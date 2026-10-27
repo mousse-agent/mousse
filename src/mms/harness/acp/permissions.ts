@@ -71,8 +71,21 @@ export const classifyGenericOption: ClassifyOption = (option) => {
  * questions (`DriverContext.questions`); a turn bridge replaces only this.
  */
 export interface PermissionPrompter {
+  /**
+   * `never`: the run refuses every tool that needs approval (`RunPolicy.approvals`), so a runtime
+   * answers each request with its denial and never calls `choose`. Absent: ask.
+   */
+  readonly approvals?: 'never'
   /** The chosen option id; undefined when the user picked nothing (dismissed, timed out). */
   choose(request: { threadId: string; title: string; options: ClassifiedOption[] }): Promise<string | undefined>
+}
+
+/** What a runtime tells its model when a run refuses tools that need approval. */
+export const APPROVALS_REFUSED_MESSAGE = 'Tools that need approval are refused here.'
+
+/** The prompter of a run whose policy is `approvals: 'never'`: nobody is asked, every request is denied. */
+export function refusingPrompter(): PermissionPrompter {
+  return { approvals: 'never', choose: async () => undefined }
 }
 
 export function questionsPrompter(questions: UserQuestionService): PermissionPrompter {
@@ -93,8 +106,9 @@ export type PermissionApprovals = 'ask' | 'grants' | 'never'
 
 /**
  * `session/request_permission`. The user picks one of the options the preset shows; `grants`
- * allows and `never` rejects with a once-only option, never an "always" one. Anything else, an
- * answer that matches no shown option, or a stopped turn is `cancelled`.
+ * allows and `never` rejects with a once-only option, never an "always" one (`never` also comes
+ * from a refusing prompter). Anything else, an answer that matches no shown option, or a stopped
+ * turn is `cancelled`.
  */
 export async function answerPermission(
   prompter: PermissionPrompter,
@@ -105,7 +119,7 @@ export async function answerPermission(
   const cancelled: RequestPermissionResponse = { outcome: { outcome: 'cancelled' } }
   const shown = request.options.map(options.classify).filter((option): option is ClassifiedOption => option !== null)
   if (scope.aborted() || !scope.threadId || !shown.length) return cancelled
-  const approvals = options.approvals ?? 'ask'
+  const approvals = options.approvals ?? prompter.approvals ?? 'ask'
   if (approvals !== 'ask') {
     const kind: PermissionOptionKind = approvals === 'grants' ? 'allow_once' : 'reject_once'
     const pick = shown.find((option) => option.kind === kind)

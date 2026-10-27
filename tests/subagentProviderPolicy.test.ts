@@ -338,6 +338,18 @@ describe('Codex children', () => {
     asked.mockRestore()
   })
 
+  it('a run with `approvals: never` declines every approval without asking (PR 4 §4)', async () => {
+    const s = server({ approvalRequests: true })
+    const asked = vi.spyOn(questions, 'requestAnswers')
+    await chat(create(s), { approvals: 'never' })
+    const reply = (id: number) => s.messages.find((message) => message.id === id)
+    await vi.waitFor(() => expect(reply(96)).toBeTruthy())
+    expect(reply(99)).toMatchObject({ result: { decision: 'decline' } })
+    expect(reply(98)).toMatchObject({ result: { decision: 'decline' } })
+    expect(asked).not.toHaveBeenCalled()
+    asked.mockRestore()
+  })
+
   it('an isolated child\'s approvals are asked through UserQuestionService in the child\'s own thread, where the question router sees them (issue #142)', async () => {
     const s = server({ approvalRequests: true })
     const asked: Array<{ requestId: string; threadId: string; prompts: string[] }> = []

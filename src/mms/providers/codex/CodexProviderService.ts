@@ -286,6 +286,8 @@ export type CodexChatInput = {
    * that continues with other instructions gets the new text in that turn's prompt.
    */
   developerInstructions?: string
+  /** `never`: every command and file change that needs approval is declined without asking (`RunPolicy.approvals`). */
+  approvals?: 'never'
   onText: (text: string) => void
   onThinking?: (text: string) => void
   onTool?: (event: CodexToolEvent) => void
@@ -524,6 +526,11 @@ class TurnRun {
   /** A read-only (`shared`) delegated child: every command and file change is declined, never asked. */
   get readOnlyChild(): boolean {
     return this.input.child?.readOnly === true
+  }
+
+  /** The run refuses tools that need approval (`approvals: 'never'`): declined, never asked. */
+  get refusesApprovals(): boolean {
+    return this.input.approvals === 'never'
   }
 
   get text(): string {
@@ -1467,7 +1474,7 @@ export class CodexProviderService {
       case 'item/commandExecution/requestApproval': {
         const approval = request.params as CodexServerRequestMap['item/commandExecution/requestApproval']['params']
         if (!run || run.questionSignal.aborted) return { decision: 'cancel' } satisfies Result<'item/commandExecution/requestApproval'>
-        if (run.mode === 'plan' || run.readOnlyChild) return { decision: 'decline' } satisfies Result<'item/commandExecution/requestApproval'>
+        if (run.mode === 'plan' || run.readOnlyChild || run.refusesApprovals) return { decision: 'decline' } satisfies Result<'item/commandExecution/requestApproval'>
         const command = approval.command ?? (run.item(approval.itemId) as { command?: string } | undefined)?.command ?? 'a command'
         const decision = await this.approve(
           run,
@@ -1478,7 +1485,7 @@ export class CodexProviderService {
       case 'item/fileChange/requestApproval': {
         const approval = request.params as CodexServerRequestMap['item/fileChange/requestApproval']['params']
         if (!run || run.questionSignal.aborted) return { decision: 'cancel' } satisfies Result<'item/fileChange/requestApproval'>
-        if (run.mode === 'plan' || run.readOnlyChild) return { decision: 'decline' } satisfies Result<'item/fileChange/requestApproval'>
+        if (run.mode === 'plan' || run.readOnlyChild || run.refusesApprovals) return { decision: 'decline' } satisfies Result<'item/fileChange/requestApproval'>
         const changes = (run.item(approval.itemId) as { changes?: Array<{ path: string }> } | undefined)?.changes ?? []
         const decision = await this.approve(
           run,
