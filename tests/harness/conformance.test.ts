@@ -12,7 +12,13 @@ const CASES: Array<{ scenario: string; stopped?: boolean }> = [
   { scenario: 'plain-turn' },
   { scenario: 'provider-error' },
   { scenario: 'steer-mid-turn' },
-  { scenario: 'stop-mid-stream', stopped: true }
+  { scenario: 'stop-mid-stream', stopped: true },
+  // Generic-agent edge cases: only the `acp` adapter has fixtures for them.
+  { scenario: 'cancelled-by-agent', stopped: true },
+  { scenario: 'refused-by-agent' },
+  { scenario: 'token-limit' },
+  { scenario: 'model-options' },
+  { scenario: 'slash-command' }
 ]
 
 describe.each(CASES)('$scenario', ({ scenario, stopped }) => {
