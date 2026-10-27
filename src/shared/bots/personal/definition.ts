@@ -118,6 +118,8 @@ export interface BotChannelReplyTo {
   chatId: string
   threadId?: string
   messageId?: string
+  /** The owner who wrote: a reply goes only while this account is still the platform's owner. */
+  userId?: string
 }
 
 /** What started an activation: the Bots tab, a schedule occurrence, or the owner's channel DM. */
@@ -204,6 +206,16 @@ export interface BotSummary {
   needsApproval: BotPermissionLine[]
   /** Open escalations of the bot's activations (the inbox badge). */
   openEscalations: number
+  /** Each schedule's next time, and the occurrence it last skipped and why (null once one runs). */
+  schedules?: Array<{ id: string; nextRunAt: string | null; skipped: { at: string; reason: string } | null }>
+}
+
+/** What a skipped schedule occurrence tells the owner. */
+export const BOT_SCHEDULE_SKIP_TEXT: Record<string, string> = {
+  bot_approval_required: 'skipped: approve the bot\'s permissions first',
+  bot_home_trashed: 'skipped: the bot\'s thread is in the trash',
+  bot_waiting_for_owner: 'skipped: the bot is waiting for your answer',
+  previous_run_still_queued: 'skipped: the previous run has not started yet'
 }
 
 /** What approving the published revision means (`bots.definitions.get`'s `approval`). */

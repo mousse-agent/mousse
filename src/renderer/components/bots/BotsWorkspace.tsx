@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   acknowledgementOf,
+  BOT_SCHEDULE_SKIP_TEXT,
   DEFAULT_BOT_ACTIVE_MS,
   ENDED_ACTIVATION_STATUSES,
   type BotAcknowledgement,
@@ -237,6 +238,12 @@ function BotDetail(props: {
       <p>This revision asks for more than you approved:</p>
       <ul>{summary.needsApproval.map((line) => <li key={line.text}>{line.text}</li>)}</ul>
     </div>}
+    {(summary.schedules ?? []).length > 0 && <ul className="bots__muted" aria-label="Schedules">
+      {(summary.schedules ?? []).map((schedule) => <li key={schedule.id}>
+        Schedule {schedule.id}: {schedule.nextRunAt ? `next ${new Date(schedule.nextRunAt).toLocaleString()}` : 'does not run again'}
+        {schedule.skipped && <> · {new Date(schedule.skipped.at).toLocaleString()} {BOT_SCHEDULE_SKIP_TEXT[schedule.skipped.reason] ?? `skipped (${schedule.skipped.reason})`}</>}
+      </li>)}
+    </ul>}
     <form className="bots__run" onSubmit={(event) => {
       event.preventDefault()
       if (!input.trim()) return

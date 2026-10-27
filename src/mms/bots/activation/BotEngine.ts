@@ -95,6 +95,8 @@ export interface BotEngineHost {
   stopThread?(threadId: string): Promise<unknown> | void
   /** `bots.changed`. */
   changed?(event: { botId?: string; activationId?: string }): void
+  /** A bot's schedules may have changed (it was published): the scheduler ticks now. */
+  schedulesChanged?(): void
   /** Wall-clock milliseconds, for the times `bots.db` records (default: `Date.now`). */
   clock?(): number
   /** Monotonic milliseconds, for measured active time (default: `performance.now`). */
@@ -208,6 +210,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     this.store.ensureRegistry(botId)
     this.store.setPublished(botId, revision.revision!)
     this.changed({ botId })
+    // A new or edited schedule is read now, not at the next 30-second tick.
+    try { this.host.schedulesChanged?.() } catch { /* the next tick reads it */ }
     return revision
   }
 
@@ -327,7 +331,12 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       revision: published?.revision ?? null,
       grant: grant ? { digest: grant.digest, approvedAt: grant.approvedAt } : null,
       needsApproval: published ? addedPermissions(published.permissions, grant?.manifest ?? null) : [],
-      openEscalations: this.store.activationsIn(entry.id, ['waiting_grant']).reduce((count, row) => count + this.store.escalations({ activationId: row.id, status: 'open' }).length, 0)
+      openEscalations: this.store.activationsIn(entry.id, ['waiting_grant']).reduce((count, row) => count + this.store.escalations({ activationId: row.id, status: 'open' }).length, 0),
+      schedules: this.store.scheduleStates(entry.id).map((state) => ({
+        id: state.scheduleId,
+        nextRunAt: state.nextRunAt,
+        skipped: state.lastSkipReason && state.lastSkipAt ? { at: state.lastSkipAt, reason: state.lastSkipReason } : null
+      }))
     }
   }
 
@@ -482,6 +491,9 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const { published, grant } = this.admissible(botId)
     const id = `act_${randomUUID()}`
     const dropped = this.store.db.transaction(() => {
+      // A duplicate of the same request in flight at the same time (a chat message delivered twice)
+      // finds the activation the other one inserted, and gets that one instead of an error.
+      if (this.store.activationByKey(key)) return undefined
       this.store.insertActivation({
         id,
         botId,
@@ -494,6 +506,11 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       }, limitsOf(intersectManifest(published.permissions, grant.manifest)))
       return this.dropOverQueue(botId)
     })
+    if (dropped === undefined) {
+      const raced = this.store.activationByKey(key)!
+      if (raced.botId !== botId) throw new BotEngineError('client_request_id_conflict', 'This request belongs to another bot.')
+      return this.activationSummary(raced)
+    }
     if (dropped) this.changed({ botId })
     await this.pump(botId)
     this.changed({ botId, activationId: id })
@@ -527,70 +544,97 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * One scheduler tick. For each due occurrence, one transaction inserts its activation (`INSERT OR
    * IGNORE` on `sched:<botId>:<scheduleId>:<occurrenceAt>`) and moves the schedule to its next
    * occurrence; occurrences missed while Mousse was closed collapse into one. A repeated tick, or
-   * one after a crash, finds the key and inserts nothing. The tick only inserts: a waiting or
-   * running activation never holds it up, and the bot's queue starts the new one when it is free.
-   * Nothing happens before the startup pass has run.
+   * one after a crash, finds the key and inserts nothing. The tick only inserts, and never piles up
+   * copies: while the bot waits for its owner, or the same schedule already has a run waiting in
+   * the queue, the occurrence is skipped (the schedule still moves on) and the reason is shown on
+   * the bot. One bot that cannot be read never stops the others. Every tick also starts what waits
+   * in a free bot's queue, so a start that failed is tried again. Nothing happens before the
+   * startup pass has run.
    */
   async tickSchedules(now: Date = new Date(this.now())): Promise<{ inserted: string[] }> {
     const inserted: string[] = []
     if (!this.startupPassed) return { inserted }
-    const bots = new Set<string>()
     for (const botId of this.host.definitions.ids()) {
-      const registry = this.store.registry(botId)
-      const definition = registry && !registry.deletedAt && registry.revision ? this.host.definitions.revision(botId, registry.revision) : undefined
-      const schedules = definition?.triggers.schedules ?? []
-      const states = new Map(this.store.scheduleStates(botId).map((state) => [state.scheduleId, state]))
-      for (const id of states.keys()) if (!schedules.some((schedule) => schedule.id === id)) this.store.dropScheduleState(botId, id)
-      if (!definition) continue
-      for (const schedule of schedules) {
-        const spec = scheduleSpec(schedule)
-        const state = states.get(schedule.id)
-        // A new or edited schedule starts from now: it never runs for times before it existed.
-        if (!state || state.spec !== spec) {
-          this.store.putScheduleState(botId, schedule.id, spec, firstOccurrence(schedule, now))
-          continue
-        }
-        if (!state.nextRunAt || Date.parse(state.nextRunAt) > now.getTime()) continue
-        const occurrenceAt = state.nextRunAt
-        const next = nextOccurrence(schedule, occurrenceAt, now)
-        let admitted: ReturnType<BotEngine['admissible']> | undefined
-        try {
-          admitted = this.admissible(botId)
-        } catch (error) {
-          // A bot that cannot run now (permissions to approve, its thread in the trash) skips this
-          // occurrence; the schedule still moves on, so approving later never runs a backlog.
-          console.warn('a bot schedule occurrence was skipped', { botId, scheduleId: schedule.id, occurrenceAt, reason: error instanceof BotEngineError ? error.code : String(error) })
-        }
-        const id = `act_${randomUUID()}`
-        const made = this.store.db.transaction(() => {
-          let made = false
-          if (admitted) {
-            made = this.store.insertActivationOnce({
-              id,
-              botId,
-              revision: admitted.published.revision!,
-              grantDigest: admitted.grant.digest,
-              trigger: { kind: 'schedule', input: schedule.prompt, scheduleId: schedule.id, occurrenceAt },
-              idempotencyKey: `sched:${botId}:${schedule.id}:${occurrenceAt}`,
-              status: 'queued',
-              createdAt: this.store.now()
-            }, limitsOf(intersectManifest(admitted.published.permissions, admitted.grant.manifest)))
-            if (made) this.dropOverQueue(botId)
-          }
-          this.store.putScheduleState(botId, schedule.id, spec, next)
-          return made
-        })
-        if (made) {
-          inserted.push(id)
-          bots.add(botId)
-        }
+      try {
+        inserted.push(...this.tickBot(botId, now))
+      } catch (error) {
+        console.warn('a bot\'s schedules could not be checked', { botId, error: error instanceof Error ? error.message : String(error) })
       }
     }
-    for (const botId of bots) {
-      this.changed({ botId })
-      await this.pump(botId)
+    for (const botId of new Set(this.store.activationsWith(['queued']).map((row) => row.botId))) {
+      try {
+        await this.pump(botId)
+      } catch (error) {
+        console.warn('a bot\'s queued activation could not start; the next tick tries again', { botId, error: error instanceof Error ? error.message : String(error) })
+      }
     }
     return { inserted }
+  }
+
+  private tickBot(botId: string, now: Date): string[] {
+    const inserted: string[] = []
+    const registry = this.store.registry(botId)
+    const definition = registry && !registry.deletedAt && registry.revision ? this.host.definitions.revision(botId, registry.revision) : undefined
+    const schedules = definition?.triggers.schedules ?? []
+    const states = new Map(this.store.scheduleStates(botId).map((state) => [state.scheduleId, state]))
+    for (const id of states.keys()) if (!schedules.some((schedule) => schedule.id === id)) this.store.dropScheduleState(botId, id)
+    if (!definition) return inserted
+    for (const schedule of schedules) {
+      const spec = scheduleSpec(schedule)
+      const state = states.get(schedule.id)
+      // A new or edited schedule starts from now: it never runs for times before it existed.
+      if (!state || state.spec !== spec) {
+        this.store.putScheduleState(botId, schedule.id, spec, firstOccurrence(schedule, now))
+        continue
+      }
+      if (!state.nextRunAt || Date.parse(state.nextRunAt) > now.getTime()) continue
+      const occurrenceAt = state.nextRunAt
+      const next = nextOccurrence(schedule, occurrenceAt, now)
+      let admitted: ReturnType<BotEngine['admissible']> | undefined
+      let skip: string | undefined
+      try {
+        admitted = this.admissible(botId)
+      } catch (error) {
+        // A bot that cannot run now (permissions to approve, its thread in the trash) skips this
+        // occurrence; the schedule still moves on, so approving later never runs a backlog.
+        skip = error instanceof BotEngineError ? error.code : 'bot_unavailable'
+      }
+      const id = `act_${randomUUID()}`
+      const made = this.store.db.transaction(() => {
+        let made = false
+        if (admitted && !skip) {
+          if (this.store.activationsIn(botId, ['waiting_grant']).length) skip = 'bot_waiting_for_owner'
+          else if (this.store.activationsIn(botId, ['queued']).some((row) => row.trigger.kind === 'schedule' && row.trigger.scheduleId === schedule.id)) skip = 'previous_run_still_queued'
+        }
+        if (admitted && !skip) {
+          made = this.store.insertActivationOnce({
+            id,
+            botId,
+            revision: admitted.published.revision!,
+            grantDigest: admitted.grant.digest,
+            trigger: { kind: 'schedule', input: schedule.prompt, scheduleId: schedule.id, occurrenceAt },
+            idempotencyKey: `sched:${botId}:${schedule.id}:${occurrenceAt}`,
+            status: 'queued',
+            createdAt: this.store.now()
+          }, limitsOf(intersectManifest(admitted.published.permissions, admitted.grant.manifest)))
+          if (made) this.dropOverQueue(botId)
+        }
+        this.store.putScheduleState(botId, schedule.id, spec, next)
+        return made
+      })
+      // The owner is told once per reason: a skip repeated for the same reason changes nothing.
+      const reason = skip ?? null
+      if (reason !== state.lastSkipReason) {
+        this.store.setScheduleSkip(botId, schedule.id, reason, reason ? occurrenceAt : null)
+        if (reason) console.warn('a bot schedule occurrence was skipped', { botId, scheduleId: schedule.id, occurrenceAt, reason })
+        this.changed({ botId })
+      }
+      if (made) {
+        inserted.push(id)
+        this.changed({ botId, activationId: id })
+      }
+    }
+    return inserted
   }
 
   // -- Channel replies (PR 6 §6) ----------------------------------------------------------------
@@ -600,7 +644,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * done, "Waiting for approval in Mousse" at a wall, or that it stopped. Undefined when there is
    * nothing new to say. The claim comes before the send, so a crash never posts a state twice.
    */
-  channelReply(activationId: string, options: { canSend?: (replyTo: BotChannelReplyTo) => boolean } = {}): { replyTo: BotChannelReplyTo; text: string } | undefined {
+  channelReply(activationId: string, options: { canSend?: (replyTo: BotChannelReplyTo) => boolean } = {}): { replyTo: BotChannelReplyTo; text: string; release(): void } | undefined {
     const row = this.store.activation(activationId)
     if (!row || row.trigger.kind !== 'channel') return undefined
     let state: string
@@ -635,7 +679,9 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     }
     // Nothing is claimed while the chat cannot be reached: the reply goes once the channel connects.
     if (options.canSend && !options.canSend(row.trigger.replyTo)) return undefined
-    return this.store.claimReply(row.id, state) ? { replyTo: row.trigger.replyTo, text } : undefined
+    if (!this.store.claimReply(row.id, state)) return undefined
+    // A send that failed gives the claim back (only if nobody claimed a later state meanwhile).
+    return { replyTo: row.trigger.replyTo, text, release: () => { this.store.releaseReply(row.id, state) } }
   }
 
   /** Channel activations of the last day: what a channel that just connected may still owe its chat. */

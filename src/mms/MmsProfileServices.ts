@@ -527,7 +527,9 @@ export class MmsProfileServices {
       runs: () => this.runEngine,
       harness,
       notifyEffects: () => this.orchestrator.notifyEffects(),
-      stopThread: (threadId) => this.orchestrator.stopThread(threadId, 'user', { clientRequestId: `bot-stop:${threadId}:${Date.now()}` })
+      stopThread: (threadId) => this.orchestrator.stopThread(threadId, 'user', { clientRequestId: `bot-stop:${threadId}:${Date.now()}` }),
+      // A published schedule is read at once; before the scheduler started this does nothing.
+      schedulesChanged: () => { void this.botScheduler?.wake() }
     })
     this.botStore = opened?.store ?? null
     this.personalBots = opened?.engine ?? null

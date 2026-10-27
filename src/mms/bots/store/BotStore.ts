@@ -171,6 +171,8 @@ CREATE TABLE bot_schedule_state(
   schedule_id TEXT NOT NULL,
   spec_json TEXT NOT NULL,
   next_run_at TEXT,
+  last_skip_at TEXT,
+  last_skip_reason TEXT,
   PRIMARY KEY(bot_id, schedule_id)
 ) STRICT;
 ALTER TABLE bot_activations ADD COLUMN reply_status TEXT;
@@ -701,12 +703,19 @@ export class BotStore {
 
   // -- Schedules and channel replies (6d) -------------------------------------------------------
 
-  scheduleStates(botId: string): Array<{ scheduleId: string; spec: string; nextRunAt: string | null }> {
+  scheduleStates(botId: string): Array<{ scheduleId: string; spec: string; nextRunAt: string | null; lastSkipAt: string | null; lastSkipReason: string | null }> {
     return this.all('SELECT * FROM bot_schedule_state WHERE bot_id = ? ORDER BY schedule_id', botId).map((row) => ({
       scheduleId: row.schedule_id as string,
       spec: row.spec_json as string,
-      nextRunAt: str(row.next_run_at)
+      nextRunAt: str(row.next_run_at),
+      lastSkipAt: str(row.last_skip_at),
+      lastSkipReason: str(row.last_skip_reason)
     }))
+  }
+
+  /** The occurrence a schedule last skipped and why; null once an occurrence runs again. */
+  setScheduleSkip(botId: string, scheduleId: string, reason: string | null, at: string | null): void {
+    this.run('UPDATE bot_schedule_state SET last_skip_reason = ?, last_skip_at = ? WHERE bot_id = ? AND schedule_id = ?', reason, at, botId, scheduleId)
   }
 
   putScheduleState(botId: string, scheduleId: string, spec: string, nextRunAt: string | null): void {
@@ -739,6 +748,11 @@ export class BotStore {
   /** Claims telling the chat about `status` (compare-and-set): false when it was told already. */
   claimReply(activationId: string, status: string): boolean {
     return this.run('UPDATE bot_activations SET reply_status = ? WHERE id = ? AND (reply_status IS NULL OR reply_status <> ?)', status, activationId, status) > 0
+  }
+
+  /** Gives back a claim whose send failed, unless a later state was claimed since. */
+  releaseReply(activationId: string, status: string): void {
+    this.run('UPDATE bot_activations SET reply_status = NULL WHERE id = ? AND reply_status = ?', activationId, status)
   }
 
   setAutoRestarts(id: string, count: number): void {
