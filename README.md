@@ -24,6 +24,8 @@ Chat apps for agents already exist. They stop at the edge of your laptop.
 
 Mousse doesn't. Link your machines and every thread, on any of them, shows up in one list. Message your agents from Telegram or Discord. Put a bot into a Space with your teammates, and it answers them using your machine and your keys. Schedule the boring work for 3 a.m. and turn the things you do every week into workflows you run with one message.
 
+It is for your teammates too. A Space is a chat where people and bots sit together, so the conversation about the work and the work itself happen in one place. One subscription on one machine can serve a whole small team, because the bots run on their owner's computer with the owner's keys. The goal is simple: you open Mousse in the morning and never have to leave it.
+
 All of it lives in the same window: the threads, the bots, the schedules, and the diffs they produce. Your code and your keys never leave your machines.
 
 And it is yours to keep. No paywalls, no device limits, no feature behind a plan. It is MIT licensed, so you can run it on every machine you own, hand it to your whole team, and fork it the day you disagree with us. We are building it to still work in ten years, not to lock you in next quarter.
