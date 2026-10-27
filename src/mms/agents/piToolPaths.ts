@@ -38,10 +38,10 @@ export function piNormalizePath(input: string, options: PiPathOptions = {}): str
   return path
 }
 
-/** The absolute path Pi's tool would open for `input` in `cwd`. */
+/** The absolute path Pi's tool would open for `input` in `cwd` (Pi does not normalize its cwd). */
 export function piResolvePath(input: string, cwd: string, options: PiPathOptions = {}): string {
   const path = piNormalizePath(input, options)
-  return isAbsolute(path) ? resolve(path) : resolve(piNormalizePath(cwd, options), path)
+  return isAbsolute(path) ? resolve(path) : resolve(cwd, path)
 }
 
 /** Pi's file tools and the argument that names their path (`.` when omitted). */

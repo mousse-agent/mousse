@@ -1558,10 +1558,12 @@ export class LlmClient {
   ): Promise<ToolResultMessage> {
 
     try {
-      // A Pi file tool's path as Pi will open it (`@` dropped, `~` expanded, absolute): the
-      // definition's gate checks this path and the tool gets exactly it.
-      if (projectPath && this.piCodingTools.isPiTool(toolCall.name) && !this.appTools.registry.get(toolCall.name))
-        toolCall = { ...toolCall, arguments: this.piCodingTools.piArgs(toolCall.name, (toolCall.arguments ?? {}) as Record<string, unknown>, projectPath) }
+      // A Pi file tool's path as Pi will open it (`@` dropped, `~` expanded, absolute): what the
+      // definition's gate checks. The tool resolves the model's arguments the same way
+      // (`ProjectFileTools.execute`); prompts and events keep the model's own path.
+      const gateArgs = projectPath && this.piCodingTools.isPiTool(toolCall.name) && !this.appTools.registry.get(toolCall.name)
+        ? this.piCodingTools.piArgs(toolCall.name, (toolCall.arguments ?? {}) as Record<string, unknown>, projectPath)
+        : (toolCall.arguments ?? {}) as Record<string, unknown>
       const settingsEnabled = (name: string): boolean => Boolean(trustedAgent) || settingsToolEnabled(this.settingsStore.get().integrations.tools, name)
       const markTrustedEffect = (): void => {
         if (trustedAgent?.effects) trustedAgent.effects.dispatched = true
@@ -1578,7 +1580,7 @@ export class LlmClient {
           policy: trustedAgent.policy,
           grants: trustedAgent.grants,
           toolName: toolCall.name,
-          args: (toolCall.arguments ?? {}) as Record<string, unknown>,
+          args: gateArgs,
           isMcp,
           projectPath,
           ...(uncontainedShell ? { uncontainedShell } : {})
@@ -1588,7 +1590,7 @@ export class LlmClient {
           policy: trustedAgent.policy,
           grants: trustedAgent.grants,
           toolName: toolCall.name,
-          args: (toolCall.arguments ?? {}) as Record<string, unknown>,
+          args: gateArgs,
           isMcp,
           projectPath,
           signal,

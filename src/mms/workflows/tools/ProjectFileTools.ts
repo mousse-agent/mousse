@@ -1,12 +1,12 @@
 import { existsSync } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { dirname, join, relative, resolve, sep } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import type { Tool } from '@earendil-works/pi-ai'
 import type { LineEditStatsStore } from '../../stats/LineEditStatsStore'
 import { countLineEdits } from '../../../shared/lineEditStats'
 import { readFile } from 'fs/promises'
 import { modeRegistry as defaultModeRegistry, type ModeRegistry } from '../../modes/ModeRegistry'
-import { resolveToolPath, sanitizeToolArgs } from '../../orchestrator/toolPathSafety'
+import { isPathInsideCwd, resolveToolPath, sanitizeToolArgs } from '../../orchestrator/toolPathSafety'
 import { PI_PATH_ARGUMENTS, piResolvePath, piResolveReadPath } from '../../agents/piToolPaths'
 
 /**
@@ -186,7 +186,18 @@ export class ProjectFileTools {
         return { text: sanitized.error, isError: true }
       }
       resolved.args = sanitized.args
-      if (piPathArgs !== args) resolved.args.path = piPathArgs.path
+      if (piPathArgs !== args) {
+        // Hand Pi a path it resolves again to exactly the checked one. Inside the cwd: `./` and the
+        // relative path, so the cwd is never re-normalized (a Unicode space in the project folder)
+        // and a leading `@` or `~` in the rest stays literal. Outside (reads): the absolute path,
+        // only when Pi reads it back unchanged.
+        const checked = String(piPathArgs.path)
+        const handed = isPathInsideCwd(checked, cwd)
+          ? `.${sep}${relative(resolve(cwd), checked) || '.'}`
+          : checked
+        if (piResolvePath(handed, cwd) !== resolve(checked)) return { text: `Path cannot be passed to the tool unchanged: ${String(args.path)}`, isError: true }
+        resolved.args.path = handed
+      }
 
       const tool = tools[resolved.name]
       if (!tool) {

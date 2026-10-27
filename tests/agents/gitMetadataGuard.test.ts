@@ -136,3 +136,35 @@ describe("the legacy loop's route: the gate checks the path Pi opens (ProjectFil
     }
   })
 })
+
+describe('a project folder whose name holds a Unicode space', () => {
+  for (const space of ['\u3000', '\u00A0']) {
+    it(`Pi's file tools work in it, on a Build turn and for a definition (U+${space.charCodeAt(0).toString(16).toUpperCase()})`, async () => {
+      const { ProjectFileTools } = await import('../../src/mms/workflows/tools/ProjectFileTools')
+      const tools = new ProjectFileTools()
+      const project = join(root, `my${space}project`)
+      mkdirSync(project)
+      writeFileSync(join(project, 'existing.txt'), 'alpha\n')
+      const scoped = { ...policy(), workspace: { mode: 'thread_worktree' as const, canonicalRoots: [project] } }
+      for (const turn of ['build', 'definition'] as const) {
+        // As LlmClient runs it: the gate (definitions only) checks the path as Pi opens it; the tool gets the model's arguments.
+        const run = async (toolName: string, args: Record<string, unknown>) => {
+          if (turn === 'definition') {
+            const prepared = prepareTrustedToolDispatch({ policy: scoped, grants, toolName, args: tools.piArgs(toolName, args, project), isMcp: false, projectPath: project })
+            expect(prepared.allowed, `${turn} ${toolName} ${prepared.message}`).toBe(true)
+          }
+          return tools.execute(toolName, args, project)
+        }
+        const name = `${turn}.txt`
+        expect(await run('write', { path: name, content: 'one\n' }), turn).toMatchObject({ isError: false })
+        expect(readFileSync(join(project, name), 'utf8')).toBe('one\n')
+        expect(await run('read', { path: 'existing.txt' })).toMatchObject({ isError: false, text: expect.stringContaining('alpha') })
+        expect(await run('edit', { path: name, edits: [{ oldText: 'one', newText: 'two' }] })).toMatchObject({ isError: false })
+        expect(readFileSync(join(project, name), 'utf8')).toBe('two\n')
+        expect(await run('ls', { path: '.' })).toMatchObject({ isError: false, text: expect.stringContaining('existing.txt') })
+      }
+      // Nothing lands in a folder with a plain space instead.
+      expect(existsSync(join(root, 'my project'))).toBe(false)
+    })
+  }
+})
