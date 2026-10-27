@@ -4,6 +4,7 @@ import { join } from 'path'
 import { MousseConfigStore } from './config/MousseConfigStore'
 import { MmsEventBus } from './events'
 import { SettingsStore } from './settings/SettingsStore'
+import { rewriteMovedDefaults } from './settings/movedDefaults'
 import { ProviderAuthService } from './providers/ProviderAuthService'
 import { AppletStore } from './applets/AppletStore'
 import { ClaudeSubscriptionProviderService } from './providers/claudeSubscription/ClaudeSubscriptionProviderService'
@@ -26,7 +27,7 @@ import { piOAuthBroker } from './harness/pi/oauthBroker'
 import { harnessAuthRunner, recordHarnessSpawn } from './harness/spawn'
 import { spawnCodexAppServer } from './providers/codex/CodexAppServerClient'
 import { createCodexProviderService, findCodexBinary, type CodexProviderService } from './providers/codex/CodexProviderService'
-import { ANTIGRAVITY_INSTANCE_ID, CLAUDE_INSTANCE_ID, CODEX_INSTANCE_ID, piInstanceId, piProviderIdOf } from '../shared/providerInstances'
+import { ANTIGRAVITY_INSTANCE_ID, CLAUDE_INSTANCE_ID, CODEX_INSTANCE_ID, piProviderIdOf } from '../shared/providerInstances'
 import { ALL_MIRROR_FIELDS, LAUNCH_MIRROR_FIELDS } from './harness/vendorMirror'
 import type { CliProviderConfigPatch } from '../shared/providerAuth'
 import { ProjectManager } from './data/ProjectManager'
@@ -438,15 +439,12 @@ export class MmsProfileServices {
       cwd: () => this.worktrees.getRepoRoot(),
       piDisplayName: (providerId) => this.providerAuth.getProviderDisplayName(providerId),
       onProvidersChanged: () => this.events.emit({ channel: 'providers:changed', data: undefined }),
-      // A moved entry's device default follows it to the agent.
+      // A moved entry's device default follows it to the agent; its title model becomes Automatic.
       defaults: {
         rewrite: (from, to) => {
-          const provider = this.settings.get().provider
-          const named = provider.instanceId?.trim() ? provider.instanceId === from : piInstanceId(provider.llmProvider) === from
-          if (!named) return []
-          const model = to.model(provider.model)
-          this.settings.set({ provider: { ...provider, instanceId: to.instanceId, llmProvider: to.llmProvider, model } })
-          return [model === provider.model ? 'Default model' : `Default model: ${model} instead of ${provider.model}`]
+          const { patch, rewritten } = rewriteMovedDefaults(this.settings.get(), from, to)
+          if (patch) this.settings.set(patch)
+          return rewritten
         }
       }
     })

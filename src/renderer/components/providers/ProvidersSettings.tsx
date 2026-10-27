@@ -205,8 +205,8 @@ export function ProvidersSettings({ settings, refreshProviderData, updateSetting
     })
 
   const addHandlers: AddProviderHandlers = {
-    add: async (driver: HarnessDriverKind, config: InstanceConfigPatch) => {
-      const snapshot = await window.mousse.providers.instances.add({ driver, config })
+    add: async (driver: HarnessDriverKind, config: InstanceConfigPatch, slug?: string) => {
+      const snapshot = await window.mousse.providers.instances.add({ driver, config, ...(slug ? { slug } : {}) })
       applySnapshot(snapshot)
       void loadProviderSnapshots(DEVICE_SCOPE)
       if (scope.kind === 'project') void reload()

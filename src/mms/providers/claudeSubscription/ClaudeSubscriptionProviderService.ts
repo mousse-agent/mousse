@@ -3,7 +3,7 @@ import { execFile } from 'node:child_process'
 import { accessSync, constants, existsSync, mkdirSync, readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { delimiter, dirname, isAbsolute, join, resolve } from 'node:path'
-import type { ModelInfo, Options, PermissionMode, Query, SDKResultMessage, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk'
+import type { ModelInfo, Options, PermissionMode, Query, SDKResultMessage, SDKUserMessage, SettingSource, Settings as SdkSettings } from '@anthropic-ai/claude-agent-sdk'
 import type {
   ClaudeSubscriptionStatus,
   CliProviderConfig,
@@ -215,6 +215,31 @@ type Dependencies = {
   saveLaunch?: (patch: CliProviderConfigPatch) => Promise<void>
   /** The terminal command that signs this instance in; default `claude auth login`. */
   signInCommand?: string
+  /**
+   * Applied last to every environment Claude Code starts with, after the user's variables and a
+   * turn's integration variables: an API-key instance sets its key here and drops other sign-ins.
+   */
+  finalEnv?: (env: NodeJS.ProcessEnv) => NodeJS.ProcessEnv
+  /**
+   * Replaces `claude auth status` for an instance whose sign-in Mousse holds itself (an API key):
+   * what the instance runs on, read without starting Claude Code.
+   */
+  probe?: (env: NodeJS.ProcessEnv) => AuthProbe
+  /** What a turn says when the instance is not signed in (default: run the sign-in command). */
+  signedOutMessage?: () => string
+  /**
+   * The settings files Claude Code loads (default: all, as in a terminal). An API-key entry leaves out
+   * `user`, its Mousse-owned home, so nothing there can replace the key or its address.
+   */
+  settingSources?: SettingSource[]
+  /** Launch arguments never passed on (an API-key entry: `--settings`, `--setting-sources`). */
+  droppedArgs?: readonly string[]
+  /**
+   * Read before a turn starts, with its folder: flag-tier settings the turn's query starts with (an
+   * API-key entry keeps its key and address over the folder's settings), or why it cannot start
+   * there. A refused turn starts no Claude Code.
+   */
+  turnSettings?: (cwd: string) => Promise<{ settings?: SdkSettings; refuse?: string }>
 }
 /** How `claude auth status` names its sign-in methods, for display. */
 const CLAUDE_AUTH_METHOD_LABELS: Record<string, string> = {
@@ -249,7 +274,7 @@ export function claudeCredentialKind(status: { authMethod?: string; apiProvider?
       return 'unknown'
   }
 }
-type AuthProbe =
+export type AuthProbe =
   | { kind: 'signed_in'; account?: ClaudeAccount }
   | { kind: 'signed_out'; message: string }
   | { kind: 'error'; message: string }
@@ -497,7 +522,11 @@ export class ClaudeSubscriptionProviderService {
     return (this.dependencies.runAuth ?? runAuth)(launch.command, [...launch.args, ...args], env, signal)
   }
   private environment(): NodeJS.ProcessEnv {
-    return withUserEnv(claudeSubscriptionEnvironment(this.dependencies.baseEnv?.()), storedCliEnv(this.launchSettings()))
+    return this.finalEnv(withUserEnv(claudeSubscriptionEnvironment(this.dependencies.baseEnv?.()), storedCliEnv(this.launchSettings())))
+  }
+  /** The instance's own last word on a process environment (`Dependencies.finalEnv`). */
+  private finalEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+    return this.dependencies.finalEnv?.(env) ?? env
   }
   /** The stored executable, args and variables: the instance config's, never `settings.json`. */
   private launchSettings(): StoredCliConfig {
@@ -623,6 +652,7 @@ export class ClaudeSubscriptionProviderService {
     env: NodeJS.ProcessEnv,
     signal?: AbortSignal
   ): Promise<AuthProbe> {
+    if (this.dependencies.probe) return this.dependencies.probe(env)
     const unreadable: AuthProbe = {
       kind: 'error',
       message: 'Claude Code did not report its sign-in status. Update the Claude Code CLI and recheck.'
@@ -837,12 +867,13 @@ export class ClaudeSubscriptionProviderService {
     cwd: string,
     controller: AbortController,
     env: NodeJS.ProcessEnv = this.environment(),
-    append: string[] = []
+    append: string[] = [],
+    settings?: SdkSettings
   ): Options {
     const launch = this.launchTarget()
     // The append flags travel in `systemPrompt.append` (see claudeLaunchAppendSystemPrompt).
     const extraArgs = claudeExtraArgs(storedCliArgs(this.launchSettings()))
-    for (const name of APPEND_SYSTEM_PROMPT_ARGS) delete extraArgs[name]
+    for (const name of [...APPEND_SYSTEM_PROMPT_ARGS, ...(this.dependencies.droppedArgs ?? [])]) delete extraArgs[name]
     const appendText = append.filter(Boolean).join('\n\n')
     return {
       cwd,
@@ -857,6 +888,8 @@ export class ClaudeSubscriptionProviderService {
       // Claude Code's own system prompt, as in a terminal; Mousse only appends to it.
       systemPrompt: { type: 'preset', preset: 'claude_code', ...(appendText ? { append: appendText } : {}) },
       mcpServers: {},
+      ...(this.dependencies.settingSources ? { settingSources: [...this.dependencies.settingSources] } : {}),
+      ...(settings ? { settings } : {}),
       ...(Object.keys(extraArgs).length ? { extraArgs } : {}),
       includePartialMessages: true
     }
@@ -978,7 +1011,7 @@ export class ClaudeSubscriptionProviderService {
     if (this.settingsError) return 'Connect Claude Subscription in Settings → Providers first.'
     if (this.signedOut())
       return 'Claude Subscription is disconnected. Reconnect it in Settings → Providers.'
-    return `Claude Code isn't signed in. Run \`${this.signInCommand()}\` in a terminal, then try again.`
+    return this.dependencies.signedOutMessage?.() ?? `Claude Code isn't signed in. Run \`${this.signInCommand()}\` in a terminal, then try again.`
   }
   private abortInFlight(): void {
     for (const controller of this.controllers) controller.abort()
@@ -1441,13 +1474,22 @@ export class ClaudeSubscriptionProviderService {
       }
       input.signal?.throwIfAborted()
     }
+    // The folder's settings are read before anything starts; whether the instance may run is checked
+    // after, so a sign-out while they are read stops the turn here.
+    let turnSettings: SdkSettings | undefined
+    if (this.dependencies.turnSettings) {
+      const policy = await this.dependencies.turnSettings(input.cwd)
+      input.signal?.throwIfAborted()
+      if (policy.refuse) throw new AppError({ code: 'claude_settings_conflict', message: policy.refuse, errorInfo: { category: 'unavailable', retryable: false } })
+      turnSettings = policy.settings
+    }
     if (!this.configured()) throw new AppError({ code: 'claude_subscription_not_connected', message: this.signInRequiredMessage(), errorInfo: { category: 'unavailable', retryable: false } })
     if (this.activeThreads.has(input.threadId))
       throw new Error('A Claude turn is already running for this thread')
     this.activeThreads.add(input.threadId)
     const integrations = input.integrations
     // User MCP servers reference their secrets as `${VAR}`; the values ride in Claude's environment.
-    const env = { ...this.environment(), ...integrations?.env }
+    const env = this.finalEnv({ ...this.environment(), ...integrations?.env })
     // This turn's own controller: it gates the turn's permission prompts and hooks and carries its
     // cancellation. A one-shot query also hands it to the SDK; a live query has a lifetime of its own.
     const controller = new AbortController()
@@ -1604,7 +1646,7 @@ export class ClaudeSubscriptionProviderService {
       }
       const buildOptions = (sdkController: AbortController, turnOf: () => TurnContext, isLive: boolean): Options => ({
         // Mousse's instructions first, then the user's own append text.
-        ...this.options(input.cwd, sdkController, env, appendTexts),
+        ...this.options(input.cwd, sdkController, env, appendTexts, turnSettings),
         model: selected.baseId,
         effort,
         resume,
@@ -1652,7 +1694,7 @@ export class ClaudeSubscriptionProviderService {
         metrics.beginQuery(live.sessionId, saved?.usageBaseline)
         liveRun.attach((message) => frames.observe(message))
       } else {
-        const key = { hard, soft: this.launchKey(env, integrations), mode: permissionMode, historyNow }
+        const key = { hard, soft: this.launchKey(env, integrations, turnSettings), mode: permissionMode, historyNow }
         try {
           live = await this.acquireLive(input.threadId, key, resume, (created) => {
             created.current = turn
@@ -1885,7 +1927,7 @@ export class ClaudeSubscriptionProviderService {
     }
   }
   /** What a new process would start with besides the turn's model and folder: launch settings and integrations. */
-  private launchKey(env: NodeJS.ProcessEnv, integrations: ClaudeTurnIntegrations | undefined): string {
+  private launchKey(env: NodeJS.ProcessEnv, integrations: ClaudeTurnIntegrations | undefined, settings?: SdkSettings): string {
     const launch = this.launchTarget()
     return createHash('sha256')
       .update(
@@ -1897,7 +1939,8 @@ export class ClaudeSubscriptionProviderService {
           Object.entries(env).sort(([a], [b]) => (a < b ? -1 : 1)),
           integrations?.mcpServers,
           Object.entries(integrations?.proxiedServers ?? {}).map(([name, proxied]) => [name, proxied.tools]),
-          integrations?.pluginPath
+          integrations?.pluginPath,
+          settings ?? null
         ])
       )
       .digest('hex')
@@ -1910,8 +1953,10 @@ export class ClaudeSubscriptionProviderService {
    */
   async logout(): Promise<void> {
     this.settings.sessions = {}
-    this.save()
+    // Everything running stops first, whatever saving does next: a turn, a warm process and its
+    // helpers, a sign-in. A failed save is reported after.
     this.abortInFlight()
+    this.save()
   }
   /**
    * Another service of this instance writes its settings from now on (its home changed): this one

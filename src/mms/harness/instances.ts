@@ -33,10 +33,18 @@ export function defaultInstanceId(driver: HarnessDriverKind): string | undefined
   return BUILT_IN_IDS[driver]
 }
 
-/** `<driver>:<slug>` for a new instance, unique among `existing`. */
-export function addedInstanceId(driver: HarnessDriverKind, displayName: string | undefined, existing: Iterable<string>): string {
+/** Lowercase letters, digits and inner dashes, at most 32 characters. */
+function slugOf(text: string): string {
+  return text.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 32)
+}
+
+/**
+ * `<driver>:<slug>` for a new instance, unique among `existing`. An explicit `slug` wins over the
+ * display name's (`claude:api`, then `claude:api-2`).
+ */
+export function addedInstanceId(driver: HarnessDriverKind, displayName: string | undefined, existing: Iterable<string>, explicitSlug?: string): string {
   const taken = new Set(existing)
-  const slug = (displayName ?? '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 32)
+  const slug = (explicitSlug ? slugOf(explicitSlug) : '') || slugOf(displayName ?? '')
   const base = slug && slug !== 'default' ? `${driver}:${slug}` : `${driver}:2`
   if (!taken.has(base)) return base
   for (let index = 2; ; index += 1) {

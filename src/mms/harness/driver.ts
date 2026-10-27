@@ -246,6 +246,11 @@ export interface DriverRuntime {
   /** Saves `apiKey` as this entry's own credential (a move that copies the old entry's key). */
   adoptApiKey?(apiKey: string): Promise<void>
   /**
+   * This runtime's name for a model of a model API that moved here and that it does not list under
+   * the same id (Claude Code: `claude-sonnet-4-5` → `sonnet`). Undefined: the agent's default.
+   */
+  movedModel?(model: string): string | undefined
+  /**
    * Installs (or updates) the runtime. A result's `config` is merged into the instance's stored
    * config, which moves its revision on (a registry agent records the install it was made with).
    */
