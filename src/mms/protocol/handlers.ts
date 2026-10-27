@@ -25,7 +25,7 @@ import type { ExternalEffect, ThreadAction } from '../../shared/threadActions'
 import type { ThreadWorkspaceMetadata } from '../../shared/workspace'
 import type { GitPullRequestInfo, PullRequestDetail, RepositoryIdentity, ThreadPullRequestLink } from '../../shared/pullRequests'
 import { PULL_REQUEST_EXISTS, PullRequestReadError } from '../git/GitHubCodeHost'
-import type { ChatMessage, FileGrepResponse, FileSearchResponse, GitPullStrategy, GitStatusSnapshot, NativeLlmContext, OrchestratorSendInput, OrchestratorSendRequest } from '../../shared/types'
+import type { ChatMessage, FileGrepResponse, FileSearchResponse, GitOperationOptions, GitPullStrategy, GitStatusSnapshot, NativeLlmContext, OrchestratorSendInput, OrchestratorSendRequest } from '../../shared/types'
 import { createErrorProvider } from '../../shared/errors'
 import { listClaimedQueue } from '../queue/ThreadMessageQueue'
 import { formatQuestionAnswersMessage, formatQuestionDismissMessage } from '../orchestrator/OrchestratorService'
@@ -615,6 +615,18 @@ async function runUserThreadGitAction<T>(
  */
 async function underThreadLocks<T>(target: GitMutationTarget, label: string, run: () => Promise<T>): Promise<T> {
   return target.directory && target.workspace ? withGitMutationLocks(target.directory, target.root, label, run) : run()
+}
+
+/**
+ * Lets the client that sent a long Git request follow it: its events travel on that connection only, never to
+ * other clients or windows, and only that connection can cancel it. Without an `operationId` nothing is sent.
+ */
+function gitOperationOptions(ctx: HandlerContext, p: Record<string, unknown>): GitOperationOptions {
+  const operationId = asOptionalString(p.operationId, 64)
+  if (!operationId) return {}
+  const send = ctx.connection?.emitConnectionEvent
+  // Best effort: a backed-up connection drops an update, and the request's own answer still carries the outcome.
+  return { operationId, owner: ctx.connection?.id, ...(send ? { onEvent: (event) => { void send('git.operation', { event }).catch(() => undefined) } } : {}) }
 }
 
 function threadWorktree(target: GitMutationTarget): Required<GitMutationTarget> | null {
@@ -2483,7 +2495,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const target = await gitMutationTarget(ctx, p, 'task_branch_authoritative')
       const dirty = asOptionalString(p.dirty, 16)
       if (dirty !== undefined && dirty !== 'carry' && dirty !== 'stash') throw new DomainRpcError('invalid_params', 'dirty must be carry or stash')
-      const result = await ctx.mms.gitService.checkout(target.root, asString(p.branch, 'branch', 512), dirty ? { dirty } : {})
+      const result = await ctx.mms.gitService.checkout(target.root, asString(p.branch, 'branch', 512), { ...(dirty ? { dirty } : {}), ...gitOperationOptions(ctx, p) })
       return gitStatusResult(ctx, target.root, { ...result })
     }
     case 'git.commit': {
@@ -2497,8 +2509,8 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         // The branch is checkpointed: an amend would replace the recorded head, so it is refused before Git runs.
         if (amend) throw gitThreadRules.create('git_amend_in_thread')
         // Everything is committed through the user's hooks as one commit; a rejected commit is recorded, never swept in with --no-verify.
-        await runUserThreadGitAction(ctx, thread, { onFailure: 'record' }, () => ctx.mms.gitService.commit(target.root, message, { all: true, expectedBranch }))
-      } else await ctx.mms.gitService.commit(target.root, message, { amend, expectedBranch })
+        await runUserThreadGitAction(ctx, thread, { onFailure: 'record' }, () => ctx.mms.gitService.commit(target.root, message, { all: true, expectedBranch, ...gitOperationOptions(ctx, p) }))
+      } else await ctx.mms.gitService.commit(target.root, message, { amend, expectedBranch, ...gitOperationOptions(ctx, p) })
       return gitStatusResult(ctx, target.root)
     }
     case 'git.push': {
@@ -2511,9 +2523,9 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
           const manager = new ThreadWorkspaceManager(directory)
           if (manager.verify().lifecycle !== 'ready' || manager.load()?.headSha !== metadata.headSha) throw new Error('Task revision changed before push; refresh the reviewed revision')
           if (workspaceGit(root, ['status', '--porcelain'])) throw gitThreadRules.create('git_thread_dirty')
-          await ctx.mms.gitService.push(root, { expectedBranch })
+          await ctx.mms.gitService.push(root, { expectedBranch, ...gitOperationOptions(ctx, p) })
         })
-      } else await ctx.mms.gitService.push(root, { expectedBranch })
+      } else await ctx.mms.gitService.push(root, { expectedBranch, ...gitOperationOptions(ctx, p) })
       return gitStatusResult(ctx, root)
     }
     case 'git.suggestCommitMessage': {
@@ -2555,7 +2567,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     case 'git.fetch': {
       const p = isObject(params) ? params : {}
       const target = await gitMutationTarget(ctx, p)
-      const result = await underThreadLocks(target, 'user-git-fetch', () => ctx.mms.gitService.fetch(target.root))
+      const result = await underThreadLocks(target, 'user-git-fetch', () => ctx.mms.gitService.fetch(target.root, gitOperationOptions(ctx, p)))
       return gitStatusResult(ctx, target.root, { ...result })
     }
     case 'git.pull': {
@@ -2563,7 +2575,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const target = await gitMutationTarget(ctx, p, 'task_branch_authoritative')
       const strategy = asOptionalString(p.strategy, 16) ?? 'ff-only'
       if (strategy !== 'ff-only' && strategy !== 'merge' && strategy !== 'rebase') throw new DomainRpcError('invalid_params', 'strategy must be ff-only, merge or rebase')
-      const result = await ctx.mms.gitService.pull(target.root, { strategy: strategy as GitPullStrategy })
+      const result = await ctx.mms.gitService.pull(target.root, { strategy: strategy as GitPullStrategy, ...gitOperationOptions(ctx, p) })
       return gitStatusResult(ctx, target.root, { ...result })
     }
     case 'git.abortInProgress': {
@@ -2592,6 +2604,11 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const target = await gitMutationTarget(ctx, p, 'task_branch_authoritative')
       await ctx.mms.gitService.deleteBranch(target.root, asString(p.name, 'name', 512), { force: asOptionalBoolean(p.force, 'force') === true })
       return gitStatusResult(ctx, target.root)
+    }
+    case 'git.cancelOperation': {
+      const p = isObject(params) ? params : {}
+      // Only the connection that started the action can stop it; anyone else is told it is not running.
+      return { cancelled: ctx.mms.gitService.cancelOperation(asString(p.operationId, 'operationId', 64), ctx.connection?.id) }
     }
     case 'git.init': {
       const p = isObject(params) ? params : {}

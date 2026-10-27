@@ -91,7 +91,7 @@ export function parseEnvelope(raw: unknown): ProtocolEnvelope | null {
         Object.keys(raw).some(
           key => !['kind', 'type', 'profileId', 'profileEpoch', 'data'].includes(key)
         ) ||
-        (raw.type !== 'bridge.hub.thread' && raw.type !== 'mcp.auth-url') ||
+        (raw.type !== 'bridge.hub.thread' && raw.type !== 'mcp.auth-url' && raw.type !== 'git.operation') ||
         !isBoundedString(raw.profileId, 128, { nonEmpty: true }) ||
         !Number.isSafeInteger(raw.profileEpoch) ||
         (raw.profileEpoch as number) < 1

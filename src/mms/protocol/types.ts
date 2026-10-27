@@ -112,10 +112,16 @@ export interface ProtocolEvent {
   ts: string
 }
 
+/** What a connection event can carry: bridge display, MCP sign-in, and the live output of the Git action this socket started. */
+export type ProtocolConnectionEventType = 'bridge.hub.thread' | 'mcp.auth-url' | 'git.operation'
+
+/** Granted to every session: it may receive `git.operation` events for the Git actions it starts. */
+export const GIT_OPERATIONS_CAPABILITY = 'git.operations.v1'
+
 /** One authenticated socket's live display lane. Never sequenced or replayed. */
 export interface ProtocolConnectionEvent {
   kind: 'connection_event'
-  type: 'bridge.hub.thread' | 'mcp.auth-url'
+  type: ProtocolConnectionEventType
   profileId: string
   profileEpoch: number
   data: unknown
@@ -403,6 +409,7 @@ export const PROTOCOL_METHODS = [
   'git.renameBranch',
   'git.deleteBranch',
   'git.init',
+  'git.cancelOperation',
   'github.status',
   'github.createRepository',
   'github.cloneRepository',
@@ -442,7 +449,8 @@ export const PROTOCOL_CAPABILITIES = [
   'providers',
   'events',
   'devgui',
-  'profiles-v1'
+  'profiles-v1',
+  GIT_OPERATIONS_CAPABILITY
 ] as const
 
 export type ProtocolEventType =

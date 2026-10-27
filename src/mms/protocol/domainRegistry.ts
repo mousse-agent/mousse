@@ -1,6 +1,6 @@
 import type { HandlerContext } from './handlers'
 import { MMS_PROTOCOL_MAX_TEXT_LENGTH, PROTOCOL_METHODS } from './types'
-import type { ProtocolClientType } from './types'
+import type { ProtocolClientType, ProtocolConnectionEventType } from './types'
 
 export interface TrustedProfileBinding {
   readonly profileId: string
@@ -17,7 +17,7 @@ export interface DomainConnectionContext {
   /** Server-only; mutates the connection binding after a validated profiles.bind. */
   bind?: (value: TrustedProfileBinding) => void
   /** Awaited, connection-only display delivery under the captured binding. */
-  emitConnectionEvent?: (type: 'bridge.hub.thread' | 'mcp.auth-url', data: unknown, signal?: AbortSignal) => Promise<void>
+  emitConnectionEvent?: (type: ProtocolConnectionEventType, data: unknown, signal?: AbortSignal) => Promise<void>
 }
 
 export class DomainRpcError extends Error {
