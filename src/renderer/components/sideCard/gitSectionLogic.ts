@@ -117,6 +117,147 @@ export function branchLabel(status: GitStatusSnapshot | null): string {
 /** Shown in place of the branch picker while the folder is a thread's own worktree. */
 export const THREAD_BRANCH_LABEL = 'This thread works on its own branch'
 
+export interface BranchActionState {
+  enabled: boolean
+  /** Why branch actions are unavailable; null when they are. */
+  reason: string | null
+}
+
+/** Creating, renaming, deleting and switching are offered everywhere except a thread's own worktree. */
+export function branchActionState(workspaceThreadId: string | null): BranchActionState {
+  return workspaceThreadId === null ? { enabled: true, reason: null } : { enabled: false, reason: THREAD_BRANCH_LABEL }
+}
+
+/** Branches under `mousse/` belong to Mousse, whatever the case. */
+export function isManagedBranchName(name: string): boolean {
+  return name.toLowerCase().startsWith('mousse/')
+}
+
+/** Local branch names the user may act on, in listing order. Remote-tracking and managed branches are left out. */
+export function localBranchNames(info: GitBranchInfo | null): string[] {
+  return info ? info.branches.filter((name) => !isRemoteBranch(name) && !isManagedBranchName(name)) : []
+}
+
+const NAME_FORBIDDEN = /[\s~^:?*[\\\x00-\x1f\x7f]/
+
+/**
+ * What is wrong with a branch name as typed, or null when it looks fine or is still empty. Git has the last
+ * word; this catches what it would refuse so the form can say so before anything runs. `existing` are the
+ * local branches the name must not collide with.
+ */
+export function branchNameError(raw: string, existing: readonly string[]): string | null {
+  const name = raw.trim()
+  if (!name) return null
+  if (name.startsWith('-')) return 'A branch name cannot start with a dash.'
+  if (isManagedBranchName(name)) return 'Branches under mousse/ are managed by Mousse.'
+  if (NAME_FORBIDDEN.test(name)) return 'A branch name cannot contain spaces or any of ~ ^ : ? * [ \\'
+  if (name === '@' || name.includes('..') || name.includes('@{') || name.includes('//')) return 'A branch name cannot contain .. @{ or //'
+  if (name.startsWith('/') || name.endsWith('/') || name.endsWith('.') || name.endsWith('.lock') || name.split('/').some((part) => part.startsWith('.'))) {
+    return 'A branch name cannot start or end with / or ., start a part with ., or end with .lock'
+  }
+  if (existing.includes(name)) return 'A branch with that name already exists.'
+  return null
+}
+
+export interface BranchRowMenu {
+  /** The row has actions at all: only local branches that Mousse does not manage do. */
+  available: boolean
+  canRename: boolean
+  canDelete: boolean
+  /** Why Delete is dimmed; null when it is not. */
+  deleteReason: string | null
+}
+
+/** Rename and delete for one row of the branch list. The current branch can be renamed, never deleted. */
+export function branchRowMenu(name: string, current: string | null): BranchRowMenu {
+  if (isRemoteBranch(name) || isManagedBranchName(name)) return { available: false, canRename: false, canDelete: false, deleteReason: null }
+  const isCurrent = current !== null && name.toLowerCase() === current.toLowerCase()
+  return { available: true, canRename: true, canDelete: !isCurrent, deleteReason: isCurrent ? 'Switch to another branch first' : null }
+}
+
+export type DirtySwitchChoiceId = 'carry' | 'stash' | 'cancel'
+
+export interface DirtySwitchChoice {
+  id: DirtySwitchChoiceId
+  label: string
+  /** The choice Enter takes. */
+  primary: boolean
+}
+
+/** What to ask before switching with uncommitted changes. Nothing to ask for a clean folder. */
+export function dirtySwitchChoices(fileCount: number): DirtySwitchChoice[] {
+  if (fileCount <= 0) return []
+  return [
+    { id: 'carry', label: 'Bring changes along', primary: true },
+    { id: 'stash', label: 'Stash and switch', primary: false },
+    { id: 'cancel', label: 'Cancel', primary: false }
+  ]
+}
+
+export function dirtySwitchMessage(fileCount: number, branch: string): string {
+  const files = fileCount === 1 ? '1 file has' : `${fileCount} files have`
+  return `${files} uncommitted changes. Switch to ${branch} with them, or stash them first and bring them back?`
+}
+
+/** Shown after a stash-and-switch whose stash could not be applied cleanly on the new branch. */
+export const STASH_KEPT_NOTICE = 'Switched; your stash is kept because it conflicts'
+
+/** Git refused to carry the changes to the other branch. */
+export function isDirtySwitchRefusal(code: string | null): boolean {
+  return code === 'git_checkout_dirty' || code === 'git_checkout_untracked_collision'
+}
+
+/** Fixed wording for a failed switch, or null when Git's own message should be shown. */
+export function checkoutFailureCopy(code: string | null): string | null {
+  switch (code) {
+    case 'git_checkout_dirty':
+      return 'Your uncommitted changes would be overwritten by that branch. Stash and switch moves them aside and brings them back.'
+    case 'git_checkout_untracked_collision':
+      return 'An untracked file would be overwritten by that branch. Stash and switch moves it aside and brings it back.'
+    case 'git_stash_kept':
+      return 'Git could not put your changes back. They are kept in the stash.'
+    default:
+      return null
+  }
+}
+
+export interface DeleteBranchPrompt {
+  message: string
+  confirmLabel: string
+}
+
+/** The delete confirmation, and the second one asked when the branch holds commits nothing else has. */
+export function deleteBranchPrompt(name: string, stage: 'confirm' | 'unmerged'): DeleteBranchPrompt {
+  return stage === 'confirm'
+    ? { message: `Delete branch ${name}? Commits that other branches have stay where they are.`, confirmLabel: 'Delete' }
+    : { message: `Branch ${name} has commits not on any other branch. Delete anyway?`, confirmLabel: 'Delete anyway' }
+}
+
+/** Fixed wording for a failed create, rename or delete, else Git's own message. */
+export function branchFailureMessage(error: unknown, name = 'The branch', context: 'create' | 'rename' | 'delete' = 'rename'): string {
+  switch (gitErrorCode(error)) {
+    case 'git_branch_exists':
+      return `A branch named ${name} already exists.`
+    case 'git_branch_in_worktree':
+      return `${name} is checked out in another worktree.`
+    case 'git_branch_current':
+      return 'Switch to another branch before deleting this one.'
+    case 'git_ref_not_found':
+      return `${name} no longer exists.`
+    case 'git_branch_protected':
+      return 'Branches under mousse/ are managed by Mousse and cannot be changed here.'
+    case 'git_checkout_dirty':
+    case 'git_checkout_untracked_collision':
+      return context === 'create'
+        ? 'Your uncommitted changes would be overwritten by that starting point. Create the branch without switching to it.'
+        : (checkoutFailureCopy(gitErrorCode(error)) ?? gitErrorMessage(error))
+    case 'task_branch_authoritative':
+      return THREAD_BRANCH_LABEL
+    default:
+      return gitErrorMessage(error)
+  }
+}
+
 /** The daemon's error code for a failed Git action, or null when the failure carries none. */
 export function gitErrorCode(error: unknown): string | null {
   if (error && typeof error === 'object' && 'code' in error && typeof error.code === 'string') return error.code
@@ -550,7 +691,7 @@ export function chooseAmend(form: CommitForm, checked: boolean): CommitForm {
 /** Why mutating Git controls are disabled while one action runs. */
 export const GIT_BUSY_REASON = 'Another Git action is running'
 
-export type GitAction = 'checkout' | 'commit' | 'push' | 'pullRequest' | 'init'
+export type GitAction = 'checkout' | 'branch' | 'commit' | 'push' | 'pullRequest' | 'init'
 
 export interface GitActionLock {
   disabled: boolean
