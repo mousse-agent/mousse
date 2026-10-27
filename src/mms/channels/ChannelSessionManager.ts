@@ -71,6 +71,17 @@ export class ChannelSessionManager {
     return updated
   }
 
+  /** Attaches the session to a personal bot (`/bot <name>`), or detaches it with undefined. */
+  setBot(sessionKey: string, botId: string | undefined): ChannelSession | undefined {
+    const existing = this.getSession(sessionKey)
+    if (!existing) return undefined
+    const updated: ChannelSession = { ...existing }
+    if (botId) updated.botId = botId
+    else delete updated.botId
+    this.store.upsertSession(updated)
+    return updated
+  }
+
   /**
    * Rebind this channel session to an existing Mousse thread without wiping history.
    * Unlike resetSession (/new), does not create a thread or clear model overrides.

@@ -302,6 +302,17 @@ export interface ChannelPlatformConfig {
   homeChatId?: string
   webhookPort?: number
   webhookSecret?: string
+  /**
+   * The account confirmed as this platform's owner (Settings → Channels → "This is me"). Personal
+   * bots answer only this account, in a direct message. Never inferred from allowed users or pairing.
+   */
+  owner?: ChannelOwner
+}
+
+export interface ChannelOwner {
+  userId: string
+  displayName: string
+  confirmedAt: string
 }
 
 export interface ChannelConfig {
@@ -324,6 +335,8 @@ export interface ChannelSession {
   createdAt: string
   /** Session model; `instanceId` is absent on sessions saved before provider instances existed. */
   modelOverride?: ModelOverride
+  /** The personal bot this DM talks to (`/bot <name>`); its messages activate the bot instead of a chat turn. */
+  botId?: string
 }
 
 export interface ChannelDirectoryEntry {

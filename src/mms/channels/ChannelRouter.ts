@@ -5,14 +5,17 @@ import type {
   ChannelActivityEvent,
   ChannelConfig,
   ChannelPlatform,
+  ChannelSession,
   Project
 } from '../../shared/types'
+import type { BotChannelReplyTo } from '../../shared/bots/personal/definition'
 import { listingKey, listingServes, selectionFromListing, type ModelOverride } from '../../shared/providerInstances'
 import type { LlmProviderOption } from '../../shared/settings'
 import { applyEffortToModelId, formatEffortLabel } from '../../shared/modelVariants'
 import type { SettingsStore } from '../settings/SettingsStore'
 import type { ThreadDataStore } from '../data/ThreadDataStore'
 import { ChannelAuth } from './ChannelAuth'
+import { BOT_NO_OWNER_REPLY, BOT_NOT_OWNER_REPLY, channelAudience, type ChannelBots, type ChannelOwnerClaims } from './channelBots'
 import { ChannelSessionManager } from './ChannelSessionManager'
 import { ChannelStore } from './ChannelStore'
 import { chunkMessage } from './chunkMessage'
@@ -67,6 +70,11 @@ export interface ChannelRouterDeps {
    */
   channelGate?: (threadId: string, modelOverride: ModelOverride | undefined) => { refusal?: string; notice?: string }
   noticeDelivered?: (threadId: string) => void
+  /** The profile's personal bots (`/bot <name>` and bot sessions); absent when bots are unavailable. */
+  bots?: ChannelBots
+  /** "This is me" codes (`/owner <code>`); `ownerClaimReceived` runs after a code was accepted. */
+  ownerClaims?: ChannelOwnerClaims
+  ownerClaimReceived?: () => void
 }
 
 interface InteractiveMenuDefinition {
@@ -221,6 +229,20 @@ export class ChannelRouter extends EventEmitter {
     }
 
     const parsed = parseSlashCommand(text)
+    if (parsed?.name === 'owner' && this.deps.ownerClaims) {
+      await this.deliverReply(message, this.receiveOwnerCode(message, parsed.args))
+      return
+    }
+    if (parsed?.name === 'bot') {
+      await this.deliverReply(message, this.attachBot(message, session, parsed.args))
+      return
+    }
+    // A session attached to a bot activates the bot; other slash commands keep working as usual.
+    if (!parsed && session.botId) {
+      await this.runBotTurn(message, session.sessionKey, text)
+      return
+    }
+
     if (parsed) {
       const result = await dispatchSlashCommand({
         message,
@@ -310,6 +332,79 @@ export class ChannelRouter extends EventEmitter {
         `(expires ${new Date(request.expiresAt).toLocaleString()})`
     })
     this.emit('pairing-updated')
+  }
+
+  /** `/owner <code>`: the one attempt a "This is me" code allows; the desktop app confirms it. */
+  private receiveOwnerCode(message: InboundChannelMessage, code: string): string {
+    if (message.chatType !== 'dm') return 'Send /owner from a direct message to this bot.'
+    if (this.deps.ownerClaims!.receive(message, code) !== 'received') return 'That code is not valid. Start again in Mousse: Settings → Channels → "This is me".'
+    try { this.deps.ownerClaimReceived?.() } catch { /* the code stays received */ }
+    return 'Code received. Confirm in Mousse that this is your account.'
+  }
+
+  /** `/bot <name>` attaches this DM to a personal bot, `/bot off` detaches it; owner only. */
+  private attachBot(message: InboundChannelMessage, session: ChannelSession, args: string): string {
+    const bots = this.deps.bots
+    if (!bots) return 'Bots are unavailable in this profile.'
+    const name = args.trim()
+    if (!name) return session.botId ? `This chat talks to the bot ${bots.findByName(session.botId)?.name ?? session.botId}. Send /bot off to detach it.` : 'Send /bot <name> to talk to one of your bots here.'
+    if (name.toLowerCase() === 'off') {
+      this.sessionManager.setBot(session.sessionKey, undefined)
+      return 'Detached. Messages here go to the chat thread again.'
+    }
+    const platform = this.getConfig().platforms[message.platform]
+    // Attaching is refused until the owner is confirmed, and for anyone but the owner.
+    if (!platform?.owner) return BOT_NO_OWNER_REPLY
+    if (channelAudience(platform, session, message) !== 'owner') return BOT_NOT_OWNER_REPLY
+    const bot = bots.findByName(name)
+    if (!bot) return `No bot named "${name.slice(0, 60)}".`
+    if (!this.sessionManager.setBot(session.sessionKey, bot.id)) return 'Could not update this channel session.'
+    return `Messages here now go to the bot ${bot.name}. Send /bot off to detach it.`
+  }
+
+  /**
+   * A message to a bot: the audience is checked again on the live session and config, so an
+   * owner change or a session change counts from the next message. Only the owner activates it.
+   */
+  private async runBotTurn(message: InboundChannelMessage, sessionKey: string, text: string): Promise<void> {
+    const bots = this.deps.bots
+    const session = this.sessionManager.getSession(sessionKey)
+    if (!session?.botId) return
+    if (!bots) {
+      await this.deliverReply(message, 'Bots are unavailable in this profile.')
+      return
+    }
+    if (channelAudience(this.getConfig().platforms[message.platform], session, message) !== 'owner') {
+      await this.deliverReply(message, BOT_NOT_OWNER_REPLY)
+      return
+    }
+    const messageId = message.messageId?.trim()
+    const replyTo: BotChannelReplyTo = {
+      platform: message.platform,
+      chatId: message.chatId,
+      ...(message.threadId ? { threadId: message.threadId } : {}),
+      ...(messageId ? { messageId } : {})
+    }
+    try {
+      // The same chat message activates the bot once, also when the platform delivers it again.
+      await bots.activateFromChannel({ botId: session.botId, input: text, clientRequestId: `${sessionKey}:${messageId ?? uuidv4()}`, replyTo })
+    } catch (error) {
+      await this.deliverReply(message, error instanceof Error ? error.message : String(error))
+    }
+  }
+
+  /** Posts a bot activation's reply to the chat it came from; true when every chunk was sent. */
+  async deliverBotReply(replyTo: BotChannelReplyTo, text: string): Promise<boolean> {
+    const message: InboundChannelMessage = {
+      platform: replyTo.platform,
+      chatId: replyTo.chatId,
+      ...(replyTo.threadId ? { threadId: replyTo.threadId } : {}),
+      ...(replyTo.messageId ? { messageId: replyTo.messageId } : {}),
+      chatType: 'dm',
+      userId: '',
+      text: ''
+    }
+    return this.lifecycle.run('bot-reply', () => this.deliverReply(message, text))
   }
 
   private async processTurn(

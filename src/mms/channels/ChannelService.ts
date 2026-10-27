@@ -17,6 +17,7 @@ import type { ProviderAuthService } from '../providers/ProviderAuthService'
 import type { AgentRegistry } from '../agents/AgentRegistry'
 import { OwnedWorkBarrier } from '../execution/OwnedWorkBarrier'
 import { ChannelAuth } from './ChannelAuth'
+import { ChannelOwnerClaims, type ChannelBots } from './channelBots'
 import { CHANNEL_POLICY, ChannelApprovalNotices, channelGate } from './channelModels'
 import { ChannelRouter } from './ChannelRouter'
 import { ChannelSessionManager } from './ChannelSessionManager'
@@ -43,6 +44,10 @@ export interface ChannelServiceOptions {
    * run one. Picks the one-time approvals notice for a model chosen with `/model`.
    */
   capsOf?: (instanceId: string) => HarnessCaps
+  /** The profile's personal bots; absent when bots are unavailable. */
+  bots?: ChannelBots
+  /** "This is me" codes (tests pass a clock). */
+  ownerClaims?: ChannelOwnerClaims
 }
 
 function createDefaultAdapter(
@@ -77,6 +82,9 @@ export class ChannelService extends EventEmitter {
   private disconnecting: Promise<void> | null = null
   private readonly draining = new Set<Promise<unknown>>()
   private readonly approvalNotices = new ChannelApprovalNotices()
+  private readonly ownerClaims: ChannelOwnerClaims
+  private readonly bots: ChannelBots | undefined
+  private unsubscribeBots: (() => void) | undefined
 
   constructor(
     private orchestrator: OrchestratorService,
@@ -89,6 +97,8 @@ export class ChannelService extends EventEmitter {
   ) {
     super()
     this.createAdapter = options?.createAdapter ?? createDefaultAdapter
+    this.ownerClaims = options?.ownerClaims ?? new ChannelOwnerClaims()
+    this.bots = options?.bots
     this.auth = new ChannelAuth(this.store.getPairingDirectory())
     this.sessionManager = new ChannelSessionManager(this.store, threadStore, (override) => orchestrator.migrateModelOverride(override) ?? override)
     this.router = new ChannelRouter(
@@ -117,6 +127,9 @@ export class ChannelService extends EventEmitter {
           return notice ? { notice } : {}
         },
         noticeDelivered: (threadId) => this.approvalNotices.delivered(threadId),
+        ...(this.bots ? { bots: this.bots } : {}),
+        ownerClaims: this.ownerClaims,
+        ownerClaimReceived: () => this.emitUpdated(),
         getSubscriptionUsage: (providerId) => this.providerAuth.getSubscriptionUsage(providerId),
         listAgents: this.agentRegistry
           ? () =>
@@ -134,6 +147,74 @@ export class ChannelService extends EventEmitter {
     this.router.on('pairing-updated', () => {
       this.emitUpdated()
     })
+    // A channel activation tells its chat what it ended with (or that it waits for approval).
+    this.unsubscribeBots = this.bots?.onChanged((event) => {
+      if (event.activationId) this.sendBotReply(event.activationId)
+    })
+  }
+
+  /** Posts what a channel activation has to say now; each state is claimed once, only while its chat is reachable. */
+  private sendBotReply(activationId: string): void {
+    if (!this.bots || this.lifecycle.stopping) return
+    let reply: ReturnType<ChannelBots['channelReply']>
+    try {
+      reply = this.bots.channelReply(activationId, { canSend: (replyTo) => !this.lifecycle.stopping && this.adapters.get(replyTo.platform)?.getStatus().state === 'connected' })
+    } catch (error) {
+      console.warn('[channels] bot reply could not be read', error)
+      return
+    }
+    if (!reply) return
+    void this.router.deliverBotReply(reply.replyTo, reply.text).catch((error) => {
+      if (!isProfileDraining(error)) console.error('[channels] bot reply failed:', error)
+    })
+  }
+
+  /** Replies channel activations still owe a chat on `platform`, once it is connected. */
+  private sweepBotReplies(): void {
+    if (!this.bots) return
+    let ids: string[] = []
+    try { ids = this.bots.recentChannelActivations() } catch { return }
+    for (const id of ids) this.sendBotReply(id)
+  }
+
+  // -- "This is me" (PR 6 §6) -------------------------------------------------------------------
+
+  /** A one-time code the owner sends with `/owner <code>` from a direct message (10 minutes, one try). */
+  startOwnerClaim(platform: ChannelPlatform): { code: string; expiresAt: string } {
+    this.lifecycle.assertAccepting()
+    const claim = this.ownerClaims.start(platform)
+    this.emitUpdated()
+    return claim
+  }
+
+  /** The claim in progress: when it expires, and the account that sent the code, if one did. */
+  ownerClaimStatus(platform: ChannelPlatform): ReturnType<ChannelOwnerClaims['status']> {
+    return this.ownerClaims.status(platform)
+  }
+
+  /** "Is this your account?" — yes: stores the account that sent the code as the platform's owner. */
+  confirmOwner(platform: ChannelPlatform, userId: string): ChannelConfig {
+    this.lifecycle.assertAccepting()
+    const owner = this.ownerClaims.confirm(platform, userId)
+    if (!owner) throw Object.assign(new Error('No account sent that code, or the code expired. Start again.'), { code: 'channel_owner_unconfirmed' })
+    const config = this.store.getConfig()
+    config.platforms[platform] = { ...config.platforms[platform], owner }
+    this.store.saveConfig(config)
+    this.emitUpdated()
+    return redactConfigForRenderer(this.store.getConfig())
+  }
+
+  /** Forgets the platform's owner (and any claim in progress): its bots answer nobody until one is confirmed. */
+  clearOwner(platform: ChannelPlatform): ChannelConfig {
+    this.lifecycle.assertAccepting()
+    this.ownerClaims.cancel(platform)
+    const config = this.store.getConfig()
+    const next = { ...config.platforms[platform] }
+    delete next.owner
+    config.platforms[platform] = next
+    this.store.saveConfig(config)
+    this.emitUpdated()
+    return redactConfigForRenderer(this.store.getConfig())
   }
 
   /** The caps a channel turn on the thread runs on: the `/model` choice, else the thread's selection. */
@@ -150,6 +231,8 @@ export class ChannelService extends EventEmitter {
   }
 
   beginShutdown(): void {
+    this.unsubscribeBots?.()
+    this.unsubscribeBots = undefined
     this.lifecycle.beginShutdown()
     this.router.beginShutdown()
     this.trackDrain(this.disconnectAdapters())
@@ -195,13 +278,14 @@ export class ChannelService extends EventEmitter {
     const mergedPlatforms = { ...current.platforms }
     if (patch.platforms) {
       for (const platform of Object.keys(patch.platforms) as ChannelPlatform[]) {
-        const incoming = patch.platforms[platform]
+        // The owner is set only through "This is me", never by a config patch.
+        const { owner: _owner, ...incoming } = patch.platforms[platform] ?? {}
         const existing = mergedPlatforms[platform]
         const next = { ...existing, ...incoming }
-        if (incoming?.token?.includes('•')) {
+        if (incoming.token?.includes('•')) {
           next.token = existing.token
         }
-        if (incoming?.webhookSecret?.includes('•')) {
+        if (incoming.webhookSecret?.includes('•')) {
           next.webhookSecret = existing.webhookSecret
         }
         mergedPlatforms[platform] = next
@@ -371,6 +455,7 @@ export class ChannelService extends EventEmitter {
       await adapter.disconnect()
       return
     }
+    this.sweepBotReplies()
     if (this.lifecycle.stopping) {
       this.adapters.delete(platform)
       await adapter.disconnect()

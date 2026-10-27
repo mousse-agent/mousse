@@ -600,7 +600,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * done, "Waiting for approval in Mousse" at a wall, or that it stopped. Undefined when there is
    * nothing new to say. The claim comes before the send, so a crash never posts a state twice.
    */
-  channelReply(activationId: string): { replyTo: BotChannelReplyTo; text: string } | undefined {
+  channelReply(activationId: string, options: { canSend?: (replyTo: BotChannelReplyTo) => boolean } = {}): { replyTo: BotChannelReplyTo; text: string } | undefined {
     const row = this.store.activation(activationId)
     if (!row || row.trigger.kind !== 'channel') return undefined
     let state: string
@@ -633,6 +633,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       default:
         return undefined
     }
+    // Nothing is claimed while the chat cannot be reached: the reply goes once the channel connects.
+    if (options.canSend && !options.canSend(row.trigger.replyTo)) return undefined
     return this.store.claimReply(row.id, state) ? { replyTo: row.trigger.replyTo, text } : undefined
   }
 
