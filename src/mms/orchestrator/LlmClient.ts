@@ -1617,12 +1617,14 @@ export class LlmClient {
             options: [
               { id: 'allow', decision: 'allow', scope: 'once' },
               { id: 'reject', decision: 'reject' }
-            ]
+            ],
+            tool: { name: toolCall.name, input: args }
           }
         }
       )
       if (answer.permission === 'allow' && !signal?.aborted) return null
-      return toolResult(toolCall, `The user rejected the request to ${what}. Do not retry it unless they ask.`, true)
+      const why = typeof answer.feedback === 'string' ? answer.feedback.trim().slice(0, 1000) : ''
+      return toolResult(toolCall, `The user rejected the request to ${what}.${why ? ` Reason: ${why}` : ' Do not retry it unless they ask.'}`, true)
     } catch {
       return toolResult(toolCall, `The user did not approve the request to ${what}.`, true)
     }

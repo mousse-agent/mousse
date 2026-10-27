@@ -1700,7 +1700,8 @@ export class CodexProviderService {
         const decision = await this.approve(
           run,
           `Allow Codex to run this command?\n${command}${approval.cwd ? `\nin ${approval.cwd}` : ''}${approval.reason ? `\n${approval.reason}` : ''}`,
-          'command'
+          'command',
+          { name: 'commandExecution', input: { command, ...(approval.cwd ? { cwd: approval.cwd } : {}) }, ...(approval.cwd ? { cwd: approval.cwd } : {}) }
         )
         return { decision } satisfies Result<'item/commandExecution/requestApproval'>
       }
@@ -1710,11 +1711,13 @@ export class CodexProviderService {
         if (run.mode === 'plan' || run.readOnlyChild || run.refusesApprovals) return { decision: 'decline' } satisfies Result<'item/fileChange/requestApproval'>
         // Edits go ahead under Auto-accept edits and Full access.
         if (permissionModeAllows(run.permissionMode, 'edit')) return { decision: 'accept' } satisfies Result<'item/fileChange/requestApproval'>
-        const changes = (run.item(approval.itemId) as { changes?: Array<{ path: string }> } | undefined)?.changes ?? []
+        const changes = (run.item(approval.itemId) as { changes?: Array<{ path: string; diff?: string; kind?: unknown }> } | undefined)?.changes ?? []
         const decision = await this.approve(
           run,
           `Allow Codex to edit ${changes.length ? changes.map((change) => change.path).join(', ') : 'files'}?${approval.reason ? `\n${approval.reason}` : ''}`,
-          'edit'
+          'edit',
+          // Only a change set Codex described has a stable action: without one there is no grant.
+          { name: 'fileChange', input: changes.length ? { changes: changes.map((change) => ({ path: change.path, diff: change.diff ?? null, kind: change.kind ?? null })) } : undefined }
         )
         return { decision } satisfies Result<'item/fileChange/requestApproval'>
       }
@@ -1756,7 +1759,12 @@ export class CodexProviderService {
    * only: Codex's own "for this session" answer is not offered, because Mousse records "Always for
    * this thread" itself, and Codex would remember its allowance past a stricter mode.
    */
-  private async approve(run: TurnRun, prompt: string, kind: 'command' | 'edit'): Promise<'accept' | 'decline' | 'cancel'> {
+  private async approve(
+    run: TurnRun,
+    prompt: string,
+    kind: 'command' | 'edit',
+    tool: { name: string; input: unknown; cwd?: string }
+  ): Promise<'accept' | 'decline' | 'cancel'> {
     try {
       const answer = await this.questions.requestAnswers(
         [
@@ -1778,7 +1786,8 @@ export class CodexProviderService {
             options: [
               { id: 'allow', decision: 'allow', scope: 'once' },
               { id: 'reject', decision: 'reject' }
-            ]
+            ],
+            tool
           }
         }
       )

@@ -120,7 +120,8 @@ describe('ACP permission requests under a permission mode', () => {
   it('tells the prompter what kind of action is asked about, so who may answer is decided by the rule', async () => {
     const ask = prompter('once')
     await answerPermission(ask, scope('ask'), request('execute'), classify)
-    expect(ask.choose.mock.calls[0][0].approval).toEqual({ action: 'command', permissionKey: 'acp:execute' })
+    // The agent's own description of the call travels with it: it is what a saved request is fingerprinted by.
+    expect(ask.choose.mock.calls[0][0].approval).toMatchObject({ action: 'command', permissionKey: 'acp:execute', tool: { name: 'execute' } })
     const questions = new UserQuestionService()
     questions.setLineageSource(() => null)
     const waiter = questionsPrompter(questions).choose({ threadId: 'thread', title: 'Edit?', options: options.map(classifyGenericOption).filter((option) => option.scope === 'once'), approval: { action: 'edit', permissionKey: 'acp:edit' } })

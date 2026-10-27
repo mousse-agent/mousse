@@ -1152,7 +1152,7 @@ export class PiRpcEngine implements ProviderAdapter {
           { optionId: 'allow', kind: 'allow_once', label: 'Allow once', scope: 'once' },
           { optionId: 'reject', kind: 'reject_once', label: 'Reject', scope: 'once' }
         ],
-        approval: { action, permissionKey: piPermissionKey(action) }
+        approval: { action, permissionKey: piPermissionKey(action), tool: { name: toolName, input, ...(turn.input.cwd ? { cwd: turn.input.cwd } : {}) } }
       })
       if (chosen === 'allow' && !turn.input.signal.aborted) return null
       return denied(`The user rejected the request to ${action === 'command' ? 'run this command' : 'edit this file'}. Do not retry it unless they ask.`)
