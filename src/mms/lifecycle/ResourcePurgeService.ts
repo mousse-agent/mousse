@@ -7,6 +7,7 @@ import { atomicWriteJsonSync } from '../data/AtomicFs'
 import { acquireRepositoryLease } from '../git/RepositoryLease'
 import { resolveRepositoryIdentity } from '../git/RepositoryIdentity'
 import { buildResourceInventory } from './ResourceInventory'
+import { measureTree } from './diskMeasure'
 import { assertLifecyclePath, ResourceLifecycleStore } from './ResourceLifecycleStore'
 import { assertFrozenContentEntry, lifecycleGit, readDirectLifecycleRef, walkOwnedContent, WorktreeRetirementService } from './WorktreeRetirementService'
 import { isOwnerLive, PROCESS_INSTANCE_ID } from '../queue/processLiveness'
@@ -16,6 +17,24 @@ import { withFileLock } from '../scheduled/fileLock'
 const digest = (value: unknown): string => createHash('sha256').update(JSON.stringify(value)).digest('hex')
 const within = (root: string, path: string): boolean => { const rel = relative(resolve(root), resolve(path)); return !isAbsolute(rel) && rel !== '..' && !rel.startsWith(`..${process.platform === 'win32' ? '\\' : '/'}`) }
 const active = new Set<string>()
+/** Time one reclaim estimate may spend measuring files. */
+const RECLAIM_BUDGET_MS = 20_000
+
+export interface TrashSweepOptions {
+  /** Records to attempt in this call; five by default. */
+  limit?: number
+  /** Attempt only these records (a manual run's snapshot). */
+  only?: ReadonlySet<string>
+}
+export interface TrashSweepOutcome {
+  taskId: string
+  outcome: 'purged' | 'kept' | 'failed'
+  reason?: string
+  /** Space recovered; 0 unless `purged`. */
+  bytes: number
+  bytesApproximate?: true
+  bytesLowerBound?: true
+}
 
 const purgeErrors = createErrorProvider({
   resource_purge_discard_required: { category: 'denied', retryable: false, message: 'Sole-copy discard requires an exact human-reviewed preview.' },
@@ -29,7 +48,7 @@ const purgeErrors = createErrorProvider({
 export class ResourcePurgeService {
   readonly retirement: WorktreeRetirementService
   private timer?: ReturnType<typeof setInterval>
-  private sweepPromise?: Promise<void>
+  private sweepPromise?: Promise<TrashSweepOutcome[]>
   private stopping = false
   constructor(readonly store: ResourceLifecycleStore, private readonly hooks: { assertIdle(taskId: string): void; projectPurged(record: TaskLifecycleRecord): void | Promise<void>; onBoundary?(record: TaskLifecycleRecord): void | Promise<void>; configurationChanged?(): void }) { this.retirement = new WorktreeRetirementService(store) }
 
@@ -58,35 +77,88 @@ export class ResourcePurgeService {
   start(): void {
     if (this.timer) return
     this.stopping = false
-    this.timer = setInterval(() => { if (!this.sweepPromise) this.sweepPromise = this.sweep().catch(() => { /* Invalid policy/source remains visible through inventory; no cleanup occurred. */ }).finally(() => { this.sweepPromise = undefined }) }, 60_000)
+    this.timer = setInterval(() => { void this.requestSweep().catch(() => { /* Invalid policy/source remains visible through inventory; no cleanup occurred. */ }) }, 60_000)
     this.timer.unref()
   }
-  async stop(): Promise<void> { this.stopping = true; if (this.timer) clearInterval(this.timer); this.timer = undefined; await this.sweepPromise }
-  async sweep(now = Date.now()): Promise<void> {
+  async stop(): Promise<void> { this.stopping = true; if (this.timer) clearInterval(this.timer); this.timer = undefined; await this.sweepPromise?.catch(() => undefined) }
+  /** Trashed root threads whose retention has passed, in the order a sweep visits them. */
+  private overdue(now: number, graceDays: number): TaskLifecycleRecord[] {
+    return this.store.list().filter((record) => record.state === 'trashed' && !record.parentTaskId && now - Date.parse(record.trashedAt ?? record.operations.filter((operation) => operation.kind === 'trash' && operation.phase === 'completed').at(-1)?.completedAt ?? record.createdAt) >= graceDays * 86_400_000).sort((a, b) => a.taskId.localeCompare(b.taskId))
+  }
+  /**
+   * Ids past retention now. A manual run snapshots this once. Empty while automatic emptying is
+   * off, unless `ignoreAutomatic` asks which records would be due.
+   */
+  overdueTaskIds(now = Date.now(), ignoreAutomatic = false): string[] {
     const policy = this.policy()
-    if (!policy.automaticPurge || this.stopping) return
+    return policy.automaticPurge || ignoreAutomatic ? this.overdue(now, policy.graceDays).map((record) => record.taskId) : []
+  }
+  /** One sweep at a time: a request during a running sweep gets that sweep's outcomes. */
+  requestSweep(now = Date.now(), options: TrashSweepOptions = {}): Promise<TrashSweepOutcome[]> {
+    if (this.sweepPromise) return this.sweepPromise
+    const run: Promise<TrashSweepOutcome[]> = this.sweep(now, options).finally(() => { if (this.sweepPromise === run) this.sweepPromise = undefined })
+    this.sweepPromise = run
+    return run
+  }
+  /**
+   * What permanent deletion would free, measured on the present checkout and file items. An absent
+   * (already retired) checkout and Git refs count 0. Hard-linked files free nothing and are not
+   * counted. This is an estimate for display; `preview.exclusiveBytes` and the digest are untouched.
+   */
+  async reclaimEstimate(preview: LifecyclePurgePreview): Promise<{ bytes: number; estimated: boolean; partial: boolean }> {
+    const total = { bytes: 0, estimated: false, partial: false }
+    const deadline = Date.now() + RECLAIM_BUDGET_MS
+    for (const item of preview.items) {
+      if ((item.kind !== 'worktree' && item.kind !== 'path') || !existsSync(item.identity)) continue
+      const budgetMs = deadline - Date.now()
+      if (budgetMs <= 0) { total.partial = true; break }
+      const measured = await measureTree(item.identity, { mode: 'reclaim', budgetMs })
+      total.bytes += measured.bytes; total.estimated ||= measured.estimated; total.partial ||= measured.partial
+    }
+    return total
+  }
+  /**
+   * Purges overdue records, at most `limit` per call (five by default), and says what happened to each:
+   * purged, kept (unpublished or sole-copy content, or a blocker) or failed. Bytes are measured before
+   * the purge and reported only when it succeeds.
+   */
+  async sweep(now = Date.now(), options: TrashSweepOptions = {}): Promise<TrashSweepOutcome[]> {
+    const outcomes: TrashSweepOutcome[] = []
+    const policy = this.policy()
+    if (!policy.automaticPurge || this.stopping) return outcomes
     const clockPath = join(this.store.root, 'trash-clock.json')
     assertLifecyclePath(this.store.root, clockPath)
     const previous = existsSync(clockPath) ? JSON.parse(readFileSync(clockPath, 'utf8')) as { highWater: number; suspended?: boolean; cursor?: string } : { highWater: now }
     if (!Number.isSafeInteger(previous.highWater) || previous.suspended || now < previous.highWater || now - previous.highWater > 24 * 60 * 60 * 1000) {
-      atomicWriteJsonSync(clockPath, { ...previous, suspended: true }); return
+      atomicWriteJsonSync(clockPath, { ...previous, suspended: true }); return outcomes
     }
     atomicWriteJsonSync(clockPath, { ...previous, highWater: Math.max(now, previous.highWater) })
-    const all = this.store.list().filter((record) => record.state === 'trashed' && !record.parentTaskId && now - Date.parse(record.trashedAt ?? record.operations.filter((operation) => operation.kind === 'trash' && operation.phase === 'completed').at(-1)?.completedAt ?? record.createdAt) >= policy.graceDays * 86_400_000).sort((a, b) => a.taskId.localeCompare(b.taskId))
-    const afterCursor = previous.cursor ? all.findIndex((record) => record.taskId.localeCompare(previous.cursor!) > 0) : 0
+    const overdue = this.overdue(now, policy.graceDays)
+    const all = options.only ? overdue.filter((record) => options.only!.has(record.taskId)) : overdue
+    const afterCursor = previous.cursor && !options.only ? all.findIndex((record) => record.taskId.localeCompare(previous.cursor!) > 0) : 0
     const start = afterCursor < 0 ? 0 : afterCursor
-    const eligible = [...all.slice(start), ...all.slice(0, start)].slice(0, 5)
+    const eligible = [...all.slice(start), ...all.slice(0, start)].slice(0, options.limit ?? 5)
     for (const record of eligible) {
       if (this.stopping) break
       atomicWriteJsonSync(clockPath, { highWater: Math.max(now, previous.highWater), cursor: record.taskId })
       try {
         const preview = await this.preview(record.taskId)
         if (preview.blockers.length || preview.items.some((item) => item.discardRequired)) {
-          this.store.update(record.taskId, (current) => { current.blockedReason = preview.blockers.join('; ') || 'Automatic trash cleanup retains unpublished or sole-copy content; review permanent deletion to decide.' }); continue
+          const reason = preview.blockers.join('; ') || 'Automatic trash cleanup retains unpublished or sole-copy content; review permanent deletion to decide.'
+          this.store.update(record.taskId, (current) => { current.blockedReason = reason })
+          outcomes.push({ taskId: record.taskId, outcome: 'kept', reason, bytes: 0 }); continue
         }
+        const reclaim = await this.reclaimEstimate(preview)
         await this.purge({ taskId: record.taskId, operationId: randomUUID(), expectedGeneration: preview.generation, previewDigest: preview.digest })
-      } catch (error) { this.store.update(record.taskId, (current) => { current.blockedReason = (error as Error).message }) }
+        outcomes.push({ taskId: record.taskId, outcome: 'purged', bytes: reclaim.bytes,
+          ...(reclaim.estimated || reclaim.partial ? { bytesApproximate: true as const } : {}), ...(reclaim.partial && !reclaim.estimated ? { bytesLowerBound: true as const } : {}) })
+      } catch (error) {
+        const reason = (error as Error).message
+        this.store.update(record.taskId, (current) => { current.blockedReason = reason })
+        outcomes.push({ taskId: record.taskId, outcome: 'failed', reason, bytes: 0 })
+      }
     }
+    return outcomes
   }
   async retireTrashed(taskId: string): Promise<void> {
     await this.withOwnership(taskId, async () => {

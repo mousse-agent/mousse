@@ -120,3 +120,80 @@ test('retireTrashed keeps the checkout and reports the cause when the exact reti
   expect(existsSync(join(f.worktree, 'a.txt'))).toBe(true)
   expect(f.store.require('task').blockedReason).toBe('Checkout retained: Workspace HEAD changed')
 })
+
+// ---- Trash sweep outcomes, the storage cleanup seam ----
+const DAY_MS = 86_400_000
+async function trashedTask(f: ReturnType<typeof fixture>, id: string, extra?: (location: string) => void) {
+  const location = id === 'task' ? f.location : join(f.home, 'thread-data', id)
+  if (id !== 'task') {
+    mkdirSync(location, { recursive: true }); writeFileSync(join(location, 'meta.json'), JSON.stringify({ id })); writeFileSync(join(location, 'messages.json'), '[]'); extra?.(location)
+    f.store.registerTask({ taskId: id, location })
+  }
+  await f.coordinator.trash({ taskId: id, operationId: `trash-${id}` })
+  f.store.update(id, (record) => { record.trashedAt = new Date(Date.now() - 5 * DAY_MS).toISOString() })
+}
+const automatic = (f: ReturnType<typeof fixture>) => f.coordinator.cleanup.configure({ schemaVersion: 1, graceDays: 1, automaticPurge: true }, true)
+
+test('sweep says what happened to each overdue record, with the bytes it recovered only when the purge succeeded', async () => {
+  const f = fixture(); automatic(f)
+  await trashedTask(f, 'task'); await trashedTask(f, 'sole', (location) => {
+    mkdirSync(join(location, 'terminal-workspace')); writeFileSync(join(location, 'terminal-workspace', 'x.txt'), 'only copy')
+    writeFileSync(join(location, 'terminal-workspace.json'), JSON.stringify({ schemaVersion: 1, kind: 'task-terminal-scratch', threadId: 'sole', workspaceRelativePath: 'terminal-workspace' }))
+  }); await trashedTask(f, 'boom')
+  const purge = f.coordinator.cleanup.purge.bind(f.coordinator.cleanup)
+  vi.spyOn(f.coordinator.cleanup, 'purge').mockImplementation(async (input) => { if (input.taskId === 'boom') throw new Error('disk is locked'); return purge(input) })
+  const outcomes = await f.coordinator.cleanup.sweep(Date.now())
+  const byId = Object.fromEntries(outcomes.map((outcome) => [outcome.taskId, outcome]))
+  expect(byId.task).toMatchObject({ outcome: 'purged' }); expect(byId.task.bytes).toBeGreaterThan(0)
+  expect(byId.sole).toMatchObject({ outcome: 'kept', bytes: 0, reason: expect.stringContaining('retains unpublished or sole-copy content') })
+  expect(byId.boom).toMatchObject({ outcome: 'failed', bytes: 0, reason: 'disk is locked' })
+  expect(existsSync(join(f.store.require('sole').location, 'terminal-workspace', 'x.txt'))).toBe(true)
+})
+test('a sweep purges at most five overdue records and the next call continues with the rest', async () => {
+  const f = fixture(); automatic(f)
+  await trashedTask(f, 'task'); for (let index = 0; index < 6; index++) await trashedTask(f, `t-${index}`)
+  expect((await f.coordinator.cleanup.sweep(Date.now())).filter((outcome) => outcome.outcome === 'purged')).toHaveLength(5)
+  expect((await f.coordinator.cleanup.sweep(Date.now())).filter((outcome) => outcome.outcome === 'purged')).toHaveLength(2)
+  expect(f.coordinator.cleanup.overdueTaskIds(Date.now())).toEqual([])
+})
+test('a sweep limited to a snapshot attempts only those records, and a request during a sweep gets that sweep', async () => {
+  const f = fixture(); automatic(f)
+  await trashedTask(f, 'task'); await trashedTask(f, 'other')
+  const first = f.coordinator.cleanup.requestSweep(Date.now(), { only: new Set(['other']) }), second = f.coordinator.cleanup.requestSweep(Date.now())
+  expect(second).toBe(first)
+  expect((await first).map((outcome) => outcome.taskId)).toEqual(['other'])
+  expect(f.store.require('task').state).toBe('trashed')
+  expect((await f.coordinator.cleanup.requestSweep(Date.now())).map((outcome) => outcome.taskId)).toEqual(['task'])
+})
+test('a sweep does nothing while automatic emptying is off or the clock guard has suspended it', async () => {
+  const f = fixture(); await trashedTask(f, 'task')
+  expect(await f.coordinator.cleanup.sweep(Date.now())).toEqual([])
+  automatic(f); writeFileSync(join(f.store.root, 'trash-clock.json'), JSON.stringify({ highWater: Date.now(), suspended: true }))
+  expect(await f.coordinator.cleanup.sweep(Date.now())).toEqual([]); expect(f.store.require('task').state).toBe('trashed')
+})
+test('a worktree already retired when the thread was deleted counts 0 bytes when the thread is purged later', async () => {
+  const f = fixture({ git: true })
+  writeFileSync(join(f.worktree, 'payload.bin'), Buffer.alloc(3 * 1024 * 1024, 7)); git(f.worktree, ['add', '.']); git(f.worktree, ['commit', '-qm', 'payload'])
+  const head = git(f.worktree, ['rev-parse', 'HEAD'])
+  const workspace = JSON.parse(readFileSync(join(f.location, 'workspace.json'), 'utf8')); workspace.headSha = head; workspace.integrationTarget.baseSha = head
+  writeFileSync(join(f.location, 'workspace.json'), JSON.stringify(workspace))
+  automatic(f); await trashedTask(f, 'task'); await f.coordinator.cleanup.retireTrashed('task')
+  expect(existsSync(f.worktree)).toBe(false)
+  const [outcome] = await f.coordinator.cleanup.sweep(Date.now())
+  expect(outcome).toMatchObject({ taskId: 'task', outcome: 'purged' }); expect(outcome.bytes).toBeLessThan(1024 * 1024)
+})
+test('the reclaim estimate counts a present checkout and leaves the preview and its digest alone', async () => {
+  const f = fixture({ git: true }); writeFileSync(join(f.worktree, 'payload.bin'), Buffer.alloc(2 * 1024 * 1024, 7))
+  await f.coordinator.trash({ taskId: 'task', operationId: 'trash' })
+  const preview = await f.coordinator.cleanup.preview('task'), before = JSON.stringify(preview)
+  const reclaim = await f.coordinator.cleanup.reclaimEstimate(preview)
+  expect(reclaim.bytes).toBeGreaterThan(1024 * 1024); expect(reclaim.partial).toBe(false)
+  expect(JSON.stringify(preview)).toBe(before)
+  expect((await f.coordinator.cleanup.preview('task')).digest).toBe(preview.digest)
+})
+test('a purge that fails reports no bytes and records why', async () => {
+  const f = fixture(); automatic(f); await trashedTask(f, 'task')
+  vi.spyOn(f.coordinator.cleanup, 'purge').mockRejectedValue(new Error('locked'))
+  expect(await f.coordinator.cleanup.sweep(Date.now())).toEqual([{ taskId: 'task', outcome: 'failed', reason: 'locked', bytes: 0 }])
+  expect(f.store.require('task').blockedReason).toBe('locked')
+})
