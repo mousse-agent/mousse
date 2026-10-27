@@ -300,10 +300,10 @@ describe('shared git status store', () => {
     const git = installGit()
     await refreshGitStatus('/repo/a')
     await checkoutGitBranch('/repo/a', 'dev', scope)
-    expect(git.checkout).toHaveBeenCalledWith(scope, 'dev', {})
+    expect(git.checkout).toHaveBeenCalledWith(scope, 'dev', { operationId: expect.any(String) })
     expect(git.status).toHaveBeenCalledTimes(2)
     await commitGitChanges('/repo/a', 'Add things', scope)
-    expect(git.commit).toHaveBeenCalledWith(scope, 'Add things', { amend: false, expectedBranch: 'main' })
+    expect(git.commit).toHaveBeenCalledWith(scope, 'Add things', { amend: false, expectedBranch: 'main', operationId: expect.any(String) })
     expect(git.status).toHaveBeenCalledTimes(3)
   })
 
@@ -311,7 +311,7 @@ describe('shared git status store', () => {
     const git = installGit({ checkout: vi.fn(async () => ({ status: repoStatus(), stashKept: true })) })
     await refreshGitStatus('/repo/a')
     await expect(checkoutGitBranch('/repo/a', 'dev', scope, { dirty: 'stash' })).resolves.toEqual({ stashKept: true })
-    expect(git.checkout).toHaveBeenCalledWith(scope, 'dev', { dirty: 'stash' })
+    expect(git.checkout).toHaveBeenCalledWith(scope, 'dev', { dirty: 'stash', operationId: expect.any(String) })
   })
 
   it('sends each new Git action with its scope, then refreshes once', async () => {
@@ -329,7 +329,7 @@ describe('shared git status store', () => {
     expect(git.discard).toHaveBeenLastCalledWith(threadScope, ['a.ts'])
     await expect(fetchGit('/repo/a', scope)).resolves.toEqual({ behindBefore: 0, behindAfter: 2 })
     await expect(pullGit('/repo/a', scope, { strategy: 'rebase' })).resolves.toEqual({ result: 'fast-forwarded' })
-    expect(git.pull).toHaveBeenLastCalledWith(scope, { strategy: 'rebase' })
+    expect(git.pull).toHaveBeenLastCalledWith(scope, { strategy: 'rebase', operationId: expect.any(String) })
     await abortGitInProgress('/repo/a', 'merge', scope)
     expect(git.abortInProgress).toHaveBeenLastCalledWith(scope, 'merge')
     await createGitBranch('/repo/a', 'topic', scope, { from: 'main', checkout: false })

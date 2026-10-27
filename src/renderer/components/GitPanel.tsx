@@ -16,6 +16,7 @@ import {
   type SectionAction,
   type SyncActivity
 } from './git/gitPanelLogic'
+import { GitOperationStatus } from './git/GitOperationStatus'
 import { GitSyncBar } from './git/GitSyncBar'
 import { ResizablePanelSidebar } from './ResizablePanelSidebar'
 import { ReviewDiffPane, WhitespaceToggle } from './review/ReviewDiffPane'
@@ -380,6 +381,7 @@ export function GitPanel() {
             onAbort={(kind) => runSyncAction({ action: 'abort', kind })}
           />
         )}
+        <GitOperationStatus path={projectPath} />
         {rowError && <div className="git-changes-error" role="alert">{rowError}</div>}
 
         <div className="git-changes">{renderSidebarBody()}</div>

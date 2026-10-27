@@ -4262,6 +4262,82 @@ div.files-asset-preview { display: grid; place-items: center; overflow: auto; pa
   line-height: 1.4;
 }
 
+/* The Git action in flight or just ended: what it is doing, Cancel, and its output. */
+.git-operation {
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px 12px;
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--text-secondary);
+  border-bottom: 1px solid rgba(var(--accent-rgb), 0.08);
+}
+
+.git-operation-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 4px 8px;
+  flex-wrap: wrap;
+}
+
+.git-operation-text {
+  flex: 1 1 12rem;
+  min-width: 0;
+  display: flex;
+  gap: 6px;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.git-operation-headline {
+  flex-shrink: 0;
+  color: var(--text-primary);
+}
+
+.git-operation[data-phase='failed'] .git-operation-headline {
+  color: var(--danger);
+}
+
+.git-operation-detail {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.git-operation-elapsed {
+  flex-shrink: 0;
+  font-variant-numeric: tabular-nums;
+}
+
+.git-operation-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.git-operation-output summary {
+  cursor: pointer;
+  user-select: none;
+}
+
+.git-operation-log {
+  max-height: 160px;
+  margin: 4px 0 0;
+  padding: 6px 8px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: var(--font-mono, monospace);
+  font-size: 11px;
+  border-radius: 4px;
+  background: rgba(var(--accent-rgb), 0.06);
+  color: var(--text-secondary);
+  user-select: text;
+}
+
 .git-status-badge {
   flex-shrink: 0;
   width: 18px;

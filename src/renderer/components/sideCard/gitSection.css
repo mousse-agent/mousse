@@ -362,6 +362,17 @@ button.side-card-git-pr-check-state {
   }
 }
 
+/* The shared Git action status sits inside the card's own padding, without the panel's rule. */
+.side-card-section .git-operation {
+  padding: 4px 6px 0;
+  border-bottom: 0;
+}
+
+.side-card-git-commit-popover .git-operation {
+  padding: 6px 0 0;
+  border-bottom: 0;
+}
+
 .side-card-git-error {
   display: -webkit-box;
   overflow: hidden;

@@ -39,6 +39,7 @@ import {
   type BranchResult,
   type CreateBranchInput
 } from './branchActions'
+import { GitOperationStatus } from '../git/GitOperationStatus'
 import { CardPopover } from './CardPopover'
 import { menuRowLabel } from './deviceMenu'
 import { PullRequestCreateForm } from './PullRequestCreateForm'
@@ -69,6 +70,7 @@ import {
   gitCollapsedLabel,
   gitErrorCode,
   gitErrorMessage,
+  isGitCancelled,
   localBranchNames,
   prefillAmendDraft,
   pullRequestReadThreadId,
@@ -565,8 +567,8 @@ function CommitButton({ path, projectId, scope: gitScope, branch, fileCount, com
     } catch (commitError) {
       if (commitError instanceof CommitPushError) {
         finish()
-        onActionError(pushFailedMessage(commitError.pushError))
-      } else {
+        if (!isGitCancelled(commitError.pushError)) onActionError(pushFailedMessage(commitError.pushError))
+      } else if (!isGitCancelled(commitError)) {
         setError(gitErrorMessage(commitError))
       }
     } finally {
@@ -649,6 +651,7 @@ function CommitButton({ path, projectId, scope: gitScope, branch, fileCount, com
             onChange={setAmendChecked}
           />
         </label>
+        {work && <GitOperationStatus path={path} />}
         {error && (
           <p className="side-card-git-error" role="alert" title={error}>
             {error}
@@ -898,7 +901,7 @@ export function GitSectionView({
     try {
       await pushGitBranch(path, scope)
     } catch (error) {
-      setActionError(gitErrorMessage(error))
+      if (!isGitCancelled(error)) setActionError(gitErrorMessage(error))
     } finally {
       end()
     }
@@ -963,6 +966,7 @@ export function GitSectionView({
           onActionError={setActionError}
         />
       </div>
+      <GitOperationStatus path={path} />
       <PullRequestCreateForm
         scope={createForm && createForm.path === path && createForm.branch === branch ? createForm : null}
         anchorRef={rowRef}
