@@ -146,6 +146,25 @@ export const HOST_APPROVALS_UNAVAILABLE = 'This runtime cannot hold a bot to its
 export interface CheckPolicyOptions {
   /** The runtime holds every call of a bot turn to its bot authority (`HarnessDriver.botAuthority`). */
   hostApprovals?: boolean
+  /** What bot runtimes still lack (default `BOT_RUNTIME_GAPS`); only tests pass another list. */
+  botRuntimeGaps?: readonly string[]
+}
+
+/**
+ * What every runtime still lacks before a bot may run on it (PR 6 §4). While this list is not
+ * empty, every bot policy is refused, at approval, at dispatch and at turn admission, whatever the
+ * runtime's caps say: a runtime promoted to `exact` tool control does not turn bots on by itself.
+ * Each item is removed by the change that builds it.
+ */
+export const BOT_RUNTIME_GAPS: readonly string[] = Object.freeze([
+  'an active-time supervisor that stops a bot at its deadline and its prepaid time outside the daemon loop, with confirmed process exits',
+  'bot processes that are never kept warm, launched in their own process group',
+  'the locked environment for bot processes'
+])
+
+/** Why bots cannot run yet, in plain words. */
+export function botRuntimeGapReason(gaps: readonly string[]): string {
+  return `Bots can't run yet: Mousse still needs ${gaps.join('; ')}.`
 }
 
 export function checkPolicy(caps: HarnessCaps, policy: RunPolicy, instanceId?: string, model?: SpendModelFacts, options: CheckPolicyOptions = {}): Enforceability {
@@ -174,6 +193,12 @@ export function checkPolicy(caps: HarnessCaps, policy: RunPolicy, instanceId?: s
   if (hostApprovals) {
     reason = [reason, HOST_APPROVALS_UNAVAILABLE].filter(Boolean).join(' ')
     if (!missing.includes('toolControl')) missing.push('toolControl')
+  }
+  // Fail closed: no runtime runs a bot until every piece bots rely on exists.
+  const gaps = options.botRuntimeGaps ?? BOT_RUNTIME_GAPS
+  if (policy.authority?.kind === 'bot' && gaps.length) {
+    reason = [reason, botRuntimeGapReason(gaps)].filter(Boolean).join(' ')
+    if (!missing.includes('containment')) missing.push('containment')
   }
   if (!missing.length) return { ok: true }
   return {
