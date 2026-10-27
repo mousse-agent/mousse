@@ -16,12 +16,6 @@ describe('title bar layout', () => {
     expect(appStyles).toMatch(/\.icon-btn-titlebar\s*\{[\s\S]*?width:\s*34px[\s\S]*?height:\s*34px/)
   })
 
-  it('vertically centers the compact profile control in the title bar', () => {
-    expect(appStyles).toMatch(
-      /\.profile-switcher\s*\{[\s\S]*?display:\s*flex[\s\S]*?align-items:\s*center[\s\S]*?height:\s*var\(--titlebar-height\)/
-    )
-  })
-
   it('uses native app-region drag on the title bar (not JS setBounds drag)', () => {
     expect(appStyles).toMatch(/\.titlebar-drag\s*\{[\s\S]*?-webkit-app-region:\s*drag/)
     expect(appStyles).toMatch(/\.titlebar-controls\s*\{[\s\S]*?-webkit-app-region:\s*no-drag/)

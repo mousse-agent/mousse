@@ -38,6 +38,8 @@ interface MousseIdState {
   busy: boolean
   error: string
   refresh: () => Promise<void>
+  /** Reads the account's device count from Mousse ID; the status itself does not carry it. */
+  loadDevices: () => Promise<void>
   signIn: () => Promise<SignInStart>
   cancelSignIn: () => void
   signOut: () => Promise<void>
@@ -65,6 +67,13 @@ export const mousseIdAvailable = (state: Pick<MousseIdState, 'runtimeOrigin'>): 
 export function mousseIdName(plus?: PlusStatus): string {
   const local = plus?.email?.split('@')[0]?.trim()
   return local || 'Mousse ID'
+}
+
+/** "3 of 5 devices", or nothing until Mousse ID has reported the count. */
+export function devicesLine(plus?: PlusStatus): string | undefined {
+  const devices = plus?.devices
+  if (!plus?.connected || !devices) return undefined
+  return `${devices.used} of ${devices.limit} ${devices.limit === 1 ? 'device' : 'devices'}`
 }
 
 let current: { controller: AbortController; callbackId?: string } | undefined
@@ -118,7 +127,12 @@ export const useMousseIdStore = create<MousseIdState>((set, get) => ({
           request<NetStatus>('net.status'),
           mousseIdAvailable(get()) ? request<PlusStatus>('net.plus.status') : undefined
         ])
-        if (useAppStore.getState().profileId === profileId) set({ net, plus, loaded: true })
+        if (useAppStore.getState().profileId === profileId) {
+          // The device count comes from loadDevices; keep it for the same account until it is read again.
+          const before = get().plus
+          const keep = plus?.connected && before?.devices && before.accountId === plus.accountId
+          set({ net, plus: keep ? { ...plus, devices: before.devices } : plus, loaded: true })
+        }
       } catch {
         if (useAppStore.getState().profileId === profileId) set({ loaded: true })
       } finally {
@@ -126,6 +140,18 @@ export const useMousseIdStore = create<MousseIdState>((set, get) => ({
       }
     })()
     return entry.promise
+  },
+
+  loadDevices: async () => {
+    const profileId = useAppStore.getState().profileId
+    if (!get().plus?.connected) return
+    try {
+      const { devices } = await request<PlusStatus>('net.plus.inventory')
+      const plus = get().plus
+      if (devices && plus?.connected && get().profileId === profileId) set({ plus: { ...plus, devices } })
+    } catch {
+      // The count is a nicety: an unreachable or older service just leaves the line out.
+    }
   },
 
   signIn: async () => {
