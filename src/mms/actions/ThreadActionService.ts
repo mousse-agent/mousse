@@ -32,7 +32,17 @@ export interface RunThreadActionOptions {
   /** Compare under the owning mutation lock before changing Git or metadata. */
   expectedJournalRevision?: number
   signal?: AbortSignal
+  /** Only for `runCheckpointedAction`; defaults to `sweep`. */
+  onFailure?: ActionFailurePolicy
 }
+
+/**
+ * What a checkpointed action does when its mutation throws. `sweep` (turns) checkpoints whatever
+ * the failure left behind. `record` (a user's own Git commit) leaves the index and tree exactly as
+ * they were and records the failed action with no commits, so a hook that rejected the commit is
+ * never bypassed by a `--no-verify` checkpoint.
+ */
+export type ActionFailurePolicy = 'sweep' | 'record'
 
 export { IN_PROGRESS_GIT_MARKERS }
 
@@ -56,7 +66,7 @@ export class StaleThreadActionRevisionError extends AppError {
 
 export class ActionExecutionError extends Error {
   constructor(readonly action: ThreadAction, cause: unknown) {
-    super(cause instanceof Error ? cause.message : String(cause))
+    super(cause instanceof Error ? cause.message : String(cause), { cause })
     this.name = 'ActionExecutionError'
   }
 }
@@ -224,12 +234,18 @@ export class ThreadActionService {
           operationId: action.id,
           operationType: 'action-checkpoint',
           state: 'running',
-          expectedPreState: { startSha, branch: git(options.workspacePath, ['branch', '--show-current']) }
+          expectedPreState: { startSha, branch: git(options.workspacePath, ['branch', '--show-current']) },
+          // Recovery reads the policy from here: after a restart nothing else says how this action may end.
+          details: { action: structuredClone(action), failurePolicy: options.onFailure ?? 'sweep' }
         })
         let result: T
         try {
           result = await mutate()
         } catch (error) {
+          if (options.onFailure === 'record') {
+            this.finishRecordedFailure(options, action, actions, startSha)
+            throw new ActionExecutionError(action, error)
+          }
           let checkpointComplete = false
           try {
             this.checkpoint(options.workspacePath, action, 'failed')
@@ -265,6 +281,46 @@ export class ThreadActionService {
     )
   }
 
+  /**
+   * A `record` action whose mutation threw. With HEAD where it started the action ends `failed` with
+   * no commits and the index and tree stay as the user had them. With HEAD moved the outcome is not
+   * known, so the journal asks for recovery; nothing is swept either way.
+   */
+  private finishRecordedFailure(options: RunThreadActionOptions, action: ThreadAction, actions: ThreadAction[], startSha: string): void {
+    try {
+      const head = git(options.workspacePath, ['rev-parse', 'HEAD'])
+      if (head !== startSha) {
+        action.state = 'failed'
+        this.replace(actions)
+        this.journal.append({ operationId: action.id, operationType: 'action-checkpoint', state: 'recovery_required', details: { actionState: 'failed', startSha, failurePolicy: 'record', error: 'HEAD moved while the action failed' } })
+        return
+      }
+      this.recordWithoutCommits(options.workspacePath, action)
+      this.replace(actions)
+      this.appendCheckpointCompleted(action, 'failed')
+    } catch (recordError) {
+      // The mutation's own error is what the caller needs; recovery finishes the bookkeeping.
+      this.journal.append({ operationId: action.id, operationType: 'action-checkpoint', state: 'recovery_required', details: { actionState: 'failed', startSha, failurePolicy: 'record', error: String(recordError) } })
+    }
+  }
+
+  /** Finishes `action` as failed with a receipt whose before and after are the same commit, so `headSha` and `generation` stay consistent. */
+  private recordWithoutCommits(workspacePath: string, action: ThreadAction): void {
+    const top = git(workspacePath, ['rev-parse', '--show-toplevel'])
+    action.endSha = action.startSha
+    action.commits = []
+    action.changedPaths = []
+    action.state = 'failed'
+    action.completedAt = new Date().toISOString()
+    const receipt = new ChangeReceiptService(this.threadDirectory).record(top, {
+      operationId: action.id, kind: 'checkpoint', actor: action.actor ?? { kind: 'main' },
+      actionId: action.id, turnId: action.turnId, runId: action.runId,
+      beforeSha: action.startSha, afterSha: action.startSha, introducedCommits: [], contributions: [],
+      externalEffects: action.externalEffects
+    })
+    action.receiptId = receipt.id
+  }
+
   /** Recover an interrupted writer as captured code, never replay its model/tools. */
   async recoverPending(workspacePath: string, heldThreadLease?: ThreadLeaseHandle): Promise<void> {
     return withGitMutationLocks(this.threadDirectory, workspacePath, 'checkpoint-recovery', async () => {
@@ -278,18 +334,37 @@ export class ThreadActionService {
         if (!action) throw new Error('Interrupted checkpoint has no durable action boundary.')
         action = structuredClone(action)
         const receipt = receipts.list().find((item) => item.operationId === entry.operationId)
-        const state = saved?.actionState ?? 'stopped'
+        let state = saved?.actionState ?? 'stopped'
+        // A user's own commit never ends in a sweep: its failure policy was written with the action.
+        const recordsFailure = history.some((item) => (item.details as { failurePolicy?: ActionFailurePolicy } | undefined)?.failurePolicy === 'record')
+        const head = git(workspacePath, ['rev-parse', 'HEAD'])
+        if (recordsFailure && receipt && receipt.beforeSha === receipt.afterSha) state = 'failed'
         if (receipt) {
-          if (git(workspacePath, ['rev-parse', 'HEAD']) !== receipt.afterSha) throw new Error('Checkpoint recovery HEAD does not match the receipt.')
-          requireClean(workspacePath, 'Thread workspace')
+          if (head !== receipt.afterSha) throw new Error('Checkpoint recovery HEAD does not match the receipt.')
+          // A rejected commit leaves the user's files in place on purpose, so there is nothing to require clean.
+          if (!(recordsFailure && receipt.beforeSha === receipt.afterSha)) requireClean(workspacePath, 'Thread workspace')
           const { id: _id, workspaceId: _workspaceId, generation: _generation, retainedRefs: _refs, createdAt: _createdAt, ...input } = receipt
           receipts.record(workspacePath, input)
           action.receiptId = receipt.id; action.endSha = receipt.afterSha; action.commits = receipt.introducedCommits
           action.changedPaths = changedPaths(workspacePath, action.startSha, action.endSha)
           action.externalEffects = receipt.externalEffects
           action.state = state; action.completedAt = receipt.createdAt
+        } else if (recordsFailure && head === action.startSha) {
+          // The commit never landed. Index and tree stay exactly as the user left them.
+          this.recordWithoutCommits(workspacePath, action)
+          state = 'failed'
         } else {
           if (!tryGit(workspacePath, ['merge-base', '--is-ancestor', action.startSha, 'HEAD']).ok) throw new Error('Interrupted writer HEAD diverged from its recorded start.')
+          if (recordsFailure) {
+            // HEAD moved: the commit landed and the process ended before its receipt. A clean tree
+            // means the checkpoint only records it; edits a hook left behind need the user's decision.
+            const dirty = tryGit(workspacePath, ['status', '--porcelain'])
+            if (!dirty.ok || dirty.stdout) {
+              if (entry.state !== 'recovery_required') this.journal.append({ operationId: entry.operationId, operationType: entry.operationType, state: 'recovery_required', details: { actionState: 'completed', startSha: action.startSha, failurePolicy: 'record', error: 'The commit landed with files still changed' } })
+              throw new Error('Interrupted commit needs recovery: it landed and the workspace still has uncommitted changes.')
+            }
+            state = 'completed'
+          }
           this.checkpoint(workspacePath, action, state)
         }
         const index = all.findIndex((item) => item.id === action.id)
