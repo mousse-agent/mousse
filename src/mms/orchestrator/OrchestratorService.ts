@@ -56,7 +56,7 @@ import { QuickActionTools } from './QuickActionTools'
 import { WebTools } from './WebTools'
 import { stableStringify } from '../run/json'
 import { closeStaleActivity, cutOffActivityOf, formatRestartNote } from '../run/restartNote'
-import { createHarnessGateway, PI_DRIVER_ID, type AdapterHost, type ChildTurnPolicy, type HarnessGateway, type ProviderMetrics, type RecoveredContext, type ResolvedTurnSelection, type TurnAppContext, type TurnControl, type TurnInput, type TurnSink } from '../harness/gateway'
+import { createHarnessGateway, PI_DRIVER_ID, type AdapterHost, type BindInput, type ChildTurnPolicy, type HarnessGateway, type ProviderMetrics, type RecoveredContext, type ResolvedTurnSelection, type TurnAppContext, type TurnControl, type TurnInput, type TurnSink } from '../harness/gateway'
 import { piDriver } from '../harness/drivers/pi'
 import { contextGauge, threadTurnOrigin } from '../harness/policy'
 import type { BotThreads } from '../../shared/bots/personal/authority'
@@ -105,6 +105,7 @@ import {
   type OrchestratorResponse,
   type OrchestratorSendInput,
   type QueuedMessage,
+  type Thread,
   type TurnPhase,
   type TurnState,
   type TurnStateSnapshot,
@@ -112,6 +113,15 @@ import {
   type UserQuestionAnswers
 } from '../../shared/types'
 import { isDefaultThreadName } from '../../shared/threadTitle'
+import {
+  buildPermissionModeChangeNotice,
+  getLastUserPermissionMode,
+  isStricter,
+  narrowPermissionMode,
+  normalizePermissionMode,
+  type PermissionMode
+} from '../../shared/permissionMode'
+import { describeApprovalRefusal, type Answerer } from '../run/approvalRights'
 import { allowsOrchestrationActions, buildModeChangeNotice, chatModeEquals, getChatModeLabel, getLastUserChatMode, normalizeChatMode } from '../../shared/chatMode'
 import { AgentRegistry } from '../agents/AgentRegistry'
 import { TaskQueue } from '../tasks/TaskQueue'
@@ -375,6 +385,18 @@ export interface OrchestratorSendOptions {
   acknowledgeUncertain?: boolean
   /** A follow-up on a subagent (`continue_subagent`): the run and its delegation row are written together. */
   delegation?: SendDelegation
+  /**
+   * Internal, daemon-only (never a field of the protocol `OrchestratorSendRequest`): a mode this
+   * turn must not exceed. Applied as `narrowPermissionMode(ceiling, thread mode, option)`, so it
+   * can only tighten (a scheduled job runs its turn in the mode the job chose).
+   */
+  permissionMode?: PermissionMode
+  /**
+   * Who sends: the user through a client (the default), or an agent. A new message denies the
+   * thread's pending approvals, so the sender must be allowed to answer them
+   * (`canAnswerApproval`); one that is not leaves them pending and its message queues.
+   */
+  actor?: Answerer
 }
 
 /** What `OrchestratorService.stopThread` did: `ok` is true when anything was running or waiting. */
@@ -424,6 +446,8 @@ interface TurnStartRequest {
   inboxIds?: string[]
   /** The subagent results the turn's message delivers. */
   subagentNotice?: SubagentNoticeItem[]
+  /** A mode the turn must not exceed (`OrchestratorSendOptions.permissionMode`). */
+  permissionMode?: PermissionMode
 }
 
 /** Payload of a `turn.start` effect (SPEC §12.2). */
@@ -926,6 +950,14 @@ export class OrchestratorService extends EventEmitter {
       shellPath: async () => ({ entries: [], source: 'failed' })
     })
     this.questions = runtime?.questions ?? defaultUserQuestionService
+    // `canAnswerApproval` finds an approval's thread parent through the Run Engine's lineage.
+    this.questions.setLineageSource((threadId) => {
+      try {
+        return this.runEngine?.delegations.getLineage(threadId) ?? null
+      } catch {
+        return null
+      }
+    })
     this.modeRegistry = runtime?.modeRegistry ?? defaultModeRegistry
     // Seed unbound session registries (tests / legacy inject shared instances).
     this.boundSession.agents = agents
@@ -1816,7 +1848,9 @@ export class OrchestratorService extends EventEmitter {
       readOnlyThread: (threadId) => this.isReadOnlyChild(threadId),
       // The ceiling the thread's delegations gave it: a Plan turn narrows only its own calls.
       threadCeiling: (threadId) => this.modeCeilingFor(threadId, 'agent'),
-      awaitLiveRun: (threadId) => this.continuationGate(threadId)
+      awaitLiveRun: (threadId) => this.continuationGate(threadId),
+      permissionModeFor: (runId) => this.runPermissionMode(runId),
+      askApproval: (threadId, questions, options) => this.questions.requestAnswers(questions, threadId, options)
     }
   }
 
@@ -1848,7 +1882,8 @@ export class OrchestratorService extends EventEmitter {
         suppressAutoQueueDrain: payload.suppressAutoQueueDrain,
         runId: payload.runId,
         admissionHeld,
-        subagentNotice: payload.subagentNotice
+        subagentNotice: payload.subagentNotice,
+        ...(payload.permissionMode ? { permissionMode: payload.permissionMode } : {})
       }
     ))
     const runId = payload.runId
@@ -1984,7 +2019,8 @@ export class OrchestratorService extends EventEmitter {
           runId: payload.runId,
           admissionHeld: payload.admissionHeld,
           externalSignal: signal,
-          subagentNotice: payload.subagentNotice
+          subagentNotice: payload.subagentNotice,
+          ...(payload.permissionMode ? { permissionMode: payload.permissionMode } : {})
         }
       )
       entry?.resolve(response)
@@ -2199,6 +2235,105 @@ export class OrchestratorService extends EventEmitter {
     }
   }
 
+  /** The mode a thread was set to, else the profile default. */
+  private storedPermissionMode(threadId: string): PermissionMode {
+    return normalizePermissionMode(this.threadStore?.getThread(threadId)?.permissionMode ?? this.settingsStore.get().permissions.defaultMode)
+  }
+
+  /**
+   * The narrowest permission mode on the thread's subagent lineage above it (each ancestor's own
+   * mode, not only its parent's, so tightening a grandparent narrows the grandchild on its next
+   * turn); `full` for a thread that is nobody's subagent. A fork starts a lineage of its own: it is
+   * the user's thread, set from the source's mode. A lineage that cannot be read asks.
+   */
+  permissionCeilingFor(threadId: string): PermissionMode {
+    const engine = this.runEngine
+    if (!engine) return 'full'
+    let ceiling: PermissionMode = 'full'
+    const seen = new Set([threadId])
+    try {
+      let lineage = engine.delegations.getLineage(threadId)
+      while (lineage && lineage.relationship === 'subagent' && !seen.has(lineage.parentThreadId)) {
+        const parentId = lineage.parentThreadId
+        seen.add(parentId)
+        ceiling = narrowPermissionMode(ceiling, this.storedPermissionMode(parentId))
+        lineage = engine.delegations.getLineage(parentId)
+      }
+    } catch (error) {
+      console.warn('permission ceiling could not be read; asking', { threadId, error: error instanceof Error ? error.message : String(error) })
+      return 'ask'
+    }
+    return ceiling
+  }
+
+  /**
+   * The mode a new turn of the thread asks for: its own, never above its lineage's ceiling, and
+   * tightened further by `override` (the internal send option a scheduled job uses; it can only tighten).
+   */
+  requestedPermissionMode(threadId: string, override?: PermissionMode): PermissionMode {
+    return narrowPermissionMode(this.permissionCeilingFor(threadId), this.storedPermissionMode(threadId), override)
+  }
+
+  /**
+   * Sets a thread's permission mode. A subagent's mode never exceeds its lineage's ceiling. Applies
+   * from the next turn: a running turn and a pending approval are not touched.
+   */
+  setThreadPermissionMode(threadId: string, mode: PermissionMode): Thread {
+    const store = this.threadStore
+    if (!store) throw new Error('Permission modes need the thread store')
+    const thread = store.getThread(threadId)
+    if (!thread) throw new DomainRpcError('thread_not_found', 'Thread not found', { threadId })
+    const ceiling = this.permissionCeilingFor(threadId)
+    if (isStricter(ceiling, mode))
+      throw new DomainRpcError('permission_mode_above_ceiling', `This subagent cannot run above ${ceiling === 'ask' ? 'Ask before acting' : 'Auto-accept edits'}: a thread it belongs to is set to it.`, { threadId, ceiling })
+    const previous = thread.permissionMode
+    const updated = store.updateThreadMeta(threadId, { permissionMode: mode }, { touch: false })
+    try {
+      this.runEngine?.store.appendEvent({ threadId, type: 'thread.permission_mode', payload: { from: previous ?? null, to: mode, ceiling } })
+    } catch (error) {
+      console.warn('permission mode change could not be recorded as an event', { threadId, error: error instanceof Error ? error.message : String(error) })
+    }
+    return updated
+  }
+
+  /**
+   * The permission mode a run enforces, read from its attempt's binding (never from a mode ceiling).
+   * A binding recorded before permission modes, and a run with no binding, read as `ask`.
+   */
+  runPermissionMode(runId: string): PermissionMode {
+    let binding: ExecutionBinding | undefined
+    try {
+      binding = this.runEngine?.bindingForRun(runId)
+    } catch {
+      binding = undefined
+    }
+    if (!binding) return 'ask'
+    return binding.policy.permissionMode ?? 'ask'
+  }
+
+  /**
+   * The mode a new turn will run in, for the notice and the stamp on its message. A run that
+   * already has a binding (a retry or recovery) keeps the binding's; a refused or unreadable
+   * selection reads as the requested mode (the turn itself fails at admission).
+   */
+  private previewTurnPermission(session: ThreadSession, mode: ChatMode, opts?: { runId?: string; modelOverride?: ModelOverride; permissionMode?: PermissionMode }): PermissionMode {
+    const requested = this.requestedPermissionMode(session.threadId, opts?.permissionMode)
+    try {
+      const bound = opts?.runId ? this.runEngine?.bindingForRun(opts.runId) : undefined
+      if (bound) return bound.policy.permissionMode ?? 'accept_edits'
+      const explicit = opts?.modelOverride ?? session.modelOverride
+      const instance = this.harness.resolveStored(this.turnSelection(session, mode, opts?.modelOverride), {
+        purpose: 'turn',
+        scope: this.threadScope(session.threadId),
+        unselectedDefault: !explicit
+      })
+      const effective = this.harness.previewPermissionMode(instance, requested, session.projectCwd)
+      return effective.refused ? requested : effective.mode
+    } catch {
+      return requested
+    }
+  }
+
   /** The instance serving the thread's selected model, disabled ones included (work already running). */
   private resolvedForThread(threadId: string): ResolvedTurnSelection {
     const session = this.boundSession.threadId === threadId ? this.boundSession : this.sessions.get(threadId)
@@ -2224,10 +2359,10 @@ export class OrchestratorService extends EventEmitter {
    * run; `resolved` was built from it), else a new one from the resolved selection. Either way it
    * is recorded on the active attempt, so a replacement attempt keeps its run's binding.
    */
-  private async bindTurn(runId: string | undefined, existing: ExecutionBinding | undefined, resolved: ResolvedTurnSelection, mode: ChatMode, origin: () => TurnOrigin): Promise<ExecutionBinding> {
+  private async bindTurn(runId: string | undefined, existing: ExecutionBinding | undefined, resolved: ResolvedTurnSelection, mode: ChatMode, origin: () => TurnOrigin, permission: Pick<BindInput, 'permissionMode' | 'cwd'>): Promise<ExecutionBinding> {
     const engine = this.runEngine
     // The origin is read only for a new binding: a retry or restart keeps the one its run recorded.
-    const binding = existing ?? await this.harness.bind(resolved, { mode, origin: origin() })
+    const binding = existing ?? await this.harness.bind(resolved, { mode, origin: origin(), ...permission })
     if (runId && engine) {
       try {
         return engine.recordExecutionBinding(runId, binding)
@@ -2291,6 +2426,11 @@ export class OrchestratorService extends EventEmitter {
       lineage: lineageForChild(parentThread),
       ownerThreadId: parentThread.id,
       workspaceBinding: { policy: request.workspace === 'shared' ? 'shared' : 'isolated', ...(shared ? { sharedPath: shared.path } : {}) },
+      // A child starts at the narrowest of its lineage's ceiling, the parent's saved mode and the mode
+      // the delegating run actually enforces (its binding: a provider may have lowered the saved
+      // mode, and a per-turn option may have tightened it). It never starts wider than the run that
+      // delegated it, and it keeps that mode for its later turns and its own subagents.
+      permissionMode: narrowPermissionMode(this.requestedPermissionMode(request.parentThreadId), this.runPermissionMode(request.parentRunId)),
       ...(model ? { modelOverride: model } : {})
     })
     const session = this.getOrCreateSession(child.id)
@@ -2394,6 +2534,12 @@ export class OrchestratorService extends EventEmitter {
       sourceThread.worktreeEnabled === undefined ? undefined : { worktreeEnabled: sourceThread.worktreeEnabled })
     const override = this.harness.instanceMap.migrate(source.modelOverride ?? sourceThread.modelOverride)
     if (override) this.threadStore.updateThreadMeta(fork.id, { modelOverride: structuredClone(override) })
+    // The fork carries the mode the source may run in now: its own, narrowed by its lineage's ceiling
+    // (a fork starts a lineage of its own, so a stale wider mode on a narrowed subagent must not
+    // come back). A source that never chose a mode and has no ceiling follows the profile default.
+    const ceiling = this.permissionCeilingFor(creation.sourceThreadId)
+    if (sourceThread.permissionMode || ceiling !== 'full')
+      this.threadStore.updateThreadMeta(fork.id, { permissionMode: this.requestedPermissionMode(creation.sourceThreadId) })
     const session = this.getOrCreateSession(fork.id)
     session.modelOverride = override ? structuredClone(override) : undefined
     return { threadId: fork.id }
@@ -2715,7 +2861,7 @@ export class OrchestratorService extends EventEmitter {
     return {
       delegateTask,
       continueSubagent,
-      answerSubagent: (input) => this.answerSubagent(parentThreadId, input),
+      answerSubagent: (input) => this.answerSubagent(parentThreadId, parentRunId, input),
       taskStatus: (ref) => this.taskStatus(parentThreadId, ref),
       taskCancel: (ref) => this.taskCancel(parentThreadId, ref),
       listDelegations,
@@ -2953,7 +3099,7 @@ export class OrchestratorService extends EventEmitter {
    * `answer_subagent`: the answer of a question one of the caller's subagents asked, in the shape the
    * GUI answers with. The request must be pending on that subagent's thread.
    */
-  private answerSubagent(parentThreadId: string, input: { subagent: string; requestId: string; answers: Record<string, string | string[]> }) {
+  private answerSubagent(parentThreadId: string, parentRunId: string, input: { subagent: string; requestId: string; answers: Record<string, string | string[]> }) {
     const target = this.resolveSubagentTarget(parentThreadId, input.subagent)
     if (!target.ok) return { answered: false as const, ...target.refusal }
     const pending = this.questions.getPending(input.requestId)
@@ -2963,8 +3109,15 @@ export class OrchestratorService extends EventEmitter {
         code: 'no_such_question' as const,
         message: `"${target.title}" has no pending question ${input.requestId}; it may have been answered or dismissed already.`
       }
-    if (!this.questions.submitAnswers(input.requestId, input.answers))
-      return { answered: false as const, code: 'no_such_question' as const, message: `Question ${input.requestId} was answered or dismissed first.` }
+    // An approval (a command, a file change, a tool) is answered only within the caller's own
+    // permission mode; `settle` applies `canAnswerApproval`. A plain question is answered as before.
+    const settled = this.questions.settle(input.requestId, input.answers, { kind: 'agent', threadId: parentThreadId, runId: parentRunId, permissionMode: this.runPermissionMode(parentRunId) })
+    if (!settled.ok) {
+      if (settled.reason === 'unknown')
+        return { answered: false as const, code: 'no_such_question' as const, message: `Question ${input.requestId} was answered or dismissed first.` }
+      const code = settled.reason === 'answerer_required' ? 'not_parent' : settled.reason
+      return { answered: false as const, code, message: `"${target.title}" asked for an approval you cannot give. ${describeApprovalRefusal(code)}` }
+    }
     // As in the GUI: the model gets the answers as the tool result; the transcript shows what was said.
     this.recordQuestionResponseMessage(target.childThreadId, formatQuestionAnswersMessage(pending.questions, input.answers))
     return { answered: true as const, subagent: target.title, childThreadId: target.childThreadId, requestId: input.requestId }
@@ -3949,7 +4102,7 @@ export class OrchestratorService extends EventEmitter {
   enqueueForThread(
     threadId: string,
     input: OrchestratorSendInput,
-    opts?: { source?: string; intent?: 'normal' | 'steer'; internal?: boolean; runId?: string; inboxIds?: string[]; subagentNotice?: SubagentNoticeItem[]; stopGeneration?: number }
+    opts?: { source?: string; intent?: 'normal' | 'steer'; internal?: boolean; runId?: string; inboxIds?: string[]; subagentNotice?: SubagentNoticeItem[]; stopGeneration?: number; permissionMode?: PermissionMode }
   ): QueuedMessage {
     if (this.threadStore && !this.threadStore.getThread(threadId)) {
       throw new QueueValidationError(`Thread not found: ${threadId}`)
@@ -3981,7 +4134,8 @@ export class OrchestratorService extends EventEmitter {
           runId: opts?.runId,
           inboxIds: opts?.inboxIds,
           subagentNotice: opts?.subagentNotice,
-          stopGeneration
+          stopGeneration,
+          permissionMode: opts?.permissionMode
         })
         item = result.item
         return result.items
@@ -4002,7 +4156,8 @@ export class OrchestratorService extends EventEmitter {
       runId: opts?.runId,
       inboxIds: opts?.inboxIds,
       subagentNotice: opts?.subagentNotice,
-      stopGeneration
+      stopGeneration,
+      permissionMode: opts?.permissionMode
     })
     session.queue = result.items
     item = result.item
@@ -4625,7 +4780,8 @@ export class OrchestratorService extends EventEmitter {
     queueItemId?: string,
     mode?: ChatMode,
     workflowRun?: WorkflowChatRun,
-    subagentNotice?: SubagentNoticeItem[]
+    subagentNotice?: SubagentNoticeItem[],
+    permissionMode?: PermissionMode
   ): { claimAccepted: boolean } {
     const messagesBefore = this.messages.length
     const nativeBefore = structuredClone(this.nativeContext)
@@ -4648,6 +4804,23 @@ export class OrchestratorService extends EventEmitter {
         }
       }
     }
+    // The same for the permission mode: the notice and the stamp carry the mode the turn runs in
+    // (the effective one), so a chosen mode the instance cannot enforce produces no notice and the
+    // next comparison is stable.
+    let permissionNotice: ChatMessage | null = null
+    if (displayUserMessage && permissionMode !== undefined) {
+      const previousPermission = getLastUserPermissionMode(this.messages)
+      if (previousPermission !== undefined && previousPermission !== permissionMode) {
+        permissionNotice = {
+          id: uuidv4(),
+          role: 'user',
+          content: buildPermissionModeChangeNotice(previousPermission, permissionMode),
+          timestamp: new Date().toISOString(),
+          hidden: true,
+          permissionMode
+        }
+      }
+    }
     const addedMessage: ChatMessage = {
       id: uuidv4(),
       role: 'user',
@@ -4660,13 +4833,18 @@ export class OrchestratorService extends EventEmitter {
       hidden: displayUserMessage ? undefined : true,
       ...(displayUserMessage && mode !== undefined
         ? { mode: normalizeChatMode(mode) }
-        : {})
+        : {}),
+      ...(displayUserMessage && permissionMode !== undefined ? { permissionMode } : {})
     }
     // Hidden internal inputs remain in the durable transcript for queue-claim provenance,
     // while presentation APIs and events omit them from the UI.
     if (modeNotice) {
       this.messages.push(modeNotice)
       this.nativeContext = appendNativeMessage(this.nativeContext, userMessage(modeNotice.content))
+    }
+    if (permissionNotice) {
+      this.messages.push(permissionNotice)
+      this.nativeContext = appendNativeMessage(this.nativeContext, userMessage(permissionNotice.content))
     }
     this.messages.push(addedMessage)
     this.nativeContext = appendNativeMessage(this.nativeContext, userMessage(userContent, images))
@@ -5232,7 +5410,9 @@ export class OrchestratorService extends EventEmitter {
 
     // A follow-up from a parent (`continue_subagent`) never answers the subagent's question for it.
     if (!opts?.forceQueue && !opts?.delegation) {
-      const preempted = this.questions.autoRejectPendingForThread(threadId)
+      // The sender denies the approvals only when it may answer them; otherwise they stay pending
+      // and the message queues behind the turn.
+      const preempted = this.questions.autoRejectPendingForThread(threadId, opts?.actor)
       if (preempted.answered + preempted.dismissed > 0 && session.isTurnRunning()) {
         this.abortActiveTurn(threadId)
         await this.waitForTurnToSettle(session)
@@ -5253,7 +5433,7 @@ export class OrchestratorService extends EventEmitter {
       })()
 
     if (session.isTurnRunning() || opts?.forceQueue || externalLease) {
-      const item = this.enqueueForThread(threadId, input, { source: opts?.source, runId: run?.runId })
+      const item = this.enqueueForThread(threadId, input, { source: opts?.source, runId: run?.runId, permissionMode: opts?.permissionMode })
       return {
         message: '',
         actions: [],
@@ -5271,7 +5451,8 @@ export class OrchestratorService extends EventEmitter {
         input,
         reuseLastUser,
         displayUserMessage: opts?.source !== 'wake',
-        source: opts?.source
+        source: opts?.source,
+        ...(opts?.permissionMode ? { permissionMode: opts.permissionMode } : {})
       })
       if (opts?.awaitMode === 'ack') {
         pending.catch(() => undefined)
@@ -5280,7 +5461,7 @@ export class OrchestratorService extends EventEmitter {
       return { ...(await pending), ...run }
     }
 
-    const response = await this.runTurnOnSession(session, input, reuseLastUser, opts?.source !== 'wake', { source: opts?.source, runId: run?.runId })
+    const response = await this.runTurnOnSession(session, input, reuseLastUser, opts?.source !== 'wake', { source: opts?.source, runId: run?.runId, ...(opts?.permissionMode ? { permissionMode: opts.permissionMode } : {}) })
     return run ? { ...response, ...run } : response
   }
 
@@ -5326,6 +5507,10 @@ export class OrchestratorService extends EventEmitter {
         ...((() => {
           const currentMode = getLastUserChatMode(this.messages)
           return currentMode !== undefined ? { mode: currentMode } : {}
+        })()),
+        ...((() => {
+          const currentPermission = getLastUserPermissionMode(this.messages)
+          return currentPermission !== undefined ? { permissionMode: currentPermission } : {}
         })())
       }
       this.messages.push(msg)
@@ -5359,6 +5544,8 @@ export class OrchestratorService extends EventEmitter {
       subagentNotice?: SubagentNoticeItem[]
       /** The turn the provider started that this run is for (`provider-continuation`). */
       continuationId?: string
+      /** A mode this turn must not exceed (`OrchestratorSendOptions.permissionMode`). */
+      permissionMode?: PermissionMode
     }
   ): Promise<OrchestratorResponse> {
     // Admission is synchronous, before any await, so a concurrent send always observes it.
@@ -5514,6 +5701,7 @@ export class OrchestratorService extends EventEmitter {
       runId?: string
       subagentNotice?: SubagentNoticeItem[]
       continuationId?: string
+      permissionMode?: PermissionMode
     }
   ): Promise<OrchestratorResponse> {
     const session = this.session
@@ -5558,7 +5746,7 @@ export class OrchestratorService extends EventEmitter {
               queueItem: released ?? undefined
             }
           }
-          const item = this.enqueueForThread(session.threadId, input, { source: 'lease-race', runId: opts?.runId })
+          const item = this.enqueueForThread(session.threadId, input, { source: 'lease-race', runId: opts?.runId, permissionMode: opts?.permissionMode })
           return {
             message: '',
             actions: [],
@@ -5673,6 +5861,9 @@ export class OrchestratorService extends EventEmitter {
       void this.generateInitialThreadTitle(session, userContent).catch(() => {})
     }
 
+    // The mode the turn runs in is known before its message is admitted, so a change reaches the
+    // agent with that message and the message records the mode.
+    const turnPermission = !reuseLastUser && displayUserMessage ? this.previewTurnPermission(session, mode, opts) : undefined
     try {
       if (!reuseLastUser) {
         // Automatic orchestration wakes belong in model context, not the user-facing timeline.
@@ -5686,7 +5877,8 @@ export class OrchestratorService extends EventEmitter {
             queueItemId,
             mode,
             undefined,
-            opts?.subagentNotice
+            opts?.subagentNotice,
+            turnPermission
           )
           claimAccepted = true
           this.notifyUserInputAccepted(session.threadId, opts?.onUserInputAccepted)
@@ -5935,7 +6127,10 @@ export class OrchestratorService extends EventEmitter {
         if (refusal) throw new AppError({ code: refusal.code, message: refusal.message, errorInfo: { category: 'unavailable', retryable: false } })
       }
       // The attempt's immutable binding; a retry of the same run keeps the one it already has.
-      const binding = await this.bindTurn(engineRunId, runBinding, instance, mode, () => this.turnOrigin(session.threadId, request.workflowInvocationId))
+      const binding = await this.bindTurn(engineRunId, runBinding, instance, mode, () => this.turnOrigin(session.threadId, request.workflowInvocationId), {
+        permissionMode: this.requestedPermissionMode(session.threadId, opts?.permissionMode),
+        cwd: session.projectCwd
+      })
       // A transcript-native runtime (the pi loop) is sent Mousse's transcript and tools, so Mousse
       // keeps that transcript within the window before the turn. A prompt-injected runtime owns its
       // loop, context and tools and receives prior turns as a prompt preamble.
@@ -5998,6 +6193,9 @@ export class OrchestratorService extends EventEmitter {
         llmProvider: instance.llmProvider,
         modelPinned: Boolean(modelOverride),
         mode,
+        // The mode the instance can enforce, recorded on the binding (a binding from before
+        // permission modes reads as `accept_edits`).
+        permissionMode: binding.policy.permissionMode ?? 'ask',
         child: this.childTurnPolicy(session),
         ...(opts?.source === 'provider-continuation' ? { continuation: true, continuationId: opts.continuationId } : {}),
         prompt: handoffs ? handoffs.prompt(userContent) : userContent,
@@ -6715,6 +6913,7 @@ export class OrchestratorService extends EventEmitter {
       source: queued.source,
       suppressAutoQueueDrain: managedByStartup,
       admissionHeld,
+      ...(queued.permissionMode ? { permissionMode: queued.permissionMode } : {}),
       ...(queued.inboxIds?.length ? { inboxIds: queued.inboxIds, subagentNotice: queued.subagentNotice } : {})
     })
     let started: Promise<OrchestratorResponse>

@@ -5,6 +5,8 @@ import { join, resolve as resolvePath } from 'node:path'
 import { promisify } from 'node:util'
 import { isRetryableAssistantError } from '@earendil-works/pi-ai'
 import { AppError } from '../../../shared/errors'
+import { piPermissionKey, piToolAction } from '../../../shared/permissionKeys'
+import { permissionModeAllows } from '../../../shared/permissionMode'
 import { harnessAppError } from '../../../shared/harness/types'
 import { parseThinkingSuffixFromModelId } from '../../../shared/modelVariants'
 import { atomicWriteFileSync, atomicWriteJsonSync } from '../../data/AtomicFs'
@@ -1077,6 +1079,13 @@ export class PiRpcEngine implements ProviderAdapter {
       // Stopped while the approval was pending: nothing runs.
       if (thread.turn !== turn || (turn.phase as PiTurn['phase']) === 'stopping') return { allow: false, reason: GATE_REFUSALS.denied }
     }
+    // The thread's permission mode: a command (and, under Ask, an edit) asks the user first. A definition
+    // run is held to its own grants above and never asks a person.
+    if (!definition && builtin) {
+      const refusal = await this.askPermission(turn, request.toolName, input)
+      if (refusal) return refusal
+      if (thread.turn !== turn || (turn.phase as PiTurn['phase']) === 'stopping') return { allow: false, reason: GATE_REFUSALS.denied }
+    }
     const decision = await turn.episode.authorize(request.toolCallId, kind)
     if (!decision.allow) return decision
     const counted = turn.host.budget?.toolCall() ?? { ok: true }
@@ -1089,6 +1098,35 @@ export class PiRpcEngine implements ProviderAdapter {
     // instead of asking for approval a second time.
     if (definition && !builtin) recordAuthorizedCall(definition, { turnToken: turn.attemptToken, toolName: request.toolName, callId: request.toolCallId, args: input })
     return rewritten ? { allow: true, input: rewritten } : { allow: true }
+  }
+
+  /**
+   * Asks the user before a built-in tool the turn's permission mode does not allow without asking
+   * (`bash` under Ask and Auto-accept edits, `edit` and `write` under Ask). Null when the call may go
+   * on. A turn with no way to ask, or whose approvals are refused, denies: nothing runs unapproved.
+   */
+  private async askPermission(turn: PiTurn, toolName: string, input: Record<string, unknown>): Promise<PiGateResponse | null> {
+    const action = piToolAction(toolName)
+    if (!action || permissionModeAllows(turn.input.permissionMode, action)) return null
+    const prompter = turn.host.bridge?.permission
+    const denied = (reason: string): PiGateResponse => ({ allow: false, reason })
+    if (!prompter || prompter.approvals === 'never') return denied(`${GATE_REFUSALS.denied}: ${toolName} needs the user's approval and this turn cannot ask`)
+    const detail = typeof input.command === 'string' ? input.command : typeof input.path === 'string' ? input.path : JSON.stringify(input)
+    try {
+      const chosen = await prompter.choose({
+        threadId: turn.input.threadId,
+        title: `Allow Pi to ${action === 'command' ? 'run this command' : 'edit this file'}?\n${detail.slice(0, 4000)}`,
+        options: [
+          { optionId: 'allow', kind: 'allow_once', label: 'Allow once', scope: 'once' },
+          { optionId: 'reject', kind: 'reject_once', label: 'Reject', scope: 'once' }
+        ],
+        approval: { action, permissionKey: piPermissionKey(action) }
+      })
+      if (chosen === 'allow' && !turn.input.signal.aborted) return null
+      return denied(`The user rejected the request to ${action === 'command' ? 'run this command' : 'edit this file'}. Do not retry it unless they ask.`)
+    } catch {
+      return denied(`${GATE_REFUSALS.denied}: the user did not approve ${toolName}`)
+    }
   }
 
   async startTurn(input: TurnInput, sink: TurnSink, ctl: TurnControl, host: AdapterHost): Promise<TurnResult> {

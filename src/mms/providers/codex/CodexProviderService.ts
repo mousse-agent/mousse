@@ -65,6 +65,8 @@ import {
 } from './protocol'
 import { isUsageLimitInfo, isUsageLimitText, resetFromSnapshot } from './rateLimits'
 import { readUsageLimit, usageLimitError } from '../../orchestrator/providerErrors'
+import { normalizePermissionMode, permissionModeAllows, type PermissionMode } from '../../../shared/permissionMode'
+import { PERMISSION_KEYS } from '../../../shared/permissionKeys'
 import { codexTurnPolicy } from './childPolicy'
 import { DEFAULT_TREE_TIMING, HelperTree, RpcRefused, ThreadStatuses, TreeOff, isWakeUp, type TreePorts, type TreeTiming } from './helperTree'
 import {
@@ -300,6 +302,12 @@ export type CodexChatInput = {
   images?: ChatImageAttachment[]
   signal?: AbortSignal
   mode?: 'plan' | 'default'
+  /**
+   * The thread's permission mode for this turn; absent reads as the default (`accept_edits`). It
+   * sets Codex's approval policy and sandbox (`codexTurnPolicy`) and decides which approvals Mousse
+   * answers without asking.
+   */
+  permissionMode?: PermissionMode
   /** Set for a delegated child's turns (first and resumed); see `codexTurnPolicy`. */
   child?: ChildTurnPolicy
   /** The Mousse MCP server for this run (SPEC §15.2); null attaches none. */
@@ -525,6 +533,11 @@ class TurnRun {
   /** The run refuses tools that need approval (`approvals: 'never'`): declined, never asked. */
   get refusesApprovals(): boolean {
     return this.input.approvals === 'never'
+  }
+
+  /** The thread's permission mode this turn runs in. */
+  get permissionMode(): PermissionMode {
+    return normalizePermissionMode(this.input.permissionMode)
   }
 
   get text(): string {
@@ -1681,10 +1694,13 @@ export class CodexProviderService {
         const approval = request.params as CodexServerRequestMap['item/commandExecution/requestApproval']['params']
         if (!run || run.questionSignal.aborted) return { decision: 'cancel' } satisfies Result<'item/commandExecution/requestApproval'>
         if (run.mode === 'plan' || run.readOnlyChild || run.refusesApprovals) return { decision: 'decline' } satisfies Result<'item/commandExecution/requestApproval'>
+        // Full access never asks (Codex's own profile does not either; this is the backstop).
+        if (permissionModeAllows(run.permissionMode, 'command')) return { decision: 'accept' } satisfies Result<'item/commandExecution/requestApproval'>
         const command = approval.command ?? (run.item(approval.itemId) as { command?: string } | undefined)?.command ?? 'a command'
         const decision = await this.approve(
           run,
-          `Allow Codex to run this command?\n${command}${approval.cwd ? `\nin ${approval.cwd}` : ''}${approval.reason ? `\n${approval.reason}` : ''}`
+          `Allow Codex to run this command?\n${command}${approval.cwd ? `\nin ${approval.cwd}` : ''}${approval.reason ? `\n${approval.reason}` : ''}`,
+          'command'
         )
         return { decision } satisfies Result<'item/commandExecution/requestApproval'>
       }
@@ -1692,10 +1708,13 @@ export class CodexProviderService {
         const approval = request.params as CodexServerRequestMap['item/fileChange/requestApproval']['params']
         if (!run || run.questionSignal.aborted) return { decision: 'cancel' } satisfies Result<'item/fileChange/requestApproval'>
         if (run.mode === 'plan' || run.readOnlyChild || run.refusesApprovals) return { decision: 'decline' } satisfies Result<'item/fileChange/requestApproval'>
+        // Edits go ahead under Auto-accept edits and Full access.
+        if (permissionModeAllows(run.permissionMode, 'edit')) return { decision: 'accept' } satisfies Result<'item/fileChange/requestApproval'>
         const changes = (run.item(approval.itemId) as { changes?: Array<{ path: string }> } | undefined)?.changes ?? []
         const decision = await this.approve(
           run,
-          `Allow Codex to edit ${changes.length ? changes.map((change) => change.path).join(', ') : 'files'}?${approval.reason ? `\n${approval.reason}` : ''}`
+          `Allow Codex to edit ${changes.length ? changes.map((change) => change.path).join(', ') : 'files'}?${approval.reason ? `\n${approval.reason}` : ''}`,
+          'edit'
         )
         return { decision } satisfies Result<'item/fileChange/requestApproval'>
       }
@@ -1732,7 +1751,12 @@ export class CodexProviderService {
     }
   }
 
-  private async approve(run: TurnRun, prompt: string): Promise<'accept' | 'acceptForSession' | 'decline' | 'cancel'> {
+  /**
+   * Asks the user about a command or a file change. Mousse answers Codex with `accept` or `decline`
+   * only: Codex's own "for this session" answer is not offered, because Mousse records "Always for
+   * this thread" itself, and Codex would remember its allowance past a stricter mode.
+   */
+  private async approve(run: TurnRun, prompt: string, kind: 'command' | 'edit'): Promise<'accept' | 'decline' | 'cancel'> {
     try {
       const answer = await this.questions.requestAnswers(
         [
@@ -1741,16 +1765,25 @@ export class CodexProviderService {
             prompt,
             options: [
               { id: 'allow', label: 'Allow once' },
-              { id: 'allow_session', label: 'Allow for this session' },
               { id: 'reject', label: 'Reject' }
             ]
           }
         ],
         run.mousseThreadId,
-        { signal: run.questionSignal }
+        {
+          signal: run.questionSignal,
+          approval: {
+            action: kind,
+            permissionKey: kind === 'command' ? PERMISSION_KEYS.codexCommand : PERMISSION_KEYS.codexFileChange,
+            options: [
+              { id: 'allow', decision: 'allow', scope: 'once' },
+              { id: 'reject', decision: 'reject' }
+            ]
+          }
+        }
       )
       if (run.questionSignal.aborted) return 'cancel'
-      return answer.permission === 'allow' ? 'accept' : answer.permission === 'allow_session' ? 'acceptForSession' : 'decline'
+      return answer.permission === 'allow' ? 'accept' : 'decline'
     } catch {
       return run.questionSignal.aborted ? 'cancel' : 'decline'
     }
@@ -2055,8 +2088,11 @@ export class CodexProviderService {
     const mcpToken = input.mcp?.token ?? null
     const overrides = codexMcpConfigOverrides(input.mcp) as ThreadConfig
     const { baseId } = parseThinkingSuffixFromModelId(input.model)
-    const policy = codexTurnPolicy(input.mode ?? 'default', input.child)
-    const childKey = input.child ? (input.child.readOnly ? 'read-only' : 'child') : ''
+    const permissionMode = normalizePermissionMode(input.permissionMode)
+    const policy = codexTurnPolicy(input.mode ?? 'default', input.child, permissionMode)
+    // The policy a loaded thread was opened with: a change of child policy or permission mode reopens it
+    // (Codex applies thread overrides when it loads a thread and ignores them on a loaded one).
+    const childKey = `${input.child ? (input.child.readOnly ? 'read-only' : 'child') : ''}|${policy.approvalPolicy}|${policy.sandbox}`
     const params = {
       cwd,
       approvalPolicy: policy.approvalPolicy,
@@ -2165,7 +2201,7 @@ export class CodexProviderService {
       current.conn = conn
       this.turns.set(codexThreadId, current)
       const { baseId, effort } = parseThinkingSuffixFromModelId(input.model)
-      const policy = codexTurnPolicy(input.mode ?? 'default', input.child)
+      const policy = codexTurnPolicy(input.mode ?? 'default', input.child, current.permissionMode)
       const turnParams = {
         cwd: resolve(input.cwd),
         approvalPolicy: policy.approvalPolicy,

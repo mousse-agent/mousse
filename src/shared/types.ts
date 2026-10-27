@@ -1,6 +1,8 @@
 import type { AgentActivityItem } from './agentActivity'
 import type { ModelOverride } from './providerInstances'
 import type { ThreadPullRequestLink } from './pullRequests'
+import type { PermissionMode } from './permissionMode'
+export type { PermissionMode } from './permissionMode'
 export type { GitPullRequestInfo, GitPullRequestLookup, PullRequestCheckState } from './pullRequests'
 export type MainView = 'browser' | 'terminal' | 'files' | 'git' | 'review' | 'pullRequest' | 'documents'
 
@@ -457,6 +459,12 @@ export interface ChatMessage {
    * migration. Legacy messages omit this and are treated as `agent`.
    */
   mode?: ChatMode
+  /**
+   * Permission mode the turn ran in (the effective one) when this user turn was sent. Stored on
+   * visible user messages and silent permission-change notices so a mid-thread change is detected
+   * on later turns, including after a restart. Legacy messages omit this and read as the default.
+   */
+  permissionMode?: PermissionMode
   kind?:
     | 'message'
     | 'plan_card'
@@ -650,6 +658,8 @@ export interface QueuedMessage {
    * run. Absent for what a person queued, which a Stop never fences.
    */
   stopGeneration?: number
+  /** A mode this turn must not exceed, set by a daemon-side sender (a scheduled job); it only tightens. */
+  permissionMode?: PermissionMode
 }
 
 export interface ContextUsageCategory {
@@ -727,6 +737,8 @@ export interface Thread {
    * absent on threads saved before provider instances existed.
    */
   modelOverride?: ModelOverride
+  /** How much the agent may do without asking; absent means the profile default. */
+  permissionMode?: PermissionMode
   /**
    * Opt-in isolated git worktree for this thread. OFF by default (undefined/false
    * means run on the primary checkout). Toggleable from the new-chat input bar

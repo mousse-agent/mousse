@@ -181,6 +181,12 @@ function allRecords(
 }
 
 describe('P3 real MMS remote Bridge', () => {
+  it('never exposes a thread\'s permission mode: a remote client cannot loosen it', () => {
+    const exposed = Object.keys(BRIDGE_REMOTE_METHODS)
+    expect(exposed).not.toContain('threads.setPermissionMode')
+    expect(exposed.filter((method) => /permission/i.test(method))).toEqual([])
+  })
+
   it('maps every exposed method, denies local/secret ingress, validates before admission, and deduplicates real thread creation', async () => {
     const p = await setup(),
       { b } = await p.connect()

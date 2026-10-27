@@ -11,6 +11,7 @@ import type {
 } from '../../shared/types'
 import { DEFAULT_CHAT_MODE } from '../../shared/types'
 import { fileWorkspaceScope } from '../stores/filesStore'
+import { DEFAULT_PERMISSION_MODE, normalizePermissionMode, permissionCeilingOf, type PermissionMode } from '../../shared/permissionMode'
 import { removeInlineSkillToken } from '../../shared/channelCommands'
 import type { SkillDescriptor } from '../../shared/integrations'
 import { isTurnActivePhase } from '../../shared/types'
@@ -100,6 +101,12 @@ export function OrchestratorChat() {
   const activeThread = useAppStore((s) =>
     s.threads.find((thread) => thread.id === s.activeThreadId)
   )
+  const threads = useAppStore((s) => s.threads)
+  // The profile default, and the pick made on a blank composer before its thread exists.
+  const [defaultPermissionMode, setDefaultPermissionMode] = useState<PermissionMode>(DEFAULT_PERMISSION_MODE)
+  const [blankPermissionMode, setBlankPermissionMode] = useState<PermissionMode | undefined>(undefined)
+  const permissionMode = activeThread?.permissionMode ?? (activeThreadId ? undefined : blankPermissionMode) ?? defaultPermissionMode
+  const permissionCeiling = permissionCeilingOf(activeThread, threads, defaultPermissionMode)
   const projects = useAppStore((s) => s.projects)
   const workspaceDraft = useAppStore((s) => s.composerWorkspaceDrafts[s.activeThreadId ?? '__blank__'])
   const setComposerWorkspaceDraft = useAppStore((s) => s.setComposerWorkspaceDraft)
@@ -394,6 +401,7 @@ export function OrchestratorChat() {
       window.mousse.settings.getOptions()
     ])
     setCatalog(options.llmProviders)
+    setDefaultPermissionMode(normalizePermissionMode(settings.permissions?.defaultMode))
     const selectedModel = activeThreadModelOverride ?? settings.provider
     setSelectedLlmProvider(selectedModel.llmProvider)
     setSelectedInstanceId(selectedModel.instanceId)
@@ -803,6 +811,13 @@ export function OrchestratorChat() {
         if (!stillVisible()) return
         if (updated) useAppStore.getState().upsertThread(updated)
       }
+      // The same for a permission mode picked before the thread existed.
+      if (blankPermissionMode) {
+        const updated = await window.mousse.threads.setPermissionMode(id, blankPermissionMode)
+        if (!stillVisible()) return
+        setBlankPermissionMode(undefined)
+        if (updated) useAppStore.getState().upsertThread(updated)
+      }
     }
 
     // Clear only after we accept the send/queue path (control commands already cleared above).
@@ -864,6 +879,24 @@ export function OrchestratorChat() {
       model: modelId
     })
     if (updated) useAppStore.getState().upsertThread(updated)
+  }
+
+  // Applies from the next turn; a running turn and a pending approval keep what they were asked under.
+  const handlePermissionSelect = async (mode: PermissionMode) => {
+    if (!activeThreadId) {
+      setBlankPermissionMode(mode)
+      return
+    }
+    const current = useAppStore.getState().threads.find((t) => t.id === activeThreadId)
+    if (current) useAppStore.getState().upsertThread({ ...current, permissionMode: mode })
+    try {
+      const updated = await window.mousse.threads.setPermissionMode(activeThreadId, mode)
+      if (updated) useAppStore.getState().upsertThread(updated)
+    } catch (error) {
+      // The daemon refused (a subagent above its ceiling): show what the thread really has.
+      if (current) useAppStore.getState().upsertThread(current)
+      setSendError(sendErrorLine(error))
+    }
   }
 
   const emptyThread = uiMessages.length === 0 && !turnActive && !loading && !showQuestions && !sendError && !connectionFailed
@@ -1041,7 +1074,7 @@ export function OrchestratorChat() {
               banner={<SubagentComposerBanner threadId={activeThreadId} />}
               searchMentions={searchMentions}
               mentionScope={mentionScope}
-
+              permission={{ mode: permissionMode, ceiling: activeThread?.lineage ? permissionCeiling : undefined, onSelect: (mode) => void handlePermissionSelect(mode) }}
 
             />
           </div>

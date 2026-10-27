@@ -3,6 +3,7 @@ import { create } from 'zustand'
 import { describeStatus, type InstanceSnapshot, type ProviderSnapshotsEvent, type StatusDescription } from '../../shared/harness/status'
 import type { HarnessCaps, HarnessDriverKind, ProviderOperationEvent, ProviderScope, SignInPrompt } from '../../shared/harness/types'
 import { formatEffortLabel, parseThinkingSuffixFromModelId } from '../../shared/modelVariants'
+import type { PermissionLimits } from '../../shared/permissionMode'
 import { legacyProviderForInstance } from '../../shared/providerInstances'
 import type { LlmModelOption, LlmProviderOption } from '../../shared/settings'
 import { useAppStore } from '../stores/appStore'
@@ -209,7 +210,7 @@ export function useRunningOperation(instanceId: string): ProviderOperationEvent 
 // Model pickers
 
 /** A catalog entry with what the instance's snapshot reports, when there is one. */
-export type ProviderWithStatus = LlmProviderOption & { caps?: HarnessCaps; status?: StatusDescription }
+export type ProviderWithStatus = LlmProviderOption & { caps?: HarnessCaps; permissionLimits?: PermissionLimits; status?: StatusDescription }
 
 /** A picker entry: one provider instance and its visible models, with what the daemon reports. */
 export interface PickerProvider extends LlmProviderOption {
@@ -217,6 +218,7 @@ export interface PickerProvider extends LlmProviderOption {
   /** The `llmProvider` name a selection on this instance stores. */
   llmProvider: string
   caps?: HarnessCaps
+  permissionLimits?: PermissionLimits
   status?: StatusDescription
 }
 
@@ -303,6 +305,7 @@ export function pickerProviders(snapshots: readonly InstanceSnapshot[] | undefin
       label: snapshot.displayName,
       models,
       caps: snapshot.caps,
+      ...(snapshot.permissionLimits ? { permissionLimits: snapshot.permissionLimits } : {}),
       status: describeStatus(snapshot)
     })
   }

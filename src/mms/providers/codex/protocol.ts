@@ -71,6 +71,7 @@ export type AskForApproval = 'untrusted' | 'on-request' | 'never'
 export type SandboxMode = 'read-only' | 'workspace-write' | 'danger-full-access'
 export type SandboxPolicy =
   | { type: 'readOnly'; networkAccess: boolean }
+  | { type: 'dangerFullAccess' }
   | {
       type: 'workspaceWrite'
       writableRoots: string[]

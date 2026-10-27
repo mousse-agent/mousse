@@ -1,5 +1,6 @@
 import type { AssistantMessage, Message } from '../../../shared/transcript'
 import type { ProviderDriverKind } from '../../../shared/providerInstances'
+import type { PermissionMode } from '../../../shared/permissionMode'
 import type { ChatImageAttachment, ChatMode } from '../../../shared/types'
 import type { LlmChatOptions, ToolLoopSafetyOptions } from '../../orchestrator/LlmClient'
 import type { StreamingLlmTextEvent, StreamingLlmThinkingEvent, StreamingLlmToolEvent } from '../../harness/turnEvents'
@@ -81,6 +82,12 @@ export interface TurnInput {
    */
   modelPinned: boolean
   mode: ChatMode
+  /**
+   * The permission mode the turn runs in: the binding's (the thread's mode, or the nearest stricter
+   * one the instance can enforce). Each adapter enforces it with its runtime's own controls on every
+   * turn; a plan turn carries it unchanged, and it does not matter there.
+   */
+  permissionMode: PermissionMode
   /** Set when the thread is a delegated child; adapters apply it on every turn of the thread. */
   child?: ChildTurnPolicy
   /**

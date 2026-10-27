@@ -1,3 +1,4 @@
+import { claudeToolKey, PERMISSION_KEYS } from '../../../shared/permissionKeys'
 import { CLAUDE_MOUSSE_TOOL_PREFIX, READ_ONLY_MOUSSE_TOOLS } from '../../run/mcp/attachment'
 import type { ChildTurnPolicy } from '../../run/adapters/ProviderAdapter'
 
@@ -7,6 +8,34 @@ import type { ChildTurnPolicy } from '../../run/adapters/ProviderAdapter'
  * subagents, and what one does still passes through the same hook and permission callback.
  */
 export const CLAUDE_READ_ONLY_BUILTIN_TOOLS: readonly string[] = ['Read', 'Glob', 'Grep', 'WebSearch', 'WebFetch', 'AskUserQuestion', 'ToolSearch', 'Agent', 'Task']
+
+/**
+ * Claude Code's shell tools: `Bash`, and `PowerShell` on Windows. A permission mode treats both as
+ * the same class of action ("commands"), so an "Always" for commands covers both shells.
+ */
+export const CLAUDE_COMMAND_TOOLS: readonly string[] = ['Bash', 'PowerShell']
+
+/** Claude Code's tools that change files. */
+export const CLAUDE_EDIT_TOOLS: readonly string[] = ['Edit', 'Write', 'MultiEdit', 'NotebookEdit']
+
+/**
+ * What kind of action a Claude tool call is, for the permission mode: a shell command, a file edit,
+ * a read-only built-in, or any other tool (an MCP tool, `WebFetch`, ...).
+ */
+export function claudeActionOf(toolName: string): 'command' | 'edit' | 'read' | 'tool' {
+  if (CLAUDE_COMMAND_TOOLS.includes(toolName)) return 'command'
+  if (CLAUDE_EDIT_TOOLS.includes(toolName)) return 'edit'
+  if (CLAUDE_READ_ONLY_BUILTIN_TOOLS.includes(toolName)) return 'read'
+  return 'tool'
+}
+
+/** The permission key of a Claude tool call: one per class of action, the tool name for any other tool. */
+export function claudePermissionKey(toolName: string): string {
+  const action = claudeActionOf(toolName)
+  if (action === 'command') return PERMISSION_KEYS.claudeCommand
+  if (action === 'edit') return PERMISSION_KEYS.claudeEdit
+  return claudeToolKey(toolName)
+}
 
 /**
  * Issue #142: the permission decision for one tool call of a delegated child, or undefined when

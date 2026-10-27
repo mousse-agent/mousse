@@ -1,3 +1,4 @@
+import type { PermissionLimits } from '../permissionMode'
 import type { HarnessCaps, HarnessDriverKind, InstanceModel, ProviderScope } from './types'
 
 /**
@@ -142,6 +143,11 @@ export interface InstanceSnapshot {
   update?: UpdateAffordance
   binary?: InstanceBinary
   caps: HarnessCaps
+  /**
+   * What limits the permission modes the instance can enforce right now (Claude: the user's
+   * settings forbid bypassing permissions). Read on every snapshot; absent when nothing does.
+   */
+  permissionLimits?: PermissionLimits
   /** The stored settings the editor shows; present on daemons with the harness gateway. */
   config?: InstanceConfigView
   /**

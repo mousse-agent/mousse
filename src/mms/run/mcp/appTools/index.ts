@@ -52,6 +52,8 @@ export function createAppToolRegistry(input: {
     toolLedger: host.toolLedger ? (runId) => host.toolLedger!(runId) : undefined,
     readOnlyThread: host.readOnlyThread ? (threadId) => host.readOnlyThread!(threadId) : undefined,
     threadCeiling: host.threadCeiling ? (threadId) => host.threadCeiling!(threadId) : undefined,
+    permissionModeFor: host.permissionModeFor ? (runId) => host.permissionModeFor!(runId) : undefined,
+    askApproval: host.askApproval ? (threadId, questions, options) => host.askApproval!(threadId, questions, options) : undefined,
     turns: input.turns,
     ...input.options
   })

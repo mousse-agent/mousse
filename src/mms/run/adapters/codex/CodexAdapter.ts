@@ -164,6 +164,7 @@ export class CodexAdapter implements ProviderAdapter {
     const mousseCalls = new Map<string, boolean>()
     const chatInput = (): CodexChatInput => ({
       mode: input.mode === 'plan' ? 'plan' : 'default',
+      permissionMode: input.permissionMode,
       child: input.child,
       threadId: input.threadId,
       instanceId: input.instanceId,

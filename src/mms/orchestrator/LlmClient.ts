@@ -41,6 +41,8 @@ import type { ChatMode } from '../../shared/types'
 
 import { normalizeChatMode } from '../../shared/chatMode'
 import { isToolAllowedForMode } from '../../shared/modes'
+import { permissionModeAllows, type PermissionMode } from '../../shared/permissionMode'
+import { piPermissionKey, piToolAction } from '../../shared/permissionKeys'
 import { modeRegistry as defaultModeRegistry, type ModeRegistry } from '../modes/ModeRegistry'
 
 import { resolveModelForMode, resolveTitleModel, normalizeContextSettings, resolveContextCompactionTokens } from '../../shared/settings'
@@ -149,6 +151,13 @@ export interface LlmChatOptions {
     executeTool(call: ToolCall, signal?: AbortSignal): Promise<ToolResultMessage>
   }
   delegation?: DelegationToolHost
+
+  /**
+   * The thread's permission mode for this turn (`ask`, `accept_edits`, `full`). A tool the mode does
+   * not allow without asking (a command, a file edit, an integration) asks the thread's user first.
+   * Absent for turns without a person behind them (definitions, workflow steps): no gate.
+   */
+  permissionMode?: PermissionMode
 
   /** Daemon-minted episode capability; never accepted from protocol input. */
   toolAccess?: AgentToolAccess
@@ -470,6 +479,8 @@ export class LlmClient {
         },
         askUser: (threadId, questions, options) => this.questions.requestAnswers(questions, threadId, options),
         dismissQuestions: (threadId) => this.questions.dismissAllForThread(threadId),
+        // The turn carries its permission mode (`AppToolTurn.permissionMode`); a tool that edits the workspace asks here.
+        askApproval: (threadId, questions, options) => this.questions.requestAnswers(questions, threadId, options),
         presentPlan: (threadId, payload) => this.onPresentPlan?.(payload, threadId),
         openDocument: (payload) => this.onOpenDocument?.(payload),
         tasks: () => tasks ?? null,
@@ -668,6 +679,7 @@ export class LlmClient {
     const appTurn: AppToolTurn | undefined = requestContext.appTurn && {
       ...requestContext.appTurn,
       runId: options.runId ?? '',
+      ...(options.permissionMode !== undefined ? { permissionMode: options.permissionMode } : {}),
       ...(options.onPublishApplet && !subagent ? { onPublishApplet: options.onPublishApplet } : {}),
       ...(options.delegation ? { delegation: options.delegation } : {}),
       ...(options.toolAccess ? { toolAccess: options.toolAccess } : {}),
@@ -1041,7 +1053,8 @@ export class LlmClient {
           authority,
           discovery,
           actor,
-          trustedAgent
+          trustedAgent,
+          options.permissionMode
         )
         }
         let result: ToolResultMessage
@@ -1576,6 +1589,58 @@ export class LlmClient {
     return appToolResult(toolCall, outcome)
   }
 
+
+  /**
+   * Asks the thread's user before a tool the permission mode does not allow without asking. Returns
+   * the tool error to hand the model when the user rejects (or dismisses) the call, and null when
+   * the call may run.
+   */
+  private async askPermission(
+    toolCall: ToolCall,
+    permissionMode: PermissionMode,
+    action: 'command' | 'edit',
+    permissionKey: string,
+    threadId: string | undefined,
+    signal: AbortSignal | undefined
+  ): Promise<ToolResultMessage | null> {
+    if (permissionModeAllows(permissionMode, action)) return null
+    const args = (toolCall.arguments ?? {}) as Record<string, unknown>
+    const detail = typeof args.command === 'string'
+      ? [args.command, ...(Array.isArray(args.args) ? args.args.map(String) : [])].join(' ')
+      : typeof args.path === 'string' ? args.path : JSON.stringify(args)
+    const what = action === 'command' ? 'run this command' : 'edit this file'
+    try {
+      const answer = await this.questions.requestAnswers(
+        [
+          {
+            id: 'permission',
+            prompt: `Allow Mousse to ${what}?\n${detail.slice(0, 4000)}`,
+            options: [
+              { id: 'allow', label: 'Allow once' },
+              { id: 'reject', label: 'Reject' }
+            ]
+          }
+        ],
+        threadId ?? '__unbound__',
+        {
+          ...(signal ? { signal } : {}),
+          approval: {
+            action,
+            permissionKey,
+            options: [
+              { id: 'allow', decision: 'allow', scope: 'once' },
+              { id: 'reject', decision: 'reject' }
+            ]
+          }
+        }
+      )
+      if (answer.permission === 'allow' && !signal?.aborted) return null
+      return toolResult(toolCall, `The user rejected the request to ${what}. Do not retry it unless they ask.`, true)
+    } catch {
+      return toolResult(toolCall, `The user did not approve the request to ${what}.`, true)
+    }
+  }
+
   private async executeToolCall(
     toolCall: ToolCall,
     mcpTools: McpToolDescriptor[],
@@ -1588,7 +1653,8 @@ export class LlmClient {
     authority: InProcessAuthority,
     discovery?: LlmChatOptions['subagentDiscovery'],
     actor: IntegrationActor = defaultIntegrationActor(false),
-    trustedAgent?: TrustedAgentExecutionOptions
+    trustedAgent?: TrustedAgentExecutionOptions,
+    permissionMode?: PermissionMode
   ): Promise<ToolResultMessage> {
 
     try {
@@ -1683,7 +1749,15 @@ export class LlmClient {
           return toolResult(toolCall, `Tool "${toolCall.name}" is disabled in Settings → Skills & MCP.`, true)
         }
 
-
+        // The thread's permission mode: a command (and, under Ask, an edit) asks the user first.
+        // The Pi RPC route that takes over these tool calls (`harness/pi/extension`, provider
+        // abstraction PR 2) must call `permissionModeAllows` and this same prompt before it runs one,
+        // and `tests/piLoopApprovals.test.ts` is pointed at that route.
+        const permissionAction = permissionMode !== undefined ? piToolAction(toolCall.name) : null
+        if (permissionAction) {
+          const refusal = await this.askPermission(toolCall, permissionMode!, permissionAction, piPermissionKey(permissionAction), appTurn?.threadId || undefined, signal)
+          if (refusal) return refusal
+        }
 
         const callEvent: LlmToolEvent = {
 

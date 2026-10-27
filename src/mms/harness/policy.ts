@@ -2,8 +2,9 @@ import { createHash } from 'node:crypto'
 import type { BotThreadRole } from '../../shared/bots/personal/authority'
 import type { CredentialKind, InstanceSnapshot } from '../../shared/harness/status'
 import type { NeutralTool } from '../../shared/harness/tools'
-import type { Enforceability, HarnessCaps, RunPolicy, TurnOrigin } from '../../shared/harness/types'
+import type { Enforceability, HarnessCaps, HarnessError, RunPolicy, TurnOrigin } from '../../shared/harness/types'
 import { stableStringify } from '../run/json'
+import { supportedPermissionModes, type PermissionMode } from '../../shared/permissionMode'
 
 /**
  * Capability readers for the keys the gateway adds to the run engine's eight (SPEC §13.2: every
@@ -131,7 +132,8 @@ function spendModelGap(budget: NonNullable<RunPolicy['budget']>, model: SpendMod
  * - a wall-clock budget needs nothing: the gateway enforces it everywhere;
  * - a host authority (a definition's or a bot's grants, roots and rules) needs `exact` tool
  *   control: only a runtime whose every tool call Mousse decides can be held to it;
- * - pre-granted or no approvals need at least `approval_only`;
+ * - pre-granted or no approvals need at least `approval_only` (pre-granted under Full access is what
+ *   an uncontrolled instance does anyway);
  * - approvals answered by the host (`approve: 'host'`) are refused on every instance for now:
  *   nothing answers them yet, and the turn would otherwise ask the person;
  * - a turn nobody watches (delegated, workflow, definition, bot) needs more than `uncontrolled`,
@@ -148,7 +150,9 @@ export function checkPolicy(caps: HarnessCaps, policy: RunPolicy, instanceId?: s
   const budget = policy.budget ?? {}
   const needsSpend = hasSpendLimit(policy)
   const needsHardBudget = needsSpend || budget.maxTurns !== undefined || budget.maxToolCalls !== undefined
-  const needsApprovals = policy.approvals === 'grants' || policy.approvals === 'never'
+  // `grants` under Full access is literally "the agent approves its own tools", which an
+  // uncontrolled instance does; any other pre-granted or absent approval needs control.
+  const needsApprovals = (policy.approvals === 'grants' && policy.permissionMode !== 'full') || policy.approvals === 'never'
   // Nothing answers approvals for the host yet (PR 6's locked runtimes and bot engine will): until
   // then a policy that asks for it is refused rather than left to ask the person.
   const hostApprovals = policy.approve === 'host'
@@ -224,4 +228,23 @@ export function mapNeutralTools(
     for (const name of native) if (!names.includes(name)) names.push(name)
   }
   return unmapped.length ? { ok: false, unmapped } : { ok: true, names }
+}
+
+/** The typed refusal of a turn whose permission mode the instance cannot enforce. */
+export function permissionModeRefusal(message: string, supported: readonly PermissionMode[], instanceId?: string): HarnessError & { code: 'permission_mode_unenforceable' } {
+  return { code: 'permission_mode_unenforceable', message, supportedModes: [...supported], ...(instanceId ? { instanceId } : {}) }
+}
+
+/**
+ * Whether an instance with `caps` can enforce the permission mode a binding recorded. Fails
+ * closed, for the first dispatch and every retry, continuation and steer: an instance that approves
+ * tools itself runs only in Full access. Bindings recorded before permission modes carry none and
+ * are not checked (they ran as they did then).
+ */
+export function checkPermissionMode(caps: Partial<Pick<HarnessCaps, 'toolControl'>>, policy: Pick<RunPolicy, 'permissionMode'>, agent: string, instanceId?: string): { ok: true } | { ok: false; error: HarnessError & { code: 'permission_mode_unenforceable' } } {
+  const mode = policy.permissionMode
+  if (mode === undefined) return { ok: true }
+  const supported = supportedPermissionModes(caps)
+  if (supported.includes(mode)) return { ok: true }
+  return { ok: false, error: permissionModeRefusal(`${agent} approves tools itself; set this thread to Full access or pick another agent.`, supported, instanceId) }
 }

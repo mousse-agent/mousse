@@ -2280,6 +2280,21 @@ html[data-theme='high-contrast'] .model-picker-row.selected {
   color: var(--text-secondary);
 }
 
+/* A row with a name and a line saying what the choice does (the permission mode menu). */
+.composer-mode-menu-item-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.composer-mode-menu-item-desc {
+  max-width: 260px;
+  font-size: 11.5px;
+  font-weight: 400;
+  line-height: 1.35;
+  color: var(--text-secondary);
+}
+
 .composer-implement-btn {
   display: inline-flex;
   align-items: center;

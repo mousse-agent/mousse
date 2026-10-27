@@ -16,6 +16,7 @@ import type {
 import type { LlmModelOption, LlmProviderOption } from '../../../shared/settings'
 import type { CredentialKind } from '../../../shared/harness/status'
 import type { ChatImageAttachment } from '../../../shared/types'
+import { normalizePermissionMode, permissionModeAllows, type PermissionLimits, type PermissionMode as ThreadPermissionMode } from '../../../shared/permissionMode'
 import { parseThinkingSuffixFromModelId } from '../../../shared/modelVariants'
 import { AppError } from '../../../shared/errors'
 import type { ProviderToolEvent } from '../../../shared/agentActivity'
@@ -40,7 +41,7 @@ import {
   type StoredCliConfig
 } from '../cliConfig'
 import { resolveWindowsShim } from '../resolveWindowsShim'
-import { claudeAccountSubject } from './accountSubject'
+import { claudeAccountSubject, claudeBypassDisabled } from './accountSubject'
 import {
   ClaudeMetricsCollector,
   ClaudeNativeEditCounter,
@@ -49,7 +50,7 @@ import {
 } from './metrics'
 import { parseClaudeSubscriptionUsage } from './usage'
 import { claudeMcpToolBlocked, claudeProxiedMcpServer, type ClaudeTurnIntegrations } from './integrations'
-import { claudeChildToolDenial } from './childPolicy'
+import { claudeActionOf, claudeChildToolDenial, claudePermissionKey } from './childPolicy'
 import { CancelInProgress, DEFAULT_LIVE_TIMINGS, LiveSession, type LiveRun, type LiveTimings } from './liveSession'
 import { TurnFrames } from './turnFrames'
 import { readUsageLimit } from '../../orchestrator/providerErrors'
@@ -102,6 +103,12 @@ export type ClaudeSubscriptionChatInput = {
   images?: ChatImageAttachment[]
   signal?: AbortSignal
   mode?: 'plan' | 'default'
+  /**
+   * The thread's permission mode for this turn (`ask`, `accept_edits`, `full`); absent reads as the
+   * default (`accept_edits`). Enforced through Claude Code's own permission mode, the PreToolUse
+   * hook and `canUseTool`; a live query follows it turn by turn.
+   */
+  permissionMode?: ThreadPermissionMode
   /** Set for a delegated child's turns (first and resumed); see `claudeChildToolDenial`. */
   child?: ChildTurnPolicy
   /** The Mousse MCP server for this run (SPEC §15.2); null attaches no server. */
@@ -165,6 +172,8 @@ type TurnContext = {
   editCounter: ClaudeNativeEditCounter
   planTurn: boolean
   restricted: boolean
+  /** The thread's permission mode this turn runs in (already lowered when Claude Code refuses to bypass). */
+  permissionMode: ThreadPermissionMode
 }
 type Dependencies = {
   /**
@@ -656,6 +665,13 @@ export class ClaudeSubscriptionProviderService {
   /** The account this instance runs as (`claudeAccountSubject`), read without starting Claude Code. */
   accountSubject(): string | undefined {
     return claudeAccountSubject(this.environment())
+  }
+  /**
+   * Whether the user's Claude settings forbid `bypassPermissions` for a turn in `cwd`
+   * (`claudeBypassDisabled`), read again every time: nothing is cached, and nothing edits the settings.
+   */
+  permissionLimits(cwd?: string): PermissionLimits | undefined {
+    return claudeBypassDisabled(this.environment(), cwd ? { cwd } : {}) ? { bypassDisabled: true } : undefined
   }
   /** Checks the sign-in with the environment the caller captured for its turn. */
   private async authenticated(signal?: AbortSignal, env = this.environment()): Promise<boolean> {
@@ -1255,7 +1271,12 @@ export class ClaudeSubscriptionProviderService {
                   ? { updatedInput: { ...(event.tool_input as Record<string, unknown>), [TURN_TOKEN_KEY]: turn.input.mcpTurnToken } }
                   : undefined
                 // Restricted turns route every call through canUseTool so its read-only allowlist holds.
-                if (turn.restricted)
+                // So does every command (and, under Ask, every edit) the thread's permission mode
+                // does not allow without asking: the user's own allow rules must not skip Mousse's
+                // check. Other tools (MCP tools, reads) follow Claude Code's own rules.
+                const action = event.hook_event_name === 'PreToolUse' ? claudeActionOf(event.tool_name) : 'read'
+                const modeAsks = (action === 'command' || action === 'edit') && !permissionModeAllows(turn.permissionMode, action)
+                if (turn.restricted || modeAsks)
                   return { hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'ask', ...stamp } }
                 return stamp ? { hookSpecificOutput: { hookEventName: 'PreToolUse', ...stamp } } : {}
               }
@@ -1361,18 +1382,37 @@ export class ClaudeSubscriptionProviderService {
           if (turn.restricted) return { behavior: 'allow', updatedInput: args }
           // Only calls Claude Code refuses to auto-approve even in bypass mode arrive here.
           if (input.approvals === 'never') return { behavior: 'deny', message: APPROVALS_REFUSED_MESSAGE }
+          const action = claudeActionOf(toolName)
+          // Reading never asks under Ask or Auto-accept edits: Claude Code reaches here only for what
+          // it does not allow itself, and a read-only built-in changes nothing.
+          if (action === 'read' && turn.permissionMode !== 'full') return { behavior: 'allow', updatedInput: args }
+          // Under Full access a call that reaches here is Claude Code's own refusal to auto-approve
+          // (its safety check), which Mousse cannot skip; the prompt says so. The full command text is
+          // kept up to the cap: the card wraps and scrolls.
+          const what = action === 'command' ? `run a command (${toolName})` : action === 'edit' ? `edit files (${toolName})` : `use ${toolName}`
+          const own = turn.permissionMode === 'full' ? 'Claude Code asks even in Full access: its own safety check.\n' : ''
           const answer = await this.questions.requestAnswers(
             [
               {
                 id: 'permission',
-                prompt: `Allow Claude Code to use ${toolName}?\n${JSON.stringify(args).slice(0, 4000)}`,
+                prompt: `${own}Allow Claude Code to ${what}?\n${JSON.stringify(args).slice(0, 4000)}`,
                 options: [
                   { id: 'allow', label: 'Allow once' },
                   { id: 'reject', label: 'Reject' }
                 ]
               }
             ],
-            input.threadId
+            input.threadId,
+            {
+              approval: {
+                action: action === 'read' ? 'tool' : action,
+                permissionKey: claudePermissionKey(toolName),
+                options: [
+                  { id: 'allow', decision: 'allow', scope: 'once' },
+                  { id: 'reject', decision: 'reject' }
+                ]
+              }
+            }
           )
           if (
             controller.signal.aborted ||
@@ -1497,7 +1537,13 @@ export class ClaudeSubscriptionProviderService {
     // read-only allowlist. A read-only child keeps the default permission mode: plan mode would
     // inject its planning and ExitPlanMode flow into a research or review task.
     const restricted = planTurn || readOnlyChild
-    const turn: TurnContext = { input, controller, integrations, editCounter, planTurn, restricted }
+    // Full access needs Claude Code to allow bypassing permissions. The gateway already lowers the
+    // mode when the user's settings forbid it; reading them again here keeps a settings edit made
+    // since then from ever starting a bypass Claude Code would refuse.
+    const bypassDisabled = claudeBypassDisabled(this.environment(), { cwd: input.cwd })
+    const requestedMode = normalizePermissionMode(input.permissionMode)
+    const threadMode: ThreadPermissionMode = requestedMode === 'full' && bypassDisabled ? 'accept_edits' : requestedMode
+    const turn: TurnContext = { input, controller, integrations, editCounter, planTurn, restricted, permissionMode: threadMode }
     try {
       const signedIn = await this.authenticated(controller.signal, env)
       if (!signedIn)
@@ -1508,8 +1554,13 @@ export class ClaudeSubscriptionProviderService {
       const selected = parseThinkingSuffixFromModelId(input.model)
       const effort = ['low', 'medium', 'high', 'xhigh', 'max'].includes(selected.effort ?? '')
         ? selected.effort as Options['effort'] : undefined
-      // Agent turns run unattended in the thread workspace, like Mousse's other agents.
-      const permissionMode: PermissionMode = planTurn ? 'plan' : readOnlyChild ? 'default' : 'bypassPermissions'
+      // The thread's permission mode, in Claude Code's own terms: Ask asks about everything it would
+      // not allow itself, Auto-accept edits lets edits through, Full access bypasses its checks.
+      const permissionMode: PermissionMode = planTurn
+        ? 'plan'
+        : readOnlyChild
+          ? 'default'
+          : { ask: 'default', accept_edits: 'acceptEdits', full: 'bypassPermissions' }[threadMode] as PermissionMode
       const launchAppend = claudeLaunchAppendSystemPrompt(claudeExtraArgs(storedCliArgs(this.launchSettings())), input.cwd)
       const appendTexts = [input.systemPromptAppend ?? '', ...launchAppend]
       // What a live process is started for (`HARD_PARTS`); a process the turn can reuse already holds the conversation.
@@ -1558,8 +1609,9 @@ export class ClaudeSubscriptionProviderService {
         effort,
         resume,
         permissionMode,
-        // A live query can switch to bypass on a later turn even when it starts in plan mode.
-        ...(permissionMode === 'bypassPermissions' || (isLive && !readOnlyChild) ? { allowDangerouslySkipPermissions: true } : {}),
+        // A live query can switch to bypass on a later turn even when it starts in plan or ask mode,
+        // unless Claude Code's settings forbid bypassing permissions at all.
+        ...(permissionMode === 'bypassPermissions' || (isLive && !readOnlyChild && !bypassDisabled) ? { allowDangerouslySkipPermissions: true } : {}),
         // The Mousse server keeps its name: user servers are spread first.
         mcpServers: {
           ...integrations?.mcpServers,
@@ -1591,6 +1643,12 @@ export class ClaudeSubscriptionProviderService {
         if (!live || !wake) throw new Error('Claude has no turn of its own to continue for this thread')
         liveRun = wake
         live.current = turn
+        // The user may have changed the thread's mode since the turn that left this work running: the
+        // process must not carry on in the wider one. If it cannot be switched, the turn fails.
+        if (live.meta.permissionMode !== permissionMode) {
+          await live.setPermissionMode(permissionMode)
+          live.meta.permissionMode = permissionMode
+        }
         metrics.beginQuery(live.sessionId, saved?.usageBaseline)
         liveRun.attach((message) => frames.observe(message))
       } else {

@@ -18,7 +18,7 @@ const PHASE5_TOOLS: Record<string, string> = {
   task_status: 'actsAsCaller',
   task_cancel: 'actsAsCaller',
   list_subagents: 'actsAsCaller',
-  integrate_delegation: 'actsAsCaller',
+  integrate_delegation: 'editsWorkspace',
   ask_user: 'actsAsCaller',
   present_plan: 'actsAsCaller',
   create_task: 'actsAsCaller',
@@ -29,7 +29,7 @@ const PHASE5_TOOLS: Record<string, string> = {
   queue_enqueue: 'writesThreads',
   // Phase 6 (SPEC §16.2).
   thread_fork: 'startsThreads',
-  thread_merge_back: 'writesThreads'
+  thread_merge_back: 'editsWorkspace'
 }
 
 describe('Mousse tool registry (SPEC §15.1)', () => {
@@ -434,3 +434,88 @@ function appToolRegistryWithoutEngine(forRun: (runId: string) => { start: (call:
   })
   return { registry, request }
 }
+
+describe('workspace-changing tools and the permission mode', () => {
+  let fx: DelegationFixture | undefined
+  afterEach(() => {
+    fx?.dispose()
+    fx = undefined
+  })
+
+  const setup = async (mode: 'ask' | 'accept_edits' | 'full' | undefined, answer: 'allow' | 'reject' | 'throw' = 'allow') => {
+    fx = delegationFixture()
+    const run = await fx.runningRun('parent')
+    const asked: Array<{ threadId: string; approval: unknown }> = []
+    const fake = fakeAppToolHost({
+      ...(mode ? { permissionModeFor: () => mode } : {}),
+      askApproval: async (threadId, _questions, options) => {
+        asked.push({ threadId, approval: options.approval })
+        if (answer === 'throw') throw new Error('dismissed')
+        return { permission: answer }
+      }
+    })
+    const { registry, turns, request } = appToolRegistry(fx.engine, fake.host)
+    turns.register(appTurn({ threadId: 'parent', runId: run.runId }))
+    const call = (name = 'integrate_delegation', args: Record<string, unknown> = { delegationId: 'd1' }) =>
+      registry.call(name, args, request({ threadId: 'parent', runId: run.runId }))
+    return { call, asked, registry, run, turns, ...fake }
+  }
+
+  it('asks under Ask before the handler runs, and a rejection leaves the workspace untouched', async () => {
+    const { call, asked, delegation } = await setup('ask', 'reject')
+    await expect(call()).resolves.toMatchObject({ isError: true, text: expect.stringContaining('did not approve') })
+    expect(delegation.integrateDelegation).not.toHaveBeenCalled()
+    expect(asked).toEqual([{ threadId: 'parent', approval: expect.objectContaining({ action: 'edit', permissionKey: 'mousse:integrate' }) }])
+  })
+
+  it('runs after the user allows it once, and counts a dismissed question as a rejection', async () => {
+    const allowed = await setup('ask', 'allow')
+    await allowed.call()
+    expect(allowed.delegation.integrateDelegation).toHaveBeenCalledTimes(1)
+    const dismissed = await setup('ask', 'throw')
+    await expect(dismissed.call()).resolves.toMatchObject({ isError: true })
+    expect(dismissed.delegation.integrateDelegation).not.toHaveBeenCalled()
+  })
+
+  it.each(['accept_edits', 'full'] as const)('runs without asking under %s', async (mode) => {
+    const { call, asked, delegation } = await setup(mode)
+    await call()
+    expect(delegation.integrateDelegation).toHaveBeenCalledTimes(1)
+    expect(asked).toEqual([])
+  })
+
+  it('refuses a call that names another thread before it asks the user anything', async () => {
+    const { call, asked } = await setup('ask')
+    await expect(call('thread_merge_back', { threadId: 'someone-else' })).rejects.toMatchObject({ code: 'mousse_scope_denied' })
+    expect(asked).toEqual([])
+  })
+
+  it('asks a merge-back under Ask and refuses it without a way to ask', async () => {
+    const { call, asked } = await setup('ask', 'reject')
+    await expect(call('thread_merge_back', {})).resolves.toMatchObject({ isError: true, text: expect.stringContaining('did not approve') })
+    expect(asked).toEqual([{ threadId: 'parent', approval: expect.objectContaining({ permissionKey: 'mousse:merge_back' }) }])
+
+    fx?.dispose()
+    fx = delegationFixture()
+    const run = await fx.runningRun('parent')
+    const fake = fakeAppToolHost({ permissionModeFor: () => 'ask' })
+    const { registry, turns, request } = appToolRegistry(fx.engine, fake.host)
+    turns.register(appTurn({ threadId: 'parent', runId: run.runId }))
+    await expect(registry.call('integrate_delegation', { delegationId: 'd1' }, request({ threadId: 'parent', runId: run.runId })))
+      .resolves.toMatchObject({ isError: true })
+    expect(fake.delegation.integrateDelegation).not.toHaveBeenCalled()
+  })
+
+  it('asks an in-process run by the turn\'s own mode, and a trusted caller does not ask', async () => {
+    const { registry, asked, delegation, run } = await setup(undefined, 'reject')
+    const turn = { ...appTurn({ threadId: 'parent', runId: run.runId }), turnToken: 't', permissionMode: 'ask' as const, delegation }
+    const call = { turn, toolCallId: 'c1', signal: new AbortController().signal }
+    await expect(registry.callInProcess('integrate_delegation', { delegationId: 'd1' }, { kind: 'run', runId: run.runId, active: () => true }, call))
+      .resolves.toMatchObject({ isError: true, text: expect.stringContaining('did not approve') })
+    expect(asked).toHaveLength(1)
+    expect(delegation.integrateDelegation).not.toHaveBeenCalled()
+
+    await registry.callInProcess('integrate_delegation', { delegationId: 'd1' }, { kind: 'trusted' }, { ...call, turn: { ...turn, trusted: true } })
+    expect(asked).toHaveLength(1)
+  })
+})

@@ -1,5 +1,6 @@
 import type { InstallOwner } from '../../../shared/harness/status'
 import type { HarnessCaps } from '../../../shared/harness/types'
+import type { PermissionLimits } from '../../../shared/permissionMode'
 import type { CodexProviderService } from '../../providers/codex/CodexProviderService'
 import { CODEX_CAPABILITIES, CodexAdapter } from '../../run/adapters/codex/CodexAdapter'
 import { cliNames } from '../env'
@@ -22,6 +23,17 @@ export const CODEX_CAPS: HarnessCaps = Object.freeze({
 })
 
 const SIGN_IN_COMMAND = 'codex login'
+
+/**
+ * What Codex cannot enforce. Auto-accept edits needs `untrusted` + read-only to apply a patch after
+ * Mousse accepts it while a mutating command still waits for Mousse's answer. That is proven only by
+ * a recorded app-server exchange of both halves, and none is recorded yet (capturing one needs a
+ * signed-in Codex account), so Codex does not offer the mode: a thread set to it asks about edits
+ * as well, and the composer says so. Add the two fixtures, then remove this limit.
+ */
+export const CODEX_PERMISSION_LIMITS: PermissionLimits = Object.freeze({
+  unavailable: Object.freeze({ accept_edits: 'Codex cannot auto-accept edits while asking for commands' })
+})
 
 function readAuth(service: CodexProviderService, status: Awaited<ReturnType<CodexProviderService['status']>>): AuthReading {
   const methodLabel = 'ChatGPT sign-in'
@@ -111,6 +123,7 @@ export function codexDriver(options: { builtIn: () => CodexProviderService; mana
         validateLaunch: (patch) => service.validateLaunch(patch),
         launchChanged: () => service.launchChanged(),
         usage: (signal) => readUsage(service, signal),
+        permissionLimits: () => CODEX_PERMISSION_LIMITS,
         auth: async ({ force }) => readAuth(service, await service.status({ force })),
         refreshModels: async () => {
           await service.status()

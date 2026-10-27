@@ -75,6 +75,7 @@ function splitSettings(full: MousseSettings): {
       appearance: full.appearance,
       notifications: full.notifications,
       shortcuts: full.shortcuts,
+      permissions: full.permissions,
       context: full.context,
       integrations: full.integrations,
       title: full.title
@@ -516,6 +517,7 @@ export class MousseConfigStore {
       partial.appearance ||
       partial.notifications ||
       partial.shortcuts ||
+      partial.permissions ||
       partial.context ||
       partial.integrations ||
       partial.title
@@ -528,6 +530,9 @@ export class MousseConfigStore {
           : {}),
         ...(partial.notifications
           ? { notifications: partial.notifications as MousseSettingsSection['notifications'] }
+          : {}),
+        ...(partial.permissions
+          ? { permissions: partial.permissions as MousseSettingsSection['permissions'] }
           : {}),
         ...(partial.integrations
           ? { integrations: partial.integrations as MousseSettingsSection['integrations'] }

@@ -1,3 +1,4 @@
+import { PERMISSION_KEYS } from '../../../../shared/permissionKeys'
 import type { RunEngine } from '../../RunEngine'
 import type { DelegationRecord, ThreadEvent } from '../../types'
 import type { AppToolHost } from './host'
@@ -189,7 +190,10 @@ export function threadTools(host: AppToolHost, engine: RunEngine): MousseTool[] 
           clientRequestId: CLIENT_REQUEST_ID_SCHEMA
         }
       },
-      access: 'writesThreads',
+      // Hands work over to another thread; still the caller's own fork only (`callerThreadOnly`), and
+      // it asks unless the run's permission mode allows edits.
+      access: 'editsWorkspace',
+      permissionKey: PERMISSION_KEYS.mousseMergeBack,
       class: 'mutation',
       offered: () => false,
       handler: async (args, ctx) => {

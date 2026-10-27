@@ -2,6 +2,7 @@ import type { MousseIntegrationsSettings, SkillModelSettings } from './integrati
 import { MOUSSE_BUILTIN_TOOL_IDS } from './integrations'
 import type { ChatMode } from './types'
 import { getSkillIdFromMode } from './chatMode'
+import { DEFAULT_PERMISSION_MODE, normalizePermissionMode, type PermissionMode } from './permissionMode'
 import { generateRandomUsername } from './randomUsername'
 import { listingServes } from './providerInstances'
 import type { ShortcutOverrides } from './commands'
@@ -51,6 +52,16 @@ export interface NotificationSettings {
   threadCompletionSound: boolean
 }
 
+export interface PermissionSettings {
+  /** Permission mode a thread starts in and uses until it is changed. */
+  defaultMode: PermissionMode
+}
+
+export function normalizePermissionSettings(raw?: Partial<PermissionSettings> | null): PermissionSettings {
+  // Not chosen yet: the default. Chosen but unreadable: the strictest mode.
+  return { defaultMode: raw?.defaultMode === undefined ? DEFAULT_PERMISSION_MODE : normalizePermissionMode(raw.defaultMode) }
+}
+
 export type ContextCompactionTokens = 128000 | 256000 | 384000 | 512000 | 1024000 | 'model-max'
 
 export interface ContextSettings {
@@ -88,6 +99,7 @@ export interface MousseSettings {
   notifications: NotificationSettings
   /** Keyboard shortcut overrides by command id; only changes are stored, `null` unbinds. */
   shortcuts: ShortcutOverrides
+  permissions: PermissionSettings
   context: ContextSettings
   provider: {
     llmProvider: LlmProviderId
@@ -368,6 +380,7 @@ export function getDefaultSettings(): MousseSettings {
       threadCompletionSound: true
     },
     shortcuts: {},
+    permissions: normalizePermissionSettings(),
     context: normalizeContextSettings(),
     provider: {
       llmProvider: '',

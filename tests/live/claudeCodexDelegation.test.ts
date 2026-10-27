@@ -74,7 +74,7 @@ describe.skipIf(!live)('live: Claude and Codex delegate to each other over the M
 
     const questions = new UserQuestionService()
     // Nothing in these turns needs approval; refuse anything that asks.
-    questions.on('pending', ({ requestId }: { requestId: string }) => questions.submitAnswers(requestId, { permission: 'reject' }))
+    questions.on('pending', ({ requestId }: { requestId: string }) => questions.submitAnswers(requestId, { permission: 'reject' }, { kind: 'user' }))
     const projects = new ProjectManager(home)
     const store = new ThreadDataStore(projects, home)
     const settings = getDefaultSettings()

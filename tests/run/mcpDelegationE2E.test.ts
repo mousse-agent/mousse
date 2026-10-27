@@ -27,7 +27,7 @@ async function callTool(mcp: Mcp, name: string, args: Record<string, unknown>, i
     body: JSON.stringify({ jsonrpc: '2.0', id, method: 'tools/call', params: { name, arguments: mcp.turnToken ? { ...args, [TURN_TOKEN_KEY]: mcp.turnToken } : args } })
   })
   const body = await response.json() as { result?: { content: Array<{ text: string }>; isError?: boolean }; error?: { code: number; message: string; data?: { reason: string } } }
-  return { status: response.status, body, value: body.result ? JSON.parse(body.result.content[0].text) : undefined }
+  return { status: response.status, body, value: body.result && !body.result.isError ? JSON.parse(body.result.content[0].text) : undefined }
 }
 
 /** A vendor runtime that reaches Mousse only over MCP; `script` is its model. */
@@ -198,5 +198,57 @@ describe('Mousse MCP delegation end to end (SPEC §15)', () => {
     orch.markThreadDeleted(parent.id)
     expect((await callTool({ url: server.url, token: seen.token! }, 'list_tasks', {})).status).toBe(401)
     expect(credentials.listForThread(parent.id)[0].revokedAt).not.toBeNull()
+  }, 30_000)
+
+  /** A vendor parent in `mode` that delegates an isolated child and then calls `integrate_delegation` over HTTP. */
+  const integrateUnder = async (mode: 'ask' | 'accept_edits') => {
+    home = mkdtempSync(join(tmpdir(), 'mousse-mcp-integrate-'))
+    previousHome = process.env.MOUSSE_HOME
+    process.env.MOUSSE_HOME = home
+    const seen: { integrate?: { status: number; body: any } } = {}
+    const vendor = new McpVendorAdapter(async (_input, mcp) => {
+      const started = await callTool(mcp, 'delegate_task', {
+        prompt: 'Write it', title: 'Writer', provider: 'openai', model: 'gpt-replay', workspace: 'isolated', role: 'implement', clientRequestId: 'write-1'
+      })
+      seen.integrate = await callTool(mcp, 'integrate_delegation', { delegationId: started.value.delegationId }, 2)
+      return 'Done.'
+    })
+    const child = new ChildPiAdapter()
+    const { orch, engine, store, stop } = phase6Daemon(home, [vendor, child])
+    const credentials = new McpCredentials(engine.store)
+    const server = new MousseMcpServer({ credentials, registry: orch.mcpToolRegistry() })
+    await server.start()
+    orch.setMcpAttachment(server)
+    stops.push(async () => {
+      child.release()
+      orch.setMcpAttachment(null)
+      await server.stop()
+      await stop()
+    })
+    // The user rejects every approval that is asked.
+    const asked: Array<{ threadId: string; prompt: string }> = []
+    const questions = (orch as unknown as { questions: import('../../src/mms/orchestrator/UserQuestionService').UserQuestionService }).questions
+    questions.on('pending', (request: { requestId: string; threadId: string; questions: Array<{ prompt: string }> }) => {
+      asked.push({ threadId: request.threadId, prompt: request.questions[0].prompt })
+      questions.submitAnswers(request.requestId, { permission: 'reject' }, { kind: 'user' })
+    })
+    const parent = store.createThread('Parent')
+    orch.setThreadModelOverride(parent.id, { llmProvider: 'claude-subscription', model: 'vendor-model' })
+    orch.setThreadPermissionMode(parent.id, mode)
+    await orch.send({ content: 'Integrate it' }, false, { threadId: parent.id, clientRequestId: 'parent-send' })
+    return { seen, asked, parent, engine }
+  }
+
+  it('under Ask, integrate_delegation asks first, and a rejection leaves the delegation un-integrated', async () => {
+    const { seen, asked, parent, engine } = await integrateUnder('ask')
+    expect(asked).toEqual([{ threadId: parent.id, prompt: expect.stringContaining('merge') }])
+    expect(seen.integrate?.body.result).toMatchObject({ isError: true, content: [{ text: expect.stringContaining('did not approve') }] })
+    expect(engine.delegations.listForParentThread(parent.id).map((delegation) => delegation.status)).not.toContain('integrated')
+  }, 30_000)
+
+  it('under Auto-accept edits, integrate_delegation does not ask', async () => {
+    const { seen, asked } = await integrateUnder('accept_edits')
+    expect(asked).toEqual([])
+    expect(JSON.stringify(seen.integrate?.body)).not.toContain('did not approve')
   }, 30_000)
 })
