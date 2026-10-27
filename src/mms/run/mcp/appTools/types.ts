@@ -9,6 +9,7 @@ import type { AgentToolAccess } from '../../../agents/WorkspaceAccessPolicy'
 import type { DefinitionAuthority } from '../../../agentDefinitions/definitionGate'
 import type { BotAuthority } from '../../../../shared/bots/personal/authority'
 import type { BrowserExecutionBinding } from '../../../orchestrator/browser'
+import type { BrowserRuntimePort } from '../../../../shared/browser/runtime'
 import type { LlmToolEvent, StreamingLlmToolEvent } from '../../../harness/turnEvents'
 import type { ModeCeiling } from '../../types'
 import type { DelegationToolHost } from './delegation'
@@ -109,6 +110,11 @@ export interface AppToolTurn {
   actor: IntegrationActor
   /** The turn's trusted browser binding, with `vision` from the selected model. */
   browser?: BrowserExecutionBinding
+  /**
+   * The browser runtime the turn's browser tools run on, when its host supplies its own (an agent
+   * chat's shared browser); absent: the profile's (`AppToolHost.browserRuntime`).
+   */
+  browserRuntime?: BrowserRuntimePort
   /** Stages an applet for the response; absent when applets are off or the caller is a subagent. */
   onPublishApplet?: (source: unknown) => unknown
   enabledSkills: SkillDescriptor[]

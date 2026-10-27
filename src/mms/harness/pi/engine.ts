@@ -127,8 +127,11 @@ export interface PiRpcEngineOptions {
   /** Git Bash on Windows. */
   shellPath?: () => string | undefined
   compaction?: () => boolean
-  /** Mousse's tools for a thread, with their class (the gate and the barrier read it). */
-  mousseTools?: (threadId: string) => PiMousseTool[]
+  /**
+   * Mousse's tools for a thread, with their class (the gate and the barrier read it). `runId`: the
+   * turn they are sent for, so a definition's turn gets them as its loop would send them.
+   */
+  mousseTools?: (threadId: string, runId?: string) => PiMousseTool[]
   warmMs?: number
   readyDeadlineMs?: number
   commandDeadlineMs?: number
@@ -1317,7 +1320,7 @@ export class PiRpcEngine implements ProviderAdapter {
     const ref: ProviderRef = { ...baseRef, ...(thread.sessionId ? { sessionId: thread.sessionId } : {}) }
     if (thread.sessionId) sink.providerRef(ref)
     let builtins = !input.cwd ? [] : input.mode === 'plan' || input.child?.readOnly ? PI_READ_ONLY_BUILTINS : PI_ALL_BUILTINS
-    let tools = host.bridge?.mcp ? this.options.mousseTools?.(input.threadId) ?? [] : []
+    let tools = host.bridge?.mcp ? this.options.mousseTools?.(input.threadId, input.runId) ?? [] : []
     // An agent definition's turn offers exactly its grants (the policy's allowlist, else its effective
     // grants), and never a delegation tool: a definition delegates nothing, as on the legacy loop.
     if (host.definition) {
