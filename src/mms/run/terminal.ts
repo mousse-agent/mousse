@@ -45,10 +45,13 @@ export function writeTerminalRun(
   options: { resultText?: string; notice?: TerminalNotice } = {}
 ): RunRecord {
   return store.db.transaction(() => {
+    // A Stop an agent asked for ends the run as the agent's, wherever the end is written (the turn
+    // that was aborted, a Stop that settles locally, the reconciler, a paused run's end).
+    const agentStop = outcome?.interruptedBy === 'user' && run.outcome?.stopRequestedBy === 'agent'
     const merged =
       outcome || run.outcome
         ? (JSON.parse(
-            stableStringify({ ...(run.outcome ?? {}), ...(outcome ?? {}) })
+            stableStringify({ ...(run.outcome ?? {}), ...(outcome ?? {}), ...(agentStop ? { interruptedBy: 'agent' } : {}) })
           ) as RunOutcome)
         : undefined
     const next = store.casRunStatus({
@@ -89,7 +92,9 @@ export function writeTerminalRun(
  *
  * A run the user stopped is left out on purpose: a user's Stop publishes right away (D2's rule for
  * every delivery the user stops), and the user already knows the integration did not finish. That
- * includes reconciler rule 3, which ends a Stop that did not land as `interruptedBy: 'user'`. A run
+ * includes reconciler rule 3, which ends a Stop that did not land as `interruptedBy: 'user'`. A Stop an
+ * agent asked for (`interruptedBy: 'agent'`) is not left out: the user may not know the integration was
+ * cut off, so the thread still gets the row. A run
  * that completed has its outcome written by the executor. A run that already has an `integration_*`
  * row (the executor's own fallback wrote one before the run was ended) owes no second one.
  */

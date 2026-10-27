@@ -1,5 +1,6 @@
 import { EventEmitter } from 'node:events'
 import type { ExecutionBinding } from '../../shared/harness/types'
+import { isStricter, type PermissionMode } from '../../shared/permissionMode'
 import { narrowAgentAccess, type AgentAccessLevel } from '../../shared/settings'
 import { DaemonEpoch } from './DaemonEpoch'
 import { CommandRejection, fail, reject, RunStoreError } from './db/RunStoreError'
@@ -24,6 +25,7 @@ import {
   TERMINAL_EFFECT_STATUSES,
   TERMINAL_RUN_STATUSES,
   leaseOwner,
+  type AgentActor,
   type AttemptRecord,
   type DelegationRecord,
   type DelegationWake,
@@ -72,9 +74,29 @@ export type RunCommand =
        * run it creates in the same transaction, so the answers cannot be delivered twice or lost.
        */
       bindDelivery?: { requestIds: string[] }
+      /**
+       * Another thread's agent sent it (`thread_send`): the `agent.action` event is written with the run,
+       * and a paused thread refuses it (`thread_paused`) instead of ending the pause.
+       */
+      actor?: AgentActor
     }
-  | { kind: 'stop'; threadId: string; clientRequestId: string; runId: string }
-  | { kind: 'steer'; threadId: string; clientRequestId: string; runId: string }
+  | { kind: 'stop'; threadId: string; clientRequestId: string; runId: string; actor?: AgentActor }
+  | {
+      kind: 'steer'
+      threadId: string
+      clientRequestId: string
+      runId: string
+      actor?: AgentActor
+      /** The steer's length, for the audit row (never its text). */
+      textLength?: number
+      /**
+       * With `actor`: the permission mode the sender runs in. Decided inside the transaction against the
+       * mode the run is bound to: a run with no binding yet (it is still starting) is refused
+       * (`steer_target_not_ready`), and so is one bound to a looser mode (`ceiling_exceeded`), because a running
+       * turn cannot be narrowed. Absent with an `actor` reads as the strictest mode.
+       */
+      ceiling?: PermissionMode
+    }
 
 /** The delegation row a follow-up `send` writes with its run (the child thread is the command's). */
 export interface SendDelegation {
@@ -127,6 +149,11 @@ export interface StopRequest {
   requesterThreadId?: string
   /** Also cancels the runs a person queued on `threadId` (today's `clearQueue`). */
   clearQueue?: boolean
+  /**
+   * Another thread's agent asked for the Stop (`thread_interrupt`): everything it ends is recorded as the
+   * agent's (`interruptedBy: 'agent'`) and one `agent.action` event is written in the same transaction.
+   */
+  actor?: AgentActor
 }
 
 export interface StopResult {
@@ -441,7 +468,8 @@ export class RunEngine extends EventEmitter {
       // pause and its timer stay intact.
       const paused = this.store.getPausedRun(run.threadId)
       if (paused) {
-        if (isFencedSource(run.source)) fail('conflict', `Thread ${run.threadId} is paused by run ${paused.runId}.`)
+        // A message another thread's agent sent is never a person's: it waits for the pause to end on its own.
+        if (isFencedSource(run.source) || run.outcome?.sentByAgent) fail('conflict', `Thread ${run.threadId} is paused by run ${paused.runId}.`)
         this.endPause(paused.runId, 'user_message')
       }
       const attemptId =
@@ -994,22 +1022,26 @@ export class RunEngine extends EventEmitter {
 
       const activeRuns: StopResult['activeRuns'] = []
       const cancelledRuns: StopResult['cancelledRuns'] = []
+      // A Stop an agent asked for ends everything in the subtree as the agent's (`interruptedBy: 'agent'`).
+      const asAgent = request.actor !== undefined
       for (const run of this.store.listNonTerminalRuns().filter((entry) => depths.has(entry.threadId))) {
         // A paused run has no turn to abort: the Stop ends the pause, and with it the timer.
         if (run.status === 'paused') {
+          if (asAgent) this.noteStoppedByAgent(run)
           this.endPause(run.runId, 'stop')
           cancelledRuns.push({ threadId: run.threadId, runId: run.runId })
           continue
         }
         if (run.status === 'queued') {
           if (this.survivesStop(run, request.clearQueue === true)) continue
-          if (this.cancelQueuedRunInTransaction(run, request.reason, { interruptedBy: 'user' }, claimed))
+          if (this.cancelQueuedRunInTransaction(run, request.reason, { interruptedBy: asAgent ? 'agent' : 'user' }, claimed))
             cancelledRuns.push({ threadId: run.threadId, runId: run.runId })
           continue
         }
         if (!ACTIVE_STATUSES.has(run.status)) continue
+        // A Stop already asked for (by a person) stays theirs.
         if (!run.outcome?.stopRequested) {
-          const next = this.store.casRunOutcome({ runId: run.runId, expectedEpoch: run.epoch, outcomePatch: { stopRequested: true } })
+          const next = this.store.casRunOutcome({ runId: run.runId, expectedEpoch: run.epoch, outcomePatch: { stopRequested: true, ...(asAgent ? { stopRequestedBy: 'agent' as const } : {}) } })
           if (this.epochs.has(run.runId)) this.epochs.set(run.runId, next.epoch)
         }
         // A steer still waiting for the run it was meant for is part of what the Stop ends (the executor
@@ -1033,12 +1065,39 @@ export class RunEngine extends EventEmitter {
         delegations: [...running].sort((a, b) => depths.get(b.childThreadId)! - depths.get(a.childThreadId)!).map((delegation) => delegation.delegationId),
         acknowledgedRows
       }
+      // The audit row is part of the Stop: it exists exactly when the Stop does, and a replay writes none.
+      if (request.actor)
+        this.recordAgentAction(threadId, request.runId ?? null, request.actor, 'stopped_run', {
+          threads: threads.length,
+          activeRuns: activeRuns.length,
+          cancelledRuns: cancelledRuns.length
+        })
       this.putStopReceipt(key, commandKind, threadId, stopped)
       for (const run of activeRuns) this.store.db.afterCommit(() => this.emit('stop-requested', run))
       return stopped
     })
     this.cancelInFlight(claimed)
     return result
+  }
+
+  /**
+   * Writes the `agent.action` event of a change another thread's agent made, in the caller's
+   * transaction (SPEC §15.1): ids, counts and lengths, never message content.
+   */
+  private recordAgentAction(threadId: string, runId: string | null, actor: AgentActor, action: string, details: Record<string, string | number | boolean | null> = {}): void {
+    this.store.appendEvent({
+      threadId,
+      runId,
+      type: 'agent.action',
+      payload: { ...details, action, actorThreadId: actor.threadId, actorRunId: actor.runId, toolCallId: actor.toolCallId }
+    })
+  }
+
+  /** Marks a run a Stop is about to end as stopped by an agent; the terminal write turns `user` into `agent`. */
+  private noteStoppedByAgent(run: RunRecord): void {
+    if (run.outcome?.stopRequestedBy === 'agent') return
+    const next = this.store.casRunOutcome({ runId: run.runId, expectedEpoch: run.epoch, outcomePatch: { stopRequestedBy: 'agent' } })
+    if (this.epochs.has(run.runId)) this.epochs.set(run.runId, next.epoch)
   }
 
   /** A replayed Stop whose runs are still live and have no interrupt pending gets one again (M4); returns those runs. */
@@ -1645,6 +1704,9 @@ export class RunEngine extends EventEmitter {
       // Work started on the thread's behalf never runs beside a pause; only the resume itself does, and
       // only for the pause it was queued for (it may have ended meanwhile).
       if (paused && isFencedSource(command.source) && !resuming) return refuse('thread_paused')
+      // A message an agent sent never ends a pause the user's usage limit put there: it can stop the
+      // paused run first (`thread_interrupt`), and send once that is done.
+      if (paused && command.actor && !resuming) return refuse('thread_paused')
       if (resuming && (!paused || command.continuationOfRunId !== paused.runId)) return refuse('pause_ended')
       const refusal = this.continuationRefusal(command)
       // Not stored: the same `continue:<runId>` request succeeds once the user acknowledges.
@@ -1656,14 +1718,17 @@ export class RunEngine extends EventEmitter {
       if (command.bindDelivery && this.approvals.deliverableCount(command.bindDelivery.requestIds) === 0) return refuse('approvals_already_delivered')
       const settlement = command.settleApprovals ? this.approvals.settleForSend(command.threadId, command.settleApprovals) : null
       const continuationOf = command.continuationOfRunId
+      const outcome: RunOutcome = {
+        ...(continuationOf ? { continuationOf, ...(resuming ? { resumedFromPause: command.source === 'resume' ? 'auto' as const : 'user' as const } : {}) } : {}),
+        // Remembered with the run, so a message an agent sent is still known as one when it starts later.
+        ...(command.actor ? { sentByAgent: true as const, agentHops: command.actor.hops ?? 1 } : {})
+      }
       const run = store.createRun({
         threadId: command.threadId,
         source: command.source,
         clientRequestId: command.clientRequestId,
         userMessageId: command.userMessageId,
-        ...(continuationOf
-          ? { outcome: { continuationOf, ...(resuming ? { resumedFromPause: command.source === 'resume' ? 'auto' as const : 'user' as const } : {}) } }
-          : {})
+        ...(Object.keys(outcome).length ? { outcome } : {})
       })
       if (tracked) {
         // Whatever the caller recorded, the row is never wider than any earlier task of this thread.
@@ -1693,6 +1758,12 @@ export class RunEngine extends EventEmitter {
         endedPause = { runId: paused.runId, ...(paused.outcome?.pause?.resumeItemId ? { resumeItemId: paused.outcome.pause.resumeItemId } : {}) }
         this.endPause(paused.runId, !resuming ? 'user_message' : command.source === 'resume' ? 'resume' : 'resume_now')
       }
+      // The audit row is written with the run, so a message an agent sent is never without it.
+      if (command.actor)
+        this.recordAgentAction(command.threadId, run.runId, command.actor, 'sent_message', {
+          runId: run.runId,
+          ...(command.prompt !== undefined ? { length: command.prompt.length } : {})
+        })
       const sequence = store.maxSeq(command.threadId)
       this.putReceipt(command, 'accepted', { runId: run.runId, sequence, ...(endedPause ? { endedPause } : {}) })
       return { status: 'accepted', runId: run.runId, sequence, replayed: false, ...(endedPause ? { endedPause } : {}) }
@@ -1736,7 +1807,9 @@ export class RunEngine extends EventEmitter {
       const activeRunId = store.getActiveRun(threadId)?.runId ?? null
       // A Stop that names the paused run ends the pause: there is no turn to signal and nothing to mark.
       if (kind === 'stop' && run?.threadId === threadId && run.status === 'paused') {
+        if (command.actor) this.noteStoppedByAgent(run)
         this.endPause(runId, 'stop')
+        if (command.actor) this.recordAgentAction(threadId, runId, command.actor, 'stopped_run', { runId })
         const sequence = store.maxSeq(threadId)
         this.putReceipt(command, 'accepted', { runId, sequence })
         return { status: 'accepted', runId, sequence, replayed: false }
@@ -1753,14 +1826,28 @@ export class RunEngine extends EventEmitter {
         this.putReceipt(command, 'ignored', { runId, activeRunId, reason, sequence })
         return { status: 'ignored', reason, runId, activeRunId, sequence }
       }
+      // An agent's steer joins the live turn as it is: its authority is the run's, which the sender must not
+      // exceed. Decided here, with the run, so no start or binding can slip in between.
+      if (kind === 'steer' && command.actor) {
+        const binding = this.bindingForRun(runId)
+        const refuse = (reason: string): CommandResult => ({ status: 'rejected', reason, sequence: store.maxSeq(threadId) })
+        // A run that has not bound its turn yet has no mode to compare with: unknown, never "strictest".
+        if (!binding) return refuse('steer_target_not_ready')
+        if (isStricter(command.ceiling ?? 'ask', binding.policy.permissionMode ?? 'ask')) return refuse('ceiling_exceeded')
+      }
       if (kind === 'stop') {
         const next = store.casRunOutcome({
           runId,
           expectedEpoch: run.epoch,
-          outcomePatch: { stopRequested: true }
+          outcomePatch: { stopRequested: true, ...(command.actor ? { stopRequestedBy: 'agent' as const } : {}) }
         })
         if (this.epochs.has(runId)) this.epochs.set(runId, next.epoch)
       }
+      if (command.actor)
+        this.recordAgentAction(threadId, runId, command.actor, kind === 'stop' ? 'stopped_run' : 'steered_run', {
+          runId,
+          ...(command.kind === 'steer' && command.textLength !== undefined ? { length: command.textLength } : {})
+        })
       const sequence = store.maxSeq(threadId)
       this.putReceipt(command, 'accepted', { runId, sequence })
       store.db.afterCommit(() =>

@@ -243,6 +243,9 @@ export interface LlmChatOptions {
   /** Trusted internal seam for immutable user-created agent definitions. */
   trustedAgent?: TrustedAgentExecutionOptions
 
+  /** False: `/skill` mentions in the user's message load no skill (the message was written by another thread's agent). */
+  skillMentions?: false
+
   /**
    * Per-turn trusted browser binding. Root supplies source/profile/thread/turn
    * identity; models cannot create this object. Falls back to bindBrowserExecution.
@@ -638,7 +641,8 @@ export class LlmClient {
 
 
     const projectPath = options.projectPath ?? this.getProjectPath?.()
-    const userContent = extractLastUserText(messages)
+    // What another thread's agent wrote is never read for `/skill` mentions: only a person invokes a skill.
+    const userContent = options.skillMentions === false ? '' : extractLastUserText(messages)
     const cacheSessionId = getCacheSessionId(options.threadId)
     const streamInactivityTimeoutMs = resolveStreamInactivityTimeout(
       options.streamInactivityTimeoutMs

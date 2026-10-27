@@ -1,5 +1,7 @@
+import type { PermissionMode } from '../../shared/permissionMode'
 import type {
   Agent,
+  AgentOrigin,
   ChatMessage,
   NativeLlmContext,
   QueuedMessage,
@@ -22,7 +24,20 @@ export interface ActiveTurnControl {
   /** Notices (subagent results) the steers in `pendingSteer` carry, until the model reads them or the turn ends. */
   carriedSteers?: Array<{ inboxIds: string[]; effectId: string; text: string; subagentNotice?: SubagentNoticeItem[] }>
   /** What the last drain took (its texts and the carried entries among them), so a drained steer the provider could not take can be put back whole. */
-  lastDrained?: { parts: string[]; carried: NonNullable<ActiveTurnControl['carriedSteers']> }
+  lastDrained?: { parts: string[]; carried: NonNullable<ActiveTurnControl['carriedSteers']>; agent: AgentSteerEntry[] }
+  /**
+   * The steers in `pendingSteer` another thread's agent sent, with who sent them and the permission mode
+   * they may run in. A steer the turn never reads becomes a turn of its own: it keeps both, and is never
+   * merged into a person's text.
+   */
+  agentSteers?: AgentSteerEntry[]
+}
+
+/** A steer an agent sent into a live turn (`thread_steer`). */
+export interface AgentSteerEntry {
+  text: string
+  origin: AgentOrigin
+  permissionMode: PermissionMode
 }
 
 /** Mutable per-thread execution state owned by MMS. */

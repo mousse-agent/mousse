@@ -101,6 +101,11 @@ export interface TurnInput {
   continuation?: boolean
   /** Which turn the provider started this run is for, when it started several. */
   continuationId?: string
+  /**
+   * The admitted message was written by another thread's agent: no `/skill` mention in it loads a skill (only a
+   * person invokes one). Runtimes that read mentions themselves (the pi loop) skip them for this turn.
+   */
+  fromAgent?: true
   /** Text of the admitted user message; prompt-based adapters send it as the turn's prompt. */
   prompt: string
   /** Active pi-ai transcript, ending with the admitted user message. */

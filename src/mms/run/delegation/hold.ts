@@ -2,6 +2,7 @@ import { Delegations, DELEGATION_RESULT_MAX_CHARS, childResult } from '../Delega
 import { Inbox } from '../Inbox'
 import type { RunStore } from '../RunStore'
 import {
+  stoppedByPerson,
   TERMINAL_RUN_STATUSES,
   type DelegationRecord,
   type DelegationResult,
@@ -106,7 +107,7 @@ function deliveryStoppedByUser(store: RunStore, row: InboxRecord): boolean {
   const effect = store.db.statement('SELECT run_id FROM effects WHERE effect_id = ?').get(row.deliveredBy)
   const runId = typeof effect?.run_id === 'string' ? effect.run_id : null
   const run = runId ? store.getRun(runId) : null
-  return Boolean(run && TERMINAL_RUN_STATUSES.has(run.status) && run.outcome?.interruptedBy === 'user')
+  return Boolean(run && TERMINAL_RUN_STATUSES.has(run.status) && stoppedByPerson(run.outcome))
 }
 
 function actionableInbox(store: RunStore, threadId: string): boolean {
@@ -182,21 +183,53 @@ export function latestResultRun(store: RunStore, delegation: Pick<DelegationReco
 }
 
 /**
- * Keeps the final text of a subagent's run next to its terminal status, so a task that publishes
- * later (once the subagent stops waiting) still has it. Written in the run's terminal transaction;
- * only for runs that may become a result.
+ * A run another thread's agent can wait on: a message an agent sent (`mcp`), or the run that continues
+ * one (the resume after a usage-limit pause). Only these keep their final text outside a subagent: a
+ * person's own turns, a channel's and a schedule's, are not retained here.
+ */
+function waitableRun(store: RunStore, run: Pick<RunRecord, 'source' | 'outcome'>, depth = 0): boolean {
+  if (run.source === 'mcp' || run.outcome?.sentByAgent) return true
+  const earlier = run.outcome?.continuationOf
+  if (!earlier || depth >= 5) return false
+  const continued = store.getRun(earlier)
+  return continued ? waitableRun(store, continued, depth + 1) : false
+}
+
+/**
+ * Keeps the final text of a run next to its terminal status: a subagent's conversational run, so a task
+ * that publishes later (once the subagent stops waiting) still has it, and a run an agent sent, so
+ * `thread_wait` returns the text of the run it waited for and never another run's. Written in the
+ * run's terminal transaction; capped. Removed with the thread's other records (`deleteRunResults`).
  */
 export function recordRunResultText(store: RunStore, run: RunRecord, text: string | undefined): void {
-  if (!text?.trim() || !RESULT_SOURCES.has(run.source)) return
-  const lineage = store.db
-    .statement(`SELECT 1 FROM thread_lineage WHERE thread_id = ? AND relationship = 'subagent'`)
-    .get(run.threadId)
-  if (!lineage) return
+  if (!text?.trim()) return
+  if (!waitableRun(store, run)) {
+    if (!RESULT_SOURCES.has(run.source)) return
+    const lineage = store.db
+      .statement(`SELECT 1 FROM thread_lineage WHERE thread_id = ? AND relationship = 'subagent'`)
+      .get(run.threadId)
+    if (!lineage) return
+  }
   store.appendEvent({
     threadId: run.threadId,
     runId: run.runId,
     type: 'run.result',
     payload: { runId: run.runId, text: text.slice(0, DELEGATION_RESULT_MAX_CHARS) }
+  })
+}
+
+/**
+ * Removes the final texts kept for a thread's runs (all of them, or the given runs'): the thread was purged,
+ * or the turn that produced them was undone or deleted. Returns how many were removed.
+ */
+export function deleteRunResults(store: RunStore, threadId: string, runIds?: readonly string[]): number {
+  if (runIds && runIds.length === 0) return 0
+  return store.db.transaction(() => {
+    if (!runIds) return Number(store.db.statement(`DELETE FROM thread_events WHERE thread_id = ? AND type = 'run.result'`).run(threadId).changes ?? 0)
+    let removed = 0
+    for (const runId of runIds)
+      removed += Number(store.db.statement(`DELETE FROM thread_events WHERE thread_id = ? AND run_id = ? AND type = 'run.result'`).run(threadId, runId).changes ?? 0)
+    return removed
   })
 }
 

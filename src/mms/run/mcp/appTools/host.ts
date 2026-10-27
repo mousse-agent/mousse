@@ -29,6 +29,26 @@ export interface ThreadSearchHit {
 /** Ids, counts and lengths of an agent's action on another thread; never message content. `summary` is the transcript row's text. */
 export type AgentActionDetails = Record<string, string | number | boolean | null>
 
+/** What an agent's message to another thread became: a run that started now, or one that waits in the thread's queue. */
+export interface AgentSendResult {
+  runId: string
+  sequence: number
+  queued: boolean
+  /** The same `clientRequestId` was sent before: this is the first result, nothing new was started. */
+  replayed: boolean
+  /** The mode the message was sent in: Plan when the thread is kept in Plan, whatever the sender asked for. */
+  mode?: 'agent' | 'plan'
+}
+
+/** What a Stop or a steer an agent asked for did to the run it named. */
+export type AgentRunCommandResult =
+  | { status: 'accepted'; runId: string; sequence: number; replayed: boolean }
+  /** The run is not the thread's active run (it ended, or never ran): nothing was changed. `runStatus` is the named run's own status. */
+  | { status: 'ignored'; reason: string; runId?: string; activeRunId: string | null; runStatus?: string }
+  | { status: 'rejected'; reason: string }
+  /** A steer joins a run that is already running under a looser permission mode than the caller's own. */
+  | { status: 'ceiling_exceeded'; callerMode: PermissionMode; targetMode: PermissionMode }
+
 /**
  * What the app tools need from their owner. The profile's thread owner (the orchestrator) serves
  * the Mousse MCP server's registry; an in-process loop (`LlmClient`) serves its own registry built
@@ -50,7 +70,8 @@ export interface AppToolHost extends DelegationToolsHost {
   /** The run engine of the thread tools (`thread_read`, the queue, fork and merge-back); MCP only. */
   engine?: RunEngine
   listQueue?(threadId: string): unknown[]
-  enqueue?(threadId: string, input: { content: string; mode: 'agent' | 'plan' }): unknown
+  /** `permissionMode`: the mode the caller's run is bound to; the queued turn never runs looser than it (nor than the thread's own). */
+  enqueue?(threadId: string, input: { content: string; mode: 'agent' | 'plan' }, options?: { permissionMode?: PermissionMode }): unknown
   browserRuntime?(): BrowserRuntimePort | undefined
   skills?(): SkillsRegistry | undefined
   quickActions?: QuickActionTools
@@ -91,4 +112,25 @@ export interface AppToolHost extends DelegationToolsHost {
   threadActivity?(threadId: string): { queuedCount: number; pendingQuestions: PendingUserQuestions[] }
   /** Records a change an agent made to another thread: an `agent.action` event and a transcript row. */
   recordAgentAction?(target: { threadId: string; runId?: string }, actor: AgentActor, action: string, details?: AgentActionDetails): void
+  /**
+   * The transcript row that shows an `agent.action` event the engine already wrote in its own transaction
+   * ("Changed by an agent in thread …"). Never writes the event; only the call that made the change adds it.
+   */
+  showAgentAction?(target: { threadId: string }, actor: AgentActor, summary: string): void
+  /**
+   * Sends `content` to another thread as `actor`'s message (`thread_send`): labelled as an agent's, run under
+   * the caller's permission mode when that is stricter than the thread's, queued behind a running turn, never
+   * a steer, and refused while the thread waits on a question or approval or is paused. A retry with the same
+   * `clientRequestId` returns the first result.
+   */
+  sendToThread?(threadId: string, input: { content: string; mode: 'agent' | 'plan' }, options: { clientRequestId: string; actor: AgentActor }): Promise<AgentSendResult>
+  /**
+   * The first result of a send that `clientRequestId` already made to the thread, found without admitting anything; undefined
+   * when the key made none. A retry past the send cap is answered with it.
+   */
+  earlierSend?(threadId: string, clientRequestId: string): AgentSendResult | undefined
+  /** Stops run `runId` of another thread and what is below it, as `actor`'s Stop (`thread_interrupt`). */
+  stopRun?(threadId: string, runId: string, options: { clientRequestId: string; actor: AgentActor }): Promise<AgentRunCommandResult>
+  /** Steers run `runId` of another thread with `text` as `actor`'s message (`thread_steer`). */
+  steerRun?(threadId: string, runId: string, text: string, options: { clientRequestId: string; actor: AgentActor }): Promise<AgentRunCommandResult>
 }

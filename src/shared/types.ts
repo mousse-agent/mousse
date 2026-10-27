@@ -592,6 +592,8 @@ export interface ChatMessage {
   subagentNotice?: import('./subagents').SubagentNoticeItem[]
   /** Set on a user message a scheduled job sent, so the thread can show "Scheduled: <name>" instead of passing it off as typed. */
   scheduled?: { jobId: string; jobName?: string }
+  /** Set on a user message another thread's agent sent (`thread_send`), so the thread can say whose it is. */
+  origin?: AgentOrigin
   /**
    * A user message added to a turn that was already running (a steer), so it does not start a turn.
    * Older transcripts do not carry it.
@@ -810,10 +812,27 @@ export interface QueuedMessage {
   /** A mode this turn must not exceed, set by a daemon-side sender (a scheduled job); it only tightens. */
   permissionMode?: PermissionMode
   /**
-   * Set on the occurrence of a scheduled job that found its thread busy. The run drains with the
-   * job's model and origin; the ids travel on to the turn so its end completes the occurrence.
+   * Who the item is from when it is not a person. `schedule`: set on the occurrence of a scheduled job
+   * that found its thread busy; the run drains with the job's model and origin, and the ids travel on to
+   * the turn so its end completes the occurrence. `agent`: a message another thread's agent sent; it
+   * drains as that agent's message, so the turn's transcript row keeps saying so.
    */
-  origin?: { kind: 'schedule'; jobId: string; occurrenceKey: string; jobName?: string; selection?: ModelOverride }
+  origin?: { kind: 'schedule'; jobId: string; occurrenceKey: string; jobName?: string; selection?: ModelOverride } | AgentOrigin
+}
+
+/**
+ * The agent a message came from (SPEC §15.1): the thread and run that sent it. Stored on the user
+ * message the target thread shows, so a message an agent wrote never passes for one a person typed.
+ */
+export interface AgentOrigin {
+  kind: 'agent'
+  threadId: string
+  runId: string
+  /**
+   * How many agent messages in a row led to this one without a person in between (the sender's own count
+   * plus one). A message that would pass the limit is refused, so a chain of agents cannot run unwatched.
+   */
+  hops?: number
 }
 
 export interface ContextUsageCategory {

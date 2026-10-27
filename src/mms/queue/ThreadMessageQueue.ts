@@ -1,5 +1,6 @@
 import { v4 as uuidv4 } from 'uuid'
 import type {
+  AgentOrigin,
   ChatImageAttachment,
   ChatMode,
   QueuedMessage,
@@ -69,10 +70,16 @@ function normalizeClaim(raw: unknown): QueuedMessageClaim | undefined {
   }
 }
 
-/** The scheduled-job origin of an item, or undefined when it is absent or malformed (dropped like any unknown field). */
+/** The scheduled-job or agent origin of an item, or undefined when it is absent or malformed (dropped like any unknown field). */
 function normalizeOrigin(raw: unknown): QueuedMessage['origin'] {
   if (!raw || typeof raw !== 'object') return undefined
-  const origin = raw as Partial<NonNullable<QueuedMessage['origin']>>
+  const kind = (raw as { kind?: unknown }).kind
+  if (kind === 'agent') {
+    const agent = raw as Partial<AgentOrigin>
+    if (typeof agent.threadId !== 'string' || !agent.threadId || typeof agent.runId !== 'string' || !agent.runId) return undefined
+    return { kind: 'agent', threadId: agent.threadId, runId: agent.runId, ...(typeof agent.hops === 'number' && Number.isSafeInteger(agent.hops) && agent.hops >= 0 ? { hops: agent.hops } : {}) }
+  }
+  const origin = raw as Partial<Extract<NonNullable<QueuedMessage['origin']>, { kind: 'schedule' }>>
   if (origin.kind !== 'schedule') return undefined
   if (typeof origin.jobId !== 'string' || !origin.jobId || typeof origin.occurrenceKey !== 'string' || !origin.occurrenceKey) return undefined
   const selection = origin.selection
