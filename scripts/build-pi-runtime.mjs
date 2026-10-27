@@ -6,8 +6,8 @@
 //   mousse-extension.mjs                                           Mousse's extension, bundled on its own
 //   runtime.json                                                   the versions copied
 //
-// The Electron build aliases the package to a shim (electron.vite.config.ts), so the runtime is
-// launched from these files on disk; packaged builds unpack them from the asar (asarUnpack).
+// The runtime is launched from these files on disk, as its own process; packaged builds unpack
+// them from the asar (asarUnpack).
 import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { builtinModules } from 'node:module'
 import { dirname, isAbsolute, join, resolve } from 'node:path'

@@ -1,6 +1,6 @@
 # Mousse Subagent Audit
 
-> **Note:** the Agents tab (`AgentsPanel`, `AgentsTasksView`, `NamedAgents`), the Agents & Tasks window (`agentsTasksWindow.ts`) and `MousseAgentChat` were removed in #143. Findings below that name them are kept for history.
+> **Note:** the Agents tab (`AgentsPanel`, `AgentsTasksView`, `NamedAgents`), the Agents & Tasks window (`agentsTasksWindow.ts`) and `MousseAgentChat` were removed in #143. Findings below that name them are kept for history. So are those that name `LlmClient` (Mousse's in-process Pi loop) and `cursorPiProvider.ts`, both deleted in PR 4h: Pi connections now run on Pi's agent.
 
 **Date:** 2026-08-01  
 **Scope:** In-app Mousse subagents, external CLI agents, worktree lifecycle, task progress, persistence, integrations, renderer behavior, and CLI management.
