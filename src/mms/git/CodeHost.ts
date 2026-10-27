@@ -27,6 +27,8 @@ export interface CodeHost {
   listBaseBranches(cwd: string): Promise<PullRequestBaseBranches>
   /** The remote that points at the folder's repository, else `origin`, else the only remote; null when there is none. */
   remoteForRepository(cwd: string): Promise<string | null>
+  /** The default branch name already looked up for this folder, or undefined. Never contacts the host. */
+  cachedDefaultBranch(cwd: string): string | undefined
   /** The account the host's credential belongs to, or null when it cannot be read; cached for 10 minutes per host. */
   viewerLogin(cwd: string): Promise<string | null>
 }
