@@ -1112,7 +1112,9 @@ export class PiRpcEngine implements ProviderAdapter {
       // History the orchestrator handed over in the prompt (a provider switch, or a fork that could
       // not branch natively) stands in for any native session of the thread.
       const handedOver = input.historyHandedOver === true
-      if (saved?.pendingFork && handedOver) {
+      // Unplanned handoffs: whether a turn ran elsewhere since the branch is unknown, so the branch
+      // is not trusted and the raw history is handed over (as before native forks).
+      if (saved?.pendingFork && (handedOver || input.handoffUnplanned === true)) {
         // The prompt carries the parent's history: the branch (made before turns elsewhere, or before
         // a re-fork that did not happen) is not resumed beside it.
         this.save(input.threadId, undefined)

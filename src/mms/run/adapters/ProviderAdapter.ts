@@ -121,6 +121,12 @@ export interface TurnInput {
    * its place.
    */
   historyHandedOver?: boolean
+  /**
+   * Planning this turn's handoffs failed, so the turn carries its raw history only: whether a native
+   * session the runtime kept for the thread is still current (a fork's branch, with turns elsewhere
+   * since) is unknown, and such a session is not resumed.
+   */
+  handoffUnplanned?: boolean
   /** Aborted by the orchestrator on Stop, effect timeout or shutdown. */
   signal: AbortSignal
 }

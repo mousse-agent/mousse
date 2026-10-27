@@ -336,7 +336,7 @@ function createHashOf(text: string): string {
 }
 
 describe('a re-forked branch the thread moved past', () => {
-  it('is handed over, not resumed, after the thread ran a turn on another provider (through the orchestrator)', async () => {
+  it('is resumed with the delta of a turn on another provider (through the orchestrator)', async () => {
     const s = fixture()
     const priorHome = process.env.MOUSSE_HOME
     process.env.MOUSSE_HOME = s.dir
@@ -394,14 +394,14 @@ describe('a re-forked branch the thread moved past', () => {
     expect((await d.orch.send('Ask elsewhere', false, { threadId: fork.threadId, clientRequestId: 'claude' })).error).toBeUndefined()
     d.orch.setThreadModelOverride(fork.threadId, PI)
     expect((await d.orch.send('Back on pi', false, { threadId: fork.threadId, clientRequestId: 'back' })).error).toBeUndefined()
-    // The second branch misses the Claude turn: it is dropped, and the turn starts a new session with
-    // the history the switch handover put in the prompt.
-    expect(processFor).not.toHaveBeenCalledWith(expect.anything(), expect.anything(), 'branch-2', expect.anything())
+    // The switch back plans a delta (the Claude turn): Pi resumes the re-forked branch, which holds
+    // the parent's history, and the delta in the prompt adds what ran elsewhere.
     const last = processFor.mock.calls.at(-1)!
-    expect(last[2]).toBeUndefined()
-    expect(last[0]).toMatchObject({ historyHandedOver: true, nativeHistory: '' })
+    expect(last[2]).toBe('branch-2')
+    expect((last[0] as { historyHandedOver?: boolean }).historyHandedOver).toBeUndefined()
+    expect((last[0] as { prompt: string }).prompt).toContain('strategy="delta"')
+    expect((last[0] as { prompt: string }).prompt).toContain('answer elsewhere')
     expect(handOver).not.toHaveBeenCalled()
-    expect(JSON.parse(readFileSync(join(s.dir, 'threads.json'), 'utf8'))[fork.threadId]?.sessionId).not.toBe('branch-2')
   })
 
   it('resumes a re-forked branch whatever the failed or stopped turns left, unless the history was handed over', async () => {
@@ -539,7 +539,7 @@ describe('the resend after a fork’s first turn (review round 4, through the or
       const adapter = piAdapter(() => 'parent answer', { fork: 'native', historyInjection: 'prompt', containment: 'weak' }, 'parent')
       const base = adapter.startTurn.bind(adapter)
       let sourceId = ''
-      const received: Array<{ nativeHistory?: string; historyHandedOver?: boolean }> = []
+      const received: Array<{ nativeHistory?: string; historyHandedOver?: boolean; handoffUnplanned?: boolean; prompt?: string }> = []
       adapter.startTurn = async (input, sink, ctl, host) => {
         if (input.threadId === sourceId) {
           const result = await base(input, sink, ctl, host)
@@ -559,14 +559,16 @@ describe('the resend after a fork’s first turn (review round 4, through the or
       const fork = await d.engine.forkThread({ sourceThreadId: sourceId, clientRequestId: 'fork' })
       await d.orch.send('Continue', false, { threadId: fork.threadId, clientRequestId: 'try-1' })
       if (firstOutcome === 'stale') {
-        // A turn on another provider, then back: the switch hands the history over, the old branch is not resumed.
+        // A turn on another provider, then back. The switch plans a delta (what ran elsewhere since Pi's
+        // own session): Pi resumes the branch, which holds the parent's history, and gets the delta.
         d.orch.setThreadModelOverride(fork.threadId, CLAUDE)
         expect((await d.orch.send('Ask elsewhere', false, { threadId: fork.threadId, clientRequestId: 'claude' })).error).toBeUndefined()
         d.orch.setThreadModelOverride(fork.threadId, PI)
         expect((await d.orch.send('Back on pi', false, { threadId: fork.threadId, clientRequestId: 'back' })).error).toBeUndefined()
-        expect(received[1]).toMatchObject({ historyHandedOver: true })
-        expect(resumed).toEqual(['branch-1', undefined])
-        expect(JSON.parse(readFileSync(join(s.dir, 'threads.json'), 'utf8'))[fork.threadId]?.sessionId).not.toBe('branch-1')
+        expect(received[1]?.historyHandedOver).toBeUndefined()
+        expect(received[1]?.prompt).toContain('strategy="delta"')
+        expect(received[1]?.prompt).toContain('answer elsewhere')
+        expect(resumed).toEqual(['branch-1', 'branch-1'])
       } else {
         // The resend forks again from the parent and resumes that branch; nothing is handed over.
         expect((await d.orch.send('Continue', false, { threadId: fork.threadId, clientRequestId: 'try-2' })).error).toBeUndefined()
@@ -577,4 +579,72 @@ describe('the resend after a fork’s first turn (review round 4, through the or
       expect(handOver).not.toHaveBeenCalled()
     })
   }
+})
+
+describe('a switch back whose handoff cannot be planned', () => {
+  it('does not resume a pending fork branch: the raw history is handed over (through the orchestrator)', async () => {
+    const s = fixture()
+    const priorHome = process.env.MOUSSE_HOME
+    process.env.MOUSSE_HOME = s.dir
+    cleanups.push(() => {
+      if (priorHome === undefined) delete process.env.MOUSSE_HOME
+      else process.env.MOUSSE_HOME = priorHome
+    })
+    session(s.dir, 'parent', s.dir)
+    writeFileSync(join(s.dir, 'threads.json'), JSON.stringify({ source: { sessionId: 'parent', turnLeaves: { sourceTurn: 'leaf' } } }))
+    vi.spyOn(s.internals, 'start').mockResolvedValue(undefined)
+    let branches = 0
+    vi.spyOn(s.internals, 'send').mockImplementation(async (_thread, command) => {
+      if (command.type === 'get_entries') return { entries: [] }
+      if (command.type === 'clone') return { cancelled: false }
+      const id = `branch-${++branches}`
+      session(s.dir, id, s.dir)
+      return { sessionId: id }
+    })
+    const resumed: unknown[] = []
+    vi.spyOn(s.internals, 'processFor').mockImplementation(async (...args: unknown[]) => {
+      resumed.push(args[2])
+      return { thread: {}, resumed: true }
+    })
+    const handOver = vi.spyOn(s.internals as unknown as { handOver(...args: unknown[]): Promise<unknown> }, 'handOver').mockResolvedValue({ thread: {}, resumed: false })
+    let forkTurns = 0
+    vi.spyOn(s.internals, 'runTurn').mockImplementation(async () => {
+      forkTurns += 1
+      if (forkTurns === 1) throw Object.assign(new Error('rate limited'), { code: 'rate_limited' })
+      return { text: 'back reply', aborted: false, providerRef: { provider: 'openai' } }
+    })
+    const adapter = piAdapter(() => 'parent answer', { fork: 'native', historyInjection: 'prompt', containment: 'weak' }, 'parent')
+    const base = adapter.startTurn.bind(adapter)
+    let sourceId = ''
+    const received: Array<{ nativeHistory?: string; handoffUnplanned?: boolean }> = []
+    adapter.startTurn = async (input, sink, ctl, host) => {
+      if (input.threadId === sourceId) {
+        const result = await base(input, sink, ctl, host)
+        result.providerRef = { ...result.providerRef!, nativeTurnId: 'sourceTurn' }
+        sink.providerRef(result.providerRef)
+        return result
+      }
+      received.push(input)
+      return s.engine.startTurn(input, sink, ctl, host)
+    }
+    adapter.forkSession = (ref, ordinal, target) => s.engine.forkSession(ref, ordinal, target)
+    const d = phase6Daemon(s.dir, [adapter, claudeAdapter(() => 'answer elsewhere')])
+    cleanups.push(() => d.stop())
+    sourceId = d.store.createThread('Source').id
+    d.orch.setThreadModelOverride(sourceId, PI)
+    expect((await d.orch.send('Parent request', false, { threadId: sourceId, clientRequestId: 'parent' })).error).toBeUndefined()
+    const fork = await d.engine.forkThread({ sourceThreadId: sourceId, clientRequestId: 'fork' })
+    await d.orch.send('Continue', false, { threadId: fork.threadId, clientRequestId: 'try-1' })
+    d.orch.setThreadModelOverride(fork.threadId, CLAUDE)
+    expect((await d.orch.send('Ask elsewhere', false, { threadId: fork.threadId, clientRequestId: 'claude' })).error).toBeUndefined()
+    d.orch.setThreadModelOverride(fork.threadId, PI)
+    vi.spyOn(d.engine.handoffs, 'plan').mockImplementation(() => { throw new Error('handoff planner unavailable') })
+    await d.orch.send('Back on pi', false, { threadId: fork.threadId, clientRequestId: 'back' })
+    expect(received[1]?.handoffUnplanned).toBe(true)
+    expect(received[1]?.nativeHistory).toContain('answer elsewhere')
+    // The stale branch is dropped; the raw history (with the turn elsewhere) is handed over.
+    expect(resumed).toEqual(['branch-1'])
+    expect(handOver).toHaveBeenCalledTimes(1)
+    expect(JSON.parse(readFileSync(join(s.dir, 'threads.json'), 'utf8'))[fork.threadId]?.sessionId).not.toBe('branch-1')
+  })
 })

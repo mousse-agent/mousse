@@ -2457,6 +2457,8 @@ export class OrchestratorService extends EventEmitter {
     images: ChatImageAttachment[] | undefined
     mode: ChatMode
     modelOverride: ThreadSession['modelOverride']
+    /** Set when planning failed and the turn keeps its raw history. */
+    planning?: { failed: boolean }
   }): Promise<TurnHandoffs | null> {
     const engine = this.runEngine
     const runId = input.runId
@@ -2518,6 +2520,7 @@ export class OrchestratorService extends EventEmitter {
         })
       }
     } catch (error) {
+      if (input.planning) input.planning.failed = true
       console.warn('run engine handoff planning failed; the turn keeps its raw history', {
         runId,
         error: error instanceof Error ? error.message : String(error)
@@ -5972,9 +5975,10 @@ export class OrchestratorService extends EventEmitter {
           compactTranscript()
         }
       }
+      const planning = { failed: false }
       handoffs = await this.planTurnHandoffs({
         session, runId: engineRunId, resolved: instance, selection: selectedModel, previousModel, promptRuntime,
-        content: userContent, images, mode, modelOverride
+        content: userContent, images, mode, modelOverride, planning
       })
       if (handoffs) this.recordHandoffMarkers(session, handoffs, switchMarker, turnId, selectedModel)
       const activeMessages = getActiveMessages(this.nativeContext)
@@ -6002,6 +6006,7 @@ export class OrchestratorService extends EventEmitter {
           ? handoffs?.replaceHistory ? '' : nativeAgentHistory(this.nativeContext, turnNativeStartBoundary.messageIndex)
           : undefined,
         ...(promptRuntime && handoffs?.historyHandedOver ? { historyHandedOver: true } : {}),
+        ...(promptRuntime && planning.failed ? { handoffUnplanned: true } : {}),
         signal: turn.abort.signal
       }
       const turnSink: TurnSink = {
