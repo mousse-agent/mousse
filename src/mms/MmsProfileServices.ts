@@ -73,6 +73,11 @@ import type { MmsOptions } from './MmsOptions'
 import { MmsProfilePlatform } from './platform/MmsProfilePlatform'
 import { OwnedWorkBarrier } from './execution/OwnedWorkBarrier'
 import { ResourceLifecycleCoordinator } from './lifecycle/ResourceLifecycleCoordinator'
+import { clearCleanupMarker, StorageCleanupService } from './lifecycle/StorageCleanupService'
+import { StoragePolicyStore } from './lifecycle/StoragePolicyStore'
+import { StorageSweepClock } from './lifecycle/sweepClock'
+import { threadHasPendingWork } from './lifecycle/threadIdle'
+import { listPendingQueue } from './queue/ThreadMessageQueue'
 import { existsSync } from 'node:fs'
 import { settleThreadMutationOwnership } from './queue/ThreadExecutionLease'
 import type { TaskLifecycleRecord } from '../shared/resourceLifecycle'
@@ -119,6 +124,9 @@ export class MmsProfileServices {
   readonly threads: ThreadDataStore
   readonly lifecycle: ResourceLifecycleCoordinator
   readonly undoRetention: UndoRetentionSweeper
+  readonly storagePolicy: StoragePolicyStore
+  /** Storage cleanup rules: the one scheduler for worktree retirement and the trash sweep. */
+  readonly storageCleanup: StorageCleanupService
   readonly orchestrator: OrchestratorService
   readonly scheduled: ScheduledJobService
   readonly channels: ChannelService
@@ -527,6 +535,7 @@ export class MmsProfileServices {
         }
       },
       projectPurged: (record) => {
+        clearCleanupMarker(this.threads.lifecycleStore, record.taskId)
         this.threads.projectPurgedIndex(record)
         this.threadRuntimes.disposeRuntime(record.taskId)
         this.orchestrator.markThreadDeleted(record.taskId)
@@ -536,6 +545,20 @@ export class MmsProfileServices {
       }
     })
     this.undoRetention = new UndoRetentionSweeper(this.threads.lifecycleStore)
+    const storageClock = new StorageSweepClock(this.threads.lifecycleStore.root)
+    this.storagePolicy = new StoragePolicyStore(this.threads.lifecycleStore, storageClock, () =>
+      this.storageCleanup.scheduleAfterPolicyChange()
+    )
+    this.storageCleanup = new StorageCleanupService({
+      store: this.threads.lifecycleStore,
+      threads: this.threads,
+      purge: this.lifecycle.cleanup,
+      policy: this.storagePolicy,
+      clock: storageClock,
+      idle: (threadId) => this.threadPendingWork(threadId),
+      installationHome: shared.installationHome,
+      codeHost: this.gitService.codeHost
+    })
     this.wireServiceEvents()
     void opts?.headless
   }
@@ -568,7 +591,10 @@ export class MmsProfileServices {
           'rpc:threads.delete',
           'rpc:threads.trash',
           'rpc:threads.restore',
-          'rpc:threads.purge'
+          'rpc:threads.purge',
+          // A manual storage run purges trash through this same idle check, and a dry run previews it; their own request is not other work.
+          'rpc:storage.cleanup.run',
+          'rpc:storage.cleanup.plan'
         ].includes(key)
     )
     if (activeRequests.length) {
@@ -585,6 +611,32 @@ export class MmsProfileServices {
     if (['trashed', 'purge-started'].includes(root.state))
       this.threads.lifecycleStore.withCleanupSettlement(taskId, settle)
     else settle()
+  }
+
+  /** Why a thread is not idle for storage cleanup, or undefined. Looks only at what is already loaded. */
+  private threadPendingWork(threadId: string): string | undefined {
+    return threadHasPendingWork(
+      {
+        orchestrator: this.orchestrator,
+        runEngine: this.runEngine,
+        pendingQueueLength: (id) => listPendingQueue(this.threads.loadMessageQueue(id)).length,
+        questions: this.questions,
+        ptyManager: this.ptyManager,
+        threadRuntimes: this.threadRuntimes,
+        executionBusy: (ids) => {
+          try { this.platform.chats.assertLifecycleIdle(new Set(ids)) } catch { return 'A chat is running' }
+          try { this.platform.workflowRuns.assertLifecycleIdle(ids) } catch { return 'A workflow is running or waiting' }
+          return undefined
+        },
+        listThreads: () => this.threads.listAllThreads()
+      },
+      threadId
+    )
+  }
+
+  /** The "Remove worktrees of deleted threads" rule; an unreadable policy keeps today's behaviour. */
+  private removesWorktreesWithDeletedThreads(): boolean {
+    try { return this.storagePolicy.policy().worktrees.removeWithDeletedThreads } catch { return true }
   }
 
   private lifecycleOwnedTasks(taskId: string): TaskLifecycleRecord[] {
@@ -642,7 +694,7 @@ export class MmsProfileServices {
       operationId: this.resolveLifecycleOperationId(taskId, 'trash', operationId),
       expectedGeneration
     })
-    if (record.state === 'trashed') {
+    if (record.state === 'trashed' && this.removesWorktreesWithDeletedThreads()) {
       try {
         await this.lifecycle.cleanup.retireTrashed(taskId)
       } catch (error) {
@@ -753,6 +805,7 @@ export class MmsProfileServices {
   /** Close admission synchronously, before any teardown await can admit another request. */
   beginShutdown(): void {
     void this.undoRetention.stop()
+    void this.storageCleanup.stop()
     void this.lifecycle.cleanup.stop()
     this.requests.beginShutdown()
     // Ends open and late window speech waits now, even when Net never started and so never closes
@@ -847,7 +900,8 @@ export class MmsProfileServices {
     this.questions.markInterruptedByDaemonRestart()
     await this.platform.workflowRuns.startRecovery()
     this.undoRetention.start()
-    this.lifecycle.cleanup.start()
+    // The storage service is the only scheduler; it runs the trash sweep inside its own run.
+    this.storageCleanup.start()
 
     // Headless-safe: reclaim abandoned claims and drain pending normal work without the GUI.
     // Non-blocking; live peer ownership is never stolen.
@@ -1064,6 +1118,7 @@ export class MmsProfileServices {
     // later owner from even receiving shutdown.
     const cleanups = [
       () => this.undoRetention.stop(),
+      () => this.storageCleanup.stop(),
       () => this.lifecycle.cleanup.stop(),
       () => this.platform.dispose(),
       () => this.scheduled.shutdown(),

@@ -615,6 +615,12 @@ const api = {
       return () => ipcRenderer.removeListener('skills:changed', handler)
     }
   },
+  storage: {
+    policy: (): Promise<{ trash: import('../shared/resourceLifecycle').TrashRetentionPolicy; trashSweepStatus: { suspended: boolean; reason?: string }; policy: import('../shared/storage').StoragePolicy; clockSuspended: boolean }> => storageInvoke('storage:policy'),
+    configure: (policy: import('../shared/storage').StoragePolicy): Promise<{ policy: import('../shared/storage').StoragePolicy }> => storageInvoke('storage:configure', policy),
+    cleanupRun: (): Promise<{ report: import('../shared/storage').StorageCleanupReport }> => storageInvoke('storage:cleanupRun'),
+    cleanupLastReport: (): Promise<{ report: import('../shared/storage').StorageCleanupReport | null }> => storageInvoke('storage:cleanupLastReport')
+  },
   workspace: {
     getStatus: (threadId: string): Promise<unknown> => ipcRenderer.invoke('workspace:getStatus', threadId),
     restore: (threadId: string, expectedJournalGeneration?: number): Promise<unknown> =>
@@ -675,7 +681,7 @@ const api = {
     select: (threadId: string): Promise<void> => ipcRenderer.invoke('threads:select', threadId),
     delete: (threadId: string): Promise<void> => storageInvoke('threads:delete', threadId),
     restore: (threadId: string): Promise<unknown> => storageInvoke('threads:restore', threadId),
-    purge: (threadId: string, options?: { preview?: boolean; operationId?: string; expectedGeneration?: number; previewDigest?: string; discard?: boolean }): Promise<{ preview?: import('../shared/resourceLifecycle').LifecyclePurgePreview; lifecycle?: import('../shared/resourceLifecycle').TaskLifecycleRecord }> => storageInvoke('threads:purge', threadId, options),
+    purge: (threadId: string, options?: { preview?: boolean; operationId?: string; expectedGeneration?: number; previewDigest?: string; discard?: boolean }): Promise<{ preview?: import('../shared/resourceLifecycle').LifecyclePurgePreview; reclaim?: { bytes: number; estimated: boolean; partial: boolean }; lifecycle?: import('../shared/resourceLifecycle').TaskLifecycleRecord }> => storageInvoke('threads:purge', threadId, options),
     inventory: (threadId?: string): Promise<{ lifecycles: import('../shared/resourceLifecycle').TaskLifecycleRecord[]; taskNames: Record<string, string>; trashPolicy: import('../shared/resourceLifecycle').TrashRetentionPolicy; trashSweepStatus: { suspended: boolean; reason?: string } }> => storageInvoke('threads:inventory', threadId),
     configureTrash: (policy: { graceDays: number; automaticPurge: boolean }): Promise<unknown> => storageInvoke('threads:configureTrash', policy),
     rename: (threadId: string, name: string): Promise<Thread> =>

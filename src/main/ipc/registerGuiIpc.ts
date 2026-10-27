@@ -1050,6 +1050,11 @@ export function registerGuiIpc(
   )
   registerStorageHandler('threads:inventory', async (_e, threadId?: string) => guiMms.request('threads.inventory', { threadId }))
   registerStorageHandler('threads:configureTrash', async (_e, policy: { graceDays: number; automaticPurge: boolean }) => guiMms.request('threads.configureTrash', policy))
+  registerStorageHandler('storage:policy', async () => guiMms.request('storage.policy', {}))
+  registerStorageHandler('storage:configure', async (_e, policy: unknown) => guiMms.request('storage.configure', { policy }))
+  // A run may purge large trees; it must not hit the 60 s default.
+  registerStorageHandler('storage:cleanupRun', async () => guiMms.request('storage.cleanup.run', {}, 15 * 60_000))
+  registerStorageHandler('storage:cleanupLastReport', async () => guiMms.request('storage.cleanup.lastReport', {}))
 
   registerHandler('projects:list', async () => {
     const res = await guiMms.request<{ projects: unknown[] }>('projects.list')
