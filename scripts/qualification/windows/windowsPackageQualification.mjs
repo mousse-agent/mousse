@@ -41,7 +41,8 @@ export const REVIEWED_ASAR_SHA256 =
   'ABD6769ECF92657F0F54F655F61B6C77A990FD41870366E9F1C68ADE6D8A99EE'
 export const REVIEWED_ASAR_BYTES = 209_391_401
 
-export const PROTOCOL_VERSION = 1
+/** The daemon protocol (`MMS_PROTOCOL_VERSION`), kept in sync by `tests/protocolVersionConstants`. */
+export const PROTOCOL_VERSION = 2
 export const MAX_FRAME_BYTES = 4 * 1024 * 1024
 const REQUESTED_CAPABILITIES = [
   'profiles-v1',

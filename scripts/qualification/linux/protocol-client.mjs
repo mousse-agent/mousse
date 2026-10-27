@@ -8,7 +8,8 @@ import { createConnection } from 'node:net'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 
-export const MMS_PROTOCOL_VERSION = 1
+/** The daemon protocol (`MMS_PROTOCOL_VERSION`), kept in sync by `tests/protocolVersionConstants`. */
+export const MMS_PROTOCOL_VERSION = 2
 export const MMS_PROTOCOL_MAX_FRAME_BYTES = 4 * 1024 * 1024
 export const QUAL_CAPABILITIES = [
   'profiles-v1',
