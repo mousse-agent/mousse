@@ -114,6 +114,12 @@ export interface TurnInput {
    * turn hands back a fresh copy (`RecoveredContext.nativeHistory`).
    */
   nativeHistory?: string
+  /**
+   * The thread's history reached the runtime in the prompt, standing in for its transcript (a
+   * provider switch's handover): `nativeHistory` is then empty, and no native session the runtime
+   * kept for the thread may be resumed in its place.
+   */
+  historyReplaced?: boolean
   /** Aborted by the orchestrator on Stop, effect timeout or shutdown. */
   signal: AbortSignal
 }

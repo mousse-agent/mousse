@@ -226,6 +226,20 @@ function prepareSession(dir: string, sessionId: string, cwd: string): boolean {
   }
 }
 
+/**
+ * The thread's history (`nativeAgentHistory`: `{summary, messages}` as JSON, or empty) holds only
+ * user messages: what a fork thread holds after first turns that failed or stopped before a reply.
+ */
+function onlyUserMessages(history: string): boolean {
+  if (!history) return true
+  try {
+    const parsed = JSON.parse(history) as { summary?: unknown; messages?: Array<{ role?: unknown }> }
+    return !parsed.summary && Array.isArray(parsed.messages) && parsed.messages.every((message) => message?.role === 'user')
+  } catch {
+    return false
+  }
+}
+
 /** A Pi process failed before or during a turn in a way Mousse must not paper over. */
 function protocolError(instanceId: string, message: string): AppError {
   return harnessAppError({ code: 'protocol', message, instanceId })
@@ -1112,11 +1126,13 @@ export class PiRpcEngine implements ProviderAdapter {
       mkdirSync(cwd, { recursive: true })
       const history = input.nativeHistory ?? ''
       let saved: SavedThread | undefined = this.saved()[input.threadId]
-      // The turn right after `forkSession` resumes the branch whatever the thread's history says (a
-      // resend after a failed or stopped first turn holds that turn's message, and the branch was
-      // forked again for it). Any later turn of the thread consumes the exemption.
-      const fresh = this.freshForks.delete(input.threadId)
-      const matches = saved?.historyFingerprint === fingerprint(history)
+      // The turn right after `forkSession` resumes the branch although the thread's history is no
+      // longer empty, but only when what it holds is the resent message(s): a fork thread starts with
+      // no history, and a first turn that failed or stopped leaves only its user message. A turn that
+      // ran anywhere (another provider included) left a reply, and then the branch is stale. Any
+      // later turn of the thread consumes the exemption.
+      const fresh = this.freshForks.delete(input.threadId) && onlyUserMessages(history) && !input.historyReplaced
+      const matches = saved?.historyFingerprint === fingerprint(history) && !input.historyReplaced
       if (saved?.pendingFork && !fresh && !matches) {
         // A branch the thread has moved past (a failed first turn, then turns elsewhere, or a re-fork
         // that did not happen): resuming it would lose those turns. The history is handed over.

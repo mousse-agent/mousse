@@ -21,7 +21,7 @@ import { piCredentialSubject, piRpcProfileOptions, type PiProfileAuth } from '..
 import { PiRpcEngine } from '../../src/mms/harness/pi/engine'
 import { piRuntimePaths } from '../../src/mms/harness/pi/launch'
 import { writePiAuth, type PiOAuthSource } from '../../src/mms/harness/pi/oauthBroker'
-import { phase6Daemon, piAdapter, PI } from '../run/phase6Fixture'
+import { CLAUDE, claudeAdapter, phase6Daemon, piAdapter, PI } from '../run/phase6Fixture'
 
 const cleanups: Array<() => unknown> = []
 afterEach(async () => {
@@ -334,3 +334,103 @@ describe('review round 3', () => {
 function createHashOf(text: string): string {
   return createHash('sha256').update(text).digest('hex')
 }
+
+describe('a re-forked branch the thread moved past', () => {
+  it('is handed over, not resumed, after the thread ran a turn on another provider (through the orchestrator)', async () => {
+    const s = fixture()
+    const priorHome = process.env.MOUSSE_HOME
+    process.env.MOUSSE_HOME = s.dir
+    cleanups.push(() => {
+      if (priorHome === undefined) delete process.env.MOUSSE_HOME
+      else process.env.MOUSSE_HOME = priorHome
+    })
+    session(s.dir, 'parent', s.dir)
+    writeFileSync(join(s.dir, 'threads.json'), JSON.stringify({ source: { sessionId: 'parent', turnLeaves: { sourceTurn: 'leaf' } } }))
+    vi.spyOn(s.internals, 'start').mockResolvedValue(undefined)
+    let branches = 0
+    vi.spyOn(s.internals, 'send').mockImplementation(async (_thread, command) => {
+      if (command.type === 'get_entries') return { entries: [] }
+      if (command.type === 'clone') return { cancelled: false }
+      const id = `branch-${++branches}`
+      session(s.dir, id, s.dir)
+      return { sessionId: id }
+    })
+    const processFor = vi.spyOn(s.internals, 'processFor').mockResolvedValue({ thread: {}, resumed: true })
+    const handOver = vi.spyOn(s.internals as unknown as { handOver(...args: unknown[]): Promise<unknown> }, 'handOver').mockResolvedValue({ thread: {}, resumed: false })
+    vi.spyOn(s.internals, 'runTurn').mockResolvedValue({ text: 'back on pi', aborted: false, providerRef: { provider: 'openai' } })
+    const pi = piAdapter(() => 'parent answer', { fork: 'native', historyInjection: 'prompt', containment: 'weak' }, 'parent')
+    const base = pi.startTurn.bind(pi)
+    let sourceId = ''
+    let forkTurns = 0
+    pi.startTurn = async (input, sink, ctl, host) => {
+      if (input.threadId === sourceId) {
+        const result = await base(input, sink, ctl, host)
+        result.providerRef = { ...result.providerRef!, nativeTurnId: 'sourceTurn' }
+        sink.providerRef(result.providerRef)
+        return result
+      }
+      forkTurns += 1
+      // The resend after the failed first turn re-forks, then fails before the engine runs it.
+      if (forkTurns === 2) throw Object.assign(new Error('rate limited'), { code: 'rate_limited' })
+      return s.engine.startTurn(input, sink, ctl, host)
+    }
+    pi.forkSession = async (ref, ordinal, target) => {
+      const branched = await s.engine.forkSession(ref, ordinal, target)
+      if (branches === 1) rmSync(join(s.dir, 'sessions', '2026-10-27T00-00-00-000Z_branch-1.jsonl'))
+      return branched
+    }
+    const claude = claudeAdapter(() => 'answer elsewhere')
+    const d = phase6Daemon(s.dir, [pi, claude])
+    cleanups.push(() => d.stop())
+    sourceId = d.store.createThread('Source').id
+    d.orch.setThreadModelOverride(sourceId, PI)
+    expect((await d.orch.send('Parent request', false, { threadId: sourceId, clientRequestId: 'parent' })).error).toBeUndefined()
+    const fork = await d.engine.forkThread({ sourceThreadId: sourceId, clientRequestId: 'fork' })
+    expect((await d.orch.send('Continue', false, { threadId: fork.threadId, clientRequestId: 'try-1' })).error?.code).toBe('binding_stale')
+    expect((await d.orch.send('Continue', false, { threadId: fork.threadId, clientRequestId: 'try-2' })).error).toBeTruthy()
+    expect(branches).toBe(2)
+    // A turn on another provider, then back to Pi's agent.
+    d.orch.setThreadModelOverride(fork.threadId, CLAUDE)
+    expect((await d.orch.send('Ask elsewhere', false, { threadId: fork.threadId, clientRequestId: 'claude' })).error).toBeUndefined()
+    d.orch.setThreadModelOverride(fork.threadId, PI)
+    expect((await d.orch.send('Back on pi', false, { threadId: fork.threadId, clientRequestId: 'back' })).error).toBeUndefined()
+    // The second branch misses the Claude turn: it is dropped, and the turn starts a new session with
+    // the history the switch handover put in the prompt.
+    expect(processFor).not.toHaveBeenCalledWith(expect.anything(), expect.anything(), 'branch-2', expect.anything())
+    const last = processFor.mock.calls.at(-1)!
+    expect(last[2]).toBeUndefined()
+    expect(last[0]).toMatchObject({ historyReplaced: true, nativeHistory: '' })
+    expect(handOver).not.toHaveBeenCalled()
+    expect(JSON.parse(readFileSync(join(s.dir, 'threads.json'), 'utf8'))[fork.threadId]?.sessionId).not.toBe('branch-2')
+  })
+
+  it('honours a fresh re-fork only while the history holds nothing but resent messages', async () => {
+    const s = fixture()
+    session(s.dir, 'parent', s.dir)
+    writeFileSync(join(s.dir, 'threads.json'), JSON.stringify({ source: { sessionId: 'parent', turnLeaves: { sourceTurn: 'leaf' } } }))
+    vi.spyOn(s.internals, 'start').mockResolvedValue(undefined)
+    let branches = 0
+    vi.spyOn(s.internals, 'send').mockImplementation(async (_thread, command) => {
+      if (command.type === 'get_entries') return { entries: [] }
+      if (command.type === 'clone') return { cancelled: false }
+      const id = `branch-${++branches}`
+      session(s.dir, id, s.dir)
+      return { sessionId: id }
+    })
+    const processFor = vi.spyOn(s.internals, 'processFor').mockResolvedValue({ thread: {}, resumed: true })
+    const handOver = vi.spyOn(s.internals as unknown as { handOver(...args: unknown[]): Promise<unknown> }, 'handOver').mockResolvedValue({ thread: {}, resumed: false })
+    vi.spyOn(s.internals, 'runTurn').mockResolvedValue({ text: 'ok', aborted: false })
+    const ref = { provider: 'openrouter', sessionId: 'parent', nativeTurnId: 'sourceTurn', model: 'm' }
+    const history = (roles: string[]) => JSON.stringify({ messages: roles.map((role) => ({ role, content: role })) })
+    const run = (nativeHistory: string) => s.engine.startTurn({ threadId: 'fork', instanceId: 'pi:openrouter', llmProvider: 'openrouter', model: 'm', mode: 'agent', prompt: 'Continue', messages: [], nativeHistory, cwd: s.dir, signal: new AbortController().signal } as never, { providerRef: () => {} } as never, {} as never, {} as never)
+    // The resend: only the failed first turn's message.
+    await s.engine.forkSession(ref, 1, { threadId: 'fork' })
+    await run(history(['user']))
+    expect(processFor.mock.calls.at(-1)?.[2]).toBe('branch-1')
+    // A re-fork whose thread meanwhile got a reply elsewhere: handed over.
+    await s.engine.forkSession(ref, 1, { threadId: 'fork' })
+    await run(history(['user', 'assistant', 'user']))
+    expect(handOver).toHaveBeenCalledTimes(1)
+    expect(JSON.parse(readFileSync(join(s.dir, 'threads.json'), 'utf8')).fork?.sessionId).not.toBe('branch-2')
+  })
+})
