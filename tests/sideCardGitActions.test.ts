@@ -21,6 +21,7 @@ import {
   gitActionLock,
   prefillAmendDraft,
   pullRequestRow,
+  pullRequestScope,
   pushButtonModel,
   pushFailedMessage,
   releaseForcedAmend
@@ -72,6 +73,33 @@ const found = (patch: Partial<GitPullRequestInfo> = {}): GitPullRequestLookup =>
 })
 
 const file = { path: 'a.ts', status: 'modified' as const, staged: false }
+
+describe('what Create PR captures', () => {
+  it('is the thread\'s own folder and the thread itself, for a worktree thread and for one on the project\'s checkout', () => {
+    // Both kinds of thread are asked about by thread: the daemon resolves a worktree or the project folder.
+    for (const path of ['/worktrees/t1', '/repo/a']) {
+      expect(pullRequestScope({ path, branch: 'feature/login', projectId: 'p1', ownThreadId: 't1' })).toEqual({
+        threadId: 't1',
+        originThreadId: 't1',
+        path,
+        branch: 'feature/login'
+      })
+    }
+  })
+
+  it('is the project\'s folder, with no origin thread, for a new chat that has no folder of its own', () => {
+    expect(pullRequestScope({ path: '/repo/a', branch: 'feature/login', projectId: 'p1', ownThreadId: null })).toEqual({
+      projectId: 'p1',
+      originThreadId: null,
+      path: '/repo/a',
+      branch: 'feature/login'
+    })
+  })
+
+  it('is nothing without a branch', () => {
+    expect(pullRequestScope({ path: '/repo/a', branch: null, projectId: 'p1', ownThreadId: 't1' })).toBeNull()
+  })
+})
 
 describe('pull request row', () => {
   it('shows nothing until the lookup has loaded', () => {
