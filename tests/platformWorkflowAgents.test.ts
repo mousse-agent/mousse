@@ -11,7 +11,8 @@ import { defaultAgentSettings } from '../src/shared/agents/defaults'
 import type { ExecutionActor, ExecutionContext, ExecutionPolicyLayer, ExecutionPolicySnapshot } from '../src/shared/execution/types'
 import type { StartWorkflowRequest, WorkflowBundle, WorkflowRunManifest } from '../src/shared/workflows'
 import { WORKFLOW_MAIN_AGENT_DEFINITION_ID } from '../src/shared/workflows/agentExecutionBindings'
-import { providerResponse, streamOf } from './fixtures/agent-platform/agent-runtime-policy/helpers'
+import { providerResponse } from './fixtures/agent-platform/agent-runtime-policy/helpers'
+import { installExactDefinitionRuntime } from './fixtures/agent-platform/exactDefinitionRuntime'
 
 const roots: string[] = []
 const previousHome = process.env.MOUSSE_HOME
@@ -40,14 +41,16 @@ async function fixture() {
   const provider = services.providerAuth.models.getProviders().find((entry) => services.providerAuth.models.getModels(entry.id).length > 0)!
   const model = services.providerAuth.models.getModels(provider.id)[0]
   const modelRef = { providerId: provider.id, modelId: model.id }
-  vi.spyOn(services.providerAuth, 'has').mockReturnValue(true)
-  vi.spyOn(services.providerAuth.models, 'getAuth').mockResolvedValue({ apiKey: 'fixture' } as never)
-  vi.spyOn(services.providerAuth.models, 'streamSimple').mockImplementation((_model, context) => {
-    captured.push(structuredClone(context))
+  // Definitions run through the gateway (PR 4 §6) on a runtime that holds them exactly: a stand-in
+  // for the provider's instance, since no production runtime declares `exact` yet.
+  let reply = async (): Promise<AssistantMessage> => {
     const next = outputs.shift()
     if (!next) throw new Error('fixture provider exhausted')
-    return streamOf(next) as never
-  })
+    return next
+  }
+  installExactDefinitionRuntime({ orchestrator: services.orchestrator, providerId: provider.id, profileHome: services.getProfileHomeDir(), captured,
+    next: (context, signal) => reply(context, signal) })
+  const setReply = (next: (context: Context, signal: AbortSignal) => Promise<AssistantMessage>) => { reply = next }
   const integrations = services.settings.get().integrations
   services.settings.set({
     provider: { llmProvider: modelRef.providerId, model: modelRef.modelId },
@@ -61,7 +64,7 @@ async function fixture() {
   })
   services.platform.workflowRuns.configureAdapters({ agent: agents.agent })
   return {
-    root, main, alice, bob, services, captured, outputs, modelRef, thread, agents,
+    root, main, alice, bob, services, captured, outputs, setReply, modelRef, thread, agents,
     setManifest: (manifest: WorkflowRunManifest | undefined) => { manifestOverride = manifest },
     close: async () => { agents.dispose(); await main.stop() }
   }
@@ -300,14 +303,9 @@ describe('production workflow Agent/Instruction adapter', () => {
   it('cancels an in-flight native call without inventing success', async () => {
     const f = await fixture()
     try {
-      vi.mocked(f.services.providerAuth.models.streamSimple).mockImplementation((_model, context, options) => {
-        f.captured.push(structuredClone(context))
-        return {
-          async *[Symbol.asyncIterator]() {
-            await new Promise<void>((resolve) => options?.signal?.addEventListener('abort', () => resolve(), { once: true }))
-          },
-          result: async () => providerResponse([], 'aborted')
-        } as never
+      f.setReply(async (_context, signal) => {
+        await new Promise<void>((resolve) => signal.addEventListener('abort', () => resolve(), { once: true }))
+        return providerResponse([], 'aborted')
       })
       const record = publishWorkflow(f, { id: 'instruction', type: 'instruction', version: 1, config: { text: 'Wait.' } })
       const request = startRequest(f, record)
@@ -513,25 +511,43 @@ describe('production workflow Agent/Instruction adapter', () => {
     } finally { await f.close() }
   }, 30_000)
 
-  it('fails closed for unsupported CLI runtimes and inherits parent pins without resolving later heads', async () => {
+  it('fails closed on a runtime that cannot hold the definition, whatever its stored kind, and inherits parent pins without resolving later heads', async () => {
     const f = await fixture()
     try {
-      const cliSettings = defaultAgentSettings({ name: 'CLI Workflow Agent', slug: 'cli-workflow-agent-' + randomUUID().slice(0, 8) })
-      cliSettings.primaryModel.ref = f.modelRef
+      // A stored Claude Code-kind definition on an instance that only asks for approval (as Pi RPC
+      // declares today): the node fails closed with its reason, and nothing runs (PR 4 §6).
+      installExactDefinitionRuntime({ orchestrator: f.services.orchestrator, providerId: f.modelRef.providerId, profileHome: f.services.getProfileHomeDir(),
+        captured: f.captured, caps: { toolControl: 'approval_only' } })
+      const cliSettings = agentSettings('CLI Workflow Agent', f.modelRef, ['read'])
+      // The editor still checks a CLI kind's settings against its old table when saving (PR 4 4d-2 drops it).
+      cliSettings.recovery = defaultAgentSettings({ name: 'CLI Workflow Agent', slug: 'cli-workflow-agent' }).recovery
+      cliSettings.memory = defaultAgentSettings({ name: 'CLI Workflow Agent', slug: 'cli-workflow-agent' }).memory
       const cli = f.services.platform.agentDefinitions.createDraft({
-        runtimeKind: 'codex',
+        runtimeKind: 'claude-code',
         settings: cliSettings,
         systemPrompt: 'unsupported'
       })
       f.services.platform.agentDefinitions.publish(cli.id, cli.draftHash)
       const cliRecord = publishWorkflow(f, {
         id: 'agent', type: 'agent', version: 1,
-        config: { agent: { kind: 'user', definitionId: cli.id }, instructions: 'Must not spawn.' }
+        config: { agent: { kind: 'user', definitionId: cli.id }, instructions: 'Must not run.' }
       })
-      const cliError = await f.agents.prepare(startRequest(f, cliRecord), cliRecord).catch((error: unknown) => error)
+      const cliRequest = startRequest(f, cliRecord)
+      await f.agents.prepare(cliRequest, cliRecord)
+      const cliPolicy = policyOf(f, { allowedTools: ['workflow.agent', 'read'] })
+      const cliManifest = runningManifest(f, cliRequest, cliPolicy)
+      f.setManifest(cliManifest)
+      const cliError = await f.agents.agent.invoke({
+        context: contextOf(cliManifest), policy: cliPolicy, agent: { kind: 'user', definitionId: cli.id },
+        instructions: 'Must not run.', input: {}, signal: new AbortController().signal, idempotencyKey: randomUUID()
+      }).catch((error: unknown) => error)
       expect(cliError).toMatchObject({ code: 'executor_unavailable' })
-      expect(JSON.stringify(cliError)).toContain('qualified CLI process lifecycle')
+      expect(JSON.stringify(cliError)).toContain("can't enforce this agent's workspace and tool limits")
+      expect(JSON.stringify(cliError)).toContain('/settings/tools/mode')
       expect(f.captured).toEqual([])
+      f.setManifest(undefined)
+      installExactDefinitionRuntime({ orchestrator: f.services.orchestrator, providerId: f.modelRef.providerId, profileHome: f.services.getProfileHomeDir(),
+        captured: f.captured, outputs: f.outputs })
 
       f.outputs.push(providerResponse([{ type: 'text', text: '{"summary":"child-pin"}' }], 'stop'))
       const created = f.services.platform.agentDefinitions.createDraft({

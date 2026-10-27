@@ -10,7 +10,8 @@ import { AGENT_DEFINITION_CAPABILITY } from '../src/shared/agentPlatform'
 import { defaultAgentSettings } from '../src/shared/agents/defaults'
 import { canonicalJson, sha256Hex } from '../src/shared/agents/hashes'
 import { createAgentDefinitionsClient } from '../src/renderer/services/agentDefinitionsClient'
-import { providerResponse, streamOf } from './fixtures/agent-platform/agent-runtime-policy/helpers'
+import { providerResponse } from './fixtures/agent-platform/agent-runtime-policy/helpers'
+import { installExactDefinitionRuntime } from './fixtures/agent-platform/exactDefinitionRuntime'
 import type { BrowserRuntimePort } from '../src/shared/browser/runtime'
 import type { BrowserToolContext } from '../src/shared/browser/automation'
 
@@ -40,14 +41,16 @@ async function fixture(outputs: AssistantMessage[]) {
   const captured: Context[] = []
   const provider = services.providerAuth.models.getProviders().find((entry) => services.providerAuth.models.getModels(entry.id).length > 0)!
   const model = services.providerAuth.models.getModels(provider.id)[0]
-  vi.spyOn(services.providerAuth, 'has').mockReturnValue(true)
-  vi.spyOn(services.providerAuth.models, 'getAuth').mockResolvedValue({ apiKey: 'fixture' } as never)
-  vi.spyOn(services.providerAuth.models, 'streamSimple').mockImplementation((_model, context) => {
-    captured.push(structuredClone(context))
+  // Definitions run through the gateway (PR 4 §6) on a runtime that holds them exactly: a stand-in
+  // for the provider's instance, since no production runtime declares `exact` yet.
+  let reply = async (): Promise<AssistantMessage> => {
     const next = outputs.shift()
     if (!next) throw new Error('fixture provider exhausted')
-    return streamOf(next) as never
-  })
+    return next
+  }
+  installExactDefinitionRuntime({ orchestrator: services.orchestrator, providerId: provider.id, profileHome: services.getProfileHomeDir(), captured,
+    next: (context, signal) => reply(context, signal) })
+  const setReply = (next: (context: Context, signal: AbortSignal) => Promise<AssistantMessage>) => { reply = next }
   const integrations = services.settings.get().integrations
   services.settings.set({ integrations: { ...integrations, tools: { enabled: true, enabledTools: ['read', 'write', 'ask_user', 'create_task'] } } })
   const server = new MmsProtocolServer({ mms: main, ownerToken: 'fixture-owner' })
@@ -58,7 +61,7 @@ async function fixture(outputs: AssistantMessage[]) {
     clients.push(rpc); await rpc.connect(); await rpc.request('profiles.bind', { profile })
     return { rpc, agents: createAgentDefinitionsClient(rpc) }
   }
-  return { root, homeDir, main, alice, bob, services, captured, modelRef: { providerId: provider.id, modelId: model.id }, connect, close: async () => {
+  return { root, homeDir, main, alice, bob, services, captured, setReply, modelRef: { providerId: provider.id, modelId: model.id }, connect, close: async () => {
     await Promise.allSettled(clients.map((client) => client.close()))
     await server.stop(); await main.stop()
   } }
@@ -152,10 +155,10 @@ describe('native Agent Editor Try Run production host', () => {
     const f = await fixture([])
     try {
       const a = await f.connect(f.alice.id)
-      vi.mocked(f.services.providerAuth.models.streamSimple).mockImplementation((_model, _context, options) => ({
-        async *[Symbol.asyncIterator]() { await new Promise<void>((resolve) => options?.signal?.addEventListener('abort', () => resolve(), { once: true })) },
-        result: async () => providerResponse([], 'aborted')
-      }) as never)
+      f.setReply(async (_context, signal) => {
+        await new Promise<void>((resolve) => signal.addEventListener('abort', () => resolve(), { once: true }))
+        return providerResponse([], 'aborted')
+      })
       const created = await a.agents.create({ profileId: f.alice.id, settings: settings('Cancel Agent', f.modelRef), systemPrompt: 'wait' })
       const request = a.agents.tryRun({ profileId: f.alice.id, id: created.id, expectedDraftHash: created.draftHash, prompt: 'wait' })
       await vi.waitFor(() => expect(f.services.platform.agentRuns.getActiveCount()).toBe(1))
@@ -206,11 +209,14 @@ describe('native Agent Editor Try Run production host', () => {
         expect(rejection).toMatchObject({ code: 'SETTINGS_UNSUPPORTED' })
         expect(JSON.stringify(rejection)).toContain(pointer)
       }
+      // A CLI-kind definition is held to the same rules: its unsupported settings are refused the same way.
       const cliSettings = settings('CLI Agent', f.modelRef)
       cliSettings.recovery = defaultAgentSettings({ name: 'CLI Agent', slug: 'cli-agent' }).recovery
+      cliSettings.workspace.mode = 'dedicated_child_worktree'
       const cli = await a.agents.create({ profileId: f.alice.id, runtimeKind: 'codex', settings: cliSettings, systemPrompt: 'unsupported' })
-      await expect(a.agents.tryRun({ profileId: f.alice.id, id: cli.id, expectedDraftHash: cli.draftHash, prompt: 'must not spawn' }))
-        .rejects.toMatchObject({ code: 'SETTINGS_UNSUPPORTED' })
+      const cliRejection = await a.agents.tryRun({ profileId: f.alice.id, id: cli.id, expectedDraftHash: cli.draftHash, prompt: 'must not dispatch' }).catch((error: unknown) => error)
+      expect(cliRejection).toMatchObject({ code: 'SETTINGS_UNSUPPORTED' })
+      expect(JSON.stringify(cliRejection)).toContain('/settings/workspace/mode')
       expect(f.captured).toEqual([])
     } finally { await f.close() }
   }, 30_000)
