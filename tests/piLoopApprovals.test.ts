@@ -153,7 +153,7 @@ describe('pi loop approvals', () => {
         store: engine.approvals,
         context: (threadId) => {
           const run = engine.getActiveRun(threadId)
-          return run ? { runId: run.runId, instanceId: 'pi', provider: 'pi', origin: 'interactive', permissionMode: state.permissionMode, approvals: 'ask' } : null
+          return run ? { runId: run.runId, instanceId: 'pi', provider: 'pi', origin: 'interactive', permissionMode: state.permissionMode, approvals: 'ask', startedByPerson: true } : null
         },
         effectDelivery: () => false,
         continuationDue: () => undefined

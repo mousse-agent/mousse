@@ -6,6 +6,7 @@ import { delimiter, isAbsolute, join, resolve } from 'node:path'
 import { AppError, redactSecrets } from '../../../shared/errors'
 import { CODEX_INSTANCE_ID } from '../../../shared/providerInstances'
 import { parseThinkingSuffixFromModelId } from '../../../shared/modelVariants'
+import { exactDirectory } from '../../run/approvalFingerprint'
 import type { ProviderToolEvent } from '../../../shared/agentActivity'
 import type {
   CliProviderConfig,
@@ -1703,14 +1704,23 @@ export class CodexProviderService {
         if (permissionModeAllows(run.permissionMode, 'command')) return { decision: 'accept' } satisfies Result<'item/commandExecution/requestApproval'>
         const known = approval.command ?? (run.item(approval.itemId) as { command?: string } | undefined)?.command
         const command = typeof known === 'string' && known.trim() ? known : undefined
-        // Where the command runs: the directory Codex names, else the turn's own.
-        const where = resolve(approval.cwd ?? run.cwd)
+        // Where the command runs: the directory Codex names (a relative one is under the turn's), else the turn's own.
+        // The accept carries only a decision, so Codex starts the command where it proposed: that exact path is hashed,
+        // never a lexically collapsed one. A path that cannot be pinned down gives no fingerprint.
+        const where = exactDirectory(run.cwd, approval.cwd)
         const decision = await this.approve(
           run,
           `Allow Codex to run this command?\n${command ?? 'a command'}${approval.cwd ? `\nin ${approval.cwd}` : ''}${approval.reason ? `\n${approval.reason}` : ''}`,
           'command',
           // A command nobody can read has no stable description: no fingerprint, so no grant after a restart.
-          { name: 'commandExecution', input: command === undefined ? undefined : { command, cwd: where }, cwd: where }
+          // Everything else the request says (its reason, an environment, any field Codex adds) is part of the
+          // action: a request that asks for more than the one a person allowed is another action.
+          {
+            name: 'commandExecution',
+            input: command === undefined || where === undefined ? undefined : { command, cwd: where, params: requestDetails(approval, ['command', 'cwd']) },
+            ...(where !== undefined ? { cwd: where } : {})
+          },
+          approval.reason
         )
         return { decision } satisfies Result<'item/commandExecution/requestApproval'>
       }
@@ -1730,10 +1740,11 @@ export class CodexProviderService {
           {
             name: 'fileChange',
             input: changes.length && changes.every((change) => typeof change.diff === 'string' && change.diff.length > 0)
-              ? { changes: changes.map((change) => ({ path: change.path, diff: change.diff, kind: change.kind ?? null })), grantRoot: approval.grantRoot ?? null }
+              ? { changes: changes.map((change) => ({ path: change.path, diff: change.diff, kind: change.kind ?? null })), grantRoot: approval.grantRoot ?? null, params: requestDetails(approval, ['grantRoot']) }
               : undefined,
             cwd: run.cwd
-          }
+          },
+          approval.reason
         )
         return { decision } satisfies Result<'item/fileChange/requestApproval'>
       }
@@ -1779,7 +1790,8 @@ export class CodexProviderService {
     run: TurnRun,
     prompt: string,
     kind: 'command' | 'edit',
-    tool: { name: string; input: unknown; cwd?: string }
+    tool: { name: string; input: unknown; cwd?: string },
+    reason?: string | null
   ): Promise<'accept' | 'decline' | 'cancel'> {
     try {
       const answer = await this.questions.requestAnswers(
@@ -1803,7 +1815,10 @@ export class CodexProviderService {
               { id: 'allow', decision: 'allow', scope: 'once' },
               { id: 'reject', decision: 'reject' }
             ],
-            tool
+            tool,
+            // A request that says why it asks (a retry outside the sandbox, a network or path escalation) is more
+            // than the plain one: never "always", never answered by a rule.
+            ...(reason && reason.trim() ? { reason: reason.trim() } : {})
           }
         }
       )
@@ -2593,6 +2608,12 @@ export class CodexProviderService {
 }
 
 /** Refuses a thread whose effective provider is not the one Mousse pinned (`expected`). */
+/** Every field of an approval request except its ids and the ones the caller already names: all of it is the action. */
+function requestDetails(request: object, named: string[]): Record<string, unknown> {
+  const skip = new Set(['threadId', 'turnId', 'itemId', 'startedAtMs', ...named])
+  return Object.fromEntries(Object.entries(request).filter(([key]) => !skip.has(key)))
+}
+
 function pinnedProvider<T extends { modelProvider?: string }>(expected: string, response: T): T {
   if (response.modelProvider !== expected)
     throw new AppError({

@@ -23,6 +23,7 @@ import type { ProviderToolEvent } from '../../../shared/agentActivity'
 import { CLAUDE_INSTANCE_ID } from '../../../shared/providerInstances'
 import { atomicWriteJsonSync } from '../../data/AtomicFs'
 import type { UserQuestionService } from '../../orchestrator/UserQuestionService'
+import { exactDirectory } from '../../run/approvalFingerprint'
 import { APPROVALS_REFUSED_MESSAGE, QUESTIONS_REFUSED_MESSAGE } from '../../harness/acp/permissions'
 import { CLAUDE_MOUSSE_TOOL_PREFIX, claudeMcpServers } from '../../run/mcp/attachment'
 import { TURN_TOKEN_KEY } from '../../run/mcp/appTools/registry'
@@ -1488,6 +1489,14 @@ export class ClaudeSubscriptionProviderService {
           // kept up to the cap: the card wraps and scrolls.
           const what = action === 'command' ? `run a command (${toolName})` : action === 'edit' ? `edit files (${toolName})` : `use ${toolName}`
           const own = turn.permissionMode === 'full' ? 'Claude Code asks even in Full access: its own safety check.\n' : ''
+          // Claude Code says when an ask must not be remembered (a safety check, a path outside the allowed folders, a
+          // rule that forces a person's answer): that holds in every mode, so there is no "always" and no rule for it.
+          const unskippable = context.suppressAlwaysAllowRule === true || Boolean(context.blockedPath) || Boolean(context.decisionReason) || context.matchedAskRule !== undefined
+          const reason = own
+            ? 'Claude Code asks even in Full access: its own safety check.'
+            : unskippable
+              ? `Claude Code asks for this itself and does not allow it to be remembered${context.decisionReason ? `: ${context.decisionReason.slice(0, 300)}` : '.'}`
+              : ''
           const answer = await this.questions.requestAnswers(
             [
               {
@@ -1508,8 +1517,9 @@ export class ClaudeSubscriptionProviderService {
                   { id: 'allow', decision: 'allow', scope: 'once' },
                   { id: 'reject', decision: 'reject' }
                 ],
-                tool: { name: toolName, input: args, cwd: resolve(input.cwd) },
-                ...(own ? { reason: 'Claude Code asks even in Full access: its own safety check.' } : {})
+                // The folder is the turn's own, as given: a path with dot segments names no exact place.
+                tool: { name: toolName, input: args, ...(exactDirectory(undefined, input.cwd) ? { cwd: exactDirectory(undefined, input.cwd)! } : {}) },
+                ...(reason ? { reason } : {})
               }
             }
           )

@@ -143,7 +143,7 @@ describe('mousse approvals', () => {
     const daemon = fakeDaemon([alwaysRequest('req-1')])
     await run(daemon, ['approvals'])
     expect(out).toContain('Options: allow (Allow once), allow_always (Always for this thread), reject (Reject)')
-    expect(out).toContain('answers only this exact request again, in this thread')
+    expect(out).toContain('allows this exact request again, in this thread')
     await run(daemon, ['approvals', 'answer', 'req-1', 'allow_always'])
     expect(daemon.calls.at(-1)).toEqual({ method: 'orchestrator.answerQuestions', params: { requestId: 'req-1', answers: { permission: 'allow_always' } } })
     expect(out).toContain('Answered: allow_always')

@@ -52,7 +52,10 @@ export function PermissionSection({ threadId }: SideCardSectionContext) {
             <div key={rule.id} className="side-card-rule" role="listitem">
               <p className="side-card-rule-summary" title={rule.summary}>{rule.summary}</p>
               <p className="side-card-rule-note">
-                {rule.active ? `Granted under ${describePermissionMode(rule.grantedUnder)}` : `Paused: this thread is stricter than ${describePermissionMode(rule.grantedUnder)}`}
+                {rule.active
+                  ? `Granted under ${describePermissionMode(rule.grantedUnder)}. A stricter mode takes effect on the next turn; the rule pauses as soon as you switch.`
+                  : `Paused: this thread asks about more than ${describePermissionMode(rule.grantedUnder)}. It applies again if you loosen the mode.`}
+                {` Id ${rule.id.slice(0, 8)}.`}
               </p>
               <button type="button" className="side-card-rule-revoke" onClick={() => revoke(rule.id)}>Revoke</button>
             </div>

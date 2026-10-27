@@ -387,7 +387,13 @@ describe('ThreadRuntime over the protocol', () => {
       const sent = await mms.runEngine.dispatch({ kind: 'send', threadId, clientRequestId: key, source: 'gui' })
       if (sent.status !== 'accepted') throw new Error('send rejected')
       mms.runEngine.markStarting(sent.runId)
-      return mms.runEngine.markRunning(sent.runId)
+      const run = mms.runEngine.markRunning(sent.runId)
+      // The binding a real turn records: it says which mode the run asks under and who started it.
+      mms.runEngine.recordExecutionBinding(run.runId, {
+        instanceId: 'claude-subscription', driver: 'claude-code', accountGeneration: 0, homeId: 'default', configRevision: 0, model: 'sonnet',
+        policy: { mode: 'default', origin: 'interactive', approvals: 'ask', permissionMode: 'ask' }
+      } as never)
+      return run
     }
     const clientAs = async (clientType: 'gui' | 'cli'): Promise<LocalMmsClient> => {
       const c = new LocalMmsClient({ homeDir: home, ownerToken, endpoint, clientType })

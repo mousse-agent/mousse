@@ -509,7 +509,7 @@ describe('Claude Subscription native provider', () => {
           store: engine.approvals,
           context: (threadId) => {
             const run = engine.getActiveRun(threadId)
-            return run ? { runId: run.runId, instanceId: 'claude-subscription', provider: 'claude', origin: 'interactive', ...state } : null
+            return run ? { runId: run.runId, instanceId: 'claude-subscription', provider: 'claude', origin: 'interactive', ...state, startedByPerson: true } : null
           },
           effectDelivery: () => false,
           continuationDue: () => undefined
@@ -556,6 +556,42 @@ describe('Claude Subscription native provider', () => {
           expect(prompts).toHaveLength(3)
           expect(prompts.every((entry) => entry.options.join() === 'allow,allow_always,reject')).toBe(true)
           expect(engine.approvals.listRules('thread')).toEqual([expect.objectContaining({ permissionKey: 'claude:command', grantedUnder: 'accept_edits' })])
+        } finally {
+          close()
+        }
+      })
+
+      it('offers no "always", in any mode, on an ask Claude Code says must not be remembered, and a rule never answers it', async () => {
+        const decisions: string[] = []
+        const flags: Array<Record<string, unknown>> = [
+          {}, { suppressAlwaysAllowRule: true }, { blockedPath: '/etc/passwd' }, { decisionReason: 'Path is outside the allowed folders' },
+          { matchedAskRule: { source: 'userSettings', toolName: 'Bash' } }, {}
+        ]
+        const { service, home, questions } = fixture((input) => {
+          const q = fakeQuery()
+          q[Symbol.asyncIterator] = async function* () {
+            for (const extra of flags)
+              decisions.push((await input.options.canUseTool!('Bash', { command: 'npm test' }, { signal: new AbortController().signal, ...extra } as never)).behavior)
+            yield result as never
+          }
+          return q
+        })
+        const { engine, close } = await bind(questions, 'accept_edits', 'ask')
+        try {
+          const prompts: Array<{ options: string[]; reason?: string }> = []
+          let first = true
+          questions.on('pending', ({ requestId, questions: asked, approval }) => {
+            prompts.push({ options: asked[0].options.map((option) => option.id), ...(approval?.reason ? { reason: approval.reason } : {}) })
+            // "Always" to the first, plain request only.
+            questions.submitAnswers(requestId, { permission: first ? 'allow_always' : 'reject' }, { kind: 'user' })
+            first = false
+          })
+          await service.chat(chatInput(home, 'accept_edits'))
+          // Plain, four flagged (asked, no "always"), plain again (answered by the rule).
+          expect(decisions).toEqual(['allow', 'deny', 'deny', 'deny', 'deny', 'allow'])
+          expect(prompts.map((entry) => entry.options.join())).toEqual(['allow,allow_always,reject', 'allow,reject', 'allow,reject', 'allow,reject', 'allow,reject'])
+          expect(prompts[3]!.reason).toContain('Path is outside the allowed folders')
+          expect(engine.approvals.listRules('thread')).toHaveLength(1)
         } finally {
           close()
         }

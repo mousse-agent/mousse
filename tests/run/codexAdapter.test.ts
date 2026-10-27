@@ -693,7 +693,7 @@ describe('CodexAdapter', () => {
         store: engine.approvals,
         context: (threadId) => {
           const run = engine.getActiveRun(threadId)
-          return run ? { runId: run.runId, instanceId: 'codex', provider: 'codex', origin: 'interactive', permissionMode: mode, approvals: 'ask' } : null
+          return run ? { runId: run.runId, instanceId: 'codex', provider: 'codex', origin: 'interactive', permissionMode: mode, approvals: 'ask', startedByPerson: true } : null
         },
         effectDelivery: () => false,
         continuationDue: () => undefined
@@ -724,6 +724,71 @@ describe('CodexAdapter', () => {
         expect(asked.map((request) => request.questions[0]!.prompt.split('\n')[1])).toEqual(['make test', 'make test --watch', 'make test'])
         expect(asked[0]!.questions[0]!.options.map((option) => option.id)).toEqual(['allow', 'allow_always', 'reject'])
         expect(engine.approvals.listRules('thread-1')).toEqual([expect.objectContaining({ permissionKey: 'codex:command', grantedUnder: 'ask' })])
+      } finally {
+        close()
+      }
+    })
+
+    const withParams = (id: string, params: Record<string, unknown>): TranscriptFrame[] => [
+      inn({ id: `srv-${id}`, method: 'item/commandExecution/requestApproval', params: { kind: 'command', threadId: T, turnId: 'turn-1', itemId: `cmd-${id}`, startedAtMs: 0, environmentId: null, command: 'npm install', cwd: '/w', reason: null, ...params } })
+    ]
+
+    it('a rule made for a plain request never accepts one that asks for more: a reason, an extra field, another folder', async () => {
+      const { engine, close } = await bound()
+      try {
+        const replay = transport([
+          ...handshake(), ...threadStart(4), ...turnStart(5, 'go'),
+          ...withParams('1', {}), reply('1', 'accept'),
+          // The same command and folder, now asking to leave the sandbox: asked, and offered no "always".
+          ...withParams('2', { reason: 'Retry outside the sandbox' }), reply('2', 'decline'),
+          ...withParams('3', { networkApprovalContext: { host: 'registry.example' } }), reply('3', 'decline'),
+          ...withParams('4', { cwd: '/w/packages/a' }), reply('4', 'decline'),
+          ...withParams('5', { cwd: 'packages/a' }), reply('5', 'decline'),
+          // A path with dot segments names no exact place: asked, and offered no "always".
+          ...withParams('6', { cwd: '/w/link/..' }), reply('6', 'decline'),
+          // The plain request again is answered by the rule.
+          ...withParams('7', {}), reply('7', 'accept'),
+          ...message('msg-1', ['ok']), completed('completed')
+        ])
+        const codex = service(replay)
+        // "Always" to the first, plain request only.
+        let seen = 0
+        const asked = answerQuestions(() => ({ permission: seen++ === 0 ? 'allow_always' : 'reject' }))
+        await new CodexAdapter(() => codex).startTurn(input({ prompt: 'go' }), recordingSink(), control(), host())
+        replay.assertDone()
+        // Asked: the first, then each variant; not the last.
+        expect(asked).toHaveLength(6)
+        expect(asked.map((request) => request.questions[0]!.options.map((option) => option.id).join())).toEqual([
+          'allow,allow_always,reject', 'allow,reject', 'allow,allow_always,reject', 'allow,allow_always,reject', 'allow,allow_always,reject', 'allow,reject'
+        ])
+        expect(engine.approvals.listRules('thread-1')).toHaveLength(1)
+      } finally {
+        close()
+      }
+    })
+
+    it('a file change that gives a reason is not offered "always" and is not answered by a rule', async () => {
+      const { engine, close } = await bound()
+      try {
+        const change = { path: 'src/a.ts', kind: { type: 'update' }, diff: '@@\n-a\n+b' }
+        const patch = (id: string, params: Record<string, unknown> = {}): TranscriptFrame[] => [
+          note('item/started', { threadId: T, turnId: 'turn-1', item: { type: 'fileChange', id: `patch-${id}`, changes: [change], status: 'inProgress' } }),
+          inn({ id: `srv-p${id}`, method: 'item/fileChange/requestApproval', params: { threadId: T, turnId: 'turn-1', itemId: `patch-${id}`, startedAtMs: 0, reason: null, ...params } })
+        ]
+        const replay = transport([
+          ...handshake(), ...threadStart(4), ...turnStart(5, 'go'),
+          ...patch('1'), out({ id: 'srv-p1', result: { decision: 'accept' } }),
+          ...patch('2', { reason: 'needs write outside the workspace' }), out({ id: 'srv-p2', result: { decision: 'decline' } }),
+          ...patch('3'), out({ id: 'srv-p3', result: { decision: 'accept' } }),
+          ...message('msg-1', ['ok']), completed('completed')
+        ])
+        const codex = service(replay)
+        let seen = 0
+        const asked = answerQuestions(() => ({ permission: seen++ === 0 ? 'allow_always' : 'reject' }))
+        await new CodexAdapter(() => codex).startTurn(input({ prompt: 'go' }), recordingSink(), control(), host())
+        replay.assertDone()
+        expect(asked.map((request) => request.questions[0]!.options.map((option) => option.id).join())).toEqual(['allow,allow_always,reject', 'allow,reject'])
+        expect(engine.approvals.listRules('thread-1')).toHaveLength(1)
       } finally {
         close()
       }

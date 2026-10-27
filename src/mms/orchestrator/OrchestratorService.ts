@@ -153,7 +153,7 @@ import {
   normalizePermissionMode,
   type PermissionMode
 } from '../../shared/permissionMode'
-import { describeApprovalRefusal, type Answerer } from '../run/approvalRights'
+import { describeApprovalRefusal, startedByPerson, type Answerer } from '../run/approvalRights'
 import { formatApprovalDecisions } from '../run/approvalNote'
 import type { ApprovalRecord, ContinuationDue } from '../run/ThreadApprovals'
 import { allowsOrchestrationActions, buildModeChangeNotice, chatModeEquals, getChatModeLabel, getLastUserChatMode, normalizeChatMode } from '../../shared/chatMode'
@@ -1642,18 +1642,30 @@ export class OrchestratorService extends EventEmitter {
         const run = engine.getActiveRun(threadId)
         if (!run) return null
         const binding = engine.bindingForRun(run.runId)
+        const origin = binding ? policyOrigin(binding.policy) : 'interactive'
+        const permissionMode = binding?.policy.permissionMode
+        let currentMode = permissionMode
+        if (permissionMode) {
+          // A rule is checked against the stricter of the run's mode and the thread's own now: a tighter mode applies
+          // to the next turn, but a rule stops answering at once.
+          try { currentMode = narrowPermissionMode(permissionMode, this.requestedPermissionMode(threadId)) } catch { currentMode = 'ask' }
+        }
         return {
           runId: run.runId,
           instanceId: binding?.instanceId ?? '',
           provider: binding?.driver ?? '',
-          origin: binding ? policyOrigin(binding.policy) : 'interactive',
-          // No binding, no recorded mode: ask (the strictest), and never a run that skips asking.
-          permissionMode: binding?.policy.permissionMode ?? 'ask',
-          approvals: binding?.policy.approvals ?? 'ask'
+          origin,
+          // A binding that records no mode leaves it unknown: no rule is offered, made or matched for it.
+          ...(permissionMode ? { permissionMode } : {}),
+          ...(currentMode ? { currentMode } : {}),
+          approvals: binding?.policy.approvals ?? 'ask',
+          // No binding, no known starter: not a person's turn.
+          startedByPerson: binding !== undefined && startedByPerson({ origin, source: run.source })
         }
       },
       effectDelivery: () => this.effectsEnabled(),
-      continuationDue: (due, answeredBy) => this.startApprovalContinuation(due, answeredBy)
+      continuationDue: (due, answeredBy) => this.startApprovalContinuation(due, answeredBy),
+      ruleApplied: (threadId, rule) => this.noteProviderNotice(threadId, `Allowed without asking by your "Always for this thread" rule (${rule.summary.slice(0, 200)}). Revoke it in the thread side card.`)
     })
   }
 

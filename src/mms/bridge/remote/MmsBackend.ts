@@ -1,3 +1,4 @@
+import { withoutStandingRules } from '../../orchestrator/UserQuestionService'
 import type { MmsProfileServices } from '../../MmsProfileServices'
 import { dispatchMethod } from '../../protocol/handlers'
 import { NetError } from '../../../shared/net'
@@ -288,7 +289,7 @@ export class MmsRemoteBackend implements RemoteBackendPort {
         thread,
         messages: withImageBudget(s.orchestrator.getMessages(threadId)),
         queue: s.orchestrator.listQueue(threadId).map(withoutImageData),
-        pendingQuestions: s.questions.listPendingForThread(threadId),
+        pendingQuestions: s.questions.listPendingForThread(threadId).map(withoutStandingRules),
         activeTurn: {
           active: s.orchestrator.isTurnActive(threadId),
           running: s.orchestrator.isActiveTurnRunning(threadId)

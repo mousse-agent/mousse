@@ -328,42 +328,40 @@ describe('remote approval requests (SPEC §17)', () => {
     expect(p.mms.runEngine.approvals.get(requestId)).toMatchObject({ status: 'answered', decision: 'reject', feedback: 'not on a phone', answeredBy: { kind: 'user', via: 'bridge' } })
   })
 
-  it('a phone answers "Always for this thread": that exact request is not asked again, anything else is, and the phone cannot touch the rules', async () => {
+  it('a phone is not offered "Always for this thread" and cannot make a rule: it can allow once, and it has no way to list or revoke rules', async () => {
     const p = await setup(),
       { b } = await p.connect(),
       thread = p.mms.threads.createThread('Always'),
       sent = await p.mms.runEngine.dispatch({ kind: 'send', threadId: thread.id, clientRequestId: 'always-run', source: 'gui' })
     if (sent.status !== 'accepted') throw new Error('send rejected')
     p.mms.runEngine.markStarting(sent.runId)
-    p.mms.runEngine.markRunning(sent.runId)
+    const run = p.mms.runEngine.markRunning(sent.runId)
+    p.mms.runEngine.recordExecutionBinding(run.runId, {
+      instanceId: 'claude-subscription', driver: 'claude-code', accountGeneration: 0, homeId: 'default', configRevision: 0, model: 'sonnet',
+      policy: { mode: 'default', origin: 'interactive', approvals: 'ask', permissionMode: 'ask' }
+    } as never)
     const exact = { ...tag, tool: { name: 'Bash', input: { command: 'npm test' }, cwd: '/work/app' } }
-    const askExact = (approval = exact) => {
-      const outcome = p.mms.questions.requestAnswers(question, thread.id, { approval }).then((value) => value, (error: Error) => error.message)
-      return { outcome, pending: p.mms.questions.listPendingForThread(thread.id) }
-    }
+    const outcome = p.mms.questions.requestAnswers(question, thread.id, { approval: exact }).then((value) => value, (error: Error) => error.message)
+    const requestId = p.mms.questions.listPendingForThread(thread.id)[0]!.requestId
+    // The app still sees the option; the phone's views do not.
+    expect(p.mms.questions.listPendingForThread(thread.id)[0]!.questions[0]!.options.map((option) => option.id)).toEqual(['allow', 'allow_always', 'reject'])
+    type Views = { pending: Array<{ questions: Array<{ options: Array<{ id: string }> }> }> }
+    const { pending } = (await b.rpc('orchestrator.pendingQuestions', { threadId: thread.id }, rpc())) as Views
+    expect(pending[0]!.questions[0]!.options.map((option) => option.id)).toEqual(['allow', 'reject'])
 
-    const first = askExact()
-    const requestId = first.pending[0]!.requestId
-    const { pending } = (await b.rpc('orchestrator.pendingQuestions', { threadId: thread.id }, rpc())) as { pending: Array<{ questions: Array<{ options: Array<{ id: string; decision?: string; scope?: string }> }> }> }
-    expect(pending[0]!.questions[0]!.options).toContainEqual({ id: 'allow_always', label: 'Always for this thread', decision: 'allow', scope: 'always' })
-    expect(await answer(b, thread.id, requestId, { permission: 'allow_always' })).toEqual({ ok: true })
-    await expect(first.outcome).resolves.toEqual({ permission: 'allow' })
-    expect(p.mms.runEngine.approvals.get(requestId)).toMatchObject({ decision: 'allow', decisionScope: 'always', answeredBy: { kind: 'user', via: 'bridge' } })
-    expect(p.mms.runEngine.approvals.listRules(thread.id)).toHaveLength(1)
-
-    // The same request is answered by the rule; a near miss asks.
-    const again = askExact()
-    expect(again.pending).toEqual([])
-    await expect(again.outcome).resolves.toEqual({ permission: 'allow' })
-    const nearMiss = askExact({ ...exact, tool: { name: 'Bash', input: { command: 'npm test --watch' }, cwd: '/work/app' } })
-    expect(nearMiss.pending).toHaveLength(1)
-    p.mms.questions.dismissAllForThread(thread.id)
-    await nearMiss.outcome
+    // Answered anyway, it is refused and nothing is allowed or recorded; the request stays pending.
+    expect(await answer(b, thread.id, requestId, { permission: 'allow_always' })).toEqual({ ok: false })
+    expect(p.mms.runEngine.approvals.get(requestId)!.status).toBe('pending')
+    expect(p.mms.runEngine.approvals.listRules(thread.id)).toEqual([])
+    // Allowing once works.
+    expect(await answer(b, thread.id, requestId, { permission: 'allow' })).toEqual({ ok: true })
+    await expect(outcome).resolves.toEqual({ permission: 'allow' })
+    expect(p.mms.runEngine.approvals.get(requestId)).toMatchObject({ decision: 'allow', decisionScope: 'once', answeredBy: { kind: 'user', via: 'bridge' } })
+    expect(p.mms.runEngine.approvals.listRules(thread.id)).toEqual([])
 
     // The phone has no way to list or revoke rules.
     for (const method of ['threads.approvalRules', 'threads.clearApprovalRules'])
       await expect(b.rpc(method, { threadId: thread.id }, rpc(`no-${method}`))).rejects.toBeTruthy()
-    expect(p.mms.runEngine.approvals.listRules(thread.id)).toHaveLength(1)
   })
 
   it('a phone that can only read sees the request but cannot answer it', async () => {

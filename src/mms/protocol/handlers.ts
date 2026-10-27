@@ -36,6 +36,7 @@ import { AppError, createErrorProvider, knownAppError } from '../../shared/error
 import type { GitOperationHandle } from '../git/GitService'
 import { listClaimedQueue } from '../queue/ThreadMessageQueue'
 import { formatQuestionAnswersMessage, formatQuestionDismissMessage } from '../orchestrator/OrchestratorService'
+import { withoutStandingRules } from '../orchestrator/UserQuestionService'
 import type { ModelOverride } from '../../shared/providerInstances'
 import {
   ACCENT_COLORS,
@@ -1539,10 +1540,13 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     case 'orchestrator.pendingQuestions': {
       const p = isObject(params) ? params : {}
       const threadId = asOptionalString(p.threadId, 256)
+      // A request over the Bridge (no connection of its own) is shown without "Always for this thread": a linked
+      // device cannot list or revoke rules, so it does not make them.
+      const shown = ctx.connection ? <T extends { questions: unknown[] }>(entry: T): T => entry : withoutStandingRules
       if (threadId) {
-        return { pending: ctx.mms.questions.listPendingForThread(threadId) }
+        return { pending: ctx.mms.questions.listPendingForThread(threadId).map(shown) }
       }
-      return { pending: ctx.mms.questions.listAllPending() }
+      return { pending: ctx.mms.questions.listAllPending().map(shown) }
     }
     case 'subagents.stopAll': {
       // Lineage's Stop all: every subagent of the thread that is working, each with its own subtree; the thread keeps running.

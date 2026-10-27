@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { PermissionAction, PermissionMode } from '../../src/shared/permissionMode'
-import { canAnswerApproval, type Answerer, type LineageLookup } from '../../src/mms/run/approvalRights'
+import { canAnswerApproval, startedByPerson, type Answerer, type LineageLookup } from '../../src/mms/run/approvalRights'
 import { UserQuestionService, type ApprovalTag } from '../../src/mms/orchestrator/UserQuestionService'
 
 const lineage: LineageLookup = (threadId) => {
@@ -15,9 +15,21 @@ const request = (threadId: string, action: PermissionAction) => ({ threadId, act
 const once = { decision: 'allow' as const, scope: 'once' as const }
 
 describe('canAnswerApproval', () => {
-  it('lets the user answer anything, through any client', () => {
-    for (const via of ['gui', 'cli', 'bridge'] as const)
+  it('lets the user answer anything, through the app or the CLI, and a linked device anything but "always"', () => {
+    for (const via of ['gui', 'cli'] as const)
       expect(canAnswerApproval(request('child', 'command'), { kind: 'user', via }, { decision: 'allow', scope: 'always' }, lineage)).toEqual({ ok: true })
+    for (const answer of [{ decision: 'allow', scope: 'once' }, { decision: 'reject' }] as const)
+      expect(canAnswerApproval(request('child', 'command'), { kind: 'user', via: 'bridge' }, answer, lineage)).toEqual({ ok: true })
+    // A linked device cannot list or revoke rules, so it does not make them.
+    expect(canAnswerApproval(request('child', 'command'), { kind: 'user', via: 'bridge' }, { decision: 'allow', scope: 'always' }, lineage)).toEqual({ ok: false, code: 'bridge_no_standing_grant' })
+  })
+
+  it('counts only a person at the app or the CLI, in a turn of their own, as starting a turn', () => {
+    const origins = ['interactive', 'delegated', 'workflow', 'definition', 'bot', 'schedule']
+    const sources = ['gui', 'cli', 'schedule', 'webhook', 'channel', 'wake', 'delegation', 'internal', 'agent', 'protocol', 'bridge', 'steer-followup', '', undefined, null]
+    for (const origin of origins)
+      for (const source of sources)
+        expect(startedByPerson({ origin, source }), `${origin} / ${source}`).toBe(origin === 'interactive' && (source === 'gui' || source === 'cli'))
   })
 
   it.each([

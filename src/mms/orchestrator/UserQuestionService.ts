@@ -29,6 +29,7 @@ import {
   type ApprovalCancelReason,
   type ApprovalQuestion,
   type ApprovalRecord,
+  type ApprovalRule,
   type ContinuationDue,
   type ThreadApprovals
 } from '../run/ThreadApprovals'
@@ -74,10 +75,21 @@ export interface ApprovalContext {
   instanceId: string
   provider: string
   origin: TurnOrigin
-  /** The permission mode the run asks under (its binding's effective mode): what a standing rule is granted and checked against. */
-  permissionMode: PermissionMode
+  /**
+   * The permission mode the run asks under (its binding's effective mode): what a standing rule is granted
+   * under. Absent when the binding records none: the rule then cannot say what it was granted under, so none is
+   * offered or made.
+   */
+  permissionMode?: PermissionMode
+  /**
+   * The mode a rule is checked against: the run's mode, or the thread's own when that is stricter now (a change
+   * applies to the next turn, but a rule pauses at once). Defaults to the run's mode, else the strictest.
+   */
+  currentMode?: PermissionMode
   /** The run's approvals policy: a standing rule only answers where the run asks (`ask`). */
   approvals: RunPolicy['approvals']
+  /** A person started the turn (`startedByPerson`): the only kind of turn a standing rule may answer or be offered in. */
+  startedByPerson: boolean
 }
 
 export type SettleResult =
@@ -130,6 +142,20 @@ export interface ApprovalBinding {
   effectDelivery(): boolean
   /** Every request of a dead run is answered: the continue turn that carries the answers is due. */
   continuationDue(due: ContinuationDue, answeredBy: Answerer): void
+  /** A standing rule answered a request without asking: the thread says so. */
+  ruleApplied?(threadId: string, rule: ApprovalRule): void
+}
+
+/**
+ * The requests as a linked device sees them: without "Always for this thread". A linked device cannot list or
+ * revoke rules, so it does not make them (`canAnswerApproval` refuses it too).
+ */
+export function withoutStandingRules<T extends { questions: PendingUserQuestions['questions'] }>(pending: T): T {
+  if (!pending.questions.some((question) => question.options?.some((option) => option.scope === 'always'))) return pending
+  return {
+    ...pending,
+    questions: pending.questions.map((question) => ({ ...question, options: question.options?.filter((option) => option.scope !== 'always') ?? [] }))
+  }
 }
 
 function cancelMessage(reason: string): string {
@@ -213,14 +239,17 @@ export class UserQuestionService extends EventEmitter {
       // fingerprint must match (so a request without one never does), the run must be one that asks, and
       // a check the provider will not let Mousse skip (`reason`) always asks. The rule only removes the
       // ask the mode would have made.
-      const eligible = Boolean(context?.runId && fingerprint && !approval.reason && context.approvals === 'ask')
+      // Only a turn a person started: a scheduled, webhook, delegated, bot, workflow or agent-sent turn asks as
+      // before, since no one watches it and "the same command" does not mean "the same effect".
+      const eligible = Boolean(context?.runId && fingerprint && !approval.reason && context.approvals === 'ask' && context.startedByPerson && context.permissionMode)
       if (eligible && context && fingerprint) {
         try {
-          const rule = binding.store.matchRule(threadId, approval.permissionKey, fingerprint, context.permissionMode)
+          const rule = binding.store.matchRule(threadId, approval.permissionKey, fingerprint, context.currentMode ?? context.permissionMode ?? 'ask')
           const allow = approval.options.find((option) => option.decision === 'allow' && option.scope !== 'always')
           const first = questions[0]
           if (rule && allow && first) {
             binding.store.noteRuleApplied(threadId, context.runId, rule)
+            try { binding.ruleApplied?.(threadId, rule) } catch { /* the notice is a courtesy */ }
             return Promise.resolve({ [first.id]: allow.id })
           }
         } catch (error) {
@@ -352,6 +381,8 @@ export class UserQuestionService extends EventEmitter {
       this.settledWaiters.set(requestId, { threadId: waiting.threadId, resolve: waiting.resolve, reject: waiting.reject })
     }
     this.emit('cleared', { requestId, threadId: outcome.record.threadId })
+    // The identical requests that waited beside this one (parallel calls) were allowed with it.
+    for (const siblingId of outcome.siblings ?? []) this.reconcileRequest(siblingId)
     // Without a worker nothing would run the `request.respond` effect: deliver here.
     if (outcome.record.answerPath === 'live' && !binding.effectDelivery()) this.deliver(requestId)
     if (outcome.continuationDue && options.continuation !== false) binding.continuationDue(outcome.continuationDue, answeredBy)

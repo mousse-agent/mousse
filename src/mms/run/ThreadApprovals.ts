@@ -110,7 +110,7 @@ export interface ContinuationDue {
 }
 
 export type SettleOutcome =
-  | { ok: true; decision: ApprovalDecision; scope?: 'once' | 'always'; record: ApprovalRecord; continuationDue?: ContinuationDue; rule?: ApprovalRule }
+  | { ok: true; decision: ApprovalDecision; scope?: 'once' | 'always'; record: ApprovalRecord; continuationDue?: ContinuationDue; rule?: ApprovalRule; siblings?: string[] }
   | {
       ok: false
       reason: 'unknown' | 'already_answered' | 'cancelled' | ApprovalRefusal
@@ -207,7 +207,9 @@ function toRule(row: Row): ApprovalRule {
     permissionKey: String(row.permission_key),
     action: row.action as PermissionAction,
     summary: String(row.summary),
-    grantedUnder: isPermissionMode(row.granted_under) ? row.granted_under : 'ask',
+    // A mode this build does not know (a later one, after a downgrade) is read as the loosest: the rule then holds
+    // in the fewest modes.
+    grantedUnder: isPermissionMode(row.granted_under) ? row.granted_under : 'full',
     sourceRequestId: str(row.source_request_id),
     createdAt: String(row.created_at)
   }
@@ -396,7 +398,9 @@ export class ThreadApprovals {
     event(this.store, 'approval.answered', record, { decision: meaning.decision, ...(meaning.scope ? { scope: meaning.scope } : {}), answeredBy: who, answerPath: row.answerPath })
     // Only a user creates a standing rule, in the same transaction as the answer.
     const rule = always && answeredBy.kind === 'user' ? this.grantRule(record) : null
-    const base = { ok: true as const, decision: meaning.decision, ...(meaning.scope ? { scope: meaning.scope } : {}), record, ...(rule ? { rule } : {}) }
+    // Identical requests waiting beside this one (a model's parallel calls) are the same decision: allow them too.
+    const siblings = rule ? this.allowSiblings(record, answeredBy, enqueueDelivery) : []
+    const base = { ok: true as const, decision: meaning.decision, ...(meaning.scope ? { scope: meaning.scope } : {}), record, ...(rule ? { rule } : {}), ...(siblings.length ? { siblings } : {}) }
     if (row.answerPath === 'live') {
       if (enqueueDelivery) this.deps.outbox.enqueue({ threadId: row.threadId, runId: row.runId, kind: 'request.respond', payload: { requestId: row.requestId } })
       return base
@@ -415,7 +419,9 @@ export class ThreadApprovals {
     if (!record.fingerprint || !record.permissionMode) return null
     const existing = this.db.statement('SELECT * FROM approval_rules WHERE thread_id = ? AND fingerprint = ?').get(record.threadId, record.fingerprint)
     const grantedUnder = existing ? narrowPermissionMode(toRule(existing).grantedUnder, record.permissionMode) : record.permissionMode
-    const summary = redactSecrets(record.questions[0]?.prompt ?? '').replace(/\s+/g, ' ').trim().slice(0, RULE_SUMMARY_CHARS)
+    const flat = redactSecrets(record.questions[0]?.prompt ?? '').replace(/\s+/g, ' ').trim()
+    // A long command is cut in the middle, so the end that tells two commands apart stays visible.
+    const summary = flat.length > RULE_SUMMARY_CHARS ? `${flat.slice(0, 300)} ... ${flat.slice(-(RULE_SUMMARY_CHARS - 306))}` : flat
     const at = now(this.store)
     this.db
       .statement(
@@ -430,6 +436,23 @@ export class ThreadApprovals {
     }
     event(this.store, 'approval.rule_granted', record, { fingerprint: record.fingerprint, permissionKey: record.permissionKey, grantedUnder })
     return rule
+  }
+
+  /**
+   * Allows (once) the other pending requests of the thread that carry the same fingerprint and key, in
+   * the answering transaction. Only requests whose provider still waits (`live`) and that offer an option
+   * allowing once; a request that already differs in any way has another fingerprint and is left alone.
+   */
+  private allowSiblings(record: ApprovalRecord, answeredBy: Answerer, enqueueDelivery: boolean): string[] {
+    if (!record.fingerprint) return []
+    const done: string[] = []
+    for (const sibling of select(this.store, "status = 'pending' AND thread_id = ? AND fingerprint = ? AND permission_key = ? AND answer_path = 'live' AND request_id != ?", record.threadId, record.fingerprint, record.permissionKey, record.requestId)) {
+      const once = onceAllowOption(sibling.questions)
+      if (!once) continue
+      const outcome = this.settleRow(sibling, { [sibling.questions[0]!.id]: once.id }, answeredBy, enqueueDelivery)
+      if (outcome.ok) done.push(sibling.requestId)
+    }
+    return done
   }
 
   /**

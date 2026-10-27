@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto'
+import { isAbsolute, join } from 'node:path'
 import { actionOf } from '../../shared/permissionKeys'
 import { stableStringify } from './json'
 
@@ -88,8 +89,9 @@ export function canonicalAction(permissionKey: string, toolName: string, input: 
   // A Mousse tool acts on state that changes between the question and its continuation (an integration
   // merges whatever the delegation holds then), so no argument list describes what was approved.
   if (permissionKey.startsWith('mousse:')) return null
-  // ACP: the agent's own description of the call, as given. A request without one has no fingerprint.
-  if (permissionKey.startsWith('acp:')) return input === undefined || input === null ? null : input
+  // ACP: the agent's own description of the call, as given. A request without one, or with an empty one (`{}`, a
+  // string, a list), describes nothing and has no fingerprint.
+  if (permissionKey.startsWith('acp:')) return isRecord(input) && Object.keys(input).length > 0 ? input : null
   if (!isRecord(input)) return null
   const canon = permissionKey.startsWith('claude:') ? CLAUDE_TOOLS[toolName] ?? GENERIC : GENERIC
   return canonicalize(input, canon)
@@ -109,4 +111,19 @@ export function approvalFingerprint(input: FingerprintInput): string | null {
     action
   })
   return createHash('sha256').update(text).digest('hex')
+}
+
+/**
+ * The directory a command a provider asks about will start in, as an exact path, or undefined when that cannot be
+ * said. The provider starts it where it proposed, so a path with dot segments (which `resolve` would collapse into
+ * another folder, e.g. through a link) is not pinned down; a relative one is under the turn's directory, which must
+ * itself be a plain absolute path.
+ */
+export function exactDirectory(turnCwd: string | undefined, named: string | null | undefined): string | undefined {
+  const raw = named && named.trim() ? named : turnCwd
+  const dotted = (path: string): boolean => path.split(/[\\/]+/).some((segment) => segment === '.' || segment === '..')
+  if (!raw || dotted(raw)) return undefined
+  if (isAbsolute(raw)) return raw
+  if (!turnCwd || !isAbsolute(turnCwd) || dotted(turnCwd)) return undefined
+  return join(turnCwd, raw)
 }

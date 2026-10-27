@@ -83,7 +83,7 @@ export function useSubagentWorld() {
     const parent = d.store.createThread('Parent')
     parentId = parent.id
     const reconciler = new Reconciler({ store: d.engine.store, outbox: d.engine.outbox, tools: d.engine.tools, capabilitiesFor: (id) => d.orch.capabilitiesForThread(id) })
-    const say = (prompt: string) => d.orch.send(prompt, false, { threadId: parent.id, clientRequestId: `send:${prompt}:${Math.random()}` })
+    const say = (prompt: string, extra: { source?: string; origin?: 'schedule' } = {}) => d.orch.send(prompt, false, { threadId: parent.id, clientRequestId: `send:${prompt}:${Math.random()}`, ...extra })
     const start = (tools: DelegationToolHost, title: string, extra: Json = {}, id = `start:${title}`) =>
       tools.delegateTask({ prompt: `Review ${title}`, title, workspace: 'shared', role: 'research', ...extra } as never, { toolCallId: id }) as Promise<Json>
     const settled = (runId: string) => waitFor(() => ['completed', 'failed'].includes(d.engine.getRun(runId)?.status ?? ''), `run ${runId}`)

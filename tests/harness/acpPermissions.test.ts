@@ -154,7 +154,7 @@ describe('ACP "Always for this thread" is Mousse\'s own rule, never the agent\'s
       store: engine.approvals,
       context: (threadId) => {
         const run = engine.getActiveRun(threadId)
-        return run ? { runId: run.runId, instanceId: 'acp:agent', provider: 'acp', origin: 'interactive', permissionMode: state.permissionMode, approvals: 'ask' } : null
+        return run ? { runId: run.runId, instanceId: 'acp:agent', provider: 'acp', origin: 'interactive', permissionMode: state.permissionMode, approvals: 'ask', startedByPerson: true } : null
       },
       effectDelivery: () => false,
       continuationDue: () => undefined
@@ -218,6 +218,54 @@ describe('ACP "Always for this thread" is Mousse\'s own rule, never the agent\'s
       // No description of the call, no fingerprint: asked every time and "always" is not offered.
       for (let times = 0; times < 2; times += 1) await answerPermission(prompter, forThread('thread'), execute(), classify)
       expect(seen.slice(4)).toEqual([['once', 'no'], ['once', 'no']])
+    } finally {
+      db.close()
+    }
+  })
+
+  it('names the tool: a rule for one tool never answers another tool of the same kind with the same input', async () => {
+    const { questions, asked, engine, db } = await bound()
+    try {
+      const prompter = questionsPrompter(questions)
+      const tool = (title: string, rawInput: unknown): RequestPermissionRequest => ({ sessionId: 's', toolCall: { toolCallId: 'c', title, kind: 'other', rawInput }, options })
+      // The user says "always" to a read-only tool.
+      await answerPermission(prompter, forThread('thread'), tool('get_issue', { number: 5 }), classify)
+      expect(asked).toHaveLength(1)
+      expect(engine.approvals.listRules('thread')).toHaveLength(1)
+      expect(await answerPermission(prompter, forThread('thread'), tool('get_issue', { number: 5 }), classify)).toEqual(selected('once'))
+      expect(asked).toHaveLength(1)
+      // Another tool, same kind, same input: asked, and no rule is made for it unless the user says so.
+      questions.removeAllListeners('pending')
+      const seen: string[][] = []
+      questions.on('pending', (event: { requestId: string; questions: Array<{ options: Array<{ id: string }> }> }) => {
+        seen.push(event.questions[0]!.options.map((option) => option.id))
+        questions.submitAnswers(event.requestId, { permission: 'no' }, { kind: 'user' })
+      })
+      expect(await answerPermission(prompter, forThread('thread'), tool('close_issue', { number: 5 }), classify)).toEqual(selected('no'))
+      expect(await answerPermission(prompter, forThread('thread'), tool('get_issue', { number: 6 }), classify)).toEqual(selected('no'))
+      expect(seen).toHaveLength(2)
+    } finally {
+      db.close()
+    }
+  })
+
+  it('a call whose description is empty or missing has no fingerprint: asked every time, never "always"', async () => {
+    const { questions, engine, db } = await bound()
+    try {
+      const prompter = questionsPrompter(questions)
+      questions.removeAllListeners('pending')
+      const seen: string[][] = []
+      questions.on('pending', (event: { requestId: string; questions: Array<{ options: Array<{ id: string }> }> }) => {
+        seen.push(event.questions[0]!.options.map((option) => option.id))
+        questions.submitAnswers(event.requestId, { permission: 'no' }, { kind: 'user' })
+      })
+      for (const rawInput of [{}, '', [], 'run it', 42, null, undefined]) {
+        for (let times = 0; times < 2; times += 1)
+          expect(await answerPermission(prompter, forThread('thread'), execute(rawInput), classify), JSON.stringify(rawInput)).toEqual(selected('no'))
+      }
+      expect(seen).toHaveLength(14)
+      expect(seen.every((options) => options.join() === 'once,no')).toBe(true)
+      expect(engine.approvals.listRules('thread')).toEqual([])
     } finally {
       db.close()
     }
