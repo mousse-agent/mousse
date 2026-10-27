@@ -398,6 +398,11 @@ export interface InstanceConfigPatch {
    * (Advanced → Engine); `null` clears it back to the default engine.
    */
   engine?: 'rpc' | 'legacy' | null
+  /**
+   * Takes the settings an older Mousse version left in the provider's own settings file
+   * (`InstanceSnapshot.settingsNotice` `older_conflict`); every other field is ignored.
+   */
+  useOlderSettings?: true
 }
 
 /**

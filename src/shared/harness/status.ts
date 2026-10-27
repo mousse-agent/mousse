@@ -162,6 +162,13 @@ export interface InstanceSnapshot {
    * uses it when it names the same action the status calls for.
    */
   nextStep?: NextStep
+  /**
+   * An older Mousse version changed this provider's settings in its own settings file, found when
+   * Mousse started: `older_applied` took them over (shown until the next start or a change);
+   * `older_conflict` kept this version's and offers "Use the older settings"
+   * (`configure({ useOlderSettings: true })`) until the user picks or saves.
+   */
+  settingsNotice?: { kind: 'older_applied' | 'older_conflict'; message: string }
 }
 
 /**

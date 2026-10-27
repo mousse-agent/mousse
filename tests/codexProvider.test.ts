@@ -68,6 +68,8 @@ const chatgpt = { result: { account: { type: 'chatgpt', email: 'me@example.com',
 let home: string
 let binary: string
 let questions: UserQuestionService
+/** The instance's signed-out flag (the gateway's), as the services read it. */
+let signedOut = false
 const services: CodexProviderService[] = []
 
 beforeEach(() => {
@@ -76,6 +78,7 @@ beforeEach(() => {
   writeFileSync(binary, '#!/bin/sh\nexit 0\n')
   chmodSync(binary, 0o755)
   questions = new UserQuestionService()
+  signedOut = false
 })
 afterEach(() => {
   for (const service of services.splice(0)) service.stop()
@@ -88,7 +91,11 @@ afterEach(() => {
 function create(server: Pick<ReturnType<typeof scriptedServer>, 'launch'>, settings: Record<string, unknown> = {}): CodexProviderService {
   mkdirSync(join(home, 'providers', 'codex'), { recursive: true })
   writeFileSync(join(home, 'providers', 'codex', 'settings.json'), JSON.stringify({ binaryPath: binary, ...settings }))
-  const service = new CodexProviderService(home, questions, { launch: server.launch })
+  // The instance config's launch settings and sign-out flag, as the gateway hands them over.
+  const service = new CodexProviderService(home, questions, { launch: server.launch }, {
+    launch: () => ({ binaryPath: binary }),
+    signedOut: () => signedOut
+  })
   services.push(service)
   return service
 }
@@ -262,7 +269,10 @@ describe('CodexProviderService', () => {
     const server = scriptedServer(() => chatgpt)
     const service = create(server, { threads: { t: { codexThreadId: 'thr', cwd: home, historyKey: 'k' } } })
     await service.status()
+    // The gateway sets the flag, then the service stops its work; the mirror records the flag.
+    signedOut = true
     await service.logout()
+    service.vendorMirror(['signedOut']).write({ signedOut: true })
     expect(server.methods()).not.toContain('account/logout')
     expect(server.processes[0].signalCode).toBe('SIGTERM')
     expect(service.configured()).toBe(false)
@@ -280,7 +290,7 @@ describe('CodexProviderService', () => {
       if (message.method === 'model/list') return { error: { code: -32600, message: 'unavailable' } }
       return { result: {} }
     })
-    const service = create(server, { disconnected: true })
+    const service = create(server)
     const session = new LoginSession('login-1')
     const prompts: string[] = []
     session.on('event', (event: { type: string; message?: string }) => {
@@ -301,7 +311,7 @@ describe('CodexProviderService', () => {
     const server = scriptedServer((message) => (message.method === 'account/read' ? chatgpt : { result: { data: [], nextCursor: null } }))
     mkdirSync(join(home, 'providers', 'codex'), { recursive: true })
     writeFileSync(join(home, 'providers', 'codex', 'settings.json'), JSON.stringify({ binaryPath: binary, models: [{ id: 'gpt-x', label: 'GPT X' }] }))
-    const service = new CodexProviderService(home, questions, { launch: server.launch, idleCloseMs: 20 })
+    const service = new CodexProviderService(home, questions, { launch: server.launch, idleCloseMs: 20 }, { launch: () => ({ binaryPath: binary }) })
     services.push(service)
     await service.status()
     expect(server.processes[0].signalCode).toBeNull()

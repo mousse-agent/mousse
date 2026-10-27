@@ -34,12 +34,14 @@ function fixture(
   )
   const questions = new UserQuestionService()
   const runAuth = vi.fn(async () => JSON.stringify({ loggedIn, authMethod: loggedIn ? 'claude.ai' : 'none' }))
-  const service = new ClaudeSubscriptionProviderService(home, questions, { query, runAuth, live: false, usageLimitHoldMs })
+  let launch: { binaryPath?: string; args?: string[]; env?: Record<string, string> } = { binaryPath: binary }
+  const service = new ClaudeSubscriptionProviderService(home, questions, { query, runAuth, live: false, usageLimitHoldMs, launchConfig: () => launch })
   return {
     home,
     service,
     questions,
     runAuth,
+    setLaunch: (next: { args?: string[]; env?: Record<string, string> }) => { launch = { binaryPath: binary, ...next } },
     settings: () => JSON.parse(readFileSync(join(directory, 'settings.json'), 'utf8'))
   }
 }
@@ -258,6 +260,7 @@ describe('Claude Subscription native provider', () => {
     const key = createHash('sha256').update('history').digest('hex')
     legacy({ sessionId: 'old-session', cwd: home, model: 'sonnet', historyKey: key })
     const reloaded = new ClaudeSubscriptionProviderService(home, new UserQuestionService(), {
+      launchConfig: () => ({ binaryPath: join(home, 'claude') }),
       live: false,
       query: (input) => { inputs.push(input); return fakeQuery([result]) },
       runAuth: vi.fn(async () => JSON.stringify({ loggedIn: true, authMethod: 'claude.ai' }))
@@ -268,6 +271,7 @@ describe('Claude Subscription native provider', () => {
     // A session from an older separate (profile-private) sign-in is never resumed.
     legacy({ sessionId: 'isolated-session', cwd: home, model: 'sonnet', historyKey: key, instanceId: 'claude' }, { loginPolicy: 'isolated' })
     const switched = new ClaudeSubscriptionProviderService(home, new UserQuestionService(), {
+      launchConfig: () => ({ binaryPath: join(home, 'claude') }),
       live: false,
       query: (input) => { inputs.push(input); return fakeQuery([result]) },
       runAuth: vi.fn(async () => JSON.stringify({ loggedIn: true, authMethod: 'claude.ai' }))
@@ -331,12 +335,12 @@ describe('Claude Subscription native provider', () => {
   })
   it("keeps the user's --append-system-prompt launch args by moving their text after Mousse's guidance", async () => {
     const inputs: Array<{ options: Options; prompt: unknown }> = []
-    const { service, home } = fixture((input) => {
+    const { service, home, setLaunch } = fixture((input) => {
       inputs.push(input)
       return fakeQuery([result])
     })
     writeFileSync(join(home, 'extra.md'), 'FROM FILE\n')
-    await service.setCliConfig({ args: ['--append-system-prompt', 'INLINE', '--append-system-prompt-file', 'extra.md', '--verbose'] })
+    setLaunch({ args: ['--append-system-prompt', 'INLINE', '--append-system-prompt-file', 'extra.md', '--verbose'] })
     await service.chat({ ...chatInput(home), systemPromptAppend: 'GUIDE' })
     expect(inputs[0].options.systemPrompt).toEqual({ type: 'preset', preset: 'claude_code', append: 'GUIDE\n\nFROM FILE\n\nINLINE' })
     // The SDK's append text replaces the CLI's, so the flags are not passed again.
@@ -345,9 +349,9 @@ describe('Claude Subscription native provider', () => {
     expect(inputs[1].options.systemPrompt).toEqual({ type: 'preset', preset: 'claude_code', append: 'FROM FILE\n\nINLINE' })
 
     // Values Claude Code would reject fail the turn with a clear message instead of disappearing.
-    await service.setCliConfig({ args: ['--append-system-prompt-file', 'missing.md'] })
+    setLaunch({ args: ['--append-system-prompt-file', 'missing.md'] })
     await expect(service.chat({ ...chatInput(home), threadId: 'missing' })).rejects.toThrow(/could not read the --append-system-prompt-file/)
-    await service.setCliConfig({ args: ['--append-system-prompt'] })
+    setLaunch({ args: ['--append-system-prompt'] })
     await expect(service.chat({ ...chatInput(home), threadId: 'empty' })).rejects.toThrow(/--append-system-prompt launch argument has no text/)
     expect(inputs).toHaveLength(2)
   })
@@ -449,6 +453,7 @@ describe('Claude Subscription native provider', () => {
       finish = resolve
     })
     const service = new ClaudeSubscriptionProviderService(home, new UserQuestionService(), {
+      launchConfig: () => ({ binaryPath: join(home, 'claude') }),
       live: false,
       query: () => fakeQuery([result]),
       runAuth: () => pending
@@ -494,6 +499,7 @@ describe('Claude Subscription native provider', () => {
     let finish!: (value: string) => void
     const query = vi.fn(() => fakeQuery([result]))
     const service = new ClaudeSubscriptionProviderService(home, new UserQuestionService(), {
+      launchConfig: () => ({ binaryPath: join(home, 'claude') }),
       live: false,
       query,
       runAuth: () =>
@@ -526,7 +532,9 @@ describe('Claude Subscription native provider', () => {
     await expect(service.chat(chatInput(home))).rejects.toThrow()
     await loggedOut
     expect(questions.listAllPending()).toEqual([])
-    expect(settings()).toMatchObject({ cliDisconnected: true, sessions: {} })
+    // The service drops its sessions; the signed-out flag is the gateway's (and its mirror's), never written here.
+    expect(settings()).toMatchObject({ sessions: {} })
+    expect(settings().cliDisconnected).toBeUndefined()
   })
   it('interrupts and resumes steering exactly once without replaying the original request', async () => {
     const captured: Array<{ options: Options; prompt: unknown }> = []
@@ -635,6 +643,7 @@ it('reports measured usage once, persists baselines and subtracts them after dae
   expect(first.mock.calls[0][0].usage).toMatchObject({ input: 10, output: 5, cost: { total: 0.1 } })
   expect(settings().sessions.thread.usageBaseline.sessionId).toBe('vendor-session')
   const restarted = new ClaudeSubscriptionProviderService(home, new UserQuestionService(), {
+      launchConfig: () => ({ binaryPath: join(home, 'claude') }),
     live: false,
     runAuth,
     query: () => fakeQuery([measuredResult(14, 7, 0.15, 'next-result')])

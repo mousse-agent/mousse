@@ -322,7 +322,7 @@ describe('the provider service', () => {
       })()
       return Object.assign(generator, { close: vi.fn(), interrupt: vi.fn(async () => undefined), supportedModels: vi.fn(async () => []) }) as unknown as Query
     }
-    const service = new ClaudeSubscriptionProviderService(dir, new UserQuestionService(), { query, runAuth, live: false })
+    const service = new ClaudeSubscriptionProviderService(dir, new UserQuestionService(), { query, runAuth, live: false, launchConfig: () => ({ binaryPath: join(dir, 'claude') }) })
     const events: ProviderToolEvent[] = []
     await service.chat({ threadId: 'thread', cwd: dir, model: 'sonnet', prompt: 'go', onText: vi.fn(), onTool: (event) => events.push(event) })
     expect(events).toEqual(expected())
@@ -337,7 +337,7 @@ describe('the provider service', () => {
       // The first frame of a turn names the message it answers.
       process.emit({ ...frames[0]!, user_message_uuid: uuid, user_message_uuids: [uuid] }, ...frames.slice(1), resultFrame({ uuids: [uuid], text: 'Done' }))
     }
-    const service = new ClaudeSubscriptionProviderService(dir, new UserQuestionService(), { query: cli.query, runAuth, live: { noticeDelayMs: 10 } })
+    const service = new ClaudeSubscriptionProviderService(dir, new UserQuestionService(), { query: cli.query, runAuth, live: { noticeDelayMs: 10 }, launchConfig: () => ({ binaryPath: join(dir, 'claude') }) })
     const events: ProviderToolEvent[] = []
     await service.chat({ threadId: 'thread', cwd: dir, model: 'sonnet', prompt: 'go', onText: vi.fn(), onTool: (event) => events.push(event) })
     expect(events).toEqual(expected())
@@ -364,7 +364,7 @@ describe('the provider service', () => {
       const uuid = String(message.uuid)
       process.emit({ ...bg[0]!, user_message_uuid: uuid, user_message_uuids: [uuid] }, ...bg.slice(1), resultFrame({ uuids: [uuid], text: 'Done' }))
     }
-    const service = new ClaudeSubscriptionProviderService(dir, new UserQuestionService(), { query: cli.query, runAuth, live: { noticeDelayMs: 10 } })
+    const service = new ClaudeSubscriptionProviderService(dir, new UserQuestionService(), { query: cli.query, runAuth, live: { noticeDelayMs: 10 }, launchConfig: () => ({ binaryPath: join(dir, 'claude') }) })
     const events: ProviderToolEvent[] = []
     await service.chat({ threadId: 'thread', cwd: dir, model: 'sonnet', prompt: 'go', onText: vi.fn(), onTool: (event) => events.push(event) })
     expect(events).toEqual(readFrames(bg, 'no_result'))
@@ -383,7 +383,7 @@ describe('the provider service', () => {
       const uuid = String(message.uuid)
       process.emit({ ...launch[0]!, user_message_uuid: uuid, user_message_uuids: [uuid] }, ...launch.slice(1), resultFrame({ uuids: [uuid], text: 'Done' }))
     }
-    const service = new ClaudeSubscriptionProviderService(dir, new UserQuestionService(), { query: cli.query, runAuth, live: { noticeDelayMs: 10 } })
+    const service = new ClaudeSubscriptionProviderService(dir, new UserQuestionService(), { query: cli.query, runAuth, live: { noticeDelayMs: 10 }, launchConfig: () => ({ binaryPath: join(dir, 'claude') }) })
     const chat = (onTool: (event: ProviderToolEvent) => void) =>
       service.chat({ threadId: 'thread', cwd: dir, model: 'sonnet', prompt: 'go', history: '', onText: vi.fn(), onTool })
     const first: ProviderToolEvent[] = []
@@ -418,7 +418,7 @@ describe('the provider service', () => {
       const unblock = () => release?.()
       return Object.assign(generator, { close: vi.fn(unblock), interrupt: vi.fn(async () => unblock()), supportedModels: vi.fn(async () => []) }) as unknown as Query
     }
-    const service = new ClaudeSubscriptionProviderService(dir, new UserQuestionService(), { query, runAuth, live: false })
+    const service = new ClaudeSubscriptionProviderService(dir, new UserQuestionService(), { query, runAuth, live: false, launchConfig: () => ({ binaryPath: join(dir, 'claude') }) })
     const events: ProviderToolEvent[] = []
     const abort = new AbortController()
     const turn = service.chat({ threadId: 'thread', cwd: dir, model: 'sonnet', prompt: 'go', signal: abort.signal, onText: vi.fn(), onTool: (event) => events.push(event) })

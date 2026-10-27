@@ -116,7 +116,7 @@ function service(replay: ReplayTransport, settings: Record<string, unknown> = {}
   chmodSync(binary, 0o755)
   mkdirSync(join(home, 'providers', 'codex'), { recursive: true })
   writeFileSync(settingsPath(), JSON.stringify({ binaryPath: binary, models: [{ id: 'gpt-x', label: 'GPT X' }], ...settings }))
-  const created = createCodexProviderService(home, questions, { launch: replayCodexAppServer(replay) })
+  const created = createCodexProviderService(home, questions, { launch: replayCodexAppServer(replay) }, { launch: () => ({ binaryPath: binary }) })
   services.push(created)
   return created
 }
@@ -366,7 +366,7 @@ describe('CodexAdapter', () => {
       ...message('msg-3', ['three'], 'turn-3'),
       completed('completed', 'turn-3')
     ])
-    const reopened = createCodexProviderService(home, questions, { launch: replayCodexAppServer(resumed) })
+    const reopened = createCodexProviderService(home, questions, { launch: replayCodexAppServer(resumed) }, { launch: () => ({ binaryPath: join(home, 'codex') }) })
     services.push(reopened)
     const third = await new CodexAdapter(() => reopened).startTurn(input({ prompt: 'third', nativeHistory: 'history+two' }), recordingSink(), control(), host())
     resumed.assertDone()
@@ -385,7 +385,7 @@ describe('CodexAdapter', () => {
       note('item/completed', { threadId: 'thr-2', turnId: 'turn-4', item: { type: 'agentMessage', id: 'msg-4', text: 'four' } }),
       note('turn/completed', { threadId: 'thr-2', turn: { id: 'turn-4', status: 'completed', error: null } })
     ])
-    const recovering = createCodexProviderService(home, questions, { launch: replayCodexAppServer(broken) })
+    const recovering = createCodexProviderService(home, questions, { launch: replayCodexAppServer(broken) }, { launch: () => ({ binaryPath: join(home, 'codex') }) })
     services.push(recovering)
     const fourth = await new CodexAdapter(() => recovering).startTurn(input({ prompt: 'fourth', nativeHistory: 'history+three' }), recordingSink(), control(), host())
     broken.assertDone()

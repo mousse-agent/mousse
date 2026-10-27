@@ -218,7 +218,12 @@ export function seedProviderInstances(
   /** The stored marker; absent means the profile predates markers (version 0). */
   seedVersion?: unknown,
   changes: readonly SupersededSeed[] = SUPERSEDED_SEEDS,
-  current: number = PROVIDER_INSTANCE_SEED_VERSION
+  current: number = PROVIDER_INSTANCE_SEED_VERSION,
+  /**
+   * The config a vendor seed starts with: its launch settings and sign-out as the vendor's own
+   * settings file holds them, with the mirror marker (`harness/vendorMirror`). Undefined: none.
+   */
+  vendorSeedConfig?: (instanceId: string) => Record<string, unknown> | undefined
 ): { instances: Record<string, unknown>; added: string[]; upgraded: string[]; seedVersion: number } {
   const instances: Record<string, unknown> =
     stored && typeof stored === 'object' && !Array.isArray(stored) ? { ...(stored as Record<string, unknown>) } : {}
@@ -237,7 +242,12 @@ export function seedProviderInstances(
     }
   // Agents are added once, for a profile that was never seeded; after that they are entries like any
   // other, so a provider the user deleted stays deleted.
-  if (version < 1) for (const [id, entry] of VENDOR_SEEDS) seed(id, { ...entry })
+  if (version < 1)
+    for (const [id, entry] of VENDOR_SEEDS) {
+      if (Object.prototype.hasOwnProperty.call(instances, id)) continue
+      const config = vendorSeedConfig?.(id)
+      seed(id, { ...entry, ...(config ? { config } : {}) })
+    }
   for (const providerId of credentialedPiProviders) if (providerId) seed(piInstanceId(providerId), { driver: 'pi', enabled: true })
   return { instances, added, upgraded, seedVersion: Math.max(version, current) }
 }

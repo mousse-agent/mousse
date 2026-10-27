@@ -95,4 +95,13 @@ describe('harness provider protocol', () => {
     expect(configure).not.toHaveBeenCalled()
     expect(setModelPrefs).not.toHaveBeenCalled()
   })
+
+  it('"Use the older settings" reaches the gateway alone; any other value is refused', async () => {
+    const configure = vi.fn()
+    const ctx = context({ configure } as unknown as Partial<HarnessInstances>)
+    await dispatchMethod(ctx, 'providers.instances.configure', { instanceId: 'claude', patch: { useOlderSettings: true, args: ['--ignored'] } })
+    expect(configure).toHaveBeenCalledWith('claude', { useOlderSettings: true })
+    await expect(dispatchMethod(ctx, 'providers.instances.configure', { instanceId: 'claude', patch: { useOlderSettings: false } })).rejects.toThrow()
+    expect(configure).toHaveBeenCalledTimes(1)
+  })
 })

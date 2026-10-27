@@ -16,7 +16,8 @@ import {
   parseCliConfigPatch,
   parseCliVersion,
   requireExecutable,
-  withUserEnv
+  withUserEnv,
+  type StoredCliConfig
 } from '../src/mms/providers/cliConfig'
 import { directLaunch } from '../src/mms/providers/resolveWindowsShim'
 
@@ -122,16 +123,14 @@ describe('CLI provider config validation', () => {
 })
 
 describe('Claude Subscription CLI config', () => {
+  // Launch settings live in the instance config (the gateway's); the service reads them from there.
   function fixture() {
     const home = tempHome()
     const binary = executable(join(home, 'claude'))
     const other = executable(join(home, 'claude-next'))
     const directory = join(home, 'providers', 'claude-subscription')
     mkdirSync(directory, { recursive: true })
-    writeFileSync(
-      join(directory, 'settings.json'),
-      JSON.stringify({ loginPolicy: 'cli', binaryPath: binary, models: [{ id: 'sonnet', label: 'Sonnet' }] })
-    )
+    writeFileSync(join(directory, 'settings.json'), JSON.stringify({ loginPolicy: 'cli', models: [{ id: 'sonnet', label: 'Sonnet' }] }))
     const captured: Options[] = []
     const query = (input: { options: Options }) => {
       captured.push(input.options)
@@ -144,13 +143,24 @@ describe('Claude Subscription CLI config', () => {
     cleanups.push(() => questions.shutdown())
     const { cache } = versions('2.1.4 (Claude Code)')
     const runAuth = vi.fn(async () => JSON.stringify({ loggedIn: true, authMethod: 'claude.ai' }))
-    const service = new ClaudeSubscriptionProviderService(home, questions, { query, runAuth, versions: cache })
+    let launch: StoredCliConfig = { binaryPath: binary }
+    const service = new ClaudeSubscriptionProviderService(home, questions, { query, runAuth, versions: cache, launchConfig: () => launch })
     cleanups.push(() => service.stop())
-    return { home, binary, other, service, captured, settings: () => JSON.parse(readFileSync(join(directory, 'settings.json'), 'utf8')) }
+    return {
+      home,
+      binary,
+      other,
+      service,
+      captured,
+      setLaunch: (next: StoredCliConfig) => {
+        launch = next
+      },
+      settings: () => JSON.parse(readFileSync(join(directory, 'settings.json'), 'utf8'))
+    }
   }
 
-  it('reports, persists and applies the executable, args and env to new SDK launches', async () => {
-    const { home, binary, other, service, captured, settings } = fixture()
+  it("reports and applies the instance config's executable, args and env to new SDK launches", async () => {
+    const { home, binary, other, service, captured, setLaunch, settings } = fixture()
     expect(await service.cliConfig()).toEqual({
       instanceId: 'claude',
       binaryPath: binary,
@@ -159,18 +169,8 @@ describe('Claude Subscription CLI config', () => {
       args: [],
       env: {}
     })
-    const config = await service.setCliConfig({
-      binaryPath: other,
-      args: ['--add-dir', '/extra', '--verbose'],
-      env: { HTTPS_PROXY: 'http://proxy', CLAUDE_CONFIG_DIR: '/user/override' }
-    })
-    expect(config).toMatchObject({ binaryPath: other, resolvedBinaryPath: other, args: ['--add-dir', '/extra', '--verbose'] })
-    expect(settings()).toMatchObject({
-      binaryPath: other,
-      args: ['--add-dir', '/extra', '--verbose'],
-      env: { HTTPS_PROXY: 'http://proxy', CLAUDE_CONFIG_DIR: '/user/override' },
-      loginPolicy: 'cli'
-    })
+    setLaunch({ binaryPath: other, args: ['--add-dir', '/extra', '--verbose'], env: { HTTPS_PROXY: 'http://proxy', CLAUDE_CONFIG_DIR: '/user/override' } })
+    expect(await service.cliConfig()).toMatchObject({ binaryPath: other, resolvedBinaryPath: other, args: ['--add-dir', '/extra', '--verbose'] })
 
     await service.refreshModels(home)
     const options = captured.at(-1)!
@@ -179,22 +179,18 @@ describe('Claude Subscription CLI config', () => {
     // User variables apply after Mousse's own environment, so they win.
     expect(options.env?.HTTPS_PROXY).toBe('http://proxy')
     expect(options.env?.CLAUDE_CONFIG_DIR).toBe('/user/override')
-
-    await service.setCliConfig({ binaryPath: null, args: [], env: {} })
-    const cleared = settings()
-    expect(cleared.binaryPath).toBeUndefined()
-    expect(cleared.args).toBeUndefined()
-    expect(cleared.env).toBeUndefined()
+    // settings.json holds none of it: only the gateway's mirror writes launch keys there.
+    expect(settings().binaryPath).toBeUndefined()
+    expect(settings().args).toBeUndefined()
   })
 
-  it('rejects an invalid executable or unsupported args without changing anything', async () => {
-    const { home, binary, service, settings } = fixture()
-    const before = settings()
-    await expect(service.setCliConfig({ binaryPath: 'relative/claude' })).rejects.toThrow(/absolute/)
-    await expect(service.setCliConfig({ binaryPath: join(home, 'missing') })).rejects.toThrow(/not found/)
-    await expect(service.setCliConfig({ args: ['-v'], env: { A: '1' } })).rejects.toThrow(/not supported/)
-    expect(settings()).toEqual(before)
-    expect((await service.cliConfig()).binaryPath).toBe(binary)
+  it('validates an executable and args before the gateway saves them', () => {
+    const { home, other, service } = fixture()
+    expect(() => service.validateLaunch({ binaryPath: 'relative/claude' })).toThrow(/absolute/)
+    expect(() => service.validateLaunch({ binaryPath: join(home, 'missing') })).toThrow(/not found/)
+    expect(() => service.validateLaunch({ args: ['-v'], env: { A: '1' } })).toThrow(/not supported/)
+    expect(() => service.validateLaunch({ binaryPath: other, args: ['--verbose'] })).not.toThrow()
+    expect(() => service.validateLaunch({ binaryPath: null })).not.toThrow()
   })
 })
 
@@ -244,18 +240,22 @@ describe('Codex CLI config', () => {
     const home = tempHome()
     const binary = executable(join(home, 'codex'))
     mkdirSync(join(home, 'providers', 'codex'), { recursive: true })
-    writeFileSync(join(home, 'providers', 'codex', 'settings.json'), JSON.stringify({ binaryPath: binary, models: [{ id: 'gpt-x', label: 'GPT X' }] }))
+    writeFileSync(join(home, 'providers', 'codex', 'settings.json'), JSON.stringify({ models: [{ id: 'gpt-x', label: 'GPT X' }] }))
     const questions = new UserQuestionService()
     cleanups.push(() => questions.shutdown())
     const fake = server()
     const { cache } = versions('codex-cli 0.47.0')
-    const service = new CodexProviderService(home, questions, { launch: fake.launch, versions: cache })
+    let launch: StoredCliConfig = { binaryPath: binary }
+    const service = new CodexProviderService(home, questions, { launch: fake.launch, versions: cache }, { launch: () => launch })
     cleanups.push(() => service.stop())
 
     expect(await service.status()).toMatchObject({ state: 'connected' })
     expect(fake.launches[0].args).toEqual([])
 
-    const config = await service.setCliConfig({ args: ['-c', 'model="o3"'], env: { OPENAI_API_KEY: 'user-chosen', FOO: 'bar' } })
+    // The gateway saved new launch settings to the instance config and tells the service.
+    launch = { binaryPath: binary, args: ['-c', 'model="o3"'], env: { OPENAI_API_KEY: 'user-chosen', FOO: 'bar' } }
+    service.launchChanged()
+    const config = await service.cliConfig()
     expect(config).toEqual({
       instanceId: 'codex',
       binaryPath: binary,
@@ -266,18 +266,13 @@ describe('Codex CLI config', () => {
     })
     // The process started with the old settings was idle, so it closed at once.
     expect(fake.processes[0].signalCode).toBe('SIGTERM')
-    expect(JSON.parse(readFileSync(join(home, 'providers', 'codex', 'settings.json'), 'utf8'))).toMatchObject({
-      args: ['-c', 'model="o3"'],
-      env: { OPENAI_API_KEY: 'user-chosen', FOO: 'bar' }
-    })
-
     expect(await service.status({ force: true })).toMatchObject({ state: 'connected' })
     expect(fake.launches).toHaveLength(2)
     expect(fake.launches[1].args).toEqual(['-c', 'model="o3"'])
     expect(fake.launches[1].env.FOO).toBe('bar')
     expect(fake.launches[1].env.OPENAI_API_KEY).toBe('user-chosen')
 
-    await expect(service.setCliConfig({ binaryPath: join(home, 'nope') })).rejects.toThrow(/not found/)
+    expect(() => service.validateLaunch({ binaryPath: join(home, 'nope') })).toThrow(/not found/)
     expect((await service.cliConfig()).binaryPath).toBe(binary)
   })
 
@@ -296,11 +291,15 @@ describe('Codex CLI config', () => {
     cleanups.push(() => questions.shutdown())
     const fake = server()
     const { cache, run } = versions('codex-cli 0.47.0')
-    const service = new CodexProviderService(home, questions, { launch: fake.launch, versions: cache, findBinary: () => undefined })
+    let launch: StoredCliConfig = {}
+    const service = new CodexProviderService(home, questions, { launch: fake.launch, versions: cache, findBinary: () => undefined }, { launch: () => launch })
     cleanups.push(() => service.stop())
 
     // No native codex.exe in the package: node runs the entry script.
-    expect(await service.setCliConfig({ binaryPath: shim, args: ['-c', 'x=1'] })).toMatchObject({
+    service.validateLaunch({ binaryPath: shim })
+    launch = { binaryPath: shim, args: ['-c', 'x=1'] }
+    expect(await service.status({ force: true })).toMatchObject({ state: 'connected' })
+    expect(await service.cliConfig()).toMatchObject({
       binaryPath: shim,
       resolvedBinaryPath: script,
       version: '0.47.0'
@@ -312,12 +311,11 @@ describe('Codex CLI config', () => {
     mkdirSync(dirname(exe), { recursive: true })
     writeFileSync(exe, 'MZ')
     expect((await service.cliConfig()).resolvedBinaryPath).toBe(exe)
-    expect(JSON.parse(readFileSync(join(home, 'providers', 'codex', 'settings.json'), 'utf8')).binaryPath).toBe(shim)
   })
 })
 
 describe('Antigravity CLI config', () => {
-  it('persists args and env, validates the agent binary, and uses the pinned version only for the pinned install', async () => {
+  it('reads args and env from the instance config, validates the agent binary, and uses the pinned version only for the pinned install', async () => {
     const home = tempHome()
     const agentName = process.platform === 'win32' ? 'agy_acp_server.exe' : 'agy_acp_server.par'
     const helperName = process.platform === 'win32' ? 'localharness_external.exe' : 'localharness_external'
@@ -331,12 +329,15 @@ describe('Antigravity CLI config', () => {
     const questions = new UserQuestionService()
     cleanups.push(() => questions.shutdown())
     const { cache } = versions('agy 1.1.2')
-    const service = new AntigravityProviderService(home, home, questions, cache)
+    let launch: StoredCliConfig = {}
+    const service = new AntigravityProviderService(home, home, questions, cache, { launch: () => launch })
     cleanups.push(() => service.stop())
 
     expect(await service.cliConfig()).toEqual({ instanceId: 'antigravity', args: [], env: {}, signedIn: false })
-    await expect(service.setCliConfig({ binaryPath: join(lonely, agentName) })).rejects.toThrow(/beside/)
-    const config = await service.setCliConfig({ binaryPath: agent, args: ['--flag'], env: { GEMINI_HOME: '/mine' } })
+    expect(() => service.validateLaunch({ binaryPath: join(lonely, agentName) })).toThrow(/beside/)
+    service.validateLaunch({ binaryPath: agent })
+    launch = { binaryPath: agent, args: ['--flag'], env: { GEMINI_HOME: '/mine' } }
+    const config = await service.cliConfig()
     expect(config).toEqual({
       instanceId: 'antigravity',
       binaryPath: agent,
@@ -345,11 +346,6 @@ describe('Antigravity CLI config', () => {
       args: ['--flag'],
       env: { GEMINI_HOME: '/mine' },
       signedIn: false
-    })
-    expect(JSON.parse(readFileSync(join(home, 'providers', 'antigravity', 'settings.json'), 'utf8'))).toMatchObject({
-      binaryPath: agent,
-      args: ['--flag'],
-      env: { GEMINI_HOME: '/mine' }
     })
   })
 })

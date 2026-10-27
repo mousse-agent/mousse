@@ -3,6 +3,7 @@ import { join } from 'node:path'
 import type { InstallOwner } from '../../../shared/harness/status'
 import type { NativeToolTable } from '../../../shared/harness/tools'
 import type { HarnessCaps } from '../../../shared/harness/types'
+import type { CliProviderConfigPatch } from '../../../shared/providerAuth'
 import type { StoredCliConfig } from '../../providers/cliConfig'
 import {
   ClaudeSubscriptionProviderService
@@ -14,6 +15,7 @@ import {
 } from '../../run/adapters/claudeSubscription/ClaudeSubscriptionAdapter'
 import { cliNames } from '../env'
 import { decodeInstanceConfig, type AuthReading, type DriverContext, type DriverRuntime, type HarnessDriver } from '../driver'
+import { ALL_MIRROR_FIELDS, SIGN_OUT_MIRROR_FIELDS } from '../vendorMirror'
 
 /** Claude Code versions Mousse was tested with. */
 export const CLAUDE_TESTED_VERSIONS = { min: '2.0.0', max: '2.1.999' }
@@ -91,6 +93,13 @@ function readAuth(service: ClaudeSubscriptionProviderService, status: Awaited<Re
  * handles Claude tokens.
  */
 export function claudeCodeDriver(options: ClaudeCodeDriverOptions = {}): HarnessDriver {
+  /**
+   * The service of each added instance, kept across the runtimes a config change rebuilds: one
+   * service, and so one writer, per instance's settings file, and a sign-in running when its own
+   * executable prompt saves a path goes on. It reads the newest runtime's context, and stops when
+   * the last runtime using it stops. A new home gets a new service; the old one stops writing.
+   */
+  const owned = new Map<string, OwnedService>()
   return {
     kind: 'claude',
     label: 'Claude Code',
@@ -107,6 +116,7 @@ export function claudeCodeDriver(options: ClaudeCodeDriverOptions = {}): Harness
     userMcp: 'native',
     // Claude Code passes MCP image content to the model, and every Claude model reads images.
     mcpImageResults: true,
+    mirrorsVendorFile: true,
     decodeConfig: (raw) => decodeInstanceConfig(raw, { privateHome: true }),
     caps: () => CLAUDE_CODE_CAPS,
     nativeToolNames: (neutral) => CLAUDE_NATIVE_TOOLS[neutral] ?? [],
@@ -120,26 +130,55 @@ export function claudeCodeDriver(options: ClaudeCodeDriverOptions = {}): Harness
       const env = () => context.env.env
       const signInCommand = claudeSignInCommand(context.env.home)
       let service: ClaudeSubscriptionProviderService
-      let owned = false
-      if (context.builtIn && options.builtIn) service = options.builtIn()
+      let entry: OwnedService | undefined
+      const shared = Boolean(context.builtIn && options.builtIn)
+      if (shared) service = options.builtIn!()
       else {
-        owned = true
         if (context.env.home) mkdirSync(context.env.home, { recursive: true, mode: 0o700 })
-        const launch = (): StoredCliConfig => ({
-          ...(context.config.binaryPath ? { binaryPath: context.config.binaryPath } : {}),
-          ...(context.config.args ? { args: context.config.args } : {}),
-          ...(context.config.env ? { env: context.config.env } : {})
-        })
-        const serviceOptions = {
-          stateDir: context.stateDir,
-          findBinary: context.findBinary,
-          baseEnv: env,
-          launchConfig: launch,
-          signInCommand
+        entry = owned.get(context.instanceId)
+        if (entry && entry.home !== context.env.home) {
+          // Another home: the old service keeps running its turns but never writes the file again.
+          entry.service.freezeSettings()
+          owned.delete(context.instanceId)
+          entry = undefined
         }
-        service = options.createService?.(context, serviceOptions)
-          ?? new ClaudeSubscriptionProviderService(context.profileHome, context.questions, serviceOptions)
+        if (entry) entry.context = context
+        else {
+          // Every read goes to the newest runtime's context: its config, environment and binary lookup.
+          const current = { context }
+          const live = () => current.context
+          const launch = (): StoredCliConfig => {
+            const config = live().config
+            return {
+              ...(config.binaryPath ? { binaryPath: config.binaryPath } : {}),
+              ...(config.args ? { args: config.args } : {}),
+              ...(config.env ? { env: config.env } : {})
+            }
+          }
+          const serviceOptions = {
+            stateDir: context.stateDir,
+            findBinary: () => live().findBinary(),
+            baseEnv: () => live().env.env,
+            launchConfig: launch,
+            signedOut: () => live().signedOut(),
+            saveLaunch: (patch: CliProviderConfigPatch) => live().saveLaunch(patch),
+            signInCommand
+          }
+          const created = options.createService?.(context, serviceOptions)
+            ?? new ClaudeSubscriptionProviderService(context.profileHome, context.questions, serviceOptions)
+          entry = {
+            service: created,
+            home: context.env.home,
+            users: 0,
+            get context() { return current.context },
+            set context(next) { current.context = next }
+          }
+          owned.set(context.instanceId, entry)
+        }
+        entry.users += 1
+        service = entry.service
       }
+      let stopped = false
       const integrations = options.integrations?.(env) ?? null
       const adapter = new ClaudeSubscriptionAdapter(() => service, () => integrations)
       return {
@@ -149,12 +188,10 @@ export function claudeCodeDriver(options: ClaudeCodeDriverOptions = {}): Harness
         llmProvider: () => service.llmProvider(),
         models: () => service.models(),
         modelsRefreshedAt: () => service.modelsRefreshedAt(),
-        ...(context.builtIn
-          ? {
-              launch: () => service.storedLaunch(),
-              setLaunch: async (patch) => void (await service.setCliConfig(patch))
-            }
-          : {}),
+        // The built-in instance mirrors its launch settings and sign-out to its settings.json for an
+        // older Mousse; an added one only its sign-out (its launch settings were always in config).
+        vendorMirror: service.vendorMirror(shared ? ALL_MIRROR_FIELDS : SIGN_OUT_MIRROR_FIELDS),
+        ...(shared ? { validateLaunch: (patch: CliProviderConfigPatch) => service.validateLaunch(patch) } : {}),
         auth: async ({ force }) => readAuth(service, await service.status({ force }), signInCommand),
         // Read from the home and the variables Claude Code reads; `claude auth status` is the turn's own check.
         identity: async () => service.accountSubject(),
@@ -170,11 +207,30 @@ export function claudeCodeDriver(options: ClaudeCodeDriverOptions = {}): Harness
         hasContinuation: (threadId, id) => service.hasContinuation(threadId, id),
         discardContinuations: (threadId, id) => service.discardContinuations(threadId, id),
         stop: () => {
-          if (owned) service.stop()
+          if (!entry || stopped) return
+          stopped = true
+          const user = entry
+          user.users -= 1
+          // A config change retires this runtime just before it builds the next one, which takes
+          // the service over: it stops only when no runtime took it by then.
+          queueMicrotask(() => {
+            if (user.users > 0) return
+            if (owned.get(context.instanceId) === user) owned.delete(context.instanceId)
+            user.service.stop()
+          })
         }
       }
     }
   }
+}
+
+/** The service of an added instance and the runtimes using it (`claudeCodeDriver`). */
+interface OwnedService {
+  service: ClaudeSubscriptionProviderService
+  home: string | undefined
+  /** The newest runtime's context, which the service reads. */
+  context: DriverContext
+  users: number
 }
 
 /** Where an added Claude instance keeps its own Claude home. */

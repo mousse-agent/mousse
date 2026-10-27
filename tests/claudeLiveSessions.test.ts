@@ -33,6 +33,7 @@ function fixture(timings: Partial<LiveTimings> = {}, cli = new FakeClaudeCli(), 
   writeFileSync(join(home, 'providers', 'claude-subscription', 'settings.json'), JSON.stringify({ loginPolicy: 'cli', binaryPath: binary, models: [{ id: 'sonnet', label: 'Sonnet' }] }))
   const questions = new UserQuestionService()
   const service = new ClaudeSubscriptionProviderService(home, questions, {
+    launchConfig: () => ({ binaryPath: binary }),
     query: cli.query,
     live: { noticeDelayMs: 10, ...timings },
     usageLimitHoldMs,

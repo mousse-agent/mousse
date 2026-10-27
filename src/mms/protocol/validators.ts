@@ -535,7 +535,11 @@ function asNullableTrimmed(v: unknown, name: string, maxLen: number): string | n
 export function asInstanceConfigPatch(v: unknown, name = 'patch'): InstanceConfigPatch {
   if (v === undefined || v === null) return {}
   const o = asPlainObject(v, name)
-  assertKnownKeys(o, name, ['displayName', 'home', 'binaryPath', 'args', 'env', 'loginMethod', 'source', 'setup', 'engine'])
+  assertKnownKeys(o, name, ['displayName', 'home', 'binaryPath', 'args', 'env', 'loginMethod', 'source', 'setup', 'engine', 'useOlderSettings'])
+  if (o.useOlderSettings !== undefined) {
+    if (o.useOlderSettings !== true) throw invalidParams(`${name}.useOlderSettings must be true`)
+    return { useOlderSettings: true }
+  }
   // binaryPath, args and env share the CLI launch-settings limits.
   const patch: InstanceConfigPatch = { ...parseCliConfigPatch({ binaryPath: o.binaryPath, args: o.args, env: o.env }) }
   if (o.displayName !== undefined) patch.displayName = asNullableTrimmed(o.displayName, `${name}.displayName`, 80)

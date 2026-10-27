@@ -101,7 +101,7 @@ describe('execution bindings', () => {
       authChecks += 1
       return { state: 'signed_in' as const, ...(subject ? { subject } : {}) }
     }
-    const claude = adapterDriver(adapter, { runtime: { auth, forgetConversation: (threadId) => forgotten.push(threadId), signOut: async () => {}, setLaunch: async () => {} } })
+    const claude = adapterDriver(adapter, { runtime: { auth, forgetConversation: (threadId) => forgotten.push(threadId), signOut: async () => {} } })
     const codexDriver = adapterDriver(codex, {
       runtime: {
         auth,
@@ -226,13 +226,14 @@ describe('execution bindings', () => {
     orch.setThreadModelOverride(thread.id, { instanceId: 'claude', llmProvider: 'claude-subscription', model: 'sonnet' })
     await orch.send('one', false, { threadId: thread.id, clientRequestId: 'send-a' })
     expect(forgotten).toEqual([])
-    // Signing out moves the account generation on.
+    // Signing out and in again moves the account generation on (once each).
     await harness.instances.signOut('claude')
+    await harness.instances.signIn('claude')
     later()
     await orch.send('two', false, { threadId: thread.id, clientRequestId: 'send-b' })
     const [latest, previous] = engine.listRuns(thread.id)
     expect(bindingOf(previous.runId)?.accountGeneration).toBe(0)
-    expect(bindingOf(latest.runId)?.accountGeneration).toBe(1)
+    expect(bindingOf(latest.runId)?.accountGeneration).toBe(2)
     expect(forgotten).toEqual([thread.id])
     // The same account again: nothing is dropped.
     later()

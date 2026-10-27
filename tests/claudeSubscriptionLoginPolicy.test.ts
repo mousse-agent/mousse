@@ -59,10 +59,20 @@ function profile(options: {
     return typeof reply === 'function' ? reply() : reply
   })
   const query = vi.fn(options.query ?? (() => fakeQuery()))
-  const service = new ClaudeSubscriptionProviderService(home, new UserQuestionService(), { runAuth, query })
+  // The instance config's launch settings and sign-out flag, as the gateway hands them over.
+  let signedOut = false
+  const service = new ClaudeSubscriptionProviderService(home, new UserQuestionService(), {
+    runAuth,
+    query,
+    launchConfig: () => ({ binaryPath: binary }),
+    signedOut: () => signedOut
+  })
   return {
     home,
     service,
+    setSignedOut: (value: boolean) => {
+      signedOut = value
+    },
     runAuth,
     query,
     calls,
@@ -236,15 +246,19 @@ describe('Claude terminal sign-in status', () => {
 
 describe('Claude disconnect', () => {
   it('never runs claude auth logout, and signing in again reconnects', async () => {
-    const { service, calls, stored, home } = profile({})
+    const { service, calls, stored, home, setSignedOut } = profile({})
     await service.status()
     expect(service.configured()).toBe(true)
+    // The gateway sets the flag, then the service drops its sessions; the mirror records the flag.
+    setSignedOut(true)
     await service.logout()
+    service.vendorMirror(['signedOut']).write({ signedOut: true })
     expect(calls.some((call) => call.args.includes('logout'))).toBe(false)
     expect(service.configured()).toBe(false)
     await expect(service.status()).resolves.toMatchObject({ state: 'disconnected' })
     expect(stored()).toMatchObject({ loginPolicy: 'cli', cliDisconnected: true })
 
+    setSignedOut(false)
     await expect(service.login(new LoginSession('login'), home)).resolves.toMatchObject({ success: true })
     await expect(service.status()).resolves.toMatchObject({ state: 'connected' })
     expect(calls.some((call) => call.args.includes('logout') || call.args.includes('login'))).toBe(false)
@@ -299,7 +313,9 @@ describe('Claude settings safety', () => {
         { runAuth: f.runAuth, query: f.query }
       )
       await expect(fresh.status()).resolves.toMatchObject({ state: 'error' })
-      await expect(fresh.setCliConfig({ args: [] })).rejects.toThrow(/could not read/)
+      // The mirror refuses before it assigns anything: nothing is written over the file.
+      expect(fresh.vendorMirror(['binaryPath', 'args', 'env', 'signedOut']).read()).toBe('unreadable')
+      expect(() => fresh.vendorMirror(['args']).write({ args: ['--verbose'] })).toThrow(/could not read/)
       await fresh.logout()
       expect(fresh.configured()).toBe(false)
       expect(f.runAuth).not.toHaveBeenCalled()

@@ -113,7 +113,7 @@ describe('Claude subscription attachment', () => {
     writeFileSync(join(directory, 'settings.json'), JSON.stringify({ loginPolicy: 'cli', binaryPath: binary, models: [{ id: 'sonnet', label: 'Sonnet' }] }))
     const questions = new UserQuestionService()
     const runAuth = vi.fn(async () => JSON.stringify({ loggedIn: true, authMethod: 'claude.ai' }))
-    return { home, questions, service: new ClaudeSubscriptionProviderService(home, questions, { query, runAuth }) }
+    return { home, questions, service: new ClaudeSubscriptionProviderService(home, questions, { query, runAuth, launchConfig: () => ({ binaryPath: binary }) }) }
   }
   /** A query that asks for a Mousse tool permission mid-turn, then finishes. */
   const decisions: unknown[] = []

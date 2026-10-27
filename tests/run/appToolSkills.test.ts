@@ -232,7 +232,7 @@ describe('resumed runtimes keep getting the turn preamble', () => {
       ...codexTurn(8, `${current}/review the last one`, 'turn-4', 'four')
     ])
     const questions = new UserQuestionService()
-    const codex: CodexProviderService = createCodexProviderService(home, questions, { launch: replayCodexAppServer(replay) })
+    const codex: CodexProviderService = createCodexProviderService(home, questions, { launch: replayCodexAppServer(replay) }, { launch: () => ({ binaryPath: binary }) })
     services.push(codex, { stop: () => questions.shutdown() })
     const adapter = new CodexAdapter(() => codex)
     const input = (prompt: string, nativeHistory?: string): TurnInput => ({
