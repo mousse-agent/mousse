@@ -1,19 +1,13 @@
+import { PROVIDER_LABELS } from '../orchestrator/providerErrors'
 import type { RunPause } from './types'
 
 /** The message of the continue turn that follows a usage-limit pause. Fixed: it carries no replay of the paused turn. */
 export const CONTINUE_TEXT = 'Continue where you left off.'
 
-const PROVIDER_NAMES: Readonly<Record<string, string>> = {
-  claude: 'Claude',
-  'claude-subscription': 'Claude',
-  codex: 'Codex',
-  pi: 'Pi'
-}
-
-/** The provider as a person reads it, or undefined when the limit named none. */
+/** The provider as a person reads it (the same labels the failure text uses), or undefined when the limit named none. */
 export function pauseProviderName(provider: string | undefined): string | undefined {
   if (!provider) return undefined
-  return PROVIDER_NAMES[provider] ?? provider.charAt(0).toUpperCase() + provider.slice(1)
+  return PROVIDER_LABELS[provider] ?? provider
 }
 
 /** The window a provider named, in words: `five_hour` is "5-hour", `seven_day_opus` is "7-day Opus". */
@@ -44,6 +38,7 @@ export function pausedLine(pause: Pick<RunPause, 'until' | 'estimated' | 'provid
   const window = pauseWindowLabel(pause.limitKind)
   const what = provider && window ? `${provider}'s ${window} limit was reached` : provider ? `${provider}'s usage limit was reached` : 'The usage limit was reached'
   const source = pause.estimated ? 'estimated' : provider ? `time reported by ${provider}` : 'time reported by the provider'
-  const next = pause.autoResume ? 'The run continues by itself when it resets.' : 'Press Resume now when it resets.'
+  // Send a message works wherever this is read; a Resume now button is a later addition and not promised here.
+  const next = pause.autoResume ? 'The run continues by itself when it resets.' : 'Send a message to continue.'
   return `Paused until ${formatPauseUntil(pause.until, nowMs)}: ${what} (${source}). ${next}`
 }

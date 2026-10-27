@@ -58,7 +58,8 @@ export function boundedResetIso(epochSecondsOrIso: number | string | undefined, 
   return new Date(at > nowMs ? at : nowMs + USAGE_LIMIT_RESET_GRACE_MS).toISOString()
 }
 
-const PROVIDER_LABELS: Record<string, string> = { claude: 'Claude', 'claude-subscription': 'Claude', codex: 'Codex', anthropic: 'Anthropic', openai: 'OpenAI', 'openai-codex': 'ChatGPT' }
+/** How the failure text and the pause line name a provider whose limit was hit. */
+export const PROVIDER_LABELS: Readonly<Record<string, string>> = { claude: 'Claude', 'claude-subscription': 'Claude', codex: 'Codex', anthropic: 'Anthropic', openai: 'OpenAI', 'openai-codex': 'ChatGPT' }
 const LIMIT_KIND_LABELS: Record<string, string> = {
   five_hour: '5-hour',
   seven_day: 'weekly',

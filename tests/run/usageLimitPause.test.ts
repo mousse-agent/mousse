@@ -12,7 +12,10 @@ import { formatPullRequestNotice } from '../../src/mms/git/pullRequestWatch'
 import { usageLimitError } from '../../src/mms/orchestrator/providerErrors'
 import { readDurableQueue } from '../../src/mms/queue/durableQueue'
 import { PI_LOOP_CAPABILITIES } from '../../src/mms/run/adapters/pi/PiLoopAdapter'
-import { CONTINUE_TEXT } from '../../src/mms/run/pauseText'
+import { startedByPerson } from '../../src/mms/run/approvalRights'
+import { CONTINUE_TEXT, pauseProviderName, pausedLine } from '../../src/mms/run/pauseText'
+import { BRIDGE_THREAD_EVENT_TYPES } from '../../src/shared/net/envelope'
+import { isRetriesExhausted } from '../../src/shared/harness/types'
 import { Reconciler } from '../../src/mms/run/Reconciler'
 import { ToolInvocations } from '../../src/mms/run/ToolInvocations'
 import type { EffectRecord, RunRecord } from '../../src/mms/run/types'
@@ -107,7 +110,7 @@ describe('a usage limit pauses the run', () => {
   describe('each provider\'s limit', () => {
     const cases: Array<{ name: string; adapter: () => ScriptedAdapter; model: typeof PI; error: () => AppError; provider: string; window: string }> = [
       { name: 'Claude', adapter: () => claudeAdapter(() => 'unused'), model: CLAUDE as typeof PI, error: () => limit({ provider: 'claude', limitKind: 'five_hour' }), provider: 'Claude', window: '5-hour' },
-      { name: 'Pi', adapter: () => piAdapter(() => 'unused'), model: PI, error: () => limit({ provider: 'openai', limitKind: 'seven_day' }), provider: 'Openai', window: '7-day' },
+      { name: 'Pi', adapter: () => piAdapter(() => 'unused'), model: PI, error: () => limit({ provider: 'openai', limitKind: 'seven_day' }), provider: 'OpenAI', window: '7-day' },
       { name: 'Codex (not managed)', adapter: () => piAdapter(() => 'unused'), model: PI, error: () => limit({ provider: 'codex', limitKind: 'five_hour' }), provider: 'Codex', window: '5-hour' },
       { name: 'Codex (managed)', adapter: () => piAdapter(() => 'unused'), model: PI, error: managedCodexLimit, provider: 'Codex', window: '5-hour' }
     ]
@@ -147,7 +150,7 @@ describe('a usage limit pauses the run', () => {
     const { thread, run } = await paused(d, pi)
     expect(run.outcome!.pause).toMatchObject({ autoResume: false })
     expect(effectsOf(d, run.runId, 'run.resume')).toEqual([])
-    expect(systemLines(d, thread.id).find((text) => text.startsWith('Paused until'))).toContain('Press Resume now')
+    expect(systemLines(d, thread.id).find((text) => text.startsWith('Paused until'))).toContain('Send a message to continue')
     await new Promise((resolve) => setTimeout(resolve, RESET_MS + 300))
     expect(d.engine.getRun(run.runId)!.status).toBe('paused')
     expect(pi.turns).toHaveLength(1)
@@ -341,8 +344,10 @@ describe('a usage limit pauses the run', () => {
       const second = boot(home, [pi], { pid: 2 })
       await waitFor(() => second.engine.getRun(run.runId)!.outcome!.pause!.stale === true, 'the stale ruling')
       expect(second.engine.getRun(run.runId)).toMatchObject({ status: 'paused', outcome: { pause: { autoResume: false, stale: true } } })
-      expect(systemLines(second, thread.id)).toContain('The usage limit reset while Mousse was off; press Resume now.')
+      expect(systemLines(second, thread.id)).toContain('The usage limit reset while Mousse was off. Send a message to continue.')
       expect(pi.turns).toHaveLength(1)
+      // The run is still paused, so the thread still shows it, now with no timer to wait for.
+      expect(second.orch.getTurnState(thread.id)).toMatchObject({ phase: 'paused', turnId: run.runId, pause: { runId: run.runId, autoResume: false } })
 
       await second.orch.resumePausedRun(run.runId)
       await waitFor(() => runsOf(second, thread.id).length === 2 && settled(second, thread.id), 'the continuation to finish')
@@ -383,9 +388,6 @@ describe('a usage limit pauses the run', () => {
       const pi = scripted([{ fail: () => limit({ ms: 60_000 }) }])
       const d = boot(newHome(), [pi])
       const { thread, run } = await paused(d, pi)
-      // A steer has no turn to join: the sender falls back to a plain message.
-      expect(d.orch.steerThreadOrEnqueueExternal(thread.id, 'try another way')).toEqual({ steered: false, queued: false })
-
       await d.orch.send('try another way', false, { threadId: thread.id, clientRequestId: 'person-1', source: 'gui' })
 
       expect(d.engine.getRun(run.runId)).toMatchObject({ status: 'cancelled', outcome: { interruptedBy: 'user', pause: { endedBy: 'user_message' } } })
@@ -393,6 +395,20 @@ describe('a usage limit pauses the run', () => {
       expect(pi.turns.map((turn) => turn.prompt)).toEqual(['Do the work', 'try another way'])
       expect(d.orch.getTurnState(thread.id).phase).toBe('completed')
       expect(queueOf(d, thread.id)).toEqual([])
+    })
+
+    it('a steer that names no run is kept as a held message: the text is not lost and the pause stays', async () => {
+      const pi = scripted([{ fail: () => limit({ ms: 60_000 }) }])
+      const d = boot(newHome(), [pi], { runs: { resumeAfterUsageLimit: false } })
+      const { thread, run } = await paused(d, pi)
+
+      expect(d.orch.steerThreadOrEnqueueExternal(thread.id, 'also check the logs')).toEqual({ steered: false, queued: true })
+
+      expect(d.engine.getRun(run.runId)!.status).toBe('paused')
+      expect(queueOf(d, thread.id).map((item) => [item.source, item.content])).toEqual([['steer-late', 'also check the logs']])
+      await d.orch.resumePausedRun(run.runId)
+      await waitFor(() => pi.turns.length === 3 && settled(d, thread.id), 'the continue turn and the steer')
+      expect(pi.turns.map((turn) => turn.prompt)).toEqual(['Do the work', CONTINUE_TEXT, 'also check the logs'])
     })
 
     it('a scheduled send neither ends the pause nor starts the count again', async () => {
@@ -786,6 +802,165 @@ describe('a usage limit pauses the run', () => {
       expect(continued).toMatchObject({ source: 'resume', outcome: { continuationOf: first.runId } })
       expect(continued.accessGrant).toBe('lineage')
       expect(effectsOf(d, continued.runId, 'turn.start')[0].payload).toMatchObject({ input: { mode: 'plan' } })
+    })
+  })
+
+  describe('stale items, unreadable pauses and the race with settling', () => {
+    it('a continue item already on disk is not run more than a day after the reset: startup recovery retires it, Resume now still continues', async () => {
+      const home = newHome()
+      const pi = scripted([{ fail: () => limit({ ms: 1500 }) }])
+      let crashed = false
+      // The timer's executor writes the item and then dies, for good.
+      const first = boot(home, [pi], { pid: 1, fault: (point) => { if (point === 'resume.afterItem') { crashed = true; throw new Error('crash at resume.afterItem') } } })
+      const { thread, run } = await paused(first, pi)
+      first.engine.inbox.append({ inboxId: rowId(thread.id), threadId: thread.id, kind: 'pr_update', payload: { text: NOTICE, number: 7, headSha: 'abcdef0123', changes: ['checks_failed'] } })
+      await waitFor(() => crashed && queueOf(first, thread.id).length === 1, 'the item to be on disk')
+      await first.crash()
+
+      vi.useFakeTimers({ toFake: ['Date'], now: Date.now() + 2 * 24 * 3_600_000 })
+      const second = boot(home, [pi], { pid: 2 })
+      second.orch.recoverAndDrainPendingQueues()
+      await waitFor(() => second.engine.getRun(run.runId)!.outcome!.pause!.stale === true && queueOf(second, thread.id).length === 0, 'the item to be retired')
+
+      expect(second.engine.getRun(run.runId)).toMatchObject({ status: 'paused', outcome: { pause: { autoResume: false, stale: true } } })
+      expect(runsOf(second, thread.id)).toHaveLength(1)
+      expect(pi.turns).toHaveLength(1)
+      expect(second.orch.getTurnState(thread.id)).toMatchObject({ phase: 'paused', pause: { autoResume: false } })
+      expect(systemLines(second, thread.id).filter((text) => text.startsWith('The usage limit reset while Mousse was off'))).toHaveLength(1)
+      // The row the item owned is given back, and nothing is left owned by a missing item.
+      expect(second.engine.inbox.listDeliveredByQueue()).toEqual([])
+      expect(second.engine.inbox.listForThread(thread.id)[0]).toMatchObject({ status: 'pending' })
+
+      await second.orch.resumePausedRun(run.runId)
+      await waitFor(() => runsOf(second, thread.id).length === 2 && settled(second, thread.id), 'the continuation to finish')
+      expect(runsOf(second, thread.id)[1]).toMatchObject({ source: 'resume_now', status: 'completed' })
+    })
+
+    it('a pause that cannot be read holds the queue instead of letting it drain', async () => {
+      const pi = scripted([{ fail: () => limit({ ms: 60_000 }) }])
+      const d = boot(newHome(), [pi], { runs: { resumeAfterUsageLimit: false } })
+      const { thread, run } = await paused(d, pi)
+      d.orch.enqueueForThread(thread.id, 'queued before', { source: 'gui' })
+      const read = vi.spyOn(d.engine.store, 'getPausedRun').mockImplementation(() => { throw new Error('the run database could not be read') })
+
+      expect((d.orch as any).pausedHoldsQueue(thread.id, [])).toBe(true)
+      ;(d.orch as any).scheduleQueueDrain(d.orch.getOrCreateSession(thread.id))
+      await new Promise((resolve) => setTimeout(resolve, 200))
+      read.mockRestore()
+
+      expect(pi.turns).toHaveLength(1)
+      expect(queueOf(d, thread.id).filter((item) => item.state === 'pending')).toHaveLength(1)
+      expect(d.engine.getRun(run.runId)!.status).toBe('paused')
+    })
+
+    it('a Resume now that finds the item an automatic timer wrote is a person\'s resume, and starts a fresh chain', async () => {
+      const pi = scripted([{ fail: () => limit({ ms: 60_000 }) }])
+      const d = boot(newHome(), [pi])
+      const { thread, run } = await paused(d, pi)
+      // The thread is busy elsewhere, so the item the timer writes is not drained yet.
+      const session = d.orch.getOrCreateSession(thread.id)
+      session.turnAdmitted = true
+      await (d.orch as any).executeResumeEffect({ effectId: 'timer', payload: { kind: 'resume', runId: run.runId, threadId: thread.id, until: run.outcome!.pause!.until } })
+      expect(queueOf(d, thread.id).map((item) => item.source)).toEqual(['resume'])
+
+      await d.orch.resumePausedRun(run.runId)
+      await waitFor(() => queueOf(d, thread.id).some((item) => item.source === 'resume_now'), 'the item to become a person\'s')
+      session.turnAdmitted = false
+      ;(d.orch as any).scheduleQueueDrain(session)
+      await waitFor(() => runsOf(d, thread.id).length === 2 && settled(d, thread.id), 'the continuation to finish')
+
+      const continued = runsOf(d, thread.id)[1]
+      expect(continued).toMatchObject({ source: 'resume_now', outcome: { resumedFromPause: 'user' } })
+      // A continuation a person asked for is a person's turn for "Always" rules; the timer's is not.
+      expect(startedByPerson({ origin: 'interactive', source: continued.source })).toBe(true)
+      expect(startedByPerson({ origin: 'interactive', source: 'resume' })).toBe(false)
+    })
+
+    it('a limit that ends the turn while the paused turn is still settling is continued without any other trigger', async () => {
+      const pi = scripted([{ fail: () => limit({ ms: 60_000 }) }])
+      const d = boot(newHome(), [pi], { runs: { resumeAfterUsageLimit: false } })
+      const thread = d.store.createThread('Settling')
+      d.orch.setThreadModelOverride(thread.id, PI)
+      // Resume now lands in the window between the pause and the end of the turn's settlement: the turn still holds the thread.
+      let pressed = false
+      d.orch.on('turn-state', (state) => {
+        if (state.phase !== 'paused' || pressed) return
+        pressed = true
+        const effect = d.engine.requestResume(state.pause!.runId, true)
+        void (d.orch as any).executeResumeEffect(effect)
+      })
+
+      const first = await d.orch.send('Do the work', false, { threadId: thread.id, clientRequestId: 'first' })
+      expect(pressed).toBe(true)
+      await waitFor(() => runsOf(d, thread.id).length === 2 && settled(d, thread.id), 'the continuation to finish')
+
+      expect(d.engine.getRun(first.runId!)!.status).toBe('interrupted')
+      expect(pi.turns.map((turn) => turn.prompt)).toEqual(['Do the work', CONTINUE_TEXT])
+    })
+
+    it('a pi limit that the harness retried until it gave up still pauses, and is not a connection failure', async () => {
+      const exhausted = () => usageLimitError({ provider: 'openai-codex', estimated: true, limitKind: 'five_hour' }, undefined, { retriesExhausted: true })
+      expect(isRetriesExhausted(exhausted())).toBe(true)
+      const pi = scripted([{ fail: exhausted }])
+      const d = boot(newHome(), [pi])
+      const events: string[] = []
+      for (const name of ['connection-failed', 'turn-paused', 'turn-failed']) d.orch.on(name, () => events.push(name))
+      const { run } = await paused(d, pi)
+      expect(events).toEqual(['turn-paused'])
+      expect(run.outcome!.pause).toMatchObject({ provider: 'openai-codex', estimated: true })
+    })
+
+    it('says which provider hit its limit with the labels the failure text uses', () => {
+      expect(pauseProviderName('openai-codex')).toBe('ChatGPT')
+      expect(pauseProviderName('openai')).toBe('OpenAI')
+      expect(pauseProviderName('anthropic')).toBe('Anthropic')
+      expect(pauseProviderName(undefined)).toBeUndefined()
+      expect(pausedLine({ until: new Date(Date.now() + 3_600_000).toISOString(), estimated: true, provider: 'openai-codex', limitKind: 'five_hour', autoResume: false })).toMatch(/ChatGPT's 5-hour limit was reached \(estimated\)\. Send a message to continue\.$/)
+    })
+
+    it('the Bridge is not sent a turn.paused event: older peers reject event types they do not know', () => {
+      expect(BRIDGE_THREAD_EVENT_TYPES).not.toContain('turn.paused')
+      expect(BRIDGE_THREAD_EVENT_TYPES).toContain('turn.state')
+    })
+  })
+
+  describe('pre-pause work that is cancelled when it would start', () => {
+    it('keeps a finished background task\'s notice for the continuation and says an integration never started', async () => {
+      const gate = deferred()
+      const pi = scripted([{ gate: gate.promise, fail: () => limit({ ms: 60_000 }) }])
+      const d = boot(newHome(), [pi], { runs: { resumeAfterUsageLimit: false } })
+      const thread = d.store.createThread('Cancelling')
+      d.orch.setThreadModelOverride(thread.id, PI)
+      const first = await d.orch.send('Do the work', false, { threadId: thread.id, clientRequestId: 'first', awaitMode: 'ack' })
+      await waitFor(() => pi.turns.length === 1, 'the first turn')
+      const admit = async (clientRequestId: string, source: string) => {
+        const result = await d.engine.dispatch({ kind: 'send', threadId: thread.id, clientRequestId, source })
+        if (result.status !== 'accepted') throw new Error('send rejected')
+        return result.runId
+      }
+      const continuationRun = await admit('continuation:c1', 'provider-continuation')
+      const integrationRun = await admit('integration:1', 'integration')
+      gate.release()
+      await waitFor(() => d.engine.getRun(first.runId!)!.status === 'paused', 'the pause')
+
+      const cancel = (payload: object): boolean => (d.orch as any).cancelStartOnPausedThread({ payload })
+      expect(cancel({ kind: 'continuation', threadId: thread.id, runId: continuationRun, continuationId: 'c1', note: 'A background task finished: the build is green.' })).toBe(true)
+      expect(cancel({ kind: 'integration', threadId: thread.id, runId: integrationRun, delegationId: 'task-9' })).toBe(true)
+
+      expect(d.engine.getRun(continuationRun)!.status).toBe('cancelled')
+      expect(d.engine.getRun(integrationRun)!.status).toBe('cancelled')
+      const rows = d.engine.inbox.listForThread(thread.id)
+      const integrationRow = rows.find((row) => (row.payload as { type?: string }).type === 'integration_failed')!
+      expect((integrationRow.payload as { text: string; interrupted?: boolean }).text).toContain('did not start')
+      expect((integrationRow.payload as { text: string }).text).not.toContain('outcome was known')
+      expect((integrationRow.payload as { interrupted?: boolean }).interrupted).toBeUndefined()
+      expect(rows.some((row) => (row.payload as { type?: string }).type === 'background_task_finished')).toBe(true)
+
+      await d.orch.resumePausedRun(first.runId!)
+      await waitFor(() => pi.turns.length === 2 && settled(d, thread.id), 'the continuation to finish')
+      const prompt = pi.turns[1].prompt
+      expect(prompt.split('A background task finished: the build is green.').length - 1).toBe(1)
+      expect(prompt).toContain('did not start')
     })
   })
 })

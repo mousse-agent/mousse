@@ -62,7 +62,8 @@ import { v4 as uuidv4 } from 'uuid'
 import { narrowestAccess, TitleTakenRejection, type CommandResult, type RunEngine, type SendDelegation, type StopResult } from '../run/RunEngine'
 import { isFencedSource, isPauseHeldSource, isResumeSource } from '../run/delegation/sources'
 import { deleteRunResults } from '../run/delegation/hold'
-import { decideUsageLimit, type UsageLimitDecision } from '../run/pausePolicy'
+import { decideUsageLimit, usageLimitOf, type UsageLimitDecision } from '../run/pausePolicy'
+import { boundedResetIso, estimatedReset } from './providerErrors'
 import { CONTINUE_TEXT, pausedLine } from '../run/pauseText'
 import { currentStopGeneration, runStopGeneration } from '../run/stopGeneration'
 import { buildSubagentView } from '../run/delegation/subagentView'
@@ -494,7 +495,9 @@ export interface ScheduledTurnHooks {
     jobId: string
     occurrenceKey: string
     runId: string
-    status: 'ok' | 'error' | 'interrupted' | 'uncertain'
+    status: 'ok' | 'error' | 'interrupted' | 'uncertain' | 'waiting'
+    /** With `waiting`: when the usage limit the run hit resets. */
+    retryAt?: string
     text?: string
     error?: string
     /** The model the run's binding used, so a run that waited in the queue records what ran. */
@@ -2139,7 +2142,7 @@ export class OrchestratorService extends EventEmitter {
         if (!run) return 'absent'
         const error = run.outcome?.error
           ?? (run.outcome?.interruptedBy === 'daemon_restart' && run.status === 'interrupted' ? 'Interrupted: the daemon restarted while the run was active' : undefined)
-        return { status: run.status, threadId: run.threadId, ...(error ? { error } : {}) }
+        return { status: run.status, threadId: run.threadId, ...(error ? { error } : {}), ...(run.outcome?.usageLimitUntil ? { usageLimitUntil: run.outcome.usageLimitUntil } : {}) }
       },
       admissionPending: (runId, threadId) => this.admissionPending(runId, threadId),
       cancelOrphanedAdmission: (runId) => this.cancelOrphanedAdmission(runId, SCHEDULED_NEVER_STARTED),
@@ -3689,7 +3692,34 @@ export class OrchestratorService extends EventEmitter {
   /** A thread's pause ended without a new turn (Cancel, Stop): its state is idle and, when `text` is given, the transcript says so. */
   private pauseEndedWithoutTurn(threadId: string, text?: string): void {
     if (this.turnStates.get(threadId)?.phase === 'paused') this.setTurnPhase(threadId, 'idle')
-    if (!text) return
+    if (text) this.noteInThread(threadId, text)
+  }
+
+  /**
+   * An automatic timer or continue item that is more than a day past the reset does not continue the run
+   * (Mousse was off over it): the run stays paused with auto-resume off, still shown as paused, and a message or
+   * Resume now continues it. Only the first call writes the line. A continue item already written is removed.
+   */
+  private markPauseStale(runId: string, threadId: string): void {
+    const engine = this.runEngine
+    const run = engine?.getRun(runId)
+    if (!engine || !run || run.status !== 'paused' || !run.outcome?.pause) return
+    if (!run.outcome.pause.stale) {
+      const updated = engine.endPause(runId, 'stale')
+      this.noteInThread(threadId, 'The usage limit reset while Mousse was off. Send a message to continue.')
+      // Still paused: the display keeps the pause, now without a timer.
+      const pause = this.turnPauseOf(updated)
+      if (pause) this.setTurnPhase(threadId, 'paused', { turnId: runId, pause })
+    }
+    this.removeResumeItem(threadId, run.outcome.pause.resumeItemId ?? this.resumeItemId(runId))
+  }
+
+  private autoResumeIsStale(pause: RunPause): boolean {
+    return Date.now() - Date.parse(pause.until) > OrchestratorService.RESUME_STALE_MS
+  }
+
+  /** Writes a system line into the thread. */
+  private noteInThread(threadId: string, text: string): void {
     try {
       const session = this.getOrCreateSession(threadId)
       if (session.deleted) return
@@ -3762,9 +3792,8 @@ export class OrchestratorService extends EventEmitter {
       engine.endPause(runId, 'deleted')
       return
     }
-    if (!payload.manual && Date.now() - Date.parse(pause.until) > OrchestratorService.RESUME_STALE_MS) {
-      engine.endPause(runId, 'stale')
-      this.pauseEndedWithoutTurn(threadId, 'The usage limit reset while Mousse was off; press Resume now.')
+    if (!payload.manual && this.autoResumeIsStale(pause)) {
+      this.markPauseStale(runId, threadId)
       return
     }
     const manual = payload.manual === true
@@ -3777,7 +3806,7 @@ export class OrchestratorService extends EventEmitter {
     db.checkpoint('resume.afterPrepare')
     const pending = this.dropStaleQuestionRows(engine.inbox.listPending(threadId))
     const planned = pending.length ? planWakeNotice(pending, this.noticeContext()) : undefined
-    this.enqueueForThread(
+    const written = this.enqueueForThread(
       threadId,
       { content: CONTINUE_TEXT, mode: getLastUserChatMode(session.messages) ?? 'agent' },
       {
@@ -3798,6 +3827,11 @@ export class OrchestratorService extends EventEmitter {
         }
       }
     )
+    // A Resume now that finds the item an automatic timer wrote (not drained yet) makes it a person's resume: the
+    // item keeps its id, and so the source it is admitted with is rewritten while it is still pending.
+    if (manual && written.source !== 'resume_now') {
+      this.mutateQueue(threadId, (items) => items.map((item) => (item.id === itemId && item.state === 'pending' ? { ...item, source: 'resume_now' } : item)))
+    }
     this.scheduleQueueDrain(session)
   }
 
@@ -3833,15 +3867,24 @@ export class OrchestratorService extends EventEmitter {
   private async admitResumeItem(session: ThreadSession, original: QueuedMessage, rebuilt: QueuedMessage, claimToken: string): Promise<string | undefined> {
     const engine = this.requireRunEngine()
     try {
-      const result = await engine.dispatch({
-        kind: 'send',
-        threadId: original.threadId,
-        clientRequestId: queueOwner(original.id),
-        source: original.source ?? 'resume',
-        continuationOfRunId: original.continuationOfRunId!
-      })
-      if (result.status === 'accepted') return result.runId
-      console.warn('the continue message of a paused run was refused', { itemId: original.id, reason: result.status === 'rejected' ? result.reason : result.status })
+      // The 24-hour rule holds for an item already on disk too (the timer's own check comes before the item
+      // exists): an automatic item whose reset is more than a day past is retired, never run. A Resume now item is
+      // a person's and stays eligible. The startup drain and the timer's replay both end up here.
+      const paused = engine.getRun(original.continuationOfRunId!)
+      const pause = paused?.status === 'paused' ? paused.outcome?.pause : undefined
+      const stale = Boolean(pause && original.source !== 'resume_now' && (pause.stale || this.autoResumeIsStale(pause)))
+      if (stale) this.markPauseStale(original.continuationOfRunId!, original.threadId)
+      else {
+        const result = await engine.dispatch({
+          kind: 'send',
+          threadId: original.threadId,
+          clientRequestId: queueOwner(original.id),
+          source: original.source ?? 'resume',
+          continuationOfRunId: original.continuationOfRunId!
+        })
+        if (result.status === 'accepted') return result.runId
+        console.warn('the continue message of a paused run was refused', { itemId: original.id, reason: result.status === 'rejected' ? result.reason : result.status })
+      }
     } catch (error) {
       session.turnAdmitted = false
       session.admissionRunId = undefined
@@ -3881,13 +3924,38 @@ export class OrchestratorService extends EventEmitter {
     if (!run || run.status !== 'queued' || isResumeSource(run.source)) return false
     if (!isFencedSource(run.source) && !isPauseHeldSource(run.source)) return false
     if (!engine.store.getPausedRun(run.threadId)) return false
+    // An integration that never started says so: the generic row would call its outcome unknown and send the model
+    // to check a workspace nothing has touched.
+    const integration = isIntegrationTurnPayload(effect.payload) ? effect.payload : undefined
+    const notice = integration
+      ? {
+          kind: 'reconcile_notice' as const,
+          payload: {
+            type: 'integration_failed' as const,
+            delegationId: integration.delegationId,
+            text: `Integration of delegated task ${integration.delegationId} did not start because the thread was paused by a usage limit. Nothing was merged; ask for it again.`
+          }
+        }
+      : undefined
     this.markRun(runId, (runs, id) => {
-      if (runs.getRun(id)?.status === 'queued') runs.markTerminal(id, 'cancelled', { error: 'The thread is paused by a usage limit.' })
+      if (runs.getRun(id)?.status === 'queued') runs.markTerminal(id, 'cancelled', { error: 'The thread is paused by a usage limit.' }, notice ? { notice } : {})
     })
     if (isContinuationTurnPayload(effect.payload)) {
+      // The model has not heard that its background task finished: the notice stays for the continuation (or
+      // for the wake that follows a message), as a row of the thread's inbox.
+      try {
+        engine.inbox.append({
+          inboxId: `inbox:continuation:${effect.payload.continuationId}`,
+          threadId: effect.payload.threadId,
+          kind: 'reconcile_notice',
+          payload: { type: 'background_task_finished', text: effect.payload.note }
+        })
+      } catch (error) {
+        console.warn('a background task notice could not be kept for the paused thread', { threadId: effect.payload.threadId, error: error instanceof Error ? error.message : String(error) })
+      }
       this.harness.discardContinuations(effect.payload.threadId, effect.payload.continuationId)
       this.endContinuationHold(effect.payload.continuationId, true)
-    } else if (!isIntegrationTurnPayload(effect.payload) && !isBotTurnPayload(effect.payload)) {
+    } else if (!integration && !isBotTurnPayload(effect.payload)) {
       const stored = effect.payload as TurnStartPayload
       const entry = this.turnResults.get(stored.runId)
       this.skipUnstartableTurn(entry?.payload ?? stored, entry, engine.getRun(runId) ?? run)
@@ -7323,6 +7391,14 @@ export class OrchestratorService extends EventEmitter {
       const item = this.enqueueExternalSteer(threadId, text, opts)
       if (item) return { steered: false, queued: true, item }
     }
+    // A paused run has no turn to join. The text is kept as a held message, as a steer that names the paused run is
+    // (`executeTurnSteerEffect`): it runs after the continue turn and the pause stays. A person who wants it to run
+    // now sends it as a message, which ends the pause.
+    const paused = this.runEngine?.store.getPausedRun(threadId)
+    if (paused && text.trim()) {
+      this.enqueueLateSteer(threadId, text, undefined, undefined, paused.runId)
+      return { steered: false, queued: true }
+    }
     return { steered: false, queued: false }
   }
 
@@ -7801,7 +7877,7 @@ export class OrchestratorService extends EventEmitter {
     const hooks = this.scheduledHooks
     const run = this.runEngine?.getRun(runId)
     if (!hooks || !run || !TERMINAL_RUN_STATUSES.has(run.status)) return
-    const result = occurrenceResultOfRun({ status: run.status, error: run.outcome?.error })
+    const result = occurrenceResultOfRun({ status: run.status, error: run.outcome?.error, usageLimitUntil: run.outcome?.usageLimitUntil })
     let text: string | undefined
     if (result.status === 'ok') {
       text = response?.message?.trim()
@@ -7825,6 +7901,7 @@ export class OrchestratorService extends EventEmitter {
         occurrenceKey: schedule.occurrenceKey,
         runId,
         status: result.status,
+        ...(result.retryAt ? { retryAt: result.retryAt } : {}),
         ...(text !== undefined ? { text } : {}),
         ...(result.error ? { error: result.error } : {}),
         ...(selection ? { selection } : {}),
@@ -8191,7 +8268,7 @@ export class OrchestratorService extends EventEmitter {
     const engineRunId = this.runEngine ? opts?.runId : undefined
     let runTerminalMarked = false
     // `resultText` is the turn's final reply; a delegated child run publishes it (SPEC §14.1).
-    const markRunTerminal = (status: 'completed' | 'interrupted' | 'failed', outcome?: { error?: string; interruptedBy?: 'user' | 'daemon_restart' | 'bot_wall' }, resultText?: string): void => {
+    const markRunTerminal = (status: 'completed' | 'interrupted' | 'failed', outcome?: { error?: string; interruptedBy?: 'user' | 'daemon_restart' | 'bot_wall'; usageLimitUntil?: string }, resultText?: string): void => {
       if (runTerminalMarked) return
       runTerminalMarked = true
       this.markRun(engineRunId, (engine, id) => engine.markTerminal(id, status, outcome, { resultText }))
@@ -8296,6 +8373,8 @@ export class OrchestratorService extends EventEmitter {
     let providerError: AppErrorShape | undefined
     /** Set when the turn failed on a usage limit that pauses the run instead of failing it. */
     let usagePause: RunPause | undefined
+    /** A scheduled turn that failed on a usage limit: when it resets (see the catch below). */
+    let scheduledLimitUntil: string | undefined
     let failureDiagnostic: Record<string, unknown> | undefined
     let compactionNote: ChatMessage | undefined
     let switchMarker: ChatMessage | undefined
@@ -8694,7 +8773,8 @@ export class OrchestratorService extends EventEmitter {
       if (isAbort) {
         aborted = true
         assistantText = ''
-      } else if (err instanceof ConnectionRetriesExhaustedError || isRetriesExhausted(err)) {
+      } else if ((err instanceof ConnectionRetriesExhaustedError || isRetriesExhausted(err)) && !usageLimitOf(err)) {
+        // A usage limit is never a connection failure, however often the provider's own retries met it: it pauses below.
         connectionFailed = true
         providerError = serializeAppError(normalized)
         assistantText = ''
@@ -8706,6 +8786,10 @@ export class OrchestratorService extends EventEmitter {
         const limit = opts?.bot || opts?.schedule ? undefined : this.usageLimitDecision(err, engineRunId)
         if (limit?.action === 'pause') usagePause = limit.pause
         else if (limit?.action === 'fail') providerError = { ...providerError, message: limit.message }
+        // A scheduled occurrence is never paused (its run would outlive the occurrence). It fails, and the run
+        // records when the limit resets so the scheduler waits for it instead of taking slots inside the window.
+        const scheduled = opts?.schedule ? usageLimitOf(err) : undefined
+        if (scheduled) scheduledLimitUntil = (scheduled.estimated ? undefined : boundedResetIso(scheduled.resetsAt, Date.now())) ?? estimatedReset(Date.now())
         assistantText = `[${providerError.code}] ${providerError.message}`
       }
     } finally {
@@ -8781,7 +8865,7 @@ export class OrchestratorService extends EventEmitter {
         this.emit('connection-failed', { threadId: session.threadId, error: providerError })
       }
       this.setTurnPhase(session.threadId, 'failed', { error: message, errorDescriptor: providerError })
-      markRunTerminal('failed', { error: message })
+      markRunTerminal('failed', { error: message, ...(scheduledLimitUntil ? { usageLimitUntil: scheduledLimitUntil } : {}) })
       await checkpointTurn('failed')
       this.persist(true)
       const response: OrchestratorResponse = { message, actions: [], error: providerError }
@@ -9327,8 +9411,10 @@ export class OrchestratorService extends EventEmitter {
     let paused: RunRecord | null | undefined
     try {
       paused = this.runEngine?.store.getPausedRun(threadId)
-    } catch {
-      return false
+    } catch (error) {
+      // A pause that cannot be read is held, never skipped: a drain would start a person's queued run, which ends it.
+      console.warn('the pause of a thread could not be read; its queue stays held', { threadId, error: error instanceof Error ? error.message : String(error) })
+      return true
     }
     if (!paused) return false
     const next = listPendingQueue(items).find((item) => item.intent === 'normal' && item.state === 'pending')

@@ -44,6 +44,8 @@ export interface ScheduledJobRunRecord {
   workspace?: ScheduledJobWorkspace
   occurrenceKey?: string
   missingPlaceholders?: string[]
+  /** Set on a `waiting` record: the occurrence hit a provider usage limit that resets at this time. */
+  usageLimitUntil?: string
 }
 
 /**
@@ -120,7 +122,13 @@ export interface ScheduledWebhookDelivery {
 
 /** How an occurrence ended; `uncertain` keeps the engine's "effects may have occurred" text in `error`. */
 export interface ScheduledOccurrenceResult {
-  status: 'ok' | 'error' | 'interrupted' | 'uncertain'
+  /**
+   * `waiting`: the turn hit a provider usage limit. It is not an error and does not spend a repeat; the job's
+   * next run is `retryAt` (the reset), not a slot inside the window.
+   */
+  status: 'ok' | 'error' | 'interrupted' | 'uncertain' | 'waiting'
+  /** With `waiting`: when the limit resets. */
+  retryAt?: string
   text?: string
   error?: string
   silent?: boolean

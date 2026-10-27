@@ -50,7 +50,6 @@ export class MmsThreadSource implements ThreadSourcePort {
       ['turn-completed', 'turn.completed'],
       ['turn-interrupted', 'turn.interrupted'],
       ['turn-aborted', 'turn.aborted'],
-      ['turn-paused', 'turn.paused'],
       ['turn-state', 'turn.state'],
       ['turn-steered', 'turn.steered'],
       ['connection-failed', 'connection.failed']
