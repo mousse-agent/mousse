@@ -2,6 +2,7 @@ import { v5 as uuidv5 } from 'uuid'
 import type { ModelOverride } from '../../shared/providerInstances'
 import type { ScheduledJobWorkspace } from '../../shared/types'
 import type { AgentAccessLevel } from '../../shared/settings'
+import type { PermissionMode } from '../../shared/permissionMode'
 import type { WorkflowChatRun } from '../../shared/workflowChat'
 import type { WorkflowRunState } from '../../shared/workflowRunPlatform'
 import type { WorkflowRunSnapshot } from '../../shared/workflows'
@@ -28,6 +29,9 @@ export interface ScheduledJobIngress {
   selection?: ModelOverride
   mode?: 'agent' | 'plan'
   workspace?: ScheduledJobWorkspace
+  /** The job's permission mode and ceiling (`ScheduledJob`); the run is the stricter of the two and its thread's mode. */
+  permissionMode?: PermissionMode
+  permissionCeiling?: PermissionMode
   /** The most agent access the run may be granted (`ScheduledJob.accessCap`); absent reads as `lineage`. */
   accessCap?: AgentAccessLevel
   /** Names the occurrence; the deterministic send receipt is `schedule:<jobId>:<occurrenceKey>`. Defaults to `occurrenceAt`. */
@@ -54,6 +58,8 @@ export interface BackgroundWorkflowTurnResult {
   queueItemId?: string
   /** The model the run's binding used, when it was bound by the time the call returned. */
   selection?: ModelOverride
+  /** The permission mode the run's binding enforced, when it was bound by the time the call returned. */
+  permissionMode?: PermissionMode
 }
 
 const WAITING = new Set<WorkflowRunState>(['waiting-approval', 'waiting-input', 'waiting-condition'])

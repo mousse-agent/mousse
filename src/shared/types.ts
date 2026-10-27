@@ -39,6 +39,8 @@ export interface ScheduledJobRunRecord {
   /** The model the run actually used (the run's binding), not the job's field. */
   selection?: ModelOverride
   mode?: 'agent' | 'plan'
+  /** The permission mode the run's binding enforced (the stricter of the job, its ceiling and the thread). */
+  permissionMode?: PermissionMode
   workspace?: ScheduledJobWorkspace
   occurrenceKey?: string
   missingPlaceholders?: string[]
@@ -156,6 +158,13 @@ export interface ScheduledJob {
   selection?: ModelOverride
   mode?: 'agent' | 'plan'
   workspace?: ScheduledJobWorkspace
+  /** How much the job's runs may do without asking; never wider than `permissionCeiling`. Absent = the thread's mode. */
+  permissionMode?: PermissionMode
+  /**
+   * The widest mode a run of this job may have: the mode its creator (or last editor) held. The daemon
+   * sets it; no protocol request can. A run is the stricter of this, `permissionMode` and the thread's mode.
+   */
+  permissionCeiling?: PermissionMode
   /** The thread (and run) of the agent that created the job; absent for jobs people create. */
   createdBy?: { threadId: string; runId?: string }
   /**
@@ -199,6 +208,9 @@ export interface CreateScheduledJobInput {
   selection?: ModelOverride
   mode?: 'agent' | 'plan'
   workspace?: ScheduledJobWorkspace
+  permissionMode?: PermissionMode
+  /** Daemon-only: the protocol refuses it, and the daemon sets it from the creator's mode. */
+  permissionCeiling?: PermissionMode
   createdBy?: { threadId: string; runId?: string }
   accessCap?: import('./settings').AgentAccessLevel
   repeat?: { times?: number }
@@ -214,6 +226,8 @@ export interface ScheduledJobPatch {
   createThread?: boolean
   selection?: ModelOverride | null
   mode?: 'agent' | 'plan' | null
+  /** `null` clears it: the run follows its thread's mode again. The job's ceiling is not part of a patch. */
+  permissionMode?: PermissionMode | null
   workspace?: ScheduledJobWorkspace | null
 }
 

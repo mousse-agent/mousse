@@ -205,6 +205,7 @@ import { lineageForChild } from '../data/subagentLineage'
 import { WorkspaceResolver, unprovisionedContext } from '../workspace/WorkspaceResolver'
 import { ThreadWorkspaceManager } from '../workspace/ThreadWorkspaceManager'
 import { findWorktreeOwner } from '../scheduled/validateJobOptions'
+import { jobPermissionRequest } from '../scheduled/jobPermission'
 import { occurrenceResultOfRun, scheduledReceiptId, type ScheduledRunProbe } from '../scheduled/ScheduledJobStore'
 import { UndoService } from '../actions/UndoService'
 import { CodeRevertService } from '../actions/CodeRevertService'
@@ -479,6 +480,8 @@ export interface ScheduledTurnRef {
 
 /** What the scheduler hears from the orchestrator about its occurrences. */
 export interface ScheduledTurnHooks {
+  /** The mode a run of the job asks for now (its mode and ceiling as stored), or nothing when the job has neither. */
+  currentPermissionRequest?(jobId: string): PermissionMode | undefined
   onOccurrenceSettled(event: {
     jobId: string
     occurrenceKey: string
@@ -488,6 +491,8 @@ export interface ScheduledTurnHooks {
     error?: string
     /** The model the run's binding used, so a run that waited in the queue records what ran. */
     selection?: ModelOverride
+    /** The permission mode the run's binding enforced. */
+    permissionMode?: PermissionMode
   }): void
 }
 
@@ -3489,6 +3494,38 @@ export class OrchestratorService extends EventEmitter {
   }
 
   /**
+   * A scheduled turn's limit, tightened by what its job holds now. An occurrence is admitted with the job's mode at
+   * that moment; when the job is edited narrower before the run starts (it waits in the queue, or was recovered
+   * after a restart), the run takes the narrower mode. A job's edit never widens a run that already has a limit.
+   */
+  private limitedByJob(limit: PermissionMode | undefined, schedule: ScheduledTurnRef | undefined): PermissionMode | undefined {
+    if (!schedule) return limit
+    let current: PermissionMode | undefined
+    try {
+      current = this.scheduledHooks?.currentPermissionRequest?.(schedule.jobId)
+    } catch {
+      // A job that cannot be read is not a reason to widen: the strictest mode.
+      current = 'ask'
+    }
+    return current === undefined ? limit : narrowPermissionMode(limit, current)
+  }
+
+  /**
+   * The mode a person holds when they create or edit a scheduled job: the mode of the thread the job is
+   * bound to (its own, never above its lineage's ceiling), else the mode threads start in. Whatever
+   * cannot be read asks. The job's ceiling is this value; no request carries one.
+   */
+  scheduledCreatorCeiling(threadId?: string): PermissionMode {
+    try {
+      if (threadId && this.threadStore?.getThread(threadId)) return this.requestedPermissionMode(threadId)
+      return normalizePermissionMode(this.settingsStore.get().permissions.defaultMode)
+    } catch (error) {
+      console.warn('scheduled job ceiling could not be read; asking', { threadId, error: error instanceof Error ? error.message : String(error) })
+      return 'ask'
+    }
+  }
+
+  /**
    * Sets a thread's permission mode. A subagent's mode never exceeds its lineage's ceiling. Applies
    * from the next turn: a running turn and a pending approval are not touched.
    */
@@ -3555,8 +3592,8 @@ export class OrchestratorService extends EventEmitter {
    * already has a binding (a retry or recovery) keeps the binding's; a refused or unreadable
    * selection reads as the requested mode (the turn itself fails at admission).
    */
-  private previewTurnPermission(session: ThreadSession, mode: ChatMode, opts?: { runId?: string; modelOverride?: ModelOverride; permissionMode?: PermissionMode }): PermissionMode {
-    const requested = this.requestedPermissionMode(session.threadId, this.limitedByContinuation(opts?.permissionMode, opts?.runId, session.threadId))
+  private previewTurnPermission(session: ThreadSession, mode: ChatMode, opts?: { runId?: string; modelOverride?: ModelOverride; permissionMode?: PermissionMode; schedule?: ScheduledTurnRef }): PermissionMode {
+    const requested = this.requestedPermissionMode(session.threadId, this.limitedByJob(this.limitedByContinuation(opts?.permissionMode, opts?.runId, session.threadId), opts?.schedule))
     try {
       const bound = opts?.runId ? this.runEngine?.bindingForRun(opts.runId) : undefined
       if (bound) return bound.policy.permissionMode ?? 'accept_edits'
@@ -7110,9 +7147,13 @@ export class OrchestratorService extends EventEmitter {
       text = text || 'Done.'
     }
     let selection: ModelOverride | undefined
+    let permissionMode: PermissionMode | undefined
     try {
       const bound = this.runEngine?.bindingForRun(runId)
-      if (bound) selection = { ...this.harness.selectionOf(bound) }
+      if (bound) {
+        selection = { ...this.harness.selectionOf(bound) }
+        permissionMode = bound.policy.permissionMode
+      }
     } catch {
       // A binding that cannot be read leaves the record without a model; the outcome still reports.
     }
@@ -7124,7 +7165,8 @@ export class OrchestratorService extends EventEmitter {
         status: result.status,
         ...(text !== undefined ? { text } : {}),
         ...(result.error ? { error: result.error } : {}),
-        ...(selection ? { selection } : {})
+        ...(selection ? { selection } : {}),
+        ...(permissionMode ? { permissionMode } : {})
       })
     } catch (error) {
       logDebug('OrchestratorService', 'scheduled occurrence observer failed', error, { runId })
@@ -7694,7 +7736,7 @@ export class OrchestratorService extends EventEmitter {
       }
       // The attempt's immutable binding; a retry of the same run keeps the one it already has.
       const binding = await this.bindTurn(engineRunId, runBinding, instance, mode, () => opts?.origin ?? this.turnOrigin(session.threadId, request.workflowInvocationId), {
-        permissionMode: this.requestedPermissionMode(session.threadId, this.limitedByContinuation(opts?.permissionMode, engineRunId, session.threadId)),
+        permissionMode: this.requestedPermissionMode(session.threadId, this.limitedByJob(this.limitedByContinuation(opts?.permissionMode, engineRunId, session.threadId), opts?.schedule)),
         cwd: opts?.bot ? opts.bot.scratch : session.projectCwd
       }, opts?.bot?.policy)
       // A transcript-native runtime (the pi loop) is sent Mousse's transcript and tools, so Mousse
@@ -9350,6 +9392,9 @@ export class OrchestratorService extends EventEmitter {
       throw error
     }
     const selection = ingress.selection
+    // The stricter of the job's mode and its ceiling (nothing when the job has neither). The turn builder narrows
+    // it by the thread's own mode and lineage, on the direct, queued and recovered paths alike, so it only tightens.
+    const permissionMode = jobPermissionRequest(ingress)
     const schedule = { jobId: ingress.jobId, occurrenceKey, ...(ingress.jobName ? { jobName: ingress.jobName } : {}) }
     let response: OrchestratorResponse
     try {
@@ -9358,6 +9403,7 @@ export class OrchestratorService extends EventEmitter {
         source: 'schedule',
         clientRequestId: scheduledReceiptId(ingress.jobId, occurrenceKey),
         modelOverride: selection,
+        ...(permissionMode ? { permissionMode } : {}),
         origin: 'schedule',
         preemptQuestions: false,
         queueOrigin: { kind: 'schedule', jobId: ingress.jobId, occurrenceKey, ...(ingress.jobName ? { jobName: ingress.jobName } : {}), ...(selection ? { selection } : {}) },
@@ -9384,6 +9430,7 @@ export class OrchestratorService extends EventEmitter {
       threadId,
       ...(runId ? { runId } : {}),
       ...(bound ? { selection: { ...this.harness.selectionOf(bound) } } : {}),
+      ...(bound?.policy.permissionMode ? { permissionMode: bound.policy.permissionMode } : {}),
       transcriptWritten: true
     }
     if (response.replayed) return { ...base, text: '', silent: false, status: 'replayed' }

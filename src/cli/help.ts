@@ -115,6 +115,11 @@ of "<timestamp>.<raw body>" under the secret. The body does not reach the job's 
 Options for add:
   --instance <id> --model <model>   Provider instance and model every run uses
   --mode agent|plan                 Mode of the run (default agent)
+  --permission ask|accept_edits|full
+                                    How much the run may do without asking. Never above the mode you hold when
+                                    you create the job (its thread's, else the default for new threads).
+                                    Without it the run follows its thread's mode, up to that limit. Not for a
+                                    workflow job (a prompt starting with /): workflows take no permission mode
   --project <id>                    Project the run works in
   --thread <id>                     Run as a turn on this thread, with its history
   --workspace project|new-worktree|<path>

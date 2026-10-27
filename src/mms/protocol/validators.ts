@@ -8,6 +8,7 @@ import type { ChatImageAttachment, ChatMode, ScheduledJobWorkspace } from '../..
 import type { ProviderLoginResponse } from '../../shared/providerAuth'
 import { PROVIDER_DRIVER_KINDS, type ModelOverride } from '../../shared/providerInstances'
 import { isAgentAccessLevel } from '../../shared/settings'
+import { isPermissionMode, type PermissionMode } from '../../shared/permissionMode'
 import {
   RESERVED_AGENT_IDS,
   reservedAgentMessage,
@@ -764,6 +765,7 @@ export type CreateScheduledJobInputValidated = {
   createThread?: boolean
   selection?: ModelOverride
   mode?: 'agent' | 'plan'
+  permissionMode?: PermissionMode
   workspace?: ScheduledJobWorkspace
   repeat?: { times?: number }
 }
@@ -781,6 +783,12 @@ export function asJobSelection(v: unknown, name = 'selection'): ModelOverride {
 
 export function asJobMode(v: unknown, name = 'mode'): 'agent' | 'plan' {
   if (v !== 'agent' && v !== 'plan') throw new Error(`${name} must be agent|plan`)
+  return v
+}
+
+/** A job's permission mode. The job's ceiling has no validator: no request may carry one (the key is refused). */
+export function asJobPermissionMode(v: unknown, name = 'permissionMode'): PermissionMode {
+  if (!isPermissionMode(v)) throw new Error(`${name} must be ask|accept_edits|full`)
   return v
 }
 
@@ -805,6 +813,7 @@ export function asCreateScheduledJobInput(v: unknown): CreateScheduledJobInputVa
   if (o.createThread !== undefined) input.createThread = asBoolean(o.createThread, 'createThread')
   if (o.selection !== undefined) input.selection = asJobSelection(o.selection)
   if (o.mode !== undefined) input.mode = asJobMode(o.mode)
+  if (o.permissionMode !== undefined) input.permissionMode = asJobPermissionMode(o.permissionMode)
   if (o.workspace !== undefined) input.workspace = asJobWorkspace(o.workspace)
   if (o.repeat !== undefined) {
     const r = asPlainObject(o.repeat, 'repeat')
@@ -821,6 +830,7 @@ export function asCreateScheduledJobInput(v: unknown): CreateScheduledJobInputVa
     'createThread',
     'selection',
     'mode',
+    'permissionMode',
     'workspace',
     'repeat'
   ])
@@ -840,6 +850,7 @@ export function asScheduledJobPatch(v: unknown): {
   createThread?: boolean
   selection?: ModelOverride | null
   mode?: 'agent' | 'plan' | null
+  permissionMode?: PermissionMode | null
   workspace?: ScheduledJobWorkspace | null
   repeat?: { times?: number } | null
 } {
@@ -854,6 +865,7 @@ export function asScheduledJobPatch(v: unknown): {
     'createThread',
     'selection',
     'mode',
+    'permissionMode',
     'workspace',
     'repeat'
   ])
@@ -875,6 +887,8 @@ export function asScheduledJobPatch(v: unknown): {
   else if (o.selection !== undefined) patch.selection = asJobSelection(o.selection)
   if (o.mode === null) patch.mode = null
   else if (o.mode !== undefined) patch.mode = asJobMode(o.mode)
+  if (o.permissionMode === null) patch.permissionMode = null
+  else if (o.permissionMode !== undefined) patch.permissionMode = asJobPermissionMode(o.permissionMode)
   if (o.workspace === null) patch.workspace = null
   else if (o.workspace !== undefined) patch.workspace = asJobWorkspace(o.workspace)
   if (o.repeat === null) patch.repeat = null

@@ -8,8 +8,18 @@ import { selectionFromListing } from '../../src/shared/providerInstances'
 import type { LlmProviderOption } from '../../src/shared/settings'
 import type { Project, ScheduledJob, ScheduledJobPatch, ScheduledWebhookDelivery, Thread } from '../../src/shared/types'
 import { ScheduledPanel } from '../../src/renderer/components/ScheduledPanel'
-import { MODE_NOTE } from '../../src/renderer/components/scheduled/JobEditor'
-import { draftFromJob, newDraft, patchOf, type ScheduledCatalog, modelGroups } from '../../src/renderer/components/scheduled/jobDraft'
+import { MODE_NOTE, WORKFLOW_PERMISSION_NOTE } from '../../src/renderer/components/scheduled/JobEditor'
+import {
+  createInputOf,
+  draftFromJob,
+  heldPermissionMode,
+  modelGroups,
+  newDraft,
+  patchOf,
+  permissionChoices,
+  validateDraft,
+  type ScheduledCatalog
+} from '../../src/renderer/components/scheduled/jobDraft'
 import { SECRET_VISIBLE_MS } from '../../src/renderer/components/scheduled/WebhookDialog'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
@@ -24,7 +34,7 @@ const projects = [
 ] as Project[]
 const threads = [
   { id: 't1', name: 'Release thread', projectId: 'p1' },
-  { id: 't2', name: 'Other project thread', projectId: 'p2' },
+  { id: 't2', name: 'Other project thread', projectId: 'p2', permissionMode: 'ask' },
   { id: 't3', name: 'Subagent', projectId: 'p1', lineage: { parentThreadId: 't1', rootThreadId: 't1', relationship: 'subagent' } }
 ] as unknown as Thread[]
 const sonnet = selectionFromListing(providers[0], 'sonnet')
@@ -93,7 +103,7 @@ async function mount(jobs: ScheduledJob[]): Promise<Harness> {
   Object.defineProperty(navigator, 'clipboard', { value: clipboard, configurable: true })
   ;(window as unknown as { mousse: unknown }).mousse = {
     scheduled: api.scheduled,
-    settings: { getOptions: async () => ({ llmProviders: providers }) },
+    settings: { getOptions: async () => ({ llmProviders: providers }), get: async () => ({ permissions: { defaultMode: 'accept_edits' } }) },
     projects: { list: async () => projects },
     threads: { listAll: async () => threads }
   }
@@ -795,7 +805,7 @@ describe('Scheduled page: keyboard', () => {
 })
 
 describe('job draft', () => {
-  const catalog: ScheduledCatalog = { models: modelGroups(providers), projects, threads }
+  const catalog: ScheduledCatalog = { models: modelGroups(providers), projects, threads, defaultPermissionMode: 'accept_edits' }
 
   it('a job that already has everything it needs round-trips to an empty patch', () => {
     const item = job({ projectId: 'p1', selection: sonnet, mode: 'agent', workspace: { kind: 'newWorktree' }, schedule: { kind: 'cron', expr: '0 9 * * *' } })
@@ -805,6 +815,168 @@ describe('job draft', () => {
   })
 
   it('a new draft is an hourly-ish interval job on the default model, mode and project checkout', () => {
-    expect(newDraft()).toMatchObject({ scheduleKind: 'interval', minutes: '30', modelKey: '', mode: '', projectId: '', threadId: '', workspaceKind: 'project' })
+    expect(newDraft()).toMatchObject({ scheduleKind: 'interval', minutes: '30', modelKey: '', mode: '', permissionMode: '', projectId: '', threadId: '', workspaceKind: 'project' })
+  })
+
+  it('offers no permission mode above the one the person holds for the job', () => {
+    const offered = (draft: ReturnType<typeof newDraft>) => permissionChoices(draft, catalog).filter((choice) => !choice.disabled).map((choice) => choice.value)
+    // No thread: the mode threads start in (Auto-accept edits here).
+    expect(offered(newDraft())).toEqual(['', 'ask', 'accept_edits'])
+    // A thread set to Ask limits the job to Ask; a thread without a mode of its own follows the default.
+    expect(offered({ ...newDraft(), projectId: 'p2', threadId: 't2' })).toEqual(['', 'ask'])
+    expect(offered({ ...newDraft(), projectId: 'p1', threadId: 't1' })).toEqual(['', 'ask', 'accept_edits'])
+    expect(heldPermissionMode({ ...newDraft(), projectId: 'p2', threadId: 't2' }, catalog)).toEqual({ mode: 'ask', exact: true })
+  })
+
+  it('computes the mode held for an existing worktree from the thread that owns it, and offers only Ask when the owner is not known', () => {
+    const offered = (draft: ReturnType<typeof newDraft>, saved?: ScheduledJob) => permissionChoices(draft, catalog, saved).filter((choice) => !choice.disabled).map((choice) => choice.value)
+    const saved = job({ projectId: 'p2', threadId: 't2', workspace: { kind: 'worktree', path: '/work/other-wt' } })
+    const draft = draftFromJob(saved, catalog, providers)
+    // The saved job records its owner (t2, set to Ask): nothing above Ask is offered, even though the default is wider.
+    expect(heldPermissionMode(draft, catalog, saved)).toEqual({ mode: 'ask', exact: true })
+    expect(offered(draft, saved)).toEqual(['', 'ask'])
+    // A path just typed has no known owner: the form offers Ask only, and the profile checks the rest.
+    const typed = { ...draft, worktreePath: '/work/somewhere-else' }
+    expect(heldPermissionMode(typed, catalog, saved)).toEqual({ mode: 'ask', exact: false })
+    expect(offered(typed, saved)).toEqual(['', 'ask'])
+    expect(offered({ ...newDraft(), projectId: 'p1', workspaceKind: 'worktree', worktreePath: '/work/wt' })).toEqual(['', 'ask'])
+    // An owner in the list whose mode is the default is offered up to it.
+    const owned = job({ projectId: 'p1', threadId: 't1', workspace: { kind: 'worktree', path: '/work/mousse-wt' } })
+    expect(offered(draftFromJob(owned, catalog, providers), owned)).toEqual(['', 'ask', 'accept_edits'])
+  })
+
+  it('disables a mode above what is held even when the job already has it, and checks only a mode being chosen now', () => {
+    const draft = { ...newDraft(), projectId: 'p2', threadId: 't2', permissionMode: 'full' as const }
+    expect(permissionChoices(draft, catalog).find((choice) => choice.value === 'full')?.disabled).toBe(true)
+    expect(validateDraft(draft, { hasWebhook: false, requireName: false }).permission).toBeUndefined()
+    expect(validateDraft(draft, { hasWebhook: false, requireName: false, held: 'ask' }).permission).toMatch(/Full access is wider than Ask before acting/)
+    expect(validateDraft({ ...draft, permissionMode: 'ask' }, { hasWebhook: false, requireName: false, held: 'ask' }).permission).toBeUndefined()
+  })
+
+  it('sends a permission mode on create and in a patch, and null to clear it', () => {
+    const draft = { ...newDraft(), prompt: 'x', permissionMode: 'ask' as const }
+    expect(createInputOf(draft, catalog)).toMatchObject({ permissionMode: 'ask' })
+    expect(createInputOf(newDraft(), catalog)).not.toHaveProperty('permissionMode')
+    const initial = draftFromJob(job({ permissionMode: 'ask', permissionCeiling: 'full' }), catalog, providers)
+    expect(initial.permissionMode).toBe('ask')
+    expect(patchOf(initial, { ...initial, permissionMode: 'accept_edits' }, catalog)).toEqual({ permissionMode: 'accept_edits' })
+    expect(patchOf(initial, { ...initial, permissionMode: '' }, catalog)).toEqual({ permissionMode: null })
+    expect(patchOf(initial, { ...initial, name: 'Renamed' }, catalog)).toEqual({ name: 'Renamed' })
+  })
+})
+
+describe('Scheduled page: permissions respect the job\'s ceiling', () => {
+  const optionsOf = (label: string) => [...control<HTMLSelectElement>(label).options].map((option) => ({ text: option.textContent, disabled: option.disabled }))
+
+  it('offers modes up to the one held for the job, and moving the job to a stricter thread narrows the choices', async () => {
+    await mount([])
+    await click(button('New job'))
+    expect(optionsOf('Permissions')).toEqual([
+      { text: "Default (the mode new threads start in, up to the job's limit)", disabled: false },
+      { text: 'Ask before acting', disabled: false },
+      { text: 'Auto-accept edits', disabled: false },
+      { text: 'Full access', disabled: true }
+    ])
+    await choose('Project', 'Other')
+    await choose('Target thread', 'Other project thread')
+    expect(optionsOf('Permissions').map((option) => option.disabled)).toEqual([false, false, true, true])
+    expect(document.querySelector('[data-testid="permission-note"]')?.textContent).toContain('Ask before acting')
+  })
+
+  it('creates a job with the chosen permission mode', async () => {
+    const h = await mount([])
+    await click(button('New job'))
+    await setValue(control('Prompt'), 'Check CI')
+    await choose('Permissions', 'Ask before acting')
+    await click(button('Create'))
+    expect(h.api.scheduled.create).toHaveBeenCalledWith(expect.objectContaining({ permissionMode: 'ask', createThread: true }))
+  })
+
+  it('refuses a mode that became too wide when the thread changed, saving nothing', async () => {
+    const h = await mount([])
+    await click(button('New job'))
+    await setValue(control('Prompt'), 'Check CI')
+    await choose('Permissions', 'Auto-accept edits')
+    await choose('Project', 'Other')
+    await choose('Target thread', 'Other project thread')
+    await click(button('Create'))
+    expect(h.api.scheduled.create).not.toHaveBeenCalled()
+    expect(alerts()).toEqual(['A job cannot run above the mode you hold here. Auto-accept edits is wider than Ask before acting; choose Ask before acting or stricter.'])
+  })
+
+  it('shows what the daemon refuses, and the job\'s own limit when editing', async () => {
+    const item = job({ projectId: 'p1', permissionMode: 'ask', permissionCeiling: 'accept_edits' })
+    const h = await mount([item])
+    h.api.scheduled.update.mockRejectedValueOnce(new Error('A job cannot run above the mode its creator holds'))
+    await openEdit(item)
+    expect(document.querySelector('[data-testid="permission-note"]')?.textContent).toContain("This job's limit is Auto-accept edits")
+    expect(control<HTMLSelectElement>('Permissions').value).toBe('ask')
+    await choose('Permissions', 'Auto-accept edits')
+    await save()
+    expect(h.api.scheduled.update).toHaveBeenCalledWith('job-1', { permissionMode: 'accept_edits' })
+    expect(document.querySelector('[data-testid="save-error"]')?.textContent).toContain('A job cannot run above the mode its creator holds')
+  })
+
+  it('does not block saving an unrelated change on a job whose mode is wider than what is held now', async () => {
+    const item = job({ projectId: 'p2', threadId: 't2', permissionMode: 'full', permissionCeiling: 'full' })
+    const h = await mount([item])
+    await openEdit(item)
+    expect(control<HTMLSelectElement>('Permissions').value).toBe('full')
+    await setValue(control('Name'), 'Renamed')
+    await save()
+    expect(h.api.scheduled.update).toHaveBeenCalledWith('job-1', { name: 'Renamed' })
+  })
+
+  it('says that saving lowers a job\'s mode when it is moved to a stricter thread, and sends no mode of its own', async () => {
+    const item = job({ projectId: 'p2', permissionMode: 'accept_edits', permissionCeiling: 'accept_edits' })
+    const h = await mount([item])
+    await openEdit(item)
+    expect(document.querySelector('[data-testid="permission-lowered"]')).toBeNull()
+    await choose('Target thread', 'Other project thread')
+    expect(document.querySelector('[data-testid="permission-lowered"]')?.textContent).toContain('from Auto-accept edits to Ask before acting')
+    await save()
+    // The profile does the lowering; the page sends only the thread change.
+    expect(h.api.scheduled.update).toHaveBeenCalledWith('job-1', { threadId: 't2', createThread: false })
+  })
+
+  it('does not say it for a rename, which leaves the mode as it is', async () => {
+    const item = job({ projectId: 'p2', threadId: 't2', permissionMode: 'full', permissionCeiling: 'full' })
+    await mount([item])
+    await openEdit(item)
+    await setValue(control('Name'), 'Renamed')
+    expect(document.querySelector('[data-testid="permission-lowered"]')).toBeNull()
+  })
+
+  it('labels the default as the thread\'s mode up to the job\'s limit', async () => {
+    const item = job({ projectId: 'p1', threadId: 't1', permissionCeiling: 'ask' })
+    await mount([item])
+    await openEdit(item)
+    expect(optionsOf('Permissions')[0].text).toBe("Default (the thread's mode, up to the job's limit)")
+    expect(document.querySelector('[data-testid="permission-note"]')?.textContent).toContain('A run follows its thread, never above that limit')
+  })
+
+  it('hides the permission select for a workflow prompt, explains why, and clears a mode the job had', async () => {
+    const item = job({ projectId: 'p1', permissionMode: 'ask', permissionCeiling: 'ask' })
+    const h = await mount([item])
+    await openEdit(item)
+    expect([...document.querySelectorAll('label')].some((label) => label.textContent === 'Permissions')).toBe(true)
+    await setValue(control('Prompt'), '/deploy staging')
+    expect([...document.querySelectorAll('label')].some((label) => label.textContent === 'Permissions')).toBe(false)
+    expect(document.querySelector('[data-testid="workflow-permission-note"]')?.textContent).toBe(WORKFLOW_PERMISSION_NOTE)
+    await save()
+    expect(h.api.scheduled.update).toHaveBeenCalledWith('job-1', { prompt: '/deploy staging', permissionMode: null })
+  })
+
+  it('sends no permission mode on create for a workflow prompt', () => {
+    const catalog: ScheduledCatalog = { models: [], projects, threads, defaultPermissionMode: 'accept_edits' }
+    expect(createInputOf({ ...newDraft(), prompt: '  /deploy', permissionMode: 'ask' }, catalog)).not.toHaveProperty('permissionMode')
+  })
+
+  it('shows the mode on the row and on each run that recorded one', async () => {
+    await mount([job({ permissionMode: 'ask', permissionCeiling: 'full', runHistory: [{ runAt: '2026-10-27T09:00:00.000Z', status: 'ok', permissionMode: 'ask' }] })])
+    const row = must(document.querySelector('[data-job-id="job-1"]'), 'row')
+    expect(row.querySelector('[data-meta="permission"]')?.textContent).toBe('Ask before acting')
+    await click(row.querySelector<HTMLElement>('[data-row-button]'))
+    expect(row.querySelector('.scheduled-history-row [data-meta="permission"]')?.textContent).toBe('Ask before acting')
   })
 })

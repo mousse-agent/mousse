@@ -14,6 +14,7 @@ import { releaseExecutionLeaseHandle, tryAcquireExecutionLease } from '../src/mm
 import type { HarnessDriver } from '../src/mms/harness/driver'
 import { adapterDriver } from '../src/mms/run/testkit/harness'
 import { Reconciler } from '../src/mms/run/Reconciler'
+import { jobPermissionRequest } from '../src/mms/scheduled/jobPermission'
 import { ScheduledJobService } from '../src/mms/scheduled/ScheduledJobService'
 import { ScheduledJobStore } from '../src/mms/scheduled/ScheduledJobStore'
 import { ThreadWorkspaceManager } from '../src/mms/workspace/ThreadWorkspaceManager'
@@ -66,7 +67,14 @@ describe('scheduled jobs run as turns', () => {
     const jobs = new ScheduledJobStore(MousseConfigStore.load(fx.home))
     jobs.setRunProbe(daemon.orch.scheduledRunProbe())
     const service = new ScheduledJobService({ runIsolated: (prompt, ingress) => daemon.orch.runIsolatedScheduledJob(prompt, ingress) }, jobs, daemon.store, daemon.projects)
-    daemon.orch.setScheduledHooks({ onOccurrenceSettled: (event) => service.occurrenceSettled(event) })
+    daemon.orch.setScheduledHooks({
+      onOccurrenceSettled: (event) => service.occurrenceSettled(event),
+      // As a profile wires it: a run takes the mode its job holds when it starts.
+      currentPermissionRequest: (jobId) => {
+        const job = jobs.getJob(jobId)
+        return job ? jobPermissionRequest(job) : undefined
+      }
+    })
     // The rest of boot recovery that a profile runs after the engine's own (the fixture runs the engine's).
     if (options.recover) {
       ;(daemon.orch as any).recoverQueuedRows()
@@ -128,6 +136,8 @@ describe('scheduled jobs run as turns', () => {
       jobName: job.name,
       selection: job.selection,
       mode: job.mode,
+      permissionMode: job.permissionMode,
+      permissionCeiling: job.permissionCeiling,
       workspace: job.workspace,
       claim: {},
       onThreadChosen: (threadId) => { w.jobs.markClaimThread(job.id, claim.token, threadId) },
@@ -790,6 +800,28 @@ describe('scheduled jobs run as turns', () => {
       expect(second.jobs.getJob(job.id)?.pendingOccurrence).toBeUndefined()
     })
 
+    it('keeps the mode of the job for an occurrence that was admitted but not started when the daemon died', async () => {
+      const first = boot([piAdapter(() => 'unused')], { start: false })
+      const { job, claimed } = jobOn(first, { permissionMode: 'ask', permissionCeiling: 'full' })
+      await first.worker.stop()
+      void startByHand(first, claimed).catch(() => undefined)
+      await waitFor(() => first.engine.store.listNonTerminalRuns().some((run) => first.engine.outbox.listForRun(run.runId).some((effect) => effect.kind === 'turn.start')), 'the turn.start effect')
+      const runId = first.jobs.getJob(job.id)!.runClaim!.runId!
+      killOwner(first, job.id)
+      await first.crash()
+
+      const pi = piAdapter((input) => `after restart: ${input.prompt}`)
+      const second = boot([pi], { pid: 2, recover: true })
+      new Reconciler({ store: second.engine.store, outbox: second.engine.outbox, tools: second.engine.tools }).runOnce()
+      const record = await finished(second, job.id)
+
+      expect(record).toMatchObject({ status: 'ok', runId })
+      // The thread follows the profile default (Auto-accept edits); the job's own mode is the stricter one.
+      expect(second.orch.requestedPermissionMode(record.threadId!)).toBe('accept_edits')
+      expect(second.engine.bindingForRun(runId)?.policy.permissionMode).toBe('ask')
+      expect(record.permissionMode).toBe('ask')
+    })
+
     it.each([
       ['crash right after the run was recorded', true],
       ['crash between the dispatch and the claim write', false]
@@ -1082,6 +1114,198 @@ describe('scheduled jobs run as turns', () => {
       expect(w.engine.bindingForRun(perRunRecord.runId!)?.policy.permissionMode).toBe(
         w.orch.requestedPermissionMode(perRunRecord.threadId!)
       )
+    })
+  })
+
+  describe('a job\'s permission mode and ceiling', () => {
+    const modeOf = (w: World, record: ScheduledJobRunRecord) => w.engine.bindingForRun(record.runId!)?.policy.permissionMode
+    const setProfileDefault = (w: World, mode: 'ask' | 'accept_edits' | 'full') => {
+      ;(w.orch as any).settingsStore.get().permissions.defaultMode = mode
+    }
+    const threadIn = (w: World, mode: 'ask' | 'accept_edits' | 'full') => {
+      const project = projectOf(w)
+      const thread = w.store.createThread('Target', project.id, project.path)
+      w.orch.setThreadPermissionMode(thread.id, mode)
+      return { project, thread }
+    }
+    /** A thread whose person-started turn waits for the returned gate, so a scheduled occurrence queues behind it. */
+    const holdThread = async (w: World, pi: ScriptedAdapter, mode: 'ask' | 'accept_edits' | 'full') => {
+      const { project, thread } = threadIn(w, mode)
+      w.orch.setThreadModelOverride(thread.id, PI)
+      await w.orch.send('hold', false, { threadId: thread.id, clientRequestId: 'person-1', awaitMode: 'ack' })
+      await waitFor(() => pi.turns.length === 1, 'the busy turn')
+      return { project, thread }
+    }
+    const holdingAdapter = (release: { promise: Promise<void> }) => piAdapter(async (input) => {
+      if (input.prompt.includes('hold')) await release.promise
+      return `pi: ${input.prompt}`
+    })
+
+    it('runs a strict job on a wider thread strictly, and a wider job on a strict thread strictly', async () => {
+      const pi = piAdapter(() => 'pi')
+      const w = boot([pi])
+      const wide = threadIn(w, 'full')
+      const strict = threadIn(w, 'ask')
+      const strictJob = addJob(w, { name: 'Strict job', threadId: wide.thread.id, projectId: wide.project.id, permissionMode: 'ask', permissionCeiling: 'full' })
+      const wideJob = addJob(w, { name: 'Wide job', threadId: strict.thread.id, projectId: strict.project.id, permissionMode: 'full', permissionCeiling: 'full' })
+
+      await runNow(w, strictJob)
+      const strictRecord = await finished(w, strictJob.id)
+      await runNow(w, wideJob)
+      const wideRecord = await finished(w, wideJob.id)
+
+      expect(modeOf(w, strictRecord)).toBe('ask')
+      expect(modeOf(w, wideRecord)).toBe('ask')
+      // The record shows the mode the run enforced.
+      expect(strictRecord.permissionMode).toBe('ask')
+      expect(wideRecord.permissionMode).toBe('ask')
+      // The job never changes its thread's own mode.
+      expect(w.store.getThread(wide.thread.id)?.permissionMode).toBe('full')
+    })
+
+    it('caps a job with no mode of its own at its ceiling, on a bound thread and on a per-run thread, and never grants more than the thread or profile', async () => {
+      const pi = piAdapter(() => 'pi')
+      const w = boot([pi])
+      setProfileDefault(w, 'accept_edits')
+      const wide = threadIn(w, 'full')
+      const bound = addJob(w, { name: 'Bound', threadId: wide.thread.id, projectId: wide.project.id, permissionCeiling: 'ask' })
+      const perRun = addJob(w, { name: 'Per run', projectId: wide.project.id, permissionCeiling: 'ask' })
+      // A ceiling is a limit, not a grant: a wide ceiling still follows the thread (or the profile default).
+      const wideBound = addJob(w, { name: 'Wide bound', threadId: threadIn(w, 'ask').thread.id, projectId: wide.project.id, permissionCeiling: 'full' })
+      const widePerRun = addJob(w, { name: 'Wide per run', projectId: wide.project.id, permissionCeiling: 'full' })
+
+      const records: Record<string, ScheduledJobRunRecord> = {}
+      for (const job of [bound, perRun, wideBound, widePerRun]) {
+        await runNow(w, job)
+        records[job.name] = await finished(w, job.id)
+      }
+
+      expect(modeOf(w, records.Bound)).toBe('ask')
+      expect(modeOf(w, records['Per run'])).toBe('ask')
+      expect(modeOf(w, records['Wide bound'])).toBe('ask')
+      expect(modeOf(w, records['Wide per run'])).toBe('accept_edits')
+    })
+
+    it('runs a job with neither a mode nor a ceiling in its thread\'s mode', async () => {
+      const pi = piAdapter(() => 'pi')
+      const w = boot([pi])
+      const { project, thread } = threadIn(w, 'full')
+      const job = addJob(w, { threadId: thread.id, projectId: project.id })
+
+      await runNow(w, job)
+      const record = await finished(w, job.id)
+
+      expect(modeOf(w, record)).toBe('full')
+    })
+
+    it('holds a job started by a webhook to the same mode and ceiling', async () => {
+      const pi = piAdapter(() => 'pi')
+      const w = boot([pi])
+      const { project, thread } = threadIn(w, 'full')
+      const job = addJob(w, { threadId: thread.id, projectId: project.id, permissionMode: 'accept_edits', permissionCeiling: 'accept_edits' })
+      w.jobs.setWebhookTrigger(job.id, { scheme: 'mousse', secretRef: 'scheduled-webhook-test', createdAt: new Date().toISOString() })
+      const accepted = w.jobs.triggerFromWebhook(job.id, { ts: Math.floor(Date.now() / 1000), sig: 'sig-1', body: Buffer.from('{}') })
+      expect(accepted.kind).toBe('accepted')
+
+      await w.tick()
+      const record = await finished(w, job.id)
+
+      expect(record.occurrenceKey).toMatch(/^webhook:/)
+      expect(modeOf(w, record)).toBe('accept_edits')
+      expect(w.engine.getRun(record.runId!)).toMatchObject({ source: 'schedule' })
+    })
+
+    it('keeps the job\'s mode for an occurrence that waits in the queue, and records it', async () => {
+      const release = gate()
+      const pi = holdingAdapter(release)
+      const w = boot([pi])
+      const { project, thread } = await holdThread(w, pi, 'full')
+      const job = addJob(w, { threadId: thread.id, projectId: project.id, schedule: { kind: 'interval', minutes: 10 }, permissionMode: 'ask', permissionCeiling: 'full' })
+      makeDue(w, job)
+
+      await w.tick()
+      await waitFor(() => w.jobs.getJob(job.id)?.pendingOccurrence?.state === 'queued', 'the queued occurrence')
+      expect(readDurableQueue(w.store, thread.id)[0]).toMatchObject({ source: 'schedule', permissionMode: 'ask' })
+      release.resolve()
+      const record = await finished(w, job.id)
+
+      expect(modeOf(w, record)).toBe('ask')
+      expect(record.permissionMode).toBe('ask')
+      // The person's own turn on that thread ran in the thread's mode.
+      const person = w.engine.listRuns(thread.id).find((run) => run.clientRequestId === 'person-1')!
+      expect(w.engine.bindingForRun(person.runId)?.policy.permissionMode).toBe('full')
+    })
+
+    it.each([
+      ['tightened', 'full', 'ask', 'ask'],
+      ['widened', 'ask', 'full', 'ask']
+    ] as const)('runs a queued occurrence in the stricter of the mode it was admitted with and the mode of the job now: job %s while it waited', async (_label, admittedWith, editedTo, expected) => {
+      const release = gate()
+      const pi = holdingAdapter(release)
+      const w = boot([pi])
+      const { project, thread } = await holdThread(w, pi, 'full')
+      const job = addJob(w, { threadId: thread.id, projectId: project.id, schedule: { kind: 'interval', minutes: 10 }, permissionMode: admittedWith, permissionCeiling: 'full' })
+      makeDue(w, job)
+      await w.tick()
+      await waitFor(() => w.jobs.getJob(job.id)?.pendingOccurrence?.state === 'queued', 'the queued occurrence')
+      expect(readDurableQueue(w.store, thread.id)[0]).toMatchObject({ permissionMode: admittedWith })
+
+      // The job is edited while its occurrence waits. The run has not started, so it takes the narrower of the two.
+      w.jobs.updateJob(job.id, { permissionMode: editedTo })
+      release.resolve()
+      const record = await finished(w, job.id)
+
+      expect(modeOf(w, record)).toBe(expected)
+      expect(record.permissionMode).toBe(expected)
+    })
+
+    it('does the same through the direct path when no effect worker is attached', async () => {
+      const pi = piAdapter(() => 'pi')
+      const w = boot([pi])
+      w.orch.attachEffectWorker(null)
+      const { project, thread } = threadIn(w, 'full')
+      const job = addJob(w, { threadId: thread.id, projectId: project.id, permissionMode: 'ask', permissionCeiling: 'full' })
+
+      await runNow(w, job)
+      const record = await finished(w, job.id)
+
+      expect(modeOf(w, record)).toBe('ask')
+    })
+
+    it('keeps a queued strict occurrence strict across a restart', async () => {
+      const first = boot([piAdapter(() => 'unused')], { start: false })
+      const { project, thread } = threadIn(first, 'full')
+      first.orch.setThreadModelOverride(thread.id, PI)
+      const job = addJob(first, { threadId: thread.id, projectId: project.id, schedule: { kind: 'interval', minutes: 10 }, permissionMode: 'ask', permissionCeiling: 'full' })
+      makeDue(first, job)
+      const [claimed] = first.jobs.claimDueJobs()
+      // The state a crash leaves for an occurrence that was admitted and waiting behind a busy thread: its run is
+      // recorded on the claim and its item, carrying the job's mode, is in the durable queue.
+      const { token, occurrenceKey } = claimed.runClaim!
+      first.jobs.markClaimThread(job.id, token, thread.id)
+      const sent = await first.engine.dispatch({ kind: 'send', threadId: thread.id, clientRequestId: `schedule:${job.id}:${occurrenceKey}`, source: 'schedule' })
+      if (sent.status !== 'accepted') throw new Error('send rejected')
+      first.jobs.markOccurrenceAdmitted(job.id, token, sent.runId)
+      first.orch.enqueueForThread(thread.id, { content: job.prompt, mode: 'agent' }, {
+        source: 'schedule',
+        runId: sent.runId,
+        permissionMode: 'ask',
+        origin: { kind: 'schedule', jobId: job.id, occurrenceKey, jobName: job.name }
+      })
+      expect(readDurableQueue(first.store, thread.id)[0]).toMatchObject({ permissionMode: 'ask', runId: sent.runId })
+      killOwner(first, job.id)
+      await first.crash()
+
+      const pi = piAdapter((input) => `after restart: ${input.prompt}`)
+      const second = boot([pi], { pid: 2, recover: true })
+      // The restarted daemon drains the thread's saved queue, as a profile does at start.
+      second.orch.recoverAndDrainPendingQueues()
+      const record = await finished(second, job.id)
+
+      expect(record).toMatchObject({ status: 'ok', runId: sent.runId })
+      expect(modeOf(second, record)).toBe('ask')
+      expect(record.permissionMode).toBe('ask')
+      expect(pi.turns).toHaveLength(1)
     })
   })
 

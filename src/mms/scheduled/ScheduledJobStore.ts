@@ -34,8 +34,10 @@ import {
   PROCESS_INSTANCE_ID
 } from '../queue/processLiveness'
 import { createLeaseToken } from '../queue/ThreadExecutionLease'
+import { isPermissionMode, narrowPermissionMode, normalizePermissionMode, type PermissionMode } from '../../shared/permissionMode'
 import { computeNextRun } from './computeNextRun'
 import { withFileLock } from './fileLock'
+import { isWorkflowPrompt, JobPermissionRefused, permissionAboveCeiling, WORKFLOW_PERMISSION_REFUSAL, type JobPermissionEdit } from './jobPermission'
 import {
   ReceiptsUnreadableError,
   appendDelivery,
@@ -118,7 +120,7 @@ export interface ScheduledRunProbe {
 
 /** Fields of a run record the runner knows once the occurrence has a thread and a run. */
 export type ScheduledRunDetails = Partial<
-  Pick<ScheduledJobRunRecord, 'threadId' | 'runId' | 'queueItemId' | 'selection' | 'mode' | 'workspace' | 'missingPlaceholders'>
+  Pick<ScheduledJobRunRecord, 'threadId' | 'runId' | 'queueItemId' | 'selection' | 'mode' | 'permissionMode' | 'workspace' | 'missingPlaceholders'>
 >
 
 export function scheduledReceiptId(jobId: string, occurrenceKey: string): string {
@@ -388,6 +390,12 @@ export class ScheduledJobStore {
   createJob(input: CreateScheduledJobInput): ScheduledJob {
     const now = new Date().toISOString()
     const nextRunAt = computeNextRun(input.schedule)
+    if (input.permissionMode && isWorkflowPrompt(input.prompt)) throw new JobPermissionRefused(WORKFLOW_PERMISSION_REFUSAL)
+    // A mode with no ceiling to bound it gets the strictest ceiling, and the mode is brought down to it.
+    const permissionCeiling = input.permissionCeiling ?? (input.permissionMode ? 'ask' : undefined)
+    const permissionMode = input.permissionMode && !input.permissionCeiling ? narrowPermissionMode(input.permissionMode, 'ask') : input.permissionMode
+    const tooWide = permissionAboveCeiling(permissionMode, permissionCeiling)
+    if (tooWide) throw new JobPermissionRefused(tooWide)
     const job: ScheduledJob = {
       id: uuidv4(),
       name: input.name.trim() || 'Scheduled job',
@@ -402,6 +410,8 @@ export class ScheduledJobStore {
       selection: input.selection,
       mode: input.mode,
       workspace: input.workspace,
+      permissionMode,
+      permissionCeiling,
       createdBy: input.createdBy,
       accessCap: input.accessCap,
       repeat: input.repeat ? { times: input.repeat.times, completed: 0 } : undefined,
@@ -418,17 +428,39 @@ export class ScheduledJobStore {
     })
   }
 
-  updateJob(id: string, patch: Partial<ScheduledJob>): ScheduledJob | null {
+  /**
+   * Edits a job. `options.permissions` works out the job's mode and ceiling from the job as it is stored now, under
+   * the lock, so two edits at once cannot write back a ceiling the other had just lowered.
+   */
+  updateJob(id: string, patch: Partial<ScheduledJob>, options?: { permissions?: (current: ScheduledJob) => JobPermissionEdit }): ScheduledJob | null {
     return withFileLock(join(this.homeDir, 'scheduled', '.jobs.lock'), () => {
       const jobs = this.listJobs()
       const index = jobs.findIndex((job) => job.id === id)
       if (index === -1) return null
 
+      let applied = patch
+      if (options?.permissions) {
+        const edit = options.permissions(jobs[index])
+        if (!edit.ok) throw new JobPermissionRefused(edit.error)
+        if (edit.changed) applied = { ...patch, permissionMode: edit.permissionMode, permissionCeiling: edit.permissionCeiling }
+      }
       const updated: ScheduledJob = {
         ...jobs[index],
-        ...patch,
+        ...applied,
         id: jobs[index].id,
         updatedAt: new Date().toISOString()
+      }
+      // However an edit arrives, a job's mode never exceeds its ceiling, a mode with no ceiling gets the strictest, and a
+      // workflow job has no mode. (A job the file already holds out of range is not made un-editable for other
+      // changes; the run narrows it anyway.)
+      if ('permissionMode' in applied || 'permissionCeiling' in applied || 'prompt' in applied) {
+        if (updated.permissionMode && isWorkflowPrompt(updated.prompt)) throw new JobPermissionRefused(WORKFLOW_PERMISSION_REFUSAL)
+        if (updated.permissionMode && !updated.permissionCeiling) {
+          updated.permissionCeiling = 'ask'
+          updated.permissionMode = narrowPermissionMode(updated.permissionMode, 'ask')
+        }
+        const tooWide = permissionAboveCeiling(updated.permissionMode, updated.permissionCeiling)
+        if (tooWide) throw new JobPermissionRefused(tooWide)
       }
       // A schedule edit that adds or removes the clock moves the next run with it.
       if (patch.schedule && !('nextRunAt' in patch) && (patch.schedule.kind === 'manual') !== (jobs[index].schedule.kind === 'manual')) {
@@ -438,6 +470,32 @@ export class ScheduledJobStore {
       jobs[index] = updated
       this.saveJobs(jobs)
       return updated
+    })
+  }
+
+  /**
+   * Gives every job that has no permission ceiling one (jobs saved before ceilings existed). `ceilingFor` says
+   * what a job's creator is taken to have held: the mode threads start in, or the target thread's mode. A job
+   * it cannot answer for gets `ask`. Jobs that already have a ceiling are not touched, so this is safe to run
+   * on every start. Returns how many jobs it stamped.
+   */
+  stampMissingPermissionCeilings(ceilingFor: (job: ScheduledJob) => PermissionMode): number {
+    return withFileLock(join(this.homeDir, 'scheduled', '.jobs.lock'), () => {
+      const jobs = this.listJobs()
+      let stamped = 0
+      for (const job of jobs) {
+        if (isPermissionMode(job.permissionCeiling)) continue
+        let ceiling: PermissionMode
+        try {
+          ceiling = normalizePermissionMode(ceilingFor(job))
+        } catch {
+          ceiling = 'ask'
+        }
+        job.permissionCeiling = ceiling
+        stamped += 1
+      }
+      if (stamped > 0) this.saveJobs(jobs)
+      return stamped
     })
   }
 

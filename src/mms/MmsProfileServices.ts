@@ -46,6 +46,7 @@ import type { BotEngine } from './bots/activation/BotEngine'
 import { openPersonalBots } from './bots/activation/open'
 import type { BotStore } from './bots/store/BotStore'
 import { RunStore } from './run/RunStore'
+import { jobPermissionRequest } from './scheduled/jobPermission'
 import { ScheduledJobService, ScheduledWebhookError } from './scheduled/ScheduledJobService'
 import { ScheduledJobStore } from './scheduled/ScheduledJobStore'
 import { ScheduledWebhookServer, scheduledWebhookPort } from './scheduled/ScheduledWebhookServer'
@@ -577,7 +578,20 @@ export class MmsProfileServices {
     )
     // The Run Engine decides when a scheduled occurrence is over, including after a restart.
     this.scheduledStore.setRunProbe(this.orchestrator.scheduledRunProbe())
-    this.orchestrator.setScheduledHooks({ onOccurrenceSettled: (event) => this.scheduled.occurrenceSettled(event) })
+    this.orchestrator.setScheduledHooks({
+      onOccurrenceSettled: (event) => this.scheduled.occurrenceSettled(event),
+      currentPermissionRequest: (jobId) => {
+        const job = this.scheduled.getJob(jobId)
+        return job ? jobPermissionRequest(job) : undefined
+      }
+    })
+    // Jobs saved before permission ceilings existed get one now: the mode of the thread they run on, else the
+    // mode threads start in, else `ask`. Jobs that already have one are untouched, so this is safe on every start.
+    try {
+      this.scheduledStore.stampMissingPermissionCeilings((job) => this.orchestrator.scheduledCreatorCeiling(job.threadId))
+    } catch (error) {
+      console.warn('scheduled job permission ceilings could not be stamped; jobs without one follow their thread\'s mode', error instanceof Error ? error.message : String(error))
+    }
     // Job webhooks: secrets live in this profile's secret file, never in the process environment. The listener
     // looks them up in a small in-memory table that is rebuilt on any scheduler change, so a request costs no file work.
     const webhookSecrets = createProfileSecretAdapter({ profileRoot: homeDir, inheritProcessEnv: false })
