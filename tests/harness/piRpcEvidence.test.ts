@@ -60,7 +60,7 @@ describe('Pi RPC’s evidence gate', () => {
     expect(piRpcCaps({ platform: 'win32', piVersion: version, evidence: [noShell, record({ platform: 'win32' })] })).toBe(PI_RPC_EXACT_CAPS)
   })
 
-  it('with a no-shell record, definitions run on Pi RPC and pass admission; bots stay refused; browser definitions keep the loop', () => {
+  it('with a no-shell record, definitions run on Pi RPC and pass admission; bots stay refused', () => {
     const rpc = { engine: 'rpc' as const }
     const noShell = driver('win32', [record({ platform: 'win32', items: PI_RPC_NO_SHELL_ITEMS })])
     expect(noShell.caps(rpc)).toBe(PI_RPC_NO_SHELL_CAPS)
@@ -110,7 +110,7 @@ describe('Pi RPC’s evidence gate', () => {
     expect(checkPolicy(unproven.caps(rpc), definitionPolicy)).toMatchObject({ ok: false, error: { missing: expect.arrayContaining(['toolControl']) } })
   })
 
-  it('a definition that needs the loop (its browser) keeps the loop where the evidence passed, and every RPC runtime keeps the loop adapter for it', () => {
+  it('a definition that needs the loop (its settings not known) keeps the loop where the evidence passed, and every RPC runtime keeps the loop adapter for it', () => {
     const rpc = { engine: 'rpc' as const }
     expect(driver('linux', [record()]).definitionCaps!(rpc, { loop: true })).toBe(PI_LEGACY_CAPS)
     expect(driver('linux', [record()]).definitionCaps!(rpc, { loop: false })).toBe(PI_RPC_EXACT_CAPS)
@@ -128,19 +128,25 @@ describe('Pi RPC’s evidence gate', () => {
 describe('definition settings Pi RPC must hold', () => {
   const features = { outputFormat: 'markdown' as const, browserMode: 'disabled' as const, memoryScope: 'off' as const, delegation: false }
 
-  it('holds what the loop holds the same way (output formats, any memory, delegation settings); refuses the browser and settings it was not given', () => {
+  it('holds what the loop holds the same way (output formats, any memory, delegation settings, the browser); refuses settings it was not given', () => {
     expect(definitionFeatureGaps(PI_RPC_EXACT_CAPS, { ...features, outputFormat: 'schema', memoryScope: 'thread' })).toEqual([])
     expect(definitionFeatureGaps(PI_RPC_EXACT_CAPS, { ...features, outputFormat: 'json', memoryScope: 'profile_agent', delegation: true })).toEqual([])
-    expect(definitionFeatureGaps(PI_RPC_EXACT_CAPS, { ...features, browserMode: 'structured' }).map((gap) => gap.pointer)).toEqual(['/settings/browser/mode'])
+    // The browser is held as Mousse app tools: a runtime that cannot attach Mousse's MCP server cannot hold it.
+    expect(definitionFeatureGaps(PI_RPC_EXACT_CAPS, { ...features, browserMode: 'structured' })).toEqual([])
+    expect(definitionFeatureGaps(PI_RPC_NO_SHELL_CAPS, { ...features, browserMode: 'structured' })).toEqual([])
+    expect(definitionFeatureGaps({ ...PI_RPC_EXACT_CAPS, mcp: false }, { ...features, browserMode: 'structured' }).map((gap) => gap.pointer)).toEqual(['/settings/browser/mode'])
+    expect(definitionFeatureGaps({ ...PI_RPC_EXACT_CAPS, mcp: false }, features)).toEqual([])
     expect(definitionFeatureGaps(PI_RPC_EXACT_CAPS, undefined).map((gap) => gap.pointer)).toEqual(['/settings'])
   })
 
-  it('a browser definition, or one whose settings are not known, is routed to the loop rather than refused', () => {
-    expect(definitionNeedsLoop({ ...features, browserMode: 'structured' })).toBe(true)
+  it('only a definition whose settings are not known is routed to the loop; a browser definition runs on Pi RPC', () => {
+    expect(definitionNeedsLoop({ ...features, browserMode: 'structured' })).toBe(false)
     expect(definitionNeedsLoop(undefined)).toBe(true)
     expect(definitionNeedsLoop(features)).toBe(false)
     const policy = definitionRunPolicy({ origin: 'definition', grants: { skills: [], mcpTools: [], builtinTools: [], denied: [] }, budget: { maxTurns: 1, maxToolCalls: 1, maxElapsedMs: 0 } as never, definition: { id: 'd', revision: 'r' }, features: { ...features, browserMode: 'structured' } })
-    expect(policy.authority).toMatchObject({ kind: 'definition', loop: true })
+    expect(policy.authority).toMatchObject({ kind: 'definition' })
+    expect(policy.authority).not.toHaveProperty('loop')
+    expect(definitionRunPolicy({ origin: 'definition', grants: { skills: [], mcpTools: [], builtinTools: [], denied: [] }, budget: { maxTurns: 1, maxToolCalls: 1, maxElapsedMs: 0 } as never, definition: { id: 'd', revision: 'r' } }).authority).toMatchObject({ kind: 'definition', loop: true })
     expect(definitionRunPolicy({ origin: 'definition', grants: { skills: [], mcpTools: [], builtinTools: [], denied: [] }, budget: { maxTurns: 1, maxToolCalls: 1, maxElapsedMs: 0 } as never, definition: { id: 'd', revision: 'r' }, features }).authority).not.toHaveProperty('loop')
   })
 
