@@ -368,7 +368,8 @@ CREATE INDEX approval_requests_continuation ON approval_requests(continuation_ru
   {
     version: 13,
     // SQLite cannot change a CHECK in place, so `inbox` is rebuilt (SQLite's "other kinds of ALTER TABLE"
-    // procedure). Nothing references it, and its index goes with the dropped table and is made again.
+    // procedure). Nothing references it, and its index goes with the dropped table and is made again. It touches only
+    // `inbox`, so it applies the same on a database at version 11 and on one that another change has taken to 12.
     sql: `
 -- A watched pull request tells its thread about finished checks and new reviews (issue #176): the
 -- kind list adds 'pr_update'. Columns are those of version 3 plus delivered_by (version 7).

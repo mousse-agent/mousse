@@ -276,8 +276,13 @@ export function wakeThreads(
   return report
 }
 
-/** Rows without a delegation (notices) always steer; a child result follows its delegation. */
+/**
+ * Rows without a delegation (notices) steer; a child result follows its delegation. A pull request update never steers:
+ * it asks the agent to change code and push, which must not interrupt what a person has started, so it waits for the
+ * run to end and arrives as a turn of its own.
+ */
 function wantsSteer(row: InboxRecord, delegations: Delegations): boolean {
+  if (row.kind === 'pr_update') return false
   if (row.kind !== 'child_result') return true
   const delegation = delegations.get((row.payload as ChildResultPayload).delegationId)
   return delegation?.wake === 'always'

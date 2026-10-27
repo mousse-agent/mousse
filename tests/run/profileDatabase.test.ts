@@ -161,7 +161,9 @@ describe('ProfileDatabase', () => {
     it('comes after the runs rebuild, so a profile already at the rebuild\'s version still gets it', () => {
       const rebuild = RUN_MIGRATIONS.find((migration) => migration.foreignKeys === 'off')!
       expect(access.version).toBeGreaterThan(rebuild.version)
-      expect(RUN_MIGRATIONS.map((migration) => migration.version)).toEqual(RUN_MIGRATIONS.map((_migration, index) => index + 1))
+      // Versions only ever increase; a number another change has taken may be missing from this list.
+      const versions = RUN_MIGRATIONS.map((migration) => migration.version)
+      expect(versions).toEqual([...new Set(versions)].sort((a, b) => a - b))
     })
 
     it('upgrades a database that has credentials and delegations: old rows read as lineage, and the levels are checked', () => {
@@ -416,15 +418,37 @@ describe('ProfileDatabase', () => {
         .run(id, rowKind, deliveredBy ? 'delivered' : 'pending', deliveredBy)
     }
 
-    it('is the last migration and comes after the one that added delivered_by', () => {
-      expect(kind.version).toBe(RUN_MIGRATIONS.at(-1)!.version)
+    it('comes after the one that added delivered_by and after every table it could meet', () => {
       expect(kind.version).toBeGreaterThan(7)
+      expect(kind.version).toBeGreaterThanOrEqual(13)
+    })
+
+    it('applies the same on a database at version 11 and on one that another change took to version 12', () => {
+      const another = { version: 12, sql: 'CREATE TABLE approval_requests(request_id TEXT PRIMARY KEY, thread_id TEXT NOT NULL) STRICT;' }
+      for (const withTwelve of [false, true]) {
+        const database = open()
+        database.migrate(before.filter((migration) => migration.version <= 11))
+        if (withTwelve) database.migrate([...before.filter((migration) => migration.version <= 11), another])
+        insertRow(database, 'i:child', 'child_result', 'effect:a')
+        insertRow(database, 'i:notice', 'reconcile_notice')
+        const rows = database.database.prepare('SELECT * FROM inbox ORDER BY inbox_id').all()
+        database.migrate([...before.filter((migration) => migration.version <= 11), ...(withTwelve ? [another] : []), kind])
+        expect(database.userVersion()).toBe(kind.version)
+        expect(database.database.prepare('SELECT * FROM inbox ORDER BY inbox_id').all()).toEqual(rows)
+        insertRow(database, 'i:pr', 'pr_update')
+        // The other change's table is untouched.
+        expect(database.database.prepare("SELECT name FROM sqlite_master WHERE name = 'approval_requests'").all()).toHaveLength(withTwelve ? 1 : 0)
+        database.close()
+        rmSync(profileHome!, { recursive: true, force: true })
+        profileHome = undefined
+        db = undefined
+      }
     })
 
     it('keeps rows of every kind, their delivered_by and the index, and then accepts pr_update', () => {
       const database = open()
       database.migrate(before)
-      expect(database.userVersion()).toBe(kind.version - 1)
+      expect(database.userVersion()).toBe(before.at(-1)!.version)
       insertRow(database, 'i:child', 'child_result', 'effect:a')
       insertRow(database, 'i:restart', 'restart_note')
       insertRow(database, 'i:notice', 'reconcile_notice', 'queue:q1')
