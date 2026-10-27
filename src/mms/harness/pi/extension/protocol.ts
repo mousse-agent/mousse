@@ -72,6 +72,8 @@ export interface PiTurnResponse {
   mcp: { url: string; token: string } | null
   /** Re-register the instance provider when it changed since the factory's catalogue. */
   catalogRevision: number
+  /** The turn's run has token or USD limits: every request asks for a reservation (`spend`). */
+  reserve?: boolean
 }
 
 /** `/pi/gate`, at every `tool_call`. */
@@ -97,10 +99,35 @@ export interface PiRequestRequest {
   /** The attempt token of the turn the extension last fetched ('' before the first); informational. */
   attemptToken: string
   kind: 'request'
+  /** What the request would spend, when the turn reserves (`PiTurnResponse.reserve`). */
+  spend?: PiSpendRequest
 }
 
-/** `reason`: one of the fixed request-path texts (`messages.ts`), never a number. */
-export type PiRequestResponse = { ok: true } | { ok: false; reason: string }
+/** One request's reservation ask (`harness/pi/reservation.ts` computes every number). */
+export interface PiSpendRequest {
+  /** Upper bound of the input tokens. */
+  inputBound: number | null
+  /** The output cap pi-ai would send as Pi asked for the request; null when it would send none. */
+  wireCap: number | null
+  /** The thinking budget pi-ai adds to the cap (0 when none). */
+  thinkingBudget: number
+  model: { provider: string; id: string; api: string; capHonouring: boolean; cost: { input: number; output: number; cacheRead: number; cacheWrite: number } }
+}
+
+/**
+ * `reason`: one of the fixed request-path texts (`messages.ts`), never a number. `reservation`: the
+ * request is reserved, and must go with exactly `cap` as its wire cap.
+ */
+export type PiRequestResponse = { ok: true; reservation?: { id: string; cap: number } } | { ok: false; reason: string }
+
+/**
+ * `/pi/settle`, once a reserved request ended: `released` when nothing was sent (refused before
+ * the HTTP call), `used` with its usage (`partial` when it failed or stopped after being sent).
+ */
+export interface PiSettleRequest {
+  reservationId: string
+  outcome: { kind: 'released' } | { kind: 'used'; input: number; output: number; usd: number; partial?: boolean }
+}
 
 /** `/pi/quiesce`: a delegation tool waits here before it runs (no parent mutation authorized or running). */
 export interface PiQuiesceRequest {

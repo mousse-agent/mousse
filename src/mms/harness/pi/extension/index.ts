@@ -20,6 +20,7 @@ import { builtinProviders } from '@earendil-works/pi-ai/providers/all'
 import { createBashToolDefinition, type ExtensionAPI, type ExtensionContext } from '@earendil-works/pi-coding-agent'
 import { guardProvider, guardStreams, isGuarded, type GuardObserver, type RequestGate } from './guard'
 import { BUDGET_EXHAUSTED, GATE_REFUSALS, GATE_UNAVAILABLE, REQUEST_REFUSED } from './messages'
+import { capHonouring, inputBound, sizedMaxTokens, wirePlan, type PiReasoning, type ThinkingBudgets } from '../reservation'
 import { containedBashOperations } from './shell'
 
 /** The input key the app-tool registry reads a `per_call` runtime's turn token from (`registry.ts`). */
@@ -35,6 +36,8 @@ import {
   type PiReadyRequest,
   type PiRequestRequest,
   type PiRequestResponse,
+  type PiSettleRequest,
+  type PiSpendRequest,
   type PiTurnResponse,
   type PiTurnTool
 } from './protocol'
@@ -56,7 +59,9 @@ import {
  *   unreachable gate blocks.
  * - **Requests (PR 4 §5a).** Every model request the guard admits, compactions, summaries and Pi's
  *   own retries included, is charged first through `/pi/request`; a refusal or an unreachable
- *   endpoint ends it with a fixed text Pi does not retry, before any network I/O.
+ *   endpoint ends it with a fixed text Pi does not retry, before any network I/O. When the turn
+ *   has token or USD limits (PR 4 §5b), the charge carries the request's input bound and final
+ *   wire cap (`reservation.ts`), and the grant sizes it (`guard.ts`); `/pi/settle` ends it.
  */
 
 /**
@@ -187,6 +192,10 @@ export default async function mousseExtension(pi: ExtensionAPI): Promise<void> {
     delete process.env.MOUSSE_PI_TEST_GUARD_LOG
     delete process.env.MOUSSE_PI_TEST_FAIL_REGISTRATION
     if (log) observer = { admitted: (model) => appendFileSync(log, `${JSON.stringify({ provider: model.provider, id: model.id, api: model.api })}\n`) }
+    // The final hook parameters of each reserved request, as `onPayload` saw them after Mousse's check.
+    const payloads = process.env.MOUSSE_PI_TEST_PAYLOAD_LOG
+    delete process.env.MOUSSE_PI_TEST_PAYLOAD_LOG
+    if (payloads) observer = { ...observer, payload: (model, params, grant) => appendFileSync(payloads, `${JSON.stringify({ api: model.api, id: model.id, cap: grant.cap, params })}\n`) }
   }
 
   // Linux and macOS: every shell runs in a process group the engine recorded first (`shell.ts`).
@@ -199,17 +208,43 @@ export default async function mousseExtension(pi: ExtensionAPI): Promise<void> {
   let turn: PiTurnResponse | undefined
   // Mousse charges every request to the live turn before it goes, or refuses it. The text thrown
   // is always one of the fixed ones, never the transport's (Pi would retry "fetch failed").
+  // A reserved turn's request carries what it would spend; only `streamSimple` (every request Pi's
+  // agent, compactions and summaries make) can be sized, so anything else is refused there.
   const gate: RequestGate = {
-    request: async () => {
-      const body: PiRequestRequest = { attemptToken: turn?.attemptToken ?? '', kind: 'request' }
+    request: async (model, context, options, fn) => {
+      let spend: PiSpendRequest | undefined
+      let thinkingBudget = 0
+      if (turn?.reserve) {
+        if (fn !== 'streamSimple') throw new Error(REQUEST_REFUSED)
+        const typed = context as Parameters<typeof wirePlan>[1]
+        const plan = wirePlan(model, typed, typeof options.maxTokens === 'number' ? options.maxTokens : undefined, options.reasoning as PiReasoning | undefined, options.thinkingBudgets as ThinkingBudgets | undefined)
+        thinkingBudget = plan.thinkingBudget
+        const cost = model.cost ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }
+        spend = {
+          inputBound: inputBound(typed, model.api) ?? null,
+          wireCap: plan.wireCap ?? null,
+          thinkingBudget,
+          model: { provider: model.provider, id: model.id, api: model.api, capHonouring: capHonouring(model), cost: { input: cost.input, output: cost.output, cacheRead: cost.cacheRead, cacheWrite: cost.cacheWrite } }
+        }
+      }
+      const body: PiRequestRequest = { attemptToken: turn?.attemptToken ?? '', kind: 'request', ...(spend ? { spend } : {}) }
       let answer: PiRequestResponse
       try {
         answer = await call<PiRequestResponse>('request', body)
       } catch {
         throw new Error(GATE_UNAVAILABLE)
       }
-      if (answer?.ok === true) return
+      if (answer?.ok === true) {
+        if (!spend) return undefined
+        const reservation = answer.reservation
+        if (!reservation || typeof reservation.cap !== 'number') throw new Error(REQUEST_REFUSED)
+        return { id: reservation.id, cap: reservation.cap, maxTokens: sizedMaxTokens(reservation.cap, { thinkingBudget }) }
+      }
       throw new Error(answer?.ok === false && answer.reason === BUDGET_EXHAUSTED ? BUDGET_EXHAUSTED : REQUEST_REFUSED)
+    },
+    settle: async (grant, outcome) => {
+      const body: PiSettleRequest = { reservationId: grant.id, outcome }
+      await call('settle', body).catch(() => undefined)
     }
   }
 

@@ -1,5 +1,6 @@
-import { lazyStream, type Api, type AssistantMessageEventStream, type Model, type Provider, type ProviderStreams } from '@earendil-works/pi-ai'
-import { ANTHROPIC_OAUTH_REFUSED, LOGIN_REFUSED } from './messages'
+import { createAssistantMessageEventStream, lazyStream, type Api, type AssistantMessage, type AssistantMessageEventStream, type Model, type Provider, type ProviderStreams } from '@earendil-works/pi-ai'
+import { hookCap } from '../reservation'
+import { ANTHROPIC_OAUTH_REFUSED, LOGIN_REFUSED, SPEND_CAP_MISMATCH } from './messages'
 
 /**
  * The fail-closed Anthropic guard of Mousse's Pi extension (PR 2 §4 "Anthropic guard").
@@ -15,7 +16,10 @@ import { ANTHROPIC_OAUTH_REFUSED, LOGIN_REFUSED } from './messages'
  *
  * With a request gate (PR 4 §5a, the extension's `/pi/request`), every request the guard admits is
  * then charged to the live turn before any network I/O; a refusal, or a gate that cannot be asked,
- * ends the stream with a fixed text Pi does not retry, and nothing is sent.
+ * ends the stream with a fixed text Pi does not retry, and nothing is sent. When the turn reserves
+ * spend (PR 4 §5b), the gate's grant sets the request's `maxTokens` so its wire cap equals the
+ * reservation, Mousse's own `onPayload` (after any other) refuses a final payload whose cap is
+ * missing or above it, and the reservation is settled before the request's last event is passed on.
  */
 
 /** Subscription tokens of Claude.ai accounts (access and refresh). */
@@ -99,15 +103,29 @@ function sdkBaseUrls(env: Record<string, unknown> | undefined): string[] {
 /** Test seam: told of every request the guard let through (only in test builds of the extension). */
 export interface GuardObserver {
   admitted?(model: Model<Api>): void
+  /** A reserved request's final hook parameters, after Mousse's cap check passed. */
+  payload?(model: Model<Api>, params: unknown, grant: RequestGrant): void
 }
 
+/** A reserved request: it must reach the wire with `cap`, which `maxTokens` produces. */
+export interface RequestGrant {
+  id: string
+  cap: number
+  maxTokens: number
+}
+
+/** How a reserved request ended (`/pi/settle`). */
+export type RequestOutcome = { kind: 'released' } | { kind: 'used'; input: number; output: number; usd: number; partial?: boolean }
+
 /**
- * Asked before every admitted request (`/pi/request`): resolves when Mousse lets it go, throws one
- * of the fixed request-path texts otherwise. It runs before the stock stream function, so before
- * any network I/O.
+ * Asked before every admitted request (`/pi/request`): resolves when Mousse lets it go (with a grant
+ * when the turn reserves spend), throws one of the fixed request-path texts otherwise. It runs
+ * before the stock stream function, so before any network I/O.
  */
 export interface RequestGate {
-  request(model: Model<Api>): Promise<void>
+  request(model: Model<Api>, context: unknown, options: Record<string, unknown>, fn: 'stream' | 'streamSimple' | 'fetchDeferred'): Promise<RequestGrant | undefined>
+  /** Ends a reservation; never throws (an unsettled reservation stays charged). */
+  settle(grant: RequestGrant, outcome: RequestOutcome): Promise<void>
 }
 
 /**
@@ -124,7 +142,8 @@ export function isGuarded(provider: unknown): boolean {
   return typeof provider === 'object' && provider !== null && GUARDED.has(provider)
 }
 
-type RequestOptions = { apiKey?: unknown; headers?: Record<string, unknown>; env?: Record<string, unknown>; maxRetries?: number; [CHARGED]?: true }
+type PayloadHook = (params: unknown, model: Model<Api>) => unknown
+type RequestOptions = { apiKey?: unknown; headers?: Record<string, unknown>; env?: Record<string, unknown>; maxRetries?: number; maxTokens?: number; onPayload?: PayloadHook; [CHARGED]?: true }
 
 /** Checks one request; returns the options it may go out with (`maxRetries: 0`), or null when refused. */
 function admit(model: Model<Api>, providerHeaders: Record<string, unknown> | undefined, options: RequestOptions | undefined): RequestOptions | null {
@@ -147,6 +166,64 @@ function refused(model: Model<Api>): AssistantMessageEventStream {
 }
 
 /**
+ * How a reserved request ended. Nothing sent (the payload check refused it, or setup failed):
+ * released. A failure with no content and no usage (the provider answered an error status): also
+ * released. Otherwise its usage, and a failed or stopped request keeps at least its reservation.
+ */
+function outcomeOf(message: AssistantMessage | undefined, sent: boolean): RequestOutcome {
+  if (!sent || !message) return { kind: 'released' }
+  const usage = message.usage
+  const input = (usage?.input ?? 0) + (usage?.cacheRead ?? 0) + (usage?.cacheWrite ?? 0)
+  const output = usage?.output ?? 0
+  const failed = message.stopReason === 'error' || message.stopReason === 'aborted'
+  if (message.stopReason === 'error' && !message.content?.length && !input && !output) return { kind: 'released' }
+  return { kind: 'used', input, output, usd: usage?.cost?.total ?? 0, ...(failed ? { partial: true } : {}) }
+}
+
+/**
+ * A reserved request: `maxTokens` sized to the grant, Mousse's cap check chained after any
+ * `onPayload` (the SDK's runs `before_provider_request`), and the reservation settled before the
+ * last event goes on, so the next request sees the run's ledger up to date.
+ */
+function reservedStream(original: (model: Model<Api>, input: unknown, options?: RequestOptions) => AssistantMessageEventStream, model: Model<Api>, input: unknown, options: RequestOptions, grant: RequestGrant, gate: RequestGate, observer?: GuardObserver): AssistantMessageEventStream {
+  let sent = false
+  const before = options.onPayload
+  const inner = original(model, input, {
+    ...options,
+    maxTokens: grant.maxTokens,
+    onPayload: async (params, payloadModel) => {
+      let next = params
+      const chained = before ? await before(params, payloadModel) : undefined
+      if (chained !== undefined) next = chained
+      const cap = hookCap(model.api, next)
+      if (cap === undefined || cap > grant.cap) throw new Error(SPEND_CAP_MISMATCH)
+      observer?.payload?.(model, next, grant)
+      sent = true
+      return next
+    }
+  })
+  const outer = createAssistantMessageEventStream()
+  void (async () => {
+    let settled = false
+    try {
+      for await (const event of inner) {
+        if (!settled && (event.type === 'done' || event.type === 'error')) {
+          settled = true
+          await gate.settle(grant, outcomeOf(event.type === 'done' ? event.message : event.error, sent))
+        }
+        outer.push(event)
+      }
+      const result = await inner.result()
+      if (!settled) await gate.settle(grant, outcomeOf(result, sent))
+      outer.end(result)
+    } catch {
+      outer.end()
+    }
+  })()
+  return outer
+}
+
+/**
  * Stream functions with the guard in front (the provider's own, or the global api registry's):
  * the Anthropic rule, then the request gate when there is one. A cancellation of a deferred
  * response is checked but never charged: it is not a model request.
@@ -164,9 +241,10 @@ export function guardStreams<T extends Partial<ProviderStreams>>(streams: T, pro
         return original(model, input, admitted)
       }
       return lazyStream(model, async () => {
-        await gate.request(model)
+        const grant = await gate.request(model, input, admitted as Record<string, unknown>, name)
         observer?.admitted?.(model)
-        return original(model, input, { ...admitted, [CHARGED]: true })
+        const charged: RequestOptions = { ...admitted, [CHARGED]: true }
+        return grant ? reservedStream(original, model, input, charged, grant, gate, observer) : original(model, input, charged)
       })
     }
   }

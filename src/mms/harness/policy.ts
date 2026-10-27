@@ -66,6 +66,15 @@ export interface SpendModelFacts {
   outputCap: boolean
   /** The model has a non-zero price (a USD limit needs one). */
   priced: boolean
+  /** The turn's effort, as the refusal names it. */
+  effort?: string
+  /**
+   * The smallest output cap one request at this effort can be sent with (the thinking budget plus
+   * the answer room, on models that add one); a smaller output or USD limit can never fit.
+   */
+  smallestCap?: number
+  /** USD per output token, for the smallest cap against a USD limit. */
+  outputUsdPerToken?: number
 }
 
 /** The policy has a token or USD limit (`spendLimits`). */
@@ -82,6 +91,12 @@ function spendModelGap(budget: NonNullable<RunPolicy['budget']>, model: SpendMod
   if (!model) return 'Mousse cannot tell whether this model caps its output, so token and cost limits cannot be held.'
   if (!model.outputCap) return `${model.label} cannot cap its output, so token and cost limits cannot be held.`
   if (budget.maxUsd !== undefined && !model.priced) return `${model.label} has no price, so a cost limit cannot be held.`
+  const smallest = model.smallestCap
+  const effort = model.effort && model.effort !== 'off' ? `${model.effort} effort` : 'no thinking'
+  if (smallest !== undefined && budget.maxOutputTokens !== undefined && budget.maxOutputTokens < smallest)
+    return `${model.label} at ${effort} needs at least ${smallest} output tokens per request, above the limit of ${budget.maxOutputTokens}. Lower the effort or raise the limit.`
+  if (smallest !== undefined && budget.maxUsd !== undefined && model.outputUsdPerToken !== undefined && smallest * model.outputUsdPerToken > budget.maxUsd)
+    return `${model.label} at ${effort} needs at least ${smallest} output tokens per request, which costs more than the limit of $${budget.maxUsd}. Lower the effort or raise the limit.`
   return undefined
 }
 
