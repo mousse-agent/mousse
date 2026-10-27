@@ -11,7 +11,7 @@ import { Select } from './ui/Select'
 
 // Serialize attachment and final detachment for repeated mounts of one display.
 const attachments = new Map<string, { users: number; tail: Promise<unknown> }>()
-function RemoteThreadView({ refValue, connected }: { refValue: BridgeEntityRef; connected: boolean }) {
+export function RemoteThreadView({ refValue, connected }: { refValue: BridgeEntityRef; connected: boolean }) {
   const profile = useAppStore(state => state.profileId)
   const currentView = useRef<RemoteView>(undefined)
   const { nodeId, entityId } = refValue

@@ -37,6 +37,11 @@
       "run": ["tests/renderer/**/*.test.ts", "tests/platformEditorCrossFeature.test.ts", "tests/promptMarkers.test.ts", "tests/net/chats/gui-*.test.ts", "tests/net/bridge/gui-electron-display.test.ts", "tests/platformMainBundleImports.test.ts", "tests/*Css*.test.ts", "tests/*css*.test.ts"]
     },
     {
+      "name": "the Storage page fixture is bundled at run time, so the import graph cannot see it",
+      "when": ["tests/fixtures/storage-settings/**", "src/shared/storage*.ts"],
+      "run": ["tests/renderer/storage-settings-electron.test.ts", "tests/renderer/storageSettings.test.ts"]
+    },
+    {
       "name": "protocol test vectors are read from disk",
       "when": ["test-vectors/**"],
       "run": ["tests/net/plus/enrollment-seal.test.ts", "tests/net/identity/privateStreamKeys.test.ts", "tests/net/protocol/codec.test.ts", "tests/net/spaces/private/service.test.ts", "tests/net/spaces/host/invites.test.ts", "tests/net/spaces/host/meta.test.ts"]

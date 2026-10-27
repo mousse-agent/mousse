@@ -44,7 +44,7 @@ const SETTINGS_SECTIONS = [
   { id: 'speech', label: 'Speech', icon: VolumeHigh, hue: 3, group: 'Customize', keywords: ['voice', 'read aloud', 'dictation', 'microphone', 'noise', 'speed'] },
   { id: 'shortcuts', label: 'Shortcuts', icon: Keyboard, hue: 2, group: 'Customize', keywords: ['keyboard', 'keys', 'keybindings', 'hotkeys', 'rebind', 'command palette', 'accelerator', 'reset'] },
   { id: 'connections', label: 'Devices', icon: Laptop, hue: 2, group: 'This computer', keywords: ['devices', 'network', 'pair', 'remote'] },
-  { id: 'storage', label: 'Storage', icon: Server, hue: 0, group: 'This computer', keywords: ['trash', 'delete', 'purge', 'retention', 'disk'] }
+  { id: 'storage', label: 'Storage', icon: Server, hue: 0, group: 'This computer', keywords: ['trash', 'delete', 'purge', 'retention', 'disk', 'worktree', 'usage', 'cleanup', 'browser', 'space'] }
 ] as const
 
 type SettingsSectionId = (typeof SETTINGS_SECTIONS)[number]['id']
