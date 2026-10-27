@@ -1,4 +1,5 @@
 import type { LlmProviderOption } from '../../../shared/settings'
+import type { PendingUserQuestions, UserQuestionAnswers } from '../../../shared/types'
 import type { AgentDefinitionError, AgentDefinitionIssue } from '../../../shared/agents/errors'
 import type {
   AgentDefinitionRecord,
@@ -42,6 +43,19 @@ export interface AgentTryRunResult {
   issues?: AgentDefinitionIssue[]
 }
 
+/** This window's running Try Runs of a definition, and the questions each waits on. */
+export interface AgentTryRunPending {
+  runs: Array<{ runId: string; threadId: string; threadTitle: string; questions: PendingUserQuestions[] }>
+}
+
+export interface AgentTryRunAnswerRequest {
+  profileId: string
+  id: string
+  requestId: string
+  answers?: UserQuestionAnswers
+  dismiss?: boolean
+}
+
 export interface AgentValidateRequest {
   profileId: string
   id?: string
@@ -76,6 +90,10 @@ export interface AgentDefinitionsClient {
   exportBundle(query: { profileId: string; id: string; revision?: string }): Promise<AgentExportBundle>
   validate(query: AgentValidateRequest): Promise<AgentValidateResult>
   tryRun(query: AgentTryRunRequest): Promise<AgentTryRunResult>
+  /** The questions this window's running Try Runs of a definition wait on (absent: a client without it). */
+  tryRunPending?(query: { profileId: string; id: string }): Promise<AgentTryRunPending>
+  /** Answers or dismisses one of those questions. */
+  tryRunAnswer?(query: AgentTryRunAnswerRequest): Promise<{ ok: boolean }>
 }
 
 export interface AgentEditorSkillOption {

@@ -141,8 +141,49 @@ describe('native Agent Editor Try Run production host', () => {
       const runRoot = join(f.services.getProfileHomeDir(), 'agent-runs', result.runId!)
       const denied = await direct.call(f.services.platform.agentRuns, runRoot, { runId: result.runId, threadId: result.threadId,
         toolName: 'write', canonicalToolName: 'write', arguments: { path: 'hidden.txt', content: oversized }, argumentDigest: '0'.repeat(64), classification: 'write' })
-      expect(denied.status).toBe('denied')
+      expect(denied).toMatchObject({ status: 'denied', reason: 'This tool call is too long to show for approval in full, so it was not run. Split it into shorter steps.' })
       expect((await a.rpc.request<{ pending: unknown[] }>('orchestrator.pendingQuestions', {})).pending).toEqual([])
+    } finally {
+      unsubscribe()
+      f.services.platform.agentRuns.beginShutdown()
+      await running?.catch(() => undefined)
+      await f.close()
+    }
+  }, 30_000)
+
+  it('the Try Run panel sees and answers its own run’s question; another window sees none and cannot answer it (#299)', async () => {
+    const f = await fixture([
+      providerResponse([{ type: 'toolCall', id: 'write-approval', name: 'write', arguments: { path: 'panel.txt', content: 'panel bytes' } }], 'toolUse'),
+      providerResponse([{ type: 'text', text: 'panel answer' }], 'stop')
+    ])
+    let running: Promise<unknown> | undefined
+    let unsubscribe = () => {}
+    try {
+      const a = await f.connect(f.alice.id), other = await f.connect(f.alice.id)
+      const questionReady = new Promise<void>((resolve) => {
+        unsubscribe = a.rpc.onEvent((event) => { if (event.type === 'questions.pending') resolve() })
+      })
+      await a.rpc.subscribe()
+      const created = await a.agents.create({ profileId: f.alice.id, settings: settings('Panel Agent', f.modelRef, 'always'), systemPrompt: 'ask first' })
+      const request = a.agents.tryRun({ profileId: f.alice.id, id: created.id, expectedDraftHash: created.draftHash, prompt: 'ask in the panel' })
+      running = request
+      await Promise.race([questionReady, request.then((result) => {
+        throw new Error(`Agent run ended before asking: ${JSON.stringify(result)}`)
+      })])
+      const pending = await a.agents.tryRunPending!({ profileId: f.alice.id, id: created.id })
+      expect(pending.runs).toHaveLength(1)
+      expect(pending.runs[0]!.threadTitle).toBe('Try Agent: Panel Agent')
+      expect(pending.runs[0]!.questions).toHaveLength(1)
+      expect(pending.runs[0]!.questions[0]!.questions[0]!.prompt).toContain('panel bytes')
+      const requestId = pending.runs[0]!.questions[0]!.requestId
+      // Another window of the same profile neither sees nor answers this run's question.
+      expect(await other.agents.tryRunPending!({ profileId: f.alice.id, id: created.id })).toEqual({ runs: [] })
+      expect(await other.agents.tryRunAnswer!({ profileId: f.alice.id, id: created.id, requestId, answers: { approval: 'approve' } })).toEqual({ ok: false })
+      expect(await a.agents.tryRunAnswer!({ profileId: f.alice.id, id: created.id, requestId, answers: { approval: 'approve' } })).toEqual({ ok: true })
+      const result = await request
+      expect(result.status).toBe('completed')
+      expect(existsSync(join(f.services.getProfileHomeDir(), 'agent-runs', result.runId!, 'workspace', 'panel.txt'))).toBe(true)
+      expect(await a.agents.tryRunPending!({ profileId: f.alice.id, id: created.id })).toEqual({ runs: [] })
     } finally {
       unsubscribe()
       f.services.platform.agentRuns.beginShutdown()
