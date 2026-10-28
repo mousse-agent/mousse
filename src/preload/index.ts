@@ -508,9 +508,12 @@ const api = {
       ipcRenderer.on('git:operation', handler)
       return () => ipcRenderer.removeListener('git:operation', handler)
     },
-    /** Stops a push, pull, fetch or commit this window started, with everything Git started for it. */
-    cancelOperation: (operationId: string, threadId?: string): Promise<{ cancelled: boolean }> =>
-      storageInvoke('git:cancelOperation', operationId, threadId),
+    /**
+     * Stops a push, pull, fetch or commit this window started, with everything Git started for it.
+     * A thread's or project's folder on another computer needs its `threadId` or `projectId`; at most one is set.
+     */
+    cancelOperation: (operationId: string, threadId?: string, projectId?: string): Promise<{ cancelled: boolean }> =>
+      storageInvoke('git:cancelOperation', operationId, threadId, projectId),
     abortInProgress: (scope: GitScope, kind: 'merge' | 'rebase'): Promise<GitMutationResult> =>
       storageInvoke('git:abortInProgress', scope, kind),
     createBranch: (scope: GitScope, name: string, options?: GitBranchOptions): Promise<GitMutationResult> =>

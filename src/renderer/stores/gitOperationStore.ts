@@ -1,5 +1,6 @@
 import { create } from 'zustand'
-import type { GitOperationEvent, GitOperationKind } from '../../shared/types'
+import type { GitOperationEvent, GitOperationKind, GitScope } from '../../shared/types'
+import { isQualifiedId } from '../../shared/threadRef'
 import { applyOperationEvent, isActive, newOperationState, type GitOperationState } from '../components/git/gitOperationLogic'
 import { gitErrorCode } from '../components/sideCard/gitSectionLogic'
 import { errorText } from '../lib/errorText'
@@ -21,6 +22,18 @@ interface GitOperationStoreState {
   operations: Record<string, GitOperationState>
   /** Actions started behind the one shown, oldest first. */
   waiting: Record<string, GitOperationState[]>
+}
+
+/** What a followed action is about, for its cancel: a thread's own worktree, or else a project's folder. */
+export type GitOperationOwner = Pick<GitOperationState, 'threadId' | 'projectId'>
+
+/**
+ * The owner a followed action of this scope names to the daemon: the thread when the folder is its own
+ * worktree, else the project. Only an id of another computer is named; a folder of this one names neither.
+ */
+export function gitOperationOwner(scope: GitScope): GitOperationOwner | undefined {
+  if (scope.workspaceThreadId) return isQualifiedId(scope.workspaceThreadId) ? { threadId: scope.workspaceThreadId } : undefined
+  return isQualifiedId(scope.projectId) ? { projectId: scope.projectId } : undefined
 }
 
 export const useGitOperationStore = create<GitOperationStoreState>(() => ({ operations: {}, waiting: {} }))
@@ -78,12 +91,16 @@ export function receiveGitOperationEvent(event: GitOperationEvent): void {
 
 /**
  * Registers a new action of the folder and returns its id. It replaces an outcome left from the one before;
- * if an action is still running, it waits behind it. `threadId` is set when the folder is a thread's own worktree.
+ * if an action is still running, it waits behind it. `owner` names the thread whose own worktree the folder is,
+ * or else the project whose folder it is; cancel names it to the daemon.
  */
-export function beginGitOperation(path: string, kind: GitOperationKind, now: number = Date.now(), threadId?: string): string {
+export function beginGitOperation(path: string, kind: GitOperationKind, now: number = Date.now(), owner?: GitOperationOwner): string {
   listen()
   const operationId = crypto.randomUUID()
-  const action = { ...newOperationState(operationId, kind, now), ...(threadId ? { threadId } : {}) }
+  const action = {
+    ...newOperationState(operationId, kind, now),
+    ...(owner?.threadId ? { threadId: owner.threadId } : owner?.projectId ? { projectId: owner.projectId } : {})
+  }
   useGitOperationStore.setState((state) => {
     const shown = state.operations[path]
     if (shown && isActive(shown)) return { ...state, waiting: { ...state.waiting, [path]: [...(state.waiting[path] ?? []), action] } }
@@ -116,7 +133,9 @@ export async function cancelGitOperation(path: string): Promise<void> {
   try {
     const { cancelled } = state.threadId
       ? await window.mousse.git.cancelOperation(state.operationId, state.threadId)
-      : await window.mousse.git.cancelOperation(state.operationId)
+      : state.projectId
+        ? await window.mousse.git.cancelOperation(state.operationId, undefined, state.projectId)
+        : await window.mousse.git.cancelOperation(state.operationId)
     // It had already ended, or cannot be stopped any more: the button comes back.
     if (!cancelled) patchById(state.operationId, (action) => ({ ...action, cancelling: false }))
   } catch {
@@ -126,10 +145,10 @@ export async function cancelGitOperation(path: string): Promise<void> {
 
 /**
  * Runs a long Git request as a followed action of the folder: its outcome, and a cancel, end up in the store.
- * `threadId` is set when the folder is a thread's own worktree.
+ * `owner` names the thread whose own worktree the folder is, or else the project whose folder it is.
  */
-export async function trackGitOperation<T>(path: string, kind: GitOperationKind, run: (operationId: string) => Promise<T>, threadId?: string): Promise<T> {
-  const operationId = beginGitOperation(path, kind, Date.now(), threadId)
+export async function trackGitOperation<T>(path: string, kind: GitOperationKind, run: (operationId: string) => Promise<T>, owner?: GitOperationOwner): Promise<T> {
+  const operationId = beginGitOperation(path, kind, Date.now(), owner)
   try {
     const value = await run(operationId)
     finishGitOperation(path, operationId, 'done')

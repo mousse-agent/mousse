@@ -240,6 +240,11 @@ function withThreadId<T extends object>(params: T, threadId: unknown): T & { thr
   return typeof threadId === 'string' && threadId.length > 0 ? { ...params, threadId } : params
 }
 
+/** `params` with the project a call is about, when the window named one; routed like `withThreadId`. */
+function withProjectId<T extends object>(params: T, projectId: unknown): T & { projectId?: string } {
+  return typeof projectId === 'string' && projectId.length > 0 ? { ...params, projectId } : params
+}
+
 /** The protocol code of a failed daemon request, without its message or details. */
 function errorCodeOf(error: unknown): string {
   const code = error && typeof error === 'object' ? (error as { code?: unknown }).code : undefined
@@ -2033,8 +2038,8 @@ export function registerGuiIpc(
   gitMutation('git:renameBranch', 'git.renameBranch', (name: string, newName: string) => ({ name, newName }))
   gitMutation('git:deleteBranch', 'git.deleteBranch', (name: string, options?: GitDeleteBranchOptions) => ({ name, force: options?.force }))
   // The daemon only stops an action for the window connection that started it, which is this sender's.
-  registerStorageHandler('git:cancelOperation', async (_e, operationId: string, threadId?: unknown) =>
-    guiMms.request<{ cancelled: boolean }>('git.cancelOperation', withThreadId({ operationId }, threadId))
+  registerStorageHandler('git:cancelOperation', async (_e, operationId: string, threadId?: unknown, projectId?: unknown) =>
+    guiMms.request<{ cancelled: boolean }>('git.cancelOperation', withProjectId(withThreadId({ operationId }, threadId), projectId))
   )
   registerHandler('git:lastCommitMessage', async (_e, scope?: GitScope) =>
     (await guiMms.request<{ message: string | null }>('git.lastCommitMessage', daemonGitParams(scope))).message

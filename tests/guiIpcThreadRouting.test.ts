@@ -89,6 +89,18 @@ describe('calls about a request name the thread for the router', () => {
     for (const call of calls) expect(Object.keys(call.params as object)).not.toContain('threadId')
     expect(calls.map((call) => call.method)).toEqual(['orchestrator.answerQuestions', 'orchestrator.dismissQuestions', 'git.cancelOperation', 'pty.isAlive', 'pty.lookup'])
   })
+
+  it("names the project when a Git action of a project's folder is cancelled, and only when one is given", async () => {
+    const project = qualifyId(NODE, 'project-1')
+    await invoke('git:cancelOperation', 'op-1', undefined, project)
+    await invoke('git:cancelOperation', 'op-2', undefined, '')
+    await invoke('git:cancelOperation', 'op-3')
+    expect(calls).toEqual([
+      { method: 'git.cancelOperation', params: { operationId: 'op-1', projectId: project } },
+      { method: 'git.cancelOperation', params: { operationId: 'op-2' } },
+      { method: 'git.cancelOperation', params: { operationId: 'op-3' } }
+    ])
+  })
 })
 
 describe('selecting a thread on another computer', () => {

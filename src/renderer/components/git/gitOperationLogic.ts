@@ -28,6 +28,8 @@ export interface GitOperationState {
   message: string | null
   /** The thread whose own worktree it runs in; unset for a project's folder. Cancel names it to the daemon. */
   threadId?: string
+  /** The project whose folder it runs in, when the scope is a project rather than a thread. Cancel names it instead. */
+  projectId?: string
 }
 
 const VERB: Record<GitOperationKind, string> = {

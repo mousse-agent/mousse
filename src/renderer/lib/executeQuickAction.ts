@@ -163,7 +163,7 @@ export async function executeBashInNewTerminal(action: QuickAction, profileId: s
   for (;;) {
     const tab = requireActiveProfile(profileId).projectTerminalTabs.find((entry) => entry.id === tabId)
     if (tab?.ptyId) {
-      const alive = await window.mousse.pty.isAlive(tab.ptyId).catch(() => false)
+      const alive = await window.mousse.pty.isAlive(tab.ptyId, tab.ownerThreadId ?? undefined).catch(() => false)
       requireActiveProfile(profileId)
       if (alive) {
         await window.mousse.pty.write(tab.ptyId, `${command}\n`)

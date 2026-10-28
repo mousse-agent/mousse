@@ -3,7 +3,8 @@ import type { UIMessage } from 'ai'
 import {
   findQuickActionCardForApproval,
   isQuickActionApproval,
-  parseQuickActionApprovalPrompt
+  parseQuickActionApprovalPrompt,
+  questionAnswerThreadId
 } from '../src/renderer/chat/components/agent-elements/tools/quick-action-approval'
 import type { PendingUserQuestions } from '../src/shared/types'
 
@@ -98,5 +99,18 @@ describe('findQuickActionCardForApproval', () => {
     expect(
       findQuickActionCardForApproval(messages, pending('Pick a color?'))
     ).toBeNull()
+  })
+})
+
+describe('questionAnswerThreadId', () => {
+  it("answers on the question's own thread, which may be on another computer", () => {
+    const remote = 'nod_0123456789abcdefghjkmnpqrs:thread-9'
+    expect(questionAnswerThreadId({ threadId: remote }, 'thread-shown')).toBe(remote)
+  })
+
+  it('falls back to the shown thread, and to nothing', () => {
+    expect(questionAnswerThreadId({}, 'thread-shown')).toBe('thread-shown')
+    expect(questionAnswerThreadId({ threadId: '' }, 'thread-shown')).toBe('thread-shown')
+    expect(questionAnswerThreadId(null, null)).toBeUndefined()
   })
 })

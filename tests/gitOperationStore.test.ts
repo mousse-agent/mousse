@@ -16,6 +16,7 @@ import {
   cancelGitOperation,
   dismissGitOperation,
   finishGitOperation,
+  gitOperationOwner,
   receiveGitOperationEvent,
   trackGitOperation,
   useGitOperationStore
@@ -253,13 +254,13 @@ describe('the operation store', () => {
 
   it("names the thread to the daemon when the folder is a thread's own worktree, and only then", async () => {
     const threadId = 'nod_0123456789abcdefghjkmnpqrs:thread-1'
-    const inThread = beginGitOperation('/worktree', 'push', 1, threadId)
+    const inThread = beginGitOperation('/worktree', 'push', 1, { threadId })
     expect(op('/worktree').threadId).toBe(threadId)
     await cancelGitOperation('/worktree')
     expect(cancelOperation).toHaveBeenLastCalledWith(inThread, threadId)
     let tracked = ''
     // The request never ends here: the action stays running for Cancel.
-    void trackGitOperation('/tracked', 'fetch', (operationId) => { tracked = operationId; return new Promise(() => undefined) }, threadId)
+    void trackGitOperation('/tracked', 'fetch', (operationId) => { tracked = operationId; return new Promise(() => undefined) }, { threadId })
     expect(op('/tracked').threadId).toBe(threadId)
     await cancelGitOperation('/tracked')
     expect(cancelOperation).toHaveBeenLastCalledWith(tracked, threadId)
@@ -267,6 +268,25 @@ describe('the operation store', () => {
     expect(op().threadId).toBeUndefined()
     await cancelGitOperation('/repo')
     expect(cancelOperation.mock.lastCall).toEqual([inProject])
+  })
+
+  it("names the project to the daemon when the folder is a project's on another computer", async () => {
+    const projectId = 'nod_0123456789abcdefghjkmnpqrs:project-1'
+    const id = beginGitOperation('/remote-repo', 'pull', 1, { projectId })
+    expect(op('/remote-repo')).toMatchObject({ projectId })
+    expect(op('/remote-repo').threadId).toBeUndefined()
+    await cancelGitOperation('/remote-repo')
+    expect(cancelOperation.mock.lastCall).toEqual([id, undefined, projectId])
+  })
+
+  it('takes the owner from the scope: a thread or project of another computer, nothing for this one', () => {
+    const remoteThread = 'nod_0123456789abcdefghjkmnpqrs:thread-1'
+    const remoteProject = 'nod_0123456789abcdefghjkmnpqrs:project-1'
+    expect(gitOperationOwner({ projectId: remoteProject, workspaceThreadId: remoteThread })).toEqual({ threadId: remoteThread })
+    expect(gitOperationOwner({ projectId: remoteProject, workspaceThreadId: null })).toEqual({ projectId: remoteProject })
+    expect(gitOperationOwner({ projectId: 'p', workspaceThreadId: 'thread-1' })).toBeUndefined()
+    expect(gitOperationOwner({ projectId: 'p', workspaceThreadId: null })).toBeUndefined()
+    expect(gitOperationOwner({ projectId: null, workspaceThreadId: null })).toBeUndefined()
   })
 
   it('asks to cancel at once, before the first event, since the daemon registers the action first', async () => {

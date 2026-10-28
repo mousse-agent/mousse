@@ -26,6 +26,17 @@ export function useQuickActionApproval(): QuickActionApproval | null {
   return useContext(QuickActionApprovalContext);
 }
 
+/**
+ * The thread an answer to a pending question names: the one that asked, else the shown one.
+ * A thread on another computer needs it, so the answer reaches the agent that waits.
+ */
+export function questionAnswerThreadId(
+  pending: Pick<PendingUserQuestions, "threadId"> | null | undefined,
+  activeThreadId: string | null | undefined,
+): string | undefined {
+  return pending?.threadId || activeThreadId || undefined;
+}
+
 /** Backend prompt shape: `Create quick action "<label>" (<kind>)? ...` */
 export function parseQuickActionApprovalPrompt(prompt: unknown): string | null {
   if (typeof prompt !== "string") return null;
