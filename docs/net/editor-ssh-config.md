@@ -18,6 +18,8 @@ All of it is under `<Mousse home>/ssh`, which is `~/.mousse/ssh` unless `MOUSSE_
 | `ssh/profiles/<profile>.json` | One profile's computers and their aliases | With the files above |
 | `~/.ssh/config` | One line: `Include ~/.mousse/ssh/config` | First use (added), Settings undo (removed) |
 
+**Which computers.** The other devices of the roster that are computers, by the rule the lists of threads use (`isListedComputer`): the kind the authority recorded wins, and a device whose kind this computer does not know is a computer if its signed delegation holds "Works on threads", which only computers are given. Only the authority records kinds, so on every other computer the rest are of unknown kind and this is what gives a computer that joined an alias for the authority and for the other computers. A phone and this computer itself have none.
+
 **Profiles.** Every profile of the installation has its own service, and they run together. Each one keeps its own `profiles/<profile>.json` and only ever adds, renames or removes its own computers and their pinned keys. The `ssh/config` that `ssh` reads is the merge of all profile files, written under one lock that all profiles in the process share. One `Include` line serves all of them. Aliases are unique across profiles, also when the same computer is paired in two profiles.
 
 A block looks like this:
