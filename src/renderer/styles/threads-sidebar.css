@@ -655,6 +655,13 @@
   box-shadow: 0 8px 24px rgba(var(--surface-base-rgb), 0.45);
 }
 
+/* What a project's menu acts on, when that is a project on another computer. */
+.threads-context-menu-label {
+  padding: 5px 10.5px 6px;
+  font-size: 11.5px;
+  color: var(--text-secondary);
+}
+
 .threads-context-menu-item {
   display: flex;
   align-items: center;

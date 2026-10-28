@@ -33,6 +33,12 @@ describe('the computer badge', () => {
     expect(html(createElement(ComputerBadgeView, { name: 'Studio', state: 'not-shared', withName: true }))).toContain('not shared')
   })
 
+  it('says "Also on" for a project of this computer that another computer holds too', () => {
+    expect(computerBadgeTitle('Studio', 'online', 'Offline', 'also')).toBe('Also on Studio')
+    expect(computerBadgeTitle('Studio', 'offline', 'Offline · last seen 5m ago', 'also')).toBe('Also on Studio · Offline · last seen 5m ago')
+    expect(html(createElement(ComputerBadgeView, { name: 'Studio', state: 'online', of: 'also' }))).toContain('title="Also on Studio"')
+  })
+
   it('shows nothing for a thread of this computer, and the node-less fallback name for an unknown one', () => {
     expect(html(createElement(ThreadComputerBadge, { thread: {} }))).toBe('')
     expect(html(createElement(ThreadComputerBadge, { thread: { node: 'nod_unknown' }, withName: true }))).toContain('Another computer')
