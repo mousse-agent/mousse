@@ -93,6 +93,7 @@ import {
 } from './editor/tunnel'
 import { LocalEditorTunnels, type LocalConnection } from './editor/localTunnels'
 import { EditorEndpoint } from './editor/endpoint/endpoint'
+import type { ProcessHost } from './editor/endpoint/host'
 import type { EditorEndpointPort } from './editor/endpoint/port'
 import { systemProcessHost } from './editor/endpoint/systemHost'
 import type { EditorTunnelInfo, TunnelReason } from '../../shared/net/tunnel'
@@ -320,11 +321,15 @@ export class NetService {
         | 'farEnd'
         | 'hostKeyDirectories'
         | 'hostTrust'
-        | 'endpoint'
         | 'perNode'
         | 'total'
         | 'opensPerMinute'
       > & {
+        /**
+         * Tests give the SSH endpoint a host of their own (a throwaway home folder and account) in place of this
+         * system's; `null` leaves it with none, as on a system the endpoint cannot run on.
+         */
+        endpointHost?: ProcessHost | null
         /** False: sessions do not offer `tunnel.v1`, like a build from before it (tests). */
         offer?: boolean
       }
@@ -592,21 +597,16 @@ export class NetService {
         remoteLists: new SqliteRemoteLists(db, this.clock),
         rpc
       }
-      const {
-        offer: _offer,
-        endpoint: endpointOption,
-        ...tunnelOptions
-      } = this.options.editorTunnel ?? {}
-      // Mousse answers editor connections itself unless a test gave the tunnels an SSH server of their own to end at.
+      const { offer: _offer, endpointHost, ...tunnelOptions } = this.options.editorTunnel ?? {}
+      // Mousse answers editor connections itself, unless a test gave the tunnels an SSH server of their own to end at.
       const endpoint: EditorEndpointPort | undefined =
-        endpointOption ??
-        (tunnelOptions.farEnd || tunnelOptions.hostKeyDirectories
+        (tunnelOptions.farEnd || tunnelOptions.hostKeyDirectories) && endpointHost === undefined
           ? undefined
           : new EditorEndpoint({
               keys,
-              host: systemProcessHost(),
+              host: endpointHost === undefined ? systemProcessHost() : (endpointHost ?? undefined),
               onEvent: (event) => this.tunnels?.recordEndpointEvent(event)
-            }))
+            })
       this.tunnels = new EditorTunnels({
         clock: this.clock,
         audit: this.state.audit,
