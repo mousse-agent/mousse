@@ -1,6 +1,6 @@
 import { EventEmitter } from 'node:events'
 import { PassThrough, Writable } from 'node:stream'
-import type { CodexLaunch, CodexProcess } from '../../providers/codex/CodexAppServerClient'
+import type { CodexLaunch, CodexProcess } from '../../harness/vendors/codex/CodexAppServerClient'
 import type { ReplayTransport } from './ReplayTransport'
 
 /**

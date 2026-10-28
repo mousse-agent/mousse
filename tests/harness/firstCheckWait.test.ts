@@ -7,9 +7,9 @@ import { describe, expect, it, vi } from 'vitest'
 import type { AuthReading } from '../../src/mms/harness/driver'
 import { PROBE_TTL_MS, type HarnessGatewayEvent } from '../../src/mms/harness/gateway'
 import { dispatchMethod, type HandlerContext } from '../../src/mms/protocol/handlers'
-import { ProviderInstanceService } from '../../src/mms/providers/ProviderInstanceService'
+import { ProviderInstanceService } from '../../src/mms/harness/instanceMap'
 import { PiStubAdapter } from '../support/piStub'
-import type { ProviderAdapter } from '../../src/mms/run/adapters/ProviderAdapter'
+import type { ProviderAdapter } from '../../src/mms/harness/adapter'
 import { adapterDriver, testHarness } from '../../src/mms/run/testkit/harness'
 
 function deferred<T>() {

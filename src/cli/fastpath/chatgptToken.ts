@@ -7,7 +7,7 @@ import { connect } from 'node:net'
  *
  * Codex runs it for every token it needs, so it is dispatched before the CLI loads anything else
  * and imports only Node's `net`. It keeps its own copy of the request format in
- * `src/mms/harness/codex/tokenProtocol.ts`; a test checks that both agree.
+ * `src/mms/harness/vendors/codex/tokenProtocol.ts`; a test checks that both agree.
  */
 
 const PROTOCOL_VERSION = 1

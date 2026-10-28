@@ -11,7 +11,7 @@ import { join } from 'node:path'
 import { afterEach, vi } from 'vitest'
 import type { DelegationToolHost } from '../../src/mms/run/mcp/appTools/delegation'
 import { PI_TEST_CAPABILITIES } from '../support/piStub'
-import type { AdapterHost, ProviderAdapter, TurnControl, TurnInput, TurnResult, TurnSink } from '../../src/mms/run/adapters/ProviderAdapter'
+import type { AdapterHost, ProviderAdapter, TurnControl, TurnInput, TurnResult, TurnSink } from '../../src/mms/harness/adapter'
 import { Reconciler } from '../../src/mms/run/Reconciler'
 import { phase6Daemon, waitFor } from './phase6Fixture'
 

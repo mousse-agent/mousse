@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import { ANTIGRAVITY_CAPABILITIES } from '../../src/mms/harness/acp/presets/antigravity'
-import { CLAUDE_SUBSCRIPTION_CAPABILITIES } from '../../src/mms/run/adapters/claudeSubscription/ClaudeSubscriptionAdapter'
+import { CLAUDE_SUBSCRIPTION_CAPABILITIES } from '../../src/mms/harness/drivers/claudeCode/adapter'
 import { PI_TEST_CAPABILITIES } from '../support/piStub'
 import { NOTICE_TASK_CHARS } from '../../src/mms/run/delegation/notice'
 import { planWakeNotice } from '../../src/mms/run/delegation/notice'

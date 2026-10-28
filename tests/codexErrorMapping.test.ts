@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import { harnessAppError } from '../src/shared/harness/types'
-import { CodexTurnFailure } from '../src/mms/providers/codex/CodexProviderService'
-import type { TurnError } from '../src/mms/providers/codex/protocol'
-import { codexHarnessError } from '../src/mms/run/adapters/codex/CodexAdapter'
+import { CodexTurnFailure } from '../src/mms/harness/vendors/codex/CodexProviderService'
+import type { TurnError } from '../src/mms/harness/vendors/codex/protocol'
+import { codexHarnessError } from '../src/mms/harness/drivers/codex/adapter'
 
 const failure = (error: Partial<TurnError>) => new CodexTurnFailure(error.message ?? 'failed', { message: 'failed', ...error })
 /** How Codex 0.162.1 reports an HTTP failure (recorded by `codexManagedWire.test.ts`). */

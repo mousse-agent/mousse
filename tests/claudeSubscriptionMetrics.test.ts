@@ -3,7 +3,7 @@ import type { ModelUsage, SDKMessage } from '@anthropic-ai/claude-agent-sdk'
 import {
   ClaudeMetricsCollector,
   ClaudeNativeEditCounter
-} from '../src/mms/providers/claudeSubscription/metrics'
+} from '../src/mms/harness/vendors/claude/metrics'
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'

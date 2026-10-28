@@ -10,9 +10,9 @@ import { dispatchMethod, type HandlerContext } from '../../src/mms/protocol/hand
 import { PROTOCOL_METHODS } from '../../src/mms/protocol/types'
 import { piDriver } from '../../src/mms/harness/drivers/pi'
 import { createProviderAccess } from '../../src/mms/providers/providerAccess'
-import { ProviderInstanceService, type StoredProviderInstances } from '../../src/mms/providers/ProviderInstanceService'
+import { ProviderInstanceService, type StoredProviderInstances } from '../../src/mms/harness/instanceMap'
 import { PiStubAdapter } from '../support/piStub'
-import type { ProviderAdapter } from '../../src/mms/run/adapters/ProviderAdapter'
+import type { ProviderAdapter } from '../../src/mms/harness/adapter'
 import { adapterDriver, testHarness } from '../../src/mms/run/testkit/harness'
 import { PiInstallationCredentials } from './fixtures/piInstallationCredentials'
 

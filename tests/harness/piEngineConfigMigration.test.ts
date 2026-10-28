@@ -19,8 +19,8 @@ import { PI_RPC_CAPS, PI_RPC_EXACT_CAPS, piDriver } from '../../src/mms/harness/
 import { loopCaps } from '../../src/mms/harness/gateway'
 import { ENGINE_NOTICE_DUE_FILE, LOOP_REMOVAL_MARKER, createRpcRuntime } from '../../src/mms/harness/drivers/pi/engines/rpc'
 import { instanceStateDir } from '../../src/mms/harness/instances'
-import { ProviderInstanceService } from '../../src/mms/providers/ProviderInstanceService'
-import type { TurnInput } from '../../src/mms/run/adapters/ProviderAdapter'
+import { ProviderInstanceService } from '../../src/mms/harness/instanceMap'
+import type { TurnInput } from '../../src/mms/harness/adapter'
 import { testHarness } from '../../src/mms/run/testkit/harness'
 
 const cleanups: Array<() => unknown> = []

@@ -25,8 +25,8 @@ import { PiRpcEngine } from '../../src/mms/harness/pi/engine'
 import { piCredentialHandler, piOAuthBroker, piOAuthHandle, writePiAuth, type PiOAuthGrant, type PiOAuthSource } from '../../src/mms/harness/pi/oauthBroker'
 import { piRuntimePaths } from '../../src/mms/harness/pi/launch'
 import { FileCredentialStore } from '../../src/mms/providers/FileCredentialStore'
-import { ProviderInstanceService } from '../../src/mms/providers/ProviderInstanceService'
-import type { TurnInput } from '../../src/mms/run/adapters/ProviderAdapter'
+import { ProviderInstanceService } from '../../src/mms/harness/instanceMap'
+import type { TurnInput } from '../../src/mms/harness/adapter'
 import { testHarness } from '../../src/mms/run/testkit/harness'
 
 const cleanups: Array<() => unknown> = []

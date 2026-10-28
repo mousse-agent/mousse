@@ -16,7 +16,7 @@ export type HarnessDriverKind = ProviderDriverKind
  * Capabilities of one instance, computed by the gateway from the driver, the installed version and
  * the execution profile (never a static per-vendor table in callers). Every key has a reader
  * outside the drivers (`tests/run/capabilityReaders.test.ts`). All but `planMode` and
- * `contextUsage` keep the meaning of `ProviderCapabilities` in `run/adapters/ProviderAdapter.ts`.
+ * `contextUsage` keep the meaning of `ProviderCapabilities` in `harness/adapter.ts`.
  */
 export interface HarnessCaps {
   /** How steer text reaches a live turn (`CommandPolicy.steerStrategy`). */

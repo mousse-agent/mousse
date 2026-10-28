@@ -12,8 +12,8 @@ import { createHarnessGateway } from '../../src/mms/harness/gateway'
 import { instanceStateDir } from '../../src/mms/harness/instances'
 import { mirrorHash, reconcileRow, settingsMirror, type MirrorTuple } from '../../src/mms/harness/vendorMirror'
 import { UserQuestionService } from '../../src/mms/orchestrator/UserQuestionService'
-import { ClaudeSubscriptionProviderService } from '../../src/mms/providers/claudeSubscription/ClaudeSubscriptionProviderService'
-import { ProviderInstanceService } from '../../src/mms/providers/ProviderInstanceService'
+import { ClaudeSubscriptionProviderService } from '../../src/mms/harness/vendors/claude/ClaudeSubscriptionProviderService'
+import { ProviderInstanceService } from '../../src/mms/harness/instanceMap'
 import { LoginSession } from '../../src/mms/providers/LoginSession'
 import {
   executable,
@@ -532,11 +532,11 @@ describe('source guard: only the mirror assigns mirrored keys in a vendor servic
       return match ? [match[0]] : []
     })
   }
-  const root = resolve(__dirname, '..', '..', 'src', 'mms', 'providers')
+  const root = resolve(__dirname, '..', '..', 'src', 'mms', 'harness')
   const SERVICES = [
-    join(root, 'claudeSubscription', 'ClaudeSubscriptionProviderService.ts'),
-    join(root, 'codex', 'CodexProviderService.ts'),
-    join(root, 'antigravity', 'AntigravityProviderService.ts')
+    join(root, 'vendors', 'claude', 'ClaudeSubscriptionProviderService.ts'),
+    join(root, 'vendors', 'codex', 'CodexProviderService.ts'),
+    join(root, 'acp', 'presets', 'antigravity', 'AntigravityProviderService.ts')
   ]
 
   it('scans the three vendor services', () => {

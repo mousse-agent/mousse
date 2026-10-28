@@ -15,7 +15,7 @@ import { createBotAuthority } from '../../src/mms/bots/authority/botAuthority'
 import type { ClaudeLockedTurn } from '../../src/mms/harness/claude/locked'
 import { lockedEnv } from '../../src/mms/harness/env'
 import { UserQuestionService } from '../../src/mms/orchestrator/UserQuestionService'
-import { ClaudeSubscriptionProviderService } from '../../src/mms/providers/claudeSubscription/ClaudeSubscriptionProviderService'
+import { ClaudeSubscriptionProviderService } from '../../src/mms/harness/vendors/claude/ClaudeSubscriptionProviderService'
 import type { ToolLedger } from '../../src/mms/run/mcp/appTools/types'
 
 const BINARY = join(process.cwd(), 'node_modules', '@anthropic-ai', 'claude-agent-sdk-win32-x64', 'claude.exe')

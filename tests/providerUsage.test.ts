@@ -1,6 +1,11 @@
-import { describe, expect, it } from 'vitest'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from 'vitest'
+import type { ConfiguredProvider, ProviderUsage } from '../src/shared/providerAuth'
 import {
   friendlyOAuthError,
+  ProviderAuthService,
   parseAnthropicUsage,
   parseXaiCreditsUsage,
   parseXaiMonthlyUsage,
@@ -123,5 +128,55 @@ describe('provider usage parsers', () => {
     expect(message).toBe('Anthropic session expired. Reconnect it in Settings.')
     expect(message).not.toContain('stack=')
     expect(message).not.toContain('invalid_grant')
+  })
+})
+
+describe('provider usage dispatch', () => {
+  let dir: string
+  let auth: ProviderAuthService
+  let readers: { xai: MockInstance; go: MockInstance }
+  const fetchSpy = vi.fn(async () => {
+    throw new Error('no request leaves this test')
+  })
+  const reading = (provider: ConfiguredProvider): ProviderUsage => ({ ...provider, status: 'available', windows: [{ id: 'week', label: 'Weekly', remainingPercent: 40 }] })
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'mousse-usage-dispatch-'))
+    vi.stubGlobal('fetch', fetchSpy)
+    auth = new ProviderAuthService(join(dir, 'auth.json'))
+    const spied = auth as unknown as Record<'fetchXaiUsage' | 'fetchOpenCodeGoUsage', (provider: ConfiguredProvider) => Promise<ProviderUsage>>
+    readers = {
+      xai: vi.spyOn(spied, 'fetchXaiUsage').mockImplementation(async (provider) => reading(provider)),
+      go: vi.spyOn(spied, 'fetchOpenCodeGoUsage').mockImplementation(async (provider) => reading(provider))
+    }
+    vi.spyOn(auth, 'getConfiguredProviders').mockReturnValue([
+      { id: 'xai', label: 'xAI', authType: 'oauth' },
+      { id: 'opencode-go', label: 'OpenCode Go', authType: 'api_key' },
+      { id: 'openrouter', label: 'OpenRouter', authType: 'api_key' }
+    ])
+  })
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    vi.restoreAllMocks()
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('reaches the xai and opencode-go readers and marks every other provider unavailable', async () => {
+    const { providers } = await auth.getUsage()
+    expect(providers.map(({ id, status }) => [id, status])).toEqual([['xai', 'available'], ['opencode-go', 'available'], ['openrouter', 'unavailable']])
+    expect(providers[2].message).toBe('Usage information is not available for this provider.')
+    expect(readers.xai).toHaveBeenCalledTimes(1)
+    expect(readers.go).toHaveBeenCalledTimes(1)
+    expect(fetchSpy).not.toHaveBeenCalled()
+  })
+
+  it('subscription usage reads only providers with a reader', async () => {
+    expect(await auth.getSubscriptionUsage('xai')).toContain('60% used')
+    expect(await auth.getSubscriptionUsage('opencode-go')).toContain('60% used')
+    for (const id of ['openrouter', 'anthropic', 'constructor', 'unknown-provider']) expect(await auth.getSubscriptionUsage(id)).toBeUndefined()
+    expect(readers.xai).toHaveBeenCalledTimes(1)
+    expect(readers.go).toHaveBeenCalledTimes(1)
+    expect(fetchSpy).not.toHaveBeenCalled()
   })
 })

@@ -4,16 +4,16 @@ import type { InstallOwner } from '../../../shared/harness/status'
 import type { HarnessCaps } from '../../../shared/harness/types'
 import type { ResolvedSettings } from '@anthropic-ai/claude-agent-sdk'
 import type { CliProviderConfigPatch } from '../../../shared/providerAuth'
-import type { StoredCliConfig } from '../../providers/cliConfig'
+import type { StoredCliConfig } from '../cliConfig'
 import {
   ClaudeSubscriptionProviderService,
   type AuthProbe
-} from '../../providers/claudeSubscription/ClaudeSubscriptionProviderService'
-import type { ClaudeIntegrationSource } from '../../providers/claudeSubscription/integrations'
+} from '../vendors/claude/ClaudeSubscriptionProviderService'
+import type { ClaudeIntegrationSource } from '../vendors/claude/integrations'
 import {
   CLAUDE_SUBSCRIPTION_CAPABILITIES,
   ClaudeSubscriptionAdapter
-} from '../../run/adapters/claudeSubscription/ClaudeSubscriptionAdapter'
+} from './claudeCode/adapter'
 import type { ProviderLoginResult } from '../../../shared/providerAuth'
 import type { LoginSession } from '../../providers/LoginSession'
 import {

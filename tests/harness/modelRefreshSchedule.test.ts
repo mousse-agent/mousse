@@ -12,9 +12,9 @@ import { decodeInstanceConfig, type DriverRuntime, type HarnessDriver } from '..
 import { CLAUDE_CODE_CAPS } from '../../src/mms/harness/drivers/claudeCode'
 import { MODEL_REFRESH_INTERVAL_MS, MODEL_REFRESH_STARTUP_DELAY_MS, type Harness, type TurnSpec } from '../../src/mms/harness/gateway'
 import { UserQuestionService } from '../../src/mms/orchestrator/UserQuestionService'
-import { ClaudeSubscriptionProviderService } from '../../src/mms/providers/claudeSubscription/ClaudeSubscriptionProviderService'
-import { ProviderInstanceService } from '../../src/mms/providers/ProviderInstanceService'
-import type { ProviderAdapter, TurnInput, TurnResult } from '../../src/mms/run/adapters/ProviderAdapter'
+import { ClaudeSubscriptionProviderService } from '../../src/mms/harness/vendors/claude/ClaudeSubscriptionProviderService'
+import { ProviderInstanceService } from '../../src/mms/harness/instanceMap'
+import type { ProviderAdapter, TurnInput, TurnResult } from '../../src/mms/harness/adapter'
 import { testHarness } from '../../src/mms/run/testkit/harness'
 
 const HOUR = 60 * 60_000

@@ -20,7 +20,7 @@ import {
 import { BRIDGE_REMOTE_METHODS } from '../src/mms/bridge/remote/capabilities'
 import type { DriverContext } from '../src/mms/harness/driver'
 import { CODEX_CAPS, CODEX_PERMISSION_LIMITS, codexDriver } from '../src/mms/harness/drivers/codex'
-import type { CodexProviderService } from '../src/mms/providers/codex/CodexProviderService'
+import type { CodexProviderService } from '../src/mms/harness/vendors/codex/CodexProviderService'
 import { acpPermissionKey,actionOf, piToolAction, PERMISSION_KEYS } from '../src/shared/permissionKeys'
 import { getDefaultSettings, normalizePermissionSettings } from '../src/shared/settings'
 

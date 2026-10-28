@@ -1,6 +1,6 @@
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
-import { claudeBypassDisabled } from '../src/mms/providers/claudeSubscription/accountSubject'
+import { claudeBypassDisabled } from '../src/mms/harness/vendors/claude/accountSubject'
 
 /** Whether Claude Code's settings forbid bypassing permissions, read from the files it reads. */
 describe('Claude bypass limit', () => {

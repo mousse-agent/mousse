@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { instanceEnv } from '../../src/mms/harness/env'
 import { PI_RPC_CAPS } from '../../src/mms/harness/drivers/pi'
 import { PiRpcEngine, type PiRpcEngineOptions } from '../../src/mms/harness/pi/engine'
-import type { AdapterHost, TurnControl, TurnInput, TurnSink } from '../../src/mms/run/adapters/ProviderAdapter'
+import type { AdapterHost, TurnControl, TurnInput, TurnSink } from '../../src/mms/harness/adapter'
 import { cleanBase, piPackage, scratchDir, startRecorder, testExtension, type RecordedRequest, type Recorder } from './piRpcFixture'
 
 // The Pi RPC engine with the real pinned Pi child, Mousse's extension built from source and an

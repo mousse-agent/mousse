@@ -15,7 +15,7 @@ import type {
   TurnInput,
   TurnResult,
   TurnSink
-} from '../../src/mms/run/adapters/ProviderAdapter'
+} from '../../src/mms/harness/adapter'
 import { PI, phase6Daemon, waitFor, type Phase6Daemon } from './phase6Fixture'
 
 /** A pi-shaped adapter that records each turn's thread, cwd and tool access, and replies. */

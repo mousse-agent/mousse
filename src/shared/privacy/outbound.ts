@@ -45,7 +45,7 @@ export const OUTBOUND: readonly OutboundEntry[] = [
     hosts: ['github.com'],
     when: 'When you add Codex set up by Mousse, or Mousse updates that copy.',
     sends: 'a download request for the pinned Codex release.',
-    sources: ['src/mms/harness/codex/release.ts']
+    sources: ['src/mms/harness/vendors/codex/release.ts']
   },
   {
     label: 'Mousse on another computer over SSH (GitHub)',
@@ -93,7 +93,7 @@ export const OUTBOUND: readonly OutboundEntry[] = [
     hosts: ['dl.google.com'],
     when: 'When you install Antigravity.',
     sends: 'a download request for its agent server.',
-    sources: ['src/mms/providers/antigravity/installation.ts']
+    sources: ['src/mms/harness/acp/presets/antigravity/installation.ts']
   },
   {
     label: 'Voice models (Hugging Face)',

@@ -12,7 +12,7 @@ import {
   claudeLoadsSkill,
   claudeMcpToolBlocked,
   claudeProxiedMcpServer
-} from '../src/mms/providers/claudeSubscription/integrations'
+} from '../src/mms/harness/vendors/claude/integrations'
 
 const roots: string[] = []
 afterEach(() => {

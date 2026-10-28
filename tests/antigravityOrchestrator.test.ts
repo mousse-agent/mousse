@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { expect, it, vi } from 'vitest'
 import { MousseMainService } from '../src/mms/MousseMainService'
 import { ProviderAuthService } from '../src/mms/providers/ProviderAuthService'
-import type { AntigravityProviderService } from '../src/mms/providers/antigravity/AntigravityProviderService'
+import type { AntigravityProviderService } from '../src/mms/harness/acp/presets/antigravity/AntigravityProviderService'
 
 it('persists ACP replies and accepted steer in canonical context and forwards it on the next turn', async () => {
   const home = mkdtempSync(join(realpathSync(tmpdir()), 'mousse-acp-orchestrator-'))

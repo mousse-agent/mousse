@@ -17,9 +17,9 @@ import { ownedHomeProblem } from '../../src/mms/harness/ownedHome'
 import { redactSignIn, runInPty, signInPrompts, type PtySpawn } from '../../src/mms/harness/pty'
 import { observeHarnessSpawns, type HarnessSpawn } from '../../src/mms/harness/spawn'
 import { UserQuestionService } from '../../src/mms/orchestrator/UserQuestionService'
-import { ClaudeSubscriptionProviderService } from '../../src/mms/providers/claudeSubscription/ClaudeSubscriptionProviderService'
+import { ClaudeSubscriptionProviderService } from '../../src/mms/harness/vendors/claude/ClaudeSubscriptionProviderService'
 import { LoginSession } from '../../src/mms/providers/LoginSession'
-import { ProviderInstanceService } from '../../src/mms/providers/ProviderInstanceService'
+import { ProviderInstanceService } from '../../src/mms/harness/instanceMap'
 
 const dirs: string[] = []
 const stops: Array<() => void> = []

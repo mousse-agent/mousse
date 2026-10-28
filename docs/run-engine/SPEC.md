@@ -19,7 +19,7 @@ Module root: `src/mms/run/`. One profile-scoped SQLite database at `<profileHome
 5. Only the root attempt finishes a run. Child completion is a stored row, not a callback.
 6. A `clientRequestId` seen twice returns the first receipt and performs nothing. Transient failures produce **no** receipt; only semantic rejections do.
 7. Transcripts and events are never deleted automatically.
-8. Provider names appear only under `src/mms/run/adapters/`. CI counts violations and fails if the count rises (Phase 0 ratchet).
+8. Provider names appear only under `src/mms/harness/`. CI counts violations and fails if the count rises (Phase 0 ratchet).
 9. Liveness is a lease with an expiry that the reconciler enforces, never "did the stream end".
 10. After a crash, a run that was `running` becomes `interrupted` (if we know the provider process died with the daemon) or `uncertain` (if we cannot tell). Neither is ever auto-resumed.
 
@@ -319,7 +319,7 @@ Every repair appends a `reconcile.<rule>` event. The loop never calls a provider
 
 Today `executeTurn` branches on `selectedModel.llmProvider` (`antigravity`, `claude-subscription`, else the pi-ai `LlmClient` loop) and each branch has its own compaction, steer, history and metrics handling. Phase 3 puts every provider behind one interface so the engine and the `turn.start` executor never see a provider name (invariant 8; the ratchet enforces it).
 
-### 13.1 Interface (`src/mms/run/adapters/ProviderAdapter.ts`)
+### 13.1 Interface (`src/mms/harness/adapter.ts`)
 
 ```ts
 export interface ProviderAdapter {
@@ -379,7 +379,7 @@ Pure functions from `(capabilities, runState)` to a decision; the engine and exe
 
 There is no `terminalQuality` flag: every adapter's `startTurn` settles when its stream closes, and that settlement is the turn's terminal signal, so no code path would read a "stream closed without a terminal event" policy. Rule 2's heartbeat window (§12.4) does not catch a hung stream while the turn's `turn.start` effect is still running (rule 2 skips a run with a live effect), so a silent adapter is bounded only by that effect's six-hour timeout. ACP agents have their own bound: `AcpSessions` fails a prompt that gets no reply and no update for `PROMPT_SILENCE_MS` (15 minutes; time spent waiting on the user is not counted). The Claude, Codex and Cursor adapters have no such bound yet.
 
-Shared builders in `src/mms/run/adapters/shared/` **before** the second adapter: streaming message assembly (text/thinking/tool start-end into `ChatMessage`s), usage recording, native history serialisation (`providers/nativeAgentHistory.ts`), steer draining. Without them, each adapter re-implements the same assembly.
+Shared builders in `src/mms/run/transcript/` **before** the second adapter: streaming message assembly (text/thinking/tool start-end into `ChatMessage`s), usage recording, native history serialisation (`providers/nativeAgentHistory.ts`), steer draining. Without them, each adapter re-implements the same assembly.
 
 ### 13.5 `turn.start` executor
 

@@ -6,8 +6,8 @@ import { Writable } from 'node:stream'
 import ts from 'typescript'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { isChatgptTokenArgv, runChatgptToken } from '../../src/cli/fastpath/chatgptToken'
-import { ChatGptTokenBroker, writeWithDeadline, type ChatGptTokenBrokerOptions } from '../../src/mms/harness/codex/broker'
-import { encodeTokenRequest, parseTokenRequest } from '../../src/mms/harness/codex/tokenProtocol'
+import { ChatGptTokenBroker, writeWithDeadline, type ChatGptTokenBrokerOptions } from '../../src/mms/harness/vendors/codex/broker'
+import { encodeTokenRequest, parseTokenRequest } from '../../src/mms/harness/vendors/codex/tokenProtocol'
 import { chatgptTokenCommand } from '../../src/mms/run/mcp/attachment'
 
 const repoRoot = resolve(__dirname, '..', '..')

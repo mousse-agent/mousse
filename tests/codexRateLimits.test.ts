@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import type { RateLimitSnapshot } from '../src/mms/providers/codex/protocol'
-import { isUsageLimitInfo, isUsageLimitText, resetFromSnapshot } from '../src/mms/providers/codex/rateLimits'
+import type { RateLimitSnapshot } from '../src/mms/harness/vendors/codex/protocol'
+import { isUsageLimitInfo, isUsageLimitText, resetFromSnapshot } from '../src/mms/harness/vendors/codex/rateLimits'
 
 const NOW = Date.parse('2026-10-01T00:00:00Z')
 const at = (hours: number) => NOW / 1000 + hours * 3600

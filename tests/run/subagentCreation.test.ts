@@ -8,7 +8,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { PI_TEST_CAPABILITIES } from '../support/piStub'
-import type { AdapterHost, ProviderAdapter, TurnControl, TurnInput, TurnResult, TurnSink } from '../../src/mms/run/adapters/ProviderAdapter'
+import type { AdapterHost, ProviderAdapter, TurnControl, TurnInput, TurnResult, TurnSink } from '../../src/mms/harness/adapter'
 import { PI, phase6Daemon, waitFor, type Phase6Daemon } from './phase6Fixture'
 
 /** A pi-shaped adapter that records the model and working directory of each turn. */

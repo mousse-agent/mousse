@@ -11,8 +11,8 @@ import { decodeInstanceConfig, type DriverRuntime, type HarnessDriver, type Runt
 import { CLAUDE_CODE_CAPS } from '../../src/mms/harness/drivers/claudeCode'
 import type { Harness, TurnSpec } from '../../src/mms/harness/gateway'
 import { fingerprintOf } from '../../src/mms/harness/status'
-import { ProviderInstanceService } from '../../src/mms/providers/ProviderInstanceService'
-import type { ProviderAdapter, TurnInput, TurnResult } from '../../src/mms/run/adapters/ProviderAdapter'
+import { ProviderInstanceService } from '../../src/mms/harness/instanceMap'
+import type { ProviderAdapter, TurnInput, TurnResult } from '../../src/mms/harness/adapter'
 import { testHarness } from '../../src/mms/run/testkit/harness'
 
 class Finishing implements ProviderAdapter {

@@ -8,7 +8,7 @@ import { PiRpcEngine } from '../../src/mms/harness/pi/engine'
 import type { PiLaunch } from '../../src/mms/harness/pi/launch'
 import type { PiProcess } from '../../src/mms/harness/pi/launch'
 import type { PiReadyRequest } from '../../src/mms/harness/pi/extension/protocol'
-import type { AdapterHost, TurnControl, TurnInput, TurnResult, TurnSink } from '../../src/mms/run/adapters/ProviderAdapter'
+import type { AdapterHost, TurnControl, TurnInput, TurnResult, TurnSink } from '../../src/mms/harness/adapter'
 import { cleanBase, piPackage, scratchDir, startRecorder, testExtension, type RecordedRequest, type Recorder, type Scratch } from './piRpcFixture'
 
 /**

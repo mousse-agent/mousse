@@ -10,7 +10,7 @@ import { methods, PROTOCOL_VERSION } from '@agentclientprotocol/sdk'
 import { afterEach, describe, expect, it } from 'vitest'
 import { acpDriver } from '../../src/mms/harness/drivers/acp'
 import type { Harness } from '../../src/mms/harness/gateway'
-import { ProviderInstanceService } from '../../src/mms/providers/ProviderInstanceService'
+import { ProviderInstanceService } from '../../src/mms/harness/instanceMap'
 import { inProcessAgent } from '../../src/mms/run/testkit/acpAgent'
 import { testHarness } from '../../src/mms/run/testkit/harness'
 

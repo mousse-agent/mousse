@@ -10,15 +10,11 @@ import { ProfileDatabase } from '../../src/mms/run/db/ProfileDatabase'
 import { EffectOutbox } from '../../src/mms/run/EffectOutbox'
 import { RunEngine } from '../../src/mms/run/RunEngine'
 import { RunStore } from '../../src/mms/run/RunStore'
-import { CodexAppServerExitedError } from '../../src/mms/providers/codex/CodexAppServerClient'
-import { CodexTurnFailure } from '../../src/mms/providers/codex/CodexProviderService'
+import { CodexAppServerExitedError } from '../../src/mms/harness/vendors/codex/CodexAppServerClient'
+import { CodexTurnFailure, createCodexProviderService, type CodexProviderService } from '../../src/mms/harness/vendors/codex/CodexProviderService'
 import { decideUsageLimit } from '../../src/mms/run/pausePolicy'
-import {
-  CodexAdapter,
-  createCodexProviderService,
-  type CodexProviderService
-} from '../../src/mms/run/adapters/codex'
-import type { AdapterHost, TurnControl, TurnInput, TurnSink } from '../../src/mms/run/adapters/ProviderAdapter'
+import { CodexAdapter } from '../../src/mms/harness/drivers/codex/adapter'
+import type { AdapterHost, TurnControl, TurnInput, TurnSink } from '../../src/mms/harness/adapter'
 import { mousseOrchestrationInstructions } from '../../src/mms/run/mcp/instructions'
 import { CODEX_APP_SERVER_BOUNDARY, replayCodexAppServer } from '../../src/mms/run/testkit/codexAppServerReplay'
 import { parseTranscript, ReplayTransport, type TranscriptFrame } from '../../src/mms/run/testkit/ReplayTransport'

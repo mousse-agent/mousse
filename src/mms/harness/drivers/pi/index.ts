@@ -1,7 +1,7 @@
 import { harnessAppError, type AddOptionMethod } from '../../../../shared/harness/types'
 import { piInstanceId, piProviderIdOf } from '../../../../shared/providerInstances'
 import { foldedInto } from '../../../../shared/harness/move'
-import type { ProviderAdapter } from '../../../run/adapters/ProviderAdapter'
+import type { ProviderAdapter } from '../../adapter'
 import { decodeInstanceConfig, type DriverAddOption, type DriverContext, type DriverRuntime, type HarnessDriver } from '../../driver'
 import { piInstanceRuntime, type PiCredentials } from './instance'
 import { createRpcRuntime, markLoopConnections, PI_RPC_CAPS, piRpcCaps, piRpcEvidenceOf, type PiRpcDriverOptions } from './engines/rpc'

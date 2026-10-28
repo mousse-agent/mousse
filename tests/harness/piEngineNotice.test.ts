@@ -9,7 +9,7 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import type { DriverContext } from '../../src/mms/harness/driver'
 import { ENGINE_NOTICE_DUE_FILE, ENGINE_NOTICE_FILE, createRpcRuntime } from '../../src/mms/harness/drivers/pi/engines/rpc'
-import type { TurnInput } from '../../src/mms/run/adapters/ProviderAdapter'
+import type { TurnInput } from '../../src/mms/harness/adapter'
 
 const dirs: string[] = []
 afterEach(() => {

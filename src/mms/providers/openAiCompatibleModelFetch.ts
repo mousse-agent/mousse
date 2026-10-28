@@ -80,49 +80,40 @@ async function fetchRemoteModelRows(options: {
 }
 
 /**
- * Pick the baseline template whose API matches a new remote model id.
- * Multi-API gateways (OpenCode Zen/Go) serve claude/qwen via anthropic-messages,
- * gemini via google-generative-ai, gpt/grok/muse via openai-responses, and the
- * rest via openai-completions. Reusing the wrong API makes the model uncallable.
+ * Model-family hints for multi-API gateways (OpenCode Zen/Go), in order: the first row with a hint
+ * in the lower-cased model id (or an id matching `idPrefix`) names the APIs to try. Gateways serve
+ * claude/qwen via anthropic-messages, gemini via google-generative-ai, gpt/grok/muse via
+ * openai-responses, and the rest via openai-completions. Reusing the wrong API makes the model
+ * uncallable.
  */
-function inferTemplateForModelId(
+const API_BY_MODEL_HINT: ReadonlyArray<{ hints: readonly string[]; idPrefix?: RegExp; apis: readonly string[] }> = [
+  { hints: ['claude', 'fable', 'qwen', 'anthropic'], apis: ['anthropic-messages'] },
+  { hints: ['gemini', 'google'], apis: ['google-generative-ai'] },
+  {
+    hints: ['gpt', 'grok', 'muse', 'spark', 'codex', 'luna', 'sol-', 'terra'],
+    idPrefix: /^(o\d|gpt|grok|muse)/,
+    apis: ['openai-responses']
+  }
+]
+/** The APIs to try when no hint matches. */
+const DEFAULT_APIS: readonly string[] = ['openai-completions', 'openai-responses']
+
+/**
+ * Pick the baseline template whose API matches a new remote model id (`API_BY_MODEL_HINT`): the
+ * first of the row's APIs with a template, else `fallback`.
+ */
+export function inferTemplateForModelId(
   id: string,
   templatesByApi: Map<string, Model<Api>>,
   fallback: Model<Api>
 ): Model<Api> {
   const lower = id.toLowerCase()
-  const pick = (...apis: string[]): Model<Api> | undefined => {
-    for (const api of apis) {
-      const template = templatesByApi.get(api)
-      if (template) return template
-    }
-    return undefined
+  const row = API_BY_MODEL_HINT.find(({ hints, idPrefix }) => hints.some((hint) => lower.includes(hint)) || idPrefix?.test(lower))
+  for (const api of row?.apis ?? DEFAULT_APIS) {
+    const template = templatesByApi.get(api)
+    if (template) return template
   }
-  if (
-    lower.includes('claude') ||
-    lower.includes('fable') ||
-    lower.includes('qwen') ||
-    lower.includes('anthropic')
-  ) {
-    return pick('anthropic-messages') ?? fallback
-  }
-  if (lower.includes('gemini') || lower.includes('google')) {
-    return pick('google-generative-ai') ?? fallback
-  }
-  if (
-    lower.includes('gpt') ||
-    lower.includes('grok') ||
-    lower.includes('muse') ||
-    lower.includes('spark') ||
-    lower.includes('codex') ||
-    lower.includes('luna') ||
-    lower.includes('sol-') ||
-    lower.includes('terra') ||
-    /^(o\d|gpt|grok|muse)/.test(lower)
-  ) {
-    return pick('openai-responses') ?? fallback
-  }
-  return pick('openai-completions', 'openai-responses') ?? fallback
+  return fallback
 }
 
 export async function fetchOpenAiCompatibleModelList(options: {

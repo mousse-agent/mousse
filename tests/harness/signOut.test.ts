@@ -9,9 +9,9 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { decodeInstanceConfig, type DriverRuntime, type HarnessDriver } from '../../src/mms/harness/driver'
 import type { Harness, TurnSpec } from '../../src/mms/harness/gateway'
-import { ProviderInstanceService } from '../../src/mms/providers/ProviderInstanceService'
+import { ProviderInstanceService } from '../../src/mms/harness/instanceMap'
 import { PiStubAdapter } from '../support/piStub'
-import type { ProviderAdapter, TurnResult } from '../../src/mms/run/adapters/ProviderAdapter'
+import type { ProviderAdapter, TurnResult } from '../../src/mms/harness/adapter'
 import { adapterDriver, testHarness } from '../../src/mms/run/testkit/harness'
 
 const dirs: string[] = []

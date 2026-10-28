@@ -1,4 +1,4 @@
-import type { ProviderAdapter, ProviderCapabilities } from '../../src/mms/run/adapters/ProviderAdapter'
+import type { ProviderAdapter, ProviderCapabilities } from '../../src/mms/harness/adapter'
 
 /**
  * Capabilities of a test-only `pi` adapter whose tools Mousse runs (strong containment, so

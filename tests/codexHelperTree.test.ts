@@ -3,8 +3,8 @@
  * the threads; the tree's `list`, `read` and `interrupt` go through it. Time is faked.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { HelperTree, RpcRefused, ThreadStatuses, TreeOff, type SweepOptions, type TreePorts, type TreeTiming } from '../src/mms/providers/codex/helperTree'
-import type { CodexNotification, ThreadStatusType } from '../src/mms/providers/codex/protocol'
+import { HelperTree, RpcRefused, ThreadStatuses, TreeOff, type SweepOptions, type TreePorts, type TreeTiming } from '../src/mms/harness/vendors/codex/helperTree'
+import type { CodexNotification, ThreadStatusType } from '../src/mms/harness/vendors/codex/protocol'
 
 const ROOT = 'root'
 const T0 = 1_800_000_000_000

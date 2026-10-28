@@ -10,15 +10,15 @@ import type { Options, Query } from '@anthropic-ai/claude-agent-sdk'
 import { PROTOCOL_VERSION } from '@agentclientprotocol/sdk'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { UserQuestionService } from '../../src/mms/orchestrator/UserQuestionService'
-import { AntigravityProviderService } from '../../src/mms/providers/antigravity/AntigravityProviderService'
+import { AntigravityProviderService } from '../../src/mms/harness/acp/presets/antigravity/AntigravityProviderService'
 import {
   ClaudeSubscriptionProviderService,
   type ClaudeSubscriptionChatInput
-} from '../../src/mms/providers/claudeSubscription/ClaudeSubscriptionProviderService'
+} from '../../src/mms/harness/vendors/claude/ClaudeSubscriptionProviderService'
 import { antigravityAdapter } from '../../src/mms/harness/drivers/antigravity'
-import type { AcpTurnClient as AntigravityClient } from '../../src/mms/run/adapters/acp/AcpAdapter'
-import { ClaudeSubscriptionAdapter, type ClaudeSubscriptionClient } from '../../src/mms/run/adapters/claudeSubscription/ClaudeSubscriptionAdapter'
-import type { AdapterHost, TurnInput, TurnSink } from '../../src/mms/run/adapters/ProviderAdapter'
+import type { AcpTurnClient as AntigravityClient } from '../../src/mms/harness/drivers/acp/adapter'
+import { ClaudeSubscriptionAdapter, type ClaudeSubscriptionClient } from '../../src/mms/harness/drivers/claudeCode/adapter'
+import type { AdapterHost, TurnInput, TurnSink } from '../../src/mms/harness/adapter'
 import { acpMcpServers, claudeMcpServers, MOUSSE_MCP_TOKEN_ENV } from '../../src/mms/run/mcp/attachment'
 import { mousseOrchestrationInstructions } from '../../src/mms/run/mcp/instructions'
 

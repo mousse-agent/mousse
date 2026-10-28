@@ -18,7 +18,7 @@ const runner = join(root, '.cache', 'codex-pin-runner.mjs')
 mkdirSync(dirname(runner), { recursive: true })
 await build({
   stdin: {
-    contents: "export { CodexInstallation } from './src/mms/harness/codex/installation'",
+    contents: "export { CodexInstallation } from './src/mms/harness/vendors/codex/installation'",
     resolveDir: root,
     loader: 'ts'
   },

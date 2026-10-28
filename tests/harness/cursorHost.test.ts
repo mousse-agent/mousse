@@ -14,7 +14,7 @@ import type { DriverContext, DriverRuntime } from '../../src/mms/harness/driver'
 import { instanceEnv } from '../../src/mms/harness/env'
 import { UserQuestionService } from '../../src/mms/orchestrator/UserQuestionService'
 import { LoginSession } from '../../src/mms/providers/LoginSession'
-import type { TurnResult } from '../../src/mms/run/adapters/ProviderAdapter'
+import type { TurnResult } from '../../src/mms/harness/adapter'
 import { crashChild } from '../support/build'
 
 const FAKE_SDK = join(__dirname, 'fakeCursorSdk.cjs')

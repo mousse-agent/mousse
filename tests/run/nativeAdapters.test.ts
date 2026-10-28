@@ -1,14 +1,14 @@
 import type { Message } from '@earendil-works/pi-ai'
 import { describe, expect, it, vi } from 'vitest'
-import type { ClaudeSubscriptionChatInput } from '../../src/mms/providers/claudeSubscription/ClaudeSubscriptionProviderService'
+import type { ClaudeSubscriptionChatInput } from '../../src/mms/harness/vendors/claude/ClaudeSubscriptionProviderService'
 import { antigravityAdapter } from '../../src/mms/harness/drivers/antigravity'
-import type { AcpTurnClient as AntigravityClient } from '../../src/mms/run/adapters/acp/AcpAdapter'
+import type { AcpTurnClient as AntigravityClient } from '../../src/mms/harness/drivers/acp/adapter'
 import {
   ClaudeSubscriptionAdapter,
   type ClaudeSubscriptionClient
-} from '../../src/mms/run/adapters/claudeSubscription/ClaudeSubscriptionAdapter'
-import { CodexAdapter, type CodexClient } from '../../src/mms/run/adapters/codex/CodexAdapter'
-import type { AdapterHost, TurnControl, TurnInput, TurnSink } from '../../src/mms/run/adapters/ProviderAdapter'
+} from '../../src/mms/harness/drivers/claudeCode/adapter'
+import { CodexAdapter, type CodexClient } from '../../src/mms/harness/drivers/codex/adapter'
+import type { AdapterHost, TurnControl, TurnInput, TurnSink } from '../../src/mms/harness/adapter'
 
 const user = (text: string): Message => ({ role: 'user', content: text, timestamp: 0 })
 

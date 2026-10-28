@@ -5,9 +5,9 @@ import { afterEach, describe, expect, it } from 'vitest'
 import type { DefinitionAuthority } from '../../src/mms/agentDefinitions/definitionGate'
 import type { TurnSpec } from '../../src/mms/harness/gateway'
 import type { HarnessCaps } from '../../src/shared/harness/types'
-import { ProviderInstanceService } from '../../src/mms/providers/ProviderInstanceService'
-import { CLAUDE_SUBSCRIPTION_CAPABILITIES } from '../../src/mms/run/adapters/claudeSubscription/ClaudeSubscriptionAdapter'
-import type { AdapterHost, ProviderAdapter, TurnInput, TurnSink } from '../../src/mms/run/adapters/ProviderAdapter'
+import { ProviderInstanceService } from '../../src/mms/harness/instanceMap'
+import { CLAUDE_SUBSCRIPTION_CAPABILITIES } from '../../src/mms/harness/drivers/claudeCode/adapter'
+import type { AdapterHost, ProviderAdapter, TurnInput, TurnSink } from '../../src/mms/harness/adapter'
 import { adapterDriver, testHarness } from '../../src/mms/run/testkit/harness'
 
 // PR 4 4b2 through the real gateway: the run's budget reaches the runtime, attempts share it, a

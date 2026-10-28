@@ -10,7 +10,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { addProvider, setProviderKey, type ProviderRequester } from '../src/cli/providerSetup'
 import { piDriver } from '../src/mms/harness/drivers/pi'
 import { dispatchMethod, type HandlerContext } from '../src/mms/protocol/handlers'
-import { ProviderInstanceService, type StoredProviderInstances } from '../src/mms/providers/ProviderInstanceService'
+import { ProviderInstanceService, type StoredProviderInstances } from '../src/mms/harness/instanceMap'
 import { testHarness } from '../src/mms/run/testkit/harness'
 import { PiInstallationCredentials } from './harness/fixtures/piInstallationCredentials'
 
