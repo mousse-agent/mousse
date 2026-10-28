@@ -45,12 +45,19 @@ const fileLink = (target: string, path: string): boolean => {
 
 type Owner = Awaited<ReturnType<typeof routedOwner>>
 
-/** A thread with a folder of its own on the owner (the first save brings its worktree up), and a folder beside it. */
+/**
+ * A thread with a folder of its own on the owner, and a folder beside it. The folder is provisioned the way
+ * the first routed save does it, from a repository that already commits `seed.txt`: a routed save for the
+ * seed ran a whole checkpoint, and every test here pays for it.
+ */
 async function folderThread(o: Owner) {
   const path = repo()
   const project = o.f.mms.projects.openProject(path)
   const t = o.thread('Works on files', project.id, path)
-  await o.ok('files.write', { threadId: t.id, path: 'seed.txt', content: 'seed\n' })
+  writeFileSync(join(path, 'seed.txt'), 'seed\n')
+  execFileSync('git', ['add', 'seed.txt'], { cwd: path, stdio: 'pipe' })
+  execFileSync('git', ['-c', 'commit.gpgsign=false', 'commit', '-qm', 'fixture seed'], { cwd: path, stdio: 'pipe' })
+  await new ThreadWorkspaceManager(o.f.mms.threads.getThreadDir(t.id)).provision(t.id, 'main', path)
   const root = new ThreadWorkspaceManager(o.f.mms.threads.getThreadDir(t.id)).load()!.worktreePath
   const outside = realpathSync(mkdtempSync(join(tmpdir(), 'routed-outside-')))
   resources.push(() => rmSync(outside, { recursive: true, force: true }))
