@@ -17,7 +17,7 @@ export type BinarySource = 'path' | 'managed' | 'override' | 'bundled'
 export type InstallOwner = 'npm' | 'pnpm' | 'bun' | 'brew' | 'winget' | 'standalone' | 'managed' | 'unknown'
 
 /** Why the binary does not run. `override_not_found` never falls back to PATH. */
-export type RunsFailure = 'override_not_found' | 'not_on_path' | 'spawn_failed' | 'exited' | 'bad_version' | 'timeout' | 'files_changed'
+export type RunsFailure = 'override_not_found' | 'not_on_path' | 'spawn_failed' | 'exited' | 'bad_version' | 'timeout' | 'files_changed' | 'known_broken'
 
 export interface InstanceBinary {
   /** Resolved executable; absent when nothing was found. */
@@ -84,6 +84,17 @@ export interface InstanceConfigView {
 }
 
 /**
+ * A version known not to work with Mousse (`compatibility.state: 'known_broken'`): what goes wrong,
+ * the version that fixes it when there is one, and whether the user allowed this version for this
+ * program anyway (`providers.instances.allowKnownProblem`).
+ */
+export interface KnownProblem {
+  reason: string
+  fixedIn?: string
+  allowed?: boolean
+}
+
+/**
  * What an instance's turns run on: a key the user gave (`api_key`), a subscription sign-in
  * (`subscription`), the environment's cloud credentials (`ambient`: AWS, or Google's application
  * default credentials), or `unknown` (the user's own home, which Mousse does not inspect further).
@@ -132,7 +143,7 @@ export interface InstanceSnapshot {
     /** What the instance runs on once signed in; absent when the driver cannot tell without another check. */
     credential?: CredentialKind
   }
-  compatibility: { state: CompatibilityState; testedRange?: string }
+  compatibility: { state: CompatibilityState; testedRange?: string; knownProblem?: KnownProblem }
   update?: UpdateAffordance
   binary?: InstanceBinary
   caps: HarnessCaps
@@ -229,6 +240,12 @@ function withLabel(headline: string, label: string | undefined): string {
   return label ? `${headline} · ${label}` : headline
 }
 
+/** A reason as a sentence: ends with a full stop. */
+function sentence(text: string): string {
+  const trimmed = text.trim()
+  return /[.!?]$/.test(trimmed) ? trimmed : `${trimmed}.`
+}
+
 const STALE_DETAIL = 'The last check did not finish. Showing the last good status.'
 
 /**
@@ -310,21 +327,25 @@ export function describeStatus(snapshot: InstanceSnapshot): StatusDescription {
     }
   }
 
+  // A known problem with this version, not allowed: nothing runs until it is updated or allowed.
+  const problem = compatibility.state === 'known_broken' ? compatibility.knownProblem : undefined
+  if (compatibility.state === 'known_broken' && !problem?.allowed) {
+    const version = snapshot.binary?.version
+    const fix = problem?.fixedIn ? `Version ${problem.fixedIn} fixes it.` : null
+    return {
+      headline: version ? `Known problem with ${version}` : 'Known problem with this version',
+      detail: [problem?.reason ? sentence(problem.reason) : null, fix, 'Update it, or run this version anyway.'].filter(Boolean).join(' '),
+      tone: 'error',
+      nextStep: updateStep(snapshot)
+    }
+  }
+
   if (runs.state === 'no') {
     return {
       headline: 'Unavailable',
       detail: runs.message ?? 'Mousse could not start this provider.',
       tone: 'error',
       nextStep: step(snapshot, 'recheck')
-    }
-  }
-
-  if (compatibility.state === 'known_broken') {
-    return {
-      headline: 'Incompatible version',
-      detail: snapshot.binary?.version ? `Version ${snapshot.binary.version} does not work with Mousse.` : null,
-      tone: 'error',
-      nextStep: updateStep(snapshot)
     }
   }
 
@@ -381,15 +402,19 @@ export function describeStatus(snapshot: InstanceSnapshot): StatusDescription {
   const headline = auth.state === 'signed_in'
     ? withLabel('Signed in', auth.account?.label ?? auth.methodLabel)
     : 'Available'
-  const detail = compatibility.state === 'newer_than_tested'
+  // Allowed anyway: it runs, and the card keeps saying why it may not work.
+  const allowed = problem?.allowed
+    ? `Known problem with ${snapshot.binary?.version ?? 'this version'}: ${sentence(problem.reason)} Running it anyway, as you allowed.`
+    : null
+  const detail = allowed ?? (compatibility.state === 'newer_than_tested'
     ? `Newer than the versions Mousse was tested with${compatibility.testedRange ? ` (${compatibility.testedRange})` : ''}.`
     : snapshot.update?.latestVersion
       ? `Update available: ${snapshot.update.latestVersion}.`
-      : null
+      : null)
   return {
     headline,
     detail: staleDetail ?? detail,
-    tone: 'ready',
+    tone: allowed ? 'warning' : 'ready',
     nextStep: updateStep(snapshot) ?? (snapshot.stale ? step(snapshot, 'recheck') : null)
   }
 }

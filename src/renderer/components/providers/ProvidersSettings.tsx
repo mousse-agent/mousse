@@ -186,6 +186,7 @@ export function ProvidersSettings({ settings, refreshProviderData, updateSetting
       },
       signOut: async () => applySnapshot(await instances.signOut(id)),
       recheck: async () => applySnapshot(await instances.recheck(id)),
+      allowKnownProblem: async (version) => applySnapshot(await instances.allowKnownProblem(id, version)),
       configure: async (patch) => applySnapshot(await instances.configure(id, patch)),
       removeInstall: (force) => instances.removeInstall(id, force)
     }

@@ -34,6 +34,8 @@ export interface InstanceActions {
   signIn: () => Promise<void>
   signOut: () => Promise<void>
   recheck: () => Promise<void>
+  /** Runs this version anyway, though it has a known problem (this program only). */
+  allowKnownProblem: (version: string) => Promise<void>
   configure: (patch: InstanceConfigPatch) => Promise<void>
   /** Deletes the files Mousse downloaded for it; other entries using them block it unless `force`. */
   removeInstall: (force: boolean) => Promise<RemoveInstallResult>
@@ -127,6 +129,12 @@ export function SetupRow({
         break
     }
   }
+  // A version with a known problem: running it anyway is the user's call, next to any update.
+  const problem = snapshot.compatibility.knownProblem
+  const version = snapshot.binary?.version
+  const allow = snapshot.compatibility.state === 'known_broken' && problem && !problem.allowed && version && !installing
+    ? button('allow', `Run anyway with ${version}`, () => actions.allowKnownProblem(version))
+    : null
 
   // Checking again is always at hand once a check has finished (a terminal sign-in, an install elsewhere).
   const recheck = !checking && !installing && (
@@ -142,6 +150,7 @@ export function SetupRow({
           <>
             {recheck}
             {control}
+            {allow}
           </>
         }
       >

@@ -170,6 +170,23 @@ describe('fake-CLI probes', () => {
     expect(result).not.toHaveProperty('update')
   })
 
+  it('a version with a known problem does not run, after its sign-in was read; a later fix offers the update', async () => {
+    const broken: HarnessDriver = { ...driver, knownBroken: [{ range: '2.1.5 - 2.1.7', reason: 'Turns stop early', fixedIn: '2.1.8' }] }
+    const env = instanceEnv({ instanceId: 'fake', driver: 'claude', configRevision: 0, searchPath: [fakeCli(`console.log('2.1.6')`)] })
+    const result = await probeInstance({ driver: broken, runtime: runtime(), env, force: true, timeouts: { versionMs: 10_000, authMs: 2_000 } })
+    expect(result).toMatchObject({
+      runs: { state: 'no', failure: 'known_broken', message: 'Known problem with Fake CLI 2.1.6: Turns stop early.' },
+      auth: { state: 'signed_in' },
+      compatibility: { state: 'known_broken', testedRange: '2.0.0 – 2.1.999', knownProblem: { reason: 'Turns stop early', fixedIn: '2.1.8' } }
+    })
+    const npm: InstanceBinary = { path: '/x/node_modules/.bin/fakecli', version: '2.1.6', source: 'path', owner: 'npm' }
+    expect(updateAffordance(broken, npm, result.compatibility)).toEqual({ kind: 'advisory', command: 'npm install -g fakecli@latest' })
+    // No fixed version yet: nothing to update to.
+    expect(updateAffordance(broken, npm, compatibilityOf({ knownBroken: [{ range: '2.1.6', reason: 'Turns stop early' }] }, '2.1.6'))).toBeUndefined()
+    // Outside the range, the tested range decides as before.
+    expect(compatibilityOf(broken, '2.1.8').state).toBe('tested')
+  }, 15_000)
+
   it('a garbage version still runs, with the version unknown', async () => {
     const result = await probe(fakeCli(`console.log('hello there')`))
     expect(result.runs).toMatchObject({ state: 'yes', failure: 'bad_version' })

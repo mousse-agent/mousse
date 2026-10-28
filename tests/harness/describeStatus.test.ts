@@ -56,7 +56,9 @@ describe('describeStatus', () => {
     ['sign-in not checked', { auth: { state: 'unknown', account: undefined } }, { headline: 'Installed · Sign-in unverified', tone: 'neutral', action: 'recheck' }],
     ['runs unknown', { runs: { state: 'unknown' } }, { headline: 'Not verified', tone: 'warning', action: 'recheck' }],
     ['install unknown is not reported as installed', { install: { state: 'unknown' }, runs: { state: 'unknown' }, auth: { state: 'unknown' } }, { headline: 'Not verified', tone: 'warning', action: 'recheck' }],
-    ['known broken version', { compatibility: { state: 'known_broken' }, update: { kind: 'one_click', owner: 'npm' } }, { headline: 'Incompatible version', tone: 'error', action: 'update' }],
+    ['known problem with a fix', { compatibility: { state: 'known_broken', knownProblem: { reason: 'Turns stop early', fixedIn: '2.1.10' } }, runs: { state: 'no', failure: 'known_broken' }, update: { kind: 'one_click', owner: 'npm' } }, { headline: 'Known problem with 2.1.0', tone: 'error', action: 'update' }],
+    ['known problem with no fix yet', { compatibility: { state: 'known_broken', knownProblem: { reason: 'Turns stop early' } }, runs: { state: 'no', failure: 'known_broken' } }, { headline: 'Known problem with 2.1.0', tone: 'error', action: null }],
+    ['known problem allowed anyway', { compatibility: { state: 'known_broken', knownProblem: { reason: 'Turns stop early', allowed: true } } }, { headline: 'Signed in · Max plan', tone: 'warning', action: null }],
     ['too old', { compatibility: { state: 'too_old', testedRange: '>=2.0.0' }, update: { kind: 'advisory', command: 'npm i -g @anthropic-ai/claude-code' } }, { headline: 'Version too old', tone: 'warning', action: 'update' }],
     ['newer than tested never blocks', { compatibility: { state: 'newer_than_tested', testedRange: '2.0–2.1' } }, { headline: 'Signed in · Max plan', tone: 'ready', action: null }],
     ['one-click update', { update: { kind: 'one_click', owner: 'npm', latestVersion: '2.2.0' } }, { headline: 'Signed in · Max plan', tone: 'ready', action: 'update' }],
@@ -72,6 +74,17 @@ describe('describeStatus', () => {
     const status = describeStatus(snapshot({ stale: true, runs: { state: 'yes' } }))
     expect(status).toMatchObject({ headline: 'Signed in · Max plan', tone: 'ready', nextStep: { action: 'recheck' } })
     expect(status.detail).toMatch(/last good status/)
+  })
+
+  it('says what goes wrong with a known-broken version, and what fixes it', () => {
+    const fixed = describeStatus(snapshot({ compatibility: { state: 'known_broken', knownProblem: { reason: 'Turns stop early', fixedIn: '2.1.10' } }, runs: { state: 'no', failure: 'known_broken' } }))
+    expect(fixed.detail).toBe('Turns stop early. Version 2.1.10 fixes it. Update it, or run this version anyway.')
+    const open = describeStatus(snapshot({ compatibility: { state: 'known_broken', knownProblem: { reason: 'Turns stop early.' } }, runs: { state: 'no', failure: 'known_broken' } }))
+    expect(open.detail).toBe('Turns stop early. Update it, or run this version anyway.')
+    const allowed = describeStatus(snapshot({ compatibility: { state: 'known_broken', knownProblem: { reason: 'Turns stop early', allowed: true } } }))
+    expect(allowed.detail).toBe('Known problem with 2.1.0: Turns stop early. Running it anyway, as you allowed.')
+    // Signed out still asks to sign in first, allowed or not.
+    expect(describeStatus(snapshot({ compatibility: { state: 'known_broken', knownProblem: { reason: 'x', allowed: true } }, auth: { state: 'signed_out' } })).headline).toBe('Not signed in')
   })
 
   it('names the override path that failed', () => {

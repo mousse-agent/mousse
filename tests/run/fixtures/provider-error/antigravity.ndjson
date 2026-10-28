@@ -1,4 +1,4 @@
-{"kind":"transcript","adapter":"antigravity","scenario":"provider-error","boundary":"ACP JSON-RPC on the agent connection: calls out; session updates and responses in","recordedAt":"hand-authored","version":1}
+{"kind":"transcript","adapter":"antigravity","scenario":"provider-error","boundary":"ACP JSON-RPC on the agent connection: calls out; session updates and responses in","recordedAt":"hand-authored","basis":"1.1.1","version":1}
 {"dir":"out","frame":{"kind":"request","method":"initialize","params":{"protocolVersion":1,"clientCapabilities":{"fs":{"readTextFile":true,"writeTextFile":true},"terminal":false},"clientInfo":{"name":"Mousse","version":"0.1.1"}}}}
 {"dir":"in","frame":{"kind":"response","result":{"protocolVersion":1}}}
 {"dir":"out","frame":{"kind":"request","method":"session/new","params":{"mcpServers":[]}}}

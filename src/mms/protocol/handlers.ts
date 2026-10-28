@@ -2710,6 +2710,11 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const p = isObject(params) ? params : {}
       return { snapshot: await harnessGateway(ctx).instances.signOut(asInstanceId(p.instanceId)) }
     }
+    case 'providers.instances.allowKnownProblem': {
+      const p = isObject(params) ? params : {}
+      const instanceId = asInstanceId(p.instanceId)
+      return { snapshot: await harnessGateway(ctx).instances.allowKnownProblem(instanceId, asString(p.version, 'version', 200)) }
+    }
     case 'providers.instances.recheck': {
       const p = isObject(params) ? params : {}
       return { snapshot: await harnessGateway(ctx).instances.recheck(asInstanceId(p.instanceId)) }

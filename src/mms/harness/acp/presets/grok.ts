@@ -1,6 +1,7 @@
 import type { HarnessCaps } from '../../../../shared/harness/types'
 import { ACP_BASE_CAPABILITIES } from '../capabilities'
 import type { ClassifyOption, PermissionApprovals } from '../permissions'
+import { compatibilityFields } from '../../compatibility'
 import type { AcpPreset } from '../preset'
 import type { AcpQuirks } from '../quirks'
 
@@ -12,7 +13,7 @@ import type { AcpQuirks } from '../quirks'
 
 export const GROK_LABEL = 'Grok'
 
-/** The Grok release Mousse was tested with, and installs. */
+/** The Grok release Mousse installs (inside its tested range, `COMPATIBILITY`). */
 export const GROK_TESTED_VERSION = '1.0.70'
 
 /**
@@ -66,7 +67,7 @@ export const GROK_QUIRKS: AcpQuirks = Object.freeze({ xaiExtensions: true })
 export const GROK_PRESET: AcpPreset = {
   id: 'grok',
   label: GROK_LABEL,
-  testedVersions: { min: GROK_TESTED_VERSION, max: GROK_TESTED_VERSION },
+  ...compatibilityFields('acp:grok'),
   // The instance's own variables apply; its arguments do not, so nothing can unpin the mode.
   launch: ({ config, source }) => ({ command: source.command, args: grokArgs(), env: { ...(config.env ?? {}) } }),
   versionArgs: () => ['--version'],

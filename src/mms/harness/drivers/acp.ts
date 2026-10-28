@@ -165,6 +165,7 @@ export function acpDriver(options: AcpDriverOptions = {}): HarnessDriver {
     // Never searched on PATH by name: the instance's command is its executable.
     binaryNames: [],
     ...(preset.testedVersions ? { testedVersions: preset.testedVersions } : {}),
+    ...(preset.knownBroken?.length ? { knownBroken: preset.knownBroken } : {}),
     multiInstance: true,
     privateHome: false,
     // Registry agents only; a local command's runtime offers no install.
@@ -539,6 +540,7 @@ export function createAcpRuntime(context: DriverContext, preset: AcpPreset, opti
       version: installed.receipt.version,
       bytes: installed.receipt.bytes,
       checksum: installed.receipt.checksum,
+      receiptHash: installed.hash,
       ...(broken ? { broken } : {}),
       ...(advisory ? { advisory } : {})
     }

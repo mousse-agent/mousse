@@ -2396,6 +2396,7 @@ export function registerGuiIpc(
   const respondInstanceSignIn = instanceCommand('providers.instances.respondSignIn', 'ok')
   const signOutInstance = instanceCommand('providers.instances.signOut', 'snapshot')
   const recheckInstance = instanceCommand('providers.instances.recheck', 'snapshot')
+  const allowKnownProblem = instanceCommand('providers.instances.allowKnownProblem', 'snapshot')
   const moveInstance = instanceCommand('providers.instances.move', 'result')
   const removeInstanceInstall = instanceCommand('providers.instances.removeInstall', 'result')
   const searchRegistry = instanceCommand('providers.registry.search', 'agents')
@@ -2425,6 +2426,8 @@ export function registerGuiIpc(
     respondInstanceSignIn({ operationId, response }))
   registerHandler('providers:instances:signOut', async (_e, instanceId: string) => signOutInstance({ instanceId }))
   registerHandler('providers:instances:recheck', async (_e, instanceId: string) => recheckInstance({ instanceId }))
+  registerHandler('providers:instances:allowKnownProblem', async (_e, instanceId: string, version: string) =>
+    allowKnownProblem({ instanceId, version }))
   registerHandler('providers:instances:move', async (_e, instanceId: string, toInstanceId: string, options?: { copyKey?: boolean }) =>
     moveInstance({ instanceId, toInstanceId, copyKey: options?.copyKey === true }))
   registerHandler('providers:instances:removeInstall', async (_e, instanceId: string, force: unknown) =>

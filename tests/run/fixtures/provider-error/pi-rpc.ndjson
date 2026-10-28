@@ -1,4 +1,4 @@
-{"kind":"transcript","adapter":"pi-rpc","scenario":"provider-error","boundary":"Pi RPC on stdio: commands out (without ids); events in","recordedAt":"hand-authored","version":1}
+{"kind":"transcript","adapter":"pi-rpc","scenario":"provider-error","boundary":"Pi RPC on stdio: commands out (without ids); events in","recordedAt":"hand-authored","basis":"1.4.0","version":1}
 {"dir":"out","frame":{"kind":"command","command":{"type":"prompt","message":"Summarise the repository"}}}
 {"dir":"in","frame":{"type":"agent_start"}}
 {"dir":"in","frame":{"type":"turn_start"}}

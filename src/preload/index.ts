@@ -994,6 +994,9 @@ const api = {
         ipcRenderer.invoke('providers:instances:respondSignIn', operationId, response),
       signOut: (instanceId: string): Promise<InstanceSnapshot> =>
         ipcRenderer.invoke('providers:instances:signOut', instanceId),
+      /** "Run anyway with <version>": allows a version with a known problem for the program checked now. */
+      allowKnownProblem: (instanceId: string, version: string): Promise<InstanceSnapshot> =>
+        ipcRenderer.invoke('providers:instances:allowKnownProblem', instanceId, version),
       /** Checks again, bypassing the cached status. */
       recheck: (instanceId: string): Promise<InstanceSnapshot> =>
         ipcRenderer.invoke('providers:instances:recheck', instanceId),

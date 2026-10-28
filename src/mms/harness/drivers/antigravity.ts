@@ -5,6 +5,7 @@ import { AcpAdapter, type AcpTurnClient } from '../../run/adapters/acp/AcpAdapte
 import { ANTIGRAVITY_CAPABILITIES, ANTIGRAVITY_LABEL } from '../acp/presets/antigravity'
 import { decodeInstanceConfig, type DriverContext, type DriverRuntime, type HarnessDriver } from '../driver'
 import { LAUNCH_MIRROR_FIELDS } from '../vendorMirror'
+import { compatibilityFields } from '../compatibility'
 
 /** The pinned agent release Mousse installs and verifies. */
 export const ANTIGRAVITY_VERSION = ANTIGRAVITY_RELEASE.replace(/^agy_acp_server_/, '')
@@ -35,7 +36,7 @@ export function antigravityDriver(options: { builtIn: () => AntigravityProviderS
     label: 'Google Antigravity',
     // Never searched on PATH: only the verified install or a manual path runs.
     binaryNames: [],
-    testedVersions: { min: ANTIGRAVITY_VERSION, max: ANTIGRAVITY_VERSION },
+    ...compatibilityFields('antigravity'),
     latestVersion: { kind: 'pinned', version: ANTIGRAVITY_VERSION },
     multiInstance: false,
     privateHome: false,

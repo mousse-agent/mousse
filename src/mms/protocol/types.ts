@@ -375,6 +375,7 @@ export const PROTOCOL_METHODS = [
   'providers.instances.signIn',
   'providers.instances.respondSignIn',
   'providers.instances.signOut',
+  'providers.instances.allowKnownProblem',
   'providers.instances.recheck',
   'providers.instances.refreshModels',
   'providers.instances.refreshAllModels',
