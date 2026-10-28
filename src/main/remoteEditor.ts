@@ -1,6 +1,7 @@
 /**
  * Opening a folder of another computer in an editor installed on this one, through the editor's own
- * Remote - SSH support. This module only builds the command; `editors.ts` runs it.
+ * SSH support: Remote - SSH in the VS Code family, Zed's own, and JetBrains Toolbox for the JetBrains IDEs.
+ * This module only builds the command or the link; `editors.ts` runs it.
  *
  * Everything that reaches the command comes from outside this process and is treated as untrusted:
  * - the folder is what another computer answered to `editor.folder`; it is worked out again from its
@@ -10,15 +11,43 @@
  * The command is an argument array. Nothing goes through a shell, no key or secret is passed, and a host
  * and a path are written into the address only after the checks below.
  */
-import { remoteEditorPath, type EditorFolderStyle } from '../shared/bridge/editorFolder'
+import { editorFolderStyleOf, remoteEditorPath, type EditorFolderStyle } from '../shared/bridge/editorFolder'
+import { opensOnOwner } from '../shared/remoteEditor'
 
-/** The editors that open a folder over their own Remote - SSH, in the order the picker lists them. */
-export const REMOTE_EDITOR_IDS = ['vscode', 'cursor', 'windsurf', 'vscodium', 'vscode-insiders'] as const
+/** The VS Code family: they open a folder over their own Remote - SSH, with `--folder-uri`. */
+export const VSCODE_FAMILY_IDS = ['vscode', 'cursor', 'windsurf', 'vscodium', 'vscode-insiders'] as const
+type VscodeFamilyId = (typeof VSCODE_FAMILY_IDS)[number]
+
+/**
+ * The product code JetBrains Toolbox installs on the other computer (`ideHint`), for each JetBrains IDE of the
+ * catalog in `editors.ts`. The paid editions, since remote development needs them. Android Studio has none.
+ */
+export const JETBRAINS_IDE_HINTS = {
+  idea: 'IU',
+  webstorm: 'WS',
+  pycharm: 'PY',
+  goland: 'GO',
+  rustrover: 'RR',
+  clion: 'CL',
+  rider: 'RD',
+  phpstorm: 'PS'
+} as const satisfies Record<string, string>
+type JetBrainsId = keyof typeof JETBRAINS_IDE_HINTS
+
+/** The editors that open a folder of another computer. */
+export const REMOTE_EDITOR_IDS = [...VSCODE_FAMILY_IDS, 'zed', ...(Object.keys(JETBRAINS_IDE_HINTS) as JetBrainsId[])] as const
 export type RemoteEditorId = (typeof REMOTE_EDITOR_IDS)[number]
 
 export function supportsRemoteFolders(editorId: string): editorId is RemoteEditorId {
   return (REMOTE_EDITOR_IDS as readonly string[]).includes(editorId)
 }
+
+/** A JetBrains IDE, which opens a remote folder through JetBrains Toolbox and not a command of its own. */
+export function isJetBrainsIde(editorId: string): editorId is JetBrainsId {
+  return Object.hasOwn(JETBRAINS_IDE_HINTS, editorId)
+}
+
+const isVscodeFamily = (editorId: string): editorId is VscodeFamilyId => (VSCODE_FAMILY_IDS as readonly string[]).includes(editorId)
 
 /** Why a folder cannot be opened, with a message that is shown to the person as it is. */
 export class RemoteOpenError extends Error {
@@ -97,6 +126,8 @@ export interface CheckedFolder {
   path: string
   /** Slashes only, not encoded: `/home/me/app`, `/C:/Users/me/app`. */
   uriPath: string
+  /** The owner's system as it reported it (`linux`, `darwin`, `win32`), when it did. Only picks which editors may open it. */
+  platform?: string
 }
 
 /**
@@ -108,11 +139,13 @@ export function checkedFolder(answer: unknown): CheckedFolder {
     throw new RemoteOpenError('folder_not_openable', 'This folder cannot be opened in an editor from another computer.')
   }
   if (!answer || typeof answer !== 'object') return refuse()
-  const { path, uriPath, style } = answer as Record<string, unknown>
+  const { path, uriPath, style, platform } = answer as Record<string, unknown>
   if (style !== 'posix' && style !== 'windows') return refuse()
   const derived = remoteEditorPath(path, style)
   if (!derived || derived !== uriPath) return refuse()
-  return { style, path: path as string, uriPath: derived }
+  // A platform that disagrees with the style is left out: the style, checked against the path, wins.
+  const known = typeof platform === 'string' && /^[a-z0-9]{1,16}$/u.test(platform) && editorFolderStyleOf(platform) === style
+  return { style, path: path as string, uriPath: derived, ...(known ? { platform } : {}) }
 }
 
 /** `encodeURIComponent` leaves these alone; they are encoded too so the path holds nothing but unreserved characters. */
@@ -130,27 +163,76 @@ export function encodeUriPath(folder: CheckedFolder): string {
     .join('/')
 }
 
-export interface RemoteLaunch {
-  args: string[]
-  /** The address the editor is given, for tests and logs. Holds no secret. */
-  uri: string
+/**
+ * How the editor is given the folder: arguments to its own command, or a link the system hands to the program
+ * that registered its scheme (JetBrains Toolbox for `jetbrains://`).
+ */
+export type RemoteLaunch =
+  | {
+      kind: 'command'
+      args: string[]
+      /** The address the editor is given, for tests and logs. Holds no secret. */
+      uri: string
+    }
+  | { kind: 'link'; uri: string }
+
+/** The start of every link Mousse hands to JetBrains Toolbox. Nothing else is opened through the system. */
+export const JETBRAINS_LINK_PREFIX = 'jetbrains://gateway/ssh/environment?'
+
+/** `[user@]host[:port]` of an `ssh://` address. A Mousse name is checked like the VS Code authority. */
+function sshUrlAuthority(host: RemoteHost): string {
+  if (host.kind === 'mousse') return sshRemoteAuthority(host)
+  const { user, host: name, port } = host.target
+  const bracketed = name.includes(':') ? `[${name}]` : name
+  return `${user ? `${encodeURIComponent(user)}@` : ''}${bracketed}${port !== undefined ? `:${port}` : ''}`
 }
 
-/** The arguments that open `folder` on `host` in the editor, or a refusal. */
+/** `zed ssh://<host><path>`. */
+function zedLaunch(host: RemoteHost, folder: CheckedFolder): RemoteLaunch {
+  const uri = `ssh://${sshUrlAuthority(host)}${encodeUriPath(folder)}`
+  return { kind: 'command', args: [uri], uri }
+}
+
+/**
+ * `jetbrains://gateway/ssh/environment?h=<host>&launchIde=true&ideHint=<code>&projectHint=<path>`. An approved address
+ * adds its user (`u`) and port (`p`); one of Mousse's names carries them in its own `Host` block. The path is the
+ * owner's own form with slashes (`/home/me/app`, `C:/Users/me/app`), each segment encoded.
+ */
+function jetbrainsLaunch(editorId: JetBrainsId, host: RemoteHost, folder: CheckedFolder): RemoteLaunch {
+  const query: Array<[string, string]> = []
+  if (host.kind === 'mousse') query.push(['h', sshRemoteAuthority(host)])
+  else {
+    query.push(['h', host.target.host])
+    if (host.target.user) query.push(['u', host.target.user])
+    if (host.target.port !== undefined) query.push(['p', String(host.target.port)])
+  }
+  const encoded = encodeUriPath(folder)
+  const projectHint = folder.style === 'windows' ? encoded.slice(1) : encoded
+  const pairs = [...query, ['launchIde', 'true'], ['ideHint', JETBRAINS_IDE_HINTS[editorId]]].map(([key, value]) => `${key}=${encodeURIComponent(value)}`)
+  return { kind: 'link', uri: `${JETBRAINS_LINK_PREFIX}${[...pairs, `projectHint=${projectHint}`].join('&')}` }
+}
+
+/** The arguments or the link that open `folder` on `host` in the editor, or a refusal. */
 export function remoteLaunchArguments(input: { editorId: string; host: RemoteHost; folder: unknown }): RemoteLaunch {
-  if (!supportsRemoteFolders(input.editorId)) {
-    throw new RemoteOpenError('editor_missing', 'That editor cannot open a folder on another computer. Choose VS Code, Cursor, Windsurf or VSCodium.')
+  const { editorId } = input
+  if (!supportsRemoteFolders(editorId)) {
+    throw new RemoteOpenError('editor_missing', 'That editor cannot open a folder on another computer.')
   }
   const folder = checkedFolder(input.folder)
+  if (!opensOnOwner(editorId, folder.platform ?? (folder.style === 'windows' ? 'win32' : undefined))) {
+    throw new RemoteOpenError('editor_missing', 'That editor cannot open a folder on that computer.')
+  }
+  if (editorId === 'zed') return zedLaunch(input.host, folder)
+  if (isJetBrainsIde(editorId)) return jetbrainsLaunch(editorId, input.host, folder)
   const uri = `vscode-remote://ssh-remote+${sshRemoteAuthority(input.host)}${encodeUriPath(folder)}`
-  return { args: ['--folder-uri', uri], uri }
+  return { kind: 'command', args: ['--folder-uri', uri], uri }
 }
 
 /** Whether a program is a Windows batch file, which `cmd.exe` would read the arguments of. */
 export const isBatchLauncher = (command: string): boolean => /\.(?:cmd|bat)$/iu.test(command.trim())
 
 /** The Remote - SSH extension of an editor, and where the editor keeps its extensions under the home folder. */
-const REMOTE_EXTENSIONS: Record<RemoteEditorId, { directory: string; id: string; label: string }> = {
+const REMOTE_EXTENSIONS: Record<VscodeFamilyId, { directory: string; id: string; label: string }> = {
   vscode: { directory: '.vscode', id: 'ms-vscode-remote.remote-ssh', label: 'VS Code' },
   'vscode-insiders': { directory: '.vscode-insiders', id: 'ms-vscode-remote.remote-ssh', label: 'VS Code Insiders' },
   cursor: { directory: '.cursor', id: 'anysphere.remote-ssh', label: 'Cursor' },
@@ -176,7 +258,8 @@ export function remoteExtensionHint(
   builtInDirectories: readonly string[],
   listDirectory: (path: string) => string[] | undefined
 ): string | undefined {
-  if (!supportsRemoteFolders(editorId)) return undefined
+  // Zed has its SSH support built in, and JetBrains Toolbox installs what it needs itself.
+  if (!isVscodeFamily(editorId)) return undefined
   const extension = REMOTE_EXTENSIONS[editorId]
   const prefix = `${extension.id}-`
   const own = listDirectory(`${home.replace(/[\\/]+$/u, '')}/${extension.directory}/extensions`)

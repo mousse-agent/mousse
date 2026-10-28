@@ -84,6 +84,18 @@ describe('a folder of another computer', () => {
     expect(remoteEditors([idea, finder])).toEqual([])
   })
 
+  it('leaves out Zed for a Windows computer and Windsurf for any but Linux, and keeps JetBrains IDEs', () => {
+    const remoteZed: EditorInfo = { ...zed, remote: true }
+    const windsurf: EditorInfo = { id: 'windsurf', label: 'Windsurf', kind: 'editor', remote: true }
+    const remoteIdea: EditorInfo = { ...idea, remote: true }
+    const all = [code, remoteZed, windsurf, remoteIdea, finder]
+    expect(remoteEditors(all, 'linux')).toEqual([code, remoteZed, windsurf, remoteIdea])
+    expect(remoteEditors(all, 'darwin')).toEqual([code, remoteZed, remoteIdea])
+    expect(remoteEditors(all, 'win32')).toEqual([code, remoteIdea])
+    // The computer's system is not known yet: nothing is left out here.
+    expect(remoteEditors(all)).toEqual([code, remoteZed, windsurf, remoteIdea])
+  })
+
   it('picks the remembered remote editor and otherwise the first one', () => {
     expect(defaultEditor(remoteEditors([code, idea, codium, finder]), 'vscodium')).toBe(codium)
     expect(defaultEditor(remoteEditors([code, idea, codium, finder]), 'idea')).toBe(code)

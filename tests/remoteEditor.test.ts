@@ -4,6 +4,8 @@ import {
   checkedFolder,
   encodeUriPath,
   isBatchLauncher,
+  isJetBrainsIde,
+  JETBRAINS_IDE_HINTS,
   remoteExtensionHint,
   parseSshTarget,
   RemoteOpenError,
@@ -12,22 +14,50 @@ import {
   supportsRemoteFolders,
   type RemoteHost
 } from '../src/main/remoteEditor'
+import { opensOnOwner } from '../src/shared/remoteEditor'
 
 const hex = (value: unknown) => Buffer.from(JSON.stringify(value), 'utf8').toString('hex')
 const approved = (endpoint: string): RemoteHost => ({ kind: 'ssh', target: parseSshTarget(endpoint)! })
 const mousse = (alias: string): RemoteHost => ({ kind: 'mousse', alias })
-const folderOf = (path: string, style: 'posix' | 'windows' = 'posix') => ({ path, style, uriPath: remoteEditorPath(path, style) })
+const folderOf = (path: string, style: 'posix' | 'windows' = 'posix', platform?: string) => ({ path, style, uriPath: remoteEditorPath(path, style), ...(platform ? { platform } : {}) })
 const launch = (editorId: string, host: RemoteHost, folder: unknown) => remoteLaunchArguments({ editorId, host, folder })
 
 describe('which editors open a folder of another computer', () => {
-  it('lists the editors with Remote - SSH of their own and leaves out the rest', () => {
-    for (const id of ['vscode', 'vscode-insiders', 'cursor', 'windsurf', 'vscodium']) expect(supportsRemoteFolders(id)).toBe(true)
-    for (const id of ['files', 'zed', 'idea', 'webstorm', 'sublime', 'xcode', 'nova', 'kiro', 'trae', 'antigravity', 'nope', '']) expect(supportsRemoteFolders(id)).toBe(false)
+  it('lists the editors with SSH support of their own and leaves out the rest', () => {
+    for (const id of ['vscode', 'vscode-insiders', 'cursor', 'windsurf', 'vscodium', 'zed', 'idea', 'webstorm', 'pycharm', 'goland', 'rustrover', 'clion', 'rider', 'phpstorm']) {
+      expect(supportsRemoteFolders(id), id).toBe(true)
+    }
+    for (const id of ['files', 'android-studio', 'sublime', 'xcode', 'nova', 'kiro', 'trae', 'antigravity', 'nope', '', 'toString', '__proto__']) expect(supportsRemoteFolders(id), id).toBe(false)
+    expect(isJetBrainsIde('idea')).toBe(true)
+    for (const id of ['zed', 'vscode', 'android-studio', 'toString', 'constructor']) expect(isJetBrainsIde(id), id).toBe(false)
   })
 
-  it('refuses an editor that cannot, naming those that can', () => {
-    expect(() => launch('idea', approved('box'), folderOf('/srv/app'))).toThrow(/VS Code, Cursor, Windsurf or VSCodium/)
+  it('refuses an editor that cannot', () => {
+    expect(() => launch('sublime', approved('box'), folderOf('/srv/app'))).toThrow('That editor cannot open a folder on another computer.')
     expect(() => launch('files', approved('box'), folderOf('/srv/app'))).toThrow(RemoteOpenError)
+  })
+
+  it('leaves Zed out for a Windows computer and Windsurf out for any but Linux', () => {
+    expect(opensOnOwner('zed', 'linux')).toBe(true)
+    expect(opensOnOwner('zed', 'darwin')).toBe(true)
+    expect(opensOnOwner('zed', 'win32')).toBe(false)
+    expect(opensOnOwner('windsurf', 'linux')).toBe(true)
+    expect(opensOnOwner('windsurf', 'darwin')).toBe(false)
+    expect(opensOnOwner('windsurf', 'win32')).toBe(false)
+    for (const id of ['vscode', 'cursor', 'vscodium', 'idea']) for (const platform of ['linux', 'darwin', 'win32']) expect(opensOnOwner(id, platform)).toBe(true)
+    // Not known yet: not filtered here; the folder's answer decides.
+    expect(opensOnOwner('zed', undefined)).toBe(true)
+    expect(opensOnOwner('toString', 'win32')).toBe(true)
+  })
+
+  it('refuses Zed for a Windows folder and Windsurf for a Mac, from the folder the computer answered', () => {
+    expect(() => launch('zed', mousse('mousse-w-aaaaaa'), folderOf('C:\\work', 'windows'))).toThrow('That editor cannot open a folder on that computer.')
+    expect(() => launch('zed', mousse('mousse-w-aaaaaa'), folderOf('C:\\work', 'windows', 'win32'))).toThrow(RemoteOpenError)
+    expect(() => launch('windsurf', mousse('mousse-m-aaaaaa'), folderOf('/Users/me/app', 'posix', 'darwin'))).toThrow(RemoteOpenError)
+    expect(launch('windsurf', mousse('mousse-l-aaaaaa'), folderOf('/home/me/app', 'posix', 'linux')).kind).toBe('command')
+    expect(launch('zed', mousse('mousse-m-aaaaaa'), folderOf('/Users/me/app', 'posix', 'darwin')).kind).toBe('command')
+    // VS Code opens every system.
+    expect(launch('vscode', mousse('mousse-w-aaaaaa'), folderOf('C:\\work', 'windows', 'win32')).kind).toBe('command')
   })
 })
 
@@ -35,6 +65,7 @@ describe('the address of a remote folder', () => {
   it('uses --folder-uri with the SSH name as the host, for every editor that supports it', () => {
     for (const id of ['vscode', 'vscode-insiders', 'cursor', 'windsurf', 'vscodium']) {
       expect(launch(id, mousse('mousse-workbox-3fa2c1'), folderOf('/home/me/app'))).toEqual({
+        kind: 'command',
         args: ['--folder-uri', 'vscode-remote://ssh-remote+mousse-workbox-3fa2c1/home/me/app'],
         uri: 'vscode-remote://ssh-remote+mousse-workbox-3fa2c1/home/me/app'
       })
@@ -74,9 +105,75 @@ describe('the address of a remote folder', () => {
   })
 })
 
+describe('the Zed address', () => {
+  it('gives Zed one ssh:// argument with the SSH name and the encoded path', () => {
+    expect(launch('zed', mousse('mousse-workbox-3fa2c1'), folderOf('/home/me/My App #1'))).toEqual({
+      kind: 'command',
+      args: ['ssh://mousse-workbox-3fa2c1/home/me/My%20App%20%231'],
+      uri: 'ssh://mousse-workbox-3fa2c1/home/me/My%20App%20%231'
+    })
+  })
+
+  it('writes an approved address with its user and port, and an IPv6 host in brackets', () => {
+    expect(launch('zed', approved('me@box.example.com:2222'), folderOf('/srv/app')).uri).toBe('ssh://me@box.example.com:2222/srv/app')
+    expect(launch('zed', approved('Build-Box'), folderOf('/srv/app')).uri).toBe('ssh://Build-Box/srv/app')
+    expect(launch('zed', approved('me@[::1]:22'), folderOf('/srv/app')).uri).toBe('ssh://me@[::1]:22/srv/app')
+  })
+
+  it('refuses a name that is not one of Mousse’s, and keeps shell words out of the argument', () => {
+    expect(() => launch('zed', mousse('-oProxyCommand=id'), folderOf('/srv/app'))).toThrow(RemoteOpenError)
+    for (const path of ['/srv/app --new-window', '/srv/$(id)', "/srv/'x'", '/srv/a b;c']) {
+      const { uri } = launch('zed', mousse('mousse-w-aaaaaa'), folderOf(path))
+      expect(uri.slice('ssh://mousse-w-aaaaaa'.length)).not.toMatch(/[\s"'`$;&|<>()\\]/u)
+    }
+  })
+})
+
+describe('the JetBrains Toolbox link', () => {
+  const base = 'jetbrains://gateway/ssh/environment?'
+
+  it('names the SSH name, the IDE to start there and the folder', () => {
+    expect(launch('idea', mousse('mousse-workbox-3fa2c1'), folderOf('/home/me/app'))).toEqual({
+      kind: 'link',
+      uri: `${base}h=mousse-workbox-3fa2c1&launchIde=true&ideHint=IU&projectHint=/home/me/app`
+    })
+  })
+
+  it('gives each JetBrains IDE its own product code', () => {
+    const codes = { idea: 'IU', webstorm: 'WS', pycharm: 'PY', goland: 'GO', rustrover: 'RR', clion: 'CL', rider: 'RD', phpstorm: 'PS' }
+    expect(JETBRAINS_IDE_HINTS).toEqual(codes)
+    for (const [id, code] of Object.entries(codes)) {
+      expect(launch(id, mousse('mousse-w-aaaaaa'), folderOf('/srv/app')).uri).toContain(`&ideHint=${code}&`)
+    }
+  })
+
+  it('adds the user and port of an approved address', () => {
+    expect(launch('goland', approved('me@box.example.com:2222'), folderOf('/srv/app')).uri).toBe(
+      `${base}h=box.example.com&u=me&p=2222&launchIde=true&ideHint=GO&projectHint=/srv/app`
+    )
+    expect(launch('goland', approved('[::1]'), folderOf('/srv/app')).uri).toBe(`${base}h=%3A%3A1&launchIde=true&ideHint=GO&projectHint=/srv/app`)
+  })
+
+  it('writes a Windows folder from its drive, without the leading slash', () => {
+    expect(launch('rider', mousse('mousse-w-aaaaaa'), folderOf('C:\\Users\\me\\My App', 'windows')).uri).toBe(
+      `${base}h=mousse-w-aaaaaa&launchIde=true&ideHint=RD&projectHint=C:/Users/me/My%20App`
+    )
+  })
+
+  it('encodes the path so it cannot add or change a field of the link', () => {
+    const { uri } = launch('webstorm', mousse('mousse-w-aaaaaa'), folderOf('/srv/a&h=evil/b?c#d'))
+    expect(uri).toBe(`${base}h=mousse-w-aaaaaa&launchIde=true&ideHint=WS&projectHint=/srv/a%26h%3Devil/b%3Fc%23d`)
+    const fields = new URL(uri).searchParams
+    expect(fields.getAll('h')).toEqual(['mousse-w-aaaaaa'])
+    expect(fields.get('projectHint')).toBe('/srv/a&h=evil/b?c#d')
+    expect(() => launch('idea', mousse('mousse-a&b'), folderOf('/srv/app'))).toThrow(RemoteOpenError)
+  })
+})
+
 describe('the answer of the computer that runs the thread is checked, not trusted', () => {
   it('accepts an answer that agrees with itself', () => {
     expect(checkedFolder(folderOf('/home/me/app'))).toEqual({ style: 'posix', path: '/home/me/app', uriPath: '/home/me/app' })
+    expect(checkedFolder(folderOf('/home/me/app', 'posix', 'linux'))).toEqual({ style: 'posix', path: '/home/me/app', uriPath: '/home/me/app', platform: 'linux' })
     expect(checkedFolder(folderOf('C:\\Users\\me\\app', 'windows'))).toEqual({
       style: 'windows',
       path: 'C:\\Users\\me\\app',
@@ -110,6 +207,13 @@ describe('the answer of the computer that runs the thread is checked, not truste
     refuse('')
   })
 
+  it('keeps the system the computer reported only when it agrees with the folder’s style', () => {
+    expect(checkedFolder(folderOf('/home/me/app', 'posix', 'win32'))).not.toHaveProperty('platform')
+    expect(checkedFolder(folderOf('C:\\x', 'windows', 'linux'))).not.toHaveProperty('platform')
+    expect(checkedFolder({ ...folderOf('/home/me/app'), platform: 'linux; id' })).not.toHaveProperty('platform')
+    expect(checkedFolder({ ...folderOf('/home/me/app'), platform: 7 })).not.toHaveProperty('platform')
+  })
+
   it('refuses anything that is not an object with those three fields', () => {
     for (const answer of [null, undefined, 'x', 3, [], {}, { path: '/x' }, { path: '/x', uriPath: '/x' }, { path: '/x', uriPath: '/x', style: 'dos' }, { path: 7, uriPath: '/x', style: 'posix' }]) {
       expect(() => checkedFolder(answer)).toThrow(RemoteOpenError)
@@ -119,7 +223,9 @@ describe('the answer of the computer that runs the thread is checked, not truste
   it('keeps the owner path out of the way of the command line: nothing in the address is a flag or a shell word', () => {
     const attacks = ['/srv/app --new-window', '/srv/app;id', '/srv/$(id)', '/srv/`id`', "/srv/'x'", '/srv/a"b', '/srv/a|b', '/srv/a&b', '/srv/a b%00']
     for (const path of attacks) {
-      const { args, uri } = launch('vscode', mousse('mousse-w-aaaaaa'), folderOf(path))
+      const launched = launch('vscode', mousse('mousse-w-aaaaaa'), folderOf(path))
+      if (launched.kind !== 'command') throw new Error('expected a command')
+      const { args, uri } = launched
       // One flag, one value; the value starts with the scheme and holds no raw space, quote or shell character.
       expect(args).toHaveLength(2)
       expect(args[0]).toBe('--folder-uri')

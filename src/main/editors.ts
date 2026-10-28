@@ -7,7 +7,15 @@ import { app, nativeImage, shell } from 'electron'
 import type { RemoteOpenResult } from '../shared/remoteEditor'
 import { EDITOR_PROXY_READY } from '../shared/remoteEditor'
 import type { EditorInfo } from '../shared/types'
-import { isBatchLauncher, RemoteOpenError, remoteExtensionHint, remoteLaunchArguments, supportsRemoteFolders } from './remoteEditor'
+import {
+  isBatchLauncher,
+  isJetBrainsIde,
+  JETBRAINS_LINK_PREFIX,
+  RemoteOpenError,
+  remoteExtensionHint,
+  remoteLaunchArguments,
+  supportsRemoteFolders
+} from './remoteEditor'
 import {
   nodeOfThread,
   probeTunnel,
@@ -73,6 +81,8 @@ export interface DetectedEditor {
   appPath?: string
   /** Linux and Windows: the launcher executable. */
   launcherPath?: string
+  /** A JetBrains IDE: JetBrains Toolbox, found on this computer, which opens its remote folders. */
+  toolboxPath?: string
 }
 
 export interface EditorDetectionEnv {
@@ -92,9 +102,28 @@ export function filesLabel(platform: NodeJS.Platform): string {
   return 'Files'
 }
 
+/** JetBrains Toolbox, where it installs itself: the app on macOS, its program on Windows and Linux. */
+export function detectToolbox(env: EditorDetectionEnv): string | undefined {
+  if (env.platform === 'darwin') {
+    return ['/Applications', posix.join(env.home, 'Applications')].map((root) => `${root}/JetBrains Toolbox.app`).find((candidate) => env.exists(candidate))
+  }
+  if (env.platform === 'win32') {
+    const exe = env.localAppData ? win32.join(env.localAppData, 'JetBrains', 'Toolbox', 'bin', 'jetbrains-toolbox.exe') : undefined
+    return exe && env.exists(exe) ? exe : undefined
+  }
+  const own = posix.join(env.home, '.local', 'share', 'JetBrains', 'Toolbox', 'bin', 'jetbrains-toolbox')
+  return env.exists(own) ? own : env.findOnPath('jetbrains-toolbox') ?? undefined
+}
+
 /** Detected editors in catalog order. The file-manager entry is added by the caller. */
 export function detectEditors(env: EditorDetectionEnv): DetectedEditor[] {
   const found: DetectedEditor[] = []
+  let toolbox: string | undefined | null = null
+  const withToolbox = (editor: DetectedEditor): DetectedEditor => {
+    if (!isJetBrainsIde(editor.id)) return editor
+    if (toolbox === null) toolbox = detectToolbox(env)
+    return toolbox ? { ...editor, toolboxPath: toolbox } : editor
+  }
   for (const definition of EDITOR_CATALOG) {
     const { id, label } = definition
     if (env.platform === 'darwin') {
@@ -102,7 +131,7 @@ export function detectEditors(env: EditorDetectionEnv): DetectedEditor[] {
       const appPath = definition.apps
         .flatMap((name) => roots.map((root) => `${root}/${name}.app`))
         .find((candidate) => env.exists(candidate))
-      if (appPath) found.push({ id, label, appPath })
+      if (appPath) found.push(withToolbox({ id, label, appPath }))
       continue
     }
     if (definition.macOnly) continue
@@ -117,7 +146,7 @@ export function detectEditors(env: EditorDetectionEnv): DetectedEditor[] {
       if (launcherPath) break
       launcherPath = env.findOnPath(name)
     }
-    if (launcherPath) found.push({ id, label, launcherPath })
+    if (launcherPath) found.push(withToolbox({ id, label, launcherPath }))
   }
   return found
 }
@@ -202,7 +231,7 @@ async function detect(): Promise<{ detected: DetectedEditor[]; infos: EditorInfo
         id: editor.id,
         label: editor.label,
         kind: 'editor',
-        ...(supportsRemoteFolders(editor.id) ? { remote: true as const } : {}),
+        ...(opensRemoteFolders(editor) ? { remote: true as const } : {}),
         ...(iconDataUrl ? { iconDataUrl } : {})
       }
     })
@@ -285,9 +314,12 @@ export function remoteLauncher(editor: DetectedEditor, env: EditorDetectionEnv):
     const names = EDITOR_CATALOG.find((definition) => definition.id === editor.id)?.cli ?? []
     // An app bundle only exists on macOS, so its paths are POSIX whatever runs this. VS Code's own bundle keeps
     // its script as `bin/code` (the name `code-insiders` is the command a person installs on PATH), so the
-    // VS Code family tries that name too.
+    // VS Code family tries that name too. Zed keeps its command as `Contents/MacOS/cli`.
     const inBundle = [...names, ...(editor.id.startsWith('vscode') || editor.id === 'cursor' ? ['code'] : [])]
-    const bundled = inBundle.map((name) => posix.join(editor.appPath!, 'Contents', 'Resources', 'app', 'bin', name))
+    const bundled = [
+      ...inBundle.map((name) => posix.join(editor.appPath!, 'Contents', 'Resources', 'app', 'bin', name)),
+      ...(editor.id === 'zed' ? [posix.join(editor.appPath, 'Contents', 'MacOS', 'cli')] : [])
+    ]
     const found = bundled.find((candidate) => env.exists(candidate))
     if (found) return found
     for (const name of names) {
@@ -296,14 +328,29 @@ export function remoteLauncher(editor: DetectedEditor, env: EditorDetectionEnv):
     }
     return null
   }
+  // Zed on Windows: its command `bin\zed.exe` sits next to `Zed.exe`.
+  if (editor.id === 'zed' && editor.launcherPath && /^[A-Za-z]:[\\/]/u.test(editor.launcherPath)) {
+    const cli = win32.join(win32.dirname(editor.launcherPath), 'bin', 'zed.exe')
+    if (env.exists(cli)) return cli
+  }
   return editor.launcherPath ?? null
+}
+
+/** Whether the editor is listed for a folder of another computer: a JetBrains IDE only with JetBrains Toolbox. */
+export function opensRemoteFolders(editor: DetectedEditor): boolean {
+  return supportsRemoteFolders(editor.id) && (!isJetBrainsIde(editor.id) || Boolean(editor.toolboxPath))
 }
 
 /**
  * The command that starts `editor`, or a `RemoteOpenError` when there is none, or it is a batch file (the
- * editors' own programs are executables, and a batch file would pass an address through cmd.exe). Starts nothing.
+ * editors' own programs are executables, and a batch file would pass an address through cmd.exe). For a JetBrains
+ * IDE it is JetBrains Toolbox, which opens the link. Starts nothing.
  */
 export function remoteEditorCommand(editor: DetectedEditor, env: EditorDetectionEnv): string {
+  if (isJetBrainsIde(editor.id)) {
+    if (!editor.toolboxPath) throw new RemoteOpenError('editor_missing', `${editor.label} needs JetBrains Toolbox to open this folder.`)
+    return editor.toolboxPath
+  }
   const command = remoteLauncher(editor, env)
   if (!command || (env.platform === 'win32' && isBatchLauncher(command))) {
     throw new RemoteOpenError('editor_missing', `Could not find the command that starts ${editor.label}.`)
@@ -344,20 +391,24 @@ export function editorLaunchEnvironment(source: NodeJS.ProcessEnv): NodeJS.Proce
   return clean
 }
 
-export interface RemoteOpenPlan {
-  command: string
-  args: string[]
-}
+/**
+ * What opens the folder: the editor's command with its arguments, or a link the system hands to `handler`
+ * (JetBrains Toolbox), the program that must be installed for it.
+ */
+export type RemoteOpenPlan = { command: string; args: string[] } | { link: string; handler: string }
 
-/** The command that would open `folder` in `editor` over `host`, or a `RemoteOpenError`. Starts nothing. */
+/** The command or the link that would open `folder` in `editor` over `host`, or a `RemoteOpenError`. Starts nothing. */
 export function planRemoteOpen(
   editor: DetectedEditor,
   input: { host: Parameters<typeof remoteLaunchArguments>[0]['host']; folder: unknown },
   env: EditorDetectionEnv
 ): RemoteOpenPlan {
   const command = remoteEditorCommand(editor, env)
-  const { args } = remoteLaunchArguments({ editorId: editor.id, host: input.host, folder: input.folder })
-  return { command, args }
+  const launch = remoteLaunchArguments({ editorId: editor.id, host: input.host, folder: input.folder })
+  if (launch.kind === 'command') return { command, args: launch.args }
+  // Only Toolbox's own links go to the system, never another scheme.
+  if (!launch.uri.startsWith(JETBRAINS_LINK_PREFIX)) throw new RemoteOpenError('editor_missing', `${editor.label} cannot open this folder.`)
+  return { link: launch.uri, handler: command }
 }
 
 /** What opening a remote folder touches on this computer. Tests give fakes, so no editor or SSH starts. */
@@ -365,6 +416,8 @@ export interface RemoteOpenIo {
   detected: () => Promise<DetectedEditor[]>
   env: () => EditorDetectionEnv
   launch: (command: string, args: string[], env: NodeJS.ProcessEnv) => Promise<void>
+  /** Hands a link to the program that registered its scheme (`jetbrains://` to JetBrains Toolbox). */
+  openLink: (link: string) => Promise<void>
   /** The editor's extension folders, or undefined when one cannot be read. */
   list: (path: string) => string[] | undefined
   /** The environment of this process, given to the editor's command without the variables that redirect it. */
@@ -382,6 +435,7 @@ const defaultRemoteOpenIo: RemoteOpenIo = {
   detected: async () => (await ensureDetected()).detected,
   env: realEnv,
   launch,
+  openLink: (link) => shell.openExternal(link),
   list: (path) => {
     try {
       return readdirSync(path)
@@ -435,7 +489,7 @@ export async function openRemoteInEditor(
   io: RemoteOpenIo = defaultRemoteOpenIo
 ): Promise<RemoteOpenResult> {
   if (typeof editorId !== 'string' || !supportsRemoteFolders(editorId)) {
-    return { ok: false, reason: 'editor_missing', message: 'That editor cannot open a folder on another computer. Choose VS Code, Cursor, Windsurf or VSCodium.' }
+    return { ok: false, reason: 'editor_missing', message: 'That editor cannot open a folder on another computer.' }
   }
   const editor = (await io.detected()).find((entry) => entry.id === editorId)
   if (!editor) return { ok: false, reason: 'editor_missing', message: 'That editor is not installed.' }
@@ -445,10 +499,10 @@ export async function openRemoteInEditor(
     remoteEditorCommand(editor, env)
     const resolved = await resolveRemoteOpen(ask, threadId, { proxyReady: io.proxyReady })
     if (!resolved.ok) return resolved
-    const { command, args } = planRemoteOpen(editor, resolved, env)
-    if (!env.exists(command)) {
+    const plan = planRemoteOpen(editor, resolved, env)
+    if (!env.exists('link' in plan ? plan.handler : plan.command)) {
       io.forgetDetected()
-      return { ok: false, reason: 'editor_missing', message: `${editor.label} is no longer installed.` }
+      return { ok: false, reason: 'editor_missing', message: `${'link' in plan ? 'JetBrains Toolbox' : editor.label} is no longer installed.` }
     }
     // One of Mousse's own names reaches the computer through its connection: look before the editor starts, so a
     // refusal is a message here and not an editor window that waits. An address the person approved was already
@@ -466,7 +520,8 @@ export async function openRemoteInEditor(
       via = checked.via
       advice = checked.advice
     }
-    await io.launch(command, args, editorLaunchEnvironment(io.processEnv()))
+    if ('link' in plan) await io.openLink(plan.link)
+    else await io.launch(plan.command, plan.args, editorLaunchEnvironment(io.processEnv()))
     // Only a hint: the editor asks for the extension itself when it is really missing.
     const hint = remoteExtensionHint(editor.id, env.home, builtInExtensionDirectories(editor), io.list)
     return { ok: true, ...(hint ? { hint } : {}), ...(via ? { via } : {}), ...(advice ? { advice } : {}) }

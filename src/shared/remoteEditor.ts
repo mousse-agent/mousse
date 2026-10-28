@@ -12,6 +12,22 @@ import type { TunnelFailure, TunnelPath } from './net/tunnel'
  */
 export const EDITOR_PROXY_READY = true
 
+/**
+ * The systems of the other computer an editor can open a folder of, for the editors that cannot open every one:
+ * Zed's Windows remotes do not work in practice, and Windsurf's SSH support reaches Linux only. Any other editor,
+ * and a computer whose system is not known yet, is not filtered here.
+ */
+const OWNER_PLATFORMS: Readonly<Record<string, readonly string[]>> = {
+  zed: ['linux', 'darwin'],
+  windsurf: ['linux']
+}
+
+/** Whether `editorId` can open a folder of a computer that runs `platform` (`process.platform` there). */
+export function opensOnOwner(editorId: string, platform: string | undefined): boolean {
+  const allowed = Object.hasOwn(OWNER_PLATFORMS, editorId) ? OWNER_PLATFORMS[editorId] : undefined
+  return !allowed || !platform || allowed.includes(platform)
+}
+
 /** How this computer reaches the owner for an editor. */
 export type RemoteRouteKind =
   /** An SSH address this computer approved for the computer (SSH setup), used as it is. */
