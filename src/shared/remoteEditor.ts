@@ -6,11 +6,11 @@ import type { EditorAskReply } from './bridge/editorAsk'
 import type { TunnelFailure, TunnelPath } from './net/tunnel'
 
 /**
- * Whether `mousse-cli net ssh-proxy` exists. Mousse's own SSH names (`Host mousse-…` in `~/.mousse/ssh/config`)
- * reach a computer only through it, so until it does a name from that file is not offered to an editor and the
- * `Include` line is not added for one. The change that adds the command turns this on.
+ * Whether Mousse's own SSH names (`Host mousse-…` in `~/.mousse/ssh/config`, carried by `mousse-cli net ssh-proxy`) are
+ * offered to an editor. They are, with the states that say why a connection is refused (offline, editor connections
+ * off with Ask, no SSH server...). A computer with an approved SSH address never uses them: it opens over that address.
  */
-export const EDITOR_PROXY_READY = false
+export const EDITOR_PROXY_READY = true
 
 /** How this computer reaches the owner for an editor. */
 export type RemoteRouteKind =

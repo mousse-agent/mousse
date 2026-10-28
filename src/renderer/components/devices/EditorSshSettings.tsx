@@ -47,7 +47,7 @@ export function EditorSshSettings() {
       status={status}
       busy={busy}
       error={error}
-      // Nothing writes ~/.ssh/config from here until editor connections exist; Undo is final until then.
+      // While Mousse's own names are not offered to an editor, nothing writes ~/.ssh/config from here and Undo is final.
       onToggle={(next) => { if (!next) void disable(); else if (EDITOR_PROXY_READY) void enable() }}
       onDismissNotice={() => void acknowledge()}
     />

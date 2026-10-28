@@ -119,16 +119,17 @@ describe('the Settings row', () => {
     expect(view({ available: false, included: true })).toBe('')
   })
 
-  it('is there only while the line is installed or its notice is pending, until editor connections exist', () => {
-    // The line serves nothing yet, so a person who never had it sees no Editors group, and the switch cannot add it.
-    expect(editorSshVisible(status())).toBe(false)
-    expect(view({})).toBe('')
-    // After Undo the group is gone and Undo is final.
-    expect(editorSshVisible(status({ enabled: false }))).toBe(false)
-    expect(view({ enabled: false })).toBe('')
+  it('is there whenever the settings are available, now that Mousse’s own names reach an editor', () => {
+    // The line serves editor connections, so the group is where a person turns it on again after Undo.
+    expect(editorSshVisible(status())).toBe(true)
+    expect(view({})).toContain('Editors')
+    expect(editorSshVisible(status({ enabled: false }))).toBe(true)
+    expect(view({ enabled: false })).toContain('Editors')
     expect(editorSshVisible(status({ included: true }))).toBe(true)
     expect(editorSshVisible(status({ noticePending: true, notice: NOTICE }))).toBe(true)
     expect(view({ noticePending: true, notice: NOTICE })).toContain('Editors')
+    // Not in a build that gives the service no home to write to, and not before the status is read.
+    expect(editorSshVisible(status({ available: false }))).toBe(false)
     expect(editorSshVisible(null)).toBe(false)
   })
 

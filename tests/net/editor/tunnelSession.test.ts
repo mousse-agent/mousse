@@ -630,6 +630,9 @@ describe('the local methods of the editor proxy, over a real session', () => {
     t.laptop.editorTunnelConnectionClosed('proxy-1')
     await vi.waitFor(() => expect(t.owner.editorTunnelList()).toEqual([]))
     await vi.waitFor(() => expect(t.echo.sockets.size).toBe(0))
+  }, 60_000)
+})
+
 describe('the check before an editor opens (net.editor.probe)', () => {
   const probe = (t: Awaited<ReturnType<typeof pair>>) =>
     t.laptop.request('net.editor.probe', { node: t.self.node })
