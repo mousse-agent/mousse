@@ -2569,6 +2569,11 @@ export class NetService {
         })
       case 'net.ssh.list':
         return ssh.list()
+      case 'net.ssh.target': {
+        // The endpoint this computer approved for the device, the one its own SSH logins use. Read-only.
+        const approval = await readSshApproval(this.options.profileDir, params.node as NodeId)
+        return approval ? { endpoint: approval.endpoint } : {}
+      }
       case 'net.ssh.setup.status':
         return ssh.status(String(params.id))
     }
