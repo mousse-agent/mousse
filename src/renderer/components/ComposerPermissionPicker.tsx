@@ -9,7 +9,7 @@ import {
   type PermissionLimits,
   type PermissionMode
 } from '../../shared/permissionMode'
-import { ChevronDown } from '../lib/icons'
+import { ChevronDown, Shield } from '../lib/icons'
 import { FloatingPortal, useFloatingPosition } from '../lib/floatingLayer'
 import { MenuCheck } from './ComposerEffortPicker'
 
@@ -72,7 +72,7 @@ export function ComposerPermissionPicker({ mode, agent, caps, limits, ceiling, r
   const title = reason ? `${label}. ${reason}` : label
   return <div className="composer-permission-picker">
     <button ref={anchorRef} type="button" className={`composer-pill-btn${open ? ' open' : ''}${reason ? ' is-limited' : ''}`} disabled={readOnly} title={title} aria-label={`Permission mode: ${title}`} aria-haspopup="menu" aria-expanded={open} onClick={() => setOpen(!open)}>
-      <span>{label}</span><ChevronDown size={12} />
+      <Shield size={14} aria-hidden="true" /><span>{label}</span><ChevronDown size={12} />
     </button>
     {open && !readOnly && <FloatingPortal><div ref={contentRef} style={style} className="composer-mode-menu composer-mode-menu-floating" role="menu" aria-label="Permission mode">
       <div className="composer-mode-menu-section" role="group" aria-label="Permission mode">
