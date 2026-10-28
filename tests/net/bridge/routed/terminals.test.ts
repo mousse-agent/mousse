@@ -432,6 +432,40 @@ describe('what ends a device’s terminals', () => {
   }, 240_000)
 })
 
+describe('a window of this computer', () => {
+  it('can still type into, resize and stop a terminal of a thread that is being trashed, naming the thread as it does for another computer', async () => {
+    const o = await routedOwner()
+    const mms = o.f.mms
+    const lifecycle = mms.threads.lifecycleStore!
+    vi.spyOn(lifecycle, 'get').mockReturnValue({} as never)
+    vi.spyOn(mms.threads, 'assertThreadAdmission').mockImplementation(() => {
+      throw new Error('This thread is being deleted.')
+    })
+    const window = (method: string, params: Record<string, unknown>) =>
+      dispatchMethod(
+        {
+          mms,
+          globalSequence: () => 0,
+          connection: {
+            id: 'window-1',
+            clientType: 'gui',
+            capabilities: new Set(),
+            binding: { profileId: mms.getProfileId(), epoch: 1 },
+            lifetime: new AbortController().signal
+          }
+        },
+        method,
+        params
+      )
+    await expect(window('pty.write', { ptyId: 'p', data: 'x', threadId: 't' })).resolves.toEqual({ ok: true })
+    await expect(window('pty.resize', { ptyId: 'p', cols: 80, rows: 24, threadId: 't' })).resolves.toEqual({
+      ok: true
+    })
+    // Opening a new one on that thread is still refused.
+    await expect(window('pty.create', { threadId: 't', agentId })).rejects.toThrow('being deleted')
+  }, 120_000)
+})
+
 describe('what is audited', () => {
   it('records the first terminal of a device once, each open and kill, and the close with its bytes, but not every key press', async () => {
     const o = await routedOwner()
@@ -551,6 +585,51 @@ describe('a terminal’s output on its own stream', () => {
     const after = readStream(o.f, (stream.descriptor as { id: never }).id, stream.subject).events
     expect(after.slice(-2).map((event) => event.type)).toEqual(['pty.data', 'pty.exit'])
     expect(after.at(-2)!.data).toMatchObject({ sequence: 301, data: 'last' })
+  }, 240_000)
+
+  it('carries what a real pseudo-terminal printed, 1 MiB of it, exactly as the owner’s own windows heard it', async () => {
+    const nodePty = await import('node-pty')
+    const o = await routedOwner({ streams: true })
+    o.policy.set(o.f.callerNode, { terminal: true })
+    // A real process on a real pseudo-terminal: it waits to be typed to, prints 1 MiB in large writes and a marker, and ends.
+    const script =
+      'process.stdin.once("data", () => { const chunk = "y".repeat(65536); for (let i = 0; i < 16; i++) process.stdout.write(chunk); process.stdout.write("\\nEND\\n", () => process.exit(0)) })'
+    ;(o.f.mms.ptyManager as unknown as { spawnPty: unknown }).spawnPty = (
+      _shell: string,
+      _args: string[],
+      options: Record<string, unknown>
+    ) => nodePty.spawn(process.execPath, ['-e', script], options as never)
+    const heard: Array<{ sequence: number; data: string }> = []
+    o.f.mms.ptyManager.on('data', (payload: { sequence: number; data: string }) =>
+      heard.push({ sequence: payload.sequence, data: payload.data })
+    )
+    const exited = new Promise<void>((resolve) => o.f.mms.ptyManager.once('exit', () => resolve()))
+    const { t } = folderThread(o)
+    const created = await create(o, t.id)
+    expect(created.ok).toBe(true)
+    const ptyId = (created as { result: { ptyId: string } }).result.ptyId
+    // The stream is attached before the process is told to print.
+    const stream = (await o.ok('stream.open', { kind: 'terminal', threadId: t.id, ptyId })) as RoutedStreamOpened
+    expect(await type(o, t.id, ptyId, 1, 'go\r')).toMatchObject({ ok: true })
+    await exited
+    await new Promise((resolve) => setTimeout(resolve, 300))
+    const all = heard.map((chunk) => chunk.data).join('')
+    expect(all.length).toBeGreaterThanOrEqual(1024 * 1024)
+    expect(all).toContain('END')
+
+    const { snapshot, events } = readStream(o.f, (stream.descriptor as { id: never }).id, stream.subject)
+    const data = events.filter((event) => event.type === 'pty.data')
+    // What the shell printed before the stream was attached is the snapshot's scrollback; the rest is records, each chunk
+    // once and in order, and together they are everything the owner's own windows heard.
+    expect(snapshot.scrollback + data.map((event) => event.data.data as string).join('')).toBe(all)
+    // A chunk larger than a record is in pieces that share its number, side by side, so the numbers climb without a step back.
+    const numbers = data.map((event) => event.data.sequence as number)
+    expect(numbers).toEqual([...numbers].sort((a, b) => a - b))
+    expect([...new Set(numbers)]).toEqual(
+      heard.filter((chunk) => chunk.sequence > snapshot.sequence).map((chunk) => chunk.sequence)
+    )
+    expect(numbers.length).toBeGreaterThan(0)
+    expect(events.at(-1)).toMatchObject({ type: 'pty.exit' })
   }, 240_000)
 
   it('can be caught up from a sequence number with pty.outputSince', async () => {

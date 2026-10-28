@@ -145,6 +145,11 @@ describe('terminals on another computer', () => {
         new Error("Error invoking remote method 'pty:create': Error: Studio Mac is offline.")
       )
     ).toEqual({ message: 'Studio Mac is offline.' })
+    expect(
+      terminalNoticeFor(
+        new Error("Error invoking remote method 'pty:create': MmsProtocolError: Studio Mac is offline.")
+      )
+    ).toEqual({ message: 'Studio Mac is offline.' })
     expect(terminalNoticeFor('plain text')).toEqual({ message: 'plain text' })
   })
 

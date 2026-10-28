@@ -56,7 +56,7 @@ export function terminalNoticeFor(error: unknown): TerminalNotice {
       message: `Terminals from this computer are off on ${off.computer}.`,
       hint: `On ${off.computer}, open Devices and turn on Terminals for this computer.`
     }
-  return { message: text.replace(/^Error invoking remote method '[^']+': (?:Error: )?/, '') }
+  return { message: text.replace(/^Error invoking remote method '[^']+': (?:\w+: )?/, '') }
 }
 
 /**

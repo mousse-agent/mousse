@@ -103,6 +103,37 @@ describe('calls about a request name the thread for the router', () => {
   })
 })
 
+describe('a terminal on another computer', () => {
+  it('names the thread for typing, resizing and stopping, and leaves it out for a local terminal', async () => {
+    await invoke('pty:write', 'pty-1', 'ls\r', REMOTE)
+    await invoke('pty:resize', 'pty-1', 100, 30, REMOTE)
+    await invoke('pty:kill', 'pty-1', REMOTE)
+    await invoke('pty:write', 'pty-2', 'x')
+    await invoke('pty:resize', 'pty-2', 80, 24)
+    await invoke('pty:kill', 'pty-2', '')
+    expect(calls).toEqual([
+      { method: 'pty.write', params: { ptyId: 'pty-1', data: 'ls\r', threadId: REMOTE } },
+      { method: 'pty.resize', params: { ptyId: 'pty-1', cols: 100, rows: 30, threadId: REMOTE } },
+      { method: 'pty.kill', params: { ptyId: 'pty-1', threadId: REMOTE } },
+      { method: 'pty.write', params: { ptyId: 'pty-2', data: 'x' } },
+      { method: 'pty.resize', params: { ptyId: 'pty-2', cols: 80, rows: 24 } },
+      { method: 'pty.kill', params: { ptyId: 'pty-2' } }
+    ])
+  })
+
+  it('opens it with a thread and a project shell only: no folder, shell, arguments or environment of this computer', async () => {
+    presentation.setActiveThreadId(REMOTE)
+    const request = { agentId: '__project-shell__:tab', cwd: 'C:\\here', command: 'x', env: { A: 'b' }, shellArgs: ['-c'] }
+    await invoke('pty:create', request)
+    expect(sent('pty.create')[0].params).toEqual({ threadId: REMOTE, agentId: '__project-shell__:tab' })
+    // A terminal of this computer is opened as it always was.
+    calls.length = 0
+    presentation.setActiveThreadId('local-thread')
+    await invoke('pty:create', request)
+    expect(sent('pty.create')[0].params).toEqual({ threadId: 'local-thread', ...request })
+  })
+})
+
 describe('selecting a thread on another computer', () => {
   it('holds it open before reading it, and lets go of it when the selection moves on', async () => {
     await invoke('threads:select', REMOTE)

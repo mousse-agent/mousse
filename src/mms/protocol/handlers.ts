@@ -1111,7 +1111,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       !['threads.delete', 'threads.trash', 'threads.restore', 'threads.purge', 'threads.inventory', 'threads.focus',
         // These name the thread only so a router can find its computer; they worked for a thread being trashed before.
         'orchestrator.answerQuestions', 'orchestrator.dismissQuestions', 'runs.get', 'runs.resumeNow', 'runs.cancelPause',
-        'git.cancelOperation', 'pty.isAlive', 'pty.lookup'].includes(method) &&
+        'git.cancelOperation', 'pty.isAlive', 'pty.lookup', 'pty.write', 'pty.resize', 'pty.kill'].includes(method) &&
       ctx.mms.threads?.lifecycleStore?.get(params.threadId)) {
     ctx.mms.threads.assertThreadAdmission(params.threadId)
   }
