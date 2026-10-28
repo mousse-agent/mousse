@@ -1,4 +1,4 @@
-{"kind":"transcript","adapter":"pi-rpc","scenario":"plain-turn","boundary":"Pi RPC on stdio: commands out (without ids); events in","recordedAt":"hand-authored","version":1}
+{"kind":"transcript","adapter":"pi-rpc","scenario":"plain-turn","boundary":"Pi RPC on stdio: commands out (without ids); events in","recordedAt":"hand-authored","basis":"1.4.0","version":1}
 {"dir":"out","frame":{"kind":"command","command":{"type":"prompt","message":"Say hello"}}}
 {"dir":"in","frame":{"type":"agent_start"}}
 {"dir":"in","frame":{"type":"turn_start"}}

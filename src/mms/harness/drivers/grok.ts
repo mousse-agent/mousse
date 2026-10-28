@@ -6,6 +6,7 @@ import type { LoginSession } from '../../providers/LoginSession'
 import { cliLaunch, withUserEnv, type CliLaunch } from '../../providers/cliConfig'
 import type { AcpConnection, AcpLaunchRequest } from '../acp/connection'
 import { GROK_CAPS, GROK_LABEL, GROK_PRESET, GROK_TESTED_VERSION } from '../acp/presets/grok'
+import { compatibilityFields } from '../compatibility'
 import type { AgentInstalls, PackageBinarySpec } from '../agents/install'
 import { DIST_DIR } from '../agents/receipt'
 import { compareVersions, decodeInstanceConfig, type AuthReading, type DriverContext, type DriverRuntime, type HarnessDriver, type ManagedInstall } from '../driver'
@@ -86,7 +87,7 @@ export function grokDriver(options: GrokDriverOptions = {}): HarnessDriver {
     kind: 'grok',
     label: GROK_LABEL,
     binaryNames: cliNames('grok'),
-    testedVersions: { min: GROK_TESTED_VERSION, max: GROK_TESTED_VERSION },
+    ...compatibilityFields('grok'),
     latestVersion: { kind: 'npm', package: '@xai-official/grok' },
     multiInstance: true,
     privateHome: true,
@@ -344,6 +345,7 @@ function createGrokRuntime(context: DriverContext, options: GrokDriverOptions): 
       version: installed.receipt.version,
       bytes: installed.receipt.bytes,
       checksum: installed.receipt.checksum,
+      receiptHash: installed.hash,
       ...(filesChanged ? { broken: filesChanged } : {})
     }
   }

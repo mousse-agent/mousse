@@ -30,7 +30,7 @@ import {
 import { cliNames, findOnPath, lockedEnv, ownedLaunchEnv, ownedUserEnv } from '../env'
 import { CLAUDE_LOCKED_PROFILE, CLAUDE_MANAGED_POLICY_REFUSAL, CLAUDE_NATIVE_TOOLS, claudeLockedCaps, claudeLockedHoldsBots, claudeSandboxFact } from '../claude/locked'
 import { readClaudeManagedPolicy, remoteSettingsHoldPolicy, type ManagedPolicyReadInput } from '../claude/managedPolicy'
-import { CONTAINMENT_EVIDENCE, hasContainmentEvidence, type ContainmentEvidence } from '../compatibility'
+import { compatibilityFields, CONTAINMENT_EVIDENCE, hasContainmentEvidence, type ContainmentEvidence } from '../compatibility'
 import { CLAUDE_INSTANCE_ID } from '../../../shared/providerInstances'
 import { decodeInstanceConfig, type AuthReading, type DriverContext, type DriverRuntime, type HarnessDriver, type InstanceConfig } from '../driver'
 import { ownedHomeProblem } from '../ownedHome'
@@ -38,9 +38,6 @@ import { ptyAvailable, redactSignIn, runInPty, terminalText, transcriptLinks, ty
 import { runHarness } from '../spawn'
 import { InstanceVault } from '../vault'
 import { ALL_MIRROR_FIELDS, SIGN_OUT_MIRROR_FIELDS } from '../vendorMirror'
-
-/** Claude Code versions Mousse was tested with. */
-export const CLAUDE_TESTED_VERSIONS = { min: '2.0.0', max: '2.1.999' }
 
 export const CLAUDE_CODE_CAPS: HarnessCaps = Object.freeze({
   ...CLAUDE_SUBSCRIPTION_CAPABILITIES,
@@ -241,7 +238,7 @@ export function claudeCodeDriver(options: ClaudeCodeDriverOptions = {}): Harness
     kind: 'claude',
     label: 'Claude Code',
     binaryNames: cliNames('claude'),
-    testedVersions: CLAUDE_TESTED_VERSIONS,
+    ...compatibilityFields('claude'),
     latestVersion: { kind: 'npm', package: '@anthropic-ai/claude-code' },
     multiInstance: true,
     privateHome: true,

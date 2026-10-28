@@ -3,8 +3,10 @@
  * Records an ACP replay fixture (`tests/run/fixtures/<scenario>/<adapter>.ndjson`) from a real
  * agent, in the transcript format `src/mms/run/testkit/acpReplay.ts` replays.
  *
- *   node scripts/record-acp-fixture.mjs --scenario plain-turn --adapter acp --prompt "Say hello" -- grok agent --no-leader stdio
+ *   node scripts/record-acp-fixture.mjs --scenario plain-turn --adapter acp --prompt "Say hello" [--agent-version 1.0.70] -- grok agent --no-leader stdio
  *
+ * The header records the agent's version (`agentVersion`), from its `initialize` answer or
+ * `--agent-version`: the compatibility table (`src/mms/harness/compatibility.ts`) cites it.
  * Use only an agent that is already signed in: this script never signs in, and it stops if the
  * agent asks for authentication. It opens one session in a temporary folder (deleted afterwards),
  * sends one prompt, and writes what crossed the connection with tokens, home paths and the temporary
@@ -66,7 +68,11 @@ async function main() {
     }
   }
   try {
-    await call(methods.agent.initialize, { protocolVersion: PROTOCOL_VERSION, clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false }, clientInfo: { name: 'Mousse', version: '0.0.0' } })
+    const initialized = await call(methods.agent.initialize, { protocolVersion: PROTOCOL_VERSION, clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false }, clientInfo: { name: 'Mousse', version: '0.0.0' } })
+    // The version the recording is evidence for (`COMPATIBILITY`): announced by the agent, or given with --agent-version.
+    const agentVersion = initialized?.agentInfo?.version ?? options['agent-version']
+    if (!agentVersion) throw new Error('The agent did not announce its version; pass --agent-version. Nothing was written.')
+    lines[0] = { ...lines[0], agentVersion }
     const session = await call(methods.agent.session.new, { cwd, mcpServers: [] })
     await call(methods.agent.session.prompt, { sessionId: session.sessionId, prompt: [{ type: 'text', text: options.prompt }] })
     const target = resolve('tests', 'run', 'fixtures', options.scenario, `${options.adapter}.ndjson`)

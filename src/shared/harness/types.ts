@@ -247,7 +247,9 @@ export const HARNESS_ERROR_CODES = [
   /** A turn, tool-call, token or cost limit refused the next step (`HarnessError.limit`). */
   'budget_exhausted',
   /** The connection was retired by a Mousse update and must be moved before it runs again. */
-  'provider_retired'
+  'provider_retired',
+  /** The agent's version has a known problem (`COMPATIBILITY`), and the user has not allowed it. */
+  'known_broken'
 ] as const
 export type HarnessErrorCode = (typeof HARNESS_ERROR_CODES)[number]
 
@@ -318,7 +320,8 @@ const HARNESS_ERROR_CATEGORY: Record<HarnessErrorCode, ErrorCategory> = {
   binding_stale: 'conflict',
   no_model_selected: 'invalid',
   budget_exhausted: 'denied',
-  provider_retired: 'unsupported'
+  provider_retired: 'unsupported',
+  known_broken: 'denied'
 }
 
 /** The protocol-safe error for a `HarnessError` (its message is audited text, never vendor output). */

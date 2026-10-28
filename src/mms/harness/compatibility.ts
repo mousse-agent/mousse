@@ -1,4 +1,117 @@
 import type { HarnessDriverKind } from '../../shared/harness/types'
+import { compareVersions } from './driver'
+
+/**
+ * Which agent versions Mousse was tested with, and which are known to break. One row per driver
+ * kind, and per ACP preset (`acp:<preset id>`) for the agents the `acp` driver runs. Drivers and
+ * presets read their range from here (`compatibilityFields`); none declares its own.
+ * `docs/providers/compatibility.md` says how a row changes when an agent releases a new version.
+ */
+export type CompatibilityKey = Exclude<HarnessDriverKind, 'acp'> | `acp:${string}`
+
+/** A version range: one version (`2.1.5`), or two joined by ` - ` (`2.1.5 - 2.1.9`), both included. */
+export interface KnownBrokenVersions {
+  range: string
+  /** Shown to the user: what goes wrong with these versions. */
+  reason: string
+  /** The first version that works again: the page then offers the update. */
+  fixedIn?: string
+}
+
+export interface CompatibilityEvidence {
+  version: string
+  /** `fixture`: a replay fixture recorded from or written against that version; `smoke`: a run on the real agent. */
+  kind: 'fixture' | 'smoke'
+  /** The fixture's path, or the PR whose description records the run (`#226`). */
+  ref: string
+}
+
+export interface CompatibilityRow {
+  /**
+   * The versions Mousse was tested with. Absent for a row that judges no version: the generic ACP
+   * preset runs any agent.
+   */
+  tested?: { min: string; max: string }
+  /** Versions that do not work with Mousse: turns on them are refused unless the user allows the version. */
+  knownBroken?: readonly KnownBrokenVersions[]
+  evidence: readonly CompatibilityEvidence[]
+  /**
+   * A runtime Mousse ships (an npm dependency): it is always the tested one. The row records the
+   * version for its upgrades; the probe does not judge it.
+   */
+  bundled?: { package: string }
+}
+
+export const COMPATIBILITY: Readonly<Record<CompatibilityKey, CompatibilityRow>> = Object.freeze({
+  claude: {
+    tested: { min: '2.0.0', max: '2.1.999' },
+    evidence: [
+      { version: '2.1.291', kind: 'smoke', ref: '#285' },
+      { version: '2.1.291', kind: 'fixture', ref: 'tests/run/fixtures/plain-turn/claude-subscription.ndjson' }
+    ]
+  },
+  codex: {
+    tested: { min: '0.100.0', max: '0.162.999' },
+    evidence: [
+      { version: '0.162.1', kind: 'smoke', ref: '#251' },
+      { version: '0.162.1', kind: 'fixture', ref: 'tests/run/fixtures/activity/codex.ndjson' }
+    ]
+  },
+  antigravity: {
+    tested: { min: '1.1.1', max: '1.1.1' },
+    evidence: [{ version: '1.1.1', kind: 'fixture', ref: 'tests/run/fixtures/plain-turn/antigravity.ndjson' }]
+  },
+  grok: {
+    tested: { min: '1.0.70', max: '1.0.70' },
+    evidence: [{ version: '1.0.70', kind: 'smoke', ref: '#226' }]
+  },
+  cursor: {
+    tested: { min: '1.0.35', max: '1.0.35' },
+    bundled: { package: '@cursor/sdk' },
+    evidence: [{ version: '1.0.35', kind: 'fixture', ref: 'tests/run/fixtures/plain-turn/cursor.ndjson' }]
+  },
+  pi: {
+    tested: { min: '1.4.0', max: '1.4.0' },
+    bundled: { package: '@earendil-works/pi-coding-agent' },
+    evidence: [
+      { version: '1.4.0', kind: 'smoke', ref: '#369' },
+      { version: '1.4.0', kind: 'fixture', ref: 'tests/run/fixtures/plain-turn/pi-rpc.ndjson' }
+    ]
+  },
+  'acp:generic': { evidence: [] },
+  'acp:grok': {
+    tested: { min: '1.0.70', max: '1.0.70' },
+    evidence: [{ version: '1.0.70', kind: 'smoke', ref: '#226' }]
+  }
+} satisfies Record<CompatibilityKey, CompatibilityRow>)
+
+/** What a driver or preset takes from its row: its tested range and known-broken versions. */
+export function compatibilityFields(key: CompatibilityKey): { testedVersions?: { min: string; max: string }; knownBroken?: readonly KnownBrokenVersions[] } {
+  const row = COMPATIBILITY[key]
+  return {
+    ...(row.tested && !row.bundled ? { testedVersions: row.tested } : {}),
+    ...(row.knownBroken?.length ? { knownBroken: row.knownBroken } : {})
+  }
+}
+
+const VERSION = /^\d+(\.\d+){0,3}([-+][0-9A-Za-z.-]+)?$/
+
+/** `KnownBrokenVersions.range` as its two ends; undefined when it does not parse. */
+export function parseVersionRange(range: string): { min: string; max: string } | undefined {
+  const parts = range.split(' - ').map((part) => part.trim())
+  if (parts.length > 2 || !parts.every((part) => VERSION.test(part))) return undefined
+  const [min, max = min] = parts
+  return compareVersions(min, max) <= 0 ? { min, max } : undefined
+}
+
+/** The known-broken row `version` falls in, if any. */
+export function knownProblemOf(rows: readonly KnownBrokenVersions[] | undefined, version: string | undefined): KnownBrokenVersions | undefined {
+  if (!rows?.length || !version) return undefined
+  return rows.find((row) => {
+    const range = parseVersionRange(row.range)
+    return range !== undefined && compareVersions(version, range.min) >= 0 && compareVersions(version, range.max) <= 0
+  })
+}
 
 /**
  * Containment evidence (PR 6 §3): what a runtime was proven to hold, per driver, CLI version and

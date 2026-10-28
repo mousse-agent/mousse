@@ -1,4 +1,4 @@
-{"kind":"transcript","adapter":"cursor","scenario":"provider-error","boundary":"Cursor host NDJSON on the host process: requests out; replies, run updates and exits in","recordedAt":"hand-authored","version":1}
+{"kind":"transcript","adapter":"cursor","scenario":"provider-error","boundary":"Cursor host NDJSON on the host process: requests out; replies, run updates and exits in","recordedAt":"hand-authored","basis":"1.0.35","version":1}
 {"dir":"out","frame":{"kind":"request","method":"create","params":{"apiKey":"replay-key","model":{"id":"default"},"mode":"agent","settingSources":["project","user","team","mdm","plugins"],"autoReview":true}}}
 {"dir":"in","frame":{"kind":"reply","method":"create","result":{"agentId":"agent-1"}}}
 {"dir":"out","frame":{"kind":"request","method":"send","params":{"agentId":"agent-1","text":"Summarise the repository","model":{"id":"default"},"mode":"agent"}}}

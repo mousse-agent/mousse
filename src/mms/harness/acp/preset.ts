@@ -1,4 +1,5 @@
 import type { HarnessCaps, RegistrySourcePatch, RuntimeFacts } from '../../../shared/harness/types'
+import type { KnownBrokenVersions } from '../compatibility'
 import type { InstanceConfig } from '../driver'
 import type { AcpPurpose } from './connection'
 import type { ClassifyOption } from './permissions'
@@ -36,7 +37,9 @@ export interface AcpLaunch {
 export interface AcpPreset {
   id: string
   label: string
+  /** From the preset's row of `COMPATIBILITY` (`acp:<id>`). */
   testedVersions?: { min: string; max: string }
+  knownBroken?: readonly KnownBrokenVersions[]
   launch(context: AcpLaunchContext): AcpLaunch
   /** The executable's version flag; `null` when the preset knows none (the handshake decides). */
   versionArgs?(config: InstanceConfig): string[] | null

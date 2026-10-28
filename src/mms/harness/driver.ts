@@ -6,6 +6,7 @@ import type { CliProviderConfigPatch, ConfiguredProvider, ProviderLoginResult, P
 import type { LlmModelOption, LlmProviderOption } from '../../shared/settings'
 import type { UserQuestionService } from '../orchestrator/UserQuestionService'
 import type { AcpSource } from './acp/preset'
+import type { KnownBrokenVersions } from './compatibility'
 import type { LoginSession } from '../providers/LoginSession'
 import type { ProviderAdapter } from '../run/adapters/ProviderAdapter'
 import type { McpTurnBinding } from '../run/mcp/appTools/registry'
@@ -88,6 +89,8 @@ export interface ManagedInstall {
   broken?: string
   /** Something to tell the user about the install. */
   advisory?: string
+  /** The hash of the install's receipt (`agents/receipt.ts`): a reinstall changes it. */
+  receiptHash?: string
 }
 
 /** What a runtime says of the account's usage; the gateway adds the instance's id and name. */
@@ -337,8 +340,10 @@ export interface HarnessDriver {
   readonly label: string
   /** Executable names searched on PATH; empty for runtimes Mousse hosts itself. */
   readonly binaryNames: readonly string[]
-  /** Versions Mousse was tested with; a newer one is reported, never blocked. */
+  /** Versions Mousse was tested with (`COMPATIBILITY`); a newer one is reported, never blocked. */
   readonly testedVersions?: { min: string; max: string }
+  /** Versions known not to work (`COMPATIBILITY`): turns on them are refused until the user allows the version. */
+  readonly knownBroken?: readonly KnownBrokenVersions[]
   /** Where the newest published version is known from; none for an agent whose releases Mousse cannot see. */
   readonly latestVersion?: LatestVersionSource
   /** The driver can run several instances (Add dialog); others have only their built-in one. */

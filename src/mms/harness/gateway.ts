@@ -74,7 +74,7 @@ import {
 import type { BotAuthority } from '../../shared/bots/personal/authority'
 import { HarnessScopeStore } from './scope'
 import { sharedShellPath, type ShellPathResult } from './shellPath'
-import { compatibilityOf, fingerprintOf, PROBE_TIMEOUTS, probeInstance, sameBinary, updateAffordance, type ProbeResult } from './status'
+import { compatibilityOf, fingerprintOf, knownProblemMessage, PROBE_TIMEOUTS, probeInstance, sameBinary, updateAffordance, type ProbeResult } from './status'
 import { interruptWithDeadline } from './supervise'
 import {
   changedFields,
@@ -354,6 +354,12 @@ export interface HarnessInstances {
   /** False when the operation or prompt is no longer waiting. */
   respondSignIn(operationId: string, response: SignInResponse): Promise<boolean>
   signOut(instanceId: string): Promise<InstanceSnapshot>
+  /**
+   * "Run anyway with <version>": turns run on a version with a known problem, for this program only.
+   * The gateway checks the instance again itself and records the version and executable that check
+   * found, never what the client saw; a different version or executable later needs this again.
+   */
+  allowKnownProblem(instanceId: string, version: string): Promise<InstanceSnapshot>
   /** Bypasses the probe cache. */
   recheck(instanceId: string): Promise<InstanceSnapshot>
   refreshModels(instanceId: string): Promise<InstanceSnapshot>
@@ -682,6 +688,29 @@ function removeStateDir(dir: string): void {
   if (failure) throw failure
 }
 
+/**
+ * `config.knownProblemConsent`: the user allowed a version with a known problem for one executable
+ * (and, for Mousse's own install, one install receipt). Written only by `allowKnownProblem` from
+ * the gateway's own check; `configure` never takes it.
+ */
+interface KnownProblemConsent {
+  version: string
+  binary: BinaryFingerprint
+  receiptHash?: string
+}
+
+const KNOWN_PROBLEM_CONSENT_KEY = 'knownProblemConsent'
+
+function knownProblemConsentOf(config: Record<string, unknown> | undefined): KnownProblemConsent | undefined {
+  const raw = config?.[KNOWN_PROBLEM_CONSENT_KEY]
+  if (!raw || typeof raw !== 'object') return undefined
+  const { version, binary, receiptHash } = raw as Record<string, unknown>
+  if (typeof version !== 'string' || !binary || typeof binary !== 'object') return undefined
+  const { path, size, mtimeMs } = binary as Record<string, unknown>
+  if (typeof path !== 'string' || typeof size !== 'number' || typeof mtimeMs !== 'number') return undefined
+  return { version, binary: { path, size, mtimeMs }, ...(typeof receiptHash === 'string' ? { receiptHash } : {}) }
+}
+
 function harnessFail(code: HarnessErrorCode, message: string, instanceId?: string): never {
   throw harnessAppError({ code, message, ...(instanceId ? { instanceId } : {}) })
 }
@@ -812,6 +841,7 @@ export class Harness implements HarnessGateway {
       signIn: (instanceId, method) => this.signIn(instanceId, method),
       respondSignIn: async (operationId, response) => this.respondSignIn(operationId, response),
       signOut: (instanceId) => this.signOut(instanceId),
+      allowKnownProblem: (instanceId, version) => this.allowKnownProblem(instanceId, version),
       recheck: async (instanceId) => {
         this.refreshLatest([instanceId])
         await this.probe(instanceId, true, { handshake: true })
@@ -1030,8 +1060,9 @@ export class Harness implements HarnessGateway {
     if (this.instanceMap.isRemoved(resolved.instanceId))
       harnessFail('instance_unknown', `Provider instance "${resolved.instanceId}" was removed. Add it again in Settings → Providers, or choose another model.`, resolved.instanceId)
     const record = this.recordOrUndefined(resolved.instanceId)
-    // Nothing is admitted on an instance signed out in Mousse: no account check, no runtime start.
-    if (record) this.refuseSignedOut(record)
+    // Nothing is admitted on an instance signed out in Mousse or on a version with a known problem:
+    // no account check, no runtime start.
+    if (record) this.admissionGate(record)
     const accountId = record ? await this.currentAccount(record) : undefined
     const counters = this.counters.get(resolved.instanceId)
     // The attempt runs on the caps of this moment, whatever the runtime reports meanwhile.
@@ -1365,7 +1396,7 @@ export class Harness implements HarnessGateway {
     const runtime = record.runtime
     if (!runtime.oneShot) harnessFail('unsupported', `${this.displayName(record)} cannot run a single request.`, record.instanceId)
     if (record.stopped) throw this.stopError(record, record.stopped.reason)
-    this.refuseSignedOut(record)
+    this.admissionGate(record)
     // The gateway's inactivity bound: every provider event restarts it; past it the request is aborted.
     const idle = new AbortController()
     let timer: ReturnType<typeof setTimeout> | undefined
@@ -1412,10 +1443,11 @@ export class Harness implements HarnessGateway {
     const draining = this.stopBarriers.get(record.instanceId)
     if (draining?.size) await Promise.all([...draining])
     this.refuseStopped(record, entry)
-    // Every attempt (first, retry, recovery, continuation) of a retired instance, or one signed out
-    // in Mousse, is refused; retired first, since signing in again would not help.
+    // Every attempt (first, retry, recovery, continuation) of a retired instance, one signed out in
+    // Mousse, or one on a version with a known problem, is refused; retired first, since signing in
+    // again would not help.
     this.refuseRetired(record)
-    this.refuseSignedOut(record)
+    this.admissionGate(record)
     if (input.instanceId !== binding.instanceId || input.model !== binding.model)
       harnessFail('protocol', `The turn names ${input.instanceId ?? 'no instance'}/${input.model} but its binding is ${binding.instanceId}/${binding.model}.`, binding.instanceId)
     // The runtime takes its permissions from the input's mode: it must be the binding's policy.
@@ -2180,6 +2212,7 @@ export class Harness implements HarnessGateway {
     // A retired entry runs nothing and keeps asking to move (it offers no sign-in) until it moved.
     const retired = retiredPrompt(driver, instanceId, record.config)
     const nextStep: NextStep | undefined = retired ? { action: 'move', label: 'Move', title: retired.title, detail: retired.detail } : signInStep
+    const allowed = shown ? this.knownProblemAllowed(record, shown) : false
     return {
       instanceId,
       driver: driver.kind,
@@ -2196,7 +2229,9 @@ export class Harness implements HarnessGateway {
         ...(managed?.checksum ? { checksum: managed.checksum } : {}),
         ...(managed?.advisory ? { advisory: managed.advisory } : {})
       },
-      runs: retired ? { state: 'no', message: `${retired.title}. ${retired.detail}` } : shown?.runs ?? { state: 'unknown' },
+      runs: retired
+        ? { state: 'no', message: `${retired.title}. ${retired.detail}` }
+        : allowed && shown?.runs.failure === 'known_broken' ? { state: 'yes' } : shown?.runs ?? { state: 'unknown' },
       auth: {
         state: auth.state,
         // Keyed by its salted hash: the vendor's account id never leaves the gateway.
@@ -2208,7 +2243,9 @@ export class Harness implements HarnessGateway {
         ...(runtime.adoptApiKey ? { canTakeKey: true } : {}),
         ...(auth.credential ? { credential: auth.credential } : {})
       },
-      compatibility: shown?.compatibility ?? compatibilityOf(driver, undefined),
+      compatibility: allowed && shown?.compatibility.knownProblem
+        ? { ...shown.compatibility, knownProblem: { ...shown.compatibility.knownProblem, allowed: true } }
+        : shown?.compatibility ?? compatibilityOf(driver, undefined),
       ...(update ? { update } : {}),
       ...(shown?.binary ? { binary: shown.binary } : {}),
       caps: driver.caps(config, shown?.binary?.version, this.currentFacts(instanceId), instanceId),
@@ -2737,6 +2774,94 @@ export class Harness implements HarnessGateway {
   private refuseSignedOut(record: InstanceRecord): void {
     if (this.isSignedOut(record))
       harnessFail('signed_out', `${this.displayName(record)} is signed out in Mousse. Sign in again in Settings → Providers.`, record.instanceId)
+  }
+
+  /**
+   * The one check every dispatch passes (`bind`, every attempt in `admitTurn`, `oneShot`): the
+   * instance is not signed out in Mousse, and its version has no known problem the user did not allow.
+   */
+  private admissionGate(record: InstanceRecord): void {
+    this.refuseSignedOut(record)
+    this.refuseKnownProblem(record)
+  }
+
+  /**
+   * A version with a known problem (`COMPATIBILITY`) runs only with the user's consent for that
+   * version and that executable. The version is the last check's, for the executable it checked:
+   * one fresh stat per admission tells whether that executable is still the one there. A changed
+   * executable never runs on the old reading: the turn is refused and the instance checked again.
+   * Consent that no longer matches (another version, size, modification time or install receipt)
+   * is dropped. Only a driver with known-broken versions is held to this.
+   */
+  private refuseKnownProblem(record: InstanceRecord): void {
+    if (!record.driver.knownBroken?.length) return
+    const good = this.probes.get(record.instanceId)?.lastGood
+    const probed = good?.fingerprint
+    if (!good || !probed) return
+    const now = fingerprintOf(probed.path)
+    const consent = knownProblemConsentOf(record.entry.config)
+    if (!sameBinary(now, probed)) {
+      if (consent && !sameBinary(consent.binary, now)) this.dropKnownProblemConsent(record)
+      this.checkAgainSoon(record.instanceId)
+      harnessFail('binding_stale', `The ${this.displayName(record)} program changed, so Mousse is checking it again. Send the message again in a moment.`, record.instanceId)
+    }
+    if (good.compatibility.state !== 'known_broken') return
+    if (consent) {
+      const receipt = good.binary?.source === 'managed' ? record.runtime.managed?.()?.receiptHash : undefined
+      if (consent.version === good.binary?.version && sameBinary(consent.binary, now) && consent.receiptHash === receipt) return
+      this.dropKnownProblemConsent(record)
+      this.checkAgainSoon(record.instanceId)
+    }
+    const version = good.binary?.version
+    const reason = good.compatibility.knownProblem?.reason
+    harnessFail(
+      'known_broken',
+      `${knownProblemMessage(this.displayName(record), version, reason)} Update it, or allow this version in Settings → Providers.`,
+      record.instanceId
+    )
+  }
+
+  /** Whether the user allowed the known problem of what `result` checked (its version, executable and receipt). */
+  private knownProblemAllowed(record: InstanceRecord, result: ProbeResult): boolean {
+    if (result.compatibility.state !== 'known_broken') return false
+    const consent = knownProblemConsentOf(record.entry.config)
+    return Boolean(consent && consent.version === result.binary?.version && sameBinary(consent.binary, result.fingerprint) && consent.receiptHash === result.receiptHash)
+  }
+
+  private dropKnownProblemConsent(record: InstanceRecord): void {
+    const config = this.storedConfig(record)
+    delete config[KNOWN_PROBLEM_CONSENT_KEY]
+    try {
+      this.storeConfig(record, config)
+    } catch (error) {
+      console.warn('[harness] could not drop a known-problem consent', { instanceId: record.instanceId, error: errorText(error) })
+    }
+    if (!this.stopped) this.changed(record.instanceId)
+  }
+
+  private checkAgainSoon(instanceId: string): void {
+    if (!this.stopped) queueMicrotask(() => void this.probe(instanceId, true).catch(() => undefined))
+  }
+
+  private async allowKnownProblem(instanceId: string, version: string): Promise<InstanceSnapshot> {
+    this.record(instanceId, { allowDisabled: true })
+    // A check of the gateway's own, started after this request: never what the client saw.
+    await this.probes.get(instanceId)?.probing
+    await this.probe(instanceId, true)
+    const record = this.record(instanceId, { allowDisabled: true })
+    const checked = this.probes.get(instanceId)?.result
+    const name = this.displayName(record)
+    if (!checked || checked.timedOut || !checked.fingerprint)
+      harnessFail('unsupported', `Mousse could not check ${name} just now. Check it again, then allow the version.`, instanceId)
+    if (checked.compatibility.state !== 'known_broken')
+      harnessFail('unsupported', `${name} ${checked.binary?.version ?? version} has no known problem to allow.`, instanceId)
+    if (checked.binary?.version !== version)
+      harnessFail('unsupported', `${name} is at version ${checked.binary?.version ?? 'unknown'} now, not ${version}. Allow the version its card shows.`, instanceId)
+    const consent: KnownProblemConsent = { version, binary: { ...checked.fingerprint }, ...(checked.receiptHash ? { receiptHash: checked.receiptHash } : {}) }
+    this.storeConfig(record, { ...this.storedConfig(record), [KNOWN_PROBLEM_CONSENT_KEY]: consent })
+    this.counters.bumpConfig(instanceId)
+    this.changed(instanceId)
+    return this.snapshot(instanceId, { kind: 'device' })
   }
 
   /** An entry a Mousse update retired runs nothing until it moved (a binding from before included). */

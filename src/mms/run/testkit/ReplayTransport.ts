@@ -20,6 +20,10 @@ export interface TranscriptHeader {
   boundary: string
   /** ISO time of the recording, or `hand-authored`. */
   recordedAt: string
+  /** The agent version a recording was made with (`COMPATIBILITY` evidence). */
+  agentVersion?: string
+  /** A hand-authored transcript: the agent version whose shapes it follows. */
+  basis?: string
   version: number
 }
 

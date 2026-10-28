@@ -2,6 +2,7 @@ import type { HarnessCaps } from '../../../../shared/harness/types'
 import { ACP_BASE_CAPABILITIES } from '../capabilities'
 import { planModeId } from '../models'
 import { classifyGenericOption } from '../permissions'
+import { compatibilityFields } from '../../compatibility'
 import type { AcpPreset } from '../preset'
 import { NO_QUIRKS } from '../quirks'
 

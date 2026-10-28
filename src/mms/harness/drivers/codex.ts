@@ -17,9 +17,7 @@ import { ownedHomeProblem } from '../ownedHome'
 import { ptyAvailable, redactSignIn, runInPty, terminalText, transcriptLinks, type PtyRun, type PtySpawn } from '../pty'
 import { recordHarnessSpawn, runHarness } from '../spawn'
 import { ALL_MIRROR_FIELDS, SIGN_OUT_MIRROR_FIELDS } from '../vendorMirror'
-
-/** Codex CLI versions Mousse was tested with. */
-export const CODEX_TESTED_VERSIONS = { min: '0.100.0', max: '0.162.999' }
+import { compatibilityFields } from '../compatibility'
 
 export const CODEX_CAPS: HarnessCaps = Object.freeze({
   ...CODEX_CAPABILITIES,
@@ -235,7 +233,7 @@ export function codexDriver(options: CodexDriverOptions): HarnessDriver {
     kind: 'codex',
     label: 'Codex',
     binaryNames: cliNames('codex'),
-    testedVersions: CODEX_TESTED_VERSIONS,
+    ...compatibilityFields('codex'),
     latestVersion: { kind: 'npm', package: '@openai/codex' },
     multiInstance: true,
     privateHome: true,

@@ -14,7 +14,7 @@ function context(instances?: Partial<HarnessInstances>, registry?: Partial<Harne
 
 describe('harness provider protocol', () => {
   it('declares the full command set', () => {
-    expect(HARNESS_METHODS).toHaveLength(19)
+    expect(HARNESS_METHODS).toHaveLength(20)
   })
 
   it('the GUI refuses, with recovery steps, a running service that predates the provider methods', async () => {
