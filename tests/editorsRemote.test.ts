@@ -17,7 +17,9 @@ import {
   type EditorDetectionEnv,
   type RemoteOpenIo
 } from '../src/main/editors'
+import type { SshProbeOutcome } from '../src/main/remoteEditorFlow'
 import { newId } from '../src/shared/net'
+import type { EditorProbeResult } from '../src/shared/net/local'
 import { qualifyId } from '../src/shared/threadRef'
 
 const env = (patch: Partial<EditorDetectionEnv> & { files?: string[]; commands?: Record<string, string> }): EditorDetectionEnv => {
@@ -136,6 +138,7 @@ describe('opening a folder of another computer', () => {
     function fixture(patch: { approval?: string; detected?: DetectedEditor[]; exists?: boolean; folders?: Record<string, string[]>; processEnv?: NodeJS.ProcessEnv; proxyReady?: boolean } = {}) {
       const launched: Array<{ command: string; args: string[]; env: NodeJS.ProcessEnv }> = []
       const asked: string[] = []
+      const signedIn: string[] = []
       const io: RemoteOpenIo = {
         detected: async () => patch.detected ?? [code],
         env: () => ({ ...env({ platform: 'linux', home: nowhere }), exists: () => patch.exists ?? true }),
@@ -145,7 +148,12 @@ describe('opening a folder of another computer', () => {
         list: (path) => patch.folders?.[path],
         processEnv: () => patch.processEnv ?? { PATH: '/usr/bin' },
         forgetDetected: () => {},
-        proxyReady: patch.proxyReady ?? false
+        proxyReady: patch.proxyReady ?? false,
+        sshProbe: async (alias) => {
+          signedIn.push(alias)
+          return { ok: true }
+        },
+        signedIn: new Set()
       }
       const ask = async (method: string) => {
         asked.push(method)
@@ -153,7 +161,7 @@ describe('opening a folder of another computer', () => {
         if (method === 'editor.folder') return answer
         throw new Error(`unexpected ${method}`)
       }
-      return { io, ask, launched, asked }
+      return { io, ask, launched, asked, signedIn }
     }
 
     it('starts the editor with the approved address and the owner\u2019s folder', async () => {
@@ -214,6 +222,191 @@ describe('opening a folder of another computer', () => {
       const f = fixture({ approval: 'box', exists: false })
       expect(await openRemoteInEditor('vscode', threadId, f.ask, f.io)).toEqual({ ok: false, reason: 'editor_missing', message: 'VS Code is no longer installed.' })
       expect(f.launched).toEqual([])
+    })
+
+    it('does not check an approved address: a sign-in proved it when it was approved', async () => {
+      const f = fixture({ approval: 'me@box.example.com' })
+      expect(await openRemoteInEditor('vscode', threadId, f.ask, f.io)).toEqual({ ok: true })
+      expect(f.asked).not.toContain('net.editor.probe')
+      expect(f.signedIn).toEqual([])
+    })
+  })
+
+  describe('over one of Mousse’s own SSH names, the check before the editor starts', () => {
+    const node = newId('node')
+    const threadId = qualifyId(node, 't1')
+    const code: DetectedEditor = { id: 'vscode', label: 'VS Code', launcherPath: '/usr/bin/code' }
+    const answer = { path: '/home/me/app', uriPath: '/home/me/app', style: 'posix', platform: 'linux', kind: 'project' }
+
+    // A fake daemon for a computer reached through Mousse's own name for it, and a fake `ssh`.
+    function setup(mousse: { probe?: EditorProbeResult | Error; ssh?: SshProbeOutcome | Error; folder?: Error; platform?: NodeJS.Platform; prepare?: unknown; alias?: unknown } = {}) {
+      const launched: string[][] = []
+      const asked: string[] = []
+      const signedIn: Array<{ alias: string; config: string; env: NodeJS.ProcessEnv }> = []
+      const io: RemoteOpenIo = {
+        detected: async () => [code],
+        env: () => ({ ...env({ platform: mousse.platform ?? 'linux', home: nowhere }), exists: () => true }),
+        launch: async (_command, args) => {
+          launched.push(args)
+        },
+        list: () => undefined,
+        processEnv: () => ({ PATH: '/usr/bin', ELECTRON_RUN_AS_NODE: '1' }),
+        forgetDetected: () => {},
+        proxyReady: true,
+        sshProbe: async (alias, config, probeEnv) => {
+          signedIn.push({ alias, config, env: probeEnv })
+          if (mousse.ssh instanceof Error) throw mousse.ssh
+          return mousse.ssh ?? { ok: true }
+        },
+        signedIn: new Set()
+      }
+      const computers = [{ node, alias: 'mousse-workbox-3fa2c1', name: 'Workbox', hostKeyPinned: true }]
+      const status = { includeLine: 'Include ~/.mousse/ssh/config', mousseConfig: '/h/.mousse/ssh/config', computers }
+      const ask = async (method: string) => {
+        asked.push(method)
+        if (method === 'net.ssh.target') return {}
+        if (method === 'editor.folder') {
+          if (mousse.folder) throw mousse.folder
+          return answer
+        }
+        if (method === 'net.editor.ssh.status') return { available: true }
+        if (method === 'net.editor.alias') return mousse.alias ?? { ok: true, added: false, status }
+        if (method === 'net.editor.ssh.prepare') return mousse.prepare ?? { ok: true, added: true, status }
+        if (method === 'net.editor.probe') {
+          const probe = mousse.probe ?? { ok: true, path: 'direct', transport: 'direct' }
+          if (probe instanceof Error) throw probe
+          return probe
+        }
+        throw new Error(`unexpected ${method}`)
+      }
+      return { io, ask, launched, asked, signedIn }
+    }
+    const refused = (reason: EditorProbeResult & { ok: false }) => reason
+    const router = (code: string, details?: unknown) => Object.assign(new Error(`router: ${code}`), { code, details })
+
+    it('checks the connection, adds the Include line only then, and starts the editor, saying how it runs', async () => {
+      const f = setup({ probe: { ok: true, path: 'relay', transport: 'plus-relay' } })
+      expect(await openRemoteInEditor('vscode', threadId, f.ask, f.io)).toEqual({ ok: true, via: { path: 'relay', transport: 'plus-relay' } })
+      expect(f.asked).toEqual(['net.ssh.target', 'net.editor.ssh.status', 'editor.folder', 'net.editor.alias', 'net.editor.probe', 'net.editor.ssh.prepare'])
+      expect(f.launched).toEqual([['--folder-uri', 'vscode-remote://ssh-remote+mousse-workbox-3fa2c1/home/me/app']])
+    })
+
+    it.each([
+      ['editor_off', 'editor connections are off'],
+      ['no_ssh_server', 'no SSH server'],
+      ['no_host_key', 'no host key'],
+      ['host_untrusted', 'not the system’s own'],
+      ['limit', 'all it may have'],
+      ['rate_limited', 'too fast'],
+      ['blocked', 'blocked'],
+      ['setting_off', 'switched off'],
+      ['capability', 'no grant'],
+      ['net_off', 'net off'],
+      ['offline', 'offline'],
+      ['unsupported', 'too old'],
+      ['timeout', 'did not answer']
+    ] as const)('%s: starts no editor and leaves the user’s ~/.ssh/config alone', async (reason, message) => {
+      const f = setup({ probe: refused({ ok: false, reason, message }) })
+      expect(await openRemoteInEditor('vscode', threadId, f.ask, f.io)).toEqual({ ok: false, reason: 'connection', failure: reason, message })
+      expect(f.launched).toEqual([])
+      // The Include line is added by prepare, which a refused open never reaches; the sign-in is not tried either.
+      expect(f.asked).not.toContain('net.editor.ssh.prepare')
+      expect(f.signedIn).toEqual([])
+    })
+
+    it('says this computer’s own settings were not ready, with the code the window words', async () => {
+      const f = setup({ probe: { ok: false, reason: 'ssh_settings', code: 'unknown_computer', message: 'No alias yet.' } })
+      expect(await openRemoteInEditor('vscode', threadId, f.ask, f.io)).toEqual({ ok: false, reason: 'ssh_settings', code: 'unknown_computer', message: 'No alias yet.' })
+      expect(f.launched).toEqual([])
+      expect(f.asked).not.toContain('net.editor.ssh.prepare')
+    })
+
+    it('gives the plain refusal of the Include line, after the check, when it cannot be added', async () => {
+      const f = setup({ prepare: { ok: false, code: 'unwritable', message: 'detail', status: { includeLine: 'Include ~/.mousse/ssh/config', computers: [] } } })
+      expect(await openRemoteInEditor('vscode', threadId, f.ask, f.io)).toMatchObject({ ok: false, reason: 'ssh_settings', code: 'unwritable', includeLine: 'Include ~/.mousse/ssh/config' })
+      expect(f.launched).toEqual([])
+    })
+
+    it('checks with ssh from Mousse’s own file of names, in the environment the editor starts with', async () => {
+      const f = setup()
+      await openRemoteInEditor('vscode', threadId, f.ask, f.io)
+      expect(f.signedIn).toEqual([{ alias: 'mousse-workbox-3fa2c1', config: '/h/.mousse/ssh/config', env: { PATH: '/usr/bin' } }])
+    })
+
+    it('starts the editor whatever the sign-in check found: it is advice and never a gate', async () => {
+      for (const stderr of ['dev@x: Permission denied (publickey,password).', 'Permission denied (publickey).', 'ssh did not finish signing in.', 'Host key verification failed.']) {
+        const f = setup({ ssh: { ok: false, stderr } })
+        const result = await openRemoteInEditor('vscode', threadId, f.ask, f.io)
+        expect(result, stderr).toMatchObject({ ok: true })
+        expect(f.launched, stderr).toHaveLength(1)
+      }
+      const broken = setup({ ssh: new Error('spawn failed') })
+      expect(await openRemoteInEditor('vscode', threadId, broken.ask, broken.io)).toMatchObject({ ok: true })
+      expect(broken.launched).toHaveLength(1)
+    })
+
+    it('does not advise for a computer that takes a password, and advises for one that takes keys alone', async () => {
+      const password = setup({ ssh: { ok: false, stderr: 'dev@x: Permission denied (publickey,password).' } })
+      expect(await openRemoteInEditor('vscode', threadId, password.ask, password.io)).not.toHaveProperty('advice')
+      const keys = setup({ ssh: { ok: false, stderr: 'Permission denied (publickey).' } })
+      expect(await openRemoteInEditor('vscode', threadId, keys.ask, keys.io)).toMatchObject({ ok: true, advice: { failure: 'key_refused', command: 'ssh-copy-id mousse-workbox-3fa2c1' } })
+      const windows = setup({ platform: 'win32', ssh: { ok: false, stderr: 'Permission denied (publickey).' } })
+      expect(await openRemoteInEditor('vscode', threadId, windows.ask, windows.io)).toMatchObject({ ok: true, advice: { failure: 'key_refused' } })
+      const other = setup({ ssh: { ok: false, stderr: 'Warning: x\nConnection reset by peer' } })
+      expect(await openRemoteInEditor('vscode', threadId, other.ask, other.io)).toMatchObject({ ok: true, advice: { failure: 'ssh_failed', message: 'Connection reset by peer' } })
+    })
+
+    it('opens without the sign-in check when this computer has no ssh to ask', async () => {
+      const f = setup({ ssh: { skipped: true } })
+      const result = await openRemoteInEditor('vscode', threadId, f.ask, f.io)
+      expect(result).toMatchObject({ ok: true })
+      expect(result).not.toHaveProperty('advice')
+      expect(f.launched).toHaveLength(1)
+    })
+
+    it('looks at the connection every time, and signs in with ssh once for each computer in a run', async () => {
+      const f = setup()
+      await openRemoteInEditor('vscode', threadId, f.ask, f.io)
+      await openRemoteInEditor('vscode', threadId, f.ask, f.io)
+      expect(f.asked.filter((method) => method === 'net.editor.probe')).toHaveLength(2)
+      expect(f.signedIn).toHaveLength(1)
+      expect(f.launched).toHaveLength(2)
+    })
+
+    it('says a computer that stopped allowing editor connections is refused, also when an earlier open went through', async () => {
+      const f = setup()
+      expect(await openRemoteInEditor('vscode', threadId, f.ask, f.io)).toMatchObject({ ok: true })
+      const off = setup({ probe: refused({ ok: false, reason: 'editor_off', message: 'off' }) })
+      off.io.signedIn.add(node)
+      expect(await openRemoteInEditor('vscode', threadId, off.ask, off.io)).toMatchObject({ ok: false, failure: 'editor_off' })
+      expect(off.launched).toEqual([])
+    })
+
+    it('says the route of this open, not of an earlier one', async () => {
+      const relay = setup({ probe: { ok: true, path: 'relay', transport: 'relay' } })
+      expect(await openRemoteInEditor('vscode', threadId, relay.ask, relay.io)).toMatchObject({ via: { path: 'relay' } })
+      const direct = setup({ probe: { ok: true, path: 'direct', transport: 'tailscale' } })
+      direct.io.signedIn.add(node)
+      expect(await openRemoteInEditor('vscode', threadId, direct.ask, direct.io)).toMatchObject({ via: { path: 'direct', transport: 'tailscale' } })
+    })
+
+    it('says the computer is offline, blocked this one, or runs a Mousse too old, from the words of the router', async () => {
+      for (const [error, failureReason] of [
+        [router('computer_offline'), 'offline'],
+        [router('computer_forbidden', { reason: 'blocked' }), 'blocked'],
+        [router('computer_forbidden', { reason: 'setting_off' }), 'setting_off'],
+        [router('computer_forbidden', { reason: 'capability' }), 'capability'],
+        [router('computer_outdated'), 'unsupported'],
+        [router('rate_limited'), 'rate_limited'],
+        [router('deadline_exceeded'), 'timeout']
+      ] as const) {
+        const f = setup({ folder: error })
+        expect(await openRemoteInEditor('vscode', threadId, f.ask, f.io), failureReason).toMatchObject({ ok: false, reason: 'connection', failure: failureReason })
+        expect(f.launched).toEqual([])
+      }
+      // Other words of the router are shown as they are.
+      const other = setup({ folder: router('not_available_remotely') })
+      expect(await openRemoteInEditor('vscode', threadId, other.ask, other.io)).toMatchObject({ ok: false, reason: 'failed' })
     })
   })
 })

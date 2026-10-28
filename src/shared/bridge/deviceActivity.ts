@@ -9,11 +9,16 @@
 import type { ApprovalRuleInfo } from '../types'
 import type { NodeId } from '../net/ids'
 
-/** Local methods of this computer's windows. They read this computer's own records and are never routed. */
+/**
+ * Local methods of this computer's windows. They read this computer's own records (and let a person here answer an
+ * ask for editor connections) and are never routed.
+ */
 export const BRIDGE_ACTIVITY_METHODS = [
   'bridge.activity',
   'bridge.clearDeviceRules',
-  'bridge.messageSenders'
+  'bridge.messageSenders',
+  'bridge.editorAsks',
+  'bridge.editorAsk.answer'
 ] as const
 export type BridgeActivityMethod = (typeof BRIDGE_ACTIVITY_METHODS)[number]
 
@@ -77,6 +82,10 @@ export interface BridgeActivityParams {
   /** One rule (`threadId` and `ruleId`), or every rule the device made. */
   'bridge.clearDeviceRules': { node: NodeId; threadId?: string; ruleId?: string }
   'bridge.messageSenders': { threadId: string }
+  /** The asks for editor connections that wait for a person on this computer. */
+  'bridge.editorAsks': Record<string, never>
+  /** Allow turns "Editor connections from this device" on here; Not now records a refusal. */
+  'bridge.editorAsk.answer': { node: NodeId; allow: boolean }
 }
 
 export interface DeviceRulesCleared {
@@ -156,13 +165,30 @@ const PROJECT_OPEN: Phrase = phrase('Opened a folder as a project', 'opened a fo
 const OTHER: Phrase = phrase('Made a change', 'made a change', 'made {n} other changes')
 
 /** A change that is a notice to the owner, not a thing to count. */
-export const DEVICE_NOTICE_METHODS = ['thread.first_use', 'pty.first_open', 'project.first_open', 'pty.close'] as const
+export const DEVICE_NOTICE_METHODS = [
+  'thread.first_use',
+  'pty.first_open',
+  'project.first_open',
+  'pty.close',
+  'editor.open',
+  'editor.close',
+  'editor.check',
+  'editor.ask',
+  'editor.ask.allowed',
+  'editor.ask.declined'
+] as const
 
 const NOTICE_ROWS: Record<string, string> = {
   'thread.first_use': 'First change from this computer',
   'pty.first_open': 'Opened its first terminal here',
   'project.first_open': 'Opened its first folder as a project here',
-  'pty.close': 'A terminal ended'
+  'pty.close': 'A terminal ended',
+  'editor.open': 'Opened its editor here',
+  'editor.close': 'An editor connection ended',
+  'editor.check': 'Checked an editor connection',
+  'editor.ask': 'Asked to open its editor here',
+  'editor.ask.allowed': 'Asked to open its editor here, and you allowed it',
+  'editor.ask.declined': 'Asked to open its editor here, and you said Not now'
 }
 
 const PHRASES: Record<string, Phrase> = {
@@ -284,6 +310,20 @@ const TERMINAL_ENDS: Record<string, string> = {
   create_failed: 'it could not finish starting'
 }
 
+const EDITOR_REFUSALS: Record<string, string> = {
+  editor_off: 'editor connections are off for the device',
+  blocked: 'the device is blocked',
+  capability: 'the device lost Works on threads',
+  setting_off: 'other computers are switched off',
+  net_off: 'networking is off',
+  no_ssh_server: 'this computer has no SSH server running',
+  no_host_key: 'its SSH host key could not be read',
+  host_untrusted: 'its SSH server could not be shown to be the system’s own',
+  limit: 'too many editor connections',
+  rate_limited: 'too many at once',
+  declined_recently: 'you said Not now a short while ago'
+}
+
 const CODE_WORDS: Record<string, string> = {
   thread_not_found: 'the thread was gone',
   permission_mode_above_ceiling: 'above the highest permission mode set for the device',
@@ -314,6 +354,14 @@ export function formatBytes(bytes: number): string {
 
 /** One row of the list, in plain words. A refusal says why it was refused, and a lost outcome says it may have happened. */
 export function describeActivityEntry(entry: Pick<DeviceActivityEntry, 'method' | 'kind' | 'outcome'>): string {
+  // A refused editor connection or ask says so; the same words as an open or an ask that went through would mislead.
+  if (entry.kind === 'refused' && (entry.method === 'editor.open' || entry.method === 'editor.ask' || entry.method === 'editor.check')) {
+    const why = EDITOR_REFUSALS[entry.outcome] ?? entry.outcome.replaceAll('_', ' ')
+    if (entry.method === 'editor.check') return `Checked an editor connection (refused: ${why})`
+    return entry.method === 'editor.open'
+      ? `Tried to open its editor here (refused: ${why})`
+      : `Asked to open its editor here (not passed on: ${why})`
+  }
   const notice = NOTICE_ROWS[entry.method]
   if (notice) return entry.method === 'pty.close' ? `${notice}: ${closedTerminal(entry.outcome)}` : notice
   const row = phraseOf(entry.method).row

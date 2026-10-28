@@ -27,13 +27,14 @@ import { phoneSpeechMethods } from './remote/speech'
 import type { ThreadSourcePort } from './remote/ThreadStreamAdapter'
 import { DispatchService, mmsDispatchRuntime, type DispatchRuntime } from './dispatch'
 import { OwnerRoutes } from './routed/OwnerRoutes'
+import { EditorAsks } from './routed/editorAsks'
 import { ThreadRouter } from './routed/ThreadRouter'
 import { MergedLists } from './routed/mergedLists'
 import { PrivateSources, raiseStreamListenerLimits } from './routed/privateSources'
 import { RoutedStaging } from './routed/staging'
 import { routedStreamsPort } from './routed/streamsPort'
 import { isPrivateKey } from './remote/privateStreams'
-import { deviceNameOf } from './routed/deviceName'
+import { deviceLabelOf, deviceNameOf } from './routed/deviceName'
 import { clearDeviceRules, deviceActivityOf, messageSendersOf, validateActivityParams } from './deviceActivity'
 import type { BridgeActivityMethod, BridgeActivityParams } from '../../shared/bridge/deviceActivity'
 
@@ -54,6 +55,7 @@ export class BridgeProfileService {
   readonly dispatch: DispatchService
   private readonly remote: RemoteApi
   private readonly routes: OwnerRoutes
+  private readonly editorAsks: EditorAsks
   private readonly staging: RoutedStaging
   private readonly clock: Clock
   private readonly tasks = new Set<Promise<unknown>>()
@@ -315,6 +317,45 @@ export class BridgeProfileService {
       }
     })
     routes.register()
+    // Another computer asks for editor connections: a desktop notification and a prompt in the windows of this
+    // computer (none, for a computer with no window, which has the `editor.ask` row in the audit and the CLI).
+    const asks = new EditorAsks({
+      policy: rt.policy,
+      audit: rt.audit,
+      clock: this.clock,
+      name: (node) => deviceLabelOf(rt.identity, node),
+      // Read again when a person answers: a device that was revoked, or lost Works on threads, is not allowed here.
+      stillAsking: async (node) => {
+        const view = (await net.request('bridge.nodes', {})) as {
+          nodes: Array<{ node: NodeId; caps: string[]; revoked?: boolean }>
+        }
+        const found = view.nodes.find((entry) => entry.node === node)
+        return !!found && !found.revoked && found.caps.includes('settings')
+      },
+      // The same code as the switch in Devices: roster check, the change, and the update windows wait for.
+      allow: async (node) => {
+        await net.request('bridge.policy', { node, editor: true })
+      },
+      onAsked: ({ name }) =>
+        services.events.emit({
+          channel: 'protocol:event',
+          data: { type: 'ui.notify', data: { kind: 'remote-editor-ask', device: name } }
+        }),
+      onChanged: () =>
+        services.events.emit({
+          channel: 'protocol:event',
+          data: { type: 'ui.notify', data: { kind: 'remote-editor-asks' } }
+        })
+    })
+    asks.start()
+    // A device that is revoked, or loses Works on threads, loses its waiting ask too.
+    this.disposers.add(rt.identity.onRosterChanged(() => void asks.reconcile().catch(() => undefined)))
+    services.editorAsks = asks
+    this.editorAsks = asks
+    this.disposers.add(() => {
+      if (services.editorAsks === asks) services.editorAsks = undefined
+      asks.close()
+    })
     // The first editor connection a device opens here is shell access: a desktop notification in the windows of
     // this computer (none, for a computer with no window, which has the `editor.open` row in the audit).
     this.disposers.add(
@@ -615,6 +656,11 @@ export class BridgeProfileService {
       return deviceActivityOf(sources, (params as BridgeActivityParams['bridge.activity']).node)
     if (method === 'bridge.clearDeviceRules')
       return clearDeviceRules(sources, params as BridgeActivityParams['bridge.clearDeviceRules'])
+    if (method === 'bridge.editorAsks') return { asks: this.editorAsks.pending() }
+    if (method === 'bridge.editorAsk.answer') {
+      const answer = params as BridgeActivityParams['bridge.editorAsk.answer']
+      return this.track(this.editorAsks.answer(answer.node, answer.allow))
+    }
     return messageSendersOf(sources, (params as BridgeActivityParams['bridge.messageSenders']).threadId)
   }
   /** Trusted local connection producers retain profile ownership while draining. */

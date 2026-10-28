@@ -1217,6 +1217,41 @@ export class EditorSshConfig {
     return this.locked(() => this.apply(live, true))
   }
 
+  /**
+   * Gives the computers paired now their aliases in Mousse's own files, and nothing else: the user's file is
+   * not read or written, so no `Include` line is added and no notice is due. A window uses it to check an
+   * editor connection (which needs the alias to pin the host key under) before the line is added by `prepare`,
+   * so a refused open leaves `~/.ssh/config` as it was. Refused with `off` while the person has the feature off.
+   */
+  prepareAliases(live: readonly LiveComputer[]): Promise<EditorSshResult> {
+    return this.locked(async () => {
+      try {
+        const { state } = await this.readGlobal()
+        if (!state.enabled)
+          return {
+            ok: false,
+            code: 'off',
+            message: 'Editor connections through ssh are off. Turn them on in Settings.',
+            status: await this.readStatus()
+          }
+        await this.ensureOwnDirectory()
+        const mine = (await this.readProfile(this.profile)) ?? {
+          version: STATE_VERSION,
+          computers: {}
+        }
+        const others = await this.readAllProfiles()
+        others.delete(this.profile)
+        const gone = this.reconcile(mine, live, this.aliasesOf(others))
+        await this.writeOwnConfig(new Map(others).set(this.profile, mine))
+        for (const alias of gone) await removeTrustedName(this.paths.knownHosts, alias)
+        await this.writeProfile(mine)
+        return { ok: true, added: false, status: await this.readStatus() }
+      } catch (error) {
+        return this.fail(error)
+      }
+    })
+  }
+
   private async apply(live: readonly LiveComputer[], turnOn: boolean): Promise<EditorSshResult> {
     try {
       const { state } = await this.readGlobal()

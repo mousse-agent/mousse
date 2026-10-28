@@ -12,6 +12,8 @@ import { CopyButton } from './settings/IconButtons'
 import { mousseIdAvailable, useMousseIdStore } from '../stores/mousseIdStore'
 import { DeviceLimitsDialog } from './devices/DeviceLimitsDialog'
 import { DeviceActivityRows } from './devices/DeviceActivityRows'
+import { DeviceAccessRows } from './devices/DeviceAccessRows'
+import { pendingEditorAsk, useEditorAskStore } from '../stores/editorAskStore'
 import { PAIRING_DISCLOSURE, netErrorWords, bindSettings, workOnThreadsDisclosure, canWorkOnThreads, deviceLine, isComputer, isIncompatible, listedDevices, readDevices, routeDetails, serveSettings, sshRecordFor, updateInstructions, worksOnThreads, WORKS_ON_THREADS, type Device } from '../lib/netDevices'
 import type { NetDoctor, NetStatus } from '../../shared/net'
 import { TAILSCALE_FUNNEL_PORTS, type NetAddonActionResult, type NetAddonRecords, type SshRecordView, type SshSetupPhase } from '../../shared/net/local'
@@ -113,6 +115,9 @@ export function NetDevicesSection() {
   // A grant that opens this computer's threads to another is confirmed with what it opens.
   const [granting, setGranting] = useState<{ device: Device; kind: 'grant' | 'computer' }>()
   const nameEdited = useRef(false)
+  // Asks for editor connections: the prompt host watches them for the whole window; this screen reads that list.
+  const editorAsks = useEditorAskStore((s) => s.asks)
+  useEffect(() => { void useEditorAskStore.getState().load() }, [])
   const reload = async () => {
     const owner = ++generation.current
     const { current, addons, nodes, ssh } = await readDevices(mousseIdAvailable(useMousseIdStore.getState()))
@@ -378,6 +383,15 @@ export function NetDevicesSection() {
                 control={record?.owner === 'managed'
                   ? <button type="button" className="settings-btn" onClick={() => setRecordDialog({ kind: 'update', record, name: device.name })}>Update…</button>
                   : selfDevice?.version && <button type="button" className="settings-btn" onClick={() => setUpdating(device)}>{updateInstructions(device, selfDevice.version).command ? 'Show command' : 'How to update'}</button>}
+              />
+            ),
+            // Terminals and editor connections from it, side by side, with a waiting ask answered here too.
+            device.policy && isComputer(device) && worksOnThreads(device) && !device.policy.blocked && (
+              <DeviceAccessRows
+                key={`${device.node}-access`}
+                device={device}
+                ask={pendingEditorAsk({ asks: editorAsks }, device.node)}
+                onChanged={reloadQuietly}
               />
             ),
             // What it did here, with its Block and limits beside it. A phone has none of this: it keeps the phone API.

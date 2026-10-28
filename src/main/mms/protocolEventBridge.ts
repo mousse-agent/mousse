@@ -142,6 +142,9 @@ export function bridgeProtocolEvent(
       return true
     }
     case 'ui.notify': {
+      // The asks other computers made for editor connections changed: windows read the waiting ones again.
+      const kind = (event.data as { kind?: unknown } | null)?.kind
+      if (kind === 'remote-editor-ask' || kind === 'remote-editor-asks') broadcast('net:editor-asks', null)
       return true
     }
     case 'net.updated': {

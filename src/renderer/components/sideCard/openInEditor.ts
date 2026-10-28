@@ -1,5 +1,6 @@
 import type { RemoteOpenResult } from '../../../shared/remoteEditor'
 import type { EditorInfo } from '../../../shared/types'
+import { helpForOpenResult } from '../../lib/editorConnection'
 import { editorSshProblemWords } from '../../lib/editorSsh'
 import { ipcErrorLine } from '../../lib/errorText'
 import { profilePreferenceKey } from '../../lib/profilePreferences'
@@ -78,37 +79,36 @@ export interface NoRouteHelp {
   endpoint?: string
 }
 
-const SYSTEM_NAMES: Record<string, string> = { darwin: 'macOS', win32: 'Windows' }
-
 /**
- * Said under the button while this computer cannot reach the computer that runs the thread over SSH, with
- * the one thing to do about it. A computer that offers an SSH address only needs it approved. Mousse sets
- * SSH up on Linux computers only, so a Mac or a Windows computer is told it needs an SSH server of its own.
+ * Said under the button while this computer has no way at all to open the folder of the computer that runs the
+ * thread: no SSH address it approved, and no editor connection of Mousse's own. A computer that offers an SSH
+ * address only needs it approved (that path stays for computers set up over SSH). Otherwise Devices is where
+ * a connection is made. The states of an editor connection that exists (offline, off, no SSH server...) are
+ * `editorConnection.ts`.
  */
 export function noRouteHelp(
   editor: Pick<EditorInfo, 'label'>,
   computer: string,
   device?: { platform?: string; sshOffer?: { endpoint: string } }
 ): NoRouteHelp {
-  const start = `To open ${computer}’s folder in ${editor.label} here, `
   if (device?.sshOffer) {
     return {
-      message: `${start}approve the SSH address ${computer} offers (${device.sshOffer.endpoint}).`,
+      message: `${computer} offers SSH (${device.sshOffer.endpoint})`,
       action: 'approve',
       label: 'Approve address…',
       endpoint: device.sshOffer.endpoint
     }
   }
-  const system = device?.platform ? SYSTEM_NAMES[device.platform] : undefined
-  const message = system
-    ? `${start}this computer needs to reach it over SSH. Mousse sets SSH up only on Linux computers; ${computer} runs ${system}, so it needs an SSH server of its own.`
-    : `${start}this computer needs to reach it over SSH. SSH can be set up in Devices.`
-  return { message, action: 'devices', label: system ? 'Open Devices…' : 'Set up…' }
+  return {
+    message: `No connection to ${computer}`,
+    action: 'devices',
+    label: 'Open Devices…'
+  }
 }
 
 /** Said when no installed editor can open a folder of another computer. */
 export function noRemoteEditorMessage(computer: string): string {
-  return `None of the editors installed on this computer can open a folder on ${computer}. VS Code, Cursor, Windsurf and VSCodium can.`
+  return `No installed editor can open ${computer}’s folder`
 }
 
 /** What a refused open says, in plain words with the computer's and the editor's names. */
@@ -119,24 +119,29 @@ export function remoteRefusalMessage(
 ): string {
   switch (result.reason) {
     case 'no_route':
-      return `To open ${computer}’s folder in ${editor.label} here, this computer needs to reach it over SSH.`
+      return `No connection to ${computer}`
     case 'editor_missing':
       return result.message || `${editor.label} could not be started.`
     case 'no_folder':
-      return `This thread has no folder on ${computer}.`
+      return `No folder on ${computer}`
     case 'folder_missing':
-      return `The thread’s folder is no longer on ${computer}.`
+      return `Folder gone from ${computer}`
     case 'folder_protected':
-      return `${computer} will not hand out this folder: it holds credentials or settings.`
+      return `${computer} keeps this folder private`
     case 'folder_not_openable':
-      return `This folder cannot be opened in an editor from another computer.`
+      return `This folder cannot be opened remotely`
     case 'worktree_missing':
-      return `The thread’s worktree on ${computer} was removed and could not be restored. Restore it on ${computer}, then open it again.`
+      return `Worktree on ${computer} was removed`
     case 'worktree_recovery':
-      return `The thread’s worktree on ${computer} needs recovery there before its folder can be opened.`
+      return `Worktree on ${computer} needs recovery`
     case 'ssh_settings':
       return editorSshProblemWords({ code: result.code ?? '', message: result.message ?? '' }, result.includeLine)
+    case 'connection': {
+      // The side card shows these as a line with an action; this is the line.
+      const help = helpForOpenResult(result, computer)
+      return help ? help.message : result.message || `${computer} did not answer`
+    }
     case 'failed':
-      return result.message || `${computer} did not answer.`
+      return result.message || `${computer} did not answer`
   }
 }

@@ -245,6 +245,78 @@
   color: var(--danger);
 }
 
+/* Why an editor connection cannot be used: the state, what to do about it, and a button for what Mousse can do. */
+.side-card-open-editor-note.state .side-card-open-editor-line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 10px;
+  margin: 0;
+}
+
+.side-card-open-editor-note.state .side-card-open-editor-steps {
+  margin: 4px 0 0;
+}
+
+/* After the first successful open added Mousse's Include line: a small toast with Undo. */
+.editor-ssh-toast {
+  position: fixed;
+  bottom: 20px;
+  left: 50%;
+  z-index: var(--z-floating, 50000);
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 14px;
+  transform: translateX(-50%);
+  border: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.12));
+  border-radius: 10px;
+  background: var(--surface-elevated, #1c1c1f);
+  color: var(--text-primary);
+  font-size: 12.5px;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.35);
+}
+
+.editor-ssh-toast-action {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--accent);
+  font: inherit;
+  cursor: pointer;
+}
+
+.editor-ssh-toast-action:hover:not(:disabled) {
+  text-decoration: underline;
+}
+
+/* After an open: how the connection runs, small and quiet. */
+.side-card-open-editor-via {
+  margin: 3px 0 0;
+  color: var(--text-tertiary, var(--text-secondary));
+  font-size: 11px;
+}
+
+.side-card-open-editor-note.state .side-card-open-editor-command {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.side-card-open-editor-note.state .side-card-open-editor-command code {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-size: 11.5px;
+  color: var(--text-primary);
+}
+
+.side-card-open-editor-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
 /* After Mousse added its Include line to ~/.ssh/config: said once, with Undo. */
 .side-card-ssh-notice {
   margin: 6px 0 0;

@@ -404,9 +404,18 @@ interface Entry {
     timer: ReturnType<typeof setTimeout>
   }
   settle?: (end: TunnelFailure) => void
+  /** A client that only asks (`ssh.check`): it gets the answer, never a stream. */
+  check?: (answer: CheckAnswer) => void
   /** Stops watching the session and the caller's signal. */
   release: Array<() => void>
   done: boolean
+}
+
+/** What a check learns: the path in use and the host keys the other computer vouches for. */
+export interface CheckAnswer {
+  path: TunnelPath
+  transport?: string
+  hostKeys: TunnelHostKey[]
 }
 
 /** How a tunnel ended here: for a client also that it never opened (it timed out, was cancelled, or the peer is gone). */
@@ -469,6 +478,10 @@ export class EditorTunnels implements SessionTunnelPort {
   private readonly tunnels = new Map<string, Entry>()
   private readonly claims = new Set<Claim>()
   private readonly opens = new Map<NodeId, number[]>()
+  /** When each device's checks were asked: they have a limit of their own, apart from the opens. */
+  private readonly checks = new Map<NodeId, number[]>()
+  /** Checks being answered, per device. */
+  private readonly checking = new Map<NodeId, number>()
   /** Ids of opens in progress: held from the moment the message is read, before the first await. */
   private readonly reserved = new Set<string>()
   /** When a row was last written for each kind of refusal of each device. */
@@ -542,8 +555,10 @@ export class EditorTunnels implements SessionTunnelPort {
           return
         case 'tunnel.opened': {
           const entry = this.tunnels.get(message.tunnel)
-          if (entry?.role === 'client' && entry.link === link && entry.opening)
-            this.activate(entry, message.hostKeys)
+          if (entry?.role === 'client' && entry.link === link && entry.opening) {
+            if (entry.check) this.answerCheck(entry, message.hostKeys)
+            else this.activate(entry, message.hostKeys)
+          }
           return
         }
         case 'tunnel.data': {
@@ -589,6 +604,7 @@ export class EditorTunnels implements SessionTunnelPort {
     link: TunnelLink,
     message: Extract<TunnelMessage, { t: 'tunnel.open' }>
   ): Promise<void> {
+    if (message.kind === 'ssh.check') return this.hostCheck(link, message)
     const { audit } = this.options
     const node = link.peer.node
     const id = message.tunnel
@@ -700,6 +716,87 @@ export class EditorTunnels implements SessionTunnelPort {
     }
   }
 
+  private allowCheck(node: NodeId): boolean {
+    const now = this.options.clock.now()
+    const recent = (this.checks.get(node) ?? []).filter((at) => now - at < OPEN_WINDOW_MS)
+    if (recent.length >= this.opensPerMinute || (this.checking.get(node) ?? 0) >= this.perNode) {
+      this.checks.set(node, recent)
+      return false
+    }
+    recent.push(now)
+    this.checks.set(node, recent)
+    return true
+  }
+
+  /**
+   * A check (`ssh.check`): everything an open would meet, answered, with nothing opened. The same rate-first order,
+   * the same gate, a bare connection to the SSH server that is dropped at once, the same host trust and host keys.
+   * No tunnel, no `editor.open` row, no first-open notice, and the asks are not counted as opens. A row of its own
+   * (`editor.check`) says what the check found, at most one of each kind per device a minute.
+   */
+  private async hostCheck(
+    link: TunnelLink,
+    message: Extract<TunnelMessage, { t: 'tunnel.open' }>
+  ): Promise<void> {
+    const node = link.peer.node
+    const id = message.tunnel
+    const refuse = (reason: TunnelReason): void => {
+      if (
+        reason === 'editor_off' ||
+        reason === 'no_ssh_server' ||
+        reason === 'no_host_key' ||
+        reason === 'host_untrusted'
+      )
+        this.recordCheck(node, reason, 'refused')
+      this.tell(link, { t: 'tunnel.close', tunnel: id, reason })
+    }
+    if (!this.allowCheck(node)) return refuse('rate_limited')
+    const gate = this.safeRefusal(link)
+    if (gate) return refuse(gate)
+    this.checking.set(node, (this.checking.get(node) ?? 0) + 1)
+    let socket: Socket | undefined
+    try {
+      try {
+        socket = await connectFarEnd(this.farEnd, FAR_END_CONNECT_MS)
+      } catch {
+        return refuse('no_ssh_server')
+      }
+      // Nothing is said to the SSH server: the connection is only proof that something listens.
+      socket.destroy()
+      socket = undefined
+      if (this.trust) {
+        const verdict = await Promise.resolve()
+          .then(() => this.trust!())
+          .catch(() => ({ ok: false }))
+        if (!verdict.ok) return refuse('host_untrusted')
+      }
+      const keys = await readHostKeys(this.hostKeyDirectories).catch(() => [])
+      if (!keys.length) return refuse('no_host_key')
+      if (link.state() !== 'open') return
+      const again = this.safeRefusal(link)
+      if (again) return refuse(again)
+      this.recordCheck(node, 'ok', 'change')
+      await link.sendTunnel({ t: 'tunnel.opened', tunnel: id, hostKeys: keys }).catch(() => undefined)
+    } finally {
+      socket?.destroy()
+      const left = (this.checking.get(node) ?? 1) - 1
+      if (left > 0) this.checking.set(node, left)
+      else this.checking.delete(node)
+    }
+  }
+
+  private recordCheck(node: NodeId, outcome: string, kind: 'change' | 'refused'): void {
+    const now = this.options.clock.now()
+    const key = `check ${node} ${outcome}`
+    const last = this.refusalRows.get(key)
+    if (last !== undefined && now - last < REFUSAL_ROW_WINDOW_MS) return
+    if (this.refusalRows.size >= 256)
+      for (const [name, at] of this.refusalRows)
+        if (now - at >= REFUSAL_ROW_WINDOW_MS) this.refusalRows.delete(name)
+    this.refusalRows.set(key, now)
+    this.options.audit.record({ node, method: 'editor.check', outcome, kind })
+  }
+
   /** At most one row of a kind of refusal per device a minute, so a device that keeps asking cannot fill the audit. */
   private recordRefusal(node: NodeId, reason: TunnelReason): void {
     const now = this.options.clock.now()
@@ -733,7 +830,7 @@ export class EditorTunnels implements SessionTunnelPort {
     const node = link.peer.node
     let mine = 0
     for (const entry of this.tunnels.values())
-      if (entry.role === 'client' && entry.node === node) mine++
+      if (entry.role === 'client' && entry.node === node && !entry.check) mine++
     if (mine >= this.perNode) return Promise.reject(new TunnelError('limit'))
     const id = randomBytes(16).toString('hex')
     return new Promise<ClientTunnel>((resolve, reject) => {
@@ -773,6 +870,59 @@ export class EditorTunnels implements SessionTunnelPort {
         )
       )
     })
+  }
+
+  /**
+   * Asks the computer at the other end of `link` what an open would meet (`ssh.check`), and opens nothing. Resolves
+   * with the path in use and the host keys it vouches for; rejects with a `TunnelError` like `open`.
+   */
+  check(link: TunnelLink, signal?: AbortSignal): Promise<CheckAnswer> {
+    if (link.state() !== 'open') return Promise.reject(new TunnelError('offline'))
+    if (!link.supportsTunnels()) return Promise.reject(new TunnelError('unsupported'))
+    if (signal?.aborted) return Promise.reject(new TunnelError('cancelled'))
+    const id = randomBytes(16).toString('hex')
+    return new Promise<CheckAnswer>((resolve, reject) => {
+      const transport = this.options.transportOf(link)
+      const entry: Entry = {
+        id,
+        role: 'client',
+        link,
+        node: link.peer.node,
+        openedAt: this.options.clock.now(),
+        path: tunnelPathOf(transport),
+        ...(transport ? { transport } : {}),
+        release: [],
+        done: false,
+        check: resolve
+      }
+      const timer = setTimeout(() => this.finish(entry, 'timeout', true), TUNNEL_OPEN_TIMEOUT_MS)
+      timer.unref?.()
+      entry.opening = { resolve: () => undefined, reject, timer }
+      this.tunnels.set(id, entry)
+      if (signal) {
+        const abort = (): void => this.finish(entry, 'cancelled', true)
+        signal.addEventListener('abort', abort, { once: true })
+        entry.release.push(() => signal.removeEventListener('abort', abort))
+      }
+      entry.release.push(link.onClosed(() => this.finish(entry, 'session_closed', false)))
+      this.sendReliably(link, { t: 'tunnel.open', tunnel: id, kind: 'ssh.check' }, () => entry.done).catch((error) =>
+        this.finish(
+          entry,
+          error instanceof NetError && error.code === 'rate_limited' ? 'timeout' : 'offline',
+          false
+        )
+      )
+    })
+  }
+
+  /** The answer to a check arrived: it is over, and there is no stream. */
+  private answerCheck(entry: Entry, hostKeys: TunnelHostKey[]): void {
+    clearTimeout(entry.opening!.timer)
+    entry.opening = undefined
+    entry.done = true
+    if (this.tunnels.get(entry.id) === entry) this.tunnels.delete(entry.id)
+    for (const release of entry.release.splice(0)) release()
+    entry.check!({ hostKeys, path: entry.path, ...(entry.transport ? { transport: entry.transport } : {}) })
   }
 
   /** `tunnel.opened` arrived: the tunnel is a stream now. Runs before the next message is handled. */

@@ -31,9 +31,9 @@ export function editorSshProblemWords(
 }
 
 /**
- * Whether Settings shows the Editors group. Until editor connections exist (`EDITOR_PROXY_READY`) the line
- * serves nothing, so the group is there only while the line is installed or its notice is pending: it is
- * where Undo is, and Undo is final.
+ * Whether Settings shows the Editors group: whenever the settings are available. While Mousse's own names are
+ * not offered to an editor (`EDITOR_PROXY_READY` false) the line serves nothing, so the group is there only while
+ * the line is installed or its notice is pending: it is where Undo is, and Undo is final.
  */
 export function editorSshVisible(status: EditorSshStatus | null): status is EditorSshStatus {
   return !!status?.available && (status.included || status.noticePending || EDITOR_PROXY_READY)
