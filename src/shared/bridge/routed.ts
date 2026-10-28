@@ -71,6 +71,17 @@ export interface RoutedRow {
   via: RoutedVia
   /** The device's terminal switch on the owner must be on. */
   terminal?: true
+  /**
+   * A change that is numbered instead of recorded in the ledger (terminal input and resizes). The call carries
+   * `seq`, the owner applies each `(caller, terminal, seq)` once, and nothing is kept on disk for it. The row is
+   * not durable, so a lost reply is answered by sending the same number again, never by a fresh request.
+   */
+  sequenced?: true
+  /**
+   * The row may carry `cwd`, a folder inside the thread's own that a terminal starts in (relative to it, or
+   * absolute and inside it). The owner resolves it by real path and refuses what leads outside.
+   */
+  startsIn?: true
   /** Only the call that names an absolute `path` (`projects.open`) may. */
   absolutePath?: true
   /**
@@ -220,7 +231,8 @@ export const ROUTED_METHODS: Readonly<Record<string, RoutedRow>> = Object.freeze
     owned: { runId: 'workflowRun' },
     routeOnly: ['threadId']
   }),
-  // Terminal output and state: also behind the device's terminal switch on the owner.
+  // Terminals: all of them are also behind the device's terminal switch on the owner. Output is not here: it travels
+  // on the terminal's own stream (`routed.stream.open { kind: 'terminal' }`), one record per chunk.
   'pty.list': read('thread', ['threadId'], { terminal: true }),
   'pty.lookup': read('thread', ['threadId', 'ptyId'], {
     terminal: true,
@@ -468,6 +480,36 @@ export const ROUTED_METHODS: Readonly<Record<string, RoutedRow>> = Object.freeze
   'pullRequests.pushTarget': write('thread', ['threadId']),
   'pullRequests.watch': write('thread', ['threadId', 'watch', 'number']),
 
+  // ---------------------------------------------------------------- terminals
+  // A terminal starts in the thread's own folder (or the thread's terminal workspace when it has none), in the
+  // owner's default shell and environment: the caller names no shell, arguments or variables. `cwd` may only
+  // name a folder inside the thread's.
+  'pty.create': write('thread', ['threadId', 'agentId', 'cwd'], {
+    terminal: true,
+    startsIn: true,
+    required: ['agentId']
+  }),
+  'pty.kill': write('thread', ['threadId', 'ptyId'], {
+    terminal: true,
+    required: ['ptyId'],
+    owned: { ptyId: 'pty' }
+  }),
+  // Input and resizes are numbered and kept out of the ledger: a resend of the same number is not applied twice.
+  'pty.write': write('thread', ['threadId', 'ptyId', 'seq', 'data'], {
+    terminal: true,
+    sequenced: true,
+    durable: false,
+    required: ['ptyId', 'seq', 'data'],
+    owned: { ptyId: 'pty' }
+  }),
+  'pty.resize': write('thread', ['threadId', 'ptyId', 'seq', 'cols', 'rows'], {
+    terminal: true,
+    sequenced: true,
+    durable: false,
+    required: ['ptyId', 'seq'],
+    owned: { ptyId: 'pty' }
+  }),
+
   // ---------------------------------------------------------------- projects and the computer
   // A new thread records the computer that asked (`startedFrom`), as for a phone.
   'threads.create': write(
@@ -564,6 +606,26 @@ export const ROUTED_LARGE_READS: readonly string[] = [
   'runs.events'
 ]
 export const ROUTED_LARGE_READS_PER_CALLER = 2
+
+/**
+ * What a computer says when this device's terminals are off there. A window cannot read the reason of an
+ * error that crossed the process boundary, only its text, so the terminal panel recognises this one to say
+ * how to turn terminals on.
+ */
+export const terminalOffMessage = (computer: string): string =>
+  `Terminals from this device are off on ${computer}.`
+export function parseTerminalOffMessage(message: string): { computer: string } | undefined {
+  const found = /Terminals from this device are off on (.+)\.\s*$/m.exec(message)
+  return found ? { computer: found[1] } : undefined
+}
+
+/** Terminals one computer may have open on another at once (the same number as its terminal streams). */
+export const ROUTED_TERMINALS_PER_NODE = 4
+/** The most one numbered input call carries; the caller cuts a longer paste into calls of this size, in order. */
+export const ROUTED_PTY_INPUT_MAX_CHARS = 16 * 1024
+/** The terminal sizes a call may ask for (the same bounds a window's `pty.resize` has). */
+export const ROUTED_PTY_MAX_COLS = 512
+export const ROUTED_PTY_MAX_ROWS = 256
 
 /** Newest part of a transcript a snapshot carries, and the most a page of older messages carries. */
 export const ROUTED_SNAPSHOT_MESSAGE_BYTES = 16 * 1024 * 1024
@@ -746,11 +808,6 @@ export const ROUTED_LOCAL_METHODS: readonly RoutedLocalRule[] = [
       'stats.recordManualEdits'
     ],
     reason: 'Diagnostics or retired methods that no window calls for a thread.'
-  },
-  {
-    methods: ['pty.create', 'pty.write', 'pty.resize', 'pty.kill'],
-    reason:
-      'Terminals are routed with their own output stream and sequenced input in the change that adds terminals; until then they stay on the computer.'
   },
   {
     methods: ['github.createRepository', 'github.cloneRepository'],

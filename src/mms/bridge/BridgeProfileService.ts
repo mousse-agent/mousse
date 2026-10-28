@@ -402,6 +402,10 @@ export class BridgeProfileService {
             this.routes.pages.dropCaller(node)
             this.staging.dropCaller(node)
           }
+          // The shells they opened here end with the permission that opened them: the owner's switch going off
+          // (no `granted`) or a computer losing "Works on threads" (or being revoked).
+          if (granted) this.routes.terminals.endExcept('access_lost', granted)
+          else this.routes.terminals.end('setting_off')
           return closed
         }
       },

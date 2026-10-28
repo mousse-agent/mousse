@@ -1,0 +1,613 @@
+/**
+ * Terminals over Bridge, on the computer that runs the thread: where a shell starts, numbered input, the
+ * limit, what ends a device's terminals, the audit and the output stream. The terminal switch and the
+ * owner's switch are checked where they live, over a real session (`terminalsBridge.test.ts`).
+ */
+import { execFileSync } from 'node:child_process'
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join, resolve } from 'node:path'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { ThreadWorkspaceManager } from '../../../../src/mms/workspace/ThreadWorkspaceManager'
+import { dispatchMethod } from '../../../../src/mms/protocol/handlers'
+import {
+  TERMINAL_INPUT_BURST_BYTES,
+  TERMINAL_INPUT_BURST_CALLS
+} from '../../../../src/mms/bridge/routed/terminals'
+import {
+  ROUTED_TERMINALS_PER_NODE,
+  type RoutedStreamOpened
+} from '../../../../src/shared/bridge/routed'
+import { PROJECT_SHELL_AGENT_ID } from '../../../../src/shared/types'
+import { newId } from '../../../../src/shared/net'
+import { cleanup, resources } from '../hub/fixture'
+import { readStream, repo, routedOwner, testClock } from './routedFixture'
+
+afterEach(async () => {
+  vi.restoreAllMocks()
+  await cleanup()
+})
+
+type Owner = Awaited<ReturnType<typeof routedOwner>>
+
+/** A shell that is not one: what the owner would start is recorded, and its output and end are the test's. */
+export class FakePty {
+  readonly written: string[] = []
+  readonly resizes: Array<[number, number]> = []
+  killed = false
+  pid = undefined
+  private readonly onDataCallbacks: Array<(data: string) => void> = []
+  private readonly onExitCallbacks: Array<(event: { exitCode: number; signal?: number }) => void> =
+    []
+  onData(callback: (data: string) => void) {
+    this.onDataCallbacks.push(callback)
+    return { dispose: () => undefined }
+  }
+  onExit(callback: (event: { exitCode: number; signal?: number }) => void) {
+    this.onExitCallbacks.push(callback)
+    return { dispose: () => undefined }
+  }
+  write(data: string): void {
+    this.written.push(data)
+  }
+  resize(cols: number, rows: number): void {
+    this.resizes.push([cols, rows])
+  }
+  kill(): void {
+    this.killed = true
+    this.exit(137)
+  }
+  say(data: string): void {
+    for (const callback of this.onDataCallbacks) callback(data)
+  }
+  exit(exitCode = 0): void {
+    for (const callback of this.onExitCallbacks.splice(0)) callback({ exitCode })
+  }
+}
+
+export interface Spawned {
+  shell: string
+  args: string[]
+  options: { cwd: string; env: Record<string, string | undefined> }
+  pty: FakePty
+}
+
+/** Makes a computer's terminals fake ones. Nothing here reads or prints the process environment. */
+export function fakeShells(manager: unknown, cleanups: Array<() => void> = resources): Spawned[] {
+  const spawned: Spawned[] = []
+  ;(manager as { spawnPty: unknown }).spawnPty = (
+    shell: string,
+    args: string[],
+    options: Spawned['options']
+  ) => {
+    const pty = new FakePty()
+    spawned.push({ shell, args, options, pty })
+    return pty
+  }
+  // A shell that is still running would hold the owner's shutdown.
+  cleanups.push(() => {
+    for (const shell of spawned) shell.pty.exit(0)
+  })
+  return spawned
+}
+
+/** A thread with a folder of its own on the owner. */
+function folderThread(o: Owner) {
+  const path = repo()
+  const project = o.f.mms.projects.openProject(path)
+  const t = o.thread('Terminal thread', project.id, path)
+  return { t, project, path }
+}
+
+const agentId = `${PROJECT_SHELL_AGENT_ID}:tab-1`
+const create = (o: Owner, threadId: string, extra: Record<string, unknown> = {}) =>
+  o.call('pty.create', { threadId, agentId, ...extra })
+
+/** The folder the owner's own window would start a terminal for the thread in. */
+function threadFolder(o: Owner, threadId: string, projectPath: string): string {
+  const manager = new ThreadWorkspaceManager(o.f.mms.threads.getThreadDir(threadId))
+  const stored = manager.load()
+  return manager.executionContext(projectPath, stored ?? undefined).projectPath
+}
+
+async function opened(o: Owner) {
+  const spawned = fakeShells(o.f.mms.ptyManager)
+  o.policy.set(o.f.callerNode, { terminal: true })
+  const { t, path } = folderThread(o)
+  const reply = await create(o, t.id)
+  if (!reply.ok) throw new Error(`pty.create refused: ${reply.error.code}: ${reply.error.message}`)
+  return { spawned, t, path, ptyId: (reply.result as { ptyId: string }).ptyId }
+}
+
+/** Another terminal of the device, in a thread of its own (a thread has one terminal at a time: it holds the thread's lease). */
+async function another(o: Owner) {
+  const { t, path } = folderThread(o)
+  const reply = await create(o, t.id)
+  if (!reply.ok) throw new Error(`pty.create refused: ${reply.error.code}`)
+  return { t, path, ptyId: (reply.result as { ptyId: string }).ptyId }
+}
+
+/** Closes a terminal, and waits for it to give its thread's lease back. */
+const close = (o: Owner, threadId: string, ptyId: string) => o.call('pty.kill', { threadId, ptyId })
+
+/** A numbered input call; `seq` is the caller's own. */
+const type = (o: Owner, threadId: string, ptyId: string, seq: number, data: string) =>
+  o.call('pty.write', { threadId, ptyId, seq, data })
+
+describe('where a routed terminal starts', () => {
+  it('starts in the thread’s own folder, in the owner’s shell and environment', async () => {
+    const o = await routedOwner()
+    const { spawned, t, path } = await opened(o)
+    expect(spawned).toHaveLength(1)
+    const [shell] = spawned
+    expect(resolve(shell.options.cwd)).toBe(resolve(threadFolder(o, t.id, path)))
+    // The owner's own default shell, and its own environment: nothing the caller sent is in it.
+    expect(shell.shell).toBe(
+      process.platform === 'win32' ? 'powershell.exe' : process.env.SHELL || 'bash'
+    )
+    expect(Object.keys(shell.options.env).every((key) => key in process.env)).toBe(true)
+    expect(Object.keys(process.env).every((key) => key in shell.options.env)).toBe(true)
+    expect(shell.args.some((arg) => arg.includes('&&'))).toBe(false)
+  }, 180_000)
+
+  it('refuses a shell, arguments, a variable or a project path the caller names, before anything starts', async () => {
+    const o = await routedOwner()
+    const spawned = fakeShells(o.f.mms.ptyManager)
+    o.policy.set(o.f.callerNode, { terminal: true })
+    const { t } = folderThread(o)
+    for (const extra of [
+      { command: 'rm -rf ~' },
+      { env: { LD_PRELOAD: '/tmp/x' } },
+      { shellArgs: ['-c', 'x'] },
+      { projectPath: '/' },
+      { source: 'bot' }
+    ])
+      await expect(
+        create(o, t.id, extra),
+        JSON.stringify(Object.keys(extra))
+      ).rejects.toMatchObject({ code: 'bad_request' })
+    // A project shell only, like the ones the panel opens.
+    await expect(o.call('pty.create', { threadId: t.id, agentId: 'agent-7' })).rejects.toMatchObject({
+      code: 'bad_request'
+    })
+    expect(spawned).toHaveLength(0)
+  }, 180_000)
+
+  it('starts in a folder inside the thread’s own, and refuses one outside it, by real path', async () => {
+    const o = await routedOwner()
+    const spawned = fakeShells(o.f.mms.ptyManager)
+    o.policy.set(o.f.callerNode, { terminal: true })
+    // Folders and a file in the repository, so they are in the thread's folder; the link is one the repository ignores.
+    const path = repo()
+    mkdirSync(join(path, 'sub', 'deeper'), { recursive: true })
+    writeFileSync(join(path, 'sub', 'deeper', 'keep.txt'), 'x')
+    writeFileSync(join(path, 'file.txt'), 'x')
+    writeFileSync(join(path, '.git', 'info', 'exclude'), 'out\n')
+    for (const args of [['add', '-A'], ['commit', '-q', '-m', 'folders']])
+      execFileSync('git', args, { cwd: path, stdio: 'pipe' })
+    const project = o.f.mms.projects.openProject(path)
+    const t = o.thread('Terminal thread', project.id, path)
+    // The thread's folder is brought up by the first terminal.
+    const first = await create(o, t.id)
+    await close(o, t.id, (first as { result: { ptyId: string } }).result.ptyId)
+    const root = threadFolder(o, t.id, path)
+    const real = realpathSync(root)
+    const outside = realpathSync(mkdtempSync(join(tmpdir(), 'terminal-outside-')))
+    resources.push(() => rmSync(outside, { recursive: true, force: true }))
+    symlinkSync(outside, join(real, 'out'), process.platform === 'win32' ? 'junction' : 'dir')
+
+    const inside = await create(o, t.id, { cwd: 'sub/deeper' })
+    expect(JSON.stringify(inside)).toContain('"ok":true')
+    expect(realpathSync(spawned.at(-1)!.options.cwd)).toBe(join(real, 'sub', 'deeper'))
+    await close(o, t.id, (inside as { result: { ptyId: string } }).result.ptyId)
+    // Spelled with the owner's own folder, it is the same folder.
+    const absolute = await create(o, t.id, { cwd: join(root, 'sub') })
+    expect(JSON.stringify(absolute)).toContain('"ok":true')
+    expect(realpathSync(spawned.at(-1)!.options.cwd)).toBe(join(real, 'sub'))
+    await close(o, t.id, (absolute as { result: { ptyId: string } }).result.ptyId)
+
+    const count = spawned.length
+    for (const cwd of [
+      '..',
+      '../..',
+      'sub/../..',
+      'out',
+      'out/inner',
+      outside,
+      'file.txt',
+      'nothing'
+    ]) {
+      const reply = await create(o, t.id, { cwd }).catch((error: unknown) => error)
+      const code =
+        (reply as { error?: { code: string } }).error?.code ?? (reply as { code?: string }).code
+      expect(['path_outside_folder', 'bad_request'], String(cwd)).toContain(code)
+    }
+    expect(spawned).toHaveLength(count)
+  }, 180_000)
+
+  it('starts a thread with no folder in its own terminal workspace, and takes no folder of the caller for it', async () => {
+    const o = await routedOwner()
+    const spawned = fakeShells(o.f.mms.ptyManager)
+    o.policy.set(o.f.callerNode, { terminal: true })
+    const t = o.thread('No folder')
+    const reply = await create(o, t.id)
+    expect(reply.ok).toBe(true)
+    const dir = o.f.mms.threads.getThreadDir(t.id)
+    expect(realpathSync(spawned[0].options.cwd)).toBe(realpathSync(join(dir, 'terminal-workspace')))
+    expect(await create(o, t.id, { cwd: '.' })).toMatchObject({
+      ok: false,
+      error: { code: 'thread_has_no_folder' }
+    })
+    // And a thread that is not here never starts a shell.
+    expect(await create(o, 'no-such-thread')).toMatchObject({
+      ok: false,
+      error: { code: 'thread_not_found' }
+    })
+    expect(spawned).toHaveLength(1)
+  }, 180_000)
+})
+
+describe('input and resizes', () => {
+  it('reach the terminal that the device opened, and nobody else’s', async () => {
+    const o = await routedOwner()
+    const { spawned, t, ptyId } = await opened(o)
+    expect(await type(o, t.id, ptyId, 1, 'ls\r')).toMatchObject({ ok: true })
+    expect(
+      await o.call('pty.resize', { threadId: t.id, ptyId, seq: 2, cols: 100, rows: 40 })
+    ).toMatchObject({ ok: true })
+    expect(spawned[0].pty.written).toEqual(['ls\r'])
+    expect(spawned[0].pty.resizes).toEqual([[100, 40]])
+
+    // A terminal the owner's own window opened in a thread the device may reach is readable, but not typed into.
+    const second = folderThread(o)
+    const own = await dispatchMethod(
+      {
+        mms: o.f.mms,
+        globalSequence: () => 0,
+        connection: {
+          id: 'window-1',
+          clientType: 'gui',
+          capabilities: new Set(),
+          binding: { profileId: o.f.mms.getProfileId(), epoch: 1 },
+          lifetime: new AbortController().signal
+        }
+      },
+      'pty.create',
+      { threadId: second.t.id, agentId: `${PROJECT_SHELL_AGENT_ID}:own` }
+    )
+    const ownId = (own as { ptyId: string }).ptyId
+    expect(await o.ok('pty.isAlive', { threadId: second.t.id, ptyId: ownId })).toMatchObject({
+      alive: true
+    })
+    expect(await type(o, second.t.id, ownId, 1, 'sneaky')).toMatchObject({
+      ok: false,
+      error: { code: 'pty_not_found' }
+    })
+    expect(await o.call('pty.kill', { threadId: second.t.id, ptyId: ownId })).toMatchObject({
+      ok: false,
+      error: { code: 'pty_not_found' }
+    })
+    expect(spawned.at(-1)!.pty.written).toEqual([])
+    expect(spawned.at(-1)!.pty.killed).toBe(false)
+    // A terminal id of another thread is not this thread's.
+    const other = o.thread('Another')
+    expect(await type(o, other.id, ptyId, 3, 'x')).toMatchObject({
+      ok: false,
+      error: { code: 'pty_not_found' }
+    })
+  }, 180_000)
+
+  it('applies each number once: a resend is answered and not typed again, and an older one is a resend', async () => {
+    const o = await routedOwner()
+    const { spawned, t, ptyId } = await opened(o)
+    const written = () => spawned[0].pty.written
+    expect(await type(o, t.id, ptyId, 10, 'a')).toMatchObject({ ok: true, result: { ok: true } })
+    expect(await type(o, t.id, ptyId, 11, 'b')).toMatchObject({ ok: true })
+    // The reply to 11 was lost, so it is sent again, and later still the caller sends 12.
+    expect(await type(o, t.id, ptyId, 11, 'b')).toMatchObject({
+      ok: true,
+      result: { ok: true, duplicate: true }
+    })
+    expect(await type(o, t.id, ptyId, 10, 'a')).toMatchObject({ result: { duplicate: true } })
+    expect(await type(o, t.id, ptyId, 12, 'c')).toMatchObject({ ok: true })
+    expect(written()).toEqual(['a', 'b', 'c'])
+    // A resize shares the numbers: it is not applied twice either.
+    await o.call('pty.resize', { threadId: t.id, ptyId, seq: 13, cols: 90, rows: 30 })
+    await o.call('pty.resize', { threadId: t.id, ptyId, seq: 13, cols: 90, rows: 30 })
+    expect(spawned[0].pty.resizes).toEqual([[90, 30]])
+  }, 180_000)
+
+  it('keeps no ledger: a numbered call is not a request on disk, and a malformed one is refused', async () => {
+    const o = await routedOwner()
+    const { t, ptyId } = await opened(o)
+    const requests = () =>
+      Number(o.f.targetDb.database.prepare('SELECT count(*) AS n FROM net_executions').get()!.n)
+    const before = requests()
+    for (let seq = 1; seq <= 50; seq += 1) await type(o, t.id, ptyId, seq, 'x')
+    expect(requests()).toBe(before)
+    // No number, a number that is not a whole one, text that is too long, and a size outside the bounds.
+    for (const params of [
+      { threadId: t.id, ptyId, data: 'x' },
+      { threadId: t.id, ptyId, seq: 0, data: 'x' },
+      { threadId: t.id, ptyId, seq: 1.5, data: 'x' },
+      { threadId: t.id, ptyId, seq: 99, data: 'x'.repeat(16 * 1024 + 1) },
+      { threadId: t.id, ptyId, seq: 99, data: 5 }
+    ])
+      await expect(o.call('pty.write', params as never)).rejects.toMatchObject({
+        code: 'bad_request'
+      })
+    for (const size of [
+      { cols: 0, rows: 24 },
+      { cols: 80, rows: 257 },
+      { cols: 513, rows: 24 },
+      { cols: 80 }
+    ])
+      await expect(
+        o.call('pty.resize', { threadId: t.id, ptyId, seq: 99, ...size })
+      ).rejects.toMatchObject({ code: 'bad_request' })
+    // A call may not carry an idempotency key to a class that keeps none.
+    await expect(
+      o.f
+        .caller()
+        .rpc(
+          'routed.pty.write',
+          { threadId: t.id, ptyId, seq: 777, data: 'x' },
+          { id: newId('rpc'), idem: 'k', deadlineMs: 10_000 }
+        )
+    ).rejects.toMatchObject({ code: 'bad_request' })
+  }, 180_000)
+
+  it('holds a device to a steady rate, and the call that was refused can be sent again', async () => {
+    const clock = testClock()
+    const o = await routedOwner({ clock })
+    const { spawned, t, ptyId } = await opened(o)
+    // One large call after another uses the burst up.
+    const chunk = 'x'.repeat(16 * 1024)
+    let seq = 0
+    let refused: number | undefined
+    for (let i = 0; i < 200 && refused === undefined; i += 1) {
+      seq += 1
+      const reply = await type(o, t.id, ptyId, seq, chunk)
+      if (!reply.ok) {
+        expect(reply.error.code).toBe('rate_limited')
+        refused = seq
+      }
+    }
+    expect(refused).toBeGreaterThan(1)
+    expect(refused! * chunk.length).toBeLessThanOrEqual(TERMINAL_INPUT_BURST_BYTES + chunk.length)
+    expect(refused!).toBeLessThanOrEqual(TERMINAL_INPUT_BURST_CALLS)
+    expect(spawned[0].pty.written).toHaveLength(refused! - 1)
+    // Nothing is typed while it is refused, and the same number goes through once the rate has recovered.
+    expect(await type(o, t.id, ptyId, refused!, chunk)).toMatchObject({ ok: false })
+    clock.advance(2000)
+    expect(await type(o, t.id, ptyId, refused!, chunk)).toMatchObject({ ok: true })
+    expect(spawned[0].pty.written).toHaveLength(refused!)
+  }, 180_000)
+
+  it('says plainly when the shell cannot take the input, and does not record it as unknown', async () => {
+    const o = await routedOwner()
+    const { spawned, t, ptyId } = await opened(o)
+    spawned[0].pty.write = () => {
+      throw new Error('EPIPE')
+    }
+    expect(await type(o, t.id, ptyId, 1, 'x')).toMatchObject({
+      ok: false,
+      error: { code: 'pty_unavailable' }
+    })
+  }, 180_000)
+})
+
+describe('how many terminals a device may have', () => {
+  it('is four, and a closed terminal gives its slot back', async () => {
+    const o = await routedOwner()
+    const spawned = fakeShells(o.f.mms.ptyManager)
+    o.policy.set(o.f.callerNode, { terminal: true })
+    const open: Array<{ t: { id: string }; ptyId: string }> = []
+    for (let n = 0; n < ROUTED_TERMINALS_PER_NODE; n += 1) open.push(await another(o))
+    const fifth = folderThread(o)
+    expect(await create(o, fifth.t.id)).toMatchObject({
+      ok: false,
+      error: { code: 'terminal_limit' }
+    })
+    expect(spawned).toHaveLength(ROUTED_TERMINALS_PER_NODE)
+    expect(await close(o, open[0].t.id, open[0].ptyId)).toMatchObject({ ok: true })
+    expect((await create(o, fifth.t.id)).ok).toBe(true)
+  }, 240_000)
+
+  it('cannot be passed by two calls made at once: the slot is taken before the shell starts', async () => {
+    const o = await routedOwner()
+    const spawned = fakeShells(o.f.mms.ptyManager)
+    o.policy.set(o.f.callerNode, { terminal: true })
+    for (let n = 0; n < ROUTED_TERMINALS_PER_NODE - 1; n += 1) await another(o)
+    const [a, b] = [folderThread(o), folderThread(o)]
+    const settled = await Promise.all([create(o, a.t.id), create(o, b.t.id)])
+    expect(settled.filter((reply) => reply.ok)).toHaveLength(1)
+    expect(settled.filter((reply) => !reply.ok)).toEqual([
+      expect.objectContaining({ error: expect.objectContaining({ code: 'terminal_limit' }) })
+    ])
+    expect(spawned).toHaveLength(ROUTED_TERMINALS_PER_NODE)
+  }, 240_000)
+})
+
+describe('what ends a device’s terminals', () => {
+  const alive = (spawned: Spawned[]) => spawned.filter((s) => !s.pty.killed).length
+
+  it('ends them all when the device’s terminal switch goes off', async () => {
+    const o = await routedOwner({ streams: true })
+    const spawned = fakeShells(o.f.mms.ptyManager)
+    o.policy.set(o.f.callerNode, { terminal: true })
+    const { t } = folderThread(o)
+    const first = (await create(o, t.id)) as { result: { ptyId: string } }
+    await another(o)
+    const stream = (await o.ok('stream.open', {
+      kind: 'terminal',
+      threadId: t.id,
+      ptyId: first.result.ptyId
+    })) as RoutedStreamOpened
+    expect(o.adapter!.privateAccess((stream.descriptor as { id: never }).id)).toMatchObject({
+      open: true
+    })
+    expect(alive(spawned)).toBe(2)
+
+    o.policy.set(o.f.callerNode, { terminal: false })
+    expect(alive(spawned)).toBe(0)
+    const closes = o.audit.recent(20, o.f.callerNode).filter((row) => row.method === 'pty.close')
+    expect(closes).toHaveLength(2)
+    expect(closes.every((row) => row.outcome.startsWith('terminal_off'))).toBe(true)
+  }, 240_000)
+
+  it('ends them when the device is blocked, and unblocking gives nothing back', async () => {
+    const o = await routedOwner()
+    const { spawned } = await opened(o)
+    await another(o)
+    expect(alive(spawned)).toBe(2)
+    o.policy.set(o.f.callerNode, { blocked: true })
+    expect(alive(spawned)).toBe(0)
+    expect(o.audit.recent(20, o.f.callerNode).filter((row) => row.method === 'pty.close')).toEqual([
+      expect.objectContaining({ outcome: expect.stringMatching(/^blocked;/) }),
+      expect.objectContaining({ outcome: expect.stringMatching(/^blocked;/) })
+    ])
+    o.policy.set(o.f.callerNode, { blocked: false })
+    expect(alive(spawned)).toBe(0)
+  }, 240_000)
+
+  it('ends them when the owner’s switch goes off and when the device loses Works on threads', async () => {
+    const o = await routedOwner()
+    const { spawned } = await opened(o)
+    await another(o)
+    // A computer that still holds the grant keeps its terminals.
+    o.routes.terminals.endExcept('access_lost', () => true)
+    expect(alive(spawned)).toBe(2)
+    o.routes.terminals.endExcept('access_lost', (node) => node !== o.f.callerNode)
+    expect(alive(spawned)).toBe(0)
+    await another(o)
+    o.routes.terminals.end('setting_off')
+    expect(alive(spawned)).toBe(0)
+    const reasons = o.audit
+      .recent(20, o.f.callerNode)
+      .filter((row) => row.method === 'pty.close')
+      .map((row) => row.outcome.split(';')[0])
+      .sort()
+    expect(reasons).toEqual(['access_lost', 'access_lost', 'setting_off'])
+  }, 240_000)
+})
+
+describe('what is audited', () => {
+  it('records the first terminal of a device once, each open and kill, and the close with its bytes, but not every key press', async () => {
+    const o = await routedOwner()
+    const spawned = fakeShells(o.f.mms.ptyManager)
+    o.policy.set(o.f.callerNode, { terminal: true })
+    const { t } = folderThread(o)
+    const first = (await create(o, t.id)) as { result: { ptyId: string } }
+    const ptyId = first.result.ptyId
+    await another(o)
+    for (let seq = 1; seq <= 30; seq += 1) await type(o, t.id, ptyId, seq, 'k')
+    spawned[0].pty.say('hello from the shell')
+    await o.call('pty.kill', { threadId: t.id, ptyId })
+    spawned[1].pty.exit(0)
+
+    const rows = o.audit.recent(50, o.f.callerNode).reverse()
+    expect(rows.map((row) => row.method)).toEqual([
+      'pty.create',
+      'pty.first_open',
+      'pty.create',
+      'pty.close',
+      'pty.kill',
+      'pty.close'
+    ])
+    expect(rows.find((row) => row.method === 'pty.first_open')).toMatchObject({
+      outcome: 'first_terminal',
+      kind: 'change',
+      thread: t.id
+    })
+    const closes = rows.filter((row) => row.method === 'pty.close')
+    // Closed by the device, with what went in and what came out; the other ended by itself.
+    expect(closes[0].outcome).toBe(
+      `killed; in 30 B; out ${Buffer.byteLength('hello from the shell')} B`
+    )
+    expect(closes[1].outcome).toBe('exited; in 0 B; out 0 B')
+    // What came out is read volume.
+    expect(
+      o.audit.reads(o.f.callerNode).reduce((sum, hour) => sum + hour.bytes, 0)
+    ).toBeGreaterThanOrEqual(Buffer.byteLength('hello from the shell'))
+  }, 240_000)
+
+  it('tells the owner of a device’s first terminal once, not for the next ones', async () => {
+    const o = await routedOwner()
+    fakeShells(o.f.mms.ptyManager)
+    o.policy.set(o.f.callerNode, { terminal: true })
+    expect(o.audit.has(o.f.callerNode, 'pty.first_open')).toBe(false)
+    await another(o)
+    await another(o)
+    expect(
+      o.audit.recent(20, o.f.callerNode).filter((row) => row.method === 'pty.first_open')
+    ).toHaveLength(1)
+  }, 240_000)
+})
+
+/** A burst of output the way a shell makes it: chunks of every size from a few bytes to tens of KiB. */
+export function burst(total: number): string[] {
+  const chunks: string[] = []
+  let sent = 0
+  let seed = 7
+  while (sent < total) {
+    seed = (seed * 1103515245 + 12345) & 0x7fffffff
+    const size = Math.min(total - sent, 1 + (seed % 40_000))
+    chunks.push(`${sent}:`.padEnd(size, 'y'))
+    sent += size
+  }
+  return chunks
+}
+
+describe('a terminal’s output on its own stream', () => {
+  it('carries 1 MiB complete and in order, one record per chunk, never merged', async () => {
+    const o = await routedOwner({ streams: true })
+    const { spawned, t, ptyId } = await opened(o)
+    const stream = (await o.ok('stream.open', {
+      kind: 'terminal',
+      threadId: t.id,
+      ptyId
+    })) as RoutedStreamOpened
+    const chunks = burst(1024 * 1024)
+    expect(chunks.length).toBeGreaterThan(20)
+    for (const chunk of chunks) spawned[0].pty.say(chunk)
+
+    const { snapshot, events } = readStream(
+      o.f,
+      (stream.descriptor as { id: never }).id,
+      stream.subject
+    )
+    expect(snapshot).toMatchObject({ kind: 'mousse.terminal', ptyId, alive: true })
+    const data = events.filter((event) => event.type === 'pty.data')
+    // The terminal's own numbers, one chunk after another; a chunk larger than a record is in pieces that share its number.
+    const bySequence = new Map<number, string[]>()
+    for (const event of data) {
+      const list = bySequence.get(event.data.sequence) ?? []
+      list.push(event.data.data)
+      bySequence.set(event.data.sequence, list)
+    }
+    expect([...bySequence.keys()]).toEqual(chunks.map((_, index) => index + 1))
+    chunks.forEach((chunk, index) => expect(bySequence.get(index + 1)!.join('')).toBe(chunk))
+    expect(data.map((event) => event.data.data).join('')).toBe(chunks.join(''))
+    // Never merged: a chunk of 16 KiB or less is exactly one record.
+    for (const [sequence, pieces] of bySequence)
+      if (chunks[sequence - 1].length <= 16 * 1024) expect(pieces).toHaveLength(1)
+    spawned[0].pty.exit(0)
+  }, 240_000)
+
+  it('can be caught up from a sequence number with pty.outputSince', async () => {
+    const o = await routedOwner()
+    const { spawned, t, ptyId } = await opened(o)
+    const chunks = burst(200 * 1024)
+    for (const chunk of chunks) spawned[0].pty.say(chunk)
+    const since = await o.ok('pty.outputSince', { threadId: t.id, ptyId, afterSequence: 3 })
+    expect(since.gap).toBe(false)
+    expect(since.sequence).toBe(chunks.length)
+    expect(since.chunks.map((chunk: { sequence: number }) => chunk.sequence)).toEqual(
+      chunks.map((_, index) => index + 1).slice(3)
+    )
+    expect(since.chunks.map((chunk: { data: string }) => chunk.data).join('')).toBe(
+      chunks.slice(3).join('')
+    )
+  }, 240_000)
+})

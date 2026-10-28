@@ -51,7 +51,10 @@ function securityOf(row: RoutedRow): string {
     owned: Object.entries(row.owned ?? {}).sort(([a], [b]) => a.localeCompare(b)),
     routeOnly: [...(row.routeOnly ?? [])].sort(),
     // Which values a caller may send ahead of the call is part of what the row lets through.
-    ...(row.stageable?.length ? { stageable: [...row.stageable].sort() } : {})
+    ...(row.stageable?.length ? { stageable: [...row.stageable].sort() } : {}),
+    // A numbered change keeps no ledger, and a terminal's starting folder is the one `cwd` a call may carry.
+    ...(row.sequenced ? { sequenced: true } : {}),
+    ...(row.startsIn ? { startsIn: true } : {})
   })
 }
 
@@ -154,22 +157,16 @@ describe('the routed method table', () => {
     }
   }, 60_000)
 
-  it('keeps the file, terminal, purge and sender-naming methods out of the table', () => {
-    for (const method of [
-      'files.writeDirect',
-      'files.root',
-      'threads.purge',
-      'pty.create',
-      'pty.write',
-      'pty.kill',
-      'pty.resize'
-    ]) {
+  it('keeps the direct save, the Files folder and permanent delete out of the table', () => {
+    for (const method of ['files.writeDirect', 'files.root', 'threads.purge']) {
       expect(ROUTED_METHODS[method]).toBeUndefined()
       expect(classifyRoutedMethod(method)).toMatchObject({ kind: 'local' })
     }
     for (const [method, row] of Object.entries(ROUTED_METHODS))
       for (const key of ROUTED_FORBIDDEN_KEYS)
-        expect(row.keys, `${method} takes ${key}`).not.toContain(key)
+        // A terminal's starting folder is the one `cwd`: it must lie inside the thread's own, and the owner checks it.
+        if (!(key === 'cwd' && row.startsIn))
+          expect(row.keys, `${method} takes ${key}`).not.toContain(key)
     // Only projects.open names a path of the owner's disk; file and Git rows name a thread or a project.
     expect(
       Object.entries(ROUTED_METHODS)
@@ -203,11 +200,55 @@ describe('the routed method table', () => {
       if (row.target === 'folder')
         expect(row.keys).toEqual(expect.arrayContaining(['threadId', 'projectId']))
       if (row.target === 'project') expect(row.keys).toContain('projectId')
-      // Everything that changes something goes through the ledger; reads keep nothing on disk.
-      expect(row.durable, label('durability')).toBe(row.capability !== 'read')
+      // Everything that changes something goes through the ledger, except numbered terminal input; reads keep nothing on disk.
+      expect(row.durable, label('durability')).toBe(row.capability !== 'read' && !row.sequenced)
       // Only the terminal rows need the terminal switch.
       expect(Boolean(row.terminal), label('terminal')).toBe(method.startsWith('pty.'))
     }
+  })
+
+  it('routes the terminal changes, with the shell and environment left to the owner', () => {
+    const terminals = Object.entries(ROUTED_METHODS)
+      .filter(([method]) => method.startsWith('pty.'))
+      .map(([method]) => method)
+      .sort()
+    expect(terminals).toEqual([
+      'pty.create',
+      'pty.isAlive',
+      'pty.kill',
+      'pty.list',
+      'pty.lookup',
+      'pty.outputSince',
+      'pty.resize',
+      'pty.scrollback',
+      'pty.write'
+    ])
+    for (const method of ['pty.create', 'pty.kill', 'pty.write', 'pty.resize']) {
+      const row = ROUTED_METHODS[method]
+      expect(row.capability, method).toBe('write')
+      expect(row.terminal, method).toBe(true)
+      // No shell, shell arguments or environment, ever; only `pty.create` may name a folder, and only one inside the thread's.
+      for (const key of ['command', 'env', 'shellArgs']) expect(row.keys, method).not.toContain(key)
+      expect(row.keys.includes('cwd'), method).toBe(method === 'pty.create')
+    }
+    // Input and resizes are numbered and kept out of the ledger; the rest of the terminal changes are in it.
+    expect(
+      Object.entries(ROUTED_METHODS)
+        .filter(([, row]) => row.sequenced)
+        .map(([method]) => method)
+        .sort()
+    ).toEqual(['pty.resize', 'pty.write'])
+    for (const method of ['pty.write', 'pty.resize']) {
+      expect(ROUTED_METHODS[method].durable, method).toBe(false)
+      expect(ROUTED_METHODS[method].keys, method).toContain('seq')
+      expect(ROUTED_METHODS[method].required, method).toContain('seq')
+    }
+    for (const method of ['pty.create', 'pty.kill']) expect(ROUTED_METHODS[method].durable, method).toBe(true)
+    expect(
+      Object.entries(ROUTED_METHODS)
+        .filter(([, row]) => row.startsIn)
+        .map(([method]) => method)
+    ).toEqual(['pty.create'])
   })
 
   it('advertises one version per row and per transport method', () => {

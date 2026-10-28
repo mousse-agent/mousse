@@ -339,10 +339,20 @@
     "digest": "232e8492957800bd",
     "security": "2455464eaace895f"
   },
+  "pty.create": {
+    "version": 1,
+    "digest": "e7c679b0db328bc2",
+    "security": "793b320a5bc040b4"
+  },
   "pty.isAlive": {
     "version": 1,
     "digest": "357d5db91b806bcd",
     "security": "bc60125b4460c3cf"
+  },
+  "pty.kill": {
+    "version": 1,
+    "digest": "357d5db91b806bcd",
+    "security": "6d7e7683daf86bbb"
   },
   "pty.list": {
     "version": 1,
@@ -359,10 +369,20 @@
     "digest": "6f8b3a1534b78dbb",
     "security": "bc60125b4460c3cf"
   },
+  "pty.resize": {
+    "version": 1,
+    "digest": "a6c60ee2107860ec",
+    "security": "617419c11aa4eab0"
+  },
   "pty.scrollback": {
     "version": 1,
     "digest": "aceac561b42d6004",
     "security": "bc60125b4460c3cf"
+  },
+  "pty.write": {
+    "version": 1,
+    "digest": "512cdd5133657158",
+    "security": "617419c11aa4eab0"
   },
   "publish.start": {
     "version": 1,

@@ -1,5 +1,5 @@
 import { NetError, forbiddenReason, type ForbiddenReason, type NodeId } from '../../../shared/net'
-import type { RoutedRefusal } from '../../../shared/bridge/routed'
+import { terminalOffMessage, type RoutedRefusal } from '../../../shared/bridge/routed'
 import { DomainRpcError } from '../../protocol/domainRegistry'
 
 /**
@@ -38,7 +38,7 @@ const FORBIDDEN_WORDS: Record<ComputerForbiddenReason, (name: string) => string>
   setting_off: (name) => `Works on threads is off on ${name}.`,
   capability: (name) =>
     `This device is not allowed to work on threads on ${name}. Turn on Works on threads for it in Devices.`,
-  terminal_off: (name) => `Terminals from this device are off on ${name}.`,
+  terminal_off: terminalOffMessage,
   unknown: (name) => `${name} refused this request.`
 }
 

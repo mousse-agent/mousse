@@ -111,6 +111,7 @@ import { PublishService } from '../actions/PublishService'
 import { atomicWriteJsonSync } from '../data/AtomicFs'
 import { lexicalGuard, type GuardedPath, type PathGuard, type PathIntent } from '../files/pathGuard'
 import { PathContainmentError, routedGuardFor } from '../files/routedGuard'
+import { terminalStartFolder } from '../files/terminalFolder'
 import { ROUTED_STAGE_ITEM_BYTES } from '../../shared/bridge/routed'
 import { grepWorkspace } from '../files/WorkspaceGrep'
 import { getWorkspaceIndexRegistry } from '../files/WorkspaceIndexRegistry'
@@ -1930,7 +1931,14 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const p = isObject(params) ? params : {}
       const threadId = asString(p.threadId, 'threadId', 256)
       const agentId = asString(p.agentId, 'agentId', 256)
-      let cwd = asOptionalString(p.cwd, 4096) ?? process.cwd()
+      // A terminal opened from another computer runs in the owner's default shell and environment, and starts in the
+      // thread's own folder (or one inside it): the caller names no other folder, shell, arguments or variables.
+      const routed = ctx.connection?.bridgeCaller
+      if (routed && (p.command !== undefined || p.env !== undefined || p.shellArgs !== undefined))
+        throw new DomainRpcError('invalid_params', 'A terminal from another computer runs in the default shell and environment.')
+      if (routed && threadId === '__unbound__') throw new DomainRpcError('thread_not_found', 'Thread not found', { threadId })
+      const startIn = routed ? asOptionalString(p.cwd, 4096) : undefined
+      let cwd = (routed ? undefined : asOptionalString(p.cwd, 4096)) ?? process.cwd()
       const command = asOptionalString(p.command, 4096)
       const env = asOptionalStringEnvMap(p.env, 'env')
       const shellArgs =
@@ -1938,7 +1946,9 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
           ? undefined
           : asStringArray(p.shellArgs, 'shellArgs', { maxItems: 32, maxItemLen: 1024 })
       const task = threadId !== '__unbound__' ? ctx.mms.threads.getThread(threadId) : undefined
-      if (threadId !== '__unbound__' && !task) throw new Error('Task not found for terminal')
+      if (threadId !== '__unbound__' && !task) throw new DomainRpcError('thread_not_found', 'Task not found for terminal', { threadId })
+      if (startIn !== undefined && task && !task.projectId)
+        throw new DomainRpcError('thread_has_no_folder', 'This thread has no folder on this computer.', { threadId })
       const directory = task ? ctx.mms.threads.getThreadDir(threadId) : undefined
       if (task?.projectId) await ensureOwnedTaskWorkspace(ctx, { threadId })
       const manager = directory ? new ThreadWorkspaceManager(directory) : undefined
@@ -1952,12 +1962,16 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
           catch (error) { if (String(error).includes('task-bound terminal')) throw error }
         }
       }
-      if (task && ctx.mms.threadRuntimes.listAgents(threadId).find((agent) => agent.id === agentId)?.workspacePolicy?.access === 'read-only') throw new Error('Read-only agents cannot open an arbitrary shell')
+      if (task && ctx.mms.threadRuntimes.listAgents(threadId).find((agent) => agent.id === agentId)?.workspacePolicy?.access === 'read-only') throw new DomainRpcError('terminal_not_allowed', 'Read-only agents cannot open an arbitrary shell')
       if (metadata) {
-        if (manager!.verify(metadata).lifecycle !== 'ready') throw new Error('Task workspace requires recovery before opening a terminal')
+        if (manager!.verify(metadata).lifecycle !== 'ready') throw new DomainRpcError('workspace_recovery_required', 'Task workspace requires recovery before opening a terminal')
         const projectPath = resolveThreadProjectPath(ctx.mms.projects, ctx.mms.threads, threadId)
-        if (p.cwd === undefined || projectPath && cwd === projectPath) cwd = manager!.executionContext(projectPath ?? metadata.worktreePath, metadata).projectPath
+        if (routed || p.cwd === undefined || projectPath && cwd === projectPath) cwd = manager!.executionContext(projectPath ?? metadata.worktreePath, metadata).projectPath
         else cwd = assertEpisodePath(metadata.worktreePath, cwd)
+        // A folder the caller named inside the thread's own, resolved by real path like a file's.
+        if (routed && startIn !== undefined) {
+          try { cwd = terminalStartFolder(cwd, startIn, routedGuardFor(routed.maxPermissionMode)) } catch (error) { throw refusedPath(error) }
+        }
       }
       const lease = directory ? tryAcquireExecutionLease(directory, { source: 'task-terminal' }) : undefined
       if (directory && !lease) throw new DomainRpcError('workspace_busy', leaseBusyMessage(readLeaseOwner(getExecutionLeasePath(directory)), 'Task writer is busy; wait for it to finish before opening a terminal'))

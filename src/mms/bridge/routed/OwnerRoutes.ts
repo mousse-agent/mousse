@@ -8,6 +8,9 @@ import {
   ROUTED_LARGE_READS_PER_CALLER,
   ROUTED_LEDGER_RESULT_MAX_BYTES,
   ROUTED_LOCAL_LIST_FIELDS,
+  ROUTED_PTY_INPUT_MAX_CHARS,
+  ROUTED_PTY_MAX_COLS,
+  ROUTED_PTY_MAX_ROWS,
   ROUTED_QUEUE_LIST_FIELD,
   ROUTED_METHODS,
   ROUTED_REPLY_MAX_BYTES,
@@ -27,6 +30,7 @@ import {
   type RoutedStreamOpened
 } from '../../../shared/bridge/routed'
 import { WORKFLOW_RUN_CAPABILITY } from '../../../shared/workflowRunPlatform'
+import { isProjectShellAgentId } from '../../../shared/types'
 import {
   AppError,
   errorDiagnostic,
@@ -53,6 +57,7 @@ import { newestMessages } from '../../protocol/transcriptPaging'
 import { ReplyPages } from './pages'
 import { cleanUpBlockedDevice } from './blockCleanup'
 import type { RoutedStaging } from './staging'
+import { RoutedTerminals } from './terminals'
 
 /** Ids are text of this length at most, as in the protocol handlers. */
 const ID_MAX = 256
@@ -75,7 +80,7 @@ export interface OwnerRoutesOptions {
   rpc: RpcDispatcher
   /** What this computer lets each device do here. */
   policy: Pick<SqliteNodePolicy, 'get' | 'list' | 'onChange'>
-  audit: Pick<SqliteBridgeAudit, 'record' | 'countRead'>
+  audit: Pick<SqliteBridgeAudit, 'record' | 'countRead' | 'has'>
   /** Keeps a call owned by the profile, so it drains when the profile closes. */
   track<T>(work: Promise<T>): Promise<T>
   /**
@@ -147,7 +152,10 @@ export function validateRoutedParams(
 ): Record<string, unknown> {
   if (!isPlainObject(value)) throw new NetError('bad_request', 'A routed call takes an object.')
   for (const key of Object.keys(value)) {
-    if ((ROUTED_FORBIDDEN_KEYS as readonly string[]).includes(key) || !row.keys.includes(key))
+    // A terminal's starting folder is the one place a `cwd` is taken: it must lie inside the thread's own folder.
+    const forbidden =
+      (ROUTED_FORBIDDEN_KEYS as readonly string[]).includes(key) && !(key === 'cwd' && row.startsIn)
+    if (forbidden || !row.keys.includes(key))
       throw new NetError('bad_request', `${method} does not take ${key}.`)
     if (key === '__proto__' || key === 'constructor' || key === 'prototype')
       throw new NetError('bad_request')
@@ -212,6 +220,34 @@ export function validateRoutedParams(
           looksAbsolute(value[key] as string))
       )
         throw new NetError('bad_request', `${key} must be a path inside the thread's folder.`)
+  if (row.startsIn && value.cwd !== undefined) {
+    // Whether it is inside the folder is decided by the real path, on the owner, when the terminal starts.
+    if (typeof value.cwd !== 'string' || value.cwd.includes('\0') || value.cwd.length > 4096)
+      throw new NetError('bad_request', 'cwd must be a folder inside the thread’s folder.')
+  }
+  if (row.sequenced) {
+    if (!Number.isSafeInteger(value.seq) || (value.seq as number) < 1)
+      throw new NetError('bad_request', `${method} needs a number (seq) of 1 or more.`)
+    if (
+      value.data !== undefined &&
+      (typeof value.data !== 'string' || value.data.length > ROUTED_PTY_INPUT_MAX_CHARS)
+    )
+      throw new NetError('bad_request', `data is a text of at most ${ROUTED_PTY_INPUT_MAX_CHARS} characters.`)
+    for (const [key, max] of [
+      ['cols', ROUTED_PTY_MAX_COLS],
+      ['rows', ROUTED_PTY_MAX_ROWS]
+    ] as const)
+      if (
+        value[key] !== undefined &&
+        (!Number.isSafeInteger(value[key]) || (value[key] as number) < 1 || (value[key] as number) > max)
+      )
+        throw new NetError('bad_request', `${key} is a whole number from 1 to ${max}.`)
+    if (method === 'pty.resize' && (value.cols === undefined || value.rows === undefined))
+      throw new NetError('bad_request', 'pty.resize needs cols and rows.')
+  }
+  // A terminal opened from another computer is a project shell, like the ones its own panel opens.
+  if (method === 'pty.create' && !isProjectShellAgentId(String(value.agentId)))
+    throw new NetError('bad_request', 'A terminal from another computer is a project shell.')
   return value
 }
 
@@ -228,22 +264,34 @@ export function validateRoutedParams(
 export class OwnerRoutes {
   private readonly backend: MmsRemoteBackend
   readonly pages: ReplyPages
+  /** The terminals other computers opened here, who opened them, and when each has to end. */
+  readonly terminals: RoutedTerminals
   private readonly clock: Pick<Clock, 'now'>
   constructor(private readonly options: OwnerRoutesOptions) {
     this.backend = new MmsRemoteBackend(options.services, () => options.services.protocolSequence())
     this.clock = options.clock ?? systemClock
     this.pages = options.pages ?? new ReplyPages(this.clock)
+    this.terminals = new RoutedTerminals({
+      services: options.services,
+      audit: options.audit,
+      clock: this.clock
+    })
   }
 
   register(): void {
     for (const [method, row] of Object.entries(ROUTED_METHODS))
       this.options.rpc.register(this.methodFor(method, row))
     this.registerTransport()
-    // A device that is blocked has nothing held for it: the results waiting to be fetched and the
-    // values it staged go with it.
     const stops = [
       this.options.policy.onChange((event) => {
+        // The device's terminals end the moment its terminal switch goes off, or it is blocked: a shell
+        // that was already open must not outlive the permission that opened it.
+        if (event.before.terminal && !event.after.terminal)
+          this.terminals.end('terminal_off', event.node)
         if (!event.after.blocked || event.before.blocked) return
+        this.terminals.end('blocked', event.node)
+        // A device that is blocked has nothing held for it: the results waiting to be fetched and the
+        // values it staged go with it.
         this.pages.dropCaller(event.node)
         this.options.staging?.dropCaller(event.node)
         // What the device queued, made a rule of and started is taken away too.
@@ -257,6 +305,7 @@ export class OwnerRoutes {
 
   close(): void {
     for (const stop of this.stops.splice(0)) stop()
+    this.terminals.close()
   }
   private stops: Array<() => void> = []
 
@@ -413,10 +462,13 @@ export class OwnerRoutes {
       capability: row.capability as NodeCapability,
       requires: ['settings'],
       ...(row.terminal ? { needsTerminal: true } : {}),
-      mutating: row.durable,
-      ...(row.durable
-        ? { ledgerResultMaxBytes: ROUTED_LEDGER_RESULT_MAX_BYTES }
-        : { ephemeral: true }),
+      // A numbered change changes something but keeps nothing in the ledger; a read keeps nothing either.
+      mutating: row.durable || row.sequenced === true,
+      ...(row.sequenced
+        ? { sequenced: true }
+        : row.durable
+          ? { ledgerResultMaxBytes: ROUTED_LEDGER_RESULT_MAX_BYTES }
+          : { ephemeral: true }),
       validate: (params) => validateRoutedParams(method, row, params),
       handle: (params, context) =>
         this.options.track(this.run(method, row, params as Record<string, unknown>, context))
@@ -450,6 +502,9 @@ export class OwnerRoutes {
     // hash of the path it was refused, never the path itself.
     if (method === 'projects.open' && typeof params.path === 'string')
       project = `path:${createHash('sha256').update(params.path).digest('hex').slice(0, 12)}`
+    // The first terminal a device opens here is worth telling the owner (below). Read before this call's own row is written.
+    const firstTerminal = method === 'pty.create' && !audit.has(node, 'pty.create')
+    let slot: ReturnType<RoutedTerminals['claim']> | undefined
     try {
       // Nothing has run yet: a call that was cancelled before it started is a refusal, not an unknown outcome.
       if (context.signal.aborted)
@@ -480,9 +535,28 @@ export class OwnerRoutes {
         stagedIds = unstaged.ids
       }
       await this.assertOwned(method, row, params)
+      // Terminals: a device types into, resizes and stops only the ones it opened, takes a slot before it starts one,
+      // and each numbered input is applied once.
+      if (method === 'pty.create') slot = this.terminals.claim(node)
+      if (row.terminal && (row.sequenced || method === 'pty.kill')) {
+        const ptyId = params.ptyId as string
+        if (!this.terminals.owns(node, ptyId, thread!)) throw notFoundFor('pty', ptyId, thread!)
+        if (method === 'pty.kill') this.terminals.markKilled(ptyId)
+      }
+      if (row.sequenced) {
+        const sent = typeof params.data === 'string' ? Buffer.byteLength(params.data) : 0
+        const verdict = this.terminals.admitInput(node, params.ptyId as string, params.seq as number, sent)
+        // A resend of a number that was applied: answered, not typed again.
+        if (verdict === 'duplicate')
+          return { ok: true, result: { ok: true, duplicate: true } } satisfies RoutedReply
+      }
       const result = await this.dispatch(method, row, params, context, head)
       if (method === 'projects.open')
         project = (result as { project?: { id?: string } }).project?.id ?? project
+      if (method === 'pty.create') {
+        slot?.adopt(thread!, (result as { ptyId: string }).ptyId)
+        slot = undefined
+      }
       const reply: RoutedReply = {
         ok: true,
         result: row.durable ? withoutLocalLists(method, result) : result
@@ -492,9 +566,16 @@ export class OwnerRoutes {
         staging?.consume(stagedIds)
         consumed = true
       }
+      // A numbered change is not audited call by call (that would be a row per key press): the terminal's
+      // opening, its end and the bytes it carried are.
+      if (row.sequenced) return reply
       if (row.durable)
         audit.record({ node, method, thread, project, outcome: 'ok', kind: 'change' })
       else audit.countRead(node, bytes)
+      // This computer cannot raise a notification of its own (the daemon has no way to), so the first terminal a
+      // device opens is a row of its own, which the Devices screen shows.
+      if (firstTerminal)
+        audit.record({ node, method: 'pty.first_open', thread, outcome: 'first_terminal', kind: 'change' })
       // A read has no ledger and no artifact to carry a reply that does not fit one RPC reply: the
       // owner keeps it for a minute and the caller fetches it in pages. A durable result goes through
       // the artifact publisher.
@@ -503,6 +584,15 @@ export class OwnerRoutes {
       return reply
     } catch (error) {
       const refusal = refusalOf(error)
+      // A numbered call has no ledger to leave "uncertain": a shell that cannot take the input says so.
+      if (!refusal && row.sequenced && !(error instanceof NetError))
+        return {
+          ok: false,
+          error: {
+            code: 'pty_unavailable',
+            message: error instanceof Error ? error.message : 'The terminal cannot take that.'
+          }
+        } satisfies RoutedReply
       if (!refusal) {
         // Not something the handler refused on purpose: it may have made part of its change. The ledger
         // records `outcome_uncertain` for a durable call, the audit says so, and the owner keeps the diagnostic.
@@ -518,9 +608,11 @@ export class OwnerRoutes {
       // A refused read is only counted: a device cannot fill the audit with reads it knows will fail.
       if (row.durable)
         audit.record({ node, method, thread, project, outcome: refusal.code, kind: 'refused' })
-      else audit.countRead(node, 0)
+      else if (!row.sequenced) audit.countRead(node, 0)
       return { ok: false, error: refusal }
     } finally {
+      // A terminal that did not start gives its slot back.
+      slot?.abandon()
       // A call that did not use its staged values up gives them back, so they can be sent in a call that does.
       if (stagedIds.length && !consumed) staging?.release(stagedIds)
       if (entered) this.leaveLargeRead(node)
