@@ -5,7 +5,10 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { newId } from '../../../../src/shared/net'
 import { BRIDGE_REMOTE_METHODS } from '../../../../src/mms/bridge/remote'
-import { matchProject } from '../../../../src/mms/bridge/remote/projectMatch'
+import {
+  matchProject,
+  matchProjectWithEvidence
+} from '../../../../src/mms/bridge/remote/projectMatch'
 import { executeBridgeHubLocal, validateBridgeHubLocal } from '../../../../src/mms/bridge/hub'
 import { dispatchMethod } from '../../../../src/mms/protocol/handlers'
 import { fixture, cleanup, resources } from './fixture'
@@ -42,18 +45,27 @@ function repository(remote?: string, from?: string): { path: string; root: strin
 }
 
 it('picks the one project whose root commits overlap, and breaks a tie by a shared remote', () => {
-  const candidate = (id: string, roots: string[], remotes: string[] = []) => ({ id, identity: { roots, remotes } })
-  expect(matchProject({ roots: [A], remotes: [] }, [candidate('one', [B]), candidate('two', [A, C])])).toBe('two')
+  const candidate = (id: string, roots: string[], remotes: string[] = []) => ({
+    id,
+    identity: { roots, remotes }
+  })
+  expect(
+    matchProject({ roots: [A], remotes: [] }, [candidate('one', [B]), candidate('two', [A, C])])
+  ).toBe('two')
   expect(matchProject({ roots: [A, B], remotes: [] }, [candidate('one', [C])])).toBeUndefined()
   // A folder that is not a repository never matches.
-  expect(matchProject({ roots: [A], remotes: [] }, [{ id: 'plain', identity: null }])).toBeUndefined()
+  expect(
+    matchProject({ roots: [A], remotes: [] }, [{ id: 'plain', identity: null }])
+  ).toBeUndefined()
   // Two clones: the one that shares a normalized remote wins.
   const clones = [candidate('x', [A], ['example.com/x']), candidate('y', [A], ['example.com/y'])]
   expect(matchProject({ roots: [A], remotes: ['example.com/y'] }, clones)).toBe('y')
   // Still ambiguous: no shared remote, or both share one.
   expect(matchProject({ roots: [A], remotes: ['example.com/z'] }, clones)).toBeUndefined()
   expect(matchProject({ roots: [A], remotes: [] }, clones)).toBeUndefined()
-  expect(matchProject({ roots: [A], remotes: ['example.com/x', 'example.com/y'] }, clones)).toBeUndefined()
+  expect(
+    matchProject({ roots: [A], remotes: ['example.com/x', 'example.com/y'] }, clones)
+  ).toBeUndefined()
 })
 
 it('matches a project of the target by a shared root commit, and answers an id, never a path', async () => {
@@ -81,7 +93,8 @@ it('matches a project of the target by a shared root commit, and answers an id, 
   expect(await ask([B], ['example.com/org/app'])).toEqual({})
   // The target reads each repository once for a few minutes: the identity survives its repository going away.
   rmSync(join(theirs.path, '.git'), { recursive: true, force: true })
-  expect(await ask([mine.root])).toEqual({ projectId: project.id })
+  // (With no remote asked about, the match rests on the history alone and says so.)
+  expect(await ask([mine.root])).toEqual({ projectId: project.id, weak: true })
 })
 
 it('prefers the clone that shares a remote and refuses to guess between the rest', async () => {
@@ -91,10 +104,15 @@ it('prefers the clone that shares a remote and refuses to guess between the rest
     y = repository('https://example.com/org/y.git', base.path)
   f.mms.projects.openProject(x.path)
   f.mms.projects.openProject(y.path)
-  const idOf = (path: string) => f.mms.projects.listProjects().find((entry) => entry.path === path)!.id
+  const idOf = (path: string) =>
+    f.mms.projects.listProjects().find((entry) => entry.path === path)!.id
   await f.connect()
   const ask = (remotes: string[]) =>
-    executeBridgeHubLocal(f.hub(), 'bridge.hub.matchProject', { target: f.targetNode, roots: [base.root], remotes })
+    executeBridgeHubLocal(f.hub(), 'bridge.hub.matchProject', {
+      target: f.targetNode,
+      roots: [base.root],
+      remotes
+    })
   expect(await ask(['example.com/org/y'])).toEqual({ projectId: idOf(y.path) })
   expect(await ask(['example.com/org/x'])).toEqual({ projectId: idOf(x.path) })
   expect(await ask(['example.com/org/other'])).toEqual({})
@@ -125,7 +143,10 @@ it('matches a project that is a subfolder of the repository, and one reached thr
       options: { id: newId('rpc') }
     })
   expect(await ask([sub.root], ['example.com/org/lib'])).toEqual({ projectId: subProject.id })
-  if (linkedProject) expect(await ask([linked.root])).toEqual({ projectId: linkedProject.id })
+  if (linkedProject)
+    expect(await ask([linked.root], ['example.com/org/linked'])).toEqual({
+      projectId: linkedProject.id
+    })
   expect(await ask([mine.root])).toEqual({})
 })
 
@@ -146,17 +167,81 @@ it('does not let two projects in one repository make each other ambiguous: the t
   expect(await ask()).toEqual({ projectId: top.id })
 })
 
+it('does not take a fork or a copy of a template for the same repository, and calls a root-commit-only match weak', () => {
+  const candidate = (id: string, roots: string[], remotes: string[] = []) => ({
+    id,
+    identity: { roots, remotes }
+  })
+  // Both sides have remotes and none is shared: the same root commit is a fork or a template, not a clone.
+  expect(
+    matchProjectWithEvidence({ roots: [A], remotes: ['example.com/me/app'] }, [
+      candidate('upstream', [A], ['example.com/org/app'])
+    ])
+  ).toBeUndefined()
+  // A shared remote is strong, and wins over a candidate that only shares the root.
+  expect(
+    matchProjectWithEvidence({ roots: [A], remotes: ['example.com/org/app'] }, [
+      candidate('fork', [A], ['example.com/me/app']),
+      candidate('clone', [A], ['example.com/org/app'])
+    ])
+  ).toEqual({ id: 'clone', weak: false })
+  // One side with no remote: the root commit is all there is, and the answer says so.
+  expect(matchProjectWithEvidence({ roots: [A], remotes: [] }, [candidate('local', [A])])).toEqual({
+    id: 'local',
+    weak: true
+  })
+  expect(
+    matchProjectWithEvidence({ roots: [A], remotes: [] }, [
+      candidate('remote', [A], ['example.com/org/app'])
+    ])
+  ).toEqual({ id: 'remote', weak: true })
+  // Two weak candidates are still ambiguous.
+  expect(
+    matchProjectWithEvidence({ roots: [A], remotes: [] }, [
+      candidate('x', [A]),
+      candidate('y', [A])
+    ])
+  ).toBeUndefined()
+})
+
+it('says a match is weak over the wire, and answers a fork with nothing', async () => {
+  const f = await fixture(),
+    mine = repository('https://example.com/org/app.git'),
+    fork = repository('https://example.com/me/app.git', mine.path),
+    plain = repository()
+  f.mms.projects.openProject(fork.path)
+  const lonely = f.mms.projects.openProject(plain.path)
+  await f.connect()
+  const ask = (roots: string[], remotes: string[] = []) =>
+    executeBridgeHubLocal(f.hub(), 'bridge.hub.matchProject', {
+      target: f.targetNode,
+      roots,
+      remotes,
+      options: { id: newId('rpc') }
+    })
+  // The upstream's remote is not the fork's: not the same repository, though the history is.
+  expect(await ask([mine.root], ['example.com/org/app'])).toEqual({})
+  // No remote on the asking side: only the history, so it is weak.
+  expect(await ask([plain.root])).toEqual({ projectId: lonely.id, weak: true })
+})
+
 it('is read-only, needs the read capability, and validates its input before anything runs', async () => {
   expect(BRIDGE_REMOTE_METHODS['projects.match']).toEqual({ capability: 'read', mutating: false })
   const denied = await fixture(['chat', 'write'])
   await denied.connect()
   await expect(
-    executeBridgeHubLocal(denied.hub(), 'bridge.hub.matchProject', { target: denied.targetNode, roots: [A] })
+    executeBridgeHubLocal(denied.hub(), 'bridge.hub.matchProject', {
+      target: denied.targetNode,
+      roots: [A]
+    })
   ).rejects.toMatchObject({ code: 'forbidden' })
   const f = await fixture(['read'])
   await f.connect()
   expect(
-    await executeBridgeHubLocal(f.hub(), 'bridge.hub.matchProject', { target: f.targetNode, roots: [A] })
+    await executeBridgeHubLocal(f.hub(), 'bridge.hub.matchProject', {
+      target: f.targetNode,
+      roots: [A]
+    })
   ).toEqual({})
   const target = f.targetNode
   const refused: unknown[] = [
@@ -176,9 +261,10 @@ it('is read-only, needs the read capability, and validates its input before anyt
     { target, roots: [A], remotes: [], projectId: 'p' }
   ]
   for (const bad of refused)
-    expect(() => validateBridgeHubLocal('bridge.hub.matchProject', bad), JSON.stringify(bad)).toThrow(
-      expect.objectContaining({ code: 'bad_request' })
-    )
+    expect(
+      () => validateBridgeHubLocal('bridge.hub.matchProject', bad),
+      JSON.stringify(bad)
+    ).toThrow(expect.objectContaining({ code: 'bad_request' }))
   validateBridgeHubLocal('bridge.hub.matchProject', {
     target,
     roots: Array.from({ length: 256 }, (_, i) => i.toString(16).padStart(64, '0')),
@@ -196,6 +282,10 @@ it('reads the identity of a local project for the match, or null for a folder th
   expect(await dispatchMethod(ctx, 'projects.identity', { projectId: ids[0] })).toEqual({
     identity: { roots: [repo.root], remotes: ['example.com/org/app'] }
   })
-  expect(await dispatchMethod(ctx, 'projects.identity', { projectId: ids[1] })).toEqual({ identity: null })
-  expect(await dispatchMethod(ctx, 'projects.identity', { projectId: 'unknown' })).toEqual({ identity: null })
+  expect(await dispatchMethod(ctx, 'projects.identity', { projectId: ids[1] })).toEqual({
+    identity: null
+  })
+  expect(await dispatchMethod(ctx, 'projects.identity', { projectId: 'unknown' })).toEqual({
+    identity: null
+  })
 })

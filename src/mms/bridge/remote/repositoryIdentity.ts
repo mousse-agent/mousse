@@ -11,7 +11,15 @@ export interface RepositoryIdentity {
   remotes: string[]
 }
 
-const IDENTITY_TTL_MS = 5 * 60_000
+/** Two paths name the same folder: Windows ignores case and takes either separator. */
+export function sameFolder(a: string, b: string): boolean {
+  if (process.platform !== 'win32') return a === b
+  const norm = (path: string): string => path.replaceAll('/', '\\').toLowerCase()
+  return norm(a) === norm(b)
+}
+
+/** A repository's top folder and root commits hardly ever change: they are read again after this long. */
+const IDENTITY_TTL_MS = 30 * 60_000
 /** A repository that could not be read is asked about again after a minute, not on every call. */
 const FAILURE_TTL_MS = 60_000
 /** A repository whose history takes longer than this to read is treated as unreadable for now. */
@@ -45,7 +53,7 @@ export class RepositoryIdentities {
       timing?: Timing
       budgetMs?: number
       /** Tests replace the reading of a repository. */
-      read?: (root: string) => Promise<{ roots: string[]; remotes: string[] }>
+      read?: (root: string, signal?: AbortSignal) => Promise<{ roots: string[]; remotes: string[] }>
     } = {}
   ) {}
 
@@ -67,13 +75,29 @@ export class RepositoryIdentities {
     let root: string | null = null
     try {
       const real = await realpath(path)
-      root = await realpath(await git(real, ['rev-parse', '--show-toplevel']))
+      // The call is stopped when the budget is up, so a slow folder does not go on after it was given up on.
+      root = await realpath(
+        await git(
+          real,
+          ['rev-parse', '--show-toplevel'],
+          AbortSignal.timeout(this.options.budgetMs ?? SCAN_BUDGET_MS)
+        )
+      )
     } catch {
       // Not a repository, or not readable: it has no identity.
     }
     this.folders.set(path, { at: this.now(), root })
     this.prune()
     return root
+  }
+
+  /** Whether `path` is the top folder of its repository, `root`. Case and separators do not matter on Windows. */
+  async isTop(path: string, root: string): Promise<boolean> {
+    try {
+      return sameFolder(await realpath(path), root)
+    } catch {
+      return false
+    }
   }
 
   private identityOf(root: string): Promise<RepositoryIdentity | null> {
@@ -87,15 +111,20 @@ export class RepositoryIdentities {
       // One repository at a time: the queue is the "one scan in flight" for this computer.
       const run = async (): Promise<void> => {
         let timer: ReturnType<typeof setTimeout> | undefined
+        const stop = new AbortController()
         try {
           const found = await Promise.race([
-            read(root).then((value) => ({
+            read(root, stop.signal).then((value) => ({
               root,
               roots: [...value.roots],
               remotes: [...value.remotes]
             })),
             new Promise<null>((done) => {
-              timer = setTimeout(() => done(null), this.options.budgetMs ?? SCAN_BUDGET_MS)
+              timer = setTimeout(() => {
+                // The Git calls end with the budget: the next repository does not wait behind them.
+                stop.abort()
+                done(null)
+              }, this.options.budgetMs ?? SCAN_BUDGET_MS)
               timer.unref?.()
             })
           ])

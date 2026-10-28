@@ -1,5 +1,4 @@
 import { realpathSync, statSync } from 'node:fs'
-import { realpath } from 'node:fs/promises'
 import { dirname, isAbsolute, resolve } from 'node:path'
 import { isInsidePath } from '../../files/pathGuard'
 import {
@@ -7,7 +6,7 @@ import {
   sensitiveFolderHolding,
   type FolderRuleEnvironment
 } from '../../files/sensitiveFolders'
-import { matchProject, type ProjectIdentity } from './projectMatch'
+import { matchProjectWithEvidence, type ProjectIdentity } from './projectMatch'
 import { repositoryIdentitiesFor } from './repositoryIdentity'
 import { withoutStandingRules } from '../../orchestrator/UserQuestionService'
 import type { MmsProfileServices } from '../../MmsProfileServices'
@@ -110,6 +109,8 @@ export function remoteThreadEventData(data: unknown): unknown {
 
 /** Projects looked at for one match; a profile with more is matched against the first ones. */
 const MATCH_PROJECT_LIMIT = 256
+/** Folders read at once for a match. */
+const MATCH_CONCURRENCY = 4
 
 /**
  * A Windows network or device path (`\\host\share`, `\\?\C:\x`, `\\.\pipe\x`). Resolving one makes
@@ -192,7 +193,9 @@ export class MmsRemoteBackend implements RemoteBackendPort {
    * nothing. Read-only; only ids leave this machine, never a path. Identities are cached by path
    * for a few minutes, so a profile's repositories are read once per window of use.
    */
-  private async matchProject(params: Record<string, unknown>): Promise<{ projectId?: string }> {
+  private async matchProject(
+    params: Record<string, unknown>
+  ): Promise<{ projectId?: string; weak?: true }> {
     // Projects are matched by the repository they are in, not by their folder: a project that is a
     // subfolder, or is reached through a link, has the identity of its repository. When two projects are
     // the same repository, the one at its top folder stands for it (else the first), so they do not
@@ -201,31 +204,34 @@ export class MmsRemoteBackend implements RemoteBackendPort {
     const byRoot = new Map<string, { id: string; atTop: boolean; identity: ProjectIdentity }>()
     const candidates: Array<{ id: string; identity: ProjectIdentity | null }> = []
     const projects = this.services.projects.listProjects().slice(0, MATCH_PROJECT_LIMIT)
-    const found = await Promise.all(
-      projects.map(async (project) => ({ project, identity: await repositories.of(project.path) }))
-    )
-    for (const { project, identity } of found) {
+    // A few folders at a time: each is a Git call, and a profile may hold hundreds of projects.
+    const scanned: Array<{ project: (typeof projects)[number]; identity: Awaited<ReturnType<typeof repositories.of>> }> = []
+    for (let at = 0; at < projects.length; at += MATCH_CONCURRENCY)
+      scanned.push(
+        ...(await Promise.all(
+          projects
+            .slice(at, at + MATCH_CONCURRENCY)
+            .map(async (project) => ({ project, identity: await repositories.of(project.path) }))
+        ))
+      )
+    for (const { project, identity } of scanned) {
       if (!identity) {
         // Not a Git repository, or not readable: it never matches.
         candidates.push({ id: project.id, identity: null })
         continue
       }
-      let atTop = false
-      try {
-        atTop = (await realpath(project.path)) === identity.root
-      } catch {
-        // A folder that is gone has no top.
-      }
+      const atTop = await repositories.isTop(project.path, identity.root)
       const known = byRoot.get(identity.root)
       if (!known || (atTop && !known.atTop))
         byRoot.set(identity.root, { id: project.id, atTop, identity: { roots: identity.roots, remotes: identity.remotes } })
     }
     for (const entry of byRoot.values()) candidates.push({ id: entry.id, identity: entry.identity })
-    const projectId = matchProject(
+    const found = matchProjectWithEvidence(
       { roots: params.roots as string[], remotes: (params.remotes as string[] | undefined) ?? [] },
       candidates
     )
-    return projectId ? { projectId } : {}
+    // A match that rests on the root commit alone says so: the caller does not group by it.
+    return found ? { projectId: found.id, ...(found.weak ? { weak: true as const } : {}) } : {}
   }
   /**
    * Registers an existing directory on this machine as a project. The path comes from another

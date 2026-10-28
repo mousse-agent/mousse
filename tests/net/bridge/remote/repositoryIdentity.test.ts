@@ -3,7 +3,10 @@ import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync } from 'node:
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, expect, it } from 'vitest'
-import { RepositoryIdentities } from '../../../../src/mms/bridge/remote/repositoryIdentity'
+import {
+  RepositoryIdentities,
+  sameFolder
+} from '../../../../src/mms/bridge/remote/repositoryIdentity'
 
 const cleanups: Array<() => void> = []
 afterEach(() => {
@@ -128,4 +131,30 @@ it('gives up on a slow repository, tries again after a minute, and does not hold
   clock += 61_000
   await identities.of(slow)
   expect(read.get(slow)).toBe(2)
+})
+
+it('stops the Git calls of a slow repository when it gives up, and compares folders as Windows does', async () => {
+  const slow = repository()
+  let stopped = false
+  const identities = new RepositoryIdentities({
+    budgetMs: 30,
+    read: (_root, signal) =>
+      new Promise((resolve) => {
+        signal?.addEventListener('abort', () => {
+          stopped = true
+          resolve({ roots: [], remotes: [] })
+        })
+      })
+  })
+  expect(await identities.of(slow)).toBeNull()
+  expect(stopped).toBe(true)
+  // Windows ignores case and takes either separator; other systems compare exactly.
+  if (process.platform === 'win32') {
+    expect(sameFolder(String.raw`C:\Work\App`, 'c:/work/app')).toBe(true)
+    expect(await identities.isTop(slow.toUpperCase(), slow)).toBe(true)
+  } else {
+    expect(sameFolder('/work/App', '/work/app')).toBe(false)
+    expect(sameFolder('/work/app', '/work/app')).toBe(true)
+  }
+  expect(sameFolder('/work/app', '/work/other')).toBe(false)
 })

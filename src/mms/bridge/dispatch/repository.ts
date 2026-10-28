@@ -59,17 +59,20 @@ export async function portableRepository(path: string): Promise<PortableReposito
  * The remotes and root commits of the repository whose top folder is `root` (a real path). Used where the
  * caller has already found the top folder, as the project matching does for a subfolder or a link.
  */
-export async function portableRepositoryAt(root: string): Promise<PortableRepository> {
-  const names = (await git(root, ['remote'])).split('\n').filter(Boolean)
+export async function portableRepositoryAt(
+  root: string,
+  signal?: AbortSignal
+): Promise<PortableRepository> {
+  const names = (await git(root, ['remote'], signal)).split('\n').filter(Boolean)
   if (names.length > 32) throw new NetError('too_large')
   const remotes: string[] = []
   for (const name of names) {
-    for (const value of (await git(root, ['remote', 'get-url', '--all', name])).split('\n'))
+    for (const value of (await git(root, ['remote', 'get-url', '--all', name], signal)).split('\n'))
       remotes.push(normalizeRemote(value))
   }
   const roots = [
     ...new Set(
-      (await git(root, ['rev-list', '--max-parents=0', '--all'])).split('\n').filter(Boolean)
+      (await git(root, ['rev-list', '--max-parents=0', '--all'], signal)).split('\n').filter(Boolean)
     )
   ].sort()
   if (!roots.length || roots.length > 256 || roots.some((value) => !COMMIT.test(value)))
