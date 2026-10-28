@@ -13,7 +13,8 @@ const git = (cwd: string, ...args: string[]): string => execFileSync('git', args
 const copyBaseRepo = committedGitTemplate((cwd) => {
   git(cwd, 'init', '-b', 'main')
   git(cwd, 'config', 'user.name', 'Git write fixture'); git(cwd, 'config', 'user.email', 'git-fixture@example.invalid')
-  git(cwd, 'config', 'commit.gpgsign', 'false')
+  // Pinned before the baseline commit, so no hook the machine configures runs while the template is built.
+  git(cwd, 'config', 'commit.gpgsign', 'false'); git(cwd, 'config', 'core.hooksPath', join(cwd, '.no-hooks'))
   writeFileSync(join(cwd, 'base.txt'), 'base\n'); git(cwd, 'add', 'base.txt'); git(cwd, 'commit', '-m', 'baseline')
 })
 function repo() {
