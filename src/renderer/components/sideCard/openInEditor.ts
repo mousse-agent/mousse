@@ -1,4 +1,4 @@
-import type { RemoteOpenResult } from '../../../shared/remoteEditor'
+import { opensOnOwner, type RemoteOpenResult } from '../../../shared/remoteEditor'
 import type { EditorInfo } from '../../../shared/types'
 import { helpForOpenResult } from '../../lib/editorConnection'
 import { editorSshProblemWords } from '../../lib/editorSsh'
@@ -64,9 +64,12 @@ export function openErrorMessage(error: unknown): string {
   return ipcErrorLine(error) || 'Could not open the folder'
 }
 
-/** The editors that open a folder of another computer over their own SSH support. Never the file manager. */
-export function remoteEditors(editors: readonly EditorInfo[]): EditorInfo[] {
-  return editors.filter((editor) => editor.kind === 'editor' && editor.remote === true)
+/**
+ * The editors that open a folder of another computer over their own SSH support, and can open one of a computer
+ * that runs `platform` (Zed: not Windows; Windsurf: Linux only). Never the file manager.
+ */
+export function remoteEditors(editors: readonly EditorInfo[], platform?: string): EditorInfo[] {
+  return editors.filter((editor) => editor.kind === 'editor' && editor.remote === true && opensOnOwner(editor.id, platform))
 }
 
 /** What a person can do when this computer cannot reach the computer that runs the thread over SSH. */

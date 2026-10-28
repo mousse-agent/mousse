@@ -121,7 +121,7 @@ export function OpenInRemoteEditor({ threadId, node, computer, profileId }: { th
     return () => { alive = false; clearInterval(timer); window.removeEventListener('focus', recheck) }
   }, [waitingUntil, threadId])
   if (!editors) return null
-  const usable = remoteEditors(editors)
+  const usable = remoteEditors(editors, device?.platform)
   const current = defaultEditor(usable, lastId)
   if (!current) {
     return (
