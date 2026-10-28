@@ -154,7 +154,7 @@ export function OpenInRemoteEditor({ threadId, node, computer, profileId }: { th
   let state: { help: EditorHelp | AskOutcome; tone: 'alert' | 'status' } | undefined
   let refusal: string | null = null
   // A computer that went offline since the last answer is offline now, whatever that answer said.
-  const offlineNow = route === 'mousse' && !!device && device.state !== 'open' && device.state !== 'connecting'
+  const offlineNow = route === 'mousse' && !!device && device.state !== 'open'
   if (offlineNow && outcome?.kind !== 'opened') state = { help: editorConnectionHelp({ failure: 'offline', computer }), tone: 'alert' }
   else if (outcome?.kind === 'asked') state = { help: askOutcomeWords(outcome.result, computer, selfNode), tone: 'status' }
   else if (outcome?.kind === 'refused') {

@@ -217,9 +217,9 @@ describe('the editor item of a thread on another computer, state by state', () =
     expect(text()).not.toContain('does not vouch for it')
   })
 
-  it('a computer that is only connecting is not called offline', async () => {
+  it('a computer this one is trying to reach again is not connected either, as everywhere else in the app', async () => {
     await mount({ device: { state: 'connecting' } })
-    expect(text()).not.toContain('is offline')
+    expect(text()).toContain('Computer B is offline.')
   })
 
   it('opens with the hint when the editor’s Remote - SSH extension may be missing, never blocking', async () => {
