@@ -76,7 +76,10 @@ export const MOUSSE_EXTENSION_MARKER = 'mousse-extension'
 /** Set by test builds only (esbuild `define`); production builds drop the code it guards. */
 declare const __MOUSSE_PI_TEST__: boolean | undefined
 
-/** The stock implementations of every API pi-ai ships, for a Mousse custom provider. */
+/**
+ * The stock implementations of every API pi-ai ships, for a Mousse custom provider. Keys are API
+ * ids, not providers (`azure-openai-responses` is the API of the `azure` provider's Responses models).
+ */
 function stockApis(): Record<string, ProviderStreams> {
   return {
     'anthropic-messages': anthropicMessagesApi(),
