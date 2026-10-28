@@ -42,6 +42,11 @@ export const NET_HELP = `Usage:
   mousse-cli net transports
   mousse-cli net transport configure <id> --settings-file <path> [--disable]
   mousse-cli net routes
+  mousse-cli net ssh-proxy <node-id> --profile <profile>
+
+ssh-proxy is the program an editor's ssh starts for a name in ~/.mousse/ssh/config. It carries the
+ssh connection to the other computer through Mousse, on stdin and stdout, and prints a plain line on
+stderr when it cannot. It is not meant to be run by hand.
 
 Mousse ID (net plus) bind explicitly signs an account/service-bound challenge with this
 profile's protected unlocked root. Connect uses a recent one-shot account

@@ -61,6 +61,22 @@ export function getChatgptTokenBuildOptions(projectRoot = root) {
 }
 
 /**
+ * The editor proxy on its own (`out/cli/ssh-proxy.js`): Node built-ins only. The launchers run it with
+ * `ELECTRON_RUN_AS_NODE=1` for `mousse-cli net ssh-proxy`, which an editor starts on every reconnect.
+ */
+export function getSshProxyBuildOptions(projectRoot = root) {
+  return {
+    entryPoints: [resolve(projectRoot, 'src/cli/fastpath/sshProxyMain.ts')],
+    outfile: resolve(projectRoot, 'out/cli/ssh-proxy.js'),
+    bundle: true,
+    platform: 'node',
+    format: 'esm',
+    target: 'node20',
+    sourcemap: false
+  }
+}
+
+/**
  * One-shot CLI build, or watch mode for development.
  * @param {{ watch?: boolean, onRebuild?: (error: Error | null) => void, log?: boolean, reuse?: boolean }} [opts]
  */
@@ -77,6 +93,7 @@ export async function buildCli(opts = {}) {
     const cli = await cachedBuild(options, { projectRoot: root, name: 'cli', reuse })
     await cachedBuild(getCursorHostBuildOptions(root), { projectRoot: root, name: 'cursor-host', reuse })
     await cachedBuild(getChatgptTokenBuildOptions(root), { projectRoot: root, name: 'chatgpt-token', reuse })
+    await cachedBuild(getSshProxyBuildOptions(root), { projectRoot: root, name: 'ssh-proxy', reuse })
     if (log) console.log(`${cli.reused ? 'Reused' : 'Built'} ${outfile}`)
     return { cliReused: cli.reused, workerReused: worker.reused }
   }
@@ -104,6 +121,7 @@ export async function buildCli(opts = {}) {
   // The host rarely changes; it is built once when watching starts.
   await cachedBuild(getCursorHostBuildOptions(root), { projectRoot: root, name: 'cursor-host' })
   await cachedBuild(getChatgptTokenBuildOptions(root), { projectRoot: root, name: 'chatgpt-token' })
+  await cachedBuild(getSshProxyBuildOptions(root), { projectRoot: root, name: 'ssh-proxy' })
   const browserOptions = getBrowserWorkerBuildOptions(root)
   let browserContext
   try {

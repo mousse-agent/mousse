@@ -24,11 +24,20 @@ import { runSpacesCommand } from './commands/spaces'
 import { runBotsCommand } from './commands/bots'
 import { runDeprecatedControl } from './commands/deprecatedControl'
 import { stripCliModeArgs } from './cliLaunch'
+import { isSshProxyArgv } from './fastpath/sshProxy'
 
 /**
  * Shared CLI entry used by standalone `out/cli/index.js` and packaged `Mousse.exe --cli`.
  */
 export async function runCliMain(argv: string[] = process.argv.slice(2)): Promise<void> {
+  // The editor proxy for the entries that have no early dispatch of their own (the standalone CLI executable).
+  // Its stdout is the tunnel: nothing below may print before it.
+  const plain = stripCliModeArgs(argv)
+  if (isSshProxyArgv(plain)) {
+    const { runSshProxy } = await import('./fastpath/sshProxy')
+    process.exitCode = await runSshProxy(plain)
+    return
+  }
   // Electron on Windows often leaves stdin/stdout.isTTY false on a real console.
   ensureWindowsConsoleTty()
   // The packaged entry sets it from the app; a checkout run reads package.json. The daemon and
