@@ -116,14 +116,37 @@ Legacy theme ids `dark-acrylic`, `light-acrylic`, and `system-acrylic` are migra
 
 ---
 
-## `providers`
-
-Orchestrator LLM provider selection. **Secrets (API keys, OAuth tokens) are not stored here** — they live in `$MOUSSE_HOME/auth.json`.
+### `settings.privacy`
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `providers.llmProvider` | `string` | `""` | Active chat provider ID (e.g. `anthropic`, `openai`, `antigravity`) |
-| `providers.model` | `string` | `""` | Model ID within that provider |
+| `privacy.agentTelemetry` | `"off"` \| `"agent_default"` | `"off"` | Settings → General → Privacy → Agent telemetry for agents Mousse sets up. `off` turns the agent's own usage and error reports off where Mousse set the agent up (a home of its own, an agent Mousse installed, the Mousse agent) and the agent documents a switch: Claude Code gets `DISABLE_TELEMETRY=1` and `DISABLE_ERROR_REPORTING=1`, the Mousse agent `PI_TELEMETRY=0`. They are set last, over the entry's own variables. `agent_default` sets nothing. An agent on your own setup is never changed. A change applies from each agent's next start; a running chat keeps its process until its turn ends. |
+
+Mousse itself collects no usage data about you or your chats. The Privacy section lists every service Mousse itself contacts and what it sends (`src/shared/privacy/outbound.ts`).
+
+---
+
+## `providers`
+
+The providers this profile can pick, and its default selection. **Secrets (API keys, OAuth tokens) are not stored here**: see [provider sign-ins and keys](PROVIDER_CREDENTIALS.md).
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `providers.llmProvider` | `string` | `""` | Provider of the default selection (kept for older readers) |
+| `providers.model` | `string` | `""` | Model of the default selection |
+| `providers.instanceId` | `string` | — | Provider instance of the default selection; wins over `llmProvider` when set |
+| `providers.instances` | `Record<string, ProviderInstanceConfig>` | the built-in entries | The provider instances of this profile, by instance id (below) |
+| `providers.instancesSeedVersion` | `number` | — | Which set of built-in entries the profile was last given |
+| `providers.removedInstances` | `string[]` | `[]` | Instance ids removed from this profile (below) |
+| `providers.modelPrefs` | `Record<string, object>` | `{}` | Per instance: hidden and favourite models, their order, and custom models |
+
+**Instances.** A provider instance is one provider a profile can pick, with a stable id: `claude`, `codex`, `pi:openai`, or `claude:work` for a second account. Each entry is `{ driver, enabled, config }`: `driver` is the kind of agent (`claude`, `codex`, `antigravity`, `grok`, `cursor`, `acp`, `pi`), `enabled` turns it on or off on this device, and `config` holds its settings: `displayName`, `home` (`default` for your own setup, `private` for a home of its own), the launch settings `binaryPath`, `args` and `env`, and `signedOutInMousse`. Mousse also keeps `vendorMirror` (the launch settings it last copied to the agent's own settings file) and `knownProblemConsent` (a version you allowed to run despite a known problem) there; leave them as they are.
+
+**Scopes.** `enabled` is the device setting. A project can turn an instance off for itself, or on again when the device has it on, and pick its own default; those choices live in `<profile>/harness/scopes.json`.
+
+**Removed instances.** A removed provider stays removed until you add it again, even if an older version of Mousse re-creates its entry. Its id is listed in `removedInstances`, which wins over `instances`; only Add in Settings → Providers takes an id off the list.
+
+**Launch settings live in the instance.** The executable, launch arguments and variables of every entry, and whether it is signed out in Mousse, are kept in its `config`. Earlier versions kept them for the built-in Claude Code, Codex and Antigravity entries in their own `settings.json` under the profile. Until the next release, Mousse still writes a copy there, so an older version you go back to reads the same settings. For good, Mousse also takes over a change an older version made in that file the next time it starts, and says so on the card; when both changed, it keeps its own and offers "Use the older settings".
 
 ---
 

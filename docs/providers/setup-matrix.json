@@ -1,0 +1,97 @@
+{
+  "$comment": "Which agent setups Mousse has been tested with. Edit this file, then run `node scripts/gen-setup-matrix.mjs` to write setup-matrix.md. tests/docs/setupMatrix.test.ts checks both.",
+  "agents": [
+    {
+      "id": "claude",
+      "label": "Claude Code",
+      "driver": "claude",
+      "rows": [
+        { "source": "path", "signIn": "agent_home", "os": ["windows-x64"], "status": "tested", "evidence": ["#86", "#139"] },
+        { "source": "path", "signIn": "agent_home", "os": ["windows-arm64"], "status": "untested", "reason": "No Windows arm64 machine in the runs. The node-pty prebuild is not packaged there, so an entry with its own home shows the sign-in command to copy instead of a terminal." },
+        { "source": "path", "signIn": "agent_home", "os": ["macos-arm64", "linux-x64", "linux-arm64"], "status": "untested", "reason": "No macOS or Linux machine in the runs. A second account in its own home was tested with a fake CLI and a fake terminal (#285)." },
+        { "source": "custom", "signIn": "agent_home", "os": ["windows-x64", "windows-arm64", "macos-arm64", "linux-x64", "linux-arm64"], "status": "untested", "reason": "An executable set in Settings starts like the one on PATH; it was not run separately." },
+        { "source": "path", "signIn": "api_key", "os": ["windows-x64", "windows-arm64", "macos-arm64", "linux-x64", "linux-arm64"], "status": "untested", "reason": "Tested with a fake CLI only; no run with a real key." }
+      ]
+    },
+    {
+      "id": "codex",
+      "label": "Codex",
+      "driver": "codex",
+      "rows": [
+        { "source": "path", "signIn": "agent_home", "os": ["windows-x64"], "status": "tested", "evidence": ["#86"] },
+        { "source": "path", "signIn": "agent_home", "os": ["windows-arm64"], "status": "untested", "reason": "No Windows arm64 machine in the runs. The node-pty prebuild is not packaged there, so an entry with its own home shows the sign-in command to copy instead of a terminal." },
+        { "source": "path", "signIn": "agent_home", "os": ["macos-arm64", "linux-x64", "linux-arm64"], "status": "untested", "reason": "No macOS or Linux machine in the runs. A second account in its own home was tested with a fake CLI, terminal and app-server (#331)." },
+        { "source": "custom", "signIn": "agent_home", "os": ["windows-x64", "windows-arm64", "macos-arm64", "linux-x64", "linux-arm64"], "status": "untested", "reason": "An executable set in Settings starts like the one on PATH; it was not run separately." },
+        { "source": "managed", "signIn": "mousse", "os": ["windows-x64", "windows-arm64", "macos-arm64", "linux-x64", "linux-arm64"], "status": "untested", "reason": "Sign in with ChatGPT was tested against a local fake ChatGPT server (#227); no real sign-in was made." }
+      ]
+    },
+    {
+      "id": "antigravity",
+      "label": "Antigravity",
+      "driver": "antigravity",
+      "rows": [
+        { "source": "managed", "signIn": "mousse", "os": ["windows-x64", "windows-arm64", "macos-arm64", "linux-x64", "linux-arm64"], "status": "untested", "reason": "Install and Google sign-in were tested with fakes and replays (#157); no live install or sign-in." },
+        { "source": "custom", "signIn": "mousse", "os": ["windows-x64", "windows-arm64", "macos-arm64", "linux-x64", "linux-arm64"], "status": "untested", "reason": "An executable set in Settings (with its helper beside it) was not run separately." }
+      ]
+    },
+    {
+      "id": "grok",
+      "label": "Grok",
+      "driver": "grok",
+      "presets": ["grok"],
+      "rows": [
+        { "source": "path", "signIn": "agent_home", "os": ["windows-x64", "macos-arm64", "linux-x64", "linux-arm64"], "status": "untested", "reason": "Device sign-in in a Mousse terminal was tested with a fake grok (#226); no real sign-in." },
+        { "source": "path", "signIn": "agent_home", "os": ["windows-arm64"], "status": "untested", "reason": "The node-pty prebuild is not packaged, so sign-in falls back to Grok's browser sign-in over ACP; not run." },
+        { "source": "path", "signIn": "api_key", "os": ["windows-x64", "windows-arm64", "macos-arm64", "linux-x64", "linux-arm64"], "status": "untested", "reason": "Tested with a fake grok (#226); no run with a real key." },
+        { "source": "managed", "signIn": "agent_home", "os": ["windows-x64", "windows-arm64", "macos-arm64", "linux-x64", "linux-arm64"], "status": "untested", "reason": "Install from npm was tested against a local registry (#226); only for an entry with its own home. No real sign-in." },
+        { "source": "managed", "signIn": "api_key", "os": ["windows-x64", "windows-arm64", "macos-arm64", "linux-x64", "linux-arm64"], "status": "untested", "reason": "Install from npm was tested against a local registry (#226); no run with a real key." },
+        { "source": "custom", "signIn": "agent_home", "os": ["windows-x64", "windows-arm64", "macos-arm64", "linux-x64", "linux-arm64"], "status": "untested", "reason": "An executable set in Settings starts like the one on PATH; it was not run separately." }
+      ]
+    },
+    {
+      "id": "cursor",
+      "label": "Cursor",
+      "driver": "cursor",
+      "rows": [
+        { "source": "bundled", "signIn": "mousse", "os": ["windows-x64"], "status": "untested", "reason": "Tested with a fake SDK and host replays (#210); a live sign-in needs a Cursor account." },
+        { "source": "bundled", "signIn": "api_key", "os": ["windows-x64"], "status": "untested", "reason": "Tested with a fake SDK and host replays (#210); no run with a real key." },
+        { "source": "bundled", "signIn": "mousse", "os": ["windows-arm64"], "status": "unsupported", "reason": "The Cursor SDK publishes no win32-arm64 package, so its rg and sandbox helpers are missing." },
+        { "source": "bundled", "signIn": "api_key", "os": ["windows-arm64"], "status": "unsupported", "reason": "The Cursor SDK publishes no win32-arm64 package, so its rg and sandbox helpers are missing." },
+        { "source": "bundled", "signIn": "mousse", "os": ["macos-arm64", "linux-x64", "linux-arm64"], "status": "untested", "reason": "No macOS or Linux machine in the runs." },
+        { "source": "bundled", "signIn": "api_key", "os": ["macos-arm64", "linux-x64", "linux-arm64"], "status": "untested", "reason": "No macOS or Linux machine in the runs." }
+      ]
+    },
+    {
+      "id": "pi",
+      "label": "Model APIs (Mousse agent, Pi)",
+      "driver": "pi",
+      "rows": [
+        { "source": "bundled", "signIn": "api_key", "os": ["windows-x64", "macos-arm64", "linux-x64"], "status": "tested", "evidence": ["#369"] },
+        { "source": "bundled", "signIn": "api_key", "os": ["windows-arm64", "linux-arm64"], "status": "untested", "reason": "No arm64 Windows or Linux machine in the runs." },
+        { "source": "bundled", "signIn": "mousse", "os": ["windows-x64", "windows-arm64", "macos-arm64", "linux-x64", "linux-arm64"], "status": "untested", "reason": "Provider sign-ins (Copilot, Kimi, Meta) run in Mousse and Pi gets only the access token; tested with fakes, not with a real account." },
+        { "source": "bundled", "signIn": "ambient", "os": ["windows-x64", "windows-arm64", "macos-arm64", "linux-x64", "linux-arm64"], "status": "untested", "reason": "Amazon Bedrock and Google Vertex credentials from the environment were tested with fakes only." }
+      ]
+    },
+    {
+      "id": "acp-custom",
+      "label": "ACP agent (Custom command)",
+      "driver": "acp",
+      "presets": ["generic"],
+      "rows": [
+        { "source": "custom", "signIn": "agent_home", "os": ["windows-x64"], "status": "untested", "reason": "Tested with fakes, a fake terminal and replays (#199); a run with a real agent is pending." },
+        { "source": "custom", "signIn": "agent_home", "os": ["windows-arm64"], "status": "untested", "reason": "The node-pty prebuild is not packaged, so Mousse tells agents it has no terminal and they offer no terminal sign-in." },
+        { "source": "custom", "signIn": "agent_home", "os": ["macos-arm64", "linux-x64", "linux-arm64"], "status": "untested", "reason": "No macOS or Linux machine in the runs." }
+      ]
+    },
+    {
+      "id": "acp-registry",
+      "label": "ACP agents from the registry",
+      "driver": "acp",
+      "rows": [
+        { "source": "managed", "signIn": "agent_home", "os": ["windows-x64"], "status": "untested", "reason": "Installed, started and deleted live without a sign-in (#206: amp-acp 0.10.0, pi-acp 0.0.34); chatting needs each agent's own account." },
+        { "source": "managed", "signIn": "agent_home", "os": ["windows-arm64"], "status": "untested", "reason": "No Windows arm64 machine. Mousse picks the windows-aarch64 build, else windows-x86_64." },
+        { "source": "managed", "signIn": "agent_home", "os": ["macos-arm64", "linux-x64", "linux-arm64"], "status": "untested", "reason": "No macOS or Linux machine in the runs; archive modes and the executable check are covered by tests." }
+      ]
+    }
+  ]
+}
