@@ -10,6 +10,7 @@ import {
   paletteKeyAction,
   type PaletteItem
 } from '../commands/paletteItems'
+import { useComputers } from '../lib/computers'
 import { useAppStore } from '../stores/appStore'
 import '../styles/thread-search.css'
 
@@ -106,15 +107,17 @@ function PaletteDialog() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [handlers, activeThreadId, turnStates, mainAreaOpen, sidebarMode]
   )
+  // The names of the computers that rows are on; a window of one computer reads none.
+  const { byNode: computers } = useComputers(threads.some((thread) => thread.node) || projects.some((project) => project.node))
   const groups = useMemo(() => {
-    return buildPaletteGroups({ query, commands, threads, projects }).map((group) => ({
+    return buildPaletteGroups({ query, commands, threads, projects, computers }).map((group) => ({
       label: group.label,
       items: group.items.map((item) => {
         const binding = item.kind === 'command' ? bindings[item.id] : null
         return { ...item, shortcut: binding ? formatBinding(binding, platform) : undefined }
       })
     }))
-  }, [query, commands, threads, projects, bindings, platform])
+  }, [query, commands, threads, projects, computers, bindings, platform])
   const rows = useMemo(() => flattenGroups(groups) as (PaletteItem & { shortcut?: string })[], [groups])
   const active = Math.min(activeIndex, Math.max(rows.length - 1, 0))
 

@@ -18,7 +18,7 @@ import { chooseCommandPaletteItem, closePalette, dismissPalette, openPalette, to
 import { buildPaletteGroups, eligibleCommands, flattenGroups, type PaletteItem } from '../src/renderer/commands/paletteItems'
 import { useAppStore } from '../src/renderer/stores/appStore'
 import type { KeyInput } from '../src/shared/commands'
-import type { Thread } from '../src/shared/types'
+import type { Project, Thread } from '../src/shared/types'
 
 const globals = globalThis as { window?: unknown; document?: unknown }
 const original = { window: globals.window, document: globals.document }
@@ -438,5 +438,62 @@ describe('the palette and the threads of other computers', () => {
     ]
     const ids = flattenGroups(buildPaletteGroups({ query: 'fix', commands: [], threads: withChild, projects: [] })).map((item) => item.id)
     expect(ids).not.toContain('nod_other:child')
+  })
+
+  const project = (id: string, name: string, over: Partial<Project> = {}): Project =>
+    ({ id, name, path: `/p/${name}`, createdAt: '', order: 0, ...over }) as Project
+  const computers = { nod_other: { name: 'Studio' } }
+  const items = (query: string, threads: Thread[], projects: Project[]) =>
+    flattenGroups(buildPaletteGroups({ query, commands: [], threads, projects, computers }))
+
+  it('names the computer on a thread of another computer, after its project', () => {
+    const projects = [project('p1', 'Mousse'), project('nod_other:rp', 'mousse-copy', { node: 'nod_other', sameAs: 'p1' })]
+    const threads = [
+      row('mine', 'Fix the login', { projectId: 'p1' }),
+      row('nod_other:remote', 'Fix the build', { node: 'nod_other', projectId: 'nod_other:rp' }),
+      row('nod_other:loose', 'Fix the docs', { node: 'nod_other' }),
+      row('nod_unknown:gone', 'Fix the cache', { node: 'nod_unknown' })
+    ]
+    const details = Object.fromEntries(items('fix', threads, projects).map((item) => [item.id, item.kind === 'command' ? '' : item.detail]))
+    // A thread of this computer names its project only. A thread of the same repository on another computer
+    // is named with the group's project, not that computer's own name for it.
+    expect(details).toEqual({
+      mine: 'Mousse',
+      'nod_other:remote': 'Mousse · Studio',
+      'nod_other:loose': 'Studio',
+      'nod_unknown:gone': 'Another computer'
+    })
+  })
+
+  it('lists a project that several computers hold as one row, opened on its newest thread of any of them', () => {
+    const projects = [
+      project('p1', 'Mousse'),
+      project('nod_other:rp', 'mousse-copy', { node: 'nod_other', sameAs: 'p1' })
+    ]
+    const threads = [
+      row('mine', 'Old', { projectId: 'p1', updatedAt: '2026-01-02T00:00:00.000Z' }),
+      row('nod_other:newer', 'Newer', { node: 'nod_other', projectId: 'nod_other:rp', updatedAt: '2026-02-01T00:00:00.000Z' })
+    ]
+    const rows = items('mousse', threads, projects).filter((item) => item.kind === 'project')
+    expect(rows).toEqual([
+      { kind: 'project', key: 'project:p1', id: 'p1', title: 'Mousse', detail: 'Project', threadId: 'nod_other:newer' }
+    ])
+    // The other computer's own name for it finds the same row.
+    expect(items('copy', threads, projects).filter((item) => item.kind === 'project').map((item) => item.id)).toEqual(['p1'])
+  })
+
+  it('names the computer on a project that only another computer has, and opens it there', () => {
+    const projects = [project('p1', 'Mousse'), project('nod_other:solo', 'Notes', { node: 'nod_other' })]
+    const rows = items('notes', [], projects).filter((item) => item.kind === 'project')
+    expect(rows).toEqual([
+      { kind: 'project', key: 'project:nod_other:solo', id: 'nod_other:solo', title: 'Notes', detail: 'Project · Studio', threadId: undefined }
+    ])
+  })
+
+  it('keeps a project whose computer is offline', () => {
+    const projects = [project('nod_other:solo', 'Notes', { node: 'nod_other', offline: true })]
+    const threads = [row('nod_other:t', 'Offline thread', { node: 'nod_other', projectId: 'nod_other:solo', offline: true })]
+    const rows = items('notes', threads, projects).filter((item) => item.kind === 'project')
+    expect(rows.map((item) => [item.id, item.kind === 'project' ? item.threadId : undefined])).toEqual([['nod_other:solo', 'nod_other:t']])
   })
 })

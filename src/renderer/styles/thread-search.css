@@ -148,6 +148,19 @@
   color: var(--text-secondary);
 }
 
+/* The project a result is in, and the computer it is on when that is not this one. */
+.thread-search-result-where {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 100%;
+  min-width: 0;
+}
+
+.thread-search-result-computer {
+  font-size: 11px;
+}
+
 .thread-search-result-snippet {
   font-size: 12px;
   color: var(--text-secondary);
