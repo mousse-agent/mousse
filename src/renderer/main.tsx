@@ -10,6 +10,7 @@ import { DictationHost } from './dictation/DictationModal'
 import { ReadAloudHost } from './readAloud/ReadAloudModal'
 import { PhoneSpeechHost } from './speechRelay/PhoneSpeechHost'
 import { EnrollmentRequestHost } from './components/EnrollmentRequestPrompt'
+import { EditorAskHost } from './components/EditorAskPrompt'
 import './styles/global.css'
 import './styles/compact-shell.css'
 import './styles/sentence-case.css'
@@ -45,6 +46,7 @@ function Root() {
       {profileReady && <DictationHost />}
       {profileReady && <PhoneSpeechHost />}
       {profileReady && <EnrollmentRequestHost />}
+      {profileReady && <EditorAskHost />}
       <AppTooltip />
     </>
   )

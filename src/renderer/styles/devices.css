@@ -310,8 +310,12 @@
   margin-top: var(--space-4);
 }
 
-/* A phone asks to join over every screen, Settings and floating dialogs (the quick action editor) included. */
-.modal-overlay.enrollment-prompt {
+/*
+ * A phone asks to join, and another computer asks to open its editor here, over every screen, Settings and
+ * floating dialogs (the quick action editor) included.
+ */
+.modal-overlay.enrollment-prompt,
+.modal-overlay.editor-ask-prompt {
   z-index: calc(var(--z-floating, 50000) + 1);
   /* The prompt renders outside .settings-page, so it carries the tokens its content and buttons use. */
   --space-4: 4px;
@@ -336,6 +340,17 @@
   color: var(--text-primary);
   font-variant-numeric: tabular-nums;
   letter-spacing: 0.04em;
+}
+
+.editor-ask-prompt .modal-body > .editor-ask-warning {
+  margin-bottom: var(--space-4);
+  font-size: var(--settings-fs-row);
+  font-weight: 600;
+}
+
+.editor-ask-prompt .editor-ask-detail {
+  color: var(--text-secondary);
+  font-size: var(--settings-fs-small);
 }
 
 /* Kind of a device that is not a computer, beside its name. */
