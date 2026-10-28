@@ -13,25 +13,30 @@ export function roundedWindowShape(width: number, height: number, radius = 12): 
   return rows.filter((row) => row.width > 0 && row.height > 0)
 }
 
+/** The window's current shape in DIPs, plus a key that changes whenever the shape does. */
+export function currentLinuxWindowShape(win: BrowserWindow): { key: string; rects: Rectangle[] } {
+  const { width, height } = win.getBounds()
+  const square = win.isMaximized() || win.isFullScreen()
+  // On X11 an empty shape is an empty drawable/input region, not a reset.
+  // Keep maximized and fullscreen windows visible with their complete bounds.
+  return {
+    key: `${width}:${height}:${square}`,
+    rects: square ? [{ x: 0, y: 0, width, height }] : roundedWindowShape(width, height)
+  }
+}
+
+export const LINUX_SHAPE_EVENTS = ['resize', 'maximize', 'unmaximize', 'enter-full-screen', 'leave-full-screen', 'show'] as const
+
 export function attachLinuxWindowShape(win: BrowserWindow, platform: NodeJS.Platform = process.platform): void {
   if (platform !== 'linux') return
   let previous = ''
   const update = () => {
     if (win.isDestroyed()) return
-    const { width, height } = win.getBounds()
-    const square = win.isMaximized() || win.isFullScreen()
-    const key = `${width}:${height}:${square}`
-    if (key === previous) return
-    // On X11 an empty shape is an empty drawable/input region, not a reset.
-    // Keep maximized and fullscreen windows visible with their complete bounds.
-    win.setShape(square ? [{ x: 0, y: 0, width, height }] : roundedWindowShape(width, height))
-    previous = key
+    const shape = currentLinuxWindowShape(win)
+    if (shape.key === previous) return
+    win.setShape(shape.rects)
+    previous = shape.key
   }
-  win.on('resize', update)
-  win.on('maximize', update)
-  win.on('unmaximize', update)
-  win.on('enter-full-screen', update)
-  win.on('leave-full-screen', update)
-  win.on('show', update)
+  for (const event of LINUX_SHAPE_EVENTS) win.on(event as 'resize', update)
   update()
 }

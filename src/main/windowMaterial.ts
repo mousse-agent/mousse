@@ -6,10 +6,14 @@ import { appearanceUsesAcrylic, normalizeAppearance } from '../shared/settings'
 import type { SettingsStore } from '../mms/settings/SettingsStore'
 import type { MousseSettings } from '../shared/settings'
 import { reapplyWindowShadow } from './windowsChrome'
+import { linuxUsesX11, setLinuxBlurBehind } from './linuxBlurBehind'
+
+/** macOS material behind acrylic surfaces: the desktop blurred through the window. */
+export const MAC_VIBRANCY = 'under-window' as const
 
 /**
  * Last background color + material written per window. setBackgroundMaterial()
- * re-composites the whole frame, so re-applying an unchanged value flickers when
+ * and setVibrancy() re-composite the whole frame, so re-applying an unchanged value flickers when
  * these calls arrive in bursts (window-state changes, focus churn).
  */
 const appliedMaterial = new WeakMap<BrowserWindow, string>()
@@ -24,7 +28,7 @@ export function applyWindowMaterial(
   win: BrowserWindow | null | undefined,
   settings: SettingsStore
 ): boolean {
-  if (!win || win.isDestroyed() || !['win32', 'linux'].includes(process.platform)) return false
+  if (!win || win.isDestroyed() || !['win32', 'linux', 'darwin'].includes(process.platform)) return false
 
   const appearance = normalizeAppearance((windowProfileSettings.get(win) ?? settings.get()).appearance)
   const usesAcrylic = appearanceUsesAcrylic(appearance)
@@ -39,6 +43,10 @@ export function applyWindowMaterial(
   try {
     win.setBackgroundColor(background)
     if (process.platform === 'win32') win.setBackgroundMaterial(material)
+    if (process.platform === 'darwin') win.setVibrancy(usesAcrylic ? MAC_VIBRANCY : null)
+    if (process.platform === 'linux' && linuxUsesX11(process.platform, process.env)) {
+      setLinuxBlurBehind(win, usesAcrylic)
+    }
     appliedMaterial.set(win, key)
     if (material === 'acrylic' && process.platform === 'win32') {
       reapplyWindowShadow(win)

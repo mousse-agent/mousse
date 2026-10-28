@@ -127,7 +127,7 @@ export function GeneralSettings({
         <SettingsRow
           title="Acrylic glass"
           description={<>
-            Translucent window material on every theme (Windows).
+            Translucent window material on every theme. The desktop shows blurred through it on Windows, macOS and KDE Plasma.
             {restartRequired && (
               <>
                 {' '}
