@@ -216,6 +216,100 @@
   color: var(--text-secondary);
 }
 
+/* What a device did on this computer: recent actions, and the "Always" rules it made. */
+.devices-block-btn:hover:not(:disabled) {
+  color: var(--danger);
+}
+
+.devices-activity {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-8);
+  max-height: 320px;
+  overflow: auto;
+}
+
+.devices-activity-list,
+.devices-rules {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: var(--settings-fs-small);
+}
+
+.devices-activity-list li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  column-gap: var(--space-8);
+  padding: var(--space-4) 0;
+  border-top: 1px solid var(--ui-line);
+}
+
+.devices-activity-list li:first-child,
+.devices-rules li:first-child {
+  border-top: 0;
+}
+
+.devices-activity-when {
+  flex: 0 0 64px;
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+.devices-activity-what {
+  color: var(--text-primary);
+}
+
+.devices-activity-what.refused {
+  color: var(--text-secondary);
+}
+
+.devices-activity-where {
+  color: var(--text-secondary);
+}
+
+.devices-activity-link {
+  max-width: 260px;
+  overflow: hidden;
+  color: var(--text-primary);
+  text-decoration: underline;
+  text-decoration-color: var(--ui-line-strong);
+  text-overflow: ellipsis;
+  text-underline-offset: 2px;
+  vertical-align: bottom;
+  white-space: nowrap;
+}
+
+.devices-activity-link:hover {
+  background: var(--ui-hover);
+  text-decoration-color: currentColor;
+}
+
+.devices-rules li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-12);
+  padding: var(--space-8) 0;
+  border-top: 1px solid var(--ui-line);
+}
+
+.devices-rules li > div {
+  min-width: 0;
+}
+
+.devices-rules .devices-code {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.devices-rule-meta {
+  margin-top: var(--space-4);
+}
+
 /* A phone asks to join over every screen, Settings and floating dialogs (the quick action editor) included. */
 .modal-overlay.enrollment-prompt {
   z-index: calc(var(--z-floating, 50000) + 1);

@@ -9,6 +9,7 @@ import { SettingsAdvanced, SettingsGroup, SettingsRow, Switch } from './settings
 import { CopyButton } from './settings/IconButtons'
 import { mousseIdAvailable, useMousseIdStore } from '../stores/mousseIdStore'
 import { DeviceLimitsDialog } from './devices/DeviceLimitsDialog'
+import { DeviceActivityRows } from './devices/DeviceActivityRows'
 import { PAIRING_DISCLOSURE, netErrorWords, bindSettings, workOnThreadsDisclosure, canWorkOnThreads, deviceLine, isComputer, isIncompatible, listedDevices, readDevices, routeDetails, serveSettings, sshRecordFor, updateInstructions, worksOnThreads, WORKS_ON_THREADS, type Device } from '../lib/netDevices'
 import type { NetDoctor, NetStatus } from '../../shared/net'
 import { TAILSCALE_FUNNEL_PORTS, type NetAddonActionResult, type NetAddonRecords, type SshRecordView, type SshSetupPhase } from '../../shared/net/local'
@@ -359,6 +360,15 @@ export function NetDevicesSection() {
                 control={record?.owner === 'managed'
                   ? <button type="button" className="settings-btn" onClick={() => setRecordDialog({ kind: 'update', record, name: device.name })}>Update…</button>
                   : selfDevice?.version && <button type="button" className="settings-btn" onClick={() => setUpdating(device)}>{updateInstructions(device, selfDevice.version).command ? 'Show command' : 'How to update'}</button>}
+              />
+            ),
+            // What it did here, with its Block and limits beside it. A phone has none of this: it keeps the phone API.
+            device.policy && isComputer(device) && (
+              <DeviceActivityRows
+                key={`${device.node}-activity`}
+                device={device}
+                onLimits={() => setLimits(device)}
+                onBlock={(blocked) => void action('bridge.policy', { node: device.node, blocked })}
               />
             )
           ]

@@ -33,6 +33,7 @@ import { SubagentParentBar } from './SubagentParentBar'
 import { SubagentComposerBanner } from './SubagentComposerBanner'
 import { ThreadMoveBanner } from './providers/MoveProviderDialog'
 import { mousseToUIMessages, chatStatusFromPhase } from '../chat/adapters/mousseToUI'
+import { useTurnSenders } from '../hooks/useTurnSenders'
 import {
   findQuickActionCardForApproval,
   questionAnswerThreadId,
@@ -258,7 +259,10 @@ export function OrchestratorChat() {
 
   // Deterministic agent-elements adapter: sorted transcript -> UIMessage[]
   // No custom coalesce/grouping — MessageList handles turn grouping internally with stable keys.
-  const uiMessages = useMemo(() => mousseToUIMessages(messages), [messages])
+  // A turn that a person on another of the user's computers sent says which one (the sender is kept on the run).
+  const userTurns = useMemo(() => messages.reduce((count, message) => count + (message.role === 'user' && message.turnId ? 1 : 0), 0), [messages])
+  const turnSenders = useTurnSenders(activeThreadId, Boolean(activeThread?.sentFrom && !activeThread.node), userTurns)
+  const uiMessages = useMemo(() => mousseToUIMessages(messages, turnSenders), [messages, turnSenders])
   // The older images of a long thread of another computer come by name; their bytes are fetched as the thread is shown.
   const shownRemote = Boolean(activeThread?.node)
   // Opening a thread (also Retry, which opens it again) asks again for images that could not be fetched before.
