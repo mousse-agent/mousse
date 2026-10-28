@@ -8,8 +8,11 @@ vi.mock('electron', () => ({ app: { getFileIcon: vi.fn() }, nativeImage: { creat
 import {
   builtInExtensionDirectories,
   detectEditors,
+  detectToolbox,
+  EDITOR_CATALOG,
   editorLaunchEnvironment,
   openRemoteInEditor,
+  opensRemoteFolders,
   planRemoteOpen,
   remoteEditorCommand,
   remoteLauncher,
@@ -17,6 +20,7 @@ import {
   type EditorDetectionEnv,
   type RemoteOpenIo
 } from '../src/main/editors'
+import { JETBRAINS_IDE_HINTS } from '../src/main/remoteEditor'
 import type { SshProbeOutcome } from '../src/main/remoteEditorFlow'
 import { newId } from '../src/shared/net'
 import type { EditorProbeResult } from '../src/shared/net/local'
@@ -40,6 +44,50 @@ describe('VSCodium', () => {
     const local = 'C:\\Users\\me\\AppData\\Local'
     const exe = win32.join(local, 'Programs', 'VSCodium', 'VSCodium.exe')
     expect(detectEditors(env({ platform: 'win32', localAppData: local, files: [exe] }))).toEqual([{ id: 'vscodium', label: 'VSCodium', launcherPath: exe }])
+  })
+})
+
+describe('Zed and the JetBrains IDEs', () => {
+  it('has a JetBrains Toolbox product code for every JetBrains IDE of the catalog but Android Studio', () => {
+    const jetbrains = ['idea', 'webstorm', 'pycharm', 'goland', 'rustrover', 'clion', 'rider', 'phpstorm']
+    for (const id of jetbrains) expect(EDITOR_CATALOG.some((definition) => definition.id === id), id).toBe(true)
+    expect(Object.keys(JETBRAINS_IDE_HINTS).sort()).toEqual([...jetbrains].sort())
+  })
+
+  it('finds JetBrains Toolbox where it installs itself', () => {
+    expect(detectToolbox(env({ files: ['/Users/me/Applications/JetBrains Toolbox.app'] }))).toBe('/Users/me/Applications/JetBrains Toolbox.app')
+    const local = 'C:\\Users\\me\\AppData\\Local'
+    const exe = win32.join(local, 'JetBrains', 'Toolbox', 'bin', 'jetbrains-toolbox.exe')
+    expect(detectToolbox(env({ platform: 'win32', localAppData: local, files: [exe] }))).toBe(exe)
+    expect(detectToolbox(env({ platform: 'linux', home: '/home/me', files: ['/home/me/.local/share/JetBrains/Toolbox/bin/jetbrains-toolbox'] }))).toBe(
+      '/home/me/.local/share/JetBrains/Toolbox/bin/jetbrains-toolbox'
+    )
+    expect(detectToolbox(env({ platform: 'linux', commands: { 'jetbrains-toolbox': '/usr/bin/jetbrains-toolbox' } }))).toBe('/usr/bin/jetbrains-toolbox')
+    expect(detectToolbox(env({ platform: 'linux' }))).toBeUndefined()
+  })
+
+  it('lists a JetBrains IDE for a remote folder only with Toolbox, and Zed always', () => {
+    const toolbox = '/Applications/JetBrains Toolbox.app'
+    const files = ['/Applications/IntelliJ IDEA.app', '/Applications/Zed.app', '/Applications/Android Studio.app']
+    const withToolbox = detectEditors(env({ files: [...files, toolbox] }))
+    expect(withToolbox).toEqual([
+      { id: 'zed', label: 'Zed', appPath: '/Applications/Zed.app' },
+      { id: 'idea', label: 'IntelliJ IDEA', appPath: '/Applications/IntelliJ IDEA.app', toolboxPath: toolbox },
+      { id: 'android-studio', label: 'Android Studio', appPath: '/Applications/Android Studio.app' }
+    ])
+    expect(withToolbox.map(opensRemoteFolders)).toEqual([true, true, false])
+    const without = detectEditors(env({ files }))
+    expect(without.map(opensRemoteFolders)).toEqual([true, false, false])
+  })
+
+  it('starts Zed with its own command: the app’s cli on macOS, bin\\zed.exe on Windows', () => {
+    const app = '/Applications/Zed.app'
+    expect(remoteLauncher({ id: 'zed', label: 'Zed', appPath: app }, env({ files: [`${app}/Contents/MacOS/cli`] }))).toBe(`${app}/Contents/MacOS/cli`)
+    expect(remoteLauncher({ id: 'zed', label: 'Zed', appPath: app }, env({ commands: { zed: '/usr/local/bin/zed' } }))).toBe('/usr/local/bin/zed')
+    const exe = 'C:\\Users\\me\\AppData\\Local\\Programs\\Zed\\Zed.exe'
+    const cli = 'C:\\Users\\me\\AppData\\Local\\Programs\\Zed\\bin\\zed.exe'
+    expect(remoteLauncher({ id: 'zed', label: 'Zed', launcherPath: exe }, env({ platform: 'win32', files: [cli] }))).toBe(cli)
+    expect(remoteLauncher({ id: 'zed', label: 'Zed', launcherPath: exe }, env({ platform: 'win32' }))).toBe(exe)
   })
 })
 
@@ -135,15 +183,19 @@ describe('opening a folder of another computer', () => {
     const code: DetectedEditor = { id: 'vscode', label: 'VS Code', launcherPath: '/usr/bin/code' }
     const answer = { path: '/home/me/app', uriPath: '/home/me/app', style: 'posix', platform: 'linux', kind: 'project' }
 
-    function fixture(patch: { approval?: string; detected?: DetectedEditor[]; exists?: boolean; folders?: Record<string, string[]>; processEnv?: NodeJS.ProcessEnv; proxyReady?: boolean } = {}) {
+    function fixture(patch: { approval?: string; detected?: DetectedEditor[]; exists?: boolean | ((path: string) => boolean); folders?: Record<string, string[]>; processEnv?: NodeJS.ProcessEnv; proxyReady?: boolean; answer?: object } = {}) {
       const launched: Array<{ command: string; args: string[]; env: NodeJS.ProcessEnv }> = []
+      const links: string[] = []
       const asked: string[] = []
       const signedIn: string[] = []
       const io: RemoteOpenIo = {
         detected: async () => patch.detected ?? [code],
-        env: () => ({ ...env({ platform: 'linux', home: nowhere }), exists: () => patch.exists ?? true }),
+        env: () => ({ ...env({ platform: 'linux', home: nowhere }), exists: typeof patch.exists === 'function' ? patch.exists : () => (patch.exists as boolean | undefined) ?? true }),
         launch: async (command, args, launchEnv) => {
           launched.push({ command, args, env: launchEnv })
+        },
+        openLink: async (link) => {
+          links.push(link)
         },
         list: (path) => patch.folders?.[path],
         processEnv: () => patch.processEnv ?? { PATH: '/usr/bin' },
@@ -158,10 +210,10 @@ describe('opening a folder of another computer', () => {
       const ask = async (method: string) => {
         asked.push(method)
         if (method === 'net.ssh.target') return patch.approval ? { endpoint: patch.approval } : {}
-        if (method === 'editor.folder') return answer
+        if (method === 'editor.folder') return patch.answer ?? answer
         throw new Error(`unexpected ${method}`)
       }
-      return { io, ask, launched, asked, signedIn }
+      return { io, ask, launched, links, asked, signedIn }
     }
 
     it('starts the editor with the approved address and the owner\u2019s folder', async () => {
@@ -212,7 +264,7 @@ describe('opening a folder of another computer', () => {
 
     it('refuses an editor that cannot open remote folders, and one that is not installed', async () => {
       const f = fixture({ approval: 'box' })
-      expect(await openRemoteInEditor('zed', threadId, f.ask, f.io)).toMatchObject({ ok: false, reason: 'editor_missing' })
+      expect(await openRemoteInEditor('sublime', threadId, f.ask, f.io)).toMatchObject({ ok: false, reason: 'editor_missing' })
       expect(await openRemoteInEditor('cursor', threadId, f.ask, f.io)).toEqual({ ok: false, reason: 'editor_missing', message: 'That editor is not installed.' })
       expect(f.launched).toEqual([])
       expect(f.asked).toEqual([])
@@ -230,6 +282,39 @@ describe('opening a folder of another computer', () => {
       expect(f.asked).not.toContain('net.editor.probe')
       expect(f.signedIn).toEqual([])
     })
+
+    const zed: DetectedEditor = { id: 'zed', label: 'Zed', launcherPath: '/usr/bin/zed' }
+    const toolbox = '/nonexistent/home/.local/share/JetBrains/Toolbox/bin/jetbrains-toolbox'
+    const idea: DetectedEditor = { id: 'idea', label: 'IntelliJ IDEA', launcherPath: '/usr/bin/idea', toolboxPath: toolbox }
+
+    it('starts Zed with an ssh:// address', async () => {
+      const f = fixture({ approval: 'me@box.example.com:2222', detected: [zed] })
+      expect(await openRemoteInEditor('zed', threadId, f.ask, f.io)).toEqual({ ok: true })
+      expect(f.launched).toEqual([{ command: '/usr/bin/zed', args: ['ssh://me@box.example.com:2222/home/me/app'], env: { PATH: '/usr/bin' } }])
+      expect(f.links).toEqual([])
+    })
+
+    it('does not start Zed for a folder of a Windows computer', async () => {
+      const f = fixture({ approval: 'box', detected: [zed], answer: { path: 'C:\\work', uriPath: '/C:/work', style: 'windows', platform: 'win32', kind: 'project' } })
+      expect(await openRemoteInEditor('zed', threadId, f.ask, f.io)).toEqual({ ok: false, reason: 'editor_missing', message: 'That editor cannot open a folder on that computer.' })
+      expect(f.launched).toEqual([])
+    })
+
+    it('hands a JetBrains IDE’s folder to JetBrains Toolbox as a link, and starts no command', async () => {
+      const f = fixture({ approval: 'me@box.example.com:2222', detected: [idea] })
+      expect(await openRemoteInEditor('idea', threadId, f.ask, f.io)).toEqual({ ok: true })
+      expect(f.links).toEqual(['jetbrains://gateway/ssh/environment?h=box.example.com&u=me&p=2222&launchIde=true&ideHint=IU&projectHint=/home/me/app'])
+      expect(f.launched).toEqual([])
+    })
+
+    it('opens nothing for a JetBrains IDE without JetBrains Toolbox, or when Toolbox is gone', async () => {
+      const none = fixture({ approval: 'box', detected: [{ ...idea, toolboxPath: undefined }] })
+      expect(await openRemoteInEditor('idea', threadId, none.ask, none.io)).toEqual({ ok: false, reason: 'editor_missing', message: 'IntelliJ IDEA needs JetBrains Toolbox to open this folder.' })
+      expect(none.asked).toEqual([])
+      const gone = fixture({ approval: 'box', detected: [idea], exists: (path) => path !== toolbox })
+      expect(await openRemoteInEditor('idea', threadId, gone.ask, gone.io)).toEqual({ ok: false, reason: 'editor_missing', message: 'JetBrains Toolbox is no longer installed.' })
+      expect([...none.links, ...gone.links, ...none.launched, ...gone.launched]).toEqual([])
+    })
   })
 
   describe('over one of Mousse’s own SSH names, the check before the editor starts', () => {
@@ -239,15 +324,18 @@ describe('opening a folder of another computer', () => {
     const answer = { path: '/home/me/app', uriPath: '/home/me/app', style: 'posix', platform: 'linux', kind: 'project' }
 
     // A fake daemon for a computer reached through Mousse's own name for it, and a fake `ssh`.
-    function setup(mousse: { probe?: EditorProbeResult | Error; ssh?: SshProbeOutcome | Error; folder?: Error; platform?: NodeJS.Platform; prepare?: unknown; alias?: unknown } = {}) {
+    function setup(mousse: { probe?: EditorProbeResult | Error; ssh?: SshProbeOutcome | Error; folder?: Error; platform?: NodeJS.Platform; prepare?: unknown; alias?: unknown; detected?: DetectedEditor[] } = {}) {
       const launched: string[][] = []
       const asked: string[] = []
       const signedIn: Array<{ alias: string; config: string; env: NodeJS.ProcessEnv }> = []
       const io: RemoteOpenIo = {
-        detected: async () => [code],
+        detected: async () => mousse.detected ?? [code],
         env: () => ({ ...env({ platform: mousse.platform ?? 'linux', home: nowhere }), exists: () => true }),
         launch: async (_command, args) => {
           launched.push(args)
+        },
+        openLink: async (link) => {
+          launched.push([link])
         },
         list: () => undefined,
         processEnv: () => ({ PATH: '/usr/bin', ELECTRON_RUN_AS_NODE: '1' }),
@@ -289,6 +377,25 @@ describe('opening a folder of another computer', () => {
       expect(await openRemoteInEditor('vscode', threadId, f.ask, f.io)).toEqual({ ok: true, via: { path: 'relay', transport: 'plus-relay' } })
       expect(f.asked).toEqual(['net.ssh.target', 'net.editor.ssh.status', 'editor.folder', 'net.editor.alias', 'net.editor.probe', 'net.editor.ssh.prepare'])
       expect(f.launched).toEqual([['--folder-uri', 'vscode-remote://ssh-remote+mousse-workbox-3fa2c1/home/me/app']])
+    })
+
+    it('opens Zed and a JetBrains IDE over the same check and the same SSH name', async () => {
+      const editors: DetectedEditor[] = [
+        { id: 'zed', label: 'Zed', launcherPath: '/usr/bin/zed' },
+        { id: 'pycharm', label: 'PyCharm', launcherPath: '/usr/bin/pycharm', toolboxPath: '/opt/toolbox/jetbrains-toolbox' }
+      ]
+      for (const [id, opened] of [
+        ['zed', 'ssh://mousse-workbox-3fa2c1/home/me/app'],
+        ['pycharm', 'jetbrains://gateway/ssh/environment?h=mousse-workbox-3fa2c1&launchIde=true&ideHint=PY&projectHint=/home/me/app']
+      ] as const) {
+        const f = setup({ detected: editors })
+        expect(await openRemoteInEditor(id, threadId, f.ask, f.io), id).toEqual({ ok: true, via: { path: 'direct', transport: 'direct' } })
+        expect(f.asked, id).toEqual(['net.ssh.target', 'net.editor.ssh.status', 'editor.folder', 'net.editor.alias', 'net.editor.probe', 'net.editor.ssh.prepare'])
+        expect(f.launched, id).toEqual([[opened]])
+        const off = setup({ detected: editors, probe: refused({ ok: false, reason: 'editor_off', message: 'off' }) })
+        expect(await openRemoteInEditor(id, threadId, off.ask, off.io), id).toMatchObject({ ok: false, failure: 'editor_off' })
+        expect(off.launched, id).toEqual([])
+      }
     })
 
     it.each([
