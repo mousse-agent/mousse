@@ -6,6 +6,7 @@ import { isAbsolute, join, relative } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { AssistantMessage, Context } from '@earendil-works/pi-ai'
 import { MousseMainService } from '../src/mms/MousseMainService'
+import { installExactDefinitionRuntime } from './fixtures/agent-platform/exactDefinitionRuntime'
 import { ProviderAuthService } from '../src/mms/providers/ProviderAuthService'
 import { ProjectManager } from '../src/mms/data/ProjectManager'
 import { ThreadDataStore } from '../src/mms/data/ThreadDataStore'
@@ -419,6 +420,14 @@ async function agentFixture() {
     if (!next) throw new Error('fixture provider exhausted')
     return streamOf(next) as never
   })
+  // An agent definition runs only on a runtime that enforces its tool limits. The profile's first provider
+  // is not one, so every agent here was refused before it ran; the exact stand-in runs the turns, and the
+  // model's replies still come from the stream mocked above.
+  installExactDefinitionRuntime({ orchestrator: services.orchestrator, providerId: provider.id, profileHome: services.getProfileHomeDir(), next: async (context, signal) => {
+    const stream = services.providerAuth.models.streamSimple(model, context, { signal } as never)
+    for await (const ignored of stream) void ignored
+    return await stream.result()
+  } })
   const integrations = services.settings.get().integrations
   services.settings.set({
     provider: { llmProvider: modelRef.providerId, model: modelRef.modelId },
