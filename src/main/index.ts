@@ -25,6 +25,7 @@ import { appearanceSurfaceBase } from '../shared/themeSurfaces'
 import { startupAppearanceArgument } from '../shared/startupAppearance'
 import { readStartupAppearance } from './startupAppearance'
 import { refreshWindowChrome } from './windowsChrome'
+import { MAC_VIBRANCY } from './windowMaterial'
 import { BrowserViewManager } from './browser/BrowserViewManager'
 import { AttachedBrowserHost } from './browser/AttachedBrowserHost'
 import {
@@ -180,7 +181,8 @@ function startGuiApp(): void {
     const isWindows = process.platform === 'win32'
     const isMac = process.platform === 'darwin'
     const appearance = normalizeAppearance(settings.get().appearance)
-    // Native acrylic supplies the blur; renderer surfaces only tint the glass.
+    // The native material (Windows acrylic, macOS vibrancy, KDE blur behind) supplies
+    // the blur; renderer surfaces only tint the glass.
     const useAcrylic = appearanceUsesAcrylic(appearance)
 
     mainWindow = new BrowserWindow({
@@ -212,7 +214,8 @@ function startGuiApp(): void {
       ...(isMac
         ? {
             titleBarStyle: 'hiddenInset' as const,
-            trafficLightPosition: { x: 14, y: 13 }
+            trafficLightPosition: { x: 14, y: 13 },
+            ...(useAcrylic ? { vibrancy: MAC_VIBRANCY } : {})
           }
         : {}),
       webPreferences: {

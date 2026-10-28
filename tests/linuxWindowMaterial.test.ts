@@ -5,6 +5,7 @@ import type { SettingsStore } from '../src/mms/settings/SettingsStore'
 import { applyWindowMaterial, setWindowProfileSettings } from '../src/main/windowMaterial'
 
 vi.mock('../src/main/windowsChrome', () => ({ reapplyWindowShadow: vi.fn() }))
+vi.mock('../src/main/linuxBlurBehind', () => ({ linuxUsesX11: () => false, setLinuxBlurBehind: vi.fn() }))
 
 const platform = Object.getOwnPropertyDescriptor(process, 'platform')!
 afterEach(() => Object.defineProperty(process, 'platform', platform))

@@ -118,10 +118,11 @@ function applyAcrylic(acrylic: boolean, intensity: number, theme: ThemeId): void
   }
 
   if (acrylic) {
-    // Windows already composites the whole window with native acrylic. Applying
-    // backdrop-filter to every nested glass surface duplicates off-screen render
-    // targets and significantly increases GPU-process memory. Keep translucency,
-    // but let the single native material provide the blur.
+    // The native material (Windows acrylic, macOS vibrancy, KDE blur behind)
+    // already blurs the whole window. Applying backdrop-filter to every nested
+    // glass surface duplicates off-screen render targets and significantly
+    // increases GPU-process memory. Keep translucency, but let the single
+    // native material provide the blur.
     root.style.setProperty('--glass-blur', 'none')
     root.style.setProperty(
       '--glass-bg',
