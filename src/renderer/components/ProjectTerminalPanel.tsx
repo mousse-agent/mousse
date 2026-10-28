@@ -39,6 +39,31 @@ export function ProjectTerminalPanel() {
   const activePtyRef = useRef<string | null>(null)
   const fitFrameRef = useRef<number | null>(null)
   const [notice, setNotice] = useState<TerminalNotice | null>(null)
+  // Terminals another of the user's computers has open on this thread (this computer's own thread only).
+  const [holders, setHolders] = useState<Array<{ ptyId: string; name: string }>>([])
+
+  useEffect(() => {
+    if (mainView !== 'terminal' || !activeThreadId || isQualifiedId(activeThreadId)) {
+      setHolders([])
+      return
+    }
+    let cancelled = false
+    const load = async (): Promise<void> => {
+      try {
+        const list = await window.mousse.pty.list()
+        if (!cancelled)
+          setHolders(list.flatMap((entry) => (entry.heldBy ? [{ ptyId: entry.ptyId, name: entry.heldBy.name }] : [])))
+      } catch {
+        /* the list is a courtesy: a failed read shows nothing */
+      }
+    }
+    void load()
+    const timer = setInterval(() => void load(), 5000)
+    return () => {
+      cancelled = true
+      clearInterval(timer)
+    }
+  }, [mainView, activeThreadId])
 
   // What was said about one thread's terminal is not said about another's.
   useEffect(() => setNotice(null), [activeThreadId])
@@ -319,6 +344,23 @@ export function ProjectTerminalPanel() {
 
   return (
     <div className="terminal-panel project-terminal-panel">
+      {holders.map((holder) => (
+        <div key={holder.ptyId} className="terminal-remote-holder" role="status">
+          <span>{holder.name} has a terminal open on this thread.</span>
+          <button
+            type="button"
+            className="btn"
+            onClick={() => {
+              void window.mousse.pty
+                .kill(holder.ptyId, activeThreadId ?? undefined)
+                .catch(() => {})
+                .finally(() => setHolders((held) => held.filter((entry) => entry.ptyId !== holder.ptyId)))
+            }}
+          >
+            Stop
+          </button>
+        </div>
+      ))}
       <div
         className={`terminal-container${visibleTabs.length === 0 ? ' terminal-container-empty' : ''}`}
         ref={containerRef}

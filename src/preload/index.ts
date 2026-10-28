@@ -411,8 +411,10 @@ const api = {
       ipcRenderer.invoke('pty:write', ptyId, data, threadId),
     resize: (ptyId: string, cols: number, rows: number, threadId?: string): Promise<void> =>
       ipcRenderer.invoke('pty:resize', ptyId, cols, rows, threadId),
-    list: (): Promise<Array<{ ptyId: string; agentId: string }>> =>
-      ipcRenderer.invoke('pty:list'),
+    /** `heldBy` is set on a terminal another of the user's computers opened on this thread. */
+    list: (): Promise<
+      Array<{ ptyId: string; agentId: string; heldBy?: { node: string; name: string; openedAt: number } }>
+    > => ipcRenderer.invoke('pty:list'),
     /** `threadId` names the terminal's thread; a thread on another computer needs it. */
     isAlive: (ptyId: string, threadId?: string): Promise<boolean> => ipcRenderer.invoke('pty:isAlive', ptyId, threadId),
     lookup: (

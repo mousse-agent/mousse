@@ -467,6 +467,26 @@ export function registerGuiIpc(
     if (useWindowsCompletionSound) playThreadCompletionSound()
   }
 
+  /** Another of the user's computers opened its first terminal on this one: said in a desktop notification. */
+  const notifyRemoteTerminal = (device: string, threadName: string): void => {
+    if (!Notification.isSupported()) return
+    const notification = new Notification({
+      title: 'Mousse',
+      body: threadName
+        ? `${device} opened a terminal on this computer, in ${threadName}.`
+        : `${device} opened a terminal on this computer.`
+    })
+    notification.on('click', () => {
+      const win = getWindow()
+      if (win && !win.isDestroyed()) {
+        if (win.isMinimized()) win.restore()
+        win.show()
+        win.focus()
+      }
+    })
+    notification.show()
+  }
+
   const setThreadActivity = (threadId: string, state: ThreadActivityState): void => {
     activityTrackerFor().setState(threadId, state)
     broadcast('threads:activity', activityTrackerFor().getSnapshot())
@@ -690,6 +710,14 @@ export function registerGuiIpc(
           /* chrome mirror best-effort */
         }
       }
+    }
+    if (event.type === 'ui.notify') {
+      const info = event.data as { kind?: unknown; device?: unknown; threadName?: unknown } | null
+      if (info?.kind === 'remote-terminal')
+        notifyRemoteTerminal(
+          typeof info.device === 'string' && info.device ? info.device : 'Another computer',
+          typeof info.threadName === 'string' ? info.threadName : ''
+        )
     }
     if (event.type === 'ui.focus-intent') {
       const win = getWindow()

@@ -167,6 +167,14 @@ describe('terminals on another computer', () => {
     expect(guiIpcSource).toContain('rows: number, threadId?: unknown')
   })
 
+  it('shows the owner who holds a terminal on the thread, with Stop, and a desktop notification for a first one', () => {
+    expect(panelSource).toMatch(/terminal-remote-holder/)
+    expect(panelSource).toMatch(/has a terminal open on this thread/)
+    expect(panelSource).toMatch(/\.kill\(holder\.ptyId, activeThreadId/)
+    expect(guiIpcSource).toMatch(/event\.type === 'ui\.notify'/)
+    expect(guiIpcSource).toMatch(/'remote-terminal'/)
+  })
+
   it('names no folder, shell or environment for a terminal on another computer, and keeps them for a local one', () => {
     const createHandler = guiIpcSource.slice(
       guiIpcSource.indexOf("'pty:create'"),
