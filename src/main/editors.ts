@@ -141,16 +141,34 @@ let pending: Promise<{ detected: DetectedEditor[]; infos: EditorInfo[] }> | null
 /** 32px so the 16px icon stays sharp on Retina displays. */
 const ICON_SIZE = { width: 32, height: 32 }
 
-async function iconFor(appPath: string): Promise<string | undefined> {
-  // getFileIcon returns the generic bundle icon for apps; the Quick Look thumbnail is the app's own.
-  try {
-    const image = await nativeImage.createThumbnailFromPath(appPath, ICON_SIZE)
-    if (!image.isEmpty()) return image.toDataURL()
-  } catch {
-    // Fall through to the file icon.
+/** The file whose icon stands for an editor: the macOS bundle or the Windows launcher. Linux launchers carry no icon of their own. */
+export function editorIconSource(editor: DetectedEditor, platform: NodeJS.Platform): string | undefined {
+  if (platform === 'darwin') return editor.appPath
+  if (platform === 'win32') return editor.launcherPath
+  return undefined
+}
+
+/** The file manager's own executable, whose icon labels the folder entry. */
+export function filesIconSource(platform: NodeJS.Platform, systemRoot?: string): string | undefined {
+  if (platform === 'darwin') return '/System/Library/CoreServices/Finder.app'
+  if (platform === 'win32') return win32.join(systemRoot ?? 'C:\\Windows', 'explorer.exe')
+  return undefined
+}
+
+async function iconFor(path: string, platform: NodeJS.Platform): Promise<string | undefined> {
+  if (!existsSync(path)) return undefined
+  // macOS: getFileIcon returns the generic bundle icon for apps; the Quick Look thumbnail is the app's own.
+  if (platform === 'darwin') {
+    try {
+      const image = await nativeImage.createThumbnailFromPath(path, ICON_SIZE)
+      if (!image.isEmpty()) return image.toDataURL()
+    } catch {
+      // Fall through to the file icon.
+    }
   }
+  // Windows: an .exe's file icon is the app's own, 32px at `normal`.
   try {
-    const image = await app.getFileIcon(appPath, { size: 'normal' })
+    const image = await app.getFileIcon(path, { size: 'normal' })
     return image.isEmpty() ? undefined : image.toDataURL()
   } catch {
     return undefined
@@ -160,17 +178,16 @@ async function iconFor(appPath: string): Promise<string | undefined> {
 async function detect(): Promise<{ detected: DetectedEditor[]; infos: EditorInfo[] }> {
   const env = realEnv()
   const detected = detectEditors(env)
-  const mac = env.platform === 'darwin'
   const infos: EditorInfo[] = await Promise.all(
     detected.map(async (editor): Promise<EditorInfo> => {
-      const iconDataUrl = mac && editor.appPath ? await iconFor(editor.appPath) : undefined
+      const source = editorIconSource(editor, env.platform)
+      const iconDataUrl = source ? await iconFor(source, env.platform) : undefined
       return { id: editor.id, label: editor.label, kind: 'editor', ...(iconDataUrl ? { iconDataUrl } : {}) }
     })
   )
-  const finderIcon = mac && existsSync('/System/Library/CoreServices/Finder.app')
-    ? await iconFor('/System/Library/CoreServices/Finder.app')
-    : undefined
-  infos.push({ id: FILES_EDITOR_ID, label: filesLabel(env.platform), kind: 'files', ...(finderIcon ? { iconDataUrl: finderIcon } : {}) })
+  const filesSource = filesIconSource(env.platform, process.env.SystemRoot)
+  const filesIcon = filesSource ? await iconFor(filesSource, env.platform) : undefined
+  infos.push({ id: FILES_EDITOR_ID, label: filesLabel(env.platform), kind: 'files', ...(filesIcon ? { iconDataUrl: filesIcon } : {}) })
   return { detected, infos }
 }
 
