@@ -13,7 +13,7 @@ import {
   writeFile
 } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, sep } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   EDITOR_SSH_NOTICE,
@@ -1271,5 +1271,55 @@ describe('through the service', () => {
     cleanup.push(() => restarted.shutdown())
     await restarted.start()
     await vi.waitFor(async () => expect(await readFile(file, 'utf8')).not.toContain('# stale'))
+  })
+})
+
+describe('which daemon the ProxyCommand reaches', () => {
+  const proxyLines = async (editor: Awaited<ReturnType<typeof bed>>['editor'], config: string) => {
+    const result = await editor.prepare([computer('Work box', 'bob')])
+    if (!result.ok) throw new Error(result.message)
+    return readFile(config, 'utf8').then((text) =>
+      text.split('\n').filter((line) => line.includes('ProxyCommand'))
+    )
+  }
+
+  it('leaves --home out for the default Mousse home', async () => {
+    const { editor, paths: p } = await bed()
+    const lines = await proxyLines(editor, p.config)
+    expect(lines).toHaveLength(1)
+    expect(lines[0]).not.toContain('--home')
+  })
+
+  it('writes the Mousse home, quoted like the program, when it is not the default', async () => {
+    const { editor, paths: p, mousseHome } = await bed({ mousseInsideHome: false })
+    const lines = await proxyLines(editor, p.config)
+    expect(lines).toHaveLength(1)
+    const home = mousseHome.split(sep).join('/')
+    // The home has a space in its path (the bed's folders do), so it is quoted.
+    expect(lines[0]).toMatch(/ --profile default --home /u)
+    expect(lines[0]!.endsWith(process.platform === 'win32' ? `"${home}"` : `'${home}'`)).toBe(true)
+  })
+
+  it('writes a home next to the home directory that is not ~/.mousse, and ignores a spelling of the default', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'mousse editor '))
+    cleanup.push(() => rm(root, { recursive: true, force: true }))
+    const home = join(root, 'home dir')
+    await mkdir(home, { recursive: true })
+    const make = (mousseHome: string) =>
+      new EditorSshConfig({ home, mousseHome, cli: CLI, profile: 'default', verify: passes })
+    const defaults = make(join(home, '.mousse', '..', '.mousse'))
+    const text = await proxyLines(defaults, defaults.paths.config)
+    expect(text[0]).not.toContain('--home')
+    const other = make(join(home, '.mousse-dev'))
+    expect((await proxyLines(other, other.paths.config))[0]).toContain('--home')
+  })
+
+  it('refuses a home that no shell can be told about, as it does a program path', () => {
+    expect(() =>
+      proxyCommand('/usr/bin/mousse-cli', newId('node'), 'p', 'linux', String.raw`C:\x`)
+    ).toThrow()
+    expect(() =>
+      proxyCommand('C:/m/mousse-cli.cmd', newId('node'), 'p', 'win32', String.raw`C:\a$b`)
+    ).toThrow()
   })
 })

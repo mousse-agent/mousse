@@ -90,7 +90,15 @@ import {
   type ClientTunnel,
   type EditorTunnelOptions
 } from './editor/tunnel'
+import { LocalEditorTunnels, type LocalConnection } from './editor/localTunnels'
 import type { EditorTunnelInfo, TunnelReason } from '../../shared/net/tunnel'
+import {
+  EDITOR_TUNNEL_HANDLE,
+  EDITOR_TUNNEL_LOCAL_CHUNK_BYTES,
+  EDITOR_TUNNEL_LOCAL_READ_WAIT_MS,
+  proxyComputerName,
+  type EditorTunnelLocalMethod
+} from '../../shared/net/editorProxy'
 import { isJoinVia } from '../../shared/net/via'
 import { isListedComputer } from '../../shared/net/listedComputer'
 import {
@@ -269,6 +277,8 @@ export class NetService {
   private editorSshConfig?: EditorSshConfig
   /** The editor tunnels this computer carries for its other computers, and those it opened to them. */
   private tunnels?: EditorTunnels
+  /** The tunnels `mousse-cli net ssh-proxy` holds on this computer's local connections. */
+  private localTunnelStore?: LocalEditorTunnels
   private readonly editorFirstOpen = new Set<(node: NodeId) => void>()
   /** Loopback listeners that exist only while a remote machine joins; never persisted. */
   private readonly enrollmentListeners = new Set<DirectTransport>()
@@ -2085,6 +2095,67 @@ export class NetService {
       })()
     )
   }
+  private localTunnels(): LocalEditorTunnels {
+    return (this.localTunnelStore ??= new LocalEditorTunnels({
+      open: (node, signal) => this.openEditorTunnel(node, signal),
+      computerName: (node) => {
+        try {
+          return proxyComputerName(this.currentNode(node).name)
+        } catch {
+          return undefined
+        }
+      }
+    }))
+  }
+  /**
+   * The local methods of `mousse-cli net ssh-proxy`: open a tunnel to another computer's SSH server and move its
+   * bytes in pieces. A tunnel belongs to the local connection that opened it and ends with it. Local owner IPC
+   * only, like the other `net.*` methods: another computer cannot reach them through Bridge.
+   */
+  async editorTunnelRequest(
+    method: EditorTunnelLocalMethod,
+    params: Record<string, unknown>,
+    connection: LocalConnection
+  ): Promise<unknown> {
+    if (this.stopped) throw new NetError('cancelled')
+    const tunnels = this.localTunnels()
+    if (method === 'net.editor.tunnel.open') {
+      if (!isId('node', params.node)) throw new NetError('bad_request')
+      return this.track(tunnels.open(connection, params.node))
+    }
+    const handle = params.tunnel
+    if (typeof handle !== 'string' || !EDITOR_TUNNEL_HANDLE.test(handle))
+      throw new NetError('bad_request')
+    switch (method) {
+      case 'net.editor.tunnel.read': {
+        const wait =
+          params.waitMs === undefined ? EDITOR_TUNNEL_LOCAL_READ_WAIT_MS : Number(params.waitMs)
+        if (!Number.isFinite(wait) || wait < 0) throw new NetError('bad_request')
+        return tunnels.read(connection.id, handle, wait)
+      }
+      case 'net.editor.tunnel.write': {
+        const text = params.data
+        if (
+          typeof text !== 'string' ||
+          text.length > Math.ceil(EDITOR_TUNNEL_LOCAL_CHUNK_BYTES / 3) * 4 ||
+          !/^[A-Za-z0-9+/]*={0,2}$/u.test(text)
+        )
+          throw new NetError('bad_request')
+        return this.track(tunnels.write(connection.id, handle, Buffer.from(text, 'base64')))
+      }
+      case 'net.editor.tunnel.end':
+        return this.track(tunnels.end(connection.id, handle))
+      case 'net.editor.tunnel.close':
+        tunnels.close(connection.id, handle)
+        return { ok: true }
+      default:
+        throw new NetError('bad_request')
+    }
+  }
+  /** A local connection closed: its editor tunnels end. */
+  editorTunnelConnectionClosed(connection: string): void {
+    this.localTunnelStore?.closeConnection(connection)
+  }
   session(node: NodeId): SyncSession {
     this.assertEnabled()
     for (const session of this.sessions)
@@ -2566,6 +2637,7 @@ export class NetService {
     this.disabled = true
     // Every editor tunnel ends now, with its end written to the audit, before the sessions are closed.
     this.tunnels?.endAll('net_off')
+    this.localTunnelStore?.closeAll()
     this.shutdownSignal.abort()
     void this.sshBootstrap?.close()
     // A closed bootstrap refuses everything; enabling again needs a fresh one.
@@ -3156,6 +3228,7 @@ export class NetService {
     this.stopped = true
     // The tunnels end first, while the audit can still be written.
     this.tunnels?.endAll('net_off')
+    this.localTunnelStore?.closeAll()
     this.shutdownSignal.abort()
     void this.sshBootstrap?.close()
     this.webrtc?.stop()

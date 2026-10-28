@@ -2,6 +2,7 @@ import { exitWithError } from './output'
 import { isElectronMainProcess, stripCliModeArgs } from './cliLaunch'
 import { configureElectronContext, finishElectronCli } from './electronContext'
 import { isChatgptTokenArgv } from './fastpath/chatgptToken'
+import { isSshProxyArgv } from './fastpath/sshProxy'
 
 async function main(): Promise<void> {
   const argv = stripCliModeArgs(process.argv.slice(2))
@@ -11,6 +12,14 @@ async function main(): Promise<void> {
     const code = await runChatgptToken(argv)
     if (isElectronMainProcess()) (await import('electron')).app.exit(code)
     else process.exitCode = code
+    return
+  }
+  // An editor's `ssh` runs the proxy on every reconnect: it loads nothing else.
+  if (isSshProxyArgv(argv)) {
+    const { runSshProxy } = await import('./fastpath/sshProxy')
+    const code = await runSshProxy(argv)
+    if (isElectronMainProcess()) (await import('electron')).app.exit(code)
+    else process.exit(code)
     return
   }
   const { runCliMain } = await import('./runCliMain')

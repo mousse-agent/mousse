@@ -4,6 +4,19 @@
 set -euo pipefail
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# An editor's ssh runs "net ssh-proxy" on every reconnect. Starting the whole app for it is slow; the proxy is a
+# script of its own that runs on the app's runtime as plain Node. When the script is not found, the app runs it.
+if [[ "${1:-}" == "net" && "${2:-}" == "ssh-proxy" ]]; then
+  for app in "$DIR/Mousse" "$DIR/mousse" "$DIR/../MacOS/Mousse"; do
+    for asar in "$DIR/resources/app.asar" "$DIR/../Resources/app.asar" "$DIR/app.asar"; do
+      if [[ -x "$app" && -f "$asar" ]]; then
+        ELECTRON_RUN_AS_NODE=1 exec "$app" "$asar/out/cli/ssh-proxy.js" "$@"
+      fi
+    done
+  done
+fi
+
 export MOUSSE_CLI=1
 
 if [[ -x "$DIR/Mousse" ]]; then
