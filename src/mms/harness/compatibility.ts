@@ -68,9 +68,9 @@ export const PI_RPC_NO_SHELL_ITEMS: readonly number[] = Object.freeze(PI_RPC_EVI
  *   does not apply). macOS (macOS 26.6.2 on Apple silicon): items 1–12.
  */
 export const CONTAINMENT_EVIDENCE: readonly ContainmentEvidence[] = Object.freeze([
-  Object.freeze({ driver: 'pi', kind: 'tools', cliVersion: '1.4.0', platform: 'linux', environment: 'wsl2', items: PI_RPC_EVIDENCE_ITEMS, recordedAt: '2026-10-28T00:47:00Z' }),
-  Object.freeze({ driver: 'pi', kind: 'tools', cliVersion: '1.4.0', platform: 'win32', items: PI_RPC_NO_SHELL_ITEMS, recordedAt: '2026-10-28T00:48:54Z' }),
-  Object.freeze({ driver: 'pi', kind: 'tools', cliVersion: '1.4.0', platform: 'darwin', items: PI_RPC_EVIDENCE_ITEMS, recordedAt: '2026-10-28T00:44:53Z' })
+  Object.freeze({ driver: 'pi', kind: 'tools', cliVersion: '1.4.0', platform: 'linux', environment: 'wsl2', items: PI_RPC_EVIDENCE_ITEMS, recordedAt: '2026-10-28T01:14:24Z' }),
+  Object.freeze({ driver: 'pi', kind: 'tools', cliVersion: '1.4.0', platform: 'win32', items: PI_RPC_NO_SHELL_ITEMS, recordedAt: '2026-10-28T01:15:35Z' }),
+  Object.freeze({ driver: 'pi', kind: 'tools', cliVersion: '1.4.0', platform: 'darwin', items: PI_RPC_EVIDENCE_ITEMS, recordedAt: '2026-10-28T01:10:30Z' })
 ] satisfies ContainmentEvidence[])
 
 export interface EvidenceQuery {
