@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from 'vitest'
 
 vi.mock('electron', () => ({ app: { getFileIcon: vi.fn() }, nativeImage: { createThumbnailFromPath: vi.fn() }, shell: { openPath: vi.fn() } }))
 
-import { detectEditors, EDITOR_CATALOG, filesLabel, scanPath, type EditorDetectionEnv } from '../src/main/editors'
+import { detectEditors, EDITOR_CATALOG, editorIconSource, filesIconSource, filesLabel, scanPath, type EditorDetectionEnv } from '../src/main/editors'
 
 const env = (patch: Partial<EditorDetectionEnv> & { files?: string[]; commands?: Record<string, string> }): EditorDetectionEnv => {
   const files = new Set(patch.files ?? [])
@@ -81,5 +81,21 @@ describe('scanPath', () => {
 describe('filesLabel', () => {
   it('names the platform file manager', () => {
     expect([filesLabel('darwin'), filesLabel('win32'), filesLabel('linux')]).toEqual(['Finder', 'File Explorer', 'Files'])
+  })
+})
+
+describe('icon sources', () => {
+  it('takes the icon from the macOS bundle or the Windows launcher, and none on Linux', () => {
+    const editor = { id: 'zed', label: 'Zed', appPath: '/Applications/Zed.app', launcherPath: 'C:\\Apps\\Zed\\Zed.exe' }
+    expect(editorIconSource(editor, 'darwin')).toBe('/Applications/Zed.app')
+    expect(editorIconSource(editor, 'win32')).toBe('C:\\Apps\\Zed\\Zed.exe')
+    expect(editorIconSource(editor, 'linux')).toBeUndefined()
+  })
+
+  it('uses the file manager executable for the folder entry', () => {
+    expect(filesIconSource('darwin')).toBe('/System/Library/CoreServices/Finder.app')
+    expect(filesIconSource('win32', 'D:\\Windows')).toBe(win32.join('D:\\Windows', 'explorer.exe'))
+    expect(filesIconSource('win32')).toBe(win32.join('C:\\Windows', 'explorer.exe'))
+    expect(filesIconSource('linux')).toBeUndefined()
   })
 })
