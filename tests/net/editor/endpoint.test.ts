@@ -599,6 +599,7 @@ describe.skipIf(!unix)('ending a connection', () => {
       void channel
     }
     await until(() => alive(plain))
+    if (b.host.terminals()) await readPid(terminalPid)
     session.connection.end(false)
     await new Promise((resolve) => setTimeout(resolve, 600))
     // The program with a pipe, and the one that left its session, are still there.
