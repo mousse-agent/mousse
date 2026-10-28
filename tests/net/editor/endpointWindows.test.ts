@@ -1,7 +1,9 @@
-import { execFile, spawnSync } from 'node:child_process'
-import { realpathSync } from 'node:fs'
-import { mkdir, readFile, writeFile } from 'node:fs/promises'
-import { join } from 'node:path'
+import { execFile, spawn, spawnSync } from 'node:child_process'
+import { symlinkSync } from 'node:fs'
+import { copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { tmpdir, userInfo } from 'node:os'
+import { dirname, join } from 'node:path'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { EditorEndpoint } from '../../../src/mms/net/editor/endpoint/endpoint'
 import { scopeToken } from '../../../src/mms/net/editor/endpoint/scope'
@@ -87,11 +89,9 @@ describe.skipIf(!windows)('programs on a Windows owner', () => {
   it('quotes a command as sshd does: cmd /c "<command>", so quotes, spaces and & reach cmd as written', async () => {
     const b = await bed()
     const { client } = await b.connect()
-    // The real path: Windows does not let a program named sshd.exe, nor what it starts, follow a junction a user
-    // made (a version manager's folder of `node` may be one).
     const node = await run(
       client,
-      `"${realpathSync(process.execPath)}" -e "console.log(process.argv.slice(1).join('|'))" "a b" c`
+      `"${process.execPath}" -e "console.log(process.argv.slice(1).join('|'))" "a b" c`
     )
     expect(node.stdout.toString()).toBe('a b|c\n')
     expect((await run(client, 'echo a& echo b')).stdout.toString()).toBe('a\r\nb\r\n')
@@ -103,6 +103,77 @@ describe.skipIf(!windows)('programs on a Windows owner', () => {
     expect((await run(client, join(folder, 'hello.cmd'))).stdout.toString()).toBe(
       'hello from a folder with a space\r\n'
     )
+  })
+
+  it('follows a junction a user made, which Windows’s guard for programs named sshd.exe would refuse', async () => {
+    const b = await bed()
+    const real = join(b.home, 'real folder')
+    await mkdir(real)
+    await writeFile(join(real, 'file.txt'), 'through the junction\r\n')
+    const junction = join(b.home, 'junction')
+    symlinkSync(real, junction, 'junction')
+    const { client } = await b.connect()
+    const read = await run(client, `type "${junction}\\file.txt"`)
+    expect(read.stderr).toBe('')
+    expect(read.stdout.toString()).toBe('through the junction\r\n')
+    // A program's program too, and the helper is still the ancestor VS Code looks for.
+    const nested = await run(
+      client,
+      powershell(
+        `Get-Content '${junction}\\file.txt'; $p = $PID; while ($p) { $q = (Get-CimInstance Win32_Process -Filter "ProcessId=$p").ParentProcessId; if ($q -and (Get-Process -Id $q -ea 0).Name -eq 'sshd') { 'sshd-ancestor'; break }; $p = $q }`
+      )
+    )
+    expect(nested.stdout.toString()).toContain('through the junction')
+    expect(nested.stdout.toString()).toContain('sshd-ancestor')
+  })
+
+  it('runs a command after a terminal of the same device, and a terminal after a command', async (context) => {
+    const b = await bed()
+    if (!b.host.terminals()) return context.skip()
+    const { client } = await b.connect()
+    const terminal = await channelOf((callback) =>
+      client.exec('cmd', { pty: { rows: 24, cols: 80, term: 'xterm' } }, callback)
+    )
+    let text = ''
+    terminal.on('data', (chunk: Buffer) => (text += chunk.toString('utf8')))
+    terminal.write('echo terminal-up\r\n')
+    await until(() => text.includes('terminal-up'))
+    // The terminal is still open, and its job holds the device's programs.
+    expect(await run(client, 'echo after-the-terminal')).toMatchObject({ code: 0 })
+    expect((await run(client, 'echo again')).stdout.toString()).toBe('again\r\n')
+    terminal.write('exit\r\n')
+    await new Promise((resolve) => terminal.on('close', resolve))
+    const second = await channelOf((callback) =>
+      client.exec('cmd /c echo second-terminal', { pty: true }, callback)
+    )
+    let more = ''
+    second.on('data', (chunk: Buffer) => (more += chunk.toString('utf8')))
+    await new Promise((resolve) => second.on('close', resolve))
+    expect(more).toContain('second-terminal')
+  })
+
+  it('runs from a helper whose path has a space, as under a profile name with one', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'mousse helper '))
+    cleanup.push(() => rm(root, { recursive: true, force: true }))
+    const helper = join(root, 'with space', 'sshd.exe')
+    await mkdir(dirname(helper))
+    await copyFile(sshdHelper!, helper)
+    const home = join(root, 'home')
+    await mkdir(home)
+    const host = createWindowsHost({ helper, account: { user: userInfo().username, home } })
+    const b = await endpointBed({ host })
+    cleanup.push(() => b.close())
+    const { client } = await b.connect()
+    expect((await run(client, 'echo spaced')).stdout.toString()).toBe('spaced\r\n')
+    if (host.terminals()) {
+      const channel = await channelOf((callback) =>
+        client.exec('cmd /c echo spaced-terminal', { pty: true }, callback)
+      )
+      let text = ''
+      channel.on('data', (chunk: Buffer) => (text += chunk.toString('utf8')))
+      await new Promise((resolve) => channel.on('close', resolve))
+      expect(text).toContain('spaced-terminal')
+    }
   })
 
   it('starts in the throwaway home with a logon environment and none of the daemon’s', async () => {
@@ -358,9 +429,94 @@ describe.skipIf(!windows)('the sweep on a Windows owner', () => {
       "const r=require('child_process').spawnSync(process.argv[1],['end',String(process.pid),process.argv[2]],{encoding:'utf8'});console.log(r.status+' '+r.stdout.trim())"
     const inside = await run(
       client,
-      `"${realpathSync(process.execPath)}" -e "${script}" "${sshdHelper}" "${name}"`
+      `"${process.execPath}" -e "${script}" "${sshdHelper}" "${name}"`
     )
     expect(inside.stdout.toString()).toMatch(/^4 0 [1-9]\d*\s*$/u)
+  })
+})
+
+describe.skipIf(!windows)('a daemon that is a process of its own', () => {
+  /**
+   * The Windows host bundled into one file, so that a plain `node` process (a stand-in daemon, with the job Node
+   * gives its children) can run it.
+   */
+  async function bundledHost(folder: string): Promise<string> {
+    const { build } = (await import('esbuild')) as typeof import('esbuild')
+    const outfile = join(folder, 'host.mjs')
+    await build({
+      entryPoints: [
+        fileURLToPath(
+          new URL('../../../src/mms/net/editor/endpoint/windowsHost.ts', import.meta.url)
+        )
+      ],
+      bundle: true,
+      platform: 'node',
+      format: 'esm',
+      outfile,
+      external: ['node-pty'],
+      logLevel: 'silent'
+    })
+    return outfile
+  }
+
+  it('survives the daemon’s death: a detached server keeps running, and a new daemon’s sweep ends it', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'mousse daemon '))
+    cleanup.push(() => rm(root, { recursive: true, force: true }))
+    const home = join(root, 'home')
+    await mkdir(home)
+    const host = await bundledHost(root)
+    const scope = 'cd'.repeat(20)
+    const script = join(root, 'daemon.mjs')
+    await writeFile(
+      script,
+      `import { createWindowsHost } from ${JSON.stringify(pathToFileURL(host).href)}
+const [helper, home, scope, server] = process.argv.slice(2)
+setInterval(() => {}, 1000)
+const host = createWindowsHost({ helper, account: { user: ${JSON.stringify(userInfo().username)}, home } })
+const program = await host.start({ command: server, requested: {}, sshConnection: '127.0.0.1 1 127.0.0.1 22', scope })
+let text = ''
+program.output.on('data', (chunk) => (text += chunk))
+program.onClose(() => console.log('server=' + text.trim()))
+`
+    )
+    const daemon = spawn(
+      process.execPath,
+      [
+        script,
+        sshdHelper!,
+        home,
+        scope,
+        powershell(
+          "(Start-Process -WindowStyle Hidden -PassThru powershell -ArgumentList '-NoProfile','-Command','Start-Sleep 300').Id"
+        )
+      ],
+      { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true }
+    )
+    let said = ''
+    daemon.stdout.on('data', (chunk: Buffer) => (said += chunk.toString('utf8')))
+    daemon.stderr.on('data', (chunk: Buffer) => (said += chunk.toString('utf8')))
+    cleanup.push(() => daemon.kill())
+    await until(() => /server=\d+/u.test(said), 30_000).catch(() => {
+      throw new Error(`the stand-in daemon did not start the server: ${said}`)
+    })
+    const server = Number(/server=(\d+)/u.exec(said)![1])
+    cleanup.push(() => spawnSync('taskkill', ['/PID', String(server), '/F'], { windowsHide: true }))
+    // The daemon process is killed: its own job, which Node made for its children, ends with it.
+    daemon.kill()
+    await new Promise((resolve) => daemon.once('exit', resolve))
+    await new Promise((resolve) => setTimeout(resolve, 2_000))
+    expect(await alive(server)).toBe(true)
+    // A new daemon, which never knew the device, reaches the job by its name: the device still has its right...
+    const again = createWindowsHost({
+      helper: sshdHelper!,
+      account: { user: userInfo().username, home }
+    })
+    cleanup.push(() => again.release())
+    expect(await again.sweep(() => true)).toBe(0)
+    expect(await alive(server)).toBe(true)
+    // ...until it is blocked.
+    expect(await again.sweep((theirs) => theirs !== scope)).toBeGreaterThan(0)
+    expect(await alive(server)).toBe(false)
   })
 })
 
@@ -404,9 +560,16 @@ describe.skipIf(!windows)('the helper', () => {
     expect(Number(bytes)).toBeLessThan(1024 * 1024)
   })
 
-  it('makes the endpoint unavailable when it cannot run, so editors go to the system’s SSH server', async () => {
-    const missing = createWindowsHost({ helper: join(process.cwd(), 'no-such-folder', 'sshd.exe') })
+  it('makes the endpoint unavailable when it cannot run, and tries again later', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'mousse retry '))
+    cleanup.push(() => rm(root, { recursive: true, force: true }))
+    const helper = join(root, 'sshd.exe')
+    const missing = createWindowsHost({ helper, retryDelays: [300] })
+    cleanup.push(() => missing.release())
     await until(() => missing.ready?.() === false)
+    // The helper turns up (an antivirus scan let it go): the next try finds it.
+    await copyFile(sshdHelper!, helper)
+    await until(() => missing.ready?.() === true, 10_000)
     const { systemProcessHost } = await import('../../../src/mms/net/editor/endpoint/systemHost')
     expect(systemProcessHost('win32', () => undefined)).toBeUndefined()
   })

@@ -1,7 +1,15 @@
+import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { dirname, join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { windowsSessionEnvironment } from '../../../src/mms/net/editor/endpoint/environment'
 import { systemProcessHost } from '../../../src/mms/net/editor/endpoint/systemHost'
-import { findSshdHelper, jobName } from '../../../src/mms/net/editor/endpoint/windowsHost'
+import {
+  findSshdHelper,
+  helperCopy,
+  jobName
+} from '../../../src/mms/net/editor/endpoint/windowsHost'
+import { until } from '../helpers/endpointBed'
 import {
   cachedShell,
   defaultWindowsShell,
@@ -164,8 +172,81 @@ describe('the helper', () => {
     expect(jobName('ab'.repeat(20))).toBe(`Local\\MousseEditor-${'ab'.repeat(20)}`)
   })
 
-  it('is looked for in the packaged resources, then in a checkout’s build', () => {
-    expect(findSshdHelper('/nowhere/at/all', '/no/resources')).toBeUndefined()
+  it('is looked for in the packaged resources, then in a checkout’s build, and nowhere above them', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'mousse find '))
+    try {
+      const plant = async (folder: string): Promise<string> => {
+        const path = join(folder, 'native', 'sshd-helper', 'target', 'release', 'sshd.exe')
+        await mkdir(dirname(path), { recursive: true })
+        await writeFile(path, 'planted')
+        return path
+      }
+      // A copy planted where any account may create a folder (the root of the drive, here `root`) is never taken:
+      // not by an installed app whose own helper is missing, nor from a folder that is not Mousse's checkout.
+      await plant(root)
+      const install = join(root, 'Programs', 'Mousse')
+      const bundle = join(install, 'resources', 'app.asar', 'out', 'main')
+      await mkdir(bundle, { recursive: true })
+      const exe = join(install, 'Mousse.exe')
+      expect(findSshdHelper(bundle, join(install, 'resources'), exe)).toBeUndefined()
+      expect(
+        findSshdHelper(join(root, 'a', 'b', 'out', 'main'), undefined, '/x/node')
+      ).toBeUndefined()
+      // An installed app's own helper.
+      const own = join(install, 'resources', 'editor-ssh', 'sshd.exe')
+      await mkdir(dirname(own), { recursive: true })
+      await writeFile(own, 'packaged')
+      expect(findSshdHelper(bundle, undefined, exe)).toBe(own)
+      // A checkout: the one build path under the folder with Mousse's package.json, from the bundle or the source.
+      const checkout = join(root, 'work', 'mousse')
+      await mkdir(join(checkout, 'src', 'mms', 'net', 'editor', 'endpoint'), { recursive: true })
+      await writeFile(join(checkout, 'package.json'), JSON.stringify({ name: 'mousse' }))
+      expect(findSshdHelper(join(checkout, 'out', 'main'), undefined, '/x/node')).toBeUndefined()
+      const built = await plant(checkout)
+      expect(findSshdHelper(join(checkout, 'out', 'main'), undefined, '/x/node')).toBe(built)
+      expect(findSshdHelper(join(checkout, 'out', 'main', 'chunks'), undefined, '/x/node')).toBe(
+        built
+      )
+      expect(
+        findSshdHelper(
+          join(checkout, 'src', 'mms', 'net', 'editor', 'endpoint'),
+          undefined,
+          '/x/node'
+        )
+      ).toBe(built)
+      // A folder of the same shape that is not Mousse's.
+      await writeFile(join(checkout, 'package.json'), JSON.stringify({ name: 'other' }))
+      expect(findSshdHelper(join(checkout, 'out', 'main'), undefined, '/x/node')).toBeUndefined()
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('runs from a copy in the profile’s folder, checked against the packaged file before each use', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'mousse copy '))
+    try {
+      const packaged = join(root, 'install', 'sshd.exe')
+      await mkdir(dirname(packaged), { recursive: true })
+      await writeFile(packaged, 'the helper, version 1')
+      const folder = join(root, 'profile', 'editor-ssh')
+      await mkdir(join(folder, '0123456789abcdef'), { recursive: true })
+      const copy = helperCopy(packaged, folder)
+      const path = await copy()
+      expect(path.startsWith(folder)).toBe(true)
+      expect(await readFile(path, 'utf8')).toBe('the helper, version 1')
+      // A copy that was changed is written again before it is used.
+      await writeFile(path, 'something else')
+      expect(await copy()).toBe(path)
+      expect(await readFile(path, 'utf8')).toBe('the helper, version 1')
+      // An older version's folder is let go.
+      await until(async () => !(await readdir(folder)).includes('0123456789abcdef'))
+      // When no copy can be made, the packaged file is used.
+      const blocked = join(root, 'a-file')
+      await writeFile(blocked, '')
+      expect(await helperCopy(packaged, join(blocked, 'editor-ssh'))()).toBe(packaged)
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
   })
 
   it('without it, a Windows computer has no endpoint and keeps using its own SSH server', () => {
