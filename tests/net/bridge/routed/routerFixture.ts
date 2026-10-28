@@ -32,7 +32,7 @@ async function profile(): Promise<MousseMainService> {
     requireOwnership: false
   })
   cleanups.push(
-    () => rmSync(home, { recursive: true, force: true }),
+    () => { try { rmSync(home, { recursive: true, force: true, maxRetries: 8, retryDelay: 250 }) } catch { /* a database file the system still holds is left to the temp folder */ } },
     () => mms.stop()
   )
   return mms
