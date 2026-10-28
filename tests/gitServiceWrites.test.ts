@@ -5,16 +5,22 @@ import { basename, dirname, join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { GitService } from '../src/mms/git/GitService'
 import type { GitOperationEvent } from '../src/shared/types'
+import { committedGitTemplate } from './support/gitBase'
 
 const roots: string[] = []
 const git = (cwd: string, ...args: string[]): string => execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim()
 
-function repo() {
-  const cwd = mkdtempSync(join(tmpdir(), 'mousse-git-writes-')); roots.push(cwd)
+const copyBaseRepo = committedGitTemplate((cwd) => {
   git(cwd, 'init', '-b', 'main')
   git(cwd, 'config', 'user.name', 'Git write fixture'); git(cwd, 'config', 'user.email', 'git-fixture@example.invalid')
-  git(cwd, 'config', 'commit.gpgsign', 'false'); git(cwd, 'config', 'core.hooksPath', join(cwd, '.no-hooks'))
+  git(cwd, 'config', 'commit.gpgsign', 'false')
   writeFileSync(join(cwd, 'base.txt'), 'base\n'); git(cwd, 'add', 'base.txt'); git(cwd, 'commit', '-m', 'baseline')
+})
+function repo() {
+  const cwd = mkdtempSync(join(tmpdir(), 'mousse-git-writes-')); roots.push(cwd)
+  copyBaseRepo(cwd)
+  // The hooks folder is named after this repository, so it is set on the copy.
+  git(cwd, 'config', 'core.hooksPath', join(cwd, '.no-hooks'))
   return cwd
 }
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }) })
