@@ -8,6 +8,7 @@ import type { LifecycleOperationResult, ResourceInventorySnapshot, TaskLifecycle
 import type { WorkflowRunView } from '../src/shared/workflowRunPlatform'
 import { lifecycleHarness } from './fixtures/resource-lifecycle-harness'
 import { providerResponse, streamOf } from './fixtures/agent-platform/agent-runtime-policy/helpers'
+import { installExactDefinitionRuntime } from './fixtures/agent-platform/exactDefinitionRuntime'
 import { ThreadWorkspaceManager } from '../src/mms/workspace/ThreadWorkspaceManager'
 import { WorktreeRetirementService } from '../src/mms/lifecycle/WorktreeRetirementService'
 
@@ -135,6 +136,16 @@ describe('public inventory and request identity', () => {
       const signedIn = vi.spyOn(f.services.providerAuth.credentials, 'listProviderIds').mockReturnValue([provider.id])
       const getAuth = vi.spyOn(f.services.providerAuth.models, 'getAuth').mockResolvedValue({ apiKey: 'fixture' } as never)
       const stream = vi.spyOn(f.services.providerAuth.models, 'streamSimple').mockImplementation(() => streamOf(providerResponse([{ type: 'text', text: '{"summary":"shared workflow result"}' }], 'stop')) as never)
+      // The profile's Mousse MCP server, as far as the gateway sees it: a definition's app tools need a bearer.
+      f.services.orchestrator.setMcpAttachment({ bearerForTurn: () => ({ url: 'http://127.0.0.1:9/mcp', token: 'fake-bearer', tokenHash: 'fake-hash' }), turnEnded: () => undefined, revokeThread: () => {} })
+      // A workflow instruction runs only on a runtime that enforces its tool limits. The profile's first provider
+      // is not one, so the instruction was refused before it ran; the exact stand-in runs the turn, and the
+      // model's reply still comes from the stream mocked above.
+      installExactDefinitionRuntime({ orchestrator: f.services.orchestrator, providerId: provider.id, profileHome: f.services.getProfileHomeDir(), next: async (context, signal) => {
+        const reply = f.services.providerAuth.models.streamSimple(model, context, { signal } as never)
+        for await (const ignored of reply) void ignored
+        return await reply.result()
+      } })
       f.services.settings.set({ provider: { llmProvider: provider.id, model: model.id } })
       const id = randomUUID()
       const draft = await f.rpc.request<{ id: string; semanticHash: string }>('workflows.create', { profileId: f.alice.id, bundle: {

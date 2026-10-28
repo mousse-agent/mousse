@@ -189,7 +189,9 @@ export function createChannelService(
       runner.runChannelTurn(threadId, text, opts),
     abortChannelTurn: () => true,
     steerChannelTurn: () => true,
-    isChannelTurnActive: () => false
+    isChannelTurnActive: () => false,
+    // No resolved runtime, as for a thread the orchestrator cannot place: the channel gate passes the turn.
+    capabilitiesForThread: () => null
   } as unknown as OrchestratorService
   const providerAuth = {
     getConfiguredLlmProviders: () => [],

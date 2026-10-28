@@ -547,7 +547,11 @@ describe('files.grep', () => {
 
   function context(projects: Record<string, string>): HandlerContext {
     return {
-      mms: { projects: { getProject: (id: string) => (projects[id] ? { id, path: projects[id] } : undefined) } },
+      mms: {
+        projects: { getProject: (id: string) => (projects[id] ? { id, path: projects[id] } : undefined) },
+        // No known threads: a named thread restores no worktree before the call checks its ids.
+        threads: { getThread: () => undefined }
+      },
       globalSequence: () => 0
     } as unknown as HandlerContext
   }

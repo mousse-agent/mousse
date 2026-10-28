@@ -5,7 +5,6 @@ import { bridgeProtocolEvent } from '../src/main/mms/protocolEventBridge'
 import { PresentationState } from '../src/main/mms/PresentationState'
 import { useAppStore } from '../src/renderer/stores/appStore'
 import type { ThreadMessagesSnapshot } from '../src/shared/types'
-import type { Context } from '@earendil-works/pi-ai'
 import { spawnSync } from 'node:child_process'
 import { build } from 'esbuild'
 import { MousseMainService } from '../src/mms/MousseMainService'
@@ -17,8 +16,10 @@ import { ChildAgentIntegrationService } from '../src/mms/agents/ChildAgentIntegr
 import { waitAcquireExecutionLease, releaseExecutionLeaseHandle } from '../src/mms/queue/ThreadExecutionLease'
 import { acquireWorkspaceMutationLease, isWorkflowRevisionCurrent, resolveOwnedThreadWorkspace } from '../src/mms/workspace/WorkflowWorkspace'
 import { ThreadWorkspaceManager } from '../src/mms/workspace/ThreadWorkspaceManager'
-import { actionOptions, git, gitFoundationFixture } from './fixtures/gitFoundation'
-import { providerResponse, streamOf } from './fixtures/agent-platform/agent-runtime-policy/helpers'
+import { CRASH_CHILD_REQUIRE, actionOptions, git, gitFoundationFixture } from './fixtures/gitFoundation'
+import { testHarness } from '../src/mms/run/testkit/harness'
+import { piAdapter } from './run/phase6Fixture'
+import { PI_TEST_CAPABILITIES } from './support/piStub'
 
 describe('Git foundation through daemon protocol', () => {
   let f: ReturnType<typeof gitFoundationFixture>
@@ -34,6 +35,9 @@ describe('Git foundation through daemon protocol', () => {
     const endpoint = await server.start()
     client = new LocalMmsClient({ homeDir: f.home, endpoint, ownerToken, clientType: 'gui' })
     await client.connect()
+    // No shipped runtime has strong containment now (Pi's RPC engine is weak, so a restore asks for a review first):
+    // a Mousse-run one stands in, so undo and redo here restore without one.
+    vi.spyOn(mms.orchestrator, 'capabilitiesForThread').mockReturnValue(PI_TEST_CAPABILITIES as never)
   }, 30_000)
   afterEach(async () => {
     vi.restoreAllMocks()
@@ -43,30 +47,21 @@ describe('Git foundation through daemon protocol', () => {
     f?.dispose()
   })
 
-  it('a public main-agent send writes through real tools into the task and a read-only follow-up reads those bytes', async () => {
+  it('a public main-agent send writes into the task and a read-only follow-up reads those bytes', async () => {
     const provider = mms.providerAuth.models.getProviders().find((item) => mms.providerAuth.models.getModels(item.id).length > 0)!
     const model = mms.providerAuth.models.getModels(provider.id)[0]
-    vi.spyOn(mms.providerAuth, 'has').mockReturnValue(true)
-    vi.spyOn(mms.providerAuth.models, 'getAuth').mockResolvedValue({ apiKey: 'fixture' } as never)
-    const settings = mms.settings.get()
-    mms.settings.set({ provider: { llmProvider: provider.id, model: model.id }, integrations: {
-      ...settings.integrations, tools: { enabled: true, enabledTools: ['read', 'write'] },
-      skills: { ...settings.integrations.skills, enabled: false }, mcp: { ...settings.integrations.mcp, enabled: false }
-    } })
-    const captured: Context[] = []
-    const responses = [
-      providerResponse([{ type: 'toolCall', id: 'main-write', name: 'write', arguments: { path: 'value.txt', content: 'main-agent bytes\n' } }], 'toolUse'),
-      providerResponse([{ type: 'text', text: 'Wrote task bytes.' }], 'stop'),
-      providerResponse([{ type: 'toolCall', id: 'main-read', name: 'read', arguments: { path: 'value.txt' } }], 'toolUse'),
-      providerResponse([{ type: 'text', text: 'Read task bytes.' }], 'stop')
+    mms.settings.set({ provider: { llmProvider: provider.id, model: model.id } })
+    // Pi's agent runs its file tools in its own process, in the turn's folder: the scripted turns do the same.
+    const replies: Array<(cwd: string) => string> = [
+      (cwd) => { writeFileSync(join(cwd, 'value.txt'), 'main-agent bytes\n'); return 'Wrote task bytes.' },
+      (cwd) => `Read task bytes: ${f.read(cwd)}`
     ]
-    vi.spyOn(mms.providerAuth.models, 'streamSimple').mockImplementation((_model, context) => {
-      if (!context.tools?.length) return streamOf(providerResponse([{ type: 'text', text: 'Task title' }], 'stop')) as never
-      captured.push(structuredClone(context))
-      const next = responses.shift()
+    const adapter = piAdapter((input) => {
+      const next = replies.shift()
       if (!next) throw new Error('Main provider fixture exhausted')
-      return streamOf(next) as never
+      return next(input.cwd!)
     })
+    mms.orchestrator.setHarness(testHarness({ adapters: [adapter], profileHome: mms.getProfileHomeDir() }))
     const project = mms.projects.openProject(f.repo)
     const thread = mms.threads.createThread('Actual main agent', project.id)
     const result = await client.request<{ message: string }>('orchestrator.send', { threadId: thread.id, content: 'Write value.txt in this task.', mode: 'agent' })
@@ -74,8 +69,10 @@ describe('Git foundation through daemon protocol', () => {
     const metadata = new ThreadWorkspaceManager(mms.threads.getThreadDir(thread.id)).load()!
     expect(f.read(metadata.worktreePath)).toBe('main-agent bytes\n')
     expect(f.read(f.repo)).toBe('base\n')
-    await client.request('orchestrator.send', { threadId: thread.id, content: 'Read value.txt without changes.', mode: 'plan' })
-    expect(JSON.stringify(captured.at(-1)?.messages.filter((message) => message.role === 'toolResult'))).toContain('main-agent bytes')
+    expect(adapter.turns[0]!.cwd).toBe(metadata.worktreePath)
+    const followUp = await client.request<{ message: string }>('orchestrator.send', { threadId: thread.id, content: 'Read value.txt without changes.', mode: 'plan' })
+    expect(adapter.turns[1]!.cwd).toBe(metadata.worktreePath)
+    expect(followUp.message).toContain('main-agent bytes')
     expect((await client.request<{ content: string }>('files.read', { threadId: thread.id, path: 'value.txt' })).content).toContain('main-agent bytes')
     expect(new ThreadActionService(mms.threads.getThreadDir(thread.id)).list().some((action) => action.receiptId && action.changedPaths.some((path) => path.path === 'value.txt'))).toBe(true)
     expect(git(f.repo, 'rev-parse', 'HEAD')).toBe(f.baseSha)
@@ -91,7 +88,7 @@ describe('Git foundation through daemon protocol', () => {
     await expect(client.request('orchestrator.send', { threadId: thread.id, content: 'Blocked while conflict exists', mode: 'agent' })).rejects.toThrow(/clean|recovery|conflict/i)
     expect(mms.orchestrator.getOrCreateSession(thread.id).isTurnRunning()).toBe(false)
     await client.request('operations.abort', { threadId: thread.id, operationId: 'main-conflict' })
-    responses.push(providerResponse([{ type: 'text', text: 'Recovered after conflict.' }], 'stop'))
+    replies.push(() => 'Recovered after conflict.')
     expect(await client.request('orchestrator.send', { threadId: thread.id, content: 'Continue after abort', mode: 'agent' })).toMatchObject({ message: 'Recovered after conflict.' })
   }, 45_000)
 
@@ -329,7 +326,7 @@ describe('Git foundation through daemon protocol', () => {
       presentationMessageEnd: 1, nativeContextBoundary: { messageIndex: 1, compactionGeneration: 0, fidelity: 'exact' }
     }, () => writeFileSync(join(workspace, 'value.txt'), 'before crash\n'))
     const runner = join(f.root, 'public-crash.mjs')
-    await build({ entryPoints: ['tests/fixtures/git-foundation-crash-child.ts'], outfile: runner, bundle: true, platform: 'node', format: 'esm', logLevel: 'silent' })
+    await build({ entryPoints: ['tests/fixtures/git-foundation-crash-child.ts'], outfile: runner, bundle: true, platform: 'node', format: 'esm', logLevel: 'silent', banner: { js: CRASH_CHILD_REQUIRE } })
     const beforeCrash = git(workspace, 'rev-parse', 'HEAD')
     const refused = spawnSync(process.execPath, [runner, directory, workspace, 'receipt'], { env: { ...process.env, MOUSSE_HOME: f.home }, windowsHide: true, encoding: 'utf8', timeout: 20_000 })
     expect(refused.status).toBe(1)

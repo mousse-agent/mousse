@@ -53,6 +53,12 @@ export function gitFoundationFixture() {
   }
 }
 
+/**
+ * Banner for an ESM crash-child bundle: bundled CommonJS dependencies (simple-git's `@kwsites/file-exists`)
+ * call `require`, which an ES module does not have.
+ */
+export const CRASH_CHILD_REQUIRE = "import { createRequire as crashChildRequire } from 'node:module'; const require = crashChildRequire(import.meta.url);"
+
 export const contextBoundary = {
   messageIndex: 0, compactionGeneration: 0, fidelity: 'exact' as const, safeBoundaryProof: 'fixture'
 }

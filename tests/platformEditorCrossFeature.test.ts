@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from '
 import { tmpdir } from 'node:os'
 import { isAbsolute, join, relative, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
-import type { AssistantMessage, Context, Model } from '@earendil-works/pi-ai'
+import type { Context } from '@earendil-works/pi-ai'
 import { build } from 'esbuild'
 import electron from 'electron'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -11,7 +11,8 @@ import { MousseMainService } from '../src/mms/MousseMainService'
 import { readOwnerRecord } from '../src/mms/ownership/MmsOwnerLease'
 import { ProviderAuthService } from '../src/mms/providers/ProviderAuthService'
 import { MmsProtocolServer } from '../src/mms/protocol'
-import { providerResponse, streamOf } from './fixtures/agent-platform/agent-runtime-policy/helpers'
+import { providerResponse } from './fixtures/agent-platform/agent-runtime-policy/helpers'
+import { installExactDefinitionRuntime, type ExactRuntime } from './fixtures/agent-platform/exactDefinitionRuntime'
 
 const roots: string[] = []
 afterEach(async () => {
@@ -78,6 +79,7 @@ describe('production editor UI compound persistence', () => {
       preload: resolve('tests/fixtures/agent-platform/editor-cross-feature/preload.cjs'),
       providerId: provider.id, providerLabel: provider.name, modelId: model.id, modelLabel: model.name,
       exportPath: join(root, 'exported.mousse-workflow.json') }
+    let runtime: ExactRuntime | undefined
     try {
     const edited = await launch({ ...common, endpoint, phase: 'edit', evidence: join(root, 'edit.json'), userData: join(root, 'electron-edit') }, root)
     expect(edited.ok).toBe(true)
@@ -102,23 +104,23 @@ describe('production editor UI compound persistence', () => {
     main = await MousseMainService.create({ homeDir: home, repoRoot: root, headless: true })
     ownerToken = readOwnerRecord(home)!.token
     services = await main.getProfileServices(profileId)
-    const captured: Array<{ model: Model<any>; context: Context }> = []
+    const captured: Context[] = []
     vi.spyOn(services.providerAuth, 'has').mockReturnValue(true)
     // Its stored sign-in: the gateway catalogue lists the models of signed-in instances.
     vi.spyOn(services.providerAuth.credentials, 'listProviderIds').mockReturnValue([provider.id])
-    vi.spyOn(services.providerAuth.models, 'getAuth').mockResolvedValue({ apiKey: 'fixture' } as never)
-    vi.spyOn(services.providerAuth.models, 'streamSimple').mockImplementation((selected, context) => {
-      captured.push({ model: selected as Model<any>, context: structuredClone(context) })
-      return streamOf(providerResponse([{ type: 'text', text: 'renderer production run complete' }], 'stop') as AssistantMessage) as never
-    })
+    // The profile's Mousse MCP server, as far as the gateway sees it: a definition's app tools need a bearer.
+    services.orchestrator.setMcpAttachment({ bearerForTurn: () => ({ url: 'http://127.0.0.1:9/mcp', token: 'fake-bearer', tokenHash: 'fake-hash' }), turnEnded: () => undefined, revokeThread: () => {} })
+    // The agent's turn runs on the exact stand-in for Pi RPC, the profile's `pi:<provider>` instance.
+    runtime = installExactDefinitionRuntime({ orchestrator: services.orchestrator, providerId: provider.id, profileHome: services.getProfileHomeDir(), captured,
+      outputs: [providerResponse([{ type: 'text', text: 'renderer production run complete' }], 'stop')] })
     protocol = new MmsProtocolServer({ mms: main, ownerToken }); endpoint = await protocol.start()
       const ran = await launch({ ...common, ownerToken, endpoint, phase: 'run', agentId, evidence: join(root, 'run.json'), userData: join(root, 'electron-run') }, root)
       expect(ran).toMatchObject({ ok: true, agentId, palette: edited.palette })
       expect(String(ran.summary)).toContain('renderer production run complete')
       expect(captured).toHaveLength(1)
-      expect(captured[0].model.id).toBe(model.id)
-      expect(captured[0].context.systemPrompt?.replace(/\r\n/g, '\n')).toBe('# Exact renderer prompt\n\nPreserve  two spaces.')
-      expect(JSON.stringify(captured[0].context)).toContain('Run through the production renderer bridge.')
+      expect(runtime!.turns[0].input.model).toBe(model.id)
+      expect(captured[0].systemPrompt?.replace(/\r\n/g, '\n')).toBe('# Exact renderer prompt\n\nPreserve  two spaces.')
+      expect(JSON.stringify(captured[0])).toContain('Run through the production renderer bridge.')
       expect(ran.runId).toEqual(expect.any(String))
       expect(ran.threadId).toEqual(expect.any(String))
       const history = JSON.parse(readFileSync(join(services.getProfileHomeDir(), 'agent-runs', String(ran.runId), 'run.json'), 'utf8'))
@@ -126,6 +128,6 @@ describe('production editor UI compound persistence', () => {
       expect(services.orchestrator.getMessages(String(ran.threadId)).map((message) => message.content))
         .toEqual(expect.arrayContaining(['Run through the production renderer bridge.', 'renderer production run complete']))
       expect(await services.platform.workflowRuns.runtime.list({ profileId })).toEqual([])
-    } finally { await protocol.stop(); await main.stop() }
+    } finally { await protocol.stop(); runtime?.harness.stop(); await main.stop() }
   }, 120_000)
 })

@@ -110,7 +110,9 @@ describe('Mousse’s Pi extension', () => {
     const { handlers, tools, active } = await loaded(async () => ({ allow: true }))
     const result = await handlers.get('before_agent_start')!({ systemPrompt: 'base' }) as { systemPrompt: string }
     expect(result.systemPrompt).toBe('base\n\nUse Mousse tools.')
-    expect(tools.map((tool) => [tool.name, tool.executionMode])).toEqual([['delegate_task', 'sequential'], ['ask_user', undefined]])
+    // Off Windows the contained `bash` tool is registered at load, before any turn's tools.
+    const shell = process.platform === 'win32' ? [] : [['bash', undefined]]
+    expect(tools.map((tool) => [tool.name, tool.executionMode])).toEqual([...shell, ['delegate_task', 'sequential'], ['ask_user', undefined]])
     expect(active.at(-1)).toEqual(['read', 'grep', 'delegate_task', 'ask_user'])
   })
 

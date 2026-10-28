@@ -8,7 +8,8 @@ import { LocalMmsClient } from '../../src/mms/protocol/client'
 import { migrateLegacyContext } from '../../src/mms/orchestrator/nativeContext'
 import type { ChatMessage } from '../../src/shared/types'
 import type { WorkspaceExecutionContext } from '../../src/shared/workspace'
-import { providerResponse, streamOf } from './agent-platform/agent-runtime-policy/helpers'
+import { testHarness } from '../../src/mms/run/testkit/harness'
+import { piAdapter } from '../run/phase6Fixture'
 
 export async function seedChatUndoFullShell(toolsEnabled = false) {
   const root = mkdtempSync(join(tmpdir(), 'mousse-chat-undo-shell-'))
@@ -30,12 +31,11 @@ export async function seedChatUndoFullShell(toolsEnabled = false) {
     } })
     const prompts = ['First ordinary chat turn.', 'Second ordinary chat turn.']
     const replies = ['First ordinary chat answer.', 'Second ordinary chat answer.']
-    vi.spyOn(main.providerAuth.models, 'streamSimple').mockImplementation((_model, context) => {
-      const last = context.messages.at(-1)
-      const text = typeof last?.content === 'string' ? last.content : JSON.stringify(last?.content)
-      const index = prompts.findIndex(prompt => text?.includes(prompt))
-      return streamOf(providerResponse([{ type: 'text', text: index < 0 ? 'Ordinary chat' : replies[index] }], 'stop')) as never
-    })
+    // Turns run on a scripted Pi-shaped adapter: replies are deterministic, and no tool runs.
+    main.orchestrator.setHarness(testHarness({ adapters: [piAdapter((input) => {
+      const index = prompts.findIndex(prompt => input.prompt.includes(prompt))
+      return index < 0 ? 'Ordinary chat' : replies[index]
+    })], profileHome: main.getProfileHomeDir() }))
     const token = main.getOwnerLease()!.owner.token
     server = new MmsProtocolServer({ mms: main, ownerToken: token, version: 'chat-undo-test' })
     client = new LocalMmsClient({ homeDir: home, endpoint: await server.start(), ownerToken: token, clientType: 'gui' })

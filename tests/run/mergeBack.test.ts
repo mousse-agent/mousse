@@ -90,7 +90,8 @@ describe('merge-back (SPEC §16.2)', () => {
     // Queueing on the parent is refused until the merge-back is consumed.
     const queued = await d.orch.send('Queued thought', false, { threadId: parent.id, clientRequestId: 'q-1', forceQueue: true }).catch((e) => e)
     expect(queued).toMatchObject({ code: 'merge_back_pending' })
-    expect(() => d.orch.mcpToolHost().enqueue(parent.id, { content: 'from a tool', mode: 'agent' })).toThrow(/merge-back/)
+    const actor = { kind: 'agent' as const, threadId: parent.id, runId: 'tool-run', toolCallId: 'tool-call' }
+    expect(() => d.orch.mcpToolHost().queueCommand!(parent.id, { op: 'enqueue', content: 'from a tool', mode: 'agent' }, { clientRequestId: 'tool-q-1', actor, level: 'lineage' })).toThrow(/merge-back/)
     expect(() => d.orch.assertQueueOpen(forkThreadId)).not.toThrow()
 
     await d.orch.send('What did the fork find?', false, { threadId: parent.id, clientRequestId: 'p-2' })

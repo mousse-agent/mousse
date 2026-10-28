@@ -68,7 +68,8 @@ describe('two Claude Code instances', () => {
     })
     const integrationEnvs: Array<() => NodeJS.ProcessEnv> = []
     let stored: unknown = {
-      claude: { driver: 'claude', enabled: true },
+      // The same fake executable as the service's: the status check never looks for a real `claude`.
+      claude: { driver: 'claude', enabled: true, config: { binaryPath: binary } },
       'claude:work': { driver: 'claude', enabled: true, config: { home: 'private', displayName: 'Work', binaryPath: binary } }
     }
     const instances = new ProviderInstanceService({ store: { read: () => ({ instances: stored, seedVersion: 1 }), write: (next) => { stored = next.instances } } })

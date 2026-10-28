@@ -66,7 +66,8 @@ describe('an ACP agent that never answers session/prompt', () => {
     const projects = new ProjectManager()
     const store = new ThreadDataStore(projects)
     const selection = { instanceId: 'acp:silent', llmProvider: '', model: 'default' }
-    const settings = { ...getDefaultSettings(), provider: { ...getDefaultSettings().provider, ...selection } }
+    // A generic ACP agent approves tools itself, so it runs only in Full access.
+    const settings = { ...getDefaultSettings(), provider: { ...getDefaultSettings().provider, ...selection }, permissions: { defaultMode: 'full' as const } }
     const orch = new OrchestratorService(
       new AgentRegistry(), new TaskQueue(), new WorktreeManager(home), new PtyManager(),
       { get: () => settings } as never, {} as never, undefined, undefined, undefined, undefined, undefined, projects

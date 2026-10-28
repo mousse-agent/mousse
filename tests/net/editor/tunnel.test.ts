@@ -886,7 +886,8 @@ describe('what ends a tunnel at once', () => {
       async (tunnel) => await tunnel.closed,
       (error: TunnelError) => error.reason
     )
-    expect(['far_end_error', 'closed']).toContain(outcome)
+    // The reset can also reach the host before its connect has completed, and then nothing answered.
+    expect(['far_end_error', 'closed', 'no_ssh_server']).toContain(outcome)
     await until(() => t.host.count(CALLER) === 0, 'the host to let the tunnel go')
     expect(t.host.list()).toEqual([])
   })

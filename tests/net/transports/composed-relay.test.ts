@@ -201,7 +201,8 @@ it('reports a selected unavailable transport through bounded public status and d
     enabled: true,
     state: 'failed',
     routes: [],
-    error: 'route_unreachable'
+    error: 'route_unreachable',
+    detail: 'Install Tailscale and sign into your tailnet, then retry setup.'
   })
   const doctor = (await a.net.request('net.doctor', {})) as { ok: boolean; checks: unknown[] }
   expect(doctor.ok).toBe(false)

@@ -9,9 +9,10 @@ import { LocalMmsClient, MmsProtocolServer } from '../src/mms/protocol'
 import { defaultAgentSettings } from '../src/shared/agents/defaults'
 import { CHAT_CAPABILITY, type ChatConversation, type ChatsSnapshot } from '../src/shared/chats'
 import type { ChatResourceSnapshot, ChatSharedFile, ChatSharedFileWriteResult } from '../src/shared/chatResources'
-import { providerResponse, streamOf } from './fixtures/agent-platform/agent-runtime-policy/helpers'
+import { providerResponse } from './fixtures/agent-platform/agent-runtime-policy/helpers'
+import { installExactDefinitionRuntime } from './fixtures/agent-platform/exactDefinitionRuntime'
 
-// Real profile composition, framed transport, LLM loop and filesystem; provider I/O is deterministic.
+// Real profile composition, framed transport and filesystem; definition turns run on an exact stand-in for Pi RPC with deterministic provider replies.
 describe('Chats daemon composition', () => {
   it('binds persistent chats, actual provider history and shared resources to the authenticated profile and client', async () => {
     vi.spyOn(ProviderAuthService.prototype, 'init').mockResolvedValue(undefined)
@@ -29,13 +30,12 @@ describe('Chats daemon composition', () => {
       vi.spyOn(services.providerAuth, 'has').mockReturnValue(true)
       // Its stored sign-in: the gateway catalogue lists the models of signed-in instances.
       vi.spyOn(services.providerAuth.credentials, 'listProviderIds').mockReturnValue([provider.id])
-      vi.spyOn(services.providerAuth.models, 'getAuth').mockResolvedValue({ apiKey: 'fixture' } as never)
+      // The profile's Mousse MCP server, as far as the gateway sees it: a definition's app tools need a bearer.
+      services.orchestrator.setMcpAttachment({ bearerForTurn: () => ({ url: 'http://127.0.0.1:9/mcp', token: 'fake-bearer', tokenHash: 'fake-hash' }), turnEnded: () => undefined, revokeThread: () => {} })
+      // Definition turns run on the exact stand-in for Pi RPC, the profile's `pi:<provider>` instance.
       const captured: Context[] = []
-      const outputs = ['@forge review this', 'Reviewed.', 'I remember the review.']
-      vi.spyOn(services.providerAuth.models, 'streamSimple').mockImplementation((_model, context) => {
-        captured.push(structuredClone(context))
-        return streamOf(providerResponse([{ type: 'text', text: outputs.shift()! }], 'stop')) as never
-      })
+      const outputs = ['@forge review this', 'Reviewed.', 'I remember the review.'].map((text) => providerResponse([{ type: 'text', text }], 'stop'))
+      installExactDefinitionRuntime({ orchestrator: services.orchestrator, providerId: provider.id, profileHome: services.getProfileHomeDir(), captured, outputs })
       const ids = ['scout', 'forge'].map((slug) => {
         const settings = defaultAgentSettings({ name: slug === 'scout' ? 'Scout' : 'Forge', slug })
         settings.primaryModel.ref = { providerId: provider.id, modelId: model.id }

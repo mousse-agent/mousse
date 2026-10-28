@@ -1,5 +1,5 @@
 import { existsSync, mkdirSync, readdirSync, rmSync } from 'node:fs'
-import { delimiter, dirname, join } from 'node:path'
+import { join, win32 } from 'node:path'
 import { atomicWriteJsonSync } from '../../data/AtomicFs'
 
 /**
@@ -63,7 +63,7 @@ export function preparePiHome(home: string, input: PiSettingsInput = {}): void {
 
 /** Git for Windows' bash under one install root. */
 function gitBashUnder(root: string | undefined): string | undefined {
-  return root ? join(root, 'Git', 'bin', 'bash.exe') : undefined
+  return root ? win32.join(root, 'Git', 'bin', 'bash.exe') : undefined
 }
 
 /**
@@ -82,13 +82,13 @@ export function piShellPath(options: { platform?: NodeJS.Platform; env?: NodeJS.
     gitBashUnder(read('ProgramFiles')),
     gitBashUnder(read('ProgramFiles(x86)')),
     gitBashUnder(read('ProgramW6432')),
-    read('LOCALAPPDATA') ? join(read('LOCALAPPDATA')!, 'Programs', 'Git', 'bin', 'bash.exe') : undefined
+    read('LOCALAPPDATA') ? win32.join(read('LOCALAPPDATA')!, 'Programs', 'Git', 'bin', 'bash.exe') : undefined
   ]
   // `git.exe` lives in `<root>\cmd`, `<root>\bin` or `<root>\mingw64\bin`; bash is `<root>\bin\bash.exe`.
-  for (const entry of (read('PATH') ?? '').split(delimiter).filter(Boolean)) {
-    if (!exists(join(entry, 'git.exe'))) continue
-    const parent = dirname(entry)
-    candidates.push(join(parent, 'bin', 'bash.exe'), join(dirname(parent), 'bin', 'bash.exe'))
+  for (const entry of (read('PATH') ?? '').split(win32.delimiter).filter(Boolean)) {
+    if (!exists(win32.join(entry, 'git.exe'))) continue
+    const parent = win32.dirname(entry)
+    candidates.push(win32.join(parent, 'bin', 'bash.exe'), win32.join(win32.dirname(parent), 'bin', 'bash.exe'))
   }
   const wsl = /\\windows\\(?:system32|sysnative)\\bash\.exe$/i
   return candidates.find((candidate): candidate is string => Boolean(candidate) && !wsl.test(candidate!) && exists(candidate!))

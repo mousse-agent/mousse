@@ -211,7 +211,7 @@ describe('Claude Code', () => {
     chmodSync(binary, 0o755)
     const directory = join(home, 'providers', 'claude-subscription')
     mkdirSync(directory, { recursive: true })
-    writeFileSync(join(directory, 'settings.json'), JSON.stringify({ loginPolicy: 'cli', binaryPath: binary, models: [{ id: 'sonnet', label: 'Sonnet' }] }))
+    writeFileSync(join(directory, 'settings.json'), JSON.stringify({ loginPolicy: 'cli', models: [{ id: 'sonnet', label: 'Sonnet' }] }))
     const answers: unknown[] = []
     const questions = new UserQuestionService()
     const service = new ClaudeSubscriptionProviderService(home, questions, {
@@ -222,7 +222,9 @@ describe('Claude Code', () => {
         })()
         return Object.assign(generator, { close: vi.fn(), interrupt: vi.fn(async () => {}) }) as unknown as Query
       },
-      runAuth: vi.fn(async () => JSON.stringify({ loggedIn: true, authMethod: 'claude.ai' }))
+      runAuth: vi.fn(async () => JSON.stringify({ loggedIn: true, authMethod: 'claude.ai' })),
+      // The executable comes from the instance config, never `settings.json`.
+      launchConfig: () => ({ binaryPath: binary })
     })
     return { home, service, questions, answers }
   }

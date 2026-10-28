@@ -3,7 +3,7 @@
  * version starts no turn on any path; "Run anyway with <version>" holds only for the version,
  * executable and install receipt the gateway checked itself.
  */
-import { appendFileSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { appendFileSync, chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -49,6 +49,7 @@ function setup(version = '2.1.5') {
   dirs.push(dir)
   const binary = join(dir, 'agent.exe')
   writeFileSync(binary, 'agent v1')
+  chmodSync(binary, 0o755)
   const install: ManagedInstall = { path: binary, version, receiptHash: 'a'.repeat(64) }
   const started: string[] = []
   const adapter: ProviderAdapter = {

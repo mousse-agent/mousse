@@ -106,6 +106,7 @@ describe('probeVersion', () => {
     dirs.push(dir)
     const binary = join(dir, 'agent')
     writeFileSync(binary, 'x')
+    chmodSync(binary, 0o755)
     const env = instanceEnv({ instanceId: 'fake', driver: 'claude', configRevision: 0, searchPath: [] })
     const { spawned, stop } = recordSpawns()
     try {
@@ -152,6 +153,7 @@ describe('the upkeep script', () => {
     const root = join(home, 'agents', 'grok', '1.0.70', 'node')
     mkdirSync(join(root, 'dist', 'bin'), { recursive: true })
     writeFileSync(join(root, 'dist', 'bin', 'grok'), 'x')
+    chmodSync(join(root, 'dist', 'bin', 'grok'), 0o755)
     writeFileSync(join(root, 'receipt.json'), JSON.stringify({
       agentId: 'grok', version: '1.0.70', platform: 'node', distribution: 'npx', artifactUrl: '@xai-official/grok@1.0.70',
       files: { 'bin/grok': 'h' }, bytes: 1, launch: { cmd: 'bin/grok', args: [], env: {} }, checksum: 'registry', installedAt: '2026-10-28T00:00:00Z'

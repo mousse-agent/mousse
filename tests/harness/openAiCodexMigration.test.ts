@@ -53,7 +53,9 @@ afterEach(async () => {
 function managedCodex(own?: unknown) {
   const holder: { auth?: ChatGptAuth } = {}
   const installation = {
-    installed: () => ({ path: join(FIXTURE, 'auth.json'), version: '0.162.1' }),
+    // Any executable file: the version comes from the install record, so it never runs.
+    installed: () => ({ path: process.execPath, version: '0.162.1' }),
+    verify: async () => undefined,
     acquire: () => () => {},
     unsupportedMessage: () => undefined,
     installing: () => false,

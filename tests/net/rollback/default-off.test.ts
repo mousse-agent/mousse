@@ -36,17 +36,20 @@ it('rejects every non-opt-in Net method without composing runtime or creating an
   await net.start()
   expect(net.request('net.status', {})).toMatchObject({ enabled: false, routes: [], peers: [] })
   expect(net.request('net.plus.status', {})).toEqual({ configured: false, connected: false })
+  expect(net.request('net.transport.list', {})).toMatchObject({ transports: [], records: {} })
   expect(existsSync(join(path, 'net'))).toBe(false)
   expect(runtime).not.toHaveBeenCalled()
   expect(composeRuntime).not.toHaveBeenCalled()
   for (const method of NET_LOCAL_METHODS) {
-    // The editor ssh methods that only read or undo answer while networking is off.
+    // The editor ssh methods, the add-on list and add-on undo only read or undo, so they answer while networking is off.
     if (
       [
         'net.status',
         'net.plus.status',
         'net.init',
         'bridge.join',
+        'net.transport.list',
+        'net.transport.action.undo',
         'net.editor.ssh.status',
         'net.editor.ssh.disable',
         'net.editor.ssh.ack'

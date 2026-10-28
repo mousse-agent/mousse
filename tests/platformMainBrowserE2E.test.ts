@@ -6,13 +6,17 @@ import { join, resolve } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { build } from 'esbuild'
 import electron from 'electron'
-import type { Context } from '@earendil-works/pi-ai'
+import type { AssistantMessage, Context, Message, Tool, ToolCall } from '@earendil-works/pi-ai'
 import { MousseMainService } from '../src/mms/MousseMainService'
 import { MmsProtocolServer } from '../src/mms/protocol/server'
 import { ProviderAuthService } from '../src/mms/providers/ProviderAuthService'
 import { BROWSER_AUTOMATION_TOOLS } from '../src/shared/browser/automation'
 import type { WorkflowBundle } from '../src/shared/workflows'
-import { providerResponse, streamOf } from './fixtures/agent-platform/agent-runtime-policy/helpers'
+import type { ProviderAdapter, TurnResult } from '../src/mms/harness/adapter'
+import { ProviderInstanceService } from '../src/mms/harness/instanceMap'
+import { TURN_TOKEN_KEY } from '../src/mms/run/mcp/appTools/registry'
+import { adapterDriver, testHarness } from '../src/mms/run/testkit/harness'
+import { providerResponse } from './fixtures/agent-platform/agent-runtime-policy/helpers'
 import { makeBrowserCommandTempRoot, removeBrowserCommandTempRoot } from './fixtures/agent-platform/browser-command-transport/ownedTemp'
 
 import { terminateChild } from './fixtures/agent-platform/process-lifecycle/terminateChild'
@@ -64,7 +68,6 @@ describe('main-agent existing in-app browser pipeline', () => {
       ]
     } }
     vi.spyOn(main.providerAuth, 'has').mockReturnValue(true)
-    vi.spyOn(main.providerAuth.models, 'getAuth').mockResolvedValue({ apiKey: 'fixture' } as never)
     const calls: string[] = []
     const captured: Context[] = []
     let opened: {
@@ -79,12 +82,13 @@ describe('main-agent existing in-app browser pipeline', () => {
     let releaseConfirmation!: () => void
     const confirmationReady = new Promise<void>((resolve) => { releaseConfirmation = resolve })
     let submitAction: unknown
-    vi.spyOn(main.providerAuth.models, 'streamSimple').mockImplementation((_model, context) => {
+    // The model's replies: each request sees the session's whole transcript, as Pi's agent keeps it.
+    const respond = (context: Context): AssistantMessage => {
       captured.push(structuredClone(context))
       const toolResults = context.messages.filter((message) => message.role === 'toolResult')
       const call = (name: string, args: Record<string, unknown>) => {
         calls.push(name)
-        return streamOf(providerResponse([{ type: 'toolCall', id: 'fixture-' + calls.length, name, arguments: args }], 'toolUse')) as never
+        return providerResponse([{ type: 'toolCall', id: 'fixture-' + calls.length, name, arguments: args }], 'toolUse')
       }
       if (!toolResults.length) return call('browser_open', {})
       const latest = toolResults.at(-1)!
@@ -100,7 +104,7 @@ describe('main-agent existing in-app browser pipeline', () => {
         if (!waitingResponseSent) {
           if (latest.isError) throw new Error('Browser human handoff failed: ' + text)
           waitingResponseSent = true
-          return streamOf(providerResponse([{ type: 'text', text: 'Waiting for human review.' }], 'stop')) as never
+          return providerResponse([{ type: 'text', text: 'Waiting for human review.' }], 'stop')
         }
         const oldInput = opened!.observation.elements.find((item) => item.name?.trim() === 'Name' && item.role === 'textbox')!
         return call('browser_act', { sessionId: opened!.session.id, tabId: opened!.observation.tabId,
@@ -163,10 +167,63 @@ describe('main-agent existing in-app browser pipeline', () => {
           `${item.name ?? ''} ${item.text ?? ''}`.includes('Submitted Mousse pipeline'))) {
           throw new Error('Browser wait returned without actual submission confirmation: ' + text)
         }
-        return streamOf(providerResponse([{ type: 'text', text: 'Completed and submitted the existing Mousse form.' }], 'stop')) as never
+        return providerResponse([{ type: 'text', text: 'Completed and submitted the existing Mousse form.' }], 'stop')
       }
       throw new Error('Unexpected provider invocation after browser pipeline completion')
+    }
+    // The main chat runs on Pi's agent in its own process. This stand-in for it, the `pi:<provider>`
+    // instance, keeps the session's transcript across turns and calls Mousse's tools as Pi's
+    // extension does: over the Mousse MCP registry, under the turn's credential and token.
+    main.orchestrator.setMcpAttachment({ bearerForTurn: () => ({ url: 'http://127.0.0.1:9/mcp', token: 'fake-bearer', tokenHash: 'fake-hash' }), turnEnded: () => undefined, revokeThread: () => {} })
+    const session: Message[] = []
+    const piAgent: ProviderAdapter = {
+      driver: 'pi',
+      capabilities: { steer: 'none', interrupt: true, rollback: 'none', fork: 'portable', events: 'rich', containment: 'strong', historyInjection: 'prompt', mcp: true, childPolicy: 'enforced' },
+      configured: () => true,
+      async startTurn(input, sink, _ctl, host): Promise<TurnResult> {
+        const ref = { provider: input.llmProvider, instanceId: input.instanceId, model: input.model }
+        sink.providerRef(ref)
+        session.push(input.messages.at(-1)!)
+        const tools: Tool[] = main.orchestrator.mcpToolRegistry().listForTurn(input.threadId, input.runId)
+          .map((tool) => ({ name: tool.name, description: tool.description, parameters: tool.inputSchema as never }))
+        let text = ''
+        const usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }
+        const result = (aborted: boolean): TurnResult => ({ text, aborted, modelName: input.model, totalResponseTimeMs: 1, usage, contextSignature: 's', nativeMessages: [], providerRef: ref })
+        for (;;) {
+          if (input.signal.aborted) return result(true)
+          const reply = respond({ systemPrompt: '', messages: structuredClone(session), tools })
+          session.push(reply)
+          const said = reply.content.flatMap((block) => block.type === 'text' ? [block.text] : []).join('')
+          if (said) {
+            sink.text({ phase: 'start', content: '', contentIndex: 0 })
+            sink.text({ phase: 'delta', content: said, contentIndex: 0 })
+            sink.text({ phase: 'complete', content: said, contentIndex: 0 })
+            text = said
+          }
+          const toolCalls = reply.content.filter((block): block is ToolCall => block.type === 'toolCall')
+          if (!toolCalls.length) return result(false)
+          for (const call of toolCalls) {
+            sink.tool({ kind: 'build_tool_call', title: call.name, summary: call.name, details: [], phase: 'start', callId: call.id })
+            const turn = main.orchestrator.appToolTurns.get(input.runId)
+            const outcome = await main.orchestrator.mcpToolRegistry().call(call.name, { ...call.arguments, [TURN_TOKEN_KEY]: host.bridge!.turnToken }, {
+              credential: { threadId: input.threadId, runId: input.runId, provider: 'pi', modeCeiling: turn?.modeCeiling ?? 'default', accessLevel: turn?.accessLevel ?? 'lineage', binding: 'per_call', current: () => true },
+              toolCallId: call.id,
+              signal: input.signal
+            }).catch((error: unknown) => ({ text: error instanceof Error ? error.message : String(error), isError: true }))
+            sink.tool({ kind: 'build_tool_result', title: call.name, summary: outcome.text.slice(0, 200), details: [], phase: 'complete', callId: call.id })
+            session.push({ role: 'toolResult', toolCallId: call.id, toolName: call.name, content: [{ type: 'text', text: outcome.text }], isError: Boolean(outcome.isError), timestamp: Date.now() })
+          }
+        }
+      },
+      interrupt: async () => 'not_active'
+    }
+    let instances: unknown = { [`pi:${provider.id}`]: { driver: 'pi', enabled: true } }
+    const harness = testHarness({
+      drivers: [adapterDriver(piAgent, { toolControl: 'exact', runtime: { configured: () => true } })],
+      instances: new ProviderInstanceService({ store: { read: () => ({ instances, seedVersion: 1 }), write: (state) => { instances = state.instances } } }),
+      profileHome: main.getHomeDir()
     })
+    main.orchestrator.setHarness(harness)
     const protocol = new MmsProtocolServer({ mms: main, ownerToken, commandRouter: main.browserCommandRouter })
     let submittedBody = ''
     let submittedCookie = ''
@@ -257,7 +314,7 @@ describe('main-agent existing in-app browser pipeline', () => {
         await terminateChild(child)
       } finally {
         try { await protocol.stop() } finally {
-          try { await main.stop() } finally {
+          try { harness.stop(); await main.stop() } finally {
             site.closeAllConnections()
             await new Promise<void>((done) => site.close(() => done()))
           }

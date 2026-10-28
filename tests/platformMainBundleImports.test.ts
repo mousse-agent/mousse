@@ -3,16 +3,17 @@ import { resolve } from 'node:path'
 import { spawnSync } from 'node:child_process'
 import { expect, it } from 'vitest'
 
-it('loads the actual main bundle highlighting imports through native package exports', () => {
+it('loads every package subpath the actual main bundle imports through native package exports', () => {
   // Like built-CLI checks, this verifies npm run build output. Checking the
-  // generated specifiers catches externalizer regressions source imports miss.
+  // generated specifiers catches externalizer regressions source imports miss,
+  // such as a subpath (highlight.js/lib/index.js once) that the package does not export.
   const root = resolve('out/main')
   const files = readdirSync(root, { recursive: true }).filter((file) => String(file).endsWith('.js'))
   const specifiers = new Set<string>()
   for (const file of files) {
     const source = readFileSync(resolve(root, String(file)), 'utf8')
-    for (const match of source.matchAll(/(?:from\s*|import\s*|import\(\s*)["'](highlight\.js(?:\/[^"']*)?)["']/g)) {
-      specifiers.add(match[1])
+    for (const match of source.matchAll(/(?:from\s*|import\s*|import\(\s*)["']((?:@[\w-][\w.-]*\/)?[\w-][\w.-]*\/[^"']+)["']/g)) {
+      if (!match[1].startsWith('node:')) specifiers.add(match[1])
     }
   }
   expect(specifiers.size).toBeGreaterThan(0)

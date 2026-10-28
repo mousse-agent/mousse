@@ -438,7 +438,7 @@ describe('definitions through the gateway', () => {
   }
 
   it('beats for its run while the model is quiet, so the reconciler leaves a live definition alone', async () => {
-    const { Reconciler } = await import('../../src/mms/run/reconciler')
+    const { Reconciler } = await import('../../src/mms/run/Reconciler')
     let clock = Date.now()
     const now = () => new Date(clock).toISOString()
     const timed = new RunEngine({ store: engine.store, now })
