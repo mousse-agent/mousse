@@ -1,10 +1,14 @@
 import { execFile, spawn } from 'node:child_process'
-import { existsSync } from 'node:fs'
+import { existsSync, readdirSync } from 'node:fs'
 import { stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
-import { delimiter, isAbsolute, join, win32 } from 'node:path'
+import { delimiter, isAbsolute, join, posix, win32 } from 'node:path'
 import { app, nativeImage, shell } from 'electron'
+import type { RemoteOpenResult } from '../shared/remoteEditor'
+import { EDITOR_PROXY_READY } from '../shared/remoteEditor'
 import type { EditorInfo } from '../shared/types'
+import { missingRemoteExtension, RemoteOpenError, remoteLaunchArguments, supportsRemoteFolders } from './remoteEditor'
+import { resolveRemoteOpen, type Ask } from './remoteEditorFlow'
 
 interface EditorDefinition {
   id: string
@@ -31,6 +35,7 @@ export const EDITOR_CATALOG: readonly EditorDefinition[] = [
     cli: ['code-insiders'],
     windows: ['Microsoft VS Code Insiders\\Code - Insiders.exe']
   },
+  { id: 'vscodium', label: 'VSCodium', apps: ['VSCodium'], cli: ['codium'], windows: ['VSCodium\\VSCodium.exe'] },
   { id: 'antigravity', label: 'Antigravity', apps: ['Antigravity', 'Antigravity IDE'], cli: ['antigravity'], windows: ['Antigravity\\Antigravity.exe'] },
   { id: 'kiro', label: 'Kiro', apps: ['Kiro'], cli: ['kiro'], windows: ['Kiro\\Kiro.exe'] },
   { id: 'trae', label: 'Trae', apps: ['Trae'], cli: ['trae'], windows: ['Trae\\Trae.exe'] },
@@ -182,7 +187,13 @@ async function detect(): Promise<{ detected: DetectedEditor[]; infos: EditorInfo
     detected.map(async (editor): Promise<EditorInfo> => {
       const source = editorIconSource(editor, env.platform)
       const iconDataUrl = source ? await iconFor(source, env.platform) : undefined
-      return { id: editor.id, label: editor.label, kind: 'editor', ...(iconDataUrl ? { iconDataUrl } : {}) }
+      return {
+        id: editor.id,
+        label: editor.label,
+        kind: 'editor',
+        ...(supportsRemoteFolders(editor.id) ? { remote: true as const } : {}),
+        ...(iconDataUrl ? { iconDataUrl } : {})
+      }
     })
   )
   const filesSource = filesIconSource(env.platform, process.env.SystemRoot)
@@ -250,4 +261,113 @@ export async function openInEditor(editorId: string, path: string): Promise<void
   }
   if (process.platform === 'darwin') await run('open', ['-a', target, path])
   else await launch(target, [path])
+}
+
+/**
+ * The program that opens a remote folder. On macOS the editor's own command inside the app bundle, since
+ * `open -a` drops its arguments when the editor is already running; elsewhere the launcher found at detection.
+ */
+export function remoteLauncher(editor: DetectedEditor, env: EditorDetectionEnv): string | null {
+  if (editor.appPath) {
+    const names = EDITOR_CATALOG.find((definition) => definition.id === editor.id)?.cli ?? []
+    // An app bundle only exists on macOS, so its paths are POSIX whatever runs this.
+    const bundled = names.map((name) => posix.join(editor.appPath!, 'Contents', 'Resources', 'app', 'bin', name))
+    const found = bundled.find((candidate) => env.exists(candidate))
+    if (found) return found
+    for (const name of names) {
+      const onPath = env.findOnPath(name)
+      if (onPath) return onPath
+    }
+    return null
+  }
+  return editor.launcherPath ?? null
+}
+
+/**
+ * The command that starts `editor`, or a `RemoteOpenError` when it cannot open a remote folder yet: no
+ * command to start it, or its Remote - SSH extension is not installed. Starts nothing.
+ */
+export function remoteEditorCommand(editor: DetectedEditor, env: EditorDetectionEnv): string {
+  const missing = missingRemoteExtension(editor.id, env.home, (path) => {
+    try {
+      return readdirSync(path)
+    } catch {
+      return undefined
+    }
+  })
+  if (missing) throw new RemoteOpenError('extension_missing', missing)
+  const command = remoteLauncher(editor, env)
+  if (!command) throw new RemoteOpenError('editor_missing', `Could not find the command that starts ${editor.label}.`)
+  return command
+}
+
+export interface RemoteOpenPlan {
+  command: string
+  args: string[]
+}
+
+/** The command that would open `folder` in `editor` over `host`, or a `RemoteOpenError`. Starts nothing. */
+export function planRemoteOpen(
+  editor: DetectedEditor,
+  input: { host: Parameters<typeof remoteLaunchArguments>[0]['host']; folder: unknown },
+  env: EditorDetectionEnv
+): RemoteOpenPlan {
+  const command = remoteEditorCommand(editor, env)
+  const { args } = remoteLaunchArguments({ editorId: editor.id, host: input.host, folder: input.folder })
+  return { command, args }
+}
+
+/** What opening a remote folder touches on this computer. Tests give fakes, so no editor or SSH starts. */
+export interface RemoteOpenIo {
+  detected: () => Promise<DetectedEditor[]>
+  env: () => EditorDetectionEnv
+  launch: (command: string, args: string[]) => Promise<void>
+  forgetDetected: () => void
+  /** Whether Mousse's own SSH names reach a computer. */
+  proxyReady: boolean
+}
+
+const defaultRemoteOpenIo: RemoteOpenIo = {
+  detected: async () => (await ensureDetected()).detected,
+  env: realEnv,
+  launch,
+  forgetDetected: () => {
+    cache = null
+  },
+  proxyReady: EDITOR_PROXY_READY
+}
+
+/**
+ * Opens the folder a thread of another computer works in, in an editor installed on this one, over SSH.
+ * `ask` reaches the daemon of this computer, which routes the thread's calls to the computer that runs it.
+ * Refusals the person can act on come back as a result; anything else is thrown.
+ */
+export async function openRemoteInEditor(
+  editorId: string,
+  threadId: string,
+  ask: Ask,
+  io: RemoteOpenIo = defaultRemoteOpenIo
+): Promise<RemoteOpenResult> {
+  if (typeof editorId !== 'string' || !supportsRemoteFolders(editorId)) {
+    return { ok: false, reason: 'editor_missing', message: 'That editor cannot open a folder on another computer. Choose VS Code, Cursor, Windsurf or VSCodium.' }
+  }
+  const editor = (await io.detected()).find((entry) => entry.id === editorId)
+  if (!editor) return { ok: false, reason: 'editor_missing', message: 'That editor is not installed.' }
+  const env = io.env()
+  try {
+    // The editor must be able to start before anything is asked or written for it.
+    remoteEditorCommand(editor, env)
+    const resolved = await resolveRemoteOpen(ask, threadId, { proxyReady: io.proxyReady })
+    if (!resolved.ok) return resolved
+    const { command, args } = planRemoteOpen(editor, resolved, env)
+    if (!env.exists(command)) {
+      io.forgetDetected()
+      return { ok: false, reason: 'editor_missing', message: `${editor.label} is no longer installed.` }
+    }
+    await io.launch(command, args)
+    return { ok: true }
+  } catch (error) {
+    if (error instanceof RemoteOpenError) return { ok: false, reason: error.reason, message: error.message }
+    throw error
+  }
 }
