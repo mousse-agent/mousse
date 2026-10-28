@@ -1506,11 +1506,12 @@ export function registerGuiIpc(
       return res.task
     }
   )
-  registerHandler('pty:write', async (_e, ptyId: string, data: string) => {
-    await guiMms.request('pty.write', { ptyId, data })
+  // A terminal on another computer is reached through its thread (`threadId` is what the daemon routes by).
+  registerHandler('pty:write', async (_e, ptyId: string, data: string, threadId?: unknown) => {
+    await guiMms.request('pty.write', withThreadId({ ptyId, data }, threadId))
   })
-  registerHandler('pty:resize', async (_e, ptyId: string, cols: number, rows: number) => {
-    await guiMms.request('pty.resize', { ptyId, cols, rows })
+  registerHandler('pty:resize', async (_e, ptyId: string, cols: number, rows: number, threadId?: unknown) => {
+    await guiMms.request('pty.resize', withThreadId({ ptyId, cols, rows }, threadId))
   })
   registerHandler('pty:list', async () => {
     const threadId = currentPresentation().getActiveThreadId() ?? undefined
@@ -1539,19 +1540,27 @@ export function registerGuiIpc(
       // Project terminals also exist before a thread is selected. Keep those
       // sessions explicitly unbound instead of making the terminal silently fail.
       const threadId = currentPresentation().getActiveThreadId() ?? '__unbound__'
-      const res = await guiMms.request<{ ptyId: string }>('pty.create', {
-        threadId,
-        agentId: request.agentId,
-        cwd: request.cwd,
-        command: request.command,
-        env: request.env,
-        shellArgs: request.shellArgs
-      })
+      // On another computer the terminal starts in the thread's own folder, in that computer's default shell:
+      // this window names no folder of its own, no shell arguments and no environment.
+      const remote = isQualifiedId(threadId)
+      const res = await guiMms.request<{ ptyId: string }>(
+        'pty.create',
+        remote
+          ? { threadId, agentId: request.agentId }
+          : {
+              threadId,
+              agentId: request.agentId,
+              cwd: request.cwd,
+              command: request.command,
+              env: request.env,
+              shellArgs: request.shellArgs
+            }
+      )
       return { ptyId: res.ptyId }
     }
   )
-  registerHandler('pty:kill', async (_e, ptyId: string) => {
-    await guiMms.request('pty.kill', { ptyId })
+  registerHandler('pty:kill', async (_e, ptyId: string, threadId?: unknown) => {
+    await guiMms.request('pty.kill', withThreadId({ ptyId }, threadId))
   })
 
   // ── Scheduler / channels / mcp / skills (daemon protocol) ──────────────

@@ -406,10 +406,11 @@ const api = {
     }
   },
   pty: {
-    write: (ptyId: string, data: string): Promise<void> =>
-      ipcRenderer.invoke('pty:write', ptyId, data),
-    resize: (ptyId: string, cols: number, rows: number): Promise<void> =>
-      ipcRenderer.invoke('pty:resize', ptyId, cols, rows),
+    /** `threadId` names the terminal's thread; a terminal on another computer needs it. */
+    write: (ptyId: string, data: string, threadId?: string): Promise<void> =>
+      ipcRenderer.invoke('pty:write', ptyId, data, threadId),
+    resize: (ptyId: string, cols: number, rows: number, threadId?: string): Promise<void> =>
+      ipcRenderer.invoke('pty:resize', ptyId, cols, rows, threadId),
     list: (): Promise<Array<{ ptyId: string; agentId: string }>> =>
       ipcRenderer.invoke('pty:list'),
     /** `threadId` names the terminal's thread; a thread on another computer needs it. */
@@ -421,7 +422,8 @@ const api = {
       ipcRenderer.invoke('pty:lookup', ptyId, threadId),
     create: (request: PtyCreateRequest): Promise<PtyCreateResult> =>
       ipcRenderer.invoke('pty:create', request),
-    kill: (ptyId: string): Promise<void> => ipcRenderer.invoke('pty:kill', ptyId),
+    kill: (ptyId: string, threadId?: string): Promise<void> =>
+      ipcRenderer.invoke('pty:kill', ptyId, threadId),
     onData: (cb: (payload: { ptyId: string; data: string }) => void): (() => void) => {
       const handler = (_: Electron.IpcRendererEvent, payload: { ptyId: string; data: string }) =>
         cb(payload)

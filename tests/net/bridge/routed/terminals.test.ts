@@ -21,6 +21,7 @@ import {
 import { PROJECT_SHELL_AGENT_ID } from '../../../../src/shared/types'
 import { newId } from '../../../../src/shared/net'
 import { cleanup, resources } from '../hub/fixture'
+import { burst, fakeShells, type Spawned } from './terminalFixture'
 import { readStream, repo, routedOwner, testClock } from './routedFixture'
 
 afterEach(async () => {
@@ -29,67 +30,6 @@ afterEach(async () => {
 })
 
 type Owner = Awaited<ReturnType<typeof routedOwner>>
-
-/** A shell that is not one: what the owner would start is recorded, and its output and end are the test's. */
-export class FakePty {
-  readonly written: string[] = []
-  readonly resizes: Array<[number, number]> = []
-  killed = false
-  pid = undefined
-  private readonly onDataCallbacks: Array<(data: string) => void> = []
-  private readonly onExitCallbacks: Array<(event: { exitCode: number; signal?: number }) => void> =
-    []
-  onData(callback: (data: string) => void) {
-    this.onDataCallbacks.push(callback)
-    return { dispose: () => undefined }
-  }
-  onExit(callback: (event: { exitCode: number; signal?: number }) => void) {
-    this.onExitCallbacks.push(callback)
-    return { dispose: () => undefined }
-  }
-  write(data: string): void {
-    this.written.push(data)
-  }
-  resize(cols: number, rows: number): void {
-    this.resizes.push([cols, rows])
-  }
-  kill(): void {
-    this.killed = true
-    this.exit(137)
-  }
-  say(data: string): void {
-    for (const callback of this.onDataCallbacks) callback(data)
-  }
-  exit(exitCode = 0): void {
-    for (const callback of this.onExitCallbacks.splice(0)) callback({ exitCode })
-  }
-}
-
-export interface Spawned {
-  shell: string
-  args: string[]
-  options: { cwd: string; env: Record<string, string | undefined> }
-  pty: FakePty
-}
-
-/** Makes a computer's terminals fake ones. Nothing here reads or prints the process environment. */
-export function fakeShells(manager: unknown, cleanups: Array<() => void> = resources): Spawned[] {
-  const spawned: Spawned[] = []
-  ;(manager as { spawnPty: unknown }).spawnPty = (
-    shell: string,
-    args: string[],
-    options: Spawned['options']
-  ) => {
-    const pty = new FakePty()
-    spawned.push({ shell, args, options, pty })
-    return pty
-  }
-  // A shell that is still running would hold the owner's shutdown.
-  cleanups.push(() => {
-    for (const shell of spawned) shell.pty.exit(0)
-  })
-  return spawned
-}
 
 /** A thread with a folder of its own on the owner. */
 function folderThread(o: Owner) {
@@ -111,7 +51,7 @@ function threadFolder(o: Owner, threadId: string, projectPath: string): string {
 }
 
 async function opened(o: Owner) {
-  const spawned = fakeShells(o.f.mms.ptyManager)
+  const spawned = fakeShells(o.f.mms.ptyManager, resources)
   o.policy.set(o.f.callerNode, { terminal: true })
   const { t, path } = folderThread(o)
   const reply = await create(o, t.id)
@@ -152,7 +92,7 @@ describe('where a routed terminal starts', () => {
 
   it('refuses a shell, arguments, a variable or a project path the caller names, before anything starts', async () => {
     const o = await routedOwner()
-    const spawned = fakeShells(o.f.mms.ptyManager)
+    const spawned = fakeShells(o.f.mms.ptyManager, resources)
     o.policy.set(o.f.callerNode, { terminal: true })
     const { t } = folderThread(o)
     for (const extra of [
@@ -175,7 +115,7 @@ describe('where a routed terminal starts', () => {
 
   it('starts in a folder inside the thread’s own, and refuses one outside it, by real path', async () => {
     const o = await routedOwner()
-    const spawned = fakeShells(o.f.mms.ptyManager)
+    const spawned = fakeShells(o.f.mms.ptyManager, resources)
     o.policy.set(o.f.callerNode, { terminal: true })
     // Folders and a file in the repository, so they are in the thread's folder; the link is one the repository ignores.
     const path = repo()
@@ -227,7 +167,7 @@ describe('where a routed terminal starts', () => {
 
   it('starts a thread with no folder in its own terminal workspace, and takes no folder of the caller for it', async () => {
     const o = await routedOwner()
-    const spawned = fakeShells(o.f.mms.ptyManager)
+    const spawned = fakeShells(o.f.mms.ptyManager, resources)
     o.policy.set(o.f.callerNode, { terminal: true })
     const t = o.thread('No folder')
     const reply = await create(o, t.id)
@@ -400,7 +340,7 @@ describe('input and resizes', () => {
 describe('how many terminals a device may have', () => {
   it('is four, and a closed terminal gives its slot back', async () => {
     const o = await routedOwner()
-    const spawned = fakeShells(o.f.mms.ptyManager)
+    const spawned = fakeShells(o.f.mms.ptyManager, resources)
     o.policy.set(o.f.callerNode, { terminal: true })
     const open: Array<{ t: { id: string }; ptyId: string }> = []
     for (let n = 0; n < ROUTED_TERMINALS_PER_NODE; n += 1) open.push(await another(o))
@@ -416,7 +356,7 @@ describe('how many terminals a device may have', () => {
 
   it('cannot be passed by two calls made at once: the slot is taken before the shell starts', async () => {
     const o = await routedOwner()
-    const spawned = fakeShells(o.f.mms.ptyManager)
+    const spawned = fakeShells(o.f.mms.ptyManager, resources)
     o.policy.set(o.f.callerNode, { terminal: true })
     for (let n = 0; n < ROUTED_TERMINALS_PER_NODE - 1; n += 1) await another(o)
     const [a, b] = [folderThread(o), folderThread(o)]
@@ -434,7 +374,7 @@ describe('what ends a device’s terminals', () => {
 
   it('ends them all when the device’s terminal switch goes off', async () => {
     const o = await routedOwner({ streams: true })
-    const spawned = fakeShells(o.f.mms.ptyManager)
+    const spawned = fakeShells(o.f.mms.ptyManager, resources)
     o.policy.set(o.f.callerNode, { terminal: true })
     const { t } = folderThread(o)
     const first = (await create(o, t.id)) as { result: { ptyId: string } }
@@ -495,7 +435,7 @@ describe('what ends a device’s terminals', () => {
 describe('what is audited', () => {
   it('records the first terminal of a device once, each open and kill, and the close with its bytes, but not every key press', async () => {
     const o = await routedOwner()
-    const spawned = fakeShells(o.f.mms.ptyManager)
+    const spawned = fakeShells(o.f.mms.ptyManager, resources)
     o.policy.set(o.f.callerNode, { terminal: true })
     const { t } = folderThread(o)
     const first = (await create(o, t.id)) as { result: { ptyId: string } }
@@ -534,7 +474,7 @@ describe('what is audited', () => {
 
   it('tells the owner of a device’s first terminal once, not for the next ones', async () => {
     const o = await routedOwner()
-    fakeShells(o.f.mms.ptyManager)
+    fakeShells(o.f.mms.ptyManager, resources)
     o.policy.set(o.f.callerNode, { terminal: true })
     expect(o.audit.has(o.f.callerNode, 'pty.first_open')).toBe(false)
     await another(o)
@@ -544,20 +484,6 @@ describe('what is audited', () => {
     ).toHaveLength(1)
   }, 240_000)
 })
-
-/** A burst of output the way a shell makes it: chunks of every size from a few bytes to tens of KiB. */
-export function burst(total: number): string[] {
-  const chunks: string[] = []
-  let sent = 0
-  let seed = 7
-  while (sent < total) {
-    seed = (seed * 1103515245 + 12345) & 0x7fffffff
-    const size = Math.min(total - sent, 1 + (seed % 40_000))
-    chunks.push(`${sent}:`.padEnd(size, 'y'))
-    sent += size
-  }
-  return chunks
-}
 
 describe('a terminal’s output on its own stream', () => {
   it('carries 1 MiB complete and in order, one record per chunk, never merged', async () => {

@@ -3,6 +3,8 @@
  * Kept free of Electron so unit tests can cover stale-session recovery.
  */
 
+import { parseTerminalOffMessage } from '../../shared/bridge/routed'
+
 export type TerminalShellAction = 'none' | 'recreate' | 'show_exited' | 'spawn_missing'
 
 export interface TerminalSessionState {
@@ -32,6 +34,29 @@ export function resolveTerminalShellAction(state: TerminalSessionState): Termina
     return 'recreate'
   }
   return 'spawn_missing'
+}
+
+/** What the terminal panel says when a terminal on another computer could not be opened. */
+export interface TerminalNotice {
+  message: string
+  /** What to do about it, when there is something. */
+  hint?: string
+}
+
+/**
+ * The words for a terminal that could not be opened on another computer. When that computer has this
+ * device's terminals off (the default), the panel says so and where to turn them on; any other failure
+ * shows what the computer said, without the wrapper the window's own process adds.
+ */
+export function terminalNoticeFor(error: unknown): TerminalNotice {
+  const text = error instanceof Error ? error.message : String(error)
+  const off = parseTerminalOffMessage(text)
+  if (off)
+    return {
+      message: `Terminals from this computer are off on ${off.computer}.`,
+      hint: `On ${off.computer}, open Devices and turn on Terminals for this computer.`
+    }
+  return { message: text.replace(/^Error invoking remote method '[^']+': (?:Error: )?/, '') }
 }
 
 /**

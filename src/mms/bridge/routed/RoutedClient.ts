@@ -83,9 +83,16 @@ function delay(ms: number, signal: AbortSignal): Promise<void> {
   })
 }
 
+/** A key press or a resize that is not answered in this long is not worth waiting for: a terminal's next input would queue behind it. */
+const SEQUENCED_DEADLINE_MS = 15_000
+const deadlineOf = (method: string): number =>
+  ROUTED_METHODS[method]?.sequenced
+    ? SEQUENCED_DEADLINE_MS
+    : LONG_METHODS.has(method)
+      ? LONG_DEADLINE_MS
+      : DEFAULT_DEADLINE_MS
 /** The longest a call takes in all: its own deadline and the wait for a link that went. */
-const totalMs = (method: string): number =>
-  (LONG_METHODS.has(method) ? LONG_DEADLINE_MS : DEFAULT_DEADLINE_MS) + RECONNECT_WINDOW_MS
+const totalMs = (method: string): number => deadlineOf(method) + RECONNECT_WINDOW_MS
 const timedOut = (computer: ComputerRef): DomainRpcError =>
   new DomainRpcError('deadline_exceeded', `${computer.name} did not answer in time.`, {
     node: computer.node,
@@ -343,7 +350,7 @@ export class RoutedClient {
   ): Promise<RoutedReply> {
     const id = newId('rpc') as RpcId
     const idem = row.durable ? `${method}:${options.idem ?? id}`.slice(0, 256) : undefined
-    const deadlineMs = LONG_METHODS.has(method) ? LONG_DEADLINE_MS : DEFAULT_DEADLINE_MS
+    const deadlineMs = deadlineOf(method)
     const signal = options.signal
     let session = this.sessionOrOffline(node, computer)
     let afterLoss = false
