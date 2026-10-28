@@ -92,6 +92,7 @@ import { isQualifiedId } from '../../shared/threadRef'
 import { resolveThreadProjectPath } from '../data/resolveActiveProjectPath'
 import { ThreadJournal } from '../data/ThreadJournal'
 import { ThreadWorkspaceManager } from '../workspace/ThreadWorkspaceManager'
+import { resolveEditorFolder } from '../workspace/editorFolder'
 import { scheduledJobOptionsDepsFrom, validateScheduledJobOptions, type ScheduledJobOptionsDeps } from '../scheduled/validateJobOptions'
 import { isExecutableJobEdit, JobPermissionRefused, permissionAboveCeiling, permissionsAfterEdit } from '../scheduled/jobPermission'
 import { ScheduledWebhookError } from '../scheduled/ScheduledJobService'
@@ -2750,6 +2751,14 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         journalGeneration: lookup.currentGeneration,
         ...(marker ? { retiredByCleanup: { at: marker.retiredAt, rule: marker.rule } } : {})
       }
+    }
+    case 'editor.folder': {
+      // Which folder an editor opens for a thread. The thread id is all a caller gives; the folder is this computer's own.
+      const p = isObject(params) ? params : {}
+      rejectUnknownKeys(p, ['threadId'])
+      const lookup = threadLookupContext(ctx, p)
+      if (!lookup.projectPath) throw new DomainRpcError('thread_has_no_folder', 'This thread has no folder on this computer.', { threadId: lookup.threadId })
+      return resolveEditorFolder({ threadId: lookup.threadId, threadDirectory: lookup.threadDirectory, projectPath: lookup.projectPath })
     }
     case 'workspace.restore': {
       const p = isObject(params) ? params : {}

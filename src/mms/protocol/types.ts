@@ -273,6 +273,7 @@ export const PROTOCOL_METHODS = [
   'agents.stop',
   'workspace.getStatus',
   'workspace.restore',
+  'editor.folder',
   'actions.list',
   'actions.sweepRetention',
   'actions.configureRetention',
