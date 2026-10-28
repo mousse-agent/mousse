@@ -119,6 +119,7 @@ import type {
   ScheduledWebhookGrant,
   ThreadActivitySnapshot,
   Thread,
+  ThreadSearchResponse,
   ThreadActivityState,
   TurnState,
   TurnStateSnapshot,
@@ -1454,11 +1455,12 @@ export function registerGuiIpc(
     }
   )
   registerHandler('threads:search', async (_e, query: string, limit?: number) => {
-    const res = await guiMms.request<{ results: unknown[] }>('threads.search', {
+    const res = await guiMms.request<ThreadSearchResponse>('threads.search', {
       query,
       limit
     })
-    return res.results
+    // The computers that were not searched are named with the matches of the others.
+    return { results: res.results, ...(res.skipped?.length ? { skipped: res.skipped } : {}) }
   })
 
   // ── Phase 4: agents / tasks / PTY / Mousse subagents (protocol) ──────────

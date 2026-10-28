@@ -65,7 +65,7 @@ import type {
   ChannelPlatform,
   ChannelsSnapshot,
   PairingRequest,
-  ThreadSearchResult,
+  ThreadSearchResponse,
   PendingUserQuestions,
   Task,
   TaskStatus,
@@ -776,7 +776,7 @@ const api = {
       ipcRenderer.invoke('threads:settle', threadId, settled),
     reorder: (projectId: string | undefined, threadIds: string[]): Promise<Thread[]> =>
       ipcRenderer.invoke('threads:reorder', projectId, threadIds),
-    search: (query: string, limit?: number): Promise<ThreadSearchResult[]> =>
+    search: (query: string, limit?: number): Promise<ThreadSearchResponse> =>
       ipcRenderer.invoke('threads:search', query, limit),
     onUpdated: (cb: (threads: Thread[]) => void): (() => void) => {
       const handler = (_: Electron.IpcRendererEvent, threads: Thread[]) => cb(threads)

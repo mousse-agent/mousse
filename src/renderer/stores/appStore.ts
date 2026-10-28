@@ -85,6 +85,9 @@ export function sameThreadSnapshot(a: Thread[], b: Thread[]): boolean {
       left.settledAt !== right.settledAt ||
       left.startedAt !== right.startedAt ||
       left.worktreeEnabled !== right.worktreeEnabled ||
+      // A thread of another computer going offline (or coming back) changes its row.
+      left.node !== right.node ||
+      left.offline !== right.offline ||
       left.modelOverride?.llmProvider !== right.modelOverride?.llmProvider ||
       left.modelOverride?.model !== right.modelOverride?.model
     ) {

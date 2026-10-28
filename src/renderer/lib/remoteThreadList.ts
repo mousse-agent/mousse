@@ -1,6 +1,7 @@
 import { useEffect } from 'react'
 import { create } from 'zustand'
 import type { NodeId } from '../../shared/net'
+import type { NetStatus } from '../../shared/net/local'
 import { isThreadStarted } from '../../shared/threadTitle'
 import type { Thread, ThreadActivityState } from '../../shared/types'
 import type { RemotePause } from '../services/remoteThreadDisplay'
@@ -23,6 +24,37 @@ export interface RemoteListedThread {
   worktreeEnabled?: boolean
   /** The project of this computer it was started from; only the computer that started it knows it. */
   localProjectId?: string
+}
+
+/**
+ * Whether the other computers' threads come in this computer's own lists (the routing flag, with Bridge on).
+ * Then the rows listed below would show every one of them twice, so the sidebar leaves them out.
+ */
+export const useRoutedThreads = create<{ on: boolean }>(() => ({ on: false }))
+
+/** Routing is on for a profile when Bridge is and so is the flag that routes threads. */
+export function routedThreadsOn(status: Pick<NetStatus, 'features'> | undefined): boolean {
+  return status?.features?.netBridge === true && status.features.netBridgeThreads === true
+}
+
+/** Keeps `useRoutedThreads` current for the profile: read now, and again whenever the daemon reports a change. */
+export function useRoutedThreadsFlag(profileId: string | null): boolean {
+  const on = useRoutedThreads((state) => state.on)
+  useEffect(() => {
+    useRoutedThreads.setState({ on: false })
+    if (!profileId) return
+    let live = true
+    const apply = (status: Pick<NetStatus, 'features'> | undefined): void => {
+      if (live) useRoutedThreads.setState({ on: routedThreadsOn(status) })
+    }
+    void window.mousse.platformRequest.request<NetStatus>('net.status', {}).then(apply, () => undefined)
+    const off = window.mousse.net.onUpdated(apply)
+    return () => {
+      live = false
+      off()
+    }
+  }, [profileId])
+  return on
 }
 
 /** How often the other computers' lists are read again while the app is open. */
@@ -136,6 +168,13 @@ export interface RemoteSidebarThread {
   localProjectId?: string
   /** Set once this window is attached to the thread. */
   entry?: RemoteThreadEntry
+}
+
+/** No rows: what the sidebar lists of the other computers while their threads are in the merged lists. */
+export const NO_REMOTE_SIDEBAR_THREADS: ReturnType<typeof sidebarRemoteThreads> = {
+  all: [],
+  byProject: new Map(),
+  unfiled: []
 }
 
 /**

@@ -72,6 +72,30 @@ const quiet = { onError: () => {}, newOperationId: () => 'op-1' }
 
 afterEach(() => { vi.useRealTimers() })
 
+describe('threads of another computer in the list', () => {
+  const remote = (taskId: string) => ({ ...trashed(taskId, 2), node: 'nod_1', computerName: 'Studio Mac' })
+
+  it('can be restored from here but not permanently deleted, and name their computer', () => {
+    const [row] = trashRows([remote('nod_1:a')], { 'nod_1:a': 'Elsewhere' }, POLICY, { now: NOW })
+    expect(row).toMatchObject({ canRestore: true, canDelete: false, computer: 'Studio Mac' })
+    const [local] = trashRows([trashed('b', 2)], {}, POLICY, { now: NOW })
+    expect(local).toMatchObject({ canDelete: true })
+    expect(local).not.toHaveProperty('computer')
+  })
+
+  it('never ask the daemon to delete one permanently, and say where to do it', async () => {
+    const daemon = fakeDaemon([remote('nod_1:a')])
+    const controller = createTrashController(daemon.api, quiet)
+    await controller.refresh()
+    expect(await controller.requestPurge('nod_1:a')).toBe(false)
+    expect(controller.getState().notice).toEqual({ taskId: 'nod_1:a', message: 'Delete permanently on Studio Mac' })
+    expect(daemon.calls.purge).toEqual([])
+    // Restore still goes through.
+    expect(await controller.restore('nod_1:a')).toBe(true)
+    expect(daemon.calls.restore).toEqual(['nod_1:a'])
+  })
+})
+
 describe('recently deleted list', () => {
   it('lists root threads in or entering the trash, never live, purged or subagent records', () => {
     const rows = trashRows([

@@ -211,7 +211,18 @@ export function GeneralSettings({
             <Switch
               label="Completion sound"
               checked={settings.notifications.threadCompletionSound}
-              onChange={(threadCompletionSound) => void onUpdate({ notifications: { threadCompletionSound } })}
+              onChange={(threadCompletionSound) => void onUpdate({ notifications: { ...settings.notifications, threadCompletionSound } })}
+            />
+          }
+        />
+        <SettingsRow
+          title="All threads on my other computers"
+          description="Notify when any thread on another of your computers needs you or finishes. Off: only threads you started or sent a message in from this computer, or opened here in the last 7 days."
+          control={
+            <Switch
+              label="Notify for all threads on my other computers"
+              checked={settings.notifications.allRemoteThreads === true}
+              onChange={(allRemoteThreads) => void onUpdate({ notifications: { ...settings.notifications, allRemoteThreads } })}
             />
           }
         />

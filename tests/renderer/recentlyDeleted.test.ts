@@ -73,6 +73,20 @@ describe('Recently deleted section', () => {
     expect(html).not.toContain('data-action="retry"')
   })
 
+  it('lists a thread of another computer with its computer, Restore, and Delete permanently turned off with where to do it', () => {
+    const remote = { ...trashed('n:a', 3), node: 'n', computerName: 'Studio Mac' }
+    const html = view({ records: [remote, trashed('b', 3)], taskNames: { 'n:a': 'Remote thread', b: 'Local thread' } })
+    const row = html.split('data-testid="sidebar-trash-row"').find((part) => part.includes('Remote thread'))!
+    expect(row).toContain('On Studio Mac')
+    expect(row).toContain('aria-label="Restore Remote thread"')
+    expect(row).toMatch(/data-action="delete"[^>]*title="Delete permanently on Studio Mac"[^>]*disabled=""/)
+    expect(row).not.toContain('aria-label="Delete Remote thread permanently…"')
+    // A local row is as it was.
+    const local = html.split('data-testid="sidebar-trash-row"').find((part) => part.includes('Local thread'))!
+    expect(local).toContain('aria-label="Delete Local thread permanently…"')
+    expect(local).not.toContain('On Studio Mac')
+  })
+
   it('says the thread is kept until deleted when automatic emptying is off', () => {
     expect(view({ records: [trashed('a', 3)], policy: { ...POLICY, automaticPurge: false } })).toContain('Deleted 3 days ago · Kept until you delete it')
     expect(view({ records: [trashed('a', 3)], paused: true })).toContain('Automatic deletion is paused')
