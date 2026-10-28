@@ -1,4 +1,4 @@
-//! The per-session helper of Mousse's SSH endpoint on Windows. Mousse's daemon starts it; nothing else may.
+//! The per-session helper of Mousse's SSH endpoint on Windows. Mousse's daemon starts it.
 //!
 //! It is named `sshd.exe` because VS Code's Windows server script walks up its own ancestors until it finds a
 //! process of that name, refuses to run without one, and exits when it is gone. Under Win32-OpenSSH that
@@ -8,21 +8,28 @@
 //! `Local\MousseEditor-<scope>` (the scope is the device's marker, lowercase hex the daemon computes). The job has
 //! `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` and neither breakaway limit: no program in it can start one outside it, so
 //! ending the job ends everything the device started, including a server that detached itself (`Start-Process`).
+//! A job of that name is used only when the user (or the user's default owner) owns it and its integrity label is
+//! not below medium; `keep` and `session` also want the limits above.
 //!
-//! The helper has three modes. Each refuses to act unless its parent is the process id it is given, which is the
-//! daemon that started it, and each takes only a job name of the form above.
+//! Every mode checks that its parent is the process id it is given and takes only job names of the form above.
+//! That is a check against misuse, not a guard: any program of the user could start the helper as its own child,
+//! and the helper never has more rights than the program that started it.
 //!
 //! - `keep <daemon pid> <name>` makes the device's job (or opens it, if an earlier run of the daemon made it),
 //!   prints `ready`, and holds it: a named job lasts only while a handle to it is open, and the daemon's own
-//!   handles end with the daemon. The keeper lives while the daemon lives (its standard input is a pipe from the
-//!   daemon) and after that until the job is empty, so a daemon that restarts finds the job again by its name.
-//! - `session <daemon pid> <name> <command line>` joins the device's job and runs the command line exactly as
-//!   given, in the environment a fresh logon of the user gets, and exits with the program's exit code.
-//! - `end <daemon pid> <name>` ends every program in the device's job, waits until they are gone, and prints how
-//!   many it ended and how many are left (`<ended> <left>`). A job that does not exist has nothing to end. A job
-//!   that holds the daemon itself (a daemon started from an editor's terminal) is not ended.
+//!   handles end with the daemon. The daemon starts it detached, outside its own job, so the keeper outlives it:
+//!   it holds the job while the daemon runs (its standard input is a pipe from the daemon) and then until the job
+//!   is empty, so a daemon that starts again finds the job by its name.
+//! - `session <daemon pid> <name> <command line>` runs the command line exactly as given, in the environment a
+//!   fresh logon of the user gets, and exits with the program's exit code. The program is made suspended, outside
+//!   the daemon's job, with a copy of the daemon's own token (see `daemon_token`), put in the device's job, and only
+//!   then let run. The helper itself stays outside the device's job.
+//! - `end <daemon pid> <name>` ends every program in the device's job whatever its limits, waits until they are
+//!   gone, and prints how many it ended and how many are left (`<ended> <left>`). A job that does not exist has
+//!   nothing to end. A job that holds the calling daemon (one started from an editor's terminal) is not ended.
 //! - `list <daemon pid>` prints the scope of every device job that exists in this logon session, one a line: the
 //!   daemon ends the jobs of devices that may no longer run anything, without having to know them first.
+//! - `drives <daemon pid>` prints the letters of the computer's local drives (not network drives), for SFTP's `/`.
 
 #[cfg(not(windows))]
 fn main() {
@@ -45,16 +52,22 @@ mod helper {
 
     use windows_sys::Wdk::Foundation::OBJECT_ATTRIBUTES;
     use windows_sys::Wdk::Storage::FileSystem::{
-        NtOpenDirectoryObject, NtOpenProcessToken, NtQueryDirectoryObject,
+        NtDuplicateToken, NtOpenDirectoryObject, NtOpenProcessToken, NtQueryDirectoryObject,
+        NtQueryInformationToken, NtQuerySecurityObject,
     };
     use windows_sys::Wdk::System::SystemServices::DIRECTORY_QUERY;
     use windows_sys::Win32::Foundation::{
-        CloseHandle, FreeLibrary, GetLastError, SetHandleInformation, ERROR_ALREADY_EXISTS,
-        ERROR_FILE_NOT_FOUND, HANDLE, HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE,
-        OBJ_CASE_INSENSITIVE, STATUS_NO_MORE_ENTRIES, UNICODE_STRING,
+        CloseHandle, FreeLibrary, GetLastError, SetHandleInformation, ERROR_ACCESS_DENIED,
+        ERROR_ALREADY_EXISTS, ERROR_FILE_NOT_FOUND, HANDLE, HANDLE_FLAG_INHERIT,
+        INVALID_HANDLE_VALUE, OBJ_CASE_INSENSITIVE, STATUS_NO_MORE_ENTRIES, UNICODE_STRING,
     };
-    use windows_sys::Win32::Security::{TOKEN_DUPLICATE, TOKEN_IMPERSONATE, TOKEN_QUERY};
-    use windows_sys::Win32::System::RemoteDesktop::ProcessIdToSessionId;
+    use windows_sys::Win32::Security::{
+        SecurityImpersonation, TokenIntegrityLevel, TokenOwner, TokenPrimary, TokenUser,
+        SECURITY_QUALITY_OF_SERVICE, TOKEN_ADJUST_DEFAULT, TOKEN_ADJUST_SESSIONID, TOKEN_ASSIGN_PRIMARY,
+        TOKEN_DUPLICATE, TOKEN_IMPERSONATE, TOKEN_INFORMATION_CLASS, TOKEN_MANDATORY_LABEL, TOKEN_OWNER,
+        TOKEN_QUERY, TOKEN_USER,
+    };
+    use windows_sys::Win32::Storage::FileSystem::{GetDriveTypeW, GetLogicalDrives};
     use windows_sys::Win32::System::Console::{
         GetConsoleMode, GetStdHandle, SetConsoleCtrlHandler, CTRL_BREAK_EVENT, CTRL_C_EVENT,
         STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
@@ -64,30 +77,45 @@ mod helper {
         TH32CS_SNAPPROCESS,
     };
     use windows_sys::Win32::System::Environment::GetCommandLineW;
-    use windows_sys::Win32::System::LibraryLoader::{
-        GetProcAddress, LoadLibraryExW, LOAD_LIBRARY_SEARCH_SYSTEM32,
-    };
-    use windows_sys::Win32::System::IO::{CreateIoCompletionPort, GetQueuedCompletionStatus, OVERLAPPED};
     use windows_sys::Win32::System::JobObjects::{
-        AssignProcessToJobObject, CreateJobObjectW, IsProcessInJob, JobObjectAssociateCompletionPortInformation,
-        JobObjectBasicAccountingInformation, JobObjectExtendedLimitInformation, OpenJobObjectW,
-        QueryInformationJobObject, SetInformationJobObject, TerminateJobObject,
-        JOBOBJECT_ASSOCIATE_COMPLETION_PORT, JOBOBJECT_BASIC_ACCOUNTING_INFORMATION,
-        JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_BREAKAWAY_OK,
-        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK,
+        AssignProcessToJobObject, CreateJobObjectW, IsProcessInJob,
+        JobObjectAssociateCompletionPortInformation, JobObjectBasicAccountingInformation,
+        JobObjectExtendedLimitInformation, OpenJobObjectW, QueryInformationJobObject,
+        SetInformationJobObject, TerminateJobObject, JOBOBJECT_ASSOCIATE_COMPLETION_PORT,
+        JOBOBJECT_BASIC_ACCOUNTING_INFORMATION, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+        JOB_OBJECT_LIMIT_BREAKAWAY_OK, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK,
     };
+    use windows_sys::Win32::System::LibraryLoader::{
+        GetModuleHandleW, GetProcAddress, LoadLibraryExW, LOAD_LIBRARY_SEARCH_SYSTEM32,
+    };
+    use windows_sys::Win32::System::RemoteDesktop::ProcessIdToSessionId;
     use windows_sys::Win32::System::Threading::{
-        CreateProcessW, DeleteProcThreadAttributeList, GetCurrentProcess, GetCurrentProcessId,
-        GetExitCodeProcess, InitializeProcThreadAttributeList, OpenProcess,
-        UpdateProcThreadAttribute, WaitForSingleObject, CREATE_UNICODE_ENVIRONMENT,
-        EXTENDED_STARTUPINFO_PRESENT, INFINITE, PROCESS_INFORMATION, PROCESS_QUERY_LIMITED_INFORMATION,
-        PROC_THREAD_ATTRIBUTE_HANDLE_LIST, STARTF_USESTDHANDLES, STARTUPINFOEXW,
+        DeleteProcThreadAttributeList, GetCurrentProcess, GetCurrentProcessId, GetExitCodeProcess,
+        InitializeProcThreadAttributeList, OpenProcess, ResumeThread, TerminateProcess,
+        UpdateProcThreadAttribute, WaitForSingleObject, CREATE_BREAKAWAY_FROM_JOB, CREATE_NO_WINDOW,
+        CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, EXTENDED_STARTUPINFO_PRESENT, INFINITE,
+        PROCESS_INFORMATION, PROCESS_QUERY_LIMITED_INFORMATION, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
+        STARTF_USESTDHANDLES, STARTUPINFOEXW, STARTUPINFOW,
+    };
+    use windows_sys::Win32::System::IO::{
+        CreateIoCompletionPort, GetQueuedCompletionStatus, OVERLAPPED,
     };
 
     // Job access rights (winnt.h).
     const JOB_OBJECT_ASSIGN_PROCESS: u32 = 0x0001;
     const JOB_OBJECT_QUERY: u32 = 0x0004;
     const JOB_OBJECT_TERMINATE: u32 = 0x0008;
+    const READ_CONTROL: u32 = 0x0002_0000;
+    // Security information classes and descriptor parts (winnt.h).
+    const OWNER_SECURITY_INFORMATION: u32 = 0x1;
+    const LABEL_SECURITY_INFORMATION: u32 = 0x10;
+    const SE_SACL_PRESENT: u16 = 0x0010;
+    const SYSTEM_MANDATORY_LABEL_ACE_TYPE: u8 = 0x11;
+    const SECURITY_MANDATORY_MEDIUM_RID: u32 = 0x2000;
+    // Drive types (winbase.h).
+    const DRIVE_NO_ROOT_DIR: u32 = 1;
+    const DRIVE_REMOTE: u32 = 4;
 
     /// The only job names the helper takes: `Local\MousseEditor-` and a scope (see `is_scope`).
     const NAME_PREFIX: &str = "Local\\MousseEditor-";
@@ -164,7 +192,7 @@ mod helper {
         }
     }
 
-    // ------------------------------------------------------------------ the daemon and the device's job
+    // ------------------------------------------------------------------ the daemon, tokens and the device's job
 
     fn parent_pid() -> Option<u32> {
         unsafe {
@@ -188,10 +216,11 @@ mod helper {
 
     /// A device's marker: 8 to 64 lowercase hex digits.
     fn is_scope(scope: &str) -> bool {
-        (8..=64).contains(&scope.len()) && scope.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        (8..=64).contains(&scope.len())
+            && scope.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
     }
 
-    /// The daemon's pid, checked: the helper acts only for the process that started it.
+    /// The daemon's pid, checked to be the parent's (against misuse, see the module's comment).
     fn daemon(rest: &[u16]) -> (u32, &[u16]) {
         let (pid, rest) = word(rest);
         let pid: u32 = pid.parse().unwrap_or(0);
@@ -211,6 +240,183 @@ mod helper {
         (pid, name, rest)
     }
 
+    /// The bytes of a SID: 8, then 4 for each sub-authority.
+    unsafe fn sid_bytes(sid: *const u8) -> Vec<u8> {
+        let count = *sid.add(1) as usize;
+        std::slice::from_raw_parts(sid, 8 + 4 * count).to_vec()
+    }
+
+    /// The last sub-authority of a SID: the level of an integrity label.
+    fn sid_rid(sid: &[u8]) -> u32 {
+        let count = sid.get(1).copied().unwrap_or(0) as usize;
+        if count == 0 || sid.len() < 8 + 4 * count {
+            return 0;
+        }
+        let at = 8 + 4 * (count - 1);
+        u32::from_le_bytes([sid[at], sid[at + 1], sid[at + 2], sid[at + 3]])
+    }
+
+    /// One class of a token's information, in a buffer aligned for the structure it holds.
+    fn token_information(token: HANDLE, class: TOKEN_INFORMATION_CLASS) -> Option<Vec<u64>> {
+        unsafe {
+            let mut length = 0u32;
+            NtQueryInformationToken(token, class, null_mut(), 0, &mut length);
+            if length == 0 {
+                return None;
+            }
+            let mut buffer = vec![0u64; (length as usize).div_ceil(8)];
+            let status = NtQueryInformationToken(
+                token,
+                class,
+                buffer.as_mut_ptr() as *mut c_void,
+                (buffer.len() * 8) as u32,
+                &mut length,
+            );
+            (status >= 0).then_some(buffer)
+        }
+    }
+
+    /// The user, the default owner and the integrity level of a token.
+    struct Identity {
+        user: Vec<u8>,
+        owner: Vec<u8>,
+        integrity: u32,
+    }
+
+    fn identity(token: HANDLE) -> Option<Identity> {
+        unsafe {
+            let user = token_information(token, TokenUser)?;
+            let owner = token_information(token, TokenOwner)?;
+            let label = token_information(token, TokenIntegrityLevel)?;
+            let user = sid_bytes((*(user.as_ptr() as *const TOKEN_USER)).User.Sid as *const u8);
+            let owner = sid_bytes((*(owner.as_ptr() as *const TOKEN_OWNER)).Owner as *const u8);
+            let label =
+                sid_bytes((*(label.as_ptr() as *const TOKEN_MANDATORY_LABEL)).Label.Sid as *const u8);
+            Some(Identity { user, owner, integrity: sid_rid(&label) })
+        }
+    }
+
+    fn own_token(access: u32) -> Owned {
+        let mut token: HANDLE = null_mut();
+        let status = unsafe { NtOpenProcessToken(GetCurrentProcess(), access, &mut token) };
+        if status < 0 {
+            fail(NOT_STARTED, &format!("cannot read the user's token (status {status:#x})"));
+        }
+        Owned(token)
+    }
+
+    fn own_identity() -> Identity {
+        identity(own_token(TOKEN_QUERY).0)
+            .unwrap_or_else(|| fail(NOT_STARTED, "cannot read the user's token"))
+    }
+
+    /// A primary token copied from the daemon's own. Windows gives a program named `sshd.exe` the redirection guard
+    /// (an Image File Execution Options entry names the image), and what it starts with its own token inherits it:
+    /// such a program cannot follow a junction a user made (fnm, Scoop, a pnpm `node_modules`). The daemon's token
+    /// has no guard. It is the same user's ordinary token, a sibling of the helper's own in the same logon, so using
+    /// it takes no privilege and grants nothing the daemon, a Mousse terminal or a local terminal does not have. It
+    /// is checked to be the helper's own user, at no higher integrity than the helper's.
+    fn daemon_token(pid: u32, own: &Identity) -> Owned {
+        unsafe {
+            let process = Owned(OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid));
+            if process.0.is_null() {
+                fail(NOT_STARTED, &format!("cannot reach the daemon (error {})", last_error()));
+            }
+            let mut token: HANDLE = null_mut();
+            let status = NtOpenProcessToken(process.0, TOKEN_DUPLICATE | TOKEN_QUERY, &mut token);
+            if status < 0 {
+                fail(NOT_STARTED, &format!("cannot read the daemon's token (status {status:#x})"));
+            }
+            let token = Owned(token);
+            let quality = SECURITY_QUALITY_OF_SERVICE {
+                Length: size_of::<SECURITY_QUALITY_OF_SERVICE>() as u32,
+                ImpersonationLevel: SecurityImpersonation,
+                ContextTrackingMode: 0,
+                EffectiveOnly: false,
+            };
+            let attributes = OBJECT_ATTRIBUTES {
+                Length: size_of::<OBJECT_ATTRIBUTES>() as u32,
+                RootDirectory: null_mut(),
+                ObjectName: null(),
+                Attributes: 0,
+                SecurityDescriptor: null(),
+                SecurityQualityOfService: &quality,
+            };
+            let mut primary: HANDLE = null_mut();
+            let status = NtDuplicateToken(
+                token.0,
+                TOKEN_QUERY
+                    | TOKEN_DUPLICATE
+                    | TOKEN_IMPERSONATE
+                    | TOKEN_ASSIGN_PRIMARY
+                    | TOKEN_ADJUST_DEFAULT
+                    | TOKEN_ADJUST_SESSIONID,
+                &attributes,
+                false,
+                TokenPrimary,
+                &mut primary,
+            );
+            if status < 0 {
+                fail(NOT_STARTED, &format!("cannot copy the daemon's token (status {status:#x})"));
+            }
+            let primary = Owned(primary);
+            match identity(primary.0) {
+                Some(theirs) if theirs.user == own.user && theirs.integrity <= own.integrity => primary,
+                _ => fail(NOT_STARTED, "the daemon runs as another user or at a higher level"),
+            }
+        }
+    }
+
+    /// Whether this process's user (or its default owner) owns `job`, and its integrity label is not below medium:
+    /// a job of the right name that another account, or a lower-integrity program, made is never used.
+    fn owned_by_user(job: HANDLE, own: &Identity) -> bool {
+        unsafe {
+            let information = OWNER_SECURITY_INFORMATION | LABEL_SECURITY_INFORMATION;
+            let mut length = 0u32;
+            NtQuerySecurityObject(job, information, null_mut(), 0, &mut length);
+            if length < 20 {
+                return false;
+            }
+            let mut buffer = vec![0u64; (length as usize).div_ceil(8)];
+            if NtQuerySecurityObject(job, information, buffer.as_mut_ptr() as *mut c_void, length, &mut length) < 0 {
+                return false;
+            }
+            // A self-relative descriptor: revision, padding, control, then the offsets of owner, group, SACL, DACL.
+            let bytes = std::slice::from_raw_parts(buffer.as_ptr() as *const u8, length as usize);
+            let read32 = |at: usize| u32::from_le_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]]);
+            let control = u16::from_le_bytes([bytes[2], bytes[3]]);
+            let owner_at = read32(4) as usize;
+            if owner_at == 0 || owner_at + 8 > bytes.len() {
+                return false;
+            }
+            let owner = sid_bytes(bytes.as_ptr().add(owner_at));
+            if owner != own.user && owner != own.owner {
+                return false;
+            }
+            // An object without a label is at medium.
+            let mut level = SECURITY_MANDATORY_MEDIUM_RID;
+            let sacl_at = read32(12) as usize;
+            if control & SE_SACL_PRESENT != 0 && sacl_at != 0 && sacl_at + 8 <= bytes.len() {
+                let count = u16::from_le_bytes([bytes[sacl_at + 4], bytes[sacl_at + 5]]) as usize;
+                let mut ace = sacl_at + 8;
+                for _ in 0..count {
+                    if ace + 8 > bytes.len() {
+                        break;
+                    }
+                    let size = u16::from_le_bytes([bytes[ace + 2], bytes[ace + 3]]) as usize;
+                    if bytes[ace] == SYSTEM_MANDATORY_LABEL_ACE_TYPE && ace + 16 <= bytes.len() {
+                        level = sid_rid(&sid_bytes(bytes.as_ptr().add(ace + 8)));
+                    }
+                    if size == 0 {
+                        break;
+                    }
+                    ace += size;
+                }
+            }
+            level >= SECURITY_MANDATORY_MEDIUM_RID
+        }
+    }
+
     fn limits(job: HANDLE) -> Option<JOBOBJECT_EXTENDED_LIMIT_INFORMATION> {
         unsafe {
             let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = zeroed();
@@ -225,9 +431,8 @@ mod helper {
         }
     }
 
-    /// A job made by `keep`: everything in it ends with it, and nothing in it may leave it. A job of the same name
-    /// that some other program made is never joined or used.
-    fn is_device_job(job: HANDLE) -> bool {
+    /// The limits `keep` sets: everything in the job ends with it, and nothing in it may leave it.
+    fn has_device_limits(job: HANDLE) -> bool {
         limits(job).is_some_and(|info| {
             let flags = info.BasicLimitInformation.LimitFlags;
             flags & JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE != 0
@@ -235,8 +440,10 @@ mod helper {
         })
     }
 
-    fn open_job(name: &str, access: u32) -> Option<Owned> {
-        let job = unsafe { OpenJobObjectW(access | JOB_OBJECT_QUERY, 0, wide(name).as_ptr()) };
+    /// The device's job, if it exists. It must be the user's; `with_limits` also wants `keep`'s limits (to join it).
+    /// Ending does not: a program of the device could change its own job's limits, and the job is ended anyway.
+    fn open_job(name: &str, access: u32, own: &Identity, with_limits: bool) -> Option<Owned> {
+        let job = unsafe { OpenJobObjectW(access | JOB_OBJECT_QUERY | READ_CONTROL, 0, wide(name).as_ptr()) };
         if job.is_null() {
             if last_error() == ERROR_FILE_NOT_FOUND {
                 return None;
@@ -244,7 +451,10 @@ mod helper {
             fail(3, &format!("cannot open the device's job (error {})", last_error()));
         }
         let job = Owned(job);
-        if !is_device_job(job.0) {
+        if !owned_by_user(job.0, own) {
+            fail(3, "the device's job belongs to someone else");
+        }
+        if with_limits && !has_device_limits(job.0) {
             fail(3, "the device's job has the wrong limits");
         }
         Some(job)
@@ -270,14 +480,19 @@ mod helper {
 
     fn keep(rest: &[u16]) -> ! {
         let (_, name, _) = daemon_and_job(rest);
+        let own = own_identity();
         let job = unsafe {
             let job = Owned(CreateJobObjectW(null(), wide(&name).as_ptr()));
             if job.0.is_null() {
                 fail(1, &format!("cannot make the device's job (error {})", last_error()));
             }
             if last_error() == ERROR_ALREADY_EXISTS {
-                // An earlier run of the daemon made it, and its keeper still holds it: it is used as it is.
-                if !is_device_job(job.0) {
+                // An earlier run of the daemon made it, and its keeper still holds it: it is used as it is, if it is
+                // the user's and has the limits.
+                if !owned_by_user(job.0, &own) {
+                    fail(3, "the device's job belongs to someone else");
+                }
+                if !has_device_limits(job.0) {
                     fail(3, "the device's job has the wrong limits");
                 }
             } else {
@@ -301,7 +516,8 @@ mod helper {
         // looks every few seconds instead.
         let port = unsafe {
             let port = Owned(CreateIoCompletionPort(INVALID_HANDLE_VALUE, null_mut(), 0, 1));
-            let association = JOBOBJECT_ASSOCIATE_COMPLETION_PORT { CompletionKey: null_mut(), CompletionPort: port.0 };
+            let association =
+                JOBOBJECT_ASSOCIATE_COMPLETION_PORT { CompletionKey: null_mut(), CompletionPort: port.0 };
             let associated = !port.0.is_null()
                 && SetInformationJobObject(
                     job.0,
@@ -334,7 +550,8 @@ mod helper {
 
     fn end(rest: &[u16]) -> ! {
         let (pid, name, _) = daemon_and_job(rest);
-        let Some(job) = open_job(&name, JOB_OBJECT_TERMINATE) else {
+        let own = own_identity();
+        let Some(job) = open_job(&name, JOB_OBJECT_TERMINATE, &own, false) else {
             println!("0 0");
             std::process::exit(0)
         };
@@ -357,6 +574,25 @@ mod helper {
             left = active_processes(job.0);
         }
         println!("{ended} {left}");
+        std::process::exit(0)
+    }
+
+    fn drives(rest: &[u16]) -> ! {
+        daemon(rest);
+        let mask = unsafe { GetLogicalDrives() };
+        let mut found = String::new();
+        for index in 0..26u32 {
+            if mask & (1 << index) == 0 {
+                continue;
+            }
+            let letter = char::from(b'A' + index as u8);
+            // A network drive can take many seconds to answer, and its files are another computer's.
+            let kind = unsafe { GetDriveTypeW(wide(&format!("{letter}:\\")).as_ptr()) };
+            if kind != DRIVE_REMOTE && kind != DRIVE_NO_ROOT_DIR {
+                found.push(letter);
+            }
+        }
+        println!("{found}");
         std::process::exit(0)
     }
 
@@ -446,7 +682,6 @@ mod helper {
         let _ = out.flush();
         std::process::exit(0)
     }
-
     // ------------------------------------------------------------------ a session
 
     /// The environment a fresh logon of this user gets (the registry's machine and user variables, then the
@@ -568,22 +803,55 @@ mod helper {
         (event == CTRL_C_EVENT || event == CTRL_BREAK_EVENT) as i32
     }
 
+    type CreateAsUser = unsafe extern "system" fn(
+        HANDLE,
+        *const u16,
+        *mut u16,
+        *const c_void,
+        *const c_void,
+        i32,
+        u32,
+        *const c_void,
+        *const u16,
+        *const STARTUPINFOW,
+        *mut PROCESS_INFORMATION,
+    ) -> i32;
+
+    /// `CreateProcessAsUserW`, from kernel32 where Windows has it (so advapi32 is not loaded for the session's
+    /// whole life), else from advapi32.
+    fn create_as_user() -> CreateAsUser {
+        unsafe {
+            let name = c"CreateProcessAsUserW".as_ptr() as *const u8;
+            let mut found = GetProcAddress(GetModuleHandleW(wide("kernel32.dll").as_ptr()), name);
+            if found.is_none() {
+                let library = LoadLibraryExW(wide("advapi32.dll").as_ptr(), null_mut(), LOAD_LIBRARY_SEARCH_SYSTEM32);
+                if !library.is_null() {
+                    found = GetProcAddress(library, name);
+                }
+            }
+            match found {
+                Some(function) => std::mem::transmute::<_, CreateAsUser>(function),
+                None => fail(NOT_STARTED, "this Windows has no CreateProcessAsUserW"),
+            }
+        }
+    }
+
     fn session(rest: &[u16]) -> ! {
         unsafe { SetConsoleCtrlHandler(Some(keep_running), 1) };
-        let (_, name, rest) = daemon_and_job(rest);
+        let (pid, name, rest) = daemon_and_job(rest);
         let mut command: Vec<u16> = skip_spaces(rest).to_vec();
         if command.is_empty() {
             fail(NOT_STARTED, "no command");
         }
         command.push(0);
+        let own = own_identity();
         // Held while the session lasts: the job stays reachable by its name even if its keeper is gone.
-        let Some(job) = open_job(&name, JOB_OBJECT_ASSIGN_PROCESS) else {
+        let Some(job) = open_job(&name, JOB_OBJECT_ASSIGN_PROCESS, &own, true) else {
             fail(NOT_STARTED, "the device's job is gone")
         };
-        if unsafe { AssignProcessToJobObject(job.0, GetCurrentProcess()) } == 0 {
-            fail(NOT_STARTED, &format!("cannot join the device's job (error {})", last_error()));
-        }
+        let token = daemon_token(pid, &own);
         let environment = environment();
+        let create = create_as_user();
 
         unsafe {
             let streams = [
@@ -631,19 +899,34 @@ mod helper {
                 }
                 startup.lpAttributeList = list;
             }
+            // Made suspended, and outside the daemon's job (Node puts its children in a job of its own that ends
+            // with the daemon), then put in the device's job before it runs a single instruction. A program on
+            // pipes gets a console of its own with no window. A job above the daemon that allows no breakaway keeps
+            // the program in it: then it is made inside, and the device's job is nested under that one.
+            let base = CREATE_UNICODE_ENVIRONMENT
+                | EXTENDED_STARTUPINFO_PRESENT
+                | CREATE_SUSPENDED
+                | if console { 0 } else { CREATE_NO_WINDOW };
             let mut process: PROCESS_INFORMATION = zeroed();
-            let started = CreateProcessW(
-                null(),
-                command.as_mut_ptr(),
-                null(),
-                null(),
-                (!inherited.is_empty()) as i32,
-                CREATE_UNICODE_ENVIRONMENT | EXTENDED_STARTUPINFO_PRESENT,
-                environment.as_ptr() as *const c_void,
-                null(),
-                &startup.StartupInfo,
-                &mut process,
-            );
+            let mut start = |flags: u32| {
+                create(
+                    token.0,
+                    null(),
+                    command.as_mut_ptr(),
+                    null(),
+                    null(),
+                    (!inherited.is_empty()) as i32,
+                    flags,
+                    environment.as_ptr() as *const c_void,
+                    null(),
+                    &startup.StartupInfo,
+                    &mut process,
+                )
+            };
+            let mut started = start(base | CREATE_BREAKAWAY_FROM_JOB);
+            if started == 0 && last_error() == ERROR_ACCESS_DENIED {
+                started = start(base);
+            }
             let error = last_error();
             if !attributes.is_empty() {
                 DeleteProcThreadAttributeList(attributes.as_mut_ptr() as *mut c_void);
@@ -651,7 +934,14 @@ mod helper {
             if started == 0 {
                 fail(NOT_STARTED, &format!("cannot start the program (error {error})"));
             }
+            if AssignProcessToJobObject(job.0, process.hProcess) == 0 {
+                let error = last_error();
+                TerminateProcess(process.hProcess, NOT_STARTED as u32);
+                fail(NOT_STARTED, &format!("cannot put the program in the device's job (error {error})"));
+            }
+            ResumeThread(process.hThread);
             CloseHandle(process.hThread);
+            drop(token);
             // The program holds the pipes now: when it and what it started are done with them, the daemon sees
             // them close, whether or not the helper is still there.
             for &h in &inherited {
@@ -674,6 +964,7 @@ mod helper {
             "keep" => keep(rest),
             "end" => end(rest),
             "list" => list(rest),
+            "drives" => drives(rest),
             _ => fail(2, "this helper is started by Mousse's daemon only"),
         }
     }
