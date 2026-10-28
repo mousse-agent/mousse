@@ -37,7 +37,8 @@ import {
 import { SettingsStore } from '../../mms/settings/SettingsStore'
 import { listEditors, openInEditor, openRemoteInEditor } from '../editors'
 import { nodeOfThread, remoteRoute } from '../remoteEditorFlow'
-import { EDITOR_PROXY_READY, type RemoteOpenResult, type RemoteRoute } from '../../shared/remoteEditor'
+import { EDITOR_PROXY_READY, type RemoteAskResult, type RemoteOpenResult, type RemoteRoute } from '../../shared/remoteEditor'
+import { askForEditorAccess } from '../remoteEditorAsk'
 import { refreshApplicationMenu } from '../applicationMenu'
 import { setGuestShortcuts } from '../menu/guestShortcutForward'
 import type { ShortcutOverrides } from '../../shared/commands'
@@ -508,6 +509,24 @@ export function registerGuiIpc(
     notification.show()
   }
 
+  /** Another of the user's computers asks to open its editor here (shell access): a desktop notification; the window holds the Allow / Not now prompt. */
+  const notifyRemoteEditorAsk = (device: string): void => {
+    if (!Notification.isSupported()) return
+    const notification = new Notification({
+      title: 'Mousse',
+      body: `Allow ${device} to open its editor here? This gives shell access. Open Mousse to answer.`
+    })
+    notification.on('click', () => {
+      const win = getWindow()
+      if (win && !win.isDestroyed()) {
+        if (win.isMinimized()) win.restore()
+        win.show()
+        win.focus()
+      }
+    })
+    notification.show()
+  }
+
   /** Another of the user's computers opened its first terminal on this one: said in a desktop notification. */
   const notifyRemoteTerminal = (device: string, threadName: string): void => {
     if (!Notification.isSupported()) return
@@ -794,6 +813,7 @@ export function registerGuiIpc(
       const threadName = typeof info?.threadName === 'string' ? info.threadName : ''
       if (info?.kind === 'remote-terminal') notifyRemoteTerminal(device, threadName)
       if (info?.kind === 'remote-editor') notifyRemoteEditor(device)
+      if (info?.kind === 'remote-editor-ask') notifyRemoteEditorAsk(device)
       if (info?.kind === 'remote-work') notifyRemoteWork(device, threadName)
       if (info?.kind === 'remote-project') notifyRemoteProject(device, typeof info.projectName === 'string' ? info.projectName : '')
     }
@@ -2288,6 +2308,10 @@ export function registerGuiIpc(
     const { kind } = await remoteRoute((method, params) => guiMms.request(method, params), node, { proxyReady: EDITOR_PROXY_READY })
     return { kind }
   })
+  // Asks the computer that runs the thread to allow editor connections from this one. A person there answers.
+  registerHandler('editors:askAccess', async (_e, threadId: string): Promise<RemoteAskResult> =>
+    askForEditorAccess((method, params) => guiMms.request(method, params), threadId)
+  )
 
   registerHandler('github:status', async () => {
     const response = await guiMms.request<{ availability: unknown }>('github.status')

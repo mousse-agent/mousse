@@ -2,7 +2,7 @@ import type { AppletApi, AppletUiEvent } from '../shared/appletRuntime'
 import { contextBridge, ipcRenderer } from 'electron'
 import { readStartupAppearanceArgument } from '../shared/startupAppearance'
 import type { NetStatus } from '../shared/net/local'
-import type { RemoteOpenResult, RemoteRoute } from '../shared/remoteEditor'
+import type { RemoteAskResult, RemoteOpenResult, RemoteRoute } from '../shared/remoteEditor'
 import type { CommandId } from '../shared/commands'
 import type { LocalTtsModelId, LocalTtsModelStatus, ProviderSpeechRequest, ProviderSpeechResult } from '../shared/readAloud'
 import type { LocalSttModelId, LocalSttModelStatus, ProviderTranscriptionRequest, ProviderTranscriptionResult } from '../shared/dictation'
@@ -565,7 +565,9 @@ const api = {
     openRemote: (editorId: string, threadId: string): Promise<RemoteOpenResult> =>
       ipcRenderer.invoke('editors:openRemote', editorId, threadId),
     /** How this computer reaches the computer that runs a thread, for an editor. */
-    remoteRoute: (threadId: string): Promise<RemoteRoute> => ipcRenderer.invoke('editors:remoteRoute', threadId)
+    remoteRoute: (threadId: string): Promise<RemoteRoute> => ipcRenderer.invoke('editors:remoteRoute', threadId),
+    /** Asks the computer that runs a thread to allow editor connections from this one. A person there answers. */
+    askAccess: (threadId: string): Promise<RemoteAskResult> => ipcRenderer.invoke('editors:askAccess', threadId)
   },
   inAppBrowser: {
     registerTab: (input) => ipcRenderer.invoke('browser:register-tab', input),
@@ -1097,6 +1099,12 @@ const api = {
       const handler = (_: Electron.IpcRendererEvent, status: NetStatus) => cb(status)
       ipcRenderer.on('net:updated', handler)
       return () => ipcRenderer.removeListener('net:updated', handler)
+    },
+    /** Another computer asked this one for editor connections, or an ask was answered or ran out: read the waiting asks again. */
+    onEditorAsks: (cb: () => void): (() => void) => {
+      const handler = () => cb()
+      ipcRenderer.on('net:editor-asks', handler)
+      return () => ipcRenderer.removeListener('net:editor-asks', handler)
     }
   },
   /** In-app updates from GitHub Releases (src/main/updates). */

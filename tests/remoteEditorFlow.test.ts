@@ -124,7 +124,8 @@ describe('the folder a thread works in on its computer', () => {
     expect(await remoteFolder(daemon({ folders: [missing], restore: new Error('git failed') }).ask, threadId)).toEqual({ ok: false, reason: 'worktree_missing' })
     expect(await remoteFolder(daemon({ folders: [missing], restore: refused('computer_offline', 'Studio is offline.') }).ask, threadId)).toEqual({
       ok: false,
-      reason: 'failed',
+      reason: 'connection',
+      failure: 'offline',
       message: 'Studio is offline.'
     })
   })
@@ -147,9 +148,22 @@ describe('the folder a thread works in on its computer', () => {
     }
   })
 
-  it('passes on the words of the router when the computer is offline, refuses, or is too old', async () => {
-    for (const code of ['computer_offline', 'computer_forbidden', 'computer_outdated']) {
-      expect(await remoteFolder(daemon({ folders: [refused(code, 'Studio is offline.')] }).ask, threadId)).toEqual({ ok: false, reason: 'failed', message: 'Studio is offline.' })
+  it('turns an offline computer, a refusal of this device and a computer that is too old into the states a window words', async () => {
+    const states: Array<[string, unknown, string]> = [
+      ['computer_offline', undefined, 'offline'],
+      ['computer_forbidden', { reason: 'blocked' }, 'blocked'],
+      ['computer_forbidden', { reason: 'setting_off' }, 'setting_off'],
+      ['computer_forbidden', { reason: 'capability' }, 'capability'],
+      ['computer_outdated', { name: 'Studio' }, 'unsupported']
+    ]
+    for (const [code, details, failure] of states) {
+      expect(await remoteFolder(daemon({ folders: [refused(code, 'Studio said so.', details)] }).ask, threadId)).toEqual({ ok: false, reason: 'connection', failure, message: 'Studio said so.' })
+    }
+  })
+
+  it('passes on the router’s own words when no state fits (a refusal for another reason, an action that cannot be routed)', async () => {
+    for (const [code, details] of [['computer_forbidden', { reason: 'terminal_off' }], ['computer_forbidden', undefined], ['not_available_remotely', undefined]] as const) {
+      expect(await remoteFolder(daemon({ folders: [refused(code, 'Studio said so.', details)] }).ask, threadId)).toEqual({ ok: false, reason: 'failed', message: 'Studio said so.' })
     }
   })
 

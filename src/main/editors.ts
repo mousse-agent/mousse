@@ -8,7 +8,16 @@ import type { RemoteOpenResult } from '../shared/remoteEditor'
 import { EDITOR_PROXY_READY } from '../shared/remoteEditor'
 import type { EditorInfo } from '../shared/types'
 import { isBatchLauncher, RemoteOpenError, remoteExtensionHint, remoteLaunchArguments, supportsRemoteFolders } from './remoteEditor'
-import { resolveRemoteOpen, type Ask } from './remoteEditorFlow'
+import {
+  nodeOfThread,
+  probeTunnel,
+  resolveRemoteOpen,
+  sshProbeFailure,
+  type Ask,
+  type ConnectionVia,
+  type SshProbeOutcome
+} from './remoteEditorFlow'
+import { runSshProbe } from './sshProbe'
 
 interface EditorDefinition {
   id: string
@@ -361,6 +370,13 @@ export interface RemoteOpenIo {
   forgetDetected: () => void
   /** Whether Mousse's own SSH names reach a computer. */
   proxyReady: boolean
+  /** Signs in once with `ssh` over one of Mousse's names (`ssh -o BatchMode=yes <name> exit`). */
+  sshProbe: (alias: string) => Promise<SshProbeOutcome>
+  /**
+   * The computers whose connection passed the check in this run of the app. The check runs before the first open
+   * of each computer and again after any failure, not before every open.
+   */
+  checked: Map<string, ConnectionVia | undefined>
 }
 
 const defaultRemoteOpenIo: RemoteOpenIo = {
@@ -378,7 +394,34 @@ const defaultRemoteOpenIo: RemoteOpenIo = {
   forgetDetected: () => {
     cache = null
   },
-  proxyReady: EDITOR_PROXY_READY
+  proxyReady: EDITOR_PROXY_READY,
+  sshProbe: runSshProbe,
+  checked: new Map()
+}
+
+/**
+ * The check before an editor opens a folder over one of Mousse's SSH names: the connection is opened and closed
+ * at once for its typed reason (offline, editor connections off, no SSH server...), then one sign-in with `ssh`
+ * shows a refused key. A pass is remembered for the run of the app; a failure forgets it, so the next open checks again.
+ */
+export async function checkConnection(
+  ask: Ask,
+  node: string,
+  alias: string,
+  env: EditorDetectionEnv,
+  io: Pick<RemoteOpenIo, 'sshProbe' | 'checked'>
+): Promise<{ ok: true; via?: ConnectionVia } | Extract<RemoteOpenResult, { ok: false }>> {
+  if (io.checked.has(node)) return { ok: true, via: io.checked.get(node) }
+  const failed = (result: Extract<RemoteOpenResult, { ok: false }>) => {
+    io.checked.delete(node)
+    return result
+  }
+  const tunnel = await probeTunnel(ask, node)
+  if (!tunnel.ok) return failed(tunnel)
+  const login = await io.sshProbe(alias)
+  if ('ok' in login && !login.ok) return failed(sshProbeFailure(login.stderr, alias, env.platform === 'win32'))
+  io.checked.set(node, tunnel.via)
+  return { ok: true, via: tunnel.via }
 }
 
 /**
@@ -408,10 +451,20 @@ export async function openRemoteInEditor(
       io.forgetDetected()
       return { ok: false, reason: 'editor_missing', message: `${editor.label} is no longer installed.` }
     }
+    // One of Mousse's own names reaches the computer through its connection: look before the editor starts, so a
+    // refusal is a message here and not an editor window that waits. An address the person approved was already
+    // proven by a sign-in when it was approved, and the editor asks about its host key itself.
+    let via: ConnectionVia | undefined
+    if (resolved.host.kind === 'mousse') {
+      const node = nodeOfThread(threadId)!
+      const checked = await checkConnection(ask, node, resolved.host.alias, env, io)
+      if (!checked.ok) return checked
+      via = checked.via
+    }
     await io.launch(command, args, editorLaunchEnvironment(io.processEnv()))
     // Only a hint: the editor asks for the extension itself when it is really missing.
     const hint = remoteExtensionHint(editor.id, env.home, builtInExtensionDirectories(editor), io.list)
-    return { ok: true, ...(hint ? { hint } : {}) }
+    return { ok: true, ...(hint ? { hint } : {}), ...(via ? { via } : {}) }
   } catch (error) {
     if (error instanceof RemoteOpenError) return { ok: false, reason: error.reason, message: error.message }
     throw error

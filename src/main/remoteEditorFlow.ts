@@ -4,8 +4,8 @@
  * is reached through `ask`, so tests give it fakes.
  */
 import { isComputerErrorCode } from '../shared/bridge/computerErrors'
-import type { EditorSshResult, EditorSshStatus } from '../shared/net/local'
-import type { RemoteOpenResult, RemoteRoute } from '../shared/remoteEditor'
+import type { EditorProbeResult, EditorSshResult, EditorSshStatus } from '../shared/net/local'
+import type { EditorConnectionFailure, RemoteOpenResult, RemoteRoute } from '../shared/remoteEditor'
 import { parseQualifiedId } from '../shared/threadRef'
 import { checkedFolder, parseSshTarget, RemoteOpenError, type CheckedFolder, type RemoteHost } from './remoteEditor'
 
@@ -27,6 +27,34 @@ const stateOf = (error: unknown): unknown => {
 }
 const messageOf = (error: unknown): string =>
   error instanceof Error && error.message ? error.message : 'The computer did not answer.'
+const reasonOf = (error: unknown): unknown => {
+  const details = error && typeof error === 'object' ? (error as { details?: unknown }).details : undefined
+  return details && typeof details === 'object' ? (details as { reason?: unknown }).reason : undefined
+}
+
+/**
+ * The editor connection state a failed call to another computer stands for: it is offline, it blocked this
+ * computer or switched other computers off, this computer lacks the grant, or it runs a Mousse too old for
+ * the call. Undefined for an error that says something else (the router's other words are shown as they are).
+ */
+export function connectionFailureOf(error: unknown): EditorConnectionFailure | undefined {
+  switch (codeOf(error)) {
+    case 'computer_offline':
+      return 'offline'
+    case 'computer_outdated':
+      return 'unsupported'
+    case 'rate_limited':
+      return 'rate_limited'
+    case 'deadline_exceeded':
+      return 'timeout'
+    case 'computer_forbidden': {
+      const reason = reasonOf(error)
+      return reason === 'blocked' || reason === 'setting_off' || reason === 'capability' ? reason : undefined
+    }
+    default:
+      return undefined
+  }
+}
 
 /** The computer that runs a thread, from the thread's qualified id. Undefined for a thread of this computer. */
 export function nodeOfThread(threadId: unknown): string | undefined {
@@ -65,9 +93,13 @@ function refusalOf(error: unknown): RemoteFailure | undefined {
       return { ok: false, reason: 'folder_not_openable' }
     case 'workspace_not_ready':
       return { ok: false, reason: stateOf(error) === 'recovery_required' ? 'worktree_recovery' : 'worktree_missing' }
-    default:
-      // Words of the router (offline, not allowed, update the other computer): shown as they are.
+    default: {
+      // Offline, blocked, switched off, too old: states the window words with a next step.
+      const failure = connectionFailureOf(error)
+      if (failure) return { ok: false, reason: 'connection', failure, message: messageOf(error) }
+      // Any other word of the router (not allowed, one action on several computers): shown as it is.
       return isComputerErrorCode(codeOf(error)) ? { ok: false, reason: 'failed', message: messageOf(error) } : undefined
+    }
   }
 }
 
@@ -134,4 +166,37 @@ export async function resolveRemoteOpen(
   if (route.host) return { ok: true, host: route.host, folder: folder.folder }
   const host = await mousseHost(ask, node)
   return host.ok ? { ok: true, host: host.host, folder: folder.folder } : host
+}
+
+/** How the connection to a computer runs, as the tunnel probe found it. */
+export type ConnectionVia = NonNullable<Extract<RemoteOpenResult, { ok: true }>['via']>
+
+/**
+ * Opens an editor connection to the computer and closes it at once (`net.editor.probe`). What a refusal says is
+ * what the editor's own connection would meet, so the person sees it here instead of a hung editor window.
+ */
+export async function probeTunnel(ask: Ask, node: string): Promise<{ ok: true; via: ConnectionVia } | RemoteFailure> {
+  const result = (await ask('net.editor.probe', { node })) as EditorProbeResult
+  if (result.ok) return { ok: true, via: { path: result.path, ...(result.transport ? { transport: result.transport } : {}) } }
+  if (result.reason === 'ssh_settings') return { ok: false, reason: 'ssh_settings', code: result.code, message: result.message }
+  return { ok: false, reason: 'connection', failure: result.reason, message: result.message }
+}
+
+/** What running `ssh -o BatchMode=yes <alias> exit` ended with. `skipped`: this computer has no `ssh` to ask. */
+export type SshProbeOutcome = { ok: true } | { ok: false; stderr: string } | { skipped: true }
+
+/** The last line `ssh` printed, shortened, for a message. Never more than a line of what ssh itself said. */
+function lastLine(text: string): string {
+  const line = text.split(/\r?\n/u).map((row) => row.trim()).filter(Boolean).pop() ?? ''
+  return line.length > 200 ? `${line.slice(0, 197)}...` : line
+}
+
+/**
+ * What a failed sign-in check means. The SSH server refusing this computer's key is the one case with a fix of its
+ * own; anything else is shown with the line `ssh` printed. `alias` and `windows` only shape the remedy.
+ */
+export function sshProbeFailure(stderr: string, alias: string, windows: boolean): RemoteFailure {
+  if (/Permission denied \(/iu.test(stderr))
+    return { ok: false, reason: 'connection', failure: 'key_refused', ...(windows ? {} : { command: `ssh-copy-id ${alias}` }) }
+  return { ok: false, reason: 'connection', failure: 'ssh_failed', message: lastLine(stderr) }
 }
