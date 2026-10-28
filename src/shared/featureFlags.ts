@@ -51,5 +51,15 @@ export function validateFeatureFlags(flags: MousseFeatureFlags): void {
 export interface NetFeatureFlags {
   netBridge: boolean
   netSpaces: boolean
+  /**
+   * This computer sends the actions of a thread that another of the user's computers runs to that
+   * computer (the router in `mms/bridge/routed/ThreadRouter.ts`). Off until the interface that shows
+   * those threads ships; it needs `netBridge`.
+   */
+  netBridgeThreads: boolean
 }
-export const DEFAULT_NET_FEATURE_FLAGS: Readonly<NetFeatureFlags> = Object.freeze({ netBridge: false, netSpaces: false })
+export const DEFAULT_NET_FEATURE_FLAGS: Readonly<NetFeatureFlags> = Object.freeze({
+  netBridge: false,
+  netSpaces: false,
+  netBridgeThreads: false
+})

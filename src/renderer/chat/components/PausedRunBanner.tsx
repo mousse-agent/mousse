@@ -100,8 +100,8 @@ export function PausedRunBanner({ threadId, onStop, client }: { threadId?: strin
       now={now}
       busy={busy}
       error={error}
-      onResume={() => void run('resume', () => actions.resumeNow(pause.runId))}
-      onCancel={() => void run('cancel', () => actions.cancel(pause.runId))}
+      onResume={() => void run('resume', () => actions.resumeNow(pause.runId, threadId ?? undefined))}
+      onCancel={() => void run('cancel', () => actions.cancel(pause.runId, threadId ?? undefined))}
       {...(onStop ? { onStop } : {})}
     />
   )

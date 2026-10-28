@@ -10,7 +10,7 @@ export const GUI_REQUIRED_METHODS = [
   'actions.sweepRetention', 'actions.configureRetention', 'actions.pin',
   'review.files', 'review.file',
   'operations.get', 'operations.abort', 'operations.recover', 'publish.status', 'publish.start',
-  'threads.inventory', 'threads.trash', 'threads.restore', 'threads.purge', 'threads.configureTrash',
+  'threads.focus', 'threads.inventory', 'threads.trash', 'threads.restore', 'threads.purge', 'threads.configureTrash',
   'storage.policy', 'storage.configure', 'storage.reviewDismiss', 'storage.cleanup.plan', 'storage.cleanup.run', 'storage.cleanup.lastReport',
   'storage.usage',
   'subagents.list',

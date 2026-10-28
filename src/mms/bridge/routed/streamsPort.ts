@@ -7,7 +7,7 @@ import type { RoutedStreamsPort } from './OwnerRoutes'
  * to the computer that asked, so the request names only what it is about (a thread, a terminal).
  */
 export function routedStreamsPort(
-  threads: Pick<ThreadStreamAdapter, 'openPrivate' | 'privateHead'> & {
+  threads: Pick<ThreadStreamAdapter, 'openPrivate' | 'privateHead' | 'closePrivate'> & {
     store: Pick<ThreadStreamAdapter['store'], 'head'>
   }
 ): RoutedStreamsPort {
@@ -30,6 +30,18 @@ export function routedStreamsPort(
         kind: spec.kind,
         subject: privateRecordSubject(spec)
       }
+    },
+    close: (caller, request) => {
+      threads.closePrivate({
+        reader: caller,
+        kind: request.kind,
+        subject:
+          request.kind === 'thread'
+            ? request.threadId
+            : request.kind === 'terminal'
+              ? `${request.threadId}:${request.ptyId}`
+              : ''
+      })
     },
     head: (caller, threadId) => threads.privateHead(caller, threadId)
   }

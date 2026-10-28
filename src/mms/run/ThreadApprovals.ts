@@ -523,6 +523,27 @@ export class ThreadApprovals {
     })
   }
 
+  /**
+   * Revokes every standing rule that a person on another computer made (the rule's source request was
+   * answered by `node`), in every thread. Returns how many were removed.
+   */
+  revokeRulesMadeBy(node: string): number {
+    return this.db.transaction(() => {
+      const rows = this.db
+        .statement(
+          `SELECT r.thread_id AS thread_id, r.fingerprint AS fingerprint, r.permission_key AS permission_key
+           FROM approval_rules r JOIN approval_requests q ON q.request_id = r.source_request_id
+           WHERE json_extract(q.answered_by, '$.node') = ?`
+        )
+        .all(node) as Array<{ thread_id: string; fingerprint: string; permission_key: string }>
+      for (const row of rows) {
+        this.db.statement('DELETE FROM approval_rules WHERE thread_id = ? AND fingerprint = ?').run(row.thread_id, row.fingerprint)
+        this.store.appendEvent({ threadId: row.thread_id, runId: null, type: 'approval.rule_revoked', payload: { fingerprint: row.fingerprint, permissionKey: row.permission_key } })
+      }
+      return rows.length
+    })
+  }
+
   /** The continue turn of a dead run, once none of its requests is still pending. */
   private continuationDue(record: ApprovalRecord): ContinuationDue | null {
     if (!record.runId) return null

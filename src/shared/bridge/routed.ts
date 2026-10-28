@@ -134,7 +134,12 @@ export const ROUTED_FORBIDDEN_KEYS = [
 export const ROUTED_METHODS: Readonly<Record<string, RoutedRow>> = Object.freeze({
   // ---------------------------------------------------------------- thread reads
   'threads.get': read('thread', ['threadId']),
-  'thread.snapshot': read('thread', ['threadId']),
+  // `transcript: false` leaves out what a computer that reads the thread's stream already has (the
+  // messages and the queue), so a snapshot of a long thread is not sent a second time.
+  'thread.snapshot': read('thread', ['threadId', 'transcript'], {
+    version: 2,
+    since: { transcript: 2 }
+  }),
   // Older messages of a long thread, a page at a time, newest first from `before` (a message id).
   'thread.messages': read('thread', ['threadId', 'before', 'limit']),
   // The image of one message or queued message, by its place in it (the stream carries only the newest images' data).
@@ -443,8 +448,11 @@ export const ROUTED_METHODS: Readonly<Record<string, RoutedRow>> = Object.freeze
   }),
   'git.deleteBranch': write('folder', [...FOLDER, 'name', 'force'], { required: ['name'] }),
   // Stops a Git action the same connection started; another connection is told it is not running.
-  'git.cancelOperation': write('thread', ['threadId', 'operationId'], {
-    required: ['operationId']
+  // A Git action on a project's folder is stopped by naming the project; one on a thread's, by the thread.
+  'git.cancelOperation': write('folder', [...FOLDER, 'operationId'], {
+    required: ['operationId'],
+    version: 2,
+    since: { projectId: 2 }
   }),
   'git.init': write('project', ['projectId']),
   'pullRequests.create': write(
@@ -639,6 +647,13 @@ export const ROUTED_TRANSPORT_METHODS: Readonly<Record<string, RoutedTransportRo
       keys: ['kind', 'threadId', 'ptyId'],
       required: ['kind']
     },
+    /** Lets go of a stream this computer opened and no longer reads, to make room for another. */
+    'stream.close': {
+      capability: 'read',
+      version: 1,
+      keys: ['kind', 'threadId', 'ptyId'],
+      required: ['kind']
+    },
     page: { capability: 'read', version: 1, keys: ['id', 'index'], required: ['id', 'index'] },
     /** Takes a value uploaded as a request artifact and keeps it for the call that names it in `stagedValues`. */
     stage: { capability: 'chat', version: 1, keys: ['input'], required: ['input'] }
@@ -697,6 +712,11 @@ export const ROUTED_LOCAL_METHODS: readonly RoutedLocalRule[] = [
     methods: ['threads.purge'],
     reason:
       'Permanent delete cannot be undone, so it stays on the computer that runs the thread; Restore is routed.'
+  },
+  {
+    methods: ['threads.focus'],
+    reason:
+      'A window asks its own daemon to keep a thread of another computer in view; the router answers it.'
   },
   {
     methods: ['threads.reorder', 'projects.reorder'],

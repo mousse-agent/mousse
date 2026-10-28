@@ -35,6 +35,7 @@ import { ThreadMoveBanner } from './providers/MoveProviderDialog'
 import { mousseToUIMessages, chatStatusFromPhase } from '../chat/adapters/mousseToUI'
 import {
   findQuickActionCardForApproval,
+  questionAnswerThreadId,
   type QuickActionApproval,
 } from '../chat/components/agent-elements/tools/quick-action-approval'
 import '../chat/components/agent-elements/agent-ui.css'
@@ -279,9 +280,11 @@ export function OrchestratorChat() {
   // to its awaiting card (toolCallId); null keeps the generic modal so an
   // approval is never stranded without UI.
   const submitQuickActionDecision = useCallback(
-    (requestId: string, decision: 'approve' | 'reject') => {
+    (requestId: string, questionThreadId: string | undefined, decision: 'approve' | 'reject') => {
+      // The thread that asked, which may be on another computer; the shown one when it did not say.
+      const threadId = questionAnswerThreadId({ threadId: questionThreadId }, useAppStore.getState().activeThreadId)
       void window.mousse.orchestrator
-        .answerQuestions(requestId, { approval: decision })
+        .answerQuestions(requestId, { approval: decision }, threadId)
         .then(() => {
           // `false` means the daemon no longer knows this question (answered
           // elsewhere, dismissed, timed out, or default-rejected by a
@@ -299,13 +302,13 @@ export function OrchestratorChat() {
   const quickActionApproval = useMemo<QuickActionApproval | null>(() => {
     const match = findQuickActionCardForApproval(uiMessages, pendingQuestions)
     if (!match || !pendingQuestions) return null
-    const requestId = pendingQuestions.requestId
+    const { requestId, threadId } = pendingQuestions
     return {
       requestId,
       toolCallId: match.toolCallId,
       label: match.label,
-      onApprove: () => submitQuickActionDecision(requestId, 'approve'),
-      onReject: () => submitQuickActionDecision(requestId, 'reject'),
+      onApprove: () => submitQuickActionDecision(requestId, threadId, 'approve'),
+      onReject: () => submitQuickActionDecision(requestId, threadId, 'reject'),
     }
   }, [pendingQuestions, uiMessages, submitQuickActionDecision])
 
@@ -1081,7 +1084,8 @@ export function OrchestratorChat() {
                 pending={questionsSnapshot}
                 onSubmit={(answers) => {
                   const requestId = questionsSnapshot.requestId
-                  void window.mousse.orchestrator.answerQuestionsDetailed(requestId, answers).then((outcome) => {
+                  const threadId = questionAnswerThreadId(questionsSnapshot, activeThreadId)
+                  void window.mousse.orchestrator.answerQuestionsDetailed(requestId, answers, threadId).then((outcome) => {
                     // The daemon accepted the answers or no longer knows this
                     // question (answered elsewhere / expired / preempted) —
                     // either way the prompt is settled: drop it so a decided
@@ -1097,7 +1101,7 @@ export function OrchestratorChat() {
                   })
                 }}
                 onDismiss={() => {
-                  void window.mousse.orchestrator.dismissQuestions(questionsSnapshot.requestId)
+                  void window.mousse.orchestrator.dismissQuestions(questionsSnapshot.requestId, questionAnswerThreadId(questionsSnapshot, activeThreadId))
                   setPendingQuestions(null)
                 }}
               />

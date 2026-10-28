@@ -1,5 +1,11 @@
 import { createHash } from 'node:crypto'
-import { NetError, isId, newId, validateStreamDescriptor } from '../../../shared/net'
+import {
+  BRIDGE_ROUTED_EVENT_TYPES,
+  NetError,
+  isId,
+  newId,
+  validateStreamDescriptor
+} from '../../../shared/net'
 import type {
   NetErrorCode,
   NodeDelegation,
@@ -50,6 +56,18 @@ interface Request extends BridgeHubRequestStatus {
 interface DisplayListener {
   update: (value: ThreadDisplayUpdate, position: BridgeDisplayPosition) => void | Promise<void>
   error?: (code: NetErrorCode) => void
+  /** A display-only note from a private stream (a streaming message, the pending questions...). */
+  delta?: (type: string, data: unknown) => void
+}
+/**
+ * How a thread is attached. A private attachment reads the stream only this computer may read
+ * (opened with `routed.stream.open`), which also carries what a phone's stream does not.
+ */
+export interface HubAttachOptions {
+  /** Opens the stream on the owner. Without it the thread's shared display stream is opened. */
+  open?: () => Promise<{ descriptor: StreamDescriptor; head: { epoch: number; seq: number } }>
+  /** Which room a private attachment counts against: threads in view, or the channel for Git progress. */
+  room?: 'thread' | 'channel'
 }
 interface Attachment {
   ref: BridgeEntityRef
@@ -63,7 +81,10 @@ interface Attachment {
   bytes: number
   stopped: boolean
   offClosed?: () => void
+  offEphemeral?: () => void
   listeners: Set<DisplayListener>
+  /** Set on a private attachment: it is reopened the same way after a reconnect. */
+  options?: HubAttachOptions
 }
 export interface BridgeHubOptions {
   db: NetDatabase
@@ -110,6 +131,9 @@ function dropStagedData(request: { method: string; params: unknown }): void {
   if (request.method === 'attachments.stage' && request.params && typeof request.params === 'object')
     request.params = { ...(request.params as object), data: '' } as typeof request.params
 }
+/** A private attachment also takes the records only a private stream has (Git progress, terminal output). */
+const projectionTypes = (options?: HubAttachOptions): readonly string[] =>
+  options?.open ? BRIDGE_ROUTED_EVENT_TYPES : []
 /** Trusted local caller journal. A sent mutation is never resubmitted by recovery. */
 export class BridgeHub {
   private readonly clock: Clock
@@ -138,6 +162,7 @@ export class BridgeHub {
   >()
   private readonly cleanup = new Set<Promise<void>>()
   private readonly attaching = new Set<string>()
+  private readonly attachingRooms = new Map<string, string>()
   private readonly inputs: DispatchInputJournal
   private readonly listeners = new Set<(status: BridgeHubRequestStatus) => void>()
   private stopped = false
@@ -146,7 +171,7 @@ export class BridgeHub {
     this.clock = options.clock ?? systemClock
     for (const [key, maximum] of [
       ['maxActiveRequests', 32],
-      ['maxStreams', 8],
+      ['maxStreams', 32],
       ['maxJournalRecords', 16384],
       ['maxJournalBytes', 16 * 1024 * 1024]
     ] as const) {
@@ -844,22 +869,28 @@ export class BridgeHub {
   ): Promise<unknown> {
     return this.call(target, 'bridge.dispatch', input, options, signal)
   }
-  private attachmentKey(ref: BridgeEntityRef): string {
-    return json([ref.nodeId, ref.entityId])
+  private attachmentKey(ref: BridgeEntityRef, options?: HubAttachOptions): string {
+    return options?.open ? json([ref.nodeId, ref.entityId, 'private']) : json([ref.nodeId, ref.entityId])
+  }
+  /** The row that remembers the stream's descriptor, which lets its records be received. */
+  private attachmentEntity(ref: BridgeEntityRef, options?: HubAttachOptions): string {
+    return options?.open ? `private:${ref.entityId}` : ref.entityId
   }
   async attach(
     ref: BridgeEntityRef,
     update: (value: ThreadDisplayUpdate, position: BridgeDisplayPosition) => void | Promise<void>,
-    error?: (code: NetErrorCode) => void
+    error?: (code: NetErrorCode) => void,
+    options?: HubAttachOptions,
+    delta?: (type: string, data: unknown) => void
   ): Promise<{
     close(): void
     descriptor: StreamDescriptor
   }> {
     this.guard()
-    validateHubParams('bridge.thread.open', { threadId: ref.entityId })
+    if (!options?.open) validateHubParams('bridge.thread.open', { threadId: ref.entityId })
     if (!isId('node', ref.nodeId)) return fail('bad_request')
-    const key = this.attachmentKey(ref),
-      listener: DisplayListener = { update, error },
+    const key = this.attachmentKey(ref, options),
+      listener: DisplayListener = { update, error, ...(delta ? { delta } : {}) },
       existing = this.attachments.get(key)
     if (existing) {
       this.session(ref.nodeId, 'bridge.thread.open')
@@ -867,24 +898,35 @@ export class BridgeHub {
       try {
         await this.rebuild({
           ...existing,
-          projection: new ThreadDisplayProjection(ref.entityId),
+          projection: new ThreadDisplayProjection(ref.entityId, projectionTypes(options)),
           listeners: new Set([listener])
         })
       } catch (error) {
         existing.listeners.delete(listener)
         throw error
       }
-      return { descriptor: existing.descriptor, close: () => this.release(ref, listener) }
+      return { descriptor: existing.descriptor, close: () => this.release(ref, listener, options) }
     }
     if (this.attaching.has(key)) return fail('conflict')
-    this.detach(ref)
-    if (this.attachments.size + this.attaching.size >= (this.options.maxStreams ?? 8))
+    this.detach(ref, options)
+    // Streams that read the shared display, the threads this computer reads, and its Git progress each have
+    // a room of their own.
+    const roomOf = (other?: HubAttachOptions): string =>
+      other?.open ? (other.room === 'channel' ? 'channel' : 'thread') : 'shared'
+    const room = roomOf(options)
+    const open = [...this.attachments.values()].filter((other) => roomOf(other.options) === room).length
+    const pending = [...this.attachingRooms.values()].filter((other) => other === room).length
+    if (open + pending >= (room === 'shared' ? (this.options.maxStreams ?? 8) : room === 'channel' ? 8 : 32))
       return fail('rate_limited')
     this.attaching.add(key)
+    this.attachingRooms.set(key, room)
     try {
-      const opened = (await this.call(ref.nodeId, 'bridge.thread.open', {
-          threadId: ref.entityId
-        })) as BridgeThreadOpenResult,
+      const raw = options?.open
+        ? await options.open()
+        : ((await this.call(ref.nodeId, 'bridge.thread.open', {
+            threadId: ref.entityId
+          })) as BridgeThreadOpenResult)
+      const opened = raw as BridgeThreadOpenResult,
         session = this.session(ref.nodeId, 'bridge.thread.open')
       this.guard()
       if (
@@ -906,7 +948,7 @@ export class BridgeHub {
       this.options.db.transaction(() => {
         const row = this.options.db.database
           .prepare('SELECT descriptor FROM net_bridge_hub_threads WHERE target=? AND entity=?')
-          .get(ref.nodeId, ref.entityId)
+          .get(ref.nodeId, this.attachmentEntity(ref, options))
         if (row && !same(JSON.parse(row.descriptor as string), opened.descriptor))
           return fail('conflict')
         if (!known) this.options.store.createStream(opened.descriptor, opened.head.epoch)
@@ -915,17 +957,18 @@ export class BridgeHub {
           .prepare(
             'INSERT INTO net_bridge_hub_threads VALUES(?,?,?) ON CONFLICT(target,entity) DO UPDATE SET descriptor=excluded.descriptor'
           )
-          .run(ref.nodeId, ref.entityId, json(opened.descriptor))
+          .run(ref.nodeId, this.attachmentEntity(ref, options), json(opened.descriptor))
       })
       const attachment: Attachment = {
         ref: { ...ref },
         descriptor: opened.descriptor,
-        projection: new ThreadDisplayProjection(ref.entityId),
+        projection: new ThreadDisplayProjection(ref.entityId, projectionTypes(options)),
         pending: Promise.resolve(),
         queued: 0,
         bytes: 0,
         stopped: false,
-        listeners: new Set([listener])
+        listeners: new Set([listener]),
+        ...(options ? { options } : {})
       }
       this.attachments.set(key, attachment)
       try {
@@ -954,20 +997,73 @@ export class BridgeHub {
           attachment.subscription?.close()
           attachment.projection.reset()
         })
-        return { descriptor: opened.descriptor, close: () => this.release(ref, listener) }
+        // A private stream also sends display-only notes (a streaming message, the pending questions).
+        if (options?.open)
+          attachment.offEphemeral = session.onEphemeral((message) => {
+            if (message.t !== 'ephemeral' || message.kind !== 'delta') return
+            if (message.stream !== attachment.descriptor.id) return
+            const body = message.data as { threadId?: unknown; type?: unknown; data?: unknown } | null
+            if (!body || typeof body !== 'object' || body.threadId !== ref.entityId || typeof body.type !== 'string')
+              return
+            for (const each of attachment.listeners) {
+              try {
+                each.delta?.(body.type, body.data)
+              } catch {
+                /* A listener that cannot take a note does not end the others. */
+              }
+            }
+          })
+        return { descriptor: opened.descriptor, close: () => this.release(ref, listener, options) }
       } catch (e) {
-        this.detach(ref)
+        this.detach(ref, options)
         throw e
       }
     } finally {
       this.attaching.delete(key)
+      this.attachingRooms.delete(key)
     }
   }
-  private release(ref: BridgeEntityRef, listener: DisplayListener): void {
-    const attachment = this.attachments.get(this.attachmentKey(ref))
+  /**
+   * Replays what the copy of a private stream on disk holds (its snapshot and the records after it),
+   * for a computer that cannot be reached. False when this computer never read the stream. Nothing is
+   * subscribed to and the computer is not asked.
+   */
+  async replay(
+    ref: BridgeEntityRef,
+    options: HubAttachOptions,
+    update: (value: ThreadDisplayUpdate) => void
+  ): Promise<boolean> {
+    this.guard()
+    if (!isId('node', ref.nodeId)) return fail('bad_request')
+    const row = this.options.db.database
+      .prepare('SELECT descriptor FROM net_bridge_hub_threads WHERE target=? AND entity=?')
+      .get(ref.nodeId, this.attachmentEntity(ref, options))
+    if (!row) return false
+    const descriptor = JSON.parse(row.descriptor as string) as StreamDescriptor
+    if (!this.options.store.getStream(descriptor.id)) return false
+    const projection = new ThreadDisplayProjection(ref.entityId, projectionTypes(options))
+    const reader = this.options.store.openSnapshot(descriptor.id)
+    try {
+      for (;;) {
+        const page = reader.next(1024 * 1024, 64)
+        for (const record of page.records) {
+          this.verifyRecord(record, descriptor)
+          const value = projection.accept(decodeEnvelope(record.envelope).envelope)
+          if (value) update(value)
+        }
+        if (page.done) break
+        await new Promise<void>((resolve) => setImmediate(resolve))
+      }
+    } finally {
+      reader.close()
+    }
+    return true
+  }
+  private release(ref: BridgeEntityRef, listener: DisplayListener, options?: HubAttachOptions): void {
+    const attachment = this.attachments.get(this.attachmentKey(ref, options))
     if (!attachment) return
     attachment.listeners.delete(listener)
-    if (!attachment.listeners.size) this.detach(ref)
+    if (!attachment.listeners.size) this.detach(ref, options)
   }
   async attachFor(
     owner: string,
@@ -1019,10 +1115,10 @@ export class BridgeHub {
       const listeners = [...previous.listeners],
         first = listeners[0]
       if (!first) continue
-      this.detach(previous.ref)
+      this.detach(previous.ref, previous.options)
       try {
-        await this.attach(previous.ref, first.update, first.error)
-        const fresh = this.attachments.get(this.attachmentKey(previous.ref))
+        await this.attach(previous.ref, first.update, first.error, previous.options, first.delta)
+        const fresh = this.attachments.get(this.attachmentKey(previous.ref, previous.options))
         if (fresh) {
           fresh.listeners = new Set(listeners)
         }
@@ -1137,8 +1233,8 @@ export class BridgeHub {
   private attachmentError(attachment: Attachment, error: unknown): void {
     if (attachment.stopped) return
     const code = error instanceof NetError ? error.code : 'internal'
-    if (this.attachments.get(this.attachmentKey(attachment.ref)) === attachment)
-      this.detach(attachment.ref)
+    if (this.attachments.get(this.attachmentKey(attachment.ref, attachment.options)) === attachment)
+      this.detach(attachment.ref, attachment.options)
     for (const listener of attachment.listeners) {
       try {
         listener.error?.(code)
@@ -1147,13 +1243,14 @@ export class BridgeHub {
       }
     }
   }
-  detach(ref: BridgeEntityRef): void {
-    const key = this.attachmentKey(ref),
+  detach(ref: BridgeEntityRef, options?: HubAttachOptions): void {
+    const key = this.attachmentKey(ref, options),
       attachment = this.attachments.get(key)
     if (attachment) {
       attachment.stopped = true
       attachment.subscription?.close()
       attachment.offClosed?.()
+      attachment.offEphemeral?.()
       attachment.projection.reset()
       this.attachments.delete(key)
       const pending = attachment.pending
@@ -1168,7 +1265,8 @@ export class BridgeHub {
     this.ownerAttachments.clear()
     for (const pending of this.ownerPending.values()) pending.cancelled = true
     for (const active of this.active.values()) active.controller.abort()
-    for (const attachment of [...this.attachments.values()]) this.detach(attachment.ref)
+    for (const attachment of [...this.attachments.values()])
+      this.detach(attachment.ref, attachment.options)
   }
   async drain(): Promise<void> {
     await this.inputs.drain()

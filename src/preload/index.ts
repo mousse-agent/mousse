@@ -277,13 +277,14 @@ const api = {
       ipcRenderer.on('orchestrator:turn-steered', handler)
       return () => ipcRenderer.removeListener('orchestrator:turn-steered', handler)
     },
-    answerQuestions: (requestId: string, answers: UserQuestionAnswers): Promise<boolean> =>
-      ipcRenderer.invoke('orchestrator:answerQuestions', requestId, answers),
+    /** `threadId` names the thread that asked; a thread on another computer needs it. */
+    answerQuestions: (requestId: string, answers: UserQuestionAnswers, threadId?: string): Promise<boolean> =>
+      ipcRenderer.invoke('orchestrator:answerQuestions', requestId, answers, threadId),
     /** `answerQuestions` with its outcome: who answered a saved approval request first, or why it was closed. */
-    answerQuestionsDetailed: (requestId: string, answers: UserQuestionAnswers): Promise<QuestionAnswerOutcome> =>
-      ipcRenderer.invoke('orchestrator:answerQuestionsDetailed', requestId, answers),
-    dismissQuestions: (requestId: string): Promise<boolean> =>
-      ipcRenderer.invoke('orchestrator:dismissQuestions', requestId),
+    answerQuestionsDetailed: (requestId: string, answers: UserQuestionAnswers, threadId?: string): Promise<QuestionAnswerOutcome> =>
+      ipcRenderer.invoke('orchestrator:answerQuestionsDetailed', requestId, answers, threadId),
+    dismissQuestions: (requestId: string, threadId?: string): Promise<boolean> =>
+      ipcRenderer.invoke('orchestrator:dismissQuestions', requestId, threadId),
     abort: (threadId?: string): Promise<boolean> =>
       ipcRenderer.invoke('orchestrator:abort', threadId),
     steer: (text: string, threadId?: string): Promise<boolean> =>
@@ -411,11 +412,13 @@ const api = {
       ipcRenderer.invoke('pty:resize', ptyId, cols, rows),
     list: (): Promise<Array<{ ptyId: string; agentId: string }>> =>
       ipcRenderer.invoke('pty:list'),
-    isAlive: (ptyId: string): Promise<boolean> => ipcRenderer.invoke('pty:isAlive', ptyId),
+    /** `threadId` names the terminal's thread; a thread on another computer needs it. */
+    isAlive: (ptyId: string, threadId?: string): Promise<boolean> => ipcRenderer.invoke('pty:isAlive', ptyId, threadId),
     lookup: (
-      ptyId: string
+      ptyId: string,
+      threadId?: string
     ): Promise<{ alive: true; ptyId: string; agentId: string } | { alive: false; ptyId: string }> =>
-      ipcRenderer.invoke('pty:lookup', ptyId),
+      ipcRenderer.invoke('pty:lookup', ptyId, threadId),
     create: (request: PtyCreateRequest): Promise<PtyCreateResult> =>
       ipcRenderer.invoke('pty:create', request),
     kill: (ptyId: string): Promise<void> => ipcRenderer.invoke('pty:kill', ptyId),
@@ -505,9 +508,12 @@ const api = {
       ipcRenderer.on('git:operation', handler)
       return () => ipcRenderer.removeListener('git:operation', handler)
     },
-    /** Stops a push, pull, fetch or commit this window started, with everything Git started for it. */
-    cancelOperation: (operationId: string): Promise<{ cancelled: boolean }> =>
-      storageInvoke('git:cancelOperation', operationId),
+    /**
+     * Stops a push, pull, fetch or commit this window started, with everything Git started for it.
+     * A thread's or project's folder on another computer needs its `threadId` or `projectId`; at most one is set.
+     */
+    cancelOperation: (operationId: string, threadId?: string, projectId?: string): Promise<{ cancelled: boolean }> =>
+      storageInvoke('git:cancelOperation', operationId, threadId, projectId),
     abortInProgress: (scope: GitScope, kind: 'merge' | 'rebase'): Promise<GitMutationResult> =>
       storageInvoke('git:abortInProgress', scope, kind),
     createBranch: (scope: GitScope, name: string, options?: GitBranchOptions): Promise<GitMutationResult> =>

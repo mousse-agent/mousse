@@ -340,12 +340,18 @@ export class NetService {
           (!cfg.features ||
             typeof cfg.features.netBridge !== 'boolean' ||
             typeof cfg.features.netSpaces !== 'boolean' ||
-            Object.keys(cfg.features).some((key) => !['netBridge', 'netSpaces'].includes(key)))
+            (cfg.features.netBridgeThreads !== undefined &&
+              typeof cfg.features.netBridgeThreads !== 'boolean') ||
+            Object.keys(cfg.features).some(
+              (key) => !['netBridge', 'netSpaces', 'netBridgeThreads'].includes(key)
+            ))
         ) {
           throw new NetError('storage_corrupt')
         }
         // Pre-rollout profiles require fresh explicit opt-in; never grandfather undefined flags.
         cfg.features ??= { ...DEFAULT_NET_FEATURE_FLAGS }
+        // Profiles from before routing existed have no such flag: it is off.
+        cfg.features.netBridgeThreads ??= false
         if (!cfg.features.netBridge && !cfg.features.netSpaces) cfg.enabled = false
         this.config = cfg
       }
@@ -550,8 +556,20 @@ export class NetService {
     }
   }
   private saveConfig(): void {
-    const { db } = this.runtime(),
-      bytes = canonicalJson(this.config)
+    const { db } = this.runtime()
+    // An earlier version rejects any other key in `features` as corrupt storage and then fails to load Net
+    // at all. The routing flag is written only while it is on, so a profile that never turned it on can
+    // go back to an earlier build.
+    const { features, ...rest } = this.config
+    const stored: NetConfiguration = features
+      ? {
+          ...rest,
+          features: features.netBridgeThreads
+            ? features
+            : ({ netBridge: features.netBridge, netSpaces: features.netSpaces } as NetFeatureFlags)
+        }
+      : rest
+    const bytes = canonicalJson(stored)
     db.transaction(() => {
       db.charge(1, bytes.length)
       db.database
@@ -855,7 +873,11 @@ export class NetService {
     if (!rt.identity.self()) await rt.identity.bootstrapAuthority(input.name ?? 'My device')
     this.assertInstanceOpen()
     this.config.enabled = true
-    this.config.features = { netBridge: true, netSpaces: true }
+    this.config.features = {
+      netBridge: true,
+      netSpaces: true,
+      netBridgeThreads: this.config.features?.netBridgeThreads === true
+    }
     if (input.listen)
       this.config.direct = {
         enabled: true,
@@ -2132,7 +2154,11 @@ export class NetService {
     }
     this.assertInstanceOpen()
     this.config.enabled = true
-    this.config.features = { netBridge: true, netSpaces: true }
+    this.config.features = {
+      netBridge: true,
+      netSpaces: true,
+      netBridgeThreads: this.config.features?.netBridgeThreads === true
+    }
     this.config.preparedForJoin = false
     this.saveConfig()
     await this.activate()

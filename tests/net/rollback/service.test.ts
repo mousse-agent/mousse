@@ -33,8 +33,8 @@ it('defaults off, persists rollback, keeps identity/data and requires restart be
   const { a, b, self } = await linked(),
     rt = a.net.runtime(),
     roster = rt.identity.roster()
-  expect(DEFAULT_NET_FEATURE_FLAGS).toEqual({ netBridge: false, netSpaces: false })
-  expect(a.net.status().features).toEqual({ netBridge: true, netSpaces: true })
+  expect(DEFAULT_NET_FEATURE_FLAGS).toEqual({ netBridge: false, netSpaces: false, netBridgeThreads: false })
+  expect(a.net.status().features).toEqual({ netBridge: true, netSpaces: true, netBridgeThreads: false })
   const disabled = a.net.request('net.disable', {})
   expect(a.net.status()).toMatchObject({
     enabled: false,
@@ -92,7 +92,7 @@ it('defaults off, persists rollback, keeps identity/data and requires restart be
   await restarted.request('net.init', { passphrase: 'owned-rollback-profile' })
   expect(restarted.status()).toMatchObject({
     enabled: true,
-    features: { netBridge: true, netSpaces: true },
+    features: { netBridge: true, netSpaces: true, netBridgeThreads: false },
     self
   })
   expect(restarted.runtime().identity.roster()).toEqual(roster)
@@ -156,7 +156,7 @@ it('retains actual late RPC ownership and open SQL after bounded uncertain drain
       JSON.parse(
         rt.db.database.prepare('SELECT value FROM net_service_config').get()!.value as string
       )
-    ).toMatchObject({ enabled: false, features: DEFAULT_NET_FEATURE_FLAGS })
+    ).toMatchObject({ enabled: false, features: { netBridge: false, netSpaces: false } })
   } finally {
     release()
     await rpc
@@ -192,6 +192,6 @@ it('does not silently grandfather previously enabled profiles lacking explicit r
   await restarted.request('net.init', {})
   expect(restarted.status()).toMatchObject({
     enabled: true,
-    features: { netBridge: true, netSpaces: true }
+    features: { netBridge: true, netSpaces: true, netBridgeThreads: false }
   })
 })

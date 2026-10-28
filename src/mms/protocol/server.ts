@@ -14,6 +14,7 @@ import { FrameDecoder, encodeFrame, FrameDecodeError, FrameTooLargeError } from 
 import { EventSequenceRing } from './eventRing'
 import { cleanupStaleUnixSocket, resolveLocalEndpoint, unlinkUnixSocketIfExists } from './endpoint'
 import { dispatchMethod } from './handlers'
+import { isQualifiedId } from '../../shared/threadRef'
 import { projectEventFor } from './threadVisibility'
 import { parseEnvelope, validateHello, validateRequest, asAfterSequence, isObject } from './validators'
 import {
@@ -1134,6 +1135,7 @@ export class MmsProtocolServer {
     const replayBudget = Math.min(MMS_PROTOCOL_MAX_FRAME_BYTES, MMS_PROTOCOL_MAX_OUTBOUND_QUEUED_BYTES / 2)
     let replayBytes = 4 + Buffer.byteLength(JSON.stringify(res), 'utf8')
     for (const stored of replay.events) {
+      if (session.clientType !== 'gui' && isQualifiedId(stored.threadId)) continue
       // Project for this client first, so the budget counts what is actually sent.
       const event = projectEventFor(session.clientType, stored)
       replayBytes += Buffer.byteLength(JSON.stringify(event), 'utf8') + (result.replay.length ? 1 : 0)
@@ -1231,6 +1233,8 @@ export class MmsProtocolServer {
   }
 
   private clientAcceptsEvent(session: ClientSession, event: ProtocolEvent): boolean {
+    // What happens in a thread of another computer is for windows: the CLI is not given its transcript or questions.
+    if (session.clientType !== 'gui' && isQualifiedId(event.threadId)) return false
     if (!event.profileId || event.type === 'server.shutdown') return true
     const boundId = session.binding?.profileId ?? this.opts.mms.profileId
     return event.profileId === boundId

@@ -51,6 +51,7 @@ import type { BridgeOrdinaryMethod } from '../remote/capabilities'
 import { mmsJson } from '../remote/jsonOutput'
 import { newestMessages } from '../../protocol/transcriptPaging'
 import { ReplyPages } from './pages'
+import { cleanUpBlockedDevice } from './blockCleanup'
 import type { RoutedStaging } from './staging'
 
 /** Ids are text of this length at most, as in the protocol handlers. */
@@ -63,6 +64,8 @@ export interface RoutedStreamsPort {
     caller: NodeId,
     request: { kind: RoutedStreamKind; threadId?: string; ptyId?: string }
   ): RoutedStreamOpened
+  /** Stops serving the stream `caller` opened, which it no longer reads. Its records stay; it can open it again. */
+  close(caller: NodeId, request: { kind: RoutedStreamKind; threadId?: string; ptyId?: string }): void
   /** Where the stream `caller` holds open for `threadId` is now, if it holds one. */
   head(caller: NodeId, threadId: string): { stream: string; epoch: number; seq: number } | undefined
 }
@@ -71,7 +74,7 @@ export interface OwnerRoutesOptions {
   services: MmsProfileServices
   rpc: RpcDispatcher
   /** What this computer lets each device do here. */
-  policy: Pick<SqliteNodePolicy, 'get' | 'onChange'>
+  policy: Pick<SqliteNodePolicy, 'get' | 'list' | 'onChange'>
   audit: Pick<SqliteBridgeAudit, 'record' | 'countRead'>
   /** Keeps a call owned by the profile, so it drains when the profile closes. */
   track<T>(work: Promise<T>): Promise<T>
@@ -243,6 +246,8 @@ export class OwnerRoutes {
         if (!event.after.blocked || event.before.blocked) return
         this.pages.dropCaller(event.node)
         this.options.staging?.dropCaller(event.node)
+        // What the device queued, made a rule of and started is taken away too.
+        this.cleanUp(event.node)
       })
     ]
     // Values staged before a restart that nobody came back for are looked for now, and then every minute.
@@ -295,28 +300,41 @@ export class OwnerRoutes {
         )
       }
     })
-    if (this.options.streams)
+    if (this.options.streams) {
+      const validateStream = (name: 'stream.open' | 'stream.close') => (params: unknown) => {
+        const value = exactKeys(name, ROUTED_TRANSPORT_METHODS[name].keys, params)
+        if (!(ROUTED_STREAM_KINDS as readonly unknown[]).includes(value.kind))
+          throw new NetError('bad_request', 'That is not a kind of stream.')
+        for (const key of ['threadId', 'ptyId'])
+          if (value[key] !== undefined && !text(value[key]))
+            throw new NetError('bad_request', `${key} is not valid.`)
+        return value
+      }
       rpc.register({
         ...common,
         method: routedNetMethod('stream.open'),
         capability: ROUTED_TRANSPORT_METHODS['stream.open'].capability,
         mutating: false,
         ephemeral: true,
-        validate: (params) => {
-          const value = exactKeys(
-            'stream.open',
-            ROUTED_TRANSPORT_METHODS['stream.open'].keys,
-            params
-          )
-          if (!(ROUTED_STREAM_KINDS as readonly unknown[]).includes(value.kind))
-            throw new NetError('bad_request', 'That is not a kind of stream.')
-          for (const key of ['threadId', 'ptyId'])
-            if (value[key] !== undefined && !text(value[key]))
-              throw new NetError('bad_request', `${key} is not valid.`)
-          return value
-        },
+        validate: validateStream('stream.open'),
         handle: (params, context) => track(this.openStream(params as never, context))
       })
+      rpc.register({
+        ...common,
+        method: routedNetMethod('stream.close'),
+        capability: ROUTED_TRANSPORT_METHODS['stream.close'].capability,
+        mutating: false,
+        ephemeral: true,
+        validate: validateStream('stream.close'),
+        handle: (params, context) =>
+          track(
+            Promise.resolve().then(() => {
+              this.options.streams!.close(context.caller.node, params as never)
+              return { ok: true, result: { closed: true } } satisfies RoutedReply
+            })
+          )
+      })
+    }
     if (this.options.staging)
       rpc.register({
         ...common,
@@ -511,6 +529,33 @@ export class OwnerRoutes {
   }
 
   private readonly largeSaves = new Set<NodeId>()
+  /** The clean-ups of blocked devices under way. */
+  private readonly cleanups = new Set<Promise<void>>()
+  private cleanUp(node: NodeId): void {
+    const cleanup: Promise<void> = this.options
+      .track(cleanUpBlockedDevice(this.options.services, node))
+      .then(
+        () => undefined,
+        () => undefined
+      )
+      .finally(() => this.cleanups.delete(cleanup))
+    this.cleanups.add(cleanup)
+  }
+
+  /**
+   * Cleans up after every device that is blocked now. A block made while Bridge was off, or one whose
+   * clean-up a restart cut short, is finished here when Bridge starts. Running it twice does no harm:
+   * what it removes is gone the second time.
+   */
+  cleanUpBlockedDevices(): void {
+    for (const row of this.options.policy.list()) if (row.blocked) this.cleanUp(row.node)
+  }
+
+  /** Resolves when the clean-up of every device blocked so far is done. */
+  async cleanedUp(): Promise<void> {
+    while (this.cleanups.size) await Promise.all([...this.cleanups])
+  }
+
   private readonly largeReads = new Map<NodeId, number>()
   private enterLargeRead(node: NodeId): void {
     const running = this.largeReads.get(node) ?? 0

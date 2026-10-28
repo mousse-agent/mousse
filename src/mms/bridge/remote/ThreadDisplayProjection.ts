@@ -17,7 +17,11 @@ export class ThreadDisplayProjection {
     parts: Uint8Array[]
     received: number
   }
-  constructor(private readonly threadId: string) {}
+  /** `extraTypes` are event types besides a thread's own that the stream may carry (a private stream's). */
+  constructor(
+    private readonly threadId: string,
+    private readonly extraTypes: readonly string[] = []
+  ) {}
   accept(envelope: Envelope): ThreadDisplayUpdate | undefined {
     const b = envelope.body as Record<string, unknown>
     if (
@@ -93,7 +97,10 @@ export class ThreadDisplayProjection {
     }
     if (envelope.type === 'thread.event') {
       exact(['threadId', 'type', 'data'])
-      if (this.pending || !THREAD_EVENT_TYPES.includes(b.type as never))
+      if (
+        this.pending ||
+        !(THREAD_EVENT_TYPES.includes(b.type as never) || this.extraTypes.includes(b.type as string))
+      )
         throw new NetError('bad_request')
       return { kind: 'event', type: b.type as string, data: b.data }
     }

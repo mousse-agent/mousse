@@ -27,6 +27,7 @@ import { phoneSpeechMethods } from './remote/speech'
 import type { ThreadSourcePort } from './remote/ThreadStreamAdapter'
 import { DispatchService, mmsDispatchRuntime, type DispatchRuntime } from './dispatch'
 import { OwnerRoutes } from './routed/OwnerRoutes'
+import { ThreadRouter } from './routed/ThreadRouter'
 import { PrivateSources, raiseStreamListenerLimits } from './routed/privateSources'
 import { RoutedStaging } from './routed/staging'
 import { routedStreamsPort } from './routed/streamsPort'
@@ -41,6 +42,9 @@ export class BridgeProfileService {
   readonly threads: ThreadStreamAdapter
   readonly artifacts: BridgeArtifacts
   readonly hub: BridgeHub
+  /** Sends the actions of a thread on another of the user's computers to that computer (behind `netBridgeThreads`). */
+  readonly router: ThreadRouter
+  private readonly routerStop = new AbortController()
   readonly dispatch: DispatchService
   private readonly remote: RemoteApi
   private readonly routes: OwnerRoutes
@@ -279,6 +283,17 @@ export class BridgeProfileService {
       session: (node) => net.session(node),
       resolveResult: (...args) => this.artifacts.resolveResult(...args)
     })
+    this.router = new ThreadRouter({
+      services,
+      net,
+      hub: this.hub,
+      signal: this.routerStop.signal
+    })
+    services.threadRouter = this.router
+    this.disposers.add(() => {
+      if (services.threadRouter === this.router) services.threadRouter = undefined
+      this.router.close()
+    })
     this.artifacts = new BridgeArtifacts({
       db: rt.db,
       identity: rt.identity,
@@ -440,7 +455,13 @@ export class BridgeProfileService {
           this.options.net.featureEnabled('netBridge') &&
           session.peer.user === this.options.runtime.identity.self()?.user
         ) {
-          void this.track(this.hub.reconnect(session.peer.node))
+          const node = session.peer.node
+          void this.track(
+            this.hub
+              .reconnect(node)
+              .catch(() => undefined)
+              .then(() => this.router.nodeOnline(node))
+          )
         }
       },
       onActivated: () => {
@@ -450,6 +471,8 @@ export class BridgeProfileService {
         }
         if (!this.activated && this.options.net.featureEnabled('netBridge')) {
           this.activated = true
+          // A device blocked while Bridge was off, or before a restart, is cleaned up after now.
+          this.routes.cleanUpBlockedDevices()
           void this.track(this.dispatch.recover())
         }
       },
@@ -489,6 +512,8 @@ export class BridgeProfileService {
   beginDisable(): void {
     if (this.stopped) return
     this.stopped = true
+    // Calls waiting on another computer end, so the profile can drain.
+    this.routerStop.abort()
     this.remote.close()
     this.options.services.speechRelay.close()
     this.hub.close()
