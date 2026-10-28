@@ -514,7 +514,7 @@ export function registerGuiIpc(
     if (!Notification.isSupported()) return
     const notification = new Notification({
       title: 'Mousse',
-      body: `Allow ${device} to open its editor here? This gives shell access. Open Mousse to answer.`
+      body: `Let ${device}’s editor connect to this computer? Gives shell access.`
     })
     notification.on('click', () => {
       const win = getWindow()

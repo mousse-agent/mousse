@@ -680,7 +680,8 @@ export class NetService {
     // What an add-on changed outside Mousse can always be seen and undone, also while networking is off.
     if (method === 'net.transport.action.undo') return this.undoAddon(params)
     // The line in ~/.ssh/config can be seen and removed in the same way.
-    if (method.startsWith('net.editor.ssh.')) return this.track(this.editorSshRequest(method))
+    if (method.startsWith('net.editor.ssh.') || method === 'net.editor.alias')
+      return this.track(this.editorSshRequest(method))
     if (method === 'net.transport.list' && (this.disabled || !this.config.enabled))
       return this.transportList()
     if (this.disabled) throw new NetError('disabled')
@@ -2042,6 +2043,55 @@ export class NetService {
     node: NodeId,
     signal?: AbortSignal
   ): Promise<{ tunnel: ClientTunnel; info: EditorTunnelInfo }> {
+    const { tunnels, editor, link } = await this.editorLink(node)
+    return this.track(
+      (async () => {
+        const tunnel = await tunnels.open(link, signal)
+        let hostKey: EditorTunnelInfo['hostKey'] = 'unpinned'
+        if (editor) {
+          try {
+            hostKey = await editor.pinHostKeys(node, tunnel.hostKeys)
+          } catch (error) {
+            // Strict host-key checking would refuse the key anyway; nothing is left open.
+            tunnel.close()
+            throw error
+          }
+        }
+        return {
+          tunnel,
+          info: {
+            path: tunnel.path,
+            ...(tunnel.transport ? { transport: tunnel.transport } : {}),
+            hostKey
+          }
+        }
+      })()
+    )
+  }
+  /**
+   * What an editor connection to `node` would meet, without opening one (`ssh.check`): the other computer answers
+   * as it would an open and keeps nothing, so its audit has a check and not an open, no first-open notice is
+   * raised, and the open limits are not used. The host keys it vouches for are pinned, as an open does.
+   */
+  private async editorProbe(node: NodeId): Promise<EditorProbeResult> {
+    try {
+      const { tunnels, editor, link } = await this.editorLink(node)
+      const answer = await this.track(tunnels.check(link))
+      if (editor) await editor.pinHostKeys(node, answer.hostKeys)
+      return { ok: true, path: answer.path, ...(answer.transport ? { transport: answer.transport } : {}) }
+    } catch (error) {
+      if (error instanceof TunnelError) return { ok: false, reason: error.reason, message: error.message }
+      if (error instanceof EditorSshError)
+        return { ok: false, reason: 'ssh_settings', code: error.code, message: error.message }
+      throw error
+    }
+  }
+  /** What opening or checking an editor connection to `node` needs: the service, this computer's editor settings, a session. */
+  private async editorLink(node: NodeId): Promise<{
+    tunnels: EditorTunnels
+    editor: EditorSshConfig | undefined
+    link: NetSyncSession
+  }> {
     this.assertFeature('netBridge')
     const rt = this.requireEnrolled(),
       tunnels = this.tunnels
@@ -2072,30 +2122,7 @@ export class NetService {
       }
     }
     if (!link) throw new TunnelError('offline')
-    const opened = link
-    return this.track(
-      (async () => {
-        const tunnel = await tunnels.open(opened, signal)
-        let hostKey: EditorTunnelInfo['hostKey'] = 'unpinned'
-        if (editor) {
-          try {
-            hostKey = await editor.pinHostKeys(node, tunnel.hostKeys)
-          } catch (error) {
-            // Strict host-key checking would refuse the key anyway; nothing is left open.
-            tunnel.close()
-            throw error
-          }
-        }
-        return {
-          tunnel,
-          info: {
-            path: tunnel.path,
-            ...(tunnel.transport ? { transport: tunnel.transport } : {}),
-            hostKey
-          }
-        }
-      })()
-    )
+    return { tunnels, editor, link }
   }
   private localTunnels(): LocalEditorTunnels {
     return (this.localTunnelStore ??= new LocalEditorTunnels({
@@ -2157,23 +2184,6 @@ export class NetService {
   /** A local connection closed: its editor tunnels end. */
   editorTunnelConnectionClosed(connection: string): void {
     this.localTunnelStore?.closeConnection(connection)
-  }
-  /**
-   * Whether an editor connection to `node` can be opened now: opens one and ends it at once. A refusal comes
-   * back as a result with the tunnel's fixed reason, so a window can say what is wrong before an editor is
-   * started. The owner writes its usual rows (`editor.open`, `editor.close`) and raises its first-open notice.
-   */
-  private async editorProbe(node: NodeId): Promise<EditorProbeResult> {
-    try {
-      const { tunnel, info } = await this.openEditorTunnel(node)
-      tunnel.close()
-      return { ok: true, path: info.path, ...(info.transport ? { transport: info.transport } : {}) }
-    } catch (error) {
-      if (error instanceof TunnelError) return { ok: false, reason: error.reason, message: error.message }
-      if (error instanceof EditorSshError)
-        return { ok: false, reason: 'ssh_settings', code: error.code, message: error.message }
-      throw error
-    }
   }
   session(node: NodeId): SyncSession {
     this.assertEnabled()
@@ -2893,7 +2903,10 @@ export class NetService {
    * networking is off; setting up needs an enrolled device, because the aliases are its computers.
    */
   private async editorSshRequest(method: NetLocalMethod): Promise<unknown> {
-    const setup = method === 'net.editor.ssh.prepare' || method === 'net.editor.ssh.enable'
+    const setup =
+      method === 'net.editor.ssh.prepare' ||
+      method === 'net.editor.ssh.enable' ||
+      method === 'net.editor.alias'
     if (setup) {
       if (this.disabled) throw new NetError('disabled')
       this.assertEnabled()
@@ -2914,6 +2927,8 @@ export class NetService {
         return editor.acknowledgeNotice()
       case 'net.editor.ssh.prepare':
         return editor.prepare(this.liveComputers())
+      case 'net.editor.alias':
+        return editor.prepareAliases(this.liveComputers())
       case 'net.editor.ssh.enable':
         return editor.enable(this.liveComputers())
       default:

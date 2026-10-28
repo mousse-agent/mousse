@@ -47,6 +47,7 @@ export const NET_LOCAL_METHODS = [
   'net.editor.ssh.enable',
   'net.editor.ssh.disable',
   'net.editor.ssh.ack',
+  'net.editor.alias',
   'net.editor.probe',
   'net.init',
   'net.disable',

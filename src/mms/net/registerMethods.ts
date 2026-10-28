@@ -57,6 +57,7 @@ const keys: Record<NetLocalMethod, readonly string[]> = {
   'net.editor.ssh.enable': [],
   'net.editor.ssh.disable': [],
   'net.editor.ssh.ack': [],
+  'net.editor.alias': [],
   'net.editor.probe': ['node'],
   'net.init': ['name', 'listen', 'host', 'port', 'passphrase'],
   'net.disable': [],

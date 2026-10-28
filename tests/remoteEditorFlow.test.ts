@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { remoteFolder, remoteRoute, resolveRemoteOpen, type Ask } from '../src/main/remoteEditorFlow'
+import { mousseHost, remoteFolder, remoteRoute, resolveRemoteOpen, type Ask } from '../src/main/remoteEditorFlow'
 import { newId } from '../src/shared/net'
 import type { EditorSshStatus } from '../src/shared/net/local'
 import { qualifyId } from '../src/shared/threadRef'
@@ -29,6 +29,8 @@ interface Script {
   folders?: Array<unknown | Error>
   restore?: Error | 'ok'
   prepare?: unknown
+  /** What `net.editor.alias` answers (the aliases only); `prepare` when not given. */
+  alias?: unknown
   status?: EditorSshStatus
 }
 
@@ -53,6 +55,8 @@ function daemon(script: Script) {
         return script.status ?? status()
       case 'net.editor.ssh.prepare':
         return script.prepare
+      case 'net.editor.alias':
+        return script.alias ?? script.prepare
       default:
         throw new Error(`unexpected ${method}`)
     }
@@ -202,33 +206,47 @@ describe('everything an editor needs for a thread of another computer', () => {
     await expect(resolveRemoteOpen(daemon({ approval: 'box' }).ask, 42, { proxyReady: false })).rejects.toThrow(/this computer/)
   })
 
-  it('prepares Mousse’s SSH settings last, and only when the folder is known', async () => {
+  it('makes only the alias, and only when the folder is known: the Include line waits for the check', async () => {
     const alias = 'mousse-studio-3fa2c1'
-    const ready = { ok: true, added: true, status: status({ included: true, computers: [{ node, alias, name: 'Studio', hostKeyPinned: true }] }) }
-    const d = daemon({ prepare: ready })
+    const ready = { ok: true, added: false, status: status({ computers: [{ node, alias, name: 'Studio', hostKeyPinned: true }] }) }
+    const d = daemon({ alias: ready })
     expect(await resolveRemoteOpen(d.ask, threadId, { proxyReady: true })).toEqual({
       ok: true,
       host: { kind: 'mousse', alias },
+      config: '/h/.mousse/ssh/config',
       folder: { style: 'posix', path: '/home/me/app', uriPath: '/home/me/app' }
     })
-    expect(d.methods()).toEqual(['net.ssh.target', 'net.editor.ssh.status', 'editor.folder', 'net.editor.ssh.prepare'])
+    // The user's ~/.ssh/config is not touched here: `net.editor.ssh.prepare` is what adds the line.
+    expect(d.methods()).toEqual(['net.ssh.target', 'net.editor.ssh.status', 'editor.folder', 'net.editor.alias'])
+    expect(d.methods()).not.toContain('net.editor.ssh.prepare')
 
-    // A refused folder leaves ~/.ssh/config alone.
-    const refusedFolder = daemon({ folders: [refused('folder_protected')], prepare: ready })
+    // A refused folder makes no alias either.
+    const refusedFolder = daemon({ folders: [refused('folder_protected')], alias: ready })
     await resolveRemoteOpen(refusedFolder.ask, threadId, { proxyReady: true })
+    expect(refusedFolder.methods()).not.toContain('net.editor.alias')
     expect(refusedFolder.methods()).not.toContain('net.editor.ssh.prepare')
+  })
+
+  it('adds the Include line with prepare, once the open is going ahead, and says why it could not', async () => {
+    const alias = 'mousse-studio-3fa2c1'
+    const d = daemon({ prepare: { ok: true, added: true, status: status({ included: true, computers: [{ node, alias, name: 'Studio', hostKeyPinned: true }] }) } })
+    expect(await mousseHost(d.ask, node)).toEqual({ ok: true, host: { kind: 'mousse', alias } })
+    expect(d.methods()).toEqual(['net.editor.ssh.prepare'])
+    const refusedLine = daemon({ prepare: { ok: false, code: 'unwritable', message: 'detail', status: status() } })
+    expect(await mousseHost(refusedLine.ask, node)).toMatchObject({ ok: false, reason: 'ssh_settings', code: 'unwritable' })
   })
 
   it('does not prepare Mousse’s SSH settings while the proxy command does not exist', async () => {
     const d = daemon({})
     await resolveRemoteOpen(d.ask, threadId, { proxyReady: false })
     expect(d.methods()).not.toContain('net.editor.ssh.prepare')
+    expect(d.methods()).not.toContain('net.editor.alias')
     expect(d.methods()).not.toContain('net.editor.ssh.status')
   })
 
   it('reports why the settings could not be prepared, with the line to add by hand', async () => {
     for (const code of ['ssh_check_failed', 'unwritable', 'not_owner']) {
-      const d = daemon({ prepare: { ok: false, code, message: 'detail', status: status() } })
+      const d = daemon({ alias: { ok: false, code, message: 'detail', status: status() } })
       expect(await resolveRemoteOpen(d.ask, threadId, { proxyReady: true })).toEqual({
         ok: false,
         reason: 'ssh_settings',
@@ -240,7 +258,7 @@ describe('everything an editor needs for a thread of another computer', () => {
   })
 
   it('refuses when the settings are ready but have no name for that computer', async () => {
-    const d = daemon({ prepare: { ok: true, added: false, status: status({ computers: [] }) } })
+    const d = daemon({ alias: { ok: true, added: false, status: status({ computers: [] }) } })
     expect(await resolveRemoteOpen(d.ask, threadId, { proxyReady: true })).toEqual({ ok: false, reason: 'no_route' })
   })
 })

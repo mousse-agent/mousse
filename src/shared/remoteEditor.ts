@@ -59,9 +59,15 @@ export type RemoteOpenReason =
 export type RemoteOpenResult =
   /**
    * `hint`: the editor's Remote - SSH extension could not be found; the editor was started anyway.
-   * `via`: how the connection runs, when Mousse carries it (`relay`: through a Mousse relay).
+   * `via`: how the connection runs, when Mousse carries it (`relay`: through a Mousse relay), from this open's own check.
    */
-  | { ok: true; hint?: string; via?: { path: TunnelPath; transport?: string } }
+  | {
+      ok: true
+      hint?: string
+      via?: { path: TunnelPath; transport?: string }
+      /** The sign-in check did not pass. The editor was started anyway; this is only advice, shown briefly. */
+      advice?: { failure: 'key_refused' | 'ssh_failed'; message?: string; command?: string }
+    }
   | {
       ok: false
       reason: RemoteOpenReason

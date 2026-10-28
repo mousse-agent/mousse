@@ -1,14 +1,17 @@
 /**
- * The sign-in check before an editor opens a folder over one of Mousse's SSH names: `ssh -o BatchMode=yes
- * <name> exit`, one login that never asks a question. A refused key or a broken setting shows up here as a plain
- * message, not as an editor window that waits. It only ever names a `Host` of Mousse's own file, so it connects
- * nowhere but through that name's ProxyCommand. Tests give `SshProbeIo` fakes, so no `ssh` starts.
+ * The sign-in check after an editor connection to a computer was found open: `ssh -o BatchMode=yes <name> exit`,
+ * one login that never asks a question, run against Mousse's own file of names (`-F`, so it does not need the
+ * `Include` line yet). It is advice only. It cannot tell a person who will type a password, a passphrase or touch a
+ * key from one who cannot sign in, so what it finds never stops an editor from starting. It only ever names a `Host`
+ * of Mousse's own file, so it connects nowhere but through that name's ProxyCommand. Tests give `SshProbeIo`
+ * fakes, so no `ssh` starts.
  */
 import { spawn } from 'node:child_process'
 import { findSshClients } from '../mms/net/editor/sshConfig'
 import type { SshProbeOutcome } from './remoteEditorFlow'
 
-export const SSH_PROBE_TIMEOUT_MS = 20_000
+/** Short, because the check is only advice and a key that waits for a touch would hold the editor back. */
+export const SSH_PROBE_TIMEOUT_MS = 6_000
 /** What Mousse writes as a `Host` name: lowercase letters, digits and `-`, never a leading `-` (an option). */
 const ALIAS = /^[a-z0-9][a-z0-9._-]{0,63}$/u
 
@@ -21,16 +24,18 @@ export interface SshProbeRun {
 export interface SshProbeIo {
   /** The `ssh` programs on this computer, best first. */
   clients(): string[]
-  run(program: string, args: string[], timeoutMs: number): Promise<SshProbeRun>
+  run(program: string, args: string[], timeoutMs: number, env: NodeJS.ProcessEnv): Promise<SshProbeRun>
 }
 
-/** The arguments of the check. No question can be asked, and no password is tried. */
-export function sshProbeArguments(alias: string): string[] {
+/** The arguments of the check. No question can be asked, and no password is tried. `config` is Mousse's own file of names. */
+export function sshProbeArguments(alias: string, config: string): string[] {
   if (!ALIAS.test(alias)) throw new Error('That is not one of Mousse’s SSH names.')
+  if (!config || config.startsWith('-') || config.includes('\0')) throw new Error('That is not a file of SSH names.')
   return [
+    '-F', config,
     '-o', 'BatchMode=yes',
     '-o', 'NumberOfPasswordPrompts=0',
-    '-o', 'ConnectTimeout=15',
+    '-o', 'ConnectTimeout=5',
     '-o', 'LogLevel=ERROR',
     '--', alias, 'exit'
   ]
@@ -38,11 +43,11 @@ export function sshProbeArguments(alias: string): string[] {
 
 const realIo: SshProbeIo = {
   clients: () => findSshClients(),
-  run: (program, args, timeoutMs) =>
+  run: (program, args, timeoutMs, env) =>
     new Promise((resolve) => {
       let stderr = ''
       let timedOut = false
-      const child = spawn(program, args, { stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true })
+      const child = spawn(program, args, { stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true, env })
       const timer = setTimeout(() => {
         timedOut = true
         child.kill()
@@ -61,12 +66,20 @@ const realIo: SshProbeIo = {
     })
 }
 
-/** Runs the check with the first `ssh` found. `skipped` when there is none: the editor has its own way to ask. */
-export async function runSshProbe(alias: string, io: SshProbeIo = realIo): Promise<SshProbeOutcome> {
-  const args = sshProbeArguments(alias)
+/**
+ * Runs the check with the first `ssh` found, in the environment the editor will start with (so a ProxyCommand sees
+ * what the editor's would). `skipped` when there is none: the editor has its own way to ask.
+ */
+export async function runSshProbe(
+  alias: string,
+  config: string,
+  env: NodeJS.ProcessEnv,
+  io: SshProbeIo = realIo
+): Promise<SshProbeOutcome> {
+  const args = sshProbeArguments(alias, config)
   const [client] = io.clients()
   if (!client) return { skipped: true }
-  const run = await io.run(client, args, SSH_PROBE_TIMEOUT_MS)
-  if (run.timedOut) return { ok: false, stderr: 'ssh did not finish signing in within 20 seconds.' }
+  const run = await io.run(client, args, SSH_PROBE_TIMEOUT_MS, env)
+  if (run.timedOut) return { ok: false, stderr: 'ssh did not finish signing in.' }
   return run.code === 0 ? { ok: true } : { ok: false, stderr: run.stderr }
 }

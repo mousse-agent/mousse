@@ -11,10 +11,12 @@ import { isBatchLauncher, RemoteOpenError, remoteExtensionHint, remoteLaunchArgu
 import {
   nodeOfThread,
   probeTunnel,
+  mousseHost,
   resolveRemoteOpen,
-  sshProbeFailure,
+  sshSignInAdvice,
   type Ask,
   type ConnectionVia,
+  type SignInAdvice,
   type SshProbeOutcome
 } from './remoteEditorFlow'
 import { runSshProbe } from './sshProbe'
@@ -370,13 +372,10 @@ export interface RemoteOpenIo {
   forgetDetected: () => void
   /** Whether Mousse's own SSH names reach a computer. */
   proxyReady: boolean
-  /** Signs in once with `ssh` over one of Mousse's names (`ssh -o BatchMode=yes <name> exit`). */
-  sshProbe: (alias: string) => Promise<SshProbeOutcome>
-  /**
-   * The computers whose connection passed the check in this run of the app. The check runs before the first open
-   * of each computer and again after any failure, not before every open.
-   */
-  checked: Map<string, ConnectionVia | undefined>
+  /** Signs in once with `ssh` over one of Mousse's names (`ssh -o BatchMode=yes <name> exit`), in the editor's environment. Advice only. */
+  sshProbe: (alias: string, config: string, env: NodeJS.ProcessEnv) => Promise<SshProbeOutcome>
+  /** The computers the sign-in check already ran for in this run of the app: it runs once for each, not before every open. */
+  signedIn: Set<string>
 }
 
 const defaultRemoteOpenIo: RemoteOpenIo = {
@@ -396,32 +395,32 @@ const defaultRemoteOpenIo: RemoteOpenIo = {
   },
   proxyReady: EDITOR_PROXY_READY,
   sshProbe: runSshProbe,
-  checked: new Map()
+  signedIn: new Set()
 }
 
 /**
- * The check before an editor opens a folder over one of Mousse's SSH names: the connection is opened and closed
- * at once for its typed reason (offline, editor connections off, no SSH server...), then one sign-in with `ssh`
- * shows a refused key. A pass is remembered for the run of the app; a failure forgets it, so the next open checks again.
+ * The check before an editor opens a folder over one of Mousse's SSH names. First the other computer is asked what an
+ * open would meet (`net.editor.probe`: it opens nothing there), so a refusal is a message with its typed reason and
+ * not an editor window that waits. This one is every time: it is cheap and always current. Then, once for each
+ * computer in a run of the app, a sign-in with `ssh` in the editor's own environment. That second look is advice
+ * only: it cannot tell a person who will type a password or touch a key from one who cannot sign in, so what it
+ * finds comes back as `advice` and the editor still starts.
  */
 export async function checkConnection(
   ask: Ask,
   node: string,
   alias: string,
+  config: string,
   env: EditorDetectionEnv,
-  io: Pick<RemoteOpenIo, 'sshProbe' | 'checked'>
-): Promise<{ ok: true; via?: ConnectionVia } | Extract<RemoteOpenResult, { ok: false }>> {
-  if (io.checked.has(node)) return { ok: true, via: io.checked.get(node) }
-  const failed = (result: Extract<RemoteOpenResult, { ok: false }>) => {
-    io.checked.delete(node)
-    return result
-  }
+  io: Pick<RemoteOpenIo, 'sshProbe' | 'signedIn' | 'processEnv'>
+): Promise<{ ok: true; via: ConnectionVia; advice?: SignInAdvice } | Extract<RemoteOpenResult, { ok: false }>> {
   const tunnel = await probeTunnel(ask, node)
-  if (!tunnel.ok) return failed(tunnel)
-  const login = await io.sshProbe(alias)
-  if ('ok' in login && !login.ok) return failed(sshProbeFailure(login.stderr, alias, env.platform === 'win32'))
-  io.checked.set(node, tunnel.via)
-  return { ok: true, via: tunnel.via }
+  if (!tunnel.ok) return tunnel
+  if (io.signedIn.has(node)) return { ok: true, via: tunnel.via }
+  io.signedIn.add(node)
+  const login = await io.sshProbe(alias, config, editorLaunchEnvironment(io.processEnv())).catch((): SshProbeOutcome => ({ skipped: true }))
+  const advice = 'ok' in login && !login.ok ? sshSignInAdvice(login.stderr, alias, env.platform === 'win32') : undefined
+  return { ok: true, via: tunnel.via, ...(advice ? { advice } : {}) }
 }
 
 /**
@@ -455,16 +454,22 @@ export async function openRemoteInEditor(
     // refusal is a message here and not an editor window that waits. An address the person approved was already
     // proven by a sign-in when it was approved, and the editor asks about its host key itself.
     let via: ConnectionVia | undefined
+    let advice: SignInAdvice | undefined
     if (resolved.host.kind === 'mousse') {
       const node = nodeOfThread(threadId)!
-      const checked = await checkConnection(ask, node, resolved.host.alias, env, io)
+      const checked = await checkConnection(ask, node, resolved.host.alias, resolved.config ?? '', env, io)
       if (!checked.ok) return checked
+      // Only now, with the open going ahead, is the `Include` line added to the user's `~/.ssh/config`.
+      const host = await mousseHost(ask, node)
+      if (!host.ok) return host
+      if (host.host.kind !== 'mousse' || host.host.alias !== resolved.host.alias) return { ok: false, reason: 'no_route' }
       via = checked.via
+      advice = checked.advice
     }
     await io.launch(command, args, editorLaunchEnvironment(io.processEnv()))
     // Only a hint: the editor asks for the extension itself when it is really missing.
     const hint = remoteExtensionHint(editor.id, env.home, builtInExtensionDirectories(editor), io.list)
-    return { ok: true, ...(hint ? { hint } : {}), ...(via ? { via } : {}) }
+    return { ok: true, ...(hint ? { hint } : {}), ...(via ? { via } : {}), ...(advice ? { advice } : {}) }
   } catch (error) {
     if (error instanceof RemoteOpenError) return { ok: false, reason: error.reason, message: error.message }
     throw error

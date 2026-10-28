@@ -139,7 +139,20 @@ export async function remoteFolder(ask: Ask, threadId: string): Promise<{ ok: tr
   }
 }
 
-/** The plain refusal of Mousse's SSH settings, or the alias of the computer once they are ready. */
+/**
+ * The alias of the computer in Mousse's own files (`net.editor.alias`), or the plain refusal of its settings. It
+ * writes nothing in the user's `~/.ssh/config`: the connection is checked with the alias first, and the `Include`
+ * line is added by `mousseHost` only once the check passed and the open is going ahead.
+ */
+export async function mousseAlias(ask: Ask, node: string): Promise<{ ok: true; host: RemoteHost; config: string } | RemoteFailure> {
+  const result = (await ask('net.editor.alias', {})) as EditorSshResult
+  if (!result.ok) return { ok: false, reason: 'ssh_settings', code: result.code, message: result.message, includeLine: result.status.includeLine }
+  const computer = result.status.computers.find((entry) => entry.node === node)
+  if (!computer) return { ok: false, reason: 'no_route' }
+  return { ok: true, host: { kind: 'mousse', alias: computer.alias }, config: result.status.mousseConfig }
+}
+
+/** Adds the `Include` line if it is not there (`net.editor.ssh.prepare`), or gives the plain refusal of Mousse's SSH settings. */
 export async function mousseHost(ask: Ask, node: string): Promise<{ ok: true; host: RemoteHost } | RemoteFailure> {
   const result = (await ask('net.editor.ssh.prepare', {})) as EditorSshResult
   if (!result.ok) return { ok: false, reason: 'ssh_settings', code: result.code, message: result.message, includeLine: result.status.includeLine }
@@ -149,14 +162,15 @@ export async function mousseHost(ask: Ask, node: string): Promise<{ ok: true; ho
 }
 
 /**
- * Everything to open the folder of `threadId`: its host and its folder. Mousse's SSH settings are prepared
- * last, after the folder is known, so the `Include` line is added only for an open that goes ahead.
+ * Everything to open the folder of `threadId`: its host and its folder. For one of Mousse's own names only the alias
+ * is made here (`config` is the file that holds it); the connection is checked next, and the `Include` line is added
+ * (`mousseHost`) only when the check passed, so a refused open leaves `~/.ssh/config` as it was.
  */
 export async function resolveRemoteOpen(
   ask: Ask,
   threadId: unknown,
   options: FlowOptions
-): Promise<{ ok: true; host: RemoteHost; folder: CheckedFolder } | RemoteFailure> {
+): Promise<{ ok: true; host: RemoteHost; folder: CheckedFolder; config?: string } | RemoteFailure> {
   const node = nodeOfThread(threadId)
   if (!node || typeof threadId !== 'string') throw new Error('This thread is on this computer. Its folder opens from the other editors.')
   const route = await remoteRoute(ask, node, options)
@@ -164,8 +178,8 @@ export async function resolveRemoteOpen(
   const folder = await remoteFolder(ask, threadId)
   if (!folder.ok) return folder
   if (route.host) return { ok: true, host: route.host, folder: folder.folder }
-  const host = await mousseHost(ask, node)
-  return host.ok ? { ok: true, host: host.host, folder: folder.folder } : host
+  const host = await mousseAlias(ask, node)
+  return host.ok ? { ok: true, host: host.host, folder: folder.folder, config: host.config } : host
 }
 
 /** How the connection to a computer runs, as the tunnel probe found it. */
@@ -191,12 +205,22 @@ function lastLine(text: string): string {
   return line.length > 200 ? `${line.slice(0, 197)}...` : line
 }
 
+/** What the sign-in check advises when it did not pass: shown after the editor started, never a reason to stop it. */
+export type SignInAdvice = NonNullable<Extract<RemoteOpenResult, { ok: true }>['advice']>
+
 /**
- * What a failed sign-in check means. The SSH server refusing this computer's key is the one case with a fix of its
- * own; anything else is shown with the line `ssh` printed. `alias` and `windows` only shape the remedy.
+ * What a sign-in check that did not pass advises. A server that offers a password or keyboard-interactive
+ * sign-in is one the editor will ask about, so there is nothing to say. Only a server that offers keys alone is
+ * reported as not accepting this computer's, with the command to add the key where this computer has one (`ssh-copy-id`
+ * needs a password sign-in on that computer). Anything else is the last line `ssh` printed.
  */
-export function sshProbeFailure(stderr: string, alias: string, windows: boolean): RemoteFailure {
-  if (/Permission denied \(/iu.test(stderr))
-    return { ok: false, reason: 'connection', failure: 'key_refused', ...(windows ? {} : { command: `ssh-copy-id ${alias}` }) }
-  return { ok: false, reason: 'connection', failure: 'ssh_failed', message: lastLine(stderr) }
+export function sshSignInAdvice(stderr: string, alias: string, windows: boolean): SignInAdvice | undefined {
+  const denied = /Permission denied \(([^)]*)\)/iu.exec(stderr)
+  if (denied) {
+    const methods = denied[1].toLowerCase().split(',').map((method) => method.trim())
+    if (methods.includes('password') || methods.includes('keyboard-interactive')) return undefined
+    return { failure: 'key_refused', ...(windows ? {} : { command: `ssh-copy-id ${alias}` }) }
+  }
+  const line = lastLine(stderr)
+  return line ? { failure: 'ssh_failed', message: line } : undefined
 }
