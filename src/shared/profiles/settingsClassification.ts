@@ -35,6 +35,7 @@ export const SETTINGS_CLASSIFICATION: readonly SettingsClassificationEntry[] = [
   { path: 'settings.permissions', scope: 'profile', notes: 'The default permission mode of new threads is personal.' },
   { path: 'settings.runs', scope: 'profile', notes: 'Whether a paused run continues by itself after a usage limit is a per-profile choice.' },
   { path: 'settings.agentAccess', scope: 'profile', notes: 'How far agents may act on other threads is a per-profile trust choice.' },
+  { path: 'settings.privacy', scope: 'profile', notes: 'Whether the agents Mousse sets up run with their telemetry off is a per-profile choice.' },
   { path: 'settings.integrations', scope: 'profile', notes: 'Skill/MCP enablement is profile-owned.' },
   { path: 'settings.title', scope: 'profile', notes: 'Title-model selection points at the shared catalog.' },
   {

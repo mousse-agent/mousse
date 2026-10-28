@@ -76,6 +76,8 @@ import { HarnessScopeStore } from './scope'
 import { sharedShellPath, type ShellPathResult } from './shellPath'
 import { compatibilityOf, fingerprintOf, knownProblemMessage, PROBE_TIMEOUTS, probeInstance, sameBinary, updateAffordance, type ProbeResult } from './status'
 import { interruptWithDeadline } from './supervise'
+import { telemetryEnforced, telemetryView } from './telemetry'
+import type { AgentTelemetrySetting } from '../../shared/settings'
 import {
   changedFields,
   fieldLabels,
@@ -234,6 +236,12 @@ export interface HarnessGateway {
   llmProviders(scope: ProviderScope): Promise<LlmProviderOption[]>
   /** The same listing from what is known now, without waiting (synchronous readers: channel `/model`). */
   listedLlmProviders(scope: ProviderScope): LlmProviderOption[]
+  /**
+   * Privacy → Agent telemetry may have changed (`settings.set`). Each instance whose setup Mousse
+   * owns and whose agent has a switch gets a new config revision: its next process starts with the
+   * new variables, and a warm process is replaced once its running turns end.
+   */
+  privacyChanged(): void
   /** Stops the instances' runtimes and running operations. */
   stop(): void
 }
@@ -556,6 +564,8 @@ export interface HarnessGatewayOptions {
   foldedInto?: (providerId: string | undefined) => HarnessDriverKind | undefined
   /** The ACP agent registry; without it the search finds nothing. */
   registry?: HarnessRegistry
+  /** Settings → General → Privacy → Agent telemetry, read live; absent reads as the default, `off`. */
+  agentTelemetry?: () => AgentTelemetrySetting
 }
 
 interface InstanceRecord {
@@ -1879,12 +1889,15 @@ export class Harness implements HarnessGateway {
     const builtIn = isBuiltInInstance(instanceId, entry.driver)
     const stateDir = instanceStateDir(this.options.profileHome, instanceId)
     const revision = this.counters.get(instanceId).configRevision
+    const home = alwaysPrivate(driver, config) || (config.home === 'private' && !builtIn) ? join(stateDir, 'home') : undefined
+    const enforced = telemetryEnforced(driver, config, home, this.agentTelemetry())
     const env = instanceEnv({
       instanceId,
       driver: entry.driver,
       configRevision: revision,
-      ...(alwaysPrivate(driver, config) || (config.home === 'private' && !builtIn) ? { home: join(stateDir, 'home') } : {}),
-      searchPath: this.searchPath
+      ...(home ? { home } : {}),
+      searchPath: this.searchPath,
+      ...(enforced ? { enforced } : {})
     })
     const record: InstanceRecord = {
       instanceId,
@@ -2263,7 +2276,25 @@ export class Harness implements HarnessGateway {
       stale,
       ...(state?.lastGood ? { lastGoodAt: state.lastGood.checkedAt } : {}),
       ...(nextStep ? { nextStep } : {}),
-      ...(settingsNotice ? { settingsNotice } : {})
+      ...(settingsNotice ? { settingsNotice } : {}),
+      telemetry: telemetryView(driver, config, record.env.home, this.agentTelemetry())
+    }
+  }
+
+  private agentTelemetry(): AgentTelemetrySetting {
+    return this.options.agentTelemetry?.() ?? 'off'
+  }
+
+  privacyChanged(): void {
+    const setting = this.agentTelemetry()
+    for (const record of [...this.records.values()]) {
+      // Only an instance whose variables change: the user's own setups, and agents without a switch, keep their runtime.
+      const enforced = telemetryEnforced(record.driver, record.config, record.env.home, setting)
+      if (JSON.stringify(enforced ?? {}) === JSON.stringify(record.env.enforced ?? {})) continue
+      this.counters.bumpConfig(record.instanceId)
+      // Rebuilt now, so the old runtime retires (it stops once its running turns end).
+      this.recordOrUndefined(record.instanceId)
+      this.changed(record.instanceId)
     }
   }
 

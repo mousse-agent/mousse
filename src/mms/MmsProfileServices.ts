@@ -503,6 +503,8 @@ export class MmsProfileServices {
       },
       cwd: () => this.worktrees.getRepoRoot(),
       piDisplayName: (providerId) => this.providerAuth.getProviderDisplayName(providerId),
+      // Settings → General → Privacy; `settings.set` tells the gateway when it changes.
+      agentTelemetry: () => this.settings.get().privacy.agentTelemetry,
       // A moved entry's device default follows it to the agent; its title model becomes Automatic.
       defaults: {
         rewrite: (from, to) => {

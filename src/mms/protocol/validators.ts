@@ -995,6 +995,7 @@ export function asSettingsPartial(v: unknown): Record<string, unknown> {
     'shortcuts',
     'context',
     'agentAccess',
+    'privacy',
     'provider',
     'title',
     'agents',
@@ -1029,7 +1030,16 @@ export function asSettingsPartial(v: unknown): Record<string, unknown> {
   }
   const walked = walk(o, 'partial', 0) as Record<string, unknown>
   if (walked.agentAccess !== undefined) assertAgentAccessPatch(walked.agentAccess)
+  if (walked.privacy !== undefined) assertPrivacyPatch(walked.privacy)
   return walked
+}
+
+/** `privacy` decides what reaches the agents Mousse sets up, so a malformed patch is refused rather than guessed at. */
+function assertPrivacyPatch(value: unknown): void {
+  const patch = asPlainObject(value, 'partial.privacy')
+  for (const key of Object.keys(patch)) if (key !== 'agentTelemetry') throw new Error(`partial.privacy.${key} is not allowed`)
+  if (patch.agentTelemetry !== undefined && patch.agentTelemetry !== 'off' && patch.agentTelemetry !== 'agent_default')
+    throw new Error('partial.privacy.agentTelemetry must be off or agent_default')
 }
 
 /** `agentAccess` narrows what agents may reach, so a malformed patch is refused rather than guessed at. */

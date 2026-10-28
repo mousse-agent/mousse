@@ -30,6 +30,22 @@ export interface InstanceEnv {
   searchPath: string[]
   /** Where the driver's own installer puts its binary, searched last (`~/.grok/bin`). */
   driverSearchPath?: string[]
+  /**
+   * Variables set last on every process of the instance, over the launch variables and anything a
+   * caller adds (the agent's telemetry switch, Settings → General → Privacy). `spawnHarness` applies
+   * them; a runtime that builds its own process environment applies them itself (`withEnforced`).
+   */
+  enforced?: Readonly<Record<string, string>>
+}
+
+/** `env` with `enforced` set over it, dropping any other spelling of each name first (Windows names ignore case). */
+export function withEnforced(env: NodeJS.ProcessEnv, enforced: Readonly<Record<string, string>> | undefined): NodeJS.ProcessEnv {
+  const names = Object.keys(enforced ?? {})
+  if (!names.length) return env
+  const upper = new Set(names.map((name) => name.toUpperCase()))
+  const next: NodeJS.ProcessEnv = {}
+  for (const [key, value] of Object.entries(env)) if (!upper.has(key.toUpperCase())) next[key] = value
+  return Object.assign(next, enforced)
 }
 
 export const DEFAULT_HOME_ID = 'default'
@@ -272,6 +288,8 @@ export function instanceEnv(input: {
   home?: string
   searchPath: readonly string[]
   base?: NodeJS.ProcessEnv
+  /** `InstanceEnv.enforced`: set last on every process. */
+  enforced?: Readonly<Record<string, string>>
 }): InstanceEnv {
   const base = input.base ?? process.env
   const variable = HOME_VARIABLES[input.driver]
@@ -295,7 +313,8 @@ export function instanceEnv(input: {
     ...(input.home ? { home: input.home } : {}),
     env,
     searchPath: [...input.searchPath, ...extraSearch],
-    ...(extraSearch.length ? { driverSearchPath: extraSearch } : {})
+    ...(extraSearch.length ? { driverSearchPath: extraSearch } : {}),
+    ...(input.enforced && Object.keys(input.enforced).length ? { enforced: { ...input.enforced } } : {})
   }
 }
 

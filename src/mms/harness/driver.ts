@@ -392,6 +392,15 @@ export interface HarnessDriver {
    */
   readonly mirrorsVendorFile?: boolean
   /**
+   * The variables that turn the agent's own telemetry off (Settings → General → Privacy), as its
+   * vendor documents them. Set last, over the launch variables, on every process of an instance
+   * whose setup Mousse owns (`ownsSetup`) while the setting is `off`. Absent: the agent documents no
+   * switch, and Mousse sets nothing.
+   */
+  telemetryEnv?(config: InstanceConfig): Readonly<Record<string, string>>
+  /** The vendor's page on what the agent collects and how to turn it off. */
+  readonly telemetryDocs?: string
+  /**
    * Mousse holds the sign-in of every instance (its own sign-in flow and saved session), whatever
    * executable runs: a sign-out revokes it, and only a sign-in in Mousse restores it.
    */

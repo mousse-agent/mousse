@@ -96,10 +96,17 @@ describe('Pi launcher: environment', () => {
     const env = launch({
       base: { PATH: '/bin', NODE_OPTIONS: '--require evil.js', ELECTRON_NO_ASAR: '1', MOUSSE_PROFILE: 'x', PI_EXPERIMENTAL: '1', pi_telemetry: '1', AWS_PROFILE: 'work', AWS_REGION: 'eu-west-1', GOOGLE_CLOUD_PROJECT: 'p' }
     }).env
-    expect(env).toMatchObject({ PATH: '/bin', PI_PACKAGE_DIR: runtime.root, PI_OFFLINE: '1', PI_SKIP_VERSION_CHECK: '1', PI_TELEMETRY: '0' })
-    for (const key of ['NODE_OPTIONS', 'ELECTRON_NO_ASAR', 'MOUSSE_PROFILE', 'PI_EXPERIMENTAL', 'pi_telemetry']) expect(env, key).not.toHaveProperty(key)
+    expect(env).toMatchObject({ PATH: '/bin', PI_PACKAGE_DIR: runtime.root, PI_OFFLINE: '1', PI_SKIP_VERSION_CHECK: '1' })
+    // Pi's telemetry is the Privacy switch's (`InstanceEnv.enforced`), not the launcher's.
+    for (const key of ['NODE_OPTIONS', 'ELECTRON_NO_ASAR', 'MOUSSE_PROFILE', 'PI_EXPERIMENTAL', 'pi_telemetry', 'PI_TELEMETRY']) expect(env, key).not.toHaveProperty(key)
     // Ambient cloud credentials stay (Bedrock, Vertex).
     expect(env).toMatchObject({ AWS_PROFILE: 'work', AWS_REGION: 'eu-west-1', GOOGLE_CLOUD_PROJECT: 'p' })
+  })
+
+  it('sets the enforced variables last, over the extra variables', () => {
+    const enforced = instanceEnv({ instanceId: 'pi:openrouter', driver: 'pi', configRevision: 0, home: join(stateDir, 'home'), searchPath: [], base: {}, enforced: { PI_TELEMETRY: '0' } })
+    const result = piLaunch({ env: enforced, runtime, stateDir, provider: 'openrouter', model: 'm', thinking: 'off', ambient: {}, host: nodeHost, extraEnv: { PI_TELEMETRY: '1' } })
+    expect(result.runs === 'yes' && result.env.PI_TELEMETRY).toBe('0')
   })
 
   it('keeps the Windows variables Pi needs to find Git Bash and run its shell', () => {
