@@ -99,6 +99,11 @@
     "digest": "2a27f073e7829290",
     "security": "4f2aa5f92e3a87e6"
   },
+  "editor.ask": {
+    "version": 1,
+    "digest": "e1b2634dfa7c5469",
+    "security": "2455464eaace895f"
+  },
   "editor.folder": {
     "version": 1,
     "digest": "2a27f073e7829290",

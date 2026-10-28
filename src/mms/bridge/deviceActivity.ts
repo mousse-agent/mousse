@@ -42,13 +42,18 @@ export function validateActivityParams<M extends BridgeActivityMethod>(
       ? [['node'], []]
       : method === 'bridge.clearDeviceRules'
         ? [['node'], ['threadId', 'ruleId']]
-        : [['threadId'], []]
+        : method === 'bridge.editorAsks'
+          ? [[], []]
+          : method === 'bridge.editorAsk.answer'
+            ? [['node', 'allow'], []]
+            : [['threadId'], []]
   if (
     required.some((key) => !Object.hasOwn(row, key)) ||
     Object.keys(row).some((key) => !required.includes(key) && !optional.includes(key))
   )
     return invalid()
   if (row.node !== undefined && !isId('node', row.node)) return invalid()
+  if (method === 'bridge.editorAsk.answer' && typeof row.allow !== 'boolean') return invalid()
   for (const key of ['threadId', 'ruleId'])
     if (row[key] !== undefined && (typeof row[key] !== 'string' || !row[key] || (row[key] as string).length > 512))
       return invalid()

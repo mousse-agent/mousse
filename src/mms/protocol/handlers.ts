@@ -93,6 +93,7 @@ import { resolveThreadProjectPath } from '../data/resolveActiveProjectPath'
 import { ThreadJournal } from '../data/ThreadJournal'
 import { ThreadWorkspaceManager } from '../workspace/ThreadWorkspaceManager'
 import { resolveEditorFolder } from '../workspace/editorFolder'
+import type { NodeId } from '../../shared/net/ids'
 import { scheduledJobOptionsDepsFrom, validateScheduledJobOptions, type ScheduledJobOptionsDeps } from '../scheduled/validateJobOptions'
 import { isExecutableJobEdit, JobPermissionRefused, permissionAboveCeiling, permissionsAfterEdit } from '../scheduled/jobPermission'
 import { ScheduledWebhookError } from '../scheduled/ScheduledJobService'
@@ -2759,6 +2760,16 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const lookup = threadLookupContext(ctx, p)
       if (!lookup.projectPath) throw new DomainRpcError('thread_has_no_folder', 'This thread has no folder on this computer.', { threadId: lookup.threadId })
       return resolveEditorFolder({ threadId: lookup.threadId, threadDirectory: lookup.threadDirectory, projectPath: lookup.projectPath })
+    }
+    case 'editor.ask': {
+      // Another computer asks this one to allow its editor connections. Only a routed call carries the caller.
+      const p = isObject(params) ? params : {}
+      rejectUnknownKeys(p, [])
+      const caller = ctx.connection?.bridgeCaller
+      if (!caller) throw new DomainRpcError('invalid_params', 'editor.ask asks another computer. Name it with node.')
+      const asks = ctx.mms.editorAsks
+      if (!asks) throw new DomainRpcError('not_available_remotely', 'This computer is not taking requests from other computers right now.')
+      return asks.ask(caller.node as NodeId)
     }
     case 'workspace.restore': {
       const p = isObject(params) ? params : {}

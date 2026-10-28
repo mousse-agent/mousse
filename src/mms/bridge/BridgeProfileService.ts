@@ -27,6 +27,7 @@ import { phoneSpeechMethods } from './remote/speech'
 import type { ThreadSourcePort } from './remote/ThreadStreamAdapter'
 import { DispatchService, mmsDispatchRuntime, type DispatchRuntime } from './dispatch'
 import { OwnerRoutes } from './routed/OwnerRoutes'
+import { EditorAsks } from './routed/editorAsks'
 import { ThreadRouter } from './routed/ThreadRouter'
 import { MergedLists } from './routed/mergedLists'
 import { PrivateSources, raiseStreamListenerLimits } from './routed/privateSources'
@@ -54,6 +55,7 @@ export class BridgeProfileService {
   readonly dispatch: DispatchService
   private readonly remote: RemoteApi
   private readonly routes: OwnerRoutes
+  private readonly editorAsks: EditorAsks
   private readonly staging: RoutedStaging
   private readonly clock: Clock
   private readonly tasks = new Set<Promise<unknown>>()
@@ -315,6 +317,31 @@ export class BridgeProfileService {
       }
     })
     routes.register()
+    // Another computer asks for editor connections: a desktop notification and a prompt in the windows of this
+    // computer (none, for a computer with no window, which has the `editor.ask` row in the audit and the CLI).
+    const asks = new EditorAsks({
+      policy: rt.policy,
+      audit: rt.audit,
+      clock: this.clock,
+      name: (node) => deviceNameOf(rt.identity, node),
+      onAsked: ({ name }) =>
+        services.events.emit({
+          channel: 'protocol:event',
+          data: { type: 'ui.notify', data: { kind: 'remote-editor-ask', device: name } }
+        }),
+      onChanged: () =>
+        services.events.emit({
+          channel: 'protocol:event',
+          data: { type: 'ui.notify', data: { kind: 'remote-editor-asks' } }
+        })
+    })
+    asks.start()
+    services.editorAsks = asks
+    this.editorAsks = asks
+    this.disposers.add(() => {
+      if (services.editorAsks === asks) services.editorAsks = undefined
+      asks.close()
+    })
     // The first editor connection a device opens here is shell access: a desktop notification in the windows of
     // this computer (none, for a computer with no window, which has the `editor.open` row in the audit).
     this.disposers.add(
@@ -615,6 +642,11 @@ export class BridgeProfileService {
       return deviceActivityOf(sources, (params as BridgeActivityParams['bridge.activity']).node)
     if (method === 'bridge.clearDeviceRules')
       return clearDeviceRules(sources, params as BridgeActivityParams['bridge.clearDeviceRules'])
+    if (method === 'bridge.editorAsks') return { asks: this.editorAsks.pending() }
+    if (method === 'bridge.editorAsk.answer') {
+      const answer = params as BridgeActivityParams['bridge.editorAsk.answer']
+      return this.editorAsks.answer(answer.node, answer.allow)
+    }
     return messageSendersOf(sources, (params as BridgeActivityParams['bridge.messageSenders']).threadId)
   }
   /** Trusted local connection producers retain profile ownership while draining. */

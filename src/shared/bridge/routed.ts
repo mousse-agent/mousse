@@ -171,6 +171,11 @@ export const ROUTED_METHODS: Readonly<Record<string, RoutedRow>> = Object.freeze
   // folder, resolved here from the thread. The call carries no path, and the reply names this computer's system
   // so the caller can build a Remote-SSH address (`editorFolder.ts`).
   'editor.folder': read('thread', ['threadId']),
+  // Asks a person on the computer (named by `node`, which only routes the call) to allow editor connections from the
+  // calling computer. It takes nothing and changes no setting there: the switch is turned on by a person on that
+  // computer, never by this call (`shared/bridge/editorAsk.ts`). It is not a ledger row; the computer keeps one pending
+  // ask per device and the audit row of each ask that reached a person.
+  'editor.ask': read('computer', []),
   'threads.approvalRules': read('thread', ['threadId']),
   'actions.list': read('thread', ['threadId', GEN]),
   'actions.getAffectedFiles': read('thread', ['threadId', 'actionId', GEN], {
