@@ -6,7 +6,8 @@ import { ComputerNotice } from '../../src/renderer/components/ComputerNotice'
 import { ComputerSurfaceNote, surfaceNoteFor } from '../../src/renderer/components/ComputerSurfaceNote'
 import { EarlierMessagesBarView } from '../../src/renderer/components/EarlierMessagesBar'
 import { ThreadComputerBarView } from '../../src/renderer/components/ThreadComputerBar'
-import { OpenInEditorElsewhere } from '../../src/renderer/components/sideCard/EditorMenuButton'
+import { OpenInEditorView } from '../../src/renderer/components/sideCard/EditorMenuButton'
+import { noRouteHelp } from '../../src/renderer/components/sideCard/openInEditor'
 import { useAppStore } from '../../src/renderer/stores/appStore'
 import { outdatedComputerName } from '../../src/shared/bridge/computerErrors'
 import { isComputerOffline, sendErrorLine } from '../../src/renderer/lib/errorText'
@@ -151,11 +152,19 @@ describe('what the app panel says for a thread of another computer', () => {
 })
 
 describe('opening the thread folder in an editor', () => {
-  it('is off for a thread of another computer, and says where the folder is', () => {
-    const item = html(createElement(OpenInEditorElsewhere, { computer: 'Studio' }))
-    expect(item).toContain('Open in editor on Studio')
-    expect(item).toContain('disabled')
-    expect(item).toContain('The folder is on Studio. Open it in an editor there.')
+  it('keeps the editor button for a thread of another computer and says what is missing, with no "on <computer>" button', () => {
+    const code = { id: 'vscode', label: 'VS Code', kind: 'editor', remote: true } as const
+    const item = html(createElement(OpenInEditorView, {
+      path: 'Studio',
+      editors: [code],
+      lastId: null,
+      onOpen: async () => {},
+      blocked: { message: noRouteHelp(code, 'Studio').message, action: { label: 'Set up…', onClick: () => {} } }
+    }))
+    expect(item).toContain('Open in VS Code')
+    expect(item).not.toContain('Open in editor on')
+    expect(item).toContain('To open Studio’s folder in VS Code here, this computer needs to reach it over SSH.')
+    expect(item).toContain('Set up…')
   })
 })
 

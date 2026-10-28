@@ -378,6 +378,21 @@ it('joins through the setup listener and the via tunnel while the invitation rou
   ).resolves.toBeUndefined()
 }, 30_000)
 
+it('net.ssh.target answers the endpoint this computer approved for a device, and nothing for any other', async () => {
+  const a = profile()
+  await a.net.request('net.init', { listen: true, port: 0 })
+  const known = newId('node')
+  await approve(a.path, { [known]: 'me@box.example.com:2222' })
+  await expect(a.net.request('net.ssh.target', { node: known })).resolves.toEqual({
+    endpoint: 'me@box.example.com:2222'
+  })
+  await expect(a.net.request('net.ssh.target', { node: newId('node') })).resolves.toEqual({})
+  // An approval that does not parse as an endpoint is no approval.
+  const odd = newId('node')
+  await approve(a.path, { [known]: 'me@box.example.com:2222', [odd]: '-oProxyCommand=x y' })
+  await expect(a.net.request('net.ssh.target', { node: odd })).resolves.toEqual({})
+})
+
 it('the method registry refuses via anywhere but bridge.join and any non-loopback shape', async () => {
   const registry = new DomainHandlerRegistry()
   const requests: string[] = []
@@ -418,5 +433,8 @@ it('the method registry refuses via anywhere but bridge.join and any non-loopbac
     call('net.ssh.trust', { host: 'box', fingerprint: 'not-a-fingerprint' })
   ).rejects.toBeTruthy()
   await expect(call('net.ssh.approve', { node: 'nope', endpoint: 'box' })).rejects.toBeTruthy()
+  await expect(call('net.ssh.target', { node: 'nope' })).rejects.toBeTruthy()
+  await expect(call('net.ssh.target', {})).rejects.toBeTruthy()
+  await expect(call('net.ssh.target', { node: newId('node') })).resolves.toBeDefined()
   await expect(call('net.ssh.check', { host: 'box' })).resolves.toBeDefined()
 })

@@ -1620,6 +1620,8 @@ export interface EditorInfo {
   id: string
   label: string
   kind: 'editor' | 'files'
+  /** Set on an editor that can open a folder of another computer over its own SSH support. */
+  remote?: true
   /** The app's own icon; omitted when unavailable. */
   iconDataUrl?: string
 }

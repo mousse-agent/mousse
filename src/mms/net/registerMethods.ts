@@ -47,6 +47,7 @@ const keys: Record<NetLocalMethod, readonly string[]> = {
   'net.ssh.update': ['id'],
   'net.ssh.rename': ['id', 'endpoint'],
   'net.ssh.approve': ['node', 'endpoint'],
+  'net.ssh.target': ['node'],
   'net.editor.ssh.status': [],
   'net.editor.ssh.prepare': [],
   'net.editor.ssh.enable': [],
@@ -112,7 +113,8 @@ function validateSsh(method: NetLocalMethod, params: Record<string, unknown>): v
     bad('A remote machine record id is required')
   if (['net.ssh.rename', 'net.ssh.approve'].includes(method) && !text(params.endpoint, 253))
     bad('An SSH endpoint is required')
-  if (method === 'net.ssh.approve' && !isId('node', params.node)) bad('A node identity is required')
+  if (['net.ssh.approve', 'net.ssh.target'].includes(method) && !isId('node', params.node))
+    bad('A node identity is required')
 }
 
 function validate(method: NetLocalMethod, value: unknown): Record<string, unknown> {

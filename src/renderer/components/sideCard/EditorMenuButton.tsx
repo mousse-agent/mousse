@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useId, useRef, useState } from 'react'
 import type { EditorInfo } from '../../../shared/types'
 import { useActiveProjectLocation } from '../../hooks/useActiveProjectPath'
 import { useTransientError } from '../../hooks/useTransientError'
@@ -6,16 +6,26 @@ import { FloatingPortal } from '../../lib/floatingLayer'
 import { ChevronDown, Code2, Folder } from '../../lib/icons'
 import { useAppStore } from '../../stores/appStore'
 import { loadEditors, refreshEditors, useEditorsStore } from '../../stores/editorsStore'
-import { UNKNOWN_COMPUTER_NAME, useComputer } from '../../lib/computers'
+import { UNKNOWN_COMPUTER_NAME, useComputer, useComputers } from '../../lib/computers'
+import { openDevice } from '../../lib/settingsNavigation'
+import { ApproveSshRouteDialog } from '../devices/ApproveSshRouteDialog'
+import type { NodeId } from '../../../shared/net'
 import {
   defaultEditor,
   hasEditorChoices,
   loadLastEditorId,
+  noRemoteEditorMessage,
+  noRouteHelp,
+  type NoRouteHelp,
   openErrorMessage,
   openLabel,
+  remoteEditors,
+  remoteRefusalMessage,
   saveLastEditorId,
   splitEditors
 } from './openInEditor'
+import { EditorSshNotice } from './EditorSshNotice'
+import { useRemoteRoute } from './useRemoteRoute'
 import { SideCardMenuRow } from './SideCardMenuRow'
 import { useSideCardMenu } from './useSideCardMenu'
 
@@ -23,24 +33,25 @@ const refreshQuietly = () => { void refreshEditors() }
 
 /**
  * Open the thread's folder in an editor or the file manager. Nothing without a folder. A thread of
- * another computer has its folder there: the item says so and stays off, since an editor started
- * here would open this computer's own disk.
+ * another computer opens in an editor installed here, over SSH (see `OpenInRemoteEditor`).
  */
 export function OpenInEditor() {
   const { projectId, path } = useActiveProjectLocation()
   const profileId = useAppStore((s) => s.profileId)
   const editors = useEditorsStore((s) => s.editors)
-  const node = useAppStore((s) => s.threads.find((thread) => thread.id === s.activeThreadId)?.node)
+  const thread = useAppStore((s) => s.threads.find((entry) => entry.id === s.activeThreadId))
+  const node = thread?.node
   const computer = useComputer(node)
   const [lastId, setLastId] = useState<string | null>(() => loadLastEditorId(profileId))
-  const enabled = Boolean(projectId && path) && !node
+  const local = Boolean(projectId && path) && !node
+  const remote = Boolean(projectId && node && thread)
 
   useEffect(() => { setLastId(loadLastEditorId(profileId)) }, [profileId])
   useEffect(() => {
-    if (enabled) void loadEditors()
-  }, [enabled])
+    if (local || remote) void loadEditors()
+  }, [local, remote])
 
-  if (node) return projectId ? <OpenInEditorElsewhere computer={computer?.name ?? UNKNOWN_COMPUTER_NAME} /> : null
+  if (node) return projectId && thread ? <OpenInRemoteEditor threadId={thread.id} node={node} computer={computer?.name ?? UNKNOWN_COMPUTER_NAME} profileId={profileId} /> : null
   if (!projectId || !path || !editors) return null
   const open = async (editor: EditorInfo) => {
     await window.mousse.editors.open(editor.id, path)
@@ -50,18 +61,69 @@ export function OpenInEditor() {
   return <OpenInEditorView path={path} editors={editors} lastId={lastId} onOpen={open} onMenuOpen={refreshQuietly} />
 }
 
-/** The editor item of a thread that lives on another computer: off, with the reason where it would open. */
-export function OpenInEditorElsewhere({ computer }: { computer: string }) {
-  const reason = `The folder is on ${computer}. Open it in an editor there.`
-  return (
-    <div className="side-card-open-editor">
-      <div className="side-card-open-editor-group single">
-        <button type="button" className="side-card-open-editor-main" disabled aria-disabled="true" title={reason} aria-label={`Open in editor on ${computer}. ${reason}`}>
-          <Code2 size={14} aria-hidden="true" />
-          <span className="side-card-open-editor-label">Open in editor on {computer}</span>
-        </button>
+/**
+ * The editor item of a thread that lives on another computer: the same button, which opens the thread's
+ * folder in an editor installed here, over SSH. Without an SSH route to that computer it stays and says
+ * what is missing. The file manager is not offered: it would open this computer's own disk.
+ */
+export function OpenInRemoteEditor({ threadId, node, computer, profileId }: { threadId: string; node: string; computer: string; profileId: string }) {
+  const editors = useEditorsStore((s) => s.editors)
+  const { kind: route, reload: reloadRoute } = useRemoteRoute(threadId)
+  const device = useComputers(true).devices.find((entry) => entry.node === node)
+  const [approving, setApproving] = useState(false)
+  const [lastId, setLastId] = useState<string | null>(() => loadLastEditorId(profileId))
+  const [refusal, setRefusal] = useState<string | null>(null)
+  const [hint, setHint] = useState<string | null>(null)
+  const [opens, setOpens] = useState(0)
+  useEffect(() => { setLastId(loadLastEditorId(profileId)) }, [profileId])
+  useEffect(() => { setRefusal(null); setHint(null) }, [threadId])
+  if (!editors) return null
+  const usable = remoteEditors(editors)
+  const current = defaultEditor(usable, lastId)
+  if (!current) {
+    return (
+      <div className="side-card-open-editor">
+        <p className="side-card-open-editor-note">{noRemoteEditorMessage(computer)}</p>
       </div>
-    </div>
+    )
+  }
+  const help = route === 'none' ? noRouteHelp(current, computer, device) : undefined
+  const blocked = help && {
+    message: help.message,
+    action: { label: help.label, onClick: () => (help.action === 'approve' ? setApproving(true) : openDevice(node)) }
+  }
+  const open = async (editor: EditorInfo) => {
+    setLastId(editor.id)
+    saveLastEditorId(profileId, editor.id)
+    setRefusal(null)
+    setHint(null)
+    try {
+      // Also while the note shows: the route may have been added since the window last looked.
+      const result = await window.mousse.editors.openRemote(editor.id, threadId)
+      if (result.ok) setHint(result.hint ?? null)
+      else if (result.reason === 'no_route') reloadRoute()
+      else setRefusal(remoteRefusalMessage(result, editor, computer))
+    } finally {
+      // An open may have added the Include line; the notice reads it again.
+      setOpens((value) => value + 1)
+    }
+  }
+  return (
+    <>
+      <OpenInEditorView path={computer} editors={usable} lastId={lastId} onOpen={open} onMenuOpen={refreshQuietly} blocked={blocked} refusal={refusal} hint={hint} />
+      <EditorSshNotice refreshKey={opens} />
+      {approving && help?.action === 'approve' && help.endpoint && (
+        <ApproveSshRouteDialog
+          node={node as NodeId}
+          name={computer}
+          endpoint={help.endpoint}
+          title={`Approve SSH address for ${computer}`}
+          intro={`${computer} offers an SSH address. Approve one that reaches it from this computer to open its folders in an editor here. Mousse checks the host key and the login first.`}
+          onClose={() => setApproving(false)}
+          onDone={reloadRoute}
+        />
+      )}
+    </>
   )
 }
 
@@ -73,13 +135,20 @@ interface OpenInEditorViewProps {
   onOpen: (editor: EditorInfo) => Promise<void>
   /** Called each time the menu opens. */
   onMenuOpen?: () => void
+  /** Why the main button cannot open anything yet, with what to do about it. Shown under the button. Clicking it, or picking an editor, still tries. */
+  blocked?: { message: string; action?: { label: string; onClick: () => void } }
+  /** The last attempt was refused: its words, kept until the next attempt. */
+  refusal?: string | null
+  /** The folder was opened; the editor may still need its Remote - SSH extension. */
+  hint?: string | null
 }
 
 /** The split button, its menu and its inline error, given the data. `OpenInEditor` supplies it. */
-export function OpenInEditorView({ path, editors, lastId, onOpen, onMenuOpen }: OpenInEditorViewProps) {
+export function OpenInEditorView({ path, editors, lastId, onOpen, onMenuOpen, blocked, refusal, hint }: OpenInEditorViewProps) {
   const [menuOpen, setMenuOpen] = useState(false)
   const [error, setError] = useTransientError()
   const busyRef = useRef(false)
+  const noteId = useId()
   const groupRef = useRef<HTMLDivElement>(null)
   const chevronRef = useRef<HTMLButtonElement>(null)
   const current = defaultEditor(editors, lastId)
@@ -122,7 +191,8 @@ export function OpenInEditorView({ path, editors, lastId, onOpen, onMenuOpen }: 
       <div ref={groupRef} className={`side-card-open-editor-group${choices ? '' : ' single'}`}>
         <button
           type="button"
-          className="side-card-open-editor-main"
+          className={`side-card-open-editor-main${blocked ? ' blocked' : ''}`}
+          aria-describedby={blocked ? noteId : undefined}
           onClick={() => void openEditor(current)}
         >
           <EditorIcon editor={current} />
@@ -144,6 +214,14 @@ export function OpenInEditorView({ path, editors, lastId, onOpen, onMenuOpen }: 
           </button>
         )}
       </div>
+      {blocked && (
+        <div id={noteId} className="side-card-open-editor-note" role="note">
+          <p>{blocked.message}</p>
+          {blocked.action && <button type="button" className="side-card-open-editor-link" onClick={blocked.action.onClick}>{blocked.action.label}</button>}
+        </div>
+      )}
+      {hint && <p className="side-card-open-editor-note" role="note">{hint}</p>}
+      {refusal && <p className="side-card-open-editor-note refusal" role="alert">{refusal}</p>}
       {error && (
         <p className="side-card-open-editor-error" role="alert" title={error}>{error}</p>
       )}

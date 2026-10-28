@@ -56,7 +56,7 @@ Found when the service is built and written again at every start and whenever th
 
 ## The `Include` line
 
-- **Automatic on first use.** The first call that needs an alias adds the line, with no dialog. The call reports `added: true` once, and the interface shows `EDITOR_SSH_NOTICE`: "Mousse added an Include line to ~/.ssh/config so your editor can reach your other computers. You can remove it in Settings." `net.editor.ssh.ack` marks it seen. The notice and the Settings undo are shown by the first screen that calls these methods.
+- **Automatic on first use.** The first call that needs an alias adds the line, with no dialog. The call reports `added: true` once, and the interface shows `EDITOR_SSH_NOTICE`: "Mousse added an Include line to ~/.ssh/config so your editor can reach your other computers. You can remove it in Settings." `net.editor.ssh.ack` marks it seen. The notice shows under the editor button after an open, and in Settings, Devices, Editors, where the switch and undo are.
 - **A line removed by hand is a no.** After Mousse added the line, a call that finds it missing treats that as the person turning the feature off: it does not add it again, and answers `off`. Only `net.editor.ssh.enable` (Settings) adds it again.
 - **A line moved under a `Host` line** is not copied to the top. `prepare` answers `scoped` and says to move it.
 - **Undo removes only that line.** `net.editor.ssh.disable` removes lines that name only Mousse's file and leaves every other byte, then turns the feature off. First use does not turn it back on; `net.editor.ssh.enable` does. If the line cannot be removed, nothing changes and the person can try again. **A line the person edited** (a comment added to it, another file on the same line) is left: the answer says `leftover: true` and `status.included` and `status.edited` stay true, so the screen can say "remove this line by hand" instead of "removed".
@@ -128,7 +128,7 @@ Arguments after the path arrived intact, also with a quoted argument that contai
 
 ## Methods
 
-Local methods on the `net.v1` capability, for the clients on this computer only (a paired computer cannot call them). No screen or CLI command uses them yet; the first change that does (opening a remote thread's folder in an editor) shows the notice and the Settings undo.
+Local methods on the `net.v1` capability, for the clients on this computer only (a paired computer cannot call them). The window uses them for the notice under the editor button and for the Editors row in Settings, Devices. No CLI command uses them.
 
 | Method | Does |
 | --- | --- |
@@ -139,3 +139,17 @@ Local methods on the `net.v1` capability, for the clients on this computer only 
 | `net.editor.ssh.ack` | The notice was seen. |
 
 While the feature is used and on, Mousse rewrites its own files at start and when the device list changes: a new computer gets an alias, a revoked one loses its alias and its pinned keys, a moved launcher is found. That sync never touches `~/.ssh/config`.
+
+## Opening a remote thread's folder
+
+The editor button of a thread that runs on another computer (VS Code, Cursor, Windsurf, VSCodium, VS Code Insiders) opens the thread's folder in the editor on this computer over Remote - SSH. The main process does it (`src/main/remoteEditorFlow.ts`, `remoteEditor.ts`, `editors.ts`).
+
+- **Which SSH name.** The SSH address this computer approved for that computer (`net/ssh/approvals.json`, read with `net.ssh.target`) is used as it is. One of Mousse's own names (`Host mousse-…` above) is used only once `mousse-cli net ssh-proxy` exists: `EDITOR_PROXY_READY` in `src/shared/remoteEditor.ts` is `false` until then, so `net.editor.ssh.prepare` is not called and nothing adds the `Include` line.
+- **Host key of an approved address.** The key Mousse verified at approval is pinned in the profile's own known-hosts file. The editor's `ssh` reads the user's `~/.ssh/known_hosts`, so the first connection may ask to trust the key. Mousse's own names carry a pinned key and strict checking (above); approved addresses move to such a name when the proxy change lands.
+- **No SSH to that computer.** The button stays and the note under it says what to do: approve the address the computer offers (button `Approve address…`), or open Settings, Devices at that computer (`Set up…` or `Open Devices…`). A Mac or Windows computer is told that Mousse sets SSH up on Linux computers only and that it needs an SSH server of its own.
+- **Which folder.** The computer that runs the thread answers the routed `editor.folder`. A removed worktree (`workspace_not_ready`, state `missing`) is restored with the routed `workspace.restore` and the folder is asked for again once. This computer works `uriPath` out again from `path` and refuses the answer when they differ.
+- **The command.** An argument array, `<editor command> --folder-uri vscode-remote://ssh-remote+<name><path>`, with each path segment percent-encoded. A host that is not `[user@]host[:port]` or a Mousse name is refused. Nothing goes through a shell, a `.cmd` or `.bat` launcher is refused on Windows, and the editor starts without `VSCODE_*`, `ELECTRON_*` and `NODE_OPTIONS` of Mousse's own environment, which would send the open to another window or run the command as plain Node. On macOS the script is `Contents/Resources/app/bin/` plus the editor's command name, then `code`, then the command on `PATH`.
+- **Remote - SSH extension.** Never a reason to refuse. If it is not in the editor's own folder (`~/.vscode/extensions` and so on) nor among the extensions inside the app (`resources/app/extensions`, where Windsurf and Antigravity ship it), the editor still opens and a hint names the extension.
+- **File manager.** It is not offered for a remote thread, since it would open this computer's own disk.
+- **Settings.** Settings, Devices shows the Editors group only while the `Include` line is installed or its notice is pending. Undo removes the line and is final until editor connections exist; nothing in Settings adds the line before then.
+- **Not tested.** A real editor against a real SSH server (a path with a space and `#`), the case of a Windows drive letter in `/C:/…` against `/c:/…`, `Code.exe --folder-uri` started directly on Windows, the bundled script name of VS Code Insiders on macOS (`bin/code` and `bin/code-insiders` are both tried; the public docs name only the `code-insiders` command), Cursor's `--folder-uri` when Cursor is already running (a forum report says it only focuses the window), and a mapped drive letter on a Windows computer.

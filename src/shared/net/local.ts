@@ -40,6 +40,7 @@ export const NET_LOCAL_METHODS = [
   'net.ssh.update',
   'net.ssh.rename',
   'net.ssh.approve',
+  'net.ssh.target',
   'net.editor.ssh.status',
   'net.editor.ssh.prepare',
   'net.editor.ssh.enable',

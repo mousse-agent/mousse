@@ -35,7 +35,9 @@ import {
   broadcastThreadSnapshot
 } from '../mms/protocolEventBridge'
 import { SettingsStore } from '../../mms/settings/SettingsStore'
-import { listEditors, openInEditor } from '../editors'
+import { listEditors, openInEditor, openRemoteInEditor } from '../editors'
+import { nodeOfThread, remoteRoute } from '../remoteEditorFlow'
+import { EDITOR_PROXY_READY, type RemoteOpenResult, type RemoteRoute } from '../../shared/remoteEditor'
 import { refreshApplicationMenu } from '../applicationMenu'
 import { setGuestShortcuts } from '../menu/guestShortcutForward'
 import type { ShortcutOverrides } from '../../shared/commands'
@@ -2254,6 +2256,18 @@ export function registerGuiIpc(
   )
   registerHandler('editors:open', async (_e, editorId: string, path: string) => {
     await openInEditor(editorId, path)
+  })
+  // A thread of another computer: its folder opens in an editor of this one over SSH. The window names the
+  // thread only; the folder is the one the owner answers, and the SSH address is read here from this
+  // computer's own records.
+  registerHandler('editors:openRemote', async (_e, editorId: string, threadId: string): Promise<RemoteOpenResult> =>
+    openRemoteInEditor(editorId, threadId, (method, params) => guiMms.request(method, params))
+  )
+  registerHandler('editors:remoteRoute', async (_e, threadId: string): Promise<RemoteRoute> => {
+    const node = nodeOfThread(threadId)
+    if (!node) return { kind: 'none' }
+    const { kind } = await remoteRoute((method, params) => guiMms.request(method, params), node, { proxyReady: EDITOR_PROXY_READY })
+    return { kind }
   })
 
   registerHandler('github:status', async () => {

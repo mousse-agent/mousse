@@ -3,8 +3,10 @@ import { AlertTriangle, CircleCheck, Monitor, MonitorSmartphone, MoreHorizontal,
 import { ChangePlanDialog } from './devices/ChangePlanDialog'
 import { AddSshDeviceDialog } from './devices/AddSshDeviceDialog'
 import { ApproveSshRouteDialog } from './devices/ApproveSshRouteDialog'
+import { EditorSshSettings } from './devices/EditorSshSettings'
 import { RenameEndpointDialog, UndoSetupDialog, UpdateRemoteDialog } from './devices/SshRecordDialogs'
 import { Modal } from './ui/Modal'
+import { takePendingDevice } from '../lib/settingsNavigation'
 import { SettingsAdvanced, SettingsGroup, SettingsRow, Switch } from './settings/SettingsRow'
 import { CopyButton } from './settings/IconButtons'
 import { mousseIdAvailable, useMousseIdStore } from '../stores/mousseIdStore'
@@ -194,6 +196,20 @@ export function NetDevicesSection() {
   const self = status?.self
   const selfDevice = devices.find((device) => device.self)
   const others = listedDevices(devices).filter((device) => !device.self)
+  // A device asked for from elsewhere in the app (an editor that needs SSH to it) is brought into view and marked for a moment.
+  const [picked, setPicked] = useState<string>()
+  useEffect(() => {
+    const pick = () => { const node = takePendingDevice(); if (node) setPicked(node) }
+    pick()
+    window.addEventListener('mousse:settings-device', pick)
+    return () => window.removeEventListener('mousse:settings-device', pick)
+  }, [])
+  useEffect(() => {
+    if (!picked) return
+    document.querySelector(`[data-device-node="${picked}"]`)?.scrollIntoView({ block: 'center' })
+    const timer = window.setTimeout(() => setPicked(undefined), 4000)
+    return () => window.clearTimeout(timer)
+  }, [picked, others.length])
   const unlocked = status?.keystore === 'unlocked'
   const authority = !!self?.isAuthority
   // On unless this computer turned it off; an older daemon that does not report it has no such switch.
@@ -336,6 +352,8 @@ export function NetDevicesSection() {
           return [
             <SettingsRow
               key={device.node}
+              data-device-node={device.node}
+              className={picked === device.node ? 'devices-row-picked' : undefined}
               title={device.name}
               titleAction={device.kind === 'phone'
                 ? <span className="devices-kind" title="Phone"><Smartphone size={13} aria-hidden="true" />Phone</span>
@@ -376,6 +394,8 @@ export function NetDevicesSection() {
         {self && unlocked && !others.length && <p className="settings-muted devices-note">No other devices yet.</p>}
       </SettingsGroup>
     )}
+
+    {status && <EditorSshSettings />}
 
     {status && unfinished.length > 0 && (
       <SettingsGroup title="Unfinished remote machine setups" className="devices-group">

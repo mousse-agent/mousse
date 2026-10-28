@@ -2,6 +2,7 @@ import type { AppletApi, AppletUiEvent } from '../shared/appletRuntime'
 import { contextBridge, ipcRenderer } from 'electron'
 import { readStartupAppearanceArgument } from '../shared/startupAppearance'
 import type { NetStatus } from '../shared/net/local'
+import type { RemoteOpenResult, RemoteRoute } from '../shared/remoteEditor'
 import type { CommandId } from '../shared/commands'
 import type { LocalTtsModelId, LocalTtsModelStatus, ProviderSpeechRequest, ProviderSpeechResult } from '../shared/readAloud'
 import type { LocalSttModelId, LocalSttModelStatus, ProviderTranscriptionRequest, ProviderTranscriptionResult } from '../shared/dictation'
@@ -559,7 +560,12 @@ const api = {
     list: (options?: { refresh?: boolean }): Promise<EditorInfo[]> =>
       ipcRenderer.invoke('editors:list', options),
     open: (editorId: string, path: string): Promise<void> =>
-      ipcRenderer.invoke('editors:open', editorId, path)
+      ipcRenderer.invoke('editors:open', editorId, path),
+    /** Opens the folder of a thread of another computer in an editor of this one, over SSH. */
+    openRemote: (editorId: string, threadId: string): Promise<RemoteOpenResult> =>
+      ipcRenderer.invoke('editors:openRemote', editorId, threadId),
+    /** How this computer reaches the computer that runs a thread, for an editor. */
+    remoteRoute: (threadId: string): Promise<RemoteRoute> => ipcRenderer.invoke('editors:remoteRoute', threadId)
   },
   inAppBrowser: {
     registerTab: (input) => ipcRenderer.invoke('browser:register-tab', input),
