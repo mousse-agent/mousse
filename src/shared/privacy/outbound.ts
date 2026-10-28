@@ -19,10 +19,15 @@ export interface OutboundEntry {
   hosts: readonly string[]
   /** `contacted`: when Mousse connects. */
   when?: string
-  /** `contacted`: what the request carries. */
+  /** `contacted`: what the request carries, starting in lower case (it follows "Sends:"). */
   sends?: string
   /** `contacted`: the files (from the repository root) that make the request. */
   sources?: readonly string[]
+  /**
+   * `contacted` through a dependency rather than an address in Mousse's own code (`discord.js`):
+   * the package, which one of `sources` imports.
+   */
+  via?: string
 }
 
 export const OUTBOUND: readonly OutboundEntry[] = [
@@ -31,7 +36,7 @@ export const OUTBOUND: readonly OutboundEntry[] = [
     kind: 'contacted',
     hosts: ['github.com'],
     when: 'In installed builds, when Mousse checks for an update and downloads one.',
-    sends: 'A request for the newest release of your update channel.',
+    sends: 'a request for the newest release of your update channel.',
     sources: ['src/main/updates/index.ts']
   },
   {
@@ -39,7 +44,7 @@ export const OUTBOUND: readonly OutboundEntry[] = [
     kind: 'contacted',
     hosts: ['github.com'],
     when: 'When you add Codex set up by Mousse, or Mousse updates that copy.',
-    sends: 'A download request for the pinned Codex release.',
+    sends: 'a download request for the pinned Codex release.',
     sources: ['src/mms/harness/codex/release.ts']
   },
   {
@@ -47,7 +52,7 @@ export const OUTBOUND: readonly OutboundEntry[] = [
     kind: 'contacted',
     hosts: ['github.com'],
     when: 'When you set up Mousse on another computer over SSH: that computer downloads the release.',
-    sends: 'A download request for that Mousse release.',
+    sends: 'a download request for that Mousse release.',
     sources: ['src/mms/net/ssh/scripts.ts']
   },
   {
@@ -55,7 +60,7 @@ export const OUTBOUND: readonly OutboundEntry[] = [
     kind: 'contacted',
     hosts: ['cdn.agentclientprotocol.com'],
     when: 'When you browse or install agents in Add provider → More ACP agents.',
-    sends: 'A request for the registry list.',
+    sends: 'a request for the registry list.',
     sources: ['src/mms/harness/agents/registry.ts']
   },
   {
@@ -63,7 +68,7 @@ export const OUTBOUND: readonly OutboundEntry[] = [
     kind: 'contacted',
     hosts: ['registry.npmjs.org'],
     when: 'At most once a day, to learn the newest version of the agents you added; and when you install an agent published on npm.',
-    sends: 'The names of the agent packages.',
+    sends: 'the names of the agent packages.',
     sources: ['src/mms/harness/latest.ts', 'src/mms/harness/agents/install.ts']
   },
   {
@@ -71,7 +76,7 @@ export const OUTBOUND: readonly OutboundEntry[] = [
     kind: 'contacted',
     hosts: ['registry.npmjs.org', 'cdn.jsdelivr.net'],
     when: 'When Mousse refreshes the models of the model APIs you added.',
-    sends: 'The names of those providers.',
+    sends: 'the names of those providers.',
     sources: ['src/mms/providers/piCatalogOverlay.ts']
   },
   {
@@ -79,7 +84,7 @@ export const OUTBOUND: readonly OutboundEntry[] = [
     kind: 'contacted',
     hosts: ['googlechromelabs.github.io', 'storage.googleapis.com'],
     when: 'When you install the browser agents use.',
-    sends: 'A request for the version list and the download.',
+    sends: 'a request for the version list and the download.',
     sources: ['src/mms/browser/install/platform.ts', 'src/browser-worker/binary/platform.ts']
   },
   {
@@ -87,7 +92,7 @@ export const OUTBOUND: readonly OutboundEntry[] = [
     kind: 'contacted',
     hosts: ['dl.google.com'],
     when: 'When you install Antigravity.',
-    sends: 'A download request for its agent server.',
+    sends: 'a download request for its agent server.',
     sources: ['src/mms/providers/antigravity/installation.ts']
   },
   {
@@ -95,7 +100,7 @@ export const OUTBOUND: readonly OutboundEntry[] = [
     kind: 'contacted',
     hosts: ['huggingface.co'],
     when: 'When you download a read-aloud or dictation model.',
-    sends: 'A download request for the model files.',
+    sends: 'a download request for the model files.',
     sources: ['src/shared/localModels.ts']
   },
   {
@@ -103,7 +108,7 @@ export const OUTBOUND: readonly OutboundEntry[] = [
     kind: 'contacted',
     hosts: ['mcp.exa.ai', 'search.parallel.ai'],
     when: 'When an agent uses Mousse\'s web search or fetch tool.',
-    sends: 'The search words or the address to fetch, and your key for that service when you saved one.',
+    sends: 'the search words or the address to fetch, and your key for that service when you saved one.',
     sources: ['src/mms/orchestrator/WebTools.ts']
   },
   {
@@ -111,7 +116,7 @@ export const OUTBOUND: readonly OutboundEntry[] = [
     kind: 'contacted',
     hosts: ['fonts.googleapis.com', 'fonts.gstatic.com'],
     when: 'When a Mousse window opens.',
-    sends: 'A request for the font, as any web page makes.',
+    sends: 'a request for the font, as any web page makes.',
     sources: ['src/renderer/index.html']
   },
   {
@@ -119,7 +124,7 @@ export const OUTBOUND: readonly OutboundEntry[] = [
     kind: 'contacted',
     hosts: ['www.google.com'],
     when: 'When you type words that are not an address into the browser panel.',
-    sends: 'Your search words.',
+    sends: 'your search words.',
     sources: ['src/main/browser/BrowserViewManager.ts', 'src/renderer/components/BrowserPanel.tsx']
   },
   {
@@ -127,7 +132,7 @@ export const OUTBOUND: readonly OutboundEntry[] = [
     kind: 'contacted',
     hosts: ['api.anthropic.com', 'api.openai.com', 'auth.openai.com', 'opencode.ai', 'grok.com', 'cli-chat-proxy.grok.com'],
     when: 'Only for a provider you added: Claude API key, ChatGPT sign-in in Mousse, OpenCode, Grok.',
-    sends: 'Your chats, the provider sign-in, and requests for its models and usage.',
+    sends: 'your chats, the provider sign-in, and requests for its models and usage.',
     sources: [
       'src/mms/harness/claude/apiKey.ts',
       'src/mms/harness/chatgpt/discovery.ts',
@@ -140,8 +145,17 @@ export const OUTBOUND: readonly OutboundEntry[] = [
     kind: 'contacted',
     hosts: ['api.telegram.org'],
     when: 'When you connect a Telegram channel.',
-    sends: 'The channel\'s messages and the replies.',
+    sends: 'the channel\'s messages and the replies.',
     sources: ['src/mms/channels/adapters/TelegramAdapter.ts']
+  },
+  {
+    label: 'Discord',
+    kind: 'contacted',
+    hosts: ['discord.com', 'gateway.discord.gg'],
+    when: 'When you connect a Discord channel.',
+    sends: 'your bot\'s token, the channel\'s messages and the replies, and the slash commands Mousse registers for the bot.',
+    sources: ['src/mms/channels/adapters/DiscordAdapter.ts'],
+    via: 'discord.js'
   },
   {
     label: 'Links and names Mousse never connects to',

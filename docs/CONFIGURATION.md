@@ -148,14 +148,14 @@ Mousse itself collects no usage data about you or your chats. Your chats go only
 
 The agents you connect may send their own usage and error reports (telemetry) to the company that makes them. Each provider in Settings → Providers has a **Telemetry** setting:
 
-- **Off:** Mousse starts every process of that provider with the agent's own documented switch, set after the provider's own launch variables and arguments.
+- **Off:** Mousse adds the agent's own documented switch to the processes it starts for that provider, after the provider's own launch variables and arguments (the table says which).
 - **Agent's own setting:** Mousse sets nothing. The agent does what its own settings say.
 
 | Agent | What Off sets |
 |-------|---------------|
-| Claude Code | `DISABLE_TELEMETRY=1` and `DISABLE_ERROR_REPORTING=1` |
-| Codex | `-c analytics.enabled=false` on the Codex process Mousse starts |
-| Model APIs (the Mousse agent, Pi) | `PI_TELEMETRY=0` |
+| Claude Code | `DISABLE_TELEMETRY=1` and `DISABLE_ERROR_REPORTING=1`, on every Claude Code process Mousse starts for it |
+| Codex | `-c analytics.enabled=false` on every Codex process Mousse starts for it (chats, sign-in checks, sign-in and sign-out); only the version check (`codex --version`) runs without it |
+| Model APIs (the Mousse agent, Pi) | `PI_TELEMETRY=0`, on every Pi process |
 | Grok, Cursor, Antigravity, other ACP agents | Nothing: they document no switch, and their row shows "No switch" |
 
 **Defaults.** Off for the agents Mousse sets up: an entry with a home of its own, an agent Mousse installed (such as Codex set up by Mousse), and the Mousse agent. Agent's own setting for your own CLIs on their usual home (`~/.claude`, `~/.codex`), so nothing changes for them until you choose Off.

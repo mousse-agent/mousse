@@ -11,12 +11,27 @@ import { OUTBOUND } from '../../src/shared/privacy/outbound'
 
 const ROOT = join(__dirname, '..', '..')
 
+/**
+ * Packages that connect to a service on their own, so its address is not in Mousse's code (chat and
+ * bot platforms): each one in package.json must be the `via` of a listed service.
+ */
+const NETWORK_CLIENT_PACKAGES = ['discord.js', '@slack/*', 'telegraf', 'grammy', 'node-telegram-bot-api', 'matrix-js-sdk', 'matrix-bot-sdk', '@whiskeysockets/*', 'whatsapp-web.js', 'twilio', 'irc*', 'mattermost*', '@octokit/*']
+
 /** Analytics and crash-reporting packages: a trailing `*` matches a prefix. */
 const TELEMETRY_PACKAGES = ['posthog-*', '@sentry/*', 'analytics-node', '@segment/*', 'mixpanel*', '@amplitude/*', 'applicationinsights', '@bugsnag/*']
 
+const matches = (patterns: readonly string[], name: string) => patterns.some((pattern) => (pattern.endsWith('*') ? name.startsWith(pattern.slice(0, -1)) : name === pattern))
+const dependencyNames = (pkg: Record<string, unknown>, fields = ['dependencies', 'devDependencies', 'optionalDependencies', 'peerDependencies']) =>
+  fields.flatMap((field) => Object.keys((pkg[field] as Record<string, string> | undefined) ?? {}))
+
 function telemetryDependencies(pkg: Record<string, unknown>): string[] {
-  const names = ['dependencies', 'devDependencies', 'optionalDependencies', 'peerDependencies'].flatMap((field) => Object.keys((pkg[field] as Record<string, string> | undefined) ?? {}))
-  return names.filter((name) => TELEMETRY_PACKAGES.some((pattern) => (pattern.endsWith('*') ? name.startsWith(pattern.slice(0, -1)) : name === pattern)))
+  return dependencyNames(pkg).filter((name) => matches(TELEMETRY_PACKAGES, name))
+}
+
+/** Shipped packages that connect to a service on their own and that no listed service names as its `via`. */
+function unlistedNetworkClients(pkg: Record<string, unknown>): string[] {
+  const listedVia = new Set(OUTBOUND.flatMap((entry) => (entry.via ? [entry.via] : [])))
+  return dependencyNames(pkg, ['dependencies', 'optionalDependencies']).filter((name) => matches(NETWORK_CLIENT_PACKAGES, name) && !listedVia.has(name))
 }
 
 const URL = /https?:\/\/([A-Za-z0-9.-]+)/g
@@ -64,6 +79,13 @@ describe('Mousse collects no usage data', () => {
     expect(telemetryDependencies({ dependencies: { 'posthog-node': '1' }, devDependencies: { '@sentry/electron': '1', react: '19' } })).toEqual(['posthog-node', '@sentry/electron'])
   })
 
+  it('lists every chat or bot platform a shipped package connects to', () => {
+    const pkg = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8')) as Record<string, unknown>
+    expect(unlistedNetworkClients(pkg)).toEqual([])
+    // A planted one is caught.
+    expect(unlistedNetworkClients({ dependencies: { '@slack/bolt': '4', 'discord.js': '14' } })).toEqual(['@slack/bolt'])
+  })
+
   it('lists every internet address in the code as contacted, a link or this computer', () => {
     expect(unlistedHosts(files)).toEqual({})
     // A planted address is caught, in code and in shown text.
@@ -83,6 +105,15 @@ describe('Mousse collects no usage data', () => {
       expect(entry.when && entry.sends, entry.label).toBeTruthy()
       expect(entry.sources?.length, entry.label).toBeGreaterThan(0)
       for (const source of entry.sources!) expect(existsSync(join(ROOT, source)), `${entry.label}: ${source}`).toBe(true)
+      // The text after "Sends:" goes on in lower case.
+      expect(entry.sends![0], entry.label).toBe(entry.sends![0]!.toLowerCase())
+      if (entry.via) {
+        // Through a dependency: a source imports it, and it ships.
+        const imports = entry.sources!.some((source) => (texts.get(source) ?? '').includes(`from '${entry.via}'`))
+        expect(imports, `${entry.label}: no source imports ${entry.via}`).toBe(true)
+        expect(dependencyNames(JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8')), ['dependencies']), entry.label).toContain(entry.via)
+        continue
+      }
       const named = entry.sources!.some((source) => hostsIn(source, texts.get(source) ?? '').some((host) => entry.hosts.includes(host)))
       expect(named, `${entry.label}: no source names ${entry.hosts.join(', ')}`).toBe(true)
     }

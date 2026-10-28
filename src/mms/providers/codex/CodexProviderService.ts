@@ -1429,12 +1429,13 @@ export class CodexProviderService {
 
   /**
    * `codex` as Mousse starts it, with the environment of its own commands (the sign-in check, turns):
-   * what the sign-in and sign-out of an instance with its own home run with. Undefined when no
-   * executable is found.
+   * what the sign-in and sign-out of an instance with its own home run with. Its arguments end with
+   * the entry's telemetry switch (`codex -c analytics.enabled=false login …`): the subcommand goes
+   * after them. Undefined when no executable is found.
    */
   authLaunch(): { command: string; args: string[]; env: NodeJS.ProcessEnv } | undefined {
     const launch = this.launchTarget()
-    return launch ? { command: launch.command, args: [...launch.args], env: this.environment() } : undefined
+    return launch ? { command: launch.command, args: [...launch.args, ...(this.options.telemetry?.()?.args ?? [])], env: this.environment() } : undefined
   }
 
   /**
