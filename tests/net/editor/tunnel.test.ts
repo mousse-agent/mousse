@@ -1306,7 +1306,7 @@ describe('the far end is Mousse’s own SSH endpoint', () => {
     expect(chosen.echo.connections).toBe(1)
     expect(chosen.host.endpointAvailable()).toBe(true)
 
-    // A Windows computer has no endpoint yet: the system's SSH server, as before the endpoint existed.
+    // A Windows computer whose helper is missing or does not run: the system's SSH server, as before the endpoint.
     const unavailable = fakeEndpoint()
     unavailable.state.available = false
     const windows = await bed({ host: { endpoint: unavailable.endpoint } })

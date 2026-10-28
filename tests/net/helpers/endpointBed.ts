@@ -9,6 +9,11 @@ import type { ProcessHost } from '../../../src/mms/net/editor/endpoint/host'
 import { linkedPair } from '../../../src/mms/net/editor/endpoint/linkedPair'
 import type { EndpointConnection, EndpointEvent } from '../../../src/mms/net/editor/endpoint/port'
 import { createUnixHost } from '../../../src/mms/net/editor/endpoint/unixHost'
+import {
+  createWindowsHost,
+  findSshdHelper,
+  type WindowsProcessHost
+} from '../../../src/mms/net/editor/endpoint/windowsHost'
 
 /**
  * A fixture for the SSH endpoint: the endpoint on a key store that lives in memory, a throwaway home folder, and
@@ -57,6 +62,31 @@ export interface SshClient {
   ): boolean
   end(): void
   destroy(): void
+}
+
+/** The Windows helper `sshd.exe` of this checkout (built from `native/sshd-helper`), or none. */
+export const sshdHelper = process.platform === 'win32' ? findSshdHelper() : undefined
+/** Whether this computer can run the tests that start programs: Linux and macOS, and Windows with the helper. */
+export const hostsPrograms = process.platform !== 'win32' || sshdHelper !== undefined
+
+/**
+ * The host of this system for a throwaway home: the Unix host, or on Windows the helper's host (which needs the
+ * helper built; callers skip without it).
+ */
+export function testHost(home: string, root: string): ProcessHost {
+  const info = userInfo()
+  if (process.platform === 'win32')
+    return createWindowsHost({ helper: sshdHelper!, account: { user: info.username, home } })
+  return createUnixHost({
+    account: {
+      user: info.username,
+      home,
+      shell: info.shell || '/bin/sh',
+      ...(info.uid >= 0 ? { uid: info.uid } : {})
+    },
+    // No `/etc/environment` of this computer in the clean environment a test checks.
+    systemEnvironmentFiles: [join(root, 'no-etc-environment')]
+  })
 }
 
 export const NODE_A = 'nod_aaaaaaaaaaaaaaaaaaaaaaaaaaaa' as NodeId
@@ -131,19 +161,7 @@ export async function endpointBed(options: { host?: ProcessHost } = {}): Promise
   const root = await realpath(await mkdtemp(join(tmpdir(), 'mousse endpoint ')))
   const home = join(root, 'home')
   await mkdir(home, { recursive: true })
-  const info = userInfo()
-  const host =
-    options.host ??
-    createUnixHost({
-      account: {
-        user: info.username,
-        home,
-        shell: info.shell || '/bin/sh',
-        ...(info.uid >= 0 ? { uid: info.uid } : {})
-      },
-      // No `/etc/environment` of this computer in the clean environment a test checks.
-      systemEnvironmentFiles: [join(root, 'no-etc-environment')]
-    })
+  const host = options.host ?? testHost(home, root)
   const keys = memoryKeys()
   const events: EndpointEvent[] = []
   const endpoint = new EditorEndpoint({ keys, host, onEvent: (event) => events.push(event) })
@@ -195,6 +213,7 @@ export async function endpointBed(options: { host?: ProcessHost } = {}): Promise
       for (const connection of connections) connection.end(false)
       await host.killScope(endpoint.scopeOf(NODE_A))
       await host.killScope(endpoint.scopeOf(NODE_B))
+      ;(host as Partial<WindowsProcessHost>).release?.()
       await rm(root, { recursive: true, force: true })
     }
   }

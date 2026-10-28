@@ -1,18 +1,20 @@
 import { spawn, type ChildProcess } from 'node:child_process'
 import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises'
 import { createServer, type Server, type Socket } from 'node:net'
-import { tmpdir, userInfo } from 'node:os'
+import { existsSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { expect, vi } from 'vitest'
 import { runSshProxy } from '../../../src/cli/fastpath/sshProxy'
 import { MousseMainService } from '../../../src/mms/MousseMainService'
-import { createUnixHost } from '../../../src/mms/net/editor/endpoint/unixHost'
 import type { ProcessHost } from '../../../src/mms/net/editor/endpoint/host'
 import { NetService } from '../../../src/mms/net/NetService'
 import { LocalMmsClient, MmsProtocolServer } from '../../../src/mms/protocol'
 import type { NodeId } from '../../../src/shared/net'
 import type { EditorSshResult } from '../../../src/shared/net/local'
+import type { WindowsProcessHost } from '../../../src/mms/net/editor/endpoint/windowsHost'
+import { testHost } from './endpointBed'
 
 /**
  * Two computers on one machine, with nothing mocked in the path an editor's `ssh` takes: the real daemon of
@@ -83,18 +85,7 @@ export async function daemonBed(
   // The editor settings of the profile write under the home directory: a throwaway one.
   vi.stubEnv('USERPROFILE', userHome)
   vi.stubEnv('HOME', userHome)
-  const info = userInfo()
-  const host =
-    options.host ??
-    createUnixHost({
-      account: {
-        user: info.username,
-        home: ownerHome,
-        shell: info.shell || '/bin/sh',
-        ...(info.uid >= 0 ? { uid: info.uid } : {})
-      },
-      systemEnvironmentFiles: [join(root, 'no-etc-environment')]
-    })
+  const host = options.host ?? testHost(ownerHome, root)
 
   const daemonHome = join(root, 'home')
   const main = await MousseMainService.create({
@@ -242,13 +233,26 @@ export async function daemonBed(
     HOME: userHome,
     USERPROFILE: userHome,
     LANG: 'C',
-    SystemRoot: process.env.SystemRoot
+    SystemRoot: process.env.SystemRoot,
+    // Windows's ssh stops without a word when it cannot find its own folder under ProgramData.
+    ...(process.platform === 'win32' ? { ProgramData: process.env.ProgramData } : {})
   })
 
   const spawned = new Set<ChildProcess>()
+  // On Windows, the system's own client (Win32-OpenSSH), whatever else is first on the PATH.
+  const program = (command: 'ssh' | 'sftp' | 'scp'): string => {
+    if (process.platform !== 'win32') return command
+    const system = join(
+      process.env.SystemRoot ?? 'C:\\Windows',
+      'System32',
+      'OpenSSH',
+      `${command}.exe`
+    )
+    return existsSync(system) ? system : command
+  }
   const tool: DaemonBed['tool'] = (command, args, toolOptions = {}) =>
     new Promise((resolve, reject) => {
-      const child = spawn(command, [...sshArgs, ...args], {
+      const child = spawn(program(command), [...sshArgs, ...args], {
         env: environment(),
         stdio: ['pipe', 'pipe', 'pipe'],
         windowsHide: true
@@ -286,7 +290,7 @@ export async function daemonBed(
     sshArgs,
     tool,
     start(command, args, startOptions = {}) {
-      const child = spawn(command, [...sshArgs, ...args], {
+      const child = spawn(program(command), [...sshArgs, ...args], {
         env: environment(),
         stdio: [startOptions.stdin ? 'pipe' : 'ignore', 'pipe', 'pipe'],
         windowsHide: true
@@ -303,7 +307,10 @@ export async function daemonBed(
     block: (on) => owner.request('bridge.policy', { node: self, blocked: on }),
     async close() {
       for (const child of spawned) child.kill('SIGKILL')
-      for (const scope of host.scopes()) await host.killScope(scope).catch(() => undefined)
+      const windows = host as Partial<WindowsProcessHost>
+      for (const scope of new Set([...host.scopes(), ...(windows.held?.() ?? [])]))
+        await host.killScope(scope).catch(() => undefined)
+      windows.release?.()
       for (const task of cleanup.splice(0).reverse()) await task()
       vi.unstubAllEnvs()
     }

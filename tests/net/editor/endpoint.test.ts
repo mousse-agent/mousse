@@ -12,6 +12,7 @@ import { loadEndpointHostKey } from '../../../src/mms/net/editor/endpoint/hostKe
 import {
   alive,
   endpointBed,
+  hostsPrograms,
   memoryKeys,
   NODE_A,
   NODE_B,
@@ -33,10 +34,13 @@ import {
 /**
  * The SSH endpoint, with `ssh2`'s own client as the peer over a pair of streams (the way a tunnel carries it).
  * Programs that are started are real: a shell of the user the tests run as, in a throwaway home. Tests that start
- * programs are for Linux and macOS; Windows has no host for the endpoint yet.
+ * programs with a Unix shell are for Linux and macOS; the login and the refusals also run on Windows with the helper
+ * built, and `endpointWindows.test.ts` has Windows's own programs, SFTP and endings.
  */
 
 const unix = process.platform !== 'win32'
+/** Linux and macOS, or Windows with the helper: the host can run the endpoint here. */
+const hosted = hostsPrograms
 const cleanup: Array<() => Promise<unknown> | unknown> = []
 afterEach(async () => {
   vi.restoreAllMocks()
@@ -84,7 +88,7 @@ describe('the host key', () => {
     expect(replaced.publicKey.key).not.toBe(first.publicKey.key)
   })
 
-  it.skipIf(!unix)(
+  it.skipIf(!hosted)(
     'is checked by the client: a client that pinned another key does not connect',
     async () => {
       const b = await bed()
@@ -105,13 +109,13 @@ describe('the host key', () => {
   )
 })
 
-describe.skipIf(!unix)('the login', () => {
+describe.skipIf(!hosted)('the login', () => {
   it('listens on no port', async () => {
     const b = await bed()
     const listen = vi.spyOn(net.Server.prototype, 'listen')
     const { client } = await b.connect()
-    const result = unix ? await run(client, 'echo hello') : undefined
-    if (result) expect(result.stdout.toString()).toBe('hello\n')
+    const result = await run(client, 'echo hello')
+    expect(result.stdout.toString()).toBe(unix ? 'hello\n' : 'hello\r\n')
     expect(listen).not.toHaveBeenCalled()
   })
 
@@ -257,7 +261,7 @@ describe.skipIf(!unix)('programs', () => {
   })
 })
 
-describe.skipIf(!unix)('refusals', () => {
+describe.skipIf(!hosted)('refusals', () => {
   it('forwards only to the loopback, by address, and never looks a name up', async () => {
     const b = await bed()
     const echo = await loopbackServer((socket) => socket.pipe(socket))
@@ -350,21 +354,24 @@ describe.skipIf(!unix)('refusals', () => {
     ).rejects.toThrow()
   })
 
-  it('takes a character that two SSH packets split between them whole', async (context) => {
-    const b = await bed()
-    if (!b.host.terminals()) return context.skip()
-    const { client } = await b.connect()
-    const channel = await channelOf((callback) => client.exec('cat', { pty: true }, callback))
-    let text = ''
-    channel.on('data', (chunk: Buffer) => (text += chunk.toString('utf8')))
-    const euro = Buffer.from('€\n')
-    channel.write(euro.subarray(0, 1))
-    await new Promise((resolve) => setTimeout(resolve, 100))
-    channel.write(euro.subarray(1))
-    await until(() => text.includes('€'))
-    expect(text).not.toContain('\ufffd')
-    channel.end('\x04')
-  })
+  it.skipIf(!unix)(
+    'takes a character that two SSH packets split between them whole',
+    async (context) => {
+      const b = await bed()
+      if (!b.host.terminals()) return context.skip()
+      const { client } = await b.connect()
+      const channel = await channelOf((callback) => client.exec('cat', { pty: true }, callback))
+      let text = ''
+      channel.on('data', (chunk: Buffer) => (text += chunk.toString('utf8')))
+      const euro = Buffer.from('€\n')
+      channel.write(euro.subarray(0, 1))
+      await new Promise((resolve) => setTimeout(resolve, 100))
+      channel.write(euro.subarray(1))
+      await until(() => text.includes('€'))
+      expect(text).not.toContain('\ufffd')
+      channel.end('\x04')
+    }
+  )
 
   it('refuses a unix socket forward, agent forwarding, X11 and every subsystem but sftp', async () => {
     const b = await bed()
