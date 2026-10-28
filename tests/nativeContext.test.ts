@@ -18,6 +18,7 @@ import {
   shouldCompactNativeContext,
   userMessage
 } from '../src/mms/orchestrator/nativeContext'
+import { STEER_MARKER_CLOSE, STEER_MARKER_OPEN } from '../src/mms/orchestrator/steer'
 
 const usage = {
   input: 10, output: 5, cacheRead: 2, cacheWrite: 0, totalTokens: 17,
@@ -191,6 +192,20 @@ describe('Pi-native thread context', () => {
     ])
     expect(result.checkpoint?.summary).toContain('make it a single app')
     expect(result.checkpoint?.summary).not.toMatch(/\[user[^\n]*404 \/imgs/)
+  })
+
+  it('reads a steer back out of the out-of-band marker that saved history carries', () => {
+    const messages: Message[] = [
+      userMessage(`tool output\n\n${STEER_MARKER_OPEN}\nuse tabs, not spaces\n${STEER_MARKER_CLOSE}`),
+      { ...assistant('stop'), content: [{ type: 'text', text: 'working '.repeat(3_000) }] },
+      userMessage('now run the tests'),
+      { ...assistant('stop'), content: [{ type: 'text', text: 'recent '.repeat(500) }] }
+    ]
+    const result = compactMessagesAtSafeBoundary(messages, 500)
+    expect(result.changed).toBe(true)
+    const steer = result.checkpoint?.directives.find((entry) => entry.source === 'user-steer')
+    expect(steer?.text).toBe('use tabs, not spaces')
+    expect(result.checkpoint?.directives.some((entry) => entry.text.includes('tool output'))).toBe(false)
   })
 
   it('rejects a stale compaction checkpoint instead of duplicating history', () => {
