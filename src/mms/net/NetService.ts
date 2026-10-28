@@ -611,6 +611,8 @@ export class NetService {
       this.lastError = error instanceof NetError ? error.code : 'internal'
       this.emit()
     }
+    // Written again at every start, so a launcher that moved with an update is found.
+    this.syncEditorSsh()
   }
   request(method: NetLocalMethod, params: Record<string, unknown>): unknown | Promise<unknown> {
     if (this.stopped) throw new NetError('cancelled')
@@ -2639,7 +2641,7 @@ export class NetService {
         throw new NetError('bad_request')
     }
   }
-  /** A device was added, renamed or revoked: keep the aliases in step. Never touches the user's file. */
+  /** At start, and when a device was added, renamed or revoked: keep the aliases in step. Never touches the user's file. */
   private syncEditorSsh(): void {
     const editor = this.editorSsh()
     if (!editor) return

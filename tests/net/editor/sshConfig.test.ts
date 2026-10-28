@@ -14,21 +14,27 @@ import {
 } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   EDITOR_SSH_NOTICE,
   EditorSshConfig,
+  defaultProxyProgram,
   editorSshPaths,
+  findSshClients,
   includeSpellings,
   insertInclude,
+  knownHostsWord,
   proxyCommand,
   removeInclude,
   renderConfig,
-  type LiveComputer
+  systemSshVerifier,
+  userWord,
+  type LiveComputer,
+  type SshVerifier
 } from '../../../src/mms/net/editor/sshConfig'
 import { NetService } from '../../../src/mms/net/NetService'
 import { newId, type NodeId } from '../../../src/shared/net'
-import { NET_LOCAL_METHODS } from '../../../src/shared/net/local'
+import { NET_LOCAL_METHODS, type EditorSshStatus } from '../../../src/shared/net/local'
 import { KEY_A, KEY_B, KEY_RSA } from '../ssh/bed'
 
 const cleanup: Array<() => Promise<unknown>> = []
@@ -38,20 +44,31 @@ afterEach(async () => {
 
 /** A program path with a space, as in `C:\Program Files` or `Application Support`. */
 const CLI = join(tmpdir(), 'mousse app', 'mousse-cli').replace(/\\/gu, '/')
+const passes: SshVerifier = async () => ({ ok: true })
 
 /** A temporary HOME and Mousse home, both with a space in the path. Nothing here is the real home. */
-async function bed(options: { mousseInsideHome?: boolean } = {}) {
-  const root = await mkdtemp(join(tmpdir(), 'mousse editor '))
-  cleanup.push(() => rm(root, { recursive: true, force: true }))
+async function bed(
+  options: {
+    mousseInsideHome?: boolean
+    verify?: SshVerifier
+    profile?: string
+    root?: string
+  } = {}
+) {
+  const root = options.root ?? (await mkdtemp(join(tmpdir(), 'mousse editor ')))
+  if (!options.root) cleanup.push(() => rm(root, { recursive: true, force: true }))
   const home = join(root, 'home dir')
-  await mkdir(home)
+  await mkdir(home, { recursive: true })
   const mousseHome =
     options.mousseInsideHome === false ? join(root, 'mousse home') : join(home, '.mousse')
-  const editor = new EditorSshConfig({ home, mousseHome, cli: CLI })
+  const make = (profile = options.profile ?? 'default', verify = options.verify ?? passes) =>
+    new EditorSshConfig({ home, mousseHome, cli: CLI, profile, verify })
+  const editor = make()
   return {
     root,
     home,
     mousseHome,
+    make,
     editor,
     userConfig: join(home, '.ssh', 'config'),
     paths: editor.paths
@@ -131,8 +148,7 @@ describe('undo', () => {
       ''
     ].join('\n')
     const { text } = insert(original)
-    const result = remove(text)
-    expect(result).toEqual({ text: original, removed: 1 })
+    expect(remove(text)).toEqual({ text: original, removed: 1 })
   })
 
   it('works on CRLF text, is case-insensitive and ignores `=`', () => {
@@ -183,6 +199,18 @@ describe('the line and the words in the config', () => {
     )
   })
 
+  it('writes the known_hosts path the way the Include line is written', () => {
+    expect(knownHostsWord(paths('win32', 'C:\\Users\\me', 'C:\\Users\\me\\.mousse'), 'win32')).toBe(
+      '~/.mousse/ssh/known_hosts'
+    )
+    expect(knownHostsWord(paths('win32', 'C:\\Users\\me', 'D:\\Mousse Data'), 'win32')).toBe(
+      '"D:/Mousse Data/ssh/known_hosts"'
+    )
+    expect(knownHostsWord(paths('linux', '/home/me', '/home/me/mousse home'), 'linux')).toBe(
+      '"~/mousse home/ssh/known_hosts"'
+    )
+  })
+
   it('refuses characters ssh would read as a token, a glob or an escape', () => {
     for (const home of ['/srv/100%', '/srv/${HOME}', '/srv/a"b', '/srv/a[1]', '/srv/a\\b'])
       expect(() => includeSpellings(paths('linux', '/home/me', home), 'linux')).toThrow(
@@ -190,36 +218,41 @@ describe('the line and the words in the config', () => {
       )
   })
 
-  it('builds a ProxyCommand that survives spaces, quotes and percent signs', () => {
+  it('builds a ProxyCommand that survives spaces, quotes and percent signs, and names the profile', () => {
     const node = newId('node')
-    expect(proxyCommand('/usr/local/bin/mousse-cli', node, 'linux')).toBe(
-      `/usr/local/bin/mousse-cli net ssh-proxy ${node}`
+    const tail = `net ssh-proxy ${node} --profile default`
+    expect(proxyCommand('/usr/local/bin/mousse-cli', node, 'default', 'linux')).toBe(
+      `/usr/local/bin/mousse-cli ${tail}`
     )
-    expect(proxyCommand('/opt/Mousse App/mousse-cli', node, 'linux')).toBe(
-      `'/opt/Mousse App/mousse-cli' net ssh-proxy ${node}`
+    expect(proxyCommand('/opt/Mousse App/mousse-cli', node, 'default', 'linux')).toBe(
+      `'/opt/Mousse App/mousse-cli' ${tail}`
     )
-    expect(proxyCommand("/opt/it's/mousse-cli", node, 'linux')).toBe(
-      `'/opt/it'"'"'s/mousse-cli' net ssh-proxy ${node}`
+    expect(proxyCommand("/opt/it's/mousse-cli", node, 'default', 'linux')).toBe(
+      `'/opt/it'"'"'s/mousse-cli' ${tail}`
     )
-    expect(proxyCommand('/opt/100%/mousse-cli', node, 'linux')).toBe(
-      `/opt/100%%/mousse-cli net ssh-proxy ${node}`
+    expect(proxyCommand('/opt/100%/mousse-cli', node, 'default', 'linux')).toBe(
+      `/opt/100%%/mousse-cli ${tail}`
     )
-    expect(proxyCommand('C:\\Program Files\\Mousse\\mousse-cli.cmd', node, 'win32')).toBe(
-      `"C:/Program Files/Mousse/mousse-cli.cmd" net ssh-proxy ${node}`
-    )
-    expect(() => proxyCommand('C:\\a$b\\mousse-cli.cmd', node, 'win32')).toThrow()
-    expect(() => proxyCommand('/x/mousse-cli', 'nod_nope' as NodeId, 'linux')).toThrow()
+    expect(
+      proxyCommand('C:\\Program Files\\Mousse\\mousse-cli.cmd', node, 'default', 'win32')
+    ).toBe(`"C:/Program Files/Mousse/mousse-cli.cmd" ${tail}`)
+    expect(
+      proxyCommand({ program: '/home/me/Mousse.AppImage', args: ['--cli'] }, node, 'p-1', 'linux')
+    ).toBe(`/home/me/Mousse.AppImage --cli net ssh-proxy ${node} --profile p-1`)
+    expect(() => proxyCommand('C:\\a$b\\mousse-cli.cmd', node, 'default', 'win32')).toThrow()
+    expect(() => proxyCommand('/x/mousse-cli', 'nod_nope' as NodeId, 'default', 'linux')).toThrow()
+    expect(() => proxyCommand('/x/mousse-cli', node, 'a b; rm', 'linux')).toThrow()
   })
 
   it('renders one block per computer, the same way every time', () => {
     const a = computer('Work box', 'bob'),
       b = computer('Étude', 'John Doe')
     const rendered = [
-      { node: a.node, alias: 'mousse-work-box-aaaaaa', name: a.name, user: a.user },
-      { node: b.node, alias: 'mousse-etude-bbbbbb', name: b.name, user: b.user }
+      { node: a.node, alias: 'mousse-work-box-aaaaaa', name: a.name, user: a.user, profile: 'one' },
+      { node: b.node, alias: 'mousse-etude-bbbbbb', name: b.name, user: b.user, profile: 'two' }
     ]
     const context = {
-      knownHosts: '/home/me/.mousse/ssh/known_hosts',
+      knownHosts: '~/.mousse/ssh/known_hosts',
       cli: '/opt/mousse-cli',
       platform: 'linux' as const
     }
@@ -228,28 +261,51 @@ describe('the line and the words in the config', () => {
     expect(text).toContain('Host mousse-work-box-aaaaaa\n')
     expect(text).toContain('  User bob\n')
     expect(text).toContain('  User "John Doe"\n')
-    expect(text).toContain(`  ProxyCommand /opt/mousse-cli net ssh-proxy ${a.node}\n`)
+    expect(text).toContain(`  ProxyCommand /opt/mousse-cli net ssh-proxy ${a.node} --profile one\n`)
+    expect(text).toContain(`  ProxyCommand /opt/mousse-cli net ssh-proxy ${b.node} --profile two\n`)
     expect(text).toContain('  HostKeyAlias mousse-work-box-aaaaaa\n')
-    expect(text).toContain('  UserKnownHostsFile /home/me/.mousse/ssh/known_hosts\n')
+    expect(text).toContain('  UserKnownHostsFile ~/.mousse/ssh/known_hosts\n')
     for (const setting of [
       'StrictHostKeyChecking yes',
-      'Port 22',
       'ForwardAgent no',
       'ForwardX11 no',
       'ControlMaster no',
       'UpdateHostKeys no'
     ])
       expect(text).toContain(`  ${setting}\n`)
+    expect(text).not.toMatch(/^\s+Port /mu)
+  })
+
+  it('writes only login names that every ssh client parses the same way', () => {
+    for (const ok of ['bob', 'John Doe', 'a.b_c-d', 'me@corp', 'a+b'])
+      expect(userWord(ok)).toBe(ok.includes(' ') ? `"${ok}"` : ok)
+    for (const bad of [
+      'a=b',
+      'a,b',
+      'a;b',
+      'a:b',
+      'a\\b',
+      'DOMAIN\\me',
+      'a"b',
+      "a'b",
+      'a%b',
+      'a#b',
+      '-oProxyCommand=x',
+      'a\nb',
+      '',
+      ' ',
+      'x'.repeat(65)
+    ])
+      expect(userWord(bad)).toBeUndefined()
   })
 
   it('leaves the User line out when the name cannot be written safely', () => {
     const a = computer('Box')
-    for (const user of ['-oProxyCommand=x', 'a"b', 'a\nb', 'a\\b', '', undefined]) {
-      const text = renderConfig([{ node: a.node, alias: 'mousse-box-aaaaaa', name: 'Box', user }], {
-        knownHosts: '/k',
-        cli: 'mousse-cli',
-        platform: 'linux'
-      })
+    for (const user of ['-oProxyCommand=x', 'a=b', 'a"b', 'a\nb', 'a\\b', '', undefined]) {
+      const text = renderConfig(
+        [{ node: a.node, alias: 'mousse-box-aaaaaa', name: 'Box', user, profile: 'default' }],
+        { knownHosts: '/k', cli: 'mousse-cli', platform: 'linux' }
+      )
       expect(text).not.toMatch(/^\s+User /mu)
     }
   })
@@ -262,7 +318,7 @@ describe('the line and the words in the config', () => {
           node: a.node,
           alias: 'mousse-x-aaaaaa',
           name: 'evil\nHost *\n  ProxyCommand rm',
-          user: undefined
+          profile: 'default'
         }
       ],
       { knownHosts: '/k', cli: 'mousse-cli', platform: 'linux' }
@@ -270,6 +326,55 @@ describe('the line and the words in the config', () => {
     expect(text.split('\n').filter((line) => /^Host /u.test(line))).toEqual([
       'Host mousse-x-aaaaaa'
     ])
+  })
+})
+
+describe('the program a ProxyCommand starts', () => {
+  const exists =
+    (...present: string[]) =>
+    (path: string) =>
+      present.includes(path)
+  it('finds the launcher next to the app binary on Windows', () => {
+    expect(
+      defaultProxyProgram('win32', {
+        execPath: 'C:\\Program Files\\Mousse\\Mousse.exe',
+        env: {},
+        exists: exists('C:\\Program Files\\Mousse\\mousse-cli.cmd')
+      })
+    ).toEqual({ program: 'C:\\Program Files\\Mousse\\mousse-cli.cmd' })
+  })
+
+  it('finds the launcher in Contents/Resources of a macOS app bundle', () => {
+    expect(
+      defaultProxyProgram('darwin', {
+        execPath: '/Applications/Mousse.app/Contents/MacOS/Mousse',
+        env: {},
+        exists: exists('/Applications/Mousse.app/Contents/Resources/mousse-cli')
+      })
+    ).toEqual({ program: '/Applications/Mousse.app/Contents/Resources/mousse-cli' })
+  })
+
+  it('uses the AppImage file itself, whose folder changes on every start', () => {
+    expect(
+      defaultProxyProgram('linux', {
+        execPath: '/tmp/.mount_MousseAB12/mousse',
+        env: { APPIMAGE: '/home/me/Apps/Mousse.AppImage' },
+        exists: exists('/home/me/Apps/Mousse.AppImage', '/tmp/.mount_MousseAB12/mousse-cli')
+      })
+    ).toEqual({ program: '/home/me/Apps/Mousse.AppImage', args: ['--cli'] })
+  })
+
+  it('uses the launcher next to the binary on Linux, and mousse-cli from PATH as the last resort', () => {
+    expect(
+      defaultProxyProgram('linux', {
+        execPath: '/opt/Mousse/mousse',
+        env: {},
+        exists: exists('/opt/Mousse/mousse-cli')
+      })
+    ).toEqual({ program: '/opt/Mousse/mousse-cli' })
+    expect(
+      defaultProxyProgram('linux', { execPath: '/opt/Mousse/mousse', env: {}, exists: () => false })
+    ).toEqual({ program: 'mousse-cli' })
   })
 })
 
@@ -303,8 +408,10 @@ describe('files', () => {
     const config = await readFile(p.config, 'utf8')
     expect(config).toContain(`Host ${alias}`)
     expect(config).toContain('  User bob')
+    expect(config).toContain(`--profile default`)
     if (process.platform !== 'win32') {
       expect((await stat(p.config)).mode & 0o777).toBe(0o600)
+      expect((await stat(p.dir)).mode & 0o777).toBe(0o700)
       expect((await stat(userConfig)).mode & 0o777).toBe(0o600)
     }
 
@@ -344,14 +451,33 @@ describe('files', () => {
     expect((await readFile(userConfig)).equals(utf16)).toBe(true)
   })
 
-  it('keeps the file mode of an existing config', async () => {
-    if (process.platform === 'win32') return
+  it('changes the file in place, so its mode and identity stay', async () => {
     const { editor, userConfig, home } = await bed()
     await mkdir(join(home, '.ssh'))
     await writeFile(userConfig, 'Host a\n')
-    await chmod(userConfig, 0o640)
+    if (process.platform !== 'win32') await chmod(userConfig, 0o640)
+    const before = await stat(userConfig)
     await editor.prepare([computer('Box')])
-    expect((await stat(userConfig)).mode & 0o777).toBe(0o640)
+    const after = await stat(userConfig)
+    // Same file, not a new one renamed over it: it keeps its ACL, owner, links and attributes.
+    expect(after.ino).toBe(before.ino)
+    if (process.platform !== 'win32') expect(after.mode & 0o777).toBe(0o640)
+    await editor.disable()
+    expect((await stat(userConfig)).ino).toBe(before.ino)
+    expect(await readFile(userConfig, 'utf8')).toBe('Host a\n')
+  })
+
+  it('leaves a read-only file alone and says how to add the line by hand', async () => {
+    const { editor, userConfig, home } = await bed()
+    await mkdir(join(home, '.ssh'))
+    await writeFile(userConfig, 'Host a\n')
+    await chmod(userConfig, 0o444)
+    cleanup.push(() => chmod(userConfig, 0o644))
+    const result = await editor.prepare([computer('Box')])
+    expect(result).toMatchObject({ ok: false, code: 'unwritable' })
+    expect(!result.ok && result.message).toContain('Include ~/.mousse/ssh/config')
+    expect(await readFile(userConfig, 'utf8')).toBe('Host a\n')
+    expect((await stat(userConfig)).mode & 0o200).toBe(0)
   })
 
   it('leaves no temporary files beside the config', async () => {
@@ -361,6 +487,7 @@ describe('files', () => {
     await editor.enable([computer('Box')])
     expect((await readdir(join(home, '.ssh'))).filter((name) => name.endsWith('.tmp'))).toEqual([])
     expect((await readdir(p.dir)).filter((name) => name.endsWith('.tmp'))).toEqual([])
+    expect((await readdir(p.dir)).filter((name) => name.startsWith('check-'))).toEqual([])
   })
 
   it('writes through a symbolic link and keeps the link', async () => {
@@ -428,6 +555,7 @@ describe('files', () => {
 
     const undone = await editor.disable()
     expect(undone).toMatchObject({ ok: true, removed: 1 })
+    expect(undone.ok && undone.leftover).toBeUndefined()
     expect(undone.ok && undone.status).toMatchObject({
       enabled: false,
       included: false,
@@ -458,6 +586,58 @@ describe('files', () => {
     expect(await readFile(userConfig, 'utf8')).toBe('Host a\n')
   })
 
+  it('treats a line the person removed by hand as turned off, and does not add it again', async () => {
+    const { editor, userConfig, home } = await bed()
+    await mkdir(join(home, '.ssh'))
+    await writeFile(userConfig, 'Host a\n')
+    const box = computer('Box')
+    await editor.prepare([box])
+    // The person deletes the line in their editor.
+    await writeFile(userConfig, 'Host a\n')
+
+    const result = await editor.prepare([box])
+    expect(result).toMatchObject({ ok: false, code: 'off' })
+    expect(!result.ok && result.message).toContain('removed')
+    expect(await readFile(userConfig, 'utf8')).toBe('Host a\n')
+    expect(result.status.enabled).toBe(false)
+    expect(await editor.prepare([box])).toMatchObject({ ok: false, code: 'off' })
+
+    // Only turning it on in Settings adds it again.
+    expect(await editor.enable([box])).toMatchObject({ ok: true, added: true })
+    expect(await readFile(userConfig, 'utf8')).toBe('Include ~/.mousse/ssh/config\nHost a\n')
+  })
+
+  it('does not add a second copy when the person moved the line under a Host line', async () => {
+    const { editor, userConfig, home } = await bed()
+    await mkdir(join(home, '.ssh'))
+    const moved = 'Host a\n  Include ~/.mousse/ssh/config\n'
+    await writeFile(userConfig, moved)
+    const result = await editor.prepare([computer('Box')])
+    expect(result).toMatchObject({ ok: false, code: 'scoped' })
+    expect(await readFile(userConfig, 'utf8')).toBe(moved)
+    expect(result.status).toMatchObject({ included: false, scoped: true })
+  })
+
+  it('says so when undo cannot remove a line the person edited', async () => {
+    const { editor, userConfig, home } = await bed()
+    await mkdir(join(home, '.ssh'))
+    await writeFile(userConfig, 'Host a\n')
+    const box = computer('Box')
+    await editor.prepare([box])
+    const edited = 'Include ~/.mousse/ssh/config # editor ssh\nHost a\n'
+    await writeFile(userConfig, edited)
+    expect((await editor.status()).edited).toBe(true)
+
+    const undone = await editor.disable()
+    expect(undone).toMatchObject({ ok: true, removed: 0, leftover: true })
+    expect(undone.ok && undone.status).toMatchObject({
+      enabled: false,
+      included: true,
+      edited: true
+    })
+    expect(await readFile(userConfig, 'utf8')).toBe(edited)
+  })
+
   it('keeps an alias when the computer is renamed, and drops it when the computer is revoked', async () => {
     const { editor, paths: p } = await bed()
     const a = computer('Work box'),
@@ -486,6 +666,23 @@ describe('files', () => {
     expect(pinned).toContain(`${aliasOf('Laptop')} ${KEY_B.type} ${KEY_B.key}`)
   })
 
+  it('writes the file again at every start, so a program path that moved is found', async () => {
+    const { home, mousseHome, editor, paths: p } = await bed()
+    const box = computer('Box')
+    await editor.prepare([box])
+    expect(await readFile(p.config, 'utf8')).toContain(proxyCommand(CLI, box.node, 'default'))
+    const moved = new EditorSshConfig({
+      home,
+      mousseHome,
+      cli: '/Applications/Mousse.app/Contents/Resources/mousse-cli',
+      verify: passes
+    })
+    await moved.syncIfPrepared(() => [box])
+    expect(await readFile(p.config, 'utf8')).toContain(
+      `ProxyCommand /Applications/Mousse.app/Contents/Resources/mousse-cli net ssh-proxy ${box.node} --profile default`
+    )
+  })
+
   it('gives two computers with the same name different aliases', async () => {
     const { editor } = await bed()
     const result = await editor.prepare([computer('Box'), computer('Box')])
@@ -503,22 +700,259 @@ describe('files', () => {
     await editor.syncIfPrepared(() => [box])
     expect(await readFile(p.config, 'utf8')).toMatch(/^ {2}User bob$/mu)
   })
-})
 
-describe('pinned host keys', () => {
-  it('pins a key under the alias, replaces a key of the same type and keeps other types', async () => {
+  it('keeps the aliases it has when the device list cannot be read', async () => {
     const { editor, paths: p } = await bed()
     const box = computer('Box')
-    const prepared = await editor.prepare([box])
+    await editor.prepare([box])
+    await editor.syncIfPrepared(() => {
+      throw new Error('not ready')
+    })
+    expect((await editor.status()).computers).toHaveLength(1)
+    expect(await readFile(p.config, 'utf8')).toContain('Host mousse-box-')
+  })
+
+  it("never writes the user's file when it only syncs", async () => {
+    const { editor, userConfig, home } = await bed()
+    await mkdir(join(home, '.ssh'))
+    await writeFile(userConfig, 'Host a\n')
+    const box = computer('Box')
+    await editor.prepare([box])
+    await writeFile(userConfig, 'Host a\n') // the line removed by hand
+    const stamp = (await stat(userConfig)).mtimeMs
+    await editor.syncIfPrepared(() => [box, computer('Other')])
+    await editor.syncIfPrepared(() => [])
+    expect(await readFile(userConfig, 'utf8')).toBe('Host a\n')
+    expect((await stat(userConfig)).mtimeMs).toBe(stamp)
+  })
+})
+
+describe('when another program changes the file during a write', () => {
+  it('makes the change again on the new text', async () => {
+    const { home, mousseHome, userConfig } = await bed()
+    await mkdir(join(home, '.ssh'))
+    await writeFile(userConfig, 'Host a\n')
+    const attempts: number[] = []
+    const editor = new EditorSshConfig({
+      home,
+      mousseHome,
+      cli: CLI,
+      verify: passes,
+      afterRead: async (attempt) => {
+        attempts.push(attempt)
+        if (attempt === 0) await writeFile(userConfig, 'Host a\nHost b\n')
+      }
+    })
+    const result = await editor.prepare([computer('Box')])
+    expect(result).toMatchObject({ ok: true, added: true })
+    expect(attempts).toEqual([0, 1])
+    expect(await readFile(userConfig, 'utf8')).toBe(
+      'Include ~/.mousse/ssh/config\nHost a\nHost b\n'
+    )
+  })
+
+  it("gives up after three tries and leaves the other program's text alone", async () => {
+    const { home, mousseHome, userConfig } = await bed()
+    await mkdir(join(home, '.ssh'))
+    await writeFile(userConfig, 'Host a\n')
+    let last = ''
+    const editor = new EditorSshConfig({
+      home,
+      mousseHome,
+      cli: CLI,
+      verify: passes,
+      afterRead: async (attempt) => {
+        last = `Host a\n# change ${attempt}\n`
+        await writeFile(userConfig, last)
+      }
+    })
+    const result = await editor.prepare([computer('Box')])
+    expect(result).toMatchObject({ ok: false, code: 'unwritable' })
+    expect(!result.ok && result.message).toContain('kept changing')
+    expect(await readFile(userConfig, 'utf8')).toBe(last)
+  })
+})
+
+describe('never breaking ssh', () => {
+  const failing =
+    (detail: string): SshVerifier =>
+    async () => ({
+      ok: false,
+      code: 'ssh_check_failed',
+      detail
+    })
+
+  it('does not touch ~/.ssh/config when the scratch check fails, and says why', async () => {
+    const { editor, userConfig, home } = await bed({ verify: failing('ssh.exe: Bad permissions') })
+    await mkdir(join(home, '.ssh'))
+    await writeFile(userConfig, 'Host a\n')
+    const result = await editor.prepare([computer('Box')])
+    expect(result).toMatchObject({ ok: false, code: 'ssh_check_failed' })
+    expect(!result.ok && result.message).toContain('Bad permissions')
+    expect(!result.ok && result.message).toContain('did not change ~/.ssh/config')
+    expect(await readFile(userConfig, 'utf8')).toBe('Host a\n')
+  })
+
+  it('does not create ~/.ssh when the check fails', async () => {
+    const { editor, home } = await bed({ verify: failing('boom') })
+    await editor.prepare([computer('Box')])
+    expect(existsSync(join(home, '.ssh'))).toBe(false)
+  })
+
+  it('refuses when there is no ssh to check with', async () => {
+    const { editor, userConfig } = await bed({
+      verify: async () => ({ ok: false, code: 'no_ssh', detail: 'The ssh command was not found.' })
+    })
+    expect(await editor.prepare([computer('Box')])).toMatchObject({ ok: false, code: 'no_ssh' })
+    expect(existsSync(userConfig)).toBe(false)
+  })
+
+  it('puts the file back exactly when the check on the real file fails', async () => {
+    const calls: string[] = []
+    const verify: SshVerifier = async ({ config }) => {
+      calls.push(config)
+      return calls.length === 1
+        ? { ok: true }
+        : { ok: false, code: 'ssh_check_failed', detail: 'parse error' }
+    }
+    const { editor, userConfig, home } = await bed({ verify })
+    await mkdir(join(home, '.ssh'))
+    const original = Buffer.from([...Buffer.from('Host a\r\n  User a\r\n# caf'), 0xe9, 0x0d, 0x0a])
+    await writeFile(userConfig, original)
+    const result = await editor.prepare([computer('Box')])
+    expect(result).toMatchObject({ ok: false, code: 'ssh_check_failed' })
+    expect(!result.ok && result.message).toContain('put ~/.ssh/config back as it was')
+    expect(calls).toHaveLength(2)
+    expect(calls[1]).toBe(userConfig)
+    expect((await readFile(userConfig)).equals(original)).toBe(true)
+    expect(result.status.included).toBe(false)
+  })
+
+  it('removes a file it created when the check on it fails', async () => {
+    let calls = 0
+    const verify: SshVerifier = async () =>
+      ++calls === 1 ? { ok: true } : { ok: false, code: 'ssh_check_failed', detail: 'parse error' }
+    const { editor, userConfig } = await bed({ verify })
+    expect(await editor.prepare([computer('Box')])).toMatchObject({ ok: false })
+    expect(existsSync(userConfig)).toBe(false)
+  })
+
+  it('reads an unrelated host and an alias in the scratch check', async () => {
+    const seen: string[][] = []
+    const { editor } = await bed({
+      verify: async ({ hosts }) => {
+        seen.push(hosts)
+        return { ok: true }
+      }
+    })
+    await editor.prepare([computer('Box')])
+    expect(seen[0]).toHaveLength(2)
+    expect(seen[0]![0]).toBe('mousse-check.invalid')
+    expect(seen[0]![1]).toMatch(/^mousse-box-/u)
+  })
+
+  it('reports a failing real file in the status', async () => {
+    let fail = false
+    const { editor } = await bed({
+      verify: async () =>
+        fail ? { ok: false, code: 'ssh_check_failed', detail: 'later' } : { ok: true }
+    })
+    await editor.prepare([computer('Box')])
+    expect((await editor.status()).problem).toBeUndefined()
+    fail = true
+    expect((await editor.status()).problem).toMatchObject({ code: 'ssh_check_failed' })
+  })
+
+  it("restores Mousse's file when a sync would leave ssh unable to read it", async () => {
+    let fail = false
+    const { editor, paths: p } = await bed({
+      verify: async () =>
+        fail ? { ok: false, code: 'ssh_check_failed', detail: 'later' } : { ok: true }
+    })
+    const box = computer('Box')
+    await editor.prepare([box])
+    const good = await readFile(p.config, 'utf8')
+    fail = true
+    await expect(editor.syncIfPrepared(() => [box, computer('Other')])).rejects.toMatchObject({
+      code: 'ssh_check_failed'
+    })
+    expect(await readFile(p.config, 'utf8')).toBe(good)
+  })
+})
+
+describe('profiles', () => {
+  it("keeps each profile's computers, aliases and pinned keys when another profile syncs", async () => {
+    const { make, userConfig, paths: p } = await bed()
+    const one = make('profile-one'),
+      two = make('profile-two')
+    const work = computer('Work box'),
+      personal = computer('Personal box')
+    const a = await one.prepare([work])
+    const b = await two.prepare([personal])
+    if (!a.ok || !b.ok) throw new Error('unreachable')
+    await one.pinHostKey(work.node, KEY_A)
+    await two.pinHostKey(personal.node, KEY_B)
+    const aliasWork = a.status.computers[0]!.alias,
+      aliasPersonal = b.status.computers[0]!.alias
+
+    const config = await readFile(p.config, 'utf8')
+    expect(config).toContain(`Host ${aliasWork}`)
+    expect(config).toContain(`Host ${aliasPersonal}`)
+    expect(config).toContain(`net ssh-proxy ${work.node} --profile profile-one`)
+    expect(config).toContain(`net ssh-proxy ${personal.node} --profile profile-two`)
+    // One line in the user's file serves every profile, and the second profile did not add another.
+    expect(b.added).toBe(false)
+    expect(await readFile(userConfig, 'utf8')).toBe('Include ~/.mousse/ssh/config\n')
+
+    // Profile one loses its computer: profile two's alias and pinned key stay.
+    await one.syncIfPrepared(() => [])
+    const after = await readFile(p.config, 'utf8')
+    expect(after).not.toContain(aliasWork)
+    expect(after).toContain(`Host ${aliasPersonal}`)
+    const pinned = await readFile(p.knownHosts, 'utf8')
+    expect(pinned).not.toContain(aliasWork)
+    expect(pinned).toContain(`${aliasPersonal} ${KEY_B.type} ${KEY_B.key}`)
+    expect((await two.status()).computers.map((row) => row.alias)).toEqual([aliasPersonal])
+    expect((await one.status()).computers).toEqual([])
+  })
+
+  it('never gives two profiles the same alias, also for the same computer', async () => {
+    const { make } = await bed()
+    const shared = computer('Box')
+    const a = await make('one').prepare([shared])
+    const b = await make('two').prepare([shared])
+    if (!a.ok || !b.ok) throw new Error('unreachable')
+    expect(a.status.computers[0]!.alias).not.toBe(b.status.computers[0]!.alias)
+  })
+
+  it('changes one profile at a time when two run together', async () => {
+    const { make, paths: p } = await bed()
+    const profiles = ['p1', 'p2', 'p3', 'p4'].map((id) => make(id))
+    const boxes = profiles.map((_, i) => computer(`Box ${i}`))
+    await Promise.all(profiles.map((service, i) => service.prepare([boxes[i]!])))
+    const config = await readFile(p.config, 'utf8')
+    for (const box of boxes) expect(config).toContain(`ssh-proxy ${box.node} --profile`)
+    expect((config.match(/^Host /gmu) ?? []).length).toBe(4)
+  })
+
+  it('replaces every pinned key of an alias, whatever its type, and nothing of another alias', async () => {
+    const { editor, paths: p } = await bed()
+    const box = computer('Box'),
+      other = computer('Other')
+    const prepared = await editor.prepare([box, other])
     if (!prepared.ok) throw new Error('unreachable')
-    const alias = prepared.status.computers[0]!.alias
+    const alias = prepared.status.computers.find((row) => row.name === 'Box')!.alias
+    const otherAlias = prepared.status.computers.find((row) => row.name === 'Other')!.alias
+    await editor.pinHostKey(other.node, KEY_RSA)
     expect(await editor.pinHostKey(box.node, KEY_A)).toBe('added')
     expect(await editor.pinHostKey(box.node, KEY_A)).toBe('present')
-    expect(await editor.pinHostKey(box.node, KEY_RSA)).toBe('added')
+    expect(await editor.pinHostKeys(box.node, [KEY_A, KEY_RSA])).toBe('replaced')
+    expect(await editor.pinHostKeys(box.node, [KEY_A, KEY_RSA])).toBe('present')
+    // The computer now vouches for one Ed25519 key only: the RSA key is no longer trusted.
     expect(await editor.pinHostKey(box.node, KEY_B)).toBe('replaced')
-    const lines = (await readFile(p.knownHosts, 'utf8')).trim().split('\n')
-    expect(lines.sort()).toEqual(
-      [`${alias} ${KEY_B.type} ${KEY_B.key}`, `${alias} ${KEY_RSA.type} ${KEY_RSA.key}`].sort()
+    const lines = (await readFile(p.knownHosts, 'utf8')).trim().split('\n').sort()
+    expect(lines).toEqual(
+      [`${alias} ${KEY_B.type} ${KEY_B.key}`, `${otherAlias} ${KEY_RSA.type} ${KEY_RSA.key}`].sort()
     )
   })
 
@@ -535,6 +969,7 @@ describe('pinned host keys', () => {
       { type: 'nonsense', key: KEY_A.key }
     ])
       await expect(editor.pinHostKey(box.node, key)).rejects.toMatchObject({ code: 'bad_value' })
+    await expect(editor.pinHostKeys(box.node, [])).rejects.toMatchObject({ code: 'bad_value' })
   })
 })
 
@@ -562,17 +997,48 @@ describe.skipIf(!hasSsh)('as the system ssh reads it', () => {
     const values = resolved(p.config, alias)
     expect(values.get('hostkeyalias')).toBe(alias)
     expect(values.get('user')).toBe('John Doe')
-    expect(values.get('port')).toBe('22')
     expect(values.get('stricthostkeychecking')).toBe('true')
     expect(values.get('hostname')).toBe('127.0.0.1')
-    expect(values.get('proxycommand')).toBe(proxyCommand(CLI, box.node))
-    expect(values.get('userknownhostsfile')?.replace(/\\/gu, '/')).toContain('/ssh/known_hosts')
+    expect(values.get('proxycommand')).toBe(proxyCommand(CLI, box.node, 'default'))
+    expect(values.get('userknownhostsfile')?.replace(/\\/gu, '/')).toContain(
+      '/.mousse/ssh/known_hosts'
+    )
+  })
+
+  it('adds the line when the real ssh reads the scratch config, and the real file reads afterwards', async () => {
+    const { editor, userConfig } = await bed({
+      verify: systemSshVerifier(),
+      mousseInsideHome: false
+    })
+    expect(await editor.prepare([computer('Box')])).toMatchObject({ ok: true, added: true })
+    expect(resolved(userConfig, 'github.com').get('hostname')).toBe('github.com')
+  })
+
+  it('does not pass a config the real ssh cannot read', async () => {
+    const { root } = await bed()
+    const verdict = await systemSshVerifier()({
+      config: join(root, 'does-not-exist-config'),
+      hosts: ['mousse-check.invalid']
+    })
+    expect(verdict).toMatchObject({ ok: false, code: 'ssh_check_failed' })
+    const bad = join(root, 'bad-config')
+    await writeFile(bad, 'Host a\n  NoSuchOptionAtAll yes\n')
+    expect((await systemSshVerifier()({ config: bad, hosts: ['a'] })).ok).toBe(false)
+  })
+
+  it('finds ssh clients without duplicates', () => {
+    const found = findSshClients()
+    expect(found.length).toBeGreaterThan(0)
+    expect(new Set(found.map((row) => row.toLowerCase())).size).toBe(found.length)
   })
 
   it.skipIf(process.platform === 'win32')(
     "applies the aliases to every host, whatever the user's own blocks say further down",
     async () => {
-      const { editor, userConfig, home } = await bed({ mousseInsideHome: false })
+      const { editor, userConfig, home } = await bed({
+        mousseInsideHome: false,
+        verify: systemSshVerifier()
+      })
       await mkdir(join(home, '.ssh'))
       await writeFile(
         userConfig,
@@ -580,11 +1046,10 @@ describe.skipIf(!hasSsh)('as the system ssh reads it', () => {
       )
       const box = computer('Work box', 'bob')
       const result = await editor.prepare([box])
-      if (!result.ok) throw new Error('unreachable')
+      if (!result.ok) throw new Error(result.message)
       const alias = result.status.computers[0]!.alias
       const values = resolved(userConfig, alias)
       expect(values.get('user')).toBe('bob')
-      expect(values.get('port')).toBe('22')
       expect(values.get('proxycommand')).toContain('net ssh-proxy')
       // The user's own hosts are untouched.
       expect(resolved(userConfig, 'elsewhere').get('user')).toBe('someone-else')
@@ -593,17 +1058,91 @@ describe.skipIf(!hasSsh)('as the system ssh reads it', () => {
   )
 })
 
+/** The Windows rule that made this a hard requirement: a loose ACL on an included file breaks every ssh. */
+describe.skipIf(process.platform !== 'win32')('on Windows', () => {
+  const win32Ssh = join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'OpenSSH', 'ssh.exe')
+  const icacls = (...args: string[]) =>
+    spawnSync(join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'icacls.exe'), args, {
+      encoding: 'utf8'
+    })
+
+  it('takes inherited access entries off the Mousse folder before writing into it', async () => {
+    const { mousseHome, editor, paths: p } = await bed({ mousseInsideHome: false })
+    // The Mousse home carries an access entry for a group that is not the user, SYSTEM or Administrators.
+    await mkdir(mousseHome, { recursive: true })
+    expect(icacls(mousseHome, '/grant', '*S-1-1-0:(OI)(CI)M').status).toBe(0)
+    expect(icacls(mousseHome).stdout).toMatch(/Everyone/u)
+
+    const result = await editor.prepare([computer('Box')])
+    expect(result.ok).toBe(true)
+    for (const file of [p.dir, p.config, p.state, join(p.profiles, 'default.json')]) {
+      const listing = icacls(file).stdout
+      expect(listing, file).not.toMatch(/Everyone/u)
+      expect(listing, file).toMatch(/NT AUTHORITY\\SYSTEM/u)
+      // Only the user, SYSTEM and Administrators.
+      expect((listing.match(/:\(/gu) ?? []).length, file).toBe(3)
+    }
+  })
+
+  it.skipIf(!existsSync(win32Ssh))(
+    'leaves Win32-OpenSSH able to read every host after the line is added',
+    async () => {
+      const { mousseHome, userConfig, home, make } = await bed({
+        mousseInsideHome: false,
+        verify: systemSshVerifier()
+      })
+      await mkdir(mousseHome, { recursive: true })
+      expect(icacls(mousseHome, '/grant', '*S-1-1-0:(OI)(CI)M').status).toBe(0)
+      await mkdir(join(home, '.ssh'))
+      await writeFile(userConfig, 'Host a\n  User a\n')
+      const result = await make().prepare([computer('Box')])
+      expect(result).toMatchObject({ ok: true, added: true })
+      for (const host of ['a', 'github.com', 'mousse-check.invalid']) {
+        const run = spawnSync(win32Ssh, ['-F', userConfig, '-G', host], { encoding: 'utf8' })
+        expect(run.status, run.stderr).toBe(0)
+      }
+    }
+  )
+
+  it.skipIf(!existsSync(win32Ssh))(
+    'refuses to add the line, and says why, when Win32-OpenSSH cannot read the file',
+    async () => {
+      const {
+        home,
+        userConfig,
+        paths: p,
+        make
+      } = await bed({
+        mousseInsideHome: false,
+        verify: systemSshVerifier()
+      })
+      const editor = make()
+      const box = computer('Box')
+      // Once the folder is private, make the config readable by Everyone again behind Mousse's back.
+      await editor.prepare([box])
+      await editor.disable()
+      await mkdir(join(home, '.ssh'), { recursive: true })
+      await writeFile(userConfig, 'Host a\n')
+      expect(icacls(p.config, '/grant', '*S-1-1-0:M').status).toBe(0)
+      const result = await editor.enable([box])
+      expect(result).toMatchObject({ ok: false, code: 'ssh_check_failed' })
+      expect(!result.ok && result.message).toMatch(/Bad (owner or )?permissions/iu)
+      expect(await readFile(userConfig, 'utf8')).toBe('Host a\n')
+    }
+  )
+})
+
 describe('through the service', () => {
-  async function service(withEditor: boolean) {
+  async function service(withEditor: boolean, profile = 'default') {
     const { root, home, mousseHome, userConfig } = await bed()
-    const profileDir = join(root, 'profile')
+    const profileDir = join(root, `profile ${profile}`)
     await mkdir(profileDir)
     const net = new NetService({
       profileDir,
-      ...(withEditor ? { editorSsh: { home, mousseHome, cli: CLI } } : {})
+      ...(withEditor ? { editorSsh: { home, mousseHome, cli: CLI, profile, verify: passes } } : {})
     })
     cleanup.push(() => net.shutdown())
-    return { net, userConfig, home, profileDir }
+    return { net, userConfig, home, profileDir, root, mousseHome }
   }
 
   it('lists the methods', () => {
@@ -661,5 +1200,76 @@ describe('through the service', () => {
       ok: false,
       code: 'unavailable'
     })
+  })
+
+  it('lists the other computers only, and follows the device list as computers are added and revoked', async () => {
+    const authority = await service(true)
+    await authority.net.request('net.init', { name: 'authority', listen: true, port: 0 })
+    await authority.net.request('net.protect', { passphrase: 'test-authority-protection' })
+    const prepared = (await authority.net.request('net.editor.ssh.enable', {})) as {
+      status: EditorSshStatus
+    }
+    // The authority itself is never listed.
+    expect(prepared.status.computers).toEqual([])
+
+    const joined = async (name: string) => {
+      const follower = await service(false)
+      const invite = (await authority.net.request('bridge.invite', {})) as { invite: string }
+      const enrolled = (await follower.net.request('bridge.join', {
+        invite: invite.invite,
+        name
+      })) as { node: string }
+      return enrolled.node as NodeId
+    }
+    const laptop = await joined('Laptop')
+    await vi.waitFor(async () => {
+      const status = (await authority.net.request('net.editor.ssh.status', {})) as EditorSshStatus
+      expect(status.computers.map((row) => row.node)).toEqual([laptop])
+    })
+    const config = await readFile(join(authority.mousseHome, 'ssh', 'config'), 'utf8')
+    expect(config).toContain(`ssh-proxy ${laptop} --profile default`)
+
+    // A phone is not listed: it has no folders to open.
+    await authority.net.request('bridge.setKind', { node: laptop, kind: 'phone' })
+    expect(
+      ((await authority.net.request('net.editor.ssh.prepare', {})) as { status: EditorSshStatus })
+        .status.computers
+    ).toEqual([])
+    await authority.net.request('bridge.setKind', { node: laptop, kind: 'computer' })
+    expect(
+      (
+        (await authority.net.request('net.editor.ssh.prepare', {})) as { status: EditorSshStatus }
+      ).status.computers.map((row) => row.node)
+    ).toEqual([laptop])
+
+    // A revoked computer loses its alias.
+    await authority.net.request('bridge.revoke', { node: laptop })
+    await vi.waitFor(async () => {
+      const status = (await authority.net.request('net.editor.ssh.status', {})) as EditorSshStatus
+      expect(status.computers).toEqual([])
+    })
+    expect(await readFile(join(authority.mousseHome, 'ssh', 'config'), 'utf8')).not.toContain(
+      laptop
+    )
+  }, 30_000)
+
+  it("writes Mousse's own file again when the service starts", async () => {
+    const authority = await service(true)
+    await authority.net.request('net.init', { name: 'authority' })
+    await authority.net.request('net.editor.ssh.enable', {})
+    const file = join(authority.mousseHome, 'ssh', 'config')
+    await writeFile(file, '# stale\n')
+    const restarted = new NetService({
+      profileDir: authority.profileDir,
+      editorSsh: {
+        home: authority.home,
+        mousseHome: authority.mousseHome,
+        cli: '/Applications/Mousse.app/Contents/Resources/mousse-cli',
+        verify: passes
+      }
+    })
+    cleanup.push(() => restarted.shutdown())
+    await restarted.start()
+    await vi.waitFor(async () => expect(await readFile(file, 'utf8')).not.toContain('# stale'))
   })
 })

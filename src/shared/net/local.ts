@@ -308,6 +308,13 @@ export type EditorSshProblemCode =
   | 'unwritable'
   | 'bad_value'
   | 'unknown_computer'
+  /** The system ssh could not read what Mousse wrote, so the line was not added (or was taken out again). */
+  | 'ssh_check_failed'
+  | 'no_ssh'
+  /** `~/.ssh/config` belongs to another account on macOS or Linux. */
+  | 'not_owner'
+  /** The line is in the file but below a `Host` or `Match` line. */
+  | 'scoped'
 
 /** One computer an editor can reach through an ssh alias. */
 export interface EditorSshComputer {
@@ -334,6 +341,8 @@ export interface EditorSshStatus {
   included: boolean
   /** The line is there but below a `Host` or `Match` line, so `ssh` reads it for that block only. */
   scoped?: boolean
+  /** The line is in force but edited (a comment added, another file on the same line), so undo cannot remove it. */
+  edited?: boolean
   includeLine: string
   userConfig: string
   mousseConfig: string
@@ -353,6 +362,11 @@ export type EditorSshResult =
       added: boolean
       /** For `disable`: how many Mousse lines were removed. */
       removed?: number
+      /**
+       * For `disable`: a line that names Mousse's file is still in `~/.ssh/config` because the person
+       * edited it. Mousse left it; show `status.includeLine` and say to remove it by hand.
+       */
+      leftover?: boolean
       status: EditorSshStatus
     }
   | { ok: false; code: EditorSshProblemCode; message: string; status: EditorSshStatus }
