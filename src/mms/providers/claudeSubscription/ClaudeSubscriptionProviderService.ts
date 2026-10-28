@@ -29,6 +29,7 @@ import { CLAUDE_MOUSSE_TOOL_PREFIX, claudeMcpServers } from '../../run/mcp/attac
 import { TURN_TOKEN_KEY } from '../../run/mcp/appTools/registry'
 import type { LoginSession } from '../LoginSession'
 import { settingsMirror, type MirrorField, type VendorMirror } from '../../harness/vendorMirror'
+import { withEnforced } from '../../harness/env'
 import { CLAUDE_LOCKED_REMOVED_OPTIONS, ClaudeLockedGate, claudeLockedOptions, claudeLockedSpawn, type ClaudeLockedTurn } from '../../harness/claude/locked'
 import {
   claudeExtraArgs,
@@ -230,6 +231,11 @@ type Dependencies = {
    * turn's integration variables: an API-key instance sets its key here and drops other sign-ins.
    */
   finalEnv?: (env: NodeJS.ProcessEnv) => NodeJS.ProcessEnv
+  /**
+   * The entry's telemetry switch (Settings → Providers): variables set after everything else,
+   * `finalEnv` included, on every process. Read at each start.
+   */
+  telemetryEnv?: () => Readonly<Record<string, string>> | undefined
   /**
    * Replaces `claude auth status` for an instance whose sign-in Mousse holds itself (an API key):
    * what the instance runs on, read without starting Claude Code.
@@ -540,9 +546,9 @@ export class ClaudeSubscriptionProviderService {
   private environment(): NodeJS.ProcessEnv {
     return this.finalEnv(withUserEnv(claudeSubscriptionEnvironment(this.dependencies.baseEnv?.()), storedCliEnv(this.launchSettings())))
   }
-  /** The instance's own last word on a process environment (`Dependencies.finalEnv`). */
+  /** The instance's own last word on a process environment (`Dependencies.finalEnv`), then its telemetry switch. */
   private finalEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
-    return this.dependencies.finalEnv?.(env) ?? env
+    return withEnforced(this.dependencies.finalEnv?.(env) ?? env, this.dependencies.telemetryEnv?.())
   }
   /** The stored executable, args and variables: the instance config's, never `settings.json`. */
   private launchSettings(): StoredCliConfig {

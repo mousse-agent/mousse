@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react'
 import type { InstanceSnapshot, StatusDescription } from '../../../shared/harness/status'
-import type { InstanceConfigPatch, ProviderOperationEvent, RemoveInstallResult } from '../../../shared/harness/types'
+import type { InstanceConfigPatch, ProviderOperationEvent, RemoveInstallResult, TelemetrySetting } from '../../../shared/harness/types'
+import { Select } from '../ui/Select'
 import { Download, Plus, RotateCcw, X } from '../../lib/icons'
 import { SettingsRow } from '../settings/SettingsRow'
 import { BrowseButton, CommandBox, RefreshButton, StatusLine, useAsyncAction } from './parts'
@@ -385,8 +386,45 @@ export function ArgsRow({ snapshot, onSave }: { snapshot: InstanceSnapshot; onSa
   )
 }
 
-/** Under a launch variable the Privacy switch overrides. */
-export const ENFORCED_NOTE = 'Ignored: Privacy → Agent telemetry is off.'
+/** Under a launch variable the entry's telemetry switch overrides. */
+export const ENFORCED_NOTE = 'Ignored while Telemetry is Off.'
+
+const TELEMETRY_OPTIONS: Array<{ value: TelemetrySetting; label: string }> = [
+  { value: 'agent_setting', label: "Agent's own setting" },
+  { value: 'off', label: 'Off' }
+]
+
+/** What Off sets, for the tooltip. */
+function telemetryTitle(telemetry: NonNullable<InstanceSnapshot['telemetry']>): string {
+  const set = [...(telemetry.variables ?? []), ...(telemetry.args?.length ? [telemetry.args.join(' ')] : [])]
+  return `Off starts the agent with ${set.join(', ')}. Mousse never changes the agent's own files.`
+}
+
+/** The entry's agent telemetry: Off or the agent's own setting, or a chip when the agent has no switch. */
+export function TelemetryRow({ snapshot, onSave }: { snapshot: InstanceSnapshot; onSave: (telemetry: TelemetrySetting) => Promise<void> }) {
+  const { error, run } = useAsyncAction()
+  const telemetry = snapshot.telemetry
+  if (!telemetry) return null
+  const setting = telemetry.setting
+  return (
+    <SettingsRow
+      title="Telemetry"
+      description={withError(undefined, error)}
+      control={setting === 'none'
+        ? <span className="prov-model-chip" title="This agent documents no way to turn its telemetry off, so Mousse sets nothing.">No switch</span>
+        : (
+          <span title={telemetryTitle(telemetry)}>
+            <Select
+              ariaLabel="Telemetry"
+              value={setting}
+              onChange={(next) => { if (next !== setting) void run('telemetry', () => onSave(next)) }}
+              options={TELEMETRY_OPTIONS}
+            />
+          </span>
+        )}
+    />
+  )
+}
 
 interface EnvDraft {
   uid: number
@@ -420,7 +458,7 @@ export function EnvRow({ snapshot, onSave }: { snapshot: InstanceSnapshot; onSav
   const update = (uid: number, patch: Partial<EnvDraft>) =>
     setRows((current) => current.map((row) => (row.uid === uid ? { ...row, ...patch } : row)))
   // Variables the Privacy switch sets last: a row naming one is not what the agent gets.
-  const enforced = new Set(snapshot.telemetry?.state === 'off' ? (snapshot.telemetry.variables ?? []).map((name) => name.toUpperCase()) : [])
+  const enforced = new Set(snapshot.telemetry?.setting === 'off' ? (snapshot.telemetry.variables ?? []).map((name) => name.toUpperCase()) : [])
 
   return (
     <SettingsRow

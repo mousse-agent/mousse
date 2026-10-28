@@ -144,7 +144,7 @@ export function piDriver(options: { credentials?: () => PiCredentials | undefine
     // Pi's documented switch: off drops its install and update reports and the attribution headers
     // it adds for some providers (OpenRouter, NVIDIA, Cloudflare). Its install ping runs only in
     // interactive mode, which Mousse never starts.
-    telemetryEnv: () => ({ PI_TELEMETRY: '0' }),
+    telemetryOff: () => ({ env: { PI_TELEMETRY: '0' } }),
     decodeConfig: (raw) => decodeInstanceConfig(raw, { privateHome: false }),
     // The connections that ran on the deleted loop get a one-time notice on their first turn.
     upgrade: ({ profileHome, instances }) => markLoopConnections(profileHome, instances),

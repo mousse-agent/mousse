@@ -222,7 +222,8 @@ describe.skipIf(skip)('managed Codex on the wire (pinned binary, fake ChatGPT)',
       USERPROFILE: userHome,
       CODEX_HOME: join(userHome, '.codex')
     }
-    const env = instanceEnv({ instanceId, driver: 'codex', configRevision: 0, home: join(stateDir, 'home'), searchPath: [], base })
+    // As the gateway builds it for a managed entry: telemetry Off by default (`-c analytics.enabled=false`).
+    const env = instanceEnv({ instanceId, driver: 'codex', configRevision: 0, home: join(stateDir, 'home'), searchPath: [], base, enforcedArgs: ['-c', 'analytics.enabled=false'] })
     const questions = new UserQuestionService()
     const context: DriverContext = {
       instanceId, builtIn: false, config: { home: 'private', setup: 'managed' }, env, profileHome,

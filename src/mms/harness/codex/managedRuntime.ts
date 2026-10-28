@@ -11,6 +11,7 @@ import type { AuthReading, DriverContext, DriverRuntime } from '../driver'
 import { chatgptTokenBroker, type ChatGptTokenBroker } from './broker'
 import { CodexInstallation } from './installation'
 import { CODEX_MANAGED_VERSION } from './release'
+import { telemetryOf } from '../telemetry'
 
 /**
  * A Codex entry Mousse manages: its own pinned download, a private `CODEX_HOME` and Sign in with
@@ -34,10 +35,11 @@ function toml(value: unknown): string {
 
 /**
  * Codex features that reach chatgpt.com or GitHub on their own (ChatGPT apps and connectors,
- * plugins and their marketplace, update checks, tool and skill suggestions, analytics). A managed
- * entry uses none of them, and ChatGPT plan use must not call ChatGPT's backend: the wire test
+ * plugins and their marketplace, update checks, tool and skill suggestions). A managed entry uses
+ * none of them, and ChatGPT plan use must not call ChatGPT's backend: the wire test
  * (`codexManagedWire.test.ts`) saw chatgpt.com, github.com and api.github.com contacted without
- * these, and nothing with them.
+ * these and the analytics switch, and nothing with them. Analytics is the entry's telemetry
+ * setting (Settings → Providers, Off by default: `-c analytics.enabled=false`).
  */
 export const MANAGED_OFFLINE_OVERRIDES = [
   'features.apps=false',
@@ -47,8 +49,7 @@ export const MANAGED_OFFLINE_OVERRIDES = [
   'features.in_app_updates=false',
   'features.tool_suggest=false',
   'features.skill_search=false',
-  'check_for_update_on_startup=false',
-  'analytics.enabled=false'
+  'check_for_update_on_startup=false'
 ] as const
 
 /**
@@ -191,6 +192,8 @@ export function createManagedCodexRuntime(context: DriverContext, deps: ManagedC
   service = new CodexProviderService(context.profileHome, context.questions, { ...deps.service, findBinary: () => runnableInstall()?.path }, {
     dir: join(context.stateDir, 'codex'),
     env: () => codexEnvironment(context.env.env),
+    // Off by default for a managed entry; the user may give it back to Codex's own setting.
+    telemetry: () => telemetryOf(context),
     clientInfo: { name: 'Mousse', title: 'Mousse' },
     modelProvider: MANAGED_MODEL_PROVIDER,
     account: { read: account },

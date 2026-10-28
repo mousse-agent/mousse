@@ -1179,7 +1179,7 @@
   color: var(--text-secondary);
 }
 
-/* A launch variable the Privacy switch sets over (Privacy → Agent telemetry is off). */
+/* A launch variable the telemetry switch sets over while Telemetry is Off. */
 .prov-env-note {
   grid-column: 1 / -1;
   margin: 0;

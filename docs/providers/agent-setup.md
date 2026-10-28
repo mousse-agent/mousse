@@ -205,11 +205,9 @@ sign-in check, chat) runs `grok --permission-mode default agent --no-leader stdi
 - An agent that ignores `session/cancel` (some drop one sent right after the prompt) is ended after
   the cancel deadline, and the next message starts a new session. Agent-specific cancel timing
   belongs in that agent's preset quirks (`harness/acp/quirks.ts`), not in the shared session code.
-- **Agent telemetry.** Settings → General → Privacy → Agent telemetry turns an agent's own usage and
-  error reports off where Mousse set the agent up (a home of its own, an agent Mousse installed, the
-  Mousse agent) and the agent documents how: Claude Code (`DISABLE_TELEMETRY`,
-  `DISABLE_ERROR_REPORTING`) and the Mousse agent (`PI_TELEMETRY=0`). It is off by default. An agent on
-  your own setup runs as you set it up; other agents document no switch, and Mousse sets nothing.
+- **Agent telemetry.** Each provider has a Telemetry setting, Off or Agent's own setting. Off starts the
+  agent with its documented switch (Claude Code, Codex and the Mousse agent have one); the agent's files
+  are never edited. See [Privacy and agent telemetry](../CONFIGURATION.md#privacy-and-agent-telemetry).
 
 ## Kept sign-ins
 

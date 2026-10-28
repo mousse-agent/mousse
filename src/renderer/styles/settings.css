@@ -1556,16 +1556,3 @@ html[data-theme='high-contrast'] .toggle-switch.on::after {
   color: color-mix(in srgb, var(--text-primary) 60%, transparent);
   overflow-wrap: anywhere;
 }
-
-.privacy-link {
-  padding: 0;
-  border: 0;
-  background: none;
-  color: var(--accent);
-  font: inherit;
-  cursor: pointer;
-}
-
-.privacy-link:hover {
-  text-decoration: underline;
-}

@@ -523,7 +523,7 @@ export function asInstanceConfigPatch(v: unknown, name = 'patch'): InstanceConfi
   if (v === undefined || v === null) return {}
   const o = asPlainObject(v, name)
   // `engine` (the removed Pi engine setting) is still accepted from an older client, and ignored.
-  assertKnownKeys(o, name, ['displayName', 'home', 'binaryPath', 'args', 'env', 'loginMethod', 'source', 'setup', 'engine', 'useOlderSettings', 'provider'])
+  assertKnownKeys(o, name, ['displayName', 'home', 'binaryPath', 'args', 'env', 'loginMethod', 'source', 'setup', 'engine', 'useOlderSettings', 'provider', 'telemetry'])
   if (o.useOlderSettings !== undefined) {
     if (o.useOlderSettings !== true) throw invalidParams(`${name}.useOlderSettings must be true`)
     return { useOlderSettings: true }
@@ -540,6 +540,10 @@ export function asInstanceConfigPatch(v: unknown, name = 'patch'): InstanceConfi
   if (o.setup !== undefined) {
     if (o.setup !== 'managed' && o.setup !== 'existing') throw invalidParams(`${name}.setup must be managed|existing`)
     patch.setup = o.setup
+  }
+  if (o.telemetry !== undefined) {
+    if (o.telemetry !== 'off' && o.telemetry !== 'agent_setting') throw invalidParams(`${name}.telemetry must be off|agent_setting`)
+    patch.telemetry = o.telemetry
   }
   if (o.provider !== undefined) {
     const provider = asString(o.provider, `${name}.provider`, 64)
@@ -995,7 +999,6 @@ export function asSettingsPartial(v: unknown): Record<string, unknown> {
     'shortcuts',
     'context',
     'agentAccess',
-    'privacy',
     'provider',
     'title',
     'agents',
@@ -1030,16 +1033,7 @@ export function asSettingsPartial(v: unknown): Record<string, unknown> {
   }
   const walked = walk(o, 'partial', 0) as Record<string, unknown>
   if (walked.agentAccess !== undefined) assertAgentAccessPatch(walked.agentAccess)
-  if (walked.privacy !== undefined) assertPrivacyPatch(walked.privacy)
   return walked
-}
-
-/** `privacy` decides what reaches the agents Mousse sets up, so a malformed patch is refused rather than guessed at. */
-function assertPrivacyPatch(value: unknown): void {
-  const patch = asPlainObject(value, 'partial.privacy')
-  for (const key of Object.keys(patch)) if (key !== 'agentTelemetry') throw new Error(`partial.privacy.${key} is not allowed`)
-  if (patch.agentTelemetry !== undefined && patch.agentTelemetry !== 'off' && patch.agentTelemetry !== 'agent_default')
-    throw new Error('partial.privacy.agentTelemetry must be off or agent_default')
 }
 
 /** `agentAccess` narrows what agents may reach, so a malformed patch is refused rather than guessed at. */

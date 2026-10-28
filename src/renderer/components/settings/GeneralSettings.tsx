@@ -229,7 +229,7 @@ export function GeneralSettings({
         />
       </SettingsGroup>
 
-      <PrivacySettingsGroup privacy={settings.privacy} onUpdate={onUpdate} />
+      <PrivacySettingsGroup />
 
       <SettingsGroup title="About" icon={Info}>
         <AboutRow />

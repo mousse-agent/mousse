@@ -76,8 +76,7 @@ import { HarnessScopeStore } from './scope'
 import { sharedShellPath, type ShellPathResult } from './shellPath'
 import { compatibilityOf, fingerprintOf, knownProblemMessage, PROBE_TIMEOUTS, probeInstance, sameBinary, updateAffordance, type ProbeResult } from './status'
 import { interruptWithDeadline } from './supervise'
-import { telemetryEnforced, telemetryView } from './telemetry'
-import type { AgentTelemetrySetting } from '../../shared/settings'
+import { telemetryEnforced, telemetrySwitch, telemetryView } from './telemetry'
 import {
   changedFields,
   fieldLabels,
@@ -236,12 +235,6 @@ export interface HarnessGateway {
   llmProviders(scope: ProviderScope): Promise<LlmProviderOption[]>
   /** The same listing from what is known now, without waiting (synchronous readers: channel `/model`). */
   listedLlmProviders(scope: ProviderScope): LlmProviderOption[]
-  /**
-   * Privacy → Agent telemetry may have changed (`settings.set`). Each instance whose setup Mousse
-   * owns and whose agent has a switch gets a new config revision: its next process starts with the
-   * new variables, and a warm process is replaced once its running turns end.
-   */
-  privacyChanged(): void
   /** Stops the instances' runtimes and running operations. */
   stop(): void
 }
@@ -564,8 +557,6 @@ export interface HarnessGatewayOptions {
   foldedInto?: (providerId: string | undefined) => HarnessDriverKind | undefined
   /** The ACP agent registry; without it the search finds nothing. */
   registry?: HarnessRegistry
-  /** Settings → General → Privacy → Agent telemetry, read live; absent reads as the default, `off`. */
-  agentTelemetry?: () => AgentTelemetrySetting
 }
 
 interface InstanceRecord {
@@ -1890,14 +1881,16 @@ export class Harness implements HarnessGateway {
     const stateDir = instanceStateDir(this.options.profileHome, instanceId)
     const revision = this.counters.get(instanceId).configRevision
     const home = alwaysPrivate(driver, config) || (config.home === 'private' && !builtIn) ? join(stateDir, 'home') : undefined
-    const enforced = telemetryEnforced(driver, config, home, this.agentTelemetry())
+    // The entry's telemetry switch: set last on every process it starts (Settings → Providers).
+    const enforced = telemetryEnforced(driver, config, home)
     const env = instanceEnv({
       instanceId,
       driver: entry.driver,
       configRevision: revision,
       ...(home ? { home } : {}),
       searchPath: this.searchPath,
-      ...(enforced ? { enforced } : {})
+      ...(enforced?.env ? { enforced: enforced.env } : {}),
+      ...(enforced?.args ? { enforcedArgs: enforced.args } : {})
     })
     const record: InstanceRecord = {
       instanceId,
@@ -2277,25 +2270,17 @@ export class Harness implements HarnessGateway {
       ...(state?.lastGood ? { lastGoodAt: state.lastGood.checkedAt } : {}),
       ...(nextStep ? { nextStep } : {}),
       ...(settingsNotice ? { settingsNotice } : {}),
-      telemetry: telemetryView(driver, config, record.env.home, this.agentTelemetry())
+      telemetry: telemetryView(driver, config, record.env.home)
     }
   }
 
-  private agentTelemetry(): AgentTelemetrySetting {
-    return this.options.agentTelemetry?.() ?? 'off'
-  }
-
-  privacyChanged(): void {
-    const setting = this.agentTelemetry()
-    for (const record of [...this.records.values()]) {
-      // Only an instance whose variables change: the user's own setups, and agents without a switch, keep their runtime.
-      const enforced = telemetryEnforced(record.driver, record.config, record.env.home, setting)
-      if (JSON.stringify(enforced ?? {}) === JSON.stringify(record.env.enforced ?? {})) continue
-      this.counters.bumpConfig(record.instanceId)
-      // Rebuilt now, so the old runtime retires (it stops once its running turns end).
-      this.recordOrUndefined(record.instanceId)
-      this.changed(record.instanceId)
-    }
+  /**
+   * What a built-in vendor service adds last to the processes it starts: the entry's telemetry
+   * switch, from its newest revision.
+   */
+  enforcedFor(instanceId: string): { env?: Readonly<Record<string, string>>; args?: readonly string[] } {
+    const env = this.recordOrUndefined(instanceId)?.env
+    return { ...(env?.enforced ? { env: env.enforced } : {}), ...(env?.enforcedArgs ? { args: env.enforcedArgs } : {}) }
   }
 
   /**
@@ -2680,6 +2665,8 @@ export class Harness implements HarnessGateway {
     if (patch.useOlderSettings) return this.useOlderSettings(record)
     if (patch.provider !== undefined)
       harnessFail('unsupported', `${this.displayName(record)} keeps the provider it was added with. Add another entry for another one.`, instanceId)
+    if (patch.telemetry !== undefined && !telemetrySwitch(record.driver, record.config))
+      harnessFail('unsupported', `${record.driver.label} has no telemetry switch Mousse could set.`, instanceId)
     const launch: CliProviderConfigPatch = {
       ...(patch.binaryPath !== undefined ? { binaryPath: patch.binaryPath } : {}),
       ...(patch.args !== undefined ? { args: patch.args } : {}),
@@ -2707,7 +2694,8 @@ export class Harness implements HarnessGateway {
     const runChanged = Object.keys(patch).some((key) => key !== 'displayName')
     if (runChanged) {
       this.counters.bumpConfig(instanceId)
-      if (Object.keys(launch).length) record.runtime.launchChanged?.()
+      // A process started with the old launch settings or telemetry switch is replaced.
+      if (Object.keys(launch).length || patch.telemetry !== undefined) record.runtime.launchChanged?.()
     }
     const failure = unchanged ? undefined : this.mirrorWrite(record, config)
     if (runChanged) void this.probe(instanceId, true)
@@ -3087,6 +3075,7 @@ export class Harness implements HarnessGateway {
     if (patch.args !== undefined) config.args = patch.args.length ? [...patch.args] : null
     if (patch.env !== undefined) config.env = Object.keys(patch.env).length ? { ...patch.env } : null
     if (patch.loginMethod !== undefined) setOrDelete(config, 'loginMethod', patch.loginMethod || undefined)
+    if (patch.telemetry !== undefined) config.telemetry = patch.telemetry
     // The removed engine setting (Advanced → Engine) is dropped on the first write after it.
     delete config.engine
     if (patch.source !== undefined) {

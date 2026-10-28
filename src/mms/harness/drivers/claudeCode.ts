@@ -27,7 +27,7 @@ import {
   entryBaseUrl,
   type ClaudeApiKeyChecker
 } from '../claude/apiKey'
-import { cliNames, findOnPath, lockedEnv, ownedLaunchEnv, ownedUserEnv, withEnforced } from '../env'
+import { cliNames, findOnPath, lockedEnv, ownedLaunchEnv, ownedUserEnv } from '../env'
 import { CLAUDE_LOCKED_PROFILE, CLAUDE_MANAGED_POLICY_REFUSAL, CLAUDE_NATIVE_TOOLS, claudeLockedCaps, claudeLockedHoldsBots, claudeSandboxFact } from '../claude/locked'
 import { readClaudeManagedPolicy, remoteSettingsHoldPolicy, type ManagedPolicyReadInput } from '../claude/managedPolicy'
 import { compatibilityFields, CONTAINMENT_EVIDENCE, hasContainmentEvidence, type ContainmentEvidence } from '../compatibility'
@@ -253,7 +253,7 @@ export function claudeCodeDriver(options: ClaudeCodeDriverOptions = {}): Harness
     mirrorsVendorFile: true,
     // Claude Code's documented switches (names checked in the 2.1.291 binary's text): usage
     // telemetry, and error reports.
-    telemetryEnv: () => ({ DISABLE_TELEMETRY: '1', DISABLE_ERROR_REPORTING: '1' }),
+    telemetryOff: () => ({ env: { DISABLE_TELEMETRY: '1', DISABLE_ERROR_REPORTING: '1' } }),
     telemetryDocs: 'https://code.claude.com/docs/en/data-usage',
     decodeConfig: (raw, instanceId) => {
       const config = decodeInstanceConfig(raw, { privateHome: true })
@@ -334,10 +334,10 @@ export function claudeCodeDriver(options: ClaudeCodeDriverOptions = {}): Harness
             launchConfig: launch,
             signedOut: () => live().signedOut(),
             saveLaunch: (patch: CliProviderConfigPatch) => live().saveLaunch(patch),
+            // The entry's telemetry switch, from its newest revision.
+            telemetryEnv: () => live().env.enforced,
             signInCommand,
-            ...(credential ? credential.serviceOptions : {}),
-            // Last of all, over the key's own environment: the telemetry switch (`InstanceEnv.enforced`).
-            finalEnv: (env: NodeJS.ProcessEnv) => withEnforced(credential ? credential.serviceOptions.finalEnv(env) : env, live().env.enforced)
+            ...(credential ? credential.serviceOptions : {})
           }
           const created = options.createService?.(context, serviceOptions)
             ?? new ClaudeSubscriptionProviderService(context.profileHome, context.questions, serviceOptions)

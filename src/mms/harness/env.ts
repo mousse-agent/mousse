@@ -32,10 +32,15 @@ export interface InstanceEnv {
   driverSearchPath?: string[]
   /**
    * Variables set last on every process of the instance, over the launch variables and anything a
-   * caller adds (the agent's telemetry switch, Settings → General → Privacy). `spawnHarness` applies
+   * caller adds (the agent's telemetry switch, Settings → Providers). `spawnHarness` applies
    * them; a runtime that builds its own process environment applies them itself (`withEnforced`).
    */
   enforced?: Readonly<Record<string, string>>
+  /**
+   * Launch arguments added last to the processes that take the entry's launch arguments (the
+   * agent's telemetry switch, e.g. Codex's `-c analytics.enabled=false`).
+   */
+  enforcedArgs?: readonly string[]
 }
 
 /** `env` with `enforced` set over it, dropping any other spelling of each name first (Windows names ignore case). */
@@ -290,6 +295,8 @@ export function instanceEnv(input: {
   base?: NodeJS.ProcessEnv
   /** `InstanceEnv.enforced`: set last on every process. */
   enforced?: Readonly<Record<string, string>>
+  /** `InstanceEnv.enforcedArgs`. */
+  enforcedArgs?: readonly string[]
 }): InstanceEnv {
   const base = input.base ?? process.env
   const variable = HOME_VARIABLES[input.driver]
@@ -314,7 +321,8 @@ export function instanceEnv(input: {
     env,
     searchPath: [...input.searchPath, ...extraSearch],
     ...(extraSearch.length ? { driverSearchPath: extraSearch } : {}),
-    ...(input.enforced && Object.keys(input.enforced).length ? { enforced: { ...input.enforced } } : {})
+    ...(input.enforced && Object.keys(input.enforced).length ? { enforced: { ...input.enforced } } : {}),
+    ...(input.enforcedArgs?.length ? { enforcedArgs: [...input.enforcedArgs] } : {})
   }
 }
 

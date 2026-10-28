@@ -173,22 +173,6 @@ export function normalizeRunSettings(raw?: Partial<RunSettings> | null): RunSett
   }
 }
 
-/**
- * `agentTelemetry`: whether Mousse turns off the telemetry of the agents it sets up itself (a home of
- * their own, an agent Mousse installed, or a runtime Mousse ships). `off` sets each agent's documented
- * switch when its processes start; `agent_default` sets nothing, so the agent behaves as it does by
- * default. An agent on the user's own setup is never changed.
- */
-export type AgentTelemetrySetting = 'agent_default' | 'off'
-
-export interface PrivacySettings {
-  agentTelemetry: AgentTelemetrySetting
-}
-
-export function normalizePrivacySettings(raw?: Partial<PrivacySettings> | null): PrivacySettings {
-  return { agentTelemetry: raw?.agentTelemetry === 'agent_default' ? 'agent_default' : 'off' }
-}
-
 export interface MousseSettings {
   profile: {
     username: string
@@ -201,7 +185,6 @@ export interface MousseSettings {
   context: ContextSettings
   agentAccess: AgentAccessSettings
   runs: RunSettings
-  privacy: PrivacySettings
   provider: {
     llmProvider: LlmProviderId
     model: string
@@ -505,7 +488,6 @@ export function getDefaultSettings(): MousseSettings {
     context: normalizeContextSettings(),
     agentAccess: normalizeAgentAccessSettings(),
     runs: normalizeRunSettings(),
-    privacy: normalizePrivacySettings(),
     provider: {
       llmProvider: '',
       model: ''

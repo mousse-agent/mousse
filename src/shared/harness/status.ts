@@ -102,19 +102,21 @@ export interface KnownProblem {
 export type CredentialKind = 'api_key' | 'subscription' | 'ambient' | 'unknown'
 
 /**
- * The agent's own telemetry for this entry (Settings → General → Privacy):
- * - `off`: Mousse set the entry up and turns the agent's telemetry off (`variables`, set last);
- * - `agent_default`: Mousse set the entry up and sets nothing (Privacy → Agent telemetry is the agent's default);
- * - `own_settings`: the entry runs on the user's own setup, which Mousse never changes;
- * - `no_switch`: the agent documents no switch Mousse could set.
+ * The entry's agent telemetry (Settings → Providers). Mousse applies it only through what it adds to
+ * the processes it starts; it never edits the agent's files.
+ * - `off`: every process starts with the agent's documented switch (`variables`, `args`) set last;
+ * - `agent_setting`: Mousse sets nothing, and the agent does what its own settings say;
+ * - `none`: the agent documents no switch, so there is nothing to set.
  */
 export interface InstanceTelemetry {
-  state: 'off' | 'agent_default' | 'own_settings' | 'no_switch'
-  /** The agent's name ("Claude Code"), for "Uses your own Claude Code settings". */
-  agent: string
-  /** The variables Mousse sets (state `off`): a launch variable of the same name is ignored. */
+  setting: 'off' | 'agent_setting' | 'none'
+  /** The setting until the user picks one: `off` for an agent Mousse set up, `agent_setting` on the user's own setup. */
+  defaultSetting?: 'off' | 'agent_setting'
+  /** The variables Off sets: a launch variable of the same name is ignored while it is off. */
   variables?: string[]
-  /** The vendor's page on what the agent collects and how to turn it off. */
+  /** The launch arguments Off adds after the entry's own. */
+  args?: string[]
+  /** The vendor's page on what the agent collects. */
   docsUrl?: string
 }
 
@@ -196,7 +198,7 @@ export interface InstanceSnapshot {
    * (`configure({ useOlderSettings: true })`) until the user picks or saves.
    */
   settingsNotice?: { kind: 'older_applied' | 'older_conflict'; message: string }
-  /** The agent's own telemetry for this entry; absent on daemons before Privacy. */
+  /** The entry's agent telemetry; absent on older daemons. */
   telemetry?: InstanceTelemetry
 }
 

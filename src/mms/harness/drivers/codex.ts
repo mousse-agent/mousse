@@ -10,6 +10,7 @@ import { codexEnvironment, CodexProviderService } from '../../providers/codex/Co
 import type { LoginSession } from '../../providers/LoginSession'
 import { CODEX_CAPABILITIES, CodexAdapter } from '../../run/adapters/codex/CodexAdapter'
 import { cliNames, ownedLaunchEnv, ownedUserArgs, ownedUserEnv } from '../env'
+import { telemetryOf } from '../telemetry'
 import { usageWindows } from '../../providers/codex/rateLimits'
 import { decodeInstanceConfig, type AuthReading, type DriverContext, type DriverRuntime, type HarnessDriver, type InstanceConfig, type RuntimeUsage } from '../driver'
 import { createManagedCodexRuntime } from '../codex/managedRuntime'
@@ -248,6 +249,9 @@ export function codexDriver(options: CodexDriverOptions): HarnessDriver {
     // Codex passes MCP image content to the model; the ChatGPT models it runs read images.
     mcpImageResults: true,
     mirrorsVendorFile: true,
+    // Codex's analytics switch, a config override on the command line (the managed runtime's wire
+    // test saw nothing sent with it). Never written to the home's config.toml.
+    telemetryOff: () => ({ args: ['-c', 'analytics.enabled=false'] }),
     decodeConfig: decodeCodexConfig,
     caps: () => CODEX_CAPS,
     updateCommand: (owner: InstallOwner) => {
@@ -333,6 +337,7 @@ export function codexDriver(options: CodexDriverOptions): HarnessDriver {
           // One environment for every process of such an instance: what it configures never moves its home or brings a credential back.
           env: () => environmentOf(live()),
           launch: (): StoredCliConfig => launchOf(live()),
+          telemetry: () => telemetryOf(live()),
           signedOut: () => live().signedOut(),
           saveLaunch: (patch) => live().saveLaunch(patch),
           ...(privateHome

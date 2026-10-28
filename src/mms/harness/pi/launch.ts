@@ -129,7 +129,7 @@ export function piLaunch(input: PiLaunchInput): PiLaunch {
   put(env, 'PI_SKIP_VERSION_CHECK', '1')
   if (host.versions.electron) put(env, 'ELECTRON_RUN_AS_NODE', '1')
   for (const [name, value] of Object.entries(PI_AWS_RETRY_ENV)) put(env, name, value)
-  // The telemetry switch (Privacy → Agent telemetry off: `PI_TELEMETRY=0`); `spawnHarness` sets it again.
+  // The entry's telemetry switch (Off: `PI_TELEMETRY=0`); `spawnHarness` sets it again.
   for (const [name, value] of Object.entries(input.env.enforced ?? {})) put(env, name, value)
 
   const args = [

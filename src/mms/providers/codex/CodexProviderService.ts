@@ -20,6 +20,7 @@ import type { LlmModelOption, LlmProviderOption } from '../../../shared/settings
 import type { ChatImageAttachment } from '../../../shared/types'
 import { mousseVersion } from '../../appVersion'
 import { killTree } from '../../harness/spawn'
+import { withEnforced } from '../../harness/env'
 import { atomicWriteJsonSync } from '../../data/AtomicFs'
 import type { UserQuestionService } from '../../orchestrator/UserQuestionService'
 import { codexMcpConfigOverrides } from '../../run/mcp/attachment'
@@ -208,6 +209,11 @@ export interface CodexServiceOptions {
    * Without it Codex runs as found, with none.
    */
   launch?: () => StoredCliConfig
+  /**
+   * The entry's telemetry switch (Settings → Providers): variables set last on every process, and
+   * `app-server` arguments added after every other. Read at each start.
+   */
+  telemetry?: () => { env?: Readonly<Record<string, string>>; args?: readonly string[] } | undefined
   /** Signed out in Mousse (the instance config's flag, the gateway's); default false. */
   signedOut?: () => boolean
   /** Saves an executable path entered at sign-in to the instance config (the gateway's `configure`). */
@@ -1603,8 +1609,9 @@ export class CodexProviderService {
       process = (this.dependencies.launch ?? spawnCodexAppServer)({
         binary: target.command,
         ...(target.args.length ? { entryArgs: target.args } : {}),
-        args: [...storedCliArgs(this.launchSettings()), ...(extras?.args ?? [])],
-        env: { ...this.environment(), ...extras?.env },
+        // The telemetry switch last: a later `-c` wins over the entry's own and Mousse's.
+        args: [...storedCliArgs(this.launchSettings()), ...(extras?.args ?? []), ...(this.options.telemetry?.()?.args ?? [])],
+        env: withEnforced({ ...this.environment(), ...extras?.env }, this.options.telemetry?.()?.env),
         cwd: this.dir
       })
     } catch (error) {
@@ -1655,7 +1662,7 @@ export class CodexProviderService {
   }
 
   private environment(): NodeJS.ProcessEnv {
-    return withUserEnv(this.options.env?.() ?? codexEnvironment(), storedCliEnv(this.launchSettings()))
+    return withEnforced(withUserEnv(this.options.env?.() ?? codexEnvironment(), storedCliEnv(this.launchSettings())), this.options.telemetry?.()?.env)
   }
 
   /** Something is using the process: a check, a model listing, or a turn. */

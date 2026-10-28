@@ -1,5 +1,5 @@
 import type { AuthState, CredentialKind, InstallOwner } from '../../shared/harness/status'
-import type { AddOptionMethod, CustomModel, HarnessCaps, HarnessDriverKind, InstanceConfigPatch, RemoveInstallResult, RuntimeFacts } from '../../shared/harness/types'
+import type { AddOptionMethod, CustomModel, HarnessCaps, HarnessDriverKind, InstanceConfigPatch, RemoveInstallResult, RuntimeFacts, TelemetrySetting } from '../../shared/harness/types'
 import type { NeutralTool } from '../../shared/harness/tools'
 import type { PermissionLimits } from '../../shared/permissionMode'
 import type { CliProviderConfigPatch, ConfiguredProvider, ProviderLoginResult, ProviderUsage } from '../../shared/providerAuth'
@@ -29,8 +29,16 @@ import type { VendorMirror } from './vendorMirror'
  */
 
 /** Instance settings kept in the instance's `config` object, decoded leniently. */
+/** What Mousse adds to an entry's processes to turn the agent's telemetry off. */
+export interface TelemetryLaunch {
+  env?: Readonly<Record<string, string>>
+  args?: readonly string[]
+}
+
 export interface InstanceConfig {
   displayName?: string
+  /** The entry's agent telemetry; absent = the default (`telemetryDefault`). */
+  telemetry?: TelemetrySetting
   /** `private`: a Mousse-owned home under `<profileHome>/harness/<instanceId>/home`. */
   home: 'default' | 'private'
   loginMethod?: string
@@ -392,12 +400,12 @@ export interface HarnessDriver {
    */
   readonly mirrorsVendorFile?: boolean
   /**
-   * The variables that turn the agent's own telemetry off (Settings → General → Privacy), as its
-   * vendor documents them. Set last, over the launch variables, on every process of an instance
-   * whose setup Mousse owns (`ownsSetup`) while the setting is `off`. Absent: the agent documents no
-   * switch, and Mousse sets nothing.
+   * What turns the agent's own telemetry off, as its vendor documents it: variables, and arguments
+   * for the processes that take launch arguments. Set last, over the entry's own launch settings, on
+   * every process Mousse starts for an entry whose telemetry is `off` (Settings → Providers). Absent:
+   * the agent documents no switch, and Mousse sets nothing. Never a change to the agent's files.
    */
-  telemetryEnv?(config: InstanceConfig): Readonly<Record<string, string>>
+  telemetryOff?(config: InstanceConfig): TelemetryLaunch
   /** The vendor's page on what the agent collects and how to turn it off. */
   readonly telemetryDocs?: string
   /**
@@ -492,6 +500,7 @@ export function decodeInstanceConfig(raw: Record<string, unknown> | undefined, o
     if (Object.keys(env).length) config.env = env
   }
   if (raw.signedOutInMousse === true) config.signedOutInMousse = true
+  if (raw.telemetry === 'off' || raw.telemetry === 'agent_setting') config.telemetry = raw.telemetry
   // Only an entry with a home of its own can be locked: the user's own setup is never.
   if (raw.profile === 'locked' && config.home === 'private') config.profile = 'locked'
   return config

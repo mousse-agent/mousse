@@ -99,7 +99,6 @@ function splitSettings(full: MousseSettings): {
       context: full.context,
       agentAccess: full.agentAccess,
       runs: full.runs,
-      privacy: full.privacy,
       integrations: full.integrations,
       title: full.title
     },
@@ -596,7 +595,6 @@ export class MousseConfigStore {
       partial.context ||
       partial.agentAccess ||
       partial.runs ||
-      partial.privacy ||
       partial.integrations ||
       partial.title
     ) {
@@ -604,7 +602,6 @@ export class MousseConfigStore {
         ...(partial.context ? { context: partial.context as MousseSettingsSection['context'] } : {}),
         ...(partial.agentAccess ? { agentAccess: partial.agentAccess as MousseSettingsSection['agentAccess'] } : {}),
         ...(partial.runs ? { runs: partial.runs as MousseSettingsSection['runs'] } : {}),
-        ...(partial.privacy ? { privacy: partial.privacy as MousseSettingsSection['privacy'] } : {}),
         ...(partial.profile ? { profile: partial.profile as MousseSettingsSection['profile'] } : {}),
         ...(partial.appearance
           ? { appearance: partial.appearance as MousseSettingsSection['appearance'] }

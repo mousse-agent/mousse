@@ -262,6 +262,7 @@ export function ProvidersSettings({ settings, refreshProviderData, updateSetting
         <ApiEditor
           snapshot={snapshot}
           removeHint={apiRemoveHint(snapshot.displayName, method, retired)}
+          onSaveTelemetry={async (telemetry) => applySnapshot(await instances.configure(snapshot.instanceId, { telemetry }))}
           onRemove={async () => {
             await instances.remove(snapshot.instanceId)
             removeSnapshot(snapshot.instanceId)

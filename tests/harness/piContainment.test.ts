@@ -123,7 +123,7 @@ describe('Pi containment evidence (real pinned Pi child)', () => {
     markers.push(join(scratch.dir, 'project-extension-loaded'), join(scratch.dir, 'user-extension-loaded'))
     plantDecoys(project, join(project, '.pi'), markers[0])
     plantDecoys(join(userHome, '.pi', 'agent'), join(userHome, '.pi', 'agent'), markers[1])
-    // As the gateway builds it with Privacy → Agent telemetry off (the default).
+    // As the gateway builds it for a Pi entry: Telemetry Off (the default).
     const env = instanceEnv({ instanceId: 'pi:mock', driver: 'pi', configRevision: 0, home, searchPath: [], base: cleanBase(userHome), enforced: { PI_TELEMETRY: '0' } })
     engine = new PiRpcEngine({
       instanceId: 'pi:mock', provider: 'mock', label: 'Mock', capabilities: PI_RPC_CAPS, env: () => env, stateDir,

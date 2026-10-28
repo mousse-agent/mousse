@@ -1,10 +1,10 @@
 import { useEffect, useState, type ReactNode } from 'react'
 import type { InstanceSnapshot, StatusDescription } from '../../../shared/harness/status'
-import type { ModelPrefsPatch, ProviderOperationEvent } from '../../../shared/harness/types'
+import type { ModelPrefsPatch, ProviderOperationEvent, TelemetrySetting } from '../../../shared/harness/types'
 import { ChevronRight } from '../../lib/icons'
 import { ProviderIcon } from '../../lib/providerIcons'
 import { Segmented, SettingsAdvanced, SettingsRow } from '../settings/SettingsRow'
-import { AccountRow, ArgsRow, BinaryRow, EnvRow, ExecutableRow, HomeRow, SetupRow, UpdateRow, type InstanceActions } from './CliSections'
+import { AccountRow, ArgsRow, BinaryRow, EnvRow, ExecutableRow, HomeRow, SetupRow, TelemetryRow, UpdateRow, type InstanceActions } from './CliSections'
 import { ProviderModelsSection, modelsSummary } from './ProviderModelsSection'
 import { EditorSection, RemoveButton, useAsyncAction } from './parts'
 import { DownloadedFilesRow, RegistrySourceRow, RemoveWithFilesButton, type RemoveOptions } from './RegistryAgents'
@@ -149,6 +149,7 @@ export function AgentEditor({
         <SetupRow snapshot={snapshot} status={status} operation={operation?.kind === 'update' ? undefined : operation} actions={actions} />
         {source && <RegistrySourceRow snapshot={snapshot} source={source} actions={actions} />}
         <AccountRow snapshot={snapshot} actions={actions} />
+        <TelemetryRow snapshot={snapshot} onSave={(telemetry) => actions.configure({ telemetry })} />
       </EditorSection>
       <ModelsEditorSection snapshot={snapshot} onSave={onSaveModelPrefs} onRefresh={onRefreshModels} />
       <SettingsAdvanced>
@@ -232,7 +233,8 @@ export function ApiEditor({
   removeHint,
   onRemove,
   onSaveModelPrefs,
-  onRefreshModels
+  onRefreshModels,
+  onSaveTelemetry
 }: {
   snapshot: InstanceSnapshot
   setup: ReactNode
@@ -243,6 +245,8 @@ export function ApiEditor({
   onRemove: () => Promise<void>
   onSaveModelPrefs: (patch: ModelPrefsPatch) => Promise<void>
   onRefreshModels: () => Promise<void>
+  /** Saves the entry's telemetry setting; without it the row is not shown. */
+  onSaveTelemetry?: (telemetry: TelemetrySetting) => Promise<void>
 }) {
   return (
     <>
@@ -251,6 +255,7 @@ export function ApiEditor({
       <EditorSection title="Setup">
         {setup}
         {move}
+        {onSaveTelemetry && <TelemetryRow snapshot={snapshot} onSave={onSaveTelemetry} />}
       </EditorSection>
       <ModelsEditorSection snapshot={snapshot} onSave={onSaveModelPrefs} onRefresh={onRefreshModels} />
     </>

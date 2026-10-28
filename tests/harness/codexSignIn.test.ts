@@ -1382,7 +1382,8 @@ describe('changing the settings of a live entry', () => {
     await w.harness.instances.configure(WORK, { env: {}, args: [] })
     await w.harness.instances.recheck(WORK)
     expect(last().env.KEEP_ME).toBeUndefined()
-    expect(last().args).toEqual([])
+    // Only the telemetry switch: an entry with its own home is Off by default.
+    expect(last().args).toEqual(['-c', 'analytics.enabled=false'])
     const signIn = await startSignIn(w, WORK)
     const terminal = await signIn.terminal()
     expect(terminal.env.KEEP_ME).toBeUndefined()
@@ -1440,7 +1441,7 @@ describe('launch arguments that choose where an account lives', () => {
     writeSignIn(w.homeOf(WORK), 'acct-work')
     const snapshot = await w.harness.instances.recheck(WORK)
     const launched = w.servers.launches.at(-1)!
-    expect(launched.args).toEqual(['-c', 'model="gpt-x"', '--verbose'])
+    expect(launched.args).toEqual(['-c', 'model="gpt-x"', '--verbose', '-c', 'analytics.enabled=false'])
     expect(launched.env.CODEX_SQLITE_HOME).toBe(w.homeOf(WORK))
     expect(snapshot.auth.message).toContain('Not used: the launch arguments that set sqlite_home, log_dir.')
     const patched = await w.harness.instances.configure(WORK, { args: ['-c', 'model="gpt-y"'] })

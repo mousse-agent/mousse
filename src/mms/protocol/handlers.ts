@@ -2544,10 +2544,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     case 'settings.set': {
       const p = isObject(params) ? params : {}
       const partial = asSettingsPartial(p.partial) as MousseSettingsUpdate
-      const telemetryBefore = ctx.mms.settings.get().privacy.agentTelemetry
       const settings = ctx.mms.settings.set(partial)
-      // The agents Mousse sets up start their next process with the new telemetry variables.
-      if (settings.privacy.agentTelemetry !== telemetryBefore) ctx.mms.harness?.privacyChanged()
       // Fan-out so all clients observe the same daemon-owned settings immediately.
       ctx.emitEvent?.('settings.changed', { settings })
       return { settings }
