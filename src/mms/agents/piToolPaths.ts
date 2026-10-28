@@ -4,7 +4,7 @@ import { isAbsolute, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 /**
- * A path argument as Pi's file tools resolve it (`resolveToCwd` in the pinned 0.85.1,
+ * A path argument as Pi's file tools resolve it (`resolveToCwd` in the pinned 1.4.0,
  * `utils/paths.js`): Unicode spaces become spaces, a leading `@` is dropped, Git Bash, MSYS,
  * Cygwin and WSL drive forms become Windows paths on Windows, `~` is the home directory and
  * `file://` URLs are file paths. The gate checks this absolute path and hands it to Pi in place of

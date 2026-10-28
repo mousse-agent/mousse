@@ -60,10 +60,11 @@ const AMBIENT_PROVIDERS: Record<string, AmbientProviderInfo> = {
 }
 
 /**
- * Subscription sign-ins Mousse no longer offers: Claude's belongs to the Claude Code agent. The
- * retired providers (`PI_RETIRED`) offer no sign-in at all.
+ * Subscription sign-ins Mousse does not offer: Claude's belongs to the Claude Code agent, and
+ * ChatGPT's (pi-ai's Sign in with ChatGPT on `openai`) to the Codex agent. The retired providers
+ * (`PI_RETIRED`) offer no sign-in at all.
  */
-const RETIRED_OAUTH: ReadonlySet<string> = new Set(['anthropic'])
+const RETIRED_OAUTH: ReadonlySet<string> = new Set(['anthropic', 'openai'])
 
 /**
  * A provider a Mousse update retired (`PI_RETIRED`): its bundled catalog for display, and no auth.
@@ -423,6 +424,9 @@ export class ProviderAuthService {
   async runOAuthLogin(session: LoginSession, providerId: string): Promise<ProviderLoginResult> {
     if (providerId === 'anthropic') {
       return { success: false, error: 'Claude subscription sign-in belongs to the official Claude Code agent, not the Anthropic Messages provider.' }
+    }
+    if (RETIRED_OAUTH.has(providerId)) {
+      return { success: false, error: 'Sign in with ChatGPT belongs to the Codex agent, not the OpenAI API provider.' }
     }
     const retired = this.retiredLoginError(providerId)
     if (retired) return { success: false, error: retired }

@@ -44,15 +44,15 @@ import {
 } from './protocol'
 
 /**
- * Mousse's extension for Pi's agent: the only extension a Mousse-started Pi loads (`-e`), besides
- * Pi's hidden built-in llama.cpp one. It is bundled on its own into
+ * Mousse's extension for Pi's agent: the only extension a Mousse-started Pi loads (`-e`; since Pi
+ * 0.99 `--no-extensions` also drops Pi's built-in ones). It is bundled on its own into
  * `out/pi-runtime/mousse-extension.mjs` and imports only Node built-ins and the modules Pi provides
  * to extensions, which resolve to the runtime's own copies.
  *
  * - **Providers (PR 2 §4).** The factory registers every pi-ai built-in provider and the instance's
  *   provider (with Mousse's catalogue and key) in the native form, each with its stream functions
  *   guarded (`guard.ts`), and wraps the global api registry too. At every `session_start` it
- *   guards whatever else is registered (Pi's llama.cpp provider), then reports the guarded set to
+ *   guards whatever else is registered (none today), then reports the guarded set to
  *   `/pi/ready`. A registration that fails after bind is reported to `/pi/fatal` and rethrown.
  * - **Turns.** `before_agent_start` fetches the turn from `/pi/turn`: Mousse's tools (registered
  *   per turn, delegation tools sequential), the active built-ins, the session instructions.
@@ -269,8 +269,7 @@ export default async function mousseExtension(pi: ExtensionAPI): Promise<void> {
     }
   }
 
-  // The global api registry, for any composition that falls through to it (and Pi's llama.cpp
-  // provider, which streams through it).
+  // The global api registry, for any composition that falls through to it.
   registerBuiltInApiProviders()
   for (const entry of getApiProviders()) registerApiProvider(guardStreams({ api: entry.api, stream: entry.stream, streamSimple: entry.streamSimple }, undefined, observer, gate) as never)
 
@@ -301,7 +300,7 @@ export default async function mousseExtension(pi: ExtensionAPI): Promise<void> {
   }
 
   pi.on('session_start', async (event, ctx: ExtensionContext) => {
-    // Whatever another extension registered (Pi's llama.cpp provider) is guarded too.
+    // Whatever another extension registered is guarded too.
     const registry = ctx.modelRegistry
     const ids = new Set<string>([...builtins.keys(), ...registry.getRegisteredProviderIds(), ...registry.getAll().map((model) => model.provider)])
     for (const id of ids) {

@@ -3,7 +3,7 @@ import { pathToFileURL } from 'node:url'
 import { describe, expect, it } from 'vitest'
 import { piNormalizePath, piResolvePath, piResolveReadPath } from '../../src/mms/harness/pi/paths'
 
-// The gate resolves a path argument exactly as Pi's file tools do (`resolveToCwd`, pinned 0.85.1).
+// The gate resolves a path argument exactly as Pi's file tools do (`resolveToCwd`, pinned 1.4.0).
 
 describe('Pi path resolution', () => {
   const cwd = resolve('/work/project')

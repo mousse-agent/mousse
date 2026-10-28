@@ -29,7 +29,7 @@ const METHODS: Record<string, Method> = {
   'ant-ling': 'key',
   // Key only: a Claude subscription never runs on Pi.
   anthropic: 'key',
-  'azure-openai-responses': 'key',
+  azure: 'key',
   baseten: 'key',
   cerebras: 'key',
   'cloudflare-ai-gateway': 'key+env',
@@ -43,12 +43,14 @@ const METHODS: Record<string, Method> = {
   groq: 'key',
   huggingface: 'key',
   'kimi-coding': 'oauth',
+  meta: 'oauth',
   minimax: 'key',
   'minimax-cn': 'key',
   mistral: 'key',
   moonshotai: 'key',
   'moonshotai-cn': 'key',
   nvidia: 'key',
+  // Key only: Sign in with ChatGPT belongs to the Codex agent.
   openai: 'key',
   'openai-codex': 'retired',
   opencode: 'key',
@@ -59,6 +61,7 @@ const METHODS: Record<string, Method> = {
   'qwen-token-plan-individual': 'key',
   radius: 'oauth',
   together: 'key',
+  typesafe: 'key',
   'vercel-ai-gateway': 'key',
   xai: 'oauth',
   xiaomi: 'key',
@@ -94,7 +97,7 @@ describe('Pi connection methods', () => {
   it('keeps pi-ai sign-in for the OAuth rows and only for them', () => {
     const providers = new Map(builtinProviders().map((provider) => [provider.id, provider]))
     for (const [id, method] of Object.entries(METHODS)) {
-      if (method === 'retired' || id === 'anthropic') continue
+      if (method === 'retired' || id === 'anthropic' || id === 'openai') continue
       expect(Boolean(providers.get(id)?.auth.oauth), id).toBe(method === 'oauth')
     }
   })

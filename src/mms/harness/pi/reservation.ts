@@ -1,4 +1,4 @@
-import type { Api, Context, Model } from '@earendil-works/pi-ai'
+import type { Api, Model, TranscriptContext } from '@earendil-works/pi-ai'
 
 /**
  * Spend reservation arithmetic for Pi (PR 4 §5b, `spendLimits: 'reserved'`). Shared by Mousse's
@@ -6,13 +6,13 @@ import type { Api, Context, Model } from '@earendil-works/pi-ai'
  * from the run's ledger. Pure, type-only imports: it is bundled into the extension.
  *
  * The wire cap is the output cap a request carries after every pi-ai adjustment, mirrored from the
- * pinned 0.85.1 request builders: the context clamp (`clampMaxTokensToContext`), the thinking budget
+ * pinned 1.4.0 request builders: the context clamp (`clampMaxTokensToContext`), the thinking budget
  * added on budget-thinking Anthropic and Bedrock Claude models (`adjustMaxTokensForThinking`), and
  * the 16-token floor of `openai-responses`. A drift in the mirror cannot overspend: the extension's
  * final payload check refuses any wire cap above the reservation before the request is sent.
  *
  * Re-check on every Pi upgrade (PR 4 §13): `MIN_ANSWER_TOKENS` (exported by `simple-options.js`,
- * and written as a literal 1024 in `anthropic-messages.js` and `bedrock-converse-stream.js:409`),
+ * and written as a literal 1024 in `anthropic-messages.js:777` and `bedrock-converse-stream.js:429`),
  * `CONTEXT_SAFETY_TOKENS`, the default thinking budgets, the estimator, the Bedrock adaptive-model
  * names, `supportsMaxOutputTokens`, each API's hook path (`hookCap`) and candidate count
  * (`hookCandidates`), and `calculateCost` (tiers, one-hour cache writes) and the Responses service
@@ -101,8 +101,23 @@ export function addsThinkingBudget(model: ReservableModel, reasoning: PiReasonin
 
 // -- pi-ai's context estimate (`utils/estimate.js`), mirrored for the context clamp ---------------
 
+/** What a request's context is: pi-ai's normalized transcript, whose system messages carry the prompt and tools. */
+export type PlanContext = Pick<TranscriptContext, 'messages'>
+
+/** `utils/estimate.js` `CHARS_PER_TOKEN`. */
+const CHARS_PER_TOKEN = 3.5
+
 type Block = { type?: string; text?: string; thinking?: string; name?: string; arguments?: unknown }
-type EstimatedMessage = { role?: string; content?: string | Block[]; usage?: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number; totalTokens?: number }; stopReason?: string; timestamp?: number; addedToolNames?: string[] }
+type EstimatedMessage = {
+  role?: string
+  content?: string | Block[]
+  sections?: Record<string, string | null>
+  toolsAdded?: unknown[]
+  toolsRemoved?: unknown[]
+  usage?: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number; totalTokens?: number }
+  stopReason?: string
+  timestamp?: number
+}
 
 function jsonLength(value: unknown): number {
   try {
@@ -112,6 +127,10 @@ function jsonLength(value: unknown): number {
   }
 }
 
+function textTokens(chars: number): number {
+  return Math.ceil(chars / CHARS_PER_TOKEN)
+}
+
 function contentChars(content: string | Block[] | undefined): number {
   if (typeof content === 'string') return content.length
   let chars = 0
@@ -119,15 +138,27 @@ function contentChars(content: string | Block[] | undefined): number {
   return chars
 }
 
+/** `utils/text.js` `getSystemMessageText`: the content's text, then each section, joined by blank lines. */
+function systemText(message: EstimatedMessage): string {
+  const content = typeof message.content === 'string' ? message.content : (message.content ?? []).filter((block) => block.type === 'text').map((block) => block.text ?? '').join('\n')
+  const parts = [content, ...Object.values(message.sections ?? {}).filter((text): text is string => text !== null)]
+  return parts.filter((part) => part.length > 0).join('\n\n')
+}
+
+function toolsTokens(tools: unknown[] | undefined): number {
+  return tools && tools.length ? textTokens(jsonLength(tools)) : 0
+}
+
 function messageTokens(message: EstimatedMessage): number {
-  if (message.role === 'user' || message.role === 'toolResult') return Math.ceil(contentChars(message.content) / 4)
+  if (message.role === 'system') return textTokens(systemText(message).length) + toolsTokens(message.toolsAdded) + toolsTokens(message.toolsRemoved)
+  if (message.role === 'user' || message.role === 'toolResult') return textTokens(contentChars(message.content))
   let chars = 0
   for (const block of (message.content as Block[] | undefined) ?? []) {
     if (block.type === 'text') chars += (block.text ?? '').length
     else if (block.type === 'thinking') chars += (block.thinking ?? '').length
     else chars += (block.name ?? '').length + jsonLength(block.arguments)
   }
-  return Math.ceil(chars / 4)
+  return textTokens(chars)
 }
 
 function usageTokens(usage: EstimatedMessage['usage']): number {
@@ -135,7 +166,7 @@ function usageTokens(usage: EstimatedMessage['usage']): number {
 }
 
 /** `estimateContextTokens(context).tokens`. */
-export function estimateContextTokens(context: Pick<Context, 'systemPrompt' | 'messages' | 'tools'>): number {
+export function estimateContextTokens(context: PlanContext): number {
   const messages = context.messages as unknown as EstimatedMessage[]
   let usageIndex: number | undefined
   let latest = Number.NEGATIVE_INFINITY
@@ -145,16 +176,10 @@ export function estimateContextTokens(context: Pick<Context, 'systemPrompt' | 'm
       usageIndex = index
     latest = Math.max(latest, message.timestamp ?? 0)
   }
-  const toolsTokens = (tools: unknown[] | undefined) => (tools && tools.length ? Math.ceil(jsonLength(tools) / 4) : 0)
-  if (usageIndex !== undefined) {
-    let tokens = usageTokens(messages[usageIndex].usage)
-    for (const message of messages.slice(usageIndex + 1)) tokens += messageTokens(message)
-    const added = new Set(messages.slice(usageIndex + 1).filter((message) => message.role === 'toolResult').flatMap((message) => message.addedToolNames ?? []))
-    return tokens + toolsTokens(context.tools?.filter((tool) => added.has(tool.name)))
-  }
-  let tokens = 0
-  for (const message of messages) tokens += messageTokens(message)
-  return tokens + (context.systemPrompt ? Math.ceil(context.systemPrompt.length / 4) : 0) + toolsTokens(context.tools)
+  const from = usageIndex === undefined ? 0 : usageIndex + 1
+  let tokens = usageIndex === undefined ? 0 : usageTokens(messages[usageIndex].usage)
+  for (const message of messages.slice(from)) tokens += messageTokens(message)
+  return tokens
 }
 
 function clampToContext(model: ReservableModel, contextTokens: number, maxTokens: number): number {
@@ -176,7 +201,7 @@ export interface WirePlan {
  * The wire cap of a `streamSimple` request on `model` with `options.maxTokens = maxTokens`
  * (undefined: the model's own cap) and `options.reasoning = reasoning`.
  */
-export function wirePlan(model: ReservableModel, context: Pick<Context, 'systemPrompt' | 'messages' | 'tools'>, maxTokens: number | undefined, reasoning: PiReasoning | undefined, budgets?: ThinkingBudgets): WirePlan {
+export function wirePlan(model: ReservableModel, context: PlanContext, maxTokens: number | undefined, reasoning: PiReasoning | undefined, budgets?: ThinkingBudgets): WirePlan {
   const contextTokens = estimateContextTokens(context)
   const base = clampToContext(model, contextTokens, maxTokens ?? model.maxTokens)
   if (addsThinkingBudget(model, reasoning)) {
@@ -203,13 +228,13 @@ export function sizedMaxTokens(cap: number, plan: Pick<WirePlan, 'thinkingBudget
 }
 
 /**
- * An upper bound of the request's input tokens: the UTF-8 bytes of its system prompt, messages and
- * tool schemas (a byte-level tokenizer emits at most one token per byte), plus a ceiling per image
- * and a fixed overhead. Only the image content blocks of user and tool-result messages are counted
+ * An upper bound of the request's input tokens: the UTF-8 bytes of its messages, the system
+ * messages' prompt and tool schemas included (a byte-level tokenizer emits at most one token per
+ * byte), plus a ceiling per image and a fixed overhead. Only the image content blocks of user and tool-result messages are counted
  * by the ceiling instead of their bytes; anything else shaped like one (a tool call's arguments, a
  * schema value) is counted in full. Undefined when the API has no image ceiling.
  */
-export function inputBound(context: Pick<Context, 'systemPrompt' | 'messages' | 'tools'>, api: string): number | undefined {
+export function inputBound(context: PlanContext, api: string): number | undefined {
   const ceiling = IMAGE_TOKEN_CEILING[api]
   if (ceiling === undefined) return undefined
   let images = 0
@@ -224,7 +249,7 @@ export function inputBound(context: Pick<Context, 'systemPrompt' | 'messages' | 
       })
     }
   })
-  const text = JSON.stringify([context.systemPrompt ?? '', messages, context.tools ?? []])
+  const text = JSON.stringify(messages)
   return Buffer.byteLength(text, 'utf8') + images * ceiling + INPUT_OVERHEAD_TOKENS
 }
 
@@ -239,10 +264,13 @@ export function hookCandidates(api: string, params: unknown): number {
   return count === undefined || count === null ? 1 : typeof count === 'number' && Number.isFinite(count) ? count : Number.POSITIVE_INFINITY
 }
 
-/** Whether a model's own sampling defaults ask for more than one completion per request. */
-export function multipleCandidates(model: { samplingParams?: Record<string, unknown> }): boolean {
-  const params = model.samplingParams ?? {}
-  return [params.n, params.candidateCount, params.candidate_count].some((count) => count !== undefined && count !== null && count !== 1)
+/**
+ * Whether a model's own sampling defaults ask for more than one completion per request, at any
+ * thinking level (`samplingParamsByThinkingLevel` is merged over `samplingParams`).
+ */
+export function multipleCandidates(model: { samplingParams?: Record<string, unknown>; samplingParamsByThinkingLevel?: Record<string, Record<string, unknown> | undefined> }): boolean {
+  return [model.samplingParams, ...Object.values(model.samplingParamsByThinkingLevel ?? {})].some((params) =>
+    [params?.n, params?.candidateCount, params?.candidate_count].some((count) => count !== undefined && count !== null && count !== 1))
 }
 
 /** A model price as pi-ai holds it (USD per million tokens), with its request-wide tiers. */

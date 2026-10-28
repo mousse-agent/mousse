@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
-import type { Api, Context, Model, SimpleStreamOptions } from '@earendil-works/pi-ai'
+import { normalizeContext, type Api, type Context, type Model, type SimpleStreamOptions, type TranscriptContext } from '@earendil-works/pi-ai'
 import { streamSimple as anthropicStream } from '@earendil-works/pi-ai/api/anthropic-messages'
 import { streamSimple as bedrockStream } from '@earendil-works/pi-ai/api/bedrock-converse-stream'
 import { streamSimple as googleStream } from '@earendil-works/pi-ai/api/google-generative-ai'
@@ -25,8 +25,9 @@ import {
 // PR 4 §16 `wireCap.test.ts`: the wire-cap mirror against pinned pi-ai's own request builders. Each
 // API's real `streamSimple` builds its request and hands it to `onPayload`, which records the
 // parameters and throws: the stream fails before any HTTP call, so nothing leaves the machine.
+// Contexts are normalized transcripts (`normalizeContext`), as Pi hands them to every provider.
 
-const STREAMS: Record<string, (model: Model<Api>, context: Context, options: SimpleStreamOptions) => AsyncIterable<unknown> & { result(): Promise<unknown> }> = {
+const STREAMS: Record<string, (model: Model<Api>, context: TranscriptContext, options: SimpleStreamOptions) => AsyncIterable<unknown> & { result(): Promise<unknown> }> = {
   'anthropic-messages': anthropicStream as never,
   'bedrock-converse-stream': bedrockStream as never,
   'google-generative-ai': googleStream as never,
@@ -56,19 +57,19 @@ const MODELS: Model<Api>[] = [
 
 const EFFORTS: Array<PiReasoning | undefined> = [undefined, 'minimal', 'low', 'medium', 'high', 'xhigh']
 
-function context(chars = 2_000): Context {
-  return {
+function context(chars = 2_000): TranscriptContext {
+  return normalizeContext({
     systemPrompt: 'You are terse.',
     messages: [
       { role: 'user', content: 'x'.repeat(chars), timestamp: 1 },
       { role: 'user', content: [{ type: 'text', text: 'and this image' }, { type: 'image', data: 'AAAA', mimeType: 'image/png' }], timestamp: 2 }
     ],
     tools: [{ name: 'read', description: 'Read a file', parameters: { type: 'object', properties: { path: { type: 'string' } } } as never }]
-  }
+  })
 }
 
 /** What pi-ai's own `streamSimple` hands `onPayload`, with nothing sent. */
-async function piPayload(target: Model<Api>, ctx: Context, maxTokens: number | undefined, reasoning: PiReasoning | undefined, thinkingBudgets?: ThinkingBudgets): Promise<unknown> {
+async function piPayload(target: Model<Api>, ctx: TranscriptContext, maxTokens: number | undefined, reasoning: PiReasoning | undefined, thinkingBudgets?: ThinkingBudgets): Promise<unknown> {
   let seen: unknown
   const stream = STREAMS[target.api](target, ctx, {
     apiKey: 'fake-key',
@@ -86,18 +87,21 @@ async function piPayload(target: Model<Api>, ctx: Context, maxTokens: number | u
   return seen
 }
 
-describe('the wire-cap mirror (pinned pi-ai 0.85.1)', () => {
+describe('the wire-cap mirror (pinned pi-ai 1.4.0)', () => {
   it('uses pi-ai’s answer-room floor and estimate', () => {
     expect(MIN_ANSWER_TOKENS).toBe(PI_MIN_ANSWER_TOKENS)
-    for (const ctx of [context(10), context(90_000), { messages: [] }, {
+    const used: Context = {
       systemPrompt: 'sys',
       messages: [
         { role: 'user', content: 'hello', timestamp: 1 },
         { role: 'assistant', content: [{ type: 'text', text: 'hi' }, { type: 'toolCall', id: 'c', name: 'read', arguments: { path: 'a' } }], usage: { input: 900, output: 40, cacheRead: 0, cacheWrite: 0, totalTokens: 940 }, stopReason: 'toolUse', timestamp: 2 },
-        { role: 'toolResult', toolCallId: 'c', toolName: 'read', content: [{ type: 'text', text: 'file body'.repeat(50) }], addedToolNames: ['read'], timestamp: 3 }
-      ],
-      tools: [{ name: 'read', description: 'Read', parameters: {} }]
-    }] as Context[])
+        { role: 'toolResult', toolCallId: 'c', toolName: 'read', content: [{ type: 'text', text: 'file body'.repeat(50) }], timestamp: 3 },
+        // A later system message: a section patch and a tool added mid-conversation.
+        { role: 'system', content: [{ type: 'text', text: 'more' }], sections: { rules: 'be brief', old: null }, toolsAdded: [{ name: 'grep', description: 'Grep', parameters: {} }], toolsRemoved: [{ name: 'ls' }], timestamp: 4 }
+      ] as never,
+      tools: [{ name: 'read', description: 'Read', parameters: {} as never }]
+    }
+    for (const ctx of [context(10), context(90_000), normalizeContext({ messages: [] }), normalizeContext(used)])
       expect(estimateContextTokens(ctx)).toBe(piEstimate(ctx).tokens)
   })
 
@@ -142,11 +146,10 @@ describe('the wire-cap mirror (pinned pi-ai 0.85.1)', () => {
     }
   })
 
-  it.each(MODELS.map((entry) => [entry.api, entry.id, entry] as const))('%s %s: a branch summary’s request (cap 4096, no effort) and a compaction’s (cap 13107, the session’s effort) are sized like any other', async (_api, _id, target) => {
-    // Pi's branch summary asks `min(4096, model.maxTokens)` with no reasoning; a compaction asks
-    // `0.8 × reserveTokens` with the session's thinking level (`branch-summarization.js:219`,
-    // `compaction.js:441-489`).
-    for (const [maxTokens, reasoning] of [[4_096, undefined], [13_107, 'high'], [13_107, undefined]] as Array<[number, PiReasoning | undefined]>) {
+  it.each(MODELS.map((entry) => [entry.api, entry.id, entry] as const))('%s %s: a summary’s request (no cap of its own, with or without the session’s effort) is sized like any other', async (_api, _id, target) => {
+    // Since Pi 1.4 compaction and branch summaries ask with the model's own output limit (no
+    // `maxTokens`) and the session's thinking level (`compaction.js:463-487`).
+    for (const [maxTokens, reasoning] of [[undefined, undefined], [undefined, 'high']] as Array<[number | undefined, PiReasoning | undefined]>) {
       const ctx = context()
       const natural = wirePlan(target, ctx, maxTokens, reasoning)
       const cap = Math.max(grantFloor(natural.thinkingBudget), Math.floor(natural.wireCap! / 2))
@@ -159,8 +162,8 @@ describe('the wire-cap mirror (pinned pi-ai 0.85.1)', () => {
 
   it('a context near full clamps the wire cap: below the effort’s budget plus the answer room, pi-ai would cut the budget', async () => {
     const target = model('anthropic-messages', { id: 'claude-sonnet-4-5', contextWindow: 40_000 })
-    // ~30k tokens of context: 40k − 30k − 4096 leaves under 16384 + 1024 for `high`.
-    const ctx = context(120_000)
+    // ~30k tokens of context (3.5 characters a token): 40k − 30k − 4096 leaves under 16384 + 1024 for `high`.
+    const ctx = context(105_000)
     const plan = wirePlan(target, ctx, undefined, 'high')
     expect(plan.wireCap).toBeLessThan(grantFloor(plan.thinkingBudget))
     expect(plan.sentThinking).toBeLessThan(plan.thinkingBudget)

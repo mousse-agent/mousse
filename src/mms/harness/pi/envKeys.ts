@@ -1,6 +1,6 @@
 /**
  * The credential variables Pi reads from its environment, by provider: pi-ai's `getApiKeyEnvVars`
- * table in the pinned 0.85.1 (`pi-ai/dist/env-api-keys.js`). A test diffs this copy against the
+ * table in the pinned 1.4.0 (`pi-ai/dist/env-api-keys.js`). A test diffs this copy against the
  * table in the bundled runtime, so an upgrade that adds a key fails until it is listed here.
  *
  * Ambient cloud credentials (`AWS_*`, Google ADC) are not keys and are not listed: they stay in
@@ -14,7 +14,7 @@ export const PI_PROVIDER_ENV_KEYS: Readonly<Record<string, readonly string[]>> =
   'qwen-token-plan-cn': ['QWEN_TOKEN_PLAN_CN_API_KEY'],
   'qwen-token-plan-individual': ['QWEN_TOKEN_PLAN_API_KEY'],
   openai: ['OPENAI_API_KEY'],
-  'azure-openai-responses': ['AZURE_OPENAI_API_KEY'],
+  azure: ['AZURE_OPENAI_API_KEY'],
   nvidia: ['NVIDIA_API_KEY'],
   deepseek: ['DEEPSEEK_API_KEY'],
   google: ['GEMINI_API_KEY'],
@@ -39,6 +39,8 @@ export const PI_PROVIDER_ENV_KEYS: Readonly<Record<string, readonly string[]>> =
   opencode: ['OPENCODE_API_KEY'],
   'opencode-go': ['OPENCODE_API_KEY'],
   'kimi-coding': ['KIMI_API_KEY'],
+  meta: ['META_API_KEY'],
+  typesafe: ['TYPESAFE_API_KEY'],
   'cloudflare-workers-ai': ['CLOUDFLARE_API_KEY'],
   'cloudflare-ai-gateway': ['CLOUDFLARE_API_KEY'],
   xiaomi: ['XIAOMI_API_KEY'],
@@ -51,11 +53,18 @@ export const PI_PROVIDER_ENV_KEYS: Readonly<Record<string, readonly string[]>> =
 export const ANTHROPIC_OAUTH_ENV_KEYS: readonly string[] = Object.freeze(['ANTHROPIC_OAUTH_TOKEN', 'ANTHROPIC_AUTH_TOKEN', 'CLAUDE_CODE_OAUTH_TOKEN'])
 
 /**
+ * Anthropic workload identity federation (`anthropic-messages.js` `getAnthropicFederation`): with no
+ * key, pi-ai signs Anthropic requests in with these. Never passed to Pi; the request guard refuses
+ * an Anthropic request without an API key anyway.
+ */
+export const ANTHROPIC_FEDERATION_ENV_KEYS: readonly string[] = Object.freeze(['ANTHROPIC_FEDERATION_RULE_ID', 'ANTHROPIC_ORGANIZATION_ID', 'ANTHROPIC_SERVICE_ACCOUNT_ID', 'ANTHROPIC_IDENTITY_TOKEN_FILE', 'ANTHROPIC_WORKSPACE_ID'])
+
+/**
  * Every credential variable a Pi child would read: none is inherited from Mousse's environment.
  * The launcher re-adds only the instance's own provider key (`piOwnProviderKeys`).
  */
 export const PI_ENV_KEYS: readonly string[] = Object.freeze([
-  ...new Set([...Object.values(PI_PROVIDER_ENV_KEYS).flat(), ...ANTHROPIC_OAUTH_ENV_KEYS])
+  ...new Set([...Object.values(PI_PROVIDER_ENV_KEYS).flat(), ...ANTHROPIC_OAUTH_ENV_KEYS, ...ANTHROPIC_FEDERATION_ENV_KEYS])
 ])
 
 /** The variables a `pi:<provider>` instance may take from the user's environment: its own key, never an Anthropic subscription token. */

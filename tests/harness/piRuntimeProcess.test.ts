@@ -154,11 +154,11 @@ describe('Pi runtime process', () => {
     expect(new Set(models.map((model) => model.provider))).toEqual(new Set(['openrouter']))
     // A failed extension load is only a startup warning; the marker command proves it loaded.
     const { commands } = await started.client.send({ type: 'get_commands' })
-    // Besides it, Pi 0.85.1 always loads its hidden built-in llama.cpp extension (a `llama` provider
-    // and command), even with --no-extensions. Pinned so a new built-in fails here; the RPC engine
-    // must guard its provider too. No skill or prompt template loads.
+    // Nothing else: since Pi 0.99 --no-extensions also drops the built-in extensions (llama.cpp,
+    // MCP, codemode, tool search). Pinned so a new built-in that loads anyway fails here; the RPC
+    // engine would have to guard its provider too. No skill or prompt template loads.
     expect(commands.map((command) => ({ name: command.name, source: command.source, path: command.sourceInfo.path })))
-      .toEqual([{ name: 'mousse-extension', source: 'extension', path: extension }, { name: 'llama', source: 'extension', path: '<inline:llama.cpp>' }])
+      .toEqual([{ name: 'mousse-extension', source: 'extension', path: extension }])
 
     killTree(started.child)
     const exit = await started.client.exited

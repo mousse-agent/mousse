@@ -138,7 +138,10 @@ describe('Pi RPC sessions with the real Pi child', () => {
 
     const earlier = await engine.forkSession(first.providerRef, 1, { threadId: 'fork-first' })
     expect(earlier?.sessionId).toBeTruthy()
-    expect(sessionMessages(stateDir, earlier!.sessionId!)).toEqual(sessionMessages(stateDir, source.sessionId!).slice(0, 2))
+    // Pi stores the system prompt as the session's first message, then the first turn's question and answer.
+    const sourceMessages = sessionMessages(stateDir, source.sessionId!) as Array<{ role: string }>
+    expect(sourceMessages.map((message) => message.role)).toEqual(['system', 'user', 'assistant', 'user', 'assistant'])
+    expect(sessionMessages(stateDir, earlier!.sessionId!)).toEqual(sourceMessages.slice(0, 3))
 
     // Each fork runs in its own worktree; its first turn resumes the branch, nothing is handed over.
     const forkProject = join(scratch, 'fork-worktree')

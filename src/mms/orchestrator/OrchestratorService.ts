@@ -7297,7 +7297,7 @@ export class OrchestratorService extends EventEmitter {
   }
 
   private commitActiveNativeMessages(
-    activeMessages: import('@earendil-works/pi-ai').Message[],
+    activeMessages: Parameters<typeof commitNativeMessages>[1],
     checkpoint?: NativeMessageCheckpoint
   ): void {
     this.nativeContext = commitNativeMessages(this.nativeContext, activeMessages, checkpoint)

@@ -18,7 +18,7 @@ describe('Pi retries (configured, never Mousse’s own)', () => {
     expect(PI_RETRY_SETTINGS).toEqual({ enabled: true, maxRetries: 5, baseDelayMs: 1600, provider: { maxRetries: 0 } })
     expect(worstCaseBackoffMs()).toBe(49_600)
     expect(worstCaseBackoffMs()).toBeLessThanOrEqual(50_000)
-    expect(piSettings()).toMatchObject({ defaultProjectTrust: 'never', retry: PI_RETRY_SETTINGS, compaction: { enabled: true } })
+    expect(piSettings()).toMatchObject({ defaultProjectTrust: 'never', retry: PI_RETRY_SETTINGS, compaction: { enabled: true }, cacheWarming: 'off' })
   })
 
   it('Pi does not retry any text Mousse raises on the request path, and none has a digit', () => {

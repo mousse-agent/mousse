@@ -71,7 +71,7 @@ if (
   runtime.node !== 'v24.20.0' ||
   runtime.platform !== 'linux' ||
   runtime.arch !== 'arm64' ||
-  runtime.sdkVersion !== '0.85.1' ||
+  runtime.sdkVersion !== '1.4.0' ||
   !runtime.ptyLoad ||
   runtime.packageLockSha256 !== hash(readFileSync(join(root, 'package-lock.json')))
 )
