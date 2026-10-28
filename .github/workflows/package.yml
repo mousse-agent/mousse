@@ -113,9 +113,27 @@ jobs:
           $msbuild = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -requires Microsoft.Component.MSBuild -find 'MSBuild\**\Bin\MSBuild.exe' | Select-Object -First 1
           if (-not $msbuild) { throw 'MSBuild not found' }
           "MSBUILD_PATH=$msbuild" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+      # The SSH endpoint's helper (native/sshd-helper) is Rust; dist:win:prep builds it and fails without it.
+      - name: Install the Rust toolchain for the SSH helper
+        run: |
+          rustup toolchain install 1.96.0 --profile minimal --target x86_64-pc-windows-msvc
+          rustup default 1.96.0
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            native/sshd-helper/target
+          key: sshd-helper-${{ runner.os }}-rust-1.96.0-${{ hashFiles('native/sshd-helper/Cargo.lock', 'native/sshd-helper/Cargo.toml', 'native/sshd-helper/src/**') }}
+          restore-keys: sshd-helper-${{ runner.os }}-rust-1.96.0-
       # The CI Static checks job typechecks the same commit, and publishing waits for it.
       - run: npm run dist:win:prep
       - run: npx electron-builder ${{ matrix.builder-args }} --publish never
+      # Unsigned, like the rest of the Windows build for now.
+      - name: Check the package carries the SSH helper
+        run: |
+          $folder = if ('${{ matrix.part }}' -eq 'cli') { 'release\cli\win-unpacked' } else { 'release\win-unpacked' }
+          if (-not (Test-Path "$folder\resources\editor-ssh\sshd.exe")) { throw "$folder has no resources\editor-ssh\sshd.exe" }
       - name: Check the packaged CLI reports the version
         if: matrix.part == 'cli'
         run: |

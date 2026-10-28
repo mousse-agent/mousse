@@ -133,6 +133,20 @@ jobs:
       # Test fixtures create their own repositories and compare checked-out bytes;
       # the runner's default core.autocrlf=true would rewrite LF to CRLF.
       - run: git config --global core.autocrlf false
+      # The SSH endpoint's helper (native/sshd-helper), which its Windows tests run.
+      - name: Install the Rust toolchain for the SSH helper
+        run: |
+          rustup toolchain install 1.96.0 --profile minimal --target x86_64-pc-windows-msvc
+          rustup default 1.96.0
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            native/sshd-helper/target
+          key: sshd-helper-${{ runner.os }}-rust-1.96.0-${{ hashFiles('native/sshd-helper/Cargo.lock', 'native/sshd-helper/Cargo.toml', 'native/sshd-helper/src/**') }}
+          restore-keys: sshd-helper-${{ runner.os }}-rust-1.96.0-
+      - run: node scripts/build-sshd-helper.mjs --require
       - name: Run Windows-relevant tests
         env:
           # The runner's default TEMP is an 8.3 short path (C:\Users\RUNNER~1\...), which
@@ -144,6 +158,8 @@ jobs:
           npx vitest run
           tests/browserWindowsSandboxPermissions.test.ts
           tests/cliWindowsConsoleTty.test.ts
+          tests/net/editor/endpointWindows.test.ts
+          tests/net/editor/windowsShell.test.ts
           tests/net/transports/ssh.test.ts
           tests/net/ssh/bootstrap.test.ts
           tests/net/ssh/knownHosts.test.ts

@@ -84,6 +84,52 @@ export function unixLoginEnvironment(input: UnixLoginInput): Record<string, stri
   return env
 }
 
+export interface WindowsSessionInput {
+  user: string
+  home: string
+  /** The shell sessions start, as `SHELL`. */
+  shell: string
+  /** The computer's name, for the prompt sshd sets. */
+  computer: string
+  /** The home is not the user's profile (tests): the profile variables point at it too. */
+  homeIsProfile: boolean
+  sshConnection: string
+  term?: string
+  requested: Readonly<Record<string, string>>
+  scope: string
+}
+
+/**
+ * Windows: what a session gets on top of the logon environment. The helper builds that environment itself from
+ * the registry, as a logon does (machine variables, the user's, then the per-logon ones, `Path` joined as
+ * machine;user), so nothing here comes from the daemon's own environment: these are the variables sshd sets for a
+ * session, the client's accepted `env` requests and the device's marker.
+ */
+export function windowsSessionEnvironment(input: WindowsSessionInput): Record<string, string> {
+  const env: Record<string, string> = {}
+  env.USER = input.user
+  env.LOGNAME = input.user
+  env.HOME = input.home
+  env.SHELL = input.shell
+  if (input.homeIsProfile) {
+    const root = /^[A-Za-z]:/u.exec(input.home)?.[0]
+    env.USERPROFILE = input.home
+    if (root) {
+      env.HOMEDRIVE = root
+      env.HOMEPATH = input.home.slice(root.length) || '\\'
+    }
+  }
+  // cmd's prompt, `user@COMPUTER path>`; a `$` in a name is doubled so the prompt does not read it.
+  env.PROMPT = `${`${input.user}@${input.computer}`.replace(/\$/gu, '$$$$')} $P$G`
+  const [clientAddress = '127.0.0.1', clientPort = '0'] = input.sshConnection.split(' ')
+  env.SSH_CLIENT = `${clientAddress} ${clientPort} 22`
+  env.SSH_CONNECTION = input.sshConnection
+  if (input.term !== undefined) env.TERM = input.term
+  for (const [name, value] of Object.entries(input.requested)) env[name] = value
+  env[SCOPE_VARIABLE] = input.scope
+  return env
+}
+
 /** `KEY=value` lines of `/etc/environment`, which `pam_env` gives to a login on Linux. Unreadable means none. */
 export async function readSystemEnvironment(
   file = '/etc/environment'

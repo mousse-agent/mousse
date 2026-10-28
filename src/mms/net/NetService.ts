@@ -96,6 +96,7 @@ import { EditorEndpoint } from './editor/endpoint/endpoint'
 import type { ProcessHost } from './editor/endpoint/host'
 import type { EditorEndpointPort } from './editor/endpoint/port'
 import { systemProcessHost } from './editor/endpoint/systemHost'
+import { findSshdHelper } from './editor/endpoint/windowsHost'
 import type { EditorTunnelInfo, TunnelReason } from '../../shared/net/tunnel'
 import {
   EDITOR_TUNNEL_HANDLE,
@@ -625,7 +626,14 @@ export class NetService {
           ? undefined
           : new EditorEndpoint({
               keys,
-              host: endpointHost === undefined ? systemProcessHost() : (endpointHost ?? undefined),
+              host:
+                endpointHost === undefined
+                  ? systemProcessHost(
+                      process.platform,
+                      findSshdHelper,
+                      join(this.options.profileDir, 'editor-ssh')
+                    )
+                  : (endpointHost ?? undefined),
               onEvent: (event) => this.tunnels?.recordEndpointEvent(event)
             })
       this.tunnels = new EditorTunnels({

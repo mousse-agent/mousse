@@ -486,8 +486,8 @@ export interface EditorTunnelOptions {
    */
   hostTrust?: () => Promise<HostTrust>
   /**
-   * Mousse's own SSH endpoint, the far end of every tunnel unless it is unavailable (Windows, until its host
-   * exists) or the owner chose the system's SSH server. Without one, the far end is always the system's.
+   * Mousse's own SSH endpoint, the far end of every tunnel unless it is unavailable (a Windows computer whose
+   * helper does not run) or the owner chose the system's SSH server. Without one, the far end is always the system's.
    */
   endpoint?: EditorEndpointPort
   /**
@@ -895,7 +895,7 @@ export class EditorTunnels implements SessionTunnelPort {
     this.options.audit.record(row)
   }
 
-  /** Whether Mousse's own endpoint can answer editor connections on this computer (it cannot on Windows yet). */
+  /** Whether Mousse's own endpoint can answer editor connections on this computer (not on Windows without its helper). */
   endpointAvailable(): boolean {
     return this.options.endpoint?.available() === true
   }

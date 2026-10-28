@@ -56,6 +56,10 @@ win:
         - x64
   icon: resources/icon.ico
   signExecutable: false
+  # The helper of the SSH endpoint (scripts/build-sshd-helper.mjs); without it Windows uses its own OpenSSH server.
+  extraResources:
+    - from: native/sshd-helper/target/release/sshd.exe
+      to: editor-ssh/sshd.exe
 linux:
   target:
     - AppImage

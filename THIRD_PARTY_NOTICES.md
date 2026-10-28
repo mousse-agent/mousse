@@ -119,3 +119,40 @@ Mousse answers an editor's SSH connection itself (`src/mms/net/editor/endpoint/`
 `node-pty` (MIT; Christopher Jeffrey, Daniel Imms and Microsoft Corporation) already ships with Mousse for terminals; the endpoint also uses it for the pseudo-terminal of an editor's shell.
 
 The full licence text of each package is in its folder under `node_modules` and is included in every build.
+
+## windows-sys and the Rust standard library (the Windows SSH helper)
+
+The Windows package carries `resources\editor-ssh\sshd.exe`, built from `native/sshd-helper` (Mousse's own code, in Rust). The program links the Rust standard library and these crates, unmodified and pinned in `native/sshd-helper/Cargo.lock`. Each is offered under MIT or Apache-2.0, and Mousse uses them under MIT.
+
+| Crate | Licence | Copyright |
+| --- | --- | --- |
+| `windows-sys` 0.60.2 | MIT or Apache-2.0 | Microsoft Corporation |
+| `windows-targets` 0.53.5 | MIT or Apache-2.0 | Microsoft Corporation |
+| `windows_x86_64_msvc` 0.53.1 and `windows_x86_64_gnu` 0.53.1 | MIT or Apache-2.0 | Microsoft Corporation |
+| `windows-link` 0.2.1 | MIT or Apache-2.0 | Microsoft Corporation |
+| Rust standard library (`std`, `core`, `alloc`) | MIT or Apache-2.0 | The Rust Project Developers |
+
+```
+MIT License
+
+Copyright (c) Microsoft Corporation.
+Copyright (c) The Rust Project Developers.
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```

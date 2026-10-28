@@ -7,10 +7,9 @@ import type { SftpPaths } from './sftp/paths'
  * is the same on every system; the way a program is started, the environment it gets and the way everything a
  * device started is stopped are not, so each system has a host.
  *
- * `unixHost.ts` is the host of Linux and macOS. A Windows host (a helper program named `sshd.exe` for every
- * session, which VS Code looks for among its ancestors, and one Job object per device to stop everything at
- * once) is a second implementation of this interface and changes nothing above it: until it exists, `processHost`
- * returns nothing for Windows, the endpoint is unavailable there, and a Windows computer keeps carrying editor
+ * `unixHost.ts` is the host of Linux and macOS. `windowsHost.ts` is the host of Windows: a helper program named
+ * `sshd.exe` for every session, which VS Code looks for among its ancestors, and one Job object per device to
+ * stop everything at once. A Windows computer without a working helper has no host, and keeps carrying editor
  * connections to its own OpenSSH server.
  */
 
@@ -70,6 +69,11 @@ export interface ProcessHost {
   readonly sftp: { paths: SftpPaths; listRoots?: () => Promise<string[]> }
   /** Whether a session may have a terminal. */
   terminals(): boolean
+  /**
+   * Whether programs can be started now. Absent means always. The Windows host is not ready until its helper has
+   * been seen to run, and stops being ready if the helper cannot be started any more.
+   */
+  ready?(): boolean
   /** Starts the program of a session, in a clean environment. Rejects when it cannot be started at all. */
   start(request: SessionRequest): Promise<SessionProcess>
   /**
