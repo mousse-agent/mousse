@@ -534,7 +534,7 @@ export class OwnerRoutes {
     const firstTerminal = method === 'pty.create' && !audit.has(node, 'pty.create')
     // The first change a device makes on a thread here, in any form (a send, a rename, a save, a Git action).
     const firstUse =
-      row.durable && !row.sequenced && method !== 'pty.create' && !this.toldFirstUse.has(node) && !audit.has(node, 'thread.first_use')
+      row.durable && !row.sequenced && !row.terminal && !this.toldFirstUse.has(node) && !audit.has(node, 'thread.first_use')
     let slot: TerminalClaim | undefined
     try {
       // Nothing has run yet: a call that was cancelled before it started is a refusal, not an unknown outcome.
