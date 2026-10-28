@@ -206,6 +206,17 @@ describe('the editor item of a thread on another computer, state by state', () =
     expect(text()).toContain('Computer B is offline.')
   })
 
+  it('a computer that went offline after an answer is offline now, not what the old answer said', async () => {
+    await mount({ opens: [{ ok: false, reason: 'connection', failure: 'host_untrusted' }] })
+    await click('Open in VS Code')
+    expect(text()).toContain('does not vouch for it')
+    state.devices = state.devices.map((entry) => (entry.node === NODE ? { ...entry, state: 'closed' } : entry))
+    act(() => root.render(createElement(OpenInRemoteEditor, { threadId: THREAD, node: NODE, computer: 'Computer B', profileId: 'p1' })))
+    await settle()
+    expect(text()).toContain('Computer B is offline.')
+    expect(text()).not.toContain('does not vouch for it')
+  })
+
   it('a computer that is only connecting is not called offline', async () => {
     await mount({ device: { state: 'connecting' } })
     expect(text()).not.toContain('is offline')
