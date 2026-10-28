@@ -183,12 +183,13 @@
   border-radius: var(--ui-control-radius) 0 0 var(--ui-control-radius);
 }
 
-.side-card-open-editor-main:disabled {
+.side-card-open-editor-main:disabled,
+.side-card-open-editor-main.blocked {
   opacity: 0.55;
   cursor: default;
 }
 
-.side-card-open-editor-main:hover:not(:disabled),
+.side-card-open-editor-main:hover:not(:disabled):not(.blocked),
 .side-card-open-editor-chevron:hover,
 .side-card-open-editor-chevron.open {
   background: var(--ui-pressed);
@@ -225,6 +226,62 @@
   overflow-wrap: anywhere;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 2;
+}
+
+/* A thread of another computer: what the editor button needs, or why the last open was refused. */
+.side-card-open-editor-note {
+  margin: 4px 0 0;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.side-card-open-editor-note.refusal {
+  color: var(--danger);
+}
+
+/* After Mousse added its Include line to ~/.ssh/config: said once, with Undo. */
+.side-card-ssh-notice {
+  margin: 6px 0 0;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.side-card-ssh-notice-text,
+.side-card-ssh-notice-error {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.side-card-ssh-notice-error {
+  margin-top: 4px;
+  color: var(--danger);
+}
+
+.side-card-ssh-notice-actions {
+  display: flex;
+  gap: 12px;
+  margin-top: 4px;
+}
+
+.side-card-open-editor-link {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--accent);
+  font: inherit;
+  cursor: pointer;
+}
+
+.side-card-open-editor-link:hover:not(:disabled) {
+  text-decoration: underline;
+}
+
+.side-card-open-editor-link:disabled {
+  opacity: 0.55;
+  cursor: default;
 }
 
 /* A thread of another computer: a note under its name while the computer cannot be reached. */
