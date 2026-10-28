@@ -32,6 +32,9 @@ describe('the thread list of the sidebar', () => {
     expect(sameThreadSnapshot([row({ node: 'n', offline: true })], [row({ node: 'n' })])).toBe(
       false
     )
+    expect(sameThreadSnapshot([row({ node: 'n' })], [row({ node: 'n', notShared: true })])).toBe(
+      false
+    )
     expect(sameThreadSnapshot([row()], [row({ node: 'n' })])).toBe(false)
   })
 })
@@ -39,6 +42,15 @@ describe('the thread list of the sidebar', () => {
 describe('a search across computers', () => {
   it('waits a quarter of a second for typing to pause', () => {
     expect(THREAD_SEARCH_DEBOUNCE_MS).toBe(250)
+  })
+
+  it('says a computer stopped sharing, or that a newer search replaced this one', () => {
+    expect(skippedLine([{ node: 'a', name: 'Laptop', reason: 'refused' }])).toBe(
+      'Not searched: Laptop (stopped sharing threads)'
+    )
+    expect(skippedLine([{ node: 'a', name: 'Laptop', reason: 'replaced' }], 'Not listed')).toBe(
+      'Not listed: Laptop (a newer search replaced this one)'
+    )
   })
 
   it('names the computers it could not ask, and why, in one line', () => {

@@ -2,8 +2,16 @@ import { readFileSync } from 'node:fs'
 import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
-import type { LifecyclePurgeItem, LifecyclePurgePreview, TaskLifecycleRecord, TrashRetentionPolicy } from '../../src/shared/resourceLifecycle'
-import { RecentlyDeletedView, type RecentlyDeletedActions } from '../../src/renderer/components/sidebar/RecentlyDeletedSection'
+import type {
+  LifecyclePurgeItem,
+  LifecyclePurgePreview,
+  TaskLifecycleRecord,
+  TrashRetentionPolicy
+} from '../../src/shared/resourceLifecycle'
+import {
+  RecentlyDeletedView,
+  type RecentlyDeletedActions
+} from '../../src/renderer/components/sidebar/RecentlyDeletedSection'
 import { PermanentDeleteDialog } from '../../src/renderer/components/sidebar/PermanentDeleteDialog'
 import type { PurgeConfirmation, TrashState } from '../../src/renderer/lib/trashInventory'
 
@@ -11,25 +19,63 @@ const DAY = 86_400_000
 const NOW = Date.parse('2026-10-27T12:00:00.000Z')
 const POLICY: TrashRetentionPolicy = { schemaVersion: 1, graceDays: 30, automaticPurge: true }
 const noop = () => {}
-const actions: RecentlyDeletedActions = { onToggle: noop, onRestore: noop, onDelete: noop, onRetry: noop }
+const actions: RecentlyDeletedActions = {
+  onToggle: noop,
+  onRestore: noop,
+  onDelete: noop,
+  onRetry: noop
+}
 
-function record(taskId: string, state: TaskLifecycleRecord['state'], extra: Partial<TaskLifecycleRecord> = {}): TaskLifecycleRecord {
+function record(
+  taskId: string,
+  state: TaskLifecycleRecord['state'],
+  extra: Partial<TaskLifecycleRecord> = {}
+): TaskLifecycleRecord {
   return {
-    schemaVersion: 1, minimumWriterVersion: 1, profileId: 'p', taskId, generation: 1, state,
-    originalLocation: '/t', location: '/t', locations: ['/t'], operations: [],
-    createdAt: new Date(NOW - 90 * DAY).toISOString(), updatedAt: new Date(NOW - DAY).toISOString(), ...extra
+    schemaVersion: 1,
+    minimumWriterVersion: 1,
+    profileId: 'p',
+    taskId,
+    generation: 1,
+    state,
+    originalLocation: '/t',
+    location: '/t',
+    locations: ['/t'],
+    operations: [],
+    createdAt: new Date(NOW - 90 * DAY).toISOString(),
+    updatedAt: new Date(NOW - DAY).toISOString(),
+    ...extra
   }
 }
-const trashed = (taskId: string, daysAgo: number) => record(taskId, 'trashed', { trashedAt: new Date(NOW - daysAgo * DAY).toISOString() })
+const trashed = (taskId: string, daysAgo: number) =>
+  record(taskId, 'trashed', { trashedAt: new Date(NOW - daysAgo * DAY).toISOString() })
 
 function view(state: Partial<TrashState>, options: { expanded?: boolean; hidden?: boolean } = {}) {
-  const full: TrashState = { loaded: true, records: [], taskNames: {}, paused: false, policy: POLICY, ...state }
-  return renderToStaticMarkup(createElement(RecentlyDeletedView, { state: full, expanded: options.expanded ?? true, hidden: options.hidden ?? false, actions, now: NOW }))
+  const full: TrashState = {
+    loaded: true,
+    records: [],
+    taskNames: {},
+    paused: false,
+    policy: POLICY,
+    ...state
+  }
+  return renderToStaticMarkup(
+    createElement(RecentlyDeletedView, {
+      state: full,
+      expanded: options.expanded ?? true,
+      hidden: options.hidden ?? false,
+      actions,
+      now: NOW
+    })
+  )
 }
 
 describe('Recently deleted section', () => {
   it('is collapsed by default behind a labelled toggle that shows how many threads are in it', () => {
-    const html = view({ records: [trashed('a', 2), trashed('b', 4)], taskNames: { a: 'A', b: 'B' } }, { expanded: false })
+    const html = view(
+      { records: [trashed('a', 2), trashed('b', 4)], taskNames: { a: 'A', b: 'B' } },
+      { expanded: false }
+    )
     expect(html).toContain('aria-expanded="false"')
     expect(html).toContain('aria-label="Expand recently deleted threads"')
     expect(html).toContain('<span>Recently deleted</span>')
@@ -49,8 +95,12 @@ describe('Recently deleted section', () => {
   })
 
   it('is hidden when the sidebar is not showing threads', () => {
-    expect(view({}, { hidden: true })).toMatch(/data-testid="sidebar-trash-section"[^>]*\shidden=""/)
-    expect(view({}, { hidden: false })).not.toMatch(/data-testid="sidebar-trash-section"[^>]*\shidden=""/)
+    expect(view({}, { hidden: true })).toMatch(
+      /data-testid="sidebar-trash-section"[^>]*\shidden=""/
+    )
+    expect(view({}, { hidden: false })).not.toMatch(
+      /data-testid="sidebar-trash-section"[^>]*\shidden=""/
+    )
   })
 
   it('says so when nothing was deleted, and when the first read has not finished', () => {
@@ -75,34 +125,94 @@ describe('Recently deleted section', () => {
 
   it('lists a thread of another computer with its computer, Restore, and Delete permanently turned off with where to do it', () => {
     const remote = { ...trashed('n:a', 3), node: 'n', computerName: 'Studio Mac' }
-    const html = view({ records: [remote, trashed('b', 3)], taskNames: { 'n:a': 'Remote thread', b: 'Local thread' } })
-    const row = html.split('data-testid="sidebar-trash-row"').find((part) => part.includes('Remote thread'))!
+    const html = view({
+      records: [remote, trashed('b', 3)],
+      taskNames: { 'n:a': 'Remote thread', b: 'Local thread' }
+    })
+    const row = html
+      .split('data-testid="sidebar-trash-row"')
+      .find((part) => part.includes('Remote thread'))!
     expect(row).toContain('On Studio Mac')
     expect(row).toContain('aria-label="Restore Remote thread"')
-    expect(row).toMatch(/data-action="delete"[^>]*title="Delete permanently on Studio Mac"[^>]*disabled=""/)
+    expect(row).toMatch(
+      /data-action="delete"[^>]*title="Delete permanently on Studio Mac"[^>]*disabled=""/
+    )
     expect(row).not.toContain('aria-label="Delete Remote thread permanently…"')
     // A local row is as it was.
-    const local = html.split('data-testid="sidebar-trash-row"').find((part) => part.includes('Local thread'))!
+    const local = html
+      .split('data-testid="sidebar-trash-row"')
+      .find((part) => part.includes('Local thread'))!
     expect(local).toContain('aria-label="Delete Local thread permanently…"')
     expect(local).not.toContain('On Studio Mac')
   })
 
+  it('names the computers whose trash could not be listed', () => {
+    const html = view({
+      records: [trashed('a', 3)],
+      taskNames: { a: 'A' },
+      skipped: [{ node: 'n', name: 'Studio Mac', reason: 'refused' }]
+    })
+    expect(html).toContain('Not listed: Studio Mac (stopped sharing threads)')
+    expect(view({ records: [trashed('a', 3)] })).not.toContain('Not listed')
+  })
+
   it('says the thread is kept until deleted when automatic emptying is off', () => {
-    expect(view({ records: [trashed('a', 3)], policy: { ...POLICY, automaticPurge: false } })).toContain('Deleted 3 days ago · Kept until you delete it')
-    expect(view({ records: [trashed('a', 3)], paused: true })).toContain('Automatic deletion is paused')
+    expect(
+      view({ records: [trashed('a', 3)], policy: { ...POLICY, automaticPurge: false } })
+    ).toContain('Deleted 3 days ago · Kept until you delete it')
+    expect(view({ records: [trashed('a', 3)], paused: true })).toContain(
+      'Automatic deletion is paused'
+    )
   })
 
   it('lists newest deletions first and unfinished deletions before them', () => {
-    const half = record('half', 'purge-started', { purge: { schemaVersion: 1, taskId: 'half', generation: 1, digest: 'd', items: [], ownedTaskIds: [], blockers: [], retained: [], exclusiveBytes: 0, operationId: 'op', startedAt: new Date(NOW).toISOString(), discardAuthorized: false } })
-    const html = view({ records: [trashed('old', 20), trashed('new', 1), half], taskNames: { old: 'Old one', new: 'New one', half: 'Half one' } })
+    const half = record('half', 'purge-started', {
+      purge: {
+        schemaVersion: 1,
+        taskId: 'half',
+        generation: 1,
+        digest: 'd',
+        items: [],
+        ownedTaskIds: [],
+        blockers: [],
+        retained: [],
+        exclusiveBytes: 0,
+        operationId: 'op',
+        startedAt: new Date(NOW).toISOString(),
+        discardAuthorized: false
+      }
+    })
+    const html = view({
+      records: [trashed('old', 20), trashed('new', 1), half],
+      taskNames: { old: 'Old one', new: 'New one', half: 'Half one' }
+    })
     const order = ['Half one', 'New one', 'Old one'].map((name) => html.indexOf(`title="${name}"`))
     expect(order.every((index) => index > 0)).toBe(true)
     expect([...order].sort((a, b) => a - b)).toEqual(order)
   })
 
   it('shows an unfinished deletion with Retry and no way to restore it', () => {
-    const items: LifecyclePurgeItem[] = [{ id: 'p', kind: 'path', identity: '/p', ownerTaskId: 'a', status: 'removed' }, { id: 'w', kind: 'worktree', identity: '/w', ownerTaskId: 'a', status: 'pending' }]
-    const half = record('a', 'purge-started', { purge: { schemaVersion: 1, taskId: 'a', generation: 1, digest: 'd', items, ownedTaskIds: ['a'], blockers: [], retained: [], exclusiveBytes: 0, operationId: 'op', startedAt: new Date(NOW).toISOString(), discardAuthorized: false, error: 'Purge could not remove a locked resource.' } })
+    const items: LifecyclePurgeItem[] = [
+      { id: 'p', kind: 'path', identity: '/p', ownerTaskId: 'a', status: 'removed' },
+      { id: 'w', kind: 'worktree', identity: '/w', ownerTaskId: 'a', status: 'pending' }
+    ]
+    const half = record('a', 'purge-started', {
+      purge: {
+        schemaVersion: 1,
+        taskId: 'a',
+        generation: 1,
+        digest: 'd',
+        items,
+        ownedTaskIds: ['a'],
+        blockers: [],
+        retained: [],
+        exclusiveBytes: 0,
+        operationId: 'op',
+        startedAt: new Date(NOW).toISOString(),
+        discardAuthorized: false,
+        error: 'Purge could not remove a locked resource.'
+      }
+    })
     const html = view({ records: [half], taskNames: { a: 'Half done' } })
     expect(html).toContain('data-action="retry"')
     expect(html).toContain('aria-label="Retry deleting Half done"')
@@ -113,12 +223,22 @@ describe('Recently deleted section', () => {
   })
 
   it('shows a failed action with its reason under the thread, and one for a thread that already left the list', () => {
-    const html = view({ records: [trashed('a', 2)], notice: { taskId: 'a', message: 'Another operation owns this thread; try again.' } })
-    expect(html).toMatch(/data-testid="sidebar-trash-notice"[^>]*>Another operation owns this thread; try again\.</)
-    const stray = view({ records: [trashed('a', 2)], notice: { taskId: 'gone', message: 'Could not delete that thread.' } })
+    const html = view({
+      records: [trashed('a', 2)],
+      notice: { taskId: 'a', message: 'Another operation owns this thread; try again.' }
+    })
+    expect(html).toMatch(
+      /data-testid="sidebar-trash-notice"[^>]*>Another operation owns this thread; try again\.</
+    )
+    const stray = view({
+      records: [trashed('a', 2)],
+      notice: { taskId: 'gone', message: 'Could not delete that thread.' }
+    })
     expect(stray).toContain('Could not delete that thread.')
     expect(stray).not.toContain('sidebar-trash-notice')
-    expect(view({ refreshError: 'Unable to refresh recently deleted threads. Please try again.' })).toContain('role="alert"')
+    expect(
+      view({ refreshError: 'Unable to refresh recently deleted threads. Please try again.' })
+    ).toContain('role="alert"')
   })
 
   it('disables every action while one is running, and offers none for a thread on its way into the trash', () => {
@@ -130,7 +250,10 @@ describe('Recently deleted section', () => {
   })
 
   it('offers each action as a real button that keyboard users can reach and name', () => {
-    const html = view({ records: [trashed('a', 2), trashed('b', 3)], taskNames: { a: 'A', b: 'B' } })
+    const html = view({
+      records: [trashed('a', 2), trashed('b', 3)],
+      taskNames: { a: 'A', b: 'B' }
+    })
     const actionButtons = html.match(/<button[^>]*data-action="[a-z]+"[^>]*>/g) ?? []
     expect(actionButtons).toHaveLength(4)
     for (const tag of actionButtons) {
@@ -150,27 +273,71 @@ describe('Recently deleted section', () => {
       expect(selector).not.toMatch(/::?(before|after)/)
       expect(body).not.toMatch(/border-(left|right|inline)|box-shadow|outline|inset/)
     }
-    expect(rules.some(([, selector, body]) => /:hover/.test(selector!) && /background:/.test(body!))).toBe(true)
+    expect(
+      rules.some(([, selector, body]) => /:hover/.test(selector!) && /background:/.test(body!))
+    ).toBe(true)
   })
 })
 
-function preview(items: LifecyclePurgeItem[], extra: Partial<LifecyclePurgePreview> = {}): LifecyclePurgePreview {
-  return { schemaVersion: 1, taskId: 'a', generation: 1, digest: 'd', items, ownedTaskIds: ['a'], blockers: [], retained: [], exclusiveBytes: 4096, ...extra }
+function preview(
+  items: LifecyclePurgeItem[],
+  extra: Partial<LifecyclePurgePreview> = {}
+): LifecyclePurgePreview {
+  return {
+    schemaVersion: 1,
+    taskId: 'a',
+    generation: 1,
+    digest: 'd',
+    items,
+    ownedTaskIds: ['a'],
+    blockers: [],
+    retained: [],
+    exclusiveBytes: 4096,
+    ...extra
+  }
 }
-const item = (kind: LifecyclePurgeItem['kind'], id: string, extra: Partial<LifecyclePurgeItem> = {}): LifecyclePurgeItem => ({ id, kind, identity: `/x/${id}`, ownerTaskId: 'a', status: 'pending', ...extra })
+const item = (
+  kind: LifecyclePurgeItem['kind'],
+  id: string,
+  extra: Partial<LifecyclePurgeItem> = {}
+): LifecyclePurgeItem => ({
+  id,
+  kind,
+  identity: `/x/${id}`,
+  ownerTaskId: 'a',
+  status: 'pending',
+  ...extra
+})
 
 function dialog(confirmation: Partial<PurgeConfirmation>) {
-  const full: PurgeConfirmation = { taskId: 'a', name: 'Fix login', preview: preview([item('path', 'data'), item('worktree', 'wt')]), discard: false, submitting: false, ...confirmation }
-  return renderToStaticMarkup(createElement(PermanentDeleteDialog, { confirmation: full, onDiscardChange: noop, onConfirm: noop, onCancel: noop }))
+  const full: PurgeConfirmation = {
+    taskId: 'a',
+    name: 'Fix login',
+    preview: preview([item('path', 'data'), item('worktree', 'wt')]),
+    discard: false,
+    submitting: false,
+    ...confirmation
+  }
+  return renderToStaticMarkup(
+    createElement(PermanentDeleteDialog, {
+      confirmation: full,
+      onDiscardChange: noop,
+      onConfirm: noop,
+      onCancel: noop
+    })
+  )
 }
-const confirmButton = (html: string) => html.match(/<button[^>]*data-testid="trash-delete-confirm"[^>]*>/)![0]
+const confirmButton = (html: string) =>
+  html.match(/<button[^>]*data-testid="trash-delete-confirm"[^>]*>/)![0]
 
 describe('Permanent delete confirmation', () => {
   it('leads with what is lost and what it frees, with the list of items folded', () => {
     const html = dialog({ reclaim: { bytes: 1.2 * 1024 ** 3, estimated: false, partial: false } })
     expect(html).toContain('role="dialog"')
     expect(html).toContain('Delete “Fix login” permanently')
-    expect(html).toContain('Permanently deletes the transcript and worktree of “Fix login”. This can’t be undone.')
+    expect(html).toContain(
+      'Permanently deletes the transcript and worktree of “Fix login”. This can’t be undone.'
+    )
     expect(html).toContain('Frees 1.20 GB.')
     expect(html.indexOf('Permanently deletes')).toBeLessThan(html.indexOf('Frees'))
     expect(html).toMatch(/<details class="trash-delete-details"><summary>Show details<\/summary>/)
@@ -181,10 +348,19 @@ describe('Permanent delete confirmation', () => {
   })
 
   it('names the unpublished work that would be lost and keeps Delete off until it is accepted', () => {
-    const items = [item('path', 'data'), item('worktree', 'wt', { discardRequired: true, reason: 'This result may contain unpublished work', content: [{ path: 'notes.txt', kind: 'file', digest: 'x', bytes: 2048, mode: 0o644 }] })]
+    const items = [
+      item('path', 'data'),
+      item('worktree', 'wt', {
+        discardRequired: true,
+        reason: 'This result may contain unpublished work',
+        content: [{ path: 'notes.txt', kind: 'file', digest: 'x', bytes: 2048, mode: 0o644 }]
+      })
+    ]
     const html = dialog({ preview: preview(items) })
     expect(html).toContain('Unpublished work will be lost: 1 worktree has unpublished work.')
-    expect(html).toContain('Discard the unpublished work and only-copy files listed under Show details.')
+    expect(html).toContain(
+      'Discard the unpublished work and only-copy files listed under Show details.'
+    )
     expect(html).toMatch(/<input type="checkbox"(?![^>]*checked)/)
     expect(confirmButton(html)).toContain('disabled')
     expect(html).toContain('Unpublished: This result may contain unpublished work')
@@ -195,20 +371,36 @@ describe('Permanent delete confirmation', () => {
   })
 
   it('names only-copy files outside Git too', () => {
-    const html = dialog({ preview: preview([item('path', 'scratch', { discardRequired: true, reason: 'Scratch files have no durable reconstruction proof' })]) })
+    const html = dialog({
+      preview: preview([
+        item('path', 'scratch', {
+          discardRequired: true,
+          reason: 'Scratch files have no durable reconstruction proof'
+        })
+      ])
+    })
     expect(html).toContain('1 folder holds files that exist nowhere else')
   })
 
   it('shows what keeps a thread from being deleted and refuses to go on', () => {
-    const html = dialog({ preview: preview([item('worktree', 'wt')], { blockers: ['Workspace retained: /x/wt: a terminal is still open'] }) })
+    const html = dialog({
+      preview: preview([item('worktree', 'wt')], {
+        blockers: ['Workspace retained: /x/wt: a terminal is still open']
+      })
+    })
     expect(html).toContain('Can’t delete: Workspace retained: /x/wt: a terminal is still open')
     expect(html).toMatch(/role="alert"[^>]*>Can’t delete/)
     expect(confirmButton(html)).toContain('disabled')
   })
 
   it('shows a busy or failed deletion with its reason and lets the person try again', () => {
-    const html = dialog({ error: 'Purge could not remove a locked or permission-protected resource. Close applications using it and retry the pending purge.' })
-    expect(html).toMatch(/data-testid="trash-delete-error"[^>]*>Purge could not remove a locked or permission-protected resource/)
+    const html = dialog({
+      error:
+        'Purge could not remove a locked or permission-protected resource. Close applications using it and retry the pending purge.'
+    })
+    expect(html).toMatch(
+      /data-testid="trash-delete-error"[^>]*>Purge could not remove a locked or permission-protected resource/
+    )
     expect(confirmButton(html)).not.toContain('disabled')
   })
 

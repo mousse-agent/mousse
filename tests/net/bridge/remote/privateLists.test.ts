@@ -108,8 +108,19 @@ describe('the snapshot an owner sends', () => {
     // A small list is never cut, however old its archive.
     const small = new MmsListsSource(services(threads.slice(0, 50)), undefined, { private: true })
     expect(small.snapshot().threads).toHaveLength(50)
-    // A phone's list is its own and is not trimmed.
-    const phone = new MmsListsSource(services(threads), undefined)
-    expect(phone.snapshot().threads.length).toBeGreaterThan(500)
+  })
+
+  it('keeps a phone’s lists within the wire bound as before: a phone is not known to parse more', () => {
+    // A phone's list is its own: no trimming, and no larger node bound.
+    const few = Array.from({ length: 400 }, (_, n) => row(n))
+    expect(new MmsListsSource(services(few), undefined).snapshot().threads).toHaveLength(400)
+    const many = Array.from({ length: 2000 }, (_, n) => row(n))
+    expect(() => new MmsListsSource(services(many), undefined).snapshot()).toThrow(
+      expect.objectContaining({ code: 'too_large' })
+    )
+    // The private lists of another computer of the user take the same threads.
+    expect(
+      new MmsListsSource(services(many), undefined, { private: true }).snapshot().threads
+    ).toHaveLength(2000)
   })
 })

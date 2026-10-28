@@ -1,6 +1,7 @@
 import { errorDiagnostic, knownAppError, normalizeAppError, parseErrorInfo, type AppErrorShape } from '../../shared/errors'
 import type { LifecycleState, LifecyclePurgePreview, TaskLifecycleRecord, TrashRetentionPolicy } from '../../shared/resourceLifecycle'
 import { formatBytes } from '../../shared/storage'
+import type { ThreadSearchSkipped } from '../../shared/types'
 
 /**
  * The "Recently deleted" list: which lifecycle records show, how they read and sort, and the
@@ -24,6 +25,8 @@ export interface TrashInventoryReply {
   taskNames?: Record<string, string>
   trashPolicy: TrashRetentionPolicy
   trashSweepStatus: { suspended: boolean; reason?: string }
+  /** The other computers whose trash could not be read this time. */
+  skipped?: ThreadSearchSkipped[]
 }
 export interface PurgeReclaim { bytes: number; estimated: boolean; partial: boolean }
 export interface PurgeInput { preview?: boolean; operationId?: string; expectedGeneration?: number; previewDigest?: string; discard?: boolean }
@@ -133,7 +136,8 @@ export function trashRows(
         canRestore: idle,
         // Permanent delete cannot be undone, so it stays on the computer that holds the thread.
         canDelete: idle && !record.node,
-        canRetry: record.state === 'purge-started' && Boolean(record.purge?.operationId),
+        // A deletion that began on another computer is retried there; this one cannot purge its threads.
+        canRetry: record.state === 'purge-started' && Boolean(record.purge?.operationId) && !record.node,
         ...(record.node ? { computer: record.computerName ?? 'the other computer' } : {})
       }
     })
@@ -211,6 +215,8 @@ export interface TrashState {
   taskNames: Record<string, string>
   policy?: TrashRetentionPolicy
   paused: boolean
+  /** The other computers whose trash is not in the list this time. */
+  skipped?: ThreadSearchSkipped[]
   /** A request is running for this thread; every action waits. */
   busyTaskId?: string
   /** The last background refresh failed. */
@@ -255,7 +261,7 @@ export function createTrashController(
   const load = (): Promise<void> => {
     if (inFlight) return inFlight
     const request = api.inventory().then((result) => {
-      set({ loaded: true, records: result.lifecycles, taskNames: result.taskNames ?? {}, policy: result.trashPolicy, paused: result.trashSweepStatus.suspended, refreshError: undefined })
+      set({ loaded: true, records: result.lifecycles, taskNames: result.taskNames ?? {}, policy: result.trashPolicy, paused: result.trashSweepStatus.suspended, skipped: result.skipped, refreshError: undefined })
     }).finally(() => { if (inFlight === request) inFlight = null })
     inFlight = request
     return request

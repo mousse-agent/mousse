@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom'
 import { ArchiveRestore, RotateCcw, Trash2 } from '../../lib/icons'
 import { createTrashController, deleteElsewhere, trashRows, type TrashController, type TrashState } from '../../lib/trashInventory'
 import { PermanentDeleteDialog } from './PermanentDeleteDialog'
+import { skippedLine } from '../../lib/threadSearchSkipped'
 
 /** While the section is open the list is re-read this often, so the countdown and the daemon's own sweeps show up. */
 const OPEN_REFRESH_MS = 15_000
@@ -21,7 +22,7 @@ export function RecentlyDeletedSection({ hidden = false }: { hidden?: boolean })
   /** Set when an action started from a row's button; the row may vanish, and keyboard focus must not fall to the page. */
   const refocus = useRef<{ index: number; action: string } | null>(null)
   const controller = useMemo<TrashController>(() => createTrashController({
-    inventory: () => window.mousse.threads.inventory(),
+    inventory: () => window.mousse.threads.inventory(undefined, { includeComputers: true }),
     restore: (threadId) => window.mousse.threads.restore(threadId),
     purge: (threadId, options) => window.mousse.threads.purge(threadId, options)
   }), [])
@@ -131,6 +132,7 @@ export function RecentlyDeletedView({ state, expanded, hidden, actions, now, roo
         <div id={listId} className="threads-sidebar-tree threads-sidebar-trash-list">
           {state.refreshError && <p className="threads-sidebar-trash-error" role="alert">{state.refreshError}</p>}
           {strayNotice && <p className="threads-sidebar-trash-error" role="alert">{strayNotice}</p>}
+          {skippedLine(state.skipped, 'Not listed') && <p className="threads-sidebar-trash-meta" data-testid="sidebar-trash-skipped">{skippedLine(state.skipped, 'Not listed')}</p>}
           {rows.length === 0
             ? <div className="threads-sidebar-empty">{state.loaded ? 'No recently deleted threads' : 'Loading…'}</div>
             : <ul className="threads-sidebar-trash-rows" aria-label="Recently deleted threads">

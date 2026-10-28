@@ -235,20 +235,29 @@ export class MmsListsSource {
     const cutoff = Date.now() - ARCHIVE_KEEP_MS
     const dropped = new Set<string>()
     for (const thread of inventory)
-      if (thread.settledAt && !thread.lineage && new Date(thread.settledAt).getTime() < cutoff) dropped.add(thread.id)
+      if (thread.settledAt && !thread.lineage && new Date(thread.settledAt).getTime() < cutoff)
+        dropped.add(thread.id)
     if (!dropped.size) return snapshot
     // Whatever hangs below a dropped thread goes with it.
     for (let grew = true; grew;) {
       grew = false
       for (const thread of inventory)
-        if (thread.lineage && !dropped.has(thread.id) && dropped.has(thread.lineage.parentThreadId)) {
+        if (
+          thread.lineage &&
+          !dropped.has(thread.id) &&
+          dropped.has(thread.lineage.parentThreadId)
+        ) {
           dropped.add(thread.id)
           grew = true
         }
     }
     const status = { ...snapshot.status }
     for (const id of dropped) delete status[id]
-    return { ...snapshot, threads: snapshot.threads.filter((thread) => !dropped.has(thread.id)), status }
+    return {
+      ...snapshot,
+      threads: snapshot.threads.filter((thread) => !dropped.has(thread.id)),
+      status
+    }
   }
 
   private build(
@@ -267,40 +276,46 @@ export class MmsListsSource {
       const entry = statusOf(rolledUp[thread.id] ?? activity[thread.id], turns[thread.id], own)
       if (entry) status[thread.id] = entry
     }
-    return mmsJson({
-      kind: 'mousse.lists',
-      version: LISTS_VERSION,
-      projects: s.projects.listProjects().map((project) => ({
-        id: project.id,
-        name: project.name,
-        path: project.path,
-        order: project.order,
-        pinnedAt: project.pinnedAt
-      })),
-      threads: threads.map((thread) => ({
-        id: thread.id,
-        name: thread.name,
-        projectId: thread.projectId,
-        createdAt: thread.createdAt,
-        updatedAt: thread.updatedAt,
-        order: thread.order,
-        pinnedAt: thread.pinnedAt,
-        settledAt: thread.settledAt,
-        startedAt: thread.startedAt,
-        worktreeEnabled: thread.worktreeEnabled || undefined,
-        ...(own
-          ? {
-              lineage: thread.lineage,
-              permissionMode: thread.permissionMode,
-              modelOverride: thread.modelOverride,
-              startedFrom: thread.startedFrom,
-              sentFrom: thread.sentFrom
-            }
-          : {})
-      })),
-      status,
-      chats
-    }, undefined, MAX_DISPLAY_JSON_NODES) as ListsSnapshot
+    return mmsJson(
+      {
+        kind: 'mousse.lists',
+        version: LISTS_VERSION,
+        projects: s.projects.listProjects().map((project) => ({
+          id: project.id,
+          name: project.name,
+          path: project.path,
+          order: project.order,
+          pinnedAt: project.pinnedAt
+        })),
+        threads: threads.map((thread) => ({
+          id: thread.id,
+          name: thread.name,
+          projectId: thread.projectId,
+          createdAt: thread.createdAt,
+          updatedAt: thread.updatedAt,
+          order: thread.order,
+          pinnedAt: thread.pinnedAt,
+          settledAt: thread.settledAt,
+          startedAt: thread.startedAt,
+          worktreeEnabled: thread.worktreeEnabled || undefined,
+          ...(own
+            ? {
+                lineage: thread.lineage,
+                permissionMode: thread.permissionMode,
+                modelOverride: thread.modelOverride,
+                startedFrom: thread.startedFrom,
+                sentFrom: thread.sentFrom
+              }
+            : {})
+        })),
+        status,
+        chats
+      },
+      undefined,
+      // The larger bound is for another computer of the user. A phone's parser is not known to take more than the
+      // wire's 16,384 nodes, so the lists it reads stay within them (as before).
+      own ? MAX_DISPLAY_JSON_NODES : undefined
+    ) as ListsSnapshot
   }
 
   /**

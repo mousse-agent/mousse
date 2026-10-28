@@ -1123,7 +1123,9 @@ export function registerGuiIpc(
   registerStorageHandler('threads:purge', async (_e, threadId: string, options: Record<string, unknown> = {}) =>
     guiMms.request('threads.purge', { ...options, threadId })
   )
-  registerStorageHandler('threads:inventory', async (_e, threadId?: string) => guiMms.request('threads.inventory', { threadId }))
+  registerStorageHandler('threads:inventory', async (_e, threadId?: string, options?: { includeComputers?: boolean }) =>
+    guiMms.request('threads.inventory', { threadId, ...(options?.includeComputers === true ? { includeComputers: true } : {}) })
+  )
   registerStorageHandler('threads:configureTrash', async (_e, policy: { graceDays: number; automaticPurge: boolean }) => guiMms.request('threads.configureTrash', policy))
   registerStorageHandler('storage:policy', async () => guiMms.request('storage.policy', {}))
   registerStorageHandler('storage:reviewDismiss', async () => guiMms.request('storage.reviewDismiss', {}))

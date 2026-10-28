@@ -1026,6 +1026,9 @@ function mergeSearchResults(local: ThreadSearchResult[], remote: ThreadSearchRes
   return out.slice(0, limit)
 }
 
+/** Transcripts a routed search reads: the newest threads, as the agent tool's search does. */
+const ROUTED_SEARCH_MESSAGE_THREADS = 100
+
 function lifecycleExpectedGeneration(params: Record<string, unknown>): number | undefined {
   const value = params.expectedGeneration
   if (value === undefined) return undefined
@@ -1359,7 +1362,12 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
           : 50
       // Search hides subagents for every client, the desktop app included: a subagent is reached
       // through its parent's Lineage, not as a result of its own.
-      const results = ctx.mms.threads.searchThreads(query, limit, { hideSubagents: true })
+      // A computer asked by another of the user's computers reads the transcripts of its newest threads only,
+      // so a search typed on one computer is bounded work on the others.
+      const results = ctx.mms.threads.searchThreads(query, limit, {
+        hideSubagents: true,
+        ...(ctx.connection?.clientType === 'bridge' ? { maxMessageThreads: ROUTED_SEARCH_MESSAGE_THREADS } : {})
+      })
       // A window also searches the user's other computers (each with a short deadline) and is told which it could not.
       const remote =
         ctx.connection?.clientType === 'gui' && ctx.mms.remoteLists
@@ -3373,7 +3381,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const project = ctx.mms.projects.openProject(destination)
       const projects = ctx.mms.projects.listProjects()
       ctx.emitEvent?.('projects.updated', { projects })
-      return { project, projects }
+      return { project, projects: listedProjectsFor(ctx, projects) }
     }
     case 'pullRequests.get': {
       const p = isObject(params) ? params : {}
@@ -3606,9 +3614,10 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
             if (meta.id === record.taskId && typeof meta.name === 'string' && meta.name.trim()) taskNames[record.taskId] = meta.name
           } catch { /* Missing/invalid metadata remains identified by the stable task ID. */ }
         }
-        // A window also lists what is in the trash of the user's other computers (each with a short deadline).
+        // Recently deleted also lists what is in the trash of the user's other computers (each with a short
+        // deadline). Another caller of this method, such as Storage settings, asks about this computer alone.
         const remote =
-          ctx.connection?.clientType === 'gui' && ctx.mms.remoteLists
+          p.includeComputers === true && ctx.connection?.clientType === 'gui' && ctx.mms.remoteLists
             ? await ctx.mms.remoteLists.inventory(ctx.connection.id)
             : undefined
         return {
