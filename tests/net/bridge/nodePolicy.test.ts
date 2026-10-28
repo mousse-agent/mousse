@@ -717,23 +717,38 @@ describe('blocking a device on a computer', () => {
     const { a, join, device, self } = await authority()
     const one = await join(await inviteText(a), 'one')
     const two = await join(await inviteText(a), 'two')
+    // Shell access (a terminal, an editor connection) is off until the owner turns it on, per device.
     expect((await device(one.node)).policy).toEqual({
       blocked: false,
       maxPermissionMode: 'accept_edits',
-      terminal: false
+      terminal: false,
+      editor: false
     })
 
     await a.request('bridge.policy', { node: one.node, maxPermissionMode: 'full', terminal: true })
     expect((await device(one.node)).policy).toEqual({
       blocked: false,
       maxPermissionMode: 'full',
-      terminal: true
+      terminal: true,
+      editor: false
+    })
+    // The editor switch is its own: it changes neither of the others, and nothing else changes it.
+    await a.request('bridge.policy', { node: one.node, editor: true })
+    expect((await device(one.node)).policy).toEqual({
+      blocked: false,
+      maxPermissionMode: 'full',
+      terminal: true,
+      editor: true
     })
     expect((await device(two.node)).policy).toEqual({
       blocked: false,
       maxPermissionMode: 'accept_edits',
-      terminal: false
+      terminal: false,
+      editor: false
     })
+    await expect(
+      a.request('bridge.policy', { node: one.node, editor: 'yes' })
+    ).rejects.toMatchObject({ code: 'bad_request' })
 
     // Unknown devices, this computer and unknown modes are refused; nothing is written for them.
     await expect(
@@ -767,7 +782,8 @@ describe('net_node_policy', () => {
     expect(policy.get(node)).toMatchObject({
       blocked: false,
       maxPermissionMode: 'accept_edits',
-      terminal: false
+      terminal: false,
+      editor: false
     })
     const seen: boolean[] = []
     policy.onChange((event) => seen.push(policy.isBlocked(event.node)))

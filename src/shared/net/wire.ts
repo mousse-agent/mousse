@@ -13,6 +13,7 @@ import type {
 } from './ids'
 import type { Base64Url, NodePublicKeys, Signed } from './identity'
 import type { SnapshotReason, StoredRecord, StreamDescriptor, StreamHead } from './streams'
+import type { TunnelHostKey, TunnelKind, TunnelReason } from './tunnel'
 
 /**
  * Sync protocol messages. Each mux message is one JSON header, optionally
@@ -20,7 +21,7 @@ import type { SnapshotReason, StoredRecord, StreamDescriptor, StreamHead } from 
  * header's `parts` lists the byte length of each part in order.
  * Normative description: docs/net/protocol.md.
  */
-export type Lane = 'control' | 'bulk'
+export type Lane = 'control' | 'bulk' | 'tunnel'
 
 export interface WireError {
   code: NetErrorCode
@@ -346,6 +347,49 @@ export type SpaceJoinResultMessage =
     }
   | { t: 'space.join.result'; space: SpaceId; error: WireError }
 
+/**
+ * Editor tunnels (`tunnel.v1`): a byte stream from the caller to ONE fixed far end on the computer that
+ * answers, its own SSH server. The caller names no host and no port; `kind` is the only choice it has and
+ * `ssh` the only value. The ids are chosen by the opener (128 random bits), so both computers may open
+ * tunnels to each other on one session.
+ */
+export interface TunnelOpenMessage {
+  t: 'tunnel.open'
+  tunnel: string
+  kind: TunnelKind
+}
+/** The far end is connected. Carries the public host keys of the SSH server the computer vouches for. */
+export interface TunnelOpenedMessage {
+  t: 'tunnel.opened'
+  tunnel: string
+  hostKeys: TunnelHostKey[]
+}
+/** Parts: one piece of the byte stream. `end` says the sender will send no more (an empty piece is allowed then). */
+export interface TunnelDataMessage {
+  t: 'tunnel.data'
+  tunnel: string
+  end?: boolean
+  parts: [number]
+}
+/** The receiver wrote `bytes` out; the sender may send that many more. */
+export interface TunnelCreditMessage {
+  t: 'tunnel.credit'
+  tunnel: string
+  bytes: number
+}
+/** Refuses an open, or ends a tunnel now (data still queued is dropped). */
+export interface TunnelCloseMessage {
+  t: 'tunnel.close'
+  tunnel: string
+  reason: TunnelReason
+}
+export type TunnelMessage =
+  | TunnelOpenMessage
+  | TunnelOpenedMessage
+  | TunnelDataMessage
+  | TunnelCreditMessage
+  | TunnelCloseMessage
+
 export type WireMessage =
   | HelloMessage
   | HelloAckMessage
@@ -389,6 +433,7 @@ export type WireMessage =
   | SpaceIdentityGetMessage
   | SpaceIdentityResultMessage
   | SpaceProofCancelMessage
+  | TunnelMessage
 
 export type WireMessageType = WireMessage['t']
 
@@ -399,8 +444,13 @@ export const BULK_MESSAGE_TYPES: ReadonlySet<WireMessageType> = new Set<WireMess
   'space.discovery.result'
 ])
 
-/** Replayed `events` batches go on bulk; live ones on control. */
+/**
+ * Replayed `events` batches go on bulk; live ones on control. The bytes of an editor tunnel go on a lane
+ * of their own, so they neither wait behind a snapshot or a blob nor hold one up. Opening, crediting and
+ * aborting a tunnel are small and go on control.
+ */
 export function laneFor(message: WireMessage): Lane {
   if (message.t === 'events') return message.replay ? 'bulk' : 'control'
+  if (message.t === 'tunnel.data') return 'tunnel'
   return BULK_MESSAGE_TYPES.has(message.t) ? 'bulk' : 'control'
 }

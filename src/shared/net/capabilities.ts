@@ -49,6 +49,8 @@ export const SESSION_CAPABILITIES = [
   'presence.v1',
   'enroll.v1',
   'relay.v1',
-  'space.discovery.v1'
+  'space.discovery.v1',
+  /** Editor tunnels: a byte stream to the peer's SSH server (`tunnel.*` messages and the tunnel lane). */
+  'tunnel.v1'
 ] as const
 export type SessionCapability = (typeof SESSION_CAPABILITIES)[number]

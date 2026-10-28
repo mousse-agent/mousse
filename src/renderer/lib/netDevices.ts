@@ -149,6 +149,9 @@ export function deviceLine(device: Device, now: number): string {
   // What this computer lets the device do here: shown for a computer that works on threads, so the defaults are not a secret.
   if (device.policy && !device.policy.blocked && isComputer(device) && worksOnThreads(device))
     parts.push(`highest mode here: ${describePermissionMode(device.policy.maxPermissionMode)}`, device.policy.terminal ? 'terminals on' : 'terminals off')
+  // Editor connections are shell access too, so when they are on the line says so (off is the default and stays unsaid).
+  if (device.policy && !device.policy.blocked && isComputer(device) && worksOnThreads(device) && device.policy.editor)
+    parts.push('editor connections on')
   if (device.policy?.blocked) parts.push('blocked on this computer')
   return parts.join(' · ')
 }

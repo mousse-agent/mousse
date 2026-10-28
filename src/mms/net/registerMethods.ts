@@ -70,7 +70,7 @@ const keys: Record<NetLocalMethod, readonly string[]> = {
   'bridge.rename': ['node', 'name'],
   'bridge.setCaps': ['node', 'caps'],
   'bridge.setKind': ['node', 'kind'],
-  'bridge.policy': ['node', 'blocked', 'maxPermissionMode', 'terminal'],
+  'bridge.policy': ['node', 'blocked', 'maxPermissionMode', 'terminal', 'editor'],
   'bridge.workOnThreads': ['enabled']
 }
 const SSH_ID = /^[A-Za-z0-9_-]{1,64}$/u
@@ -258,13 +258,16 @@ function validate(method: NetLocalMethod, value: unknown): Record<string, unknow
     if (
       params.blocked === undefined &&
       params.maxPermissionMode === undefined &&
-      params.terminal === undefined
+      params.terminal === undefined &&
+      params.editor === undefined
     )
       throw new DomainRpcError('invalid_params', 'Choose a limit to change')
     if (params.blocked !== undefined && typeof params.blocked !== 'boolean')
       throw new DomainRpcError('invalid_params', 'blocked must be boolean')
     if (params.terminal !== undefined && typeof params.terminal !== 'boolean')
       throw new DomainRpcError('invalid_params', 'terminal must be boolean')
+    if (params.editor !== undefined && typeof params.editor !== 'boolean')
+      throw new DomainRpcError('invalid_params', 'editor must be boolean')
     if (params.maxPermissionMode !== undefined && !isPermissionMode(params.maxPermissionMode))
       throw new DomainRpcError('invalid_params', 'Unknown permission mode')
   }

@@ -128,6 +128,105 @@ describe('real duplex mux', () => {
     a.close()
     expect(await blocked).toBeInstanceOf(NetError)
   })
+  describe('the tunnel lane', () => {
+    const TUNNEL = '0123456789abcdef0123456789abcdef'
+    const piece = (size: number): MuxMessage => ({
+      header: { t: 'tunnel.data', tunnel: TUNNEL, parts: [size] },
+      parts: [new Uint8Array(size).fill(7)]
+    })
+    it('has a window of its own and its own lane number on the wire', async () => {
+      expect(MUX_WINDOWS.tunnel).toBe(256 * 1024)
+      const { a, b, connection } = pair()
+      const lanes: number[] = []
+      connection.b.on('data', (frame: Buffer) => lanes.push(frame[1]))
+      const received = new Promise<MuxMessage>((resolve) =>
+        b.onMessage((lane, value) => lane === 'tunnel' && resolve(value))
+      )
+      await a.send('tunnel', piece(1000))
+      const value = await received
+      expect(lanes).toEqual([2])
+      expect(value.header).toMatchObject({ t: 'tunnel.data', parts: [1000] })
+      expect(value.parts[0]).toHaveLength(1000)
+    })
+    it('only carries tunnel bytes, and tunnel bytes only travel on it', async () => {
+      const { a } = pair()
+      await expect(a.send('bulk', piece(10))).rejects.toMatchObject({ code: 'bad_request' })
+      await expect(a.send('control', piece(10))).rejects.toMatchObject({ code: 'bad_request' })
+      await expect(a.send('tunnel', ping)).rejects.toMatchObject({ code: 'bad_request' })
+    })
+    it('takes turns with bulk: a long transfer does not hold up a tunnel, and control still goes first', async () => {
+      const { a, b } = pair(),
+        received: string[] = []
+      b.onMessage((lane, value) => received.push(`${lane}:${value.header.t}`))
+      await Promise.all([
+        a.send('bulk', message('bulk')),
+        a.send('tunnel', piece(1000)),
+        a.send('control', ping)
+      ])
+      await tick()
+      expect(received).toEqual(['control:ping', 'tunnel:tunnel.data', 'bulk:events'])
+    })
+    it('takes turns the other way too: a busy tunnel does not starve a snapshot', async () => {
+      const { a, connection } = pair(),
+        lanes: number[] = []
+      connection.b.on('data', (frame: Buffer) => lanes.push(frame[1]))
+      // Several pieces queue on the tunnel lane while a long bulk message goes out frame by frame.
+      const pieces = [1, 2, 3].map(() => a.send('tunnel', piece(30_000)))
+      const bulk = a.send('bulk', message('bulk'))
+      await Promise.all([...pieces, bulk])
+      await tick()
+      // The frames alternate: the bulk message keeps moving while the pieces go, and the pieces do not wait for its end.
+      const firstBulk = lanes.indexOf(1),
+        lastTunnel = lanes.lastIndexOf(2)
+      expect(firstBulk).toBeGreaterThan(-1)
+      expect(lastTunnel).toBeGreaterThan(-1)
+      expect(firstBulk).toBeLessThan(lastTunnel)
+      expect(lanes.lastIndexOf(1)).toBeGreaterThan(lastTunnel)
+      expect(lanes.indexOf(2)).toBeLessThan(lanes.lastIndexOf(1))
+    })
+    it('never refuses a close for want of room in a full control queue, and sends it ahead of what waits', async () => {
+      const { a, b, connection } = pair()
+      const received: string[] = []
+      b.onMessage((_lane, value) => received.push(value.header.t))
+      connection.forward.stall()
+      const close = (n: number): MuxMessage => ({
+        header: { t: 'tunnel.close', tunnel: TUNNEL.replace(/.$/u, String(n)), reason: 'blocked' },
+        parts: []
+      })
+      // One message is being sent and the queue behind it is full: another ordinary message is refused.
+      const active = a.send('control', message('control')).catch((error) => error)
+      const waiting = a.send('control', ping).catch((error) => error)
+      await expect(a.send('control', message('control'))).rejects.toMatchObject({
+        code: 'rate_limited'
+      })
+      // A close still goes in, as many as a block of several tunnels makes, and is not refused.
+      const closes = [1, 2, 3, 4].map((n) => a.send('control', close(n)))
+      connection.forward.resume()
+      await Promise.all([active, waiting, ...closes])
+      await tick()
+      // The closes wait ahead of the ordinary message that was already waiting.
+      expect(received.indexOf('ping')).toBeGreaterThan(received.lastIndexOf('tunnel.close'))
+      expect(received.filter((type) => type === 'tunnel.close')).toHaveLength(4)
+    })
+    it('keeps control moving when the tunnel lane has used its credit', async () => {
+      const clock = new FakeClock(),
+        connection = memoryPair(clock),
+        a = new StreamMux(connection.a, { clock })
+      cleanup.push(() => {
+        a.close()
+        connection.cut()
+      })
+      const lanes: number[] = []
+      connection.b.on('data', (frame: Buffer) => lanes.push(frame[1]))
+      // Nobody reads on the far side, so the window of the tunnel lane is spent after 256 KiB.
+      const sent = Array.from({ length: 12 }, () => a.send('tunnel', piece(30_000)).catch((e) => e))
+      await tick()
+      await a.send('control', ping)
+      expect(lanes.at(-1)).toBe(0)
+      a.close()
+      await Promise.all(sent)
+    })
+  })
   it('rejects bounded waiting queue overflow without closing an otherwise valid mux', async () => {
     const { a, b, connection } = pair()
     connection.forward.stall()
@@ -199,7 +298,7 @@ describe('real duplex mux', () => {
   it.each([
     { flags: 0 },
     { version: 2 },
-    { lane: 2 },
+    { lane: 3 },
     { reserved: 1 },
     { flags: 7 },
     { id: 0 },

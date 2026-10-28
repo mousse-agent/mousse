@@ -40,6 +40,7 @@ import type {
   StreamHead,
   StreamId,
   TransportId,
+  TunnelMessage,
   UserId,
   WireMessage
 } from '../../shared/net'
@@ -666,7 +667,10 @@ export interface MuxMessage {
   parts: Uint8Array[]
 }
 
-/** Two lanes with independent credit windows; control is always scheduled first. */
+/**
+ * Three lanes (control, bulk, tunnel) with independent credit windows. Control is always scheduled first;
+ * bulk and tunnel take turns.
+ */
 export interface Mux {
   send(lane: Lane, message: MuxMessage, signal?: AbortSignal): Promise<void>
   onMessage(listener: (lane: Lane, message: MuxMessage) => void): () => void
@@ -715,6 +719,26 @@ export interface QualifiedClockEstimate {
   rttMs: number
   /** Observed wall elapsed minus monotonic elapsed since this sample. */
   wallDeltaMs: number
+}
+
+/**
+ * What an editor tunnel needs of a session: who is on the other side, whether the session is still up,
+ * and a way to send one tunnel message (the bytes of a tunnel go on their own lane).
+ */
+export interface TunnelLink {
+  readonly peer: SyncSession['peer']
+  state(): SessionState
+  /** Whether both sides negotiated `tunnel.v1`. */
+  supportsTunnels(): boolean
+  /** Rejects `rate_limited` when the lane's queue is full; the tunnel layer waits and sends again. */
+  sendTunnel(message: TunnelMessage, bytes?: Uint8Array): Promise<void>
+  onClosed(listener: (error?: Error) => void): () => void
+}
+
+/** What a session hands the tunnel layer: each `tunnel.*` message from the peer, in the order it arrived. */
+export interface SessionTunnelPort {
+  /** Must not throw for a tunnel it does not know: a message that follows an end is ordinary. */
+  receive(link: TunnelLink, message: TunnelMessage, bytes: Uint8Array | undefined): void
 }
 
 export interface SyncSession {

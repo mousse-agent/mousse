@@ -315,6 +315,19 @@ export class BridgeProfileService {
       }
     })
     routes.register()
+    // The first editor connection a device opens here is shell access: a desktop notification in the windows of
+    // this computer (none, for a computer with no window, which has the `editor.open` row in the audit).
+    this.disposers.add(
+      net.onEditorFirstOpen((node) =>
+        services.events.emit({
+          channel: 'protocol:event',
+          data: {
+            type: 'ui.notify',
+            data: { kind: 'remote-editor', device: deviceNameOf(rt.identity, node) }
+          }
+        })
+      )
+    )
     this.routes = routes
     this.staging = staging
     this.disposers.add(() => routes.close())

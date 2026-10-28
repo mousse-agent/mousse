@@ -507,6 +507,46 @@
     {
       "t": "space.proof.cancel",
       "n": 1
+    },
+    {
+      "t": "tunnel.open",
+      "tunnel": "0123456789abcdef0123456789abcdef",
+      "kind": "ssh"
+    },
+    {
+      "t": "tunnel.opened",
+      "tunnel": "0123456789abcdef0123456789abcdef",
+      "hostKeys": [
+        {
+          "type": "ssh-ed25519",
+          "key": "AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl"
+        }
+      ]
+    },
+    {
+      "t": "tunnel.data",
+      "tunnel": "0123456789abcdef0123456789abcdef",
+      "parts": [
+        1
+      ]
+    },
+    {
+      "t": "tunnel.data",
+      "tunnel": "0123456789abcdef0123456789abcdef",
+      "end": true,
+      "parts": [
+        0
+      ]
+    },
+    {
+      "t": "tunnel.credit",
+      "tunnel": "0123456789abcdef0123456789abcdef",
+      "bytes": 65536
+    },
+    {
+      "t": "tunnel.close",
+      "tunnel": "0123456789abcdef0123456789abcdef",
+      "reason": "editor_off"
     }
   ],
   "events": [

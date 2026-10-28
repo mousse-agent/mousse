@@ -113,7 +113,7 @@ describe('deviceLine', () => {
 })
 
 describe('what this computer lets a device do here, in the device line', () => {
-  const policy = (patch: Partial<NonNullable<Device['policy']>> = {}) => ({ blocked: false, maxPermissionMode: 'accept_edits' as const, terminal: false, ...patch })
+  const policy = (patch: Partial<NonNullable<Device['policy']>> = {}) => ({ blocked: false, maxPermissionMode: 'accept_edits' as const, terminal: false, editor: false, ...patch })
   const computer = (patch: Partial<Device> = {}) => device({ kind: 'computer', caps: ['read', 'chat', 'write', 'settings'], policy: policy(), ...patch })
 
   it('shows the default limit and the terminal switch for a computer that works on threads', () => {
@@ -123,6 +123,15 @@ describe('what this computer lets a device do here, in the device line', () => {
   it('shows a raised limit and terminals that were turned on', () => {
     expect(deviceLine(computer({ policy: policy({ maxPermissionMode: 'full', terminal: true }) }), NOW)).toContain('highest mode here: Full access · terminals on')
     expect(deviceLine(computer({ policy: policy({ maxPermissionMode: 'ask' }) }), NOW)).toContain('highest mode here: Ask before acting')
+  })
+
+  it('says editor connections are on when they are, and nothing when they are off (the default)', () => {
+    expect(deviceLine(computer({ policy: policy({ editor: true }) }), NOW)).toBe('Online · can read, chat, write, work on threads · highest mode here: Auto-accept edits · terminals off · editor connections on')
+    expect(deviceLine(computer({ policy: policy({ editor: false }) }), NOW)).not.toContain('editor')
+    // Not for a device that is blocked here, a phone, or one that does not work on threads.
+    expect(deviceLine(computer({ policy: policy({ editor: true, blocked: true }) }), NOW)).not.toContain('editor')
+    expect(deviceLine(computer({ kind: 'phone', policy: policy({ editor: true }) }), NOW)).not.toContain('editor')
+    expect(deviceLine(computer({ caps: ['read', 'chat', 'write'], policy: policy({ editor: true }) }), NOW)).not.toContain('editor')
   })
 
   it('says nothing of limits for a phone, for a computer that does not work on threads, or from a daemon without them', () => {
@@ -161,7 +170,7 @@ describe('works on threads and blocking', () => {
   })
 
   it('says a device is blocked on this computer, and reads a daemon without policy as before', () => {
-    const policy = { blocked: true, maxPermissionMode: 'accept_edits' as const, terminal: false }
+    const policy = { blocked: true, maxPermissionMode: 'accept_edits' as const, terminal: false, editor: false }
     expect(deviceLine(device({ policy }), NOW)).toBe('Online · can read, chat, write · blocked on this computer')
     expect(deviceLine(device({ policy: { ...policy, blocked: false } }), NOW)).toBe('Online · can read, chat, write')
     expect(deviceLine(device(), NOW)).toBe('Online · can read, chat, write')

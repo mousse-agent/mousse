@@ -56,7 +56,8 @@ import type {
   SyncSession,
   StreamStore,
   StreamAuthority,
-  PeerRef
+  PeerRef,
+  TunnelLink
 } from './contracts'
 import type { SpaceJoinAdmissionPort } from './enrollment/quarantine'
 import { systemClock } from './clock'
@@ -78,11 +79,20 @@ import { parseSshRoute, readSshApproval } from './transports/ssh'
 import { SshBootstrap, type SshBootstrapOptions } from './ssh/bootstrap'
 import {
   EditorSshConfig,
+  EditorSshError,
   unavailableEditorSsh,
   type EditorSshOptions,
   type LiveComputer
 } from './editor/sshConfig'
+import {
+  EditorTunnels,
+  TunnelError,
+  type ClientTunnel,
+  type EditorTunnelOptions
+} from './editor/tunnel'
+import type { EditorTunnelInfo, TunnelReason } from '../../shared/net/tunnel'
 import { isJoinVia } from '../../shared/net/via'
+import { isListedComputer } from '../../shared/net/listedComputer'
 import {
   PHONE_ENDPOINTS_METHOD,
   PHONE_WEBRTC_OFFER_METHOD,
@@ -121,7 +131,8 @@ import {
 const policyView = (policy: NodePolicy): BridgeNodePolicy => ({
   blocked: policy.blocked,
   maxPermissionMode: policy.maxPermissionMode,
-  terminal: policy.terminal
+  terminal: policy.terminal,
+  editor: policy.editor
 })
 
 interface NetConfiguration {
@@ -256,6 +267,9 @@ export class NetService {
   private shutdownComplete = false
   private sshBootstrap?: SshBootstrap
   private editorSshConfig?: EditorSshConfig
+  /** The editor tunnels this computer carries for its other computers, and those it opened to them. */
+  private tunnels?: EditorTunnels
+  private readonly editorFirstOpen = new Set<(node: NodeId) => void>()
   /** Loopback listeners that exist only while a remote machine joins; never persisted. */
   private readonly enrollmentListeners = new Set<DirectTransport>()
   /** The optional Mousse ID module; absent in builds and tests that leave it out. */
@@ -277,6 +291,17 @@ export class NetService {
        * built in a test never reaches the real home directory.
        */
       editorSsh?: EditorSshOptions
+      /**
+       * Tests point the far end of an editor tunnel at an echo server on loopback (it is this computer's own
+       * SSH server otherwise), the host keys at a folder they made, and the limits at small numbers.
+       */
+      editorTunnel?: Pick<
+        EditorTunnelOptions,
+        'farEnd' | 'hostKeyDirectories' | 'hostTrust' | 'perNode' | 'total' | 'opensPerMinute'
+      > & {
+        /** False: sessions do not offer `tunnel.v1`, like a build from before it (tests). */
+        offer?: boolean
+      }
       /** Tests replace the native WebRTC stack and this computer's addresses. */
       phoneWebRtc?: {
         factory?: PeerConnectionFactory
@@ -539,8 +564,28 @@ export class NetService {
         remoteLists: new SqliteRemoteLists(db, this.clock),
         rpc
       }
+      const { offer: _offer, ...tunnelOptions } = this.options.editorTunnel ?? {}
+      this.tunnels = new EditorTunnels({
+        clock: this.clock,
+        audit: this.state.audit,
+        refusal: (link) => this.tunnelRefusal(link),
+        transportOf: (link) => this.sessionLinks.get(link)?.transport,
+        onFirstOpen: (node) => {
+          for (const listener of this.editorFirstOpen) {
+            try {
+              listener(node)
+            } catch {
+              // A notice that cannot be shown never stops a tunnel.
+            }
+          }
+        },
+        ...tunnelOptions
+      })
       // A block ends what the device is doing here now, not only what it asks for next.
       this.policyListener = policy.onChange((event) => {
+        // An editor tunnel is shell access: a block, or its switch going off, ends the device's tunnels now. This
+        // comes first, and cannot throw, so nothing below it that fails can leave a tunnel standing.
+        this.tunnels?.reconcile()
         if (event.after.blocked && !event.before.blocked) this.endBlockedNode(event.node)
         // Terminal output is for a device whose terminal switch is on; switching it off ends the stream at once.
         else if (event.before.terminal && !event.after.terminal)
@@ -550,6 +595,8 @@ export class NetService {
       })
       this.domain = this.options.composeRuntime?.(this.state) ?? undefined
       this.rosterListener = identity.onRosterChanged((user) => {
+        // A computer that lost "Works on threads" (or was revoked) keeps no editor tunnel either.
+        this.tunnels?.reconcile()
         // A computer that lost "Works on threads" (or was revoked) keeps nothing open for it, as a block does.
         this.endPrivateServing(
           this.domain?.privateStreams?.release((node) => {
@@ -839,7 +886,8 @@ export class NetService {
             ...(params.maxPermissionMode === undefined
               ? {}
               : { maxPermissionMode: params.maxPermissionMode as PermissionMode }),
-            ...(params.terminal === undefined ? {} : { terminal: params.terminal as boolean })
+            ...(params.terminal === undefined ? {} : { terminal: params.terminal as boolean }),
+            ...(params.editor === undefined ? {} : { editor: params.editor as boolean })
           })
           this.emit()
           return { policy: policyView(policy) }
@@ -853,8 +901,11 @@ export class NetService {
             this.config = { ...this.config, workOnThreads: params.enabled === true }
             this.saveConfig()
             // Off ends the private streams that are open, not only the next call.
-            if (was && params.enabled !== true)
+            if (was && params.enabled !== true) {
               this.endPrivateServing(this.domain?.privateStreams?.release() ?? [])
+              // ...and the editor tunnels, which are shell access on this computer.
+              this.tunnels?.reconcile()
+            }
             this.emit()
           }
           return { enabled: this.config.workOnThreads !== false }
@@ -1540,6 +1591,8 @@ export class NetService {
       if (this.config.workOnThreads === false) return false
       return access.kind !== 'terminal' || rt.policy.get(peer.node).terminal
     }
+    // Sessions offer editor tunnels, unless a test stands in for a build from before them.
+    const offered = this.options.editorTunnel?.offer !== false
     const session = new NetSyncSession({
       ...this.domain?.session,
       channel,
@@ -1555,6 +1608,13 @@ export class NetService {
       // rpc.v1 also carries shared Net authority transfer on Spaces-only sessions.
       // Method-family policy is enforced by the dispatcher on every entry point.
       rpc: rt.rpc,
+      // Editor tunnels (`tunnel.v1`). A domain that lists its capabilities gets this one added to the list.
+      ...(offered ? { tunnels: this.tunnels } : {}),
+      ...(offered && this.domain?.session?.capabilities
+        ? {
+            capabilities: [...new Set([...this.domain.session.capabilities, 'tunnel.v1' as const])]
+          }
+        : {}),
       clock: this.clock,
       isStreamQuiesced: (stream) => this.streamQuiesced(stream),
       isSpaceQuiesced: (space) => this.archiveFences.has(space),
@@ -1920,6 +1980,110 @@ export class NetService {
         // Not authenticated yet: its hello is checked against the new roster.
       }
     }
+  }
+  /**
+   * Why `link`'s device may not have an editor tunnel on this computer right now, or undefined. An editor
+   * tunnel is shell access (an SSH login on this computer's own SSH server), so it needs everything a
+   * terminal needs and a switch of its own. Read from the live policy and roster on every open and on every
+   * change, so a tunnel never outlives its permission.
+   */
+  private tunnelRefusal(link: TunnelLink): TunnelReason | undefined {
+    const rt = this.state
+    if (!rt || !this.featureEnabled('netBridge')) return 'net_off'
+    let node: NodeId
+    try {
+      node = link.peer.node
+    } catch {
+      return 'capability'
+    }
+    if (rt.policy.isBlocked(node)) return 'blocked'
+    let caps: readonly NodeCapability[]
+    try {
+      // From the roster, not from what the session last saw: a grant taken away counts at once.
+      caps = this.currentNode(node).caps
+    } catch {
+      return 'capability'
+    }
+    if (!caps.includes('settings')) return 'capability'
+    if (this.config.workOnThreads === false) return 'setting_off'
+    if (!rt.policy.get(node).editor) return 'editor_off'
+    return undefined
+  }
+  /** The first editor tunnel a device ever opens on this computer (a desktop notification for the owner). */
+  onEditorFirstOpen(listener: (node: NodeId) => void): () => void {
+    this.editorFirstOpen.add(listener)
+    return () => this.editorFirstOpen.delete(listener)
+  }
+  /** The editor tunnels that are open, carried here or opened from here. */
+  editorTunnelList(node?: NodeId): ReturnType<EditorTunnels['list']> {
+    return this.tunnels?.list(node) ?? []
+  }
+  /**
+   * Opens an editor tunnel to the SSH server of another of this user's computers. The caller names only the
+   * computer: that computer decides what its far end is. The computer's public SSH host keys come back over
+   * Net and are pinned in Mousse's own `known_hosts` before the stream is handed over, so the editor's `ssh`
+   * never asks anyone to trust a key. Rejects with a `TunnelError` whose `reason` is one of the fixed words
+   * (`editor_off`, `blocked`, `no_ssh_server`...), or with the error of the editor settings when the key
+   * cannot be pinned (the tunnel is closed then).
+   */
+  async openEditorTunnel(
+    node: NodeId,
+    signal?: AbortSignal
+  ): Promise<{ tunnel: ClientTunnel; info: EditorTunnelInfo }> {
+    this.assertFeature('netBridge')
+    const rt = this.requireEnrolled(),
+      tunnels = this.tunnels
+    if (!tunnels || node === rt.identity.self()?.node) throw new NetError('bad_request')
+    // A computer of this user's roster only (a device of another user has no session that can carry a tunnel).
+    try {
+      this.currentNode(node)
+    } catch {
+      throw new NetError('bad_request', 'Unknown computer.')
+    }
+    // With editor settings here, the computer needs its alias before anything is opened: the host key is pinned
+    // under it, and a tunnel that would only be closed again must not touch the other computer's SSH server,
+    // write its audit row or raise its notice.
+    const editor = this.editorSsh()
+    if (editor && !(await editor.aliasOf(node)))
+      throw new EditorSshError(
+        'unknown_computer',
+        'This computer has no editor alias for that computer yet.'
+      )
+    let link: NetSyncSession | undefined
+    for (const session of this.sessions) {
+      try {
+        if (session.state() !== 'open' || session.peer.node !== node) continue
+        link = session
+        if (session.supportsTunnels()) break
+      } catch {
+        // Not authenticated yet.
+      }
+    }
+    if (!link) throw new TunnelError('offline')
+    const opened = link
+    return this.track(
+      (async () => {
+        const tunnel = await tunnels.open(opened, signal)
+        let hostKey: EditorTunnelInfo['hostKey'] = 'unpinned'
+        if (editor) {
+          try {
+            hostKey = await editor.pinHostKeys(node, tunnel.hostKeys)
+          } catch (error) {
+            // Strict host-key checking would refuse the key anyway; nothing is left open.
+            tunnel.close()
+            throw error
+          }
+        }
+        return {
+          tunnel,
+          info: {
+            path: tunnel.path,
+            ...(tunnel.transport ? { transport: tunnel.transport } : {}),
+            hostKey
+          }
+        }
+      })()
+    )
   }
   session(node: NodeId): SyncSession {
     this.assertEnabled()
@@ -2400,6 +2564,8 @@ export class NetService {
     this.config = { ...this.config, enabled: false, features: { ...DEFAULT_NET_FEATURE_FLAGS } }
     this.saveConfig()
     this.disabled = true
+    // Every editor tunnel ends now, with its end written to the audit, before the sessions are closed.
+    this.tunnels?.endAll('net_off')
     this.shutdownSignal.abort()
     void this.sshBootstrap?.close()
     // A closed bootstrap refuses everything; enabling again needs a fresh one.
@@ -2608,10 +2774,27 @@ export class NetService {
   /** The other computers of this user, for the aliases an editor opens. Phones have no folders to open. */
   private liveComputers(): LiveComputer[] {
     const view = this.nodes() as {
-      nodes: Array<{ node: NodeId; name: string; kind: string; self: boolean; revoked: boolean }>
+      nodes: Array<{
+        node: NodeId
+        name: string
+        kind: string
+        caps: string[]
+        self: boolean
+        revoked: boolean
+      }>
     }
+    // The same rule as the lists of threads. Only the authority records which devices are computers, so on any
+    // other computer the rest are of unknown kind, and a computer is told by the grant only computers hold.
     return view.nodes
-      .filter((entry) => !entry.self && !entry.revoked && entry.kind === 'computer')
+      .filter(
+        (entry) =>
+          !entry.self &&
+          !entry.revoked &&
+          isListedComputer(
+            entry.kind === 'computer' || entry.kind === 'phone' ? entry.kind : undefined,
+            entry.caps
+          )
+      )
       .map((entry) => ({ node: entry.node, name: entry.name }))
   }
   /**
@@ -2971,6 +3154,8 @@ export class NetService {
   beginShutdown(): void {
     if (this.stopped) return
     this.stopped = true
+    // The tunnels end first, while the audit can still be written.
+    this.tunnels?.endAll('net_off')
     this.shutdownSignal.abort()
     void this.sshBootstrap?.close()
     this.webrtc?.stop()

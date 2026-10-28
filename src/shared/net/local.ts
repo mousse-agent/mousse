@@ -116,6 +116,11 @@ export interface BridgeNodePolicy {
   maxPermissionMode: PermissionMode
   /** The device may open terminals on this computer. */
   terminal: boolean
+  /**
+   * The device may open its editor on a folder of this computer: an SSH login on this computer's own SSH
+   * server, carried over Mousse Net. Shell access as the user, like a terminal. Off until the owner turns it on.
+   */
+  editor: boolean
 }
 export interface NetStatus {
   enabled: boolean

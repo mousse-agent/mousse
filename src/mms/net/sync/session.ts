@@ -15,6 +15,7 @@ import type {
   StreamDescriptor,
   StreamHead,
   StreamId,
+  TunnelMessage,
   UserId,
   WireError,
   WireMessage
@@ -56,11 +57,13 @@ import type {
   QualifiedClockEstimate,
   SecureChannel,
   SessionState,
+  SessionTunnelPort,
   SnapshotReader,
   StreamAuthority,
   StreamStore,
   SubscriptionHandlers,
-  SyncSession
+  SyncSession,
+  TunnelLink
 } from '../contracts'
 import { createMux } from '../link/mux'
 import { systemClock } from '../clock'
@@ -118,6 +121,8 @@ export interface SyncSessionOptions {
   authority?: StreamAuthority
   blobs?: BlobStore
   rpc?: SessionRpcPort
+  /** Receives the `tunnel.*` messages. Without it `tunnel.v1` is not offered and the lane is never used. */
+  tunnels?: SessionTunnelPort
   discovery?: SessionDiscoveryPort
   spaceIdentity?: SessionIdentityPort
   clock?: Clock
@@ -199,7 +204,7 @@ const remoteError = (error: WireError): NetError => {
 }
 
 /** Authenticated normal session. Enrollment-only composition is implemented in P2. */
-export class NetSyncSession implements SyncSession {
+export class NetSyncSession implements SyncSession, TunnelLink {
   private readonly clock: Clock
   private readonly mux: Mux
   private currentState: SessionState = 'connecting'
@@ -280,6 +285,7 @@ export class NetSyncSession implements SyncSession {
           'streams.v1' as const,
           ...(options.blobs ? ['blobs.v1' as const] : []),
           ...(options.rpc ? ['rpc.v1' as const] : []),
+          ...(options.tunnels ? ['tunnel.v1' as const] : []),
           ...(options.discovery || options.spaceIdentity ? ['space.discovery.v1' as const] : [])
         ]
       )
@@ -668,6 +674,24 @@ export class NetSyncSession implements SyncSession {
     this.requireCap('rpc.v1')
     this.sameUser()
     return this.send({ t: 'rpc.cancel', id })
+  }
+  supportsTunnels(): boolean {
+    return this.currentState === 'open' && this.negotiatedCaps.includes('tunnel.v1')
+  }
+  /**
+   * One `tunnel.*` message. The bytes of a tunnel go on their own lane; a full lane queue rejects with
+   * `rate_limited`, which is not a failure of the session (the tunnel layer waits and sends again).
+   */
+  sendTunnel(message: TunnelMessage, bytes?: Uint8Array): Promise<void> {
+    // A session that is closing or revoked answers with a rejection, never with a throw: a tunnel ends as
+    // part of that, and must reach its audit row.
+    try {
+      this.requireCap('tunnel.v1')
+      this.sameUser()
+    } catch (error) {
+      return Promise.reject(error)
+    }
+    return this.send(message, bytes ? [bytes] : [])
   }
   sendEphemeral(message: Extract<WireMessage, { t: 'presence' | 'ephemeral' }>): void {
     this.requireCap('presence.v1')
@@ -1327,6 +1351,17 @@ export class NetSyncSession implements SyncSession {
         )
         return
       }
+      case 'tunnel.open':
+      case 'tunnel.opened':
+      case 'tunnel.data':
+      case 'tunnel.credit':
+      case 'tunnel.close':
+        this.requireCap('tunnel.v1')
+        // Between the user's own computers only; the port decides what each computer may do for the other.
+        this.sameUser()
+        // Called before the first await, so messages reach the port in the order they arrived.
+        this.options.tunnels?.receive(this, h, h.t === 'tunnel.data' ? message.parts[0] : undefined)
+        return
       case 'presence':
       case 'ephemeral':
         this.requireCap('presence.v1')

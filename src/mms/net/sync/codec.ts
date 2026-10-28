@@ -209,6 +209,9 @@ function checkParts(header: WireMessage, parts: readonly Uint8Array[]): void {
     if (!(parts[i] instanceof Uint8Array) || parts[i].byteLength !== lengths[i])
       return fail('Binary part length mismatch.')
   }
+  // An empty piece only ends a stream; it is never how a tunnel keeps a connection alive.
+  if (header.t === 'tunnel.data' && lengths[0] === 0 && !header.end)
+    return fail('An empty tunnel piece must end the stream.')
   if (header.t === 'events' || header.t === 'snapshot.chunk') {
     if (lengths.length !== header.records.length * 2)
       return fail('Each record needs envelope and signature parts.')

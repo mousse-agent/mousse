@@ -92,6 +92,7 @@ export const BRIDGE_HELP = `Usage:
   mousse-cli bridge block <node-id>
   mousse-cli bridge unblock <node-id>
   mousse-cli bridge limits <node-id> [--max-mode ask|accept_edits|full] [--terminal on|off]
+    [--editor on|off]
   mousse-cli bridge caps <node-id> --caps read,chat,write,settings
   mousse-cli bridge kind <node-id> computer|phone
   mousse-cli bridge threads [on|off]
@@ -334,7 +335,7 @@ export function prepareNetCommand(args: ParsedArgs): NetCliRequest {
     'bridge.rename': [],
     'bridge.setCaps': ['caps'],
     'bridge.setKind': [],
-    'bridge.policy': args.subcommand === 'limits' ? ['max-mode', 'terminal'] : [],
+    'bridge.policy': args.subcommand === 'limits' ? ['max-mode', 'terminal', 'editor'] : [],
     'bridge.workOnThreads': []
   }
   const permitted = options[method]
@@ -583,9 +584,12 @@ export function prepareNetCommand(args: ParsedArgs): NetCliRequest {
     else if (args.subcommand === 'unblock') params.blocked = false
     else {
       const mode = stringFlag(args, 'max-mode'),
-        terminal = stringFlag(args, 'terminal')
-      if (mode === undefined && terminal === undefined)
-        invalid('bridge limits requires --max-mode ask|accept_edits|full and/or --terminal on|off.')
+        terminal = stringFlag(args, 'terminal'),
+        editor = stringFlag(args, 'editor')
+      if (mode === undefined && terminal === undefined && editor === undefined)
+        invalid(
+          'bridge limits requires --max-mode ask|accept_edits|full, --terminal on|off and/or --editor on|off.'
+        )
       if (mode !== undefined) {
         if (!isPermissionMode(mode)) invalid('--max-mode requires ask, accept_edits or full.')
         params.maxPermissionMode = mode
@@ -593,6 +597,10 @@ export function prepareNetCommand(args: ParsedArgs): NetCliRequest {
       if (terminal !== undefined) {
         if (terminal !== 'on' && terminal !== 'off') invalid('--terminal requires on or off.')
         params.terminal = terminal === 'on'
+      }
+      if (editor !== undefined) {
+        if (editor !== 'on' && editor !== 'off') invalid('--editor requires on or off.')
+        params.editor = editor === 'on'
       }
     }
   }

@@ -111,7 +111,7 @@ describe('the Devices screen says what a device did', () => {
 
 describe('which devices get an Activity row', () => {
   const computer = (patch: Partial<Device> = {}): Pick<Device, 'kind' | 'policy' | 'caps'> => ({
-    kind: 'computer', caps: ['read', 'chat', 'write', 'settings'], policy: { blocked: false, maxPermissionMode: 'accept_edits', terminal: false }, ...patch
+    kind: 'computer', caps: ['read', 'chat', 'write', 'settings'], policy: { blocked: false, maxPermissionMode: 'accept_edits', terminal: false, editor: false }, ...patch
   })
   const quiet = activity({ entries: [], rules: [], counts: [] })
 

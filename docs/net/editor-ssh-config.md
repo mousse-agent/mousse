@@ -2,7 +2,7 @@
 
 Editors such as VS Code, Cursor, Zed and the JetBrains IDEs open a folder on another computer by running the system `ssh` against a host name. `ssh` reads `~/.ssh/config`, so a `Host` name is the one way to reach every editor. Mousse keeps its own config file with one `Host` name per paired computer and adds one `Include` line for it to `~/.ssh/config`.
 
-The code is `src/mms/net/editor/sshConfig.ts`. The tunnel behind the `ProxyCommand` (`mousse-cli net ssh-proxy`) and the owner's switch come in later changes; until then the names exist but do not connect.
+The code is `src/mms/net/editor/sshConfig.ts`. The tunnel that the `ProxyCommand` will use, and the owner's switch "Editor connections from this device", are in `src/mms/net/editor/tunnel.ts` (see `threat-model.md`, "Editor connections", and `protocol.md` §13). The program the `ProxyCommand` starts (`mousse-cli net ssh-proxy`) comes in a later change; until then the names exist but do not connect. `NetService.openEditorTunnel(node)` opens a tunnel and pins the computer's host keys here, under its alias, before it hands the stream over.
 
 **The rule above all others: Mousse never makes the user's other `ssh` commands fail.** An included file is read for every host, so a file `ssh` dislikes breaks `git push`, `scp` and every other `ssh`, not only the aliases. See [Never breaking ssh](#never-breaking-ssh).
 
@@ -17,6 +17,8 @@ All of it is under `<Mousse home>/ssh`, which is `~/.mousse/ssh` unless `MOUSSE_
 | `ssh/state.json` | Whether the feature is on, when the line was added, whether the notice was seen. Shared by every profile | With the files above |
 | `ssh/profiles/<profile>.json` | One profile's computers and their aliases | With the files above |
 | `~/.ssh/config` | One line: `Include ~/.mousse/ssh/config` | First use (added), Settings undo (removed) |
+
+**Which computers.** The other devices of the roster that are computers, by the rule the lists of threads use (`isListedComputer`): the kind the authority recorded wins, and a device whose kind this computer does not know is a computer if its signed delegation holds "Works on threads", which only computers are given. Only the authority records kinds, so on every other computer the rest are of unknown kind and this is what gives a computer that joined an alias for the authority and for the other computers. A phone and this computer itself have none.
 
 **Profiles.** Every profile of the installation has its own service, and they run together. Each one keeps its own `profiles/<profile>.json` and only ever adds, renames or removes its own computers and their pinned keys. The `ssh/config` that `ssh` reads is the merge of all profile files, written under one lock that all profiles in the process share. One `Include` line serves all of them. Aliases are unique across profiles, also when the same computer is paired in two profiles.
 

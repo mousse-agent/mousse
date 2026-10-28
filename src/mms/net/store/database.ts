@@ -100,6 +100,7 @@ export class NetDatabase {
       this.database.exec('BEGIN IMMEDIATE')
       try {
         this.database.exec(SCHEMA)
+        this.addMissingColumns()
         this.database
           .prepare('INSERT OR IGNORE INTO net_schema_migrations VALUES(1,?)')
           .run(integer(this.clock.now()))
@@ -152,6 +153,24 @@ export class NetDatabase {
       }
       throw translated
     }
+  }
+
+  /**
+   * Columns added after a table first shipped. Each is added only when the table lacks it, with a default
+   * that is the safe value, and `user_version` does not move: an older build still reads and writes the
+   * table (it names its columns, and the new one takes its default), so a profile can go back to it.
+   */
+  private addMissingColumns(): void {
+    const has = (table: string, column: string): boolean =>
+      this.database
+        .prepare(`PRAGMA table_info(${table})`)
+        .all()
+        .some((row) => row.name === column)
+    // "Editor connections from this device": off for every device that already has a row.
+    if (!has('net_node_policy', 'editor'))
+      this.database.exec(
+        'ALTER TABLE net_node_policy ADD COLUMN editor INTEGER NOT NULL DEFAULT 0 CHECK(editor IN (0,1))'
+      )
   }
 
   get inTransaction(): boolean {
@@ -317,7 +336,7 @@ CREATE TABLE IF NOT EXISTS net_quota_reservations(scope TEXT NOT NULL REFERENCES
 CREATE TABLE IF NOT EXISTS net_rate_config(scope TEXT NOT NULL, principal TEXT NOT NULL, max_units INTEGER NOT NULL, window_ms INTEGER NOT NULL, last_now INTEGER NOT NULL, PRIMARY KEY(scope,principal)) STRICT;
 CREATE TABLE IF NOT EXISTS net_rate_charges(scope TEXT NOT NULL, principal TEXT NOT NULL, id TEXT NOT NULL, created_at INTEGER NOT NULL, units INTEGER NOT NULL, PRIMARY KEY(scope,principal,id), FOREIGN KEY(scope,principal) REFERENCES net_rate_config(scope,principal)) STRICT;
 CREATE INDEX IF NOT EXISTS net_rate_window ON net_rate_charges(scope,principal,created_at);
-CREATE TABLE IF NOT EXISTS net_node_policy(node TEXT PRIMARY KEY, blocked INTEGER NOT NULL CHECK(blocked IN (0,1)), max_permission_mode TEXT NOT NULL, terminal INTEGER NOT NULL CHECK(terminal IN (0,1)), created_at INTEGER NOT NULL) STRICT;
+CREATE TABLE IF NOT EXISTS net_node_policy(node TEXT PRIMARY KEY, blocked INTEGER NOT NULL CHECK(blocked IN (0,1)), max_permission_mode TEXT NOT NULL, terminal INTEGER NOT NULL CHECK(terminal IN (0,1)), editor INTEGER NOT NULL DEFAULT 0 CHECK(editor IN (0,1)), created_at INTEGER NOT NULL) STRICT;
 CREATE TABLE IF NOT EXISTS bridge_audit(id INTEGER PRIMARY KEY AUTOINCREMENT, at INTEGER NOT NULL, node TEXT NOT NULL, kind TEXT NOT NULL CHECK(kind IN ('change','refused')), method TEXT NOT NULL, thread TEXT, project TEXT, outcome TEXT NOT NULL) STRICT;
 CREATE INDEX IF NOT EXISTS bridge_audit_node ON bridge_audit(node,kind,id);
 CREATE TABLE IF NOT EXISTS bridge_audit_reads(node TEXT NOT NULL, hour INTEGER NOT NULL, calls INTEGER NOT NULL, bytes INTEGER NOT NULL, PRIMARY KEY(node,hour)) STRICT;

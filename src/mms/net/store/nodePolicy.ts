@@ -16,16 +16,20 @@ export interface NodePolicy {
   maxPermissionMode: PermissionMode
   /** The device may open terminals on this computer. */
   terminal: boolean
+  /** The device may open its editor on a folder of this computer, over SSH to this computer's own SSH server. */
+  editor: boolean
   createdAt: number
 }
 export type NodePolicyChange = Partial<
-  Pick<NodePolicy, 'blocked' | 'maxPermissionMode' | 'terminal'>
+  Pick<NodePolicy, 'blocked' | 'maxPermissionMode' | 'terminal' | 'editor'>
 >
 
 /** A new computer starts at Auto-accept edits; the owner raises it to Full access per device. */
 export const DEFAULT_MAX_PERMISSION_MODE: PermissionMode = 'accept_edits'
 /** Terminals from another device are off until the owner turns them on for that device. */
 export const DEFAULT_TERMINAL_ACCESS = false
+/** Editor connections from another device are off until the owner turns them on for that device. */
+export const DEFAULT_EDITOR_ACCESS = false
 
 export interface NodePolicyEvent {
   node: NodeId
@@ -38,8 +42,11 @@ interface Row {
   blocked: number
   max_permission_mode: string
   terminal: number
+  editor: number
   created_at: number
 }
+
+const COLUMNS = 'node,blocked,max_permission_mode,terminal,editor,created_at'
 
 /** `net_node_policy`, in the Net database. A node without a row has the defaults. */
 export class SqliteNodePolicy {
@@ -62,9 +69,7 @@ export class SqliteNodePolicy {
 
   get(node: NodeId): NodePolicy {
     const row = this.db.database
-      .prepare(
-        'SELECT node,blocked,max_permission_mode,terminal,created_at FROM net_node_policy WHERE node=?'
-      )
+      .prepare(`SELECT ${COLUMNS} FROM net_node_policy WHERE node=?`)
       .get(node) as Row | undefined
     return row ? this.read(row) : this.defaults(node)
   }
@@ -75,9 +80,7 @@ export class SqliteNodePolicy {
   list(): NodePolicy[] {
     return (
       this.db.database
-        .prepare(
-          'SELECT node,blocked,max_permission_mode,terminal,created_at FROM net_node_policy ORDER BY created_at,node'
-        )
+        .prepare(`SELECT ${COLUMNS} FROM net_node_policy ORDER BY created_at,node`)
         .all() as unknown as Row[]
     ).map((row) => this.read(row))
   }
@@ -86,6 +89,7 @@ export class SqliteNodePolicy {
     if (
       (change.blocked !== undefined && typeof change.blocked !== 'boolean') ||
       (change.terminal !== undefined && typeof change.terminal !== 'boolean') ||
+      (change.editor !== undefined && typeof change.editor !== 'boolean') ||
       (change.maxPermissionMode !== undefined && !isPermissionMode(change.maxPermissionMode))
     )
       throw new NetError('bad_request')
@@ -96,6 +100,7 @@ export class SqliteNodePolicy {
           ...before,
           ...(change.blocked === undefined ? {} : { blocked: change.blocked }),
           ...(change.terminal === undefined ? {} : { terminal: change.terminal }),
+          ...(change.editor === undefined ? {} : { editor: change.editor }),
           ...(change.maxPermissionMode === undefined
             ? {}
             : { maxPermissionMode: change.maxPermissionMode })
@@ -103,14 +108,15 @@ export class SqliteNodePolicy {
       this.db.charge(1)
       this.db.database
         .prepare(
-          'INSERT INTO net_node_policy(node,blocked,max_permission_mode,terminal,created_at) VALUES(?,?,?,?,?) ' +
-            'ON CONFLICT(node) DO UPDATE SET blocked=excluded.blocked,max_permission_mode=excluded.max_permission_mode,terminal=excluded.terminal'
+          'INSERT INTO net_node_policy(node,blocked,max_permission_mode,terminal,editor,created_at) VALUES(?,?,?,?,?,?) ' +
+            'ON CONFLICT(node) DO UPDATE SET blocked=excluded.blocked,max_permission_mode=excluded.max_permission_mode,terminal=excluded.terminal,editor=excluded.editor'
         )
         .run(
           node,
           after.blocked ? 1 : 0,
           after.maxPermissionMode,
           after.terminal ? 1 : 0,
+          after.editor ? 1 : 0,
           after.createdAt || this.clock.now()
         )
       event = { node, before, after: this.get(node) }
@@ -143,6 +149,7 @@ export class SqliteNodePolicy {
       blocked: false,
       maxPermissionMode: DEFAULT_MAX_PERMISSION_MODE,
       terminal: DEFAULT_TERMINAL_ACCESS,
+      editor: DEFAULT_EDITOR_ACCESS,
       createdAt: 0
     }
   }
@@ -155,6 +162,8 @@ export class SqliteNodePolicy {
         ? row.max_permission_mode
         : 'ask',
       terminal: row.terminal === 1,
+      // Anything but a stored 1 reads as off, so a value this version does not know never grants shell access.
+      editor: row.editor === 1,
       createdAt: row.created_at
     }
   }
