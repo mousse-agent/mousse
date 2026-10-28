@@ -48,7 +48,7 @@ const SCOPE_KEY_SECRET = 'editor/endpoint/scope-key'
 
 export interface EditorEndpointOptions {
   keys: Pick<KeyStore, 'getSecret' | 'putSecret'>
-  /** The system's host; none means the endpoint is unavailable (Windows, until its host exists). */
+  /** The system's host; none means the endpoint is unavailable (Windows without its helper). */
   host: ProcessHost | undefined
   /** What the connections do that the audit says. Counts and kinds only. */
   onEvent?: (event: EndpointEvent) => void
@@ -65,7 +65,8 @@ export class EditorEndpoint implements EditorEndpointPort {
   constructor(private readonly options: EditorEndpointOptions) {}
 
   available(): boolean {
-    return this.options.host !== undefined
+    const host = this.options.host
+    return host !== undefined && host.ready?.() !== false
   }
 
   private key(): EndpointHostKey {

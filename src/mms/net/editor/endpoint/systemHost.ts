@@ -1,14 +1,16 @@
 import type { ProcessHost } from './host'
 import { createUnixHost } from './unixHost'
+import { createWindowsHost, findSshdHelper } from './windowsHost'
 
 /**
  * The host of the system this daemon runs on, or none when the endpoint cannot run there. Linux and macOS have
- * one. Windows has none yet: its host (a helper program named `sshd.exe` for each session, and a Job object for
- * each device) is the next change, and goes here. Until then a Windows computer carries editor connections to
- * its own OpenSSH server, as it did before the endpoint existed.
+ * one. Windows has one when the helper `sshd.exe` is there (in a packaged app, always; in a checkout, once
+ * `native/sshd-helper` is built); without it a Windows computer carries editor connections to its own OpenSSH
+ * server, as it did before the endpoint existed.
  */
 export function systemProcessHost(
-  platform: NodeJS.Platform = process.platform
+  platform: NodeJS.Platform = process.platform,
+  helper: () => string | undefined = findSshdHelper
 ): ProcessHost | undefined {
   if (platform === 'linux' || platform === 'darwin') {
     try {
@@ -18,6 +20,10 @@ export function systemProcessHost(
       // the endpoint is unavailable and the system's SSH server is used, and Net starts as it did before.
       return undefined
     }
+  }
+  if (platform === 'win32') {
+    const path = helper()
+    return path ? createWindowsHost({ helper: path }) : undefined
   }
   return undefined
 }

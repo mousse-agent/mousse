@@ -46,7 +46,7 @@ export interface EndpointConnection {
  * SSH login.
  */
 export interface EditorEndpointPort {
-  /** Whether this computer can answer editor connections itself (it cannot on Windows yet). */
+  /** Whether this computer can answer editor connections itself (not on Windows without a working helper). */
   available(): boolean
   /** The public host keys this computer vouches for over Net. May throw when the key cannot be made. */
   hostKeys(): TunnelHostKey[]
