@@ -86,6 +86,7 @@
 .composer-workspace-menu-item svg { flex-shrink: 0; }
 .composer-workspace-menu-item:hover,
 .composer-workspace-menu-item:focus { background: rgba(var(--accent-rgb), 0.12); }
+.composer-workspace-menu-item:disabled { opacity: 0.5; cursor: default; background: transparent; }
 .composer-workspace-menu-item[aria-checked='true'] { color: var(--accent); }
 .composer-workspace-menu-check { margin-left: auto; }
 .composer-workspace-menu-separator { height: 1px; background: var(--border); margin: 5px; }

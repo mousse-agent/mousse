@@ -352,6 +352,7 @@ html.platform-darwin .titlebar-left {
 .usage-dialog { width: min(520px, calc(100vw - 32px)); max-height: min(620px, calc(100vh - 32px)); overflow: auto; padding: 22px; border: 1px solid var(--border); border-radius: 16px; background: var(--bg-secondary); color: var(--text-primary); box-shadow: 0 24px 70px rgba(0,0,0,.45); }
 .usage-heading { display: flex; align-items: center; justify-content: space-between; margin-bottom: 18px; }
 .usage-heading h2 { margin: 0; font-size: 18px; letter-spacing: .01em; }
+.usage-heading h2 .usage-computer { font-weight: 400; color: var(--text-secondary); }
 .usage-heading button { display: grid; place-items: center; padding: 7px; border-radius: 8px; color: var(--text-secondary); }
 .usage-heading button:hover { background: rgba(var(--accent-rgb), .14); color: var(--text-primary); }
 .usage-provider { padding: 14px 14px 16px; border: 1px solid var(--border); border-radius: 12px; background: color-mix(in srgb, var(--bg-tertiary) 55%, transparent); margin-top: 12px; }

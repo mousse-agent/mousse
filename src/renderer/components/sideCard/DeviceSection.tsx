@@ -4,6 +4,7 @@ import { FloatingPortal } from '../../lib/floatingLayer'
 import { ChevronDown, Folder, FolderPlus, Laptop, Server } from '../../lib/icons'
 import { useRunOnDevices } from '../../hooks/useRunOnDevices'
 import { workspaceOnDevice } from '../../lib/remoteComputers'
+import { UNKNOWN_COMPUTER_NAME, offlineLabel, threadComputerState, useComputer } from '../../lib/computers'
 import { composerWorkspaceFor, isComposerWorkspaceLocked, isNewEmptyThread } from '../../lib/newThread'
 import { useAppStore } from '../../stores/appStore'
 import {
@@ -26,26 +27,32 @@ const WORKSPACE_ICONS = { checkout: Folder, worktree: FolderPlus } as const
 const rowIcon = (Icon: typeof Laptop) => <Icon size={14} aria-hidden="true" />
 
 /**
- * Name of the computer the thread runs on. Plain text once the thread has
- * started, while a send is in flight, or when there is nothing to pick; on a
- * new, empty thread it opens a menu to pick where it runs (this computer or a
- * connected one, as in the composer toolbar) and whether it starts in a new
- * worktree. A thread that has started cannot move to another computer, so it
- * only names the one it runs on. Below it, a local thread's folder opens in an editor.
+ * Name of the computer the thread runs on ("This computer" locally, the other
+ * computer's name, and whether it is offline, for a thread that runs there). Plain
+ * text once the thread has started, while a send is in flight, or when there is
+ * nothing to pick; on a new, empty thread it opens a menu to pick where it runs (this
+ * computer or a connected one, as in the composer toolbar) and whether it starts in a
+ * new worktree. A thread that has started cannot move to another computer, so it
+ * only names the one it runs on. Below it, a thread's folder opens in an editor on
+ * this computer; for a thread of another computer the item says where it would open.
  */
 export function DeviceSection({ threadId }: SideCardSectionContext) {
   const name = useAppStore((s) => localDeviceName(s.appInfo?.deviceName))
+  const thread = useAppStore((s) => s.threads.find((entry) => entry.id === s.activeThreadId))
   const isNew = useAppStore((s) => isNewEmptyThread(
     s.activeThreadId,
-    s.threads.find((thread) => thread.id === s.activeThreadId),
+    s.threads.find((entry) => entry.id === s.activeThreadId),
     s.messages.length
   ))
   const locked = useAppStore(isComposerWorkspaceLocked)
+  const computer = useComputer(thread?.node)
   return (
-    <SideCardSection title="Device" threadId={threadId}>
+    <SideCardSection title="Computer" threadId={threadId}>
       {isNew
         ? <DeviceMenuButton threadId={threadId} name={name} locked={locked} />
-        : <DeviceName name={name} />}
+        : thread?.node
+          ? <ComputerName name={computer?.name ?? UNKNOWN_COMPUTER_NAME} state={threadComputerState(thread, computer)} detail={offlineLabel(computer, Date.now())} />
+          : <DeviceName name={name} />}
       <OpenInEditor />
     </SideCardSection>
   )
@@ -55,6 +62,17 @@ function DeviceName({ name }: { name: string }) {
   return <p className="side-card-device-name" title={name}>{name}</p>
 }
 
+/** The other computer a thread runs on, with a note while it cannot be reached. */
+function ComputerName({ name, state, detail }: { name: string; state: 'online' | 'offline' | 'not-shared'; detail: string }) {
+  return (
+    <>
+      <p className="side-card-device-name" title={name}>{name}</p>
+      {state === 'offline' && <p className="side-card-computer-note">{detail}</p>}
+      {state === 'not-shared' && <p className="side-card-computer-note">{name} is not sharing its threads with this computer right now.</p>}
+    </>
+  )
+}
+
 function DeviceMenuButton({ threadId, name, locked }: { threadId: string | null; name: string; locked: boolean }) {
   const draft = useAppStore((s) => s.composerWorkspaceDrafts[s.activeThreadId ?? '__blank__'])
   const thread = useAppStore((s) => s.threads.find((entry) => entry.id === s.activeThreadId))
@@ -62,10 +80,10 @@ function DeviceMenuButton({ threadId, name, locked }: { threadId: string | null;
   const workspace = composerWorkspaceFor(draft, thread)
 
   const [menuOpen, setOpen] = useState(false)
-  const { devices, refresh } = useRunOnDevices()
+  const { devices, notSharing, refresh } = useRunOnDevices()
   const localProjects = useAppStore((s) => s.projects)
   const triggerRef = useRef<HTMLButtonElement>(null)
-  const model = buildDeviceMenu({ localName: name, devices, workspace })
+  const model = buildDeviceMenu({ localName: name, devices, workspace, notSharing })
   const label = runOnLabel(name, devices, workspace.node)
   // Nothing to pick without a project or another device, and nothing can change mid-send.
   const interactive = !locked && hasDeviceChoices(model)
@@ -87,11 +105,8 @@ function DeviceMenuButton({ threadId, name, locked }: { threadId: string | null;
     closeAndFocus()
     const node = id === LOCAL_RUN_ON_ID ? undefined : id as NodeId
     if (node === workspace.node) return
-    // The project carries over only when the picked computer has the same Git repository.
-    void workspaceOnDevice(workspace, localProjects, node).then(
-      (next) => setComposerWorkspaceDraft(threadId, next),
-      () => undefined
-    )
+    // The project carries over only when the picked computer lists the same Git repository.
+    setComposerWorkspaceDraft(threadId, workspaceOnDevice(workspace, localProjects, node))
   }
 
   const chooseWorkspace = (choice: WorkspaceChoice) => {

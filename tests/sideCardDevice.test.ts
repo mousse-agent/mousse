@@ -13,6 +13,8 @@ import {
   localDeviceName,
   menuRowLabel,
   runOnLabel,
+  notSharingReason,
+  thisComputerLacksGrant,
   workspaceDraftForChoice
 } from '../src/renderer/components/sideCard/deviceMenu'
 import type { Device } from '../src/renderer/lib/netDevices'
@@ -79,71 +81,44 @@ describe('picking where a new chat runs', () => {
   const local = [{ id: 'a', name: 'app', path: '/Users/me/app' }, { id: 'b', name: 'lib', path: '/Users/me/lib' }] as never[]
   const node = 'node-1' as Device['node']
   const other = 'node-2' as Device['node']
-  const identity = { roots: ['r1'], remotes: ['example.com/app'] }
+  /** The projects as this computer lists them: its own, and each other computer's with the local project it is the same repository as. */
+  const listed = [
+    ...local,
+    { id: 'node-1:remote-a', name: 'app', path: '/home/studio/app', node, sameAs: 'a' },
+    { id: 'node-1:remote-x', name: 'other', path: '/home/studio/other', node },
+    { id: 'node-2:other-a', name: 'app', path: 'D:\\app', node: other, sameAs: 'b' }
+  ] as never[]
 
-  /** Platform requests as the daemon answers them; the target's project for `roots` is `match`. */
-  function platform(match: Record<string, string | undefined>) {
-    const requests: Array<[string, any]> = []
-    ;(globalThis as { window?: unknown }).window = {
-      mousse: {
-        platformRequest: {
-          request: async (method: string, params: any) => {
-            requests.push([method, params])
-            if (method !== 'bridge.hub.matchProject') throw new Error('unexpected ' + method)
-            const projectId = match[params.target]
-            return projectId ? { projectId } : {}
-          }
-        }
-      }
-    }
-    return requests
-  }
-  afterEach(() => { delete (globalThis as { window?: unknown }).window })
-
-  it('carries a project to another computer by repository, sending the identity and no path', async () => {
-    const requests = platform({ [node]: 'remote-a' })
-    const next = await workspaceOnDevice({ projectId: 'a', worktreeEnabled: true }, local, node, async () => identity)
-    expect(next).toEqual({ projectId: 'remote-a', worktreeEnabled: true, node, localProjectId: 'a' })
-    expect(requests).toEqual([['bridge.hub.matchProject', { target: node, roots: ['r1'], remotes: ['example.com/app'] }]])
-    expect(JSON.stringify(requests)).not.toContain('/Users/me')
+  it('carries a project to another computer when that computer lists the same repository', () => {
+    expect(workspaceOnDevice({ projectId: 'a', worktreeEnabled: true }, listed, node))
+      .toEqual({ projectId: 'node-1:remote-a', worktreeEnabled: true, node, localProjectId: 'a' })
   })
 
-  it('starts without a project, and without a worktree, when nothing matches or the folder is not a repository', async () => {
-    platform({})
-    const none = await workspaceOnDevice({ projectId: 'a', worktreeEnabled: true }, local, node, async () => identity)
-    expect(none).toEqual({ projectId: undefined, worktreeEnabled: false, node, localProjectId: 'a' })
-    const requests = platform({ [node]: 'never' })
-    const plain = await workspaceOnDevice({ projectId: 'b', worktreeEnabled: true }, local, node, async () => null)
-    expect(plain).toEqual({ projectId: undefined, worktreeEnabled: false, node, localProjectId: 'b' })
-    // Nothing to match without a project here, and a failed match does not stop the pick.
-    expect(await workspaceOnDevice({ worktreeEnabled: false }, local, node, async () => identity))
-      .toEqual({ projectId: undefined, worktreeEnabled: false, node })
-    expect(requests).toEqual([])
-    const failing = await workspaceOnDevice({ projectId: 'a', worktreeEnabled: false }, local, node, async () => { throw new Error('gone') })
-    expect(failing).toMatchObject({ projectId: undefined, node, localProjectId: 'a' })
+  it('starts without a project, and without a worktree, when nothing matches or there is no project here', () => {
+    expect(workspaceOnDevice({ projectId: 'b', worktreeEnabled: true }, listed, node))
+      .toEqual({ projectId: undefined, worktreeEnabled: false, node, localProjectId: 'b' })
+    expect(workspaceOnDevice({ worktreeEnabled: false }, listed, node)).toEqual({ projectId: undefined, worktreeEnabled: false, node })
   })
 
-  it('restores the project the draft had here when this computer is picked again', async () => {
-    platform({ [node]: 'remote-a' })
-    const away = await workspaceOnDevice({ projectId: 'a', worktreeEnabled: true }, local, node, async () => identity)
-    const back = await workspaceOnDevice(away, local, undefined)
-    expect(back).toEqual({ projectId: 'a', worktreeEnabled: true })
+  it('restores the project the draft had here when this computer is picked again', () => {
+    const away = workspaceOnDevice({ projectId: 'a', worktreeEnabled: true }, listed, node)
+    expect(workspaceOnDevice(away, listed, undefined)).toEqual({ projectId: 'a', worktreeEnabled: true })
     // A project that was removed meanwhile does not come back.
-    expect(await workspaceOnDevice(away, local.slice(1), undefined)).toEqual({ projectId: undefined, worktreeEnabled: false })
-    // Nothing remembered, nothing restored.
-    expect(await workspaceOnDevice({ projectId: 'remote-x', worktreeEnabled: false, node }, local, undefined))
+    expect(workspaceOnDevice(away, listed.filter((project) => (project as { id: string }).id !== 'a'), undefined)).toEqual({ projectId: undefined, worktreeEnabled: false })
+    // Nothing remembered, nothing restored; another computer's project id never counts as one of this computer's.
+    expect(workspaceOnDevice({ projectId: 'node-1:remote-x', worktreeEnabled: false, node }, listed, undefined))
       .toEqual({ projectId: undefined, worktreeEnabled: false })
   })
 
-  it('matches from the remembered local project when going from one computer to another', async () => {
-    const requests = platform({ [node]: 'remote-a', [other]: undefined })
-    const first = await workspaceOnDevice({ projectId: 'a', worktreeEnabled: false }, local, node, async () => identity)
-    const second = await workspaceOnDevice(first, local, other, async (id) => { expect(id).toBe('a'); return identity })
-    expect(second).toEqual({ projectId: undefined, worktreeEnabled: false, node: other, localProjectId: 'a' })
-    expect(requests.map(([, params]) => params.target)).toEqual([node, other])
+  it('matches from the remembered local project when going from one computer to another', () => {
+    const first = workspaceOnDevice({ projectId: 'a', worktreeEnabled: false }, listed, node)
+    // The other computer lists no project for app, only for lib.
+    expect(workspaceOnDevice(first, listed, other)).toEqual({ projectId: undefined, worktreeEnabled: false, node: other, localProjectId: 'a' })
+    expect(workspaceOnDevice({ projectId: 'b', worktreeEnabled: false }, listed, other))
+      .toEqual({ projectId: 'node-2:other-a', worktreeEnabled: false, node: other, localProjectId: 'b' })
     // Without a remembered local project, the next computer starts empty.
-    const lost = await workspaceOnDevice({ projectId: 'remote-a', worktreeEnabled: false, node }, local, other, async () => identity)
-    expect(lost).toEqual({ projectId: undefined, worktreeEnabled: false, node: other })
+    expect(workspaceOnDevice({ projectId: 'node-1:remote-a', worktreeEnabled: false, node }, listed, other))
+      .toEqual({ projectId: undefined, worktreeEnabled: false, node: other })
   })
 
   it('names the project a draft has on this computer, wherever it runs', () => {
@@ -159,6 +134,9 @@ describe('picking where a new chat runs', () => {
     expect(localWorkspaceFor({ projectId: 'y', worktreeEnabled: true, node }, undefined)).toEqual({ worktreeEnabled: false })
     expect(localWorkspaceFor({ projectId: 'a', worktreeEnabled: true }, undefined)).toEqual({ projectId: 'a', worktreeEnabled: true })
     expect(localWorkspaceFor(undefined, thread({ projectId: 'q' }))).toEqual({ projectId: 'q', worktreeEnabled: false })
+    // An empty chat that was created on another computer is a chat for it.
+    expect(localWorkspaceFor(undefined, thread({ projectId: 'node-1:q', node }))).toEqual({ worktreeEnabled: false })
+    expect(composerWorkspaceFor(undefined, thread({ projectId: 'node-1:q', node }))).toEqual({ projectId: 'node-1:q', worktreeEnabled: false, node })
   })
 })
 
@@ -215,12 +193,35 @@ describe('device menu options', () => {
     expect(model.runOn?.map((option) => option.name)).toEqual(['Mac', 'Old daemon', 'Studio'])
   })
 
-  it('lists this computer first and every connected computer as pickable', () => {
-    const { runOn } = buildDeviceMenu({ localName: 'Mac', devices: [device({ name: 'Studio' })], workspace })
+  it('lists this computer first and every connected computer as pickable when this computer works on threads', () => {
+    const mine = device({ self: true, node: 'node-0' as Device['node'], name: 'Mac', caps: ['read', 'chat', 'write', 'settings'] })
+    // The other computer's own grant is not asked about: routing checks the caller's.
+    const { runOn } = buildDeviceMenu({ localName: 'Mac', devices: [mine, device({ name: 'Studio', caps: ['read', 'chat', 'write'] })], workspace })
     expect(runOn).toEqual([
       { id: 'local', name: 'Mac', active: true, disabled: false },
       { id: 'node-1', name: 'Studio', active: false, disabled: false }
     ])
+    // A list from a daemon that does not name this computer is taken as able.
+    expect(buildDeviceMenu({ localName: 'Mac', devices: [device({ name: 'Studio' })], workspace }).runOn?.[1]).toMatchObject({ disabled: false })
+  })
+
+  it('names the connected computers, and says what is missing, when this computer has no grant to work on threads', () => {
+    const mine = device({ self: true, node: 'node-0' as Device['node'], name: 'Mac', caps: ['read', 'chat', 'write'] })
+    const { runOn } = buildDeviceMenu({ localName: 'Mac', devices: [mine, device({ name: 'Studio', caps: ['read', 'chat', 'write', 'settings'] })], workspace })
+    expect(runOn?.[1]).toEqual({ id: 'node-1', name: 'Studio', active: false, disabled: true, reason: thisComputerLacksGrant('Mac') })
+    expect(thisComputerLacksGrant('Mac')).toContain('on the computer that manages your devices')
+    // Nothing asks for the other computer to be given anything.
+    expect(thisComputerLacksGrant('Mac')).not.toContain('Studio')
+    // A pick that is already made stays pickable, so a person can see where the chat runs.
+    const picked = buildDeviceMenu({ localName: 'Mac', devices: [mine, device({ name: 'Studio' })], workspace: { ...workspace, node: 'node-1' as Device['node'] } })
+    expect(picked.runOn?.[1]).toMatchObject({ active: true, disabled: false })
+  })
+
+  it('names a computer that stopped sharing its threads, and says how to start again, without granting anything', () => {
+    const mine = device({ self: true, node: 'node-0' as Device['node'], name: 'Mac', caps: ['settings'] })
+    const { runOn } = buildDeviceMenu({ localName: 'Mac', devices: [mine, device({ name: 'Studio' })], workspace, notSharing: new Set(['node-1']) })
+    expect(runOn?.[1]).toEqual({ id: 'node-1', name: 'Studio', active: false, disabled: true, reason: notSharingReason('Studio') })
+    expect(notSharingReason('Studio')).toContain('on Studio')
   })
 
   it('marks the picked computer, and none when it is no longer connected', () => {
@@ -252,6 +253,9 @@ describe('device menu options', () => {
     // This computer already selected and nothing else to pick changes nothing; a connected computer does.
     expect(hasDeviceChoices(buildDeviceMenu({ localName: 'Mac', devices: [device({ state: 'closed' })], workspace: noProject }))).toBe(false)
     expect(hasDeviceChoices(buildDeviceMenu({ localName: 'Mac', devices: [device({})], workspace: noProject }))).toBe(true)
+    // A computer that cannot be picked is not a choice.
+    const lacking = device({ self: true, node: 'node-0' as Device['node'], caps: [] })
+    expect(hasDeviceChoices(buildDeviceMenu({ localName: 'Mac', devices: [lacking, device({})], workspace: noProject }))).toBe(false)
   })
 
   it('marks the active workspace choice', () => {
@@ -308,6 +312,18 @@ describe('DeviceSection rendering', () => {
     expect(html).toContain('Mac mini')
     expect(html).not.toContain('<button')
     expect(html).not.toContain('<svg')
+    expect(html).not.toContain('aria-haspopup')
+  })
+
+  it('names the other computer, and offers no editor, for a thread that runs there', () => {
+    seed({
+      activeThreadId: 'nod_studio:t1',
+      threads: [thread({ id: 'nod_studio:t1', node: 'nod_studio', startedAt: '2026-01-01T00:00:01Z', projectId: 'nod_studio:p' } as Partial<Thread>)],
+      appInfo: { platform: 'darwin', repoRoot: '/', llmProvider: 'x', deviceName: 'Mac mini' }
+    })
+    const html = render()
+    expect(html).toContain('Another computer')
+    expect(html).not.toContain('Mac mini')
     expect(html).not.toContain('aria-haspopup')
   })
 

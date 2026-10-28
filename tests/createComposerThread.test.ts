@@ -1,14 +1,6 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import type { Thread } from '../src/shared/types'
-import {
-  RemoteNotConnectedError,
-  createComposerThread,
-  prepareComposerThread,
-  remoteThreadName,
-  resetUnsentRemoteThreads,
-  startRemoteComposerThread
-} from '../src/renderer/lib/createComposerThread'
-import type { Device } from '../src/renderer/lib/netDevices'
+import { createComposerThread, prepareComposerThread } from '../src/renderer/lib/createComposerThread'
 
 describe('blank composer thread creation', () => {
   const thread = { id: 'created-thread' } as Thread
@@ -148,177 +140,54 @@ describe('blank composer workspace selection', () => {
   })
 })
 
-describe('composer thread on another computer', () => {
-  const node = 'node-studio' as Device['node']
-  const device = (patch: Partial<Device> = {}): Device => ({
-    node, name: 'Studio', caps: ['read', 'write', 'chat'], keyEpoch: 1, expiresAt: 0,
-    self: false, revoked: false, state: 'open', kind: 'computer', ...patch
-  })
-  const ref = { nodeId: node, entityId: 'remote-thread' }
-  beforeEach(resetUnsentRemoteThreads)
-  function setup(over: { devices?: Device[]; answers?: Record<string, unknown>; visible?: () => boolean; problem?: string } = {}) {
-    const calls: Array<{ method: string; params: any }> = []
-    const order: string[] = []
-    const answers: Record<string, unknown> = {
-      'bridge.hub.create': { thread: { id: 'remote-thread' } },
-      'bridge.hub.setModel': { ok: true },
-      ...over.answers
+describe('blank composer thread on another computer', () => {
+  const node = 'nod_studio000000000000000000' as never
+  const remoteProject = `${node}:project-there`
+  function setup(thread?: Thread, workspace: { projectId?: string; worktreeEnabled: boolean; node?: typeof node } = { projectId: remoteProject, worktreeEnabled: true, node }) {
+    return {
+      thread,
+      workspace,
+      create: vi.fn(async (projectId: string | undefined, opts: { worktreeEnabled: boolean; node?: string }) => ({ id: `${opts.node ?? ''}:created`, projectId, node: opts.node, ...opts } as Thread)),
+      setWorktreeEnabled: vi.fn(async (id: string, enabled: boolean) => ({ ...thread, id, worktreeEnabled: enabled } as Thread)),
+      update: vi.fn(), activate: vi.fn(), select: vi.fn(async () => {}), stillVisible: () => true
     }
-    const request = vi.fn(async (method: string, params?: unknown) => {
-      calls.push({ method, params })
-      order.push(method)
-      const answer = answers[method]
-      if (answer instanceof Error) throw answer
-      return answer
-    })
-    const open = vi.fn(() => { order.push('open') })
-    const submit = vi.fn(async () => { order.push('submit') })
-    const deps = {
-      node,
-      devices: async () => over.devices ?? [device()],
-      projectId: 'project-there',
-      worktreeEnabled: true,
-      content: 'Fix the parser\nwith care',
-      images: [] as Array<{ name: string; mimeType: string; data: string }>,
-      imageProblem: () => over.problem ?? '',
-      request: request as never,
-      stillVisible: over.visible ?? (() => true),
-      openRemoteThread: open,
-      submit
-    }
-    return { deps, calls, order, open, submit, request }
   }
 
-  it('creates the thread, opens it in the remote thread view, and sends the first message through it', async () => {
-    const { deps, calls, order, open, submit } = setup()
-    const started = await startRemoteComposerThread(deps)
-    expect(calls.map((call) => call.method)).toEqual(['bridge.hub.create'])
-    expect(calls[0].params).toEqual({
-      target: node, name: 'Fix the parser', projectId: 'project-there', options: { worktreeEnabled: true }
-    })
-    // Opening attaches to the display; the message follows it.
-    expect(order).toEqual(['bridge.hub.create', 'open', 'submit'])
-    expect(open).toHaveBeenCalledWith({ ...ref, deviceName: 'Studio', title: 'Fix the parser' })
-    expect(submit).toHaveBeenCalledWith(ref, { content: 'Fix the parser\nwith care', images: [] })
-    expect(started).toMatchObject({ ref, deviceName: 'Studio' })
-    await expect(started!.sent).resolves.toBeUndefined()
+  it('creates the chat on the picked computer, in its project, and then selects it like any thread', async () => {
+    const deps = setup({ id: 'local-draft' } as Thread)
+    expect(await prepareComposerThread(deps)).toBe(`${node}:created`)
+    expect(deps.create).toHaveBeenCalledWith(remoteProject, { worktreeEnabled: true, node })
+    expect(deps.activate).toHaveBeenCalledWith(expect.objectContaining({ node }))
+    expect(deps.select).toHaveBeenCalledWith(`${node}:created`)
   })
 
-  it('lists the thread under the local project only when the target project is its match', async () => {
-    const matched = setup()
-    await startRemoteComposerThread({ ...matched.deps, localProjectId: 'project-here' })
-    expect(matched.open).toHaveBeenCalledWith({ ...ref, deviceName: 'Studio', title: 'Fix the parser', localProjectId: 'project-here' })
-    // The target stores it, so the thread is listed under this project after a restart too.
-    expect(matched.calls[0].params).toMatchObject({ options: { worktreeEnabled: true, startedFromProjectId: 'project-here' } })
-    const unmatched = setup()
-    await startRemoteComposerThread({ ...unmatched.deps, projectId: undefined, localProjectId: 'project-here' })
-    expect(unmatched.open).toHaveBeenCalledWith({ ...ref, deviceName: 'Studio', title: 'Fix the parser' })
-    expect(unmatched.calls[0].params).toEqual({ target: node, name: 'Fix the parser', options: { worktreeEnabled: false } })
+  it('creates a chat without a project on that computer', async () => {
+    const deps = setup(undefined, { worktreeEnabled: true, node })
+    await prepareComposerThread(deps)
+    expect(deps.create).toHaveBeenCalledWith(undefined, { worktreeEnabled: false, node })
   })
 
-  it('creates a project-less chat without a worktree, whatever the toggle says', async () => {
-    const { deps, calls } = setup()
-    await startRemoteComposerThread({ ...deps, projectId: undefined })
-    expect(calls[0].params).toEqual({ target: node, name: 'Fix the parser', options: { worktreeEnabled: false } })
+  it('does not send a local empty thread to the other computer, nor the other way round', async () => {
+    const local = setup({ id: 'local-draft', projectId: remoteProject } as Thread)
+    await prepareComposerThread(local)
+    expect(local.create).toHaveBeenCalled()
+    const back = setup({ id: `${node}:draft`, node, projectId: 'project-a' } as Thread, { projectId: 'project-a', worktreeEnabled: false })
+    await prepareComposerThread(back)
+    expect(back.create).toHaveBeenCalledWith('project-a', { worktreeEnabled: false })
   })
 
-  it('hands images to the view for staging and refuses the ones the target cannot take before creating anything', async () => {
-    const image = { name: 'a.png', mimeType: 'image/png', data: 'QUJD' }
-    const ok = setup()
-    await startRemoteComposerThread({ ...ok.deps, images: [image] })
-    expect(ok.submit).toHaveBeenCalledWith(ref, { content: 'Fix the parser\nwith care', images: [image] })
-    const refused = setup({ problem: 'a.png is too large.' })
-    await expect(startRemoteComposerThread({ ...refused.deps, images: [image] })).rejects.toThrow('a.png is too large.')
-    expect(refused.calls).toEqual([])
-    expect(refused.open).not.toHaveBeenCalled()
+  it('reuses an empty chat that is already on the picked computer and in its project', async () => {
+    const deps = setup({ id: `${node}:draft`, node, projectId: remoteProject, worktreeEnabled: true } as Thread)
+    expect(await prepareComposerThread(deps)).toBe(`${node}:draft`)
+    expect(deps.create).not.toHaveBeenCalled()
+    expect(deps.setWorktreeEnabled).not.toHaveBeenCalled()
   })
 
-  it('stamps the picked model on the new thread before the thread opens', async () => {
-    const { deps, calls, order } = setup()
-    await startRemoteComposerThread({ ...deps, model: { instanceId: 'codex', llmProvider: 'openai', model: 'gpt-x' } })
-    expect(order).toEqual(['bridge.hub.create', 'bridge.hub.setModel', 'open', 'submit'])
-    expect(calls[1].params).toEqual({ ref, model: { instanceId: 'codex', llmProvider: 'openai', model: 'gpt-x' } })
-    const refused = setup({ answers: { 'bridge.hub.setModel': { ok: false, error: 'That model is not available.' } } })
-    await expect(startRemoteComposerThread({ ...refused.deps, model: { instanceId: 'x', model: 'y' } })).rejects.toThrow('That model is not available.')
-    expect(refused.open).not.toHaveBeenCalled()
-    expect(refused.submit).not.toHaveBeenCalled()
-  })
-
-  it('uses the chat it already created when a first send that failed is tried again, instead of leaving another empty one', async () => {
-    const answers: Record<string, unknown> = { 'bridge.hub.setModel': { ok: false, error: 'That model is not available.' } }
-    const first = setup({ answers })
-    await expect(startRemoteComposerThread({ ...first.deps, model: { instanceId: 'x', model: 'y' } })).rejects.toThrow('That model is not available.')
-    expect(first.calls.filter((call) => call.method === 'bridge.hub.create')).toHaveLength(1)
-    // The retry, with another model, sends into the same chat.
-    const retry = setup({ answers: { 'bridge.hub.create': { thread: { id: 'another-thread' } } } })
-    const started = await startRemoteComposerThread({ ...retry.deps, model: { instanceId: 'codex', model: 'gpt-x' } })
-    expect(retry.calls.map((call) => call.method)).toEqual(['bridge.hub.setModel'])
-    expect(started!.ref).toEqual(ref)
-    expect(retry.submit).toHaveBeenCalledWith(ref, expect.anything())
-    // Once the chat is open the next draft starts a new one.
-    const next = setup({ answers: { 'bridge.hub.create': { thread: { id: 'another-thread' } } } })
-    expect((await startRemoteComposerThread(next.deps))!.ref.entityId).toBe('another-thread')
-    expect(next.calls.map((call) => call.method)).toEqual(['bridge.hub.create'])
-  })
-
-  it('does not reuse a chat made for another project or computer', async () => {
-    const first = setup({ answers: { 'bridge.hub.setModel': { ok: false, error: 'No.' } } })
-    await expect(startRemoteComposerThread({ ...first.deps, model: { instanceId: 'x', model: 'y' } })).rejects.toThrow('No.')
-    const other = setup({ answers: { 'bridge.hub.create': { thread: { id: 'other-project-thread' } } } })
-    const started = await startRemoteComposerThread({ ...other.deps, projectId: 'another-project' })
-    expect(started!.ref.entityId).toBe('other-project-thread')
-  })
-
-  it('passes a skill mode to the view and drops the built-in modes', async () => {
-    const plain = setup()
-    await startRemoteComposerThread({ ...plain.deps, mode: 'plan' })
-    expect(plain.submit.mock.calls[0]).toEqual([ref, { content: 'Fix the parser\nwith care', images: [] }])
-    const skill = setup()
-    await startRemoteComposerThread({ ...skill.deps, mode: { type: 'skill', skillId: 's1' } as never })
-    expect((skill.submit.mock.calls[0] as unknown[])[1]).toMatchObject({ mode: { type: 'skill', skillId: 's1' } })
-  })
-
-  it('refuses a computer that is not connected before touching it, and names it', async () => {
-    for (const devices of [[device({ state: 'closed' })], [device({ kind: 'phone' })], [device({ revoked: true })], []]) {
-      const { deps, calls, open, submit } = setup({ devices })
-      const error = await startRemoteComposerThread(deps).catch((cause) => cause)
-      expect(error).toBeInstanceOf(RemoteNotConnectedError)
-      expect(calls).toEqual([])
-      expect(open).not.toHaveBeenCalled()
-      expect(submit).not.toHaveBeenCalled()
-    }
-    const { deps } = setup({ devices: [device({ state: 'closed' })] })
-    await expect(startRemoteComposerThread(deps)).rejects.toThrow('Studio is not connected')
-  })
-
-  it('does nothing when the user moved on first, and does not open an abandoned thread', async () => {
-    const early = setup({ visible: () => false })
-    expect(await startRemoteComposerThread(early.deps)).toBeNull()
-    expect(early.calls).toEqual([])
-    let visible = true
-    const mid = setup({ visible: () => visible })
-    mid.request.mockImplementation(async (method: string) => {
-      if (method === 'bridge.hub.create') { visible = false; return { thread: { id: 'remote-thread' } } }
-      return {}
-    })
-    expect(await startRemoteComposerThread(mid.deps)).toBeNull()
-    expect(mid.open).not.toHaveBeenCalled()
-    expect(mid.submit).not.toHaveBeenCalled()
-    expect(mid.request.mock.calls.map(([method]) => method)).toEqual(['bridge.hub.create'])
-  })
-
-  it('does not open or send when the thread cannot be created', async () => {
-    const created = setup({ answers: { 'bridge.hub.create': {} } })
-    await expect(startRemoteComposerThread(created.deps)).rejects.toThrow('Studio did not create the chat')
-    const failed = setup({ answers: { 'bridge.hub.create': new Error('offline') } })
-    await expect(startRemoteComposerThread(failed.deps)).rejects.toThrow('offline')
-    expect(failed.open).not.toHaveBeenCalled()
-    expect(failed.submit).not.toHaveBeenCalled()
-  })
-
-  it('names the thread after the first line, or a default', () => {
-    expect(remoteThreadName('  Hello there\nmore')).toBe('Hello there')
-    expect(remoteThreadName('x'.repeat(200))).toHaveLength(80)
-    expect(remoteThreadName('   ')).toBe('New chat')
+  it('keeps the old chat when the computer refuses the new one', async () => {
+    const deps = setup({ id: 'local-draft' } as Thread)
+    deps.create.mockRejectedValue(Object.assign(new Error('Studio is offline.'), { code: 'computer_offline' }))
+    await expect(prepareComposerThread(deps)).rejects.toThrow('Studio is offline.')
+    expect(deps.activate).not.toHaveBeenCalled()
+    expect(deps.select).not.toHaveBeenCalled()
   })
 })

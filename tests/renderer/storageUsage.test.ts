@@ -197,14 +197,15 @@ describe('where selecting a row goes', () => {
     expect(openTarget(group({ kind: 'logs' }), 'kind', threads)).toBeUndefined()
   })
 
-  it('opens a local thread, and a remote one in a viewer', () => {
-    expect(openTarget(group({ id: 'new', machine: SELF_MACHINE }), 'thread', threads)).toEqual({ type: 'thread', threadId: 'new' })
-    expect(openTarget(group({ id: 't1', machine: LAPTOP }), 'thread', threads)).toEqual({ type: 'remote-thread', node: 'nod_laptop', threadId: 't1' })
+  it('opens a local thread, and one on another computer by the id this computer lists it under', () => {
+    const listed = [...threads, { id: 'nod_laptop:t1', projectId: 'nod_laptop:p9', updatedAt: '2026-10-27T00:00:00Z' }]
+    expect(openTarget(group({ id: 'new', machine: SELF_MACHINE }), 'thread', listed)).toEqual({ type: 'thread', threadId: 'new' })
+    expect(openTarget(group({ id: 't1', machine: LAPTOP }), 'thread', listed)).toEqual({ type: 'thread', threadId: 'nod_laptop:t1' })
   })
 
-  it('leaves a local thread that is not in the thread list (in the trash, or deleted since) as a label', () => {
+  it('leaves a thread that is not in the thread list (in the trash, deleted since, or on a computer that does not share) as a label', () => {
     expect(openTarget(group({ id: 'deleted-since', machine: SELF_MACHINE }), 'thread', threads)).toBeUndefined()
-    expect(openTarget(group({ id: 'deleted-since', machine: LAPTOP }), 'thread', threads)).toEqual({ type: 'remote-thread', node: 'nod_laptop', threadId: 'deleted-since' })
+    expect(openTarget(group({ id: 't1', machine: LAPTOP }), 'thread', threads)).toBeUndefined()
   })
 
   it('opens the latest thread of a local project, never a subagent, and leaves other projects as labels', () => {

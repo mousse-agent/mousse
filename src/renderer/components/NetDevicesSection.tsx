@@ -1,6 +1,5 @@
 import { useEffect, useId, useRef, useState, type FormEvent } from 'react'
 import { AlertTriangle, CircleCheck, Monitor, MonitorSmartphone, MoreHorizontal, Plus, RefreshCw, Smartphone } from '../lib/icons'
-import { RemoteDeviceThreads } from './RemoteDeviceThreads'
 import { ChangePlanDialog } from './devices/ChangePlanDialog'
 import { AddSshDeviceDialog } from './devices/AddSshDeviceDialog'
 import { ApproveSshRouteDialog } from './devices/ApproveSshRouteDialog'
@@ -10,7 +9,7 @@ import { SettingsAdvanced, SettingsGroup, SettingsRow, Switch } from './settings
 import { CopyButton } from './settings/IconButtons'
 import { mousseIdAvailable, useMousseIdStore } from '../stores/mousseIdStore'
 import { DeviceLimitsDialog } from './devices/DeviceLimitsDialog'
-import { bindSettings, canWorkOnThreads, deviceLine, isComputer, isIncompatible, listedDevices, readDevices, routeDetails, serveSettings, sshRecordFor, updateInstructions, worksOnThreads, WORKS_ON_THREADS, type Device } from '../lib/netDevices'
+import { PAIRING_DISCLOSURE, netErrorWords, bindSettings, workOnThreadsDisclosure, canWorkOnThreads, deviceLine, isComputer, isIncompatible, listedDevices, readDevices, routeDetails, serveSettings, sshRecordFor, updateInstructions, worksOnThreads, WORKS_ON_THREADS, type Device } from '../lib/netDevices'
 import type { NetDoctor, NetStatus } from '../../shared/net'
 import { TAILSCALE_FUNNEL_PORTS, type NetAddonActionResult, type NetAddonRecords, type SshRecordView, type SshSetupPhase } from '../../shared/net/local'
 import type { PlatformRequestMethod } from '../../shared/platform'
@@ -23,7 +22,7 @@ type Transport = NonNullable<NetStatus['transports']>[number]
 function networkingLine(status?: NetStatus): string {
   if (!status) return 'Loading…'
   if (status.restartRequired) return 'Off · restart the background service before turning it on again'
-  const error = status.error ? ` · ${status.error}` : ''
+  const error = status.error ? ` · ${netErrorWords(status.error)}` : ''
   if (!status.self) return status.enabled ? `No network identity yet${error}` : 'Off · turning it on creates a network identity for this device'
   if (!status.enabled) return status.keystore === 'unlocked' ? `Off · local conversations and network records are kept${error}` : `Off · unlock below to turn it on${error}`
   if (status.keystore === 'locked') return `On · locked until you enter the passphrase${error}`
@@ -108,6 +107,8 @@ export function NetDevicesSection() {
   const [sshRecords, setSshRecords] = useState<SshRecordView[]>([]), [sshSetup, setSshSetup] = useState<{ setupId?: string }>(), [approving, setApproving] = useState<Device & { sshOffer: { endpoint: string } }>()
   const [recordDialog, setRecordDialog] = useState<{ kind: 'undo' | 'rename' | 'update'; record: SshRecordView; name: string }>()
   const [limits, setLimits] = useState<Device>()
+  // A grant that opens this computer's threads to another is confirmed with what it opens.
+  const [granting, setGranting] = useState<{ device: Device; kind: 'grant' | 'computer' }>()
   const nameEdited = useRef(false)
   const reload = async () => {
     const owner = ++generation.current
@@ -194,6 +195,8 @@ export function NetDevicesSection() {
   const others = listedDevices(devices).filter((device) => !device.self)
   const unlocked = status?.keystore === 'unlocked'
   const authority = !!self?.isAuthority
+  // On unless this computer turned it off; an older daemon that does not report it has no such switch.
+  const workOnThreads = status?.workOnThreads !== false
 
   const toggleNetworking = (next: boolean) => {
     if (!next) { setInvite(''); void action('net.disable', {}) }
@@ -246,10 +249,12 @@ export function NetDevicesSection() {
       // computer. One it never recorded a kind for is asked about first.
       ...(authority && canWorkOnThreads(device) ? [{
         label: worksOnThreads(device) ? 'Turn off Works on threads' : 'Turn on Works on threads',
-        onSelect: () => void action('bridge.setCaps', { node: device.node, caps: worksOnThreads(device) ? device.caps.filter((cap) => cap !== WORKS_ON_THREADS) : [...device.caps, WORKS_ON_THREADS] })
+        onSelect: () => worksOnThreads(device)
+          ? void action('bridge.setCaps', { node: device.node, caps: device.caps.filter((cap) => cap !== WORKS_ON_THREADS) })
+          : setGranting({ device, kind: 'grant' })
       }] : []),
       ...(authority && device.kind === 'unknown' ? [
-        { label: 'This is a computer', onSelect: () => void action('bridge.setKind', { node: device.node, kind: 'computer' }) },
+        { label: 'This is a computer', onSelect: () => setGranting({ device, kind: 'computer' }) },
         { label: 'This is a phone', onSelect: () => void action('bridge.setKind', { node: device.node, kind: 'phone' }) }
       ] : []),
       ...(record ? [{ label: 'Undo setup…', onSelect: open('undo') }, { label: 'Rename SSH endpoint…', onSelect: open('rename') }] : []),
@@ -276,6 +281,23 @@ export function NetDevicesSection() {
       />
       {status?.restartRequired && status.error === 'outcome_uncertain' && (
         <p role="status" className="settings-muted devices-note">Some work is still draining; its original records are kept.</p>
+      )}
+      {self && status?.enabled && unlocked && !authority && selfDevice && (
+        <SettingsRow
+          title="Works on threads"
+          description={worksOnThreads(selfDevice)
+            ? 'On · this computer can open and change threads on your other computers that share them'
+            : 'Off · this computer cannot work on threads on your other computers, which is why theirs are not listed. The computer that manages your devices can turn it on for this one.'}
+        />
+      )}
+      {self && status?.enabled && unlocked && status.workOnThreads !== undefined && (
+        <SettingsRow
+          title="Let my other computers work on this computer's threads"
+          description={workOnThreads
+            ? 'On · computers with Works on threads can open and change this computer’s threads, within the limits set for each device below'
+            : 'Off · no other computer can open or change this computer’s threads'}
+          control={<Switch checked={workOnThreads} label="Let my other computers work on this computer's threads" disabled={busy} onChange={(next) => void action('bridge.workOnThreads', { enabled: next })} />}
+        />
       )}
       {self && (
         (!status.protected || locked) ? (
@@ -486,7 +508,6 @@ export function NetDevicesSection() {
           {!doctor && !status.enabled && <p className="settings-muted devices-note">Run a check to see what this device can reach.</p>}
         </SettingsGroup>
 
-        {!!devices.length && <RemoteDeviceThreads devices={devices} />}
       </SettingsAdvanced>
     )}
 
@@ -521,7 +542,7 @@ export function NetDevicesSection() {
         <div className="devices-dialog">
           <button type="button" className="devices-choice" onClick={() => setAddKind('computer')}>
             <span>Another computer with Mousse</span>
-            <span className="settings-muted">Create an invitation and paste it on the other computer.</span>
+            <span className="settings-muted">Create an invitation and paste it on the other computer. {PAIRING_DISCLOSURE}</span>
           </button>
           <button type="button" className="devices-choice" onClick={() => { closeAdd(); setSshSetup({}) }}>
             <span>Remote machine over SSH</span>
@@ -555,7 +576,7 @@ export function NetDevicesSection() {
               </div>
             </>
           ) : (
-            <p className="settings-muted">Create an invitation code, then paste it on the new device.</p>
+            <p className="settings-muted">Create an invitation code, then paste it on the new device. {PAIRING_DISCLOSURE}</p>
           )}
           {error && <p role="alert" className="chat-error">{error}</p>}
         </div>
@@ -608,6 +629,24 @@ export function NetDevicesSection() {
     {recordDialog?.kind === 'undo' && <UndoSetupDialog record={recordDialog.record} name={recordDialog.name} onClose={() => setRecordDialog(undefined)} onDone={reloadQuietly} />}
     {recordDialog?.kind === 'rename' && <RenameEndpointDialog record={recordDialog.record} name={recordDialog.name} onClose={() => setRecordDialog(undefined)} onDone={reloadQuietly} />}
     {recordDialog?.kind === 'update' && <UpdateRemoteDialog record={recordDialog.record} name={recordDialog.name} onClose={() => setRecordDialog(undefined)} onDone={reloadQuietly} />}
+    {granting && (
+      <Modal
+        open
+        title={granting.kind === 'grant' ? `Turn on Works on threads for ${granting.device.name}?` : `Is ${granting.device.name} a computer?`}
+        onClose={() => setGranting(undefined)}
+        footer={<button type="button" className="settings-btn devices-dialog-btn primary" disabled={busy} onClick={() => {
+          const { device, kind } = granting
+          setGranting(undefined)
+          void (kind === 'grant'
+            ? action('bridge.setCaps', { node: device.node, caps: [...device.caps, WORKS_ON_THREADS] })
+            : action('bridge.setKind', { node: device.node, kind: 'computer' }))
+        }}>{granting.kind === 'grant' ? 'Turn on' : 'This is a computer'}</button>}
+      >
+        <div className="devices-dialog">
+          <p>{workOnThreadsDisclosure(granting.device.name, granting.device.policy?.maxPermissionMode)}</p>
+        </div>
+      </Modal>
+    )}
     {limits?.policy && <DeviceLimitsDialog node={limits.node} name={limits.name} policy={limits.policy} onClose={() => setLimits(undefined)} onDone={reloadQuietly} />}
   </>
 }

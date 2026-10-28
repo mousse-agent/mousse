@@ -7,10 +7,13 @@ import {
   isComputer,
   isIncompatible,
   lastSeenLabel,
+  netErrorWords,
+  PAIRING_DISCLOSURE,
   routeDetails,
   routeLabel,
   serveSettings,
   updateInstructions,
+  workOnThreadsDisclosure,
   worksOnThreads,
   type Device
 } from '../../src/renderer/lib/netDevices'
@@ -106,6 +109,32 @@ describe('deviceLine', () => {
     expect(isIncompatible(device({ state: 'closed', error: 'unsupported_version' }))).toBe(true)
     expect(isIncompatible(device({ state: 'closed', error: 'route_unreachable' }))).toBe(false)
     expect(isIncompatible(device({ state: 'open', error: 'incompatible_peer' }))).toBe(false)
+  })
+})
+
+describe('what this computer lets a device do here, in the device line', () => {
+  const policy = (patch: Partial<NonNullable<Device['policy']>> = {}) => ({ blocked: false, maxPermissionMode: 'accept_edits' as const, terminal: false, ...patch })
+  const computer = (patch: Partial<Device> = {}) => device({ kind: 'computer', caps: ['read', 'chat', 'write', 'settings'], policy: policy(), ...patch })
+
+  it('shows the default limit and the terminal switch for a computer that works on threads', () => {
+    expect(deviceLine(computer(), NOW)).toBe('Online · can read, chat, write, work on threads · highest mode here: Auto-accept edits · terminals off')
+  })
+
+  it('shows a raised limit and terminals that were turned on', () => {
+    expect(deviceLine(computer({ policy: policy({ maxPermissionMode: 'full', terminal: true }) }), NOW)).toContain('highest mode here: Full access · terminals on')
+    expect(deviceLine(computer({ policy: policy({ maxPermissionMode: 'ask' }) }), NOW)).toContain('highest mode here: Ask before acting')
+  })
+
+  it('says nothing of limits for a phone, for a computer that does not work on threads, or from a daemon without them', () => {
+    expect(deviceLine(computer({ kind: 'phone' }), NOW)).not.toContain('highest mode')
+    expect(deviceLine(computer({ caps: ['read', 'chat', 'write'] }), NOW)).not.toContain('highest mode')
+    expect(deviceLine(computer({ policy: undefined }), NOW)).not.toContain('highest mode')
+  })
+
+  it('says a blocked device is blocked, and not what it could have done', () => {
+    const line = deviceLine(computer({ policy: policy({ blocked: true }) }), NOW)
+    expect(line).toContain('blocked on this computer')
+    expect(line).not.toContain('highest mode')
   })
 })
 
@@ -216,5 +245,30 @@ describe('updateInstructions', () => {
     const result = updateInstructions(device({ platform: 'linux', arch: 'x64' }), '1.0; rm -rf ~')
     expect(result.command).toBeUndefined()
     expect(result.summary.length).toBeGreaterThan(0)
+  })
+})
+
+describe('what pairing and granting say they open', () => {
+  it('says at pairing, in both directions, what a paired computer can do and what stays off', () => {
+    expect(PAIRING_DISCLOSURE).toContain('each computer can run and change threads on the other')
+    expect(PAIRING_DISCLOSURE).toContain('Auto-accept edits')
+    expect(PAIRING_DISCLOSURE).toContain('Terminals stay off')
+    expect(PAIRING_DISCLOSURE).toContain('limit or block either one in Devices')
+  })
+
+  it('names the computer and the limit when a grant or a kind is confirmed, and says it works both ways', () => {
+    const words = workOnThreadsDisclosure('Computer B')
+    expect(words).toContain('Computer B will be able to run and change threads on this computer, up to Auto-accept edits')
+    expect(words).toContain("commit and push with this computer's sign-ins")
+    expect(words).toContain('This computer can do the same on Computer B')
+    expect(words).toContain('Terminals stay off')
+    expect(workOnThreadsDisclosure('Computer B', 'full')).toContain('up to Full access')
+  })
+})
+
+describe('Net errors in words', () => {
+  it('turns the codes a person sees on the Devices screen into sentences, and softens an unknown one', () => {
+    expect(netErrorWords('route_unreachable')).toBe('none of your other devices can be reached right now')
+    expect(netErrorWords('some_new_code')).toBe('some new code')
   })
 })

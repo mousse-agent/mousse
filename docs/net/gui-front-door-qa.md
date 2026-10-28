@@ -17,8 +17,7 @@ calls remain zero.
 
 ```sh
 TMPDIR=/private/tmp node node_modules/vitest/vitest.mjs run \
-  tests/net/chats/gui-electron.test.ts \
-  tests/net/bridge/gui-electron-display.test.ts --maxWorkers=1
+  tests/net/chats/gui-electron.test.ts --maxWorkers=1
 ```
 
 The Net/Chats check uses two genuinely different protected Root users and

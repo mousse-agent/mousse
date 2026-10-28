@@ -104,7 +104,7 @@ it('fences owner-local domains, retains exact pending outbox originals, and leav
     )
     expect(await b.request('net.status', {})).toMatchObject({
       enabled: true,
-      features: { netBridge: true, netSpaces: true, netBridgeThreads: false }
+      features: { netBridge: true, netSpaces: true, netBridgeThreads: true }
     })
     expect(services.platform.chats.snapshot()).toBeDefined()
     expect(() => services.chatNetwork.publish({ chatId: 'invalid', publicationId: 'fixture' } as any)).toThrow(NetError)

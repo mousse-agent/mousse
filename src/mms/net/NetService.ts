@@ -127,7 +127,8 @@ interface NetConfiguration {
   transports?: TransportConfiguration[]
   /**
    * "Let my other computers work on this computer's threads": routed calls from other computers
-   * that hold "Works on threads" are answered only while this is on. Off by default.
+   * that hold "Works on threads" are answered unless this is turned off (on when absent). It is read on
+   * every call, so turning it off is also a kill switch.
    */
   workOnThreads?: boolean
   /** What an add-on action changed outside Mousse, kept so it can be undone. Keyed by add-on. */
@@ -355,8 +356,8 @@ export class NetService {
         }
         // Pre-rollout profiles require fresh explicit opt-in; never grandfather undefined flags.
         cfg.features ??= { ...DEFAULT_NET_FEATURE_FLAGS }
-        // Profiles from before routing existed have no such flag: it is off.
-        cfg.features.netBridgeThreads ??= false
+        // The flag is stored only while it is off (see `saveConfig`), so a profile without it has the default: on.
+        cfg.features.netBridgeThreads ??= DEFAULT_NET_FEATURE_FLAGS.netBridgeThreads
         if (!cfg.features.netBridge && !cfg.features.netSpaces) cfg.enabled = false
         this.config = cfg
       }
@@ -401,7 +402,7 @@ export class NetService {
               )
             if (method.family === 'routed') {
               // The owner's switch is read on every call, so turning it off is also a kill switch.
-              if (!this.config.workOnThreads)
+              if (this.config.workOnThreads === false)
                 throw new NetError('forbidden', undefined, { details: { reason: 'setting_off' } })
               if (method.needsTerminal && !policy.get(peer.node).terminal)
                 throw new NetError('forbidden', undefined, { details: { reason: 'terminal_off' } })
@@ -564,15 +565,15 @@ export class NetService {
   private saveConfig(): void {
     const { db } = this.runtime()
     // An earlier version rejects any other key in `features` as corrupt storage and then fails to load Net
-    // at all. The routing flag is written only while it is on, so a profile that never turned it on can
-    // go back to an earlier build.
+    // at all. The routing flag is on by default, so it is written only while it is off: a profile that
+    // never turned it off can go back to an earlier build.
     const { features, ...rest } = this.config
     const stored: NetConfiguration = features
       ? {
           ...rest,
           features: features.netBridgeThreads
-            ? features
-            : ({ netBridge: features.netBridge, netSpaces: features.netSpaces } as NetFeatureFlags)
+            ? ({ netBridge: features.netBridge, netSpaces: features.netSpaces } as NetFeatureFlags)
+            : features
         }
       : rest
     const bytes = canonicalJson(stored)
@@ -831,7 +832,7 @@ export class NetService {
           // takes effect on the next routed call, so turning it off is also the kill switch.
           this.requireEnrolled()
           if (params.enabled !== undefined) {
-            const was = this.config.workOnThreads === true
+            const was = this.config.workOnThreads !== false
             this.config = { ...this.config, workOnThreads: params.enabled === true }
             this.saveConfig()
             // Off ends the private streams that are open, not only the next call.
@@ -839,7 +840,7 @@ export class NetService {
               this.endPrivateServing(this.domain?.privateStreams?.release() ?? [])
             this.emit()
           }
-          return { enabled: this.config.workOnThreads === true }
+          return { enabled: this.config.workOnThreads !== false }
         }
         default:
           throw new NetError('bad_request')
@@ -882,7 +883,7 @@ export class NetService {
     this.config.features = {
       netBridge: true,
       netSpaces: true,
-      netBridgeThreads: this.config.features?.netBridgeThreads === true
+      netBridgeThreads: this.config.features?.netBridgeThreads !== false
     }
     if (input.listen)
       this.config.direct = {
@@ -1519,7 +1520,7 @@ export class NetService {
     const privateReadable = (stream: StreamId, peer: { node: NodeId }): boolean => {
       const access = this.domain?.privateStreams?.access(stream)
       if (!access) return true
-      if (!this.config.workOnThreads) return false
+      if (this.config.workOnThreads === false) return false
       return access.kind !== 'terminal' || rt.policy.get(peer.node).terminal
     }
     const session = new NetSyncSession({
@@ -2168,7 +2169,7 @@ export class NetService {
     this.config.features = {
       netBridge: true,
       netSpaces: true,
-      netBridgeThreads: this.config.features?.netBridgeThreads === true
+      netBridgeThreads: this.config.features?.netBridgeThreads !== false
     }
     this.config.preparedForJoin = false
     this.saveConfig()
@@ -2325,7 +2326,7 @@ export class NetService {
       return {
         enabled: this.config.enabled,
         features: { ...this.config.features! },
-        workOnThreads: this.config.workOnThreads === true,
+        workOnThreads: this.config.workOnThreads !== false,
         ...(this.disabled ? { restartRequired: true } : {}),
         keystore: rt.keys.state(),
         protected: rt.keys.encryptedAtRest(),

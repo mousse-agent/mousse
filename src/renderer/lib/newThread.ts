@@ -32,9 +32,14 @@ export function isNewEmptyThread(
 /** The workspace draft for the new chat, falling back to what the thread already has. */
 export function composerWorkspaceFor(
   draft: ComposerWorkspace | undefined,
-  thread: { projectId?: string; worktreeEnabled?: boolean } | undefined
+  thread: { projectId?: string; worktreeEnabled?: boolean; node?: string } | undefined
 ): ComposerWorkspace {
-  return draft ?? { projectId: thread?.projectId, worktreeEnabled: Boolean(thread?.worktreeEnabled) }
+  return draft ?? {
+    projectId: thread?.projectId,
+    worktreeEnabled: Boolean(thread?.worktreeEnabled),
+    // An empty thread that was created on another computer is a chat for it.
+    ...(thread?.node ? { node: thread.node as NodeId } : {})
+  }
 }
 
 /**
@@ -43,9 +48,10 @@ export function composerWorkspaceFor(
  */
 export function localWorkspaceFor(
   draft: ComposerWorkspace | undefined,
-  thread: { projectId?: string; worktreeEnabled?: boolean } | undefined
+  thread: { projectId?: string; worktreeEnabled?: boolean; node?: string } | undefined
 ): ComposerWorkspace {
-  return draft?.node ? { worktreeEnabled: false } : composerWorkspaceFor(draft, thread)
+  const workspace = composerWorkspaceFor(draft, thread)
+  return workspace.node ? { worktreeEnabled: false } : workspace
 }
 
 /** The project of this computer a draft stands for, also while another computer is picked. */
@@ -68,7 +74,7 @@ export function workspaceOnThisComputer(
 
 /**
  * The draft after picking another computer. `projectId` is that computer's project for the same
- * repository (found by `bridge.hub.matchProject`), or none. The project the draft had on this
+ * repository (its row says so: `sameAs`), or none. The project the draft had on this
  * computer is kept, so going back restores it.
  */
 export function workspaceOnOtherComputer(

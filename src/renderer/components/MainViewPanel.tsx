@@ -9,6 +9,7 @@ import { KeepMounted, KeepMountedStack } from './KeepMounted'
 import { useAppStore } from '../stores/appStore'
 import { surfaceTabItems } from '../lib/surfaces'
 import { OpenSurfacePicker } from './OpenSurfaceMenu'
+import { ComputerSurfaceNote } from './ComputerSurfaceNote'
 
 export function MainViewPanel() {
   const mainView = useAppStore((s) => s.mainView)
@@ -60,6 +61,7 @@ export function MainViewPanel() {
       {mainView !== 'files' && mainView !== 'terminal' && mainView !== 'browser' && (
         <div className="keep-mounted-pane">{transientPanel}</div>
       )}
+      <ComputerSurfaceNote />
     </KeepMountedStack>
   )
 }

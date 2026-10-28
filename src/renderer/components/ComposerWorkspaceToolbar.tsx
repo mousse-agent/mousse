@@ -15,7 +15,9 @@ export interface ComposerDeviceProps {
   /** This computer's name. */
   localName: string
   /** The user's devices; phones and disconnected ones are left out of the menu. */
-  devices: Device[]
+  devices: readonly Device[]
+  /** Computers that stopped sharing their threads with this one: named in the menu, not offered. */
+  notSharing?: ReadonlySet<string>
   /** Called when the Run on menu opens, so the list is fresh. */
   onRefresh: () => void
   /** Picks where the chat runs; undefined is this computer. */
@@ -196,7 +198,7 @@ function ComposerDeviceButton({ device, node, disabled }: { device: ComposerDevi
   const itemRefs = useRef<(HTMLButtonElement | null)[]>([])
   const initialFocusRef = useRef(0)
   const menuId = useId()
-  const run = buildRunOnOptions({ localName: device.localName, devices: device.devices, node })
+  const run = buildRunOnOptions({ localName: device.localName, devices: device.devices, node, notSharing: device.notSharing })
   const label = runOnLabel(device.localName, device.devices, node)
   const selectedIndex = Math.max(0, run.findIndex((option) => option.active))
   const open = menuOpen && !disabled
@@ -275,6 +277,8 @@ function ComposerDeviceButton({ device, node, disabled }: { device: ComposerDevi
                   aria-checked={option.active}
                   className="composer-workspace-menu-item"
                   data-node={option.id === LOCAL_RUN_ON_ID ? '' : option.id}
+                  disabled={option.disabled}
+                  title={option.reason}
                   onClick={() => {
                     device.onSelect(option.id === LOCAL_RUN_ON_ID ? undefined : option.id as NodeId)
                     closeMenu()

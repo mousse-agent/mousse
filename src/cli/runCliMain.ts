@@ -19,7 +19,7 @@ import { runService } from './commands/service'
 import { runThreadActionCommand } from './commands/threadActions'
 import { runRelay } from './commands/relay'
 import { runNet, runBridge } from './commands/net'
-import { BRIDGE_HUB_SUBCOMMANDS, runBridgeHubCommand } from './commands/bridge'
+import { isBridgeHubCommand, runBridgeHubCommand } from './commands/bridge'
 import { runSpacesCommand } from './commands/spaces'
 import { runBotsCommand } from './commands/bots'
 import { runDeprecatedControl } from './commands/deprecatedControl'
@@ -102,7 +102,7 @@ export async function runCliMain(argv: string[] = process.argv.slice(2)): Promis
         await runNet(args)
         break
       case 'bridge':
-        if (BRIDGE_HUB_SUBCOMMANDS.includes(args.subcommand as typeof BRIDGE_HUB_SUBCOMMANDS[number])) {
+        if (isBridgeHubCommand(args)) {
           await runBridgeHubCommand(args)
         } else {
           await runBridge(args)

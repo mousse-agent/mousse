@@ -173,6 +173,6 @@ export function describeApprovalRefusal(code: ApprovalRefusal): string {
     case 'mode_forbids': return 'Your permission mode would ask the user before this kind of action, so you cannot approve it for your subagent. Ask the user to answer it.'
     case 'agent_no_standing_grant': return 'Only the user can approve an action for the whole thread. Approve it once, or ask the user.'
     case 'bridge_no_standing_grant': return 'A linked device can allow a request once. "Always for this thread" is made in the app or the CLI, where the rule can be seen and revoked.'
-    case 'device_mode_forbids': return 'This computer lets that device allow this request once, but not for the whole thread: its permission limit would ask about this kind of action. Raise the limit for the device on this computer, or answer in the app there.'
+    case 'device_mode_forbids': return 'The computer that runs this thread lets this device allow this request once, but not for the whole thread: its permission limit would ask about this kind of action. Raise the limit for this device on that computer, in Settings, Devices, or answer in the app there.'
   }
 }

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode, type RefObject } from 'react'
-import { Bot, GitBranch, Sparkles } from '../lib/icons'
+import { Bot, GitBranch, Server, Sparkles } from '../lib/icons'
 import type { Thread } from '../../shared/types'
 import { isRunningSubagent } from '../../shared/subagents'
 import {
@@ -10,6 +10,7 @@ import { FloatingPortal, useFloatingPosition } from '../lib/floatingLayer'
 import { ProviderIcon } from '../lib/providerIcons'
 import { useSubagents } from '../hooks/useSubagents'
 import { retiredWorktreeNote } from '../lib/storageCopy'
+import { UNKNOWN_COMPUTER_NAME, offlineLabel, threadComputerState, useComputer } from '../lib/computers'
 
 const HOVER_OPEN_DELAY_MS = 420
 const HOVER_CLOSE_DELAY_MS = 120
@@ -72,6 +73,9 @@ export function ThreadHoverCard({ thread, enabled = true, children }: ThreadHove
   const [open, setOpen] = useState(false)
   const [defaultModel, setDefaultModel] = useState<DefaultModel | null>(null)
   const [workspace, setWorkspace] = useState<WorkspaceHoverInfo | null>(null)
+  // A thread of another computer names it, and says so while it cannot be reached.
+  const computer = useComputer(thread.node)
+  const computerState = threadComputerState(thread, computer)
   // The subagents this thread started, from the daemon's read model; watched only while the card is open.
   const subagentCount = useSubagents(open ? thread.id : null).filter(isRunningSubagent).length
 
@@ -103,8 +107,8 @@ export function ThreadHoverCard({ thread, enabled = true, children }: ThreadHove
   const loadHoverData = async (threadId: string) => {
     const requestId = ++requestIdRef.current
 
-    // Default model (cached after first successful load).
-    if (!defaultModel) {
+    // Default model (cached after first successful load). It is this computer's, so a thread of another one has none to show.
+    if (!defaultModel && !thread.node) {
       try {
         const settings = await window.mousse.settings.get()
         if (requestId !== requestIdRef.current) return
@@ -259,6 +263,19 @@ export function ThreadHoverCard({ thread, enabled = true, children }: ThreadHove
             <div className="thread-hover-card-title">{thread.name}</div>
 
             <div className="thread-hover-card-rows">
+              {thread.node && (
+                <div className="thread-hover-card-row">
+                  <span className="thread-hover-card-icon" aria-hidden="true">
+                    <Server size={13} strokeWidth={2} />
+                  </span>
+                  <div className="thread-hover-card-row-text">
+                    <span className="thread-hover-card-row-label">{computer?.name ?? UNKNOWN_COMPUTER_NAME}</span>
+                    <span className="thread-hover-card-row-detail">
+                      {computerState === 'online' ? 'Runs this thread' : computerState === 'offline' ? offlineLabel(computer, Date.now()) : 'Not sharing its threads with this computer'}
+                    </span>
+                  </div>
+                </div>
+              )}
               {worktreeRow && (
                 <div className="thread-hover-card-row">
                   <span className="thread-hover-card-icon" aria-hidden="true">

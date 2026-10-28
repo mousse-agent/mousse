@@ -33,8 +33,8 @@ it('defaults off, persists rollback, keeps identity/data and requires restart be
   const { a, b, self } = await linked(),
     rt = a.net.runtime(),
     roster = rt.identity.roster()
-  expect(DEFAULT_NET_FEATURE_FLAGS).toEqual({ netBridge: false, netSpaces: false, netBridgeThreads: false })
-  expect(a.net.status().features).toEqual({ netBridge: true, netSpaces: true, netBridgeThreads: false })
+  expect(DEFAULT_NET_FEATURE_FLAGS).toEqual({ netBridge: false, netSpaces: false, netBridgeThreads: true })
+  expect(a.net.status().features).toEqual({ netBridge: true, netSpaces: true, netBridgeThreads: true })
   const disabled = a.net.request('net.disable', {})
   expect(a.net.status()).toMatchObject({
     enabled: false,
@@ -92,7 +92,7 @@ it('defaults off, persists rollback, keeps identity/data and requires restart be
   await restarted.request('net.init', { passphrase: 'owned-rollback-profile' })
   expect(restarted.status()).toMatchObject({
     enabled: true,
-    features: { netBridge: true, netSpaces: true, netBridgeThreads: false },
+    features: { netBridge: true, netSpaces: true, netBridgeThreads: true },
     self
   })
   expect(restarted.runtime().identity.roster()).toEqual(roster)
@@ -192,6 +192,6 @@ it('does not silently grandfather previously enabled profiles lacking explicit r
   await restarted.request('net.init', {})
   expect(restarted.status()).toMatchObject({
     enabled: true,
-    features: { netBridge: true, netSpaces: true, netBridgeThreads: false }
+    features: { netBridge: true, netSpaces: true, netBridgeThreads: true }
   })
 })

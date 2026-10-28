@@ -516,6 +516,16 @@ export function mousseToUIMessages(messages: ChatMessage[]): UIMessage[] {
     if (displayText.trim()) parts.push({ type: 'text', text: displayText } as unknown as UIMessage['parts'][number])
     if (msg.images?.length) {
       for (const img of msg.images) {
+        // An image of a long thread of another computer arrives by name first; its bytes are fetched when shown.
+        if (!img.data) {
+          parts.push({
+            type: 'file',
+            filename: img.name,
+            mediaType: img.mimeType,
+            mimeType: img.mimeType,
+          } as unknown as UIMessage['parts'][number])
+          continue
+        }
         parts.push({
           type: 'file',
           mediaType: img.mimeType,

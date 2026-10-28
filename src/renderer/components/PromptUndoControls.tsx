@@ -1,6 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from 'react'
 import { IconArrowBackUp } from '../lib/icons'
 import { useAppStore } from '../stores/appStore'
+import { ipcErrorLine, isComputerOffline } from '../lib/errorText'
 import { invalidateThreadActionHistory, readThreadActionHistory, type ThreadActionHistory } from '../utils/threadActionHistory'
 
 interface PromptUndoState {
@@ -33,7 +34,8 @@ export function PromptUndoProvider({ threadId, busy, revision, children }: {
     const refresh = () => void readThreadActionHistory(threadId, true).then(value => {
       if (current && isCurrent()) setHistory(value)
     }).catch(cause => {
-      if (current && isCurrent()) { setHistory(null); setError(cause instanceof Error ? cause.message : String(cause)) }
+      // A computer that is away is said so once, by the bar above the thread, not by this poll every few seconds.
+      if (current && isCurrent()) { setHistory(null); setError(isComputerOffline(cause) ? null : ipcErrorLine(cause) || String(cause)) }
     })
     refresh()
     const timer = window.setInterval(refresh, 3000)

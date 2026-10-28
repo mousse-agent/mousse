@@ -641,7 +641,10 @@ describe('the profile barrier and the audit', () => {
     await ok('threads.rename', { threadId: t.id, name: 'Renamed' })
     await call('threads.rename', { threadId: 'missing', name: 'x' })
     await ok('threads.get', { threadId: t.id })
-    const rows = audit.recent(10, f.callerNode)
+    // The first change a device makes is also a row of its own (`thread.first_use`, which tells the owner).
+    const all = audit.recent(10, f.callerNode)
+    expect(all.map((row) => row.method).reverse()).toEqual(['threads.rename', 'thread.first_use', 'threads.rename'])
+    const rows = all.filter((row) => row.method !== 'thread.first_use')
     expect(rows.map((row) => [row.method, row.outcome, row.kind]).reverse()).toEqual([
       ['threads.rename', 'ok', 'change'],
       ['threads.rename', 'thread_not_found', 'refused']
@@ -657,7 +660,7 @@ describe('the profile barrier and the audit', () => {
     for (let attempt = 0; attempt < 300; attempt++)
       expect(await call('threads.get', { threadId: 'nope' })).toMatchObject({ ok: false })
     // The change is still there, and the refused reads are only counted.
-    expect(audit.recent(1000, f.callerNode).map((row) => row.method)).toEqual(['threads.rename'])
+    expect(audit.recent(1000, f.callerNode).map((row) => row.method)).toEqual(['thread.first_use', 'threads.rename'])
     expect(audit.reads(f.callerNode)).toEqual([expect.objectContaining({ calls: 300 })])
   }, 120_000)
 
@@ -667,7 +670,7 @@ describe('the profile barrier and the audit', () => {
     expect(refused).toMatchObject({ ok: false, error: { code: 'project_refused' } })
     const folder = repo()
     const opened = await ok('projects.open', { path: folder })
-    const [success, refusal] = audit.recent(5, f.callerNode)
+    const [success, refusal] = audit.recent(5, f.callerNode).filter((row) => row.method !== 'thread.first_use')
     expect(success).toMatchObject({
       method: 'projects.open',
       outcome: 'ok',

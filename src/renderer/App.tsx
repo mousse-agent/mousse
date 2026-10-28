@@ -15,8 +15,6 @@ import { ScheduledPage } from './components/ScheduledPage'
 import { ChannelsPage } from './components/ChannelsPage'
 import { NavigationRail } from './components/NavigationRail'
 import { ThreadSideCard } from './components/sideCard/ThreadSideCard'
-import { RemoteThreadView, RemoteUnsupportedPanel } from './components/RemoteThreadView'
-import { useRemoteThreads } from './lib/remoteThreadStore'
 import { QuickActionEditorHost } from './components/QuickActionEditor'
 import { WorkspaceLoading } from './components/WorkspaceLoading'
 
@@ -53,7 +51,6 @@ export default function App() {
   useAppCommands()
   const setShortcuts = useAppStore((s) => s.setShortcuts)
   const usageOpen = useAppStore((s) => s.usageOpen)
-  const remoteThreadOpen = useRemoteThreads((s) => s.activeKey !== null)
   const setUsageOpen = useAppStore((s) => s.setUsageOpen)
   useEffect(() => {
     const openUsage = () => setUsageOpen(true)
@@ -563,11 +560,10 @@ export default function App() {
           style={sidebarMode === 'chats' && !usageOpen ? { display: 'none' } : mainAreaOpen ? { width: `${sidebarWidth}%` } : undefined}
         >
           {usageOpen && <SubscriptionUsagePage key={profileId} onClose={() => setUsageOpen(false)} />}
-          <KeepMounted active={!usageOpen && !remoteThreadOpen} className="keep-mounted-pane">
+          <KeepMounted active={!usageOpen} className="keep-mounted-pane">
           {workspaceReady ? <OrchestratorChat key={profileId} /> : <WorkspaceLoading conversationOnly />}
 
           </KeepMounted>
-          {remoteThreadOpen && !usageOpen && <div className="keep-mounted-pane"><RemoteThreadView /></div>}
           <ThreadSideCard />
           <QuickActionEditorHost />
         </aside>
@@ -587,7 +583,6 @@ export default function App() {
         <KeepMounted as="main" active={mainAreaOpen && sidebarMode === 'projects'} preserveLayout className="main-area">
           <MainViewTabs />
           <MainViewPanel />
-          <RemoteUnsupportedPanel />
         </KeepMounted>
         </>}
         </div>

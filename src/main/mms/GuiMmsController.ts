@@ -91,6 +91,8 @@ export interface ThreadSnapshotResult {
   activity?: string
   activeTurn: { active: boolean; running: boolean }
   connectionFailed: boolean
+  /** A long transcript of another computer arrives as its newest part: the older messages are loaded from `before`. */
+  earlier?: { before: string; count: number }
   revision: number
 }
 

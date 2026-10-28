@@ -153,7 +153,7 @@ it('edits policies, shows usage across machines, and cleans up only after the pl
     expect(report.links.localThread).toEqual({ select: 't1', settingsOpen: false })
     expect(report.links.project).toEqual({ select: 't2' })
     expect(report.links.kind).toEqual({ scrolledTo: 'storage-worktrees', logsIsLabel: true })
-    expect(report.links.remoteThread).toEqual({ attach: { ref: { nodeId: 'nod_laptop', entityId: 'r1' } }, dialog: true })
+    expect(report.links.remoteThread).toEqual({ select: 'nod_laptop:r1', dialog: false })
 
     // Trash is reviewed from the sidebar: the row says so, and Settings has no trash dialog or other-threads list.
     expect(report.trash.row).toContain('1 thread in trash · restore or delete them from Recently deleted in the sidebar.')

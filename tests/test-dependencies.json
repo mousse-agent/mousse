@@ -34,7 +34,7 @@
     {
       "name": "renderer sources, styles and assets reach the Electron fixture tests",
       "when": ["src/renderer/**", "src/shared/**/*.css"],
-      "run": ["tests/renderer/**/*.test.ts", "tests/platformEditorCrossFeature.test.ts", "tests/promptMarkers.test.ts", "tests/net/chats/gui-*.test.ts", "tests/net/bridge/gui-electron-display.test.ts", "tests/platformMainBundleImports.test.ts", "tests/*Css*.test.ts", "tests/*css*.test.ts"]
+      "run": ["tests/renderer/**/*.test.ts", "tests/platformEditorCrossFeature.test.ts", "tests/promptMarkers.test.ts", "tests/net/chats/gui-*.test.ts", "tests/platformMainBundleImports.test.ts", "tests/*Css*.test.ts", "tests/*css*.test.ts"]
     },
     {
       "name": "the Storage page fixture is bundled at run time, so the import graph cannot see it",

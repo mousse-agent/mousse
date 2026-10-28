@@ -10,6 +10,7 @@ import type {
 } from '../../shared/settings'
 import { listingServes, selectionFromListing } from '../../shared/providerInstances'
 import { useAppStore } from '../stores/appStore'
+import { useLocalProjects } from '../hooks/useLocalProjects'
 import { onProviderListingsChanged } from '../lib/providerSnapshots'
 import { ProvidersSettings } from './providers/ProvidersSettings'
 import { SpeechSettings } from '../speech/SpeechSettings'
@@ -87,7 +88,7 @@ export function SettingsPage() {
 function ProfileSettingsPage({ profileId }: { profileId: string }) {
   const settingsOpen = useAppStore((s) => s.settingsOpen)
   const setSettingsOpen = useAppStore((s) => s.setSettingsOpen)
-  const projects = useAppStore((s) => s.projects)
+  const projects = useLocalProjects()
   const [integrationProject, setIntegrationProject] = useState('')
   const integrationClient = useMemo(() => createIntegrationPlatformClient(window.mousse.platformRequest), [])
 

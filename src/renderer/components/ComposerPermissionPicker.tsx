@@ -33,7 +33,7 @@ function modeDescription(mode: PermissionMode, agent: string, sandboxOff: boolea
  * Full access on an agent that approves tools itself, and, for a subagent, never a mode above its
  * lineage's ceiling.
  */
-export function ComposerPermissionPicker({ mode, agent, caps, limits, ceiling, readOnly, onSelect }: {
+export function ComposerPermissionPicker({ mode, agent, caps, limits, ceiling, ceilingReason, readOnly, onSelect }: {
   /** The mode the thread is set to. */
   mode: PermissionMode
   /** The selected agent's name ("Claude Code"). */
@@ -42,6 +42,8 @@ export function ComposerPermissionPicker({ mode, agent, caps, limits, ceiling, r
   limits?: PermissionLimits
   /** A subagent's lineage ceiling; absent for a thread nobody delegated. */
   ceiling?: PermissionMode
+  /** Why nothing above `ceiling` is offered, when it is not a subagent's lineage (a thread of another computer: the device limit). */
+  ceilingReason?: string
   readOnly?: boolean
   onSelect: (mode: PermissionMode) => void
 }) {
@@ -83,7 +85,7 @@ export function ComposerPermissionPicker({ mode, agent, caps, limits, ceiling, r
             <MenuCheck on={mode === entry} />
             <span className="composer-mode-menu-item-text">
               <span>{describePermissionMode(entry)}</span>
-              <span className="composer-mode-menu-item-desc">{aboveCeiling ? 'A thread this subagent belongs to is set lower.' : modeDescription(entry, agent, limits?.sandboxOffInFull === true)}</span>
+              <span className="composer-mode-menu-item-desc">{aboveCeiling ? ceilingReason ?? 'A thread this subagent belongs to is set lower.' : modeDescription(entry, agent, limits?.sandboxOffInFull === true)}</span>
             </span>
           </button>
         })}

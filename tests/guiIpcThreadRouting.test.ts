@@ -18,6 +18,7 @@ vi.mock('electron', () => ({
 
 import { registerGuiIpc, type GuiIpcServices } from '../src/main/ipc/registerGuiIpc'
 import { PresentationState } from '../src/main/mms/PresentationState'
+import { MmsProtocolError } from '../src/mms/protocol/client'
 import { isQualifiedId, qualifyId } from '../src/shared/threadRef'
 
 const NODE = 'nod_0123456789abcdefghjkmnpqrs'
@@ -166,5 +167,105 @@ describe('selecting a thread on another computer', () => {
     await invoke('threads:select', REMOTE)
     expect(sent('snapshot')).toEqual([{ method: 'snapshot', params: { threadId: REMOTE } }])
     expect(warn).toHaveBeenCalledWith('threads.focus failed:', 'node_unreachable')
+  })
+})
+
+describe('a chat is created on another computer', () => {
+  it('names the computer for the daemon, and only when one is picked', async () => {
+    const project = qualifyId(NODE, 'project-1')
+    await invoke('threads:create', 'Fix it', project, { worktreeEnabled: true, node: NODE })
+    await invoke('threads:create', 'Fix it', undefined, { worktreeEnabled: false })
+    await invoke('threads:create', undefined, undefined, { node: '' })
+    expect(sent('threads.create').map((call) => call.params)).toEqual([
+      { name: 'Fix it', projectId: project, worktreeEnabled: true, node: NODE },
+      { name: 'Fix it', projectId: undefined, worktreeEnabled: false },
+      { name: 'New Chat', projectId: undefined, worktreeEnabled: false }
+    ])
+  })
+})
+
+describe('a long thread of another computer', () => {
+  it('reads a page of older messages and a missing image, naming the thread for the router', async () => {
+    await invoke('threads:loadEarlier', REMOTE, 'message-9')
+    await invoke('threads:messageImage', REMOTE, 'message-3', 1)
+    expect(calls).toEqual([
+      { method: 'thread.messages', params: { before: 'message-9', threadId: REMOTE } },
+      { method: 'thread.messageImage', params: { messageId: 'message-3', index: 1, threadId: REMOTE } }
+    ])
+  })
+
+  it('hands the window the part that was left out of the first view', async () => {
+    const broadcasts: Array<{ channel: string; data: unknown }> = []
+    const { broadcastThreadSnapshot } = await import('../src/main/mms/protocolEventBridge')
+    presentation.setActiveThreadId(REMOTE)
+    broadcastThreadSnapshot(
+      REMOTE,
+      { messages: [], queue: [], earlier: { before: 'message-9', count: 40 } },
+      (channel, data) => { broadcasts.push({ channel, data }) },
+      presentation
+    )
+    expect(broadcasts.find((entry) => entry.channel === 'thread:view')?.data).toMatchObject({ threadId: REMOTE, earlier: { before: 'message-9', count: 40 } })
+    broadcasts.length = 0
+    broadcastThreadSnapshot(REMOTE, { messages: [], queue: [] }, (channel, data) => { broadcasts.push({ channel, data }) }, presentation)
+    expect(Object.keys(broadcasts.find((entry) => entry.channel === 'thread:view')!.data as object)).not.toContain('earlier')
+  })
+})
+
+describe('a call to another computer that was not confirmed', () => {
+  const uncertain = (method: string) =>
+    Object.assign(new Error('Studio did not confirm this. It may have happened; check before trying again.'), {
+      code: 'outcome_uncertain',
+      details: { node: NODE, name: 'Studio', method }
+    })
+
+  it('still tells the window, and reads the thread in view again', async () => {
+    presentation.setActiveThreadId(REMOTE)
+    request.mockImplementationOnce(async (method: string, params?: unknown) => {
+      calls.push({ method, params })
+      throw uncertain(method)
+    })
+    await expect(invoke('threads:rename', REMOTE, 'New name')).rejects.toMatchObject({ code: 'outcome_uncertain' })
+    await vi.waitFor(() => expect(sent('threads.list')).toHaveLength(1))
+    // The thread is held and read afresh, as when it is opened.
+    expect(sent('threads.focus').map((call) => call.params)).toContainEqual({ threadId: REMOTE, focused: true })
+    expect(sent('snapshot')).toEqual([{ method: 'snapshot', params: { threadId: REMOTE } }])
+  })
+
+  it('does the same for a send, which answers with an error instead of failing, and keeps its code and its request id', async () => {
+    presentation.setActiveThreadId(REMOTE)
+    request.mockImplementationOnce(async (method: string, params?: unknown) => {
+      calls.push({ method, params })
+      const error = uncertain(method)
+      throw new MmsProtocolError('outcome_uncertain', error.message, error.details)
+    })
+    const answer = (await invoke('orchestrator:sendToThread', REMOTE, { content: 'Hello', requestId: 'req-1' })) as { requestAcknowledged?: boolean; error?: { code?: string; message?: string } }
+    expect(answer.requestAcknowledged).toBe(false)
+    expect(answer.error).toMatchObject({ code: 'outcome_uncertain' })
+    expect(answer.error?.message).toContain('may have happened')
+    expect(sent('orchestrator.send')[0].params).toMatchObject({ threadId: REMOTE, requestId: 'req-1' })
+    await vi.waitFor(() => expect(sent('threads.list')).toHaveLength(1))
+    expect(sent('snapshot')).toEqual([{ method: 'snapshot', params: { threadId: REMOTE } }])
+  })
+
+  it('leaves a thread of another computer, or of this one, that is not in view alone', async () => {
+    presentation.setActiveThreadId('local-thread')
+    request.mockImplementationOnce(async (method: string, params?: unknown) => {
+      calls.push({ method, params })
+      throw uncertain(method)
+    })
+    await expect(invoke('threads:rename', OTHER_REMOTE, 'New name')).rejects.toMatchObject({ code: 'outcome_uncertain' })
+    await new Promise((done) => setTimeout(done, 20))
+    expect(calls.map((call) => call.method)).toEqual(['threads.rename'])
+  })
+
+  it('does not read anything again for a refusal, which is a decided answer', async () => {
+    presentation.setActiveThreadId(REMOTE)
+    request.mockImplementationOnce(async (method: string, params?: unknown) => {
+      calls.push({ method, params })
+      throw Object.assign(new Error('Studio is offline.'), { code: 'computer_offline', details: { node: NODE, name: 'Studio' } })
+    })
+    await expect(invoke('threads:rename', REMOTE, 'New name')).rejects.toMatchObject({ code: 'computer_offline' })
+    await new Promise((done) => setTimeout(done, 20))
+    expect(calls.map((call) => call.method)).toEqual(['threads.rename'])
   })
 })

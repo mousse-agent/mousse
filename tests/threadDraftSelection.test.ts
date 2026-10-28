@@ -49,3 +49,18 @@ describe('new-chat draft selection', () => {
     ])).toBeUndefined()
   })
 })
+
+describe('empty threads on another computer', () => {
+  const remote = (patch: Record<string, unknown>) => ({ id: 'nod_a:r', name: 'New Thread', updatedAt: '2026-01-02T00:00:00Z', node: 'nod_a', ...patch })
+  const local = (patch: Record<string, unknown>) => ({ id: 'l', name: 'New Thread', updatedAt: '2026-01-01T00:00:00Z', ...patch })
+
+  it('are not the new chat of this computer, which starts here unless another is picked', () => {
+    expect(findUnstartedThread([remote({})])).toBeUndefined()
+    expect(findUnstartedThread([remote({}), local({})])?.id).toBe('l')
+  })
+
+  it('are the new chat of a project of that computer', () => {
+    expect(findUnstartedThread([remote({ projectId: 'nod_a:p' }), local({ projectId: 'p' })], 'nod_a:p')?.id).toBe('nod_a:r')
+    expect(findUnstartedThread([remote({ projectId: 'nod_a:p' })], 'p')).toBeUndefined()
+  })
+})

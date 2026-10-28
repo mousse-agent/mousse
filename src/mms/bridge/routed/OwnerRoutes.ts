@@ -110,6 +110,11 @@ export interface OwnerRoutesOptions {
    * notification it does (the daemon sends the event); a computer with no window has the audit row only.
    */
   onFirstTerminal?: (info: { node: NodeId; name: string; threadId: string }) => void
+  /**
+   * The first time a device changes something on a thread here: a desktop notice for the owner, who is told
+   * what that computer can now do and where to limit it. Written to the audit too (`thread.first_use`).
+   */
+  onFirstUse?: (info: { node: NodeId; name: string; threadId?: string }) => void
   /** How long a device may be away before its terminals end, and how often that is looked at (tests shorten them). */
   terminalAwayMs?: number
   terminalSweepMs?: number
@@ -272,7 +277,12 @@ export class OwnerRoutes {
   readonly terminals: RoutedTerminals
   private readonly clock: Pick<Clock, 'now'>
   constructor(private readonly options: OwnerRoutesOptions) {
-    this.backend = new MmsRemoteBackend(options.services, () => options.services.protocolSequence())
+    this.backend = new MmsRemoteBackend(
+      options.services,
+      () => options.services.protocolSequence(),
+      undefined,
+      (node) => options.policy.get(node).maxPermissionMode
+    )
     this.clock = options.clock ?? systemClock
     this.pages = options.pages ?? new ReplyPages(this.clock)
     this.terminals = new RoutedTerminals({
@@ -522,6 +532,9 @@ export class OwnerRoutes {
       project = `path:${createHash('sha256').update(params.path).digest('hex').slice(0, 12)}`
     // The first terminal a device opens here is worth telling the owner (below). Read before this call's own row is written.
     const firstTerminal = method === 'pty.create' && !audit.has(node, 'pty.create')
+    // The first change a device makes on a thread here, in any form (a send, a rename, a save, a Git action).
+    const firstUse =
+      row.durable && !row.sequenced && !row.terminal && !this.toldFirstUse.has(node) && !audit.has(node, 'thread.first_use')
     let slot: TerminalClaim | undefined
     try {
       // Nothing has run yet: a call that was cancelled before it started is a refusal, not an unknown outcome.
@@ -603,6 +616,19 @@ export class OwnerRoutes {
       if (row.durable)
         audit.record({ node, method, thread, project, outcome: 'ok', kind: 'change' })
       else audit.countRead(node, bytes)
+      if (firstUse) {
+        this.toldFirstUse.add(node)
+        audit.record({ node, method: 'thread.first_use', thread, project, outcome: 'first_use', kind: 'change' })
+        try {
+          this.options.onFirstUse?.({
+            node,
+            name: this.options.deviceName?.(node) ?? 'Another computer',
+            ...(thread ? { threadId: thread } : {})
+          })
+        } catch {
+          // A notice that cannot be shown does not undo the change.
+        }
+      }
       // The first terminal a device opens is a row of its own, and a desktop notification where a window can show one.
       if (firstTerminal) {
         audit.record({ node, method: 'pty.first_open', thread, outcome: 'first_terminal', kind: 'change' })
@@ -860,6 +886,9 @@ export class OwnerRoutes {
         }
     }
   }
+
+  /** Devices the owner was told about in this run, so the audit is read once for each. */
+  private readonly toldFirstUse = new Set<NodeId>()
 
   private async dispatch(
     method: string,

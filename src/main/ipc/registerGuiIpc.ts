@@ -127,7 +127,7 @@ import type {
   UserQuestionAnswers
 } from '../../shared/types'
 import { isThreadActivityActive } from '../../shared/types'
-import { isQualifiedId } from '../../shared/threadRef'
+import { isQualifiedId, parseQualifiedId } from '../../shared/threadRef'
 import type {
   CreatePullRequestResult,
   PullRequestBaseBranches,
@@ -222,14 +222,31 @@ export function getWindowShortcuts(senderId: number): ShortcutOverrides | undefi
   return shortcutsByWindow.get(senderId)
 }
 
+/**
+ * A call to another computer that was not confirmed ("outcome_uncertain") leaves what a window shows
+ * possibly out of date. Set once handlers are registered: reads the thread in view again.
+ */
+let refreshAfterUncertain: ((node: string) => void) | undefined
+
+function noteUncertainOutcome(error: unknown): void {
+  if (!error || typeof error !== 'object') return
+  const { code, details } = error as { code?: unknown; details?: { node?: unknown } }
+  if (code === 'outcome_uncertain' && typeof details?.node === 'string') refreshAfterUncertain?.(details.node)
+}
+
 function registerHandler(
   channel: string,
   handler: Parameters<typeof ipcMain.handle>[1]
 ): void {
   ipcMain.removeHandler(channel)
-  ipcMain.handle(channel, (event, ...args) => {
-    if (!activeGuiMms) return handler(event, ...args)
-    return activeGuiMms.runWithSender(event.sender, () => handler(event, ...args))
+  ipcMain.handle(channel, async (event, ...args) => {
+    try {
+      if (!activeGuiMms) return await handler(event, ...args)
+      return await activeGuiMms.runWithSender(event.sender, () => handler(event, ...args))
+    } catch (error) {
+      noteUncertainOutcome(error)
+      throw error
+    }
   })
 }
 
@@ -256,6 +273,7 @@ function registerStorageHandler(channel: string, handler: Parameters<typeof ipcM
   registerHandler(channel, async (event, ...args) => {
     try { return { ok: true, value: await handler(event, ...args) } }
     catch (cause) {
+      noteUncertainOutcome(cause)
       const descriptor = cause instanceof MmsProtocolError
         ? knownAppError({ code: cause.code, message: cause.message, details: cause.details, errorInfo: cause.errorInfo })
         : normalizeAppError(cause, 'storage_request_failed')
@@ -476,6 +494,24 @@ export function registerGuiIpc(
       body: threadName
         ? `${device} opened a terminal on this computer, in ${threadName}.`
         : `${device} opened a terminal on this computer.`
+    })
+    notification.on('click', () => {
+      const win = getWindow()
+      if (win && !win.isDestroyed()) {
+        if (win.isMinimized()) win.restore()
+        win.show()
+        win.focus()
+      }
+    })
+    notification.show()
+  }
+
+  /** Another of the user's computers changed a thread here for the first time: said in a desktop notification, with where to limit it. */
+  const notifyRemoteWork = (device: string, threadName: string): void => {
+    if (!Notification.isSupported()) return
+    const notification = new Notification({
+      title: 'Mousse',
+      body: `${device} is working on this computer's threads${threadName ? ` (${threadName})` : ''}. Open Settings, Devices to limit what it can do.`
     })
     notification.on('click', () => {
       const win = getWindow()
@@ -714,11 +750,10 @@ export function registerGuiIpc(
     }
     if (event.type === 'ui.notify') {
       const info = event.data as { kind?: unknown; device?: unknown; threadName?: unknown } | null
-      if (info?.kind === 'remote-terminal')
-        notifyRemoteTerminal(
-          typeof info.device === 'string' && info.device ? info.device : 'Another computer',
-          typeof info.threadName === 'string' ? info.threadName : ''
-        )
+      const device = typeof info?.device === 'string' && info.device ? info.device : 'Another computer'
+      const threadName = typeof info?.threadName === 'string' ? info.threadName : ''
+      if (info?.kind === 'remote-terminal') notifyRemoteTerminal(device, threadName)
+      if (info?.kind === 'remote-work') notifyRemoteWork(device, threadName)
     }
     if (event.type === 'ui.focus-intent') {
       const win = getWindow()
@@ -764,7 +799,6 @@ export function registerGuiIpc(
       )).catch(error => console.warn('MCP browser authorization failed', error instanceof Error ? error.message : 'Unknown error'))
       return
     }
-    if (event.type === 'bridge.hub.thread') win.webContents.send('bridge:thread-part', event.data)
     // Live output of a Git action: the daemon sent it on this window's own connection, so only this window gets it.
     if (event.type === 'git.operation') win.webContents.send('git:operation', (event.data as { event?: unknown } | null)?.event)
   })
@@ -883,7 +917,8 @@ export function registerGuiIpc(
           queue: snap.queue,
           connectionFailed: snap.connectionFailed,
           agents: full.agents,
-          tasks: full.tasks
+          tasks: full.tasks,
+          earlier: snap.earlier
         },
         broadcast,
         presentation
@@ -934,6 +969,8 @@ export function registerGuiIpc(
       }
       return result
     } catch (err) {
+      // A send to another computer that was not confirmed: the window reads the thread in view again.
+      noteUncertainOutcome(err)
       const error = guiChatRequestError(err)
       const disconnected = error.code === 'workspace_connection_lost'
       if (!disconnected) {
@@ -1161,13 +1198,6 @@ export function registerGuiIpc(
     return res.project
   })
 
-  registerHandler('projects:identity', async (_e, projectId: string) => {
-    const res = await guiMms.request<{ identity: { roots: string[]; remotes: string[] } | null }>(
-      'projects.identity',
-      { projectId }
-    )
-    return res.identity
-  })
   registerHandler('projects:remove', async (_e, projectId: string) => {
     const res = await guiMms.request<{ projects: unknown[] }>('projects.remove', {
       projectId
@@ -1309,7 +1339,8 @@ export function registerGuiIpc(
         queue: snap.queue,
         connectionFailed: snap.connectionFailed,
         agents: full.agents,
-        tasks: full.tasks
+        tasks: full.tasks,
+        earlier: snap.earlier
       },
       broadcast,
       presentation
@@ -1324,10 +1355,18 @@ export function registerGuiIpc(
     // (full project scan) on the hot path.
   }
 
-  registerHandler('threads:create', async (_e, name?: string, projectId?: string, opts?: { worktreeEnabled?: boolean }) => {
+  /** `opts.node`: create the chat on another of the user's computers; the daemon sends the call there. */
+  const createParams = (name: string | undefined, projectId: string | undefined, opts: { worktreeEnabled?: boolean; node?: string } | undefined) => ({
+    name: name?.trim() || 'New Chat',
+    projectId,
+    worktreeEnabled: opts?.worktreeEnabled === true,
+    ...(typeof opts?.node === 'string' && opts.node ? { node: opts.node } : {})
+  })
+
+  registerHandler('threads:create', async (_e, name?: string, projectId?: string, opts?: { worktreeEnabled?: boolean; node?: string }) => {
     const res = await guiMms.request<{ thread: unknown; threads: unknown[] }>(
       'threads.create',
-      { name: name?.trim() || 'New Chat', projectId, worktreeEnabled: opts?.worktreeEnabled === true }
+      createParams(name, projectId, opts)
     )
     broadcast('threads:updated', res.threads)
     return res.thread
@@ -1335,10 +1374,10 @@ export function registerGuiIpc(
 
   registerHandler(
     'threads:createAndSelect',
-    async (_e, name?: string, projectId?: string, opts?: { worktreeEnabled?: boolean }) => {
+    async (_e, name?: string, projectId?: string, opts?: { worktreeEnabled?: boolean; node?: string }) => {
       const res = await guiMms.request<{ thread: { id: string }; threads: unknown[] }>(
         'threads.create',
-        { name: name?.trim() || 'New Chat', projectId, worktreeEnabled: opts?.worktreeEnabled === true }
+        createParams(name, projectId, opts)
       )
       broadcast('threads:updated', res.threads)
       await selectThread(res.thread.id)
@@ -1349,6 +1388,30 @@ export function registerGuiIpc(
   registerHandler('threads:select', async (_e, threadId: string) => {
     await selectThread(threadId)
   })
+
+  // A long thread of another computer arrives as its newest part. These read the rest: a page of the
+  // messages before one, and an image of a message that was sent without its bytes.
+  registerHandler('threads:loadEarlier', async (_e, threadId: string, before: string) =>
+    guiMms.request<{ messages: unknown[]; earlier?: { before: string; count: number } }>(
+      'thread.messages',
+      withThreadId({ before }, threadId)
+    )
+  )
+  registerHandler('threads:messageImage', async (_e, threadId: string, messageId: string, index: number) =>
+    guiMms.request<{ name: string; mimeType: string; data: string }>(
+      'thread.messageImage',
+      withThreadId({ messageId, index }, threadId)
+    )
+  )
+
+  // What a window has in view may be older than what happened on the other computer once a call there is
+  // not confirmed ("may have happened"): read it again.
+  refreshAfterUncertain = (node) => {
+    const activeId = currentPresentation().getActiveThreadId()
+    if (!activeId || parseQualifiedId(activeId)?.node !== node) return
+    void selectThread(activeId).catch(() => undefined)
+    void guiMms.request<{ threads: unknown[] }>('threads.list').then((res) => broadcast('threads:updated', res.threads), () => undefined)
+  }
 
   registerStorageHandler('threads:delete', async (_e, threadId: string) => {
     const res = await guiMms.request<{ threads: Pick<Thread, 'id' | 'settledAt' | 'lineage'>[] }>(

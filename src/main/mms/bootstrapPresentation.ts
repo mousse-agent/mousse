@@ -57,7 +57,8 @@ export async function bootstrapPresentation(
     queue: snap.queue,
     connectionFailed: snap.connectionFailed,
     agents: full.agents,
-    tasks: full.tasks
+    tasks: full.tasks,
+    earlier: snap.earlier
   }, broadcast, presentation)
   for (const q of full.pendingQuestions ?? []) {
     broadcast('orchestrator:questionsPending', { ...q, threadId: activeId })

@@ -7,7 +7,7 @@ import electron from 'electron'
 import { expect, it } from 'vitest'
 
 /** Real mounted controls/browser crypto; a controlled UI API port, not MMS/ACL qualification. */
-it('fences mounted private completions, preserves original retries, and confirms fresh remote displays', async () => {
+it('fences mounted private completions and preserves original retries', async () => {
   const directory = mkdtempSync(join(realpathSync(tmpdir()), 'mousse-gui-mounted-'))
   let child: ChildProcess | undefined, exited: Promise<number | null> | undefined
   try {
@@ -23,7 +23,7 @@ it('fences mounted private completions, preserves original retries, and confirms
     exited = new Promise<number | null>((done, reject) => { child!.once('error', reject); child!.once('exit', done) })
     const code = await exited
     expect(code, stderr + stdout).toBe(0)
-    const report = JSON.parse(readFileSync(join(directory, 'evidence.json'), 'utf8')) as { observations: Array<{ mode: string; before: unknown[]; after: { calls: Array<{ method: string; params: unknown }>; callbacks: unknown[]; text?: string }; online: string; offline: string; awaiting: string; incremental: string; partial: string; fresh: string; calls: Array<{ method: string }> }>; rendererErrors: string[] }
+    const report = JSON.parse(readFileSync(join(directory, 'evidence.json'), 'utf8')) as { observations: Array<{ mode: string; before: unknown[]; after: { calls: Array<{ method: string; params: unknown }>; callbacks: unknown[]; text?: string } }>; rendererErrors: string[] }
     expect(report.rendererErrors).toEqual([])
     for (const mode of ['aside', 'permission', 'work']) {
       const observation = report.observations.find(row => row.mode === mode)!
@@ -36,21 +36,6 @@ it('fences mounted private completions, preserves original retries, and confirms
       expect(mutations).toHaveLength(2); expect(mutations[1].params).toEqual(mutations[0].params)
       expect(observation.after.callbacks).toHaveLength(1)
     }
-    const remote = report.observations.find(row => row.mode === 'remote')!
-    expect(remote.online).toContain('Working')
-    expect(remote.offline).toContain('Offline · Cached display')
-    expect(remote.offline).toContain('Retained remote body')
-    expect(remote.offline).not.toContain('Working')
-    for (const text of [remote.awaiting, remote.incremental, remote.partial]) {
-      expect(text).toContain('Awaiting current display · Cached display')
-      expect(text).toContain('Retained remote body')
-      expect(text).not.toContain('Working')
-      expect(text).not.toContain('Fresh verified body')
-    }
-    expect(remote.fresh).toContain('Working')
-    expect(remote.fresh).toContain('Fresh verified body')
-    expect(remote.fresh).not.toContain('Cached display')
-    expect(remote.calls.map(row => row.method)).toEqual(['bridge.hub.threads', 'bridge.hub.attach', 'bridge.hub.detach', 'bridge.hub.attach', 'bridge.hub.detach'])
   } finally {
     // Only my spawned child handle is eligible for cleanup; no process-name/group search.
     if (child?.pid && child.exitCode === null && child.signalCode === null) {

@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useId, useRef, useState } from 'react'
 import { formatBytes, type UsageGroup, type UsageGroupBy, type UsageMachine } from '../../../shared/storage'
-import type { NodeId } from '../../../shared/net'
 import { ArrowDown, ArrowUp, RefreshCw, Server } from '../../lib/icons'
 import { readDevices } from '../../lib/netDevices'
 import {
@@ -22,9 +21,7 @@ import {
 } from '../../lib/storageUsage'
 import { openThread } from '../../lib/openThread'
 import { useAppStore } from '../../stores/appStore'
-import { RemoteThreadView } from '../RemoteDeviceThreads'
 import { SettingsGroup, SettingsRow } from '../settings/SettingsRow'
-import { Modal } from '../ui/Modal'
 import { Select } from '../ui/Select'
 import { StorageDonut, sliceColor } from './StorageDonut'
 
@@ -160,7 +157,6 @@ export function StorageUsageSection({ refreshKey = 0 }: { refreshKey?: number })
   const [loading, setLoading] = useState(false)
   const [sort, setSort] = useState<Sort>({ key: 'size', direction: 'desc' })
   const [now, setNow] = useState(() => Date.now())
-  const [remote, setRemote] = useState<{ node: NodeId; threadId: string; name: string }>()
   const token = useRef(0)
   const mounted = useRef(true)
   const machinesRef = useRef<MachineChoice[]>([])
@@ -211,10 +207,8 @@ export function StorageUsageSection({ refreshKey = 0 }: { refreshKey?: number })
     if (!target) return
     if (target.type === 'policy') {
       document.getElementById(target.anchor)?.scrollIntoView({ block: 'start' })
-    } else if (target.type === 'thread') {
-      void openThread(target.threadId).then(() => { if (useAppStore.getState().activeThreadId === target.threadId) useAppStore.getState().setSettingsOpen(false) })
     } else {
-      setRemote({ node: target.node, threadId: target.threadId, name: group.label })
+      void openThread(target.threadId).then(() => { if (useAppStore.getState().activeThreadId === target.threadId) useAppStore.getState().setSettingsOpen(false) })
     }
   }
   const onSort = (key: SortKey) => setSort((current) => current.key === key ? { key, direction: current.direction === 'asc' ? 'desc' : 'asc' } : { key, direction: key === 'name' || key === 'machine' ? 'asc' : 'desc' })
@@ -235,8 +229,5 @@ export function StorageUsageSection({ refreshKey = 0 }: { refreshKey?: number })
       onSort={onSort}
       onOpen={open}
     />
-    <Modal open={remote !== undefined} title={remote ? `${remote.name} on another machine` : 'Thread'} onClose={() => setRemote(undefined)}>
-      {remote && <RemoteThreadView refValue={{ nodeId: remote.node, entityId: remote.threadId }} connected={machines.find((choice) => choice.node === remote.node)?.online ?? false} />}
-    </Modal>
   </>
 }

@@ -4,6 +4,7 @@ import type { PlatformRequestMethod } from '../../shared/platform'
 import type { TransportManifest } from '../../mms/net/contracts'
 import { formatAgo } from './formatAgo'
 import { parseVersion } from '../../shared/net/version'
+import { describePermissionMode, type PermissionMode } from '../../shared/permissionMode'
 
 /** One route this computer knows for a device and how its last attempt went. */
 export interface DeviceRouteHealth {
@@ -50,6 +51,33 @@ export interface Device {
 
 /** The capability that lets a computer work on this one's threads is stored as `settings`. */
 export const WORKS_ON_THREADS: NodeCapability = 'settings'
+
+/**
+ * What pairing a computer opens, in both directions, said where a person pairs one (Add device, an SSH setup).
+ * The numbers are the defaults a new computer starts with; they are limits, not promises, and are changed per device.
+ */
+export const PAIRING_DISCLOSURE =
+  'Once paired, each computer can run and change threads on the other, up to Auto-accept edits. Terminals stay off. You can limit or block either one in Devices.'
+
+/**
+ * What turning on "Works on threads" for a computer, or marking a device as a computer, opens. This computer
+ * holds the grant itself when it manages the devices, so the reach is in both directions.
+ */
+export function workOnThreadsDisclosure(name: string, mode: PermissionMode = 'accept_edits'): string {
+  return `${name} will be able to run and change threads on this computer, up to ${describePermissionMode(mode)}: it can read their transcripts, files and Git state, start turns, answer approvals, and commit and push with this computer's sign-ins. This computer can do the same on ${name}. Terminals stay off. You can limit or block ${name} in Devices.`
+}
+
+const NET_ERROR_WORDS: Record<string, string> = {
+  route_unreachable: 'none of your other devices can be reached right now',
+  peer_offline: 'a device is offline',
+  keystore_locked: 'the network keys are locked',
+  deadline_exceeded: 'a device did not answer in time'
+}
+
+/** A Net error code in words a person can read; a code this build does not know has its underscores taken out. */
+export function netErrorWords(code: string): string {
+  return NET_ERROR_WORDS[code] ?? code.replaceAll('_', ' ')
+}
 
 /** Words for a capability in the device line; `settings` is "work on threads". */
 export function capabilityLabel(cap: NodeCapability): string {
@@ -118,6 +146,9 @@ export function deviceLine(device: Device, now: number): string {
   const version = versionLabel(device)
   if (version) parts.push(version)
   if (device.caps.length) parts.push(`can ${device.caps.map(capabilityLabel).join(', ')}`)
+  // What this computer lets the device do here: shown for a computer that works on threads, so the defaults are not a secret.
+  if (device.policy && !device.policy.blocked && isComputer(device) && worksOnThreads(device))
+    parts.push(`highest mode here: ${describePermissionMode(device.policy.maxPermissionMode)}`, device.policy.terminal ? 'terminals on' : 'terminals off')
   if (device.policy?.blocked) parts.push('blocked on this computer')
   return parts.join(' · ')
 }

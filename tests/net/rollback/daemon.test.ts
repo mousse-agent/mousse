@@ -77,7 +77,7 @@ it.skipIf(process.platform === 'win32')(
       let daemon = await launch()
       expect(await ok(['net', 'status'])).toMatchObject({
         enabled: false,
-        features: { netBridge: false, netSpaces: false, netBridgeThreads: false }
+        features: { netBridge: false, netSpaces: false, netBridgeThreads: true }
       })
       expect(existsSync(join(profile(), 'net'))).toBe(false)
       await ok(['net', 'init', '--listen', '--port', '0'])
@@ -89,7 +89,7 @@ it.skipIf(process.platform === 'win32')(
       expect(await ok(['net', 'disable'])).toMatchObject({
         enabled: false,
         restartRequired: true,
-        features: { netBridge: false, netSpaces: false, netBridgeThreads: false },
+        features: { netBridge: false, netSpaces: false, netBridgeThreads: true },
         routes: []
       })
       expect(await cli(['spaces', 'create', 'denied'])).toMatchObject({
@@ -104,7 +104,7 @@ it.skipIf(process.platform === 'win32')(
       daemon = await launch()
       expect(await ok(['net', 'status'])).toMatchObject({
         enabled: false,
-        features: { netBridge: false, netSpaces: false, netBridgeThreads: false },
+        features: { netBridge: false, netSpaces: false, netBridgeThreads: true },
         routes: []
       })
       expect(await cli(['net', 'unlock'], 'owned-rollback-daemon-passphrase')).toMatchObject({
@@ -117,7 +117,7 @@ it.skipIf(process.platform === 'win32')(
       await ok(['net', 'init', '--unlock'], 'owned-rollback-daemon-passphrase')
       expect(await ok(['net', 'status'])).toMatchObject({
         enabled: true,
-        features: { netBridge: true, netSpaces: true, netBridgeThreads: false }
+        features: { netBridge: true, netSpaces: true, netBridgeThreads: true }
       })
       const tail = await ok(['spaces', 'tail', created.channel])
       expect(tail.records).toHaveLength(1)
