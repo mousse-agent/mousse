@@ -244,11 +244,10 @@ describe('ask dialog', () => {
     const html = render()
     expect(html).toContain('role="dialog"')
     expect(html).toContain('modal-overlay editor-ask-prompt')
-    expect(html).toContain('Allow Computer B to open its editor here?')
-    expect(html).toContain('<p class="editor-ask-warning">This gives shell access.</p>')
-    expect(html).toContain(
-      "Computer B signs in to this computer&#x27;s own SSH server as you for as long as its editor stays connected. You can turn it off any time in Settings, Devices."
-    )
+    expect(html).toContain('Let Computer B’s editor connect to this computer?')
+    // A title and one short line, nothing more.
+    expect(html).toContain('<p class="editor-ask-warning">Gives shell access.</p>')
+    expect(html.match(/<p /g)).toHaveLength(1)
     const actions = [...html.matchAll(/data-action="([a-z-]+)"/g)].map((match) => match[1])
     expect(actions).toEqual(['decline-editor-ask', 'allow-editor-ask'])
     expect(html).toContain('Not now</button>')
@@ -260,6 +259,13 @@ describe('ask dialog', () => {
     const html = render({ busy: true, error: 'The background service is not running.' })
     expect(html).toContain('<p role="alert" class="chat-error">The background service is not running.</p>')
     expect(html.match(/data-action="(allow|decline)-editor-ask" disabled=""/g)).toHaveLength(2)
+  })
+
+  it('arms Allow only after a moment, so a click meant for something else cannot grant it', () => {
+    // Rendered on the server, the first paint is the unarmed one: Allow is disabled, Not now is not.
+    const html = render()
+    expect(html).toMatch(/data-action="allow-editor-ask" disabled=""/)
+    expect(html).not.toMatch(/data-action="decline-editor-ask" disabled=""/)
   })
 })
 

@@ -163,7 +163,7 @@ describe('opening the thread folder in an editor', () => {
     }))
     expect(item).toContain('Open in VS Code')
     expect(item).not.toContain('Open in editor on')
-    expect(item).toContain('VS Code cannot open Studio’s folder from this computer yet.')
+    expect(item).toContain('No connection to Studio')
     expect(item).toContain('Set up…')
   })
 })

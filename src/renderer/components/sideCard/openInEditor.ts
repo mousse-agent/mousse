@@ -93,14 +93,14 @@ export function noRouteHelp(
 ): NoRouteHelp {
   if (device?.sshOffer) {
     return {
-      message: `To open ${computer}’s folder in ${editor.label} here, approve the SSH address ${computer} offers (${device.sshOffer.endpoint}).`,
+      message: `${computer} offers SSH (${device.sshOffer.endpoint})`,
       action: 'approve',
       label: 'Approve address…',
       endpoint: device.sshOffer.endpoint
     }
   }
   return {
-    message: `${editor.label} cannot open ${computer}’s folder from this computer yet. Add a connection to ${computer} in Devices, then try again.`,
+    message: `No connection to ${computer}`,
     action: 'devices',
     label: 'Open Devices…'
   }
@@ -108,7 +108,7 @@ export function noRouteHelp(
 
 /** Said when no installed editor can open a folder of another computer. */
 export function noRemoteEditorMessage(computer: string): string {
-  return `None of the editors installed on this computer can open a folder on ${computer}. VS Code, Cursor, Windsurf and VSCodium can.`
+  return `No installed editor can open ${computer}’s folder`
 }
 
 /** What a refused open says, in plain words with the computer's and the editor's names. */
@@ -119,29 +119,29 @@ export function remoteRefusalMessage(
 ): string {
   switch (result.reason) {
     case 'no_route':
-      return `${editor.label} cannot open ${computer}’s folder from this computer yet.`
+      return `No connection to ${computer}`
     case 'editor_missing':
       return result.message || `${editor.label} could not be started.`
     case 'no_folder':
-      return `This thread has no folder on ${computer}.`
+      return `No folder on ${computer}`
     case 'folder_missing':
-      return `The thread’s folder is no longer on ${computer}.`
+      return `Folder gone from ${computer}`
     case 'folder_protected':
-      return `${computer} will not hand out this folder: it holds credentials or settings.`
+      return `${computer} keeps this folder private`
     case 'folder_not_openable':
-      return `This folder cannot be opened in an editor from another computer.`
+      return `This folder cannot be opened remotely`
     case 'worktree_missing':
-      return `The thread’s worktree on ${computer} was removed and could not be restored. Restore it on ${computer}, then open it again.`
+      return `Worktree on ${computer} was removed`
     case 'worktree_recovery':
-      return `The thread’s worktree on ${computer} needs recovery there before its folder can be opened.`
+      return `Worktree on ${computer} needs recovery`
     case 'ssh_settings':
       return editorSshProblemWords({ code: result.code ?? '', message: result.message ?? '' }, result.includeLine)
     case 'connection': {
-      // The side card shows these as states with a button; this is the same words in one line.
+      // The side card shows these as a line with an action; this is the line.
       const help = helpForOpenResult(result, computer)
-      return help ? [help.message, help.next].filter(Boolean).join(' ') : result.message || `${computer} did not answer.`
+      return help ? help.message : result.message || `${computer} did not answer`
     }
     case 'failed':
-      return result.message || `${computer} did not answer.`
+      return result.message || `${computer} did not answer`
   }
 }

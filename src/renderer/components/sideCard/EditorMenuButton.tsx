@@ -6,6 +6,7 @@ import {
   editorConnectionHelp,
   helpForOpenResult,
   openedWords,
+  signInAdvice,
   type AskOutcome,
   type EditorHelp,
   type EditorHelpAction
@@ -34,7 +35,7 @@ import {
   saveLastEditorId,
   splitEditors
 } from './openInEditor'
-import { EditorSshNotice } from './EditorSshNotice'
+import { EditorSshToast } from './EditorSshToast'
 import { EditorStateNote, type EditorStateAction } from './EditorStateNote'
 import { useRemoteRoute } from './useRemoteRoute'
 import { SideCardMenuRow } from './SideCardMenuRow'
@@ -75,10 +76,14 @@ export function OpenInEditor() {
 /** What the last open or ask came to, until the next one. */
 type Outcome =
   | { kind: 'refused'; result: Extract<RemoteOpenResult, { ok: false }> }
-  | { kind: 'opened'; hint?: string; via?: ConnectionVia }
+  | { kind: 'opened'; hint?: string; via?: ConnectionVia; advice?: SignInAdvice }
   | { kind: 'asked'; result: RemoteAskResult }
 
 type ConnectionVia = NonNullable<Extract<RemoteOpenResult, { ok: true }>['via']>
+type SignInAdvice = NonNullable<Extract<RemoteOpenResult, { ok: true }>['advice']>
+
+/** How often a waiting ask is looked at again (and when the window comes back to the front): has the other computer allowed it? */
+const ASK_RECHECK_MS = 30_000
 
 /**
  * The editor item of a thread that lives on another computer: the same button, which opens the thread's
@@ -99,6 +104,22 @@ export function OpenInRemoteEditor({ threadId, node, computer, profileId }: { th
   const [opens, setOpens] = useState(0)
   useEffect(() => { setLastId(loadLastEditorId(profileId)) }, [profileId])
   useEffect(() => { setOutcome(null) }, [threadId])
+  // After an ask the other computer may allow it any time: look again while the ask waits. Asking again while it
+  // waits bothers nobody there, and a computer that now allows it answers `already_on`.
+  const waitingUntil = outcome?.kind === 'asked' && outcome.result.ok && (outcome.result.reply.state === 'asked' || outcome.result.reply.state === 'pending') ? outcome.result.reply.expiresAt : 0
+  useEffect(() => {
+    if (!waitingUntil) return
+    let alive = true
+    const recheck = () => {
+      if (Date.now() >= waitingUntil) return
+      void window.mousse.editors.askAccess(threadId).then((result) => {
+        if (alive && result.ok && result.reply.state === 'already_on') setOutcome({ kind: 'asked', result })
+      }, () => undefined)
+    }
+    const timer = setInterval(recheck, ASK_RECHECK_MS)
+    window.addEventListener('focus', recheck)
+    return () => { alive = false; clearInterval(timer); window.removeEventListener('focus', recheck) }
+  }, [waitingUntil, threadId])
   if (!editors) return null
   const usable = remoteEditors(editors)
   const current = defaultEditor(usable, lastId)
@@ -122,7 +143,7 @@ export function OpenInRemoteEditor({ threadId, node, computer, profileId }: { th
     try {
       // Also while the note shows: the route may have been added since the window last looked.
       const result = await window.mousse.editors.openRemote(editor.id, threadId)
-      if (result.ok) setOutcome({ kind: 'opened', ...(result.hint ? { hint: result.hint } : {}), ...(result.via ? { via: result.via } : {}) })
+      if (result.ok) setOutcome({ kind: 'opened', ...(result.hint ? { hint: result.hint } : {}), ...(result.via ? { via: result.via } : {}), ...(result.advice ? { advice: result.advice } : {}) })
       else if (result.reason === 'no_route') reloadRoute()
       else setOutcome({ kind: 'refused', result })
     } finally {
@@ -155,19 +176,26 @@ export function OpenInRemoteEditor({ threadId, node, computer, profileId }: { th
   let refusal: string | null = null
   // A computer that went offline since the last answer is offline now, whatever that answer said.
   const offlineNow = route === 'mousse' && !!device && device.state !== 'open'
+  // Editor connections off: the button itself becomes "Ask <computer>", with no note and no paragraph.
+  let primary: { label: string; title: string; onClick: () => void } | undefined
   if (offlineNow && outcome?.kind !== 'opened') state = { help: editorConnectionHelp({ failure: 'offline', computer }), tone: 'alert' }
   else if (outcome?.kind === 'asked') state = { help: askOutcomeWords(outcome.result, computer, selfNode), tone: 'status' }
+  else if (outcome?.kind === 'opened' && outcome.advice) state = { help: signInAdvice(outcome.advice, computer, device?.platform), tone: 'status' }
   else if (outcome?.kind === 'refused') {
-    const found = helpForOpenResult(outcome.result, computer, device?.platform)
-    if (found) state = { help: found, tone: 'alert' }
-    else refusal = remoteRefusalMessage(outcome.result, current, computer)
+    if (outcome.result.reason === 'connection' && outcome.result.failure === 'editor_off')
+      primary = { label: `Ask ${computer}`, title: 'Gives shell access', onClick: () => void ask() }
+    else {
+      const found = helpForOpenResult(outcome.result, computer, device?.platform)
+      if (found) state = { help: found, tone: 'alert' }
+      else refusal = remoteRefusalMessage(outcome.result, current, computer)
+    }
   }
   const extra = (
     <>
-      {working === 'opening' && route === 'mousse' && <p className="side-card-open-editor-note" role="status">Checking the connection to {computer}…</p>}
-      {working === 'asking' && <p className="side-card-open-editor-note" role="status">Asking {computer}…</p>}
-      {!working && outcome?.kind === 'opened' && outcome.via && <p className="side-card-open-editor-note" role="status">{openedWords(computer, outcome.via)}</p>}
-      {!working && state && <EditorStateNote help={state.help} tone={state.tone} actions={state.help.actions.map(run)} />}
+      {working === 'opening' && route === 'mousse' && <p className="side-card-open-editor-note" role="status">Checking…</p>}
+      {working === 'asking' && <p className="side-card-open-editor-note" role="status">Asking…</p>}
+      {!working && outcome?.kind === 'opened' && outcome.via && <p className="side-card-open-editor-via" role="status">{openedWords(outcome.via)}</p>}
+      {!working && state && <EditorStateNote key={state.help.message} help={state.help} tone={state.tone} actions={state.help.actions.map(run)} />}
     </>
   )
   return (
@@ -182,8 +210,9 @@ export function OpenInRemoteEditor({ threadId, node, computer, profileId }: { th
         refusal={refusal}
         hint={outcome?.kind === 'opened' ? outcome.hint ?? null : null}
         extra={extra}
+        primary={primary}
       />
-      <EditorSshNotice refreshKey={opens} />
+      <EditorSshToast refreshKey={opens} opened={outcome?.kind === 'opened'} />
       {approving && help?.action === 'approve' && help.endpoint && (
         <ApproveSshRouteDialog
           node={node as NodeId}
@@ -215,10 +244,12 @@ interface OpenInEditorViewProps {
   hint?: string | null
   /** What an editor connection to another computer says under the button: progress, a state with its next step, an answer to an ask. */
   extra?: ReactNode
+  /** Replaces what the main button does and says, as when editor connections are off and the button asks the computer. */
+  primary?: { label: string; title?: string; onClick: () => void }
 }
 
 /** The split button, its menu and its inline error, given the data. `OpenInEditor` supplies it. */
-export function OpenInEditorView({ path, editors, lastId, onOpen, onMenuOpen, blocked, refusal, hint, extra }: OpenInEditorViewProps) {
+export function OpenInEditorView({ path, editors, lastId, onOpen, onMenuOpen, blocked, refusal, hint, extra, primary }: OpenInEditorViewProps) {
   const [menuOpen, setMenuOpen] = useState(false)
   const [error, setError] = useTransientError()
   const busyRef = useRef(false)
@@ -267,10 +298,12 @@ export function OpenInEditorView({ path, editors, lastId, onOpen, onMenuOpen, bl
           type="button"
           className={`side-card-open-editor-main${blocked ? ' blocked' : ''}`}
           aria-describedby={blocked ? noteId : undefined}
-          onClick={() => void openEditor(current)}
+          title={primary?.title}
+          data-action={primary ? 'ask' : undefined}
+          onClick={() => (primary ? primary.onClick() : void openEditor(current))}
         >
           <EditorIcon editor={current} />
-          <span className="side-card-open-editor-label">{openLabel(current)}</span>
+          <span className="side-card-open-editor-label">{primary ? primary.label : openLabel(current)}</span>
         </button>
         {choices && (
           <button
@@ -294,7 +327,7 @@ export function OpenInEditorView({ path, editors, lastId, onOpen, onMenuOpen, bl
           {blocked.action && <button type="button" className="side-card-open-editor-link" onClick={blocked.action.onClick}>{blocked.action.label}</button>}
         </div>
       )}
-      {hint && <p className="side-card-open-editor-note" role="note">{hint}</p>}
+      {hint && <p className="side-card-open-editor-note" role="note" title={hint}>Remote - SSH may be needed</p>}
       {refusal && <p className="side-card-open-editor-note refusal" role="alert">{refusal}</p>}
       {extra}
       {error && (

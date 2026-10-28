@@ -49,20 +49,19 @@ describe('terminal and editor rows for a device', () => {
   })
 
   it('says an editor connection is shell access over this computer\'s SSH server', () => {
+    // One short phrase on each row; the longer words are the tooltip.
     const off = view()
-    expect(off).toContain('Off · Computer B cannot open its editor on this computer.')
-    expect(off).toContain('shell access')
-    expect(off).toContain('SSH server')
+    expect(off.match(/Off · shell access/g)).toHaveLength(2)
+    expect(off).toContain('title="Computer B&#x27;s editor signs in to this computer&#x27;s own SSH server as you, so one needs to be running.')
+    expect(off).toContain('turn this off or turn Mousse Net off')
     const on = view({ policy: policy({ editor: true, terminal: true }) })
-    expect(on).toContain('On · Computer B&#x27;s editor can sign in to this computer&#x27;s SSH server as you (shell access).')
-    expect(on).toContain('turn this off or turn Mousse Net off')
-    expect(on).toContain('On · Computer B can open, type into and stop terminals')
-    expect(off).toContain('Off · Computer B cannot open terminals on this computer.')
+    expect(on.match(/On · shell access/g)).toHaveLength(2)
+    expect(on).toContain('title="Computer B can open, type into and stop terminals')
   })
 
   it('answers a waiting ask in the editor row and keeps the switch', () => {
     const html = view({ ask })
-    expect(html).toContain('Computer B asked to open its editor here. This gives shell access.')
+    expect(html).toContain('Asked · shell access')
     const actions = [...html.matchAll(/data-action="([a-z-]+)"/g)].map((match) => match[1])
     expect(actions).toEqual(['decline-editor-ask', 'allow-editor-ask'])
     expect(html).toContain('Not now</button>')

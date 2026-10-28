@@ -1,7 +1,7 @@
 import { SettingsRow, Switch } from '../settings/SettingsRow'
 import { useDaemonCall } from './useDaemonCall'
 import { useEditorAskStore } from '../../stores/editorAskStore'
-import { EDITOR_ASK_WARNING, type EditorAskView } from '../../../shared/bridge/editorAsk'
+import type { EditorAskView } from '../../../shared/bridge/editorAsk'
 import type { BridgeNodePolicy } from '../../../shared/net/local'
 import type { Device } from '../../lib/netDevices'
 
@@ -17,10 +17,15 @@ export interface DeviceAccessViewProps {
   onNotNow(): void
 }
 
-const editorLine = (name: string, on: boolean) =>
-  on
-    ? `On · ${name}'s editor can sign in to this computer's SSH server as you (shell access). It ends at once when you block ${name}, turn this off or turn Mousse Net off.`
-    : `Off · ${name} cannot open its editor on this computer. Turning it on is the same as shell access: its editor signs in to this computer's own SSH server as you, so one needs to be running.`
+/** One short phrase; the longer words are the tooltip. */
+const line = (state: string, detail: string) => <span title={detail}>{state}</span>
+const terminalLine = (name: string, on: boolean) =>
+  line(`${on ? 'On' : 'Off'} · shell access`, `${name} can open, type into and stop terminals on this computer. They end at once when you block ${name}, turn this off or turn Mousse Net off.`)
+const editorLine = (name: string, on: boolean, asked: boolean) =>
+  line(
+    asked ? 'Asked · shell access' : `${on ? 'On' : 'Off'} · shell access`,
+    `${name}'s editor signs in to this computer's own SSH server as you, so one needs to be running. It ends at once when you block ${name}, turn this off or turn Mousse Net off.`
+  )
 
 /**
  * The two ways another computer gets a shell here, side by side under its row in Devices: terminals and
@@ -31,15 +36,13 @@ export function DeviceAccessView({ name, policy, busy, ask, onSetTerminal, onSet
     <SettingsRow
       indent
       title="Terminals from this device"
-      description={policy.terminal
-        ? `On · ${name} can open, type into and stop terminals on this computer (shell access). They end at once when you block ${name}, turn this off or turn Mousse Net off.`
-        : `Off · ${name} cannot open terminals on this computer.`}
+      description={terminalLine(name, policy.terminal)}
       control={<Switch checked={policy.terminal} label={`Terminals from ${name}`} disabled={busy} onChange={onSetTerminal} />}
     />
     <SettingsRow
       indent
       title="Editor connections from this device"
-      description={ask ? `${name} asked to open its editor here. ${EDITOR_ASK_WARNING}` : editorLine(name, policy.editor)}
+      description={editorLine(name, policy.editor, !!ask)}
       control={<>
         {ask && <>
           <button type="button" className="settings-btn" data-action="decline-editor-ask" disabled={busy} onClick={onNotNow}>Not now</button>

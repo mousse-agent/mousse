@@ -1,5 +1,5 @@
-import { useEffect } from 'react'
-import { EDITOR_ASK_WARNING, editorAskQuestion, type EditorAskView } from '../../shared/bridge/editorAsk'
+import { useEffect, useState } from 'react'
+import { EDITOR_ASK_ARM_MS, EDITOR_ASK_WARNING, editorAskQuestion, type EditorAskView } from '../../shared/bridge/editorAsk'
 import { useAppStore } from '../stores/appStore'
 import { currentEditorAsk, useEditorAskStore, useEditorAskWatch } from '../stores/editorAskStore'
 import { Check } from '../lib/icons'
@@ -18,6 +18,14 @@ export function EditorAskPrompt({
   onDecide: (allow: boolean) => void
   onClose: () => void
 }) {
+  // A prompt appears when the other computer chooses, over whatever is on screen: Allow waits a moment, so a click
+  // or a key meant for something else cannot grant shell access.
+  const [armed, setArmed] = useState(false)
+  useEffect(() => {
+    setArmed(false)
+    const timer = setTimeout(() => setArmed(true), EDITOR_ASK_ARM_MS)
+    return () => clearTimeout(timer)
+  }, [ask.node, ask.at])
   return (
     <Modal
       open
@@ -29,7 +37,7 @@ export function EditorAskPrompt({
           <button type="button" className="settings-btn" data-action="decline-editor-ask" disabled={busy} onClick={() => onDecide(false)}>
             Not now
           </button>
-          <button type="button" className="settings-btn" data-action="allow-editor-ask" disabled={busy} onClick={() => onDecide(true)}>
+          <button type="button" className="settings-btn" data-action="allow-editor-ask" disabled={busy || !armed} onClick={() => onDecide(true)}>
             <Check size={14} className="settings-status-ok" />
             Allow
           </button>
@@ -38,9 +46,6 @@ export function EditorAskPrompt({
     >
       {error && <p role="alert" className="chat-error">{error}</p>}
       <p className="editor-ask-warning">{EDITOR_ASK_WARNING}</p>
-      <p className="editor-ask-detail">
-        {ask.name} signs in to this computer's own SSH server as you for as long as its editor stays connected. You can turn it off any time in Settings, Devices.
-      </p>
     </Modal>
   )
 }
