@@ -321,4 +321,7 @@ CREATE TABLE IF NOT EXISTS net_node_policy(node TEXT PRIMARY KEY, blocked INTEGE
 CREATE TABLE IF NOT EXISTS bridge_audit(id INTEGER PRIMARY KEY AUTOINCREMENT, at INTEGER NOT NULL, node TEXT NOT NULL, kind TEXT NOT NULL CHECK(kind IN ('change','refused')), method TEXT NOT NULL, thread TEXT, project TEXT, outcome TEXT NOT NULL) STRICT;
 CREATE INDEX IF NOT EXISTS bridge_audit_node ON bridge_audit(node,kind,id);
 CREATE TABLE IF NOT EXISTS bridge_audit_reads(node TEXT NOT NULL, hour INTEGER NOT NULL, calls INTEGER NOT NULL, bytes INTEGER NOT NULL, PRIMARY KEY(node,hour)) STRICT;
+CREATE TABLE IF NOT EXISTS remote_thread_order(node TEXT NOT NULL, thread TEXT NOT NULL, position REAL NOT NULL, PRIMARY KEY(node,thread)) STRICT;
+CREATE TABLE IF NOT EXISTS remote_thread_opened(node TEXT NOT NULL, thread TEXT NOT NULL, opened_at INTEGER NOT NULL, PRIMARY KEY(node,thread)) STRICT;
+CREATE TABLE IF NOT EXISTS remote_lists_cache(node TEXT PRIMARY KEY, saved_at INTEGER NOT NULL, snapshot TEXT NOT NULL) STRICT;
 `
