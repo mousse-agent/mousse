@@ -29,26 +29,26 @@ function target(file: string, specifier: string): string {
 
 // -- Rule 1: forbidden modules ---------------------------------------------------------------------
 
-/** Vendor SDKs, vendor protocols and the code that wraps them. */
+/**
+ * Vendor SDKs, vendor protocols and the code that wraps them. Driver modules themselves
+ * (`harness/drivers/<kind>.ts`, `harness/drivers/pi/**`) are the gateway's registration seam and
+ * stay importable: the orchestrator builds its unbound gateway with the pi driver, and
+ * `ProviderAuthService` reads the pi driver's retirement table and one-shot API check.
+ */
 const FORBIDDEN = [
   /^@anthropic-ai\/claude-agent-sdk/,
   /^@agentclientprotocol\/sdk/,
-  /^src\/mms\/providers\/(claudeSubscription|codex|antigravity)\//,
-  // The adapters the drivers wrap. `run/adapters/shared/*` is the vendor-neutral context-overflow
-  // retry the orchestrator still uses.
-  /^src\/mms\/run\/adapters\/(?!shared\/)/,
+  // Vendor services and vendor-specific code: Claude Code, Codex (with the managed runtime), the
+  // ACP client and its presets (with Antigravity's service), the Cursor host, ChatGPT sign-in, Grok.
+  /^src\/mms\/harness\/(vendors|acp|hosts|chatgpt|claude|cursor|grok)\//,
+  // The adapters the drivers wrap.
+  /^src\/mms\/harness\/drivers\/[^/]+\/adapter$/,
   // Pi's agent as a process: the launcher, the RPC client and Mousse's extension.
   /^src\/mms\/harness\/pi\//
 ]
 
 /** Who may import them. */
-const ALLOWED_IMPORTERS = [
-  /^src\/mms\/harness\//,
-  /^src\/mms\/run\/adapters\//,
-  /^src\/mms\/providers\//,
-  /^src\/mms\/run\/testkit\//,
-  /^src\/mms\/MmsProfileServices\.ts$/
-]
+const ALLOWED_IMPORTERS = [/^src\/mms\/harness\//, /^src\/mms\/run\/testkit\//, /^src\/mms\/MmsProfileServices\.ts$/]
 
 describe('harness import boundary', () => {
   const sources = files('src').map((path) => ({ path, source: readFileSync(join(repoRoot, path), 'utf8') }))
@@ -72,7 +72,7 @@ describe('harness import boundary', () => {
 
   it('the orchestrator imports no vendor service or adapter', () => {
     const orchestrator = sources.find(({ path }) => path === 'src/mms/orchestrator/OrchestratorService.ts')!
-    const vendor = specifiers(orchestrator.source).filter((specifier) => /providers\/(claudeSubscription|codex|antigravity)|run\/adapters\/(?!shared\/)/.test(specifier))
+    const vendor = specifiers(orchestrator.source).filter((specifier) => /harness\/(vendors|acp)\/|harness\/drivers\/[^/]+\/adapter$/.test(specifier))
     expect(vendor).toEqual([])
   })
 
@@ -103,7 +103,7 @@ const CURSOR_SDK_IMPORTERS = [/^src\/mms\/harness\/hosts\//]
 // -- Rule 2: driver-name literals at branch sites --------------------------------------------------
 
 /** Where application branches live. Declarations and data tables are out of scope (plan v3). */
-const BRANCH_SCOPES = ['src/renderer/', 'src/mms/orchestrator/', 'src/mms/protocol/', 'src/mms/channels/', 'src/cli/']
+const BRANCH_SCOPES = ['src/renderer/', 'src/mms/orchestrator/', 'src/mms/protocol/', 'src/mms/channels/', 'src/mms/providers/', 'src/cli/']
 
 const DRIVER_NAMES = ['antigravity', 'claude-subscription', 'codex', 'pi', 'claude', 'acp', 'cursor', 'grok', 'xai']
 const NAME = `['"\`](${DRIVER_NAMES.join('|')})['"\`]`
@@ -122,26 +122,22 @@ const LITERAL_ALLOWLIST: Record<string, string> = {
   'src/renderer/lib/providerIcons.tsx': 'icons'
 }
 
-/**
- * Transitional allowlist (plan v3): driver declarations and vendor-service internals that PR 1
- * keeps unchanged. These directories are outside the branch scopes above; listed so the scope
- * stays honest if they move.
- */
-const TRANSITIONAL: Record<string, string> = {
-  'src/mms/run/adapters/claudeSubscription/': 'PR 5 (adapters retired by drivers)',
-  'src/mms/run/adapters/codex/': 'PR 5 (adapters retired by drivers)',
-  'src/mms/run/adapters/acp/': 'PR 5 (adapters retired by drivers)',
-  'src/mms/run/adapters/cursor/': 'PR 5 (adapters retired by drivers)',
-  'src/mms/harness/vendors/claude/': 'PR 5',
-  'src/mms/harness/vendors/codex/': 'PR 5',
-  'src/mms/harness/acp/presets/antigravity/': 'PR 5'
-}
-
 function codeLines(source: string): Array<{ line: string; number: number }> {
   return source.split('\n').map((line, index) => ({ line, number: index + 1 })).filter(({ line }) => {
     const trimmed = line.trim()
     return !trimmed.startsWith('//') && !trimmed.startsWith('*') && !trimmed.startsWith('/*')
   })
+}
+
+/** Every branch site in the branch scopes, as `path:line: code`. */
+function branchViolations(sources: Array<{ path: string; source: string }>): string[] {
+  const violations: string[] = []
+  for (const { path, source } of sources) {
+    if (LITERAL_ALLOWLIST[path] || !BRANCH_SCOPES.some((scope) => path.startsWith(scope))) continue
+    for (const { line, number } of codeLines(source))
+      if (BRANCH_SITES.some((site) => site.test(line))) violations.push(`${path}:${number}: ${line.trim()}`)
+  }
+  return violations
 }
 
 describe('driver-name literals', () => {
@@ -150,17 +146,16 @@ describe('driver-name literals', () => {
   it('scans the branch scopes', () => {
     expect(sources.some(({ path }) => path.startsWith('src/mms/protocol/'))).toBe(true)
     expect(sources.some(({ path }) => path.startsWith('src/renderer/'))).toBe(true)
-    for (const dir of Object.keys(TRANSITIONAL)) expect(BRANCH_SCOPES.some((scope) => dir.startsWith(scope)), dir).toBe(false)
+    expect(sources.some(({ path }) => path === 'src/mms/providers/ProviderAuthService.ts')).toBe(true)
   })
 
   it('no application branch compares a driver or legacy provider name', () => {
-    const violations: string[] = []
-    for (const { path, source } of sources) {
-      if (LITERAL_ALLOWLIST[path]) continue
-      for (const { line, number } of codeLines(source))
-        if (BRANCH_SITES.some((site) => site.test(line))) violations.push(`${path}:${number}: ${line.trim()}`)
-    }
-    expect(violations).toEqual([])
+    expect(branchViolations(sources)).toEqual([])
+  })
+
+  it('fails on a provider-name comparison planted in the vendor-neutral provider code', () => {
+    const planted = { path: 'src/mms/providers/planted.ts', source: `export const isPi = (driver: string) => driver === 'pi'\n` }
+    expect(branchViolations([...sources, planted])).toEqual([`src/mms/providers/planted.ts:1: export const isPi = (driver: string) => driver === 'pi'`])
   })
 
   it('catches the shapes it is meant to catch', () => {
