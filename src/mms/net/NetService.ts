@@ -556,8 +556,20 @@ export class NetService {
     }
   }
   private saveConfig(): void {
-    const { db } = this.runtime(),
-      bytes = canonicalJson(this.config)
+    const { db } = this.runtime()
+    // An earlier version rejects any other key in `features` as corrupt storage and then fails to load Net
+    // at all. The routing flag is written only while it is on, so a profile that never turned it on can
+    // go back to an earlier build.
+    const { features, ...rest } = this.config
+    const stored: NetConfiguration = features
+      ? {
+          ...rest,
+          features: features.netBridgeThreads
+            ? features
+            : ({ netBridge: features.netBridge, netSpaces: features.netSpaces } as NetFeatureFlags)
+        }
+      : rest
+    const bytes = canonicalJson(stored)
     db.transaction(() => {
       db.charge(1, bytes.length)
       db.database

@@ -156,7 +156,7 @@ it('retains actual late RPC ownership and open SQL after bounded uncertain drain
       JSON.parse(
         rt.db.database.prepare('SELECT value FROM net_service_config').get()!.value as string
       )
-    ).toMatchObject({ enabled: false, features: DEFAULT_NET_FEATURE_FLAGS })
+    ).toMatchObject({ enabled: false, features: { netBridge: false, netSpaces: false } })
   } finally {
     release()
     await rpc
