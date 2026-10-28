@@ -670,7 +670,13 @@ describe('the profile barrier and the audit', () => {
     expect(refused).toMatchObject({ ok: false, error: { code: 'project_refused' } })
     const folder = repo()
     const opened = await ok('projects.open', { path: folder })
-    const [success, refusal] = audit.recent(5, f.callerNode).filter((row) => row.method !== 'thread.first_use')
+    // The first folder is also a row of its own (`project.first_open`, which tells the owner), like the first change.
+    const [success, refusal] = audit
+      .recent(5, f.callerNode)
+      .filter((row) => row.method !== 'thread.first_use' && row.method !== 'project.first_open')
+    expect(audit.recent(5, f.callerNode).filter((row) => row.method === 'project.first_open')).toEqual([
+      expect.objectContaining({ project: opened.project.id, outcome: 'first_folder', kind: 'change' })
+    ])
     expect(success).toMatchObject({
       method: 'projects.open',
       outcome: 'ok',

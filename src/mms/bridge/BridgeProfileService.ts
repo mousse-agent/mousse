@@ -34,6 +34,8 @@ import { RoutedStaging } from './routed/staging'
 import { routedStreamsPort } from './routed/streamsPort'
 import { isPrivateKey } from './remote/privateStreams'
 import { deviceNameOf } from './routed/deviceName'
+import { clearDeviceRules, deviceActivityOf, messageSendersOf, validateActivityParams } from './deviceActivity'
+import type { BridgeActivityMethod, BridgeActivityParams } from '../../shared/bridge/deviceActivity'
 
 /** Actual profile services own Bridge; no received DTO supplies a backend or path. */
 export class BridgeProfileService {
@@ -296,6 +298,15 @@ export class BridgeProfileService {
               device: name,
               ...(threadId ? { threadId, threadName: services.threads.getThread(threadId)?.name ?? '' } : {})
             }
+          }
+        }),
+      // The first folder a device registers as a project here: a desktop notification, and a row of its own in the audit.
+      onFirstProject: ({ name, projectName }) =>
+        services.events.emit({
+          channel: 'protocol:event',
+          data: {
+            type: 'ui.notify',
+            data: { kind: 'remote-project', device: name, ...(projectName ? { projectName } : {}) }
           }
         }),
       // Progress of a Git action goes to the one computer that started it, on its own channel stream.
@@ -581,6 +592,17 @@ export class BridgeProfileService {
       this.currentIdentity.activeCount() +
       (this.domain.activeCount?.() ?? 0)
     )
+  }
+  /** Answers the Devices screen of this computer's windows (`bridge.activity`, `bridge.clearDeviceRules`, `bridge.messageSenders`). */
+  activityAbout<M extends BridgeActivityMethod>(method: M, value: unknown): unknown {
+    if (this.stopped) throw new NetError('cancelled')
+    const params = validateActivityParams(method, value)
+    const sources = { services: this.options.services, runtime: this.options.runtime, now: this.clock.now() }
+    if (method === 'bridge.activity')
+      return deviceActivityOf(sources, (params as BridgeActivityParams['bridge.activity']).node)
+    if (method === 'bridge.clearDeviceRules')
+      return clearDeviceRules(sources, params as BridgeActivityParams['bridge.clearDeviceRules'])
+    return messageSendersOf(sources, (params as BridgeActivityParams['bridge.messageSenders']).threadId)
   }
   /** Trusted local connection producers retain profile ownership while draining. */
   ownDrain<T>(work: Promise<T>): Promise<T> {

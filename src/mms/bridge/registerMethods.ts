@@ -1,7 +1,8 @@
 import { AppError } from '../../shared/errors'
 import { NET_ERRORS, NetError } from '../../shared/net'
 import { NET_LOCAL_CAPABILITY } from '../../shared/net/local'
-import { BRIDGE_HUB_LOCAL_METHODS, BRIDGE_HUB_THREAD_EVENT } from '../../shared/bridge'
+import { BRIDGE_ACTIVITY_METHODS, BRIDGE_HUB_LOCAL_METHODS, BRIDGE_HUB_THREAD_EVENT } from '../../shared/bridge'
+import { validateActivityParams } from './deviceActivity'
 import { DomainHandlerRegistry } from '../protocol/domainRegistry'
 import type { DomainConnectionContext, TrustedProfileBinding } from '../protocol/domainRegistry'
 import type { BridgeProfileService } from './BridgeProfileService'
@@ -112,6 +113,30 @@ export function registerBridgeMethods(
               ? await events(context.connection, binding!, service)
               : undefined
           return await executeBridgeHubLocal(service.hub, method, params, local)
+        } catch (error) {
+          throw publicError(error)
+        }
+      }
+    })
+  // What other computers did on this one: read from this computer's own records, never forwarded anywhere.
+  for (const method of BRIDGE_ACTIVITY_METHODS)
+    registry.register({
+      method,
+      scope: 'profile',
+      capability: NET_LOCAL_CAPABILITY,
+      requiredCapabilities: [NET_LOCAL_CAPABILITY],
+      validate: (value) => {
+        try {
+          return validateActivityParams(method, value ?? {})
+        } catch (error) {
+          throw publicError(error)
+        }
+      },
+      handle: async (_context, params, binding) => {
+        try {
+          const service = await forProfile(binding!.profileId)
+          service.options.net.assertFeature('netBridge')
+          return service.activityAbout(method, params)
         } catch (error) {
           throw publicError(error)
         }

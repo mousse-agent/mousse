@@ -7,6 +7,7 @@ import { CHAT_RESOURCE_METHODS } from '../../shared/chatResources'
 import { CHAT_NETWORK_METHODS } from '../../shared/chatsNetwork'
 import { NET_LOCAL_METHODS } from '../../shared/net/local'
 import { BRIDGE_HUB_LOCAL_METHODS } from '../../shared/bridge/types'
+import { BRIDGE_ACTIVITY_METHODS } from '../../shared/bridge/deviceActivity'
 import { SPACES_LOCAL_METHODS } from '../../shared/spaces/local'
 import { BOTS_LOCAL_METHODS } from '../../shared/bots/space/local'
 import { BOTS_PERSONAL_METHODS } from '../../shared/bots/personal/methods'
@@ -178,6 +179,7 @@ export const PLATFORM_REQUEST_METHODS: ReadonlySet<PlatformRequestMethod> = new 
   ...CHAT_NETWORK_METHODS,
   ...NET_LOCAL_METHODS.filter(method => !['net.plus.bind','net.plus.connect'].includes(method)),
   ...BRIDGE_HUB_LOCAL_METHODS,
+  ...BRIDGE_ACTIVITY_METHODS,
   ...SPACES_LOCAL_METHODS,
   ...BOTS_LOCAL_METHODS,
   ...BOTS_PERSONAL_METHODS,
@@ -524,6 +526,24 @@ export function registerGuiIpc(
     notification.show()
   }
 
+  /** Another of the user's computers registered its first folder as a project here: said in a desktop notification, with where to see and limit what it did. */
+  const notifyRemoteProject = (device: string, projectName: string): void => {
+    if (!Notification.isSupported()) return
+    const notification = new Notification({
+      title: 'Mousse',
+      body: `${device} opened a folder${projectName ? ` (${projectName})` : ''} as a project on this computer. Open Settings, Devices to see what it did and to limit it.`
+    })
+    notification.on('click', () => {
+      const win = getWindow()
+      if (win && !win.isDestroyed()) {
+        if (win.isMinimized()) win.restore()
+        win.show()
+        win.focus()
+      }
+    })
+    notification.show()
+  }
+
   const setThreadActivity = (threadId: string, state: ThreadActivityState): void => {
     activityTrackerFor().setState(threadId, state)
     broadcast('threads:activity', activityTrackerFor().getSnapshot())
@@ -749,11 +769,12 @@ export function registerGuiIpc(
       }
     }
     if (event.type === 'ui.notify') {
-      const info = event.data as { kind?: unknown; device?: unknown; threadName?: unknown } | null
+      const info = event.data as { kind?: unknown; device?: unknown; threadName?: unknown; projectName?: unknown } | null
       const device = typeof info?.device === 'string' && info.device ? info.device : 'Another computer'
       const threadName = typeof info?.threadName === 'string' ? info.threadName : ''
       if (info?.kind === 'remote-terminal') notifyRemoteTerminal(device, threadName)
       if (info?.kind === 'remote-work') notifyRemoteWork(device, threadName)
+      if (info?.kind === 'remote-project') notifyRemoteProject(device, typeof info.projectName === 'string' ? info.projectName : '')
     }
     if (event.type === 'ui.focus-intent') {
       const win = getWindow()

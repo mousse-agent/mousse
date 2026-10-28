@@ -115,6 +115,11 @@ export interface OwnerRoutesOptions {
    * what that computer can now do and where to limit it. Written to the audit too (`thread.first_use`).
    */
   onFirstUse?: (info: { node: NodeId; name: string; threadId?: string }) => void
+  /**
+   * The first folder a device registers as a project here (`projects.open`): a desktop notice for the owner, and a
+   * row of its own in the audit (`project.first_open`). It stands in for the first-use notice when both are due.
+   */
+  onFirstProject?: (info: { node: NodeId; name: string; projectName?: string }) => void
   /** How long a device may be away before its terminals end, and how often that is looked at (tests shorten them). */
   terminalAwayMs?: number
   terminalSweepMs?: number
@@ -532,6 +537,8 @@ export class OwnerRoutes {
       project = `path:${createHash('sha256').update(params.path).digest('hex').slice(0, 12)}`
     // The first terminal a device opens here is worth telling the owner (below). Read before this call's own row is written.
     const firstTerminal = method === 'pty.create' && !audit.has(node, 'pty.create')
+    // The first folder it registers as a project here, in the same way.
+    const firstFolder = method === 'projects.open' && !audit.has(node, 'project.first_open')
     // The first change a device makes on a thread here, in any form (a send, a rename, a save, a Git action).
     const firstUse =
       row.durable && !row.sequenced && !row.terminal && !this.toldFirstUse.has(node) && !audit.has(node, 'thread.first_use')
@@ -619,14 +626,29 @@ export class OwnerRoutes {
       if (firstUse) {
         this.toldFirstUse.add(node)
         audit.record({ node, method: 'thread.first_use', thread, project, outcome: 'first_use', kind: 'change' })
+        // Registering a folder says more than "is working on threads", so its notice is the one shown.
+        if (!firstFolder)
+          try {
+            this.options.onFirstUse?.({
+              node,
+              name: this.options.deviceName?.(node) ?? 'Another computer',
+              ...(thread ? { threadId: thread } : {})
+            })
+          } catch {
+            // A notice that cannot be shown does not undo the change.
+          }
+      }
+      if (firstFolder) {
+        audit.record({ node, method: 'project.first_open', project, outcome: 'first_folder', kind: 'change' })
         try {
-          this.options.onFirstUse?.({
+          const projectName = project ? this.options.services.projects.getProject(project)?.name : undefined
+          this.options.onFirstProject?.({
             node,
             name: this.options.deviceName?.(node) ?? 'Another computer',
-            ...(thread ? { threadId: thread } : {})
+            ...(projectName ? { projectName } : {})
           })
         } catch {
-          // A notice that cannot be shown does not undo the change.
+          // A notice that cannot be shown does not undo the open.
         }
       }
       // The first terminal a device opens is a row of its own, and a desktop notification where a window can show one.

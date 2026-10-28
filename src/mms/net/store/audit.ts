@@ -133,6 +133,40 @@ export class SqliteBridgeAudit {
     }))
   }
 
+  /**
+   * What one device did since `since`, for the one-line summary: the changes that went through, counted per
+   * method; the ones that may have happened; and the calls that were refused. Notice rows are included, so the
+   * caller decides what to count.
+   */
+  summary(
+    node: NodeId,
+    since: number
+  ): { counts: Array<{ method: string; count: number }>; uncertain: number; refused: number } {
+    const rows = this.db.database
+      .prepare(
+        'SELECT method, kind, outcome = ? AS lost, COUNT(*) AS n FROM bridge_audit WHERE node=? AND at>=? GROUP BY method, kind, lost'
+      )
+      .all('uncertain', node, since) as Array<{
+      method: string
+      kind: BridgeAuditKind
+      lost: number
+      n: number
+    }>
+    const counts = new Map<string, number>()
+    let uncertain = 0
+    let refused = 0
+    for (const row of rows) {
+      if (row.kind === 'refused') refused += row.n
+      else if (row.lost) uncertain += row.n
+      else counts.set(row.method, (counts.get(row.method) ?? 0) + row.n)
+    }
+    return {
+      counts: [...counts.entries()].map(([method, count]) => ({ method, count })),
+      uncertain,
+      refused
+    }
+  }
+
   reads(node?: NodeId): BridgeReadTotal[] {
     const rows = (
       node
