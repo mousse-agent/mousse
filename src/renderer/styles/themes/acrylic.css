@@ -97,3 +97,33 @@ html[data-acrylic='false'] .main-area .header {
   backdrop-filter: none;
   -webkit-backdrop-filter: none;
 }
+
+/* Surfaces on the glass take the profile card's material: a faint lift of
+   the glass, not a solid slab on it. One level for every panel keeps the
+   window calm. The transcript fades out before the composer and stops short
+   of the docked card, so neither needs more. The overlay card covers the
+   transcript and stays denser to keep it readable. */
+html[data-acrylic='true'] .thread-side-card,
+html[data-acrylic='true'] .app .chat-input-area .composer,
+html[data-acrylic='true'] .app .agent-chat-composer,
+html[data-acrylic='true'] .an-markdown [data-streamdown="code-block-header"] {
+  background: color-mix(in srgb, var(--text-primary) 3%, transparent);
+}
+
+html[data-acrylic='true'] .thread-side-card-layer--overlay .thread-side-card {
+  background: color-mix(in srgb, var(--ui-raised) calc(var(--glass-alpha-strong) * 100%), transparent);
+}
+
+/* Inline chips are small, so they need a little more lift to read as code. */
+html[data-acrylic='true'] .an-markdown .an-md-code {
+  background-color: color-mix(in srgb, var(--text-primary) 8%, transparent);
+}
+
+/* Selected rows use the same material, with the profile card's hairline so
+   the selection still reads without a fill of its own. */
+html[data-acrylic='true'] .app .threads-sidebar-thread.active,
+html[data-acrylic='true'] .app .threads-sidebar-thread.has-open-subagent,
+html[data-acrylic='true'] .app .chat-list-row.active {
+  background: color-mix(in srgb, var(--text-primary) 3%, transparent);
+  box-shadow: var(--ui-specular), inset 0 0 0 1px var(--ui-line);
+}
