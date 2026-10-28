@@ -630,5 +630,80 @@ describe('the local methods of the editor proxy, over a real session', () => {
     t.laptop.editorTunnelConnectionClosed('proxy-1')
     await vi.waitFor(() => expect(t.owner.editorTunnelList()).toEqual([]))
     await vi.waitFor(() => expect(t.echo.sockets.size).toBe(0))
+describe('the check before an editor opens (net.editor.probe)', () => {
+  const probe = (t: Awaited<ReturnType<typeof pair>>) =>
+    t.laptop.request('net.editor.probe', { node: t.self.node })
+
+  it('says each refusal by its fixed reason, and a refusal of a permission never reaches the SSH server', async () => {
+    const t = await pair()
+
+    // Off by default: the owner's own words for it, and nothing was sent to the SSH server.
+    expect(await probe(t)).toMatchObject({ ok: false, reason: 'editor_off' })
+    expect(t.echo.connections).toBe(0)
+
+    await t.policy({ blocked: true })
+    expect(await probe(t)).toMatchObject({ ok: false, reason: 'blocked' })
+    await t.policy({ blocked: false })
+
+    await t.owner.request('bridge.workOnThreads', { enabled: false })
+    expect(await probe(t)).toMatchObject({ ok: false, reason: 'setting_off' })
+    await t.owner.request('bridge.workOnThreads', { enabled: true })
+
+    await t.owner.request('bridge.setCaps', { node: t.laptopNode, caps: ['read', 'chat', 'write'] })
+    expect(await probe(t)).toMatchObject({ ok: false, reason: 'capability' })
+    await t.owner.request('bridge.setCaps', {
+      node: t.laptopNode,
+      caps: ['read', 'chat', 'write', 'settings']
+    })
+
+    // None of the refusals above reached the SSH server.
+    expect(t.echo.connections).toBe(0)
+
+    await t.policy({ editor: true })
+    await rm(t.keyFile)
+    expect(await probe(t)).toMatchObject({ ok: false, reason: 'no_host_key' })
+    await writeFile(t.keyFile, `${KEY_A.type} ${KEY_A.key} root@owner\n`)
+
+    await new Promise<void>((resolve) => {
+      for (const socket of t.echo.sockets) socket.destroy()
+      t.echo.server.close(() => resolve())
+    })
+    expect(await probe(t)).toMatchObject({ ok: false, reason: 'no_ssh_server' })
+  }, 90_000)
+
+  it('opens a connection and closes it again at once, leaving none behind', async () => {
+    const t = await pair()
+    await t.policy({ editor: true })
+    expect(await probe(t)).toEqual({ ok: true, path: 'direct', transport: expect.any(String) })
+    await vi.waitFor(() => expect(t.owner.editorTunnelList()).toEqual([]))
+    await vi.waitFor(() => expect(t.closes()).toHaveLength(1))
+    expect(t.echo.connections).toBe(1)
+    // The owner writes its usual rows, so a probe is no secret from it.
+    expect(
+      t.owner
+        .runtime()
+        .audit.recent(100, t.laptopNode)
+        .filter((row) => row.method === 'editor.open' && row.kind === 'change')
+    ).toHaveLength(1)
+  }, 60_000)
+
+  it('says the computer’s own editor settings were not ready, instead of opening anything', async () => {
+    const t = await pair({ editorSsh: true })
+    await t.policy({ editor: true })
+    // This computer has made no alias for the other one yet (nothing prepared its settings).
+    expect(await probe(t)).toMatchObject({ ok: false, reason: 'ssh_settings', code: 'unknown_computer' })
+    expect(t.echo.connections).toBe(0)
+  }, 60_000)
+
+  it('says the other computer is too old when it cannot carry editor connections', async () => {
+    const t = await pair({ laptopOffers: false })
+    await t.policy({ editor: true })
+    expect(await probe(t)).toMatchObject({ ok: false, reason: 'unsupported' })
+  }, 60_000)
+
+  it('is not a method of a computer with networking off', async () => {
+    const t = await pair()
+    await t.laptop.request('net.disable', {})
+    await expect(Promise.resolve().then(() => probe(t))).rejects.toBeDefined()
   }, 60_000)
 })

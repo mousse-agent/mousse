@@ -57,6 +57,7 @@ const keys: Record<NetLocalMethod, readonly string[]> = {
   'net.editor.ssh.enable': [],
   'net.editor.ssh.disable': [],
   'net.editor.ssh.ack': [],
+  'net.editor.probe': ['node'],
   'net.init': ['name', 'listen', 'host', 'port', 'passphrase'],
   'net.disable': [],
   'net.status': [],
@@ -243,6 +244,7 @@ function validate(method: NetLocalMethod, value: unknown): Record<string, unknow
       'bridge.setCaps',
       'bridge.setKind',
       'bridge.policy',
+      'net.editor.probe',
       'net.authority.transfer'
     ].includes(method) &&
     !isId('node', params.node)

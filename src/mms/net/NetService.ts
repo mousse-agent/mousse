@@ -41,6 +41,7 @@ import type {
   NetAddonRecords,
   NetDoctor,
   BridgeNodePolicy,
+  EditorProbeResult,
   NetInitInput,
   NetLocalMethod,
   NetStatus
@@ -717,6 +718,7 @@ export class NetService {
       )
     }
     if (method === 'bridge.nodes') return this.nodesView()
+    if (method === 'net.editor.probe') return this.track(this.editorProbe(params.node as NodeId))
     if (method.startsWith('net.ssh.')) return this.track(this.sshRequest(method, params))
     if (method.startsWith('net.plus.') && !this.hosted) throw hostedUnavailable()
     if (method === 'net.plus.login.cancel') return this.hosted!.cancelLogin()
@@ -2155,6 +2157,23 @@ export class NetService {
   /** A local connection closed: its editor tunnels end. */
   editorTunnelConnectionClosed(connection: string): void {
     this.localTunnelStore?.closeConnection(connection)
+  }
+  /**
+   * Whether an editor connection to `node` can be opened now: opens one and ends it at once. A refusal comes
+   * back as a result with the tunnel's fixed reason, so a window can say what is wrong before an editor is
+   * started. The owner writes its usual rows (`editor.open`, `editor.close`) and raises its first-open notice.
+   */
+  private async editorProbe(node: NodeId): Promise<EditorProbeResult> {
+    try {
+      const { tunnel, info } = await this.openEditorTunnel(node)
+      tunnel.close()
+      return { ok: true, path: info.path, ...(info.transport ? { transport: info.transport } : {}) }
+    } catch (error) {
+      if (error instanceof TunnelError) return { ok: false, reason: error.reason, message: error.message }
+      if (error instanceof EditorSshError)
+        return { ok: false, reason: 'ssh_settings', code: error.code, message: error.message }
+      throw error
+    }
   }
   session(node: NodeId): SyncSession {
     this.assertEnabled()

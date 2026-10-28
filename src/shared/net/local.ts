@@ -4,6 +4,7 @@ import type { NodeId, UserId } from './ids'
 import type { Route } from './identity'
 import type { KeystoreState, RosterState } from './identity'
 import type { NetErrorCode } from './errors'
+import type { TunnelFailure, TunnelPath } from './tunnel'
 
 export const NET_LOCAL_CAPABILITY = 'net.v1'
 export const NET_LOCAL_METHODS = [
@@ -46,6 +47,7 @@ export const NET_LOCAL_METHODS = [
   'net.editor.ssh.enable',
   'net.editor.ssh.disable',
   'net.editor.ssh.ack',
+  'net.editor.probe',
   'net.init',
   'net.disable',
   'net.status',
@@ -359,6 +361,21 @@ export interface EditorSshStatus {
   computers: EditorSshComputer[]
   problem?: { code: EditorSshProblemCode; message: string }
 }
+
+/**
+ * `net.editor.probe { node }`: whether an editor connection to that computer can be opened now. It opens one
+ * and closes it at once, so what a refusal says is what the editor's own connection would meet, in the fixed
+ * words of the tunnel (`editor_off`, `no_ssh_server`...). Nothing else is sent through it.
+ */
+export type EditorProbeResult =
+  | { ok: true; path: TunnelPath; transport?: string }
+  | {
+      ok: false
+      /** The tunnel's reason, or `ssh_settings` when this computer's own editor settings were not ready (`code`). */
+      reason: TunnelFailure | 'ssh_settings'
+      message: string
+      code?: EditorSshProblemCode
+    }
 
 /** `prepare`, `enable` and `disable`: the new status, or why nothing changed. */
 export type EditorSshResult =
