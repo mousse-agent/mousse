@@ -385,6 +385,9 @@ export function ArgsRow({ snapshot, onSave }: { snapshot: InstanceSnapshot; onSa
   )
 }
 
+/** Under a launch variable the Privacy switch overrides. */
+export const ENFORCED_NOTE = 'Ignored: Privacy → Agent telemetry is off.'
+
 interface EnvDraft {
   uid: number
   key: string
@@ -416,6 +419,8 @@ export function EnvRow({ snapshot, onSave }: { snapshot: InstanceSnapshot; onSav
   }
   const update = (uid: number, patch: Partial<EnvDraft>) =>
     setRows((current) => current.map((row) => (row.uid === uid ? { ...row, ...patch } : row)))
+  // Variables the Privacy switch sets last: a row naming one is not what the agent gets.
+  const enforced = new Set(snapshot.telemetry?.state === 'off' ? (snapshot.telemetry.variables ?? []).map((name) => name.toUpperCase()) : [])
 
   return (
     <SettingsRow
@@ -471,6 +476,7 @@ export function EnvRow({ snapshot, onSave }: { snapshot: InstanceSnapshot; onSav
               >
                 <X size={14} />
               </button>
+              {enforced.has(row.key.trim().toUpperCase()) && <p className="prov-env-note">{ENFORCED_NOTE}</p>}
             </div>
           ))}
         </div>
