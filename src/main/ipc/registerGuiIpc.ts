@@ -490,6 +490,24 @@ export function registerGuiIpc(
     if (useWindowsCompletionSound) playThreadCompletionSound()
   }
 
+  /** Another of the user's computers opened its editor on this one for the first time (an SSH login here): a desktop notification. */
+  const notifyRemoteEditor = (device: string): void => {
+    if (!Notification.isSupported()) return
+    const notification = new Notification({
+      title: 'Mousse',
+      body: `${device} opened an editor connection to this computer. It is the same as shell access, and you can turn it off for ${device} in Devices.`
+    })
+    notification.on('click', () => {
+      const win = getWindow()
+      if (win && !win.isDestroyed()) {
+        if (win.isMinimized()) win.restore()
+        win.show()
+        win.focus()
+      }
+    })
+    notification.show()
+  }
+
   /** Another of the user's computers opened its first terminal on this one: said in a desktop notification. */
   const notifyRemoteTerminal = (device: string, threadName: string): void => {
     if (!Notification.isSupported()) return
@@ -775,6 +793,7 @@ export function registerGuiIpc(
       const device = typeof info?.device === 'string' && info.device ? info.device : 'Another computer'
       const threadName = typeof info?.threadName === 'string' ? info.threadName : ''
       if (info?.kind === 'remote-terminal') notifyRemoteTerminal(device, threadName)
+      if (info?.kind === 'remote-editor') notifyRemoteEditor(device)
       if (info?.kind === 'remote-work') notifyRemoteWork(device, threadName)
       if (info?.kind === 'remote-project') notifyRemoteProject(device, typeof info.projectName === 'string' ? info.projectName : '')
     }
