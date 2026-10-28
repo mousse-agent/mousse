@@ -1236,7 +1236,9 @@ describe('a far end the system cannot vouch for', () => {
 function fakeEndpoint(keys: Array<{ type: string; key: string }> = [KEY_B]) {
   const served: Array<{ node: NodeId; stream: Duplex; ended: boolean[] }> = []
   const killed: NodeId[] = []
-  const state = { available: true, devices: [] as NodeId[], keysFail: false }
+  /** What each sweep was told is allowed. */
+  const swept: NodeId[][] = []
+  const state = { available: true, keysFail: false }
   const endpoint: EditorEndpointPort = {
     available: () => state.available,
     hostKeys: () => {
@@ -1257,9 +1259,9 @@ function fakeEndpoint(keys: Array<{ type: string; key: string }> = [KEY_B]) {
       }
     },
     killDevice: async (node) => void killed.push(node),
-    devices: () => state.devices
+    sweep: async (allowed) => swept.push([...allowed]) * 0
   }
-  return { endpoint, served, killed, state }
+  return { endpoint, served, killed, swept, state }
 }
 
 describe('the far end is Mousse’s own SSH endpoint', () => {
@@ -1362,26 +1364,52 @@ describe('the far end is Mousse’s own SSH endpoint', () => {
     expect(fake.served[0]!.ended).toEqual([true])
   })
 
-  it('stops what a device started after its tunnels are gone, when it loses the right', async () => {
+  it('stops what a device started after its tunnels are gone: the sweep is told who is allowed, not who is known', async () => {
     const fake = fakeEndpoint()
-    fake.state.devices = [CALLER]
-    let why: TunnelReason | undefined
+    let allowed: NodeId[] | undefined = [CALLER]
     const t = await bed({
-      host: { endpoint: fake.endpoint, deviceRefusal: () => why }
+      host: { endpoint: fake.endpoint, allowedDevices: () => allowed }
     })
-    // Nothing is open, and the device is allowed: nothing is stopped.
+    // Nothing is open. The sweep still runs on every change of a right, with the devices that may have one.
     expect(t.host.reconcile()).toBe(0)
-    expect(fake.killed).toEqual([])
-    // The block arrives with no tunnel open (an editor server from an earlier connection is still running).
-    why = 'blocked'
-    expect(t.host.reconcile()).toBe(0)
-    await until(() => fake.killed.length === 1, 'the device’s programs to be stopped')
-    expect(fake.killed).toEqual([CALLER])
-    // Net off stops every device that has anything running.
-    why = undefined
-    fake.state.devices = [CALLER, newId('node')]
-    t.host.endAll('net_off')
-    await until(() => fake.killed.length === 3, 'every device to be stopped')
+    await until(() => fake.swept.length === 1, 'the sweep')
+    expect(fake.swept[0]).toEqual([CALLER])
+    // The device is blocked, with no connection and no program of its own left: it is simply not in the list.
+    allowed = []
+    t.host.reconcile()
+    await until(() => fake.swept.length === 2, 'the sweep')
+    expect(fake.swept[1]).toEqual([])
+    // A roster that cannot be read stops nothing.
+    allowed = undefined
+    expect(await t.host.sweepStrays()).toBe(0)
+    expect(fake.swept).toHaveLength(2)
+    // It also runs once at start (the service calls it), and finds what an earlier run of the daemon left.
+    allowed = [CALLER]
+    await t.host.sweepStrays()
+    expect(fake.swept[2]).toEqual([CALLER])
+  })
+
+  it('Net being turned off stops everything, for every device; a daemon that is closing does not', async () => {
+    const fake = fakeEndpoint()
+    const off = await bed({ host: { endpoint: fake.endpoint } })
+    const open = await off.open()
+    off.host.endAll('net_off')
+    expect(await open.closed).toBe('net_off')
+    expect(fake.served[0]!.ended).toEqual([true])
+    await until(() => fake.swept.length === 1, 'the sweep')
+    expect(fake.swept[0]).toEqual([])
+
+    // A quit, an update or a restart: an ordinary disconnect, as an SSH server restarting is. The editor servers
+    // keep running, and the sweep at the next start stops whatever has no right by then.
+    const closing = fakeEndpoint()
+    const t = await bed({ host: { endpoint: closing.endpoint } })
+    const tunnel = await t.open()
+    t.host.endAll('net_off', false)
+    expect(await tunnel.closed).toBe('net_off')
+    expect(closing.served[0]!.ended).toEqual([false])
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(closing.swept).toEqual([])
+    expect(closing.killed).toEqual([])
   })
 
   it('writes the counts of a connection, its logins and its refusals to the owner’s audit', async () => {

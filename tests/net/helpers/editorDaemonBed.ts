@@ -93,7 +93,7 @@ export async function daemonBed(
         shell: info.shell || '/bin/sh',
         ...(info.uid >= 0 ? { uid: info.uid } : {})
       },
-      systemEnvironmentFile: join(root, 'no-etc-environment')
+      systemEnvironmentFiles: [join(root, 'no-etc-environment')]
     })
 
   const daemonHome = join(root, 'home')

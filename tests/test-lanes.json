@@ -47,6 +47,7 @@
     "tests/net/cli/relay.test.ts",
     "tests/net/cutover/control.test.ts",
     "tests/net/editor/endpoint.test.ts",
+    "tests/net/editor/endpointUpgrade.test.ts",
     "tests/net/enrollment/enrollment.test.ts",
     "tests/net/identity/keyStore.test.ts",
     "tests/net/spaces/archive/private-rotation.test.ts",

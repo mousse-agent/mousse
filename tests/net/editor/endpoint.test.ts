@@ -1,8 +1,13 @@
 import { mkdir, readdir, readFile, readlink, stat, writeFile } from 'node:fs/promises'
 import dns from 'node:dns'
 import net, { createServer, type Server } from 'node:net'
+import { spawn, spawnSync } from 'node:child_process'
+import { userInfo } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { EditorEndpoint } from '../../../src/mms/net/editor/endpoint/endpoint'
+import { scopeToken } from '../../../src/mms/net/editor/endpoint/scope'
+import { createUnixHost } from '../../../src/mms/net/editor/endpoint/unixHost'
 import { loadEndpointHostKey } from '../../../src/mms/net/editor/endpoint/hostKey'
 import {
   alive,
@@ -35,6 +40,7 @@ const unix = process.platform !== 'win32'
 const cleanup: Array<() => Promise<unknown> | unknown> = []
 afterEach(async () => {
   vi.restoreAllMocks()
+  vi.unstubAllEnvs()
   for (const task of cleanup.splice(0).reverse()) await task()
 })
 async function bed(): Promise<Bed> {
@@ -179,7 +185,7 @@ describe.skipIf(!unix)('programs', () => {
     expect(output).toContain(`USER=${b.user}`)
     expect(output).toContain(`HOME=${b.home}`)
     expect(output).toMatch(/^SSH_CONNECTION=127\.0\.0\.1 \d+ 127\.0\.0\.1 22$/mu)
-    expect(output).toMatch(/^MOUSSE_EDITOR_SCOPE=[0-9a-f]{32}$/mu)
+    expect(output).toMatch(/^MOUSSE_EDITOR_SCOPE=[0-9a-f]{40}$/mu)
   })
 
   it('takes only the allow-listed variables a client sets', async () => {
@@ -322,6 +328,42 @@ describe.skipIf(!unix)('refusals', () => {
     expect(
       b.events.filter((event) => event.kind === 'refused' && event.what === 'tcpip-forward')
     ).toHaveLength(4)
+  })
+
+  it('cancels a remote forward by the port that was assigned, and stops listening', async () => {
+    const b = await bed()
+    const { client } = await b.connect()
+    const port = await new Promise<number>((resolve, reject) =>
+      client.forwardIn('127.0.0.1', 0, (error, chosen) => (error ? reject(error) : resolve(chosen)))
+    )
+    await new Promise<void>((resolve, reject) =>
+      (
+        client as unknown as { unforwardIn(a: string, p: number, cb: (e?: Error) => void): void }
+      ).unforwardIn('127.0.0.1', port, (error) => (error ? reject(error) : resolve()))
+    )
+    await expect(
+      new Promise((resolve, reject) => {
+        const socket = net.connect(port, '127.0.0.1')
+        socket.once('connect', () => resolve(socket.destroy()))
+        socket.once('error', reject)
+      })
+    ).rejects.toThrow()
+  })
+
+  it('takes a character that two SSH packets split between them whole', async (context) => {
+    const b = await bed()
+    if (!b.host.terminals()) return context.skip()
+    const { client } = await b.connect()
+    const channel = await channelOf((callback) => client.exec('cat', { pty: true }, callback))
+    let text = ''
+    channel.on('data', (chunk: Buffer) => (text += chunk.toString('utf8')))
+    const euro = Buffer.from('€\n')
+    channel.write(euro.subarray(0, 1))
+    await new Promise((resolve) => setTimeout(resolve, 100))
+    channel.write(euro.subarray(1))
+    await until(() => text.includes('€'))
+    expect(text).not.toContain('\ufffd')
+    channel.end('\x04')
   })
 
   it('refuses a unix socket forward, agent forwarding, X11 and every subsystem but sftp', async () => {
@@ -565,10 +607,9 @@ describe('SFTP paths', () => {
 describe.skipIf(!unix)('ending a connection', () => {
   const nodeProgram = (script: string): string => `${quote(process.execPath)} -e ${quote(script)}`
   /** A command that leaves a program of its own session and process group (what `setsid` and daemons do). */
-  const detach = (pidFile: string): string =>
-    nodeProgram(
-      `const {spawn}=require('node:child_process');const c=spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{detached:true,stdio:'ignore'});require('node:fs').writeFileSync(${JSON.stringify(pidFile)},String(c.pid));c.unref()`
-    )
+  const detachScript = (pidFile: string): string =>
+    `const {spawn}=require('node:child_process');const c=spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{detached:true,stdio:'ignore'});require('node:fs').writeFileSync(${JSON.stringify(pidFile)},String(c.pid));c.unref()`
+  const detach = (pidFile: string): string => nodeProgram(detachScript(pidFile))
   const readPid = async (file: string): Promise<number> => {
     await until(async () => (await readFile(file, 'utf8').catch(() => '')).length > 0)
     return Number((await readFile(file, 'utf8')).trim())
@@ -635,7 +676,6 @@ describe.skipIf(!unix)('ending a connection', () => {
     first.connection.end(false)
     await new Promise((resolve) => setTimeout(resolve, 400))
     expect(await alive(detached)).toBe(true)
-    expect(b.endpoint.devices().sort()).toEqual([NODE_A, NODE_B].sort())
 
     await b.endpoint.killDevice(NODE_A)
     await until(async () => !(await alive(plain)) && !(await alive(detached)), 8_000)
@@ -643,6 +683,85 @@ describe.skipIf(!unix)('ending a connection', () => {
     expect(await alive(theirs.detached)).toBe(true)
     await b.endpoint.killDevice(NODE_B)
     await until(async () => !(await alive(theirs.plain)) && !(await alive(theirs.detached)), 8_000)
+  })
+
+  /** A server that outlives everything that started it: its starting command has exited, and so has the connection. */
+  async function leftBehind(b: Bed, node = NODE_A): Promise<number> {
+    const session = await b.connect({ node })
+    const pidFile = join(b.home, `left-${node}.pid`)
+    // The command that starts the server finishes at once (as VS Code's install script does), so no program of the
+    // device is left to be found through its session.
+    expect((await run(session.client, detach(pidFile))).code).toBe(0)
+    const pid = await readPid(pidFile)
+    session.connection.end(false)
+    await until(() => b.host.scopes().length === 0)
+    await new Promise((resolve) => setTimeout(resolve, 300))
+    expect(await alive(pid)).toBe(true)
+    return pid
+  }
+
+  it('a block stops a detached server whose starting command has exited and whose window has closed', async () => {
+    const b = await bed()
+    const server = await leftBehind(b)
+    const bystander = await leftBehind(b, NODE_B)
+    // Nothing here knows the device any more: no connection, no program, no list. The sweep is told who is
+    // allowed (the other device), and stops the rest by the marker alone.
+    expect(b.host.scopes()).toEqual([])
+    await b.endpoint.sweep([NODE_B])
+    await until(async () => !(await alive(server)), 8_000)
+    expect(await alive(bystander)).toBe(true)
+    // A device that is allowed keeps its server.
+    await b.endpoint.sweep([NODE_B])
+    expect(await alive(bystander)).toBe(true)
+    await b.endpoint.sweep([])
+    await until(async () => !(await alive(bystander)), 8_000)
+  })
+
+  it('stops it after a restart too: a new endpoint on the same key store finds what the old one started', async () => {
+    const b = await bed()
+    const server = await leftBehind(b)
+    const restarted = new EditorEndpoint({
+      keys: b.keys,
+      host: createUnixHost({
+        account: { user: b.user, home: b.home, shell: userInfo().shell || '/bin/sh' },
+        systemEnvironmentFiles: []
+      })
+    })
+    expect(restarted.available()).toBe(true)
+    // The marker is the same after a restart, so an allowed device keeps its server and a refused one loses it.
+    await restarted.sweep([NODE_A])
+    expect(await alive(server)).toBe(true)
+    await restarted.sweep([])
+    await until(async () => !(await alive(server)), 8_000)
+  })
+
+  it('leaves the programs of another key, and the daemon’s own tree, alone', async () => {
+    const b = await bed()
+    const stray = await leftBehind(b)
+    // Another profile has its own key, so its markers are not this endpoint's to judge.
+    const foreign = scopeToken(Buffer.alloc(32, 9), NODE_A)
+    const pidFile = join(b.home, 'foreign.pid')
+    spawnSync(process.execPath, ['-e', detachScript(pidFile)], {
+      env: { PATH: process.env.PATH, MOUSSE_EDITOR_SCOPE: foreign }
+    })
+    const foreignPid = await readPid(pidFile)
+    // A program of the daemon itself that carries a refused device's marker (the daemon was started from an editor's terminal).
+    const own = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {
+      env: { PATH: process.env.PATH, MOUSSE_EDITOR_SCOPE: b.endpoint.scopeOf(NODE_A) },
+      stdio: 'ignore'
+    })
+    cleanup.push(() => own.kill('SIGKILL'))
+    await b.endpoint.sweep([])
+    await until(async () => !(await alive(stray)), 8_000)
+    expect(await alive(foreignPid)).toBe(true)
+    expect(await alive(own.pid!)).toBe(true)
+    process.kill(foreignPid, 'SIGKILL')
+  })
+
+  it('does not put a marker into the daemon’s own environment', async () => {
+    vi.stubEnv('MOUSSE_EDITOR_SCOPE', 'inherited-from-an-editor-terminal')
+    await bed()
+    expect(process.env.MOUSSE_EDITOR_SCOPE).toBeUndefined()
   })
 
   it('does not hold the event loop while it stops many programs', async () => {

@@ -142,7 +142,7 @@ export async function endpointBed(options: { host?: ProcessHost } = {}): Promise
         ...(info.uid >= 0 ? { uid: info.uid } : {})
       },
       // No `/etc/environment` of this computer in the clean environment a test checks.
-      systemEnvironmentFile: join(root, 'no-etc-environment')
+      systemEnvironmentFiles: [join(root, 'no-etc-environment')]
     })
   const keys = memoryKeys()
   const events: EndpointEvent[] = []
