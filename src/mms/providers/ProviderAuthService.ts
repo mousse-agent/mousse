@@ -10,6 +10,7 @@ import type {
   ProviderLoginOption,
   ProviderLoginResult,
   ProvidersUsageResponse,
+  ProviderUsage,
   ProviderUsageWindow
 } from '../../shared/providerAuth'
 import { usageText } from './usageText'
@@ -100,6 +101,19 @@ const DYNAMIC_MODELS_REFRESH_MS = 5 * 60_000
 const CATALOG_REFRESH_TIMEOUT_MS = 60_000
 
 export class ProviderAuthService {
+  /**
+   * Pi providers with a subscription-usage API, by provider id, and the reader that fetches it.
+   * Usage dispatch is a lookup here; every other provider reports no usage.
+   */
+  private static readonly PI_USAGE_READERS: Readonly<Record<string, (service: ProviderAuthService, provider: ConfiguredProvider) => Promise<ProviderUsage>>> = {
+    xai: (service, provider) => service.fetchXaiUsage(provider),
+    'opencode-go': (service, provider) => service.fetchOpenCodeGoUsage(provider)
+  }
+
+  private static usageReaderFor(providerId: string): ((service: ProviderAuthService, provider: ConfiguredProvider) => Promise<ProviderUsage>) | undefined {
+    return Object.hasOwn(ProviderAuthService.PI_USAGE_READERS, providerId) ? ProviderAuthService.PI_USAGE_READERS[providerId] : undefined
+  }
+
   readonly credentials: FileCredentialStore
   readonly models: MutableModels
   private readonly modelsStore: FileModelsStore
@@ -553,8 +567,8 @@ export class ProviderAuthService {
           windows: [],
           message: 'This connection was retired by a Mousse update. Move it in Settings → Providers.'
         }
-        if (provider.id === 'xai') return this.fetchXaiUsage(provider)
-        if (provider.id === 'opencode-go') return this.fetchOpenCodeGoUsage(provider)
+        const reader = ProviderAuthService.usageReaderFor(provider.id)
+        if (reader) return reader(this, provider)
         return {
           ...provider,
           status: 'unavailable' as const,
@@ -578,14 +592,8 @@ export class ProviderAuthService {
     const label = this.getProviderDisplayName(normalized)
     const configured = this.getConfiguredProviders().find((entry) => entry.id === normalized)
     const provider = configured ?? { id: normalized, label, authType: 'api_key' as const }
-    const usage =
-      normalized === 'anthropic'
-        ? undefined
-        : normalized === 'xai'
-          ? await this.fetchXaiUsage(provider)
-          : normalized === 'opencode-go'
-            ? await this.fetchOpenCodeGoUsage(provider)
-            : undefined
+    const reader = ProviderAuthService.usageReaderFor(normalized)
+    const usage = reader ? await reader(this, provider) : undefined
     return usage ? usageText(label, usage) : undefined
   }
 
