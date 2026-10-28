@@ -183,16 +183,20 @@ describe('GitService stage, unstage and discard', () => {
     expect(porcelain(cwd)).toEqual([' M base.txt', '?? a.txt', '?? dir/b.txt'])
   })
 
-  it('stages, unstages and discards 1,500 tracked and 1,500 untracked paths in one call each', async () => {
+  it('stages, unstages and discards 400 tracked and 400 untracked long-named paths in one call each', async () => {
     const cwd = repo(), service = new GitService()
-    const tracked = Array.from({ length: 1500 }, (_, index) => `tracked/file-${String(index).padStart(4, '0')}-with-a-longish-name.txt`)
-    const untracked = Array.from({ length: 1500 }, (_, index) => `loose/file-${String(index).padStart(4, '0')}-with-a-longish-name.txt`)
+    // Each list is about 48,000 characters on its own, over Windows' 32,767-character command line, so passing
+    // the paths as arguments would fail it; long names get there with far fewer files for Git to walk.
+    const longName = (dir: string, index: number) => `${dir}/file-${String(index).padStart(4, '0')}-${'n'.repeat(100)}.txt`
+    const tracked = Array.from({ length: 400 }, (_, index) => longName('tracked', index))
+    const untracked = Array.from({ length: 400 }, (_, index) => longName('loose', index))
+    expect(tracked.join('').length).toBeGreaterThan(32_767); expect(untracked.join('').length).toBeGreaterThan(32_767)
     for (const name of tracked) write(cwd, name)
     git(cwd, 'add', '-A'); git(cwd, 'commit', '-q', '-m', 'many')
     for (const name of tracked) write(cwd, name, 'edited\n')
     for (const name of untracked) write(cwd, name)
     await service.stage(cwd, [...tracked, ...untracked])
-    expect(git(cwd, 'diff', '--cached', '--name-only').split('\n')).toHaveLength(3000)
+    expect(git(cwd, 'diff', '--cached', '--name-only').split('\n')).toHaveLength(800)
     await service.unstage(cwd, [...tracked, ...untracked])
     expect(git(cwd, 'diff', '--cached', '--name-only')).toBe('')
     await service.discard(cwd, [...tracked, ...untracked])
