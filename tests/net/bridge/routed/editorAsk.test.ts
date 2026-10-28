@@ -17,6 +17,7 @@ import {
   type EditorAskView
 } from '../../../../src/shared/bridge/editorAsk'
 import { EditorAsks } from '../../../../src/mms/bridge/routed/editorAsks'
+import { cleanDeviceName, editorAskQuestion } from '../../../../src/shared/bridge/editorAsk'
 import { NetService } from '../../../../src/mms/net/NetService'
 import { SqliteBridgeAudit } from '../../../../src/mms/net/store/audit'
 import { ROUTED_METHODS, routedVersions } from '../../../../src/shared/bridge/routed'
@@ -32,7 +33,7 @@ afterEach(async () => {
 })
 
 /** The owner's asks, with a clock the test moves, a notice log and the owner's real policy and audit. */
-async function owner(options: { name?: string } = {}) {
+async function owner(options: { name?: string; stillAsking?: (node: NodeId) => Promise<boolean>; allow?: (node: NodeId) => Promise<void> } = {}) {
   const clock = testClock()
   const o = await routedOwner({ clock })
   const audit = new SqliteBridgeAudit(o.f.targetDb, clock)
@@ -44,7 +45,9 @@ async function owner(options: { name?: string } = {}) {
     clock,
     name: () => options.name ?? 'Laptop',
     onAsked: (view) => asked.push(view),
-    onChanged: changed
+    onChanged: changed,
+    ...(options.stillAsking ? { stillAsking: options.stillAsking } : {}),
+    ...(options.allow ? { allow: options.allow } : {})
   })
   asks.start()
   cleanups.push(() => asks.close())
@@ -138,7 +141,7 @@ describe('asking', () => {
     expect(asks.pending()).toEqual([])
     expect(changed).toHaveBeenCalledTimes(1)
     // A late Allow does nothing: the ask is gone.
-    expect(asks.answer(node, true)).toEqual({ ok: false, reason: 'expired' })
+    expect(await asks.answer(node, true)).toEqual({ ok: false, reason: 'expired' })
     expect(o.policy.get(node).editor).toBe(false)
   })
 })
@@ -150,7 +153,7 @@ describe('answering', () => {
     changed.mockClear()
     expect(asks.pending().map((view) => view.node)).toEqual([node])
 
-    expect(asks.answer(node, true)).toEqual({ ok: true, allowed: true })
+    expect(await asks.answer(node, true)).toEqual({ ok: true, allowed: true })
     expect(o.policy.get(node).editor).toBe(true)
     expect(asks.pending()).toEqual([])
     expect(changed).toHaveBeenCalled()
@@ -163,13 +166,13 @@ describe('answering', () => {
     // The switch is on now, so the next ask has nothing to ask.
     expect(await ask()).toEqual({ state: 'already_on' })
     // An answer is given once.
-    expect(asks.answer(node, true)).toEqual({ ok: false, reason: 'expired' })
+    expect(await asks.answer(node, true)).toEqual({ ok: false, reason: 'expired' })
   })
 
   it('Not now records a refusal, leaves the switch off, and tells the same computer so without asking again', async () => {
     const { o, asks, asked, node, ask, rows, clock } = await owner()
     await ask()
-    expect(asks.answer(node, false)).toEqual({ ok: true, allowed: false })
+    expect(await asks.answer(node, false)).toEqual({ ok: true, allowed: false })
     expect(o.policy.get(node).editor).toBe(false)
     expect(rows().map((row) => [row.method, row.outcome, row.kind]).sort()).toEqual([
       ['editor.ask', 'asked', 'change'],
@@ -193,7 +196,7 @@ describe('answering', () => {
   it('remembers a Not now across a restart of the daemon, from the audit', async () => {
     const { o, asks, audit, node, ask, clock } = await owner()
     await ask()
-    asks.answer(node, false)
+    await asks.answer(node, false)
     const restarted = new EditorAsks({
       policy: o.policy,
       audit,
@@ -217,7 +220,117 @@ describe('answering', () => {
 
   it('refuses an answer for a computer that did not ask', async () => {
     const { asks } = await owner()
-    expect(asks.answer(newId('node'), true)).toEqual({ ok: false, reason: 'expired' })
+    expect(await asks.answer(newId('node'), true)).toEqual({ ok: false, reason: 'expired' })
+  })
+})
+
+describe('answering when things changed', () => {
+  it('Allow is refused for a device that is no longer on the roster with Works on threads, and turns nothing on', async () => {
+    let still = true
+    const { o, asks, node, ask, rows } = await owner({ stillAsking: async () => still })
+    await ask()
+    // Revoked, or its grant taken away, while the question was on screen.
+    still = false
+    expect(await asks.answer(node, true)).toEqual({ ok: false, reason: 'expired' })
+    expect(o.policy.get(node).editor).toBe(false)
+    expect(asks.pending()).toEqual([])
+    expect(rows().map((row) => row.method)).not.toContain('editor.ask.allowed')
+  })
+
+  it('drops the waiting ask of a device that lost its place, without being asked to answer', async () => {
+    let still = true
+    const { asks, ask, changed } = await owner({ stillAsking: async () => still })
+    await ask()
+    changed.mockClear()
+    await asks.reconcile()
+    expect(asks.pending()).toHaveLength(1)
+    still = false
+    await asks.reconcile()
+    expect(asks.pending()).toEqual([])
+    expect(changed).toHaveBeenCalledTimes(1)
+  })
+
+  it('turns the switch on through the same code as the switch in Devices, and not twice when two windows answer', async () => {
+    const turnedOn: NodeId[] = []
+    const { o, asks, node, ask } = await owner({
+      allow: async (device) => {
+        turnedOn.push(device)
+        o.policy.set(device, { editor: true })
+      }
+    })
+    await ask()
+    const [first, second] = await Promise.all([asks.answer(node, true), asks.answer(node, true)])
+    expect([first, second].filter((result) => result.ok)).toHaveLength(1)
+    expect(turnedOn).toEqual([node])
+    expect(o.policy.get(node).editor).toBe(true)
+  })
+
+  it('keeps the ask when turning the switch on fails, as an expired one', async () => {
+    const { o, asks, node, ask } = await owner({
+      allow: async () => {
+        throw new Error('Unknown device.')
+      }
+    })
+    await ask()
+    expect(await asks.answer(node, true)).toEqual({ ok: false, reason: 'expired' })
+    expect(o.policy.get(node).editor).toBe(false)
+  })
+})
+
+describe('the limits do not depend on the last rows of the audit', () => {
+  it('still holds three asks an hour after a device made hundreds of other changes', async () => {
+    const { o, audit, node, ask, clock, asked } = await owner()
+    for (let index = 0; index < EDITOR_ASKS_PER_HOUR; index++) {
+      expect((await ask()).state).toBe('asked')
+      clock.advance(EDITOR_ASK_TTL_MS + 1)
+    }
+    // Far more rows than any window of "the last rows" could hold.
+    for (let index = 0; index < 450; index++) audit.record({ node, method: 'orchestrator.send', outcome: 'ok', kind: 'change' })
+    // A restart: the counters come from the audit, asked by method and time.
+    const restarted = new EditorAsks({
+      policy: o.policy,
+      audit,
+      clock,
+      name: () => 'Laptop',
+      onAsked: () => expect.unreachable('nobody is asked again'),
+      onChanged: () => undefined
+    })
+    expect(restarted.ask(node)).toMatchObject({ state: 'rate_limited' })
+    // And the one that is running did not forget them either.
+    expect((await ask()).state).toBe('rate_limited')
+    expect(asked).toHaveLength(EDITOR_ASKS_PER_HOUR)
+  })
+
+  it('remembers a Not now across a restart however many other changes came after it', async () => {
+    const { o, asks, audit, node, ask, clock } = await owner()
+    await ask()
+    await asks.answer(node, false)
+    for (let index = 0; index < 450; index++) audit.record({ node, method: 'orchestrator.send', outcome: 'ok', kind: 'change' })
+    const restarted = new EditorAsks({
+      policy: o.policy,
+      audit,
+      clock,
+      name: () => 'Laptop',
+      onAsked: () => expect.unreachable('nobody is asked again'),
+      onChanged: () => undefined
+    })
+    expect(restarted.ask(node)).toMatchObject({ state: 'declined_recently' })
+  })
+})
+
+describe('a name is safe to show', () => {
+  it('drops control and direction characters, cuts a long name, and keeps an ordinary one', () => {
+    expect(cleanDeviceName('Studio laptop')).toBe('Studio laptop')
+    expect(cleanDeviceName('Studio\nlaptop\u202eevil\u200b')).toBe('Studio laptop evil')
+    expect(cleanDeviceName('  \u0000\u202e  ')).toBe('Another computer')
+    expect(cleanDeviceName('')).toBe('Another computer')
+    const long = cleanDeviceName('x'.repeat(300))
+    expect([...long]).toHaveLength(64)
+    expect(long.endsWith('…')).toBe(true)
+  })
+
+  it('asks in the name of the computer that asks, never the owner’s own', () => {
+    expect(editorAskQuestion('Computer B')).toBe('Let Computer B’s editor connect to this computer?')
   })
 })
 

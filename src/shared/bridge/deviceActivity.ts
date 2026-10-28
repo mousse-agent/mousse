@@ -172,6 +172,7 @@ export const DEVICE_NOTICE_METHODS = [
   'pty.close',
   'editor.open',
   'editor.close',
+  'editor.check',
   'editor.ask',
   'editor.ask.allowed',
   'editor.ask.declined'
@@ -184,6 +185,7 @@ const NOTICE_ROWS: Record<string, string> = {
   'pty.close': 'A terminal ended',
   'editor.open': 'Opened its editor here',
   'editor.close': 'An editor connection ended',
+  'editor.check': 'Checked an editor connection',
   'editor.ask': 'Asked to open its editor here',
   'editor.ask.allowed': 'Asked to open its editor here, and you allowed it',
   'editor.ask.declined': 'Asked to open its editor here, and you said Not now'
@@ -353,8 +355,9 @@ export function formatBytes(bytes: number): string {
 /** One row of the list, in plain words. A refusal says why it was refused, and a lost outcome says it may have happened. */
 export function describeActivityEntry(entry: Pick<DeviceActivityEntry, 'method' | 'kind' | 'outcome'>): string {
   // A refused editor connection or ask says so; the same words as an open or an ask that went through would mislead.
-  if (entry.kind === 'refused' && (entry.method === 'editor.open' || entry.method === 'editor.ask')) {
+  if (entry.kind === 'refused' && (entry.method === 'editor.open' || entry.method === 'editor.ask' || entry.method === 'editor.check')) {
     const why = EDITOR_REFUSALS[entry.outcome] ?? entry.outcome.replaceAll('_', ' ')
+    if (entry.method === 'editor.check') return `Checked an editor connection (refused: ${why})`
     return entry.method === 'editor.open'
       ? `Tried to open its editor here (refused: ${why})`
       : `Asked to open its editor here (not passed on: ${why})`

@@ -63,6 +63,27 @@ export const EDITOR_ASK_AUDIT = {
   declined: 'editor.ask.declined'
 } as const
 
+/** The longest device name shown in the question, the notice and Devices. */
+export const DEVICE_NAME_SHOWN_MAX = 64
+
+/**
+ * A device name as a person reads it: control and format characters (newlines, bidirectional overrides, zero-width
+ * marks) are dropped, runs of white space become one space, and a long name is cut. A name is the user's own text, but
+ * it is shown in a notice and a question that decide shell access, so it must not be able to reorder or break them.
+ */
+export function cleanDeviceName(name: string, fallback = 'Another computer'): string {
+  const cleaned = name
+    .replace(/[\p{Cc}\p{Cf}\u2028\u2029]/gu, ' ')
+    .replace(/\s+/gu, ' ')
+    .trim()
+  if (!cleaned) return fallback
+  const letters = [...cleaned]
+  return letters.length > DEVICE_NAME_SHOWN_MAX ? `${letters.slice(0, DEVICE_NAME_SHOWN_MAX - 1).join('')}…` : cleaned
+}
+
 /** The question as the owner's person reads it. */
-export const editorAskQuestion = (device: string): string => `Allow ${device} to open its editor here?`
-export const EDITOR_ASK_WARNING = 'This gives shell access.'
+export const editorAskQuestion = (device: string): string => `Let ${device}’s editor connect to this computer?`
+export const EDITOR_ASK_WARNING = 'Gives shell access.'
+
+/** How long the prompt keeps Allow disabled after it appears, so a click meant for something else cannot grant it. */
+export const EDITOR_ASK_ARM_MS = 1_000

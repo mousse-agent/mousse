@@ -111,6 +111,24 @@ export class SqliteBridgeAudit {
     }
   }
 
+  /** The newest rows of one `method` for `node` since `since`: a query by method and time, not a look at the last rows. */
+  since(node: NodeId, method: string, since: number, limit = 50): BridgeAuditEntry[] {
+    const rows = this.db.database
+      .prepare(
+        'SELECT at,node,kind,method,thread,project,outcome FROM bridge_audit WHERE node=? AND method=? AND at>=? ORDER BY id DESC LIMIT ?'
+      )
+      .all(node, method, since, limit) as Array<Record<string, unknown>>
+    return rows.map((row) => ({
+      at: Number(row.at),
+      node: String(row.node) as NodeId,
+      kind: row.kind as BridgeAuditKind,
+      method: String(row.method),
+      ...(row.thread ? { thread: String(row.thread) } : {}),
+      ...(row.project ? { project: String(row.project) } : {}),
+      outcome: String(row.outcome)
+    }))
+  }
+
   recent(limit = 100, node?: NodeId): BridgeAuditEntry[] {
     const columns = 'at,node,kind,method,thread,project,outcome'
     const rows = (

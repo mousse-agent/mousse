@@ -34,7 +34,7 @@ import { PrivateSources, raiseStreamListenerLimits } from './routed/privateSourc
 import { RoutedStaging } from './routed/staging'
 import { routedStreamsPort } from './routed/streamsPort'
 import { isPrivateKey } from './remote/privateStreams'
-import { deviceNameOf } from './routed/deviceName'
+import { deviceLabelOf, deviceNameOf } from './routed/deviceName'
 import { clearDeviceRules, deviceActivityOf, messageSendersOf, validateActivityParams } from './deviceActivity'
 import type { BridgeActivityMethod, BridgeActivityParams } from '../../shared/bridge/deviceActivity'
 
@@ -323,7 +323,19 @@ export class BridgeProfileService {
       policy: rt.policy,
       audit: rt.audit,
       clock: this.clock,
-      name: (node) => deviceNameOf(rt.identity, node),
+      name: (node) => deviceLabelOf(rt.identity, node),
+      // Read again when a person answers: a device that was revoked, or lost Works on threads, is not allowed here.
+      stillAsking: async (node) => {
+        const view = (await net.request('bridge.nodes', {})) as {
+          nodes: Array<{ node: NodeId; caps: string[]; revoked?: boolean }>
+        }
+        const found = view.nodes.find((entry) => entry.node === node)
+        return !!found && !found.revoked && found.caps.includes('settings')
+      },
+      // The same code as the switch in Devices: roster check, the change, and the update windows wait for.
+      allow: async (node) => {
+        await net.request('bridge.policy', { node, editor: true })
+      },
       onAsked: ({ name }) =>
         services.events.emit({
           channel: 'protocol:event',
@@ -336,6 +348,8 @@ export class BridgeProfileService {
         })
     })
     asks.start()
+    // A device that is revoked, or loses Works on threads, loses its waiting ask too.
+    this.disposers.add(rt.identity.onRosterChanged(() => void asks.reconcile().catch(() => undefined)))
     services.editorAsks = asks
     this.editorAsks = asks
     this.disposers.add(() => {
@@ -645,7 +659,7 @@ export class BridgeProfileService {
     if (method === 'bridge.editorAsks') return { asks: this.editorAsks.pending() }
     if (method === 'bridge.editorAsk.answer') {
       const answer = params as BridgeActivityParams['bridge.editorAsk.answer']
-      return this.editorAsks.answer(answer.node, answer.allow)
+      return this.track(this.editorAsks.answer(answer.node, answer.allow))
     }
     return messageSendersOf(sources, (params as BridgeActivityParams['bridge.messageSenders']).threadId)
   }
