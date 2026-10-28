@@ -497,6 +497,8 @@ describe('a terminal’s output on its own stream', () => {
     const chunks = burst(1024 * 1024)
     expect(chunks.length).toBeGreaterThan(20)
     for (const chunk of chunks) spawned[0].pty.say(chunk)
+    // The stream stores a burst a few milliseconds after it arrived (and at once when it ends).
+    await new Promise((resolve) => setTimeout(resolve, 150))
 
     const { snapshot, events } = readStream(
       o.f,
@@ -519,6 +521,36 @@ describe('a terminal’s output on its own stream', () => {
     for (const [sequence, pieces] of bySequence)
       if (chunks[sequence - 1].length <= 16 * 1024) expect(pieces).toHaveLength(1)
     spawned[0].pty.exit(0)
+  }, 240_000)
+
+  it('signs and stores a burst in a few transactions, each chunk still its own record in order', async () => {
+    const o = await routedOwner({ streams: true })
+    const { spawned, t, ptyId } = await opened(o)
+    const stream = (await o.ok('stream.open', {
+      kind: 'terminal',
+      threadId: t.id,
+      ptyId
+    })) as RoutedStreamOpened
+    const commits = vi.spyOn(o.f.targetDb.database, 'exec')
+    const chunks = Array.from({ length: 300 }, (_, index) => `line ${index}
+`)
+    for (const chunk of chunks) spawned[0].pty.say(chunk)
+    await new Promise((resolve) => setTimeout(resolve, 150))
+    const committed = commits.mock.calls.filter(([sql]) => sql === 'COMMIT').length
+    commits.mockRestore()
+    // One transaction a record would be 300; a batch holds up to 32.
+    expect(committed).toBeGreaterThan(0)
+    expect(committed).toBeLessThan(60)
+    const { events } = readStream(o.f, (stream.descriptor as { id: never }).id, stream.subject)
+    const data = events.filter((event) => event.type === 'pty.data')
+    expect(data.map((event) => event.data.sequence)).toEqual(chunks.map((_, index) => index + 1))
+    expect(data.map((event) => event.data.data)).toEqual(chunks)
+    // Anything that is not output keeps its place behind the output before it.
+    spawned[0].pty.say('last')
+    spawned[0].pty.exit(0)
+    const after = readStream(o.f, (stream.descriptor as { id: never }).id, stream.subject).events
+    expect(after.slice(-2).map((event) => event.type)).toEqual(['pty.data', 'pty.exit'])
+    expect(after.at(-2)!.data).toMatchObject({ sequence: 301, data: 'last' })
   }, 240_000)
 
   it('can be caught up from a sequence number with pty.outputSince', async () => {

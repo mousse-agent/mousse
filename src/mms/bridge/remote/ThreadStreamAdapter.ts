@@ -102,6 +102,8 @@ interface ActiveThread {
   holders: Map<string, number>
   /** Last time the stream was opened, subscribed to or running a turn (wall clock, ms). */
   lastBusyAt: number
+  /** A terminal's output that arrived within a few milliseconds of each other, not yet signed and stored. */
+  batch?: { bodies: unknown[]; bytes: number; timer?: { cancel(): void } }
 }
 export interface ThreadStreamOptions {
   db: NetDatabase
@@ -149,7 +151,16 @@ const IDLE_MS = 10 * 60 * 1000,
   HOLDER_MAX_THREADS = 16,
   SNAPSHOT_MAX = 32 * 1024 * 1024,
   CHUNK_BYTES = 32 * 1024,
-  DELTA_MAX = 32 * 1024
+  DELTA_MAX = 32 * 1024,
+  /**
+   * A terminal's chunks that arrive this close together are signed and stored in one transaction, each as its
+   * own record. A burst of output (a build, `yes`) is hundreds of chunks a second, and a roster check, a
+   * signature and a commit each is far more than a terminal needs.
+   */
+  BATCH_MS = 4,
+  BATCH_MAX_RECORDS = 32,
+  /** Well under what one transaction may hold (STORE_TXN_MAX_BYTES, 1 MiB), with the envelopes and signatures counted in. */
+  BATCH_MAX_BYTES = 256 * 1024
 const PRIVATE_DELTA_SET: readonly string[] = PRIVATE_DELTA_TYPES
 const PRIVATE_DURABLE_SET: readonly string[] = BRIDGE_ROUTED_EVENT_TYPES
 
@@ -473,6 +484,16 @@ export class ThreadStreamAdapter {
             return
           }
           const body = { threadId: thread.subject, type: event.type, data: event.data }
+          // A terminal's output waits a few milliseconds to be stored with what comes right after it. Nothing else
+          // on its stream overtakes it: anything that is not output is stored behind what is already waiting.
+          if (thread.spec?.kind === 'terminal' && event.type === 'pty.data' && !event.ephemeral) {
+            const size = canonicalJson(body).byteLength
+            if (size <= 48 * 1024) {
+              this.queueBatch(thread, body, size)
+              return
+            }
+          }
+          this.flushBatch(thread)
           if (event.ephemeral) {
             if (!deltaTypes.includes(event.type)) throw new NetError('bad_request')
             const key = deltaKey(event)
@@ -520,6 +541,33 @@ export class ThreadStreamAdapter {
       this.options.onError?.(thread.threadId, error, thread.stream)
     }
   }
+  /** Keeps one record of a terminal's output to be stored with the ones around it (see `BATCH_MS`). */
+  private queueBatch(thread: ActiveThread, body: unknown, size: number): void {
+    const batch = (thread.batch ??= { bodies: [], bytes: 0 })
+    batch.bodies.push(body)
+    batch.bytes += size
+    if (batch.bodies.length >= BATCH_MAX_RECORDS || batch.bytes >= BATCH_MAX_BYTES)
+      return this.flushBatch(thread)
+    batch.timer ??= this.options.clock.setTimeout(() => {
+      try {
+        this.flushBatch(thread)
+      } catch (error) {
+        if (this.active.get(thread.stream) !== thread) return
+        this.deactivate(thread.threadId)
+        this.options.onError?.(thread.threadId, error, thread.stream)
+      }
+    }, BATCH_MS)
+  }
+  /** Stores what a terminal's stream is holding back, in the order it arrived. */
+  private flushBatch(thread: ActiveThread): void {
+    const batch = thread.batch
+    if (!batch) return
+    thread.batch = undefined
+    batch.timer?.cancel()
+    if (!batch.bodies.length) return
+    this.appendMany(thread, 'thread.event', batch.bodies)
+    this.trim(thread)
+  }
   private queueDelta(thread: ActiveThread, key: string, body: unknown): void {
     if (!this.options.onDelta) return
     thread.deltas.delete(key)
@@ -548,12 +596,25 @@ export class ThreadStreamAdapter {
     for (const key of [...thread.deltas.keys()]) if (matches(key)) thread.deltas.delete(key)
     this.options.onDeltaDiscard?.(thread.stream, matches)
   }
+  /** A stream that is closed does not store what it was holding back: its reader is no longer served. */
+  private dropBatch(thread: ActiveThread): void {
+    thread.batch?.timer?.cancel()
+    thread.batch = undefined
+  }
   private stopDeltas(thread: ActiveThread): void {
     thread.deltaTimer?.cancel()
     thread.deltaTimer = undefined
     thread.deltas.clear()
   }
   private append(thread: ActiveThread, type: string, body: unknown): void {
+    this.appendMany(thread, type, [body])
+  }
+  /**
+   * Signs and stores records, one after another in one transaction: the roster and this computer's delegation are
+   * checked once, each record is signed on its own, and the records are published after the commit. Each body is
+   * its own record, in the order given, so nothing about a record changes by being stored with others.
+   */
+  private appendMany(thread: ActiveThread, type: string, bodies: readonly unknown[]): void {
     if (this.options.db.database.isTransaction)
       throw new NetError('forbidden', 'Display records cannot escape an enclosing transaction.')
     const identity = this.options.identity,
@@ -575,39 +636,53 @@ export class ThreadStreamAdapter {
       )
     )
       throw new NetError('bad_delegation')
-    const envelope: Envelope = {
-      v: 1,
-      minor: 0,
-      id: newId('event'),
-      stream: thread.stream,
-      type,
-      crit: false,
-      author: { user: self.user, node: self.node, keyEpoch: delegation.keyEpoch },
-      ts: this.options.clock.now(),
-      body
-    }
-    const bytes = encodeEnvelope(envelope),
-      sig = this.options.keys.signAsNode(bytes)
-    identity.verifyAuthor(envelope.author, bytes, sig, this.options.clock.now(), 'newWork')
-    const position = this.options.store.appendAsAuthority(thread.stream, {
-      id: envelope.id,
-      envelope: bytes,
-      sig,
-      recvTs: this.options.clock.now()
+    const sealed = bodies.map((body) => {
+      const envelope: Envelope = {
+        v: 1,
+        minor: 0,
+        id: newId('event'),
+        stream: thread.stream,
+        type,
+        crit: false,
+        author: { user: self.user, node: self.node, keyEpoch: delegation.keyEpoch },
+        ts: this.options.clock.now(),
+        body
+      }
+      const bytes = encodeEnvelope(envelope),
+        sig = this.options.keys.signAsNode(bytes)
+      identity.verifyAuthor(envelope.author, bytes, sig, this.options.clock.now(), 'newWork')
+      return { id: envelope.id, bytes, sig }
     })
-    const record: StoredRecord = { ...position, envelope: bytes, sig }
-    thread.ring.push(record)
-    thread.bytes += bytes.byteLength + sig.byteLength
-    while (
-      thread.ring.length > (thread.maxRows ?? this.options.maxRows ?? 512) ||
-      thread.bytes > (thread.maxBytes ?? this.options.maxBytes ?? 1024 * 1024)
-    ) {
-      const dropped = thread.ring.shift()!
-      thread.bytes -= dropped.envelope.byteLength + dropped.sig.byteLength
+    const records: StoredRecord[] = []
+    const store = (): void => {
+      for (const { id, bytes, sig } of sealed) {
+        const position = this.options.store.appendAsAuthority(thread.stream, {
+          id,
+          envelope: bytes,
+          sig,
+          recvTs: this.options.clock.now()
+        })
+        records.push({ ...position, envelope: bytes, sig })
+      }
     }
-    this.options.onRecord?.(thread.stream, record)
+    if (sealed.length === 1) store()
+    else this.options.db.transaction(store)
+    for (const record of records) {
+      thread.ring.push(record)
+      thread.bytes += record.envelope.byteLength + record.sig.byteLength
+      while (
+        thread.ring.length > (thread.maxRows ?? this.options.maxRows ?? 512) ||
+        thread.bytes > (thread.maxBytes ?? this.options.maxBytes ?? 1024 * 1024)
+      ) {
+        const dropped = thread.ring.shift()!
+        thread.bytes -= dropped.envelope.byteLength + dropped.sig.byteLength
+      }
+      this.options.onRecord?.(thread.stream, record)
+    }
   }
   private refreshSnapshot(thread: ActiveThread): void {
+    // What is waiting was printed before this snapshot was read: it goes first, then the snapshot replaces it.
+    this.flushBatch(thread)
     const bytes = canonicalJson(this.options.source.snapshot(thread.threadId))
     if (bytes.byteLength > SNAPSHOT_MAX)
       throw new NetError('too_large', 'Display snapshot exceeds32MiB.')
@@ -643,6 +718,7 @@ export class ThreadStreamAdapter {
       if (thread.threadId === threadId) {
         thread.dispose?.()
         this.stopDeltas(thread)
+        this.dropBatch(thread)
         this.active.delete(stream)
         return
       }
@@ -778,6 +854,7 @@ export class ThreadStreamAdapter {
     for (const thread of this.active.values()) {
       thread.dispose?.()
       this.stopDeltas(thread)
+      this.dropBatch(thread)
     }
     this.active.clear()
   }
