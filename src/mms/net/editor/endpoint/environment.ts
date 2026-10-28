@@ -106,6 +106,18 @@ export async function readSystemEnvironment(
   return out
 }
 
+/**
+ * What `pam_env` gives a login: `/etc/default/locale` (Debian and Ubuntu keep the language there; a client that
+ * sends no `LANG`, such as Windows' OpenSSH, would otherwise get the C locale) and then `/etc/environment`, which wins.
+ */
+export async function readSystemEnvironments(
+  files: readonly string[] = ['/etc/default/locale', '/etc/environment']
+): Promise<Record<string, string>> {
+  const out: Record<string, string> = {}
+  for (const file of files) Object.assign(out, await readSystemEnvironment(file))
+  return out
+}
+
 /** `/run/user/<uid>` when it exists and is a folder. */
 export async function runtimeDirectory(uid: number | undefined): Promise<string | undefined> {
   if (uid === undefined || uid < 0) return undefined

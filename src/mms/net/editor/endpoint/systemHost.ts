@@ -10,6 +10,14 @@ import { createUnixHost } from './unixHost'
 export function systemProcessHost(
   platform: NodeJS.Platform = process.platform
 ): ProcessHost | undefined {
-  if (platform === 'linux' || platform === 'darwin') return createUnixHost({ platform })
+  if (platform === 'linux' || platform === 'darwin') {
+    try {
+      return createUnixHost({ platform })
+    } catch {
+      // The account of the daemon cannot be read (a user id with no entry in the passwd file, as in some containers):
+      // the endpoint is unavailable and the system's SSH server is used, and Net starts as it did before.
+      return undefined
+    }
+  }
   return undefined
 }

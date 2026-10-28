@@ -77,6 +77,13 @@ export interface ProcessHost {
    * found. It never blocks the thread: the lists are read and the signals sent between turns of the event loop.
    */
   killScope(scope: string): Promise<void>
-  /** The scopes that have a program running that the host started and still tracks. */
+  /**
+   * Stops every program that carries the marker of a device `isAllowed` refuses, found by reading the marker of
+   * the processes that exist: it needs no list of devices, so a device that was revoked, one whose last session
+   * ended long ago and servers left from before the daemon restarted are all found. Never stops the daemon's own
+   * process or anything it started. Resolves with how many processes were signalled.
+   */
+  sweep(isAllowed: (scope: string) => boolean): Promise<number>
+  /** The scopes that have a session program running that the host started and still tracks (tests clean up with it). */
   scopes(): string[]
 }

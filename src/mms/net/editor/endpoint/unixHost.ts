@@ -3,8 +3,14 @@ import { createRequire } from 'node:module'
 import { homedir, userInfo } from 'node:os'
 import { basename } from 'node:path'
 import { PassThrough, Writable } from 'node:stream'
+import { StringDecoder } from 'node:string_decoder'
 import type * as NodePty from 'node-pty'
-import { readSystemEnvironment, runtimeDirectory, unixLoginEnvironment } from './environment'
+import {
+  readSystemEnvironments,
+  runtimeDirectory,
+  SCOPE_VARIABLE,
+  unixLoginEnvironment
+} from './environment'
 import type { ProcessHost, SessionExit, SessionProcess, SessionRequest } from './host'
 import { posixPaths } from './sftp/paths'
 import { readProcesses, ScopeKiller, type ProcessRow } from './scope'
@@ -53,8 +59,8 @@ export interface UnixHostOptions {
   scope?: ConstructorParameters<typeof ScopeKiller>[0]
   /** Tests give a `TZ` and `TMPDIR` of their own. */
   daemonEnvironment?: { TZ?: string | undefined; TMPDIR?: string | undefined }
-  /** Tests do not want the system's `/etc/environment`. */
-  systemEnvironmentFile?: string
+  /** Tests do not want the system's `/etc/environment` and `/etc/default/locale`. */
+  systemEnvironmentFiles?: string[]
 }
 
 function accountOfDaemon(): { user: string; home: string; shell: string; uid?: number } {
@@ -76,11 +82,15 @@ function signalTo(pid: number, signal: NodeJS.Signals): void {
 }
 
 export function createUnixHost(options: UnixHostOptions = {}): ProcessHost {
+  // A daemon that was started from an editor's terminal carries the marker of that device, and so would everything it
+  // starts (agents, terminals, helpers), and a block of the device would stop them all. Its own environment is
+  // cleaned here; what it already started cannot be, so the sweep never stops the daemon's own tree either.
+  delete process.env[SCOPE_VARIABLE]
   const platform = options.platform ?? process.platform
   const account = options.account ?? accountOfDaemon()
   const kills = new ScopeKiller(
     options.scope ?? {
-      snapshot: (token: string): Promise<ProcessRow[]> => readProcesses(platform)(token),
+      snapshot: (): Promise<ProcessRow[]> => readProcesses(platform)(),
       signal: (pid, signal) => process.kill(pid, signal)
     }
   )
@@ -95,7 +105,7 @@ export function createUnixHost(options: UnixHostOptions = {}): ProcessHost {
       shell: account.shell,
       sshConnection: request.sshConnection,
       ...(request.pty ? { term: request.pty.term } : {}),
-      ...(linux ? { system: await readSystemEnvironment(options.systemEnvironmentFile) } : {}),
+      ...(linux ? { system: await readSystemEnvironments(options.systemEnvironmentFiles) } : {}),
       ...(runtimeDir ? { runtimeDir } : {}),
       daemon: options.daemonEnvironment ?? { TZ: process.env.TZ, TMPDIR: process.env.TMPDIR },
       requested: request.requested,
@@ -183,17 +193,24 @@ export function createUnixHost(options: UnixHostOptions = {}): ProcessHost {
     kills.track(request.scope, pid)
     const output = new PassThrough()
     const listeners = finishers()
+    // A multi-byte character can be split between two SSH packets (a large paste): it is decoded across them.
+    const decoder = new StringDecoder('utf8')
+    let hungUp = false
     const input = new Writable({
       write(chunk: Buffer, _encoding, callback) {
         try {
-          terminal.write(chunk.toString('utf8'))
+          const text = decoder.write(chunk)
+          if (text) terminal.write(text)
         } catch {
           // The terminal is gone; what was typed has nowhere to go.
         }
         callback()
       }
     })
-    terminal.onData((data) => output.write(data))
+    // After a hang-up nobody reads the output any more: a program that ignores SIGHUP must not fill the daemon's memory.
+    terminal.onData((data) => {
+      if (!hungUp) output.write(data)
+    })
     terminal.onExit(({ exitCode, signal }) => {
       kills.untrack(request.scope, pid)
       for (const listener of listeners.exit)
@@ -219,7 +236,18 @@ export function createUnixHost(options: UnixHostOptions = {}): ProcessHost {
         if (SIGNALS.has(name)) signalTo(pid, `SIG${name}` as NodeJS.Signals)
       },
       // The terminal's program leads its own session: a hang-up of the group is what closing the terminal does.
-      hangUp: () => signalTo(-pid, 'SIGHUP'),
+      hangUp: () => {
+        hungUp = true
+        signalTo(-pid, 'SIGHUP')
+        // And the pseudo-terminal's controlling side is closed, as closing a terminal does: a program that ignores
+        // SIGHUP no longer has anywhere to write.
+        try {
+          ;(terminal as unknown as { destroy?: () => void }).destroy?.()
+        } catch {
+          // Already closed.
+        }
+        output.destroy()
+      },
       kill: () => {
         signalTo(-pid, 'SIGKILL')
         signalTo(pid, 'SIGKILL')
@@ -238,6 +266,7 @@ export function createUnixHost(options: UnixHostOptions = {}): ProcessHost {
       return request.pty ? startTerminal(request, env) : startPipes(request, env)
     },
     killScope: async (scope) => void (await kills.kill(scope)),
+    sweep: (isAllowed) => kills.sweep(isAllowed),
     scopes: () => kills.tokens()
   }
 }

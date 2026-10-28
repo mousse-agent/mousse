@@ -106,7 +106,7 @@ export const BRIDGE_HELP = `Usage:
 editor-server chooses which SSH server answers editor connections from your other computers:
 mousse (the default) is Mousse's own, which needs no SSH server on this computer; system is this
 computer's own SSH server (it needs one running, and a key it accepts). Without an argument it
-shows the setting. A Windows computer always uses its own SSH server for now.
+shows the setting. A Windows computer always uses its own SSH server for now, and a device that had its editor switch on before the endpoint existed keeps using it until that switch is turned off.
 threads turns on (or off) whether your other computers may work on this computer's threads;
 without an argument it shows the setting. It is on by default and only changes this computer.
 Only the current authority can invite, revoke or rename nodes, change capabilities or set a

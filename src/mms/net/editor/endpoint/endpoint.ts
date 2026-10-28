@@ -16,7 +16,7 @@ import { loadEndpointHostKey, type EndpointHostKey } from './hostKey'
 import { ssh2 } from './library'
 import { isForwardPort, loopbackTargets } from './loopback'
 import type { EditorEndpointPort, EndpointConnection, EndpointCounts, EndpointEvent } from './port'
-import { scopeToken } from './scope'
+import { scopePrefix, scopeToken } from './scope'
 import { serveSftp } from './sftp/server'
 
 /**
@@ -60,8 +60,6 @@ const REFUSAL_TEXT = 'mousse: not available through Mousse\n'
 export class EditorEndpoint implements EditorEndpointPort {
   private hostKey?: EndpointHostKey
   private scopeKey?: Uint8Array
-  private readonly connections = new Map<NodeId, Set<ConnectionState>>()
-  private readonly tokenNodes = new Map<string, NodeId>()
   private serial = 0
 
   constructor(private readonly options: EditorEndpointOptions) {}
@@ -78,8 +76,8 @@ export class EditorEndpoint implements EditorEndpointPort {
     return [this.key().publicKey]
   }
 
-  /** The marker of `node`'s programs: stable across restarts (a keyed hash of the id), so they are still found. */
-  scopeOf(node: NodeId): string {
+  /** The key the markers are made with: made once, kept in the key store, so the markers are the same after a restart. */
+  private scopeSecret(): Uint8Array {
     if (!this.scopeKey) {
       let held = this.options.keys.getSecret(SCOPE_KEY_SECRET)
       if (!held) {
@@ -88,9 +86,12 @@ export class EditorEndpoint implements EditorEndpointPort {
       }
       this.scopeKey = held
     }
-    const token = scopeToken(this.scopeKey, node)
-    this.tokenNodes.set(token, node)
-    return token
+    return this.scopeKey
+  }
+
+  /** The marker of `node`'s programs: stable across restarts (a keyed hash of the id), so they are still found. */
+  scopeOf(node: NodeId): string {
+    return scopeToken(this.scopeSecret(), node)
   }
 
   serve(stream: Duplex, node: NodeId): EndpointConnection {
@@ -111,15 +112,8 @@ export class EditorEndpoint implements EditorEndpointPort {
         }
       },
       forceKill: () => this.killDevice(node),
-      onClosed: () => {
-        const set = this.connections.get(node)
-        set?.delete(state)
-        if (set && !set.size) this.connections.delete(node)
-      }
+      onClosed: () => {}
     })
-    const set = this.connections.get(node) ?? new Set<ConnectionState>()
-    set.add(state)
-    this.connections.set(node, set)
     const { Server } = ssh2()
     const server = new Server({ hostKeys: [hostKey.privateKey], ident: 'MousseSSH' })
     server.on('connection', (client) => state.attach(client))
@@ -137,13 +131,20 @@ export class EditorEndpoint implements EditorEndpointPort {
     await this.options.host?.killScope(this.scopeOf(node))
   }
 
-  devices(): NodeId[] {
-    const nodes = new Set<NodeId>(this.connections.keys())
-    for (const token of this.options.host?.scopes() ?? []) {
-      const node = this.tokenNodes.get(token)
-      if (node) nodes.add(node)
+  async sweep(allowed: readonly NodeId[]): Promise<number> {
+    const host = this.options.host
+    if (!host) return 0
+    let tokens: Set<string>
+    let prefix: string
+    try {
+      tokens = new Set(allowed.map((node) => this.scopeOf(node)))
+      prefix = scopePrefix(this.scopeSecret())
+    } catch {
+      // The key store cannot be read (it is locked): nothing can be told from anything, so nothing is stopped.
+      return 0
     }
-    return [...nodes]
+    // Only this key's markers are this endpoint's to judge (another profile has its own key, and its programs its own prefix).
+    return host.sweep((scope) => !scope.startsWith(prefix) || tokens.has(scope))
   }
 }
 
@@ -462,27 +463,38 @@ class ConnectionState {
           this.release()
           return void socket.destroy()
         }
-        this.counts.forwards++
-        this.channels.add(channel)
-        socket.setNoDelay(true)
-        channel.pipe(socket)
-        socket.pipe(channel)
-        const done = (): void => {
-          this.release()
-          this.channels.delete(channel)
-          socket.destroy()
-          channel.destroy()
-        }
-        channel.once('close', done)
-        socket.once('close', done)
-        socket.on('error', () => {})
-        channel.on('error', () => {})
+        this.join(channel, socket)
       },
       () => {
         this.release()
         reject()
       }
     )
+  }
+
+  /**
+   * A forward's channel and its socket, one piece: whichever ends first ends the other. The channel slot the forward
+   * holds is given back once, however many of the two events arrive.
+   */
+  private join(channel: ServerChannel, socket: Socket): void {
+    this.counts.forwards++
+    this.channels.add(channel)
+    socket.setNoDelay(true)
+    channel.pipe(socket)
+    socket.pipe(channel)
+    let over = false
+    const done = (): void => {
+      if (over) return
+      over = true
+      this.release()
+      this.channels.delete(channel)
+      socket.destroy()
+      channel.destroy()
+    }
+    channel.once('close', done)
+    socket.once('close', done)
+    socket.on('error', () => {})
+    channel.on('error', () => {})
   }
 
   private globalRequest(
@@ -493,6 +505,7 @@ class ConnectionState {
   ): void {
     if (name === 'cancel-tcpip-forward') {
       const bind = info as { bindAddr: string; bindPort: number }
+      // Filed under the port that was really bound, which is the one a client cancels with (it asked for 0).
       const key = `${bind.bindAddr}:${bind.bindPort}`
       this.listeners.get(key)?.close()
       this.listeners.delete(key)
@@ -517,38 +530,38 @@ class ConnectionState {
     }
     const client = this.client
     if (!client) return reject?.()
-    const key = `${bind.bindAddr}:${bind.bindPort}`
+    let replied = false
     const server = createServer((socket) => {
       const port = (server.address() as { port: number } | null)?.port ?? bind.bindPort
+      // A connection to the forwarded port is a channel of this connection like any other, and counts as one.
+      if (!this.take()) return void socket.destroy()
       client.forwardOut(
         bind.bindAddr,
         port,
         socket.remoteAddress ?? '127.0.0.1',
         socket.remotePort ?? 0,
         (error, channel) => {
-          if (error || !channel) return void socket.destroy()
-          this.counts.forwards++
-          this.channels.add(channel)
-          socket.pipe(channel)
-          channel.pipe(socket)
-          const done = (): void => {
-            this.channels.delete(channel)
-            socket.destroy()
-            channel.destroy()
+          if (error || !channel || this.closed) {
+            this.release()
+            return void socket.destroy()
           }
-          channel.once('close', done)
-          socket.once('close', done)
-          socket.on('error', () => {})
-          channel.on('error', () => {})
+          this.join(channel, socket)
         }
       )
     })
-    server.on('error', () => reject?.())
+    server.on('error', () => {
+      // After the answer was sent, a listener that fails has nothing left to tell the client.
+      if (!replied) reject?.()
+      replied = true
+    })
     server.listen({ host: hosts[0]!, port: bind.bindPort }, () => {
       if (this.closed) return void server.close()
+      const bound = (server.address() as { port: number }).port
+      const key = `${bind.bindAddr}:${bound}`
       this.listeners.set(key, server)
       server.once('close', () => this.listeners.delete(key))
-      accept?.((server.address() as { port: number }).port)
+      replied = true
+      accept?.(bound)
     })
   }
 

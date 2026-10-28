@@ -490,13 +490,18 @@ export interface EditorTunnelOptions {
    * exists) or the owner chose the system's SSH server. Without one, the far end is always the system's.
    */
   endpoint?: EditorEndpointPort
-  /** The owner's choice "Use this computer's SSH server" for this computer. Read for every open. */
-  useSystemSsh?: () => boolean
   /**
-   * Why `node` may not have a tunnel here now, or undefined, for a device that has no tunnel open (`refusal`
-   * needs a session). Used to stop what a device started after its tunnels are gone.
+   * Whether the owner chose the system's SSH server for `node`: "Use this computer's SSH server", or a device that
+   * already had the switch on when the endpoint arrived and keeps the server it had. Read for every open.
    */
-  deviceRefusal?: (node: NodeId) => TunnelReason | undefined
+  useSystemSsh?: (node: NodeId) => boolean
+  /**
+   * The devices that may have a tunnel here now: every one on the roster that `refusal` would let in. Everything
+   * the endpoint started for any other device is stopped, whatever device that was and whether or not anything here
+   * remembers it (a device that was revoked, a server left from before the daemon restarted). Undefined when it
+   * cannot be told (the key store is locked): then nothing is stopped.
+   */
+  allowedDevices?: () => NodeId[] | undefined
   perNode?: number
   total?: number
   opensPerMinute?: number
@@ -681,7 +686,7 @@ export class EditorTunnels implements SessionTunnelPort {
     let keys: TunnelHostKey[]
     // The end of the pair that the endpoint serves, once it is given the stream.
     let endpointEnd: Duplex | undefined
-    const endpoint = this.endpointInUse()
+    const endpoint = this.endpointInUse(node)
     try {
       if (endpoint) {
         // Mousse's own endpoint: no SSH server of the system, nothing to connect to or to vouch for but its key.
@@ -810,7 +815,7 @@ export class EditorTunnels implements SessionTunnelPort {
     if (gate) return refuse(gate)
     this.checking.set(node, (this.checking.get(node) ?? 0) + 1)
     let socket: Socket | undefined
-    const endpoint = this.endpointInUse()
+    const endpoint = this.endpointInUse(node)
     try {
       let keys: TunnelHostKey[]
       if (endpoint) {
@@ -896,11 +901,11 @@ export class EditorTunnels implements SessionTunnelPort {
   }
 
   /** The endpoint, when this computer answers editor connections itself: it is there, it can run here, and the owner did not choose the system's. */
-  private endpointInUse(): EditorEndpointPort | undefined {
+  private endpointInUse(node: NodeId): EditorEndpointPort | undefined {
     const { endpoint, useSystemSsh } = this.options
     if (!endpoint?.available()) return undefined
     try {
-      if (useSystemSsh?.()) return undefined
+      if (useSystemSsh?.(node)) return undefined
     } catch {
       // A setting that cannot be read leaves the default.
     }
@@ -932,19 +937,23 @@ export class EditorTunnels implements SessionTunnelPort {
     })
   }
 
-  /** The devices whose connections ended and which may have no right to what they started. */
-  private sweepDevices(): void {
-    const { endpoint, deviceRefusal } = this.options
-    if (!endpoint || !deviceRefusal) return
-    for (const node of endpoint.devices()) {
-      let why: TunnelReason | undefined
-      try {
-        why = deviceRefusal(node)
-      } catch {
-        why = 'capability'
-      }
-      if (why) void endpoint.killDevice(node).catch(() => undefined)
+  /**
+   * Stops what the endpoint started for every device that has no right here now. It reads the processes that exist and
+   * the marker they carry, so it needs to know no device and no connection: a device whose window closed long ago, one
+   * that was revoked and one from before a restart are found the same way. Run when a right changes (`reconcile`),
+   * when Net is turned off (`endAll`) and once when the daemon starts. Asynchronous; never throws.
+   */
+  sweepStrays(): Promise<number> {
+    const { endpoint, allowedDevices } = this.options
+    if (!endpoint?.available() || !allowedDevices) return Promise.resolve(0)
+    let allowed: NodeId[] | undefined
+    try {
+      allowed = allowedDevices()
+    } catch {
+      allowed = undefined
     }
+    if (!allowed) return Promise.resolve(0)
+    return endpoint.sweep(allowed).catch(() => 0)
   }
 
   private hostCount(): number {
@@ -1118,8 +1127,8 @@ export class EditorTunnels implements SessionTunnelPort {
       ended++
     }
     // A device that no longer has the right also loses what it started, even with no tunnel open now: an editor's
-    // server outlives the connection that started it, and a block must reach it.
-    this.sweepDevices()
+    // server outlives the connection that started it and its session, and a block must reach it.
+    void this.sweepStrays()
     return ended
   }
 
@@ -1132,19 +1141,28 @@ export class EditorTunnels implements SessionTunnelPort {
     }
   }
 
-  /** Ends every tunnel, those carried here and those opened from here (Net or Bridge was turned off). */
-  endAll(reason: TunnelReason): number {
+  /**
+   * Ends every tunnel, those carried here and those opened from here. `forced` (by default, for a reason that takes a
+   * right away) also stops everything the endpoint started, for every device, tunnel or not: Net or Bridge was turned
+   * off by the person. A daemon that is closing (a quit, an update, a restart) ends its tunnels as an ordinary
+   * disconnect, `forced: false`: editor servers keep running, as they do when an SSH server restarts, and the sweep
+   * at the next start stops whatever has no right by then.
+   */
+  endAll(reason: TunnelReason, forced: boolean = FORCED_ENDS.has(reason)): number {
     for (const claim of this.claims) claim.cancelled ??= reason
     const open = [...this.tunnels.values()]
-    for (const entry of open) this.finish(entry, reason, true)
-    // Net or Bridge off: nothing the endpoint started stays, whether or not a tunnel is open.
+    for (const entry of open) this.finish(entry, reason, true, forced)
     const { endpoint } = this.options
-    if (endpoint && FORCED_ENDS.has(reason))
-      for (const node of endpoint.devices()) void endpoint.killDevice(node).catch(() => undefined)
+    if (endpoint?.available() && forced) void endpoint.sweep([]).catch(() => undefined)
     return open.length
   }
 
-  private finish(entry: Entry, reason: EndReason, notify: boolean): void {
+  private finish(
+    entry: Entry,
+    reason: EndReason,
+    notify: boolean,
+    forced: boolean = FORCED_ENDS.has(reason)
+  ): void {
     if (entry.done) return
     entry.done = true
     // Only this entry's own place: the id is never shared, but a map entry must never be taken for another's.
@@ -1159,7 +1177,7 @@ export class EditorTunnels implements SessionTunnelPort {
     }
     entry.pipe?.stop()
     // The endpoint's connection ends first, so a forced end stops the device's programs before anything else runs.
-    entry.served?.end(FORCED_ENDS.has(reason))
+    entry.served?.end(forced)
     entry.local?.destroy()
     // The caller's stream just ends; why is in `closed`. (An error event nobody listens for would crash the process.)
     entry.user?.destroy()

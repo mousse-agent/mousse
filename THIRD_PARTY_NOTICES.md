@@ -106,7 +106,7 @@ terms (`node_modules/@cursor/sdk/LICENSE.md`). Mousse loads them only in its Cur
 
 ## ssh2 (the SSH endpoint)
 
-Mousse answers an editor's SSH connection itself (`src/mms/net/editor/endpoint/`), using `ssh2` 1.17.0 in server mode. It ships unmodified, pinned to that exact version, and Mousse builds none of its optional native add-ons (`cpu-features`, `buildcheck`, `nan` and the `sshcrypto` binding): `ssh2` falls back to Node's own crypto without them.
+Mousse answers an editor's SSH connection itself (`src/mms/net/editor/endpoint/`), using `ssh2` 1.17.0 in server mode. It ships unmodified, pinned to that exact version, and Mousse ships none of its optional native add-ons (`cpu-features`, `buildcheck`, `nan` and the `sshcrypto` binding): the packaging excludes them, and `ssh2` falls back to Node's own crypto without them. `ssh2` has an install script that would build `sshcrypto` wherever a compiler is found; this repository allows install scripts only for `node-pty` (`allowScripts` in `package.json`), so it does not run here, and a built copy would be left out of the package by the exclusions in any case.
 
 | Package | Licence | Copyright |
 | --- | --- | --- |

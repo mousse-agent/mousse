@@ -215,7 +215,10 @@
       "!**/node_modules/node-pty/**/*.test.js",
       "!**/node_modules/cpu-features/**",
       "!**/node_modules/buildcheck/**",
-      "!**/node_modules/nan/**"
+      "!**/node_modules/nan/**",
+      "!**/node_modules/ssh2/lib/protocol/crypto/build/**",
+      "!**/node_modules/ssh2/lib/protocol/crypto/src/**",
+      "!**/node_modules/ssh2/lib/protocol/crypto/binding.gyp"
     ],
     "asarUnpack": [
       "out/net-native/**",

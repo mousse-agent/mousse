@@ -54,6 +54,11 @@ export interface EditorEndpointPort {
   serve(stream: Duplex, node: NodeId): EndpointConnection
   /** Stops everything started for `node`, whether or not a connection of it is open. */
   killDevice(node: NodeId): Promise<void>
-  /** The devices that have a connection open or a program running here. */
-  devices(): NodeId[]
+  /**
+   * Stops every program of every device that is not in `allowed`, found by the marker the programs carry (not by any
+   * list of devices kept here), and so also those of a device that was revoked and of an earlier run of the daemon.
+   * Never stops the daemon's own tree. Resolves with how many processes were signalled; does nothing, and says so
+   * with 0, when the marker keys cannot be read.
+   */
+  sweep(allowed: readonly NodeId[]): Promise<number>
 }
