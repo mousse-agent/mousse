@@ -133,6 +133,10 @@ export const UserMessage = memo(function UserMessage({
 
   if (!text && images.length === 0 && files.length === 0 && references.length === 0) return null;
 
+  // A turn sent from another of the user's computers says which one.
+  const sentFromName = (message.metadata as { sentFrom?: { name?: unknown } } | undefined)?.sentFrom?.name;
+  const sentFrom = typeof sentFromName === "string" && sentFromName ? sentFromName : undefined;
+
   const lightboxImages = images.map((url, i) => ({
     id: `${message.id}-img-${i}`,
     url,
@@ -201,6 +205,11 @@ export const UserMessage = memo(function UserMessage({
         </p>
       )}
       </div>
+      {sentFrom && (
+        <span className="chat-user-sent-from" title={`Sent from ${sentFrom}`}>
+          from {sentFrom}
+        </span>
+      )}
     </div>
   );
 });

@@ -169,7 +169,7 @@ import {
 } from '../../shared/permissionMode'
 import { describeApprovalRefusal, startedByPerson, type Answerer } from '../run/approvalRights'
 import { describeApproval, formatApprovalDecisions } from '../run/approvalNote'
-import { agentNoteOf, type ApprovalRecord, type ContinuationDue } from '../run/ThreadApprovals'
+import { agentNoteOf, type ApprovalRecord, type ApprovalRule, type ContinuationDue } from '../run/ThreadApprovals'
 import { allowsOrchestrationActions, buildModeChangeNotice, chatModeEquals, getChatModeLabel, getLastUserChatMode, normalizeChatMode } from '../../shared/chatMode'
 import { AgentRegistry } from '../agents/AgentRegistry'
 import { TaskQueue } from '../tasks/TaskQueue'
@@ -586,6 +586,19 @@ function putsAheadOfOthers(items: QueuedMessage[], orderedIds: readonly string[]
     if (nowAhead.some((id) => !wasAhead.has(id))) return true
   }
   return false
+}
+
+/** A standing rule as the windows show it, `active` when the thread's mode (`mode`) is not stricter than the one it was granted under. */
+function approvalRuleInfo(rule: ApprovalRule, mode: PermissionMode): ApprovalRuleInfo {
+  return {
+    id: rule.fingerprint,
+    permissionKey: rule.permissionKey,
+    action: rule.action,
+    summary: rule.summary,
+    grantedUnder: rule.grantedUnder,
+    active: !isStricter(mode, rule.grantedUnder),
+    createdAt: rule.createdAt
+  }
 }
 
 /** The stricter of two modes either of which may be absent; undefined when both are (no limit at all). */
@@ -4446,14 +4459,14 @@ export class OrchestratorService extends EventEmitter {
     const approvals = this.runEngine?.approvals
     if (!approvals) return []
     const mode = this.requestedPermissionMode(threadId)
-    return approvals.listRules(threadId).map((rule) => ({
-      id: rule.fingerprint,
-      permissionKey: rule.permissionKey,
-      action: rule.action,
-      summary: rule.summary,
-      grantedUnder: rule.grantedUnder,
-      active: !isStricter(mode, rule.grantedUnder),
-      createdAt: rule.createdAt
+    return approvals.listRules(threadId).map((rule) => approvalRuleInfo(rule, mode))
+  }
+
+  /** The "Always for this thread" rules that a person on the computer `node` made, in every thread. */
+  listApprovalRulesMadeBy(node: string): Array<{ threadId: string; rule: ApprovalRuleInfo }> {
+    return (this.runEngine?.approvals.listRulesMadeBy(node) ?? []).map((rule) => ({
+      threadId: rule.threadId,
+      rule: approvalRuleInfo(rule, this.requestedPermissionMode(rule.threadId))
     }))
   }
 
@@ -4463,9 +4476,9 @@ export class OrchestratorService extends EventEmitter {
     return { removed: approvals ? approvals.revokeRules(threadId, ruleId) : 0 }
   }
 
-  /** Revokes every "Always for this thread" rule that a person on the computer `node` made. */
-  clearApprovalRulesMadeBy(node: string): number {
-    return this.runEngine?.approvals.revokeRulesMadeBy(node) ?? 0
+  /** Revokes every "Always for this thread" rule that a person on the computer `node` made, or only the one named by `only`. */
+  clearApprovalRulesMadeBy(node: string, only?: { threadId: string; ruleId: string }): number {
+    return this.runEngine?.approvals.revokeRulesMadeBy(node, only ? { threadId: only.threadId, fingerprint: only.ruleId } : undefined) ?? 0
   }
 
   /**

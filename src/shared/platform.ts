@@ -7,6 +7,7 @@ import type { BrowserAccessMethod } from './browser/access'
 import type { ChatNetworkMethod } from './chatsNetwork'
 import type { NetLocalMethod } from './net/local'
 import type { BridgeHubLocalMethod } from './bridge/types'
+import type { BridgeActivityMethod } from './bridge/deviceActivity'
 import type { SpacesLocalMethod } from './spaces/local'
 import type { BotsLocalMethod } from './bots/space/local'
 import type { BotsPersonalMethod } from './bots/personal/methods'
@@ -14,7 +15,7 @@ import type { SpaceArchiveMethod } from './spaces/archive'
 import type { SpeechHostMethod } from './speechRelay'
 
 export type PlatformRequestMethod = ChatMethod | ChatResourceMethod | WorkflowRunMethod | BrowserGuiMethod | BrowserSetupMethod | BrowserAccessMethod
-  | ChatNetworkMethod | NetLocalMethod | BridgeHubLocalMethod | SpacesLocalMethod | BotsLocalMethod | SpaceArchiveMethod | SpeechHostMethod
+  | ChatNetworkMethod | NetLocalMethod | BridgeHubLocalMethod | BridgeActivityMethod | SpacesLocalMethod | BotsLocalMethod | SpaceArchiveMethod | SpeechHostMethod
   | BotsPersonalMethod
   | 'workflows.list' | 'workflows.get' | 'workflows.getRevision' | 'workflows.create'
   | 'workflows.saveDraft' | 'workflows.publish' | 'workflows.archive'

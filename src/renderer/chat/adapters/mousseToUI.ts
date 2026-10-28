@@ -332,7 +332,10 @@ function toolPart(msg: ChatMessage, toolCallId: string): Record<string, unknown>
   }
 }
 
-export function mousseToUIMessages(messages: ChatMessage[]): UIMessage[] {
+/** Who sent a turn: a person on another of the user's computers. Keyed by run id, which is the `turnId` of the turn's messages. */
+export type TurnSenders = Readonly<Record<string, { name: string }>>
+
+export function mousseToUIMessages(messages: ChatMessage[], senders?: TurnSenders): UIMessage[] {
   const out: UIMessage[] = []
   // Typed items: each item's parent, and the message a subagent's nested work belongs to.
   const parentOf = new Map<string, string | undefined>()
@@ -492,6 +495,9 @@ export function mousseToUIMessages(messages: ChatMessage[]): UIMessage[] {
     // A message that delivers subagent results carries them structured; the transcript renders
     // those, never the text, which stays what the model reads.
     if (msg.role === 'user' && msg.steered) base.metadata = { ...(base.metadata as object | undefined), steered: true }
+    // The turn a person on another of the user's computers sent says so (the sender is kept on the run, not on the message).
+    const sender = msg.role === 'user' && msg.turnId && !msg.steered ? senders?.[msg.turnId] : undefined
+    if (sender) base.metadata = { ...(base.metadata as object | undefined), sentFrom: { name: sender.name } }
     const subagentNotice = msg.role === 'user' && msg.subagentNotice?.length ? msg.subagentNotice : undefined
     if (subagentNotice) base.metadata = { ...(base.metadata as object | undefined), subagentNotice }
     if (msg.role === 'assistant' && msg.scheduledRun) base.metadata = { ...(base.metadata as object | undefined), scheduledRun: msg.scheduledRun }
