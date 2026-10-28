@@ -30,6 +30,8 @@ export interface AttachedThreadsOptions {
   computer(node: NodeId): ComputerRef
   /** Progress of a Git action, from the channel stream of `node`. */
   onGit(node: NodeId, data: unknown): void
+  /** The thread's own row changed on its computer (a rename, a pin...): the merged lists take it at once. */
+  onMetadata?(node: NodeId, thread: Json): void
   idleMs?: number
   maxPerComputer?: number
   maxTotal?: number
@@ -405,8 +407,10 @@ export class AttachedThreads {
       case 'workspace.updated':
       case 'thread.title-generation-failed':
         return [{ type, data: qualified(type, isRecord(data) ? { threadId: owner, ...data } : data) }]
-      // The thread's row is part of the merged lists, which the lists stream feeds.
+      // The thread's row is a row of the merged lists: it is updated there, and windows hear it as `threads.updated`.
       case 'thread.metadata':
+        if (isRecord(data) && isRecord(data.thread)) this.options.onMetadata?.(attachment.node, data.thread)
+        return []
       default:
         return []
     }

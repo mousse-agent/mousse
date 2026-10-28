@@ -9,7 +9,7 @@ import {
   unqualifyRoutedParams,
   type QualifyContext
 } from '../../../shared/bridge/routedIds'
-import type { NodeId } from '../../../shared/net'
+import type { NodeDelegation, NodeId, Roster } from '../../../shared/net'
 import { isId } from '../../../shared/net'
 import { parseQualifiedId, qualifyId } from '../../../shared/threadRef'
 import type { MmsProfileServices } from '../../MmsProfileServices'
@@ -17,8 +17,9 @@ import type { NetService } from '../../net/NetService'
 import { DomainRpcError } from '../../protocol/domainRegistry'
 import type { HandlerContext } from '../../protocol/handlers'
 import type { ThreadRouterPort } from '../../protocol/threadRouterPort'
-import { visibleThreadsFor } from '../../protocol/threadVisibility'
+import { listedProjectsFor, listedThreadsFor } from '../../protocol/threadVisibility'
 import type { BridgeHub } from '../hub'
+import type { MergedLists } from './mergedLists'
 import {
   mixedComputers,
   notAvailableRemotely,
@@ -59,6 +60,8 @@ const GIT_PROGRESS = new Set([
   'git.renameBranch',
   'git.deleteBranch'
 ])
+/** Methods a person uses to send a message: the thread they are sent in moves to the front. */
+const SENDS = new Set(['orchestrator.send', 'queue.enqueue'])
 /** Methods whose request id the caller supplies, so a retry of the same request reaches the same execution. */
 const REQUEST_ID_IS_IDEM = new Set(['orchestrator.send', 'queue.enqueue'])
 
@@ -123,6 +126,7 @@ export class ThreadRouter implements ThreadRouterPort {
       maxPerComputer: options.maxPerComputer,
       maxTotal: options.maxTotal,
       onGit: (node, data) => this.gitProgress(data),
+      onMetadata: (node, thread) => this.lists?.applyMetadata(node, thread),
       computer: (node) => this.computer(node)
     })
     this.terminals = new AttachedTerminals({ services, hub: options.hub, client: this.client })
@@ -141,6 +145,50 @@ export class ThreadRouter implements ThreadRouterPort {
 
   computer(node: NodeId): ComputerRef {
     return { node, name: this.nameOf(node) }
+  }
+
+  /** The merged lists of the other computers, told what a person does here (opens, sends). */
+  setLists(lists: Pick<MergedLists, 'noteOpened' | 'noteSent' | 'applyMetadata'> | undefined): void {
+    this.lists = lists
+  }
+  private lists?: Pick<MergedLists, 'noteOpened' | 'noteSent' | 'applyMetadata'>
+
+  /** The other computers of the user: every device in the roster but this one that has not been revoked. */
+  pairedComputers(): ComputerRef[] {
+    try {
+      const identity = this.options.net.runtime().identity
+      const self = identity.self()
+      const root = self && identity.pinnedRootKey(self.user)
+      const signed = self && identity.roster(self.user)
+      if (!self || !root || !signed) return []
+      const roster = identity.verifySigned<Roster>(signed, root)
+      const latest = new Map<string, NodeDelegation>()
+      for (const row of roster.nodes) {
+        const found = identity.verifySigned<NodeDelegation>(row, root)
+        const known = latest.get(found.subject)
+        if (!known || found.keyEpoch > known.keyEpoch || (found.keyEpoch === known.keyEpoch && found.issuedAt > known.issuedAt))
+          latest.set(found.subject, found)
+      }
+      return [...latest.values()]
+        .filter(
+          (found) =>
+            found.subject !== self.node &&
+            !roster.revoked.some((row) => row.subject === found.subject && row.throughKeyEpoch >= found.keyEpoch)
+        )
+        .map((found) => ({ node: found.subject as NodeId, name: found.name || 'the other computer' }))
+    } catch {
+      return []
+    }
+  }
+
+  /** Whether a session with `node` is open. */
+  isOnline(node: NodeId): boolean {
+    try {
+      this.options.net.session(node)
+      return true
+    } catch {
+      return false
+    }
   }
 
   private nameOf(node: NodeId): string {
@@ -164,8 +212,12 @@ export class ThreadRouter implements ThreadRouterPort {
     method: string,
     params: unknown
   ): Promise<{ result: unknown } | undefined> {
-    // `threads.focus` is the router's own method: the handler calls `focus` below.
+    // `threads.focus` is the router's own method: the handler calls `focus` below. Reordering is an overlay
+    // this computer keeps for itself: the handler places the rows of other computers among its own.
     if (method === 'threads.focus' || !this.enabled() || !isRecord(params)) return undefined
+    // A CLI that names a qualified id is still refused below; a window's drag is the handler's to place.
+    if ((method === 'threads.reorder' || method === 'projects.reorder') && ctx.connection?.clientType === 'gui')
+      return undefined
     const row = ROUTED_METHODS[method]
     const split = unqualifyRoutedParams(params)
     const target = this.targetNode(row, params)
@@ -225,6 +277,8 @@ export class ThreadRouter implements ThreadRouterPort {
     }
     progress?.end()
     if (method.startsWith('pty.')) this.readTerminals(node, method, owner, raw)
+    // A person's send from here moves the thread to the front of its group, as it does on its own computer.
+    if (SENDS.has(method) && typeof params.threadId === 'string') this.lists?.noteSent(params.threadId)
     let result = qualifyRoutedResult(method, raw, context)
     if (isRecord(result)) result = this.withLocalLists(ctx, method, result)
     return { result }
@@ -309,11 +363,8 @@ export class ThreadRouter implements ThreadRouterPort {
   ): Record<string, unknown> {
     const { services } = this.options
     const out = { ...result }
-    if (RESULT_WITH_THREADS.has(method)) {
-      const all = services.threads.listAllThreads()
-      out.threads = visibleThreadsFor(ctx.connection, all, all)
-    }
-    if (RESULT_WITH_PROJECTS.has(method)) out.projects = services.projects.listProjects()
+    if (RESULT_WITH_THREADS.has(method)) out.threads = listedThreadsFor(ctx, services.threads.listAllThreads())
+    if (RESULT_WITH_PROJECTS.has(method)) out.projects = listedProjectsFor(ctx, services.projects.listProjects())
     return out
   }
 
@@ -399,6 +450,8 @@ export class ThreadRouter implements ThreadRouterPort {
         lifetime.addEventListener('abort', () => this.attached.dropLeases(lease), { once: true })
       }
     }
+    // A thread opened here notifies for the next seven days.
+    this.lists?.noteOpened(threadId)
     await this.attached.focus(lease, ref.node as NodeId, ref.id)
     return { routed: true, focused: true }
   }

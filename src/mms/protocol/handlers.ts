@@ -32,7 +32,7 @@ import { relinked, sameLinkedPullRequest, type GitPullRequestInfo, type PullRequ
 import { PULL_REQUEST_EXISTS, PullRequestReadError } from '../git/GitHubCodeHost'
 import { PullRequestThreadError, PullRequestThreadService } from '../git/PullRequestThreadService'
 import { PullRequestWatchError } from '../git/PullRequestWatchService'
-import type { ChatMessage, FileGrepResponse, FileSearchResponse, GitOperationKind, GitOperationOptions, GitPullStrategy, GitStatusSnapshot, NativeLlmContext, OrchestratorSendInput, OrchestratorSendRequest, ScheduledSettings, Thread } from '../../shared/types'
+import type { ChatMessage, FileGrepResponse, FileSearchResponse, GitOperationKind, GitOperationOptions, GitPullStrategy, GitStatusSnapshot, NativeLlmContext, OrchestratorSendInput, OrchestratorSendRequest, ScheduledSettings, Thread, ThreadSearchResult } from '../../shared/types'
 import { AGENT_JOB_LIMIT_RANGES, AGENT_JOB_LIMIT_SETTINGS, type AgentJobLimitKey } from '../../shared/agentJobLimits'
 import type { MousseConfigStore } from '../config/MousseConfigStore'
 import type { ScheduledConfigSection } from '../config/types'
@@ -87,7 +87,8 @@ import { PROTOCOL_CAPABILITIES, PROTOCOL_METHODS, MMS_PROTOCOL_VERSION } from '.
 import { imageAt, messagesBefore, withoutImageBytes } from './transcriptPaging'
 import { ROUTED_MESSAGES_PAGE_BYTES } from '../../shared/bridge/routed'
 import { buildSubagentView } from '../run/delegation/subagentView'
-import { visibleThreadsFor } from './threadVisibility'
+import { listedProjectsFor, listedThreadsFor } from './threadVisibility'
+import { isQualifiedId } from '../../shared/threadRef'
 import { resolveThreadProjectPath } from '../data/resolveActiveProjectPath'
 import { ThreadJournal } from '../data/ThreadJournal'
 import { ThreadWorkspaceManager } from '../workspace/ThreadWorkspaceManager'
@@ -1014,6 +1015,17 @@ function asPlanToken(value: unknown): StorageCleanupPlanToken {
   return { issuedAt: time(raw.issuedAt, 'time'), expiresAt: time(raw.expiresAt, 'expiry'), policyDigest: asString(raw.policyDigest, 'policyDigest', 128), keys: raw.keys as string[] }
 }
 
+/**
+ * The matches of this computer and of the others in one list: thread matches, then project matches, then
+ * message matches, this computer's first within each kind, cut to `limit`.
+ */
+function mergeSearchResults(local: ThreadSearchResult[], remote: ThreadSearchResult[], limit: number): ThreadSearchResult[] {
+  const out: ThreadSearchResult[] = []
+  for (const kind of ['thread', 'project', 'message'] as const)
+    for (const result of [...local, ...remote]) if (result.matchType === kind) out.push(result)
+  return out.slice(0, limit)
+}
+
 function lifecycleExpectedGeneration(params: Record<string, unknown>): number | undefined {
   const value = params.expectedGeneration
   if (value === undefined) return undefined
@@ -1169,7 +1181,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         methods: [...PROTOCOL_METHODS, ...(ctx.mms.domains?.methods() ?? [])]
       }
     case 'projects.list':
-      return { projects: ctx.mms.projects.listProjects() }
+      return { projects: listedProjectsFor(ctx, ctx.mms.projects.listProjects()) }
     case 'chatReferences.resolve': {
       const p = isObject(params) ? params : {}
       const candidate = parseChatReference(p.reference)
@@ -1189,7 +1201,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const project = ctx.mms.projects.openProject(path)
       const projects = ctx.mms.projects.listProjects()
       ctx.emitEvent?.('projects.updated', { projects })
-      return { project, projects }
+      return { project, projects: listedProjectsFor(ctx, projects) }
     }
     case 'projects.identity': {
       // The repository identity of one project, for matching it with a project on another
@@ -1208,7 +1220,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       ctx.mms.projects.removeProject(projectId)
       const projects = ctx.mms.projects.listProjects()
       ctx.emitEvent?.('projects.updated', { projects })
-      return { projects }
+      return { projects: listedProjectsFor(ctx, projects) }
     }
     case 'projects.rename': {
       const p = isObject(params) ? params : {}
@@ -1217,7 +1229,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const project = ctx.mms.projects.renameProject(projectId, name)
       const projects = ctx.mms.projects.listProjects()
       ctx.emitEvent?.('projects.updated', { projects })
-      return { project, projects }
+      return { project, projects: listedProjectsFor(ctx, projects) }
     }
     case 'projects.pin': {
       const p = isObject(params) ? params : {}
@@ -1226,7 +1238,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const project = ctx.mms.projects.setProjectPinned(projectId, pinned)
       const projects = ctx.mms.projects.listProjects()
       ctx.emitEvent?.('projects.updated', { projects })
-      return { project, projects }
+      return { project, projects: listedProjectsFor(ctx, projects) }
     }
     case 'projects.trustGitSettings': {
       const p = isObject(params) ? params : {}
@@ -1235,17 +1247,22 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     }
     case 'projects.reorder': {
       const p = isObject(params) ? params : {}
-      const projectIds = asStringArray(p.projectIds, 'projectIds', { unique: true })
+      // A window sends the whole list, the other computers' projects included; those follow this
+      // computer's own and are not reordered here.
+      const projectIds = asStringArray(p.projectIds, 'projectIds', { unique: true }).filter(
+        (id) => ctx.connection?.clientType !== 'gui' || !isQualifiedId(id)
+      )
       const projects = ctx.mms.projects.reorderProjects(projectIds)
       ctx.emitEvent?.('projects.updated', { projects })
-      return { projects }
+      return { projects: listedProjectsFor(ctx, projects) }
     }
     case 'threads.list': {
       const p = isObject(params) ? params : {}
       const projectId = asOptionalString(p.projectId)
       const inventory = ctx.mms.threads.listAllThreads()
       const threads = projectId ? ctx.mms.threads.listThreads(projectId) : inventory
-      return { threads: visibleThreadsFor(ctx.connection, threads, inventory) }
+      // One project's list gets only the rows of other computers that belong to that project.
+      return { threads: listedThreadsFor(ctx, threads, inventory, projectId ? { projectId } : undefined) }
     }
     case 'threads.get': {
       const p = isObject(params) ? params : {}
@@ -1267,7 +1284,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       if (lastUsed) {
         thread = ctx.mms.threads.updateThreadMeta(thread.id, { modelOverride: lastUsed })
       }
-      const threads = visibleThreadsFor(ctx.connection, ctx.mms.threads.listAllThreads())
+      const threads = listedThreadsFor(ctx, ctx.mms.threads.listAllThreads())
       return { thread, threads }
     }
     case 'threads.delete': {
@@ -1278,7 +1295,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const operationResult = ctx.mms.lifecycle.getOperationResult(threadId, operationId)
       const threads = ctx.mms.threads.listAllThreads()
       ctx.emitEvent?.('threads.updated', { threads })
-      return { threads: visibleThreadsFor(ctx.connection, threads), lifecycle, operationResult }
+      return { threads: listedThreadsFor(ctx, threads), lifecycle, operationResult }
     }
     case 'threads.rename': {
       const p = isObject(params) ? params : {}
@@ -1287,7 +1304,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const thread = ctx.mms.threads.updateThreadMeta(threadId, { name })
       const threads = ctx.mms.threads.listAllThreads()
       ctx.emitEvent?.('threads.updated', { threads })
-      return { thread, threads: visibleThreadsFor(ctx.connection, threads) }
+      return { thread, threads: listedThreadsFor(ctx, threads) }
     }
     case 'threads.pin': {
       const p = isObject(params) ? params : {}
@@ -1296,7 +1313,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const thread = ctx.mms.threads.setThreadPinned(threadId, pinned)
       const threads = ctx.mms.threads.listAllThreads()
       ctx.emitEvent?.('threads.updated', { threads })
-      return { thread, threads: visibleThreadsFor(ctx.connection, threads) }
+      return { thread, threads: listedThreadsFor(ctx, threads) }
     }
     case 'threads.settle': {
       const p = isObject(params) ? params : {}
@@ -1313,16 +1330,25 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       }
       const threads = ctx.mms.threads.listAllThreads()
       ctx.emitEvent?.('threads.updated', { threads })
-      return { thread, threads: visibleThreadsFor(ctx.connection, threads) }
+      return { thread, threads: listedThreadsFor(ctx, threads) }
     }
     case 'threads.reorder': {
       const p = isObject(params) ? params : {}
       const projectId = asOptionalString(p.projectId, 256)
-      const threadIds = asStringArray(p.threadIds, 'threadIds', { unique: true })
-      const threads = ctx.mms.threads.reorderThreads(projectId, threadIds)
+      const given = asStringArray(p.threadIds, 'threadIds', { unique: true })
+      // A window sends the whole group in the order it was left, with the rows of other computers among
+      // them. This computer's own rows are reordered here, and the others take places that keep that order.
+      const merged = ctx.connection?.clientType === 'gui' ? ctx.mms.remoteLists : undefined
+      const threadIds = merged ? given.filter((id) => !isQualifiedId(id)) : given
+      const reorderedHere = !(merged && (isQualifiedId(projectId) || !threadIds.length))
+      const threads = reorderedHere ? ctx.mms.threads.reorderThreads(projectId, threadIds) : []
+      merged?.reorder(given)
       const all = ctx.mms.threads.listAllThreads()
       ctx.emitEvent?.('threads.updated', { threads: all })
-      return { threads: visibleThreadsFor(ctx.connection, threads, all), all: visibleThreadsFor(ctx.connection, all) }
+      return {
+        threads: listedThreadsFor(ctx, threads, all, { projectId: projectId ?? null }),
+        all: listedThreadsFor(ctx, all)
+      }
     }
     case 'threads.search': {
       const p = isObject(params) ? params : {}
@@ -1333,7 +1359,17 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
           : 50
       // Search hides subagents for every client, the desktop app included: a subagent is reached
       // through its parent's Lineage, not as a result of its own.
-      return { results: ctx.mms.threads.searchThreads(query, limit, { hideSubagents: true }) }
+      const results = ctx.mms.threads.searchThreads(query, limit, { hideSubagents: true })
+      // A window also searches the user's other computers (each with a short deadline) and is told which it could not.
+      const remote =
+        ctx.connection?.clientType === 'gui' && ctx.mms.remoteLists
+          ? await ctx.mms.remoteLists.search(ctx.connection.id, query, limit)
+          : undefined
+      if (!remote) return { results }
+      return {
+        results: mergeSearchResults(results, remote.results, limit),
+        ...(remote.skipped.length ? { skipped: remote.skipped } : {})
+      }
     }
     case 'thread.snapshot': {
       const p = isObject(params) ? params : {}
@@ -1409,7 +1445,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const thread = ctx.mms.threads.updateThreadMeta(threadId, { name: title })
       const threads = ctx.mms.threads.listAllThreads()
       ctx.emitEvent?.('threads.updated', { threads })
-      return { thread, threads: visibleThreadsFor(ctx.connection, threads) }
+      return { thread, threads: listedThreadsFor(ctx, threads) }
     }
     case 'threads.setModel': {
       const p = isObject(params) ? params : {}
@@ -1442,7 +1478,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const thread = ctx.mms.threads.getThread(threadId)
       const threads = ctx.mms.threads.listAllThreads()
       ctx.emitEvent?.('threads.updated', { threads })
-      return { thread, modelOverride: next, threads: visibleThreadsFor(ctx.connection, threads) }
+      return { thread, modelOverride: next, threads: listedThreadsFor(ctx, threads) }
     }
     case 'threads.setWorktreeEnabled': {
       const p = isObject(params) ? params : {}
@@ -1457,7 +1493,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const thread = ctx.mms.threads.setThreadWorktreeEnabled(threadId, enabled)
       const threads = ctx.mms.threads.listAllThreads()
       ctx.emitEvent?.('threads.updated', { threads })
-      return { thread, threads: visibleThreadsFor(ctx.connection, threads) }
+      return { thread, threads: listedThreadsFor(ctx, threads) }
     }
     case 'threads.setPermissionMode': {
       const p = isObject(params) ? params : {}
@@ -1471,7 +1507,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const thread = ctx.mms.orchestrator.setThreadPermissionMode(threadId, mode, caller ? { node: caller.node, maxPermissionMode: caller.maxPermissionMode } : undefined)
       const threads = ctx.mms.threads.listAllThreads()
       ctx.emitEvent?.('threads.updated', { threads })
-      return { thread, threads: visibleThreadsFor(ctx.connection, threads) }
+      return { thread, threads: listedThreadsFor(ctx, threads) }
     }
     case 'threads.approvalRules': {
       // The thread's "Always for this thread" rules (SPEC §17.8). Not exposed on the Bridge.
@@ -2079,7 +2115,10 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       }
     }
     case 'activity.snapshot': {
-      return { activity: ctx.mms.threadRuntimes.getActivitySnapshot() }
+      const activity = ctx.mms.threadRuntimes.getActivitySnapshot()
+      // A window also gets what the threads of the other computers are doing.
+      const remote = ctx.connection?.clientType === 'gui' ? ctx.mms.remoteLists?.activity() : undefined
+      return { activity: remote ? { ...activity, ...remote } : activity }
     }
     case 'stats.usage':
       return ctx.mms.lineEditStats.getUsageSnapshot()
@@ -3445,7 +3484,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const thread = writeThreadLink(ctx, threadId, threadPullRequestLinkFromDetail(detail), true)
       const threads = ctx.mms.threads.listAllThreads()
       ctx.emitEvent?.('threads.updated', { threads })
-      return { thread, threads: visibleThreadsFor(ctx.connection, threads) }
+      return { thread, threads: listedThreadsFor(ctx, threads) }
     }
     case 'pullRequests.list': {
       const p = isObject(params) ? params : {}
@@ -3487,7 +3526,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
           allowClosed: asOptionalBoolean(p.allowClosed, 'allowClosed') === true,
           allowDuplicate: asOptionalBoolean(p.allowDuplicate, 'allowDuplicate') === true
         }))
-        return { ...started, threads: visibleThreadsFor(ctx.connection, ctx.mms.threads.listAllThreads()) }
+        return { ...started, threads: listedThreadsFor(ctx, ctx.mms.threads.listAllThreads()) }
       } finally {
         // Also after a failure: a thread made and removed, or kept in the trash, must not linger in a client's list.
         ctx.emitEvent?.('threads.updated', { threads: ctx.mms.threads.listAllThreads() })
@@ -3512,7 +3551,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       ctx.mms.pullRequestWatch.onEnded(threadId, 'unlinked')
       const threads = ctx.mms.threads.listAllThreads()
       ctx.emitEvent?.('threads.updated', { threads })
-      return { thread, threads: visibleThreadsFor(ctx.connection, threads) }
+      return { thread, threads: listedThreadsFor(ctx, threads) }
     }
     case 'pullRequests.watch': {
       // Turns a thread's watch of its pull request off, to notify (a line in the thread) or to act (also wakes the agent).
@@ -3539,7 +3578,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       }
       const threads = ctx.mms.threads.listAllThreads()
       ctx.emitEvent?.('threads.updated', { threads })
-      return { status, thread: ctx.mms.threads.getThread(threadId), threads: visibleThreadsFor(ctx.connection, threads) }
+      return { status, thread: ctx.mms.threads.getThread(threadId), threads: listedThreadsFor(ctx, threads) }
     }
     case 'pullRequests.watchStatus': {
       const p = isObject(params) ? params : {}
@@ -3567,7 +3606,19 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
             if (meta.id === record.taskId && typeof meta.name === 'string' && meta.name.trim()) taskNames[record.taskId] = meta.name
           } catch { /* Missing/invalid metadata remains identified by the stable task ID. */ }
         }
-        return { lifecycles, taskNames, migrationDiagnostics, trashPolicy: ctx.mms.lifecycle.cleanup.policy(), trashSweepStatus: ctx.mms.lifecycle.cleanup.sweepStatus() }
+        // A window also lists what is in the trash of the user's other computers (each with a short deadline).
+        const remote =
+          ctx.connection?.clientType === 'gui' && ctx.mms.remoteLists
+            ? await ctx.mms.remoteLists.inventory(ctx.connection.id)
+            : undefined
+        return {
+          lifecycles: remote ? [...lifecycles, ...remote.lifecycles] : lifecycles,
+          taskNames: remote ? { ...taskNames, ...remote.taskNames } : taskNames,
+          migrationDiagnostics,
+          trashPolicy: ctx.mms.lifecycle.cleanup.policy(),
+          trashSweepStatus: ctx.mms.lifecycle.cleanup.sweepStatus(),
+          ...(remote?.skipped.length ? { skipped: remote.skipped } : {})
+        }
       }
       const threadId = asString(p.threadId, 'threadId', 256)
       if (!store.get(threadId)) {

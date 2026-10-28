@@ -16,6 +16,7 @@ import { cleanupStaleUnixSocket, resolveLocalEndpoint, unlinkUnixSocketIfExists 
 import { dispatchMethod } from './handlers'
 import { isQualifiedId } from '../../shared/threadRef'
 import { projectEventFor } from './threadVisibility'
+import type { RemoteListsPort } from './remoteListsPort'
 import { parseEnvelope, validateHello, validateRequest, asAfterSequence, isObject } from './validators'
 import {
   MMS_PROTOCOL_CHUNK_CAPABILITY,
@@ -124,6 +125,7 @@ export class MmsProtocolServer {
   private readonly audienceRings = new Map<string, EventSequenceRing>()
   private readonly ring = new EventSequenceRing()
   private readonly profileEventDisposers = new Map<string, Array<() => void>>()
+  private readonly servicesByProfile = new Map<string, MmsProfileServices>()
   private profileLifecycleUnsubscribe: (() => void) | null = null
   private accepting = false
   private endpointPath: string | null = null
@@ -329,6 +331,11 @@ export class MmsProtocolServer {
     if (this.profileEventDisposers.has(services.profileId)) return
     const disposers: Array<() => void> = []
     this.profileEventDisposers.set(services.profileId, disposers)
+    // The merged lists of the other computers are added to a window's events as they are delivered.
+    this.servicesByProfile.set(services.profileId, services)
+    disposers.push(() => {
+      if (this.servicesByProfile.get(services.profileId) === services) this.servicesByProfile.delete(services.profileId)
+    })
     const emitToSubscribers = (event: ProtocolEvent): void => {
       this.emitToSubscribers(event, services.profileId)
     }
@@ -1137,7 +1144,7 @@ export class MmsProtocolServer {
     for (const stored of replay.events) {
       if (session.clientType !== 'gui' && isQualifiedId(stored.threadId)) continue
       // Project for this client first, so the budget counts what is actually sent.
-      const event = projectEventFor(session.clientType, stored)
+      const event = projectEventFor(session.clientType, stored, this.remoteListsFor(session))
       replayBytes += Buffer.byteLength(JSON.stringify(event), 'utf8') + (result.replay.length ? 1 : 0)
       if (replayBytes > replayBudget) {
         result.gap = true
@@ -1222,7 +1229,7 @@ export class MmsProtocolServer {
       if (!this.clientAcceptsEvent(client, event)) continue
       // The ring holds the complete thread list; each client gets its own projection of it,
       // whether the event is sent now or held for the end of a subscribe handshake.
-      const projected = projectEventFor(client.clientType, event)
+      const projected = projectEventFor(client.clientType, event, this.remoteListsFor(client))
       if (client.subscribeState === 'buffering') {
         client.eventBuffer.push(projected)
         continue
@@ -1230,6 +1237,13 @@ export class MmsProtocolServer {
       if (client.subscribeState !== 'active') continue
       this.deliverEventToClient(client, projected)
     }
+  }
+
+  /** The merged lists of other computers for the profile a client is bound to; only windows are given them. */
+  private remoteListsFor(session: ClientSession): RemoteListsPort | undefined {
+    if (session.clientType !== 'gui') return undefined
+    const profileId = session.binding?.profileId ?? this.opts.mms.profileId
+    return this.servicesByProfile.get(profileId)?.remoteLists
   }
 
   private clientAcceptsEvent(session: ClientSession, event: ProtocolEvent): boolean {

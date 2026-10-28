@@ -219,9 +219,11 @@ describe('version skew, leases and ids', () => {
     expect(
       await t.refused(t.dispatch('threads.reorder', { orderedIds: [id] }, t.connection('c', 'cli')))
     ).toMatchObject({ code: 'forbidden' })
-    expect(
-      await t.refused(t.dispatch('threads.reorder', { threadIds: [id, 'plain'] }))
-    ).toMatchObject({ code: 'mixed_computers' })
+    // A window's drag holds rows of both computers: this computer's are reordered here and the others are placed
+    // among them, so it is not refused as mixed; an id that is no thread of this computer is refused as before.
+    await expect(t.dispatch('threads.reorder', { threadIds: [id, 'plain'] })).rejects.toThrow(
+      /every thread in its group/
+    )
   }, 60_000)
 
   it('names the references in a sent message the way the owner does, and back', () => {

@@ -28,6 +28,7 @@ import type { ThreadSourcePort } from './remote/ThreadStreamAdapter'
 import { DispatchService, mmsDispatchRuntime, type DispatchRuntime } from './dispatch'
 import { OwnerRoutes } from './routed/OwnerRoutes'
 import { ThreadRouter } from './routed/ThreadRouter'
+import { MergedLists } from './routed/mergedLists'
 import { PrivateSources, raiseStreamListenerLimits } from './routed/privateSources'
 import { RoutedStaging } from './routed/staging'
 import { routedStreamsPort } from './routed/streamsPort'
@@ -45,6 +46,8 @@ export class BridgeProfileService {
   readonly hub: BridgeHub
   /** Sends the actions of a thread on another of the user's computers to that computer (behind `netBridgeThreads`). */
   readonly router: ThreadRouter
+  /** The other computers' threads, projects and statuses as one list with this computer's (behind `netBridgeThreads`). */
+  readonly lists: MergedLists
   private readonly routerStop = new AbortController()
   readonly dispatch: DispatchService
   private readonly remote: RemoteApi
@@ -319,6 +322,25 @@ export class BridgeProfileService {
       if (services.threadRouter === this.router) services.threadRouter = undefined
       this.router.close()
     })
+    // The threads, projects and statuses of the other computers, merged into this computer's lists (behind the same flag).
+    this.lists = new MergedLists({
+      services,
+      hub: this.hub,
+      client: this.router.client,
+      store: rt.remoteLists,
+      self: () => rt.identity.self()?.node,
+      computers: () => this.router.pairedComputers(),
+      online: (node) => this.router.isOnline(node),
+      enabled: () => this.router.enabled(),
+      clock: this.clock
+    })
+    this.router.setLists(this.lists)
+    services.remoteLists = this.lists
+    this.lists.start()
+    this.disposers.add(() => {
+      if (services.remoteLists === this.lists) services.remoteLists = undefined
+      this.lists.close()
+    })
     this.artifacts = new BridgeArtifacts({
       db: rt.db,
       identity: rt.identity,
@@ -489,8 +511,19 @@ export class BridgeProfileService {
             this.hub
               .reconnect(node)
               .catch(() => undefined)
-              .then(() => this.router.nodeOnline(node))
+              .then(() => {
+                this.router.nodeOnline(node)
+                this.lists.nodeOnline(node)
+              })
           )
+        }
+      },
+      onSessionClosed: (session: SyncSession) => {
+        if (this.stopped) return
+        try {
+          this.lists.nodeOffline(session.peer.node)
+        } catch {
+          // The session never authenticated: it never listed anything.
         }
       },
       onActivated: () => {
@@ -543,6 +576,7 @@ export class BridgeProfileService {
     this.stopped = true
     // Calls waiting on another computer end, so the profile can drain.
     this.routerStop.abort()
+    this.lists.close()
     this.remote.close()
     this.options.services.speechRelay.close()
     this.hub.close()

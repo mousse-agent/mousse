@@ -47,6 +47,23 @@ describe('a thread in view', () => {
     ;(t.router.attached as unknown as { options: { idleMs?: number } }).options.idleMs = undefined
   }, 60_000)
 
+  it('turns the metadata of a thread in view into a change of its row in the merged lists', async () => {
+    const thread = t.thread('Before')
+    const id = t.qualified(thread.id)
+    await t.dispatch('threads.focus', { threadId: id })
+    const applied = vi.spyOn(t.caller.bridge.lists, 'applyMetadata')
+    const from = t.events.length
+    t.owner.threads.updateThreadMeta(thread.id, { name: 'After' })
+    await vi.waitFor(() => expect(applied).toHaveBeenCalledWith(t.node, expect.objectContaining({ id: thread.id, name: 'After' })), {
+      timeout: 10_000
+    })
+    await vi.waitFor(() => expect(t.caller.bridge.lists.threads().find((row) => row.id === id)?.name).toBe('After'), { timeout: 10_000 })
+    // Windows hear it as a change of the list.
+    const lists = t.events.slice(from).filter((event) => event.type === 'threads.updated')
+    expect(lists.length).toBeGreaterThan(0)
+    applied.mockRestore()
+  }, 60_000)
+
   it('brings the events in order with qualified ids, and the snapshot is the same transcript', async () => {
     const thread = t.thread('Events')
     const id = t.qualified(thread.id)
