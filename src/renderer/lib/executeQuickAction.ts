@@ -166,7 +166,7 @@ export async function executeBashInNewTerminal(action: QuickAction, profileId: s
       const alive = await window.mousse.pty.isAlive(tab.ptyId, tab.ownerThreadId ?? undefined).catch(() => false)
       requireActiveProfile(profileId)
       if (alive) {
-        await window.mousse.pty.write(tab.ptyId, `${command}\n`)
+        await window.mousse.pty.write(tab.ptyId, `${command}\n`, tab.ownerThreadId ?? undefined)
         requireActiveProfile(profileId)
         return
       }

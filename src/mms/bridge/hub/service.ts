@@ -66,8 +66,8 @@ interface DisplayListener {
 export interface HubAttachOptions {
   /** Opens the stream on the owner. Without it the thread's shared display stream is opened. */
   open?: () => Promise<{ descriptor: StreamDescriptor; head: { epoch: number; seq: number } }>
-  /** Which room a private attachment counts against: threads in view, or the channel for Git progress. */
-  room?: 'thread' | 'channel'
+  /** Which room a private attachment counts against: threads in view, the channel for Git progress, or a terminal's output. */
+  room?: 'thread' | 'channel' | 'terminal'
 }
 interface Attachment {
   ref: BridgeEntityRef
@@ -909,15 +909,15 @@ export class BridgeHub {
     }
     if (this.attaching.has(key)) return fail('conflict')
     this.detach(ref, options)
-    // Streams that read the shared display, the threads this computer reads, and its Git progress each have
-    // a room of their own.
+    // Streams that read the shared display, the threads this computer reads, its Git progress and its terminals'
+    // output each have a room of their own, so none crowds out the others.
     const roomOf = (other?: HubAttachOptions): string =>
-      other?.open ? (other.room === 'channel' ? 'channel' : 'thread') : 'shared'
+      other?.open ? (other.room === 'channel' || other.room === 'terminal' ? other.room : 'thread') : 'shared'
     const room = roomOf(options)
     const open = [...this.attachments.values()].filter((other) => roomOf(other.options) === room).length
     const pending = [...this.attachingRooms.values()].filter((other) => other === room).length
-    if (open + pending >= (room === 'shared' ? (this.options.maxStreams ?? 8) : room === 'channel' ? 8 : 32))
-      return fail('rate_limited')
+    const roomSize = room === 'shared' ? (this.options.maxStreams ?? 8) : room === 'channel' ? 8 : room === 'terminal' ? 16 : 32
+    if (open + pending >= roomSize) return fail('rate_limited')
     this.attaching.add(key)
     this.attachingRooms.set(key, room)
     try {

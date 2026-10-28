@@ -158,7 +158,7 @@ describe('opening a private stream', () => {
   }, 60_000)
 
   it('refuses what a stream does not take, a thread that is not here, and a terminal that is not allowed', async () => {
-    const { call, ok, thread, f, policy } = await routedOwner({ streams: true })
+    const { call, ok, thread, f, policy, routes } = await routedOwner({ streams: true })
     const t = thread()
     const other = thread('Other')
     // Exactly the keys a kind takes.
@@ -216,6 +216,13 @@ describe('opening a private stream', () => {
       threadId: t.id,
       sequence: 0
     })
+    // A terminal of this thread that another computer (or the owner's window) opened is not this device's to read.
+    expect(
+      await call('stream.open', { kind: 'terminal', threadId: t.id, ptyId: 'pty-1' })
+    ).toMatchObject({ ok: false, error: { code: 'pty_not_found' } })
+    const claim = routes.terminals.claim(f.callerNode, t.id, 'a')
+    claim.created('pty-1')
+    claim.finish()
     const opened = (await ok('stream.open', {
       kind: 'terminal',
       threadId: t.id,
@@ -687,9 +694,12 @@ describe('the channel and terminal streams', () => {
   }, 60_000)
 
   it('keeps a terminal’s output in order and whole, one record per chunk, never merged', async () => {
-    const { ok, thread, policy, f } = await routedOwner({ streams: true })
+    const { ok, thread, policy, f, routes } = await routedOwner({ streams: true })
     const t = thread()
     policy.set(f.callerNode, { terminal: true })
+    const claim = routes.terminals.claim(f.callerNode, t.id, 'a')
+    claim.created('pty-1')
+    claim.finish()
     vi.spyOn(f.mms.ptyManager, 'lookup').mockReturnValue({
       alive: true,
       ptyId: 'pty-1',

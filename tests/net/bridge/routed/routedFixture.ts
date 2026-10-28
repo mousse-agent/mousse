@@ -143,6 +143,13 @@ export interface RoutedOwnerOptions {
         isSubscribed?: (stream: StreamId, holder?: string) => boolean
       }
   clock?: Clock
+  /** What the owner's terminals are told about the devices: whether one is connected, its name, a first terminal. */
+  terminals?: {
+    connected?: (node: NodeId) => boolean
+    awayMs?: number
+    deviceName?: (node: NodeId) => string
+    onFirstTerminal?: (info: { node: NodeId; name: string; threadId: string }) => void
+  }
 }
 
 /**
@@ -201,6 +208,14 @@ export async function routedOwner(options: RoutedOwnerOptions = {}) {
     audit,
     clock,
     track: (work) => work,
+    ...(options.terminals
+      ? {
+          connected: options.terminals.connected,
+          deviceName: options.terminals.deviceName,
+          onFirstTerminal: options.terminals.onFirstTerminal,
+          terminalAwayMs: options.terminals.awayMs
+        }
+      : {}),
     ...(staging ? { staging } : {}),
     ...(adapter
       ? {

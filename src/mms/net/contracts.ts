@@ -856,6 +856,13 @@ export interface RpcMethod {
    */
   ephemeral?: boolean
   /**
+   * A numbered change that runs outside the ledger (terminal input). It is `mutating` but keeps no request,
+   * alias or result on disk and needs no idempotency key: the call carries a number, and the handler applies
+   * each number once, so a caller that never saw the reply simply sends the same number again. For
+   * high-rate calls whose retry the caller owns; it never takes uploads, and only a `routed` method may be one.
+   */
+  sequenced?: boolean
+  /**
    * A durable result larger than this is kept in the ledger as its hash and size only; the waiting
    * caller still gets it whole, and a later retry is told the outcome may have happened. Absent,
    * the whole result is kept, as long as it fits an RPC reply.

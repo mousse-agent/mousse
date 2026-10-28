@@ -1110,7 +1110,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       !['threads.delete', 'threads.trash', 'threads.restore', 'threads.purge', 'threads.inventory', 'threads.focus',
         // These name the thread only so a router can find its computer; they worked for a thread being trashed before.
         'orchestrator.answerQuestions', 'orchestrator.dismissQuestions', 'runs.get', 'runs.resumeNow', 'runs.cancelPause',
-        'git.cancelOperation', 'pty.isAlive', 'pty.lookup'].includes(method) &&
+        'git.cancelOperation', 'pty.isAlive', 'pty.lookup', 'pty.write', 'pty.resize', 'pty.kill'].includes(method) &&
       ctx.mms.threads?.lifecycleStore?.get(params.threadId)) {
     ctx.mms.threads.assertThreadAdmission(params.threadId)
   }
@@ -1924,13 +1924,26 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     case 'pty.list': {
       const p = isObject(params) ? params : {}
       const threadId = asOptionalString(p.threadId, 256)
-      return { ptys: ctx.mms.ptyManager.list(threadId) }
+      const routed = ctx.connection?.bridgeCaller
+      const held = ctx.mms.routedTerminals
+      // Another computer sees only the terminals it opened. A window of this computer sees who holds each one that
+      // another computer opened, so the owner can tell and stop it.
+      const ptys = ctx.mms.ptyManager.list(threadId)
+        .filter((entry) => !routed || held?.opened(routed.node, entry.ptyId))
+        .map((entry) => { const holder = held?.holderOf(entry.ptyId); return holder && !routed ? { ...entry, heldBy: { node: holder.node, name: holder.name, openedAt: holder.openedAt } } : entry })
+      return { ptys }
     }
     case 'pty.create': {
       const p = isObject(params) ? params : {}
       const threadId = asString(p.threadId, 'threadId', 256)
       const agentId = asString(p.agentId, 'agentId', 256)
-      let cwd = asOptionalString(p.cwd, 4096) ?? process.cwd()
+      // A terminal opened from another computer runs in the owner's default shell and environment, and starts in the
+      // thread's own folder: the caller names no folder, shell, arguments or variables.
+      const routed = ctx.connection?.bridgeCaller
+      if (routed && (p.cwd !== undefined || p.command !== undefined || p.env !== undefined || p.shellArgs !== undefined))
+        throw new DomainRpcError('invalid_params', 'A terminal from another computer starts in the thread\u2019s folder, in the default shell and environment.')
+      if (routed && threadId === '__unbound__') throw new DomainRpcError('thread_not_found', 'Thread not found', { threadId })
+      let cwd = (routed ? undefined : asOptionalString(p.cwd, 4096)) ?? process.cwd()
       const command = asOptionalString(p.command, 4096)
       const env = asOptionalStringEnvMap(p.env, 'env')
       const shellArgs =
@@ -1938,7 +1951,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
           ? undefined
           : asStringArray(p.shellArgs, 'shellArgs', { maxItems: 32, maxItemLen: 1024 })
       const task = threadId !== '__unbound__' ? ctx.mms.threads.getThread(threadId) : undefined
-      if (threadId !== '__unbound__' && !task) throw new Error('Task not found for terminal')
+      if (threadId !== '__unbound__' && !task) throw new DomainRpcError('thread_not_found', 'Task not found for terminal', { threadId })
       const directory = task ? ctx.mms.threads.getThreadDir(threadId) : undefined
       if (task?.projectId) await ensureOwnedTaskWorkspace(ctx, { threadId })
       const manager = directory ? new ThreadWorkspaceManager(directory) : undefined
@@ -1952,11 +1965,11 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
           catch (error) { if (String(error).includes('task-bound terminal')) throw error }
         }
       }
-      if (task && ctx.mms.threadRuntimes.listAgents(threadId).find((agent) => agent.id === agentId)?.workspacePolicy?.access === 'read-only') throw new Error('Read-only agents cannot open an arbitrary shell')
+      if (task && ctx.mms.threadRuntimes.listAgents(threadId).find((agent) => agent.id === agentId)?.workspacePolicy?.access === 'read-only') throw new DomainRpcError('terminal_not_allowed', 'Read-only agents cannot open an arbitrary shell')
       if (metadata) {
-        if (manager!.verify(metadata).lifecycle !== 'ready') throw new Error('Task workspace requires recovery before opening a terminal')
+        if (manager!.verify(metadata).lifecycle !== 'ready') throw new DomainRpcError('workspace_recovery_required', 'Task workspace requires recovery before opening a terminal')
         const projectPath = resolveThreadProjectPath(ctx.mms.projects, ctx.mms.threads, threadId)
-        if (p.cwd === undefined || projectPath && cwd === projectPath) cwd = manager!.executionContext(projectPath ?? metadata.worktreePath, metadata).projectPath
+        if (routed || p.cwd === undefined || projectPath && cwd === projectPath) cwd = manager!.executionContext(projectPath ?? metadata.worktreePath, metadata).projectPath
         else cwd = assertEpisodePath(metadata.worktreePath, cwd)
       }
       const lease = directory ? tryAcquireExecutionLease(directory, { source: 'task-terminal' }) : undefined
@@ -1991,6 +2004,8 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
             } } : undefined
         })
       } catch (error) { if (lease) releaseExecutionLeaseHandle(lease); throw error }
+      // A terminal another computer opened is that computer's from the moment it exists.
+      routed?.onTerminalCreated?.(ptyId)
       // `__unbound__` is used by project terminals opened without an active
       // chat thread and must not hydrate a fake thread runtime.
       if (threadId !== '__unbound__') {
@@ -2021,6 +2036,8 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const p = isObject(params) ? params : {}
       const ptyId = asString(p.ptyId, 'ptyId', 256)
       const lookup = ctx.mms.ptyManager.lookup(ptyId)
+      // Stopped by a person here (not by the device that opened it): the audit says so.
+      if (!ctx.connection?.bridgeCaller) ctx.mms.routedTerminals?.stoppedByOwner(ptyId)
       await ctx.mms.ptyManager.killAndWait(ptyId)
       if (lookup.alive) {
         ctx.mms.threadRuntimes.unregisterPty(lookup.threadId, ptyId)
@@ -2044,7 +2061,11 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       if (ptyId) {
         return { ptyId, scrollback: ctx.mms.ptyManager.getScrollback(ptyId) }
       }
-      return { scrollbacks: ctx.mms.ptyManager.getScrollbacks(threadId) }
+      const scrollbacks = ctx.mms.ptyManager.getScrollbacks(threadId)
+      const routed = ctx.connection?.bridgeCaller
+      // Another computer reads the scrollback of the terminals it opened, never the rest of the thread's.
+      if (routed) for (const id of Object.keys(scrollbacks)) if (!ctx.mms.routedTerminals?.opened(routed.node, id)) delete scrollbacks[id]
+      return { scrollbacks }
     }
     case 'pty.outputSince': {
       const p = isObject(params) ? params : {}

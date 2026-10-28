@@ -9,7 +9,7 @@ import {
   unqualifyRoutedParams,
   type QualifyContext
 } from '../../../shared/bridge/routedIds'
-import type { Roster, NodeDelegation, NodeId } from '../../../shared/net'
+import type { NodeId } from '../../../shared/net'
 import { isId } from '../../../shared/net'
 import { parseQualifiedId, qualifyId } from '../../../shared/threadRef'
 import type { MmsProfileServices } from '../../MmsProfileServices'
@@ -28,6 +28,8 @@ import {
 import { RoutedClient } from './RoutedClient'
 import { RoutedStager } from './stager'
 import { AttachedThreads } from './attachedThreads'
+import { AttachedTerminals } from './attachedTerminals'
+import { deviceNameOf } from './deviceName'
 
 /** Methods whose result on this computer carries the complete list of threads or projects. */
 const RESULT_WITH_THREADS = new Set([
@@ -93,6 +95,8 @@ export interface ThreadRouterOptions {
 export class ThreadRouter implements ThreadRouterPort {
   readonly client: RoutedClient
   readonly attached: AttachedThreads
+  /** The terminals this computer opened on other computers: their output and their numbered input. */
+  readonly terminals: AttachedTerminals
   /** Git actions in progress on another computer, with the window that started each. */
   private readonly git = new Map<string, { connection: string; emit: NonNullable<HandlerContext['connection']>['emitConnectionEvent']; until?: number }>()
 
@@ -121,6 +125,7 @@ export class ThreadRouter implements ThreadRouterPort {
       onGit: (node, data) => this.gitProgress(data),
       computer: (node) => this.computer(node)
     })
+    this.terminals = new AttachedTerminals({ services, hub: options.hub, client: this.client })
     // A window that goes away takes its leases with it.
     this.offClosed = services.domains?.onConnectionClosed((id) => this.connectionClosed(id))
   }
@@ -140,22 +145,10 @@ export class ThreadRouter implements ThreadRouterPort {
 
   private nameOf(node: NodeId): string {
     try {
-      const identity = this.options.net.runtime().identity
-      const self = identity.self()
-      const root = self && identity.pinnedRootKey(self.user)
-      const signed = self && identity.roster(self.user)
-      if (root && signed) {
-        const roster = identity.verifySigned<Roster>(signed, root)
-        const found = roster.nodes
-          .map((row) => identity.verifySigned<NodeDelegation>(row, root))
-          .filter((row) => row.subject === node)
-          .sort((a, b) => b.keyEpoch - a.keyEpoch || b.issuedAt - a.issuedAt)[0]
-        if (found?.name) return found.name
-      }
+      return deviceNameOf(this.options.net.runtime().identity, node, 'the other computer')
     } catch {
-      // The name is only for the message.
+      return 'the other computer'
     }
-    return 'the other computer'
   }
 
   private selfNode(): string | undefined {
@@ -199,6 +192,18 @@ export class ThreadRouter implements ThreadRouterPort {
       return { result: await this.attached.snapshot(node, threadId, qualified) }
     }
     if (method === 'git.cancelOperation') return { result: this.cancelGit(ctx, owner, node, method) }
+    // Input and resizes are numbered and go one at a time, in the window's order (see `AttachedTerminals.input`).
+    if (row.sequenced)
+      return {
+        result: await this.terminals.input(
+          node,
+          owner.threadId as string,
+          owner.ptyId as string,
+          method as 'pty.write' | 'pty.resize',
+          owner,
+          ctx.connection?.lifetime ? { signal: ctx.connection.lifetime } : {}
+        )
+      }
 
     const progress = GIT_PROGRESS.has(method) ? this.followGit(ctx, owner) : undefined
     if (progress) await this.attached.channel(node).catch(() => undefined)
@@ -211,14 +216,48 @@ export class ThreadRouter implements ThreadRouterPort {
       })
     } catch (error) {
       progress?.end()
+      // A terminal that is not there any more has nothing left to read.
+      if (method === 'pty.kill' && error instanceof DomainRpcError && error.code === 'pty_not_found')
+        this.terminals.forget(node, owner.ptyId as string)
       throw error
     } finally {
       progress?.release()
     }
     progress?.end()
+    if (method.startsWith('pty.')) this.readTerminals(node, method, owner, raw)
     let result = qualifyRoutedResult(method, raw, context)
     if (isRecord(result)) result = this.withLocalLists(ctx, method, result)
     return { result }
+  }
+
+  /**
+   * What a terminal call of this computer's window means for reading the terminal's output: a terminal that was
+   * opened, or found alive, starts to be read; one that was stopped is let go of. The output follows on its own
+   * stream, so these never wait for it.
+   */
+  private readTerminals(node: NodeId, method: string, owner: Record<string, unknown>, raw: unknown): void {
+    const threadId = owner.threadId as string
+    if (!isRecord(raw)) return
+    switch (method) {
+      case 'pty.create':
+        if (typeof raw.ptyId === 'string')
+          // Opened here: its input counts from 0.
+          this.terminals.ensure(node, threadId, raw.ptyId, typeof owner.agentId === 'string' ? owner.agentId : undefined, 0, true)
+        break
+      case 'pty.isAlive':
+      case 'pty.lookup':
+        if (raw.alive === true && typeof owner.ptyId === 'string')
+          this.terminals.ensure(node, threadId, owner.ptyId, typeof raw.agentId === 'string' ? raw.agentId : undefined, typeof raw.lastSeq === 'number' ? raw.lastSeq : undefined)
+        break
+      case 'pty.list':
+        for (const entry of Array.isArray(raw.ptys) ? raw.ptys : [])
+          if (isRecord(entry) && typeof entry.ptyId === 'string')
+            this.terminals.ensure(node, threadId, entry.ptyId, typeof entry.agentId === 'string' ? entry.agentId : undefined, typeof entry.lastSeq === 'number' ? entry.lastSeq : undefined)
+        break
+      case 'pty.kill':
+        if (typeof owner.ptyId === 'string') this.terminals.forget(node, owner.ptyId)
+        break
+    }
   }
 
   /** The computer a call names without naming a thread: `threads.create { node }`, `composer.options { node }`. */
@@ -243,7 +282,8 @@ export class ThreadRouter implements ThreadRouterPort {
       if (key === 'source' && value === 'gui') continue
       // The owner answers a send once the turn is admitted, however long the turn runs.
       if (key === 'await' && method === 'orchestrator.send') continue
-      if ((ROUTED_FORBIDDEN_KEYS as readonly string[]).includes(key) || !row.keys.includes(key))
+      // Numbers belong to the router: a window never picks one.
+      if ((ROUTED_FORBIDDEN_KEYS as readonly string[]).includes(key) || !row.keys.includes(key) || (key === 'seq' && row.sequenced))
         throw new DomainRpcError('invalid_params', `${method} does not take ${key} for a thread on another computer.`)
       // References in the text name threads the way the owner does.
       params[key] =
@@ -371,11 +411,13 @@ export class ThreadRouter implements ThreadRouterPort {
   /** A session with `node` opened: what windows have in view there is attached again. */
   nodeOnline(node: NodeId): void {
     void this.attached.nodeOnline(node)
+    this.terminals.nodeOnline(node)
   }
 
   close(): void {
     this.offClosed?.()
     this.attached.close()
+    this.terminals.close()
     this.git.clear()
   }
 }

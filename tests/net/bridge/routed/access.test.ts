@@ -180,6 +180,68 @@ describe('who may call a routed method', () => {
     expect(Object.keys(info.routed!)).not.toContain('threads.purge')
   }, 60_000)
 
+  it('runs a numbered change outside the ledger, behind the same checks, and refuses one that is not routed', async () => {
+    const { a, join } = await authority()
+    const applied: number[] = []
+    a.runtime().rpc.register({
+      method: 'routed.test.numbered',
+      family: 'routed',
+      capability: 'write',
+      requires: ['settings'],
+      needsTerminal: true,
+      mutating: true,
+      sequenced: true,
+      handle: async (params) => {
+        applied.push((params as { seq: number }).seq)
+        return { ok: true }
+      }
+    })
+    await a.request('bridge.workOnThreads', { enabled: true })
+    const laptop = await join(await inviteText(a), 'laptop')
+    const send = (seq: number, idem?: string) =>
+      laptop.net
+        .session(a.runtime().identity.self()!.node)
+        .rpc(
+          'routed.test.numbered',
+          { seq },
+          { id: newId('rpc'), ...(idem ? { idem } : {}), deadlineMs: 5000 }
+        )
+    // The same checks as any routed method: the device's terminal switch is off by default.
+    expect(await refusedWith(send(1))).toBe('terminal_off')
+    await a.request('bridge.policy', { node: laptop.node, terminal: true })
+    const ledger = () =>
+      Number(
+        a.runtime().db.database.prepare('SELECT count(*) AS n FROM net_executions').get()!.n
+      )
+    const before = ledger()
+    for (const seq of [1, 2, 3]) expect(await send(seq)).toEqual({ ok: true })
+    expect(applied).toEqual([1, 2, 3])
+    // Nothing is recorded: no execution, so a retry of a lost reply is the caller's to send again.
+    expect(ledger()).toBe(before)
+    // A key would suggest a ledger that is not there.
+    await expect(send(4, 'a-key')).rejects.toMatchObject({ code: 'bad_request' })
+    // A block, and the owner's switch going off, refuse it like any other.
+    await a.request('bridge.policy', { node: laptop.node, blocked: true })
+    expect(await refusedWith(send(5))).toBe('blocked')
+    await a.request('bridge.policy', { node: laptop.node, blocked: false })
+    await a.request('bridge.workOnThreads', { enabled: false })
+    expect(await refusedWith(send(6))).toBe('setting_off')
+    expect(applied).toEqual([1, 2, 3])
+
+    // Only a routed change without uploads can be numbered instead of recorded.
+    const rpc = a.runtime().rpc
+    const base = { capability: 'write' as const, handle: async () => ({}) }
+    for (const method of [
+      { ...base, method: 'test.numbered.plain', mutating: true, sequenced: true },
+      { ...base, method: 'routed.test.numbered.read', family: 'routed' as const, mutating: false, sequenced: true },
+      { ...base, method: 'routed.test.numbered.ephemeral', family: 'routed' as const, mutating: true, ephemeral: true, sequenced: true },
+      { ...base, method: 'routed.test.numbered.upload', family: 'routed' as const, mutating: true, uploadEnabled: true, sequenced: true }
+    ])
+      expect(() => rpc.register(method), method.method).toThrow(
+        expect.objectContaining({ code: 'bad_request' })
+      )
+  }, 60_000)
+
   it('does not change the phone API: a bridge method needs no grant and no switch', async () => {
     const { a, join } = await authority()
     a.runtime().rpc.register({

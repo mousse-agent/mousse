@@ -3575,6 +3575,16 @@ html[data-theme='high-contrast'] {
   z-index: 2;
 }
 
+/* Another of the user's computers has a terminal open on this thread: who, and a way to stop it. */
+.terminal-remote-holder {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 6px 12px;
+  color: var(--text-secondary);
+  border-bottom: 1px solid var(--border-subtle, rgba(128, 128, 128, 0.25));
+}
+
 .browser-panel,
 .files-panel,
 .git-panel,

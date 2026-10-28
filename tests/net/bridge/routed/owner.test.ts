@@ -38,7 +38,16 @@ function baseParams(row: RoutedRow): Record<string, unknown> {
   if (row.target === 'folder') params.threadId = 'thread-1'
   if (row.target === 'project') params.projectId = 'project-1'
   for (const key of row.required ?? [])
-    params[key] ??= key === 'path' || key === 'oldPath' ? 'src/a.ts' : 'x'
+    params[key] ??=
+      key === 'path' || key === 'oldPath'
+        ? 'src/a.ts'
+        : key === 'seq'
+          ? 1
+          : key === 'agentId'
+            ? '__project-shell__:tab'
+            : 'x'
+  // A resize names its size; the terminal rows that are numbered carry numbers.
+  if (row.keys.includes('cols')) Object.assign(params, { cols: 80, rows: 24 })
   return params
 }
 
@@ -125,19 +134,15 @@ describe('the routed methods the owner registers', () => {
         family: 'routed',
         capability: row.capability,
         requires: ['settings'],
-        mutating: row.durable
+        // A numbered change changes something without a ledger row.
+        mutating: row.durable || row.sequenced === true
       })
-      expect(Boolean(info.ephemeral), method).toBe(!row.durable)
+      expect(Boolean(info.ephemeral), method).toBe(!row.durable && !row.sequenced)
+      expect(Boolean(info.sequenced), method).toBe(row.sequenced === true)
       // Durable results stay small in the ledger; a lost reply is "may have happened", not a full replay.
       expect(info.ledgerResultMaxBytes, method).toBe(row.durable ? 16 * 1024 : undefined)
     }
-    for (const method of [
-      'threads.purge',
-      'files.writeDirect',
-      'files.root',
-      'settings.set',
-      'pty.create'
-    ])
+    for (const method of ['threads.purge', 'files.writeDirect', 'files.root', 'settings.set'])
       expect(f.targetRpc.methodInfo(routedNetMethod(method)), method).toBeUndefined()
   }, 60_000)
 
@@ -159,10 +164,12 @@ describe('the routed methods the owner registers', () => {
         'profileId',
         'expectedProfileId'
       ])
+      {
         expect(
           () => validateRoutedParams(method, row, { ...baseParams(row), [extra]: 'x' }),
           `${method} + ${extra}`
         ).toThrow(expect.objectContaining({ code: 'bad_request' }))
+      }
       expect(() => validateRoutedParams(method, row, [])).toThrow(
         expect.objectContaining({ code: 'bad_request' })
       )

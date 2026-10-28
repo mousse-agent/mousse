@@ -1,14 +1,17 @@
-import { useCallback, useEffect, useMemo, useRef } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import '@xterm/xterm/css/xterm.css'
 import { PROJECT_SHELL_AGENT_ID } from '../../shared/types'
+import { isQualifiedId } from '../../shared/threadRef'
 import { useFilesRoot } from '../hooks/useActiveProjectPath'
 import { XTERM_FONT, getXtermTheme, followXtermAppearance } from '../lib/xtermTheme'
 import { useAppStore } from '../stores/appStore'
 import {
   clearStalePtyBinding,
-  resolveTerminalShellAction
+  resolveTerminalShellAction,
+  terminalNoticeFor,
+  type TerminalNotice
 } from '../utils/terminalSession'
 
 interface TerminalInstance {
@@ -16,6 +19,8 @@ interface TerminalInstance {
   ptyId: string
   terminal: Terminal
   fitAddon: FitAddon
+  /** The terminal's thread, which a terminal on another computer is reached by. */
+  threadId?: string
 }
 
 export function ProjectTerminalPanel() {
@@ -33,6 +38,35 @@ export function ProjectTerminalPanel() {
   const spawningRef = useRef<Set<string>>(new Set())
   const activePtyRef = useRef<string | null>(null)
   const fitFrameRef = useRef<number | null>(null)
+  const [notice, setNotice] = useState<TerminalNotice | null>(null)
+  // Terminals another of the user's computers has open on this thread (this computer's own thread only).
+  const [holders, setHolders] = useState<Array<{ ptyId: string; name: string }>>([])
+
+  useEffect(() => {
+    if (mainView !== 'terminal' || !activeThreadId || isQualifiedId(activeThreadId)) {
+      setHolders([])
+      return
+    }
+    let cancelled = false
+    const load = async (): Promise<void> => {
+      try {
+        const list = await window.mousse.pty.list()
+        if (!cancelled)
+          setHolders(list.flatMap((entry) => (entry.heldBy ? [{ ptyId: entry.ptyId, name: entry.heldBy.name }] : [])))
+      } catch {
+        /* the list is a courtesy: a failed read shows nothing */
+      }
+    }
+    void load()
+    const timer = setInterval(() => void load(), 5000)
+    return () => {
+      cancelled = true
+      clearInterval(timer)
+    }
+  }, [mainView, activeThreadId])
+
+  // What was said about one thread's terminal is not said about another's.
+  useEffect(() => setNotice(null), [activeThreadId])
 
   const threadKey = activeThreadId ?? '__standalone__'
   const visibleTabs = useMemo(
@@ -68,7 +102,7 @@ export function ProjectTerminalPanel() {
       inst.fitAddon.fit()
       const dims = inst.fitAddon.proposeDimensions()
       if (dims) {
-        void window.mousse.pty.resize(ptyId, dims.cols, dims.rows)
+        void window.mousse.pty.resize(ptyId, dims.cols, dims.rows, inst.threadId)
       }
       if (focus) {
         inst.terminal.focus()
@@ -106,15 +140,18 @@ export function ProjectTerminalPanel() {
       terminal.open(wrapper)
       fitAddon.fit()
 
+      const threadId =
+        useAppStore.getState().projectTerminalTabs.find((entry) => entry.id === tabId)?.ownerThreadId ?? undefined
       terminal.onData((data) => {
-        void window.mousse.pty.write(ptyId, data)
+        void window.mousse.pty.write(ptyId, data, threadId)
       })
 
       instancesRef.current.set(ptyId, {
         tabId,
         ptyId,
         terminal,
-        fitAddon
+        fitAddon,
+        threadId
       })
     },
     []
@@ -129,7 +166,7 @@ export function ProjectTerminalPanel() {
       spawningRef.current.add(tabId)
 
       if (tab.ptyId) {
-        await window.mousse.pty.kill(tab.ptyId).catch(() => {})
+        await window.mousse.pty.kill(tab.ptyId, tab.ownerThreadId ?? undefined).catch(() => {})
         unmountTerminal(tab.ptyId)
         updateProjectTerminalTab(tabId, clearStalePtyBinding(tab))
       }
@@ -139,6 +176,7 @@ export function ProjectTerminalPanel() {
           agentId: `${PROJECT_SHELL_AGENT_ID}:${tabId}`,
           cwd
         })
+        setNotice(null)
         updateProjectTerminalTab(tabId, { ptyId, cwd, exited: false })
         mountTerminal(tabId, ptyId)
         const state = useAppStore.getState()
@@ -146,6 +184,11 @@ export function ProjectTerminalPanel() {
         if (state.activeProjectTerminalTabByThread[key] === tabId) {
           focusTerminal(ptyId)
         }
+      } catch (error) {
+        // A terminal on another computer can be refused (its terminals from this device are off there, the
+        // computer is offline): the panel says so. A local terminal fails as it always did.
+        if (!isQualifiedId(tab.ownerThreadId)) throw error
+        setNotice(terminalNoticeFor(error))
       } finally {
         spawningRef.current.delete(tabId)
       }
@@ -224,8 +267,9 @@ export function ProjectTerminalPanel() {
     const live = new Set(tabs.flatMap((tab) => (tab.ptyId ? [tab.ptyId] : [])))
     for (const ptyId of instancesRef.current.keys()) {
       if (live.has(ptyId)) continue
+      const threadId = instancesRef.current.get(ptyId)?.threadId
       unmountTerminal(ptyId)
-      void window.mousse.pty.kill(ptyId).catch(() => {})
+      void window.mousse.pty.kill(ptyId, threadId).catch(() => {})
     }
   }, [tabs, unmountTerminal])
 
@@ -300,6 +344,23 @@ export function ProjectTerminalPanel() {
 
   return (
     <div className="terminal-panel project-terminal-panel">
+      {holders.map((holder) => (
+        <div key={holder.ptyId} className="terminal-remote-holder" role="status">
+          <span>{holder.name} has a terminal open on this thread.</span>
+          <button
+            type="button"
+            className="btn"
+            onClick={() => {
+              void window.mousse.pty
+                .kill(holder.ptyId, activeThreadId ?? undefined)
+                .catch(() => {})
+                .finally(() => setHolders((held) => held.filter((entry) => entry.ptyId !== holder.ptyId)))
+            }}
+          >
+            Stop
+          </button>
+        </div>
+      ))}
       <div
         className={`terminal-container${visibleTabs.length === 0 ? ' terminal-container-empty' : ''}`}
         ref={containerRef}
@@ -321,7 +382,13 @@ export function ProjectTerminalPanel() {
             </button>
           </div>
         )}
-        {terminalCwd && visibleTabs.length === 0 && (
+        {notice && (
+          <div className="terminal-empty" role="status">
+            <p>{notice.message}</p>
+            {notice.hint && <p>{notice.hint}</p>}
+          </div>
+        )}
+        {terminalCwd && visibleTabs.length === 0 && !notice && (
           <div className="terminal-empty">
             <p>No terminals open</p>
             <button type="button" className="btn btn-primary" onClick={handleAddTab}>

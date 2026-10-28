@@ -6,8 +6,10 @@ import {
 } from '../src/mms/terminals/PtyManager'
 import {
   clearStalePtyBinding,
-  resolveTerminalShellAction
+  resolveTerminalShellAction,
+  terminalNoticeFor
 } from '../src/renderer/utils/terminalSession'
+import { parseTerminalOffMessage, terminalOffMessage } from '../src/shared/bridge/routed'
 
 describe('appendBoundedScrollback', () => {
   it('keeps short buffers intact', () => {
@@ -110,5 +112,78 @@ describe('clearStalePtyBinding', () => {
       ptyId: null,
       exited: false
     })
+  })
+})
+
+describe('terminals on another computer', () => {
+  const panelSource = readFileSync(
+    new URL('../src/renderer/components/ProjectTerminalPanel.tsx', import.meta.url),
+    'utf8'
+  )
+  const guiIpcSource = readFileSync(
+    new URL('../src/main/ipc/registerGuiIpc.ts', import.meta.url),
+    'utf8'
+  )
+
+  it('says how to turn terminals on when the other computer has them off', () => {
+    expect(
+      terminalNoticeFor(
+        new Error(
+          "Error invoking remote method 'pty:create': Error: Terminals from this device are off on Studio Mac."
+        )
+      )
+    ).toEqual({
+      message: 'Terminals from this computer are off on Studio Mac.',
+      hint: 'On Studio Mac, open Devices and turn on Terminals for this computer.'
+    })
+    expect(parseTerminalOffMessage(terminalOffMessage('Office PC'))).toEqual({ computer: 'Office PC' })
+  })
+
+  it('shows any other refusal as the computer said it, without the wrapper of the window’s own process', () => {
+    expect(
+      terminalNoticeFor(
+        new Error("Error invoking remote method 'pty:create': Error: Studio Mac is offline.")
+      )
+    ).toEqual({ message: 'Studio Mac is offline.' })
+    expect(
+      terminalNoticeFor(
+        new Error("Error invoking remote method 'pty:create': MmsProtocolError: Studio Mac is offline.")
+      )
+    ).toEqual({ message: 'Studio Mac is offline.' })
+    expect(terminalNoticeFor('plain text')).toEqual({ message: 'plain text' })
+  })
+
+  it('passes the terminal’s thread for every call that reaches a terminal, so a thread on another computer is found', () => {
+    expect(panelSource).toMatch(/pty\.write\(ptyId, data, threadId\)/)
+    expect(panelSource).toMatch(/pty\.resize\(ptyId, dims\.cols, dims\.rows, inst\.threadId\)/)
+    expect(panelSource).toMatch(/pty\.kill\(tab\.ptyId, tab\.ownerThreadId \?\? undefined\)/)
+    for (const channel of ['pty:write', 'pty:resize', 'pty:kill'])
+      expect(guiIpcSource).toContain(`registerHandler('${channel}'`)
+    for (const handler of [
+      "'pty:write', async (_e, ptyId: string, data: string, threadId?: unknown)",
+      "'pty:kill', async (_e, ptyId: string, threadId?: unknown)"
+    ])
+      expect(guiIpcSource).toContain(handler)
+    expect(guiIpcSource).toContain('rows: number, threadId?: unknown')
+  })
+
+  it('shows the owner who holds a terminal on the thread, with Stop, and a desktop notification for a first one', () => {
+    expect(panelSource).toMatch(/terminal-remote-holder/)
+    expect(panelSource).toMatch(/has a terminal open on this thread/)
+    expect(panelSource).toMatch(/\.kill\(holder\.ptyId, activeThreadId/)
+    expect(guiIpcSource).toMatch(/event\.type === 'ui\.notify'/)
+    expect(guiIpcSource).toMatch(/'remote-terminal'/)
+  })
+
+  it('names no folder, shell or environment for a terminal on another computer, and keeps them for a local one', () => {
+    const createHandler = guiIpcSource.slice(
+      guiIpcSource.indexOf("'pty:create'"),
+      guiIpcSource.indexOf("'pty:kill'")
+    )
+    expect(createHandler).toMatch(/isQualifiedId\(threadId\)/)
+    expect(createHandler).toMatch(/\? \{ threadId, agentId: request\.agentId \}/)
+    expect(createHandler).toMatch(/cwd: request\.cwd/)
+    expect(createHandler).toMatch(/env: request\.env/)
+    expect(createHandler).toMatch(/shellArgs: request\.shellArgs/)
   })
 })

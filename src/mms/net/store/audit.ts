@@ -81,6 +81,20 @@ export class SqliteBridgeAudit {
     }
   }
 
+  /** Whether this computer has a change row of `method` for `node` (the first terminal a device opens is told apart by it). */
+  has(node: NodeId, method: string): boolean {
+    try {
+      return (
+        this.db.database
+          .prepare("SELECT 1 FROM bridge_audit WHERE node=? AND kind='change' AND method=? LIMIT 1")
+          .get(node, method) !== undefined
+      )
+    } catch {
+      // Unknown means a notice that may repeat, never one that is lost.
+      return false
+    }
+  }
+
   countRead(node: NodeId, bytes: number): void {
     try {
       const hour = Math.floor(this.clock.now() / HOUR_MS)

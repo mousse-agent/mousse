@@ -118,6 +118,15 @@ export class DurableRpcDispatcher implements RpcDispatcher, SessionRpcPort {
     if (this.registry.has(method.method)) throw new NetError('conflict')
     if (method.ephemeral && (method.mutating || method.uploadEnabled))
       throw new NetError('bad_request', 'Only read-only methods can run outside the ledger.')
+    // The other way out of the ledger: a numbered change. It has to say so, change something, and stay small.
+    if (
+      method.sequenced &&
+      (!method.mutating || method.ephemeral || method.uploadEnabled || method.family !== 'routed')
+    )
+      throw new NetError(
+        'bad_request',
+        'Only a routed change without uploads can be sequenced instead of recorded in the ledger.'
+      )
     this.registry.set(method.method, method)
   }
   methods(): string[] {
@@ -172,10 +181,13 @@ export class DurableRpcDispatcher implements RpcDispatcher, SessionRpcPort {
     const capability = method.capabilityFor?.(params) ?? method.capability
     this.authorize(name, context.caller, capability)
     method.authorize?.(params, context)
-    if (method.mutating && (!idem || idem.length > 256))
+    if (method.mutating && !method.sequenced && (!idem || idem.length > 256))
       throw new NetError('bad_request', 'Mutations need durable idempotency.')
+    // A sequenced call carries its own number: sending it with a key would suggest a ledger that is not there.
+    if (method.sequenced && idem !== undefined)
+      throw new NetError('bad_request', 'A sequenced call takes no idempotency key.')
     if (context.signal.aborted) throw new NetError('cancelled')
-    if (method.ephemeral) {
+    if (method.ephemeral || method.sequenced) {
       const returned = await method.handle(params, context)
       this.authorize(name, context.caller, capability)
       const result = returned === undefined ? null : returned

@@ -97,7 +97,7 @@ export function MainViewTabs() {
     const store = useAppStore.getState()
     if (item.view === 'terminal' && item.resourceId) {
       const tab = store.projectTerminalTabs.find((entry) => entry.id === item.resourceId)
-      if (tab?.ptyId) void window.mousse.pty.kill(tab.ptyId).catch(() => {})
+      if (tab?.ptyId) void window.mousse.pty.kill(tab.ptyId, tab.ownerThreadId ?? undefined).catch(() => {})
       store.closeProjectTerminalTab(item.resourceId)
       const remaining = store.projectTerminalTabs.filter(
         (tab) => tab.id !== item.resourceId && (tab.ownerThreadId === store.activeThreadId || tab.ownerThreadId === null)
