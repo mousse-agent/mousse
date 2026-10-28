@@ -15,6 +15,7 @@ import {
   type EditorTunnelOptions
 } from '../../../src/mms/net/editor/tunnel'
 import type { Clock, TunnelLink } from '../../../src/mms/net/contracts'
+import type { EditorEndpointPort } from '../../../src/mms/net/editor/endpoint/port'
 import { decodeMessage, encodeMessage } from '../../../src/mms/net/sync/codec'
 import { NetError, newId, type NodeId } from '../../../src/shared/net'
 import {
@@ -1226,5 +1227,234 @@ describe('a far end the system cannot vouch for', () => {
     const fine = await bed({ host: { hostTrust: async () => ({ ok: true }) } })
     const tunnel = await fine.open()
     expect(tunnel.hostKeys).toEqual([KEY_A])
+  })
+})
+
+// ------------------------------------------------------------------------------ Mousse's own SSH endpoint
+
+/** A stand-in for the SSH endpoint: it echoes, and records what the tunnels did to it. */
+function fakeEndpoint(keys: Array<{ type: string; key: string }> = [KEY_B]) {
+  const served: Array<{ node: NodeId; stream: Duplex; ended: boolean[] }> = []
+  const killed: NodeId[] = []
+  /** What each sweep was told is allowed. */
+  const swept: NodeId[][] = []
+  const state = { available: true, keysFail: false }
+  const endpoint: EditorEndpointPort = {
+    available: () => state.available,
+    hostKeys: () => {
+      if (state.keysFail) throw new Error('no key')
+      return keys
+    },
+    serve(stream, node) {
+      const entry = { node, stream, ended: [] as boolean[] }
+      served.push(entry)
+      stream.on('error', () => {})
+      stream.pipe(stream)
+      return {
+        end: (forced) => {
+          entry.ended.push(forced)
+          stream.destroy()
+        },
+        counts: () => ({ exec: 2, shell: 1, sftp: 3, forwards: 4 })
+      }
+    },
+    killDevice: async (node) => void killed.push(node),
+    sweep: async (allowed) => swept.push([...allowed]) * 0
+  }
+  return { endpoint, served, killed, swept, state }
+}
+
+describe('the far end is Mousse’s own SSH endpoint', () => {
+  it('hands the endpoint the stream, vouches for its key, and connects to no SSH server', async () => {
+    const fake = fakeEndpoint()
+    const t = await bed({ host: { endpoint: fake.endpoint } })
+    const tunnel = await t.open()
+    expect(tunnel.hostKeys).toEqual([KEY_B])
+    const echoed = readAll(tunnel.stream, 5)
+    tunnel.stream.write('hello')
+    expect((await echoed).toString()).toBe('hello')
+    expect(fake.served.map((entry) => entry.node)).toEqual([CALLER])
+    // The system's SSH server was never touched.
+    expect(t.echo.connections).toBe(0)
+    tunnel.close()
+    expect(await tunnel.closed).toBe('closed')
+  })
+
+  it('answers a check from the endpoint and serves nothing', async () => {
+    const fake = fakeEndpoint()
+    const t = await bed({ host: { endpoint: fake.endpoint } })
+    const answer = await t.caller.check(t.toHost)
+    expect(answer.hostKeys).toEqual([KEY_B])
+    expect(fake.served).toEqual([])
+    expect(t.echo.connections).toBe(0)
+  })
+
+  it('refuses `no_host_key` when the endpoint cannot make its key', async () => {
+    const fake = fakeEndpoint()
+    fake.state.keysFail = true
+    const t = await bed({ host: { endpoint: fake.endpoint } })
+    expect((await rejection(t.open())).reason).toBe('no_host_key')
+    expect(t.host.count(CALLER)).toBe(0)
+  })
+
+  it('ends at the system’s SSH server when the owner chose it, or when the endpoint is unavailable', async () => {
+    const chosen = await bed({
+      host: { endpoint: fakeEndpoint().endpoint, useSystemSsh: () => true }
+    })
+    const system = await chosen.open()
+    expect(system.hostKeys).toEqual([KEY_A])
+    expect(chosen.echo.connections).toBe(1)
+    expect(chosen.host.endpointAvailable()).toBe(true)
+
+    // A Windows computer has no endpoint yet: the system's SSH server, as before the endpoint existed.
+    const unavailable = fakeEndpoint()
+    unavailable.state.available = false
+    const windows = await bed({ host: { endpoint: unavailable.endpoint } })
+    expect((await windows.open()).hostKeys).toEqual([KEY_A])
+    expect(windows.echo.connections).toBe(1)
+    expect(windows.host.endpointAvailable()).toBe(false)
+    expect(unavailable.served).toEqual([])
+
+    // The choice is read for every open: turning it back on moves the next tunnel to the endpoint.
+    let system2 = true
+    const fake = fakeEndpoint()
+    const flip = await bed({ host: { endpoint: fake.endpoint, useSystemSsh: () => system2 } })
+    await flip.open()
+    expect(fake.served).toHaveLength(0)
+    system2 = false
+    await flip.open()
+    expect(fake.served).toHaveLength(1)
+  })
+
+  it('destroys the stream it gave the endpoint when the tunnel ends, and says whether the end was forced', async () => {
+    const fake = fakeEndpoint()
+    const t = await bed({ host: { endpoint: fake.endpoint } })
+
+    // The caller closes: ordinary.
+    const first = await t.open()
+    first.close()
+    await first.closed
+    await until(() => fake.served[0]!.stream.destroyed, 'the endpoint’s stream to be destroyed')
+    expect(fake.served[0]!.ended).toEqual([false])
+
+    // The session is lost: ordinary too (a dropped connection leaves what the programs started).
+    const second = await t.open()
+    t.toCaller.cut()
+    expect(await second.closed).toBe('offline')
+    await until(() => fake.served[1]!.stream.destroyed, 'the endpoint’s stream to be destroyed')
+    expect(fake.served[1]!.ended).toEqual([false])
+  })
+
+  it('stops the device’s programs for a block, a switch going off and Net going off, not for an ordinary end', async () => {
+    for (const reason of ['blocked', 'editor_off', 'setting_off', 'access_lost'] as const) {
+      const fake = fakeEndpoint()
+      const t = await bed({ host: { endpoint: fake.endpoint } })
+      const tunnel = await t.open()
+      t.refusal.current = reason === 'access_lost' ? 'capability' : reason
+      expect(t.host.reconcile()).toBe(1)
+      expect(await tunnel.closed).toBe(reason)
+      expect(fake.served[0]!.ended).toEqual([true])
+      expect(fake.served[0]!.stream.destroyed).toBe(true)
+    }
+    const fake = fakeEndpoint()
+    const t = await bed({ host: { endpoint: fake.endpoint } })
+    const tunnel = await t.open()
+    t.host.endAll('net_off')
+    expect(await tunnel.closed).toBe('net_off')
+    expect(fake.served[0]!.ended).toEqual([true])
+  })
+
+  it('stops what a device started after its tunnels are gone: the sweep is told who is allowed, not who is known', async () => {
+    const fake = fakeEndpoint()
+    let allowed: NodeId[] | undefined = [CALLER]
+    const t = await bed({
+      host: { endpoint: fake.endpoint, allowedDevices: () => allowed }
+    })
+    // Nothing is open. The sweep still runs on every change of a right, with the devices that may have one.
+    expect(t.host.reconcile()).toBe(0)
+    await until(() => fake.swept.length === 1, 'the sweep')
+    expect(fake.swept[0]).toEqual([CALLER])
+    // The device is blocked, with no connection and no program of its own left: it is simply not in the list.
+    allowed = []
+    t.host.reconcile()
+    await until(() => fake.swept.length === 2, 'the sweep')
+    expect(fake.swept[1]).toEqual([])
+    // A roster that cannot be read stops nothing.
+    allowed = undefined
+    expect(await t.host.sweepStrays()).toBe(0)
+    expect(fake.swept).toHaveLength(2)
+    // It also runs once at start (the service calls it), and finds what an earlier run of the daemon left.
+    allowed = [CALLER]
+    await t.host.sweepStrays()
+    expect(fake.swept[2]).toEqual([CALLER])
+  })
+
+  it('Net being turned off stops everything, for every device; a daemon that is closing does not', async () => {
+    const fake = fakeEndpoint()
+    const off = await bed({ host: { endpoint: fake.endpoint } })
+    const open = await off.open()
+    off.host.endAll('net_off')
+    expect(await open.closed).toBe('net_off')
+    expect(fake.served[0]!.ended).toEqual([true])
+    await until(() => fake.swept.length === 1, 'the sweep')
+    expect(fake.swept[0]).toEqual([])
+
+    // A quit, an update or a restart: an ordinary disconnect, as an SSH server restarting is. The editor servers
+    // keep running, and the sweep at the next start stops whatever has no right by then.
+    const closing = fakeEndpoint()
+    const t = await bed({ host: { endpoint: closing.endpoint } })
+    const tunnel = await t.open()
+    t.host.endAll('net_off', false)
+    expect(await tunnel.closed).toBe('net_off')
+    expect(closing.served[0]!.ended).toEqual([false])
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(closing.swept).toEqual([])
+    expect(closing.killed).toEqual([])
+  })
+
+  it('writes the counts of a connection, its logins and its refusals to the owner’s audit', async () => {
+    const fake = fakeEndpoint()
+    const t = await bed({ host: { endpoint: fake.endpoint } })
+    const tunnel = await t.open()
+    t.host.recordEndpointEvent({ kind: 'login', node: CALLER, method: 'none' })
+    // A device that keeps trying a refused thing costs one row a minute.
+    for (let i = 0; i < 5; i++)
+      t.host.recordEndpointEvent({ kind: 'refused', node: CALLER, what: 'direct-tcpip' })
+    t.host.recordEndpointEvent({ kind: 'refused', node: CALLER, what: 'tcpip-forward' })
+    t.host.recordEndpointEvent({ kind: 'login_refused', node: CALLER, reason: 'user' })
+    t.clock.advance(61_000)
+    t.host.recordEndpointEvent({ kind: 'refused', node: CALLER, what: 'direct-tcpip' })
+    tunnel.close()
+    await tunnel.closed
+    await until(
+      () => t.hostAudit.rows.some((row) => row.method === 'editor.close'),
+      'the close row'
+    )
+    const rows = t.hostAudit.rows.map(
+      (row) => `${row.method} ${row.kind} ${row.outcome.split(';')[0]}`
+    )
+    expect(rows).toEqual([
+      'editor.open change direct',
+      'editor.login change none',
+      'editor.refused refused direct-tcpip',
+      'editor.refused refused tcpip-forward',
+      'editor.login refused user',
+      'editor.refused refused direct-tcpip',
+      'editor.close change closed'
+    ])
+    expect(t.hostAudit.rows.at(-1)!.outcome).toMatch(/exec 3; sftp 3; fwd 4$/u)
+    // No name, address or command is in any row.
+    expect(JSON.stringify(t.hostAudit.rows)).not.toMatch(/192\.|example|\/bin\//u)
+  })
+
+  it('still limits the opens of a device: the endpoint is behind the same gate', async () => {
+    const fake = fakeEndpoint()
+    const t = await bed({ host: { endpoint: fake.endpoint, perNode: 1 } })
+    await t.open()
+    expect((await rejection(t.open())).reason).toBe('limit')
+    expect(fake.served).toHaveLength(1)
+    t.refusal.current = 'editor_off'
+    expect((await rejection(t.open())).reason).toBe('editor_off')
+    expect(fake.served).toHaveLength(1)
   })
 })

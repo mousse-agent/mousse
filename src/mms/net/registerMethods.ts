@@ -77,7 +77,8 @@ const keys: Record<NetLocalMethod, readonly string[]> = {
   'bridge.setCaps': ['node', 'caps'],
   'bridge.setKind': ['node', 'kind'],
   'bridge.policy': ['node', 'blocked', 'maxPermissionMode', 'terminal', 'editor'],
-  'bridge.workOnThreads': ['enabled']
+  'bridge.workOnThreads': ['enabled'],
+  'bridge.editorServer': ['system']
 }
 const SSH_ID = /^[A-Za-z0-9_-]{1,64}$/u
 const FINGERPRINT = /^SHA256:[A-Za-z0-9+/]{43}$/u
@@ -261,6 +262,12 @@ function validate(method: NetLocalMethod, value: unknown): Record<string, unknow
     typeof params.enabled !== 'boolean'
   )
     throw new DomainRpcError('invalid_params', 'enabled must be boolean')
+  if (
+    method === 'bridge.editorServer' &&
+    params.system !== undefined &&
+    typeof params.system !== 'boolean'
+  )
+    throw new DomainRpcError('invalid_params', 'system must be boolean')
   if (method === 'bridge.policy') {
     if (
       params.blocked === undefined &&

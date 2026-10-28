@@ -24,6 +24,8 @@ import {
 import type { TunnelMessage } from '../../../shared/net/wire'
 import type { Clock, SessionTunnelPort, TunnelLink } from '../contracts'
 import type { SqliteBridgeAudit } from '../store/audit'
+import type { EditorEndpointPort, EndpointConnection, EndpointEvent } from './endpoint/port'
+import { linkedPair } from './endpoint/linkedPair'
 import { checkHostTrust, type HostTrust } from './hostTrust'
 import { isHostKey } from './sshConfig'
 
@@ -37,10 +39,12 @@ import { isHostKey } from './sshConfig'
  * computer and proved who is on the other side; this module adds only what an SSH connection needs.
  *
  * **The far end is fixed.** `tunnel.open` has no host and no port: it says `ssh`, and the computer that
- * carries the tunnel connects to ITS OWN SSH server on loopback (`SSH_FAR_END`), never to anything the
- * caller named. A wire message with an extra field is not valid and ends the session, and the only way to
- * change the far end is the constructor, which accepts loopback addresses only. A tunnel therefore cannot
- * become an open proxy.
+ * carries the tunnel decides what the far end is, never the caller. By default it is Mousse's own SSH endpoint
+ * (`endpoint/`), which is handed the tunnel's stream and listens on no port. A computer without the endpoint (a
+ * Windows computer, for now), or whose owner chose "Use this computer's SSH server", connects to ITS OWN SSH
+ * server on loopback (`SSH_FAR_END`) instead. A wire message with an extra field is not valid and ends the
+ * session, and the only way to change the far end is the constructor, which accepts loopback addresses only. A
+ * tunnel therefore cannot become an open proxy.
  *
  * **It is shell access.** An SSH login on that server is a shell as the user. So a tunnel follows the rules
  * of a terminal (docs/net/threat-model.md): the device needs "Works on threads", must not be blocked, the
@@ -69,6 +73,20 @@ const SEND_PATIENCE_TRIES = 80
 
 /** Why a tunnel ended here: a wire reason, or the session it rode on was lost. */
 export type TunnelEnd = TunnelReason | 'session_closed'
+
+/**
+ * The ends that take the device's right away, and so stop everything it started on this computer (the endpoint
+ * kills the device's whole scope). Every other end (the editor closed, the session to the device was lost, an
+ * error) is an ordinary one, which leaves what the device's programs started running, as `sshd` does.
+ */
+const FORCED_ENDS: ReadonlySet<string> = new Set<TunnelReason>([
+  'net_off',
+  'blocked',
+  'capability',
+  'setting_off',
+  'editor_off',
+  'access_lost'
+])
 
 /** What an open or a tunnel fails with. `reason` is a fixed word; `message` is plain words for a person. */
 export class TunnelError extends Error {
@@ -394,6 +412,8 @@ interface Entry {
   transport?: string
   /** The far end's socket on a host, the service's end of the pair on a client. */
   local?: Duplex
+  /** On a host whose far end is the endpoint: the SSH connection it serves on this tunnel. */
+  served?: EndpointConnection
   /** The end a client hands to its caller. */
   user?: Duplex
   pipe?: TunnelPipe
@@ -465,6 +485,23 @@ export interface EditorTunnelOptions {
    * folder (tests) has none unless it is given one.
    */
   hostTrust?: () => Promise<HostTrust>
+  /**
+   * Mousse's own SSH endpoint, the far end of every tunnel unless it is unavailable (Windows, until its host
+   * exists) or the owner chose the system's SSH server. Without one, the far end is always the system's.
+   */
+  endpoint?: EditorEndpointPort
+  /**
+   * Whether the owner chose the system's SSH server for `node`: "Use this computer's SSH server", or a device that
+   * already had the switch on when the endpoint arrived and keeps the server it had. Read for every open.
+   */
+  useSystemSsh?: (node: NodeId) => boolean
+  /**
+   * The devices that may have a tunnel here now: every one on the roster that `refusal` would let in. Everything
+   * the endpoint started for any other device is stopped, whatever device that was and whether or not anything here
+   * remembers it (a device that was revoked, a server left from before the daemon restarted). Undefined when it
+   * cannot be told (the key store is locked): then nothing is stopped.
+   */
+  allowedDevices?: () => NodeId[] | undefined
   perNode?: number
   total?: number
   opensPerMinute?: number
@@ -645,22 +682,36 @@ export class EditorTunnels implements SessionTunnelPort {
     // The slot is taken before anything is awaited, so two opens made at once cannot both pass.
     const claim: Claim = { node, link }
     this.claims.add(claim)
-    let socket: Socket | undefined
+    let socket: Duplex | undefined
+    let keys: TunnelHostKey[]
+    // The end of the pair that the endpoint serves, once it is given the stream.
+    let endpointEnd: Duplex | undefined
+    const endpoint = this.endpointInUse(node)
     try {
-      try {
-        socket = await connectFarEnd(this.farEnd, FAR_END_CONNECT_MS)
-      } catch {
-        return refuse('no_ssh_server')
+      if (endpoint) {
+        // Mousse's own endpoint: no SSH server of the system, nothing to connect to or to vouch for but its key.
+        try {
+          keys = endpoint.hostKeys()
+        } catch {
+          return refuse('no_host_key')
+        }
+        ;[socket, endpointEnd] = linkedPair()
+      } else {
+        try {
+          socket = await connectFarEnd(this.farEnd, FAR_END_CONNECT_MS)
+        } catch {
+          return refuse('no_ssh_server')
+        }
+        // Whether what answered is the system's own SSH server (checked on Windows, where any account could be).
+        if (this.trust) {
+          const verdict = await Promise.resolve()
+            .then(() => this.trust!())
+            .catch(() => ({ ok: false }))
+          if (!verdict.ok) return refuse('host_untrusted')
+        }
+        keys = await readHostKeys(this.hostKeyDirectories).catch(() => [])
+        if (!keys.length) return refuse('no_host_key')
       }
-      // Whether what answered is the system's own SSH server (checked on Windows, where any account could be).
-      if (this.trust) {
-        const verdict = await Promise.resolve()
-          .then(() => this.trust!())
-          .catch(() => ({ ok: false }))
-        if (!verdict.ok) return refuse('host_untrusted')
-      }
-      const keys = await readHostKeys(this.hostKeyDirectories).catch(() => [])
-      if (!keys.length) return refuse('no_host_key')
       // Whatever ended the device's right while the far end was being reached ends the open too.
       if (claim.cancelled) return refuse(claim.cancelled)
       if (link.state() !== 'open') return
@@ -678,6 +729,15 @@ export class EditorTunnels implements SessionTunnelPort {
         local: socket,
         release: [],
         done: false
+      }
+      if (endpoint && endpointEnd) {
+        try {
+          // From here the other end of the pair is the endpoint's: it destroys it when the connection is over, and
+          // the pair ends with it.
+          entry.served = endpoint.serve(endpointEnd, node)
+        } catch {
+          return refuse('far_end_error')
+        }
       }
       entry.pipe = this.pipeFor(entry, socket)
       this.tunnels.set(entry.id, entry)
@@ -755,28 +815,41 @@ export class EditorTunnels implements SessionTunnelPort {
     if (gate) return refuse(gate)
     this.checking.set(node, (this.checking.get(node) ?? 0) + 1)
     let socket: Socket | undefined
+    const endpoint = this.endpointInUse(node)
     try {
-      try {
-        socket = await connectFarEnd(this.farEnd, FAR_END_CONNECT_MS)
-      } catch {
-        return refuse('no_ssh_server')
+      let keys: TunnelHostKey[]
+      if (endpoint) {
+        // The endpoint is part of this daemon: nothing to reach, only its key to vouch for.
+        try {
+          keys = endpoint.hostKeys()
+        } catch {
+          return refuse('no_host_key')
+        }
+      } else {
+        try {
+          socket = await connectFarEnd(this.farEnd, FAR_END_CONNECT_MS)
+        } catch {
+          return refuse('no_ssh_server')
+        }
+        // Nothing is said to the SSH server: the connection is only proof that something listens.
+        socket.destroy()
+        socket = undefined
+        if (this.trust) {
+          const verdict = await Promise.resolve()
+            .then(() => this.trust!())
+            .catch(() => ({ ok: false }))
+          if (!verdict.ok) return refuse('host_untrusted')
+        }
+        keys = await readHostKeys(this.hostKeyDirectories).catch(() => [])
+        if (!keys.length) return refuse('no_host_key')
       }
-      // Nothing is said to the SSH server: the connection is only proof that something listens.
-      socket.destroy()
-      socket = undefined
-      if (this.trust) {
-        const verdict = await Promise.resolve()
-          .then(() => this.trust!())
-          .catch(() => ({ ok: false }))
-        if (!verdict.ok) return refuse('host_untrusted')
-      }
-      const keys = await readHostKeys(this.hostKeyDirectories).catch(() => [])
-      if (!keys.length) return refuse('no_host_key')
       if (link.state() !== 'open') return
       const again = this.safeRefusal(link)
       if (again) return refuse(again)
       this.recordCheck(node, 'ok', 'change')
-      await link.sendTunnel({ t: 'tunnel.opened', tunnel: id, hostKeys: keys }).catch(() => undefined)
+      await link
+        .sendTunnel({ t: 'tunnel.opened', tunnel: id, hostKeys: keys })
+        .catch(() => undefined)
     } finally {
       socket?.destroy()
       const left = (this.checking.get(node) ?? 1) - 1
@@ -799,15 +872,88 @@ export class EditorTunnels implements SessionTunnelPort {
 
   /** At most one row of a kind of refusal per device a minute, so a device that keeps asking cannot fill the audit. */
   private recordRefusal(node: NodeId, reason: TunnelReason): void {
+    this.recordLimited(`${node} ${reason}`, {
+      node,
+      method: 'editor.open',
+      outcome: reason,
+      kind: 'refused'
+    })
+  }
+
+  /** Writes `row` unless a row with the same `key` was written in the last minute. */
+  private recordLimited(
+    key: string,
+    row: { node: NodeId; method: string; outcome: string; kind: 'refused' }
+  ): void {
     const now = this.options.clock.now()
-    const key = `${node} ${reason}`
     const last = this.refusalRows.get(key)
     if (last !== undefined && now - last < REFUSAL_ROW_WINDOW_MS) return
     if (this.refusalRows.size >= 256)
       for (const [name, at] of this.refusalRows)
         if (now - at >= REFUSAL_ROW_WINDOW_MS) this.refusalRows.delete(name)
     this.refusalRows.set(key, now)
-    this.options.audit.record({ node, method: 'editor.open', outcome: reason, kind: 'refused' })
+    this.options.audit.record(row)
+  }
+
+  /** Whether Mousse's own endpoint can answer editor connections on this computer (it cannot on Windows yet). */
+  endpointAvailable(): boolean {
+    return this.options.endpoint?.available() === true
+  }
+
+  /** The endpoint, when this computer answers editor connections itself: it is there, it can run here, and the owner did not choose the system's. */
+  private endpointInUse(node: NodeId): EditorEndpointPort | undefined {
+    const { endpoint, useSystemSsh } = this.options
+    if (!endpoint?.available()) return undefined
+    try {
+      if (useSystemSsh?.(node)) return undefined
+    } catch {
+      // A setting that cannot be read leaves the default.
+    }
+    return endpoint
+  }
+
+  /**
+   * What an SSH connection on the endpoint did that the owner's audit says, with the device. A refusal is written at
+   * most once a minute of each kind per device, so a device cannot fill the audit with forwards it was refused.
+   */
+  recordEndpointEvent(event: EndpointEvent): void {
+    const { audit } = this.options
+    if (event.kind === 'login') {
+      audit.record({
+        node: event.node,
+        method: 'editor.login',
+        outcome: event.method.slice(0, 40),
+        kind: 'change'
+      })
+      return
+    }
+    const outcome = event.kind === 'login_refused' ? event.reason : event.what
+    const method = event.kind === 'login_refused' ? 'editor.login' : 'editor.refused'
+    this.recordLimited(`${method} ${event.node} ${outcome}`, {
+      node: event.node,
+      method,
+      outcome,
+      kind: 'refused'
+    })
+  }
+
+  /**
+   * Stops what the endpoint started for every device that has no right here now. It reads the processes that exist and
+   * the marker they carry, so it needs to know no device and no connection: a device whose window closed long ago, one
+   * that was revoked and one from before a restart are found the same way. Run when a right changes (`reconcile`),
+   * when Net is turned off (`endAll`) and once when the daemon starts. Asynchronous; never throws.
+   */
+  sweepStrays(): Promise<number> {
+    const { endpoint, allowedDevices } = this.options
+    if (!endpoint?.available() || !allowedDevices) return Promise.resolve(0)
+    let allowed: NodeId[] | undefined
+    try {
+      allowed = allowedDevices()
+    } catch {
+      allowed = undefined
+    }
+    if (!allowed) return Promise.resolve(0)
+    return endpoint.sweep(allowed).catch(() => 0)
   }
 
   private hostCount(): number {
@@ -905,7 +1051,11 @@ export class EditorTunnels implements SessionTunnelPort {
         entry.release.push(() => signal.removeEventListener('abort', abort))
       }
       entry.release.push(link.onClosed(() => this.finish(entry, 'session_closed', false)))
-      this.sendReliably(link, { t: 'tunnel.open', tunnel: id, kind: 'ssh.check' }, () => entry.done).catch((error) =>
+      this.sendReliably(
+        link,
+        { t: 'tunnel.open', tunnel: id, kind: 'ssh.check' },
+        () => entry.done
+      ).catch((error) =>
         this.finish(
           entry,
           error instanceof NetError && error.code === 'rate_limited' ? 'timeout' : 'offline',
@@ -922,7 +1072,11 @@ export class EditorTunnels implements SessionTunnelPort {
     entry.done = true
     if (this.tunnels.get(entry.id) === entry) this.tunnels.delete(entry.id)
     for (const release of entry.release.splice(0)) release()
-    entry.check!({ hostKeys, path: entry.path, ...(entry.transport ? { transport: entry.transport } : {}) })
+    entry.check!({
+      hostKeys,
+      path: entry.path,
+      ...(entry.transport ? { transport: entry.transport } : {})
+    })
   }
 
   /** `tunnel.opened` arrived: the tunnel is a stream now. Runs before the next message is handled. */
@@ -972,6 +1126,9 @@ export class EditorTunnels implements SessionTunnelPort {
       this.finish(entry, why === 'capability' ? 'access_lost' : why, true)
       ended++
     }
+    // A device that no longer has the right also loses what it started, even with no tunnel open now: an editor's
+    // server outlives the connection that started it and its session, and a block must reach it.
+    void this.sweepStrays()
     return ended
   }
 
@@ -984,15 +1141,28 @@ export class EditorTunnels implements SessionTunnelPort {
     }
   }
 
-  /** Ends every tunnel, those carried here and those opened from here (Net or Bridge was turned off). */
-  endAll(reason: TunnelReason): number {
+  /**
+   * Ends every tunnel, those carried here and those opened from here. `forced` (by default, for a reason that takes a
+   * right away) also stops everything the endpoint started, for every device, tunnel or not: Net or Bridge was turned
+   * off by the person. A daemon that is closing (a quit, an update, a restart) ends its tunnels as an ordinary
+   * disconnect, `forced: false`: editor servers keep running, as they do when an SSH server restarts, and the sweep
+   * at the next start stops whatever has no right by then.
+   */
+  endAll(reason: TunnelReason, forced: boolean = FORCED_ENDS.has(reason)): number {
     for (const claim of this.claims) claim.cancelled ??= reason
     const open = [...this.tunnels.values()]
-    for (const entry of open) this.finish(entry, reason, true)
+    for (const entry of open) this.finish(entry, reason, true, forced)
+    const { endpoint } = this.options
+    if (endpoint?.available() && forced) void endpoint.sweep([]).catch(() => undefined)
     return open.length
   }
 
-  private finish(entry: Entry, reason: EndReason, notify: boolean): void {
+  private finish(
+    entry: Entry,
+    reason: EndReason,
+    notify: boolean,
+    forced: boolean = FORCED_ENDS.has(reason)
+  ): void {
     if (entry.done) return
     entry.done = true
     // Only this entry's own place: the id is never shared, but a map entry must never be taken for another's.
@@ -1006,6 +1176,8 @@ export class EditorTunnels implements SessionTunnelPort {
       entry.opening = undefined
     }
     entry.pipe?.stop()
+    // The endpoint's connection ends first, so a forced end stops the device's programs before anything else runs.
+    entry.served?.end(forced)
     entry.local?.destroy()
     // The caller's stream just ends; why is in `closed`. (An error event nobody listens for would crash the process.)
     entry.user?.destroy()
@@ -1062,10 +1234,15 @@ export class EditorTunnels implements SessionTunnelPort {
     const bytesIn = entry.pipe?.received ?? 0
     const bytesOut = entry.pipe?.sent ?? 0
     const seconds = Math.max(0, Math.round((this.options.clock.now() - entry.openedAt) / 1000))
+    // What the endpoint's connection did, as counts: never a command, a file name or an address.
+    const counts = entry.served?.counts()
+    const did = counts
+      ? `; exec ${counts.exec + counts.shell}; sftp ${counts.sftp}; fwd ${counts.forwards}`
+      : ''
     this.options.audit.record({
       node: entry.node,
       method: 'editor.close',
-      outcome: `${reason}; ${entry.path}; in ${bytesIn} B; out ${bytesOut} B; ${seconds} s`,
+      outcome: `${reason}; ${entry.path}; in ${bytesIn} B; out ${bytesOut} B; ${seconds} s${did}`,
       kind: 'change'
     })
     this.options.audit.countRead(entry.node, bytesOut)

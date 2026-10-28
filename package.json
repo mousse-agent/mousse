@@ -84,6 +84,7 @@
     "qrcode-generator": "^1.5.2",
     "shiki": "^3.23.0",
     "simple-git": "^3.27.0",
+    "ssh2": "1.17.0",
     "streamdown": "^2.6.0",
     "tailwind-merge": "^3.6.0",
     "tar": "7.5.22",
@@ -211,7 +212,13 @@
       "!**/node_modules/node-pty/scripts/**",
       "!**/node_modules/node-pty/prebuilds/win32-arm64/**",
       "!**/node_modules/node-pty/**/*.{map,ts,md}",
-      "!**/node_modules/node-pty/**/*.test.js"
+      "!**/node_modules/node-pty/**/*.test.js",
+      "!**/node_modules/cpu-features/**",
+      "!**/node_modules/buildcheck/**",
+      "!**/node_modules/nan/**",
+      "!**/node_modules/ssh2/lib/protocol/crypto/build/**",
+      "!**/node_modules/ssh2/lib/protocol/crypto/src/**",
+      "!**/node_modules/ssh2/lib/protocol/crypto/binding.gyp"
     ],
     "asarUnpack": [
       "out/net-native/**",

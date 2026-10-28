@@ -92,6 +92,10 @@ import {
   type EditorTunnelOptions
 } from './editor/tunnel'
 import { LocalEditorTunnels, type LocalConnection } from './editor/localTunnels'
+import { EditorEndpoint } from './editor/endpoint/endpoint'
+import type { ProcessHost } from './editor/endpoint/host'
+import type { EditorEndpointPort } from './editor/endpoint/port'
+import { systemProcessHost } from './editor/endpoint/systemHost'
 import type { EditorTunnelInfo, TunnelReason } from '../../shared/net/tunnel'
 import {
   EDITOR_TUNNEL_HANDLE,
@@ -157,6 +161,18 @@ interface NetConfiguration {
    * every call, so turning it off is also a kill switch.
    */
   workOnThreads?: boolean
+  /**
+   * "Use this computer's SSH server" for editor connections from other computers: the owner's choice for this
+   * computer. Off when absent: Mousse's own SSH endpoint answers. It is written only while it is on, so a profile
+   * that never used it stays readable by an earlier version.
+   */
+  editorSystemSsh?: boolean
+  /**
+   * Devices that keep the system's SSH server for editor connections: those whose "Editor connections" switch was on
+   * when the endpoint arrived, so an upgrade changes nothing for them. A device leaves the list when its switch is
+   * turned off. Its presence (even empty) says the upgrade has been looked at.
+   */
+  editorSystemSshNodes?: NodeId[]
   /** What an add-on action changed outside Mousse, kept so it can be undone. Keyed by add-on. */
   addonRecords?: Record<string, { action: string; appliedAt: number; record: unknown }>
   preparedForJoin?: boolean
@@ -310,6 +326,11 @@ export class NetService {
         EditorTunnelOptions,
         'farEnd' | 'hostKeyDirectories' | 'hostTrust' | 'perNode' | 'total' | 'opensPerMinute'
       > & {
+        /**
+         * Tests give the SSH endpoint a host of their own (a throwaway home folder and account) in place of this
+         * system's; `null` leaves it with none, as on a system the endpoint cannot run on.
+         */
+        endpointHost?: ProcessHost | null
         /** False: sessions do not offer `tunnel.v1`, like a build from before it (tests). */
         offer?: boolean
       }
@@ -357,6 +378,15 @@ export class NetService {
         if (cfg.preparedForJoin !== undefined && typeof cfg.preparedForJoin !== 'boolean')
           throw new NetError('storage_corrupt')
         if (cfg.workOnThreads !== undefined && typeof cfg.workOnThreads !== 'boolean')
+          throw new NetError('storage_corrupt')
+        if (cfg.editorSystemSsh !== undefined && typeof cfg.editorSystemSsh !== 'boolean')
+          throw new NetError('storage_corrupt')
+        if (
+          cfg.editorSystemSshNodes !== undefined &&
+          (!Array.isArray(cfg.editorSystemSshNodes) ||
+            cfg.editorSystemSshNodes.length > 1024 ||
+            cfg.editorSystemSshNodes.some((node) => !isId('node', node)))
+        )
           throw new NetError('storage_corrupt')
         if (
           cfg.addonRecords !== undefined &&
@@ -575,11 +605,38 @@ export class NetService {
         remoteLists: new SqliteRemoteLists(db, this.clock),
         rpc
       }
-      const { offer: _offer, ...tunnelOptions } = this.options.editorTunnel ?? {}
+      // Before the endpoint, an editor connection ended at the system's SSH server. A device that already has the switch
+      // on keeps that server, so the upgrade changes neither what it reaches nor how it signs in; every other device
+      // gets the endpoint. (Looked at once: the list is stored.)
+      if (this.config.editorSystemSshNodes === undefined) {
+        this.config = {
+          ...this.config,
+          editorSystemSshNodes: policy
+            .list()
+            .filter((row) => row.editor)
+            .map((row) => row.node)
+        }
+        this.saveConfig()
+      }
+      const { offer: _offer, endpointHost, ...tunnelOptions } = this.options.editorTunnel ?? {}
+      // Mousse answers editor connections itself, unless a test gave the tunnels an SSH server of their own to end at.
+      const endpoint: EditorEndpointPort | undefined =
+        (tunnelOptions.farEnd || tunnelOptions.hostKeyDirectories) && endpointHost === undefined
+          ? undefined
+          : new EditorEndpoint({
+              keys,
+              host: endpointHost === undefined ? systemProcessHost() : (endpointHost ?? undefined),
+              onEvent: (event) => this.tunnels?.recordEndpointEvent(event)
+            })
       this.tunnels = new EditorTunnels({
         clock: this.clock,
         audit: this.state.audit,
         refusal: (link) => this.tunnelRefusal(link),
+        allowedDevices: () => this.allowedEditorDevices(),
+        useSystemSsh: (node) =>
+          this.config.editorSystemSsh === true ||
+          this.config.editorSystemSshNodes?.includes(node) === true,
+        ...(endpoint ? { endpoint } : {}),
         transportOf: (link) => this.sessionLinks.get(link)?.transport,
         onFirstOpen: (node) => {
           for (const listener of this.editorFirstOpen) {
@@ -597,6 +654,20 @@ export class NetService {
         // An editor tunnel is shell access: a block, or its switch going off, ends the device's tunnels now. This
         // comes first, and cannot throw, so nothing below it that fails can leave a tunnel standing.
         this.tunnels?.reconcile()
+        // A device that turns its switch off and on again is given a new grant, and the new grant is the endpoint's.
+        if (
+          event.before.editor &&
+          !event.after.editor &&
+          this.config.editorSystemSshNodes?.includes(event.node)
+        ) {
+          this.config = {
+            ...this.config,
+            editorSystemSshNodes: this.config.editorSystemSshNodes.filter(
+              (node) => node !== event.node
+            )
+          }
+          this.saveConfig()
+        }
         if (event.after.blocked && !event.before.blocked) this.endBlockedNode(event.node)
         // Terminal output is for a device whose terminal switch is on; switching it off ends the stream at once.
         else if (event.before.terminal && !event.after.terminal)
@@ -624,6 +695,8 @@ export class NetService {
         // Mousse ID admits relay connections against the roster it last received.
         if (user === identity.self()?.user) this.hosted?.rosterChanged()
       })
+      // Once when Net starts: whatever an earlier run of the daemon left running for a device that has no right now.
+      void this.tunnels.sweepStrays()
       return this.state
     } catch (error) {
       this.domain?.close?.()
@@ -923,10 +996,30 @@ export class NetService {
           }
           return { enabled: this.config.workOnThreads !== false }
         }
+        case 'bridge.editorServer': {
+          // "Use this computer's SSH server" for editor connections from other computers. Any computer sets it
+          // for itself. It applies to the next tunnel: one that is open keeps the server it was opened to.
+          this.requireEnrolled()
+          if (params.system !== undefined) {
+            const { editorSystemSsh: _was, ...rest } = this.config
+            // Written only while it is on, so an earlier version of Mousse still reads the profile.
+            this.config = params.system === true ? { ...rest, editorSystemSsh: true } : rest
+            this.saveConfig()
+            this.emit()
+          }
+          return this.editorServerView()
+        }
         default:
           throw new NetError('bad_request')
       }
     })
+  }
+  /** Which SSH server answers editor connections from other computers, and whether Mousse's own can. */
+  private editorServerView(): { system: boolean; available: boolean } {
+    return {
+      system: this.config.editorSystemSsh === true,
+      available: this.tunnels?.endpointAvailable() === true
+    }
   }
   private serial<T>(work: () => Promise<T>): Promise<T> {
     const result = this.mutation.then(() => {
@@ -2001,14 +2094,43 @@ export class NetService {
    * change, so a tunnel never outlives its permission.
    */
   private tunnelRefusal(link: TunnelLink): TunnelReason | undefined {
-    const rt = this.state
-    if (!rt || !this.featureEnabled('netBridge')) return 'net_off'
     let node: NodeId
     try {
       node = link.peer.node
     } catch {
-      return 'capability'
+      return this.state && this.featureEnabled('netBridge') ? 'capability' : 'net_off'
     }
+    return this.deviceRefusal(node)
+  }
+  /**
+   * The devices of the roster that may have an editor connection now, for the sweep of what the endpoint started
+   * (`EditorTunnels.sweepStrays`). Undefined when the roster cannot be read (a locked key store): the sweep then
+   * stops nothing, since it could not tell a device that has the right from one that has not.
+   */
+  private allowedEditorDevices(): NodeId[] | undefined {
+    const rt = this.state
+    if (!rt) return undefined
+    const self = rt.identity.self()
+    // A computer that is not enrolled has no device with a right.
+    if (!self) return []
+    let subjects: NodeId[]
+    try {
+      const roster = rt.identity.verifySigned<Roster>(
+        rt.identity.roster()!,
+        rt.keys.rootKey() ?? rt.identity.pinnedRootKey(self.user)!
+      )
+      subjects = roster.nodes.map(
+        (row) => rt.identity.verifySigned<NodeDelegation>(row, roster.rootKey).subject
+      )
+    } catch {
+      return undefined
+    }
+    return [...new Set(subjects)].filter((node) => this.deviceRefusal(node) === undefined)
+  }
+  /** The same checks for a device named by id, which has no session now (what it started may still be running). */
+  private deviceRefusal(node: NodeId): TunnelReason | undefined {
+    const rt = this.state
+    if (!rt || !this.featureEnabled('netBridge')) return 'net_off'
     if (rt.policy.isBlocked(node)) return 'blocked'
     let caps: readonly NodeCapability[]
     try {
@@ -2078,9 +2200,14 @@ export class NetService {
       const { tunnels, editor, link } = await this.editorLink(node)
       const answer = await this.track(tunnels.check(link))
       if (editor) await editor.pinHostKeys(node, answer.hostKeys)
-      return { ok: true, path: answer.path, ...(answer.transport ? { transport: answer.transport } : {}) }
+      return {
+        ok: true,
+        path: answer.path,
+        ...(answer.transport ? { transport: answer.transport } : {})
+      }
     } catch (error) {
-      if (error instanceof TunnelError) return { ok: false, reason: error.reason, message: error.message }
+      if (error instanceof TunnelError)
+        return { ok: false, reason: error.reason, message: error.message }
       if (error instanceof EditorSshError)
         return { ok: false, reason: 'ssh_settings', code: error.code, message: error.message }
       throw error
@@ -2609,6 +2736,7 @@ export class NetService {
         enabled: this.config.enabled,
         features: { ...this.config.features! },
         workOnThreads: this.config.workOnThreads !== false,
+        editorServer: this.editorServerView(),
         ...(this.disabled ? { restartRequired: true } : {}),
         keystore: rt.keys.state(),
         protected: rt.keys.encryptedAtRest(),
@@ -3260,8 +3388,10 @@ export class NetService {
   beginShutdown(): void {
     if (this.stopped) return
     this.stopped = true
-    // The tunnels end first, while the audit can still be written.
-    this.tunnels?.endAll('net_off')
+    // The tunnels end first, while the audit can still be written. As an ordinary disconnect and not a forced end: a
+    // quit, an update or a restart of the daemon must not kill what an editor started (as restarting an SSH server
+    // does not); whatever has no right by the time Net starts again is stopped by the sweep at that start.
+    this.tunnels?.endAll('net_off', false)
     this.localTunnelStore?.closeAll()
     this.shutdownSignal.abort()
     void this.sshBootstrap?.close()

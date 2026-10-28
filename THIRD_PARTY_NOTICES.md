@@ -103,3 +103,19 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 `@cursor/sdk` and its platform packages (`@cursor/sdk-<platform>-<arch>`, which carry `rg` and the
 Cursor sandbox helper) ship with Mousse unmodified. They are proprietary and used under Cursor's
 terms (`node_modules/@cursor/sdk/LICENSE.md`). Mousse loads them only in its Cursor host process.
+
+## ssh2 (the SSH endpoint)
+
+Mousse answers an editor's SSH connection itself (`src/mms/net/editor/endpoint/`), using `ssh2` 1.17.0 in server mode. It ships unmodified, pinned to that exact version, and Mousse ships none of its optional native add-ons (`cpu-features`, `buildcheck`, `nan` and the `sshcrypto` binding): the packaging excludes them, and `ssh2` falls back to Node's own crypto without them. `ssh2` has an install script that would build `sshcrypto` wherever a compiler is found; this repository allows install scripts only for `node-pty` (`allowScripts` in `package.json`), so it does not run here, and a built copy would be left out of the package by the exclusions in any case.
+
+| Package | Licence | Copyright |
+| --- | --- | --- |
+| `ssh2` 1.17.0 | MIT | Brian White |
+| `asn1` 0.2.6 | MIT | Mark Cavage |
+| `bcrypt-pbkdf` 1.0.2 | BSD-3-Clause | Niels Provos, Ted Unangst, Joyent Inc |
+| `tweetnacl` 0.14.5 | Unlicense (public domain) | none |
+| `safer-buffer` 2.1.2 | MIT | Nikita Skovoroda |
+
+`node-pty` (MIT; Christopher Jeffrey, Daniel Imms and Microsoft Corporation) already ships with Mousse for terminals; the endpoint also uses it for the pseudo-terminal of an editor's shell.
+
+The full licence text of each package is in its folder under `node_modules` and is included in every build.
