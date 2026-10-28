@@ -86,9 +86,12 @@ function bedrockClaude(model: ReservableModel): boolean {
   return id.includes('anthropic.claude') || id.includes('anthropic/claude') || name.includes('anthropic.claude') || name.includes('anthropic/claude') || name.includes('claude')
 }
 
+/** The markers of `bedrock-converse-stream.js` `supportsAdaptiveThinking` (a test reads pi-ai's own list). */
+export const BEDROCK_ADAPTIVE_MARKERS: readonly string[] = Object.freeze(['opus-4-6', 'opus-4-7', 'opus-4-8', 'opus-5', 'sonnet-4-6', 'sonnet-5', 'haiku-5', 'fable-5'])
+
 /** `bedrock-converse-stream.js` `supportsAdaptiveThinking`. */
 function bedrockAdaptive(model: ReservableModel): boolean {
-  return matchCandidates(model).some((value) => ['opus-4-6', 'opus-4-7', 'opus-4-8', 'opus-5', 'sonnet-4-6', 'sonnet-5', 'fable-5'].some((marker) => value.includes(marker)))
+  return matchCandidates(model).some((value) => BEDROCK_ADAPTIVE_MARKERS.some((marker) => value.includes(marker)))
 }
 
 /** Whether pi-ai adds the thinking budget to the output cap for this request (budget-based thinking). */

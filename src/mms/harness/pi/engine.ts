@@ -1559,7 +1559,9 @@ export class PiRpcEngine implements ProviderAdapter {
         if (thread.starting === started) thread.starting = undefined
       }
       const after = await this.send<{ entries: Array<{ id: string; type: string; message?: { role?: string } }> }>(thread, { type: 'get_entries', since: leaf })
-      const next = after.entries.find((entry) => entry.type === 'message')
+      // Pi 1.x records a system message before a turn whose prompt or tools changed: the next turn
+      // starts at its first user message.
+      const next = after.entries.find((entry) => entry.type === 'message' && entry.message?.role !== 'system')
       if (!next) {
         if ((await this.send<{ cancelled: boolean }>(thread, { type: 'clone' })).cancelled) return null
       } else {

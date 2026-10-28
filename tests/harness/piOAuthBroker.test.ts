@@ -391,4 +391,25 @@ describe('the OAuth broker in the real Pi child', () => {
     }
     expect(source.refresh).not.toHaveBeenCalled()
   }, 180_000)
+
+  it('a Meta sign-in in Mousse’s vault reaches Pi: its minted key is the request’s key', async () => {
+    const recorder = await startRecorder()
+    cleanups.push(() => recorder.close())
+    const model = {
+      id: 'mousse-muse', name: 'Mousse Muse', api: 'openai-responses', provider: 'meta', baseUrl: `${recorder.url}/v1`,
+      reasoning: false, input: ['text'], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 128000, maxTokens: 4096
+    }
+    // As pi-ai's Meta login stores it: the minted Model API key as `access`, the identity token as `refresh`.
+    const { vault } = fakeVault({ meta: { type: 'oauth', access: 'meta-fake-model-key', refresh: 'meta-fake-identity-token', expires: Date.now() + HOUR } })
+    const source = piOAuthBroker(vault)
+    const grant = await source.credential('meta')
+    expect(grant).toMatchObject({ access: 'meta-fake-model-key', fields: {} })
+    const run = await child({ provider: { id: 'meta', builtin: true, models: [model] as never }, model: 'mousse-muse', grant: grant!, source })
+    await run.prompt('meta', 'mousse-muse')
+    expect(recorder.requests.length).toBeGreaterThan(0)
+    for (const request of recorder.requests) {
+      expect(request.headers.authorization).toBe('Bearer meta-fake-model-key')
+      expect(JSON.stringify(request)).not.toContain('meta-fake-identity-token')
+    }
+  }, 180_000)
 })

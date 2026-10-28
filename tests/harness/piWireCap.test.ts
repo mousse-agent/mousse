@@ -9,6 +9,7 @@ import { streamSimple as responsesStream } from '@earendil-works/pi-ai/api/opena
 import { MIN_ANSWER_TOKENS as PI_MIN_ANSWER_TOKENS } from '@earendil-works/pi-ai/api/simple-options'
 import { estimateContextTokens as piEstimate } from '@earendil-works/pi-ai/utils/estimate'
 import {
+  BEDROCK_ADAPTIVE_MARKERS,
   CAP_HONOURING_APIS,
   MIN_ANSWER_TOKENS,
   capHonouring,
@@ -48,6 +49,7 @@ const MODELS: Model<Api>[] = [
   model('anthropic-messages', { id: 'claude-opus-4-7', compat: { forceAdaptiveThinking: true } as never }),
   model('bedrock-converse-stream', { id: 'anthropic.claude-sonnet-4-5-20250929-v1:0', name: 'Claude Sonnet 4.5' }),
   model('bedrock-converse-stream', { id: 'anthropic.claude-opus-4-7', name: 'Claude Opus 4.7' }),
+  model('bedrock-converse-stream', { id: 'us.anthropic.claude-haiku-5-5', name: 'Claude Haiku 5.5' }),
   model('bedrock-converse-stream', { id: 'amazon.nova-pro-v1:0', name: 'Nova Pro' }),
   model('google-generative-ai', { id: 'gemini-2.5-pro' }),
   model('openai-completions', { id: 'gpt-4.1' }),
@@ -103,6 +105,15 @@ describe('the wire-cap mirror (pinned pi-ai 1.4.0)', () => {
     }
     for (const ctx of [context(10), context(90_000), normalizeContext({ messages: [] }), normalizeContext(used)])
       expect(estimateContextTokens(ctx)).toBe(piEstimate(ctx).tokens)
+  })
+
+  it('Bedrock’s adaptive-thinking models are pi-ai’s own list', () => {
+    const source = readFileSync(new URL('../../node_modules/@earendil-works/pi-ai/dist/api/bedrock-converse-stream.js', import.meta.url), 'utf8')
+    const body = /function supportsAdaptiveThinking\([^)]*\) \{([\s\S]*?)\n\}/.exec(source)?.[1]
+    expect(body, 'supportsAdaptiveThinking in the Bedrock builder').toBeDefined()
+    const markers = [...body!.matchAll(/s\.includes\("([^"]+)"\)/g)].map((match) => match[1])
+    expect(markers.length).toBeGreaterThan(0)
+    expect([...BEDROCK_ADAPTIVE_MARKERS].sort()).toEqual(markers.sort())
   })
 
   it('the answer room is also a literal 1024 in the Anthropic and Bedrock builders (re-checked on every Pi upgrade)', () => {

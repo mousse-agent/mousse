@@ -1,6 +1,6 @@
 import { createAssistantMessageEventStream, lazyStream, type Api, type AssistantMessage, type AssistantMessageEventStream, type Model, type Provider, type ProviderStreams } from '@earendil-works/pi-ai'
 import { fallbackModels, hookCandidates, hookCap, unreservedRoute } from '../reservation'
-import { ANTHROPIC_OAUTH_REFUSED, LOGIN_REFUSED, SPEND_CAP_MISMATCH } from './messages'
+import { ANTHROPIC_OAUTH_REFUSED, LOGIN_REFUSED, MODEL_OPERATION_REFUSED, SPEND_CAP_MISMATCH } from './messages'
 
 /**
  * The fail-closed Anthropic guard of Mousse's Pi extension (PR 2 §4 "Anthropic guard").
@@ -320,14 +320,21 @@ const refuseLogin = async (): Promise<never> => {
   throw new Error(LOGIN_REFUSED)
 }
 
+/** Image generation and classification pass neither the Anthropic rule nor the request gate: refused. */
+const refuseOperation = async (): Promise<never> => {
+  throw new Error(MODEL_OPERATION_REFUSED)
+}
+
 /** A copy of `value` (own fields and prototype, so class methods survive) with `patch` over it. */
 function override<T extends object>(value: T, patch: Partial<T>): T {
   return Object.assign(Object.create(Object.getPrototypeOf(value) as object) as T, value, patch)
 }
 
 /**
- * `provider` with its stream functions guarded and its sign-in flows refused (Mousse signs in;
- * Pi never does). Everything else, OAuth `toAuth` and `refresh` included, is the provider's own.
+ * `provider` with its stream functions guarded, its sign-in flows refused (Mousse signs in; Pi never
+ * does), and image generation and classification refused (whether or not the provider has them, so
+ * one added later still fails closed). Everything else, OAuth `toAuth` and `refresh` included, is
+ * the provider's own.
  */
 export function guardProvider(provider: Provider, observer?: GuardObserver, gate?: RequestGate): Provider {
   if (isGuarded(provider)) return provider
@@ -339,6 +346,8 @@ export function guardProvider(provider: Provider, observer?: GuardObserver, gate
       ...(provider.fetchDeferred ? { fetchDeferred: provider.fetchDeferred.bind(provider) } : {}),
       ...(provider.cancelDeferred ? { cancelDeferred: provider.cancelDeferred.bind(provider) } : {})
     }, provider.headers, observer, gate),
+    generateImages: refuseOperation,
+    classify: refuseOperation,
     auth: {
       ...(auth.apiKey ? { apiKey: auth.apiKey.login ? override(auth.apiKey, { login: refuseLogin }) : auth.apiKey } : {}),
       ...(auth.oauth ? { oauth: override(auth.oauth, { login: refuseLogin }) } : {})

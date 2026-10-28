@@ -147,7 +147,7 @@ mousse-cli [options] [message...]
 
 Without `-p`/`--print`, on an interactive terminal, `mousse-cli` opens a **pi-style** session:
 
-- Pi's interactive terminal UI and multi-line editor, powered directly by `@earendil-works/pi-tui` 1.4.0 (with a readline fallback if the TUI cannot load)
+- A line editor (readline). The pi-style terminal UI is meant to load from `@earendil-works/pi-tui`, but it does not load today, so readline is what runs.
 - Slash commands shared with Telegram/Discord (`/threads`, `/models`, `/steer`, `/stop`, …)
 - Ordinary messages submitted while a turn is busy **stack FIFO** and run next
 - `/steer <text>` targets the **active turn** only (never rewritten as a normal message)

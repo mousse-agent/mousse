@@ -27,8 +27,14 @@ export const GATE_UNAVAILABLE = 'mousse_gate_unavailable'
  */
 export const SPEND_CAP_MISMATCH = 'mousse_spend_cap_mismatch'
 
+/**
+ * A provider's image generation or classification (pi-ai 1.x `generateImages`, `classify`): Mousse
+ * neither guards nor charges them, so a Mousse-started Pi never runs them.
+ */
+export const MODEL_OPERATION_REFUSED = 'mousse_model_operation_refused'
+
 /** Every text Mousse raises on the request path; a unit test checks pi-ai does not retry any. */
-export const REQUEST_PATH_ERRORS: readonly string[] = Object.freeze([ANTHROPIC_OAUTH_REFUSED, CREDENTIAL_UNAVAILABLE, BUDGET_EXHAUSTED, REQUEST_REFUSED, GATE_UNAVAILABLE, SPEND_CAP_MISMATCH])
+export const REQUEST_PATH_ERRORS: readonly string[] = Object.freeze([ANTHROPIC_OAUTH_REFUSED, CREDENTIAL_UNAVAILABLE, BUDGET_EXHAUSTED, REQUEST_REFUSED, GATE_UNAVAILABLE, SPEND_CAP_MISMATCH, MODEL_OPERATION_REFUSED])
 
 /** Pi's sign-in flows are Mousse's: a provider's `login` rejects with this. */
 export const LOGIN_REFUSED = "mousse_login_refused: sign in from Mousse's Providers page"

@@ -155,6 +155,30 @@ describe('Pi RPC sessions with the real Pi child', () => {
     expect(notices).toEqual([])
   }, 120_000)
 
+  it('forks an earlier turn natively when the next turn ran with other tools (Pi records a system message before it)', async () => {
+    const { engine, recorder, project, stateDir, notices, scratch } = await setup()
+    recorder.respond(replies(['First answer', 'Planned answer', 'Fork of first']))
+    const first = await run(engine, harness(project))
+    // Plan mode offers no write tool, so the second turn's tool set differs from the first's.
+    const second = await run(engine, harness(project, { runId: 'r2', prompt: 'Plan it', mode: 'plan' as TurnInput['mode'], nativeHistory: `
+user: Say hello
+assistant: First answer` }))
+    const source = second.providerRef as ProviderRef
+    expect(source.sessionId).toBe(first.providerRef.sessionId)
+    const roles = (sessionMessages(stateDir, source.sessionId!) as Array<{ role: string }>).map((message) => message.role)
+    expect(roles).toEqual(['system', 'user', 'assistant', 'system', 'user', 'assistant'])
+
+    const earlier = await engine.forkSession(first.providerRef, 1, { threadId: 'fork-first' })
+    expect(earlier?.sessionId).toBeTruthy()
+    expect(earlier?.sessionId).not.toBe(source.sessionId)
+    const forkProject = join(scratch, 'fork-worktree')
+    mkdirSync(forkProject)
+    const onFirst = await run(engine, harness(forkProject, { threadId: 'fork-first', runId: 'f1', prompt: 'Go on' }))
+    expect(onFirst).toMatchObject({ text: 'Fork of first', providerRef: { sessionId: earlier!.sessionId } })
+    expect(sent(recorder.requests.at(-1))).toEqual(['user: Say hello', 'assistant: First answer', 'user: Go on'])
+    expect(notices).toEqual([])
+  }, 120_000)
+
   it('hands a pi-loop thread’s history to a seeded session: Pi sends the prior messages as messages, and the thread is told', async () => {
     const { engine, recorder, project, stateDir, notices } = await setup()
     recorder.respond(replies(['Seeded reply', 'Resumed reply']))
