@@ -429,10 +429,10 @@ describe('files and the folder of a thread', () => {
       path: 'a.txt',
       content: expect.stringContaining('one')
     })
-    // The panel is told why, as the owner's own window is.
+    // The panel is told why, as the owner's own window is, and a path that leaves the folder has a code of its own.
     expect(await call('files.read', { threadId: t.id, path: '../outside.txt' })).toMatchObject({
       ok: false,
-      error: { code: 'file_unavailable', message: expect.stringMatching(/./) }
+      error: { code: 'path_outside_folder', message: 'Path is outside the project root' }
     })
     expect(await call('files.read', { threadId: t.id, path: 'missing.txt' })).toMatchObject({
       ok: false,

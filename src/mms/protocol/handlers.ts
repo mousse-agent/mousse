@@ -109,12 +109,14 @@ import { ChildAgentIntegrationService } from '../agents/ChildAgentIntegrationSer
 import { ChangeReceiptService } from '../actions/ChangeReceiptService'
 import { PublishService } from '../actions/PublishService'
 import { atomicWriteJsonSync } from '../data/AtomicFs'
-import { resolveWithinRoot } from '../files/pathGuard'
+import { lexicalGuard, type GuardedPath, type PathGuard, type PathIntent } from '../files/pathGuard'
+import { PathContainmentError, routedGuardFor } from '../files/routedGuard'
+import { ROUTED_STAGE_ITEM_BYTES } from '../../shared/bridge/routed'
 import { grepWorkspace } from '../files/WorkspaceGrep'
 import { getWorkspaceIndexRegistry } from '../files/WorkspaceIndexRegistry'
 import { searchWorkspacePaths } from '../files/WorkspaceSearch'
 import { devGuiBridge } from '../devgui/DevGuiBridge'
-import { existsSync, lstatSync, mkdirSync, readFileSync } from 'node:fs'
+import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync } from 'node:fs'
 import { FILE_ASSET_PIECE_BYTES, SAVE_TOO_LARGE_MESSAGE, saveExceedsRequest } from '../../shared/fileAssets'
 import { homedir } from 'node:os'
 import { join, relative, resolve } from 'node:path'
@@ -475,7 +477,8 @@ function isLocalWindow(ctx: HandlerContext): boolean {
 async function fileCall<T>(ctx: HandlerContext, run: () => Promise<T>): Promise<T> {
   try {
     return await run()
-  } catch (error) {
+  } catch (rejected) {
+    const error = refusedPath(rejected)
     if (!isPerson(ctx.connection) || error instanceof DomainRpcError || error instanceof AppError) throw error
     throw new DomainRpcError('file_unavailable', error instanceof Error ? error.message : String(error))
   }
@@ -798,15 +801,28 @@ async function gitMutationTarget(ctx: HandlerContext, p: Record<string, unknown>
 }
 
 /** Paths as `getStatus` names them (repository-relative), accepted only inside the project folder. */
-function gitPaths(root: string, value: unknown): string[] {
+function gitPaths(ctx: HandlerContext, root: string, value: unknown): string[] {
   const paths = asStringArray(value, 'paths', { unique: true, maxItems: GIT_PATHS_MAX, maxItemLen: 4096 })
   if (paths.length === 0) throw new DomainRpcError('invalid_params', 'paths must name at least one file')
   const top = workspaceGit(root, ['rev-parse', '--show-toplevel'])
+  let named: string[]
   try {
-    return repoRelativePaths(top, root, paths)
+    named = repoRelativePaths(top, root, paths)
   } catch {
     throw new DomainRpcError('git_path_outside', 'That path is outside the project folder.')
   }
+  // From another computer a path may not lead out of the folder through a link or junction either: Git on Windows
+  // follows junctions, and `discard` deletes what it names. The path is only looked at, never changed, so a `.git` name is no concern here.
+  if (ctx.connection?.bridgeCaller) {
+    try {
+      const realRoot = realpathSync.native(resolve(root))
+      const realTop = realpathSync.native(top)
+      for (const path of named) containedPath(ctx, root, relative(realRoot, join(realTop, path)), 'inspect')
+    } catch (error) {
+      throw refusedPath(error)
+    }
+  }
+  return named
 }
 
 /**
@@ -898,14 +914,39 @@ async function gitStatusResult(ctx: HandlerContext, root: string, extra: Record<
   return { status: await ctx.mms.gitService.getStatus(root), ...extra } as { status: GitStatusSnapshot }
 }
 
-function containedPath(root: string, value: unknown): string {
-  const path = asOptionalString(value, 4096) ?? ''
-  const absolute = resolveWithinRoot(root, path)
-  return relative(root, absolute).replace(/\\/g, '/')
+/**
+ * Which paths a caller may name inside a folder. A call from another of the user's computers holds to what is
+ * on disk (links, junctions and short names are resolved, `.git` and hook folders cannot be changed); a window of
+ * this computer, and the other callers of this computer, keep to how the path is spelled.
+ */
+function guardFor(ctx: HandlerContext): PathGuard {
+  const caller = ctx.connection?.bridgeCaller
+  // The device's limit decides which files a save may change (those that start programs by themselves need Full access).
+  return caller ? routedGuardFor(caller.maxPermissionMode) : lexicalGuard
 }
 
-function requiredContainedPath(root: string, value: unknown): string {
-  return containedPath(root, asString(value, 'path', 4096))
+/** A refusal of the guard is a result with its own code; any other error is left as it is. */
+function refusedPath(error: unknown): unknown {
+  return error instanceof PathContainmentError ? new DomainRpcError(error.code, error.message) : error
+}
+
+/** An action that failed only because the guard refused its path (found out as it wrote) is that refusal. */
+function refusalOfAction(error: unknown): never {
+  const cause = error instanceof ActionExecutionError ? error.cause : error
+  throw cause instanceof PathContainmentError ? refusedPath(cause) : error
+}
+
+function containedPath(ctx: HandlerContext, root: string, value: unknown, intent: PathIntent = 'read'): string {
+  const path = asOptionalString(value, 4096) ?? ''
+  try {
+    return guardFor(ctx).resolve(root, path, intent).relative
+  } catch (error) {
+    throw refusedPath(error)
+  }
+}
+
+function requiredContainedPath(ctx: HandlerContext, root: string, value: unknown, intent: PathIntent = 'read'): string {
+  return containedPath(ctx, root, asString(value, 'path', 4096), intent)
 }
 
 function asReviewScope(value: unknown): ReviewScope {
@@ -2721,8 +2762,9 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const p = isObject(params) ? params : {}
       const target = await reviewTarget(ctx, p)
       if (target.unavailable) throw new DomainRpcError('review_unavailable', target.unavailable)
-      const path = requiredContainedPath(target.root, p.path)
-      const oldPath = p.oldPath === undefined ? undefined : requiredContainedPath(target.root, p.oldPath)
+      // The review shows a link at the path as the link text and never reads what it points to.
+      const path = requiredContainedPath(ctx, target.root, p.path, 'inspect')
+      const oldPath = p.oldPath === undefined ? undefined : requiredContainedPath(ctx, target.root, p.oldPath, 'inspect')
       return await readFileVersions(target.root, target.range, path, oldPath)
     }
     case 'actions.undoLatest': {
@@ -2915,15 +2957,15 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const p = isObject(params) ? params : {}
       return await fileCall(ctx, async () => {
         const root = await filesRootContext(ctx, p)
-        return { entries: await ctx.mms.fileService.listDir(root, containedPath(root, p.path)) }
+        return { entries: await ctx.mms.fileService.listDir(root, containedPath(ctx, root, p.path), guardFor(ctx)) }
       })
     }
     case 'files.read': {
       const p = isObject(params) ? params : {}
       return await fileCall(ctx, async () => {
         const root = await filesRootContext(ctx, p)
-        const path = requiredContainedPath(root, p.path)
-        return { path, content: await ctx.mms.fileService.readFile(root, path) }
+        const path = requiredContainedPath(ctx, root, p.path)
+        return { path, content: await ctx.mms.fileService.readFile(root, path, guardFor(ctx)) }
       })
     }
     case 'files.readAsset': {
@@ -2933,8 +2975,8 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const length = asOptionalBoundedInt(p.length, 'length', { min: 1, max: FILE_ASSET_PIECE_BYTES }) ?? FILE_ASSET_PIECE_BYTES
       return await fileCall(ctx, async () => {
         const root = await filesRootContext(ctx, p)
-        const path = requiredContainedPath(root, p.path)
-        const piece = await ctx.mms.fileService.readAssetRange(root, path, offset, length)
+        const path = requiredContainedPath(ctx, root, p.path)
+        const piece = await ctx.mms.fileService.readAssetRange(root, path, offset, length, guardFor(ctx))
         return { path, mimeType: piece.mimeType, size: piece.size, offset, data: Buffer.from(piece.data).toString('base64') }
       })
     }
@@ -2955,7 +2997,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         // The file was read from the thread's worktree, so a retired one comes back before it is written.
         await materializeRequestedWorkspace(ctx, p)
         const root = localFilesRoot(ctx, p)
-        const path = requiredContainedPath(root, p.path)
+        const path = requiredContainedPath(ctx, root, p.path)
         const lines = await ctx.mms.fileService.writeFile(root, path, content)
         ctx.mms.lineEditStats.record('manual', lines)
         return { path }
@@ -2965,8 +3007,20 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const p = isObject(params) ? params : {}
       await ensureOwnedTaskWorkspace(ctx, p)
       const root = projectRootContext(ctx, p)
-      const path = requiredContainedPath(root, p.path)
-      const content = asString(p.content, 'content', 512 * 1024)
+      const guard = guardFor(ctx)
+      const wanted = asString(p.path, 'path', 4096)
+      // Checked once, before the action is recorded, so a refused path leaves no action behind. What the repository says about
+      // hooks and configuration is looked up first, without blocking the daemon.
+      await guard.prepare?.(root, wanted, 'write').catch(() => undefined)
+      let guarded: GuardedPath
+      try {
+        guarded = guard.resolve(root, wanted, 'write')
+      } catch (error) {
+        throw refusedPath(error)
+      }
+      const path = guarded.relative
+      // Another computer sends a large file ahead of the call (a staged value, at most what staging holds); every other caller keeps the 512 KiB limit.
+      const content = asString(p.content, 'content', ctx.connection?.bridgeCaller ? ROUTED_STAGE_ITEM_BYTES : 512 * 1024)
       const threadId = asOptionalString(p.threadId, 256)
       if (threadId) {
         const operation = threadOperationContext(ctx, p)
@@ -2980,7 +3034,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
             workspacePath: root, actor: { kind: 'user' }, expectedJournalRevision: operation.currentGeneration,
             presentationMessageStart: latest?.presentationMessageEnd ?? 0, presentationMessageEnd: latest?.presentationMessageEnd ?? 0,
             nativeContextBoundary: latest?.nativeContextBoundary ?? { messageIndex: 0, compactionGeneration: 0, fidelity: 'legacy' }
-          }, () => ctx.mms.fileService.writeFile(root, path, content))
+          }, () => ctx.mms.fileService.writeFile(root, path, content, guard, guarded)).catch(refusalOfAction)
           // Covers daemon-side writers only: desktop saves and agent edits never reach this method
           // (the search index refreshes on its own 15 s stale rule).
           getWorkspaceIndexRegistry().invalidate(root)
@@ -2988,7 +3042,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
           return { path, lineEdits, receiptId: action.receiptId }
         }
       }
-      const lineEdits = await ctx.mms.fileService.writeFile(root, path, content)
+      const lineEdits = await ctx.mms.fileService.writeFile(root, path, content, guard, guarded).catch(refusalOfAction)
       getWorkspaceIndexRegistry().invalidate(root)
       return { path, lineEdits }
     }
@@ -2996,7 +3050,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const p = isObject(params) ? params : {}
       await materializeRequestedWorkspace(ctx, p)
       const root = projectRootContext(ctx, p)
-      return { stat: await ctx.mms.fileService.stat(root, requiredContainedPath(root, p.path)) }
+      return { stat: await ctx.mms.fileService.stat(root, requiredContainedPath(ctx, root, p.path), guardFor(ctx)) }
     }
     case 'files.search': {
       const p = isObject(params) ? params : {}
@@ -3053,7 +3107,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const p = isObject(params) ? params : {}
       await materializeRequestedWorkspace(ctx, p)
       const root = projectRootContext(ctx, p)
-      return { diff: await ctx.mms.gitService.getDiff(root, requiredContainedPath(root, p.path), asOptionalBoolean(p.staged, 'staged') === true) }
+      return { diff: await ctx.mms.gitService.getDiff(root, requiredContainedPath(ctx, root, p.path, 'inspect'), asOptionalBoolean(p.staged, 'staged') === true) }
     }
     case 'git.log': {
       const p = isObject(params) ? params : {}
@@ -3143,13 +3197,13 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const all = asOptionalBoolean(p.all, 'all') === true
       const staging = method === 'git.stage'
       if (all) await (staging ? ctx.mms.gitService.stageAll(target.root) : ctx.mms.gitService.unstageAll(target.root))
-      else await (staging ? ctx.mms.gitService.stage(target.root, gitPaths(target.root, p.paths)) : ctx.mms.gitService.unstage(target.root, gitPaths(target.root, p.paths)))
+      else await (staging ? ctx.mms.gitService.stage(target.root, gitPaths(ctx, target.root, p.paths)) : ctx.mms.gitService.unstage(target.root, gitPaths(ctx, target.root, p.paths)))
       return gitStatusResult(ctx, target.root)
     }
     case 'git.discard': {
       const p = isObject(params) ? params : {}
       const target = await gitMutationTarget(ctx, p)
-      const paths = gitPaths(target.root, p.paths)
+      const paths = gitPaths(ctx, target.root, p.paths)
       const thread = threadWorktree(target)
       if (thread) {
         // The remainder is checkpointed afterwards, so the tree is clean again and the discard is on record.

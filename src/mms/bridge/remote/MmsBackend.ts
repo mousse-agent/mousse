@@ -1,5 +1,11 @@
 import { realpathSync, statSync } from 'node:fs'
-import { dirname, isAbsolute, relative, resolve, sep } from 'node:path'
+import { dirname, isAbsolute, resolve } from 'node:path'
+import { isInsidePath } from '../../files/pathGuard'
+import {
+  currentFolderEnvironment,
+  sensitiveFolderHolding,
+  type FolderRuleEnvironment
+} from '../../files/sensitiveFolders'
 import { portableRepository } from '../dispatch/repository'
 import { matchProject, type ProjectIdentity } from './projectMatch'
 import { withoutStandingRules } from '../../orchestrator/UserQuestionService'
@@ -106,16 +112,6 @@ const IDENTITY_TTL_MS = 5 * 60_000
 /** Projects looked at for one match; a profile with more is matched against the first ones. */
 const MATCH_PROJECT_LIMIT = 256
 
-/** Whether `child` is `parent` or lies below it; case-insensitive where the filesystem usually is. */
-function isInside(child: string, parent: string): boolean {
-  const fold = process.platform === 'darwin' || process.platform === 'win32'
-  const from = fold ? parent.toLowerCase() : parent
-  const to = fold ? child.toLowerCase() : child
-  const path = relative(from, to)
-  // `..cache` is a folder name, not a step up.
-  return path === '' || (path !== '..' && !path.startsWith(`..${sep}`) && !isAbsolute(path))
-}
-
 /**
  * A Windows network or device path (`\\host\share`, `\\?\C:\x`, `\\.\pipe\x`). Resolving one makes
  * this computer reach out to a host the caller names, and the lookup blocks until it answers.
@@ -134,7 +130,9 @@ export class MmsRemoteBackend implements RemoteBackendPort {
   private readonly identities = new Map<string, { at: number; identity: ProjectIdentity | null }>()
   constructor(
     private readonly services: MmsProfileServices,
-    private readonly revision: () => number = () => 0
+    private readonly revision: () => number = () => 0,
+    /** Where this computer keeps credentials and settings (the user's home, the platform, tool folders). */
+    private readonly folderRules: () => FolderRuleEnvironment = currentFolderEnvironment
   ) {}
   async execute(method: BridgeOrdinaryMethod, params: Record<string, unknown>, caller?: { node: NodeId }): Promise<unknown> {
     if (
@@ -259,9 +257,16 @@ export class MmsRemoteBackend implements RemoteBackendPort {
         folders = [lexical, real]
       // Inside the data folder, or a folder that holds it: file tools may edit anything below the
       // project folder, so a thread there could change the keys and databases without asking.
-      if (homes.some((root) => folders.some((folder) => isInside(folder, root) || isInside(root, folder))))
+      if (homes.some((root) => folders.some((folder) => isInsidePath(folder, root) || isInsidePath(root, folder))))
         return refuse('That folder is part of the Mousse data folder, or contains it.')
     }
+    // The user's credentials and settings (SSH keys, cloud sign-ins, keychains, browser profiles), and so the home
+    // folder and everything above it: a thread there could read or change them without asking.
+    const holding = sensitiveFolderHolding([lexical, real], this.folderRules())
+    if (holding)
+      return refuse(
+        `That folder holds ${holding}, or is inside or above a folder that does, so it cannot be opened from another computer.`
+      )
     const project = s.projects.openProject(real)
     s.events.broadcast('projects:updated', s.projects.listProjects())
     return { ok: true, project }
