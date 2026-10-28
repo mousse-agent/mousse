@@ -92,6 +92,7 @@ import { isQualifiedId } from '../../shared/threadRef'
 import { resolveThreadProjectPath } from '../data/resolveActiveProjectPath'
 import { ThreadJournal } from '../data/ThreadJournal'
 import { ThreadWorkspaceManager } from '../workspace/ThreadWorkspaceManager'
+import { resolveEditorFolder } from '../workspace/editorFolder'
 import { scheduledJobOptionsDepsFrom, validateScheduledJobOptions, type ScheduledJobOptionsDeps } from '../scheduled/validateJobOptions'
 import { isExecutableJobEdit, JobPermissionRefused, permissionAboveCeiling, permissionsAfterEdit } from '../scheduled/jobPermission'
 import { ScheduledWebhookError } from '../scheduled/ScheduledJobService'
@@ -2750,6 +2751,16 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         journalGeneration: lookup.currentGeneration,
         ...(marker ? { retiredByCleanup: { at: marker.retiredAt, rule: marker.rule } } : {})
       }
+    }
+    case 'editor.folder': {
+      // Which folder an editor opens for a thread. The thread id is all a caller gives; the folder is this computer's own.
+      const p = isObject(params) ? params : {}
+      rejectUnknownKeys(p, ['threadId'])
+      const threadId = asString(p.threadId, 'threadId', 256)
+      if (!ctx.mms.threads.getThread(threadId)) throw new DomainRpcError('thread_not_found', 'Thread not found', { threadId })
+      const projectPath = resolveThreadProjectPath(ctx.mms.projects, ctx.mms.threads, threadId)
+      if (!projectPath) throw new DomainRpcError('thread_has_no_folder', 'This thread has no folder on this computer.', { threadId })
+      return resolveEditorFolder({ threadId, threadDirectory: ctx.mms.threads.getThreadDir(threadId), projectPath })
     }
     case 'workspace.restore': {
       const p = isObject(params) ? params : {}

@@ -167,6 +167,10 @@ export const ROUTED_METHODS: Readonly<Record<string, RoutedRow>> = Object.freeze
   'agents.list': read('thread', ['threadId']),
   'tasks.list': read('thread', ['threadId']),
   'workspace.getStatus': read('thread', ['threadId', GEN]),
+  // The folder an editor on the calling computer opens for the thread: its ready worktree, else its project's
+  // folder, resolved here from the thread. The call carries no path, and the reply names this computer's system
+  // so the caller can build a Remote-SSH address (`editorFolder.ts`).
+  'editor.folder': read('thread', ['threadId']),
   'threads.approvalRules': read('thread', ['threadId']),
   'actions.list': read('thread', ['threadId', GEN]),
   'actions.getAffectedFiles': read('thread', ['threadId', 'actionId', GEN], {
