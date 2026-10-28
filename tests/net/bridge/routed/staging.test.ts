@@ -167,10 +167,11 @@ describe('routed.stage', () => {
     const t = thread('Saved', project.id, path)
     const id = stageId(await stage('same text, sent once'))
 
-    // Two calls name the same value at once: one uses it, the other is told it is in use.
+    // Two calls name the same value at once: one uses it, the other is told it is in use. (Two large saves at once are
+    // refused earlier, one at a time per computer, so this is a queued message.)
     const [first, second] = await Promise.all([
-      call('files.write', { threadId: t.id, path: 'one.txt', stagedValues: { content: id } }),
-      call('files.write', { threadId: t.id, path: 'two.txt', stagedValues: { content: id } })
+      call('queue.enqueue', { threadId: t.id, stagedValues: { content: id } }),
+      call('queue.enqueue', { threadId: t.id, stagedValues: { content: id } })
     ])
     const replies = [first, second]
     expect(replies.filter((reply) => reply.ok)).toHaveLength(1)
