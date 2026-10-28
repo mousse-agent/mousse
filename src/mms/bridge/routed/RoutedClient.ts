@@ -14,6 +14,7 @@ import {
   type RoutedStreamKind,
   type RoutedStreamOpened
 } from '../../../shared/bridge/routed'
+import { qualifyRoutedResult } from '../../../shared/bridge/routedIds'
 import type { SyncSession } from '../../net/contracts'
 import { DomainRpcError } from '../../protocol/domainRegistry'
 import {
@@ -81,6 +82,15 @@ function delay(ms: number, signal: AbortSignal): Promise<void> {
     signal.addEventListener('abort', done, { once: true })
   })
 }
+
+/** The longest a call takes in all: its own deadline and the wait for a link that went. */
+const totalMs = (method: string): number =>
+  (LONG_METHODS.has(method) ? LONG_DEADLINE_MS : DEFAULT_DEADLINE_MS) + RECONNECT_WINDOW_MS
+const timedOut = (computer: ComputerRef): DomainRpcError =>
+  new DomainRpcError('deadline_exceeded', `${computer.name} did not answer in time.`, {
+    node: computer.node,
+    name: computer.name
+  })
 
 const sizeOf = (value: unknown): number => Buffer.byteLength(JSON.stringify(value) ?? '')
 
@@ -158,11 +168,24 @@ export class RoutedClient {
     const params = Object.fromEntries(Object.entries(given).filter(([, value]) => value !== undefined))
     const verdict = await this.guard(node, session, computer, () => this.unsupportedKey(node, method, row, params))
     if (verdict.outdated) throw computerOutdated(computer, method, verdict.key)
-    const release = ROUTED_LARGE_READS.includes(method) ? await this.enterLargeRead(node) : undefined
+    // One signal ends the whole call: the window that asked closing (or giving up), the profile closing, and
+    // the call's own total time. It also ends the wait for a big-read slot, and the slot is given back.
+    const signal = AbortSignal.any([
+      this.deps.signal,
+      ...(options.signal ? [options.signal] : []),
+      AbortSignal.timeout(totalMs(method))
+    ])
+    const release = ROUTED_LARGE_READS.includes(method)
+      ? await this.enterLargeRead(node, signal, computer)
+      : undefined
     try {
-      const sent = await this.stageLarge(node, session, computer, method, row, params, options.signal)
-      const reply = await this.invoke(node, computer, method, row, sent, options)
-      if (!reply.ok) throw refusalError(reply.error)
+      const sent = await this.stageLarge(node, session, computer, method, row, params, signal)
+      const reply = await this.invoke(node, computer, method, row, sent, { ...options, signal })
+      // The ids in a refusal's details are the owner's own; they are named as the results are.
+      if (!reply.ok)
+        throw refusalError(reply.error, (value) =>
+          value === undefined ? value : qualifyRoutedResult('error', value, { node })
+        )
       return reply.result
     } finally {
       release?.()
@@ -234,17 +257,43 @@ export class RoutedClient {
   }
 
   /** At most two big reads at once per computer: the owner refuses the third, so the third waits here. */
-  private async enterLargeRead(node: NodeId): Promise<() => void> {
+  private async enterLargeRead(
+    node: NodeId,
+    signal: AbortSignal,
+    computer: ComputerRef
+  ): Promise<() => void> {
     let entry = this.large.get(node)
     if (!entry) this.large.set(node, (entry = { running: 0, waiting: [] }))
-    while (entry.running >= ROUTED_LARGE_READS_PER_CALLER) {
-      await new Promise<void>((resolve) => entry!.waiting.push(resolve))
+    const slots = entry
+    while (slots.running >= ROUTED_LARGE_READS_PER_CALLER) {
+      // A call that is cancelled or runs out of time stops waiting, so it never takes a slot it cannot use.
+      await new Promise<void>((resolve, reject) => {
+        const wake = (): void => {
+          signal.removeEventListener('abort', give)
+          resolve()
+        }
+        const give = (): void => {
+          const at = slots.waiting.indexOf(wake)
+          if (at >= 0) slots.waiting.splice(at, 1)
+          reject(
+            this.deps.signal.aborted
+              ? new DomainRpcError('cancelled', 'Mousse is shutting down.')
+              : new DomainRpcError('deadline_exceeded', `${computer.name} is busy with other reads. Try again in a moment.`)
+          )
+        }
+        if (signal.aborted) return give()
+        signal.addEventListener('abort', give, { once: true })
+        slots.waiting.push(wake)
+      })
     }
-    entry.running += 1
+    slots.running += 1
+    let released = false
     return () => {
-      entry!.running -= 1
-      entry!.waiting.shift()?.()
-      if (!entry!.running && !entry!.waiting.length) this.large.delete(node)
+      if (released) return
+      released = true
+      slots.running -= 1
+      slots.waiting.shift()?.()
+      if (!slots.running && !slots.waiting.length) this.large.delete(node)
     }
   }
 
@@ -290,13 +339,12 @@ export class RoutedClient {
     method: string,
     row: RoutedRow,
     params: Record<string, unknown>,
-    options: RoutedCallOptions
+    options: RoutedCallOptions & { signal: AbortSignal }
   ): Promise<RoutedReply> {
     const id = newId('rpc') as RpcId
     const idem = row.durable ? `${method}:${options.idem ?? id}`.slice(0, 256) : undefined
     const deadlineMs = LONG_METHODS.has(method) ? LONG_DEADLINE_MS : DEFAULT_DEADLINE_MS
-    const signal = options.signal ? AbortSignal.any([options.signal, this.deps.signal]) : this.deps.signal
-    const giveUpAt = Date.now() + RECONNECT_WINDOW_MS
+    const signal = options.signal
     let session = this.sessionOrOffline(node, computer)
     let afterLoss = false
     for (;;) {
@@ -313,15 +361,35 @@ export class RoutedClient {
         } else reply = await this.send(session, method, params, id, idem, deadlineMs, signal, options)
         return await this.settle(node, session, computer, method, reply, signal)
       } catch (error) {
-        if (signal.aborted) throw new DomainRpcError('cancelled', 'The request was cancelled.')
+        if (this.deps.signal.aborted) throw new DomainRpcError('cancelled', 'Mousse is shutting down.')
+        if (signal.aborted) {
+          // The window gave up, or the call ran out of its total time. A write may have gone through.
+          if (row.durable) throw mayHaveHappened(computer, method)
+          throw (signal.reason as { name?: string } | undefined)?.name === 'TimeoutError'
+            ? timedOut(computer)
+            : new DomainRpcError('cancelled', 'The request was cancelled.')
+        }
+        // A computer that is connected and did not answer in time is slow, not gone. A read that is still
+        // running there is never sent again; a write is asked for its result once, then left as unknown.
+        if (error instanceof NetError && error.code === 'deadline_exceeded' && session.state() === 'open') {
+          if (!row.durable) throw timedOut(computer)
+          try {
+            const late = await session.rpcResult(id, { deadlineMs: 15_000, signal })
+            return await this.settle(node, session, computer, method, late, signal)
+          } catch {
+            throw mayHaveHappened(computer, method)
+          }
+        }
         const lost = isLinkLoss(error) || session.state() !== 'open'
         if (!lost) {
           if (error instanceof NetError && error.code === 'outcome_uncertain')
             throw mayHaveHappened(computer, method)
           throw translateNetError(error, computer, method) ?? error
         }
-        // The link went away with the call in flight: wait for it to return.
-        session = await this.reopened(node, computer, giveUpAt, signal, row.durable)
+        // The link went away with the call in flight. A read is sent again once, a write is found again by
+        // its request id; neither goes on without end, and each loss gets its own wait for the link.
+        if (afterLoss && !row.durable) throw computerOffline(computer)
+        session = await this.reopened(node, computer, Date.now() + RECONNECT_WINDOW_MS, signal, row.durable)
         afterLoss = true
       }
     }

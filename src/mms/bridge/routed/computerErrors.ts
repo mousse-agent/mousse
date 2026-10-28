@@ -87,15 +87,21 @@ export function mayHaveHappened(computer: ComputerRef, method: string): DomainRp
 }
 
 /** The owner's refusal, rethrown as the error its own window would have shown. */
-export function refusalError(refusal: RoutedRefusal): DomainRpcError {
-  return new DomainRpcError(refusal.code, refusal.message, refusal.details)
+export function refusalError(
+  refusal: RoutedRefusal,
+  details: (value: unknown) => unknown = (value) => value
+): DomainRpcError {
+  return new DomainRpcError(refusal.code, refusal.message, details(refusal.details))
 }
 
-/** Whether `error` says the link to the computer was lost, not that the computer answered no. */
+/**
+ * Whether `error` says the link to the computer was lost, not that the computer answered no. A call that
+ * timed out on a link that is still open is not one: the computer is slow, and may still be working.
+ */
 export function isLinkLoss(error: unknown): boolean {
   return (
     error instanceof NetError &&
-    ['peer_offline', 'route_unreachable', 'deadline_exceeded', 'clock_skew'].includes(error.code)
+    ['peer_offline', 'route_unreachable'].includes(error.code)
   )
 }
 

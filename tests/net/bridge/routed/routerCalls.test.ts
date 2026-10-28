@@ -44,11 +44,14 @@ function clientWith(overrides: (session: SyncSessionLike) => SyncSessionLike): R
 }
 const withClient = async <T>(client: RoutedClient, run: () => Promise<T>): Promise<T> => {
   const original = t.router.client
+  const inside = t.router.attached as unknown as { options: { client: RoutedClient } }
   ;(t.router as unknown as { client: RoutedClient }).client = client
+  inside.options.client = client
   try {
     return await run()
   } finally {
     ;(t.router as unknown as { client: RoutedClient }).client = original
+    inside.options.client = original
   }
 }
 
@@ -196,8 +199,9 @@ describe('Git progress', () => {
     await expect(t.dispatch('git.cancelOperation', { threadId: id, operationId: 'op-1' }, second)).resolves.toEqual({
       cancelled: false
     })
-    await expect(t.dispatch('git.cancelOperation', { threadId: id, operationId: 'op-1' }, first)).resolves.toEqual({
-      cancelled: false
+    // (The thread has no folder here, so the owner refuses; what matters is that the call reached it.)
+    expect(await t.refused(t.dispatch('git.cancelOperation', { threadId: id, operationId: 'op-1' }, first))).toMatchObject({
+      code: 'thread_has_no_folder'
     })
   }, 60_000)
 })
@@ -247,6 +251,108 @@ describe('what a computer refused, in words', () => {
       )
       expect(needsStaging).toMatchObject({ code: 'computer_outdated' })
       small.mockRestore()
+    })
+  }, 60_000)
+})
+
+describe('a call that takes too long', () => {
+  it('is sent once: a slow read on a connected computer is not a lost link', async () => {
+    const thread = t.thread()
+    let sent = 0
+    const slow = clientWith((real) => ({
+      rpc: async (method: string, params: unknown, options: unknown) => {
+        if (method !== 'routed.files.grep') return real.rpc(method, params, options)
+        sent += 1
+        throw new NetError('deadline_exceeded')
+      }
+    }))
+    const refusal = await withClient(slow, () =>
+      t.refused(t.dispatch('files.grep', { threadId: t.qualified(thread.id), query: 'x' }))
+    )
+    expect(refusal).toMatchObject({ code: 'deadline_exceeded' })
+    expect(sent).toBe(1)
+  }, 60_000)
+
+  it('is left as "may have happened" for a write, asked for its result once, and never sent twice', async () => {
+    const thread = t.thread()
+    let sent = 0
+    const slow = clientWith((real) => ({
+      rpc: async (method: string, params: unknown, options: unknown) => {
+        if (method !== 'routed.threads.rename') return real.rpc(method, params, options)
+        sent += 1
+        throw new NetError('deadline_exceeded')
+      }
+    }))
+    const refusal = await withClient(slow, () =>
+      t.refused(t.dispatch('threads.rename', { threadId: t.qualified(thread.id), name: 'Slow' }))
+    )
+    expect(refusal).toMatchObject({ code: 'outcome_uncertain' })
+    expect(sent).toBe(1)
+  }, 60_000)
+
+  it('gives its big-read slot back when its window goes, so stuck reads do not block the next', async () => {
+    const thread = t.thread()
+    const id = t.qualified(thread.id)
+    let reads = 0
+    const stuck = clientWith((real) => ({
+      rpc: (method: string, params: unknown, options: { signal?: AbortSignal }) => {
+        if (method !== 'routed.files.read') return real.rpc(method, params, options)
+        reads += 1
+        if (reads > 2) return Promise.resolve({ ok: true, result: { content: 'later' } })
+        // The first two never answer; they end only when their call is cancelled.
+        return new Promise((_resolve, reject) =>
+          options.signal?.addEventListener('abort', () => reject(new NetError('cancelled')), { once: true })
+        )
+      }
+    }))
+    await withClient(stuck, async () => {
+      const windows = [new AbortController(), new AbortController(), new AbortController()]
+      const call = (n: number) =>
+        t.dispatch(
+          'files.read',
+          { threadId: id, path: 'a.txt' },
+          { ...t.connection(`slot-${n}`), lifetime: windows[n].signal }
+        )
+      const first = t.refused(call(0)),
+        second = t.refused(call(1))
+      await vi.waitFor(() => expect(reads).toBe(2), { timeout: 10_000 })
+      // The third waits for a slot; it is not sent while the two are stuck.
+      const third = call(2)
+      await new Promise((resolve) => setTimeout(resolve, 300))
+      expect(reads).toBe(2)
+      windows[0].abort()
+      windows[1].abort()
+      expect((await first).code).toBe('cancelled')
+      expect((await second).code).toBe('cancelled')
+      await expect(third).resolves.toMatchObject({ content: 'later' })
+      expect(reads).toBe(3)
+    })
+  }, 60_000)
+
+  it('stops waiting for a slot when its own window goes', async () => {
+    const thread = t.thread()
+    const id = t.qualified(thread.id)
+    const stuck = clientWith((real) => ({
+      rpc: (method: string, params: unknown, options: { signal?: AbortSignal }) =>
+        method === 'routed.files.read'
+          ? new Promise((_resolve, reject) =>
+              options.signal?.addEventListener('abort', () => reject(new NetError('cancelled')), { once: true })
+            )
+          : real.rpc(method, params, options)
+    }))
+    await withClient(stuck, async () => {
+      const windows = [new AbortController(), new AbortController(), new AbortController()]
+      const calls = windows.map((window, n) =>
+        t.refused(
+          t.dispatch('files.read', { threadId: id, path: 'a.txt' }, { ...t.connection(`wait-${n}`), lifetime: window.signal })
+        )
+      )
+      await new Promise((resolve) => setTimeout(resolve, 300))
+      windows[2].abort()
+      expect((await calls[2]).code).toBe('deadline_exceeded')
+      windows[0].abort()
+      windows[1].abort()
+      await Promise.all(calls.slice(0, 2))
     })
   }, 60_000)
 })
