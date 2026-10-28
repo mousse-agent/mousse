@@ -322,15 +322,22 @@ describe('big results and Undo', () => {
   it('round-trips a save through Undo and through reverting the code', async () => {
     const o = await routedOwner()
     const { t, root } = await folderThread(o)
-    // A model whose containment restores without asking, so Undo runs as it does on the owner's own window.
     o.f.mms.orchestrator.setThreadModelOverride(t.id, { llmProvider: 'openai', model: 'gpt-4o' })
+    // Where the model's containment is weak (Windows has no contained shell) a restore first returns
+    // the diff to review; the caller confirms exactly that diff, as the owner's own window does.
+    const restore = async (method: string, params: Record<string, unknown>) => {
+      const reply = await o.ok(method, params)
+      if (!reply.requiresReview) return reply
+      expect(reply.diff).not.toBe('')
+      return o.ok(method, { ...params, reviewedDiffSha: reply.diffSha })
+    }
     const saved = await o.ok('files.write', {
       threadId: t.id,
       path: 'draft.txt',
       content: 'from the laptop\n'
     })
     expect(readFileSync(join(root, 'draft.txt'), 'utf8')).toBe('from the laptop\n')
-    await o.ok('actions.undoLatest', { threadId: t.id })
+    await restore('actions.undoLatest', { threadId: t.id })
     expect(existsSync(join(root, 'draft.txt'))).toBe(false)
     expect(existsSync(join(root, 'seed.txt'))).toBe(true)
 
@@ -346,7 +353,7 @@ describe('big results and Undo', () => {
     }>
     const action = listed.find((item) => item.receiptId === again.receiptId)!
     expect(action).toBeTruthy()
-    await o.ok('actions.revertCode', { threadId: t.id, actionId: action.id })
+    await restore('actions.revertCode', { threadId: t.id, actionId: action.id })
     expect(existsSync(join(root, 'draft2.txt'))).toBe(false)
     expect(saved.receiptId).not.toBe(again.receiptId)
   }, 180_000)
