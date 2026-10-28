@@ -114,7 +114,7 @@ export interface BridgeNodePolicy {
 export interface NetStatus {
   enabled: boolean
   features?: import('../featureFlags').NetFeatureFlags
-  /** Whether other computers of the user may work on this computer's threads (`bridge.workOnThreads`). Off by default. */
+  /** Whether other computers of the user may work on this computer's threads (`bridge.workOnThreads`). On by default. */
   workOnThreads?: boolean
   restartRequired?: boolean
   keystore: KeystoreState | 'unavailable'

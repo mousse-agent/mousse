@@ -742,11 +742,18 @@ const api = {
     listAll: (): Promise<Thread[]> => ipcRenderer.invoke('threads:listAll'),
     active: (): Promise<string | null> => ipcRenderer.invoke('threads:active'),
     getActivity: (): Promise<ThreadActivitySnapshot> => ipcRenderer.invoke('threads:activity'),
-    create: (name?: string, projectId?: string, opts?: { worktreeEnabled?: boolean }): Promise<Thread> =>
+    /** `opts.node` creates the chat on another of the user's computers (`projectId` is then that computer's, as this computer lists it). */
+    create: (name?: string, projectId?: string, opts?: { worktreeEnabled?: boolean; node?: string }): Promise<Thread> =>
       ipcRenderer.invoke('threads:create', name, projectId, opts),
-    createAndSelect: (name?: string, projectId?: string, opts?: { worktreeEnabled?: boolean }): Promise<Thread> =>
+    createAndSelect: (name?: string, projectId?: string, opts?: { worktreeEnabled?: boolean; node?: string }): Promise<Thread> =>
       ipcRenderer.invoke('threads:createAndSelect', name, projectId, opts),
     select: (threadId: string): Promise<void> => ipcRenderer.invoke('threads:select', threadId),
+    /** A page of the messages before `before` of a long thread of another computer. */
+    loadEarlier: (threadId: string, before: string): Promise<{ messages: ChatMessage[]; earlier?: { before: string; count: number } }> =>
+      ipcRenderer.invoke('threads:loadEarlier', threadId, before),
+    /** One image of a message that arrived without its bytes. */
+    messageImage: (threadId: string, messageId: string, index: number): Promise<{ name: string; mimeType: string; data: string }> =>
+      ipcRenderer.invoke('threads:messageImage', threadId, messageId, index),
     delete: (threadId: string): Promise<void> => storageInvoke('threads:delete', threadId),
     restore: (threadId: string): Promise<unknown> => storageInvoke('threads:restore', threadId),
     purge: (threadId: string, options?: { preview?: boolean; operationId?: string; expectedGeneration?: number; previewDigest?: string; discard?: boolean }): Promise<{ preview?: import('../shared/resourceLifecycle').LifecyclePurgePreview; reclaim?: { bytes: number; estimated: boolean; partial: boolean }; lifecycle?: import('../shared/resourceLifecycle').TaskLifecycleRecord }> => storageInvoke('threads:purge', threadId, options),
@@ -806,6 +813,7 @@ const api = {
         messages: ChatMessage[]
         agents: Agent[]
         tasks: Task[]
+        earlier?: { before: string; count: number }
       }) => void
     ): (() => void) => {
       const handler = (
@@ -815,6 +823,7 @@ const api = {
           messages: ChatMessage[]
           agents: Agent[]
           tasks: Task[]
+          earlier?: { before: string; count: number }
         }
       ) => cb(payload)
       ipcRenderer.on('thread:view', handler)

@@ -301,6 +301,8 @@ export function broadcastThreadSnapshot(
     connectionFailed?: boolean
     agents?: unknown
     tasks?: unknown
+    /** Older messages the snapshot left out (a long thread of another computer). */
+    earlier?: { before: string; count: number }
   },
   broadcast: BroadcastFn,
   presentation: PresentationState
@@ -320,7 +322,8 @@ export function broadcastThreadSnapshot(
     threadId,
     messages: snapshot.messages,
     agents: snapshot.agents ?? [],
-    tasks: snapshot.tasks ?? []
+    tasks: snapshot.tasks ?? [],
+    ...(snapshot.earlier ? { earlier: snapshot.earlier } : {})
   })
   if (snapshot.connectionFailed) {
     broadcast('orchestrator:connection-failed', undefined)

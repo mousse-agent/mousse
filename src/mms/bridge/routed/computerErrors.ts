@@ -4,18 +4,12 @@ import { DomainRpcError } from '../../protocol/domainRegistry'
 
 /**
  * Errors of a call that goes to another computer, with words a person can act on. The codes are
- * the ones a window tells apart: it disables an action it cannot do (`computer_outdated`,
- * `computer_forbidden`), shows the offline state (`computer_offline`) and says an action "may have
- * happened" (`outcome_uncertain`). A refusal of the owner keeps the owner's own code and message.
+ * the ones a window tells apart (`shared/bridge/computerErrors.ts`): it disables an action it cannot do
+ * (`computer_outdated`, `computer_forbidden`), shows the offline state (`computer_offline`) and says an
+ * action "may have happened" (`outcome_uncertain`). A refusal of the owner keeps the owner's own code
+ * and message.
  */
-export const COMPUTER_ERROR_CODES = [
-  'computer_offline',
-  'computer_forbidden',
-  'computer_outdated',
-  'mixed_computers',
-  'not_available_remotely',
-  'outcome_uncertain'
-] as const
+export { COMPUTER_ERROR_CODES } from '../../../shared/bridge/computerErrors'
 
 /** Why a computer refused this device, as the `cause` of the refusal says; `unknown` when it did not say. */
 export type ComputerForbiddenReason = ForbiddenReason | 'unknown'

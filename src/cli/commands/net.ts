@@ -97,7 +97,7 @@ export const BRIDGE_HELP = `Usage:
   mousse-cli bridge threads [on|off]
 
 threads turns on (or off) whether your other computers may work on this computer's threads;
-without an argument it shows the setting. It is off by default and only changes this computer.
+without an argument it shows the setting. It is on by default and only changes this computer.
 Only the current authority can invite, revoke or rename nodes, change capabilities or set a
 device's kind. block, unblock and limits act on this computer only, on any computer: a blocked
 device is refused every Bridge call and stream here until unblocked.

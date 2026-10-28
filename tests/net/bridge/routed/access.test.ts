@@ -108,13 +108,15 @@ describe('who may call a routed method', () => {
     expect(await refusedWith(call(phone.net, a, 'routed.test.write', 'w-1'))).toBe('capability')
   }, 60_000)
 
-  it('is refused while the owner switch is off, which is the default, and allowed once it is on', async () => {
+  it('is allowed while the owner switch is on, which is the default, and refused once it is off', async () => {
     const { a, join } = await authority()
     registerRows(a)
     const laptop = await join(await inviteText(a), 'laptop')
-    expect(a.status().workOnThreads).toBe(false)
+    expect(a.status().workOnThreads).toBe(true)
+    expect(await call(laptop.net, a, 'routed.test.read')).toBeDefined()
+    // Off, then on again: the choice is kept, and nothing else changes it.
+    await a.request('bridge.workOnThreads', { enabled: false })
     expect(await refusedWith(call(laptop.net, a, 'routed.test.read'))).toBe('setting_off')
-
     expect(await a.request('bridge.workOnThreads', { enabled: true })).toEqual({ enabled: true })
     expect(a.status().workOnThreads).toBe(true)
     const written = newId('rpc')
