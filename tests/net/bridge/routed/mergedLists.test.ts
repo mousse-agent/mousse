@@ -935,6 +935,51 @@ describe('projects that are the same repository', () => {
     ).toEqual([h.q('x')])
   }, 30_000)
 
+  it('keeps the match across a restart while the other computer is out of reach, for the projects this computer still has', async () => {
+    const h = harness({ cacheSettleMs: 20 })
+    const repo = repository()
+    h.state.projects = [{ id: 'mine', name: 'mine', path: repo.path, createdAt: iso(0), order: 0 }]
+    h.client.call.mockImplementation(async (_node: NodeId, method: string) =>
+      method === 'projects.match' ? { projectId: 'rp' } : {}
+    )
+    await h.feed(
+      snapshot([{ id: 't', projectId: 'rp', updatedAt: iso(1) }], {
+        projects: [{ id: 'rp', name: 'rp', path: '/x', order: 0 }]
+      })
+    )
+    await vi.waitFor(() => expect(h.lists.projects()[0]?.sameAs).toBe('mine'), { timeout: 20_000 })
+    // The match is written with the copy of the lists; it holds project ids only.
+    await vi.waitFor(
+      () => {
+        const [copy] = h.store.snapshots()
+        expect(copy && JSON.parse(copy.snapshot).matches).toEqual({
+          sameAs: [[h.q('rp'), 'mine']],
+          similar: []
+        })
+      },
+      { timeout: 5000 }
+    )
+    h.online.delete(h.node)
+    h.client.call.mockClear()
+    const lists = h.restart()
+    await lists.reconcile()
+    // Without the other computer: its project is still this computer's project's group, and its row is in it.
+    expect(lists.projects()).toMatchObject([{ id: h.q('rp'), sameAs: 'mine', offline: true }])
+    expect(
+      listedThreadsFor({ connection: { clientType: 'gui' }, mms: { remoteLists: lists } }, [], [], {
+        projectId: 'mine'
+      }).map((row) => row.id)
+    ).toEqual([h.q('t')])
+    expect(h.client.call).not.toHaveBeenCalled()
+
+    // A project that was removed here since is not matched from the copy.
+    h.state.projects = []
+    const again = h.restart()
+    await again.reconcile()
+    expect(again.projects()[0]).not.toHaveProperty('sameAs')
+    expect(again.threads()).toHaveLength(1)
+  }, 30_000)
+
   it('asks the other computer again only after a while, and not for a folder that is not a repository', async () => {
     const h = harness()
     const repo = repository()

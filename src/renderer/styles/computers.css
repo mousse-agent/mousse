@@ -155,3 +155,9 @@
   font-size: 11px;
   font-weight: 400;
 }
+
+/* A project this computer has too, also held by another computer: its icon beside the name. */
+.threads-sidebar-project-also {
+  flex: 0 0 auto;
+  margin-left: 4px;
+}

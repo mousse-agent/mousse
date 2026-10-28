@@ -37,6 +37,20 @@ describe('sortSidebarThreads', () => {
     expect(sortSidebarThreads([laterId, earlierId]).map((entry) => entry.id)).toEqual(['a', 'b'])
   })
 
+  it('puts the threads of other computers among this computer’s by the same order', () => {
+    // A thread of another computer lists by its place here (see the merged lists), not by its own computer.
+    const mine = thread({ id: 'mine', order: 2 })
+    const first = thread({ id: 'nod_b:first', node: 'nod_b', order: 1 })
+    const last = thread({ id: 'nod_c:last', node: 'nod_c', order: 3 })
+    const offline = thread({ id: 'nod_b:offline', node: 'nod_b', offline: true, order: 2.5 })
+    expect(sortSidebarThreads([last, offline, mine, first]).map((entry) => entry.id)).toEqual([
+      'nod_b:first',
+      'mine',
+      'nod_b:offline',
+      'nod_c:last'
+    ])
+  })
+
   it('does not mutate the input array', () => {
     const threads = [
       thread({ id: 'second', order: 1 }),

@@ -3,6 +3,7 @@ import { Search, X } from '../lib/icons'
 import type { ThreadSearchResult, ThreadSearchSkipped } from '../../shared/types'
 import { useCommandOverlay } from '../commands/commandRegistry'
 import { skippedLine, THREAD_SEARCH_DEBOUNCE_MS } from '../lib/threadSearchSkipped'
+import { ThreadComputerBadge } from './ComputerBadge'
 import '../styles/thread-search.css'
 
 interface ThreadSearchDialogProps {
@@ -163,8 +164,12 @@ export function ThreadSearchDialog({ open, onClose, onSelect }: ThreadSearchDial
                       onClick={() => choose(result)}
                     >
                       <span className="thread-search-result-title">{result.threadName}</span>
-                      {result.projectName && (
-                        <span className="thread-search-result-meta">{result.projectName}</span>
+                      {(result.projectName || result.node) && (
+                        <span className="thread-search-result-meta thread-search-result-where">
+                          {result.projectName && <span>{result.projectName}</span>}
+                          {/* A result from another computer says which one it is on. */}
+                          <ThreadComputerBadge thread={{ node: result.node }} withName className="thread-search-result-computer" />
+                        </span>
                       )}
                       {result.snippet && (
                         <span className="thread-search-result-snippet">{result.snippet}</span>

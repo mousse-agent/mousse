@@ -28,6 +28,8 @@ import {
 import { StartFromPullRequestDialog } from './StartFromPullRequestDialog'
 import { ThreadHoverCard } from './ThreadHoverCard'
 import { ThreadComputerBadge } from './ComputerBadge'
+import { UNKNOWN_COMPUTER_NAME, useComputers } from '../lib/computers'
+import { groupComputers, groupProjects } from '../lib/projectGroups'
 import { ThreadSpeechIndicator, useSpeakingThreadId } from '../readAloud/ThreadSpeechIndicator'
 
 import '../styles/threads-sidebar.css'
@@ -221,6 +223,7 @@ function SidebarRenameInput({
 function ThreadCardBody({
   thread,
   projectName,
+  projectKey,
   activity,
   startedAt,
   pause,
@@ -232,6 +235,8 @@ function ThreadCardBody({
 }: {
   thread: Pick<Thread, 'name' | 'projectId' | 'updatedAt' | 'pinnedAt' | 'worktreeEnabled' | 'node' | 'offline' | 'notShared'>
   projectName?: string
+  /** What the project's color comes from: the id of its group, so a project on several computers is one color. */
+  projectKey?: string
   activity?: ThreadActivityState
   startedAt?: string
   /** This thread's own pause (not one a subagent below it is in): when its limit resets. */
@@ -243,7 +248,8 @@ function ThreadCardBody({
   onRename: (name: string) => void
   onCancelRename: () => void
 }) {
-  const hue = thread.projectId ? (Math.abs(hashText(thread.projectId)) % 6) + 1 : 0
+  const colorKey = projectKey ?? thread.projectId
+  const hue = colorKey ? (Math.abs(hashText(colorKey)) % 6) + 1 : 0
   const age = threadAge(isThreadActivityActive(activity) ? startedAt ?? thread.updatedAt : thread.updatedAt)
   return (
     <>
@@ -402,17 +408,25 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
   )
   const orphanThreads = availableThreads.filter((thread) => !thread.projectId)
 
+  // A project that several computers hold for the same repository is one group; the others' projects that
+  // match none of this computer's stay groups of their own, named with their computer.
+  const { groups: projectGroups, groupOf } = useMemo(() => groupProjects(projects), [projects])
+  const groupById = useMemo(() => new Map(projectGroups.map((group) => [group.id, group])), [projectGroups])
+  const { byNode: computers } = useComputers(projects.some((project) => project.node))
+  const groupIdOf = (projectId: string | undefined): string | undefined => (projectId ? groupOf.get(projectId) ?? projectId : undefined)
+
   useEffect(() => {
     if (!activeThreadId) return
     // The project to reveal is the one the highlighted row is in, which for a subagent is its parent's.
     const shownThread = threads.find((thread) => thread.id === (openSubagentParentId ?? activeThreadId))
     const projectId = shownThread?.projectId
-    if (!projectId) return
+    const groupId = projectId ? groupOf.get(projectId) ?? projectId : undefined
+    if (!groupId) return
     setExpandedProjects((prev) => {
-      if (prev.has(projectId)) return prev
-      return new Set(prev).add(projectId)
+      if (prev.has(groupId)) return prev
+      return new Set(prev).add(groupId)
     })
-  }, [activeThreadId, openSubagentParentId, threads])
+  }, [activeThreadId, openSubagentParentId, threads, groupOf])
 
   const toggleProject = (projectId: string) => {
 
@@ -459,6 +473,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
 
 
+  // `projectId` is the project that names its group, so it is also the group's id.
   const createProjectThread = async (projectId: string) => {
     const thread = findUnstartedThread(listedThreads, projectId) ??
       await window.mousse.threads.create(undefined, projectId)
@@ -533,14 +548,16 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
     suppressClick.current = true
     window.setTimeout(() => { suppressClick.current = false }, 0)
     if (dragged.type === 'project') {
-      const ids = projects.map((project) => project.id)
+      // One entry per group: a project on several computers is dragged as one.
+      const ids = projectGroups.map((group) => group.id)
       ids.splice(ids.indexOf(dragged.id), 1)
       ids.splice(ids.indexOf(target.id), 0, dragged.id)
       await window.mousse.projects.reorder(ids)
       return
     }
-    // Reorder must include every thread in the group (including hidden drafts).
-    const group = threads.filter((thread) => thread.projectId === dragged.projectId)
+    // Reorder must include every thread in the group (including hidden drafts), the other computers' threads
+    // of the same repository among them; the project is the one that names the group.
+    const group = threads.filter((thread) => groupIdOf(thread.projectId) === dragged.projectId)
     const ids = group.map((thread) => thread.id)
     ids.splice(ids.indexOf(dragged.id), 1)
     ids.splice(ids.indexOf(target.id), 0, dragged.id)
@@ -863,17 +880,17 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
         onDragStart={(event) => {
           event.stopPropagation()
-          startDrag(event, { type: 'thread', id: thread.id, projectId: thread.projectId })
+          startDrag(event, { type: 'thread', id: thread.id, projectId: groupIdOf(thread.projectId) })
         }}
 
         onDragOver={(event) => {
-          if (canDropOn({ type: 'thread', id: thread.id, projectId: thread.projectId })) event.preventDefault()
+          if (canDropOn({ type: 'thread', id: thread.id, projectId: groupIdOf(thread.projectId) })) event.preventDefault()
         }}
 
         onDrop={(event) => {
           event.stopPropagation()
           event.preventDefault()
-          void reorderBefore({ type: 'thread', id: thread.id, projectId: thread.projectId })
+          void reorderBefore({ type: 'thread', id: thread.id, projectId: groupIdOf(thread.projectId) })
         }}
 
         onDragEnd={endDrag}
@@ -909,7 +926,8 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
         {layout === 'card' ? (
           <ThreadCardBody
             thread={thread}
-            projectName={thread.projectId ? projects.find((project) => project.id === thread.projectId)?.name : undefined}
+            projectName={groupById.get(groupIdOf(thread.projectId) ?? '')?.project.name}
+            projectKey={groupIdOf(thread.projectId)}
             activity={rolledUpActivity[thread.id] ?? threadActivity[thread.id]}
             startedAt={turnStates[thread.id]?.startedAt}
             pause={turnStates[thread.id]?.phase === 'paused' ? turnStates[thread.id]?.pause : undefined}
@@ -1053,17 +1071,21 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
         <div className="threads-sidebar-tree">
 
-          {projects.length === 0 ? (
+          {projectGroups.length === 0 ? (
 
             <div className="threads-sidebar-empty">No projects</div>
 
           ) : (
 
-            projects.map((project) => {
+            projectGroups.map((group) => {
+
+              // The group is named by one project: this computer's when it has one.
+              const project = group.project
+              const alsoOn = groupComputers(group).filter((node) => node !== project.node)
 
               const expanded = expandedProjects.has(project.id)
 
-              const projectThreads = availableThreads.filter((thread) => thread.projectId === project.id)
+              const projectThreads = availableThreads.filter((thread) => groupIdOf(thread.projectId) === group.id)
               const projectThreadCount = projectThreads.length
 
               const showAllProjectThreads = expandedProjectThreadLists.has(project.id)
@@ -1121,7 +1143,10 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
                           pinned: Boolean(project.pinnedAt),
 
-                          ...(project.node ? { node: project.node } : {})
+                          // The menu acts on the project that names the group, on the computer that holds it.
+                          ...(project.node ? { node: project.node, computerName: computers[project.node]?.name ?? UNKNOWN_COMPUTER_NAME } : {}),
+
+                          ...(alsoOn.length ? { alsoOn: alsoOn.map((node) => computers[node]?.name ?? UNKNOWN_COMPUTER_NAME) } : {})
 
                         })
 
@@ -1172,6 +1197,16 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
                       )}
 
                       <ThreadComputerBadge thread={project} withName of="project" className="threads-sidebar-project-computer" />
+
+                      {/* A project this computer has too: the other computers that hold it are marked by icon. */}
+                      {alsoOn.map((node) => (
+                        <ThreadComputerBadge
+                          key={node}
+                          thread={group.members.find((member) => member.node === node) ?? { node }}
+                          of="also"
+                          className="threads-sidebar-project-also"
+                        />
+                      ))}
 
                     </button>
 

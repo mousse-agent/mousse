@@ -19,6 +19,10 @@ export interface ThreadsContextMenuTarget {
   settled?: boolean
   /** The computer a project is on, when it is not this one. */
   node?: string
+  /** That computer's name: the menu acts on the project there, and says so. */
+  computerName?: string
+  /** On a project of this computer: the other computers that hold the same repository. Removing leaves their projects. */
+  alsoOn?: readonly string[]
 }
 
 interface ThreadsContextMenuProps {
@@ -102,6 +106,9 @@ export function ThreadsContextMenu({
         style={{ left: x, top: y, zIndex: FLOATING_LAYER_Z_INDEX }}
         role="menu"
       >
+        {target.type === 'project' && target.computerName && (
+          <div className="threads-context-menu-label" role="presentation">On {target.computerName}</div>
+        )}
         {!target.settled && (
           <button type="button" className="threads-context-menu-item" role="menuitem" onClick={onPin}>
             {target.pinned ? <PinOffRegular /> : <PinRegular />}
@@ -140,6 +147,11 @@ export function ThreadsContextMenu({
           type="button"
           className="threads-context-menu-item threads-context-menu-item-danger"
           role="menuitem"
+          title={
+            target.type === 'project' && target.alsoOn?.length
+              ? `Removes the project from this computer only. ${target.alsoOn.join(' and ')} keep${target.alsoOn.length === 1 ? 's' : ''} theirs.`
+              : undefined
+          }
           onClick={onRemove}
         >
           <DeleteRegular />

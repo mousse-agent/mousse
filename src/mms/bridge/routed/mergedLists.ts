@@ -268,10 +268,37 @@ export class MergedLists implements RemoteListsPort {
   private loadCache(c: Computer): void {
     try {
       const cached = this.options.store.snapshots().find((entry) => entry.node === c.node)
-      if (cached) this.ingest(c, JSON.parse(cached.snapshot), false)
+      if (cached) {
+        const parsed = JSON.parse(cached.snapshot) as unknown
+        // Which projects were the same repository as this computer's, so a group does not come apart while the
+        // other computer is out of reach. They are asked again when it is back.
+        this.restoreMatches(c, isRecord(parsed) ? parsed.matches : undefined)
+        this.ingest(c, parsed, false)
+      }
     } catch {
       // An unreadable cache is a computer with no rows yet.
     }
+  }
+
+  /** Takes the matches kept with a cached snapshot, for the projects this computer still has. */
+  private restoreMatches(c: Computer, raw: unknown): void {
+    if (!isRecord(raw)) return
+    const own = new Set(this.options.services.projects.listProjects().map((project) => project.id))
+    const pairs = (value: unknown): Map<string, string> => {
+      const out = new Map<string, string>()
+      if (!Array.isArray(value)) return out
+      for (const pair of value.slice(0, MAX_PROJECT_ROWS))
+        if (
+          Array.isArray(pair) &&
+          typeof pair[0] === 'string' &&
+          typeof pair[1] === 'string' &&
+          own.has(pair[1])
+        )
+          out.set(pair[0], pair[1])
+      return out
+    }
+    c.sameAs = pairs(raw.sameAs)
+    c.similar = pairs(raw.similar)
   }
 
   /** Looks at which computers there are and which are reachable: attaches, marks offline, forgets removed ones. */
@@ -762,9 +789,11 @@ export class MergedLists implements RemoteListsPort {
     if (!snapshot) return
     // What is kept is at most 2 MiB: the threads archived longest ago (or updated longest ago) are left out first.
     // No statuses are kept (the cached rows say nothing of what the threads do; the turn errors in them are text).
-    const json = JSON.stringify(
-      fitSnapshot({ ...snapshot, status: {} }, REMOTE_LISTS_CACHE_MAX_BYTES)
-    )
+    // The matches with this computer's projects go with it (project ids only), so the grouping survives a restart.
+    const json = JSON.stringify({
+      ...fitSnapshot({ ...snapshot, status: {} }, REMOTE_LISTS_CACHE_MAX_BYTES),
+      matches: { sameAs: [...c.sameAs], similar: [...c.similar] }
+    })
     if (json === c.cachedJson) return
     this.safely(() => {
       this.options.store.saveSnapshot(c.node, json)
@@ -1231,6 +1260,8 @@ export class MergedLists implements RemoteListsPort {
       changed = true
     }
     if (changed) this.pushLists(false, true, false)
+    // The copy on disk keeps the matches too.
+    if (c.snapshot !== undefined) this.scheduleCache(c)
     // Rows placed before their project's match was known sort with this computer's rows of that project now.
     if (arrived.size) this.replaceSeeded(c, arrived)
   }

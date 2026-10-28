@@ -84,6 +84,53 @@ describe('orderedThreadIds', () => {
     ])
   })
 
+  it('steps through a project that is on several computers as one group, in one sidebar order', () => {
+    const remote = (id: string, over: Partial<Thread> = {}) => thread(id, { node: 'nod_other', ...over })
+    const grouped = [
+      { id: 'p1' },
+      { id: 'p2' },
+      { id: 'nod_other:rp', node: 'nod_other', sameAs: 'p1' },
+      { id: 'nod_other:solo', node: 'nod_other' }
+    ]
+    const threads = [
+      thread('p2-a', { projectId: 'p2', order: 0 }),
+      remote('nod_other:r1', { projectId: 'nod_other:rp', order: 1 }),
+      thread('p1-a', { projectId: 'p1', order: 2 }),
+      remote('nod_other:r2', { projectId: 'nod_other:rp', order: 3 }),
+      thread('p1-b', { projectId: 'p1', order: 4 }),
+      remote('nod_other:s1', { projectId: 'nod_other:solo', order: 5 }),
+      thread('orphan', { order: 6 })
+    ]
+    // The first project's group holds the other computer's rows among its own; the project only the other
+    // computer has comes after this computer's projects; threads without a project come last.
+    expect(orderedThreadIds({ projects: grouped, threads, view: 'projects' })).toEqual([
+      'nod_other:r1',
+      'p1-a',
+      'nod_other:r2',
+      'p1-b',
+      'p2-a',
+      'nod_other:s1',
+      'orphan'
+    ])
+    // Without the match, the other computer's project is a group of its own.
+    expect(
+      orderedThreadIds({
+        projects: grouped.map(({ sameAs: _sameAs, ...project }) => project),
+        threads,
+        view: 'projects'
+      })
+    ).toEqual(['p1-a', 'p1-b', 'p2-a', 'nod_other:r1', 'nod_other:r2', 'nod_other:s1', 'orphan'])
+  })
+
+  it('keeps the steps of a group whose computer is offline', () => {
+    const threads = [
+      thread('p1-a', { projectId: 'p1', order: 1 }),
+      thread('nod_other:r1', { projectId: 'nod_other:rp', node: 'nod_other', offline: true, order: 0 })
+    ]
+    const projects = [{ id: 'p1' }, { id: 'nod_other:rp', node: 'nod_other', sameAs: 'p1' }]
+    expect(orderedThreadIds({ projects, threads, view: 'projects' })).toEqual(['nod_other:r1', 'p1-a'])
+  })
+
   it('is empty without threads', () => {
     expect(orderedThreadIds({ projects, threads: [], view: 'projects' })).toEqual([])
   })
