@@ -112,10 +112,10 @@ Mousse answers an editor's SSH connection itself (`src/mms/net/editor/endpoint/`
 | --- | --- | --- |
 | `ssh2` 1.17.0 | MIT | Brian White |
 | `asn1` 0.2.6 | MIT | Mark Cavage |
-| `bcrypt-pbkdf` 1.0.2 | BSD-3-Clause (its Blowfish portions: Niels Provos, Damien Miller; its BSD-3 portion: Ted Unangst) | see `node_modules/bcrypt-pbkdf/LICENSE` |
+| `bcrypt-pbkdf` 1.0.2 | BSD-3-Clause | Niels Provos, Ted Unangst, Joyent Inc |
 | `tweetnacl` 0.14.5 | Unlicense (public domain) | none |
 | `safer-buffer` 2.1.2 | MIT | Nikita Skovoroda |
 
-`node-pty` (MIT, Christopher Jeffrey and the Microsoft Corporation) already ships with Mousse for terminals; the endpoint also uses it for the pseudo-terminal of an editor's shell.
+`node-pty` (MIT; Christopher Jeffrey, Daniel Imms and Microsoft Corporation) already ships with Mousse for terminals; the endpoint also uses it for the pseudo-terminal of an editor's shell.
 
 The full licence text of each package is in its folder under `node_modules` and is included in every build.
