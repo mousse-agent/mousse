@@ -471,6 +471,8 @@ export class BridgeProfileService {
         }
         if (!this.activated && this.options.net.featureEnabled('netBridge')) {
           this.activated = true
+          // A device blocked while Bridge was off, or before a restart, is cleaned up after now.
+          this.routes.cleanUpBlockedDevices()
           void this.track(this.dispatch.recover())
         }
       },

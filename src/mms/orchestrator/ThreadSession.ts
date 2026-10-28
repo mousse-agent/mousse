@@ -28,6 +28,8 @@ export interface SteerEntry {
   text: string
   itemId?: string
   permissionMode?: PermissionMode
+  /** The computer a person sent this from, so a turn it becomes is stopped if that computer is blocked. */
+  sentFrom?: { node: string }
   origin?: AgentOrigin
   /** The promoted item's chat mode and images, so a steer the turn never reads comes back as the message it was. */
   mode?: ChatMode

@@ -74,7 +74,7 @@ export interface OwnerRoutesOptions {
   services: MmsProfileServices
   rpc: RpcDispatcher
   /** What this computer lets each device do here. */
-  policy: Pick<SqliteNodePolicy, 'get' | 'onChange'>
+  policy: Pick<SqliteNodePolicy, 'get' | 'list' | 'onChange'>
   audit: Pick<SqliteBridgeAudit, 'record' | 'countRead'>
   /** Keeps a call owned by the profile, so it drains when the profile closes. */
   track<T>(work: Promise<T>): Promise<T>
@@ -247,14 +247,7 @@ export class OwnerRoutes {
         this.pages.dropCaller(event.node)
         this.options.staging?.dropCaller(event.node)
         // What the device queued, made a rule of and started is taken away too.
-        const cleanup: Promise<void> = this.options
-          .track(cleanUpBlockedDevice(this.options.services, event.node))
-          .then(
-            () => undefined,
-            () => undefined
-          )
-          .finally(() => this.cleanups.delete(cleanup))
-        this.cleanups.add(cleanup)
+        this.cleanUp(event.node)
       })
     ]
     // Values staged before a restart that nobody came back for are looked for now, and then every minute.
@@ -538,6 +531,26 @@ export class OwnerRoutes {
   private readonly largeSaves = new Set<NodeId>()
   /** The clean-ups of blocked devices under way. */
   private readonly cleanups = new Set<Promise<void>>()
+  private cleanUp(node: NodeId): void {
+    const cleanup: Promise<void> = this.options
+      .track(cleanUpBlockedDevice(this.options.services, node))
+      .then(
+        () => undefined,
+        () => undefined
+      )
+      .finally(() => this.cleanups.delete(cleanup))
+    this.cleanups.add(cleanup)
+  }
+
+  /**
+   * Cleans up after every device that is blocked now. A block made while Bridge was off, or one whose
+   * clean-up a restart cut short, is finished here when Bridge starts. Running it twice does no harm:
+   * what it removes is gone the second time.
+   */
+  cleanUpBlockedDevices(): void {
+    for (const row of this.options.policy.list()) if (row.blocked) this.cleanUp(row.node)
+  }
+
   /** Resolves when the clean-up of every device blocked so far is done. */
   async cleanedUp(): Promise<void> {
     while (this.cleanups.size) await Promise.all([...this.cleanups])
