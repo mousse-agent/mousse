@@ -5,10 +5,13 @@
  */
 
 /**
- * What a tunnel ends at. There is exactly one kind: the SSH server of the computer that carries the
- * far end, which that computer chooses (loopback port 22). The caller never names a host or a port.
+ * What a tunnel ends at: the SSH server of the computer that carries the far end, which that computer chooses
+ * (loopback port 22). The caller never names a host or a port. `ssh.check` asks the same question without
+ * opening anything: the other computer answers as it would an open (the refusal, or `tunnel.opened` with its
+ * host keys), keeps no tunnel, writes a check row of its own, raises no first-open notice and counts the ask
+ * against a limit of its own, not the limits of opens.
  */
-export const TUNNEL_KINDS = ['ssh'] as const
+export const TUNNEL_KINDS = ['ssh', 'ssh.check'] as const
 export type TunnelKind = (typeof TUNNEL_KINDS)[number]
 
 /**
