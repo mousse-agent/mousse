@@ -1,4 +1,5 @@
 import type { NodeId } from '../../shared/net'
+import { qualifyId } from '../../shared/threadRef'
 import type { Thread } from '../../shared/types'
 import { KIND_POLICY_GROUP } from './storageCopy'
 import {
@@ -154,12 +155,11 @@ export function oldestMeasuredAt(results: readonly MachineUsage[]): string | und
 export type OpenTarget =
   | { type: 'policy'; anchor: string }
   | { type: 'thread'; threadId: string }
-  | { type: 'remote-thread'; node: NodeId; threadId: string }
 
 /**
  * Where selecting a row goes. A kind scrolls to that kind's cleanup rule; a local thread opens; a local
- * project opens its most recently updated thread; a thread on another machine opens in a viewer. A row
- * with nowhere to go (Other, a remote project, a project with no thread) is a label.
+ * project opens its most recently updated thread; a thread on another computer opens like a local one, while
+ * this computer lists it. A row with nowhere to go (Other, a remote project, a project with no thread) is a label.
  */
 export function openTarget(
   group: UsageGroup,
@@ -173,8 +173,9 @@ export function openTarget(
   if (!group.id || !group.machine) return undefined
   if (by === 'thread') {
     // A thread that is not in this computer's list (in the trash, or deleted since the measurement) has nothing to open.
-    if (group.machine.node === 'self') return threads.some((thread) => thread.id === group.id) ? { type: 'thread', threadId: group.id } : undefined
-    return { type: 'remote-thread', node: group.machine.node as NodeId, threadId: group.id }
+    // One on another computer is listed under its qualified id; it is there only while that computer shares its threads.
+    const id = group.machine.node === 'self' ? group.id : qualifyId(group.machine.node, group.id)
+    return threads.some((thread) => thread.id === id) ? { type: 'thread', threadId: id } : undefined
   }
   if (group.machine.node !== 'self') return undefined
   const latest = threads

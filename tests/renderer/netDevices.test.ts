@@ -109,6 +109,32 @@ describe('deviceLine', () => {
   })
 })
 
+describe('what this computer lets a device do here, in the device line', () => {
+  const policy = (patch: Partial<NonNullable<Device['policy']>> = {}) => ({ blocked: false, maxPermissionMode: 'accept_edits' as const, terminal: false, ...patch })
+  const computer = (patch: Partial<Device> = {}) => device({ kind: 'computer', caps: ['read', 'chat', 'write', 'settings'], policy: policy(), ...patch })
+
+  it('shows the default limit and the terminal switch for a computer that works on threads', () => {
+    expect(deviceLine(computer(), NOW)).toBe('Online · can read, chat, write, work on threads · highest mode here: Auto-accept edits · terminals off')
+  })
+
+  it('shows a raised limit and terminals that were turned on', () => {
+    expect(deviceLine(computer({ policy: policy({ maxPermissionMode: 'full', terminal: true }) }), NOW)).toContain('highest mode here: Full access · terminals on')
+    expect(deviceLine(computer({ policy: policy({ maxPermissionMode: 'ask' }) }), NOW)).toContain('highest mode here: Ask before acting')
+  })
+
+  it('says nothing of limits for a phone, for a computer that does not work on threads, or from a daemon without them', () => {
+    expect(deviceLine(computer({ kind: 'phone' }), NOW)).not.toContain('highest mode')
+    expect(deviceLine(computer({ caps: ['read', 'chat', 'write'] }), NOW)).not.toContain('highest mode')
+    expect(deviceLine(computer({ policy: undefined }), NOW)).not.toContain('highest mode')
+  })
+
+  it('says a blocked device is blocked, and not what it could have done', () => {
+    const line = deviceLine(computer({ policy: policy({ blocked: true }) }), NOW)
+    expect(line).toContain('blocked on this computer')
+    expect(line).not.toContain('highest mode')
+  })
+})
+
 describe('works on threads and blocking', () => {
   it('calls the settings capability "work on threads" in the device line', () => {
     expect(capabilityLabel('settings')).toBe('work on threads')

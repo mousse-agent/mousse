@@ -1,6 +1,8 @@
+import { isComputerErrorCode } from '../../shared/bridge/computerErrors'
 import type { NodeId } from '../../shared/net'
 import type { LlmProviderOption } from '../../shared/settings'
 import type { Project } from '../../shared/types'
+import { routedThreadsOn } from './computers'
 import { readDevices, type Device } from './netDevices'
 import { localProjectIdOf, workspaceOnOtherComputer, workspaceOnThisComputer, type ComposerWorkspace } from './newThread'
 
@@ -10,19 +12,17 @@ const request = <T>(method: Parameters<typeof window.mousse.platformRequest.requ
 /** What the target answered to a request to open a folder as a project. */
 export type OpenRemoteProjectResult = { ok: true; project: Project } | { ok: false; error: string }
 
-/** Every device of the signed-in Mousse ID's roster, or none when Net is off or locked. */
+/**
+ * The user's devices that a new chat can be started on, or none when Net is off or locked, or when the
+ * threads of other computers are not routed (a chat for another computer is created through that routing).
+ */
 export async function readRunOnDevices(): Promise<Device[]> {
   try {
-    return (await readDevices(false)).nodes
+    const { current, nodes } = await readDevices(false)
+    return routedThreadsOn(current) ? nodes : []
   } catch {
     return []
   }
-}
-
-/** The projects on another computer, as that computer knows them (its own ids and paths). */
-export async function readRemoteProjects(node: NodeId): Promise<Project[]> {
-  const value = await request<{ projects?: Project[] }>('bridge.hub.projects', { target: node })
-  return Array.isArray(value?.projects) ? value.projects : []
 }
 
 /**
@@ -38,56 +38,31 @@ export async function openRemoteProject(node: NodeId, path: string): Promise<Ope
 /** Plain words for a failed request to another computer. */
 export function remoteErrorMessage(error: unknown, deviceName: string): string {
   const code = (error as { code?: unknown } | null)?.code
+  const message = (error as { message?: unknown } | null)?.message
+  // The router words its own errors for a person ("<computer> is offline."); they are shown as they are.
+  if (isComputerErrorCode(code) && typeof message === 'string' && message) return message
   if (code === 'peer_offline' || code === 'route_unreachable' || code === 'outcome_uncertain') return `${deviceName} is not connected`
   if (code === 'forbidden') return `${deviceName} does not let this computer do that`
-  const message = (error as { message?: unknown } | null)?.message
   return typeof message === 'string' && message ? message : `Could not reach ${deviceName}`
 }
 
-/** The repository identity of a project of this computer, or null for a folder that is not a Git repository. */
-export interface ProjectIdentity {
-  roots: string[]
-  remotes: string[]
-}
-
 /**
- * The project on another computer that is the same Git repository as a project here, or
- * undefined. The other computer compares root commits and remotes itself; no path is sent.
+ * The draft after picking where the chat runs. Going to another computer carries the project over
+ * only when that computer lists a project for the same Git repository (`sameAs` on its row, which
+ * this computer worked out from root commits and remotes); going back restores the project the
+ * draft had here. With none, the chat starts without a project; it does not stop the pick.
  */
-export async function matchRemoteProject(node: NodeId, identity: ProjectIdentity): Promise<string | undefined> {
-  const value = await request<{ projectId?: unknown } | undefined>('bridge.hub.matchProject', {
-    target: node,
-    roots: identity.roots,
-    remotes: identity.remotes
-  })
-  return typeof value?.projectId === 'string' ? value.projectId : undefined
-}
-
-/**
- * The draft after picking where the chat runs. Going to another computer carries the project
- * over only when that computer has a project for the same repository (found by root commits,
- * with shared remotes as the tie-break); going back restores the project the draft had here.
- * A failed match leaves the chat without a project; it does not stop the pick.
- */
-export async function workspaceOnDevice(
+export function workspaceOnDevice(
   workspace: ComposerWorkspace,
-  local: readonly Project[],
-  node: NodeId | undefined,
-  identityOf: (projectId: string) => Promise<ProjectIdentity | null> = (id) => window.mousse.projects.identity(id)
-): Promise<ComposerWorkspace> {
-  if (!node) return workspaceOnThisComputer(workspace, local)
-  let matched: string | undefined
+  projects: readonly Pick<Project, 'id' | 'node' | 'sameAs'>[],
+  node: NodeId | undefined
+): ComposerWorkspace {
+  if (!node) return workspaceOnThisComputer(workspace, projects.filter((project) => !project.node))
   const source = localProjectIdOf(workspace)
-  if (source) {
-    try {
-      const identity = await identityOf(source)
-      if (identity) matched = await matchRemoteProject(node, identity)
-    } catch {
-      matched = undefined
-    }
-  }
+  const matched = source ? projects.find((project) => project.node === node && project.sameAs === source)?.id : undefined
   return workspaceOnOtherComputer(workspace, node, matched)
 }
+
 /** The model a computer would use for a new chat, in the shape `bridge.hub.setModel` takes. */
 export interface RemoteDefaultModel {
   instanceId?: string

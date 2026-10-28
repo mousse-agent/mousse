@@ -98,11 +98,19 @@ export function sameThreadSnapshot(a: Thread[], b: Thread[]): boolean {
   return true
 }
 
+/** What is left before the oldest message a window was given of a long thread: load it from `before`. */
+export interface EarlierMessages {
+  before: string
+  count: number
+}
+
 export interface ThreadViewSnapshot {
   threadId: string
   messages: ChatMessage[]
   agents?: Agent[]
   tasks?: Task[]
+  /** Set when a long thread of another computer was sent as its newest part. */
+  earlier?: EarlierMessages
 }
 
 interface AppState {
@@ -186,6 +194,10 @@ interface AppState {
   /** Durable rich references staged in each composer. */
   composerReferences: Record<string, ChatReference[]>
 
+  /** Threads whose transcript is only its newest part: the older messages are loaded on request. */
+  earlierByThread: Record<string, EarlierMessages>
+  /** Puts a page of older messages in front of the shown transcript and records what is still left. */
+  applyEarlierMessages: (threadId: string, messages: ChatMessage[], earlier: EarlierMessages | undefined) => void
   setMessages: (messages: ChatMessage[]) => void
   applyThreadMessages: (snapshot: ThreadMessagesSnapshot, profileId: string | null) => void
   addMessage: (message: ChatMessage) => void
@@ -431,6 +443,18 @@ export const useAppStore = create<AppState>()(persist((set) => ({
   }),
   composerDrafts: {},
   composerReferences: {},
+  earlierByThread: {},
+  applyEarlierMessages: (threadId, messages, earlier) =>
+    set((s) => {
+      const earlierByThread = { ...s.earlierByThread }
+      if (earlier) earlierByThread[threadId] = earlier
+      else delete earlierByThread[threadId]
+      if (s.activeThreadId !== threadId) return { earlierByThread }
+      const have = new Set(s.messages.map((message) => message.id))
+      const merged = sortMessagesDeterministic([...messages.filter((message) => !have.has(message.id)), ...s.messages])
+      rememberMessages(threadId, merged)
+      return { messages: merged, earlierByThread }
+    }),
 
   setMessages: (messages) =>
     set((s) => {
@@ -508,11 +532,26 @@ export const useAppStore = create<AppState>()(persist((set) => ({
       const messagesUnchanged = sameMessageSnapshot(s.messages, reconciled)
       const agents = view.agents ?? s.agents
       const tasks = view.tasks ?? s.tasks
-      if (messagesUnchanged && agents === s.agents && tasks === s.tasks) return s
+      // A view with older messages left out says so; one without them has the whole transcript.
+      const had = s.earlierByThread[view.threadId]
+      // Older messages this window already loaded stay: a view that stops at the same boundary again
+      // (a reconnect) does not bring the "load earlier" prompt back for them.
+      const loadedBeyond = Boolean(
+        had && view.earlier && s.messages.length > 0 && s.messages[0].id !== view.earlier.before && s.messages.some((message) => message.id === view.earlier!.before)
+      )
+      const next = loadedBeyond ? had : view.earlier
+      let earlierByThread = s.earlierByThread
+      if (had?.before !== next?.before || had?.count !== next?.count) {
+        earlierByThread = { ...s.earlierByThread }
+        if (next) earlierByThread[view.threadId] = next
+        else delete earlierByThread[view.threadId]
+      }
+      if (messagesUnchanged && agents === s.agents && tasks === s.tasks && earlierByThread === s.earlierByThread) return s
       return {
         messages: messagesUnchanged ? s.messages : reconciled,
         agents,
-        tasks
+        tasks,
+        earlierByThread
       }
     }),
   setProjects: (projects) => set({ projects }),

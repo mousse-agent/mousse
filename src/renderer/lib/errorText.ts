@@ -1,3 +1,4 @@
+import { COMPUTER_ERROR_CODES } from '../../shared/bridge/computerErrors'
 import { HARNESS_ERROR_CODES } from '../../shared/harness/types'
 import { PROVIDER_INSTANCE_ERROR_CODES } from '../../shared/providerInstances'
 
@@ -20,7 +21,23 @@ export function ipcErrorLine(error: unknown): string {
   return stripped.split('\n').map((part) => part.trim()).find(Boolean) ?? ''
 }
 
-const PLAIN_CODES = new Set<string>([...HARNESS_ERROR_CODES, ...Object.values(PROVIDER_INSTANCE_ERROR_CODES)])
+/**
+ * Whether a call failed because the computer that runs the thread cannot be reached. A poll of such a
+ * thread fails every few seconds while it is away; the thread view already says so, with Retry.
+ */
+export function isComputerOffline(error: unknown): boolean {
+  if (error && typeof error === 'object' && (error as { code?: unknown }).code === 'computer_offline') return true
+  return /^(?:MmsProtocolError: )?.+ is offline\.$/.test(ipcErrorLine(error))
+}
+
+// A thread on another computer says why in words ("<computer> is offline."), also for the owner's limits.
+const PLAIN_CODES = new Set<string>([
+  ...HARNESS_ERROR_CODES,
+  ...Object.values(PROVIDER_INSTANCE_ERROR_CODES),
+  ...COMPUTER_ERROR_CODES,
+  'permission_mode_above_ceiling',
+  'workflow_not_available_remotely'
+])
 
 /**
  * A failed send as the composer shows it: the message, prefixed with its code (`[code] …`) except

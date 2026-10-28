@@ -1,6 +1,5 @@
 import { useEffect, useId, useRef, useState, type FormEvent } from 'react'
 import { AlertTriangle, CircleCheck, Monitor, MonitorSmartphone, MoreHorizontal, Plus, RefreshCw, Smartphone } from '../lib/icons'
-import { RemoteDeviceThreads } from './RemoteDeviceThreads'
 import { ChangePlanDialog } from './devices/ChangePlanDialog'
 import { AddSshDeviceDialog } from './devices/AddSshDeviceDialog'
 import { ApproveSshRouteDialog } from './devices/ApproveSshRouteDialog'
@@ -194,6 +193,8 @@ export function NetDevicesSection() {
   const others = listedDevices(devices).filter((device) => !device.self)
   const unlocked = status?.keystore === 'unlocked'
   const authority = !!self?.isAuthority
+  // On unless this computer turned it off; an older daemon that does not report it has no such switch.
+  const workOnThreads = status?.workOnThreads !== false
 
   const toggleNetworking = (next: boolean) => {
     if (!next) { setInvite(''); void action('net.disable', {}) }
@@ -276,6 +277,15 @@ export function NetDevicesSection() {
       />
       {status?.restartRequired && status.error === 'outcome_uncertain' && (
         <p role="status" className="settings-muted devices-note">Some work is still draining; its original records are kept.</p>
+      )}
+      {self && status?.enabled && unlocked && status.workOnThreads !== undefined && (
+        <SettingsRow
+          title="Let my other computers work on this computer's threads"
+          description={workOnThreads
+            ? 'On · computers with Works on threads can open and change this computer’s threads, within the limits set for each device below'
+            : 'Off · no other computer can open or change this computer’s threads'}
+          control={<Switch checked={workOnThreads} label="Let my other computers work on this computer's threads" disabled={busy} onChange={(next) => void action('bridge.workOnThreads', { enabled: next })} />}
+        />
       )}
       {self && (
         (!status.protected || locked) ? (
@@ -486,7 +496,6 @@ export function NetDevicesSection() {
           {!doctor && !status.enabled && <p className="settings-muted devices-note">Run a check to see what this device can reach.</p>}
         </SettingsGroup>
 
-        {!!devices.length && <RemoteDeviceThreads devices={devices} />}
       </SettingsAdvanced>
     )}
 

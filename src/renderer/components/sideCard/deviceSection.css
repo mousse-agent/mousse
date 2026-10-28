@@ -183,7 +183,12 @@
   border-radius: var(--ui-control-radius) 0 0 var(--ui-control-radius);
 }
 
-.side-card-open-editor-main:hover,
+.side-card-open-editor-main:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.side-card-open-editor-main:hover:not(:disabled),
 .side-card-open-editor-chevron:hover,
 .side-card-open-editor-chevron.open {
   background: var(--ui-pressed);
@@ -222,8 +227,8 @@
   -webkit-line-clamp: 2;
 }
 
-/* The side card of a thread on another computer: its name, and what does not reach it. */
-.side-card-device-note {
+/* A thread of another computer: a note under its name while the computer cannot be reached. */
+.side-card-computer-note {
   margin: 4px 0 0;
   color: var(--text-secondary);
   font-size: 12px;

@@ -14,7 +14,6 @@ import {
   type ShortcutOverrides
 } from '../../shared/commands'
 import { hasOpenDialog } from '../components/ui/Modal'
-import { shownRemoteThread } from '../lib/remoteThreadStore'
 import { useAppStore } from '../stores/appStore'
 import { commandContextFromDom, type ClosestTarget } from './commandContext'
 
@@ -158,12 +157,6 @@ export function currentContext(source: CommandSource, target?: ClosestTarget | n
   })
   // Until the app info arrives the preload still knows the platform.
   if (!context.platform && typeof window !== 'undefined') context.platform = window.mousse?.platform ?? ''
-  // The thread shown may be on another computer; the local thread behind it is not what a command acts on.
-  const remote = shownRemoteThread()
-  if (remote) {
-    context.threadOpen = true
-    context.runActive = remote.running
-  }
   // A palette row or menu click has no focus to judge, so it counts as being in the Files panel.
   if (source !== 'key') context.inFilesPanel = true
   return source === 'guest' ? { ...context, inTextInput: true } : context

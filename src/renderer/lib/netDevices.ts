@@ -4,6 +4,7 @@ import type { PlatformRequestMethod } from '../../shared/platform'
 import type { TransportManifest } from '../../mms/net/contracts'
 import { formatAgo } from './formatAgo'
 import { parseVersion } from '../../shared/net/version'
+import { describePermissionMode } from '../../shared/permissionMode'
 
 /** One route this computer knows for a device and how its last attempt went. */
 export interface DeviceRouteHealth {
@@ -118,6 +119,9 @@ export function deviceLine(device: Device, now: number): string {
   const version = versionLabel(device)
   if (version) parts.push(version)
   if (device.caps.length) parts.push(`can ${device.caps.map(capabilityLabel).join(', ')}`)
+  // What this computer lets the device do here: shown for a computer that works on threads, so the defaults are not a secret.
+  if (device.policy && !device.policy.blocked && isComputer(device) && worksOnThreads(device))
+    parts.push(`highest mode here: ${describePermissionMode(device.policy.maxPermissionMode)}`, device.policy.terminal ? 'terminals on' : 'terminals off')
   if (device.policy?.blocked) parts.push('blocked on this computer')
   return parts.join(' · ')
 }

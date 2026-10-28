@@ -20,7 +20,7 @@ async function main() {
   const url = `http://127.0.0.1:${(server.address() as { port: number }).port}`
   const observations: unknown[] = [], rendererErrors: string[] = []
   try {
-    for (const mode of ['aside', 'permission', 'work', 'aside-retry', 'permission-retry', 'remote']) {
+    for (const mode of ['aside', 'permission', 'work', 'aside-retry', 'permission-retry']) {
       const window = new BrowserWindow({ show: false, webPreferences: { offscreen: true, backgroundThrottling: false, contextIsolation: true, nodeIntegration: false, sandbox: true } })
       const execute = <T,>(code: string): Promise<T> => window.webContents.executeJavaScript(code)
       window.webContents.on('console-message', event => { if (event.level === 'error') { rendererErrors.push(event.message); console.error(event.message) } })
@@ -34,42 +34,6 @@ async function main() {
       }
       try {
         await window.loadURL(url); await until('!!window.qa')
-        if (mode === 'remote') {
-          await execute("qa.mountRemote('open')")
-          // Themed selects: open the listbox, check its options, click one.
-          const choose = async (index: number, value: string) => {
-            await until(`!!document.querySelectorAll('[role="combobox"]')[${index}]`)
-            await execute(`document.querySelectorAll('[role="combobox"]')[${index}].click()`)
-            await until(`document.querySelectorAll('[role="listbox"] [role="option"]').length===2`)
-            await execute(`document.querySelector('[role="listbox"] [role="option"][data-value=${JSON.stringify(value)}]').click()`)
-            await until(`!document.querySelector('[role="listbox"]') && document.querySelectorAll('[role="combobox"]')[${index}].value===${JSON.stringify(value)}`)
-          }
-          await choose(0, 'nod_00000000000000000000000001')
-          await choose(1, 'thread')
-          await until("qa.calls.filter(row=>row.method==='bridge.hub.attach').length===1 && qa.listenerCount()===1")
-          await execute('qa.publish(qa.remoteSnapshot())'); await until("qa.text().includes('Working')")
-          const online = await execute('qa.text()')
-          await execute("qa.mountRemote('closed')")
-          await until("qa.listenerCount()===0 && qa.calls.filter(row=>row.method==='bridge.hub.detach').length===1")
-          const offline = await execute('qa.text()')
-          // A frame from the departed carrier has no listener and cannot refresh the display.
-          await execute('qa.publish(qa.remoteSnapshot())')
-          await execute("qa.mountRemote('open')")
-          await until("qa.calls.filter(row=>row.method==='bridge.hub.attach').length===2 && qa.listenerCount()===1")
-          const awaiting = await execute('qa.text()')
-          await execute('qa.publish(qa.remoteIncremental())'); await delay(100)
-          const incremental = await execute('qa.text()')
-          await execute('(async () => { window.qaParts = await qa.remoteSnapshotParts(); for (const part of qaParts.slice(0,-1)) qa.publish(part) })()')
-          await delay(100)
-          const partial = await execute('qa.text()')
-          await execute('qa.publish(qaParts.at(-1))')
-          await until("qa.text().includes('Fresh verified body') && qa.text().includes('Working')")
-          const fresh = await execute('qa.text()')
-          await execute('qa.unmount()')
-          await until("qa.listenerCount()===0 && qa.calls.filter(row=>row.method==='bridge.hub.detach').length===2")
-          observations.push({ mode, online, offline, awaiting, incremental, partial, fresh, calls: await execute('qa.calls') })
-          continue
-        }
         await execute(`qa.mount(${JSON.stringify(mode.startsWith('aside') ? 'aside' : mode === 'work' ? 'work' : 'permission')})`)
         if (mode === 'work') await click('Private aside')
         await click(mode.startsWith('aside') ? 'Create private aside' : 'Approve exact request')

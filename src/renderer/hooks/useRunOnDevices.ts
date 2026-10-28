@@ -1,8 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { NodeId } from '../../shared/net'
-import type { Project } from '../../shared/types'
 import type { Device } from '../lib/netDevices'
-import { readRemoteComposerOptions, readRemoteProjects, readRunOnDevices, type RemoteComposerOptions } from '../lib/remoteComputers'
+import { readRemoteComposerOptions, readRunOnDevices, type RemoteComposerOptions } from '../lib/remoteComputers'
 
 /** How often the list is read again while the window is open, so a computer that connects shows up. */
 const DEVICE_REFRESH_MS = 30_000
@@ -32,36 +31,8 @@ export function useRunOnDevices(): { devices: Device[]; refresh: () => void } {
 }
 
 /**
- * The projects of the picked computer; none while this computer is picked. `failed` is set when
- * the computer cannot be reached, so the picker can say so once.
- */
-export function useRemoteProjects(node: NodeId | undefined): {
-  projects: Project[]
-  failed: boolean
-  add: (project: Project) => void
-} {
-  const [state, setState] = useState<{ node: NodeId | undefined; projects: Project[]; failed: boolean }>({ node, projects: [], failed: false })
-  useEffect(() => {
-    let cancelled = false
-    if (!node) return
-    void readRemoteProjects(node).then(
-      (projects) => { if (!cancelled) setState({ node, projects, failed: false }) },
-      () => { if (!cancelled) setState({ node, projects: [], failed: true }) }
-    )
-    return () => { cancelled = true }
-  }, [node])
-  const add = useCallback((project: Project) => {
-    setState((current) => current.projects.some((entry) => entry.id === project.id)
-      ? current
-      : { ...current, projects: [...current.projects, project] })
-  }, [])
-  // Projects read for another computer are never shown for this one.
-  return state.node === node && node ? { projects: state.projects, failed: state.failed, add } : { projects: [], failed: false, add }
-}
-
-/**
- * The models the picked computer offers a new chat. Empty until it answers, and when it cannot
- * be reached (the project list already reports that).
+ * The models another computer offers a chat that runs there (a new one, or a thread of it). Empty
+ * until it answers, and when it cannot be reached.
  */
 export function useRemoteComposerOptions(node: NodeId | undefined): RemoteComposerOptions & { loaded: boolean } {
   const [state, setState] = useState<{ node: NodeId | undefined; options: RemoteComposerOptions }>({ node, options: { providers: [], defaultModel: null } })

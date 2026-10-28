@@ -1,7 +1,7 @@
 import { useEffect, useId, useRef, useState } from 'react'
 import { X } from '../../lib/icons'
 import { useChatsStore } from '../../stores/chatsStore'
-import { useAppStore } from '../../stores/appStore'
+import { useLocalProjects } from '../../hooks/useLocalProjects'
 import { ChatAvatar } from './ChatsSidebar'
 
 export function NewChatDialog() {
@@ -9,7 +9,7 @@ export function NewChatDialog() {
   const create = useChatsStore((s) => s.create)
   const loading = useChatsStore((s) => s.loading)
   const error = useChatsStore((s) => s.error)
-  const projects = useAppStore((s) => s.projects)
+  const projects = useLocalProjects()
   const initialKind = useChatsStore((s) => s.newChatKind)
   const [kind, setKind] = useState<'direct' | 'group'>(initialKind)
   const [selected, setSelected] = useState<string[]>([])

@@ -18,7 +18,7 @@ import {
   useProviderSnapshotsStore,
   useRunningOperation
 } from '../../lib/providerSnapshots'
-import { useAppStore } from '../../stores/appStore'
+import { useLocalProjects } from '../../hooks/useLocalProjects'
 import { Select } from '../ui/Select'
 import { AddProviderDialog, type AddProviderHandlers } from './AddProviderDialog'
 import { ApiSetupRow } from './ApiSections'
@@ -75,7 +75,7 @@ function apiRemoveHint(name: string, method: AddOptionMethod | undefined, retire
 export function ProvidersSettings({ settings, refreshProviderData, updateSettings, ensureValidProviderSelection }: ProvidersSettingsProps) {
   const settingsRef = useRef(settings)
   settingsRef.current = settings
-  const projects = useAppStore((state) => state.projects)
+  const projects = useLocalProjects()
 
   /** '' is this device; otherwise a project id. A removed project falls back to the device. */
   const [chosenScopeId, setChosenScopeId] = useState(lastScopeId)

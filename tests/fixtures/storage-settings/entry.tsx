@@ -134,7 +134,9 @@ useAppStore.setState({
   threads: [
     { id: 't1', name: 'Fix storage', projectId: 'p1', createdAt: '2026-10-01T00:00:00Z', updatedAt: '2026-10-10T00:00:00Z' },
     { id: 't2', name: 'Add search', projectId: 'p1', createdAt: '2026-10-01T00:00:00Z', updatedAt: '2026-10-20T00:00:00Z' },
-    { id: 't3', name: 'Landing page', projectId: 'p2', createdAt: '2026-10-01T00:00:00Z', updatedAt: '2026-10-05T00:00:00Z' }
+    { id: 't3', name: 'Landing page', projectId: 'p2', createdAt: '2026-10-01T00:00:00Z', updatedAt: '2026-10-05T00:00:00Z' },
+    // A thread of another computer, as this computer lists it: under the qualified id, with the computer in `node`.
+    { id: 'nod_laptop:r1', name: 'Remote thread', node: 'nod_laptop', createdAt: '2026-10-01T00:00:00Z', updatedAt: '2026-10-21T00:00:00Z' }
   ] as never
 })
 
@@ -418,11 +420,13 @@ async function run() {
   await pick('storage-machine-select', 'nod_laptop')
   await pick('storage-groupby-select', 'thread')
   await until(() => $$('.storage-row-link').some((link) => link.textContent === 'Remote thread'), 'remote thread link')
+  // It opens like a local thread, by its qualified id, and Settings gives way to it.
+  const remoteSelects = callsOf('threads.select').length
   $$('.storage-row-link').find((link) => link.textContent === 'Remote thread')!.click()
-  await until(() => callsOf('bridge.hub.attach').length > 0, 'remote thread attached')
-  links.remoteThread = { attach: callsOf('bridge.hub.attach').at(-1)!.args[0], dialog: Boolean($('[role="dialog"]')) }
-  $<HTMLButtonElement>('[role="dialog"] button[aria-label="Close"]')!.click()
-  await until(() => !$('[role="dialog"]'), 'viewer closed')
+  await until(() => callsOf('threads.select').length > remoteSelects, 'remote thread opened')
+  await until(() => useAppStore.getState().settingsOpen === false, 'settings closed for the remote thread')
+  links.remoteThread = { select: callsOf('threads.select').at(-1)!.args[0], dialog: Boolean($('[role="dialog"]')) }
+  useAppStore.setState({ settingsOpen: true, activeThreadId: null })
   evidence.links = links
   await pick('storage-machine-select', 'self')
   await settled()

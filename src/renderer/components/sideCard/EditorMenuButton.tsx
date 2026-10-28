@@ -6,6 +6,7 @@ import { FloatingPortal } from '../../lib/floatingLayer'
 import { ChevronDown, Code2, Folder } from '../../lib/icons'
 import { useAppStore } from '../../stores/appStore'
 import { loadEditors, refreshEditors, useEditorsStore } from '../../stores/editorsStore'
+import { UNKNOWN_COMPUTER_NAME, useComputer } from '../../lib/computers'
 import {
   defaultEditor,
   hasEditorChoices,
@@ -20,19 +21,26 @@ import { useSideCardMenu } from './useSideCardMenu'
 
 const refreshQuietly = () => { void refreshEditors() }
 
-/** Open the thread's folder in an editor or the file manager. Nothing without a folder. */
+/**
+ * Open the thread's folder in an editor or the file manager. Nothing without a folder. A thread of
+ * another computer has its folder there: the item says so and stays off, since an editor started
+ * here would open this computer's own disk.
+ */
 export function OpenInEditor() {
   const { projectId, path } = useActiveProjectLocation()
   const profileId = useAppStore((s) => s.profileId)
   const editors = useEditorsStore((s) => s.editors)
+  const node = useAppStore((s) => s.threads.find((thread) => thread.id === s.activeThreadId)?.node)
+  const computer = useComputer(node)
   const [lastId, setLastId] = useState<string | null>(() => loadLastEditorId(profileId))
-  const enabled = Boolean(projectId && path)
+  const enabled = Boolean(projectId && path) && !node
 
   useEffect(() => { setLastId(loadLastEditorId(profileId)) }, [profileId])
   useEffect(() => {
     if (enabled) void loadEditors()
   }, [enabled])
 
+  if (node) return projectId ? <OpenInEditorElsewhere computer={computer?.name ?? UNKNOWN_COMPUTER_NAME} /> : null
   if (!projectId || !path || !editors) return null
   const open = async (editor: EditorInfo) => {
     await window.mousse.editors.open(editor.id, path)
@@ -40,6 +48,21 @@ export function OpenInEditor() {
     setLastId(editor.id)
   }
   return <OpenInEditorView path={path} editors={editors} lastId={lastId} onOpen={open} onMenuOpen={refreshQuietly} />
+}
+
+/** The editor item of a thread that lives on another computer: off, with the reason where it would open. */
+export function OpenInEditorElsewhere({ computer }: { computer: string }) {
+  const reason = `The folder is on ${computer}. Open it in an editor there.`
+  return (
+    <div className="side-card-open-editor">
+      <div className="side-card-open-editor-group single">
+        <button type="button" className="side-card-open-editor-main" disabled aria-disabled="true" title={reason} aria-label={`Open in editor on ${computer}. ${reason}`}>
+          <Code2 size={14} aria-hidden="true" />
+          <span className="side-card-open-editor-label">Open in editor on {computer}</span>
+        </button>
+      </div>
+    </div>
+  )
 }
 
 interface OpenInEditorViewProps {

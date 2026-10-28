@@ -1,5 +1,5 @@
 import type { NodeId } from '../../../shared/net'
-import type { Device } from '../../lib/netDevices'
+import { worksOnThreads, type Device } from '../../lib/netDevices'
 import type { ComposerWorkspace } from '../../lib/newThread'
 
 export const LOCAL_DEVICE_FALLBACK_NAME = 'This computer'
@@ -58,6 +58,9 @@ export function runOnLabel(localName: string, devices: readonly Device[], node: 
   return node ? deviceForNode(devices, node)?.name ?? 'Unavailable computer' : localName
 }
 
+/** Why a connected computer cannot be picked: the grant to work on its threads is not there. */
+export const WORKS_ON_THREADS_OFF = 'Works on threads is off for this computer. Turn it on in Settings, Devices.'
+
 /** The Run on rows: this computer first, then each connected computer, with the picked one active. */
 export function buildRunOnOptions(input: {
   localName: string
@@ -67,12 +70,13 @@ export function buildRunOnOptions(input: {
   const remote = connectedRemoteDevices(input.devices)
   return [
     { id: LOCAL_RUN_ON_ID, name: input.localName, active: !input.node, disabled: false },
-    ...remote.map((device) => ({
-      id: device.node,
-      name: device.name,
-      active: device.node === input.node,
-      disabled: false
-    }))
+    ...remote.map((device): RunOnOption => {
+      const active = device.node === input.node
+      // A chat is created and written to through the grant; without it the computer is named, not offered.
+      return worksOnThreads(device) || active
+        ? { id: device.node, name: device.name, active, disabled: false }
+        : { id: device.node, name: device.name, active, disabled: true, reason: WORKS_ON_THREADS_OFF }
+    })
   ]
 }
 

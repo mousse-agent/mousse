@@ -17,6 +17,8 @@ export interface ThreadsContextMenuTarget {
   name: string
   pinned: boolean
   settled?: boolean
+  /** The computer a project is on, when it is not this one. */
+  node?: string
 }
 
 interface ThreadsContextMenuProps {
@@ -122,7 +124,7 @@ export function ThreadsContextMenu({
           <EditRegular />
           <span>Rename</span>
         </button>
-        {target.type === 'project' && onTrustGitSettings && (
+        {target.type === 'project' && onTrustGitSettings && !target.node && (
           <button
             type="button"
             className="threads-context-menu-item"

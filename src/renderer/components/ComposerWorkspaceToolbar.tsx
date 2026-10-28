@@ -275,6 +275,8 @@ function ComposerDeviceButton({ device, node, disabled }: { device: ComposerDevi
                   aria-checked={option.active}
                   className="composer-workspace-menu-item"
                   data-node={option.id === LOCAL_RUN_ON_ID ? '' : option.id}
+                  disabled={option.disabled}
+                  title={option.reason}
                   onClick={() => {
                     device.onSelect(option.id === LOCAL_RUN_ON_ID ? undefined : option.id as NodeId)
                     closeMenu()

@@ -1,5 +1,8 @@
 import { useEffect, useState } from 'react'
 import { ArrowLeft, RefreshCw } from '../lib/icons'
+import { useComputers } from '../lib/computers'
+import { useAppStore } from '../stores/appStore'
+import { localDeviceName } from './sideCard/deviceMenu'
 import type { ProvidersUsageResponse } from '../../shared/providerAuth'
 
 function formatUsageReset(resetsAt?: string): string {
@@ -21,6 +24,9 @@ function formatUsageReset(resetsAt?: string): string {
 }
 
 export function SubscriptionUsagePage({ onClose }: { onClose: () => void }) {
+  // Usage is this computer's, also while the thread in view runs on another one; with others around, it says so.
+  const others = Object.keys(useComputers().byNode).length > 0
+  const computerName = useAppStore((state) => localDeviceName(state.appInfo?.deviceName))
   const [usage, setUsage] = useState<ProvidersUsageResponse | null>(null)
   const [usageLoading, setUsageLoading] = useState(false)
   const [error, setError] = useState('')
@@ -35,7 +41,7 @@ export function SubscriptionUsagePage({ onClose }: { onClose: () => void }) {
   return <section className="subscription-usage-page" aria-labelledby="usage-title">
     <header className="usage-heading">
       <button type="button" onClick={onClose} aria-label="Back"><ArrowLeft size={16} /></button>
-      <h2 id="usage-title">Subscription usage</h2>
+      <h2 id="usage-title">Subscription usage{others ? <span className="usage-computer"> on {computerName}</span> : null}</h2>
       <button type="button" onClick={() => void loadUsage()} disabled={usageLoading} aria-label="Refresh usage"><RefreshCw className={usageLoading ? 'icon-spin' : ''} size={16} /></button>
     </header>
     <div className="subscription-usage-page-body">

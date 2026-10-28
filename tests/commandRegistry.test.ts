@@ -18,7 +18,6 @@ import {
   type CommandsBridge
 } from '../src/renderer/commands/commandRegistry'
 import { attachCommandShortcuts } from '../src/renderer/commands/useCommandShortcuts'
-import { useRemoteThreads } from '../src/renderer/lib/remoteThreadStore'
 import { useAppStore } from '../src/renderer/stores/appStore'
 import { bindingFor, resolveBinding, type CommandId, type KeyInput } from '../src/shared/commands'
 
@@ -708,32 +707,5 @@ describe('two views that register the same command', () => {
     expect(runCommand('thread.new', 'menu')).toBe(false)
     off.forEach((unregister) => unregister())
     expect(useCommandRegistry.getState().handlers.has('thread.new')).toBe(false)
-  })
-})
-
-describe('commands while a thread on another computer is shown', () => {
-  const showRemote = (entry: Record<string, unknown>) =>
-    useRemoteThreads.setState({ entries: { remote: { key: 'remote', ...entry } as never }, order: ['remote'], activeKey: 'remote' })
-  afterEach(() => useRemoteThreads.setState({ entries: {}, order: [], activeKey: null }))
-
-  it('runs Stop while the remote thread works, even when the local thread behind it is idle', () => {
-    stubWindow()
-    useAppStore.setState({ turnStates: { 'thread-1': { threadId: 'thread-1', phase: 'idle' } as never } })
-    const stop = vi.fn()
-    registerCommand('run.stop', { run: stop })
-    expect(runCommand('run.stop', 'menu')).toBe(false)
-    showRemote({ sending: true })
-    expect(runCommand('run.stop', 'menu')).toBe(true)
-    expect(stop).toHaveBeenCalledTimes(1)
-  })
-
-  it('does not run Stop for an idle remote thread because the local thread behind it is working', () => {
-    stubWindow()
-    const stop = vi.fn()
-    registerCommand('run.stop', { run: stop })
-    expect(runCommand('run.stop', 'menu')).toBe(true)
-    showRemote({ sending: false })
-    expect(runCommand('run.stop', 'menu')).toBe(false)
-    expect(stop).toHaveBeenCalledTimes(1)
   })
 })
