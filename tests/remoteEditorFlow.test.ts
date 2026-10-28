@@ -102,13 +102,13 @@ describe('how this computer reaches the computer that runs a thread', () => {
 describe('the folder a thread works in on its computer', () => {
   it('asks for the thread by its id and nothing else', async () => {
     const d = daemon({})
-    expect(await remoteFolder(d.ask, threadId)).toEqual({ ok: true, folder: { style: 'posix', path: '/home/me/app', uriPath: '/home/me/app' } })
+    expect(await remoteFolder(d.ask, threadId)).toEqual({ ok: true, folder: { style: 'posix', path: '/home/me/app', uriPath: '/home/me/app', platform: 'linux' } })
     expect(d.calls).toEqual([{ method: 'editor.folder', params: { threadId } }])
   })
 
   it('restores a removed worktree with the routed restore, then asks again', async () => {
     const d = daemon({ folders: [refused('workspace_not_ready', 'gone', { threadId, state: 'missing' }), { ...folder, kind: 'worktree', path: '/wt/t1', uriPath: '/wt/t1' }] })
-    expect(await remoteFolder(d.ask, threadId)).toEqual({ ok: true, folder: { style: 'posix', path: '/wt/t1', uriPath: '/wt/t1' } })
+    expect(await remoteFolder(d.ask, threadId)).toEqual({ ok: true, folder: { style: 'posix', path: '/wt/t1', uriPath: '/wt/t1', platform: 'linux' } })
     expect(d.calls).toEqual([
       { method: 'editor.folder', params: { threadId } },
       { method: 'workspace.restore', params: { threadId } },
@@ -190,7 +190,7 @@ describe('everything an editor needs for a thread of another computer', () => {
     expect(resolved).toEqual({
       ok: true,
       host: { kind: 'ssh', target: { user: 'me', host: 'box' } },
-      folder: { style: 'posix', path: '/home/me/app', uriPath: '/home/me/app' }
+      folder: { style: 'posix', path: '/home/me/app', uriPath: '/home/me/app', platform: 'linux' }
     })
     expect(d.methods()).toEqual(['net.ssh.target', 'editor.folder'])
   })
@@ -214,7 +214,7 @@ describe('everything an editor needs for a thread of another computer', () => {
       ok: true,
       host: { kind: 'mousse', alias },
       config: '/h/.mousse/ssh/config',
-      folder: { style: 'posix', path: '/home/me/app', uriPath: '/home/me/app' }
+      folder: { style: 'posix', path: '/home/me/app', uriPath: '/home/me/app', platform: 'linux' }
     })
     // The user's ~/.ssh/config is not touched here: `net.editor.ssh.prepare` is what adds the line.
     expect(d.methods()).toEqual(['net.ssh.target', 'net.editor.ssh.status', 'editor.folder', 'net.editor.alias'])
