@@ -8,6 +8,7 @@ import { describePermissionMode, PERMISSION_MODES } from '../../../shared/permis
 import { Select } from '../ui/Select'
 import { SettingsGroup, SettingsRow, Switch } from './SettingsRow'
 import { RunSettingsGroup } from './RunSettingsGroup'
+import { PrivacySettingsGroup } from './PrivacySettingsGroup'
 
 /** Set at build time from package.json (electron.vite.config.ts). */
 declare const __MOUSSE_VERSION__: string | undefined
@@ -65,7 +66,7 @@ export interface GeneralSettingsProps {
   onCommitAcrylicIntensity: (value: number) => void
 }
 
-/** Settings → General: appearance, the completion sound and the installed version. */
+/** Settings → General: appearance, permissions, runs, notifications, privacy and the installed version. */
 export function GeneralSettings({
   settings,
   options,
@@ -227,6 +228,8 @@ export function GeneralSettings({
           }
         />
       </SettingsGroup>
+
+      <PrivacySettingsGroup />
 
       <SettingsGroup title="About" icon={Info}>
         <AboutRow />

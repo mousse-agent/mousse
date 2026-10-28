@@ -1,5 +1,5 @@
 import { spawn, type ChildProcess, type SpawnOptions } from 'node:child_process'
-import type { InstanceEnv } from './env'
+import { withEnforced, type InstanceEnv } from './env'
 import { killProcessTree } from './processTree.mjs'
 
 /**
@@ -38,7 +38,7 @@ export function recordHarnessSpawn(spawned: HarnessSpawn): void {
   }
 }
 
-/** `command args…` with the instance's environment, `extraEnv` on top. */
+/** `command args…` with the instance's environment, `extraEnv` on top, and its enforced variables last. */
 export function spawnHarness(
   env: InstanceEnv,
   purpose: string,
@@ -47,7 +47,7 @@ export function spawnHarness(
   options: Omit<SpawnOptions, 'env'> & { extraEnv?: NodeJS.ProcessEnv } = {}
 ): ChildProcess {
   const { extraEnv, ...spawnOptions } = options
-  const processEnv = extraEnv ? { ...env.env, ...extraEnv } : env.env
+  const processEnv = withEnforced(extraEnv ? { ...env.env, ...extraEnv } : env.env, env.enforced)
   recordHarnessSpawn({ instanceId: env.instanceId, purpose, command, args, env: processEnv })
   return spawn(command, args, {
     windowsHide: true,

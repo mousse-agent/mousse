@@ -251,6 +251,10 @@ export function claudeCodeDriver(options: ClaudeCodeDriverOptions = {}): Harness
     // Claude Code passes MCP image content to the model, and every Claude model reads images.
     mcpImageResults: true,
     mirrorsVendorFile: true,
+    // Claude Code's documented switches (names checked in the 2.1.291 binary's text): usage
+    // telemetry, and error reports.
+    telemetryOff: () => ({ env: { DISABLE_TELEMETRY: '1', DISABLE_ERROR_REPORTING: '1' } }),
+    telemetryDocs: 'https://code.claude.com/docs/en/data-usage',
     decodeConfig: (raw, instanceId) => {
       const config = decodeInstanceConfig(raw, { privateHome: true })
       // The user's own built-in entry is never locked: it runs Claude Code as they set it up.
@@ -330,6 +334,8 @@ export function claudeCodeDriver(options: ClaudeCodeDriverOptions = {}): Harness
             launchConfig: launch,
             signedOut: () => live().signedOut(),
             saveLaunch: (patch: CliProviderConfigPatch) => live().saveLaunch(patch),
+            // The entry's telemetry switch, from its newest revision.
+            telemetryEnv: () => live().env.enforced,
             signInCommand,
             ...(credential ? credential.serviceOptions : {})
           }

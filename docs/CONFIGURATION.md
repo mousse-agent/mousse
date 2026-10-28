@@ -116,14 +116,53 @@ Legacy theme ids `dark-acrylic`, `light-acrylic`, and `system-acrylic` are migra
 
 ---
 
+---
+
 ## `providers`
 
-Orchestrator LLM provider selection. **Secrets (API keys, OAuth tokens) are not stored here** — they live in `$MOUSSE_HOME/auth.json`.
+The providers this profile can pick, and its default selection. **Secrets (API keys, OAuth tokens) are not stored here**: see [provider sign-ins and keys](PROVIDER_CREDENTIALS.md).
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `providers.llmProvider` | `string` | `""` | Active chat provider ID (e.g. `anthropic`, `openai`, `antigravity`) |
-| `providers.model` | `string` | `""` | Model ID within that provider |
+| `providers.llmProvider` | `string` | `""` | Provider of the default selection (kept for older readers) |
+| `providers.model` | `string` | `""` | Model of the default selection |
+| `providers.instanceId` | `string` | — | Provider instance of the default selection; wins over `llmProvider` when set |
+| `providers.instances` | `Record<string, ProviderInstanceConfig>` | the built-in entries | The provider instances of this profile, by instance id (below) |
+| `providers.instancesSeedVersion` | `number` | — | Which set of built-in entries the profile was last given |
+| `providers.removedInstances` | `string[]` | `[]` | Instance ids removed from this profile (below) |
+| `providers.modelPrefs` | `Record<string, object>` | `{}` | Per instance: hidden and favourite models, their order, and custom models |
+
+**Instances.** A provider instance is one provider a profile can pick, with a stable id: `claude`, `codex`, `pi:openai`, or `claude:work` for a second account. Each entry is `{ driver, enabled, config }`: `driver` is the kind of agent (`claude`, `codex`, `antigravity`, `grok`, `cursor`, `acp`, `pi`), `enabled` turns it on or off on this device, and `config` holds its settings: `displayName`, `home` (`default` for your own setup, `private` for a home of its own), the launch settings `binaryPath`, `args` and `env`, `signedOutInMousse`, and `telemetry` (`off` or `agent_setting`; absent means the default, see [Privacy and agent telemetry](#privacy-and-agent-telemetry)). Mousse also keeps `vendorMirror` (the launch settings it last copied to the agent's own settings file) and `knownProblemConsent` (a version you allowed to run despite a known problem) there; leave them as they are.
+
+**Scopes.** `enabled` is the device setting. A project can turn an instance off for itself, or on again when the device has it on, and pick its own default; those choices live in `<profile>/harness/scopes.json`.
+
+**Removed instances.** A removed provider stays removed until you add it again, even if an older version of Mousse re-creates its entry. Its id is listed in `removedInstances`, which wins over `instances`; only Add in Settings → Providers takes an id off the list.
+
+**Launch settings live in the instance.** The executable, launch arguments and variables of every entry, and whether it is signed out in Mousse, are kept in its `config`. Earlier versions kept them for the built-in Claude Code, Codex and Antigravity entries in their own `settings.json` under the profile. Until the next release, Mousse still writes a copy there, so an older version you go back to reads the same settings. For good, Mousse also takes over a change an older version made in that file the next time it starts, and says so on the card; when both changed, it keeps its own and offers "Use the older settings".
+
+---
+
+## Privacy and agent telemetry
+
+Mousse itself collects no usage data about you or your chats. Your chats go only to the providers you set up. Settings → General → Privacy lists every service Mousse itself contacts, when, and what it sends (the list is `src/shared/privacy/outbound.ts`).
+
+The agents you connect may send their own usage and error reports (telemetry) to the company that makes them. Each provider in Settings → Providers has a **Telemetry** setting:
+
+- **Off:** Mousse adds the agent's own documented switch to the processes it starts for that provider, after the provider's own launch variables and arguments (the table says which).
+- **Agent's own setting:** Mousse sets nothing. The agent does what its own settings say.
+
+| Agent | What Off sets |
+|-------|---------------|
+| Claude Code | `DISABLE_TELEMETRY=1` and `DISABLE_ERROR_REPORTING=1`, on every Claude Code process Mousse starts for it |
+| Codex | `-c analytics.enabled=false` on every Codex process Mousse starts for it (chats, sign-in checks, sign-in and sign-out); only the version check (`codex --version`) runs without it |
+| Model APIs (the Mousse agent, Pi) | `PI_TELEMETRY=0`, on every Pi process |
+| Grok, Cursor, Antigravity, other ACP agents | Nothing: they document no switch, and their row shows "No switch" |
+
+**Defaults.** Off for the agents Mousse sets up: an entry with a home of its own, an agent Mousse installed (such as Codex set up by Mousse), and the Mousse agent. Agent's own setting for your own CLIs on their usual home (`~/.claude`, `~/.codex`), so nothing changes for them until you choose Off.
+
+**What Mousse never does.** It never edits an agent's settings files or home for this: the switch exists only in the processes Mousse starts. The same agent started from a terminal follows its own settings. Off covers only what the agent's switch covers (Claude Code's usage telemetry and error reports, Codex's analytics, Pi's install and update reports and the attribution headers it adds for some providers). It does not change what the agent sends to its model provider to do the work.
+
+**Details.** A variable of the same name set on the provider is ignored while Telemetry is Off, and the editor marks it. A change applies from the agent's next start; a chat that is running keeps its process until its turn ends.
 
 ---
 

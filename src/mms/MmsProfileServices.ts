@@ -348,6 +348,8 @@ export class MmsProfileServices {
       findBinary: () => this.harnessImpl?.findBinaryFor(CLAUDE_INSTANCE_ID),
       runAuth: harnessAuthRunner(CLAUDE_INSTANCE_ID),
       launchConfig: launchOf(CLAUDE_INSTANCE_ID),
+      // The entry's telemetry switch (Settings → Providers), set last on every process.
+      telemetryEnv: () => this.harnessImpl?.enforcedFor(CLAUDE_INSTANCE_ID).env,
       signedOut: signedOutOf(CLAUDE_INSTANCE_ID),
       saveLaunch: saveLaunchOf(CLAUDE_INSTANCE_ID)
     })
@@ -359,6 +361,7 @@ export class MmsProfileServices {
       }
     }, {
       launch: launchOf(CODEX_INSTANCE_ID),
+      telemetry: () => this.harnessImpl?.enforcedFor(CODEX_INSTANCE_ID),
       signedOut: signedOutOf(CODEX_INSTANCE_ID),
       saveLaunch: saveLaunchOf(CODEX_INSTANCE_ID)
     })

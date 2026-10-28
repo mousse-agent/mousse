@@ -127,9 +127,10 @@ export function piLaunch(input: PiLaunchInput): PiLaunch {
   put(env, 'PI_PACKAGE_DIR', input.runtime.root)
   put(env, 'PI_OFFLINE', '1')
   put(env, 'PI_SKIP_VERSION_CHECK', '1')
-  put(env, 'PI_TELEMETRY', '0')
   if (host.versions.electron) put(env, 'ELECTRON_RUN_AS_NODE', '1')
   for (const [name, value] of Object.entries(PI_AWS_RETRY_ENV)) put(env, name, value)
+  // The entry's telemetry switch (Off: `PI_TELEMETRY=0`); `spawnHarness` sets it again.
+  for (const [name, value] of Object.entries(input.env.enforced ?? {})) put(env, name, value)
 
   const args = [
     input.runtime.entry,

@@ -101,6 +101,25 @@ export interface KnownProblem {
  */
 export type CredentialKind = 'api_key' | 'subscription' | 'ambient' | 'unknown'
 
+/**
+ * The entry's agent telemetry (Settings → Providers). Mousse applies it only through what it adds to
+ * the processes it starts; it never edits the agent's files.
+ * - `off`: every process starts with the agent's documented switch (`variables`, `args`) set last;
+ * - `agent_setting`: Mousse sets nothing, and the agent does what its own settings say;
+ * - `none`: the agent documents no switch, so there is nothing to set.
+ */
+export interface InstanceTelemetry {
+  setting: 'off' | 'agent_setting' | 'none'
+  /** The setting until the user picks one: `off` for an agent Mousse set up, `agent_setting` on the user's own setup. */
+  defaultSetting?: 'off' | 'agent_setting'
+  /** The variables Off sets: a launch variable of the same name is ignored while it is off. */
+  variables?: string[]
+  /** The launch arguments Off adds after the entry's own. */
+  args?: string[]
+  /** The vendor's page on what the agent collects. */
+  docsUrl?: string
+}
+
 export interface InstanceSnapshot {
   instanceId: string
   driver: HarnessDriverKind
@@ -179,6 +198,8 @@ export interface InstanceSnapshot {
    * (`configure({ useOlderSettings: true })`) until the user picks or saves.
    */
   settingsNotice?: { kind: 'older_applied' | 'older_conflict'; message: string }
+  /** The entry's agent telemetry; absent on older daemons. */
+  telemetry?: InstanceTelemetry
 }
 
 /**

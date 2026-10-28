@@ -276,6 +276,29 @@ describe('Codex CLI config', () => {
     expect((await service.cliConfig()).binaryPath).toBe(binary)
   })
 
+  it('adds the telemetry switch after every other argument while it is off, and nothing on the agent\'s own setting', async () => {
+    const home = tempHome()
+    const binary = executable(join(home, 'codex'))
+    const questions = new UserQuestionService()
+    cleanups.push(() => questions.shutdown())
+    const fake = server()
+    const { cache } = versions('codex-cli 0.162.1')
+    let telemetry: { args?: readonly string[] } | undefined
+    const launch: StoredCliConfig = { binaryPath: binary, args: ['-c', 'analytics.enabled=true'] }
+    const service = new CodexProviderService(home, questions, { launch: fake.launch, versions: cache }, { launch: () => launch, telemetry: () => telemetry })
+    cleanups.push(() => service.stop())
+
+    // The user's own Codex, never flipped: as the user set it up.
+    expect(await service.status()).toMatchObject({ state: 'connected' })
+    expect(fake.launches[0].args).toEqual(['-c', 'analytics.enabled=true'])
+
+    // Off: the switch last, so it wins over the entry's own `-c`; the home's config.toml is not touched.
+    telemetry = { args: ['-c', 'analytics.enabled=false'] }
+    service.launchChanged()
+    expect(await service.status({ force: true })).toMatchObject({ state: 'connected' })
+    expect(fake.launches[1].args).toEqual(['-c', 'analytics.enabled=true', '-c', 'analytics.enabled=false'])
+  })
+
   it.runIf(process.platform === 'win32')('keeps a chosen npm codex.cmd and launches the program it runs', async () => {
     const home = tempHome()
     const npm = join(home, 'npm')

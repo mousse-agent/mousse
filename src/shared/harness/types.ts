@@ -403,8 +403,17 @@ export interface InstanceModel {
 }
 
 /** Instance settings the Add dialog and editor change. `null` clears a field back to its default. */
+/**
+ * An entry's agent telemetry (Settings → Providers): `off` starts every process of the entry with
+ * the agent's documented switch set last; `agent_setting` sets nothing, so the agent does what its
+ * own settings say.
+ */
+export type TelemetrySetting = 'agent_setting' | 'off'
+
 export interface InstanceConfigPatch {
   displayName?: string | null
+  /** The entry's agent telemetry; refused for an agent that documents no switch. */
+  telemetry?: TelemetrySetting
   /** `default` = the user's own vendor home; `private` = a Mousse-owned home for this instance. */
   home?: 'default' | 'private'
   /** Explicit executable. When it cannot run, the instance reports "Override not found" (no PATH fallback). */

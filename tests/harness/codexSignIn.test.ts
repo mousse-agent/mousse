@@ -99,7 +99,9 @@ function fakeCodex(): string {
     '#!/usr/bin/env node',
     "const fs = require('node:fs')",
     "const path = require('node:path')",
+    // Leading `-c key=value` overrides (the telemetry switch) come before the subcommand, as Codex takes them.
     'const args = process.argv.slice(2)',
+    "while (args[0] === '-c') args.splice(0, 2)",
     "if (args.includes('--version')) { console.log('codex-cli 0.162.1'); process.exit(0) }",
     'const home = process.env.CODEX_HOME',
     "if (args[0] === 'logout') {",
@@ -414,7 +416,8 @@ describe('sign in from the app', () => {
 
     const signIn = await startSignIn(w, WORK)
     const terminal = await signIn.terminal()
-    expect(terminal.args.slice(-2)).toEqual(['login', '--device-auth'])
+    // The telemetry switch (Off by default with a home of its own) goes before the subcommand.
+    expect(terminal.args.slice(-4)).toEqual(['-c', 'analytics.enabled=false', 'login', '--device-auth'])
     // It starts in the private home, so no project settings of Mousse's own folder are read.
     expect(terminal.cwd).toBe(w.homeOf(WORK))
     // The private home is set; `HOME` is the user's own, and no ambient credential comes along.
@@ -600,6 +603,23 @@ describe('sign in from the app', () => {
     expect((await w.harness.instances.recheck(WORK)).auth).toMatchObject({ state: 'signed_in', canSignOut: true })
   })
 
+  it('on the agent\'s own telemetry setting, sign-in and sign-out run without the switch', async () => {
+    const w = world()
+    await w.harness.instances.configure(WORK, { telemetry: 'agent_setting' })
+    const running = await startSignIn(w, WORK)
+    const terminal = await running.terminal()
+    expect(terminal.args).not.toContain('analytics.enabled=false')
+    expect(terminal.args.slice(-2)).toEqual(['login', '--device-auth'])
+    terminal.print(DEVICE_OUTPUT)
+    terminal.exit(0, 'acct-own')
+    expect((await running.settled()).phase).toBe('completed')
+    await w.harness.instances.signOut(WORK)
+    const logout = w.spawns.filter((spawned) => spawned.purpose === 'auth' && spawned.args.at(-1) === 'logout').at(-1)!
+    expect(logout.args).not.toContain('analytics.enabled=false')
+    // Every app-server it started after the change ran without it too.
+    expect(w.servers.launches.at(-1)?.args ?? []).not.toContain('analytics.enabled=false')
+  })
+
   it('sign in, sign out, sign in again; the second sign-in works after the service is rebuilt from disk', async () => {
     const profileHome = tempDir('mousse-codex-cycle')
     const first = world({ profileHome })
@@ -620,6 +640,7 @@ describe('sign in from the app', () => {
     const logout = first.spawns.find((spawned) => spawned.purpose === 'auth' && spawned.args.at(-1) === 'logout')
     expect(logout?.instanceId).toBe(WORK)
     expect(logout?.env.CODEX_HOME).toBe(first.homeOf(WORK))
+    expect(logout?.args.slice(-3)).toEqual(['-c', 'analytics.enabled=false', 'logout'])
     expect(existsSync(join(first.homeOf(WORK), 'auth.json'))).toBe(false)
     first.stop()
 
@@ -1382,7 +1403,8 @@ describe('changing the settings of a live entry', () => {
     await w.harness.instances.configure(WORK, { env: {}, args: [] })
     await w.harness.instances.recheck(WORK)
     expect(last().env.KEEP_ME).toBeUndefined()
-    expect(last().args).toEqual([])
+    // Only the telemetry switch: an entry with its own home is Off by default.
+    expect(last().args).toEqual(['-c', 'analytics.enabled=false'])
     const signIn = await startSignIn(w, WORK)
     const terminal = await signIn.terminal()
     expect(terminal.env.KEEP_ME).toBeUndefined()
@@ -1440,7 +1462,7 @@ describe('launch arguments that choose where an account lives', () => {
     writeSignIn(w.homeOf(WORK), 'acct-work')
     const snapshot = await w.harness.instances.recheck(WORK)
     const launched = w.servers.launches.at(-1)!
-    expect(launched.args).toEqual(['-c', 'model="gpt-x"', '--verbose'])
+    expect(launched.args).toEqual(['-c', 'model="gpt-x"', '--verbose', '-c', 'analytics.enabled=false'])
     expect(launched.env.CODEX_SQLITE_HOME).toBe(w.homeOf(WORK))
     expect(snapshot.auth.message).toContain('Not used: the launch arguments that set sqlite_home, log_dir.')
     const patched = await w.harness.instances.configure(WORK, { args: ['-c', 'model="gpt-y"'] })
