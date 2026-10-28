@@ -213,7 +213,10 @@ export class BridgeProfileService {
         void this.track(net.failStream(stream, error instanceof NetError ? error.code : 'internal'))
       }
     })
-    this.remote = new RemoteApi(new MmsRemoteBackend(services), this.clock)
+    this.remote = new RemoteApi(
+      new MmsRemoteBackend(services, undefined, undefined, (node) => rt.policy.get(node).maxPermissionMode),
+      this.clock
+    )
     for (const method of this.remote.methods())
       rt.rpc.register({
         ...method,
@@ -279,6 +282,19 @@ export class BridgeProfileService {
               device: name,
               threadId,
               threadName: services.threads.getThread(threadId)?.name ?? ''
+            }
+          }
+        }),
+      // The first change a device makes on a thread here: a desktop notification, with where to limit it.
+      onFirstUse: ({ name, threadId }) =>
+        services.events.emit({
+          channel: 'protocol:event',
+          data: {
+            type: 'ui.notify',
+            data: {
+              kind: 'remote-work',
+              device: name,
+              ...(threadId ? { threadId, threadName: services.threads.getThread(threadId)?.name ?? '' } : {})
             }
           }
         }),

@@ -31,7 +31,7 @@ const FORBIDDEN_WORDS: Record<ComputerForbiddenReason, (name: string) => string>
   blocked: (name) => `${name} refused this device.`,
   setting_off: (name) => `Works on threads is off on ${name}.`,
   capability: (name) =>
-    `This device is not allowed to work on threads on ${name}. Turn on Works on threads for it in Devices.`,
+    `This computer is not allowed to work on threads on ${name}. Turn on Works on threads for this computer in Settings, Devices, on the computer that manages your devices.`,
   terminal_off: terminalOffMessage,
   unknown: (name) => `${name} refused this request.`
 }

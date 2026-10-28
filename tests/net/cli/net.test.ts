@@ -14,6 +14,7 @@ import {
   type InviteInput
 } from '../../../src/cli/commands/net'
 import type { ParsedArgs } from '../../../src/cli/parseArgs'
+import { isBridgeHubCommand } from '../../../src/cli/commands/bridge'
 
 function args(
   command: 'net' | 'bridge',
@@ -167,6 +168,18 @@ describe('network CLI validation', () => {
       args('bridge', 'threads', ['on', 'off'])
     ])
       expect(() => prepareNetCommand(bad)).toThrow()
+  })
+  it('sends bridge threads on, off or alone to the setting, and bridge threads with a computer to the Hub', () => {
+    // The Hub also has a threads subcommand (a computer's list); it must not swallow the switch.
+    for (const rest of [[], ['on'], ['off']]) expect(isBridgeHubCommand(args('bridge', 'threads', rest))).toBe(false)
+    expect(isBridgeHubCommand(args('bridge', 'threads', [nodeId]))).toBe(true)
+    expect(isBridgeHubCommand(args('bridge', 'threads', [nodeId, 'extra']))).toBe(true)
+    expect(isBridgeHubCommand(args('bridge', 'threads', ['on', 'off']))).toBe(true)
+    // The other Hub subcommands are unchanged, and the net ones are not the Hub's.
+    expect(isBridgeHubCommand(args('bridge', 'projects', [nodeId]))).toBe(true)
+    expect(isBridgeHubCommand(args('bridge', 'send', [nodeId, 'thread', 'hi']))).toBe(true)
+    expect(isBridgeHubCommand(args('bridge', 'block', [nodeId]))).toBe(false)
+    expect(isBridgeHubCommand(args('bridge', 'nodes', []))).toBe(false)
   })
   it('rejects malformed, unexpected or privilege-confusing arguments without exposing them', () => {
     const cases = [

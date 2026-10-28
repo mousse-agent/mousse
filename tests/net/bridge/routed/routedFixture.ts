@@ -149,6 +149,7 @@ export interface RoutedOwnerOptions {
     awayMs?: number
     deviceName?: (node: NodeId) => string
     onFirstTerminal?: (info: { node: NodeId; name: string; threadId: string }) => void
+    onFirstUse?: (info: { node: NodeId; name: string; threadId?: string }) => void
   }
 }
 
@@ -213,6 +214,7 @@ export async function routedOwner(options: RoutedOwnerOptions = {}) {
           connected: options.terminals.connected,
           deviceName: options.terminals.deviceName,
           onFirstTerminal: options.terminals.onFirstTerminal,
+          onFirstUse: options.terminals.onFirstUse,
           terminalAwayMs: options.terminals.awayMs
         }
       : {}),

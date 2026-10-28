@@ -13,7 +13,7 @@ import type { MmsProfileServices } from '../../MmsProfileServices'
 import { dispatchMethod } from '../../protocol/handlers'
 import { NetError, type NodeId } from '../../../shared/net'
 import { REMOTE_MESSAGE_IMAGES_MAX_CHARS } from './RemoteApi'
-import type { PermissionMode } from '../../../shared/permissionMode'
+import { normalizePermissionMode, type PermissionMode } from '../../../shared/permissionMode'
 import { newestMessages } from '../../protocol/transcriptPaging'
 import { ROUTED_SNAPSHOT_MESSAGE_BYTES } from '../../../shared/bridge/routed'
 import type { RemoteBackendPort, RemoteChatExtras } from './RemoteApi'
@@ -130,7 +130,9 @@ export class MmsRemoteBackend implements RemoteBackendPort {
     private readonly services: MmsProfileServices,
     private readonly revision: () => number = () => 0,
     /** Where this computer keeps credentials and settings (the user's home, the platform, tool folders). */
-    private readonly folderRules: () => FolderRuleEnvironment = currentFolderEnvironment
+    private readonly folderRules: () => FolderRuleEnvironment = currentFolderEnvironment,
+    /** The highest permission mode this computer lets a device run a turn in (`net_node_policy`); absent for a build without limits. */
+    private readonly deviceLimit?: (node: NodeId) => PermissionMode
   ) {}
   async execute(method: BridgeOrdinaryMethod, params: Record<string, unknown>, caller?: { node: NodeId }): Promise<unknown> {
     if (
@@ -154,7 +156,7 @@ export class MmsRemoteBackend implements RemoteBackendPort {
     }
     if (method === 'projects.open') return mmsJson(this.openProject(params.path))
     if (method === 'projects.match') return mmsJson(await this.matchProject(params))
-    const composer = await this.composer(method, params)
+    const composer = await this.composer(method, params, caller)
     if (composer !== undefined) return mmsJson(composer)
     if (method === 'threads.create') return mmsJson(await this.createThread(params, caller))
     return mmsJson(
@@ -291,13 +293,14 @@ export class MmsRemoteBackend implements RemoteBackendPort {
    */
   private async composer(
     method: BridgeOrdinaryMethod,
-    params: Record<string, unknown>
+    params: Record<string, unknown>,
+    caller?: { node: NodeId }
   ): Promise<unknown> {
     const s = this.services,
       threadId = params.threadId as string
     switch (method) {
       case 'composer.options':
-        return this.composerOptions(params.threadId as string | undefined)
+        return this.composerOptions(params.threadId as string | undefined, caller)
       case 'threads.setModel': {
         const model = params.model as { instanceId?: string; llmProvider?: string; model: string }
         try {
@@ -370,7 +373,7 @@ export class MmsRemoteBackend implements RemoteBackendPort {
     }
   }
   /** The models, default model, modes, skills and slash commands a composer offers. */
-  private async composerOptions(threadId?: string): Promise<unknown> {
+  private async composerOptions(threadId?: string, caller?: { node: NodeId }): Promise<unknown> {
     const s = this.services
     await s.providerAuth.init()
     const settings = s.settings.get()
@@ -398,6 +401,12 @@ export class MmsRemoteBackend implements RemoteBackendPort {
           }
         : null,
       modes: REMOTE_CHAT_MODES,
+      // What a turn written from here runs in: this computer's default mode, and the most it lets the asking device
+      // have. A window shows the stricter of the two for a thread that has no mode of its own.
+      permission: {
+        defaultMode: normalizePermissionMode(settings.permissions?.defaultMode),
+        ...(caller && this.deviceLimit ? { limit: this.deviceLimit(caller.node) } : {})
+      },
       skills,
       commands: [...CHANNEL_COMMAND_REGISTRY, ...COMPOSER_DESKTOP_COMMANDS].map((command) => ({
         name: command.name,

@@ -506,6 +506,24 @@ export function registerGuiIpc(
     notification.show()
   }
 
+  /** Another of the user's computers changed a thread here for the first time: said in a desktop notification, with where to limit it. */
+  const notifyRemoteWork = (device: string, threadName: string): void => {
+    if (!Notification.isSupported()) return
+    const notification = new Notification({
+      title: 'Mousse',
+      body: `${device} is working on this computer's threads${threadName ? ` (${threadName})` : ''}. Open Settings, Devices to limit what it can do.`
+    })
+    notification.on('click', () => {
+      const win = getWindow()
+      if (win && !win.isDestroyed()) {
+        if (win.isMinimized()) win.restore()
+        win.show()
+        win.focus()
+      }
+    })
+    notification.show()
+  }
+
   const setThreadActivity = (threadId: string, state: ThreadActivityState): void => {
     activityTrackerFor().setState(threadId, state)
     broadcast('threads:activity', activityTrackerFor().getSnapshot())
@@ -732,11 +750,10 @@ export function registerGuiIpc(
     }
     if (event.type === 'ui.notify') {
       const info = event.data as { kind?: unknown; device?: unknown; threadName?: unknown } | null
-      if (info?.kind === 'remote-terminal')
-        notifyRemoteTerminal(
-          typeof info.device === 'string' && info.device ? info.device : 'Another computer',
-          typeof info.threadName === 'string' ? info.threadName : ''
-        )
+      const device = typeof info?.device === 'string' && info.device ? info.device : 'Another computer'
+      const threadName = typeof info?.threadName === 'string' ? info.threadName : ''
+      if (info?.kind === 'remote-terminal') notifyRemoteTerminal(device, threadName)
+      if (info?.kind === 'remote-work') notifyRemoteWork(device, threadName)
     }
     if (event.type === 'ui.focus-intent') {
       const win = getWindow()
@@ -782,7 +799,6 @@ export function registerGuiIpc(
       )).catch(error => console.warn('MCP browser authorization failed', error instanceof Error ? error.message : 'Unknown error'))
       return
     }
-    if (event.type === 'bridge.hub.thread') win.webContents.send('bridge:thread-part', event.data)
     // Live output of a Git action: the daemon sent it on this window's own connection, so only this window gets it.
     if (event.type === 'git.operation') win.webContents.send('git:operation', (event.data as { event?: unknown } | null)?.event)
   })
@@ -953,6 +969,8 @@ export function registerGuiIpc(
       }
       return result
     } catch (err) {
+      // A send to another computer that was not confirmed: the window reads the thread in view again.
+      noteUncertainOutcome(err)
       const error = guiChatRequestError(err)
       const disconnected = error.code === 'workspace_connection_lost'
       if (!disconnected) {
@@ -1180,13 +1198,6 @@ export function registerGuiIpc(
     return res.project
   })
 
-  registerHandler('projects:identity', async (_e, projectId: string) => {
-    const res = await guiMms.request<{ identity: { roots: string[]; remotes: string[] } | null }>(
-      'projects.identity',
-      { projectId }
-    )
-    return res.identity
-  })
   registerHandler('projects:remove', async (_e, projectId: string) => {
     const res = await guiMms.request<{ projects: unknown[] }>('projects.remove', {
       projectId

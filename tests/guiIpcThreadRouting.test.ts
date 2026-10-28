@@ -18,6 +18,7 @@ vi.mock('electron', () => ({
 
 import { registerGuiIpc, type GuiIpcServices } from '../src/main/ipc/registerGuiIpc'
 import { PresentationState } from '../src/main/mms/PresentationState'
+import { MmsProtocolError } from '../src/mms/protocol/client'
 import { isQualifiedId, qualifyId } from '../src/shared/threadRef'
 
 const NODE = 'nod_0123456789abcdefghjkmnpqrs'
@@ -227,6 +228,22 @@ describe('a call to another computer that was not confirmed', () => {
     await vi.waitFor(() => expect(sent('threads.list')).toHaveLength(1))
     // The thread is held and read afresh, as when it is opened.
     expect(sent('threads.focus').map((call) => call.params)).toContainEqual({ threadId: REMOTE, focused: true })
+    expect(sent('snapshot')).toEqual([{ method: 'snapshot', params: { threadId: REMOTE } }])
+  })
+
+  it('does the same for a send, which answers with an error instead of failing, and keeps its code and its request id', async () => {
+    presentation.setActiveThreadId(REMOTE)
+    request.mockImplementationOnce(async (method: string, params?: unknown) => {
+      calls.push({ method, params })
+      const error = uncertain(method)
+      throw new MmsProtocolError('outcome_uncertain', error.message, error.details)
+    })
+    const answer = (await invoke('orchestrator:sendToThread', REMOTE, { content: 'Hello', requestId: 'req-1' })) as { requestAcknowledged?: boolean; error?: { code?: string; message?: string } }
+    expect(answer.requestAcknowledged).toBe(false)
+    expect(answer.error).toMatchObject({ code: 'outcome_uncertain' })
+    expect(answer.error?.message).toContain('may have happened')
+    expect(sent('orchestrator.send')[0].params).toMatchObject({ threadId: REMOTE, requestId: 'req-1' })
+    await vi.waitFor(() => expect(sent('threads.list')).toHaveLength(1))
     expect(sent('snapshot')).toEqual([{ method: 'snapshot', params: { threadId: REMOTE } }])
   })
 

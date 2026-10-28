@@ -244,7 +244,8 @@ export class RemoteApi {
       return { ok: true }
     }
     // A thread remembers the device that created it, so every device can list it.
-    if (method === 'threads.create') return this.backend.execute(method, params, { node: context.caller.node })
+    if (method === 'threads.create' || method === 'composer.options')
+      return this.backend.execute(method, params, { node: context.caller.node })
     return this.backend.execute(method, params)
   }
   close(): void {

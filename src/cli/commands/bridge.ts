@@ -46,6 +46,17 @@ export const BRIDGE_HUB_SUBCOMMANDS = [
   'cancel',
   'requests'
 ] as const
+/**
+ * Whether `bridge <subcommand>` is one of the Hub's. `threads` is both the Hub's list of a computer's
+ * threads (`bridge threads <node-id>`) and the owner's switch (`bridge threads [on|off]`, with no node):
+ * it is the switch when it has no argument, or exactly `on` or `off`.
+ */
+export function isBridgeHubCommand(args: Pick<ParsedArgs, 'subcommand' | 'positional'>): boolean {
+  if (!BRIDGE_HUB_SUBCOMMANDS.includes(args.subcommand as (typeof BRIDGE_HUB_SUBCOMMANDS)[number])) return false
+  if (args.subcommand !== 'threads') return true
+  const [first, ...rest] = args.positional
+  return !(first === undefined || ((first === 'on' || first === 'off') && rest.length === 0))
+}
 export interface BridgeHubCliRequest {
   method: BridgeHubLocalMethod
   params: BridgeHubLocalParams[BridgeHubLocalMethod]
