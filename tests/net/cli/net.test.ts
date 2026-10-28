@@ -174,6 +174,25 @@ describe('network CLI validation', () => {
     ])
       expect(() => prepareNetCommand(bad)).toThrow()
   })
+  it('chooses which SSH server answers editor connections, or shows the choice', () => {
+    expect(prepareNetCommand(args('bridge', 'editor-server', []))).toEqual({
+      method: 'bridge.editorServer',
+      params: {}
+    })
+    expect(prepareNetCommand(args('bridge', 'editor-server', ['system']))).toEqual({
+      method: 'bridge.editorServer',
+      params: { system: true }
+    })
+    expect(prepareNetCommand(args('bridge', 'editor-server', ['mousse']))).toEqual({
+      method: 'bridge.editorServer',
+      params: { system: false }
+    })
+    for (const bad of [
+      args('bridge', 'editor-server', ['sshd']),
+      args('bridge', 'editor-server', ['system', 'mousse'])
+    ])
+      expect(() => prepareNetCommand(bad)).toThrow()
+  })
   it('turns the setting for other computers working on this one on and off, or shows it', () => {
     expect(prepareNetCommand(args('bridge', 'threads', []))).toEqual({
       method: 'bridge.workOnThreads',

@@ -31,13 +31,18 @@ it('stores the routing flag only while it is off, so an earlier version still lo
     await main.net.request('net.protect', { passphrase: 'stored-flags-passphrase' })
     const stored = (): { features: Record<string, unknown> } =>
       JSON.parse(
-        main.net.runtime().db.database.prepare('SELECT value FROM net_service_config').get()!.value as string
+        main.net.runtime().db.database.prepare('SELECT value FROM net_service_config').get()!
+          .value as string
       )
     // On, the default: the saved configuration is what the earlier version wrote, and it reads it.
     expect(stored().features).toEqual({ netBridge: true, netSpaces: true })
     expect(olderVersionAccepts(stored())).toBe(true)
     // The flag is on in memory, and a later save (any setting) keeps the stored form.
-    expect(main.net.status().features).toEqual({ netBridge: true, netSpaces: true, netBridgeThreads: true })
+    expect(main.net.status().features).toEqual({
+      netBridge: true,
+      netSpaces: true,
+      netBridgeThreads: true
+    })
     await main.net.request('bridge.workOnThreads', { enabled: true })
     expect(olderVersionAccepts(stored())).toBe(true)
     // Off: it is stored (a tester who turned it off goes back at their own risk), and read back.
@@ -64,13 +69,30 @@ it('has both switches for other computers on by default, and keeps a choice to t
   try {
     await main.net.request('net.init', { listen: true })
     // Nothing was ever stored for them, so a profile from before this change gets the defaults.
-    expect(main.net.status()).toMatchObject({ workOnThreads: true, features: { netBridgeThreads: true } })
+    expect(main.net.status()).toMatchObject({
+      workOnThreads: true,
+      features: { netBridgeThreads: true }
+    })
     expect(await main.net.request('bridge.workOnThreads', {})).toEqual({ enabled: true })
     // Turning the owner switch off is kept, and is the kill switch.
-    expect(await main.net.request('bridge.workOnThreads', { enabled: false })).toEqual({ enabled: false })
+    expect(await main.net.request('bridge.workOnThreads', { enabled: false })).toEqual({
+      enabled: false
+    })
     expect(main.net.status().workOnThreads).toBe(false)
-    expect(await main.net.request('bridge.workOnThreads', { enabled: true })).toEqual({ enabled: true })
+    expect(await main.net.request('bridge.workOnThreads', { enabled: true })).toEqual({
+      enabled: true
+    })
     expect(main.net.status().workOnThreads).toBe(true)
+    // The owner's choice of the system's SSH server is kept only while it is on, so an earlier build still reads the profile.
+    expect(await main.net.request('bridge.editorServer', {})).toMatchObject({ system: false })
+    expect(await main.net.request('bridge.editorServer', { system: true })).toMatchObject({
+      system: true
+    })
+    expect(main.net.status().editorServer).toMatchObject({ system: true })
+    expect(await main.net.request('bridge.editorServer', { system: false })).toMatchObject({
+      system: false
+    })
+    expect(main.net.status().editorServer).toMatchObject({ system: false })
   } finally {
     await main.stop()
     rmSync(root, { recursive: true, force: true })
