@@ -1,4 +1,4 @@
-import { Type, type Tool, type ToolCall, type ToolResultMessage } from '@earendil-works/pi-ai'
+import { Type, type JsonObject, type Tool, type ToolCall, type ToolResultMessage } from '@earendil-works/pi-ai'
 import { PERMISSION_KEYS } from '../../../../shared/permissionKeys'
 import { recordSubagentCall } from '../../../../shared/subagentTools'
 import type { LlmToolEvent, StreamingLlmToolEvent } from '../../../harness/turnEvents'
@@ -294,7 +294,8 @@ export function delegationTools(host: DelegationToolsHost): MousseTool[] {
       // has them); over MCP the thread owner builds them for the caller.
       const delegation = ctx.turn.delegation ?? (ctx.transport === 'mcp' ? host.delegation(ctx.caller) : undefined)
       if (!delegation) throw new Error(`Unknown tool: ${definition.name}`)
-      const call: ToolCall = { type: 'toolCall', id: ctx.toolCallId, name: definition.name, arguments: args }
+      // Tool arguments arrive as parsed JSON (MCP or Pi), so they are JSON values.
+      const call: ToolCall = { type: 'toolCall', id: ctx.toolCallId, name: definition.name, arguments: args as JsonObject }
       return { text: await dispatchWithTimeline(delegation, call, ctx) }
     }
   })

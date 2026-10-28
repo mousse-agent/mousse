@@ -4,6 +4,9 @@
  * an upgrade fails here until it has a row.
  */
 import { createHash } from 'node:crypto'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { builtinProviders } from '@earendil-works/pi-ai/providers/all'
 import type { Api, Model } from '@earendil-works/pi-ai'
 import { describe, expect, it } from 'vitest'
@@ -11,6 +14,8 @@ import { piRetiredOf } from '../../src/mms/harness/drivers/pi'
 import { PI_AMBIENT_SUBJECT_ENV, piCredentialSubject, piRpcProfileOptions, type PiProfileAuth } from '../../src/mms/harness/drivers/pi/profile'
 import { PI_AMBIENT_ENV, PI_AMBIENT_MARKER, piOwnProviderKeys } from '../../src/mms/harness/pi/envKeys'
 import { piRuntimePaths } from '../../src/mms/harness/pi/launch'
+import { PI_OAUTH_PROVIDERS } from '../../src/mms/harness/pi/oauthBroker'
+import { ProviderAuthService } from '../../src/mms/providers/ProviderAuthService'
 
 type Method =
   /** Stored key → the native registration's `apiKey.resolve` (`/pi/catalog`, first request only). */
@@ -29,7 +34,7 @@ const METHODS: Record<string, Method> = {
   'ant-ling': 'key',
   // Key only: a Claude subscription never runs on Pi.
   anthropic: 'key',
-  'azure-openai-responses': 'key',
+  azure: 'key',
   baseten: 'key',
   cerebras: 'key',
   'cloudflare-ai-gateway': 'key+env',
@@ -43,12 +48,14 @@ const METHODS: Record<string, Method> = {
   groq: 'key',
   huggingface: 'key',
   'kimi-coding': 'oauth',
+  meta: 'oauth',
   minimax: 'key',
   'minimax-cn': 'key',
   mistral: 'key',
   moonshotai: 'key',
   'moonshotai-cn': 'key',
   nvidia: 'key',
+  // Key only: Sign in with ChatGPT belongs to the Codex agent.
   openai: 'key',
   'openai-codex': 'retired',
   opencode: 'key',
@@ -59,6 +66,7 @@ const METHODS: Record<string, Method> = {
   'qwen-token-plan-individual': 'key',
   radius: 'oauth',
   together: 'key',
+  typesafe: 'key',
   'vercel-ai-gateway': 'key',
   xai: 'oauth',
   xiaomi: 'key',
@@ -94,8 +102,26 @@ describe('Pi connection methods', () => {
   it('keeps pi-ai sign-in for the OAuth rows and only for them', () => {
     const providers = new Map(builtinProviders().map((provider) => [provider.id, provider]))
     for (const [id, method] of Object.entries(METHODS)) {
-      if (method === 'retired' || id === 'anthropic') continue
+      if (method === 'retired' || id === 'anthropic' || id === 'openai') continue
       expect(Boolean(providers.get(id)?.auth.oauth), id).toBe(method === 'oauth')
+    }
+  })
+
+  it('hands every OAuth row’s sign-in to Pi through the broker, and no other', () => {
+    const oauthRows = Object.entries(METHODS).filter(([, method]) => method === 'oauth').map(([id]) => id).sort()
+    expect([...PI_OAUTH_PROVIDERS].sort()).toEqual(oauthRows)
+  })
+
+  it('every OAuth sign-in Mousse offers for a Pi provider is one the broker hands to Pi', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'mousse-pi-methods-'))
+    const auth = new ProviderAuthService(join(dir, 'auth.json'))
+    try {
+      const offered = auth.getLoginOptions('oauth').map((option) => option.id).filter((id) => !piRetiredOf(id))
+      expect(offered).toContain('meta')
+      for (const id of offered) expect(PI_OAUTH_PROVIDERS, id).toContain(id)
+    } finally {
+      auth.stop()
+      rmSync(dir, { recursive: true, force: true })
     }
   })
 

@@ -10,8 +10,8 @@ import {
 } from '../src/mms/providers/piCatalogOverlay'
 
 const SOL = {
-  id: 'gpt-6-sol',
-  name: 'GPT-6 Sol',
+  id: 'gpt-unpublished-test',
+  name: 'GPT unpublished test',
   api: 'openai-codex-responses',
   provider: 'openai-codex',
   baseUrl: 'https://chatgpt.com/backend-api',
@@ -41,7 +41,7 @@ describe('parseProviderCatalog', () => {
 
   it('keeps valid models and drops unknown thinking levels', () => {
     const [model] = parseProviderCatalog('openai-codex', { 'openai-codex-responses': { [SOL.id]: SOL } }, apis)
-    expect(model.id).toBe('gpt-6-sol')
+    expect(model.id).toBe('gpt-unpublished-test')
     expect(model.thinkingLevelMap).toEqual({ off: 'none', high: 'high' })
   })
 
@@ -67,7 +67,7 @@ describe('PiCatalogOverlay', () => {
     const cachePath = join(dir, 'pi-catalog-cache.json')
     const models = builtinModels()
     const bundled = models.getModels('openai-codex')
-    expect(bundled.some((model) => model.id === 'gpt-6-sol')).toBe(false)
+    expect(bundled.some((model) => model.id === 'gpt-unpublished-test')).toBe(false)
     const existing = bundled[0]!
 
     const fetchImpl = vi.fn(async (input: string | URL | Request) => {
@@ -89,7 +89,7 @@ describe('PiCatalogOverlay', () => {
 
     await expect(overlay.refresh()).resolves.toBe(true)
     const merged = models.getModels('openai-codex')
-    expect(merged.find((model) => model.id === 'gpt-6-sol')?.name).toBe('GPT-6 Sol')
+    expect(merged.find((model) => model.id === 'gpt-unpublished-test')?.name).toBe('GPT unpublished test')
     expect(merged.find((model) => model.id === existing.id)?.name).toBe(existing.name)
     expect(JSON.parse(readFileSync(cachePath, 'utf8')).piVersion).toBe('9.9.9')
 
@@ -104,7 +104,7 @@ describe('PiCatalogOverlay', () => {
       fetchImpl: (async () => { throw new Error('offline') }) as typeof fetch
     })
     restarted.attach(restartedModels.getProvider('openai-codex')!)
-    expect(restartedModels.getModels('openai-codex').some((model) => model.id === 'gpt-6-sol')).toBe(true)
+    expect(restartedModels.getModels('openai-codex').some((model) => model.id === 'gpt-unpublished-test')).toBe(true)
   })
 
   it('keeps the bundled catalog when the cache is corrupt and the network fails', async (context) => {

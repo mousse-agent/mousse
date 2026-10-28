@@ -172,7 +172,10 @@ describe('Pi launcher: credentials', () => {
     for (const match of map.matchAll(/(?:"([\w-]+)"|([\w]+)):"([A-Z0-9_]+)"/g)) table[match[1] ?? match[2]] = [match[3]]
     expect(Object.keys(table).length).toBeGreaterThan(30)
     expect(table).toEqual(PI_PROVIDER_ENV_KEYS)
-    expect([...PI_ENV_KEYS].sort()).toEqual([...new Set([...Object.values(table).flat(), 'CLAUDE_CODE_OAUTH_TOKEN'])].sort())
+    // Anthropic's federation identity is read beside the table (`getAnthropicFederation`).
+    const federation = ['FEDERATION_RULE_ID', 'ORGANIZATION_ID', 'SERVICE_ACCOUNT_ID', 'IDENTITY_TOKEN_FILE', 'WORKSPACE_ID'].map((name) => constant(`ANTHROPIC_${name}_ENV`))
+    expect(federation.every(Boolean), 'the federation variables in the bundle').toBe(true)
+    expect([...PI_ENV_KEYS].sort()).toEqual([...new Set([...Object.values(table).flat(), 'CLAUDE_CODE_OAUTH_TOKEN', ...(federation as string[])])].sort())
   })
 })
 

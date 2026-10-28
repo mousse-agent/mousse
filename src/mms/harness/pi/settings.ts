@@ -40,6 +40,9 @@ export function piSettings(input: PiSettingsInput = {}): Record<string, unknown>
     defaultProjectTrust: 'never',
     retry: input.retry ?? PI_RETRY_SETTINGS,
     compaction: { enabled: input.compaction ?? true },
+    // Pi 1.x would otherwise send extra requests to keep a prompt cache warm during long tool runs:
+    // spend no one asked for. Every request Pi makes is one Mousse's turn asked for.
+    cacheWarming: 'off',
     ...(input.shellPath ? { shellPath: input.shellPath } : {})
   }
 }

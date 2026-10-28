@@ -4,7 +4,7 @@ import { StringDecoder } from 'node:string_decoder'
 import type { RpcCommand, RpcExtensionUIResponse, RpcResponse } from '@earendil-works/pi-coding-agent'
 
 /**
- * The client side of Pi's RPC mode (`pi --mode rpc`, pinned 0.85.1): commands go to the child's
+ * The client side of Pi's RPC mode (`pi --mode rpc`, pinned 1.4.0): commands go to the child's
  * stdin as JSON lines with an `id`, and its stdout carries the matching responses and every event.
  *
  * It owns framing and correlation only. It has no timers: deadlines, Stop and the tree kill belong

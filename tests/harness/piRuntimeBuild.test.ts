@@ -2,7 +2,7 @@ import { appendFileSync, existsSync, mkdtempSync, readFileSync, renameSync, rmSy
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
-import { buildPiRuntime, reachableImports, runtimeProblems } from '../../scripts/build-pi-runtime.mjs'
+import { buildPiRuntime, runtimeProblems } from '../../scripts/build-pi-runtime.mjs'
 
 // The packaged runtime must hold every package Pi loads: Node would otherwise find a missing one
 // in any node_modules above it (the repository's, the user's home) and hide the gap until a user's
@@ -25,7 +25,6 @@ afterAll(() => {
 describe('Pi runtime build', () => {
   it('ships the bundle, the packages it loads, the themes and Mousse\'s extension, with nothing missing', () => {
     expect(JSON.parse(readFileSync(join(out, 'runtime.json'), 'utf8')).packages).toEqual({
-      '@earendil-works/chord': expect.any(String),
       typebox: expect.any(String),
       jiti: expect.any(String),
       '@silvia-odwyer/photon-node': expect.any(String)
@@ -46,33 +45,7 @@ describe('Pi runtime build', () => {
     }
   })
 
-  it('allows chord\'s esbuild only while nothing Pi loads reaches it', () => {
-    expect(reachableImports(pi, ['@earendil-works/chord/context'])).toEqual([])
-    expect(reachableImports(pi, ['@earendil-works/chord/bundler'])).toContain('esbuild')
-    const chunk = join(pi, 'dist/bundle/chunks/zz-mousse-test.js')
-    writeFileSync(chunk, 'import"@earendil-works/chord/bundler";\n')
-    try {
-      expect(runtimeProblems(pi)).toEqual(['@earendil-works/chord now loads esbuild'])
-    } finally {
-      rmSync(chunk)
-    }
-  })
-
-  it('follows a package importing its own subpath: chord/context → chord/bundler → esbuild fails the gate', () => {
-    const context = join(pi, 'node_modules/@earendil-works/chord/dist/context/index.js')
-    const original = readFileSync(context, 'utf8')
-    try {
-      writeFileSync(context, `${original}\nexport * from "@earendil-works/chord/bundler";\n`)
-      expect(runtimeProblems(pi)).toEqual(['@earendil-works/chord now loads esbuild'])
-      // An import the gate cannot follow is not assumed harmless.
-      writeFileSync(context, `${original}\nimport "./missing.js";\n`)
-      expect(runtimeProblems(pi)).toEqual([expect.stringMatching(/^@earendil-works\/chord: cannot follow \.\/missing\.js/)])
-    } finally {
-      writeFileSync(context, original)
-    }
-  })
-
-  it('reports a dependency a shipped package declares that is neither shipped nor listed as unreachable', () => {
+  it('reports a dependency a shipped package declares that is not shipped', () => {
     const manifest = join(pi, 'node_modules/typebox/package.json')
     const original = readFileSync(manifest, 'utf8')
     writeFileSync(manifest, JSON.stringify({ ...JSON.parse(original), dependencies: { 'left-pad': '1.3.0' } }))

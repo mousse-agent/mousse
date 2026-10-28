@@ -8,7 +8,7 @@ import { ANTHROPIC_OAUTH_ENV_KEYS, piOwnProviderKeys } from './envKeys'
 import { PiRpcClient, type PiRpcHandlers } from './rpcClient'
 
 /**
- * How Mousse starts Pi's agent (`@earendil-works/pi-coding-agent`, pinned 0.85.1) in RPC mode:
+ * How Mousse starts Pi's agent (`@earendil-works/pi-coding-agent`, pinned 1.4.0) in RPC mode:
  * the packaged runtime under `out/pi-runtime/`, run by Mousse's own Node (Electron as Node in the
  * app), with a Mousse-owned agent dir, only Mousse's extension, and no credential it did not choose.
  */

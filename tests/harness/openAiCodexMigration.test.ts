@@ -254,6 +254,17 @@ describe('openai-codex after the PR 3 release', () => {
     auth.stop()
   })
 
+  it('the OpenAI API provider offers a key only: Sign in with ChatGPT belongs to the Codex agent', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'mousse-pr3-auth-'))
+    homes.push(home)
+    const auth = new ProviderAuthService(join(home, 'auth.json'))
+    // pi-ai offers it on `openai` since 0.99; Mousse lists and runs only the key.
+    expect(auth.models.getProvider('openai')?.auth.oauth).toBeDefined()
+    expect(auth.getLoginOptions().filter((option) => option.id === 'openai').map((option) => option.authType)).toEqual(['api_key'])
+    expect(await auth.runOAuthLogin(new LoginSession('chatgpt'), 'openai')).toMatchObject({ success: false, error: expect.stringContaining('Codex') })
+    auth.stop()
+  })
+
   it('a move onto a Codex that is not signed in changes nothing', async () => {
     const made = await profile()
     const { harness, auth, stored, deviceDefault } = made

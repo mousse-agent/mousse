@@ -1,5 +1,5 @@
 /**
- * Resolve @earendil-works/pi-tui (0.80.7) shipped under pi-coding-agent.
+ * Resolve @earendil-works/pi-tui (pinned 1.4.0, beside or under pi-coding-agent).
  * Direct dependency is not required; nested install path is feature-detected.
  */
 

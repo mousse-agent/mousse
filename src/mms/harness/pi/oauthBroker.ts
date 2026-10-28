@@ -13,8 +13,12 @@ import type { PiCredentialRequest, PiCredentialResponse, PiOAuthCredential } fro
  * the engine answers with the vault's copy (`extension/oauth.ts` is the other side).
  */
 
-/** The pi-ai OAuth providers that run on Pi's agent (`openai-codex` stays legacy; Anthropic never). */
-export const PI_OAUTH_PROVIDERS: readonly string[] = Object.freeze(['github-copilot', 'kimi-coding', 'radius', 'xai', 'openrouter'])
+/**
+ * The pi-ai OAuth providers whose sign-in Mousse hands to Pi's agent (`openai-codex` is retired;
+ * Anthropic's and ChatGPT's sign-ins belong to their own agents). Meta's sign-in stores the minted
+ * Model API key as `access`, which its stock `toAuth` sends as the key.
+ */
+export const PI_OAUTH_PROVIDERS: readonly string[] = Object.freeze(['github-copilot', 'kimi-coding', 'radius', 'xai', 'openrouter', 'meta'])
 
 /** What pi-ai's stock `toAuth`/`filterModels` read besides `access`, per provider. */
 const PROVIDER_FIELDS: Readonly<Record<string, readonly string[]>> = Object.freeze({

@@ -1,7 +1,7 @@
 import { createProvider, type Api, type AssistantMessageEventStream, type Model, type Provider } from '@earendil-works/pi-ai'
 import { describe, expect, it } from 'vitest'
 import { guardProvider, guardStreams, isGuarded, refusesAnthropicRequest, type RequestGate } from '../../src/mms/harness/pi/extension/guard'
-import { ANTHROPIC_OAUTH_REFUSED, BUDGET_EXHAUSTED, LOGIN_REFUSED } from '../../src/mms/harness/pi/extension/messages'
+import { ANTHROPIC_OAUTH_REFUSED, BUDGET_EXHAUSTED, LOGIN_REFUSED, MODEL_OPERATION_REFUSED } from '../../src/mms/harness/pi/extension/messages'
 
 // The guard's rule and its wrapper, in process. `piGuardSpike` runs the same wrapper inside the
 // real pinned Pi child against local recorders.
@@ -78,6 +78,20 @@ describe('guardProvider', () => {
     expect(viaStream).toMatchObject({ errorMessage: ANTHROPIC_OAUTH_REFUSED })
     expect(calls).toHaveLength(1)
     expect(guarded.getModels().map((entry) => entry.api)).toEqual(['openai-completions', 'anthropic-messages'])
+  })
+
+  it('refuses image generation and classification, which the guard does not charge, whether or not the provider has them', async () => {
+    const { provider } = recordingProvider()
+    let reached = 0
+    const withOperations = Object.assign(Object.create(provider) as Provider, provider, {
+      generateImages: async () => { reached += 1; return {} as never },
+      classify: async () => { reached += 1; return {} as never }
+    })
+    for (const guarded of [guardProvider(withOperations), guardProvider(provider)]) {
+      await expect(guarded.generateImages!({} as never, {} as never)).rejects.toThrow(MODEL_OPERATION_REFUSED)
+      await expect(guarded.classify!({} as never, {} as never)).rejects.toThrow(MODEL_OPERATION_REFUSED)
+    }
+    expect(reached).toBe(0)
   })
 
   it('refuses Pi’s own sign-in flows', async () => {

@@ -62,16 +62,15 @@ export const PI_RPC_NO_SHELL_ITEMS: readonly number[] = Object.freeze(PI_RPC_EVI
  * Every record so far.
  * - Locked Claude Code: none. No platform has passed the real-CLI suite yet, so it holds no bot
  *   authority and runs no shell anywhere.
- * - Pi RPC: Linux, from runs in WSL2 (a real Linux kernel in a VM on Windows, accepted as Linux
- *   evidence): items 1–9 and 10 on their own files, 11 and 12 again at the final change.
- *   Windows (native Windows 11, x64): a no-shell record, items 1–9, 11 and 12 on their own files
- *   (Pi's shell runs uncontained there, so item 10 does not apply). macOS (macOS 26.6.2 on Apple
- *   silicon): items 1–12 on their own files.
+ * - Pi RPC, for Pi 1.4.0, each evidence file run on its own: Linux, from a run in WSL2 (a real Linux
+ *   kernel in a VM on Windows, accepted as Linux evidence): items 1–12. Windows (native Windows 11,
+ *   x64): a no-shell record, items 1–9, 11 and 12 (Pi's shell runs uncontained there, so item 10
+ *   does not apply). macOS (macOS 26.6.2 on Apple silicon): items 1–12.
  */
 export const CONTAINMENT_EVIDENCE: readonly ContainmentEvidence[] = Object.freeze([
-  Object.freeze({ driver: 'pi', kind: 'tools', cliVersion: '0.85.1', platform: 'linux', environment: 'wsl2', items: PI_RPC_EVIDENCE_ITEMS, recordedAt: '2026-10-27T13:38:46Z' }),
-  Object.freeze({ driver: 'pi', kind: 'tools', cliVersion: '0.85.1', platform: 'win32', items: PI_RPC_NO_SHELL_ITEMS, recordedAt: '2026-10-27T14:41:24Z' }),
-  Object.freeze({ driver: 'pi', kind: 'tools', cliVersion: '0.85.1', platform: 'darwin', items: PI_RPC_EVIDENCE_ITEMS, recordedAt: '2026-10-27T17:25:23Z' })
+  Object.freeze({ driver: 'pi', kind: 'tools', cliVersion: '1.4.0', platform: 'linux', environment: 'wsl2', items: PI_RPC_EVIDENCE_ITEMS, recordedAt: '2026-10-28T02:51:11Z' }),
+  Object.freeze({ driver: 'pi', kind: 'tools', cliVersion: '1.4.0', platform: 'win32', items: PI_RPC_NO_SHELL_ITEMS, recordedAt: '2026-10-28T02:52:13Z' }),
+  Object.freeze({ driver: 'pi', kind: 'tools', cliVersion: '1.4.0', platform: 'darwin', items: PI_RPC_EVIDENCE_ITEMS, recordedAt: '2026-10-28T02:50:26Z' })
 ] satisfies ContainmentEvidence[])
 
 export interface EvidenceQuery {

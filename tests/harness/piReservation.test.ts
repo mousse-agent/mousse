@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import type { Api, Context, Model } from '@earendil-works/pi-ai'
+import { normalizeContext, type Api, type Model, type TranscriptContext } from '@earendil-works/pi-ai'
 import { budgetLimitsOf, RunCounterBook, RunCounters, RunSpend, TurnBudget, type SpendRequest } from '../../src/mms/harness/budget'
 import { fallbackModels, grantFloor, hookCandidates, unreservedRoute, IMAGE_TOKEN_CEILING, INPUT_OVERHEAD_TOKENS, inputBound, MIN_ANSWER_TOKENS, MIN_GRANT_TOKENS, multipleCandidates, perToken, reservationRates, thinkingBudgetFor, wirePlan } from '../../src/mms/harness/pi/reservation'
 
@@ -10,15 +10,16 @@ const FREE = { input: 0, output: 0 }
 const ask = (patch: Partial<SpendRequest> = {}): SpendRequest => ({ inputBound: 1_000, wireCap: 8_000, floor: MIN_GRANT_TOKENS, price: FREE, ...patch })
 
 describe('the input bound', () => {
-  it('counts UTF-8 bytes of the system prompt, messages and tools, an image ceiling per image and a fixed overhead', () => {
-    const text: Context = { systemPrompt: 'sys', messages: [{ role: 'user', content: 'héllo', timestamp: 1 }], tools: [] }
-    const bytes = Buffer.byteLength(JSON.stringify(['sys', text.messages, []]), 'utf8')
+  it('counts UTF-8 bytes of the messages (the system message with its prompt and tools), an image ceiling per image and a fixed overhead', () => {
+    const text = normalizeContext({ systemPrompt: 'sys', messages: [{ role: 'user', content: 'héllo', timestamp: 1 }], tools: [{ name: 'read', description: 'Read', parameters: {} as never }] })
+    expect(text.messages[0]).toMatchObject({ role: 'system', content: 'sys' })
+    const bytes = Buffer.byteLength(JSON.stringify(text.messages), 'utf8')
     expect(inputBound(text, 'anthropic-messages')).toBe(bytes + INPUT_OVERHEAD_TOKENS)
     // Multi-byte characters count every byte.
-    expect(bytes).toBe(JSON.stringify(['sys', text.messages, []]).length + 1)
+    expect(bytes).toBe(JSON.stringify(text.messages).length + 1)
 
     const data = 'A'.repeat(100_000)
-    const image: Context = { messages: [{ role: 'user', content: [{ type: 'image', data, mimeType: 'image/png' }], timestamp: 1 }, { role: 'toolResult', toolCallId: 'c', toolName: 'shot', content: [{ type: 'image', data, mimeType: 'image/png' }], isError: false, timestamp: 2 }] }
+    const image = { messages: [{ role: 'user', content: [{ type: 'image', data, mimeType: 'image/png' }], timestamp: 1 }, { role: 'toolResult', toolCallId: 'c', toolName: 'shot', content: [{ type: 'image', data, mimeType: 'image/png' }], isError: false, timestamp: 2 }] } as unknown as TranscriptContext
     const bound = inputBound(image, 'openai-responses')!
     // The image data is not counted as text; each image adds the API's ceiling.
     expect(bound).toBeLessThan(data.length)
@@ -29,9 +30,9 @@ describe('the input bound', () => {
   it('counts anything shaped like an image outside user and tool-result content in full', () => {
     const data = 'A'.repeat(1_000_000)
     // A tool call's arguments go to the provider as text (`JSON.stringify(arguments)`).
-    const call: Context = { messages: [{ role: 'assistant', content: [{ type: 'toolCall', id: 'c', name: 'paint', arguments: { type: 'image', data, mimeType: 'image/png' } }], api: 'openai-completions', provider: 'p', model: 'm', usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } }, stopReason: 'toolUse', timestamp: 1 }] as never }
+    const call = { messages: [{ role: 'assistant', content: [{ type: 'toolCall', id: 'c', name: 'paint', arguments: { type: 'image', data, mimeType: 'image/png' } }], api: 'openai-completions', provider: 'p', model: 'm', usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } }, stopReason: 'toolUse', timestamp: 1 }] } as unknown as TranscriptContext
     expect(inputBound(call, 'openai-completions')).toBeGreaterThan(data.length)
-    const schema: Context = { messages: [], tools: [{ name: 't', description: 'd', parameters: { default: { type: 'image', data } } as never }] }
+    const schema = normalizeContext({ messages: [], tools: [{ name: 't', description: 'd', parameters: { default: { type: 'image', data } } as never }] })
     expect(inputBound(schema, 'anthropic-messages')).toBeGreaterThan(data.length)
   })
 
@@ -81,6 +82,9 @@ describe('the input bound', () => {
     expect(multipleCandidates({ samplingParams: { n: 2 } })).toBe(true)
     expect(multipleCandidates({ samplingParams: { n: 1, temperature: 0 } })).toBe(false)
     expect(multipleCandidates({})).toBe(false)
+    // pi-ai merges a thinking level's sampling parameters over the model's (`samplingParamsByThinkingLevel`).
+    expect(multipleCandidates({ samplingParamsByThinkingLevel: { high: { n: 2 } } })).toBe(true)
+    expect(multipleCandidates({ samplingParams: { n: 1 }, samplingParamsByThinkingLevel: { high: { temperature: 1 } } })).toBe(false)
   })
 })
 

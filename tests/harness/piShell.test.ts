@@ -114,7 +114,20 @@ describe.runIf(runs)('contained bash operations, against pinned Pi’s bash', ()
     expect(sawSignal).toBe(controller.signal)
   })
 
-  it('keeps output a background job writes after the shell exited, as Pi does', async () => {
+  // POSIX only: the app runs the contained shell on Linux and macOS (on Windows the gate does not pass a kill on).
+  it.skipIf(windows)('a shell killed by a signal reports the exit code Pi reports, never a success', async () => {
+    const dir = scratch()
+    const command = 'kill -KILL $$'
+    const ours = await output(contained(async () => {}).ops, command, dir)
+    const theirs = await output(pi, command, dir)
+    expect(theirs.exitCode).not.toBe(0)
+    expect(theirs.exitCode).not.toBeNull()
+    expect(ours.exitCode).toBe(theirs.exitCode)
+  })
+
+  // POSIX only: on Windows the stand-in gate (sh, then env.exe, then Git Bash) starts slower than Pi's
+  // 100 ms grace for late output when other test files load the machine.
+  it.skipIf(windows)('keeps output a background job writes after the shell exited, as Pi does', async () => {
     const dir = scratch()
     const command = '(sleep 0.05; for i in {1..20}; do echo line$i; done) &'
     const ours = await output(contained(async () => {}).ops, command, dir)

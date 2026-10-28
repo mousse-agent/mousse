@@ -8,7 +8,7 @@
 //
 // The runtime is launched from these files on disk, as its own process; packaged builds unpack
 // them from the asar (asarUnpack).
-import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { builtinModules } from 'node:module'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -43,9 +43,9 @@ export function getPiExtensionBuildOptions(projectRoot = root, options = {}) {
 }
 
 /** Packages the bundle imports at run time, copied beside it (jiti loads extensions; photon-node resizes images). */
-export const RUNTIME_PACKAGES = ['@earendil-works/chord', 'typebox', 'jiti', '@silvia-odwyer/photon-node']
+export const RUNTIME_PACKAGES = ['typebox', 'jiti', '@silvia-odwyer/photon-node']
 /** Imports guarded with try/catch (Pi's bundle) that Mousse does not ship. */
-export const OPTIONAL_IMPORTS = ['@aws-sdk/signature-v4-crt', '@mariozechner/clipboard', 'bufferutil', 'utf-8-validate', 'supports-color']
+export const OPTIONAL_IMPORTS = ['@aws-sdk/signature-v4-crt', 'bufferutil', 'kerberos', 'utf-8-validate']
 
 /** `<from>/node_modules/<name>` or the nearest one above it, as Node resolves a bare import. */
 function packageDir(from, name) {
@@ -86,91 +86,11 @@ export function packageName(specifier) {
   return specifier.startsWith('@') ? parts.slice(0, 2).join('/') : parts[0]
 }
 
-const isBuiltin = (specifier) => specifier.startsWith('node:') || builtinModules.includes(specifier) || builtinModules.includes(specifier.split('/')[0])
-
-/**
- * Dependencies a shipped package declares that Mousse does not ship, each with why no file Pi
- * loads imports it. `runtimeProblems` walks the package's reachable files to hold that true.
- */
-export const UNREACHABLE_DEPENDENCIES = {
-  '@earendil-works/chord': { esbuild: 'only chord/bundler and chord/node import it; Pi loads chord/context, which imports nothing' }
-}
-
-const RUNTIME_CONDITIONS = new Set(['node', 'import', 'require', 'module-sync', 'default'])
-
-/** Every file an export target maps to under a condition Node can pick at run time. */
-function exportTargets(value) {
-  if (typeof value === 'string') return [value]
-  if (Array.isArray(value)) return value.flatMap(exportTargets)
-  if (!value || typeof value !== 'object') return []
-  return Object.entries(value).filter(([condition]) => RUNTIME_CONDITIONS.has(condition)).flatMap(([, target]) => exportTargets(target))
-}
-
-/** The files `specifier` can load from the package in `directory` (`import` and `require` alike). */
-function packageEntries(directory, specifier) {
-  const manifest = JSON.parse(readFileSync(join(directory, 'package.json'), 'utf8'))
-  const subpath = specifier === packageName(specifier) ? '.' : `./${specifier.slice(packageName(specifier).length + 1)}`
-  if (manifest.exports !== undefined) {
-    const exports = typeof manifest.exports === 'string' || Array.isArray(manifest.exports) || !Object.keys(manifest.exports).some((key) => key.startsWith('.'))
-      ? { '.': manifest.exports }
-      : manifest.exports
-    return exportTargets(exports[subpath]).map((target) => join(directory, target))
-  }
-  return [join(directory, subpath === '.' ? manifest.main ?? 'index.js' : subpath)]
-}
-
-function existingFile(path) {
-  for (const candidate of [path, `${path}.js`, `${path}.mjs`, `${path}.cjs`, join(path, 'index.js')])
-    if (existsSync(candidate) && statSync(candidate).isFile()) return candidate
-  return undefined
-}
-
-/**
- * The bare imports of every file reachable from `specifiers` in the runtime at `packageRoot`.
- * Relative imports are followed, and so are bare imports of a shipped package (a package importing
- * its own subpath included), resolved through its `exports`. An import that cannot be followed
- * throws, so no path is assumed harmless. A plain scan of import and require calls: meant for
- * packages published as ordinary modules, not for bundles that embed source text.
- */
-export function reachableImports(packageRoot, specifiers) {
-  const pattern = /(?:\bfrom\s*|\bimport\s*\(\s*|\bimport\s*|\brequire\s*\(\s*)(["'])([^"'\s]+)\1/g
-  const found = new Set()
-  const visited = new Set()
-  const followed = new Set()
-  const files = []
-  const shipped = (specifier) => existsSync(join(packageRoot, 'node_modules', packageName(specifier), 'package.json'))
-  const follow = (specifier) => {
-    if (followed.has(specifier)) return
-    followed.add(specifier)
-    const entries = packageEntries(join(packageRoot, 'node_modules', packageName(specifier)), specifier).map(existingFile)
-    if (!entries.length || entries.includes(undefined)) throw new Error(`cannot follow ${specifier}`)
-    files.push(...entries)
-  }
-  for (const specifier of specifiers) follow(specifier)
-  while (files.length) {
-    const file = files.pop()
-    if (visited.has(file)) continue
-    visited.add(file)
-    for (const match of readFileSync(file, 'utf8').matchAll(pattern)) {
-      const specifier = match[2]
-      if (specifier.startsWith('.')) {
-        const next = existingFile(resolve(dirname(file), specifier))
-        if (!next) throw new Error(`cannot follow ${specifier} from ${file}`)
-        files.push(next)
-      } else if (!isBuiltin(specifier)) {
-        found.add(specifier)
-        if (shipped(specifier)) follow(specifier)
-      }
-    }
-  }
-  return [...found].sort()
-}
-
 /**
  * What would fail at run time in the runtime at `packageRoot`: a bare import of Pi's bundle whose
- * package is not inside the runtime, or a shipped package's dependency that is neither shipped
- * nor proven unreachable. Node would otherwise find a missing package in any node_modules above
- * the runtime (the repository's, the user's home) and hide the gap.
+ * package is not inside the runtime, or a dependency a shipped package declares that is not
+ * shipped. Node would otherwise find a missing package in any node_modules above the runtime (the
+ * repository's, the user's home) and hide the gap.
  */
 export function runtimeProblems(packageRoot) {
   const problems = []
@@ -185,19 +105,7 @@ export function runtimeProblems(packageRoot) {
       ...Object.keys(manifest.dependencies ?? {}),
       ...Object.keys(manifest.peerDependencies ?? {}).filter((peer) => !optionalPeers[peer]?.optional)
     ]
-    const unshipped = dependencies.filter((dependency) => !shipped(dependency))
-    if (!unshipped.length) continue
-    let reached
-    try {
-      reached = reachableImports(packageRoot, imports.filter((specifier) => packageName(specifier) === name)).map(packageName)
-    } catch (error) {
-      problems.push(`${name}: ${error.message}, so its unshipped dependencies are not proven unreachable`)
-      continue
-    }
-    for (const dependency of unshipped) {
-      if (!UNREACHABLE_DEPENDENCIES[name]?.[dependency]) problems.push(`${name} depends on ${dependency}`)
-      else if (reached.includes(dependency)) problems.push(`${name} now loads ${dependency}`)
-    }
+    for (const dependency of dependencies) if (!shipped(dependency)) problems.push(`${name} depends on ${dependency}`)
   }
   return problems
 }
@@ -213,7 +121,7 @@ export async function buildPiRuntime(projectRoot = root, options = {}) {
   cpSync(join(pi, 'package.json'), join(target, 'package.json'))
   cpSync(join(pi, 'dist/bundle'), join(target, 'dist/bundle'), { recursive: true, filter: (path) => !path.endsWith('.map') })
   // RPC mode still loads the built-in theme files at startup.
-  for (const theme of ['dark.json', 'light.json', 'theme-schema.json'])
+  for (const theme of ['dark.json', 'light.json'])
     cpSync(join(pi, 'dist/modes/interactive/theme', theme), join(target, 'dist/modes/interactive/theme', theme))
   const versions = {}
   for (const name of RUNTIME_PACKAGES) versions[name] = copyPackage(packageDir(pi, name), join(target, 'node_modules', name))

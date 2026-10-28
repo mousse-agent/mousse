@@ -138,7 +138,10 @@ describe('Pi RPC sessions with the real Pi child', () => {
 
     const earlier = await engine.forkSession(first.providerRef, 1, { threadId: 'fork-first' })
     expect(earlier?.sessionId).toBeTruthy()
-    expect(sessionMessages(stateDir, earlier!.sessionId!)).toEqual(sessionMessages(stateDir, source.sessionId!).slice(0, 2))
+    // Pi stores the system prompt as the session's first message, then the first turn's question and answer.
+    const sourceMessages = sessionMessages(stateDir, source.sessionId!) as Array<{ role: string }>
+    expect(sourceMessages.map((message) => message.role)).toEqual(['system', 'user', 'assistant', 'user', 'assistant'])
+    expect(sessionMessages(stateDir, earlier!.sessionId!)).toEqual(sourceMessages.slice(0, 3))
 
     // Each fork runs in its own worktree; its first turn resumes the branch, nothing is handed over.
     const forkProject = join(scratch, 'fork-worktree')
@@ -148,6 +151,30 @@ describe('Pi RPC sessions with the real Pi child', () => {
     expect(sent(recorder.requests.at(-1))).toEqual(['user: Say hello', 'assistant: First answer', 'user: Second question', 'assistant: Second answer', 'user: Go on'])
     const onFirst = await run(engine, harness(forkProject, { threadId: 'fork-first', runId: 'f2', prompt: 'Go on' }))
     expect(onFirst.text).toBe('Fork of first')
+    expect(sent(recorder.requests.at(-1))).toEqual(['user: Say hello', 'assistant: First answer', 'user: Go on'])
+    expect(notices).toEqual([])
+  }, 120_000)
+
+  it('forks an earlier turn natively when the next turn ran with other tools (Pi records a system message before it)', async () => {
+    const { engine, recorder, project, stateDir, notices, scratch } = await setup()
+    recorder.respond(replies(['First answer', 'Planned answer', 'Fork of first']))
+    const first = await run(engine, harness(project))
+    // Plan mode offers no write tool, so the second turn's tool set differs from the first's.
+    const second = await run(engine, harness(project, { runId: 'r2', prompt: 'Plan it', mode: 'plan' as TurnInput['mode'], nativeHistory: `
+user: Say hello
+assistant: First answer` }))
+    const source = second.providerRef as ProviderRef
+    expect(source.sessionId).toBe(first.providerRef.sessionId)
+    const roles = (sessionMessages(stateDir, source.sessionId!) as Array<{ role: string }>).map((message) => message.role)
+    expect(roles).toEqual(['system', 'user', 'assistant', 'system', 'user', 'assistant'])
+
+    const earlier = await engine.forkSession(first.providerRef, 1, { threadId: 'fork-first' })
+    expect(earlier?.sessionId).toBeTruthy()
+    expect(earlier?.sessionId).not.toBe(source.sessionId)
+    const forkProject = join(scratch, 'fork-worktree')
+    mkdirSync(forkProject)
+    const onFirst = await run(engine, harness(forkProject, { threadId: 'fork-first', runId: 'f1', prompt: 'Go on' }))
+    expect(onFirst).toMatchObject({ text: 'Fork of first', providerRef: { sessionId: earlier!.sessionId } })
     expect(sent(recorder.requests.at(-1))).toEqual(['user: Say hello', 'assistant: First answer', 'user: Go on'])
     expect(notices).toEqual([])
   }, 120_000)

@@ -53,7 +53,7 @@ function copilotCredential(access: string, extra: Record<string, unknown> = {}):
     refresh: 'ghu_real_refresh_token',
     expires: Date.now() + HOUR,
     enterpriseUrl: 'ghe.mousse.test',
-    availableModelIds: ['gpt-5.4', 'claude-sonnet-5'],
+    availableModelIds: ['gpt-6.1-sol', 'claude-sonnet-5'],
     ...extra
   }
 }
@@ -100,7 +100,7 @@ describe('the OAuth broker, Mousse side', () => {
       refresh: handle,
       expires: grant!.expires,
       enterpriseUrl: 'ghe.mousse.test',
-      availableModelIds: ['gpt-5.4', 'claude-sonnet-5']
+      availableModelIds: ['gpt-6.1-sol', 'claude-sonnet-5']
     })
     expect(handle).toMatch(/^mousse:pi:github-copilot:[\w-]+$/)
     // Signed out: the file goes.
@@ -123,7 +123,7 @@ describe('the OAuth broker, Mousse side', () => {
       ...current,
       access: 'tid=new;proxy-ep=proxy.mousse.test;',
       expires: Date.now() + 2 * HOUR,
-      availableModelIds: ['gpt-5.4']
+      availableModelIds: ['gpt-6.1-sol']
     }))
     const broker = piOAuthBroker(vault)
     const handle = piOAuthHandle('pi:github-copilot')
@@ -136,8 +136,8 @@ describe('the OAuth broker, Mousse side', () => {
     // Copilot's subject: its stored GitHub token, which the refresh kept.
     const subject = (await grants[0])!.subject
     expect(subject).toMatch(/^github:/)
-    expect(await Promise.all(grants)).toEqual(Array(3).fill({ access: 'tid=new;proxy-ep=proxy.mousse.test;', expires, fields: { enterpriseUrl: 'ghe.mousse.test', availableModelIds: ['gpt-5.4'] }, subject }))
-    expect(await Promise.all(answers)).toEqual(Array(3).fill({ credential: { type: 'oauth', access: 'tid=new;proxy-ep=proxy.mousse.test;', refresh: handle, expires, enterpriseUrl: 'ghe.mousse.test', availableModelIds: ['gpt-5.4'] } }))
+    expect(await Promise.all(grants)).toEqual(Array(3).fill({ access: 'tid=new;proxy-ep=proxy.mousse.test;', expires, fields: { enterpriseUrl: 'ghe.mousse.test', availableModelIds: ['gpt-6.1-sol'] }, subject }))
+    expect(await Promise.all(answers)).toEqual(Array(3).fill({ credential: { type: 'oauth', access: 'tid=new;proxy-ep=proxy.mousse.test;', refresh: handle, expires, enterpriseUrl: 'ghe.mousse.test', availableModelIds: ['gpt-6.1-sol'] } }))
     // A later refresh starts a new one.
     await broker.refresh('github-copilot')
     expect(getAuth).toHaveBeenCalledTimes(2)
@@ -230,7 +230,7 @@ describe('the OAuth broker, extension side', () => {
     const signal = new AbortController().signal
     expect(await copilot.auth.oauth!.refresh(held, signal)).toEqual({
       type: 'oauth', access: 'tid=new;proxy-ep=proxy.mousse.test;', refresh: handle, expires: expect.any(Number),
-      enterpriseUrl: 'ghe.mousse.test', availableModelIds: ['gpt-5.4', 'claude-sonnet-5']
+      enterpriseUrl: 'ghe.mousse.test', availableModelIds: ['gpt-6.1-sol', 'claude-sonnet-5']
     })
     // Another instance's handle, another provider, a plain refresh token: one fixed text, no detail.
     for (const [id, credential] of [
@@ -241,7 +241,7 @@ describe('the OAuth broker, extension side', () => {
       await expect(provider(id).auth.oauth!.refresh(credential, signal)).rejects.toThrow(new Error(CREDENTIAL_UNAVAILABLE))
     // Every OAuth provider's sign-in is Mousse's.
     const oauthProviders = providers.filter((entry) => entry.auth.oauth)
-    expect(new Set(oauthProviders.map((entry) => entry.id))).toEqual(new Set(['github-copilot', 'kimi-coding', 'radius', 'xai', 'openrouter', 'anthropic', 'openai-codex'].filter((id) => builtinProviders().some((entry) => entry.id === id && entry.auth.oauth))))
+    expect(new Set(oauthProviders.map((entry) => entry.id))).toEqual(new Set(['github-copilot', 'kimi-coding', 'radius', 'xai', 'openrouter', 'anthropic', 'openai-codex', 'openai', 'meta'].filter((id) => builtinProviders().some((entry) => entry.id === id && entry.auth.oauth))))
     for (const entry of oauthProviders) await expect(entry.auth.oauth!.login({} as never)).rejects.toThrow(LOGIN_REFUSED)
     // The bridge gone (transport failure): the same fixed text.
     registration.close()
@@ -349,21 +349,21 @@ describe('the OAuth broker in the real Pi child', () => {
     const recorder = await startTlsRecorder(tls)
     cleanups.push(() => recorder.close())
     // Expired: Pi's first request refreshes, through `/pi/credential`, to a token whose proxy endpoint is the recorder.
-    const stale: PiOAuthGrant = { access: 'tid=stale;proxy-ep=proxy.unused.invalid;', expires: Date.now() - 1000, fields: { availableModelIds: ['gpt-5.4', 'claude-sonnet-5'] } }
-    const fresh: PiOAuthGrant = { access: `tid=fresh;proxy-ep=127.0.0.1:${recorder.port};`, expires: Date.now() + HOUR, fields: { availableModelIds: ['gpt-5.4', 'claude-sonnet-5'] } }
+    const stale: PiOAuthGrant = { access: 'tid=stale;proxy-ep=proxy.unused.invalid;', expires: Date.now() - 1000, fields: { availableModelIds: ['gpt-6.1-sol', 'claude-sonnet-5'] } }
+    const fresh: PiOAuthGrant = { access: `tid=fresh;proxy-ep=127.0.0.1:${recorder.port};`, expires: Date.now() + HOUR, fields: { availableModelIds: ['gpt-6.1-sol', 'claude-sonnet-5'] } }
     const source: PiOAuthSource = { credential: async () => stale, refresh: vi.fn(async () => fresh) }
     const run = await child({
-      provider: { id: 'github-copilot', builtin: true, models: [] }, model: 'gpt-5.4', grant: stale, source,
+      provider: { id: 'github-copilot', builtin: true, models: [] }, model: 'gpt-6.1-sol', grant: stale, source,
       env: { NODE_EXTRA_CA_CERTS: tls.certPath }
     })
     const { models } = await run.pi.process.client.send({ type: 'get_available_models' })
-    expect(models.filter((entry) => entry.provider === 'github-copilot').map((entry) => entry.id).sort()).toEqual(['claude-sonnet-5', 'gpt-5.4'])
-    await run.prompt('github-copilot', 'gpt-5.4')
+    expect(models.filter((entry) => entry.provider === 'github-copilot').map((entry) => entry.id).sort()).toEqual(['claude-sonnet-5', 'gpt-6.1-sol'])
+    await run.prompt('github-copilot', 'gpt-6.1-sol')
     await run.prompt('github-copilot', 'claude-sonnet-5')
     expect(run.credentialRequests).toEqual([{ providerId: 'github-copilot', handle: run.handle }])
     expect(source.refresh).toHaveBeenCalledTimes(1)
     // Pi stored the refreshed credential with the handle and the kept fields.
-    expect(JSON.parse(readFileSync(run.authPath, 'utf8'))['github-copilot']).toMatchObject({ access: fresh.access, refresh: run.handle, availableModelIds: ['gpt-5.4', 'claude-sonnet-5'] })
+    expect(JSON.parse(readFileSync(run.authPath, 'utf8'))['github-copilot']).toMatchObject({ access: fresh.access, refresh: run.handle, availableModelIds: ['gpt-6.1-sol', 'claude-sonnet-5'] })
     // An `openai-responses` and an `anthropic-messages` request, both at the token's host with the fresh token.
     expect(recorder.requests.some((request) => request.url.endsWith('/responses') && request.headers.authorization === `Bearer ${fresh.access}`), JSON.stringify(recorder.requests.map((request) => request.url))).toBe(true)
     const errors = run.pi.events.filter((event) => event.type === 'message_end').map((event) => (event.message as { errorMessage?: string }).errorMessage)
@@ -390,5 +390,26 @@ describe('the OAuth broker in the real Pi child', () => {
       expect(request.headers['x-api-key']).toBeUndefined()
     }
     expect(source.refresh).not.toHaveBeenCalled()
+  }, 180_000)
+
+  it('a Meta sign-in in Mousse’s vault reaches Pi: its minted key is the request’s key', async () => {
+    const recorder = await startRecorder()
+    cleanups.push(() => recorder.close())
+    const model = {
+      id: 'mousse-muse', name: 'Mousse Muse', api: 'openai-responses', provider: 'meta', baseUrl: `${recorder.url}/v1`,
+      reasoning: false, input: ['text'], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 128000, maxTokens: 4096
+    }
+    // As pi-ai's Meta login stores it: the minted Model API key as `access`, the identity token as `refresh`.
+    const { vault } = fakeVault({ meta: { type: 'oauth', access: 'meta-fake-model-key', refresh: 'meta-fake-identity-token', expires: Date.now() + HOUR } })
+    const source = piOAuthBroker(vault)
+    const grant = await source.credential('meta')
+    expect(grant).toMatchObject({ access: 'meta-fake-model-key', fields: {} })
+    const run = await child({ provider: { id: 'meta', builtin: true, models: [model] as never }, model: 'mousse-muse', grant: grant!, source })
+    await run.prompt('meta', 'mousse-muse')
+    expect(recorder.requests.length).toBeGreaterThan(0)
+    for (const request of recorder.requests) {
+      expect(request.headers.authorization).toBe('Bearer meta-fake-model-key')
+      expect(JSON.stringify(request)).not.toContain('meta-fake-identity-token')
+    }
   }, 180_000)
 })

@@ -7,6 +7,7 @@ import Anthropic from '@anthropic-ai/sdk'
 import {
   createProvider,
   type AnthropicOptions,
+  type AnyModel,
   type Api,
   type Credential,
   type CredentialStore,
@@ -163,7 +164,7 @@ export function createClaudeSdkProvider(
 export async function registerClaudeSdkProvider(
   models: MutableModels,
   credentials: CredentialStore,
-  options: { allowNetwork?: boolean; cached?: readonly Model<Api>[] } = {}
+  options: { allowNetwork?: boolean; cached?: readonly AnyModel[] } = {}
 ): Promise<void> {
   const existing = models.getProvider(CLAUDE_PROVIDER_ID)
   if (!existing) return

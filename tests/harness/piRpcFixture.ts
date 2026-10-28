@@ -195,5 +195,5 @@ export function launchPi(options: LaunchOptions): PiChild {
 
 /** The private `settings.json` of a test child: Mousse's values, retries off unless given. */
 export function testSettings(overrides: Record<string, unknown> = {}): Record<string, unknown> {
-  return { defaultProjectTrust: 'never', retry: { enabled: false, provider: { maxRetries: 0 } }, ...overrides }
+  return { defaultProjectTrust: 'never', retry: { enabled: false, provider: { maxRetries: 0 } }, cacheWarming: 'off', ...overrides }
 }
