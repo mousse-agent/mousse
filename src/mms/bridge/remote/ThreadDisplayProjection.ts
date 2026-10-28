@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto'
 import type { Envelope } from '../../../shared/net'
 import { NetError } from '../../../shared/net'
 import { decodeBase64 } from '../../net/identity/crypto'
-import { parseBoundedJsonDocument } from '../../net/sync/codec'
+import { MAX_DISPLAY_JSON_NODES, parseBoundedJsonDocument } from '../../net/sync/codec'
 import { THREAD_EVENT_TYPES } from './ThreadStreamAdapter'
 
 export type ThreadDisplayUpdate =
@@ -91,7 +91,7 @@ export class ThreadDisplayProjection {
       const bytes = Buffer.concat(held.parts)
       if (createHash('sha256').update(bytes).digest('base64url') !== held.hash)
         throw new NetError('bad_request')
-      const value = parseBoundedJsonDocument(bytes, 32 * 1024 * 1024)
+      const value = parseBoundedJsonDocument(bytes, 32 * 1024 * 1024, MAX_DISPLAY_JSON_NODES)
       this.pending = undefined
       return { kind: 'snapshot', value }
     }

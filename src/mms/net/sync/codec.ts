@@ -15,6 +15,13 @@ export const MAX_MESSAGE_HEADER_BYTES = 64 * 1024
 export const MAX_MESSAGE_BYTES = REPLAY_BATCH_BYTES
 export const MAX_JSON_DEPTH = 32
 export const MAX_JSON_NODES = 16_384
+/**
+ * The node bound of a display snapshot (a thread's, or a computer's lists): a document of up to 32 MiB that
+ * its own computer wrote and signed, assembled from verified records. The wire bound above is far too small
+ * for it (a list of about 700 threads is 16,384 nodes); this one still stops a document that is mostly
+ * structure, at a few tens of megabytes of memory.
+ */
+export const MAX_DISPLAY_JSON_NODES = 262_144
 const encoder = new TextEncoder()
 const decoder = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true })
 const fail = (message: string): never => {
@@ -31,9 +38,15 @@ export function parseProtocolJson(bytes: Uint8Array): unknown {
 
 /** Trusted assembled documents may have a larger byte budget; grammar, depth,
  * node count and duplicate-key protections remain the wire parser's rules. */
-export function parseBoundedJsonDocument(bytes: Uint8Array, maximumBytes: number): unknown {
+export function parseBoundedJsonDocument(
+  bytes: Uint8Array,
+  maximumBytes: number,
+  maximumNodes = MAX_JSON_NODES
+): unknown {
   if (!Number.isSafeInteger(maximumBytes) || maximumBytes < 1 || maximumBytes > 32 * 1024 * 1024)
     return fail('Invalid JSON document byte bound.')
+  if (!Number.isSafeInteger(maximumNodes) || maximumNodes < 1 || maximumNodes > MAX_DISPLAY_JSON_NODES)
+    return fail('Invalid JSON document node bound.')
   if (bytes.length > maximumBytes) return large('JSON document exceeds its byte bound.')
   let source: string
   try {
@@ -66,7 +79,7 @@ export function parseBoundedJsonDocument(bytes: Uint8Array, maximumBytes: number
     return fail('Unterminated JSON string.')
   }
   const value = (depth: number): unknown => {
-    if (depth > MAX_JSON_DEPTH || ++nodes > MAX_JSON_NODES)
+    if (depth > MAX_JSON_DEPTH || ++nodes > maximumNodes)
       return large('JSON structure exceeds bounds.')
     ws()
     const char = source[index]
@@ -82,7 +95,7 @@ export function parseBoundedJsonDocument(bytes: Uint8Array, maximumBytes: number
       for (;;) {
         ws()
         if (source[index] !== '"') return fail('Expected JSON object key.')
-        if (++nodes > MAX_JSON_NODES) return large('JSON structure exceeds bounds.')
+        if (++nodes > maximumNodes) return large('JSON structure exceeds bounds.')
         const key = string()
         if (Object.hasOwn(result, key)) return fail('Duplicate JSON object key.')
         ws()
@@ -135,10 +148,12 @@ export function parseBoundedJsonDocument(bytes: Uint8Array, maximumBytes: number
 }
 
 /** Canonical compact sorted-key JSON for presence and enrollment proof inputs only. */
-export function canonicalJson(value: unknown): Uint8Array {
+export function canonicalJson(value: unknown, maximumNodes = MAX_JSON_NODES): Uint8Array {
+  if (!Number.isSafeInteger(maximumNodes) || maximumNodes < 1 || maximumNodes > MAX_DISPLAY_JSON_NODES)
+    return fail('Invalid JSON document node bound.')
   let nodes = 0
   const serialize = (item: unknown, depth: number): string => {
-    if (depth > MAX_JSON_DEPTH || ++nodes > MAX_JSON_NODES)
+    if (depth > MAX_JSON_DEPTH || ++nodes > maximumNodes)
       return large('JSON structure exceeds bounds.')
     if (item === null || typeof item === 'boolean') return JSON.stringify(item)
     if (typeof item === 'number') {

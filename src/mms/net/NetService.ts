@@ -68,6 +68,7 @@ import { SqliteOutbox } from './store/outbox'
 import { SqliteQuotaRateLedger } from './store/limits'
 import { SqliteNodePolicy } from './store/nodePolicy'
 import { SqliteBridgeAudit } from './store/audit'
+import { SqliteRemoteLists } from './store/remoteLists'
 import { FileBlobStore } from './store/blobs'
 import { FileKeyStore, NetIdentityService } from './identity'
 import { ProfileTransports } from './transports/manager'
@@ -147,6 +148,8 @@ export interface NetRuntime {
   policy: SqliteNodePolicy
   /** What other computers did on this one, and how much they read (`bridge_audit`). */
   audit: SqliteBridgeAudit
+  /** What this computer remembers of its other computers' threads: row positions, openings, last lists. */
+  remoteLists: SqliteRemoteLists
   rpc: DurableRpcDispatcher
   enrollment: EnrollmentService
   transfer: AuthorityTransferDelivery
@@ -190,6 +193,8 @@ export interface NetDomainComposition {
   hostedSpacePeerAuthorized?(user: UserId, node: NodeId): boolean
   spaceJoin?: SpaceJoinAdmissionPort
   onSessionOpened?(session: SyncSession): void
+  /** A session ended (it may never have opened); the peer's other sessions, if any, are still in `session()`. */
+  onSessionClosed?(session: SyncSession): void
   /** Starts bounded domain recovery after routes and unlocked identity are ready. */
   onActivated?(): void
   /** Synchronously fences admission and starts owned cancellation; does not close stores. */
@@ -517,6 +522,7 @@ export class NetService {
         limits: new SqliteQuotaRateLedger(db),
         policy,
         audit: new SqliteBridgeAudit(db, this.clock),
+        remoteLists: new SqliteRemoteLists(db, this.clock),
         rpc
       }
       // A block ends what the device is doing here now, not only what it asks for next.
@@ -1595,6 +1601,11 @@ export class NetService {
         )
       }
       if (error instanceof NetError) this.lastError = error.code
+      try {
+        this.domain?.onSessionClosed?.(session)
+      } catch {
+        // A domain observer cannot change how a session ends.
+      }
       this.emit()
     })
     void session.opened

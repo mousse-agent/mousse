@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Search, X } from '../lib/icons'
-import type { ThreadSearchResult } from '../../shared/types'
+import type { ThreadSearchResult, ThreadSearchSkipped } from '../../shared/types'
 import { useCommandOverlay } from '../commands/commandRegistry'
+import { skippedLine, THREAD_SEARCH_DEBOUNCE_MS } from '../lib/threadSearchSkipped'
 import '../styles/thread-search.css'
 
 interface ThreadSearchDialogProps {
@@ -24,6 +25,7 @@ function groupLabel(matchType: ThreadSearchResult['matchType']): string {
 export function ThreadSearchDialog({ open, onClose, onSelect }: ThreadSearchDialogProps) {
   const [query, setQuery] = useState('')
   const [results, setResults] = useState<ThreadSearchResult[]>([])
+  const [skipped, setSkipped] = useState<ThreadSearchSkipped[] | undefined>()
   const [loading, setLoading] = useState(false)
   const [activeIndex, setActiveIndex] = useState(0)
   const inputRef = useRef<HTMLInputElement>(null)
@@ -33,6 +35,8 @@ export function ThreadSearchDialog({ open, onClose, onSelect }: ThreadSearchDial
     if (!open) {
       setQuery('')
       setResults([])
+      setSkipped(undefined)
+      setLoading(false)
       setActiveIndex(0)
       return
     }
@@ -45,22 +49,30 @@ export function ThreadSearchDialog({ open, onClose, onSelect }: ThreadSearchDial
     const trimmed = query.trim()
     if (!trimmed) {
       setResults([])
+      setSkipped(undefined)
       setActiveIndex(0)
       return
     }
 
+    // A newer query replaces this one: its answer is dropped, and the daemon ends the calls it made to other computers.
+    let current = true
     const timer = setTimeout(async () => {
       setLoading(true)
       try {
         const found = await window.mousse.threads.search(trimmed, 40)
-        setResults(found)
+        if (!current) return
+        setResults(found.results)
+        setSkipped(found.skipped)
         setActiveIndex(0)
       } finally {
-        setLoading(false)
+        if (current) setLoading(false)
       }
-    }, 200)
+    }, THREAD_SEARCH_DEBOUNCE_MS)
 
-    return () => clearTimeout(timer)
+    return () => {
+      current = false
+      clearTimeout(timer)
+    }
   }, [open, query])
 
   useEffect(() => {
@@ -163,6 +175,8 @@ export function ThreadSearchDialog({ open, onClose, onSelect }: ThreadSearchDial
               </div>
             ))}
         </div>
+
+        {skippedLine(skipped) && <div className="thread-search-empty">{skippedLine(skipped)}</div>}
 
         <div className="thread-search-footer">
           <span className="thread-search-hint">

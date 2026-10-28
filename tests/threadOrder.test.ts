@@ -62,6 +62,28 @@ describe('orderedThreadIds', () => {
     expect(orderedThreadIds({ projects, threads, view: 'threads' })).toEqual(['lonely'])
   })
 
+  it('steps through the threads of other computers too, by their place among this computer’s', () => {
+    const remote = (id: string, over: Partial<Thread> = {}) => thread(id, { node: 'nod_other', ...over })
+    const threads = [
+      thread('mine-b', { order: 2 }),
+      remote('nod_other:r1', { order: 0.5 }),
+      remote('nod_other:r2', { projectId: 'nod_other:rp', order: 0 }),
+      remote('nod_other:child', {
+        order: 1,
+        lineage: { parentThreadId: 'nod_other:r1', rootThreadId: 'nod_other:r1', relationship: 'subagent' }
+      }),
+      thread('mine-a', { order: 0 })
+    ]
+    expect(orderedThreadIds({ projects, threads, view: 'threads' })).toEqual(['mine-a', 'nod_other:r2', 'nod_other:r1', 'mine-b'])
+    // Under a project of the other computer, they follow that project in the projects view.
+    expect(orderedThreadIds({ projects: [{ id: 'p1' }, { id: 'nod_other:rp' }], threads, view: 'projects' })).toEqual([
+      'nod_other:r2',
+      'mine-a',
+      'nod_other:r1',
+      'mine-b'
+    ])
+  })
+
   it('is empty without threads', () => {
     expect(orderedThreadIds({ projects, threads: [], view: 'projects' })).toEqual([])
   })

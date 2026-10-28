@@ -180,6 +180,12 @@ export interface ThreadSearchOptions {
 
 export class ThreadDataStore extends EventEmitter {
   /**
+   * The order of the first row of the user's other computers in a group (a project, or none), when there are
+   * any. Set by the Bridge service while threads of other computers are merged into the lists. A thread of this
+   * computer moved to the front of its group (or created in it) goes in front of those rows too.
+   */
+  remoteFloor?: (projectId: string | undefined) => number | undefined
+  /**
    * Warm list cache. Invalidated on mutations; also keyed by project set so
    * opening/removing a project forces a rescan without an explicit invalidate call.
    */
@@ -1160,12 +1166,17 @@ export class ThreadDataStore extends EventEmitter {
     const siblings = thread.projectId
       ? this.listThreads(thread.projectId)
       : this.readStandaloneIndex()
-    const alreadyFront = siblings.every(
-      (entry) => entry.id === thread.id || entry.order > thread.order
-    )
+    // Rows of the user's other computers sort with these (in the same project, or none): the front is theirs too.
+    const floor = this.remoteFloor?.(thread.projectId)
+    const alreadyFront =
+      siblings.every((entry) => entry.id === thread.id || entry.order > thread.order) &&
+      (floor === undefined || thread.order < floor)
     if (alreadyFront) return { thread, bumped: false }
 
-    const minOrder = siblings.reduce((min, entry) => Math.min(min, entry.order), thread.order)
+    const minOrder = siblings.reduce(
+      (min, entry) => Math.min(min, entry.order),
+      Math.min(thread.order, floor ?? thread.order)
+    )
     const updated: Thread = { ...thread, order: minOrder - 1 }
     this.writeJsonAtomic(join(this.getThreadDir(id), 'meta.json'), updated)
     if (!updated.projectId) this.updateStandaloneIndexEntry(updated)
@@ -1399,7 +1410,9 @@ export class ThreadDataStore extends EventEmitter {
     const threads = projectId
       ? this.scanProjectThreads(projectPath ?? this.projectManager.getProject(projectId)?.path ?? '')
       : this.readStandaloneIndex()
-    return threads.reduce((min, thread) => Math.min(min, thread.order), 0) - 1
+    // A group that also holds rows of other computers starts below their first.
+    const floor = this.remoteFloor?.(projectId)
+    return threads.reduce((min, thread) => Math.min(min, thread.order), Math.min(0, floor ?? 0)) - 1
   }
 
   private ensureThreadOrders(threads: Thread[], persist: (threads: Thread[]) => void): Thread[] {

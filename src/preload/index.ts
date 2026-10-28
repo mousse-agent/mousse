@@ -65,7 +65,7 @@ import type {
   ChannelPlatform,
   ChannelsSnapshot,
   PairingRequest,
-  ThreadSearchResult,
+  ThreadSearchResponse,
   PendingUserQuestions,
   Task,
   TaskStatus,
@@ -750,7 +750,8 @@ const api = {
     delete: (threadId: string): Promise<void> => storageInvoke('threads:delete', threadId),
     restore: (threadId: string): Promise<unknown> => storageInvoke('threads:restore', threadId),
     purge: (threadId: string, options?: { preview?: boolean; operationId?: string; expectedGeneration?: number; previewDigest?: string; discard?: boolean }): Promise<{ preview?: import('../shared/resourceLifecycle').LifecyclePurgePreview; reclaim?: { bytes: number; estimated: boolean; partial: boolean }; lifecycle?: import('../shared/resourceLifecycle').TaskLifecycleRecord }> => storageInvoke('threads:purge', threadId, options),
-    inventory: (threadId?: string): Promise<{ lifecycles: import('../shared/resourceLifecycle').TaskLifecycleRecord[]; taskNames: Record<string, string>; trashPolicy: import('../shared/resourceLifecycle').TrashRetentionPolicy; trashSweepStatus: { suspended: boolean; reason?: string } }> => storageInvoke('threads:inventory', threadId),
+    /** `includeComputers`: also the trash of the user's other computers (Recently deleted); without it, this computer's alone. */
+    inventory: (threadId?: string, options?: { includeComputers?: boolean }): Promise<{ lifecycles: Array<import('../shared/resourceLifecycle').TaskLifecycleRecord & { node?: string; computerName?: string }>; taskNames: Record<string, string>; trashPolicy: import('../shared/resourceLifecycle').TrashRetentionPolicy; trashSweepStatus: { suspended: boolean; reason?: string }; skipped?: import('../shared/types').ThreadSearchSkipped[] }> => storageInvoke('threads:inventory', threadId, options),
     configureTrash: (policy: { graceDays: number; automaticPurge: boolean }): Promise<unknown> => storageInvoke('threads:configureTrash', policy),
     rename: (threadId: string, name: string): Promise<Thread> =>
       ipcRenderer.invoke('threads:rename', threadId, name),
@@ -776,7 +777,7 @@ const api = {
       ipcRenderer.invoke('threads:settle', threadId, settled),
     reorder: (projectId: string | undefined, threadIds: string[]): Promise<Thread[]> =>
       ipcRenderer.invoke('threads:reorder', projectId, threadIds),
-    search: (query: string, limit?: number): Promise<ThreadSearchResult[]> =>
+    search: (query: string, limit?: number): Promise<ThreadSearchResponse> =>
       ipcRenderer.invoke('threads:search', query, limit),
     onUpdated: (cb: (threads: Thread[]) => void): (() => void) => {
       const handler = (_: Electron.IpcRendererEvent, threads: Thread[]) => cb(threads)

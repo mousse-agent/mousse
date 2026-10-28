@@ -1,8 +1,9 @@
 import { useEffect, useId, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import { createPortal } from 'react-dom'
 import { ArchiveRestore, RotateCcw, Trash2 } from '../../lib/icons'
-import { createTrashController, trashRows, type TrashController, type TrashState } from '../../lib/trashInventory'
+import { createTrashController, deleteElsewhere, trashRows, type TrashController, type TrashState } from '../../lib/trashInventory'
 import { PermanentDeleteDialog } from './PermanentDeleteDialog'
+import { skippedLine } from '../../lib/threadSearchSkipped'
 
 /** While the section is open the list is re-read this often, so the countdown and the daemon's own sweeps show up. */
 const OPEN_REFRESH_MS = 15_000
@@ -21,7 +22,7 @@ export function RecentlyDeletedSection({ hidden = false }: { hidden?: boolean })
   /** Set when an action started from a row's button; the row may vanish, and keyboard focus must not fall to the page. */
   const refocus = useRef<{ index: number; action: string } | null>(null)
   const controller = useMemo<TrashController>(() => createTrashController({
-    inventory: () => window.mousse.threads.inventory(),
+    inventory: () => window.mousse.threads.inventory(undefined, { includeComputers: true }),
     restore: (threadId) => window.mousse.threads.restore(threadId),
     purge: (threadId, options) => window.mousse.threads.purge(threadId, options)
   }), [])
@@ -131,6 +132,7 @@ export function RecentlyDeletedView({ state, expanded, hidden, actions, now, roo
         <div id={listId} className="threads-sidebar-tree threads-sidebar-trash-list">
           {state.refreshError && <p className="threads-sidebar-trash-error" role="alert">{state.refreshError}</p>}
           {strayNotice && <p className="threads-sidebar-trash-error" role="alert">{strayNotice}</p>}
+          {skippedLine(state.skipped, 'Not listed') && <p className="threads-sidebar-trash-meta" data-testid="sidebar-trash-skipped">{skippedLine(state.skipped, 'Not listed')}</p>}
           {rows.length === 0
             ? <div className="threads-sidebar-empty">{state.loaded ? 'No recently deleted threads' : 'Loading…'}</div>
             : <ul className="threads-sidebar-trash-rows" aria-label="Recently deleted threads">
@@ -140,12 +142,14 @@ export function RecentlyDeletedView({ state, expanded, hidden, actions, now, roo
                     <li key={row.taskId} className="threads-sidebar-trash-row" data-testid="sidebar-trash-row" data-task-id={row.taskId} data-state={row.state}>
                       <div className="threads-sidebar-trash-text">
                         <span className="threads-sidebar-trash-name" title={row.name}>{row.name}</span>
+                        {row.computer && <span className="threads-sidebar-trash-meta" data-testid="sidebar-trash-computer">On {row.computer}</span>}
                         {row.meta && <span className="threads-sidebar-trash-meta" data-testid="sidebar-trash-meta">{row.meta}</span>}
                         {row.note && <span className="threads-sidebar-trash-meta threads-sidebar-trash-note">{row.note}</span>}
                         {notice && <span className="threads-sidebar-trash-error" role="alert" data-testid="sidebar-trash-notice">{notice}</span>}
                       </div>
                       <span className="threads-sidebar-trash-actions">
                         {row.canRestore && <button type="button" className="threads-sidebar-icon-btn" data-action="restore" title="Restore" aria-label={`Restore ${row.name}`} disabled={busy} onClick={() => actions.onRestore(row.taskId)}><ArchiveRestore size={14} aria-hidden="true" /></button>}
+                        {row.computer && row.state === 'trashed' && <button type="button" className="threads-sidebar-icon-btn danger" data-action="delete" title={deleteElsewhere(row.computer)} aria-label={`${deleteElsewhere(row.computer)}: ${row.name}`} disabled><Trash2 size={14} aria-hidden="true" /></button>}
                         {row.canDelete && <button type="button" className="threads-sidebar-icon-btn danger" data-action="delete" title="Delete permanently…" aria-label={`Delete ${row.name} permanently…`} disabled={busy} onClick={() => actions.onDelete(row.taskId)}><Trash2 size={14} aria-hidden="true" /></button>}
                         {row.canRetry && <button type="button" className="threads-sidebar-icon-btn" data-action="retry" title="Retry deletion" aria-label={`Retry deleting ${row.name}`} disabled={busy} onClick={() => actions.onRetry(row.taskId)}><RotateCcw size={14} aria-hidden="true" /></button>}
                       </span>

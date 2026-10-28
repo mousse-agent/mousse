@@ -293,6 +293,22 @@ export interface ThreadSearchResult {
   matchType: 'thread' | 'project' | 'message'
   snippet?: string
   messageId?: string
+  /** On a result from another of the user's computers: the computer that runs the thread. */
+  node?: string
+}
+
+/** A computer that a search did not cover, and why. */
+export interface ThreadSearchSkipped {
+  node: string
+  name: string
+  reason: 'offline' | 'slow' | 'unavailable' | 'refused' | 'replaced'
+}
+
+/** What a search finds: the matches of this computer and of the others that answered, and who did not. */
+export interface ThreadSearchResponse {
+  results: ThreadSearchResult[]
+  /** Computers that were not searched; absent when every computer answered. */
+  skipped?: ThreadSearchSkipped[]
 }
 
 export const SILENT_MARKER = '[SILENT]'
@@ -1004,6 +1020,19 @@ export interface Project {
   /** Explicit sidebar position; maintained independently of activity timestamps. */
   order: number
   pinnedAt?: string
+  /** Set on a project of another of the user's computers: the computer that holds it. Absent on this computer's own. */
+  node?: string
+  /** On a project of another computer: the project of this computer with the same Git history, when there is one. */
+  sameAs?: string
+  /**
+   * A weaker match than `sameAs`: a project of this computer that shares its root commit, where one side has no
+   * remote to compare. Two clones of a template look like this; grouping should not rely on it.
+   */
+  similarTo?: string
+  /** Set while the computer that holds the project cannot be reached; the row is what it last said. */
+  offline?: true
+  /** Set while the computer that holds the project has stopped sharing its threads with this one (it blocked this computer or turned sharing off). */
+  notShared?: true
 }
 
 /**
@@ -1057,6 +1086,16 @@ export interface Thread {
   createdByThreadId?: string
   /** Set on a thread another of the user's devices created through Bridge. */
   startedFrom?: ThreadStartedFrom
+  /**
+   * Set on a row of the merged lists that is a thread of another of the user's computers: the computer
+   * that runs it (its Net node id). The id of such a row is `<node>:<id on that computer>`. Absent on
+   * this computer's own threads.
+   */
+  node?: string
+  /** Set while the computer that runs the thread cannot be reached; the row is what it last said. */
+  offline?: true
+  /** Set while the computer that runs the thread has stopped sharing its threads with this one; the row is what it last said. */
+  notShared?: true
   /** The other computer of the user a message in this thread was last sent from; absent when every message came from this one. */
   sentFrom?: ThreadSentFrom
   /**

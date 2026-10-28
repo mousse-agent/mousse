@@ -6,8 +6,8 @@ import {
   sensitiveFolderHolding,
   type FolderRuleEnvironment
 } from '../../files/sensitiveFolders'
-import { portableRepository } from '../dispatch/repository'
-import { matchProject, type ProjectIdentity } from './projectMatch'
+import { matchProjectWithEvidence, type ProjectIdentity } from './projectMatch'
+import { repositoryIdentitiesFor } from './repositoryIdentity'
 import { withoutStandingRules } from '../../orchestrator/UserQuestionService'
 import type { MmsProfileServices } from '../../MmsProfileServices'
 import { dispatchMethod } from '../../protocol/handlers'
@@ -107,10 +107,10 @@ export function remoteThreadEventData(data: unknown): unknown {
   }
 }
 
-/** How long a project's repository identity is reused before its repository is read again. */
-const IDENTITY_TTL_MS = 5 * 60_000
 /** Projects looked at for one match; a profile with more is matched against the first ones. */
 const MATCH_PROJECT_LIMIT = 256
+/** Folders read at once for a match. */
+const MATCH_CONCURRENCY = 4
 
 /**
  * A Windows network or device path (`\\host\share`, `\\?\C:\x`, `\\.\pipe\x`). Resolving one makes
@@ -126,8 +126,6 @@ function failure(error: unknown): { ok: false; error: string } {
 
 /** Adapts the actual profile services, never a client-supplied ingress/profile/path. */
 export class MmsRemoteBackend implements RemoteBackendPort {
-  /** Repository identity per project path, null for a folder that is not a Git repository. */
-  private readonly identities = new Map<string, { at: number; identity: ProjectIdentity | null }>()
   constructor(
     private readonly services: MmsProfileServices,
     private readonly revision: () => number = () => 0,
@@ -195,30 +193,45 @@ export class MmsRemoteBackend implements RemoteBackendPort {
    * nothing. Read-only; only ids leave this machine, never a path. Identities are cached by path
    * for a few minutes, so a profile's repositories are read once per window of use.
    */
-  private async matchProject(params: Record<string, unknown>): Promise<{ projectId?: string }> {
-    const now = Date.now()
+  private async matchProject(
+    params: Record<string, unknown>
+  ): Promise<{ projectId?: string; weak?: true }> {
+    // Projects are matched by the repository they are in, not by their folder: a project that is a
+    // subfolder, or is reached through a link, has the identity of its repository. When two projects are
+    // the same repository, the one at its top folder stands for it (else the first), so they do not
+    // make each other ambiguous.
+    const repositories = repositoryIdentitiesFor(this.services)
+    const byRoot = new Map<string, { id: string; atTop: boolean; identity: ProjectIdentity }>()
     const candidates: Array<{ id: string; identity: ProjectIdentity | null }> = []
-    for (const [path, held] of this.identities) if (now - held.at > IDENTITY_TTL_MS) this.identities.delete(path)
-    for (const project of this.services.projects.listProjects().slice(0, MATCH_PROJECT_LIMIT)) {
-      let held = this.identities.get(project.path)
-      if (!held || now - held.at > IDENTITY_TTL_MS) {
-        let identity: ProjectIdentity | null = null
-        try {
-          const { roots, remotes } = await portableRepository(project.path)
-          identity = { roots, remotes }
-        } catch {
-          // Not a Git repository, or not readable: it never matches.
-        }
-        held = { at: now, identity }
-        this.identities.set(project.path, held)
+    const projects = this.services.projects.listProjects().slice(0, MATCH_PROJECT_LIMIT)
+    // A few folders at a time: each is a Git call, and a profile may hold hundreds of projects.
+    const scanned: Array<{ project: (typeof projects)[number]; identity: Awaited<ReturnType<typeof repositories.of>> }> = []
+    for (let at = 0; at < projects.length; at += MATCH_CONCURRENCY)
+      scanned.push(
+        ...(await Promise.all(
+          projects
+            .slice(at, at + MATCH_CONCURRENCY)
+            .map(async (project) => ({ project, identity: await repositories.of(project.path) }))
+        ))
+      )
+    for (const { project, identity } of scanned) {
+      if (!identity) {
+        // Not a Git repository, or not readable: it never matches.
+        candidates.push({ id: project.id, identity: null })
+        continue
       }
-      candidates.push({ id: project.id, identity: held.identity })
+      const atTop = await repositories.isTop(project.path, identity.root)
+      const known = byRoot.get(identity.root)
+      if (!known || (atTop && !known.atTop))
+        byRoot.set(identity.root, { id: project.id, atTop, identity: { roots: identity.roots, remotes: identity.remotes } })
     }
-    const projectId = matchProject(
+    for (const entry of byRoot.values()) candidates.push({ id: entry.id, identity: entry.identity })
+    const found = matchProjectWithEvidence(
       { roots: params.roots as string[], remotes: (params.remotes as string[] | undefined) ?? [] },
       candidates
     )
-    return projectId ? { projectId } : {}
+    // A match that rests on the root commit alone says so: the caller does not group by it.
+    return found ? { projectId: found.id, ...(found.weak ? { weak: true as const } : {}) } : {}
   }
   /**
    * Registers an existing directory on this machine as a project. The path comes from another

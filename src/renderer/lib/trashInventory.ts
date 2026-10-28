@@ -1,6 +1,7 @@
 import { errorDiagnostic, knownAppError, normalizeAppError, parseErrorInfo, type AppErrorShape } from '../../shared/errors'
 import type { LifecycleState, LifecyclePurgePreview, TaskLifecycleRecord, TrashRetentionPolicy } from '../../shared/resourceLifecycle'
 import { formatBytes } from '../../shared/storage'
+import type { ThreadSearchSkipped } from '../../shared/types'
 
 /**
  * The "Recently deleted" list: which lifecycle records show, how they read and sort, and the
@@ -13,11 +14,19 @@ const DAY_MS = 86_400_000
 const LIVE_STATES: ReadonlySet<LifecycleState> = new Set(['active', 'draining'])
 const REFRESH_DEBOUNCE_MS = 400
 
+/**
+ * A lifecycle record as the list shows it. A record of another of the user's computers names that computer
+ * (`node`, `computerName`): it can be restored from here, but it is permanently deleted only there.
+ */
+export type TrashRecord = TaskLifecycleRecord & { node?: string; computerName?: string }
+
 export interface TrashInventoryReply {
-  lifecycles: TaskLifecycleRecord[]
+  lifecycles: TrashRecord[]
   taskNames?: Record<string, string>
   trashPolicy: TrashRetentionPolicy
   trashSweepStatus: { suspended: boolean; reason?: string }
+  /** The other computers whose trash could not be read this time. */
+  skipped?: ThreadSearchSkipped[]
 }
 export interface PurgeReclaim { bytes: number; estimated: boolean; partial: boolean }
 export interface PurgeInput { preview?: boolean; operationId?: string; expectedGeneration?: number; previewDigest?: string; discard?: boolean }
@@ -38,7 +47,12 @@ export interface TrashRow {
   canRestore: boolean
   canDelete: boolean
   canRetry: boolean
+  /** The computer that holds the thread, for a thread of another computer. */
+  computer?: string
 }
+
+/** Why a thread of another computer cannot be permanently deleted from here. */
+export const deleteElsewhere = (computer: string): string => `Delete permanently on ${computer}`
 
 /** Same timestamp fallback as the daemon's sweep; this is presentation only. */
 export function trashedAtMs(record: TaskLifecycleRecord): number | undefined {
@@ -63,24 +77,24 @@ export function retentionLabel(trashedAt: number, policy: TrashRetentionPolicy |
   return days === 1 ? 'Permanently deleted in 1 day' : `Permanently deleted in ${days} days`
 }
 
-const isListed = (record: TaskLifecycleRecord) => !record.parentTaskId && record.state !== 'purged' && !LIVE_STATES.has(record.state)
+const isListed = (record: TrashRecord) => !record.parentTaskId && record.state !== 'purged' && !LIVE_STATES.has(record.state)
 
 /** How many root threads are in (or entering) the trash. */
-export function trashCount(records: readonly TaskLifecycleRecord[]): number {
+export function trashCount(records: readonly TrashRecord[]): number {
   return records.filter(isListed).length
 }
 
 /** Root threads in (or entering) the trash, unfinished deletions first, then newest deletion first. */
 export function trashRows(
-  records: readonly TaskLifecycleRecord[],
+  records: readonly TrashRecord[],
   taskNames: Record<string, string>,
   policy: TrashRetentionPolicy | undefined,
   options: { now?: number; paused?: boolean } = {}
 ): TrashRow[] {
   const now = options.now ?? Date.now()
   const listed = records.filter(isListed)
-  const key = (record: TaskLifecycleRecord) => trashedAtMs(record) ?? Date.parse(record.updatedAt) ?? 0
-  const name = (record: TaskLifecycleRecord) => taskNames[record.taskId] ?? 'Untitled thread'
+  const key = (record: TrashRecord) => trashedAtMs(record) ?? Date.parse(record.updatedAt) ?? 0
+  const name = (record: TrashRecord) => taskNames[record.taskId] ?? 'Untitled thread'
   return [...listed]
     .sort((a, b) =>
       Number(b.state === 'purge-started') - Number(a.state === 'purge-started') ||
@@ -120,8 +134,11 @@ export function trashRows(
         ...(parts.length ? { meta: parts.join(' · ') } : {}),
         ...(note ? { note } : {}),
         canRestore: idle,
-        canDelete: idle,
-        canRetry: record.state === 'purge-started' && Boolean(record.purge?.operationId)
+        // Permanent delete cannot be undone, so it stays on the computer that holds the thread.
+        canDelete: idle && !record.node,
+        // A deletion that began on another computer is retried there; this one cannot purge its threads.
+        canRetry: record.state === 'purge-started' && Boolean(record.purge?.operationId) && !record.node,
+        ...(record.node ? { computer: record.computerName ?? 'the other computer' } : {})
       }
     })
 }
@@ -194,10 +211,12 @@ export interface PurgeConfirmation {
 }
 export interface TrashState {
   loaded: boolean
-  records: TaskLifecycleRecord[]
+  records: TrashRecord[]
   taskNames: Record<string, string>
   policy?: TrashRetentionPolicy
   paused: boolean
+  /** The other computers whose trash is not in the list this time. */
+  skipped?: ThreadSearchSkipped[]
   /** A request is running for this thread; every action waits. */
   busyTaskId?: string
   /** The last background refresh failed. */
@@ -242,7 +261,7 @@ export function createTrashController(
   const load = (): Promise<void> => {
     if (inFlight) return inFlight
     const request = api.inventory().then((result) => {
-      set({ loaded: true, records: result.lifecycles, taskNames: result.taskNames ?? {}, policy: result.trashPolicy, paused: result.trashSweepStatus.suspended, refreshError: undefined })
+      set({ loaded: true, records: result.lifecycles, taskNames: result.taskNames ?? {}, policy: result.trashPolicy, paused: result.trashSweepStatus.suspended, skipped: result.skipped, refreshError: undefined })
     }).finally(() => { if (inFlight === request) inFlight = null })
     inFlight = request
     return request
@@ -299,6 +318,11 @@ export function createTrashController(
     },
     restore: (taskId) => act(taskId, 'threads.restore', async () => { await api.restore(taskId) }),
     async requestPurge(taskId) {
+      const remote = state.records.find((record) => record.taskId === taskId)
+      if (remote?.node) {
+        set({ notice: { taskId, message: deleteElsewhere(remote.computerName ?? 'the other computer') } })
+        return false
+      }
       let fetched: Awaited<ReturnType<typeof fetchPreview>> | undefined
       const ok = await act(taskId, 'threads.purge.preview', async () => { fetched = await fetchPreview(taskId) })
       // Shown once the list is re-read and the controller is idle, so a quick confirm is never ignored.

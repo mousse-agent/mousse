@@ -114,7 +114,7 @@ export const FIXTURE_LEGACY_MOUSSE_CONF = {
   settings: {
     profile: { username: 'legacy-user' },
     appearance: { theme: 'dark', accentColor: '#3b82f6', acrylic: false, acrylicIntensity: 50 },
-    notifications: { threadCompletionSound: true }
+    notifications: { threadCompletionSound: true, allRemoteThreads: false }
   },
   providers: { llmProvider: 'openrouter', model: 'openai/gpt-4.1' },
   agents: { enabled: { mousse: true } },

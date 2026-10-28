@@ -49,6 +49,11 @@ export interface AppearanceSettings {
 export interface NotificationSettings {
   /** Use the operating system notification sound when a thread's agent finishes. */
   threadCompletionSound: boolean
+  /**
+   * Notify for every thread on the user's other computers. Off: only a thread this computer started or
+   * sent in, or that was opened here in the last seven days, notifies.
+   */
+  allRemoteThreads: boolean
 }
 
 export interface PermissionSettings {
@@ -475,7 +480,8 @@ export function getDefaultSettings(): MousseSettings {
       renderMath: true
     },
     notifications: {
-      threadCompletionSound: true
+      threadCompletionSound: true,
+      allRemoteThreads: false
     },
     shortcuts: {},
     permissions: normalizePermissionSettings(),

@@ -15,7 +15,7 @@ import { confirmNavigation } from '../services/navigationGuards'
 import { useChatsStore } from '../stores/chatsStore'
 import { createAndSelectThread, selectThread } from '../lib/threadActions'
 import { closeRemoteThread, openRemoteThread, selectRemoteThread, useRemoteThreads } from '../lib/remoteThreadStore'
-import { remoteRowActivity, sidebarRemoteThreads, useRemoteListedThreads, useRemoteThreadListing, type RemoteSidebarThread } from '../lib/remoteThreadList'
+import { NO_REMOTE_SIDEBAR_THREADS, remoteRowActivity, sidebarRemoteThreads, useRemoteListedThreads, useRemoteThreadListing, useRoutedThreadsFlag, type RemoteSidebarThread } from '../lib/remoteThreadList'
 import { ChatsSidebar } from './chats/ChatsSidebar'
 import { ProfileSwitcher } from './profiles/ProfileSwitcher'
 import { RecentlyDeletedSection } from './sidebar/RecentlyDeletedSection'
@@ -416,10 +416,14 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
   const activeRemoteKey = useRemoteThreads((state) => state.activeKey)
   const listedRemoteThreads = useRemoteListedThreads((state) => state.threads)
   const profileId = useAppStore((s) => s.profileId)
-  useRemoteThreadListing(profileId)
+  // With the routing flag on, the other computers' threads are in `threads` itself: these separate rows would repeat them.
+  const threadsAreMerged = useRoutedThreadsFlag(profileId)
+  useRemoteThreadListing(threadsAreMerged ? null : profileId)
   const remoteThreads = useMemo(
-    () => sidebarRemoteThreads(remoteEntries, remoteOrder, listedRemoteThreads, new Set(projects.map((project) => project.id))),
-    [remoteEntries, remoteOrder, listedRemoteThreads, projects]
+    () => threadsAreMerged
+      ? NO_REMOTE_SIDEBAR_THREADS
+      : sidebarRemoteThreads(remoteEntries, remoteOrder, listedRemoteThreads, new Set(projects.map((project) => project.id))),
+    [threadsAreMerged, remoteEntries, remoteOrder, listedRemoteThreads, projects]
   )
 
   useEffect(() => {

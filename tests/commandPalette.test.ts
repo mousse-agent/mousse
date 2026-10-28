@@ -417,3 +417,26 @@ describe('the palette list', () => {
     for (const [, , body] of rules) expect(body).not.toMatch(/border-(left|right|inline)|box-shadow\s*:\s*inset|outline/)
   })
 })
+
+describe('the palette and the threads of other computers', () => {
+  const row = (id: string, name: string, over: Partial<Thread> = {}): Thread =>
+    ({ id, name, createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-02T00:00:00.000Z', order: 0, startedAt: '2026-01-01T00:00:01.000Z', ...over }) as Thread
+
+  it('finds a thread of another computer by name and opens it by its qualified id', () => {
+    const threads = [row('mine', 'Fix the login'), row('nod_other:remote', 'Fix the build', { node: 'nod_other' })]
+    const found = flattenGroups(buildPaletteGroups({ query: 'fix', commands: [], threads, projects: [] }))
+    expect(found.map((item) => [item.kind, item.id])).toEqual(
+      expect.arrayContaining([['thread', 'mine'], ['thread', 'nod_other:remote']])
+    )
+    // A subagent of the other computer stays under its parent, as a local one does.
+    const withChild = [
+      ...threads,
+      row('nod_other:child', 'Fix the build, part two', {
+        node: 'nod_other',
+        lineage: { parentThreadId: 'nod_other:remote', rootThreadId: 'nod_other:remote', relationship: 'subagent' }
+      })
+    ]
+    const ids = flattenGroups(buildPaletteGroups({ query: 'fix', commands: [], threads: withChild, projects: [] })).map((item) => item.id)
+    expect(ids).not.toContain('nod_other:child')
+  })
+})
