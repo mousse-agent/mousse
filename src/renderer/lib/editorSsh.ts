@@ -30,6 +30,15 @@ export function editorSshProblemWords(
   }
 }
 
+/**
+ * Whether Settings shows the Editors group. Until editor connections exist (`EDITOR_PROXY_READY`) the line
+ * serves nothing, so the group is there only while the line is installed or its notice is pending: it is
+ * where Undo is, and Undo is final.
+ */
+export function editorSshVisible(status: EditorSshStatus | null): status is EditorSshStatus {
+  return !!status?.available && (status.included || status.noticePending || EDITOR_PROXY_READY)
+}
+
 /** The state the Settings switch shows, and what the switch does. */
 export function editorSshSwitch(status: EditorSshStatus): { on: boolean; disabled: boolean; description: string } {
   const where = status.userConfig || '~/.ssh/config'
@@ -48,9 +57,6 @@ export function editorSshSwitch(status: EditorSshStatus): { on: boolean; disable
   }
   if (!status.enabled) {
     return { on: false, disabled: false, description: `Off · Mousse added nothing to ${where}. Turn it on to let your editor reach your other computers by name.` }
-  }
-  if (!EDITOR_PROXY_READY) {
-    return { on: false, disabled: true, description: `Not needed yet · computers you set up over SSH open in your editor without it. Mousse adds one Include line to ${where} when editor connections arrive.` }
   }
   return { on: false, disabled: false, description: `Mousse adds one Include line to ${where} the first time you open a folder of another computer in your editor.` }
 }

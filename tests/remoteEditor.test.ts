@@ -3,7 +3,8 @@ import { remoteEditorPath } from '../src/shared/bridge/editorFolder'
 import {
   checkedFolder,
   encodeUriPath,
-  missingRemoteExtension,
+  isBatchLauncher,
+  remoteExtensionHint,
   parseSshTarget,
   RemoteOpenError,
   remoteLaunchArguments,
@@ -146,31 +147,53 @@ describe('the SSH name an editor connects to', () => {
   })
 })
 
-describe('the Remote - SSH extension', () => {
-  const list = (entries: string[] | undefined) => (path: string) => (path.endsWith('/extensions') ? entries : undefined)
+describe('the hint about the Remote - SSH extension', () => {
+  /** A disk: folder path to the names inside it; anything else cannot be read. */
+  const disk = (folders: Record<string, string[]>) => (path: string) => folders[path]
+  const own = (editor: string) => `/home/me/${editor}/extensions`
 
-  it('names the extension to install when the extensions folder is readable and does not have it', () => {
-    expect(missingRemoteExtension('vscode', '/home/me', list(['ms-python.python-2024.1.0']))).toBe(
-      'Install the Remote - SSH extension (ms-vscode-remote.remote-ssh) in VS Code, then open this folder again.'
+  it('names the extension when the editor’s own folder is readable and does not have it', () => {
+    expect(remoteExtensionHint('vscode', '/home/me', [], disk({ [own('.vscode')]: ['ms-python.python-2024.1.0'] }))).toBe(
+      'If VS Code asks for the Remote - SSH extension, install ms-vscode-remote.remote-ssh, then open this folder again.'
     )
-    expect(missingRemoteExtension('cursor', '/home/me', list([]))).toContain('anysphere.remote-ssh')
-    expect(missingRemoteExtension('vscodium', '/home/me', list([]))).toContain('jeanp413.open-remote-ssh')
-    expect(missingRemoteExtension('windsurf', '/home/me', list([]))).toContain('codeium.windsurf-remote-openssh')
-    expect(missingRemoteExtension('vscode-insiders', '/home/me', list([]))).toContain('VS Code Insiders')
+    expect(remoteExtensionHint('cursor', '/home/me', [], disk({ [own('.cursor')]: [] }))).toContain('anysphere.remote-ssh')
+    expect(remoteExtensionHint('vscodium', '/home/me', [], disk({ [own('.vscode-oss')]: [] }))).toContain('jeanp413.open-remote-ssh')
+    expect(remoteExtensionHint('vscode-insiders', '/home/me', [], disk({ [own('.vscode-insiders')]: [] }))).toContain('VS Code Insiders')
   })
 
-  it('stays quiet when the extension is there, and when the folder cannot be read', () => {
-    expect(missingRemoteExtension('vscode', '/home/me', list(['ms-vscode-remote.remote-ssh-0.110.0']))).toBeUndefined()
-    expect(missingRemoteExtension('vscode', '/home/me', list(['MS-VSCODE-REMOTE.REMOTE-SSH-0.110.0']))).toBeUndefined()
-    expect(missingRemoteExtension('vscode', '/home/me', list(undefined))).toBeUndefined()
-    // A different extension that only shares the start of the name does not count.
-    expect(missingRemoteExtension('vscode', '/home/me', list(['ms-vscode-remote.remote-ssh-edit-0.86.0']))).toContain('Install the Remote - SSH extension')
-    expect(missingRemoteExtension('idea', '/home/me', list([]))).toBeUndefined()
+  it('stays quiet when the extension is in the person’s own folder', () => {
+    expect(remoteExtensionHint('vscode', '/home/me', [], disk({ [own('.vscode')]: ['ms-vscode-remote.remote-ssh-0.110.0'] }))).toBeUndefined()
+    expect(remoteExtensionHint('vscode', '/home/me', [], disk({ [own('.vscode')]: ['MS-VSCODE-REMOTE.REMOTE-SSH-0.110.0'] }))).toBeUndefined()
   })
 
-  it('looks in the editor\u2019s own folder under the home folder', () => {
+  it('stays quiet when the editor ships it inside its app, as Windsurf and Antigravity do', () => {
+    const builtIn = '/opt/windsurf/resources/app/extensions'
+    const folders = { [own('.windsurf')]: ['codeium.windsurfpyright-1.0.0'], [builtIn]: ['git', 'windsurf-remote-openssh', 'json'] }
+    expect(remoteExtensionHint('windsurf', '/home/me', [builtIn], disk(folders))).toBeUndefined()
+    expect(remoteExtensionHint('windsurf', '/home/me', ['/other/extensions', builtIn], disk(folders))).toBeUndefined()
+    // The same folder without it: the hint shows.
+    expect(remoteExtensionHint('windsurf', '/home/me', [builtIn], disk({ ...folders, [builtIn]: ['git', 'json'] }))).toContain('codeium.windsurf-remote-openssh')
+  })
+
+  it('says nothing when no folder can be read, and for an editor without remote support', () => {
+    expect(remoteExtensionHint('vscode', '/home/me', ['/app/extensions'], disk({}))).toBeUndefined()
+    expect(remoteExtensionHint('idea', '/home/me', [], disk({ [own('.idea')]: [] }))).toBeUndefined()
+  })
+
+  it('counts a built-in folder as readable even when the person’s own folder is not', () => {
+    expect(remoteExtensionHint('vscode', '/home/me', ['/app/extensions'], disk({ '/app/extensions': ['git'] }))).toContain('ms-vscode-remote.remote-ssh')
+  })
+
+  it('looks in the editor’s own folder under the home folder', () => {
     const seen: string[] = []
-    missingRemoteExtension('vscodium', 'C:\\Users\\me\\', (path) => (seen.push(path), undefined))
+    remoteExtensionHint('vscodium', 'C:\\Users\\me\\', [], (path) => (seen.push(path), undefined))
     expect(seen).toEqual(['C:\\Users\\me/.vscode-oss/extensions'])
+  })
+})
+
+describe('batch launchers', () => {
+  it('recognises a .cmd or .bat file in any case', () => {
+    for (const name of ['C:\\x\\code.cmd', 'code.BAT', ' code.Cmd ']) expect(isBatchLauncher(name)).toBe(true)
+    for (const name of ['C:\\x\\Code.exe', '/usr/bin/code', 'code.cmd.exe', 'cmd']) expect(isBatchLauncher(name)).toBe(false)
   })
 })

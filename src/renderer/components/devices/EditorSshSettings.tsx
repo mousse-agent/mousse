@@ -1,5 +1,6 @@
 import { Code2 } from '../../lib/icons'
-import { editorSshProblemWords, editorSshSwitch, useEditorSsh } from '../../lib/editorSsh'
+import { editorSshProblemWords, editorSshSwitch, editorSshVisible, useEditorSsh } from '../../lib/editorSsh'
+import { EDITOR_PROXY_READY } from '../../../shared/remoteEditor'
 import type { EditorSshStatus } from '../../../shared/net/local'
 import { SettingsGroup, SettingsRow, Switch } from '../settings/SettingsRow'
 import { EditorSshNoticeView } from '../sideCard/EditorSshNotice'
@@ -20,7 +21,7 @@ export function EditorSshSettingsView({
   onToggle: (next: boolean) => void
   onDismissNotice: () => void
 }) {
-  if (!status?.available) return null
+  if (!editorSshVisible(status)) return null
   const control = editorSshSwitch(status)
   const problem = status.problem ? editorSshProblemWords(status.problem, status.includeLine, status.userConfig) : ''
   return (
@@ -46,7 +47,8 @@ export function EditorSshSettings() {
       status={status}
       busy={busy}
       error={error}
-      onToggle={(next) => void (next ? enable() : disable())}
+      // Nothing writes ~/.ssh/config from here until editor connections exist; Undo is final until then.
+      onToggle={(next) => { if (!next) void disable(); else if (EDITOR_PROXY_READY) void enable() }}
       onDismissNotice={() => void acknowledge()}
     />
   )

@@ -7,7 +7,7 @@ import {
   hasEditorChoices,
   loadLastEditorId,
   noRemoteEditorMessage,
-  noRouteMessage,
+  noRouteHelp,
   openErrorMessage,
   openLabel,
   remoteEditors,
@@ -96,23 +96,51 @@ describe('a folder of another computer', () => {
   })
 
   it('says what is missing without an SSH route, and when no installed editor can open it', () => {
-    expect(noRouteMessage(code, 'Computer B')).toBe(
-      'Opening Computer B’s folder in VS Code here needs an SSH route. It arrives with editor connections; until then, set Computer B up over SSH.'
-    )
+    expect(noRouteHelp(code, 'Computer B')).toEqual({
+      message: 'To open Computer B’s folder in VS Code here, this computer needs to reach it over SSH. SSH can be set up in Devices.',
+      action: 'devices',
+      label: 'Set up…'
+    })
     expect(noRemoteEditorMessage('Computer B')).toContain('None of the editors installed on this computer can open a folder on Computer B.')
+  })
+
+  it('asks to approve the address a computer offers, and otherwise says what applies to its system', () => {
+    const offered = noRouteHelp(code, 'Computer B', { platform: 'darwin', sshOffer: { endpoint: 'dev@box.example.com:22' } })
+    expect(offered).toEqual({
+      message: 'To open Computer B’s folder in VS Code here, approve the SSH address Computer B offers (dev@box.example.com:22).',
+      action: 'approve',
+      label: 'Approve address…',
+      endpoint: 'dev@box.example.com:22'
+    })
+    const mac = noRouteHelp(code, 'Computer B', { platform: 'darwin' })
+    expect(mac).toMatchObject({ action: 'devices', label: 'Open Devices…' })
+    expect(mac.message).toContain('Mousse sets SSH up only on Linux computers; Computer B runs macOS, so it needs an SSH server of its own.')
+    expect(noRouteHelp(code, 'Computer B', { platform: 'win32' }).message).toContain('Computer B runs Windows')
+    const linux = noRouteHelp(code, 'Computer B', { platform: 'linux' })
+    expect(linux).toMatchObject({ action: 'devices', label: 'Set up…' })
+    expect(linux.message).not.toContain('Linux computers')
+    for (const help of [offered, mac, linux]) {
+      expect(help.message).not.toMatch(/SSH route|editor connections|arrives/)
+    }
+  })
+
+  it('shows the hint under the button after a folder was opened', () => {
+    const html = renderToStaticMarkup(createElement(OpenInEditorView, { path: 'Computer B', editors: [code], lastId: null, onOpen: async () => {}, hint: 'If VS Code asks for the Remote - SSH extension, install ms-vscode-remote.remote-ssh.' }))
+    expect(html).toContain('role="note"')
+    expect(html).toContain('install ms-vscode-remote.remote-ssh')
   })
 
   it('words each refusal with the computer and the editor, and shows a computer’s own words as they are', () => {
     const refuse = (reason: Parameters<typeof remoteRefusalMessage>[0]['reason'], more: object = {}) =>
       remoteRefusalMessage({ ok: false, reason, ...more }, code, 'Computer B')
-    expect(refuse('no_route')).toBe(noRouteMessage(code, 'Computer B'))
+    expect(refuse('no_route')).toBe('To open Computer B’s folder in VS Code here, this computer needs to reach it over SSH.')
     expect(refuse('folder_protected')).toBe('Computer B will not hand out this folder: it holds credentials or settings.')
     expect(refuse('folder_missing')).toBe('The thread’s folder is no longer on Computer B.')
     expect(refuse('no_folder')).toBe('This thread has no folder on Computer B.')
     expect(refuse('worktree_missing')).toContain('worktree on Computer B was removed and could not be restored')
     expect(refuse('worktree_recovery')).toContain('needs recovery there')
     expect(refuse('folder_not_openable')).toContain('cannot be opened in an editor from another computer')
-    expect(refuse('extension_missing', { message: 'Install the Remote - SSH extension (ms-vscode-remote.remote-ssh) in VS Code, then open this folder again.' })).toContain('Install the Remote - SSH extension')
+    expect(refuse('editor_missing', { message: 'Could not find the command that starts VS Code.' })).toBe('Could not find the command that starts VS Code.')
     expect(refuse('failed', { message: 'Computer B is offline.' })).toBe('Computer B is offline.')
     expect(refuse('failed')).toBe('Computer B did not answer.')
   })
@@ -129,13 +157,15 @@ describe('a folder of another computer', () => {
     expect(open).toContain('Open in VS Code')
     expect(open).toContain('Choose where to open')
     expect(open).not.toContain('Show in')
-    expect(open).not.toContain('aria-disabled')
+    expect(open).not.toContain('role="note"')
 
-    const blocked = renderToStaticMarkup(createElement(OpenInEditorView, { path: 'Computer B', editors: [code, codium], lastId: 'vscodium', onOpen: async () => {}, blocked: noRouteMessage(codium, 'Computer B') }))
+    const blocked = renderToStaticMarkup(createElement(OpenInEditorView, { path: 'Computer B', editors: [code, codium], lastId: 'vscodium', onOpen: async () => {}, blocked: { message: noRouteHelp(codium, 'Computer B').message, action: { label: 'Set up…', onClick: () => {} } } }))
     expect(blocked).toContain('Open in VSCodium')
-    expect(blocked).toContain('aria-disabled="true"')
     expect(blocked).toContain('role="note"')
-    expect(blocked).toContain('needs an SSH route')
+    expect(blocked).toContain('this computer needs to reach it over SSH')
+    expect(blocked).toContain('Set up…')
+    expect(blocked).not.toContain('SSH route')
+    expect(blocked).not.toContain('aria-disabled')
     expect(blocked).toContain('aria-haspopup="menu"')
   })
 

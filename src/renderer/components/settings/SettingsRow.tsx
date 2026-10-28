@@ -97,6 +97,7 @@ export function SettingsRow({
   /** Full-width content under the title, for controls that do not fit on the right. */
   children?: ReactNode
   'data-task-id'?: string
+  'data-device-node'?: string
 }) {
   const classes = ['settings-item']
   if (disabled) classes.push('disabled')

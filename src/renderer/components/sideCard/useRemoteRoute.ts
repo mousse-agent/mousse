@@ -6,7 +6,7 @@ import type { RemoteRouteKind } from '../../../shared/remoteEditor'
  * one of Mousse's own SSH names, or none yet. A failed read counts as none. Only the kind is read here;
  * the address itself is read again by the main process when an editor is opened.
  */
-export function useRemoteRoute(threadId: string): RemoteRouteKind | 'loading' {
+export function useRemoteRoute(threadId: string): { kind: RemoteRouteKind | 'loading'; reload: () => void } {
   const [answer, setAnswer] = useState<{ threadId: string; kind: RemoteRouteKind } | null>(null)
   const [round, setRound] = useState(0)
   useEffect(() => {
@@ -24,5 +24,5 @@ export function useRemoteRoute(threadId: string): RemoteRouteKind | 'loading' {
     window.addEventListener('focus', reload)
     return () => window.removeEventListener('focus', reload)
   }, [reload])
-  return answer && answer.threadId === threadId ? answer.kind : 'loading'
+  return { kind: answer && answer.threadId === threadId ? answer.kind : 'loading', reload }
 }

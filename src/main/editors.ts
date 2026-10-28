@@ -1,5 +1,5 @@
 import { execFile, spawn } from 'node:child_process'
-import { existsSync, readdirSync } from 'node:fs'
+import { existsSync, readdirSync, realpathSync } from 'node:fs'
 import { stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { delimiter, isAbsolute, join, posix, win32 } from 'node:path'
@@ -7,7 +7,7 @@ import { app, nativeImage, shell } from 'electron'
 import type { RemoteOpenResult } from '../shared/remoteEditor'
 import { EDITOR_PROXY_READY } from '../shared/remoteEditor'
 import type { EditorInfo } from '../shared/types'
-import { missingRemoteExtension, RemoteOpenError, remoteLaunchArguments, supportsRemoteFolders } from './remoteEditor'
+import { isBatchLauncher, RemoteOpenError, remoteExtensionHint, remoteLaunchArguments, supportsRemoteFolders } from './remoteEditor'
 import { resolveRemoteOpen, type Ask } from './remoteEditorFlow'
 
 interface EditorDefinition {
@@ -233,9 +233,11 @@ function run(command: string, args: string[]): Promise<void> {
   })
 }
 
-function launch(command: string, args: string[]): Promise<void> {
+function launch(command: string, args: string[], env?: NodeJS.ProcessEnv): Promise<void> {
   return new Promise((resolve, reject) => {
-    const child = spawn(command, args, { detached: true, stdio: 'ignore', windowsHide: true })
+    // Never through a shell, and never a batch file: its arguments would be read by cmd.exe.
+    if (process.platform === 'win32' && isBatchLauncher(command)) return reject(new Error('A batch file cannot start an editor.'))
+    const child = spawn(command, args, { detached: true, stdio: 'ignore', windowsHide: true, ...(env ? { env } : {}) })
     child.once('error', reject)
     child.once('spawn', () => {
       child.unref()
@@ -270,8 +272,11 @@ export async function openInEditor(editorId: string, path: string): Promise<void
 export function remoteLauncher(editor: DetectedEditor, env: EditorDetectionEnv): string | null {
   if (editor.appPath) {
     const names = EDITOR_CATALOG.find((definition) => definition.id === editor.id)?.cli ?? []
-    // An app bundle only exists on macOS, so its paths are POSIX whatever runs this.
-    const bundled = names.map((name) => posix.join(editor.appPath!, 'Contents', 'Resources', 'app', 'bin', name))
+    // An app bundle only exists on macOS, so its paths are POSIX whatever runs this. VS Code's own bundle keeps
+    // its script as `bin/code` (the name `code-insiders` is the command a person installs on PATH), so the
+    // VS Code family tries that name too.
+    const inBundle = [...names, ...(editor.id.startsWith('vscode') || editor.id === 'cursor' ? ['code'] : [])]
+    const bundled = inBundle.map((name) => posix.join(editor.appPath!, 'Contents', 'Resources', 'app', 'bin', name))
     const found = bundled.find((candidate) => env.exists(candidate))
     if (found) return found
     for (const name of names) {
@@ -284,21 +289,48 @@ export function remoteLauncher(editor: DetectedEditor, env: EditorDetectionEnv):
 }
 
 /**
- * The command that starts `editor`, or a `RemoteOpenError` when it cannot open a remote folder yet: no
- * command to start it, or its Remote - SSH extension is not installed. Starts nothing.
+ * The command that starts `editor`, or a `RemoteOpenError` when there is none, or it is a batch file (the
+ * editors' own programs are executables, and a batch file would pass an address through cmd.exe). Starts nothing.
  */
 export function remoteEditorCommand(editor: DetectedEditor, env: EditorDetectionEnv): string {
-  const missing = missingRemoteExtension(editor.id, env.home, (path) => {
-    try {
-      return readdirSync(path)
-    } catch {
-      return undefined
-    }
-  })
-  if (missing) throw new RemoteOpenError('extension_missing', missing)
   const command = remoteLauncher(editor, env)
-  if (!command) throw new RemoteOpenError('editor_missing', `Could not find the command that starts ${editor.label}.`)
+  if (!command || (env.platform === 'win32' && isBatchLauncher(command))) {
+    throw new RemoteOpenError('editor_missing', `Could not find the command that starts ${editor.label}.`)
+  }
   return command
+}
+
+/** The folders inside the editor's own app where it keeps the extensions that ship with it. */
+export function builtInExtensionDirectories(
+  editor: DetectedEditor,
+  resolve: (path: string) => string = (path) => {
+    try {
+      return realpathSync(path)
+    } catch {
+      return path
+    }
+  }
+): string[] {
+  if (editor.appPath) return [posix.join(editor.appPath, 'Contents', 'Resources', 'app', 'extensions')]
+  if (!editor.launcherPath) return []
+  // Windows: `Code.exe` sits in the install folder. Linux: `bin/code`, often a link, in the install folder.
+  const windows = /^[A-Za-z]:[\\/]/u.test(editor.launcherPath)
+  if (windows) return [win32.join(win32.dirname(editor.launcherPath), 'resources', 'app', 'extensions')]
+  const real = resolve(editor.launcherPath)
+  return [posix.join(posix.dirname(posix.dirname(real)), 'resources', 'app', 'extensions'), posix.join(posix.dirname(real), 'resources', 'app', 'extensions')]
+}
+
+/**
+ * Environment variables of this process that would send the editor's command to another editor, or make it
+ * run as a plain Node program. An editor that launched Mousse (a development terminal) leaves them behind.
+ */
+export function editorLaunchEnvironment(source: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const clean: NodeJS.ProcessEnv = {}
+  for (const [key, value] of Object.entries(source)) {
+    if (/^(?:VSCODE_|ELECTRON_)/iu.test(key) || /^NODE_OPTIONS$/iu.test(key)) continue
+    clean[key] = value
+  }
+  return clean
 }
 
 export interface RemoteOpenPlan {
@@ -321,7 +353,11 @@ export function planRemoteOpen(
 export interface RemoteOpenIo {
   detected: () => Promise<DetectedEditor[]>
   env: () => EditorDetectionEnv
-  launch: (command: string, args: string[]) => Promise<void>
+  launch: (command: string, args: string[], env: NodeJS.ProcessEnv) => Promise<void>
+  /** The editor's extension folders, or undefined when one cannot be read. */
+  list: (path: string) => string[] | undefined
+  /** The environment of this process, given to the editor's command without the variables that redirect it. */
+  processEnv: () => NodeJS.ProcessEnv
   forgetDetected: () => void
   /** Whether Mousse's own SSH names reach a computer. */
   proxyReady: boolean
@@ -331,6 +367,14 @@ const defaultRemoteOpenIo: RemoteOpenIo = {
   detected: async () => (await ensureDetected()).detected,
   env: realEnv,
   launch,
+  list: (path) => {
+    try {
+      return readdirSync(path)
+    } catch {
+      return undefined
+    }
+  },
+  processEnv: () => process.env,
   forgetDetected: () => {
     cache = null
   },
@@ -364,8 +408,10 @@ export async function openRemoteInEditor(
       io.forgetDetected()
       return { ok: false, reason: 'editor_missing', message: `${editor.label} is no longer installed.` }
     }
-    await io.launch(command, args)
-    return { ok: true }
+    await io.launch(command, args, editorLaunchEnvironment(io.processEnv()))
+    // Only a hint: the editor asks for the extension itself when it is really missing.
+    const hint = remoteExtensionHint(editor.id, env.home, builtInExtensionDirectories(editor), io.list)
+    return { ok: true, ...(hint ? { hint } : {}) }
   } catch (error) {
     if (error instanceof RemoteOpenError) return { ok: false, reason: error.reason, message: error.message }
     throw error

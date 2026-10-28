@@ -15,3 +15,19 @@ export function takePendingSettingsSection(): string | undefined {
   pendingSection = undefined
   return section
 }
+
+let pendingDevice: string | undefined
+
+/** Opens Settings, Devices, and brings the row of one device (a node id) into view. */
+export function openDevice(node: string): void {
+  pendingDevice = node
+  openSettingsSection('connections')
+  window.dispatchEvent(new CustomEvent('mousse:settings-device', { detail: node }))
+}
+
+/** The device requested before Devices was shown, consumed once. */
+export function takePendingDevice(): string | undefined {
+  const node = pendingDevice
+  pendingDevice = undefined
+  return node
+}

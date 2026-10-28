@@ -237,6 +237,10 @@
   overflow-wrap: anywhere;
 }
 
+.side-card-open-editor-note p {
+  margin: 0 0 4px;
+}
+
 .side-card-open-editor-note.refusal {
   color: var(--danger);
 }

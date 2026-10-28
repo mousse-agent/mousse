@@ -29,8 +29,6 @@ export type RemoteOpenReason =
   | 'no_route'
   /** The editor is not installed, or has no command to start it. */
   | 'editor_missing'
-  /** The editor's Remote - SSH extension is not installed. `message` names it. */
-  | 'extension_missing'
   /** The thread has no folder on its computer. */
   | 'no_folder'
   | 'folder_missing'
@@ -47,7 +45,8 @@ export type RemoteOpenReason =
   | 'failed'
 
 export type RemoteOpenResult =
-  | { ok: true }
+  /** `hint`: the editor's Remote - SSH extension could not be found; the editor was started anyway. */
+  | { ok: true; hint?: string }
   | {
       ok: false
       reason: RemoteOpenReason

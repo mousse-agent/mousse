@@ -11,10 +11,14 @@ type Approval = SshCheckResult & { approved: boolean }
  * A device offers a route over SSH that this computer has not approved. Checking it reads the
  * host key; an unknown or changed key is confirmed here before the route is approved.
  */
-export function ApproveSshRouteDialog({ node, name, endpoint: offered, onClose, onDone }: {
+export function ApproveSshRouteDialog({ node, name, endpoint: offered, title, intro, onClose, onDone }: {
   node: NodeId
   name: string
   endpoint: string
+  /** Replaces the heading, where the dialog is opened for an editor and not from the device list. */
+  title?: string
+  /** Replaces the opening paragraph. */
+  intro?: string
   onClose: () => void
   onDone: () => void
 }) {
@@ -44,9 +48,9 @@ export function ApproveSshRouteDialog({ node, name, endpoint: offered, onClose, 
     : confirming || stopped ? undefined
       : <button type="button" className={`${btn} primary`} disabled={busy || !endpoint} onClick={() => void approve()}>{result ? 'Retry' : 'Check and approve'}</button>
   return (
-    <Modal open title={`Use SSH route to ${name}`} onClose={onClose} footer={footer}>
+    <Modal open title={title ?? `Use SSH route to ${name}`} onClose={onClose} footer={footer}>
       <div className="devices-dialog">
-        <p>{name} offers an SSH address. Use an address that reaches it from this computer, then Mousse checks the host key and the login before it approves the route.</p>
+        <p>{intro ?? `${name} offers an SSH address. Use an address that reaches it from this computer, then Mousse checks the host key and the login before it approves the route.`}</p>
         <label className="devices-field">
           <span>SSH address</span>
           <input value={typed} maxLength={253} spellCheck={false} disabled={busy || !!result?.approved} onChange={(event) => { setTyped(event.target.value); setResult(undefined); setError('') }} />

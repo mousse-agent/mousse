@@ -68,9 +68,42 @@ export function remoteEditors(editors: readonly EditorInfo[]): EditorInfo[] {
   return editors.filter((editor) => editor.kind === 'editor' && editor.remote === true)
 }
 
-/** Said under the button while this computer has no SSH route to the computer that runs the thread. */
-export function noRouteMessage(editor: Pick<EditorInfo, 'label'>, computer: string): string {
-  return `Opening ${computer}’s folder in ${editor.label} here needs an SSH route. It arrives with editor connections; until then, set ${computer} up over SSH.`
+/** What a person can do when this computer cannot reach the computer that runs the thread over SSH. */
+export interface NoRouteHelp {
+  message: string
+  /** `approve` opens the dialog that approves the address the computer offers; `devices` opens Settings, Devices at it. */
+  action: 'approve' | 'devices'
+  label: string
+  /** For `approve`: the address the computer offers. */
+  endpoint?: string
+}
+
+const SYSTEM_NAMES: Record<string, string> = { darwin: 'macOS', win32: 'Windows' }
+
+/**
+ * Said under the button while this computer cannot reach the computer that runs the thread over SSH, with
+ * the one thing to do about it. A computer that offers an SSH address only needs it approved. Mousse sets
+ * SSH up on Linux computers only, so a Mac or a Windows computer is told it needs an SSH server of its own.
+ */
+export function noRouteHelp(
+  editor: Pick<EditorInfo, 'label'>,
+  computer: string,
+  device?: { platform?: string; sshOffer?: { endpoint: string } }
+): NoRouteHelp {
+  const start = `To open ${computer}’s folder in ${editor.label} here, `
+  if (device?.sshOffer) {
+    return {
+      message: `${start}approve the SSH address ${computer} offers (${device.sshOffer.endpoint}).`,
+      action: 'approve',
+      label: 'Approve address…',
+      endpoint: device.sshOffer.endpoint
+    }
+  }
+  const system = device?.platform ? SYSTEM_NAMES[device.platform] : undefined
+  const message = system
+    ? `${start}this computer needs to reach it over SSH. Mousse sets SSH up only on Linux computers; ${computer} runs ${system}, so it needs an SSH server of its own.`
+    : `${start}this computer needs to reach it over SSH. SSH can be set up in Devices.`
+  return { message, action: 'devices', label: system ? 'Open Devices…' : 'Set up…' }
 }
 
 /** Said when no installed editor can open a folder of another computer. */
@@ -86,9 +119,8 @@ export function remoteRefusalMessage(
 ): string {
   switch (result.reason) {
     case 'no_route':
-      return noRouteMessage(editor, computer)
+      return `To open ${computer}’s folder in ${editor.label} here, this computer needs to reach it over SSH.`
     case 'editor_missing':
-    case 'extension_missing':
       return result.message || `${editor.label} could not be started.`
     case 'no_folder':
       return `This thread has no folder on ${computer}.`

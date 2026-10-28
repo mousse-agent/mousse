@@ -7,7 +7,7 @@ import { ComputerSurfaceNote, surfaceNoteFor } from '../../src/renderer/componen
 import { EarlierMessagesBarView } from '../../src/renderer/components/EarlierMessagesBar'
 import { ThreadComputerBarView } from '../../src/renderer/components/ThreadComputerBar'
 import { OpenInEditorView } from '../../src/renderer/components/sideCard/EditorMenuButton'
-import { noRouteMessage } from '../../src/renderer/components/sideCard/openInEditor'
+import { noRouteHelp } from '../../src/renderer/components/sideCard/openInEditor'
 import { useAppStore } from '../../src/renderer/stores/appStore'
 import { outdatedComputerName } from '../../src/shared/bridge/computerErrors'
 import { isComputerOffline, sendErrorLine } from '../../src/renderer/lib/errorText'
@@ -159,12 +159,12 @@ describe('opening the thread folder in an editor', () => {
       editors: [code],
       lastId: null,
       onOpen: async () => {},
-      blocked: noRouteMessage(code, 'Studio')
+      blocked: { message: noRouteHelp(code, 'Studio').message, action: { label: 'Set up…', onClick: () => {} } }
     }))
     expect(item).toContain('Open in VS Code')
     expect(item).not.toContain('Open in editor on')
-    expect(item).toContain('aria-disabled="true"')
-    expect(item).toContain('Opening Studio’s folder in VS Code here needs an SSH route. It arrives with editor connections; until then, set Studio up over SSH.')
+    expect(item).toContain('To open Studio’s folder in VS Code here, this computer needs to reach it over SSH.')
+    expect(item).toContain('Set up…')
   })
 })
 

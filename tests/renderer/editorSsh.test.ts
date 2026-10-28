@@ -3,7 +3,7 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
 import { EditorSshSettingsView } from '../../src/renderer/components/devices/EditorSshSettings'
 import { EditorSshNoticeView } from '../../src/renderer/components/sideCard/EditorSshNotice'
-import { editorSshProblemWords, editorSshSwitch } from '../../src/renderer/lib/editorSsh'
+import { editorSshProblemWords, editorSshSwitch, editorSshVisible } from '../../src/renderer/lib/editorSsh'
 import type { EditorSshStatus } from '../../src/shared/net/local'
 
 const NOTICE = 'Mousse added an Include line to ~/.ssh/config so your editor can reach your other computers. You can remove it in Settings.'
@@ -73,12 +73,11 @@ describe('why Mousse could not set up, in plain words', () => {
 })
 
 describe('the Settings switch', () => {
-  it('is off and waits while editor connections do not exist yet', () => {
+  it('offers to add the line the first time a folder is opened, once editor connections exist', () => {
     const control = editorSshSwitch(status())
-    expect(control.on).toBe(false)
-    expect(control.disabled).toBe(true)
-    expect(control.description).toContain('Not needed yet')
-    expect(control.description).toContain('computers you set up over SSH open in your editor without it')
+    expect(control).toMatchObject({ on: false, disabled: false })
+    expect(control.description).toContain('adds one Include line to ~/.ssh/config the first time')
+    expect(control.description).not.toContain('Not needed yet')
   })
 
   it('is on, and can be undone, while the line is in ~/.ssh/config', () => {
@@ -117,7 +116,20 @@ describe('the Settings row', () => {
 
   it('shows nothing before the status is read or where it is unavailable', () => {
     expect(view(null)).toBe('')
-    expect(view({ available: false })).toBe('')
+    expect(view({ available: false, included: true })).toBe('')
+  })
+
+  it('is there only while the line is installed or its notice is pending, until editor connections exist', () => {
+    // The line serves nothing yet, so a person who never had it sees no Editors group, and the switch cannot add it.
+    expect(editorSshVisible(status())).toBe(false)
+    expect(view({})).toBe('')
+    // After Undo the group is gone and Undo is final.
+    expect(editorSshVisible(status({ enabled: false }))).toBe(false)
+    expect(view({ enabled: false })).toBe('')
+    expect(editorSshVisible(status({ included: true }))).toBe(true)
+    expect(editorSshVisible(status({ noticePending: true, notice: NOTICE }))).toBe(true)
+    expect(view({ noticePending: true, notice: NOTICE })).toContain('Editors')
+    expect(editorSshVisible(null)).toBe(false)
   })
 
   it('keeps the notice with Undo in the row while it is pending', () => {
@@ -134,6 +146,6 @@ describe('the Settings row', () => {
   })
 
   it('shows the failure of the last action', () => {
-    expect(view({ enabled: false }, { error: '~/.ssh/config is read-only for this account, so Mousse left it alone.' })).toContain('read-only for this account')
+    expect(view({ included: true }, { error: '~/.ssh/config is read-only for this account, so Mousse left it alone.' })).toContain('read-only for this account')
   })
 })

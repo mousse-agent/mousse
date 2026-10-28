@@ -426,3 +426,8 @@
   margin: 0;
   padding: var(--space-8) 16px 12px;
 }
+
+/* A device that was asked for from elsewhere in the app: a background mark, no edge bar. */
+.devices-row-picked {
+  background: var(--ui-hover);
+}

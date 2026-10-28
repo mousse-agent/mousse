@@ -25,7 +25,6 @@ export class RemoteOpenError extends Error {
   constructor(
     readonly reason:
       | 'editor_missing'
-      | 'extension_missing'
       | 'folder_not_openable'
       | 'no_route',
     message: string
@@ -147,6 +146,9 @@ export function remoteLaunchArguments(input: { editorId: string; host: RemoteHos
   return { args: ['--folder-uri', uri], uri }
 }
 
+/** Whether a program is a Windows batch file, which `cmd.exe` would read the arguments of. */
+export const isBatchLauncher = (command: string): boolean => /\.(?:cmd|bat)$/iu.test(command.trim())
+
 /** The Remote - SSH extension of an editor, and where the editor keeps its extensions under the home folder. */
 const REMOTE_EXTENSIONS: Record<RemoteEditorId, { directory: string; id: string; label: string }> = {
   vscode: { directory: '.vscode', id: 'ms-vscode-remote.remote-ssh', label: 'VS Code' },
@@ -156,21 +158,36 @@ const REMOTE_EXTENSIONS: Record<RemoteEditorId, { directory: string; id: string;
   vscodium: { directory: '.vscode-oss', id: 'jeanp413.open-remote-ssh', label: 'VSCodium' }
 }
 
+/** Names, lower-cased, that mark a Remote - SSH extension shipped inside an editor's app. */
+const BUILT_IN_SSH = /remote-?(?:open)?ssh/u
+
 /**
- * A sentence naming the extension to install when the editor's extensions folder can be read and does not
- * have it; undefined when it has it, or when it cannot be told (no folder, an unusual install). The editor
- * then shows its own prompt.
+ * A short hint naming the extension to install, for an editor whose Remote - SSH extension cannot be found;
+ * undefined when it is found, and when it cannot be told. It is only a hint: the open goes ahead either way,
+ * and the editor asks for the extension itself when it is really missing.
+ * - `home`'s `<editor folder>/extensions` is where a person's own installs go;
+ * - `builtInDirectories` are the extension folders inside the editor's app (`resources/app/extensions`),
+ *   where some editors (Windsurf, Antigravity) ship it. Any entry named like a Remote - SSH extension counts.
+ * Nothing found because no folder could be read is "cannot be told".
  */
-export function missingRemoteExtension(
+export function remoteExtensionHint(
   editorId: string,
   home: string,
+  builtInDirectories: readonly string[],
   listDirectory: (path: string) => string[] | undefined
 ): string | undefined {
   if (!supportsRemoteFolders(editorId)) return undefined
   const extension = REMOTE_EXTENSIONS[editorId]
-  const entries = listDirectory(`${home.replace(/[\\/]+$/u, '')}/${extension.directory}/extensions`)
-  if (!entries) return undefined
   const prefix = `${extension.id}-`
-  if (entries.some((entry) => entry.toLowerCase().startsWith(prefix) && /^\d/u.test(entry.slice(prefix.length)))) return undefined
-  return `Install the Remote - SSH extension (${extension.id}) in ${extension.label}, then open this folder again.`
+  const own = listDirectory(`${home.replace(/[\\/]+$/u, '')}/${extension.directory}/extensions`)
+  if (own?.some((entry) => entry.toLowerCase().startsWith(prefix) && /^\d/u.test(entry.slice(prefix.length)))) return undefined
+  let read = own !== undefined
+  for (const directory of builtInDirectories) {
+    const entries = listDirectory(directory)
+    if (!entries) continue
+    read = true
+    if (entries.some((entry) => BUILT_IN_SSH.test(entry.toLowerCase()))) return undefined
+  }
+  if (!read) return undefined
+  return `If ${extension.label} asks for the Remote - SSH extension, install ${extension.id}, then open this folder again.`
 }
