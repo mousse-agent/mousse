@@ -76,6 +76,12 @@ import { DirectTransport } from './transports/direct'
 import { inboundPrincipal } from './transports/admission'
 import { parseSshRoute, readSshApproval } from './transports/ssh'
 import { SshBootstrap, type SshBootstrapOptions } from './ssh/bootstrap'
+import {
+  EditorSshConfig,
+  unavailableEditorSsh,
+  type EditorSshOptions,
+  type LiveComputer
+} from './editor/sshConfig'
 import { isJoinVia } from '../../shared/net/via'
 import {
   PHONE_ENDPOINTS_METHOD,
@@ -249,6 +255,7 @@ export class NetService {
   private shutdownInFlight?: Promise<void>
   private shutdownComplete = false
   private sshBootstrap?: SshBootstrap
+  private editorSshConfig?: EditorSshConfig
   /** Loopback listeners that exist only while a remote machine joins; never persisted. */
   private readonly enrollmentListeners = new Set<DirectTransport>()
   /** The optional Mousse ID module; absent in builds and tests that leave it out. */
@@ -264,6 +271,12 @@ export class NetService {
       ssh?: { binary?: string; userKnownHosts?: string } & Partial<
         Omit<SshBootstrapOptions, 'binary' | 'userKnownHosts'>
       >
+      /**
+       * Where Mousse keeps the ssh settings it writes for editors, and the user's home directory for
+       * the one line it adds to `~/.ssh/config`. Without it the feature is unavailable, so a service
+       * built in a test never reaches the real home directory.
+       */
+      editorSsh?: EditorSshOptions
       /** Tests replace the native WebRTC stack and this computer's addresses. */
       phoneWebRtc?: {
         factory?: PeerConnectionFactory
@@ -606,6 +619,8 @@ export class NetService {
     if (method === 'net.disable') return this.disable()
     // What an add-on changed outside Mousse can always be seen and undone, also while networking is off.
     if (method === 'net.transport.action.undo') return this.undoAddon(params)
+    // The line in ~/.ssh/config can be seen and removed in the same way.
+    if (method.startsWith('net.editor.ssh.')) return this.track(this.editorSshRequest(method))
     if (method === 'net.transport.list' && (this.disabled || !this.config.enabled))
       return this.transportList()
     if (this.disabled) throw new NetError('disabled')
@@ -1779,6 +1794,7 @@ export class NetService {
     if (!signed) return
     const roster = rt.identity.verifySigned<Roster>(signed, root)
     this.prunePresence(rt, roster)
+    this.syncEditorSsh()
     for (const row of rt.db.database.prepare('SELECT node,signed FROM net_peer_routes').all()) {
       const node = String(row.node) as NodeId
       if (node === self.node || this.supervisors.has(node)) continue
@@ -2577,6 +2593,59 @@ export class NetService {
       default:
         throw new NetError('bad_request')
     }
+  }
+  private editorSsh(): EditorSshConfig | undefined {
+    if (!this.options.editorSsh) return undefined
+    return (this.editorSshConfig ??= new EditorSshConfig(this.options.editorSsh))
+  }
+  /** The other computers of this user, for the aliases an editor opens. Phones have no folders to open. */
+  private liveComputers(): LiveComputer[] {
+    const view = this.nodes() as {
+      nodes: Array<{ node: NodeId; name: string; kind: string; self: boolean; revoked: boolean }>
+    }
+    return view.nodes
+      .filter((entry) => !entry.self && !entry.revoked && entry.kind === 'computer')
+      .map((entry) => ({ node: entry.node, name: entry.name }))
+  }
+  /**
+   * Mousse's ssh settings for editors. Reading, undoing and acknowledging the notice work while
+   * networking is off; setting up needs an enrolled device, because the aliases are its computers.
+   */
+  private async editorSshRequest(method: NetLocalMethod): Promise<unknown> {
+    const setup = method === 'net.editor.ssh.prepare' || method === 'net.editor.ssh.enable'
+    if (setup) {
+      if (this.disabled) throw new NetError('disabled')
+      this.assertEnabled()
+    }
+    const editor = this.editorSsh()
+    if (!editor) {
+      const status = unavailableEditorSsh()
+      if (method === 'net.editor.ssh.status' || method === 'net.editor.ssh.ack') return status
+      return { ok: false, code: 'unavailable', message: status.problem!.message, status }
+    }
+    if (setup) this.requireEnrolled()
+    switch (method) {
+      case 'net.editor.ssh.status':
+        return editor.status()
+      case 'net.editor.ssh.disable':
+        return editor.disable()
+      case 'net.editor.ssh.ack':
+        return editor.acknowledgeNotice()
+      case 'net.editor.ssh.prepare':
+        return editor.prepare(this.liveComputers())
+      case 'net.editor.ssh.enable':
+        return editor.enable(this.liveComputers())
+      default:
+        throw new NetError('bad_request')
+    }
+  }
+  /** A device was added, renamed or revoked: keep the aliases in step. Never touches the user's file. */
+  private syncEditorSsh(): void {
+    const editor = this.editorSsh()
+    if (!editor) return
+    this.track(editor.syncIfPrepared(() => this.liveComputers())).catch(() => {
+      // The aliases are rewritten on the next roster change or the next time the person opens a folder.
+    })
   }
   /** `bridge.nodes`, plus the ssh route a peer offers that this computer has not approved. */
   private async nodesView(): Promise<unknown> {

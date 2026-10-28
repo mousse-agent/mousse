@@ -40,7 +40,19 @@ it('rejects every non-opt-in Net method without composing runtime or creating an
   expect(runtime).not.toHaveBeenCalled()
   expect(composeRuntime).not.toHaveBeenCalled()
   for (const method of NET_LOCAL_METHODS) {
-    if (['net.status', 'net.plus.status', 'net.init', 'bridge.join'].includes(method)) continue
+    // The editor ssh methods that only read or undo answer while networking is off.
+    if (
+      [
+        'net.status',
+        'net.plus.status',
+        'net.init',
+        'bridge.join',
+        'net.editor.ssh.status',
+        'net.editor.ssh.disable',
+        'net.editor.ssh.ack'
+      ].includes(method)
+    )
+      continue
     await expect(Promise.resolve().then(() => net.request(method, {}))).rejects.toMatchObject({
       code: 'disabled',
       message: 'Mousse Net is disabled for this profile. Opt in with net init or bridge join.'

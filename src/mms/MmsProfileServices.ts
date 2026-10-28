@@ -1,6 +1,8 @@
 import { ResourceLifecycleError } from './lifecycle/ResourceLifecycleStore'
 import { AgentEpisodeStore } from './agents/AgentEpisodeStore'
 import { join } from 'path'
+import { homedir } from 'os'
+import { getMousseHomeDir } from './data/paths'
 import { MousseConfigStore } from './config/MousseConfigStore'
 import { MmsEventBus } from './events'
 import { SettingsStore } from './settings/SettingsStore'
@@ -694,6 +696,7 @@ export class MmsProfileServices {
 
     this.net = new NetService({
       profileDir: this.homeDir,
+      editorSsh: { home: homedir(), mousseHome: getMousseHomeDir() },
       hosted: mousseIdNetModule,
       onChanged: (status) => this.events.emit({ channel: 'net:updated', data: status }),
       composeRuntime: (runtime) => {
