@@ -3,6 +3,7 @@ import { AlertTriangle, CircleCheck, Monitor, MonitorSmartphone, MoreHorizontal,
 import { ChangePlanDialog } from './devices/ChangePlanDialog'
 import { AddSshDeviceDialog } from './devices/AddSshDeviceDialog'
 import { ApproveSshRouteDialog } from './devices/ApproveSshRouteDialog'
+import { EditorSshSettings } from './devices/EditorSshSettings'
 import { RenameEndpointDialog, UndoSetupDialog, UpdateRemoteDialog } from './devices/SshRecordDialogs'
 import { Modal } from './ui/Modal'
 import { SettingsAdvanced, SettingsGroup, SettingsRow, Switch } from './settings/SettingsRow'
@@ -376,6 +377,8 @@ export function NetDevicesSection() {
         {self && unlocked && !others.length && <p className="settings-muted devices-note">No other devices yet.</p>}
       </SettingsGroup>
     )}
+
+    {status && <EditorSshSettings />}
 
     {status && unfinished.length > 0 && (
       <SettingsGroup title="Unfinished remote machine setups" className="devices-group">
