@@ -2,7 +2,7 @@
 
 Editors such as VS Code, Cursor, Zed and the JetBrains IDEs open a folder on another computer by running the system `ssh` against a host name. `ssh` reads `~/.ssh/config`, so a `Host` name is the one way to reach every editor. Mousse keeps its own config file with one `Host` name per paired computer and adds one `Include` line for it to `~/.ssh/config`.
 
-The code is `src/mms/net/editor/sshConfig.ts`. The tunnel behind the `ProxyCommand` (`mousse-cli net ssh-proxy`) and the owner's switch come in later changes; until then the names exist but do not connect.
+The code is `src/mms/net/editor/sshConfig.ts`. The tunnel that the `ProxyCommand` will use, and the owner's switch "Editor connections from this device", are in `src/mms/net/editor/tunnel.ts` (see `threat-model.md`, "Editor connections", and `protocol.md` §13). The program the `ProxyCommand` starts (`mousse-cli net ssh-proxy`) comes in a later change; until then the names exist but do not connect. `NetService.openEditorTunnel(node)` opens a tunnel and pins the computer's host keys here, under its alias, before it hands the stream over.
 
 **The rule above all others: Mousse never makes the user's other `ssh` commands fail.** An included file is read for every host, so a file `ssh` dislikes breaks `git push`, `scp` and every other `ssh`, not only the aliases. See [Never breaking ssh](#never-breaking-ssh).
 
