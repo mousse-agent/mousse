@@ -84,7 +84,6 @@ export async function buildCli(opts = {}) {
   const ctx = await context({
     ...options,
     plugins: [
-      ...options.plugins,
       {
         name: 'cli-rebuild-notify',
         setup(api) {
