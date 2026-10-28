@@ -18,16 +18,34 @@ export interface EditorFolder {
   path: string
   /**
    * The path of a Remote-SSH address: slashes only, from the root. On a Windows owner `C:\Users\me\app` is
-   * `/C:/Users/me/app` (the drive letter keeps the case it has). It is not percent-encoded.
+   * `/C:/Users/me/app` (the drive letter keeps the case it has). It is NOT percent-encoded: a name may hold
+   * `#`, `%`, `?`, spaces or non-ASCII letters. Whoever builds an address from it (`vscode-remote://…`,
+   * `ssh://…`) must
+   * - work it out again with `remoteEditorPath(path, style)` and refuse the answer when that is undefined or
+   *   differs from `uriPath`, instead of trusting the field, and
+   * - encode each segment with `encodeURIComponent` and join them with `/`, keeping the `:` after a drive
+   *   letter: `encodeURI` leaves `#` and `?` alone.
    */
   uriPath: string
   style: EditorFolderStyle
   /** The owner's system (`process.platform`): `linux`, `darwin` or `win32`. */
   platform: string
   kind: EditorFolderKind
-  /** The owner's login name, when the system tells it. */
+  /**
+   * The owner's login name, when the system tells it and it is safe to write into an SSH config's `User` line
+   * (see `isSafeLoginName`); left out otherwise.
+   */
   user?: string
 }
+
+/**
+ * Whether `name` can be written as it is into an SSH config's `User` line: letters, digits, `_`, `.` and `-`
+ * (any script's letters), starting with a letter, digit or `_`, at most 64 characters. A name with a space,
+ * a quote, a `#` or a control character is not, and is left out of the reply. Whoever writes the config
+ * checks it again.
+ */
+export const isSafeLoginName = (name: unknown): name is string =>
+  typeof name === 'string' && /^[\p{L}\p{N}_][\p{L}\p{N}_.-]{0,63}$/u.test(name)
 
 /** The longest folder path an owner sends (the usual limit of Linux paths). */
 export const EDITOR_FOLDER_PATH_MAX = 4096

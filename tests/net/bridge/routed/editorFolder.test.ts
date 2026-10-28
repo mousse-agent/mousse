@@ -3,17 +3,24 @@
  * is the thread's ready worktree, else its project's folder, resolved on the owner from the thread id alone,
  * and the reply carries what the caller needs to build a Remote-SSH address.
  */
-import { mkdtempSync, realpathSync, rmSync } from 'node:fs'
+import { execFileSync } from 'node:child_process'
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir, userInfo } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import {
   EDITOR_FOLDER_PATH_MAX,
   editorFolderStyleOf,
+  isSafeLoginName,
   remoteEditorPath,
   type EditorFolder
 } from '../../../../src/shared/bridge/editorFolder'
 import { ROUTED_METHODS, routedVersions } from '../../../../src/shared/bridge/routed'
+import {
+  forgetResolvedSensitiveFolders,
+  sensitiveFolderContaining,
+  type FolderRuleEnvironment
+} from '../../../../src/mms/files/sensitiveFolders'
 import { resolveEditorFolder } from '../../../../src/mms/workspace/editorFolder'
 import { ThreadWorkspaceManager } from '../../../../src/mms/workspace/ThreadWorkspaceManager'
 import { newId } from '../../../../src/shared/net'
@@ -40,6 +47,40 @@ describe('the path of a Remote-SSH address', () => {
     expect(remoteEditorPath('/', 'posix')).toBe('/')
     // A backslash is an ordinary character in a posix name.
     expect(remoteEditorPath('/home/ana/a\\b', 'posix')).toBe('/home/ana/a\\b')
+  })
+
+  it('passes `#`, `%`, `?` and non-ASCII letters through unencoded, for the caller to encode', () => {
+    expect(remoteEditorPath('/home/ana/a#b/100%/what?/café/日本語', 'posix')).toBe(
+      '/home/ana/a#b/100%/what?/café/日本語'
+    )
+    expect(remoteEditorPath('C:\\Users\\josé\\100% #1\\日本語', 'windows')).toBe(
+      '/C:/Users/josé/100% #1/日本語'
+    )
+    // An already encoded name is a different name: it is not decoded.
+    expect(remoteEditorPath('/home/ana/a%20b', 'posix')).toBe('/home/ana/a%20b')
+  })
+
+  it('accepts a login name only when it is safe in an SSH config’s User line', () => {
+    for (const name of ['ana', 'Ana.Maria-2', 'svc_build', 'josé', '日本', 'a'.repeat(64)])
+      expect(isSafeLoginName(name), name).toBe(true)
+    for (const name of [
+      '',
+      'Ana Maria',
+      'a"b',
+      'a#b',
+      'a\nb',
+      'a b',
+      "a'b",
+      '-oProxyCommand=x',
+      'a/b',
+      '.ana',
+      'a\\b',
+      'DOMAIN\\ana',
+      'a'.repeat(65),
+      undefined,
+      5
+    ])
+      expect(isSafeLoginName(name), String(name)).toBe(false)
   })
 
   it('refuses what an address cannot carry', () => {
@@ -106,13 +147,14 @@ describe('the folder an editor opens for a thread', () => {
       style: windows ? 'windows' : 'posix',
       platform: process.platform,
       kind: 'worktree',
-      ...(userInfo().username ? { user: userInfo().username } : {})
+      // The login name is sent only when it is safe in an SSH config.
+      ...(isSafeLoginName(userInfo().username) ? { user: userInfo().username } : {})
     })
     // The folder is looked up, never made: the primary checkout is left as it was.
     expect(folder.path).not.toBe(primary)
   }, 120_000)
 
-  it('is the project’s folder for a thread that has no worktree, and when its worktree was retired', async () => {
+  it('is the project’s folder only for a thread that never had a worktree', async () => {
     const o = await routedOwner()
     const primary = repo()
     const project = o.f.mms.projects.openProject(primary)
@@ -122,7 +164,14 @@ describe('the folder an editor opens for a thread', () => {
       uriPath: expected(primary),
       kind: 'project'
     })
+  }, 120_000)
 
+  it('is refused, not answered with the project’s folder, while the thread’s worktree is not ready', async () => {
+    const o = await routedOwner()
+    const primary = repo()
+    const project = o.f.mms.projects.openProject(primary)
+
+    // A storage rule removed the checkout: the caller restores it (`workspace.restore`, a row of its own) and asks again.
     const retired = o.thread('Retired', project.id, primary)
     const manager = new ThreadWorkspaceManager(o.f.mms.threads.getThreadDir(retired.id))
     const { worktreePath } = await manager.provision(retired.id, 'main', primary)
@@ -130,12 +179,40 @@ describe('the folder an editor opens for a thread', () => {
       path: worktreePath,
       kind: 'worktree'
     })
-    // A storage rule removed the checkout: the project's folder is opened, and the checkout is not brought back.
     rmSync(worktreePath, { recursive: true, force: true })
-    const after = await o.ok('editor.folder', { threadId: retired.id })
-    expect(after).toMatchObject({ path: primary, kind: 'project' })
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const refused = await o.call('editor.folder', { threadId: retired.id })
+      expect(refused).toMatchObject({
+        ok: false,
+        error: { code: 'workspace_not_ready', details: { threadId: retired.id, state: 'missing' } }
+      })
+      expect(JSON.stringify(refused)).not.toContain(primary)
+      expect(JSON.stringify(refused)).not.toContain(worktreePath)
+    }
+    // Asking never brings the checkout back.
     expect(manager.verify().lifecycle).toBe('missing')
-  }, 120_000)
+
+    // Its HEAD moved outside a recorded operation: the worktree needs recovery.
+    const moved = o.thread('Moved', project.id, primary)
+    const movedMeta = await new ThreadWorkspaceManager(o.f.mms.threads.getThreadDir(moved.id)).provision(
+      moved.id,
+      'main',
+      primary
+    )
+    execFileSync('git', ['commit', '-q', '--allow-empty', '-m', 'outside the thread'], {
+      cwd: movedMeta.worktreePath,
+      stdio: 'pipe'
+    })
+    const needsRecovery = await o.call('editor.folder', { threadId: moved.id })
+    expect(needsRecovery).toMatchObject({
+      ok: false,
+      error: {
+        code: 'workspace_not_ready',
+        details: { threadId: moved.id, state: 'recovery_required' }
+      }
+    })
+    expect(JSON.stringify(needsRecovery)).not.toContain(movedMeta.worktreePath)
+  }, 180_000)
 
   it('is refused for a thread that is not there, has no folder, or whose folder is gone', async () => {
     const o = await routedOwner()
@@ -162,6 +239,54 @@ describe('the folder an editor opens for a thread', () => {
     expect(refused).toMatchObject({ ok: false, error: { code: 'folder_missing' } })
     // A refusal names the thread, never the owner's path.
     expect(JSON.stringify(refused)).not.toContain(gone)
+    // A project folder that became a file is not a folder to open.
+    writeFileSync(gone, 'not a folder')
+    expect(await o.call('editor.folder', { threadId: t.id })).toMatchObject({
+      ok: false,
+      error: { code: 'folder_missing' }
+    })
+  }, 120_000)
+
+  it('is refused for a credentials folder, with the default table and a project that is one', async () => {
+    const o = await routedOwner()
+    const home = realpathSync(mkdtempSync(join(tmpdir(), 'editor-folder-home-')))
+    resources.push(() => rmSync(home, { recursive: true, force: true }))
+    const ssh = join(home, '.ssh')
+    mkdirSync(join(ssh, 'keys'), { recursive: true })
+    const ordinary = join(home, 'work')
+    mkdirSync(ordinary)
+    const link = join(tmpdir(), `editor-folder-link-${newId('rpc')}`)
+    symlinkSync(ssh, link, windows ? 'junction' : 'dir')
+    resources.push(() => rmSync(link, { recursive: true, force: true }))
+    // The default table reads this computer's home folder; point it at the fake one for the calls below.
+    const saved = { HOME: process.env.HOME, USERPROFILE: process.env.USERPROFILE }
+    process.env.HOME = home
+    process.env.USERPROFILE = home
+    forgetResolvedSensitiveFolders()
+    try {
+      const project = (path: string) => o.f.mms.projects.openProject(path)
+      const asked = async (path: string) => {
+        const t = o.thread(`At ${path}`, project(path).id, path)
+        return o.call('editor.folder', { threadId: t.id })
+      }
+      for (const path of [ssh, join(ssh, 'keys'), link]) {
+        const refused = await asked(path)
+        expect(refused, path).toMatchObject({
+          ok: false,
+          error: { code: 'folder_protected', message: expect.stringContaining('SSH keys') }
+        })
+        // The refusal says what the folder holds and names the thread, never a path.
+        for (const spelled of [path, ssh, home]) expect(JSON.stringify(refused)).not.toContain(JSON.stringify(spelled).slice(1, -1))
+      }
+      // A folder beside it, and the home folder itself, are the owner's own choice and open as usual.
+      expect(await asked(ordinary)).toMatchObject({ ok: true, result: { path: ordinary } })
+      expect(await asked(home)).toMatchObject({ ok: true, result: { path: home } })
+    } finally {
+      for (const [key, value] of Object.entries(saved))
+        if (value === undefined) delete process.env[key]
+        else process.env[key] = value
+      forgetResolvedSensitiveFolders()
+    }
   }, 120_000)
 
   it('is not given for a thread in the trash', async () => {
@@ -247,14 +372,60 @@ describe('the folder on the owner', () => {
     expect(String((thrown as Error).message)).not.toContain(projectPath)
   })
 
-  it('names the owner’s system and login', () => {
+  it('names the owner’s system and login, and leaves out a login that is not safe in an SSH config', () => {
     const projectPath = directory()
+    const ask = (user: string) =>
+      resolveEditorFolder({ threadId: 't1', threadDirectory: directory(), projectPath, user })
+    expect(ask('ana')).toMatchObject({
+      path: projectPath,
+      kind: 'project',
+      platform: process.platform,
+      user: 'ana'
+    })
+    for (const user of ['Ana Maria', 'a"b', 'a#b', 'a\nb', '']) expect(ask(user), user).not.toHaveProperty('user')
+  })
+
+  it('opens a project reached through a link under the link’s name, and checks where the link leads', () => {
+    const real = directory()
+    const link = join(directory(), 'linked project')
+    symlinkSync(real, link, windows ? 'junction' : 'dir')
     const found = resolveEditorFolder({
       threadId: 't1',
       threadDirectory: directory(),
-      projectPath,
-      user: 'ana'
+      projectPath: link
     })
-    expect(found).toMatchObject({ path: projectPath, kind: 'project', platform: process.platform, user: 'ana' })
+    expect(found).toMatchObject({ path: link, uriPath: expected(link), kind: 'project' })
+
+    // The same link into a credentials folder is refused: the real path is what is checked.
+    const home = directory()
+    mkdirSync(join(home, '.aws'))
+    const environment: FolderRuleEnvironment = { platform: process.platform, home, env: {} }
+    const sensitive = (path: string) => sensitiveFolderContaining(path, environment)
+    forgetResolvedSensitiveFolders()
+    const toAws = join(directory(), 'innocent')
+    symlinkSync(join(home, '.aws'), toAws, windows ? 'junction' : 'dir')
+    let thrown: unknown
+    try {
+      resolveEditorFolder({ threadId: 't1', threadDirectory: directory(), projectPath: toAws, sensitive })
+    } catch (error) {
+      thrown = error
+    }
+    forgetResolvedSensitiveFolders()
+    expect(thrown).toMatchObject({ code: 'folder_protected', details: { threadId: 't1' } })
+    expect(String((thrown as Error).message)).toContain('AWS credentials')
+    for (const spelled of [toAws, home]) expect(String((thrown as Error).message)).not.toContain(spelled)
+  })
+
+  it('carries a folder name with `#`, `%`, a space and non-ASCII letters as it is spelled', () => {
+    const name = join(directory(), 'a#b 100% café 日本')
+    mkdirSync(name)
+    const found = resolveEditorFolder({
+      threadId: 't1',
+      threadDirectory: directory(),
+      projectPath: name
+    })
+    expect(found.path).toBe(name)
+    expect(found.uriPath).toBe(expected(name))
+    expect(found.uriPath).toContain('a#b 100% café 日本')
   })
 })

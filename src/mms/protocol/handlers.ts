@@ -2756,11 +2756,9 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       // Which folder an editor opens for a thread. The thread id is all a caller gives; the folder is this computer's own.
       const p = isObject(params) ? params : {}
       rejectUnknownKeys(p, ['threadId'])
-      const threadId = asString(p.threadId, 'threadId', 256)
-      if (!ctx.mms.threads.getThread(threadId)) throw new DomainRpcError('thread_not_found', 'Thread not found', { threadId })
-      const projectPath = resolveThreadProjectPath(ctx.mms.projects, ctx.mms.threads, threadId)
-      if (!projectPath) throw new DomainRpcError('thread_has_no_folder', 'This thread has no folder on this computer.', { threadId })
-      return resolveEditorFolder({ threadId, threadDirectory: ctx.mms.threads.getThreadDir(threadId), projectPath })
+      const lookup = threadLookupContext(ctx, p)
+      if (!lookup.projectPath) throw new DomainRpcError('thread_has_no_folder', 'This thread has no folder on this computer.', { threadId: lookup.threadId })
+      return resolveEditorFolder({ threadId: lookup.threadId, threadDirectory: lookup.threadDirectory, projectPath: lookup.projectPath })
     }
     case 'workspace.restore': {
       const p = isObject(params) ? params : {}
