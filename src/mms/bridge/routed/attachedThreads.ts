@@ -54,6 +54,14 @@ interface Attachment {
   replica: boolean
   /** The snapshot has been installed before, so a new one is a resync of the windows. */
   installed: boolean
+  /**
+   * Windows were answered without the live stream (a whole routed read, or the copy on disk): what they
+   * were told about prompts and the turn, so the stream's first snapshot can put right what differs.
+   */
+  served?: { questions: string[]; active: boolean }
+  /** The attachment was let go of; an attach still on its way closes what it opens. */
+  dropped?: boolean
+  retries?: number
 }
 
 /** A local protocol event for a thread of another computer. */
@@ -81,6 +89,8 @@ export class AttachedThreads {
   private readonly leases = new Map<string, Set<string>>()
   private readonly channels = new Map<NodeId, Promise<void>>()
   private readonly channelHandles = new Map<NodeId, { close(): void }>()
+  /** Streams being closed on the owner, by thread; a stream for the same thread is not opened until it is done. */
+  private readonly closing = new Map<string, Promise<void>>()
   private closed = false
 
   constructor(private readonly options: AttachedThreadsOptions) {}
@@ -198,12 +208,41 @@ export class AttachedThreads {
     const held = attachment.handle
     held?.close()
     attachment.handle = undefined
+    attachment.dropped = true
     this.threads.delete(this.key(attachment.node, attachment.threadId))
     // The owner keeps the room a stream holds until it is told, or ten idle minutes pass.
-    if (held && !this.closed)
-      void this.options.client
-        .closeStream(attachment.node, { kind: 'thread', threadId: attachment.threadId })
-        .catch(() => undefined)
+    if (held) this.tellOwnerClosed(attachment)
+  }
+
+  /** Closes the stream on the owner. A stream for the same thread opens only after this is done. */
+  private tellOwnerClosed(attachment: Attachment): void {
+    if (this.closed) return
+    const key = this.key(attachment.node, attachment.threadId)
+    const closing: Promise<void> = this.options.client
+      .closeStream(attachment.node, { kind: 'thread', threadId: attachment.threadId })
+      .catch(() => undefined)
+      .finally(() => {
+        if (this.closing.get(key) === closing) this.closing.delete(key)
+      })
+    this.closing.set(key, closing)
+  }
+
+  /** A focused thread whose stream failed is attached again, a few times, before it waits for the next use. */
+  private reattachSoon(attachment: Attachment): void {
+    if (this.closed || attachment.dropped || !this.focused(attachment)) return
+    const attempt = (attachment.retries ?? 0) + 1
+    if (attempt > 3) return
+    attachment.retries = attempt
+    const timer = setTimeout(() => {
+      if (this.closed || attachment.dropped || attachment.handle || attachment.attaching) return
+      void this.attach(attachment).then(
+        () => {
+          attachment.retries = 0
+        },
+        () => this.reattachSoon(attachment)
+      )
+    }, 1000 * attempt)
+    timer.unref?.()
   }
 
   private attach(attachment: Attachment): Promise<void> {
@@ -211,12 +250,15 @@ export class AttachedThreads {
     if (attachment.attaching) return attachment.attaching
     const { hub, client } = this.options
     attachment.attaching = (async () => {
+      // A stream let go of a moment ago is closed on the owner first, or the close would catch the new one.
+      await this.closing.get(this.key(attachment.node, attachment.threadId))
       const handle = await hub.attach(
         { nodeId: attachment.node, entityId: attachment.threadId },
         (value) => this.onUpdate(attachment, value),
         () => {
-          // The hub detached it after an error; it is attached again by the next use or when the computer is back.
+          // The hub detached it after an error: it is attached again shortly, and by the next use.
           attachment.handle = undefined
+          this.reattachSoon(attachment)
         },
         {
           open: async () => {
@@ -234,6 +276,8 @@ export class AttachedThreads {
       )
       if (this.closed || this.threads.get(this.key(attachment.node, attachment.threadId)) !== attachment) {
         handle.close()
+        // Nothing else holds the stream if no newer attachment of the thread exists: the owner is told.
+        if (!this.threads.has(this.key(attachment.node, attachment.threadId))) this.tellOwnerClosed(attachment)
         return
       }
       attachment.handle = handle
@@ -254,13 +298,23 @@ export class AttachedThreads {
 
   private onUpdate(attachment: Attachment, update: ThreadDisplayUpdate): void {
     if (update.kind === 'snapshot') {
+      // What the windows were last told: the view's, or what a whole read or the copy on disk gave them.
+      const known = attachment.view.read()
+      const before = known
+        ? {
+            questions: known.pendingQuestions.map((row) => String(row.requestId)),
+            active: known.activeTurn.active === true
+          }
+        : attachment.served
+      const resync = attachment.installed || before !== undefined
       attachment.replica = false
+      attachment.served = undefined
       attachment.view.install(update.value)
-      const resync = attachment.installed
       attachment.installed = true
       attachment.markReady()
-      // A snapshot after the first (the computer restarted, or the link was lost for long) replaces what windows hold.
-      if (resync && this.focused(attachment)) this.pushResync(attachment)
+      // The first live snapshot after a whole read or the offline copy, and any snapshot after the first (the
+      // computer restarted, or the link was lost for long), replaces what windows hold.
+      if (resync && this.focused(attachment)) this.pushResync(attachment, before)
       attachment.revision = this.sequence()
       return
     }
@@ -359,7 +413,10 @@ export class AttachedThreads {
   }
 
   /** After a new snapshot: the windows are given the whole transcript, queue and questions again. */
-  private pushResync(attachment: Attachment): void {
+  private pushResync(
+    attachment: Attachment,
+    before?: { questions: string[]; active: boolean }
+  ): void {
     const state = attachment.view.read()
     if (!state) return
     const context = this.context(attachment.node)
@@ -372,10 +429,35 @@ export class AttachedThreads {
       type: 'queue.updated',
       data: qualifyRoutedEvent('queue.updated', { items: state.queue }, context)
     })
+    const now = new Set(state.pendingQuestions.map((row) => String(row.requestId)))
+    // A prompt the window still shows that has gone away is cleared.
+    for (const requestId of before?.questions ?? [])
+      if (!now.has(requestId))
+        this.push(attachment, {
+          type: 'questions.cleared',
+          data: qualifyRoutedEvent('questions.cleared', { requestId, threadId: owner }, context)
+        })
     for (const row of state.pendingQuestions)
       this.push(attachment, {
         type: 'questions.pending',
         data: qualifyRoutedEvent('questions.pending', { threadId: owner, ...row }, context)
+      })
+    // And the turn: started, or ended, as the stream now says.
+    const active = state.activeTurn.active === true
+    if (active && before?.active !== true)
+      this.push(attachment, {
+        type: 'turn.started',
+        data: qualifyRoutedEvent('turn.started', { threadId: owner }, context)
+      })
+    else if (!active && before?.active === true)
+      this.push(attachment, {
+        type: 'turn.completed',
+        data: qualifyRoutedEvent('turn.completed', { threadId: owner }, context)
+      })
+    if (state.turnState)
+      this.push(attachment, {
+        type: 'turn.state',
+        data: qualifyRoutedEvent('turn.state', state.turnState, context)
       })
   }
 
@@ -391,24 +473,26 @@ export class AttachedThreads {
     const attachment = this.obtain(node, threadId)
     this.touch(attachment)
     let online = true
+    let streamed = true
     try {
       await this.attach(attachment)
       await this.waitReady(attachment)
     } catch (error) {
-      if (error instanceof DomainRpcError && error.code !== 'computer_offline' && error.code !== 'attach_timeout')
-        throw error
-      online = !(error instanceof DomainRpcError && error.code === 'computer_offline') &&
-        !(error instanceof NetError && ['peer_offline', 'route_unreachable'].includes(error.code))
-      if (!attachment.view.ready) await this.fromReplica(attachment)
-    }
-    if (!attachment.view.ready) {
-      if (!online) throw computerOffline(this.options.computer(node))
-      // The stream is slow or unavailable: one whole routed read instead.
-      const whole = await this.options.client.call(node, 'thread.snapshot', { threadId })
-      return {
-        ...(qualifyRoutedResult('thread.snapshot', whole, this.context(node)) as Json),
-        revision: this.sequence()
+      if (error instanceof DomainRpcError && error.code === 'computer_outdated') {
+        // An owner from before the stream API still has the whole read.
+        streamed = false
+      } else {
+        if (error instanceof DomainRpcError && error.code !== 'computer_offline' && error.code !== 'attach_timeout')
+          throw error
+        online =
+          !(error instanceof DomainRpcError && error.code === 'computer_offline') &&
+          !(error instanceof NetError && ['peer_offline', 'route_unreachable'].includes(error.code))
+        if (!attachment.view.ready) await this.fromReplica(attachment)
       }
+    }
+    if (!attachment.view.ready || !streamed) {
+      if (!online) throw computerOffline(this.options.computer(node))
+      return this.wholeRead(attachment, node, threadId)
     }
     let extras: Json = {}
     if (online) {
@@ -416,17 +500,26 @@ export class AttachedThreads {
         const read = await this.options.client.call(node, 'thread.snapshot', { threadId, transcript: false })
         if (isRecord(read)) extras = read
       } catch (error) {
+        if (error instanceof DomainRpcError && error.code === 'computer_outdated')
+          // This owner's snapshot has no way to leave the transcript out: it is read whole.
+          return this.wholeRead(attachment, node, threadId)
         if (!(error instanceof DomainRpcError && error.code === 'computer_offline')) throw error
         online = false
       }
     }
+    // Read after the extras, so the transcript and the queue are never older than what the extras say.
     const state = attachment.view.read()!
+    const queued = new Set(state.queue.map((row) => String(row.id)))
+    // An item the stream still queues is not also claimed: the stream is the newer of the two.
+    const claimed = (Array.isArray(extras.claimed) ? (extras.claimed as Json[]) : []).filter(
+      (row) => !queued.has(String(row.id))
+    )
     const body: Json = {
       thread: state.thread,
       messages: state.messages,
       ...(state.earlier !== undefined ? { earlier: state.earlier } : {}),
       queue: state.queue,
-      claimed: extras.claimed ?? [],
+      claimed,
       agents: extras.agents ?? [],
       tasks: extras.tasks ?? [],
       ptys: extras.ptys ?? [],
@@ -443,6 +536,23 @@ export class AttachedThreads {
     return {
       ...result,
       ...(online && !attachment.replica ? {} : { offline: { node, name: this.options.computer(node).name } })
+    }
+  }
+
+  /** The whole snapshot, read from the owner, for when the stream cannot give the transcript. */
+  private async wholeRead(attachment: Attachment, node: NodeId, threadId: string): Promise<unknown> {
+    const whole = await this.options.client.call(node, 'thread.snapshot', { threadId })
+    // The windows now hold this, not the stream's view: when the stream's snapshot arrives it corrects them.
+    if (!attachment.view.ready && isRecord(whole)) {
+      const pending = Array.isArray(whole.pendingQuestions) ? (whole.pendingQuestions as Json[]) : []
+      attachment.served = {
+        questions: pending.map((row) => String(row.requestId)),
+        active: isRecord(whole.activeTurn) && whole.activeTurn.active === true
+      }
+    }
+    return {
+      ...(qualifyRoutedResult('thread.snapshot', whole, this.context(node)) as Json),
+      revision: this.sequence()
     }
   }
 
@@ -478,9 +588,15 @@ export class AttachedThreads {
     } catch {
       found = false
     }
-    if (!found || !view.ready) return
+    // The live stream may have delivered its snapshot while the copy was read: the newer one stays.
+    if (!found || !view.ready || attachment.view.ready) return
     attachment.view = view
     attachment.replica = true
+    const read = view.read()!
+    attachment.served = {
+      questions: read.pendingQuestions.map((row) => String(row.requestId)),
+      active: read.activeTurn.active === true
+    }
     attachment.markReady()
   }
 
@@ -503,6 +619,8 @@ export class AttachedThreads {
             this.channelHandles.delete(node)
           },
           {
+            // Git progress has rooms of its own, so threads in view never crowd it out (nor it them).
+            room: 'channel',
             open: async () => {
               const opened = await client.openStream(node, { kind: 'channel' })
               return { descriptor: opened.descriptor as StreamDescriptor, head: opened.head }

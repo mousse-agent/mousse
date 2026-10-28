@@ -145,9 +145,9 @@
     "security": "23c8269058d1b9db"
   },
   "git.cancelOperation": {
-    "version": 1,
-    "digest": "1bca6e15005304df",
-    "security": "ceacd93869361a7a"
+    "version": 2,
+    "digest": "ad89934d35f26755",
+    "security": "6f012c3ca58ce7c5"
   },
   "git.checkout": {
     "version": 1,

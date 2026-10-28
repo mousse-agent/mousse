@@ -66,6 +66,8 @@ interface DisplayListener {
 export interface HubAttachOptions {
   /** Opens the stream on the owner. Without it the thread's shared display stream is opened. */
   open?: () => Promise<{ descriptor: StreamDescriptor; head: { epoch: number; seq: number } }>
+  /** Which room a private attachment counts against: threads in view, or the channel for Git progress. */
+  room?: 'thread' | 'channel'
 }
 interface Attachment {
   ref: BridgeEntityRef
@@ -160,6 +162,7 @@ export class BridgeHub {
   >()
   private readonly cleanup = new Set<Promise<void>>()
   private readonly attaching = new Set<string>()
+  private readonly attachingRooms = new Map<string, string>()
   private readonly inputs: DispatchInputJournal
   private readonly listeners = new Set<(status: BridgeHubRequestStatus) => void>()
   private stopped = false
@@ -906,12 +909,17 @@ export class BridgeHub {
     }
     if (this.attaching.has(key)) return fail('conflict')
     this.detach(ref, options)
-    // Streams that read the shared display and the ones only this computer reads have rooms of their own.
-    const sameKind = (other: Attachment): boolean => !!other.options?.open === !!options?.open
-    const open = [...this.attachments.values()].filter(sameKind).length
-    if (open + this.attaching.size >= (options?.open ? 32 : (this.options.maxStreams ?? 8)))
+    // Streams that read the shared display, the threads this computer reads, and its Git progress each have
+    // a room of their own.
+    const roomOf = (other?: HubAttachOptions): string =>
+      other?.open ? (other.room === 'channel' ? 'channel' : 'thread') : 'shared'
+    const room = roomOf(options)
+    const open = [...this.attachments.values()].filter((other) => roomOf(other.options) === room).length
+    const pending = [...this.attachingRooms.values()].filter((other) => other === room).length
+    if (open + pending >= (room === 'shared' ? (this.options.maxStreams ?? 8) : room === 'channel' ? 8 : 32))
       return fail('rate_limited')
     this.attaching.add(key)
+    this.attachingRooms.set(key, room)
     try {
       const raw = options?.open
         ? await options.open()
@@ -1012,6 +1020,7 @@ export class BridgeHub {
       }
     } finally {
       this.attaching.delete(key)
+      this.attachingRooms.delete(key)
     }
   }
   /**

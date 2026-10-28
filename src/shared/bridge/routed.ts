@@ -448,8 +448,11 @@ export const ROUTED_METHODS: Readonly<Record<string, RoutedRow>> = Object.freeze
   }),
   'git.deleteBranch': write('folder', [...FOLDER, 'name', 'force'], { required: ['name'] }),
   // Stops a Git action the same connection started; another connection is told it is not running.
-  'git.cancelOperation': write('thread', ['threadId', 'operationId'], {
-    required: ['operationId']
+  // A Git action on a project's folder is stopped by naming the project; one on a thread's, by the thread.
+  'git.cancelOperation': write('folder', [...FOLDER, 'operationId'], {
+    required: ['operationId'],
+    version: 2,
+    since: { projectId: 2 }
   }),
   'git.init': write('project', ['projectId']),
   'pullRequests.create': write(

@@ -1107,7 +1107,10 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     if (routed) return routed.result
   }
   if (isObject(params) && typeof params.threadId === 'string' &&
-      !['threads.delete', 'threads.trash', 'threads.restore', 'threads.purge', 'threads.inventory', 'threads.focus'].includes(method) &&
+      !['threads.delete', 'threads.trash', 'threads.restore', 'threads.purge', 'threads.inventory', 'threads.focus',
+        // These name the thread only so a router can find its computer; they worked for a thread being trashed before.
+        'orchestrator.answerQuestions', 'orchestrator.dismissQuestions', 'runs.get', 'runs.resumeNow', 'runs.cancelPause',
+        'git.cancelOperation', 'pty.isAlive', 'pty.lookup'].includes(method) &&
       ctx.mms.threads?.lifecycleStore?.get(params.threadId)) {
     ctx.mms.threads.assertThreadAdmission(params.threadId)
   }
@@ -1555,7 +1558,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const runId = asOptionalString(p.runId, 256)
       if (runId) {
         const clientRequestId = asOptionalClientRequestId(p.clientRequestId) ?? randomUUID()
-        const response = runCommandResponse(await ctx.mms.orchestrator.steerRun(runId, text, clientRequestId, threadId, undefined, undefined, deviceLimit(ctx)), runId)
+        const response = runCommandResponse(await ctx.mms.orchestrator.steerRun(runId, text, clientRequestId, threadId, undefined, undefined, deviceLimit(ctx), sentFromOf(ctx)), runId)
         noteSentFrom(ctx, threadId)
         return response
       }
@@ -1564,7 +1567,8 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const result = ctx.mms.orchestrator.steerThreadOrEnqueueExternal(threadId, text, {
         source: admittedChatSource(ctx, asOptionalString(p.source, 64) ?? 'protocol-steer'),
         // Text that cannot join the running turn waits as a turn of its own, at no more than the device's limit.
-        ...(limit ? { permissionMode: limit } : {})
+        ...(limit ? { permissionMode: limit } : {}),
+        ...(sentFromOf(ctx) ? { sentFrom: sentFromOf(ctx) } : {})
       })
       noteSentFrom(ctx, threadId)
       return { ok: result.steered || result.queued, steered: result.steered, queued: result.queued }

@@ -21,6 +21,7 @@ import {
   qualifyId,
   unqualifyId
 } from '../../../../src/shared/threadRef'
+import { ROUTED_METHODS } from '../../../../src/shared/bridge/routed'
 import { newId } from '../../../../src/shared/net'
 import { cleanupAll, cleanups, linked } from './routerFixture'
 
@@ -128,7 +129,9 @@ describe('the walker', () => {
       await read('runs.list', { threadId: id })
       await read('orchestrator.pendingQuestions', { threadId: id })
       await read('threads.approvalRules', { threadId: id })
+      await read('threads.inventory', { threadId: id })
     }
+    await read('threads.inventory', { node: t.node })
     await read('projects.list', {})
     await read('threads.rename', { threadId: t.qualified(parent.id), name: 'Parent renamed' })
     await read('threads.settle', { threadId: t.qualified(child.id), settled: false })
@@ -160,7 +163,9 @@ describe('the walker', () => {
         let at = text.indexOf(id)
         while (at >= 0) {
           // Every occurrence is the id of a qualified one: `<node>:<id>`.
-          expect(text.slice(Math.max(0, at - NODE.length - 1), at), `${id} in ${text.slice(0, 200)}`).toBe(`${t.node}:`)
+          // A folder on the owner's disk that is named after the thread is a path, not an id.
+          const before = text.slice(Math.max(0, at - NODE.length - 1), at)
+          if (!before.endsWith('\\') && !before.endsWith('/')) expect(before, `${id} in …${text.slice(Math.max(0, at - 90), at + 60)}…`).toBe(`${t.node}:`)
           at = text.indexOf(id, at + 1)
         }
       }
@@ -170,4 +175,71 @@ describe('the walker', () => {
     // The record of who started the parent names a project of the caller, which stays its own.
     expect(joined).toContain('"projectId":"local-project"')
   }, 120_000)
+
+  it('leaves no owner id unqualified in what any row returns or refuses with', async () => {
+    const dir = realpathSync(mkdtempSync(join(tmpdir(), 'routed-ids-rows-')))
+    cleanups.push(() => rmSync(dir, { recursive: true, force: true }))
+    const project = t.owner.projects.openProject(dir)
+    const parent = t.owner.threads.createThread('Rows parent', project.id, dir, { started: true })
+    const child = t.owner.threads.createThread('Rows child', project.id, dir, {
+      started: true,
+      lineage: { parentThreadId: parent.id, rootThreadId: parent.id, relationship: 'subagent' } as never
+    })
+    t.owner.threads.updateThreadMeta(parent.id, { sentFrom: { node: t.callerNode } }, { touch: false })
+    const owned = [parent.id, child.id, project.id]
+    // Rows that would start a turn, a model call or something that cannot be undone are left to their own tests;
+    // every other row is called, with values that satisfy its checks, and what comes back is read.
+    const skipped = new Set([
+      'orchestrator.send', 'orchestrator.steer', 'orchestrator.abort', 'orchestrator.retry', 'queue.enqueue',
+      'threads.regenerateTitle', 'threads.delete', 'threads.trash', 'projects.remove', 'projects.open',
+      'pullRequests.startThread', 'publish.start', 'git.init', 'git.push', 'git.pull', 'git.fetch', 'git.checkout',
+      'git.commit', 'git.discard', 'git.createBranch', 'git.renameBranch', 'git.deleteBranch', 'git.suggestCommitMessage',
+      'actions.undoLatest', 'actions.redo', 'actions.revertCode', 'workspace.restore'
+    ])
+    const value = (key: string): unknown =>
+      key === 'path' || key === 'oldPath' ? 'a.txt'
+        : key === 'scope' ? 'worktree'
+        : key === 'pinned' || key === 'settled' || key === 'enabled' || key === 'approved' ? true
+        : key === 'paths' || key === 'orderedIds' || key === 'roots' ? ['x']
+        : key === 'number' || key === 'index' ? 1
+        : key === 'answers' || key === 'state' || key === 'data' || key === 'policy' ? {}
+        : key === 'model' ? { model: 'none' }
+        : key === 'reference' ? { id: 'r', kind: 'project', title: 'P', projectId: t.qualified(project.id) }
+        : key === 'format' ? 'html'
+        : 'x'
+    let called = 0
+    const seen: string[] = []
+    for (const [method, row] of Object.entries(ROUTED_METHODS)) {
+      if (skipped.has(method)) continue
+      const params: Record<string, unknown> = {}
+      if (row.target === 'thread') params[row.threadIds?.[0] ?? 'threadId'] = t.qualified(parent.id)
+      else if (row.target === 'folder') params.threadId = t.qualified(parent.id)
+      else if (row.target === 'project') params.projectId = t.qualified(project.id)
+      else params.node = t.node
+      for (const key of row.required ?? []) params[key] ??= value(key)
+      if (method === 'thread.fork') params.sourceThreadId = t.qualified(parent.id)
+      if (method === 'thread.mergeBack') params.forkThreadId = t.qualified(child.id)
+      let text: string
+      try {
+        text = JSON.stringify(await t.dispatch(method, params))
+      } catch (error) {
+        const refusal = error as { code?: string; details?: unknown }
+        text = JSON.stringify({ code: refusal.code, details: refusal.details })
+      }
+      called += 1
+      seen.push(text)
+      for (const id of owned) {
+        let at = text.indexOf(id)
+        while (at >= 0) {
+          // A folder on the owner's disk that is named after the thread is a path, not an id.
+          const before = text.slice(Math.max(0, at - t.node.length - 1), at)
+          if (!before.endsWith('\\') && !before.endsWith('/')) expect(before, `${method}: ${id} in …${text.slice(Math.max(0, at - 90), at + 60)}…`).toBe(`${t.node}:`)
+          at = text.indexOf(id, at + 1)
+        }
+      }
+    }
+    // Most rows were called, and what they returned does name the owner's threads, qualified.
+    expect(called).toBeGreaterThan(Object.keys(ROUTED_METHODS).length - skipped.size - 1)
+    expect(seen.join(' ')).toContain(`${t.node}:${parent.id}`)
+  }, 300_000)
 })

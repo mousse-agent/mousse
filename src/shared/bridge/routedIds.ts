@@ -25,15 +25,18 @@ export const ROUTED_THREAD_ID_KEYS: readonly string[] = [
   'workspaceThreadId',
   'createdByThreadId',
   'liveThreadId',
-  'mousseThreadId'
+  'mousseThreadId',
+  // A lifecycle record calls the thread that owns a resource its owner task.
+  'ownerTaskId'
 ]
 
 /** Fields that hold a project id, wherever they are in a result or an event. */
 export const ROUTED_PROJECT_ID_KEYS: readonly string[] = ['projectId', 'createdByProjectId']
 
 /**
- * A place in a value: dot-separated keys, `[]` after a key for every item of an array. The value
- * found there is an id, not a field named like one.
+ * A place in a value: dot-separated keys, `[]` after a key for every item of an array, and `{}` after
+ * the last key when the keys of that map are the ids. The value found there is an id, not a field named
+ * like one.
  */
 export type IdPath = string
 
@@ -62,10 +65,25 @@ export const ROUTED_RESULT_ID_PATHS: Readonly<Record<string, RoutedIdPaths>> = {
   'threads.setWorktreeEnabled': THREAD_AND_PROJECT,
   'threads.setModel': THREAD_AND_PROJECT,
   'threads.setPermissionMode': THREAD_AND_PROJECT,
-  'threads.delete': { threads: ['taskId', 'thread.id'] },
-  'threads.trash': { threads: ['taskId', 'thread.id'] },
-  'threads.restore': { threads: ['taskId', 'thread.id'] },
-  'threads.inventory': { threads: ['taskId', 'thread.id', 'threads[].id', 'resources[].ownerTaskId'] },
+  // A lifecycle record names its thread `taskId`, and what the thread owns names it `ownerTaskId`.
+  'threads.delete': { threads: ['taskId', 'thread.id', 'lifecycle.taskId', 'lifecycle.ownerTaskId'] },
+  'threads.trash': { threads: ['taskId', 'thread.id', 'lifecycle.taskId', 'lifecycle.ownerTaskId'] },
+  'threads.restore': { threads: ['taskId', 'thread.id', 'lifecycle.taskId', 'lifecycle.ownerTaskId'] },
+  'threads.inventory': {
+    threads: [
+      'taskId',
+      'thread.id',
+      'threads[].id',
+      'resources[].ownerTaskId',
+      'lifecycles[].taskId',
+      'lifecycles[].ownerTaskId',
+      'lifecycles[].resources[].ownerTaskId',
+      'lifecycle.taskId',
+      'lifecycle.ownerTaskId',
+      'inventory.taskId',
+      'taskNames{}'
+    ]
+  },
   'thread.fork': { threads: ['thread.id', 'fork.id'] },
   'thread.mergeBack': { threads: ['thread.id'] },
   'projects.open': THREAD_AND_PROJECT,
@@ -76,7 +94,9 @@ export const ROUTED_RESULT_ID_PATHS: Readonly<Record<string, RoutedIdPaths>> = {
   'projects.match': { projects: ['projectId'] },
   'pullRequests.startThread': { threads: ['thread.id', 'threadId', 'existing[].id'] },
   'composer.options': {},
-  'subagents.list': { threads: ['subagents[].threadId'] }
+  'subagents.list': { threads: ['subagents[].threadId'] },
+  // The status of every thread that is not idle, by thread id.
+  'activity.snapshot': { threads: ['activity{}'] }
 }
 
 /** Events with an `id` that is a thread or project id; the same rule as for results. */
@@ -110,7 +130,27 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object' && !Array.isArray(value)
 }
 
-function qualifyReferenceText(content: string, context: QualifyContext): string {
+/**
+ * The id a reference carries, as this computer names it: the owner's own ids are qualified, and an id
+ * the owner holds of this computer's (a reference a person on this computer wrote) is plain again.
+ */
+function incomingReferenceId(id: string, context: QualifyContext): string {
+  const parsed = parseQualifiedId(id)
+  if (parsed) return parsed.node === context.self ? parsed.id : id
+  return qualifyId(context.node, id)
+}
+
+/** The id a reference carries to the owner: its own ids are plain, and this computer's are qualified with it. */
+function outgoingReferenceId(id: string, context: QualifyContext): string {
+  const parsed = parseQualifiedId(id)
+  if (parsed) return parsed.node === context.node ? parsed.id : id
+  return context.self ? qualifyId(context.self, id) : id
+}
+
+function mapReferenceText(
+  content: string,
+  map: (id: string) => string
+): string {
   if (!content.includes('[Mousse references')) return content
   return content
     .replace(REFERENCE_BLOCK, (whole, open: string, encoded: string, close: string) => {
@@ -121,7 +161,7 @@ function qualifyReferenceText(content: string, context: QualifyContext): string 
           if (!isRecord(reference)) return reference
           const copy: Record<string, unknown> = { ...reference }
           for (const key of ['threadId', 'projectId'])
-            if (typeof copy[key] === 'string') copy[key] = ensureQualified(context.node, copy[key])
+            if (typeof copy[key] === 'string') copy[key] = map(copy[key] as string)
           return copy
         })
         return `${open}${encodeURIComponent(JSON.stringify(rewritten))}${close}`
@@ -129,7 +169,20 @@ function qualifyReferenceText(content: string, context: QualifyContext): string 
         return whole
       }
     })
-    .replace(REFERENCE_LINES, (_line, prefix: string, id: string) => `${prefix}${ensureQualified(context.node, id)}`)
+    .replace(REFERENCE_LINES, (_line, prefix: string, id: string) => `${prefix}${map(id)}`)
+}
+
+function qualifyReferenceText(content: string, context: QualifyContext): string {
+  return mapReferenceText(content, (id) => incomingReferenceId(id, context))
+}
+
+/**
+ * A message this computer sends to the owner, with the thread and project references it carries named
+ * the way the owner names them. Without it a reference to a thread of this computer would come back
+ * qualified with the owner's node, pointing at a thread that is not there.
+ */
+export function outgoingMessageText(content: string, context: QualifyContext): string {
+  return mapReferenceText(content, (id) => outgoingReferenceId(id, context))
 }
 
 /** The value at `path`, rewritten in place of a copy; every other part is shared with `value`. */
@@ -140,6 +193,14 @@ function rewriteAt(
 ): unknown {
   if (!path.length) return typeof value === 'string' ? rewrite(value) : value
   const [head, ...rest] = path
+  // `name{}`: the keys of the map at `name` are the ids.
+  if (head.endsWith('{}') && !rest.length) {
+    const mapKey = head.slice(0, -2)
+    if (!isRecord(value) || !isRecord(value[mapKey])) return value
+    const renamed: Record<string, unknown> = {}
+    for (const [id, entry] of Object.entries(value[mapKey] as Record<string, unknown>)) renamed[rewrite(id)] = entry
+    return { ...value, [mapKey]: renamed }
+  }
   const each = head.endsWith('[]')
   const key = each ? head.slice(0, -2) : head
   if (!isRecord(value) || !(key in value)) return value
@@ -162,6 +223,14 @@ function qualifyStartedFrom(value: Record<string, unknown>, context: QualifyCont
   const origin = typeof startedFrom.node === 'string' ? startedFrom.node : undefined
   if (!origin || origin === context.self || parseQualifiedId(startedFrom.projectId)) return value
   return { ...value, startedFrom: { ...startedFrom, projectId: qualifyId(origin, startedFrom.projectId) } }
+}
+
+/** Keys whose objects are threads or projects, so that their `id` is an id of one. */
+const ID_OBJECT_KEYS: Readonly<Record<string, 'thread' | 'project'>> = {
+  thread: 'thread',
+  threads: 'thread',
+  project: 'project',
+  projects: 'project'
 }
 
 function walk(value: unknown, context: QualifyContext, depth: number): unknown {
@@ -191,6 +260,22 @@ function walk(value: unknown, context: QualifyContext, depth: number): unknown {
       continue
     }
     if (key === 'startedFrom') continue
+    // A reference to a thread or project is identified `thread:<id>` / `project:<id>`.
+    if (key === 'reference' && isRecord(inner) && typeof inner.id === 'string') {
+      const found = /^(thread|project):(.+)$/.exec(inner.id)
+      const renamed = found ? { ...inner, id: `${found[1]}:${ensureQualified(context.node, found[2])}` } : inner
+      const next = walk(renamed, context, depth + 1)
+      if (next !== inner) set(key, next)
+      continue
+    }
+    // An object under `thread`, `threads`, `project` or `projects` is a thread or a project: its `id` is the id.
+    if (ID_OBJECT_KEYS[key] && (isRecord(inner) || Array.isArray(inner))) {
+      const named = (item: unknown): unknown =>
+        isRecord(item) && typeof item.id === 'string' ? { ...item, id: ensureQualified(context.node, item.id) } : item
+      const next = walk(Array.isArray(inner) ? inner.map(named) : named(inner), context, depth + 1)
+      if (next !== inner) set(key, next)
+      continue
+    }
     if (key === 'content' && typeof inner === 'string') {
       const next = qualifyReferenceText(inner, context)
       if (next !== inner) set(key, next)
@@ -235,35 +320,58 @@ export interface UnqualifiedParams {
   hasLocal: boolean
 }
 
+/** A key that holds an id or a list of ids (`threadId`, `orderedIds`, `sourceThreadId`...). */
+const ID_KEY = /Ids?$/
+/** A key that names a thread or a project, so a plain id there is one of this computer's. */
+const THREAD_OR_PROJECT_KEY = /(Thread|Project)Ids?$|^(threadIds?|projectIds?)$/
+/** Free text is never read for ids: a message that happens to hold one is only text. */
+const TEXT_KEYS = new Set([
+  'content',
+  'text',
+  'message',
+  'title',
+  'name',
+  'query',
+  'summary',
+  'reason',
+  'comment',
+  'description',
+  'body',
+  'data',
+  'answers',
+  'state',
+  'draftInput',
+  'feedback'
+])
+const MAX_DEPTH = 6
+
 /**
- * Splits the ids a call names into the computer each belongs to and the id there. A call that names
- * ids of more than one computer, or of one computer and this one, is refused by the router.
+ * Splits the ids a call names into the computer each belongs to and the id there. An id is found in any
+ * field whose name ends in `Id` or `Ids`, at any depth and inside arrays, so a qualified id cannot slip
+ * past routing (or the refusal of a connection that may not route) by being somewhere unexpected. A
+ * call that names ids of more than one computer, or of one computer and this one, is refused.
  */
 export function unqualifyRoutedParams(params: Record<string, unknown>): UnqualifiedParams {
   const nodes = new Set<string>()
   let hasLocal = false
-  const out: Record<string, unknown> = { ...params }
-  for (const key of [...ROUTED_PARAM_THREAD_KEYS, ...ROUTED_PARAM_PROJECT_KEYS]) {
-    const value = out[key]
-    if (typeof value !== 'string') continue
-    const parsed = parseQualifiedId(value)
-    if (parsed) {
-      nodes.add(parsed.node)
-      out[key] = parsed.id
-    } else hasLocal = true
-  }
-  // A reference names a thread or a project by the fields of the reference itself.
-  const reference = out.reference
-  if (isRecord(reference)) {
-    const copy: Record<string, unknown> = { ...reference }
-    for (const key of ['threadId', 'projectId']) {
-      const parsed = parseQualifiedId(copy[key])
+  const visit = (value: unknown, key: string, depth: number): unknown => {
+    if (depth > MAX_DEPTH) return value
+    if (typeof value === 'string') {
+      if (!ID_KEY.test(key)) return value
+      const parsed = parseQualifiedId(value)
       if (parsed) {
         nodes.add(parsed.node)
-        copy[key] = parsed.id
-      } else if (typeof copy[key] === 'string') hasLocal = true
+        return parsed.id
+      }
+      if (THREAD_OR_PROJECT_KEY.test(key) && value) hasLocal = true
+      return value
     }
-    out.reference = copy
+    if (Array.isArray(value)) return value.length > 10_000 ? value : value.map((item) => visit(item, key, depth + 1))
+    if (!isRecord(value)) return value
+    const out: Record<string, unknown> = {}
+    for (const [name, inner] of Object.entries(value)) out[name] = TEXT_KEYS.has(name) ? inner : visit(inner, name, depth + 1)
+    return out
   }
+  const out = visit(params, '', 0) as Record<string, unknown>
   return { params: out, nodes: [...nodes], hasLocal }
 }

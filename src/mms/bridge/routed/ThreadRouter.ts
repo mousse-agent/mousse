@@ -4,7 +4,7 @@ import {
   type RoutedRow
 } from '../../../shared/bridge/routed'
 import {
-  qualifyRoutedEvent,
+  outgoingMessageText,
   qualifyRoutedResult,
   unqualifyRoutedParams,
   type QualifyContext
@@ -125,6 +125,8 @@ export class ThreadRouter implements ThreadRouterPort {
     this.offClosed = services.domains?.onConnectionClosed((id) => this.connectionClosed(id))
   }
   private offClosed?: () => void
+  /** Window bindings whose end is already watched. */
+  private readonly watched = new WeakSet<AbortSignal>()
 
   /** Whether routing is on for this profile: Bridge is on and so is the routing flag. */
   enabled(): boolean {
@@ -188,8 +190,8 @@ export class ThreadRouter implements ThreadRouterPort {
       throw new DomainRpcError('invalid_params', 'That thread is on this computer. Use its own id.')
     const computer = this.computer(node)
     if (!row) throw notAvailableRemotely(computer, method)
-    const owner = this.ownerParams(method, row, split.params)
     const context: QualifyContext = { node, self: this.selfNode() }
+    const owner = this.ownerParams(method, row, split.params, context)
 
     if (method === 'thread.snapshot') {
       const threadId = owner.threadId as string
@@ -202,7 +204,11 @@ export class ThreadRouter implements ThreadRouterPort {
     if (progress) await this.attached.channel(node).catch(() => undefined)
     let raw: unknown
     try {
-      raw = await this.client.call(node, method, owner, { idem: this.idemOf(method, params) })
+      raw = await this.client.call(node, method, owner, {
+        idem: this.idemOf(method, params),
+        // The window that asked going away (or switching profile) ends the call.
+        ...(ctx.connection?.lifetime ? { signal: ctx.connection.lifetime } : {})
+      })
     } catch (error) {
       progress?.end()
       throw error
@@ -226,7 +232,8 @@ export class ThreadRouter implements ThreadRouterPort {
   private ownerParams(
     method: string,
     row: RoutedRow,
-    given: Record<string, unknown>
+    given: Record<string, unknown>,
+    context: QualifyContext
   ): Record<string, unknown> {
     const params: Record<string, unknown> = {}
     for (const [key, value] of Object.entries(given)) {
@@ -238,7 +245,11 @@ export class ThreadRouter implements ThreadRouterPort {
       if (key === 'await' && method === 'orchestrator.send') continue
       if ((ROUTED_FORBIDDEN_KEYS as readonly string[]).includes(key) || !row.keys.includes(key))
         throw new DomainRpcError('invalid_params', `${method} does not take ${key} for a thread on another computer.`)
-      params[key] = value
+      // References in the text name threads the way the owner does.
+      params[key] =
+        typeof value === 'string' && (key === 'content' || key === 'text' || key === 'message')
+          ? outgoingMessageText(value, context)
+          : value
     }
     return params
   }
@@ -313,7 +324,7 @@ export class ThreadRouter implements ThreadRouterPort {
     if (!operationId || !entry || entry.connection !== ctx.connection?.id) return { cancelled: false }
     // The owner stops the action its channel started; the call carries no other identity.
     return this.client
-      .call(node, method, owner)
+      .call(node, method, owner, ctx.connection?.lifetime ? { signal: ctx.connection.lifetime } : {})
       .then((result) => result)
       .catch((error: unknown) => {
         throw translateNetError(error, this.computer(node), method) ?? error
@@ -337,6 +348,16 @@ export class ThreadRouter implements ThreadRouterPort {
     if (!focused) {
       this.attached.unfocus(lease, ref.node as NodeId, ref.id)
       return { routed: true, focused: false }
+    }
+    // The lease ends with the window's binding: when the window closes or switches to another profile its
+    // signal aborts, and this profile's attachments stop forwarding for it.
+    const lifetime = ctx.connection.lifetime
+    if (lifetime) {
+      if (lifetime.aborted) return { routed: true, focused: false }
+      if (!this.watched.has(lifetime)) {
+        this.watched.add(lifetime)
+        lifetime.addEventListener('abort', () => this.attached.dropLeases(lease), { once: true })
+      }
     }
     await this.attached.focus(lease, ref.node as NodeId, ref.id)
     return { routed: true, focused: true }
