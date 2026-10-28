@@ -13,6 +13,14 @@ import { NET_ERRORS } from './errors'
 import type { WireMessage, WireMessageType } from './wire'
 import { STREAM_KINDS, type StreamDescriptor } from './streams'
 import { BLOB_CHUNK_BYTES, MAX_INLINE_ENVELOPE_BYTES, MAX_SEQ, REPLAY_BATCH_BYTES } from './limits'
+import {
+  TUNNEL_CHUNK_BYTES,
+  TUNNEL_HOST_KEYS_MAX,
+  TUNNEL_ID_PATTERN,
+  TUNNEL_KINDS,
+  TUNNEL_REASONS,
+  TUNNEL_WINDOW_BYTES
+} from './tunnel'
 
 type Schema = Record<string, unknown>
 const integer = (minimum = 0, maximum = MAX_SEQ): Schema => ({ type: 'integer', minimum, maximum })
@@ -464,6 +472,11 @@ const message = (
 const stream = { stream: id('str') }
 const rpc = { id: id('rpc') }
 const blob = { blob: blobId }
+const tunnelId: Schema = { type: 'string', pattern: TUNNEL_ID_PATTERN.source }
+const tunnelHostKey = object({
+  type: { type: 'string', minLength: 1, maxLength: 64, pattern: '^[a-z0-9@.-]+$' },
+  key: { type: 'string', minLength: 16, maxLength: 8192, pattern: '^[A-Za-z0-9+/]+={0,2}$' }
+})
 export const wireMessageSchemas = {
   hello: message(
     'hello',
@@ -562,6 +575,29 @@ export const wireMessageSchemas = {
     ]
   },
   'space.proof.cancel': message('space.proof.cancel', { n: integer(1) }),
+  // `tunnel.open` has no field for a host or a port, and `additionalProperties: false` refuses one that is added.
+  'tunnel.open': message('tunnel.open', { tunnel: tunnelId, kind: enumeration(TUNNEL_KINDS) }),
+  'tunnel.opened': message('tunnel.opened', {
+    tunnel: tunnelId,
+    hostKeys: array(tunnelHostKey, TUNNEL_HOST_KEYS_MAX, 1)
+  }),
+  'tunnel.data': message(
+    'tunnel.data',
+    {
+      tunnel: tunnelId,
+      end: bool,
+      parts: { type: 'array', items: integer(0, TUNNEL_CHUNK_BYTES), minItems: 1, maxItems: 1 }
+    },
+    ['tunnel', 'parts']
+  ),
+  'tunnel.credit': message('tunnel.credit', {
+    tunnel: tunnelId,
+    bytes: integer(1, TUNNEL_WINDOW_BYTES)
+  }),
+  'tunnel.close': message('tunnel.close', {
+    tunnel: tunnelId,
+    reason: enumeration(TUNNEL_REASONS)
+  }),
   append: message('append', { ...stream, id: id('evt'), parts: pairedParts }),
   appendResult: {
     oneOf: [

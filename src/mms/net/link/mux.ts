@@ -6,12 +6,13 @@ import { FRAGMENT_STALL_MS, MAX_FRAME_BYTES } from '../../../shared/net/limits'
 import { laneFor, type Lane } from '../../../shared/net/wire'
 import { decodeMessage, encodeMessage, MAX_MESSAGE_BYTES } from '../sync/codec'
 
-export const MUX_WINDOWS = { control: 256 * 1024, bulk: 1024 * 1024 } as const
+export const MUX_WINDOWS = { control: 256 * 1024, bulk: 1024 * 1024, tunnel: 256 * 1024 } as const
 const HEADER = 16,
   FIRST = 1,
   LAST = 2,
   CREDIT = 4
-const LANES: Lane[] = ['control', 'bulk']
+/** The lane's number in the frame header. A peer that did not negotiate `tunnel.v1` never sends lane 2. */
+const LANES: Lane[] = ['control', 'bulk', 'tunnel']
 type Timer = { cancel(): void }
 type Send = {
   bytes: Uint8Array
@@ -33,7 +34,12 @@ type LaneState = {
   receive?: Receive
 }
 
-/** Independent lane credits; one bounded active message plus a bounded waiting queue per lane. */
+/**
+ * Independent lane credits; one bounded active message plus a bounded waiting queue per lane. Control is
+ * always scheduled first. The bulk lane (snapshots, blobs) and the tunnel lane (an editor's bytes) take
+ * turns, so a long transfer cannot starve an open editor connection and an editor connection cannot starve
+ * a snapshot.
+ */
 export class StreamMux implements Mux {
   private readonly clock: Clock
   private readonly onBytesReceived?: (count: number) => void
@@ -44,6 +50,8 @@ export class StreamMux implements Mux {
   private closeError?: Error
   private writing = false
   private scheduled = false
+  /** Which of bulk and tunnel goes first the next time both have data and credit. */
+  private tunnelNext = false
   private nextId = 1
   private lastReceivedId = 0
   private frameHeader = Buffer.alloc(HEADER)
@@ -65,7 +73,7 @@ export class StreamMux implements Mux {
       waiting: [],
       waitingBytes: 0
     })
-    this.lanes = { control: state('control'), bulk: state('bulk') }
+    this.lanes = { control: state('control'), bulk: state('bulk'), tunnel: state('tunnel') }
     stream.on('data', this.data)
     stream.on('error', this.error)
     stream.on('end', this.ended)
@@ -210,7 +218,7 @@ export class StreamMux implements Mux {
   ): Buffer {
     const bytes = Buffer.alloc(HEADER + (payload?.length ?? 0))
     bytes[0] = 1
-    bytes[1] = lane === 'control' ? 0 : 1
+    bytes[1] = LANES.indexOf(lane)
     bytes[2] = flags
     bytes.writeUInt32BE(id, 4)
     bytes.writeUInt32BE(payload?.length ?? 0, 8)
@@ -234,10 +242,15 @@ export class StreamMux implements Mux {
         return
       }
     }
-    for (const lane of LANES) {
+    const order: Lane[] = this.tunnelNext
+      ? ['control', 'tunnel', 'bulk']
+      : ['control', 'bulk', 'tunnel']
+    for (const lane of order) {
       const state = this.lanes[lane],
         send = state.active
       if (!send || !state.credit) continue
+      // The other of bulk and tunnel goes first next time.
+      if (lane !== 'control') this.tunnelNext = lane === 'bulk'
       if (send.id === undefined) {
         if (this.nextId > 0xffffffff) {
           this.close(new NetError('conflict', 'Mux message identifiers exhausted.'))
