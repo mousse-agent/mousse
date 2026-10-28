@@ -57,4 +57,4 @@ Open an issue before a large change. Small fixes are welcome as pull requests. C
 
 ## License
 
-[MIT](LICENSE). Mousse ID, the optional hosted account and relay service, runs separately. This repository holds only its client, and everything else works without it.
+[MIT](LICENSE)
