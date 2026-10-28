@@ -1048,3 +1048,183 @@ describe('what the owner can see afterwards', () => {
     expect((await echoed).toString()).toBe('x')
   })
 })
+
+describe('opens that share a tunnel id', () => {
+  const SAME = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+  const rawOpen = (t: Bed, id = SAME) =>
+    t.host.receive(t.toCaller, { t: 'tunnel.open', tunnel: id, kind: 'ssh' }, undefined)
+
+  it('give one tunnel, one far-end connection, and nothing that outlives a block', async () => {
+    // A far end that talks all the time, so a connection that was missed would be heard.
+    const echo = await echoServer((socket) => {
+      const timer = setInterval(() => socket.write('tick'), 5)
+      socket.on('close', () => clearInterval(timer))
+    })
+    const t = await bed({ echo })
+    // Twenty opens with one id, all read before anything is awaited.
+    for (let index = 0; index < 20; index++) rawOpen(t)
+    await until(
+      () => t.host.count(CALLER) === 1 && t.toCaller.sent.some((m) => m.t === 'tunnel.opened'),
+      'the tunnel to open'
+    )
+    await settle(100)
+    expect(echo.connections).toBe(1)
+    expect(t.host.count(CALLER)).toBe(1)
+    expect(t.host.list()).toHaveLength(1)
+    expect(t.toCaller.sent.filter((message) => message.t === 'tunnel.opened')).toHaveLength(1)
+    // More opens with the same id while it is open change nothing either.
+    for (let index = 0; index < 5; index++) rawOpen(t)
+    await settle(50)
+    expect(echo.connections).toBe(1)
+
+    expect(t.toCaller.dataBytes).toBeGreaterThan(0)
+    t.refusal.current = 'blocked'
+    expect(t.host.reconcile()).toBe(1)
+    await until(() => echo.sockets.size === 0, 'the far end to close')
+    const after = t.toCaller.dataBytes
+    await settle(150)
+    // Nothing is sent to the blocked device after the block, and nothing stays open.
+    expect(t.toCaller.dataBytes).toBe(after)
+    expect(echo.sockets.size).toBe(0)
+    expect(t.host.count(CALLER)).toBe(0)
+    expect(
+      t.hostAudit.rows.filter((row) => row.method === 'editor.open' && row.kind === 'change')
+    ).toHaveLength(1)
+    expect(t.hostAudit.rows.filter((row) => row.method === 'editor.close')).toHaveLength(1)
+  })
+
+  it('count against the limit, so many ids cannot get past it either', async () => {
+    const t = await bed({ host: { perNode: 3 } })
+    for (let index = 0; index < 20; index++)
+      rawOpen(t, index.toString(16).padStart(2, '0').repeat(16))
+    await until(() => t.host.count(CALLER) === 3, 'the tunnels to open')
+    await settle(100)
+    expect(t.echo.connections).toBe(3)
+    expect(t.host.count(CALLER)).toBe(3)
+  })
+
+  it('can use an id again once its tunnel has ended', async () => {
+    const t = await bed()
+    rawOpen(t)
+    await until(() => t.toCaller.sent.some((m) => m.t === 'tunnel.opened'), 'the tunnel to open')
+    t.host.receive(t.toCaller, { t: 'tunnel.close', tunnel: SAME, reason: 'closed' }, undefined)
+    await until(() => t.host.count(CALLER) === 0, 'the tunnel to end')
+    rawOpen(t)
+    await until(
+      () => t.toCaller.sent.filter((m) => m.t === 'tunnel.opened').length === 2,
+      'the tunnel to open again'
+    )
+    expect(t.echo.connections).toBe(2)
+  })
+
+  it('end one tunnel without touching another: an entry is only ever deleted by itself', async () => {
+    const t = await bed()
+    const first = await t.open()
+    const second = await t.open()
+    first.close()
+    await until(() => t.host.count(CALLER) === 1, 'the first to end')
+    const echoed = readAll(second.stream, 2)
+    second.stream.write('ok')
+    expect((await echoed).toString()).toBe('ok')
+    expect(t.host.list()).toHaveLength(1)
+  })
+})
+
+describe('a device that keeps asking', () => {
+  it('costs one check per allowed open, not one per message, and writes one row of each kind a minute', async () => {
+    const t = await bed({ host: { opensPerMinute: 5, perNode: 20 } })
+    t.refusal.current = 'editor_off'
+    for (let index = 0; index < 200; index++)
+      t.host.receive(
+        t.toCaller,
+        { t: 'tunnel.open', tunnel: randomBytes(16).toString('hex'), kind: 'ssh' },
+        undefined
+      )
+    await settle(50)
+    // The rate is decided before the roster and the policy are read.
+    expect(t.refusal.calls).toBeLessThanOrEqual(5)
+    expect(t.echo.connections).toBe(0)
+    expect(t.hostAudit.rows.filter((row) => row.kind === 'refused')).toEqual([
+      expect.objectContaining({ method: 'editor.open', outcome: 'editor_off' })
+    ])
+    // Every one of them was answered.
+    expect(t.toCaller.sent.filter((message) => message.t === 'tunnel.close')).toHaveLength(200)
+  })
+
+  it('writes a row again for a refusal a minute later, and a row of its own for each kind', async () => {
+    const t = await bed({ host: { perNode: 1 } })
+    t.refusal.current = 'editor_off'
+    for (let index = 0; index < 3; index++) await rejection(t.open())
+    expect(t.hostAudit.rows.filter((row) => row.outcome === 'editor_off')).toHaveLength(1)
+    t.clock.setWallTime(t.clock.now() + 61_000)
+    await rejection(t.open())
+    expect(t.hostAudit.rows.filter((row) => row.outcome === 'editor_off')).toHaveLength(2)
+    t.refusal.current = undefined
+    await t.open()
+    expect((await rejection(t.open())).reason).toBe('limit')
+    expect(t.hostAudit.rows.filter((row) => row.outcome === 'limit')).toHaveLength(1)
+  })
+})
+
+describe('a close is not lost when the session is busy', () => {
+  it('waits for room and goes out, so the caller is told a block ended its tunnel', async () => {
+    const t = await bed()
+    const tunnel = await t.open()
+    let refused = 0
+    const real = t.toCaller.sendTunnel.bind(t.toCaller)
+    t.toCaller.sendTunnel = (message, bytes) => {
+      if (message.t === 'tunnel.close' && refused < 3) {
+        refused++
+        return Promise.reject(new NetError('rate_limited'))
+      }
+      return real(message, bytes)
+    }
+    t.refusal.current = 'blocked'
+    t.host.reconcile()
+    expect(await tunnel.closed).toBe('blocked')
+    expect(refused).toBe(3)
+  })
+
+  it('and an open that finds the queue full is waited out', async () => {
+    const t = await bed()
+    let calls = 0
+    const real = t.toHost.sendTunnel.bind(t.toHost)
+    t.toHost.sendTunnel = (message, bytes) => {
+      if (message.t === 'tunnel.open' && calls++ < 2)
+        return Promise.reject(new NetError('rate_limited'))
+      return real(message, bytes)
+    }
+    const tunnel = await t.open()
+    expect(tunnel.path).toBe('direct')
+    expect(calls).toBe(3)
+  })
+})
+
+describe('a far end the system cannot vouch for', () => {
+  it('is refused `host_untrusted` before its keys are read, and let go at once', async () => {
+    const t = await bed({
+      host: { hostTrust: async () => ({ ok: false, detail: 'sshd is not running' }) }
+    })
+    expect((await rejection(t.open())).reason).toBe('host_untrusted')
+    await until(() => t.echo.sockets.size === 0, 'the far end to be closed')
+    expect(t.host.count(CALLER)).toBe(0)
+    expect(t.firstOpens).toEqual([])
+    expect(t.hostAudit.rows).toEqual([
+      expect.objectContaining({ method: 'editor.open', kind: 'refused', outcome: 'host_untrusted' })
+    ])
+  })
+
+  it('is refused when the check itself fails, and allowed when it says yes', async () => {
+    const broken = await bed({
+      host: {
+        hostTrust: () => {
+          throw new Error('no powershell')
+        }
+      }
+    })
+    expect((await rejection(broken.open())).reason).toBe('host_untrusted')
+    const fine = await bed({ host: { hostTrust: async () => ({ ok: true }) } })
+    const tunnel = await fine.open()
+    expect(tunnel.hostKeys).toEqual([KEY_A])
+  })
+})

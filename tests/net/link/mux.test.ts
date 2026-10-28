@@ -184,6 +184,30 @@ describe('real duplex mux', () => {
       expect(lanes.lastIndexOf(1)).toBeGreaterThan(lastTunnel)
       expect(lanes.indexOf(2)).toBeLessThan(lanes.lastIndexOf(1))
     })
+    it('never refuses a close for want of room in a full control queue, and sends it ahead of what waits', async () => {
+      const { a, b, connection } = pair()
+      const received: string[] = []
+      b.onMessage((_lane, value) => received.push(value.header.t))
+      connection.forward.stall()
+      const close = (n: number): MuxMessage => ({
+        header: { t: 'tunnel.close', tunnel: TUNNEL.replace(/.$/u, String(n)), reason: 'blocked' },
+        parts: []
+      })
+      // One message is being sent and the queue behind it is full: another ordinary message is refused.
+      const active = a.send('control', message('control')).catch((error) => error)
+      const waiting = a.send('control', ping).catch((error) => error)
+      await expect(a.send('control', message('control'))).rejects.toMatchObject({
+        code: 'rate_limited'
+      })
+      // A close still goes in, as many as a block of several tunnels makes, and is not refused.
+      const closes = [1, 2, 3, 4].map((n) => a.send('control', close(n)))
+      connection.forward.resume()
+      await Promise.all([active, waiting, ...closes])
+      await tick()
+      // The closes wait ahead of the ordinary message that was already waiting.
+      expect(received.indexOf('ping')).toBeGreaterThan(received.lastIndexOf('tunnel.close'))
+      expect(received.filter((type) => type === 'tunnel.close')).toHaveLength(4)
+    })
     it('keeps control moving when the tunnel lane has used its credit', async () => {
       const clock = new FakeClock(),
         connection = memoryPair(clock),

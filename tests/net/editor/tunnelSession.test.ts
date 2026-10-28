@@ -8,7 +8,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { NetService, type NetDomainComposition } from '../../../src/mms/net/NetService'
 import type { SshVerifier } from '../../../src/mms/net/editor/sshConfig'
 import { TunnelError, type ClientTunnel } from '../../../src/mms/net/editor/tunnel'
-import { NetError, type NodeId } from '../../../src/shared/net'
+import { NetError, newId, type NodeId } from '../../../src/shared/net'
 import type { EditorSshStatus } from '../../../src/shared/net/local'
 import { KEY_A, KEY_B } from '../ssh/bed'
 
@@ -87,6 +87,10 @@ async function pair(
     keys?: Array<{ type: string; key: string }>
     /** The computer that opens tunnels is the authority, and the one that carries the far end has joined it. */
     callerIsAuthority?: boolean
+    /** False: the computer that opens tunnels does not offer `tunnel.v1`, like a build from before it. */
+    laptopOffers?: boolean
+    /** What the computer that carries the far end composes into its network service. */
+    ownerDomain?: NetDomainComposition
   } = {}
 ) {
   const echo = await echoServer()
@@ -98,6 +102,7 @@ async function pair(
   )
   const owner = new NetService({
     profileDir: await directory('net-tunnel-owner-'),
+    ...(options.ownerDomain ? { composeRuntime: () => options.ownerDomain } : {}),
     editorTunnel: { farEnd: [{ host: '127.0.0.1', port: echo.port }], hostKeyDirectories: [keys] }
   })
   cleanups.push(() => owner.shutdown())
@@ -106,6 +111,7 @@ async function pair(
   await mkdir(mousseHome, { recursive: true })
   const laptop = new NetService({
     profileDir: await directory('net-tunnel-laptop-'),
+    ...(options.laptopOffers === false ? { editorTunnel: { offer: false } } : {}),
     composeRuntime: (): NetDomainComposition => ({
       session: { capabilities: ['streams.v1', 'blobs.v1', 'rpc.v1'] }
     }),
@@ -376,44 +382,168 @@ describe('editor tunnels over a real session', () => {
 })
 
 describe('host keys', () => {
-  it('are pinned in Mousse’s own known_hosts before the stream is handed over, and replaced when the computer’s key changes', async () => {
-    // The authority records which devices are computers, so it is the computer that gets the aliases.
-    const t = await pair({ editorSsh: true, callerIsAuthority: true })
-    await t.policy({ editor: true })
-    await t.laptop.request('net.editor.ssh.enable', {})
-    let alias = ''
-    await vi.waitFor(async () => {
-      const status = (await t.laptop.request('net.editor.ssh.status', {})) as EditorSshStatus
-      expect(status.computers.map((row) => row.node)).toEqual([t.self.node])
-      alias = status.computers[0]!.alias
-    })
-    const knownHosts = join(t.mousseHome, 'ssh', 'known_hosts')
+  it.each([
+    ['a computer that joined (a follower)', false],
+    ['the authority', true]
+  ])(
+    'are pinned in Mousse’s own known_hosts before the stream is handed over, and replaced when the key changes, for %s',
+    async (_name, callerIsAuthority) => {
+      const t = await pair({ editorSsh: true, callerIsAuthority })
+      await t.policy({ editor: true })
+      await t.laptop.request('net.editor.ssh.enable', {})
+      let alias = ''
+      await vi.waitFor(async () => {
+        const status = (await t.laptop.request('net.editor.ssh.status', {})) as EditorSshStatus
+        // The computer that carries the far end has its alias, whichever of the two kinds of computer this is.
+        expect(status.computers.map((row) => row.node)).toEqual([t.self.node])
+        alias = status.computers[0]!.alias
+      })
+      const knownHosts = join(t.mousseHome, 'ssh', 'known_hosts')
 
-    const first = await t.open()
-    expect(first.info.hostKey).toBe('added')
-    expect(await readFile(knownHosts, 'utf8')).toContain(`${alias} ${KEY_A.type} ${KEY_A.key}`)
-    first.tunnel.close()
+      const first = await t.open()
+      expect(first.info.hostKey).toBe('added')
+      expect(await readFile(knownHosts, 'utf8')).toContain(`${alias} ${KEY_A.type} ${KEY_A.key}`)
+      first.tunnel.close()
 
-    const second = await t.open()
-    expect(second.info.hostKey).toBe('present')
-    second.tunnel.close()
+      const second = await t.open()
+      expect(second.info.hostKey).toBe('present')
+      second.tunnel.close()
 
-    // The owner's SSH server got a new key: the owner vouches for it over Net, so it is pinned, not asked about.
-    await writeFile(t.keyFile, `${KEY_B.type} ${KEY_B.key} root@owner\n`)
-    const third = await t.open()
-    expect(third.info.hostKey).toBe('replaced')
-    const text = await readFile(knownHosts, 'utf8')
-    expect(text).toContain(`${alias} ${KEY_B.type} ${KEY_B.key}`)
-    expect(text).not.toContain(KEY_A.key)
-    third.tunnel.close()
-  }, 60_000)
+      // The owner's SSH server got a new key: the owner vouches for it over Net, so it is pinned, not asked about.
+      await writeFile(t.keyFile, `${KEY_B.type} ${KEY_B.key} root@owner\n`)
+      const third = await t.open()
+      expect(third.info.hostKey).toBe('replaced')
+      const text = await readFile(knownHosts, 'utf8')
+      expect(text).toContain(`${alias} ${KEY_B.type} ${KEY_B.key}`)
+      expect(text).not.toContain(KEY_A.key)
+      third.tunnel.close()
+    },
+    60_000
+  )
 
-  it('leave nothing open when they cannot be pinned', async () => {
+  it('do not open anything when the computer has no alias yet: no connection, no row, no notice', async () => {
     // This computer keeps editor settings, but has no alias for the owner yet: strict checking would refuse the key.
-    const t = await pair({ editorSsh: true, callerIsAuthority: true })
+    const t = await pair({ editorSsh: true })
+    const firstOpens: NodeId[] = []
+    t.owner.onEditorFirstOpen((node) => firstOpens.push(node))
     await t.policy({ editor: true })
     await expect(t.open()).rejects.toMatchObject({ code: 'unknown_computer' })
-    await vi.waitFor(() => expect(t.laptop.editorTunnelList()).toEqual([]))
+    expect(t.echo.connections).toBe(0)
+    expect(t.owner.runtime().audit.recent(100, t.laptopNode)).toEqual([])
+    expect(firstOpens).toEqual([])
+    expect(t.laptop.editorTunnelList()).toEqual([])
+  }, 60_000)
+})
+
+describe('which computers get an editor alias', () => {
+  it('on a follower: the authority and the other followers, and no phone', async () => {
+    const t = await pair({ editorSsh: true })
+    const authority = t.owner
+    // A second follower, and a phone.
+    const invite = async (params: Record<string, unknown> = {}) =>
+      ((await authority.request('bridge.invite', params)) as { invite: string }).invite
+    const second = new NetService({ profileDir: await directory('net-tunnel-second-') })
+    cleanups.push(() => second.shutdown())
+    const secondNode = (
+      (await second.request('bridge.join', { invite: await invite(), name: 'second' })) as {
+        node: NodeId
+      }
+    ).node
+    const phone = new NetService({ profileDir: await directory('net-tunnel-phone-') })
+    cleanups.push(() => phone.shutdown())
+    const phoneNode = (
+      (await phone.request('bridge.join', {
+        invite: await invite({ caps: ['read', 'chat', 'write'] }),
+        name: 'phone'
+      })) as { node: NodeId }
+    ).node
+    await authority.request('bridge.setKind', { node: phoneNode, kind: 'phone' })
+
+    await t.laptop.request('net.editor.ssh.enable', {})
+    await vi.waitFor(
+      async () => {
+        const status = (await t.laptop.request('net.editor.ssh.status', {})) as EditorSshStatus
+        expect(status.computers.map((row) => row.node).sort()).toEqual(
+          [t.self.node, secondNode].sort()
+        )
+      },
+      { timeout: 20_000 }
+    )
+    // Not the follower itself, not the phone.
+    const status = (await t.laptop.request('net.editor.ssh.status', {})) as EditorSshStatus
+    expect(status.computers.map((row) => row.node)).not.toContain(t.laptopNode)
+    expect(status.computers.map((row) => row.node)).not.toContain(phoneNode)
+  }, 90_000)
+})
+
+describe('a computer from before tunnels', () => {
+  it('is told `unsupported`, and nothing is sent on the tunnel lane or accepted from it', async () => {
+    const t = await pair({ laptopOffers: false })
+    await t.policy({ editor: true })
+    const sessionOf = (net: NetService) =>
+      [
+        ...(
+          net as unknown as {
+            sessions: Set<{
+              state(): string
+              supportsTunnels(): boolean
+              send(message: unknown): Promise<void>
+            }>
+          }
+        ).sessions
+      ].find((session) => session.state() === 'open')!
+    // Neither side negotiated it.
+    expect(sessionOf(t.laptop).supportsTunnels()).toBe(false)
+    expect(sessionOf(t.owner).supportsTunnels()).toBe(false)
+    expect(await reason(t.open())).toBe('unsupported')
+    await expect(t.owner.openEditorTunnel(t.laptopNode)).rejects.toMatchObject({
+      reason: 'unsupported'
+    })
+    expect(t.echo.connections).toBe(0)
+
+    // A `tunnel.*` message that the peer sends anyway is refused: the owner ends that session.
+    const owners = sessionOf(t.owner)
+    const sent = sessionOf(t.laptop).send({ t: 'tunnel.open', tunnel: 'b'.repeat(32), kind: 'ssh' })
+    await sent.catch(() => {})
+    await vi.waitFor(() => expect(owners.state()).not.toBe('open'), { timeout: 10_000 })
+    expect(t.echo.connections).toBe(0)
+    expect(t.owner.editorTunnelList()).toEqual([])
+  }, 60_000)
+
+  it('is not a reason for the others to stop working: a computer that offers it still opens tunnels', async () => {
+    const t = await pair()
+    await t.policy({ editor: true })
+    const { tunnel } = await t.open()
+    await echoed(tunnel)
+  }, 60_000)
+})
+
+describe('a block when something else fails', () => {
+  it('still ends the tunnels, even when closing the private streams throws', async () => {
+    const t = await pair({
+      ownerDomain: {
+        privateStreams: {
+          access: () => undefined,
+          close: () => {
+            throw new Error('the streams could not be closed')
+          },
+          release: () => []
+        }
+      }
+    })
+    await t.policy({ editor: true })
+    const { tunnel } = await t.open()
+    await echoed(tunnel)
+    await t.policy({ blocked: true })
+    expect(await tunnel.closed).toBe('blocked')
     await vi.waitFor(() => expect(t.echo.sockets.size).toBe(0))
+    expect(t.owner.editorTunnelList()).toEqual([])
+  }, 60_000)
+
+  it('refuses to open to a computer that is not on this user’s roster', async () => {
+    const t = await pair()
+    await expect(t.laptop.openEditorTunnel(newId('node'))).rejects.toMatchObject({
+      code: 'bad_request'
+    })
   }, 60_000)
 })

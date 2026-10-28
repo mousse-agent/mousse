@@ -11,3 +11,4 @@ export * from './wire'
 export * from './schemas'
 
 export * from './local'
+export * from './listedComputer'

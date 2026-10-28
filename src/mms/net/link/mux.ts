@@ -7,6 +7,8 @@ import { laneFor, type Lane } from '../../../shared/net/wire'
 import { decodeMessage, encodeMessage, MAX_MESSAGE_BYTES } from '../sync/codec'
 
 export const MUX_WINDOWS = { control: 256 * 1024, bulk: 1024 * 1024, tunnel: 256 * 1024 } as const
+/** Room beyond a lane's waiting limit that only a `tunnel.close` may use (about a hundred bytes each). */
+const URGENT_RESERVE_BYTES = 16 * 1024
 const HEADER = 16,
   FIRST = 1,
   LAST = 2,
@@ -93,7 +95,13 @@ export class StreamMux implements Mux {
       return Promise.reject(error)
     }
     const state = this.lanes[lane]
-    if (state.active && state.waitingBytes + bytes.length > MUX_WINDOWS[lane])
+    // An abort of a tunnel is never refused for want of room, and goes ahead of what waits: it is what stops an
+    // editor connection a block or a switch has ended, and it is a hundred bytes.
+    const urgent = message.header.t === 'tunnel.close'
+    if (
+      state.active &&
+      state.waitingBytes + bytes.length > MUX_WINDOWS[lane] + (urgent ? URGENT_RESERVE_BYTES : 0)
+    )
       return Promise.reject(new NetError('rate_limited', 'Mux waiting queue is full.'))
     return new Promise((resolve, reject) => {
       const send: Send = { bytes, offset: 0, resolve, reject, signal }
@@ -128,7 +136,8 @@ export class StreamMux implements Mux {
       signal?.addEventListener('abort', abort, { once: true })
       if (!state.active) state.active = send
       else {
-        state.waiting.push(send)
+        if (urgent) state.waiting.unshift(send)
+        else state.waiting.push(send)
         state.waitingBytes += bytes.length
       }
       if (signal?.aborted) abort()

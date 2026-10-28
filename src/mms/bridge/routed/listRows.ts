@@ -128,18 +128,7 @@ export interface RowContext {
   notShared?: boolean
 }
 
-/**
- * Whether a device of the roster is one of the user's computers to list threads from. The kind the authority
- * recorded wins (a phone never is); a device whose kind is not known here is a computer only if its signed
- * delegation holds "Works on threads" (`settings`), which only computers are given.
- */
-export function isListedComputer(
-  kind: 'computer' | 'phone' | undefined,
-  caps: readonly string[]
-): boolean {
-  if (kind === 'phone') return false
-  return kind === 'computer' || caps.includes('settings')
-}
+export { isListedComputer } from '../../../shared/net/listedComputer'
 
 /** One thread row of a (qualified) lists snapshot as a row of the merged lists, with its place. */
 export function threadRow(

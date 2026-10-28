@@ -1420,6 +1420,11 @@ export class EditorSshConfig {
     })
   }
 
+  /** The alias Mousse keeps for a computer, or undefined if it has none yet (a cheap read of this profile's file). */
+  async aliasOf(node: NodeId): Promise<string | undefined> {
+    return (await this.readProfile(this.profile))?.computers[node]?.alias
+  }
+
   pinHostKey(
     node: NodeId,
     key: { type: string; key: string }

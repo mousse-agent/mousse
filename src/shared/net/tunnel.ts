@@ -34,6 +34,8 @@ export const TUNNEL_REASONS = [
   'no_ssh_server',
   /** The SSH server is there, but Mousse cannot read its public host key. */
   'no_host_key',
+  /** On Windows: the SSH server or its folder of keys cannot be shown to be the system's own, so Mousse does not vouch for it. */
+  'host_untrusted',
   /** The device already has all the tunnels it may have, or this computer has all it can carry. */
   'limit',
   /** The device opens tunnels faster than this computer takes them. */
@@ -56,6 +58,7 @@ export const TUNNEL_REFUSALS: readonly TunnelReason[] = [
   'editor_off',
   'no_ssh_server',
   'no_host_key',
+  'host_untrusted',
   'limit',
   'rate_limited'
 ]
@@ -80,6 +83,8 @@ export const TUNNEL_REASON_TEXT: Readonly<Record<TunnelFailure, string>> = {
   access_lost: 'This computer lost its access to the other computer.',
   no_ssh_server: 'The other computer has no SSH server running.',
   no_host_key: "The other computer's SSH host key could not be read.",
+  host_untrusted:
+    "The other computer's SSH server cannot be shown to be the system's own, so Mousse does not vouch for it. Its SSH folder or port 22 can be changed by another account.",
   limit: 'This computer already has all the editor connections it may have there.',
   rate_limited: 'Editor connections are being opened too fast.',
   far_end_error: "The other computer's SSH server ended the connection with an error.",

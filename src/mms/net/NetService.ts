@@ -79,6 +79,7 @@ import { parseSshRoute, readSshApproval } from './transports/ssh'
 import { SshBootstrap, type SshBootstrapOptions } from './ssh/bootstrap'
 import {
   EditorSshConfig,
+  EditorSshError,
   unavailableEditorSsh,
   type EditorSshOptions,
   type LiveComputer
@@ -91,6 +92,7 @@ import {
 } from './editor/tunnel'
 import type { EditorTunnelInfo, TunnelReason } from '../../shared/net/tunnel'
 import { isJoinVia } from '../../shared/net/via'
+import { isListedComputer } from '../../shared/net/listedComputer'
 import {
   PHONE_ENDPOINTS_METHOD,
   PHONE_WEBRTC_OFFER_METHOD,
@@ -295,8 +297,11 @@ export class NetService {
        */
       editorTunnel?: Pick<
         EditorTunnelOptions,
-        'farEnd' | 'hostKeyDirectories' | 'perNode' | 'total' | 'opensPerMinute'
-      >
+        'farEnd' | 'hostKeyDirectories' | 'hostTrust' | 'perNode' | 'total' | 'opensPerMinute'
+      > & {
+        /** False: sessions do not offer `tunnel.v1`, like a build from before it (tests). */
+        offer?: boolean
+      }
       /** Tests replace the native WebRTC stack and this computer's addresses. */
       phoneWebRtc?: {
         factory?: PeerConnectionFactory
@@ -559,6 +564,7 @@ export class NetService {
         remoteLists: new SqliteRemoteLists(db, this.clock),
         rpc
       }
+      const { offer: _offer, ...tunnelOptions } = this.options.editorTunnel ?? {}
       this.tunnels = new EditorTunnels({
         clock: this.clock,
         audit: this.state.audit,
@@ -573,18 +579,19 @@ export class NetService {
             }
           }
         },
-        ...this.options.editorTunnel
+        ...tunnelOptions
       })
       // A block ends what the device is doing here now, not only what it asks for next.
       this.policyListener = policy.onChange((event) => {
+        // An editor tunnel is shell access: a block, or its switch going off, ends the device's tunnels now. This
+        // comes first, and cannot throw, so nothing below it that fails can leave a tunnel standing.
+        this.tunnels?.reconcile()
         if (event.after.blocked && !event.before.blocked) this.endBlockedNode(event.node)
         // Terminal output is for a device whose terminal switch is on; switching it off ends the stream at once.
         else if (event.before.terminal && !event.after.terminal)
           this.endPrivateServing(
             this.domain?.privateStreams?.close({ reader: event.node, kind: 'terminal' }) ?? []
           )
-        // An editor tunnel is shell access: a block, or its switch going off, ends the device's tunnels now.
-        this.tunnels?.reconcile()
       })
       this.domain = this.options.composeRuntime?.(this.state) ?? undefined
       this.rosterListener = identity.onRosterChanged((user) => {
@@ -1584,6 +1591,8 @@ export class NetService {
       if (this.config.workOnThreads === false) return false
       return access.kind !== 'terminal' || rt.policy.get(peer.node).terminal
     }
+    // Sessions offer editor tunnels, unless a test stands in for a build from before them.
+    const offered = this.options.editorTunnel?.offer !== false
     const session = new NetSyncSession({
       ...this.domain?.session,
       channel,
@@ -1600,8 +1609,8 @@ export class NetService {
       // Method-family policy is enforced by the dispatcher on every entry point.
       rpc: rt.rpc,
       // Editor tunnels (`tunnel.v1`). A domain that lists its capabilities gets this one added to the list.
-      tunnels: this.tunnels,
-      ...(this.domain?.session?.capabilities
+      ...(offered ? { tunnels: this.tunnels } : {}),
+      ...(offered && this.domain?.session?.capabilities
         ? {
             capabilities: [...new Set([...this.domain.session.capabilities, 'tunnel.v1' as const])]
           }
@@ -2025,6 +2034,21 @@ export class NetService {
     const rt = this.requireEnrolled(),
       tunnels = this.tunnels
     if (!tunnels || node === rt.identity.self()?.node) throw new NetError('bad_request')
+    // A computer of this user's roster only (a device of another user has no session that can carry a tunnel).
+    try {
+      this.currentNode(node)
+    } catch {
+      throw new NetError('bad_request', 'Unknown computer.')
+    }
+    // With editor settings here, the computer needs its alias before anything is opened: the host key is pinned
+    // under it, and a tunnel that would only be closed again must not touch the other computer's SSH server,
+    // write its audit row or raise its notice.
+    const editor = this.editorSsh()
+    if (editor && !(await editor.aliasOf(node)))
+      throw new EditorSshError(
+        'unknown_computer',
+        'This computer has no editor alias for that computer yet.'
+      )
     let link: NetSyncSession | undefined
     for (const session of this.sessions) {
       try {
@@ -2041,7 +2065,6 @@ export class NetService {
       (async () => {
         const tunnel = await tunnels.open(opened, signal)
         let hostKey: EditorTunnelInfo['hostKey'] = 'unpinned'
-        const editor = this.editorSsh()
         if (editor) {
           try {
             hostKey = await editor.pinHostKeys(node, tunnel.hostKeys)
@@ -2751,10 +2774,27 @@ export class NetService {
   /** The other computers of this user, for the aliases an editor opens. Phones have no folders to open. */
   private liveComputers(): LiveComputer[] {
     const view = this.nodes() as {
-      nodes: Array<{ node: NodeId; name: string; kind: string; self: boolean; revoked: boolean }>
+      nodes: Array<{
+        node: NodeId
+        name: string
+        kind: string
+        caps: string[]
+        self: boolean
+        revoked: boolean
+      }>
     }
+    // The same rule as the lists of threads. Only the authority records which devices are computers, so on any
+    // other computer the rest are of unknown kind, and a computer is told by the grant only computers hold.
     return view.nodes
-      .filter((entry) => !entry.self && !entry.revoked && entry.kind === 'computer')
+      .filter(
+        (entry) =>
+          !entry.self &&
+          !entry.revoked &&
+          isListedComputer(
+            entry.kind === 'computer' || entry.kind === 'phone' ? entry.kind : undefined,
+            entry.caps
+          )
+      )
       .map((entry) => ({ node: entry.node, name: entry.name }))
   }
   /**

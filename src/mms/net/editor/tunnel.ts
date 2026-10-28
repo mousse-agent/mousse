@@ -24,6 +24,7 @@ import {
 import type { TunnelMessage } from '../../../shared/net/wire'
 import type { Clock, SessionTunnelPort, TunnelLink } from '../contracts'
 import type { SqliteBridgeAudit } from '../store/audit'
+import { checkHostTrust, type HostTrust } from './hostTrust'
 import { isHostKey } from './sshConfig'
 
 /**
@@ -61,6 +62,10 @@ const FAR_END_CONNECT_MS = 3_000
 const LINGER_MS = 30_000
 const SEND_RETRY_MS = 25
 const OPEN_WINDOW_MS = 60_000
+/** A kind of refusal is written to the audit at most once in this long for a device. */
+const REFUSAL_ROW_WINDOW_MS = 60_000
+/** How long a close or an open waits for room in a full control queue (`rate_limited`) before it gives up. */
+const SEND_PATIENCE_TRIES = 80
 
 /** Why a tunnel ended here: a wire reason, or the session it rode on was lost. */
 export type TunnelEnd = TunnelReason | 'session_closed'
@@ -316,7 +321,11 @@ class TunnelPipe {
     return out
   }
 
-  /** Sends one message, waiting for room when the lane's queue is full. */
+  /**
+   * Sends one message, waiting for room when the lane's queue is full. The wait is a poll, not a queue: tunnels of
+   * one session that wait together are served in whatever order their timers fire, so under sustained load one can
+   * get less than its share of its siblings (it is never stuck: the queue empties as the lane is sent).
+   */
   private async deliver(message: TunnelMessage, bytes?: Uint8Array): Promise<void> {
     for (;;) {
       try {
@@ -441,6 +450,12 @@ export interface EditorTunnelOptions {
   farEnd?: ReadonlyArray<{ host: string; port: number }>
   /** Tests replace the directories the public host keys are read from. */
   hostKeyDirectories?: readonly string[]
+  /**
+   * Whether the SSH server on the far end and its folder of keys can be vouched for. By default this is the check
+   * for Windows in `hostTrust.ts` (nothing to check elsewhere); a service built with its own far end or key
+   * folder (tests) has none unless it is given one.
+   */
+  hostTrust?: () => Promise<HostTrust>
   perNode?: number
   total?: number
   opensPerMinute?: number
@@ -454,8 +469,13 @@ export class EditorTunnels implements SessionTunnelPort {
   private readonly tunnels = new Map<string, Entry>()
   private readonly claims = new Set<Claim>()
   private readonly opens = new Map<NodeId, number[]>()
+  /** Ids of opens in progress: held from the moment the message is read, before the first await. */
+  private readonly reserved = new Set<string>()
+  /** When a row was last written for each kind of refusal of each device. */
+  private readonly refusalRows = new Map<string, number>()
   private readonly farEnd: ReadonlyArray<{ host: string; port: number }>
   private readonly hostKeyDirectories: readonly string[]
+  private readonly trust?: () => Promise<HostTrust>
   private readonly perNode: number
   private readonly total: number
   private readonly opensPerMinute: number
@@ -466,6 +486,11 @@ export class EditorTunnels implements SessionTunnelPort {
     if (!this.farEnd.length || this.farEnd.some((target) => !LOOPBACK_HOSTS.has(target.host)))
       throw new NetError('bad_request', 'An editor tunnel ends on loopback only.')
     this.hostKeyDirectories = options.hostKeyDirectories ?? defaultHostKeyDirectories()
+    this.trust =
+      options.hostTrust ??
+      (options.farEnd || options.hostKeyDirectories
+        ? undefined
+        : () => checkHostTrust({ directories: this.hostKeyDirectories }))
     this.perNode = options.perNode ?? EDITOR_TUNNELS_PER_NODE
     this.total = options.total ?? EDITOR_TUNNELS_MAX
     this.opensPerMinute = options.opensPerMinute ?? EDITOR_OPENS_PER_MINUTE
@@ -566,25 +591,41 @@ export class EditorTunnels implements SessionTunnelPort {
   ): Promise<void> {
     const { audit } = this.options
     const node = link.peer.node
-    // An id that is already in use belongs to a tunnel that exists; the opener of that one is not disturbed.
-    if (this.tunnels.has(message.tunnel)) return
+    const id = message.tunnel
+    // An id that is in use, or being opened, belongs to a tunnel that exists or is on its way: it is not opened a
+    // second time, and the opener of the first is not disturbed. The id is held before anything is awaited, so
+    // any number of opens made at once with one id give one tunnel, counted, limited and ended like any other.
+    if (this.tunnels.has(id) || this.reserved.has(id)) return
+    this.reserved.add(id)
     const refuse = (reason: TunnelReason): void => {
-      // A refusal that tells the owner something is a row: the device is allowed to be here but could not open
-      // one. Refusals for a blocked or switched-off computer are not rows, so a device cannot fill the audit.
+      // A refusal that tells the owner something is a row (at most one of each kind per device a minute): the
+      // device is allowed to be here but could not open one. Refusals for a blocked or switched-off computer are
+      // not rows, so a device cannot fill the audit.
       if (
         reason === 'editor_off' ||
         reason === 'no_ssh_server' ||
         reason === 'no_host_key' ||
+        reason === 'host_untrusted' ||
         reason === 'limit'
       )
-        audit.record({ node, method: 'editor.open', outcome: reason, kind: 'refused' })
-      this.tell(link, { t: 'tunnel.close', tunnel: message.tunnel, reason })
+        this.recordRefusal(node, reason)
+      this.tell(link, { t: 'tunnel.close', tunnel: id, reason })
+    }
+    // The rate comes first: a device that is refused still costs this computer something, so how often it may
+    // ask is decided before the roster is read, the policy is read or a row is written.
+    if (!this.allowOpen(node)) {
+      this.reserved.delete(id)
+      return refuse('rate_limited')
     }
     const gate = this.safeRefusal(link)
-    if (gate) return refuse(gate)
-    if (!this.allowOpen(node)) return refuse('rate_limited')
-    if (this.count(node) >= this.perNode || this.hostCount() + this.claims.size >= this.total)
+    if (gate) {
+      this.reserved.delete(id)
+      return refuse(gate)
+    }
+    if (this.count(node) >= this.perNode || this.hostCount() + this.claims.size >= this.total) {
+      this.reserved.delete(id)
       return refuse('limit')
+    }
     // The slot is taken before anything is awaited, so two opens made at once cannot both pass.
     const claim: Claim = { node, link }
     this.claims.add(claim)
@@ -594,6 +635,13 @@ export class EditorTunnels implements SessionTunnelPort {
         socket = await connectFarEnd(this.farEnd, FAR_END_CONNECT_MS)
       } catch {
         return refuse('no_ssh_server')
+      }
+      // Whether what answered is the system's own SSH server (checked on Windows, where any account could be).
+      if (this.trust) {
+        const verdict = await Promise.resolve()
+          .then(() => this.trust!())
+          .catch(() => ({ ok: false }))
+        if (!verdict.ok) return refuse('host_untrusted')
       }
       const keys = await readHostKeys(this.hostKeyDirectories).catch(() => [])
       if (!keys.length) return refuse('no_host_key')
@@ -647,8 +695,22 @@ export class EditorTunnels implements SessionTunnelPort {
       if (!entry.done) entry.pipe.start()
     } finally {
       this.claims.delete(claim)
+      this.reserved.delete(id)
       socket?.destroy()
     }
+  }
+
+  /** At most one row of a kind of refusal per device a minute, so a device that keeps asking cannot fill the audit. */
+  private recordRefusal(node: NodeId, reason: TunnelReason): void {
+    const now = this.options.clock.now()
+    const key = `${node} ${reason}`
+    const last = this.refusalRows.get(key)
+    if (last !== undefined && now - last < REFUSAL_ROW_WINDOW_MS) return
+    if (this.refusalRows.size >= 256)
+      for (const [name, at] of this.refusalRows)
+        if (now - at >= REFUSAL_ROW_WINDOW_MS) this.refusalRows.delete(name)
+    this.refusalRows.set(key, now)
+    this.options.audit.record({ node, method: 'editor.open', outcome: reason, kind: 'refused' })
   }
 
   private hostCount(): number {
@@ -697,10 +759,19 @@ export class EditorTunnels implements SessionTunnelPort {
         entry.release.push(() => signal.removeEventListener('abort', abort))
       }
       entry.release.push(link.onClosed(() => this.finish(entry, 'session_closed', false)))
-      // Everything the open says is `ssh`: there is no field in which to name a host or a port.
-      link
-        .sendTunnel({ t: 'tunnel.open', tunnel: id, kind: 'ssh' })
-        .catch(() => this.finish(entry, 'offline', false))
+      // Everything the open says is `ssh`: there is no field in which to name a host or a port. A full control
+      // queue is waited out for a while; a session that cannot take it at all is offline.
+      this.sendReliably(
+        link,
+        { t: 'tunnel.open', tunnel: id, kind: 'ssh' },
+        () => entry.done
+      ).catch((error) =>
+        this.finish(
+          entry,
+          error instanceof NetError && error.code === 'rate_limited' ? 'timeout' : 'offline',
+          false
+        )
+      )
     })
   }
 
@@ -774,7 +845,8 @@ export class EditorTunnels implements SessionTunnelPort {
   private finish(entry: Entry, reason: EndReason, notify: boolean): void {
     if (entry.done) return
     entry.done = true
-    this.tunnels.delete(entry.id)
+    // Only this entry's own place: the id is never shared, but a map entry must never be taken for another's.
+    if (this.tunnels.get(entry.id) === entry) this.tunnels.delete(entry.id)
     for (const release of entry.release.splice(0)) release()
     // What a person is told: a lost session is "offline".
     const failure: TunnelFailure = reason === 'session_closed' ? 'offline' : reason
@@ -801,12 +873,37 @@ export class EditorTunnels implements SessionTunnelPort {
     entry.settle?.(failure)
   }
 
-  /** Tells the other computer something about an end, if it can still hear. Never throws: an end must complete. */
+  /**
+   * Tells the other computer something about an end, if it can still hear. Never throws: an end must complete.
+   * A close is never dropped because the control queue is full: the mux keeps room for it and puts it first, and
+   * this waits and tries again if even that was refused.
+   */
   private tell(link: TunnelLink, message: TunnelMessage): void {
-    try {
-      link.sendTunnel(message).catch(() => {})
-    } catch {
+    void this.sendReliably(link, message).catch(() => {
       // A session that is closing says so by throwing; the tunnel ends either way.
+    })
+  }
+
+  /** Sends a control message, waiting (a little) for room when the queue is full. Rejects with the last error. */
+  private async sendReliably(
+    link: TunnelLink,
+    message: TunnelMessage,
+    stop: () => boolean = () => false
+  ): Promise<void> {
+    for (let attempt = 0; ; attempt++) {
+      try {
+        await link.sendTunnel(message)
+        return
+      } catch (error) {
+        if (
+          !(error instanceof NetError) ||
+          error.code !== 'rate_limited' ||
+          attempt >= SEND_PATIENCE_TRIES
+        )
+          throw error
+      }
+      await sleep(SEND_RETRY_MS)
+      if (stop()) return
     }
   }
 
