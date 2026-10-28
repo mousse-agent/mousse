@@ -10,7 +10,8 @@ const btn = 'settings-btn devices-dialog-btn'
 
 /**
  * What a computer may do on this one, set on this computer alone: the most permissive mode a
- * person on it can run a turn or an "Always" rule in, and whether it can open terminals here.
+ * person on it can run a turn or an "Always" rule in, whether it can open terminals here, and whether
+ * it can open its editor on this computer's folders (an SSH login here, so shell access like a terminal).
  */
 export function DeviceLimitsDialog({ node, name, policy, onClose, onDone }: {
   node: NodeId
@@ -23,12 +24,14 @@ export function DeviceLimitsDialog({ node, name, policy, onClose, onDone }: {
   const { busy, error, call } = useDaemonCall()
   const [mode, setMode] = useState<PermissionMode>(policy.maxPermissionMode)
   const [terminal, setTerminal] = useState(policy.terminal)
-  const changed = mode !== policy.maxPermissionMode || terminal !== policy.terminal
+  const [editor, setEditor] = useState(policy.editor)
+  const changed = mode !== policy.maxPermissionMode || terminal !== policy.terminal || editor !== policy.editor
   const save = async () => {
     const answer = await call('bridge.policy', {
       node,
       ...(mode !== policy.maxPermissionMode ? { maxPermissionMode: mode } : {}),
-      ...(terminal !== policy.terminal ? { terminal } : {})
+      ...(terminal !== policy.terminal ? { terminal } : {}),
+      ...(editor !== policy.editor ? { editor } : {})
     })
     if (answer) { onDone(); onClose() }
   }
@@ -51,6 +54,13 @@ export function DeviceLimitsDialog({ node, name, policy, onClose, onDone }: {
           <span>Terminals from this device</span>
           <Switch checked={terminal} label={`Terminals from ${name}`} disabled={busy} onChange={setTerminal} />
         </div>
+        <div className="devices-field">
+          <span>Editor connections from this device</span>
+          <Switch checked={editor} label={`Editor connections from ${name}`} disabled={busy} onChange={setEditor} />
+        </div>
+        <p className="settings-muted">
+          An editor connection is shell access: {name} signs in to this computer's own SSH server, as you, for as long as the editor stays connected. It ends at once when you block {name}, turn this off or turn Mousse Net off. This computer needs an SSH server running.
+        </p>
         {error && <p role="alert" className="chat-error">{error}</p>}
       </div>
     </Modal>

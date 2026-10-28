@@ -126,6 +126,28 @@ describe('network CLI validation', () => {
       method: 'bridge.policy',
       params: { node: nodeId, maxPermissionMode: 'full', terminal: true }
     })
+    // The editor switch is its own: on, off, and together with the others.
+    expect(prepareNetCommand(args('bridge', 'limits', [nodeId], [['editor', 'on']]))).toEqual({
+      method: 'bridge.policy',
+      params: { node: nodeId, editor: true }
+    })
+    expect(prepareNetCommand(args('bridge', 'limits', [nodeId], [['editor', 'off']]))).toEqual({
+      method: 'bridge.policy',
+      params: { node: nodeId, editor: false }
+    })
+    expect(
+      prepareNetCommand(
+        args(
+          'bridge',
+          'limits',
+          [nodeId],
+          [
+            ['terminal', 'on'],
+            ['editor', 'on']
+          ]
+        )
+      )
+    ).toEqual({ method: 'bridge.policy', params: { node: nodeId, terminal: true, editor: true } })
     expect(
       prepareNetCommand(args('bridge', 'caps', [nodeId], [['caps', 'read,chat,write,settings']]))
     ).toEqual({
@@ -142,6 +164,8 @@ describe('network CLI validation', () => {
       args('bridge', 'limits', [nodeId]),
       args('bridge', 'limits', [nodeId], [['max-mode', 'root']]),
       args('bridge', 'limits', [nodeId], [['terminal', 'maybe']]),
+      args('bridge', 'limits', [nodeId], [['editor', 'maybe']]),
+      args('bridge', 'block', [nodeId], [['editor', 'on']]),
       args('bridge', 'caps', [nodeId]),
       args('bridge', 'caps', [nodeId], [['caps', 'read,read']]),
       args('bridge', 'caps', [nodeId], [['caps', 'read,root']]),
@@ -171,7 +195,8 @@ describe('network CLI validation', () => {
   })
   it('sends bridge threads on, off or alone to the setting, and bridge threads with a computer to the Hub', () => {
     // The Hub also has a threads subcommand (a computer's list); it must not swallow the switch.
-    for (const rest of [[], ['on'], ['off']]) expect(isBridgeHubCommand(args('bridge', 'threads', rest))).toBe(false)
+    for (const rest of [[], ['on'], ['off']])
+      expect(isBridgeHubCommand(args('bridge', 'threads', rest))).toBe(false)
     expect(isBridgeHubCommand(args('bridge', 'threads', [nodeId]))).toBe(true)
     expect(isBridgeHubCommand(args('bridge', 'threads', [nodeId, 'extra']))).toBe(true)
     expect(isBridgeHubCommand(args('bridge', 'threads', ['on', 'off']))).toBe(true)
