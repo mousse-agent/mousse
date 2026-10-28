@@ -12,7 +12,7 @@ import type { InstanceBinary } from '../../src/shared/harness/status'
 import { observeHarnessSpawns } from '../../src/mms/harness/spawn'
 import { describeStatus } from '../../src/shared/harness/status'
 import { testHarness } from '../../src/mms/run/testkit/harness'
-import { ProviderInstanceService } from '../../src/mms/providers/ProviderInstanceService'
+import { ProviderInstanceService } from '../../src/mms/harness/instanceMap'
 
 const dirs: string[] = []
 afterEach(() => {

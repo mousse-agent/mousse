@@ -15,7 +15,7 @@ import { AgentInstalls, resetAgentInstallState } from '../../src/mms/harness/age
 import type { RegistryAgent } from '../../src/mms/harness/agents/registry'
 import { acpDriver } from '../../src/mms/harness/drivers/acp'
 import type { Harness, HarnessGatewayEvent } from '../../src/mms/harness/gateway'
-import { ProviderInstanceService } from '../../src/mms/providers/ProviderInstanceService'
+import { ProviderInstanceService } from '../../src/mms/harness/instanceMap'
 import { inProcessAgent } from '../../src/mms/run/testkit/acpAgent'
 import { testHarness } from '../../src/mms/run/testkit/harness'
 import { describeStatus } from '../../src/shared/harness/status'

@@ -7,7 +7,7 @@ import {
   CLAUDE_AUTH_STATUS_TTL_MS,
   ClaudeSubscriptionProviderService,
   claudeSubscriptionEnvironment
-} from '../src/mms/providers/claudeSubscription/ClaudeSubscriptionProviderService'
+} from '../src/mms/harness/vendors/claude/ClaudeSubscriptionProviderService'
 import { UserQuestionService } from '../src/mms/orchestrator/UserQuestionService'
 import { LoginSession } from '../src/mms/providers/LoginSession'
 

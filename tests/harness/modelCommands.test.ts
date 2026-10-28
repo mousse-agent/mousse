@@ -7,9 +7,9 @@ import { handleInteractiveSlash, type InteractiveCommandContext } from '../../sr
 import { dispatchSlashCommand, type SlashContext } from '../../src/mms/channels/slash/handlers'
 import { parseSlashCommand } from '../../src/mms/channels/slash/parse'
 import { piInstanceId, piProviderIdOf } from '../../src/shared/providerInstances'
-import { ProviderInstanceService } from '../../src/mms/providers/ProviderInstanceService'
+import { ProviderInstanceService } from '../../src/mms/harness/instanceMap'
 import { PiStubAdapter } from '../support/piStub'
-import type { ProviderAdapter } from '../../src/mms/run/adapters/ProviderAdapter'
+import type { ProviderAdapter } from '../../src/mms/harness/adapter'
 import { adapterDriver, testHarness } from '../../src/mms/run/testkit/harness'
 import type { LlmProviderOption } from '../../src/shared/settings'
 

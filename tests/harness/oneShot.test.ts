@@ -15,9 +15,9 @@ import { ONE_SHOT_INACTIVITY_MS, type Harness, type OneShotRequest } from '../..
 import { piDriver } from '../../src/mms/harness/drivers/pi'
 import { runPiOneShot } from '../../src/mms/harness/drivers/pi/oneShot'
 import { streamSimple as bedrockStreamSimple } from '@earendil-works/pi-ai/api/bedrock-converse-stream'
-import { ProviderInstanceService } from '../../src/mms/providers/ProviderInstanceService'
-import { CODEX_CAPABILITIES } from '../../src/mms/run/adapters/codex/CodexAdapter'
-import type { ProviderAdapter } from '../../src/mms/run/adapters/ProviderAdapter'
+import { ProviderInstanceService } from '../../src/mms/harness/instanceMap'
+import { CODEX_CAPABILITIES } from '../../src/mms/harness/drivers/codex/adapter'
+import type { ProviderAdapter } from '../../src/mms/harness/adapter'
 import { testHarness } from '../../src/mms/run/testkit/harness'
 
 const homes: string[] = []

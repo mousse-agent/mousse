@@ -132,9 +132,9 @@ const TRANSITIONAL: Record<string, string> = {
   'src/mms/run/adapters/codex/': 'PR 5 (adapters retired by drivers)',
   'src/mms/run/adapters/acp/': 'PR 5 (adapters retired by drivers)',
   'src/mms/run/adapters/cursor/': 'PR 5 (adapters retired by drivers)',
-  'src/mms/providers/claudeSubscription/': 'PR 5',
-  'src/mms/providers/codex/': 'PR 5',
-  'src/mms/providers/antigravity/': 'PR 5'
+  'src/mms/harness/vendors/claude/': 'PR 5',
+  'src/mms/harness/vendors/codex/': 'PR 5',
+  'src/mms/harness/acp/presets/antigravity/': 'PR 5'
 }
 
 function codeLines(source: string): Array<{ line: string; number: number }> {

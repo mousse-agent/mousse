@@ -3,7 +3,7 @@ import { pathToFileURL } from 'node:url'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { createAgentToolAccess } from '../../src/mms/agents/WorkspaceAccessPolicy'
-import type { TurnInput } from '../../src/mms/run/adapters/ProviderAdapter'
+import type { TurnInput } from '../../src/mms/harness/adapter'
 import { isRetriesExhausted } from '../../src/shared/harness/types'
 import { harness, script, setup as setupEngine, type SetupOptions } from './piRpcEngineFixture'
 

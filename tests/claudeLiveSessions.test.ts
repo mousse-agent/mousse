@@ -12,8 +12,8 @@ import {
   ClaudeSubscriptionProviderService,
   type ClaudeLiveHost,
   type ClaudeSubscriptionChatInput
-} from '../src/mms/providers/claudeSubscription/ClaudeSubscriptionProviderService'
-import { BackgroundObligations, LiveSession, UNSURE_MEMORY_MS, type LiveTimings } from '../src/mms/providers/claudeSubscription/liveSession'
+} from '../src/mms/harness/vendors/claude/ClaudeSubscriptionProviderService'
+import { BackgroundObligations, LiveSession, UNSURE_MEMORY_MS, type LiveTimings } from '../src/mms/harness/vendors/claude/liveSession'
 import { FakeClaudeCli, notification, resultFrame, roster, SESSION, textDelta, toolResult, toolStart } from './run/fakeClaudeCli'
 
 const later = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
@@ -1712,7 +1712,7 @@ describe('background helpers as the real Claude Code reports them', () => {
     const f = fixture()
     startedWith(f, { id: 'bash-1', type: 'local_bash' }, { id: 'bash-2', type: 'local_bash' })
     await f.turn()
-    const { obligations } = (f.service as unknown as { live: Map<string, { obligations: import('../src/mms/providers/claudeSubscription/liveSession').BackgroundObligations }> }).live.get('thread')!
+    const { obligations } = (f.service as unknown as { live: Map<string, { obligations: import('../src/mms/harness/vendors/claude/liveSession').BackgroundObligations }> }).live.get('thread')!
     const lost = {}
     const read = {}
     obligations.consume('bash-1', lost)

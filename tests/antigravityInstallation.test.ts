@@ -4,10 +4,10 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { UserQuestionService } from '../src/mms/orchestrator/UserQuestionService'
-import { AntigravityProviderService } from '../src/mms/providers/antigravity/AntigravityProviderService'
+import { AntigravityProviderService } from '../src/mms/harness/acp/presets/antigravity/AntigravityProviderService'
 import {
   antigravityInstallState, cancelAntigravityInstall, installAntigravity, installedAntigravityBinary, releaseDirectory, type Release
-} from '../src/mms/providers/antigravity/installation'
+} from '../src/mms/harness/acp/presets/antigravity/installation'
 
 // The real install path, with a fake download: nothing here reaches the network.
 const payload = Buffer.from('not-really-a-zip'.repeat(8))

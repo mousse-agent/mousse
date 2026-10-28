@@ -9,8 +9,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import type { RecoveredContext } from '../src/mms/harness/gateway'
-import type { AdapterHost, TurnControl, TurnInput, TurnResult, TurnSink } from '../src/mms/run/adapters/ProviderAdapter'
-import { CLAUDE_SUBSCRIPTION_CAPABILITIES } from '../src/mms/run/adapters/claudeSubscription/ClaudeSubscriptionAdapter'
+import type { AdapterHost, TurnControl, TurnInput, TurnResult, TurnSink } from '../src/mms/harness/adapter'
+import { CLAUDE_SUBSCRIPTION_CAPABILITIES } from '../src/mms/harness/drivers/claudeCode/adapter'
 import { CLAUDE, ScriptedAdapter, phase6Daemon, type Phase6Daemon } from './run/phase6Fixture'
 
 /** About 40k tokens of reply per turn (Mousse estimates four characters a token). */

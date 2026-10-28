@@ -6,7 +6,7 @@ import { dirname, join, resolve } from 'node:path'
 import { Readable } from 'node:stream'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { describe, expect, it, vi } from 'vitest'
-import { AntigravityProviderService } from '../src/mms/providers/antigravity/AntigravityProviderService'
+import { AntigravityProviderService } from '../src/mms/harness/acp/presets/antigravity/AntigravityProviderService'
 import { antigravityStdout, forwardAntigravityCallback } from '../src/mms/harness/acp/presets/antigravity'
 import { UserQuestionService } from '../src/mms/orchestrator/UserQuestionService'
 

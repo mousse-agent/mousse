@@ -20,7 +20,7 @@ import type {
   TurnInput,
   TurnResult,
   TurnSink
-} from '../../run/adapters/ProviderAdapter'
+} from '../adapter'
 import { CumulativeStream } from '../../run/transcript/promptRuntime'
 import type { ProviderRef } from '../../run/types'
 import type { InstanceEnv } from '../env'

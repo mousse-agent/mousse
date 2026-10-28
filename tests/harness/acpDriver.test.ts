@@ -10,11 +10,11 @@ import { methods, PROTOCOL_VERSION } from '@agentclientprotocol/sdk'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { acpDriver } from '../../src/mms/harness/drivers/acp'
 import type { Harness, TurnSpec } from '../../src/mms/harness/gateway'
-import { ProviderInstanceService } from '../../src/mms/providers/ProviderInstanceService'
+import { ProviderInstanceService } from '../../src/mms/harness/instanceMap'
 import { inProcessAgent } from '../../src/mms/run/testkit/acpAgent'
 import { testHarness } from '../../src/mms/run/testkit/harness'
 import { describeStatus } from '../../src/shared/harness/status'
-import type { TurnInput } from '../../src/mms/run/adapters/ProviderAdapter'
+import type { TurnInput } from '../../src/mms/harness/adapter'
 
 const homes: string[] = []
 const harnesses: Harness[] = []

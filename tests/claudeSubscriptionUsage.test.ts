@@ -3,8 +3,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { Options, Query } from '@anthropic-ai/claude-agent-sdk'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { ClaudeSubscriptionProviderService } from '../src/mms/providers/claudeSubscription/ClaudeSubscriptionProviderService'
-import { parseClaudeSubscriptionUsage } from '../src/mms/providers/claudeSubscription/usage'
+import { ClaudeSubscriptionProviderService } from '../src/mms/harness/vendors/claude/ClaudeSubscriptionProviderService'
+import { parseClaudeSubscriptionUsage } from '../src/mms/harness/vendors/claude/usage'
 import { UserQuestionService } from '../src/mms/orchestrator/UserQuestionService'
 
 const homes: string[] = []

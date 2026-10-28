@@ -6,10 +6,10 @@ import { PassThrough } from 'node:stream'
 import type { Options, Query } from '@anthropic-ai/claude-agent-sdk'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { UserQuestionService } from '../src/mms/orchestrator/UserQuestionService'
-import { AntigravityProviderService } from '../src/mms/providers/antigravity/AntigravityProviderService'
-import { ClaudeSubscriptionProviderService } from '../src/mms/providers/claudeSubscription/ClaudeSubscriptionProviderService'
-import type { CodexLaunch, CodexProcess } from '../src/mms/providers/codex/CodexAppServerClient'
-import { CodexProviderService } from '../src/mms/providers/codex/CodexProviderService'
+import { AntigravityProviderService } from '../src/mms/harness/acp/presets/antigravity/AntigravityProviderService'
+import { ClaudeSubscriptionProviderService } from '../src/mms/harness/vendors/claude/ClaudeSubscriptionProviderService'
+import type { CodexLaunch, CodexProcess } from '../src/mms/harness/vendors/codex/CodexAppServerClient'
+import { CodexProviderService } from '../src/mms/harness/vendors/codex/CodexProviderService'
 import {
   claudeExtraArgs,
   CliVersionCache,
@@ -18,8 +18,8 @@ import {
   requireExecutable,
   withUserEnv,
   type StoredCliConfig
-} from '../src/mms/providers/cliConfig'
-import { directLaunch } from '../src/mms/providers/resolveWindowsShim'
+} from '../src/mms/harness/cliConfig'
+import { directLaunch } from '../src/mms/harness/resolveWindowsShim'
 
 const homes: string[] = []
 const cleanups: Array<() => void> = []

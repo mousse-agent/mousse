@@ -19,7 +19,7 @@ import type {
   TurnInput,
   TurnResult,
   TurnSink
-} from '../../src/mms/run/adapters/ProviderAdapter'
+} from '../../src/mms/harness/adapter'
 import { ProfileDatabase } from '../../src/mms/run/db/ProfileDatabase'
 import { EffectWorker } from '../../src/mms/run/EffectWorker'
 import { RunEngine } from '../../src/mms/run/RunEngine'

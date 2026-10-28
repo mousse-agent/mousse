@@ -31,8 +31,8 @@ import type { AgentAccessLevel, LlmProviderOption } from '../../shared/settings'
 import type { ChatMode } from '../../shared/types'
 import { parseThinkingSuffixFromModelId } from '../../shared/modelVariants'
 import type { LoginSession } from '../providers/LoginSession'
-import type { ProviderInstanceService } from '../providers/ProviderInstanceService'
-import type { AdapterHost, TurnBridge, TurnControl, TurnInput, TurnResult, TurnSink } from '../run/adapters/ProviderAdapter'
+import type { ProviderInstanceService } from './instanceMap'
+import type { AdapterHost, TurnBridge, TurnControl, TurnInput, TurnResult, TurnSink } from './adapter'
 import { mcpAttachable, type ChildPreflightContext, type SubagentRefusal } from '../run/policy/featureGates'
 import type { McpAttachmentProvider } from '../run/mcp/MousseMcpServer'
 import type { TurnSettlement } from '../run/mcp/McpCredentials'
@@ -89,7 +89,7 @@ import {
   unsetFields,
   type MirrorTuple
 } from './vendorMirror'
-import type { StoredCliConfig } from '../providers/cliConfig'
+import type { StoredCliConfig } from './cliConfig'
 
 
 // The turn contract callers build (`TurnSpec`): app code imports these from the gateway, never
@@ -105,7 +105,7 @@ export type {
   TurnInput,
   TurnResult,
   TurnSink
-} from '../run/adapters/ProviderAdapter'
+} from './adapter'
 
 /**
  * The only way app code reaches agents and providers. Drivers (`./drivers/*`) sit behind it; the

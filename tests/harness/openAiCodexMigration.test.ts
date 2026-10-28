@@ -5,9 +5,9 @@ import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ChatGptAuth } from '../../src/mms/harness/chatgpt/chatgptAuth'
-import { ChatGptTokenBroker } from '../../src/mms/harness/codex/broker'
-import type { CodexInstallation } from '../../src/mms/harness/codex/installation'
-import { createManagedCodexRuntime } from '../../src/mms/harness/codex/managedRuntime'
+import { ChatGptTokenBroker } from '../../src/mms/harness/vendors/codex/broker'
+import type { CodexInstallation } from '../../src/mms/harness/vendors/codex/installation'
+import { createManagedCodexRuntime } from '../../src/mms/harness/vendors/codex/managedRuntime'
 import { codexDriver } from '../../src/mms/harness/drivers/codex'
 import { piProviderIdOf } from '../../src/shared/providerInstances'
 import type { Harness, TurnSpec } from '../../src/mms/harness/gateway'
@@ -426,7 +426,7 @@ describe('openai-codex after the PR 3 release', () => {
     await signManagedIn(made)
     await made.harness.instances.move('pi:openai-codex', MANAGED)
     // A fresh decoder over the stored map (the PR 2 reader, restarted on the moved state).
-    const { ProviderInstanceService } = await import('../../src/mms/providers/ProviderInstanceService')
+    const { ProviderInstanceService } = await import('../../src/mms/harness/instanceMap')
     const reread = new ProviderInstanceService({ store: { read: () => ({ instances: made.stored(), seedVersion: 1 }), write: () => {} } })
     const entries = reread.list()
     expect(entries['pi:openai-codex']).toMatchObject({ driver: 'pi', enabled: false, config: { movedTo: MANAGED } })

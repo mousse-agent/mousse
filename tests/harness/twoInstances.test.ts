@@ -12,9 +12,9 @@ import { instanceStateDir } from '../../src/mms/harness/instances'
 import { instanceEnv } from '../../src/mms/harness/env'
 import { observeHarnessSpawns, type HarnessSpawn } from '../../src/mms/harness/spawn'
 import { UserQuestionService } from '../../src/mms/orchestrator/UserQuestionService'
-import { ClaudeSubscriptionProviderService } from '../../src/mms/providers/claudeSubscription/ClaudeSubscriptionProviderService'
-import { claudeLoadsSkill } from '../../src/mms/providers/claudeSubscription/integrations'
-import { ProviderInstanceService } from '../../src/mms/providers/ProviderInstanceService'
+import { ClaudeSubscriptionProviderService } from '../../src/mms/harness/vendors/claude/ClaudeSubscriptionProviderService'
+import { claudeLoadsSkill } from '../../src/mms/harness/vendors/claude/integrations'
+import { ProviderInstanceService } from '../../src/mms/harness/instanceMap'
 import { FakeCursorHost } from './fakeCursorHost'
 
 const dirs: string[] = []

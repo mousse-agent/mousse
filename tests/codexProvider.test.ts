@@ -6,7 +6,7 @@ import { PassThrough } from 'node:stream'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { UserQuestionService } from '../src/mms/orchestrator/UserQuestionService'
 import { LoginSession } from '../src/mms/providers/LoginSession'
-import type { CodexLaunch, CodexProcess } from '../src/mms/providers/codex/CodexAppServerClient'
+import type { CodexLaunch, CodexProcess } from '../src/mms/harness/vendors/codex/CodexAppServerClient'
 import {
   CODEX_ACCOUNT_TTL_MS,
   CODEX_MODEL_PROVIDER,
@@ -15,7 +15,7 @@ import {
   codexEnvironment,
   type CodexServiceDependencies,
   type CodexServiceOptions
-} from '../src/mms/providers/codex/CodexProviderService'
+} from '../src/mms/harness/vendors/codex/CodexProviderService'
 import { codexMcpConfigOverrides } from '../src/mms/run/mcp/attachment'
 
 type Message = { id?: number | string; method?: string; params?: unknown }

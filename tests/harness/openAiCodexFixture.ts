@@ -5,7 +5,7 @@ import { piDriver, type PiCredentials } from '../../src/mms/harness/drivers/pi'
 import { createHarnessGateway, type Harness, type HarnessGatewayOptions } from '../../src/mms/harness/gateway'
 import type { HarnessDriver } from '../../src/mms/harness/driver'
 import { UserQuestionService } from '../../src/mms/orchestrator/UserQuestionService'
-import { ProviderInstanceService } from '../../src/mms/providers/ProviderInstanceService'
+import { ProviderInstanceService } from '../../src/mms/harness/instanceMap'
 import { PI_RPC_BOUNDARY, replayPiRpc, type PiRpcReplay } from '../../src/mms/run/testkit/piRpcReplay'
 import { parseTranscript, ReplayTransport, type TranscriptFrame } from '../../src/mms/run/testkit/ReplayTransport'
 

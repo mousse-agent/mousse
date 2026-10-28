@@ -23,9 +23,9 @@ import { ownedHomeProblem } from '../../src/mms/harness/ownedHome'
 import type { PtySpawn } from '../../src/mms/harness/pty'
 import { observeHarnessSpawns, recordHarnessSpawn, type HarnessSpawn } from '../../src/mms/harness/spawn'
 import { UserQuestionService } from '../../src/mms/orchestrator/UserQuestionService'
-import { ProviderInstanceService } from '../../src/mms/providers/ProviderInstanceService'
-import type { CodexLaunch, CodexProcess } from '../../src/mms/providers/codex/CodexAppServerClient'
-import { CodexProviderService } from '../../src/mms/providers/codex/CodexProviderService'
+import { ProviderInstanceService } from '../../src/mms/harness/instanceMap'
+import type { CodexLaunch, CodexProcess } from '../../src/mms/harness/vendors/codex/CodexAppServerClient'
+import { CodexProviderService } from '../../src/mms/harness/vendors/codex/CodexProviderService'
 
 const dirs: string[] = []
 const stops: Array<() => void> = []

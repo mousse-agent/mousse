@@ -9,11 +9,11 @@ import { ProjectManager } from '../../src/mms/data/ProjectManager'
 import { ThreadDataStore } from '../../src/mms/data/ThreadDataStore'
 import { OrchestratorService } from '../../src/mms/orchestrator/OrchestratorService'
 import { UserQuestionService } from '../../src/mms/orchestrator/UserQuestionService'
-import type { ProviderInstanceService } from '../../src/mms/providers/ProviderInstanceService'
+import type { ProviderInstanceService } from '../../src/mms/harness/instanceMap'
 import type { ProviderDriverKind } from '../../src/shared/providerInstances'
 import { testHarness } from '../../src/mms/run/testkit/harness'
 import type { HarnessDriver } from '../../src/mms/harness/driver'
-import { CLAUDE_SUBSCRIPTION_CAPABILITIES } from '../../src/mms/run/adapters/claudeSubscription/ClaudeSubscriptionAdapter'
+import { CLAUDE_SUBSCRIPTION_CAPABILITIES } from '../../src/mms/harness/drivers/claudeCode/adapter'
 import { PI_TEST_CAPABILITIES } from '../support/piStub'
 import type {
   AdapterHost,
@@ -23,7 +23,7 @@ import type {
   TurnInput,
   TurnResult,
   TurnSink
-} from '../../src/mms/run/adapters/ProviderAdapter'
+} from '../../src/mms/harness/adapter'
 import { ProfileDatabase, type ProfileDatabaseFault } from '../../src/mms/run/db/ProfileDatabase'
 import { EffectWorker } from '../../src/mms/run/EffectWorker'
 import { RunEngine } from '../../src/mms/run/RunEngine'

@@ -21,9 +21,9 @@ import { observeHarnessSpawns, runHarness, type HarnessSpawn } from '../../src/m
 import { telemetryEnforced, telemetryView } from '../../src/mms/harness/telemetry'
 import { UserQuestionService } from '../../src/mms/orchestrator/UserQuestionService'
 import { asInstanceConfigPatch } from '../../src/mms/protocol/validators'
-import { ClaudeSubscriptionProviderService } from '../../src/mms/providers/claudeSubscription/ClaudeSubscriptionProviderService'
-import { ProviderInstanceService } from '../../src/mms/providers/ProviderInstanceService'
-import type { ProviderAdapter } from '../../src/mms/run/adapters/ProviderAdapter'
+import { ClaudeSubscriptionProviderService } from '../../src/mms/harness/vendors/claude/ClaudeSubscriptionProviderService'
+import { ProviderInstanceService } from '../../src/mms/harness/instanceMap'
+import type { ProviderAdapter } from '../../src/mms/harness/adapter'
 import { adapterDriver, testHarness } from '../../src/mms/run/testkit/harness'
 import { PiStubAdapter } from '../support/piStub'
 

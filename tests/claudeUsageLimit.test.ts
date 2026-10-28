@@ -1,7 +1,7 @@
 import type { SDKMessage, SDKResultMessage } from '@anthropic-ai/claude-agent-sdk'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { readUsageLimit } from '../src/mms/orchestrator/providerErrors'
-import { observeRateLimit, RejectedWindows, usageLimitFromResult, USAGE_LIMIT_HOLD_MS } from '../src/mms/providers/claudeSubscription/usageLimit'
+import { observeRateLimit, RejectedWindows, usageLimitFromResult, USAGE_LIMIT_HOLD_MS } from '../src/mms/harness/vendors/claude/usageLimit'
 
 const NOW = Date.parse('2026-10-01T00:00:00Z')
 const seconds = (offsetMs: number) => (NOW + offsetMs) / 1000

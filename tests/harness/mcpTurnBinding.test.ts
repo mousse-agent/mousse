@@ -11,7 +11,7 @@ import { claudeCodeDriver } from '../../src/mms/harness/drivers/claudeCode'
 import { codexDriver } from '../../src/mms/harness/drivers/codex'
 import { piDriver } from '../../src/mms/harness/drivers/pi'
 import { HARNESS_CAP_KEYS } from '../../src/shared/harness/types'
-import type { ProviderAdapter } from '../../src/mms/run/adapters/ProviderAdapter'
+import type { ProviderAdapter } from '../../src/mms/harness/adapter'
 import { adapterDriver } from '../../src/mms/run/testkit/harness'
 
 const unused = (): never => { throw new Error('no runtime in this test') }

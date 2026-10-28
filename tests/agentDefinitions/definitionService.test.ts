@@ -26,10 +26,10 @@ import { providerResponse } from '../fixtures/agent-platform/agent-runtime-polic
 import { APPROVAL_ONLY_INSTANCE } from '../fixtures/agent-platform/exactDefinitionRuntime'
 import { createDefinitionEngine, ENGINE_MODEL, type DefinitionEngine } from '../fixtures/agent-platform/definitionEngines'
 import type { Harness } from '../../src/mms/harness/gateway'
-import type { ProviderAdapter } from '../../src/mms/run/adapters/ProviderAdapter'
+import type { ProviderAdapter } from '../../src/mms/harness/adapter'
 import { harnessAppError } from '../../src/shared/harness/types'
 import { adapterDriver, testHarness } from '../../src/mms/run/testkit/harness'
-import { ProviderInstanceService } from '../../src/mms/providers/ProviderInstanceService'
+import { ProviderInstanceService } from '../../src/mms/harness/instanceMap'
 import type { BrowserRuntimePort } from '../../src/shared/browser/runtime'
 
 // PR 4 §6 / §16 `definitionService`, through the real AgentExecutionService, orchestrator, gateway

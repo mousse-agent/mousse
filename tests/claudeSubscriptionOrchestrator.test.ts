@@ -6,7 +6,7 @@ import { MousseMainService } from '../src/mms/MousseMainService'
 import { ProviderAuthService } from '../src/mms/providers/ProviderAuthService'
 import { createNativeContext, userMessage } from '../src/mms/orchestrator/nativeContext'
 import { nativeAgentAssistantMessage, nativeAgentHistory } from '../src/mms/providers/nativeAgentHistory'
-import type { ClaudeSubscriptionProviderService } from '../src/mms/providers/claudeSubscription/ClaudeSubscriptionProviderService'
+import type { ClaudeSubscriptionProviderService } from '../src/mms/harness/vendors/claude/ClaudeSubscriptionProviderService'
 
 describe('independent routing turns on one host', () => {
   let home: string

@@ -16,7 +16,7 @@ import { OrchestratorService } from '../../src/mms/orchestrator/OrchestratorServ
 import { subagentPreamble } from '../../src/mms/run/delegation/guidance'
 import { testHarness } from '../../src/mms/run/testkit/harness'
 import { PI_TEST_CAPABILITIES } from '../support/piStub'
-import type { AdapterHost, ProviderAdapter, TurnControl, TurnInput, TurnResult, TurnSink } from '../../src/mms/run/adapters/ProviderAdapter'
+import type { AdapterHost, ProviderAdapter, TurnControl, TurnInput, TurnResult, TurnSink } from '../../src/mms/harness/adapter'
 import { ProfileDatabase } from '../../src/mms/run/db/ProfileDatabase'
 import { EffectWorker } from '../../src/mms/run/EffectWorker'
 import { Reconciler } from '../../src/mms/run/Reconciler'

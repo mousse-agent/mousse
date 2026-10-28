@@ -5,13 +5,13 @@ import { join } from 'node:path'
 import { PassThrough } from 'node:stream'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { UserQuestionService } from '../src/mms/orchestrator/UserQuestionService'
-import { AntigravityProviderService } from '../src/mms/providers/antigravity/AntigravityProviderService'
-import { installAntigravity } from '../src/mms/providers/antigravity/installation'
+import { AntigravityProviderService } from '../src/mms/harness/acp/presets/antigravity/AntigravityProviderService'
+import { installAntigravity } from '../src/mms/harness/acp/presets/antigravity/installation'
 
 const fake = vi.hoisted(() => ({ spawnLine: undefined as string | undefined, stdouts: [] as Array<{ write(line: string): void }> }))
 
-vi.mock('../src/mms/providers/antigravity/installation', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('../src/mms/providers/antigravity/installation')>()),
+vi.mock('../src/mms/harness/acp/presets/antigravity/installation', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../src/mms/harness/acp/presets/antigravity/installation')>()),
   installAntigravity: vi.fn()
 }))
 

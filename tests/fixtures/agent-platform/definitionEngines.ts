@@ -1,7 +1,7 @@
 import type { AssistantMessage, Context } from '@earendil-works/pi-ai'
 import type { Harness } from '../../../src/mms/harness/gateway'
 import type { OrchestratorService } from '../../../src/mms/orchestrator/OrchestratorService'
-import type { AdapterHost, TurnInput } from '../../../src/mms/run/adapters/ProviderAdapter'
+import type { AdapterHost, TurnInput } from '../../../src/mms/harness/adapter'
 import { installExactDefinitionRuntime } from './exactDefinitionRuntime'
 
 /**

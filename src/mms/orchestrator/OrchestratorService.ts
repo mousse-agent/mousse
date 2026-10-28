@@ -107,7 +107,7 @@ import type { HandoffItem } from '../run/handoff/budget'
 import { committedTransfers, TurnHandoffs, type PlannedHandoff } from './turnHandoffs'
 import { TranscriptAssembler } from '../run/transcript/TranscriptAssembler'
 import { forkStrategy, handoffDelivery, mcpAttachable, subagentTargetRefusal, type SubagentRefusal } from '../run/policy/featureGates'
-import { isContextOverflowError, retryContextOverflowOnce } from '../run/adapters/shared/retryContextOverflow'
+import { isContextOverflowError, retryContextOverflowOnce } from '../run/transcript/retryContextOverflow'
 import {
   TERMINAL_RUN_STATUSES,
   isChildQuestionRow,
@@ -189,7 +189,7 @@ import { computeContextUsage } from './contextUsage'
 import { getToolCallDisplay } from '../../shared/toolCallDisplay'
 import type { SettingsStore } from '../settings/SettingsStore'
 import type { ProviderAuthService } from '../providers/ProviderAuthService'
-import { ProviderInstanceService } from '../providers/ProviderInstanceService'
+import { ProviderInstanceService } from '../harness/instanceMap'
 import type { McpManager } from '../integrations/mcp/McpManager'
 import type { SkillsRegistry } from '../integrations/skills/SkillsRegistry'
 import type { FileService } from '../files/FileService'

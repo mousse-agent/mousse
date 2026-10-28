@@ -10,7 +10,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { dispatchMethod, type HandlerContext } from '../src/mms/protocol/handlers'
 import { ProviderAuthService } from '../src/mms/providers/ProviderAuthService'
 import { createProviderAccess, type ProviderAccess } from '../src/mms/providers/providerAccess'
-import { ProviderInstanceService } from '../src/mms/providers/ProviderInstanceService'
+import { ProviderInstanceService } from '../src/mms/harness/instanceMap'
 
 const REMOVED_TEXT = 'OpenAI was removed from this profile. Add it again in Settings → Providers.'
 

@@ -3,8 +3,8 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, 
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { ACTIVE_FILE, CODEX_STAGING_STALE_MS, CodexInstallation, COMPLETE_FILE } from '../../src/mms/harness/codex/installation'
-import { CODEX_MANAGED_VERSION, CODEX_RELEASES, codexReleaseFor, type CodexRelease } from '../../src/mms/harness/codex/release'
+import { ACTIVE_FILE, CODEX_STAGING_STALE_MS, CodexInstallation, COMPLETE_FILE } from '../../src/mms/harness/vendors/codex/installation'
+import { CODEX_MANAGED_VERSION, CODEX_RELEASES, codexReleaseFor, type CodexRelease } from '../../src/mms/harness/vendors/codex/release'
 import { tarGzOf, type ArchiveEntry } from './archiveFixtures'
 
 const TARGET = 'x86_64-unknown-linux-musl'
@@ -192,7 +192,7 @@ describe('CodexInstallation', () => {
     expect(existsSync(join(codexDir(), `${CODEX_MANAGED_VERSION}.check-failed.json`))).toBe(true)
     // A fresh copy of the module stands in for a restarted Mousse: nothing is kept in memory.
     vi.resetModules()
-    const reloaded = await import('../../src/mms/harness/codex/installation')
+    const reloaded = await import('../../src/mms/harness/vendors/codex/installation')
     const restarted = new reloaded.CodexInstallation({ installationHome: home, release: releaseOf(archive), fetch: fakeFetch(archive), runVersion: okVersion })
     expect(restarted.installed()?.broken).toMatch(/changed/)
     // A reinstall clears it.

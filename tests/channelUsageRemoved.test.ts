@@ -11,7 +11,7 @@ import { dispatchSlashCommand, type SlashContext } from '../src/mms/channels/sla
 import { parseSlashCommand } from '../src/mms/channels/slash/parse'
 import { ProviderAuthService } from '../src/mms/providers/ProviderAuthService'
 import { createProviderAccess } from '../src/mms/providers/providerAccess'
-import { ProviderInstanceService } from '../src/mms/providers/ProviderInstanceService'
+import { ProviderInstanceService } from '../src/mms/harness/instanceMap'
 
 let dir: string
 let auth: ProviderAuthService

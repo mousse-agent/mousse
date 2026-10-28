@@ -5,8 +5,8 @@ import type { HarnessCaps } from '../../../shared/harness/types'
 import { decodeInstanceConfig, type DriverRuntime, type HarnessDriver } from '../../harness/driver'
 import { createHarnessGateway, type Harness, type HarnessGatewayOptions } from '../../harness/gateway'
 import { UserQuestionService } from '../../orchestrator/UserQuestionService'
-import { ProviderInstanceService } from '../../providers/ProviderInstanceService'
-import type { ProviderAdapter } from '../adapters/ProviderAdapter'
+import { ProviderInstanceService } from '../../harness/instanceMap'
+import type { ProviderAdapter } from '../../harness/adapter'
 import type { McpTurnBinding } from '../mcp/appTools/registry'
 
 /** The turn binding each real driver declares (`harness/drivers/*`), for test drivers of the same kind. */

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { ProviderInstanceService } from '../../src/mms/providers/ProviderInstanceService'
+import { ProviderInstanceService } from '../../src/mms/harness/instanceMap'
 import {
   instanceIdForLegacyProvider,
   legacyProviderForInstance,

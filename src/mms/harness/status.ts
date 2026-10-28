@@ -9,7 +9,7 @@ import type {
 } from '../../shared/harness/status'
 import { statSync } from 'node:fs'
 import type { BinaryFingerprint } from '../../shared/harness/types'
-import { parseCliVersion } from '../providers/cliConfig'
+import { parseCliVersion } from './cliConfig'
 import { knownProblemOf } from './compatibility'
 import { compareVersions, installOwner, type AuthReading, type DriverRuntime, type HarnessDriver, type InstanceConfig, type ManagedInstall } from './driver'
 import { resolveBinary, type InstanceEnv } from './env'

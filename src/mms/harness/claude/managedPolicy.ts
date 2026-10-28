@@ -3,7 +3,7 @@ import { existsSync, readFileSync, statSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { userInfo } from 'node:os'
 import { dirname, join } from 'node:path'
-import { managedSettingsPaths } from '../../providers/claudeSubscription/accountSubject'
+import { managedSettingsPaths } from '../vendors/claude/accountSubject'
 import { claudeManagedPolicyIn } from './locked'
 
 /**

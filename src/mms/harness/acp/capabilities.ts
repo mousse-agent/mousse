@@ -1,5 +1,5 @@
 import { methods, PROTOCOL_VERSION } from '@agentclientprotocol/sdk'
-import type { ProviderCapabilities } from '../../run/adapters/ProviderAdapter'
+import type { ProviderCapabilities } from '../adapter'
 import { mousseVersion } from '../../appVersion'
 import type { AcpRpc } from './connection'
 

@@ -1,9 +1,9 @@
 import { describe, expect, it } from 'vitest'
 import { heartbeatToleranceMs, steerStrategy, stopStrategy } from '../../src/mms/run/CommandPolicy'
 import { ANTIGRAVITY_CAPABILITIES } from '../../src/mms/harness/acp/presets/antigravity'
-import { CLAUDE_SUBSCRIPTION_CAPABILITIES } from '../../src/mms/run/adapters/claudeSubscription/ClaudeSubscriptionAdapter'
+import { CLAUDE_SUBSCRIPTION_CAPABILITIES } from '../../src/mms/harness/drivers/claudeCode/adapter'
 import { PI_TEST_CAPABILITIES } from '../support/piStub'
-import type { ProviderCapabilities } from '../../src/mms/run/adapters/ProviderAdapter'
+import type { ProviderCapabilities } from '../../src/mms/harness/adapter'
 import type { RunRecord, RunStatus } from '../../src/mms/run/types'
 
 const caps = (patch: Partial<ProviderCapabilities> = {}): ProviderCapabilities => ({

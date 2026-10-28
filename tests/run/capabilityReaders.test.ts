@@ -11,7 +11,7 @@ import { HARNESS_CAP_KEYS, type HarnessCaps } from '../../src/shared/harness/typ
 const repoRoot = resolve(__dirname, '..', '..')
 const readerRoots = [join(repoRoot, 'src', 'mms', 'run'), join(repoRoot, 'src', 'mms', 'harness')]
 const srcRoot = join(repoRoot, 'src')
-const DECLARATION_DIRS = ['src/mms/run/adapters/', 'src/mms/harness/drivers/']
+const DECLARATION_DIRS = ['src/mms/harness/drivers/', 'src/mms/harness/vendors/', 'src/mms/harness/acp/presets/antigravity/']
 
 /** Each key of `HarnessCaps` and the reader functions that read it; `satisfies` keeps it exact. */
 const READERS = {

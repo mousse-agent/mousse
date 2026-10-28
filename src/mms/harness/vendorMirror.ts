@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { storedCliArgs, storedCliEnv } from '../providers/cliConfig'
+import { storedCliArgs, storedCliEnv } from './cliConfig'
 
 /**
  * Launch settings and the sign-out flag live in each instance's config. Until the release after

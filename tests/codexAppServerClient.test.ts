@@ -9,7 +9,7 @@ import {
   codexConfigArgs,
   tomlValue,
   type CodexProcess
-} from '../src/mms/providers/codex/CodexAppServerClient'
+} from '../src/mms/harness/vendors/codex/CodexAppServerClient'
 
 class FakeProcess extends EventEmitter implements CodexProcess {
   readonly stdin = new PassThrough()

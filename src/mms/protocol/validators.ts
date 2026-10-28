@@ -21,7 +21,7 @@ import {
   type RegistrySourcePatch,
   type SignInResponse
 } from '../../shared/harness/types'
-import { parseCliConfigPatch } from '../providers/cliConfig'
+import { parseCliConfigPatch } from '../harness/cliConfig'
 import { cronProblem } from '../scheduled/computeNextRun'
 import {
   parseClientCommandResponse,

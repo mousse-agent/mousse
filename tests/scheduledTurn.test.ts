@@ -22,7 +22,7 @@ import { ScheduledJobStore } from '../src/mms/scheduled/ScheduledJobStore'
 import { ThreadWorkspaceManager } from '../src/mms/workspace/ThreadWorkspaceManager'
 import type { ScheduledJob, ScheduledJobRunRecord } from '../src/shared/types'
 import { gitFoundationFixture } from './fixtures/gitFoundation'
-import { CLAUDE_SUBSCRIPTION_CAPABILITIES } from '../src/mms/run/adapters/claudeSubscription/ClaudeSubscriptionAdapter'
+import { CLAUDE_SUBSCRIPTION_CAPABILITIES } from '../src/mms/harness/drivers/claudeCode/adapter'
 import { CLAUDE, PI, ScriptedAdapter, claudeAdapter, phase6Daemon, piAdapter, waitFor, type Phase6Daemon } from './run/phase6Fixture'
 
 vi.setConfig({ testTimeout: 30_000 })
