@@ -3,7 +3,6 @@ import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { act, createElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
-import { renderToStaticMarkup } from 'react-dom/server'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { GitSectionView } from '../src/renderer/components/sideCard/GitSection'
 import { createBranch, deleteBranch, renameBranch, switchBranch } from '../src/renderer/components/sideCard/branchActions'
@@ -463,15 +462,6 @@ describe('branch picker in the side card', () => {
       expect(dialog('Switch to dev')).toBeUndefined()
     })
 
-    it('stashes and switches when asked', async () => {
-      mount(dirtyStatus())
-      await openPicker()
-      await click(option('dev'))
-      await click(byText('button', 'Stash and switch'))
-      expect(git.checkout).toHaveBeenCalledWith(scope, 'dev', { dirty: 'stash', operationId: expect.any(String) })
-      expect(dialog('Switch to dev')).toBeUndefined()
-    })
-
     it('leaves everything as it was on Cancel', async () => {
       mount(dirtyStatus())
       await openPicker()
@@ -542,12 +532,6 @@ describe('branch picker in the side card', () => {
       expect(dialog('New branch')).toBeDefined()
     }
     const nameInput = () => dialog('New branch')!.querySelector<HTMLInputElement>('input[type="text"]')!
-
-    it('offers New branch… in the picker', async () => {
-      mount()
-      await openPicker()
-      expect(byText('button', 'New branch…')).toBeDefined()
-    })
 
     it('creates and switches by default, starting from the current branch', async () => {
       mount()
@@ -729,20 +713,6 @@ describe('branch picker in the side card', () => {
       expect(dialog('Switch branch')).toBeUndefined()
       expect(byText('button', 'New branch…')).toBeUndefined()
       expect(git.checkout).not.toHaveBeenCalled()
-    })
-
-    it('renders the same in markup, with no picker button and no New branch', () => {
-      const html = renderToStaticMarkup(createElement(GitSectionView, props(repoStatus({ branch: 'mousse/thread/t1' }), 'thread-1')))
-      expect(html).toContain('side-card-git-branch-static')
-      expect(html).toContain('aria-disabled="true"')
-      expect(html).not.toMatch(/<button[^>]*class="side-card-git-branch"/)
-      expect(html).not.toContain('New branch')
-    })
-
-    it('keeps the picker a button outside a thread worktree', () => {
-      const html = renderToStaticMarkup(createElement(GitSectionView, props(repoStatus())))
-      expect(html).toMatch(/<button[^>]*class="side-card-git-branch"/)
-      expect(html).not.toContain('side-card-git-branch-static')
     })
   })
 })

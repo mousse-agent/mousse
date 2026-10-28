@@ -1,19 +1,11 @@
-// The queue as persisted on ThreadDataStore (queue.json, durable claims).
+// The queue as persisted on ThreadDataStore (queue.json). Durable claims are tested in threadExecutionLease.
 import { mkdtempSync, rmSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { ProjectManager } from '../src/mms/data/ProjectManager'
 import { ThreadDataStore } from '../src/mms/data/ThreadDataStore'
-import { enqueueMessage, listPendingQueue } from '../src/mms/queue/ThreadMessageQueue'
-import {
-  claimNextNormalDurable,
-  completeClaimDurable,
-  mutateDurableQueue,
-  readDurableQueue,
-  reclaimAbandonedClaimsDurable,
-  releaseClaimDurable
-} from '../src/mms/queue/durableQueue'
+import { enqueueMessage } from '../src/mms/queue/ThreadMessageQueue'
 
 describe('queue persistence on ThreadDataStore', () => {
   let home: string
@@ -72,46 +64,5 @@ describe('queue persistence on ThreadDataStore', () => {
 
     expect(store.loadMessageQueue(thread.id).map((i) => i.content)).toEqual(['from-queue-api'])
     expect(store.loadThreadData(thread.id).messages[0].content).toBe('scheduled note')
-  })
-
-  it('durable claim APIs preserve FIFO and support reclaim of abandoned claims', () => {
-    const thread = store.createThread('Durable Claim')
-    mutateDurableQueue(store, thread.id, (items) => {
-      let next = enqueueMessage(items, { threadId: thread.id, content: 'a' }).items
-      next = enqueueMessage(next, { threadId: thread.id, content: 'b' }).items
-      return next
-    })
-
-    const claimed = claimNextNormalDurable(store, thread.id, {
-      ownerPid: 2_147_000_020,
-      ownerToken: 'stale',
-      source: 'peer'
-    })
-    expect(claimed?.content).toBe('a')
-    expect(claimed?.order).toBe(0)
-    expect(readDurableQueue(store, thread.id).find((i) => i.id === claimed!.id)?.state).toBe(
-      'claimed'
-    )
-
-    // Live foreign token cannot release our claim without matching token.
-    expect(
-      releaseClaimDurable(store, thread.id, claimed!.id, { ownerToken: 'other' })
-    ).toBeNull()
-
-    const reclaimed = reclaimAbandonedClaimsDurable(store, thread.id, {
-      isOwnerLive: () => false,
-      isAccepted: () => false
-    })
-    expect(reclaimed.released.map((i) => i.content)).toEqual(['a'])
-    expect(listPendingQueue(reclaimed.items).map((i) => i.content)).toEqual(['a', 'b'])
-
-    const claimed2 = claimNextNormalDurable(store, thread.id, {
-      ownerPid: process.pid,
-      ownerToken: 'mine'
-    })
-    completeClaimDurable(store, thread.id, claimed2!.id, { ownerToken: 'mine' })
-    expect(listPendingQueue(readDurableQueue(store, thread.id)).map((i) => i.content)).toEqual([
-      'b'
-    ])
   })
 })

@@ -19,7 +19,7 @@
     {
       "name": "run engine, orchestrator and MCP reach the run and MCP process contracts",
       "when": ["src/mms/run/**", "src/mms/orchestrator/**", "src/mms/integrations/mcp/**", "src/shared/run/**"],
-      "run": ["tests/run/**/*.test.ts", "tests/platformMcpLifecycleDrain.test.ts", "tests/platformIntegrationMcpRuntime.test.ts"]
+      "run": ["tests/run/**/*.test.ts", "tests/harness/boundary.test.ts", "tests/platformMcpLifecycleDrain.test.ts", "tests/platformIntegrationMcpRuntime.test.ts"]
     },
     {
       "name": "network, bridge, bots, spaces and chats reach the bundled net daemons and crash children",
@@ -32,9 +32,49 @@
       "run": ["tests/platformWorkflow*.test.ts", "tests/resourceLifecycle*.test.ts", "tests/resourcePurge*.test.ts", "tests/gitFoundation*.test.ts", "tests/chatUndoFullShell.test.ts"]
     },
     {
-      "name": "renderer sources, styles and assets reach the Electron fixture tests",
+      "name": "renderer sources and styles reach the Electron fixture tests and the tests that read them from disk",
       "when": ["src/renderer/**", "src/shared/**/*.css"],
-      "run": ["tests/renderer/**/*.test.ts", "tests/platformEditorCrossFeature.test.ts", "tests/promptMarkers.test.ts", "tests/net/chats/gui-*.test.ts", "tests/platformMainBundleImports.test.ts", "tests/*Css*.test.ts", "tests/*css*.test.ts"]
+      "run": [
+        "tests/renderer/**/*.test.ts",
+        "tests/platformEditorCrossFeature.test.ts",
+        "tests/promptMarkers.test.ts",
+        "tests/net/chats/gui-*.test.ts",
+        "tests/platformMainBundleImports.test.ts",
+        "tests/*Css*.test.ts",
+        "tests/*css*.test.ts",
+        "tests/harness/boundary.test.ts",
+        "tests/chatLayoutStyles.test.ts",
+        "tests/chatMarkdown.test.ts",
+        "tests/commandPalette.test.ts",
+        "tests/composerMentionList.test.ts",
+        "tests/composerRenderingPerformance.test.ts",
+        "tests/filesSearch.test.ts",
+        "tests/gitBranchActions.test.ts",
+        "tests/gitPanelLogic.test.ts",
+        "tests/movedShortcuts.test.ts",
+        "tests/platformMarkdownEditor.test.ts",
+        "tests/ptyLiveness.test.ts",
+        "tests/pullRequestPanel.test.ts",
+        "tests/quickActionWorkspace.test.ts",
+        "tests/sideCardActions.test.ts",
+        "tests/sideCardDevice.test.ts",
+        "tests/sideCardGit.test.ts",
+        "tests/sideCardPresence.test.ts",
+        "tests/slashCommandPopoverStyles.test.ts",
+        "tests/subagentCardView.test.ts",
+        "tests/subagentComposerBanner.test.ts",
+        "tests/titleBarLayout.test.ts"
+      ]
+    },
+    {
+      "name": "a changed or added test file re-checks the rules that list tests by name",
+      "when": ["tests/**/*.test.ts"],
+      "run": ["tests/testSelect.test.ts"]
+    },
+    {
+      "name": "the example workflow is read from disk by the workflow tests",
+      "when": ["examples/**"],
+      "run": ["tests/platformWorkflowCompiler.test.ts", "tests/platformWorkflowRegistry.test.ts", "tests/platformWorkflowRuntime.test.ts"]
     },
     {
       "name": "the Storage page fixture is bundled at run time, so the import graph cannot see it",

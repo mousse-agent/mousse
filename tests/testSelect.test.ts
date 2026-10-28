@@ -52,6 +52,44 @@ describe('change-based test selection plan', () => {
     expect(plan.runGlobs).toContain('tests/platformEditorCrossFeature.test.ts')
   })
 
+  it('runs every test that reads a renderer source or stylesheet from disk when the renderer changes', async () => {
+    // Reading a file is not an import, so the graph cannot link the test to it; only the rule can.
+    const { globSync, readFileSync } = await import('node:fs')
+    const { resolve } = await import('node:path')
+    const root = resolve(import.meta.dirname, '..')
+    const posix = (file: string) => file.replaceAll('\\', '/')
+    const plan = classifyChanges(['src/renderer/styles/app.css'], manifest)
+    const selected = new Set(plan.runGlobs.flatMap((glob: string) => globSync(glob, { cwd: root })).map(posix))
+    const readsFiles = /\b(readFileSync|readFile|readdirSync)\b/
+    const namesRendererFile = /src\/renderer|renderer\/styles|['"`][^'"`\n]*\.css['"`]/
+    // Module specifiers are not reads: drop whole import statements (they can span lines), re-exports and vi.mock paths.
+    const withoutImports = (source: string) =>
+      source
+        .replace(/\bimport\b[^;'"]*?\bfrom\s*['"][^'"\n]+['"]/g, '')
+        .replace(/\bimport\s*['"][^'"\n]+['"]/g, '')
+        .split('\n')
+        .filter((line) => !/^\s*(export .* from|vi\.mock\()/.test(line))
+        .join('\n')
+    // This file is exempt because it only names paths as data.
+    const missed = globSync('tests/**/*.test.ts', { cwd: root })
+      .map(posix)
+      .filter((file) => !file.startsWith('tests/renderer/') && file !== 'tests/testSelect.test.ts')
+      .filter((file) => {
+        const code = withoutImports(readFileSync(resolve(root, file), 'utf8'))
+        return readsFiles.test(code) && namesRendererFile.test(code)
+      })
+      .filter((file) => !selected.has(file))
+    expect(missed, 'add these tests to the renderer rule in tests/test-dependencies.json').toEqual([])
+  })
+
+  it('maps the example workflow to the workflow tests that read it from disk', () => {
+    const plan = classifyChanges(['examples/workflows/summarize-files/workflow.json'], manifest)
+    expect(plan.mode).toBe('select')
+    expect(plan.runGlobs).toEqual(
+      expect.arrayContaining(['tests/platformWorkflowCompiler.test.ts', 'tests/platformWorkflowRegistry.test.ts', 'tests/platformWorkflowRuntime.test.ts'])
+    )
+  })
+
   it('maps development launchers to the tests of their helpers instead of a full run', () => {
     for (const path of ['scripts/dev.mjs', 'scripts/dev-mms.mjs', 'scripts/gui-launch.mjs']) {
       const plan = classifyChanges([path], manifest)

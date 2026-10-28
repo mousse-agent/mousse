@@ -61,5 +61,5 @@ Some tests are the only place a real boundary is exercised. Shrink their fixture
 - Put the decision table at the module that decides it. A new option or branch usually adds rows there, not a new daemon-booting file.
 - Above that module, add at most one happy path and one failure per tier the feature actually crosses (daemon in process, spawned process). Each `it.each` row counts. Most features add no spawned-process test.
 - For a test above the deciding module, answer: which incorrect change would fail this test while every lower test still passed? If there is no specific answer, the test belongs lower or not at all.
-- If the test spawns built output or reads a data file, add a rule to `tests/test-dependencies.json` and run `npm run test:plan` to see it selected.
+- If the test spawns built output or reads a data file, add a rule to `tests/test-dependencies.json` and run `npm run test:plan` to see it selected. A test that reads a renderer source or stylesheet from disk counts: list it in the renderer rule, and `tests/testSelect.test.ts` fails until you do.
 - Keep gates visible: `it.skipIf` or `it.runIf` with the reason, never an early `return` inside the test.

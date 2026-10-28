@@ -978,6 +978,19 @@ describe('RunEngine pause (SPEC §5)', () => {
       expect(resumeEffects(run.runId).map((effect) => effect.status)).toEqual(['cancelled'])
     })
 
+    it('leaves a timer a worker already claimed running; the run itself is cancelled', async () => {
+      fixture()
+      const run = await paused()
+      f!.advance(61 * 60_000)
+      const claimed = f!.outbox.claimNext('owner', f!.now())!
+      expect(claimed).toMatchObject({ kind: 'run.resume' })
+
+      f!.engine.stopSubtree({ threadId: 't1', reason: 'user' })
+
+      expect(f!.outbox.get(claimed.effectId)).toMatchObject({ status: 'running' })
+      expect(f!.store.getRun(run.runId)).toMatchObject({ status: 'cancelled' })
+    })
+
     it("a parent's Stop ends the pause of its subagent, cancels the task and the timer", async () => {
       fixture()
       const parent = await f!.runningRun('parent')
