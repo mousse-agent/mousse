@@ -40,6 +40,11 @@ export const NET_LOCAL_METHODS = [
   'net.ssh.update',
   'net.ssh.rename',
   'net.ssh.approve',
+  'net.editor.ssh.status',
+  'net.editor.ssh.prepare',
+  'net.editor.ssh.enable',
+  'net.editor.ssh.disable',
+  'net.editor.ssh.ack',
   'net.init',
   'net.disable',
   'net.status',
@@ -294,6 +299,78 @@ export interface SshRecordView {
   createdAt: number
   updatedAt: number
 }
+/** Why Mousse's ssh settings for editors could not be written or used. */
+export type EditorSshProblemCode =
+  | 'unavailable'
+  | 'off'
+  | 'unsafe_path'
+  | 'unreadable'
+  | 'unwritable'
+  | 'bad_value'
+  | 'unknown_computer'
+  /** The system ssh could not read what Mousse wrote, so the line was not added (or was taken out again). */
+  | 'ssh_check_failed'
+  | 'no_ssh'
+  /** `~/.ssh/config` belongs to another account on macOS or Linux. */
+  | 'not_owner'
+  /** The line is in the file but below a `Host` or `Match` line. */
+  | 'scoped'
+
+/** One computer an editor can reach through an ssh alias. */
+export interface EditorSshComputer {
+  node: NodeId
+  /** The `Host` name an editor opens, such as `mousse-workbox-3fa2c1`. It never changes. */
+  alias: string
+  name: string
+  /** The login name on that computer, once it has said it. */
+  user?: string
+  /** Its host key is pinned, so ssh connects without a trust-on-first-use question. */
+  hostKeyPinned: boolean
+}
+
+/**
+ * `net.editor.ssh.status` and the `status` of every other `net.editor.ssh.*` answer. Mousse keeps a
+ * config file of its own and one `Include` line for it in `~/.ssh/config`.
+ */
+export interface EditorSshStatus {
+  /** False when this build gives the service no home directory to write to. */
+  available: boolean
+  /** False after the person undid the setup, until they turn it on again. */
+  enabled: boolean
+  /** The user's `~/.ssh/config` carries the line where `ssh` applies it to every host. */
+  included: boolean
+  /** The line is there but below a `Host` or `Match` line, so `ssh` reads it for that block only. */
+  scoped?: boolean
+  /** The line is in force but edited (a comment added, another file on the same line), so undo cannot remove it. */
+  edited?: boolean
+  includeLine: string
+  userConfig: string
+  mousseConfig: string
+  knownHosts: string
+  /** The line was added and the person has not yet seen `notice`. */
+  noticePending: boolean
+  notice?: string
+  computers: EditorSshComputer[]
+  problem?: { code: EditorSshProblemCode; message: string }
+}
+
+/** `prepare`, `enable` and `disable`: the new status, or why nothing changed. */
+export type EditorSshResult =
+  | {
+      ok: true
+      /** This call added the line, so the notice is due. */
+      added: boolean
+      /** For `disable`: how many Mousse lines were removed. */
+      removed?: number
+      /**
+       * For `disable`: a line that names Mousse's file is still in `~/.ssh/config` because the person
+       * edited it. Mousse left it; show `status.includeLine` and say to remove it by hand.
+       */
+      leftover?: boolean
+      status: EditorSshStatus
+    }
+  | { ok: false; code: EditorSshProblemCode; message: string; status: EditorSshStatus }
+
 export interface NetDoctor {
   ok: boolean
   checks: Array<{ name: string; ok: boolean; code?: NetErrorCode; message: string }>
