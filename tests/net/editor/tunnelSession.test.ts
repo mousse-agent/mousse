@@ -10,6 +10,11 @@ import type { SshVerifier } from '../../../src/mms/net/editor/sshConfig'
 import { TunnelError, type ClientTunnel } from '../../../src/mms/net/editor/tunnel'
 import { NetError, newId, type NodeId } from '../../../src/shared/net'
 import type { EditorSshStatus } from '../../../src/shared/net/local'
+import type {
+  EditorTunnelOpenAnswer,
+  EditorTunnelReadAnswer,
+  EditorTunnelWriteAnswer
+} from '../../../src/shared/net/editorProxy'
 import { KEY_A, KEY_B } from '../ssh/bed'
 
 const cleanups: Array<() => unknown> = []
@@ -545,5 +550,85 @@ describe('a block when something else fails', () => {
     await expect(t.laptop.openEditorTunnel(newId('node'))).rejects.toMatchObject({
       code: 'bad_request'
     })
+  }, 60_000)
+})
+
+describe('the local methods of the editor proxy, over a real session', () => {
+  const local = (t: Awaited<ReturnType<typeof pair>>, id = 'proxy-1') => {
+    const connection = { id }
+    return {
+      open: (node: NodeId = t.self.node) =>
+        t.laptop.editorTunnelRequest('net.editor.tunnel.open', { node }, connection) as Promise<
+          EditorTunnelOpenAnswer
+        >,
+      read: (tunnel: string) =>
+        t.laptop.editorTunnelRequest(
+          'net.editor.tunnel.read',
+          { tunnel, waitMs: 2000 },
+          connection
+        ) as Promise<EditorTunnelReadAnswer>,
+      write: (tunnel: string, text: string) =>
+        t.laptop.editorTunnelRequest(
+          'net.editor.tunnel.write',
+          { tunnel, data: Buffer.from(text).toString('base64') },
+          connection
+        ) as Promise<EditorTunnelWriteAnswer>,
+      close: (tunnel: string) =>
+        t.laptop.editorTunnelRequest('net.editor.tunnel.close', { tunnel }, connection)
+    }
+  }
+  const text = (read: EditorTunnelReadAnswer): string =>
+    read.data ? Buffer.from(read.data, 'base64').toString() : ''
+
+  it('open a tunnel to the owner, carry the editor’s bytes to its far end and back, and let it go', async () => {
+    const t = await pair()
+    await t.policy({ editor: true })
+    const proxy = local(t)
+    const opened = await proxy.open()
+    if (!opened.ok) throw new Error(`refused: ${opened.reason}`)
+    expect(opened).toMatchObject({ path: 'direct', computer: 'authority' })
+    expect(await proxy.write(opened.handle, 'SSH-2.0-OpenSSH_for_Test')).toEqual({ ok: true })
+    let echoed = ''
+    while (echoed.length < 'SSH-2.0-OpenSSH_for_Test'.length) echoed += text(await proxy.read(opened.handle))
+    expect(echoed).toBe('SSH-2.0-OpenSSH_for_Test')
+    expect(t.owner.editorTunnelList(t.laptopNode)).toHaveLength(1)
+    await proxy.close(opened.handle)
+    await vi.waitFor(() => expect(t.owner.editorTunnelList()).toEqual([]))
+  }, 60_000)
+
+  it('answer a refusal as a reason with the owner’s name, and open nothing', async () => {
+    const t = await pair()
+    const proxy = local(t)
+    // The owner's switch is off.
+    expect(await proxy.open()).toEqual({ ok: false, reason: 'editor_off', computer: 'authority' })
+    expect(t.echo.connections).toBe(0)
+    // A device that is not on the roster.
+    expect(await proxy.open(newId('node'))).toMatchObject({ ok: false, reason: 'unknown_computer' })
+  }, 60_000)
+
+  it('tell the proxy why when the owner ends the tunnel', async () => {
+    const t = await pair()
+    await t.policy({ editor: true })
+    const proxy = local(t)
+    const opened = await proxy.open()
+    if (!opened.ok) throw new Error(`refused: ${opened.reason}`)
+    await t.policy({ blocked: true })
+    let end: unknown
+    for (let i = 0; i < 5 && !end; i++) end = (await proxy.read(opened.handle)).end
+    expect(end).toBe('blocked')
+  }, 60_000)
+
+  it('end with the local connection, and are not reachable from another one', async () => {
+    const t = await pair()
+    await t.policy({ editor: true })
+    const mine = local(t, 'proxy-1')
+    const opened = await mine.open()
+    if (!opened.ok) throw new Error(`refused: ${opened.reason}`)
+    await expect(local(t, 'proxy-2').read(opened.handle)).rejects.toMatchObject({
+      code: 'bad_request'
+    })
+    t.laptop.editorTunnelConnectionClosed('proxy-1')
+    await vi.waitFor(() => expect(t.owner.editorTunnelList()).toEqual([]))
+    await vi.waitFor(() => expect(t.echo.sockets.size).toBe(0))
   }, 60_000)
 })

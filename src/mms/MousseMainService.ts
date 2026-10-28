@@ -19,7 +19,7 @@ import {
 import { ProfileHost } from './profiles/ProfileHost'
 import { registerProfileDomain } from './profiles/profileDomain'
 import type { ProfileId } from '../shared/profiles/ids'
-import { registerNetMethods } from './net/registerMethods'
+import { registerEditorTunnelMethods, registerNetMethods } from './net/registerMethods'
 import { registerBridgeMethods } from './bridge/registerMethods'
 import { registerSpaceMethods } from './spaces/registerMethods'
 import { registerSpaceArchiveMethods } from './spaces/archive/registerMethods'
@@ -212,6 +212,7 @@ export class MousseMainService extends MmsProfileServices {
       return services
     }
     registerNetMethods(this.domains, async profileId => (await profile(profileId)).net)
+    registerEditorTunnelMethods(this.domains, async profileId => (await profile(profileId)).net)
     registerBridgeMethods(this.domains, async profileId => (await profile(profileId)).bridge)
     this.domainCleanupSubscriptions.push(
       registerSpeechHostMethods(this.domains, async profileId => (await profile(profileId)).speechRelay)

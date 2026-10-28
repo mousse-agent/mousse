@@ -4,6 +4,10 @@ import {
   NET_LOCAL_METHODS,
   type NetLocalMethod
 } from '../../shared/net/local'
+import {
+  EDITOR_TUNNEL_LOCAL_METHODS,
+  type EditorTunnelLocalMethod
+} from '../../shared/net/editorProxy'
 import { isId, NODE_CAPABILITIES, NET_ERRORS, NetError } from '../../shared/net'
 import { isJoinVia } from '../../shared/net/via'
 import { AppError } from '../../shared/errors'
@@ -321,6 +325,92 @@ function validate(method: NetLocalMethod, value: unknown): Record<string, unknow
   )
     throw new DomainRpcError('invalid_params', 'A bounded add-on action request is required')
   return params
+}
+
+/** The service that holds the editor tunnels of one profile's local connections. */
+export interface EditorTunnelLocalService {
+  editorTunnelRequest(
+    method: EditorTunnelLocalMethod,
+    params: Record<string, unknown>,
+    connection: { id: string; lifetime?: AbortSignal }
+  ): unknown | Promise<unknown>
+  editorTunnelConnectionClosed(connection: string): void
+}
+const tunnelKeys: Record<EditorTunnelLocalMethod, readonly string[]> = {
+  'net.editor.tunnel.open': ['node'],
+  'net.editor.tunnel.read': ['tunnel', 'waitMs'],
+  'net.editor.tunnel.write': ['tunnel', 'data'],
+  'net.editor.tunnel.end': ['tunnel'],
+  'net.editor.tunnel.close': ['tunnel']
+}
+
+/**
+ * The four methods `mousse-cli net ssh-proxy` uses to carry an editor's SSH over a tunnel. They need the
+ * connection (a tunnel belongs to the one that opened it), so they are not part of `registerNetMethods`.
+ * A routed call from another computer never gets here: the router only forwards the methods it lists.
+ */
+export function registerEditorTunnelMethods(
+  registry: DomainHandlerRegistry,
+  forProfile: (id: string) => EditorTunnelLocalService | Promise<EditorTunnelLocalService>
+): void {
+  // Weak, so a profile service that was stopped and rebuilt is not kept alive by this list.
+  const known = new Set<WeakRef<EditorTunnelLocalService>>()
+  registry.onConnectionClosed((id) => {
+    for (const ref of [...known]) {
+      const service = ref.deref()
+      if (service) service.editorTunnelConnectionClosed(id)
+      else known.delete(ref)
+    }
+  })
+  // A connection's tunnels also end with its lifetime signal, which aborts when its profile binding changes.
+  for (const method of EDITOR_TUNNEL_LOCAL_METHODS)
+    registry.register({
+      method,
+      scope: 'profile',
+      capability: NET_LOCAL_CAPABILITY,
+      requiredCapabilities: [NET_LOCAL_CAPABILITY],
+      validate: (params) => {
+        try {
+          const value = domainObject(params ?? {}, ['profileId', ...tunnelKeys[method]])
+          if (method === 'net.editor.tunnel.open' && !isId('node', value.node))
+            throw new DomainRpcError('invalid_params', 'A node identity is required')
+          if (method !== 'net.editor.tunnel.open' && typeof value.tunnel !== 'string')
+            throw new DomainRpcError('invalid_params', 'A tunnel is required')
+          if (
+            method === 'net.editor.tunnel.write' &&
+            (typeof value.data !== 'string' || value.data.length > 64 * 1024)
+          )
+            throw new DomainRpcError('invalid_params', 'Bytes are required')
+          if (
+            method === 'net.editor.tunnel.read' &&
+            value.waitMs !== undefined &&
+            (!Number.isSafeInteger(value.waitMs) || Number(value.waitMs) < 0)
+          )
+            throw new DomainRpcError('invalid_params', 'waitMs must be a number of milliseconds')
+          return value
+        } catch (error) {
+          if (error instanceof DomainRpcError) throw publicError('bad_request')
+          throw error
+        }
+      },
+      async handle(context, params, binding) {
+        const connection = context.connection
+        // Only a program of this computer, with the owner's token. A routed call carries the other computer.
+        if (!connection || connection.bridgeCaller || connection.clientType === 'bridge')
+          throw publicError('forbidden')
+        try {
+          const service = await forProfile(binding!.profileId)
+          if (![...known].some((ref) => ref.deref() === service)) known.add(new WeakRef(service))
+          return await service.editorTunnelRequest(method, params, {
+            id: connection.id,
+            ...(connection.lifetime ? { lifetime: connection.lifetime } : {})
+          })
+        } catch (error) {
+          if (error instanceof NetError) throw publicError(error.code, error)
+          throw error
+        }
+      }
+    })
 }
 
 function publicError(code: keyof typeof NET_ERRORS, cause?: unknown): AppError {
