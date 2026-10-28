@@ -199,14 +199,16 @@ const NOT_COPIED: Record<string, string> = {
   GOOGLE_CLOUD_API_KEY: 'credential', GOOGLE_API_KEY: 'credential',
   // SDK host detection, optional credential metadata, endpoint and logging switches.
   AWS_EXECUTION_ENV: 'sdk', AWS_LAMBDA_BENCHMARK_MODE: 'sdk', AWS_LAMBDA_FUNCTION_NAME: 'sdk', AWS_LAMBDA_MAX_CONCURRENCY: 'sdk', AWS_SDK_JS_NODE_VERSION_SUPPORT_WARNING_DISABLED: 'sdk',
-  AWS_SDK_JS_TYPESCRIPT_DETECTION_DISABLED: 'sdk', AWS_SDK_UA_APP_ID: 'sdk', AWS_AUTH_SCHEME_PREFERENCE: 'sdk', AWS_SIGV4A_SIGNING_REGION_SET: 'sdk', AWS_ACCOUNT_ID: 'sdk',
+  AWS_DISABLE_CLOCK_SKEW_CORRECTION: 'sdk', AWS_SDK_UA_APP_ID: 'sdk', AWS_AUTH_SCHEME_PREFERENCE: 'sdk', AWS_SIGV4A_SIGNING_REGION_SET: 'sdk', AWS_ACCOUNT_ID: 'sdk',
   AWS_CREDENTIAL_SCOPE: 'sdk', GOOGLE_SDK_NODE_LOGGING: 'sdk', GOOGLE_API_CERTIFICATE_CONFIG: 'sdk', GOOGLE_GENAI_USE_ENTERPRISE: 'sdk', GOOGLE_GENAI_USE_VERTEXAI: 'sdk',
   GOOGLE_VERTEX_BASE_URL: 'sdk', GOOGLE_GEMINI_BASE_URL: 'sdk',
   // The prefix `AWS_BEARER_TOKEN_BEDROCK` is built from.
   AWS_BEARER_TOKEN_: 'prefix',
   // Enum values that look like variables (Bedrock guardrail PII types, Gemini tool and auth types).
   AWS_ACCESS_KEY: 'not a variable', AWS_SECRET_KEY: 'not a variable', GOOGLE_MAPS: 'not a variable', GOOGLE_SEARCH_IMAGE: 'not a variable',
-  GOOGLE_SEARCH_WEB: 'not a variable', GOOGLE_SERVICE_ACCOUNT_AUTH: 'not a variable'
+  GOOGLE_SEARCH_WEB: 'not a variable', GOOGLE_SERVICE_ACCOUNT_AUTH: 'not a variable',
+  // CI platforms jiti's environment detection names (`std-env`), not cloud settings Pi reads.
+  AWS_AMPLIFY: 'ci detection', AWS_APP_ID: 'ci detection', GOOGLE_CLOUDRUN: 'ci detection', GOOGLE_CLOUDRUN_JOB: 'ci detection'
 }
 
 describe('the ambient sets against the pinned Pi bundle', () => {

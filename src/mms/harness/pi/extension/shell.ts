@@ -1,6 +1,7 @@
 import { spawn as nodeSpawn, type ChildProcess, type SpawnOptions } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import { access } from 'node:fs/promises'
+import { constants as osConstants } from 'node:os'
 
 /**
  * How Mousse's extension runs Pi's `bash` tool on Linux and macOS, so that a Pi that dies leaves
@@ -233,7 +234,10 @@ export function containedBashOperations(options: ContainedShellOptions) {
         const exitCode = await exited
         if (signal?.aborted) throw new Error('aborted')
         if (timedOut) throw new Error(`timeout:${timeout}`)
-        return { exitCode }
+        // As Pi's `bash.js`: a shell killed by a signal has no exit code, so it reports the shell
+        // convention (128 + the signal), never a success.
+        const signalCode = child.signalCode
+        return { exitCode: exitCode ?? (signalCode ? 128 + (osConstants.signals[signalCode] ?? 0) : 1) }
       } finally {
         if (timer) clearTimeout(timer)
         signal?.removeEventListener('abort', onAbort)
