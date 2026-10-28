@@ -176,6 +176,8 @@ class ConnectionState {
   readonly counts: EndpointCounts = { exec: 0, shell: 0, sftp: 0, forwards: 0 }
   private client?: Connection
   private closed = false
+  /** The connection ended with a block or the like: everything it started is stopped, not hung up. */
+  private forced = false
   private authenticated = false
   private authTries = 0
   private refusedUserSaid = false
@@ -184,6 +186,8 @@ class ConnectionState {
   private readonly channels = new Set<{ destroy(): void }>()
   private readonly listeners = new Map<string, TcpServer>()
   private channelCount = 0
+  /** Programs being started (their request is accepted, their process not yet running). */
+  private starting = 0
   private grace?: ReturnType<typeof setTimeout>
 
   constructor(private readonly init: ConnectionInit) {
@@ -348,10 +352,20 @@ class ConnectionState {
     accept: () => ServerChannel,
     reject: () => void
   ): Promise<void> {
-    if (this.running.size >= SESSIONS_MAX) {
+    if (this.running.size + this.starting >= SESSIONS_MAX) {
       this.refuse('channel_limit')
       return reject()
     }
+    // The request is accepted at once, before anything is awaited: a client that has no input (`ssh host cmd < /dev/null`)
+    // sends EOF right behind the request, and `ssh2` drops a channel that gets its EOF before it was accepted, so the
+    // client would wait for an answer that never comes.
+    const channel = accept()
+    if (!channel) return
+    this.starting++
+    let channelClosed = false
+    channel.once('close', () => {
+      channelClosed = true
+    })
     let program: SessionProcess
     try {
       program = await this.init.host.start({
@@ -361,18 +375,27 @@ class ConnectionState {
         sshConnection: `${this.init.label} 127.0.0.1 22`,
         scope: this.init.scope
       })
-    } catch {
-      return reject()
+    } catch (error) {
+      this.starting--
+      try {
+        // What `sshd` does when it cannot run the shell: says so, and the command has failed.
+        channel.stderr.write(
+          `mousse: ${error instanceof Error ? error.message : 'could not start'}\n`
+        )
+        channel.exit(127)
+        channel.end()
+      } catch {
+        // The channel is gone.
+      }
+      return
     }
+    this.starting--
     const running: Running = { process: program, ended: false }
-    // The connection ended while the program was being started: it is let go as any other would be.
-    if (this.closed) {
-      program.hangUp()
-      return reject()
-    }
-    const channel = accept()
-    if (!channel) {
-      program.hangUp()
+    // The connection or the channel ended while the program was being started: it is let go as any other would be.
+    if (this.closed || channelClosed) {
+      // A forced end that came while the program was starting stops it too; the sweep may have run before it existed.
+      if (this.forced) program.kill()
+      else program.hangUp()
       return
     }
     request.running = running
@@ -535,6 +558,7 @@ class ConnectionState {
   end(forced: boolean): void {
     if (this.closed) return
     this.closed = true
+    this.forced = forced
     if (this.grace) clearTimeout(this.grace)
     for (const running of [...this.running]) {
       if (forced) running.process.kill()
