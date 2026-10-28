@@ -70,6 +70,9 @@ describe('Claude background helpers through the orchestrator (issue #142)', () =
     }
     const service = new ClaudeSubscriptionProviderService(home, new UserQuestionService(), {
       launchConfig: () => ({ binaryPath: binary }),
+      // The gateway resumes a native session only when it can tell which account the turn runs as. The test
+      // setup strips every credential the launching shell has, so the account is a fake key set here.
+      baseEnv: () => ({ ...process.env, ANTHROPIC_API_KEY: 'sk-ant-api03-fake-local' }),
       query: cli.query,
       // A test can hold the sign-in check every turn makes before it pushes its prompt.
       runAuth: vi.fn(async () => {

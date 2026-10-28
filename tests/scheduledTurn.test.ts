@@ -31,6 +31,12 @@ const CLAUDE_SELECTION = { instanceId: 'claude', llmProvider: 'claude-subscripti
 const PAST = '2026-01-01T00:00:00.000Z'
 /** A claim owner that is gone: another pid and a process instance nobody runs. */
 const DEAD_OWNER = { pid: 2_147_000_090, processInstanceId: 'dead-daemon' }
+/**
+ * A scheduled run's thread works on the project's own checkout unless its job asks for a new worktree
+ * (`runIsolatedScheduledJob`). The cases about the level, mode and ceiling a run gets are not about the
+ * checkout, so their threads are bound to it and skip provisioning an owned worktree each.
+ */
+const ON_PRIMARY = { workspaceBinding: { policy: 'primary' as const } }
 
 function deferred<T = void>() {
   let resolve!: (value: T) => void
@@ -1077,7 +1083,7 @@ describe('scheduled jobs run as turns', () => {
       const w = boot([pi])
       setProfileAccess(w, 'manage')
       const project = projectOf(w)
-      const thread = w.store.createThread('Mine', project.id, project.path)
+      const thread = w.store.createThread('Mine', project.id, project.path, ON_PRIMARY)
       w.orch.setThreadModelOverride(thread.id, PI)
       const idle = addJob(w, { name: 'Idle', threadId: thread.id, projectId: project.id })
       await runNow(w, idle)
@@ -1104,7 +1110,7 @@ describe('scheduled jobs run as turns', () => {
       const pi = piAdapter(() => 'pi')
       const w = boot([pi])
       const project = projectOf(w)
-      const strict = w.store.createThread('Strict', project.id, project.path)
+      const strict = w.store.createThread('Strict', project.id, project.path, ON_PRIMARY)
       w.orch.setThreadPermissionMode(strict.id, 'ask')
       const bound = addJob(w, { name: 'Bound', threadId: strict.id, projectId: project.id })
       const perRun = addJob(w, { name: 'Per run', projectId: project.id })
@@ -1129,7 +1135,7 @@ describe('scheduled jobs run as turns', () => {
     }
     const threadIn = (w: World, mode: 'ask' | 'accept_edits' | 'full') => {
       const project = projectOf(w)
-      const thread = w.store.createThread('Target', project.id, project.path)
+      const thread = w.store.createThread('Target', project.id, project.path, ON_PRIMARY)
       w.orch.setThreadPermissionMode(thread.id, mode)
       return { project, thread }
     }
@@ -1321,11 +1327,11 @@ describe('scheduled jobs run as turns', () => {
       const pi = piAdapter(() => 'pi')
       const w = boot([pi])
       const project = projectOf(w)
-      const wide = w.store.createThread('Wide', project.id, project.path)
+      const wide = w.store.createThread('Wide', project.id, project.path, ON_PRIMARY)
       w.orch.setThreadPermissionMode(wide.id, 'full')
-      const strict = w.store.createThread('Strict', project.id, project.path)
+      const strict = w.store.createThread('Strict', project.id, project.path, ON_PRIMARY)
       w.orch.setThreadPermissionMode(strict.id, 'ask')
-      const creator = { threadId: w.store.createThread('Creator', project.id, project.path).id, runId: 'r1' }
+      const creator = { threadId: w.store.createThread('Creator', project.id, project.path, ON_PRIMARY).id, runId: 'r1' }
       const capped = addJob(w, { name: 'Capped', threadId: wide.id, projectId: project.id, permissionCeiling: 'ask', createdBy: creator })
       const uncapped = addJob(w, { name: 'Uncapped', threadId: wide.id, projectId: project.id })
       const looser = addJob(w, { name: 'Looser', threadId: strict.id, projectId: project.id, permissionCeiling: 'full', createdBy: creator })
@@ -1351,11 +1357,11 @@ describe('scheduled jobs run as turns', () => {
       })
       const w = boot([pi])
       const project = projectOf(w)
-      const thread = w.store.createThread('Wide', project.id, project.path)
+      const thread = w.store.createThread('Wide', project.id, project.path, ON_PRIMARY)
       w.orch.setThreadPermissionMode(thread.id, 'full')
       const busy = await w.orch.send('hold', false, { threadId: thread.id, clientRequestId: 'person-1', awaitMode: 'ack' })
       await waitFor(() => pi.turns.some((turn) => turn.prompt.includes('hold')), 'the busy turn')
-      const creator = { threadId: w.store.createThread('Creator', project.id, project.path).id }
+      const creator = { threadId: w.store.createThread('Creator', project.id, project.path, ON_PRIMARY).id }
       const job = addJob(w, { name: 'Queued', threadId: thread.id, projectId: project.id, permissionCeiling: 'accept_edits', createdBy: creator })
       await runNow(w, job)
       await waitFor(() => w.jobs.getJob(job.id)?.pendingOccurrence?.state === 'queued', 'the queued occurrence')
@@ -1411,7 +1417,7 @@ describe('scheduled jobs run as turns', () => {
         wired = wireJobs(world)
         setProfileAccess(world, 'manage')
         const project = projectOf(world)
-        const thread = world.store.createThread('Mine', project.id, project.path)
+        const thread = world.store.createThread('Mine', project.id, project.path, ON_PRIMARY)
         world.orch.setThreadPermissionMode(thread.id, 'full')
         const sent = await world.orch.send('hello', false, { threadId: thread.id, source: 'gui', clientRequestId: 'person-1', awaitMode: 'turn' })
         expect(mode(world, sent.runId)).toBe('full')
@@ -1427,7 +1433,7 @@ describe('scheduled jobs run as turns', () => {
         const w = boot([piAdapter((input) => { seen.person = wired.person(input.threadId, input.runId); return 'pi' })])
         wired = wireJobs(w)
         const project = projectOf(w)
-        const thread = w.store.createThread('Mine', project.id, project.path)
+        const thread = w.store.createThread('Mine', project.id, project.path, ON_PRIMARY)
         await w.orch.send('hello', false, { threadId: thread.id, source: 'cli', clientRequestId: 'person-1', awaitMode: 'turn' })
         expect(seen.person).toBe(true)
       })
@@ -1444,7 +1450,7 @@ describe('scheduled jobs run as turns', () => {
         setProfileAccess(w, 'manage')
         const project = projectOf(w)
         const make = (name: string) => {
-          const thread = w.store.createThread(name, project.id, project.path)
+          const thread = w.store.createThread(name, project.id, project.path, ON_PRIMARY)
           w.orch.setThreadPermissionMode(thread.id, 'full')
           return thread
         }

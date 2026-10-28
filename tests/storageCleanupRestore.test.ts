@@ -1,6 +1,6 @@
 import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 import { MousseMainService } from '../src/mms/MousseMainService'
 import { LocalMmsClient } from '../src/mms/protocol/client'
 import { MmsProtocolServer } from '../src/mms/protocol/server'
@@ -41,15 +41,28 @@ describe('a worktree retired by a storage rule comes back on demand', () => {
     await gui?.close(); await cli?.close(); await server?.stop(); await mms?.stop(); f?.dispose()
   })
 
-  async function retiredThread() {
+  // Every cleanup run looks at every thread the file has made, retired or not, and each costs it about a tenth
+  // of a second, so a file that makes a thread per test gets slower test by test. The tests that only read
+  // after the restore retire one thread again and again (`reuse`). A test that writes to the checkout or
+  // deletes the thread takes a thread of its own, and a checkout it brought back is removed when it is done,
+  // so the next run does not retire that one a second time.
+  let shared: string | undefined
+  const restored: string[] = []
+  afterEach(() => {
+    for (const path of restored.splice(0)) if (existsSync(path)) git(f.repo, 'worktree', 'remove', '--force', path)
+  })
+
+  async function retiredThread(options: { reuse?: boolean } = {}) {
     const project = mms.projects.openProject(f.repo)
-    const thread = mms.threads.createThread(`Retired ${Math.random().toString(16).slice(2, 8)}`, project.id)
-    const { metadata } = await gui.request<{ metadata: { worktreePath: string } }>('workspace.restore', { threadId: thread.id })
+    const threadId = options.reuse && shared ? shared : mms.threads.createThread(`Retired ${Math.random().toString(16).slice(2, 8)}`, project.id).id
+    if (options.reuse) shared = threadId
+    const { metadata } = await gui.request<{ metadata: { worktreePath: string } }>('workspace.restore', { threadId })
     expect(existsSync(metadata.worktreePath)).toBe(true)
     const report = (await gui.request<{ report: StorageCleanupReport }>('storage.cleanup.run', {})).report
-    expect(report.items.find((entry) => entry.threadId === thread.id)).toMatchObject({ rule: 'worktree-inactive', outcome: 'removed' })
+    expect(report.items.find((entry) => entry.threadId === threadId)).toMatchObject({ rule: 'worktree-inactive', outcome: 'removed' })
     expect(existsSync(metadata.worktreePath)).toBe(false)
-    return { threadId: thread.id, worktreePath: metadata.worktreePath }
+    if (!options.reuse) restored.push(metadata.worktreePath)
+    return { threadId, worktreePath: metadata.worktreePath }
   }
   const marker = (threadId: string) => cleanupMarkerPath(mms.threads.lifecycleStore, threadId)
 
@@ -96,7 +109,7 @@ describe('a worktree retired by a storage rule comes back on demand', () => {
     ['actions.list', {}],
     ['publish.status', {}]
   ])('%s restores the checkout it is about to read', async (method, extra) => {
-    const { threadId, worktreePath } = await retiredThread()
+    const { threadId, worktreePath } = await retiredThread({ reuse: true })
     await gui.request(method, { threadId, ...extra })
     expect(existsSync(worktreePath)).toBe(true); expect(existsSync(marker(threadId))).toBe(false)
   }, 120_000)
@@ -107,7 +120,7 @@ describe('a worktree retired by a storage rule comes back on demand', () => {
     ['review.file', { scope: { kind: 'turn', turnId: 'no-such-turn' }, path: 'value.txt' }],
     ['git.suggestCommitMessage', {}]
   ])('%s restores the checkout even when the answer itself is an error or "unavailable"', async (method, extra) => {
-    const { threadId, worktreePath } = await retiredThread()
+    const { threadId, worktreePath } = await retiredThread({ reuse: true })
     await gui.request(method, { threadId, ...extra }).catch(() => undefined)
     expect(existsSync(worktreePath)).toBe(true); expect(existsSync(marker(threadId))).toBe(false)
   }, 120_000)

@@ -5,16 +5,23 @@ import { basename, dirname, join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { GitService } from '../src/mms/git/GitService'
 import type { GitOperationEvent } from '../src/shared/types'
+import { committedGitTemplate } from './support/gitBase'
 
 const roots: string[] = []
 const git = (cwd: string, ...args: string[]): string => execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim()
 
-function repo() {
-  const cwd = mkdtempSync(join(tmpdir(), 'mousse-git-writes-')); roots.push(cwd)
+const copyBaseRepo = committedGitTemplate((cwd) => {
   git(cwd, 'init', '-b', 'main')
   git(cwd, 'config', 'user.name', 'Git write fixture'); git(cwd, 'config', 'user.email', 'git-fixture@example.invalid')
+  // Pinned before the baseline commit, so no hook the machine configures runs while the template is built.
   git(cwd, 'config', 'commit.gpgsign', 'false'); git(cwd, 'config', 'core.hooksPath', join(cwd, '.no-hooks'))
   writeFileSync(join(cwd, 'base.txt'), 'base\n'); git(cwd, 'add', 'base.txt'); git(cwd, 'commit', '-m', 'baseline')
+})
+function repo() {
+  const cwd = mkdtempSync(join(tmpdir(), 'mousse-git-writes-')); roots.push(cwd)
+  copyBaseRepo(cwd)
+  // The hooks folder is named after this repository, so it is set on the copy.
+  git(cwd, 'config', 'core.hooksPath', join(cwd, '.no-hooks'))
   return cwd
 }
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }) })
@@ -176,16 +183,20 @@ describe('GitService stage, unstage and discard', () => {
     expect(porcelain(cwd)).toEqual([' M base.txt', '?? a.txt', '?? dir/b.txt'])
   })
 
-  it('stages, unstages and discards 1,500 tracked and 1,500 untracked paths in one call each', async () => {
+  it('stages, unstages and discards 400 tracked and 400 untracked long-named paths in one call each', async () => {
     const cwd = repo(), service = new GitService()
-    const tracked = Array.from({ length: 1500 }, (_, index) => `tracked/file-${String(index).padStart(4, '0')}-with-a-longish-name.txt`)
-    const untracked = Array.from({ length: 1500 }, (_, index) => `loose/file-${String(index).padStart(4, '0')}-with-a-longish-name.txt`)
+    // Each list is about 48,000 characters on its own, over Windows' 32,767-character command line, so passing
+    // the paths as arguments would fail it; long names get there with far fewer files for Git to walk.
+    const longName = (dir: string, index: number) => `${dir}/file-${String(index).padStart(4, '0')}-${'n'.repeat(100)}.txt`
+    const tracked = Array.from({ length: 400 }, (_, index) => longName('tracked', index))
+    const untracked = Array.from({ length: 400 }, (_, index) => longName('loose', index))
+    expect(tracked.join('').length).toBeGreaterThan(32_767); expect(untracked.join('').length).toBeGreaterThan(32_767)
     for (const name of tracked) write(cwd, name)
     git(cwd, 'add', '-A'); git(cwd, 'commit', '-q', '-m', 'many')
     for (const name of tracked) write(cwd, name, 'edited\n')
     for (const name of untracked) write(cwd, name)
     await service.stage(cwd, [...tracked, ...untracked])
-    expect(git(cwd, 'diff', '--cached', '--name-only').split('\n')).toHaveLength(3000)
+    expect(git(cwd, 'diff', '--cached', '--name-only').split('\n')).toHaveLength(800)
     await service.unstage(cwd, [...tracked, ...untracked])
     expect(git(cwd, 'diff', '--cached', '--name-only')).toBe('')
     await service.discard(cwd, [...tracked, ...untracked])
