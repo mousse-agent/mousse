@@ -10,7 +10,9 @@ import { createWindowsHost, findSshdHelper } from './windowsHost'
  */
 export function systemProcessHost(
   platform: NodeJS.Platform = process.platform,
-  helper: () => string | undefined = findSshdHelper
+  helper: () => string | undefined = findSshdHelper,
+  /** The profile's folder for the copy of the helper that sessions run from (see `helperCopy`). */
+  folder?: string
 ): ProcessHost | undefined {
   if (platform === 'linux' || platform === 'darwin') {
     try {
@@ -23,7 +25,7 @@ export function systemProcessHost(
   }
   if (platform === 'win32') {
     const path = helper()
-    return path ? createWindowsHost({ helper: path }) : undefined
+    return path ? createWindowsHost({ helper: path, ...(folder ? { folder } : {}) }) : undefined
   }
   return undefined
 }
