@@ -8,7 +8,7 @@ import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync } from 'node:
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { fitSnapshot } from '../../../../src/mms/bridge/routed/listRows'
+import { fitSnapshot, isListedComputer } from '../../../../src/mms/bridge/routed/listRows'
 import { MergedLists, type MergedListsOptions } from '../../../../src/mms/bridge/routed/mergedLists'
 import { MmsEventBus } from '../../../../src/mms/events'
 import { NetDatabase } from '../../../../src/mms/net/store/database'
@@ -68,6 +68,7 @@ function harness(
     self?: NodeId
     enabled?: boolean
     deadline?: number
+    cacheSettleMs?: number
   } = {}
 ) {
   const dir = realpathSync(mkdtempSync(join(tmpdir(), 'merged-lists-')))
@@ -78,6 +79,8 @@ function harness(
   const clock = { now: () => now.at }
   const self = options.self ?? newId('node')
   const computers = options.computers ?? [{ node: newId('node'), name: 'Laptop' }]
+  /** What the roster says now: a test changes it, or makes it unreadable (undefined). */
+  const roster: { list: Array<{ node: NodeId; name: string }> | undefined } = { list: computers }
   const online = new Set<NodeId>(computers.map((computer) => computer.node))
   const state = {
     threads: [] as Thread[],
@@ -131,11 +134,12 @@ function harness(
       client: client as never,
       store,
       self: () => self,
-      computers: () => computers,
+      computers: () => roster.list,
       online: (node) => online.has(node),
       enabled: () => state.enabled,
       clock,
-      fanOutDeadlineMs: options.deadline ?? 2_000
+      fanOutDeadlineMs: options.deadline ?? 2_000,
+      cacheSettleMs: options.cacheSettleMs ?? 50
     } satisfies MergedListsOptions)
   let lists = make()
   cleanups.push(() => lists.close())
@@ -156,6 +160,10 @@ function harness(
     node,
     self,
     computers,
+    roster,
+    get store() {
+      return store
+    },
     get lists() {
       return lists
     },
@@ -790,7 +798,10 @@ describe('search and Recently deleted across computers', () => {
     await h.lists.reconcile()
     const first = h.lists.search('window-1', 'first', 10)
     const newer = await h.lists.search('window-1', 'second', 10)
-    expect(await first).toEqual({ results: [], skipped: [] })
+    expect(await first).toEqual({
+      results: [],
+      skipped: [{ node: h.node, name: 'Laptop', reason: 'replaced' }]
+    })
     expect(newer.results.map((row) => row.threadName)).toEqual(['Second'])
     // Another window's search is its own.
     expect(h.client.call).toHaveBeenCalledTimes(2)
@@ -943,5 +954,371 @@ describe('projects that are the same repository', () => {
     )
     await new Promise((resolve) => setTimeout(resolve, 100))
     expect(h.client.call).toHaveBeenCalledTimes(1)
+  }, 30_000)
+})
+
+describe('a search and Recently deleted on one window', () => {
+  it('do not cancel each other: each kind of call has its own slot, and overlapping reads share one', async () => {
+    const h = harness()
+    const aborted: string[] = []
+    h.client.call.mockImplementation(
+      (_node: NodeId, method: string, _params: unknown, options?: { signal?: AbortSignal }) =>
+        new Promise((resolve, reject) => {
+          options?.signal?.addEventListener('abort', () => {
+            aborted.push(method)
+            reject(new DomainRpcError('cancelled', 'cancelled'))
+          })
+          if (method === 'threads.inventory')
+            setTimeout(
+              () =>
+                resolve({
+                  lifecycles: [{ taskId: 'gone', state: 'trashed', operations: [] }],
+                  taskNames: { gone: 'Gone' }
+                }),
+              60
+            )
+          else
+            setTimeout(
+              () =>
+                resolve({ results: [{ threadId: 'r', threadName: 'Found', matchType: 'thread' }] }),
+              120
+            )
+        })
+    )
+    await h.lists.reconcile()
+    const search = h.lists.search('window-1', 'x', 10)
+    // Recently deleted refreshes while the search is running, twice, on the same connection.
+    const first = h.lists.inventory('window-1')
+    const second = h.lists.inventory('window-1')
+    const [found, trash, again] = await Promise.all([search, first, second])
+    expect(aborted).toEqual([])
+    expect(found.results.map((row) => row.threadName)).toEqual(['Found'])
+    expect(found.skipped).toEqual([])
+    expect(trash.lifecycles).toHaveLength(1)
+    expect(again).toBe(trash)
+    // One read of the trash for the two refreshes, one of the search.
+    expect(h.client.call.mock.calls.filter((call) => call[1] === 'threads.inventory')).toHaveLength(
+      1
+    )
+    expect(h.client.call.mock.calls.filter((call) => call[1] === 'threads.search')).toHaveLength(1)
+  })
+
+  it('name the computers a replaced search did not cover, and the one a list could not read', async () => {
+    const quiet = { node: newId('node'), name: 'Desktop' }
+    const h = harness({ computers: [{ node: newId('node'), name: 'Laptop' }, quiet] })
+    h.online.delete(quiet.node)
+    h.client.call.mockImplementation(
+      (_node: NodeId, _method: string, params: unknown, options?: { signal?: AbortSignal }) =>
+        new Promise((resolve, reject) => {
+          if ((params as { query?: string }).query === 'newer') return resolve({ results: [] })
+          options?.signal?.addEventListener('abort', () =>
+            reject(new DomainRpcError('cancelled', 'x'))
+          )
+        })
+    )
+    await h.lists.reconcile()
+    const older = h.lists.search('w', 'older', 5)
+    await h.lists.search('w', 'newer', 5)
+    expect((await older).skipped.map((row) => [row.name, row.reason]).sort()).toEqual([
+      ['Desktop', 'replaced'],
+      ['Laptop', 'replaced']
+    ])
+    h.client.call.mockResolvedValue({ lifecycles: [], taskNames: {} })
+    const trash = await h.lists.inventory('w')
+    expect(trash.skipped).toEqual([{ node: quiet.node, name: 'Desktop', reason: 'offline' }])
+  })
+})
+
+describe('which devices are computers', () => {
+  it('lists a device whose kind is computer, or whose delegation holds Works on threads; never a phone', () => {
+    expect(isListedComputer('computer', [])).toBe(true)
+    expect(isListedComputer(undefined, ['read', 'chat', 'write', 'settings'])).toBe(true)
+    expect(isListedComputer(undefined, ['read', 'chat', 'write'])).toBe(false)
+    expect(isListedComputer('phone', ['read', 'chat', 'write', 'settings'])).toBe(false)
+    expect(isListedComputer('phone', [])).toBe(false)
+  })
+
+  it('forgets no computer when the roster cannot be read', async () => {
+    const h = harness()
+    await h.feed(snapshot([{ id: 'a', updatedAt: iso(1) }]))
+    h.roster.list = undefined
+    await h.lists.reconcile()
+    expect(h.lists.threads()).toHaveLength(1)
+    expect(h.attachments.get(h.node)!.close).not.toHaveBeenCalled()
+  })
+})
+
+describe('the copy of a computer’s lists on disk', () => {
+  it('is not written back for a computer that left the roster while its stream was being opened', async () => {
+    const h = harness()
+    let release!: () => void
+    h.hub.attach.mockImplementationOnce(
+      (ref: { nodeId: NodeId }, update: (value: unknown) => void, error: () => void) =>
+        new Promise((resolve) => {
+          const close = vi.fn()
+          h.attachments.set(ref.nodeId, { update, error, close })
+          release = () => resolve({ close, descriptor: {} })
+        }) as never
+    )
+    const reading = h.lists.reconcile()
+    await vi.waitFor(() => expect(h.hub.attach).toHaveBeenCalledTimes(1))
+    // It is removed (revoked) before the stream is open.
+    h.roster.list = []
+    const second = h.lists.reconcile()
+    release()
+    await Promise.all([reading, second])
+    const attachment = h.attachments.get(h.node)!
+    expect(attachment.close).toHaveBeenCalled()
+    expect(h.client.closeStream).toHaveBeenCalled()
+    // A snapshot that still arrives is not made into rows, and nothing is written for the computer.
+    attachment.update({ kind: 'snapshot', value: snapshot([{ id: 'late', updatedAt: iso(1) }]) })
+    expect(h.lists.threads()).toEqual([])
+    h.lists.close()
+    expect(h.restartSnapshots()).toBe(0)
+  })
+
+  it('is cleared when routing goes off, and what is kept for a computer no longer listed goes first', async () => {
+    const gone = { node: newId('node'), name: 'Old' }
+    const h = harness({ computers: [{ node: newId('node'), name: 'Laptop' }, gone] })
+    await h.feed(snapshot([{ id: 'a', updatedAt: iso(1) }]))
+    await h.feed(snapshot([{ id: 'z', updatedAt: iso(1) }]), gone.node)
+    h.lists.close()
+    expect(h.restartSnapshots()).toBe(2)
+    // Restart with the other computer out of the roster: its copy and places are dropped at the first look.
+    const lists = h.restart()
+    h.roster.list = h.computers.slice(0, 1)
+    await lists.reconcile()
+    expect(h.store.snapshots().map((row) => row.node)).toEqual([h.node])
+    expect(h.store.positions(gone.node).size).toBe(0)
+    // Routing goes off: every copy goes, the rows go, and nothing is attached.
+    h.state.enabled = false
+    await lists.reconcile()
+    expect(h.restartSnapshots()).toBe(0)
+    expect(lists.threads()).toEqual([])
+    // Places are only numbers and stay, so rows come back in order when routing is on again.
+    expect(h.store.positions(h.node).size).toBeGreaterThan(0)
+  })
+
+  it('shows a computer that refuses this one as not shared, not offline, and keeps nothing of it on disk', async () => {
+    const h = harness()
+    await h.feed(
+      snapshot([{ id: 'a', updatedAt: iso(1) }], {
+        projects: [{ id: 'p', name: 'P', path: '/p', order: 0 }]
+      })
+    )
+    h.lists.close()
+    expect(h.restartSnapshots()).toBe(1)
+    const lists = h.restart()
+    await lists.reconcile()
+    // The other computer then refuses this one: the stream ends with `forbidden`.
+    h.attachments.get(h.node)!.error('forbidden' as never)
+    expect(lists.threads().map((row) => [row.offline, row.notShared])).toEqual([[undefined, true]])
+    expect(lists.projects().map((row) => [row.offline, row.notShared])).toEqual([[undefined, true]])
+    expect(lists.state()[0]).toMatchObject({ live: false })
+    expect(h.restartSnapshots()).toBe(0)
+    // A search says so rather than "offline", and does not ask.
+    expect(await lists.search('w', 'x', 5)).toMatchObject({
+      skipped: [{ name: 'Laptop', reason: 'refused' }]
+    })
+    expect(h.client.call).not.toHaveBeenCalled()
+  })
+
+  it('is a refusal too when the computer answers no to opening the stream', async () => {
+    const h = harness()
+    await h.feed(snapshot([{ id: 'a', updatedAt: iso(1) }]))
+    h.lists.close()
+    const lists = h.restart()
+    h.hub.attach.mockRejectedValueOnce(new DomainRpcError('computer_forbidden', 'no'))
+    await lists.reconcile()
+    expect(lists.threads().map((row) => row.notShared)).toEqual([true])
+    expect(h.restartSnapshots()).toBe(0)
+  })
+
+  it('is written when it changed and at most once while it settles; it holds no statuses', async () => {
+    const h = harness({ cacheSettleMs: 40 })
+    const save = vi.spyOn(h.store, 'saveSnapshot')
+    const rows = [{ id: 'a', updatedAt: iso(1) }]
+    await h.feed(
+      snapshot(rows, {
+        status: { a: { state: 'failed', error: 'Secret detail of a failed turn' } }
+      })
+    )
+    for (let n = 0; n < 5; n++)
+      await h.feed(snapshot(rows, { status: { a: { state: 'processing' } } }))
+    expect(save).not.toHaveBeenCalled()
+    await vi.waitFor(() => expect(save).toHaveBeenCalledTimes(1))
+    const cached = h.store.snapshots()[0]!.snapshot
+    expect(cached).not.toContain('Secret detail')
+    expect(JSON.parse(cached).status).toEqual({})
+    // Nothing changed: the same copy is not written again.
+    await h.feed(snapshot(rows, { status: { a: { state: 'completed' } } }))
+    await new Promise((resolve) => setTimeout(resolve, 150))
+    expect(save).toHaveBeenCalledTimes(1)
+    // A change in the rows is.
+    await h.feed(snapshot([{ id: 'a', name: 'Renamed', updatedAt: iso(1) }]))
+    await vi.waitFor(() => expect(save).toHaveBeenCalledTimes(2))
+  })
+})
+
+describe('a subagent and the notification rule', () => {
+  it('notifies for a question under the default rule when the thread it works for qualifies', async () => {
+    const h = harness()
+    const child = (id: string, parent: string) => ({
+      id,
+      updatedAt: iso(1),
+      lineage: { parentThreadId: parent, rootThreadId: parent, relationship: 'subagent' }
+    })
+    const rows = [
+      { id: 'mine', updatedAt: iso(5), startedFrom: { node: h.self } },
+      child('mine-child', 'mine'),
+      { id: 'theirs', updatedAt: iso(4) },
+      child('theirs-child', 'theirs')
+    ]
+    const say = (state: string) => ({ 'mine-child': { state }, 'theirs-child': { state } })
+    await h.feed(snapshot(rows, { status: say('processing') }))
+    const from = h.events.length
+    await h.feed(snapshot(rows, { status: say('awaiting_input') }))
+    const told = h.ofType('activity', from).map((event) => event.threadId)
+    expect(told).toEqual([h.q('mine-child')])
+  })
+})
+
+describe('where this computer’s own threads go in a group that holds rows of others', () => {
+  it('knows the first row of the group, among every computer’s rows of its project', async () => {
+    const h = harness()
+    await h.feed(
+      snapshot(
+        [
+          { id: 'a', updatedAt: iso(9) },
+          { id: 'b', updatedAt: iso(3), projectId: 'p' }
+        ],
+        { projects: [{ id: 'p', name: 'P', path: '/p', order: 0 }] }
+      )
+    )
+    const first = Math.min(
+      ...h.lists
+        .threads()
+        .filter((row) => !row.projectId)
+        .map((row) => row.order)
+    )
+    expect(h.lists.frontFloor(undefined)).toBe(first)
+    expect(h.lists.frontFloor(h.q('p'))).toBe(
+      h.lists.threads().find((row) => row.id === h.q('b'))!.order
+    )
+    expect(h.lists.frontFloor('nothing')).toBeUndefined()
+    h.state.enabled = false
+    expect(h.lists.frontFloor(undefined)).toBeUndefined()
+  })
+})
+
+describe('how projects are matched', () => {
+  const git = (cwd: string, ...args: string[]): string =>
+    execFileSync('git', ['-c', 'user.name=T', '-c', 'user.email=t@example.com', ...args], {
+      cwd,
+      encoding: 'utf8'
+    }).trim()
+  const folder = (): string => {
+    const path = realpathSync(mkdtempSync(join(tmpdir(), 'merged-match-')))
+    cleanups.push(() =>
+      rmSync(path, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
+    )
+    return path
+  }
+  const repository = (remote?: string): { path: string; root: string } => {
+    const path = folder()
+    git(path, 'init', '-q')
+    git(path, 'commit', '-q', '--allow-empty', '-m', `root ${Math.random()}`)
+    if (remote) git(path, 'remote', 'add', 'origin', remote)
+    return { path, root: git(path, 'rev-list', '--max-parents=0', 'HEAD') }
+  }
+  const remoteProject = [{ id: 'rp', name: 'R', path: '/r', order: 0 }]
+
+  it('keeps a weak match (the root commit alone) apart from sameAs', async () => {
+    const h = harness()
+    const repo = repository()
+    h.state.projects = [{ id: 'mine', name: 'm', path: repo.path, createdAt: iso(0), order: 0 }]
+    h.client.call.mockResolvedValue({ projectId: 'rp', weak: true })
+    await h.feed(snapshot([], { projects: remoteProject }))
+    await vi.waitFor(() => expect(h.lists.projects()[0]?.similarTo).toBe('mine'), {
+      timeout: 20_000
+    })
+    expect(h.lists.projects()[0]).not.toHaveProperty('sameAs')
+    // Rows of a project that is only similar do not sort with this computer's project.
+    await h.feed(
+      snapshot([{ id: 't', projectId: 'rp', updatedAt: iso(1) }], { projects: remoteProject })
+    )
+    expect(h.lists.threads({ projectId: 'mine' })).toEqual([])
+  }, 30_000)
+
+  it('asks again only for a repository it has not asked about, and a minute after a failure', async () => {
+    const h = harness()
+    const one = repository(),
+      two = repository()
+    h.state.projects = [{ id: 'a', name: 'a', path: one.path, createdAt: iso(0), order: 0 }]
+    h.client.call.mockRejectedValueOnce(new DomainRpcError('deadline_exceeded', 'slow'))
+    const rows = snapshot([], { projects: remoteProject })
+    await h.feed(rows)
+    await vi.waitFor(() => expect(h.client.call).toHaveBeenCalledTimes(1), { timeout: 20_000 })
+    // The failure is not retried by every snapshot that follows.
+    for (let n = 0; n < 3; n++)
+      await h.feed(snapshot([{ id: `t${n}`, updatedAt: iso(n) }], { projects: remoteProject }))
+    await new Promise((resolve) => setTimeout(resolve, 200))
+    expect(h.client.call).toHaveBeenCalledTimes(1)
+    h.now.at += 61_000
+    h.client.call.mockResolvedValue({ projectId: 'rp' })
+    await h.feed(snapshot([{ id: 'late', updatedAt: iso(9) }], { projects: remoteProject }))
+    await vi.waitFor(() => expect(h.lists.projects()[0]?.sameAs).toBe('a'), { timeout: 20_000 })
+    const calls = h.client.call.mock.calls.length
+    // A rename or a pin of a project changes no repository: nothing is asked.
+    h.state.projects = [{ ...h.state.projects[0]!, name: 'renamed', pinnedAt: iso(1) }]
+    ;(h.lists as unknown as { localProjectsChanged(): void }).localProjectsChanged()
+    await new Promise((resolve) => setTimeout(resolve, 1_300))
+    expect(h.client.call).toHaveBeenCalledTimes(calls)
+    // A project of a repository not asked about before is asked about, and only that one.
+    h.state.projects = [
+      ...h.state.projects,
+      { id: 'b', name: 'b', path: two.path, createdAt: iso(0), order: 1 }
+    ]
+    ;(h.lists as unknown as { localProjectsChanged(): void }).localProjectsChanged()
+    await vi.waitFor(() => expect(h.client.call).toHaveBeenCalledTimes(calls + 1), {
+      timeout: 20_000
+    })
+  }, 60_000)
+
+  it('sorts rows with this computer’s project once its match is known, unless a person moved them', async () => {
+    const h = harness()
+    const repo = repository()
+    h.state.projects = [{ id: 'mine', name: 'm', path: repo.path, createdAt: iso(0), order: 0 }]
+    h.state.threads = [
+      local('l1', 0, 50, { projectId: 'mine' }),
+      local('l2', 1, 10, { projectId: 'mine' })
+    ]
+    // The match takes a moment: the rows are placed before it arrives.
+    let answer!: () => void
+    h.client.call.mockImplementation(
+      () => new Promise((resolve) => (answer = () => resolve({ projectId: 'rp' })))
+    )
+    await h.feed(
+      snapshot(
+        [
+          { id: 'seeded', projectId: 'rp', updatedAt: iso(30) },
+          { id: 'moved', projectId: 'rp', updatedAt: iso(31) }
+        ],
+        { projects: remoteProject }
+      )
+    )
+    // A person sends in "moved" before the match is known: it goes to the front of its group and stays.
+    h.lists.noteSent(h.q('moved'))
+    const movedAt = h.lists.threads().find((row) => row.id === h.q('moved'))!.order
+    await vi.waitFor(() => expect(typeof answer).toBe('function'), { timeout: 20_000 })
+    answer()
+    await vi.waitFor(() => expect(h.lists.projects()[0]?.sameAs).toBe('mine'), { timeout: 20_000 })
+    const order = (id: string) => h.lists.threads().find((row) => row.id === h.q(id))!.order
+    // "seeded" was re-placed among the local rows by its update time: between l1 (50) and l2 (10).
+    expect(order('seeded')).toBeGreaterThan(0)
+    expect(order('seeded')).toBeLessThan(1)
+    expect(order('moved')).toBe(movedAt)
+    // The places were kept.
+    expect(h.store.positions(h.node).get('seeded')).toBe(order('seeded'))
   }, 30_000)
 })

@@ -336,8 +336,15 @@ export class BridgeProfileService {
     })
     this.router.setLists(this.lists)
     services.remoteLists = this.lists
+    // This computer's own threads go to the front of a group in front of the other computers' rows too.
+    const floor = (projectId: string | undefined): number | undefined => this.lists.frontFloor(projectId)
+    services.threads.remoteFloor = floor
+    // A device this computer blocks (or unblocks) is dropped from (or read into) the lists at once.
+    const offPolicy = rt.policy.onChange(() => void this.lists.reconcile())
     this.lists.start()
     this.disposers.add(() => {
+      offPolicy()
+      if (services.threads.remoteFloor === floor) services.threads.remoteFloor = undefined
       if (services.remoteLists === this.lists) services.remoteLists = undefined
       this.lists.close()
     })

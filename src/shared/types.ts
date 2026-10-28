@@ -301,7 +301,7 @@ export interface ThreadSearchResult {
 export interface ThreadSearchSkipped {
   node: string
   name: string
-  reason: 'offline' | 'slow' | 'unavailable'
+  reason: 'offline' | 'slow' | 'unavailable' | 'refused' | 'replaced'
 }
 
 /** What a search finds: the matches of this computer and of the others that answered, and who did not. */
@@ -1024,8 +1024,15 @@ export interface Project {
   node?: string
   /** On a project of another computer: the project of this computer with the same Git history, when there is one. */
   sameAs?: string
+  /**
+   * A weaker match than `sameAs`: a project of this computer that shares its root commit, where one side has no
+   * remote to compare. Two clones of a template look like this; grouping should not rely on it.
+   */
+  similarTo?: string
   /** Set while the computer that holds the project cannot be reached; the row is what it last said. */
   offline?: true
+  /** Set while the computer that holds the project has stopped sharing its threads with this one (it blocked this computer or turned sharing off). */
+  notShared?: true
 }
 
 /**
@@ -1087,6 +1094,8 @@ export interface Thread {
   node?: string
   /** Set while the computer that runs the thread cannot be reached; the row is what it last said. */
   offline?: true
+  /** Set while the computer that runs the thread has stopped sharing its threads with this one; the row is what it last said. */
+  notShared?: true
   /** The other computer of the user a message in this thread was last sent from; absent when every message came from this one. */
   sentFrom?: ThreadSentFrom
   /**

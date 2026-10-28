@@ -217,8 +217,10 @@ describe('another computer’s lists over a real link', () => {
     const original = folder()
     git(original, 'init', '-q')
     git(original, 'commit', '-q', '--allow-empty', '-m', `root ${Math.random()}`)
+    git(original, 'remote', 'add', 'origin', 'https://example.com/org/same.git')
     const clone = join(folder(), 'clone')
     git(original, 'clone', '-q', original, clone)
+    git(clone, 'remote', 'set-url', 'origin', 'https://example.com/org/same.git')
     const mine = t.caller.projects.openProject(original)
     const theirs = t.owner.projects.openProject(clone)
     await vi.waitFor(
@@ -245,7 +247,14 @@ describe('another computer’s lists over a real link', () => {
     const thread = t.owner.threads.createThread('Findable elsewhere zebra')
     t.owner.threads.updateThreadMeta(thread.id, { startedAt: new Date().toISOString() } as never)
     t.caller.threads.createThread('Findable here zebra')
+    const scan = vi.spyOn(t.owner.threads, 'searchThreads')
     const found = await t.dispatch('threads.search', { query: 'zebra', limit: 20 })
+    // The other computer reads the transcripts of its newest threads only for a search asked from here.
+    expect(scan.mock.calls.at(-1)?.[2]).toMatchObject({
+      hideSubagents: true,
+      maxMessageThreads: 100
+    })
+    scan.mockRestore()
     expect(found.results.map((result: { threadName: string }) => result.threadName).sort()).toEqual(
       expect.arrayContaining(['Findable elsewhere zebra'])
     )
@@ -257,7 +266,13 @@ describe('another computer’s lists over a real link', () => {
 
     // Trash it on the other computer: its Recently deleted record is listed here, by qualified id and without its folders.
     await t.dispatch('threads.delete', { threadId: t.qualified(thread.id) })
-    const trash = await t.dispatch('threads.inventory', {})
+    // Storage settings ask about this computer alone, and do not wait for the others.
+    const asked = vi.spyOn(t.client(), 'call')
+    const own = await t.dispatch('threads.inventory', {})
+    expect(own.lifecycles.some((entry: { node?: string }) => entry.node)).toBe(false)
+    expect(asked.mock.calls.filter((call) => call[1] === 'threads.inventory')).toHaveLength(0)
+    asked.mockRestore()
+    const trash = await t.dispatch('threads.inventory', { includeComputers: true })
     const record = trash.lifecycles.find(
       (entry: { taskId: string }) => entry.taskId === t.qualified(thread.id)
     )
@@ -269,11 +284,26 @@ describe('another computer’s lists over a real link', () => {
     await t.owner.net.request('bridge.workOnThreads', { enabled: false })
     try {
       const found = await t.dispatch('threads.search', { query: 'zebra', limit: 20 })
-      expect(found.skipped).toEqual([
-        { node: t.node, name: expect.any(String), reason: 'unavailable' }
-      ])
-      // Its rows stay listed.
+      // It said no: that is "stopped sharing", not "offline".
+      expect(found.skipped).toEqual([{ node: t.node, name: expect.any(String), reason: 'refused' }])
+      // Its rows stay listed, marked not shared (its stream ended with a refusal).
+      await vi.waitFor(
+        () =>
+          expect(
+            lists()
+              .threads()
+              .every((row) => row.notShared === true)
+          ).toBe(true),
+        {
+          timeout: 20_000
+        }
+      )
       expect(lists().threads().length).toBeGreaterThan(0)
+      expect(
+        lists()
+          .threads()
+          .some((row) => row.offline)
+      ).toBe(false)
     } finally {
       await t.owner.net.request('bridge.workOnThreads', { enabled: true })
       // The stream the owner ended is opened again as soon as it is asked for, not after the next wait.
@@ -318,6 +348,75 @@ describe('another computer’s lists over a real link', () => {
       .filter((row) => ordered.includes(row.id))
       .sort((a, b) => a.order - b.order)
     expect(after.map((row) => row.id)).toEqual(ordered)
+  }, 60_000)
+
+  it('puts this computer’s own thread in front of a remote row that went to the front, on a send and on a create', async () => {
+    const mine = t.caller.threads.createThread('Mine, in front')
+    const remote = t.owner.threads.createThread('Theirs, sent in from here')
+    await vi.waitFor(
+      () =>
+        expect(
+          lists()
+            .threads()
+            .some((row) => row.id === t.qualified(remote.id))
+        ).toBe(true),
+      {
+        timeout: 20_000
+      }
+    )
+    // The remote thread goes to the front of the standalone group on a send from here.
+    lists().noteSent(t.qualified(remote.id))
+    const remoteOrder = () =>
+      lists()
+        .threads()
+        .find((row) => row.id === t.qualified(remote.id))!.order
+    // A send in this computer's own thread at the front of its own rows puts it in front of the remote row.
+    t.caller.threads.touchThreadUserActivity(mine.id)
+    expect(t.caller.threads.getThread(mine.id)!.order).toBeLessThan(remoteOrder())
+    // And a new thread of this computer starts in front of every row of the group, remote ones included.
+    const fresh = t.caller.threads.createThread('Brand new')
+    expect(fresh.order).toBeLessThan(remoteOrder())
+    expect(fresh.order).toBeLessThan(t.caller.threads.getThread(mine.id)!.order)
+    // A row of another project is not in this group.
+    expect(t.caller.threads.remoteFloor?.('some-project')).toBeUndefined()
+  }, 60_000)
+
+  it('does not list a phone, and lists a computer again when its kind is computer', async () => {
+    // On the owner, which is the authority: the caller is a computer; marking it a phone takes it out.
+    const ownerLists = t.owner.bridge.router
+    expect(ownerLists.pairedComputers()?.map((row) => row.node)).toContain(t.callerNode)
+    await t.owner.net.request('bridge.setKind', { node: t.callerNode, kind: 'phone' })
+    expect(ownerLists.pairedComputers()?.map((row) => row.node) ?? []).not.toContain(t.callerNode)
+    await t.owner.net.request('bridge.setKind', { node: t.callerNode, kind: 'computer' })
+    // A phone loses "Works on threads"; the computer gets it back.
+    await t.owner.net.request('bridge.setCaps', {
+      node: t.callerNode,
+      caps: ['read', 'chat', 'write', 'settings']
+    })
+    expect(ownerLists.pairedComputers()?.map((row) => row.node)).toContain(t.callerNode)
+    // A device this computer blocks is not listed either.
+    await t.owner.net.request('bridge.policy', { node: t.callerNode, blocked: true })
+    try {
+      expect(ownerLists.pairedComputers()?.map((row) => row.node) ?? []).not.toContain(t.callerNode)
+    } finally {
+      await t.owner.net.request('bridge.policy', { node: t.callerNode, blocked: false })
+    }
+  }, 60_000)
+
+  it('keeps the other computers’ projects in the list a clone returns', async () => {
+    const path = folder()
+    const clone = vi.spyOn(t.caller.gitService.github, 'cloneRepository').mockResolvedValue(path)
+    try {
+      const result = await t.dispatch('github.cloneRepository', {
+        repository: 'org/app',
+        destination: path
+      })
+      expect(result.projects.some((project: { node?: string }) => project.node === t.node)).toBe(
+        true
+      )
+    } finally {
+      clone.mockRestore()
+    }
   }, 60_000)
 
   it('adds nothing and changes nothing with the routing flag off', async () => {

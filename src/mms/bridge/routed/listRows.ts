@@ -124,6 +124,21 @@ export interface RowContext {
   node: string
   /** Whether the computer is out of reach: its rows are what it last said. */
   offline: boolean
+  /** Whether the computer has stopped sharing its threads with this one; its rows are what it last said. */
+  notShared?: boolean
+}
+
+/**
+ * Whether a device of the roster is one of the user's computers to list threads from. The kind the authority
+ * recorded wins (a phone never is); a device whose kind is not known here is a computer only if its signed
+ * delegation holds "Works on threads" (`settings`), which only computers are given.
+ */
+export function isListedComputer(
+  kind: 'computer' | 'phone' | undefined,
+  caps: readonly string[]
+): boolean {
+  if (kind === 'phone') return false
+  return kind === 'computer' || caps.includes('settings')
 }
 
 /** One thread row of a (qualified) lists snapshot as a row of the merged lists, with its place. */
@@ -153,7 +168,8 @@ export function threadRow(
   if (isRecord(raw.startedFrom))
     row.startedFrom = raw.startedFrom as unknown as Thread['startedFrom']
   if (isRecord(raw.sentFrom)) row.sentFrom = raw.sentFrom as unknown as Thread['sentFrom']
-  if (context.offline) row.offline = true
+  if (context.notShared) row.notShared = true
+  else if (context.offline) row.offline = true
   return row
 }
 
@@ -162,7 +178,8 @@ export function projectRow(
   raw: Record<string, unknown>,
   order: number,
   context: RowContext,
-  sameAs?: string
+  sameAs?: string,
+  similarTo?: string
 ): Project {
   const row: Project = {
     id: String(raw.id),
@@ -175,7 +192,9 @@ export function projectRow(
   }
   if (typeof raw.pinnedAt === 'string') row.pinnedAt = raw.pinnedAt
   if (sameAs) row.sameAs = sameAs
-  if (context.offline) row.offline = true
+  else if (similarTo) row.similarTo = similarTo
+  if (context.notShared) row.notShared = true
+  else if (context.offline) row.offline = true
   return row
 }
 

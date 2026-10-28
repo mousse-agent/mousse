@@ -116,6 +116,32 @@ export class SqliteRemoteLists {
     }))
   }
 
+  /** Forgets the copy of one computer's lists. */
+  dropCache(node: NodeId): void {
+    this.db.transaction(() => {
+      this.db.charge(1)
+      this.db.database.prepare('DELETE FROM remote_lists_cache WHERE node=?').run(node)
+    })
+  }
+
+  /** Forgets the copies of every computer's lists (routing went off); positions and openings stay. */
+  dropCaches(): void {
+    this.db.transaction(() => {
+      this.db.charge(1)
+      this.db.database.prepare('DELETE FROM remote_lists_cache').run()
+    })
+  }
+
+  /** Forgets everything kept about computers that are not in `keep` (they left the roster, or were blocked). */
+  dropOthers(keep: readonly NodeId[]): void {
+    const kept = new Set<string>(keep)
+    const known = new Set<string>()
+    for (const table of ['remote_thread_order', 'remote_thread_opened', 'remote_lists_cache'])
+      for (const row of this.db.database.prepare(`SELECT DISTINCT node FROM ${table}`).all())
+        known.add(String(row.node))
+    for (const node of known) if (!kept.has(node)) this.dropComputer(node as NodeId)
+  }
+
   /** Forgets everything kept about a computer (it was removed from the user's computers). */
   dropComputer(node: NodeId): void {
     this.db.transaction(() => {

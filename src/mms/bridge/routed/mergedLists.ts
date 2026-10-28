@@ -1,6 +1,6 @@
 import { qualifyRoutedEvent, qualifyRoutedResult } from '../../../shared/bridge/routedIds'
 import { NetError, type NodeId, type StreamDescriptor } from '../../../shared/net'
-import { parseQualifiedId } from '../../../shared/threadRef'
+import { parseQualifiedId, qualifyId } from '../../../shared/threadRef'
 import { isSubagentThread } from '../../../shared/threadLineage'
 import type {
   Project,
@@ -56,8 +56,10 @@ const SAME_AS_TTL_MS = 10 * 60_000
 const READ_POLL_MS = 30_000
 const RETRY_MIN_MS = 5_000
 const RETRY_MAX_MS = 5 * 60_000
-/** Writing the cache of a computer's lists waits for the changes to settle. */
-const CACHE_SETTLE_MS = 2_000
+/** The copy of a computer's lists is written at most this often, and only when it changed. */
+const CACHE_SETTLE_MS = 30_000
+/** After a failed match the other computer is asked again no sooner than this. */
+const MATCH_RETRY_MS = 60_000
 
 interface Computer {
   node: NodeId
@@ -72,6 +74,13 @@ interface Computer {
   ownerOrders: Map<string, number>
   /** The newest snapshot, as the computer wrote it, for the offline cache. */
   snapshot?: unknown
+  /** What was last written to disk, so an unchanged copy is not written again. */
+  cachedJson?: string
+  /** The computer blocked this one or turned sharing off: the stream was refused or ended with `forbidden`. */
+  refused: boolean
+  /** Threads placed on first sight and not moved by a person since: they are placed again once their project's match is known. */
+  seeded: Set<string>
+  matchRetryAt: number
   online: boolean
   /** A snapshot of the current stream has arrived: what follows are changes, not a first look. */
   live: boolean
@@ -83,7 +92,9 @@ interface Computer {
   failures: number
   /** A project of the computer (qualified id) and the project of this computer with the same Git history. */
   sameAs: Map<string, string>
-  matches: Map<string, { remote: string | null; at: number }>
+  /** The weaker matches: see `Project.similarTo`. */
+  similar: Map<string, string>
+  matches: Map<string, { remote: string | null; weak: boolean; at: number }>
   matching?: Promise<void>
   matchAgain?: boolean
   cacheTimer?: ReturnType<typeof setTimeout>
@@ -97,8 +108,12 @@ export interface MergedListsOptions {
   store: SqliteRemoteLists
   /** This computer's node. */
   self(): NodeId | undefined
-  /** The other computers of the user, with the names they go by. */
-  computers(): ComputerRef[]
+  /**
+   * The other computers of the user, with the names they go by: no phones, no device of unknown kind without
+   * "Works on threads", no device this computer blocked. `undefined` when the roster cannot be read now, so
+   * nothing is forgotten on a bad moment.
+   */
+  computers(): ComputerRef[] | undefined
   /** Whether a session with the computer is open. */
   online(node: NodeId): boolean
   /** Whether routing is on for this profile. */
@@ -107,6 +122,8 @@ export interface MergedListsOptions {
   reconcileMs?: number
   readPollMs?: number
   fanOutDeadlineMs?: number
+  /** How long the copy of a computer's lists waits to be written (default 30 s). */
+  cacheSettleMs?: number
 }
 
 /** The shape every snapshot is checked against before any row is made from it. */
@@ -133,6 +150,7 @@ function skipReason(error: unknown): ThreadSearchSkipped['reason'] {
   if (error instanceof DomainRpcError) {
     if (error.code === 'computer_offline') return 'offline'
     if (error.code === 'deadline_exceeded') return 'slow'
+    if (error.code === 'computer_forbidden') return 'refused'
     return 'unavailable'
   }
   if (error instanceof NetError && ['peer_offline', 'route_unreachable'].includes(error.code))
@@ -160,7 +178,11 @@ function skipReason(error: unknown): ThreadSearchSkipped['reason'] {
 export class MergedLists implements RemoteListsPort {
   private readonly computersByNode = new Map<NodeId, Computer>()
   private readonly opened = new Map<string, number>()
-  private readonly searches = new Map<string, AbortController>()
+  /** The calls of each kind a window has running, by `<kind>:<connection>`: a newer search ends the older search, nothing else. */
+  private readonly running = new Map<string, AbortController>()
+  private readonly inventories = new Map<string, Promise<InventoryAnswer>>()
+  private cleared = false
+  private presentKey = ''
   private timer?: ReturnType<typeof setInterval>
   private closed = false
   private offProjects?: () => void
@@ -195,8 +217,8 @@ export class MergedLists implements RemoteListsPort {
     if (this.timer) clearInterval(this.timer)
     if (this.localProjectsTimer) clearTimeout(this.localProjectsTimer)
     this.offProjects?.()
-    for (const controller of this.searches.values()) controller.abort()
-    this.searches.clear()
+    for (const controller of this.running.values()) controller.abort()
+    this.running.clear()
     for (const c of this.computersByNode.values()) this.detach(c)
   }
 
@@ -229,7 +251,11 @@ export class MergedLists implements RemoteListsPort {
         retryAt: 0,
         failures: 0,
         sameAs: new Map(),
-        matches: new Map()
+        similar: new Map(),
+        matches: new Map(),
+        refused: false,
+        seeded: new Set(),
+        matchRetryAt: 0
       }
       this.computersByNode.set(ref.node, c)
       this.loadCache(c)
@@ -255,8 +281,18 @@ export class MergedLists implements RemoteListsPort {
       this.clear()
       return
     }
-    const present = new Map(this.options.computers().map((ref) => [ref.node, ref]))
+    this.cleared = false
+    const listed = this.options.computers()
+    // A roster that cannot be read now changes nothing: a bad moment must not forget a computer.
+    if (!listed) return
+    const present = new Map(listed.map((ref) => [ref.node, ref]))
     for (const node of [...this.computersByNode.keys()]) if (!present.has(node)) this.forget(node)
+    // What is kept on disk for a computer that is no longer listed (it left the roster, or was blocked) goes too.
+    const key = [...present.keys()].sort().join(',')
+    if (key !== this.presentKey) {
+      this.presentKey = key
+      this.safely(() => this.options.store.dropOthers([...present.keys()]))
+    }
     for (const ref of present.values()) {
       const c = this.computerOf(ref)
       const online = this.options.online(c.node)
@@ -273,8 +309,15 @@ export class MergedLists implements RemoteListsPort {
   /** Routing went off: nothing is merged, and nothing stays attached. */
   private clear(): void {
     let any = false
+    // The copies on disk go with it: nothing of another computer's threads is kept while the flag is off.
+    if (!this.cleared) {
+      this.cleared = true
+      this.safely(() => this.options.store.dropCaches())
+    }
     for (const c of this.computersByNode.values()) {
-      this.detach(c)
+      this.detach(c, false)
+      c.snapshot = undefined
+      c.cachedJson = undefined
       if (c.threads.size || c.projects.size) any = true
       c.threads = new Map()
       c.projects = new Map()
@@ -332,7 +375,14 @@ export class MergedLists implements RemoteListsPort {
     this.markOffline(c)
   }
 
-  private markOffline(c: Computer): void {
+  /**
+   * The rows stay, marked `offline` (the computer cannot be reached) or `notShared` (it refused this one:
+   * it blocked it or turned sharing off). Statuses are dropped: what the threads do is not known.
+   */
+  private markOffline(
+    c: Computer,
+    why: 'offline' | 'refused' = c.refused ? 'refused' : 'offline'
+  ): void {
     c.live = false
     // What its threads were doing is not known while it is out of reach.
     const hadActivity = c.activity.size > 0
@@ -343,14 +393,22 @@ export class MergedLists implements RemoteListsPort {
     }
     let threads = false
     let projects = false
+    const flag = (row: { offline?: true; notShared?: true }): boolean =>
+      why === 'refused'
+        ? row.notShared !== true || row.offline === true
+        : row.offline !== true || row.notShared === true
+    const marked = <T extends { offline?: true; notShared?: true }>(row: T): T => {
+      const { offline: _a, notShared: _b, ...rest } = row
+      return { ...rest, ...(why === 'refused' ? { notShared: true } : { offline: true }) } as T
+    }
     for (const [id, row] of c.threads)
-      if (!row.offline) {
-        c.threads.set(id, { ...row, offline: true })
+      if (flag(row)) {
+        c.threads.set(id, marked(row))
         threads = true
       }
     for (const [id, row] of c.projects)
-      if (!row.offline) {
-        c.projects.set(id, { ...row, offline: true })
+      if (flag(row)) {
+        c.projects.set(id, marked(row))
         projects = true
       }
     this.pushLists(threads, projects, hadActivity)
@@ -366,12 +424,15 @@ export class MergedLists implements RemoteListsPort {
           (update) => {
             if (update.kind === 'snapshot') this.ingest(c, update.value, true)
           },
-          () => {
-            // The stream was ended (the computer turned the setting off, blocked this device, or restarted).
+          (code) => {
+            // The stream was ended. `forbidden` is a no: the computer blocked this one or turned sharing off.
             c.attached = undefined
             c.live = false
-            this.markOffline(c)
-            this.backOff(c)
+            if (code === 'forbidden') this.refuse(c)
+            else {
+              this.markOffline(c)
+              this.backOff(c)
+            }
           },
           {
             room: 'lists',
@@ -381,6 +442,12 @@ export class MergedLists implements RemoteListsPort {
             }
           }
         )
+        // The computer left the list (or routing went off) while the stream was being opened: let it go again.
+        if (this.closed || this.computersByNode.get(c.node) !== c || !this.options.enabled()) {
+          handle.close()
+          void client.closeStream(c.node, { kind: 'lists' })
+          return
+        }
         c.attached = handle
         c.mode = 'stream'
         c.failures = 0
@@ -393,16 +460,34 @@ export class MergedLists implements RemoteListsPort {
           return
         }
         c.mode = 'none'
-        if (error instanceof DomainRpcError && error.code === 'computer_offline') {
-          c.online = false
-          this.markOffline(c)
-        } else this.markOffline(c)
+        if (error instanceof DomainRpcError && error.code === 'computer_forbidden') {
+          this.refuse(c)
+          return
+        }
+        if (error instanceof DomainRpcError && error.code === 'computer_offline') c.online = false
+        this.markOffline(c)
         this.backOff(c)
       }
     })().finally(() => {
       c.attaching = undefined
     })
     return c.attaching
+  }
+
+  /**
+   * The computer said no (it blocked this one, or turned sharing off). Its rows stay, marked `notShared`
+   * rather than offline, and the copy of its lists on disk goes: a restart must not bring them back.
+   */
+  private refuse(c: Computer): void {
+    c.refused = true
+    c.attached = undefined
+    if (c.cacheTimer) clearTimeout(c.cacheTimer)
+    c.cacheTimer = undefined
+    c.snapshot = undefined
+    c.cachedJson = undefined
+    this.safely(() => this.options.store.dropCache(c.node))
+    this.markOffline(c, 'refused')
+    this.backOff(c)
   }
 
   private backOff(c: Computer): void {
@@ -490,11 +575,16 @@ export class MergedLists implements RemoteListsPort {
    * cache: its rows are marked offline and it says nothing about what the threads are doing.
    */
   private ingest(c: Computer, raw: unknown, live: boolean): void {
-    if (this.closed) return
+    // Nothing is made for a computer that left the list, and nothing while routing is off.
+    if (this.closed || this.computersByNode.get(c.node) !== c) return
+    if (live && !this.options.enabled()) return
     const snapshot = listsSnapshot(raw)
     if (!snapshot) return
-    if (live) c.online = true
-    const context = { node: c.node, offline: !live }
+    if (live) {
+      c.online = true
+      c.refused = false
+    }
+    const context = { node: c.node, offline: !live, notShared: !live && c.refused }
     const qualified = qualifyRoutedResult('lists.snapshot', snapshot, {
       node: c.node,
       self: this.options.self()
@@ -510,7 +600,13 @@ export class MergedLists implements RemoteListsPort {
         (typeof (raw as { order?: unknown }).order === 'number'
           ? (raw as { order: number }).order
           : index)
-      const row = projectRow(raw as unknown as Json, order, context, c.sameAs.get(id))
+      const row = projectRow(
+        raw as unknown as Json,
+        order,
+        context,
+        c.sameAs.get(id),
+        c.similar.get(id)
+      )
       const known = c.projects.get(id)
       projects.set(id, known && sameRow(known, row) ? known : row)
     })
@@ -559,30 +655,25 @@ export class MergedLists implements RemoteListsPort {
         node: c.node,
         ids: new Set([...fresh.values()].flat().map((row) => row.id))
       })
-      for (const [group, list] of fresh) {
-        const placed = placeNewRows(fixed.get(group) ?? [], list)
-        for (const [id, order] of placed) {
-          c.positions.set(id, order)
-          changed.push([id, order])
-          const list2 = fixed.get(group) ?? []
-          list2.push({
-            id: `${c.node}:${id}`,
-            order,
-            updatedAt: list.find((row) => row.id === id)?.updatedAt ?? ''
-          })
-          fixed.set(group, list2)
-        }
+      for (const [id, order] of this.placeGroups(c, fresh, fixed)) {
+        changed.push([id, order])
+        c.seeded.add(id)
       }
       for (const { id, group } of front) {
         const others = (fixed.get(group) ?? []).filter((placed) => placed.id !== `${c.node}:${id}`)
         const order = frontOrder(others.map((placed) => placed.order))
         c.positions.set(id, order)
         changed.push([id, order])
+        c.seeded.delete(id)
       }
     }
     if (changed.length) this.safely(() => this.options.store.setPositions(c.node, changed))
     if (live) {
-      for (const id of [...c.positions.keys()]) if (!ownerIds.has(id)) c.positions.delete(id)
+      for (const id of [...c.positions.keys()])
+        if (!ownerIds.has(id)) {
+          c.positions.delete(id)
+          c.seeded.delete(id)
+        }
       this.safely(() => this.options.store.forgetPositions(c.node, ownerIds))
     }
     c.ownerOrders = new Map(owner.map((thread) => [String(thread.id), ownerOrder(thread)]))
@@ -624,7 +715,34 @@ export class MergedLists implements RemoteListsPort {
       transitions.length > 0,
       asEvents ? transitions : []
     )
-    if (projectsChanged || !c.matches.size) this.matchProjects(c)
+    if (projectsChanged || (!c.matches.size && this.now() >= c.matchRetryAt)) this.matchProjects(c)
+  }
+
+  /**
+   * Places the new rows of each group among the rows already placed there (`fixed`, which grows as rows are
+   * placed), keeps the places, and returns them.
+   */
+  private placeGroups(
+    c: Computer,
+    fresh: ReadonlyMap<string, Array<{ id: string; updatedAt: string }>>,
+    fixed: Map<string, Placed[]>
+  ): Array<[string, number]> {
+    const out: Array<[string, number]> = []
+    for (const [group, list] of fresh) {
+      const placed = placeNewRows(fixed.get(group) ?? [], list)
+      const into = fixed.get(group) ?? []
+      for (const [id, order] of placed) {
+        c.positions.set(id, order)
+        out.push([id, order])
+        into.push({
+          id: `${c.node}:${id}`,
+          order,
+          updatedAt: list.find((row) => row.id === id)?.updatedAt ?? ''
+        })
+      }
+      fixed.set(group, into)
+    }
+    return out
   }
 
   private scheduleCache(c: Computer): void {
@@ -632,21 +750,26 @@ export class MergedLists implements RemoteListsPort {
     c.cacheTimer = setTimeout(() => {
       c.cacheTimer = undefined
       if (!this.closed) this.writeCache(c)
-    }, CACHE_SETTLE_MS)
+    }, this.options.cacheSettleMs ?? CACHE_SETTLE_MS)
     c.cacheTimer.unref?.()
   }
 
   private writeCache(c: Computer): void {
-    if (c.snapshot === undefined) return
-    // What is kept is at most 2 MiB: the threads archived longest ago (or updated longest ago) are left out first.
+    // Only for a computer that is still listed, and never while routing is off.
+    if (c.snapshot === undefined || c.refused || this.computersByNode.get(c.node) !== c) return
+    if (!this.options.enabled()) return
     const snapshot = listsSnapshot(c.snapshot)
     if (!snapshot) return
-    this.safely(() =>
-      this.options.store.saveSnapshot(
-        c.node,
-        JSON.stringify(fitSnapshot(snapshot, REMOTE_LISTS_CACHE_MAX_BYTES))
-      )
+    // What is kept is at most 2 MiB: the threads archived longest ago (or updated longest ago) are left out first.
+    // No statuses are kept (the cached rows say nothing of what the threads do; the turn errors in them are text).
+    const json = JSON.stringify(
+      fitSnapshot({ ...snapshot, status: {} }, REMOTE_LISTS_CACHE_MAX_BYTES)
     )
+    if (json === c.cachedJson) return
+    this.safely(() => {
+      this.options.store.saveSnapshot(c.node, json)
+      c.cachedJson = json
+    })
   }
 
   private safely(work: () => void): void {
@@ -689,11 +812,18 @@ export class MergedLists implements RemoteListsPort {
 
   /** Whether a status change of this thread may notify: this computer started it, sent in it, opened it lately, or all are asked for. */
   private notifies(id: string): boolean {
-    const ref = parseQualifiedId(id)
-    const c = ref && this.computersByNode.get(ref.node as NodeId)
-    const row = c?.threads.get(id)
-    if (!ref || !row) return false
+    const own = parseQualifiedId(id)
+    const c = own && this.computersByNode.get(own.node as NodeId)
+    const found = c?.threads.get(id)
+    if (!own || !c || !found) return false
     if (this.options.services.settings.get().notifications?.allRemoteThreads === true) return true
+    // A subagent counts as the thread it works for: a question it asks notifies when its root would.
+    const row = found.lineage
+      ? (c.threads.get(found.lineage.rootThreadId) ??
+        c.threads.get(found.lineage.parentThreadId) ??
+        found)
+      : found
+    const ref = parseQualifiedId(row.id) ?? own
     const self = this.options.self()
     if (self && (row.startedFrom?.node === self || row.sentFrom?.node === self)) return true
     const opened = this.opened.get(`${ref.node}|${ref.id}`)
@@ -739,6 +869,8 @@ export class MergedLists implements RemoteListsPort {
     const row = c?.threads.get(qualifiedId)
     if (!ref || !c || !row) return
     this.noteOpened(qualifiedId)
+    // Sent in from here: its place is a person's now, even when it was first already.
+    c.seeded.delete(ref.id)
     const group = this.groupKey(c, row.projectId)
     const others = (this.fixedByGroup().get(group) ?? []).filter((placed) => placed.id !== row.id)
     const order = frontOrder(others.map((placed) => placed.order))
@@ -775,15 +907,39 @@ export class MergedLists implements RemoteListsPort {
     if (byNode.size) this.pushLists(true, false, false)
   }
 
-  private setOrders(c: Computer, entries: Array<[string, number]>, push = true): void {
+  private setOrders(
+    c: Computer,
+    entries: Array<[string, number]>,
+    push = true,
+    byPerson = true
+  ): void {
     for (const [id, order] of entries) {
       c.positions.set(id, order)
+      // A row a person moved is never placed again.
+      if (byPerson) c.seeded.delete(id)
       const key = `${c.node}:${id}`
       const row = c.threads.get(key)
       if (row) c.threads.set(key, { ...row, order })
     }
     this.safely(() => this.options.store.setPositions(c.node, entries))
     if (push) this.pushLists(true, false, false)
+  }
+
+  /**
+   * The order of the row of other computers that is first in a group of this computer (its project, or none), or
+   * undefined when there is none. This computer's own threads are moved to the front of their group below it, so
+   * a local send or create is first in a group that holds rows of other computers too.
+   */
+  frontFloor(projectId: string | undefined): number | undefined {
+    if (!this.options.enabled()) return undefined
+    const group = projectId ?? ''
+    let first: number | undefined
+    for (const c of this.computersByNode.values())
+      for (const row of c.threads.values()) {
+        if (isSubagentThread(row) || this.groupKey(c, row.projectId) !== group) continue
+        if (first === undefined || row.order < first) first = row.order
+      }
+    return first
   }
 
   // ------------------------------------------------------------------ the port
@@ -818,8 +974,13 @@ export class MergedLists implements RemoteListsPort {
 
   // ------------------------------------------------------------------ fan-out
 
-  /** Calls `work` on every computer of the list that is online, each with its own short deadline. */
+  /**
+   * Calls `work` on every computer that is listed, each with its own short deadline. A call of a kind
+   * (`search` or `inventory`) from a window ends the call of the same kind the window still has running,
+   * and nothing else: a newer search never cancels a Recently deleted read.
+   */
   private async fanOut<T>(
+    kind: 'search' | 'inventory',
     connection: string | undefined,
     work: (c: Computer, signal: AbortSignal) => Promise<T>
   ): Promise<{
@@ -827,15 +988,19 @@ export class MergedLists implements RemoteListsPort {
     skipped: ThreadSearchSkipped[]
     superseded: boolean
   }> {
-    const key = connection ?? ''
-    this.searches.get(key)?.abort()
+    const key = `${kind}:${connection ?? ''}`
+    this.running.get(key)?.abort()
     const controller = new AbortController()
-    this.searches.set(key, controller)
+    this.running.set(key, controller)
     const skipped: ThreadSearchSkipped[] = []
     const answers: Array<{ c: Computer; value: T }> = []
     try {
       await Promise.all(
         [...this.computersByNode.values()].map(async (c) => {
+          if (c.refused) {
+            skipped.push({ node: c.node, name: c.name, reason: 'refused' })
+            return
+          }
           if (!this.options.online(c.node)) {
             skipped.push({ node: c.node, name: c.name, reason: 'offline' })
             return
@@ -869,8 +1034,19 @@ export class MergedLists implements RemoteListsPort {
       )
       return { answers, skipped, superseded: controller.signal.aborted }
     } finally {
-      if (this.searches.get(key) === controller) this.searches.delete(key)
+      if (this.running.get(key) === controller) this.running.delete(key)
     }
+  }
+
+  /** What a call that was replaced (or cut off by the profile closing) says: it covered nobody. */
+  private notCovered(): ThreadSearchSkipped[] {
+    return sortSkipped(
+      [...this.computersByNode.values()].map((c) => ({
+        node: c.node,
+        name: c.name,
+        reason: 'replaced' as const
+      }))
+    )
   }
 
   async search(
@@ -879,42 +1055,63 @@ export class MergedLists implements RemoteListsPort {
     limit: number
   ): Promise<{ results: ThreadSearchResult[]; skipped: ThreadSearchSkipped[] }> {
     if (!this.options.enabled()) return { results: [], skipped: [] }
-    const { answers, skipped, superseded } = await this.fanOut(connection, async (c, signal) => {
-      const raw = await this.options.client.call(
-        c.node,
-        'threads.search',
-        { query, limit },
-        { signal }
-      )
-      const found = qualifyRoutedResult('threads.search', raw, {
-        node: c.node,
-        self: this.options.self()
-      })
-      const results = isRecord(found) && Array.isArray(found.results) ? found.results : []
-      return results
-        .filter(isRecord)
-        .map((result) => ({ ...result, node: c.node }) as unknown as ThreadSearchResult)
-    })
-    if (superseded) return { results: [], skipped: [] }
+    const { answers, skipped, superseded } = await this.fanOut(
+      'search',
+      connection,
+      async (c, signal) => {
+        const raw = await this.options.client.call(
+          c.node,
+          'threads.search',
+          { query, limit },
+          { signal }
+        )
+        const found = qualifyRoutedResult('threads.search', raw, {
+          node: c.node,
+          self: this.options.self()
+        })
+        const results = isRecord(found) && Array.isArray(found.results) ? found.results : []
+        return results
+          .filter(isRecord)
+          .map((result) => ({ ...result, node: c.node }) as unknown as ThreadSearchResult)
+      }
+    )
+    // A search that a newer one replaced did not cover the other computers, and says so.
+    if (superseded) return { results: [], skipped: this.notCovered() }
     return { results: answers.flatMap((answer) => answer.value), skipped: sortSkipped(skipped) }
   }
 
-  async inventory(connection: string | undefined): Promise<{
-    lifecycles: Array<Record<string, unknown>>
-    taskNames: Record<string, string>
-    skipped: ThreadSearchSkipped[]
-  }> {
-    if (!this.options.enabled()) return { lifecycles: [], taskNames: {}, skipped: [] }
-    const { answers, skipped, superseded } = await this.fanOut(connection, async (c, signal) => {
-      const raw = await this.options.client.call(c.node, 'threads.inventory', {}, { signal })
-      return qualifyRoutedResult('threads.inventory', raw, {
-        node: c.node,
-        self: this.options.self()
-      })
+  /**
+   * Recently deleted of the other computers. Calls from one window share the read that is running, so an
+   * overlapping refresh never cancels it; the answer always names the computers it could not ask.
+   */
+  inventory(connection: string | undefined): Promise<InventoryAnswer> {
+    if (!this.options.enabled())
+      return Promise.resolve({ lifecycles: [], taskNames: {}, skipped: [] })
+    const key = connection ?? ''
+    const held = this.inventories.get(key)
+    if (held) return held
+    const run = this.readInventories(connection).finally(() => {
+      if (this.inventories.get(key) === run) this.inventories.delete(key)
     })
+    this.inventories.set(key, run)
+    return run
+  }
+
+  private async readInventories(connection: string | undefined): Promise<InventoryAnswer> {
+    const { answers, skipped, superseded } = await this.fanOut(
+      'inventory',
+      connection,
+      async (c, signal) => {
+        const raw = await this.options.client.call(c.node, 'threads.inventory', {}, { signal })
+        return qualifyRoutedResult('threads.inventory', raw, {
+          node: c.node,
+          self: this.options.self()
+        })
+      }
+    )
     const lifecycles: Array<Record<string, unknown>> = []
     const taskNames: Record<string, string> = {}
-    if (superseded) return { lifecycles, taskNames, skipped: [] }
+    if (superseded) return { lifecycles, taskNames, skipped: this.notCovered() }
     for (const { c, value } of answers) {
       if (!isRecord(value)) continue
       for (const record of Array.isArray(value.lifecycles) ? value.lifecycles : []) {
@@ -943,10 +1140,9 @@ export class MergedLists implements RemoteListsPort {
     if (this.localProjectsTimer || this.closed) return
     this.localProjectsTimer = setTimeout(() => {
       this.localProjectsTimer = undefined
-      for (const c of this.computersByNode.values()) {
-        c.matches.clear()
-        this.matchProjects(c)
-      }
+      // The answers already held are kept: a rename, a pin or a reorder changes none of them, and a project
+      // that is new asks about its own repository only.
+      for (const c of this.computersByNode.values()) this.matchProjects(c)
     }, 1_000)
     this.localProjectsTimer.unref?.()
   }
@@ -976,18 +1172,19 @@ export class MergedLists implements RemoteListsPort {
     for (const project of services.projects.listProjects()) {
       const identity = await identities.of(project.path)
       if (!identity) continue
-      const atTop =
-        (await identities.rootOf(project.path)) === identity.root && project.path === identity.root
+      const atTop = await identities.isTop(project.path, identity.root)
       const known = byRoot.get(identity.root)
       if (!known || (atTop && !known.atTop))
         byRoot.set(identity.root, { id: project.id, identity, atTop })
     }
     const sameAs = new Map<string, string>()
+    const similar = new Map<string, string>()
     for (const { id, identity } of byRoot.values()) {
-      const key = `${identity.root}|${identity.roots.join(',')}`
+      const key = `${identity.root}|${identity.roots.join(',')}|${identity.remotes.join(',')}`
       let held = c.matches.get(key)
       if (!held || this.now() - held.at > SAME_AS_TTL_MS) {
         let remote: string | null = null
+        let weak = false
         try {
           const raw = await client.call(
             c.node,
@@ -1000,29 +1197,69 @@ export class MergedLists implements RemoteListsPort {
             self: this.options.self()
           })
           remote = isRecord(found) && typeof found.projectId === 'string' ? found.projectId : null
+          weak = isRecord(found) && found.weak === true
         } catch (error) {
-          // A computer that cannot answer now (offline, older) is asked again later.
-          if (error instanceof DomainRpcError && error.code === 'computer_outdated') remote = null
-          else return
+          // A computer that is older has no way to say; one that cannot answer now is asked again in a minute.
+          if (!(error instanceof DomainRpcError && error.code === 'computer_outdated')) {
+            c.matchRetryAt = this.now() + MATCH_RETRY_MS
+            return
+          }
         }
-        held = { remote, at: this.now() }
+        held = { remote, weak, at: this.now() }
         c.matches.set(key, held)
       }
       // A project of the computer that several of this one's match goes to the first; the top folder came first.
-      if (held.remote && !sameAs.has(held.remote)) sameAs.set(held.remote, id)
+      if (held.remote && !held.weak && !sameAs.has(held.remote)) sameAs.set(held.remote, id)
+      else if (held.remote && held.weak && !similar.has(held.remote)) similar.set(held.remote, id)
     }
-    if (sameMapValues(c.sameAs, sameAs)) return
+    if (sameMapValues(c.sameAs, sameAs) && sameMapValues(c.similar, similar)) return
+    const arrived = new Set<string>()
+    for (const [remote, local] of sameAs) if (c.sameAs.get(remote) !== local) arrived.add(remote)
     c.sameAs = sameAs
+    c.similar = similar
     let changed = false
     for (const [id, row] of c.projects) {
       const next = sameAs.get(id)
-      if (row.sameAs === next) continue
-      const { sameAs: _old, ...rest } = row
-      c.projects.set(id, next ? { ...rest, sameAs: next } : rest)
+      const weaker = next ? undefined : similar.get(id)
+      if (row.sameAs === next && row.similarTo === weaker) continue
+      const { sameAs: _a, similarTo: _b, ...rest } = row
+      c.projects.set(id, {
+        ...rest,
+        ...(next ? { sameAs: next } : {}),
+        ...(weaker ? { similarTo: weaker } : {})
+      })
       changed = true
     }
     if (changed) this.pushLists(false, true, false)
+    // Rows placed before their project's match was known sort with this computer's rows of that project now.
+    if (arrived.size) this.replaceSeeded(c, arrived)
   }
+
+  /** Places again the rows of the projects that just matched one of this computer's, if no person has moved them. */
+  private replaceSeeded(c: Computer, projectIds: ReadonlySet<string>): void {
+    const ids = [...c.threads.values()]
+      .filter((row) => !isSubagentThread(row) && row.projectId && projectIds.has(row.projectId))
+      .map((row) => parseQualifiedId(row.id)?.id)
+      .filter((id): id is string => id !== undefined && c.seeded.has(id))
+    if (!ids.length) return
+    const fixed = this.fixedByGroup({ node: c.node, ids: new Set(ids) })
+    const fresh = new Map<string, Array<{ id: string; updatedAt: string }>>()
+    for (const id of ids) {
+      const row = c.threads.get(qualifyId(c.node, id))!
+      const group = this.groupKey(c, row.projectId)
+      const list = fresh.get(group) ?? []
+      list.push({ id, updatedAt: row.updatedAt })
+      fresh.set(group, list)
+    }
+    const placed = this.placeGroups(c, fresh, fixed)
+    if (placed.length) this.setOrders(c, placed, true, false)
+  }
+}
+
+interface InventoryAnswer {
+  lifecycles: Array<Record<string, unknown>>
+  taskNames: Record<string, string>
+  skipped: ThreadSearchSkipped[]
 }
 
 function sortSkipped(skipped: ThreadSearchSkipped[]): ThreadSearchSkipped[] {

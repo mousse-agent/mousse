@@ -19,6 +19,7 @@ import type { HandlerContext } from '../../protocol/handlers'
 import type { ThreadRouterPort } from '../../protocol/threadRouterPort'
 import { listedProjectsFor, listedThreadsFor } from '../../protocol/threadVisibility'
 import type { BridgeHub } from '../hub'
+import { isListedComputer } from './listRows'
 import type { MergedLists } from './mergedLists'
 import {
   mixedComputers,
@@ -153,14 +154,19 @@ export class ThreadRouter implements ThreadRouterPort {
   }
   private lists?: Pick<MergedLists, 'noteOpened' | 'noteSent' | 'applyMetadata'>
 
-  /** The other computers of the user: every device in the roster but this one that has not been revoked. */
-  pairedComputers(): ComputerRef[] {
+  /**
+   * The other computers of the user whose threads are listed: devices of the roster that are not this one, not
+   * revoked, not blocked here, and not phones. The kind the authority recorded wins; a device of unknown kind
+   * counts only if its signed delegation holds "Works on threads". `undefined` when the roster cannot be read.
+   */
+  pairedComputers(): ComputerRef[] | undefined {
     try {
-      const identity = this.options.net.runtime().identity
+      const rt = this.options.net.runtime()
+      const identity = rt.identity
       const self = identity.self()
       const root = self && identity.pinnedRootKey(self.user)
       const signed = self && identity.roster(self.user)
-      if (!self || !root || !signed) return []
+      if (!self || !root || !signed) return undefined
       const roster = identity.verifySigned<Roster>(signed, root)
       const latest = new Map<string, NodeDelegation>()
       for (const row of roster.nodes) {
@@ -173,11 +179,13 @@ export class ThreadRouter implements ThreadRouterPort {
         .filter(
           (found) =>
             found.subject !== self.node &&
-            !roster.revoked.some((row) => row.subject === found.subject && row.throughKeyEpoch >= found.keyEpoch)
+            !roster.revoked.some((row) => row.subject === found.subject && row.throughKeyEpoch >= found.keyEpoch) &&
+            !rt.policy.get(found.subject as NodeId).blocked &&
+            isListedComputer(rt.enrollment.nodeKind(found.subject as NodeId), found.caps)
         )
         .map((found) => ({ node: found.subject as NodeId, name: found.name || 'the other computer' }))
     } catch {
-      return []
+      return undefined
     }
   }
 
