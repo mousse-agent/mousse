@@ -2,6 +2,7 @@ import type { ChatSummary } from '../../../shared/chats'
 import type { Project, Thread, ThreadActivityState, TurnState } from '../../../shared/types'
 import type { MmsProfileServices } from '../../MmsProfileServices'
 import { rollUpActivities, visibleThreads } from '../../../shared/threadLineage'
+import { MAX_DISPLAY_JSON_NODES } from '../../net/sync/codec'
 import { mmsJson } from './jsonOutput'
 
 /**
@@ -16,6 +17,9 @@ const SETTLE_MS = 40
 const RECONCILE_MS = 15_000
 const PREVIEW_CHARS = 280
 const ERROR_CHARS = 280
+/** A private snapshot above this size leaves out threads archived long ago (see `trimmed`). */
+export const PRIVATE_SOFT_LIMIT_BYTES = 256 * 1024
+const ARCHIVE_KEEP_MS = 30 * 24 * 60 * 60 * 1000
 
 export type ListsStatusState =
   | 'processing'
@@ -217,6 +221,45 @@ export class MmsListsSource {
     // A phone lists threads the way the CLI does: subagents sit under their parent, not beside it. Another
     // computer lists them all, with their lineage, and builds the tree itself like the desktop sidebar.
     const threads = own ? inventory : visibleThreads(inventory)
+    const snapshot = this.build(s, inventory, threads, own, activity, turns, chats)
+    return own ? this.trimmed(snapshot, inventory) : snapshot
+  }
+
+  /**
+   * A private snapshot grows with the number of threads. Above `PRIVATE_SOFT_LIMIT_BYTES`, archived threads
+   * that were settled more than 30 days ago leave it (with the subagents under them); the Archive and
+   * Recently deleted views of another computer ask for them with a read when they need them.
+   */
+  private trimmed(snapshot: ListsSnapshot, inventory: readonly Thread[]): ListsSnapshot {
+    if (Buffer.byteLength(JSON.stringify(snapshot)) <= PRIVATE_SOFT_LIMIT_BYTES) return snapshot
+    const cutoff = Date.now() - ARCHIVE_KEEP_MS
+    const dropped = new Set<string>()
+    for (const thread of inventory)
+      if (thread.settledAt && !thread.lineage && new Date(thread.settledAt).getTime() < cutoff) dropped.add(thread.id)
+    if (!dropped.size) return snapshot
+    // Whatever hangs below a dropped thread goes with it.
+    for (let grew = true; grew;) {
+      grew = false
+      for (const thread of inventory)
+        if (thread.lineage && !dropped.has(thread.id) && dropped.has(thread.lineage.parentThreadId)) {
+          dropped.add(thread.id)
+          grew = true
+        }
+    }
+    const status = { ...snapshot.status }
+    for (const id of dropped) delete status[id]
+    return { ...snapshot, threads: snapshot.threads.filter((thread) => !dropped.has(thread.id)), status }
+  }
+
+  private build(
+    s: ListsServices,
+    inventory: readonly Thread[],
+    threads: readonly Thread[],
+    own: boolean,
+    activity: Record<string, ThreadActivityState>,
+    turns: Record<string, TurnState>,
+    chats: ListsChat[]
+  ): ListsSnapshot {
     // A phone's parent row shows what its subagents are doing; another computer rolls the states up itself.
     const rolledUp = own ? {} : rollUpActivities(inventory, activity)
     const status: Record<string, ListsStatus> = {}
@@ -257,7 +300,7 @@ export class MmsListsSource {
       })),
       status,
       chats
-    }) as ListsSnapshot
+    }, undefined, MAX_DISPLAY_JSON_NODES) as ListsSnapshot
   }
 
   /**

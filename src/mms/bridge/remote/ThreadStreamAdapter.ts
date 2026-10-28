@@ -17,7 +17,7 @@ import {
 import type { RoutedStreamKind } from '../../../shared/bridge/routed'
 import type { Clock, IdentityService, KeyStore, StreamStore } from '../../net/contracts'
 import type { NetDatabase } from '../../net/store/database'
-import { canonicalJson, encodeEnvelope } from '../../net/sync/codec'
+import { canonicalJson, encodeEnvelope, MAX_DISPLAY_JSON_NODES } from '../../net/sync/codec'
 import {
   PRIVATE_STREAM_QUOTA,
   PRIVATE_TERMINAL_RING_BYTES,
@@ -683,7 +683,7 @@ export class ThreadStreamAdapter {
   private refreshSnapshot(thread: ActiveThread): void {
     // What is waiting was printed before this snapshot was read: it goes first, then the snapshot replaces it.
     this.flushBatch(thread)
-    const bytes = canonicalJson(this.options.source.snapshot(thread.threadId))
+    const bytes = canonicalJson(this.options.source.snapshot(thread.threadId), MAX_DISPLAY_JSON_NODES)
     if (bytes.byteLength > SNAPSHOT_MAX)
       throw new NetError('too_large', 'Display snapshot exceeds32MiB.')
     const snapshot = randomUUID(),
