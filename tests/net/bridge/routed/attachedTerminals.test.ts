@@ -5,7 +5,10 @@
 import { describe, expect, it, vi } from 'vitest'
 import { AttachedTerminals } from '../../../../src/mms/bridge/routed/attachedTerminals'
 import { DomainRpcError } from '../../../../src/mms/protocol/domainRegistry'
-import { ROUTED_PTY_INPUT_MAX_CHARS } from '../../../../src/shared/bridge/routed'
+import {
+  ROUTED_PTY_INPUT_MAX_CHARS,
+  ROUTED_PTY_PASTE_MAX_BYTES
+} from '../../../../src/shared/bridge/routed'
 import { newId, type NodeId } from '../../../../src/shared/net'
 import { qualifyId } from '../../../../src/shared/threadRef'
 import { PROJECT_SHELL_AGENT_ID } from '../../../../src/shared/types'
@@ -236,83 +239,124 @@ describe('the end', () => {
 })
 
 describe('input', () => {
-  it('numbers each call above the last, runs them one at a time in order, and cuts a long paste', async () => {
-    const sent: Array<{ seq: number; data?: string }> = []
+  const write = (h: ReturnType<typeof harness>, data: string) =>
+    h.terminals.input(node, threadId, ptyId, 'pty.write', { threadId, ptyId, data })
+  const sent = (h: ReturnType<typeof harness>) =>
+    h.calls.filter((call) => call.method === 'pty.write').map((call) => call.params)
+
+  it('takes the next number the moment the window types, sends without waiting for replies, and cuts a long paste', async () => {
     let running = 0
     let overlapped = false
-    const h = harness(async (method, params) => {
+    const h = harness(async (method) => {
       if (method !== 'pty.write') return {}
       running += 1
       overlapped ||= running > 1
-      await new Promise((resolve) => setTimeout(resolve, 2))
-      sent.push({ seq: params.seq as number, data: params.data as string })
+      await new Promise((resolve) => setTimeout(resolve, 5))
       running -= 1
       return { ok: true }
     })
-    const write = (data: string) => h.terminals.input(node, threadId, ptyId, 'pty.write', { threadId, ptyId, data })
     const paste = 'p'.repeat(ROUTED_PTY_INPUT_MAX_CHARS * 2 + 5)
-    await Promise.all([write('a'), write(paste), write('z')])
-    expect(overlapped).toBe(false)
-    expect(sent.map((call) => call.data!.length)).toEqual([
+    await Promise.all([write(h, 'a'), write(h, paste), write(h, 'z')])
+    // Calls were in flight together: the numbers, not the replies, are the order.
+    expect(overlapped).toBe(true)
+    const calls = sent(h)
+    expect(calls.map((call) => (call.data as string).length)).toEqual([
       1,
       ROUTED_PTY_INPUT_MAX_CHARS,
       ROUTED_PTY_INPUT_MAX_CHARS,
       5,
       1
     ])
-    expect(sent.map((call) => call.data).join('')).toBe(`a${paste}z`)
-    const numbers = sent.map((call) => call.seq)
-    expect([...numbers].sort((a, b) => a - b)).toEqual(numbers)
-    expect(new Set(numbers).size).toBe(numbers.length)
+    expect(calls.map((call) => call.data).join('')).toBe(`a${paste}z`)
+    // From 1, one after the other, no number twice: a count of the terminal's own, not a clock.
+    expect(calls.map((call) => call.seq)).toEqual([1, 2, 3, 4, 5])
+  })
+
+  it('refuses a paste too large for the owner’s budget whole, before any of it is sent', async () => {
+    const h = harness()
+    const paste = 'x'.repeat(ROUTED_PTY_PASTE_MAX_BYTES + 1)
+    await expect(write(h, paste)).rejects.toMatchObject({ code: 'paste_too_large' })
+    expect(sent(h)).toEqual([])
+    // One that fits goes through whole.
+    await write(h, 'x'.repeat(ROUTED_PTY_PASTE_MAX_BYTES))
+    expect(sent(h).map((call) => (call.data as string).length).reduce((a, b) => a + b, 0)).toBe(
+      ROUTED_PTY_PASTE_MAX_BYTES
+    )
   })
 
   it('does not split a character in two', async () => {
-    const sent: string[] = []
-    const h = harness(async (method, params) => {
-      if (method === 'pty.write') sent.push(params.data as string)
-      return {}
-    })
+    const h = harness()
     // A character outside the basic plane is two code units; the cut falls between them.
     const text = 'x'.repeat(ROUTED_PTY_INPUT_MAX_CHARS - 1) + '😀' + 'y'
-    await h.terminals.input(node, threadId, ptyId, 'pty.write', { threadId, ptyId, data: text })
-    expect(sent.join('')).toBe(text)
-    expect(sent.every((piece) => !/[\ud800-\udbff]$/.test(piece))).toBe(true)
+    await write(h, text)
+    const pieces = sent(h).map((call) => call.data as string)
+    expect(pieces.join('')).toBe(text)
+    expect(pieces.every((piece) => !/[\ud800-\udbff]$/.test(piece))).toBe(true)
   })
 
   it('does not let one that failed hold up the ones after it, and never reuses its number', async () => {
-    const seen: number[] = []
     let fail = true
-    const h = harness(async (method, params) => {
+    const h = harness(async (method) => {
       if (method !== 'pty.write') return {}
-      seen.push(params.seq as number)
       if (fail) {
         fail = false
         throw new DomainRpcError('rate_limited', 'Slow down.')
       }
       return { ok: true }
     })
-    const write = (data: string) => h.terminals.input(node, threadId, ptyId, 'pty.write', { threadId, ptyId, data })
-    await expect(write('a')).rejects.toMatchObject({ code: 'rate_limited' })
-    await write('b')
-    expect(seen).toHaveLength(2)
-    expect(seen[1]).toBeGreaterThan(seen[0])
+    await expect(write(h, 'a')).rejects.toMatchObject({ code: 'rate_limited' })
+    await write(h, 'b')
+    expect(sent(h).map((call) => call.seq)).toEqual([1, 2])
   })
 
-  it('starts its numbers from the clock, so a daemon that restarts never sends one the owner has seen', async () => {
-    const first = harness()
-    const before = Date.now()
-    await first.terminals.input(node, threadId, ptyId, 'pty.write', { threadId, ptyId, data: 'x' })
-    const used = first.calls.filter((call) => call.method === 'pty.write').map((call) => call.params.seq as number)
-    expect(used[0]).toBeGreaterThanOrEqual(before)
-    // Many calls in one millisecond keep climbing, even past the clock.
-    for (let n = 0; n < 50; n += 1)
-      await first.terminals.input(node, threadId, ptyId, 'pty.write', { threadId, ptyId, data: 'x' })
-    const last = first.calls.filter((call) => call.method === 'pty.write').at(-1)!.params.seq as number
-    // A new daemon after a restart starts at the clock, which is above where the old one got to unless it
-    // sent more than a call per millisecond for the whole time between.
-    await new Promise((resolve) => setTimeout(resolve, 60))
-    const second = harness()
-    await second.terminals.input(node, threadId, ptyId, 'pty.write', { threadId, ptyId, data: 'x' })
-    expect(second.calls.find((call) => call.method === 'pty.write')!.params.seq as number).toBeGreaterThan(last)
+  it('counts without a clock: the same numbers whatever the time does, even backwards', async () => {
+    const h = harness()
+    const now = vi.spyOn(Date, 'now')
+    now.mockReturnValue(5_000_000_000_000)
+    await write(h, 'a')
+    now.mockReturnValue(1_000)
+    await write(h, 'b')
+    now.mockRestore()
+    await write(h, 'c')
+    expect(sent(h).map((call) => call.seq)).toEqual([1, 2, 3])
+  })
+
+  it('counts on from where the owner says it is for a terminal it finds alive', async () => {
+    const h = harness()
+    h.terminals.ensure(node, threadId, ptyId, undefined, 40)
+    await write(h, 'a')
+    expect(sent(h).map((call) => call.seq)).toEqual([41])
+  })
+
+  it('sends again under the next number when the owner says a number was taken before any was accepted', async () => {
+    // This computer forgot where the owner is (a restart that never asked): the owner has seen 50.
+    const h = harness(async (method, params) => {
+      if (method !== 'pty.write') return {}
+      return (params.seq as number) <= 50 ? { ok: true, duplicate: true, lastSeq: 50 } : { ok: true }
+    })
+    await write(h, 'typed')
+    expect(sent(h).map((call) => call.seq)).toEqual([1, 51])
+    expect(sent(h).map((call) => call.data)).toEqual(['typed', 'typed'])
+    // From then on its numbers are the owner's, and nothing is sent twice.
+    await write(h, 'next')
+    expect(sent(h).at(-1)).toMatchObject({ seq: 52, data: 'next' })
+  })
+
+  it('takes "already applied" for an accepted number as a resend whose reply was lost, and does not send it again', async () => {
+    let calls = 0
+    const h = harness(async (method) => {
+      if (method !== 'pty.write') return {}
+      calls += 1
+      return calls === 1 ? { ok: true } : { ok: true, duplicate: true, lastSeq: 5 }
+    })
+    await write(h, 'a')
+    await write(h, 'b')
+    // The second was a duplicate of something the owner had applied: it is not typed a second time.
+    expect(sent(h).map((call) => call.seq)).toEqual([1, 2])
+  })
+
+  it('gives up with a plain message when the owner and this computer cannot agree', async () => {
+    const h = harness(async (method) => (method === 'pty.write' ? { ok: true, duplicate: true, lastSeq: 10 ** 9 } : {}))
+    await expect(write(h, 'x')).rejects.toMatchObject({ code: 'terminal_out_of_step' })
   })
 })

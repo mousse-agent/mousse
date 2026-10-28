@@ -77,11 +77,6 @@ export interface RoutedRow {
    * not durable, so a lost reply is answered by sending the same number again, never by a fresh request.
    */
   sequenced?: true
-  /**
-   * The row may carry `cwd`, a folder inside the thread's own that a terminal starts in (relative to it, or
-   * absolute and inside it). The owner resolves it by real path and refuses what leads outside.
-   */
-  startsIn?: true
   /** Only the call that names an absolute `path` (`projects.open`) may. */
   absolutePath?: true
   /**
@@ -482,11 +477,9 @@ export const ROUTED_METHODS: Readonly<Record<string, RoutedRow>> = Object.freeze
 
   // ---------------------------------------------------------------- terminals
   // A terminal starts in the thread's own folder (or the thread's terminal workspace when it has none), in the
-  // owner's default shell and environment: the caller names no shell, arguments or variables. `cwd` may only
-  // name a folder inside the thread's.
-  'pty.create': write('thread', ['threadId', 'agentId', 'cwd'], {
+  // owner's default shell and environment: the caller names no folder, shell, arguments or variables.
+  'pty.create': write('thread', ['threadId', 'agentId'], {
     terminal: true,
-    startsIn: true,
     required: ['agentId']
   }),
   'pty.kill': write('thread', ['threadId', 'ptyId'], {
@@ -623,6 +616,11 @@ export function parseTerminalOffMessage(message: string): { computer: string } |
 export const ROUTED_TERMINALS_PER_NODE = 4
 /** The most one numbered input call carries; the caller cuts a longer paste into calls of this size, in order. */
 export const ROUTED_PTY_INPUT_MAX_CHARS = 16 * 1024
+/**
+ * The most one paste into a terminal may carry, in bytes: what a device's input budget holds at once. A longer one is
+ * refused whole, before any of it is sent, instead of being cut where the budget runs out.
+ */
+export const ROUTED_PTY_PASTE_MAX_BYTES = 512 * 1024
 /** The terminal sizes a call may ask for (the same bounds a window's `pty.resize` has). */
 export const ROUTED_PTY_MAX_COLS = 512
 export const ROUTED_PTY_MAX_ROWS = 256

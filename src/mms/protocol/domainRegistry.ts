@@ -33,6 +33,11 @@ export interface BridgeCaller {
   readonly node: string
   readonly user: string
   readonly maxPermissionMode: PermissionMode
+  /**
+   * Called by `pty.create` the moment the shell exists, before anything else is done with it, so the terminal is
+   * the device's (and ends with its permission) even if the rest of the call fails.
+   */
+  readonly onTerminalCreated?: (ptyId: string) => void
 }
 
 export class DomainRpcError extends Error {

@@ -45,7 +45,9 @@ export interface Spawned {
 /** Makes a computer's terminals fake ones. Nothing here reads or prints the process environment. */
 export function fakeShells(
   manager: unknown,
-  cleanups: Array<() => void | Promise<void>>
+  cleanups: Array<() => void | Promise<void>>,
+  /** Runs as each shell starts, before the owner has been told it exists. */
+  onSpawn?: (shell: Spawned) => void
 ): Spawned[] {
   const spawned: Spawned[] = []
   ;(manager as { spawnPty: unknown }).spawnPty = (
@@ -54,7 +56,9 @@ export function fakeShells(
     options: Spawned['options']
   ) => {
     const pty = new FakePty()
-    spawned.push({ shell, args, options, pty })
+    const entry = { shell, args, options, pty }
+    spawned.push(entry)
+    onSpawn?.(entry)
     return pty
   }
   // A shell that is still running would hold the owner's shutdown.

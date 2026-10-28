@@ -341,8 +341,8 @@
   },
   "pty.create": {
     "version": 1,
-    "digest": "e7c679b0db328bc2",
-    "security": "793b320a5bc040b4"
+    "digest": "be1cfae362a90041",
+    "security": "a45a3a455870a3f6"
   },
   "pty.isAlive": {
     "version": 1,

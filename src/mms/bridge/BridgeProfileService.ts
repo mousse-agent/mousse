@@ -32,6 +32,7 @@ import { PrivateSources, raiseStreamListenerLimits } from './routed/privateSourc
 import { RoutedStaging } from './routed/staging'
 import { routedStreamsPort } from './routed/streamsPort'
 import { isPrivateKey } from './remote/privateStreams'
+import { deviceNameOf } from './routed/deviceName'
 
 /** Actual profile services own Bridge; no received DTO supplies a backend or path. */
 export class BridgeProfileService {
@@ -254,6 +255,30 @@ export class BridgeProfileService {
       track: (work) => this.track(work),
       staging,
       streams: routedStreamsPort(this.threads),
+      // A device that has been away from this computer for ten minutes has its terminals ended.
+      connected: (node) => {
+        try {
+          return net.session(node).state() === 'open'
+        } catch {
+          return false
+        }
+      },
+      deviceName: (node) => deviceNameOf(rt.identity, node),
+      // The first terminal a device opens: a desktop notification in the windows of this computer (none, for a
+      // computer with no window, which has the audit row).
+      onFirstTerminal: ({ name, threadId }) =>
+        services.events.emit({
+          channel: 'protocol:event',
+          data: {
+            type: 'ui.notify',
+            data: {
+              kind: 'remote-terminal',
+              device: name,
+              threadId,
+              threadName: services.threads.getThread(threadId)?.name ?? ''
+            }
+          }
+        }),
       // Progress of a Git action goes to the one computer that started it, on its own channel stream.
       connectionEvent: async (caller, type, data) => {
         if (type === 'git.operation') this.threads.pushChannel(caller.node, type, data)

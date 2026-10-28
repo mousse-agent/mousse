@@ -100,7 +100,8 @@ describe('where a routed terminal starts', () => {
       { env: { LD_PRELOAD: '/tmp/x' } },
       { shellArgs: ['-c', 'x'] },
       { projectPath: '/' },
-      { source: 'bot' }
+      { source: 'bot' },
+      { cwd: '.' }
     ])
       await expect(
         create(o, t.id, extra),
@@ -113,56 +114,20 @@ describe('where a routed terminal starts', () => {
     expect(spawned).toHaveLength(0)
   }, 180_000)
 
-  it('starts in a folder inside the thread’s own, and refuses one outside it, by real path', async () => {
+  it('takes no folder from the caller at all, inside the thread’s folder or outside it', async () => {
     const o = await routedOwner()
     const spawned = fakeShells(o.f.mms.ptyManager, resources)
     o.policy.set(o.f.callerNode, { terminal: true })
-    // Folders and a file in the repository, so they are in the thread's folder; the link is one the repository ignores.
-    const path = repo()
-    mkdirSync(join(path, 'sub', 'deeper'), { recursive: true })
-    writeFileSync(join(path, 'sub', 'deeper', 'keep.txt'), 'x')
-    writeFileSync(join(path, 'file.txt'), 'x')
-    writeFileSync(join(path, '.git', 'info', 'exclude'), 'out\n')
-    for (const args of [['add', '-A'], ['commit', '-q', '-m', 'folders']])
-      execFileSync('git', args, { cwd: path, stdio: 'pipe' })
-    const project = o.f.mms.projects.openProject(path)
-    const t = o.thread('Terminal thread', project.id, path)
-    // The thread's folder is brought up by the first terminal.
-    const first = await create(o, t.id)
-    await close(o, t.id, (first as { result: { ptyId: string } }).result.ptyId)
-    const root = threadFolder(o, t.id, path)
-    const real = realpathSync(root)
-    const outside = realpathSync(mkdtempSync(join(tmpdir(), 'terminal-outside-')))
-    resources.push(() => rmSync(outside, { recursive: true, force: true }))
-    symlinkSync(outside, join(real, 'out'), process.platform === 'win32' ? 'junction' : 'dir')
-
-    const inside = await create(o, t.id, { cwd: 'sub/deeper' })
-    expect(JSON.stringify(inside)).toContain('"ok":true')
-    expect(realpathSync(spawned.at(-1)!.options.cwd)).toBe(join(real, 'sub', 'deeper'))
-    await close(o, t.id, (inside as { result: { ptyId: string } }).result.ptyId)
-    // Spelled with the owner's own folder, it is the same folder.
-    const absolute = await create(o, t.id, { cwd: join(root, 'sub') })
-    expect(JSON.stringify(absolute)).toContain('"ok":true')
-    expect(realpathSync(spawned.at(-1)!.options.cwd)).toBe(join(real, 'sub'))
-    await close(o, t.id, (absolute as { result: { ptyId: string } }).result.ptyId)
-
-    const count = spawned.length
-    for (const cwd of [
-      '..',
-      '../..',
-      'sub/../..',
-      'out',
-      'out/inner',
-      outside,
-      'file.txt',
-      'nothing'
-    ]) {
-      const reply = await create(o, t.id, { cwd }).catch((error: unknown) => error)
-      const code =
-        (reply as { error?: { code: string } }).error?.code ?? (reply as { code?: string }).code
-      expect(['path_outside_folder', 'bad_request'], String(cwd)).toContain(code)
-    }
-    expect(spawned).toHaveLength(count)
+    const { t, path } = folderThread(o)
+    for (const cwd of ['.', 'sub', '..', '../..', path, 'C:\\Windows', '\\\\host\\share', 'x\0y'])
+      await expect(create(o, t.id, { cwd }), JSON.stringify(cwd)).rejects.toMatchObject({
+        code: 'bad_request'
+      })
+    expect(spawned).toHaveLength(0)
+    // The terminal that does start is in the thread's own folder.
+    const reply = await create(o, t.id)
+    expect(reply.ok).toBe(true)
+    expect(resolve(spawned[0].options.cwd)).toBe(resolve(threadFolder(o, t.id, path)))
   }, 180_000)
 
   it('starts a thread with no folder in its own terminal workspace, and takes no folder of the caller for it', async () => {
@@ -174,10 +139,6 @@ describe('where a routed terminal starts', () => {
     expect(reply.ok).toBe(true)
     const dir = o.f.mms.threads.getThreadDir(t.id)
     expect(realpathSync(spawned[0].options.cwd)).toBe(realpathSync(join(dir, 'terminal-workspace')))
-    expect(await create(o, t.id, { cwd: '.' })).toMatchObject({
-      ok: false,
-      error: { code: 'thread_has_no_folder' }
-    })
     // And a thread that is not here never starts a shell.
     expect(await create(o, 'no-such-thread')).toMatchObject({
       ok: false,
@@ -216,9 +177,21 @@ describe('input and resizes', () => {
       { threadId: second.t.id, agentId: `${PROJECT_SHELL_AGENT_ID}:own` }
     )
     const ownId = (own as { ptyId: string }).ptyId
-    expect(await o.ok('pty.isAlive', { threadId: second.t.id, ptyId: ownId })).toMatchObject({
-      alive: true
-    })
+    // Nor read: the device reads only the terminals it opened.
+    for (const [method, params] of [
+      ['pty.isAlive', {}],
+      ['pty.lookup', {}],
+      ['pty.scrollback', {}],
+      ['pty.outputSince', { afterSequence: 0 }]
+    ] as const)
+      expect(await o.call(method, { threadId: second.t.id, ptyId: ownId, ...params }), method).toMatchObject({
+        ok: false,
+        error: { code: 'pty_not_found' }
+      })
+    expect(
+      (await o.ok('pty.list', { threadId: second.t.id })).ptys
+    ).toEqual([])
+    expect((await o.ok('pty.scrollback', { threadId: second.t.id })).scrollbacks).toEqual({})
     expect(await type(o, second.t.id, ownId, 1, 'sneaky')).toMatchObject({
       ok: false,
       error: { code: 'pty_not_found' }
@@ -297,31 +270,47 @@ describe('input and resizes', () => {
     ).rejects.toMatchObject({ code: 'bad_request' })
   }, 180_000)
 
-  it('holds a device to a steady rate, and the call that was refused can be sent again', async () => {
+  it('holds a device to a steady rate by making input wait, so a paste stays whole and in order', async () => {
     const clock = testClock()
     const o = await routedOwner({ clock })
     const { spawned, t, ptyId } = await opened(o)
-    // One large call after another uses the burst up.
-    const chunk = 'x'.repeat(16 * 1024)
-    let seq = 0
-    let refused: number | undefined
-    for (let i = 0; i < 200 && refused === undefined; i += 1) {
-      seq += 1
-      const reply = await type(o, t.id, ptyId, seq, chunk)
-      if (!reply.ok) {
-        expect(reply.error.code).toBe('rate_limited')
-        refused = seq
-      }
+    const terminals = o.routes.terminals as unknown as {
+      buckets: Map<string, { bytes: number; calls: number; at: number }>
     }
-    expect(refused).toBeGreaterThan(1)
-    expect(refused! * chunk.length).toBeLessThanOrEqual(TERMINAL_INPUT_BURST_BYTES + chunk.length)
-    expect(refused!).toBeLessThanOrEqual(TERMINAL_INPUT_BURST_CALLS)
-    expect(spawned[0].pty.written).toHaveLength(refused! - 1)
-    // Nothing is typed while it is refused, and the same number goes through once the rate has recovered.
-    expect(await type(o, t.id, ptyId, refused!, chunk)).toMatchObject({ ok: false })
-    clock.advance(2000)
-    expect(await type(o, t.id, ptyId, refused!, chunk)).toMatchObject({ ok: true })
-    expect(spawned[0].pty.written).toHaveLength(refused!)
+    // The burst is spent and 100 KiB more is owed: this call waits for it, then goes through.
+    terminals.buckets.set(o.f.callerNode, { bytes: -100 * 1024, calls: 100, at: clock.now() })
+    const chunk = 'x'.repeat(16 * 1024)
+    const started = Date.now()
+    expect(await type(o, t.id, ptyId, 1, chunk)).toMatchObject({ ok: true })
+    expect(Date.now() - started).toBeGreaterThanOrEqual(300)
+    expect(spawned[0].pty.written).toEqual([chunk])
+    // A device that owes far more than any wait is refused, plainly, and nothing of that call is typed.
+    terminals.buckets.set(o.f.callerNode, { bytes: -4 * 1024 * 1024, calls: 100, at: clock.now() })
+    expect(await type(o, t.id, ptyId, 2, chunk)).toMatchObject({
+      ok: false,
+      error: { code: 'rate_limited' }
+    })
+    expect(spawned[0].pty.written).toEqual([chunk])
+    // The number after it is the next one: the refused call was not typed and is not waited for.
+    terminals.buckets.set(o.f.callerNode, { bytes: 500 * 1024, calls: 100, at: clock.now() })
+    expect(await type(o, t.id, ptyId, 3, 'after')).toMatchObject({ ok: true })
+    expect(spawned[0].pty.written).toEqual([chunk, 'after'])
+  }, 180_000)
+
+  it('puts calls sent together back in order, and waits a moment for the number before a late one', async () => {
+    const o = await routedOwner()
+    const { spawned, t, ptyId } = await opened(o)
+    // Sent at once and in the wrong order: the owner types them in number order.
+    const calls = [4, 2, 3, 1].map((seq) => type(o, t.id, ptyId, seq, String(seq) + ";"))
+    await Promise.all(calls)
+    expect(spawned[0].pty.written).toEqual(['1;', '2;', '3;', '4;'])
+    // A number that never comes is waited for only a moment; the call after it is not held for good.
+    const started = Date.now()
+    expect(await type(o, t.id, ptyId, 9, 'late')).toMatchObject({ ok: true })
+    expect(Date.now() - started).toBeLessThan(5000)
+    expect(spawned[0].pty.written.at(-1)).toBe('late')
+    // And the numbers in between are resends now.
+    expect(await type(o, t.id, ptyId, 7, 'lost')).toMatchObject({ result: { duplicate: true, lastSeq: 9 } })
   }, 180_000)
 
   it('says plainly when the shell cannot take the input, and does not record it as unknown', async () => {
@@ -330,10 +319,10 @@ describe('input and resizes', () => {
     spawned[0].pty.write = () => {
       throw new Error('EPIPE')
     }
-    expect(await type(o, t.id, ptyId, 1, 'x')).toMatchObject({
-      ok: false,
-      error: { code: 'pty_unavailable' }
-    })
+    const reply = await type(o, t.id, ptyId, 1, 'x')
+    expect(reply).toMatchObject({ ok: false, error: { code: 'pty_unavailable' } })
+    // Fixed words: what the shell said (a path, a system error) stays in the owner's log.
+    expect(JSON.stringify(reply)).not.toContain('EPIPE')
   }, 180_000)
 })
 

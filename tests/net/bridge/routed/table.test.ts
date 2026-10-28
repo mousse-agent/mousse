@@ -52,9 +52,8 @@ function securityOf(row: RoutedRow): string {
     routeOnly: [...(row.routeOnly ?? [])].sort(),
     // Which values a caller may send ahead of the call is part of what the row lets through.
     ...(row.stageable?.length ? { stageable: [...row.stageable].sort() } : {}),
-    // A numbered change keeps no ledger, and a terminal's starting folder is the one `cwd` a call may carry.
-    ...(row.sequenced ? { sequenced: true } : {}),
-    ...(row.startsIn ? { startsIn: true } : {})
+    // A numbered change keeps no ledger.
+    ...(row.sequenced ? { sequenced: true } : {})
   })
 }
 
@@ -164,9 +163,7 @@ describe('the routed method table', () => {
     }
     for (const [method, row] of Object.entries(ROUTED_METHODS))
       for (const key of ROUTED_FORBIDDEN_KEYS)
-        // A terminal's starting folder is the one `cwd`: it must lie inside the thread's own, and the owner checks it.
-        if (!(key === 'cwd' && row.startsIn))
-          expect(row.keys, `${method} takes ${key}`).not.toContain(key)
+        expect(row.keys, `${method} takes ${key}`).not.toContain(key)
     // Only projects.open names a path of the owner's disk; file and Git rows name a thread or a project.
     expect(
       Object.entries(ROUTED_METHODS)
@@ -227,9 +224,8 @@ describe('the routed method table', () => {
       const row = ROUTED_METHODS[method]
       expect(row.capability, method).toBe('write')
       expect(row.terminal, method).toBe(true)
-      // No shell, shell arguments or environment, ever; only `pty.create` may name a folder, and only one inside the thread's.
-      for (const key of ['command', 'env', 'shellArgs']) expect(row.keys, method).not.toContain(key)
-      expect(row.keys.includes('cwd'), method).toBe(method === 'pty.create')
+      // No folder, shell, shell arguments or environment, ever: the owner decides them.
+      for (const key of ['cwd', 'command', 'env', 'shellArgs']) expect(row.keys, method).not.toContain(key)
     }
     // Input and resizes are numbered and kept out of the ledger; the rest of the terminal changes are in it.
     expect(
@@ -244,11 +240,6 @@ describe('the routed method table', () => {
       expect(ROUTED_METHODS[method].required, method).toContain('seq')
     }
     for (const method of ['pty.create', 'pty.kill']) expect(ROUTED_METHODS[method].durable, method).toBe(true)
-    expect(
-      Object.entries(ROUTED_METHODS)
-        .filter(([, row]) => row.startsIn)
-        .map(([method]) => method)
-    ).toEqual(['pty.create'])
   })
 
   it('advertises one version per row and per transport method', () => {

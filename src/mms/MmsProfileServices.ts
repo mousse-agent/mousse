@@ -88,6 +88,7 @@ import type { BotProfileService } from './bots/space/BotProfileService'
 import { randomUUID } from 'crypto'
 import { DomainHandlerRegistry, DomainRpcError } from './protocol/domainRegistry'
 import type { ThreadRouterPort } from './protocol/threadRouterPort'
+import type { RoutedTerminalsPort } from './protocol/routedTerminalsPort'
 import type { MmsOptions } from './MmsOptions'
 import { MmsProfilePlatform } from './platform/MmsProfilePlatform'
 import { OwnedWorkBarrier } from './execution/OwnedWorkBarrier'
@@ -192,6 +193,8 @@ export class MmsProfileServices {
    * the Bridge service while it is composed and cleared when it closes; the handlers consult it first.
    */
   threadRouter?: ThreadRouterPort
+  /** The terminals other computers opened here, set while Bridge is on. */
+  routedTerminals?: RoutedTerminalsPort
   readonly net: NetService
   readonly chatNetwork: ChatNetworkBindingService
   private bridgeService?: BridgeProfileService

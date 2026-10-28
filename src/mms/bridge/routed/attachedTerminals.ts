@@ -1,4 +1,4 @@
-import { ROUTED_PTY_INPUT_MAX_CHARS } from '../../../shared/bridge/routed'
+import { ROUTED_PTY_INPUT_MAX_CHARS, ROUTED_PTY_PASTE_MAX_BYTES } from '../../../shared/bridge/routed'
 import { NetError, type NodeId, type StreamDescriptor } from '../../../shared/net'
 import { qualifyId } from '../../../shared/threadRef'
 import { PROJECT_SHELL_AGENT_ID } from '../../../shared/types'
@@ -54,10 +54,13 @@ interface Terminal {
   exited: boolean
   dropped: boolean
   retries: number
-  /** The number of the newest input call made for this terminal; every call takes the next, never one used. */
+  /** The newest input number taken for this terminal. Every call takes the next, so numbers never repeat and never go back. */
   seq: number
-  /** Input calls run one at a time, in the order the window made them. */
-  chain: Promise<unknown>
+  /**
+   * Whether this computer knows its numbers are the ones the owner counts: the terminal was opened here, or the owner
+   * said where it is (`lastSeq`), or a number was accepted. Until then a "resend" answer means the numbers are stale.
+   */
+  verified: boolean
 }
 
 /**
@@ -71,9 +74,13 @@ interface Terminal {
  *   away long enough to miss some, the missing output is fetched with `pty.outputSince` and delivered
  *   first, in order; if the owner no longer holds it, the terminal is cleared and its scrollback is
  *   written again.
- * - **Input.** Numbered calls, one at a time per terminal, in the window's order. A lost reply is answered
- *   by sending the same number again, which the owner does not apply twice. The numbers start from the
- *   clock, so a daemon that restarts never reuses one the owner has already seen.
+ * - **Input.** Numbered calls. Each takes the next number of its terminal the moment the window makes it, and is
+ *   sent without waiting for the one before: the numbers are the order, and the owner puts calls back in
+ *   order. A lost reply is answered by sending the same number again, which the owner does not apply twice.
+ *   The count is the owner's own: it starts at 0 for a terminal opened here, and at what the owner says
+ *   (`lastSeq`) for one found later, so it never depends on a clock; an owner that says a number was already
+ *   taken before any was accepted gets the call again under the next number. A paste too large for the owner's
+ *   budget is refused whole, before any of it is sent.
  * - **End.** A terminal that ends, is stopped here, or is ended by the owner (its switch went off, the
  *   device was blocked) is told to the windows as `pty.exit`, and its stream is let go of.
  */
@@ -104,7 +111,14 @@ export class AttachedTerminals {
    * it asked for, and the output follows. A stream that cannot be attached is looked into, and the terminal is
    * reported as ended if it is.
    */
-  ensure(node: NodeId, threadId: string, ptyId: string, agentId?: string): void {
+  ensure(
+    node: NodeId,
+    threadId: string,
+    ptyId: string,
+    agentId?: string,
+    lastSeq?: number,
+    created = false
+  ): void {
     if (this.closed) return
     const key = this.key(node, ptyId)
     let term = this.terminals.get(key)
@@ -121,9 +135,9 @@ export class AttachedTerminals {
         exited: false,
         dropped: false,
         retries: 0,
-        // The clock, so a restarted daemon starts above anything its predecessor sent.
-        seq: Date.now(),
-        chain: Promise.resolve()
+        // A terminal this computer just opened counts from 0; one found alive counts from where the owner is.
+        seq: lastSeq ?? 0,
+        verified: lastSeq !== undefined || created === true
       }
       this.terminals.set(key, term)
     } else if (agentId && term.agentId === PROJECT_SHELL_AGENT_ID) term.agentId = agentId
@@ -403,32 +417,72 @@ export class AttachedTerminals {
     params: Json,
     options: { signal?: AbortSignal } = {}
   ): Promise<unknown> {
+    if (
+      method === 'pty.write' &&
+      typeof params.data === 'string' &&
+      Buffer.byteLength(params.data) > ROUTED_PTY_PASTE_MAX_BYTES
+    )
+      return Promise.reject(
+        new DomainRpcError(
+          'paste_too_large',
+          `That is too much to paste into a terminal at once (the limit is ${ROUTED_PTY_PASTE_MAX_BYTES / 1024} KiB). Nothing was sent.`,
+          { limit: ROUTED_PTY_PASTE_MAX_BYTES }
+        )
+      )
     this.ensure(node, threadId, ptyId)
     const term = this.terminals.get(this.key(node, ptyId))
-    // Not tracked (the daemon is shutting down): the call is made without an order to keep.
-    if (!term) return this.call(node, method, { ...params, seq: Date.now() }, options.signal)
+    // Not tracked (the daemon is shutting down): nothing to number.
+    if (!term) return Promise.reject(new DomainRpcError('cancelled', 'Mousse is shutting down.'))
     // A resize means the window mounted the terminal: what was kept for it can be shown.
     if (method === 'pty.resize') this.release(term)
     const pieces =
       method === 'pty.write' && typeof params.data === 'string'
         ? split(params.data, ROUTED_PTY_INPUT_MAX_CHARS)
         : [undefined]
-    const run = term.chain.then(async () => {
-      let result: unknown = { ok: true }
-      for (const piece of pieces) {
-        term.seq = Math.max(Date.now(), term.seq + 1)
-        result = await this.call(
-          node,
-          method,
-          { ...params, ...(piece === undefined ? {} : { data: piece }), seq: term.seq },
-          options.signal
-        )
-      }
-      return result
+    // The numbers are taken here, in the order the window made the calls, and the calls go out together.
+    const sends = pieces.map((piece) =>
+      this.sendNumbered(
+        term,
+        node,
+        method,
+        { ...params, ...(piece === undefined ? {} : { data: piece }) },
+        ++term.seq,
+        options.signal
+      )
+    )
+    return Promise.allSettled(sends).then((settled) => {
+      const failed = settled.find((one): one is PromiseRejectedResult => one.status === 'rejected')
+      if (failed) throw failed.reason
+      return (settled.at(-1) as PromiseFulfilledResult<unknown>).value
     })
-    // One that failed does not hold up the ones after it.
-    term.chain = run.catch(() => undefined)
-    return run
+  }
+
+  /**
+   * One numbered call. An answer of "already taken" for a number this computer never had accepted means its count
+   * is behind the owner's (a restart that forgot it): the owner's `lastSeq` becomes the new floor and the call is
+   * sent again under the next number. Once a number has been accepted, that answer is only a resend of a call
+   * whose reply was lost, and the call is done.
+   */
+  private async sendNumbered(
+    term: Terminal,
+    node: NodeId,
+    method: string,
+    params: Json,
+    seq: number,
+    signal?: AbortSignal
+  ): Promise<unknown> {
+    let number = seq
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const reply = await this.call(node, method, { ...params, seq: number }, signal)
+      if (!isRecord(reply) || reply.duplicate !== true) {
+        term.verified = true
+        return reply
+      }
+      if (term.verified || typeof reply.lastSeq !== 'number') return reply
+      term.seq = Math.max(term.seq, reply.lastSeq)
+      number = ++term.seq
+    }
+    throw new DomainRpcError('terminal_out_of_step', 'This computer and the terminal could not agree on the order of input. Nothing was typed.')
   }
 
   private call(node: NodeId, method: string, params: Json, signal?: AbortSignal): Promise<unknown> {

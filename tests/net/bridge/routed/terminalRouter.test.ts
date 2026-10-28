@@ -8,6 +8,7 @@ import { mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
+import { dispatchMethod } from '../../../../src/mms/protocol/handlers'
 import { parseTerminalOffMessage } from '../../../../src/shared/bridge/routed'
 import { PROJECT_SHELL_AGENT_ID } from '../../../../src/shared/types'
 import { cleanups, cleanupAll, linked } from './routerFixture'
@@ -78,6 +79,35 @@ describe('a device whose terminals are off', () => {
 })
 
 describe('with the terminal switch on', () => {
+  it('lists, for a window, only the terminals this computer opened', async () => {
+    await t.owner.net.request('bridge.policy', { node: t.callerNode, terminal: true })
+    const mine = await open()
+    // A terminal the owner's own window opened in another thread is not this device's.
+    const other = folderThread('Owner terminal')
+    await dispatchMethod(
+      {
+        mms: t.owner,
+        globalSequence: () => 0,
+        connection: {
+          id: 'owner-window',
+          clientType: 'gui',
+          capabilities: new Set(),
+          binding: { profileId: t.owner.getProfileId(), epoch: 1 },
+          lifetime: new AbortController().signal
+        }
+      },
+      'pty.create',
+      { threadId: other.id, agentId: `${PROJECT_SHELL_AGENT_ID}:own` }
+    )
+    expect((await t.dispatch('pty.list', { threadId: t.qualified(other.id) })).ptys).toEqual([])
+    expect(
+      (await t.dispatch('pty.list', { threadId: t.qualified(mine.thread.id) })).ptys.map(
+        (entry: { ptyId: string }) => entry.ptyId
+      )
+    ).toEqual([mine.ptyId])
+    await t.dispatch('pty.kill', { threadId: t.qualified(mine.thread.id), ptyId: mine.ptyId })
+  }, 120_000)
+
   beforeAll(async () => {
     await t.owner.net.request('bridge.policy', { node: t.callerNode, terminal: true })
   }, 60_000)
@@ -88,17 +118,13 @@ describe('with the terminal switch on', () => {
     expect(created.ptys[0]).toMatchObject({ threadId: t.qualified(thread.id), agentId })
     expect(shell.options.cwd).toContain(thread.id)
 
-    for (const extra of [{ command: 'x' }, { env: { A: 'b' } }, { shellArgs: ['-c'] }])
+    // No folder, shell, arguments or variables: the owner decides all of them.
+    for (const extra of [{ cwd: '..' }, { cwd: '.' }, { command: 'x' }, { env: { A: 'b' } }, { shellArgs: ['-c'] }])
       expect(
         await t.refused(
           t.dispatch('pty.create', { threadId: t.qualified(thread.id), agentId, ...extra })
         )
       ).toMatchObject({ code: 'invalid_params' })
-    expect(
-      await t.refused(
-        t.dispatch('pty.create', { threadId: t.qualified(thread.id), agentId, cwd: '..' })
-      )
-    ).toMatchObject({ code: 'path_outside_folder' })
     // The CLI and an agent's shell never route a terminal.
     expect(
       await t.refused(
@@ -195,6 +221,8 @@ describe('with the terminal switch on', () => {
   it('keeps reading a terminal the window finds alive after a restart of its own', async () => {
     const { thread, shell, ptyId } = await open()
     const q = t.qualified(thread.id)
+    await t.dispatch('pty.write', { threadId: q, ptyId, data: 'before;' })
+    await t.dispatch('pty.write', { threadId: q, ptyId, data: 'restart;' })
     // Forget everything this computer knew, as a restart does.
     t.router.terminals.forget(t.node, ptyId)
     expect(t.router.terminals.state().some((term) => term.ptyId === ptyId)).toBe(false)
@@ -203,6 +231,9 @@ describe('with the terminal switch on', () => {
     shell.pty.say('after the restart')
     // A stream that was let go of is opened again and brings its snapshot first: that takes a moment.
     await eventually(() => expect(output(ptyId)).toContain('after the restart'), { timeout: 15_000 })
+    // Its input counts on from where the owner is, so the first key after the restart is typed, not taken for a resend.
+    await t.dispatch('pty.write', { threadId: q, ptyId, data: 'after;' })
+    expect(shell.pty.written.join('')).toBe('before;restart;after;')
     await t.dispatch('pty.kill', { threadId: q, ptyId })
   }, 120_000)
 

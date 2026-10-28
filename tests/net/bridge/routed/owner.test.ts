@@ -165,11 +165,6 @@ describe('the routed methods the owner registers', () => {
         'expectedProfileId'
       ])
       {
-        // A terminal's starting folder is the one `cwd` a call may carry (it is held inside the thread's folder later).
-        if (extra === 'cwd' && row.startsIn) {
-          expect(() => validateRoutedParams(method, row, { ...baseParams(row), cwd: 'sub' })).not.toThrow()
-          continue
-        }
         expect(
           () => validateRoutedParams(method, row, { ...baseParams(row), [extra]: 'x' }),
           `${method} + ${extra}`

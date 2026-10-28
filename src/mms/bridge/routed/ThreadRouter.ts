@@ -9,7 +9,7 @@ import {
   unqualifyRoutedParams,
   type QualifyContext
 } from '../../../shared/bridge/routedIds'
-import type { Roster, NodeDelegation, NodeId } from '../../../shared/net'
+import type { NodeId } from '../../../shared/net'
 import { isId } from '../../../shared/net'
 import { parseQualifiedId, qualifyId } from '../../../shared/threadRef'
 import type { MmsProfileServices } from '../../MmsProfileServices'
@@ -29,6 +29,7 @@ import { RoutedClient } from './RoutedClient'
 import { RoutedStager } from './stager'
 import { AttachedThreads } from './attachedThreads'
 import { AttachedTerminals } from './attachedTerminals'
+import { deviceNameOf } from './deviceName'
 
 /** Methods whose result on this computer carries the complete list of threads or projects. */
 const RESULT_WITH_THREADS = new Set([
@@ -144,22 +145,10 @@ export class ThreadRouter implements ThreadRouterPort {
 
   private nameOf(node: NodeId): string {
     try {
-      const identity = this.options.net.runtime().identity
-      const self = identity.self()
-      const root = self && identity.pinnedRootKey(self.user)
-      const signed = self && identity.roster(self.user)
-      if (root && signed) {
-        const roster = identity.verifySigned<Roster>(signed, root)
-        const found = roster.nodes
-          .map((row) => identity.verifySigned<NodeDelegation>(row, root))
-          .filter((row) => row.subject === node)
-          .sort((a, b) => b.keyEpoch - a.keyEpoch || b.issuedAt - a.issuedAt)[0]
-        if (found?.name) return found.name
-      }
+      return deviceNameOf(this.options.net.runtime().identity, node, 'the other computer')
     } catch {
-      // The name is only for the message.
+      return 'the other computer'
     }
-    return 'the other computer'
   }
 
   private selfNode(): string | undefined {
@@ -252,17 +241,18 @@ export class ThreadRouter implements ThreadRouterPort {
     switch (method) {
       case 'pty.create':
         if (typeof raw.ptyId === 'string')
-          this.terminals.ensure(node, threadId, raw.ptyId, typeof owner.agentId === 'string' ? owner.agentId : undefined)
+          // Opened here: its input counts from 0.
+          this.terminals.ensure(node, threadId, raw.ptyId, typeof owner.agentId === 'string' ? owner.agentId : undefined, 0, true)
         break
       case 'pty.isAlive':
       case 'pty.lookup':
         if (raw.alive === true && typeof owner.ptyId === 'string')
-          this.terminals.ensure(node, threadId, owner.ptyId, typeof raw.agentId === 'string' ? raw.agentId : undefined)
+          this.terminals.ensure(node, threadId, owner.ptyId, typeof raw.agentId === 'string' ? raw.agentId : undefined, typeof raw.lastSeq === 'number' ? raw.lastSeq : undefined)
         break
       case 'pty.list':
         for (const entry of Array.isArray(raw.ptys) ? raw.ptys : [])
           if (isRecord(entry) && typeof entry.ptyId === 'string')
-            this.terminals.ensure(node, threadId, entry.ptyId, typeof entry.agentId === 'string' ? entry.agentId : undefined)
+            this.terminals.ensure(node, threadId, entry.ptyId, typeof entry.agentId === 'string' ? entry.agentId : undefined, typeof entry.lastSeq === 'number' ? entry.lastSeq : undefined)
         break
       case 'pty.kill':
         if (typeof owner.ptyId === 'string') this.terminals.forget(node, owner.ptyId)
@@ -292,10 +282,8 @@ export class ThreadRouter implements ThreadRouterPort {
       if (key === 'source' && value === 'gui') continue
       // The owner answers a send once the turn is admitted, however long the turn runs.
       if (key === 'await' && method === 'orchestrator.send') continue
-      // The terminal's starting folder is the one `cwd` a call may carry; the owner holds it inside the thread's own.
-      const forbidden = (ROUTED_FORBIDDEN_KEYS as readonly string[]).includes(key) && !(key === 'cwd' && row.startsIn)
       // Numbers belong to the router: a window never picks one.
-      if (forbidden || !row.keys.includes(key) || (key === 'seq' && row.sequenced))
+      if ((ROUTED_FORBIDDEN_KEYS as readonly string[]).includes(key) || !row.keys.includes(key) || (key === 'seq' && row.sequenced))
         throw new DomainRpcError('invalid_params', `${method} does not take ${key} for a thread on another computer.`)
       // References in the text name threads the way the owner does.
       params[key] =
