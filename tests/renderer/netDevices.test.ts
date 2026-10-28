@@ -7,10 +7,13 @@ import {
   isComputer,
   isIncompatible,
   lastSeenLabel,
+  netErrorWords,
+  PAIRING_DISCLOSURE,
   routeDetails,
   routeLabel,
   serveSettings,
   updateInstructions,
+  workOnThreadsDisclosure,
   worksOnThreads,
   type Device
 } from '../../src/renderer/lib/netDevices'
@@ -242,5 +245,30 @@ describe('updateInstructions', () => {
     const result = updateInstructions(device({ platform: 'linux', arch: 'x64' }), '1.0; rm -rf ~')
     expect(result.command).toBeUndefined()
     expect(result.summary.length).toBeGreaterThan(0)
+  })
+})
+
+describe('what pairing and granting say they open', () => {
+  it('says at pairing, in both directions, what a paired computer can do and what stays off', () => {
+    expect(PAIRING_DISCLOSURE).toContain('each computer can run and change threads on the other')
+    expect(PAIRING_DISCLOSURE).toContain('Auto-accept edits')
+    expect(PAIRING_DISCLOSURE).toContain('Terminals stay off')
+    expect(PAIRING_DISCLOSURE).toContain('limit or block either one in Devices')
+  })
+
+  it('names the computer and the limit when a grant or a kind is confirmed, and says it works both ways', () => {
+    const words = workOnThreadsDisclosure('Computer B')
+    expect(words).toContain('Computer B will be able to run and change threads on this computer, up to Auto-accept edits')
+    expect(words).toContain("commit and push with this computer's sign-ins")
+    expect(words).toContain('This computer can do the same on Computer B')
+    expect(words).toContain('Terminals stay off')
+    expect(workOnThreadsDisclosure('Computer B', 'full')).toContain('up to Full access')
+  })
+})
+
+describe('Net errors in words', () => {
+  it('turns the codes a person sees on the Devices screen into sentences, and softens an unknown one', () => {
+    expect(netErrorWords('route_unreachable')).toBe('none of your other devices can be reached right now')
+    expect(netErrorWords('some_new_code')).toBe('some new code')
   })
 })

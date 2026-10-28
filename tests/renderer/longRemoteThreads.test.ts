@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { hydrateMessageImages, missingImages, resetMessageImageRequests, type MessageImageDeps } from '../../src/renderer/lib/messageImages'
+import { forgetMessageImageRequests, hydrateMessageImages, missingImages, resetMessageImageRequests, type MessageImageDeps } from '../../src/renderer/lib/messageImages'
 import { useAppStore } from '../../src/renderer/stores/appStore'
 import { mousseToUIMessages } from '../../src/renderer/chat/adapters/mousseToUI'
 import type { ChatMessage } from '../../src/shared/types'
@@ -121,5 +121,60 @@ describe('the older part of a long thread in the window', () => {
     useAppStore.getState().applyEarlierMessages('nod_b:t', [message('1')], { before: '1', count: 2 })
     expect(useAppStore.getState().messages.map((entry) => entry.id)).toEqual(['8', '9'])
     expect(useAppStore.getState().earlierByThread['nod_b:t']).toEqual({ before: '1', count: 2 })
+  })
+})
+
+describe('images that were fetched stay', () => {
+  const initial = useAppStore.getInitialState()
+  beforeEach(() => { useAppStore.setState({ ...initial, activeThreadId: 'nod_a:t', messages: [], earlierByThread: {} }); resetMessageImageRequests() })
+  afterEach(() => { useAppStore.setState({ ...initial }) })
+
+  it('are kept when the thread is read again, which sends them by name', () => {
+    const store = useAppStore.getState()
+    store.applyThreadView({ threadId: 'nod_a:t', messages: [message('1', { images: [image('a.png'), image('b.png')] })] })
+    store.updateMessage({ ...useAppStore.getState().messages[0], images: [image('a.png', 'AAAA'), image('b.png')] })
+    // A reconnect, Retry or reopening: the snapshot has no bytes at all.
+    useAppStore.getState().applyThreadView({ threadId: 'nod_a:t', messages: [message('1', { images: [image('a.png'), image('b.png')] })] })
+    expect(useAppStore.getState().messages[0].images?.map((one) => one.data)).toEqual(['AAAA', undefined])
+  })
+
+  it('are never given to an image of another name', () => {
+    const store = useAppStore.getState()
+    store.applyThreadView({ threadId: 'nod_a:t', messages: [message('1', { images: [image('a.png', 'AAAA')] })] })
+    useAppStore.getState().updateMessage(message('1', { images: [image('other.png')], content: 'edited' }))
+    expect(useAppStore.getState().messages[0].images).toEqual([image('other.png')])
+  })
+
+  it('are asked for again for a thread that is opened again, when the first ask failed', async () => {
+    const asked: string[] = []
+    let messages = [message('1', { images: [image('a.png')] })]
+    const deps = (ok: boolean): MessageImageDeps => ({
+      fetchImage: async (_thread, id, index) => { asked.push(`${id}:${index}`); if (!ok) throw new Error('offline'); return { name: 'a.png', mimeType: 'image/png', data: 'AAAA' } },
+      shown: () => ({ threadId: 'nod_a:t', messages }),
+      update: (next) => { messages = messages.map((entry) => (entry.id === next.id ? next : entry)) }
+    })
+    await hydrateMessageImages('nod_a:t', deps(false))
+    await hydrateMessageImages('nod_a:t', deps(false))
+    expect(asked).toEqual(['1:0'])
+    forgetMessageImageRequests('nod_a:t')
+    await hydrateMessageImages('nod_a:t', deps(true))
+    expect(asked).toEqual(['1:0', '1:0'])
+    expect(messages[0].images?.[0].data).toBe('AAAA')
+  })
+
+  it('are asked for again when the person moved to another thread before they came', async () => {
+    let active = 'nod_a:t'
+    let messages = [message('1', { images: [image('a.png')] })]
+    const deps: MessageImageDeps = {
+      fetchImage: async () => { active = 'other'; return { name: 'a.png', mimeType: 'image/png', data: 'AAAA' } },
+      shown: () => ({ threadId: active, messages }),
+      update: () => undefined
+    }
+    await hydrateMessageImages('nod_a:t', deps)
+    active = 'nod_a:t'
+    expect(missingImages(messages)).toHaveLength(1)
+    const again: string[] = []
+    await hydrateMessageImages('nod_a:t', { ...deps, fetchImage: async (_t, id) => { again.push(id); return { name: 'a.png', mimeType: 'image/png', data: 'AAAA' } } })
+    expect(again).toEqual(['1'])
   })
 })

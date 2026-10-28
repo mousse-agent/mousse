@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { RefreshCw, Server } from '../lib/icons'
 import { UNKNOWN_COMPUTER_NAME, offlineLabel, refreshComputers, threadComputerState, useComputer, type ComputerState } from '../lib/computers'
+import { forgetMessageImageRequests } from '../lib/messageImages'
 import { useAppStore } from '../stores/appStore'
 import '../styles/computers.css'
 
@@ -41,6 +42,7 @@ export function ThreadComputerBar() {
   const retry = () => {
     // Opening the thread again attaches it afresh, which reads its transcript and queue from the other computer.
     setRetrying(true)
+    forgetMessageImageRequests(thread.id)
     void Promise.allSettled([refreshComputers(), window.mousse.threads.select(thread.id)]).finally(() => setRetrying(false))
   }
   return (

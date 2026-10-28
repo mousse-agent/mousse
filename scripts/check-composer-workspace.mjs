@@ -352,8 +352,19 @@ try {
         assert.equal((await calls()).some(c=>c[0]==='send'),false)
         // The chat is still for that computer: the picker has not silently moved it to this one.
         assert.equal(await evaluate('document.querySelector(".composer-workspace-device-btn").textContent'),'Build Linux')
-        // A computer without the grant to work on its threads is named, not offered.
+        // Routing asks for this computer's own grant, not the other computer's: one without the grant to work on threads is still offered.
         await evaluate('fixture.reset();fixture.nodes[1].caps=["read","write","chat"];window.dispatchEvent(new Event("focus"))');await pause(200)
+        await click('.composer-workspace-device-btn')
+        assert.deepEqual(await evaluate('Array.from(document.querySelectorAll(".composer-workspace-menu-item")).map(item=>[item.textContent,item.disabled])'),[['Studio Mac',false],['Build Linux',false]])
+        await key('Escape')
+        // Without the grant for this computer no other can be picked, and the reason says where to get it, not to grant the other one.
+        await evaluate('fixture.reset();fixture.nodes[0].caps=["read","write","chat"];window.dispatchEvent(new Event("focus"))');await pause(200)
+        await click('.composer-workspace-device-btn')
+        assert.deepEqual(await evaluate('Array.from(document.querySelectorAll(".composer-workspace-menu-item")).map(item=>[item.textContent,item.disabled])'),[['Studio Mac',false],['Build Linux',true]])
+        assert.equal(await evaluate('Array.from(document.querySelectorAll(".composer-workspace-menu-item")).find(item=>item.disabled).title.includes("on the computer that manages your devices")'),true)
+        await key('Escape')
+        // A computer that stopped sharing its threads with this one is named, not offered.
+        await evaluate('fixture.reset();fixture.store.setState({threads:[{id:"n-linux:gone",name:"Gone",node:"n-linux",notShared:true,createdAt:"",updatedAt:""}]});window.dispatchEvent(new Event("focus"))');await pause(200)
         await click('.composer-workspace-device-btn')
         assert.deepEqual(await evaluate('Array.from(document.querySelectorAll(".composer-workspace-menu-item")).map(item=>[item.textContent,item.disabled])'),[['Studio Mac',false],['Build Linux',true]])
         await key('Escape')

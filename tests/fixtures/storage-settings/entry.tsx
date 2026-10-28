@@ -84,7 +84,6 @@ const report = () => ({
   ]
 })
 
-const unsubscribe = () => () => {}
 Object.assign(window, {
   mousse: {
     threads: {
@@ -106,7 +105,6 @@ Object.assign(window, {
         return { report: daemon.report }
       })
     },
-    bridge: { onThreadPart: unsubscribe },
     platformRequest: {
       request: async (method: string, params: Record<string, unknown> = {}) => {
         if (method.startsWith('bridge.hub.')) calls.push({ method, args: [structuredClone(params)] })
@@ -118,8 +116,6 @@ Object.assign(window, {
           case 'bridge.hub.storage':
             if (params.target === 'nod_laptop') return laptopUsage()
             throw Object.assign(new Error('Not permitted.'), { code: 'forbidden' })
-          case 'bridge.hub.attach': return { attached: true }
-          case 'bridge.hub.detach': return { detached: true }
           default: throw new Error(`Unscripted platform request ${method}`)
         }
       }

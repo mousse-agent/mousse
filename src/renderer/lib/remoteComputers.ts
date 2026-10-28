@@ -1,9 +1,8 @@
 import { isComputerErrorCode } from '../../shared/bridge/computerErrors'
+import { describePermissionMode, isPermissionMode, isStricter, narrowPermissionMode, type PermissionMode } from '../../shared/permissionMode'
 import type { NodeId } from '../../shared/net'
 import type { LlmProviderOption } from '../../shared/settings'
 import type { Project } from '../../shared/types'
-import { routedThreadsOn } from './computers'
-import { readDevices, type Device } from './netDevices'
 import { localProjectIdOf, workspaceOnOtherComputer, workspaceOnThisComputer, type ComposerWorkspace } from './newThread'
 
 const request = <T>(method: Parameters<typeof window.mousse.platformRequest.request>[0], params: unknown) =>
@@ -11,19 +10,6 @@ const request = <T>(method: Parameters<typeof window.mousse.platformRequest.requ
 
 /** What the target answered to a request to open a folder as a project. */
 export type OpenRemoteProjectResult = { ok: true; project: Project } | { ok: false; error: string }
-
-/**
- * The user's devices that a new chat can be started on, or none when Net is off or locked, or when the
- * threads of other computers are not routed (a chat for another computer is created through that routing).
- */
-export async function readRunOnDevices(): Promise<Device[]> {
-  try {
-    const { current, nodes } = await readDevices(false)
-    return routedThreadsOn(current) ? nodes : []
-  } catch {
-    return []
-  }
-}
 
 /**
  * Asks another computer to register a folder on it as a project. That computer checks the path
@@ -63,23 +49,58 @@ export function workspaceOnDevice(
   return workspaceOnOtherComputer(workspace, node, matched)
 }
 
-/** The model a computer would use for a new chat, in the shape `bridge.hub.setModel` takes. */
+/** The model a computer would use for a new chat, in the shape `threads.setModel` takes. */
 export interface RemoteDefaultModel {
   instanceId?: string
   llmProvider?: string
   model: string
 }
 
-/** What another computer's composer offers: its models, and the one it would pick by default. */
+/** What a turn written from this computer runs in on the other one: its default mode, and the most it lets this device have. */
+export interface RemotePermission {
+  defaultMode: PermissionMode
+  limit?: PermissionMode
+}
+
+/** What another computer's composer offers: its models, the one it would pick by default, and its permission rules for this device. */
 export interface RemoteComposerOptions {
   providers: LlmProviderOption[]
   defaultModel: RemoteDefaultModel | null
+  /** Absent from a computer that predates it; the window then shows the strictest mode, never a looser one than will run. */
+  permission?: RemotePermission
+}
+
+/**
+ * The permission mode a thread of another computer will run its next turn in, and the most this device may pick
+ * there. A thread with a mode of its own has it; one without follows that computer's default, not this one's. The
+ * device limit caps both. While that computer's rules are not known the mode is the strictest, since showing a looser
+ * one than will run would misreport what the agent may do.
+ */
+export function remotePermissionView(input: { threadMode?: PermissionMode; permission?: RemotePermission }): { mode: PermissionMode; limit?: PermissionMode } {
+  const { permission } = input
+  const base = input.threadMode ?? permission?.defaultMode ?? 'ask'
+  const limit = permission?.limit
+  return { mode: limit ? narrowPermissionMode(base, limit) : base, ...(limit ? { limit } : {}) }
+}
+
+/**
+ * The highest mode the picker offers: the stricter of a subagent's lineage ceiling and the device limit, with the
+ * words that say which one holds it down.
+ */
+export function remotePermissionCeiling(lineage: PermissionMode | undefined, limit: PermissionMode | undefined, computer: string): { ceiling?: PermissionMode; reason?: string } {
+  if (limit === undefined) return lineage === undefined ? {} : { ceiling: lineage }
+  if (lineage !== undefined && isStricter(lineage, limit)) return { ceiling: lineage }
+  return { ceiling: limit, reason: `${computer} lets this device use ${describePermissionMode(limit)} at most. Raise the limit for this device on ${computer}, in Settings, Devices.` }
 }
 
 export async function readRemoteComposerOptions(node: NodeId): Promise<RemoteComposerOptions> {
   const value = await request<Partial<RemoteComposerOptions> | undefined>('bridge.hub.composerOptions', { target: node })
+  const permission = value?.permission
   return {
     providers: Array.isArray(value?.providers) ? value.providers : [],
-    defaultModel: value?.defaultModel ?? null
+    defaultModel: value?.defaultModel ?? null,
+    ...(permission && isPermissionMode(permission.defaultMode)
+      ? { permission: { defaultMode: permission.defaultMode, ...(isPermissionMode(permission.limit) ? { limit: permission.limit } : {}) } }
+      : {})
   }
 }

@@ -57,7 +57,11 @@ export async function hydrateMessageImages(threadId: string, deps: MessageImageD
       try {
         const bytes = await deps.fetchImage(threadId, image.messageId, image.index)
         const shown = deps.shown()
-        if (shown.threadId !== threadId) continue
+        if (shown.threadId !== threadId) {
+          // The person moved on before it came: it is asked for again when this thread is opened.
+          requested.delete(`${threadId}:${image.messageId}:${image.index}`)
+          continue
+        }
         const message = shown.messages.find((entry) => entry.id === image.messageId)
         if (!message?.images?.[image.index]) continue
         const images = message.images.map((entry, index) => (index === image.index ? { ...entry, data: bytes.data } : entry))
@@ -70,7 +74,15 @@ export async function hydrateMessageImages(threadId: string, deps: MessageImageD
   await Promise.all(Array.from({ length: Math.min(CONCURRENCY, todo.length) }, worker))
 }
 
-/** Forgets what was asked for; a thread that is opened again asks again. Tests start clean. */
+/** Forgets what was asked for. Tests start clean. */
 export function resetMessageImageRequests(): void {
   requested.clear()
+}
+
+/**
+ * Forgets what was asked for of one thread, so opening it again, or pressing Retry, asks again for the images
+ * that could not be fetched (the other computer was offline). Images already fetched are kept by the transcript.
+ */
+export function forgetMessageImageRequests(threadId: string): void {
+  for (const key of requested) if (key.startsWith(`${threadId}:`)) requested.delete(key)
 }

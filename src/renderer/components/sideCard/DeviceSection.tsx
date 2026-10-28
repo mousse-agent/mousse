@@ -80,10 +80,10 @@ function DeviceMenuButton({ threadId, name, locked }: { threadId: string | null;
   const workspace = composerWorkspaceFor(draft, thread)
 
   const [menuOpen, setOpen] = useState(false)
-  const { devices, refresh } = useRunOnDevices()
+  const { devices, notSharing, refresh } = useRunOnDevices()
   const localProjects = useAppStore((s) => s.projects)
   const triggerRef = useRef<HTMLButtonElement>(null)
-  const model = buildDeviceMenu({ localName: name, devices, workspace })
+  const model = buildDeviceMenu({ localName: name, devices, workspace, notSharing })
   const label = runOnLabel(name, devices, workspace.node)
   // Nothing to pick without a project or another device, and nothing can change mid-send.
   const interactive = !locked && hasDeviceChoices(model)

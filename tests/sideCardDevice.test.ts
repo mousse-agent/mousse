@@ -13,7 +13,8 @@ import {
   localDeviceName,
   menuRowLabel,
   runOnLabel,
-  WORKS_ON_THREADS_OFF,
+  notSharingReason,
+  thisComputerLacksGrant,
   workspaceDraftForChoice
 } from '../src/renderer/components/sideCard/deviceMenu'
 import type { Device } from '../src/renderer/lib/netDevices'
@@ -192,20 +193,35 @@ describe('device menu options', () => {
     expect(model.runOn?.map((option) => option.name)).toEqual(['Mac', 'Old daemon', 'Studio'])
   })
 
-  it('lists this computer first and every connected computer that works on threads as pickable', () => {
-    const { runOn } = buildDeviceMenu({ localName: 'Mac', devices: [device({ name: 'Studio', caps: ['read', 'chat', 'write', 'settings'] })], workspace })
+  it('lists this computer first and every connected computer as pickable when this computer works on threads', () => {
+    const mine = device({ self: true, node: 'node-0' as Device['node'], name: 'Mac', caps: ['read', 'chat', 'write', 'settings'] })
+    // The other computer's own grant is not asked about: routing checks the caller's.
+    const { runOn } = buildDeviceMenu({ localName: 'Mac', devices: [mine, device({ name: 'Studio', caps: ['read', 'chat', 'write'] })], workspace })
     expect(runOn).toEqual([
       { id: 'local', name: 'Mac', active: true, disabled: false },
       { id: 'node-1', name: 'Studio', active: false, disabled: false }
     ])
+    // A list from a daemon that does not name this computer is taken as able.
+    expect(buildDeviceMenu({ localName: 'Mac', devices: [device({ name: 'Studio' })], workspace }).runOn?.[1]).toMatchObject({ disabled: false })
   })
 
-  it('names a connected computer that does not work on threads, and says what to turn on', () => {
-    const { runOn } = buildDeviceMenu({ localName: 'Mac', devices: [device({ name: 'Studio', caps: ['read', 'chat', 'write'] })], workspace })
-    expect(runOn?.[1]).toEqual({ id: 'node-1', name: 'Studio', active: false, disabled: true, reason: WORKS_ON_THREADS_OFF })
+  it('names the connected computers, and says what is missing, when this computer has no grant to work on threads', () => {
+    const mine = device({ self: true, node: 'node-0' as Device['node'], name: 'Mac', caps: ['read', 'chat', 'write'] })
+    const { runOn } = buildDeviceMenu({ localName: 'Mac', devices: [mine, device({ name: 'Studio', caps: ['read', 'chat', 'write', 'settings'] })], workspace })
+    expect(runOn?.[1]).toEqual({ id: 'node-1', name: 'Studio', active: false, disabled: true, reason: thisComputerLacksGrant('Mac') })
+    expect(thisComputerLacksGrant('Mac')).toContain('on the computer that manages your devices')
+    // Nothing asks for the other computer to be given anything.
+    expect(thisComputerLacksGrant('Mac')).not.toContain('Studio')
     // A pick that is already made stays pickable, so a person can see where the chat runs.
-    const picked = buildDeviceMenu({ localName: 'Mac', devices: [device({ name: 'Studio', caps: [] })], workspace: { ...workspace, node: 'node-1' as Device['node'] } })
+    const picked = buildDeviceMenu({ localName: 'Mac', devices: [mine, device({ name: 'Studio' })], workspace: { ...workspace, node: 'node-1' as Device['node'] } })
     expect(picked.runOn?.[1]).toMatchObject({ active: true, disabled: false })
+  })
+
+  it('names a computer that stopped sharing its threads, and says how to start again, without granting anything', () => {
+    const mine = device({ self: true, node: 'node-0' as Device['node'], name: 'Mac', caps: ['settings'] })
+    const { runOn } = buildDeviceMenu({ localName: 'Mac', devices: [mine, device({ name: 'Studio' })], workspace, notSharing: new Set(['node-1']) })
+    expect(runOn?.[1]).toEqual({ id: 'node-1', name: 'Studio', active: false, disabled: true, reason: notSharingReason('Studio') })
+    expect(notSharingReason('Studio')).toContain('on Studio')
   })
 
   it('marks the picked computer, and none when it is no longer connected', () => {
@@ -236,9 +252,10 @@ describe('device menu options', () => {
     expect(hasDeviceChoices(buildDeviceMenu({ localName: 'Mac', devices: [], workspace: noProject }))).toBe(false)
     // This computer already selected and nothing else to pick changes nothing; a connected computer does.
     expect(hasDeviceChoices(buildDeviceMenu({ localName: 'Mac', devices: [device({ state: 'closed' })], workspace: noProject }))).toBe(false)
-    expect(hasDeviceChoices(buildDeviceMenu({ localName: 'Mac', devices: [device({ caps: ['settings'] })], workspace: noProject }))).toBe(true)
-    // A computer that cannot be picked yet is not a choice.
-    expect(hasDeviceChoices(buildDeviceMenu({ localName: 'Mac', devices: [device({})], workspace: noProject }))).toBe(false)
+    expect(hasDeviceChoices(buildDeviceMenu({ localName: 'Mac', devices: [device({})], workspace: noProject }))).toBe(true)
+    // A computer that cannot be picked is not a choice.
+    const lacking = device({ self: true, node: 'node-0' as Device['node'], caps: [] })
+    expect(hasDeviceChoices(buildDeviceMenu({ localName: 'Mac', devices: [lacking, device({})], workspace: noProject }))).toBe(false)
   })
 
   it('marks the active workspace choice', () => {

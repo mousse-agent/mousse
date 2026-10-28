@@ -42,14 +42,16 @@ import '../chat/components/agent-elements/agent-ui.css'
 import type { NodeId } from '../../shared/net'
 import { qualifyId } from '../../shared/threadRef'
 import { prepareComposerThread } from '../lib/createComposerThread'
-import { openRemoteProject, remoteErrorMessage, workspaceOnDevice } from '../lib/remoteComputers'
+import { openRemoteProject, remoteErrorMessage, remotePermissionCeiling, remotePermissionView, workspaceOnDevice } from '../lib/remoteComputers'
+import { UNKNOWN_COMPUTER_NAME, useComputer } from '../lib/computers'
 import { useRemoteComposerOptions, useRunOnDevices } from '../hooks/useRunOnDevices'
 import { localProjectsOf } from '../hooks/useLocalProjects'
 import { localDeviceName, runOnLabel } from './sideCard/deviceMenu'
 import { ComputerNotice } from './ComputerNotice'
 import { ThreadComputerBar } from './ThreadComputerBar'
 import { EarlierMessagesBar } from './EarlierMessagesBar'
-import { hydrateMessageImages } from '../lib/messageImages'
+import { forgetMessageImageRequests, hydrateMessageImages } from '../lib/messageImages'
+import { isOutcomeUncertain, settleUncertainSend } from '../lib/uncertainSend'
 import { onProviderListingsChanged, pickerIdFor, pickerProviders, projectScope, useProviderSnapshots } from '../lib/providerSnapshots'
 import { sendErrorLine } from '../lib/errorText'
 import { composerThreadActions } from '../lib/composerThreadActions'
@@ -123,7 +125,7 @@ export function OrchestratorChat() {
   const setComposerWorkspaceDraft = useAppStore((s) => s.setComposerWorkspaceDraft)
   const workspace = composerWorkspaceFor(workspaceDraft, activeThread)
   const localName = useAppStore((s) => localDeviceName(s.appInfo?.deviceName))
-  const { devices: runOnDevices, refresh: refreshRunOnDevices } = useRunOnDevices()
+  const { devices: runOnDevices, notSharing, refresh: refreshRunOnDevices } = useRunOnDevices()
   const pickedDeviceName = runOnLabel(localName, runOnDevices, workspace.node)
   // Shared with quick actions and the side card, which also prepare or edit the new chat's workspace.
   const workspacePending = useAppStore(isWorkspacePending)
@@ -259,6 +261,10 @@ export function OrchestratorChat() {
   const uiMessages = useMemo(() => mousseToUIMessages(messages), [messages])
   // The older images of a long thread of another computer come by name; their bytes are fetched as the thread is shown.
   const shownRemote = Boolean(activeThread?.node)
+  // Opening a thread (also Retry, which opens it again) asks again for images that could not be fetched before.
+  useEffect(() => {
+    if (activeThreadId) forgetMessageImageRequests(activeThreadId)
+  }, [activeThreadId, activeThread?.offline])
   useEffect(() => {
     if (shownRemote && activeThreadId) void hydrateMessageImages(activeThreadId)
   }, [shownRemote, activeThreadId, messages.length])
@@ -631,7 +637,9 @@ export function OrchestratorChat() {
       content: string,
       mode = chatMode,
       images?: Awaited<ReturnType<typeof filesToImagePayloads>>,
-      targetThreadId = activeThreadId
+      targetThreadId = activeThreadId,
+      /** Puts the staged text, files and references back, for a message that turns out not to have arrived. */
+      onUnsent?: () => void
     ) => {
       if (!content && !(images && images.length)) return
 
@@ -653,6 +661,8 @@ export function OrchestratorChat() {
       }
       // Paint an ordinary send before IPC/disk/provider work. The App event handler swaps this
       // row for the durable message by matching its content; stale hydration snapshots retain it.
+      // The messages the transcript had before this one, to tell it from an identical one sent earlier.
+      const seenBefore = new Set(useAppStore.getState().messages.map((message) => message.id))
       const optimisticMessageId = !loading && targetThreadId
         ? `optimistic:${crypto.randomUUID()}`
         : null
@@ -736,6 +746,34 @@ export function OrchestratorChat() {
       } catch (error) {
         if (!stillVisible()) return
         setSendError(sendErrorLine(error))
+        if (isOutcomeUncertain(error) && targetThreadId) {
+          // The other computer did not confirm: the message may be there. Keep what is shown, read the thread again,
+          // and only then say whether it arrived. Sending the same text again replays this request, so it cannot run twice.
+          const thread = targetThreadId
+          void settleUncertainSend({
+            refresh: () => window.mousse.threads.select(thread),
+            arrived: async () => {
+              if (optimisticQueueId) return (await window.mousse.queue.list(thread)).some((item) => item.content === request.content)
+              return useAppStore.getState().messages.some((message) =>
+                message.role === 'user' && !message.id.startsWith('optimistic:') && !seenBefore.has(message.id) && message.content === request.content)
+            },
+            dropOptimistic: () => {
+              if (optimisticQueueId) setOptimisticQueueItems((current) => current.filter((item) => item.id !== optimisticQueueId))
+              if (optimisticMessageId) {
+                const messagesNow = useAppStore.getState().messages
+                useAppStore.getState().setMessages(messagesNow.filter((message) => message.id !== optimisticMessageId))
+              }
+            }
+          }).then((outcome) => {
+            if (!stillVisible()) return
+            if (outcome === 'missing') {
+              setSendError(`${sendErrorLine(error)} It did not arrive, so it is back in the composer.`)
+              setInput((current) => current || extractChatReferences(content).text)
+              onUnsent?.()
+            } else if (outcome === 'arrived') setSendError(null)
+          })
+          return 'uncertain' as const
+        }
         setInput((current) => current || extractChatReferences(content).text)
         if (optimisticQueueId) {
           setOptimisticQueueItems((current) => current.filter((item) => item.id !== optimisticQueueId))
@@ -888,14 +926,18 @@ export function OrchestratorChat() {
     // Thread preparation is complete. The send promise lasts for the entire
     // first turn, so it must not keep typing, queueing, or Stop disabled.
     releaseWorkspacePending()
-    const sent = await sendMessage(text, skillMode ?? chatMode, images, targetThreadId)
-    if (sent === false && stillVisible()) {
+    const restoreUnsent = () => {
       setInput((current) => current === text || !current ? input : current)
       setAttachedFiles((current) => [...attachedFiles, ...current])
       setVoiceMessages((current) => [...voiceMessages, ...current])
       browserElements.forEach((element) => useAppStore.getState().addBrowserElementAttachment(targetThreadId, element))
       resolvedReferences.forEach((reference) => useAppStore.getState().addComposerReference(targetThreadId, reference))
-    } else {
+    }
+    const sent = await sendMessage(text, skillMode ?? chatMode, images, targetThreadId, restoreUnsent)
+    if (sent === false && stillVisible()) {
+      restoreUnsent()
+    } else if (sent !== 'uncertain') {
+      // An unconfirmed send keeps its files: they come back with the text if it did not arrive.
       releaseComposerUrls()
     }
     } catch (error) {
@@ -980,7 +1022,8 @@ export function OrchestratorChat() {
 
   // Applies from the next turn; a running turn and a pending approval keep what they were asked under.
   const handlePermissionSelect = async (mode: PermissionMode) => {
-    if (!activeThreadId) {
+    // A chat for another computer has no thread there yet: the pick waits with the draft, and goes to the new thread.
+    if (!activeThreadId || remoteDraft) {
       setBlankPermissionMode(mode)
       return
     }
@@ -995,6 +1038,20 @@ export function OrchestratorChat() {
       setSendError(sendErrorLine(error))
     }
   }
+
+  // A thread of another computer runs in that computer's default mode unless it has its own, and never above what
+  // that computer lets this device have: show that, not this computer's default.
+  const remoteComputer = useComputer(remoteNode)
+  const remoteMode = remoteNode
+    ? remotePermissionView({
+        threadMode: remoteDraft ? blankPermissionMode : activeThread?.permissionMode,
+        permission: remoteOptions.loaded ? remoteOptions.permission : undefined
+      })
+    : undefined
+  const shownPermissionMode = remoteMode ? remoteMode.mode : permissionMode
+  const shownCeiling = remoteMode
+    ? remotePermissionCeiling(activeThread?.lineage ? permissionCeiling : undefined, remoteMode.limit, remoteComputer?.name ?? UNKNOWN_COMPUTER_NAME)
+    : { ceiling: activeThread?.lineage ? permissionCeiling : undefined }
 
   const emptyThread = uiMessages.length === 0 && !turnActive && !loading && !showQuestions && !sendError && !connectionFailed
 
@@ -1137,6 +1194,7 @@ export function OrchestratorChat() {
                 device={{
                   localName,
                   devices: runOnDevices,
+                  notSharing,
                   onRefresh: refreshRunOnDevices,
                   onSelect: (node) => void selectRunOnDevice(node),
                   onOpenRemoteProject: openProjectOnRunOnDevice
@@ -1184,7 +1242,7 @@ export function OrchestratorChat() {
               banner={<SubagentComposerBanner threadId={activeThreadId} />}
               searchMentions={searchMentions}
               mentionScope={mentionScope}
-              permission={{ mode: permissionMode, ceiling: activeThread?.lineage ? permissionCeiling : undefined, onSelect: (mode) => void handlePermissionSelect(mode) }}
+              permission={{ mode: shownPermissionMode, ceiling: shownCeiling.ceiling, ceilingReason: shownCeiling.reason, onSelect: (mode) => void handlePermissionSelect(mode) }}
 
             />
           </div>

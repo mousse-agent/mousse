@@ -25,9 +25,11 @@ export interface ComputersState {
   /** Threads of other computers are listed and routed (`netBridge` and `netBridgeThreads`). */
   routed: boolean
   byNode: Readonly<Record<string, Computer>>
+  /** The devices as `bridge.nodes` lists them (this computer too, with the capabilities it holds); none while not routed. */
+  devices: readonly Device[]
 }
 
-export const NO_COMPUTERS: ComputersState = { loaded: false, routed: false, byNode: {} }
+export const NO_COMPUTERS: ComputersState = { loaded: false, routed: false, byNode: {}, devices: [] }
 
 export const useComputersStore = create<ComputersState>(() => NO_COMPUTERS)
 
@@ -50,6 +52,16 @@ export function computersFrom(devices: readonly Device[]): Record<string, Comput
     }
   }
   return byNode
+}
+
+/**
+ * The computers that stopped sharing their threads with this one (they turned the switch off, or blocked this
+ * computer): their rows are marked `notShared`. A new chat cannot be created there, whatever the grants say.
+ */
+export function notSharingNodes(rows: ReadonlyArray<{ node?: string; notShared?: true }>): Set<string> {
+  const stopped = new Set<string>()
+  for (const row of rows) if (row.node && row.notShared) stopped.add(row.node)
+  return stopped
 }
 
 /** What a thread row says about the computer it runs on: connected, not connected, or no longer sharing. */
@@ -98,7 +110,7 @@ export function refreshComputers(): Promise<void> {
       const nodes = listed ? (await request<{ nodes: Device[] }>('bridge.nodes', {})).nodes : []
       // A profile switch during the read: the answer is for the other profile.
       if (useAppStore.getState().profileId !== profile) return
-      useComputersStore.setState({ loaded: true, routed, byNode: computersFrom(nodes) })
+      useComputersStore.setState({ loaded: true, routed, byNode: computersFrom(nodes), devices: nodes })
     } catch {
       // Without an answer the last list stays; a window with Net off has none to begin with.
       if (useAppStore.getState().profileId === profile && !useComputersStore.getState().loaded)

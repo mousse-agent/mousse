@@ -1171,7 +1171,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
                       )}
 
-                      <ThreadComputerBadge thread={project} className="threads-sidebar-device-icon" />
+                      <ThreadComputerBadge thread={project} withName of="project" className="threads-sidebar-project-computer" />
 
                     </button>
 

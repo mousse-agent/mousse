@@ -161,3 +161,14 @@ describe('a computer that is away', () => {
     expect(isComputerOffline(undefined)).toBe(false)
   })
 })
+
+describe('the computer a project is on', () => {
+  it('is named "On <computer>", not "Runs on", and keeps the offline wording', () => {
+    expect(computerBadgeTitle('Studio', 'online', 'Offline', 'project')).toBe('On Studio')
+    expect(computerBadgeTitle('Studio', 'offline', 'Offline · last seen 5m ago', 'project')).toBe('On Studio · Offline · last seen 5m ago')
+    expect(computerBadgeTitle('Studio', 'online')).toBe('Runs on Studio')
+    const row = html(createElement(ThreadComputerBadge, { thread: { node: 'nod_unknown' }, withName: true, of: 'project' }))
+    expect(row).toContain('title="On Another computer"')
+    expect(row).toContain('computer-badge-name">Another computer<')
+  })
+})

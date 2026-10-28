@@ -58,24 +58,40 @@ export function runOnLabel(localName: string, devices: readonly Device[], node: 
   return node ? deviceForNode(devices, node)?.name ?? 'Unavailable computer' : localName
 }
 
-/** Why a connected computer cannot be picked: the grant to work on its threads is not there. */
-export const WORKS_ON_THREADS_OFF = 'Works on threads is off for this computer. Turn it on in Settings, Devices.'
+/**
+ * Why no other computer can be picked: routing asks for this computer's own grant to work on threads, which only the
+ * computer that manages the user's devices can give. The other computers are not asked to grant anything.
+ */
+export function thisComputerLacksGrant(localName: string): string {
+  return `${localName} cannot work on threads on other computers yet. Turn on Works on threads for ${localName} in Settings, Devices, on the computer that manages your devices.`
+}
+
+/** Why a computer that stopped sharing cannot be picked: its owner switch is off, or it blocked this computer. */
+export function notSharingReason(name: string): string {
+  return `${name} is not sharing its threads with this computer. Turn on "Let my other computers work on this computer's threads" on ${name}, in Settings, Devices, or unblock this computer there.`
+}
 
 /** The Run on rows: this computer first, then each connected computer, with the picked one active. */
 export function buildRunOnOptions(input: {
   localName: string
   devices: readonly Device[]
   node?: NodeId
+  /** Computers whose rows say they stopped sharing their threads with this one. */
+  notSharing?: ReadonlySet<string>
 }): RunOnOption[] {
   const remote = connectedRemoteDevices(input.devices)
+  // Routing checks the caller's own grant (this computer's row of `bridge.nodes`); a list without this row is from an older daemon.
+  const self = input.devices.find((device) => device.self)
+  const granted = !self || worksOnThreads(self)
   return [
     { id: LOCAL_RUN_ON_ID, name: input.localName, active: !input.node, disabled: false },
     ...remote.map((device): RunOnOption => {
       const active = device.node === input.node
-      // A chat is created and written to through the grant; without it the computer is named, not offered.
-      return worksOnThreads(device) || active
-        ? { id: device.node, name: device.name, active, disabled: false }
-        : { id: device.node, name: device.name, active, disabled: true, reason: WORKS_ON_THREADS_OFF }
+      // A pick that is already made stays, so a person can see where the chat runs and leave it.
+      if (active) return { id: device.node, name: device.name, active, disabled: false }
+      if (!granted) return { id: device.node, name: device.name, active, disabled: true, reason: thisComputerLacksGrant(input.localName) }
+      if (input.notSharing?.has(device.node)) return { id: device.node, name: device.name, active, disabled: true, reason: notSharingReason(device.name) }
+      return { id: device.node, name: device.name, active, disabled: false }
     })
   ]
 }
@@ -119,13 +135,14 @@ export function buildDeviceMenu(input: {
   localName: string
   devices: readonly Device[]
   workspace: ComposerWorkspace
+  notSharing?: ReadonlySet<string>
 }): DeviceMenuModel {
   const hasProject = Boolean(input.workspace.projectId)
   const choice = activeWorkspaceChoice(input.workspace)
   const noProject = hasProject ? undefined : 'Needs a project'
   return {
     runOn: canPickComputer(input.devices, input.workspace.node)
-      ? buildRunOnOptions({ localName: input.localName, devices: input.devices, node: input.workspace.node })
+      ? buildRunOnOptions({ localName: input.localName, devices: input.devices, node: input.workspace.node, notSharing: input.notSharing })
       : null,
     workspace: [
       { id: 'checkout', label: 'Current checkout', active: choice === 'checkout', disabled: !hasProject, reason: noProject },

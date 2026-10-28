@@ -1,5 +1,6 @@
 import { useEffect, useId, useRef, useState, type FormEvent } from 'react'
 import { Modal } from '../ui/Modal'
+import { PAIRING_DISCLOSURE } from '../../lib/netDevices'
 import { CommandLine, SetupSteps, UndoReport } from './SshParts'
 import { HostKeyConfirm, canTrustHostKey } from './HostKeyConfirm'
 import { errorText, useDaemonCall } from './useDaemonCall'
@@ -190,6 +191,7 @@ export function AddSshDeviceDialog({ open, onClose, onDone, setupId }: {
         {!setup && (
           <form id={`${id}-host`} className="devices-dialog" onSubmit={submit}>
             <p className="settings-muted">Mousse connects over SSH, shows what it will install, and sets it up after you agree. It never asks for a password.</p>
+            <p className="settings-muted">{PAIRING_DISCLOSURE}</p>
             <label className="devices-field">
               <span>Host or SSH config alias</span>
               <input value={host} autoFocus spellCheck={false} placeholder="me@build-box" disabled={busy} onChange={(event) => editHost(event.target.value)} />
@@ -226,6 +228,7 @@ export function AddSshDeviceDialog({ open, onClose, onDone, setupId }: {
         {!setup && plan && (
           <div className="devices-dialog">
             <p><strong>What setup will do</strong></p>
+            <p className="settings-muted">{PAIRING_DISCLOSURE}</p>
             <ol className="devices-plan" aria-label="Setup plan">
               {plan.steps.map((step) => (
                 <li key={step.id}>

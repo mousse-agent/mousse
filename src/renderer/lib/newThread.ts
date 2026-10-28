@@ -74,7 +74,7 @@ export function workspaceOnThisComputer(
 
 /**
  * The draft after picking another computer. `projectId` is that computer's project for the same
- * repository (found by `bridge.hub.matchProject`), or none. The project the draft had on this
+ * repository (its row says so: `sameAs`), or none. The project the draft had on this
  * computer is kept, so going back restores it.
  */
 export function workspaceOnOtherComputer(

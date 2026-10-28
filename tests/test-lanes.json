@@ -125,7 +125,6 @@
     "tests/chatUndoFullShell.test.ts",
     "tests/errorElectronBridge.test.ts",
     "tests/gitFoundationFullShell.test.ts",
-    "tests/net/bridge/gui-electron-display.test.ts",
     "tests/net/chats/gui-electron.test.ts",
     "tests/net/chats/gui-renderer-lifecycle.test.ts",
     "tests/platformBrowserArtifactPipeline.test.ts",

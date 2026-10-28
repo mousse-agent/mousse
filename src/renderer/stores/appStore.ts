@@ -274,8 +274,28 @@ export function sortMessagesDeterministic(messages: ChatMessage[]): ChatMessage[
   })
 }
 
+/**
+ * The incoming message with the image bytes this window already fetched. A thread of another computer sends its
+ * older images by name and type; a later snapshot (Retry, a reconnect, reopening the thread) must not take them away.
+ */
+function keepFetchedImages(current: ChatMessage, incoming: ChatMessage): ChatMessage {
+  if (!incoming.images?.length || !current.images?.length) return incoming
+  let changed = false
+  const images = incoming.images.map((image, index) => {
+    const had = current.images![index]
+    if (image.data || !had?.data || had.name !== image.name) return image
+    changed = true
+    return { ...image, data: had.data }
+  })
+  return changed ? { ...incoming, images } : incoming
+}
+
 /** Prefer the message version that cannot regress visible streaming progress. */
 function newerMessageVersion(current: ChatMessage, incoming: ChatMessage): ChatMessage {
+  return keepFetchedImages(current, chooseMessageVersion(current, incoming))
+}
+
+function chooseMessageVersion(current: ChatMessage, incoming: ChatMessage): ChatMessage {
   // A delayed initial event/snapshot must not roll a completed stream back to its placeholder.
   if (!current.streaming && incoming.streaming) return current
   // While both versions stream, snapshots can lag behind token events. Content is append-only.

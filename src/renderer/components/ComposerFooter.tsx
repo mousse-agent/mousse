@@ -69,8 +69,10 @@ export interface ComposerFooterProps {
   /** The thread's permission mode and how to change it; without it the footer has no such control. */
   permission?: {
     mode: PermissionMode
-    /** A subagent's lineage ceiling. */
+    /** The most the picker offers: a subagent's lineage ceiling, or the limit a thread's computer gives this device. */
     ceiling?: PermissionMode
+    /** Why nothing above `ceiling` is offered, when it is not a lineage. */
+    ceilingReason?: string
     onSelect: (mode: PermissionMode) => void
   }
 }
@@ -245,6 +247,7 @@ export function ComposerFooter({
           caps={selectedProvider?.caps}
           limits={selectedProvider?.permissionLimits}
           ceiling={permission.ceiling}
+          ceilingReason={permission.ceilingReason}
           onSelect={permission.onSelect}
         />}
       </div>

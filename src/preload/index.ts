@@ -1,7 +1,6 @@
 import type { AppletApi, AppletUiEvent } from '../shared/appletRuntime'
 import { contextBridge, ipcRenderer } from 'electron'
 import { readStartupAppearanceArgument } from '../shared/startupAppearance'
-import type { BridgeDisplayPart } from '../shared/bridge'
 import type { NetStatus } from '../shared/net/local'
 import type { CommandId } from '../shared/commands'
 import type { LocalTtsModelId, LocalTtsModelStatus, ProviderSpeechRequest, ProviderSpeechResult } from '../shared/readAloud'
@@ -175,14 +174,6 @@ const api = {
   /** Bounded profile-aware bridge for new platform feature clients. */
   platformRequest: {
     request: platformRequest
-  },
-  bridge: {
-    /** Parts belong to this window's authenticated profile connection. */
-    onThreadPart: (callback: (part: BridgeDisplayPart) => void): (() => void) => {
-      const handler = (_event: Electron.IpcRendererEvent, part: BridgeDisplayPart) => callback(part)
-      ipcRenderer.on('bridge:thread-part', handler)
-      return () => { ipcRenderer.removeListener('bridge:thread-part', handler) }
-    }
   },
   chatReferences: {
     resolve: (reference: ChatReference): Promise<ChatReference | null> =>
@@ -715,9 +706,6 @@ const api = {
   projects: {
     list: (): Promise<Project[]> => ipcRenderer.invoke('projects:list'),
     open: (): Promise<Project | null> => ipcRenderer.invoke('projects:open'),
-    /** The Git identity of a project, or null when it is not a Git repository. */
-    identity: (projectId: string): Promise<{ roots: string[]; remotes: string[] } | null> =>
-      ipcRenderer.invoke('projects:identity', projectId),
     remove: (projectId: string): Promise<void> =>
       ipcRenderer.invoke('projects:remove', projectId),
     rename: (projectId: string, name: string): Promise<Project> =>
