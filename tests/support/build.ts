@@ -41,7 +41,7 @@ const CONFIG_FILES = [
   'scripts/build-net-native-reader.mjs',
   'tests/support/build.ts'
 ]
-const SOURCE_ROOTS = ['src', 'node_modules/pi-cursor-sdk/src']
+const SOURCE_ROOTS = ['src']
 
 const sha256 = (input: Buffer | string) => createHash('sha256').update(input).digest('hex')
 const fileDigest = (path: string) => sha256(readFileSync(path))

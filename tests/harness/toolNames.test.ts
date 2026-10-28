@@ -11,7 +11,7 @@ import { CLAUDE_NATIVE_TOOLS } from '../../src/mms/harness/drivers/claudeCode'
 import { PI_NATIVE_TOOLS, piDriver, type PiRpcDriverOptions } from '../../src/mms/harness/drivers/pi'
 import { mapNeutralTools } from '../../src/mms/harness/policy'
 import { ProviderInstanceService } from '../../src/mms/providers/ProviderInstanceService'
-import { PiLoopAdapter } from '../../src/mms/run/adapters/pi/PiLoopAdapter'
+import { PiStubAdapter } from '../support/piStub'
 import { adapterDriver, testHarness } from '../../src/mms/run/testkit/harness'
 import { isNeutralTool, NEUTRAL_TOOLS, neutralToolIdempotent, type NeutralTool } from '../../src/shared/harness/tools'
 
@@ -41,15 +41,15 @@ describe('neutral tool names', () => {
     expect(mapNeutralTools(undefined, [])).toEqual({ ok: true, names: [] })
   })
 
-  it('maps Pi\'s tools on its RPC engine only: the legacy loop runs Mousse\'s own tools', () => {
-    const driver = piDriver({ client: () => ({ chat: async () => { throw new Error('unused') } }), rpc: {} as PiRpcDriverOptions })
-    expect(driver.nativeToolNames!('search', { home: 'private', engine: 'rpc' })).toEqual(['find', 'grep'])
-    expect(driver.nativeToolNames!('search', { home: 'default' })).toEqual([])
-    expect(driver.nativeToolNames!('web_fetch', { home: 'private', engine: 'rpc' })).toEqual([])
+  it('maps Pi\'s tools where this build has Pi\'s runtime, and none without it', () => {
+    const driver = piDriver({ rpc: {} as PiRpcDriverOptions })
+    expect(driver.nativeToolNames!('search', { home: 'private' })).toEqual(['find', 'grep'])
+    expect(driver.nativeToolNames!('web_fetch', { home: 'private' })).toEqual([])
+    expect(piDriver().nativeToolNames!('search', { home: 'private' })).toEqual([])
   })
 
   it('the gateway refuses a tool the instance has no name for with policy_unenforceable', () => {
-    const pi = new PiLoopAdapter(() => ({ chat: async () => { throw new Error('unused') } }))
+    const pi = new PiStubAdapter()
     const driver = { ...adapterDriver(pi), nativeToolNames: (neutral: NeutralTool) => PI_NATIVE_TOOLS[neutral] ?? [] }
     const instances = new ProviderInstanceService({
       store: { read: () => ({ instances: undefined }), write: () => {} },

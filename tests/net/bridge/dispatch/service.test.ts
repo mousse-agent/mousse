@@ -1,7 +1,7 @@
 import { afterEach, expect, it, vi } from 'vitest'
 import { createHash } from 'node:crypto'
 import { mkdtemp, mkdir, writeFile, readFile, realpath, rm, stat } from 'node:fs/promises'
-import { join, resolve } from 'node:path'
+import { join } from 'node:path'
 import { devNull, tmpdir } from 'node:os'
 import { fork } from 'node:child_process'
 import { once } from 'node:events'
@@ -760,18 +760,6 @@ it.each(['preparing', 'running'] as const)(
       packages: 'external',
       platform: 'node',
       format: 'esm',
-      plugins: [
-        {
-          name: 'omit-unused-provider-bootstrap',
-          setup: (builder) => {
-            // ThreadDataStore imports the real snapshot parser; its unused model runner is not part of this crash worker.
-            builder.onResolve({ filter: /orchestrator\/LlmClient$/ }, (args) => ({
-              path: resolve(args.resolveDir, `${args.path}.ts`),
-              sideEffects: false
-            }))
-          }
-        }
-      ],
       banner: {
         js: "import { createRequire as dispatchTestRequire } from 'node:module'; const require = dispatchTestRequire(import.meta.url); const __dirname = process.cwd();"
       },

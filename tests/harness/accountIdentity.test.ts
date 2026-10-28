@@ -12,7 +12,7 @@ import { UserQuestionService } from '../../src/mms/orchestrator/UserQuestionServ
 import { claudeAccountSubject } from '../../src/mms/providers/claudeSubscription/accountSubject'
 import { CodexProviderService } from '../../src/mms/providers/codex/CodexProviderService'
 import { ProviderInstanceService } from '../../src/mms/providers/ProviderInstanceService'
-import { PiLoopAdapter } from '../../src/mms/run/adapters/pi/PiLoopAdapter'
+import { PiStubAdapter } from '../support/piStub'
 import { adapterDriver, testHarness } from '../../src/mms/run/testkit/harness'
 
 const homes: string[] = []
@@ -156,7 +156,7 @@ describe('gateway account state', () => {
     expect(first.accountIdentity('default', 'user-a')).not.toBe(second.accountIdentity('default', 'user-a'))
 
     let subject = 'claude.ai:user-a:org-1'
-    const adapter = new PiLoopAdapter(() => ({ chat: async () => { throw new Error('unused') } }))
+    const adapter = new PiStubAdapter()
     const claude = adapterDriver({ ...adapter, driver: 'claude', startTurn: adapter.startTurn.bind(adapter), interrupt: adapter.interrupt.bind(adapter) }, {
       runtime: { auth: async () => ({ state: 'signed_in', account: { label: 'Claude Max' }, subject }), forgetConversation: () => {} }
     })

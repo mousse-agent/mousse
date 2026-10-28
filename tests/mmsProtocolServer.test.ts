@@ -10,46 +10,15 @@ import { EventSequenceRing } from '../src/mms/protocol/eventRing'
 import { encodeFrame, FrameDecoder } from '../src/mms/protocol/framing'
 import { MMS_PROTOCOL_VERSION } from '../src/mms/protocol/types'
 import { parseEnvelope, validateHello, asChatMode, asChatImages, asStringArray } from '../src/mms/protocol/validators'
+import { scriptTurns } from './net/bridge/hub/fixture'
 
-function mockLlm(mms: MousseMainService, chatImpl?: () => Promise<unknown>): void {
-  const llm = (
-    mms.orchestrator as unknown as {
-      llm: {
-        getSelectedModelContextLimit: () => { limit: number }
-        getContextInputs: () => Promise<unknown>
-        chat: () => Promise<unknown>
-      }
-    }
-  ).llm
-  const contextInputs = {
-    systemPromptText: '',
-    mcpToolsText: '',
-    otherToolsText: '',
-    signature: 'proto'
-  }
-  vi.spyOn(llm, 'getSelectedModelContextLimit').mockReturnValue({ limit: 100_000 })
-  vi.spyOn(llm, 'getContextInputs').mockResolvedValue(contextInputs)
-  vi.spyOn(llm, 'chat').mockImplementation(async () => {
+/** Turns run on a scripted pi adapter that answers with `chatImpl` (or a short default reply). */
+function mockLlm(mms: MousseMainService, chatImpl?: () => Promise<string>): void {
+  mms.settings.set({ provider: { llmProvider: 'openai', model: 'test' } })
+  scriptTurns(mms, async () => {
     if (chatImpl) return chatImpl()
     await new Promise((r) => setTimeout(r, 20))
-    return {
-      text: 'assistant-ok',
-      usage: {
-        input: 1,
-        output: 1,
-        cacheRead: 0,
-        cacheWrite: 0,
-        totalTokens: 2,
-        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }
-      },
-      modelName: 'test',
-      totalResponseTimeMs: 1,
-      totalTokensUsed: 2,
-      tokensPerSecond: 1,
-      contextInputs,
-      toolEvents: [],
-      nativeMessages: []
-    }
+    return 'assistant-ok'
   })
 }
 
@@ -187,29 +156,7 @@ describe('MmsProtocolServer + LocalMmsClient', () => {
       await new Promise<void>((r) => {
         releaseChat = r
       })
-      return {
-        text: 'long-send-done',
-        usage: {
-          input: 1,
-          output: 1,
-          cacheRead: 0,
-          cacheWrite: 0,
-          totalTokens: 2,
-          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }
-        },
-        modelName: 'test',
-        totalResponseTimeMs: 1,
-        totalTokensUsed: 2,
-        tokensPerSecond: 1,
-        contextInputs: {
-          systemPromptText: '',
-          mcpToolsText: '',
-          otherToolsText: '',
-          signature: 'x'
-        },
-        toolEvents: [],
-        nativeMessages: []
-      }
+      return 'long-send-done'
     })
 
     const client = new LocalMmsClient({
@@ -264,29 +211,7 @@ describe('MmsProtocolServer + LocalMmsClient', () => {
       await new Promise<void>((r) => {
         releaseChat = r
       })
-      return {
-        text: 'dup-ok',
-        usage: {
-          input: 1,
-          output: 1,
-          cacheRead: 0,
-          cacheWrite: 0,
-          totalTokens: 2,
-          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }
-        },
-        modelName: 'test',
-        totalResponseTimeMs: 1,
-        totalTokensUsed: 2,
-        tokensPerSecond: 1,
-        contextInputs: {
-          systemPromptText: '',
-          mcpToolsText: '',
-          otherToolsText: '',
-          signature: 'x'
-        },
-        toolEvents: [],
-        nativeMessages: []
-      }
+      return 'dup-ok'
     })
 
     const thread = mms.threads.createThread('Dup')
@@ -668,29 +593,7 @@ describe('MmsProtocolServer + LocalMmsClient', () => {
       await new Promise<void>((r) => {
         resolveChat = r
       })
-      return {
-        text: 'completed-after-disconnect',
-        usage: {
-          input: 1,
-          output: 1,
-          cacheRead: 0,
-          cacheWrite: 0,
-          totalTokens: 2,
-          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }
-        },
-        modelName: 'test',
-        totalResponseTimeMs: 1,
-        totalTokensUsed: 2,
-        tokensPerSecond: 1,
-        contextInputs: {
-          systemPromptText: '',
-          mcpToolsText: '',
-          otherToolsText: '',
-          signature: 'x'
-        },
-        toolEvents: [],
-        nativeMessages: []
-      }
+      return 'completed-after-disconnect'
     })
 
     const client = new LocalMmsClient({
@@ -858,29 +761,7 @@ describe('MmsProtocolServer + LocalMmsClient', () => {
       await new Promise<void>((r) => {
         release = r
       })
-      return {
-        text: 'snap-ok',
-        usage: {
-          input: 1,
-          output: 1,
-          cacheRead: 0,
-          cacheWrite: 0,
-          totalTokens: 2,
-          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }
-        },
-        modelName: 'test',
-        totalResponseTimeMs: 1,
-        totalTokensUsed: 2,
-        tokensPerSecond: 1,
-        contextInputs: {
-          systemPromptText: '',
-          mcpToolsText: '',
-          otherToolsText: '',
-          signature: 'x'
-        },
-        toolEvents: [],
-        nativeMessages: []
-      }
+      return 'snap-ok'
     })
 
     const client2 = new LocalMmsClient({

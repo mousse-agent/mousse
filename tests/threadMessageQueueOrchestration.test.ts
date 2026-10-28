@@ -12,7 +12,8 @@ import {
   reclaimAbandonedClaimsDurable
 } from '../src/mms/queue/durableQueue'
 import { OrchestratorService } from '../src/mms/orchestrator/OrchestratorService'
-import { createOrchestrator } from './run/phase6Fixture'
+import { createOrchestrator, piAdapter } from './run/phase6Fixture'
+import { testHarness } from '../src/mms/run/testkit/harness'
 import { getExecutionLeasePath } from '../src/mms/queue/ThreadExecutionLease'
 
 describe('OrchestratorService concurrent threads and queue', () => {
@@ -26,6 +27,11 @@ describe('OrchestratorService concurrent threads and queue', () => {
     store = new ThreadDataStore(new ProjectManager())
     orch = createOrchestrator(home, store)
   })
+
+  /** Turns run on a scripted pi adapter; `reply` answers each. */
+  function scriptTurns(reply: () => Promise<string> | string): void {
+    orch.setHarness(testHarness({ adapters: [piAdapter(reply)], profileHome: home }))
+  }
 
   afterEach(() => {
     rmSync(home, { recursive: true, force: true })
@@ -205,39 +211,8 @@ describe('OrchestratorService concurrent threads and queue', () => {
   it('holds the execution lease through final transcript persistence', async () => {
     const thread = store.createThread('Lease lifetime')
     orch.bindThread(thread.id, [], undefined, [])
-    const contextInputs = {
-      systemPromptText: '',
-      mcpToolsText: '',
-      otherToolsText: '',
-      signature: 'test'
-    }
-    const llm = (orch as unknown as {
-      llm: {
-        getSelectedModelContextLimit: () => { limit: number }
-        getContextInputs: () => Promise<typeof contextInputs>
-        chat: (...args: unknown[]) => Promise<unknown>
-      }
-    }).llm
-    vi.spyOn(llm, 'getSelectedModelContextLimit').mockReturnValue({ limit: 100_000 })
-    vi.spyOn(llm, 'getContextInputs').mockResolvedValue(contextInputs)
-    const chatSpy = vi.spyOn(llm, 'chat').mockResolvedValue({
-      text: 'complete',
-      usage: {
-        input: 1,
-        output: 1,
-        cacheRead: 0,
-        cacheWrite: 0,
-        totalTokens: 2,
-        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }
-      },
-      modelName: 'test',
-      totalResponseTimeMs: 1,
-      totalTokensUsed: 2,
-      tokensPerSecond: 1,
-      contextInputs,
-      toolEvents: [],
-      nativeMessages: []
-    })
+    let chatCalls = 0
+    scriptTurns(() => { chatCalls += 1; return 'complete' })
 
     const leasePath = getExecutionLeasePath(store.getThreadDir(thread.id))
     const persistedWithLease: boolean[] = []
@@ -248,12 +223,7 @@ describe('OrchestratorService concurrent threads and queue', () => {
     expect(persistedWithLease.length).toBeGreaterThan(0)
     expect(persistedWithLease.every(Boolean)).toBe(true)
     expect(existsSync(leasePath)).toBe(false)
-    expect(chatSpy.mock.calls[0]?.[2]).toMatchObject({
-      toolLoopSafety: {
-        compactNativeMessages: expect.any(Function)
-      }
-    })
-    expect(chatSpy.mock.calls[0]?.[2]?.toolLoopSafety?.compactionThresholdTokens).toBe(100_000)
+    expect(chatCalls).toBe(1)
   })
 
   it('queue drain claims FIFO and emits diagnostics instead of system messages on failure', async () => {
@@ -317,39 +287,7 @@ describe('OrchestratorService concurrent threads and queue', () => {
     const thread = store.createThread('Post-accept complete fail')
     orch.bindThread(thread.id, [], undefined, [])
 
-    const contextInputs = {
-      systemPromptText: '',
-      mcpToolsText: '',
-      otherToolsText: '',
-      signature: 'post-accept'
-    }
-    const llm = (orch as unknown as {
-      llm: {
-        getSelectedModelContextLimit: () => { limit: number }
-        getContextInputs: () => Promise<typeof contextInputs>
-        chat: () => Promise<unknown>
-      }
-    }).llm
-    vi.spyOn(llm, 'getSelectedModelContextLimit').mockReturnValue({ limit: 100_000 })
-    vi.spyOn(llm, 'getContextInputs').mockResolvedValue(contextInputs)
-    vi.spyOn(llm, 'chat').mockResolvedValue({
-      text: 'ok',
-      usage: {
-        input: 1,
-        output: 1,
-        cacheRead: 0,
-        cacheWrite: 0,
-        totalTokens: 2,
-        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }
-      },
-      modelName: 'test',
-      totalResponseTimeMs: 1,
-      totalTokensUsed: 2,
-      tokensPerSecond: 1,
-      contextInputs,
-      toolEvents: [],
-      nativeMessages: []
-    })
+    scriptTurns(() => 'ok')
 
     // Real transcript acceptance via persist; then fail the subsequent queue complete write.
     let blockCompleteWrite = false
@@ -424,39 +362,7 @@ describe('OrchestratorService concurrent threads and queue', () => {
       ownerToken: 'abandoned-startup'
     })
 
-    const llm = (orch as unknown as {
-      llm: {
-        getSelectedModelContextLimit: () => { limit: number }
-        getContextInputs: () => Promise<unknown>
-        chat: () => Promise<unknown>
-      }
-    }).llm
-    const contextInputs = {
-      systemPromptText: '',
-      mcpToolsText: '',
-      otherToolsText: '',
-      signature: 'startup'
-    }
-    vi.spyOn(llm, 'getSelectedModelContextLimit').mockReturnValue({ limit: 100_000 })
-    vi.spyOn(llm, 'getContextInputs').mockResolvedValue(contextInputs)
-    vi.spyOn(llm, 'chat').mockResolvedValue({
-      text: 'ok',
-      usage: {
-        input: 1,
-        output: 1,
-        cacheRead: 0,
-        cacheWrite: 0,
-        totalTokens: 2,
-        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }
-      },
-      modelName: 'test',
-      totalResponseTimeMs: 1,
-      totalTokensUsed: 2,
-      tokensPerSecond: 1,
-      contextInputs,
-      toolEvents: [],
-      nativeMessages: []
-    })
+    scriptTurns(() => 'ok')
     orch.setPersistCallback((threadId) => {
       const id = threadId ?? thread.id
       const existing = store.loadThreadData(id)
@@ -494,39 +400,7 @@ describe('OrchestratorService concurrent threads and queue', () => {
       'utf-8'
     )
 
-    const llm = (orch as unknown as {
-      llm: {
-        getSelectedModelContextLimit: () => { limit: number }
-        getContextInputs: () => Promise<unknown>
-        chat: () => Promise<unknown>
-      }
-    }).llm
-    const contextInputs = {
-      systemPromptText: '',
-      mcpToolsText: '',
-      otherToolsText: '',
-      signature: 'ghost'
-    }
-    vi.spyOn(llm, 'getSelectedModelContextLimit').mockReturnValue({ limit: 100_000 })
-    vi.spyOn(llm, 'getContextInputs').mockResolvedValue(contextInputs)
-    vi.spyOn(llm, 'chat').mockResolvedValue({
-      text: 'recovered-ok',
-      usage: {
-        input: 1,
-        output: 1,
-        cacheRead: 0,
-        cacheWrite: 0,
-        totalTokens: 2,
-        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }
-      },
-      modelName: 'test',
-      totalResponseTimeMs: 1,
-      totalTokensUsed: 2,
-      tokensPerSecond: 1,
-      contextInputs,
-      toolEvents: [],
-      nativeMessages: []
-    })
+    scriptTurns(() => 'recovered-ok')
     orch.setPersistCallback((threadId) => {
       const id = threadId ?? thread.id
       const existing = store.loadThreadData(id)
@@ -574,49 +448,17 @@ describe('OrchestratorService concurrent threads and queue', () => {
       })
     }
 
-    const llm = (orch as unknown as {
-      llm: {
-        getSelectedModelContextLimit: () => { limit: number }
-        getContextInputs: () => Promise<unknown>
-        chat: () => Promise<unknown>
-      }
-    }).llm
-    const contextInputs = {
-      systemPromptText: '',
-      mcpToolsText: '',
-      otherToolsText: '',
-      signature: 'bound'
-    }
     let inFlight = 0
     let maxInFlight = 0
     let totalChatCalls = 0
-    vi.spyOn(llm, 'getSelectedModelContextLimit').mockReturnValue({ limit: 100_000 })
-    vi.spyOn(llm, 'getContextInputs').mockResolvedValue(contextInputs)
-    vi.spyOn(llm, 'chat').mockImplementation(async () => {
+    scriptTurns(async () => {
       inFlight += 1
       maxInFlight = Math.max(maxInFlight, inFlight)
       totalChatCalls += 1
       // Long enough that chained internal drains would overlap another thread's turn.
       await new Promise((r) => setTimeout(r, 40))
       inFlight -= 1
-      return {
-        text: 'ok',
-        usage: {
-          input: 1,
-          output: 1,
-          cacheRead: 0,
-          cacheWrite: 0,
-          totalTokens: 2,
-          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }
-        },
-        modelName: 'test',
-        totalResponseTimeMs: 1,
-        totalTokensUsed: 2,
-        tokensPerSecond: 1,
-        contextInputs,
-        toolEvents: [],
-        nativeMessages: []
-      }
+      return 'ok'
     })
     orch.setPersistCallback((threadId) => {
       if (!threadId) return
@@ -700,39 +542,7 @@ describe('OrchestratorService concurrent threads and queue', () => {
       'pending'
     )
 
-    const contextInputs = {
-      systemPromptText: '',
-      mcpToolsText: '',
-      otherToolsText: '',
-      signature: 'cleanup'
-    }
-    const llm = (orch as unknown as {
-      llm: {
-        getSelectedModelContextLimit: () => { limit: number }
-        getContextInputs: () => Promise<typeof contextInputs>
-        chat: () => Promise<unknown>
-      }
-    }).llm
-    vi.spyOn(llm, 'getSelectedModelContextLimit').mockReturnValue({ limit: 100_000 })
-    vi.spyOn(llm, 'getContextInputs').mockResolvedValue(contextInputs)
-    vi.spyOn(llm, 'chat').mockResolvedValue({
-      text: 'ok',
-      usage: {
-        input: 1,
-        output: 1,
-        cacheRead: 0,
-        cacheWrite: 0,
-        totalTokens: 2,
-        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }
-      },
-      modelName: 'test',
-      totalResponseTimeMs: 1,
-      totalTokensUsed: 2,
-      tokensPerSecond: 1,
-      contextInputs,
-      toolEvents: [],
-      nativeMessages: []
-    })
+    scriptTurns(() => 'ok')
     orch.setPersistCallback((threadId) => {
       const id = threadId ?? thread.id
       const existing = store.loadThreadData(id)

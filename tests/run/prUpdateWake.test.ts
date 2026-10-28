@@ -8,7 +8,7 @@ import { mkdirSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
-import { PI_LOOP_CAPABILITIES } from '../../src/mms/run/adapters/pi/PiLoopAdapter'
+import { PI_TEST_CAPABILITIES } from '../support/piStub'
 import { Reconciler } from '../../src/mms/run/Reconciler'
 import { ToolInvocations } from '../../src/mms/run/ToolInvocations'
 import type { AgentAccessLevel } from '../../src/shared/settings'
@@ -46,7 +46,7 @@ describe('a woken pull request update runs as the thread\'s own turn', () => {
       outbox: d.engine.outbox,
       tools: new ToolInvocations(d.engine.store),
       now: () => new Date().toISOString(),
-      capabilitiesFor: () => PI_LOOP_CAPABILITIES
+      capabilitiesFor: () => PI_TEST_CAPABILITIES
     })
     return { d, adapter, project, reconciler }
   }

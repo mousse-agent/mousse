@@ -6,8 +6,7 @@ import type { PermissionMode } from '../../src/shared/permissionMode'
 
 /**
  * The Pi RPC engine under a permission mode: its gate asks the thread's user before a built-in the
- * mode does not allow without asking, and denies when the turn cannot ask. (The same rule the legacy
- * loop applies in `LlmClient`; `tests/piLoopApprovals.test.ts`.)
+ * mode does not allow without asking, and denies when the turn cannot ask.
  */
 const engine = new PiRpcEngine({ instanceId: 'pi:x', provider: 'x', label: 'X', capabilities: PI_RPC_CAPS, catalog: () => ({ revision: 1, provider: { id: 'x', builtin: false, models: [] as never } }) } as unknown as PiRpcEngineOptions)
 type Gate = (turn: unknown, toolName: string, input: Record<string, unknown>) => Promise<{ allow: false; reason: string } | null>
@@ -32,14 +31,14 @@ describe('Pi RPC engine permission mode', () => {
     for (const mode of ['ask', 'accept_edits'] as const) {
       const { turn, asked } = turnIn(mode, answer('allow'))
       expect(await askPermission(turn, 'bash', { command: 'echo hi' })).toBeNull()
-      expect(asked).toEqual([{ title: expect.stringContaining('echo hi'), approval: { action: 'command', permissionKey: 'pi:command' } }])
+      expect(asked).toEqual([{ title: expect.stringContaining('echo hi'), approval: { action: 'command', permissionKey: 'pi:command', tool: { name: 'bash', input: { command: 'echo hi' }, cwd: undefined } } }])
     }
     const accepting = turnIn('accept_edits', answer('reject'))
     expect(await askPermission(accepting.turn, 'write', { path: 'a.txt', content: 'x' })).toBeNull()
     expect(accepting.asked).toEqual([])
     const asking = turnIn('ask', answer('allow'))
     expect(await askPermission(asking.turn, 'edit', { path: 'a.txt' })).toBeNull()
-    expect(asking.asked).toEqual([{ title: expect.stringContaining('a.txt'), approval: { action: 'edit', permissionKey: 'pi:edit' } }])
+    expect(asking.asked).toEqual([{ title: expect.stringContaining('a.txt'), approval: { action: 'edit', permissionKey: 'pi:edit', tool: { name: 'edit', input: { path: 'a.txt' }, cwd: undefined } } }])
   })
 
   it('never asks under Full access, and never about a read', async () => {

@@ -93,7 +93,7 @@ describe.skipIf(!live)('live: Claude and Codex delegate to each other over the M
       instanceMap: new ProviderInstanceService(),
       questions,
       drivers: [
-        piDriver({ client: () => orch.piChatClient() }),
+        piDriver(),
         claudeCodeDriver({ builtIn: () => claude }),
         codexDriver({ builtIn: () => codex })
       ]

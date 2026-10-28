@@ -6,6 +6,8 @@ import { OwnedWorkBarrier } from '../src/mms/execution/OwnedWorkBarrier'
 import { MousseMainService } from '../src/mms/MousseMainService'
 import { ProviderAuthService } from '../src/mms/providers/ProviderAuthService'
 import { UserQuestionService } from '../src/mms/orchestrator/UserQuestionService'
+import { testHarness } from '../src/mms/run/testkit/harness'
+import { piAdapter } from './run/phase6Fixture'
 
 function deferred() {
   let resolve!: () => void
@@ -48,22 +50,13 @@ describe('awaited profile work ownership', () => {
       const bob = main.getInstallationHost()!.manager.create({ displayName: 'Bob', slug: 'bob' })
       const services = await main.getProfileServices(bob.id), marker = join(services.getProfileHomeDir(), 'last-owned-write.txt')
       let signal!: AbortSignal
-      vi.spyOn((services.orchestrator as any).llm, 'chat').mockImplementation(async (...args: any[]) => {
-        signal = args[2].signal; entered.resolve(); await release.promise
+      services.orchestrator.setHarness(testHarness({ adapters: [piAdapter(async (input) => {
+        signal = input.signal; entered.resolve(); await release.promise
         writeFileSync(marker, 'Final owned write')
-        return { text: 'Stopped after cleanup', aborted: true }
-      })
+        return 'Stopped after cleanup'
+      })], profileHome: services.getProfileHomeDir() }))
       // A scheduled plain prompt is a real turn now, so the other profile's model answers like a provider would.
-      vi.spyOn((main.orchestrator as any).llm, 'chat').mockImplementation(async (messages: any[]) => ({
-        text: 'Other profile works',
-        usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2 },
-        modelName: 'fixture',
-        totalResponseTimeMs: 1,
-        totalTokensUsed: 2,
-        contextInputs: { signature: 'fixture' },
-        toolEvents: [],
-        nativeMessages: [...messages, { role: 'assistant', content: 'Other profile works', timestamp: Date.now() }]
-      }))
+      main.orchestrator.setHarness(testHarness({ adapters: [piAdapter(() => 'Other profile works')], profileHome: join(root, 'other-harness') }))
       // Both profiles run turns on a default model (there is no bare pi route).
       for (const orchestrator of [services.orchestrator, main.orchestrator])
         (orchestrator as any).settingsStore.set({ provider: { llmProvider: 'openai', model: 'fixture' } })

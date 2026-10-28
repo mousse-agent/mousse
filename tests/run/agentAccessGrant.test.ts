@@ -10,7 +10,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { CLAUDE_SUBSCRIPTION_CAPABILITIES } from '../../src/mms/run/adapters/claudeSubscription/ClaudeSubscriptionAdapter'
-import { PI_LOOP_CAPABILITIES } from '../../src/mms/run/adapters/pi/PiLoopAdapter'
+import { PI_TEST_CAPABILITIES } from '../support/piStub'
 import type { AdapterHost, ProviderAdapter, ProviderCapabilities, TurnControl, TurnInput, TurnResult, TurnSink } from '../../src/mms/run/adapters/ProviderAdapter'
 import type { DelegationToolHost } from '../../src/mms/run/mcp/appTools/delegation'
 import { TURN_TOKEN_KEY } from '../../src/mms/run/mcp/appTools'
@@ -100,7 +100,7 @@ describe('agent access grant (SPEC §15.1)', () => {
   ) => {
     const dir = options.dir ?? profileHome()
     let created: Phase6Daemon | undefined
-    const pi = new ScriptedAdapter('pi', PI_LOOP_CAPABILITIES, async (input, host) => {
+    const pi = new ScriptedAdapter('pi', PI_TEST_CAPABILITIES, async (input, host) => {
       if (input.prompt !== 'Delegate it') return options.onPiChild ? options.onPiChild(input, host) : 'Looked.'
       await onParent(host.tools.delegation!, created!, input.threadId)
       return 'Delegated.'

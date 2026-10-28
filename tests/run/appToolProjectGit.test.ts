@@ -1,7 +1,7 @@
 /**
  * PR 4 §6: `git_status` and `git_diff` are app tools, so a definition granted them keeps them over
  * the Mousse MCP server on a runtime with its own loop. Its grants decide each call; other turns use
- * them in Build mode, as in the pi loop, which keeps its own copies.
+ * them in Build mode.
  */
 import { execFileSync } from 'node:child_process'
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
@@ -477,7 +477,7 @@ describe('git_status and git_diff as app tools', () => {
     })
   })
 
-  describe('the legacy loop runs the same scoped read (ProjectGitTools.execute, as LlmClient calls it)', () => {
+  describe('the workflow tools run the same scoped read (ProjectGitTools.execute)', () => {
     it("Sol's repros: a magic pathspec and the parent repository stay out, for a definition's roots and a Build turn", async () => {
       const { allowed } = parentRepo()
       const tools = new ProjectGitTools(new FileService(), new GitService())
@@ -495,7 +495,7 @@ describe('git_status and git_diff as app tools', () => {
     })
   })
 
-  it('a host that does not read the repository (the pi loop) registers none', () => {
+  it('a host that does not read the repository registers none', () => {
     const { registry, families } = createAppToolRegistry({ host: fakeAppToolHost().host })
     expect(families.projectGit).toEqual([])
     expect(registry.get('git_status')).toBeUndefined()

@@ -17,7 +17,6 @@ import { WORKFLOW_DEFINITIONS_CAPABILITY } from '../src/shared/workflowPlatform'
 import { WORKFLOW_RUN_CAPABILITY, type WorkflowRunView } from '../src/shared/workflowRunPlatform'
 import type { WorkflowBundle, WorkflowNode } from '../src/shared/workflows'
 import type { OrchestratorResponse } from '../src/shared/types'
-import { LlmClient } from '../src/mms/orchestrator/LlmClient'
 import { normalizeQueuedMessages, promoteQueuedMessageToSteer } from '../src/mms/queue/ThreadMessageQueue'
 
 const roots: string[] = []
@@ -97,7 +96,7 @@ describe('structured workflow CLI', () => {
     const f = await fixture()
     const gui = new LocalMmsClient({ homeDir: f.homeDir, endpoint: f.endpoint, ownerToken: f.main.getOwnerRecord()!.token, clientType: 'gui', requestedCapabilities: ['profiles-v1', WORKFLOW_RUN_CAPABILITY] })
     try {
-      const model = vi.spyOn(LlmClient.prototype, 'chat').mockRejectedValue(new Error('Workflow commands must not ask a model to schedule their graph'))
+      const model = vi.spyOn(Harness.prototype, 'startTurn').mockImplementation(() => { throw new Error('Workflow commands must not ask a model to schedule their graph') })
       const title = vi.spyOn(Harness.prototype, 'oneShot').mockRejectedValue(new Error('No model title request for explicit workflow execution'))
       const content = bundle()
       content.manifest.inputSchema = { type: 'object', properties: { count: { type: 'integer' } }, required: ['count'], additionalProperties: false }
@@ -141,7 +140,7 @@ describe('structured workflow CLI', () => {
     const f = await fixture()
     let fresh: MousseMainService | undefined
     try {
-      vi.spyOn(LlmClient.prototype, 'chat').mockRejectedValue(new Error('No model scheduling'))
+      vi.spyOn(Harness.prototype, 'startTurn').mockImplementation(() => { throw new Error('No model scheduling') })
       const content = bundle(), published = await f.publish(content)
       const { thread } = await f.rpc.request<{ thread: { id: string } }>('threads.create', { name: 'Queued workflow' })
       const request = { threadId: thread.id, content: '/' + published.slug, requestId: randomUUID(), forceQueue: true }

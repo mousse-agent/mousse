@@ -17,7 +17,7 @@ import { ProjectManager } from '../../src/mms/data/ProjectManager'
 import { ThreadDataStore } from '../../src/mms/data/ThreadDataStore'
 import { childBusy } from '../../src/mms/run/delegation/hold'
 import type { DelegationToolHost } from '../../src/mms/run/mcp/appTools/delegation'
-import { PI_LOOP_CAPABILITIES } from '../../src/mms/run/adapters/pi/PiLoopAdapter'
+import { PI_TEST_CAPABILITIES } from '../support/piStub'
 import type { AdapterHost, ProviderAdapter, TurnControl, TurnInput, TurnResult, TurnSink } from '../../src/mms/run/adapters/ProviderAdapter'
 import { dispatchMethod } from '../../src/mms/protocol/handlers'
 import { CommandRejection } from '../../src/mms/run/db/RunStoreError'
@@ -399,7 +399,7 @@ type HostScript = (input: TurnInput, delegation: DelegationToolHost | undefined)
 /** A pi-shaped adapter whose script sees the turn's delegation tools; it records what Stop asked of it. */
 class HostAdapter implements ProviderAdapter {
   readonly driver = 'pi' as const
-  readonly capabilities = PI_LOOP_CAPABILITIES
+  readonly capabilities = PI_TEST_CAPABILITIES
   readonly turns: TurnInput[] = []
   /** Threads `stopThread` was asked to end the provider process of (the hook PR H fills for Claude). */
   readonly providerStops: string[] = []

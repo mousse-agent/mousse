@@ -93,7 +93,7 @@ export interface AppToolTurn {
   modeFacts: ModeFacts
   modeCeiling: ModeCeiling
   /**
-   * The permission mode an in-process turn runs in (`LlmChatOptions.permissionMode`); an MCP turn's is
+   * The permission mode the turn runs in; an MCP turn's is
    * read from its run's binding (`ToolRegistryOptions.permissionModeFor`). Absent: no tool asks.
    */
   permissionMode?: PermissionMode
@@ -102,9 +102,9 @@ export interface AppToolTurn {
    * `lineage`. The call-time check also narrows it by the profile's setting as it is then.
    */
   accessLevel?: AgentAccessLevel
-  /** A Mousse subagent implementing a delegated task in the in-process loop (`LlmChatOptions.subagent`). */
+  /** A Mousse subagent implementing a delegated task. */
   subagent: boolean
-  /** The read-only pre-allocation phase of such a subagent (`LlmChatOptions.subagentDiscovery`). */
+  /** The read-only pre-allocation phase of such a subagent. */
   discovery: boolean
   projectPath?: string
   actor: IntegrationActor

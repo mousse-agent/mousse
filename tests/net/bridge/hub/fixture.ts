@@ -25,7 +25,13 @@ import { newId, type NodeCapability } from '../../../../src/shared/net'
 import type { StreamStore } from '../../../../src/mms/net/contracts'
 import { memoryPair } from '../../harness/MemoryTransport'
 import { HUB_METHODS, validateHubParams } from '../../../../src/mms/bridge/hub/validation'
+import { testHarness } from '../../../../src/mms/run/testkit/harness'
+import { piAdapter, type Script } from '../../../run/phase6Fixture'
 export const resources: Array<() => void | Promise<void>> = []
+/** Turns of `mms`'s profile run on a scripted pi adapter that answers with `script`. */
+export function scriptTurns(mms: MousseMainService, script: Script): void {
+  mms.orchestrator.setHarness(testHarness({ adapters: [piAdapter(script)], profileHome: mms.getProfileHomeDir() }))
+}
 export async function cleanup() {
   for (const close of resources.splice(0).reverse()) await close()
 }

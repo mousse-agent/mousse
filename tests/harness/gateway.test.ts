@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ProviderInstanceService } from '../../src/mms/providers/ProviderInstanceService'
 import { RunStoreError } from '../../src/mms/run/db/RunStoreError'
-import { PiLoopAdapter } from '../../src/mms/run/adapters/pi/PiLoopAdapter'
+import { PiStubAdapter } from '../support/piStub'
 import type { ProviderAdapter } from '../../src/mms/run/adapters/ProviderAdapter'
 import { adapterDriver, testHarness } from '../../src/mms/run/testkit/harness'
 import type { HarnessGatewayEvent } from '../../src/mms/harness/gateway'
@@ -16,7 +16,7 @@ import { describeStatus } from '../../src/shared/harness/status'
 import { asInstanceConfigPatch } from '../../src/mms/protocol/validators'
 import type { ProviderDriverKind } from '../../src/shared/providerInstances'
 
-const pi = (): PiLoopAdapter => new PiLoopAdapter(() => ({ chat: async () => { throw new Error('unused') } }))
+const pi = (): PiStubAdapter => new PiStubAdapter()
 
 const fake = (driver: ProviderDriverKind, configured = true): ProviderAdapter => ({
   driver,
@@ -126,7 +126,7 @@ describe('harness gateway: resolution (absorbs AdapterRegistry)', () => {
 
   it('keeps today\'s capability values and adds planMode and contextUsage', () => {
     const { harness } = full()
-    expect(harness.resolveStored({ instanceId: 'pi:openai', llmProvider: '', model: 'm' }, { purpose: 'turn' }).caps).toMatchObject({ ...pi().capabilities, planMode: true, contextUsage: 'measured' })
+    expect(harness.resolveStored({ instanceId: 'pi:openai', llmProvider: '', model: 'm' }, { purpose: 'turn' }).caps).toMatchObject({ ...pi().capabilities, planMode: true, contextUsage: 'none' })
   })
 })
 
@@ -701,54 +701,9 @@ describe('harness gateway: a driver whose home depends on its setup (managed Cod
   })
 })
 
-describe('harness gateway: the engine of a pi instance (Advanced → Engine)', () => {
-  /** A pi driver with the engine hook: every provider switches but `openai-codex`; the default is `legacy`, stored `rpc` opts in. */
-  const piDriver = (): HarnessDriver => ({
-    ...adapterDriver(pi()),
-    engine: (instanceId, stored) => {
-      const switchable = instanceId !== 'pi:openai-codex'
-      return { effective: switchable && stored?.engine === 'rpc' ? 'rpc' : 'legacy', switchable }
-    }
-  })
-  const setup = () => {
-    let stored: unknown
-    let seedVersion: number | undefined
-    const source = new ProviderInstanceService({
-      store: { read: () => ({ instances: stored, seedVersion }), write: (next) => { stored = next.instances; seedVersion = next.seedVersion } },
-      providerAuth: { credentials: { listProviderIds: () => ['openai', 'openai-codex'] } }
-    })
-    const harness = testHarness({ drivers: [piDriver(), adapterDriver(fake('claude'))], instances: source, profileHome: home() })
-    const entry = (id: string) => (stored as Record<string, { config?: Record<string, unknown> }>)[id]
-    const snapshot = async (id: string) => (await harness.instances.snapshots({ kind: 'device' })).find((item) => item.instanceId === id)!
-    return { harness, entry, snapshot }
-  }
-
-  it('stores the opt-in, clears it back to the default, and shows both in the snapshot', async () => {
-    const { harness, entry, snapshot } = setup()
-    expect((await snapshot('pi:openai')).engine).toEqual({ effective: 'legacy', switchable: true })
-
-    const rpc = await harness.instances.configure('pi:openai', { engine: 'rpc' })
-    expect(entry('pi:openai').config).toMatchObject({ engine: 'rpc' })
-    expect(rpc.engine).toEqual({ setting: 'rpc', effective: 'rpc', switchable: true })
-
-    const cleared = await harness.instances.configure('pi:openai', { engine: null })
-    expect(entry('pi:openai').config ?? {}).not.toHaveProperty('engine')
-    expect(cleared.engine).toEqual({ effective: 'legacy', switchable: true })
-  })
-
-  it('refuses the switch for a provider that runs on one engine, and for a driver without engines', async () => {
-    const { harness, entry, snapshot } = setup()
-    await expect(harness.instances.configure('pi:openai-codex', { engine: 'legacy' })).rejects.toMatchObject({ code: 'unsupported' })
-    expect(entry('pi:openai-codex')?.config ?? {}).not.toHaveProperty('engine')
-    expect((await snapshot('pi:openai-codex')).engine).toEqual({ effective: 'legacy', switchable: false })
-
-    await expect(harness.instances.configure('claude', { engine: 'legacy' })).rejects.toMatchObject({ code: 'unsupported' })
-    expect((await snapshot('claude')).engine).toBeUndefined()
-  })
-
-  it('takes rpc, legacy or null over the protocol, and nothing else', () => {
-    expect(asInstanceConfigPatch({ engine: 'legacy' })).toEqual({ engine: 'legacy' })
-    expect(asInstanceConfigPatch({ engine: null })).toEqual({ engine: null })
-    expect(() => asInstanceConfigPatch({ engine: 'fast' })).toThrow(/engine must be rpc\|legacy\|null/)
+describe('harness gateway: the removed Pi engine setting', () => {
+  it('takes an engine key from an older client over the protocol, and drops it', () => {
+    expect(asInstanceConfigPatch({ engine: 'legacy' })).toEqual({})
+    expect(asInstanceConfigPatch({ engine: 'fast', displayName: 'Router' })).toEqual({ displayName: 'Router' })
   })
 })

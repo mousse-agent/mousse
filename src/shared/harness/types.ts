@@ -40,11 +40,10 @@ export interface HarnessCaps {
   /** The composer offers Plan mode for this instance. */
   planMode: boolean
   /**
-   * Context gauge source: `measured` when Mousse measures the transcript itself (the pi loop),
-   * `reported` when the runtime reports its context and window, `none` when it publishes neither
-   * (the gauge is hidden rather than fabricated).
+   * Context gauge source: `reported` when the runtime reports its context and window, `none` when
+   * it publishes neither (the gauge is hidden rather than fabricated).
    */
-  contextUsage: 'measured' | 'reported' | 'none'
+  contextUsage: 'reported' | 'none'
   /**
    * How far Mousse controls which tools the runtime runs: `exact` (Mousse runs the tools: an exact
    * allowlist holds), `approval_only` (the runtime asks Mousse before each tool, with its permission
@@ -65,17 +64,6 @@ export interface HarnessCaps {
    * what is left. They also need `budgets: 'hard'`.
    */
   spendLimits: 'reserved' | 'unsupported'
-  /**
-   * `in_loop`: the runtime runs an agent definition's whole loop itself, under the definition's own
-   * limits, as definitions have always run (Mousse's in-process loop, the legacy Pi engine): the turn
-   * and tool-call counts refuse the next request or call before it starts, and the token and cost
-   * limits are checked after each response. A definition authority's limits are then admitted
-   * without `hard` budgets or `reserved` spend; nothing else is, and admission also requires the
-   * turn to carry that definition and its loop. `none` everywhere else (and for caps from before the
-   * key existed). Transitional: PR 4 unit 4d-rpc moves definitions to Pi RPC (exact tool control, a
-   * session per definition turn), and 4h deletes this key, its reader and the loop that declares it.
-   */
-  definitionLimits: 'in_loop' | 'none'
 }
 
 /**
@@ -88,7 +76,7 @@ export type RunCapabilities = Pick<
 >
 
 export const HARNESS_CAP_KEYS = [
-  'steer', 'interrupt', 'rollback', 'fork', 'events', 'containment', 'historyInjection', 'mcp', 'childPolicy', 'planMode', 'contextUsage', 'toolControl', 'budgets', 'spendLimits', 'definitionLimits'
+  'steer', 'interrupt', 'rollback', 'fork', 'events', 'containment', 'historyInjection', 'mcp', 'childPolicy', 'planMode', 'contextUsage', 'toolControl', 'budgets', 'spendLimits'
 ] as const satisfies ReadonlyArray<keyof HarnessCaps>
 
 /** What a caller picks to run an agent. */
@@ -144,12 +132,6 @@ export interface RunPolicy {
 export interface PolicyAuthority {
   kind: 'definition' | 'bot'
   digest: string
-  /**
-   * A definition that needs the instance's own definition loop (its settings not known, or a token
-   * or USD limit only the loop can hold for its model): it runs there while
-   * the loop exists, whatever runtime the instance runs other definitions on (`definitionCaps`).
-   */
-  loop?: true
 }
 
 /** The caller's part of a binding's policy (`HarnessGateway.bind`): mode and origin are bound separately. */
@@ -435,11 +417,6 @@ export interface InstanceConfigPatch {
    * own) or `existing` (the user's Codex CLI). Set when the entry is added; it cannot change.
    */
   setup?: 'managed' | 'existing'
-  /**
-   * `pi` instances whose provider runs on Pi's agent: `legacy` switches back to the in-process loop
-   * (Advanced → Engine); `null` clears it back to the default engine.
-   */
-  engine?: 'rpc' | 'legacy' | null
   /**
    * Takes the settings an older Mousse version left in the provider's own settings file
    * (`InstanceSnapshot.settingsNotice` `older_conflict`); every other field is ignored.

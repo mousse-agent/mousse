@@ -1,23 +1,24 @@
 import { readFileSync, writeFileSync } from 'node:fs'
 import { isAbsolute, resolve } from 'node:path'
 import type { AssistantMessage, Context, Message, Tool, ToolCall } from '@earendil-works/pi-ai'
-import { authorizeDefinitionCall } from '../../../src/mms/agentDefinitions/definitionGate'
+import { authorizeDefinitionCall, recordAuthorizedCall } from '../../../src/mms/agentDefinitions/definitionGate'
 import type { Harness } from '../../../src/mms/harness/gateway'
 import type { OrchestratorService } from '../../../src/mms/orchestrator/OrchestratorService'
 import { ProviderInstanceService } from '../../../src/mms/providers/ProviderInstanceService'
 import { CLAUDE_SUBSCRIPTION_CAPABILITIES } from '../../../src/mms/run/adapters/claudeSubscription/ClaudeSubscriptionAdapter'
 import type { AdapterHost, ProviderAdapter, TurnInput, TurnResult, TurnSink } from '../../../src/mms/run/adapters/ProviderAdapter'
+import { TURN_TOKEN_KEY } from '../../../src/mms/run/mcp/appTools/registry'
 import { adapterDriver, testHarness } from '../../../src/mms/run/testkit/harness'
-import type { HarnessCaps } from '../../../src/shared/harness/types'
+import { harnessAppError, type HarnessCaps } from '../../../src/shared/harness/types'
 
 /**
- * A stand-in for a runtime that earned `toolControl: 'exact'` (PR 4 §6), installed in a real
- * profile's gateway as the `pi:<provider>` instance. No production runtime declares `exact` yet, so
- * definition tests run on this one. It behaves as an exact runtime must:
+ * A stand-in for a runtime that earned `toolControl: 'exact'` (PR 4 §6; Pi RPC with evidence),
+ * installed in a real profile's gateway as the `pi:<provider>` instance, so definition tests run
+ * without starting Pi. It behaves as an exact runtime must:
  * - it runs the definition's own instructions (`TurnInput.instructions`) and only its messages;
  * - every tool call passes the definition's authority first (`authorizeDefinitionCall`, as Pi's
  *   `/pi/gate` does), with the exact arguments it then runs;
- * - built-in file tools run under the host's writer, app tools through the Mousse tool registry.
+ * - built-in file tools run under the host's writer, app tools over the Mousse MCP registry.
  * Model replies are scripted (`next`), and each request's context is captured, as a provider sees it.
  */
 export interface ExactRuntimeOptions {
@@ -64,6 +65,12 @@ export function installExactDefinitionRuntime(options: ExactRuntimeOptions): Exa
     if (!definition) return { text: 'This runtime runs no tool without a definition authority.', isError: true }
     const decision = await authorizeDefinitionCall(definition, { toolName: call.name, args: call.arguments, ...(input.cwd ? { projectPath: input.cwd } : {}), signal: input.signal })
     if (!decision.allowed) return { text: decision.message, isError: true }
+    // As Pi's gate: a run that is no longer its thread's active run (ended during an approval) runs
+    // nothing, and every allowed call is counted against the run's hard budget.
+    if (host.tools.runActive?.() === false) return { text: 'The run is no longer active.', isError: true }
+    const counted = host.budget?.toolCall()
+    // A refused call ends the turn with the limit, as Pi's engine ends it.
+    if (counted && !counted.ok) throw harnessAppError({ code: 'budget_exhausted', message: 'The run reached its limit.', limit: counted.limit })
     const path = typeof call.arguments.path === 'string' ? call.arguments.path : ''
     const target = input.cwd && path ? (isAbsolute(path) ? path : resolve(input.cwd, path)) : ''
     if (call.name === 'write') {
@@ -71,9 +78,18 @@ export function installExactDefinitionRuntime(options: ExactRuntimeOptions): Exa
       return { text: `Wrote ${path}` }
     }
     if (call.name === 'read') return { text: readFileSync(target, 'utf8') }
+    // App tools: over the Mousse MCP registry under the turn's credential, stamped with its turn
+    // token, as Pi's extension calls them. A turn whose bridge attached no server has none.
+    const bridge = host.bridge
+    if (!bridge?.mcp) return { text: `Unknown tool: ${call.name}`, isError: true }
+    // The gate authorized this exact call: the registry takes it once, without asking again.
+    recordAuthorizedCall(definition, { turnToken: bridge.turnToken, toolName: call.name, callId: call.id, args: call.arguments })
     const turn = options.orchestrator.appToolTurns.get(input.runId)
-    if (!turn) return { text: 'No app-tool turn is registered for this run.', isError: true }
-    return options.orchestrator.mcpToolRegistry().callInProcess(call.name, call.arguments, { kind: 'run', runId: input.runId }, { turn, toolCallId: call.id, signal: input.signal })
+    return options.orchestrator.mcpToolRegistry().call(call.name, { ...call.arguments, [TURN_TOKEN_KEY]: bridge.turnToken }, {
+      credential: { threadId: input.threadId, runId: input.runId, provider: 'pi', modeCeiling: turn?.modeCeiling ?? 'default', accessLevel: turn?.accessLevel ?? 'lineage', binding: 'per_call', current: () => true },
+      toolCallId: call.id,
+      signal: input.signal
+    })
   }
 
   const adapter: ProviderAdapter = {
@@ -92,6 +108,9 @@ export function installExactDefinitionRuntime(options: ExactRuntimeOptions): Exa
       const result = (aborted: boolean): TurnResult => ({ text, aborted, modelName: input.model, totalResponseTimeMs: 1, usage, contextSignature: 's', nativeMessages: [], providerRef: ref })
       for (;;) {
         if (input.signal.aborted) return result(true)
+        // The run's hard budget admits each model request, as Pi's engine asks it.
+        const admitted = host.budget?.request()
+        if (admitted && !admitted.ok) throw harnessAppError({ code: 'budget_exhausted', message: 'The run reached its limit.', limit: admitted.limit })
         const context: Context = { systemPrompt: input.instructions?.text ?? '', messages: structuredClone(messages), tools }
         options.captured?.push(structuredClone(context))
         let reply: AssistantMessage
@@ -106,6 +125,8 @@ export function installExactDefinitionRuntime(options: ExactRuntimeOptions): Exa
         usage.output += reply.usage?.output ?? 0
         cost += reply.usage?.cost?.total ?? 0
         sink.providerMetrics({ totalResponseTimeMs: 1, usage: { ...reply.usage, cost: { ...reply.usage.cost, total: cost } } })
+        // Each request's usage as it ends, as Pi's agent reports it.
+        sink.usage({ input: reply.usage?.input ?? 0, output: reply.usage?.output ?? 0, cacheRead: reply.usage?.cacheRead ?? 0, cacheWrite: reply.usage?.cacheWrite ?? 0, ...(reply.usage?.cost?.total ? { costUsd: reply.usage.cost.total } : {}) })
         messages.push(reply)
         const said = blocks(reply, 'text').map((block) => block.text).join('')
         if (said) {
@@ -118,8 +139,11 @@ export function installExactDefinitionRuntime(options: ExactRuntimeOptions): Exa
         if (!calls.length) return result(false)
         for (const call of calls) {
           sink.tool({ kind: 'build_tool_call', title: call.name, summary: call.name, details: [], phase: 'start', callId: call.id })
-          // A failed tool is the call's error result, as a runtime reports it.
-          const outcome = await runTool(call, input, host).catch((error: unknown) => ({ text: error instanceof Error ? error.message : String(error), isError: true }))
+          // A failed tool is the call's error result, as a runtime reports it; a limit ends the turn.
+          const outcome = await runTool(call, input, host).catch((error: unknown) => {
+            if ((error as { code?: unknown }).code === 'budget_exhausted') throw error
+            return { text: error instanceof Error ? error.message : String(error), isError: true }
+          })
           sink.tool({ kind: 'build_tool_result', title: call.name, summary: outcome.text.slice(0, 200), details: [], phase: 'complete', callId: call.id })
           messages.push({ role: 'toolResult', toolCallId: call.id, toolName: call.name, content: [{ type: 'text', text: outcome.text }], isError: Boolean(outcome.isError), timestamp: Date.now() })
           if (input.signal.aborted) return result(true)

@@ -5,7 +5,6 @@ import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
 
 const mousseVersion: string = JSON.parse(readFileSync(resolve(__dirname, 'package.json'), 'utf-8')).version
-const piCodingAgentShim = resolve(__dirname, 'src/mms/providers/piCodingAgentShim.ts')
 const rendererPort = process.env.MOUSSE_RENDERER_PORT ? Number(process.env.MOUSSE_RENDERER_PORT) : 5713
 if (!Number.isInteger(rendererPort) || rendererPort < 1024 || rendererPort > 65535) {
   throw new Error('MOUSSE_RENDERER_PORT must be an integer between 1024 and 65535')
@@ -15,19 +14,10 @@ export default defineConfig({
   main: {
     resolve: {
       alias: {
-        '@earendil-works/pi-coding-agent': piCodingAgentShim,
-        // Fallback if any transitive import survives the shim.
         'highlight.js/lib/index.js': 'highlight.js'
       }
     },
-    // Keep pi-coding-agent excluded from externalization so the alias shim is
-    // applied. The real package (and its undici dependency) is incompatible with
-    // Electron's Node build; tools are loaded from dist/core/tools at runtime.
-    plugins: [
-      externalizeDepsPlugin({
-        exclude: ['pi-cursor-sdk', '@earendil-works/pi-coding-agent']
-      })
-    ],
+    plugins: [externalizeDepsPlugin()],
     build: {
       rollupOptions: {
         plugins: [

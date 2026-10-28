@@ -1,5 +1,5 @@
 import { useEffect, useState, type ReactNode } from 'react'
-import type { InstanceSnapshot, PiEngine, StatusDescription } from '../../../shared/harness/status'
+import type { InstanceSnapshot, StatusDescription } from '../../../shared/harness/status'
 import type { ModelPrefsPatch, ProviderOperationEvent } from '../../../shared/harness/types'
 import { ChevronRight } from '../../lib/icons'
 import { ProviderIcon } from '../../lib/providerIcons'
@@ -220,50 +220,9 @@ export function ModelsEditorSection({
   )
 }
 
-const ENGINE_OPTIONS = [
-  { value: 'legacy', label: 'Legacy' },
-  { value: 'rpc', label: 'New engine' }
-] as const satisfies ReadonlyArray<{ value: PiEngine; label: string }>
-
-/** The stored value for a choice: the default (Legacy) stores nothing (`null` clears), New engine stores `rpc`. */
-export function engineSetting(choice: PiEngine): 'rpc' | null {
-  return choice === 'rpc' ? 'rpc' : null
-}
-
-/**
- * The engine a model API runs on: the in-process loop (Legacy, the default) or Pi's own agent (New
- * engine), which the user opts in to until it becomes the default. Legacy stores nothing; New engine
- * stores `engine: 'rpc'`.
- */
-export function EngineRow({ snapshot, onSetEngine }: { snapshot: InstanceSnapshot; onSetEngine: (engine: 'rpc' | null) => Promise<void> }) {
-  const change = useAsyncAction()
-  const engine = snapshot.engine
-  if (!engine?.switchable) return null
-  const value: PiEngine = engine.setting ?? engine.effective
-  return (
-    <SettingsRow
-      title="Engine"
-      description={
-        change.error
-          ? <span className="prov-error">{change.error}</span>
-          : "New engine runs this provider on Pi's own agent. Its tools and replies may differ slightly; switch back to Legacy any time."
-      }
-      control={
-        <Segmented<PiEngine>
-          ariaLabel="Engine"
-          value={value}
-          options={ENGINE_OPTIONS}
-          disabled={change.busy !== null}
-          onChange={(next) => void change.run('engine', () => onSetEngine(engineSetting(next)))}
-        />
-      }
-    />
-  )
-}
-
 /**
  * The editor of a model API: header, its Setup row (and Move, where it now runs as an agent), then
- * Models, and the engine under Advanced where the provider can switch it.
+ * Models.
  */
 export function ApiEditor({
   snapshot,
@@ -273,8 +232,7 @@ export function ApiEditor({
   removeHint,
   onRemove,
   onSaveModelPrefs,
-  onRefreshModels,
-  onSetEngine
+  onRefreshModels
 }: {
   snapshot: InstanceSnapshot
   setup: ReactNode
@@ -285,7 +243,6 @@ export function ApiEditor({
   onRemove: () => Promise<void>
   onSaveModelPrefs: (patch: ModelPrefsPatch) => Promise<void>
   onRefreshModels: () => Promise<void>
-  onSetEngine?: (engine: 'rpc' | null) => Promise<void>
 }) {
   return (
     <>
@@ -296,13 +253,6 @@ export function ApiEditor({
         {move}
       </EditorSection>
       <ModelsEditorSection snapshot={snapshot} onSave={onSaveModelPrefs} onRefresh={onRefreshModels} />
-      {onSetEngine && snapshot.engine?.switchable && (
-        <SettingsAdvanced>
-          <EditorSection title="Runtime" description={deviceWideNote(snapshot)}>
-            <EngineRow snapshot={snapshot} onSetEngine={onSetEngine} />
-          </EditorSection>
-        </SettingsAdvanced>
-      )}
     </>
   )
 }

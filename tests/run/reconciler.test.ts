@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
-import { PI_LOOP_CAPABILITIES } from '../../src/mms/run/adapters/pi/PiLoopAdapter'
+import { PI_TEST_CAPABILITIES } from '../support/piStub'
 import type { ProviderCapabilities } from '../../src/mms/run/adapters/ProviderAdapter'
 import { ProfileDatabase } from '../../src/mms/run/db/ProfileDatabase'
 import { EffectOutbox, EFFECT_LEASE_GRACE_MS } from '../../src/mms/run/EffectOutbox'
@@ -166,8 +166,8 @@ describe('Reconciler', () => {
   })
 
   it('rule 2: a sparse-event adapter gets 6x the silence window', async () => {
-    const sparse: ProviderCapabilities = { ...PI_LOOP_CAPABILITIES, events: 'sparse' }
-    const { store, engine, reconciler, advance } = setup(10_000, (threadId) => (threadId === 'sparse' ? sparse : PI_LOOP_CAPABILITIES))
+    const sparse: ProviderCapabilities = { ...PI_TEST_CAPABILITIES, events: 'sparse' }
+    const { store, engine, reconciler, advance } = setup(10_000, (threadId) => (threadId === 'sparse' ? sparse : PI_TEST_CAPABILITIES))
     const rich = await runningRun(engine, 'rich')
     const quiet = await runningRun(engine, 'sparse')
     advance(21_000)
@@ -183,7 +183,7 @@ describe('Reconciler', () => {
     let asked = 0
     const { store, engine, reconciler, advance } = setup(10_000, () => {
       asked += 1
-      return { ...PI_LOOP_CAPABILITIES, events: 'sparse' }
+      return { ...PI_TEST_CAPABILITIES, events: 'sparse' }
     })
     const undo = store.createRun({ threadId: 't', source: 'undo' })
     engine.markStarting(undo.runId)

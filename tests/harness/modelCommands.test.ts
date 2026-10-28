@@ -8,12 +8,12 @@ import { dispatchSlashCommand, type SlashContext } from '../../src/mms/channels/
 import { parseSlashCommand } from '../../src/mms/channels/slash/parse'
 import { piInstanceId, piProviderIdOf } from '../../src/shared/providerInstances'
 import { ProviderInstanceService } from '../../src/mms/providers/ProviderInstanceService'
-import { PiLoopAdapter } from '../../src/mms/run/adapters/pi/PiLoopAdapter'
+import { PiStubAdapter } from '../support/piStub'
 import type { ProviderAdapter } from '../../src/mms/run/adapters/ProviderAdapter'
 import { adapterDriver, testHarness } from '../../src/mms/run/testkit/harness'
 import type { LlmProviderOption } from '../../src/shared/settings'
 
-const pi = new PiLoopAdapter(() => ({ chat: async () => { throw new Error('unused') } }))
+const pi = new PiStubAdapter()
 const claude: ProviderAdapter = { driver: 'claude', capabilities: pi.capabilities, configured: () => true, startTurn: async () => { throw new Error('unused') }, interrupt: async () => 'not_active' }
 
 /** A profile with OpenAI (one hidden model), a disabled Anthropic pi instance and Claude Code. */

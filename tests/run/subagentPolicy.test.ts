@@ -14,7 +14,7 @@ import type { UserQuestionService } from '../../src/mms/orchestrator/UserQuestio
 import { ANTIGRAVITY_CAPABILITIES } from '../../src/mms/harness/acp/presets/antigravity'
 import { CLAUDE_SUBSCRIPTION_CAPABILITIES } from '../../src/mms/run/adapters/claudeSubscription/ClaudeSubscriptionAdapter'
 import { CODEX_CAPABILITIES } from '../../src/mms/run/adapters/codex/CodexAdapter'
-import { PI_LOOP_CAPABILITIES } from '../../src/mms/run/adapters/pi/PiLoopAdapter'
+import { PI_TEST_CAPABILITIES } from '../support/piStub'
 import type { AdapterHost, ProviderAdapter, ProviderCapabilities, TurnControl, TurnInput, TurnResult, TurnSink } from '../../src/mms/run/adapters/ProviderAdapter'
 import { READ_ONLY_MOUSSE_TOOLS } from '../../src/mms/run/mcp/attachment'
 import { AppToolTurns, ToolRegistry } from '../../src/mms/run/mcp/appTools'
@@ -60,8 +60,8 @@ class ScriptedAdapter implements ProviderAdapter {
 
 describe('subagent target preflight table', () => {
   it.each([
-    ['pi', PI_LOOP_CAPABILITIES, 'shared', null],
-    ['pi', PI_LOOP_CAPABILITIES, 'isolated', null],
+    ['pi', PI_TEST_CAPABILITIES, 'shared', null],
+    ['pi', PI_TEST_CAPABILITIES, 'isolated', null],
     ['claude', CLAUDE_SUBSCRIPTION_CAPABILITIES, 'shared', null],
     ['claude', CLAUDE_SUBSCRIPTION_CAPABILITIES, 'isolated', null],
     ['codex', CODEX_CAPABILITIES, 'shared', null],
@@ -94,7 +94,7 @@ describe('delegated child policy', () => {
     process.env.MOUSSE_HOME = home
     const projectDir = join(home, 'project')
     mkdirSync(projectDir)
-    const parent = new ScriptedAdapter('pi', PI_LOOP_CAPABILITIES, async (input, host) => {
+    const parent = new ScriptedAdapter('pi', PI_TEST_CAPABILITIES, async (input, host) => {
       if (input.prompt !== 'Delegate it') return onPiChild ? onPiChild(input, host) : 'unexpected pi turn'
       await onParent(host.tools.delegation!, input.threadId)
       return 'Delegated.'
@@ -175,7 +175,7 @@ describe('delegated child policy', () => {
       process.env.MOUSSE_HOME = home
       const projectDir = join(home, 'project')
       mkdirSync(projectDir)
-      const parent = new ScriptedAdapter('pi', PI_LOOP_CAPABILITIES, async (input, host) => {
+      const parent = new ScriptedAdapter('pi', PI_TEST_CAPABILITIES, async (input, host) => {
         if (input.prompt !== 'Delegate it') return 'unexpected pi turn'
         for (const workspace of ['shared', 'isolated'] as const)
           outcomes[workspace] = await delegate(host.tools.delegation!, { workspace, role: workspace === 'shared' ? 'research' : 'implement', instanceId: 'codex' }, workspace)

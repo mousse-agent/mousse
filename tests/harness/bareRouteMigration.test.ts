@@ -8,7 +8,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
-import { PiLoopAdapter } from '../../src/mms/run/adapters/pi/PiLoopAdapter'
+import { PiStubAdapter } from '../support/piStub'
 import { ProfileDatabase } from '../../src/mms/run/db/ProfileDatabase'
 import { RunEngine } from '../../src/mms/run/RunEngine'
 import { RunStore } from '../../src/mms/run/RunStore'
@@ -100,7 +100,7 @@ describe('runs recorded on the retired bare pi route', () => {
 })
 
 describe('the gateway without the bare route', () => {
-  const pi = new PiLoopAdapter(() => ({ chat: async () => { throw new Error('no turn runs here') } }))
+  const pi = new PiStubAdapter()
   const gateway = () => testHarness({ adapters: [pi], profileHome: home() })
 
   it('resolves no selection to no_model_selected, never to a pi loop', () => {

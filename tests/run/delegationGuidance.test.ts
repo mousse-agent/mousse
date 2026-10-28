@@ -1,15 +1,13 @@
 /**
- * Issue #142: the guidance about subagents lives in one module and reaches the pi loop, the Mousse
- * MCP server and a subagent's first prompt from there. The texts and tool descriptions are pinned,
+ * Issue #142: the guidance about subagents lives in one module and reaches the Mousse MCP server
+ * and a subagent's first prompt from there. The texts and tool descriptions are pinned,
  * so a change to what models are told shows in review.
  */
 import { describe, expect, it, vi } from 'vitest'
-import { DELEGATION_PROMPT } from '../../src/mms/orchestrator/systemPrompt'
 import { delegationToolDefinitions, dispatchDelegationTool, LISTED_DELEGATION_TOOL_NAMES, type DelegationToolHost } from '../../src/mms/run/mcp/appTools/delegation'
 import {
   delegationGuidanceLines,
   mcpDelegationInstructions,
-  piDelegationPrompt,
   subagentGuidanceLines,
   subagentPreamble
 } from '../../src/mms/run/delegation/guidance'
@@ -19,23 +17,6 @@ import { TaskQueue } from '../../src/mms/tasks/TaskQueue'
 import { delegationFixture } from './delegationFixture'
 
 describe('subagent guidance', () => {
-  it('the pi system prompt section', () => {
-    expect(DELEGATION_PROMPT).toBe(piDelegationPrompt())
-    expect(piDelegationPrompt()).toMatchInlineSnapshot(`
-      "## Delegation
-      Use delegate_task to hand a bounded task to a subagent. It returns immediately with a delegationId; do not wait or poll. When the subagent finishes, Mousse sends you a notice with its result. task_cancel stops a subagent and everything it delegated. list_subagents lists your subagents and what they are doing.
-      - Delegate only substantial work: a bounded task that runs on its own thread, in parallel, or on another provider or model. Give every subagent a short role-like title such as "API reviewer"; the title is how you address it later.
-      - Continue the same subagent (continue_subagent, by title) when the next step builds on what it already read or did: fixing its findings, re-checking its own change, answering its question, the next iteration of the same work. It keeps its context, so this is faster and cheaper than starting over.
-      - Start a new subagent (delegate_task) for independent work, a deliberately fresh or independent review, a different workspace, provider or model, or when the old subagent's context is wrong or too long. A title is unique among your subagents; delegate_task returns title_taken when one already exists, and then you continue it or choose another title.
-      - The user cannot create subagents. When the user names one ("ask the API reviewer to ..."), use continue_subagent with that title.
-      - Pick workspace "isolated" for work that edits, builds or tests; "shared" only for read-only roles (role "research" or "review").
-      - After delegating or continuing, end your turn. Mousse sends you a notice with the result, so do not poll; call task_status only when the notice says the result was cut off. Use integrate_delegation to merge a finished isolated task.
-      - When a subagent asks a question you can answer, use answer_subagent; otherwise ask the user. A subagent that needs input is reported as needing it.
-      - Include the plan or spec body (or a readable path), the acceptance criteria and the focused validation to run. instanceId and model default to yours; set them only when the user explicitly requests an override, using known connected identifiers. Never copy example or guessed model identifiers.
-      - Isolated results do not affect this task until you call integrate_delegation after the subagent finished; it runs as its own integration run after your turn and you are notified of the outcome. Never claim integration from completion alone."
-    `)
-  })
-
   it('the Mousse MCP server instructions', () => {
     expect(mousseOrchestrationInstructions()).toMatchInlineSnapshot(`
       "You are running inside Mousse, which exposes its orchestration tools through the "mousse" MCP server.
@@ -80,13 +61,14 @@ describe('subagent guidance', () => {
   it('tells a subagent that it may start subagents of its own, and tells no one else', () => {
     expect(subagentPreamble('Parent')).toContain('You may start your own subagents unless your instructions say not to.')
     // The main thread's guidance is about its own subagents; nesting is the subagent's preamble alone.
-    const mainThread = [piDelegationPrompt(), mousseOrchestrationInstructions(), ...delegationGuidanceLines(), ...mcpDelegationInstructions()].join('\n')
+    const mainThread = [mousseOrchestrationInstructions(), ...delegationGuidanceLines(), ...mcpDelegationInstructions()].join('\n')
     expect(mainThread).not.toMatch(/own subagents|nest/i)
   })
 
   it('every listed tool is named by the guidance the models read', () => {
-    const text = `${piDelegationPrompt()}\n${mousseOrchestrationInstructions()}`
-    for (const name of ['delegate_task', 'continue_subagent', 'answer_subagent', 'task_status', 'task_cancel', 'integrate_delegation']) expect(text).toContain(name)
+    const text = mousseOrchestrationInstructions()
+    // task_cancel is named only by its own tool description (the deleted pi loop's prompt also named it).
+    for (const name of ['delegate_task', 'continue_subagent', 'answer_subagent', 'task_status', 'integrate_delegation']) expect(text).toContain(name)
   })
 })
 
@@ -181,7 +163,7 @@ describe('the delegation tools models are offered', () => {
     `)
   })
 
-  it('the pi loop and the Mousse MCP server list the same tools with the same descriptions', () => {
+  it('the delegation tool definitions and the Mousse MCP server list the same tools with the same descriptions', () => {
     const f = delegationFixture()
     try {
       const delegation: DelegationToolHost = {

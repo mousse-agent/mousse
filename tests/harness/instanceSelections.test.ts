@@ -11,7 +11,7 @@ import { MousseConfigStore } from '../../src/mms/config/MousseConfigStore'
 import { OrchestratorService } from '../../src/mms/orchestrator/OrchestratorService'
 import { SharedAgentModelLookup } from '../../src/mms/platform/SharedAgentModelLookup'
 import { ProviderInstanceService } from '../../src/mms/providers/ProviderInstanceService'
-import { PiLoopAdapter } from '../../src/mms/run/adapters/pi/PiLoopAdapter'
+import { PiStubAdapter } from '../support/piStub'
 import type { ProviderAdapter } from '../../src/mms/run/adapters/ProviderAdapter'
 import { adapterDriver, testHarness } from '../../src/mms/run/testkit/harness'
 import { SettingsStore } from '../../src/mms/settings/SettingsStore'
@@ -19,7 +19,7 @@ import { parseModelRef } from '../../src/shared/agents/schema'
 import { getDefaultSettings, oneShotProviderOptions, resolveModelForMode, type MousseSettings } from '../../src/shared/settings'
 import type { OneShotSpec } from '../../src/mms/harness/driver'
 
-const pi = new PiLoopAdapter(() => ({ chat: async () => { throw new Error('unused') } }))
+const pi = new PiStubAdapter()
 const claude: ProviderAdapter = { driver: 'claude', capabilities: pi.capabilities, configured: () => true, startTurn: async () => { throw new Error('unused') }, interrupt: async () => 'not_active' }
 
 /** What the Claude runtime lists: Sonnet takes images and has a long window; Opus states neither. */

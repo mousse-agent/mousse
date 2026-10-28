@@ -28,7 +28,7 @@ function daemon() {
   const harness = testHarness({
     profileHome: home,
     instances,
-    drivers: [piDriver({ client: () => ({ chat: async () => { throw new Error('no model call in this test') } }) as never, credentials: () => credentials as never })]
+    drivers: [piDriver({ credentials: () => credentials as never })]
   })
   cleanups.push(() => harness.stop(), () => rmSync(home, { recursive: true, force: true }))
   const context = { mms: { harness, providerInstances: instances, providerAuth: credentials }, globalSequence: () => 0 } as unknown as HandlerContext

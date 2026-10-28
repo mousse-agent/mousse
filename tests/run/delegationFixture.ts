@@ -1,7 +1,7 @@
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { PI_LOOP_CAPABILITIES } from '../../src/mms/run/adapters/pi/PiLoopAdapter'
+import { PI_TEST_CAPABILITIES } from '../support/piStub'
 import type { ProviderCapabilities } from '../../src/mms/run/adapters/ProviderAdapter'
 import { ProfileDatabase } from '../../src/mms/run/db/ProfileDatabase'
 import { EffectOutbox } from '../../src/mms/run/EffectOutbox'
@@ -14,7 +14,7 @@ import { ToolInvocations } from '../../src/mms/run/ToolInvocations'
 const T0 = Date.parse('2026-10-12T00:00:00.000Z')
 
 /** Steer only by queueing: rule 4 must leave rows pending for such a parent. */
-export const QUEUE_ONLY_CAPABILITIES: ProviderCapabilities = { ...PI_LOOP_CAPABILITIES, steer: 'queue_only' }
+export const QUEUE_ONLY_CAPABILITIES: ProviderCapabilities = { ...PI_TEST_CAPABILITIES, steer: 'queue_only' }
 
 /**
  * One run database, engine and reconciler on a fake clock, with a delegation host that names child
@@ -38,7 +38,7 @@ export function delegationFixture(
     outbox,
     tools,
     now,
-    capabilitiesFor: (threadId) => capabilities.get(threadId) ?? PI_LOOP_CAPABILITIES
+    capabilitiesFor: (threadId) => capabilities.get(threadId) ?? PI_TEST_CAPABILITIES
   })
   const requests: DelegationRequest[] = []
   /** Child threads the host holds (created and not deleted). */

@@ -79,7 +79,7 @@ describe('two Claude Code instances', () => {
       questions,
       shellPath: async () => ({ entries: [], source: 'failed' }),
       drivers: [
-        piDriver({ client: () => ({ chat: async () => { throw new Error('unused') } }) }),
+        piDriver(),
         claudeCodeDriver({
           builtIn: () => builtIn,
           // No sign-in terminal: the page offers the command to copy.

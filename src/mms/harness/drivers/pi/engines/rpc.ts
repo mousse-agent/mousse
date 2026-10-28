@@ -1,5 +1,5 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
 import type { HarnessCaps } from '../../../../../shared/harness/types'
 import { hasContainmentEvidence, PI_RPC_EVIDENCE_ITEMS, PI_RPC_NO_SHELL_ITEMS, type ContainmentEvidence } from '../../../compatibility'
 import type { DriverContext, DriverRuntime, LiveProcessHost } from '../../../driver'
@@ -7,11 +7,12 @@ import { PiRpcEngine, type PiEngineCatalog, type PiMousseTool, type PiRpcEngineO
 import type { PiRuntimePaths } from '../../../pi/launch'
 import type { PiOAuthSource } from '../../../pi/oauthBroker'
 import { piShellPath } from '../../../pi/settings'
-import { piInstanceRuntime, type PiCredentials } from './legacy'
+import { instanceStateDir } from '../../../instances'
+import { piInstanceRuntime, type PiCredentials } from '../instance'
 
 /**
- * Pi's agent as its own process (PR 2 §4): a `pi:*` instance the user switched to it (Advanced →
- * Engine: New engine), except the legacy-only providers (`../engines.ts`).
+ * Pi's agent as its own process (PR 2 §4): every `pi:*` instance, except the retired providers
+ * (`../retired.ts`).
  *
  * - Containment and tool control are `weak`/`approval_only` (these caps) wherever the evidence suite
  *   has not passed for this platform and Pi version: Mousse sees and can refuse every call, but does
@@ -44,8 +45,7 @@ export const PI_RPC_CAPS: HarnessCaps = Object.freeze({
   contextUsage: 'reported',
   toolControl: 'approval_only',
   budgets: 'hard',
-  spendLimits: 'reserved',
-  definitionLimits: 'none'
+  spendLimits: 'reserved'
 })
 
 /** What decides whether the evidence suite passed here: the platform, the pinned Pi and the records. */
@@ -125,6 +125,8 @@ export interface PiRpcDriverOptions {
   apiKey?(providerId: string): string | undefined
   /** Mousse's tools for a thread, with their class; as `runId`'s turn is offered them when given (`ToolRegistry.listForTurn`). */
   mousseTools?(threadId: string, runId?: string): PiMousseTool[]
+  /** The user's own MCP tools a turn is offered, proxied through Mousse's MCP server (`userMcp: 'proxy'`). */
+  userMcpTools?(threadId: string, runId?: string): Promise<PiMousseTool[]>
   /**
    * Ids the provider's stored credential carries beside its key (Cloudflare's account and gateway
    * ids): they reach the child's environment, never a credential.
@@ -182,11 +184,12 @@ export function createRpcRuntime(context: DriverContext, providerId: string, lab
     extraEnv: () => ({ ...(options.credentialEnv?.(providerId) ?? {}), ...(context.config.env ?? {}) }),
     shellPath: () => piShellPath({ env: context.env.env }),
     ...(options.mousseTools ? { mousseTools: (threadId: string, runId?: string) => options.mousseTools!(threadId, runId) } : {}),
+    ...(options.userMcpTools ? { userMcpTools: (threadId: string, runId?: string) => options.userMcpTools!(threadId, runId) } : {}),
     // A new session seeded with the chat's history tells the thread (`history_injected`).
     notice: (threadId, { message }) => notice.send(threadId, message),
     ...options.engine
   })
-  // The first turn of the instance on this engine says so, once (PR 2 §5, "Engine notice").
+  // The first turn of the instance on this engine says so, once ("Engine notice").
   const startTurn: PiRpcEngine['startTurn'] = (input, ...rest) => {
     notice.show(input.threadId)
     return engine.startTurn(input, ...rest)
@@ -290,14 +293,43 @@ function credentialChanges(engine: PiRpcEngine, subject: () => string | undefine
 /** File in the instance's state dir that records the engine notice was shown. */
 export const ENGINE_NOTICE_FILE = 'engine-notice.json'
 
+/** File in the instance's state dir of a connection that ran on the deleted loop: its notice is due. */
+export const ENGINE_NOTICE_DUE_FILE = 'engine-notice-due.json'
+
+/** File in the profile's harness dir: the connections on the loop were marked (`markLoopConnections`). */
+export const LOOP_REMOVAL_MARKER = 'pi-loop-removed.json'
+
 /**
- * The one-time notice that an instance now runs on Pi's agent: shown on its first RPC turn and
- * recorded in the instance's state dir, so it never shows again (a removed instance starts over).
+ * Once per profile, at the first start after the loop was deleted (PR 4 unit 4h): every `pi:*`
+ * connection whose stored engine was not `rpc` ran on the loop, so its notice becomes due. A profile
+ * that had none (a fresh install) and every connection added later get no notice.
+ */
+export function markLoopConnections(profileHome: string, instances: ReadonlyArray<{ instanceId: string; config: Record<string, unknown> | undefined }>): void {
+  const marker = join(profileHome, 'harness', LOOP_REMOVAL_MARKER)
+  if (existsSync(marker)) return
+  for (const { instanceId, config } of instances) {
+    if (config?.engine === 'rpc') continue
+    const dir = instanceStateDir(profileHome, instanceId)
+    mkdirSync(dir, { recursive: true, mode: 0o700 })
+    writeFileSync(join(dir, ENGINE_NOTICE_DUE_FILE), `${JSON.stringify({ engine: config?.engine ?? 'legacy' })}
+`, { mode: 0o600 })
+  }
+  mkdirSync(dirname(marker), { recursive: true, mode: 0o700 })
+  writeFileSync(marker, `${JSON.stringify({ at: new Date().toISOString() })}
+`, { mode: 0o600 })
+}
+
+/**
+ * The one-time notice that a connection that ran on the deleted loop now runs on Pi's agent: shown
+ * on its first turn when it is due (`markLoopConnections`) and recorded in the instance's state dir,
+ * so it never shows again. A connection that was already on Pi's agent, a new one and one on a fresh
+ * install see none.
  */
 function engineNotice(context: DriverContext, label: string): { show(threadId: string): void; send(threadId: string, text: string): void; setHost(host: LiveProcessHost | null): void } {
   let host: LiveProcessHost | null = null
   const path = join(context.stateDir, ENGINE_NOTICE_FILE)
-  let shown = existsSync(path)
+  const due = join(context.stateDir, ENGINE_NOTICE_DUE_FILE)
+  let shown = existsSync(path) || !existsSync(due)
   return {
     send: (threadId, text) => {
       try {
@@ -316,11 +348,12 @@ function engineNotice(context: DriverContext, label: string): { show(threadId: s
         mkdirSync(context.stateDir, { recursive: true, mode: 0o700 })
         writeFileSync(path, `${JSON.stringify({ engine: 'rpc', shownAt: new Date().toISOString() })}
 `, { mode: 0o600 })
+        rmSync(due, { force: true })
       } catch (error) {
         console.warn('[harness] could not record the engine notice', error instanceof Error ? error.message : String(error))
       }
       try {
-        host.notice(threadId, `${label} now runs on Pi's agent, so its tools and replies may differ slightly. To switch back: Providers → ${label} → Advanced → Engine: Legacy.`)
+        host.notice(threadId, `The Mousse agent engine was removed; ${label} now runs on Pi's agent, so its tools and replies may differ slightly.`)
       } catch (error) {
         console.warn('[harness] notice failed', error instanceof Error ? error.message : String(error))
       }

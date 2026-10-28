@@ -2,12 +2,12 @@ import { describe, expect, it } from 'vitest'
 import { heartbeatToleranceMs, steerStrategy, stopStrategy } from '../../src/mms/run/CommandPolicy'
 import { ANTIGRAVITY_CAPABILITIES } from '../../src/mms/harness/acp/presets/antigravity'
 import { CLAUDE_SUBSCRIPTION_CAPABILITIES } from '../../src/mms/run/adapters/claudeSubscription/ClaudeSubscriptionAdapter'
-import { PI_LOOP_CAPABILITIES } from '../../src/mms/run/adapters/pi/PiLoopAdapter'
+import { PI_TEST_CAPABILITIES } from '../support/piStub'
 import type { ProviderCapabilities } from '../../src/mms/run/adapters/ProviderAdapter'
 import type { RunRecord, RunStatus } from '../../src/mms/run/types'
 
 const caps = (patch: Partial<ProviderCapabilities> = {}): ProviderCapabilities => ({
-  ...PI_LOOP_CAPABILITIES,
+  ...PI_TEST_CAPABILITIES,
   ...patch
 })
 
@@ -53,7 +53,7 @@ describe('steerStrategy', () => {
 
   it('steers the pi loop natively and Claude Subscription and Antigravity by interrupt-and-restart', () => {
     for (const status of LIVE) {
-      expect(steerStrategy(PI_LOOP_CAPABILITIES, run(status))).toBe('native')
+      expect(steerStrategy(PI_TEST_CAPABILITIES, run(status))).toBe('native')
       expect(steerStrategy(CLAUDE_SUBSCRIPTION_CAPABILITIES, run(status))).toBe('interrupt_restart')
       expect(steerStrategy(ANTIGRAVITY_CAPABILITIES, run(status))).toBe('interrupt_restart')
     }

@@ -180,7 +180,7 @@ describe('openai-codex after the PR 3 release', () => {
     const { harness, stored } = await profile()
     expect(stored()['pi:openai-codex']).toMatchObject({ driver: 'pi', enabled: true, config: { displayName: 'ChatGPT' } })
     const snapshot = await snapshotOf(harness, 'pi:openai-codex')
-    expect(snapshot).toMatchObject({ driver: 'pi', auth: { state: 'signed_in' }, runs: { state: 'no' }, engine: { effective: 'legacy' } })
+    expect(snapshot).toMatchObject({ driver: 'pi', auth: { state: 'signed_in' }, runs: { state: 'no' } })
     expect(snapshot.nextStep).toEqual(RETIRED)
     expect(describeStatus(snapshot)).toMatchObject({ headline: 'Retired by this update', tone: 'warning', nextStep: RETIRED })
     // Control: an entry with no old route going away has no Move step.

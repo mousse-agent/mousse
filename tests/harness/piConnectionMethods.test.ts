@@ -7,7 +7,7 @@ import { createHash } from 'node:crypto'
 import { builtinProviders } from '@earendil-works/pi-ai/providers/all'
 import type { Api, Model } from '@earendil-works/pi-ai'
 import { describe, expect, it } from 'vitest'
-import { piDriver } from '../../src/mms/harness/drivers/pi'
+import { piRetiredOf } from '../../src/mms/harness/drivers/pi'
 import { PI_AMBIENT_SUBJECT_ENV, piCredentialSubject, piRpcProfileOptions, type PiProfileAuth } from '../../src/mms/harness/drivers/pi/profile'
 import { PI_AMBIENT_ENV, PI_AMBIENT_MARKER, piOwnProviderKeys } from '../../src/mms/harness/pi/envKeys'
 import { piRuntimePaths } from '../../src/mms/harness/pi/launch'
@@ -21,8 +21,8 @@ type Method =
   | 'ambient'
   /** pi-ai sign-in → stock `toAuth`, Mousse's broker refreshes. A stored key works too. */
   | 'oauth'
-  /** Stays on the legacy loop (PR 4 / PR D). */
-  | 'legacy'
+  /** Retired: the connection moves to its own agent (`drivers/pi/retired.ts`). */
+  | 'retired'
 
 const METHODS: Record<string, Method> = {
   'amazon-bedrock': 'ambient',
@@ -34,7 +34,7 @@ const METHODS: Record<string, Method> = {
   cerebras: 'key',
   'cloudflare-ai-gateway': 'key+env',
   'cloudflare-workers-ai': 'key+env',
-  cursor: 'legacy',
+  cursor: 'retired',
   deepseek: 'key',
   fireworks: 'key',
   'github-copilot': 'oauth',
@@ -50,7 +50,7 @@ const METHODS: Record<string, Method> = {
   'moonshotai-cn': 'key',
   nvidia: 'key',
   openai: 'key',
-  'openai-codex': 'legacy',
+  'openai-codex': 'retired',
   opencode: 'key',
   'opencode-go': 'key',
   openrouter: 'oauth',
@@ -87,19 +87,14 @@ describe('Pi connection methods', () => {
     expect(Object.keys(METHODS).sort()).toEqual([...builtinProviders().map((provider) => provider.id), 'cursor'].sort())
   })
 
-  it('routes each row to its engine once the user opts in', () => {
-    const driver = piDriver({ client: () => { throw new Error('unused') }, rpc: profile({}) })
-    for (const [id, method] of Object.entries(METHODS)) {
-      expect(driver.engine?.(`pi:${id}`, { engine: 'rpc' }).effective, id).toBe(method === 'legacy' ? 'legacy' : 'rpc')
-      // The default stays the loop until the parity gate passed.
-      expect(driver.engine?.(`pi:${id}`, undefined).effective, id).toBe('legacy')
-    }
+  it('marks retired exactly the rows the driver retired', () => {
+    for (const [id, method] of Object.entries(METHODS)) expect(Boolean(piRetiredOf(id)), id).toBe(method === 'retired')
   })
 
   it('keeps pi-ai sign-in for the OAuth rows and only for them', () => {
     const providers = new Map(builtinProviders().map((provider) => [provider.id, provider]))
     for (const [id, method] of Object.entries(METHODS)) {
-      if (method === 'legacy' || id === 'anthropic') continue
+      if (method === 'retired' || id === 'anthropic') continue
       expect(Boolean(providers.get(id)?.auth.oauth), id).toBe(method === 'oauth')
     }
   })

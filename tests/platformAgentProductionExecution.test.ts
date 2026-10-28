@@ -10,7 +10,8 @@ import { AGENT_DEFINITION_CAPABILITY } from '../src/shared/agentPlatform'
 import { defaultAgentSettings } from '../src/shared/agents/defaults'
 import { canonicalJson, sha256Hex } from '../src/shared/agents/hashes'
 import { createAgentDefinitionsClient } from '../src/renderer/services/agentDefinitionsClient'
-import { providerResponse, streamOf } from './fixtures/agent-platform/agent-runtime-policy/helpers'
+import { providerResponse } from './fixtures/agent-platform/agent-runtime-policy/helpers'
+import { installExactDefinitionRuntime } from './fixtures/agent-platform/exactDefinitionRuntime'
 import type { BrowserRuntimePort } from '../src/shared/browser/runtime'
 import type { BrowserToolContext } from '../src/shared/browser/automation'
 
@@ -43,13 +44,18 @@ async function fixture(outputs: AssistantMessage[]) {
   vi.spyOn(services.providerAuth, 'has').mockReturnValue(true)
   // Its stored sign-in: the gateway catalogue lists the models of signed-in instances.
   vi.spyOn(services.providerAuth.credentials, 'listProviderIds').mockReturnValue([provider.id])
-  vi.spyOn(services.providerAuth.models, 'getAuth').mockResolvedValue({ apiKey: 'fixture' } as never)
-  vi.spyOn(services.providerAuth.models, 'streamSimple').mockImplementation((_model, context) => {
-    captured.push(structuredClone(context))
-    const next = outputs.shift()
-    if (!next) throw new Error('fixture provider exhausted')
-    return streamOf(next) as never
-  })
+  // The profile's Mousse MCP server, as far as the gateway sees it: a definition's app tools need a bearer.
+  services.orchestrator.setMcpAttachment({ bearerForTurn: () => ({ url: 'http://127.0.0.1:9/mcp', token: 'fake-bearer', tokenHash: 'fake-hash' }), turnEnded: () => undefined, revokeThread: () => {} })
+  // Definition turns run on the exact stand-in for Pi RPC, the profile's `pi:<provider>` instance; the
+  // model's replies are `outputs` (or `setNext`).
+  let custom: ((context: Context, signal: AbortSignal) => Promise<AssistantMessage>) | undefined
+  installExactDefinitionRuntime({ orchestrator: services.orchestrator, providerId: provider.id, profileHome: services.getProfileHomeDir(), captured,
+    next: async (context, signal) => {
+      if (custom) return custom(context, signal)
+      const next = outputs.shift()
+      if (!next) throw new Error('fixture provider exhausted')
+      return next
+    } })
   const integrations = services.settings.get().integrations
   services.settings.set({ integrations: { ...integrations, tools: { enabled: true, enabledTools: ['read', 'write', 'ask_user', 'create_task'] } } })
   const server = new MmsProtocolServer({ mms: main, ownerToken: 'fixture-owner' })
@@ -60,7 +66,8 @@ async function fixture(outputs: AssistantMessage[]) {
     clients.push(rpc); await rpc.connect(); await rpc.request('profiles.bind', { profile })
     return { rpc, agents: createAgentDefinitionsClient(rpc) }
   }
-  return { root, homeDir, main, alice, bob, services, captured, modelRef: { providerId: provider.id, modelId: model.id }, connect, close: async () => {
+  return { root, homeDir, main, alice, bob, services, captured, modelRef: { providerId: provider.id, modelId: model.id }, connect,
+    setNext: (next: typeof custom) => { custom = next }, close: async () => {
     await Promise.allSettled(clients.map((client) => client.close()))
     await server.stop(); await main.stop()
   } }
@@ -225,10 +232,7 @@ describe('native Agent Editor Try Run production host', () => {
     const f = await fixture([])
     try {
       const a = await f.connect(f.alice.id)
-      vi.mocked(f.services.providerAuth.models.streamSimple).mockImplementation((_model, _context, options) => ({
-        async *[Symbol.asyncIterator]() { await new Promise<void>((resolve) => options?.signal?.addEventListener('abort', () => resolve(), { once: true })) },
-        result: async () => providerResponse([], 'aborted')
-      }) as never)
+      f.setNext((_context, signal) => new Promise((resolve) => signal.addEventListener('abort', () => resolve(providerResponse([], 'aborted')), { once: true })))
       const created = await a.agents.create({ profileId: f.alice.id, settings: settings('Cancel Agent', f.modelRef), systemPrompt: 'wait' })
       const request = a.agents.tryRun({ profileId: f.alice.id, id: created.id, expectedDraftHash: created.draftHash, prompt: 'wait' })
       await vi.waitFor(() => expect(f.services.platform.agentRuns.getActiveCount()).toBe(1))

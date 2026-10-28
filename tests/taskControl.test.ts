@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { TaskQueue } from '../src/mms/tasks/TaskQueue'
 import { TaskControlTools } from '../src/mms/tasks/TaskControlTools'
-import { buildOrchestratorSystemPrompt } from '../src/mms/orchestrator/systemPrompt'
 
 describe('TaskQueue validated operations', () => {
   it('creates unassigned tasks as first-class entries', () => {
@@ -119,29 +118,5 @@ describe('TaskControlTools', () => {
     const badStatus = await tools.execute('update_task', { id, status: 'not-a-status' })
     expect(badStatus.isError).toBe(true)
     expect(badStatus.text).toMatch(/Invalid task status/)
-  })
-})
-
-describe('task tools in every chat mode (prompt surface)', () => {
-  it('mentions task queue tools in agent, plan, build, and skill prompts', () => {
-    const modes = [
-      buildOrchestratorSystemPrompt({ mode: 'agent' }),
-      buildOrchestratorSystemPrompt({ mode: 'plan' }),
-      buildOrchestratorSystemPrompt({ mode: 'build' }),
-      buildOrchestratorSystemPrompt({ mode: { type: 'skill', skillId: 'reviewer' } })
-    ] as const
-
-    for (const prompt of modes) {
-      expect(prompt).toContain('list_tasks')
-      expect(prompt).toContain('create_task')
-      expect(prompt).toContain('update_task')
-      expect(prompt).toContain('unassigned')
-    }
-  })
-
-  it('omits task queue tools from subagent prompts', () => {
-    const sub = buildOrchestratorSystemPrompt({ mode: 'build', subagent: true })
-    expect(sub).not.toContain('create_task')
-    expect(sub).not.toContain('list_tasks')
   })
 })

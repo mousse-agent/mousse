@@ -90,15 +90,6 @@ export interface InstanceConfigView {
  */
 export type CredentialKind = 'api_key' | 'subscription' | 'ambient' | 'unknown'
 
-/** `rpc`: Pi's agent as its own process; `legacy`: the in-process loop Mousse used before. */
-export type PiEngine = 'rpc' | 'legacy'
-
-export interface InstanceEngine {
-  setting?: PiEngine
-  effective: PiEngine
-  switchable: boolean
-}
-
 export interface InstanceSnapshot {
   instanceId: string
   driver: HarnessDriverKind
@@ -152,11 +143,6 @@ export interface InstanceSnapshot {
   permissionLimits?: PermissionLimits
   /** The stored settings the editor shows; present on daemons with the harness gateway. */
   config?: InstanceConfigView
-  /**
-   * The engine a `pi` instance runs on: the user's stored choice (absent = the default), the one in
-   * effect, and whether the user may switch it (Advanced → Engine). Absent for other drivers.
-   */
-  engine?: InstanceEngine
   models: {
     entries: InstanceModel[]
     source: 'live' | 'cached' | 'manifest' | 'none'

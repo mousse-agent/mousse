@@ -15,35 +15,50 @@ import { AgentResolver } from '../src/mms/agentDefinitions/AgentResolver'
 import { StaticAgentIntegrationLookup, StaticAgentModelLookup } from '../src/mms/agentDefinitions/lookups'
 import { defaultAgentSettings } from '../src/shared/agents/defaults'
 import type { AgentExecutionRequest } from '../src/shared/agents/execution'
-import { AgentExecutionService } from '../src/mms/agentDefinitions/AgentExecutionService'
-import { createNativeAgentRuntime } from '../src/mms/agentDefinitions/nativeRuntime'
+import { AgentRegistry } from '../src/mms/agents/AgentRegistry'
+import { OrchestratorService } from '../src/mms/orchestrator/OrchestratorService'
+import { ProfileDatabase } from '../src/mms/run/db/ProfileDatabase'
+import { RunEngine } from '../src/mms/run/RunEngine'
+import { RunStore } from '../src/mms/run/RunStore'
+import { TaskQueue } from '../src/mms/tasks/TaskQueue'
+import { PtyManager } from '../src/mms/terminals/PtyManager'
+import { WorktreeManager } from '../src/mms/worktree/WorktreeManager'
+import { getDefaultSettings } from '../src/shared/settings'
 import { ProjectManager } from '../src/mms/data/ProjectManager'
 import { ThreadDataStore } from '../src/mms/data/ThreadDataStore'
 import { UserQuestionService } from '../src/mms/orchestrator/UserQuestionService'
 import { DomainHandlerRegistry } from '../src/mms/protocol/domainRegistry'
 import { registerChatMethods, validateChatParams } from '../src/mms/chats/registerMethods'
 import { CHAT_CAPABILITY } from '../src/shared/chats'
-import { nativeClient, providerResponse } from './fixtures/agent-platform/agent-runtime-policy/helpers'
+import { providerResponse } from './fixtures/agent-platform/agent-runtime-policy/helpers'
+import { installExactDefinitionRuntime } from './fixtures/agent-platform/exactDefinitionRuntime'
 import { tryAcquireExecutionLease, releaseExecutionLeaseHandle } from '../src/mms/queue/ThreadExecutionLease'
 import { canonicalJson, sha256Hex } from '../src/shared/agents/hashes'
 
 const roots: string[] = []
 const services: AgentChatService[] = []
+const runtimes: Array<() => void> = []
+const previousHome = process.env.MOUSSE_HOME
 afterEach(async () => {
   await Promise.all(services.splice(0).map((service) => service.dispose()))
+  for (const stop of runtimes.splice(0)) stop()
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true })
+  if (previousHome === undefined) delete process.env.MOUSSE_HOME
+  else process.env.MOUSSE_HOME = previousHome
 })
+/** A running Mousse MCP server, as far as the gateway sees it: every turn gets a bearer. */
+const mcpServer = { bearerForTurn: () => ({ url: 'http://127.0.0.1:9/mcp', token: 'fake-bearer', tokenHash: 'fake-hash' }), turnEnded: () => undefined, revokeThread: () => {} }
 function fixture(outputs: Array<string | AssistantMessage> = ['done'], override?: (request: AgentExecutionRequest) => Promise<any>) {
   const root = mkdtempSync(join(realpathSync(tmpdir()), 'mousse-chats-')); roots.push(root)
   const profileId = randomUUID()
   const registry = new AgentDefinitionRegistry({ profileId, profileRoot: root })
   const lookup = new StaticAgentIntegrationLookup({ builtinToolIds: ['read', 'write'] })
-  const models = new StaticAgentModelLookup([{ ref: { providerId: 'fixture-provider', modelId: 'fixture-model' }, available: true,
+  const models = new StaticAgentModelLookup([{ ref: { providerId: 'fixture-provider', modelId: 'fixture-model', instanceId: 'pi:fixture-provider' }, available: true,
     efforts: [], speeds: [], contexts: [], capabilities: ['tools'], unavailableReasons: [] }])
   const resolver = new AgentResolver({ registry, integrationLookup: lookup, modelLookup: models })
   const createAgent = (slug: string, publish = true) => {
     const settings = defaultAgentSettings({ name: slug.toUpperCase(), slug, purpose: `${slug} purpose` })
-    settings.primaryModel.ref = { providerId: 'fixture-provider', modelId: 'fixture-model' }
+    settings.primaryModel.ref = { providerId: 'fixture-provider', modelId: 'fixture-model', instanceId: 'pi:fixture-provider' }
     settings.recovery.retryCount = 0
     const draft = registry.createDraft({ settings, systemPrompt: `You are ${slug}.` })
     if (publish) registry.publish(draft.id, draft.draftHash, { integrationLookup: lookup })
@@ -54,13 +69,24 @@ function fixture(outputs: Array<string | AssistantMessage> = ['done'], override?
   projects.setThreadStore(threads)
   const questions = new UserQuestionService()
   const captured: Context[] = [], requests: AgentExecutionRequest[] = []
-  const llm = nativeClient(outputs.map((text) => typeof text === 'string' ? providerResponse([{ type: 'text', text }], 'stop') : text), captured)
-  const run = new AgentExecutionService({ runtime: createNativeAgentRuntime(llm) })
+  // Replies run as definition turns through the real orchestrator, gateway and run engine, on the
+  // exact stand-in for Pi RPC.
+  process.env.MOUSSE_HOME = root
+  const settings = getDefaultSettings()
+  settings.integrations.skills.enabled = false
+  const orch = new OrchestratorService(new AgentRegistry(), new TaskQueue(), new WorktreeManager(root), new PtyManager(), { get: () => settings } as never, {} as never)
+  orch.setThreadStore(threads)
+  const engine = new RunEngine({ store: new RunStore(new ProfileDatabase({ profileHome: root })) })
+  orch.setRunEngine(engine)
+  orch.setMcpAttachment(mcpServer)
+  const { harness } = installExactDefinitionRuntime({ orchestrator: orch, providerId: 'fixture-provider', profileHome: root, captured,
+    outputs: outputs.map((text) => typeof text === 'string' ? providerResponse([{ type: 'text', text }], 'stop') : text) })
+  runtimes.push(() => { orch.setRunEngine(null); engine.store.db.close(); harness.stop() })
   const options = { services: { profileId, getProfileHomeDir: () => root, projects, threads, questions,
     events: { broadcast: vi.fn() }, orchestrator: {
       recordAgentDefinitionMessages: vi.fn(), runAgentDefinition: async (request: AgentExecutionRequest) => {
         requests.push(request)
-        return override ? override(request) : run.run(request)
+        return override ? override(request) : orch.runAgentDefinition(request)
       }
     } } as any, registry, resolverFor: vi.fn(() => resolver) }
   const service = new AgentChatService(options); services.push(service)

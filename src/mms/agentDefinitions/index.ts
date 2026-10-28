@@ -8,7 +8,6 @@ export type { AgentDefinitionRegistryOptions } from './AgentDefinitionRegistry'
 export { AgentResolver } from './AgentResolver'
 export type { AgentResolverOptions } from './AgentResolver'
 export { AgentExecutionService, createAgentExecutionService } from './AgentExecutionService'
-export { createNativeAgentRuntime } from './nativeRuntime'
 export type {
   AgentExecutionBindings,
   AgentExecutionBudget,

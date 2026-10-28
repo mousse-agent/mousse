@@ -28,7 +28,7 @@ function buildContext(root) {
     runtime: `${process.version}/${process.platform}/${process.arch}/${esbuildVersion}`,
     config: CONFIG_FILES.map((path) => [path, existsSync(resolve(root, path)) ? digest(resolve(root, path)) : null]),
     // New files can change extension/index resolution without changing an old input.
-    sources: [...fileNames(root, 'src'), ...fileNames(root, 'node_modules/pi-cursor-sdk/src')]
+    sources: fileNames(root, 'src')
   }
 }
 

@@ -35,7 +35,7 @@ export {
   type SubagentRef
 } from './delegation'
 
-/** The tool families in the order the pi loop has always sent them, after the delegation tools. */
+/** The tool families in the order runtimes are sent them, after the delegation tools. */
 export const APP_TOOL_FAMILIES = ['skills', 'plans', 'tasks', 'quickActions', 'devGui', 'web', 'browser', 'applets', 'delegation', 'thread', 'schedules', 'bots', 'projectGit'] as const
 export type AppToolFamily = (typeof APP_TOOL_FAMILIES)[number]
 

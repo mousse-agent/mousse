@@ -1,5 +1,4 @@
 import type { Message } from '../../shared/transcript'
-import { ORCHESTRATOR_SYSTEM_PROMPT } from './systemPrompt'
 import type { ContextUsageSnapshot } from '../../shared/types'
 import { estimateMessageTokens } from './nativeContext'
 
@@ -39,7 +38,7 @@ export function computeContextUsage(params: ComputeContextUsageParams): ContextU
   const {
     draftInput, contextLimit, modelName, lastMeasuredInput,
     lastMeasuredCacheRead, lastMeasuredCacheWrite,
-    legacyEstimated = false, systemPromptText = ORCHESTRATOR_SYSTEM_PROMPT,
+    legacyEstimated = false, systemPromptText = '',
     mcpToolsText = '', otherToolsText = ''
   } = params
   const messages: Message[] = params.messages ?? (params.history ?? []).map((message) => ({
@@ -108,4 +107,3 @@ function partitionMessages(messages: Message[]): ContextUsageSnapshot['categorie
   ]
 }
 
-export { ORCHESTRATOR_SYSTEM_PROMPT }

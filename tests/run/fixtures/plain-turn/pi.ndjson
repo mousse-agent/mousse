@@ -1,8 +1,0 @@
-{"kind":"transcript","adapter":"pi","scenario":"plain-turn","boundary":"LlmClient.chat call: request projection out; callbacks and result in","recordedAt":"hand-authored","version":1}
-{"dir":"out","frame":{"kind":"chat","messages":[{"role":"user","content":"Say hello"}],"options":{"mode":"agent"}}}
-{"dir":"in","frame":{"kind":"text","event":{"phase":"start","content":"","contentIndex":0}}}
-{"dir":"in","frame":{"kind":"progress"}}
-{"dir":"in","frame":{"kind":"text","event":{"phase":"delta","content":"Hello","contentIndex":0}}}
-{"dir":"in","frame":{"kind":"text","event":{"phase":"delta","content":"Hello from replay","contentIndex":0}}}
-{"dir":"in","frame":{"kind":"text","event":{"phase":"complete","content":"Hello from replay","contentIndex":0}}}
-{"dir":"in","frame":{"kind":"result","result":{"text":"Hello from replay","usage":{"input":12,"output":4,"cacheRead":0,"cacheWrite":0,"totalTokens":16,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"modelName":"GPT Replay","totalResponseTimeMs":40,"totalTokensUsed":16,"tokensPerSecond":100,"contextInputs":{"systemPromptText":"","mcpToolsText":"","otherToolsText":"","signature":"replay-sig","modelKey":"openai:gpt-replay"},"toolEvents":[]},"append":[{"role":"assistant","content":[{"type":"text","text":"Hello from replay"}],"api":"openai-completions","provider":"openai","model":"gpt-replay","usage":{"input":12,"output":4,"cacheRead":0,"cacheWrite":0,"totalTokens":16,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"stopReason":"stop"}]}}

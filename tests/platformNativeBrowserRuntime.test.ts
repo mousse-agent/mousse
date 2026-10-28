@@ -1,23 +1,27 @@
 import { browserBackendCapabilities } from '../src/shared/browser/capabilities'
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { Context } from '@earendil-works/pi-ai'
 import { AgentExecutionService } from '../src/mms/agentDefinitions/AgentExecutionService'
-import { createNativeAgentRuntime } from '../src/mms/agentDefinitions/nativeRuntime'
 import { collectUnsupportedRuntimeSettings } from '../src/mms/agentDefinitions/runtimePolicy'
 import type { BrowserRuntimePort } from '../src/shared/browser/runtime'
 import type { BrowserToolContext, BrowserToolOutput } from '../src/shared/browser/automation'
 import type { BrowserObservation, BrowserSessionRecord } from '../src/shared/browser/types'
-import { createDefinitionBrowserBinding, formatBrowserToolOutput } from '../src/mms/orchestrator/browser'
+import { formatBrowserToolOutput } from '../src/mms/orchestrator/browser'
 import { mainBrowserBinding } from '../src/mms/platform/mainBrowserBinding'
 import type { MmsProfileServices } from '../src/mms/MmsProfileServices'
 import {
   createPolicyTempRoot,
   grantTools,
-  fixtureModel,
-  nativeClient,
   providerResponse,
+  removeOwnedPolicyTempRoots,
   resolvedDefinition
 } from './fixtures/agent-platform/agent-runtime-policy/helpers'
+import { disposeDefinitionRuns, runDefinition } from './fixtures/agent-platform/definitionRun'
+
+afterEach(async () => {
+  disposeDefinitionRuns()
+  await removeOwnedPolicyTempRoots()
+})
 
 interface RecordedDispatch {
   context: BrowserToolContext
@@ -98,94 +102,42 @@ function browserSnapshot() {
   return snapshot
 }
 
+/** The tool results the model was sent, in order. */
+function toolResults(captured: Context[]): string {
+  return JSON.stringify(captured.at(-1)?.messages.filter((message) => message.role === 'toolResult').map((message) => message.content) ?? [])
+}
+
+/**
+ * A browser definition run on the exact stand-in for Pi RPC: its browser tools are Mousse app tools
+ * over the MCP registry, on the host's browser runtime under the definition run's binding.
+ */
 async function runBrowserNative(input: {
   outputs: ReturnType<typeof providerResponse>[]
   runtimeOutputs?: BrowserToolOutput[]
   target?: BrowserToolContext['target'] | null
   snapshot?: ReturnType<typeof resolvedDefinition>
-  bindRuntime?: boolean
-  hostRuntime?: boolean
-  bindExecution?: boolean
   budget?: { maxToolCalls?: number; maxElapsedMs?: number; maxTurns?: number }
   signal?: AbortSignal
-  projectPath?: string
-  vision?: boolean
-  readScreenshot?: BrowserRuntimePort['readScreenshot']
 }) {
   const snapshot = input.snapshot ?? browserSnapshot()
-  const captured: Context[] = []
   const recorded = recordingPort(input.runtimeOutputs ?? [], input.target)
-  recorded.port.readScreenshot = input.readScreenshot
-  if (input.readScreenshot && input.target !== null) recorded.port.capabilities = () => browserBackendCapabilities(input.target?.backend ?? 'electron-attached', true, { screenshots: true })
-  const llm = nativeClient(input.outputs, captured, input.vision ? {
-    getModel: (provider, id) => ({ ...fixtureModel(provider, id), input: ['text', 'image'] })
-  } : undefined)
-  if (input.bindRuntime !== false) llm.setBrowserRuntime(recorded.port)
   const runId = 'run-browser-1'
-  const projectPath = input.projectPath ?? createPolicyTempRoot()
-  const request = {
-    profileId: 'profile-1' as const,
-    resolved: snapshot,
-    threadId: 'thread-1',
+  const projectPath = createPolicyTempRoot()
+  const run = runDefinition(snapshot, input.outputs, {
     runId,
-    source: 'editor' as const,
+    source: 'editor',
     projectPath,
     input: 'use the selected tab',
-    host: {
-      workspaceRoots: [projectPath],
-      ...(input.hostRuntime !== false ? { browserRuntime: recorded.port } : {})
-    },
-    budget: input.budget,
+    host: { workspaceRoots: [projectPath], browserRuntime: recorded.port },
+    profileBrowser: recorded.port,
+    budget: input.budget as never,
     signal: input.signal
-  }
-  if (input.bindExecution !== false) {
-    llm.bindBrowserExecution(createDefinitionBrowserBinding({ request, runId, resolved: snapshot }))
-  }
-  const service = new AgentExecutionService({ runtime: createNativeAgentRuntime(llm) })
-  const result = await service.run(request)
-  return { result, captured, recorded, snapshot, runId }
+  })
+  const result = await run.pending
+  return { result, captured: run.captured, threadId: run.threadId, recorded, snapshot, runId }
 }
 
-describe('native browser runtime binding', () => {
-  it('delivers a requested screenshot as image content in the next model context', async () => {
-    const snapshot = browserSnapshot()
-    grantTools(snapshot, ['browser_open', 'browser_observe', 'browser_screenshot'])
-    const readScreenshot = vi.fn().mockResolvedValue({ data: 'c2NyZWVuc2hvdA==', mimeType: 'image/png' })
-    const { captured, result, recorded } = await runBrowserNative({
-      snapshot, vision: true, readScreenshot,
-      runtimeOutputs: [{ observation: observation({ screenshot: {
-        artifactId: 'shot-1', pixelWidth: 800, pixelHeight: 600,
-        cssToImageScaleX: 1, cssToImageScaleY: 1, cropOriginCss: { x: 0, y: 0 }
-      } }) }],
-      outputs: [
-        providerResponse([{ type: 'toolCall', id: 'shot-call', name: 'browser_screenshot', arguments: { sessionId: 'session-1', tabId: 'tab-1' } }], 'toolUse'),
-        providerResponse([{ type: 'text', text: 'I can inspect the image.' }], 'stop')
-      ]
-    })
-    expect(result.status).toBe('completed')
-    expect(captured[0].tools?.map((tool) => tool.name)).toContain('browser_screenshot')
-    expect(recorded.dispatches[0].context.vision).toBe(true)
-    expect(readScreenshot).toHaveBeenCalledWith(expect.objectContaining({ vision: true }), 'session-1', 'shot-1')
-    const toolResult = captured[1].messages.find((message) => message.role === 'toolResult' && message.toolCallId === 'shot-call')
-    expect(toolResult).toMatchObject({ content: expect.arrayContaining([{ type: 'image', data: 'c2NyZWVuc2hvdA==', mimeType: 'image/png' }]) })
-  })
-
-  it('does not advertise or read screenshots for a text-only model', async () => {
-    const snapshot = browserSnapshot()
-    grantTools(snapshot, ['browser_observe', 'browser_screenshot'])
-    const readScreenshot = vi.fn()
-    const { captured, recorded } = await runBrowserNative({
-      snapshot, readScreenshot,
-      outputs: [
-        providerResponse([{ type: 'toolCall', id: 'shot-call', name: 'browser_screenshot', arguments: { sessionId: 'session-1' } }], 'toolUse'),
-        providerResponse([{ type: 'text', text: 'Use semantic observation.' }], 'stop')
-      ]
-    })
-    expect(captured[0].tools?.map((tool) => tool.name)).not.toContain('browser_screenshot')
-    expect(readScreenshot).not.toHaveBeenCalled()
-    expect(recorded.dispatches).toEqual([])
-  })
-
+describe('definition browser runtime binding', () => {
   it('keeps bounded browser output valid JSON when untrusted page content is truncated', () => {
     const formatted = formatBrowserToolOutput({
       extraction: { value: '"\\'.repeat(80_000), truncated: false }
@@ -238,7 +190,7 @@ describe('native browser runtime binding', () => {
 
   it('dispatches browser_open/observe/act through the injected port and continues with the observation', async () => {
     const runId = 'run-browser-1'
-    const { result, captured, recorded } = await runBrowserNative({
+    const { result, captured, recorded, threadId } = await runBrowserNative({
       runtimeOutputs: [
         { session: sessionRecord(runId, 'thread-1'), observation: observation() },
         { observation: observation({ observationId: 'obs-2', title: 'After act' }) },
@@ -291,7 +243,7 @@ describe('native browser runtime binding', () => {
     ])
     expect(recorded.targets[0]).toMatchObject({
       profileId: 'profile-1',
-      threadId: 'thread-1',
+      threadId,
       runId,
       source: 'gui',
       actor: { kind: 'agent', definitionId: 'def-policy' }
@@ -312,17 +264,14 @@ describe('native browser runtime binding', () => {
     expect(openResult).toContain('obs-1')
     expect(openResult).toContain('untrusted-page')
     expect(openResult).toContain('https://example.test/page')
-    expect(result.history.some((entry) => entry.role === 'tool' && entry.content.includes('Clicked'))).toBe(true)
+    expect(toolResults(captured)).toContain('Clicked')
   })
 
   it('does not call the provider or runtime when browser mode is enabled without an injected host', async () => {
     const snapshot = browserSnapshot()
-    const captured: Context[] = []
     const recorded = recordingPort([])
-    const llm = nativeClient([
-      providerResponse([{ type: 'text', text: 'should not run' }], 'stop')
-    ], captured)
-    const service = new AgentExecutionService({ runtime: createNativeAgentRuntime(llm) })
+    const run = vi.fn()
+    const service = new AgentExecutionService({ runtime: { run } })
     await expect(service.run({
       profileId: 'profile-1',
       resolved: snapshot,
@@ -333,7 +282,7 @@ describe('native browser runtime binding', () => {
       code: 'SETTINGS_UNSUPPORTED',
       details: { pointers: expect.arrayContaining(['/settings/browser/mode']) }
     })
-    expect(captured).toEqual([])
+    expect(run).not.toHaveBeenCalled()
     expect(recorded.dispatches).toEqual([])
   })
 
@@ -341,19 +290,11 @@ describe('native browser runtime binding', () => {
     const snapshot = resolvedDefinition()
     snapshot.settings.browser.mode = 'disabled'
     grantTools(snapshot, ['browser_open', 'ask_user', 'read'])
-    const captured: Context[] = []
     const recorded = recordingPort([{ observation: observation() }])
-    const llm = nativeClient([
+    const { captured, pending } = runDefinition(snapshot, [
       providerResponse([{ type: 'text', text: 'no browser' }], 'stop')
-    ], captured)
-    llm.setBrowserRuntime(recorded.port)
-    const result = await new AgentExecutionService({ runtime: createNativeAgentRuntime(llm) }).run({
-      profileId: 'profile-1',
-      resolved: snapshot,
-      threadId: 'thread-1',
-      input: 'hello',
-      host: { workspaceRoots: [createPolicyTempRoot()], browserRuntime: recorded.port }
-    })
+    ], { input: 'hello', host: { workspaceRoots: [createPolicyTempRoot()], browserRuntime: recorded.port }, profileBrowser: recorded.port })
+    const result = await pending
     expect(result.status).toBe('completed')
     expect(captured[0]!.tools!.map((tool) => tool.name)).not.toEqual(
       expect.arrayContaining(['browser_open', 'browser_observe', 'browser_act'])
@@ -377,7 +318,7 @@ describe('native browser runtime binding', () => {
   })
 
   it('rejects forged target, profile, execution, and persistent-workspace claims without calling the runtime', async () => {
-    const { result, recorded } = await runBrowserNative({
+    const { result, recorded, captured } = await runBrowserNative({
       runtimeOutputs: [{ session: sessionRecord('run-browser-1', 'thread-1'), observation: observation() }],
       outputs: [
         providerResponse([{
@@ -399,13 +340,13 @@ describe('native browser runtime binding', () => {
     })
     expect(result.status).toBe('completed')
     expect(recorded.dispatches).toEqual([])
-    expect(JSON.stringify(result.history)).toContain('host authority fields')
-    expect(JSON.stringify(result.history)).toContain('uiTabId')
-    expect(JSON.stringify(result.history)).toContain('workspaceId')
+    expect(toolResults(captured)).toContain('host authority fields')
+    expect(toolResults(captured)).toContain('uiTabId')
+    expect(toolResults(captured)).toContain('workspaceId')
   })
 
   it('fails GUI setup_required when the host has no selected tab and never launches managed Chromium', async () => {
-    const { result, recorded } = await runBrowserNative({
+    const { result, recorded, captured } = await runBrowserNative({
       target: null,
       runtimeOutputs: [{ session: sessionRecord('run-browser-1', 'thread-1') }],
       outputs: [
@@ -420,7 +361,7 @@ describe('native browser runtime binding', () => {
     })
     expect(result.status).toBe('completed')
     expect(recorded.dispatches).toEqual([])
-    expect(JSON.stringify(result.history)).toMatch(/setup_required/)
+    expect(toolResults(captured)).toMatch(/setup_required/)
   })
 
   it('honors per-run tool budgets and cancellation without extra runtime calls', async () => {
@@ -449,38 +390,20 @@ describe('native browser runtime binding', () => {
     expect(budgeted.status).toBe('failed')
     expect(budgeted.error?.code).toBe('BUDGET_EXCEEDED')
     expect(budgetRecorded.dispatches.map((entry) => entry.name)).toEqual(['browser_open'])
-    expect(JSON.stringify(budgeted.history)).toContain('budget exhausted')
 
     const abort = new AbortController()
     abort.abort()
-    const captured: Context[] = []
-    const recorded = recordingPort([])
-    const llm = nativeClient([
-      providerResponse([{ type: 'text', text: 'should not run' }], 'stop')
-    ], captured)
-    llm.setBrowserRuntime(recorded.port)
-    const snapshot = browserSnapshot()
-    const projectPath = createPolicyTempRoot()
-    const request = {
-      profileId: 'profile-1',
-      resolved: snapshot,
-      threadId: 'thread-1',
-      runId: 'run-cancelled',
-      source: 'editor' as const,
-      projectPath,
-      input: 'cancelled',
-      host: { workspaceRoots: [projectPath], browserRuntime: recorded.port },
-      signal: abort.signal
-    }
-    llm.bindBrowserExecution(createDefinitionBrowserBinding({ request, runId: 'run-cancelled', resolved: snapshot }))
-    const cancelled = await new AgentExecutionService({ runtime: createNativeAgentRuntime(llm) }).run(request)
+    const { result: cancelled, captured, recorded } = await runBrowserNative({
+      signal: abort.signal,
+      outputs: [providerResponse([{ type: 'text', text: 'should not run' }], 'stop')]
+    })
     expect(cancelled.status).toBe('cancelled')
     expect(captured).toEqual([])
     expect(recorded.dispatches).toEqual([])
   })
 
   it('surfaces unknown-effect as an error and does not replay it as a successful action', async () => {
-    const { result, recorded } = await runBrowserNative({
+    const { result, recorded, captured } = await runBrowserNative({
       runtimeOutputs: [
         { session: sessionRecord('run-browser-1', 'thread-1'), observation: observation() },
         {
@@ -518,8 +441,9 @@ describe('native browser runtime binding', () => {
     })
     expect(result.status).toBe('completed')
     expect(recorded.dispatches.map((entry) => entry.name)).toEqual(['browser_open', 'browser_act'])
-    const actResult = result.history.find((entry) => entry.role === 'tool' && entry.content.includes('unknown-effect'))
-    expect(actResult?.content).toContain('unknown-effect')
+    const actResult = captured.at(-1)!.messages.find((message) => message.role === 'toolResult' && message.toolCallId === 'act-1')
+    expect(actResult).toMatchObject({ isError: true })
+    expect(JSON.stringify(actResult)).toContain('unknown-effect')
     expect(result.text).toBe('stopped after unknown effect')
   })
 

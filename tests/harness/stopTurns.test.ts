@@ -9,7 +9,7 @@ import { instanceStateDir } from '../../src/mms/harness/instances'
 import { UserQuestionService } from '../../src/mms/orchestrator/UserQuestionService'
 import { ClaudeSubscriptionProviderService } from '../../src/mms/providers/claudeSubscription/ClaudeSubscriptionProviderService'
 import { ProviderInstanceService } from '../../src/mms/providers/ProviderInstanceService'
-import { PiLoopAdapter } from '../../src/mms/run/adapters/pi/PiLoopAdapter'
+import { PiStubAdapter } from '../support/piStub'
 import type { ProviderAdapter, TurnInput, TurnResult } from '../../src/mms/run/adapters/ProviderAdapter'
 import type { ProviderRef } from '../../src/mms/run/types'
 import { adapterDriver, testHarness } from '../../src/mms/run/testkit/harness'
@@ -57,7 +57,7 @@ const codeOf = (promise: Promise<unknown>) => promise.then(() => undefined, (err
 
 // -- A fake agent on a harness -------------------------------------------------------------------
 
-const piCapabilities = new PiLoopAdapter(() => ({ chat: async () => { throw new Error('unused') } })).capabilities
+const piCapabilities = new PiStubAdapter().capabilities
 
 interface Script {
   /** The inputs the adapter was started with. */
@@ -114,7 +114,7 @@ function fakeHarness(make: () => ProviderAdapter, extraDrivers: HarnessDriver[] 
   let stored: unknown
   let seedVersion: number | undefined
   const source = new ProviderInstanceService({ store: { read: () => ({ instances: stored, seedVersion }), write: (next) => { stored = next.instances; seedVersion = next.seedVersion } } })
-  const pi = adapterDriver(new PiLoopAdapter(() => ({ chat: async () => { throw new Error('unused') } })))
+  const pi = adapterDriver(new PiStubAdapter())
   const harness = testHarness({ drivers: [pi, multiDriver(make), ...extraDrivers], instances: source, profileHome })
   const notices: Array<{ threadId: string; text: string }> = []
   harness.setLiveHost({ notice: (threadId, text) => { notices.push({ threadId, text }) } })
@@ -159,7 +159,7 @@ describe('stopping chats when an instance is removed or turned off', () => {
     let stored: unknown
     let seedVersion: number | undefined
     const source = new ProviderInstanceService({ store: { read: () => ({ instances: stored, seedVersion }), write: (next) => { stored = next.instances; seedVersion = next.seedVersion } } })
-    const pi = adapterDriver(new PiLoopAdapter(() => ({ chat: async () => { throw new Error('unused') } })))
+    const pi = adapterDriver(new PiStubAdapter())
     const harness = testHarness({ drivers: [pi, driver], instances: source, profileHome })
     const { instanceId } = await harness.instances.add({ driver: 'claude', config: { displayName: 'Work' } })
     // The first dispatch of a binding uses the account `bind` read; a second one reads it again, which is held here.
@@ -510,11 +510,11 @@ function claudeRig(options: {
     stopCalls,
     turnQueries,
     resolves: () => resolves,
-    /** A turn of `claude:work` in a project folder (the real service needs one). */
+    /** A turn of `claude:work` in a project folder (the real service needs one), under Full access as recorded. */
     startWithCwd: async (threadId: string, attemptId: string, prompt?: string) => {
-      const binding = await harness.bind(harness.resolveStored({ instanceId: 'claude:work', llmProvider: '', model: 'sonnet' }, { purpose: 'turn' }), { mode: 'agent' })
+      const binding = await harness.bind(harness.resolveStored({ instanceId: 'claude:work', llmProvider: '', model: 'sonnet' }, { purpose: 'turn' }), { mode: 'agent', permissionMode: 'full' })
       const spec = turnSpec('claude:work', binding, { threadId, attemptId, cwd, ...(prompt ? { prompt } : {}) })
-      return harness.startTurn({ ...spec, input: { ...spec.input, model: 'sonnet' } })
+      return harness.startTurn({ ...spec, input: { ...spec.input, model: 'sonnet', permissionMode: 'full' } })
     },
     stop: () => {
       harness.stop()

@@ -14,7 +14,7 @@ import type { ProviderDriverKind } from '../../src/shared/providerInstances'
 import { testHarness } from '../../src/mms/run/testkit/harness'
 import type { HarnessDriver } from '../../src/mms/harness/driver'
 import { CLAUDE_SUBSCRIPTION_CAPABILITIES } from '../../src/mms/run/adapters/claudeSubscription/ClaudeSubscriptionAdapter'
-import { PI_LOOP_CAPABILITIES } from '../../src/mms/run/adapters/pi/PiLoopAdapter'
+import { PI_TEST_CAPABILITIES } from '../support/piStub'
 import type {
   AdapterHost,
   ProviderAdapter,
@@ -114,9 +114,9 @@ export class ScriptedAdapter implements ProviderAdapter {
   }
 }
 
-/** A pi-shaped adapter (`historyInjection: 'native'`). */
+/** A pi-shaped adapter (`historyInjection: 'prompt'`, as Pi's RPC engine runs; `caps` may change it). */
 export const piAdapter = (script: Script, caps: Partial<ProviderCapabilities> = {}, sessionId?: string): ScriptedAdapter =>
-  new ScriptedAdapter('pi', { ...PI_LOOP_CAPABILITIES, ...caps }, script, sessionId)
+  new ScriptedAdapter('pi', { ...PI_TEST_CAPABILITIES, ...caps }, script, sessionId)
 
 /** A Claude-subscription-shaped adapter (`historyInjection: 'prompt'`, weak containment). */
 export const claudeAdapter = (script: Script): ScriptedAdapter =>
@@ -131,12 +131,13 @@ export async function waitFor(cond: () => boolean, label: string, timeoutMs = 10
 }
 
 /**
- * A bare `OrchestratorService` over `store` with inert collaborators (no run engine, no providers):
- * tests replace `llm` and drive the queue, admission and event paths. Points `MOUSSE_HOME` at `home`.
- * The default model is a pi instance (`PI`), so turns run on the pi loop over the replaced `llm`:
- * a profile with no model has no turn to run (`no_model_selected`).
+ * A bare `OrchestratorService` over `store` with inert collaborators (no run engine): tests drive
+ * the queue, admission and event paths. Points `MOUSSE_HOME` at `home`. The default model is a pi
+ * instance (`PI`); turns run on `adapters` (e.g. a `piAdapter`) through a test harness. Without
+ * adapters the orchestrator keeps its unbound gateway, whose pi driver has no runtime and refuses
+ * every turn.
  */
-export function createOrchestrator(home: string, store: ThreadDataStore): OrchestratorService {
+export function createOrchestrator(home: string, store: ThreadDataStore, adapters: ProviderAdapter[] = []): OrchestratorService {
   process.env.MOUSSE_HOME = home
   const settings = () => ({ ...getDefaultSettings(), provider: { ...getDefaultSettings().provider, ...PI } })
   const settingsStore = { getSettings: settings, get: settings }
@@ -146,6 +147,7 @@ export function createOrchestrator(home: string, store: ThreadDataStore): Orches
     settingsStore as never, providerAuth as never
   )
   orch.setThreadStore(store)
+  if (adapters.length > 0) orch.setHarness(testHarness({ adapters, profileHome: home }))
   return orch
 }
 
@@ -164,12 +166,6 @@ export function phase6Daemon(home: string, adapters: ProviderAdapter[], options:
     { questions }
   )
   orch.setThreadStore(store)
-  ;(orch as any).llm = {
-    getSelectedModelContextLimit: () => ({ limit: 128_000, modelName: 'scripted' }),
-    getContextInputs: async () => ({ systemPromptText: '', mcpToolsText: '', otherToolsText: '', signature: 'scripted' }),
-    generateTitle: async () => 'Scripted',
-    chat: async () => { throw new Error('the scripted adapter replaces the pi loop') }
-  }
   orch.setHarness(testHarness({ adapters, ...(options.drivers ? { drivers: options.drivers } : {}), ...(options.instances ? { instances: options.instances } : {}), profileHome: home }))
   const engine = new RunEngine({ store: new RunStore(new ProfileDatabase({ profileHome: home, ...(options.fault ? { fault: options.fault } : {}) })), pid: options.pid ?? 1 })
   orch.setRunEngine(engine)

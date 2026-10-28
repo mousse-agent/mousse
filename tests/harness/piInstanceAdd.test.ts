@@ -33,7 +33,7 @@ function profile(credentials: PiInstallationCredentials) {
   const harness = testHarness({
     profileHome: home,
     instances,
-    drivers: [piDriver({ client: () => ({ chat: async () => { throw new Error('no model call in this test') } }) as never, credentials: () => credentials as never })]
+    drivers: [piDriver({ credentials: () => credentials as never })]
   })
   const events: HarnessGatewayEvent[] = []
   harness.instances.subscribe((event) => events.push(event))
@@ -181,7 +181,7 @@ describe('review round 1', () => {
       },
       providerAuth: credentials
     })
-    const harness = testHarness({ instances, drivers: [piDriver({ client: () => ({ chat: async () => { throw new Error('unused') } }) as never, credentials: () => credentials as never })] })
+    const harness = testHarness({ instances, drivers: [piDriver({ credentials: () => credentials as never })] })
     cleanups.push(() => harness.stop())
     expect(Object.keys(instances.list())).toEqual(['pi:openrouter'])
     failWrites = true

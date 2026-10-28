@@ -349,12 +349,10 @@ function captureCandidate() {
     engines: pkg?.engines ?? null,
     overlay: {
       packageJsonSha256: sha256File(join(projectRoot, 'package.json')),
-      packageLockSha256: sha256File(join(projectRoot, 'package-lock.json')),
-      cleanupScriptSha256: sha256File(join(projectRoot, 'scripts/remove-vulnerable-bundled-deps.mjs'))
+      packageLockSha256: sha256File(join(projectRoot, 'package-lock.json'))
     },
     dependencies: {
       piCodingAgent: pkg?.dependencies?.['@earendil-works/pi-coding-agent'] ?? null,
-      piCursorSdk: pkg?.dependencies?.['pi-cursor-sdk'] ?? null,
       electron: pkg?.devDependencies?.electron ?? null,
       electronBuilder: pkg?.devDependencies?.['electron-builder'] ?? null,
       vitest: pkg?.devDependencies?.vitest ?? null

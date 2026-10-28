@@ -4,8 +4,6 @@ import { createDefinitionRuntime, type DefinitionCheck, type DefinitionRefusal, 
 import { harnessAppError } from '../../src/shared/harness/types'
 import { AppError } from '../../src/shared/errors'
 import { resolvedDefinition } from '../fixtures/agent-platform/agent-runtime-policy/helpers'
-import { PiLoopAdapter } from '../../src/mms/run/adapters/pi/PiLoopAdapter'
-import type { TurnInput } from '../../src/mms/run/adapters/ProviderAdapter'
 import type { AgentRuntimeInput } from '../../src/shared/agents/execution'
 
 // PR 4 §6 / §16 `definitionRuntime`: candidates are checked before they run, fallbacks only before
@@ -223,10 +221,22 @@ describe('definitionRuntime', () => {
     controller.abort()
     expect(await pending).toMatchObject({ status: 'cancelled', error: { code: 'ABORTED' } })
   })
+
+  it('a cancel during the fallback backoff is a cancellation, and the next candidate never runs', async () => {
+    const controller = new AbortController()
+    const p = port({ turn: async () => { throw new Error('provider unavailable') } })
+    const resolved = definition([second])
+    resolved.settings.recovery.backoffMs = 60_000
+    const pending = new AgentExecutionService({ runtime: createDefinitionRuntime(p.value) }).run({ profileId: resolved.profileId, resolved, threadId: 'thread-1', input: 'go', projectPath: process.cwd(), host: { workspaceRoots: [process.cwd()] }, signal: controller.signal })
+    await vi.waitFor(() => expect(p.turns).toHaveLength(1))
+    controller.abort()
+    expect(await pending).toMatchObject({ status: 'cancelled' })
+    expect(p.turns.map((turn) => turn.ref.modelId)).toEqual(['primary'])
+  })
 })
 
 describe('a definition run without its settings', () => {
-  it('is refused before any candidate is checked or run: it never falls back to the loop', async () => {
+  it('is refused before any candidate is checked or run', async () => {
     const p = port({ turn: async () => ok('must not run') })
     const resolved = definition([])
     const input = {
@@ -237,30 +247,5 @@ describe('a definition run without its settings', () => {
     await expect(createDefinitionRuntime(p.value).run(input)).rejects.toMatchObject({ code: 'SETTINGS_UNSUPPORTED', pointer: '/settings', message: expect.stringContaining("settings were not passed to its runtime") })
     expect(p.checks).toEqual([])
     expect(p.turns).toEqual([])
-  })
-})
-
-describe('the legacy loop and definition turns', () => {
-  it('refuses a definition turn that lacks its authority, its loop, its instructions or a session of its own, before anything runs', async () => {
-    const chat = vi.fn()
-    const adapter = new PiLoopAdapter(() => ({ chat }))
-    const input = { runId: 'r', attemptId: 'a', threadId: 't', cwd: null, instanceId: 'pi:p', model: 'm', llmProvider: 'p', modelPinned: true, mode: 'agent', prompt: 'go', messages: [], signal: new AbortController().signal } as unknown as TurnInput
-    const noop = () => {}
-    const sink = { text: noop, thinking: noop, tool: noop, nativeMessages: noop, compaction: noop, retry: noop, progress: noop, usage: noop, providerRef: noop, steerAccepted: noop, providerMetrics: noop, lineEdits: noop }
-    const authority = { policy: {}, grants: { skills: [], mcpTools: [], builtinTools: [], denied: [] } } as never
-    const loop = { client: () => ({ chat }), budget: {}, effects: {}, actor: { kind: 'agent' }, limitReached: noop } as never
-    const host = (extra: object) => ({ tools: {}, context: { recoverOverflow: () => null, prepareNativeContext: () => null, nativeHistoryAfterTurn: () => '' }, ...extra }) as never
-    const full = { ...input, session: 'ephemeral', instructions: { text: 'SYSTEM', placement: 'replace' } } as TurnInput
-    for (const [turn, extra] of [
-      [full, { definitionLoop: loop }],
-      [full, { definition: authority }],
-      [{ ...full, session: undefined }, { definition: authority, definitionLoop: loop }],
-      [{ ...full, instructions: undefined }, { definition: authority, definitionLoop: loop }],
-      [{ ...full, instructions: { text: 'SYSTEM', placement: 'append' } }, { definition: authority, definitionLoop: loop }],
-      [input, { definition: authority }]
-    ] as Array<[TurnInput, object]>) {
-      await expect(adapter.startTurn(turn, sink, { drainSteer: () => undefined, heartbeat: noop }, host(extra))).rejects.toMatchObject({ code: 'policy_unenforceable' })
-    }
-    expect(chat).not.toHaveBeenCalled()
   })
 })

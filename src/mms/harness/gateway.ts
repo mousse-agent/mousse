@@ -40,7 +40,7 @@ import type { ModeCeiling, ProviderRef } from '../run/types'
 import { randomUUID } from 'node:crypto'
 import { existsSync, mkdirSync, readdirSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
-import type { InstanceConfigView, InstanceEngine, NextStep, UpdateAffordance } from '../../shared/harness/status'
+import type { InstanceConfigView, NextStep, UpdateAffordance } from '../../shared/harness/status'
 import { acceptsMove, foldedInto, foldedTarget, type MoveResult } from '../../shared/harness/move'
 import { harnessAppError, onRetiredBareRoute, type HarnessErrorCode, type ModelPrefs, type SignInPrompt } from '../../shared/harness/types'
 import type { ProviderLoginEvent, ProviderUsage } from '../../shared/providerAuth'
@@ -60,7 +60,7 @@ import { addedInstanceId, defaultInstanceId, InstanceCounterStore, instanceState
 import { LatestVersionCache } from './latest'
 import { RuntimeFactsStore } from './facts'
 import { questionsPrompter, refusingPrompter } from './acp/permissions'
-import { checkPermissionMode, checkPolicy, type CheckPolicyOptions, definitionLimitsLevel, freezePolicy, hasSpendLimit, mapNeutralTools, permissionModeRefusal, policyDigest, purposeAllowed, toolControlLevel } from './policy'
+import { checkPermissionMode, checkPolicy, type CheckPolicyOptions, freezePolicy, hasSpendLimit, mapNeutralTools, permissionModeRefusal, policyDigest, purposeAllowed, toolControlLevel } from './policy'
 import { budgetLimitsOf, RunCounterBook, type CounterScope, type SpendScope } from './budget'
 import { definitionAuthorityDigest, type DefinitionAuthority } from '../agentDefinitions/definitionGate'
 import {
@@ -96,9 +96,9 @@ import type { StoredCliConfig } from '../providers/cliConfig'
 export type {
   AdapterHost,
   ChildTurnPolicy,
-  DefinitionLoop,
   ProviderMetrics,
   RecoveredContext,
+  ToolHost,
   TurnBridge,
   TurnControl,
   TurnInput,
@@ -258,11 +258,8 @@ export interface BindInput {
 
 export interface ResolveStoredOptions {
   purpose: ResolvePurpose
-  /**
-   * An agent definition's turn: the instance's definition caps apply (`HarnessDriver.definitionCaps`);
-   * `{loop: true}`: one that needs the instance's definition loop (`PolicyAuthority.loop`).
-   */
-  definition?: boolean | { loop: boolean }
+  /** An agent definition's turn (checked as one by the caller). */
+  definition?: boolean
   scope?: ProviderScope
   allowDisabled?: boolean
 }
@@ -561,7 +558,7 @@ interface InstanceRecord {
   driver: HarnessDriver
   config: InstanceConfig
   builtIn: boolean
-  /** Driver, revision, home and engine: a change builds a new runtime. */
+  /** Driver, revision and home: a change builds a new runtime. */
   key: string
   env: InstanceEnv
   runtime: DriverRuntime
@@ -784,6 +781,7 @@ export class Harness implements HarnessGateway {
       if (driver.addOptions && !driver.instanceIdFor) throw new Error(`The ${driver.kind} driver offers Add options but no fixed instance ids (instanceIdFor).`)
       this.drivers.set(driver.kind, driver)
     }
+    this.upgradeDrivers()
     this.scopes = new HarnessScopeStore(options.profileHome)
     this.counters = new InstanceCounterStore(options.profileHome)
     this.facts = new RuntimeFactsStore(options.profileHome)
@@ -901,7 +899,7 @@ export class Harness implements HarnessGateway {
         harnessFail('model_hidden', `${this.modelName(resolved.instanceId, selection.model)} is hidden. Show it in Settings → Providers or choose another model.`, resolved.instanceId)
     }
     const version = this.probes.get(resolved.instanceId)?.lastGood?.binary?.version
-    const caps = (options.definition && driver.definitionCaps?.(config, { loop: options.definition !== true && options.definition.loop })) || driver.caps(config, version, this.currentFacts(resolved.instanceId), resolved.instanceId)
+    const caps = driver.caps(config, version, this.currentFacts(resolved.instanceId), resolved.instanceId)
     // An instance that approves tools itself runs only turns a person drives; reading or stopping
     // work already running (`allowDisabled`) is never refused.
     if (!options.allowDisabled && !purposeAllowed(caps, options.purpose))
@@ -1016,7 +1014,7 @@ export class Harness implements HarnessGateway {
 
   check(resolved: ResolvedTurnSelection, policy: RunPolicy): Enforceability {
     const record = this.recordOrUndefined(resolved.instanceId)
-    const caps = record ? this.capsFor(record, policy.authority) : resolved.caps
+    const caps = record ? this.recordCaps(record) : resolved.caps
     const spendModel = hasSpendLimit(policy) ? record?.runtime.spendModel?.(resolved.model) : undefined
     const verdict = checkPolicy(caps, policy, resolved.instanceId, spendModel, record ? this.policyOptions(record) : undefined)
     // An agent definition names the provider that cannot hold it, for the editor and the run's error.
@@ -1037,7 +1035,7 @@ export class Harness implements HarnessGateway {
     const accountId = record ? await this.currentAccount(record) : undefined
     const counters = this.counters.get(resolved.instanceId)
     // The attempt runs on the caps of this moment, whatever the runtime reports meanwhile.
-    const caps = record ? this.capsFor(record, input.policy?.authority) : resolved.caps
+    const caps = record ? this.recordCaps(record) : resolved.caps
     const requested = normalizePermissionMode(input.permissionMode)
     const { effective, supported } = this.resolvePermissionMode(record, caps, requested, input.cwd ?? undefined)
     if (effective.refused) throw harnessAppError(permissionModeRefusal(effective.reason, supported, resolved.instanceId))
@@ -1314,14 +1312,7 @@ export class Harness implements HarnessGateway {
           ...(spec.app?.bot ? { bot: spec.app.bot } : {}),
           ...(counted ? { budget: counted.budget } : {})
         }
-        // An agent definition's turn runs where its binding's caps say: on the instance's definition
-        // loop (`definitionAdapter`) when they are the loop's (`definitionLimits: 'in_loop'`), else on
-        // the runtime itself.
-        const definitionCaps = spec.binding.caps ?? this.capsFor(record, spec.binding.policy.authority)
-        const adapter = spec.binding.policy.authority?.kind === 'definition' && definitionLimitsLevel(definitionCaps) === 'in_loop'
-          ? record.runtime.definitionAdapter ?? record.runtime.adapter
-          : record.runtime.adapter
-        const turn = await adapter.startTurn(input, sink, spec.control, host)
+        const turn = await record.runtime.adapter.startTurn(input, sink, spec.control, host)
         minted?.settle({ status: turn.aborted || signal.aborted ? 'aborted' : 'completed', ...(turn.drain ? { drain: turn.drain } : {}) })
         minted = undefined
         // The adapter ended because the instance was removed or turned off: the thread sees why.
@@ -1433,8 +1424,9 @@ export class Harness implements HarnessGateway {
     // A stored binding runs on the policy it was made with, or not at all.
     if (binding.policyDigest !== undefined && binding.policyDigest !== policyDigest(binding.policy))
       harnessFail('protocol', 'The policy of this turn is not the one its binding was made with.', binding.instanceId)
-    // The caps the binding froze (bindings from before snapshots: the live ones).
-    const caps = binding.caps ?? this.recordCaps(record)
+    // The caps the binding froze (bindings from before snapshots, and snapshots of the deleted
+    // in-process Pi loop, which no longer runs anything: the live ones).
+    const caps = binding.caps && !loopCaps(binding.caps) ? binding.caps : this.recordCaps(record)
     // Token and spend limits also need the model's own facts (an output cap, a price).
     const spendModel = hasSpendLimit(binding.policy) ? record.runtime.spendModel?.(binding.model) : undefined
     const enforceable = checkPolicy(caps, binding.policy, binding.instanceId, spendModel, this.policyOptions(record))
@@ -1448,7 +1440,7 @@ export class Harness implements HarnessGateway {
     // A definition's authority (roots, script rules, unattended policy, approvals), its own
     // instructions and a session of its own are honoured only by a runtime whose tools Mousse
     // controls exactly (PR 4 §4); any other refuses the turn, whatever its policy says.
-    if (binding.policy.authority?.kind === 'definition') this.admitDefinition(spec, caps, record)
+    if (binding.policy.authority?.kind === 'definition') this.admitDefinition(spec, record)
     if ((spec.app?.definition || spec.instructions || spec.session === 'ephemeral') && toolControlLevel(caps) !== 'exact')
       throw harnessAppError({
         code: 'policy_unenforceable',
@@ -1491,12 +1483,10 @@ export class Harness implements HarnessGateway {
   /**
    * A turn admitted under an agent definition's authority carries that definition (PR 4 §6): a
    * definition or workflow origin, the registered authority the policy's digest names, the
-   * definition's own instructions and a session of its own. Where the instance's definition limits
-   * are `in_loop` (the waiver that admits its counts and spend), the turn also carries the host's
-   * loop binding, whose limits never exceed the admitted ones. Anything less is refused: a policy
+   * definition's own instructions and a session of its own. Anything less is refused: a policy
    * marker alone never selects an unbudgeted path.
    */
-  private admitDefinition(spec: TurnSpec, caps: HarnessCaps, record: InstanceRecord): void {
+  private admitDefinition(spec: TurnSpec, record: InstanceRecord): void {
     const { policy } = spec.binding
     const refuse = (what: string): never => {
       throw harnessAppError({
@@ -1512,15 +1502,6 @@ export class Harness implements HarnessGateway {
     if (!authority) refuse('its authority')
     if (definitionAuthorityDigest(authority!) !== policy.authority?.digest) refuse('the authority its policy names')
     if (spec.session !== 'ephemeral' || spec.instructions?.placement !== 'replace') refuse('its instructions and a session of its own')
-    if (definitionLimitsLevel(caps) !== 'in_loop') return
-    const loop = spec.host.definitionLoop
-    if (!loop) refuse('its loop')
-    const admitted = policy.budget ?? {}
-    const own = loop!.budget
-    const within = (limit: number | undefined, value: number | undefined) => limit === undefined || (value !== undefined && value <= limit)
-    if (!within(admitted.maxTurns, own.maxTurns) || !within(admitted.maxToolCalls, own.maxToolCalls) || !within(admitted.maxInputTokens, own.maxInputTokens) ||
-        !within(admitted.maxOutputTokens, own.maxOutputTokens) || !within(admitted.maxUsd, own.maxCostUsd))
-      refuse('limits within the admitted ones')
   }
 
   /** The first turn of a thread on an instance that approves tools itself says so, once. */
@@ -1582,11 +1563,6 @@ export class Harness implements HarnessGateway {
   }
 
   /** Capabilities of a record's instance at its last known version and current runtime facts. */
-  /** The caps a turn runs on: the instance's, or its definition caps for an agent definition's turn. */
-  private capsFor(record: InstanceRecord, authority: RunPolicy['authority']): HarnessCaps {
-    return (authority?.kind === 'definition' && record.driver.definitionCaps?.(record.config, { loop: authority.loop === true })) || this.recordCaps(record)
-  }
-
   private recordCaps(record: InstanceRecord): HarnessCaps {
     return record.driver.caps(record.config, this.probes.get(record.instanceId)?.lastGood?.binary?.version, this.currentFacts(record.instanceId), record.instanceId)
   }
@@ -2238,7 +2214,6 @@ export class Harness implements HarnessGateway {
       caps: driver.caps(config, shown?.binary?.version, this.currentFacts(instanceId), instanceId),
       ...(limits ? { permissionLimits: limits } : {}),
       config: this.configView(record),
-      ...this.engineView(record),
       models: {
         // A retired entry offers no model to choose, custom ones included (its prefs are kept).
         entries: retired ? [] : modelsWithPrefs(listed, prefs),
@@ -2317,6 +2292,28 @@ export class Harness implements HarnessGateway {
     }
   }
 
+  /** Each driver's own migration of its stored instances (`HarnessDriver.upgrade`), once at start. */
+  private upgradeDrivers(): void {
+    let entries: Array<[string, { driver: string; config?: Record<string, unknown> }]> = []
+    try {
+      entries = Object.entries(this.instanceMap.list()) as typeof entries
+    } catch (error) {
+      console.warn('[harness] could not read the instances to upgrade', errorText(error))
+      return
+    }
+    for (const driver of this.drivers.values()) {
+      if (!driver.upgrade) continue
+      try {
+        driver.upgrade({
+          profileHome: this.options.profileHome,
+          instances: entries.filter(([, entry]) => entry.driver === driver.kind).map(([instanceId, entry]) => ({ instanceId, config: entry.config }))
+        })
+      } catch (error) {
+        console.warn('[harness] driver upgrade failed', { driver: driver.kind, error: errorText(error) })
+      }
+    }
+  }
+
   /**
    * Whether Mousse owns the instance's sign-in: a private home, a Mousse-managed agent, or a pi
    * provider key Mousse stores, or a driver whose sign-in is always Mousse's (Antigravity's Google
@@ -2326,15 +2323,6 @@ export class Harness implements HarnessGateway {
     if (record.entry.driver === 'pi' || record.driver.ownsSignIn) return true
     if (record.env.home) return true
     return Boolean(record.runtime.managed?.()) && !record.config.binaryPath
-  }
-
-  /** The engine of a driver with several (`pi`): the user's stored choice and the one in effect. */
-  private engineView(record: InstanceRecord): { engine?: InstanceEngine } {
-    const stored = record.entry.config
-    const engine = record.driver.engine?.(record.instanceId, stored)
-    if (!engine) return {}
-    const setting = stored?.engine === 'rpc' || stored?.engine === 'legacy' ? stored.engine : undefined
-    return { engine: { ...(setting ? { setting } : {}), effective: engine.effective, switchable: engine.switchable } }
   }
 
   /** The settings the editor shows, all from the instance config. */
@@ -2376,7 +2364,6 @@ export class Harness implements HarnessGateway {
     const driver = this.drivers.get(input.driver)
     if (!driver) return harnessFail('unsupported', `Mousse cannot add a ${input.driver} instance.`)
     const patch = input.config ?? {}
-    if (patch.engine !== undefined) return harnessFail('unsupported', `${driver.label} takes its engine under Advanced once added.`)
     if (input.signIn === 'ambient') {
       // Cloud credentials are checked before anything is written: a failed check adds no entry.
       if (!driver.instanceIdFor || !driver.verifyAmbient) return harnessFail('unsupported', `${driver.label} has no cloud credentials to check.`)
@@ -2622,9 +2609,6 @@ export class Harness implements HarnessGateway {
       harnessFail('unsupported', `${this.displayName(record)} cannot use a separate home.`, instanceId)
     if (patch.home === 'default' && homeRule === 'required')
       harnessFail('unsupported', `${this.displayName(record)} always runs in a home of its own.`, instanceId)
-    // Only a provider that can run on Pi's agent switches engines (Advanced → Engine).
-    if (patch.engine !== undefined && !record.driver.engine?.(instanceId, record.entry.config ?? {}).switchable)
-      harnessFail('unsupported', `${this.displayName(record)} runs on one engine only.`, instanceId)
     if (patch.useOlderSettings) return this.useOlderSettings(record)
     if (patch.provider !== undefined)
       harnessFail('unsupported', `${this.displayName(record)} keeps the provider it was added with. Add another entry for another one.`, instanceId)
@@ -2947,7 +2931,8 @@ export class Harness implements HarnessGateway {
     if (patch.args !== undefined) config.args = patch.args.length ? [...patch.args] : null
     if (patch.env !== undefined) config.env = Object.keys(patch.env).length ? { ...patch.env } : null
     if (patch.loginMethod !== undefined) setOrDelete(config, 'loginMethod', patch.loginMethod || undefined)
-    if (patch.engine !== undefined) setOrDelete(config, 'engine', patch.engine ?? undefined)
+    // The removed engine setting (Advanced → Engine) is dropped on the first write after it.
+    delete config.engine
     if (patch.source !== undefined) {
       // Only a driver that reads registry sources takes one (it validates every value itself).
       if (driver.decodeConfig({ source: patch.source }).source?.kind !== 'registry')
@@ -3569,9 +3554,18 @@ function alwaysPrivate(driver: HarnessDriver, config: InstanceConfig): boolean {
   return typeof driver.alwaysPrivateHome === 'function' ? driver.alwaysPrivateHome(config) : driver.alwaysPrivateHome === true
 }
 
-/** Driver, revision, home and engine: a change in any builds a new runtime (and a new epoch). */
+/** Driver, revision and home: a change in any builds a new runtime (and a new epoch). */
 function recordKey(driver: HarnessDriver, revision: number, config: InstanceConfig): string {
-  return `${driver.kind}|${revision}|${config.home}|${config.engine ?? ''}`
+  return `${driver.kind}|${revision}|${config.home}`
+}
+
+/**
+ * Caps frozen by a binding made on the deleted in-process Pi loop (PR 4 unit 4h): its own keys and
+ * values (`definitionLimits`, a `measured` gauge, `native` history), never declared by a runtime now.
+ */
+export function loopCaps(caps: HarnessCaps): boolean {
+  const stored = caps as unknown as Record<string, unknown>
+  return stored.definitionLimits === 'in_loop' || stored.contextUsage === 'measured' || stored.historyInjection === 'native'
 }
 
 function setOrDelete(target: Record<string, unknown>, key: string, value: unknown): void {

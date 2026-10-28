@@ -19,15 +19,7 @@ await build({
   banner: { js: "import { fileURLToPath as __fixtureFileURLToPath } from 'node:url'; import { dirname as __fixtureDirname } from 'node:path'; const __filename = __fixtureFileURLToPath(import.meta.url); const __dirname = __fixtureDirname(__filename);" },
   entryPoints: [resolve(root, 'tests/fixtures/profile-isolation/profile-production-main.ts')],
   outfile: resolve(buildDir, 'main.mjs'),
-  external: ['electron', 'node-pty'],
-  plugins: [{
-    name: 'bundle-pi-cursor-model-discovery',
-    setup(buildApi) {
-      buildApi.onResolve({ filter: /^pi-cursor-sdk\/src\/(.+)$/ }, (args) => ({
-        path: resolve(root, `node_modules/pi-cursor-sdk/src/${args.path.slice('pi-cursor-sdk/src/'.length)}.ts`)
-      }))
-    }
-  }]
+  external: ['electron', 'node-pty']
 })
 const env = {
   ...process.env,

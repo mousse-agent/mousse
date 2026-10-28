@@ -6,6 +6,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { enqueueMessage } from '../src/mms/queue/ThreadMessageQueue'
 import { MousseMainService } from '../src/mms/MousseMainService'
 import { ProviderAuthService } from '../src/mms/providers/ProviderAuthService'
+import { testHarness } from '../src/mms/run/testkit/harness'
+import { piAdapter } from './run/phase6Fixture'
 
 describe('queue persistence through the main service', () => {
   let home: string
@@ -61,39 +63,8 @@ describe('queue persistence through the main service', () => {
     const orchSvc = service.orchestrator
     orchSvc.bindThread(thread.id, [], undefined, service.threads.loadMessageQueue(thread.id))
 
-    const contextInputs = {
-      systemPromptText: '',
-      mcpToolsText: '',
-      otherToolsText: '',
-      signature: 'headless'
-    }
-    const llm = (orchSvc as unknown as {
-      llm: {
-        getSelectedModelContextLimit: () => { limit: number }
-        getContextInputs: () => Promise<typeof contextInputs>
-        chat: () => Promise<unknown>
-      }
-    }).llm
-    vi.spyOn(llm, 'getSelectedModelContextLimit').mockReturnValue({ limit: 100_000 })
-    vi.spyOn(llm, 'getContextInputs').mockResolvedValue(contextInputs)
-    vi.spyOn(llm, 'chat').mockResolvedValue({
-      text: 'headless-ok',
-      usage: {
-        input: 1,
-        output: 1,
-        cacheRead: 0,
-        cacheWrite: 0,
-        totalTokens: 2,
-        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }
-      },
-      modelName: 'test',
-      totalResponseTimeMs: 1,
-      totalTokensUsed: 2,
-      tokensPerSecond: 1,
-      contextInputs,
-      toolEvents: [],
-      nativeMessages: []
-    })
+    service.settings.set({ provider: { llmProvider: 'openai', model: 'test' } })
+    orchSvc.setHarness(testHarness({ adapters: [piAdapter(() => 'headless-ok')], profileHome: service.getProfileHomeDir() }))
 
     // Real orchestrator send/accept path (provider mocked); MMS-owned persist must merge.
     await orchSvc.send('from-headless', false, { threadId: thread.id })

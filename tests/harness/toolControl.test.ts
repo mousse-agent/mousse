@@ -11,7 +11,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { ANTIGRAVITY_CAPS } from '../../src/mms/harness/drivers/antigravity'
 import { CLAUDE_CODE_CAPS } from '../../src/mms/harness/drivers/claudeCode'
 import { CODEX_CAPS } from '../../src/mms/harness/drivers/codex'
-import { PI_LEGACY_CAPS } from '../../src/mms/harness/drivers/pi'
+import { PI_RPC_CAPS, PI_RPC_EXACT_CAPS } from '../../src/mms/harness/drivers/pi'
 import { checkPermissionMode, checkPolicy, INTERACTIVE_PURPOSES, purposeAllowed, toolControlLevel } from '../../src/mms/harness/policy'
 import { ProviderInstanceService } from '../../src/mms/providers/ProviderInstanceService'
 import type { ProviderAdapter, TurnInput, TurnResult } from '../../src/mms/run/adapters/ProviderAdapter'
@@ -25,7 +25,8 @@ const policy = (patch: Partial<RunPolicy> = {}): RunPolicy => ({ mode: 'default'
 
 describe('tool control levels', () => {
   it('is declared by every driver', () => {
-    expect(PI_LEGACY_CAPS.toolControl).toBe('exact')
+    expect(PI_RPC_EXACT_CAPS.toolControl).toBe('exact')
+    expect(PI_RPC_CAPS.toolControl).toBe('approval_only')
     expect(CLAUDE_CODE_CAPS.toolControl).toBe('approval_only')
     expect(CODEX_CAPS.toolControl).toBe('approval_only')
     expect(ANTIGRAVITY_CAPS.toolControl).toBe('approval_only')
@@ -37,9 +38,9 @@ describe('tool control levels', () => {
 })
 
 describe('checkPolicy', () => {
-  it('needs exact control for a tool allowlist (the pi loop keeps it, agents refuse it)', () => {
+  it('needs exact control for a tool allowlist (Pi with its evidence keeps it, agents refuse it)', () => {
     const tools = policy({ tools: { allow: ['read'] } })
-    expect(checkPolicy(PI_LEGACY_CAPS, tools)).toEqual({ ok: true })
+    expect(checkPolicy(PI_RPC_EXACT_CAPS, tools)).toEqual({ ok: true })
     expect(checkPolicy(CLAUDE_CODE_CAPS, tools)).toMatchObject({ ok: false, error: { code: 'policy_unenforceable', missing: ['toolControl'] } })
   })
 
@@ -67,9 +68,8 @@ describe('checkPolicy', () => {
     const limits = (budgets: HarnessCaps['budgets'], spendLimits: HarnessCaps['spendLimits'] = 'unsupported'): HarnessCaps => ({ ...caps('exact'), budgets, spendLimits })
     // A model whose output cap the driver bounds, with a price (the model rows are in `policyRules.test.ts`).
     const model = { label: 'M', outputCap: true, priced: true }
-    expect(PI_LEGACY_CAPS.budgets).toBe('observed')
     for (const agent of [CLAUDE_CODE_CAPS, CODEX_CAPS, ANTIGRAVITY_CAPS]) expect(agent.budgets).toBe('unsupported')
-    for (const any of [PI_LEGACY_CAPS, CLAUDE_CODE_CAPS, CODEX_CAPS, ANTIGRAVITY_CAPS]) expect(any.spendLimits).toBe('unsupported')
+    for (const any of [CLAUDE_CODE_CAPS, CODEX_CAPS, ANTIGRAVITY_CAPS]) expect(any.spendLimits).toBe('unsupported')
     expect(checkPolicy(limits('observed'), policy({ budget: { maxTurns: 3 } }))).toMatchObject({ ok: false, error: { missing: ['budgets'] } })
     expect(checkPolicy(limits('observed'), policy({ budget: { maxToolCalls: 10 } }))).toMatchObject({ ok: false, error: { missing: ['budgets'] } })
     expect(checkPolicy(limits('hard'), policy({ budget: { maxTurns: 3, maxToolCalls: 10 } }))).toEqual({ ok: true })
@@ -78,9 +78,8 @@ describe('checkPolicy', () => {
     expect(checkPolicy(limits('hard'), policy({ budget: { maxInputTokens: 1000 } }))).toMatchObject({ ok: false, error: { missing: ['spendLimits'] } })
     expect(checkPolicy(limits('observed', 'reserved'), policy({ budget: { maxOutputTokens: 1000 } }), undefined, model)).toMatchObject({ ok: false, error: { missing: ['budgets'] } })
     expect(checkPolicy(limits('hard', 'reserved'), policy({ budget: { maxTurns: 3, maxInputTokens: 1, maxOutputTokens: 1, maxUsd: 1 } }), undefined, model)).toEqual({ ok: true })
-    expect(checkPolicy(PI_LEGACY_CAPS, policy({ budget: { maxTurns: 3 } }))).toEqual({ ok: false, error: expect.objectContaining({ missing: ['budgets'] }) })
-    // Explicitly hard caps admit turn and spend limits.
-    expect(checkPolicy({ ...PI_LEGACY_CAPS, budgets: 'hard', spendLimits: 'reserved' }, policy({ budget: { maxTurns: 3, maxUsd: 2 } }), undefined, model)).toEqual({ ok: true })
+    // Pi's hard caps admit turn and spend limits.
+    expect(checkPolicy(PI_RPC_EXACT_CAPS, policy({ budget: { maxTurns: 3, maxUsd: 2 } }), undefined, model)).toEqual({ ok: true })
     expect(checkPolicy(CLAUDE_CODE_CAPS, policy({ budget: { maxTurns: 3 } }))).toMatchObject({ ok: false })
     expect(checkPolicy({ ...caps('uncontrolled'), budgets: 'unsupported' }, policy({ budget: { maxWallMs: 60_000 } }))).toEqual({ ok: true })
   })

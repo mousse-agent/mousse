@@ -12,7 +12,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import type { HarnessGatewayEvent } from '../../src/mms/harness/gateway'
 import type { LoginSession } from '../../src/mms/providers/LoginSession'
 import { ProviderInstanceService } from '../../src/mms/providers/ProviderInstanceService'
-import { PiLoopAdapter } from '../../src/mms/run/adapters/pi/PiLoopAdapter'
+import { PiStubAdapter } from '../support/piStub'
 import { adapterDriver, testHarness } from '../../src/mms/run/testkit/harness'
 import type { SignInPrompt } from '../../src/shared/harness/types'
 
@@ -29,7 +29,7 @@ function signInWith(flow: (session: LoginSession) => Promise<{ success: boolean 
   homes.push(home)
   let value: unknown = { 'pi:openrouter': { driver: 'pi', enabled: true } }
   const instances = new ProviderInstanceService({ store: { read: () => ({ instances: value, seedVersion: 1 }), write: (next) => { value = next.instances } } })
-  const pi = new PiLoopAdapter(() => ({ chat: async () => { throw new Error('unused') } }))
+  const pi = new PiStubAdapter()
   const driver = adapterDriver(pi, { runtime: { signIn: async (session) => ({ ...(await flow(session as LoginSession)), sessionId: session.sessionId }) } })
   const harness = testHarness({ drivers: [driver], instances, profileHome: home })
   const events: HarnessGatewayEvent[] = []

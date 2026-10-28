@@ -22,7 +22,7 @@ import { gitMetadataRefusal, touchesGitMetadata } from '../agents/gitMetadata'
 import { BROWSER_READ_TOOLS, isBrowserAutomationTool } from '../orchestrator/browser/tools'
 import { browserRuntimeHostBindingMessage, readHostBrowserRuntime } from '../orchestrator/browser/binding'
 
-/** Legacy Mousse build-tool names → canonical built-in ids. Keep aligned with LlmClient. */
+/** Legacy Mousse build-tool names → canonical built-in ids. Stored definitions may still name them. */
 export const BUILTIN_TOOL_ALIASES: Readonly<Record<string, string>> = {
   read_file: 'read',
   write_file: 'write',

@@ -111,8 +111,6 @@ export async function vendorDaemon(adapters: ProviderAdapter[]) {
   process.env.MOUSSE_HOME = home
   const daemon = phase6Daemon(home, adapters)
   const { orch, engine, store } = daemon
-  // The scripted daemon replaces the pi loop's client; the browser seam forwards to it.
-  ;(orch as any).llm.setBrowserRuntime = () => {}
   const credentials = new McpCredentials(engine.store)
   const server = new MousseMcpServer({ credentials, registry: orch.mcpToolRegistry() })
   await server.start()

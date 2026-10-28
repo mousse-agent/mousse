@@ -9,14 +9,14 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { claudeCodeDriver } from '../../src/mms/harness/drivers/claudeCode'
-import { piInstanceRuntime } from '../../src/mms/harness/drivers/pi/engines/legacy'
+import { piInstanceRuntime } from '../../src/mms/harness/drivers/pi/instance'
 import type { DriverContext } from '../../src/mms/harness/driver'
 import { PI_AMBIENT_MARKER } from '../../src/mms/harness/pi/envKeys'
 import { credentialKind } from '../../src/mms/harness/policy'
 import { UserQuestionService } from '../../src/mms/orchestrator/UserQuestionService'
 import { ClaudeSubscriptionProviderService, claudeCredentialKind } from '../../src/mms/providers/claudeSubscription/ClaudeSubscriptionProviderService'
 import { ProviderInstanceService } from '../../src/mms/providers/ProviderInstanceService'
-import { PiLoopAdapter } from '../../src/mms/run/adapters/pi/PiLoopAdapter'
+import { PiStubAdapter } from '../support/piStub'
 import { adapterDriver, testHarness } from '../../src/mms/run/testkit/harness'
 import type { InstanceSnapshot } from '../../src/shared/harness/status'
 import type { ConfiguredProvider } from '../../src/shared/providerAuth'
@@ -43,7 +43,7 @@ describe('credentialKind', () => {
   it('reaches the snapshot from the driver\'s reading', async () => {
     const home = mkdtempSync(join(tmpdir(), 'mousse-credential-'))
     homes.push(home)
-    const pi = new PiLoopAdapter(() => ({ chat: async () => { throw new Error('unused') } }))
+    const pi = new PiStubAdapter()
     const driver = adapterDriver(pi, { runtime: { auth: async () => ({ state: 'signed_in', credential: 'subscription' }) } })
     const instances = new ProviderInstanceService({
       store: { read: () => ({ instances: undefined }), write: () => {} },
@@ -62,7 +62,7 @@ describe('Pi instances', () => {
       has: () => provider !== null,
       getConfiguredProviders: () => (provider ? [{ id: providerId, label: providerId, authType: 'api_key', ...provider }] : []),
       storedApiKey: typeof stored === 'function' ? stored : () => stored
-    }), new PiLoopAdapter(() => ({ chat: async () => { throw new Error('unused') } })))
+    }), new PiStubAdapter())
 
   it.each([
     ['a stored key', 'openrouter', { authType: 'api_key' as const }, 'sk-or-1', 'api_key'],

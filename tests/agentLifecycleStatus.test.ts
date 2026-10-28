@@ -11,7 +11,6 @@ import {
   requiresMergeCandidateToFinalize,
   shouldFinalizeAgent
 } from '../src/mms/orchestrator/OrchestratorService'
-import { buildOrchestratorSystemPrompt, DELEGATION_PROMPT } from '../src/mms/orchestrator/systemPrompt'
 import { LEGACY_AGENT_PROGRESS_FILE, MOUSSE_CONTROL_FILE_PATHS } from '../src/mms/worktree/controlFiles'
 import { TaskQueue } from '../src/mms/tasks/TaskQueue'
 import { PtyManager } from '../src/mms/terminals/PtyManager'
@@ -226,55 +225,6 @@ describe('legacy agent settlement', () => {
     agents.updateStatus(agent.id, 'cancelled')
     expect(agents.updateStatus(agent.id, 'running')?.status ?? agents.get(agent.id)?.status).toBe('cancelled')
     expect(orchestrator.getActiveAgents()).toEqual([])
-  })
-})
-
-describe('prompt consistency', () => {
-  it('has subagents report through their final reply, without a progress file or orchestration JSON', () => {
-    const sub = buildOrchestratorSystemPrompt({ mode: 'build', subagent: true })
-    expect(sub).toContain('Do NOT emit complete_task')
-    expect(sub).toContain('Your final reply is your result')
-    expect(sub).toMatch(/On failure, say why/i)
-    expect(sub).not.toMatch(/task progress protocol|progress file/i)
-    expect(sub).not.toContain('spawn_agents')
-    expect(sub).not.toContain('"type": "complete_task"')
-  })
-
-  it('tells the delegating model to include the plan, acceptance criteria and focused validation', () => {
-    expect(DELEGATION_PROMPT).toMatch(/plan or spec body \(or a readable path\)/i)
-    expect(DELEGATION_PROMPT).toMatch(/acceptance criteria/i)
-    expect(DELEGATION_PROMPT).toMatch(/focused validation/i)
-    expect(DELEGATION_PROMPT).toMatch(/do not wait or poll/i)
-  })
-})
-
-describe('delegation guidance', () => {
-  // spawn_agents (cliType assignments) is retired (SPEC §14.5); delegation is delegate_task.
-  it('describes delegation as delegate_task subagents', () => {
-    expect(DELEGATION_PROMPT).toContain('delegate_task')
-    expect(DELEGATION_PROMPT).toContain('subagent')
-  })
-
-  it('defaults delegated children to the current connected model', () => {
-    expect(DELEGATION_PROMPT).toContain('instanceId and model default to yours')
-    expect(DELEGATION_PROMPT).toContain('explicitly requests an override')
-    expect(DELEGATION_PROMPT).toContain('Never copy example or guessed model identifiers')
-  })
-
-  it('reserves the shared workspace for read-only roles and isolates writers', () => {
-    expect(DELEGATION_PROMPT).toMatch(/"shared" only for read-only roles \(role "research" or "review"\)/)
-    expect(DELEGATION_PROMPT).toMatch(/workspace "isolated" for work that edits, builds or tests/)
-  })
-
-  it('requires an explicit integration of isolated results', () => {
-    expect(DELEGATION_PROMPT).toMatch(/integrate_delegation/)
-    expect(DELEGATION_PROMPT).toMatch(/Never claim integration from completion alone/)
-  })
-
-  it('keeps the agent-mode prompt free of spawn instructions', () => {
-    const agent = buildOrchestratorSystemPrompt({ mode: 'agent' })
-    expect(agent).not.toContain('spawn_agents')
-    expect(agent).not.toContain('cliType')
   })
 })
 

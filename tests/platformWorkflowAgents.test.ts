@@ -11,9 +11,8 @@ import { defaultAgentSettings } from '../src/shared/agents/defaults'
 import type { ExecutionActor, ExecutionContext, ExecutionPolicyLayer, ExecutionPolicySnapshot } from '../src/shared/execution/types'
 import type { StartWorkflowRequest, WorkflowBundle, WorkflowRunManifest } from '../src/shared/workflows'
 import { WORKFLOW_MAIN_AGENT_DEFINITION_ID } from '../src/shared/workflows/agentExecutionBindings'
-import { providerResponse, streamOf } from './fixtures/agent-platform/agent-runtime-policy/helpers'
+import { providerResponse } from './fixtures/agent-platform/agent-runtime-policy/helpers'
 import { installExactDefinitionRuntime } from './fixtures/agent-platform/exactDefinitionRuntime'
-import type { Harness } from '../src/mms/harness/gateway'
 
 const roots: string[] = []
 const previousHome = process.env.MOUSSE_HOME
@@ -45,13 +44,18 @@ async function fixture() {
   vi.spyOn(services.providerAuth, 'has').mockReturnValue(true)
   // Its stored sign-in: the gateway catalogue lists the models of signed-in instances.
   vi.spyOn(services.providerAuth.credentials, 'listProviderIds').mockReturnValue([provider.id])
-  vi.spyOn(services.providerAuth.models, 'getAuth').mockResolvedValue({ apiKey: 'fixture' } as never)
-  vi.spyOn(services.providerAuth.models, 'streamSimple').mockImplementation((_model, context) => {
-    captured.push(structuredClone(context))
-    const next = outputs.shift()
-    if (!next) throw new Error('fixture provider exhausted')
-    return streamOf(next) as never
-  })
+  // The profile's Mousse MCP server, as far as the gateway sees it: a definition's app tools need a bearer.
+  services.orchestrator.setMcpAttachment({ bearerForTurn: () => ({ url: 'http://127.0.0.1:9/mcp', token: 'fake-bearer', tokenHash: 'fake-hash' }), turnEnded: () => undefined, revokeThread: () => {} })
+  // Definition turns run on the exact stand-in for Pi RPC, the profile's `pi:<provider>` instance; the
+  // model's replies are `outputs` (or `setNext`).
+  let custom: ((context: Context, signal: AbortSignal) => Promise<AssistantMessage>) | undefined
+  const { harness } = installExactDefinitionRuntime({ orchestrator: services.orchestrator, providerId: provider.id, profileHome: services.getProfileHomeDir(), captured,
+    next: async (context, signal) => {
+      if (custom) return custom(context, signal)
+      const next = outputs.shift()
+      if (!next) throw new Error('fixture provider exhausted')
+      return next
+    } })
   const integrations = services.settings.get().integrations
   services.settings.set({
     provider: { llmProvider: modelRef.providerId, model: modelRef.modelId },
@@ -65,7 +69,8 @@ async function fixture() {
   })
   services.platform.workflowRuns.configureAdapters({ agent: agents.agent })
   return {
-    root, main, alice, bob, services, captured, outputs, modelRef, thread, agents,
+    root, main, alice, bob, services, captured, outputs, modelRef, thread, agents, harness,
+    setNext: (next: typeof custom) => { custom = next },
     setManifest: (manifest: WorkflowRunManifest | undefined) => { manifestOverride = manifest },
     close: async () => { agents.dispose(); await main.stop() }
   }
@@ -219,7 +224,7 @@ describe('production workflow Agent/Instruction adapter', () => {
     } finally { await f.close() }
   }, 30_000)
 
-  it('executes an instruction node through the native loop and returns real output/usage', async () => {
+  it('executes an instruction node on a definition runtime and returns real output/usage', async () => {
     const f = await fixture()
     try {
       f.outputs.push(providerResponse([{ type: 'text', text: '{"summary":"instruction-ok"}' }], 'stop', 9, 0.02))
@@ -304,15 +309,7 @@ describe('production workflow Agent/Instruction adapter', () => {
   it('cancels an in-flight native call without inventing success', async () => {
     const f = await fixture()
     try {
-      vi.mocked(f.services.providerAuth.models.streamSimple).mockImplementation((_model, context, options) => {
-        f.captured.push(structuredClone(context))
-        return {
-          async *[Symbol.asyncIterator]() {
-            await new Promise<void>((resolve) => options?.signal?.addEventListener('abort', () => resolve(), { once: true }))
-          },
-          result: async () => providerResponse([], 'aborted')
-        } as never
-      })
+      f.setNext((_context, signal) => new Promise((resolve) => signal.addEventListener('abort', () => resolve(providerResponse([], 'aborted')), { once: true })))
       const record = publishWorkflow(f, { id: 'instruction', type: 'instruction', version: 1, config: { text: 'Wait.' } })
       const request = startRequest(f, record)
       await f.agents.prepare(request, record)
@@ -522,7 +519,6 @@ describe('production workflow Agent/Instruction adapter', () => {
     try {
       // A stored Claude Code-kind definition whose model's instance only asks for approval (as Claude
       // Code, Codex and Pi RPC do today): the node fails closed with its reason, and nothing is sent.
-      const profileHarness = (f.services.orchestrator as unknown as { harness: Harness }).harness
       installExactDefinitionRuntime({ orchestrator: f.services.orchestrator, providerId: f.modelRef.providerId, profileHome: f.services.getProfileHomeDir(),
         captured: f.captured, caps: { toolControl: 'approval_only' } })
       const cliSettings = agentSettings('CLI Workflow Agent', f.modelRef, ['read'])
@@ -553,8 +549,8 @@ describe('production workflow Agent/Instruction adapter', () => {
       expect(JSON.stringify(cliError)).toContain('/settings/tools/mode')
       expect(f.captured).toEqual([])
       f.setManifest(undefined)
-      // Back on the profile's own gateway: the legacy Pi engine runs the rest.
-      f.services.orchestrator.setHarness(profileHarness)
+      // Back on the runtime that holds definitions for the rest.
+      f.services.orchestrator.setHarness(f.harness)
 
       f.outputs.push(providerResponse([{ type: 'text', text: '{"summary":"child-pin"}' }], 'stop'))
       const created = f.services.platform.agentDefinitions.createDraft({

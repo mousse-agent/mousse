@@ -132,6 +132,11 @@ export interface PiRpcEngineOptions {
    * turn they are sent for, so a definition's turn gets them as its loop would send them.
    */
   mousseTools?: (threadId: string, runId?: string) => PiMousseTool[]
+  /**
+   * The user's own MCP tools the turn `runId` is offered, proxied through Mousse's MCP server (the
+   * driver's `userMcp: 'proxy'`); a definition's turn gets its granted ones only.
+   */
+  userMcpTools?: (threadId: string, runId?: string) => Promise<PiMousseTool[]>
   warmMs?: number
   readyDeadlineMs?: number
   commandDeadlineMs?: number
@@ -1321,6 +1326,11 @@ export class PiRpcEngine implements ProviderAdapter {
     if (thread.sessionId) sink.providerRef(ref)
     let builtins = !input.cwd ? [] : input.mode === 'plan' || input.child?.readOnly ? PI_READ_ONLY_BUILTINS : PI_ALL_BUILTINS
     let tools = host.bridge?.mcp ? this.options.mousseTools?.(input.threadId, input.runId) ?? [] : []
+    // The user's own MCP servers reach Pi's agent through Mousse's MCP server, like the app tools.
+    if (host.bridge?.mcp && host.bridge.userMcp === 'proxy' && this.options.userMcpTools) {
+      const appTools = new Set(tools.map((tool) => tool.name))
+      tools = [...tools, ...(await this.options.userMcpTools(input.threadId, input.runId)).filter((tool) => !appTools.has(tool.name))]
+    }
     // An agent definition's turn offers exactly its grants (the policy's allowlist, else its effective
     // grants), and never a delegation tool: a definition delegates nothing, as on the legacy loop.
     if (host.definition) {

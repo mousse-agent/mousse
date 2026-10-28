@@ -18,6 +18,7 @@ import { PresentationState } from '../src/main/mms/PresentationState'
 import { bridgeProtocolEvent, broadcastThreadSnapshot } from '../src/main/mms/protocolEventBridge'
 import { MMS_PROTOCOL_VERSION, type ProtocolEvent } from '../src/mms/protocol/types'
 import { bootstrapPresentation } from '../src/main/ipc/registerGuiIpc'
+import { scriptTurns } from './net/bridge/hub/fixture'
 
 describe('GuiMmsController lifecycle', () => {
   let home: string
@@ -255,46 +256,13 @@ describe('GuiMmsController lifecycle', () => {
     const waitEnter = new Promise<void>((r) => {
       entered = r
     })
-    const llm = (
-      mms.orchestrator as unknown as {
-        llm: {
-          getSelectedModelContextLimit: () => { limit: number }
-          getContextInputs: () => Promise<unknown>
-          chat: () => Promise<unknown>
-        }
-      }
-    ).llm
-    const contextInputs = {
-      systemPromptText: '',
-      mcpToolsText: '',
-      otherToolsText: '',
-      signature: 'gui'
-    }
-    vi.spyOn(llm, 'getSelectedModelContextLimit').mockReturnValue({ limit: 100_000 })
-    vi.spyOn(llm, 'getContextInputs').mockResolvedValue(contextInputs)
-    vi.spyOn(llm, 'chat').mockImplementation(async () => {
+    mms.settings.set({ provider: { llmProvider: 'openai', model: 'test' } })
+    scriptTurns(mms, async () => {
       entered()
       await new Promise<void>((r) => {
         release = r
       })
-      return {
-        text: 'done',
-        usage: {
-          input: 1,
-          output: 1,
-          cacheRead: 0,
-          cacheWrite: 0,
-          totalTokens: 2,
-          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }
-        },
-        modelName: 'test',
-        totalResponseTimeMs: 1,
-        totalTokensUsed: 2,
-        tokensPerSecond: 1,
-        contextInputs,
-        toolEvents: [],
-        nativeMessages: []
-      }
+      return 'done'
     })
 
     const gui = new GuiMmsController({
@@ -331,46 +299,13 @@ describe('GuiMmsController lifecycle', () => {
     const waitEnter = new Promise<void>((r) => {
       entered = r
     })
-    const llm = (
-      mms.orchestrator as unknown as {
-        llm: {
-          getSelectedModelContextLimit: () => { limit: number }
-          getContextInputs: () => Promise<unknown>
-          chat: () => Promise<unknown>
-        }
-      }
-    ).llm
-    const contextInputs = {
-      systemPromptText: '',
-      mcpToolsText: '',
-      otherToolsText: '',
-      signature: 'gui'
-    }
-    vi.spyOn(llm, 'getSelectedModelContextLimit').mockReturnValue({ limit: 100_000 })
-    vi.spyOn(llm, 'getContextInputs').mockResolvedValue(contextInputs)
-    vi.spyOn(llm, 'chat').mockImplementation(async () => {
+    mms.settings.set({ provider: { llmProvider: 'openai', model: 'test' } })
+    scriptTurns(mms, async () => {
       entered()
       await new Promise<void>((r) => {
         release = r
       })
-      return {
-        text: 'persisted-after-disconnect',
-        usage: {
-          input: 1,
-          output: 1,
-          cacheRead: 0,
-          cacheWrite: 0,
-          totalTokens: 2,
-          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }
-        },
-        modelName: 'test',
-        totalResponseTimeMs: 1,
-        totalTokensUsed: 2,
-        tokensPerSecond: 1,
-        contextInputs,
-        toolEvents: [],
-        nativeMessages: []
-      }
+      return 'persisted-after-disconnect'
     })
 
     const gui = new GuiMmsController({

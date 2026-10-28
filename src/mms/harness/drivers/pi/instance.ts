@@ -1,29 +1,12 @@
-import { harnessAppError, type HarnessCaps } from '../../../../../shared/harness/types'
-import type { CredentialKind } from '../../../../../shared/harness/status'
-import type { ConfiguredProvider } from '../../../../../shared/providerAuth'
-import type { LlmProviderOption } from '../../../../../shared/settings'
-import type { ProviderAuthService } from '../../../../providers/ProviderAuthService'
-import { PI_LOOP_CAPABILITIES } from '../../../../run/adapters/pi/PiLoopAdapter'
-import type { ProviderAdapter } from '../../../../run/adapters/ProviderAdapter'
-import type { DriverRuntime } from '../../../driver'
-import { PI_AMBIENT_MARKER, piAmbientProvider } from '../../../pi/envKeys'
-import { runPiOneShot } from '../oneShot'
-
-/** Mousse measures the pi loop's transcript itself and offers Plan mode on it. */
-export const PI_LEGACY_CAPS: HarnessCaps = Object.freeze({
-  ...PI_LOOP_CAPABILITIES,
-  planMode: true,
-  contextUsage: 'measured',
-  // Mousse runs the pi loop's tools itself.
-  toolControl: 'exact',
-  // Spend is counted after each response; nothing refuses the next request yet.
-  budgets: 'observed',
-  spendLimits: 'unsupported',
-  // A definition's loop runs here under its own limits (`TrustedAgentExecutionOptions`) until PR 4
-  // unit 4d-rpc moves definitions to Pi RPC; 4h then deletes this with the loop. Counts
-  // before each request and tool call, tokens and cost after each response, as always.
-  definitionLimits: 'in_loop'
-})
+import { harnessAppError } from '../../../../shared/harness/types'
+import type { CredentialKind } from '../../../../shared/harness/status'
+import type { ConfiguredProvider } from '../../../../shared/providerAuth'
+import type { LlmProviderOption } from '../../../../shared/settings'
+import type { ProviderAuthService } from '../../../providers/ProviderAuthService'
+import type { ProviderAdapter } from '../../../run/adapters/ProviderAdapter'
+import type { DriverRuntime } from '../../driver'
+import { PI_AMBIENT_MARKER, piAmbientProvider } from '../../pi/envKeys'
+import { runPiOneShot } from './oneShot'
 
 export type PiCredentials = Partial<Pick<ProviderAuthService,
   'getConfiguredProviders' | 'getConfiguredLlmProviders' | 'has' | 'logout' | 'runOAuthLogin' | 'runApiKeyLogin' | 'refreshDynamicModels' | 'getProviderDisplayName' | 'storedApiKey' | 'models'
@@ -31,8 +14,8 @@ export type PiCredentials = Partial<Pick<ProviderAuthService,
 >>
 
 /**
- * What every engine of a `pi:<provider>` instance shares: its provider's sign-in and models, as
- * the profile's credentials report them. The engine supplies the turn runtime.
+ * What a `pi:<provider>` instance shares with Pi's agent: its provider's sign-in and models, as the
+ * profile's credentials report them. The engine supplies the turn runtime.
  */
 export function piInstanceRuntime(instanceId: string, providerId: string, credentials: () => PiCredentials | undefined, adapter: ProviderAdapter): DriverRuntime {
   const configuredProvider = (): ConfiguredProvider | undefined =>
@@ -97,7 +80,7 @@ export function piInstanceRuntime(instanceId: string, providerId: string, creden
       await auth.refreshDynamicModels?.().catch(() => undefined)
     },
     exportApiKey: async () => credentials()?.storedApiKey?.(providerId),
-    // Chat titles: one pi-ai request in Mousse's process, on either engine (`runPiOneShot`).
+    // Chat titles: one pi-ai request in Mousse's process (`runPiOneShot`).
     oneShot: (spec, signal) => {
       const models = credentials()?.models
       if (!models) throw harnessAppError({ code: 'signed_out', message: 'Mousse has no provider credentials loaded yet.', instanceId })

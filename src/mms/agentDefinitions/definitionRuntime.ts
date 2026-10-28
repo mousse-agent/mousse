@@ -104,30 +104,27 @@ export function definitionFeatures(settings: Pick<AgentDefinitionSettings, 'outp
 
 /**
  * The definition settings, besides its tools and limits, that an instance with `caps` cannot hold
- * (PR 4 4d-rpc). A runtime that runs the definition's own loop (`definitionLimits: 'in_loop'`, the
- * legacy engine) holds them all, as it always has. Any other runtime (Pi's agent) holds what the
- * loop holds in the same way:
+ * (PR 4 4d-rpc). Pi's agent holds them as follows:
  * - JSON and schema output: their rules and the schema are in the definition's system prompt, sent
  *   as written, and the reply is validated by the run owner (`AgentExecutionService`) whatever ran it;
- * - memory, any scope: the entries are in the system prompt, as on the loop;
- * - delegation settings: no runtime runs child definitions (the loop refuses a delegation tool, and
- *   Pi's agent is never offered one in a definition's turn);
+ * - memory, any scope: the entries are in the system prompt;
+ * - delegation settings: no runtime runs child definitions (Pi's agent is never offered a
+ *   delegation tool in a definition's turn);
  * - the browser: the same browser tools, as Mousse app tools over its MCP server, under the same
  *   binding (`createDefinitionBrowserBinding`) and the definition's authority on every call. A
  *   runtime that cannot attach Mousse's MCP server cannot reach them, so it is refused there.
  * Settings that are not known are refused, on every runtime.
  */
-export function definitionFeatureGaps(caps: Pick<HarnessCaps, 'definitionLimits' | 'mcp'>, features: AgentRuntimeFeatures | undefined): AgentRuntimeUnsupportedSetting[] {
-  // Settings that were not given are refused everywhere, the loop included: nothing falls back for them.
+export function definitionFeatureGaps(caps: Pick<HarnessCaps, 'mcp'>, features: AgentRuntimeFeatures | undefined): AgentRuntimeUnsupportedSetting[] {
+  // Settings that were not given are refused everywhere: nothing falls back for them.
   if (!features) return [{ pointer: '/settings', reason: DEFINITION_SETTINGS_MISSING }]
-  if (caps.definitionLimits === 'in_loop') return []
   if (features.browserMode !== 'disabled' && !caps.mcp)
     return [{ pointer: '/settings/browser/mode', reason: "The browser reaches agent definitions through Mousse's tools, which this provider's engine cannot attach. Turn the browser off, or pick another provider." }]
   return []
 }
 
 /** A refusal for the gaps `definitionFeatureGaps` found, or undefined. */
-export function definitionFeatureRefusal(caps: Pick<HarnessCaps, 'definitionLimits' | 'mcp'>, features: AgentRuntimeFeatures | undefined, instanceId?: string): DefinitionRefusal | undefined {
+export function definitionFeatureRefusal(caps: Pick<HarnessCaps, 'mcp'>, features: AgentRuntimeFeatures | undefined, instanceId?: string): DefinitionRefusal | undefined {
   const gaps = definitionFeatureGaps(caps, features)
   if (!gaps.length) return undefined
   return {

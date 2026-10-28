@@ -1,7 +1,6 @@
 /**
  * Suggesting a commit message from the changes a commit would take. Everything here is pure: the
- * caller reads the changes with `GitService.describeCommitInput`, and the one model call lives beside
- * the title call in `LlmClient`.
+ * caller reads the changes with `GitService.describeCommitInput` and makes the one model call.
  */
 import { createErrorProvider } from '../../shared/errors'
 import { capText } from './pullRequestDraft'

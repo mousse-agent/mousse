@@ -1,5 +1,0 @@
-{"kind":"transcript","adapter":"pi","scenario":"provider-error","boundary":"LlmClient.chat call: request projection out; callbacks and result in","recordedAt":"hand-authored","version":1}
-{"dir":"out","frame":{"kind":"chat","messages":[{"role":"user","content":"Summarise the repository"}],"options":{"mode":"agent"}}}
-{"dir":"in","frame":{"kind":"text","event":{"phase":"start","content":"","contentIndex":0}}}
-{"dir":"in","frame":{"kind":"text","event":{"phase":"delta","content":"Partial","contentIndex":0}}}
-{"dir":"in","frame":{"kind":"error","error":{"message":"Upstream overloaded"}}}

@@ -11,7 +11,8 @@ import { describe, expect, it, afterEach, beforeEach } from 'vitest'
 import { ThreadDataStore } from '../src/mms/data/ThreadDataStore'
 import { ProjectManager } from '../src/mms/data/ProjectManager'
 import { OrchestratorService } from '../src/mms/orchestrator/OrchestratorService'
-import { createOrchestrator } from './run/phase6Fixture'
+import { createOrchestrator, piAdapter } from './run/phase6Fixture'
+import { testHarness } from '../src/mms/run/testkit/harness'
 
 async function waitFor(cond: () => boolean, timeoutMs: number, label: string): Promise<void> {
   const start = Date.now()
@@ -45,86 +46,40 @@ describe('late-turn steer/send during finalizing', () => {
       const thread = store.createThread('late')
       orch.getOrCreateSession(thread.id).projectCwd = projectRepo
 
-      let releaseFinalizing: (() => void) | null = null
-      const finalizingGate = new Promise<void>((r) => {
-        releaseFinalizing = r
-      })
-      let enteredFinalizing = false
       let inFlight = 0
       let maxInFlight = 0
       let chatCalls = 0
       const lastUserPerCall: string[] = []
+      orch.setHarness(testHarness({ adapters: [piAdapter(async (input) => {
+        inFlight += 1
+        maxInFlight = Math.max(maxInFlight, inFlight)
+        try {
+          chatCalls += 1
+          lastUserPerCall.push(input.prompt)
+          await new Promise((r) => setTimeout(r, 20))
+          return 'final answer'
+        } finally {
+          inFlight -= 1
+        }
+      })], profileHome: home }))
 
-      // The probe response carries one harmless action so the test can hold
-      // the turn inside post-LLM finalizing deterministically.
-      ;(orch as any).llm = {
-        getSelectedModelContextLimit: () => ({ limit: 128_000, modelName: 'probe' }),
-        getContextInputs: async () => ({
-          systemPromptText: '',
-          mcpToolsText: '',
-          otherToolsText: '',
-          signature: 'probe-sig'
-        }),
-        chat: async (messages: any, _onTool: unknown, opts: any) => {
-          inFlight += 1
-          maxInFlight = Math.max(maxInFlight, inFlight)
-          try {
-            chatCalls += 1
-            const arr = Array.isArray(messages) ? messages : []
-            const lastUser = [...arr].reverse().find((m: any) => m?.role === 'user')
-            const text =
-              typeof lastUser?.content === 'string'
-                ? lastUser.content
-                : Array.isArray(lastUser?.content)
-                  ? lastUser.content.map((p: any) => p?.text ?? '').join('')
-                  : ''
-            lastUserPerCall.push(text)
-            await new Promise((r) => setTimeout(r, 20))
-            const aborted = Boolean(opts?.signal?.aborted)
-            return {
-              text: aborted
-                ? ''
-                : 'final answer\n```mousse-actions\n{"actions":[{"type":"message","content":"gated"}]}\n```',
-              usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
-              modelName: 'probe',
-              totalResponseTimeMs: 1,
-              totalTokensUsed: 2,
-              tokensPerSecond: undefined,
-              contextInputs: { signature: 'probe-sig' },
-              toolEvents: [],
-              aborted,
-              nativeMessages: []
-            }
-          } finally {
-            inFlight -= 1
-          }
+      // The first turn is past the provider and finalizing: the steer and the send land in that exact
+      // window, before the final response is written and the turn settles.
+      let steered: boolean | undefined
+      let late: ReturnType<OrchestratorService['send']> | undefined
+      const realSetTurnPhase = (orch as any).setTurnPhase.bind(orch)
+      ;(orch as any).setTurnPhase = (threadId: string, phase: string, ...rest: unknown[]) => {
+        realSetTurnPhase(threadId, phase, ...rest)
+        if (phase === 'finalizing' && !late) {
+          steered = orch.steerActiveTurn('late steer', thread.id)
+          late = orch.send('second', false, { threadId: thread.id })
         }
       }
-      const realExecuteAction = (orch as any).executeAction.bind(orch)
-      let executeActionCalls = 0
-      ;(orch as any).executeAction = async (action: any, ...rest: any[]) => {
-        executeActionCalls += 1
-        if (executeActionCalls === 1) {
-          // First turn is now past the LLM and inside finalizing: hold it
-          // here so the steer/send below land in that exact window.
-          enteredFinalizing = true
-          await finalizingGate
-        }
-        return realExecuteAction(action, ...rest)
-      }
 
-      const p1 = orch.send('first', false, { threadId: thread.id })
-      await waitFor(() => enteredFinalizing, 10_000, 'finalizing gate')
-
-      // Steer and send now race the in-progress final render.
-      const steered = orch.steerActiveTurn('late steer', thread.id)
-      expect(steered).toBe(true)
-      const r2 = await orch.send('second', false, { threadId: thread.id })
-      expect(r2.queued).toBe(true)
-
-      releaseFinalizing?.()
-      const r1 = await p1
+      const r1 = await orch.send('first', false, { threadId: thread.id })
       expect(r1.queued).not.toBe(true)
+      expect(steered).toBe(true)
+      expect((await late!).queued).toBe(true)
 
       // Both the queued send and the leftover steer follow-up must drain as
       // sequential turns — never concurrently with the first.

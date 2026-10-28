@@ -12,7 +12,7 @@
     "mousse-cli": "./out/cli/index.js"
   },
   "scripts": {
-    "postinstall": "node scripts/ensure-electron.mjs && node scripts/ensure-native-executables.mjs && node scripts/remove-vulnerable-bundled-deps.mjs",
+    "postinstall": "node scripts/ensure-electron.mjs && node scripts/ensure-native-executables.mjs",
     "start": "node scripts/start.mjs",
     "dev": "node scripts/dev.mjs",
     "dev:electron": "node scripts/dev.mjs",
@@ -81,7 +81,6 @@
     "node-datachannel": "0.33.4",
     "node-pty": "^1.0.0",
     "pele": "^1.10.0",
-    "pi-cursor-sdk": "0.3.6",
     "qrcode-generator": "^1.5.2",
     "shiki": "^3.23.0",
     "simple-git": "^3.27.0",

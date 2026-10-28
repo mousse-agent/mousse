@@ -81,11 +81,6 @@ describe('execution bindings', () => {
       { get: () => getDefaultSettings() } as never, {} as never
     )
     orch.setThreadStore(store)
-    ;(orch as any).llm = {
-      getSelectedModelContextLimit: () => ({ limit: 128_000, modelName: 'm' }),
-      getContextInputs: async () => ({ systemPromptText: '', mcpToolsText: '', otherToolsText: '', signature: 's' }),
-      chat: async () => { throw new Error('unused') }
-    }
     adapter = new GatedClaude()
     codex = new GatedClaude('codex')
     forgotten = []
@@ -442,7 +437,6 @@ describe('execution bindings', () => {
   })
 
   it('the context gauge of a fresh profile with no model selected is empty, not an error', async () => {
-    ;(orch as any).llm.getContextInputs = async () => { throw new Error('Unknown model "" for provider ""') }
     await expect(orch.getContextUsage('')).resolves.toMatchObject({ percent: 0, used: 0, limit: 0, categories: [] })
   })
 
