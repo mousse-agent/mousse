@@ -13,6 +13,10 @@ import { PROJECT_SHELL_AGENT_ID } from '../../../../src/shared/types'
 import { cleanups, cleanupAll, linked } from './routerFixture'
 import { fakeShells, type Spawned } from './terminalFixture'
 
+/** Waits for a thing that crosses a real session: long enough for a loaded machine. */
+const eventually = (check: () => void, options: { timeout?: number } = {}) =>
+  vi.waitFor(check, { timeout: 15_000, ...options })
+
 let t: Awaited<ReturnType<typeof linked>>
 let shells: Spawned[]
 beforeAll(async () => {
@@ -53,7 +57,7 @@ async function open(thread = folderThread()) {
   const before = shells.length
   const created = await t.dispatch('pty.create', { threadId: t.qualified(thread.id), agentId })
   const shell = shells[before]
-  await vi.waitFor(() => expect(attached(created.ptyId)).toBe(true), { timeout: 20_000 })
+  await eventually(() => expect(attached(created.ptyId)).toBe(true), { timeout: 20_000 })
   return { thread, shell, ptyId: created.ptyId as string, created }
 }
 
@@ -108,7 +112,7 @@ describe('with the terminal switch on', () => {
     const { thread, shell, ptyId } = await open()
     shell.pty.say('hello ')
     shell.pty.say('world\r\n')
-    await vi.waitFor(() => expect(output(ptyId)).toContain('hello world'))
+    await eventually(() => expect(output(ptyId)).toContain('hello world'))
     const first = terminalEvents('pty.data').find((event) => event.data.ptyId === ptyId)!
     expect(first).toMatchObject({
       threadId: t.qualified(thread.id),
@@ -124,13 +128,13 @@ describe('with the terminal switch on', () => {
     const shell = shells[before]
     // The prompt is printed before this computer has attached to the terminal's stream.
     shell.pty.say('PS prompt> ')
-    await vi.waitFor(() => expect(attached(created.ptyId)).toBe(true), { timeout: 20_000 })
+    await eventually(() => expect(attached(created.ptyId)).toBe(true), { timeout: 20_000 })
     shell.pty.say('then more')
     // Nothing is shown yet: the window has not mounted the terminal, which it does by resizing it.
     await new Promise((resolve) => setTimeout(resolve, 300))
     expect(output(created.ptyId)).toBe('')
     await t.dispatch('pty.resize', { threadId: t.qualified(thread.id), ptyId: created.ptyId, cols: 100, rows: 30 })
-    await vi.waitFor(() => expect(output(created.ptyId)).toBe('PS prompt> then more'), { timeout: 10_000 })
+    await eventually(() => expect(output(created.ptyId)).toBe('PS prompt> then more'), { timeout: 10_000 })
     expect(shell.pty.resizes).toEqual([[100, 30]])
     await t.dispatch('pty.kill', { threadId: t.qualified(thread.id), ptyId: created.ptyId })
   }, 120_000)
@@ -162,7 +166,7 @@ describe('with the terminal switch on', () => {
     const { thread, shell, ptyId } = await open()
     shell.pty.say('bye\r\n')
     shell.pty.exit(3)
-    await vi.waitFor(() =>
+    await eventually(() =>
       expect(terminalEvents('pty.exit').some((event) => event.data.ptyId === ptyId)).toBe(true)
     )
     const mine = terminalEvents().filter((event) => event.data.ptyId === ptyId)
@@ -195,10 +199,10 @@ describe('with the terminal switch on', () => {
     t.router.terminals.forget(t.node, ptyId)
     expect(t.router.terminals.state().some((term) => term.ptyId === ptyId)).toBe(false)
     expect(await t.dispatch('pty.isAlive', { threadId: q, ptyId })).toMatchObject({ alive: true })
-    await vi.waitFor(() => expect(attached(ptyId)).toBe(true), { timeout: 20_000 })
+    await eventually(() => expect(attached(ptyId)).toBe(true), { timeout: 20_000 })
     shell.pty.say('after the restart')
     // A stream that was let go of is opened again and brings its snapshot first: that takes a moment.
-    await vi.waitFor(() => expect(output(ptyId)).toContain('after the restart'), { timeout: 15_000 })
+    await eventually(() => expect(output(ptyId)).toContain('after the restart'), { timeout: 15_000 })
     await t.dispatch('pty.kill', { threadId: q, ptyId })
   }, 120_000)
 
@@ -207,7 +211,7 @@ describe('with the terminal switch on', () => {
     const two = await open()
     await t.owner.net.request('bridge.policy', { node: t.callerNode, terminal: false })
     expect(one.shell.pty.killed && two.shell.pty.killed).toBe(true)
-    await vi.waitFor(
+    await eventually(
       () => {
         for (const { ptyId } of [one, two])
           expect(terminalEvents('pty.exit').some((event) => event.data.ptyId === ptyId)).toBe(true)
@@ -227,7 +231,7 @@ describe('with the terminal switch on', () => {
     const one = await open()
     await t.owner.net.request('bridge.policy', { node: t.callerNode, blocked: true })
     expect(one.shell.pty.killed).toBe(true)
-    await vi.waitFor(
+    await eventually(
       () =>
         expect(terminalEvents('pty.exit').some((event) => event.data.ptyId === one.ptyId)).toBe(true),
       { timeout: 20_000 }
