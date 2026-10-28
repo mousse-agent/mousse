@@ -311,11 +311,17 @@ export interface ProxyProgram {
   args?: readonly string[]
 }
 
+/**
+ * `home` is the Mousse home of the installation whose config this is, written as `--home <path>` so the proxy
+ * reaches that installation's daemon whatever environment the editor's `ssh` runs in. Leave it out for the
+ * default home (`~/.mousse`), which the proxy finds on its own.
+ */
 export function proxyCommand(
   cli: string | ProxyProgram,
   node: NodeId,
   profile: string,
-  platform: NodeJS.Platform = process.platform
+  platform: NodeJS.Platform = process.platform,
+  home?: string
 ) {
   if (!isId('node', node)) throw new EditorSshError('bad_value', 'A device identity is required.')
   if (!PROFILE_ID.test(profile)) throw new EditorSshError('bad_value', 'A profile id is required.')
@@ -327,7 +333,8 @@ export function proxyCommand(
     'ssh-proxy',
     node,
     '--profile',
-    profile
+    profile,
+    ...(home ? ['--home', shellWord(home, platform)] : [])
   ].join(' ')
 }
 
@@ -393,6 +400,8 @@ export function renderConfig(
     knownHosts: string
     cli: string | ProxyProgram
     platform?: NodeJS.Platform
+    /** The Mousse home, when it is not the default one: written into every ProxyCommand. */
+    mousseHome?: string
   }
 ): string {
   const platform = context.platform ?? process.platform
@@ -412,7 +421,7 @@ export function renderConfig(
       // The ProxyCommand reaches the computer; the name is only for tools that print it.
       '  HostName 127.0.0.1',
       ...(user ? [`  User ${user}`] : []),
-      `  ProxyCommand ${proxyCommand(context.cli, computer.node, computer.profile, platform)}`,
+      `  ProxyCommand ${proxyCommand(context.cli, computer.node, computer.profile, platform, context.mousseHome)}`,
       `  HostKeyAlias ${computer.alias}`,
       `  UserKnownHostsFile ${context.knownHosts}`,
       '  StrictHostKeyChecking yes',
@@ -745,6 +754,8 @@ export class EditorSshConfig {
   private readonly verifier: SshVerifier
   private readonly afterRead?: EditorSshOptions['afterRead']
   private readonly lockKey: string
+  /** The Mousse home when it is not `<home>/.mousse`: the proxy is told, so it finds this installation's daemon. */
+  private readonly nonDefaultHome?: string
 
   constructor(options: EditorSshOptions) {
     this.platform = options.platform ?? process.platform
@@ -757,6 +768,12 @@ export class EditorSshConfig {
     this.verifier = options.verify ?? systemSshVerifier(this.platform)
     this.afterRead = options.afterRead
     this.lockKey = this.platform === 'win32' ? this.paths.dir.toLowerCase() : this.paths.dir
+    const p = pathModule(this.platform)
+    const fold = (value: string): string =>
+      this.platform === 'win32' ? value.toLowerCase() : value
+    const normal = (value: string): string => fold(p.resolve(value))
+    if (normal(options.mousseHome) !== normal(p.join(options.home, '.mousse')))
+      this.nonDefaultHome = options.mousseHome
   }
 
   /** One change at a time for the whole Mousse folder, across profiles. */
@@ -913,7 +930,8 @@ export class EditorSshConfig {
     return renderConfig(computers, {
       knownHosts: knownHostsWord(this.paths, this.platform),
       cli: this.cli,
-      platform: this.platform
+      platform: this.platform,
+      ...(this.nonDefaultHome ? { mousseHome: this.nonDefaultHome } : {})
     })
   }
 

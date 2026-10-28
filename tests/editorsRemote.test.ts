@@ -133,7 +133,7 @@ describe('opening a folder of another computer', () => {
     const code: DetectedEditor = { id: 'vscode', label: 'VS Code', launcherPath: '/usr/bin/code' }
     const answer = { path: '/home/me/app', uriPath: '/home/me/app', style: 'posix', platform: 'linux', kind: 'project' }
 
-    function fixture(patch: { approval?: string; detected?: DetectedEditor[]; exists?: boolean; folders?: Record<string, string[]>; processEnv?: NodeJS.ProcessEnv } = {}) {
+    function fixture(patch: { approval?: string; detected?: DetectedEditor[]; exists?: boolean; folders?: Record<string, string[]>; processEnv?: NodeJS.ProcessEnv; proxyReady?: boolean } = {}) {
       const launched: Array<{ command: string; args: string[]; env: NodeJS.ProcessEnv }> = []
       const asked: string[] = []
       const io: RemoteOpenIo = {
@@ -145,7 +145,7 @@ describe('opening a folder of another computer', () => {
         list: (path) => patch.folders?.[path],
         processEnv: () => patch.processEnv ?? { PATH: '/usr/bin' },
         forgetDetected: () => {},
-        proxyReady: false
+        proxyReady: patch.proxyReady ?? false
       }
       const ask = async (method: string) => {
         asked.push(method)
@@ -161,6 +161,15 @@ describe('opening a folder of another computer', () => {
       expect(await openRemoteInEditor('vscode', threadId, f.ask, f.io)).toEqual({ ok: true })
       const hex = Buffer.from('{"hostName":"box.example.com","user":"me","port":2222}').toString('hex')
       expect(f.launched).toEqual([{ command: '/usr/bin/code', args: ['--folder-uri', `vscode-remote://ssh-remote+${hex}/home/me/app`], env: { PATH: '/usr/bin' } }])
+    })
+
+    it('opens a computer with an approved address over that address, whatever the owner’s editor switch says, once Mousse’s own names are on', async () => {
+      // The approved address is the person's own SSH: no tunnel, no owner switch, no Include line.
+      const f = fixture({ approval: 'me@box.example.com:2222', proxyReady: true })
+      expect(await openRemoteInEditor('vscode', threadId, f.ask, f.io)).toEqual({ ok: true })
+      const hex = Buffer.from('{"hostName":"box.example.com","user":"me","port":2222}').toString('hex')
+      expect(f.launched[0].args).toEqual(['--folder-uri', `vscode-remote://ssh-remote+${hex}/home/me/app`])
+      expect(f.asked).toEqual(['net.ssh.target', 'editor.folder'])
     })
 
     it('starts the editor without the variables that would send it to another window', async () => {
