@@ -1,6 +1,6 @@
 import { afterEach, expect, it } from 'vitest'
 import { execFileSync } from 'node:child_process'
-import { mkdirSync, mkdtempSync, realpathSync, rmSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { newId } from '../../../../src/shared/net'
@@ -99,6 +99,51 @@ it('prefers the clone that shares a remote and refuses to guess between the rest
   expect(await ask(['example.com/org/x'])).toEqual({ projectId: idOf(x.path) })
   expect(await ask(['example.com/org/other'])).toEqual({})
   expect(await ask([])).toEqual({})
+})
+
+it('matches a project that is a subfolder of the repository, and one reached through a link', async () => {
+  const f = await fixture(),
+    mine = repository('https://example.com/org/app.git'),
+    sub = repository('https://example.com/org/lib.git'),
+    linked = repository('https://example.com/org/linked.git')
+  mkdirSync(join(sub.path, 'packages', 'ui'), { recursive: true })
+  const subProject = f.mms.projects.openProject(join(sub.path, 'packages', 'ui'))
+  let linkedProject: { id: string } | undefined
+  const link = join(folder(), 'shortcut')
+  try {
+    symlinkSync(linked.path, link, 'junction')
+    linkedProject = f.mms.projects.openProject(link)
+  } catch {
+    // The machine cannot make links: only the subfolder is checked.
+  }
+  await f.connect()
+  const ask = (roots: string[], remotes: string[] = []) =>
+    executeBridgeHubLocal(f.hub(), 'bridge.hub.matchProject', {
+      target: f.targetNode,
+      roots,
+      remotes,
+      options: { id: newId('rpc') }
+    })
+  expect(await ask([sub.root], ['example.com/org/lib'])).toEqual({ projectId: subProject.id })
+  if (linkedProject) expect(await ask([linked.root])).toEqual({ projectId: linkedProject.id })
+  expect(await ask([mine.root])).toEqual({})
+})
+
+it('does not let two projects in one repository make each other ambiguous: the top folder stands for it', async () => {
+  const f = await fixture(),
+    app = repository('https://example.com/org/app.git')
+  mkdirSync(join(app.path, 'docs'))
+  const docs = f.mms.projects.openProject(join(app.path, 'docs'))
+  const top = f.mms.projects.openProject(app.path)
+  expect(docs.id).not.toBe(top.id)
+  await f.connect()
+  const ask = () =>
+    executeBridgeHubLocal(f.hub(), 'bridge.hub.matchProject', {
+      target: f.targetNode,
+      roots: [app.root],
+      remotes: ['example.com/org/app']
+    })
+  expect(await ask()).toEqual({ projectId: top.id })
 })
 
 it('is read-only, needs the read capability, and validates its input before anything runs', async () => {

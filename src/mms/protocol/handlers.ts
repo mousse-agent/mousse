@@ -1,4 +1,4 @@
-import { portableRepository } from '../bridge/dispatch/repository'
+import { repositoryIdentitiesFor } from '../bridge/remote/repositoryIdentity'
 import type { StorageCleanupPlanToken } from '../../shared/storage'
 import { validateAppletAppearance } from '../../shared/appletAppearance'
 import { appletJsonBytes, APPLET_STATE_LIMIT } from '../../shared/applets'
@@ -1198,12 +1198,9 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const projectId = asString(p.projectId, 'projectId', 256)
       const project = ctx.mms.projects.getProject(projectId)
       if (!project) return { identity: null }
-      try {
-        const { roots, remotes } = await portableRepository(project.path)
-        return { identity: { roots, remotes } }
-      } catch {
-        return { identity: null }
-      }
+      // By the repository the folder is in, so a subfolder or a linked folder has its repository's identity.
+      const identity = await repositoryIdentitiesFor(ctx.mms).of(project.path)
+      return { identity: identity ? { roots: identity.roots, remotes: identity.remotes } : null }
     }
     case 'projects.remove': {
       const p = isObject(params) ? params : {}

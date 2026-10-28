@@ -52,7 +52,14 @@ export async function canonicalRepository(path: string): Promise<string> {
 }
 
 export async function portableRepository(path: string): Promise<PortableRepository> {
-  const root = await canonicalRepository(path)
+  return portableRepositoryAt(await canonicalRepository(path))
+}
+
+/**
+ * The remotes and root commits of the repository whose top folder is `root` (a real path). Used where the
+ * caller has already found the top folder, as the project matching does for a subfolder or a link.
+ */
+export async function portableRepositoryAt(root: string): Promise<PortableRepository> {
   const names = (await git(root, ['remote'])).split('\n').filter(Boolean)
   if (names.length > 32) throw new NetError('too_large')
   const remotes: string[] = []
