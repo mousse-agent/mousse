@@ -420,3 +420,9 @@
 .devices-choice:hover {
   background: var(--ui-hover);
 }
+
+/* The one-time notice about Mousse's Include line, inside the Editors group. */
+.settings-group-rows .side-card-ssh-notice {
+  margin: 0;
+  padding: var(--space-8) 16px 12px;
+}
