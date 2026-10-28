@@ -1,5 +1,15 @@
-import { useEffect, useId, useRef, useState } from 'react'
+import { useEffect, useId, useRef, useState, type ReactNode } from 'react'
 import type { EditorInfo } from '../../../shared/types'
+import type { RemoteAskResult, RemoteOpenResult } from '../../../shared/remoteEditor'
+import {
+  askOutcomeWords,
+  editorConnectionHelp,
+  helpForOpenResult,
+  openedWords,
+  type AskOutcome,
+  type EditorHelp,
+  type EditorHelpAction
+} from '../../lib/editorConnection'
 import { useActiveProjectLocation } from '../../hooks/useActiveProjectPath'
 import { useTransientError } from '../../hooks/useTransientError'
 import { FloatingPortal } from '../../lib/floatingLayer'
@@ -25,6 +35,7 @@ import {
   splitEditors
 } from './openInEditor'
 import { EditorSshNotice } from './EditorSshNotice'
+import { EditorStateNote, type EditorStateAction } from './EditorStateNote'
 import { useRemoteRoute } from './useRemoteRoute'
 import { SideCardMenuRow } from './SideCardMenuRow'
 import { useSideCardMenu } from './useSideCardMenu'
@@ -61,22 +72,33 @@ export function OpenInEditor() {
   return <OpenInEditorView path={path} editors={editors} lastId={lastId} onOpen={open} onMenuOpen={refreshQuietly} />
 }
 
+/** What the last open or ask came to, until the next one. */
+type Outcome =
+  | { kind: 'refused'; result: Extract<RemoteOpenResult, { ok: false }> }
+  | { kind: 'opened'; hint?: string; via?: ConnectionVia }
+  | { kind: 'asked'; result: RemoteAskResult }
+
+type ConnectionVia = NonNullable<Extract<RemoteOpenResult, { ok: true }>['via']>
+
 /**
  * The editor item of a thread that lives on another computer: the same button, which opens the thread's
- * folder in an editor installed here, over SSH. Without an SSH route to that computer it stays and says
- * what is missing. The file manager is not offered: it would open this computer's own disk.
+ * folder in an editor installed here, over SSH. When it cannot open, the item says why in plain words, with
+ * the next step and a button for what Mousse can do (ask that computer to allow editor connections, try
+ * again, open Devices). The file manager is not offered: it would open this computer's own disk.
  */
 export function OpenInRemoteEditor({ threadId, node, computer, profileId }: { threadId: string; node: string; computer: string; profileId: string }) {
   const editors = useEditorsStore((s) => s.editors)
   const { kind: route, reload: reloadRoute } = useRemoteRoute(threadId)
-  const device = useComputers(true).devices.find((entry) => entry.node === node)
+  const { devices } = useComputers(true)
+  const device = devices.find((entry) => entry.node === node)
+  const selfNode = devices.find((entry) => entry.self)?.node
   const [approving, setApproving] = useState(false)
   const [lastId, setLastId] = useState<string | null>(() => loadLastEditorId(profileId))
-  const [refusal, setRefusal] = useState<string | null>(null)
-  const [hint, setHint] = useState<string | null>(null)
+  const [outcome, setOutcome] = useState<Outcome | null>(null)
+  const [working, setWorking] = useState<'opening' | 'asking' | null>(null)
   const [opens, setOpens] = useState(0)
   useEffect(() => { setLastId(loadLastEditorId(profileId)) }, [profileId])
-  useEffect(() => { setRefusal(null); setHint(null) }, [threadId])
+  useEffect(() => { setOutcome(null) }, [threadId])
   if (!editors) return null
   const usable = remoteEditors(editors)
   const current = defaultEditor(usable, lastId)
@@ -95,22 +117,71 @@ export function OpenInRemoteEditor({ threadId, node, computer, profileId }: { th
   const open = async (editor: EditorInfo) => {
     setLastId(editor.id)
     saveLastEditorId(profileId, editor.id)
-    setRefusal(null)
-    setHint(null)
+    setOutcome(null)
+    setWorking('opening')
     try {
       // Also while the note shows: the route may have been added since the window last looked.
       const result = await window.mousse.editors.openRemote(editor.id, threadId)
-      if (result.ok) setHint(result.hint ?? null)
+      if (result.ok) setOutcome({ kind: 'opened', ...(result.hint ? { hint: result.hint } : {}), ...(result.via ? { via: result.via } : {}) })
       else if (result.reason === 'no_route') reloadRoute()
-      else setRefusal(remoteRefusalMessage(result, editor, computer))
+      else setOutcome({ kind: 'refused', result })
     } finally {
+      setWorking(null)
       // An open may have added the Include line; the notice reads it again.
       setOpens((value) => value + 1)
     }
   }
+  const ask = async () => {
+    setWorking('asking')
+    try {
+      setOutcome({ kind: 'asked', result: await window.mousse.editors.askAccess(threadId) })
+    } catch (failure) {
+      setOutcome({ kind: 'refused', result: { ok: false, reason: 'failed', message: openErrorMessage(failure) } })
+    } finally {
+      setWorking(null)
+    }
+  }
+  const run = (action: EditorHelpAction): EditorStateAction => ({
+    key: action.kind,
+    label: action.label,
+    onClick: () => {
+      if (action.kind === 'ask') void ask()
+      else if (action.kind === 'retry') void open(current).catch(() => undefined)
+      else openDevice(node)
+    }
+  })
+  // The state under the button: what the last ask or open came to, else that the computer is offline now.
+  let state: { help: EditorHelp | AskOutcome; tone: 'alert' | 'status' } | undefined
+  let refusal: string | null = null
+  if (outcome?.kind === 'asked') state = { help: askOutcomeWords(outcome.result, computer, selfNode), tone: 'status' }
+  else if (outcome?.kind === 'refused') {
+    const found = helpForOpenResult(outcome.result, computer, device?.platform)
+    if (found) state = { help: found, tone: 'alert' }
+    else refusal = remoteRefusalMessage(outcome.result, current, computer)
+  } else if (!outcome && route === 'mousse' && device && device.state !== 'open' && device.state !== 'connecting') {
+    state = { help: editorConnectionHelp({ failure: 'offline', computer }), tone: 'alert' }
+  }
+  const extra = (
+    <>
+      {working === 'opening' && route === 'mousse' && <p className="side-card-open-editor-note" role="status">Checking the connection to {computer}…</p>}
+      {working === 'asking' && <p className="side-card-open-editor-note" role="status">Asking {computer}…</p>}
+      {!working && outcome?.kind === 'opened' && outcome.via && <p className="side-card-open-editor-note" role="status">{openedWords(computer, outcome.via)}</p>}
+      {!working && state && <EditorStateNote help={state.help} tone={state.tone} actions={state.help.actions.map(run)} />}
+    </>
+  )
   return (
     <>
-      <OpenInEditorView path={computer} editors={usable} lastId={lastId} onOpen={open} onMenuOpen={refreshQuietly} blocked={blocked} refusal={refusal} hint={hint} />
+      <OpenInEditorView
+        path={computer}
+        editors={usable}
+        lastId={lastId}
+        onOpen={open}
+        onMenuOpen={refreshQuietly}
+        blocked={blocked}
+        refusal={refusal}
+        hint={outcome?.kind === 'opened' ? outcome.hint ?? null : null}
+        extra={extra}
+      />
       <EditorSshNotice refreshKey={opens} />
       {approving && help?.action === 'approve' && help.endpoint && (
         <ApproveSshRouteDialog
@@ -141,10 +212,12 @@ interface OpenInEditorViewProps {
   refusal?: string | null
   /** The folder was opened; the editor may still need its Remote - SSH extension. */
   hint?: string | null
+  /** What an editor connection to another computer says under the button: progress, a state with its next step, an answer to an ask. */
+  extra?: ReactNode
 }
 
 /** The split button, its menu and its inline error, given the data. `OpenInEditor` supplies it. */
-export function OpenInEditorView({ path, editors, lastId, onOpen, onMenuOpen, blocked, refusal, hint }: OpenInEditorViewProps) {
+export function OpenInEditorView({ path, editors, lastId, onOpen, onMenuOpen, blocked, refusal, hint, extra }: OpenInEditorViewProps) {
   const [menuOpen, setMenuOpen] = useState(false)
   const [error, setError] = useTransientError()
   const busyRef = useRef(false)
@@ -222,6 +295,7 @@ export function OpenInEditorView({ path, editors, lastId, onOpen, onMenuOpen, bl
       )}
       {hint && <p className="side-card-open-editor-note" role="note">{hint}</p>}
       {refusal && <p className="side-card-open-editor-note refusal" role="alert">{refusal}</p>}
+      {extra}
       {error && (
         <p className="side-card-open-editor-error" role="alert" title={error}>{error}</p>
       )}
