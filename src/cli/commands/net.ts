@@ -101,7 +101,12 @@ export const BRIDGE_HELP = `Usage:
   mousse-cli bridge caps <node-id> --caps read,chat,write,settings
   mousse-cli bridge kind <node-id> computer|phone
   mousse-cli bridge threads [on|off]
+  mousse-cli bridge editor-server [system|mousse]
 
+editor-server chooses which SSH server answers editor connections from your other computers:
+mousse (the default) is Mousse's own, which needs no SSH server on this computer; system is this
+computer's own SSH server (it needs one running, and a key it accepts). Without an argument it
+shows the setting. A Windows computer always uses its own SSH server for now.
 threads turns on (or off) whether your other computers may work on this computer's threads;
 without an argument it shows the setting. It is on by default and only changes this computer.
 Only the current authority can invite, revoke or rename nodes, change capabilities or set a
@@ -159,9 +164,11 @@ type NetMethod =
   | 'bridge.setKind'
   | 'bridge.policy'
   | 'bridge.workOnThreads'
+  | 'bridge.editorServer'
 /** CLI subcommands that are one daemon method with fixed arguments. */
 const BRIDGE_ALIASES: Record<string, NetMethod> = {
   threads: 'bridge.workOnThreads',
+  'editor-server': 'bridge.editorServer',
   block: 'bridge.policy',
   unblock: 'bridge.policy',
   limits: 'bridge.policy',
@@ -341,7 +348,8 @@ export function prepareNetCommand(args: ParsedArgs): NetCliRequest {
     'bridge.setCaps': ['caps'],
     'bridge.setKind': [],
     'bridge.policy': args.subcommand === 'limits' ? ['max-mode', 'terminal', 'editor'] : [],
-    'bridge.workOnThreads': []
+    'bridge.workOnThreads': [],
+    'bridge.editorServer': []
   }
   const permitted = options[method]
   if (!permitted) invalid('Unknown network command. Use net help or bridge help.')
@@ -381,7 +389,9 @@ export function prepareNetCommand(args: ParsedArgs): NetCliRequest {
                 method === 'bridge.setCaps' ||
                 method === 'bridge.policy'
               ? 1
-              : method === 'bridge.join' || method === 'bridge.workOnThreads'
+              : method === 'bridge.join' ||
+                  method === 'bridge.workOnThreads' ||
+                  method === 'bridge.editorServer'
                 ? undefined
                 : 0
   if (count !== undefined && args.positional.length !== count)
@@ -565,6 +575,15 @@ export function prepareNetCommand(args: ParsedArgs): NetCliRequest {
     if (extra !== undefined || (setting !== undefined && setting !== 'on' && setting !== 'off'))
       invalid('bridge threads takes on or off, or nothing to show the setting.')
     if (setting !== undefined) params.enabled = setting === 'on'
+  }
+  if (method === 'bridge.editorServer') {
+    const [setting, extra] = args.positional
+    if (
+      extra !== undefined ||
+      (setting !== undefined && setting !== 'system' && setting !== 'mousse')
+    )
+      invalid('bridge editor-server takes system or mousse, or nothing to show the setting.')
+    if (setting !== undefined) params.system = setting === 'system'
   }
   if (method === 'bridge.setCaps' || method === 'bridge.setKind' || method === 'bridge.policy') {
     const node = args.positional[0]

@@ -92,6 +92,9 @@ import {
   type EditorTunnelOptions
 } from './editor/tunnel'
 import { LocalEditorTunnels, type LocalConnection } from './editor/localTunnels'
+import { EditorEndpoint } from './editor/endpoint/endpoint'
+import type { EditorEndpointPort } from './editor/endpoint/port'
+import { systemProcessHost } from './editor/endpoint/systemHost'
 import type { EditorTunnelInfo, TunnelReason } from '../../shared/net/tunnel'
 import {
   EDITOR_TUNNEL_HANDLE,
@@ -157,6 +160,12 @@ interface NetConfiguration {
    * every call, so turning it off is also a kill switch.
    */
   workOnThreads?: boolean
+  /**
+   * "Use this computer's SSH server" for editor connections from other computers: the owner's choice for this
+   * computer. Off when absent: Mousse's own SSH endpoint answers. It is written only while it is on, so a profile
+   * that never used it stays readable by an earlier version.
+   */
+  editorSystemSsh?: boolean
   /** What an add-on action changed outside Mousse, kept so it can be undone. Keyed by add-on. */
   addonRecords?: Record<string, { action: string; appliedAt: number; record: unknown }>
   preparedForJoin?: boolean
@@ -308,7 +317,13 @@ export class NetService {
        */
       editorTunnel?: Pick<
         EditorTunnelOptions,
-        'farEnd' | 'hostKeyDirectories' | 'hostTrust' | 'perNode' | 'total' | 'opensPerMinute'
+        | 'farEnd'
+        | 'hostKeyDirectories'
+        | 'hostTrust'
+        | 'endpoint'
+        | 'perNode'
+        | 'total'
+        | 'opensPerMinute'
       > & {
         /** False: sessions do not offer `tunnel.v1`, like a build from before it (tests). */
         offer?: boolean
@@ -357,6 +372,8 @@ export class NetService {
         if (cfg.preparedForJoin !== undefined && typeof cfg.preparedForJoin !== 'boolean')
           throw new NetError('storage_corrupt')
         if (cfg.workOnThreads !== undefined && typeof cfg.workOnThreads !== 'boolean')
+          throw new NetError('storage_corrupt')
+        if (cfg.editorSystemSsh !== undefined && typeof cfg.editorSystemSsh !== 'boolean')
           throw new NetError('storage_corrupt')
         if (
           cfg.addonRecords !== undefined &&
@@ -575,11 +592,28 @@ export class NetService {
         remoteLists: new SqliteRemoteLists(db, this.clock),
         rpc
       }
-      const { offer: _offer, ...tunnelOptions } = this.options.editorTunnel ?? {}
+      const {
+        offer: _offer,
+        endpoint: endpointOption,
+        ...tunnelOptions
+      } = this.options.editorTunnel ?? {}
+      // Mousse answers editor connections itself unless a test gave the tunnels an SSH server of their own to end at.
+      const endpoint: EditorEndpointPort | undefined =
+        endpointOption ??
+        (tunnelOptions.farEnd || tunnelOptions.hostKeyDirectories
+          ? undefined
+          : new EditorEndpoint({
+              keys,
+              host: systemProcessHost(),
+              onEvent: (event) => this.tunnels?.recordEndpointEvent(event)
+            }))
       this.tunnels = new EditorTunnels({
         clock: this.clock,
         audit: this.state.audit,
         refusal: (link) => this.tunnelRefusal(link),
+        deviceRefusal: (node) => this.deviceRefusal(node),
+        useSystemSsh: () => this.config.editorSystemSsh === true,
+        ...(endpoint ? { endpoint } : {}),
         transportOf: (link) => this.sessionLinks.get(link)?.transport,
         onFirstOpen: (node) => {
           for (const listener of this.editorFirstOpen) {
@@ -923,10 +957,30 @@ export class NetService {
           }
           return { enabled: this.config.workOnThreads !== false }
         }
+        case 'bridge.editorServer': {
+          // "Use this computer's SSH server" for editor connections from other computers. Any computer sets it
+          // for itself. It applies to the next tunnel: one that is open keeps the server it was opened to.
+          this.requireEnrolled()
+          if (params.system !== undefined) {
+            const { editorSystemSsh: _was, ...rest } = this.config
+            // Written only while it is on, so an earlier version of Mousse still reads the profile.
+            this.config = params.system === true ? { ...rest, editorSystemSsh: true } : rest
+            this.saveConfig()
+            this.emit()
+          }
+          return this.editorServerView()
+        }
         default:
           throw new NetError('bad_request')
       }
     })
+  }
+  /** Which SSH server answers editor connections from other computers, and whether Mousse's own can. */
+  private editorServerView(): { system: boolean; available: boolean } {
+    return {
+      system: this.config.editorSystemSsh === true,
+      available: this.tunnels?.endpointAvailable() === true
+    }
   }
   private serial<T>(work: () => Promise<T>): Promise<T> {
     const result = this.mutation.then(() => {
@@ -2001,14 +2055,18 @@ export class NetService {
    * change, so a tunnel never outlives its permission.
    */
   private tunnelRefusal(link: TunnelLink): TunnelReason | undefined {
-    const rt = this.state
-    if (!rt || !this.featureEnabled('netBridge')) return 'net_off'
     let node: NodeId
     try {
       node = link.peer.node
     } catch {
-      return 'capability'
+      return this.state && this.featureEnabled('netBridge') ? 'capability' : 'net_off'
     }
+    return this.deviceRefusal(node)
+  }
+  /** The same checks for a device named by id, which has no session now (what it started may still be running). */
+  private deviceRefusal(node: NodeId): TunnelReason | undefined {
+    const rt = this.state
+    if (!rt || !this.featureEnabled('netBridge')) return 'net_off'
     if (rt.policy.isBlocked(node)) return 'blocked'
     let caps: readonly NodeCapability[]
     try {
@@ -2078,9 +2136,14 @@ export class NetService {
       const { tunnels, editor, link } = await this.editorLink(node)
       const answer = await this.track(tunnels.check(link))
       if (editor) await editor.pinHostKeys(node, answer.hostKeys)
-      return { ok: true, path: answer.path, ...(answer.transport ? { transport: answer.transport } : {}) }
+      return {
+        ok: true,
+        path: answer.path,
+        ...(answer.transport ? { transport: answer.transport } : {})
+      }
     } catch (error) {
-      if (error instanceof TunnelError) return { ok: false, reason: error.reason, message: error.message }
+      if (error instanceof TunnelError)
+        return { ok: false, reason: error.reason, message: error.message }
       if (error instanceof EditorSshError)
         return { ok: false, reason: 'ssh_settings', code: error.code, message: error.message }
       throw error
@@ -2609,6 +2672,7 @@ export class NetService {
         enabled: this.config.enabled,
         features: { ...this.config.features! },
         workOnThreads: this.config.workOnThreads !== false,
+        editorServer: this.editorServerView(),
         ...(this.disabled ? { restartRequired: true } : {}),
         keystore: rt.keys.state(),
         protected: rt.keys.encryptedAtRest(),
