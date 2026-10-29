@@ -159,6 +159,15 @@ describe('protocol nested validators', () => {
       shortcuts: { 'thread.new': 'CommandOrControl+Shift+X', 'thread.next': null }
     })
     expect(() => asSettingsPartial({ notASection: true })).toThrow(/not allowed/)
+    // The General page saves the default permission mode and the run settings through this patch.
+    expect(asSettingsPartial({ permissions: { defaultMode: 'full' } })).toEqual({ permissions: { defaultMode: 'full' } })
+    expect(asSettingsPartial({ runs: { resumeAfterUsageLimit: true, usageLimitPauseCap: 5 } })).toEqual({
+      runs: { resumeAfterUsageLimit: true, usageLimitPauseCap: 5 }
+    })
+    for (const bad of [{ defaultMode: 'root' }, { defaultMode: 1 }, { extra: 'ask' }])
+      expect(() => asSettingsPartial({ permissions: bad }), JSON.stringify(bad)).toThrow(/permissions/)
+    for (const bad of [{ resumeAfterUsageLimit: 'yes' }, { usageLimitPauseCap: 0 }, { usageLimitPauseCap: 2.5 }, { usageLimitPauseCap: 99 }, { extra: 1 }])
+      expect(() => asSettingsPartial({ runs: bad }), JSON.stringify(bad)).toThrow(/runs/)
     expect(asStringEnvMap({ FOO: 'bar' }).FOO).toBe('bar')
     expect(() => asStringEnvMap({ 'bad-key': 'x' })).toThrow()
     expect(() => asStringEnvMap({ FOO: 'x'.repeat(5000) })).toThrow()
