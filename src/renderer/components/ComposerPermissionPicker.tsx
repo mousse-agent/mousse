@@ -9,7 +9,8 @@ import {
   type PermissionLimits,
   type PermissionMode
 } from '../../shared/permissionMode'
-import { ChevronDown, Shield } from '../lib/icons'
+import { ChevronDown } from '../lib/icons'
+import { permissionModeIcon } from '../lib/permissionModeIcon'
 import { FloatingPortal, useFloatingPosition } from '../lib/floatingLayer'
 import { MenuCheck } from './ComposerEffortPicker'
 
@@ -71,18 +72,21 @@ export function ComposerPermissionPicker({ mode, agent, caps, limits, ceiling, c
   // Only Full access is offered on an agent that approves tools itself.
   const offered = approvesItself ? PERMISSION_MODES.filter((entry) => entry === 'full') : PERMISSION_MODES
   const label = describePermissionMode(shown)
+  const ShownIcon = permissionModeIcon(shown)
   const title = reason ? `${label}. ${reason}` : label
   return <div className="composer-permission-picker">
     <button ref={anchorRef} type="button" className={`composer-pill-btn${open ? ' open' : ''}${reason ? ' is-limited' : ''}`} disabled={readOnly} title={title} aria-label={`Permission mode: ${title}`} aria-haspopup="menu" aria-expanded={open} onClick={() => setOpen(!open)}>
-      <Shield size={14} aria-hidden="true" /><span>{label}</span><ChevronDown size={12} />
+      <ShownIcon size={14} aria-hidden="true" /><span>{label}</span><ChevronDown size={12} />
     </button>
     {open && !readOnly && <FloatingPortal><div ref={contentRef} style={style} className="composer-mode-menu composer-mode-menu-floating" role="menu" aria-label="Permission mode">
       <div className="composer-mode-menu-section" role="group" aria-label="Permission mode">
         {approvesItself && <div className="composer-mode-menu-heading">{agent} approves tools itself</div>}
         {offered.map((entry) => {
           const aboveCeiling = ceiling !== undefined && isStricter(ceiling, entry)
+          const EntryIcon = permissionModeIcon(entry)
           return <button key={entry} type="button" role="menuitemradio" aria-checked={mode === entry} disabled={aboveCeiling} className={`composer-mode-menu-item${mode === entry ? ' selected' : ''}`} onClick={() => { setOpen(false); anchorRef.current?.focus(); if (entry !== mode) onSelect(entry) }}>
             <MenuCheck on={mode === entry} />
+            <EntryIcon size={14} aria-hidden="true" />
             <span className="composer-mode-menu-item-text">
               <span>{describePermissionMode(entry)}</span>
               <span className="composer-mode-menu-item-desc">{aboveCeiling ? ceilingReason ?? 'A thread this subagent belongs to is set lower.' : modeDescription(entry, agent, limits?.sandboxOffInFull === true)}</span>
