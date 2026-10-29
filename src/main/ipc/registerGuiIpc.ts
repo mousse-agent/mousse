@@ -1,5 +1,6 @@
 import { registerAppletIpc } from '../applets/registerAppletIpc'
-import { AppError, errorDiagnostic, knownAppError, normalizeAppError, serializeAppError } from '../../shared/errors'
+import { AppError, type AppErrorShape, errorDiagnostic, knownAppError, normalizeAppError, serializeAppError } from '../../shared/errors'
+import { PENDING_CHANGES_ERROR_CODES } from '../../shared/workspace'
 import { registerLinuxWindowResizeIpc } from '../linuxWindowResizeIpc'
 import type { SubagentSummary } from '../../shared/subagents'
 import { CHAT_METHODS } from '../../shared/chats'
@@ -240,6 +241,20 @@ function noteUncertainOutcome(error: unknown): void {
   if (!error || typeof error !== 'object') return
   const { code, details } = error as { code?: unknown; details?: { node?: unknown } }
   if (code === 'outcome_uncertain' && typeof details?.node === 'string') refreshAfterUncertain?.(details.node)
+}
+
+/**
+ * Electron passes only the message of a thrown error to the window. A refusal about uncommitted changes is
+ * returned instead, with its details, so the window can name the files and offer Discard.
+ */
+async function withPendingChangesFailure<T>(run: () => Promise<T>): Promise<T | { pendingChangesError: AppErrorShape }> {
+  try {
+    return await run()
+  } catch (error) {
+    const code = error && typeof error === 'object' && 'code' in error ? String(error.code) : ''
+    if (!(PENDING_CHANGES_ERROR_CODES as readonly string[]).includes(code)) throw error
+    return { pendingChangesError: serializeAppError(guiChatRequestError(error)) }
+  }
 }
 
 function registerHandler(
@@ -1211,6 +1226,10 @@ export function registerGuiIpc(
   registerHandler('workspace:restore', async (_e, threadId: string, expectedJournalGeneration?: number) =>
     guiMms.request('workspace.restore', { threadId, expectedJournalGeneration })
   )
+  // The window asks the person before it calls this.
+  registerHandler('workspace:discardPendingChanges', async (_e, threadId: string) =>
+    guiMms.request('workspace.discardPendingChanges', { threadId, confirmed: true })
+  )
   registerHandler('actions:list', async (_e, threadId: string) =>
     guiMms.request('actions.list', { threadId })
   )
@@ -1220,13 +1239,13 @@ export function registerGuiIpc(
   registerHandler('actions:configureRetention', async (_e, params: Record<string, unknown>) => guiMms.request('actions.configureRetention', params))
   registerHandler('actions:sweepRetention', async (_e, threadId: string) => guiMms.request('actions.sweepRetention', { threadId }))
   registerHandler('actions:undoLatest', async (_e, threadId: string, expectedJournalGeneration: number, expectedTurnId?: string) =>
-    guiMms.request('actions.undoLatest', { threadId, expectedJournalGeneration, expectedTurnId })
+    withPendingChangesFailure(() => guiMms.request('actions.undoLatest', { threadId, expectedJournalGeneration, expectedTurnId }))
   )
   registerHandler('actions:revertCode', async (_e, params: Record<string, unknown>) =>
     guiMms.request('actions.revertCode', params)
   )
   registerHandler('actions:redo', async (_e, threadId: string, expectedJournalGeneration: number) =>
-    guiMms.request('actions.redo', { threadId, expectedJournalGeneration })
+    withPendingChangesFailure(() => guiMms.request('actions.redo', { threadId, expectedJournalGeneration }))
   )
   registerHandler('actions:fork', async (_e, params: Record<string, unknown>) =>
     guiMms.request('actions.fork', params)

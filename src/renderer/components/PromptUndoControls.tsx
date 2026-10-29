@@ -1,7 +1,9 @@
 import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from 'react'
 import { IconArrowBackUp } from '../lib/icons'
 import { useAppStore } from '../stores/appStore'
-import { ipcErrorLine, isComputerOffline } from '../lib/errorText'
+import { errorText, ipcErrorLine, isComputerOffline } from '../lib/errorText'
+import { pendingChangesDetails, type PendingChangesDetails } from '../../shared/workspace'
+import { PendingChangesNotice } from './PendingChangesNotice'
 import { invalidateThreadActionHistory, readThreadActionHistory, type ThreadActionHistory } from '../utils/threadActionHistory'
 
 interface PromptUndoState {
@@ -13,6 +15,11 @@ interface PromptUndoState {
 }
 const PromptUndoContext = createContext<PromptUndoState | null>(null)
 
+/** Undo and Redo return a refusal over a conflict instead of throwing it, so its details survive IPC. */
+function throwPendingChanges(result: unknown): void {
+  if (result && typeof result === 'object' && 'pendingChangesError' in result) throw result.pendingChangesError
+}
+
 /** One authoritative history read for the entire visible transcript. */
 export function PromptUndoProvider({ threadId, busy, revision, children }: {
   threadId?: string | null; busy: boolean; revision: unknown; children: ReactNode
@@ -21,6 +28,8 @@ export function PromptUndoProvider({ threadId, busy, revision, children }: {
   const [history, setHistory] = useState<ThreadActionHistory | null>(null)
   const [working, setWorking] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  /** Discard for an Undo refused over a conflict, and the prompt to undo again afterwards. */
+  const [changes, setChanges] = useState<{ details: PendingChangesDetails; retry: () => void } | null>(null)
   const pending = useRef(false)
   const binding = useRef({ threadId, profileId, busy })
   binding.current = { threadId, profileId, busy }
@@ -28,7 +37,7 @@ export function PromptUndoProvider({ threadId, busy, revision, children }: {
     && binding.current.profileId === profileId && useAppStore.getState().profileId === profileId, [threadId, profileId])
 
   useEffect(() => {
-    setHistory(null); setError(null)
+    setHistory(null); setError(null); setChanges(null)
     if (!threadId || busy) return
     let current = true
     const refresh = () => void readThreadActionHistory(threadId, true).then(value => {
@@ -45,7 +54,7 @@ export function PromptUndoProvider({ threadId, busy, revision, children }: {
   const undo = async (messageId: string) => {
     const target = history?.undoTarget
     if (!threadId || !target || target.messageId !== messageId || busy || pending.current) return
-    pending.current = true; setWorking(true); setError(null)
+    pending.current = true; setWorking(true); setError(null); setChanges(null)
     try {
       const fresh = await readThreadActionHistory(threadId, true)
       if (!isCurrent() || binding.current.busy) throw new Error('The active conversation changed. Review it before undoing.')
@@ -54,13 +63,17 @@ export function PromptUndoProvider({ threadId, busy, revision, children }: {
         setHistory(fresh)
         throw new Error('Conversation history changed. Review the latest prompt and try again.')
       }
-      await window.mousse.actions.undoLatest(threadId, target.journalGeneration, target.turnId)
+      throwPendingChanges(await window.mousse.actions.undoLatest(threadId, target.journalGeneration, target.turnId))
       // The daemon publishes the restored transcript; never remove messages locally.
       invalidateThreadActionHistory(threadId)
       const next = await readThreadActionHistory(threadId, true)
       if (isCurrent()) setHistory(next)
     } catch (cause) {
-      if (isCurrent()) setError(cause instanceof Error ? cause.message : String(cause))
+      if (isCurrent()) {
+        setError(errorText(cause))
+        const details = pendingChangesDetails(cause)
+        if (details) setChanges({ details, retry: () => void undo(messageId) })
+      }
     } finally {
       pending.current = false
       if (isCurrent()) setWorking(false)
@@ -70,7 +83,7 @@ export function PromptUndoProvider({ threadId, busy, revision, children }: {
   const redo = async () => {
     const target = history?.redoTarget
     if (!threadId || !target || busy || pending.current) return
-    pending.current = true; setWorking(true); setError(null)
+    pending.current = true; setWorking(true); setError(null); setChanges(null)
     try {
       const fresh = await readThreadActionHistory(threadId, true)
       if (!isCurrent() || binding.current.busy) throw new Error('The active conversation changed. Review it before redoing.')
@@ -79,12 +92,16 @@ export function PromptUndoProvider({ threadId, busy, revision, children }: {
         setHistory(fresh)
         throw new Error('Conversation history changed. This turn can no longer be redone.')
       }
-      await window.mousse.actions.redo(threadId, target.journalGeneration)
+      throwPendingChanges(await window.mousse.actions.redo(threadId, target.journalGeneration))
       invalidateThreadActionHistory(threadId)
       const next = await readThreadActionHistory(threadId, true)
       if (isCurrent()) setHistory(next)
     } catch (cause) {
-      if (isCurrent()) setError(cause instanceof Error ? cause.message : String(cause))
+      if (isCurrent()) {
+        setError(errorText(cause))
+        const details = pendingChangesDetails(cause)
+        if (details) setChanges({ details, retry: () => void redo() })
+      }
     } finally {
       pending.current = false
       if (isCurrent()) setWorking(false)
@@ -95,7 +112,9 @@ export function PromptUndoProvider({ threadId, busy, revision, children }: {
     {children}
     {history?.redoTarget && <button type="button" disabled={busy || working} onClick={() => void redo()}>Redo last undo</button>}
     {working && <div role="status">Updating conversation…</div>}
-    {error && <div role="alert">{error}</div>}
+    {error && (changes && threadId
+      ? <PendingChangesNotice threadId={threadId} message={error} details={changes.details} onResolved={() => { setError(null); setChanges(null); changes.retry() }} />
+      : <div role="alert">{error}</div>)}
   </PromptUndoContext.Provider>
 }
 

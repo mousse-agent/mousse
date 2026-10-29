@@ -238,6 +238,7 @@ const PHRASES: Record<string, Phrase> = {
   'actions.configureRetention': HISTORY,
   'actions.sweepRetention': HISTORY,
   'workspace.restore': WORKSPACE,
+  'workspace.discardPendingChanges': DISCARD,
   'operations.abort': OPERATION,
   'operations.recover': OPERATION,
   'files.write': SAVE,

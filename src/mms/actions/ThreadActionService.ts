@@ -12,7 +12,7 @@ import { ThreadWorkspaceManager } from '../workspace/ThreadWorkspaceManager'
 import { ChangeReceiptService } from './ChangeReceiptService'
 import { assertHeldThreadLease, withGitMutationLocks } from './GitOperationCoordinator'
 import { IN_PROGRESS_GIT_MARKERS } from '../git/gitMarkers'
-import { changedPaths, git, introducedCommits, MOUSSE_COMMIT_ENV, requireClean, tryGit } from './git'
+import { changedPaths, git, introducedCommits, MOUSSE_COMMIT_ENV, refuseUnsafeChanges, requireClean, tryGit } from './git'
 
 export interface RunThreadActionOptions {
   threadId: string
@@ -44,6 +44,16 @@ export interface RunThreadActionOptions {
  * (a hook that rewrites them) is not swept either; see `leftChangesBehind`.
  */
 export type ActionFailurePolicy = 'sweep' | 'record'
+
+/** Turn ids of the checkpoints that save the user's pending edits before a turn (see `saveUserChanges`). */
+export const USER_CHANGES_TURN_PREFIX = 'user-changes:'
+
+export interface SaveUserChangesOptions extends Pick<RunThreadActionOptions, 'threadId' | 'conversationBranchId' | 'workspacePath' | 'heldThreadLease' | 'signal'> {
+  /** Where the next turn's messages start; the save covers none. Defaults to the end of the latest action. */
+  presentationMessageStart?: number
+  /** The conversation position the next turn starts from. Defaults to the latest action's. */
+  nativeContextBoundary?: NativeContextBoundary
+}
 
 export { IN_PROGRESS_GIT_MARKERS }
 
@@ -121,6 +131,7 @@ export class ThreadActionService {
     }
     new ChangeReceiptService(this.threadDirectory).assertNoPendingOperation()
     this.assertExpectedRevision(options.expectedJournalRevision)
+    // Callers save the user's pending edits first (`saveUserChanges`), so anything left here is not theirs to sweep in.
     requireClean(options.workspacePath, 'Thread workspace')
     const metadata = new ThreadWorkspaceManager(this.threadDirectory).load()
     if (metadata && metadata.headSha !== startSha) throw new Error('Workspace HEAD moved outside a recorded operation; recovery is required.')
@@ -140,55 +151,92 @@ export class ThreadActionService {
     return action
   }
 
+  /**
+   * Saves the user's pending edits (tracked and untracked, never ignored files or `.mousse/`) as a checkpoint of
+   * their own, a completed `user` action, so the turn that follows starts clean. Undoing that turn then reverts
+   * only the turn's commits and the edits are back exactly as they were; they are never counted as the agent's.
+   * The save covers no messages and has no conversation start boundary, so the app never offers it as a turn
+   * to undo. A workspace with an unresolved conflict or a Git operation in progress is refused with an error that
+   * offers Discard: committing it would record conflict markers.
+   *
+   * Returns the HEAD the next action starts from. The caller holds the thread lease, as for `beginTurn`.
+   */
+  async saveUserChanges(options: SaveUserChangesOptions): Promise<{ startSha: string; action?: ThreadAction }> {
+    return withGitMutationLocks(this.threadDirectory, options.workspacePath, 'save-pending-changes', () => this.saveUserChangesHeld(options), options.signal, options.heldThreadLease)
+  }
+
+  /** `saveUserChanges` for a caller that already holds the mutation locks. */
+  private saveUserChangesHeld(options: SaveUserChangesOptions): { startSha: string; action?: ThreadAction } {
+    refuseUnsafeChanges(options.workspacePath, 'Thread workspace', { discard: true })
+    const head = git(options.workspacePath, ['rev-parse', 'HEAD'])
+    if (!this.hasUncommittedChanges(options.workspacePath)) return { startSha: head }
+    // HEAD moved outside a recorded operation: nothing is saved on top of it, as admission would refuse the turn.
+    const metadata = new ThreadWorkspaceManager(this.threadDirectory).load()
+    if (metadata && metadata.headSha !== head) throw new Error('Workspace HEAD moved outside a recorded operation; recovery is required.')
+    const latest = this.latest(options.conversationBranchId)
+    const at = options.presentationMessageStart ?? latest?.presentationMessageEnd ?? 0
+    const action = this.checkpointTurnHeld({
+      threadId: options.threadId, turnId: `${USER_CHANGES_TURN_PREFIX}${randomUUID()}`, actor: { kind: 'user' },
+      conversationBranchId: options.conversationBranchId, workspacePath: options.workspacePath,
+      presentationMessageStart: at, presentationMessageEnd: at,
+      nativeContextBoundary: options.nativeContextBoundary ?? latest?.nativeContextBoundary ?? { messageIndex: 0, compactionGeneration: 0, fidelity: 'legacy' },
+      externalEffects: []
+    }, head, 'completed')
+    return { startSha: action.endSha, action }
+  }
+
   /** Checkpoint a turn while the caller owns the execution lease, or acquire it for standalone callers. */
   async checkpointExistingTurn(
     options: RunThreadActionOptions,
     startSha: string,
     state: 'completed' | 'stopped' | 'failed'
   ): Promise<ThreadAction> {
-    return withGitMutationLocks(this.threadDirectory, options.workspacePath, 'turn-checkpoint', async () => {
-      const actions = this.list()
-      const completed = actions.find((item) => item.turnId === options.turnId && item.state !== 'running')
-      if (completed) {
-        if (completed.startSha !== startSha || completed.conversationBranchId !== options.conversationBranchId || completed.runId !== options.runId ||
-            completed.presentationMessageStart !== options.presentationMessageStart || completed.presentationMessageEnd !== options.presentationMessageEnd ||
-            !isDeepStrictEqual(completed.nativeContextBoundary, options.nativeContextBoundary) || !isDeepStrictEqual(completed.nativeContextStartBoundary, options.nativeContextStartBoundary) ||
-            !isDeepStrictEqual(completed.actor ?? { kind: 'main' }, options.actor ?? { kind: 'main' })) throw new Error('Turn identity was reused for a different workspace boundary or context payload.')
-        if (this.journal.latestByOperation().get(completed.id)?.state !== 'completed') throw new Error('Checkpoint result requires operation recovery.')
-        return completed
+    return withGitMutationLocks(this.threadDirectory, options.workspacePath, 'turn-checkpoint', () => this.checkpointTurnHeld(options, startSha, state), options.signal, options.heldThreadLease)
+  }
+
+  /** `checkpointExistingTurn` for a caller that already holds the mutation locks. */
+  private checkpointTurnHeld(options: RunThreadActionOptions, startSha: string, state: 'completed' | 'stopped' | 'failed'): ThreadAction {
+    const actions = this.list()
+    const completed = actions.find((item) => item.turnId === options.turnId && item.state !== 'running')
+    if (completed) {
+      if (completed.startSha !== startSha || completed.conversationBranchId !== options.conversationBranchId || completed.runId !== options.runId ||
+          completed.presentationMessageStart !== options.presentationMessageStart || completed.presentationMessageEnd !== options.presentationMessageEnd ||
+          !isDeepStrictEqual(completed.nativeContextBoundary, options.nativeContextBoundary) || !isDeepStrictEqual(completed.nativeContextStartBoundary, options.nativeContextStartBoundary) ||
+          !isDeepStrictEqual(completed.actor ?? { kind: 'main' }, options.actor ?? { kind: 'main' })) throw new Error('Turn identity was reused for a different workspace boundary or context payload.')
+      if (this.journal.latestByOperation().get(completed.id)?.state !== 'completed') throw new Error('Checkpoint result requires operation recovery.')
+      return completed
+    }
+    let action = actions.find((item) => item.turnId === options.turnId && item.state === 'running')
+    if (!action) {
+      new ChangeReceiptService(this.threadDirectory).assertNoPendingOperation()
+      this.assertExpectedRevision(options.expectedJournalRevision)
+      action = {
+        id: randomUUID(), turnId: options.turnId, conversationBranchId: options.conversationBranchId,
+        actor: options.actor ?? { kind: 'main' }, runId: options.runId,
+        parentActionId: actions.filter((item) => item.conversationBranchId === options.conversationBranchId).at(-1)?.id,
+        presentationMessageStart: options.presentationMessageStart, presentationMessageEnd: options.presentationMessageEnd,
+        nativeContextStartBoundary: options.nativeContextStartBoundary, nativeContextBoundary: options.nativeContextBoundary,
+        startSha, endSha: startSha, commits: [], childIntegrations: [], changedPaths: [],
+        externalEffects: options.externalEffects ?? [], reversible: true, state: 'running', createdAt: new Date().toISOString()
       }
-      let action = actions.find((item) => item.turnId === options.turnId && item.state === 'running')
-      if (!action) {
-        new ChangeReceiptService(this.threadDirectory).assertNoPendingOperation()
-        this.assertExpectedRevision(options.expectedJournalRevision)
-        action = {
-          id: randomUUID(), turnId: options.turnId, conversationBranchId: options.conversationBranchId,
-          actor: options.actor ?? { kind: 'main' }, runId: options.runId,
-          parentActionId: actions.filter((item) => item.conversationBranchId === options.conversationBranchId).at(-1)?.id,
-          presentationMessageStart: options.presentationMessageStart, presentationMessageEnd: options.presentationMessageEnd,
-          nativeContextStartBoundary: options.nativeContextStartBoundary, nativeContextBoundary: options.nativeContextBoundary,
-          startSha, endSha: startSha, commits: [], childIntegrations: [], changedPaths: [],
-          externalEffects: options.externalEffects ?? [], reversible: true, state: 'running', createdAt: new Date().toISOString()
-        }
-        actions.push(action)
-        this.replace(actions)
-        this.journal.append({ operationId: action.id, operationType: 'action-checkpoint', state: 'running', expectedPreState: { startSha, actionId: action.id } })
-      }
-      action.presentationMessageEnd = options.presentationMessageEnd
-      action.nativeContextBoundary = options.nativeContextBoundary
-      action.externalEffects = options.externalEffects ?? action.externalEffects
-      try {
-        this.checkpoint(options.workspacePath, action, state)
-        // Admission order differs from completion order when a turn snapshots before child spawn.
-        actions.splice(actions.indexOf(action), 1); actions.push(action)
-        this.replace(actions)
-        this.appendCheckpointCompleted(action, state)
-        return action
-      } catch (error) {
-        this.journal.append({ operationId: action.id, operationType: 'action-checkpoint', state: 'recovery_required', details: { actionId: action.id, startSha, error: String(error) } })
-        throw error
-      }
-    }, options.signal, options.heldThreadLease)
+      actions.push(action)
+      this.replace(actions)
+      this.journal.append({ operationId: action.id, operationType: 'action-checkpoint', state: 'running', expectedPreState: { startSha, actionId: action.id } })
+    }
+    action.presentationMessageEnd = options.presentationMessageEnd
+    action.nativeContextBoundary = options.nativeContextBoundary
+    action.externalEffects = options.externalEffects ?? action.externalEffects
+    try {
+      this.checkpoint(options.workspacePath, action, state)
+      // Admission order differs from completion order when a turn snapshots before child spawn.
+      actions.splice(actions.indexOf(action), 1); actions.push(action)
+      this.replace(actions)
+      this.appendCheckpointCompleted(action, state)
+      return action
+    } catch (error) {
+      this.journal.append({ operationId: action.id, operationType: 'action-checkpoint', state: 'recovery_required', details: { actionId: action.id, startSha, error: String(error) } })
+      throw error
+    }
   }
 
   async runCheckpointedAction<T>(
@@ -204,7 +252,8 @@ export class ThreadActionService {
         const metadata = new ThreadWorkspaceManager(this.threadDirectory).load()
         if (metadata && (metadata.lifecycle !== 'ready' || metadata.headSha !== git(options.workspacePath, ['rev-parse', 'HEAD']) || metadata.branch !== git(options.workspacePath, ['branch', '--show-current']))) throw new Error('Workspace HEAD or branch moved outside a recorded operation; recovery is required.')
         this.assertExpectedRevision(options.expectedJournalRevision)
-        if (!options.allowDirtyInput) requireClean(options.workspacePath, 'Thread workspace')
+        // The user's other pending edits are saved as their own checkpoint first, so this action covers only its own change.
+        if (!options.allowDirtyInput) this.saveUserChangesHeld(options)
         const startSha = git(options.workspacePath, ['rev-parse', 'HEAD'])
         const actions = this.list()
         if (actions.some((item) => item.turnId === options.turnId)) throw new Error('This turn already has a durable intent; execution must not be replayed.')
@@ -369,8 +418,8 @@ export class ThreadActionService {
         if (recordsFailure && receipt && receipt.beforeSha === receipt.afterSha) state = 'failed'
         if (receipt) {
           if (head !== receipt.afterSha) throw new Error('Checkpoint recovery HEAD does not match the receipt.')
-          // A rejected commit leaves the user's files in place on purpose, so there is nothing to require clean.
-          if (!(recordsFailure && receipt.beforeSha === receipt.afterSha)) requireClean(workspacePath, 'Thread workspace')
+          // Only the record is finished here; files are not touched. Edits made since are the user's and stay pending.
+          refuseUnsafeChanges(workspacePath, 'Thread workspace', { discard: true })
           const { id: _id, workspaceId: _workspaceId, generation: _generation, retainedRefs: _refs, createdAt: _createdAt, ...input } = receipt
           receipts.record(workspacePath, input)
           action.receiptId = receipt.id; action.endSha = receipt.afterSha; action.commits = receipt.introducedCommits
@@ -419,7 +468,8 @@ export class ThreadActionService {
     git(workspacePath, ['add', '-A', '--', '.', ':(exclude).mousse/**'])
     const staged = !tryGit(workspacePath, ['diff', '--cached', '--quiet']).ok
     if (staged) {
-      git(workspacePath, ['commit', '--no-verify', '-m', `mousse: checkpoint turn ${action.turnId} (${action.id})`], MOUSSE_COMMIT_ENV)
+      const message = action.turnId.startsWith(USER_CHANGES_TURN_PREFIX) ? `mousse: save pending changes (${action.id})` : `mousse: checkpoint turn ${action.turnId} (${action.id})`
+      git(workspacePath, ['commit', '--no-verify', '-m', message], MOUSSE_COMMIT_ENV)
     }
     const endSha = git(workspacePath, ['rev-parse', 'HEAD'])
     action.endSha = endSha

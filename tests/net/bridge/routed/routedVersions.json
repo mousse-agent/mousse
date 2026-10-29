@@ -754,6 +754,11 @@
     "digest": "5183d74689ef0a7d",
     "security": "8b7d92b23781a6fa"
   },
+  "workspace.discardPendingChanges": {
+    "version": 1,
+    "digest": "5322ee1bcb40e7bd",
+    "security": "ceacd93869361a7a"
+  },
   "workspace.getStatus": {
     "version": 1,
     "digest": "5682d15e453fd69e",

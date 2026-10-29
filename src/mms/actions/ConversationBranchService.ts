@@ -11,13 +11,18 @@ import { withGitMutationLocks } from './GitOperationCoordinator'
 import type { ThreadLeaseHandle } from '../queue/ThreadExecutionLease'
 import { ThreadWorkspaceManager } from '../workspace/ThreadWorkspaceManager'
 import { ChangeReceiptService } from './ChangeReceiptService'
-import { git, requireClean } from './git'
+import { git, movePendingSnapshot, pendingSnapshotsUnder, refuseUnsafeChanges, restorePendingChanges, setAsidePendingChanges, type PendingChangesOwnerOptions, type PendingChangesSnapshot } from './git'
+
+/** Where a conversation branch's uncommitted changes wait while another branch is active. */
+function parkedChangesPrefix(branchId: ConversationBranchId): string {
+  return `refs/mousse/pending-changes/branches/${branchId.replace(/[^A-Za-z0-9._-]+/g, '-')}/`
+}
 
 export class ConversationBranchService {
   private readonly path: string
   private readonly actions: ThreadActionService
   private readonly journal: ThreadJournal
-  constructor(private readonly threadDirectory: string) {
+  constructor(private readonly threadDirectory: string, private readonly options: PendingChangesOwnerOptions = {}) {
     this.path = join(threadDirectory, 'conversation-branches.json')
     this.actions = new ThreadActionService(threadDirectory)
     this.journal = new ThreadJournal(threadDirectory)
@@ -36,9 +41,17 @@ export class ConversationBranchService {
     return withGitMutationLocks(this.threadDirectory, workspacePath, 'conversation-activate', async () => {
       new ChangeReceiptService(this.threadDirectory).assertNoPendingOperation()
       this.actions.assertExpectedRevision(expectedJournalRevision)
-      requireClean(workspacePath, 'Thread workspace')
+      refuseUnsafeChanges(workspacePath, 'Thread workspace', { discard: true })
       const branches = this.list(); const selected = branches.find((branch) => branch.id === branchId)
       if (!selected || selected.lifecycle === 'tombstoned') throw new Error(`Conversation branch is unavailable: ${branchId}`)
+      // Uncommitted changes belong to the branch they were made on: they wait under a ref while another branch is
+      // active and come back, still uncommitted, when it is active again. Saving them would make them that
+      // branch's latest action, and its last turn could no longer be undone. A branch that can't be activated
+      // again (the thread's first one) hands them to the selected branch instead.
+      const leaving = new ThreadWorkspaceManager(this.threadDirectory).load()?.conversationBranchId ?? 'main'
+      const returnable = branches.some((branch) => branch.id === leaving && branch.lifecycle !== 'tombstoned')
+      const setAside = leaving === selected.id ? undefined : setAsidePendingChanges(workspacePath, 'Thread workspace', { discard: true })
+      let parked = false
       const operationId = randomUUID()
       this.journal.append({
         operationId,
@@ -48,6 +61,9 @@ export class ConversationBranchService {
       })
       try {
         git(workspacePath, ['switch', selected.gitBranch])
+        if (setAside && returnable) { movePendingSnapshot(setAside, `${parkedChangesPrefix(leaving)}${setAside.ref.split('/').at(-1)}`); parked = true }
+        if (leaving !== selected.id) this.restoreParked(workspacePath, selected.id)
+        if (setAside && !returnable) { parked = true; this.putBack(setAside) }
         for (const branch of branches) branch.lifecycle = branch.id === branchId ? 'active' : 'inactive'
         atomicWriteJsonSync(this.path, branches)
         const manager = new ThreadWorkspaceManager(this.threadDirectory)
@@ -64,6 +80,8 @@ export class ConversationBranchService {
         return selected
       } catch (error) {
         if (this.journal.latestByOperation().get(operationId)?.state === 'context_pending') throw error
+        // The switch did not happen: the changes go back where they were.
+        if (setAside && !parked && git(workspacePath, ['rev-parse', 'HEAD']) === setAside.base) restorePendingChanges(setAside)
         this.journal.append({
           operationId,
           operationType: 'conversation-activate',
@@ -73,6 +91,16 @@ export class ConversationBranchService {
         throw error
       }
     })
+  }
+
+  /** Puts back the changes that waited for `branchId`; any that no longer fit stay under their ref, with a notice. */
+  private restoreParked(workspacePath: string, branchId: ConversationBranchId): void {
+    for (const snapshot of pendingSnapshotsUnder(workspacePath, parkedChangesPrefix(branchId))) this.putBack(snapshot)
+  }
+
+  private putBack(snapshot: PendingChangesSnapshot): void {
+    const outcome = restorePendingChanges(snapshot)
+    if (!outcome.restored) this.options.onPendingChangesKept?.({ path: snapshot.top, ref: snapshot.ref, files: outcome.files, operation: 'switching conversation branches' })
   }
 
   async recoverPending(workspacePath: string, restoreContext: (branch: ConversationBranch) => void | Promise<void>, heldThreadLease?: ThreadLeaseHandle): Promise<void> {
@@ -98,7 +126,7 @@ export class ConversationBranchService {
   ): Promise<ConversationBranch> {
     return withGitMutationLocks(this.threadDirectory, workspacePath, 'conversation-fork', async () => {
       this.actions.assertExpectedRevision(expectedJournalRevision)
-      requireClean(workspacePath, 'Thread workspace')
+      // A fork only adds a branch and a ref; the checkout and its uncommitted changes stay as they are.
       const action = this.actions.get(actionId)
       if (action?.scope === 'conversation') throw new Error('Conversation-only turns have no repository snapshot to fork.')
       if (!action || action.state !== 'completed') throw new Error('Fork requires a completed action.')

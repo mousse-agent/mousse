@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto'
 import type { ThreadLeaseHandle } from '../queue/ThreadExecutionLease'
 import { ThreadJournal } from '../data/ThreadJournal'
 import { withGitMutationLocks } from './GitOperationCoordinator'
-import { commitParents, git, MOUSSE_COMMIT_ENV, requireClean, tryGit } from './git'
+import { commitParents, git, MOUSSE_COMMIT_ENV, refuseUnsafeChanges, tryGit, withPendingChangesSetAside, type PendingChangesOwnerOptions } from './git'
 
 import { ChangeReceiptService } from './ChangeReceiptService'
 import { ThreadActionService } from './ThreadActionService'
@@ -28,7 +28,7 @@ export interface PublishResult {
 
 export class PublishService {
   private readonly journal: ThreadJournal
-  constructor(private readonly threadDirectory: string) {
+  constructor(private readonly threadDirectory: string, private readonly options: PendingChangesOwnerOptions = {}) {
     this.journal = new ThreadJournal(threadDirectory)
   }
 
@@ -53,7 +53,8 @@ export class PublishService {
         const intent = this.journal.list().find((entry) => entry.operationId === options.operationId && entry.state === 'prepared')
         const expected = intent?.expectedPreState as { prePublishSha: string; sourceSha: string; targetBranch: string } | undefined
         if (!expected || expected.sourceSha !== expectedSourceSha || expected.prePublishSha !== expectedTargetSha || expected.targetBranch !== targetBranch) throw new Error('Publish recovery requires the original reviewed revisions.')
-        requireClean(primaryCheckout, 'Primary checkout')
+        // Recovery reads HEAD and records; uncommitted edits in the checkout stay where they are.
+        refuseUnsafeChanges(primaryCheckout, 'Primary checkout')
         if (git(primaryCheckout, ['branch', '--show-current']) !== targetBranch) throw new Error('Publish recovery destination branch changed.')
         const head = git(primaryCheckout, ['rev-parse', 'HEAD'])
         const parents = commitParents(primaryCheckout, head)
@@ -69,33 +70,36 @@ export class PublishService {
       if (resolveRepositoryIdentity(threadWorkspace).key !== resolveRepositoryIdentity(primaryCheckout).key) throw new Error('Publish destination belongs to a different repository.')
       if (git(threadWorkspace, ['rev-parse', 'HEAD']) !== expectedSourceSha) throw new Error('Publish source revision changed; refresh review.')
       if (git(primaryCheckout, ['rev-parse', 'HEAD']) !== expectedTargetSha) throw new Error('Publish destination revision changed; refresh review.')
-      requireClean(threadWorkspace, 'Thread workspace')
-      requireClean(primaryCheckout, 'Primary checkout')
+      // Publish merges the reviewed commit, so uncommitted edits in the thread worktree are neither needed nor
+      // published; they stay there. In the primary checkout they are set aside for the merge and put back after it.
+      refuseUnsafeChanges(primaryCheckout, 'Primary checkout')
       const currentTarget = git(primaryCheckout, ['branch', '--show-current'])
       if (currentTarget !== targetBranch) throw new Error(`Primary checkout must be on ${targetBranch}, found ${currentTarget}`)
       const sourceBranch = git(threadWorkspace, ['branch', '--show-current'])
       const prePublishSha = git(primaryCheckout, ['rev-parse', 'HEAD'])
       const operationId = options.operationId ?? randomUUID()
-      this.journal.append({
-        operationId,
-        operationType: 'publish',
-        state: 'prepared',
-        expectedPreState: { prePublishSha, targetBranch, sourceBranch, sourceSha: expectedSourceSha },
-        details: { threadWorkspace, primaryCheckout }
-      })
-      const merged = tryGit(primaryCheckout, ['merge', '--no-ff', '--no-edit', expectedSourceSha], MOUSSE_COMMIT_ENV)
-      if (!merged.ok) {
-        const conflictFiles = git(primaryCheckout, ['diff', '--name-only', '--diff-filter=U']).split(/\r?\n/).filter(Boolean)
+      return withPendingChangesSetAside<PublishResult>(primaryCheckout, { label: 'Primary checkout', operation: 'Publish', onKept: this.options.onPendingChangesKept }, () => {
         this.journal.append({
           operationId,
           operationType: 'publish',
-          state: 'recovery_required',
-          details: { prePublishSha, targetBranch, sourceBranch, conflictFiles, error: merged.stderr }
+          state: 'prepared',
+          expectedPreState: { prePublishSha, targetBranch, sourceBranch, sourceSha: expectedSourceSha },
+          details: { threadWorkspace, primaryCheckout }
         })
-        return { operationId, state: 'conflict', prePublishSha, conflictFiles }
-      }
-      const publishSha = git(primaryCheckout, ['rev-parse', 'HEAD'])
-      return this.completePublish(threadWorkspace, primaryCheckout, operationId, prePublishSha, expectedSourceSha, publishSha)
+        const merged = tryGit(primaryCheckout, ['merge', '--no-ff', '--no-edit', expectedSourceSha], MOUSSE_COMMIT_ENV)
+        if (!merged.ok) {
+          const conflictFiles = git(primaryCheckout, ['diff', '--name-only', '--diff-filter=U']).split(/\r?\n/).filter(Boolean)
+          this.journal.append({
+            operationId,
+            operationType: 'publish',
+            state: 'recovery_required',
+            details: { prePublishSha, targetBranch, sourceBranch, conflictFiles, error: merged.stderr }
+          })
+          return { operationId, state: 'conflict', prePublishSha, conflictFiles }
+        }
+        const publishSha = git(primaryCheckout, ['rev-parse', 'HEAD'])
+        return this.completePublish(threadWorkspace, primaryCheckout, operationId, prePublishSha, expectedSourceSha, publishSha)
+      })
     }, signal, options.heldThreadLease)
   }
 

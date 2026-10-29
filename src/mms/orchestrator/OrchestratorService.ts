@@ -231,7 +231,7 @@ import { DEFAULT_FEATURE_FLAGS } from '../../shared/featureFlags'
 import { ThreadActionService } from '../actions/ThreadActionService'
 import { ChildAgentIntegrationService } from '../agents/ChildAgentIntegrationService'
 import type { NativeContextBoundary } from '../../shared/threadActions'
-import { git as actionGit, requireClean as requireCleanWorkspace } from '../actions/git'
+import { git as actionGit, keptPendingChangesNotice, requireClean as requireCleanWorkspace, type PendingChangesKeptListener } from '../actions/git'
 import {
   claimNextNormal,
   clearPendingQueue,
@@ -1887,20 +1887,32 @@ export class OrchestratorService extends EventEmitter {
   }
 
   /**
+   * A quiet line in the thread when the user's uncommitted changes could not be put back after an operation
+   * that set them aside; it says where they are saved. Nothing wakes the agent.
+   */
+  pendingChangesKeptNotice(threadId: string): PendingChangesKeptListener {
+    return (kept) => {
+      void this.noteThreadUpdate(threadId, keptPendingChangesNotice(kept), { messageId: `pending-changes:${kept.ref}`, kind: 'warning' }).catch((error) => {
+        console.warn('pending changes notice could not be written', { threadId, ref: kept.ref, error: error instanceof Error ? error.message : String(error) })
+      })
+    }
+  }
+
+  /**
    * A line in the thread from a watch of its pull request, saved before this answers. `messageId` makes it once: a line
    * with that id already in the transcript (live, or loaded from disk when the session was made) is not added again. The
    * answer means the line is on disk: `delivered` when this call added it, `already` when it was there. A failed save throws
    * and leaves the line in memory, so the retry finds it, adds and announces nothing a second time, and saves again.
    * Unlike `postThreadNotice`, no inbox row is written, so nothing wakes the agent.
    */
-  async noteThreadUpdate(threadId: string, text: string, opts: { messageId: string }): Promise<'delivered' | 'already'> {
+  async noteThreadUpdate(threadId: string, text: string, opts: { messageId: string; kind?: 'warning' }): Promise<'delivered' | 'already'> {
     if (this.lifecycle.stopping) throw new Error('The daemon is stopping')
     if (this.threadStore?.lifecycleStore?.get(threadId)) this.threadStore.assertThreadAdmission(threadId)
     const session = this.getOrCreateSession(threadId)
     return this.sessionAls.run(session, () => {
       const held = session.messages.some((message) => message.id === opts.messageId)
       if (!held) {
-        const message: ChatMessage = { id: opts.messageId, role: 'system', content: text, timestamp: new Date().toISOString() }
+        const message: ChatMessage = { id: opts.messageId, role: 'system', ...(opts.kind ? { kind: opts.kind } : {}), content: text, timestamp: new Date().toISOString() }
         session.messages.push(message)
         this.emitMessageAdded(message)
       }
@@ -5664,7 +5676,7 @@ export class OrchestratorService extends EventEmitter {
       // subagent had waited on its own subagents), and the task's own run for a result that predates `runId`.
       const pinned = taskCheckpoint(new ThreadActionService(childDirectory).list(), delegation.result?.runId ?? delegation.childRunId)
       if (!pinned) throw new Error('The delegated task left no code checkpoint to integrate.')
-      return await new ChildAgentIntegrationService(parentDirectory).integrate({
+      return await new ChildAgentIntegrationService(parentDirectory, { onPendingChangesKept: this.pendingChangesKeptNotice(parentThreadId) }).integrate({
         agentId: delegation.childThreadId,
         operationId: `delegation-integration:${delegationId}:${pinned}`,
         actor: { kind: 'agent', id: delegation.childThreadId },
@@ -8915,10 +8927,11 @@ export class OrchestratorService extends EventEmitter {
 
     if (recoveryDirectory && recoveryWorkspace && session.executionLease) {
       const heldLease = session.executionLease
-      await new ChildAgentIntegrationService(recoveryDirectory).recoverPending(recoveryWorkspace.worktreePath, heldLease)
+      const onPendingChangesKept = this.pendingChangesKeptNotice(session.threadId)
+      await new ChildAgentIntegrationService(recoveryDirectory, { onPendingChangesKept }).recoverPending(recoveryWorkspace.worktreePath, heldLease)
       const primary = this.projectManager && this.threadStore
         ? resolveThreadProjectPath(this.projectManager, this.threadStore, session.threadId) : undefined
-      if (primary) await new PublishService(recoveryDirectory).recoverPending(recoveryWorkspace.worktreePath, primary, heldLease)
+      if (primary) await new PublishService(recoveryDirectory, { onPendingChangesKept }).recoverPending(recoveryWorkspace.worktreePath, primary, heldLease)
       await new ThreadActionService(recoveryDirectory).recoverPending(recoveryWorkspace.worktreePath, heldLease)
       await new CodeRevertService(recoveryDirectory).recoverPending(recoveryWorkspace.worktreePath, heldLease)
       await new UndoService(recoveryDirectory).recoverPending(recoveryWorkspace.worktreePath, (action, kind) => {
@@ -9008,8 +9021,18 @@ export class OrchestratorService extends EventEmitter {
     }
     let turnStartSha: string | undefined
     if (checkpointEnabled && session.projectCwd) {
-      requireCleanWorkspace(session.projectCwd, 'Thread workspace')
-      turnStartSha = actionGit(session.projectCwd, ['rev-parse', 'HEAD'])
+      // The user's own pending edits become a checkpoint of their own, so Undo of this turn gives them back.
+      const directory = session.threadId !== '__unbound__' ? this.resolveThreadDir(session.threadId) : undefined
+      if (directory) {
+        turnStartSha = (await new ThreadActionService(directory).saveUserChanges({
+          threadId: session.threadId, conversationBranchId, workspacePath: session.projectCwd,
+          heldThreadLease: session.executionLease ?? undefined,
+          presentationMessageStart: turnPresentationStart, nativeContextBoundary: turnNativeStartBoundary
+        })).startSha
+      } else {
+        requireCleanWorkspace(session.projectCwd, 'Thread workspace')
+        turnStartSha = actionGit(session.projectCwd, ['rev-parse', 'HEAD'])
+      }
     }
     // Keep user commits visible in the sidebar. Internal orchestration wakes stay hidden.
     if (!reuseLastUser && displayUserMessage) {
@@ -10680,7 +10703,7 @@ export class OrchestratorService extends EventEmitter {
           nativeContextBoundary: { messageIndex: 0, compactionGeneration: 0, fidelity: 'exact' }
         }, base, 'completed')
         const expectedDestinationHead = await this.snapshotOwnedParent(owner, 'child-integration-base')
-        await new ChildAgentIntegrationService(directory).integrate({
+        await new ChildAgentIntegrationService(directory, { onPendingChangesKept: this.pendingChangesKeptNotice(owner.threadId) }).integrate({
           agentId: agent.id, operationId: `chat-integration:${agent.id}:${workerAction.endSha}`,
           workerWorktree: agent.worktreePath, workerBranch: agent.branch,
           spawnBaseSha: base, expectedWorkerHead: workerAction.endSha,
