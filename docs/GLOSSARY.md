@@ -9,6 +9,8 @@ Use these terms in issues, PRs, comments, and docs. If you need a term that is n
 - **Thread:** a conversation and its work history. A thread that changes a Git repository gets its own branch and worktree.
 - **Turn:** one user message and the agent work it starts.
 - **Snapshot:** a record of every file in a thread's worktree at one moment, kept as a Git commit under `refs/mousse/` that belongs to no branch. Each turn is recorded as a snapshot before and after, so the agent's own branches, commits and pushes never collide with Undo. See `docs/workspace-snapshots.md`.
+- **Publish:** puts a thread's latest snapshot into the primary checkout as one commit on the branch it is on, made with your own Git identity. Uncommitted files are published too; the thread's own branch is not merged.
+- **Subagent result:** the files a subagent (or a workflow agent) changed, brought into its parent thread as files by a three-way merge. It makes no commit; an overlap with the parent's own edits refuses and changes nothing.
 - **Run:** the saved record of a turn in the Run Engine, with its own ID. Stop, Steer, and Undo act on a run.
 - **Steer:** a message sent to a turn that is still running, to change its direction.
 - **Stop:** ends what a thread is doing and everything its subagents are doing, at every depth. The Stop button, the CLI, a channel's `/stop`, Lineage's Stop and Stop all, `task_cancel`, deleting a thread and settling it are all the same Stop. A subagent's result that is already waiting to be read is kept.

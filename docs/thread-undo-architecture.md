@@ -11,7 +11,11 @@ Status: Implemented in gated phases. Core schema, repository coordination, exter
 > - Workspace health no longer depends on the branch name or HEAD. Operations Mousse left unfinished still block the thread until they recover.
 > - Recovery reads the files (a receipt, the expected tree, the snapshot before) instead of HEAD and commit messages.
 >
-> Still true: the durable worktree and branch per thread, repository and thread leases, the journal and generations, retention, trash, and Publish as an explicit operation. Subagent and workflow results, Publish and worktree retirement still use the commit-based code until phase 3 of #464.
+> - A subagent's or workflow agent's result is a snapshot of its files, brought into the thread by a three-way merge of files (base: where the worker started; ours: a fresh snapshot of the thread; theirs: the worker's snapshot). It is not a `--no-ff` merge, makes no commit and sets nothing aside; a conflict refuses and changes nothing. Phase 8 below describes the merge-commit design it replaced.
+> - Publish puts the thread's latest snapshot into the primary checkout as one commit with the person's own identity, by a three-way merge onto the primary's HEAD (base: the files the thread last published, else where it started). It is not a `--no-ff` merge of the thread's branch, so uncommitted turn results are published and Mousse's snapshots never reach the primary. Phase 9 below describes the merge it replaced.
+> - A worktree with uncommitted files can be retired: its files are pinned as a snapshot with the real HEAD, and reconstruction writes them back.
+>
+> Still true: the durable worktree and branch per thread, repository and thread leases, the journal and generations, retention, trash, and Publish as an explicit operation.
 
 ## Problem
 

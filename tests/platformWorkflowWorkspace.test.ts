@@ -740,8 +740,10 @@ describe('workflow agent worktrees', () => {
       expect(right.workspaceRevision?.receiptId).toBeTruthy()
       const receipts = new ChangeReceiptService(f.services.threads.getThreadDir(f.thread.id)).list().filter((receipt) => receipt.kind === 'integration')
       expect(receipts).toHaveLength(2)
-      expect(new Set(receipts.map((receipt) => receipt.contributions[0].baseSha)).size).toBe(1)
-      expect(git(threadMeta!.worktreePath, ['status', '--porcelain'])).toBe('')
+      // Each result came in as files, from the snapshot of the thread its worker started from; nothing was committed.
+      expect(receipts.every((receipt) => /^[0-9a-f]{40}$/.test(receipt.contributions[0].baseSha) && receipt.introducedCommits.length === 0)).toBe(true)
+      expect(git(threadMeta!.worktreePath, ['rev-parse', 'HEAD'])).toBe(f.primaryHead)
+      expect(git(threadMeta!.worktreePath, ['status', '--porcelain', '--untracked-files=all'])).toBe('?? left.txt\n?? right.txt')
     } finally { await f.close() }
   }, 45_000)
 
@@ -835,7 +837,9 @@ describe('workflow agent worktrees', () => {
         expect(git(path, ['rev-parse', 'HEAD'])).toBe(f.primaryHead)
       }
       const metadata = new ThreadWorkspaceManager(f.services.threads.getThreadDir(f.thread.id)).load()!
-      expect(git(metadata.worktreePath, ['diff', '--name-only', '--diff-filter=U'])).toBe('branch.txt')
+      // The refused result changed nothing: no merge is left in the thread, and it holds the one that came in first.
+      expect(git(metadata.worktreePath, ['diff', '--name-only', '--diff-filter=U'])).toBe('')
+      expect(['left-result', 'right-result']).toContain(readFileSync(join(metadata.worktreePath, 'branch.txt'), 'utf8'))
       expect(git(f.repo, ['rev-parse', 'HEAD'])).toBe(f.primaryHead)
       expect(existsSync(join(f.repo, 'branch.txt'))).toBe(false)
       const invocationRoot = join(f.services.getProfileHomeDir(), 'workflow-agent-bindings', 'invocations')
