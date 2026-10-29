@@ -14,6 +14,7 @@ Status: Implemented in gated phases. Core schema, repository coordination, exter
 > - Mousse never merges a subagent's or workflow agent's work into its parent. Each completion reports a frozen result to the parent agent: base and result snapshots pinned under `refs/mousse/`, where it worked, and the Git state it left. The parent agent brings the work in with Git. Phase 8 below describes the merge design this replaced.
 > - Publish puts the thread's latest snapshot into the primary checkout as one commit with the person's own identity, by a three-way merge onto the primary's HEAD (base: the files the thread last published, else where it started). It is not a `--no-ff` merge of the thread's branch, so uncommitted turn results are published and Mousse's snapshots never reach the primary. It never writes over an ignored file in the primary, and its recovery only records or cancels. Phase 9 below describes the merge it replaced.
 > - A worktree with uncommitted files can be retired: its files are pinned as a snapshot with the real HEAD, and reconstruction writes them back. Retirement moves the worktree into Mousse's trash in one step instead of removing it; the trash deletes it after an hour with no change, once a new snapshot of it is pinned. Its own `mousse/*` branch goes once the pins keep its tip.
+> - A project that is not a Git repository (or has no commit yet) and a thread with no project record their turns as snapshots too, in a hidden store of Mousse's own, used with `--git-dir` and `--work-tree`: the folder never gains a `.git`, and there is no worktree, branch, Publish or isolated subagent. Undo, Redo, revert and per-turn review work as for a Git thread. What a snapshot leaves out is reported as for a Git thread. A thread keeps its store when the folder later becomes a repository. See "Folders without Git" in [workspace snapshots](workspace-snapshots.md).
 >
 > Still true: the durable worktree and branch per thread, repository and thread leases, the journal and generations, retention, trash, and Publish as an explicit operation.
 
@@ -43,7 +44,7 @@ solves all of these. (Records were commits on the thread's branch at first; see 
 - Thread runtime data moves outside the repository before worktrees are introduced.
 - Primary-checkout integration is an explicit `Publish` operation.
 - Latest-turn undo, conversation fork, older-change revert, and redo ship separately.
-- Non-Git threads keep their current execution capabilities, but filesystem undo is unavailable.
+- Non-Git threads keep their current execution capabilities. Since #464 their files are recorded and undone through a hidden snapshot store; they still have no worktree, Publish, or isolated subagents.
 - Mousse-managed dev servers are outside this project. External dev servers can run directly in a
   thread worktree (a worktree is a normal directory, so hot reload works the moment the server runs
   inside it).
