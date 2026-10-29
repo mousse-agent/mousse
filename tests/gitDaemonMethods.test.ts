@@ -426,10 +426,21 @@ describe('Git mutations through the daemon', () => {
       expect(porcelain(t.path)).toEqual(['?? y.txt'])
     })
 
-    it('refuses a push while the thread has uncommitted changes, with its own code', async () => {
+    it('pushes the thread’s commits while it has uncommitted files, and says those were not pushed', async () => {
+      const origin = withRemote()
       const t = await threadScope()
       write(t.path, 'a.txt')
-      await expect(client.request('git.push', { threadId: t.threadId })).rejects.toMatchObject({ code: 'git_thread_dirty', errorInfo: { category: 'conflict' } })
+      await client.request('git.commit', { threadId: t.threadId, message: 'a' })
+      write(t.path, 'b.txt')
+      const result = await client.request<Status & { notice?: string }>('git.push', { threadId: t.threadId })
+      expect(result.notice).toBe('Pushed the commits. 1 uncommitted file was not pushed.')
+      const branch = git(t.path, 'branch', '--show-current')
+      expect(git(origin, 'rev-parse', branch)).toBe(git(t.path, 'rev-parse', 'HEAD'))
+      expect(git(origin, 'ls-tree', '--name-only', branch).split('\n')).not.toContain('b.txt')
+      expect(porcelain(t.path)).toEqual(['?? b.txt'])
+      // With nothing uncommitted there is nothing to say.
+      rmSync(join(t.path, 'b.txt'))
+      expect((await client.request<Status & { notice?: string }>('git.push', { threadId: t.threadId })).notice).toBeUndefined()
     })
 
     describe('recovery after a rejected commit', () => {

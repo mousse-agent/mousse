@@ -231,10 +231,10 @@ import { ConversationBranchService } from '../actions/ConversationBranchService'
 import type { MousseFeatureFlags } from '../../shared/featureFlags'
 import { DEFAULT_FEATURE_FLAGS } from '../../shared/featureFlags'
 import { ThreadActionService } from '../actions/ThreadActionService'
-import { ChildAgentIntegrationService } from '../agents/ChildAgentIntegrationService'
+import { ChildAgentIntegrationService, ChildIntegrationConflictError } from '../agents/ChildAgentIntegrationService'
 import type { NativeContextBoundary } from '../../shared/threadActions'
 import { snapshotOrigin } from '../actions/snapshots'
-import { git as actionGit, keptPendingChangesNotice, requireClean as requireCleanWorkspace, type PendingChangesKeptListener } from '../actions/git'
+import { git as actionGit, requireClean as requireCleanWorkspace } from '../actions/git'
 import {
   claimNextNormal,
   clearPendingQueue,
@@ -1903,18 +1903,6 @@ export class OrchestratorService extends EventEmitter {
       this.sessionAls.run(session, () => this.addSystemMessage(text))
     } catch (error) {
       console.warn('provider notice could not be written', { threadId, error: error instanceof Error ? error.message : String(error) })
-    }
-  }
-
-  /**
-   * A quiet line in the thread when the user's uncommitted changes could not be put back after an operation
-   * that set them aside; it says where they are saved. Nothing wakes the agent.
-   */
-  pendingChangesKeptNotice(threadId: string): PendingChangesKeptListener {
-    return (kept) => {
-      void this.noteThreadUpdate(threadId, keptPendingChangesNotice(kept), { messageId: `pending-changes:${kept.ref}`, kind: 'warning' }).catch((error) => {
-        console.warn('pending changes notice could not be written', { threadId, ref: kept.ref, error: error instanceof Error ? error.message : String(error) })
-      })
     }
   }
 
@@ -5685,7 +5673,7 @@ export class OrchestratorService extends EventEmitter {
       })
     }
     if (merged) {
-      notice = `Integration of delegated task ${payload.delegationId} finished: merged ${merged.workerHeadSha.slice(0, 12)} as ${merged.integrationSha.slice(0, 12)} (${merged.changedPaths.length} path(s)).`
+      notice = `Integration of delegated task ${payload.delegationId} finished: brought in ${merged.workerHeadSha.slice(0, 12)} as ${merged.integrationSha.slice(0, 12)} (${merged.changedPaths.length} path(s)).`
       try {
         engine.markTerminal(payload.runId, 'completed', undefined, { resultText: notice, notice: outcomeRow(notice, 'integration_completed') })
       } catch (error) {
@@ -5763,14 +5751,12 @@ export class OrchestratorService extends EventEmitter {
       // subagent had waited on its own subagents), and the task's own run for a result that predates `runId`.
       const pinned = taskCheckpoint(new ThreadActionService(childDirectory).list(), delegation.result?.runId ?? delegation.childRunId)
       if (!pinned) throw new Error('The delegated task left no code checkpoint to integrate.')
-      return await new ChildAgentIntegrationService(parentDirectory, { onPendingChangesKept: this.pendingChangesKeptNotice(parentThreadId) }).integrate({
+      return await new ChildAgentIntegrationService(parentDirectory).integrate({
         agentId: delegation.childThreadId,
         operationId: `delegation-integration:${delegationId}:${pinned}`,
         actor: { kind: 'agent', id: delegation.childThreadId },
         workerWorktree: child.worktreePath,
-        workerBranch: child.branch,
         spawnBaseSha: child.baseSha,
-        expectedWorkerHead: pinned,
         pinnedWorkerSha: pinned,
         threadWorkspace: target.workspacePath,
         heldThreadLease: lease,
@@ -9069,11 +9055,10 @@ export class OrchestratorService extends EventEmitter {
 
     if (recoveryDirectory && recoveryWorkspace && session.executionLease) {
       const heldLease = session.executionLease
-      const onPendingChangesKept = this.pendingChangesKeptNotice(session.threadId)
-      await new ChildAgentIntegrationService(recoveryDirectory, { onPendingChangesKept }).recoverPending(recoveryWorkspace.worktreePath, heldLease)
+      await new ChildAgentIntegrationService(recoveryDirectory).recoverPending(recoveryWorkspace.worktreePath, heldLease)
       const primary = this.projectManager && this.threadStore
         ? resolveThreadProjectPath(this.projectManager, this.threadStore, session.threadId) : undefined
-      if (primary) await new PublishService(recoveryDirectory, { onPendingChangesKept }).recoverPending(recoveryWorkspace.worktreePath, primary, heldLease)
+      if (primary) await new PublishService(recoveryDirectory).recoverPending(recoveryWorkspace.worktreePath, primary, heldLease)
       await new ThreadActionService(recoveryDirectory).recoverPending(recoveryWorkspace.worktreePath, heldLease)
       await new CodeRevertService(recoveryDirectory).recoverPending(recoveryWorkspace.worktreePath, heldLease)
       await new UndoService(recoveryDirectory).recoverPending(recoveryWorkspace.worktreePath, (action, kind) => {
@@ -10691,14 +10676,6 @@ export class OrchestratorService extends EventEmitter {
     }
   }
 
-  private async snapshotOwnedParent(session: ThreadSession, label: string): Promise<string> {
-    const path = session.workspace?.workspacePath
-    const directory = this.resolveThreadDir(session.threadId)
-    if (!path || !directory || !session.executionLease) throw new Error('No owned task writer for child operation')
-    // The parent's uncommitted files are not committed for a merge: the integration sets them aside and puts them back.
-    return actionGit(path, ['rev-parse', 'HEAD'])
-  }
-
   private async completeTask(agentIds: string[], merge: boolean): Promise<string[]> {
     const logs: string[] = []
     const agentList: Agent[] = []
@@ -10841,13 +10818,12 @@ export class OrchestratorService extends EventEmitter {
           presentationMessageStart: 0, presentationMessageEnd: 0,
           nativeContextBoundary: { messageIndex: 0, compactionGeneration: 0, fidelity: 'exact' }
         }, base, 'completed')
-        const expectedDestinationHead = await this.snapshotOwnedParent(owner, 'child-integration-base')
-        await new ChildAgentIntegrationService(directory, { onPendingChangesKept: this.pendingChangesKeptNotice(owner.threadId) }).integrate({
+        await new ChildAgentIntegrationService(directory).integrate({
           agentId: agent.id, operationId: `chat-integration:${agent.id}:${workerAction.endSha}`,
-          workerWorktree: agent.worktreePath, workerBranch: agent.branch,
-          spawnBaseSha: base, expectedWorkerHead: workerAction.endSha,
+          workerWorktree: agent.worktreePath,
+          spawnBaseSha: base,
           pinnedWorkerSha: workerAction.endSha,
-          threadWorkspace: parent, expectedDestinationHead, heldThreadLease: owner.executionLease ?? undefined,
+          threadWorkspace: parent, heldThreadLease: owner.executionLease ?? undefined,
           externalEffects: workerAction.externalEffects,
           actor: { kind: 'agent', id: agent.id }
         })
@@ -10855,8 +10831,7 @@ export class OrchestratorService extends EventEmitter {
         return { success: true }
       })
     } catch (error) {
-      let conflicts: string[] = []
-      try { conflicts = actionGit(owner.workspace!.workspacePath, ['diff', '--name-only', '--diff-filter=U']).split(/\r?\n/).filter(Boolean) } catch { /* preserve original error */ }
+      const conflicts = error instanceof ChildIntegrationConflictError ? error.files : []
       return { success: false, conflict: conflicts.length > 0, conflicts, error: error instanceof Error ? error.message : String(error) }
     }
   }
@@ -10909,7 +10884,7 @@ export class OrchestratorService extends EventEmitter {
         task && this.tasks.updateProgress(task.id, {
           message: `Merge conflict: ${files}`
         })
-        // Preserve the worktree, branch, and Git merge state for resolution.
+        // The thread's files are untouched; the worker's worktree, branch and pinned result stay for another try.
         return logs
       } else {
         logs.push(`[merge] Failed for ${agent.branch}: ${result.error}`)

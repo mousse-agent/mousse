@@ -1,13 +1,14 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { ChangeReceiptService } from '../src/mms/actions/ChangeReceiptService'
 import { ConversationBranchService } from '../src/mms/actions/ConversationBranchService'
 import { CodeRevertService } from '../src/mms/actions/CodeRevertService'
+import { PublishService } from '../src/mms/actions/PublishService'
 import { RedoService } from '../src/mms/actions/RedoService'
 import { ThreadActionService } from '../src/mms/actions/ThreadActionService'
 import { UndoService } from '../src/mms/actions/UndoService'
-import { restoreChange, takeSnapshot, worktreeTree } from '../src/mms/actions/snapshots'
+import { publishedRef, restoreChange, takeSnapshot, worktreeTree } from '../src/mms/actions/snapshots'
 import { ChildAgentIntegrationService } from '../src/mms/agents/ChildAgentIntegrationService'
 import { ThreadJournal } from '../src/mms/data/ThreadJournal'
 import { ThreadWorkspaceManager } from '../src/mms/workspace/ThreadWorkspaceManager'
@@ -467,30 +468,225 @@ describe('seeding another worktree from a snapshot', () => {
   })
 })
 
+/** A worker worktree at the thread's HEAD whose task ended with `files` written: its journal, its end snapshot, and where it started. */
+async function worker(name: string, files: Record<string, string>) {
+  const path = f.child(`${name}-branch`, git(cwd, 'rev-parse', 'HEAD'))
+  git(path, 'config', 'user.name', 'Test'); git(path, 'config', 'user.email', 'test@example.test')
+  const { action } = await new ThreadActionService(join(f.root, `${name}-journal`)).runCheckpointedAction({ ...actionOptions(path, `${name}-result`), threadId: name }, () => {
+    for (const [file, value] of Object.entries(files)) writeFileSync(join(path, file), value)
+  })
+  return { path, result: action.endSha, base: git(cwd, 'rev-parse', 'HEAD') }
+}
+const integrate = (agent: Awaited<ReturnType<typeof worker>>, operationId = `integrate-${agent.result}`) => new ChildAgentIntegrationService(f.thread).integrate({
+  agentId: 'worker', operationId, workerWorktree: agent.path, spawnBaseSha: agent.base, pinnedWorkerSha: agent.result, threadWorkspace: cwd
+})
+
 describe('subagent results', () => {
-  it('a worker’s snapshot is merged into the thread by the pinned integration, whatever the worker did to its own HEAD since', async () => {
-    const worker = f.child('worker-branch', git(cwd, 'rev-parse', 'HEAD'))
-    git(worker, 'config', 'user.name', 'Test'); git(worker, 'config', 'user.email', 'test@example.test')
-    const workerActions = new ThreadActionService(join(f.root, 'worker-journal'))
-    const { action } = await workerActions.runCheckpointedAction({ ...actionOptions(worker, 'worker-result'), threadId: 'worker' }, () => writeFileSync(join(worker, 'worker.txt'), 'worker\n'))
-    // The worker keeps going: its own HEAD and files move on after the result it reported.
-    writeFileSync(join(worker, 'worker.txt'), 'worker, later\n'); git(worker, 'add', 'worker.txt'); git(worker, 'commit', '-qm', 'later')
+  it('arrive as files: the thread’s uncommitted work stays, nothing is committed, and the receipt records both snapshots', async () => {
+    const agent = await worker('worker', { 'worker.txt': 'worker\n' })
+    // The thread has uncommitted work of its own, in another file and as a staged edit, that the merge must not touch.
+    await turn('parent', () => write('parent.txt', 'parent\n'))
+    write('notes.txt', 'mine\n'); git(cwd, 'add', 'notes.txt')
     const head = git(cwd, 'rev-parse', 'HEAD')
-    const record = await new ChildAgentIntegrationService(f.thread).integrate({
-      agentId: 'worker', workerWorktree: worker, workerBranch: 'worker-branch', spawnBaseSha: head,
-      expectedWorkerHead: action.endSha, pinnedWorkerSha: action.endSha, threadWorkspace: cwd, expectedDestinationHead: head
-    })
+    const branchesBefore = branches()
+    const cached = git(cwd, 'diff', '--cached', '--binary')
+
+    const record = await integrate(agent)
     expect(f.read(cwd, 'worker.txt')).toBe('worker\n')
-    expect(record.workerHeadSha).toBe(action.endSha)
-    expect(git(cwd, 'rev-parse', 'HEAD')).toBe(record.integrationSha)
-    // The latest snapshot already includes the merge, so the next turn does not record it as outside changes.
+    expect(f.read(cwd, 'parent.txt')).toBe('parent\n')
+    expect(f.read(cwd, 'notes.txt')).toBe('mine\n')
+    // No commit, no merge, no set-aside copy; HEAD, branches and the real index are as they were.
+    expect(git(cwd, 'rev-parse', 'HEAD')).toBe(head)
+    expect(branches()).toBe(branchesBefore)
+    expect(git(cwd, 'diff', '--cached', '--binary')).toBe(cached)
+    expect(git(cwd, 'for-each-ref', 'refs/mousse/pending-changes')).toBe('')
+    expect(git(cwd, 'log', '--format=%s', '-3')).not.toMatch(/mousse|merge/i)
+    expect(() => git(cwd, 'rev-parse', '--verify', '-q', 'MERGE_HEAD')).toThrow()
+    // The receipt is between two snapshots of the thread; the worker's result is pinned.
+    const receipt = new ChangeReceiptService(f.thread).list().find((item) => item.id === record.receiptId)!
+    expect(receipt).toMatchObject({ kind: 'integration', introducedCommits: [], contributions: [{ actorId: 'worker', baseSha: agent.base, resultSha: agent.result }] })
+    expect(receipt.git).toMatchObject({ rewroteHistory: false, headBefore: head, headAfter: head })
+    expect(git(cwd, 'ls-tree', '--name-only', receipt.beforeSha).split('\n')).not.toContain('worker.txt')
+    expect(git(cwd, 'show', `${receipt.afterSha}:worker.txt`)).toBe('worker')
+    expect(git(cwd, 'show', `${receipt.afterSha}:notes.txt`)).toBe('mine')
+    expect(record).toMatchObject({ workerHeadSha: agent.result, preMergeSha: receipt.beforeSha, integrationSha: receipt.afterSha, changedPaths: ['worker.txt'] })
+    expect(git(cwd, 'rev-parse', `refs/mousse/agents/worker`)).toBe(agent.result)
+    expect(new ThreadWorkspaceManager(f.thread).load()!.snapshotSha).toBe(receipt.afterSha)
+    // The next turn records nothing as outside changes.
     expect((await actions.recordOutsideChanges({ threadId: 'task', conversationBranchId: 'main', workspacePath: cwd })).action).toBeUndefined()
-    // A worker that changed nothing has no result to merge.
-    const idle = f.child('idle-branch', head)
-    const { action: none } = await new ThreadActionService(join(f.root, 'idle-journal')).runCheckpointedAction({ ...actionOptions(idle, 'idle-result'), threadId: 'idle' }, () => undefined)
-    await expect(new ChildAgentIntegrationService(f.thread).integrate({
-      agentId: 'idle', operationId: 'idle', workerWorktree: idle, workerBranch: 'idle-branch', spawnBaseSha: head,
-      expectedWorkerHead: none.endSha, pinnedWorkerSha: none.endSha, threadWorkspace: cwd, expectedDestinationHead: git(cwd, 'rev-parse', 'HEAD')
-    })).rejects.toThrow(/no authored commit/)
+    noPending()
+  })
+
+  it('arrive whatever the worker did to its own HEAD and files since', async () => {
+    const agent = await worker('worker', { 'worker.txt': 'worker\n' })
+    writeFileSync(join(agent.path, 'worker.txt'), 'worker, later\n'); git(agent.path, 'add', 'worker.txt'); git(agent.path, 'commit', '-qm', 'later')
+    await integrate(agent)
+    expect(f.read(cwd, 'worker.txt')).toBe('worker\n')
+  })
+
+  it('a conflict refuses with the file names and changes nothing: no merge, no set-aside, no pending operation', async () => {
+    const agent = await worker('worker', { 'value.txt': 'from the worker\n', 'worker.txt': 'worker\n' })
+    await turn('parent', () => { write('value.txt', 'from the parent\n'); write('parent.txt', 'parent\n') })
+    const status = git(cwd, 'status', '--porcelain', '--untracked-files=all')
+    const journal = new ThreadJournal(f.thread).list().length
+    const refs = git(cwd, 'for-each-ref', '--format=%(refname)', 'refs/mousse')
+    await expect(integrate(agent)).rejects.toMatchObject({ code: 'integration_conflict', details: { files: ['value.txt'] }, message: expect.stringContaining('value.txt') })
+    expect(git(cwd, 'status', '--porcelain', '--untracked-files=all')).toBe(status)
+    expect(f.read(cwd)).toBe('from the parent\n')
+    expect(existsSync(join(cwd, 'worker.txt'))).toBe(false)
+    expect(git(cwd, 'for-each-ref', '--format=%(refname)', 'refs/mousse')).toBe(refs)
+    expect(new ThreadJournal(f.thread).list().length).toBe(journal)
+    expect(new ChangeReceiptService(f.thread).list().filter((item) => item.kind === 'integration')).toEqual([])
+    noPending()
+    // The thread goes on: a turn starts, and the same result integrates once the overlap is gone.
+    write('value.txt', 'base\n')
+    await turn('next', () => undefined, 2)
+    await integrate(agent)
+    expect(f.read(cwd, 'worker.txt')).toBe('worker\n')
+  })
+
+  it('refuses a worker that produced no change, by comparing files', async () => {
+    const agent = await worker('idle', {})
+    await expect(integrate(agent)).rejects.toThrow(/produced no change/)
+    // A worker that rewrote a file to what it already was changed nothing either.
+    const same = await worker('same', { 'value.txt': 'base\n' })
+    await expect(integrate(same)).rejects.toThrow(/produced no change/)
+    noPending()
+  })
+
+  it('recovers an interrupted integration by merging again, and never twice', async () => {
+    const agent = await worker('worker', { 'worker.txt': 'worker\n' })
+    const service = new ChildAgentIntegrationService(f.thread)
+    // The crash: the intent was written and the files changed, but no receipt exists yet.
+    const ours = takeSnapshot(cwd, { reason: 'ours' })
+    new ThreadJournal(f.thread).append({
+      operationId: 'crashed', operationType: 'child-integration', state: 'prepared',
+      expectedPreState: { preSnapshot: ours.sha, workerSha: agent.result, spawnBaseSha: agent.base, expectedTree: '' },
+      details: { request: { agentId: 'worker', operationId: 'crashed', workerWorktree: agent.path, spawnBaseSha: agent.base, pinnedWorkerSha: agent.result, threadWorkspace: cwd } }
+    })
+    write('worker.txt', 'worker\n')
+    await service.recoverPending(cwd)
+    const receipts = new ChangeReceiptService(f.thread).list().filter((item) => item.kind === 'integration')
+    expect(receipts).toHaveLength(1)
+    expect(receipts[0]).toMatchObject({ operationId: 'crashed', beforeSha: ours.sha })
+    expect(f.read(cwd, 'worker.txt')).toBe('worker\n')
+    noPending()
+    await service.recoverPending(cwd)
+    expect(new ChangeReceiptService(f.thread).list().filter((item) => item.kind === 'integration')).toHaveLength(1)
+  })
+})
+
+describe('publish', () => {
+  const target = () => git(f.repo, 'branch', '--show-current')
+  const publish = (options: Parameters<PublishService['publish']>[4] = {}) => new PublishService(f.thread).publish(cwd, f.repo, target(), undefined, options)
+
+  it('puts the thread’s files, uncommitted ones included, into the primary as one commit with the person’s own identity', async () => {
+    const baseSha = git(f.repo, 'rev-parse', 'HEAD')
+    // The agent commits one file and leaves the rest of its turn uncommitted; both are in the thread's snapshot.
+    const first = await turn('turn', () => {
+      write('committed.txt', 'committed\n'); git(cwd, 'add', 'committed.txt'); git(cwd, 'commit', '-qm', 'the agent’s own commit')
+      write('value.txt', 'edited\n'); write('uncommitted.txt', 'uncommitted\n')
+    })
+    const result = await publish({ message: 'Add the feature' })
+    expect(result.state).toBe('completed')
+    // Exactly one commit on the primary's branch, on top of where it was, and no Mousse snapshot or the agent's own commit in its history.
+    expect(git(f.repo, 'rev-list', '--count', `${baseSha}..HEAD`)).toBe('1')
+    expect(git(f.repo, 'rev-parse', 'HEAD')).toBe(result.publishSha)
+    expect(git(f.repo, 'rev-parse', 'HEAD^')).toBe(baseSha)
+    expect(git(f.repo, 'log', '--format=%an <%ae> | %cn <%ce> | %s', '-1')).toBe('Foundation Test <foundation@example.test> | Foundation Test <foundation@example.test> | Add the feature')
+    expect(git(f.repo, 'log', '--format=%s')).not.toMatch(/mousse snapshot|the agent’s own commit/)
+    expect(git(f.repo, 'branch', '--contains', first.action.endSha)).toBe('')
+    expect(f.read(f.repo)).toBe('edited\n')
+    expect(f.read(f.repo, 'committed.txt')).toBe('committed\n')
+    expect(f.read(f.repo, 'uncommitted.txt')).toBe('uncommitted\n')
+    expect(git(f.repo, 'status', '--porcelain', '--untracked-files=all')).toBe('')
+    // The thread keeps its own branch, HEAD and files.
+    expect(git(cwd, 'branch', '--show-current')).toBe('mousse/thread/task/main')
+    expect(f.read(cwd, 'uncommitted.txt')).toBe('uncommitted\n')
+    // The turn's receipt is published, so Undo of it is refused; the snapshot is remembered as the next base.
+    const receipts = new ChangeReceiptService(f.thread)
+    const published = receipts.list().find((item) => item.id === result.receiptId)!
+    expect(published).toMatchObject({ kind: 'publish', beforeSha: baseSha, afterSha: result.publishSha })
+    expect(published.publishedReceiptIds).toContain(first.action.receiptId)
+    expect(published.publishedReceiptIds).not.toContain(result.receiptId)
+    await expect(new UndoService(f.thread).undoLatest('main', cwd)).rejects.toMatchObject({ code: 'published_changes' })
+    expect(git(f.repo, 'rev-parse', publishedRef('task'))).toBe(result.sourceSha)
+  })
+
+  it('publishes again only what came after, even for lines it already published', async () => {
+    const baseSha = git(f.repo, 'rev-parse', 'HEAD')
+    await turn('one', () => write('value.txt', 'one\n'))
+    const first = await publish()
+    await turn('two', () => { write('value.txt', 'two\n'); write('extra.txt', 'extra\n') }, 2)
+    const second = await publish()
+    expect(second.state).toBe('completed')
+    expect(git(f.repo, 'rev-list', '--count', `${baseSha}..HEAD`)).toBe('2')
+    expect(git(f.repo, 'rev-parse', 'HEAD^')).toBe(first.publishSha)
+    expect(f.read(f.repo)).toBe('two\n')
+    // Nothing new: no third commit.
+    const third = await publish()
+    expect(third.publishSha).toBe(second.publishSha)
+    expect(git(f.repo, 'rev-list', '--count', `${baseSha}..HEAD`)).toBe('2')
+  })
+
+  it('refuses when the files are not the ones that were reviewed, and records the outside edit for the next review', async () => {
+    await turn('one', () => write('value.txt', 'one\n'))
+    const reviewed = new ThreadWorkspaceManager(f.thread).load()!.snapshotSha!
+    write('late.txt', 'late\n')
+    await expect(publish({ expectedSourceSha: reviewed })).rejects.toThrow(/source revision changed/)
+    expect(git(f.repo, 'log', '--format=%s', '-1')).toBe('base')
+    const refreshed = new ThreadWorkspaceManager(f.thread).load()!.snapshotSha!
+    expect(refreshed).not.toBe(reviewed)
+    expect((await publish({ expectedSourceSha: refreshed })).state).toBe('completed')
+    expect(f.read(f.repo, 'late.txt')).toBe('late\n')
+  })
+
+  it('refuses a conflict with the file names and changes nothing in the primary or the thread', async () => {
+    await turn('one', () => write('value.txt', 'from the thread\n'))
+    f.commit(f.repo, 'from the primary\n')
+    const head = git(f.repo, 'rev-parse', 'HEAD')
+    const result = await publish()
+    expect(result).toMatchObject({ state: 'conflict', conflictFiles: ['value.txt'], prePublishSha: head })
+    expect(git(f.repo, 'rev-parse', 'HEAD')).toBe(head)
+    expect(f.read(f.repo)).toBe('from the primary\n')
+    expect(git(f.repo, 'status', '--porcelain', '--untracked-files=all')).toBe('')
+    expect(f.read(cwd)).toBe('from the thread\n')
+    expect(new ChangeReceiptService(f.thread).list().filter((item) => item.kind === 'publish')).toEqual([])
+    noPending()
+  })
+
+  it('needs a clean primary on the target branch and changes nothing otherwise', async () => {
+    await turn('one', () => write('value.txt', 'one\n'))
+    writeFileSync(join(f.repo, 'mine.txt'), 'mine\n')
+    await expect(publish()).rejects.toMatchObject({ code: 'workspace_not_clean' })
+    expect(git(f.repo, 'status', '--porcelain', '--untracked-files=all')).toBe('?? mine.txt')
+    rmSync(join(f.repo, 'mine.txt'))
+    await expect(new PublishService(f.thread).publish(cwd, f.repo, 'other-branch')).rejects.toThrow(/must be on other-branch/)
+    expect(f.read(f.repo)).toBe('base\n')
+    noPending()
+  })
+
+  it('says what to set when Git does not know who the person is', async () => {
+    await turn('one', () => write('value.txt', 'one\n'))
+    git(f.repo, 'config', 'user.useConfigOnly', 'true'); git(f.repo, 'config', '--unset', 'user.name'); git(f.repo, 'config', '--unset', 'user.email')
+    const keys = ['GIT_AUTHOR_NAME', 'GIT_AUTHOR_EMAIL', 'GIT_COMMITTER_NAME', 'GIT_COMMITTER_EMAIL', 'EMAIL', 'GIT_CONFIG_GLOBAL', 'GIT_CONFIG_SYSTEM']
+    const saved = Object.fromEntries(keys.map((key) => [key, process.env[key]]))
+    for (const key of keys) delete process.env[key]
+    process.env.GIT_CONFIG_GLOBAL = '/dev/null'; process.env.GIT_CONFIG_SYSTEM = '/dev/null'
+    try {
+      await expect(publish()).rejects.toThrow(/Set user\.name and user\.email/)
+    } finally {
+      for (const key of keys) { if (saved[key] === undefined) delete process.env[key]; else process.env[key] = saved[key] }
+    }
+    expect(f.read(f.repo)).toBe('base\n')
+    noPending()
+  })
+
+  it('a repeated operation is the recorded result, with no second commit', async () => {
+    await turn('one', () => write('value.txt', 'one\n'))
+    const service = new PublishService(f.thread)
+    const first = await service.publish(cwd, f.repo, target(), undefined, { operationId: 'replay' })
+    expect(await service.publish(cwd, f.repo, target(), undefined, { operationId: 'replay' })).toEqual(first)
+    expect(git(f.repo, 'rev-list', '--count', `${first.prePublishSha}..HEAD`)).toBe('1')
   })
 })

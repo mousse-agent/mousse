@@ -84,7 +84,7 @@ describe('sending in a dirty thread workspace', () => {
   it('starts a turn during a merge conflict and records it; Undo refuses with Discard, which runs only when confirmed', async () => {
     const replies: Array<(cwd: string) => string> = [
       (cwd) => { writeFileSync(join(cwd, 'value.txt'), 'first turn\n'); return 'First.' },
-      () => 'Second.',
+      (cwd) => { writeFileSync(join(cwd, 'result.txt'), 'second turn result\n'); return 'Second.' },
       () => 'After discard.'
     ]
     const { thread, directory } = threadWithAgent(replies)
@@ -103,16 +103,38 @@ describe('sending in a dirty thread workspace', () => {
     expect(git(worktree, 'rev-parse', 'HEAD')).toBe(mergeHead)
 
     const refusal = await client.request('actions.undoLatest', { threadId: thread.id }).catch((error: unknown) => error)
-    expect(refusal).toMatchObject({ code: 'workspace_conflict', details: { conflict: true, discard: true, operation: 'merge', files: ['value.txt'] } })
+    expect(refusal).toMatchObject({ code: 'workspace_conflict', details: { conflict: true, discard: true, operation: 'merge', files: ['value.txt', 'result.txt'] } })
     expect((refusal as Error).message).toContain(worktree)
 
     await expect(client.request('workspace.discardPendingChanges', { threadId: thread.id })).rejects.toMatchObject({ code: 'confirmation_required' })
     expect(git(worktree, 'rev-parse', '--verify', '-q', 'MERGE_HEAD')).not.toBe('')
-    const discarded = await client.request<{ backupRef: string }>('workspace.discardPendingChanges', { threadId: thread.id, confirmed: true })
+    const discarded = await client.request<{ backupRef: string; snapshotSha?: string; notice: string }>('workspace.discardPendingChanges', { threadId: thread.id, confirmed: true })
     expect(discarded.backupRef).toMatch(/^refs\/mousse\/discarded\//)
+    // The second turn's uncommitted result goes with the conflict, so it is kept where a person can find it, and the result says where.
+    expect(git(worktree, 'show', `${discarded.backupRef}:result.txt`)).toBe('second turn result')
+    expect(discarded.notice).toContain(discarded.backupRef)
+    expect(git(worktree, 'show', `${discarded.snapshotSha}:result.txt`)).toBe('second turn result')
     expect(git(worktree, 'status', '--porcelain', '--untracked-files=all')).toBe('')
     expect(git(worktree, 'rev-parse', 'HEAD')).toBe(mergeHead)
     expect(await client.request('orchestrator.send', { threadId: thread.id, content: 'Continue.', mode: 'agent' })).toMatchObject({ message: 'After discard.' })
+  }, 45_000)
+
+  it('pushes the thread’s commits with uncommitted files in the worktree, and says those were not pushed', async () => {
+    const replies: Array<(cwd: string) => string> = [(cwd) => { writeFileSync(join(cwd, 'value.txt'), 'first turn\n'); return 'First.' }]
+    const { thread, directory } = threadWithAgent(replies)
+    const origin = join(f.root, 'origin.git')
+    git(f.root, 'init', '--bare', '-q', origin); git(f.repo, 'remote', 'add', 'origin', origin)
+    await client.request('orchestrator.send', { threadId: thread.id, content: 'First turn.', mode: 'agent' })
+    const worktree = new ThreadWorkspaceManager(directory).load()!.worktreePath
+    git(worktree, 'commit', '-qam', 'the first turn')
+    writeFileSync(join(worktree, 'draft.txt'), 'not committed\n')
+    const result = await client.request<{ notice?: string }>('git.push', { threadId: thread.id })
+    expect(result.notice).toBe('Pushed the commits. 1 uncommitted file was not pushed.')
+    const branch = git(worktree, 'branch', '--show-current')
+    expect(git(origin, 'rev-parse', branch)).toBe(git(worktree, 'rev-parse', 'HEAD'))
+    expect(git(origin, 'ls-tree', '--name-only', branch).split('\n')).not.toContain('draft.txt')
+    expect(existsSync(join(worktree, 'draft.txt'))).toBe(true)
+    expect(git(origin, 'log', '--format=%s', branch)).not.toMatch(/mousse/i)
   }, 45_000)
 
   it('Undo and Redo keep pending edits; edits that overlap refuse the Undo and change nothing', async () => {

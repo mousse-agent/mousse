@@ -6,7 +6,7 @@ import { ipcErrorLine } from '../lib/errorText'
 export function discardPrompt(details: PendingChangesDetails): string {
   const what = details.count === 1 ? '1 changed file' : `${details.count} changed files`
   const operation = details.operation ? ` The unfinished ${details.operation} is ended too.` : ''
-  return `Discard ${what} in ${details.path}?${operation} Mousse keeps a copy in Git under refs/mousse/discarded.`
+  return `Discard ${what} in ${details.path}? This includes uncommitted results of the thread's earlier turns.${operation} Mousse keeps a copy in Git under refs/mousse/discarded.`
 }
 
 /**

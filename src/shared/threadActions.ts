@@ -70,12 +70,17 @@ export interface ExternalEffect {
 export interface ChildIntegrationRecord {
   receiptId?: string
   operationId?: string
+  /** The thread's files before the result came in (a snapshot, or the branch commit of an integration recorded before snapshots). */
   preMergeSha?: string
   agentId: string
+  /** The code the worker started from. */
   spawnBaseSha: string
+  /** The worker's result: a snapshot of its files, or its branch commit in an integration recorded before snapshots. */
   workerHeadSha: string
+  /** The thread's files after the result came in, as `preMergeSha`. */
   integrationSha: string
-  mainlineParent: number
+  /** Which parent of the merge commit is the thread's own; only in integrations recorded before snapshots, which were merges. */
+  mainlineParent?: number
   changedPaths: string[]
 }
 

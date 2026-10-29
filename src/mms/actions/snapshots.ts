@@ -99,6 +99,11 @@ export function takeSnapshot(cwd: string, input: SnapshotInput): Snapshot {
   return { sha, ...state }
 }
 
+/** The ref that remembers the thread's files as last published into the primary checkout: the next publish brings in only what came after. */
+export function publishedRef(threadId: string): string {
+  return `refs/mousse/published/${threadId}`
+}
+
 /** Whether two revisions (snapshots or commits) hold the same files. Revisions that cannot be read are not the same. */
 export function sameTree(cwd: string, a: string, b: string): boolean {
   if (a === b) return true
