@@ -5673,7 +5673,7 @@ export class OrchestratorService extends EventEmitter {
       })
     }
     if (merged) {
-      notice = `Integration of delegated task ${payload.delegationId} finished: brought in ${merged.workerHeadSha.slice(0, 12)} as ${merged.integrationSha.slice(0, 12)} (${merged.changedPaths.length} path(s)).`
+      notice = `Integration of delegated task ${payload.delegationId} finished: merged ${merged.workerHeadSha.slice(0, 12)} as ${merged.integrationSha.slice(0, 12)} (${merged.changedPaths.length} path(s)).`
       try {
         engine.markTerminal(payload.runId, 'completed', undefined, { resultText: notice, notice: outcomeRow(notice, 'integration_completed') })
       } catch (error) {
