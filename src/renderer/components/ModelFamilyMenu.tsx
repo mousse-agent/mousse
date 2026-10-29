@@ -57,6 +57,10 @@ interface FlatModelEntry {
   listing: string
   /** The instance's name ("Claude Code 2"), with the model's maker for a multi-brand API. */
   providerLabel: string
+  /** The instance's name alone. */
+  providerName: string
+  /** The model's maker ("DeepSeek") where it is worth naming: a multi-brand API, and not the provider itself. */
+  makerLabel?: string
   /** Initials telling apart instances that share a logo (`instanceBadges`). */
   badge?: string
   /** Position of the provider, then of the family in the saved model order. */
@@ -237,11 +241,14 @@ function ProfileModelFamilyMenu({
     const entries: FlatModelEntry[] = []
     groupedProviders.forEach((provider, providerRank) => {
       for (const family of provider.families) {
+        const maker = provider.multiBrand ? makerLabelOf(provider.providerId, provider.label, family) : undefined
         entries.push({
           providerId: provider.providerId,
           instanceId: provider.instanceId,
           listing: provider.listing,
-          providerLabel: provider.multiBrand ? `${provider.label} · ${family.brandLabel}` : provider.label,
+          providerLabel: maker ? `${provider.label} · ${maker}` : provider.label,
+          providerName: provider.label,
+          makerLabel: maker,
           badge: provider.badge,
           providerRank,
           familyRank: provider.familyRanks.get(family.familyId) ?? Number.MAX_SAFE_INTEGER,
@@ -501,10 +508,11 @@ function ProfileModelFamilyMenu({
 
   // Rows filtered to one single-maker provider drop the logo and provider line, which would only
   // repeat the selected rail item on every row. A multi-brand API keeps them: the logo is the maker.
-  const compactRows =
+  const oneProvider =
     (railFilter !== null || railItems.length <= 1) &&
     filteredEntries.length > 0 &&
-    filteredEntries.every((entry) => entry.listing === filteredEntries[0]!.listing && !entry.multiBrand)
+    filteredEntries.every((entry) => entry.listing === filteredEntries[0]!.listing)
+  const compactRows = oneProvider && filteredEntries.every((entry) => !entry.multiBrand)
 
   const renderEntry = (entry: FlatModelEntry, index: number) => {
     const selected = isEntrySelected(entry)
@@ -512,6 +520,7 @@ function ProfileModelFamilyMenu({
     const binding = index < MODEL_PICK_COMMANDS.length ? bindings[MODEL_PICK_COMMANDS[index]] : null
     const shortcut = binding ? formatBinding(binding, platform) : null
     const isHighlighted = index === highlightIndex
+    const subtitle = modelRowSubtitle(entry, oneProvider)
     const isActive =
       activeFamily?.entry.listing === entry.listing &&
       activeFamily.family.familyId === entry.family.familyId
@@ -532,7 +541,7 @@ function ProfileModelFamilyMenu({
       <div
         key={entry.key}
         data-model-index={index}
-        className={`model-picker-row${compactRows ? ' compact' : ''}${isActive ? ' active' : ''}${
+        className={`model-picker-row${compactRows ? ' compact' : ''}${!compactRows && !subtitle && !entry.providerStatus ? ' bare' : ''}${isActive ? ' active' : ''}${
           isHighlighted ? ' highlighted' : ''
         }${selected ? ' selected' : ''}`}
         onMouseEnter={(event) => {
@@ -561,9 +570,9 @@ function ProfileModelFamilyMenu({
           )}
           <span className="model-picker-row-text">
             <span className="model-picker-row-title">{entry.family.familyLabel}</span>
-            {compactRows && !entry.providerStatus ? null : (
+            {!subtitle && !entry.providerStatus ? null : (
               <span className="model-picker-row-subtitle">
-                {compactRows ? null : <span className="model-picker-row-provider">{entry.providerLabel}</span>}
+                {subtitle ? <span className="model-picker-row-provider">{subtitle}</span> : null}
                 {entry.providerStatus ? <span className="model-picker-row-status">{entry.providerStatus}</span> : null}
               </span>
             )}
@@ -694,6 +703,41 @@ function ProfileModelFamilyMenu({
   }
 
   return shell
+}
+
+/** Brand ids that are the provider's own, so naming them would only repeat the provider. */
+function sameMaker(providerId: string, providerLabel: string, family: Pick<ModelFamily, 'brandId' | 'brandLabel'>): boolean {
+  const provider = normalizeProviderId(providerId)
+  const brand = normalizeProviderId(family.brandId)
+  return (
+    brand === provider ||
+    (provider === 'claude' && brand === 'anthropic') ||
+    family.brandLabel.trim().toLowerCase() === providerLabel.trim().toLowerCase()
+  )
+}
+
+/**
+ * The maker to name under a model of a multi-brand API: its display name ("DeepSeek"), never a raw
+ * id ("vercel-ai-gateway", which is all the catalog knows for an unrecognised model), and not the
+ * provider itself.
+ */
+export function makerLabelOf(
+  providerId: string,
+  providerLabel: string,
+  family: Pick<ModelFamily, 'brandId' | 'brandLabel'>
+): string | undefined {
+  if (family.brandLabel === family.brandId || family.brandId === 'other') return undefined
+  return sameMaker(providerId, providerLabel, family) ? undefined : family.brandLabel
+}
+
+/**
+ * The line under a model's name. In a list of one provider the provider is already the selected rail
+ * item, so only the maker is named; across providers the provider stays so the same model from two of
+ * them can be told apart.
+ */
+export function modelRowSubtitle(entry: { providerName: string; makerLabel?: string }, oneProvider: boolean): string | undefined {
+  if (oneProvider) return entry.makerLabel
+  return [entry.providerName, entry.makerLabel].filter(Boolean).join(' · ')
 }
 
 /** Favorites first, then by provider, then by the provider's saved model order. */

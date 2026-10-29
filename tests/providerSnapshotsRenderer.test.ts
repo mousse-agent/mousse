@@ -20,7 +20,7 @@ import {
 } from '../src/renderer/lib/providerSnapshots'
 import { useAppStore } from '../src/renderer/stores/appStore'
 import { sendErrorLine } from '../src/renderer/lib/errorText'
-import { getGroupedModelButtonParts, sortPickerEntries } from '../src/renderer/components/ModelFamilyMenu'
+import { getGroupedModelButtonParts, makerLabelOf, modelRowSubtitle, sortPickerEntries } from '../src/renderer/components/ModelFamilyMenu'
 import { profilePreferenceKey } from '../src/renderer/lib/profilePreferences'
 import { model, snapshot } from './providerSnapshotFixture'
 
@@ -89,6 +89,37 @@ describe('composer picker from snapshots', () => {
     ]
     expect(sortPickerEntries(entries, () => false).map((entry) => entry.id)).toEqual(['a', 'b', 'c', 'd'])
     expect(sortPickerEntries([...entries].reverse(), (entry) => entry.id === 'd').map((entry) => entry.id)).toEqual(['d', 'a', 'b', 'c'])
+  })
+
+  describe('row subtitle', () => {
+    const family = (modelId: string, label: string, providerId = 'vercel-ai-gateway') =>
+      groupModelsByFamily(providerId, [model(modelId, { label })])[0]!
+    const gateway = (modelId: string, label: string) => makerLabelOf('vercel-ai-gateway', 'Vercel AI Gateway', family(modelId, label))
+
+    it('names the maker alone in a list of one provider', () => {
+      const entry = { providerName: 'Vercel AI Gateway', makerLabel: gateway('deepseek/deepseek-v4-flash', 'DeepSeek V4.1 Flash') }
+      expect(entry.makerLabel).toBe('DeepSeek')
+      expect(modelRowSubtitle(entry, true)).toBe('DeepSeek')
+    })
+
+    it('keeps the provider with the maker across providers', () => {
+      const entry = { providerName: 'Vercel AI Gateway', makerLabel: 'Google' }
+      expect(modelRowSubtitle(entry, false)).toBe('Vercel AI Gateway · Google')
+      expect(modelRowSubtitle({ providerName: 'Anthropic' }, false)).toBe('Anthropic')
+    })
+
+    it('shows no line for a model made by its own provider', () => {
+      expect(modelRowSubtitle({ providerName: 'Anthropic', makerLabel: undefined }, true)).toBeUndefined()
+      expect(makerLabelOf('anthropic', 'Anthropic', family('claude-opus-4', 'Claude Opus 4', 'anthropic'))).toBeUndefined()
+      expect(makerLabelOf('claude', 'Claude Code', family('claude-opus-4', 'Claude Opus 4', 'claude'))).toBeUndefined()
+    })
+
+    it('never shows a raw provider id as the maker', () => {
+      const maker = gateway('ember-1', 'Ember-1')
+      expect(maker).toBeUndefined()
+      expect(modelRowSubtitle({ providerName: 'Vercel AI Gateway', makerLabel: maker }, false)).toBe('Vercel AI Gateway')
+      expect(modelRowSubtitle({ providerName: 'Vercel AI Gateway', makerLabel: maker }, true)).toBeUndefined()
+    })
   })
 
   it('badges a second account that shares a logo with what sets its name apart (D5)', () => {
