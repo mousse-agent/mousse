@@ -267,7 +267,8 @@ describe('delegated child policy', () => {
     )
     const modeOf = (threadId: string) => d.store.getThread(threadId)?.permissionMode
     const turnsOf = (threadId: string) => claude.turns.filter((turn) => turn.input.threadId === threadId)
-    const done = (run: { childRunId: string }) => waitFor(() => d.engine.getRun(run.childRunId)?.status === 'completed', 'a child run')
+    // The turn is over once its checkpoint is recorded, which is after its run completes: a send before that queues.
+    const done = (run: { childRunId: string; childThreadId: string }) => waitFor(() => d.engine.getRun(run.childRunId)?.status === 'completed' && !d.orch.isConversationHistoryBusy(run.childThreadId), 'a child run')
 
     d.orch.setThreadPermissionMode(thread.id, 'accept_edits')
     expect(d.engine.store.listEvents(thread.id).filter((event) => event.type === 'thread.permission_mode')).toHaveLength(1)

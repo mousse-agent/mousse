@@ -8304,7 +8304,6 @@ export class OrchestratorService extends EventEmitter {
     }
   }
 
-  /** The model a new turn of the session runs: the given or thread override, else the mode's default. */
   /**
    * The folder a turn that changes files is recorded in when its thread has no worktree of its own (docs/workspace-snapshots.md,
    * "Folders without Git"): the project's folder when the project is not a Git repository (or has no commit yet), and for a
@@ -8330,6 +8329,7 @@ export class OrchestratorService extends EventEmitter {
     }
   }
 
+  /** The model a new turn of the session runs: the given or thread override, else the mode's default. */
   private turnSelection(session: ThreadSession, mode: ChatMode, override?: ModelOverride): ModelOverride {
     return this.harness.instanceMap.migrate(override ?? session.modelOverride ?? resolveModelForMode(this.settingsStore.get(), mode, [
       ...(this.providerAuth.credentials?.listProviderIds() ?? []),
