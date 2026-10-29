@@ -8,6 +8,7 @@ import { ChangeReceiptService } from '../actions/ChangeReceiptService'
 import { CodeRevertService } from '../actions/CodeRevertService'
 import { PublishService } from '../actions/PublishService'
 import { ConversationBranchService } from '../actions/ConversationBranchService'
+import { moveFiles, takeSnapshot } from '../actions/snapshots'
 import { ChildAgentIntegrationService } from '../agents/ChildAgentIntegrationService'
 import { withGitMutationLocks } from '../actions/GitOperationCoordinator'
 import {
@@ -360,7 +361,7 @@ function verifyWorkspaceWriterAdmission(
     const repository = manager.resolveRepository(canonicalPath(project.path))
     validateThreadWorkspaceMetadata(manager, metadata, repository, context.threadId)
     if (metadata.lifecycle !== 'ready' || manager.verify(metadata).lifecycle !== 'ready') {
-      throw new DomainRpcError('thread_unavailable', 'Workspace HEAD or branch changed while waiting; recovery is required')
+      throw new DomainRpcError('thread_unavailable', 'Workspace needs recovery before it can be written')
     }
     if (!pathsEqual(metadata.worktreePath, workspace.workspacePath) || metadata.branch !== workspace.branch) {
       throw new DomainRpcError('thread_unavailable', 'Workspace binding changed while waiting; resolve its current revision again')
@@ -368,11 +369,9 @@ function verifyWorkspaceWriterAdmission(
     validateThreadWorkspacePaths(workspace.workspacePath, workspace.cwd, repository)
   } else {
     // Isolated children have a separate journal but no task-binding metadata.
-    // Their immutable spawn revision is the admission authority instead.
+    // Their repository identity is the admission authority instead; HEAD and branch are the agent's to move.
     if (pathsEqual(workspace.threadDirectory, owner.threads.getThreadDir(context.threadId)) ||
         !workspace.expectedHeadSha || !workspace.branch ||
-        git(workspace.workspacePath, ['rev-parse', 'HEAD']) !== workspace.expectedHeadSha ||
-        git(workspace.workspacePath, ['branch', '--show-current']) !== workspace.branch ||
         resolveRepositoryIdentity(workspace.workspacePath).key !== workspace.repositoryId) {
       throw new DomainRpcError('thread_unavailable', 'Workspace admission revision changed; recovery is required')
     }
@@ -394,19 +393,13 @@ export async function acquireWorkspaceMutationLease(
     verifyWorkspaceWriterAdmission(owner, context, workspace)
     // The thread lease covers the writer lifetime. Repository leases are taken
     // only by checkpoint/integration operations, never across model or process work.
-    let startSha = git(workspace.workspacePath, ['rev-parse', 'HEAD'])
-    if (git(workspace.workspacePath, ['status', '--porcelain', '--untracked-files=all'])) {
-      const before = await new ThreadActionService(workspace.threadDirectory).checkpointExistingTurn({
-        threadId: context.threadId, turnId: `workflow-input:${crypto.randomUUID()}`,
-        conversationBranchId: new ThreadWorkspaceManager(workspace.threadDirectory).load()?.conversationBranchId ?? 'main', workspacePath: workspace.workspacePath,
-        presentationMessageStart: 0, presentationMessageEnd: 0,
-        nativeContextBoundary: { messageIndex: 0, compactionGeneration: 0, fidelity: 'exact' },
-        actor: { kind: 'workflow', id: context.runId }, runId: context.runId, heldThreadLease: threadLease
-      }, startSha, 'completed')
-      startSha = before.endSha
-    }
-    const turnId = `${context.turnId ?? context.runId ?? 'workflow'}:${crypto.randomUUID()}`
     const conversationBranchId = new ThreadWorkspaceManager(workspace.threadDirectory).load()?.conversationBranchId ?? 'main'
+    // Files changed outside Mousse since the last action are recorded first; the workflow starts from the snapshot.
+    const startSha = (await new ThreadActionService(workspace.threadDirectory).recordOutsideChanges({
+      threadId: context.threadId, conversationBranchId, workspacePath: workspace.workspacePath, heldThreadLease: threadLease,
+      presentationMessageStart: 0, nativeContextBoundary: { messageIndex: 0, compactionGeneration: 0, fidelity: 'exact' }
+    })).startSha
+    const turnId = `${context.turnId ?? context.runId ?? 'workflow'}:${crypto.randomUUID()}`
     new ThreadActionService(workspace.threadDirectory).beginTurn({
       threadId: context.threadId, turnId, conversationBranchId, workspacePath: workspace.workspacePath,
       presentationMessageStart: 0, presentationMessageEnd: 0,
@@ -467,7 +460,8 @@ export async function integrateOwnedAgentWorkspace(input: {
   if (!record) throw new DomainRpcError('unknown_effect', 'Workflow child result has no durable workspace record')
   const resultSha = input.revision.writeSha
   await withGitMutationLocks(`${workspace.recordPath}.changes`, workspace.worktreePath, 'workflow-result-pin', () => {
-    if (git(workspace.worktreePath, ['rev-parse', 'HEAD']) !== resultSha) throw new Error('Worker result revision changed')
+    // The result is a snapshot of the worker's files, which stays valid whatever the worker did to its own HEAD since.
+    git(workspace.worktreePath, ['cat-file', '-e', `${resultSha}^{commit}`])
     if (workspace.retainedRef) git(workspace.worktreePath, ['update-ref', workspace.retainedRef, resultSha])
     writeAgentRecord(workspace.recordPath, { ...record, resultSha, receiptId: input.revision.receiptId })
   }, input.signal)
@@ -483,7 +477,7 @@ export async function integrateOwnedAgentWorkspace(input: {
       agentId: agentWorktreeId(context.profileId, context.threadId, input.idempotencyKey),
       operationId: `workflow-integration:${input.idempotencyKey}`,
       workerWorktree: workspace.worktreePath, workerBranch: workspace.branch,
-      spawnBaseSha: workspace.baseSha, expectedWorkerHead: resultSha,
+      spawnBaseSha: workspace.baseSha, expectedWorkerHead: resultSha, pinnedWorkerSha: resultSha,
       threadWorkspace: parent.workspacePath, expectedDestinationHead: expected,
       externalEffects: new ChangeReceiptService(`${workspace.recordPath}.changes`).list()
         .find((receipt) => receipt.id === input.revision.receiptId)?.externalEffects ?? [],
@@ -527,6 +521,8 @@ export function isWorkflowRevisionCurrent(
         if (contribution.resultSha === revision.readSha || contribution.resultSha === revision.writeSha) return true
       }
     }
+    // Snapshots have no ancestry, but receipts are linear: an observation made at or after the undone change saw it.
+    if (undone.git) return observedGeneration !== undefined && undone.generation <= observedGeneration
     // A later verification can observe a descendant of the reversed change.
     if (undone.beforeSha !== undone.afterSha) {
       try {
@@ -684,17 +680,9 @@ async function createAgentWorktree(input: {
       signal: input.signal
     })
     verifyWorkspaceWriterAdmission(input.owner, input.context, input.thread)
-    if (git(input.thread.workspacePath, ['status', '--porcelain', '--untracked-files=all'])) {
-      const head = git(input.thread.workspacePath, ['rev-parse', 'HEAD'])
-      await new ThreadActionService(input.thread.threadDirectory).checkpointExistingTurn({
-        threadId: input.context.threadId, turnId: `workflow-base:${input.idempotencyKey}`,
-        conversationBranchId: new ThreadWorkspaceManager(input.thread.threadDirectory).load()?.conversationBranchId ?? 'main', workspacePath: input.thread.workspacePath,
-        presentationMessageStart: 0, presentationMessageEnd: 0,
-        nativeContextBoundary: { messageIndex: 0, compactionGeneration: 0, fidelity: 'exact' },
-        actor: { kind: 'workflow', id: input.idempotencyKey }, heldThreadLease: threadLease
-      }, head, 'completed')
-    }
     const baseSha = git(input.thread.workspacePath, ['rev-parse', 'HEAD'])
+    // The worker starts from the thread's files as they are, uncommitted work included, on top of the same commit.
+    const threadFiles = takeSnapshot(input.thread.workspacePath, { reason: `workflow agent ${input.idempotencyKey}` })
     const repoIdentity = resolveRepositoryIdentity(input.thread.gitTopLevel, { requireMutationCapability: true })
     repositoryLease = await acquireRepositoryLease(repoIdentity, { signal: input.signal })
     liveBinding(input.owner, input.context)
@@ -716,6 +704,7 @@ async function createAgentWorktree(input: {
       throw new DomainRpcError('unknown_effect', 'Workflow agent branch exists without its owned record')
     } else {
       git(input.thread.workspacePath, ['worktree', 'add', '-b', identity.branch, identity.path, baseSha])
+      moveFiles(identity.path, git(identity.path, ['rev-parse', 'HEAD^{tree}']), threadFiles.tree)
     }
     git(input.thread.gitTopLevel, ['update-ref', retainedRef, git(identity.path, ['rev-parse', 'HEAD'])])
     const cwd = projectCwd(identity.path, input.thread.projectRelativeSubdirectory)

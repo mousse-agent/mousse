@@ -50,12 +50,17 @@ export interface ThreadWorkspaceMetadata {
   threadId: string
   repositoryId: RepositoryId
   conversationBranchId: ConversationBranchId
+  /** The branch Mousse created for the thread. The agent may switch away from it; nothing here follows it. */
   branch: string
+  /** Points at the latest snapshot (see `snapshotSha`); at the base commit before the first one. */
   retainedRef: string
   worktreePath: string
   projectRelativeSubdirectory: string
   baseSha: string
+  /** The last HEAD Mousse observed in the worktree. Informational: HEAD is the agent's to move. */
   headSha: string
+  /** The latest recorded snapshot of the worktree's files; absent until the first one. */
+  snapshotSha?: string
   lifecycle: WorkspaceLifecycle
   lastVerifiedAt: string
   workspaceId?: string

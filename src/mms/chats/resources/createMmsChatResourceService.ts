@@ -130,8 +130,8 @@ export function createMmsChatResourceService(services: MmsProfileServices, resol
               presentationMessageStart: latest?.presentationMessageEnd ?? 0, presentationMessageEnd: latest?.presentationMessageEnd ?? 0,
               nativeContextBoundary: latest?.nativeContextBoundary ?? { messageIndex: 0, compactionGeneration: 0, fidelity: 'legacy' },
               externalEffects: [{ kind: 'unknown', reversible: false, description: 'Shared terminal commands may affect external services or ignored files.' }] }
-            // The user's pending edits are saved as their own checkpoint first; the terminal's action covers only what it changes.
-            startSha = (await actions.saveUserChanges(actionOptions)).startSha
+            // Edits made outside the terminal are recorded as their own action first; the terminal's action covers only what it changes.
+            startSha = (await actions.recordOutsideChanges(actionOptions)).startSha
             actions.beginTurn(actionOptions, startSha)
           }
           const id = services.ptyManager.create(`chat:${binding.groupId}`, binding.workspaceRoot, undefined, {

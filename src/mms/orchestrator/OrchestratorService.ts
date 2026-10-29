@@ -231,6 +231,7 @@ import { DEFAULT_FEATURE_FLAGS } from '../../shared/featureFlags'
 import { ThreadActionService } from '../actions/ThreadActionService'
 import { ChildAgentIntegrationService } from '../agents/ChildAgentIntegrationService'
 import type { NativeContextBoundary } from '../../shared/threadActions'
+import { snapshotOrigin } from '../actions/snapshots'
 import { git as actionGit, keptPendingChangesNotice, requireClean as requireCleanWorkspace, type PendingChangesKeptListener } from '../actions/git'
 import {
   claimNextNormal,
@@ -5012,7 +5013,10 @@ export class OrchestratorService extends EventEmitter {
           : sourceWorkspace?.lifecycle === 'ready'
             ? { kind: 'source_head', sha: actionGit(sourceWorkspace.worktreePath, ['rev-parse', 'HEAD']) }
             : { kind: 'primary_head' }
-        await manager.provision(threadId, 'main', projectPath, signal, lease ?? undefined, typeof seed.sha === 'string' ? seed.sha : undefined)
+        // A checkpoint is a snapshot: the fork's worktree is made at the commit the snapshot was taken on (the source's
+        // HEAD then) and the snapshot's files are written over it, so no snapshot commit becomes the fork's branch.
+        const seedHead = checkpoint ? snapshotOrigin(sourceWorkspace?.worktreePath ?? projectPath, checkpoint.endSha).head : undefined
+        await manager.provision(threadId, 'main', projectPath, signal, lease ?? undefined, checkpoint ? seedHead : typeof seed.sha === 'string' ? seed.sha : undefined, checkpoint ? { snapshot: checkpoint.endSha } : {})
       }
     } catch (error) {
       seed = { kind: 'failed', error: error instanceof Error ? error.message : String(error) }
@@ -9021,10 +9025,10 @@ export class OrchestratorService extends EventEmitter {
     }
     let turnStartSha: string | undefined
     if (checkpointEnabled && session.projectCwd) {
-      // The user's own pending edits become a checkpoint of their own, so Undo of this turn gives them back.
+      // Edits made outside Mousse since the last action become an action of their own, so Undo of this turn leaves them.
       const directory = session.threadId !== '__unbound__' ? this.resolveThreadDir(session.threadId) : undefined
       if (directory) {
-        turnStartSha = (await new ThreadActionService(directory).saveUserChanges({
+        turnStartSha = (await new ThreadActionService(directory).recordOutsideChanges({
           threadId: session.threadId, conversationBranchId, workspacePath: session.projectCwd,
           heldThreadLease: session.executionLease ?? undefined,
           presentationMessageStart: turnPresentationStart, nativeContextBoundary: turnNativeStartBoundary
@@ -10548,16 +10552,8 @@ export class OrchestratorService extends EventEmitter {
     const path = session.workspace?.workspacePath
     const directory = this.resolveThreadDir(session.threadId)
     if (!path || !directory || !session.executionLease) throw new Error('No owned task writer for child operation')
-    const head = actionGit(path, ['rev-parse', 'HEAD'])
-    if (!actionGit(path, ['status', '--porcelain', '--untracked-files=all'])) return head
-    const action = await new ThreadActionService(directory).checkpointExistingTurn({
-      threadId: session.threadId, turnId: `${label}:${uuidv4()}`,
-      conversationBranchId: new ThreadWorkspaceManager(directory).load()?.conversationBranchId ?? 'main',
-      workspacePath: path, heldThreadLease: session.executionLease,
-      presentationMessageStart: session.messages.length, presentationMessageEnd: session.messages.length,
-      nativeContextBoundary: { messageIndex: session.nativeContext.messages.length, compactionGeneration: 0, fidelity: 'exact' }
-    }, head, 'completed')
-    return action.endSha
+    // The parent's uncommitted files are not committed for a merge: the integration sets them aside and puts them back.
+    return actionGit(path, ['rev-parse', 'HEAD'])
   }
 
   private async completeTask(agentIds: string[], merge: boolean): Promise<string[]> {
@@ -10707,6 +10703,7 @@ export class OrchestratorService extends EventEmitter {
           agentId: agent.id, operationId: `chat-integration:${agent.id}:${workerAction.endSha}`,
           workerWorktree: agent.worktreePath, workerBranch: agent.branch,
           spawnBaseSha: base, expectedWorkerHead: workerAction.endSha,
+          pinnedWorkerSha: workerAction.endSha,
           threadWorkspace: parent, expectedDestinationHead, heldThreadLease: owner.executionLease ?? undefined,
           externalEffects: workerAction.externalEffects,
           actor: { kind: 'agent', id: agent.id }
