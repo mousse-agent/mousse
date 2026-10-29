@@ -13,19 +13,31 @@ const openai = { source: 'provider', providerId: 'openai', modelId: 'gpt-4o-mini
 describe('parseSpeechPreferences', () => {
   it('fills in defaults for missing or malformed values', () => {
     expect(parseSpeechPreferences(null)).toEqual(DEFAULT_SPEECH_PREFERENCES)
-    expect(parseSpeechPreferences({ speed: 9, voices: { a: 3, b: 'x' }, reduceNoise: 'no' })).toEqual({
-      speed: 1,
-      voices: { b: 'x' },
-      reduceNoise: true
+    expect(parseSpeechPreferences({ speed: 9, voices: { a: 3, b: 'x' }, reduceNoise: 'no', vocabulary: 'x', expandSymbols: 1 })).toEqual({
+      ...DEFAULT_SPEECH_PREFERENCES,
+      voices: { b: 'x' }
     })
   })
 
-  it('keeps supported values', () => {
-    expect(parseSpeechPreferences({ speed: 1.5, voices: { 'local:kokoro-82m': 'bm_george' }, reduceNoise: false })).toEqual({
+  it('keeps supported values, including an emptied vocabulary', () => {
+    expect(
+      parseSpeechPreferences({
+        speed: 1.5,
+        voices: { 'local:kokoro-82m': 'bm_george' },
+        reduceNoise: false,
+        vocabulary: [{ spoken: ' gh-rysp ', written: 'gh-ryspa' }, { spoken: '', written: 'x' }, 'junk'],
+        expandSymbols: false,
+        detectLists: false
+      })
+    ).toEqual({
       speed: 1.5,
       voices: { 'local:kokoro-82m': 'bm_george' },
-      reduceNoise: false
+      reduceNoise: false,
+      vocabulary: [{ spoken: 'gh-rysp', written: 'gh-ryspa' }],
+      expandSymbols: false,
+      detectLists: false
     })
+    expect(parseSpeechPreferences({ vocabulary: [] }).vocabulary).toEqual([])
   })
 })
 

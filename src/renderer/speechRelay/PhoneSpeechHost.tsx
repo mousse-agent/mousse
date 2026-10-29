@@ -1,11 +1,12 @@
 import { useEffect } from 'react'
 import type { LocalSttModelId } from '../../shared/dictation'
+import { polishTranscript } from '../../shared/dictationPostProcess'
 import type { LocalTtsModelId } from '../../shared/readAloud'
 import { useDictationStore } from '../dictation/dictationStore'
 import { transcribeRecording } from '../dictation/transcribe'
 import { synthesizeWithLocalModel } from '../readAloud/localEngine'
 import { useReadAloudStore } from '../readAloud/readAloudStore'
-import { currentSpeechPreferences, voiceFor } from '../speech/speechPreferences'
+import { currentSpeechPreferences, dictationPolishOptions, voiceFor } from '../speech/speechPreferences'
 import { useAppStore } from '../stores/appStore'
 import type { PhoneSpeechDeps } from './phoneSpeechJobs'
 import { startPhoneSpeechHost, type SpeechHostRequest } from './startPhoneSpeechHost'
@@ -39,7 +40,7 @@ const windowDeps: PhoneSpeechDeps = {
       : window.mousse.readAloud.cancelLocalModelDownload(modelId as LocalTtsModelId),
   onLocalStatus: (kind, listener) =>
     kind === 'dictation' ? window.mousse.dictation.onLocalModelStatus(listener) : window.mousse.readAloud.onLocalModelStatus(listener),
-  transcribe: transcribeRecording,
+  transcribe: async (...args) => polishTranscript(await transcribeRecording(...args), dictationPolishOptions(currentSpeechPreferences())),
   synthesizeLocal: synthesizeWithLocalModel,
   synthesizeProvider: (request) => window.mousse.readAloud.synthesizeWithProvider(request)
 }
