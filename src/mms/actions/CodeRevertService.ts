@@ -26,7 +26,7 @@ export class CodeRevertService {
     return withGitMutationLocks(this.threadDirectory, workspacePath, 'code-revert', async () => {
       new ChangeReceiptService(this.threadDirectory).assertNoPendingOperation()
       this.actions.assertExpectedRevision(expectedJournalRevision)
-      requireClean(workspacePath, 'Thread workspace')
+      requireClean(workspacePath, 'Thread workspace', { folder: 'thread', actions: ['save', 'discard'] })
       const actions = this.actions.list(); const target = actions.find((action) => action.id === actionId)
       if (target?.scope === 'conversation') throw new Error('Conversation-only turns have no repository changes to revert.')
       if (!target || target.state !== 'completed') throw new Error('Code revert requires a completed action.')

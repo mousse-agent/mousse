@@ -123,3 +123,26 @@ it('hides Undo and explains unavailable history after a failed read', async () =
   const alert = tree.props.children.find((child: any) => child?.props?.role === 'alert')
   expect(alert.props.children).toBe('History offline')
 })
+
+it('offers Discard for an Undo refused over uncommitted changes, runs it only after confirmation, then undoes again', async () => {
+  const refusal = { code: 'workspace_not_clean', message: 'Thread workspace /w has uncommitted changes: notes.md. Resolve or discard them, then try again.',
+    details: { label: 'Thread workspace', path: '/w', folder: 'thread', files: ['notes.md'], count: 1, conflict: false, actions: ['discard'] } }
+  const undoLatest = vi.fn().mockResolvedValueOnce({ pendingChangesError: refusal }).mockResolvedValue(undefined)
+  await mount(vi.fn().mockResolvedValue(history), undoLatest)
+  const resolvePendingChanges = vi.fn(async () => ({ backupRef: 'refs/mousse/discarded/x' }))
+  const confirm = vi.fn().mockReturnValueOnce(false).mockReturnValue(true)
+  Object.assign(window, { confirm, mousse: { ...window.mousse, workspace: { resolvePendingChanges } } })
+  PromptUndoButton({ messageId: target.messageId }).props.onClick()
+  await vi.waitFor(() => expect(hooks.states[2]).toBe(refusal.message))
+  const notice = render().props.children.find((child: any) => child?.props?.details)
+  expect(notice.props.message).toBe(refusal.message)
+  const shown = notice.type(notice.props)
+  const buttons = shown.props.children.filter((child: any) => child?.type === 'button')
+  expect(buttons.map((button: any) => button.props.children)).toEqual(['Discard…'])
+  buttons[0].props.onClick()
+  expect(confirm).toHaveBeenCalledWith(expect.stringContaining('Discard 1 changed file in /w?'))
+  expect(resolvePendingChanges).not.toHaveBeenCalled()
+  buttons[0].props.onClick()
+  await vi.waitFor(() => expect(resolvePendingChanges).toHaveBeenCalledExactlyOnceWith(threadId, { folder: 'thread', action: 'discard', confirmed: true }))
+  await vi.waitFor(() => expect(undoLatest).toHaveBeenCalledTimes(2))
+})

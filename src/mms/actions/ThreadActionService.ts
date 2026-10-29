@@ -12,7 +12,7 @@ import { ThreadWorkspaceManager } from '../workspace/ThreadWorkspaceManager'
 import { ChangeReceiptService } from './ChangeReceiptService'
 import { assertHeldThreadLease, withGitMutationLocks } from './GitOperationCoordinator'
 import { IN_PROGRESS_GIT_MARKERS } from '../git/gitMarkers'
-import { changedPaths, git, introducedCommits, MOUSSE_COMMIT_ENV, requireClean, tryGit } from './git'
+import { changedPaths, git, inspectPendingChanges, introducedCommits, MOUSSE_COMMIT_ENV, pendingChangesError, requireClean, tryGit } from './git'
 
 export interface RunThreadActionOptions {
   threadId: string
@@ -44,6 +44,16 @@ export interface RunThreadActionOptions {
  * (a hook that rewrites them) is not swept either; see `leftChangesBehind`.
  */
 export type ActionFailurePolicy = 'sweep' | 'record'
+
+/** Turn ids of the checkpoints that save the user's pending edits before a turn (see `saveUserChanges`). */
+export const USER_CHANGES_TURN_PREFIX = 'user-changes:'
+
+export interface SaveUserChangesOptions extends Pick<RunThreadActionOptions, 'threadId' | 'conversationBranchId' | 'workspacePath' | 'heldThreadLease' | 'signal'> {
+  /** Where the next turn's messages start; the save covers none. Defaults to the end of the latest action. */
+  presentationMessageStart?: number
+  /** The conversation position the next turn starts from. Defaults to the latest action's. */
+  nativeContextBoundary?: NativeContextBoundary
+}
 
 export { IN_PROGRESS_GIT_MARKERS }
 
@@ -121,7 +131,7 @@ export class ThreadActionService {
     }
     new ChangeReceiptService(this.threadDirectory).assertNoPendingOperation()
     this.assertExpectedRevision(options.expectedJournalRevision)
-    requireClean(options.workspacePath, 'Thread workspace')
+    requireClean(options.workspacePath, 'Thread workspace', { folder: 'thread', actions: ['save', 'discard'] })
     const metadata = new ThreadWorkspaceManager(this.threadDirectory).load()
     if (metadata && metadata.headSha !== startSha) throw new Error('Workspace HEAD moved outside a recorded operation; recovery is required.')
     if (git(options.workspacePath, ['rev-parse', 'HEAD']) !== startSha) throw new Error('Task HEAD changed before turn admission.')
@@ -138,6 +148,37 @@ export class ThreadActionService {
     this.journal.append({ operationId: action.id, operationType: 'action-checkpoint', state: 'running', expectedPreState: { startSha, actionId: action.id, branch: git(options.workspacePath, ['branch', '--show-current']) }, details: { action } })
     actions.push(action); this.replace(actions)
     return action
+  }
+
+  /**
+   * Saves the user's pending edits (tracked and untracked, never ignored files or `.mousse/`) as a checkpoint of
+   * their own, a completed `user` action, so the turn that follows starts clean. Undoing that turn then reverts
+   * only the turn's commits and the edits are back exactly as they were; they are never counted as the agent's.
+   * The save covers no messages and has no conversation start boundary, so the app never offers it as a turn
+   * to undo. A workspace with an unresolved conflict or a Git operation in progress is refused with an error that
+   * offers Discard: committing it would record conflict markers.
+   *
+   * Returns the HEAD the next action starts from. The caller holds the thread lease, as for `beginTurn`.
+   */
+  async saveUserChanges(options: SaveUserChangesOptions): Promise<{ startSha: string; action?: ThreadAction }> {
+    const head = git(options.workspacePath, ['rev-parse', 'HEAD'])
+    const pending = inspectPendingChanges(options.workspacePath)
+    if (pending.unmerged.length || pending.operation) throw pendingChangesError(options.workspacePath, 'Thread workspace', { folder: 'thread', actions: ['discard'] }, pending)
+    if (!this.hasUncommittedChanges(options.workspacePath)) return { startSha: head }
+    // HEAD moved outside a recorded operation: nothing is saved on top of it, as admission would refuse the turn.
+    const metadata = new ThreadWorkspaceManager(this.threadDirectory).load()
+    if (metadata && metadata.headSha !== head) throw new Error('Workspace HEAD moved outside a recorded operation; recovery is required.')
+    const latest = this.latest(options.conversationBranchId)
+    const at = options.presentationMessageStart ?? latest?.presentationMessageEnd ?? 0
+    const action = await this.checkpointExistingTurn({
+      threadId: options.threadId, turnId: `${USER_CHANGES_TURN_PREFIX}${randomUUID()}`, actor: { kind: 'user' },
+      conversationBranchId: options.conversationBranchId, workspacePath: options.workspacePath,
+      heldThreadLease: options.heldThreadLease, signal: options.signal,
+      presentationMessageStart: at, presentationMessageEnd: at,
+      nativeContextBoundary: options.nativeContextBoundary ?? latest?.nativeContextBoundary ?? { messageIndex: 0, compactionGeneration: 0, fidelity: 'legacy' },
+      externalEffects: []
+    }, head, 'completed')
+    return { startSha: action.endSha, action }
   }
 
   /** Checkpoint a turn while the caller owns the execution lease, or acquire it for standalone callers. */
@@ -419,7 +460,8 @@ export class ThreadActionService {
     git(workspacePath, ['add', '-A', '--', '.', ':(exclude).mousse/**'])
     const staged = !tryGit(workspacePath, ['diff', '--cached', '--quiet']).ok
     if (staged) {
-      git(workspacePath, ['commit', '--no-verify', '-m', `mousse: checkpoint turn ${action.turnId} (${action.id})`], MOUSSE_COMMIT_ENV)
+      const message = action.turnId.startsWith(USER_CHANGES_TURN_PREFIX) ? `mousse: save pending changes (${action.id})` : `mousse: checkpoint turn ${action.turnId} (${action.id})`
+      git(workspacePath, ['commit', '--no-verify', '-m', message], MOUSSE_COMMIT_ENV)
     }
     const endSha = git(workspacePath, ['rev-parse', 'HEAD'])
     action.endSha = endSha

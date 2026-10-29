@@ -367,7 +367,9 @@ export class AgentChatService {
           nativeContextBoundary: { messageIndex: 0, compactionGeneration: 0, fidelity: 'legacy' },
           externalEffects: [{ kind: 'unknown', reversible: false, description: 'Agent tools may affect external services or ignored files.' }]
         } : undefined
-        if (actions && actionOptions) actions.beginTurn(actionOptions, metadata!.headSha)
+        // The user's pending edits are saved as their own checkpoint first, so this response's Undo leaves them.
+        const startSha = actions && actionOptions ? (await actions.saveUserChanges(actionOptions)).startSha : undefined
+        if (actions && actionOptions) actions.beginTurn(actionOptions, startSha!)
         let result: AgentExecutionResult | undefined
         try {
           result = await this.options.services.orchestrator.runAgentDefinition({ profileId: this.profileId, resolved,
@@ -378,7 +380,7 @@ export class AgentChatService {
         } finally {
           if (actions && actionOptions) {
             actionOptions.presentationMessageEnd += result ? 1 : 0
-            await actions.checkpointExistingTurn(actionOptions, metadata!.headSha,
+            await actions.checkpointExistingTurn(actionOptions, startSha!,
               signal.aborted || result?.status === 'cancelled' ? 'stopped' : result?.status === 'completed' ? 'completed' : 'failed')
           }
         }

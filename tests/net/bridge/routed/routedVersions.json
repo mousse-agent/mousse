@@ -744,6 +744,11 @@
     "digest": "5682d15e453fd69e",
     "security": "04f7c680ffd36337"
   },
+  "workspace.resolvePendingChanges": {
+    "version": 1,
+    "digest": "a424d84630401f20",
+    "security": "ceacd93869361a7a"
+  },
   "workspace.restore": {
     "version": 1,
     "digest": "f57f8729cac80201",

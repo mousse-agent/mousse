@@ -8979,8 +8979,18 @@ export class OrchestratorService extends EventEmitter {
     }
     let turnStartSha: string | undefined
     if (checkpointEnabled && session.projectCwd) {
-      requireCleanWorkspace(session.projectCwd, 'Thread workspace')
-      turnStartSha = actionGit(session.projectCwd, ['rev-parse', 'HEAD'])
+      // The user's own pending edits become a checkpoint of their own, so Undo of this turn gives them back.
+      const directory = session.threadId !== '__unbound__' ? this.resolveThreadDir(session.threadId) : undefined
+      if (directory) {
+        turnStartSha = (await new ThreadActionService(directory).saveUserChanges({
+          threadId: session.threadId, conversationBranchId, workspacePath: session.projectCwd,
+          heldThreadLease: session.executionLease ?? undefined,
+          presentationMessageStart: turnPresentationStart, nativeContextBoundary: turnNativeStartBoundary
+        })).startSha
+      } else {
+        requireCleanWorkspace(session.projectCwd, 'Thread workspace')
+        turnStartSha = actionGit(session.projectCwd, ['rev-parse', 'HEAD'])
+      }
     }
     // Keep user commits visible in the sidebar. Internal orchestration wakes stay hidden.
     if (!reuseLastUser && displayUserMessage) {

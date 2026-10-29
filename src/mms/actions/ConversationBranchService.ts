@@ -36,7 +36,7 @@ export class ConversationBranchService {
     return withGitMutationLocks(this.threadDirectory, workspacePath, 'conversation-activate', async () => {
       new ChangeReceiptService(this.threadDirectory).assertNoPendingOperation()
       this.actions.assertExpectedRevision(expectedJournalRevision)
-      requireClean(workspacePath, 'Thread workspace')
+      requireClean(workspacePath, 'Thread workspace', { folder: 'thread', actions: ['save', 'discard'] })
       const branches = this.list(); const selected = branches.find((branch) => branch.id === branchId)
       if (!selected || selected.lifecycle === 'tombstoned') throw new Error(`Conversation branch is unavailable: ${branchId}`)
       const operationId = randomUUID()
@@ -98,7 +98,7 @@ export class ConversationBranchService {
   ): Promise<ConversationBranch> {
     return withGitMutationLocks(this.threadDirectory, workspacePath, 'conversation-fork', async () => {
       this.actions.assertExpectedRevision(expectedJournalRevision)
-      requireClean(workspacePath, 'Thread workspace')
+      requireClean(workspacePath, 'Thread workspace', { folder: 'thread', actions: ['save', 'discard'] })
       const action = this.actions.get(actionId)
       if (action?.scope === 'conversation') throw new Error('Conversation-only turns have no repository snapshot to fork.')
       if (!action || action.state !== 'completed') throw new Error('Fork requires a completed action.')

@@ -105,7 +105,7 @@ import { ReceiptRefReleaseService } from '../actions/ReceiptRefReleaseService'
 import { RedoService } from '../actions/RedoService'
 import { CodeRevertService } from '../actions/CodeRevertService'
 import { ConversationBranchService } from '../actions/ConversationBranchService'
-import { git as workspaceGit } from '../actions/git'
+import { discardPendingChanges, git as workspaceGit } from '../actions/git'
 import { randomUUID } from 'node:crypto'
 import { ManagedConflictService } from '../actions/ManagedConflictService'
 import { ChildAgentIntegrationService } from '../agents/ChildAgentIntegrationService'
@@ -2782,6 +2782,37 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         : await manager.provision(operation.threadId, branchId, operation.projectPath)
       ctx.emitEvent?.('workspace.updated', { threadId: operation.threadId, metadata }, operation.threadId)
       return { metadata }
+    }
+    case 'workspace.resolvePendingChanges': {
+      // The buttons of a `workspace_not_clean` / `workspace_conflict` error. Only ever run on a person's click;
+      // Discard also needs `confirmed: true`, and keeps a copy of what it drops.
+      const p = isObject(params) ? params : {}
+      rejectUnknownKeys(p, ['threadId', 'folder', 'action', 'confirmed'])
+      const operation = threadOperationContext(ctx, p)
+      const folder = p.folder ?? 'thread'
+      if (folder !== 'thread' && folder !== 'primary') throw new DomainRpcError('invalid_params', 'folder must be thread or primary')
+      if (p.action !== 'save' && p.action !== 'discard') throw new DomainRpcError('invalid_params', 'action must be save or discard')
+      if (p.action === 'discard' && p.confirmed !== true) throw new DomainRpcError('confirmation_required', 'Discarding changes needs the user’s confirmation.')
+      if (ctx.mms.orchestrator.isConversationHistoryBusy(operation.threadId)) throw new DomainRpcError('thread_busy', 'Wait for active or queued work to finish.')
+      await ensureWorkspaceMaterialized(ctx, operation.threadId, operation.projectPath)
+      const workspace = new ThreadWorkspaceManager(operation.threadDirectory).load()
+      if (!workspace || workspace.lifecycle !== 'ready') throw new DomainRpcError('workspace_not_ready', 'Thread workspace is not ready')
+      if (folder === 'primary') {
+        if (p.action === 'save') {
+          // The user's own commit in their own checkout, through their hooks, like the Commit button.
+          await ctx.mms.gitService.commit(operation.projectPath, 'Save uncommitted changes before publishing', { all: true })
+          return { saved: true }
+        }
+        return await withGitMutationLocks(operation.threadDirectory, operation.projectPath, 'discard-pending-changes', () => discardPendingChanges(operation.projectPath))
+      }
+      if (p.action === 'save') {
+        const { action } = await new ThreadActionService(operation.threadDirectory).saveUserChanges({
+          threadId: operation.threadId, conversationBranchId: workspace.conversationBranchId, workspacePath: workspace.worktreePath
+        })
+        if (action) ctx.emitEvent?.('actions.updated', { threadId: operation.threadId, action }, operation.threadId)
+        return { saved: Boolean(action) }
+      }
+      return await withGitMutationLocks(operation.threadDirectory, workspace.worktreePath, 'discard-pending-changes', () => discardPendingChanges(workspace.worktreePath))
     }
     case 'actions.list': {
       const p = isObject(params) ? params : {}

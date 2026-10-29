@@ -54,7 +54,9 @@ import { EarlierMessagesBar } from './EarlierMessagesBar'
 import { forgetMessageImageRequests, hydrateMessageImages } from '../lib/messageImages'
 import { isOutcomeUncertain, settleUncertainSend } from '../lib/uncertainSend'
 import { onProviderListingsChanged, pickerIdFor, pickerProviders, projectScope, useProviderSnapshots } from '../lib/providerSnapshots'
-import { sendErrorLine } from '../lib/errorText'
+import { errorText, sendErrorLine } from '../lib/errorText'
+import { pendingChangesDetails, type PendingChangesDetails } from '../../shared/workspace'
+import { PendingChangesNotice } from './PendingChangesNotice'
 import { composerThreadActions } from '../lib/composerThreadActions'
 import { composerWorkspaceFor, isComposerWorkspaceLocked, isNewEmptyThread, isWorkspacePending } from '../lib/newThread'
 import { ComposerWorkspaceToolbar } from './ComposerWorkspaceToolbar'
@@ -234,6 +236,8 @@ export function OrchestratorChat() {
   const [pendingQuestions, setPendingQuestions] = useState<PendingUserQuestions | null>(null)
   const [connectionFailed, setConnectionFailed] = useState(false)
   const [sendError, setSendError] = useState<string | null>(null)
+  /** Save and Discard for a send refused over uncommitted changes; shown only while `sendError` is that refusal's line. */
+  const [sendChanges, setSendChanges] = useState<{ line: string; message: string; details: PendingChangesDetails } | null>(null)
   const addResolvedReference = useCallback(async (reference: ChatReference) => {
     const expectedProfile = useAppStore.getState().profileId
     const expectedThread = useAppStore.getState().activeThreadId
@@ -245,7 +249,7 @@ export function OrchestratorChat() {
   }, [])
   const pendingSends = useRef(new Map<string, string>())
   const blankSendPending = useRef(false)
-  useEffect(() => { setSendError(null) }, [profileId, activeThreadId])
+  useEffect(() => { setSendError(null); setSendChanges(null) }, [profileId, activeThreadId])
   const [optimisticQueueItems, setOptimisticQueueItems] = useState<QueuedMessage[]>([])
   const [lastSteer, setLastSteer] = useState<{ text: string; at: number } | null>(null)
 
@@ -750,6 +754,8 @@ export function OrchestratorChat() {
       } catch (error) {
         if (!stillVisible()) return
         setSendError(sendErrorLine(error))
+        const changes = pendingChangesDetails(error)
+        setSendChanges(changes ? { line: sendErrorLine(error), message: errorText(error), details: changes } : null)
         if (isOutcomeUncertain(error) && targetThreadId) {
           // The other computer did not confirm: the message may be there. Keep what is shown, read the thread again,
           // and only then say whether it arrived. Sending the same text again replays this request, so it cannot run twice.
@@ -1082,7 +1088,10 @@ export function OrchestratorChat() {
         {activeThreadId && !activeThread?.node && <ChatBrowserAccess key={`${profileId}:${activeThreadId}`} threadId={activeThreadId} requireSelectedThread />}
         {emptyThread && <MousseLogoOutline className="chat-empty-logo" />}
         {emptyThread && <h1 className="chat-empty-title">What should we build?</h1>}
-        {sendError && <ComputerNotice message={sendError} />}
+        {sendError && (sendChanges?.line === sendError && activeThreadId
+          ? <PendingChangesNotice className="connection-failed-pill" threadId={activeThreadId} message={sendChanges.message} details={sendChanges.details}
+              onResolved={() => { setSendError(null); setSendChanges(null); void handleSend() }} />
+          : <ComputerNotice message={sendError} />)}
         {connectionFailed && (
           <div className="connection-failed-pill" role="alert">
             <span>Connection Failed</span>

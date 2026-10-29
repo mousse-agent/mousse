@@ -69,8 +69,9 @@ export class PublishService {
       if (resolveRepositoryIdentity(threadWorkspace).key !== resolveRepositoryIdentity(primaryCheckout).key) throw new Error('Publish destination belongs to a different repository.')
       if (git(threadWorkspace, ['rev-parse', 'HEAD']) !== expectedSourceSha) throw new Error('Publish source revision changed; refresh review.')
       if (git(primaryCheckout, ['rev-parse', 'HEAD']) !== expectedTargetSha) throw new Error('Publish destination revision changed; refresh review.')
-      requireClean(threadWorkspace, 'Thread workspace')
-      requireClean(primaryCheckout, 'Primary checkout')
+      // Neither folder is saved automatically: Publish would ship edits nobody reviewed, and the primary checkout is the user's own.
+      requireClean(threadWorkspace, 'Thread workspace', { folder: 'thread', actions: ['save', 'discard'] })
+      requireClean(primaryCheckout, 'Primary checkout', { folder: 'primary', actions: ['save', 'discard'] })
       const currentTarget = git(primaryCheckout, ['branch', '--show-current'])
       if (currentTarget !== targetBranch) throw new Error(`Primary checkout must be on ${targetBranch}, found ${currentTarget}`)
       const sourceBranch = git(threadWorkspace, ['branch', '--show-current'])

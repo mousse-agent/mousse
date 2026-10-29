@@ -51,7 +51,8 @@ export class UndoService {
       const receipts = new ChangeReceiptService(this.threadDirectory)
       receipts.assertNoPendingOperation()
       this.actions.assertExpectedRevision(expectedJournalRevision)
-      requireClean(workspacePath, 'Thread workspace')
+      // Saving would make the save the latest action and this turn no longer undoable, so only Discard is offered.
+      requireClean(workspacePath, 'Thread workspace', { folder: 'thread', actions: ['discard'] })
       const all = this.actions.list()
       const target = all.filter((action) => action.conversationBranchId === branchId).at(-1)
       if (!target || !['completed', 'failed', 'stopped'].includes(target.state)) throw new Error('Only the latest completed action is eligible for conversation undo.')
