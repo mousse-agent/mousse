@@ -86,15 +86,16 @@ describe('Git foundation through daemon protocol', () => {
       writeFileSync(join(metadata.worktreePath, 'value.txt'), 'conflicting parent\n')
       git(metadata.worktreePath, 'commit', '-qam', 'conflicting parent')
     })
+    const before = git(metadata.worktreePath, 'status', '--porcelain', '--untracked-files=all')
     await expect(new ChildAgentIntegrationService(directory).integrate({
-      operationId: 'main-conflict', agentId: 'conflicting-main-child', workerWorktree: child, workerBranch: 'conflicting-main-child',
-      spawnBaseSha: currentHead, expectedWorkerHead: childResult, expectedDestinationHead: git(metadata.worktreePath, 'rev-parse', 'HEAD'), threadWorkspace: metadata.worktreePath
-    })).rejects.toThrow(/conflict/i)
-    await expect(client.request('orchestrator.send', { threadId: thread.id, content: 'Blocked while conflict exists', mode: 'agent' })).rejects.toThrow(/clean|recovery|conflict/i)
-    expect(mms.orchestrator.getOrCreateSession(thread.id).isTurnRunning()).toBe(false)
-    await client.request('operations.abort', { threadId: thread.id, operationId: 'main-conflict' })
-    replies.push(() => 'Recovered after conflict.')
-    expect(await client.request('orchestrator.send', { threadId: thread.id, content: 'Continue after abort', mode: 'agent' })).toMatchObject({ message: 'Recovered after conflict.' })
+      operationId: 'main-conflict', agentId: 'conflicting-main-child', workerWorktree: child,
+      spawnBaseSha: currentHead, pinnedWorkerSha: childResult, threadWorkspace: metadata.worktreePath
+    })).rejects.toMatchObject({ code: 'integration_conflict', details: { files: ['value.txt'] } })
+    // A refused integration changes nothing and locks nothing: no merge is left in the worktree, and the next turn runs.
+    expect(git(metadata.worktreePath, 'status', '--porcelain', '--untracked-files=all')).toBe(before)
+    expect(f.read(metadata.worktreePath)).toBe('conflicting parent\n')
+    replies.push(() => 'Continued after the conflict.')
+    expect(await client.request('orchestrator.send', { threadId: thread.id, content: 'Continue after the conflict', mode: 'agent' })).toMatchObject({ message: 'Continued after the conflict.' })
   }, 45_000)
 
   it('a queued workflow writer is admitted after HEAD moved while it waited, and records the dirty input as outside changes', async () => {
@@ -177,8 +178,8 @@ describe('Git foundation through daemon protocol', () => {
       f.commit(child, 'child first\n')
       const result = f.commit(child, 'child second\n')
       await new ChildAgentIntegrationService(threadDir).integrate({
-        agentId: 'nested-child', workerWorktree: child, workerBranch: 'nested-child',
-        spawnBaseSha: snapshot.endSha, expectedWorkerHead: result, expectedDestinationHead: git(workspace, 'rev-parse', 'HEAD'),
+        agentId: 'nested-child', workerWorktree: child,
+        spawnBaseSha: snapshot.endSha, pinnedWorkerSha: result,
         threadWorkspace: workspace, heldThreadLease: lease, actionId: parent.id, turnId: 'parent-turn'
       })
       writeFileSync(join(workspace, 'parent.txt'), 'parent after child\n')
@@ -213,7 +214,7 @@ describe('Git foundation through daemon protocol', () => {
     const undoneHistory = await client.request<{ actions: Array<{ id: string }>; journalGeneration: number; redoTarget?: { actionId: string } }>('actions.list', { threadId: thread.id })
     expect(undoneHistory.redoTarget?.actionId).toBe(undoneHistory.actions.at(-1)!.id)
     await expect(client.request('actions.redo', { threadId: thread.id, expectedJournalGeneration: undoneHistory.journalGeneration - 1 })).rejects.toThrow()
-    // Undo restored the files; the merge commit of the child's result stays on the thread's branch.
+    // Undo restored the files; no commit was made for the child's result, so the branch has nothing of it either way.
     expect(worktreeTree(workspace)).toBe(git(f.repo, 'rev-parse', `${f.baseSha}^{tree}`))
     await client.request('actions.redo', { threadId: thread.id, expectedJournalGeneration: undoneHistory.journalGeneration })
     expect(mms.orchestrator.getMessages(thread.id)).toHaveLength(2)

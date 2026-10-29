@@ -37,9 +37,11 @@ it('keeps an older unintegrated isolated result and its Undo refs after a newer 
     const childDirectory = join(directory, 'agent-changes', agentId)
     await new ThreadActionService(childDirectory).runCheckpointedAction({ ...actionOptions(child.path), threadId: thread.id, actor: { kind: 'agent', id: agentId } },
       () => writeFileSync(join(child.path, 'unpublished.txt'), 'older unpublished result\n'))
-    const resultSha = git(child.path, 'rev-parse', 'HEAD')
-    expect(resultSha).not.toBe(base)
+    // The result is a snapshot of the child's files; its HEAD stays where it started.
     const receipt = new ChangeReceiptService(childDirectory).list().at(-1)!
+    const resultSha = receipt.afterSha
+    expect(resultSha).not.toBe(base)
+    expect(git(child.path, 'rev-parse', 'HEAD')).toBe(base)
     expect(receipt.retainedRefs.length).toBeGreaterThan(0)
 
     // Its episode record, then the checkout retired the way the old completion step did.
@@ -48,7 +50,7 @@ it('keeps an older unintegrated isolated result and its Undo refs after a newer 
     const repositoryLease = await acquireRepositoryLease(resolveRepositoryIdentity(workspace, { requireMutationCapability: true }))
     try {
       const retirement = new WorktreeRetirementService(f.services.threads.lifecycleStore, { taskLease, repositoryLease })
-      retirement.prepare({ taskId: thread.id, worktreePath: child.path, branch: child.branch, sourcePath: new AgentEpisodeStore(directory).path, baseSha: base, resultSha })
+      retirement.prepare({ taskId: thread.id, worktreePath: child.path, branch: child.branch, sourcePath: new AgentEpisodeStore(directory).path, baseSha: base })
       retirement.retire(retirement.pathFor(thread.id, child.path))
     } finally { repositoryLease.release(); releaseExecutionLeaseHandle(taskLease) }
     expect(existsSync(child.path)).toBe(false)
@@ -68,7 +70,7 @@ it('keeps an older unintegrated isolated result and its Undo refs after a newer 
     expect(claimsOn(`refs/heads/${child.branch}`)).toContain('pending-integration')
     for (const ref of receipt.retainedRefs) expect(claimsOn(ref), ref).toContain('recall')
     // The refs themselves are still there, not only the claims on them.
-    expect(git(workspace, 'rev-parse', `refs/heads/${child.branch}`)).toBe(resultSha)
+    expect(git(workspace, 'rev-parse', `refs/heads/${child.branch}`)).toBe(base)
     for (const ref of receipt.retainedRefs) expect(git(workspace, 'rev-parse', ref)).toBe(ref.endsWith('/before') ? receipt.beforeSha : receipt.afterSha)
     expect(existsSync(child.path)).toBe(false)
     expect(primaryCheckoutSnapshot(repo)).toEqual(primary)
