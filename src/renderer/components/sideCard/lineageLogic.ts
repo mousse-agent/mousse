@@ -1,8 +1,11 @@
 import { isRunningSubagent, type SubagentSummary } from '../../../shared/subagents'
 import { formatAgo } from '../../lib/formatAgo'
 
-/** Rows shown before the list asks to be expanded. */
+/** Finished rows shown, once their group is open, before the list asks to be expanded. */
 export const LINEAGE_COLLAPSED_COUNT = 5
+
+/** Running rows shown before the list asks to be expanded; a few keep the card short while many work at once. */
+export const LINEAGE_RUNNING_COUNT = 3
 
 type LineageSubagent = Pick<SubagentSummary, 'childThreadId' | 'state' | 'createdAt' | 'updatedAt'>
 
@@ -23,11 +26,16 @@ export function lineageTitle(subagents: readonly Pick<SubagentSummary, 'state'>[
   return running > 0 ? `Lineage · ${running} running` : 'Lineage'
 }
 
+export interface LineageGroups<T> {
+  running: T[]
+  finished: T[]
+}
+
 /**
- * Running subagents come first, newest first; finished ones follow, most recently finished first.
- * Needing input is the one running state that sorts ahead of the rest: it is waiting on the user.
+ * Running subagents newest first, with those needing input ahead of the rest: they wait on the user.
+ * Finished subagents most recently finished first.
  */
-export function orderLineageSubagents<T extends LineageSubagent>(subagents: readonly T[]): T[] {
+export function groupLineageSubagents<T extends LineageSubagent>(subagents: readonly T[]): LineageGroups<T> {
   const running: T[] = []
   const finished: T[] = []
   for (const subagent of subagents) (isRunningSubagent(subagent) ? running : finished).push(subagent)
@@ -36,7 +44,19 @@ export function orderLineageSubagents<T extends LineageSubagent>(subagents: read
     return asking || timeOf(right.createdAt) - timeOf(left.createdAt)
   })
   finished.sort((left, right) => timeOf(right.updatedAt) - timeOf(left.updatedAt))
+  return { running, finished }
+}
+
+/** Running subagents first, then finished ones, each in their group's order. */
+export function orderLineageSubagents<T extends LineageSubagent>(subagents: readonly T[]): T[] {
+  const { running, finished } = groupLineageSubagents(subagents)
   return [...running, ...finished]
+}
+
+/** Label of the folded group of finished subagents: "3 finished", or "3 finished · 1 failed". */
+export function finishedGroupLabel(finished: readonly Pick<SubagentSummary, 'state'>[]): string {
+  const failed = finished.filter((subagent) => subagent.state === 'failed').length
+  return failed > 0 ? `${finished.length} finished · ${failed} failed` : `${finished.length} finished`
 }
 
 export interface LineageSlice<T> {

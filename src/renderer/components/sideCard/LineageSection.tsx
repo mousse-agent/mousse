@@ -1,16 +1,19 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useId, useState } from 'react'
 import { isRunningSubagent, type SubagentSummary } from '../../../shared/subagents'
 import { useSubagents } from '../../hooks/useSubagents'
+import { ChevronRight } from '../../lib/icons'
 import { openThread } from '../../lib/openThread'
 import { SubagentAvatar, useThreadProviderId } from '../SubagentAvatar'
 import { subagentBadgeTone, subagentIconId } from '../subagentStatus'
 import {
   countRunningSubagents,
+  finishedGroupLabel,
+  groupLineageSubagents,
+  LINEAGE_RUNNING_COUNT,
   lineageModelLabel,
   lineageStatusLabel,
   lineageSubagentName,
   lineageTitle,
-  orderLineageSubagents,
   sliceLineage,
   stopAllSubagents
 } from './lineageLogic'
@@ -31,63 +34,118 @@ function useLineageNow(enabled: boolean): number {
   return now
 }
 
+/** Which parts of the list the user opened: more running rows, the finished group, and more finished rows. */
+export interface LineageOpenParts {
+  running: boolean
+  finished: boolean
+  finishedAll: boolean
+}
+
+export const LINEAGE_CLOSED: LineageOpenParts = { running: false, finished: false, finishedAll: false }
+
 interface LineageListProps {
   subagents: readonly SubagentSummary[]
   now: number
   /** The provider the thread runs on, for subagents that name none. */
   inheritedProvider?: string | null
-  expanded: boolean
-  onExpand: () => void
+  open: LineageOpenParts
+  onOpenPart: (part: keyof LineageOpenParts, value: boolean) => void
   /** Opens a subagent's own thread. */
   onOpen: (childThreadId: string) => void
   /** Stops the work a running subagent is doing. */
   onStop: (childThreadId: string) => void
 }
 
-/** Subagents this thread started: running ones first, then finished ones. Renders nothing for an empty list; the section collapses instead. */
-export function LineageList({ subagents, now, inheritedProvider, expanded, onExpand, onOpen, onStop }: LineageListProps) {
+interface LineageRowProps {
+  subagent: SubagentSummary
+  now: number
+  inheritedProvider?: string | null
+  onOpen: (childThreadId: string) => void
+  onStop: (childThreadId: string) => void
+}
+
+function LineageRow({ subagent, now, inheritedProvider, onOpen, onStop }: LineageRowProps) {
+  const name = lineageSubagentName(subagent)
+  const running = isRunningSubagent(subagent)
+  const model = lineageModelLabel(subagent)
+  return (
+    <li className="lineage-item">
+      <button
+        type="button"
+        className={`lineage-row${running ? ' is-working' : ''}`}
+        title={name}
+        onClick={() => onOpen(subagent.childThreadId)}
+      >
+        <SubagentAvatar providerId={subagentIconId(subagent.provider, inheritedProvider)} tone={subagentBadgeTone(subagent)} />
+        <span className="lineage-text">
+          <span className="lineage-name">{name}</span>
+          {model && <span className="lineage-model">{model}</span>}
+        </span>
+        <span className="lineage-status">{lineageStatusLabel(subagent, now)}</span>
+      </button>
+      {running && (
+        <button
+          type="button"
+          className="lineage-stop"
+          aria-label={`Stop ${name}`}
+          onClick={() => onStop(subagent.childThreadId)}
+        >
+          Stop
+        </button>
+      )}
+    </li>
+  )
+}
+
+function ShowMoreRow({ count, onExpand }: { count: number; onExpand: () => void }) {
+  return (
+    <li>
+      <button type="button" className="lineage-row lineage-more" aria-expanded={false} onClick={onExpand}>
+        Show {count} more
+      </button>
+    </li>
+  )
+}
+
+/**
+ * Subagents this thread started. A few running ones show first; finished ones fold into one
+ * "N finished" row that opens to list them. Renders nothing for an empty list; the section collapses instead.
+ */
+export function LineageList({ subagents, now, inheritedProvider, open, onOpenPart, onOpen, onStop }: LineageListProps) {
+  const finishedId = useId()
   if (subagents.length === 0) return null
 
-  const { visible, hiddenCount } = sliceLineage(orderLineageSubagents(subagents), expanded)
+  const { running, finished } = groupLineageSubagents(subagents)
+  const runningSlice = sliceLineage(running, open.running, LINEAGE_RUNNING_COUNT)
+  const finishedSlice = sliceLineage(finished, open.finishedAll)
+  const rowProps = { now, inheritedProvider, onOpen, onStop }
   return (
     <ul className="lineage-list">
-      {visible.map((subagent) => {
-        const name = lineageSubagentName(subagent)
-        const running = isRunningSubagent(subagent)
-        const model = lineageModelLabel(subagent)
-        return (
-          <li key={subagent.childThreadId} className="lineage-item">
-            <button
-              type="button"
-              className={`lineage-row${running ? ' is-working' : ''}`}
-              title={name}
-              onClick={() => onOpen(subagent.childThreadId)}
-            >
-              <SubagentAvatar providerId={subagentIconId(subagent.provider, inheritedProvider)} tone={subagentBadgeTone(subagent)} />
-              <span className="lineage-text">
-                <span className="lineage-name">{name}</span>
-                {model && <span className="lineage-model">{model}</span>}
-              </span>
-              <span className="lineage-status">{lineageStatusLabel(subagent, now)}</span>
-            </button>
-            {running && (
-              <button
-                type="button"
-                className="lineage-stop"
-                aria-label={`Stop ${name}`}
-                onClick={() => onStop(subagent.childThreadId)}
-              >
-                Stop
-              </button>
-            )}
-          </li>
-        )
-      })}
-      {hiddenCount > 0 && (
-        <li>
-          <button type="button" className="lineage-row lineage-more" aria-expanded={false} onClick={onExpand}>
-            Show {hiddenCount} more
+      {runningSlice.visible.map((subagent) => <LineageRow key={subagent.childThreadId} subagent={subagent} {...rowProps} />)}
+      {runningSlice.hiddenCount > 0 && <ShowMoreRow count={runningSlice.hiddenCount} onExpand={() => onOpenPart('running', true)} />}
+      {finished.length > 0 && (
+        <li className="lineage-group" data-open={open.finished}>
+          <button
+            type="button"
+            className="lineage-row lineage-group-toggle"
+            aria-expanded={open.finished}
+            aria-controls={open.finished ? finishedId : undefined}
+            onClick={() => onOpenPart('finished', !open.finished)}
+          >
+            <span className="lineage-group-icon" aria-hidden="true">
+              <ChevronRight className="lineage-group-chevron" size={12} strokeWidth={2} />
+            </span>
+            <span className="lineage-text">
+              <span className="lineage-name">{finishedGroupLabel(finished)}</span>
+            </span>
+            {!open.finished && <span className="lineage-status">{lineageStatusLabel(finished[0], now)}</span>}
           </button>
+          {open.finished && (
+            <ul id={finishedId} className="lineage-list lineage-sublist">
+              {finishedSlice.visible.map((subagent) => <LineageRow key={subagent.childThreadId} subagent={subagent} {...rowProps} />)}
+              {finishedSlice.hiddenCount > 0 && <ShowMoreRow count={finishedSlice.hiddenCount} onExpand={() => onOpenPart('finishedAll', true)} />}
+            </ul>
+          )}
         </li>
       )}
     </ul>
@@ -98,10 +156,10 @@ export function LineageList({ subagents, now, inheritedProvider, expanded, onExp
 export function LineageSection({ threadId }: SideCardSectionContext) {
   const subagents = useSubagents(threadId)
   const inheritedProvider = useThreadProviderId(threadId)
-  // Remembering which thread was expanded resets the list on a thread change
+  // Remembering which thread the choices belong to resets the list on a thread change
   // without an effect.
-  const [expandedThreadId, setExpandedThreadId] = useState<string | null>(null)
-  const expanded = threadId !== null && expandedThreadId === threadId
+  const [openState, setOpenState] = useState<{ threadId: string | null; parts: LineageOpenParts }>({ threadId: null, parts: LINEAGE_CLOSED })
+  const open = threadId !== null && openState.threadId === threadId ? openState.parts : LINEAGE_CLOSED
 
   const now = useLineageNow(subagents.length > 0)
 
@@ -139,8 +197,8 @@ export function LineageSection({ threadId }: SideCardSectionContext) {
         subagents={subagents}
         now={now}
         inheritedProvider={inheritedProvider}
-        expanded={expanded}
-        onExpand={() => setExpandedThreadId(threadId)}
+        open={open}
+        onOpenPart={(part, value) => setOpenState({ threadId, parts: { ...open, [part]: value } })}
         onOpen={(childThreadId) => void openThread(childThreadId)}
         onStop={(childThreadId) => void window.mousse.orchestrator.abort(childThreadId)}
       />

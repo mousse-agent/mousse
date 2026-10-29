@@ -155,3 +155,38 @@ button.lineage-row:focus-visible {
 .lineage-more:hover {
   color: var(--text-primary);
 }
+
+/* Finished subagents fold into one row; it opens in place to list them. */
+.lineage-group-toggle {
+  color: var(--ui-faint);
+}
+
+.lineage-group-toggle:hover {
+  color: var(--text-secondary);
+}
+
+/* The chevron takes the avatar's slot so the label lines up with the names above. */
+.lineage-group-icon {
+  display: inline-flex;
+  flex: 0 0 16px;
+  align-items: center;
+  justify-content: center;
+}
+
+.lineage-group-chevron {
+  transition: transform 120ms ease;
+}
+
+.lineage-group[data-open='true'] .lineage-group-chevron {
+  transform: rotate(90deg);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .lineage-group-chevron {
+    transition: none;
+  }
+}
+
+.lineage-sublist {
+  margin: 1px 0 0;
+}
