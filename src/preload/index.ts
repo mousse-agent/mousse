@@ -73,6 +73,7 @@ import type {
   TurnState,
   TurnStateSnapshot,
   QuestionAnswerOutcome,
+  ThreadApprovalRequest,
   UserQuestionAnswers
 } from '../shared/types'
 import type {
@@ -276,6 +277,12 @@ const api = {
       ipcRenderer.invoke('orchestrator:answerQuestionsDetailed', requestId, answers, threadId),
     dismissQuestions: (requestId: string, threadId?: string): Promise<boolean> =>
       ipcRenderer.invoke('orchestrator:dismissQuestions', requestId, threadId),
+    /** The thread's saved approval requests, oldest first, with the answers they got. */
+    approvalRequests: (threadId: string): Promise<ThreadApprovalRequest[]> =>
+      ipcRenderer.invoke('orchestrator:approvalRequests', threadId),
+    /** Every thread's waiting questions and approval requests. */
+    pendingQuestions: (): Promise<PendingUserQuestions[]> =>
+      ipcRenderer.invoke('orchestrator:pendingQuestions'),
     abort: (threadId?: string): Promise<boolean> =>
       ipcRenderer.invoke('orchestrator:abort', threadId),
     steer: (text: string, threadId?: string): Promise<boolean> =>

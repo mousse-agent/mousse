@@ -82,10 +82,13 @@ export function bridgeProtocolEvent(
     case 'questions.pending': {
       // Pending questions are interactive and must never leak into another selected thread.
       if (isSelected) {
+        const approval = (event.data as { approval?: unknown })?.approval
         broadcast('orchestrator:questionsPending', {
           requestId: (event.data as { requestId?: string })?.requestId,
           questions: (event.data as { questions?: unknown })?.questions,
-          threadId
+          threadId,
+          // A saved approval request says so: the chat shows it inline instead of in the question dialog.
+          ...(approval ? { approval } : {})
         })
       }
       return true

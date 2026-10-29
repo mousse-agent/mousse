@@ -463,6 +463,40 @@ describe('ThreadRuntime over the protocol', () => {
       await cli.close()
     })
 
+    it('threads.approvalRequests lists the thread\'s requests with the answers they got, oldest first', async () => {
+      const thread = mms.threads.createThread('History')
+      const other = mms.threads.createThread('Elsewhere')
+      await startRun(thread.id, 'history-run')
+      const gui = await clientAs('gui')
+      type Listed = { threadId: string; requests: Array<{ requestId: string; action: string; prompt: string; status: string; decision?: string; scope?: string; answeredBy?: { kind: string; via?: string }; createdAt: string; settledAt?: string }> }
+      const first = mms.questions.requestAnswers(approvalQuestion, thread.id, { approval: approvalTag })
+      await vi.waitFor(() => expect(mms.questions.listPendingForThread(thread.id)).toHaveLength(1))
+      const firstId = mms.questions.listPendingForThread(thread.id)[0]!.requestId
+      const waiting = await gui.request<Listed>('threads.approvalRequests', { threadId: thread.id })
+      expect(waiting).toEqual({ threadId: thread.id, requests: [expect.objectContaining({ requestId: firstId, action: 'command', status: 'pending', prompt: approvalQuestion[0]!.prompt })] })
+      expect(waiting.requests[0]!.decision).toBeUndefined()
+
+      await gui.request('orchestrator.answerQuestions', { requestId: firstId, answers: { permission: 'allow' } })
+      await expect(first).resolves.toEqual({ permission: 'allow' })
+      const second = mms.questions.requestAnswers(approvalQuestion, thread.id, { approval: approvalTag })
+      await vi.waitFor(() => expect(mms.questions.listPendingForThread(thread.id)).toHaveLength(1))
+      const secondId = mms.questions.listPendingForThread(thread.id)[0]!.requestId
+      await gui.request('orchestrator.answerQuestions', { requestId: secondId, answers: { permission: 'reject' } })
+      await second
+
+      const listed = await gui.request<Listed>('threads.approvalRequests', { threadId: thread.id })
+      expect(listed.requests.map(({ requestId, status, decision, answeredBy }) => ({ requestId, status, decision, answeredBy }))).toEqual([
+        { requestId: firstId, status: 'answered', decision: 'allow', answeredBy: { kind: 'user', via: 'gui' } },
+        { requestId: secondId, status: 'answered', decision: 'reject', answeredBy: { kind: 'user', via: 'gui' } }
+      ])
+      expect(listed.requests.every((request) => typeof request.settledAt === 'string')).toBe(true)
+      // Only the thread's own requests, and only for a thread that exists.
+      expect((await gui.request<Listed>('threads.approvalRequests', { threadId: other.id })).requests).toEqual([])
+      await expect(gui.request('threads.approvalRequests', { threadId: 'missing' })).rejects.toMatchObject({ code: 'thread_not_found' })
+      await expect(gui.request('threads.approvalRequests', { threadId: thread.id, extra: 1 })).rejects.toBeTruthy()
+      await gui.close()
+    })
+
     it('"Always for this thread" from the CLI makes a rule that is listed, answers the same request, stays in its thread and is revoked over the protocol', async () => {
       const thread = mms.threads.createThread('Always')
       const other = mms.threads.createThread('Other')
