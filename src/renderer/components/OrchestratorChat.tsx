@@ -271,7 +271,9 @@ export function OrchestratorChat() {
   // Permission requests show inline in the turn that asked them, with the answer they got; agent questions keep the dialog.
   const permissionRequests = usePermissionRequests(activeThreadId, setSendError, describeAnswerOutcome)
   const placePermissionRequests = permissionRequests.place
-  const uiMessages = useMemo(() => placePermissionRequests(mousseToUIMessages(messages, turnSenders)), [messages, turnSenders, placePermissionRequests])
+  const uiMessages = useMemo(() => mousseToUIMessages(messages, turnSenders), [messages, turnSenders])
+  // Placed in a separate pass, so a permission request arriving or being answered does not convert the transcript again.
+  const shownMessages = useMemo(() => placePermissionRequests(uiMessages), [uiMessages, placePermissionRequests])
   // The older images of a long thread of another computer come by name; their bytes are fetched as the thread is shown.
   const shownRemote = Boolean(activeThread?.node)
   // Opening a thread (also Retry, which opens it again) asks again for images that could not be fetched before.
@@ -331,7 +333,7 @@ export function OrchestratorChat() {
     []
   )
   const quickActionApproval = useMemo<QuickActionApproval | null>(() => {
-    const match = findQuickActionCardForApproval(uiMessages, pendingQuestions)
+    const match = findQuickActionCardForApproval(shownMessages, pendingQuestions)
     if (!match || !pendingQuestions) return null
     const { requestId, threadId } = pendingQuestions
     return {
@@ -341,7 +343,7 @@ export function OrchestratorChat() {
       onApprove: () => submitQuickActionDecision(requestId, threadId, 'approve'),
       onReject: () => submitQuickActionDecision(requestId, threadId, 'reject'),
     }
-  }, [pendingQuestions, uiMessages, submitQuickActionDecision])
+  }, [pendingQuestions, shownMessages, submitQuickActionDecision])
 
   // The question tool replaces the composer while active: the input bar
   // collapses away and re-expands after submit. Both directions animate so
@@ -1070,7 +1072,7 @@ export function OrchestratorChat() {
     ? remotePermissionCeiling(activeThread?.lineage ? permissionCeiling : undefined, remoteMode.limit, remoteComputer?.name ?? UNKNOWN_COMPUTER_NAME)
     : { ceiling: activeThread?.lineage ? permissionCeiling : undefined }
 
-  const emptyThread = uiMessages.length === 0 && !turnActive && !loading && !showQuestions && !sendError && !connectionFailed
+  const emptyThread = shownMessages.length === 0 && !turnActive && !loading && !showQuestions && !sendError && !connectionFailed
 
   return (
     <div className={`chat${emptyThread ? ' chat--empty' : ''}`} style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
@@ -1082,7 +1084,7 @@ export function OrchestratorChat() {
         key={activeThreadId ?? 'no-thread'}
         threadId={activeThreadId}
         busy={turnActive || loading}
-        messages={uiMessages}
+        messages={shownMessages}
         status={chatStatus}
         onSend={() => void handleSend()}
         onStop={() => void handleStop()}

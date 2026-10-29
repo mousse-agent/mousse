@@ -296,6 +296,13 @@ describe('DeviceSection rendering', () => {
     Object.assign(initial, state)
   }
   const render = () => renderToStaticMarkup(createElement(DeviceSection, { threadId: 't1', projectId: null }))
+  // The section's heading always has its collapse toggle (a button with a chevron); the picker lives in the body.
+  const renderBody = () => {
+    const html = render()
+    const start = html.indexOf('class="side-card-section-body"')
+    expect(start).toBeGreaterThan(-1)
+    return html.slice(start)
+  }
 
   afterEach(() => {
     seed({ activeThreadId: null, threads: [], messages: [], appInfo: null, loading: false, turnStates: {} })
@@ -308,7 +315,7 @@ describe('DeviceSection rendering', () => {
       messages: [],
       appInfo: { platform: 'darwin', repoRoot: '/', llmProvider: 'x', deviceName: 'Mac mini' }
     })
-    const html = render()
+    const html = renderBody()
     expect(html).toContain('Mac mini')
     expect(html).not.toContain('<button')
     expect(html).not.toContain('<svg')
@@ -334,7 +341,7 @@ describe('DeviceSection rendering', () => {
 
   it('shows a button with a chevron on a new, empty thread with a project', () => {
     seed({ activeThreadId: 't1', threads: [thread({ projectId: 'p' })], messages: [], appInfo: null })
-    const html = render()
+    const html = renderBody()
     expect(html).toContain('<button')
     expect(html).toContain('aria-haspopup="menu"')
     expect(html).toContain('<svg')
@@ -344,7 +351,7 @@ describe('DeviceSection rendering', () => {
 
   it('shows plain text when there is nothing to pick', () => {
     seed({ activeThreadId: 't1', threads: [thread({})], messages: [], appInfo: null })
-    const html = render()
+    const html = renderBody()
     expect(html).toContain('This computer')
     expect(html).not.toContain('<button')
     expect(html).not.toContain('<svg')
@@ -352,12 +359,12 @@ describe('DeviceSection rendering', () => {
 
   it('shows plain text while a send is in flight', () => {
     seed({ activeThreadId: 't1', threads: [thread({ projectId: 'p' })], messages: [], loading: true })
-    expect(render()).not.toContain('<button')
+    expect(renderBody()).not.toContain('<button')
     seed({
       loading: false,
       turnStates: { t1: { threadId: 't1', phase: 'thinking' } as never }
     })
-    expect(render()).not.toContain('<button')
+    expect(renderBody()).not.toContain('<button')
   })
 })
 

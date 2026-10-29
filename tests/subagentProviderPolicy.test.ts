@@ -15,6 +15,7 @@ import { QUESTIONS_REFUSED_MESSAGE } from '../src/mms/harness/acp/permissions'
 import { claudeChildToolDenial } from '../src/mms/harness/vendors/claude/childPolicy'
 import type { ClaudeTurnIntegrations } from '../src/mms/harness/vendors/claude/integrations'
 import { ClaudeSubscriptionProviderService, type ClaudeSubscriptionChatInput } from '../src/mms/harness/vendors/claude/ClaudeSubscriptionProviderService'
+import { CLAUDE_TURN_EXTRA_ARGS } from '../src/mms/harness/vendors/claude/turnFrames'
 import type { CodexLaunch, CodexProcess } from '../src/mms/harness/vendors/codex/CodexAppServerClient'
 import { codexTurnPolicy } from '../src/mms/harness/vendors/codex/childPolicy'
 import { CODEX_MODEL_PROVIDER, CodexProviderService, type CodexChatInput } from '../src/mms/harness/vendors/codex/CodexProviderService'
@@ -132,9 +133,13 @@ describe('Claude Subscription children', () => {
     return { service, options, input }
   }
 
-  /** The user's setup is left alone: no tool lists, no strict MCP config, every server still passed. */
+  /**
+   * The user's setup is left alone: no tool lists, no strict MCP config, every server still passed,
+   * and no launch arguments beyond the ones every turn adds.
+   */
   const untouched = (turn: Options) => {
-    for (const key of ['tools', 'disallowedTools', 'strictMcpConfig', 'settingSources', 'extraArgs']) expect(turn).not.toHaveProperty(key)
+    for (const key of ['tools', 'disallowedTools', 'strictMcpConfig', 'settingSources']) expect(turn).not.toHaveProperty(key)
+    expect(turn.extraArgs).toEqual(CLAUDE_TURN_EXTRA_ARGS)
     expect(Object.keys(turn.mcpServers ?? {})).toEqual(expect.arrayContaining(['mousse', 'userserver', 'oauthserver']))
   }
 
