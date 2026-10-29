@@ -222,8 +222,8 @@ export function ProviderListRow({
   iconId: string
   name: string
   version?: string
-  /** An update is available: a small button takes the version's place. */
-  update?: { label: string; onClick: () => void }
+  /** An update is available: a small button takes the version's place, off while it runs. */
+  update?: { label: string; busy?: boolean; onClick: () => void }
   status: StatusDescription
   /** How fresh the model list is, when the row has something to say about it. */
   models?: ModelsFreshness | null
@@ -256,6 +256,8 @@ export function ProviderListRow({
                 className="settings-icon-btn prov-micro prov-item-update"
                 title={version ? `${update.label} (now ${version})` : update.label}
                 aria-label={update.label}
+                disabled={update.busy}
+                aria-busy={update.busy}
                 onClick={update.onClick}
               >
                 <CircleArrowUp size={14} />

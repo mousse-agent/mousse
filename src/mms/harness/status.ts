@@ -60,7 +60,8 @@ export function compatibilityOf(driver: Pick<HarnessDriver, 'testedVersions' | '
 }
 
 /**
- * One-click update only when Mousse owns the install; otherwise the owner's command to copy.
+ * One-click update through Mousse's own install when Mousse owns it; otherwise the owner's command,
+ * which Update runs (`ownerUpdate.ts`) and the page also shows to copy.
  * Offered when the version is older than tested, has a known problem that a later version fixes,
  * or when `latest` (the newest published version known, from `LatestVersionCache`) is newer than
  * the installed one. An owner Mousse cannot prove has no command: a newer version is then reported

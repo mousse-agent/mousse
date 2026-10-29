@@ -396,11 +396,12 @@ export function ProvidersSettings({ settings, refreshProviderData, updateSetting
                   snapshot.update && snapshot.update.kind !== 'notice'
                     ? {
                         label: `Update ${snapshot.displayName}${snapshot.update.latestVersion ? ` to ${formatVersion(snapshot.update.latestVersion)}` : ''}`,
-                        // One click where Mousse knows who installed it; otherwise the editor shows the command.
-                        onClick:
-                          snapshot.update.kind === 'one_click'
-                            ? () => guard(() => actionsFor(snapshot).update())
-                            : () => setSelectedId(snapshot.instanceId)
+                        busy: snapshot.install.state === 'installing',
+                        // Mousse's own install or the owner's command; the editor shows the progress.
+                        onClick: () => {
+                          setSelectedId(snapshot.instanceId)
+                          void guard(() => actionsFor(snapshot).update())
+                        }
                       }
                     : undefined
                 }

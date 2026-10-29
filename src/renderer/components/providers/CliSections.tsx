@@ -123,8 +123,9 @@ export function SetupRow({
         } else control = button('signin', isManagedSetup(snapshot) ? 'Continue with ChatGPT' : step.label, actions.signIn)
         break
       case 'update':
+        // Mousse runs the owner's command too; the command stays beside the button for a terminal.
+        control = button('update', step.label, actions.update)
         if (step.command) below = <CommandBox command={step.command} label="Copy update command" />
-        else control = button('update', step.label, actions.update)
         break
       case 'recheck':
         break
@@ -233,8 +234,8 @@ export function BinaryRow({ snapshot }: { snapshot: InstanceSnapshot }) {
 }
 
 /**
- * An available update. One click only when Mousse knows who installed the binary; otherwise the
- * command to run, in its own box, so the two never look alike.
+ * An available update. Mousse's own install updates in place; one its owner made runs the owner's
+ * command, shown in its own box to copy as well. A copy whose owner is unknown only names the version.
  */
 export function UpdateRow({ snapshot, operation, actions }: { snapshot: InstanceSnapshot; operation?: ProviderOperationEvent; actions: InstanceActions }) {
   const { busy, error, run } = useAsyncAction()
@@ -251,28 +252,21 @@ export function UpdateRow({ snapshot, operation, actions }: { snapshot: Instance
       />
     )
   }
-  if (update.kind === 'one_click') {
-    return (
-      <SettingsRow
-        className="prov-update is-one-click"
-        title={target ? `Update to ${target}` : 'Update available'}
-        description={withError(updating && operation?.phase === 'progress' ? operation.message : 'Mousse updates it the way it was installed.', error)}
-        control={
-          <button type="button" className="settings-btn prov-update-btn" disabled={busy !== null || updating} onClick={() => void run('update', actions.update)}>
-            <Download size={14} />
-            {updating ? 'Updating…' : 'Update now'}
-          </button>
-        }
-      />
-    )
-  }
+  const advisory = update.kind === 'advisory'
+  const idleText = advisory ? 'Mousse runs this, or run it yourself in a terminal:' : 'Mousse updates it the way it was installed.'
   return (
     <SettingsRow
-      className="prov-update is-advisory"
-      title={target ? `${target} is available` : 'Update available'}
-      description="Mousse didn't install this copy, so update it yourself in a terminal:"
+      className={`prov-update ${advisory ? 'is-advisory' : 'is-one-click'}`}
+      title={target ? `Update to ${target}` : 'Update available'}
+      description={withError(updating && operation?.phase === 'progress' ? operation.message : idleText, error)}
+      control={
+        <button type="button" className="settings-btn prov-update-btn" disabled={busy !== null || updating} onClick={() => void run('update', actions.update)}>
+          <Download size={14} />
+          {updating ? 'Updating…' : 'Update now'}
+        </button>
+      }
     >
-      <CommandBox command={update.command} label="Copy update command" />
+      {advisory && <CommandBox command={update.command} label="Copy update command" />}
     </SettingsRow>
   )
 }

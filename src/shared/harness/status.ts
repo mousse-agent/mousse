@@ -29,6 +29,7 @@ export interface InstanceBinary {
 
 export type UpdateAffordance =
   | { kind: 'one_click'; owner: InstallOwner; latestVersion?: string }
+  /** Installed by its owner (npm, brew, the CLI's own installer): Update runs `command`, which can also be copied. */
   | { kind: 'advisory'; command: string; latestVersion?: string }
   /** A newer version is known, but Mousse cannot say how this copy was installed: no command, no action. */
   | { kind: 'notice'; latestVersion: string }
@@ -254,7 +255,7 @@ function updateStep(snapshot: InstanceSnapshot): NextStep | null {
   if (!update) return null
   if (update.kind === 'one_click') return step(snapshot, 'update')
   if (update.kind === 'notice') return null
-  return { action: 'update', label: 'Copy update command', command: update.command }
+  return { action: 'update', label: 'Update', command: update.command }
 }
 
 function withLabel(headline: string, label: string | undefined): string {

@@ -341,12 +341,20 @@
 /* Project override marker and reset: small icon buttons on their own line under the status,
    above the row's select target. */
 
-/* Update available: a small button where the version was, above the row's select target. */
+/* Update available: a small button where the version was, above the row's select target. The
+   title aligns on text baselines, and an icon has none: the button is centred on the name's line
+   instead, and its negative margins keep that line (and the name) where it is in every other row. */
 .settings-icon-btn.prov-item-update {
   position: relative;
   z-index: 2;
   flex-shrink: 0;
+  align-self: center;
+  margin-block: -4px;
   color: var(--accent);
+}
+
+.settings-icon-btn.prov-item-update:disabled {
+  cursor: progress;
 }
 
 .prov-item-override {
