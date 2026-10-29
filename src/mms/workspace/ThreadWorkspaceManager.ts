@@ -9,6 +9,7 @@ import { safeWorktreeGit } from '../worktree/WorktreeManager'
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { assertHeldThreadLease } from '../actions/GitOperationCoordinator'
 import { moveFiles, snapshotOrigin } from '../actions/snapshots'
+import { loadSnapshotWorkspaceMetadata } from './SnapshotWorkspace'
 import { atomicWriteJsonSync } from '../data/AtomicFs'
 import { ThreadJournal } from '../data/ThreadJournal'
 import { getMousseHomeDir } from '../data/paths'
@@ -154,6 +155,15 @@ export class ThreadWorkspaceManager {
   load(): ThreadWorkspaceMetadata | undefined {
     if (!existsSync(this.workspacePath)) return undefined
     return JSON.parse(readFileSync(this.workspacePath, 'utf8')) as ThreadWorkspaceMetadata
+  }
+
+  /**
+   * The thread's worktree record, or, for a thread whose folder has no Git of its own, the snapshot workspace's as the
+   * same shape (`snapshotOnly`). For the code that Undoes, reviews and releases snapshots; every rule about worktrees
+   * (retirement, cleanup, rebuilding, Publish) reads `load()` and never sees a folder that is the person's.
+   */
+  loadOrSnapshot(): ThreadWorkspaceMetadata | undefined {
+    return this.load() ?? loadSnapshotWorkspaceMetadata(this.threadDirectory)
   }
 
   resolveRepository(projectPath: string): RepositoryContextData {

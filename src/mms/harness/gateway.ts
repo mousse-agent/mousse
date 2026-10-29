@@ -215,6 +215,11 @@ export interface HarnessGateway {
   /** A native fork of `ref` after `atTurnOrdinal`, or null when the instance cannot branch it. */
   forkSession(ref: ProviderRef, atTurnOrdinal: number, target?: { threadId: string }): Promise<ProviderRef | null>
   /**
+   * The private folder the instance runs a thread with no project in (`ProviderAdapter.standaloneWorkspace`), or
+   * undefined when it has none. Where Mousse records that thread's snapshots.
+   */
+  standaloneWorkspace?(instanceId: string, threadId: string): string | undefined
+  /**
    * Ends what a thread's process still runs in the background (`ProviderAdapter.stopThread`), on
    * whichever instance holds it: the thread may have switched instances since. 'stopped' when one did.
    */
@@ -1739,6 +1744,10 @@ export class Harness implements HarnessGateway {
   async forkSession(ref: ProviderRef, atTurnOrdinal: number, target?: { threadId: string }): Promise<ProviderRef | null> {
     const adapter = this.refRecord(ref)?.runtime.adapter
     return adapter?.forkSession ? adapter.forkSession(ref, atTurnOrdinal, target) : null
+  }
+
+  standaloneWorkspace(instanceId: string, threadId: string): string | undefined {
+    return this.recordOrUndefined(instanceId)?.runtime.adapter.standaloneWorkspace?.(threadId)
   }
 
   async stopThread(threadId: string): Promise<'stopped' | 'not_active'> {

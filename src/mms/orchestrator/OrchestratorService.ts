@@ -219,7 +219,8 @@ import { resolveThreadProjectPath } from '../data/resolveActiveProjectPath'
 import { waitForFolderAccess, type WaitOptions } from '../files/folderAccess'
 import { resolveProjectWorkingDirectory } from '../data/projectWorkingDirectory'
 import { lineageForChild } from '../data/subagentLineage'
-import { WorkspaceResolver, unprovisionedContext } from '../workspace/WorkspaceResolver'
+import { SNAPSHOT_STORE_REASON, WorkspaceResolver, modeMutatesFiles, unprovisionedContext } from '../workspace/WorkspaceResolver'
+import { ensureSnapshotWorkspace, setSnapshotsOff } from '../workspace/SnapshotWorkspace'
 import { ThreadWorkspaceManager } from '../workspace/ThreadWorkspaceManager'
 import { findWorktreeOwner } from '../scheduled/validateJobOptions'
 import { jobPermissionRequest } from '../scheduled/jobPermission'
@@ -234,7 +235,7 @@ import { ThreadActionService } from '../actions/ThreadActionService'
 import { cancelledIntegrationsNotice, cancelPendingIntegrations } from '../agents/ChildAgentIntegrationService'
 import { buildSubagentResultReport, delegationResultRefPrefix, formatSubagentResultReport, readSubagentResults, recordedFilesAt, SUBAGENT_RESULTS_FILE, writeSubagentResults, type SubagentResultReport } from '../agents/subagentResultReport'
 import type { NativeContextBoundary } from '../../shared/threadActions'
-import { snapshotOrigin } from '../actions/snapshots'
+import { coverageNotice, SnapshotRefusedError, snapshotOrigin } from '../actions/snapshots'
 import { git as actionGit, requireClean as requireCleanWorkspace } from '../actions/git'
 import {
   claimNextNormal,
@@ -300,6 +301,17 @@ import {
   userMessage,
   type NativeMessageCheckpoint
 } from './nativeContext'
+
+/** A folder with no worktree whose turns are recorded in a hidden store (`snapshotFolderFor`). */
+interface SnapshotFolder {
+  /** The thread's data folder. */
+  directory: string
+  threadId: string
+  /** The folder the agent works in. */
+  workTree: string
+  /** The project, when the folder is a project's; the project's threads share one store. */
+  projectId?: string
+}
 
 interface NormalizedOrchestratorSendRequest {
   content: string
@@ -8260,6 +8272,31 @@ export class OrchestratorService extends EventEmitter {
   }
 
   /** The model a new turn of the session runs: the given or thread override, else the mode's default. */
+  /**
+   * The folder a turn that changes files is recorded in when its thread has no worktree of its own (docs/workspace-snapshots.md,
+   * "Folders without Git"): the project's folder when the project is not a Git repository (or has no commit yet), and for a
+   * thread with no project the private folder its runtime keeps for it. Undefined for a thread with a worktree, a runtime
+   * that keeps no such folder, and a project that is a repository Mousse cannot work in (a bare one).
+   */
+  private snapshotFolderFor(session: ThreadSession, mode: ChatMode, directory: string, projectPath: string | undefined, override?: ModelOverride): SnapshotFolder | undefined {
+    if (projectPath) {
+      const workspace = session.workspace
+      const reason = workspace?.capability.unavailableReason
+      if (!workspace || workspace.capability.checkpointable || (reason !== 'not-a-repository' && reason !== 'unborn-head' && reason !== SNAPSHOT_STORE_REASON)) return undefined
+      const projectId = this.threadStore?.getThread(session.threadId)?.projectId
+      return projectId ? { directory, threadId: session.threadId, workTree: session.projectCwd ?? projectPath, projectId } : undefined
+    }
+    try {
+      const selected = this.turnSelection(session, mode, override)
+      const resolved = this.harness.resolveStored(selected, { purpose: 'turn', scope: this.threadScope(session.threadId) })
+      const workTree = this.harness.standaloneWorkspace?.(resolved.instanceId, session.threadId)
+      return workTree ? { directory, threadId: session.threadId, workTree } : undefined
+    } catch {
+      // The turn reports a model it cannot run when it binds it; here it only means there is no folder to record.
+      return undefined
+    }
+  }
+
   private turnSelection(session: ThreadSession, mode: ChatMode, override?: ModelOverride): ModelOverride {
     return this.harness.instanceMap.migrate(override ?? session.modelOverride ?? resolveModelForMode(this.settingsStore.get(), mode, [
       ...(this.providerAuth.credentials?.listProviderIds() ?? []),
@@ -8971,7 +9008,7 @@ export class OrchestratorService extends EventEmitter {
     // operations below under that lease, before workspace verification/dispatch.
     const recoveryDirectory = session.threadId !== '__unbound__' ? this.resolveThreadDir(session.threadId) : undefined
     const recoveryManager = recoveryDirectory ? new ThreadWorkspaceManager(recoveryDirectory) : undefined
-    const recoveryWorkspace = recoveryManager?.load()
+    const recoveryWorkspace = recoveryManager?.loadOrSnapshot()
     // Acquire cross-process execution lease before mutating thread state.
     let lease: ThreadLeaseHandle | null = session.executionLease
     if (session.threadId !== '__unbound__') {
@@ -9022,6 +9059,8 @@ export class OrchestratorService extends EventEmitter {
       }, heldLease)
     }
     const request = normalizeSendRequest(input)
+    // The folder a turn is recorded in when it has no worktree: a project without Git, or a thread with no project.
+    let snapshotFolder: SnapshotFolder | undefined
     // Resolve the task binding before dispatch. Provisioning failures must not
     // turn an isolated code request into a write to the registered checkout.
     if (session.sharedWorkspace) {
@@ -9056,6 +9095,7 @@ export class OrchestratorService extends EventEmitter {
           session.workspace = null
           session.projectCwd = projectPath ? resolveProjectWorkingDirectory(projectPath) : null
         }
+        if (threadDir && !opts?.bot && modeMutatesFiles(request.mode)) snapshotFolder = this.snapshotFolderFor(session, request.mode, threadDir, projectPath, opts?.modelOverride)
         // Only move worktree root when this is the bound session and no concurrent turn
         // is relying on ALS projectCwd alone (GUI tools that still read WorktreeManager).
         if (session.projectCwd && this.boundSession.threadId === session.threadId) {
@@ -9075,7 +9115,13 @@ export class OrchestratorService extends EventEmitter {
       return await this.executeWorkflowChatTurn(session, request, opts)
     }
 
-    const checkpointEnabled = Boolean(session.workspace?.capability.checkpointable)
+    let checkpointEnabled = Boolean(session.workspace?.capability.checkpointable) || snapshotFolder !== undefined
+    // The folder the turn's snapshots are taken in: the worktree, or the folder that has none.
+    let checkpointCwd: string | null = snapshotFolder?.workTree ?? session.projectCwd
+    /** Why this turn's files are not recorded, for Undo to say. */
+    let snapshotsOff: string | undefined
+    /** The same, as the coverage line a receipt carries: "Not covered: . (too large (more than 1 GB))". */
+    let snapshotsNotCovered: string | undefined
     const conversationBranchId = recoveryManager?.load()?.conversationBranchId ?? 'main'
     const externalEffects = mode === 'agent' || mode === 'build' || typeof mode === 'object'
       ? [{ kind: 'unknown' as const, description: 'Agent tools may affect processes, ignored files, or external services; code undo only restores tracked workspace changes.', reversible: false as const }]
@@ -9095,18 +9141,38 @@ export class OrchestratorService extends EventEmitter {
       safeBoundaryProof: 'captured before admitting the turn user message'
     }
     let turnStartSha: string | undefined
-    if (checkpointEnabled && session.projectCwd) {
+    if (checkpointEnabled && checkpointCwd) {
       // Edits made outside Mousse since the last action become an action of their own, so Undo of this turn leaves them.
       const directory = session.threadId !== '__unbound__' ? this.resolveThreadDir(session.threadId) : undefined
-      if (directory) {
+      if (snapshotFolder) {
+        // A folder with no worktree: a folder Mousse cannot snapshot (too large, a home folder) never fails the turn;
+        // it runs with its conversation recorded alone, and Undo says why the files are not.
+        try {
+          const prepared = ensureSnapshotWorkspace({ threadDirectory: snapshotFolder.directory, threadId: snapshotFolder.threadId, workTree: snapshotFolder.workTree, projectId: snapshotFolder.projectId })
+          checkpointCwd = prepared.record.workTree
+          turnStartSha = (await new ThreadActionService(snapshotFolder.directory).recordOutsideChanges({
+            threadId: session.threadId, conversationBranchId, workspacePath: checkpointCwd,
+            heldThreadLease: session.executionLease ?? undefined,
+            presentationMessageStart: turnPresentationStart, nativeContextBoundary: turnNativeStartBoundary
+          })).startSha
+          setSnapshotsOff(snapshotFolder.directory, undefined)
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error)
+          snapshotsOff = error instanceof SnapshotRefusedError ? message : `Undo is off for this folder: ${message}`
+          snapshotsNotCovered = coverageNotice([{ path: '.', reason: error instanceof SnapshotRefusedError ? error.gapReason : `no snapshot could be taken (${message.split(/\r?\n/)[0]})` }])
+          try { setSnapshotsOff(snapshotFolder.directory, snapshotsOff, snapshotFolder) } catch { /* The reason still reaches this turn's conversation record. */ }
+          checkpointEnabled = false
+          snapshotFolder = undefined
+        }
+      } else if (directory) {
         turnStartSha = (await new ThreadActionService(directory).recordOutsideChanges({
-          threadId: session.threadId, conversationBranchId, workspacePath: session.projectCwd,
+          threadId: session.threadId, conversationBranchId, workspacePath: checkpointCwd,
           heldThreadLease: session.executionLease ?? undefined,
           presentationMessageStart: turnPresentationStart, nativeContextBoundary: turnNativeStartBoundary
         })).startSha
       } else {
-        requireCleanWorkspace(session.projectCwd, 'Thread workspace')
-        turnStartSha = actionGit(session.projectCwd, ['rev-parse', 'HEAD'])
+        requireCleanWorkspace(checkpointCwd, 'Thread workspace')
+        turnStartSha = actionGit(checkpointCwd, ['rev-parse', 'HEAD'])
       }
     }
     // Keep user commits visible in the sidebar. Internal orchestration wakes stay hidden.
@@ -9201,11 +9267,11 @@ export class OrchestratorService extends EventEmitter {
     if (conversationDirectory && session.executionLease) {
       new ConversationActionService(conversationDirectory).begin(turnId, conversationBranchId, turnPresentationStart, turnNativeStartBoundary, session.executionLease)
     }
-    if (checkpointEnabled && turnStartSha && session.projectCwd) {
+    if (checkpointEnabled && turnStartSha && checkpointCwd) {
       const directory = this.resolveThreadDir(session.threadId)!
       new ThreadActionService(directory).beginTurn({
         threadId: session.threadId, turnId, conversationBranchId,
-        workspacePath: session.projectCwd, heldThreadLease: session.executionLease ?? undefined, externalEffects,
+        workspacePath: checkpointCwd, heldThreadLease: session.executionLease ?? undefined, externalEffects,
         presentationMessageStart: turnPresentationStart, presentationMessageEnd: session.messages.length,
         nativeContextStartBoundary: turnNativeStartBoundary, nativeContextBoundary: turnNativeStartBoundary
       }, turnStartSha)
@@ -9233,7 +9299,7 @@ export class OrchestratorService extends EventEmitter {
     // The run is active: Mousse tool calls Claude made while it was being started act as it.
     if (opts?.continuationId) this.endContinuationHold(opts.continuationId, false, engineRunId ?? null)
     const checkpointTurn = async (state: 'completed' | 'stopped' | 'failed'): Promise<void> => {
-      if ((!checkpointEnabled || !turnStartSha || !session.projectCwd) && !conversationDirectory || session.threadId === '__unbound__') return
+      if ((!checkpointEnabled || !turnStartSha || !checkpointCwd) && !conversationDirectory || session.threadId === '__unbound__') return
       const threadDir = this.resolveThreadDir(session.threadId)
       if (!threadDir) return
       const checkpointOptions = {
@@ -9242,7 +9308,7 @@ export class OrchestratorService extends EventEmitter {
         heldThreadLease: session.executionLease ?? undefined,
         externalEffects,
         conversationBranchId,
-        workspacePath: session.projectCwd!,
+        workspacePath: checkpointCwd!,
         presentationMessageStart: turnPresentationStart,
         presentationMessageEnd: session.messages.length,
         nativeContextStartBoundary: turnNativeStartBoundary,
@@ -9262,7 +9328,7 @@ export class OrchestratorService extends EventEmitter {
         }
       }
       const action = conversationDirectory
-        ? new ConversationActionService(conversationDirectory).settle(turnId, session.messages.length, checkpointOptions.nativeContextBoundary, state, conversationToolsUsed, session.executionLease!)
+        ? new ConversationActionService(conversationDirectory).settle(turnId, session.messages.length, checkpointOptions.nativeContextBoundary, state, conversationToolsUsed, session.executionLease!, snapshotsOff, snapshotsNotCovered)
         : await new ThreadActionService(threadDir).checkpointExistingTurn(checkpointOptions, turnStartSha!, state)
       for (let index = turnPresentationStart; index < session.messages.length; index += 1) {
         session.messages[index] = {

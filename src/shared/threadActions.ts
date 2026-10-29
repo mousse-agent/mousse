@@ -120,6 +120,11 @@ export interface ThreadAction {
   git?: GitRecord
   /** A line Undo, Redo or revert shows next to its result, such as commits that were already pushed. */
   notice?: string
+  /**
+   * What of the folder's files this action's record leaves out, in the words of a receipt's `notCovered`: "Not covered:
+   * big.bin (over 50 MB)". The whole folder (".") when its files could not be recorded at all.
+   */
+  notCovered?: string
   reversible: boolean
   state: ThreadActionState
   compensationActionId?: ActionId
