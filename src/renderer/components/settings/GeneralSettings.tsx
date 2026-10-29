@@ -3,6 +3,7 @@ import type { MousseSettings, MousseSettingsUpdate, SettingsOptions, ThemeId } f
 import type { UpdateState } from '../../../shared/updates'
 import { subscribeToUpdates, updateActions, useUpdateStore } from '../../stores/updateStore'
 import { InstallConfirm } from '../updates/InstallConfirm'
+import { UpdateErrorNotice } from '../updates/UpdateErrorNotice'
 import { Bell, Download, Info, Loader2, Palette, RefreshCw, RotateCcw, ShieldCheck } from '../../lib/icons'
 import { describePermissionMode, PERMISSION_MODES } from '../../../shared/permissionMode'
 import { Select } from '../ui/Select'
@@ -245,9 +246,9 @@ function updateStatus(state: UpdateState): string | undefined {
     case 'up-to-date': return 'Up to date'
     case 'available': return `Version ${state.availableVersion} is available`
     case 'downloading': return `Downloading ${state.availableVersion}… ${state.downloadPercent ?? 0}%`
-    case 'downloaded': return state.error ? `Update not installed: ${state.error.message}` : `${state.availableVersion} is ready to install`
+    case 'downloaded': return state.error ? `${state.availableVersion} is downloaded but not installed` : `${state.availableVersion} is ready to install`
     case 'installing': return `Installing ${state.availableVersion}…`
-    case 'error': return state.error?.message ?? 'The last update check failed.'
+    case 'error': return state.availableVersion ? `Version ${state.availableVersion} is available` : 'The last update check failed.'
     default: return undefined
   }
 }
@@ -307,7 +308,9 @@ function AboutRow() {
         title={version ? `Mousse ${version}` : 'Mousse'}
         description={status && <span role="status" className={updateStatusClass(state)}>{status}</span>}
         control={control}
-      />
+      >
+        {state.error && <UpdateErrorNotice error={state.error} />}
+      </SettingsRow>
       <InstallConfirm open={confirming} version={state.availableVersion ?? ''} onClose={() => setConfirming(false)} />
     </>
   )
