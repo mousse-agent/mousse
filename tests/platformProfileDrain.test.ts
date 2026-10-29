@@ -12,8 +12,6 @@ import { ScheduledJobStore } from '../src/mms/scheduled/ScheduledJobStore'
 import { ProjectManager } from '../src/mms/data/ProjectManager'
 import { ThreadDataStore } from '../src/mms/data/ThreadDataStore'
 import { WorkerHandle } from '../src/mms/terminals/WorkerHandle'
-import type { ChannelAdapterFactory } from '../src/mms/channels/ChannelService'
-import { FixtureAdapter } from './fixtures/agent-platform/channel-control-lifecycle/helpers'
 import {
   heartbeatCommand,
   heartbeatPath,
@@ -48,49 +46,38 @@ afterEach(() => {
 })
 
 describe('profile drain and durable scheduler ownership', () => {
-  it('retains a composed failed channel close and removes the profile only after retry succeeds', async () => {
+  it('retains a composed failed close and removes the profile only after retry succeeds', async () => {
     vi.spyOn(ProviderAuthService.prototype, 'init').mockResolvedValue(undefined)
     const root = ownedRoot(), home = join(root, 'home')
     const main = await MousseMainService.create({ homeDir: home, repoRoot: root, requireOwnership: false })
     const host = main.getInstallationHost()!, profile = host.manager.create({ displayName: 'Close retry', slug: 'close-retry' })
     const services = await host.getProfileServices(profile.id)
-    const adapter = new FixtureAdapter('webhook')
-    vi.spyOn(services.channels as unknown as { createAdapter: ChannelAdapterFactory }, 'createAdapter').mockReturnValue(adapter)
-    services.channels.updateConfig({ platforms: { webhook: { enabled: true, allowAllUsers: true } } })
-    await services.channels.connect('webhook')
-    const close = vi.spyOn(adapter, 'disconnect').mockRejectedValueOnce(new Error('owned close failed'))
+    const close = vi.spyOn(services.scheduled, 'shutdown').mockRejectedValueOnce(new Error('owned close failed'))
     try {
       await expect(host.remove(profile.id, profile.revision)).rejects.toThrow(/Failed to drain profile services/)
       expect(host.getLive(profile.id)).toBe(services)
       expect(existsSync(services.getProfileHomeDir())).toBe(true)
-      expect(services.getOwnedActivity().channelWork).toBeGreaterThan(0)
 
       await host.remove(profile.id, profile.revision)
       expect(close).toHaveBeenCalledTimes(2)
-      expect(adapter.connected).toBe(false)
       expect(host.getLive(profile.id)).toBeUndefined()
     } finally {
       await main.stop()
     }
   }, 20_000)
 
-  it('fences and retains actual MCP discovery, channel close and profile request owners before profile removal', async () => {
+  it('fences and retains actual MCP discovery and profile request owners before profile removal', async () => {
     vi.spyOn(ProviderAuthService.prototype, 'init').mockResolvedValue(undefined)
     const root = ownedRoot(), home = join(root, 'home')
     const main = await MousseMainService.create({ homeDir: home, repoRoot: root, requireOwnership: false })
     const host = main.getInstallationHost()!, profile = host.manager.create({ displayName: 'Owned integration', slug: 'owned-integration' })
     const services = await host.getProfileServices(profile.id), profileRoot = services.getProfileHomeDir()
-    const discoveryEntered = deferred(), releaseDiscovery = deferred(), requestEntered = deferred(), releaseRequest = deferred(), releaseChannel = deferred()
+    const discoveryEntered = deferred(), releaseDiscovery = deferred(), requestEntered = deferred(), releaseRequest = deferred()
     vi.spyOn(services.mcpRegistry, 'discover').mockImplementation(async () => {
       discoveryEntered.resolve(); await releaseDiscovery.promise
       writeFileSync(join(profileRoot, 'mcp-final.txt'), 'discovery settled')
       return { servers: [], sources: [], diagnostics: [] }
     })
-    const adapter = new FixtureAdapter('webhook')
-    adapter.disconnectHold = releaseChannel.promise
-    vi.spyOn(services.channels as unknown as { createAdapter: ChannelAdapterFactory }, 'createAdapter').mockReturnValue(adapter)
-    services.channels.updateConfig({ platforms: { webhook: { enabled: true, allowAllUsers: true } } })
-    await services.channels.connect('webhook')
     const request = services.runOwnedRequest('fixture.profileWrite', async () => {
       requestEntered.resolve(); await releaseRequest.promise
       writeFileSync(join(profileRoot, 'request-final.txt'), 'request settled')
@@ -106,26 +93,22 @@ describe('profile drain and durable scheduler ownership', () => {
       expect(host.manager.get(profile.id).status).toBe('active')
       await expect(host.getProfileServices(profile.id)).rejects.toMatchObject({ code: 'profile_draining' })
       expect(services.getOwnedActivity()).toMatchObject({ 'rpc:fixture.profileWrite': 1 })
-      for (const owner of ['mcpWork', 'channelWork']) expect(services.getOwnedActivity()[owner]).toBeGreaterThan(0)
+      expect(services.getOwnedActivity().mcpWork).toBeGreaterThan(0)
       await expect(services.mcpManager.listConfiguredServers()).rejects.toMatchObject({ code: 'profile_draining' })
-      await expect(services.channels.connect()).rejects.toMatchObject({ code: 'profile_draining' })
       await expect(Promise.resolve().then(() => services.runOwnedRequest('fixture.newRequest', async () => ({})))).rejects.toMatchObject({ code: 'profile_draining' })
       await expect(main.runOwnedRequest('fixture-peer', () => 'other profile remains live')).resolves.toBe('other profile remains live')
       releaseDiscovery.resolve(); await discovery
       releaseRequest.resolve(); await request
       expect(existsSync(profileRoot)).toBe(true)
-      expect(services.getOwnedActivity().channelWork).toBeGreaterThan(0)
-      expect(adapter.connected).toBe(true)
-      releaseChannel.resolve(); stop.mockRestore()
+      stop.mockRestore()
       await host.remove(profile.id, profile.revision)
-      expect(adapter.connected).toBe(false)
       expect(host.getLive(profile.id)).toBeUndefined()
       expect(existsSync(profileRoot)).toBe(false)
       const moved = readdirSync(join(home, 'trash', 'profiles')).find((name) => name.startsWith(`${profile.id}-`))!
       expect(readFileSync(join(home, 'trash', 'profiles', moved, 'mcp-final.txt'), 'utf8')).toBe('discovery settled')
       expect(readFileSync(join(home, 'trash', 'profiles', moved, 'request-final.txt'), 'utf8')).toBe('request settled')
     } finally {
-      releaseDiscovery.resolve(); releaseRequest.resolve(); releaseChannel.resolve(); stop.mockRestore()
+      releaseDiscovery.resolve(); releaseRequest.resolve(); stop.mockRestore()
       await Promise.allSettled([discovery, request]); await main.stop()
     }
   }, 20_000)

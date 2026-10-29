@@ -104,22 +104,22 @@ describe('per-thread turn admission', () => {
     expect(existsSync(join(store.getThreadDir(thread.id), 'execution.lease'))).toBe(false)
   }, 30_000)
 
-  it('queues a send that arrives while a channel turn is admitted, and clears admission afterwards', async () => {
+  it('queues a send that arrives while a remote turn is admitted, and clears admission afterwards', async () => {
     const thread = store.createThread('D')
     const realExecute = (orch as any).executeTurn.bind(orch)
     const gate = deferred()
     ;(orch as any).executeTurn = async (...args: unknown[]) => { await gate.promise; return realExecute(...args) }
 
-    const channel = orch.runChannelTurn(thread.id, 'from-channel', store)
+    const remote = orch.runRemoteTurn(thread.id, 'from-remote', store)
     await waitFor(() => orch.isActiveTurnRunning(thread.id))
     const during = await orch.send('msg-b', false, { threadId: thread.id })
     expect(during.queued).toBe(true)
     expect(inFlight).toBe(0)
 
     gate.resolve()
-    const result = await channel
+    const result = await remote
     expect(result.error).toBeUndefined()
-    // Channel turns never chain queue drains; the queued message stays durable for the next drain.
+    // Remote turns never chain queue drains; the queued message stays durable for the next drain.
     expect(maxInFlight).toBe(1)
     expect(chatCalls).toHaveLength(1)
     expect(orch.isActiveTurnRunning(thread.id)).toBe(false)

@@ -3,7 +3,7 @@ import type { ThreadActivityState } from '../src/shared/types'
 import { threadDescendants, threadHasPendingWork, type ThreadIdleServices } from '../src/mms/lifecycle/threadIdle'
 
 interface Stub {
-  turn?: Set<string>; running?: Set<string>; channel?: Set<string>; runs?: Record<string, string>
+  turn?: Set<string>; running?: Set<string>; runs?: Record<string, string>
   queue?: Record<string, number>; questions?: Set<string>; ptys?: Record<string, Array<{ ptyId: string; alive: boolean }>>
   activity?: Record<string, ThreadActivityState>; agents?: Record<string, string[]>; children?: Record<string, string>; execution?: string
 }
@@ -13,8 +13,7 @@ function services(stub: Stub = {}) {
   const value: ThreadIdleServices & { threadRuntimes: { getOrHydrate: typeof getOrHydrate } } = {
     orchestrator: {
       isTurnActive: (id) => stub.turn?.has(id) ?? false,
-      isActiveTurnRunning: (id) => stub.running?.has(id) ?? false,
-      isChannelTurnActive: (id) => stub.channel?.has(id) ?? false
+      isActiveTurnRunning: (id) => stub.running?.has(id) ?? false
     },
     runEngine: { store: { listNonTerminalRuns: () => Object.entries(stub.runs ?? {}).map(([threadId, status]) => ({ threadId, status })) } },
     pendingQueueLength: (id) => stub.queue?.[id] ?? 0,
@@ -35,7 +34,6 @@ describe('threadHasPendingWork', () => {
   it.each<[string, Stub, string]>([
     ['a running turn', { running: new Set(['root']) }, 'A turn is running'],
     ['an active turn session', { turn: new Set(['root']) }, 'A turn is running'],
-    ['a channel turn', { channel: new Set(['root']) }, 'A channel turn is running'],
     ['a starting run', { runs: { root: 'starting' } }, 'A run is active'],
     ['a running run', { runs: { root: 'running' } }, 'A run is active'],
     ['a run that is finalizing', { runs: { root: 'finalizing' } }, 'A run is active'],

@@ -22,7 +22,6 @@ const open: SideCardVisibilityInput = {
   settingsOpen: false,
   usageOpen: false,
   scheduledOpen: false,
-  channelsOpen: false,
   sidebarMode: 'projects',
   sideCardOverlayOpen: false,
   sideCardFits: true
@@ -41,7 +40,6 @@ describe('side card visibility', () => {
     ['Settings is open', { settingsOpen: true }],
     ['Usage is open', { usageOpen: true }],
     ['Scheduled is open', { scheduledOpen: true }],
-    ['Channels is open', { channelsOpen: true }],
     ['the Chats view is showing', { sidebarMode: 'chats' }],
     ['the thread area is too narrow and the overlay is closed', { sideCardFits: false }],
     ['the width is not measured yet', { sideCardFits: null }]
@@ -189,7 +187,6 @@ describe('title-bar button availability', () => {
     ['Settings', { settingsOpen: true }],
     ['Usage', { usageOpen: true }],
     ['Scheduled', { scheduledOpen: true }],
-    ['Channels', { channelsOpen: true }],
     ['Chats', { sidebarMode: 'chats' }]
   ])('is disabled over %s, even with the card switched on', (_name, patch) => {
     expect(deriveSideCardState({ ...open, ...patch })).toEqual({ visible: false, mode: 'docked', unavailable: 'view' })

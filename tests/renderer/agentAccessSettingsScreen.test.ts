@@ -223,7 +223,7 @@ describe('Settings > Agents > Agent access', () => {
       show({ level })
       const caps = Array.from(host.querySelectorAll('.agent-access-cap')).map((entry) => entry.textContent)
       expect(caps).toHaveLength(CAPPED_THREADS.length)
-      expect(caps.join('|')).toContain('Threads driven from a channel')
+      expect(caps.join('|')).toContain('Threads driven by a remote send')
       expect(caps.join('|')).toContain('Bot threads')
       expect(caps.filter((entry) => entry?.endsWith('Lineage only'))).toHaveLength(2)
       expect(caps.join('|')).toContain('Read at most')

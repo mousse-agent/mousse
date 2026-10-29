@@ -1056,7 +1056,7 @@ describe('scheduled jobs run as turns', () => {
       expect(w.engine.getRun(records.Unknown.runId!)?.accessGrant).toBe('lineage')
       expect(w.engine.getRun(records.Reader.runId!)?.accessGrant).toBe('read')
       expect(w.engine.getRun(records.Manager.runId!)?.accessGrant).toBe('manage')
-      // The per-run thread keeps the limit, as a channel's thread does, so what it delegates inherits it.
+      // The per-run thread keeps the limit, as a remote turn's thread does, so what it delegates inherits it.
       expect(w.store.getThread(records.Unknown.threadId!)?.accessCeiling).toBe('lineage')
       expect(w.store.getThread(records.Reader.threadId!)?.accessCeiling).toBe('read')
     })
@@ -1438,7 +1438,7 @@ describe('scheduled jobs run as turns', () => {
         expect(seen.person).toBe(true)
       })
 
-      it("no other run is a person's: a scheduled run, a channel turn, an agent's message, a bot's thread, a wake, a continuation, a run with no binding", async () => {
+      it("no other run is a person's: a scheduled run, a remote turn, an agent's message, a bot's thread, a wake, a continuation, a run with no binding", async () => {
         const seen: Record<string, { person: boolean; limits: unknown }> = {}
         let wired!: ReturnType<typeof wireJobs>
         const pi = piAdapter((input) => {
@@ -1462,10 +1462,10 @@ describe('scheduled jobs run as turns', () => {
         await finished(w, job.id)
         expect(seen[scheduledThread.id]).toEqual({ person: false, limits: NARROWEST })
 
-        // A channel turn.
-        const channel = make('Channel')
-        await w.orch.runChannelTurn(channel.id, 'channel message', w.store)
-        expect(seen[channel.id]).toEqual({ person: false, limits: NARROWEST })
+        // A remote send.
+        const remote = make('Remote')
+        await w.orch.runRemoteTurn(remote.id, 'remote message', w.store)
+        expect(seen[remote.id]).toEqual({ person: false, limits: NARROWEST })
 
         // A message another agent sent with thread_send: an interactive origin, but source mcp.
         const origin = make('Origin')

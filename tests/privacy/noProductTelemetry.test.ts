@@ -83,7 +83,7 @@ describe('Mousse collects no usage data', () => {
     const pkg = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8')) as Record<string, unknown>
     expect(unlistedNetworkClients(pkg)).toEqual([])
     // A planted one is caught.
-    expect(unlistedNetworkClients({ dependencies: { '@slack/bolt': '4', 'discord.js': '14' } })).toEqual(['@slack/bolt'])
+    expect(unlistedNetworkClients({ dependencies: { '@slack/bolt': '4', react: '19' } })).toEqual(['@slack/bolt'])
   })
 
   it('lists every internet address in the code as contacted, a link or this computer', () => {

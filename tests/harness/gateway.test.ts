@@ -167,7 +167,7 @@ describe('harness gateway: scope and model prefs', () => {
       ...['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'].map((effort) => ({ model: `opus:${effort}` })),
       { model: 'opus', effort: 'high' }
     ]
-    for (const purpose of ['composer', 'default', 'delegate_task', 'definition', 'workflow', 'channel_model', 'cli_model', 'turn'] as const)
+    for (const purpose of ['composer', 'default', 'delegate_task', 'definition', 'workflow', 'cli_model', 'turn'] as const)
       for (const selection of representations)
         expect(codeOf(() => harness.resolve({ instanceId: 'claude', ...selection }, { kind: 'device' }, purpose)), `${purpose} ${JSON.stringify(selection)}`).toBe('model_hidden')
     for (const selection of representations)

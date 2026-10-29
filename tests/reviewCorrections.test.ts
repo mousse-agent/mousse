@@ -191,7 +191,7 @@ describe('Review: protocol live events and fan-out', () => {
     await cli.close()
   })
 
-  it('daemon-owned channel thread creation is observed by an already-connected GUI client', async () => {
+  it('daemon-owned thread creation is observed by an already-connected GUI client', async () => {
     const gui = await client('gui')
     const seenNames: string[] = []
     const unsub = gui.onEvent((ev) => {
@@ -203,10 +203,10 @@ describe('Review: protocol live events and fan-out', () => {
       }
     })
 
-    // ChannelSessionManager and ScheduledJobService use the store directly.
-    mms.threads.createThread('Telegram: live channel thread')
+    // ScheduledJobService uses the store directly.
+    mms.threads.createThread('Scheduled: live thread')
     await vi.waitFor(() => {
-      expect(seenNames).toContain('Telegram: live channel thread')
+      expect(seenNames).toContain('Scheduled: live thread')
     })
 
     unsub()

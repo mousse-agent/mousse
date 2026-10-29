@@ -790,8 +790,6 @@ describe('remote composer methods on a real profile', () => {
     const turn = vi.spyOn(mms.orchestrator, 'isTurnActive').mockReturnValue(true)
     expect(backend.isActive(thread.id)).toBe(true)
     turn.mockRestore()
-    vi.spyOn(mms.orchestrator, 'isChannelTurnActive').mockReturnValue(true)
-    expect(backend.isActive(thread.id)).toBe(true)
   })
 
   it('a thread whose turn is admitted or claimed but not running yet is active too', async () => {

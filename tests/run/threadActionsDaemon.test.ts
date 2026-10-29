@@ -933,7 +933,7 @@ describe('thread_send, thread_wait, thread_interrupt and thread_steer end to end
   })
 
   describe('callers that are capped', () => {
-    it('a thread a channel drives is held at lineage: send and steer are not listed; they and wait are refused for an unrelated thread, and nothing reaches the target', async () => {
+    it('a thread a remote send drives is held at lineage: send and steer are not listed; they and wait are refused for an unrelated thread, and nothing reaches the target', async () => {
       const seen: Record<string, unknown> = {}
       const w = world(async (_input, mcp) => {
         seen.listed = await names(mcp!)
@@ -943,7 +943,7 @@ describe('thread_send, thread_wait, thread_interrupt and thread_steer end to end
         return 'ok'
       })
       await w.attach()
-      // What the first channel turn of a thread stores (`Thread.accessCeiling`), whatever the profile says.
+      // What the first remote turn of a thread stores (`Thread.accessCeiling`), whatever the profile says.
       w.d.store.updateThreadMeta(w.parent.id, { accessCeiling: 'lineage' })
       await w.d.orch.send(GO, false, { threadId: w.parent.id, clientRequestId: 'go' })
       expect(w.credentials.listForThread(w.parent.id).map((row) => row.accessLevel)).toEqual(['lineage'])

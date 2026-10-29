@@ -290,9 +290,9 @@ describe('agent actions in the Run Engine (SPEC §15.1)', () => {
       expect(readRunResultText(fx.store, 'target', second.runId)).toBe('second answer')
     })
 
-    it('is not kept for a person\'s own turns (a thread\'s answers to its user, a channel\'s), only for what an agent can wait on', async () => {
+    it('is not kept for a person\'s own turns (a thread\'s answers to its user, a remote send\'s), only for what an agent can wait on', async () => {
       fx = delegationFixture()
-      for (const source of ['gui', 'channel', 'cli', 'protocol', 'schedule']) {
+      for (const source of ['gui', 'remote', 'cli', 'protocol', 'schedule']) {
         const run = await mcpRun(`thread-${source}`, `run-${source}`, { source })
         fx.finish(run.runId, `the answer to ${source}`)
         expect(readRunResultText(fx.store, `thread-${source}`, run.runId), source).toBeUndefined()

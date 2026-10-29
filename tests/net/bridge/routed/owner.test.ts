@@ -485,7 +485,7 @@ describe('a routed call runs as a person on another computer', () => {
     const send = vi
       .spyOn(f.mms.orchestrator, 'send')
       .mockResolvedValue({ message: '', actions: [], runId: 'run-1', accepted: true } as never)
-    const channel = vi.spyOn(f.mms.orchestrator, 'runChannelTurn')
+    const remote = vi.spyOn(f.mms.orchestrator, 'runRemoteTurn')
     await ok('orchestrator.send', { threadId: t.id, content: 'hello', clientRequestId: 'req-1' })
     expect(send).toHaveBeenCalledTimes(1)
     expect(send.mock.calls[0][2]).toMatchObject({
@@ -497,7 +497,7 @@ describe('a routed call runs as a person on another computer', () => {
       sentFrom: { node: f.callerNode },
       actor: { kind: 'user', via: 'bridge', node: f.callerNode, maxPermissionMode: 'accept_edits' }
     })
-    expect(channel).not.toHaveBeenCalled()
+    expect(remote).not.toHaveBeenCalled()
     expect(f.mms.threads.getThread(t.id)!.accessCeiling).toBeUndefined()
     // A device the owner trusted with Full access is limited to nothing the thread does not already have.
     vi.restoreAllMocks()

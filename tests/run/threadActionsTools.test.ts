@@ -167,7 +167,7 @@ describe('tools that act on other threads (SPEC §15.1)', () => {
       expect(host.sendToThread).toHaveBeenCalledTimes(1)
     })
 
-    it('a channel or bot thread\'s caller is held at lineage, whatever the profile says, and is refused all four', async () => {
+    it('a capped or bot thread\'s caller is held at lineage, whatever the profile says, and is refused all four', async () => {
       const { call, denied, host, ledger } = await world({ level: 'manage' })
       // The grant such a thread's turns carry (`Thread.accessCeiling`, the bot wall) is lineage.
       for (const [name, args] of [...ACTING, ['thread_wait', { threadId: 'target', runId: 'any' }] as [string, Record<string, unknown>]])

@@ -208,9 +208,9 @@ describe('thread-scoped orchestrator conversation events', () => {
     expect(legacySyncs).toHaveLength(0)
   })
 
-  it('runs background channel turns with live events', async () => {
+  it('runs remote turns with live events', async () => {
     const selected = store.createThread('Selected thread')
-    const thread = store.createThread('Channel thread')
+    const thread = store.createThread('Remote thread')
     orch.bindThread(selected.id, [], undefined, [])
 
     const adapter = piAdapter(() => 'live answer')
@@ -235,16 +235,16 @@ describe('thread-scoped orchestrator conversation events', () => {
     orch.on('turn-started', () => lifecycle.push('started'))
     orch.on('turn-completed', () => lifecycle.push('completed'))
 
-    const result = await orch.runChannelTurn(thread.id, 'from Telegram', store)
+    const result = await orch.runRemoteTurn(thread.id, 'from a phone', store)
 
     expect(result).toMatchObject({ text: 'live answer', silent: false })
     expect(lifecycle).toEqual(['started', 'completed'])
     expect(adds.every((event) => event.threadId === thread.id)).toBe(true)
-    expect(adds.some((event) => event.message.role === 'user' && event.message.content === 'from Telegram')).toBe(true)
+    expect(adds.some((event) => event.message.role === 'user' && event.message.content === 'from a phone')).toBe(true)
     expect(adds.some((event) => event.message.kind === 'thinking')).toBe(true)
     expect(adds.some((event) => event.message.kind === 'mcp_tool_call')).toBe(true)
     expect(updates.some((event) => event.message.toolCall?.status === 'complete')).toBe(true)
     expect(updates.some((event) => event.message.role === 'assistant' && event.message.content === 'live answer')).toBe(true)
-    expect(orch.getMessages(thread.id).some((message) => message.content === 'from Telegram')).toBe(true)
+    expect(orch.getMessages(thread.id).some((message) => message.content === 'from a phone')).toBe(true)
   })
 })
