@@ -243,6 +243,12 @@ function ProviderAssetIcon({
   )
 }
 
+/** The maker of a provider's own models, as a model brand id: Claude Code's models are Anthropic's. */
+export function providerMakerId(providerId: string): string {
+  const id = normalizeProviderId(providerId)
+  return id === 'claude' ? 'anthropic' : id
+}
+
 /**
  * Maps a provider id to a logo key. Accepts legacy `llmProvider` names
  * (`codex`, `claude-subscription`), provider instance ids (`claude`,
