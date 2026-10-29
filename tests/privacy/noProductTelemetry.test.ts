@@ -1,5 +1,5 @@
 /**
- * Mousse itself collects no usage data (Settings → General → Privacy). The guard: no analytics or
+ * Mousse itself collects no usage data. The guard: no analytics or
  * crash-reporting package, every internet address in the code listed in `OUTBOUND` (what Mousse
  * contacts and what it sends, or a link it never contacts), and no listed service whose code is gone.
  */

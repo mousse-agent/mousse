@@ -308,8 +308,8 @@ export function NetDevicesSection() {
         <SettingsRow
           title="Works on threads"
           description={worksOnThreads(selfDevice)
-            ? 'On · this computer can open and change threads on your other computers that share them'
-            : 'Off · this computer cannot work on threads on your other computers, which is why theirs are not listed. The computer that manages your devices can turn it on for this one.'}
+            ? <span title="This computer can open and change threads on your other computers that share them.">On · can work on your other computers’ threads</span>
+            : <span title="This computer cannot work on threads on your other computers, which is why theirs are not listed. The computer that manages your devices can turn it on for this one.">Off · the computer that manages your devices can turn it on</span>}
         />
       )}
       {self && status?.enabled && unlocked && status.workOnThreads !== undefined && (

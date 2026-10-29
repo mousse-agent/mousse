@@ -1528,31 +1528,3 @@ html[data-theme='high-contrast'] .toggle-switch.on::after {
   background: var(--accent);
   flex-shrink: 0;
 }
-
-/* Settings → General → Privacy: the services Mousse contacts, and each provider's agent telemetry. */
-.privacy-list {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-8);
-  margin: 0;
-  padding: 0;
-  list-style: none;
-}
-
-.privacy-list li {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-
-.privacy-list-name {
-  font-size: var(--settings-fs-small);
-  font-weight: 500;
-}
-
-.privacy-list-detail {
-  font-size: var(--settings-fs-small);
-  line-height: 1.5;
-  color: color-mix(in srgb, var(--text-primary) 60%, transparent);
-  overflow-wrap: anywhere;
-}

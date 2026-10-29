@@ -8,7 +8,6 @@ import { describePermissionMode, PERMISSION_MODES } from '../../../shared/permis
 import { Select } from '../ui/Select'
 import { SettingsGroup, SettingsRow, Switch } from './SettingsRow'
 import { RunSettingsGroup } from './RunSettingsGroup'
-import { PrivacySettingsGroup } from './PrivacySettingsGroup'
 
 /** Set at build time from package.json (electron.vite.config.ts). */
 declare const __MOUSSE_VERSION__: string | undefined
@@ -190,7 +189,7 @@ export function GeneralSettings({
       <SettingsGroup title="Permissions" icon={ShieldCheck}>
         <SettingsRow
           title="Default permission mode"
-          description="What an agent may do in a new chat without asking. Each chat can change it from the composer."
+          description={<span title="What an agent may do in a new chat without asking. Each chat can change it from the composer.">What an agent may do without asking in new chats.</span>}
           control={
             <Select
               ariaLabel="Default permission mode"
@@ -218,7 +217,7 @@ export function GeneralSettings({
         />
         <SettingsRow
           title="All threads on my other computers"
-          description="Notify when any thread on another of your computers needs you or finishes. Off: only threads you started or sent a message in from this computer, or opened here in the last 7 days."
+          description={<span title="Off: only threads you started or sent a message in from this computer, or opened here in the last 7 days.">Notify when any thread on another computer needs you or finishes.</span>}
           control={
             <Switch
               label="Notify for all threads on my other computers"
@@ -228,8 +227,6 @@ export function GeneralSettings({
           }
         />
       </SettingsGroup>
-
-      <PrivacySettingsGroup />
 
       <SettingsGroup title="About" icon={Info}>
         <AboutRow />

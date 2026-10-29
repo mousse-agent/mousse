@@ -216,7 +216,7 @@ async function run() {
     trash: valueOf('storage-auto-empty-select'), inactive: valueOf('storage-inactive-select'), captures: valueOf('storage-captures-select'),
     deleted: $('#storage-remove-deleted-switch')?.getAttribute('aria-checked'), merged: $('#storage-merged-switch')?.getAttribute('aria-checked'),
     ruleRows: ['storage-auto-empty', 'storage-remove-deleted', 'storage-inactive', 'storage-merged', 'storage-captures'].map((id) => ({ id, text: text(tid(id)) })),
-    keepWhen: text(tid('storage-keep-when')),
+    worktreesNote: text(document.querySelector('#storage-worktrees .settings-group-desc')),
     groups: ['storage-trash', 'storage-worktrees', 'storage-browser', 'storage-usage', 'storage-cleanup'].map((id) => Boolean(document.getElementById(id))),
     machineSelect: Boolean($(tid('storage-machine-select'))),
     measuredAt: text(tid('storage-measured-at')),
