@@ -4,6 +4,7 @@ import { ThreadJournal } from '../data/ThreadJournal'
 import { ThreadWorkspaceManager } from '../workspace/ThreadWorkspaceManager'
 import { atomicWriteJsonSync } from '../data/AtomicFs'
 import { git } from './git'
+import type { Snapshot } from './snapshots'
 import { UndoRetentionService } from './UndoRetentionService'
 
 function canonical(value: unknown): string {
@@ -56,13 +57,34 @@ export class ChangeReceiptService {
     return receipt
   }
 
+  /** Records an existing receipt again, as recovery does after an interruption: the same change, with its refs and workspace cache refreshed. */
+  replay(workspacePath: string, receipt: ChangeReceipt): ChangeReceipt {
+    const { id: _id, workspaceId: _workspaceId, generation: _generation, retainedRefs: _refs, createdAt: _createdAt, ...input } = receipt
+    return this.record(workspacePath, input)
+  }
+
   private refreshWorkspace(workspacePath: string, receipt: ChangeReceipt): void {
     const manager = new ThreadWorkspaceManager(this.threadDirectory)
     const workspace = manager.load()
     if (!workspace || git(workspace.worktreePath, ['rev-parse', '--show-toplevel']) !== git(workspacePath, ['rev-parse', '--show-toplevel'])) return
     if ((workspace.generation ?? 0) > receipt.generation) return
     git(workspacePath, ['update-ref', workspace.retainedRef, receipt.afterSha])
-    atomicWriteJsonSync(manager.workspacePath, { ...workspace, headSha: receipt.afterSha, generation: receipt.generation })
+    // A snapshot receipt moves the pin and the latest snapshot; HEAD is whatever the thread's Git left it at.
+    const snapshot = receipt.git ? { snapshotSha: receipt.afterSha } : {}
+    atomicWriteJsonSync(manager.workspacePath, { ...workspace, ...snapshot, headSha: receipt.git ? receipt.git.headAfter ?? workspace.headSha : receipt.afterSha, generation: receipt.generation })
+  }
+
+  /**
+   * Makes `snapshot` the latest one without a receipt, for a start that found nothing outside Mousse's records
+   * changed: `retainedRef` keeps pointing at the newest snapshot, so the next turn compares against it.
+   */
+  adoptSnapshot(workspacePath: string, snapshot: Snapshot): void {
+    const manager = new ThreadWorkspaceManager(this.threadDirectory)
+    const workspace = manager.load()
+    if (!workspace || git(workspace.worktreePath, ['rev-parse', '--show-toplevel']) !== git(workspacePath, ['rev-parse', '--show-toplevel'])) return
+    if (workspace.snapshotSha === snapshot.sha) return
+    git(workspacePath, ['update-ref', workspace.retainedRef, snapshot.sha])
+    atomicWriteJsonSync(manager.workspacePath, { ...workspace, snapshotSha: snapshot.sha, headSha: snapshot.head ?? workspace.headSha })
   }
 
   isPublished(receipt: ChangeReceipt): boolean {

@@ -53,7 +53,7 @@ const OPERATION_OF: Record<(typeof IN_PROGRESS_GIT_MARKERS)[number], PendingChan
 }
 /** Mousse's own files in a checkout; never part of the user's pending changes. */
 const MOUSSE_DIRECTORY = '.mousse'
-const NOT_MOUSSE = `:(exclude)${MOUSSE_DIRECTORY}`
+export const NOT_MOUSSE = `:(exclude)${MOUSSE_DIRECTORY}`
 
 /** Git output exactly as printed (NUL-separated lists keep leading and trailing spaces), optionally fed `input`. */
 function gitRaw(cwd: string, args: string[], env?: NodeJS.ProcessEnv, input?: string): string {
@@ -86,12 +86,17 @@ export function inspectPendingChanges(cwd: string): PendingChanges {
     if (isConflict(entry)) unmerged.push(entry.path)
     else files.push(entry.path)
   }
-  let operation: PendingChanges['operation']
-  for (const marker of IN_PROGRESS_GIT_MARKERS) {
-    const resolved = tryGit(top, ['rev-parse', '--git-path', marker])
-    if (resolved.ok && existsSync(resolve(top, resolved.stdout))) { operation = OPERATION_OF[marker]; break }
-  }
+  const operation = operationInProgress(top)
   return { top, files: [...unmerged, ...files], unmerged, ...(operation ? { operation } : {}) }
+}
+
+/** The merge, revert, cherry-pick or rebase that waits for the user in a checkout, if any. */
+export function operationInProgress(cwd: string): PendingChanges['operation'] {
+  for (const marker of IN_PROGRESS_GIT_MARKERS) {
+    const resolved = tryGit(cwd, ['rev-parse', '--git-path', marker])
+    if (resolved.ok && existsSync(resolve(cwd, resolved.stdout))) return OPERATION_OF[marker]
+  }
+  return undefined
 }
 
 /** Pending paths Mousse sets aside: not `.mousse/`, and not a nested repository (listed as `dir/`), which stays in place. */
@@ -229,7 +234,7 @@ function occupied(path: string): boolean {
   try { lstatSync(path); return true } catch { return false }
 }
 
-function treeOf(top: string, revision: string): string {
+export function treeOf(top: string, revision: string): string {
   return git(top, ['rev-parse', `${revision}^{tree}`])
 }
 
@@ -238,7 +243,7 @@ function treePaths(top: string, tree: string): string[] {
 }
 
 /** Three-way merge of `theirs` onto `ours` from `base`, without touching the checkout. */
-function mergeTrees(top: string, base: string, ours: string, theirs: string): { tree: string } | { conflicts: string[] } {
+export function mergeTrees(top: string, base: string, ours: string, theirs: string): { tree: string } | { conflicts: string[] } {
   const result = tryGit(top, ['merge-tree', '--write-tree', '--name-only', '--no-messages', `--merge-base=${base}`, ours, theirs])
   const [tree, ...files] = result.stdout.split(/\r?\n/)
   if (result.ok && tree) return { tree }

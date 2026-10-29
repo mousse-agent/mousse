@@ -841,7 +841,7 @@ function gitPaths(ctx: HandlerContext, root: string, value: unknown): string[] {
 async function runUserThreadGitAction<T>(
   ctx: HandlerContext,
   target: Required<Pick<GitMutationTarget, 'root' | 'directory' | 'workspace'>>,
-  extra: Pick<RunThreadActionOptions, 'onFailure' | 'externalEffects' | 'signal'>,
+  extra: Pick<RunThreadActionOptions, 'externalEffects' | 'signal'>,
   mutate: () => Promise<T>
 ): Promise<T> {
   const { root, directory, workspace } = target
@@ -2151,8 +2151,8 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
           mkdirSync(cwd, { recursive: true })
           cwd = assertEpisodePath(directory!, binding.workspaceRelativePath)
         }
-        // The user's pending edits are saved as their own checkpoint first; the terminal's action covers only what it changes.
-        const startSha = actions && actionOptions ? (await actions.saveUserChanges(actionOptions)).startSha : undefined
+        // Edits made outside the terminal are recorded as their own action first; the terminal's action covers only what it changes.
+        const startSha = actions && actionOptions ? (await actions.recordOutsideChanges(actionOptions)).startSha : undefined
         if (actions && actionOptions) actions.beginTurn(actionOptions, startSha!)
         ptyId = ctx.mms.ptyManager.create(agentId, cwd, command, { threadId, env, shellArgs,
           ownership: lease ? { assert: () => assertHeldThreadLease(directory!, lease), heartbeat: () => { heartbeatExecutionLease(lease) },
@@ -2955,7 +2955,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const ran = await localActionRun(ctx, operation.threadId, 'undo', async () =>
         latest?.scope === 'conversation'
           ? new ConversationActionService(operation.threadDirectory).apply(branchId, 'undo', operation.currentGeneration, expectedTurnId, validate, restore)
-          : await new UndoService(operation.threadDirectory, { onPendingChangesKept: ctx.mms.orchestrator.pendingChangesKeptNotice(operation.threadId) }).undoLatest(branchId, workspace!.worktreePath, undefined, operation.currentGeneration, restore, 'undo', expectedTurnId, validate),
+          : await new UndoService(operation.threadDirectory).undoLatest(branchId, workspace!.worktreePath, undefined, operation.currentGeneration, restore, 'undo', expectedTurnId, validate),
       { gate, outcome: { undoStrategy } })
       if ('review' in ran) return ran.review
       const { runId, result: action } = ran
@@ -2972,7 +2972,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const target = new ThreadActionService(operation.threadDirectory).get(actionId)
       const reviewedDiffSha = asReviewedDiffSha(p)
       const ran = await localActionRun(ctx, operation.threadId, 'revert', () =>
-        new CodeRevertService(operation.threadDirectory, { onPendingChangesKept: ctx.mms.orchestrator.pendingChangesKeptNotice(operation.threadId) }).revertCode(actionId, workspace.worktreePath, operation.currentGeneration),
+        new CodeRevertService(operation.threadDirectory).revertCode(actionId, workspace.worktreePath, operation.currentGeneration),
       { gate: () => restoreGate(ctx, { threadId: operation.threadId, workspace, target, kind: 'revert', reviewedDiffSha }) })
       if ('review' in ran) return ran.review
       const { runId, result: action } = ran
@@ -2998,7 +2998,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       }
       await ensureWorkspaceMaterialized(ctx, operation.threadId, operation.projectPath ?? undefined)
       if (!workspace || workspace.lifecycle !== 'ready') throw new DomainRpcError('workspace_not_ready', 'Thread workspace is not ready')
-      const action = await new RedoService(operation.threadDirectory, { onPendingChangesKept: ctx.mms.orchestrator.pendingChangesKeptNotice(operation.threadId) }).redoLatest(branchId, workspace.worktreePath, operation.currentGeneration, (original) => {
+      const action = await new RedoService(operation.threadDirectory).redoLatest(branchId, workspace.worktreePath, operation.currentGeneration, (original) => {
         if (original.nativeContextStartBoundary) ctx.mms.orchestrator.restoreConversationActionEnd(operation.threadId, original.presentationMessageStart, original.presentationMessageEnd, original.nativeContextBoundary)
       })
       return { action }
@@ -3031,7 +3031,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       await ensureWorkspaceMaterialized(ctx, operation.threadId, operation.projectPath)
       const workspace = new ThreadWorkspaceManager(operation.threadDirectory).load()
       if (!workspace || workspace.lifecycle !== 'ready') throw new DomainRpcError('workspace_not_ready', 'Thread workspace is not ready')
-      const branches = new ConversationBranchService(operation.threadDirectory, { onPendingChangesKept: ctx.mms.orchestrator.pendingChangesKeptNotice(operation.threadId) })
+      const branches = new ConversationBranchService(operation.threadDirectory)
       const current = branches.list().find((branch) => branch.lifecycle === 'active')
       const target = loadConversationState(operation.threadDirectory, branchId)
       const branch = await branches.activate(workspace.worktreePath, branchId, operation.currentGeneration, () => {
@@ -3298,9 +3298,9 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       if (thread) {
         // The branch is checkpointed: an amend would replace the recorded head, so it is refused before Git runs.
         if (amend) throw gitThreadRules.create('git_amend_in_thread')
-        // Everything is committed through the user's hooks as one commit; a rejected commit is recorded, never swept in with --no-verify.
+        // Everything is committed through the user's hooks as one commit; a rejected commit is recorded as a failed action.
         await followedGitAction(ctx, p, target.root, 'commit', (request, signal) =>
-          runUserThreadGitAction(ctx, thread, { onFailure: 'record', signal }, () => ctx.mms.gitService.commit(target.root, gitUserAction(ctx, 'Commit'), message, { all: true, expectedBranch, ...request })))
+          runUserThreadGitAction(ctx, thread, { signal }, () => ctx.mms.gitService.commit(target.root, gitUserAction(ctx, 'Commit'), message, { all: true, expectedBranch, ...request })))
       } else await followedGitAction(ctx, p, target.root, 'commit', (request) => ctx.mms.gitService.commit(target.root, gitUserAction(ctx, amend ? 'Amend the last commit' : 'Commit'), message, { amend, expectedBranch, ...request }))
       return gitStatusResult(ctx, target.root)
     }

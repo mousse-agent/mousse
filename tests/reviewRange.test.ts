@@ -24,19 +24,21 @@ const edit = (path: string, value: string) => () => writeFileSync(join(cwd, path
 const paths = async (resolved: NonNullable<ReturnType<typeof resolveReviewScope>>) => (await listChangedFiles(resolved.cwd, resolved.range)).files.map((file) => file.path)
 
 describe('resolveReviewScope', () => {
-  it('maps a completed turn to its own start and end commits', async () => {
-    const before = git(cwd, 'rev-parse', 'HEAD')
+  it('maps a completed turn to its own start and end snapshots, leaving HEAD where it was', async () => {
+    const head = git(cwd, 'rev-parse', 'HEAD')
     const { action } = await actions.runCheckpointedAction(actionOptions(cwd, turnId(1)), edit('one.txt', '1\n'))
     const resolved = resolveReviewScope(f.thread, turn(1))!
     expect(resolved.unavailable).toBeUndefined()
     expect(resolved.cwd).toBe(cwd)
-    expect(resolved.range).toEqual({ from: { kind: 'commit', sha: before }, to: { kind: 'commit', sha: action.endSha } })
+    expect(resolved.range).toEqual({ from: { kind: 'commit', sha: action.startSha }, to: { kind: 'commit', sha: action.endSha } })
+    expect(action.endSha).not.toBe(head)
+    expect(git(cwd, 'rev-parse', 'HEAD')).toBe(head)
     expect(await paths(resolved)).toEqual(['one.txt'])
   })
 
   it('resolves a stopped turn between two completed turns on its own pair, and the next turn still resolves', async () => {
-    await actions.runCheckpointedAction(actionOptions(cwd, turnId(1)), edit('one.txt', '1\n'))
-    const stoppedStart = git(cwd, 'rev-parse', 'HEAD')
+    const first = await actions.runCheckpointedAction(actionOptions(cwd, turnId(1)), edit('one.txt', '1\n'))
+    const stoppedStart = first.action.endSha
     const options = actionOptions(cwd, turnId(2))
     actions.beginTurn(options, stoppedStart)
     edit('two.txt', 'partial\n')()

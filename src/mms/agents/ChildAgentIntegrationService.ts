@@ -4,6 +4,7 @@ import { ThreadJournal } from '../data/ThreadJournal'
 import { ThreadActionService } from '../actions/ThreadActionService'
 import { withGitMutationLocks } from '../actions/GitOperationCoordinator'
 import { changedPaths, commitParents, git, MOUSSE_COMMIT_ENV, refuseUnsafeChanges, requireClean, tryGit, withPendingChangesSetAside, type PendingChangesOwnerOptions } from '../actions/git'
+import { sameTree, takeSnapshot } from '../actions/snapshots'
 import { ChangeReceiptService } from '../actions/ChangeReceiptService'
 import type { ThreadLeaseHandle } from '../queue/ThreadExecutionLease'
 import type { WorkspaceActor } from '../../shared/workspace'
@@ -66,7 +67,7 @@ export class ChildAgentIntegrationService {
         const head = git(request.threadWorkspace, ['rev-parse', 'HEAD'])
         const parents = commitParents(request.threadWorkspace, head)
         if (previous?.afterSha === head || (parents[0] === expected.preMergeSha && parents[1] === expected.workerHeadSha)) {
-          return this.completeIntegration(request, request.operationId!, expected.preMergeSha, expected.workerHeadSha, head)
+          return this.adoptSnapshot(request, this.completeIntegration(request, request.operationId!, expected.preMergeSha, expected.workerHeadSha, head))
         }
         if (head !== expected.preMergeSha) throw new Error('Integration recovery HEAD does not match the original operation.')
         // Git was not applied. An explicit retry may execute this same pinned intent once.
@@ -85,14 +86,15 @@ export class ChildAgentIntegrationService {
         workerHeadSha = git(request.workerWorktree, ['rev-parse', 'HEAD'])
         if (request.expectedWorkerHead && request.expectedWorkerHead !== workerHeadSha) throw new Error('Worker HEAD changed after readiness validation.')
       }
-      if (workerHeadSha === request.spawnBaseSha) throw new Error('Worker produced no authored commit.')
+      // A worker's result is a snapshot of its files (no commit of its own), so "no change" is read from the files.
+      if (workerHeadSha === request.spawnBaseSha || sameTree(request.workerWorktree, workerHeadSha, request.spawnBaseSha)) throw new Error('Worker produced no authored commit.')
       const preMergeSha = git(request.threadWorkspace, ['rev-parse', 'HEAD'])
       if (preMergeSha !== expectedDestination) throw new Error('Integration destination HEAD changed after readiness validation.')
       if (!tryGit(request.workerWorktree, ['merge-base', '--is-ancestor', request.spawnBaseSha, workerHeadSha]).ok) throw new Error('Worker history no longer descends from its spawn base.')
       const operationId = request.operationId ?? randomUUID()
       // Uncommitted edits in the thread worktree (the user's, or the running turn's own) are set aside for the merge
       // and put back on top of it, still uncommitted, so they stay with whoever made them.
-      return withPendingChangesSetAside<ChildIntegrationRecord>(request.threadWorkspace, { label: 'Thread workspace', operation: 'merging the subagent’s result', discard: true, onKept: this.options.onPendingChangesKept }, () => {
+      return this.adoptSnapshot(request, await withPendingChangesSetAside<ChildIntegrationRecord>(request.threadWorkspace, { label: 'Thread workspace', operation: 'merging the subagent’s result', discard: true, onKept: this.options.onPendingChangesKept }, () => {
         this.journal.append({
           operationId,
           operationType: 'child-integration',
@@ -113,8 +115,17 @@ export class ChildAgentIntegrationService {
         }
         const integrationSha = git(request.threadWorkspace, ['rev-parse', 'HEAD'])
         return this.completeIntegration(request, operationId, preMergeSha, workerHeadSha, integrationSha)
-      })
+      }))
     }, request.signal, request.heldThreadLease)
+  }
+
+  /**
+   * The merge changed the thread's files, so the latest snapshot is taken again once the changes set aside for it are
+   * back; the next turn then compares against it instead of recording the merged files as outside changes.
+   */
+  private adoptSnapshot(request: ChildIntegrationRequest, record: ChildIntegrationRecord): ChildIntegrationRecord {
+    new ChangeReceiptService(this.threadDirectory).adoptSnapshot(request.threadWorkspace, takeSnapshot(request.threadWorkspace, { reason: `subagent result ${request.agentId}`, operationId: record.operationId }))
+    return record
   }
   private completeIntegration(request: ChildIntegrationRequest, operationId: string, preMergeSha: string, workerHeadSha: string, integrationSha: string): ChildIntegrationRecord {
       const actions = this.actions.list()

@@ -8,6 +8,7 @@ import { assertGitAllowed, rethrowGitPolicyError, type UserAction } from '../git
 import { safeWorktreeGit } from '../worktree/WorktreeManager'
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { assertHeldThreadLease } from '../actions/GitOperationCoordinator'
+import { moveFiles } from '../actions/snapshots'
 import { atomicWriteJsonSync } from '../data/AtomicFs'
 import { ThreadJournal } from '../data/ThreadJournal'
 import { getMousseHomeDir } from '../data/paths'
@@ -209,8 +210,12 @@ export class ThreadWorkspaceManager {
      * turned on here, under the repository's lease and after every check that can refuse, so a refused start leaves
      * the setting as it was; the callback runs when this call turned it on. Without it, a repository with the
      * setting off is refused. `userRequested` is that agreement as the central Git check sees it.
+     *
+     * `snapshot`: a workspace snapshot (a fork's source checkpoint) whose files are written into the new worktree
+     * after it is made at `startSha`, which is the commit the snapshot was taken on; the snapshot becomes the
+     * thread's latest one, so the first turn starts from it instead of recording it as outside changes.
      */
-    options: { untrusted?: boolean; enableWorktreeConfig?: () => void; userRequested?: UserAction } = {}
+    options: { untrusted?: boolean; enableWorktreeConfig?: () => void; userRequested?: UserAction; snapshot?: string } = {}
   ): Promise<ThreadWorkspaceMetadata> {
     const existing = this.load()
     if (existing?.lifecycle === 'ready') return this.verify(existing)
@@ -262,7 +267,8 @@ export class ThreadWorkspaceManager {
       } satisfies ThreadWorkspaceMetadata)
       if (options.untrusted) await addUntrustedWorktree(repository.primaryCheckoutPath, ['-b', branch, worktreePath, head], worktreePath, options.enableWorktreeConfig, options.userRequested)
       else git(repository.primaryCheckoutPath, ['worktree', 'add', '-b', branch, worktreePath, head])
-      git(repository.primaryCheckoutPath, ['update-ref', retainedRef, head])
+      if (options.snapshot) moveFiles(worktreePath, git(worktreePath, ['rev-parse', 'HEAD^{tree}']), git(worktreePath, ['rev-parse', `${options.snapshot}^{tree}`]))
+      git(repository.primaryCheckoutPath, ['update-ref', retainedRef, options.snapshot ?? head])
       const metadata: ThreadWorkspaceMetadata = {
         schemaVersion: 1,
         threadId,
@@ -278,6 +284,7 @@ export class ThreadWorkspaceManager {
         projectRelativeSubdirectory: repository.projectRelativeSubdirectory,
         baseSha: head,
         headSha: head,
+        ...(options.snapshot ? { snapshotSha: options.snapshot } : {}),
         lifecycle: 'ready',
         lastVerifiedAt: new Date().toISOString(),
         ...(options.untrusted ? { untrusted: true as const } : {})
@@ -328,7 +335,7 @@ export class ThreadWorkspaceManager {
       if (verified.lifecycle === 'ready') {
         const ready = this.verify(metadata)
         if (ready.lifecycle !== 'ready') throw new Error('Workspace changed while acquiring recovery ownership.')
-        git(ready.worktreePath, ['update-ref', ready.retainedRef, ready.headSha])
+        git(ready.worktreePath, ['update-ref', ready.retainedRef, ready.snapshotSha ?? ready.headSha])
         atomicWriteJsonSync(this.workspacePath, ready)
         this.finishProvisionRecovery(ready)
         return ready
@@ -350,12 +357,13 @@ export class ThreadWorkspaceManager {
         atomicWriteJsonSync(this.workspacePath, restored)
         return restored
       }
-      const retained = git(repository.gitTopLevel, ['rev-parse', '--verify', metadata.retainedRef])
-      const branchHead = git(repository.gitTopLevel, ['rev-parse', '--verify', metadata.branch])
-      if (retained !== branchHead) throw new Error('Workspace branch and retained ref disagree; manual recovery is required.')
+      // The files come from the retained snapshot; the branch only supplies HEAD (the agent may have moved it).
+      const retained = git(repository.gitTopLevel, ['rev-parse', '--verify', `${metadata.retainedRef}^{commit}`])
+      git(repository.gitTopLevel, ['rev-parse', '--verify', metadata.branch])
       mkdirSync(dirname(metadata.worktreePath), { recursive: true })
       if (metadata.untrusted) await addUntrustedWorktree(repository.gitTopLevel, [metadata.worktreePath, metadata.branch], metadata.worktreePath)
       else git(repository.gitTopLevel, ['worktree', 'add', metadata.worktreePath, metadata.branch])
+      moveFiles(metadata.worktreePath, git(metadata.worktreePath, ['rev-parse', 'HEAD^{tree}']), git(metadata.worktreePath, ['rev-parse', `${retained}^{tree}`]))
       const restored = this.verify(metadata)
       atomicWriteJsonSync(this.workspacePath, restored)
       this.finishProvisionRecovery(restored)
@@ -410,6 +418,11 @@ export class ThreadWorkspaceManager {
     }
   }
 
+  /** An operation that started and did not finish, so a person or recovery has to settle it before the next one. */
+  hasPendingOperation(): boolean {
+    return [...this.journal.latestByOperation().values()].some((entry) => ['prepared', 'git_applied', 'context_pending', 'recovery_required'].includes(entry.state))
+  }
+
   verify(metadata = this.load()): ThreadWorkspaceMetadata {
     if (!metadata) throw new Error('Thread workspace metadata is missing')
     if (!existsSync(metadata.worktreePath)) {
@@ -417,10 +430,10 @@ export class ThreadWorkspaceManager {
       return missing
     }
     try {
-      const branch = git(metadata.worktreePath, ['branch', '--show-current'])
-      const headSha = git(metadata.worktreePath, ['rev-parse', 'HEAD'])
-      if (branch !== metadata.branch) throw new Error(`Expected ${metadata.branch}, found ${branch}`)
-      if (headSha !== metadata.headSha) throw new Error('Workspace HEAD moved outside a recorded operation.')
+      // The branch and HEAD are the agent's to move: ready means the checkout is there and no Mousse operation waits.
+      git(metadata.worktreePath, ['rev-parse', '--show-toplevel'])
+      if (this.hasPendingOperation()) throw new Error('A Mousse operation is waiting for recovery.')
+      const headSha = tryGit(metadata.worktreePath, ['rev-parse', 'HEAD']).stdout || metadata.headSha
       const verified = { ...metadata, lifecycle: 'ready' as const, headSha, lastVerifiedAt: new Date().toISOString() }
       return verified
     } catch {
