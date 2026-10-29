@@ -2,7 +2,8 @@ import { useEffect, useId, useMemo, useRef, useState } from 'react'
 
 import type { CSSProperties, KeyboardEvent } from 'react'
 
-import { Archive, CircleCheck, CircleDotDashed, Edit, Folder, FolderOpen, FolderPlus, FolderKanban, GitBranch, GitPullRequest, ListTree, Loader2, MessageQuestion, MessagesSquare, MessageSquarePlus, Pause, Pin, Search } from '../lib/icons'
+import { Archive, CircleCheck, CircleDotDashed, Edit, Folder, FolderOpen, FolderPlus, FolderKanban, GitBranch, GitPullRequest, ListTree, Loader2, MessageQuestion, MessagesSquare, MessageSquarePlus, Pause, Pin, Search, Shield } from '../lib/icons'
+import { useThreadsAwaitingApproval } from '../hooks/useThreadsAwaitingApproval'
 
 import { isThreadActivityActive, type Thread, type ThreadActivityState, type TurnPause } from '../../shared/types'
 import { pausedStatusLabel } from '../lib/pausedRun'
@@ -225,6 +226,7 @@ function ThreadCardBody({
   projectName,
   projectKey,
   activity,
+  awaitsApproval,
   startedAt,
   pause,
   isRenaming,
@@ -238,6 +240,8 @@ function ThreadCardBody({
   /** What the project's color comes from: the id of its group, so a project on several computers is one color. */
   projectKey?: string
   activity?: ThreadActivityState
+  /** The input it waits for is a permission request. */
+  awaitsApproval?: boolean
   startedAt?: string
   /** This thread's own pause (not one a subagent below it is in): when its limit resets. */
   pause?: Pick<TurnPause, 'until' | 'estimated'>
@@ -272,6 +276,11 @@ function ThreadCardBody({
             <span className="threads-sidebar-card-status threads-sidebar-card-status-waiting">
               <CircleDotDashed size={12} strokeWidth={2} aria-hidden="true" />
               Waiting{age && age !== 'now' ? ` ${age}` : ''}
+            </span>
+          ) : activity === 'awaiting_input' && awaitsApproval ? (
+            <span className="threads-sidebar-card-status threads-sidebar-card-status-input" title="Needs your approval">
+              <Shield size={12} strokeWidth={2} aria-hidden="true" />
+              Approval
             </span>
           ) : activity === 'awaiting_input' ? (
             <span className="threads-sidebar-card-status threads-sidebar-card-status-input">
@@ -338,6 +347,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
   const threadActivity = useAppStore((s) => s.threadActivity)
   const turnStates = useAppStore((s) => s.turnStates)
+  const approvalThreads = useThreadsAwaitingApproval()
 
   const upsertThread = useAppStore((s) => s.upsertThread)
 
@@ -740,6 +750,17 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
       )
     }
 
+    if (state === 'awaiting_input' && threadId && approvalThreads.has(threadId)) {
+      return (
+        <Shield
+          size={14}
+          strokeWidth={2}
+          className="threads-sidebar-status-icon threads-sidebar-status-icon--question"
+          aria-label="Agent needs approval"
+        />
+      )
+    }
+
     if (state === 'awaiting_input') {
       return (
         <MessageQuestion
@@ -929,6 +950,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
             projectName={groupById.get(groupIdOf(thread.projectId) ?? '')?.project.name}
             projectKey={groupIdOf(thread.projectId)}
             activity={rolledUpActivity[thread.id] ?? threadActivity[thread.id]}
+            awaitsApproval={approvalThreads.has(thread.id)}
             startedAt={turnStates[thread.id]?.startedAt}
             pause={turnStates[thread.id]?.phase === 'paused' ? turnStates[thread.id]?.pause : undefined}
             isRenaming={isRenaming}

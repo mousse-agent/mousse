@@ -17,7 +17,7 @@ import { ScheduledJobStore } from '../src/mms/scheduled/ScheduledJobStore'
 import type { PermissionMode } from '../src/shared/permissionMode'
 import type { ScheduledJob } from '../src/shared/types'
 
-const MODES: PermissionMode[] = ['ask', 'accept_edits', 'full']
+const MODES: PermissionMode[] = ['ask', 'accept_edits', 'auto', 'full']
 
 describe('what a run of a job asks for', () => {
   it('is the stricter of the job\'s mode and its ceiling, and nothing when the job has neither', () => {
@@ -129,8 +129,10 @@ describe('the protocol refuses a ceiling', () => {
     expect(asCreateScheduledJobInput({ ...base, permissionMode: 'accept_edits' }).permissionMode).toBe('accept_edits')
     expect(asScheduledJobPatch({ permissionMode: 'full' }).permissionMode).toBe('full')
     expect(asScheduledJobPatch({ permissionMode: null }).permissionMode).toBeNull()
-    expect(() => asCreateScheduledJobInput({ ...base, permissionMode: 'yolo' })).toThrow(/ask\|accept_edits\|full/)
-    expect(() => asScheduledJobPatch({ permissionMode: 'agent' })).toThrow(/ask\|accept_edits\|full/)
+    expect(asCreateScheduledJobInput({ ...base, permissionMode: 'auto' }).permissionMode).toBe('auto')
+    expect(asScheduledJobPatch({ permissionMode: 'auto' }).permissionMode).toBe('auto')
+    expect(() => asCreateScheduledJobInput({ ...base, permissionMode: 'yolo' })).toThrow(/ask\|accept_edits\|auto\|full/)
+    expect(() => asScheduledJobPatch({ permissionMode: 'agent' })).toThrow(/ask\|accept_edits\|auto\|full/)
   })
 
   it('refuses permissionCeiling on a create and on an edit, with any value', () => {
@@ -179,6 +181,19 @@ describe('the store keeps a job within its ceiling', () => {
     // Nothing was stored by the refused calls.
     expect(store.listJobs()).toHaveLength(1)
     expect(store.getJob(job.id)).toMatchObject({ permissionMode: 'ask', permissionCeiling: 'accept_edits' })
+  })
+
+  it('stores Auto within an Auto or Full access ceiling, refuses it under Auto-accept edits, and loads a job saved without a mode', () => {
+    const store = open()
+    const auto = store.createJob({ ...input, permissionMode: 'auto', permissionCeiling: 'full' })
+    const old = store.createJob(input)
+    const reopened = open()
+    expect(reopened.getJob(auto.id)).toMatchObject({ permissionMode: 'auto', permissionCeiling: 'full' })
+    expect(jobPermissionRequest(reopened.getJob(auto.id)!)).toBe('auto')
+    expect(reopened.getJob(old.id)?.permissionMode).toBeUndefined()
+    expect(jobPermissionRequest(reopened.getJob(old.id)!)).toBeUndefined()
+    expect(() => store.createJob({ ...input, permissionMode: 'auto', permissionCeiling: 'accept_edits' })).toThrow(/Auto is wider than Auto-accept edits/)
+    expect(() => store.updateJob(auto.id, { permissionCeiling: 'auto', permissionMode: 'full' })).toThrow(/wider than Auto\./)
   })
 
   it('gives a mode with no ceiling the strictest ceiling, and brings the mode down to it', () => {

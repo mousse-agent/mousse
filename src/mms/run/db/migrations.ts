@@ -437,5 +437,74 @@ CREATE TABLE queue_commands(
 ) STRICT;
 CREATE INDEX queue_commands_thread_status ON queue_commands(thread_id, status);
 `
+  },
+  {
+    version: 16,
+    // SQLite cannot change a CHECK in place: both tables are rebuilt (SQLite's "other kinds of ALTER
+    // TABLE" procedure). Neither has a foreign key, and nothing refers to them.
+    sql: `
+-- The Auto permission mode (issue #419) joins the mode CHECKs of approval rules and requests, between
+-- 'accept_edits' and 'full'. Columns are listed in the same order in each new table and its copy:
+-- approval_requests has version 12's, then permission_mode (version 14).
+CREATE TABLE approval_rules_new(
+  thread_id TEXT NOT NULL,
+  fingerprint TEXT NOT NULL,
+  permission_key TEXT NOT NULL,
+  action TEXT NOT NULL CHECK(action IN ('command','edit','tool')),
+  summary TEXT NOT NULL,
+  granted_under TEXT NOT NULL CHECK(granted_under IN ('ask','accept_edits','auto','full')),
+  source_request_id TEXT,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY(thread_id, fingerprint)
+) STRICT;
+INSERT INTO approval_rules_new(thread_id, fingerprint, permission_key, action, summary, granted_under, source_request_id, created_at)
+  SELECT thread_id, fingerprint, permission_key, action, summary, granted_under, source_request_id, created_at
+  FROM approval_rules;
+DROP TABLE approval_rules;
+ALTER TABLE approval_rules_new RENAME TO approval_rules;
+
+CREATE TABLE approval_requests_new(
+  request_id TEXT PRIMARY KEY,
+  thread_id TEXT NOT NULL,
+  run_id TEXT,
+  instance_id TEXT NOT NULL,
+  provider TEXT NOT NULL,
+  action TEXT NOT NULL CHECK(action IN ('command','edit','tool')),
+  permission_key TEXT NOT NULL,
+  fingerprint TEXT,
+  questions TEXT NOT NULL,
+  reason TEXT,
+  answer_path TEXT NOT NULL CHECK(answer_path IN ('live','continue')),
+  uncertain INTEGER NOT NULL DEFAULT 0 CHECK(uncertain IN (0,1)),
+  uncertain_tools TEXT,
+  status TEXT NOT NULL CHECK(status IN ('pending','answered','cancelled')),
+  answers TEXT,
+  decision TEXT CHECK(decision IS NULL OR decision IN ('allow','reject')),
+  decision_scope TEXT CHECK(decision_scope IS NULL OR decision_scope IN ('once','always')),
+  feedback TEXT,
+  answered_by TEXT,
+  cancel_reason TEXT,
+  continuation_run_id TEXT,
+  grant_consumed_at TEXT,
+  delivered_at TEXT,
+  created_at TEXT NOT NULL,
+  settled_at TEXT,
+  permission_mode TEXT CHECK(permission_mode IS NULL OR permission_mode IN ('ask','accept_edits','auto','full'))
+) STRICT;
+INSERT INTO approval_requests_new(request_id, thread_id, run_id, instance_id, provider, action, permission_key,
+    fingerprint, questions, reason, answer_path, uncertain, uncertain_tools, status, answers, decision,
+    decision_scope, feedback, answered_by, cancel_reason, continuation_run_id, grant_consumed_at, delivered_at,
+    created_at, settled_at, permission_mode)
+  SELECT request_id, thread_id, run_id, instance_id, provider, action, permission_key,
+    fingerprint, questions, reason, answer_path, uncertain, uncertain_tools, status, answers, decision,
+    decision_scope, feedback, answered_by, cancel_reason, continuation_run_id, grant_consumed_at, delivered_at,
+    created_at, settled_at, permission_mode
+  FROM approval_requests;
+DROP TABLE approval_requests;
+ALTER TABLE approval_requests_new RENAME TO approval_requests;
+CREATE INDEX approval_requests_thread ON approval_requests(thread_id, status);
+CREATE INDEX approval_requests_run ON approval_requests(run_id, status);
+CREATE INDEX approval_requests_continuation ON approval_requests(continuation_run_id);
+`
   }
 ]

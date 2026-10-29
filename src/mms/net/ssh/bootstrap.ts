@@ -207,7 +207,8 @@ export class SshBootstrap {
   private readonly approvals: ApprovalStore
   private readonly keys = new Map<string, KeyEntry>()
   private readonly checks = new Map<string, CheckEntry>()
-  private readonly runs = new Map<string, RunState & { done: Promise<void> }>()
+  /** `m` is the run's live manifest, which `status` reads instead of the file the run keeps replacing. */
+  private readonly runs = new Map<string, RunState & { done: Promise<void>; m: SshManifest }>()
   private busy = false
   private closed = false
   constructor(
@@ -746,9 +747,10 @@ export class SshBootstrap {
     return { records: (await this.manifests.list()).map((m) => this.view(m)) }
   }
   async status(id: string): Promise<SshSetupStatus> {
-    const m = await this.manifests.read(id)
-    if (!m) throw new NetError('bad_request')
+    // A poll that opened the file would make Windows refuse the run's next rename over it.
     const run = this.runs.get(id)
+    const m = run?.m ?? (await this.manifests.read(id))
+    if (!m) throw new NetError('bad_request')
     const lingerCommand = m.lingerSkipped
       ? `sudo loginctl enable-linger ${m.resolved.user}`
       : undefined
@@ -863,7 +865,11 @@ export class SshBootstrap {
 
   private launch(m: SshManifest, work: (ctx: RunContext) => Promise<void>): void {
     const controller = new AbortController()
-    const state: RunState & { done: Promise<void> } = { controller, done: Promise.resolve() }
+    const state: RunState & { done: Promise<void>; m: SshManifest } = {
+      controller,
+      done: Promise.resolve(),
+      m
+    }
     const ctx: RunContext = {
       m,
       remote: this.remote(m.endpoint, controller.signal),

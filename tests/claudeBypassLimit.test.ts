@@ -1,6 +1,8 @@
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
-import { claudeBypassDisabled } from '../src/mms/harness/vendors/claude/accountSubject'
+import { claudeAutoModeDisabled, claudeBypassDisabled } from '../src/mms/harness/vendors/claude/accountSubject'
+import { CLAUDE_AUTO_MODE_DISABLED } from '../src/mms/harness/vendors/claude/ClaudeSubscriptionProviderService'
+import { effectivePermissionMode, supportedPermissionModes } from '../src/shared/permissionMode'
 
 /** Whether Claude Code's settings forbid bypassing permissions, read from the files it reads. */
 describe('Claude bypass limit', () => {
@@ -44,5 +46,34 @@ describe('Claude bypass limit', () => {
     expect(check(files)).toBe(true)
     delete files[settings]
     expect(check(files)).toBe(false)
+  })
+})
+
+/** Whether Claude Code's settings turn its auto mode off: a thread set to Auto then runs as Auto-accept edits. */
+describe('Claude auto mode limit', () => {
+  const read = (files: Record<string, string>) => (path: string) => {
+    const text = files[path]
+    if (text === undefined) throw new Error('ENOENT')
+    return text
+  }
+  const user = join('/users/me', '.claude', 'settings.json')
+  const check = (files: Record<string, string>, cwd?: string) =>
+    claudeAutoModeDisabled({}, { readText: read(files), home: '/users/me', platform: 'linux', ...(cwd ? { cwd } : {}) })
+
+  it('reads disableAutoMode at the top level and in the permissions block, from the same files as the bypass limit', () => {
+    expect(check({})).toBe(false)
+    expect(check({ [user]: JSON.stringify({ permissions: { disableBypassPermissionsMode: 'disable' } }) })).toBe(false)
+    expect(check({ [user]: JSON.stringify({ disableAutoMode: 'disable' }) })).toBe(true)
+    expect(check({ [user]: JSON.stringify({ permissions: { disableAutoMode: 'disable' } }) })).toBe(true)
+    expect(check({ '/etc/claude-code/managed-settings.json': JSON.stringify({ disableAutoMode: 'disable' }) })).toBe(true)
+    const project = { [join('/work/app', '.claude', 'settings.local.json')]: JSON.stringify({ disableAutoMode: 'disable' }) }
+    expect(check(project)).toBe(false)
+    expect(check(project, '/work/app')).toBe(true)
+  })
+
+  it('is reported by the Claude Code entry as Auto being unavailable, so the thread runs as Auto-accept edits', () => {
+    const limits = { unavailable: { auto: CLAUDE_AUTO_MODE_DISABLED } }
+    const supported = supportedPermissionModes({ toolControl: 'approval_only', autoPermissionMode: true }, limits)
+    expect(effectivePermissionMode('auto', supported, { agent: 'Claude Code', limits })).toEqual({ mode: 'accept_edits', reason: CLAUDE_AUTO_MODE_DISABLED })
   })
 })

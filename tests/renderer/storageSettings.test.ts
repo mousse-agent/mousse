@@ -10,7 +10,7 @@ import { StorageCleanupView } from '../../src/renderer/components/storage/Storag
 import { sliceArcs } from '../../src/renderer/components/storage/StorageDonut'
 import { DaysSelect, StoragePolicyRows, parseCustomDays } from '../../src/renderer/components/storage/StoragePolicyRows'
 import { StorageUsageView } from '../../src/renderer/components/storage/StorageUsageSection'
-import { KEEP_WHEN_COPY, STORAGE_RULE_COPY, WORKTREE_GROUP_DESCRIPTION, ruleLabel, trashCountSentence, type StorageRuleId } from '../../src/renderer/lib/storageCopy'
+import { STORAGE_RULE_COPY, WORKTREE_GROUP_DESCRIPTION, WORKTREE_GROUP_TOOLTIP, ruleLabel, ruleTooltip, trashCountSentence, type StorageRuleId } from '../../src/renderer/lib/storageCopy'
 import { SELF_MACHINE, offlineUsage, type MachineUsage } from '../../src/renderer/lib/storageUsage'
 
 const text = (html: string) => html.replace(/<[^>]+>/g, ' ').replace(/&#x27;|&#39;/g, "'").replace(/&quot;/g, '"').replace(/\s+/g, ' ').trim()
@@ -82,28 +82,33 @@ describe('policy rows', () => {
 describe('plain-words copy', () => {
   const rules = Object.keys(STORAGE_RULE_COPY) as StorageRuleId[]
 
-  it('says what every rule deletes and what it never deletes, on the page', () => {
-    const page = text(rows())
+  it('shows each rule as a title and one short line, with what it deletes and never deletes in the tooltip', () => {
+    const html = rows()
+    const page = text(html)
     for (const id of rules) {
       const copy = STORAGE_RULE_COPY[id]
-      expect(copy.deletes.length, id).toBeGreaterThan(20)
-      expect(copy.never.length, id).toBeGreaterThan(20)
-      expect(page, `${id} deletes`).toContain(`Deletes ${copy.deletes}`)
-      expect(page, `${id} never deletes`).toContain(`Never deletes ${copy.never}`)
       expect(page, `${id} title`).toContain(copy.title)
+      if (copy.line) {
+        expect(copy.line.length, id).toBeLessThan(60)
+        expect(copy.line, id).not.toMatch(/\.\s+\S/)
+        expect(page, `${id} line`).toContain(copy.line)
+      }
+      expect(html, `${id} tooltip`).toContain(`title="Deletes ${copy.deletes.slice(0, 30)}`)
+      expect(ruleTooltip(id), id).toContain(`Deletes ${copy.deletes}`)
     }
+    expect(page).not.toContain('Never deletes')
+    expect(page).not.toContain('Deletes ')
   })
 
-  it('names what the worktree rules always keep, in terms a person uses', () => {
-    for (const id of ['deletedThreads', 'inactive', 'merged'] as const) {
-      const never = STORAGE_RULE_COPY[id].never
-      expect(never).toContain('uncommitted')
-      expect(never).toContain('untracked')
-      expect(never).toContain('ignored')
-      expect(never).toContain('node_modules')
-      expect(never).toContain('commits that are not in the default branch')
-      expect(never).toContain('running or waiting')
-    }
+  it('says once, for the Worktrees group, what no worktree rule removes', () => {
+    for (const id of ['deletedThreads', 'inactive', 'merged'] as const) expect(STORAGE_RULE_COPY[id].never, id).toBeUndefined()
+    expect(WORKTREE_GROUP_TOOLTIP).toContain('Uncommitted')
+    expect(WORKTREE_GROUP_TOOLTIP).toContain('untracked')
+    expect(WORKTREE_GROUP_TOOLTIP).toContain('ignored')
+    expect(WORKTREE_GROUP_TOOLTIP).toContain('node_modules')
+    expect(WORKTREE_GROUP_TOOLTIP).toContain('commits that are not in the default branch')
+    expect(WORKTREE_GROUP_TOOLTIP).toContain('running or waiting')
+    expect(text(rows()).split(WORKTREE_GROUP_DESCRIPTION)).toHaveLength(2)
   })
 
   it('explains merged, restore, capture links and older downloads', () => {
@@ -116,17 +121,16 @@ describe('plain-words copy', () => {
     expect(STORAGE_RULE_COPY.trash.never).toContain('not been published')
   })
 
-  it('shows the keep-when statement, as a statement and not a control', () => {
+  it('folds "keep a worktree when it has any local files" into the group note, with no row of its own', () => {
     const html = rows()
-    const statement = html.slice(html.indexOf('data-testid="storage-keep-when"'))
-    expect(text(statement.slice(0, statement.indexOf('</div></div>') + 12))).toContain(KEEP_WHEN_COPY.title)
-    expect(text(html)).toContain(KEEP_WHEN_COPY.description)
+    expect(html).not.toContain('storage-keep-when')
+    expect(text(html)).not.toContain('Keep a worktree when it has any local files')
     expect(text(html)).toContain(WORKTREE_GROUP_DESCRIPTION)
-    expect(KEEP_WHEN_COPY.title).toBe('Keep a worktree when it has any local files')
+    expect(html).toContain('title="Uncommitted, untracked and ignored files')
   })
 
   it('keeps the plain sentences free of jargon a person would not use', () => {
-    const everything = JSON.stringify([STORAGE_RULE_COPY, KEEP_WHEN_COPY, WORKTREE_GROUP_DESCRIPTION])
+    const everything = JSON.stringify([STORAGE_RULE_COPY, WORKTREE_GROUP_DESCRIPTION, WORKTREE_GROUP_TOOLTIP])
     for (const word of ['HEAD', 'ref ', 'lease', 'manifest', 'digest', 'ancestor', 'retire']) expect(everything).not.toContain(word)
   })
 })
@@ -448,7 +452,8 @@ describe('the notice about the recommended rules', () => {
     const page = text(notice(true))
     for (const id of ['inactive', 'merged', 'captures'] as const) {
       expect(page).toContain(`Deletes ${STORAGE_RULE_COPY[id].deletes}`)
-      expect(page).toContain(`Never deletes ${STORAGE_RULE_COPY[id].never}`)
+      const never = STORAGE_RULE_COPY[id].never
+      if (never) expect(page).toContain(`Never deletes ${never}`)
     }
     expect(page).toContain('A download saved by an older version with a .png name')
     expect(page).toContain('Not now')
@@ -474,9 +479,9 @@ describe('the notice about the recommended rules', () => {
 describe('trash is reviewed from the sidebar', () => {
   it('says how many threads wait there, and where to find them', () => {
     expect(trashCountSentence(0)).toBe('No threads in trash.')
-    expect(trashCountSentence(1)).toBe('1 thread in trash · restore or delete them from Recently deleted in the sidebar.')
+    expect(trashCountSentence(1)).toBe('1 thread in trash, listed under Recently deleted.')
     expect(trashCountSentence(3)).toContain('3 threads in trash')
-    expect(text(rows({ trashCount: 3 }))).toContain('3 threads in trash · restore or delete them from Recently deleted in the sidebar.')
+    expect(text(rows({ trashCount: 3 }))).toContain('3 threads in trash, listed under Recently deleted.')
     expect(rows()).not.toContain('data-testid="storage-review-trash-button"')
   })
 })

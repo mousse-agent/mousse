@@ -33,6 +33,14 @@ export function toolControlLevel(caps: Partial<Pick<HarnessCaps, 'toolControl'>>
   return caps.toolControl ?? 'uncontrolled'
 }
 
+/**
+ * Whether the agent has an auto mode of its own that a thread set to Auto runs in. Caps without the key
+ * read as `false`: the thread then runs as Auto-accept edits.
+ */
+export function autoPermissionModeAvailable(caps: Partial<Pick<HarnessCaps, 'autoPermissionMode'>>): boolean {
+  return caps.autoPermissionMode === true
+}
+
 /** Whether turn and cost budgets hold on the instance. Caps without the key read as `unsupported`. */
 export function budgetsLevel(caps: Partial<Pick<HarnessCaps, 'budgets'>>): HarnessCaps['budgets'] {
   return caps.budgets ?? 'unsupported'
@@ -272,13 +280,16 @@ export function permissionModeRefusal(message: string, supported: readonly Permi
 /**
  * Whether an instance with `caps` can enforce the permission mode a binding recorded. Fails
  * closed, for the first dispatch and every retry, continuation and steer: an instance that approves
- * tools itself runs only in Full access. Bindings recorded before permission modes carry none and
- * are not checked (they ran as they did then).
+ * tools itself runs only in Full access, and only an agent with an auto mode of its own runs in Auto
+ * (admission already turned Auto into Auto-accept edits anywhere else). Bindings recorded before
+ * permission modes carry none and are not checked (they ran as they did then).
  */
-export function checkPermissionMode(caps: Partial<Pick<HarnessCaps, 'toolControl'>>, policy: Pick<RunPolicy, 'permissionMode'>, agent: string, instanceId?: string): { ok: true } | { ok: false; error: HarnessError & { code: 'permission_mode_unenforceable' } } {
+export function checkPermissionMode(caps: Partial<Pick<HarnessCaps, 'toolControl' | 'autoPermissionMode'>>, policy: Pick<RunPolicy, 'permissionMode'>, agent: string, instanceId?: string): { ok: true } | { ok: false; error: HarnessError & { code: 'permission_mode_unenforceable' } } {
   const mode = policy.permissionMode
   if (mode === undefined) return { ok: true }
   const supported = supportedPermissionModes(caps)
   if (supported.includes(mode)) return { ok: true }
+  if (mode === 'auto' && toolControlLevel(caps) !== 'uncontrolled' && !autoPermissionModeAvailable(caps))
+    return { ok: false, error: permissionModeRefusal(`${agent} has no auto mode any more, so this turn cannot go on in Auto. Send the message again: a new turn runs as Auto-accept edits.`, supported, instanceId) }
   return { ok: false, error: permissionModeRefusal(`${agent} approves tools itself; set this thread to Full access or pick another agent.`, supported, instanceId) }
 }

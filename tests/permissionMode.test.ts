@@ -27,7 +27,8 @@ import { getDefaultSettings, normalizePermissionSettings } from '../src/shared/s
 describe('permission modes', () => {
   it('reads a missing or unknown value as the strictest mode, so an unreadable record never widens a thread', () => {
     expect(normalizePermissionMode('full')).toBe('full')
-    expect(normalizePermissionMode('auto')).toBe('ask')
+    expect(normalizePermissionMode('auto')).toBe('auto')
+    expect(normalizePermissionMode('yolo')).toBe('ask')
     expect(normalizePermissionMode(undefined)).toBe('ask')
     expect(normalizePermissionMode(3)).toBe('ask')
     // A profile that never chose a default gets the default; one that holds an unreadable value asks.
@@ -136,6 +137,20 @@ describe('permission modes', () => {
     expect(notice).toContain(describePermissionMode('accept_edits'))
     expect(notice).toContain(describePermissionMode('ask'))
     expect(notice).toContain('ask the user')
+  })
+
+  it('keeps Auto as the profile default through a reload, names it, and tells the agent what it means', () => {
+    expect(normalizePermissionSettings({ defaultMode: 'auto' }).defaultMode).toBe('auto')
+    const home = mkdtempSync(join(tmpdir(), 'mousse-permission-auto-'))
+    try {
+      new SettingsStore(MousseConfigStore.load(home)).set({ permissions: { defaultMode: 'auto' } })
+      expect(new SettingsStore(MousseConfigStore.load(home)).get().permissions).toEqual({ defaultMode: 'auto' })
+    } finally {
+      rmSync(home, { recursive: true, force: true })
+    }
+    expect(describePermissionMode('auto')).toBe('Auto')
+    expect(buildPermissionModeChangeNotice('accept_edits', 'auto')).toContain('auto mode decides which commands are safe')
+    expect(getLastUserPermissionMode([{ role: 'user', permissionMode: 'auto' }])).toBe('auto')
   })
 
   it('tracks the last user turn, reading a legacy visible message as the default and skipping hidden wakes', () => {

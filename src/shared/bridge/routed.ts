@@ -177,6 +177,8 @@ export const ROUTED_METHODS: Readonly<Record<string, RoutedRow>> = Object.freeze
   // ask per device and the audit row of each ask that reached a person.
   'editor.ask': read('computer', []),
   'threads.approvalRules': read('thread', ['threadId']),
+  // The thread's saved approval requests and their answers, which its transcript shows where they were asked.
+  'threads.approvalRequests': read('thread', ['threadId']),
   'actions.list': read('thread', ['threadId', GEN]),
   'actions.getAffectedFiles': read('thread', ['threadId', 'actionId', GEN], {
     required: ['actionId']
@@ -322,7 +324,9 @@ export const ROUTED_METHODS: Readonly<Record<string, RoutedRow>> = Object.freeze
     }
   ),
   'threads.setModel': chat('thread', ['threadId', 'model']),
-  'threads.setPermissionMode': chat('thread', ['threadId', 'mode'], { required: ['mode'] }),
+  // Version 2 accepts `mode: 'auto'` (issue #419); a caller sends an older owner `accept_edits` instead
+  // (`routedParamsForOwner`).
+  'threads.setPermissionMode': chat('thread', ['threadId', 'mode'], { required: ['mode'], version: 2 }),
   'threads.clearApprovalRules': chat('thread', ['threadId', 'ruleId']),
   'runs.resumeNow': chat('thread', ['threadId', 'runId'], {
     required: ['runId'],
@@ -694,6 +698,17 @@ export const routedNetMethod = (method: string): string => `routed.${method}`
 export const isRoutedNetMethod = (name: string): boolean => name.startsWith('routed.')
 export const routedMethodOf = (name: string): string | undefined =>
   isRoutedNetMethod(name) ? name.slice('routed.'.length) : undefined
+
+/**
+ * The params of a call as an owner at `version` of the row takes them, for a row whose newer version
+ * accepts a value an older one rejects. An owner from before the Auto permission mode (`threads.setPermissionMode`
+ * below version 2) is sent Auto-accept edits for Auto: the mode Auto runs as on an agent without an auto mode,
+ * so the thread never gets more than its person chose. Other calls are unchanged.
+ */
+export function routedParamsForOwner(method: string, version: number, params: Record<string, unknown>): Record<string, unknown> {
+  if (method === 'threads.setPermissionMode' && version < 2 && params.mode === 'auto') return { ...params, mode: 'accept_edits' }
+  return params
+}
 
 /** The keys a row has at `version`; a caller sends no key its owner's version does not know. */
 export function routedKeysAt(rowOf: RoutedRow, version: number): string[] {

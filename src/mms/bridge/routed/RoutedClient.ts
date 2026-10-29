@@ -8,6 +8,7 @@ import {
   isRoutedReply,
   routedKeysAt,
   routedNetMethod,
+  routedParamsForOwner,
   type RoutedPage,
   type RoutedReply,
   type RoutedRow,
@@ -152,14 +153,14 @@ export class RoutedClient {
     method: string,
     row: RoutedRow,
     params: Record<string, unknown>
-  ): Promise<{ outdated: boolean; key?: string }> {
+  ): Promise<{ outdated: boolean; key?: string; version?: number }> {
     const versions = await this.versions(node)
     const version = versions?.[method]
     if (version === undefined) return { outdated: true }
     const known = new Set(routedKeysAt(row, version))
     for (const [key, value] of Object.entries(params))
       if (value !== undefined && !known.has(key)) return { outdated: true, key }
-    return { outdated: false }
+    return { outdated: false, version }
   }
 
   /** Runs one routed row on `node` and returns its result, or throws what the person should see. */
@@ -173,9 +174,11 @@ export class RoutedClient {
     if (!row) throw new DomainRpcError('not_available_remotely', `${method} is not available from another computer.`)
     const computer = this.deps.computer(node)
     const session = this.sessionOrOffline(node, computer)
-    const params = Object.fromEntries(Object.entries(given).filter(([, value]) => value !== undefined))
-    const verdict = await this.guard(node, session, computer, () => this.unsupportedKey(node, method, row, params))
+    const known = Object.fromEntries(Object.entries(given).filter(([, value]) => value !== undefined))
+    const verdict = await this.guard(node, session, computer, () => this.unsupportedKey(node, method, row, known))
     if (verdict.outdated) throw computerOutdated(computer, method, verdict.key)
+    // A value the owner's version of the row does not take yet is sent as the nearest one it does.
+    const params = routedParamsForOwner(method, verdict.version ?? row.version, known)
     // One signal ends the whole call: the window that asked closing (or giving up), the profile closing, and
     // the call's own total time. It also ends the wait for a big-read slot, and the slot is given back.
     const signal = AbortSignal.any([

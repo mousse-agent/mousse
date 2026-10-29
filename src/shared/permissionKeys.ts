@@ -20,7 +20,7 @@ export const PERMISSION_KEYS = {
 export const ALWAYS_OPTION_ID = 'allow_always'
 export const ALWAYS_OPTION_LABEL = 'Always for this thread'
 /** What the option does and does not do, shown next to it. */
-export const ALWAYS_OPTION_NOTE = 'Always for this thread allows this exact request again, in this thread, when you are the one who sent the message. It approves the text of the request, not what it does: a command that runs scripts runs whatever they contain then. Claude\'s shell keeps its folder between calls, so the same command can run from another folder. Other commands, folders and tools still ask. Revoke it in the thread side card.'
+export const ALWAYS_OPTION_NOTE = 'Always for this thread allows this exact request again, in this thread, when you are the one who sent the message. It approves the text of the request, not what it does: a command that runs scripts runs whatever they contain then. Claude\'s shell keeps its folder between calls, so the same command can run from another folder. Other commands, folders and tools still ask.'
 
 /** Key of any other Claude tool. */
 export function claudeToolKey(toolName: string): string {

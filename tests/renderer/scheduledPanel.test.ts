@@ -1021,11 +1021,12 @@ describe('Scheduled page: permissions respect the job\'s ceiling', () => {
       { text: "Default (the mode new threads start in, up to the job's limit)", disabled: false },
       { text: 'Ask before acting', disabled: false },
       { text: 'Auto-accept edits', disabled: false },
+      { text: 'Auto', disabled: true },
       { text: 'Full access', disabled: true }
     ])
     await choose('Project', 'Other')
     await choose('Target thread', 'Other project thread')
-    expect(optionsOf('Permissions').map((option) => option.disabled)).toEqual([false, false, true, true])
+    expect(optionsOf('Permissions').map((option) => option.disabled)).toEqual([false, false, true, true, true])
     expect(document.querySelector('[data-testid="permission-note"]')?.textContent).toContain('Ask before acting')
   })
 

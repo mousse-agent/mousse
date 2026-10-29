@@ -90,15 +90,16 @@ export async function writeJsonAtomic(file: string, value: unknown): Promise<voi
   } finally {
     await handle.close()
   }
-  // Windows refuses to replace a file a reader has open for a moment; a short retry is enough.
+  // Windows refuses to replace a file another process, such as a virus scanner, has open for a moment;
+  // retrying with backoff for about two seconds rides that out.
   for (let attempt = 0; ; attempt++) {
     try {
       await rename(temporary, file)
       return
     } catch (error) {
       const code = (error as NodeJS.ErrnoException).code
-      if (attempt < 20 && (code === 'EPERM' || code === 'EBUSY' || code === 'EACCES')) {
-        await new Promise((resolve) => setTimeout(resolve, 15))
+      if (attempt < 10 && (code === 'EPERM' || code === 'EBUSY' || code === 'EACCES')) {
+        await new Promise((resolve) => setTimeout(resolve, Math.min(10 * 2 ** attempt, 400)))
         continue
       }
       await rm(temporary, { force: true })

@@ -497,6 +497,24 @@ export interface ApprovalRuleInfo {
   createdAt: string
 }
 
+/**
+ * One saved approval request of a thread as the transcript shows it (`threads.approvalRequests`): what was
+ * asked, when, and the answer it got. The prompt is the saved preview, with credentials removed.
+ */
+export interface ThreadApprovalRequest {
+  requestId: string
+  runId?: string
+  action: 'command' | 'edit' | 'tool'
+  prompt: string
+  status: 'pending' | 'answered' | 'cancelled'
+  decision?: 'allow' | 'reject'
+  scope?: 'once' | 'always'
+  answeredBy?: { kind: 'user'; via?: string } | { kind: 'agent' }
+  cancelReason?: string
+  createdAt: string
+  settledAt?: string
+}
+
 export interface PendingUserQuestions {
   requestId: string
   questions: UserQuestion[]
