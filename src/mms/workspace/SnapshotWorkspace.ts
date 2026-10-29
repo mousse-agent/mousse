@@ -65,11 +65,15 @@ export function snapshotWorkspacePath(threadDirectory: string): string {
   return join(threadDirectory, SNAPSHOT_WORKSPACE_FILE)
 }
 
+const STORAGE_IDENTITY = /^[a-zA-Z0-9_-]{1,256}$/
+
+/** The store a record names. The ids come from a file, so they are checked before they become part of a path. */
 function storePathOf(record: SnapshotWorkspaceRecord, home = getMousseHomeDir()): string {
   if (record.kind === 'project') {
-    if (!record.projectId) throw new Error('Snapshot workspace names no project.')
+    if (!record.projectId || !STORAGE_IDENTITY.test(record.projectId)) throw new Error('Snapshot workspace names no valid project.')
     return projectStorePath(record.projectId, home)
   }
+  if (!STORAGE_IDENTITY.test(record.threadId)) throw new Error('Snapshot workspace names no valid thread.')
   return threadStorePath(record.threadId, home)
 }
 
@@ -267,13 +271,13 @@ export function startedInSnapshotStore(threadDirectory: string): boolean {
 
 /** Removes a project's store with the project. Nothing else of the project's is touched. */
 export function removeProjectSnapshots(projectId: string, home = getMousseHomeDir()): void {
-  if (!/^[a-zA-Z0-9_-]{1,256}$/.test(projectId)) return
+  if (!STORAGE_IDENTITY.test(projectId)) return
   rmSync(join(home, 'project-data', projectId), { recursive: true, force: true, maxRetries: 3, retryDelay: 100 })
 }
 
 /** Removes the store of a thread with no project when the thread is deleted for good. */
 export function removeThreadSnapshots(threadId: string, home = getMousseHomeDir()): void {
-  if (!/^[a-zA-Z0-9_-]{1,256}$/.test(threadId)) return
+  if (!STORAGE_IDENTITY.test(threadId)) return
   rmSync(join(home, 'thread-snapshots', threadId), { recursive: true, force: true, maxRetries: 3, retryDelay: 100 })
 }
 

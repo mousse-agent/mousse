@@ -123,7 +123,8 @@ describe('agent access grant (SPEC §15.1)', () => {
   const delegate = (delegation: DelegationToolHost, id: string, patch: Record<string, unknown> = {}) =>
     delegation.delegateTask({ prompt: `Work on ${id}`, title: id, workspace: 'isolated', role: 'implement', instanceId: 'claude', ...patch } as never, { toolCallId: id }) as Promise<Started>
 
-  const finished = (d: Phase6Daemon, child: Started) => waitFor(() => d.engine.getRun(child.childRunId)?.status === 'completed', `${child.childThreadId} to finish`)
+  // The turn is over once its checkpoint is recorded, which is after its run completes: a send before that queues.
+  const finished = (d: Phase6Daemon, child: Started) => waitFor(() => d.engine.getRun(child.childRunId)?.status === 'completed' && !d.orch.isConversationHistoryBusy(child.childThreadId), `${child.childThreadId} to finish`)
 
   it('a turn granted lineage hands out lineage, even when the profile is raised while it runs', async () => {
     const out: Started[] = []
