@@ -327,7 +327,7 @@ describe('Git mutations through the daemon', () => {
       expect(porcelain(t.path)).toEqual([])
     }, 60_000)
 
-    it('refuses to sweep what a hook rewrote after a successful commit, and records the commit once the tree is clean', async () => {
+    it('records a commit whose hook rewrote a file afterwards as one completed action, leaving the hook’s edit in the tree', async () => {
       const t = await threadScope()
       installHook("require('node:fs').writeFileSync('a.txt', 'formatted by the hook\\n')")
       write(t.path, 'a.txt', 'a\n'); git(t.path, 'add', 'a.txt')
@@ -339,16 +339,9 @@ describe('Git mutations through the daemon', () => {
       expect(git(t.path, 'show', 'HEAD:a.txt')).toBe('a')
       // The helper trims the first line, so the leading space of " M" may be gone.
       expect(porcelain(t.path)).toEqual([expect.stringMatching(/^ ?M a\.txt$/)])
+      // A snapshot records the commit and the files after the hook; there is nothing to sweep, so nothing waits for recovery.
       const action = new ThreadActionService(t.directory).list().at(-1)!
-      expect(new ThreadJournal(t.directory).latestByOperation().get(action.id)?.state).toBe('recovery_required')
-      await expect(client.request('git.commit', { threadId: t.threadId, message: 'again' })).rejects.toThrow(/recovery/i)
-      expect(git(t.path, 'rev-parse', 'HEAD')).toBe(landed)
-
-      // The user deals with the leftover edit, then recovery records the commit without another one.
-      git(t.path, 'checkout', '--', 'a.txt')
-      await client.request('operations.recover', { threadId: t.threadId })
-      const recovered = new ThreadActionService(t.directory).list().find((item) => item.id === action.id)!
-      expect(recovered).toMatchObject({ state: 'completed', commits: [landed] })
+      expect(action).toMatchObject({ state: 'completed', commits: [landed], git: { headBefore: before, headAfter: landed } })
       expect(new ThreadJournal(t.directory).latestByOperation().get(action.id)?.state).toBe('completed')
       expect(git(t.path, 'rev-parse', 'HEAD')).toBe(landed)
       expect(new ThreadWorkspaceManager(t.directory).load()!.headSha).toBe(landed)
@@ -398,11 +391,14 @@ describe('Git mutations through the daemon', () => {
         const before = git(t.path, 'rev-parse', 'HEAD')
         await expect(client.request('git.commit', { threadId: t.threadId, message: 'rejected' })).rejects.toMatchObject({ code: 'git_commit_failed', message: expect.stringContaining('hook says no') })
         expect(git(t.path, 'rev-parse', 'HEAD')).toBe(before)
-        expect(git(t.path, 'log', '--format=%s', '-1')).not.toContain('mousse: checkpoint')
+        expect(git(t.path, 'log', '--format=%s', '-1')).not.toMatch(/^mousse/)
         expect(staged(t.path)).toEqual(prestaged ? ['a.txt'] : [])
         expect(porcelain(t.path)).toEqual(prestaged ? ['?? b.txt', 'A  a.txt'].sort() : ['?? a.txt', '?? b.txt'])
         const action = new ThreadActionService(t.directory).list().at(-1)!
-        expect(action).toMatchObject({ state: 'failed', commits: [], startSha: before, endSha: before })
+        // The files are what they were, so the action starts and ends on one snapshot of the HEAD it saw.
+        expect(action).toMatchObject({ state: 'failed', commits: [] })
+        expect(action.endSha).toBe(action.startSha)
+        expect(git(t.path, 'rev-parse', `${action.startSha}^`)).toBe(before)
         const receipt = new ChangeReceiptService(t.directory).list().find((item) => item.id === action.receiptId)!
         expect(receipt.beforeSha).toBe(receipt.afterSha)
         expect(new ThreadJournal(t.directory).latestByOperation().get(action.id)?.state).toBe('completed')
@@ -414,18 +410,20 @@ describe('Git mutations through the daemon', () => {
       }
     })
 
-    it('discards one of two dirty files and lets the checkpoint keep the other, recording a non-reversible effect', async () => {
+    it('discards one of two dirty files and records the other in the snapshot, with a non-reversible effect', async () => {
       const t = await threadScope()
       write(t.path, 'first.txt')
       await client.request('git.commit', { threadId: t.threadId, message: 'first' })
       write(t.path, 'x.txt'); write(t.path, 'y.txt')
       const result = await client.request<Status>('git.discard', { threadId: t.threadId, paths: ['x.txt'] })
-      expect(result.status.changes).toEqual([])
+      expect(result.status.changes).toEqual([expect.objectContaining({ path: 'y.txt' })])
       expect(existsSync(join(t.path, 'x.txt'))).toBe(false)
-      expect(git(t.path, 'ls-tree', '--name-only', 'HEAD').split('\n')).toContain('y.txt')
+      // Nothing is committed for the person: the other file is an uncommitted file that the snapshot records.
+      expect(git(t.path, 'ls-tree', '--name-only', 'HEAD').split('\n')).not.toContain('y.txt')
       const action = new ThreadActionService(t.directory).list().at(-1)!
       expect(action.externalEffects).toEqual([expect.objectContaining({ kind: 'unknown', description: 'Discarded 1 file', reversible: false })])
-      expect(porcelain(t.path)).toEqual([])
+      expect(git(t.path, 'show', `${action.endSha}:y.txt`)).toBe('y.txt')
+      expect(porcelain(t.path)).toEqual(['?? y.txt'])
     })
 
     it('refuses a push while the thread has uncommitted changes, with its own code', async () => {
@@ -445,7 +443,8 @@ describe('Git mutations through the daemon', () => {
         const actions = new ThreadActionService(t.directory)
         await new ThreadActionService(t.directory).recoverPending(t.path)
         const action = actions.list().at(-1)!
-        expect(action).toMatchObject({ state: 'failed', commits: [], startSha: before, endSha: before })
+        expect(action).toMatchObject({ state: 'failed', commits: [] })
+        expect(action.endSha).toBe(action.startSha)
         expect(new ThreadJournal(t.directory).latestByOperation().get(action.id)?.state).toBe('completed')
         expect(git(t.path, 'rev-parse', 'HEAD')).toBe(before)
         expect(staged(t.path)).toEqual(['a.txt'])
@@ -481,7 +480,7 @@ describe('Git mutations through the daemon', () => {
         })
       }
 
-      it('records a commit that landed before the failure once the tree is clean, without sweeping', async () => {
+      it('records a commit that landed before the failure as a failed action that lists the commit, with nothing left to recover', async () => {
         const t = await threadScope()
         write(t.path, 'a.txt')
         const before = git(t.path, 'rev-parse', 'HEAD')
@@ -490,16 +489,14 @@ describe('Git mutations through the daemon', () => {
         const landed = git(t.path, 'rev-parse', 'HEAD')
         expect(landed).not.toBe(before)
         const action = new ThreadActionService(t.directory).list().at(-1)!
-        expect(new ThreadJournal(t.directory).latestByOperation().get(action.id)?.state).toBe('recovery_required')
-        await new ThreadActionService(t.directory).recoverPending(t.path)
-        const recovered = new ThreadActionService(t.directory).list().find((item) => item.id === action.id)!
-        expect(recovered).toMatchObject({ state: 'completed', commits: [landed], startSha: before, endSha: landed })
+        expect(action).toMatchObject({ state: 'failed', commits: [landed], git: { headBefore: before, headAfter: landed } })
         expect(new ThreadJournal(t.directory).latestByOperation().get(action.id)?.state).toBe('completed')
+        await new ThreadActionService(t.directory).recoverPending(t.path)
         expect(git(t.path, 'log', '--format=%s', `${before}..HEAD`).split('\n')).toEqual(['landed'])
         expect(new ThreadWorkspaceManager(t.directory).load()!.headSha).toBe(landed)
       })
 
-      it('asks for recovery, and sweeps nothing, when a commit landed and files are still changed', async () => {
+      it('records a commit that landed with files still changed the same way, and sweeps nothing', async () => {
         const t = await threadScope()
         write(t.path, 'a.txt'); write(t.path, 'b.txt')
         const before = git(t.path, 'rev-parse', 'HEAD')
@@ -507,22 +504,26 @@ describe('Git mutations through the daemon', () => {
         await expect(client.request('git.commit', { threadId: t.threadId, message: 'x' })).rejects.toThrow()
         const landed = git(t.path, 'rev-parse', 'HEAD')
         const action = new ThreadActionService(t.directory).list().at(-1)!
-        await expect(new ThreadActionService(t.directory).recoverPending(t.path)).rejects.toThrow(/needs recovery/)
+        expect(action).toMatchObject({ state: 'failed', commits: [landed] })
+        expect(git(t.path, 'show', `${action.endSha}:b.txt`)).toBe('b.txt')
+        await new ThreadActionService(t.directory).recoverPending(t.path)
         expect(git(t.path, 'rev-parse', 'HEAD')).toBe(landed)
         expect(git(t.path, 'log', '--format=%s', `${before}..HEAD`).split('\n')).toEqual(['landed'])
         expect(porcelain(t.path)).toEqual(['?? b.txt'])
-        expect(new ThreadJournal(t.directory).latestByOperation().get(action.id)?.state).toBe('recovery_required')
+        expect(new ThreadJournal(t.directory).latestByOperation().get(action.id)?.state).toBe('completed')
       })
 
-      it('still sweeps an interrupted turn, which has no failure policy', async () => {
+      it('records an interrupted turn from the files, with no commit', async () => {
         const t = await threadScope()
         const actions = new ThreadActionService(t.directory)
         actions.beginTurn({ ...actionOptions(t.path, 'interrupted-turn'), threadId: t.threadId }, f.baseSha)
         write(t.path, 'turn-output.txt')
         await new ThreadActionService(t.directory).recoverPending(t.path)
-        expect(git(t.path, 'log', '--format=%s', '-1')).toContain('mousse: checkpoint turn interrupted-turn')
-        expect(git(t.path, 'show', '--name-only', '--format=', 'HEAD').split('\n').filter(Boolean)).toEqual(['turn-output.txt'])
-        expect(porcelain(t.path)).toEqual([])
+        const action = actions.list().find((item) => item.turnId === 'interrupted-turn')!
+        expect(action).toMatchObject({ state: 'stopped', commits: [] })
+        expect(action.changedPaths.map((item) => item.path)).toEqual(['turn-output.txt'])
+        expect(git(t.path, 'rev-parse', 'HEAD')).toBe(f.baseSha)
+        expect(porcelain(t.path)).toEqual(['?? turn-output.txt'])
       })
     })
   })
@@ -736,11 +737,12 @@ describe('Git mutations through the daemon', () => {
         expect(await committing).toMatchObject({ code: 'git_cancelled' })
         await allDead(pidFile)
         expect(git(t.path, 'rev-parse', 'HEAD')).toBe(before)
-        expect(git(t.path, 'log', '--format=%s', '-1')).not.toContain('mousse: checkpoint')
+        expect(git(t.path, 'log', '--format=%s', '-1')).not.toMatch(/^mousse/)
         expect(staged(t.path)).toEqual(['a.txt'])
         expect(porcelain(t.path)).toEqual(state)
         const action = new ThreadActionService(t.directory).list().at(-1)!
-        expect(action).toMatchObject({ state: 'failed', commits: [], startSha: before, endSha: before })
+        expect(action).toMatchObject({ state: 'failed', commits: [] })
+        expect(action.endSha).toBe(action.startSha)
         const receipt = new ChangeReceiptService(t.directory).list().find((item) => item.id === action.receiptId)!
         expect(receipt.beforeSha).toBe(receipt.afterSha)
         // The journal recorded the end, so a restart has nothing to recover and the next action is admitted.

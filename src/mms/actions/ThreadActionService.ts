@@ -258,14 +258,16 @@ export class ThreadActionService {
             })
           }
           this.replace(actions)
-          if (checkpointComplete) {
+          // The mutation's own error is what the caller needs; recovery finishes whatever bookkeeping did not.
+          try {
+            if (!checkpointComplete) throw new Error('The checkpoint was not recorded.')
             this.appendCheckpointCompleted(action, 'failed')
-          } else {
+          } catch (bookkeepingError) {
             this.journal.append({
               operationId: action.id,
               operationType: 'action-checkpoint',
               state: 'recovery_required',
-              details: { actionState: action.state, startSha: action.startSha }
+              details: { actionState: action.state, startSha: action.startSha, error: String(bookkeepingError) }
             })
           }
           throw new ActionExecutionError(action, error)

@@ -280,7 +280,10 @@ function validateThreadWorkspaceMetadata(
   const expectedPath = join(repository.worktreeBase, 'threads', threadId, branchId)
   const activated = new ConversationBranchService(manager.threadDirectory).list()
     .find((branch) => branch.id === branchId && branch.lifecycle === 'active')
+  // Activating a conversation branch no longer switches Git branches, so the checkout stays on the thread's own; forks made
+  // before snapshots recorded a Git branch of their own, which the checkout may still be on.
   const expectedBranch = activated?.gitBranch ?? `mousse/thread/${threadId}/${branchId}`
+  const ownBranch = activated ? metadata.branch === expectedBranch || metadata.branch.startsWith(`mousse/thread/${threadId}/`) : metadata.branch === expectedBranch
   const expectedRef = activated?.retainedRef ?? `refs/mousse/threads/${threadId}/${branchId}`
   const ownedPath = activated
     ? pathInside(join(repository.worktreeBase, 'threads', threadId), metadata.worktreePath)
@@ -290,7 +293,7 @@ function validateThreadWorkspaceMetadata(
     metadata.repositoryId !== repository.repositoryId ||
     metadata.projectRelativeSubdirectory !== repository.projectRelativeSubdirectory ||
     !ownedPath ||
-    metadata.branch !== expectedBranch ||
+    !ownBranch ||
     metadata.retainedRef !== expectedRef
   ) {
     throw new DomainRpcError('thread_unavailable', 'Thread workspace metadata does not match the live project binding')
