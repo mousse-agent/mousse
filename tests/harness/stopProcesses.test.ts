@@ -42,9 +42,10 @@ afterEach(() => {
 async function agent(script: string, options: { stubborn?: boolean; detached?: boolean } = {}): Promise<{ child: ChildProcess; shell: number }> {
   const code = [
     "const { spawn } = require('node:child_process')",
+    // The handler is in place before the pid is printed, so a SIGTERM sent once the test has the pid is ignored.
+    options.stubborn ? "process.on('SIGTERM', () => {})" : '',
     "const shell = spawn('/bin/sh', ['-c', process.argv[1]], { detached: true, stdio: 'ignore' })",
     'process.stdout.write(String(shell.pid) + "\\n")',
-    options.stubborn ? "process.on('SIGTERM', () => {})" : '',
     'setInterval(() => {}, 1000)'
   ].join(';')
   const child = spawn(process.execPath, ['-e', code, script], { stdio: ['pipe', 'pipe', 'ignore'], detached: options.detached === true })
