@@ -39,8 +39,7 @@
   box-shadow: inset 0 0 0 1px rgba(var(--accent-rgb), 0.16);
 }
 
-.navigation-rail-button:focus-visible,
-.navigation-rail-menu button:focus-visible {
+.navigation-rail-button:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: -2px;
 }
@@ -56,31 +55,6 @@
   margin: 3px 0;
   border-top: 1px solid rgba(var(--accent-pale-rgb), 0.16);
 }
-
-.navigation-rail-menu {
-  min-width: 190px;
-  padding: 6px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: var(--bg-secondary);
-  color: var(--text-primary);
-  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.3);
-}
-
-.navigation-rail-menu button {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  width: 100%;
-  min-height: 30px;
-  padding: 6px 8px;
-  border-radius: 7px;
-  font-size: 13px;
-  text-align: left;
-}
-
-.navigation-rail-menu button:hover:not(:disabled) { background: rgba(var(--accent-rgb), 0.14); }
-.navigation-rail-menu button:disabled { opacity: 0.4; }
 
 /* A small dot, not a bar: something in Settings is waiting to be looked at. */
 .navigation-rail-notice-dot {
