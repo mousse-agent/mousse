@@ -250,8 +250,7 @@ function DownloadRow({ entry, notesOpen, onToggleNotes, onInstall, onOpen }: {
     glyph = (
       <span className="downloads-glyph" role="progressbar" aria-label={`Downloading ${entry.label}`}
         aria-valuemin={0} aria-valuemax={100} aria-valuenow={entry.percent ?? 0}>
-        <ProgressRing percent={entry.phase === 'downloading' ? entry.percent : undefined} />
-        <KindIcon size={12} strokeWidth={1.8} aria-hidden="true" />
+        <KindIcon size={15} strokeWidth={1.8} aria-hidden="true" />
       </span>
     )
   } else if (entry.phase === 'done' || (entry.phase === 'ready' && !entry.error)) {
