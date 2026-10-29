@@ -14,6 +14,7 @@ import {
   QuickActionApprovalContext,
   type QuickActionApproval,
 } from './agent-elements/tools/quick-action-approval'
+import { PermissionRequestContext, type PermissionRequestControls } from './agent-elements/tools/permission-request'
 import './agent-elements/agent-ui.css'
 
 /**
@@ -30,6 +31,7 @@ import './agent-elements/agent-ui.css'
  */
 
 const MousseComposerContext = createContext<ReactNode>(null)
+const NO_PERMISSION_REQUESTS: Readonly<Record<string, PermissionRequestControls>> = {}
 
 // Stable component type — reading the composer from context avoids remounting
 // (and losing textarea focus) on every parent render.
@@ -67,6 +69,8 @@ interface MousseAgentChatShellProps {
   composer: ReactNode
   /** Inline quick-action approval bridged to the matching card. Null = generic question UI. */
   quickActionApproval?: QuickActionApproval | null
+  /** Waiting permission requests this window can answer inline, by request id. */
+  permissionRequests?: Readonly<Record<string, PermissionRequestControls>>
 }
 
 export function MousseAgentChatShell({
@@ -80,6 +84,7 @@ export function MousseAgentChatShell({
   toolRenderers,
   composer,
   quickActionApproval,
+  permissionRequests,
 }: MousseAgentChatShellProps) {
   const profileId = useAppStore(state => state.profileId)
   const interrupted = useAppStore(state => Boolean(threadId && state.turnStates[threadId]?.phase === 'stopped'))
@@ -94,6 +99,7 @@ export function MousseAgentChatShell({
     <MousseComposerContext.Provider value={composer}>
       <PromptUndoProvider key={`${profileId}:${threadId ?? ""}`} threadId={threadId} busy={busy} revision={messages}>
       <QuickActionApprovalContext.Provider value={quickActionApproval ?? null}>
+      <PermissionRequestContext.Provider value={permissionRequests ?? NO_PERMISSION_REQUESTS}>
       <SubagentCardsContext.Provider value={subagentCards}>
       <SubagentInheritedProviderContext.Provider value={threadProvider}>
         <AgentChat
@@ -117,6 +123,7 @@ export function MousseAgentChatShell({
         />
       </SubagentInheritedProviderContext.Provider>
       </SubagentCardsContext.Provider>
+      </PermissionRequestContext.Provider>
       </QuickActionApprovalContext.Provider>
       </PromptUndoProvider>
     </MousseComposerContext.Provider>

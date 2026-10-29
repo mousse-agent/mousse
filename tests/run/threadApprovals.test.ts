@@ -1598,11 +1598,19 @@ describe('approval requests across a daemon restart', () => {
     const first = await daemon.orch.send('go', false, { threadId: thread.id, clientRequestId: 'go-1', awaitMode: 'ack' })
     await waitFor(() => daemon.questions.listPendingForThread(thread.id).length === 1, 'the turn to ask')
     const requestId = daemon.questions.listPendingForThread(thread.id)[0]!.requestId
+    // The transcript lists the waiting request with what it asks.
+    expect(daemon.orch.listApprovalRequests(thread.id)).toEqual([
+      expect.objectContaining({ requestId, action: 'command', status: 'pending', prompt: 'Allow Claude Code to run a command (Bash)?\nnpm test' })
+    ])
 
     const second = await daemon.orch.send('Use pnpm', false, { threadId: thread.id, clientRequestId: 'go-2' })
     expect(second.message).toBe('fresh: Use pnpm')
     expect(second.queued).toBeUndefined()
     expect(daemon.engine.approvals.get(requestId)).toMatchObject({ status: 'answered', decision: 'reject', feedback: 'Use pnpm', continuationRunId: second.runId })
+    // ...and then the denial the message gave it, which the inline request shows after a reload.
+    const [listed] = daemon.orch.listApprovalRequests(thread.id)
+    expect(listed).toMatchObject({ requestId, status: 'answered', decision: 'reject' })
+    expect(listed!.settledAt).toEqual(expect.any(String))
     await waitFor(() => ['completed', 'interrupted', 'cancelled', 'failed'].includes(daemon.engine.getRun(first.runId!)!.status), 'the first turn to end')
     expect(daemon.engine.listRuns(thread.id)).toHaveLength(2)
     expect(daemon.questions.listPendingForThread(thread.id)).toEqual([])

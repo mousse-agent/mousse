@@ -177,6 +177,8 @@ export const ROUTED_METHODS: Readonly<Record<string, RoutedRow>> = Object.freeze
   // ask per device and the audit row of each ask that reached a person.
   'editor.ask': read('computer', []),
   'threads.approvalRules': read('thread', ['threadId']),
+  // The thread's saved approval requests and their answers, which its transcript shows where they were asked.
+  'threads.approvalRequests': read('thread', ['threadId']),
   'actions.list': read('thread', ['threadId', GEN]),
   'actions.getAffectedFiles': read('thread', ['threadId', 'actionId', GEN], {
     required: ['actionId']
