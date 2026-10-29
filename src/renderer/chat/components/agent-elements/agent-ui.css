@@ -622,3 +622,160 @@ html[data-theme] .an-edit-tool-card .an-edit-diff code {
   opacity: 0.4;
   cursor: default;
 }
+
+/* Permission requests in the turn: one short line with Approve and Deny while
+   the request waits (on one lifted surface), then the answer it got, as quiet
+   as a tool row. Approve is a neutral filled button, never the accent. */
+.permission-request {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.permission-request[data-state="waiting"] {
+  padding: 4px 4px 4px 10px;
+  border-radius: var(--ui-control-radius);
+  background: var(--ui-hover);
+  box-shadow: var(--ui-specular);
+}
+
+.permission-request-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.permission-request-summary {
+  display: flex;
+  flex: 1 1 auto;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 14px;
+  line-height: 22px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.permission-request-summary:hover {
+  color: var(--text-primary);
+}
+
+.permission-request-summary:focus-visible {
+  border-radius: 4px;
+  box-shadow: var(--ui-focus-ring);
+  outline: none;
+}
+
+.permission-request-icon,
+.permission-request-verb,
+.permission-request-chevron {
+  flex-shrink: 0;
+}
+
+.permission-request-verb {
+  font-weight: 450;
+}
+
+.permission-request-target {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.permission-request-chevron {
+  opacity: 0.6;
+  transition: transform 0.15s;
+}
+
+.permission-request-chevron.is-open {
+  transform: rotate(180deg);
+}
+
+.permission-request-actions {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 4px;
+}
+
+.permission-request-btn {
+  height: 28px;
+  padding: 0 10px;
+  border: none;
+  border-radius: var(--ui-control-radius);
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 12.5px;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s;
+}
+
+.permission-request-btn:hover:not(:disabled) {
+  background: var(--ui-hover);
+  color: var(--text-primary);
+}
+
+.permission-request-btn:focus-visible {
+  box-shadow: var(--ui-focus-ring);
+  outline: none;
+}
+
+.permission-request-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.permission-request-btn-primary {
+  background: var(--ui-pressed);
+  box-shadow: var(--ui-specular);
+  color: var(--text-primary);
+}
+
+html[data-theme="high-contrast"] .permission-request-btn-primary {
+  box-shadow: inset 0 0 0 1px var(--ui-line-strong);
+}
+
+.permission-request-answer {
+  flex-shrink: 0;
+  color: var(--text-secondary);
+  font-size: 12.5px;
+}
+
+.permission-request-answer.is-allow {
+  color: var(--success);
+}
+
+.permission-request-answer.is-reject {
+  color: var(--danger);
+}
+
+.permission-request-note {
+  margin: 0;
+  padding-left: 23px;
+  color: var(--text-secondary);
+  font-size: 12.5px;
+}
+
+.permission-request-full {
+  max-height: 240px;
+  margin: 0;
+  padding: 0 0 4px 23px;
+  overflow: auto;
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}

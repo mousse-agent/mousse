@@ -76,6 +76,24 @@ function connectionEventCapability(type: ProtocolConnectionEvent['type']): strin
   return type === 'git.operation' ? GIT_OPERATIONS_CAPABILITY : 'net.v1'
 }
 
+/** The message of an overload refusal, from this client's own limit or the service's. */
+export const PENDING_REQUESTS_FULL_MESSAGE = 'Too many pending requests'
+
+/**
+ * Waits before each retry of a request that was refused because too many requests were in flight.
+ * The refusal comes before the request runs (this client never sent it, or the service turned it away
+ * on arrival), so retrying is safe for every method. About 1.5 s in total; a longer overload fails.
+ */
+export const OVERLOAD_RETRY_DELAYS_MS: readonly number[] = [50, 150, 400, 900]
+
+/**
+ * Whether `error` is an overload refusal: too many requests in flight on the connection, from
+ * this client's limit or the service's `backpressure` reply.
+ */
+export function isPendingRequestLimitError(error: unknown): boolean {
+  return error instanceof MmsProtocolError && error.code === 'backpressure' && error.message === PENDING_REQUESTS_FULL_MESSAGE
+}
+
 /** Structured daemon rejection preserved across every local client caller. */
 export class MmsProtocolError extends Error {
   readonly code: string
@@ -159,6 +177,11 @@ export class LocalMmsClient implements MmsClient {
 
   clearResnapshotFlag(): void {
     this.needsResnapshot = false
+  }
+
+  /** A resnapshot that was started failed; the next event asks for one again. */
+  markResnapshotNeeded(): void {
+    this.needsResnapshot = true
   }
 
   async connect(): Promise<ProtocolHelloOk> {
@@ -387,7 +410,24 @@ export class LocalMmsClient implements MmsClient {
     }
   }
 
+  /** Sends a request; a brief overload (too many requests in flight) is retried quietly with backoff. */
   async request<T = unknown>(
+    method: string,
+    params?: unknown,
+    timeoutMs?: number
+  ): Promise<T> {
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        return await this.requestOnce<T>(method, params, timeoutMs)
+      } catch (error) {
+        const delay = OVERLOAD_RETRY_DELAYS_MS[attempt]
+        if (delay === undefined || !isPendingRequestLimitError(error) || this.closing) throw error
+        await new Promise((resolve) => setTimeout(resolve, delay))
+      }
+    }
+  }
+
+  private async requestOnce<T>(
     method: string,
     params?: unknown,
     timeoutMs?: number
@@ -397,7 +437,7 @@ export class LocalMmsClient implements MmsClient {
       throw new Error('Not connected')
     }
     if (this.pending.size >= MMS_PROTOCOL_MAX_PENDING_REQUESTS) {
-      throw new Error('Too many pending requests')
+      throw new MmsProtocolError('backpressure', PENDING_REQUESTS_FULL_MESSAGE, undefined, { category: 'unavailable', retryable: true })
     }
     const id = randomBytes(8).toString('hex')
     const result = new Promise<T>((resolve, reject) => {

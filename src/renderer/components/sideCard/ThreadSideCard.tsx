@@ -5,7 +5,6 @@ import { ActionsSection } from './ActionsSection'
 import { DeviceSection } from './DeviceSection'
 import { GitSection } from './GitSection'
 import { LineageSection } from './LineageSection'
-import { PermissionSection } from './PermissionSection'
 import {
   sideCardFitsThreadWidth,
   sideCardReservedWidth,
@@ -28,7 +27,6 @@ export function SideCardSections({ threadId, projectId }: SideCardSectionsProps)
     <>
       <DeviceSection threadId={threadId} projectId={projectId} />
       <GitSection threadId={threadId} projectId={projectId} />
-      <PermissionSection threadId={threadId} projectId={projectId} />
       <ActionsSection threadId={threadId} projectId={projectId} />
       <LineageSection threadId={threadId} projectId={projectId} />
     </>

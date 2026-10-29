@@ -1,6 +1,7 @@
 import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent } from 'react'
 import { errorText } from './scheduledLabels'
-import { describePermissionMode, type PermissionMode } from '../../../shared/permissionMode'
+import { describePermissionMode, isPermissionMode, type PermissionMode } from '../../../shared/permissionMode'
+import { PermissionModeLabel } from '../../lib/permissionModeIcon'
 import type { ScheduledJob, ScheduleKind } from '../../../shared/types'
 import {
   heldPermissionMode,
@@ -209,7 +210,9 @@ export function JobEditor({
 
       {takesPermissionMode(draft) ? (
         <div className="scheduled-field">
-          <label className="scheduled-label" htmlFor={id('permission')}>Permissions</label>
+          <label className="scheduled-label" htmlFor={id('permission')}>
+            {isPermissionMode(draft.permissionMode) ? <PermissionModeLabel mode={draft.permissionMode} size={13}>Permissions</PermissionModeLabel> : 'Permissions'}
+          </label>
           <select
             id={id('permission')}
             className="scheduled-input"

@@ -32,7 +32,7 @@ import { CLAUDE_LOCKED_PROFILE, CLAUDE_MANAGED_POLICY_REFUSAL, CLAUDE_NATIVE_TOO
 import { readClaudeManagedPolicy, remoteSettingsHoldPolicy, type ManagedPolicyReadInput } from '../claude/managedPolicy'
 import { compatibilityFields, CONTAINMENT_EVIDENCE, hasContainmentEvidence, type ContainmentEvidence } from '../compatibility'
 import { CLAUDE_INSTANCE_ID } from '../../../shared/providerInstances'
-import { decodeInstanceConfig, type AuthReading, type DriverContext, type DriverRuntime, type HarnessDriver, type InstanceConfig } from '../driver'
+import { compareVersions, decodeInstanceConfig, type AuthReading, type DriverContext, type DriverRuntime, type HarnessDriver, type InstanceConfig } from '../driver'
 import { ownedHomeProblem } from '../ownedHome'
 import { ptyAvailable, redactSignIn, runInPty, terminalText, transcriptLinks, type PtyRun, type PtySpawn } from '../pty'
 import { runHarness } from '../spawn'
@@ -45,9 +45,28 @@ export const CLAUDE_CODE_CAPS: HarnessCaps = Object.freeze({
   contextUsage: 'reported',
   // Claude Code asks Mousse through its permission callback under the mode Mousse sets.
   toolControl: 'approval_only',
+  // Only once the installed version is known to have it (`claudeCodeCaps`).
+  autoPermissionMode: false,
   budgets: 'unsupported',
   spendLimits: 'unsupported'
 })
+
+/**
+ * The first Claude Code version whose auto mode a session can start in with `--permission-mode auto`
+ * (the SDK's `permissionMode: 'auto'`) alone. Claude Code's changelog for 2.1.111: "Auto mode no longer
+ * requires `--enable-auto-mode`"; before it, `auto` needed that extra flag, which Mousse does not pass.
+ */
+export const CLAUDE_AUTO_MODE_MIN_VERSION = '2.1.111'
+
+/**
+ * The caps of an ordinary (not locked) Claude Code entry at its installed version. Auto is offered only
+ * when that version is known and has auto mode: an unknown version runs Auto as Auto-accept edits.
+ */
+export function claudeCodeCaps(installedVersion: string | undefined): HarnessCaps {
+  if (installedVersion === undefined || compareVersions(installedVersion, CLAUDE_AUTO_MODE_MIN_VERSION) < 0) return CLAUDE_CODE_CAPS
+  return CLAUDE_CODE_AUTO_CAPS
+}
+const CLAUDE_CODE_AUTO_CAPS: HarnessCaps = Object.freeze({ ...CLAUDE_CODE_CAPS, autoPermissionMode: true })
 
 export { CLAUDE_NATIVE_TOOLS } from '../claude/locked'
 
@@ -265,7 +284,7 @@ export function claudeCodeDriver(options: ClaudeCodeDriverOptions = {}): Harness
     // So does a locked entry: a bot never runs in the user's own Claude Code setup.
     privateHomeFor: (config) => (claudeRunsOnApiKey(config) || config.profile === CLAUDE_LOCKED_PROFILE ? 'required' : 'allowed'),
     caps: (config, installedVersion, _facts, instanceId) =>
-      claudeLocked(config) ? claudeLockedCaps(CLAUDE_CODE_CAPS, { platform, ...(installedVersion ? { cliVersion: installedVersion } : {}), managedPolicy: managedFor(instanceId), evidence }) : CLAUDE_CODE_CAPS,
+      claudeLocked(config) ? claudeLockedCaps(CLAUDE_CODE_CAPS, { platform, ...(installedVersion ? { cliVersion: installedVersion } : {}), managedPolicy: managedFor(instanceId), evidence }) : claudeCodeCaps(installedVersion),
     // Only a locked entry holds a bot to its grant, and only once its gate and ledger have evidence on
     // this platform (`CONTAINMENT_EVIDENCE`) and no organisation policy applies; no record exists yet.
     botAuthority: (config, instanceId) => claudeLocked(config) && claudeLockedHoldsBots(platform, managedFor(instanceId), evidence),

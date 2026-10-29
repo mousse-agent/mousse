@@ -3,6 +3,7 @@
  * tests drive the provider service against `FakeClaudeCli`, a peer that reads the prompt stream and
  * writes the frames a real Claude Code process would.
  */
+import { spawn, type ChildProcess } from 'node:child_process'
 import { chmodSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -14,6 +15,7 @@ import {
   type ClaudeSubscriptionChatInput
 } from '../src/mms/harness/vendors/claude/ClaudeSubscriptionProviderService'
 import { BackgroundObligations, LiveSession, UNSURE_MEMORY_MS, type LiveTimings } from '../src/mms/harness/vendors/claude/liveSession'
+import { STOP_GRACE_MS } from '../src/mms/harness/stopProcesses'
 import { FakeClaudeCli, notification, resultFrame, roster, SESSION, textDelta, toolResult, toolStart } from './run/fakeClaudeCli'
 
 const later = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
@@ -30,7 +32,12 @@ afterEach(() => {
   for (const home of homes.splice(0)) rmSync(home, { recursive: true, force: true })
 })
 
-function fixture(timings: Partial<LiveTimings> = {}, cli = new FakeClaudeCli(), usageLimitHoldMs?: number) {
+function fixture(
+  timings: Partial<LiveTimings> = {},
+  cli = new FakeClaudeCli(),
+  usageLimitHoldMs?: number,
+  extra: Partial<ConstructorParameters<typeof ClaudeSubscriptionProviderService>[2]> = {}
+) {
   const home = mkdtempSync(join(tmpdir(), 'claude-live-test-'))
   homes.push(home)
   const binary = join(home, 'claude')
@@ -44,7 +51,8 @@ function fixture(timings: Partial<LiveTimings> = {}, cli = new FakeClaudeCli(), 
     query: cli.query,
     live: { noticeDelayMs: 10, ...timings },
     usageLimitHoldMs,
-    runAuth: vi.fn(async () => JSON.stringify({ loggedIn: true, authMethod: 'claude.ai' }))
+    runAuth: vi.fn(async () => JSON.stringify({ loggedIn: true, authMethod: 'claude.ai' })),
+    ...extra
   })
   const host = { backgroundWork: vi.fn<(threadId: string, active: boolean) => void>(), continuationStarted: vi.fn<NonNullable<ClaudeLiveHost['continuationStarted']>>(), notice: vi.fn<NonNullable<ClaudeLiveHost['notice']>>() }
   service.setLiveHost(host)
@@ -523,6 +531,64 @@ describe('Stop and process lifetime', () => {
     // The next turn starts a new process.
     await f.turn()
     expect(f.cli.processes).toHaveLength(2)
+  })
+
+  describe.skipIf(process.platform === 'win32')('a Claude Code process that does not exit after Stop (issue #417)', () => {
+    const spawned: ChildProcess[] = []
+    afterEach(() => {
+      for (const child of spawned.splice(0)) child.kill('SIGKILL')
+    })
+    const alive = (pid: number): boolean => {
+      try {
+        process.kill(pid, 0)
+        return true
+      } catch (error) {
+        return (error as NodeJS.ErrnoException).code === 'EPERM'
+      }
+    }
+
+    /** A real process standing in for Claude Code: it ignores the close and SIGTERM, and runs a command in a group of its own. */
+    async function stubbornClaude(): Promise<{ claude: ChildProcess; shell: number }> {
+      const code = [
+        "const { spawn } = require('node:child_process')",
+        "const shell = spawn('/bin/sh', ['-c', 'sleep 300 ; echo done'], { detached: true, stdio: 'ignore' })",
+        'process.stdout.write(String(shell.pid) + "\\n")',
+        "process.on('SIGTERM', () => {})",
+        'setInterval(() => {}, 1000)'
+      ].join(';')
+      const claude = spawn(process.execPath, ['-e', code], { stdio: ['ignore', 'pipe', 'ignore'] })
+      spawned.push(claude)
+      const shell = await new Promise<number>((resolve) => claude.stdout!.once('data', (chunk: Buffer) => resolve(Number(chunk.toString().trim()))))
+      spawned.push({ kill: () => { try { process.kill(-shell, 'SIGKILL') } catch { /* gone */ } return true } } as unknown as ChildProcess)
+      return { claude, shell }
+    }
+
+    /** Queries of `cli` whose process transport names `pid`, as the Agent SDK's do. */
+    const withPid = (cli: FakeClaudeCli, pid: number) => (input: Parameters<FakeClaudeCli['query']>[0]) => Object.assign(cli.query(input), { transport: { process: { pid } } })
+
+    it('kills it with the command it runs, shortly after the Stop', async () => {
+      const { claude, shell } = await stubbornClaude()
+      const cli = new FakeClaudeCli()
+      const f = fixture({}, cli, undefined, { query: withPid(cli, claude.pid!) })
+      await f.turn()
+      const stoppedAt = Date.now()
+      expect(f.service.stopThread('thread')).toBe('stopped')
+      expect(f.cli.last.closed).toBe(true)
+      await vi.waitFor(() => expect(alive(claude.pid!)).toBe(false), { timeout: STOP_GRACE_MS + 3_000, interval: 50 })
+      expect(Date.now() - stoppedAt).toBeLessThan(STOP_GRACE_MS + 3_000)
+      await vi.waitFor(() => expect(alive(shell)).toBe(false), { timeout: 2_000, interval: 50 })
+      expect(f.host.notice).not.toHaveBeenCalled()
+    })
+
+    it('says so in the thread when it could not be ended', async () => {
+      const cli = new FakeClaudeCli()
+      const reap = vi.fn(async () => 'survived' as const)
+      const f = fixture({}, cli, undefined, { query: withPid(cli, 4242), reap })
+      await f.turn()
+      expect(f.service.stopThread('thread')).toBe('stopped')
+      expect(reap).toHaveBeenCalledWith(4242)
+      await vi.waitFor(() => expect(f.host.notice).toHaveBeenCalledWith('thread', expect.stringContaining('Stop could not end Claude Code\'s process for this chat (process 4242)')))
+    })
   })
 
   it('refuses a model, folder or instruction change while background work exists, and replaces the process when there is none', async () => {

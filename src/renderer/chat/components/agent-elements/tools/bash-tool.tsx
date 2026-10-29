@@ -78,7 +78,7 @@ export function BashToolTerminalCard({
   return (
     <div
       className={cn(
-        "an-tool-chrome rounded-an-tool-border-radius border border-an-border-color bg-an-tool-background overflow-hidden",
+        "an-tool-chrome an-bash-card rounded-an-tool-border-radius border border-an-border-color bg-an-tool-background overflow-hidden",
         isError && "border-red-500/50",
       )}
     >

@@ -28,6 +28,12 @@ import {
 } from "../../../utils/assistantMessageActions";
 import { ToolRenderer as DefaultToolRenderer } from "./tools/tool-renderer";
 import { ToolCallsGroup } from "./tools/tool-calls-group";
+import { LiveThinkingRow } from "./tools/thinking-tool";
+import {
+  PermissionRequestRow,
+  isPermissionRequestPart,
+  isWaitingPermissionRequest,
+} from "./tools/permission-request";
 import { SubagentCardGroup } from "./tools/SubagentCard";
 import { SubagentNotice } from "./tools/SubagentNotice";
 import { useSubagentCards } from "./tools/subagent-cards-context";
@@ -152,6 +158,7 @@ function getLastAssistantHasContent(messages: UIMessage[]) {
     return (msg.parts ?? []).some((part) => {
       if (isTextPart(part)) return part.text.trim().length > 0;
       if (isRecord(part) && part.type === "data-applet-pending") return true;
+      if (isPermissionRequestPart(part)) return true;
       return isV5ToolPart(part) || isAppletPart(part);
     });
   }
@@ -237,10 +244,13 @@ function TurnWorkStatus({
   active,
   startedAt,
   durationMs,
+  waitingLabel,
 }: {
   active: boolean;
   startedAt?: number | null;
   durationMs: number | null;
+  /** Said instead of the time while the reply waits for the user (an approval). */
+  waitingLabel?: string;
 }) {
   const fallbackStartRef = useRef<number | null>(null);
   if (!active) fallbackStartRef.current = null;
@@ -261,11 +271,13 @@ function TurnWorkStatus({
   const elapsedMs =
     active && origin != null ? Math.max(0, now - origin) : durationMs;
   const label =
-    elapsedMs == null
-      ? null
-      : active
-        ? formatWorkingFor(elapsedMs)
-        : formatWorkedFor(elapsedMs);
+    active && waitingLabel
+      ? waitingLabel
+      : elapsedMs == null
+        ? null
+        : active
+          ? formatWorkingFor(elapsedMs)
+          : formatWorkedFor(elapsedMs);
   if (!label) return null;
   return (
     <div className="turn-work" data-find-ignore>
@@ -1240,13 +1252,18 @@ export const MessageList = memo(function MessageList({
     const turnId = lastUserMessageId;
     if (!turnId) return;
     if (isStreaming) {
-      if (workClockRef.current?.turnId !== turnId) {
+      const clock = workClockRef.current;
+      if (clock?.turnId !== turnId) {
         const user = normalizedMessages.find((message) => message.id === turnId);
         workClockRef.current = {
           turnId,
           startedAt: readCreatedAt(user) ?? Date.now(),
           endedAt: null,
         };
+      } else if (clock.endedAt != null) {
+        // The same reply goes on after a pause (an answered approval or
+        // question): its time runs to where it really ends.
+        clock.endedAt = null;
       }
       return;
     }
@@ -1586,6 +1603,12 @@ export const MessageList = memo(function MessageList({
                           active={isTurnStreaming}
                           startedAt={isTurnStreaming ? liveStart : null}
                           durationMs={workedMs}
+                          waitingLabel={
+                            isTurnStreaming &&
+                            turn.assistantMsgs.some(isWaitingPermissionRequest)
+                              ? "Waiting for approval"
+                              : undefined
+                          }
                         />
                         <div className="turn-answer flex flex-col gap-3">
                           {(() => {
@@ -1731,18 +1754,24 @@ export const MessageList = memo(function MessageList({
                     );
                   })()}
 
-                {isLastTurn &&
-                  (showAwaitingReply || (showPlanning && turn.assistantMsgs.length === 0)) && (
-                  <TurnWorkStatus
-                    active
-                    startedAt={
-                      turn.userMsg &&
-                      workClockRef.current?.turnId === turn.userMsg.id
-                        ? workClockRef.current.startedAt
-                        : readCreatedAt(turn.userMsg)
-                    }
-                    durationMs={null}
-                  />
+                {isLastTurn && (showAwaitingReply || showPlanning) && (
+                  // Laid out like the turn's answer below, so its first row
+                  // takes the live row's place without moving.
+                  <div className="group/assistant-turn">
+                    <TurnWorkStatus
+                      active
+                      startedAt={
+                        turn.userMsg &&
+                        workClockRef.current?.turnId === turn.userMsg.id
+                          ? workClockRef.current.startedAt
+                          : readCreatedAt(turn.userMsg)
+                      }
+                      durationMs={null}
+                    />
+                    <div className="turn-answer flex flex-col gap-3">
+                      <LiveThinkingRow />
+                    </div>
+                  </div>
                 )}
               </div>
             );
@@ -1901,6 +1930,11 @@ function AssistantParts({
       }
       if (isAppletPart(part)) {
         elems.push(<AppletCard key={`${msg.id}-applet-${part.data.revisionId}`} reference={part.data} />);
+        i++;
+        continue;
+      }
+      if (isPermissionRequestPart(part)) {
+        elems.push(<PermissionRequestRow key={`${msg.id}-permission`} data={part.data} />);
         i++;
         continue;
       }

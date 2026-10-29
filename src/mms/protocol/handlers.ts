@@ -1527,6 +1527,14 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       if (!ctx.mms.threads.getThread(threadId)) throw new DomainRpcError('thread_not_found', 'Thread not found', { threadId })
       return { threadId, rules: ctx.mms.orchestrator.listApprovalRules(threadId) }
     }
+    case 'threads.approvalRequests': {
+      // The thread's saved approval requests with the answers they got, for its transcript. Not exposed on the Bridge.
+      const p = isObject(params) ? params : {}
+      rejectUnknownKeys(p, ['threadId'])
+      const threadId = asString(p.threadId, 'threadId', 256)
+      if (!ctx.mms.threads.getThread(threadId)) throw new DomainRpcError('thread_not_found', 'Thread not found', { threadId })
+      return { threadId, requests: ctx.mms.orchestrator.listApprovalRequests(threadId) }
+    }
     case 'threads.clearApprovalRules': {
       // Revokes one rule (`ruleId`) or every rule of the thread. Not exposed on the Bridge.
       const p = isObject(params) ? params : {}

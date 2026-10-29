@@ -26,6 +26,7 @@ export const CODEX_CAPS: HarnessCaps = Object.freeze({
   contextUsage: 'reported',
   // Codex asks Mousse before each tool under the approval policy Mousse sets.
   toolControl: 'approval_only',
+  autoPermissionMode: false,
   budgets: 'unsupported',
   spendLimits: 'unsupported'
 })

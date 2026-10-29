@@ -52,6 +52,12 @@ export interface HarnessCaps {
    */
   toolControl: 'exact' | 'approval_only' | 'uncontrolled'
   /**
+   * The agent has an auto mode of its own that decides which actions are safe to run and asks about the
+   * rest (Claude Code's `auto` permission mode), so a thread set to Auto runs in it. Without it a thread
+   * set to Auto runs as Auto-accept edits. Caps from before the key existed read as `false`.
+   */
+  autoPermissionMode: boolean
+  /**
    * Count budgets (`RunPolicy.budget.maxTurns|maxToolCalls`). `hard` = Mousse refuses the next model
    * request (compaction, summaries, retries included) or tool call before it starts. A limit checked
    * after a response is `observed`. `unsupported`: neither. A wall-clock budget is the gateway's own
@@ -76,7 +82,7 @@ export type RunCapabilities = Pick<
 >
 
 export const HARNESS_CAP_KEYS = [
-  'steer', 'interrupt', 'rollback', 'fork', 'events', 'containment', 'historyInjection', 'mcp', 'childPolicy', 'planMode', 'contextUsage', 'toolControl', 'budgets', 'spendLimits'
+  'steer', 'interrupt', 'rollback', 'fork', 'events', 'containment', 'historyInjection', 'mcp', 'childPolicy', 'planMode', 'contextUsage', 'toolControl', 'autoPermissionMode', 'budgets', 'spendLimits'
 ] as const satisfies ReadonlyArray<keyof HarnessCaps>
 
 /** What a caller picks to run an agent. */

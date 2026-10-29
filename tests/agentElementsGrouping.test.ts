@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   extractCommandSummary,
   formatSearchRowLabels,
+  latestThoughtHeading,
   thoughtHeading,
 } from '../src/renderer/chat/components/agent-elements/utils/format-tool'
 import { getToolStatus } from '../src/renderer/chat/components/agent-elements/utils/format-tool'
@@ -18,6 +19,15 @@ const tool = (type: string, toolCallId: string, extra: Record<string, unknown> =
   state: 'output-available',
   input: {},
   ...extra,
+})
+
+describe('latestThoughtHeading', () => {
+  it('takes the last titled summary, else the last paragraph', () => {
+    expect(latestThoughtHeading('**One**\n\nbody\n\n__Two__\n\nmore body')).toBe('Two')
+    expect(latestThoughtHeading('First idea.\n\n  \n\nSecond idea\nwith detail')).toBe('Second idea')
+    expect(latestThoughtHeading('   ')).toBe('')
+    expect(latestThoughtHeading(undefined)).toBe('')
+  })
 })
 
 describe('thoughtHeading', () => {
@@ -153,6 +163,19 @@ describe('analyzeAssistantMessage', () => {
     ]
     expect(activityGroupLabel(items)).toBe('Check the model list')
     expect(activityGroupLabel([{ part: tool('tool-Grep', 'g') }, { part: tool('tool-Read', 'r') }])).toBe('')
+  })
+
+  it('titles a run with one line from the newest part of the latest thought', () => {
+    // Codex: titled reasoning summaries, merged into one thought.
+    const codex = '**Finding the start script**\n\nThe package has a start script.\n\n**Checking the build output**\n\nThe bundle is missing.'
+    expect(activityGroupLabel([{ part: tool('tool-Thinking', 't', { input: { thought: codex } }) }, { part: tool('tool-Bash', 'a') }])).toBe(
+      'Checking the build output'
+    )
+    // Claude: summarized prose; the last paragraph's first line.
+    const claude = 'The user wants the app running.\n\nnpm start downloads Electron first, so wait for it.\nThen check the log.'
+    expect(activityGroupLabel([{ part: tool('tool-Bash', 'a') }, { part: tool('tool-Thinking', 't', { output: claude }) }])).toBe(
+      'npm start downloads Electron first, so wait for it.'
+    )
   })
 
   it('ignores suppressed questions and task output so runs stay joined', () => {

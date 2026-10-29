@@ -17,6 +17,7 @@ export const ANTIGRAVITY_CAPS: HarnessCaps = Object.freeze({
   contextUsage: 'none',
   // The agent asks Mousse for every tool permission and file write.
   toolControl: 'approval_only',
+  autoPermissionMode: false,
   budgets: 'unsupported',
   spendLimits: 'unsupported'
 })

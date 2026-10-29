@@ -626,3 +626,14 @@ export function chatStatusFromPhase(phase: string): 'ready' | 'submitted' | 'str
   if (phase === 'failed') return 'error'
   return 'ready'
 }
+
+/**
+ * The chat status of a thread's turn. A run that waits for an approval or an answer to a question
+ * (`awaiting_input` with the run's id) is still the same reply: it reads as streaming, so the turn
+ * keeps one working indicator and its timer runs on. A request with no run behind it (one a restart
+ * left, which continues the thread when answered) reads as ready.
+ */
+export function chatStatusFromTurn(state: { phase: string; turnId?: string | null } | undefined): 'ready' | 'submitted' | 'streaming' | 'error' {
+  if (state?.phase === 'awaiting_input') return state.turnId ? 'streaming' : 'ready'
+  return chatStatusFromPhase(state?.phase ?? 'idle')
+}

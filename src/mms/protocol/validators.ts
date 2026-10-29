@@ -785,7 +785,7 @@ export function asJobMode(v: unknown, name = 'mode'): 'agent' | 'plan' {
 
 /** A job's permission mode. The job's ceiling has no validator: no request may carry one (the key is refused). */
 export function asJobPermissionMode(v: unknown, name = 'permissionMode'): PermissionMode {
-  if (!isPermissionMode(v)) throw new Error(`${name} must be ask|accept_edits|full`)
+  if (!isPermissionMode(v)) throw new Error(`${name} must be ask|accept_edits|auto|full`)
   return v
 }
 

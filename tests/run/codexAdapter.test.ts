@@ -2,7 +2,8 @@ import { createHash } from 'node:crypto'
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { spawn, type ChildProcess } from 'node:child_process'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { usageLimitError } from '../../src/mms/orchestrator/providerErrors'
 import { UserQuestionService, type ApprovalTag } from '../../src/mms/orchestrator/UserQuestionService'
 import { approvalFingerprint } from '../../src/mms/run/approvalFingerprint'
@@ -11,7 +12,8 @@ import { EffectOutbox } from '../../src/mms/run/EffectOutbox'
 import { RunEngine } from '../../src/mms/run/RunEngine'
 import { RunStore } from '../../src/mms/run/RunStore'
 import { CodexAppServerExitedError } from '../../src/mms/harness/vendors/codex/CodexAppServerClient'
-import { CodexTurnFailure, createCodexProviderService, type CodexProviderService } from '../../src/mms/harness/vendors/codex/CodexProviderService'
+import { CodexTurnFailure, createCodexProviderService, type CodexProviderService, type CodexServiceDependencies } from '../../src/mms/harness/vendors/codex/CodexProviderService'
+import { STOP_GRACE_MS } from '../../src/mms/harness/stopProcesses'
 import { decideUsageLimit } from '../../src/mms/run/pausePolicy'
 import { CodexAdapter } from '../../src/mms/harness/drivers/codex/adapter'
 import type { AdapterHost, TurnControl, TurnInput, TurnSink } from '../../src/mms/harness/adapter'
@@ -69,7 +71,7 @@ function threadStart(id: number, params = threadParams(), thread = T): Transcrip
 
 function turnStart(id: number, prompt: string, turn = 'turn-1', extra: Record<string, unknown> = {}): TranscriptFrame[] {
   return [
-    out({ id, method: 'turn/start', params: { threadId: T, input: text(prompt), approvalPolicy: 'untrusted', sandboxPolicy: SUPERVISED, model: 'gpt-x', ...extra } }),
+    out({ id, method: 'turn/start', params: { summary: 'auto', threadId: T, input: text(prompt), approvalPolicy: 'untrusted', sandboxPolicy: SUPERVISED, model: 'gpt-x', ...extra } }),
     inn({ id, result: { turn: { id: turn, status: 'inProgress', error: null, items: [] } } }),
     note('turn/started', { threadId: T, turn: { id: turn, status: 'inProgress', error: null } })
   ]
@@ -383,7 +385,7 @@ describe('CodexAdapter', () => {
       inn({ id: 4, error: { code: -32600, message: `no rollout found for thread id ${T}` } }),
       out({ id: 5, method: 'thread/start', params: threadParams() }),
       inn({ id: 5, result: threadResult('thr-2') }),
-      out({ id: 6, method: 'turn/start', params: { threadId: 'thr-2', input: text('Previous conversation (context only; do not repeat earlier actions):\nhistory+three\n\nCurrent request:\nfourth'), approvalPolicy: 'untrusted', sandboxPolicy: SUPERVISED, model: 'gpt-x' } }),
+      out({ id: 6, method: 'turn/start', params: { summary: 'auto', threadId: 'thr-2', input: text('Previous conversation (context only; do not repeat earlier actions):\nhistory+three\n\nCurrent request:\nfourth'), approvalPolicy: 'untrusted', sandboxPolicy: SUPERVISED, model: 'gpt-x' } }),
       inn({ id: 6, result: { turn: { id: 'turn-4', status: 'inProgress', error: null } } }),
       note('item/completed', { threadId: 'thr-2', turnId: 'turn-4', item: { type: 'agentMessage', id: 'msg-4', text: 'four' } }),
       note('turn/completed', { threadId: 'thr-2', turn: { id: 'turn-4', status: 'completed', error: null } })
@@ -464,12 +466,12 @@ describe('CodexAdapter', () => {
       inn({ id: 6, result: threadResult('thr-2') }),
       out({ id: 7, method: 'thread/unsubscribe', params: { threadId: T } }),
       inn({ id: 7, result: { status: 'unsubscribed' } }),
-      out({ id: 8, method: 'turn/start', params: { threadId: 'thr-2', input: text('again'), approvalPolicy: 'untrusted', sandboxPolicy: SUPERVISED, model: 'gpt-x' } }),
+      out({ id: 8, method: 'turn/start', params: { summary: 'auto', threadId: 'thr-2', input: text('again'), approvalPolicy: 'untrusted', sandboxPolicy: SUPERVISED, model: 'gpt-x' } }),
       inn({ id: 8, result: { turn: { id: 'turn-2', status: 'inProgress', error: null } } }),
       note('item/completed', { threadId: 'thr-2', turnId: 'turn-2', item: { type: 'agentMessage', id: 'msg-2', text: 'two' } }),
       note('turn/completed', { threadId: 'thr-2', turn: { id: 'turn-2', status: 'completed', error: null } }),
       // Same token again: the forked thread is reused as loaded.
-      out({ id: 9, method: 'turn/start', params: { threadId: 'thr-2', input: text('third'), approvalPolicy: 'untrusted', sandboxPolicy: SUPERVISED, model: 'gpt-x' } }),
+      out({ id: 9, method: 'turn/start', params: { summary: 'auto', threadId: 'thr-2', input: text('third'), approvalPolicy: 'untrusted', sandboxPolicy: SUPERVISED, model: 'gpt-x' } }),
       inn({ id: 9, result: { turn: { id: 'turn-3', status: 'inProgress', error: null } } }),
       note('item/completed', { threadId: 'thr-2', turnId: 'turn-3', item: { type: 'agentMessage', id: 'msg-3', text: 'three' } }),
       note('turn/completed', { threadId: 'thr-2', turn: { id: 'turn-3', status: 'completed', error: null } })
@@ -577,7 +579,7 @@ describe('CodexAdapter', () => {
       inn({ id: 6, result: threadResult('thr-2') }),
       out({ id: 7, method: 'thread/unsubscribe', params: { threadId: T } }),
       inn({ id: 7, result: { status: 'unsubscribed' } }),
-      out({ id: 8, method: 'turn/start', params: { threadId: 'thr-2', input: text('two'), approvalPolicy: 'never', sandboxPolicy: FULL, model: 'gpt-x' } }),
+      out({ id: 8, method: 'turn/start', params: { summary: 'auto', threadId: 'thr-2', input: text('two'), approvalPolicy: 'never', sandboxPolicy: FULL, model: 'gpt-x' } }),
       inn({ id: 8, result: { turn: { id: 'turn-2', status: 'inProgress', error: null, items: [] } } }),
       note('item/completed', { threadId: 'thr-2', turnId: 'turn-2', item: { type: 'agentMessage', id: 'msg-2', text: 'two' } }),
       note('turn/completed', { threadId: 'thr-2', turn: { id: 'turn-2', status: 'completed', error: null } })
@@ -905,7 +907,7 @@ describe('CodexAdapter', () => {
         inn({ id: 4, result: threadResult() }),
         // The next turn starts a new thread with the history as a preamble.
         ...threadStart(5),
-        out({ id: 6, method: 'turn/start', params: { threadId: T, input: text(`Previous conversation (context only; do not repeat earlier actions):\n${STOPPED}\n\nCurrent request:\nagain`), approvalPolicy: 'untrusted', sandboxPolicy: SUPERVISED, model: 'gpt-x' } }),
+        out({ id: 6, method: 'turn/start', params: { summary: 'auto', threadId: T, input: text(`Previous conversation (context only; do not repeat earlier actions):\n${STOPPED}\n\nCurrent request:\nagain`), approvalPolicy: 'untrusted', sandboxPolicy: SUPERVISED, model: 'gpt-x' } }),
         inn({ id: 6, result: { turn: { id: 'turn-2', status: 'inProgress', error: null, items: [] } } }),
         ...message('msg-2', ['two'], 'turn-2'),
         completed('completed', 'turn-2')
@@ -957,6 +959,140 @@ describe('CodexAdapter', () => {
       // No stopped turn is remembered, so a fingerprint changes nothing.
       codex.commitInterrupted('thread-1', STOPPED)
       expect(readFileSync(settingsPath(), 'utf8')).toBe(before)
+    })
+  })
+
+  describe.skipIf(process.platform === 'win32')('Stop during a long-running command (issue #417)', () => {
+    const SCRIPT = 'sleep 300 ; echo done'
+    const COMMAND = `/bin/zsh -lc '${SCRIPT}'`
+    const spawned: ChildProcess[] = []
+    afterEach(() => {
+      for (const child of spawned.splice(0)) child.kill('SIGKILL')
+    })
+    const alive = (pid: number): boolean => {
+      try {
+        process.kill(pid, 0)
+        return true
+      } catch (error) {
+        return (error as NodeJS.ErrnoException).code === 'EPERM'
+      }
+    }
+
+    /**
+     * A real process standing in for `codex app-server`: like Codex, it runs the command in a shell of
+     * its own process group and keeps it running after `turn/interrupt`, as Codex does with a command
+     * it holds as a background terminal. The JSON-RPC side is the replay.
+     */
+    async function appServer(): Promise<{ server: ChildProcess; shell: number }> {
+      const code = [
+        "const { spawn } = require('node:child_process')",
+        "const shell = spawn('/bin/sh', ['-c', process.argv[1]], { detached: true, stdio: 'ignore' })",
+        'process.stdout.write(String(shell.pid) + "\\n")',
+        'setInterval(() => {}, 1000)'
+      ].join(';')
+      const server = spawn(process.execPath, ['-e', code, SCRIPT], { stdio: ['ignore', 'pipe', 'ignore'] })
+      spawned.push(server)
+      const shell = await new Promise<number>((resolve) => server.stdout!.once('data', (chunk: Buffer) => resolve(Number(chunk.toString().trim()))))
+      spawned.push({ kill: () => { try { process.kill(-shell, 'SIGKILL') } catch { /* gone */ } return true } } as unknown as ChildProcess)
+      return { server, shell }
+    }
+
+    function stoppedTurn(controller: AbortController): ReplayTransport {
+      return transport(
+        [
+          ...handshake(),
+          ...threadStart(4),
+          ...turnStart(5, 'hello'),
+          note('item/started', { threadId: T, turnId: 'turn-1', item: { type: 'commandExecution', id: 'cmd-1', command: COMMAND, cwd: '/w', status: 'inProgress', processId: '73647' } }),
+          cue({ action: 'stop' }),
+          out({ id: 6, method: 'turn/interrupt', params: { threadId: T, turnId: 'turn-1' } }),
+          inn({ id: 6, result: {} }),
+          // Codex settles the turn at once and never reports the command as ended: it is still running.
+          completed('interrupted')
+        ],
+        () => controller.abort(new Error('stopped by the user'))
+      )
+    }
+
+    function serviceOn(replay: ReplayTransport, pid: number, dependencies: Partial<CodexServiceDependencies> = {}): CodexProviderService {
+      const binary = join(home, 'codex')
+      writeFileSync(binary, '#!/bin/sh\nexit 0\n')
+      chmodSync(binary, 0o755)
+      mkdirSync(join(home, 'providers', 'codex'), { recursive: true })
+      writeFileSync(settingsPath(), JSON.stringify({ binaryPath: binary, models: [{ id: 'gpt-x', label: 'GPT X' }] }))
+      const launch = replayCodexAppServer(replay)
+      const created = createCodexProviderService(home, questions, { launch: (spec) => Object.assign(launch(spec), { pid }), ...dependencies }, { launch: () => ({ binaryPath: binary }) })
+      services.push(created)
+      return created
+    }
+
+    it('kills the command and its children within the grace, and leaves the app-server running', async () => {
+      const { server, shell } = await appServer()
+      const controller = new AbortController()
+      const replay = stoppedTurn(controller)
+      const codex = serviceOn(replay, server.pid!)
+      const adapter = new CodexAdapter(() => codex)
+      await expect(adapter.startTurn(input({ signal: controller.signal }), recordingSink(), control(), host())).rejects.toThrow('stopped by the user')
+      const stoppedAt = Date.now()
+      expect(await adapter.stopThread('thread-1')).toBe('stopped')
+      expect(Date.now() - stoppedAt).toBeLessThan(STOP_GRACE_MS + 2_000)
+      expect(alive(shell)).toBe(false)
+      expect(alive(server.pid!)).toBe(true)
+      await replay.idle()
+      replay.assertDone()
+      // Nothing of the thread's is left to stop; another thread's Stop never touches it.
+      expect(await adapter.stopThread('thread-1')).toBe('not_active')
+    })
+
+    it('kills nothing for another thread\'s Stop', async () => {
+      const { server, shell } = await appServer()
+      const controller = new AbortController()
+      const replay = stoppedTurn(controller)
+      const codex = serviceOn(replay, server.pid!)
+      const adapter = new CodexAdapter(() => codex)
+      await expect(adapter.startTurn(input({ signal: controller.signal }), recordingSink(), control(), host())).rejects.toThrow('stopped by the user')
+      expect(await adapter.stopThread('thread-2')).toBe('not_active')
+      expect(alive(shell)).toBe(true)
+    })
+
+    it('says which command could not be stopped', async () => {
+      const { server } = await appServer()
+      const controller = new AbortController()
+      const replay = stoppedTurn(controller)
+      const stopCommands = vi.fn(async (roots: readonly number[], commands: readonly string[]) => ({
+        killed: [{ pid: 4242, ppid: roots[0]!, command: commands[0]! }],
+        survivors: [{ pid: 4242, ppid: roots[0]!, command: commands[0]! }]
+      }))
+      const codex = serviceOn(replay, server.pid!, { stopCommands, stopGraceMs: 10 })
+      const adapter = new CodexAdapter(() => codex)
+      await expect(adapter.startTurn(input({ signal: controller.signal }), recordingSink(), control(), host())).rejects.toThrow('stopped by the user')
+      await expect(adapter.stopThread('thread-1')).rejects.toThrow(`Codex's command ${COMMAND} (process 4242) could not be stopped`)
+      expect(stopCommands).toHaveBeenCalledWith([server.pid], [COMMAND])
+    })
+
+    it('waits for a command Codex ends itself and kills nothing', async () => {
+      const controller = new AbortController()
+      const replay = transport(
+        [
+          ...handshake(),
+          ...threadStart(4),
+          ...turnStart(5, 'hello'),
+          note('item/started', { threadId: T, turnId: 'turn-1', item: { type: 'commandExecution', id: 'cmd-1', command: COMMAND, status: 'inProgress' } }),
+          cue({ action: 'stop' }),
+          out({ id: 6, method: 'turn/interrupt', params: { threadId: T, turnId: 'turn-1' } }),
+          inn({ id: 6, result: {} }),
+          note('item/completed', { threadId: T, turnId: 'turn-1', item: { type: 'commandExecution', id: 'cmd-1', command: COMMAND, status: 'failed', exitCode: -1 } }),
+          completed('interrupted')
+        ],
+        () => controller.abort(new Error('stopped by the user'))
+      )
+      const stopCommands = vi.fn()
+      const codex = serviceOn(replay, process.pid, { stopCommands })
+      const adapter = new CodexAdapter(() => codex)
+      await expect(adapter.startTurn(input({ signal: controller.signal }), recordingSink(), control(), host())).rejects.toThrow('stopped by the user')
+      await replay.idle()
+      expect(await adapter.stopThread('thread-1')).toBe('not_active')
+      expect(stopCommands).not.toHaveBeenCalled()
     })
   })
 
@@ -1051,7 +1187,7 @@ describe('CodexAdapter', () => {
       [
         ...handshake(),
         ...threadStart(4),
-        out({ id: 5, method: 'turn/start', params: { threadId: T, input: text('hello'), approvalPolicy: 'untrusted', sandboxPolicy: SUPERVISED, model: 'gpt-x' } }),
+        out({ id: 5, method: 'turn/start', params: { summary: 'auto', threadId: T, input: text('hello'), approvalPolicy: 'untrusted', sandboxPolicy: SUPERVISED, model: 'gpt-x' } }),
         cue({ action: 'stop' }),
         inn({ id: 5, result: { turn: { id: 'turn-1', status: 'inProgress', error: null } } }),
         out({ id: 6, method: 'turn/interrupt', params: { threadId: T, turnId: 'turn-1' } }),

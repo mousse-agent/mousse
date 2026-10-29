@@ -43,7 +43,6 @@ import type {
   GitPushOptions,
   GitScope,
   GitStatusSnapshot,
-  ApprovalRuleInfo,
   MainView,
   OrchestratorResponse,
   PermissionMode,
@@ -74,6 +73,7 @@ import type {
   TurnState,
   TurnStateSnapshot,
   QuestionAnswerOutcome,
+  ThreadApprovalRequest,
   UserQuestionAnswers
 } from '../shared/types'
 import type {
@@ -278,6 +278,12 @@ const api = {
       ipcRenderer.invoke('orchestrator:answerQuestionsDetailed', requestId, answers, threadId),
     dismissQuestions: (requestId: string, threadId?: string): Promise<boolean> =>
       ipcRenderer.invoke('orchestrator:dismissQuestions', requestId, threadId),
+    /** The thread's saved approval requests, oldest first, with the answers they got. */
+    approvalRequests: (threadId: string): Promise<ThreadApprovalRequest[]> =>
+      ipcRenderer.invoke('orchestrator:approvalRequests', threadId),
+    /** Every thread's waiting questions and approval requests. */
+    pendingQuestions: (): Promise<PendingUserQuestions[]> =>
+      ipcRenderer.invoke('orchestrator:pendingQuestions'),
     abort: (threadId?: string): Promise<boolean> =>
       ipcRenderer.invoke('orchestrator:abort', threadId),
     steer: (text: string, threadId?: string): Promise<boolean> =>
@@ -777,12 +783,6 @@ const api = {
       ipcRenderer.invoke('threads:setWorktreeEnabled', threadId, enabled),
     setPermissionMode: (threadId: string, mode: PermissionMode): Promise<Thread> =>
       ipcRenderer.invoke('threads:setPermissionMode', threadId, mode),
-    /** The thread's "Always for this thread" rules. */
-    approvalRules: (threadId: string): Promise<ApprovalRuleInfo[]> =>
-      ipcRenderer.invoke('threads:approvalRules', threadId),
-    /** Revokes one rule (by id) or all of them; returns the rules that remain. */
-    clearApprovalRules: (threadId: string, ruleId?: string): Promise<ApprovalRuleInfo[]> =>
-      ipcRenderer.invoke('threads:clearApprovalRules', threadId, ruleId),
     settle: (threadId: string, settled: boolean): Promise<Thread> =>
       ipcRenderer.invoke('threads:settle', threadId, settled),
     reorder: (projectId: string | undefined, threadIds: string[]): Promise<Thread[]> =>

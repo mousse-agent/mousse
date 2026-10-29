@@ -8,7 +8,7 @@
 {"dir":"in","frame":{"id":3,"result":{"data":[],"nextCursor":null}}}
 {"dir":"out","frame":{"id":4,"method":"thread/start","params":{"approvalPolicy":"never","sandbox":"danger-full-access","model":"gpt-replay-codex","modelProvider":"openai","config":{"model_provider":"openai"}}}}
 {"dir":"in","frame":{"id":4,"result":{"thread":{"id":"thr-replay"},"model":"gpt-replay-codex","modelProvider":"openai","cwd":"/replay"}}}
-{"dir":"out","frame":{"id":5,"method":"turn/start","params":{"threadId":"thr-replay","input":[{"type":"text","text":"Summarise the repository","text_elements":[]}],"approvalPolicy":"never","sandboxPolicy":{"type":"dangerFullAccess"},"model":"gpt-replay-codex"}}}
+{"dir":"out","frame":{"id":5,"method":"turn/start","params":{"threadId":"thr-replay","input":[{"type":"text","text":"Summarise the repository","text_elements":[]}],"approvalPolicy":"never","sandboxPolicy":{"type":"dangerFullAccess"},"model":"gpt-replay-codex","summary":"auto"}}}
 {"dir":"in","frame":{"id":5,"result":{"turn":{"id":"turn-1","status":"inProgress","error":null,"items":[]}}}}
 {"dir":"in","frame":{"method":"turn/started","params":{"threadId":"thr-replay","turn":{"id":"turn-1","status":"inProgress","error":null,"items":[]}}}}
 {"dir":"in","frame":{"method":"item/started","params":{"threadId":"thr-replay","turnId":"turn-1","item":{"type":"userMessage","id":"item-user-1","content":[{"type":"text","text":"Summarise the repository","text_elements":[]}]}}}}

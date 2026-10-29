@@ -172,7 +172,7 @@ const threadParams = (extra: Record<string, unknown> = {}) => ({
 /** One turn on `T`: its `turn/start` with exactly `prompt`, a reply and completion. */
 function codexTurn(id: number, prompt: string, turn: string, reply: string): TranscriptFrame[] {
   return [
-    out({ id, method: 'turn/start', params: { threadId: T, input: text(prompt), approvalPolicy: 'untrusted', sandboxPolicy: SUPERVISED, model: 'gpt-x' } }),
+    out({ id, method: 'turn/start', params: { summary: 'auto', threadId: T, input: text(prompt), approvalPolicy: 'untrusted', sandboxPolicy: SUPERVISED, model: 'gpt-x' } }),
     inn({ id, result: { turn: { id: turn, status: 'inProgress', error: null, items: [] } } }),
     note('turn/started', { threadId: T, turn: { id: turn, status: 'inProgress', error: null } }),
     note('item/completed', { threadId: T, turnId: turn, item: { type: 'agentMessage', id: `msg-${turn}`, text: reply } }),

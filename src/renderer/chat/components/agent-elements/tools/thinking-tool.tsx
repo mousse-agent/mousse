@@ -4,7 +4,7 @@ import { useToolComplete } from "../hooks/use-tool-complete";
 import { ToolRowBase } from "./tool-row-base";
 import { Markdown } from "../markdown";
 import { IconBrain } from "../../../../lib/icons";
-import { thoughtHeading } from "../utils/format-tool";
+import { latestThoughtHeading, thoughtHeading } from "../utils/format-tool";
 import {
   mapPartStateToInvocationState,
   mapToolInvocationToStep,
@@ -31,13 +31,16 @@ export function ThinkingCollapsed({
   useToolComplete(state === "animating", step.duration, onComplete);
 
   const heading = thoughtHeading(step.thoughtContent);
+  const isAnimating = state === "animating";
 
   return (
     <ToolRowBase
       icon={<IconBrain size={18} />}
       shimmerLabel="Thinking"
       completeLabel={heading || "Thinking"}
-      isAnimating={state === "animating"}
+      // While it streams, the newest line of the thought follows the label.
+      detail={isAnimating ? latestThoughtHeading(step.thoughtContent) || undefined : undefined}
+      isAnimating={isAnimating}
       expandable={!!step.thoughtContent}
       defaultOpen={defaultOpen}
       expanded={expanded}
@@ -50,6 +53,22 @@ export function ThinkingCollapsed({
         />
       </div>
     </ToolRowBase>
+  );
+}
+
+/**
+ * The row a turn shows from the moment it is sent until its first output: the
+ * same row a thought takes, so the thought (or a tool call) that follows
+ * replaces it in place.
+ */
+export function LiveThinkingRow() {
+  return (
+    <ToolRowBase
+      icon={<IconBrain size={18} />}
+      shimmerLabel="Thinking"
+      completeLabel="Thinking"
+      isAnimating
+    />
   );
 }
 

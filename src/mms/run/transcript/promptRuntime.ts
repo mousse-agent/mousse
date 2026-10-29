@@ -10,26 +10,42 @@ import type { StreamingLlmTextEvent, StreamingLlmThinkingEvent, StreamingLlmTool
 /**
  * Relays a runtime's cumulative text (each callback carries everything so far) as the
  * start/delta/complete events the transcript expects: `start` before the first delta, and
- * `complete` only when something started.
+ * `complete` only when something started. `break` closes the current segment: the next update
+ * starts a new one with only what came after.
  */
 export class CumulativeStream {
   private started = false
   private latest = ''
+  /** How much of the runtime's cumulative text the closed segments hold. */
+  private offset = 0
+  private seen = 0
 
   constructor(private readonly emit: (phase: 'start' | 'delta' | 'complete', content: string) => void) {}
 
   update(content: string): void {
+    this.seen = content.length
+    const segment = this.offset ? content.slice(this.offset).replace(/^\s+/, '') : content
+    if (this.offset && !segment) return
     if (!this.started) {
       this.emit('start', '')
       this.started = true
     }
-    this.latest = content
-    this.emit('delta', content)
+    this.latest = segment
+    this.emit('delta', segment)
   }
 
   /** Closes the stream with `content` (default: the latest update). No-op if nothing started. */
   complete(content: string = this.latest): void {
     if (this.started) this.emit('complete', content)
+  }
+
+  /** Closes the current segment (a thought before a tool call); what streams next opens another. */
+  break(): void {
+    if (!this.started) return
+    this.complete()
+    this.started = false
+    this.latest = ''
+    this.offset = this.seen
   }
 }
 
