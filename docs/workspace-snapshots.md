@@ -1,6 +1,6 @@
 # Workspace snapshots
 
-Status: phases 1 to 3 of [#464](https://github.com/mousse-agent/mousse/issues/464) are implemented: turn snapshots, outside changes, Undo, Redo, revert and conversation forks (1 and 2), then subagent and workflow results, Publish, the Git panel's push, and worktree retirement, cleanup, GC and inventory (3). Phase 4 (projects without Git and standalone threads) is not started.
+Status: phases 1 to 4 of [#464](https://github.com/mousse-agent/mousse/issues/464) are implemented: turn snapshots, outside changes, Undo, Redo, revert and conversation forks (1 and 2), then subagent and workflow results, Publish, the Git panel's push, and worktree retirement, cleanup, GC and inventory (3), then projects without Git and threads with no project, through a hidden store (4). The model's terms in the glossary and the architecture doc (5) follow.
 
 ## Why
 
@@ -10,7 +10,7 @@ Now a turn is recorded as a private snapshot of the files, stored with Git but k
 
 ## The model
 
-A **snapshot** is a commit whose tree holds every file of a worktree: tracked and untracked, not ignored, not `.mousse/`. Its parent is the worktree's HEAD when it was taken (none in a repository without a commit). Nothing points at it except refs under `refs/mousse/`, so it belongs to no branch and a push never carries it.
+A **snapshot** is a commit whose tree holds every file of a worktree: tracked and untracked, not ignored, not `.mousse/`. Its parent is the worktree's HEAD when it was taken (none in a folder with no Git Mousse may use: see "Folders without Git"). Nothing points at it except refs under `refs/mousse/`, so it belongs to no branch and a push never carries it.
 
 `takeSnapshot` (`src/mms/actions/snapshots.ts`):
 
@@ -41,6 +41,7 @@ A **snapshot** is a commit whose tree holds every file of a worktree: tracked an
 | The thread's files as last published | `refs/mousse/published/<threadId>` (kept in the primary's repository) |
 | A retired worktree | `refs/mousse/lifecycle/<profile>/<thread>/<key>/{base,result,snapshot}` (`snapshot` only when the worktree held uncommitted files) |
 | The thread's last snapshot, as data | `workspace.json` `snapshotSha`; `headSha` is the last HEAD Mousse saw (informational) |
+| The same, in a folder without Git | `snapshot-workspace.json` `snapshotSha`, and the pin `refs/mousse/threads/<threadId>/main` in the hidden store |
 
 `ThreadAction` (`src/shared/threadActions.ts`):
 
@@ -151,6 +152,84 @@ Storage cleanup, trashed threads and permanent deletion retire worktrees through
 
 Cross-thread fork seeding creates the new worktree at the HEAD the snapshot was taken on, then writes the snapshot's files and makes the snapshot the thread's first one (`provision(…, { snapshot })`).
 
+## Folders without Git
+
+A project that is not a Git repository, a repository with no commit yet, and a thread with no project (it runs in a private scratch folder its runtime keeps for it) get the same snapshots, Undo, Redo, revert and per-turn review as a Git thread. There is no worktree and no branch: the folder is the person's, so the snapshots live in a **hidden store** of Mousse's own and the folder never gains a `.git`.
+
+### The store
+
+A repository Mousse creates (`git init --bare --template=`, then `core.bare=false`, `gc.auto=0`) and uses only as `git --git-dir=<store> --work-tree=<folder>`.
+
+| Folder | Store | Shared by |
+| --- | --- | --- |
+| A project that is not a Git repository, or has no commit yet | `<MOUSSE_HOME>/project-data/<projectId>/snapshots.git` | the project's threads |
+| A thread with no project (its runtime's scratch folder) | `<MOUSSE_HOME>/thread-snapshots/<threadId>/snapshots.git` | the thread |
+
+A repository with no commit is treated like a folder with no repository: its own `.git` is excluded and never read or written by a snapshot. A project that is a bare repository is not a candidate. The store has no HEAD and no branch, so a snapshot there has no parent, and its `git` record has no `headBefore`, `headAfter` or branch.
+
+The store's own index (`<store>/index`) is the persistent snapshot index, so `git diff <snapshot>` against the folder, which the review reads, sees the files as of the last snapshot. `info/exclude` is rewritten with each turn: `.git/`, `.mousse/`, `node_modules/`, `.venv/`, `venv/`, `__pycache__/`, `.DS_Store`, and, at the top of the folder only, `/dist/`, `/build/`, `/target/`, `/.next/`, `/.cache/` (a source folder called `build` deeper down stays). The folder's own `.gitignore` files apply as in any repository.
+
+### How Git reaches the store
+
+`src/mms/git/hiddenStore.ts` keeps a registry of folder to store and a scope (`AsyncLocalStorage`). Mousse's own Git helpers (`actions/git.ts`) and the review's `guardedSimpleGit` add `--git-dir`/`--work-tree` (or `GIT_DIR`/`GIT_WORK_TREE`) only for a command run inside the scope of a store, on a path inside its folder. `withGitMutationLocks` opens the scope, so every snapshot, restore, receipt and recovery runs in it. The read paths (`listChangedFiles`, `readFileVersions`, `commitExists`, the restore review's `restoreDiff`) open it themselves. Nothing outside a scope is redirected, so the Git panel and everything else keep seeing a folder with no repository.
+
+A hidden store has no index of the person's, merge or rebase: `inspectPendingChanges`, `operationInProgress` and `requireClean` report nothing waiting.
+
+### What is saved, and when it is not
+
+Before a snapshot is taken in a hidden store, `git ls-files --cached --others --exclude-standard` lists what `git add -A` is about to add, and the folder is refused when it is:
+
+- a home or system folder: the filesystem root, the home folder, or a folder that holds the home folder (`isUnsafeSnapshotRoot`);
+- past 50,000 files, 1 GB in total, or has one file over 50 MB (`configureSnapshotLimits` changes them for a test); a listing that does not fit in memory or does not end in a minute counts as too many files.
+
+The refusal is a `SnapshotRefusedError` with a message the person can read ("Undo is off for this folder because it is too large (more than 50,000 files).") and it never fails a turn:
+
+- At turn start, the turn runs without snapshots. Its conversation is recorded alone (a conversation action), carrying the message as its `notice`, so Undo of that turn takes back the conversation and says why the files stay. The reason is kept in `snapshot-workspace.json` (`off`) and cleared by the next turn that can take a snapshot.
+- If the folder grows past a limit while the turn runs, the turn is recorded without its files: it ends where it started, cannot be undone, and carries the reason in `notice` and an external effect.
+- Any other failure to start (a nested repository with no commit that `git add` cannot index, an unreadable folder) is handled the same way, with `Undo is off for this folder: <what Git said>`.
+
+### Admission and turns
+
+`OrchestratorService` decides per turn (`snapshotFolderFor`): a turn that changes files (`agent`, `build`, a skill; not a read-only turn, a bot's, or a subagent's shared view) in a thread with no worktree of its own and a folder as above is recorded in the folder's store. The project's folder is the project's path; for a thread with no project it is the folder the selected runtime keeps for the thread (`ProviderAdapter.standaloneWorkspace`, implemented by Claude Code and Codex). A runtime that keeps no such folder records the conversation only, as before.
+
+The turn then runs exactly as a Git thread's: `recordOutsideChanges` takes the first snapshot (changes made outside Mousse become an action of the person), `beginTurn`, and `checkpointExistingTurn` at the end; interrupted checkpoints and Undo operations recover at the next turn start. `capability.checkpointable` stays false for these threads, so everything that needs an owned Git workspace (isolated subagents, workflow integration, Publish) refuses as it did before.
+
+When the folder a thread's runtime uses changes (another provider's scratch folder), the thread keeps its history and the first turn in the new folder records the difference as outside changes.
+
+### Threads that share a folder
+
+The store is the lock: `withGitMutationLocks` takes the store's lease, not the thread's repository, so threads of one project take turns on snapshots and restores. Their edits meanwhile are simply files in one folder: a thread's start snapshot includes what the others did before it, and what they do during its turn is part of its turn.
+
+Undo is the same three-way restore, so one thread's Undo keeps the files another thread wrote, and an overlap refuses with the file names and changes nothing. While another thread's turn is running in the folder, the restore gate refuses with `workspace_shared`, as for any two threads in one workspace (`liveWorkspaceClaims`); idle threads sharing the folder do not count as sharing it, because the merge protects their edits.
+
+### Undo, Redo, revert and review
+
+The services take the folder as their `workspacePath` and need no other change. The code that reads a thread's `workspace.json` for them (the protocol handlers, the review, the retention sweep, recovery) reads `ThreadWorkspaceManager.loadOrSnapshot()` instead: `workspace.json` when the thread has a worktree, else the snapshot workspace as the same shape with `snapshotOnly: true`, `lifecycle: 'ready'`, `conversationBranchId: 'main'` and the thread pin as `retainedRef`. `snapshot-workspace.json` is a different file on purpose: `workspace.json` means "Mousse made this worktree and may retire, rebuild and delete it", and every worktree rule (retirement, cleanup, rebuilding, Publish, inventory) reads only that file, so none of them can reach a folder that is the person's.
+
+`actions.list` offers Undo and Redo as for a Git thread, so `PromptUndoControls` needs no special case. The review's turn scope is the pair of snapshots read from the store; its thread scope starts at the first recorded action. The Git panel's working-tree scope still says "Not a Git repository".
+
+Refused or absent, as before: Publish (`workspace_not_ready`), push, forks and branch activation, isolated subagents and workflow worktrees, retirement, cleanup and rebuilding.
+
+### Lifecycle
+
+- Receipts' refs expire with the Undo window as for a worktree. `releaseSnapshotRefs` (the hourly sweeper, and `actions.sweepRetention`) deletes an expired receipt's pair while it still points where the receipt says, then runs `git gc --prune=now` on the store. That is the one place Mousse collects garbage, and only in a store it owns, never in a person's repository; the thread's latest-snapshot pin and the other threads' refs keep what they hold.
+- Deleting a thread for good releases what it pinned (`releaseThreadSnapshots`, run when the purge starts, while the receipts that name the refs still exist): a thread with no project loses its whole store; a thread of a project loses its pin, receipt pairs and conversation-branch pins in the project store, and the store is collected. Removing a project removes `project-data/<projectId>`.
+- The thread's own folder holds only `snapshot-workspace.json`, so the permanent-delete preview, which hashes and bounds everything in a thread's folder, never reads a store.
+
+### Deviations from the first design
+
+- A thread with no project keeps its store beside the project stores, not inside its thread data: a permanent delete reads and bounds the whole thread folder, and a store can hold a gigabyte.
+- `resolveRepositoryIdentity` no longer writes `mousse/repository-location.json` into a folder that is not a repository. It did so for every non-Git project, and the file would have been recorded by the first snapshot as a change of the person's.
+- `.mousse/` is left out through the store's exclude list and, if a `.gitignore` takes it back in, by dropping it from the index; Git refuses `add` with an exclusion pathspec that names an ignored path.
+
+### Known limits
+
+- A folder that holds a nested repository with no commit makes `git add` fail, as it does in a worktree; the turn runs with Undo off for that folder and says why.
+- Nested repositories with commits are recorded as links, not read.
+- A store only shrinks when a receipt expires or a thread or project goes. A deleted thread whose purge never ran leaves its store until the profile's data is cleaned by hand.
+- The three-way restore protects another thread's edits, not its running turn's: Undo waits for it (the gate refuses), but the two turns' edits to one file are not separated.
+- A snapshot in a hidden store is taken with the person's own (global and system) Git configuration, such as `core.autocrlf` and an installed filter; the folder's own repository configuration, if it has one, is not read for its settings, only checked for programs that must not run.
+
 ## Legacy compatibility
 
 - Actions and receipts recorded before snapshots keep commits as `startSha`/`endSha`; Undo, review, forks and retention work on them.
@@ -167,11 +246,12 @@ Cross-thread fork seeding creates the new worktree at the HEAD the snapshot was 
 
 ## Still to do
 
-Phase 4: projects without Git and standalone threads get snapshots and Undo through a hidden store in Mousse's data. The phase 5 documentation of the model's terms follows it.
+The phase 5 documentation of the model's terms (the architecture doc's body and the glossary) follows.
 
 ## Tests
 
 - `tests/workspaceSnapshots.test.ts`: the snapshot model, an agent that switches branches, rewrites history, commits and pushes, rebase in progress, outside changes, three-way Undo/Redo/revert, recovery including locked legacy threads, forks and fork seeding, subagent results (files arrive with the thread's uncommitted work and staging kept, conflict refuses and changes nothing, no-change refusal, recovery), Publish (one commit with the person's identity and no snapshot in its history, a second publish, stale review, conflict, dirty primary, missing identity), rebuilding a worktree from its snapshot, and GC.
+- `tests/snapshotWorkspace.test.ts`, `tests/snapshotWorkspaceProtocol.test.ts` (phase 4): a project without Git (a turn is a snapshot, Undo restores, the folder never gains a `.git`, `.gitignore` and the built-in list are honored, a repository with no commit keeps its `.git`), review from the store, folders past a limit and home folders (the turn runs and says why), threads that share a folder (Undo keeps the other's edits, overlap refuses, the store is the lock), a thread with no project, release and garbage collection, thread and project deletion, and the whole of it through the daemon with a scripted runtime.
 - `tests/storageCleanupService.test.ts`, `tests/resourcePurge.test.ts`: a worktree with uncommitted files retires into a snapshot and comes back with identical files; what a snapshot cannot hold keeps the worktree; permanent deletion asks first.
 - `tests/dirtyWorkspaceProtocol.test.ts`: push with uncommitted files, and Discard's record and notice.
 - Updated for the new model: `tests/dirtyWorkspace*.test.ts`, `tests/reviewRange.test.ts`, `tests/reviewProtocol.test.ts`, `tests/promptUndoUi.test.ts`, `tests/net/bridge/routed/editorFolder.test.ts`, the Git panel tests.
