@@ -219,6 +219,18 @@ function formatWorkedFor(milliseconds: number): string {
   return `Worked for ${seconds}s`;
 }
 
+/** A line Mousse adds to the thread (see `ThreadNotice`); it is not part of a turn's work. */
+function isThreadNotice(message: UIMessage | undefined): boolean {
+  return (message?.metadata as { notice?: boolean } | undefined)?.notice === true;
+}
+
+/** Mousse's own line in the thread, quiet and apart from the agent's answer. Backticks mark a command. */
+function ThreadNotice({ text }: { text: string }) {
+  return <div role="note" className="w-full py-1.5 text-xs leading-5 text-muted-foreground [overflow-wrap:anywhere]">
+    {text.split("`").map((part, index) => index % 2 ? <code key={index} className="font-mono text-[11px] text-foreground/80">{part}</code> : part)}
+  </div>;
+}
+
 function turnDurationMs(
   user: UIMessage | undefined,
   assistants: UIMessage[],
@@ -227,6 +239,7 @@ function turnDurationMs(
   if (start == null) return null;
   let end = start;
   for (const message of assistants) {
+    if (isThreadNotice(message)) continue;
     const at = readCreatedAt(message);
     if (at != null && at > end) end = at;
   }
@@ -1989,6 +2002,7 @@ function AssistantParts({
     toolRenderers,
   ]);
 
+  if (isThreadNotice(msg)) return <ThreadNotice text={parts.filter(isTextPart).map((part) => part.text).join('')} />;
   const handoff = (msg.metadata as { contextHandoff?: HandoffMarker } | undefined)?.contextHandoff;
   if (handoff) return <ContextHandoffMarker handoff={handoff} text={parts.filter(isTextPart).map((part) => part.text).join('')} />;
   const compactionMetadata = msg.metadata as { compaction?: boolean; compacting?: boolean } | undefined;

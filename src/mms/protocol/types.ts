@@ -273,7 +273,7 @@ export const PROTOCOL_METHODS = [
   'agents.stop',
   'workspace.getStatus',
   'workspace.restore',
-  'workspace.resolvePendingChanges',
+  'workspace.discardPendingChanges',
   'editor.folder',
   'editor.ask',
   'actions.list',

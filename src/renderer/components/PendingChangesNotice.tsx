@@ -1,17 +1,17 @@
 import { useState } from 'react'
-import type { PendingChangesAction, PendingChangesDetails } from '../../shared/workspace'
+import type { PendingChangesDetails } from '../../shared/workspace'
 import { ipcErrorLine } from '../lib/errorText'
 
 /** What the person confirms before Discard runs. Nothing is discarded without it. */
 export function discardPrompt(details: PendingChangesDetails): string {
   const what = details.count === 1 ? '1 changed file' : `${details.count} changed files`
-  const operation = details.conflict ? ' The unfinished merge, revert or cherry-pick is ended too.' : ''
+  const operation = details.operation ? ` The unfinished ${details.operation} is ended too.` : ''
   return `Discard ${what} in ${details.path}?${operation} Mousse keeps a copy in Git under refs/mousse/discarded.`
 }
 
 /**
- * A refusal about uncommitted changes, with the actions it offers: Save & continue records them as a
- * checkpoint, Discard drops them after asking. Either one then retries what was refused (`onResolved`).
+ * A conflict Mousse can't work around in the thread worktree, with Discard: it drops the changes after asking
+ * (a copy is kept), then retries what was refused (`onResolved`).
  */
 export function PendingChangesNotice({ threadId, message, details, onResolved, className }: {
   threadId: string
@@ -22,13 +22,12 @@ export function PendingChangesNotice({ threadId, message, details, onResolved, c
 }) {
   const [working, setWorking] = useState(false)
   const [failure, setFailure] = useState<string | null>(null)
-  const run = async (action: PendingChangesAction) => {
-    if (!details.folder || working) return
-    if (action === 'discard' && !window.confirm(discardPrompt(details))) return
+  const discard = async () => {
+    if (working || !window.confirm(discardPrompt(details))) return
     setWorking(true)
     setFailure(null)
     try {
-      await window.mousse.workspace.resolvePendingChanges(threadId, { folder: details.folder, action, ...(action === 'discard' ? { confirmed: true } : {}) })
+      await window.mousse.workspace.discardPendingChanges(threadId)
       onResolved()
     } catch (cause) {
       setFailure(ipcErrorLine(cause) || String(cause))
@@ -39,8 +38,7 @@ export function PendingChangesNotice({ threadId, message, details, onResolved, c
   return (
     <div className={className} role="alert">
       <span>{failure ?? message}</span>
-      {details.actions.includes('save') && <button type="button" disabled={working} onClick={() => void run('save')}>Save & continue</button>}
-      {details.actions.includes('discard') && <button type="button" disabled={working} onClick={() => void run('discard')}>Discard…</button>}
+      {details.discard && <button type="button" disabled={working} onClick={() => void discard()}>Discard</button>}
     </div>
   )
 }

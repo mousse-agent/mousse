@@ -50,7 +50,7 @@ const LONG_METHODS = new Set([
   'actions.redo',
   'actions.revertCode',
   'workspace.restore',
-  'workspace.resolvePendingChanges'
+  'workspace.discardPendingChanges'
 ])
 
 export interface RoutedClientDeps {

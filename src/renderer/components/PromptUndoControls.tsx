@@ -15,7 +15,7 @@ interface PromptUndoState {
 }
 const PromptUndoContext = createContext<PromptUndoState | null>(null)
 
-/** Undo and Redo return a refusal over uncommitted changes instead of throwing it, so its actions survive IPC. */
+/** Undo and Redo return a refusal over a conflict instead of throwing it, so its details survive IPC. */
 function throwPendingChanges(result: unknown): void {
   if (result && typeof result === 'object' && 'pendingChangesError' in result) throw result.pendingChangesError
 }
@@ -28,7 +28,7 @@ export function PromptUndoProvider({ threadId, busy, revision, children }: {
   const [history, setHistory] = useState<ThreadActionHistory | null>(null)
   const [working, setWorking] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  /** Discard for an Undo refused over uncommitted changes, and the prompt to undo again afterwards. */
+  /** Discard for an Undo refused over a conflict, and the prompt to undo again afterwards. */
   const [changes, setChanges] = useState<{ details: PendingChangesDetails; retry: () => void } | null>(null)
   const pending = useRef(false)
   const binding = useRef({ threadId, profileId, busy })

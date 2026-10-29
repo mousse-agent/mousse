@@ -243,7 +243,7 @@ function noteUncertainOutcome(error: unknown): void {
 
 /**
  * Electron passes only the message of a thrown error to the window. A refusal about uncommitted changes is
- * returned instead, with its details, so the window can offer Save and Discard.
+ * returned instead, with its details, so the window can name the files and offer Discard.
  */
 async function withPendingChangesFailure<T>(run: () => Promise<T>): Promise<T | { pendingChangesError: AppErrorShape }> {
   try {
@@ -1213,8 +1213,9 @@ export function registerGuiIpc(
   registerHandler('workspace:restore', async (_e, threadId: string, expectedJournalGeneration?: number) =>
     guiMms.request('workspace.restore', { threadId, expectedJournalGeneration })
   )
-  registerHandler('workspace:resolvePendingChanges', async (_e, threadId: string, request: { folder?: unknown; action?: unknown; confirmed?: unknown }) =>
-    guiMms.request('workspace.resolvePendingChanges', { threadId, folder: request?.folder, action: request?.action, confirmed: request?.confirmed === true })
+  // The window asks the person before it calls this.
+  registerHandler('workspace:discardPendingChanges', async (_e, threadId: string) =>
+    guiMms.request('workspace.discardPendingChanges', { threadId, confirmed: true })
   )
   registerHandler('actions:list', async (_e, threadId: string) =>
     guiMms.request('actions.list', { threadId })

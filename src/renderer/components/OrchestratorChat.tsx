@@ -236,7 +236,7 @@ export function OrchestratorChat() {
   const [pendingQuestions, setPendingQuestions] = useState<PendingUserQuestions | null>(null)
   const [connectionFailed, setConnectionFailed] = useState(false)
   const [sendError, setSendError] = useState<string | null>(null)
-  /** Save and Discard for a send refused over uncommitted changes; shown only while `sendError` is that refusal's line. */
+  /** Discard for a send refused over a conflict in the thread worktree; shown only while `sendError` is that refusal’s line. */
   const [sendChanges, setSendChanges] = useState<{ line: string; message: string; details: PendingChangesDetails } | null>(null)
   const addResolvedReference = useCallback(async (reference: ChatReference) => {
     const expectedProfile = useAppStore.getState().profileId

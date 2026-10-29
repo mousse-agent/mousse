@@ -125,12 +125,13 @@ export function createMmsChatResourceService(services: MmsProfileServices, resol
           if (metadata) {
             actions = new ThreadActionService(directory)
             const latest = actions.latest(metadata.conversationBranchId)
-            startSha = metadata.headSha
             actionOptions = { threadId: binding.threadId, turnId: `chat-terminal:${randomUUID()}`, actor: { kind: 'user' },
               conversationBranchId: metadata.conversationBranchId, workspacePath: binding.workspaceRoot, heldThreadLease: lease,
               presentationMessageStart: latest?.presentationMessageEnd ?? 0, presentationMessageEnd: latest?.presentationMessageEnd ?? 0,
               nativeContextBoundary: latest?.nativeContextBoundary ?? { messageIndex: 0, compactionGeneration: 0, fidelity: 'legacy' },
               externalEffects: [{ kind: 'unknown', reversible: false, description: 'Shared terminal commands may affect external services or ignored files.' }] }
+            // The user's pending edits are saved as their own checkpoint first; the terminal's action covers only what it changes.
+            startSha = (await actions.saveUserChanges(actionOptions)).startSha
             actions.beginTurn(actionOptions, startSha)
           }
           const id = services.ptyManager.create(`chat:${binding.groupId}`, binding.workspaceRoot, undefined, {

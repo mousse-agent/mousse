@@ -2038,11 +2038,13 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
           mkdirSync(cwd, { recursive: true })
           cwd = assertEpisodePath(directory!, binding.workspaceRelativePath)
         }
-        if (actions && actionOptions) actions.beginTurn(actionOptions, metadata!.headSha)
+        // The user's pending edits are saved as their own checkpoint first; the terminal's action covers only what it changes.
+        const startSha = actions && actionOptions ? (await actions.saveUserChanges(actionOptions)).startSha : undefined
+        if (actions && actionOptions) actions.beginTurn(actionOptions, startSha!)
         ptyId = ctx.mms.ptyManager.create(agentId, cwd, command, { threadId, env, shellArgs,
           ownership: lease ? { assert: () => assertHeldThreadLease(directory!, lease), heartbeat: () => { heartbeatExecutionLease(lease) },
             settled: async () => {
-              try { if (actions && actionOptions) await actions.checkpointExistingTurn(actionOptions, metadata!.headSha, 'completed') }
+              try { if (actions && actionOptions) await actions.checkpointExistingTurn(actionOptions, startSha!, 'completed') }
               finally { releaseExecutionLeaseHandle(lease) }
             } } : undefined
         })
@@ -2783,35 +2785,17 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       ctx.emitEvent?.('workspace.updated', { threadId: operation.threadId, metadata }, operation.threadId)
       return { metadata }
     }
-    case 'workspace.resolvePendingChanges': {
-      // The buttons of a `workspace_not_clean` / `workspace_conflict` error. Only ever run on a person's click;
-      // Discard also needs `confirmed: true`, and keeps a copy of what it drops.
+    case 'workspace.discardPendingChanges': {
+      // The Discard button of a `workspace_conflict` error in a thread worktree. Only ever run on a person's click
+      // after a confirmation; it keeps a copy of what it drops under refs/mousse/discarded/.
       const p = isObject(params) ? params : {}
-      rejectUnknownKeys(p, ['threadId', 'folder', 'action', 'confirmed'])
+      rejectUnknownKeys(p, ['threadId', 'confirmed'])
+      if (p.confirmed !== true) throw new DomainRpcError('confirmation_required', 'Discarding changes needs the user’s confirmation.')
       const operation = threadOperationContext(ctx, p)
-      const folder = p.folder ?? 'thread'
-      if (folder !== 'thread' && folder !== 'primary') throw new DomainRpcError('invalid_params', 'folder must be thread or primary')
-      if (p.action !== 'save' && p.action !== 'discard') throw new DomainRpcError('invalid_params', 'action must be save or discard')
-      if (p.action === 'discard' && p.confirmed !== true) throw new DomainRpcError('confirmation_required', 'Discarding changes needs the user’s confirmation.')
       if (ctx.mms.orchestrator.isConversationHistoryBusy(operation.threadId)) throw new DomainRpcError('thread_busy', 'Wait for active or queued work to finish.')
       await ensureWorkspaceMaterialized(ctx, operation.threadId, operation.projectPath)
       const workspace = new ThreadWorkspaceManager(operation.threadDirectory).load()
       if (!workspace || workspace.lifecycle !== 'ready') throw new DomainRpcError('workspace_not_ready', 'Thread workspace is not ready')
-      if (folder === 'primary') {
-        if (p.action === 'save') {
-          // The user's own commit in their own checkout, through their hooks, like the Commit button.
-          await ctx.mms.gitService.commit(operation.projectPath, 'Save uncommitted changes before publishing', { all: true })
-          return { saved: true }
-        }
-        return await withGitMutationLocks(operation.threadDirectory, operation.projectPath, 'discard-pending-changes', () => discardPendingChanges(operation.projectPath))
-      }
-      if (p.action === 'save') {
-        const { action } = await new ThreadActionService(operation.threadDirectory).saveUserChanges({
-          threadId: operation.threadId, conversationBranchId: workspace.conversationBranchId, workspacePath: workspace.worktreePath
-        })
-        if (action) ctx.emitEvent?.('actions.updated', { threadId: operation.threadId, action }, operation.threadId)
-        return { saved: Boolean(action) }
-      }
       return await withGitMutationLocks(operation.threadDirectory, workspace.worktreePath, 'discard-pending-changes', () => discardPendingChanges(workspace.worktreePath))
     }
     case 'actions.list': {
@@ -2947,7 +2931,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const ran = await localActionRun(ctx, operation.threadId, 'undo', async () =>
         latest?.scope === 'conversation'
           ? new ConversationActionService(operation.threadDirectory).apply(branchId, 'undo', operation.currentGeneration, expectedTurnId, validate, restore)
-          : await new UndoService(operation.threadDirectory).undoLatest(branchId, workspace!.worktreePath, undefined, operation.currentGeneration, restore, 'undo', expectedTurnId, validate),
+          : await new UndoService(operation.threadDirectory, { onPendingChangesKept: ctx.mms.orchestrator.pendingChangesKeptNotice(operation.threadId) }).undoLatest(branchId, workspace!.worktreePath, undefined, operation.currentGeneration, restore, 'undo', expectedTurnId, validate),
       { gate, outcome: { undoStrategy } })
       if ('review' in ran) return ran.review
       const { runId, result: action } = ran
@@ -2964,7 +2948,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const target = new ThreadActionService(operation.threadDirectory).get(actionId)
       const reviewedDiffSha = asReviewedDiffSha(p)
       const ran = await localActionRun(ctx, operation.threadId, 'revert', () =>
-        new CodeRevertService(operation.threadDirectory).revertCode(actionId, workspace.worktreePath, operation.currentGeneration),
+        new CodeRevertService(operation.threadDirectory, { onPendingChangesKept: ctx.mms.orchestrator.pendingChangesKeptNotice(operation.threadId) }).revertCode(actionId, workspace.worktreePath, operation.currentGeneration),
       { gate: () => restoreGate(ctx, { threadId: operation.threadId, workspace, target, kind: 'revert', reviewedDiffSha }) })
       if ('review' in ran) return ran.review
       const { runId, result: action } = ran
@@ -2990,7 +2974,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       }
       await ensureWorkspaceMaterialized(ctx, operation.threadId, operation.projectPath ?? undefined)
       if (!workspace || workspace.lifecycle !== 'ready') throw new DomainRpcError('workspace_not_ready', 'Thread workspace is not ready')
-      const action = await new RedoService(operation.threadDirectory).redoLatest(branchId, workspace.worktreePath, operation.currentGeneration, (original) => {
+      const action = await new RedoService(operation.threadDirectory, { onPendingChangesKept: ctx.mms.orchestrator.pendingChangesKeptNotice(operation.threadId) }).redoLatest(branchId, workspace.worktreePath, operation.currentGeneration, (original) => {
         if (original.nativeContextStartBoundary) ctx.mms.orchestrator.restoreConversationActionEnd(operation.threadId, original.presentationMessageStart, original.presentationMessageEnd, original.nativeContextBoundary)
       })
       return { action }
@@ -3023,7 +3007,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       await ensureWorkspaceMaterialized(ctx, operation.threadId, operation.projectPath)
       const workspace = new ThreadWorkspaceManager(operation.threadDirectory).load()
       if (!workspace || workspace.lifecycle !== 'ready') throw new DomainRpcError('workspace_not_ready', 'Thread workspace is not ready')
-      const branches = new ConversationBranchService(operation.threadDirectory)
+      const branches = new ConversationBranchService(operation.threadDirectory, { onPendingChangesKept: ctx.mms.orchestrator.pendingChangesKeptNotice(operation.threadId) })
       const current = branches.list().find((branch) => branch.lifecycle === 'active')
       const target = loadConversationState(operation.threadDirectory, branchId)
       const branch = await branches.activate(workspace.worktreePath, branchId, operation.currentGeneration, () => {
@@ -3044,8 +3028,9 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       await ensureWorkspaceMaterialized(ctx, operation.threadId, operation.projectPath)
       const workspace = new ThreadWorkspaceManager(operation.threadDirectory).load()
       if (!workspace || workspace.lifecycle !== 'ready') throw new DomainRpcError('workspace_not_ready', 'Thread workspace is not ready')
-      await new ChildAgentIntegrationService(operation.threadDirectory).recoverPending(workspace.worktreePath)
-      await new PublishService(operation.threadDirectory).recoverPending(workspace.worktreePath, operation.projectPath)
+      const onPendingChangesKept = ctx.mms.orchestrator.pendingChangesKeptNotice(operation.threadId)
+      await new ChildAgentIntegrationService(operation.threadDirectory, { onPendingChangesKept }).recoverPending(workspace.worktreePath)
+      await new PublishService(operation.threadDirectory, { onPendingChangesKept }).recoverPending(workspace.worktreePath, operation.projectPath)
       await new ThreadActionService(operation.threadDirectory).recoverPending(workspace.worktreePath)
       await new CodeRevertService(operation.threadDirectory).recoverPending(workspace.worktreePath)
       await new UndoService(operation.threadDirectory).recoverPending(workspace.worktreePath, (target, kind) => {
@@ -3084,7 +3069,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       await ensureWorkspaceMaterialized(ctx, operation.threadId, operation.projectPath)
       const workspace = new ThreadWorkspaceManager(operation.threadDirectory).load()
       if (!workspace || workspace.lifecycle !== 'ready') throw new DomainRpcError('workspace_not_ready', 'Thread workspace is not ready')
-      return await new PublishService(operation.threadDirectory).publish(workspace.worktreePath, operation.projectPath, targetBranch, undefined, { expectedSourceSha: asOptionalString(p.expectedSourceSha, 64), expectedTargetSha: asOptionalString(p.expectedTargetSha, 64), expectedJournalRevision: asOptionalBoundedInt(p.expectedJournalGeneration, 'expectedJournalGeneration', { min: 0, max: Number.MAX_SAFE_INTEGER }) ?? operation.currentGeneration, operationId: asOptionalString(p.operationId, 256) })
+      return await new PublishService(operation.threadDirectory, { onPendingChangesKept: ctx.mms.orchestrator.pendingChangesKeptNotice(operation.threadId) }).publish(workspace.worktreePath, operation.projectPath, targetBranch, undefined, { expectedSourceSha: asOptionalString(p.expectedSourceSha, 64), expectedTargetSha: asOptionalString(p.expectedTargetSha, 64), expectedJournalRevision: asOptionalBoundedInt(p.expectedJournalGeneration, 'expectedJournalGeneration', { min: 0, max: Number.MAX_SAFE_INTEGER }) ?? operation.currentGeneration, operationId: asOptionalString(p.operationId, 256) })
     }
     case 'files.root': {
       const p = isObject(params) ? params : {}

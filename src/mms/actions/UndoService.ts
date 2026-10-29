@@ -8,7 +8,7 @@ import { ThreadActionService } from './ThreadActionService'
 import { UndoRetentionService } from './UndoRetentionService'
 import { ChangeReceiptService } from './ChangeReceiptService'
 import { withGitMutationLocks } from './GitOperationCoordinator'
-import { changedPaths, commitParents, git, introducedCommits, MOUSSE_COMMIT_ENV, requireClean, tryGit } from './git'
+import { changedPaths, commitParents, git, introducedCommits, MOUSSE_COMMIT_ENV, refuseUnsafeChanges, tryGit, withPendingChangesSetAside, type PendingChangesOwnerOptions } from './git'
 
 export type RestoreActionContext = (action: ThreadAction, kind: 'undo' | 'redo') => void | Promise<void>
 interface UndoRecovery {
@@ -32,7 +32,7 @@ export class UndoConflictError extends Error {
 export class UndoService {
   private readonly actions: ThreadActionService
   private readonly journal: ThreadJournal
-  constructor(private readonly threadDirectory: string) {
+  constructor(private readonly threadDirectory: string, private readonly options: PendingChangesOwnerOptions = {}) {
     this.actions = new ThreadActionService(threadDirectory)
     this.journal = new ThreadJournal(threadDirectory)
   }
@@ -51,8 +51,7 @@ export class UndoService {
       const receipts = new ChangeReceiptService(this.threadDirectory)
       receipts.assertNoPendingOperation()
       this.actions.assertExpectedRevision(expectedJournalRevision)
-      // Saving would make the save the latest action and this turn no longer undoable, so only Discard is offered.
-      requireClean(workspacePath, 'Thread workspace', { folder: 'thread', actions: ['discard'] })
+      refuseUnsafeChanges(workspacePath, 'Thread workspace', { discard: true })
       const all = this.actions.list()
       const target = all.filter((action) => action.conversationBranchId === branchId).at(-1)
       if (!target || !['completed', 'failed', 'stopped'].includes(target.state)) throw new Error('Only the latest completed action is eligible for conversation undo.')
@@ -70,48 +69,52 @@ export class UndoService {
       if (preUndoSha !== target.endSha) throw new Error('Thread HEAD no longer matches the latest action.')
       const later = receipts.list().filter((item) => sourceReceipt && item.generation > sourceReceipt.generation && item.beforeSha !== item.afterSha)
       if (later.length) throw new Error('A newer workspace change depends on this action; undo the latest change first.')
-      const operationId = randomUUID()
-      const compensationId = randomUUID()
-      this.journal.append({ operationId, operationType: kind, state: 'prepared', expectedPreState: { preUndoSha, actionId: target.id }, details: { target, contextAction, kind, compensationId, restoreContext: Boolean(restoreContext) } })
-      target.state = 'undoing'; this.actions.replace(all)
-      // Derive first-parent units even for legacy records that listed child commits twice.
-      for (const sha of introducedCommits(workspacePath, target.startSha, target.endSha).reverse()) {
-        const args = ['revert', '--no-commit']
-        if (commitParents(workspacePath, sha).length > 1) args.push('-m', '1')
-        args.push(sha)
-        const result = tryGit(workspacePath, args)
-        if (!result.ok) {
-          const files = git(workspacePath, ['diff', '--name-only', '--diff-filter=U']).split(/\r?\n/).filter(Boolean)
-          target.state = 'undo_conflict'; this.actions.replace(all)
-          this.journal.append({ operationId, operationType: kind, state: 'recovery_required', details: { preUndoSha, actionId: target.id, currentCommit: sha, conflictFiles: files, error: result.stderr } })
-          throw new UndoConflictError(files)
+      // The user's pending edits are set aside, not saved: a save would become the latest action and this turn
+      // could no longer be undone. They come back on top of the result as uncommitted changes.
+      return withPendingChangesSetAside(workspacePath, { label: 'Thread workspace', operation: kind === 'redo' ? 'Redo' : 'Undo', discard: true, onKept: this.options.onPendingChangesKept }, async () => {
+        const operationId = randomUUID()
+        const compensationId = randomUUID()
+        this.journal.append({ operationId, operationType: kind, state: 'prepared', expectedPreState: { preUndoSha, actionId: target.id }, details: { target, contextAction, kind, compensationId, restoreContext: Boolean(restoreContext) } })
+        target.state = 'undoing'; this.actions.replace(all)
+        // Derive first-parent units even for legacy records that listed child commits twice.
+        for (const sha of introducedCommits(workspacePath, target.startSha, target.endSha).reverse()) {
+          const args = ['revert', '--no-commit']
+          if (commitParents(workspacePath, sha).length > 1) args.push('-m', '1')
+          args.push(sha)
+          const result = tryGit(workspacePath, args)
+          if (!result.ok) {
+            const files = git(workspacePath, ['diff', '--name-only', '--diff-filter=U']).split(/\r?\n/).filter(Boolean)
+            target.state = 'undo_conflict'; this.actions.replace(all)
+            this.journal.append({ operationId, operationType: kind, state: 'recovery_required', details: { preUndoSha, actionId: target.id, currentCommit: sha, conflictFiles: files, error: result.stderr } })
+            throw new UndoConflictError(files)
+          }
         }
-      }
-      if (!tryGit(workspacePath, ['diff', '--cached', '--quiet']).ok) {
-        git(workspacePath, ['commit', '--no-verify', '-m', `mousse: ${kind} turn ${target.turnId} (${operationId})`], MOUSSE_COMMIT_ENV)
-      }
-      const endSha = git(workspacePath, ['rev-parse', 'HEAD'])
-      const compensation: ThreadAction = {
-        id: compensationId, turnId: kind === 'redo' ? contextAction.turnId : compensationId, conversationBranchId: branchId, actor: { kind: 'user' },
-        parentActionId: target.id,
-        presentationMessageStart: kind === 'redo' ? contextAction.presentationMessageStart : target.presentationMessageEnd,
-        presentationMessageEnd: kind === 'redo' ? contextAction.presentationMessageEnd : target.presentationMessageEnd,
-        nativeContextStartBoundary: contextAction.nativeContextStartBoundary ? target.nativeContextBoundary : undefined,
-        nativeContextBoundary: kind === 'undo' ? target.nativeContextStartBoundary ?? target.nativeContextBoundary : contextAction.nativeContextBoundary,
-        startSha: preUndoSha, endSha, commits: preUndoSha === endSha ? [] : [endSha], childIntegrations: [],
-        changedPaths: changedPaths(workspacePath, preUndoSha, endSha), externalEffects: target.externalEffects,
-        reversible: true, state: 'completed', createdAt: new Date().toISOString(), completedAt: new Date().toISOString()
-      }
-      const receipt = receipts.record(workspacePath, { operationId, kind, actor: { kind: 'user' }, actionId: compensation.id,
-        beforeSha: preUndoSha, afterSha: endSha, introducedCommits: compensation.commits,
-        contributions: [], externalEffects: target.externalEffects, reversesReceiptId: target.receiptId })
-      compensation.receiptId = receipt.id
-      target.state = 'undone'; target.compensationActionId = compensation.id
-      const recovery: UndoRecovery = { actionId: target.id, preUndoSha, endSha, target, compensation, contextAction, kind, restoreContext: Boolean(restoreContext) }
-      this.journal.append({ operationId, operationType: kind, state: 'git_applied', details: recovery })
-      all.push(compensation); this.actions.replace(all)
-      await this.completeContext(operationId, recovery, restoreContext)
-      return compensation
+        if (!tryGit(workspacePath, ['diff', '--cached', '--quiet']).ok) {
+          git(workspacePath, ['commit', '--no-verify', '-m', `mousse: ${kind} turn ${target.turnId} (${operationId})`], MOUSSE_COMMIT_ENV)
+        }
+        const endSha = git(workspacePath, ['rev-parse', 'HEAD'])
+        const compensation: ThreadAction = {
+          id: compensationId, turnId: kind === 'redo' ? contextAction.turnId : compensationId, conversationBranchId: branchId, actor: { kind: 'user' },
+          parentActionId: target.id,
+          presentationMessageStart: kind === 'redo' ? contextAction.presentationMessageStart : target.presentationMessageEnd,
+          presentationMessageEnd: kind === 'redo' ? contextAction.presentationMessageEnd : target.presentationMessageEnd,
+          nativeContextStartBoundary: contextAction.nativeContextStartBoundary ? target.nativeContextBoundary : undefined,
+          nativeContextBoundary: kind === 'undo' ? target.nativeContextStartBoundary ?? target.nativeContextBoundary : contextAction.nativeContextBoundary,
+          startSha: preUndoSha, endSha, commits: preUndoSha === endSha ? [] : [endSha], childIntegrations: [],
+          changedPaths: changedPaths(workspacePath, preUndoSha, endSha), externalEffects: target.externalEffects,
+          reversible: true, state: 'completed', createdAt: new Date().toISOString(), completedAt: new Date().toISOString()
+        }
+        const receipt = receipts.record(workspacePath, { operationId, kind, actor: { kind: 'user' }, actionId: compensation.id,
+          beforeSha: preUndoSha, afterSha: endSha, introducedCommits: compensation.commits,
+          contributions: [], externalEffects: target.externalEffects, reversesReceiptId: target.receiptId })
+        compensation.receiptId = receipt.id
+        target.state = 'undone'; target.compensationActionId = compensation.id
+        const recovery: UndoRecovery = { actionId: target.id, preUndoSha, endSha, target, compensation, contextAction, kind, restoreContext: Boolean(restoreContext) }
+        this.journal.append({ operationId, operationType: kind, state: 'git_applied', details: recovery })
+        all.push(compensation); this.actions.replace(all)
+        await this.completeContext(operationId, recovery, restoreContext)
+        return compensation
+      })
     }, signal)
   }
 
@@ -135,7 +138,8 @@ export class UndoService {
         const intent = prepared?.details as { target: ThreadAction; contextAction: ThreadAction; kind: 'undo' | 'redo'; compensationId: string; restoreContext: boolean } | undefined
         if (!intent?.target) throw new Error('Undo recovery intent is missing.')
         const head = git(workspacePath, ['rev-parse', 'HEAD'])
-        requireClean(workspacePath, 'Thread workspace')
+        // Recovery reads HEAD and records; it changes no files, so uncommitted edits stay where they are.
+        refuseUnsafeChanges(workspacePath, 'Thread workspace', { discard: true })
         let recovery = record.details as UndoRecovery
         if (!recovery.compensation) {
           const preUndoSha = intent.target.endSha

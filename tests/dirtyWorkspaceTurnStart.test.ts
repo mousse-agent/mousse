@@ -94,7 +94,7 @@ describe('a turn that starts in a dirty workspace', () => {
     expect(actions.list()).toEqual([])
   })
 
-  it('an unresolved merge conflict is never saved; the refusal names the folder and files and offers only Discard', async () => {
+  it('an unresolved merge conflict is never saved; the refusal names the folder and files and offers Discard', async () => {
     const { repo, thread } = fixture(); const actions = new ThreadActionService(thread)
     git(repo, 'switch', '-q', '-c', 'side'); writeFileSync(join(repo, 'value.txt'), 'side\n'); git(repo, 'commit', '-qam', 'side')
     git(repo, 'switch', '-q', '-'); writeFileSync(join(repo, 'value.txt'), 'main\n'); git(repo, 'commit', '-qam', 'main')
@@ -103,10 +103,9 @@ describe('a turn that starts in a dirty workspace', () => {
     const head = git(repo, 'rev-parse', 'HEAD')
 
     const refusal = await actions.saveUserChanges({ threadId: 'thread', conversationBranchId: 'main', workspacePath: repo }).catch((error: unknown) => error)
-    expect(refusal).toMatchObject({ code: 'workspace_conflict', details: { label: 'Thread workspace', folder: 'thread', conflict: true, actions: ['discard'], files: ['value.txt', 'untracked.txt'], count: 2 } })
-    expect((refusal as Error).message).toContain(git(repo, 'rev-parse', '--show-toplevel'))
-    expect((refusal as Error).message).toMatch(/merge in progress with conflicts in value\.txt/)
-    expect(pendingChangesDetails(refusal)?.actions).toEqual(['discard'])
+    expect(refusal).toMatchObject({ code: 'workspace_conflict', details: { label: 'Thread workspace', conflict: true, discard: true, operation: 'merge', files: ['value.txt', 'untracked.txt'], count: 2 } })
+    expect((refusal as Error).message).toBe(`Thread workspace ${git(repo, 'rev-parse', '--show-toplevel')} has a merge in progress with conflicts in value.txt. Resolve it or discard the changes, then try again.`)
+    expect(pendingChangesDetails(refusal)?.discard).toBe(true)
     expect(git(repo, 'rev-parse', 'HEAD')).toBe(head)
     expect(actions.list()).toEqual([])
 
@@ -124,34 +123,28 @@ describe('a turn that starts in a dirty workspace', () => {
 })
 
 describe('refusals about pending changes', () => {
-  it('name the folder and the first few files and carry the caller’s actions', () => {
+  it('after Mousse’s own steps name the folder and the first few files, and offer nothing', () => {
     const { repo } = fixture()
     for (let index = 1; index <= 7; index++) writeFileSync(join(repo, `file-${index}.txt`), `${index}\n`)
-    const refusal = (() => { try { requireClean(repo, 'Thread workspace', { folder: 'thread', actions: ['save', 'discard'] }) } catch (error) { return error } })()
-    expect(refusal).toMatchObject({ code: 'workspace_not_clean', details: { path: git(repo, 'rev-parse', '--show-toplevel'), count: 7, conflict: false, actions: ['save', 'discard'] } })
-    const details = pendingChangesDetails(refusal)!
-    expect(details.files).toHaveLength(5)
-    expect((refusal as Error).message).toBe(`Thread workspace ${details.path} has uncommitted changes: ${details.files.join(', ')} and 2 more. Save or discard them, then try again.`)
-  })
-
-  it('offer no action for a folder the user cannot act on from the app', () => {
-    const { repo } = fixture()
-    writeFileSync(join(repo, 'value.txt'), 'changed\n')
     const refusal = (() => { try { requireClean(repo, 'Worker worktree') } catch (error) { return error } })()
-    expect(refusal).toMatchObject({ code: 'workspace_not_clean', details: { files: ['value.txt'], actions: [] } })
-    expect((refusal as Error).message).toMatch(/Commit or discard them/)
+    expect(refusal).toMatchObject({ code: 'workspace_not_clean', details: { path: git(repo, 'rev-parse', '--show-toplevel'), count: 7, conflict: false, discard: false } })
+    const files = (refusal as { details: { files: string[] } }).details.files
+    expect(files).toHaveLength(5)
+    expect((refusal as Error).message).toBe(`Worker worktree ${git(repo, 'rev-parse', '--show-toplevel')} has uncommitted changes: ${files.join(', ')} and 2 more.`)
     expect(pendingChangesDetails(refusal)).toBeUndefined()
   })
 
-  it('Undo in a dirty workspace offers Discard, never Save, so the turn stays the latest action', async () => {
-    const { repo, thread } = fixture(); const actions = new ThreadActionService(thread)
-    const options = turnOptions(repo, 'turn', 0)
-    const start = git(repo, 'rev-parse', 'HEAD')
-    actions.beginTurn(options, start)
-    writeFileSync(join(repo, 'agent.txt'), 'agent\n')
-    await actions.checkpointExistingTurn(options, start, 'completed')
-    writeFileSync(join(repo, 'value.txt'), 'later user edit\n')
-    await expect(new UndoService(thread).undoLatest('main', repo)).rejects.toMatchObject({ code: 'workspace_not_clean', details: { folder: 'thread', actions: ['discard'], files: ['value.txt'] } })
-    expect(readFileSync(join(repo, 'value.txt'), 'utf8')).toBe('later user edit\n')
+  it('a rebase in progress offers no Discard', async () => {
+    const { repo, thread } = fixture()
+    const main = git(repo, 'branch', '--show-current')
+    git(repo, 'switch', '-q', '-c', 'side'); writeFileSync(join(repo, 'value.txt'), 'side\n'); git(repo, 'commit', '-qam', 'side')
+    git(repo, 'switch', '-q', main); writeFileSync(join(repo, 'value.txt'), 'main\n'); git(repo, 'commit', '-qam', 'main')
+    git(repo, 'switch', '-q', 'side')
+    expect(tryGit(repo, 'rebase', '-q', main)).toBe(false)
+    const refusal = await new ThreadActionService(thread).saveUserChanges({ threadId: 'thread', conversationBranchId: 'main', workspacePath: repo }).catch((error: unknown) => error)
+    expect(refusal).toMatchObject({ code: 'workspace_conflict', details: { operation: 'rebase', discard: false } })
+    expect((refusal as Error).message).toMatch(/has a rebase in progress with conflicts in value\.txt\. Finish or abort it in a terminal, then try again\.$/)
+    expect(() => discardPendingChanges(repo)).toThrow(/rebase in progress/)
+    tryGit(repo, 'rebase', '--abort')
   })
 })

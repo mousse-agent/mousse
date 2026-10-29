@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto'
 import { ThreadJournal } from '../data/ThreadJournal'
 import { ThreadActionService } from '../actions/ThreadActionService'
 import { withGitMutationLocks } from '../actions/GitOperationCoordinator'
-import { changedPaths, commitParents, git, MOUSSE_COMMIT_ENV, requireClean, tryGit } from '../actions/git'
+import { changedPaths, commitParents, git, MOUSSE_COMMIT_ENV, refuseUnsafeChanges, requireClean, tryGit, withPendingChangesSetAside, type PendingChangesOwnerOptions } from '../actions/git'
 import { ChangeReceiptService } from '../actions/ChangeReceiptService'
 import type { ThreadLeaseHandle } from '../queue/ThreadExecutionLease'
 import type { WorkspaceActor } from '../../shared/workspace'
@@ -40,7 +40,7 @@ export interface ChildIntegrationRequest {
 export class ChildAgentIntegrationService {
   private readonly journal: ThreadJournal
   private readonly actions: ThreadActionService
-  constructor(private readonly threadDirectory: string) {
+  constructor(private readonly threadDirectory: string, private readonly options: PendingChangesOwnerOptions = {}) {
     this.journal = new ThreadJournal(threadDirectory)
     this.actions = new ThreadActionService(threadDirectory)
   }
@@ -61,7 +61,8 @@ export class ChildAgentIntegrationService {
         const intent = this.journal.list().find((item) => item.operationId === request.operationId && item.state === 'prepared')
         const expected = intent?.expectedPreState as { preMergeSha: string; workerHeadSha: string; spawnBaseSha: string } | undefined
         if (!expected || expected.workerHeadSha !== (request.expectedWorkerHead ?? git(request.workerWorktree, ['rev-parse', 'HEAD'])) || expected.spawnBaseSha !== request.spawnBaseSha) throw new Error('Integration recovery requires its original pinned request.')
-        requireClean(request.threadWorkspace, 'Thread workspace')
+        // Recovery reads HEAD and records; uncommitted edits stay where they are.
+        refuseUnsafeChanges(request.threadWorkspace, 'Thread workspace', { discard: true })
         const head = git(request.threadWorkspace, ['rev-parse', 'HEAD'])
         const parents = commitParents(request.threadWorkspace, head)
         if (previous?.afterSha === head || (parents[0] === expected.preMergeSha && parents[1] === expected.workerHeadSha)) {
@@ -71,7 +72,7 @@ export class ChildAgentIntegrationService {
         // Git was not applied. An explicit retry may execute this same pinned intent once.
       }
       if (resolveRepositoryIdentity(request.workerWorktree).key !== resolveRepositoryIdentity(request.threadWorkspace).key) throw new Error('Worker belongs to a different repository.')
-      requireClean(request.threadWorkspace, 'Thread workspace')
+      refuseUnsafeChanges(request.threadWorkspace, 'Thread workspace', { discard: true })
       let workerHeadSha: string
       if (request.pinnedWorkerSha) {
         // A pinned result does not depend on the live worktree, which may be running or dirty.
@@ -89,26 +90,30 @@ export class ChildAgentIntegrationService {
       if (preMergeSha !== expectedDestination) throw new Error('Integration destination HEAD changed after readiness validation.')
       if (!tryGit(request.workerWorktree, ['merge-base', '--is-ancestor', request.spawnBaseSha, workerHeadSha]).ok) throw new Error('Worker history no longer descends from its spawn base.')
       const operationId = request.operationId ?? randomUUID()
-      this.journal.append({
-        operationId,
-        operationType: 'child-integration',
-        state: 'prepared',
-        expectedPreState: { preMergeSha, workerHeadSha, spawnBaseSha: request.spawnBaseSha },
-        details: { request: { agentId: request.agentId, retainedResultId: request.retainedResultId, operationId, workerWorktree: request.workerWorktree, workerBranch: request.workerBranch, spawnBaseSha: request.spawnBaseSha, expectedWorkerHead: workerHeadSha, ...(request.pinnedWorkerSha ? { pinnedWorkerSha: request.pinnedWorkerSha } : {}), expectedDestinationHead: preMergeSha, threadWorkspace: request.threadWorkspace, actionId: request.actionId, actor: request.actor, externalEffects: request.externalEffects, runId: request.runId, turnId: request.turnId } }
-      })
-      const merge = tryGit(request.threadWorkspace, ['merge', '--no-ff', '--no-edit', workerHeadSha], MOUSSE_COMMIT_ENV)
-      if (!merge.ok) {
-        const conflictFiles = git(request.threadWorkspace, ['diff', '--name-only', '--diff-filter=U']).split(/\r?\n/).filter(Boolean)
+      // Uncommitted edits in the thread worktree (the user's, or the running turn's own) are set aside for the merge
+      // and put back on top of it, still uncommitted, so they stay with whoever made them.
+      return withPendingChangesSetAside<ChildIntegrationRecord>(request.threadWorkspace, { label: 'Thread workspace', operation: 'merging the subagent’s result', discard: true, onKept: this.options.onPendingChangesKept }, () => {
         this.journal.append({
           operationId,
           operationType: 'child-integration',
-          state: 'recovery_required',
-          details: { preMergeSha, workerHeadSha, conflictFiles, error: merge.stderr }
+          state: 'prepared',
+          expectedPreState: { preMergeSha, workerHeadSha, spawnBaseSha: request.spawnBaseSha },
+          details: { request: { agentId: request.agentId, retainedResultId: request.retainedResultId, operationId, workerWorktree: request.workerWorktree, workerBranch: request.workerBranch, spawnBaseSha: request.spawnBaseSha, expectedWorkerHead: workerHeadSha, ...(request.pinnedWorkerSha ? { pinnedWorkerSha: request.pinnedWorkerSha } : {}), expectedDestinationHead: preMergeSha, threadWorkspace: request.threadWorkspace, actionId: request.actionId, actor: request.actor, externalEffects: request.externalEffects, runId: request.runId, turnId: request.turnId } }
         })
-        throw new Error(`Child integration conflict: ${conflictFiles.join(', ')}`)
-      }
-      const integrationSha = git(request.threadWorkspace, ['rev-parse', 'HEAD'])
-      return this.completeIntegration(request, operationId, preMergeSha, workerHeadSha, integrationSha)
+        const merge = tryGit(request.threadWorkspace, ['merge', '--no-ff', '--no-edit', workerHeadSha], MOUSSE_COMMIT_ENV)
+        if (!merge.ok) {
+          const conflictFiles = git(request.threadWorkspace, ['diff', '--name-only', '--diff-filter=U']).split(/\r?\n/).filter(Boolean)
+          this.journal.append({
+            operationId,
+            operationType: 'child-integration',
+            state: 'recovery_required',
+            details: { preMergeSha, workerHeadSha, conflictFiles, error: merge.stderr }
+          })
+          throw new Error(`Child integration conflict: ${conflictFiles.join(', ')}`)
+        }
+        const integrationSha = git(request.threadWorkspace, ['rev-parse', 'HEAD'])
+        return this.completeIntegration(request, operationId, preMergeSha, workerHeadSha, integrationSha)
+      })
     }, request.signal, request.heldThreadLease)
   }
   private completeIntegration(request: ChildIntegrationRequest, operationId: string, preMergeSha: string, workerHeadSha: string, integrationSha: string): ChildIntegrationRecord {

@@ -149,7 +149,6 @@ const SAVE: Phrase = phrase('Saved a file', 'saved a file', 'saved {n} files')
 const PUBLISH: Phrase = phrase('Published a thread’s changes', 'published a thread’s changes', 'published a thread’s changes {n} times')
 const STAGE: Phrase = phrase('Changed staged files', 'changed staged files', 'changed staged files {n} times')
 const DISCARD: Phrase = phrase('Discarded changes', 'discarded changes', 'discarded changes {n} times')
-const PENDING: Phrase = phrase('Saved or discarded uncommitted changes', 'saved or discarded uncommitted changes', 'saved or discarded uncommitted changes {n} times')
 const COMMIT: Phrase = phrase('Made a commit', 'made a commit', 'made {n} commits')
 const PUSH: Phrase = phrase('Pushed to a remote', 'pushed to a remote', 'pushed to a remote {n} times')
 const SYNC: Phrase = phrase('Fetched or pulled', 'fetched or pulled', 'fetched or pulled {n} times')
@@ -239,7 +238,7 @@ const PHRASES: Record<string, Phrase> = {
   'actions.configureRetention': HISTORY,
   'actions.sweepRetention': HISTORY,
   'workspace.restore': WORKSPACE,
-  'workspace.resolvePendingChanges': PENDING,
+  'workspace.discardPendingChanges': DISCARD,
   'operations.abort': OPERATION,
   'operations.recover': OPERATION,
   'files.write': SAVE,

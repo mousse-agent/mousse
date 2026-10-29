@@ -687,9 +687,9 @@ const api = {
     getStatus: (threadId: string): Promise<unknown> => ipcRenderer.invoke('workspace:getStatus', threadId),
     restore: (threadId: string, expectedJournalGeneration?: number): Promise<unknown> =>
       ipcRenderer.invoke('workspace:restore', threadId, expectedJournalGeneration),
-    /** Save or Discard on an error about uncommitted changes. Discard needs `confirmed: true` from the person. */
-    resolvePendingChanges: (threadId: string, request: { folder: import('../shared/workspace').PendingChangesFolder; action: import('../shared/workspace').PendingChangesAction; confirmed?: boolean }): Promise<{ saved?: boolean; backupRef?: string }> =>
-      ipcRenderer.invoke('workspace:resolvePendingChanges', threadId, request)
+    /** Discard on a conflict in the thread worktree, after the person confirmed. Keeps a copy under `backupRef`. */
+    discardPendingChanges: (threadId: string): Promise<{ backupRef: string }> =>
+      ipcRenderer.invoke('workspace:discardPendingChanges', threadId)
   },
   actions: {
     pin: (params: Record<string, unknown>): Promise<unknown> => ipcRenderer.invoke('actions:pin', params),

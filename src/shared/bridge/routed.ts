@@ -428,9 +428,9 @@ export const ROUTED_METHODS: Readonly<Record<string, RoutedRow>> = Object.freeze
   'actions.configureRetention': write('thread', ['threadId', 'policy', 'acknowledgeClock', GEN]),
   'actions.sweepRetention': write('thread', ['threadId', GEN]),
   'workspace.restore': write('thread', ['threadId', 'conversationBranchId', GEN]),
-  // Save or Discard on an error about uncommitted changes; Discard keeps a copy and needs `confirmed`.
-  'workspace.resolvePendingChanges': write('thread', ['threadId', 'folder', 'action', 'confirmed'], {
-    required: ['action']
+  // Discard on a conflict in the thread worktree; it keeps a copy and needs `confirmed`.
+  'workspace.discardPendingChanges': write('thread', ['threadId', 'confirmed'], {
+    required: ['confirmed']
   }),
   'operations.abort': write('thread', ['threadId', 'operationId', GEN], {
     required: ['operationId']
