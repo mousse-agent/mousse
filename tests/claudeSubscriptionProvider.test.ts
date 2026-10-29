@@ -201,6 +201,15 @@ describe('Claude Subscription native provider', () => {
         session_id: 'vendor-session',
         event: { type: 'content_block_delta', delta: { type: 'text_delta', text: 'hello' } }
       },
+      // A thinking block whose text is omitted streams an empty delta first: no thought to show.
+      {
+        type: 'stream_event',
+        session_id: 'vendor-session',
+        event: {
+          type: 'content_block_delta',
+          delta: { type: 'thinking_delta', thinking: '' }
+        }
+      },
       {
         type: 'stream_event',
         session_id: 'vendor-session',
@@ -226,7 +235,7 @@ describe('Claude Subscription native provider', () => {
     const onThinking = vi.fn(),
       onTool = vi.fn()
     expect(await service.chat({ ...chatInput(home), onThinking, onTool })).toBe('hello')
-    expect(onThinking).toHaveBeenCalledWith('thinking')
+    expect(onThinking.mock.calls).toEqual([['thinking']])
     expect(onTool).toHaveBeenCalledWith(
       expect.objectContaining({ phase: 'start', toolName: 'Read' })
     )
@@ -245,9 +254,10 @@ describe('Claude Subscription native provider', () => {
     })
     // No settingSources: the SDK then loads the user, project and local settings like the CLI.
     // No strict-mcp-config: the user's own MCP servers load too.
+    // A headless Claude Code streams thinking text only when the session asks for a display.
     for (const input of inputs) {
       expect(input.options).not.toHaveProperty('settingSources')
-      expect(input.options).not.toHaveProperty('extraArgs')
+      expect(input.options.extraArgs).toEqual({ 'thinking-display': 'summarized' })
     }
     expect(JSON.stringify(settings())).not.toContain('secret')
   })
@@ -356,7 +366,7 @@ describe('Claude Subscription native provider', () => {
     await service.chat({ ...chatInput(home), systemPromptAppend: 'GUIDE' })
     expect(inputs[0].options.systemPrompt).toEqual({ type: 'preset', preset: 'claude_code', append: 'GUIDE\n\nFROM FILE\n\nINLINE' })
     // The SDK's append text replaces the CLI's, so the flags are not passed again.
-    expect(inputs[0].options.extraArgs).toEqual({ verbose: null })
+    expect(inputs[0].options.extraArgs).toEqual({ 'thinking-display': 'summarized', verbose: null })
     await service.chat({ ...chatInput(home), threadId: 'plain' })
     expect(inputs[1].options.systemPrompt).toEqual({ type: 'preset', preset: 'claude_code', append: 'FROM FILE\n\nINLINE' })
 

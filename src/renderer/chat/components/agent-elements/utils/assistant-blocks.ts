@@ -1,4 +1,4 @@
-import { thoughtHeading } from "./format-tool";
+import { latestThoughtHeading } from "./format-tool";
 import { normalizeAssistantToolParts } from "./tool-part-normalizer";
 
 export type ToolPartBase = {
@@ -156,27 +156,26 @@ export type TurnSegment =
   | { kind: "tools"; msgIndices: number[] }
   | { kind: "cards"; msgIndices: number[] };
 
-/** First non-empty line of a thinking part, or "" when it has no message. */
-export function thoughtMessageFromPart(part: ToolPartBase): string {
+/** A thinking part's text: what streamed so far, or its final output. */
+function thoughtTextFromPart(part: ToolPartBase): string {
   if (part.type !== "tool-Thinking") return "";
   const input = isRecord(part.input) ? part.input.thought : undefined;
   const output = part.output ?? part.result;
-  const raw =
-    typeof input === "string" && input.trim()
-      ? input
-      : typeof output === "string"
-        ? output
-        : "";
-  return thoughtHeading(raw);
+  return typeof input === "string" && input.trim()
+    ? input
+    : typeof output === "string"
+      ? output
+      : "";
 }
 
 /**
- * Title for a grouped run of thoughts and tool calls: the latest thought
- * that actually has text. Empty when the run should fall back to "Tool calls".
+ * Title for a grouped run of thoughts and tool calls: one line from the
+ * latest thought that actually has text. Empty when the run should fall back
+ * to "Tool calls".
  */
 export function activityGroupLabel(items: AssistantToolItem[]): string {
   for (let index = items.length - 1; index >= 0; index -= 1) {
-    const heading = thoughtMessageFromPart(items[index]!.part);
+    const heading = latestThoughtHeading(thoughtTextFromPart(items[index]!.part));
     if (heading) return heading;
   }
   return "";

@@ -129,6 +129,8 @@ export interface TurnStartParams {
   sandboxPolicy?: SandboxPolicy | null
   model?: string | null
   effort?: string | null
+  /** How much of the model's reasoning comes back as summary text; the server sends none unless asked. */
+  summary?: 'auto' | 'concise' | 'detailed' | 'none' | null
 }
 export type TurnStatus = 'completed' | 'interrupted' | 'failed' | 'inProgress'
 export interface TurnError {

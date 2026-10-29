@@ -55,7 +55,7 @@ import { parseClaudeSubscriptionUsage } from './usage'
 import { claudeMcpToolBlocked, claudeProxiedMcpServer, type ClaudeTurnIntegrations } from './integrations'
 import { claudeActionOf, claudeChildToolDenial, claudePermissionKey } from './childPolicy'
 import { CancelInProgress, DEFAULT_LIVE_TIMINGS, LiveSession, type LiveRun, type LiveTimings } from './liveSession'
-import { TurnFrames } from './turnFrames'
+import { CLAUDE_TURN_EXTRA_ARGS, TurnFrames } from './turnFrames'
 import { readUsageLimit } from '../../../orchestrator/providerErrors'
 import { USAGE_LIMIT_HOLD_MS, usageLimitFromResult, usageLimitFromWindows, type RejectedWindows } from './usageLimit'
 import type { ChildTurnPolicy } from '../../adapter'
@@ -1740,27 +1740,32 @@ export class ClaudeSubscriptionProviderService {
       const messages = async function* (): AsyncGenerator<SDKUserMessage> {
         yield userMessage(resume ?? '')
       }
-      const buildOptions = (sdkController: AbortController, turnOf: () => TurnContext, isLive: boolean): Options => ({
+      const buildOptions = (sdkController: AbortController, turnOf: () => TurnContext, isLive: boolean): Options => {
         // Mousse's instructions first, then the user's own append text.
-        ...this.options(input.cwd, sdkController, env, appendTexts, turnSettings),
-        model: selected.baseId,
-        effort,
-        resume,
-        permissionMode,
-        // A live query can switch to bypass on a later turn even when it starts in plan or ask mode,
-        // unless Claude Code's settings forbid bypassing permissions at all.
-        ...(permissionMode === 'bypassPermissions' || (isLive && !readOnlyChild && !bypassDisabled) ? { allowDangerouslySkipPermissions: true } : {}),
-        // The Mousse server keeps its name: user servers are spread first.
-        mcpServers: {
-          ...integrations?.mcpServers,
-          // Servers that sign in with OAuth run in this process and call Mousse's own connection.
-          ...Object.fromEntries(Object.entries(integrations?.proxiedServers ?? {}).map(([name, proxied]) => [name, claudeProxiedMcpServer(name, proxied)])),
-          ...claudeMcpServers(input.mcp)
-        },
-        // The skills enabled in Mousse reach Claude as a local plugin, next to the user's own.
-        ...(integrations?.pluginPath ? { plugins: [{ type: 'local' as const, path: integrations.pluginPath }] } : {}),
-        ...this.permissionCallbacks(turnOf)
-      })
+        const base = this.options(input.cwd, sdkController, env, appendTexts, turnSettings)
+        return {
+          ...base,
+          // A launch argument the user set for the display wins.
+          extraArgs: { ...CLAUDE_TURN_EXTRA_ARGS, ...base.extraArgs },
+          model: selected.baseId,
+          effort,
+          resume,
+          permissionMode,
+          // A live query can switch to bypass on a later turn even when it starts in plan or ask mode,
+          // unless Claude Code's settings forbid bypassing permissions at all.
+          ...(permissionMode === 'bypassPermissions' || (isLive && !readOnlyChild && !bypassDisabled) ? { allowDangerouslySkipPermissions: true } : {}),
+          // The Mousse server keeps its name: user servers are spread first.
+          mcpServers: {
+            ...integrations?.mcpServers,
+            // Servers that sign in with OAuth run in this process and call Mousse's own connection.
+            ...Object.fromEntries(Object.entries(integrations?.proxiedServers ?? {}).map(([name, proxied]) => [name, claudeProxiedMcpServer(name, proxied)])),
+            ...claudeMcpServers(input.mcp)
+          },
+          // The skills enabled in Mousse reach Claude as a local plugin, next to the user's own.
+          ...(integrations?.pluginPath ? { plugins: [{ type: 'local' as const, path: integrations.pluginPath }] } : {}),
+          ...this.permissionCallbacks(turnOf)
+        }
+      }
       // A locked turn: the locked profile over everything above, and nothing that would widen it.
       const lockedOptions = (sdkController: AbortController, turnOf: () => TurnContext): Options => {
         const options: Options = {
