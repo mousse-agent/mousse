@@ -26,6 +26,7 @@ import { randomUUID } from 'node:crypto'
 import type { GuiMmsController } from '../mms/GuiMmsController'
 import { PresentationState } from '../mms/PresentationState'
 import { bootstrapPresentation } from '../mms/bootstrapPresentation'
+import { coalescedRunner } from '../mms/coalescedRunner'
 export { bootstrapPresentation } from '../mms/bootstrapPresentation'
 import { MmsProtocolError } from '../../mms/protocol/client'
 import { guiChatRequestError } from '../mms/requestErrors'
@@ -934,7 +935,10 @@ export function registerGuiIpc(
     }
   })
 
-  guiMms.on('window-resnapshot', async ({ senderId }: { senderId: number }) => {
+  // A window asks for a resnapshot on every event while its gap flag is set, which is a burst during
+  // streaming. One snapshot runs at a time per window (and one more if asked meanwhile); one per
+  // event filled the connection's request limit and failed unrelated calls.
+  const resnapshotWindow = coalescedRunner(async (senderId: number) => {
     const win = BrowserWindow.getAllWindows().find((candidate) => candidate.webContents.id === senderId)
     const binding = guiMms.getWindowBindingForSender(senderId)
     if (!win || win.isDestroyed() || !binding) return
@@ -958,10 +962,12 @@ export function registerGuiIpc(
       console.error('window resnapshot failed:', error)
     }
   })
+  guiMms.on('window-resnapshot', ({ senderId }: { senderId: number }) => {
+    void resnapshotWindow(senderId)
+  })
 
-  guiMms.on('resnapshot', async (event?: { reason?: string }) => {
-    // A reconnect may be to a restarted service: provider operations the windows wait on are gone.
-    if (event?.reason?.startsWith('reconnect')) broadcast('providers:serviceRestarted', null)
+  // Same burst for the base connection, and each run here costs three requests.
+  const resnapshotBase = coalescedRunner(async (_key: 'base') => {
     const activeId = currentPresentation().getActiveThreadId()
     if (!activeId || !guiMms.connected) return
     try {
@@ -999,6 +1005,11 @@ export function registerGuiIpc(
     } catch (err) {
       console.error('resnapshot failed:', err)
     }
+  })
+  guiMms.on('resnapshot', (event?: { reason?: string }) => {
+    // A reconnect may be to a restarted service: provider operations the windows wait on are gone.
+    if (event?.reason?.startsWith('reconnect')) broadcast('providers:serviceRestarted', null)
+    void resnapshotBase('base')
   })
 
   browserView.init(getWindow, (state) => broadcast('browser:state', state))
