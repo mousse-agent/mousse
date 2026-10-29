@@ -36,6 +36,7 @@ import {
 } from "./tools/permission-request";
 import { SubagentCardGroup } from "./tools/SubagentCard";
 import { SubagentNotice } from "./tools/SubagentNotice";
+import { isRunningSubagent } from "../../../../shared/subagents";
 import { useSubagentCards } from "./tools/subagent-cards-context";
 import { readSubagentNotice } from "../../adapters/subagentNotice";
 import { openThread } from "../../../lib/openThread";
@@ -163,14 +164,6 @@ function getLastAssistantHasContent(messages: UIMessage[]) {
     });
   }
   return false;
-}
-
-function getLastUserMessageId(messages: UIMessage[]) {
-  for (let i = messages.length - 1; i >= 0; i -= 1) {
-    const msg = messages[i];
-    if (msg?.role === "user") return msg.id;
-  }
-  return null;
 }
 
 function readCreatedAt(message: UIMessage | undefined): number | null {
@@ -572,13 +565,23 @@ function MessageToolbar({
   );
 }
 
-/** Group flat messages into turns (user message + following assistant messages) */
-function groupMessagesIntoTurns(messages: UIMessage[]) {  const turns: { userMsg?: UIMessage; assistantMsgs: UIMessage[] }[] = [];
+/**
+ * Group flat messages into turns: a message the user wrote and everything that
+ * follows it. Subagent results delivered to the thread are not something the
+ * user wrote: they join the reply in progress, in place, with only their
+ * structured notice kept (their text is what the model reads).
+ */
+function groupMessagesIntoTurns(messages: UIMessage[]) {
+  const turns: { userMsg?: UIMessage; assistantMsgs: UIMessage[] }[] = [];
   let current: { userMsg?: UIMessage; assistantMsgs: UIMessage[] } | null =
     null;
 
   for (const msg of messages) {
     if (msg.role === "user") {
+      if (current && readSubagentNotice(msg)) {
+        current.assistantMsgs.push({ ...msg, parts: [] });
+        continue;
+      }
       if (current) turns.push(current);
       current = { userMsg: msg, assistantMsgs: [] };
     } else if (msg.role === "assistant") {
@@ -950,6 +953,15 @@ export const MessageList = memo(function MessageList({
     () => new Set(subagentCards.keys()),
     [subagentCards],
   );
+  // Subagents (by task and by thread) whose state a card in the thread shows.
+  const cardedSubagents = useMemo(() => {
+    const ids = new Set<string>();
+    for (const card of subagentCards.values()) {
+      if (card.delegationId) ids.add(card.delegationId);
+      if (card.childThreadId) ids.add(card.childThreadId);
+    }
+    return ids;
+  }, [subagentCards]);
 
   const markCopied = useCallback((id: string) => {
     setActiveCopyId(id);
@@ -1256,15 +1268,33 @@ export const MessageList = memo(function MessageList({
   const lastMessage = normalizedMessages[normalizedMessages.length - 1];
   const lastMessageId = lastMessage?.id ?? null;
   const lastMessageRole = lastMessage?.role ?? null;
-  const lastUserMessageId = useMemo(
-    () => getLastUserMessageId(normalizedMessages),
+  const turns = useMemo(
+    () => groupMessagesIntoTurns(normalizedMessages),
     [normalizedMessages],
   );
+  // The message that started the reply in progress. Subagent results that
+  // join that reply do not start a new one.
+  const lastUserMessageId = turns[turns.length - 1]?.userMsg?.id ?? null;
+  // The last reply launched subagents that are still working: their results
+  // continue it, so it is still in progress while the thread waits for them.
+  const awaitingSubagents = useMemo(() => {
+    const last = turns[turns.length - 1];
+    if (!last?.userMsg) return false;
+    return last.assistantMsgs.some((message) =>
+      (message.parts ?? []).some((part: unknown) => {
+        if (!isV5ToolPart(part) || !part.toolCallId) return false;
+        const card = subagentCards.get(part.toolCallId);
+        // A card with no task known yet (the list has not loaded) says nothing.
+        return card != null && !card.pending && isRunningSubagent(card);
+      }),
+    );
+  }, [turns, subagentCards]);
+  const replyActive = isStreaming || awaitingSubagents;
 
   useEffect(() => {
     const turnId = lastUserMessageId;
     if (!turnId) return;
-    if (isStreaming) {
+    if (replyActive) {
       const clock = workClockRef.current;
       if (clock?.turnId !== turnId) {
         const user = normalizedMessages.find((message) => message.id === turnId);
@@ -1291,7 +1321,7 @@ export const MessageList = memo(function MessageList({
           : { ...current, [turnId]: durationMs },
       );
     }
-  }, [isStreaming, lastUserMessageId, normalizedMessages]);
+  }, [replyActive, lastUserMessageId, normalizedMessages]);
 
   const lastUserMessageIdRef = useRef(lastUserMessageId);
   useLayoutEffect(() => {
@@ -1305,10 +1335,6 @@ export const MessageList = memo(function MessageList({
     }
   }, [lastUserMessageId, dispatchFollow]);
 
-  const turns = useMemo(
-    () => groupMessagesIntoTurns(normalizedMessages),
-    [normalizedMessages],
-  );
   const lastTurn = turns[turns.length - 1];
   const trailingUser = lastTurn?.userMsg;
   const trailingHasAssistant = (lastTurn?.assistantMsgs.length ?? 0) > 0;
@@ -1576,7 +1602,7 @@ export const MessageList = memo(function MessageList({
                       turn.assistantMsgs.flatMap((msg) => msg.parts ?? []),
                       "\n\n",
                     );
-                    const isTurnStreaming = isStreaming && isLastTurn;
+                    const isTurnStreaming = replyActive && isLastTurn;
                     // A turn can span several assistant rows (text + tool
                     // results); surface the latest completed-response
                     // metadata so the popup reflects the visible reply.
@@ -1628,7 +1654,19 @@ export const MessageList = memo(function MessageList({
                             // Consecutive thoughts and tool calls collapse into one
                             // group titled with the latest thought. A run with
                             // no thought falls back to "Tool calls N".
-                            const analyses = turn.assistantMsgs.map((msg) =>
+                            // Subagent results whose subagents have a card in
+                            // the thread show there, as the card's state: the
+                            // results add no line of their own.
+                            const answerMsgs = turn.assistantMsgs.flatMap((msg) => {
+                              const notice = readSubagentNotice(msg);
+                              if (!notice) return [msg];
+                              const rest = notice.filter(
+                                (item) => !cardedSubagents.has(item.delegationId) && !cardedSubagents.has(item.childThreadId),
+                              );
+                              if (rest.length === 0) return [];
+                              return [{ ...msg, metadata: { ...(msg.metadata as object | undefined), subagentNotice: rest } }];
+                            });
+                            const analyses = answerMsgs.map((msg) =>
                               analyzeAssistantMessage(
                                 msg.parts ?? [],
                                 suppressQuestionTool,
@@ -1644,12 +1682,12 @@ export const MessageList = memo(function MessageList({
                                 const cardParts = segment.msgIndices.flatMap(
                                   (msgIndex) => analyses[msgIndex]!.cardParts,
                                 );
-                                const chatStreamingStatus = isTurnStreaming
+                                const chatStreamingStatus = isLastTurn && isStreaming
                                   ? "streaming"
                                   : undefined;
                                 return (
                                   <SubagentCardGroup
-                                    key={`${turn.assistantMsgs[segment.msgIndices[0]!]!.id}-subagents`}
+                                    key={`${answerMsgs[segment.msgIndices[0]!]!.id}-subagents`}
                                     toolCallIds={cardParts.map(
                                       (part) => part.toolCallId!,
                                     )}
@@ -1667,11 +1705,19 @@ export const MessageList = memo(function MessageList({
                               }
                               if (segment.kind === "message") {
                                 const msg =
-                                  turn.assistantMsgs[segment.msgIndex]!;
+                                  answerMsgs[segment.msgIndex]!;
+                                const notice = readSubagentNotice(msg);
+                                if (notice) {
+                                  return (
+                                    <div key={msg.id} data-notice-id={msg.id}>
+                                      <SubagentNotice items={notice} />
+                                    </div>
+                                  );
+                                }
                                 const isLastMsg =
                                   isLastTurn &&
                                   segment.msgIndex ===
-                                    turn.assistantMsgs.length - 1;
+                                    answerMsgs.length - 1;
                                 return (
                                   <AssistantParts
                                     key={msg.id}
@@ -1690,10 +1736,10 @@ export const MessageList = memo(function MessageList({
                               );
                               const groupLabel = activityGroupLabel(items);
                               const firstId =
-                                turn.assistantMsgs[
+                                answerMsgs[
                                   segment.msgIndices[0]!
                                 ]!.id;
-                              const chatStreamingStatus = isTurnStreaming
+                              const chatStreamingStatus = isLastTurn && isStreaming
                                 ? "streaming"
                                 : undefined;
                               // Only shimmer the group header while a child
