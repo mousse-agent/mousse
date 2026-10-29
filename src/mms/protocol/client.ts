@@ -81,10 +81,66 @@ export const PENDING_REQUESTS_FULL_MESSAGE = 'Too many pending requests'
 
 /**
  * Waits before each retry of a request that was refused because too many requests were in flight.
- * The refusal comes before the request runs (this client never sent it, or the service turned it away
- * on arrival), so retrying is safe for every method. About 1.5 s in total; a longer overload fails.
+ * The refusal comes before the request runs (the service turned it away on arrival, or too many were
+ * already waiting here), so retrying is safe for every method. About 1.5 s in total; a longer overload
+ * fails. Below that, a call past this client's in-flight limit waits for a slot instead.
  */
 export const OVERLOAD_RETRY_DELAYS_MS: readonly number[] = [50, 150, 400, 900]
+
+/**
+ * How many requests may wait for a free slot once `MMS_PROTOCOL_MAX_PENDING_REQUESTS` are in flight.
+ * A request past this is refused with the overload error; one that waits keeps its own timeout.
+ */
+export const MMS_CLIENT_MAX_WAITING_REQUESTS = 1_024
+
+/**
+ * Reads that only return state (a lookup may restore a retired worktree, which is the same work twice).
+ * With `shareIdenticalReads`, a call while the same method with the same params is in flight gets that
+ * request's answer instead of sending another. Opening a thread asks several of these more than once at
+ * the same moment (`files.root` three times, `projects.list` and `settings.get` from several views),
+ * and each switch to another thread asks again while the earlier answers are still on their way. Any
+ * other method ends sharing for the reads already in flight, so a read after a change is a new request.
+ */
+export const SHARED_READ_METHODS: ReadonlySet<string> = new Set([
+  'actions.list',
+  'agentDefinitions.list',
+  'bridge.editorAsks',
+  'browser.access.status',
+  'capabilities',
+  'channels.getActivity',
+  'channels.getSnapshot',
+  'channels.listPairingRequests',
+  'chats.snapshot',
+  'files.root',
+  'git.branches',
+  'git.diffStats',
+  'git.log',
+  'git.status',
+  'integrations.snapshot',
+  'net.status',
+  'orchestrator.contextUsage',
+  'orchestrator.isTurnActive',
+  'profiles.list',
+  'profiles.status',
+  'projects.list',
+  'providers.snapshots',
+  'pullRequests.get',
+  'queue.list',
+  'settings.get',
+  'settings.getOptions',
+  'skills.list',
+  'storage.policy',
+  'subagents.list',
+  'thread.snapshot',
+  'threads.approvalRules',
+  'threads.get',
+  'threads.list',
+  'workflows.list',
+  'workspace.getStatus'
+])
+
+/** Calls that change nothing a read returns, so they leave shared reads in flight (a long wait, the event cursor). */
+const SHARING_NEUTRAL_METHODS: ReadonlySet<string> = new Set(['events.subscribe', 'speech.host.wait'])
 
 /**
  * Whether `error` is an overload refusal: too many requests in flight on the connection, from
@@ -124,6 +180,8 @@ export interface LocalMmsClientOptions {
   /** Override endpoint path (tests). */
   endpoint?: string
   requestTimeoutMs?: number
+  /** Identical concurrent calls of a `SHARED_READ_METHODS` method share one request (GUI windows). */
+  shareIdenticalReads?: boolean
 }
 
 interface Pending {
@@ -133,11 +191,32 @@ interface Pending {
   method: string
 }
 
+/** A request waiting for a free slot; `send` takes the slot and writes it at once. */
+interface SlotWaiter {
+  send: () => void
+  fail: (error: Error) => void
+  timer: ReturnType<typeof setTimeout>
+}
+
+/** The key two calls must share to be answered by one request; null when the params cannot be compared. */
+function sharedReadKey(method: string, params: unknown, timeoutMs: number | undefined): string | null {
+  if (!SHARED_READ_METHODS.has(method)) return null
+  try {
+    return `${method}\u0000${timeoutMs ?? ''}\u0000${JSON.stringify(params ?? null)}`
+  } catch {
+    return null
+  }
+}
+
 export class LocalMmsClient implements MmsClient {
   private socket: Socket | null = null
   private decoder = new FrameDecoder()
   private assembler = new EnvelopeAssembler(() => this.onDisconnect(new FrameDecodeError('Envelope transfer timed out')))
   private pending = new Map<string, Pending>()
+  /** Requests waiting, in call order, for one of the in-flight slots. */
+  private slotWaiters: SlotWaiter[] = []
+  /** In-flight shared reads by `sharedReadKey`. */
+  private sharedReads = new Map<string, Promise<unknown>>()
   private eventHandlers = new Set<(event: ProtocolEvent, delivery?: { replay: boolean }) => void>()
   private connectionEventHandlers = new Set<(event: ProtocolConnectionEvent) => void>()
   private connectionClosedHandlers = new Set<(error: Error) => void>()
@@ -410,8 +489,41 @@ export class LocalMmsClient implements MmsClient {
     }
   }
 
-  /** Sends a request; a brief overload (too many requests in flight) is retried quietly with backoff. */
+  /**
+   * Sends a request. Past the in-flight limit it waits for a free slot; a refused one (the service's
+   * overload reply, or too many waiting here) is retried quietly with backoff. With
+   * `shareIdenticalReads`, an identical read already in flight answers this call too.
+   */
   async request<T = unknown>(
+    method: string,
+    params?: unknown,
+    timeoutMs?: number
+  ): Promise<T> {
+    const key = this.opts.shareIdenticalReads ? sharedReadKey(method, params, timeoutMs) : null
+    if (key === null) {
+      // Any other call may change state (a profile binding changes what every read returns): a read
+      // asked after it is sent must not take the answer of one asked before it.
+      if (!SHARED_READ_METHODS.has(method) && !SHARING_NEUTRAL_METHODS.has(method)) this.sharedReads.clear()
+      return this.requestWithRetry<T>(method, params, timeoutMs)
+    }
+    const inFlight = this.sharedReads.get(key)
+    // Each later caller gets its own copy, so one caller changing its answer cannot change another's.
+    if (inFlight) return inFlight.then((value) => structuredClone(value) as T)
+    const request = this.requestWithRetry<T>(method, params, timeoutMs)
+    this.sharedReads.set(key, request)
+    const forget = (): void => {
+      if (this.sharedReads.get(key) === request) this.sharedReads.delete(key)
+    }
+    request.then(forget, forget)
+    return request
+  }
+
+  /** Requests waiting for a free slot (tests and diagnostics). */
+  get waitingRequestCount(): number {
+    return this.slotWaiters.length
+  }
+
+  private async requestWithRetry<T>(
     method: string,
     params?: unknown,
     timeoutMs?: number
@@ -436,35 +548,68 @@ export class LocalMmsClient implements MmsClient {
     if (!this._connected || !this.socket || this.socket.destroyed) {
       throw new Error('Not connected')
     }
-    if (this.pending.size >= MMS_PROTOCOL_MAX_PENDING_REQUESTS) {
+    // Earlier waiters go first, so a free slot never lets a later call overtake them.
+    const full = this.pending.size >= MMS_PROTOCOL_MAX_PENDING_REQUESTS || this.slotWaiters.length > 0
+    if (full && this.slotWaiters.length >= MMS_CLIENT_MAX_WAITING_REQUESTS) {
       throw new MmsProtocolError('backpressure', PENDING_REQUESTS_FULL_MESSAGE, undefined, { category: 'unavailable', retryable: true })
     }
-    const id = randomBytes(8).toString('hex')
-    const result = new Promise<T>((resolve, reject) => {
-      const timer = setTimeout(() => {
-        this.pending.delete(id)
-        reject(new Error(`Request timeout: ${method}`))
-      }, effectiveTimeoutMs)
-      this.pending.set(id, {
-        resolve: (v) => resolve(v as T),
-        reject,
-        timer,
-        method
-      })
-    })
-    try {
-      this.write({ kind: 'req', id, method, params })
-    } catch (err) {
-      // Remove/reject pending immediately — do not wait for timeout.
-      // Reject the pending promise (do not also throw) so callers get one rejection.
-      const p = this.pending.get(id)
-      if (p) {
-        clearTimeout(p.timer)
-        this.pending.delete(id)
-        p.reject(err instanceof Error ? err : new Error(String(err)))
+    const calledAt = Date.now()
+    return new Promise<T>((resolve, reject) => {
+      // Takes a slot and writes the request in one step; the timeout counts from the call, waiting included.
+      const send = (): void => {
+        if (!this._connected || !this.socket || this.socket.destroyed) {
+          reject(new Error('Not connected'))
+          return
+        }
+        const id = randomBytes(8).toString('hex')
+        const timer = setTimeout(() => {
+          this.pending.delete(id)
+          reject(new Error(`Request timeout: ${method}`))
+          this.admitWaiters()
+        }, Math.max(1, effectiveTimeoutMs - (Date.now() - calledAt)))
+        this.pending.set(id, {
+          resolve: (v) => resolve(v as T),
+          reject,
+          timer,
+          method
+        })
+        try {
+          this.write({ kind: 'req', id, method, params })
+        } catch (err) {
+          // Remove/reject pending immediately — do not wait for timeout.
+          // Reject the pending promise (do not also throw) so callers get one rejection.
+          const p = this.pending.get(id)
+          if (p) {
+            clearTimeout(p.timer)
+            this.pending.delete(id)
+            p.reject(err instanceof Error ? err : new Error(String(err)))
+          }
+        }
       }
+      if (!full) {
+        send()
+        return
+      }
+      const waiter: SlotWaiter = {
+        send,
+        fail: reject,
+        timer: setTimeout(() => {
+          const index = this.slotWaiters.indexOf(waiter)
+          if (index >= 0) this.slotWaiters.splice(index, 1)
+          reject(new Error(`Request timeout: ${method}`))
+        }, effectiveTimeoutMs)
+      }
+      this.slotWaiters.push(waiter)
+    })
+  }
+
+  /** Sends waiting requests, oldest first, into the slots that are free. */
+  private admitWaiters(): void {
+    while (this.pending.size < MMS_PROTOCOL_MAX_PENDING_REQUESTS && this.slotWaiters.length > 0) {
+      const waiter = this.slotWaiters.shift()!
+      clearTimeout(waiter.timer)
+      waiter.send()
     }
-    return result
   }
 
   async subscribe(afterSequence = 0): Promise<{
@@ -593,6 +738,7 @@ export class LocalMmsClient implements MmsClient {
     if (!p) return
     clearTimeout(p.timer)
     this.pending.delete(env.id)
+    this.admitWaiters()
     if (env.ok) p.resolve(env.result)
     else {
       const error = env.error
@@ -680,6 +826,12 @@ export class LocalMmsClient implements MmsClient {
   }
 
   private rejectAllPending(err: Error): void {
+    const waiters = this.slotWaiters
+    this.slotWaiters = []
+    for (const waiter of waiters) {
+      clearTimeout(waiter.timer)
+      waiter.fail(err)
+    }
     for (const [, p] of this.pending) {
       clearTimeout(p.timer)
       p.reject(err)
