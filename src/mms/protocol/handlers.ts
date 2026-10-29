@@ -91,6 +91,7 @@ import { isQualifiedId } from '../../shared/threadRef'
 import { resolveThreadProjectPath } from '../data/resolveActiveProjectPath'
 import { ThreadJournal } from '../data/ThreadJournal'
 import { ThreadWorkspaceManager } from '../workspace/ThreadWorkspaceManager'
+import { describeRecovery, switchBackToThreadBranch } from '../workspace/workspaceRecovery'
 import { resolveEditorFolder } from '../workspace/editorFolder'
 import type { NodeId } from '../../shared/net/ids'
 import { scheduledJobOptionsDepsFrom, validateScheduledJobOptions, type ScheduledJobOptionsDeps } from '../scheduled/validateJobOptions'
@@ -2790,8 +2791,11 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const metadata = stored && lookup.projectPath ? manager.verify(stored) : stored
       // Never restores: the hover card and the active-project lookup call this for passive reads.
       const marker = stored && !existsSync(stored.worktreePath) ? readCleanupMarker(ctx.mms.threads.lifecycleStore, lookup.threadId) : undefined
+      // Why every turn, Undo and Publish are refused, for the banner and the CLI; absent while the thread is fine.
+      const recovery = metadata && lookup.projectPath ? describeRecovery(lookup.threadDirectory, metadata) : undefined
       return {
         metadata,
+        ...(recovery ? { recovery } : {}),
         execution: lookup.projectPath
           ? manager.executionContext(lookup.projectPath, metadata)
           : manager.unboundExecutionContext(lookup.threadId),

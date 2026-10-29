@@ -132,7 +132,7 @@ export function operationInProgress(cwd: string): PendingChanges['operation'] {
 }
 
 /** Pending paths Mousse sets aside: not `.mousse/`, and not a nested repository (listed as `dir/`), which stays in place. */
-function ownPaths(files: string[]): string[] {
+export function ownPaths(files: string[]): string[] {
   return files.filter((path) => !path.endsWith('/') && path !== MOUSSE_DIRECTORY && !path.startsWith(`${MOUSSE_DIRECTORY}/`))
 }
 

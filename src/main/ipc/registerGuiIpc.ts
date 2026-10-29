@@ -1262,7 +1262,10 @@ export function registerGuiIpc(
   registerHandler('operations:abort', async (_e, params: Record<string, unknown>) =>
     guiMms.request('operations.abort', params)
   )
-  registerStorageHandler('threads:restore', async (_e, threadId: string) =>
+  registerHandler('operations:recover', async (_e, threadId: string, options?: { switchBack?: boolean }) =>
+    guiMms.request('operations.recover', { threadId, ...(options?.switchBack === true ? { switchBack: true } : {}) })
+  )
+  registerStorageHandler('threads:restore',async (_e, threadId: string) =>
     guiMms.request('threads.restore', { threadId })
   )
   registerStorageHandler('threads:purge', async (_e, threadId: string, options: Record<string, unknown> = {}) =>

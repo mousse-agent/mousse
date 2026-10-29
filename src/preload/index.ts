@@ -726,7 +726,10 @@ const api = {
     start: (params: Record<string, unknown>): Promise<unknown> => ipcRenderer.invoke('publish:start', params)
   },
   operations: {
-    abort: (params: Record<string, unknown>): Promise<unknown> => ipcRenderer.invoke('operations:abort', params)
+    abort: (params: Record<string, unknown>): Promise<unknown> => ipcRenderer.invoke('operations:abort', params),
+    /** Finishes the operation a thread's worktree is waiting on. `switchBack` first puts a worktree the agent moved to another branch back on the thread's branch. */
+    recover: (threadId: string, options?: { switchBack?: boolean }): Promise<import('../shared/workspace').WorkspaceRecoverResult> =>
+      ipcRenderer.invoke('operations:recover', threadId, options)
   },
   projects: {
     list: (): Promise<Project[]> => ipcRenderer.invoke('projects:list'),

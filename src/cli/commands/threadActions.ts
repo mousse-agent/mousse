@@ -1,5 +1,5 @@
 import type { ParsedArgs } from '../parseArgs'
-import { flagString } from '../parseArgs'
+import { flagBool, flagString } from '../parseArgs'
 import { closeMmsContext, openMms } from '../mmsContext'
 import { exitWithError, writeOutput } from '../output'
 
@@ -52,7 +52,12 @@ export async function runThreadActionCommand(args: ParsedArgs): Promise<void> {
         break
       }
       case 'operation': {
-        if (args.subcommand !== 'abort') exitWithError('operation requires the abort subcommand.', args.globals.mode)
+        if (args.subcommand === 'recover') {
+          // `--switch-back` first puts a worktree the agent moved to another branch back on the thread's branch.
+          result = await context.client.request('operations.recover', { threadId, ...(flagBool(args.flags, 'switch-back') ? { switchBack: true } : {}) })
+          break
+        }
+        if (args.subcommand !== 'abort') exitWithError('operation requires the abort or recover subcommand.', args.globals.mode)
         const operationId = args.positional[0] ?? flagString(args.flags, 'operation')
         if (!operationId) exitWithError('operation abort requires an operation id.', args.globals.mode)
         result = await context.client.request('operations.abort', { threadId, operationId, expectedJournalGeneration })
