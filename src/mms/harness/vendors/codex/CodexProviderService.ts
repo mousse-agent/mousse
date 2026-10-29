@@ -5,7 +5,7 @@ import { homedir } from 'node:os'
 import { delimiter, isAbsolute, join, resolve } from 'node:path'
 import { AppError, redactSecrets } from '../../../../shared/errors'
 import { CODEX_INSTANCE_ID } from '../../../../shared/providerInstances'
-import { parseThinkingSuffixFromModelId } from '../../../../shared/modelVariants'
+import { parseThinkingSuffixFromModelId, REASONING_LEVELS, supportedEffortOf } from '../../../../shared/modelVariants'
 import { exactDirectory } from '../../../run/approvalFingerprint'
 import type { ProviderToolEvent } from '../../../../shared/agentActivity'
 import type {
@@ -55,6 +55,7 @@ import {
   type CodexNotification,
   type CodexServerRequest,
   type CodexServerRequestMap,
+  type CodexModel,
   type CodexTurn,
   type ModelListResponse,
   type RateLimitSnapshot,
@@ -133,7 +134,26 @@ export const CODEX_CHECK_CLOSE_MS = 5_000
 export const CODEX_HELPER_IDLE_CAP_MS = 30 * 60_000
 /** ...or when they have held it this long in total, however active they are. */
 export const CODEX_HELPER_PIN_CAP_MS = 4 * 60 * 60_000
-const EFFORTS = new Set(['minimal', 'low', 'medium', 'high', 'xhigh', 'max'])
+/** Levels a turn may send for a model listed without its own (`model/list` reports them per model). */
+const EFFORTS: ReadonlySet<string> = new Set(REASONING_LEVELS)
+
+/**
+ * One `model/list` entry as a picker model: every reasoning level Codex reports for it (`ultra` on
+ * some models), with Codex's description of each and its default. Codex runs every model with
+ * reasoning, so there is no "Off".
+ */
+export function codexModelOption(model: CodexModel): LlmModelOption {
+  const reported = model.supportedReasoningEfforts.filter((effort) => EFFORTS.has(effort.reasoningEffort))
+  const efforts = reported.map((effort) => effort.reasoningEffort)
+  const descriptions = Object.fromEntries(reported.filter((effort) => effort.description).map((effort) => [effort.reasoningEffort, effort.description]))
+  return {
+    id: model.id,
+    label: model.displayName || model.id,
+    ...(efforts.length ? { efforts, thinkingOff: false as const } : {}),
+    ...(efforts.length && efforts.includes(model.defaultReasoningEffort) ? { defaultEffort: model.defaultReasoningEffort } : {}),
+    ...(Object.keys(descriptions).length ? { effortDescriptions: descriptions } : {})
+  }
+}
 
 type SavedThread = {
   codexThreadId: string
@@ -1341,8 +1361,7 @@ export class CodexProviderService {
         const response: ModelListResponse = await conn.request('model/list', cursor ? { cursor } : {})
         for (const model of response.data) {
           if (model.hidden) continue
-          const efforts = model.supportedReasoningEfforts.map((effort) => effort.reasoningEffort).filter((effort) => EFFORTS.has(effort))
-          models.push({ id: model.id, label: model.displayName || model.id, ...(efforts.length ? { efforts } : {}) })
+          models.push(codexModelOption(model))
         }
         cursor = response.nextCursor
         if (!cursor) break
@@ -2406,14 +2425,16 @@ export class CodexProviderService {
       run = current
       current.conn = conn
       this.turns.set(codexThreadId, current)
-      const { baseId, effort } = parseThinkingSuffixFromModelId(input.model)
+      const { baseId } = parseThinkingSuffixFromModelId(input.model)
+      // A level the model does not offer (saved for another model) runs at the model's default.
+      const effort = supportedEffortOf(input.model, this.settings.models ?? [], EFFORTS)
       const policy = codexTurnPolicy(input.mode ?? 'default', input.child, current.permissionMode)
       const turnParams = {
         cwd: resolve(input.cwd),
         approvalPolicy: policy.approvalPolicy,
         sandboxPolicy: policy.sandboxPolicy,
         ...(baseId !== CODEX_DEFAULT_MODEL_ID ? { model: baseId } : {}),
-        ...(effort && EFFORTS.has(effort) ? { effort } : {}),
+        ...(effort ? { effort } : {}),
         // Without it the server streams no reasoning summaries, and thought rows would stay empty.
         summary: 'auto' as const
       }

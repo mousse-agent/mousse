@@ -26,7 +26,8 @@ afterEach(() => {
 function fixture(
   query: (input: { options: Options; prompt: unknown }) => Query,
   loggedIn = true,
-  usageLimitHoldMs?: number
+  usageLimitHoldMs?: number,
+  models: unknown[] = [{ id: 'sonnet', label: 'Sonnet' }]
 ) {
   const home = mkdtempSync(join(tmpdir(), 'claude-subscription-test-'))
   homes.push(home)
@@ -40,7 +41,7 @@ function fixture(
     JSON.stringify({
       loginPolicy: 'cli',
       binaryPath: binary,
-      models: [{ id: 'sonnet', label: 'Sonnet' }]
+      models
     })
   )
   const questions = new UserQuestionService()
@@ -869,6 +870,53 @@ it.each(['low', 'medium', 'high', 'xhigh', 'max'])('passes %s effort separately 
   const { service, home } = fixture(({ options }) => { captured.push(options); return fakeQuery([result]) })
   await service.chat({ ...chatInput(home), model: `opus:${effort}` })
   expect(captured[0]).toMatchObject({ model: 'opus', effort })
+})
+
+describe('Claude reasoning levels', () => {
+  const opus = { value: 'opus', resolvedModel: 'claude-opus-5-5', displayName: 'Opus', description: 'Opus 5.5 · Best for everyday, complex tasks', supportsEffort: true, supportedEffortLevels: ['low', 'medium', 'high', 'xhigh', 'max'] as const }
+  const haiku = { value: 'haiku', resolvedModel: 'claude-haiku-5-5', displayName: 'Haiku', description: 'Haiku 5.5 · Fastest for quick answers', supportsEffort: true, supportedEffortLevels: ['low', 'medium', 'high'] as const }
+
+  it('lists the levels Claude Code reports, plus Ultracode where it is available, with the default', () => {
+    const options = claudeModelOptions([{ ...opus, supportedEffortLevels: [...opus.supportedEffortLevels] }, { ...haiku, supportedEffortLevels: [...haiku.supportedEffortLevels] }], { opus: { defaultEffort: 'medium', ultracode: true }, haiku: { defaultEffort: 'high' } })
+    expect(options).toEqual([
+      { id: 'opus', label: 'Opus 5.5', efforts: ['low', 'medium', 'high', 'xhigh', 'max', 'ultracode'], thinkingOff: false, defaultEffort: 'medium', effortDescriptions: { ultracode: expect.any(String) } },
+      { id: 'haiku', label: 'Haiku 5.5', efforts: ['low', 'medium', 'high'], thinkingOff: false, defaultEffort: 'high' }
+    ])
+  })
+
+  it('reads each model\'s default effort and Ultracode availability from get_settings during discovery', async () => {
+    let current = 'default'
+    const setModel = vi.fn(async (model: string) => { current = model })
+    const getSettings = vi.fn(async () => ({ applied: { model: current, effort: current === 'opus' ? 'medium' : 'high', ultracodeAvailable: current === 'opus' } }))
+    const { service, home } = fixture(() => Object.assign(fakeQuery(), {
+      supportedModels: vi.fn(async () => [opus, haiku]),
+      setModel,
+      getSettings
+    }) as unknown as Query)
+    await service.refreshModels(home)
+    expect(setModel.mock.calls.map(([model]) => model)).toEqual(['opus', 'haiku'])
+    expect(service.llmProvider()?.models.map((model) => [model.id, model.efforts, model.defaultEffort])).toEqual([
+      ['opus', ['low', 'medium', 'high', 'xhigh', 'max', 'ultracode'], 'medium'],
+      ['haiku', ['low', 'medium', 'high'], 'high']
+    ])
+  })
+
+  it('runs Ultracode with Claude Code\'s ultracode setting at the model\'s default effort', async () => {
+    const captured: Options[] = []
+    const { service, home } = fixture(({ options }) => { captured.push(options); return fakeQuery([result]) }, true, undefined, [{ id: 'opus', label: 'Opus 5.5', efforts: ['low', 'high', 'ultracode'] }])
+    await service.chat({ ...chatInput(home), model: 'opus:ultracode' })
+    expect(captured[0]).toMatchObject({ model: 'opus', settings: { ultracode: true } })
+    expect(captured[0].effort).toBeUndefined()
+  })
+
+  it('runs a saved level the model does not list at the model\'s default', async () => {
+    const captured: Options[] = []
+    const { service, home } = fixture(({ options }) => { captured.push(options); return fakeQuery([result]) }, true, undefined, [{ id: 'haiku', label: 'Haiku 5.5', efforts: ['low', 'medium', 'high'] }])
+    await service.chat({ ...chatInput(home), model: 'haiku:max' })
+    expect(captured[0]).toMatchObject({ model: 'haiku' })
+    expect(captured[0].effort).toBeUndefined()
+    expect(captured[0].settings?.ultracode).toBeUndefined()
+  })
 })
 
 it('keeps standalone workspaces profile-owned even for non-path thread IDs', () => {

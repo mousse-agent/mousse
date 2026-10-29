@@ -241,7 +241,7 @@ describe('CodexProviderService', () => {
           ? { data: [{ id: 'gpt-b', model: 'gpt-b', displayName: 'GPT B', description: '', hidden: false, supportedReasoningEfforts: [], defaultReasoningEffort: 'low', isDefault: false }], nextCursor: null }
           : {
               data: [
-                { id: 'gpt-a', model: 'gpt-a', displayName: 'GPT A', description: '', hidden: false, supportedReasoningEfforts: [{ reasoningEffort: 'low', description: '' }, { reasoningEffort: 'ultra', description: '' }], defaultReasoningEffort: 'low', isDefault: true },
+                { id: 'gpt-a', model: 'gpt-a', displayName: 'GPT A', description: '', hidden: false, supportedReasoningEfforts: [{ reasoningEffort: 'low', description: 'Fast responses' }, { reasoningEffort: 'ultra', description: 'Maximum reasoning with automatic task delegation' }, { reasoningEffort: 'turbo-new', description: '' }], defaultReasoningEffort: 'low', isDefault: true },
                 { id: 'gpt-hidden', model: 'gpt-hidden', displayName: 'Hidden', description: '', hidden: true, supportedReasoningEfforts: [], defaultReasoningEffort: 'low', isDefault: false }
               ],
               nextCursor: 'page-2'
@@ -251,8 +251,9 @@ describe('CodexProviderService', () => {
     const service = create(server, { models: [{ id: 'stale', label: 'Stale' }] })
     await service.status()
     const models = await service.refreshModels()
+    // Every level Codex reports, its extra `ultra` level included, with its descriptions and default.
     expect(models).toEqual([
-      { id: 'gpt-a', label: 'GPT A', efforts: ['low'] },
+      { id: 'gpt-a', label: 'GPT A', efforts: ['low', 'ultra'], thinkingOff: false, defaultEffort: 'low', effortDescriptions: { low: 'Fast responses', ultra: 'Maximum reasoning with automatic task delegation' } },
       { id: 'gpt-b', label: 'GPT B' }
     ])
     expect(service.llmProvider()).toEqual({ id: 'codex', label: 'Codex', models })
@@ -400,6 +401,16 @@ describe('CodexProviderService options (managed Codex)', () => {
     const service = create(server)
     await allRoutes(service, server)
     expect(pinned(server)).toEqual([['openai', 'openai'], ['openai', 'openai'], ['openai', 'openai']])
+  })
+
+  it('sends the level Codex lists for the model, and none for a level the model does not list', async () => {
+    const server = turnServer()
+    const service = create(server, { models: [{ id: 'gpt-x', label: 'GPT X', efforts: ['low', 'high', 'ultra'], defaultEffort: 'low' }] })
+    await chat(service, { model: 'gpt-x:ultra' })
+    service.commitConversation('t', 'h')
+    // A level saved for another model runs at this model's default: no effort is sent.
+    await chat(service, { model: 'gpt-x:max', history: 'h' })
+    expect(server.requests('turn/start').map((message) => (message.params as { effort?: string }).effort)).toEqual(['ultra', undefined])
   })
 
   it('managed pins its own provider on start, fork and resume, and never reads the account from Codex', async () => {

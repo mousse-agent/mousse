@@ -334,10 +334,15 @@ export function pickerIdOf(snapshot: Pick<InstanceSnapshot, 'instanceId' | 'driv
 
 function pickerModel(model: InstanceSnapshot['models']['entries'][number], catalog: LlmModelOption | undefined): LlmModelOption {
   const efforts = model.capabilities.efforts.length > 0 ? model.capabilities.efforts : catalog?.efforts
+  const defaultEffort = model.capabilities.defaultEffort ?? catalog?.defaultEffort
+  const effortDescriptions = model.capabilities.effortDescriptions ?? catalog?.effortDescriptions
   return {
     id: model.id,
     label: model.label,
     ...(efforts && efforts.length > 0 ? { efforts } : {}),
+    ...(defaultEffort ? { defaultEffort } : {}),
+    ...(effortDescriptions ? { effortDescriptions } : {}),
+    ...(model.capabilities.thinkingOff === false || catalog?.thinkingOff === false ? { thinkingOff: false as const } : {}),
     ...(catalog?.speed ? { speed: catalog.speed } : {})
   }
 }
