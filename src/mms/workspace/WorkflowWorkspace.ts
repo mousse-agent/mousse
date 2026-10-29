@@ -8,7 +8,7 @@ import { ChangeReceiptService } from '../actions/ChangeReceiptService'
 import { CodeRevertService } from '../actions/CodeRevertService'
 import { PublishService } from '../actions/PublishService'
 import { ConversationBranchService } from '../actions/ConversationBranchService'
-import { moveFiles, takeSnapshot } from '../actions/snapshots'
+import { moveFiles, sameTree, takeSnapshot } from '../actions/snapshots'
 import { ChildAgentIntegrationService } from '../agents/ChildAgentIntegrationService'
 import { withGitMutationLocks } from '../actions/GitOperationCoordinator'
 import {
@@ -62,6 +62,8 @@ export interface OwnedAgentWorkspace {
   recordPath: string
   parent?: OwnedThreadWorkspace
   baseSha?: string
+  /** The thread's files the worker started from (uncommitted work included): the base of the merge back. */
+  baseSnapshot?: string
   retainedRef?: string
 }
 
@@ -78,6 +80,9 @@ interface AgentWorkspaceRecord {
   branch?: string
   retainedRef?: string
   baseSha?: string
+  /** A snapshot of the thread's files at spawn; the worktree was made at `baseSha` and these files written over it. */
+  baseSnapshot?: string
+  /** The worker's result: a snapshot of its files, or `baseSnapshot` when it changed nothing. */
   resultSha?: string
   receiptId?: string
   lifecycle: 'ready'
@@ -462,26 +467,28 @@ export async function integrateOwnedAgentWorkspace(input: {
   const record = readAgentRecord(workspace.recordPath, context, input.idempotencyKey)
   if (!record) throw new DomainRpcError('unknown_effect', 'Workflow child result has no durable workspace record')
   const resultSha = input.revision.writeSha
+  const spawnBase = record.baseSnapshot ?? workspace.baseSha
+  // A worker that changed nothing has no result: its files are the ones it started from.
+  const unchanged = sameTree(workspace.worktreePath, resultSha, spawnBase)
   await withGitMutationLocks(`${workspace.recordPath}.changes`, workspace.worktreePath, 'workflow-result-pin', () => {
     // The result is a snapshot of the worker's files, which stays valid whatever the worker did to its own HEAD since.
     git(workspace.worktreePath, ['cat-file', '-e', `${resultSha}^{commit}`])
     if (workspace.retainedRef) git(workspace.worktreePath, ['update-ref', workspace.retainedRef, resultSha])
-    writeAgentRecord(workspace.recordPath, { ...record, resultSha, receiptId: input.revision.receiptId })
+    writeAgentRecord(workspace.recordPath, { ...record, resultSha: unchanged ? spawnBase : resultSha, receiptId: input.revision.receiptId })
   }, input.signal)
   const parent = workspace.parent
   const lease = await waitAcquireExecutionLease(parent.threadDirectory, { source: 'workflow-integration', signal: input.signal })
   try {
     verifyWorkspaceWriterAdmission(input.owner, context, parent)
     const metadata = new ThreadWorkspaceManager(parent.threadDirectory).load()
-    const expected = git(parent.workspacePath, ['rev-parse', 'HEAD'])
-    if (resultSha === workspace.baseSha) return { workspaceId: metadata?.workspaceId ?? context.threadId,
-      readSha: workspace.baseSha, writeSha: expected, generation: metadata?.generation }
+    if (unchanged) return { workspaceId: metadata?.workspaceId ?? context.threadId,
+      readSha: workspace.baseSha, writeSha: metadata?.snapshotSha ?? git(parent.workspacePath, ['rev-parse', 'HEAD']), generation: metadata?.generation }
     const integration = await new ChildAgentIntegrationService(parent.threadDirectory).integrate({
       agentId: agentWorktreeId(context.profileId, context.threadId, input.idempotencyKey),
       operationId: `workflow-integration:${input.idempotencyKey}`,
-      workerWorktree: workspace.worktreePath, workerBranch: workspace.branch,
-      spawnBaseSha: workspace.baseSha, expectedWorkerHead: resultSha, pinnedWorkerSha: resultSha,
-      threadWorkspace: parent.workspacePath, expectedDestinationHead: expected,
+      workerWorktree: workspace.worktreePath,
+      spawnBaseSha: spawnBase, pinnedWorkerSha: resultSha,
+      threadWorkspace: parent.workspacePath,
       externalEffects: new ChangeReceiptService(`${workspace.recordPath}.changes`).list()
         .find((receipt) => receipt.id === input.revision.receiptId)?.externalEffects ?? [],
       actor: { kind: 'workflow', id: context.runId }, runId: context.runId,
@@ -586,7 +593,7 @@ export async function provisionOwnedAgentWorkspace(input: {
   }
   if (existing?.kind === 'git-worktree') {
     const reused = reuseAgentWorktree(existing, thread, input.owner, input.context, input.idempotencyKey)
-    if (reused) return { ...reused, recordPath, parent: thread, baseSha: existing.baseSha, retainedRef: existing.retainedRef }
+    if (reused) return { ...reused, recordPath, parent: thread, baseSha: existing.baseSha, baseSnapshot: existing.baseSnapshot, retainedRef: existing.retainedRef }
   } else if (existing) {
     throw new DomainRpcError('profile_mismatch', 'Workflow agent workspace kind changed for this invocation')
   }
@@ -684,11 +691,12 @@ async function createAgentWorktree(input: {
     })
     verifyWorkspaceWriterAdmission(input.owner, input.context, input.thread)
     const baseSha = git(input.thread.workspacePath, ['rev-parse', 'HEAD'])
-    // The worker starts from the thread's files as they are, uncommitted work included, on top of the same commit.
-    const threadFiles = takeSnapshot(input.thread.workspacePath, { reason: `workflow agent ${input.idempotencyKey}` })
     const repoIdentity = resolveRepositoryIdentity(input.thread.gitTopLevel, { requireMutationCapability: true })
     repositoryLease = await acquireRepositoryLease(repoIdentity, { signal: input.signal })
     liveBinding(input.owner, input.context)
+    // The worker starts from the thread's files as they are, uncommitted work included, on top of the same commit.
+    // That snapshot is also the base its result is merged back from.
+    const threadFiles = takeSnapshot(input.thread.workspacePath, { reason: `workflow agent ${input.idempotencyKey}` })
     mkdirSync(worktreesBase, { recursive: true })
     if (existsSync(identity.path) && listedWorktree(input.thread.gitTopLevel, identity.path)) {
       throw new DomainRpcError('unknown_effect', 'Unrecorded workflow worktree exists; preserve it for recovery')
@@ -709,7 +717,7 @@ async function createAgentWorktree(input: {
       git(input.thread.workspacePath, ['worktree', 'add', '-b', identity.branch, identity.path, baseSha])
       moveFiles(identity.path, git(identity.path, ['rev-parse', 'HEAD^{tree}']), threadFiles.tree)
     }
-    git(input.thread.gitTopLevel, ['update-ref', retainedRef, git(identity.path, ['rev-parse', 'HEAD'])])
+    git(input.thread.gitTopLevel, ['update-ref', retainedRef, threadFiles.sha])
     const cwd = projectCwd(identity.path, input.thread.projectRelativeSubdirectory)
     writeAgentRecord(input.recordPath, {
       version: 1,
@@ -724,10 +732,11 @@ async function createAgentWorktree(input: {
       branch: identity.branch,
       retainedRef,
       baseSha,
+      baseSnapshot: threadFiles.sha,
       lifecycle: 'ready'
     })
     return { cwd, worktreePath: identity.path, kind: 'git-worktree', branch: identity.branch, recordPath: input.recordPath,
-      parent: input.thread, baseSha, retainedRef }
+      parent: input.thread, baseSha, baseSnapshot: threadFiles.sha, retainedRef }
   } finally {
     repositoryLease?.release()
     if (threadLease) releaseExecutionLeaseHandle(threadLease)

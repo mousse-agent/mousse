@@ -120,7 +120,7 @@ describe('pull choices and controls', () => {
     expect(reason({ changes: [change('a.ts', { status: 'conflicted' })] })).toBe('Resolve the conflicted files first')
     expect(reason({ inProgress: 'rebase' })).toBe('Finish or abort the rebase first')
     expect(reason({ inProgress: 'cherry-pick' })).toBe('Finish or abort the cherry-pick first')
-    expect(reason({ behind: 1 }, thread)).toBe("This thread's branch is checkpointed")
+    expect(reason({ behind: 1 }, thread)).toBe("Not available in this thread's worktree")
   })
 
   it('still fetches in a thread worktree, but not without a remote', () => {
@@ -177,7 +177,7 @@ describe('file rows', () => {
     expect(rowActions(change('i.log', { status: 'ignored' }), project)).toEqual([])
   })
 
-  it("keeps only discard in a thread's own worktree, where the next checkpoint commits everything", () => {
+  it("keeps only discard in a thread's own worktree, where a commit takes every change", () => {
     expect(rowActions(change('a.ts'), thread)).toEqual(['discard'])
     expect(rowActions(change('a.ts', { staged: true }), thread)).toEqual(['discard'])
     expect(sectionAction('staged', project)).toBe('unstage-all')
@@ -378,7 +378,7 @@ describe('sync bar markup', () => {
     expect(busy).toMatch(/title="Another Git action is running"[^>]*disabled=""[^>]*>(<svg.*?<\/svg>)?Fetch/)
     expect(busy).toMatch(/title="Another Git action is running"[^>]*disabled=""[^>]*>(<svg.*?<\/svg>)?Pull/)
     const inThread = render({ behind: 1 }, IDLE_SYNC_ACTIVITY, thread)
-    expect(inThread).toMatch(/title="This thread&#x27;s branch is checkpointed"[^>]*disabled=""[^>]*>(<svg.*?<\/svg>)?Pull/)
+    expect(inThread).toMatch(/title="Not available in this thread&#x27;s worktree"[^>]*disabled=""[^>]*>(<svg.*?<\/svg>)?Pull/)
     expect(inThread).toMatch(/<button(?![^>]*disabled)[^>]*>(<svg.*?<\/svg>)?Fetch/)
   })
 

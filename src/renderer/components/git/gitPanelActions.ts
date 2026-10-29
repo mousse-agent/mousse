@@ -7,7 +7,7 @@ import {
   stageGitPaths,
   unstageGitPaths
 } from '../../stores/gitStatusStore'
-import { THREAD_CHECKPOINTED_REASON, gitErrorMessage, isGitCancelled } from '../sideCard/gitSectionLogic'
+import { THREAD_WORKTREE_REASON, gitErrorMessage, isGitCancelled } from '../sideCard/gitSectionLogic'
 import {
   discardPrompt,
   fetchResultNotice,
@@ -33,7 +33,7 @@ const paths = (files: readonly GitFileChange[]): string[] => [...new Set(files.m
 /**
  * Stage, unstage or discard files. A discard asks first and does nothing when declined, since it
  * destroys changes and deletes untracked files. Stage and unstage are refused in a thread's own
- * worktree, where the next checkpoint would commit everything anyway.
+ * worktree, where a commit takes every change anyway.
  */
 export async function runRowAction(
   path: string,
@@ -42,7 +42,7 @@ export async function runRowAction(
   deps: RowActionDeps = {}
 ): Promise<RowOutcome> {
   if (request.action !== 'discard' && scope.workspaceThreadId !== null) {
-    return { kind: 'failed', message: THREAD_CHECKPOINTED_REASON }
+    return { kind: 'failed', message: THREAD_WORKTREE_REASON }
   }
   if (request.files !== 'all' && request.files.length === 0) return { kind: 'done' }
   try {

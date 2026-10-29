@@ -9,10 +9,8 @@ import { ConversationBranchService } from '../src/mms/actions/ConversationBranch
 import { ChangeReceiptService } from '../src/mms/actions/ChangeReceiptService'
 import { ThreadJournal } from '../src/mms/data/ThreadJournal'
 import { PublishService } from '../src/mms/actions/PublishService'
-import { keptPendingChangesNotice, type KeptPendingChanges } from '../src/mms/actions/git'
 import { WorkspaceResolver } from '../src/mms/workspace/WorkspaceResolver'
 import { pendingChangesDetails } from '../src/shared/workspace'
-import { mousseToUIMessages } from '../src/renderer/chat/adapters/mousseToUI'
 import { actionOptions, git, gitFoundationFixture } from './fixtures/gitFoundation'
 
 const PNG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0xff, 0x10])
@@ -170,28 +168,20 @@ describe('operations in a thread worktree with uncommitted changes', () => {
     expect(keptRefs(workspace)).toEqual([])
   })
 
-  it('Publish runs with pending changes in both folders: the thread’s stay unpublished, the primary checkout’s come back', async () => {
+  it('Publish takes the thread’s uncommitted files, but refuses a primary checkout with pending changes and changes nothing there', async () => {
     const workspace = f.child('task')
-    const reviewed = f.commit(workspace, 'reviewed\n')
-    writeFileSync(join(workspace, 'thread-notes.md'), 'not reviewed\n')
+    f.commit(workspace, 'reviewed\n')
+    writeFileSync(join(workspace, 'thread-notes.md'), 'not committed\n')
     writeFileSync(join(f.repo, 'draft.md'), 'staged draft\n'); git(f.repo, 'add', 'draft.md')
     userEdits(f.repo)
     git(f.repo, 'checkout', '--', 'value.txt')
     const before = pending(f.repo)
     const target = git(f.repo, 'branch', '--show-current')
 
-    const result = await new PublishService(f.thread).publish(workspace, f.repo, target, undefined, { expectedSourceSha: reviewed, expectedTargetSha: f.baseSha })
-    expect(result.state).toBe('completed')
-    expect(f.read(f.repo)).toBe('reviewed\n')
+    await expect(new PublishService(f.thread).publish(workspace, f.repo, target)).rejects.toMatchObject({ code: 'workspace_not_clean' })
     expect(pending(f.repo)).toEqual(before)
-    expect(git(workspace, 'status', '--porcelain', '--untracked-files=all')).toBe('?? thread-notes.md')
-    expect(() => git(f.repo, 'cat-file', '-e', `${result.publishSha}:thread-notes.md`)).toThrow()
+    expect(git(f.repo, 'rev-parse', 'HEAD')).toBe(f.baseSha)
     expect(keptRefs(f.repo)).toEqual([])
+    expect(git(workspace, 'status', '--porcelain', '--untracked-files=all')).toBe('?? thread-notes.md')
   })
-})
-
-it('the thread shows the line as Mousse’s own notice, apart from the agent’s answer', () => {
-  const text = keptPendingChangesNotice({ path: '/w', ref: 'refs/mousse/pending-changes/x', files: ['a.ts'], operation: 'Undo' })
-  const [notice] = mousseToUIMessages([{ id: 'pending-changes:x', role: 'system', kind: 'warning', content: text, timestamp: new Date(0).toISOString() }])
-  expect(notice).toMatchObject({ role: 'assistant', metadata: expect.objectContaining({ notice: true }), parts: [{ type: 'text', text }] })
 })
