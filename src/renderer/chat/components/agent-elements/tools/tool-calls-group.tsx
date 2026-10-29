@@ -7,8 +7,9 @@ export type ToolCallsGroupProps = {
   /** Thinking icon when the title is a thought; a tool icon otherwise. */
   icon?: ReactNode;
   /**
-   * Latest thought in the run. When absent, the header falls back to
-   * "Tool calls" plus the count. Other tool calls do not change this title.
+   * One line from the latest thought in the run. When absent (the run has no
+   * thought text), the header falls back to "Tool calls" plus the count.
+   * Other tool calls do not change this title.
    */
   label?: string;
   /**
@@ -48,7 +49,7 @@ export const ToolCallsGroup = memo(function ToolCallsGroup({
         setExpanded((prev) => !prev);
       }}
     >
-      <div className="flex flex-col gap-0.5 ml-1.5 border-l border-an-border-color pl-3">
+      <div className="an-tool-group-rows flex flex-col gap-1.5 ml-1.5 border-l border-an-border-color pl-3">
         {children}
       </div>
     </ToolRowBase>

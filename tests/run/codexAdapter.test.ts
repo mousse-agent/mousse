@@ -71,7 +71,7 @@ function threadStart(id: number, params = threadParams(), thread = T): Transcrip
 
 function turnStart(id: number, prompt: string, turn = 'turn-1', extra: Record<string, unknown> = {}): TranscriptFrame[] {
   return [
-    out({ id, method: 'turn/start', params: { threadId: T, input: text(prompt), approvalPolicy: 'untrusted', sandboxPolicy: SUPERVISED, model: 'gpt-x', ...extra } }),
+    out({ id, method: 'turn/start', params: { summary: 'auto', threadId: T, input: text(prompt), approvalPolicy: 'untrusted', sandboxPolicy: SUPERVISED, model: 'gpt-x', ...extra } }),
     inn({ id, result: { turn: { id: turn, status: 'inProgress', error: null, items: [] } } }),
     note('turn/started', { threadId: T, turn: { id: turn, status: 'inProgress', error: null } })
   ]
@@ -385,7 +385,7 @@ describe('CodexAdapter', () => {
       inn({ id: 4, error: { code: -32600, message: `no rollout found for thread id ${T}` } }),
       out({ id: 5, method: 'thread/start', params: threadParams() }),
       inn({ id: 5, result: threadResult('thr-2') }),
-      out({ id: 6, method: 'turn/start', params: { threadId: 'thr-2', input: text('Previous conversation (context only; do not repeat earlier actions):\nhistory+three\n\nCurrent request:\nfourth'), approvalPolicy: 'untrusted', sandboxPolicy: SUPERVISED, model: 'gpt-x' } }),
+      out({ id: 6, method: 'turn/start', params: { summary: 'auto', threadId: 'thr-2', input: text('Previous conversation (context only; do not repeat earlier actions):\nhistory+three\n\nCurrent request:\nfourth'), approvalPolicy: 'untrusted', sandboxPolicy: SUPERVISED, model: 'gpt-x' } }),
       inn({ id: 6, result: { turn: { id: 'turn-4', status: 'inProgress', error: null } } }),
       note('item/completed', { threadId: 'thr-2', turnId: 'turn-4', item: { type: 'agentMessage', id: 'msg-4', text: 'four' } }),
       note('turn/completed', { threadId: 'thr-2', turn: { id: 'turn-4', status: 'completed', error: null } })
@@ -466,12 +466,12 @@ describe('CodexAdapter', () => {
       inn({ id: 6, result: threadResult('thr-2') }),
       out({ id: 7, method: 'thread/unsubscribe', params: { threadId: T } }),
       inn({ id: 7, result: { status: 'unsubscribed' } }),
-      out({ id: 8, method: 'turn/start', params: { threadId: 'thr-2', input: text('again'), approvalPolicy: 'untrusted', sandboxPolicy: SUPERVISED, model: 'gpt-x' } }),
+      out({ id: 8, method: 'turn/start', params: { summary: 'auto', threadId: 'thr-2', input: text('again'), approvalPolicy: 'untrusted', sandboxPolicy: SUPERVISED, model: 'gpt-x' } }),
       inn({ id: 8, result: { turn: { id: 'turn-2', status: 'inProgress', error: null } } }),
       note('item/completed', { threadId: 'thr-2', turnId: 'turn-2', item: { type: 'agentMessage', id: 'msg-2', text: 'two' } }),
       note('turn/completed', { threadId: 'thr-2', turn: { id: 'turn-2', status: 'completed', error: null } }),
       // Same token again: the forked thread is reused as loaded.
-      out({ id: 9, method: 'turn/start', params: { threadId: 'thr-2', input: text('third'), approvalPolicy: 'untrusted', sandboxPolicy: SUPERVISED, model: 'gpt-x' } }),
+      out({ id: 9, method: 'turn/start', params: { summary: 'auto', threadId: 'thr-2', input: text('third'), approvalPolicy: 'untrusted', sandboxPolicy: SUPERVISED, model: 'gpt-x' } }),
       inn({ id: 9, result: { turn: { id: 'turn-3', status: 'inProgress', error: null } } }),
       note('item/completed', { threadId: 'thr-2', turnId: 'turn-3', item: { type: 'agentMessage', id: 'msg-3', text: 'three' } }),
       note('turn/completed', { threadId: 'thr-2', turn: { id: 'turn-3', status: 'completed', error: null } })
@@ -579,7 +579,7 @@ describe('CodexAdapter', () => {
       inn({ id: 6, result: threadResult('thr-2') }),
       out({ id: 7, method: 'thread/unsubscribe', params: { threadId: T } }),
       inn({ id: 7, result: { status: 'unsubscribed' } }),
-      out({ id: 8, method: 'turn/start', params: { threadId: 'thr-2', input: text('two'), approvalPolicy: 'never', sandboxPolicy: FULL, model: 'gpt-x' } }),
+      out({ id: 8, method: 'turn/start', params: { summary: 'auto', threadId: 'thr-2', input: text('two'), approvalPolicy: 'never', sandboxPolicy: FULL, model: 'gpt-x' } }),
       inn({ id: 8, result: { turn: { id: 'turn-2', status: 'inProgress', error: null, items: [] } } }),
       note('item/completed', { threadId: 'thr-2', turnId: 'turn-2', item: { type: 'agentMessage', id: 'msg-2', text: 'two' } }),
       note('turn/completed', { threadId: 'thr-2', turn: { id: 'turn-2', status: 'completed', error: null } })
@@ -907,7 +907,7 @@ describe('CodexAdapter', () => {
         inn({ id: 4, result: threadResult() }),
         // The next turn starts a new thread with the history as a preamble.
         ...threadStart(5),
-        out({ id: 6, method: 'turn/start', params: { threadId: T, input: text(`Previous conversation (context only; do not repeat earlier actions):\n${STOPPED}\n\nCurrent request:\nagain`), approvalPolicy: 'untrusted', sandboxPolicy: SUPERVISED, model: 'gpt-x' } }),
+        out({ id: 6, method: 'turn/start', params: { summary: 'auto', threadId: T, input: text(`Previous conversation (context only; do not repeat earlier actions):\n${STOPPED}\n\nCurrent request:\nagain`), approvalPolicy: 'untrusted', sandboxPolicy: SUPERVISED, model: 'gpt-x' } }),
         inn({ id: 6, result: { turn: { id: 'turn-2', status: 'inProgress', error: null, items: [] } } }),
         ...message('msg-2', ['two'], 'turn-2'),
         completed('completed', 'turn-2')
@@ -1187,7 +1187,7 @@ describe('CodexAdapter', () => {
       [
         ...handshake(),
         ...threadStart(4),
-        out({ id: 5, method: 'turn/start', params: { threadId: T, input: text('hello'), approvalPolicy: 'untrusted', sandboxPolicy: SUPERVISED, model: 'gpt-x' } }),
+        out({ id: 5, method: 'turn/start', params: { summary: 'auto', threadId: T, input: text('hello'), approvalPolicy: 'untrusted', sandboxPolicy: SUPERVISED, model: 'gpt-x' } }),
         cue({ action: 'stop' }),
         inn({ id: 5, result: { turn: { id: 'turn-1', status: 'inProgress', error: null } } }),
         out({ id: 6, method: 'turn/interrupt', params: { threadId: T, turnId: 'turn-1' } }),

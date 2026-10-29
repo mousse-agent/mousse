@@ -134,7 +134,7 @@ describe('locked Claude Code: launch options (item 1, 4, 7)', () => {
       settingSources: [],
       strictMcpConfig: true,
       plugins: [],
-      extraArgs: {},
+      extraArgs: { 'thinking-display': 'summarized' },
       permissionMode: 'default',
       systemPrompt: 'You are a bot.',
       maxTurns: 100,

@@ -165,6 +165,8 @@ describe('ClaudeSubscriptionAdapter', () => {
       expect(chat.drainSteer?.()).toBe('steer text')
       chat.onSteer?.('steer text')
       chat.onTool?.({ phase: 'start', callId: 'tool-1', title: 'Read', toolName: 'Read' })
+      // The runtime's thinking is cumulative; what follows the call is a thought of its own.
+      chat.onThinking?.('Considering\n\nRead the file next')
       chat.onText('Hello')
       chat.onLineEdits?.(3)
       chat.onMetrics?.({
@@ -207,13 +209,25 @@ describe('ClaudeSubscriptionAdapter', () => {
       'text',
       'text',
       'steerAccepted',
+      'thinking',
       'tool',
+      'thinking',
+      'thinking',
       'text',
       'lineEdits',
       'providerMetrics',
       'usage',
       'thinking',
       'text'
+    ])
+    // The thought before the call closes when the call starts; the next one opens a row below it.
+    expect(sink.calls.filter(([name]) => name === 'thinking').map(([, event]) => event)).toEqual([
+      { phase: 'start', content: '' },
+      { phase: 'delta', content: 'Considering' },
+      { phase: 'complete', content: 'Considering' },
+      { phase: 'start', content: '' },
+      { phase: 'delta', content: 'Read the file next' },
+      { phase: 'complete', content: 'Read the file next' }
     ])
     expect(sink.calls.filter(([name]) => name === 'text').map(([, event]) => event)).toEqual([
       { phase: 'start', content: '', contentIndex: 0 },

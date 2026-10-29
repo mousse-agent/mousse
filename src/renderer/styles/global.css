@@ -135,6 +135,16 @@ html[data-theme='light'] {
   opacity: inherit;
   margin-block: 0;
 }
+/* A command inside a tool call group is one row like its neighbours: the
+   card keeps its outline but takes the row height (22px) and type size. */
+.an-message-list .an-tool-group-rows .an-bash-card > button {
+  height: 22px;
+  padding-inline: 6px 4px;
+}
+.an-message-list .an-tool-group-rows .an-bash-card > button svg {
+  width: 14px;
+  height: 14px;
+}
 /* Chat convention: a single newline is an intended line break (verses,
    addresses, signatures). Spec markdown would join them into prose.
    pre-line keeps structure (blank lines, lists, fences) intact while

@@ -196,6 +196,8 @@ export class ClaudeSubscriptionAdapter implements ProviderAdapter {
       },
       onTool: (event) => {
         progress()
+        // A thought that came before this call keeps its own row, above it; the next one starts below.
+        if (event.phase === 'start' && !event.parentCallId) streams.thinking.break()
         toolStarted = true
         sink.tool(runtimeToolEvent(event))
       },
