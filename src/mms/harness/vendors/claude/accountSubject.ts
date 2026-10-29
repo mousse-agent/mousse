@@ -97,6 +97,26 @@ export function claudeAccountSubject(env: NodeJS.ProcessEnv, options: AccountSub
  * `--settings` file) are not read.
  */
 export function claudeBypassDisabled(env: NodeJS.ProcessEnv, options: AccountSubjectOptions & { cwd?: string } = {}): boolean {
+  return anyClaudeSettings(env, options, (settings) => {
+    const permissions = settings.permissions
+    return isRecord(permissions) && permissions.disableBypassPermissionsMode === 'disable'
+  })
+}
+
+/**
+ * Whether Claude Code's settings turn its auto mode off (`disableAutoMode: "disable"`; the
+ * `permissions` block is read too), from the same files as `claudeBypassDisabled`. Any one of them is
+ * enough: a thread set to Auto then runs as Auto-accept edits rather than in a mode Claude Code refuses.
+ */
+export function claudeAutoModeDisabled(env: NodeJS.ProcessEnv, options: AccountSubjectOptions & { cwd?: string } = {}): boolean {
+  return anyClaudeSettings(env, options, (settings) => {
+    const permissions = settings.permissions
+    return settings.disableAutoMode === 'disable' || (isRecord(permissions) && permissions.disableAutoMode === 'disable')
+  })
+}
+
+/** Whether `test` holds for any settings file Claude Code reads for a turn in `options.cwd`; an unreadable file holds nothing. */
+function anyClaudeSettings(env: NodeJS.ProcessEnv, options: AccountSubjectOptions & { cwd?: string }, test: (settings: Record<string, unknown>) => boolean): boolean {
   const readText = options.readText ?? ((path: string) => readFileSync(path, 'utf8'))
   const home = options.home ?? homedir()
   const configDir = env.CLAUDE_CONFIG_DIR?.trim()
@@ -108,8 +128,7 @@ export function claudeBypassDisabled(env: NodeJS.ProcessEnv, options: AccountSub
   return paths.some((path) => {
     try {
       const value: unknown = JSON.parse(readText(path))
-      const permissions = isRecord(value) ? value.permissions : undefined
-      return isRecord(permissions) && permissions.disableBypassPermissionsMode === 'disable'
+      return isRecord(value) && test(value)
     } catch {
       return false
     }

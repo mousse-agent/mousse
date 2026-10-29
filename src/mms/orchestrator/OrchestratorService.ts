@@ -161,6 +161,7 @@ import { isDefaultThreadName } from '../../shared/threadTitle'
 import {
   buildPermissionModeChangeNotice,
   getLastUserPermissionMode,
+  describePermissionMode,
   isPermissionMode,
   isStricter,
   narrowPermissionMode,
@@ -4440,10 +4441,10 @@ export class OrchestratorService extends EventEmitter {
     if (!thread) throw new DomainRpcError('thread_not_found', 'Thread not found', { threadId })
     const ceiling = this.permissionCeilingFor(threadId)
     if (isStricter(ceiling, mode))
-      throw new DomainRpcError('permission_mode_above_ceiling', `This subagent cannot run above ${ceiling === 'ask' ? 'Ask before acting' : 'Auto-accept edits'}: a thread it belongs to is set to it.`, { threadId, ceiling })
+      throw new DomainRpcError('permission_mode_above_ceiling', `This subagent cannot run above ${describePermissionMode(ceiling)}: a thread it belongs to is set to it.`, { threadId, ceiling })
     // A person on another of the user's computers sets modes up to the limit this computer gave that device.
     if (by && isStricter(by.maxPermissionMode, mode))
-      throw new DomainRpcError('permission_mode_above_ceiling', `The computer that runs this thread lets this device set ${by.maxPermissionMode === 'ask' ? 'Ask before acting' : 'Auto-accept edits'} at most. To allow more, raise the limit for this device on that computer, in Settings, Devices.`, { threadId, limit: by.maxPermissionMode, reason: 'device_limit' })
+      throw new DomainRpcError('permission_mode_above_ceiling', `The computer that runs this thread lets this device set ${describePermissionMode(by.maxPermissionMode)} at most. To allow more, raise the limit for this device on that computer, in Settings, Devices.`, { threadId, limit: by.maxPermissionMode, reason: 'device_limit' })
     const previous = thread.permissionMode
     const updated = store.updateThreadMeta(threadId, { permissionMode: mode }, { touch: false })
     try {

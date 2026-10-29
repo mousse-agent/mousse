@@ -6,6 +6,7 @@ import { InstallConfirm } from '../updates/InstallConfirm'
 import { UpdateErrorNotice } from '../updates/UpdateErrorNotice'
 import { Bell, Download, Info, Loader2, Palette, RefreshCw, RotateCcw, ShieldCheck } from '../../lib/icons'
 import { describePermissionMode, PERMISSION_MODES } from '../../../shared/permissionMode'
+import { PermissionModeLabel } from '../../lib/permissionModeIcon'
 import { Select } from '../ui/Select'
 import { SettingsGroup, SettingsRow, Switch } from './SettingsRow'
 import { RunSettingsGroup } from './RunSettingsGroup'
@@ -196,7 +197,7 @@ export function GeneralSettings({
               ariaLabel="Default permission mode"
               value={settings.permissions.defaultMode}
               onChange={(defaultMode) => void onUpdate({ permissions: { defaultMode } })}
-              options={PERMISSION_MODES.map((mode) => ({ value: mode, label: describePermissionMode(mode) }))}
+              options={PERMISSION_MODES.map((mode) => ({ value: mode, label: <PermissionModeLabel mode={mode}>{describePermissionMode(mode)}</PermissionModeLabel>, textValue: describePermissionMode(mode) }))}
             />
           }
         />

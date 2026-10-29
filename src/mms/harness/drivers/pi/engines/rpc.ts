@@ -44,6 +44,7 @@ export const PI_RPC_CAPS: HarnessCaps = Object.freeze({
   planMode: true,
   contextUsage: 'reported',
   toolControl: 'approval_only',
+  autoPermissionMode: false,
   budgets: 'hard',
   spendLimits: 'reserved'
 })

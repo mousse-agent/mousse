@@ -96,7 +96,7 @@ export const BRIDGE_HELP = `Usage:
   mousse-cli bridge rename <node-id> <name>
   mousse-cli bridge block <node-id>
   mousse-cli bridge unblock <node-id>
-  mousse-cli bridge limits <node-id> [--max-mode ask|accept_edits|full] [--terminal on|off]
+  mousse-cli bridge limits <node-id> [--max-mode ask|accept_edits|auto|full] [--terminal on|off]
     [--editor on|off]
   mousse-cli bridge caps <node-id> --caps read,chat,write,settings
   mousse-cli bridge kind <node-id> computer|phone
@@ -612,10 +612,10 @@ export function prepareNetCommand(args: ParsedArgs): NetCliRequest {
         editor = stringFlag(args, 'editor')
       if (mode === undefined && terminal === undefined && editor === undefined)
         invalid(
-          'bridge limits requires --max-mode ask|accept_edits|full, --terminal on|off and/or --editor on|off.'
+          'bridge limits requires --max-mode ask|accept_edits|auto|full, --terminal on|off and/or --editor on|off.'
         )
       if (mode !== undefined) {
-        if (!isPermissionMode(mode)) invalid('--max-mode requires ask, accept_edits or full.')
+        if (!isPermissionMode(mode)) invalid('--max-mode requires ask, accept_edits, auto or full.')
         params.maxPermissionMode = mode
       }
       if (terminal !== undefined) {

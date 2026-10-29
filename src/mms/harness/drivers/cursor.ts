@@ -32,6 +32,7 @@ export const CURSOR_CAPS: HarnessCaps = Object.freeze({
   // Usage per turn, but no context window.
   contextUsage: 'none',
   toolControl: 'uncontrolled',
+  autoPermissionMode: false,
   budgets: 'unsupported',
   spendLimits: 'unsupported'
 })
