@@ -556,6 +556,58 @@ describe('harness gateway: update available', () => {
     harness.stop()
   })
 
+  it('an install its owner made updates with the owner command, reports a failure, and is checked again', async () => {
+    const fetchImpl = vi.fn(async () => response('2.2.0')) as unknown as typeof fetch
+    const dir = home()
+    const latest = new LatestVersionCache(dir, { fetchImpl })
+    await latest.refresh({ kind: 'npm', package: '@anthropic-ai/claude-code' })
+    // The owner's "CLI" is Node running a script: it records its arguments, or fails like a real updater.
+    const marker = join(dir, 'updated.txt')
+    const script = join(dir, 'update.js')
+    writeFileSync(script, `if (process.argv[2] === '--fail') { console.error('EACCES: permission denied'); process.exit(3) } require('node:fs').writeFileSync(${JSON.stringify(marker)}, process.argv.slice(2).join(' '))`)
+    let command = `node ${script} --latest`
+    let checks = 0
+    const base = adapterDriver(fake('claude'), {
+      runtime: {
+        managed: () => ({ path: process.execPath, version: '2.1.0' }),
+        auth: async () => {
+          checks += 1
+          return { state: 'signed_in' }
+        }
+      }
+    })
+    const driver: HarnessDriver = { ...base, latestVersion: { kind: 'npm', package: '@anthropic-ai/claude-code' }, updateCommand: () => command }
+    const harness = testHarness({ drivers: [adapterDriver(pi()), driver, adapterDriver(fake('codex')), adapterDriver(fake('antigravity'))], instances: instances(), profileHome: dir, latest })
+    const events: HarnessGatewayEvent[] = []
+    harness.instances.subscribe((event) => events.push(event))
+    const spawned: string[][] = []
+    const stops = observeHarnessSpawns((entry) => {
+      if (entry.purpose === 'update') spawned.push([entry.command, ...entry.args])
+    })
+    const phase = (operationId: string, wanted: string) =>
+      events.some((event) => event.type === 'operation' && event.data.operationId === operationId && event.data.phase === wanted)
+
+    const snapshot = (await harness.instances.snapshots(device)).find((entry) => entry.instanceId === 'claude')
+    expect(snapshot?.update).toEqual({ kind: 'advisory', command, latestVersion: '2.2.0' })
+    const checked = checks
+    const started = await harness.instances.update('claude')
+    expect(started).toMatchObject({ instanceId: 'claude', kind: 'update' })
+    await waitFor(() => phase(started.operationId, 'completed'), 10_000)
+    // The very executable the instance runs, with the command's arguments.
+    expect(spawned).toEqual([[process.execPath, script, '--latest']])
+    expect(readFileSync(marker, 'utf8')).toBe('--latest')
+    // Checked again afterwards, so a new version shows without a click on Check again.
+    await waitFor(() => checks > checked)
+
+    command = `node ${script} --fail`
+    const failing = await harness.instances.update('claude')
+    await waitFor(() => phase(failing.operationId, 'failed'), 10_000)
+    const failed = events.find((event) => event.type === 'operation' && event.data.operationId === failing.operationId && event.data.phase === 'failed')
+    expect(failed?.type === 'operation' && failed.data.phase === 'failed' && failed.data.error.message).toContain('EACCES: permission denied')
+    stops()
+    harness.stop()
+  })
+
   it('a current install and a driver without a source show no update, and nothing is fetched for them', async () => {
     const fetchImpl = vi.fn(async () => response('9.9.9')) as unknown as typeof fetch
     const dir = home()

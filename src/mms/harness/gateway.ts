@@ -74,6 +74,7 @@ import {
 import type { BotAuthority } from '../../shared/bots/personal/authority'
 import { HarnessScopeStore } from './scope'
 import { sharedShellPath, type ShellPathResult } from './shellPath'
+import { runOwnerUpdate } from './ownerUpdate'
 import { compatibilityOf, fingerprintOf, knownProblemMessage, PROBE_TIMEOUTS, probeInstance, sameBinary, updateAffordance, type ProbeResult } from './status'
 import { interruptWithDeadline } from './supervise'
 import { telemetryEnforced, telemetrySwitch, telemetryView } from './telemetry'
@@ -3418,17 +3419,38 @@ export class Harness implements HarnessGateway {
 
   // -- Operations -------------------------------------------------------------------------------
 
-  private async install(instanceId: string, kind: 'install' | 'update'): Promise<ProviderOperationStarted> {
+  /**
+   * Installs or updates through the runtime's own install, or, given `ownerCommand`, updates a CLI
+   * Mousse did not install by running its owner's update command (`claude update`, npm, brew).
+   */
+  private async install(instanceId: string, kind: 'install' | 'update', ownerCommand?: string): Promise<ProviderOperationStarted> {
     const record = this.record(instanceId, { allowDisabled: true })
     const runtime = record.runtime
-    if (!runtime.install) return harnessFail('unsupported', `Mousse cannot install ${record.driver.label}. Install it yourself, then check again.`, instanceId)
+    const abort = new AbortController()
+    const work: DriverRuntime['install'] = ownerCommand
+      ? (onProgress) =>
+          runOwnerUpdate({
+            command: ownerCommand,
+            binary: this.probes.get(instanceId)?.lastGood?.binary,
+            env: record.env,
+            signal: abort.signal,
+            onProgress: (message) => onProgress({ message })
+          })
+      : runtime.install?.bind(runtime)
+    if (!work) return harnessFail('unsupported', `Mousse cannot install ${record.driver.label}. Install it yourself, then check again.`, instanceId)
     if ([...this.operations.values()].some((entry) => entry.started.instanceId === instanceId && entry.started.kind !== 'sign_in'))
       return harnessFail('operation_busy', `${record.driver.label} is already being installed.`, instanceId)
     const started: ProviderOperationStarted = { operationId: randomUUID(), instanceId, kind }
-    const operation: Operation = { started, prompts: 0, urlPrompts: [], cancel: () => runtime.cancelInstall?.() ?? false }
+    const cancel = ownerCommand
+      ? () => {
+          abort.abort()
+          return true
+        }
+      : () => runtime.cancelInstall?.() ?? false
+    const operation: Operation = { started, prompts: 0, urlPrompts: [], cancel }
     this.operations.set(started.operationId, operation)
     queueMicrotask(() => {
-      void runtime.install!((progress) => {
+      void work((progress) => {
         const fraction = progress.fraction ?? (progress.receivedBytes !== undefined && progress.totalBytes ? Math.min(1, progress.receivedBytes / progress.totalBytes) : undefined)
         operation.progress = { ...progress, ...(fraction !== undefined ? { fraction } : {}) }
         this.emit({ type: 'operation', data: { ...started, phase: 'progress', ...operation.progress } })
@@ -3479,8 +3501,8 @@ export class Harness implements HarnessGateway {
     if (update?.kind === 'one_click') return this.install(instanceId, 'update')
     if (update?.kind === 'notice')
       return harnessFail('unsupported', `Mousse cannot tell how this CLI was installed, so it cannot update it. Version ${update.latestVersion} is available.`, instanceId)
-    if (update?.kind === 'advisory')
-      return harnessFail('unsupported', `Mousse cannot prove who installed this CLI. Update it with: ${update.command}`, instanceId)
+    // Not Mousse's install: its owner's own update command, the one the editor shows to copy.
+    if (update?.kind === 'advisory') return this.install(instanceId, 'update', update.command)
     return harnessFail('unsupported', 'No update is available.', instanceId)
   }
 

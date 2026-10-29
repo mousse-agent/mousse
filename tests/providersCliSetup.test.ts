@@ -54,6 +54,14 @@ describe('Setup row: the status and its one next step', () => {
     expect(buttons(html)).toEqual(['Cancel'])
   })
 
+  it('offers Update for an install its owner made, with the owner command beside it', () => {
+    const html = setupRow({ update: { kind: 'advisory', command: 'claude update', latestVersion: '2.2.0' } })
+    expect(html).toContain('Update available: 2.2.0.')
+    expect(buttons(html)).toContain('Update')
+    expect(html).toContain('claude update')
+    expect(labels(html)).toContain('Copy update command')
+  })
+
   it('signs in with a button when Mousse runs the sign-in', () => {
     const html = setupRow({ driver: 'antigravity', auth: { state: 'signed_out', account: undefined } })
     expect(html).toContain('Not signed in')
@@ -137,13 +145,14 @@ describe('Runtime rows', () => {
     expect(buttons(html)).toEqual(['Update now'])
   })
 
-  it('shows an advisory update as a command to copy, with no update button', () => {
+  it('updates an install its owner made with one click, and keeps the owner command to copy', () => {
     const html = renderToStaticMarkup(createElement(UpdateRow, {
       snapshot: snapshot({ update: { kind: 'advisory', command: 'npm i -g @anthropic-ai/claude-code', latestVersion: '2.2.0' } }), actions
     }))
     expect(html).toContain('is-advisory')
+    expect(html).toContain('Update to v2.2.0')
     expect(html).toContain('npm i -g @anthropic-ai/claude-code')
-    expect(buttons(html)).not.toContain('Update now')
+    expect(buttons(html)).toContain('Update now')
     expect(labels(html)).toContain('Copy update command')
   })
 

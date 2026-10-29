@@ -92,9 +92,9 @@ describe('describeStatus', () => {
     expect(status.detail).toContain('/opt/claude')
   })
 
-  it('gives an advisory update as a command to copy', () => {
+  it('gives an advisory update as Update, with the owner command to copy', () => {
     const status = describeStatus(snapshot({ compatibility: { state: 'too_old' }, update: { kind: 'advisory', command: 'brew upgrade codex' } }))
-    expect(status.nextStep).toEqual({ action: 'update', label: 'Copy update command', command: 'brew upgrade codex' })
+    expect(status.nextStep).toEqual({ action: 'update', label: 'Update', command: 'brew upgrade codex' })
   })
 
   it('says an update is available for an unproven owner, with no step to take', () => {
