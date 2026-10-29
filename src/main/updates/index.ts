@@ -1,8 +1,12 @@
 import { app, BrowserWindow, ipcMain } from 'electron'
 import { writeFileSync } from 'node:fs'
+import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { UPDATE_IPC, type UpdateChannel, type UpdateState } from '../../shared/updates'
+import { getAppIconPath } from '../appIcon'
+import { installAppImage, startAfterExit } from './appImageInstall'
 import { DesktopUpdater, type UpdaterBackend } from './DesktopUpdater'
+import { syncLinuxLauncher } from './linuxLauncher'
 import { updaterRecordFile } from './updaterRecord'
 
 const REPOSITORY_URL = 'https://github.com/mousse-agent/mousse'
@@ -35,7 +39,50 @@ async function loadElectronUpdater(): Promise<UpdaterBackend> {
       autoUpdater.forceDevUpdateConfig = true
     }
   }
+  if (process.platform === 'linux' && process.env.APPIMAGE) replaceAppImageInstall(autoUpdater)
   return autoUpdater as unknown as UpdaterBackend
+}
+
+/**
+ * electron-updater's AppImage install removes the running file before the new one is in place,
+ * leaves launchers naming the old file, and starts the new copy while this one still holds the
+ * single-instance lock, so it quits at once. This install avoids all three.
+ */
+function replaceAppImageInstall(autoUpdater: import('electron-updater').AppUpdater): void {
+  const updater = autoUpdater as unknown as { installerPath: string | null; quitAndInstall: UpdaterBackend['quitAndInstall'] }
+  updater.quitAndInstall = (_isSilent, isForceRunAfter) => {
+    try {
+      const current = process.env.APPIMAGE!
+      const downloaded = updater.installerPath
+      if (!downloaded) throw new Error('The downloaded update file is missing; download it again.')
+      const destination = installAppImage({
+        current,
+        downloaded,
+        onReplaced: (next, previous) => syncLauncher(next, previous)
+      })
+      if (isForceRunAfter) startAfterExit(process.pid, destination, process.argv.slice(1), process.env)
+    } catch (error) {
+      autoUpdater.emit('error', error instanceof Error ? error : new Error(String(error)))
+      return
+    }
+    setImmediate(() => app.quit())
+  }
+}
+
+/** Points the user's Mousse launchers at `appImage` and installs this build's icon. */
+function syncLauncher(appImage: string, previousAppImage?: string): void {
+  try {
+    const iconSource = previousAppImage ? undefined : getAppIconPath()
+    syncLinuxLauncher({
+      appImage,
+      ...(previousAppImage ? { previousAppImage } : {}),
+      ...(iconSource ? { iconSource } : {}),
+      env: process.env,
+      home: homedir()
+    })
+  } catch (error) {
+    console.warn('The Mousse launcher could not be updated:', error instanceof Error ? error.message : String(error))
+  }
 }
 
 function broadcast(state: UpdateState): void {
@@ -53,6 +100,8 @@ export function startDesktopUpdates(hooks: {
   prepareInstall: () => Promise<void>
   recoverInstall: () => Promise<void>
 }): DesktopUpdater {
+  // Every start of an installed AppImage keeps its launcher and icon current, updates or not.
+  if (process.platform === 'linux' && app.isPackaged && process.env.APPIMAGE) syncLauncher(process.env.APPIMAGE)
   const disabledReason = updatesDisabledReason()
   const updater = new DesktopUpdater({
     currentVersion: app.getVersion(),
