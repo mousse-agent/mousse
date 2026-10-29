@@ -78,7 +78,7 @@ async function main() {
     const cachedClick = await execute("({count:qa.navigateCount(),scrollTop:document.getElementById('viewport').scrollTop})")
     await execute("qa.update(Array.from({length:60},(_,i)=>'long-'+i))")
     await until('qa.sample().length===60')
-    const bounded = await execute("({rail:document.querySelector('.chat-prompt-ticks').clientHeight,viewport:document.querySelector('.an-message-list-wrap').clientHeight,scrollHeight:document.querySelector('.chat-prompt-ticks').scrollHeight})")
+    const bounded = await execute("({rail:document.querySelector('.chat-prompt-ticks').clientHeight,viewport:document.querySelector('.an-message-list-wrap').clientHeight,scrollHeight:document.querySelector('.chat-prompt-ticks').scrollHeight,textLeft:document.querySelector('[data-prompt-id]').getBoundingClientRect().left,railRight:document.querySelector('.chat-prompt-ticks').getBoundingClientRect().right})")
     await execute('qa.unmount()')
     await delay(50)
     writeFileSync(join(directory, 'evidence.json'), JSON.stringify({ initial, hovered, settled, scrolled, virtualized, recycled, focused, focusedAfterLeave, click, cachedClick, bounded, rendererErrors }))

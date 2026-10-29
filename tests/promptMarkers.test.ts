@@ -27,7 +27,7 @@ it('tracks every visible mounted prompt, recycles safely, and expands only aroun
       initial: Tick[]; hovered: Tick[]; settled: Tick[]; scrolled: Tick[]; virtualized: Tick[]; recycled: Tick[]; focused: Tick[];
       focusedAfterLeave: boolean; click: { count: number; scrollTop: number; transition: string };
       cachedClick: { count: number; scrollTop: number };
-      bounded: { rail: number; viewport: number; scrollHeight: number }; rendererErrors: string[];
+      bounded: { rail: number; viewport: number; scrollHeight: number; textLeft: number; railRight: number }; rendererErrors: string[];
     }
     expect(result.rendererErrors).toEqual([])
     expect(result.initial.filter(tick => tick.visible).map(tick => tick.id)).toEqual(['one', 'two'])
@@ -46,6 +46,8 @@ it('tracks every visible mounted prompt, recycles safely, and expands only aroun
     expect(result.cachedClick).toEqual({ count: 2, scrollTop: 224 })
     expect(result.bounded.rail).toBeLessThan(result.bounded.viewport)
     expect(result.bounded.scrollHeight).toBeGreaterThan(result.bounded.rail)
+    // In a narrow pane the transcript's text starts right of the rail instead of under it.
+    expect(result.bounded.textLeft).toBeGreaterThanOrEqual(result.bounded.railRight)
   } finally {
     if (child?.pid && child.exitCode === null && child.signalCode === null) {
       child.kill('SIGTERM')
