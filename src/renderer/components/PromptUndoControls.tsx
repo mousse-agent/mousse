@@ -1,17 +1,22 @@
 import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from 'react'
 import { IconArrowBackUp } from '../lib/icons'
 import { useAppStore } from '../stores/appStore'
-import { errorText, ipcErrorLine, isComputerOffline } from '../lib/errorText'
+import { isSessionClosing, readableError } from '../lib/errorText'
 import { pendingChangesDetails, type PendingChangesDetails } from '../../shared/workspace'
 import { PendingChangesNotice } from './PendingChangesNotice'
 import { invalidateThreadActionHistory, readThreadActionHistory, type ThreadActionHistory } from '../utils/threadActionHistory'
 
 interface PromptUndoState {
+  threadId?: string | null
   history: ThreadActionHistory | null
   busy: boolean
   working: boolean
-  unavailableReason?: string
+  /** A failed Undo or Redo the person asked for. Background history reads never set it. */
+  error: string | null
+  changes: { details: PendingChangesDetails; retry: () => void } | null
   undo: (messageId: string) => Promise<void>
+  redo: () => Promise<void>
+  clearError: () => void
 }
 const PromptUndoContext = createContext<PromptUndoState | null>(null)
 
@@ -42,9 +47,10 @@ export function PromptUndoProvider({ threadId, busy, revision, children }: {
     let current = true
     const refresh = () => void readThreadActionHistory(threadId, true).then(value => {
       if (current && isCurrent()) setHistory(value)
-    }).catch(cause => {
-      // A computer that is away is said so once, by the bar above the thread, not by this poll every few seconds.
-      if (current && isCurrent()) { setHistory(null); setError(isComputerOffline(cause) ? null : ipcErrorLine(cause) || String(cause)) }
+    }).catch(() => {
+      // A background read says nothing: Undo hides until the next read, every few seconds, succeeds.
+      // An away computer is shown by the bar above the thread; a closing window needs nothing at all.
+      if (current && isCurrent()) setHistory(null)
     })
     refresh()
     const timer = window.setInterval(refresh, 3000)
@@ -69,8 +75,8 @@ export function PromptUndoProvider({ threadId, busy, revision, children }: {
       const next = await readThreadActionHistory(threadId, true)
       if (isCurrent()) setHistory(next)
     } catch (cause) {
-      if (isCurrent()) {
-        setError(errorText(cause))
+      if (isCurrent() && !isSessionClosing(cause)) {
+        setError(readableError(cause, 'Undo did not finish. Try again.'))
         const details = pendingChangesDetails(cause)
         if (details) setChanges({ details, retry: () => void undo(messageId) })
       }
@@ -97,8 +103,8 @@ export function PromptUndoProvider({ threadId, busy, revision, children }: {
       const next = await readThreadActionHistory(threadId, true)
       if (isCurrent()) setHistory(next)
     } catch (cause) {
-      if (isCurrent()) {
-        setError(errorText(cause))
+      if (isCurrent() && !isSessionClosing(cause)) {
+        setError(readableError(cause, 'Redo did not finish. Try again.'))
         const details = pendingChangesDetails(cause)
         if (details) setChanges({ details, retry: () => void redo() })
       }
@@ -108,14 +114,35 @@ export function PromptUndoProvider({ threadId, busy, revision, children }: {
     }
   }
 
-  return <PromptUndoContext.Provider value={{ history, busy, working, undo, unavailableReason: !history && error ? `Undo unavailable: ${error}` : undefined }}>
+  const clearError = () => { setError(null); setChanges(null) }
+  return <PromptUndoContext.Provider value={{ threadId, history, busy, working, error, changes, undo, redo, clearError }}>
     {children}
-    {history?.redoTarget && <button type="button" disabled={busy || working} onClick={() => void redo()}>Redo last undo</button>}
-    {working && <div role="status">Updating conversation…</div>}
-    {error && (changes && threadId
-      ? <PendingChangesNotice threadId={threadId} message={error} details={changes.details} onResolved={() => { setError(null); setChanges(null); changes.retry() }} />
-      : <div role="alert">{error}</div>)}
   </PromptUndoContext.Provider>
+}
+
+/**
+ * Redo, progress and a failed Undo or Redo, as one notice above the composer. It is rendered inside the
+ * composer block, so it sits with the composer's other notices instead of below the chat.
+ */
+export function PromptUndoNotice() {
+  const state = useContext(PromptUndoContext)
+  if (!state) return null
+  const { threadId, history, busy, working, error, changes } = state
+  if (error) {
+    return changes && threadId
+      ? <PendingChangesNotice className="connection-failed-pill" threadId={threadId} message={error} details={changes.details}
+          onResolved={() => { state.clearError(); changes.retry() }} />
+      : <div className="connection-failed-pill" role="alert">
+          <span>{error}</span>
+          <button type="button" onClick={state.clearError}>Dismiss</button>
+        </div>
+  }
+  if (working) return <div className="connection-failed-pill prompt-undo-notice" role="status"><span>Updating conversation…</span></div>
+  if (!history?.redoTarget) return null
+  return <div className="connection-failed-pill prompt-undo-notice" role="status">
+    <span>Turn undone</span>
+    <button type="button" disabled={busy} onClick={() => void state.redo()}>Redo last undo</button>
+  </div>
 }
 
 /** This is the actual control in each prompt toolbar, not a parallel history action. */

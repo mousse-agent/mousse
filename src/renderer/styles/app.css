@@ -6021,3 +6021,17 @@ html[data-theme='high-contrast'] .composer-question-option.selected {
 .scheduled-page[hidden], .channels-page[hidden] { display: none; }
 .rail-page-header { flex: none; padding: 16px 24px; }
 .rail-page-header h1 { margin: 0; font-size: 16px; font-weight: 600; }
+
+/* Redo and progress after an Undo: the same pill as other composer notices, without the failure tint. */
+.connection-failed-pill.prompt-undo-notice {
+  border-color: var(--border);
+}
+
+.connection-failed-pill.prompt-undo-notice button {
+  background: var(--ui-raised, rgba(255, 255, 255, 0.06));
+}
+
+.connection-failed-pill.prompt-undo-notice button:disabled {
+  cursor: default;
+  opacity: 0.5;
+}

@@ -19,7 +19,8 @@ vi.mock('../src/renderer/stores/appStore', () => {
   const state = { get profileId() { return hooks.profileId } }
   return { useAppStore: Object.assign((selector: (value: typeof state) => unknown) => selector(state), { getState: () => state, subscribe: () => () => undefined }) }
 })
-import { PromptUndoButton, PromptUndoProvider } from '../src/renderer/components/PromptUndoControls'
+import { PromptUndoButton, PromptUndoNotice, PromptUndoProvider } from '../src/renderer/components/PromptUndoControls'
+import { isSessionClosing } from '../src/renderer/lib/errorText'
 
 const target = { actionId: 'action-latest', turnId: 'turn-latest', messageId: 'prompt-latest', journalGeneration: 7 }
 const history = { actions: [], receipts: [], journalGeneration: 7, undoTarget: target }
@@ -80,8 +81,11 @@ it('shows backend failure and leaves the prompt available rather than deleting i
   const { undoLatest } = await mount(vi.fn().mockResolvedValue(history), vi.fn().mockRejectedValue(new Error('Checkpoint is unavailable')))
   PromptUndoButton({ messageId: target.messageId }).props.onClick()
   await vi.waitFor(() => expect(hooks.states[2]).toBe('Checkpoint is unavailable'))
-  const tree = render()
-  expect(tree.props.children.some((child: any) => child?.props?.role === 'alert')).toBe(true)
+  render()
+  const notice = PromptUndoNotice()!
+  expect(notice.props.role).toBe('alert')
+  expect(notice.props.className).toBe('connection-failed-pill')
+  expect(notice.props.children[0].props.children).toBe('Checkpoint is unavailable')
   expect(PromptUndoButton({ messageId: target.messageId }).props.disabled).toBe(false)
   expect(undoLatest).toHaveBeenCalledTimes(1)
 })
@@ -89,7 +93,10 @@ it('shows backend failure and leaves the prompt available rather than deleting i
 it('uses authoritative conversation redo after Undo hides the prompt', async () => {
   const redoTarget = { actionId: 'undone', turnId: target.turnId, journalGeneration: 8 }
   const { redo } = await mount(vi.fn().mockResolvedValue({ ...history, undoTarget: undefined, redoTarget }))
-  const button = render().props.children.find((child: any) => child?.type === 'button')
+  render()
+  const notice = PromptUndoNotice()!
+  expect(notice.props.className).toContain('connection-failed-pill')
+  const button = notice.props.children.find((child: any) => child?.type === 'button')
   expect(button.props.children).toBe('Redo last undo')
   button.props.onClick()
   await vi.waitFor(() => expect(redo).toHaveBeenCalledExactlyOnceWith(threadId, 8))
@@ -113,15 +120,39 @@ it('does not let a completion from an unmounted profile alter the new binding', 
   expect(PromptUndoButton({ messageId: target.messageId }).props.disabled).toBe(false)
 })
 
-it('hides Undo and explains unavailable history after a failed read', async () => {
-  vi.stubGlobal('window', { setInterval: () => 1, clearInterval: () => undefined, mousse: { actions: { list: vi.fn().mockRejectedValue(new Error('History offline')) } } })
+it.each([
+  'History offline',
+  "Error invoking remote method 'actions:list': Error: Window MMS session is closing"
+])('hides Undo and shows no text after a failed background read (%s)', async (message) => {
+  const list = vi.fn().mockRejectedValue(new Error(message))
+  vi.stubGlobal('window', { setInterval: () => 1, clearInterval: () => undefined, mousse: { actions: { list } } })
   render()
-  await vi.waitFor(() => expect(hooks.states[2]).toBe('History offline'))
+  await vi.waitFor(() => expect(list).toHaveBeenCalled())
+  await new Promise(resolve => setTimeout(resolve, 0))
   const tree = render()
+  expect(hooks.states[2]).toBeNull()
   expect(PromptUndoButton({ messageId: target.messageId })).toBeNull()
-  expect(tree.props.value.unavailableReason).toBe('Undo unavailable: History offline')
-  const alert = tree.props.children.find((child: any) => child?.props?.role === 'alert')
-  expect(alert.props.children).toBe('History offline')
+  // The provider adds nothing beside the chat, and the composer notice stays empty.
+  expect(tree.props.children).toBeNull()
+  expect(PromptUndoNotice()).toBeNull()
+})
+
+it('says nothing when Undo fails because the window is closing', async () => {
+  const closing = new Error("Error invoking remote method 'actions:undoLatest': Error: Window MMS session is closing")
+  const { undoLatest } = await mount(vi.fn().mockResolvedValue(history), vi.fn().mockRejectedValue(closing))
+  PromptUndoButton({ messageId: target.messageId }).props.onClick()
+  await vi.waitFor(() => expect(undoLatest).toHaveBeenCalledTimes(1))
+  await vi.waitFor(() => expect(hooks.states[1]).toBe(false))
+  render()
+  expect(hooks.states[2]).toBeNull()
+  expect(PromptUndoNotice()).toBeNull()
+})
+
+it('shows a failed Undo without the IPC prefix', async () => {
+  const failure = new Error("Error invoking remote method 'actions:undoLatest': Error: Checkpoint is unavailable")
+  await mount(vi.fn().mockResolvedValue(history), vi.fn().mockRejectedValue(failure))
+  PromptUndoButton({ messageId: target.messageId }).props.onClick()
+  await vi.waitFor(() => expect(hooks.states[2]).toBe('Checkpoint is unavailable'))
 })
 
 it('offers Discard for an Undo refused over a conflict, runs it only after confirmation, then undoes again', async () => {
@@ -134,7 +165,9 @@ it('offers Discard for an Undo refused over a conflict, runs it only after confi
   Object.assign(window, { confirm, mousse: { ...window.mousse, workspace: { discardPendingChanges } } })
   PromptUndoButton({ messageId: target.messageId }).props.onClick()
   await vi.waitFor(() => expect(hooks.states[2]).toBe(refusal.message))
-  const notice = render().props.children.find((child: any) => child?.props?.details)
+  render()
+  const notice = PromptUndoNotice()!
+  expect(notice.props.details).toEqual(refusal.details)
   expect(notice.props.message).toBe(refusal.message)
   const shown = notice.type(notice.props)
   const buttons = shown.props.children.filter((child: any) => child?.type === 'button')
@@ -145,4 +178,12 @@ it('offers Discard for an Undo refused over a conflict, runs it only after confi
   buttons[0].props.onClick()
   await vi.waitFor(() => expect(discardPendingChanges).toHaveBeenCalledExactlyOnceWith(threadId))
   await vi.waitFor(() => expect(undoLatest).toHaveBeenCalledTimes(2))
+})
+
+it('recognises a closing window connection only by the messages main sends for it', () => {
+  expect(isSessionClosing(new Error("Error invoking remote method 'threads:initialize': Error: Window MMS session is closing"))).toBe(true)
+  expect(isSessionClosing(new Error('Window MMS session closed while opening'))).toBe(true)
+  expect(isSessionClosing({ message: 'GuiMmsController is stopped' })).toBe(true)
+  expect(isSessionClosing(new Error('MMS client not connected'))).toBe(false)
+  expect(isSessionClosing(new Error('Checkpoint is unavailable'))).toBe(false)
 })
