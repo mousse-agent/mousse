@@ -2063,8 +2063,14 @@ html[data-theme='high-contrast'] .model-picker-row.selected {
   padding-block: 7px;
 }
 
-.model-picker-row.compact .model-picker-row-status::before {
+.model-picker-row.compact .model-picker-row-status::before,
+.model-picker-row-subtitle > .model-picker-row-status:first-child::before {
   content: none;
+}
+
+/* In a multi-brand provider's list, a model with no maker line keeps the height of its neighbours. */
+.model-picker-row.bare .model-picker-row-main {
+  min-height: 44px;
 }
 
 /* Shortcut hints and stars are quiet chrome: faint, no fill, no colour. */
