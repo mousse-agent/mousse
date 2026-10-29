@@ -30,27 +30,72 @@ describe('loading the queue', () => {
     vi.useRealTimers()
   })
 
-  const mount = async () => {
-    act(() => root.render(createElement(QueuedMessages, { threadId: 't1' })))
-    // The 120 ms fallback load, then every retry.
-    await act(async () => { await vi.advanceTimersByTimeAsync(3_000) })
+  const mount = async (threadId = 't1') => {
+    act(() => root.render(createElement(QueuedMessages, { threadId })))
+    // The 120 ms fallback load.
+    await act(async () => { await vi.advanceTimersByTimeAsync(150) })
   }
+  const advance = (ms: number) => act(async () => { await vi.advanceTimersByTimeAsync(ms) })
   const banner = () => host.querySelector('.queued-messages-error')
 
-  it('shows no banner when a failed load recovers on a retry', async () => {
+  it('shows no banner or error text while loads keep failing, and retries with backoff then every 5 s', async () => {
+    list.mockRejectedValue(OVERLOAD)
+    await mount()
+    expect(list).toHaveBeenCalledTimes(1)
+    await advance(500)
+    expect(list).toHaveBeenCalledTimes(2)
+    await advance(1000)
+    expect(list).toHaveBeenCalledTimes(3)
+    await advance(2000)
+    expect(list).toHaveBeenCalledTimes(4)
+    await advance(5000)
+    expect(list).toHaveBeenCalledTimes(5)
+    await advance(5000)
+    expect(list).toHaveBeenCalledTimes(6)
+    expect(banner()).toBeNull()
+    expect(host.textContent).not.toMatch(/busy|Error|Could not/)
+  })
+
+  it('logs once per failure streak', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    list.mockRejectedValue(OVERLOAD)
+    await mount()
+    await advance(20_000)
+    expect(list.mock.calls.length).toBeGreaterThan(3)
+    expect(warn).toHaveBeenCalledTimes(1)
+    warn.mockRestore()
+  })
+
+  it('shows the list once a retry succeeds', async () => {
     list.mockRejectedValueOnce(OVERLOAD).mockRejectedValueOnce(OVERLOAD).mockResolvedValue([item])
     await mount()
+    expect(host.textContent).not.toContain('Run the tests next')
+    await advance(1500)
     expect(list).toHaveBeenCalledTimes(3)
     expect(banner()).toBeNull()
     expect(host.textContent).toContain('Run the tests next')
+    await advance(20_000)
+    expect(list).toHaveBeenCalledTimes(3)
   })
 
-  it('shows a readable banner, without the IPC prefix, only when every try fails', async () => {
+  it('stops retrying when the component unmounts', async () => {
     list.mockRejectedValue(OVERLOAD)
     await mount()
-    expect(list).toHaveBeenCalledTimes(3)
-    expect(banner()?.textContent).toContain('Mousse is busy. Try again in a moment.')
-    expect(host.textContent).not.toContain('Error invoking remote method')
+    act(() => root.unmount())
+    const calls = list.mock.calls.length
+    await advance(30_000)
+    expect(list).toHaveBeenCalledTimes(calls)
+    root = createRoot(host)
+  })
+
+  it('stops retrying the old thread when the thread changes', async () => {
+    list.mockRejectedValue(OVERLOAD)
+    await mount('t1')
+    act(() => root.render(createElement(QueuedMessages, { threadId: null })))
+    const calls = list.mock.calls.length
+    await advance(30_000)
+    expect(list).toHaveBeenCalledTimes(calls)
+    expect(banner()).toBeNull()
   })
 })
 

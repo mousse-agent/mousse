@@ -6,8 +6,9 @@ import { imagePayloadToDataUrl } from '../utils/imageAttachments'
 import { noticeSummary } from '../chat/adapters/subagentNotice'
 import { readableError } from '../lib/errorText'
 
-/** Waits before each new try of a queue load that failed; the banner shows only when every try fails. */
-export const QUEUE_LOAD_RETRY_DELAYS_MS: readonly number[] = [400, 1200]
+/** Waits before the first tries of a queue load that failed; after these it tries every `QUEUE_LOAD_RETRY_CAP_MS`. */
+export const QUEUE_LOAD_RETRY_DELAYS_MS: readonly number[] = [500, 1000, 2000]
+export const QUEUE_LOAD_RETRY_CAP_MS = 5000
 
 export interface QueuedMessagesProps {
   threadId: string | null
@@ -131,10 +132,14 @@ export function QueuedMessages({
 
   const threadIdRef = useRef(threadId)
   threadIdRef.current = threadId
-  // Bumped by every load and every queue update, so an older load that finishes late changes nothing.
+  // Bumped by every load, every queue update, and when the thread changes or the component unmounts,
+  // so a load that finishes or wakes late changes nothing and stops retrying.
   const loadGeneration = useRef(0)
+  const retryTimer = useRef<number | null>(null)
+  const loggedLoadFailure = useRef(false)
 
-  // A load that fails is tried again quietly; a failure that recovers never shows a banner.
+  // A failed load is never shown: the last list stays, and the load keeps retrying quietly with
+  // backoff until it succeeds or is superseded. Only the first failure of a streak is logged.
   const loadQueue = useCallback(async (id: string) => {
     const generation = ++loadGeneration.current
     const current = () => loadGeneration.current === generation && threadIdRef.current === id
@@ -142,17 +147,20 @@ export function QueuedMessages({
       try {
         const list = await window.mousse.queue.list(id)
         if (!current()) return
+        loggedLoadFailure.current = false
         setItems(list)
         setError(null)
         return
       } catch (err) {
         if (!current()) return
-        const delay = QUEUE_LOAD_RETRY_DELAYS_MS[attempt]
-        if (delay === undefined) {
-          setError(readableError(err, 'Could not load the queue.'))
-          return
+        if (!loggedLoadFailure.current) {
+          loggedLoadFailure.current = true
+          console.warn('Loading the queued messages failed; retrying in the background.', err)
         }
-        await new Promise((resolve) => window.setTimeout(resolve, delay))
+        const delay = QUEUE_LOAD_RETRY_DELAYS_MS[attempt] ?? QUEUE_LOAD_RETRY_CAP_MS
+        await new Promise<void>((resolve) => {
+          retryTimer.current = window.setTimeout(resolve, delay)
+        })
         if (!current()) return
       }
     }
@@ -183,6 +191,11 @@ export function QueuedMessages({
     return () => {
       unsub()
       window.clearTimeout(fallback)
+      // Stops a load that is retrying for this thread.
+      loadGeneration.current += 1
+      loggedLoadFailure.current = false
+      if (retryTimer.current !== null) window.clearTimeout(retryTimer.current)
+      retryTimer.current = null
     }
   }, [threadId, loadQueue])
 
