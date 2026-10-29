@@ -410,7 +410,9 @@ export class GuiMmsController extends EventEmitter {
       endpoint,
       clientType: 'gui',
       requestedCapabilities: [...GUI_PLATFORM_CAPABILITIES, ...(this.attachedBrowserHost ? [BROWSER_ATTACHED_V1_CAPABILITY] : [])],
-      requestTimeoutMs: this.requestTimeoutMs
+      requestTimeoutMs: this.requestTimeoutMs,
+      // Views of a window ask the same reads at the same moment; one request answers them all (#420).
+      shareIdenticalReads: true
     })
     client = windowClient
     if (this.attachedBrowserHost) {
@@ -696,7 +698,9 @@ export class GuiMmsController extends EventEmitter {
       endpoint,
       clientType: 'gui',
       requestedCapabilities: [...GUI_PLATFORM_CAPABILITIES],
-      requestTimeoutMs: this.requestTimeoutMs
+      requestTimeoutMs: this.requestTimeoutMs,
+      // Views of a window ask the same reads at the same moment; one request answers them all (#420).
+      shareIdenticalReads: true
     })
 
     try {
