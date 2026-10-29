@@ -4,7 +4,6 @@ import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { InstanceSnapshot, InstanceTelemetry } from '../../src/shared/harness/status'
 import { EnvRow, ENFORCED_NOTE, TelemetryRow } from '../../src/renderer/components/providers/CliSections'
-import { PRIVACY_STATEMENT, PrivacySettingsGroup } from '../../src/renderer/components/settings/PrivacySettingsGroup'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
@@ -44,16 +43,6 @@ function snapshot(telemetry: InstanceTelemetry, env: Record<string, string> = {}
 
 const off: InstanceTelemetry = { setting: 'off', defaultSetting: 'off', variables: ['DISABLE_TELEMETRY', 'DISABLE_ERROR_REPORTING'] }
 const click = (target: Element) => act(() => { (target as HTMLElement).click() })
-
-describe('Settings > General > Privacy', () => {
-  it('states that Mousse collects nothing, lists what it contacts, and says where agent telemetry is set', () => {
-    act(() => root.render(createElement(PrivacySettingsGroup)))
-    const text = host.textContent ?? ''
-    expect(text).toContain(PRIVACY_STATEMENT)
-    expect(text).toContain('Mousse updates (GitHub)')
-    expect(text).toContain('Set for each provider in Settings → Providers.')
-  })
-})
 
 describe('a provider\'s Telemetry row', () => {
   it('offers the agent\'s own setting and Off, and saves the choice', async () => {

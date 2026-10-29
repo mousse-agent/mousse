@@ -44,13 +44,12 @@ it('edits policies, shows usage across machines, and cleans up only after the pl
     expect(review.turnedOn).toEqual({ saved: { schemaVersion: 1, worktrees: { removeWithDeletedThreads: true, inactiveDays: 30, removeMerged: true }, browser: { captureDays: 30 } }, noticeGone: true })
     expect(review.dismissed).toEqual({ dismissCalls: 1, configureCallsAdded: 0, inactive: '30' })
 
-    // The saved values reach the controls, and every rule says what it deletes and never deletes.
+    // The saved values reach the controls, and every rule is a title and one short line.
     expect(report.initial).toMatchObject({ trash: 'never', inactive: '30', captures: '30', deleted: 'true', merged: 'true', groups: [true, true, true, true, true], machineSelect: true, measuredAt: 'Measured 5m ago', projectArcs: 3 })
     for (const row of report.initial.ruleRows) {
-      expect(row.text, row.id).toContain('Deletes')
-      expect(row.text, row.id).toContain('Never deletes')
+      expect(row.text, row.id).not.toContain('Never deletes')
     }
-    expect(report.initial.keepWhen).toContain('Keep a worktree when it has any local files')
+    expect(report.initial.worktreesNote).toContain('always kept')
     expect(report.initial.projectRows.map((row: any) => [row.label, row.bytes])).toEqual([['Mousse', 700 * MB], ['Website', 280 * MB], ['Other', 100 * MB]])
 
     // Policy editing: each setting is sent, saved and read back; a bad number is never sent.

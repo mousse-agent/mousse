@@ -1,5 +1,5 @@
 /**
- * Every internet address Mousse's own code names (Settings → General → Privacy). Each host found in
+ * Every internet address Mousse's own code names. Each host found in
  * a string in `src/**` is listed here once, as one of:
  * - `contacted`: Mousse itself connects to it, in the situations `when` names, sending what `sends` says;
  * - `link`: Mousse never connects to it itself: it opens in your browser when you click it, is shown
@@ -13,7 +13,7 @@
 export type OutboundKind = 'contacted' | 'link' | 'local'
 
 export interface OutboundEntry {
-  /** What it is, as the Privacy list shows it. */
+  /** What it is. */
   label: string
   kind: OutboundKind
   hosts: readonly string[]
@@ -171,8 +171,3 @@ export const OUTBOUND: readonly OutboundEntry[] = [
     hosts: ['127.0.0.1', 'localhost']
   }
 ]
-
-/** What the Privacy section lists: the services Mousse connects to. */
-export function contactedServices(): OutboundEntry[] {
-  return OUTBOUND.filter((entry) => entry.kind === 'contacted')
-}

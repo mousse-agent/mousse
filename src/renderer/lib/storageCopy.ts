@@ -1,22 +1,23 @@
 import type { StorageCleanupRule } from '../../shared/storage'
 
 /**
- * The words next to each cleanup rule. Every rule says what it deletes and what it never deletes, so a
- * person can decide without opening anything. Kept in one place so the page and its tests read the same text.
+ * The words next to each cleanup rule. A rule row shows its title, one short line and its control; what it
+ * deletes and never deletes is in the tooltip (and in full in the recommended-rules dialog). Kept in one place
+ * so the page and its tests read the same text.
  */
 export type StorageRuleId = 'trash' | 'deletedThreads' | 'inactive' | 'merged' | 'captures'
 
 export interface StorageRuleCopy {
   title: string
+  /** The one short line under the title. The Trash row shows how many threads wait there instead. */
+  line?: string
   /** Completes "Deletes …". */
   deletes: string
-  /** Completes "Never deletes …". */
-  never: string
+  /** Completes "Never deletes …". Worktree rules leave it out: the Worktrees group says it once. */
+  never?: string
   /** One more sentence where the rule's wording could be misread. */
   note?: string
 }
-
-const KEPT_WORKTREE = 'a worktree with uncommitted, untracked or ignored files (such as .env or node_modules), commits that are not in the default branch, or a thread that is running or waiting.'
 
 export const STORAGE_RULE_COPY: Record<StorageRuleId, StorageRuleCopy> = {
   trash: {
@@ -26,34 +27,40 @@ export const STORAGE_RULE_COPY: Record<StorageRuleId, StorageRuleCopy> = {
   },
   deletedThreads: {
     title: 'Remove worktrees of deleted threads',
-    deletes: 'the worktree folder of a thread when you move the thread to the trash. The thread stays in the trash until it is emptied.',
-    never: KEPT_WORKTREE
+    line: 'When a thread moves to the trash.',
+    deletes: 'the worktree folder of a thread when you move the thread to the trash. The thread stays in the trash until it is emptied.'
   },
   inactive: {
     title: 'Remove worktrees inactive for',
-    deletes: 'the worktree folder of a thread that has had no activity for this long. It is restored the next time you use the thread.',
-    never: KEPT_WORKTREE
+    line: 'Restored when you use the thread again.',
+    deletes: 'the worktree folder of a thread that has had no activity for this long. It is restored the next time you use the thread.'
   },
   merged: {
     title: 'Remove worktrees whose work is merged into the default branch',
+    line: 'Restored when you use the thread again.',
     deletes: 'the worktree folder of a thread once its commits are in the default branch. It is restored the next time you use the thread.',
-    never: KEPT_WORKTREE,
     note: 'Merged means the worktree’s commits are in the default branch. A pull request’s state is not checked, and a rebased or squashed branch counts as not merged.'
   },
   captures: {
     title: 'Delete saved browser captures after',
+    line: 'Only captures no conversation uses.',
     deletes: 'screenshots the browser saved in closed sessions that no conversation uses. Older capture links will no longer open.',
     never: 'a screenshot attached to a conversation, a download, or anything from a session that is still open.',
     note: 'A download saved by an older version with a .png name can look like a capture and may be deleted.'
   }
 }
 
-export const WORKTREE_GROUP_DESCRIPTION = 'Work that has not been published is never removed automatically.'
-
-export const KEEP_WHEN_COPY = {
-  title: 'Keep a worktree when it has any local files',
-  description: 'Uncommitted, untracked and ignored files (such as .env or node_modules) all keep a worktree. Delete the thread to remove such a worktree; you review what is discarded.'
+/** The tooltip on a rule row: everything the rule deletes and keeps. */
+export function ruleTooltip(rule: StorageRuleId): string {
+  const copy = STORAGE_RULE_COPY[rule]
+  return [`Deletes ${copy.deletes}`, copy.never && `Never deletes ${copy.never}`, copy.note].filter(Boolean).join(' ')
 }
+
+/** The Worktrees group's one-line note: what no worktree rule ever removes. */
+export const WORKTREE_GROUP_DESCRIPTION = 'Worktrees with local files, unpublished commits or a running thread are always kept.'
+
+/** Its tooltip: what counts as a local file, and how to remove such a worktree. */
+export const WORKTREE_GROUP_TOOLTIP = 'Uncommitted, untracked and ignored files (such as .env or node_modules) all keep a worktree, as do commits that are not in the default branch and a thread that is running or waiting. Delete the thread to remove such a worktree; you review what is discarded.'
 
 export const CLEANUP_COPY = {
   idle: 'Runs the rules above now. You see what would be removed, and confirm, before anything is deleted.',
@@ -99,7 +106,7 @@ export function retiredWorktreeNote(at: string): string {
 /** Where the trash is reviewed and restored: the sidebar's Recently deleted section. */
 export function trashCountSentence(count: number): string {
   if (count === 0) return 'No threads in trash.'
-  return `${count} ${count === 1 ? 'thread' : 'threads'} in trash · restore or delete them from Recently deleted in the sidebar.`
+  return `${count} ${count === 1 ? 'thread' : 'threads'} in trash, listed under Recently deleted.`
 }
 
 /** The notice for a profile that was already in use when the recommended rules arrived. */
