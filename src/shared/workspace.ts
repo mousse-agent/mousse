@@ -73,6 +73,11 @@ export interface ThreadWorkspaceMetadata {
    * anything the commits carry.
    */
   untrusted?: true
+  /**
+   * Not a worktree: the folder is the person's, and its snapshots live in a hidden store (a project without Git, a
+   * thread with no project). Only the Undo, review and retention code sees this; it is never written to `workspace.json`.
+   */
+  snapshotOnly?: true
 }
 
 export interface WorkspaceExecutionContext {

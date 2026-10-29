@@ -117,6 +117,11 @@ export class ClaudeSubscriptionAdapter implements ProviderAdapter {
     return this.service()?.configured() ?? false
   }
 
+  /** A locked runtime runs bot turns in their activation's folder, never in a thread's. */
+  standaloneWorkspace(threadId: string): string | undefined {
+    return this.locked ? undefined : this.service()?.standaloneWorkspace(threadId)
+  }
+
   async startTurn(
     input: TurnInput,
     sink: TurnSink,

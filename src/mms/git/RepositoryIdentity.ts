@@ -67,6 +67,8 @@ export function resolveRepositoryIdentity(cwd: string, options: ResolveRepositor
 
   const commonDir = commonRaw ? canonical(isAbsolute(commonRaw) ? commonRaw : resolve(worktreePath, commonRaw)) : worktreePath
   const key = createHash('sha256').update(commonDir.toLowerCase()).digest('hex').slice(0, 32)
+  // Not a repository: the folder is the person's and no mutation lease is ever taken in it, so nothing is written there.
+  if (!commonRaw) return { commonDir, key, worktreePath, metadataDir: '', capability }
   const localMetadata = join(commonDir, 'mousse')
   const metadataDir = writable(localMetadata)
     ? localMetadata

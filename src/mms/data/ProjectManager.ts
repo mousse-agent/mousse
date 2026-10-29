@@ -6,6 +6,7 @@ import type { ThreadDataStore } from './ThreadDataStore'
 import { atomicWriteJsonSync, quarantineUnreadableFileSync } from './AtomicFs'
 import { getMousseHomeDir } from './paths'
 import { trustRepositoryPrograms } from '../git/repoPrograms'
+import { removeProjectSnapshots } from '../workspace/SnapshotWorkspace'
 
 export class ProjectManager {
   private projects: Project[] = []
@@ -13,7 +14,7 @@ export class ProjectManager {
 
   private readonly projectsPath: string
 
-  constructor(homeDir = getMousseHomeDir()) {
+  constructor(private readonly homeDir = getMousseHomeDir()) {
     this.projectsPath = join(homeDir, 'projects.json')
     this.projects = this.loadProjects()
   }
@@ -62,6 +63,8 @@ export class ProjectManager {
   removeProject(id: string): void {
     this.projects = this.projects.filter((p) => p.id !== id)
     this.persist()
+    // The snapshots of a project that is not a Git repository live in Mousse's data and go with the project.
+    try { removeProjectSnapshots(id, this.homeDir) } catch (error) { console.warn('the project snapshot store could not be removed', { projectId: id, error: error instanceof Error ? error.message : String(error) }) }
   }
 
   renameProject(id: string, name: string): Project {

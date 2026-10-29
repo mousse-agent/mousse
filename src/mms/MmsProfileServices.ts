@@ -107,6 +107,7 @@ import { existsSync } from 'node:fs'
 import { settleThreadMutationOwnership } from './queue/ThreadExecutionLease'
 import type { TaskLifecycleRecord } from '../shared/resourceLifecycle'
 import { UndoRetentionSweeper } from './actions/UndoRetentionSweeper'
+import { releaseThreadSnapshots } from './actions/SnapshotRefReleaseService'
 import { PullRequestWatchService } from './git/PullRequestWatchService'
 import { resolveThreadProjectPath } from './data/resolveActiveProjectPath'
 import { SpeechRelay } from './speech/SpeechRelay'
@@ -810,6 +811,13 @@ export class MmsProfileServices {
         }
       },
       quiesceDisk: () => this.storageUsage.pause(),
+      onPhase: async (record, phase) => {
+        if (phase !== 'purge-started') return
+        // What a deleted thread pinned in the snapshot store its project shares goes now, while the receipts that name it still exist.
+        for (const task of this.lifecycleOwnedTasks(record.taskId)) {
+          try { await releaseThreadSnapshots(task.location) } catch (error) { console.warn('the thread snapshots could not be released', { taskId: task.taskId, error: error instanceof Error ? error.message : String(error) }) }
+        }
+      },
       projectPurged: (record) => {
         // A permanent delete freed space.
         this.storageUsage.rescanSoon()

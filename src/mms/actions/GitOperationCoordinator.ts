@@ -1,5 +1,6 @@
 import { acquireRepositoryLease } from '../git/RepositoryLease'
 import { resolveRepositoryIdentity } from '../git/RepositoryIdentity'
+import { hiddenStoreFor, hiddenStoreIdentity, inHiddenStore } from '../git/hiddenStore'
 import {
   getExecutionLeasePath,
   readLeaseOwner,
@@ -25,7 +26,11 @@ export function assertHeldThreadLease(threadDirectory: string, lease: ThreadLeas
   }
 }
 
-/** Enforces the global lock order: thread execution lease, then repository lease. */
+/**
+ * Enforces the global lock order: thread execution lease, then repository lease. A folder whose snapshots live in a
+ * hidden store is locked by the store, so the threads that share the folder take turns; the operation then runs with
+ * Git going through the store.
+ */
 export async function withGitMutationLocks<T>(
   threadDirectory: string,
   repositoryPath: string,
@@ -35,14 +40,16 @@ export async function withGitMutationLocks<T>(
   heldThreadLease?: ThreadLeaseHandle
 ): Promise<T> {
   if (heldThreadLease) assertHeldThreadLease(threadDirectory, heldThreadLease)
-  const repository = resolveRepositoryIdentity(repositoryPath, { requireMutationCapability: true })
+  const store = hiddenStoreFor(repositoryPath)
+  const repository = store ? hiddenStoreIdentity(store) : resolveRepositoryIdentity(repositoryPath, { requireMutationCapability: true })
   const heldRepositories = mutationContext.getStore()
   if (heldRepositories?.has(repository.key)) throw new Error('Nested repository mutation is not allowed; finish the owning operation first.')
   const threadLease = heldThreadLease ?? await waitAcquireExecutionLease(threadDirectory, { source, signal })
   try {
     const repositoryLease = await acquireRepositoryLease(repository, { signal })
     try {
-      return await mutationContext.run(new Set([...(heldRepositories ?? []), repository.key]), operation)
+      const held = new Set([...(heldRepositories ?? []), repository.key])
+      return await mutationContext.run(held, () => store ? inHiddenStore(store, operation) : operation())
     } finally {
       repositoryLease.release()
     }

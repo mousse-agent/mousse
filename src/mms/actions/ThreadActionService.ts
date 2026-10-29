@@ -13,7 +13,9 @@ import { ChangeReceiptService } from './ChangeReceiptService'
 import { assertHeldThreadLease, withGitMutationLocks } from './GitOperationCoordinator'
 import { IN_PROGRESS_GIT_MARKERS } from '../git/gitMarkers'
 import { changedPaths, git, tryGit } from './git'
-import { describeGit, sameTree, takeSnapshot } from './snapshots'
+import { describeGit, sameTree, SnapshotRefusedError, takeSnapshot, type Snapshot } from './snapshots'
+import { inSnapshotScope } from '../git/hiddenStore'
+import { setSnapshotsOff } from '../workspace/SnapshotWorkspace'
 
 export interface RunThreadActionOptions {
   threadId: string
@@ -122,7 +124,7 @@ export class ThreadActionService {
     }
     new ChangeReceiptService(this.threadDirectory).assertNoPendingOperation()
     this.assertExpectedRevision(options.expectedJournalRevision)
-    git(options.workspacePath, ['rev-parse', '--verify', `${startSha}^{commit}`])
+    inSnapshotScope(options.workspacePath, () => git(options.workspacePath, ['rev-parse', '--verify', `${startSha}^{commit}`]))
     const actions = this.list()
     const action = this.newAction(options, startSha, actions)
     this.journal.append({ operationId: action.id, operationType: 'action-checkpoint', state: 'running', expectedPreState: { startSha, actionId: action.id }, details: { action } })
@@ -147,7 +149,7 @@ export class ThreadActionService {
   /** `recordOutsideChanges` for a caller that already holds the mutation locks. */
   recordOutsideChangesHeld(options: OutsideChangesOptions): { startSha: string; action?: ThreadAction } {
     const snapshot = takeSnapshot(options.workspacePath, { reason: 'before the next action', threadId: options.threadId })
-    const metadata = new ThreadWorkspaceManager(this.threadDirectory).load()
+    const metadata = new ThreadWorkspaceManager(this.threadDirectory).loadOrSnapshot()
     const latest = this.latest(options.conversationBranchId)
     // The latest recorded snapshot. Workspaces recorded before snapshots have none; their last checkpoint commit was HEAD.
     const known = metadata?.snapshotSha ?? latest?.endSha ?? metadata?.headSha ?? snapshot.head
@@ -336,9 +338,17 @@ export class ThreadActionService {
     workspacePath = git(workspacePath, ['rev-parse', '--show-toplevel'])
     action.state = 'checkpointing'
     this.journal.append({ operationId: action.id, operationType: 'action-checkpoint', state: 'prepared', expectedPreState: { startSha: action.startSha }, details: { action, actionState: state } })
-    const threadId = new ThreadWorkspaceManager(this.threadDirectory).load()?.threadId
+    const threadId = new ThreadWorkspaceManager(this.threadDirectory).loadOrSnapshot()?.threadId
     const reason = action.turnId.startsWith(USER_CHANGES_TURN_PREFIX) ? 'outside changes' : `end of turn ${action.turnId}`
-    const snapshot = takeSnapshot(workspacePath, { reason, threadId, operationId: action.id })
+    let snapshot: Snapshot
+    try {
+      snapshot = takeSnapshot(workspacePath, { reason, threadId, operationId: action.id })
+    } catch (error) {
+      // The folder grew past what a hidden store keeps while the turn ran: the turn is recorded without its files, and says why.
+      if (!(error instanceof SnapshotRefusedError)) throw error
+      this.recordWithoutFiles(action, state, error.message)
+      return
+    }
     const { record, commits } = describeGit(workspacePath, action.startSha, snapshot)
     action.endSha = snapshot.sha
     action.commits = commits
@@ -359,6 +369,22 @@ export class ThreadActionService {
       externalEffects: action.externalEffects, git: record
     })
     action.receiptId = receipt.id
+  }
+
+  /**
+   * An action whose files could not be recorded (see `SnapshotRefusedError`): it ends where it started, cannot be
+   * undone, and carries the reason, so Undo never offers to restore files that were not saved.
+   */
+  private recordWithoutFiles(action: ThreadAction, state: 'completed' | 'stopped' | 'failed', reason: string): void {
+    action.endSha = action.startSha
+    action.commits = []
+    action.changedPaths = []
+    action.reversible = false
+    action.state = state
+    action.completedAt = new Date().toISOString()
+    action.notice = reason
+    action.externalEffects = [...action.externalEffects, { kind: 'unknown', description: `${reason} This turn's file changes were not recorded.`, reversible: false }]
+    setSnapshotsOff(this.threadDirectory, reason)
   }
 
   private appendCheckpointCompleted(

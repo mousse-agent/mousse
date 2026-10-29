@@ -398,6 +398,11 @@ export interface ProviderAdapter {
   /** The runtime is signed in and installed, so its models can be selected by default. */
   configured?(): boolean
   /**
+   * The private folder a turn with no project runs in, for the runtimes that keep one per thread. Mousse records the
+   * thread's snapshots there, so Undo works in it; a runtime without it has no per-thread folder to record.
+   */
+  standaloneWorkspace?(threadId: string): string | undefined
+  /**
    * Issue #142: a check of the user's own setup before a child is created on this adapter, for
    * shared and isolated children alike. Returns why the child cannot be held to its policy (the
    * runtime's native subagents are enabled, or a read-only child would sit beside MCP servers whose
