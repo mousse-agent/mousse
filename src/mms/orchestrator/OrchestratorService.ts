@@ -2552,14 +2552,17 @@ export class OrchestratorService extends EventEmitter {
 
   /**
    * Stop reaches the provider's process for the thread (`HarnessGateway.stopThread`): what it still
-   * runs in the background ends, whether or not a turn is live. True when there was a process to end.
-   * Never throws.
+   * runs in the background ends, whether or not a turn is live, and a command still running after the
+   * Stop's interrupt is killed. True when there was a process to end. What could not be ended is said
+   * in the thread, so it never looks stopped while something still runs. Never throws.
    */
   async stopProviderWork(threadId: string): Promise<boolean> {
     try {
       return (await this.harness.stopThread(threadId)) === 'stopped'
     } catch (error) {
-      console.warn('provider stop failed', { threadId, error: error instanceof Error ? error.message : String(error) })
+      const message = error instanceof Error ? error.message : String(error)
+      console.warn('provider stop failed', { threadId, error: message })
+      this.noteProviderNotice(threadId, `Stop could not end everything this chat started. ${message}`)
       return false
     }
   }

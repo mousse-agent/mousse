@@ -513,19 +513,34 @@ export class GuiMmsController extends EventEmitter {
     })
   }
 
+  /**
+   * The flag is cleared when the snapshot starts, not when it returns: until then every event that
+   * arrives would ask for another snapshot, and a gap seen while this one runs needs a later one.
+   */
   async snapshotThread(threadId: string): Promise<ThreadSnapshotResult> {
-    const result = await this.request<ThreadSnapshotResult>('thread.snapshot', { threadId })
-    this.client?.clearResnapshotFlag()
-    return result
+    const client = this.client
+    const needed = client?.requiresResnapshot === true
+    client?.clearResnapshotFlag()
+    try {
+      return await this.request<ThreadSnapshotResult>('thread.snapshot', { threadId })
+    } catch (error) {
+      if (needed) client?.markResnapshotNeeded()
+      throw error
+    }
   }
 
-  /** Snapshot through one window's profile-bound session after an event gap. */
+  /** Snapshot through one window's profile-bound session after an event gap; clears the flag like `snapshotThread`. */
   async snapshotThreadForSender(senderId: number, threadId: string): Promise<ThreadSnapshotResult> {
     const session = this.windowSessions.get(senderId)
     if (!session || !session.client.connected) throw new Error('Window MMS session is not connected')
-    const result = await session.client.request<ThreadSnapshotResult>('thread.snapshot', { threadId })
+    const needed = session.client.requiresResnapshot
     session.client.clearResnapshotFlag()
-    return result
+    try {
+      return await session.client.request<ThreadSnapshotResult>('thread.snapshot', { threadId })
+    } catch (error) {
+      if (needed) session.client.markResnapshotNeeded()
+      throw error
+    }
   }
 
   clearResnapshotFlag(): void {

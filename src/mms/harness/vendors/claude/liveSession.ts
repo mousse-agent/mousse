@@ -60,6 +60,16 @@ export const DEFAULT_LIVE_TIMINGS: LiveTimings = {
   interruptTimeoutMs: 10_000
 }
 
+/**
+ * The pid of the Claude Code process a query runs, or undefined. The Agent SDK does not publish it:
+ * it is read from the query's process transport (`transport.process.pid` in the SDK version Mousse
+ * pins), so a later SDK that moves it leaves Stop with the SDK's own close only.
+ */
+export function claudeQueryPid(query: unknown): number | undefined {
+  const pid = (query as { transport?: { process?: { pid?: unknown } } } | undefined)?.transport?.process?.pid
+  return typeof pid === 'number' && Number.isInteger(pid) && pid > 0 ? pid : undefined
+}
+
 /** The input stream of a live query. It ends only when closed. */
 export class PromptQueue implements AsyncIterable<SDKUserMessage> {
   private readonly items: SDKUserMessage[] = []
@@ -558,6 +568,11 @@ export class LiveSession<Turn = unknown> {
     this.query = query
     void this.pump(query)
     this.armIdle()
+  }
+
+  /** The pid of the Claude Code process behind the query, while it is known (`claudeQueryPid`). */
+  processId(): number | undefined {
+    return this.query ? claudeQueryPid(this.query) : undefined
   }
 
   /** A run is live: pushed and not yet ended (an abandoned one still owes its result). */

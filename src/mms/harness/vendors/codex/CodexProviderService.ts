@@ -70,6 +70,7 @@ import { readUsageLimit, usageLimitError } from '../../../orchestrator/providerE
 import { normalizePermissionMode, permissionModeAllows, type PermissionMode } from '../../../../shared/permissionMode'
 import { PERMISSION_KEYS } from '../../../../shared/permissionKeys'
 import { codexTurnPolicy } from './childPolicy'
+import { STOP_GRACE_MS, stopCommandProcesses } from '../../stopProcesses'
 import { DEFAULT_TREE_TIMING, HelperTree, RpcRefused, ThreadStatuses, TreeOff, isWakeUp, type TreePorts, type TreeTiming } from './helperTree'
 import {
   closeEvent,
@@ -267,6 +268,10 @@ export type CodexServiceDependencies = {
   stopTiming?: { killAfterMs?: number; exitDeadlineMs?: number }
   /** Kills a process and everything it started (tests substitute it; it may throw). */
   killTree?: (process: CodexProcess) => void
+  /** How long Stop gives Codex to end a thread's running commands before they are killed (tests). */
+  stopGraceMs?: number
+  /** Kills the processes below `roots` running one of `commands` (`stopCommandProcesses`; tests substitute it). */
+  stopCommands?: typeof stopCommandProcesses
 }
 
 /** `stopAll`: a closed process gets this long before its tree is killed. */
@@ -1039,6 +1044,14 @@ export class CodexProviderService {
   private readonly preparing = new Set<AbortController>()
   /** Every app-server this service started that has not exited yet, attached or not. */
   private readonly processes = new Set<LiveProcess>()
+  /**
+   * Commands Codex reported as started and not yet as ended, by Codex thread and item, with the Mousse
+   * thread they run for (a helper's run for the thread that started the helper). Stop kills the ones
+   * still running (`stopThread`).
+   */
+  private readonly runningCommands = new Map<string, { command: string; owner: string }>()
+  /** Called whenever a command ends (`stopThread` waits on it). */
+  private readonly commandWaiters = new Set<() => void>()
 
   constructor(
     private readonly profileHome: string,
@@ -1680,6 +1693,8 @@ export class CodexProviderService {
     this.app = undefined
     this.loaded.clear()
     this.orphans.clear()
+    // Its commands end with the process.
+    this.forgetCommands()
     app.conn.close()
   }
 
@@ -1716,6 +1731,7 @@ export class CodexProviderService {
     this.app = undefined
     this.loaded.clear()
     this.orphans.clear()
+    this.forgetCommands()
     // The next process must prove its own sign-in before it gets a turn.
     this.probeResult = undefined
     for (const [threadId, run] of [...this.turns]) {
@@ -1727,6 +1743,7 @@ export class CodexProviderService {
   private route(notification: CodexNotification, statuses: ThreadStatuses): void {
     // Recorded here, in the order the process sent them and before any response resolves.
     statuses.note(notification)
+    this.noteCommand(notification)
     if (isWakeUp(notification))
       for (const held of this.turns.values()) {
         held.tree?.noteWake(notification)
@@ -1937,6 +1954,80 @@ export class CodexProviderService {
     if (!run) return 'not_active'
     this.requestInterrupt(run)
     return 'interrupted'
+  }
+
+  /**
+   * Stop of a Mousse thread (issue #417): the commands Codex started for it or for its helpers that
+   * are still running after the Stop's `turn/interrupt` are killed, with everything they started.
+   * Codex ends a command it waits on when the turn is interrupted, but a command it keeps as a
+   * background terminal runs on until the app-server closes, and the app-server serves every thread.
+   * So each command gets `STOP_GRACE_MS` to end, and then its processes below the app-server are
+   * found by its script and killed. Rejects, naming the command, when one is still running after
+   * that; the caller says so in the thread.
+   */
+  async stopThread(threadId: string): Promise<'stopped' | 'not_active'> {
+    const mine = () => [...this.runningCommands].filter(([, entry]) => entry.owner === threadId)
+    if (mine().length === 0) return 'not_active'
+    await this.commandsEnd(() => mine().length === 0, this.dependencies.stopGraceMs ?? STOP_GRACE_MS)
+    const left = mine()
+    if (left.length === 0) return 'stopped'
+    for (const [key] of left) this.runningCommands.delete(key)
+    const roots = [...this.processes].flatMap((entry) => (!entry.done && entry.process.pid ? [entry.process.pid] : []))
+    // No process is left: its commands ended with it.
+    if (roots.length === 0) return 'stopped'
+    const commands = left.map(([, entry]) => entry.command)
+    let survivors: Array<{ pid: number; command: string }>
+    try {
+      ;({ survivors } = await (this.dependencies.stopCommands ?? stopCommandProcesses)(roots, commands))
+    } catch (error) {
+      throw new Error(`Codex's ${commands.length === 1 ? 'command' : 'commands'} ${commands.join(', ')} may still be running: ${error instanceof Error ? error.message : String(error)}.`)
+    }
+    if (survivors.length) {
+      const names = survivors.map((entry) => `${entry.command} (process ${entry.pid})`).join(', ')
+      throw new Error(`Codex's ${survivors.length === 1 ? 'command' : 'commands'} ${names} could not be stopped and may still be running.`)
+    }
+    return 'stopped'
+  }
+
+  /** Records a command Codex started for a thread Mousse runs, and forgets one that ended. */
+  private noteCommand(notification: CodexNotification): void {
+    if (notification.method !== 'item/started' && notification.method !== 'item/completed') return
+    const params = notification.params as { threadId?: unknown; item?: { type?: unknown; id?: unknown; command?: unknown } } | undefined
+    const item = params?.item
+    if (typeof params?.threadId !== 'string' || item?.type !== 'commandExecution' || typeof item.id !== 'string') return
+    const key = `${params.threadId}\n${item.id}`
+    if (notification.method === 'item/completed') {
+      if (!this.runningCommands.delete(key)) return
+      for (const waiter of [...this.commandWaiters]) waiter()
+      return
+    }
+    if (typeof item.command !== 'string' || !item.command.trim()) return
+    const codexThreadId = params.threadId
+    const run = this.turns.get(codexThreadId) ?? [...this.turns.values()].find((candidate) => candidate.helpers.has(codexThreadId))
+    if (run) this.runningCommands.set(key, { command: item.command, owner: run.mousseThreadId })
+  }
+
+  private forgetCommands(): void {
+    this.runningCommands.clear()
+    for (const waiter of [...this.commandWaiters]) waiter()
+  }
+
+  /** Resolves once `done` holds, checked whenever a command ends, or after `ms`. */
+  private commandsEnd(done: () => boolean, ms: number): Promise<void> {
+    return new Promise((resolve) => {
+      const finish = () => {
+        clearTimeout(timer)
+        this.commandWaiters.delete(check)
+        resolve()
+      }
+      const check = () => {
+        if (done()) finish()
+      }
+      const timer = setTimeout(finish, ms)
+      timer.unref?.()
+      this.commandWaiters.add(check)
+      check()
+    })
   }
 
   /** Adds `text` to the running turn on `codexThreadId` (`turn/steer`). */
