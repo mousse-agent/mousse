@@ -21,6 +21,8 @@ function modeDescription(mode: PermissionMode, agent: string, sandboxOff: boolea
       return `${agent} asks before every command and file edit.`
     case 'accept_edits':
       return `File edits go ahead; ${agent} asks before every command.`
+    case 'auto':
+      return `File edits go ahead; ${agent}'s auto mode runs commands it judges safe and asks about the rest.`
     case 'full':
       return sandboxOff
         ? `${agent} runs commands and edits without asking, and its sandbox is off.`
@@ -39,7 +41,7 @@ export function ComposerPermissionPicker({ mode, agent, caps, limits, ceiling, c
   mode: PermissionMode
   /** The selected agent's name ("Claude Code"). */
   agent: string
-  caps?: Pick<HarnessCaps, 'toolControl'>
+  caps?: Pick<HarnessCaps, 'toolControl' | 'autoPermissionMode'>
   limits?: PermissionLimits
   /** A subagent's lineage ceiling; absent for a thread nobody delegated. */
   ceiling?: PermissionMode
@@ -69,6 +71,8 @@ export function ComposerPermissionPicker({ mode, agent, caps, limits, ceiling, c
   const shown = effective.refused ? mode : effective.mode
   const reason = effective.reason
   const approvesItself = supported.length === 1 && supported[0] === 'full'
+  // On an agent without an auto mode the Auto row says, for this thread, that it runs as Auto-accept edits.
+  const autoFallback = supported.includes('auto') ? undefined : `Works as ${describePermissionMode('accept_edits')}: ${limits?.unavailable?.auto ?? `${agent} has no auto mode`}.`
   // Only Full access is offered on an agent that approves tools itself.
   const offered = approvesItself ? PERMISSION_MODES.filter((entry) => entry === 'full') : PERMISSION_MODES
   const label = describePermissionMode(shown)
@@ -89,7 +93,7 @@ export function ComposerPermissionPicker({ mode, agent, caps, limits, ceiling, c
             <EntryIcon size={14} aria-hidden="true" />
             <span className="composer-mode-menu-item-text">
               <span>{describePermissionMode(entry)}</span>
-              <span className="composer-mode-menu-item-desc">{aboveCeiling ? ceilingReason ?? 'A thread this subagent belongs to is set lower.' : modeDescription(entry, agent, limits?.sandboxOffInFull === true)}</span>
+              <span className="composer-mode-menu-item-desc">{aboveCeiling ? ceilingReason ?? 'A thread this subagent belongs to is set lower.' : entry === 'auto' && autoFallback ? autoFallback : modeDescription(entry, agent, limits?.sandboxOffInFull === true)}</span>
             </span>
           </button>
         })}
