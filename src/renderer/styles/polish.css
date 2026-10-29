@@ -788,10 +788,12 @@ html[data-theme='high-contrast'] .app .chat--empty .chat-input-area .composer-wo
   box-shadow: 0 2px 10px rgba(var(--accent-rgb), 0.35);
 }
 
-/* The workspace strip is a tab tucked behind the composer card. */
+/* The workspace strip is a tab that meets the composer card. It overlaps only
+   the card's top border: a deeper overlap shows through the translucent,
+   blurred card as a dark band. */
 .app .chat-input-area .composer-workspace-toolbar {
-  margin: 0 12px -14px;
-  padding: 5px 10px 19px;
+  margin: 0 12px -1px;
+  padding: 5px 10px 6px;
   border-color: var(--ui-line);
   border-radius: 12px 12px 0 0;
   background: color-mix(in srgb, var(--ui-raised) 55%, transparent);
