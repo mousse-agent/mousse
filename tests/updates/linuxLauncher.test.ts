@@ -2,7 +2,13 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { syncLinuxLauncher, type LauncherChanges } from '../../src/main/updates/linuxLauncher'
+import {
+  LAUNCHER_ICON_SIZES,
+  launcherIconName,
+  syncLinuxLauncher,
+  type LauncherChanges,
+  type LauncherIcon
+} from '../../src/main/updates/linuxLauncher'
 
 let root: string
 let home: string
@@ -10,8 +16,16 @@ let apps: string
 let applications: string
 let refreshed: LauncherChanges[]
 
-function sync(options: { appImage: string; previousAppImage?: string; iconSource?: string }) {
-  return syncLinuxLauncher({ ...options, env: {}, home, refresh: (changes) => refreshed.push(changes) })
+function sync(options: { appImage: string; previousAppImage?: string; iconName?: string; icons?: LauncherIcon[] }) {
+  return syncLinuxLauncher({ iconName: 'mousse', ...options, env: {}, home, refresh: (changes) => refreshed.push(changes) })
+}
+
+function icons(tag: string): LauncherIcon[] {
+  return LAUNCHER_ICON_SIZES.map((size) => ({ size, png: Buffer.from(`${tag}-${size}`) }))
+}
+
+function themeIcon(size: string, name: string): string {
+  return join(home, '.local', 'share', 'icons', 'hicolor', size, 'apps', name)
 }
 
 beforeEach(() => {
@@ -105,31 +119,67 @@ describe('syncLinuxLauncher', () => {
 
   it('creates a launcher and installs the icon when there is none, then changes nothing on the next start', () => {
     const current = join(apps, 'Mousse.AppImage')
-    const icon = join(root, 'icon.png')
-    writeFileSync(icon, 'png-1')
-
-    const first = sync({ appImage: current, iconSource: icon })
+    const first = sync({ appImage: current, icons: icons('png-1') })
 
     const launcher = join(applications, 'mousse.desktop')
     expect(first).toMatchObject({ created: true, iconChanged: true, launchers: [launcher] })
     expect(readFileSync(launcher, 'utf8')).toContain(`Exec=${current}\nIcon=mousse\n`)
-    const installed = join(home, '.local', 'share', 'icons', 'hicolor', '512x512', 'apps', 'mousse.png')
-    expect(readFileSync(installed, 'utf8')).toBe('png-1')
+    for (const size of LAUNCHER_ICON_SIZES) {
+      expect(readFileSync(themeIcon(`${size}x${size}`, 'mousse.png'), 'utf8')).toBe(`png-1-${size}`)
+    }
+    const installed = themeIcon('512x512', 'mousse.png')
 
-    const second = sync({ appImage: current, iconSource: icon })
+    const second = sync({ appImage: current, icons: icons('png-1') })
     expect(second).toMatchObject({ created: false, iconChanged: false, launchers: [] })
     expect(refreshed).toHaveLength(1)
 
     // A new build's icon replaces the installed one.
-    writeFileSync(icon, 'png-2')
-    expect(sync({ appImage: current, iconSource: icon }).iconChanged).toBe(true)
-    expect(readFileSync(installed, 'utf8')).toBe('png-2')
+    expect(sync({ appImage: current, icons: icons('png-2') }).iconChanged).toBe(true)
+    expect(readFileSync(installed, 'utf8')).toBe('png-2-512')
+    expect(readFileSync(themeIcon('48x48', 'mousse.png'), 'utf8')).toBe('png-2-48')
     expect(existsSync(`${installed}.${process.pid}.tmp`)).toBe(false)
+  })
+
+  it('gives a nightly its own icon name and removes stale copies of that icon at other sizes', () => {
+    const current = join(apps, 'Mousse-0.1.2-nightly.20261029.22.AppImage')
+    writeFileSync(current, '')
+    const launcher = join(applications, 'mousse.desktop')
+    writeFileSync(launcher, ['[Desktop Entry]', 'Name=Mousse', `Exec=${current} --ozone-platform=x11`, 'Icon=mousse', 'StartupWMClass=Mousse', ''].join('\n'))
+    // A stable icon under the shared name, and stale nightly copies at sizes or formats Mousse does not install.
+    const stable = themeIcon('256x256', 'mousse.png')
+    const staleSizes = [themeIcon('96x96', 'mousse-nightly.png'), themeIcon('scalable', 'mousse-nightly.svg'), themeIcon('256x256@2', 'mousse-nightly.png')]
+    for (const path of [stable, ...staleSizes, themeIcon('48x48', 'mousse-nightly.png')]) {
+      mkdirSync(join(path, '..'), { recursive: true })
+      writeFileSync(path, 'old')
+    }
+
+    const changes = sync({ appImage: current, iconName: launcherIconName('nightly'), icons: icons('nightly') })
+
+    expect(changes.iconChanged).toBe(true)
+    expect(readFileSync(launcher, 'utf8')).toContain('Icon=mousse-nightly\n')
+    expect(readFileSync(launcher, 'utf8')).toContain('StartupWMClass=Mousse')
+    for (const size of LAUNCHER_ICON_SIZES) {
+      expect(readFileSync(themeIcon(`${size}x${size}`, 'mousse-nightly.png'), 'utf8')).toBe(`nightly-${size}`)
+    }
+    for (const path of staleSizes) expect(existsSync(path)).toBe(false)
+    // The stable icon belongs to the stable channel and stays.
+    expect(readFileSync(stable, 'utf8')).toBe('old')
+  })
+
+  it('names the icons by channel', () => {
+    expect(launcherIconName('nightly')).toBe('mousse-nightly')
+    expect(launcherIconName('stable')).toBe('mousse')
   })
 
   it('uses XDG_DATA_HOME when set', () => {
     const data = join(root, 'data')
-    const changes = syncLinuxLauncher({ appImage: join(apps, 'Mousse.AppImage'), env: { XDG_DATA_HOME: data }, home, refresh: () => undefined })
+    const changes = syncLinuxLauncher({
+      appImage: join(apps, 'Mousse.AppImage'),
+      iconName: 'mousse',
+      env: { XDG_DATA_HOME: data },
+      home,
+      refresh: () => undefined
+    })
     expect(changes.launchers).toEqual([join(data, 'applications', 'mousse.desktop')])
   })
 })
