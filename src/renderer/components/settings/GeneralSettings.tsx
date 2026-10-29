@@ -253,9 +253,9 @@ function updateStatus(state: UpdateState): string | undefined {
   }
 }
 
-/** Colours only outcomes: a failure, up to date, or an update ready to install. */
+/** Colours only outcomes: up to date, or an update ready to install. A failure shows in UpdateErrorNotice. */
 function updateStatusClass(state: UpdateState): string | undefined {
-  if (state.phase === 'error' || (state.phase === 'downloaded' && state.error)) return 'settings-status-bad'
+  if (state.phase === 'error' || state.error) return undefined
   if (state.phase === 'up-to-date' || state.phase === 'downloaded') return 'settings-status-ok'
   return undefined
 }
