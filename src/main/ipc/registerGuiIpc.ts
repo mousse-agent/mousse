@@ -134,6 +134,7 @@ import { isThreadActivityActive } from '../../shared/types'
 import { isQualifiedId, parseQualifiedId } from '../../shared/threadRef'
 import type {
   CreatePullRequestResult,
+  PullRequestActionResult,
   PullRequestBaseBranches,
   PullRequestDetail,
   PullRequestDraft,
@@ -2244,6 +2245,24 @@ export function registerGuiIpc(
       draft: input?.draft === true
     })
     return { pullRequest: response.pullRequest, existing: response.existing === true } satisfies CreatePullRequestResult
+  })
+  // Merge and close answer with the pull request read back; a refusal carries the host's own reason.
+  registerHandler('pullRequests:merge', async (_e, ref: PullRequestRef | undefined, number: number, headSha?: string) => {
+    const response = await guiMms.request<PullRequestActionResult>('pullRequests.merge', {
+      ...(typeof ref?.threadId === 'string' ? { threadId: ref.threadId } : {}),
+      ...(typeof ref?.projectId === 'string' ? { projectId: ref.projectId } : {}),
+      number,
+      ...(typeof headSha === 'string' && headSha ? { headSha } : {})
+    })
+    return { pullRequest: response.pullRequest, method: response.method } satisfies PullRequestActionResult
+  })
+  registerHandler('pullRequests:close', async (_e, ref: PullRequestRef | undefined, number: number) => {
+    const response = await guiMms.request<PullRequestActionResult>('pullRequests.close', {
+      ...(typeof ref?.threadId === 'string' ? { threadId: ref.threadId } : {}),
+      ...(typeof ref?.projectId === 'string' ? { projectId: ref.projectId } : {}),
+      number
+    })
+    return { pullRequest: response.pullRequest } satisfies PullRequestActionResult
   })
   registerHandler('pullRequests:baseBranches', async (_e, ref: PullRequestRef | undefined) => {
     const response = await guiMms.request<{ baseBranches: PullRequestBaseBranches }>('pullRequests.baseBranches', {

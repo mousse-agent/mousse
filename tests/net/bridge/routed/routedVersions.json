@@ -409,6 +409,11 @@
     "digest": "be5c180f1cc0b52d",
     "security": "23c8269058d1b9db"
   },
+  "pullRequests.close": {
+    "version": 1,
+    "digest": "cf3ce34633230e04",
+    "security": "6f012c3ca58ce7c5"
+  },
   "pullRequests.create": {
     "version": 1,
     "digest": "5f247d85d6753935",
@@ -438,6 +443,11 @@
     "version": 1,
     "digest": "4a3795e203814b78",
     "security": "066fa977e9dd8084"
+  },
+  "pullRequests.merge": {
+    "version": 1,
+    "digest": "105866599c28e239",
+    "security": "6f012c3ca58ce7c5"
   },
   "pullRequests.pushTarget": {
     "version": 1,

@@ -1,6 +1,7 @@
 import type {
   PullRequestCheck,
   PullRequestDetail,
+  PullRequestMergeMethod,
   PullRequestPushTarget,
   PullRequestReviewDecision,
   PullRequestScope,
@@ -402,11 +403,26 @@ export function pullRequestCheckRows(checks: readonly PullRequestCheck[]): PullR
 /** Shown on a linked pull request of a thread that works in its own worktree. */
 export const LINKED_WORKTREE_HINT = 'Merge back targets the primary checkout, not the PR'
 
+/** What the Merge button of an open pull request does: enabled (and then the one primary action) or dimmed with why. */
+export interface PullRequestMergeAction {
+  enabled: boolean
+  /** Why it is dimmed; null when it is enabled. */
+  reason: string | null
+  /** The head that was shown: a merge is refused if more was pushed since. Null when it is not known. */
+  headSha: string | null
+}
+
 export interface PullRequestFoundRow {
   kind: 'found'
   url: string
   /** "#123" */
   number: string
+  /** The pull request's number, for merging or closing it. */
+  value: number
+  /** The branch it merges into, as named in the merge prompt. */
+  base: string
+  /** Merge and Close for an open pull request; null for a merged or closed one. */
+  merge: PullRequestMergeAction | null
   title: string
   /** Icon for the check state; null when there are no checks or the PR is finished. */
   checks: PullRequestChecksTone | null
@@ -467,7 +483,15 @@ export function pullRequestRow(
   }
   if (lookup.state !== 'found') return null
 
-  const { pullRequest } = lookup
+  return foundRow(lookup.pullRequest, detail, link, worktreeThread)
+}
+
+function foundRow(
+  pullRequest: GitPullRequestInfo,
+  detail: PullRequestDetail | null,
+  link: Pick<ThreadPullRequestLink, 'number'> | null,
+  worktreeThread: boolean
+): PullRequestFoundRow {
   const open = pullRequest.state === 'open'
   const tone = open && pullRequest.checks !== 'none' ? pullRequest.checks : null
   const checks = tone ? checksText(tone, pullRequest.checkCounts) : null
@@ -485,6 +509,9 @@ export function pullRequestRow(
     kind: 'found',
     url: pullRequest.url,
     number,
+    value: pullRequest.number,
+    base: own?.baseRefName || pullRequest.baseRefName || 'the base branch',
+    merge: open ? mergeAction(pullRequest, own) : null,
     title,
     checks: tone,
     checksLabel: checks?.label ?? null,
@@ -496,6 +523,69 @@ export function pullRequestRow(
     tooltip: [title ? `${number} ${title}` : number, review?.label, checks?.label].filter(Boolean).join('\n'),
     ariaLabel: ['Pull request ' + number, title, suffix?.toLowerCase(), review?.label.toLowerCase(), checks?.spoken].filter(Boolean).join(', ')
   }
+}
+
+/**
+ * Whether an open pull request can be merged from the side card: its checks pass (or it has none) and GitHub says it would
+ * merge cleanly. Anything else dims Merge with the reason. `detail` is the same pull request read in full; without it
+ * the host's answer is not known yet.
+ */
+export function mergeAction(pullRequest: GitPullRequestInfo, detail: PullRequestDetail | null): PullRequestMergeAction {
+  const headSha = detail?.headSha || null
+  const dimmed = (reason: string): PullRequestMergeAction => ({ enabled: false, reason, headSha })
+  const base = detail?.baseRefName || pullRequest.baseRefName || 'the base branch'
+  if (pullRequest.isDraft || detail?.mergeState === 'draft') return dimmed('A draft can’t be merged until it is ready for review')
+  if (pullRequest.checks === 'failing') {
+    const count = Math.max(1, pullRequest.checkCounts.failed)
+    return dimmed(`${count} ${count === 1 ? 'check is' : 'checks are'} failing`)
+  }
+  if (pullRequest.checks === 'pending') {
+    const counts = pullRequest.checkCounts
+    return dimmed(counts.waiting > 0 && counts.waiting >= counts.pending ? 'Checks are waiting for approval' : 'Checks are still running')
+  }
+  switch (detail?.mergeState) {
+    case 'clean':
+      return { enabled: true, reason: null, headSha }
+    case 'conflicting':
+      return dimmed(`Has conflicts with ${base}`)
+    case 'behind':
+      return dimmed(`Behind ${base}; update the branch first`)
+    case 'unstable':
+      return dimmed('Some checks are not passing')
+    case 'blocked':
+      if (detail.reviewDecision === 'changes_requested') return dimmed('Changes were requested')
+      if (detail.reviewDecision === 'review_required') return dimmed('Needs an approving review')
+      return dimmed(`Blocked by the rules of ${base}`)
+    default:
+      return dimmed('GitHub is still working out whether it can be merged')
+  }
+}
+
+/**
+ * Every pull request the section lists: the lookup's own (as `pullRequestRow` builds it) and the branch's other ones.
+ * Only the lookup's own has a full read, so only it can say whether it would merge.
+ */
+export function pullRequestRows(
+  lookup: GitPullRequestLookup | null,
+  status: GitStatusSnapshot | null,
+  detail: PullRequestDetail | null = null,
+  link: Pick<ThreadPullRequestLink, 'number'> | null = null,
+  worktreeThread = false
+): PullRequestFoundRow[] {
+  const row = pullRequestRow(lookup, status, detail, link, worktreeThread)
+  if (row?.kind !== 'found' || lookup?.state !== 'found') return []
+  return [row, ...(lookup.others ?? []).map((other) => foundRow(other, null, link, worktreeThread))]
+}
+
+const MERGE_METHOD_WORDS: Record<PullRequestMergeMethod, string> = {
+  merge: 'with a merge commit',
+  squash: 'squashed into one commit',
+  rebase: 'rebased onto the base branch'
+}
+
+/** Said once a merge went through: "Merged #12 squashed into one commit." */
+export function mergedNotice(number: number, method: PullRequestMergeMethod | undefined): string {
+  return method ? `Merged #${number} ${MERGE_METHOD_WORDS[method]}.` : `Merged #${number}.`
 }
 
 /** Pull requests shown before "Show N more". */
@@ -861,7 +951,7 @@ export function chooseAmend(form: CommitForm, checked: boolean): CommitForm {
 /** Why mutating Git controls are disabled while one action runs. */
 export const GIT_BUSY_REASON = 'Another Git action is running'
 
-export type GitAction = 'checkout' | 'branch' | 'commit' | 'push' | 'pullRequest' | 'init'
+export type GitAction = 'checkout' | 'branch' | 'commit' | 'push' | 'pullRequest' | 'merge' | 'close' | 'init'
 
 export interface GitActionLock {
   disabled: boolean

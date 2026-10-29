@@ -46,6 +46,7 @@ const LONG_METHODS = new Set([
   'publish.start',
   'pullRequests.create',
   'pullRequests.draft',
+  'pullRequests.merge',
   'actions.undoLatest',
   'actions.redo',
   'actions.revertCode',

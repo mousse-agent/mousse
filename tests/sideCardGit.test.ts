@@ -15,7 +15,10 @@ import {
   gitErrorCode,
   gitErrorMessage,
   commitMenuState,
+  mergeAction,
+  mergedNotice,
   pullRequestRow,
+  pullRequestRows,
   relativeTime,
   untrackedFileCount
 } from '../src/renderer/components/sideCard/gitSectionLogic'
@@ -39,8 +42,7 @@ import {
 } from '../src/renderer/stores/gitStatusStore'
 import { anyTurnEnded } from '../src/renderer/lib/turnEnded'
 import { useAppStore } from '../src/renderer/stores/appStore'
-import type { PullRequestComment, PullRequestDetail, PullRequestWatchStatus } from '../src/shared/pullRequests'
-import { inTime, pullRequestWatchModel } from '../src/renderer/components/sideCard/pullRequestWatchLogic'
+import type { PullRequestComment, PullRequestDetail } from '../src/shared/pullRequests'
 import type {
   GitBranchInfo,
   GitCommit,
@@ -852,26 +854,6 @@ describe('the pull request row opens the panel', () => {
   })
   afterEach(() => vi.unstubAllGlobals())
 
-  it('opens the Pull request surface from the title and number', () => {
-    const [main] = buttonsIn(PullRequestLink({ row: foundRow() }))
-    expect(main.props.className).toBe('side-card-git-pr')
-    main.props.onClick?.()
-    expect(useAppStore.getState().mainView).toBe('pullRequest')
-    expect(useAppStore.getState().openedSurfaceKinds).toContain('pullRequest')
-  })
-
-  it('has a separate button that opens the pull request on the host in the browser, and leaves the app where it is', () => {
-    const open = vi.fn()
-    vi.stubGlobal('window', { open })
-    const row = foundRow()
-    const buttons = buttonsIn(PullRequestLink({ row }))
-    const external = buttons.find((button) => button.props.className === 'side-card-git-pr-external')
-    expect(external?.props['aria-label']).toBe('Open pull request #7 on GitHub')
-    external?.props.onClick?.()
-    expect(open).toHaveBeenCalledWith(row.url, '_blank', 'noopener,noreferrer')
-    expect(useAppStore.getState().mainView).toBe('git')
-  })
-
   it('renders both buttons in the side card, the first still named for the pull request', () => {
     const html = renderToStaticMarkup(createElement(GitSectionView, {
       threadId: 't1',
@@ -895,43 +877,48 @@ describe('the pull request row opens the panel', () => {
   })
 })
 
-describe('the watch of the pull request in the side card', () => {
-  const NOW = Date.parse('2026-10-27T10:00:00Z')
-  const status = (patch: Partial<PullRequestWatchStatus> = {}): PullRequestWatchStatus => ({
-    threadId: 't1',
-    mode: 'notify',
-    state: 'watching',
-    nextCheckAt: '2026-10-27T10:04:00Z',
-    ended: null,
-    viewer: 'ada',
-    host: 'github.com',
-    actRefusal: null,
-    ...patch
+describe('Merge and Close on a pull request row', () => {
+  const ready = prDetail({ checks: 'passing', checkCounts: { passed: 3, failed: 0, pending: 0, waiting: 0, total: 3 }, mergeState: 'clean' })
+
+  it('lets an open pull request merge once its checks pass and GitHub would merge it, guarding the shown head', () => {
+    expect(mergeAction(ready, ready)).toEqual({ enabled: true, reason: null, headSha: 'abc1234' })
+    expect(mergeAction(prDetail({ checks: 'none', checkCounts: { passed: 0, failed: 0, pending: 0, waiting: 0, total: 0 }, mergeState: 'clean' }), prDetail({ mergeState: 'clean' })).enabled).toBe(true)
   })
 
-  it('offers Off, Notify and Let the agent act, and says what the watch is doing', () => {
-    const model = pullRequestWatchModel(status(), NOW)
-    expect(model.options.map((option) => option.label)).toEqual(['Off', 'Notify', 'Let the agent act'])
-    expect(model).toMatchObject({ mode: 'notify', watching: true, summary: 'Watching · next check in 4m' })
-    expect(model.viewerLine).toBe('Comments by ada on github.com are not reported.')
-    expect(pullRequestWatchModel(null, NOW)).toMatchObject({ mode: 'off', watching: false, summary: null, viewerLine: null, endedLine: null })
-    expect(pullRequestWatchModel(status({ state: 'paused', nextCheckAt: '2026-10-27T10:10:00Z' }), NOW).summary).toBe('Waiting for GitHub · next check in 10m')
+  it('dims Merge with the reason otherwise', () => {
+    const reason = (patch: Partial<PullRequestDetail>) => {
+      const pr = { ...ready, ...patch }
+      return mergeAction(pr, pr).reason
+    }
+    expect(reason({ isDraft: true })).toBe('A draft can’t be merged until it is ready for review')
+    expect(reason({ checks: 'failing', checkCounts: { passed: 1, failed: 2, pending: 0, waiting: 0, total: 3 } })).toBe('2 checks are failing')
+    expect(reason({ checks: 'pending', checkCounts: { passed: 1, failed: 0, pending: 1, waiting: 0, total: 2 } })).toBe('Checks are still running')
+    expect(reason({ checks: 'pending', checkCounts: { passed: 1, failed: 0, pending: 1, waiting: 1, total: 2 } })).toBe('Checks are waiting for approval')
+    expect(reason({ mergeState: 'conflicting' })).toBe('Has conflicts with main')
+    expect(reason({ mergeState: 'behind' })).toBe('Behind main; update the branch first')
+    expect(reason({ mergeState: 'blocked', reviewDecision: 'review_required' })).toBe('Needs an approving review')
+    expect(reason({ mergeState: 'blocked', reviewDecision: 'changes_requested' })).toBe('Changes were requested')
+    expect(reason({ mergeState: 'blocked' })).toBe('Blocked by the rules of main')
+    expect(reason({ mergeState: 'unknown' })).toBe('GitHub is still working out whether it can be merged')
+    expect(mergeAction(ready, null)).toMatchObject({ enabled: false, headSha: null })
   })
 
-  it('disables acting on a subagent thread with the reason, and names why a watch ended', () => {
-    const refusal = "A subagent thread can only be notified: a pending notice would hold its parent's task open"
-    const model = pullRequestWatchModel(status({ actRefusal: refusal }), NOW)
-    expect(model.options.find((option) => option.mode === 'act')?.disabledReason).toBe(refusal)
-    expect(model.options.find((option) => option.mode === 'notify')?.disabledReason).toBeNull()
-    const ended = pullRequestWatchModel(status({ mode: 'off', state: 'ended', ended: { reason: 'merged', at: '2026-10-27T09:59:00Z' } }), NOW)
-    expect(ended).toMatchObject({ mode: 'off', watching: false, endedLine: 'The pull request was merged, so the watch ended.' })
+  it('offers nothing on a merged or closed pull request', () => {
+    expect(pullRequestRow({ state: 'found', pullRequest: prDetail({ state: 'merged' }) }, null)).toMatchObject({ kind: 'found', merge: null })
+    expect(pullRequestRow({ state: 'found', pullRequest: prDetail({ state: 'closed' }) }, null)).toMatchObject({ kind: 'found', merge: null })
   })
 
-  it('formats the wait in seconds and minutes', () => {
-    expect(inTime('2026-10-27T10:00:30Z', NOW)).toBe('in 30s')
-    expect(inTime('2026-10-27T10:10:00Z', NOW)).toBe('in 10m')
-    expect(inTime('2026-10-27T09:59:00Z', NOW)).toBe('now')
-    expect(inTime(null, NOW)).toBe('now')
+  it('lists the branch\'s other pull requests after its own, each with its own action', () => {
+    const older = prDetail({ number: 5, title: 'First try', state: 'merged' })
+    const rows = pullRequestRows({ state: 'found', pullRequest: ready, others: [older] }, null, ready)
+    expect(rows.map((row) => [row.number, row.state, row.merge?.enabled ?? null])).toEqual([['#7', 'open', true], ['#5', 'merged', null]])
+    expect(pullRequestRows({ state: 'none', isDefaultBranch: false }, null)).toEqual([])
+  })
+
+  it('says how a merge went through', () => {
+    expect(mergedNotice(7, 'squash')).toBe('Merged #7 squashed into one commit.')
+    expect(mergedNotice(7, 'merge')).toBe('Merged #7 with a merge commit.')
+    expect(mergedNotice(7, undefined)).toBe('Merged #7.')
   })
 
   const sectionWith = (props: Record<string, unknown>) => renderToStaticMarkup(createElement(GitSectionView, {
@@ -940,32 +927,25 @@ describe('the watch of the pull request in the side card', () => {
     projectId: 'p1',
     path: '/repo/a',
     git: { ...EMPTY_GIT_ENTRY, loaded: true, refresh: async () => undefined, status: repoStatus({ branch: 'feature/retry' }) },
-    pullRequest: { state: 'found', pullRequest: prDetail() },
-    pullRequestDetail: prDetail(),
+    pullRequest: { state: 'found', pullRequest: ready },
+    pullRequestDetail: ready,
     collapsedLabel: null,
-    now: NOW,
     ...props
   }))
 
-  it('shows the control under the pull request, with the viewer line and the next check', () => {
-    const html = sectionWith({ pullRequestWatch: status(), onWatchChange: async () => undefined })
-    expect(html).toContain('side-card-git-pr-watch')
-    expect(html).toMatch(/role="radio"[^>]*aria-checked="true"[^>]*>Notify</)
-    expect(html).toContain('Watching · next check in 4m')
-    expect(html).toContain('Comments by ada on github.com are not reported.')
+  it('shows Merge as the primary action and Close beside it, and no watch control', () => {
+    const html = sectionWith({})
+    expect(html).toMatch(/class="side-card-git-pr-merge"[^>]*data-ready="true"/)
+    expect(html).toContain('aria-label="Close pull request #7"')
+    expect(html).not.toContain('Watch')
+    expect(html).not.toContain('Let the agent act')
   })
 
-  it('is hidden without a pull request, for a merged one, and for a thread that is not its own', () => {
-    expect(sectionWith({ onWatchChange: async () => undefined, pullRequest: { state: 'none', isDefaultBranch: false }, pullRequestDetail: null })).not.toContain('side-card-git-pr-watch')
-    expect(sectionWith({ onWatchChange: async () => undefined, pullRequest: { state: 'found', pullRequest: prDetail({ state: 'merged' }) } })).not.toContain('side-card-git-pr-watch')
-    expect(sectionWith({ onWatchChange: async () => undefined, ownThreadId: null })).not.toContain('side-card-git-pr-watch')
-    expect(sectionWith({})).not.toContain('side-card-git-pr-watch')
-  })
-
-  it('marks the chosen option with a background, never an edge bar', () => {
-    const css = readFileSync(resolve(__dirname, '../src/renderer/components/sideCard/gitSection.css'), 'utf8')
-    const rule = /\.side-card-git-pr-watch-option\[aria-checked='true'\]\s*\{([^}]*)\}/.exec(css)
-    expect(rule?.[1]).toMatch(/background:/)
-    expect(rule?.[1]).not.toMatch(/border|shadow|outline/)
+  it('dims Merge with the reason as its tooltip, and shows no actions on a merged pull request', () => {
+    const failing = sectionWith({ pullRequest: { state: 'found', pullRequest: prDetail() }, pullRequestDetail: prDetail() })
+    expect(failing).toMatch(/class="side-card-git-pr-merge"[^>]*title="1 check is failing"[^>]*aria-disabled="true"/)
+    const merged = sectionWith({ pullRequest: { state: 'found', pullRequest: prDetail({ state: 'merged' }) }, pullRequestDetail: null })
+    expect(merged).not.toContain('side-card-git-pr-merge')
+    expect(merged).not.toContain('side-card-git-pr-close')
   })
 })

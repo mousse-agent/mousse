@@ -78,6 +78,7 @@ import type {
 } from '../shared/types'
 import type {
   CreatePullRequestResult,
+  PullRequestActionResult,
   PullRequestBaseBranches,
   PullRequestDetail,
   PullRequestDraft,
@@ -530,6 +531,12 @@ const api = {
       ipcRenderer.invoke('pullRequests:draft', scope, base),
     create: (scope: PullRequestScope, input: PullRequestFormInput): Promise<CreatePullRequestResult> =>
       ipcRenderer.invoke('pullRequests:create', scope, input),
+    /** Merges the pull request with the repository's usual method; `headSha` refuses when its head moved since. */
+    merge: (ref: PullRequestRef, number: number, headSha?: string): Promise<PullRequestActionResult> =>
+      ipcRenderer.invoke('pullRequests:merge', ref, number, headSha),
+    /** Closes the pull request without merging it; its branch stays. */
+    close: (ref: PullRequestRef, number: number): Promise<PullRequestActionResult> =>
+      ipcRenderer.invoke('pullRequests:close', ref, number),
     baseBranches: (ref: PullRequestRef): Promise<PullRequestBaseBranches> =>
       ipcRenderer.invoke('pullRequests:baseBranches', ref),
     /** The project's open pull requests, most recently updated first. */

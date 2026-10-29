@@ -23,13 +23,12 @@ import {
   pullRequestKey,
   refreshPullRequest,
   refreshPullRequestDetail,
-  refreshPullRequestWatch,
-  refreshWatchedPullRequest,
   retainPullRequest,
   retainPullRequestDetail,
   setPullRequestTracked,
-  setPullRequestWatch,
   submitCreatePullRequest,
+  mergePullRequest,
+  closePullRequest,
   useGitPullRequestStore
 } from '../src/renderer/stores/pullRequestStore'
 import type { GitPullRequestInfo, PullRequestDetail, PullRequestScope } from '../src/shared/pullRequests'
@@ -986,55 +985,53 @@ describe('commit, push and open PR through the git store', () => {
   })
 })
 
-describe('the watch state of a thread', () => {
-  const status = (mode: 'off' | 'notify' | 'act') => ({ threadId: 't1', mode, state: mode === 'off' ? 'off' : 'watching', nextCheckAt: null, ended: null, viewer: null, host: 'github.com', actRefusal: null })
-
+describe('merging and closing a pull request', () => {
   beforeEach(() => {
-    useGitPullRequestStore.setState({ entries: {}, details: {}, watches: {} })
+    useGitPullRequestStore.setState({ entries: {}, details: {} })
   })
   afterEach(() => {
     vi.unstubAllGlobals()
   })
 
-  const installWatch = (watch: ReturnType<typeof vi.fn>, watchStatus = vi.fn(async () => status('notify'))) => {
+  const installActions = (merge: ReturnType<typeof vi.fn>, close: ReturnType<typeof vi.fn> = vi.fn()) => {
     const git = install()
     vi.stubGlobal('window', {
-      ...(globalThis as unknown as { window: { mousse: { pullRequests: object } } }).window,
-      mousse: { pullRequests: { get: git.pullRequest, detail: git.detail, watch, watchStatus } }
+      ...(globalThis as unknown as { window: object }).window,
+      mousse: { pullRequests: { get: git.pullRequest, detail: git.detail, merge, close } }
     })
-    return { git, watchStatus }
+    return git
   }
 
-  it('keeps what the daemon answered, and passes the number to link by', async () => {
-    const watch = vi.fn(async () => status('act'))
-    installWatch(watch)
-    await setPullRequestWatch('t1', 'act', 7)
-    expect(watch).toHaveBeenCalledWith('t1', 'act', 7)
-    expect(useGitPullRequestStore.getState().watches.t1).toMatchObject({ mode: 'act' })
-  })
-
-  it('shows the daemon refusal to the caller and keeps the old state', async () => {
-    useGitPullRequestStore.setState({ watches: { t1: status('notify') } as never })
-    installWatch(vi.fn(async () => { throw new Error('A subagent thread can only be notified') }))
-    await expect(setPullRequestWatch('t1', 'act', 7)).rejects.toThrow('only be notified')
-    expect(useGitPullRequestStore.getState().watches.t1).toMatchObject({ mode: 'notify' })
-  })
-
-  it('reads the state without ever rejecting', async () => {
-    installWatch(vi.fn(), vi.fn(async () => { throw new Error('daemon gone') }))
-    await expect(refreshPullRequestWatch('t1')).resolves.toBeUndefined()
-    expect(useGitPullRequestStore.getState().watches.t1).toBeUndefined()
-  })
-
-  it('reads a watched pull request again at once, everywhere it is shown, and the watch state with it', async () => {
-    const { git, watchStatus } = installWatch(vi.fn())
-    const release = retainPullRequestDetail('/repo/a', 7, 'p1', 't1')
-    const other = retainPullRequestDetail('/repo/b', 8, 'p1')
-    refreshWatchedPullRequest('t1', 7)
-    await vi.waitFor(() => expect(git.detail).toHaveBeenCalledTimes(1))
+  it('merges as the thread, shows the merged state at once and reads the lookup and detail again', async () => {
+    const merged = { ...lookupInfo(7), state: 'merged' as const }
+    const merge = vi.fn(async () => ({ pullRequest: merged, method: 'squash' }))
+    const git = installActions(merge)
+    git.pullRequest.mockImplementation(async () => new Promise(() => {}))
+    useGitPullRequestStore.setState({ entries: { [pullRequestKey('/repo/a', 'feature')]: { lookup: lookup(7), fetchedAt: 1 } } })
+    const result = await mergePullRequest({ path: '/repo/a', branch: 'feature', number: 7, threadId: 't1', projectId: 'p1' }, 'abc1234')
+    expect(result.method).toBe('squash')
+    expect(merge).toHaveBeenCalledWith({ threadId: 't1' }, 7, 'abc1234')
+    expect(entry('/repo/a', 'feature').lookup).toMatchObject({ state: 'found', pullRequest: { number: 7, state: 'merged' } })
+    expect(git.pullRequest).toHaveBeenCalledWith({ threadId: 't1' }, 'feature', true)
     expect(git.detail).toHaveBeenCalledWith({ threadId: 't1' }, 7, true)
-    await vi.waitFor(() => expect(watchStatus).toHaveBeenCalledWith('t1'))
-    release()
-    other()
+  })
+
+  it('updates an earlier pull request of the branch in place', async () => {
+    const close = vi.fn(async () => ({ pullRequest: { ...lookupInfo(5), state: 'closed' as const } }))
+    const git = installActions(vi.fn(), close)
+    git.pullRequest.mockImplementation(async () => new Promise(() => {}))
+    const both: GitPullRequestLookup = { state: 'found', pullRequest: lookupInfo(7), others: [lookupInfo(5)] }
+    useGitPullRequestStore.setState({ entries: { [pullRequestKey('/repo/a', 'feature')]: { lookup: both, fetchedAt: 1 } } })
+    await closePullRequest({ path: '/repo/a', branch: 'feature', number: 5, projectId: 'p1' })
+    expect(close).toHaveBeenCalledWith({ projectId: 'p1' }, 5)
+    expect(entry('/repo/a', 'feature').lookup).toMatchObject({ pullRequest: { number: 7, state: 'open' }, others: [{ number: 5, state: 'closed' }] })
+  })
+
+  it('rejects with the host\'s reason and changes nothing', async () => {
+    const git = installActions(vi.fn(async () => { throw new Error('Pull request acme/app#7 is not mergeable: the base branch policy prohibits the merge.') }))
+    useGitPullRequestStore.setState({ entries: { [pullRequestKey('/repo/a', 'feature')]: { lookup: lookup(7), fetchedAt: 1 } } })
+    await expect(mergePullRequest({ path: '/repo/a', branch: 'feature', number: 7, projectId: 'p1' })).rejects.toThrow('not mergeable')
+    expect(entry('/repo/a', 'feature').lookup).toEqual(lookup(7))
+    expect(git.pullRequest).not.toHaveBeenCalled()
   })
 })

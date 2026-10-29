@@ -35,10 +35,9 @@ import {
   type CommitPhase,
   type GitStatusView
 } from '../../stores/gitStatusStore'
-import { createPullRequestForBranch, setPullRequestWatch, useGitPullRequestStore, useThreadPullRequestWatch } from '../../stores/pullRequestStore'
-import type { PullRequestDetail, PullRequestPushTarget, PullRequestScope, PullRequestWatchMode, PullRequestWatchStatus, ThreadPullRequestLink } from '../../../shared/pullRequests'
+import { closePullRequest, createPullRequestForBranch, mergePullRequest, useGitPullRequestStore } from '../../stores/pullRequestStore'
+import type { PullRequestDetail, PullRequestPushTarget, PullRequestScope, ThreadPullRequestLink } from '../../../shared/pullRequests'
 import { usePullRequestPushTarget } from './usePullRequestPushTarget'
-import { PullRequestWatchControl } from './PullRequestWatchControl'
 import { gitScopeFor } from '../../lib/activeProject'
 import type { GitCommit, GitPullRequestLookup, GitScope } from '../../../shared/types'
 import { Switch } from '../settings/SettingsRow'
@@ -83,6 +82,7 @@ import {
   emptyCommitForm,
   existingPullRequestNotice,
   forceAmend,
+  GIT_BUSY_REASON,
   GIT_CHECKING_LABEL,
   gitActionAvailability,
   gitActionLock,
@@ -93,8 +93,11 @@ import {
   localBranchNames,
   openPullRequestFailedMessage,
   prefillAmendDraft,
+  mergedNotice,
   pullRequestList,
+  pullRequestReadThreadId,
   pullRequestRow,
+  pullRequestRows,
   pullRequestScope,
   pushButtonModel,
   pushFailedMessage,
@@ -770,54 +773,159 @@ const PULL_REQUEST_ICONS = {
   closed: GitPullRequestClosed
 } as const
 
+/** Merge or close one pull request; resolves with the reason it failed, or null once it is done. */
+export type PullRequestChange = (action: 'merge' | 'close', row: PullRequestFoundRow) => Promise<string | null>
+
+interface PullRequestLinkProps {
+  row: PullRequestFoundRow
+  /** The Git action running in the section, if any: one at a time. */
+  running?: GitAction | null
+  onChange?: PullRequestChange
+}
+
 /**
- * One of the thread's pull requests: an icon coloured by its state, the title in bold over at most two lines,
- * and the number with its checks on a quiet line. The row opens the pull request panel; the arrow opens it on the host.
+ * One of the thread's pull requests: an icon coloured by its state, the title in bold over at most two lines, and the
+ * number with its checks on a quiet line. The title opens the pull request panel; the arrow opens it on the host. An open
+ * pull request has Merge (the primary action once GitHub would merge it; dimmed with the reason otherwise) and Close,
+ * each confirmed first.
  */
-export function PullRequestLink({ row }: { row: PullRequestFoundRow }) {
+export function PullRequestLink({ row, running = null, onChange }: PullRequestLinkProps) {
   const Icon = PULL_REQUEST_ICONS[row.state]
+  const [confirm, setConfirm] = useState<'merge' | 'close' | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const mergeRef = useRef<HTMLButtonElement>(null)
+  const closeRef = useRef<HTMLButtonElement>(null)
+  const cancelRef = useRef<HTMLButtonElement>(null)
+  const merge = row.merge
+  const working = confirm !== null && running === confirm
+  const busy = running !== null && !working
+  const ask = (action: 'merge' | 'close') => {
+    setError(null)
+    setConfirm(action)
+  }
+  // The prompt takes focus when it opens, on Cancel: nothing final happens on a stray Enter.
+  useEffect(() => {
+    if (confirm) cancelRef.current?.focus()
+  }, [confirm])
+  // The row's buttons come back once the prompt is gone; focus returns to the one that opened it.
+  const dismiss = () => {
+    if (working || !confirm) return
+    const back = confirm === 'close' ? closeRef : mergeRef
+    setConfirm(null)
+    setError(null)
+    requestAnimationFrame(() => back.current?.focus())
+  }
+  const run = async () => {
+    if (!confirm || !onChange || running !== null) return
+    setError(null)
+    const failure = await onChange(confirm, row)
+    if (failure) setError(failure)
+    else setConfirm(null)
+  }
   return (
-    <div className="side-card-git-pr-line">
-      <button
-        type="button"
-        className="side-card-git-pr"
-        title={row.tooltip}
-        aria-label={row.ariaLabel}
-        onClick={() => openSurface('pullRequest')}
-      >
-        <Icon className="side-card-git-pr-icon" data-state={row.state} size={14} strokeWidth={1.8} aria-hidden="true" />
-        <span className="side-card-git-pr-text">
+    <div className="side-card-git-pr-item">
+      <div className="side-card-git-pr-line">
+        <button
+          type="button"
+          className="side-card-git-pr"
+          title={row.tooltip}
+          aria-label={row.ariaLabel}
+          onClick={() => openSurface('pullRequest')}
+        >
+          <Icon className="side-card-git-pr-icon" data-state={row.state} size={14} strokeWidth={1.8} aria-hidden="true" />
           <span className="side-card-git-pr-title">{row.title || row.number}</span>
-          <span className="side-card-git-pr-meta">
-            <span className="side-card-git-pr-number">{row.number}</span>
-            {row.checks === 'passing' && <CircleCheck className="side-card-git-pr-check" data-checks="passing" size={13} strokeWidth={1.8} aria-hidden="true" />}
-            {row.checks === 'failing' && <CircleX className="side-card-git-pr-check" data-checks="failing" size={13} strokeWidth={1.8} aria-hidden="true" />}
-            {row.checks === 'pending' && <span className="side-card-git-pr-pending" aria-hidden="true" />}
-            {row.suffix && <span className="side-card-git-pr-suffix">{row.suffix}</span>}
+        </button>
+        <button
+          type="button"
+          className="side-card-git-pr-external"
+          title="Open on GitHub"
+          aria-label={`Open pull request ${row.number} on GitHub`}
+          onClick={() => openWeb(row.url)}
+        >
+          <ExternalLink size={13} strokeWidth={2} aria-hidden="true" />
+        </button>
+      </div>
+      <div className="side-card-git-pr-meta">
+        <span className="side-card-git-pr-number">{row.number}</span>
+        {row.checks === 'passing' && <CircleCheck className="side-card-git-pr-check" data-checks="passing" size={13} strokeWidth={1.8} aria-hidden="true" />}
+        {row.checks === 'failing' && <CircleX className="side-card-git-pr-check" data-checks="failing" size={13} strokeWidth={1.8} aria-hidden="true" />}
+        {row.checks === 'pending' && <span className="side-card-git-pr-pending" aria-hidden="true" />}
+        {row.suffix && <span className="side-card-git-pr-suffix">{row.suffix}</span>}
+        {/* While a prompt asks, its own buttons stand in for these. */}
+        {merge && onChange && !confirm && (
+          <span className="side-card-git-pr-actions">
+            <button
+              ref={closeRef}
+              type="button"
+              className="side-card-git-pr-close"
+              title={busy ? GIT_BUSY_REASON : 'Close pull request'}
+              aria-label={`Close pull request ${row.number}`}
+              aria-disabled={busy || undefined}
+              onClick={() => { if (!busy) ask('close') }}
+            >
+              <GitPullRequestClosed size={13} strokeWidth={1.8} aria-hidden="true" />
+            </button>
+            <button
+              ref={mergeRef}
+              type="button"
+              className="side-card-git-pr-merge"
+              data-ready={merge.enabled || undefined}
+              title={busy ? GIT_BUSY_REASON : merge.reason ?? `Merge ${row.number}`}
+              aria-label={merge.reason ? `Merge pull request ${row.number}: ${merge.reason}` : `Merge pull request ${row.number}`}
+              aria-disabled={!merge.enabled || busy || undefined}
+              onClick={() => { if (merge.enabled && !busy) ask('merge') }}
+            >
+              <GitMerge size={13} strokeWidth={1.8} aria-hidden="true" />
+              <span>Merge</span>
+            </button>
           </span>
-        </span>
-      </button>
-      <button
-        type="button"
-        className="side-card-git-pr-external"
-        title="Open on GitHub"
-        aria-label={`Open pull request ${row.number} on GitHub`}
-        onClick={() => openWeb(row.url)}
-      >
-        <ExternalLink size={13} strokeWidth={2} aria-hidden="true" />
-      </button>
+        )}
+      </div>
+      {confirm && (
+        <div
+          className="side-card-git-pr-confirm"
+          role="group"
+          aria-label={confirm === 'close' ? `Close ${row.number}` : `Merge ${row.number}`}
+          onKeyDown={(event) => {
+            if (event.key !== 'Escape') return
+            event.preventDefault()
+            event.stopPropagation()
+            dismiss()
+          }}
+        >
+          <p className="side-card-git-pr-confirm-text">
+            {confirm === 'close' ? `Close ${row.number} without merging? Its branch stays.` : `Merge ${row.number} into ${row.base}?`}
+          </p>
+          {error && <p className="side-card-git-error" role="alert" title={error}>{error}</p>}
+          <div className="side-card-git-pr-confirm-actions">
+            <button ref={cancelRef} type="button" className="side-card-git-submit side-card-git-submit-quiet" disabled={working} onClick={dismiss}>
+              Cancel
+            </button>
+            {confirm === 'merge' ? (
+              <button type="button" className="side-card-git-pr-merge" data-ready aria-busy={working} disabled={running !== null} onClick={() => void run()}>
+                <GitMerge size={13} strokeWidth={1.8} aria-hidden="true" />
+                <span>{working ? 'Merging…' : 'Merge'}</span>
+              </button>
+            ) : (
+              <button type="button" className="side-card-git-submit" aria-busy={working} disabled={running !== null} onClick={() => void run()}>
+                {working ? 'Closing…' : 'Close pull request'}
+              </button>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   )
 }
 
 /** The thread's pull requests, newest first; the rest wait behind "Show N more". */
-export function PullRequestList({ rows }: { rows: readonly PullRequestFoundRow[] }) {
+export function PullRequestList({ rows, running = null, onChange }: { rows: readonly PullRequestFoundRow[]; running?: GitAction | null; onChange?: PullRequestChange }) {
   const [expanded, setExpanded] = useState(false)
   const { shown, hidden } = pullRequestList(rows, expanded)
   if (shown.length === 0) return null
   return (
     <div className="side-card-git-prs">
-      {shown.map((row) => <PullRequestLink key={row.number} row={row} />)}
+      {shown.map((row) => <PullRequestLink key={row.number} row={row} running={running} onChange={onChange} />)}
       {hidden > 0 && (
         <button type="button" className="side-card-git-pr-more" aria-expanded={false} onClick={() => setExpanded(true)}>
           <ChevronDown size={12} aria-hidden="true" />
@@ -848,16 +956,10 @@ interface GitSectionViewProps {
   pullRequestLink?: ThreadPullRequestLink | null
   /** Where Push goes for a thread linked to a pull request; null when it keeps its usual target. */
   pullRequestPushTarget?: PullRequestPushTarget | null
-  /** What the thread's watch of its pull request is doing; null until it is known. */
-  pullRequestWatch?: PullRequestWatchStatus | null
-  /** Sets the watch (`number` links the pull request the row found by its branch). Without it the control is not shown. */
-  onWatchChange?: (mode: PullRequestWatchMode, number: number) => Promise<unknown>
   /** When set, the section shows only this muted line, and starts collapsed once the folder is known to have no repository. */
   collapsedLabel: string | null
   /** The folder is not a repository, so the collapsed section offers to make it one. */
   canInitialize?: boolean
-  /** Clock for the watch control; tests pin it. */
-  now?: number
 }
 
 /** The section's markup, given its data. `GitSection` supplies the data. */
@@ -873,11 +975,8 @@ export function GitSectionView({
   pullRequestError = null,
   pullRequestLink = null,
   pullRequestPushTarget = null,
-  pullRequestWatch = null,
-  onWatchChange,
   collapsedLabel,
-  canInitialize = false,
-  now
+  canInitialize = false
 }: GitSectionViewProps) {
   const scope = useMemo(() => gitScopeFor({ projectId, workspaceThreadId }), [projectId, workspaceThreadId])
   const [running, setRunning] = useState<GitAction | null>(null)
@@ -979,10 +1078,28 @@ export function GitSectionView({
   const availability = gitActionAvailability(git.status, pullRequest, git.commits.length, scope)
   const prRow = pullRequestRow(pullRequest, git.status, pullRequestDetail, pullRequestLink, workspaceThreadId !== null)
   const createLock = gitActionLock(running, 'pullRequest')
-  // Only an open pull request is worth watching, and only a thread of its own can be told about it.
-  const watchedNumber = ownThreadId !== null && pullRequest?.state === 'found' && pullRequest.pullRequest.state === 'open' ? pullRequest.pullRequest.number : null
   const branchActions = branchActionState(scope.workspaceThreadId)
-  const pullRequestRows = prRow?.kind === 'found' ? [prRow] : []
+  const rows = pullRequestRows(pullRequest, git.status, pullRequestDetail, pullRequestLink, workspaceThreadId !== null)
+  // Read as the same thread or project the section's lookup was, so a thread on another computer merges there.
+  const readThreadId = pullRequestReadThreadId(ownThreadId, workspaceThreadId)
+  const changePullRequest: PullRequestChange = async (action, row) => {
+    if (!begin(action)) return GIT_BUSY_REASON
+    const target = { path, branch, number: row.value, ...(readThreadId ? { threadId: readThreadId } : projectId ? { projectId } : {}) }
+    try {
+      if (action === 'merge') {
+        const result = await mergePullRequest(target, row.merge?.headSha ?? undefined)
+        setNotice(mergedNotice(row.value, result.method))
+      } else {
+        await closePullRequest(target)
+        setNotice(`Closed ${row.number}.`)
+      }
+      return null
+    } catch (error) {
+      return gitErrorMessage(error)
+    } finally {
+      end()
+    }
+  }
 
   return (
     <SideCardSection title="Git" threadId={threadId} collapseKey={GIT_KEY}>
@@ -1040,15 +1157,12 @@ export function GitSectionView({
         scope={createForm && createForm.path === path && createForm.branch === branch ? createForm : null}
         anchorRef={rowRef}
       />
-      <PullRequestList key={`${path}\u0000${branch ?? ''}`} rows={pullRequestRows} />
+      <PullRequestList key={`${path}\u0000${branch ?? ''}`} rows={rows} running={running} onChange={changePullRequest} />
       {prRow?.kind === 'found' && prRow.hint && <p className="side-card-git-pr-hint">{prRow.hint}</p>}
       {pullRequestError && (
         <p className="side-card-git-pr-error" role="alert" title={pullRequestError}>
           {pullRequestError}
         </p>
-      )}
-      {onWatchChange && watchedNumber !== null && (
-        <PullRequestWatchControl status={pullRequestWatch} now={now} onChange={(mode) => onWatchChange(mode, watchedNumber)} />
       )}
       {actionError && (
         <p className="side-card-git-error" role="alert" title={actionError}>
@@ -1091,9 +1205,6 @@ export function GitSection({ threadId }: SideCardSectionContext) {
   }
   const collapsedLabel = gitCollapsedLabel(collapse)
   const pullRequestPushTarget = usePullRequestPushTarget(location.workspaceThreadId, link)
-  const watchActive = ownThreadId !== null && pullRequest?.state === 'found' && pullRequest.pullRequest.state === 'open'
-  const pullRequestWatch = useThreadPullRequestWatch(ownThreadId, watchActive)
-  const onWatchChange = ownThreadId ? (mode: PullRequestWatchMode, number: number) => setPullRequestWatch(ownThreadId, mode, number) : undefined
   return (
     <GitSectionView
       threadId={threadId}
@@ -1107,8 +1218,6 @@ export function GitSection({ threadId }: SideCardSectionContext) {
       pullRequestError={detailError}
       pullRequestLink={link}
       pullRequestPushTarget={pullRequestPushTarget}
-      pullRequestWatch={pullRequestWatch}
-      onWatchChange={onWatchChange}
       collapsedLabel={collapsedLabel}
       canInitialize={canInitRepository(collapse)}
     />

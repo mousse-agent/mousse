@@ -307,6 +307,10 @@ describe('pull request row', () => {
       kind: 'found',
       url: 'https://github.com/acme/app/pull/123',
       number: '#123',
+      value: 123,
+      base: expect.any(String),
+      // Without the full read GitHub's answer is not known yet, so Merge waits.
+      merge: { enabled: false, reason: 'GitHub is still working out whether it can be merged', headSha: null },
       title: 'Fix login',
       checks: 'passing',
       checksLabel: 'Checks passed',

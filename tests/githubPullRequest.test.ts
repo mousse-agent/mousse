@@ -10,6 +10,8 @@ import {
   parsePushUrls,
   parseRemotes,
   parseRemoteUrl,
+  parseDefaultMergeMethod,
+  parseMergeState,
   parseRepositoryIdentity,
   PULL_REQUEST_EXISTS,
   remoteForIdentity,
@@ -174,14 +176,15 @@ describe('GitHubCodeHost.lookupPullRequest', () => {
       state: 'found',
       pullRequest: { number: 3, state: 'open', isDraft: true, checks: 'none', headRefName: 'feature', baseRefName: 'main' }
     })
-    expect(run).toHaveBeenCalledWith('gh', ['pr', 'list', '--head', 'feature', '--state', 'open', '--limit', '10', '--json', FIELDS], { cwd: '/repo' })
+    expect(run).toHaveBeenCalledWith('gh', ['pr', 'list', '--head', 'feature', '--state', 'all', '--limit', '10', '--json', FIELDS], { cwd: '/repo' })
+    expect(prListCalls(run)).toHaveLength(1)
   })
 
   it('looks up the requested branch, not whatever is checked out when the lookup runs', async () => {
     const run = runner({ branch: 'other' })
     await new GitHubCodeHost(run).lookupPullRequest('/repo', 'feature-a')
     expect(run.mock.calls.some((call) => call[0] === 'git')).toBe(false)
-    expect(run).toHaveBeenCalledWith('gh', ['pr', 'list', '--head', 'feature-a', '--state', 'open', '--limit', '10', '--json', FIELDS], { cwd: '/repo' })
+    expect(run).toHaveBeenCalledWith('gh', ['pr', 'list', '--head', 'feature-a', '--state', 'all', '--limit', '10', '--json', FIELDS], { cwd: '/repo' })
   })
 
   it('prefers an open pull request and falls back to closed or merged ones', async () => {
@@ -189,11 +192,34 @@ describe('GitHubCodeHost.lookupPullRequest', () => {
     const run = vi.fn<ExecutableRunner>(async (executable, args) => {
       if (executable === 'git') return ok('feature\n')
       if (args[0] === 'repo') return ok(identityJson())
-      if (args[0] === 'pr') return ok(args.includes('open') ? '[]' : `[${closed}]`)
+      if (args[0] === 'pr') return ok(`[${closed}]`)
       return ok()
     })
-    expect(await new GitHubCodeHost(run).lookupPullRequest('/repo')).toMatchObject({ state: 'found', pullRequest: { number: 9, state: 'merged' } })
-    expect(run.mock.calls.filter((call) => call[1][0] === 'pr').map((call) => call[1][5])).toEqual(['open', 'all'])
+    expect(await new GitHubCodeHost(run).lookupPullRequest('/repo')).toEqual({ state: 'found', pullRequest: expect.objectContaining({ number: 9, state: 'merged' }) })
+    expect(run.mock.calls.filter((call) => call[1][0] === 'pr').map((call) => call[1][5])).toEqual(['all'])
+  })
+
+  it('lists the branch\'s other pull requests behind the open one, newest first, without a fork\'s', async () => {
+    const item = (number: number, state: string, isCrossRepository = false) =>
+      JSON.stringify({ number, title: `PR ${number}`, url: `https://github.com/a/b/pull/${number}`, state, isDraft: false, statusCheckRollup: [], isCrossRepository })
+    const run = runner({ pr: async () => ok(`[${item(14, 'CLOSED')},${item(13, 'OPEN', true)},${item(12, 'OPEN')},${item(9, 'MERGED')}]`) })
+    const result = await new GitHubCodeHost(run).lookupPullRequest('/repo')
+    expect(result).toMatchObject({ state: 'found', pullRequest: { number: 12, state: 'open' }, others: [{ number: 14, state: 'closed' }, { number: 9, state: 'merged' }] })
+    expect(prListCalls(run)).toHaveLength(1)
+  })
+
+  it('asks for open ones as well when a full page holds only closed ones', async () => {
+    const item = (number: number, state: string) =>
+      JSON.stringify({ number, title: `PR ${number}`, url: `https://github.com/a/b/pull/${number}`, state, isDraft: false, statusCheckRollup: [] })
+    const full = Array.from({ length: 10 }, (_, index) => item(30 - index, 'CLOSED'))
+    const run = vi.fn<ExecutableRunner>(async (executable, args) => {
+      if (executable === 'git') return ok('feature\n')
+      if (args[0] === 'repo') return ok(identityJson())
+      if (args[0] === 'pr') return ok(args.includes('open') ? `[${item(4, 'OPEN')}]` : `[${full.join(',')}]`)
+      return ok()
+    })
+    expect(await new GitHubCodeHost(run).lookupPullRequest('/repo')).toMatchObject({ state: 'found', pullRequest: { number: 4, state: 'open' } })
+    expect(run.mock.calls.filter((call) => call[1][0] === 'pr').map((call) => call[1][5])).toEqual(['all', 'open'])
   })
 
   it('skips a fork pull request whose branch has the same name', () => {
@@ -1115,5 +1141,75 @@ describe('line comment reads for a watch', () => {
     await host.listLineCommentsSince('/repo', pr, { since: '2026-10-11T23:59:59Z', page: 1 })
     await host.listLineCommentsSince('/repo', pr, { since: '2026-10-11T23:59:59Z', page: 1 })
     expect(gh.linePages()).toHaveLength(2)
+  })
+})
+
+describe('merging and closing through gh', () => {
+  const merged = JSON.stringify({ number: 7, title: 'T', url: 'https://github.com/acme/app/pull/7', state: 'MERGED', isDraft: false, statusCheckRollup: [] })
+  const actionRunner = (change: (args: readonly string[]) => Promise<{ stdout: string; stderr: string }> = async () => ok()) =>
+    vi.fn<ExecutableRunner>(async (_executable, args) => {
+      if (args[0] === '--version') return ok()
+      if (args[0] === 'repo' && args.includes('nameWithOwner,url')) return ok(identityJson())
+      if (args[0] === 'repo') return ok(JSON.stringify({ viewerDefaultMergeMethod: 'MERGE', mergeCommitAllowed: true, squashMergeAllowed: true, rebaseMergeAllowed: false }))
+      if (args[0] === 'pr' && (args[1] === 'merge' || args[1] === 'close')) return change(args)
+      if (args[0] === 'pr' && args[1] === 'view') return ok(merged)
+      if (args[0] === 'pr' && args[1] === 'list') return ok('[]')
+      throw new Error(`unexpected ${args.join(' ')}`)
+    })
+
+  it('merges with the method asked for, keeps the branch, guards the head and reads the pull request back', async () => {
+    const run = actionRunner()
+    const result = await new GitHubCodeHost(run).mergePullRequest('/repo', 7, { method: 'squash', headSha: 'abc1234' })
+    expect(result).toMatchObject({ number: 7, state: 'merged' })
+    expect(run).toHaveBeenCalledWith('gh', ['pr', 'merge', '7', '--squash', '--match-head-commit=abc1234'], { cwd: '/repo' })
+    expect(run.mock.calls.some((call) => call[1].includes('--delete-branch'))).toBe(false)
+    expect(run).toHaveBeenCalledWith('gh', ['pr', 'view', '7', '--json', FIELDS], { cwd: '/repo' })
+  })
+
+  it('closes without deleting the branch', async () => {
+    const run = actionRunner()
+    await new GitHubCodeHost(run).closePullRequest('/repo', 7)
+    expect(run).toHaveBeenCalledWith('gh', ['pr', 'close', '7'], { cwd: '/repo' })
+  })
+
+  it('throws the host\'s own reason without gh\'s cross mark, and never passes a bad number or commit', async () => {
+    const run = actionRunner(async () => { throw failure('X Pull request acme/app#7 is not mergeable: the base branch policy prohibits the merge.\nTo have the pull request merged after all the requirements have been met, add the `--auto` flag.') })
+    const host = new GitHubCodeHost(run)
+    await expect(host.mergePullRequest('/repo', 7, { method: 'merge' })).rejects.toThrow(/^Pull request acme\/app#7 is not mergeable: the base branch policy prohibits the merge\.$/)
+    await expect(host.closePullRequest('/repo', 0)).rejects.toThrow('Unsupported pull request number.')
+    await expect(host.mergePullRequest('/repo', 7, { method: 'merge', headSha: '--admin' })).rejects.toThrow('Unsupported commit.')
+    await expect(new GitHubCodeHost(vi.fn<ExecutableRunner>(async (_e, args) => {
+      if (args[0] === 'repo') return ok(identityJson())
+      throw enoent()
+    })).closePullRequest('/repo', 7)).rejects.toThrow('GitHub CLI (gh) was not found')
+  })
+
+  it('forgets every read of the repository, so the next lookup asks the host again', async () => {
+    const run = actionRunner()
+    const host = new GitHubCodeHost(run)
+    await host.lookupPullRequest('/repo', 'feature')
+    await host.lookupPullRequest('/repo', 'feature')
+    expect(prListCalls(run as never)).toHaveLength(1)
+    await host.closePullRequest('/repo', 7)
+    await host.lookupPullRequest('/repo', 'feature')
+    expect(prListCalls(run as never)).toHaveLength(2)
+  })
+
+  it('takes the merge method GitHub\'s own button offers, else squash', async () => {
+    expect(await new GitHubCodeHost(actionRunner()).defaultMergeMethod('/repo')).toBe('merge')
+    expect(parseDefaultMergeMethod(JSON.stringify({ viewerDefaultMergeMethod: 'REBASE', mergeCommitAllowed: true, squashMergeAllowed: true, rebaseMergeAllowed: false }))).toBe('squash')
+    expect(parseDefaultMergeMethod(JSON.stringify({ viewerDefaultMergeMethod: 'SQUASH', mergeCommitAllowed: false, squashMergeAllowed: false, rebaseMergeAllowed: true }))).toBe('rebase')
+    expect(parseDefaultMergeMethod('not json')).toBeNull()
+    const failing = vi.fn<ExecutableRunner>(async () => { throw failure('HTTP 502') })
+    expect(await new GitHubCodeHost(failing).defaultMergeMethod('/repo')).toBeNull()
+  })
+
+  it('reads whether GitHub would merge it now', () => {
+    expect(parseMergeState('MERGEABLE', 'CLEAN')).toBe('clean')
+    expect(parseMergeState('MERGEABLE', 'HAS_HOOKS')).toBe('clean')
+    expect(parseMergeState('CONFLICTING', 'BLOCKED')).toBe('conflicting')
+    expect(parseMergeState('MERGEABLE', 'BEHIND')).toBe('behind')
+    expect(parseMergeState('UNKNOWN', 'UNKNOWN')).toBe('unknown')
+    expect(parseMergeState(undefined, undefined)).toBe('unknown')
   })
 })

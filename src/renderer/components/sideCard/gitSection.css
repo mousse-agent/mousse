@@ -176,18 +176,109 @@
   color: var(--danger);
 }
 
-.side-card-git-pr-text {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  min-width: 0;
-}
-
+/* The number, checks and actions sit under the title, lined up with it (past the icon). */
 .side-card-git-pr-meta {
   display: flex;
   align-items: center;
   gap: 6px;
+  min-height: 26px;
+  padding-left: 28px;
   font-size: 11px;
+}
+
+.side-card-git-pr-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: auto;
+}
+
+.side-card-git-pr-close,
+.side-card-git-pr-merge {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  height: 24px;
+  border: 0;
+  border-radius: var(--ui-row-radius);
+  font: inherit;
+  cursor: pointer;
+}
+
+.side-card-git-pr-close {
+  width: 24px;
+  background: transparent;
+  color: var(--ui-faint);
+}
+
+.side-card-git-pr-close:hover:not([aria-disabled='true']) {
+  background: var(--ui-hover);
+  color: var(--text-primary);
+}
+
+/* Neutral until GitHub would merge it; then it is the section's one accent-filled action. */
+.side-card-git-pr-merge {
+  gap: 5px;
+  padding: 0 10px 0 8px;
+  background: var(--ui-hover);
+  color: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.side-card-git-pr-merge[data-ready] {
+  background-image: var(--ui-sheen-accent), var(--gradient-accent);
+  box-shadow: var(--ui-specular-accent);
+  color: white;
+}
+
+.side-card-git-pr-merge[data-ready]:hover:not(:disabled) {
+  filter: brightness(1.08);
+}
+
+.side-card-git-pr-merge[aria-disabled='true'],
+.side-card-git-pr-close[aria-disabled='true'] {
+  cursor: default;
+  opacity: 0.5;
+}
+
+.side-card-git-pr-merge:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
+/* Merge and Close ask first, inline under the row, so the rest of the list stays in view. */
+.side-card-git-pr-confirm {
+  margin: 2px 0 4px 28px;
+  font-size: 12px;
+}
+
+.side-card-git-pr-confirm-text {
+  margin: 0 0 6px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.side-card-git-pr-confirm .side-card-git-error {
+  margin: 0 0 6px;
+}
+
+.side-card-git-pr-confirm-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.side-card-git-pr-confirm-actions .side-card-git-pr-merge {
+  height: 26px;
+}
+
+.side-card-git-pr-close:focus-visible,
+.side-card-git-pr-merge:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
 }
 
 .side-card-git-pr-more {
@@ -851,62 +942,4 @@
   .side-card-device-menu * {
     transition-property: none !important;
   }
-}
-
-.side-card-git-pr-watch {
-  padding: 4px 6px 0 6px;
-  font-size: 11px;
-  color: var(--text-secondary);
-}
-
-.side-card-git-pr-watch-line {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-
-.side-card-git-pr-watch-label {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  flex: none;
-}
-
-.side-card-git-pr-watch-options {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 2px;
-  min-width: 0;
-}
-
-.side-card-git-pr-watch-option {
-  border: 0;
-  border-radius: var(--ui-row-radius);
-  background: transparent;
-  color: inherit;
-  font: inherit;
-  padding: 1px 6px;
-  cursor: pointer;
-}
-
-.side-card-git-pr-watch-option:hover {
-  background: var(--ui-hover);
-}
-
-/* The chosen one is a background, never a bar at an edge. */
-.side-card-git-pr-watch-option[aria-checked='true'] {
-  background: var(--ui-hover);
-  color: var(--text-primary);
-}
-
-.side-card-git-pr-watch-option[aria-disabled='true'] {
-  opacity: 0.5;
-  cursor: default;
-}
-
-.side-card-git-pr-watch-note {
-  margin: 2px 0 0;
-  color: var(--ui-faint);
-  line-height: 1.35;
-  overflow-wrap: anywhere;
 }
