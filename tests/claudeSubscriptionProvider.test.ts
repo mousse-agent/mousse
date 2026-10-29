@@ -75,7 +75,7 @@ const result = {
   result: 'hello',
   session_id: 'vendor-session'
 }
-const chatInput = (cwd: string, permissionMode: 'ask' | 'accept_edits' | 'full' = 'full') => ({
+const chatInput = (cwd: string, permissionMode: 'ask' | 'accept_edits' | 'auto' | 'full' = 'full') => ({
   threadId: 'thread',
   cwd,
   model: 'sonnet',
@@ -427,7 +427,7 @@ describe('Claude Subscription native provider', () => {
   })
   describe('permission modes', () => {
     /** Runs one turn in `mode`, probing `tools` through the hook and `canUseTool`; every prompt is rejected. */
-    async function probe(mode: 'ask' | 'accept_edits' | 'full', tools: string[], cwd?: string) {
+    async function probe(mode: 'ask' | 'accept_edits' | 'auto' | 'full', tools: string[], cwd?: string) {
       const hooks: Record<string, string> = {}
       const decisions: Record<string, string> = {}
       const options: Options[] = []
@@ -477,6 +477,32 @@ describe('Claude Subscription native provider', () => {
       for (const tool of [...edits, ...others]) expect(accept[tool], tool).toBe('none')
       const full = (await probe('full', [...commands, ...edits])).hooks
       for (const tool of [...commands, ...edits]) expect(full[tool], tool).toBe('none')
+    })
+
+    it('runs Auto in Claude Code\'s auto mode: edits go ahead, its classifier decides commands, and what it cannot decide asks the user', async () => {
+      const commands = ['Bash', 'PowerShell']
+      const edits = ['Edit', 'Write', 'MultiEdit', 'NotebookEdit']
+      const auto = await probe('auto', [...commands, ...edits, 'Read'])
+      expect(auto.options).toMatchObject({ permissionMode: 'auto' })
+      // A one-shot query in Auto never asks for the bypass flag.
+      expect(auto.options).not.toHaveProperty('allowDangerouslySkipPermissions')
+      // Mousse's hook leaves commands to the classifier instead of asking first, as it does under Auto-accept edits.
+      for (const tool of [...commands, ...edits, 'Read']) expect(auto.hooks[tool], tool).toBe('none')
+      // A command the classifier sends on to canUseTool is the user's to answer.
+      expect(auto.decisions).toMatchObject({ Bash: 'deny', PowerShell: 'deny', Read: 'allow' })
+      expect(auto.prompts.map((entry) => entry.prompt.split('\n')[0])).toContain('Allow Claude Code to run a command (Bash)?')
+    })
+
+    it('runs Auto as Auto-accept edits when Claude Code settings turn auto mode off', async () => {
+      const home = mkdtempSync(join(tmpdir(), 'claude-auto-off-'))
+      homes.push(home)
+      mkdirSync(join(home, '.claude'), { recursive: true })
+      writeFileSync(join(home, '.claude', 'settings.json'), JSON.stringify({ disableAutoMode: 'disable' }))
+      const seen: Options[] = []
+      const { service } = fixture((input) => { seen.push(input.options); return fakeQuery([result]) })
+      await service.chat(chatInput(home, 'auto'))
+      expect(seen[0]).toMatchObject({ permissionMode: 'acceptEdits' })
+      expect(service.permissionLimits(home)).toEqual({ unavailable: { auto: 'Claude Code settings turn auto mode off' } })
     })
 
     it('lets read-only built-ins through without asking, and names the action class when it asks', async () => {

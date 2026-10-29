@@ -27,6 +27,7 @@ const READERS = {
   planMode: ['planModeAvailable'],
   contextUsage: ['contextGauge'],
   toolControl: ['toolControlLevel'],
+  autoPermissionMode: ['autoPermissionModeAvailable'],
   budgets: ['budgetsLevel'],
   spendLimits: ['spendLimitLevel']
 } satisfies Record<keyof HarnessCaps, string[]>

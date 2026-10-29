@@ -17,8 +17,22 @@ export function errorText(error: unknown): string {
 export function ipcErrorLine(error: unknown): string {
   const stripped = errorText(error)
     .replace(/^Error invoking remote method '[^']*':\s*/, '')
-    .replace(/^(?:Error|GitError):\s*/i, '')
+    .replace(/^(?:Error|GitError|MmsProtocolError):\s*/i, '')
   return stripped.split('\n').map((part) => part.trim()).find(Boolean) ?? ''
+}
+
+/** Whether a call failed because too many requests to the background service were in flight. */
+export function isServiceBusy(error: unknown): boolean {
+  return ipcErrorLine(error) === 'Too many pending requests'
+}
+
+/**
+ * A failure as a person reads it: its own first line (see `ipcErrorLine`), plain words for an
+ * overloaded background service, or `fallback` when the failure says nothing.
+ */
+export function readableError(error: unknown, fallback: string): string {
+  if (isServiceBusy(error)) return 'Mousse is busy. Try again in a moment.'
+  return ipcErrorLine(error) || fallback
 }
 
 /**

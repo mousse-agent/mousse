@@ -70,6 +70,8 @@ export function claudeLockedCaps(base: HarnessCaps, input: { platform: NodeJS.Pl
   return Object.freeze({
     ...base,
     planMode: false,
+    // A locked turn runs in Claude Code's default mode under Mousse's grant gate: never its auto mode.
+    autoPermissionMode: false,
     toolControl: proven('tools') ? 'exact' : 'approval_only',
     containment: proven('tools') && proven('sandbox') ? 'strong' : 'weak',
     childPolicy: 'enforced',

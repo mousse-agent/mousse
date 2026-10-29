@@ -57,14 +57,18 @@ const pickCap = (label: string) => {
   click(option)
 }
 
+/** The row's details live in its tooltip, not on the page. */
+const tooltips = () => Array.from(host.querySelectorAll('[title]')).map((entry) => entry.getAttribute('title')).join(' ')
+
 describe('Settings > General > Runs', () => {
   it('is off by default, with the cap of three', () => {
     show()
     expect(host.textContent).toContain('Runs')
     expect(toggle().getAttribute('aria-checked')).toBe('false')
     expect(capTrigger().textContent).toContain('3')
-    expect(host.textContent).toContain('at most 3 times in a row')
-    expect(host.textContent).toContain('Runs already paused are not resumed; press Resume now.')
+    expect(host.textContent).toContain('Continues a paused run when the limit resets.')
+    expect(tooltips()).toContain('at most 3 times in a row')
+    expect(tooltips()).toContain('Runs already paused are not resumed; press Resume now.')
   })
 
   it('turning it on saves it, and the daemon reads it from disk', () => {
@@ -90,10 +94,10 @@ describe('Settings > General > Runs', () => {
     pickCap('5')
     expect(updates).toHaveBeenCalledWith({ runs: { resumeAfterUsageLimit: true, usageLimitPauseCap: 5 } })
     expect(saved()).toEqual({ resumeAfterUsageLimit: true, usageLimitPauseCap: 5 })
-    expect(host.textContent).toContain('at most 5 times in a row')
+    expect(tooltips()).toContain('at most 5 times in a row')
     pickCap('1')
     expect(saved().usageLimitPauseCap).toBe(1)
-    expect(host.textContent).toContain('at most 1 time in a row')
+    expect(tooltips()).toContain('at most 1 time in a row')
   })
 
   it('choosing the cap that is already saved writes nothing', () => {

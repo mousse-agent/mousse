@@ -162,6 +162,7 @@ import { isDefaultThreadName } from '../../shared/threadTitle'
 import {
   buildPermissionModeChangeNotice,
   getLastUserPermissionMode,
+  describePermissionMode,
   isPermissionMode,
   isStricter,
   narrowPermissionMode,
@@ -1768,7 +1769,7 @@ export class OrchestratorService extends EventEmitter {
       },
       effectDelivery: () => this.effectsEnabled(),
       continuationDue: (due, answeredBy) => this.startApprovalContinuation(due, answeredBy),
-      ruleApplied: (threadId, rule) => this.noteProviderNotice(threadId, `Allowed without asking by your "Always for this thread" rule (${rule.summary.slice(0, 200)}). Revoke it in the thread side card.`)
+      ruleApplied: (threadId, rule) => this.noteProviderNotice(threadId, `Allowed without asking by your "Always for this thread" rule (${rule.summary.slice(0, 200)}).`)
     })
   }
 
@@ -2572,14 +2573,17 @@ export class OrchestratorService extends EventEmitter {
 
   /**
    * Stop reaches the provider's process for the thread (`HarnessGateway.stopThread`): what it still
-   * runs in the background ends, whether or not a turn is live. True when there was a process to end.
-   * Never throws.
+   * runs in the background ends, whether or not a turn is live, and a command still running after the
+   * Stop's interrupt is killed. True when there was a process to end. What could not be ended is said
+   * in the thread, so it never looks stopped while something still runs. Never throws.
    */
   async stopProviderWork(threadId: string): Promise<boolean> {
     try {
       return (await this.harness.stopThread(threadId)) === 'stopped'
     } catch (error) {
-      console.warn('provider stop failed', { threadId, error: error instanceof Error ? error.message : String(error) })
+      const message = error instanceof Error ? error.message : String(error)
+      console.warn('provider stop failed', { threadId, error: message })
+      this.noteProviderNotice(threadId, `Stop could not end everything this chat started. ${message}`)
       return false
     }
   }
@@ -4457,10 +4461,10 @@ export class OrchestratorService extends EventEmitter {
     if (!thread) throw new DomainRpcError('thread_not_found', 'Thread not found', { threadId })
     const ceiling = this.permissionCeilingFor(threadId)
     if (isStricter(ceiling, mode))
-      throw new DomainRpcError('permission_mode_above_ceiling', `This subagent cannot run above ${ceiling === 'ask' ? 'Ask before acting' : 'Auto-accept edits'}: a thread it belongs to is set to it.`, { threadId, ceiling })
+      throw new DomainRpcError('permission_mode_above_ceiling', `This subagent cannot run above ${describePermissionMode(ceiling)}: a thread it belongs to is set to it.`, { threadId, ceiling })
     // A person on another of the user's computers sets modes up to the limit this computer gave that device.
     if (by && isStricter(by.maxPermissionMode, mode))
-      throw new DomainRpcError('permission_mode_above_ceiling', `The computer that runs this thread lets this device set ${by.maxPermissionMode === 'ask' ? 'Ask before acting' : 'Auto-accept edits'} at most. To allow more, raise the limit for this device on that computer, in Settings, Devices.`, { threadId, limit: by.maxPermissionMode, reason: 'device_limit' })
+      throw new DomainRpcError('permission_mode_above_ceiling', `The computer that runs this thread lets this device set ${describePermissionMode(by.maxPermissionMode)} at most. To allow more, raise the limit for this device on that computer, in Settings, Devices.`, { threadId, limit: by.maxPermissionMode, reason: 'device_limit' })
     const previous = thread.permissionMode
     const updated = store.updateThreadMeta(threadId, { permissionMode: mode }, { touch: false })
     try {

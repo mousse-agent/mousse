@@ -220,7 +220,7 @@ export function buildScheduleAddInput(
   }
   const permission = flagString(flags, 'permission')
   if (permission !== undefined) {
-    if (!isPermissionMode(permission)) throw new Error('--permission must be ask, accept_edits or full.')
+    if (!isPermissionMode(permission)) throw new Error('--permission must be ask, accept_edits, auto or full.')
     input.permissionMode = permission
   }
   const workspace = flagString(flags, 'workspace')

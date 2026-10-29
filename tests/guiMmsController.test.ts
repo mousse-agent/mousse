@@ -77,6 +77,35 @@ describe('GuiMmsController lifecycle', () => {
     } finally {await gui.stop()}
   })
 
+  it('opens a window with its gap flag set once the service ring has wrapped; its snapshot clears the flag when it starts and restores it on failure', async () => {
+    const gui = new GuiMmsController({homeDir:home,disableAutoStart:true,endpointOverride:endpoint,ownerTokenOverride:ownerToken})
+    const sender = Object.assign(new EventEmitter(), {id:988,isDestroyed:()=>false}) as unknown as WebContents
+    await gui.start()
+    try {
+      const thread = await gui.request<{ thread: { id: string } }>('threads.create', { name: 'Gap' })
+      // More events than the replay ring holds: a window that subscribes from 0 is told about a gap.
+      const ring = (server as unknown as {ringFor:(profileId:string)=>{push:(type:string,data:unknown)=>unknown}}).ringFor(mms.profileId)
+      for (let i = 0; i < 600; i += 1) ring.push('test.filler', { i })
+      await gui.prepareWindow(sender)
+      const internals = gui as unknown as {windowSessions:Map<number,{client:import('../src/mms/protocol/client').LocalMmsClient}>}
+      const client = internals.windowSessions.get(sender.id)!.client
+      expect(client.requiresResnapshot).toBe(true)
+      // While the flag is set, every event asks for a snapshot.
+      const resnapshots = vi.fn(); gui.on('window-resnapshot', resnapshots)
+      await gui.runWithSender(sender, () => gui.request('threads.rename', { threadId: thread.thread.id, name: 'Gap 2' }))
+      await vi.waitFor(() => expect(resnapshots).toHaveBeenCalled())
+
+      const snapshot = gui.snapshotThreadForSender(sender.id, thread.thread.id)
+      expect(client.requiresResnapshot).toBe(false)
+      await snapshot
+      expect(client.requiresResnapshot).toBe(false)
+
+      client.markResnapshotNeeded()
+      await expect(gui.snapshotThreadForSender(sender.id, 'missing-thread')).rejects.toThrow()
+      expect(client.requiresResnapshot).toBe(true)
+    } finally {await gui.stop()}
+  })
+
   it('connects when daemon is already running (no ownership)', async () => {
     const gui = new GuiMmsController({
       homeDir: home,

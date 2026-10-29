@@ -184,7 +184,9 @@ export class DesktopUpdater {
   }
 
   private async runDownload(): Promise<UpdateState> {
-    if (this.state.phase !== 'available') return this.state
+    // A failed download is retried from its error; a failed check or install is not a download.
+    const retry = this.state.phase === 'error' && this.state.error?.during === 'download'
+    if (this.state.phase !== 'available' && !retry) return this.state
     this.lastProgressEmit = this.now()
     this.update({ phase: 'downloading', downloadPercent: 0 }, ['error'])
     try {

@@ -4958,7 +4958,7 @@ div.files-asset-preview { display: grid; place-items: center; overflow: auto; pa
   display: flex;
   flex-direction: column;
   gap: 12px;
-  max-height: 220px;
+  max-height: 260px;
   overflow-y: auto;
 }
 
@@ -4972,37 +4972,51 @@ div.files-asset-preview { display: grid; place-items: center; overflow: auto; pa
   display: flex;
   flex-direction: column;
   align-items: stretch;
-  gap: 8px;
+  gap: 2px;
 }
 
+/* Rows follow the menu language: neutral hover, filled background when selected. */
 .composer-question-option {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--ui-menu-row-x);
   width: 100%;
-  padding: 6px 10px;
-  border-radius: 8px;
-  font-size: 12px;
-  text-align: center;
-  color: var(--text-primary);
+  padding: 6px var(--ui-menu-row-x);
+  border-radius: var(--ui-menu-row-radius);
+  font-size: 12.5px;
+  text-align: left;
+  color: color-mix(in srgb, var(--text-primary) 80%, transparent);
   background: transparent;
   border: none;
+  transition: background 0.12s;
+}
+
+.composer-question-option:hover,
+.composer-question-option:focus-visible {
+  background: var(--ui-hover);
+  color: var(--text-primary);
+  outline: none;
 }
 
 .composer-question-option.selected {
+  background: var(--ui-pressed);
+  box-shadow: var(--ui-specular);
   color: var(--text-primary);
-  background: transparent;
 }
 
-.composer-question-option + .composer-question-option {
-  position: relative;
+html[data-theme='high-contrast'] .composer-question-option.selected {
+  box-shadow: inset 0 0 0 1px var(--ui-line-strong);
 }
 
-.composer-question-option + .composer-question-option::before {
-  content: "";
-  position: absolute;
-  top: -4px;
-  left: 50%;
-  transform: translateX(-50%);
-  width: 40%;
-  border-top: 1px solid rgba(var(--accent-pale-rgb), 0.25);
+.composer-question-option-label {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.composer-question-option-check {
+  flex-shrink: 0;
+  color: var(--text-primary);
 }
 
 .composer-question-modal-footer {
@@ -5010,14 +5024,14 @@ div.files-asset-preview { display: grid; place-items: center; overflow: auto; pa
   justify-content: flex-end;
   gap: 8px;
   padding: 10px 12px;
-  border-top: 1px solid rgba(var(--accent-pale-rgb), 0.12);
 }
 
 .composer-question-dismiss,
 .composer-question-submit {
-  padding: 6px 12px;
-  border-radius: 8px;
-  font-size: 12px;
+  height: 28px;
+  padding: 0 12px;
+  border-radius: var(--ui-control-radius);
+  font-size: 12.5px;
 }
 
 .composer-question-dismiss {
@@ -5066,12 +5080,12 @@ div.files-asset-preview { display: grid; place-items: center; overflow: auto; pa
 .composer-question-custom {
   margin-top: 8px;
   width: 100%;
-  height: 30px;
-  border-radius: 8px;
-  border: 1px solid rgba(var(--accent-pale-rgb), 0.22);
-  background: rgba(var(--surface-soft-rgb), 0.9);
-  padding: 0 10px;
-  font-size: 12px;
+  height: 28px;
+  border-radius: var(--ui-control-radius);
+  border: 1px solid var(--ui-line-strong);
+  background: transparent;
+  padding: 0 8px;
+  font-size: 12.5px;
   color: var(--text-primary);
 }
 
@@ -5879,36 +5893,14 @@ div.files-asset-preview { display: grid; place-items: center; overflow: auto; pa
 .composer-question-modal-title { font-size: 12px; letter-spacing: normal; }
 
 .composer-question-prompt { font-size: 13.5px; font-weight: 500; letter-spacing: -0.01em; }
-/* A command or file change the user is asked to allow: the whole text, wrapped, scrolling when long. */
-.composer-question-prompt--approval { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 220px; overflow-y: auto; }
+/* A command or file change the user is asked to allow: the whole text, wrapped; the body is the one scroller. */
+.composer-question-prompt--approval { white-space: pre-wrap; overflow-wrap: anywhere; }
 .composer-question-reason { margin: 0 0 8px; font-size: 12px; color: var(--text-secondary); }
 
-.composer-question-option {
-  width: 100%;
-  padding: 7px 13px;
-  text-align: center;
-  font-weight: 500;
-  color: var(--text-primary);
-  border: none;
-  background: transparent;
-  transition: all 0.13s ease;
-}
-
-.composer-question-option:hover { transform: translateY(-0.5px); }
-
-.composer-question-option.selected {
-  background: transparent;
-  color: var(--text-primary);
-  font-weight: 700;
-  box-shadow: none;
-}
-
 .composer-question-submit {
-  border-radius: 999px;
   background: var(--gradient-accent);
   color: white;
   font-weight: 600;
-  padding: 7px 16px;
   box-shadow: 0 2px 8px rgba(var(--accent-rgb), 0.25);
 }
 
