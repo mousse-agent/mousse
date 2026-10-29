@@ -1,6 +1,8 @@
 /**
  * Issue 420: a brief overload of the request limit is retried quietly, and the GUI's resnapshot
- * bursts (one per event while the gap flag is set) run one at a time.
+ * bursts (one per event while the gap flag is set) run one at a time. Past the in-flight limit a call
+ * waits for a slot, and identical reads in flight share one request, so opening threads while the
+ * service is slow to answer no longer fails unrelated calls.
  */
 import { mkdtempSync, rmSync } from 'fs'
 import { createServer, type Server, type Socket } from 'node:net'
@@ -9,10 +11,10 @@ import { join } from 'path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { coalescedRunner } from '../src/main/mms/coalescedRunner'
 import { FrameDecoder, encodeFrame } from '../src/mms/protocol/framing'
-import { LocalMmsClient, MmsProtocolError, OVERLOAD_RETRY_DELAYS_MS, isPendingRequestLimitError } from '../src/mms/protocol/client'
+import { LocalMmsClient, MMS_CLIENT_MAX_WAITING_REQUESTS, MmsProtocolError, OVERLOAD_RETRY_DELAYS_MS, isPendingRequestLimitError } from '../src/mms/protocol/client'
 import { MMS_PROTOCOL_MAX_PENDING_REQUESTS, MMS_PROTOCOL_VERSION } from '../src/mms/protocol/types'
 
-interface HeldRequest { id: string; method: string }
+interface HeldRequest { id: string; method: string; params?: unknown }
 
 describe('request limit overload', () => {
   let dir: string
@@ -38,13 +40,13 @@ describe('request limit overload', () => {
         decoder.push(chunk)
         let frame: unknown
         while ((frame = decoder.shift()) !== null) {
-          const message = frame as { kind: string; id?: string; method?: string }
+          const message = frame as { kind: string; id?: string; method?: string; params?: unknown }
           if (message.kind === 'hello') {
             connection.write(encodeFrame({ kind: 'hello_ok', protocolVersion: MMS_PROTOCOL_VERSION, serverVersion: 'test', instanceId: 'fake', capabilities: [], globalSequence: 0 }))
             continue
           }
           if (message.kind !== 'req') continue
-          const request = { id: message.id!, method: message.method! }
+          const request = { id: message.id!, method: message.method!, params: message.params }
           received.push(request)
           const action = answer(request)
           if (action === 'ok') reply(request)
@@ -53,7 +55,7 @@ describe('request limit overload', () => {
       })
     })
     await new Promise<void>((resolve) => server.listen(endpoint, resolve))
-    client = new LocalMmsClient({ homeDir: dir, ownerToken: 'token', endpoint, clientType: 'test' })
+    client = new LocalMmsClient({ homeDir: dir, ownerToken: 'token', endpoint, clientType: 'test', shareIdenticalReads: true })
     await client.connect()
   })
 
@@ -83,8 +85,10 @@ describe('request limit overload', () => {
     await expect(queued).resolves.toEqual({ method: 'queue.list' })
   })
 
-  it('fails with a recognizable overload error once the retries are spent', async () => {
+  it('fails with a recognizable overload error once too many are waiting and the retries are spent', async () => {
     await holdAll(MMS_PROTOCOL_MAX_PENDING_REQUESTS)
+    for (let i = 0; i < MMS_CLIENT_MAX_WAITING_REQUESTS; i += 1) void client.request('slow.read', { waiting: i }).catch(() => undefined)
+    await expect.poll(() => client.waitingRequestCount).toBe(MMS_CLIENT_MAX_WAITING_REQUESTS)
     const started = Date.now()
     const failure = await client.request('queue.list', { threadId: 't1' }).catch((error: unknown) => error)
     expect(failure).toBeInstanceOf(MmsProtocolError)
@@ -92,6 +96,90 @@ describe('request limit overload', () => {
     expect((failure as Error).message).toBe('Too many pending requests')
     const total = OVERLOAD_RETRY_DELAYS_MS.reduce((sum, delay) => sum + delay, 0)
     expect(Date.now() - started).toBeGreaterThanOrEqual(total - 20)
+  })
+
+  it('sends waiting calls in call order, times one out from its call, and fails them all on disconnect', async () => {
+    const held = await holdAll(MMS_PROTOCOL_MAX_PENDING_REQUESTS)
+    answer = () => 'hold'
+    const late = client.request('slow.read', { waiting: 'times out' }, 60).catch((error: unknown) => error)
+    const first = client.request('slow.read', { waiting: 'first' })
+    const second = client.request('slow.read', { waiting: 'second' })
+    expect(client.waitingRequestCount).toBe(3)
+    await expect(late).resolves.toMatchObject({ message: 'Request timeout: slow.read' })
+    expect(client.waitingRequestCount).toBe(2)
+    reply(held[0])
+    await expect.poll(() => received.length).toBe(MMS_PROTOCOL_MAX_PENDING_REQUESTS + 1)
+    expect(received.at(-1)!.params).toEqual({ waiting: 'first' })
+    expect(client.waitingRequestCount).toBe(1)
+    socket!.destroy()
+    await expect(first).rejects.toThrow()
+    await expect(second).rejects.toThrow()
+    expect(client.waitingRequestCount).toBe(0)
+  })
+
+  it('answers identical reads in flight with one request, and gives each caller its own copy', async () => {
+    answer = () => 'hold'
+    const calls = [
+      client.request<{ method: string }>('projects.list'),
+      client.request<{ method: string }>('projects.list'),
+      client.request<{ method: string }>('files.root', { threadId: 'a' }),
+      client.request<{ method: string }>('files.root', { threadId: 'a' }),
+      client.request<{ method: string }>('files.root', { threadId: 'b' }),
+      // Not a read: always its own request.
+      client.request<{ method: string }>('queue.enqueue', { threadId: 'a' }),
+      client.request<{ method: string }>('queue.enqueue', { threadId: 'a' })
+    ]
+    await expect.poll(() => received.length).toBe(5)
+    expect(received.map((request) => request.method)).toEqual(['projects.list', 'files.root', 'files.root', 'queue.enqueue', 'queue.enqueue'])
+    received.forEach(reply)
+    const answers = await Promise.all(calls)
+    expect(answers[0]).toEqual(answers[1])
+    expect(answers[0]).not.toBe(answers[1])
+
+    // Once answered, the same read is asked again.
+    answer = () => 'ok'
+    await client.request('projects.list')
+    expect(received.filter((request) => request.method === 'projects.list')).toHaveLength(2)
+    // A read after a change (here a new profile binding) never takes the answer of a read from before it.
+    answer = (request) => (request.method === 'profiles.bind' || request.method === 'queue.remove' ? 'ok' : 'hold')
+    void client.request('settings.get').catch(() => undefined)
+    await client.request('profiles.bind', { profile: 'other' })
+    void client.request('settings.get').catch(() => undefined)
+    await expect.poll(() => received.filter((request) => request.method === 'settings.get').length).toBe(2)
+    void client.request('queue.list', { threadId: 'a' }).catch(() => undefined)
+    await client.request('queue.remove', { threadId: 'a', itemId: 'i' })
+    void client.request('queue.list', { threadId: 'a' }).catch(() => undefined)
+    await expect.poll(() => received.filter((request) => request.method === 'queue.list').length).toBe(2)
+  })
+
+  it('opens five threads while the service is not answering without failing a call', async () => {
+    // What a window asked when each of five threads was opened while the service was paused: 64 calls
+    // were in flight after the fifth, 41 of them distinct, and its queue load failed (measured on #420).
+    answer = () => 'hold'
+    const open = (threadId: string) => [
+      ...[1, 2, 3].map(() => client.request('files.root', { threadId })),
+      ...[1, 2].map(() => client.request('browser.access.status', { profileId: 'p' })),
+      client.request('projects.list'),
+      client.request('settings.get'),
+      client.request('settings.getOptions'),
+      client.request('thread.snapshot', { threadId }),
+      client.request('subagents.list', { threadId }),
+      client.request('actions.list', { threadId }),
+      client.request('threads.approvalRules', { threadId }),
+      client.request('orchestrator.isTurnActive', { threadId }),
+      client.request('orchestrator.contextUsage', { threadId }),
+      client.request('queue.list', { threadId })
+    ]
+    const calls = ['t1', 't2', 't3', 't4', 't5'].flatMap(open)
+    expect(calls).toHaveLength(75)
+    const outcomes = Promise.allSettled(calls)
+    // Five threads' own reads plus one of each shared one; nothing is refused or left waiting.
+    await expect.poll(() => received.length).toBe(5 * 8 + 4)
+    expect(client.waitingRequestCount).toBe(0)
+    answer = () => 'ok'
+    received.forEach(reply)
+    const settled = await outcomes
+    expect(settled.filter((outcome) => outcome.status === 'rejected')).toEqual([])
   })
 
   it('retries a request the service refused as overloaded, and nothing else', async () => {
