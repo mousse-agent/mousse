@@ -1,6 +1,6 @@
 import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
-import { describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { GitSectionView } from '../src/renderer/components/sideCard/GitSection'
 import {
   EMPTY_COMMIT_DRAFT,
@@ -36,6 +36,7 @@ import {
   releaseForcedAmend
 } from '../src/renderer/components/sideCard/gitSectionLogic'
 import { EMPTY_GIT_ENTRY, type GitStatusView } from '../src/renderer/stores/gitStatusStore'
+import { useAppStore } from '../src/renderer/stores/appStore'
 import type { PullRequestCheck, PullRequestComment, PullRequestDetail } from '../src/shared/pullRequests'
 import type {
   GitCommit,
@@ -245,7 +246,7 @@ describe('pull request checks', () => {
 describe('pull request row with its detail', () => {
   const checkSet = [check('build', 'passing'), check('test', 'failing'), check('deploy', 'waiting')]
 
-  it('adds the reviewers\' verdict, each check with its link and the comment count to an open pull request', () => {
+  it('adds the reviewers\' verdict of an open pull request to its tooltip and label', () => {
     const row = pullRequestRow(
       found({ checks: 'failing', checkCounts: { passed: 1, failed: 1, pending: 1, waiting: 1, total: 3 } }),
       status(),
@@ -253,18 +254,11 @@ describe('pull request row with its detail', () => {
     )
     expect(row).toMatchObject({
       review: { label: 'Changes requested', tone: 'failing' },
-      commentCount: 2,
-      commentsLabel: '2 comments',
       linked: false,
       hint: null,
       tooltip: '#123 Fix login\nChanges requested\n1 failing',
       ariaLabel: 'Pull request #123, Fix login, changes requested, 1 check failing'
     })
-    expect(row?.kind === 'found' && row.checkRows.map((entry) => [entry.name, entry.tone, entry.url])).toEqual([
-      ['test', 'failing', 'https://github.com/acme/app/actions/runs/test'],
-      ['deploy', 'waiting', 'https://github.com/acme/app/actions/runs/deploy'],
-      ['build', 'passing', 'https://github.com/acme/app/actions/runs/build']
-    ])
   })
 
   it.each([
@@ -280,25 +274,16 @@ describe('pull request row with its detail', () => {
     expect(pullRequestRow(found({ isDraft: true }), status(), detail({ isDraft: true, reviewDecision: 'approved' }))).toMatchObject({ review: { label: 'Approved' }, suffix: 'Draft' })
   })
 
-  it('shows nothing of the detail for a merged or closed pull request', () => {
+  it('shows no verdict for a merged or closed pull request, and names its state for the icon', () => {
     for (const state of ['merged', 'closed'] as const) {
       const row = pullRequestRow(found({ state }), status(), detail({ state, reviewDecision: 'approved', checkRuns: checkSet, comments: [lineComment('1')] }))
-      expect(row).toMatchObject({ review: null, checkRows: [], commentCount: 0, commentsLabel: null, suffix: state === 'merged' ? 'Merged' : 'Closed' })
+      expect(row).toMatchObject({ review: null, state, suffix: state === 'merged' ? 'Merged' : 'Closed' })
     }
-  })
-
-  it('shows no check rows for a pull request without checks', () => {
-    expect(pullRequestRow(found({ checks: 'none', checkCounts: { passed: 0, failed: 0, pending: 0, waiting: 0, total: 0 } }), status(), detail({ checkRuns: [] }))).toMatchObject({ checkRows: [], checks: null })
   })
 
   it('ignores the detail of another pull request, which the branch has moved on from', () => {
     const row = pullRequestRow(found(), status(), detail({ number: 99, reviewDecision: 'changes_requested', checkRuns: checkSet }))
-    expect(row).toMatchObject({ number: '#123', review: null, checkRows: [], commentCount: 0 })
-  })
-
-  it('counts one comment, and says when more exist than were read', () => {
-    expect(pullRequestRow(found(), status(), detail({ comments: [lineComment('1')] }))).toMatchObject({ commentCount: 1, commentsLabel: '1 comment' })
-    expect(pullRequestRow(found(), status(), detail({ comments: [lineComment('1')], commentsTruncated: true }))).toMatchObject({ commentsLabel: '1+ comments' })
+    expect(row).toMatchObject({ number: '#123', review: null })
   })
 
   it('notes that merge back targets the primary checkout, for a linked pull request of a worktree thread only', () => {
@@ -322,14 +307,16 @@ describe('pull request row', () => {
       kind: 'found',
       url: 'https://github.com/acme/app/pull/123',
       number: '#123',
+      value: 123,
+      base: expect.any(String),
+      // Without the full read GitHub's answer is not known yet, so Merge waits.
+      merge: { enabled: false, reason: 'GitHub is still working out whether it can be merged', headSha: null },
       title: 'Fix login',
       checks: 'passing',
       checksLabel: 'Checks passed',
+      state: 'open',
       suffix: null,
       review: null,
-      checkRows: [],
-      commentCount: 0,
-      commentsLabel: null,
       linked: false,
       hint: null,
       tooltip: '#123 Fix login\nChecks passed',
@@ -357,7 +344,7 @@ describe('pull request row', () => {
 
   it('marks a draft and keeps its checks', () => {
     const row = pullRequestRow(found({ isDraft: true }), status())
-    expect(row).toMatchObject({ suffix: 'Draft', checks: 'passing' })
+    expect(row).toMatchObject({ state: 'draft', suffix: 'Draft', checks: 'passing' })
     expect(row?.kind === 'found' && row.ariaLabel).toBe('Pull request #123, Fix login, draft, checks passed')
   })
 
@@ -795,8 +782,8 @@ describe('initialize repository', () => {
   it('is not offered for a folder that does not exist, which reads as not found', () => {
     const missing = { ...input, status: status({ isRepo: false, branch: null, missing: true }) }
     expect(canInitRepository(missing)).toBe(false)
-    expect(gitCollapsedLabel(missing)).toBe('Git: folder not found')
-    expect(gitCollapsedLabel(input)).toBe('Git: not a repository')
+    expect(gitCollapsedLabel(missing)).toBe('Folder not found')
+    expect(gitCollapsedLabel(input)).toBe('Not a repository')
   })
 })
 
@@ -937,7 +924,7 @@ describe('git section actions markup', () => {
       now: Date.parse('2026-10-24T10:05:00Z')
     }))
 
-  it('renders a found pull request as one button with the checks icon, number and title', () => {
+  it('renders a found pull request as one button with its icon, title, number and checks icon', () => {
     const html = render(view(), found())
     expect(html).toMatch(/<button[^>]*class="side-card-git-pr"[^>]*aria-label="Pull request #123, Fix login, checks passed"/)
     expect(html).toContain('data-checks="passing"')
@@ -962,7 +949,7 @@ describe('git section actions markup', () => {
 
   it('renders an enabled Create PR for a pushed branch with no pull request', () => {
     const html = render(view(), { state: 'none', isDefaultBranch: false })
-    expect(html).toMatch(/class="side-card-git-pr-create"[^>]*aria-disabled="false"[^>]*>Create PR</)
+    expect(html).toMatch(/<div class="side-card-git-row">.*class="side-card-git-pr-create"[^>]*aria-disabled="false"[^>]*><svg[^>]*>.*?<\/svg><span>Create PR</)
     expect(html).not.toContain('Push the branch first')
   })
 
@@ -987,7 +974,7 @@ describe('git section actions markup', () => {
 
   it('renders Push with the unpushed badge and its tooltip', () => {
     const html = render(view({ status: status({ ahead: 3 }) }))
-    expect(html).toMatch(/<button[^>]*class="side-card-git-push"[^>]*>Push<span class="side-card-git-push-count" aria-hidden="true">↑3<\/span>/)
+    expect(html).toMatch(/<button[^>]*class="side-card-git-push"[^>]*><svg[^>]*>.*?<\/svg><span>Push<\/span><span class="side-card-git-push-count" aria-hidden="true">↑3<\/span>/)
     expect(html).toContain('title="Push 3 commits to origin/feature/login"')
     expect(html).toContain('aria-label="Push 3 commits to origin/feature/login"')
     expect(html).not.toMatch(/class="side-card-git-push"[^>]*disabled/)
@@ -1013,7 +1000,7 @@ describe('git section actions markup', () => {
 
   it('renders Publish for a branch with no upstream', () => {
     const html = render(view({ status: status({ tracking: 'none', upstream: null }) }))
-    expect(html).toMatch(/class="side-card-git-push"[^>]*>Publish</)
+    expect(html).toMatch(/class="side-card-git-push"[^>]*><svg[^>]*>.*?<\/svg><span>Publish</)
     expect(html).toContain('title="Push this branch and track it on the remote"')
     expect(html).not.toContain('side-card-git-push-count')
   })
@@ -1038,20 +1025,29 @@ describe('git section actions markup', () => {
     expect(html).toContain('title="Amend the last commit"')
   })
 
-  describe('not a repository', () => {
+  describe('not a repository, once expanded', () => {
+    // Server rendering reads the store's initial state, so the expanded choice is seeded there as well.
+    const initial = useAppStore.getInitialState()
+    const seed = (sideCardCollapsed: Record<string, boolean>) => {
+      useAppStore.setState({ sideCardCollapsed })
+      Object.assign(initial, { sideCardCollapsed })
+    }
+    beforeEach(() => seed({ 'Git.noRepository': false }))
+    afterEach(() => seed({}))
+
     const renderCollapsed = (canInitialize: boolean, path: string | null = '/repo/a') =>
       renderToStaticMarkup(createElement(GitSectionView, {
         threadId: 't1',
         projectId: 'p1',
         path,
         git: view({ status: status({ isRepo: false, branch: null }), commits: [] }),
-        collapsedLabel: 'Git: not a repository',
+        collapsedLabel: 'Not a repository',
         canInitialize
       }))
 
     it('keeps the quiet line and adds an enabled Initialize repository button', () => {
       const html = renderCollapsed(true)
-      expect(html).toContain('Git: not a repository')
+      expect(html).toContain('side-card-git-collapsed">Not a repository<')
       expect(html).toMatch(/<button[^>]*class="side-card-git-init"(?![^>]*disabled)[^>]*>Initialize repository</)
     })
 

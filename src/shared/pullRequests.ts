@@ -20,7 +20,8 @@ export interface GitPullRequestInfo {
 }
 
 export type GitPullRequestLookup =
-  | { state: 'found'; pullRequest: GitPullRequestInfo }
+  /** `others` are the branch's earlier (or other) pull requests in this repository, newest first; absent from older daemons. */
+  | { state: 'found'; pullRequest: GitPullRequestInfo; others?: GitPullRequestInfo[] }
   /** isDefaultBranch is null when the repository's default branch could not be read. */
   | { state: 'none'; isDefaultBranch: boolean | null }
   | {
@@ -168,6 +169,24 @@ export interface PullRequestDetail extends GitPullRequestInfo {
   updatedAt: string
   mergedAt: string | null
   closedAt: string | null
+  /** Whether the host would merge it now; absent from older daemons, which reads as unknown. */
+  mergeState?: PullRequestMergeState
+}
+
+/**
+ * Whether the host would merge a pull request now (GitHub's `mergeStateStatus`, with `mergeable` for conflicts).
+ * `clean` merges; `unstable` merges with checks that are not passing; `unknown` is still being worked out by the host.
+ */
+export type PullRequestMergeState = 'clean' | 'unstable' | 'blocked' | 'behind' | 'conflicting' | 'draft' | 'unknown'
+
+/** How a pull request is merged: a merge commit, one squashed commit, or its commits rebased onto the base. */
+export type PullRequestMergeMethod = 'merge' | 'squash' | 'rebase'
+
+/** A pull request after a merge or a close, read back from the host. */
+export interface PullRequestActionResult {
+  pullRequest: GitPullRequestInfo
+  /** The method a merge used; absent for a close. */
+  method?: PullRequestMergeMethod
 }
 
 /** One open pull request in the project's list, with what is needed to pick one to start a thread from. */

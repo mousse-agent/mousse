@@ -2,14 +2,14 @@ import { useEffect } from 'react'
 import { create } from 'zustand'
 import type {
   CreatePullRequestResult,
+  GitPullRequestInfo,
+  PullRequestActionResult,
   PullRequestBaseBranches,
   PullRequestDetail,
   PullRequestDraft,
   PullRequestFormInput,
   PullRequestRef,
   PullRequestScope,
-  PullRequestWatchMode,
-  PullRequestWatchStatus,
   ThreadPullRequestLink
 } from '../../shared/pullRequests'
 import type { GitPullRequestLookup } from '../../shared/types'
@@ -47,11 +47,9 @@ interface PullRequestState {
   details: Record<string, PullRequestDetailEntry>
   /** The scope the create form is open for; the form shows in the section of that folder and branch. */
   createForm: PullRequestScope | null
-  /** What each thread's watch of its pull request is doing, by thread id. */
-  watches: Record<string, PullRequestWatchStatus>
 }
 
-export const useGitPullRequestStore = create<PullRequestState>(() => ({ entries: {}, details: {}, createForm: null, watches: {} }))
+export const useGitPullRequestStore = create<PullRequestState>(() => ({ entries: {}, details: {}, createForm: null }))
 
 /** Lookups kept in memory; the least recently fetched ones that no section shows go first. */
 const MAX_PULL_REQUEST_ENTRIES = 200
@@ -516,46 +514,53 @@ export function composeThreadPullRequest(input: {
   }
 }
 
-/** Reads what a thread's watch is doing. Never rejects: a failed read leaves what is shown. */
-export async function refreshPullRequestWatch(threadId: string): Promise<void> {
-  try {
-    const status = await window.mousse.pullRequests.watchStatus(threadId)
-    useGitPullRequestStore.setState((state) => ({ watches: { ...state.watches, [threadId]: status } }))
-  } catch {
-    // Kept as it is.
+/** One pull request of a section: the folder and branch it was found for, and the thread or project it is read as. */
+export interface PullRequestActionTarget {
+  /** The folder's key (`folderKey`), not a path. */
+  path: string
+  branch: string | null
+  number: number
+  projectId?: string
+  threadId?: string
+}
+
+/** A lookup with one of its pull requests replaced by what the host says now. */
+function withPullRequest(lookup: GitPullRequestLookup | null, next: GitPullRequestInfo): GitPullRequestLookup | null {
+  if (lookup?.state !== 'found') return lookup
+  if (lookup.pullRequest.number === next.number) return { ...lookup, pullRequest: next }
+  if (!lookup.others?.some((other) => other.number === next.number)) return lookup
+  return { ...lookup, others: lookup.others.map((other) => (other.number === next.number ? next : other)) }
+}
+
+/** Shows the changed pull request at once, then reads the branch's lookup and the pull request's detail again. */
+function afterChange(target: PullRequestActionTarget, result: PullRequestActionResult): void {
+  const { path, branch, number, projectId, threadId } = target
+  if (branch) {
+    const key = pullRequestKey(path, branch)
+    const entry = useGitPullRequestStore.getState().entries[key]
+    if (entry) setEntry(key, { lookup: withPullRequest(entry.lookup, result.pullRequest), fetchedAt: entry.fetchedAt })
+    void refreshPullRequest(path, branch, { force: true, projectId, threadId })
   }
+  void refreshPullRequestDetail(path, number, { force: true, projectId, threadId })
+}
+
+function actionRef(target: PullRequestActionTarget): PullRequestRef {
+  return target.threadId ? { threadId: target.threadId } : target.projectId ? { projectId: target.projectId } : {}
 }
 
 /**
- * Sets a thread's watch. `number` links that pull request to the thread first (the row found it by its branch). Rejects with the
- * daemon's own refusal (for example, a subagent cannot let the agent act), which the caller shows.
+ * Merges a pull request with the repository's usual method (else squash). `headSha` is the head that was shown: the host
+ * refuses if more was pushed since. Rejects with the host's reason; the section shows it.
  */
-export async function setPullRequestWatch(threadId: string, mode: PullRequestWatchMode, number?: number): Promise<PullRequestWatchStatus> {
-  const status = await window.mousse.pullRequests.watch(threadId, mode, number)
-  useGitPullRequestStore.setState((state) => ({ watches: { ...state.watches, [threadId]: status } }))
-  return status
+export async function mergePullRequest(target: PullRequestActionTarget, headSha?: string): Promise<PullRequestActionResult> {
+  const result = await window.mousse.pullRequests.merge(actionRef(target), target.number, headSha)
+  afterChange(target, result)
+  return result
 }
 
-/** A watched pull request changed: its detail is read again at once, in every folder that shows it. */
-export function refreshWatchedPullRequest(threadId: string, number: number): void {
-  for (const { path, number: shown, projectId, threadId: readerThread } of retainedDetails.values()) {
-    if (shown === number) void refreshPullRequestDetail(path, shown, { force: true, projectId, threadId: readerThread })
-  }
-  void refreshPullRequestWatch(threadId)
-}
-
-/**
- * The state of a thread's watch, kept current: read when `active` turns true, and again when the daemon says the pull request
- * changed or the watch ended. Null while unknown, or for a thread that has no pull request to watch.
- */
-export function useThreadPullRequestWatch(threadId: string | null, active: boolean): PullRequestWatchStatus | null {
-  const status = useGitPullRequestStore((state) => (threadId ? state.watches[threadId] ?? null : null))
-  useEffect(() => {
-    if (!threadId || !active) return
-    void refreshPullRequestWatch(threadId)
-    return window.mousse.pullRequests.onUpdated?.((event) => {
-      if (event.threadId === threadId) refreshWatchedPullRequest(threadId, event.number)
-    })
-  }, [threadId, active])
-  return threadId && active ? status : null
+/** Closes a pull request without merging it; its branch stays. Rejects with the host's reason. */
+export async function closePullRequest(target: PullRequestActionTarget): Promise<PullRequestActionResult> {
+  const result = await window.mousse.pullRequests.close(actionRef(target), target.number)
+  afterChange(target, result)
+  return result
 }
