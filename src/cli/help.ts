@@ -37,6 +37,7 @@ Usage:
   mousse-cli revert-code --session <id> --action <id>
   mousse-cli fork --session <id> --action <id>
   mousse-cli operation abort <id> --session <id>
+  mousse-cli operation recover [--switch-back] --session <id>
 
 Global options:
   -p, --print                 Print response and exit (non-interactive / automation)
@@ -188,6 +189,7 @@ export const THREAD_ACTION_HELP = `Usage:
   mousse-cli revert-code --session <thread> --action <action>
   mousse-cli fork --session <thread> --action <action> [--name <name>]
   mousse-cli operation abort <operation> --session <thread>
+  mousse-cli operation recover [--switch-back] --session <thread>
 `
 
 export const CHANNELS_HELP = `Usage:

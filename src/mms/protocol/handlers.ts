@@ -92,6 +92,7 @@ import { isQualifiedId } from '../../shared/threadRef'
 import { resolveThreadProjectPath } from '../data/resolveActiveProjectPath'
 import { ThreadJournal } from '../data/ThreadJournal'
 import { ThreadWorkspaceManager } from '../workspace/ThreadWorkspaceManager'
+import { describeRecovery, switchBackToThreadBranch } from '../workspace/workspaceRecovery'
 import { resolveEditorFolder } from '../workspace/editorFolder'
 import type { NodeId } from '../../shared/net/ids'
 import { scheduledJobOptionsDepsFrom, validateScheduledJobOptions, type ScheduledJobOptionsDeps } from '../scheduled/validateJobOptions'
@@ -2754,8 +2755,11 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const metadata = stored && lookup.projectPath ? manager.verify(stored) : stored
       // Never restores: the hover card and the active-project lookup call this for passive reads.
       const marker = stored && !existsSync(stored.worktreePath) ? readCleanupMarker(ctx.mms.threads.lifecycleStore, lookup.threadId) : undefined
+      // Why every turn, Undo and Publish are refused, for the banner and the CLI; absent while the thread is fine.
+      const recovery = metadata && lookup.projectPath ? describeRecovery(lookup.threadDirectory, metadata) : undefined
       return {
         metadata,
+        ...(recovery ? { recovery } : {}),
         execution: lookup.projectPath
           ? manager.executionContext(lookup.projectPath, metadata)
           : manager.unboundExecutionContext(lookup.threadId),
@@ -3036,6 +3040,17 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       await ensureWorkspaceMaterialized(ctx, operation.threadId, operation.projectPath)
       const workspace = new ThreadWorkspaceManager(operation.threadDirectory).load()
       if (!workspace || workspace.lifecycle !== 'ready') throw new DomainRpcError('workspace_not_ready', 'Thread workspace is not ready')
+      // The Switch back and continue button: the agent checked out another branch. Everything is checked before Git moves.
+      let switched: { from: string; message: string } | undefined
+      if (p.switchBack !== undefined && typeof p.switchBack !== 'boolean') throw new DomainRpcError('invalid_params', 'switchBack must be a boolean')
+      if (p.switchBack === true) {
+        if (ctx.mms.orchestrator.isConversationHistoryBusy(operation.threadId)) throw new DomainRpcError('thread_busy', 'Wait for active or queued work to finish.')
+        try {
+          switched = await withGitMutationLocks(operation.threadDirectory, workspace.worktreePath, 'switch-back', () => switchBackToThreadBranch(workspace))
+        } catch (error) {
+          throw new DomainRpcError('switch_back_refused', error instanceof Error ? error.message : String(error))
+        }
+      }
       const onPendingChangesKept = ctx.mms.orchestrator.pendingChangesKeptNotice(operation.threadId)
       await new ChildAgentIntegrationService(operation.threadDirectory, { onPendingChangesKept }).recoverPending(workspace.worktreePath)
       await new PublishService(operation.threadDirectory, { onPendingChangesKept }).recoverPending(workspace.worktreePath, operation.projectPath)
@@ -3049,7 +3064,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         const target = loadConversationState(operation.threadDirectory, branch.id)
         ctx.mms.orchestrator.replaceConversationState(operation.threadId, target.messages, target.nativeContext)
       })
-      return { ok: true }
+      return { ok: true, ...(switched ? { switchedFrom: switched.from, message: switched.message } : {}) }
     }
     case 'operations.abort': {
       const p = isObject(params) ? params : {}
