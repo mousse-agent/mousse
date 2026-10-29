@@ -38,8 +38,16 @@ export interface ModelFamilyGroup {
   brandSections: ModelBrandSection[]
 }
 
+/** The levels Mousse offers when an agent or model reports none of its own (custom models, fallback lists). */
 export const EFFORT_LEVELS = ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'] as const
-export const EFFORT_SUFFIXES = new Set(['off', ...EFFORT_LEVELS])
+/**
+ * Every level a model id may carry as a suffix (`gpt-6:ultra`), lowest first: the fallback levels
+ * plus the extra ones agents report for some models (Codex's `none` and `ultra`, Claude Code's
+ * `ultracode`). Which of them a model offers comes from what its agent reports (`LlmModelOption.efforts`);
+ * this list only lets an id be read back, so a level an agent adds later needs one entry here.
+ */
+export const REASONING_LEVELS = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra', 'ultracode'] as const
+export const EFFORT_SUFFIXES = new Set<string>(['off', ...REASONING_LEVELS])
 const SPEED_SUFFIXES = new Set(['fast', 'slow'])
 
 export function parseThinkingSuffixFromModelId(modelId: string): {
@@ -145,7 +153,7 @@ function uniqueSorted(values: Array<string | undefined>): string[] {
 }
 
 function uniqueEfforts(values: Array<string | undefined>): string[] {
-  const order = new Map<string, number>(EFFORT_LEVELS.map((level, index) => [level, index]))
+  const order = new Map<string, number>(REASONING_LEVELS.map((level, index) => [level, index]))
   return [...new Set(values.filter((value): value is string => Boolean(value)))]
     .filter((effort) => effort !== 'off')
     .sort((a, b) => (order.get(a) ?? Number.MAX_SAFE_INTEGER) - (order.get(b) ?? Number.MAX_SAFE_INTEGER) || a.localeCompare(b))
@@ -512,19 +520,64 @@ export function getCurrentEffort(
   models: LlmModelOption[],
   providerId?: string
 ): string | undefined {
-  const { baseId, effort: effortFromId } = parseThinkingSuffixFromModelId(modelId)
-  if (effortFromId) return effortFromId
+  return resolveReasoning(providerId ?? '', modelId, models).current
+}
 
-  if (providerId) {
-    const family = findModelFamily(providerId, models, modelId)
-    if (family?.efforts[0]) return family.efforts[0]
+/** The menu name of a reasoning level, in the agent's own words where it has them. */
+export function reasoningLevelLabel(level: string): string {
+  switch (level) {
+    case 'xhigh': return 'Extra high'
+    case 'ultracode': return 'Ultracode'
+    default: return formatEffortLabel(level)
   }
+}
 
-  const model =
-    models.find((entry) => entry.id === modelId) ?? models.find((entry) => entry.id === baseId)
-  if (!model) return undefined
-  const parsed = parseModelVariant(model)
-  return parsed.effort ?? model.efforts?.[0]
+export interface ReasoningChoice {
+  /** The levels the menu offers, lowest first; `off` first when the model can turn thinking off. */
+  levels: string[]
+  /** The level the next turn runs at: the saved one when the model offers it, else its default. */
+  current?: string
+  /** The model's default level, when its agent reports one. */
+  defaultLevel?: string
+  /** A saved level this model does not offer (the turn runs at `current` instead). */
+  unsupported?: string
+  /** What the agent says each level does, when it says. */
+  descriptions: Record<string, string>
+}
+
+/**
+ * The reasoning levels of the selected model and the one a turn runs at. A saved level the model no
+ * longer offers (a level of another model, or one its agent dropped) falls back to the model's default,
+ * as the agent runs it; the menu says so.
+ */
+export function resolveReasoning(providerId: string, modelId: string, models: LlmModelOption[]): ReasoningChoice {
+  const { baseId, effort: saved } = parseThinkingSuffixFromModelId(modelId)
+  const model = models.find((entry) => entry.id === modelId) ?? models.find((entry) => entry.id === baseId)
+  const efforts = getEffortsForModel(providerId, modelId, models)
+  const known = model !== undefined && efforts.length > 0
+  const levels = known && model.thinkingOff !== false ? ['off', ...efforts] : known ? efforts : []
+  const defaultLevel = model?.defaultEffort && efforts.includes(model.defaultEffort) ? model.defaultEffort : undefined
+  const descriptions = model?.effortDescriptions ?? {}
+  if (!known) {
+    // Without the model's levels nothing is known to fall back to: the id's level stands.
+    const family = providerId ? findModelFamily(providerId, models, modelId) : undefined
+    return { levels, current: saved ?? family?.efforts[0] ?? (model ? parseModelVariant(model).effort ?? model.efforts?.[0] : undefined), descriptions }
+  }
+  const fallback = defaultLevel ?? efforts[0]
+  if (saved && !levels.includes(saved)) return { levels, current: fallback, ...(defaultLevel ? { defaultLevel } : {}), unsupported: saved, descriptions }
+  return { levels, current: saved ?? fallback, ...(defaultLevel ? { defaultLevel } : {}), descriptions }
+}
+
+/**
+ * The level a turn sends to its agent: the id's level when the model's listing offers it (or, for a
+ * model listed without levels, when `accepted` has it), else none, so the agent runs its default.
+ */
+export function supportedEffortOf(modelId: string, models: readonly LlmModelOption[], accepted: ReadonlySet<string>): string | undefined {
+  const { baseId, effort } = parseThinkingSuffixFromModelId(modelId)
+  if (!effort || effort === 'off') return undefined
+  const listed = models.find((entry) => entry.id === modelId) ?? models.find((entry) => entry.id === baseId)
+  if (listed?.efforts?.length) return listed.efforts.includes(effort) ? effort : undefined
+  return accepted.has(effort) ? effort : undefined
 }
 
 /** Resolve a toggle only when the catalog lists both endpoint speeds for this context. */

@@ -1,10 +1,9 @@
 import { useCallback, useEffect, useRef } from 'react'
-import { ArrowUp, ChevronDown, Mic, Paperclip, Square } from '../lib/icons'
+import { ArrowUp, Mic, Paperclip, Square } from '../lib/icons'
 import { showsContextGauge, type ProviderWithStatus } from '../lib/providerSnapshots'
 import type { PermissionMode } from '../../shared/permissionMode'
 import type { ContextUsageSnapshot } from '../../shared/types'
-import { ComposerEffortPicker } from './ComposerEffortPicker'
-import { ComposerPermissionPicker } from './ComposerPermissionPicker'
+import { ComposerRunPicker } from './ComposerEffortPicker'
 import { FloatingPortal, useFloatingPosition } from '../lib/floatingLayer'
 import { getGroupedModelButtonParts, ModelFamilyMenu } from './ModelFamilyMenu'
 import { ProviderIcon } from '../lib/providerIcons'
@@ -174,82 +173,86 @@ export function ComposerFooter({
   return (
     <div className="composer-footer">
       <div className="composer-footer-left">
-        <div className="composer-model-picker" ref={modelPickerRef}>
-          {!modelReadOnly && modelMenuOpen && (
-            <>
-              {providers.length === 0 ? (
-                <FloatingPortal>
-                  <div
-                    ref={modelMenuContentRef}
-                    className="composer-model-picker-shell composer-model-picker-shell-empty composer-model-picker-shell-floating"
-                    role="listbox"
-                    aria-label="Select model"
-                    style={emptyModelMenuStyle}
-                  >
-                    <div className="composer-model-menu scrollbar-ultra-thin">
-                      <div className="composer-model-menu-empty">
-                        <p>No providers connected.</p>
-                        <button
-                          type="button"
-                          className="composer-model-menu-settings"
-                          onClick={() => {
-                            onModelMenuOpenChange(false)
-                            onOpenSettings()
-                          }}
-                        >
-                          Open Settings
-                        </button>
+        <div className="composer-run-controls">
+          <div className="composer-model-picker" ref={modelPickerRef}>
+            {!modelReadOnly && modelMenuOpen && (
+              <>
+                {providers.length === 0 ? (
+                  <FloatingPortal>
+                    <div
+                      ref={modelMenuContentRef}
+                      className="composer-model-picker-shell composer-model-picker-shell-empty composer-model-picker-shell-floating"
+                      role="listbox"
+                      aria-label="Select model"
+                      style={emptyModelMenuStyle}
+                    >
+                      <div className="composer-model-menu scrollbar-ultra-thin">
+                        <div className="composer-model-menu-empty">
+                          <p>No providers connected.</p>
+                          <button
+                            type="button"
+                            className="composer-model-menu-settings"
+                            onClick={() => {
+                              onModelMenuOpenChange(false)
+                              onOpenSettings()
+                            }}
+                          >
+                            Open Settings
+                          </button>
+                        </div>
                       </div>
                     </div>
-                  </div>
-                </FloatingPortal>
-              ) : (
-                <ModelFamilyMenu
-                  providers={providers}
-                  selectedProviderId={selectedProviderId}
-                  selectedModelId={selectedModelId}
-                  onSelect={onModelSelect}
-                  onMenuScroll={handleMenuScroll}
-                  anchorRef={modelButtonRef}
-                  contentRef={modelMenuContentRef}
-                />
-              )}
-            </>
-          )}
-          <button
-            ref={modelButtonRef}
-            type="button"
-            className={`composer-model-btn${modelMenuOpen ? ' open' : ''}`}
-            aria-expanded={modelReadOnly ? undefined : modelMenuOpen}
-            aria-haspopup={modelReadOnly ? undefined : 'listbox'}
-            aria-label={`${modelReadOnly ? 'Assigned model' : 'Model'}: ${modelButtonLabel}`}
-            title={modelReadOnly ? `Assigned model: ${modelButtonTitle}` : modelButtonTitle}
-            disabled={modelReadOnly}
-            onClick={modelReadOnly ? undefined : handleModelMenuToggle}
-          >
-            {selectedProviderId ? (
-              <ProviderIcon providerId={selectedProviderId} size={14} />
-            ) : null}
-            <span className="composer-model-btn-label">
-              <span className="composer-model-btn-name">{modelButtonParts[0]}</span>
-              {modelButtonParts.length > 1 ? ` · ${modelButtonParts.slice(1).join(' · ')}` : null}
-            </span>
-            {providerAttention && (providerAttention.tone === 'warning' || providerAttention.tone === 'error') ? (
-              <span className={`composer-model-btn-dot is-${providerAttention.tone}`} aria-label={providerAttention.headline} />
-            ) : null}
-            {!modelReadOnly && <ChevronDown size={12} strokeWidth={2} />}
-          </button>
+                  </FloatingPortal>
+                ) : (
+                  <ModelFamilyMenu
+                    providers={providers}
+                    selectedProviderId={selectedProviderId}
+                    selectedModelId={selectedModelId}
+                    onSelect={onModelSelect}
+                    onMenuScroll={handleMenuScroll}
+                    anchorRef={modelButtonRef}
+                    contentRef={modelMenuContentRef}
+                  />
+                )}
+              </>
+            )}
+            <button
+              ref={modelButtonRef}
+              type="button"
+              className={`composer-model-btn${modelMenuOpen ? ' open' : ''}`}
+              aria-expanded={modelReadOnly ? undefined : modelMenuOpen}
+              aria-haspopup={modelReadOnly ? undefined : 'listbox'}
+              aria-label={`${modelReadOnly ? 'Assigned model' : 'Model'}: ${modelButtonLabel}`}
+              title={modelReadOnly ? `Assigned model: ${modelButtonTitle}` : modelButtonTitle}
+              disabled={modelReadOnly}
+              onClick={modelReadOnly ? undefined : handleModelMenuToggle}
+            >
+              {selectedProviderId ? (
+                <ProviderIcon providerId={selectedProviderId} size={14} />
+              ) : null}
+              <span className="composer-model-btn-label">
+                <span className="composer-model-btn-name">{modelButtonParts[0]}</span>
+                {modelButtonParts.length > 1 ? ` · ${modelButtonParts.slice(1).join(' · ')}` : null}
+              </span>
+              {providerAttention && (providerAttention.tone === 'warning' || providerAttention.tone === 'error') ? (
+                <span className={`composer-model-btn-dot is-${providerAttention.tone}`} aria-label={providerAttention.headline} />
+              ) : null}
+            </button>
+          </div>
+          <ComposerRunPicker
+            providerId={selectedProviderId}
+            modelId={selectedModelId}
+            models={providerModels}
+            modelReadOnly={modelReadOnly}
+            onSelect={onModelSelect}
+            permission={permission && {
+              ...permission,
+              agent: selectedProvider?.label ?? 'The agent',
+              caps: selectedProvider?.caps,
+              limits: selectedProvider?.permissionLimits
+            }}
+          />
         </div>
-        <ComposerEffortPicker providerId={selectedProviderId} modelId={selectedModelId} models={providerModels} readOnly={modelReadOnly} onSelect={onModelSelect} />
-        {permission && <ComposerPermissionPicker
-          mode={permission.mode}
-          agent={selectedProvider?.label ?? 'The agent'}
-          caps={selectedProvider?.caps}
-          limits={selectedProvider?.permissionLimits}
-          ceiling={permission.ceiling}
-          ceilingReason={permission.ceilingReason}
-          onSelect={permission.onSelect}
-        />}
       </div>
 
       <div className="composer-footer-right">

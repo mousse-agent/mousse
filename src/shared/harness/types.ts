@@ -89,7 +89,7 @@ export const HARNESS_CAP_KEYS = [
 export interface ProviderSelection {
   instanceId: string
   model: string
-  /** Reasoning effort (`EFFORT_LEVELS` in `modelVariants.ts`); absent = the model's default. */
+  /** Reasoning effort (one of the model's `efforts`, see `REASONING_LEVELS` in `modelVariants.ts`); absent = the model's default. */
   effort?: string
 }
 
@@ -362,6 +362,12 @@ export interface ProjectProviderOverrides {
 export interface ModelCapabilities {
   /** Reasoning efforts the model accepts; empty = no effort control. */
   efforts: string[]
+  /** The effort a turn runs at when none is chosen, when the agent reports it. */
+  defaultEffort?: string
+  /** What the agent says each effort does, by effort. */
+  effortDescriptions?: Record<string, string>
+  /** `false`: the model cannot turn thinking off. */
+  thinkingOff?: false
   images: boolean
   /** Context window in tokens, when known. */
   contextWindow?: number

@@ -1,0 +1,129 @@
+/* The composer's run controls: "<provider icon> Opus 5.5 · High <mode icon>" as adjacent text.
+   The model name opens the model picker; the level and mode icon open the run menu (reasoning,
+   speed, permissions). Both parts share the model button's text size, hover and radius. */
+.composer-run-controls {
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+}
+
+.composer-run-picker {
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+}
+
+.composer-run-sep {
+  font-size: 12px;
+  color: var(--text-secondary);
+  opacity: 0.7;
+}
+
+.composer-run-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 6px;
+  border-radius: 6px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  transition: background 0.15s, color 0.15s;
+}
+
+.composer-run-btn:hover:not(:disabled),
+.composer-run-btn.open {
+  background: var(--ui-hover);
+  color: var(--text-primary);
+}
+
+.composer-run-btn:disabled {
+  cursor: default;
+}
+
+/* The agent runs a stricter mode than the thread's (the tooltip says why). */
+.composer-run-btn.is-limited .composer-run-btn-mode {
+  color: var(--warning);
+}
+
+@container composer (max-width: 340px) {
+  .composer-run-btn-level,
+  .composer-run-sep {
+    display: none;
+  }
+}
+
+/* The run menu: the shared menu material with even padding; wide enough for the permission line. */
+.composer-run-menu {
+  max-height: min(480px, calc(100vh - 96px));
+}
+
+.composer-run-menu.has-permissions {
+  width: 248px;
+}
+
+.composer-run-menu .composer-mode-menu-section {
+  min-width: 0;
+}
+
+/* A saved level the model no longer offers: one muted line under the levels. */
+.composer-run-menu-note {
+  padding: 4px var(--ui-menu-row-x) 2px;
+  font-size: 11.5px;
+  line-height: 1.35;
+  color: var(--text-secondary);
+}
+
+.composer-run-menu-permission-row {
+  display: flex;
+  gap: var(--ui-menu-pad);
+  padding: 2px var(--ui-menu-pad) 0;
+}
+
+.composer-run-menu-permission {
+  display: inline-flex;
+  flex: 1 1 0;
+  align-items: center;
+  justify-content: center;
+  height: var(--ui-row-height, 30px);
+  border-radius: var(--ui-menu-row-radius);
+  color: var(--text-secondary);
+  transition: background 0.12s, color 0.12s;
+}
+
+.composer-run-menu-permission:hover:not(.is-disabled) {
+  background: var(--ui-hover);
+  color: var(--text-primary);
+}
+
+/* The chosen mode: the neutral raised fill with the shared top light, never a check or accent. */
+.composer-run-menu-permission.selected {
+  background: color-mix(in srgb, var(--text-primary) 11%, transparent);
+  box-shadow: var(--ui-specular);
+  color: var(--text-primary);
+}
+
+.composer-run-menu-permission.is-disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.composer-run-menu-permission:focus-visible {
+  box-shadow: var(--ui-focus-ring);
+}
+
+/* One fixed block under the row for the chosen (or hovered) mode: two lines tall, so it never jumps. */
+.composer-run-menu-permission-line {
+  display: block;
+  min-height: calc(2 * 1.35 * 11.5px);
+  padding: 6px var(--ui-menu-row-x) 4px;
+  font-size: 11.5px;
+  line-height: 1.35;
+  color: var(--text-secondary);
+}
+
+.composer-run-menu-permission-name {
+  margin-right: 4px;
+  font-weight: 500;
+  color: var(--text-primary);
+}

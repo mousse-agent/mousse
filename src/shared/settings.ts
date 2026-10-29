@@ -240,6 +240,12 @@ export interface LlmModelOption {
   label: string
   /** Supported reasoning/effort levels from the provider (excludes "off"). */
   efforts?: string[]
+  /** The level a turn runs at when none is chosen, when the agent reports it. */
+  defaultEffort?: string
+  /** What the agent says each level does, by level. */
+  effortDescriptions?: Record<string, string>
+  /** `false`: thinking cannot be turned off, so the menu offers no "Off". */
+  thinkingOff?: false
   /** Effective endpoint speed, including provider defaults. */
   speed?: 'fast' | 'slow'
   /** `false`: this model cannot run a single request (chat titles) even though its provider can. */

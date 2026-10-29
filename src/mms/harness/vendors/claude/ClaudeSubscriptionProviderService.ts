@@ -17,7 +17,7 @@ import type { LlmModelOption, LlmProviderOption } from '../../../../shared/setti
 import type { CredentialKind } from '../../../../shared/harness/status'
 import type { ChatImageAttachment } from '../../../../shared/types'
 import { normalizePermissionMode, permissionModeAllows, type PermissionLimits, type PermissionMode as ThreadPermissionMode } from '../../../../shared/permissionMode'
-import { parseThinkingSuffixFromModelId } from '../../../../shared/modelVariants'
+import { parseThinkingSuffixFromModelId, supportedEffortOf } from '../../../../shared/modelVariants'
 import { AppError } from '../../../../shared/errors'
 import type { ProviderToolEvent } from '../../../../shared/agentActivity'
 import { CLAUDE_INSTANCE_ID } from '../../../../shared/providerInstances'
@@ -339,12 +339,25 @@ const FALLBACK_MODELS: LlmModelOption[] = ['sonnet', 'opus', 'haiku'].map((id) =
   label: `Claude ${id[0].toUpperCase()}${id.slice(1)}`
 }))
 
+/** What Claude Code's `get_settings` reports for a model besides its listing (`applied`). */
+export interface ClaudeModelExtras {
+  /** The effort a turn runs at when none is sent (`applied.effort`). */
+  defaultEffort?: string
+  /** Ultracode can be turned on with this model (`applied.ultracodeAvailable`). */
+  ultracode?: boolean
+}
+
+/** The efforts Claude Code takes as `effort` (its `EffortLevel`). */
+const CLAUDE_EFFORTS: ReadonlySet<string> = new Set(['low', 'medium', 'high', 'xhigh', 'max'])
+
 /**
  * Claude Code names models by family ("Sonnet") and puts the version in the description
  * ("Sonnet 5.5 · …"). Its "default" alias repeats another listed model, so it is dropped;
- * when it points elsewhere it is named after that model instead.
+ * when it points elsewhere it is named after that model instead. The levels are the ones Claude
+ * Code reports for the model, plus Ultracode where `get_settings` says the model can run it. Mousse
+ * never turns Claude's thinking off, so no model offers "Off".
  */
-export function claudeModelOptions(models: ModelInfo[]): LlmModelOption[] {
+export function claudeModelOptions(models: ModelInfo[], extras: Record<string, ClaudeModelExtras> = {}): LlmModelOption[] {
   const listed = new Set(models.filter((model) => model.value !== 'default').map((model) => model.resolvedModel))
   return models
     .filter((model) => model.value !== 'default' || !model.resolvedModel || !listed.has(model.resolvedModel))
@@ -353,12 +366,45 @@ export function claudeModelOptions(models: ModelInfo[]): LlmModelOption[] {
         model.value === 'default'
           ? /\(currently ([^)]+)\)/.exec(model.description)?.[1]
           : /^([A-Za-z]+ \d+(?:\.\d+)*)\s*(?:·|$)/.exec(model.description)?.[1]
+      const extra = extras[model.value] ?? {}
+      const efforts = model.supportedEffortLevels?.length || extra.ultracode
+        ? [...(model.supportedEffortLevels ?? []), ...(extra.ultracode ? ['ultracode'] : [])]
+        : model.supportedEffortLevels
       return {
         id: model.value,
         label: version?.trim() || model.displayName,
-        efforts: model.supportedEffortLevels
+        efforts,
+        ...(efforts?.length ? { thinkingOff: false as const } : {}),
+        ...(extra.defaultEffort && efforts?.includes(extra.defaultEffort) ? { defaultEffort: extra.defaultEffort } : {}),
+        ...(extra.ultracode ? { effortDescriptions: { ultracode: 'Runs multi-agent workflows on each task, at the default effort.' } } : {})
       }
     })
+}
+
+/**
+ * Each listed model's default effort and Ultracode availability, read from Claude Code's
+ * `get_settings` after switching the idle discovery query to the model. Claude Code versions without
+ * it (or a model it refuses) report nothing, and the model keeps only its listed levels.
+ */
+export async function claudeModelExtras(query: Query, models: ModelInfo[], signal: AbortSignal): Promise<Record<string, ClaudeModelExtras>> {
+  const settingsOf = (query as Query & { getSettings?: () => Promise<{ applied?: { effort?: unknown; ultracodeAvailable?: unknown } }> }).getSettings
+  if (typeof settingsOf !== 'function') return {}
+  const extras: Record<string, ClaudeModelExtras> = {}
+  for (const model of models) {
+    if (signal.aborted) break
+    if (model.value === 'default') continue
+    try {
+      await query.setModel(model.value)
+      const applied = (await settingsOf.call(query))?.applied
+      extras[model.value] = {
+        ...(typeof applied?.effort === 'string' ? { defaultEffort: applied.effort } : {}),
+        ...(applied?.ultracodeAvailable === true ? { ultracode: true } : {})
+      }
+    } catch {
+      // A model Claude Code cannot switch to here keeps its listed levels.
+    }
+  }
+  return extras
 }
 
 /** Variables a running Claude Code session sets for the commands it starts. */
@@ -1002,7 +1048,9 @@ export class ClaudeSubscriptionProviderService {
       const models = await query.supportedModels()
       controller.signal.throwIfAborted()
       if (models.length) {
-        this.settings.models = claudeModelOptions(models)
+        const extras = await claudeModelExtras(query, models, controller.signal)
+        controller.signal.throwIfAborted()
+        this.settings.models = claudeModelOptions(models, extras)
         this.settings.modelsRefreshedAt = new Date().toISOString()
         this.save()
       }
@@ -1760,8 +1808,12 @@ export class ClaudeSubscriptionProviderService {
       input.signal?.throwIfAborted()
       controller.signal.throwIfAborted()
       const selected = parseThinkingSuffixFromModelId(input.model)
-      const effort = ['low', 'medium', 'high', 'xhigh', 'max'].includes(selected.effort ?? '')
-        ? selected.effort as Options['effort'] : undefined
+      // A level the model does not offer (saved for another model) runs at the model's default.
+      const level = supportedEffortOf(input.model, this.settings.models ?? [], new Set([...CLAUDE_EFFORTS, 'ultracode']))
+      // Ultracode runs at the model's default effort, with Claude Code's `ultracode` setting on.
+      const ultracode = level === 'ultracode'
+      const effort = level && CLAUDE_EFFORTS.has(level) ? level as Options['effort'] : undefined
+      if (ultracode && !locked) turnSettings = { ...turnSettings, ultracode: true }
       // The thread's permission mode, in Claude Code's own terms: Ask asks about everything it would
       // not allow itself, Auto-accept edits lets edits through, Auto hands the decision to Claude Code's
       // auto mode (its classifier runs what it judges safe and asks through canUseTool about the rest),
@@ -1778,7 +1830,7 @@ export class ClaudeSubscriptionProviderService {
         instanceId,
         resolve(input.cwd),
         selected.baseId,
-        effort ?? null,
+        ultracode ? 'ultracode' : effort ?? null,
         appendTexts.filter(Boolean).join('\n\n'),
         input.mcp ? [input.mcp.url, input.mcp.token] : null,
         readOnlyChild
