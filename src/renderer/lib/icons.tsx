@@ -65,7 +65,9 @@ import FolderSearchIcon from '@hugeicons/core-free-icons/FolderSearchIcon'
 import GitBranchIcon from '@hugeicons/core-free-icons/GitBranchIcon'
 import GitCommitHorizontalIcon from '@hugeicons/core-free-icons/GitCommitHorizontalIcon'
 import GitForkIcon from '@hugeicons/core-free-icons/GitForkIcon'
+import GitMergeIcon from '@hugeicons/core-free-icons/GitMergeIcon'
 import GitPullRequestIcon from '@hugeicons/core-free-icons/GitPullRequestIcon'
+import GitPullRequestClosedIcon from '@hugeicons/core-free-icons/GitPullRequestClosedIcon'
 import Globe02Icon from '@hugeicons/core-free-icons/Globe02Icon'
 import GridViewIcon from '@hugeicons/core-free-icons/GridViewIcon'
 import HammerIcon from '@hugeicons/core-free-icons/HammerIcon'
@@ -218,7 +220,9 @@ export const Gauge = /* @__PURE__ */ createIcon('Gauge', DashboardSpeed01Icon)
 export const GitBranch = /* @__PURE__ */ createIcon('GitBranch', GitBranchIcon)
 export const GitCommitHorizontal = /* @__PURE__ */ createIcon('GitCommitHorizontal', GitCommitHorizontalIcon)
 export const GitFork = /* @__PURE__ */ createIcon('GitFork', GitForkIcon)
+export const GitMerge = /* @__PURE__ */ createIcon('GitMerge', GitMergeIcon)
 export const GitPullRequest = /* @__PURE__ */ createIcon('GitPullRequest', GitPullRequestIcon)
+export const GitPullRequestClosed = /* @__PURE__ */ createIcon('GitPullRequestClosed', GitPullRequestClosedIcon)
 export const Globe = /* @__PURE__ */ createIcon('Globe', Globe02Icon)
 export const GripVertical = /* @__PURE__ */ createIcon('GripVertical', DragDropVerticalIcon)
 export const Hammer = /* @__PURE__ */ createIcon('Hammer', HammerIcon)

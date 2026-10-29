@@ -6,7 +6,22 @@ import {
   useRef,
   useState
 } from 'react'
-import { Check, ChevronDown, ExternalLink, GitBranch, MoreHorizontal, Plus, Search, X } from '../../lib/icons'
+import {
+  Check,
+  ChevronDown,
+  CircleCheck,
+  CircleX,
+  ExternalLink,
+  GitBranch,
+  GitCommitHorizontal,
+  GitMerge,
+  GitPullRequest,
+  GitPullRequestClosed,
+  MoreHorizontal,
+  Plus,
+  Search,
+  Upload
+} from '../../lib/icons'
 import { openSurface } from '../../lib/surfaces'
 import { useActiveThreadPullRequest } from '../../hooks/useActiveThreadPullRequest'
 import { useTransientError } from '../../hooks/useTransientError'
@@ -68,7 +83,7 @@ import {
   emptyCommitForm,
   existingPullRequestNotice,
   forceAmend,
-  formatCommitLine,
+  GIT_CHECKING_LABEL,
   gitActionAvailability,
   gitActionLock,
   gitCollapsedLabel,
@@ -78,11 +93,13 @@ import {
   localBranchNames,
   openPullRequestFailedMessage,
   prefillAmendDraft,
+  pullRequestList,
   pullRequestRow,
   pullRequestScope,
   pushButtonModel,
   pushFailedMessage,
   releaseForcedAmend,
+  THREAD_BRANCH_SWITCH_REASON,
   untrackedFileCount,
   type CommitAvailability,
   type CommitDraft,
@@ -101,6 +118,10 @@ import {
   type SuggestionRequest
 } from './commitSuggestLogic'
 import './gitSection.css'
+
+/** Where the Git section's collapse choice is kept: one for a repository, one for a folder without one. */
+const GIT_KEY = 'Git'
+const GIT_NO_REPOSITORY_KEY = 'Git.noRepository'
 
 /** How long a notice stays: it carries something to act on, like a kept stash. */
 const NOTICE_MS = 15_000
@@ -232,17 +253,29 @@ function BranchPicker({ path, scope, status, branches, fileCount, busyLabel, loc
     if (open) optionRefs.current[active]?.scrollIntoView({ block: 'nearest' })
   }, [open, active])
 
+  // A thread's own branch cannot be switched; the picker opens on the full name and the reason instead of a list.
   if (disabledReason !== null) {
     return (
-      <div
-        className="side-card-git-branch side-card-git-branch-static"
-        title={disabledReason}
-        aria-disabled="true"
-        aria-label={`Branch ${label}. ${disabledReason}`}
-      >
-        <GitBranch size={13} strokeWidth={1.8} aria-hidden="true" />
-        <span className="side-card-git-branch-name">{label}</span>
-      </div>
+      <>
+        <button
+          ref={triggerRef}
+          type="button"
+          className="side-card-git-branch"
+          title={label}
+          aria-label={`Branch ${label}`}
+          aria-haspopup="dialog"
+          aria-expanded={open}
+          onClick={() => setOpen((value) => !value)}
+        >
+          <GitBranch size={13} strokeWidth={1.8} aria-hidden="true" />
+          <span className="side-card-git-branch-name">{label}</span>
+          <ChevronDown className="side-card-git-branch-chevron" size={11} aria-hidden="true" />
+        </button>
+        <CardPopover open={open} anchorRef={triggerRef} placement="below-start" label="Branch" onClose={close}>
+          <p className="side-card-git-branch-fixed-name">{label}</p>
+          <p className="side-card-git-branch-fixed-reason">{disabledReason}</p>
+        </CardPopover>
+      </>
     )
   }
 
@@ -264,7 +297,7 @@ function BranchPicker({ path, scope, status, branches, fileCount, busyLabel, loc
       >
         <GitBranch size={13} strokeWidth={1.8} aria-hidden="true" />
         <span className="side-card-git-branch-name">{busyLabel ?? label}</span>
-        <ChevronDown size={11} aria-hidden="true" />
+        <ChevronDown className="side-card-git-branch-chevron" size={11} aria-hidden="true" />
       </button>
       <CardPopover
         open={open}
@@ -612,7 +645,8 @@ function CommitButton({ path, scope: gitScope, branch, fileCount, commits, pusha
           setOpen((value) => !value)
         }}
       >
-        Commit
+        <GitCommitHorizontal size={14} strokeWidth={1.8} aria-hidden="true" />
+        <span>Commit</span>
       </button>
       <CardPopover
         open={open}
@@ -716,7 +750,8 @@ function PushButton({ model, busy, lock, onPush }: PushButtonProps) {
       disabled={lock.disabled || model.disabledReason !== undefined}
       onClick={onPush}
     >
-      {busy ? 'Pushing…' : model.label}
+      <Upload size={14} strokeWidth={1.8} aria-hidden="true" />
+      <span>{busy ? 'Pushing…' : model.label}</span>
       {!busy && model.count !== null && (
         <span className="side-card-git-push-count" aria-hidden="true">↑{model.count}</span>
       )}
@@ -728,8 +763,19 @@ function openWeb(url: string) {
   window.open(url, '_blank', 'noopener,noreferrer')
 }
 
-/** The pull request row: the number and title open the pull request panel; the arrow opens it on the host. */
+const PULL_REQUEST_ICONS = {
+  open: GitPullRequest,
+  draft: GitPullRequest,
+  merged: GitMerge,
+  closed: GitPullRequestClosed
+} as const
+
+/**
+ * One of the thread's pull requests: an icon coloured by its state, the title in bold over at most two lines,
+ * and the number with its checks on a quiet line. The row opens the pull request panel; the arrow opens it on the host.
+ */
 export function PullRequestLink({ row }: { row: PullRequestFoundRow }) {
+  const Icon = PULL_REQUEST_ICONS[row.state]
   return (
     <div className="side-card-git-pr-line">
       <button
@@ -739,12 +785,17 @@ export function PullRequestLink({ row }: { row: PullRequestFoundRow }) {
         aria-label={row.ariaLabel}
         onClick={() => openSurface('pullRequest')}
       >
-        {row.checks === 'passing' && <Check className="side-card-git-pr-check" data-checks="passing" size={13} strokeWidth={2} aria-hidden="true" />}
-        {row.checks === 'failing' && <X className="side-card-git-pr-check" data-checks="failing" size={13} strokeWidth={2} aria-hidden="true" />}
-        {row.checks === 'pending' && <span className="side-card-git-pr-pending" aria-hidden="true" />}
-        <span className="side-card-git-pr-number">{row.number}</span>
-        <span className="side-card-git-pr-title">{row.title}</span>
-        {row.suffix && <span className="side-card-git-pr-suffix">{row.suffix}</span>}
+        <Icon className="side-card-git-pr-icon" data-state={row.state} size={14} strokeWidth={1.8} aria-hidden="true" />
+        <span className="side-card-git-pr-text">
+          <span className="side-card-git-pr-title">{row.title || row.number}</span>
+          <span className="side-card-git-pr-meta">
+            <span className="side-card-git-pr-number">{row.number}</span>
+            {row.checks === 'passing' && <CircleCheck className="side-card-git-pr-check" data-checks="passing" size={13} strokeWidth={1.8} aria-hidden="true" />}
+            {row.checks === 'failing' && <CircleX className="side-card-git-pr-check" data-checks="failing" size={13} strokeWidth={1.8} aria-hidden="true" />}
+            {row.checks === 'pending' && <span className="side-card-git-pr-pending" aria-hidden="true" />}
+            {row.suffix && <span className="side-card-git-pr-suffix">{row.suffix}</span>}
+          </span>
+        </span>
       </button>
       <button
         type="button"
@@ -759,60 +810,21 @@ export function PullRequestLink({ row }: { row: PullRequestFoundRow }) {
   )
 }
 
-/** The checks of a pull request, collapsed unless one failed or waits for approval, each with its state and a link to it. */
-function PullRequestChecks({ row }: { row: PullRequestFoundRow }) {
-  const [open, setOpen] = useState(() => row.checkRows.some((check) => check.tone === 'failing' || check.tone === 'waiting'))
-  if (row.checkRows.length === 0) return null
+/** The thread's pull requests, newest first; the rest wait behind "Show N more". */
+export function PullRequestList({ rows }: { rows: readonly PullRequestFoundRow[] }) {
+  const [expanded, setExpanded] = useState(false)
+  const { shown, hidden } = pullRequestList(rows, expanded)
+  if (shown.length === 0) return null
   return (
-    <div className="side-card-git-pr-checks">
-      <button
-        type="button"
-        className="side-card-git-pr-checks-toggle"
-        aria-expanded={open}
-        onClick={() => setOpen(!open)}
-      >
-        <span className="side-card-git-pr-checks-label">{row.checksLabel ?? `${row.checkRows.length} checks`}</span>
-        <span className="side-card-git-pr-checks-count">{row.checkRows.length}</span>
-      </button>
-      {open && (
-        <ul className="side-card-git-pr-check-list" aria-label="Checks">
-          {row.checkRows.map((check, index) => (
-            <li key={`${check.name}\u0000${index}`} className="side-card-git-pr-check-row" data-tone={check.tone}>
-              <span className="side-card-git-pr-check-dot" aria-hidden="true" />
-              <span className="side-card-git-pr-check-name" title={check.workflow ? `${check.workflow} / ${check.name}` : check.name}>{check.name}</span>
-              {check.url ? (
-                <button type="button" className="side-card-git-pr-check-state" title="Open this check" onClick={() => openWeb(check.url!)}>
-                  {check.label}
-                </button>
-              ) : (
-                <span className="side-card-git-pr-check-state">{check.label}</span>
-              )}
-            </li>
-          ))}
-        </ul>
+    <div className="side-card-git-prs">
+      {shown.map((row) => <PullRequestLink key={row.number} row={row} />)}
+      {hidden > 0 && (
+        <button type="button" className="side-card-git-pr-more" aria-expanded={false} onClick={() => setExpanded(true)}>
+          <ChevronDown size={12} aria-hidden="true" />
+          <span>Show {hidden} more</span>
+        </button>
       )}
     </div>
-  )
-}
-
-/** Below the pull request row: the reviewers' verdict, comments, the checks, a note for linked threads, and why the pull request could not be read. */
-function PullRequestDetailLines({ row, error }: { row: PullRequestFoundRow | null; error: string | null }) {
-  return (
-    <>
-      {row && (row.review || row.commentsLabel) && (
-        <div className="side-card-git-pr-review">
-          {row.review && <span className="side-card-git-pr-verdict" data-tone={row.review.tone}>{row.review.label}</span>}
-          {row.commentsLabel && <span className="side-card-git-pr-comments">{row.commentsLabel}</span>}
-        </div>
-      )}
-      {row && <PullRequestChecks key={row.number} row={row} />}
-      {row?.hint && <p className="side-card-git-pr-hint">{row.hint}</p>}
-      {error && (
-        <p className="side-card-git-pr-error" role="alert" title={error}>
-          {error}
-        </p>
-      )}
-    </>
   )
 }
 
@@ -828,7 +840,7 @@ interface GitSectionViewProps {
   git: GitStatusView
   /** The current branch's pull request lookup; null until it has loaded or when there is no branch. */
   pullRequest?: GitPullRequestLookup | null
-  /** The same pull request read in full: reviewers' verdict, comments and each check. */
+  /** The same pull request read in full; its reviewers' verdict goes in the row's tooltip. */
   pullRequestDetail?: PullRequestDetail | null
   /** The host's message when that read failed. */
   pullRequestError?: string | null
@@ -840,11 +852,11 @@ interface GitSectionViewProps {
   pullRequestWatch?: PullRequestWatchStatus | null
   /** Sets the watch (`number` links the pull request the row found by its branch). Without it the control is not shown. */
   onWatchChange?: (mode: PullRequestWatchMode, number: number) => Promise<unknown>
-  /** When set, the section collapses to this one muted line. */
+  /** When set, the section shows only this muted line, and starts collapsed once the folder is known to have no repository. */
   collapsedLabel: string | null
   /** The folder is not a repository, so the collapsed section offers to make it one. */
   canInitialize?: boolean
-  /** Clock for commit ages; tests pin it. */
+  /** Clock for the watch control; tests pin it. */
   now?: number
 }
 
@@ -901,9 +913,18 @@ export function GitSectionView({
       }
     }
     const initLock = gitActionLock(running, 'init')
+    const label = collapsedLabel ?? 'No project folder'
+    // Only a settled answer collapses the section; it keeps its own remembered choice, apart from a repository's.
+    const settled = label !== GIT_CHECKING_LABEL
     return (
-      <div className="side-card-section side-card-git-collapsed" data-thread-id={threadId ?? undefined}>
-        <p className="side-card-git-quiet">{collapsedLabel ?? 'Git: no project folder'}</p>
+      <SideCardSection
+        title="Git"
+        threadId={threadId}
+        collapseKey={settled ? GIT_NO_REPOSITORY_KEY : GIT_KEY}
+        defaultCollapsed={settled}
+        collapsedNote={settled ? label : null}
+      >
+        <p className="side-card-git-quiet side-card-git-collapsed">{label}</p>
         {canInitialize && path && (
           <button
             type="button"
@@ -921,7 +942,7 @@ export function GitSectionView({
             {actionError}
           </p>
         )}
-      </div>
+      </SideCardSection>
     )
   }
 
@@ -953,7 +974,6 @@ export function GitSectionView({
   }
 
   const stat = diffStatLabel(git.diffStats, untrackedFileCount(git.status))
-  const latest = git.commits[0] ? formatCommitLine(git.commits[0], now ?? Date.now()) : null
   const fileCount = changedFileCount(git.status)
   const pushButton = pushButtonModel(git.status, git.commits.length, scope, pullRequestPushTarget)
   const availability = gitActionAvailability(git.status, pullRequest, git.commits.length, scope)
@@ -962,24 +982,25 @@ export function GitSectionView({
   // Only an open pull request is worth watching, and only a thread of its own can be told about it.
   const watchedNumber = ownThreadId !== null && pullRequest?.state === 'found' && pullRequest.pullRequest.state === 'open' ? pullRequest.pullRequest.number : null
   const branchActions = branchActionState(scope.workspaceThreadId)
+  const pullRequestRows = prRow?.kind === 'found' ? [prRow] : []
 
   return (
-    <SideCardSection title="Git" threadId={threadId}>
+    <SideCardSection title="Git" threadId={threadId} collapseKey={GIT_KEY}>
+      <BranchPicker
+        path={path}
+        scope={scope}
+        status={git.status}
+        branches={git.branches}
+        fileCount={fileCount}
+        busyLabel={running === 'checkout' ? 'Switching…' : running === 'branch' ? 'Updating branches…' : null}
+        lock={gitActionLock(running, running === 'branch' ? 'branch' : 'checkout')}
+        disabledReason={branchActions.enabled ? null : THREAD_BRANCH_SWITCH_REASON}
+        onBegin={begin}
+        onEnd={end}
+        onActionError={setActionError}
+        onNotice={setNotice}
+      />
       <div ref={rowRef} className="side-card-git-row">
-        <BranchPicker
-          path={path}
-          scope={scope}
-          status={git.status}
-          branches={git.branches}
-          fileCount={fileCount}
-          busyLabel={running === 'checkout' ? 'Switching…' : running === 'branch' ? 'Updating branches…' : null}
-          lock={gitActionLock(running, running === 'branch' ? 'branch' : 'checkout')}
-          disabledReason={branchActions.reason}
-          onBegin={begin}
-          onEnd={end}
-          onActionError={setActionError}
-          onNotice={setNotice}
-        />
         {pushButton && (
           <PushButton model={pushButton} busy={running === 'push'} lock={gitActionLock(running, 'push')} onPush={() => void push()} />
         )}
@@ -998,6 +1019,20 @@ export function GitSectionView({
           onActionError={setActionError}
           onNotice={setNotice}
         />
+        {prRow?.kind === 'create' && (
+          <button
+            type="button"
+            className="side-card-git-pr-create"
+            title={createLock.reason ?? prRow.hint ?? undefined}
+            aria-disabled={!prRow.enabled || createLock.disabled}
+            onClick={() => {
+              if (prRow.enabled && !createLock.disabled) void createPullRequest()
+            }}
+          >
+            <GitPullRequest size={14} strokeWidth={1.8} aria-hidden="true" />
+            <span>{running === 'pullRequest' ? 'Opening…' : 'Create PR'}</span>
+          </button>
+        )}
       </div>
       {pushButton?.note && <p className="side-card-git-quiet">{pushButton.note}</p>}
       <GitOperationStatus path={path} />
@@ -1005,23 +1040,15 @@ export function GitSectionView({
         scope={createForm && createForm.path === path && createForm.branch === branch ? createForm : null}
         anchorRef={rowRef}
       />
-      {prRow?.kind === 'found' && <PullRequestLink row={prRow} />}
-      <PullRequestDetailLines row={prRow?.kind === 'found' ? prRow : null} error={pullRequestError} />
+      <PullRequestList key={`${path}\u0000${branch ?? ''}`} rows={pullRequestRows} />
+      {prRow?.kind === 'found' && prRow.hint && <p className="side-card-git-pr-hint">{prRow.hint}</p>}
+      {pullRequestError && (
+        <p className="side-card-git-pr-error" role="alert" title={pullRequestError}>
+          {pullRequestError}
+        </p>
+      )}
       {onWatchChange && watchedNumber !== null && (
         <PullRequestWatchControl status={pullRequestWatch} now={now} onChange={(mode) => onWatchChange(mode, watchedNumber)} />
-      )}
-      {prRow?.kind === 'create' && (
-        <button
-          type="button"
-          className="side-card-git-pr-create"
-          title={createLock.reason ?? prRow.hint ?? undefined}
-          aria-disabled={!prRow.enabled || createLock.disabled}
-          onClick={() => {
-            if (prRow.enabled && !createLock.disabled) void createPullRequest()
-          }}
-        >
-          {running === 'pullRequest' ? 'Opening…' : 'Create PR'}
-        </button>
       )}
       {actionError && (
         <p className="side-card-git-error" role="alert" title={actionError}>
@@ -1047,18 +1074,11 @@ export function GitSectionView({
           {stat.untracked && <span className="side-card-git-new">· {stat.untracked}</span>}
         </span>
       </button>
-      {latest && (
-        <div className="side-card-git-latest" title={latest.title} aria-label="Latest commit">
-          <span className="side-card-git-subject">{latest.subject}</span>
-          <span className="side-card-git-hash">{latest.shortHash}</span>
-          {latest.when && <span className="side-card-git-when">{latest.when}</span>}
-        </div>
-      )}
     </SideCardSection>
   )
 }
 
-/** Branch, pull request, latest commit, commit button and change counts for the folder the thread works on. */
+/** Branch, Git actions, the thread's pull requests and change counts for the folder the thread works on. */
 export function GitSection({ threadId }: SideCardSectionContext) {
   const { location, git, path, projectId, ownThreadId, link, lookup: pullRequest, detail, detailError } = useActiveThreadPullRequest(threadId)
   const { loading } = location

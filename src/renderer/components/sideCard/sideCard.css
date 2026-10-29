@@ -141,23 +141,89 @@
 }
 
 .side-card-section-title {
-  margin: 0 0 8px;
+  margin: 0;
   color: var(--ui-faint);
   font-size: 11.5px;
   font-weight: 600;
 }
 
-/* A heading with a control at its end: the control shares the baseline, the title loses its own margin. */
+/* The heading and an optional control at its end; the heading collapses and expands the section. */
 .side-card-section-head {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   justify-content: space-between;
   gap: 8px;
+  min-width: 0;
   margin: 0 0 8px;
 }
 
+.side-card-section[data-collapsed='true'] .side-card-section-head {
+  margin-bottom: 0;
+}
+
 .side-card-section-head .side-card-section-title {
-  margin: 0;
+  min-width: 0;
+}
+
+.side-card-section-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  margin: -2px -4px;
+  padding: 2px 4px;
+  border: 0;
+  border-radius: var(--ui-row-radius);
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.side-card-section-toggle:hover {
+  color: var(--text-secondary);
+}
+
+.side-card-section-toggle:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.side-card-section-name {
+  flex: none;
+}
+
+.side-card-section-note {
+  overflow: hidden;
+  min-width: 0;
+  font-weight: 400;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.side-card-section-chevron {
+  flex: none;
+  opacity: 0;
+  transform: rotate(90deg);
+  transition: opacity 120ms ease, transform 120ms ease;
+}
+
+.side-card-section[data-collapsed='true'] .side-card-section-chevron {
+  transform: none;
+}
+
+/* The chevron shows on hover and focus, and always while collapsed so a closed section reads as one. */
+.side-card-section-toggle:hover .side-card-section-chevron,
+.side-card-section-toggle:focus-visible .side-card-section-chevron,
+.side-card-section[data-collapsed='true'] .side-card-section-chevron {
+  opacity: 1;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .side-card-section-chevron {
+    transition: none;
+  }
 }
 
 .side-card-placeholder {

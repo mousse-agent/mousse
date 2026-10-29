@@ -70,7 +70,7 @@ export function changesSummary(status: GitStatusSnapshot | null): string {
   return count === 1 ? '1 file changed' : `${count} files changed`
 }
 
-/** Compact age for a commit date: "now", "5m", "3h", "2d", "6w", "4mo", "2y". Empty when the date is unreadable. */
+/** Compact age for a date: "now", "5m", "3h", "2d", "6w", "4mo", "2y". Empty when the date is unreadable. */
 export function relativeTime(date: string, now: number): string {
   const then = Date.parse(date)
   if (Number.isNaN(then)) return ''
@@ -87,23 +87,6 @@ export function relativeTime(date: string, now: number): string {
   const months = Math.round(days / 30)
   if (days < 365) return `${months}mo`
   return `${Math.round(days / 365)}y`
-}
-
-export interface CommitLine {
-  subject: string
-  shortHash: string
-  when: string
-  /** Full message and details for the tooltip. */
-  title: string
-}
-
-/** The latest-commit row: first line of the message, short hash and age. */
-export function formatCommitLine(commit: GitCommit, now: number): CommitLine {
-  const message = commit.message.trim()
-  const subject = message.split('\n', 1)[0]?.trim() || '(no message)'
-  const when = relativeTime(commit.date, now)
-  const details = [commit.shortHash, commit.author, commit.date].filter(Boolean).join(' · ')
-  return { subject, shortHash: commit.shortHash, when, title: message ? `${message}\n\n${details}` : details }
 }
 
 const isRemoteBranch = (name: string) => name.startsWith('remotes/')
@@ -125,6 +108,9 @@ export function branchLabel(status: GitStatusSnapshot | null): string {
 
 /** Shown in place of the branch picker while the folder is a thread's own worktree. */
 export const THREAD_BRANCH_LABEL = 'This thread works on its own branch'
+
+/** Why the branch picker of a thread with its own worktree lists no branches to switch to. */
+export const THREAD_BRANCH_SWITCH_REASON = 'This thread has its own branch and worktree, so its branch stays fixed.'
 
 export interface BranchActionState {
   enabled: boolean
@@ -294,18 +280,21 @@ export interface GitCollapseInput {
   status: GitStatusSnapshot | null
 }
 
+/** Shown while the folder or its status is still being read. */
+export const GIT_CHECKING_LABEL = 'Checking…'
+
 /**
- * The single muted line shown instead of the section when there is nothing to
- * manage, or null when the full section applies.
+ * The single muted line shown under the Git heading instead of the section's controls when there is
+ * nothing to manage, or null when the full section applies.
  */
 export function gitCollapsedLabel(input: GitCollapseInput): string | null {
-  if (!input.hasProject) return 'Git: no project'
-  if (input.pathPending) return 'Git: checking…'
-  if (!input.hasPath) return 'Git: no project folder'
-  if (!input.loaded) return 'Git: checking…'
-  if (!input.status) return 'Git: unavailable'
-  if (input.status.missing === true) return 'Git: folder not found'
-  if (!input.status.isRepo) return 'Git: not a repository'
+  if (!input.hasProject) return 'No project'
+  if (input.pathPending) return GIT_CHECKING_LABEL
+  if (!input.hasPath) return 'No project folder'
+  if (!input.loaded) return GIT_CHECKING_LABEL
+  if (!input.status) return 'Unavailable'
+  if (input.status.missing === true) return 'Folder not found'
+  if (!input.status.isRepo) return 'Not a repository'
   return null
 }
 
@@ -423,16 +412,12 @@ export interface PullRequestFoundRow {
   checks: PullRequestChecksTone | null
   /** "Checks passed", "2 failing", "Checks running" or "Waiting for approval". */
   checksLabel: string | null
-  /** Muted word after the title. */
+  /** What colours and shapes the pull request icon. */
+  state: 'open' | 'draft' | 'merged' | 'closed'
+  /** Muted word after the number. */
   suffix: 'Draft' | 'Merged' | 'Closed' | null
-  /** The reviewers' verdict of an open pull request; null when the host has none (a draft, merged or closed pull request shows its suffix instead). */
+  /** The reviewers' verdict of an open pull request, for the tooltip; null when the host has none (a draft, merged or closed pull request has its suffix instead). */
   review: { label: string; tone: PullRequestReviewTone } | null
-  /** Each check with its state and link; only for an open pull request whose detail has been read. */
-  checkRows: PullRequestCheckRow[]
-  /** Conversation and line comments read so far. */
-  commentCount: number
-  /** "3 comments"; null when there are none. */
-  commentsLabel: string | null
   /** The thread is linked to this pull request, which it did not only find by its branch. */
   linked: boolean
   /** A short note about what the pull request means for this thread; null when there is none. */
@@ -464,8 +449,7 @@ function checksText(tone: PullRequestChecksTone, counts: GitPullRequestInfo['che
 /**
  * The pull request row under the branch row. Only a found pull request, or a branch
  * with none that could get one, shows a row; every unavailable lookup shows nothing.
- * `detail` (the same pull request, read in full) adds the reviewers' verdict, each check and the comment
- * count; `link` and `worktreeThread` say whether the thread is linked to it and works in its own worktree.
+ * `detail` (the same pull request, read in full) adds the reviewers' verdict; `link` and `worktreeThread` say whether the thread is linked to it and works in its own worktree.
  */
 export function pullRequestRow(
   lookup: GitPullRequestLookup | null,
@@ -496,7 +480,6 @@ export function pullRequestRow(
   const review = verdict && (verdict.key === 'approved' || verdict.key === 'changes_requested' || verdict.key === 'review_required')
     ? { label: verdict.label, tone: verdict.tone }
     : null
-  const commentCount = own?.comments.length ?? 0
   const linked = link?.number === pullRequest.number
   return {
     kind: 'found',
@@ -505,18 +488,27 @@ export function pullRequestRow(
     title,
     checks: tone,
     checksLabel: checks?.label ?? null,
+    state: pullRequest.state === 'open' && pullRequest.isDraft ? 'draft' : pullRequest.state,
     suffix,
     review,
-    checkRows: own ? pullRequestCheckRows(own.checkRuns) : [],
-    commentCount,
-    commentsLabel: commentCount > 0
-      ? `${commentCount}${own?.commentsTruncated ? '+' : ''} ${commentCount === 1 && !own?.commentsTruncated ? 'comment' : 'comments'}`
-      : null,
     linked,
     hint: linked && worktreeThread ? LINKED_WORKTREE_HINT : null,
     tooltip: [title ? `${number} ${title}` : number, review?.label, checks?.label].filter(Boolean).join('\n'),
     ariaLabel: ['Pull request ' + number, title, suffix?.toLowerCase(), review?.label.toLowerCase(), checks?.spoken].filter(Boolean).join(', ')
   }
+}
+
+/** Pull requests shown before "Show N more". */
+export const PULL_REQUESTS_SHOWN = 1
+
+/**
+ * The thread's pull requests as the section lists them: the newest first and shown, the rest counted behind
+ * "Show N more" until expanded. Pull requests are newest when their number is highest.
+ */
+export function pullRequestList<T extends Pick<PullRequestFoundRow, 'number'>>(rows: readonly T[], expanded: boolean): { shown: T[]; hidden: number } {
+  const ordered = [...rows].sort((a, b) => Number(b.number.slice(1)) - Number(a.number.slice(1)))
+  if (expanded || ordered.length <= PULL_REQUESTS_SHOWN) return { shown: ordered, hidden: 0 }
+  return { shown: ordered.slice(0, PULL_REQUESTS_SHOWN), hidden: ordered.length - PULL_REQUESTS_SHOWN }
 }
 
 /**

@@ -1,9 +1,5 @@
 /* Git section of the thread side card. */
 
-.side-card-git-collapsed {
-  padding-block: 9px;
-}
-
 .side-card-git-quiet {
   margin: 0;
   color: var(--ui-faint);
@@ -13,8 +9,14 @@
 
 .side-card-git-row {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 6px;
+  margin-top: 4px;
+}
+
+.side-card-git-row:empty {
+  display: none;
 }
 
 .side-card-git-branch,
@@ -46,8 +48,8 @@
 .side-card-git-branch {
   display: flex;
   align-items: center;
-  flex: 1 1 auto;
   gap: 6px;
+  width: 100%;
   min-width: 0;
   height: 26px;
   padding: 0 6px;
@@ -62,35 +64,28 @@
   color: var(--ui-faint);
 }
 
-/* A thread's own branch is shown, not offered: nothing to click. */
-.side-card-git-branch-static {
-  cursor: default;
-}
-
 .side-card-git-branch-name {
   overflow: hidden;
+  flex: 1 1 auto;
   min-width: 0;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .side-card-git-commit-button,
-.side-card-git-push {
+.side-card-git-push,
+.side-card-git-pr-create {
+  display: flex;
   flex: none;
+  align-items: center;
+  gap: 5px;
   height: 26px;
-  padding: 0 10px;
+  padding: 0 10px 0 8px;
   border-radius: var(--ui-row-radius);
   background: var(--ui-hover);
   font-size: 12px;
   font-weight: 500;
   white-space: nowrap;
-}
-
-.side-card-git-push {
-  display: flex;
-  align-items: center;
-  gap: 5px;
-  padding: 0 8px;
 }
 
 .side-card-git-push-count {
@@ -139,24 +134,102 @@
   outline-offset: 1px;
 }
 
+/* The thread's pull requests: icon, bold title over at most two lines, then the number and checks. */
+.side-card-git-prs {
+  margin-top: 4px;
+}
+
 .side-card-git-pr-line {
+  position: relative;
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 2px;
-  margin-top: 2px;
 }
 
 .side-card-git-pr {
   display: flex;
-  align-items: center;
-  gap: 6px;
+  align-items: flex-start;
+  gap: 8px;
   flex: 1 1 auto;
   min-width: 0;
-  height: 26px;
-  padding: 0 6px;
+  padding: 4px 6px;
   border-radius: var(--ui-row-radius);
   font-size: 12px;
   text-align: left;
+}
+
+.side-card-git-pr-icon {
+  flex: none;
+  margin-top: 1px;
+  color: var(--ui-faint);
+}
+
+.side-card-git-pr-icon[data-state='open'] {
+  color: var(--success);
+}
+
+.side-card-git-pr-icon[data-state='merged'] {
+  color: var(--accent);
+}
+
+.side-card-git-pr-icon[data-state='closed'] {
+  color: var(--danger);
+}
+
+.side-card-git-pr-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.side-card-git-pr-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+}
+
+.side-card-git-pr-more {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 24px;
+  padding: 0 6px;
+  border: 0;
+  border-radius: var(--ui-row-radius);
+  background: transparent;
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.side-card-git-pr-more:hover {
+  background: var(--ui-hover);
+}
+
+.side-card-git-pr-more:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* The branch of a thread with its own worktree: its full name and why it stays fixed. */
+.side-card-git-branch-fixed-name,
+.side-card-git-branch-fixed-reason {
+  margin: 0;
+  padding: 2px 6px;
+  font-size: 12px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.side-card-git-branch-fixed-name {
+  font-family: var(--font-mono);
+}
+
+.side-card-git-branch-fixed-reason {
+  color: var(--text-secondary);
 }
 
 .side-card-git-pr-external {
@@ -212,146 +285,19 @@
 }
 
 .side-card-git-pr-title {
+  display: -webkit-box;
   overflow: hidden;
-  flex: 1 1 auto;
-  min-width: 0;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  font-weight: 600;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
 }
 
 .side-card-git-pr-suffix {
   flex: none;
   color: var(--ui-faint);
   font-size: 11px;
-}
-
-.side-card-git-pr-review {
-  display: flex;
-  align-items: baseline;
-  gap: 6px;
-  padding: 2px 6px 0 6px;
-  font-size: 11px;
-  color: var(--text-secondary);
-}
-
-.side-card-git-pr-verdict[data-tone='passing'] {
-  color: var(--success);
-}
-
-.side-card-git-pr-verdict[data-tone='failing'] {
-  color: var(--danger);
-}
-
-.side-card-git-pr-verdict[data-tone='pending'] {
-  color: var(--text-secondary);
-}
-
-.side-card-git-pr-comments {
-  color: var(--ui-faint);
-}
-
-.side-card-git-pr-checks-toggle,
-.side-card-git-pr-check-state {
-  border: 0;
-  background: transparent;
-  color: inherit;
-  font: inherit;
-}
-
-.side-card-git-pr-checks-toggle {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  width: 100%;
-  height: 22px;
-  margin-top: 2px;
-  padding: 0 6px;
-  border-radius: var(--ui-row-radius);
-  font-size: 11px;
-  color: var(--text-secondary);
-  text-align: left;
-  cursor: pointer;
-}
-
-.side-card-git-pr-checks-toggle:hover,
-button.side-card-git-pr-check-state:hover {
-  background: var(--ui-hover);
-}
-
-.side-card-git-pr-checks-toggle:focus-visible,
-button.side-card-git-pr-check-state:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 1px;
-}
-
-.side-card-git-pr-checks-label {
-  flex: 1 1 auto;
-}
-
-.side-card-git-pr-checks-count {
-  flex: none;
-  color: var(--ui-faint);
-  font-variant-numeric: tabular-nums;
-}
-
-.side-card-git-pr-check-list {
-  margin: 0;
-  padding: 0;
-  list-style: none;
-}
-
-.side-card-git-pr-check-row {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  min-height: 22px;
-  padding: 0 6px;
-  font-size: 11px;
-}
-
-.side-card-git-pr-check-dot {
-  flex: none;
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: var(--ui-faint);
-}
-
-.side-card-git-pr-check-row[data-tone='passing'] .side-card-git-pr-check-dot {
-  background: var(--success);
-}
-
-.side-card-git-pr-check-row[data-tone='failing'] .side-card-git-pr-check-dot {
-  background: var(--danger);
-}
-
-.side-card-git-pr-check-row[data-tone='pending'] .side-card-git-pr-check-dot {
-  animation: side-card-git-pr-pulse 1.6s ease-in-out infinite;
-}
-
-.side-card-git-pr-check-row[data-tone='waiting'] .side-card-git-pr-check-dot,
-.side-card-git-pr-check-row[data-tone='skipped'] .side-card-git-pr-check-dot {
-  background: transparent;
-  box-shadow: inset 0 0 0 1px var(--ui-faint);
-}
-
-.side-card-git-pr-check-name {
-  overflow: hidden;
-  flex: 1 1 auto;
-  min-width: 0;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.side-card-git-pr-check-state {
-  flex: none;
-  padding: 1px 4px;
-  border-radius: var(--ui-row-radius);
-  color: var(--text-secondary);
-}
-
-button.side-card-git-pr-check-state {
-  cursor: pointer;
 }
 
 .side-card-git-pr-hint,
@@ -369,18 +315,6 @@ button.side-card-git-pr-check-state {
 
 .side-card-git-pr-error {
   color: var(--danger);
-}
-
-.side-card-git-pr-create {
-  display: block;
-  height: 26px;
-  margin: 2px 0 0 6px;
-  padding: 0 10px;
-  border-radius: var(--ui-row-radius);
-  background: var(--ui-hover);
-  font-size: 12px;
-  font-weight: 500;
-  white-space: nowrap;
 }
 
 @keyframes side-card-git-pr-pulse {
@@ -462,34 +396,6 @@ button.side-card-git-pr-check-state {
 .side-card-git-added[data-zero='true'],
 .side-card-git-removed[data-zero='true'] {
   color: var(--ui-faint);
-}
-
-.side-card-git-latest {
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
-  min-width: 0;
-  padding: 3px 6px 0;
-  font-size: 12px;
-}
-
-.side-card-git-subject {
-  overflow: hidden;
-  flex: 1 1 auto;
-  min-width: 0;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.side-card-git-hash,
-.side-card-git-when {
-  flex: none;
-  color: var(--ui-faint);
-  font-size: 11px;
-}
-
-.side-card-git-hash {
-  font-family: var(--font-mono);
 }
 
 /* Popovers sit in the floating layer, outside the card, so they carry their own surface. */
@@ -938,10 +844,6 @@ button.side-card-git-pr-check-state {
    read as hidden when focus moves into them. */
 @media (prefers-reduced-motion: reduce) {
   .side-card-git-pr-pending {
-    animation: none;
-  }
-
-  .side-card-git-pr-check-row[data-tone='pending'] .side-card-git-pr-check-dot {
     animation: none;
   }
 
