@@ -12,6 +12,7 @@ import { publishedRef, restoreChange, takeSnapshot, worktreeTree } from '../src/
 import { ChildAgentIntegrationService } from '../src/mms/agents/ChildAgentIntegrationService'
 import { ThreadJournal } from '../src/mms/data/ThreadJournal'
 import { ThreadWorkspaceManager } from '../src/mms/workspace/ThreadWorkspaceManager'
+import { WorkspaceGcService } from '../src/mms/workspace/WorkspaceGcService'
 import type { ThreadAction } from '../src/shared/threadActions'
 import { actionOptions, git, gitFoundationFixture } from './fixtures/gitFoundation'
 
@@ -688,5 +689,65 @@ describe('publish', () => {
     const first = await service.publish(cwd, f.repo, target(), undefined, { operationId: 'replay' })
     expect(await service.publish(cwd, f.repo, target(), undefined, { operationId: 'replay' })).toEqual(first)
     expect(git(f.repo, 'rev-list', '--count', `${first.prePublishSha}..HEAD`)).toBe('1')
+  })
+})
+
+describe('rebuilding a worktree from its snapshot', () => {
+  /** An agent's turn on a branch of its own, with a commit and files it left uncommitted; then the worktree is gone. */
+  async function leftOnAnotherBranch() {
+    await turn('turn', () => {
+      git(cwd, 'switch', '-q', '-c', 'issue-7-work')
+      write('feature.txt', 'committed\n'); git(cwd, 'add', 'feature.txt'); git(cwd, 'commit', '-qm', 'feature')
+      write('value.txt', 'uncommitted edit\n'); write('draft.txt', 'draft\n')
+    })
+    const head = git(cwd, 'rev-parse', 'HEAD')
+    const status = git(cwd, 'status', '--porcelain', '--untracked-files=all')
+    git(f.repo, 'worktree', 'remove', '--force', cwd)
+    expect(existsSync(cwd)).toBe(false)
+    return { head, status }
+  }
+
+  it('starts at the HEAD the snapshot was taken on, on the branch it was on, with the same uncommitted files', async () => {
+    const { head, status } = await leftOnAnotherBranch()
+    const restored = await new ThreadWorkspaceManager(f.thread).restore(f.repo)
+    expect(restored.lifecycle).toBe('ready')
+    expect(git(cwd, 'rev-parse', 'HEAD')).toBe(head)
+    expect(git(cwd, 'branch', '--show-current')).toBe('issue-7-work')
+    expect(git(cwd, 'status', '--porcelain', '--untracked-files=all')).toBe(status)
+    expect(f.read(cwd)).toBe('uncommitted edit\n'); expect(f.read(cwd, 'draft.txt')).toBe('draft\n')
+    // Nothing of this is outside changes: the next turn starts from the snapshot it was rebuilt from.
+    expect((await actions.recordOutsideChanges({ threadId: 'task', conversationBranchId: 'main', workspacePath: cwd })).action).toBeUndefined()
+  })
+
+  it('is detached at that HEAD when the branch has moved since', async () => {
+    const { head, status } = await leftOnAnotherBranch()
+    git(f.repo, 'branch', '-f', 'issue-7-work', f.baseSha)
+    await new ThreadWorkspaceManager(f.thread).restore(f.repo)
+    expect(git(cwd, 'rev-parse', 'HEAD')).toBe(head)
+    expect(git(cwd, 'branch', '--show-current')).toBe('')
+    expect(git(cwd, 'status', '--porcelain', '--untracked-files=all')).toBe(status)
+  })
+})
+
+describe('workspace GC', () => {
+  it('never deletes a snapshot pin, whatever it is called, and keeps the pins of retirement and publish', async () => {
+    const { action } = await turn('turn', () => write('agent.txt', 'agent\n'))
+    const receipt = new ChangeReceiptService(f.thread).list().find((item) => item.id === action.receiptId)!
+    // Pins in places GC does not know: a snapshot is work that exists nowhere else.
+    git(f.repo, 'update-ref', 'refs/mousse/somewhere-new/snapshot', action.endSha)
+    git(f.repo, 'update-ref', 'refs/mousse/lifecycle/profile/task/key/base', f.baseSha)
+    git(f.repo, 'update-ref', 'refs/mousse/lifecycle/profile/task/key/snapshot', action.endSha)
+    git(f.repo, 'update-ref', publishedRef('task'), action.endSha)
+    // A ref that is nothing but an old commit of the primary's own branch is still a candidate.
+    git(f.repo, 'update-ref', 'refs/mousse/scratch/old', f.baseSha)
+    const gc = new WorkspaceGcService(f.repo)
+    const report = gc.dryRun(new Set(), new Set())
+    const pins = ['refs/mousse/threads/task/main', ...receipt.retainedRefs, 'refs/mousse/somewhere-new/snapshot', 'refs/mousse/lifecycle/profile/task/key/base', 'refs/mousse/lifecycle/profile/task/key/snapshot', publishedRef('task')]
+    for (const ref of pins) expect(report.retainedRefs).toContain(ref)
+    expect(report.unreferencedRefs).toEqual(['refs/mousse/scratch/old'])
+    await gc.purge(report, true)
+    for (const ref of pins) expect(git(f.repo, 'rev-parse', ref)).toMatch(/^[0-9a-f]{40}$/)
+    expect(() => git(f.repo, 'rev-parse', '--verify', '-q', 'refs/mousse/scratch/old')).toThrow()
+    expect(f.read(cwd, 'agent.txt')).toBe('agent\n')
   })
 })

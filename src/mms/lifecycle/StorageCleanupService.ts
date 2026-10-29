@@ -8,7 +8,9 @@ import type { ThreadWorkspaceMetadata } from '../../shared/workspace'
 import { atomicWriteFileSync, atomicWriteJsonSync } from '../data/AtomicFs'
 import { ThreadJournal } from '../data/ThreadJournal'
 import { isIntegrated, primaryRemote, resolveDefaultBranch } from '../git/defaultBranch'
-import { readOnlyGit } from '../git/readOnlyGit'
+import { operationInProgress } from '../actions/git'
+import { publishedRef } from '../actions/snapshots'
+import { readOnlyGit, runReadOnlyGit } from '../git/readOnlyGit'
 import { acquireRepositoryLease } from '../git/RepositoryLease'
 import { resolveRepositoryIdentity } from '../git/RepositoryIdentity'
 import { isExecutionLeaseHeld, releaseExecutionLeaseHandle, STORAGE_CLEANUP_LEASE_SOURCE, tryAcquireExecutionLease } from '../queue/ThreadExecutionLease'
@@ -136,7 +138,7 @@ type DeletedVerdict =
   | { remove: true; head: string; workspace: ThreadWorkspaceMetadata; measurement: Measurement }
 
 /** What the content checks found in a checkout that has nothing to keep it for the location and content reasons. */
-type CheckoutFacts = { head: string; beyondBase: number; integrated: boolean }
+type CheckoutFacts = { head: string; beyondBase: number; integrated: boolean; uncommitted: number }
 
 /** One line of a dry run; the shape the Storage page reads. */
 export type PlannedCleanup = StorageCleanupPlanItem
@@ -747,10 +749,16 @@ export class StorageCleanupService {
     if (placement) return { keep: placement }
     const unfinished = [...new ThreadJournal(record.location, { readOnly: true }).latestByOperation().values()].find((entry) => !TERMINAL_OPERATION_STATES.has(entry.state))
     if (unfinished) return { keep: 'Workspace has an unfinished operation' }
+    // HEAD and the branch are the agent's to move; the commits it added are counted below.
     const head = readOnlyGit(path, ['rev-parse', 'HEAD'])
-    if (workspace.headSha !== head) return { keep: 'Workspace HEAD moved outside a recorded operation' }
+    // Uncommitted files do not keep a worktree: retiring it saves them as a snapshot first. What a snapshot cannot hold keeps it.
     const changed = readOnlyGit(path, ['status', '--porcelain', '--untracked-files=all']).split(/\r?\n/).filter(Boolean).length
-    if (changed) return { keep: `Has uncommitted changes (${plural(changed, 'file')})` }
+    const operation = operationInProgress(path)
+    if (operation) return { keep: `Has a ${operation} in progress` }
+    if (readOnlyGit(path, ['ls-files', '-u'])) return { keep: 'Has unresolved conflicts' }
+    const staged = readOnlyGit(path, ['diff', '--cached', '--name-only']).split(/\r?\n/).filter(Boolean).length
+    if (staged) return { keep: `Has staged changes (${plural(staged, 'file')})` }
+    if (changed && runReadOnlyGit(path, ['config', '--bool', 'core.sparseCheckout']).stdout.trim() === 'true') return { keep: `Has uncommitted changes in a sparse checkout (${plural(changed, 'file')})` }
     // Cheap checks first: a worktree with ignored files (node_modules, .env) is kept without walking it for another repository.
     const ignored = readOnlyGit(path, ['ls-files', '--others', '--ignored', '--exclude-standard', '--directory', '-z']).split('\0').filter(Boolean).filter((entry) => !onlyControlFiles(path, entry))
     if (ignored.length) return { keep: `Has ignored files (${ignored[0]})` }
@@ -766,10 +774,18 @@ export class StorageCleanupService {
     if (beyondBase > 0) {
       const defaults = resolveDefaultBranch(target.checkoutPath, this.deps.codeHost)
       if (!defaults) return { keep: `Default branch is unavailable; run \`git remote set-head ${primaryRemote(target.checkoutPath) ?? '<remote>'} --auto\`` }
-      integrated = isIntegrated(path, head, defaults.refs)
+      // Ancestry covers a branch that was merged as it is. A publish puts the files into one new commit, so it is also
+      // integrated when the files it last published are the ones in HEAD.
+      integrated = isIntegrated(path, head, defaults.refs) || (changed === 0 && this.publishedAsHead(target.checkoutPath, record.taskId, path))
       if (!integrated) return { keep: `Has ${plural(beyondBase, 'unpublished commit')}` }
     }
-    return { head, beyondBase, integrated }
+    return { head, beyondBase, integrated, uncommitted: changed }
+  }
+
+  /** Whether the thread's last publish put exactly the files HEAD has into the primary checkout. Reads only. */
+  private publishedAsHead(primaryCheckout: string, taskId: string, worktree: string): boolean {
+    const published = runReadOnlyGit(primaryCheckout, ['rev-parse', '--verify', '-q', `${publishedRef(taskId)}^{tree}`])
+    return published.status === 0 && published.stdout.trim() === readOnlyGit(worktree, ['rev-parse', 'HEAD^{tree}'])
   }
 
   /** The fixed order of keep reasons; the first match wins. Undefined means skip silently. */
@@ -785,7 +801,7 @@ export class StorageCleanupService {
     if (isExecutionLeaseHeld(record.location)) return { keep: 'Thread is in use' }
     const facts = await this.inspectCheckout(record, workspace)
     if ('keep' in facts) return facts
-    const { head, beyondBase, integrated } = facts
+    const { head, beyondBase, integrated, uncommitted } = facts
     let rule: 'worktree-inactive' | 'worktree-merged' | undefined
     let reason = ''
     const reasons: string[] = []
@@ -796,6 +812,7 @@ export class StorageCleanupService {
     }
     if (!rule && mergedOn) {
       if (beyondBase === 0 || !integrated) reasons.push('No commits to merge yet')
+      else if (uncommitted) reasons.push(`Has uncommitted changes (${plural(uncommitted, 'file')})`)
       // A merged thread the person keeps coming back to would be retired, restored by the next status
       // refresh and retired again every hour. A worktree used in the last day (a message, an operation,
       // a commit or a restore) is left alone.

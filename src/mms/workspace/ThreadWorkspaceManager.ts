@@ -7,7 +7,7 @@ import { nonInteractiveGitEnv } from '../git/gitEnv'
 import { safeWorktreeGit } from '../worktree/WorktreeManager'
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { assertHeldThreadLease } from '../actions/GitOperationCoordinator'
-import { moveFiles } from '../actions/snapshots'
+import { moveFiles, snapshotOrigin } from '../actions/snapshots'
 import { atomicWriteJsonSync } from '../data/AtomicFs'
 import { ThreadJournal } from '../data/ThreadJournal'
 import { getMousseHomeDir } from '../data/paths'
@@ -303,7 +303,8 @@ export class ThreadWorkspaceManager {
         const retirement = new WorktreeRetirementService(gate, { taskLease: threadLease, repositoryLease })
         const manifestPath = retirement.pathFor(metadata.threadId, metadata.worktreePath)
         const manifest = retirement.load(manifestPath)
-        if (manifest.branch !== metadata.branch || manifest.resultSha !== metadata.headSha || manifest.repositoryId !== metadata.repositoryId) throw new Error('Retired workspace manifest disagrees with authoritative task binding')
+        // HEAD is the agent's to move, so the one the worktree had when retired is not compared with the last one Mousse saw.
+        if (manifest.branch !== metadata.branch || manifest.repositoryId !== metadata.repositoryId) throw new Error('Retired workspace manifest disagrees with authoritative task binding')
         // The worktree's own configuration went with the worktree: for someone else's commits it is put back before anything is checked out.
         const safety = metadata.untrusted ? await untrustedSafety(repository.gitTopLevel) : undefined
         retirement.reconstruct(manifestPath, safety ? { prepare: (path) => pinUntrustedWorktree(repository.gitTopLevel, path, safety), env: { ...nonInteractiveGitEnv(), GIT_LFS_SKIP_SMUDGE: '1' } } : undefined)
@@ -312,12 +313,21 @@ export class ThreadWorkspaceManager {
         atomicWriteJsonSync(this.workspacePath, restored)
         return restored
       }
-      // The files come from the retained snapshot; the branch only supplies HEAD (the agent may have moved it).
+      // The files come from the retained snapshot, and the worktree starts at the HEAD the snapshot was taken on: on the
+      // branch it was on, or on the thread's own, when that branch still is at that commit; detached there otherwise.
       const retained = git(repository.gitTopLevel, ['rev-parse', '--verify', `${metadata.retainedRef}^{commit}`])
-      git(repository.gitTopLevel, ['rev-parse', '--verify', metadata.branch])
+      const origin = snapshotOrigin(repository.gitTopLevel, retained)
+      const head = origin.head ?? git(repository.gitTopLevel, ['rev-parse', '--verify', `${metadata.branch}^{commit}`])
+      const tip = (branch: string): string | undefined => tryGit(repository.gitTopLevel, ['rev-parse', '--verify', '-q', `refs/heads/${branch}^{commit}`]).stdout || undefined
+      const branch = [origin.branch, metadata.branch].find((name) => name && tip(name) === head)
       mkdirSync(dirname(metadata.worktreePath), { recursive: true })
-      if (metadata.untrusted) await addUntrustedWorktree(repository.gitTopLevel, [metadata.worktreePath, metadata.branch], metadata.worktreePath)
-      else git(repository.gitTopLevel, ['worktree', 'add', metadata.worktreePath, metadata.branch])
+      const add = async (target: string[]): Promise<void> => {
+        if (metadata.untrusted) await addUntrustedWorktree(repository.gitTopLevel, target, metadata.worktreePath)
+        else git(repository.gitTopLevel, ['worktree', 'add', ...target])
+      }
+      // A branch that another worktree has checked out cannot be added again; the commit can.
+      if (branch) { try { await add([metadata.worktreePath, branch]) } catch { await add(['--detach', metadata.worktreePath, head]) } }
+      else await add(['--detach', metadata.worktreePath, head])
       moveFiles(metadata.worktreePath, git(metadata.worktreePath, ['rev-parse', 'HEAD^{tree}']), git(metadata.worktreePath, ['rev-parse', `${retained}^{tree}`]))
       const restored = this.verify(metadata)
       atomicWriteJsonSync(this.workspacePath, restored)
