@@ -1748,7 +1748,7 @@ export class OrchestratorService extends EventEmitter {
       },
       effectDelivery: () => this.effectsEnabled(),
       continuationDue: (due, answeredBy) => this.startApprovalContinuation(due, answeredBy),
-      ruleApplied: (threadId, rule) => this.noteProviderNotice(threadId, `Allowed without asking by your "Always for this thread" rule (${rule.summary.slice(0, 200)}). Revoke it in the thread side card.`)
+      ruleApplied: (threadId, rule) => this.noteProviderNotice(threadId, `Allowed without asking by your "Always for this thread" rule (${rule.summary.slice(0, 200)}).`)
     })
   }
 
