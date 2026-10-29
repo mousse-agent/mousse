@@ -8,6 +8,7 @@ Use these terms in issues, PRs, comments, and docs. If you need a term that is n
 - **Project:** a workspace directory registered in a profile.
 - **Thread:** a conversation and its work history. A thread that changes a Git repository gets its own branch and worktree.
 - **Turn:** one user message and the agent work it starts.
+- **Snapshot:** a record of every file in a thread's worktree at one moment, kept as a Git commit under `refs/mousse/` that belongs to no branch. Each turn is recorded as a snapshot before and after, so the agent's own branches, commits and pushes never collide with Undo. See `docs/workspace-snapshots.md`.
 - **Run:** the saved record of a turn in the Run Engine, with its own ID. Stop, Steer, and Undo act on a run.
 - **Steer:** a message sent to a turn that is still running, to change its direction.
 - **Stop:** ends what a thread is doing and everything its subagents are doing, at every depth. The Stop button, the CLI, Lineage's Stop and Stop all, `task_cancel`, deleting a thread and settling it are all the same Stop. A subagent's result that is already waiting to be read is kept.
