@@ -1295,6 +1295,9 @@ html[data-theme='high-contrast'] .toggle-switch.on::after {
 
 /* Neutral, like .settings-btn: an error retry is not a primary action. */
 .settings-retry-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-4);
   height: var(--settings-control-h);
   padding: 0 var(--space-12);
   border-radius: var(--ui-control-radius);

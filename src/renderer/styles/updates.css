@@ -16,3 +16,14 @@
 .update-notes a { display: inline-block; margin-top: 2px; font-size: 12px; color: var(--ui-faint, var(--text-secondary)); text-decoration: underline dotted; }
 .update-notes a:hover { color: var(--text-primary); }
 .update-notes-more { margin: 8px 0 0; font-size: 12px; color: var(--ui-faint, var(--text-secondary)); }
+
+/* Failed update check, download or install in Settings, General. */
+.update-error {
+  display: flex;
+  align-items: center;
+  gap: var(--space-8);
+}
+.update-error-icon { flex: none; color: var(--danger); }
+.update-error-text { display: flex; flex: 1; flex-direction: column; gap: var(--space-4); min-width: 0; font-size: var(--settings-fs-small); }
+.update-error-text strong { font-weight: 600; }
+.update-error-text span { color: var(--text-secondary); overflow-wrap: anywhere; }
