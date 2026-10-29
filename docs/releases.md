@@ -64,7 +64,7 @@ To try the updater from a checkout, serve a folder with a `latest.yml` (or `nigh
 
 ## Contract versions, not component versions
 
-The orchestrator, providers and channels are internal modules. They ship together in one build and nothing outside the app depends on them, so they have no versions of their own: the app version identifies all of them. A separate version per module would move in lockstep with the app version and say nothing new.
+The orchestrator and providers are internal modules. They ship together in one build and nothing outside the app depends on them, so they have no versions of their own: the app version identifies all of them. A separate version per module would move in lockstep with the app version and say nothing new.
 
 What does need its own version is anything **another build can see**: older or newer daemons, peers on Mousse Net, and data saved by an earlier release. These are the contract versions, listed in [`src/mms/contractVersions.ts`](../src/mms/contractVersions.ts) and printed by `mousse-cli --version --json`:
 
@@ -82,4 +82,4 @@ Rules:
 - Bump a contract version only when an older or newer build could misread the change. Adding an optional field usually does not need a bump; renaming or removing one does.
 - `tests/contractVersions.test.ts` lists every value, so a bump fails that test until the list is updated in the same PR. Say what changed in the PR description.
 - A release that bumps a contract version is a minor release, and its notes say what stops working across versions.
-- A new provider or channel API that outside code implements, such as a plugin API, gets its own contract version when it exists.
+- A new provider API that outside code implements, such as a plugin API, gets its own contract version when it exists.

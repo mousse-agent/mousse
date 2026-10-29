@@ -1,6 +1,6 @@
 # Mousse configuration (`mousse.conf`)
 
-Mousse stores installation configuration at `$MOUSSE_HOME/mousse.conf` and personal configuration at `$MOUSSE_HOME/profiles/<profile-id>/mousse.conf`. MMS owns writes; GUI and CLI use the authenticated daemon protocol. The installation file owns `version`, `mms`, and rollout `features`. Profile files own `settings`, `providers` (personal selection), `agents`, `scheduled`, and `channels`.
+Mousse stores installation configuration at `$MOUSSE_HOME/mousse.conf` and personal configuration at `$MOUSSE_HOME/profiles/<profile-id>/mousse.conf`. MMS owns writes; GUI and CLI use the authenticated daemon protocol. The installation file owns `version`, `mms`, and rollout `features`. Profile files own `settings`, `providers` (personal selection), `agents`, and `scheduled`.
 
 Provider credentials in installation `auth.json` and the provider/model catalog are shared. Mousse ID/control accounts, integration secrets, threads, projects, Agent/workflow definitions, runs, browser state, and preferences are personal. `installation.json` and each `profiles/<id>/profile.json` identify the installation and profiles. Do not copy shared provider credentials into profile roots.
 
@@ -14,13 +14,10 @@ Legacy personal data migrates to Default using the durable `migration/journal.js
 |----------|---------|--------|
 | `MOUSSE_HOME` | `~/.mousse` | Root directory for all Mousse data and `mousse.conf` |
 | `MOUSSE_REPO_ROOT` | `process.cwd()` (CLI/MMS) or homedir when packaged (GUI) | Default git repo for worktrees |
-| `MOUSSE_TELEGRAM_BOT_TOKEN` | — | Overrides Telegram token; enables Telegram channel |
-| `MOUSSE_DISCORD_BOT_TOKEN` | — | Overrides Discord token; enables Discord channel |
-| `MOUSSE_CHANNELS_WEBHOOK_PORT` | — | Overrides webhook listen port |
 
 **Config paths:** installation `$MOUSSE_HOME/mousse.conf`; personal `$MOUSSE_HOME/profiles/<profile-id>/mousse.conf`.
 
-**Precedence:** Environment overrides apply at runtime for channels (tokens/ports) after reading `mousse.conf`. All other settings come from `mousse.conf` unless a store merges live edits in memory.
+**Precedence:** Settings come from `mousse.conf` unless a store merges live edits in memory.
 
 ## Claude Subscription provider
 
@@ -58,7 +55,6 @@ An approval request is saved. It waits as long as you take while you are in the 
   "providers": { /* orchestrator LLM selection */ },
   "agents": { /* CLI agent defaults */ },
   "scheduled": { "enabled": true, "jobs": [ /* definitions */ ] },
-  "channels": { /* messaging platform config */ },
   "mms": { "autostart": false, "logLevel": "info" }
 }
 ```
@@ -247,7 +243,7 @@ A plain-prompt run is a turn on a thread, admitted by the Run Engine like any me
 
 > **Warning: `workspace: project` lets an unattended agent edit your own checkout.** The run works in the same folder you work in, with no worktree, no checkpoints and no undo, and two jobs on one project can edit it at the same time. For an agent-mode job in a Git project, use `newWorktree` (`--workspace new-worktree`), or `mode: plan` if the job should not change files.
 - **Jobs agents create.** Agents get five tools (`schedule_list`, `schedule_create`, `schedule_update`, `schedule_pause`, `schedule_run`; see `docs/run-engine/SPEC.md` §15.1) when `scheduled.agentJobs` is on and the profile gives them the `manage` access level.
-  - **Only a person's turn creates or starts jobs.** `schedule_create`, `schedule_run` and a `schedule_update` of anything but the name are refused unless a person started the run from the app or the CLI. A scheduled or webhook run, a message another agent sent, a subagent, a wake, a continuation, a bot, a channel, a run with no recorded binding and one that cannot be read are all refused, so a job can never create or start jobs and no chain of jobs can form.
+  - **Only a person's turn creates or starts jobs.** `schedule_create`, `schedule_run` and a `schedule_update` of anything but the name are refused unless a person started the run from the app or the CLI. A scheduled or webhook run, a message another agent sent, a subagent, a wake, a continuation, a bot, a remote send, a run with no recorded binding and one that cannot be read are all refused, so a job can never create or start jobs and no chain of jobs can form.
   - **Creator scope.** An agent lists, changes, pauses and runs only the jobs its own thread created through these tools. A person's job, and a job another thread made, are refused like jobs that do not exist. Every change an agent makes is an `agent.action` event on its thread with a row in its transcript, and the job and its run records are labelled "Created by an agent".
   - **Bounds.** A person sets them (`scheduled.agentJobMaxActive`, `agentJobMinIntervalMinutes`, `agentJobLifetimeDays`; defaults 10, 15 and 7), and the tools read them at every call. At most that many active agent-made jobs in the profile at once (counted from the saved jobs, so a restart does not reset it; paused and ended jobs do not count). A job runs no more often than every that many minutes (a cron expression has exactly five fields and a fixed list of minutes that far apart; above 60 minutes the hours it names must keep its runs that far apart too). A job ends that many days after it is made unless a person extends it. An agent can only shorten a job's number of runs. A lower limit does not delete or pause jobs that exist: it only refuses new creates or changes. A changed lifetime applies to jobs created or extended afterwards, and the `expiresAt` already stored is not rewritten. No `schedule_*` tool and no tool argument can change these settings.
   - **No more than the creator.** The job records the access level and permission mode of the turn that made it, and its runs get at most those; a change by an agent can only narrow them. A job cannot have a webhook, run a workflow (a prompt starting with `/`; agents do not create, change or start those), use an existing worktree, or be enabled again by an agent: a person resumes a paused job. `schedule_run` is refused in the same cases as Run now (running, claimed, a run in progress or waiting in a queue), for a paused job and for one that has ended.
@@ -261,46 +257,6 @@ Other scheduled files (unchanged):
 - `$MOUSSE_HOME/scheduled/ticker_heartbeat` — ticker liveness
 - `$MOUSSE_HOME/scheduled/ticker_last_success` — last successful tick
 - `$MOUSSE_HOME/scheduled/.tick.lock`, `.jobs.lock` — file locks
-
----
-
-## `channels`
-
-Same shape as the former `$MOUSSE_HOME/channels/config.json`.
-
-| Key | Type | Default | Description |
-|-----|------|---------|-------------|
-| `filterSilenceNarration` | `boolean` | `true` | Drop `*(silent)*` narration from outbound messages |
-| `unauthorizedDmBehavior` | `"pair"` \| … | `"pair"` | How to handle unknown DM senders |
-
-### `channels.platforms.telegram`
-
-| Key | Type | Default |
-|-----|------|---------|
-| `enabled` | `boolean` | `false` |
-| `token` | `string` | *(optional)* |
-| `allowedUserIds` | `string[]` | `[]` |
-| `allowAllUsers` | `boolean` | `false` |
-
-### `channels.platforms.discord`
-
-Same fields as Telegram defaults.
-
-### `channels.platforms.webhook`
-
-| Key | Type | Default |
-|-----|------|---------|
-| `enabled` | `boolean` | `false` |
-| `allowedUserIds` | `string[]` | `[]` |
-| `allowAllUsers` | `boolean` | `true` |
-| `webhookPort` | `number` | `18789` |
-| `webhookSecret` | `string` | `""` (required: the webhook refuses to connect while empty) |
-
-**Runtime channel state** (not in `mousse.conf`):
-
-- `$MOUSSE_HOME/channels/sessions.json` — active chat sessions
-- `$MOUSSE_HOME/channels/directory.json` — discovered chats
-- `$MOUSSE_HOME/channels/pairing/` — pairing codes
 
 ---
 
@@ -322,12 +278,13 @@ On **first load** when `mousse.conf` is missing, MMS imports configuration and l
 | Legacy file | Imported into | Marker file |
 |-------------|---------------|-------------|
 | `$MOUSSE_HOME/settings.json` | `settings`, `providers`, `agents` | `settings.json.migrated` |
-| `$MOUSSE_HOME/channels/config.json` | `channels` | `config.json.migrated` |
 | `$MOUSSE_HOME/scheduled/jobs.json` | `scheduled.jobs` (definitions) | `jobs.json.migrated` |
 
 Original files are **not deleted**. Runtime from `jobs.json` is copied to `scheduled/jobs-runtime.json` on first access if needed.
 
-After migration, edit **`mousse.conf`** (or use `mousse-cli config`) as the source of truth for configuration. Legacy paths are no longer written by `SettingsStore`, `ChannelStore`, or `ScheduledJobStore`.
+After migration, edit **`mousse.conf`** (or use `mousse-cli config`) as the source of truth for configuration. Legacy paths are no longer written by `SettingsStore` or `ScheduledJobStore`.
+
+A `channels` section and a `channels/` folder left by builds that had Channels (Telegram, Discord and webhook chats) are not read. The section stays in `mousse.conf` and is written back unchanged; nothing deletes the folder.
 
 ---
 
@@ -357,7 +314,7 @@ config.updateMmsSection({ logLevel: 'debug' })
 config.getPath() // ~/.mousse/mousse.conf
 ```
 
-`MousseMainService.create({ homeDir })` loads config once and wires `SettingsStore`, `ChannelStore`, and `ScheduledJobStore` as views over the unified file.
+`MousseMainService.create({ homeDir })` loads config once and wires `SettingsStore` and `ScheduledJobStore` as views over the unified file.
 
 ## Thread workspace rollout flags
 
