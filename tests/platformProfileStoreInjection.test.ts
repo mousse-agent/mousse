@@ -180,11 +180,15 @@ describe('explicit profile store roots', () => {
       profileId: 'profile-fixture',
       beginShutdown: () => { calls.push('begin') },
       undoRetention: { stop: async () => { calls.push('undoRetention'); if (failed === 'undoRetention') throw new Error('undoRetention failed') } },
+      pullRequestWatch: { stop: () => { calls.push('pullRequestWatch') } },
+      storageCleanup: { stop: async () => { calls.push('storageCleanup') } },
+      storageUsage: { stop: () => { calls.push('storageUsage') } },
       lifecycle: { cleanup: { stop: async () => { calls.push('lifecycle') } } },
       platform: { dispose: async () => { calls.push('platform') } },
+      scheduledWebhookServer: { stop: async () => { calls.push('webhooks') } },
       scheduled: { shutdown: () => { calls.push('scheduled'); if (failed === 'scheduled') throw new Error('scheduled failed') } },
       channels: { shutdown: async () => { calls.push('channels') } },
-      orchestrator: { shutdown: async () => { calls.push('orchestrator') } },
+      orchestrator: { holdApprovals: () => undefined, shutdown: async () => { calls.push('orchestrator') } },
       net: { shutdown: async () => { calls.push('net') } },
       requests: { waitForIdle: async () => { calls.push('requests') } },
       antigravity: { stop: () => { calls.push('antigravity') } },
@@ -200,7 +204,7 @@ describe('explicit profile store roots', () => {
       message: 'Failed to drain profile services',
       errors: [expect.objectContaining({ message: `${failed} failed` })]
     })
-    expect(calls).toEqual(['begin', 'undoRetention', 'lifecycle', 'platform', 'scheduled', 'channels', 'orchestrator', 'net', 'requests', 'antigravity', 'claudeSubscription', 'codex', 'pty', 'mcp'])
+    expect(calls).toEqual(['begin', 'undoRetention', 'pullRequestWatch', 'storageCleanup', 'storageUsage', 'lifecycle', 'platform', 'webhooks', 'scheduled', 'channels', 'orchestrator', 'net', 'requests', 'antigravity', 'claudeSubscription', 'codex', 'pty', 'mcp'])
     expect(service.started).toBe(true)
   })
 
@@ -213,12 +217,16 @@ describe('explicit profile store roots', () => {
       profileId: 'profile-fixture',
       beginShutdown: () => { calls.push('begin') },
       undoRetention: { stop: async () => { calls.push('undoRetention') } },
+      pullRequestWatch: { stop: () => undefined },
+      storageCleanup: { stop: async () => undefined },
+      storageUsage: { stop: () => undefined },
       lifecycle: { cleanup: { stop: async () => { calls.push('lifecycle') } } },
       platform: { dispose: async () => { calls.push('platform') } },
+      scheduledWebhookServer: { stop: async () => undefined },
       scheduled: { shutdown: () => { calls.push('scheduled') } },
       // Channels and requests settle late: the clean epoch end must still come after them.
       channels: { shutdown: async () => { await new Promise((resolve) => setTimeout(resolve, 20)); calls.push('channels done'); if (failing === 'channels') throw new Error('channels failed') } },
-      orchestrator: { shutdown: async () => { calls.push('orchestrator') }, setRunEngine: () => { calls.push('detach') } },
+      orchestrator: { holdApprovals: () => undefined, shutdown: async () => { calls.push('orchestrator') }, setRunEngine: () => { calls.push('detach') }, setBotDispatcher: () => undefined, setBotThreads: () => undefined },
       net: { shutdown: async () => { calls.push('net') } },
       requests: { waitForIdle: async () => { await new Promise((resolve) => setTimeout(resolve, 10)); calls.push('requests idle') } },
       antigravity: { stop: () => { calls.push('antigravity') } },
@@ -261,6 +269,10 @@ describe('profile start order (H4)', () => {
       started: false,
       requests: { assertAccepting: () => undefined },
       config: { getScheduledSection: () => ({ enabled: true }) },
+      pullRequestWatch: { start: () => undefined },
+      storagePolicy: { initialize: () => undefined },
+      storageCleanup: { start: () => undefined },
+      storageUsage: { start: () => undefined },
       scheduled: { start: () => { calls.push('scheduled') }, listJobs: () => [], getStatus: () => ({}) },
       channels: {
         // A channel delivers a message as soon as it starts: its turn is a run that starts at once.

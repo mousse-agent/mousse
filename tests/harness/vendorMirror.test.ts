@@ -191,7 +191,8 @@ describe('an older version changed the vendor file', () => {
   it.each(cases)('upgrade → an older build changes $name → upgrade: the older value wins and the card says so once', async ({ edit, launch, label }) => {
     const dir = home()
     const other = executable(join(dir, 'bin'), 'claude-other')
-    writeVendor(dir, 'claude', { loginPolicy: 'cli', args: ['--a'], env: { A: '1' } })
+    // Models already listed: a found executable would otherwise list them and save them to this file.
+    writeVendor(dir, 'claude', { loginPolicy: 'cli', args: ['--a'], env: { A: '1' }, models: [{ id: 'sonnet', label: 'Sonnet' }] })
     const store = legacyStore()
     start(dir, store)
     stopAll()

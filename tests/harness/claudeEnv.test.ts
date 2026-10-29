@@ -28,9 +28,14 @@ function bundledClaude(): string | undefined {
   return undefined
 }
 
-/** Every `ANTHROPIC_*` and `CLAUDE_CODE_*` name in a file, read in chunks. */
+/**
+ * Every `ANTHROPIC_*` and `CLAUDE_CODE_*` name in a file, read in chunks. Some builds (Linux) keep a
+ * name in a string table as the name, one tag byte and a NUL (`CLAUDE_CODE_MESSAGING_SOCKETP\0`):
+ * a name seen only that way, whose name without the last character is found too, is that name.
+ */
 function variableNames(path: string): Set<string> {
   const names = new Set<string>()
+  const untagged = new Set<string>()
   const fd = openSync(path, 'r')
   const chunk = Buffer.alloc(16 * 1024 * 1024)
   let carry = ''
@@ -39,13 +44,17 @@ function variableNames(path: string): Set<string> {
       const read = readSync(fd, chunk, 0, chunk.length, null)
       if (!read) break
       const text = carry + chunk.toString('latin1', 0, read)
-      for (const match of text.matchAll(/(?:ANTHROPIC|CLAUDE_CODE)_[A-Z0-9_]+/g)) names.add(match[0])
+      for (const match of text.matchAll(/(?:ANTHROPIC|CLAUDE_CODE)_[A-Z0-9_]+/g)) {
+        names.add(match[0])
+        if (text[match.index + match[0].length] !== '\0') untagged.add(match[0])
+      }
       // A name cut at the chunk's end is read again with the next chunk.
       carry = text.slice(-128)
     }
   } finally {
     closeSync(fd)
   }
+  for (const name of names) if (!untagged.has(name) && names.has(name.slice(0, -1))) names.delete(name)
   return names
 }
 

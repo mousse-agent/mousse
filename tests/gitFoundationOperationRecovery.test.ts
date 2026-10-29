@@ -10,7 +10,7 @@ import { ChildAgentIntegrationService } from '../src/mms/agents/ChildAgentIntegr
 import { ChangeReceiptService } from '../src/mms/actions/ChangeReceiptService'
 import { ThreadJournal } from '../src/mms/data/ThreadJournal'
 import { UndoService } from '../src/mms/actions/UndoService'
-import { actionOptions, git, gitFoundationFixture } from './fixtures/gitFoundation'
+import { CRASH_CHILD_REQUIRE, actionOptions, git, gitFoundationFixture } from './fixtures/gitFoundation'
 
 let f: ReturnType<typeof gitFoundationFixture>
 beforeEach(() => { f = gitFoundationFixture() })
@@ -43,7 +43,7 @@ it.each(['checkpoint', 'revert', 'integration', 'publish'].flatMap((kind) => ['b
     const configPath = join(f.root, 'crash.json')
     writeFileSync(configPath, JSON.stringify(config))
     const runner = join(f.root, 'operation-crash.mjs')
-    await build({ entryPoints: ['tests/fixtures/git-foundation-operation-crash.ts'], outfile: runner, bundle: true, platform: 'node', format: 'esm', logLevel: 'silent' })
+    await build({ entryPoints: ['tests/fixtures/git-foundation-operation-crash.ts'], outfile: runner, bundle: true, platform: 'node', format: 'esm', logLevel: 'silent', banner: { js: CRASH_CHILD_REQUIRE } })
     const child = spawnSync(process.execPath, [runner, configPath], { env: { ...process.env, MOUSSE_HOME: f.home }, windowsHide: true, encoding: 'utf8', timeout: 20_000 })
     expect(child.status, child.stderr).toBe(86)
     const appliedHead = git(f.repo, 'rev-parse', 'HEAD')
@@ -68,7 +68,7 @@ it('recovers an interrupted nested snapshot before its parent and keeps whole-pa
   writeFileSync(configPath, JSON.stringify({ kind: 'nested-checkpoint', phase: 'after', thread: f.thread, repo: f.repo,
     baseSha: f.baseSha, options: actionOptions(f.repo, 'parent-turn') }))
   const runner = join(f.root, 'nested-crash.mjs')
-  await build({ entryPoints: ['tests/fixtures/git-foundation-operation-crash.ts'], outfile: runner, bundle: true, platform: 'node', format: 'esm', logLevel: 'silent' })
+  await build({ entryPoints: ['tests/fixtures/git-foundation-operation-crash.ts'], outfile: runner, bundle: true, platform: 'node', format: 'esm', logLevel: 'silent', banner: { js: CRASH_CHILD_REQUIRE } })
   const child = spawnSync(process.execPath, [runner, configPath], { env: { ...process.env, MOUSSE_HOME: f.home }, windowsHide: true, encoding: 'utf8', timeout: 20_000 })
   expect(child.status, child.stderr).toBe(86)
   const appliedHead = git(f.repo, 'rev-parse', 'HEAD')

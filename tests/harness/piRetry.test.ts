@@ -56,7 +56,7 @@ describe('Pi’s private agent dir', () => {
     const exists = (path: string) => files.has(path)
     expect(piShellPath({ platform: 'win32', env: { LOCALAPPDATA: 'C:\\Users\\me\\AppData\\Local', PATH: 'C:\\Windows\\System32' }, exists }))
       .toBe('C:\\Users\\me\\AppData\\Local\\Programs\\Git\\bin\\bash.exe')
-    expect(piShellPath({ platform: 'win32', env: { PATH: 'C:\\Windows\\System32;D:\\Tools\\Git\\cmd' }, exists })).toBe(join('D:\\Tools\\Git', 'bin', 'bash.exe'))
+    expect(piShellPath({ platform: 'win32', env: { PATH: 'C:\\Windows\\System32;D:\\Tools\\Git\\cmd' }, exists })).toBe('D:\\Tools\\Git\\bin\\bash.exe')
     expect(piShellPath({ platform: 'win32', env: { PATH: 'C:\\Windows\\System32' }, exists })).toBeUndefined()
     expect(piShellPath({ platform: 'linux', env: {}, exists })).toBeUndefined()
   })

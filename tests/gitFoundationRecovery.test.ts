@@ -7,7 +7,7 @@ import { ThreadActionService } from '../src/mms/actions/ThreadActionService'
 import { UndoService } from '../src/mms/actions/UndoService'
 import { ChangeReceiptService } from '../src/mms/actions/ChangeReceiptService'
 import { ThreadJournal } from '../src/mms/data/ThreadJournal'
-import { actionOptions, git, gitFoundationFixture } from './fixtures/gitFoundation'
+import { CRASH_CHILD_REQUIRE, actionOptions, git, gitFoundationFixture } from './fixtures/gitFoundation'
 
 describe('Git foundation undo recovery', () => {
   let f: ReturnType<typeof gitFoundationFixture>
@@ -18,7 +18,7 @@ describe('Git foundation undo recovery', () => {
     const actions = new ThreadActionService(f.thread)
     const { action } = await actions.runCheckpointedAction(actionOptions(f.repo), () => writeFileSync(join(f.repo, 'value.txt'), 'changed\n'))
     const runner = join(f.root, 'crash-child.mjs')
-    await build({ entryPoints: ['tests/fixtures/git-foundation-crash-child.ts'], outfile: runner, bundle: true, platform: 'node', format: 'esm', logLevel: 'silent' })
+    await build({ entryPoints: ['tests/fixtures/git-foundation-crash-child.ts'], outfile: runner, bundle: true, platform: 'node', format: 'esm', logLevel: 'silent', banner: { js: CRASH_CHILD_REQUIRE } })
     const child = spawnSync(process.execPath, [runner, f.thread, f.repo, phase], {
       env: { ...process.env, MOUSSE_HOME: f.home }, windowsHide: true, encoding: 'utf8', timeout: 20_000
     })
@@ -43,7 +43,7 @@ describe('Git foundation undo recovery', () => {
     const { action } = await actions.runCheckpointedAction(actionOptions(f.repo), () => writeFileSync(join(f.repo, 'value.txt'), 'changed\n'))
     await new UndoService(f.thread).undoLatest('main', f.repo)
     const runner = join(f.root, 'redo-crash-child.mjs')
-    await build({ entryPoints: ['tests/fixtures/git-foundation-crash-child.ts'], outfile: runner, bundle: true, platform: 'node', format: 'esm', logLevel: 'silent' })
+    await build({ entryPoints: ['tests/fixtures/git-foundation-crash-child.ts'], outfile: runner, bundle: true, platform: 'node', format: 'esm', logLevel: 'silent', banner: { js: CRASH_CHILD_REQUIRE } })
     const child = spawnSync(process.execPath, [runner, f.thread, f.repo, phase, 'redo'], {
       env: { ...process.env, MOUSSE_HOME: f.home }, windowsHide: true, encoding: 'utf8', timeout: 20_000
     })

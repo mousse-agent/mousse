@@ -26,7 +26,7 @@ export function RecentlyDeletedSection({ hidden = false }: { hidden?: boolean })
     restore: (threadId) => window.mousse.threads.restore(threadId),
     purge: (threadId, options) => window.mousse.threads.purge(threadId, options)
   }), [])
-  const state = useSyncExternalStore(controller.subscribe, controller.getState)
+  const state = useSyncExternalStore(controller.subscribe, controller.getState, controller.getState)
 
   useEffect(() => {
     const off = window.mousse.threads.onUpdated((threads) => controller.threadsChanged(threads.map((thread) => thread.id)))

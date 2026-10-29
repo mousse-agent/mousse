@@ -359,7 +359,8 @@ describe('delegated child policy', () => {
             [{ id: 'permission', prompt: `Allow ${action}?`, options: [{ id: 'allow', label: 'Allow once' }, { id: 'allow_always', label: 'Always' }, { id: 'reject', label: 'Reject' }] }],
             child.childThreadId,
             { approval: { action, permissionKey, options: [{ id: 'allow', decision: 'allow', scope: 'once' }, { id: 'allow_always', decision: 'allow', scope: 'always' }, { id: 'reject', decision: 'reject' }] } }
-          )
+          // A request still open when the child's run ends is closed with a rejection; nothing here waits on it.
+          ).catch(() => undefined)
           return questions.listPendingForThread(child.childThreadId).at(-1)!.requestId
         }
         const answer = (requestId: string, permission: string) =>

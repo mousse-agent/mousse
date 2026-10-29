@@ -316,7 +316,7 @@ describe('the schedule tools (SPEC §15.1)', () => {
       ['a cron range in the minute field', { schedule: { kind: 'cron', expr: '0-30 * * * *' } }, /fixed list of minutes/],
       ['cron minutes closer than the floor', { schedule: { kind: 'cron', expr: '0,10 * * * *' } }, new RegExp(`at least ${MIN_INTERVAL} apart`)],
       ['cron minutes that wrap closer than the floor', { schedule: { kind: 'cron', expr: '5,55 * * * *' } }, new RegExp(`at least ${MIN_INTERVAL} apart`)],
-      ['a cron minute past 59', { schedule: { kind: 'cron', expr: '75 * * * *' } }, /between 0 and 59/],
+      ['a cron minute past 59', { schedule: { kind: 'cron', expr: '75 * * * *' } }, /cron field is invalid/],
       ['a cron expression with six fields', { schedule: { kind: 'cron', expr: '0 0 9 * * *' } }, /five fields/],
       ['an existing worktree', { workspace: { kind: 'worktree', path: '/work/wt' } }, /existing worktree/]
     ])('refuses %s', async (_name, extra, message) => {

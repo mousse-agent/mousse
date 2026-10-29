@@ -378,11 +378,13 @@ describe('background workflow ingress', () => {
       const resumablePublished = await f.publish(f.alice.id, bundle({
         id: 'wait', type: 'delay', version: 1, config: { durationMs: 500 }
       }, 'resume-wait-fixture'))
+      // Its own thread: due jobs start together, and the waiting job above resumes on its thread at the same tick.
+      const { thread: resumableThread } = await f.aliceClient.rpc.request<{ thread: { id: string } }>('threads.create', { name: 'Resumable schedule' })
       const resumable = alice.scheduled.createJob({
         name: 'Resumable waiting occurrence',
         prompt: '/' + resumablePublished.slug + ' --count 9',
         schedule: { kind: 'interval', minutes: 60 },
-        threadId: thread.id,
+        threadId: resumableThread.id,
         repeat: { times: 1 }
       })
       alice.scheduled.triggerJob(resumable.id)

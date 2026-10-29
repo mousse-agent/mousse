@@ -9,7 +9,7 @@
 import { EventEmitter } from 'node:events'
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { PassThrough } from 'node:stream'
 import { format } from 'node:util'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -121,7 +121,10 @@ function fakeCodex(): string {
     return shim
   }
   chmodSync(script, 0o755)
-  return script
+  // A `codex` beside it, as npm links one: the folder is the PATH the user's own Codex is found on.
+  const link = join(dir, 'codex')
+  symlinkSync(script, link)
+  return link
 }
 
 /** What a completed Codex sign-in leaves in a home: the account the app-server reads, and a fake secret. */
@@ -308,7 +311,8 @@ function world(options: WorldOptions = {}) {
     installationHome: profileHome,
     instanceMap: instances,
     questions,
-    shellPath: async () => ({ entries: [], source: 'failed' }),
+    // The user's own CLI is this fake, found on PATH: never one installed on this machine.
+    shellPath: async () => ({ entries: [dirname(binary)], source: 'login_shell' }),
     drivers: [
       codexDriver({
         builtIn: () => builtIn,

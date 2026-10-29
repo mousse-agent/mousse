@@ -61,8 +61,9 @@ describe('Antigravity ACP auth transport', () => {
     chmodSync(binary, 0o755)
     const profile = join(home, 'profile')
     mkdirSync(join(profile, 'providers', 'antigravity'), { recursive: true })
-    writeFileSync(join(profile, 'providers', 'antigravity', 'settings.json'), JSON.stringify({ binaryPath: binary, signedIn: true, models: [{ id: 'older-model', label: 'Older Model' }] }))
-    const service = new AntigravityProviderService(profile, home, new UserQuestionService())
+    writeFileSync(join(profile, 'providers', 'antigravity', 'settings.json'), JSON.stringify({ signedIn: true, models: [{ id: 'older-model', label: 'Older Model' }] }))
+    // The manual agent path is the instance config's, handed over by the gateway.
+    const service = new AntigravityProviderService(profile, home, new UserQuestionService(), undefined, { launch: () => ({ binaryPath: binary }) })
     try {
       let streamed = ''
       const tools: Array<{ phase: string; title: string }> = []

@@ -11,6 +11,8 @@ import type { McpTurnBinding } from '../mcp/appTools/registry'
 
 /** The turn binding each real driver declares (`harness/drivers/*`), for test drivers of the same kind. */
 const TURN_BINDINGS: Partial<Record<ProviderAdapter['driver'], McpTurnBinding>> = { claude: 'per_call', codex: 'drained_turn', antigravity: 'drained_turn', acp: 'drained_turn', pi: 'per_call' }
+// As the real Claude Code and Codex drivers declare.
+const MCP_IMAGE_RESULTS: Partial<Record<ProviderAdapter['driver'], boolean>> = { claude: true, codex: true }
 
 /**
  * Test drivers over a plain `ProviderAdapter` (scripted, fake or replay adapters), so run-engine
@@ -29,8 +31,7 @@ export function adapterDriver(adapter: ProviderAdapter, extra: Partial<HarnessCa
     canInstall: false,
     customModels: true,
     mcpTurnBinding: mcpTurnBinding ?? TURN_BINDINGS[adapter.driver],
-    // As the real Claude Code and Codex drivers declare.
-    mcpImageResults: adapter.driver === 'claude' || adapter.driver === 'codex',
+    mcpImageResults: MCP_IMAGE_RESULTS[adapter.driver] ?? false,
     // As the real pi driver declares: its models name chats.
     oneShot: adapter.driver === 'pi',
     decodeConfig: (raw) => decodeInstanceConfig(raw, { privateHome: false }),

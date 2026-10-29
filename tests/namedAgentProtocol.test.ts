@@ -1,17 +1,80 @@
 import { join } from 'node:path'
 import { readFileSync, writeFileSync } from 'node:fs'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
-import type { Context, AssistantMessage } from '@earendil-works/pi-ai'
+import type { Context, AssistantMessage, ToolCall } from '@earendil-works/pi-ai'
 import { MousseMainService } from '../src/mms/MousseMainService'
 import { ProviderAuthService } from '../src/mms/providers/ProviderAuthService'
 import { MmsProtocolServer, LocalMmsClient } from '../src/mms/protocol'
 import { ThreadWorkspaceManager } from '../src/mms/workspace/ThreadWorkspaceManager'
 import { gitFoundationFixture } from './fixtures/gitFoundation'
 import { seedLegacyNamedEpisode } from './fixtures/legacy-named-agent'
-import { providerResponse, streamOf } from './fixtures/agent-platform/agent-runtime-policy/helpers'
+import { providerResponse } from './fixtures/agent-platform/agent-runtime-policy/helpers'
+import type { AdapterHost, ProviderAdapter, TurnInput, TurnResult, TurnSink, TurnControl } from '../src/mms/harness/adapter'
+import { dispatchDelegationTool } from '../src/mms/run/mcp/appTools/delegation'
+import { testHarness } from '../src/mms/run/testkit/harness'
+import { PI_TEST_CAPABILITIES } from './support/piStub'
 
 let f: ReturnType<typeof gitFoundationFixture>, mms: MousseMainService, server: MmsProtocolServer, client: LocalMmsClient
-const responses: AssistantMessage[] = [], captured: Context[] = []
+const captured: Context[] = []
+/** The model's reply to each request of a turn, given the context it sees. */
+type Respond = (context: Context, signal: AbortSignal) => AssistantMessage | Promise<AssistantMessage>
+let respond: Respond = () => { throw new Error('Named provider fixture exhausted') }
+
+/**
+ * A stand-in for Pi's agent, which runs the tool loop in its own process: each request's context is
+ * captured as a provider sees it, `write` writes in the turn's folder under the host's writer, and
+ * the delegation tools run on the turn's delegation host, as Pi's agent calls them over Mousse's MCP server.
+ */
+function toolLoopAdapter(): ProviderAdapter {
+  const runTool = async (call: ToolCall, input: TurnInput, host: AdapterHost): Promise<unknown> => {
+    if (call.name === 'write') {
+      const write = async () => writeFileSync(join(input.cwd!, String(call.arguments.path)), String(call.arguments.content ?? ''))
+      await (host.tools.toolAccess ? host.tools.toolAccess.execute('write', call.arguments, write) : write())
+      return `Wrote ${String(call.arguments.path)}`
+    }
+    if (!host.tools.delegation) throw new Error(`Unknown tool: ${call.name}`)
+    return dispatchDelegationTool(host.tools.delegation, call)
+  }
+  return {
+    driver: 'pi',
+    capabilities: PI_TEST_CAPABILITIES,
+    configured: () => true,
+    async startTurn(input: TurnInput, sink: TurnSink, _ctl: TurnControl, host: AdapterHost): Promise<TurnResult> {
+      const providerRef = { provider: input.llmProvider, model: input.model }
+      sink.providerRef(providerRef)
+      // The transcript as a provider sees it.
+      const messages = [...input.messages] as unknown as Context['messages']
+      let text = ''
+      const result = (aborted: boolean): TurnResult => {
+        if (!aborted) host.context.nativeHistoryAfterTurn(text)
+        return { text, aborted, modelName: 'Scripted', totalResponseTimeMs: 1, usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 }, contextSignature: 'scripted', nativeMessages: [], providerRef }
+      }
+      for (;;) {
+        if (input.signal.aborted) return result(true)
+        const context: Context = { messages: structuredClone(messages) }
+        captured.push(structuredClone(context))
+        const reply = await respond(context, input.signal)
+        if (input.signal.aborted) return result(true)
+        messages.push(reply)
+        const said = reply.content.flatMap((block) => (block.type === 'text' ? [block.text] : [])).join('')
+        if (said) {
+          sink.text({ phase: 'complete', content: said, contentIndex: 0 })
+          text = said
+        }
+        const calls = reply.content.filter((block): block is ToolCall => block.type === 'toolCall')
+        if (!calls.length) return result(false)
+        for (const call of calls) {
+          const outcome = await runTool(call, input, host).then(
+            (value) => ({ text: typeof value === 'string' ? value : JSON.stringify(value), isError: false }),
+            (error: unknown) => ({ text: error instanceof Error ? error.message : String(error), isError: true })
+          )
+          messages.push({ role: 'toolResult', toolCallId: call.id, toolName: call.name, content: [{ type: 'text', text: outcome.text }], isError: outcome.isError, timestamp: Date.now() })
+        }
+      }
+    },
+    interrupt: async () => 'not_active'
+  }
+}
 beforeEach(async () => {
   vi.spyOn(ProviderAuthService.prototype, 'init').mockResolvedValue(undefined)
   f = gitFoundationFixture()
@@ -24,18 +87,12 @@ beforeEach(async () => {
   await client.connect()
   const provider = mms.providerAuth.models.getProviders().find((entry) => mms.providerAuth.models.getModels(entry.id).length > 0)!
   const model = mms.providerAuth.models.getModels(provider.id)[0]
-  vi.spyOn(mms.providerAuth, 'has').mockReturnValue(true)
-  vi.spyOn(mms.providerAuth.models, 'getAuth').mockResolvedValue({ apiKey: 'fixture' } as never)
-  vi.spyOn(mms.providerAuth.models, 'streamSimple').mockImplementation((_model, context) => {
-    captured.push(structuredClone(context))
-    const next = responses.shift(); if (!next) throw new Error('Named provider fixture exhausted')
-    return streamOf(next) as never
-  })
+  mms.orchestrator.setHarness(testHarness({ adapters: [toolLoopAdapter()], profileHome: mms.getProfileHomeDir() }))
   const settings = mms.settings.get()
   mms.settings.set({ provider: { llmProvider: provider.id, model: model.id }, integrations: { ...settings.integrations,
     tools: { enabled: true, enabledTools: ['read', 'write', 'bash'] }, skills: { ...settings.integrations.skills, enabled: false }, mcp: { ...settings.integrations.mcp, enabled: false } } })
 }, 30_000)
-afterEach(async () => { await client?.close(); await server?.stop(); await mms?.stop(); vi.restoreAllMocks(); f?.dispose(); responses.length = 0; captured.length = 0 })
+afterEach(async () => { await client?.close(); await server?.stop(); await mms?.stop(); vi.restoreAllMocks(); f?.dispose(); captured.length = 0; respond = () => { throw new Error('Named provider fixture exhausted') } })
 
 
 /** Text of the latest user message in a provider context, without the preamble a subagent's first prompt starts with. */
@@ -60,21 +117,20 @@ const DELEGATION_ID = /finished task (delegation:[0-9a-f-]+)/
 it('delegates main to an isolated writer thread, wakes main with its result and integrates it', async () => {
   const project = mms.projects.openProject(f.repo), thread = mms.threads.createThread('Nested writers', project.id)
   const seen: string[] = []
-  vi.mocked(mms.providerAuth.models.streamSimple).mockImplementation((_model, context) => {
-    captured.push(structuredClone(context))
+  respond = (context) => {
     const prompt = lastUserText(context), results = toolResultsSinceUser(context)
     seen.push(`${prompt.slice(0, 24)}#${results.length}`)
-    if (prompt === 'Delegate the change.') return streamOf(results.length ? text('Main delegated') : toolCall('create-worker', 'create_subagent', { name: 'Worker', task: 'Write value', access: 'write' })) as never
-    if (prompt === 'Write value') return streamOf(results.length ? text('Worker done') : toolCall('worker-write', 'write', { path: 'value.txt', content: 'child result\n' })) as never
+    if (prompt === 'Delegate the change.') return results.length ? text('Main delegated') : toolCall('create-worker', 'create_subagent', { name: 'Worker', task: 'Write value', access: 'write' })
+    if (prompt === 'Write value') return results.length ? text('Worker done') : toolCall('worker-write', 'write', { path: 'value.txt', content: 'child result\n' })
     const delegationId = DELEGATION_ID.exec(prompt)?.[1]
     if (delegationId) {
-      if (results.length === 0) return streamOf(toolCall('main-status', 'task_status', { delegationId })) as never
-      if (results.length === 1) return streamOf(toolCall('main-integrate', 'integrate_delegation', { delegationId })) as never
-      return streamOf(text('Integration requested')) as never
+      if (results.length === 0) return toolCall('main-status', 'task_status', { delegationId })
+      if (results.length === 1) return toolCall('main-integrate', 'integrate_delegation', { delegationId })
+      return text('Integration requested')
     }
-    if (prompt.startsWith('Integration of delegated task')) return streamOf(text('Integrated')) as never
-    return streamOf(text('unexpected')) as never
-  })
+    if (prompt.startsWith('Integration of delegated task')) return text('Integrated')
+    return text('unexpected')
+  }
   const result = await client.request<{ message: string }>('orchestrator.send', { threadId: thread.id, content: 'Delegate the change.', mode: 'agent' })
   expect(result.message).toBe('Main delegated')
   const [delegation] = mms.orchestrator.listDelegations(thread.id)
@@ -102,28 +158,27 @@ it('delegates main to an isolated writer thread, wakes main with its result and 
 it('integrates, at depth, the checkpoint of the run whose answer the task published, after the integration outcome was read', async () => {
   const project = mms.projects.openProject(f.repo), thread = mms.threads.createThread('Nested integration', project.id)
   let integrationNotices = 0
-  vi.mocked(mms.providerAuth.models.streamSimple).mockImplementation((_model, context) => {
-    captured.push(structuredClone(context))
+  respond = (context) => {
     const prompt = lastUserText(context), results = toolResultsSinceUser(context)
-    if (prompt === 'Delegate the coordination.') return streamOf(results.length ? text('Main delegated') : toolCall('create-coordinator', 'create_subagent', { name: 'Coordinator', task: 'Coordinate the reading', access: 'write' })) as never
-    if (prompt === 'Coordinate the reading') return streamOf(results.length ? text('Coordinator started the Reader') : toolCall('create-reader', 'create_subagent', { name: 'Reader', task: 'Write g.txt', access: 'write' })) as never
-    if (prompt === 'Write g.txt') return streamOf(results.length ? text('Reader done') : toolCall('reader-write', 'write', { path: 'g.txt', content: 'reader work\n' })) as never
+    if (prompt === 'Delegate the coordination.') return results.length ? text('Main delegated') : toolCall('create-coordinator', 'create_subagent', { name: 'Coordinator', task: 'Coordinate the reading', access: 'write' })
+    if (prompt === 'Coordinate the reading') return results.length ? text('Coordinator started the Reader') : toolCall('create-reader', 'create_subagent', { name: 'Reader', task: 'Write g.txt', access: 'write' })
+    if (prompt === 'Write g.txt') return results.length ? text('Reader done') : toolCall('reader-write', 'write', { path: 'g.txt', content: 'reader work\n' })
     const finished = DELEGATION_ID.exec(prompt)?.[1]
     if (prompt.startsWith('Subagent "Reader"') && finished) {
       // The Coordinator's wake: integrate the Reader's work, which runs as an integration run of its own.
-      return streamOf(results.length ? text('Coordinator is integrating') : toolCall('coordinator-integrate', 'integrate_delegation', { delegationId: finished })) as never
+      return results.length ? text('Coordinator is integrating') : toolCall('coordinator-integrate', 'integrate_delegation', { delegationId: finished })
     }
     if (prompt.startsWith('Integration of delegated task')) {
       // The first outcome is the Coordinator's: its last run adds a file of its own, then answers.
       if (results.length === 0) integrationNotices += 1
-      if (integrationNotices === 1) return streamOf(results.length ? text("Coordinator final: the Reader's work is merged") : toolCall('coordinator-write', 'write', { path: 'c.txt', content: 'coordinator work\n' })) as never
-      return streamOf(text('Main integrated')) as never
+      if (integrationNotices === 1) return results.length ? text("Coordinator final: the Reader's work is merged") : toolCall('coordinator-write', 'write', { path: 'c.txt', content: 'coordinator work\n' })
+      return text('Main integrated')
     }
     if (prompt.startsWith('Subagent "Coordinator"') && finished) {
-      return streamOf(results.length ? text('Main is integrating') : toolCall('main-integrate', 'integrate_delegation', { delegationId: finished })) as never
+      return results.length ? text('Main is integrating') : toolCall('main-integrate', 'integrate_delegation', { delegationId: finished })
     }
-    return streamOf(text('unexpected')) as never
-  })
+    return text('unexpected')
+  }
   const result = await client.request<{ message: string }>('orchestrator.send', { threadId: thread.id, content: 'Delegate the coordination.', mode: 'agent' })
   expect(result.message).toBe('Main delegated')
   await vi.waitFor(() => {
@@ -165,23 +220,22 @@ it('starts every valid parallel assignment without waiting and reports a failed 
   let release!: () => void
   const delayed = new Promise<void>((resolve) => { release = resolve })
   let entered = 0
-  vi.mocked(mms.providerAuth.models.streamSimple).mockImplementation((_model, context) => {
-    captured.push(structuredClone(context))
+  respond = (context) => {
     const prompt = lastUserText(context), results = toolResultsSinceUser(context)
     if (prompt === 'Run parallel agents') {
-      if (results.length) return streamOf(text('Batch started')) as never
-      return streamOf(toolCall('parallel-batch', 'create_subagents', { agents: [
+      if (results.length) return text('Batch started')
+      return toolCall('parallel-batch', 'create_subagents', { agents: [
         { name: 'Empty', task: '   ', workspace: 'isolated' },
         { name: 'Slow A', task: 'slow-a', workspace: 'isolated' },
         { name: 'Slow B', task: 'slow-b', workspace: 'isolated' }
-      ] })) as never
+      ] })
     }
     if ((prompt === 'slow-a' || prompt === 'slow-b') && !results.length) {
       entered += 1
-      return { async *[Symbol.asyncIterator]() { await delayed }, result: async () => text(`${prompt} finished`) } as never
+      return delayed.then(() => text(`${prompt} finished`))
     }
-    return streamOf(text('Batch settled')) as never
-  })
+    return text('Batch settled')
+  }
   try {
     const result = await client.request<{ message: string }>('orchestrator.send', { threadId: thread.id, content: 'Run parallel agents', mode: 'agent' })
     expect(result.message).toBe('Batch started')
@@ -207,21 +261,18 @@ it('cancels a delegated child and its nested delegation depth-first, aborting th
   const draining = new Promise<void>((resolve) => { release = resolve })
   const aborted = new Promise<void>((resolve) => { observeAbort = resolve })
   let nestedEntered = false
-  vi.mocked(mms.providerAuth.models.streamSimple).mockImplementation((_model, context, options) => {
-    captured.push(structuredClone(context))
+  respond = (context, signal) => {
     const prompt = lastUserText(context), results = toolResultsSinceUser(context)
-    if (prompt === 'Delegate nested') return streamOf(results.length ? text('Main delegated') : toolCall('main-create', 'create_subagent', { name: 'Parent cancel', task: 'Delegate deeper', access: 'write' })) as never
-    if (prompt === 'Delegate deeper') return streamOf(results.length ? text('Child delegated') : toolCall('child-create', 'create_subagent', { name: 'Nested cancel', task: 'Wait for cancellation', access: 'write' })) as never
+    if (prompt === 'Delegate nested') return results.length ? text('Main delegated') : toolCall('main-create', 'create_subagent', { name: 'Parent cancel', task: 'Delegate deeper', access: 'write' })
+    if (prompt === 'Delegate deeper') return results.length ? text('Child delegated') : toolCall('child-create', 'create_subagent', { name: 'Nested cancel', task: 'Wait for cancellation', access: 'write' })
     if (prompt === 'Wait for cancellation' && !results.length) {
       nestedEntered = true
-      return { async *[Symbol.asyncIterator]() {
-        if (options?.signal?.aborted) observeAbort()
-        else options?.signal?.addEventListener('abort', observeAbort, { once: true })
-        await draining
-      }, result: async () => text('Drained') } as never
+      if (signal.aborted) observeAbort()
+      else signal.addEventListener('abort', observeAbort, { once: true })
+      return draining.then(() => text('Drained'))
     }
-    return streamOf(text('ok')) as never
-  })
+    return text('ok')
+  }
   try {
     await client.request('orchestrator.send', { threadId: thread.id, content: 'Delegate nested', mode: 'agent' })
     await vi.waitFor(() => expect(nestedEntered).toBe(true), { timeout: 15_000 })

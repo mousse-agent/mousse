@@ -75,8 +75,18 @@ if (argv[0] === 'status') {
   // Blocks until the caller's timeout kills this process.
   if (fs.existsSync(${q(hang)})) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 60000)
   if (fs.existsSync(${q(failAfter)}) && fs.existsSync(${q(wrote)})) { console.error('status failed'); process.exit(1) }
-  if (fs.existsSync(${q(flood)})) console.log('x'.repeat(2 * 1024 * 1024))
-  else if (fs.existsSync(${q(raw)})) console.log(fs.readFileSync(${q(raw)}, 'utf8'))
+  if (fs.existsSync(${q(flood)})) {
+    // A pipe write can be asynchronous, so process.exit below would cut it short; write it all first.
+    const chunk = 'x'.repeat(64 * 1024)
+    for (let sent = 0; sent < 2 * 1024 * 1024; ) {
+      try {
+        sent += fs.writeSync(1, chunk)
+      } catch (error) {
+        if (error.code !== 'EAGAIN') throw error
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1)
+      }
+    }
+  } else if (fs.existsSync(${q(raw)})) console.log(fs.readFileSync(${q(raw)}, 'utf8'))
   else console.log(JSON.stringify(serve))
 } else if (argv[0] === 'serve' && argv.includes('off')) {
   delete serve.TCP[port]

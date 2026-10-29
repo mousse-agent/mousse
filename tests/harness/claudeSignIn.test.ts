@@ -5,7 +5,7 @@
  */
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { format } from 'node:util'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ProviderOperationEvent } from '../../src/shared/harness/types'
@@ -102,7 +102,10 @@ function fakeClaude(): string {
     return shim
   }
   chmodSync(script, 0o755)
-  return script
+  // A `claude` beside it, as npm links one: the folder is the PATH the user's own Claude is found on.
+  const link = join(dir, 'claude')
+  symlinkSync(script, link)
+  return link
 }
 
 /** What `claude auth login` leaves in a home: the account Claude Code reads, and a fake secret. */
@@ -227,7 +230,8 @@ function world(options: WorldOptions = {}) {
     installationHome: profileHome,
     instanceMap: instances,
     questions,
-    shellPath: async () => ({ entries: [], source: 'failed' }),
+    // The user's own CLI is this fake, found on PATH: never one installed on this machine.
+    shellPath: async () => ({ entries: [dirname(binary)], source: 'login_shell' }),
     drivers: [
       claudeCodeDriver({
         builtIn: () => builtIn,
@@ -911,13 +915,14 @@ describe('the sign-in dialog', () => {
     const signIn = await startSignIn(w, WORK)
     const terminal = await signIn.terminal()
     terminal.print(`${LOGIN_OUTPUT}Paste code here if prompted > `)
-    const fields = () => signIn.prompts().filter((prompt) => prompt.type === 'input')
+    // The first field comes before the link; one offered after it is the link shown again with the field under it.
+    const fields = () => signIn.prompts().filter((prompt) => prompt.type === 'input' || (prompt.type === 'auth_url' && prompt.pasteMessage !== undefined))
     await vi.waitFor(() => expect(fields()).toHaveLength(1))
     await w.harness.instances.respondSignIn(signIn.started.operationId, { promptId: fields()[0]!.promptId, kind: 'input', value: 'half-a-code' })
     await vi.waitFor(() => expect(terminal.written).toEqual(['half-a-code\r']))
     terminal.print('\r\nInvalid code. Please make sure the full code was copied.\r\nPaste code here if prompted > ')
     await vi.waitFor(() => expect(fields()).toHaveLength(2))
-    expect(fields()[1]).toMatchObject({ message: expect.stringContaining('did not accept') })
+    expect(fields()[1]).toMatchObject({ type: 'auth_url', acceptsRedirectPaste: true, pasteMessage: expect.stringContaining('did not accept') })
     // The same refusal printed again in the same output does not add a field; a second one does.
     await w.harness.instances.respondSignIn(signIn.started.operationId, { promptId: fields()[1]!.promptId, kind: 'input', value: 'the-whole-code' })
     await vi.waitFor(() => expect(terminal.written).toEqual(['half-a-code\r', 'the-whole-code\r']))

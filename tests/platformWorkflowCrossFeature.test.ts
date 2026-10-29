@@ -15,7 +15,9 @@ import type { WorkflowBundle, WorkflowGraph } from '../src/shared/workflows'
 import type { LifecyclePurgePreview, ResourceInventorySnapshot } from '../src/shared/resourceLifecycle'
 import { createWorkflowDefinitionsClient } from '../src/renderer/services/workflowDefinitionsClient'
 import { createWorkflowExecutionClient } from '../src/renderer/services/workflowExecutionClient'
-import { providerResponse, streamOf } from './fixtures/agent-platform/agent-runtime-policy/helpers'
+import type { Harness } from '../src/mms/harness/gateway'
+import { providerResponse } from './fixtures/agent-platform/agent-runtime-policy/helpers'
+import { installExactDefinitionRuntime } from './fixtures/agent-platform/exactDefinitionRuntime'
 
 const roots: string[] = []
 const previousHome = process.env.MOUSSE_HOME
@@ -45,6 +47,7 @@ it('E2E04 executes script, condition, isolated mutating Agents, deterministic jo
   const main = await MousseMainService.create({ homeDir, repoRoot: repo, requireOwnership: false, headless: true })
   const server = new MmsProtocolServer({ mms: main, ownerToken: 'cross-feature-owner' })
   let rpc: LocalMmsClient | undefined
+  let harness: Harness | undefined
   try {
     const alice = main.getInstallationHost()!.manager.create({ displayName: 'Alice', slug: 'alice' })
     const services = await main.getProfileServices(alice.id)
@@ -53,9 +56,11 @@ it('E2E04 executes script, condition, isolated mutating Agents, deterministic jo
     vi.spyOn(services.providerAuth, 'has').mockReturnValue(true)
     // Its stored sign-in: the gateway catalogue lists the models of signed-in instances.
     vi.spyOn(services.providerAuth.credentials, 'listProviderIds').mockReturnValue([provider.id])
-    vi.spyOn(services.providerAuth.models, 'getAuth').mockResolvedValue({ apiKey: 'fixture' } as never)
+    // The profile's Mousse MCP server, as far as the gateway sees it: a definition's app tools need a bearer.
+    services.orchestrator.setMcpAttachment({ bearerForTurn: () => ({ url: 'http://127.0.0.1:9/mcp', token: 'fake-bearer', tokenHash: 'fake-hash' }), turnEnded: () => undefined, revokeThread: () => {} })
     const calls: Record<string, string[]> = { a: [], z: [] }
-    vi.spyOn(services.providerAuth.models, 'streamSimple').mockImplementation((_model, context) => {
+    // Agent turns run on the exact stand-in for Pi RPC, the profile's `pi:<provider>` instance.
+    harness = installExactDefinitionRuntime({ orchestrator: services.orchestrator, providerId: provider.id, profileHome: services.getProfileHomeDir(), next: async (context) => {
       const system = context.systemPrompt ?? ''
       const id = system.includes('BRANCH_A_ONLY') ? 'a' : system.includes('BRANCH_Z_ONLY') ? 'z' : undefined
       if (!id) throw new Error('Unrecognized published Agent prompt')
@@ -64,10 +69,10 @@ it('E2E04 executes script, condition, isolated mutating Agents, deterministic jo
       expect(serialized).toContain(sentinel)
       calls[id].push(serialized)
       // Only model I/O is scripted. Native tool dispatch must perform the write.
-      return streamOf(calls[id].length === 1
+      return calls[id].length === 1
         ? providerResponse([{ type: 'toolCall', id: 'write-' + id, name: 'write', arguments: { path: `branch-${id}.txt`, content: 'branch-' + id } }], 'toolUse')
-        : providerResponse([{ type: 'text', text: JSON.stringify({ branch: id, sentinel }) }], 'stop')) as never
-    })
+        : providerResponse([{ type: 'text', text: JSON.stringify({ branch: id, sentinel }) }], 'stop')
+    } }).harness
     const current = services.settings.get().integrations
     services.settings.set({ provider: { llmProvider: provider.id, model: model.id }, integrations: { ...current, tools: { enabled: true, enabledTools: ['read', 'write'] } } })
     const project = services.projects.openProject(repo)
@@ -178,6 +183,6 @@ it('E2E04 executes script, condition, isolated mutating Agents, deterministic jo
     expect(git('for-each-ref', '--format=%(refname)', 'refs/mousse/', 'refs/heads/mousse/')).toBe('')
     expect(git('rev-parse', 'HEAD')).toBe(originalHead); expect(git('status', '--porcelain')).toBe('')
   } finally {
-    await rpc?.close(); await server.stop(); await main.stop()
+    await rpc?.close(); await server.stop(); harness?.stop(); await main.stop()
   }
 }, 60000)

@@ -123,7 +123,8 @@ describe('Claude Code', () => {
       profileHome,
       installationHome: profileHome,
       instanceMap: store({
-        claude: { driver: 'claude', enabled: true, config: { env: { DISABLE_TELEMETRY: '0' } } },
+        // Its executable set, so the check never looks for a Claude Code installed on this machine.
+        claude: { driver: 'claude', enabled: true, config: { binaryPath: process.execPath, env: { DISABLE_TELEMETRY: '0' } } },
         'claude:work': { driver: 'claude', enabled: true, config: { home: 'private', displayName: 'Work', binaryPath: process.execPath, env: { DISABLE_TELEMETRY: '0', KEEP: 'yes' } } }
       }),
       questions,
