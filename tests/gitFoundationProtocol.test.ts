@@ -12,6 +12,7 @@ import { MmsProtocolServer } from '../src/mms/protocol/server'
 import { LocalMmsClient } from '../src/mms/protocol/client'
 import { WorkspaceResolver } from '../src/mms/workspace/WorkspaceResolver'
 import { ThreadActionService } from '../src/mms/actions/ThreadActionService'
+import { worktreeTree } from '../src/mms/actions/snapshots'
 import { ChildAgentIntegrationService } from '../src/mms/agents/ChildAgentIntegrationService'
 import { waitAcquireExecutionLease, releaseExecutionLeaseHandle } from '../src/mms/queue/ThreadExecutionLease'
 import { acquireWorkspaceMutationLease, isWorkflowRevisionCurrent, resolveOwnedThreadWorkspace } from '../src/mms/workspace/WorkflowWorkspace'
@@ -80,10 +81,14 @@ describe('Git foundation through daemon protocol', () => {
     const currentHead = git(metadata.worktreePath, 'rev-parse', 'HEAD')
     const child = f.child('conflicting-main-child', currentHead)
     const childResult = f.commit(child, 'conflicting child\n')
-    const { action: parent } = await new ThreadActionService(directory).runCheckpointedAction({ ...actionOptions(metadata.worktreePath, 'conflicting-parent'), threadId: thread.id }, () => writeFileSync(join(metadata.worktreePath, 'value.txt'), 'conflicting parent\n'))
+    // The agent commits its own work on the thread's branch, as it is free to; the child's commit then conflicts with it.
+    await new ThreadActionService(directory).runCheckpointedAction({ ...actionOptions(metadata.worktreePath, 'conflicting-parent'), threadId: thread.id }, () => {
+      writeFileSync(join(metadata.worktreePath, 'value.txt'), 'conflicting parent\n')
+      git(metadata.worktreePath, 'commit', '-qam', 'conflicting parent')
+    })
     await expect(new ChildAgentIntegrationService(directory).integrate({
       operationId: 'main-conflict', agentId: 'conflicting-main-child', workerWorktree: child, workerBranch: 'conflicting-main-child',
-      spawnBaseSha: currentHead, expectedWorkerHead: childResult, expectedDestinationHead: parent.endSha, threadWorkspace: metadata.worktreePath
+      spawnBaseSha: currentHead, expectedWorkerHead: childResult, expectedDestinationHead: git(metadata.worktreePath, 'rev-parse', 'HEAD'), threadWorkspace: metadata.worktreePath
     })).rejects.toThrow(/conflict/i)
     await expect(client.request('orchestrator.send', { threadId: thread.id, content: 'Blocked while conflict exists', mode: 'agent' })).rejects.toThrow(/clean|recovery|conflict/i)
     expect(mms.orchestrator.getOrCreateSession(thread.id).isTurnRunning()).toBe(false)
@@ -92,7 +97,7 @@ describe('Git foundation through daemon protocol', () => {
     expect(await client.request('orchestrator.send', { threadId: thread.id, content: 'Continue after abort', mode: 'agent' })).toMatchObject({ message: 'Recovered after conflict.' })
   }, 45_000)
 
-  it('a queued workflow writer rejects unmanaged HEAD movement before snapshotting dirty input', async () => {
+  it('a queued workflow writer is admitted after HEAD moved while it waited, and records the dirty input as outside changes', async () => {
     const project = mms.projects.openProject(f.repo)
     const thread = mms.threads.createThread('Queued writer', project.id)
     const context = { profileId: mms.profileId, projectId: project.id, threadId: thread.id }
@@ -103,13 +108,17 @@ describe('Git foundation through daemon protocol', () => {
     try {
       pending = acquireWorkspaceMutationLease(owner, context, workspace, new AbortController().signal)
       f.commit(workspace.workspacePath, 'unmanaged while queued\n')
-      writeFileSync(join(workspace.workspacePath, 'pending.txt'), 'must not snapshot')
+      writeFileSync(join(workspace.workspacePath, 'pending.txt'), 'recorded as outside changes')
     } finally { releaseExecutionLeaseHandle(lease) }
     const head = git(workspace.workspacePath, 'rev-parse', 'HEAD')
-    await expect(pending!.then((writer) => { writer.release(); return writer })).rejects.toThrow(/recovery|revision|HEAD/i)
+    const writer = await pending!
+    writer.release()
+    // Nothing is rejected, moved or committed: the files the writer found are recorded as the user's first.
     expect(git(workspace.workspacePath, 'rev-parse', 'HEAD')).toBe(head)
-    expect(f.read(workspace.workspacePath, 'pending.txt')).toBe('must not snapshot')
-    expect(new ThreadActionService(workspace.threadDirectory).list()).toEqual([])
+    expect(f.read(workspace.workspacePath, 'pending.txt')).toBe('recorded as outside changes')
+    const outside = new ThreadActionService(workspace.threadDirectory).list().find((action) => action.turnId.startsWith('user-changes:'))!
+    expect(outside).toMatchObject({ actor: { kind: 'user' }, state: 'completed' })
+    expect(outside.changedPaths.map((item) => item.path).sort()).toEqual(['pending.txt', 'value.txt'])
   }, 30_000)
 
   it('main resolution, read-only follow-up and GUI file requests share one task while a second task and primary stay isolated', async () => {
@@ -169,7 +178,7 @@ describe('Git foundation through daemon protocol', () => {
       const result = f.commit(child, 'child second\n')
       await new ChildAgentIntegrationService(threadDir).integrate({
         agentId: 'nested-child', workerWorktree: child, workerBranch: 'nested-child',
-        spawnBaseSha: snapshot.endSha, expectedWorkerHead: result, expectedDestinationHead: snapshot.endSha,
+        spawnBaseSha: snapshot.endSha, expectedWorkerHead: result, expectedDestinationHead: git(workspace, 'rev-parse', 'HEAD'),
         threadWorkspace: workspace, heldThreadLease: lease, actionId: parent.id, turnId: 'parent-turn'
       })
       writeFileSync(join(workspace, 'parent.txt'), 'parent after child\n')
@@ -204,15 +213,15 @@ describe('Git foundation through daemon protocol', () => {
     const undoneHistory = await client.request<{ actions: Array<{ id: string }>; journalGeneration: number; redoTarget?: { actionId: string } }>('actions.list', { threadId: thread.id })
     expect(undoneHistory.redoTarget?.actionId).toBe(undoneHistory.actions.at(-1)!.id)
     await expect(client.request('actions.redo', { threadId: thread.id, expectedJournalGeneration: undoneHistory.journalGeneration - 1 })).rejects.toThrow()
-    expect(git(workspace, 'rev-parse', 'HEAD^{tree}')).toBe(git(f.repo, 'rev-parse', `${f.baseSha}^{tree}`))
-    expect(git(workspace, 'status', '--porcelain')).toBe('')
+    // Undo restored the files; the merge commit of the child's result stays on the thread's branch.
+    expect(worktreeTree(workspace)).toBe(git(f.repo, 'rev-parse', `${f.baseSha}^{tree}`))
     await client.request('actions.redo', { threadId: thread.id, expectedJournalGeneration: undoneHistory.journalGeneration })
     expect(mms.orchestrator.getMessages(thread.id)).toHaveLength(2)
     await vi.waitFor(() => expect(useAppStore.getState().messages).toHaveLength(2))
     expect((await client.request<{ redoTarget?: unknown }>('actions.list', { threadId: thread.id })).redoTarget).toBeUndefined()
     expect(snapshots.at(-1)?.replace).toBe(true)
     expect(mms.orchestrator.getMessages(thread.id).every((message) => !message.hidden)).toBe(true)
-    expect(git(workspace, 'rev-parse', 'HEAD^{tree}')).toBe(git(workspace, 'rev-parse', `${finalHead!}^{tree}`))
+    expect(worktreeTree(workspace)).toBe(git(workspace, 'rev-parse', `${finalHead!}^{tree}`))
     expect(f.read(workspace)).toBe('child second\n')
     expect(f.read(workspace, 'parent.txt')).toBe('parent after child\n')
     // Completion for A after selecting B must only refresh A's cached transcript.
@@ -290,10 +299,12 @@ describe('Git foundation through daemon protocol', () => {
     await client.request('actions.undoLatest', { threadId: thread.id })
     expect(f.read(execution.projectPath!)).toBe('nested base\n')
     expect(git(f.repo, 'rev-parse', 'HEAD')).toBe(base)
+    // A commit made outside Mousse is the thread's own Git work: it neither blocks the next save nor is moved by it.
     const unmanaged = f.commit(execution.workspacePath!, 'outside editor save\n', 'package/value.txt')
-    await expect(client.request('files.write', { threadId: thread.id, path: 'value.txt', content: 'must not overwrite' })).rejects.toThrow(/recovery|HEAD|recorded/i)
+    await client.request('files.write', { threadId: thread.id, path: 'value.txt', content: 'saved after the outside commit\n' })
     expect(git(execution.workspacePath!, 'rev-parse', 'HEAD')).toBe(unmanaged)
-    expect(f.read(execution.projectPath!)).toBe('outside editor save\n')
+    expect(f.read(execution.projectPath!)).toBe('saved after the outside commit\n')
+    expect(new ThreadActionService(directory).list().some((item) => item.turnId.startsWith('user-changes:') && item.changedPaths.some((path) => path.path === 'package/value.txt'))).toBe(true)
   }, 30_000)
 
   it('public publish retries the original reviewed revisions despite the now-stale request journal generation', async () => {
@@ -301,7 +312,11 @@ describe('Git foundation through daemon protocol', () => {
     const thread = mms.threads.createThread('Reviewed publish', project.id)
     const directory = mms.threads.getThreadDir(thread.id)
     const workspace = (await new WorkspaceResolver(directory, thread.id, f.repo).resolve('agent')).workspacePath!
-    await new ThreadActionService(directory).runCheckpointedAction({ ...actionOptions(workspace), threadId: thread.id }, () => writeFileSync(join(workspace, 'value.txt'), 'reviewed publish\n'))
+    // Publish merges a commit of the thread's branch, so the agent commits its work, as it is free to.
+    await new ThreadActionService(directory).runCheckpointedAction({ ...actionOptions(workspace), threadId: thread.id }, () => {
+      writeFileSync(join(workspace, 'value.txt'), 'reviewed publish\n')
+      git(workspace, 'commit', '-qam', 'reviewed publish')
+    })
     const reviewed = await client.request<{ sourceSha: string; targetSha: string; journalGeneration: number }>('publish.status', { threadId: thread.id })
     const input = { threadId: thread.id, targetBranch: git(f.repo, 'branch', '--show-current'), operationId: 'public-publish',
       expectedSourceSha: reviewed.sourceSha, expectedTargetSha: reviewed.targetSha, expectedJournalGeneration: reviewed.journalGeneration }

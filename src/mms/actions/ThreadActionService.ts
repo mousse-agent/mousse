@@ -345,8 +345,9 @@ export class ThreadActionService {
     action.state = state
     action.completedAt = new Date().toISOString()
     const receipts = new ChangeReceiptService(this.threadDirectory)
-    // Results merged in during the action (a subagent's): the window is the action's own, as a snapshot has no ancestry to test.
-    const integrations = receipts.list().filter((item) => item.operationId !== action.id && item.createdAt >= action.createdAt && item.kind === 'integration' && item.afterSha !== item.beforeSha)
+    // Changes recorded inside the action (a subagent's result, a nested snapshot) belong to it. A snapshot has no ancestry to test,
+    // so the window is the action's own: nothing else writes to this thread while its turn holds the lease.
+    const integrations = receipts.list().filter((item) => item.operationId !== action.id && item.createdAt >= action.createdAt && (item.kind === 'integration' || item.kind === 'checkpoint') && item.afterSha !== item.beforeSha)
     action.externalEffects = [...new Map([...action.externalEffects, ...integrations.flatMap((item) => item.externalEffects)].map((effect) => [JSON.stringify(effect), effect])).values()]
     const receipt = receipts.record(workspacePath, {
       operationId: action.id, kind: 'checkpoint', actor: action.actor ?? { kind: 'main' },

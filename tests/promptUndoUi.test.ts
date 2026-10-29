@@ -102,6 +102,22 @@ it('uses authoritative conversation redo after Undo hides the prompt', async () 
   await vi.waitFor(() => expect(redo).toHaveBeenCalledExactlyOnceWith(threadId, 8))
 })
 
+it('shows the line an Undo returns with its result, such as commits that were already pushed, until it is dismissed', async () => {
+  const text = 'These commits were already pushed to origin/feature; Undo restores files only.'
+  const undoLatest = vi.fn().mockResolvedValue({ action: { notice: text }, runId: 'run' })
+  await mount(vi.fn().mockResolvedValue(history), undoLatest)
+  PromptUndoButton({ messageId: target.messageId }).props.onClick()
+  await vi.waitFor(() => expect(hooks.states[4]).toBe(text))
+  render()
+  const shown = PromptUndoNotice()!
+  expect(shown.props.role).toBe('status')
+  expect(shown.props.children[0].props.children).toBe(text)
+  const dismiss = shown.props.children.find((child: any) => child?.type === 'button')
+  expect(dismiss.props.children).toBe('Dismiss')
+  dismiss.props.onClick()
+  expect(hooks.states[4]).toBeNull()
+})
+
 it('does not let a completion from an unmounted profile alter the new binding', async () => {
   let complete!: () => void
   const oldUndo = vi.fn(() => new Promise<void>(resolve => { complete = resolve }))
