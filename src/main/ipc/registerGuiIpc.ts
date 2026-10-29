@@ -95,8 +95,6 @@ import { NotificationThreadIndex } from '../notifications/threadNotificationTarg
 import { playThreadCompletionSound } from '../notifications/completionSound'
 import type {
   BrowserBounds,
-  ChannelConfig,
-  ChannelPlatform,
   CreateScheduledJobInput,
   FileAsset,
   FileEntry,
@@ -1756,7 +1754,7 @@ export function registerGuiIpc(
     await guiMms.request('pty.kill', withThreadId({ ptyId }, threadId))
   })
 
-  // ── Scheduler / channels / mcp / skills (daemon protocol) ──────────────
+  // ── Scheduler / mcp / skills (daemon protocol) ─────────────────────────
 
   registerHandler('scheduled:list', async () => {
     const res = await guiMms.request<{ jobs: unknown[] }>('scheduled.list')
@@ -1831,80 +1829,6 @@ export function registerGuiIpc(
   registerHandler('scheduled:settings:set', async (_e, update: ScheduledSettingsUpdate) => {
     const res = await guiMms.request<{ settings: unknown }>('scheduled.settings.set', { ...update })
     return res.settings
-  })
-
-  registerHandler('channels:getSnapshot', async () => {
-    const res = await guiMms.request<{ snapshot: unknown }>('channels.getSnapshot')
-    return res.snapshot
-  })
-  registerHandler('channels:getConfig', async () => {
-    const res = await guiMms.request<{ config: unknown }>('channels.getConfig')
-    return res.config
-  })
-  registerHandler('channels:updateConfig', async (_e, patch: Partial<ChannelConfig>) => {
-    const res = await guiMms.request<{ config: unknown }>('channels.updateConfig', { patch })
-    return res.config
-  })
-  registerHandler('channels:connect', async (_e, platform?: ChannelPlatform) => {
-    const res = await guiMms.request<{ snapshot: unknown }>('channels.connect', { platform })
-    return res.snapshot
-  })
-  registerHandler('channels:disconnect', async (_e, platform?: ChannelPlatform) => {
-    const res = await guiMms.request<{ snapshot: unknown }>('channels.disconnect', {
-      platform
-    })
-    return res.snapshot
-  })
-  registerHandler('channels:listPairingRequests', async () => {
-    const res = await guiMms.request<{ requests: unknown[] }>(
-      'channels.listPairingRequests'
-    )
-    return res.requests
-  })
-  registerHandler('channels:approvePairing', async (_e, code: string) => {
-    const res = await guiMms.request<{ ok: boolean }>('channels.approvePairing', { code })
-    return res.ok
-  })
-  registerHandler('channels:rejectPairing', async (_e, code: string) => {
-    const res = await guiMms.request<{ ok: boolean }>('channels.rejectPairing', { code })
-    return res.ok
-  })
-  registerHandler(
-    'channels:sendTest',
-    async (_e, platform: ChannelPlatform, chatId: string, text: string, threadId?: string) => {
-      const res = await guiMms.request<{ result: unknown }>('channels.sendTest', {
-        platform,
-        chatId,
-        text,
-        threadId
-      })
-      return res.result
-    }
-  )
-  registerHandler('channels:getActivity', async (_e, limit?: number) => {
-    const res = await guiMms.request<{ activity: unknown[] }>('channels.getActivity', {
-      limit
-    })
-    return res.activity
-  })
-  registerHandler('channels:owner:start', async (_e, platform: ChannelPlatform) => {
-    const res = await guiMms.request<{ claim: unknown }>('channels.owner.start', { platform })
-    return res.claim
-  })
-  registerHandler('channels:owner:status', async (_e, platform: ChannelPlatform) => {
-    const res = await guiMms.request<{ claim: unknown }>('channels.owner.status', { platform })
-    return res.claim
-  })
-  registerHandler('channels:owner:confirm', async (_e, platform: ChannelPlatform, userId: string) => {
-    const res = await guiMms.request<{ owners: unknown }>('channels.owner.confirm', { platform, userId })
-    return res.owners
-  })
-  registerHandler('channels:owner:cancel', async (_e, platform: ChannelPlatform) => {
-    await guiMms.request<{ ok: boolean }>('channels.owner.cancel', { platform })
-  })
-  registerHandler('channels:owner:clear', async (_e, platform: ChannelPlatform) => {
-    const res = await guiMms.request<{ owners: unknown }>('channels.owner.clear', { platform })
-    return res.owners
   })
 
   registerHandler('mcp:listServers', async (_e, projectId?: string) => {

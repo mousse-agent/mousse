@@ -41,7 +41,7 @@ const GLOBAL_FLAGS: Record<string, { key: keyof CliGlobals | 'home' | 'json'; al
 }
 
 const COMMANDS = new Set([
-  'schedule', 'agents', 'channels', 'config', 'service',
+  'schedule', 'agents', 'config', 'service',
   'workspace', 'publish', 'undo', 'revert-code', 'redo', 'fork', 'operation',
   'relay', 'net', 'bridge', 'spaces', 'bots', 'login', 'logout', 'control',
   'connections', 'workflow', 'workflows', 'chat', 'browser', 'engine', 'approvals'

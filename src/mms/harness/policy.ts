@@ -56,7 +56,7 @@ export function spendLimitLevel(caps: Partial<Pick<HarnessCaps, 'spendLimits'>>)
  * other purpose (delegation, definitions, workflows, scheduled jobs, titles, and any purpose added
  * later) runs without a person watching each tool.
  */
-export const INTERACTIVE_PURPOSES: ReadonlySet<string> = new Set(['composer', 'default', 'turn', 'channel_model', 'cli_model'])
+export const INTERACTIVE_PURPOSES: ReadonlySet<string> = new Set(['composer', 'default', 'turn', 'cli_model'])
 
 /** Whether a purpose may run on an instance with these caps. */
 export function purposeAllowed(caps: Partial<Pick<HarnessCaps, 'toolControl'>>, purpose: string): boolean {

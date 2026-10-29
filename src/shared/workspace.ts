@@ -5,7 +5,7 @@ export type ActionId = string
 export type OperationId = string
 
 export interface WorkspaceActor {
-  kind: 'main' | 'agent' | 'workflow' | 'user' | 'scheduler' | 'channel'
+  kind: 'main' | 'agent' | 'workflow' | 'user' | 'scheduler'
   id?: string
   definitionId?: string
 }

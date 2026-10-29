@@ -27,7 +27,6 @@ import {
   type BotAcknowledgement,
   type BotActivationSummary,
   type BotActivationTrigger,
-  type BotChannelReplyTo,
   type BotDefinition,
   type BotManifest,
   type BotPermissionLine,
@@ -461,27 +460,6 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     return this.enqueue(input.botId, `manual:${input.clientRequestId}`, { kind: 'manual', input: input.input })
   }
 
-  /**
-   * An activation from the owner's channel DM (PR 6 §6). The channel decides the audience before
-   * this is called; what the activation ends with (or that it waits for approval) goes back to
-   * `replyTo` through `channelReply`.
-   */
-  async activateFromChannel(input: { botId: string; input: string; clientRequestId: string; replyTo: BotChannelReplyTo }): Promise<BotActivationSummary> {
-    return this.enqueue(input.botId, `channel:${input.clientRequestId}`, { kind: 'channel', input: input.input, replyTo: input.replyTo })
-  }
-
-  /** A published bot a channel can attach to, by its name or id. */
-  findByName(name: string): { id: string; name: string } | undefined {
-    const wanted = name.trim().toLowerCase()
-    if (!wanted) return undefined
-    for (const id of this.host.definitions.ids()) {
-      if (this.store.registry(id)?.deletedAt) continue
-      const published = this.host.definitions.get(id)?.published
-      if (published && (published.name.trim().toLowerCase() === wanted || id === wanted)) return { id, name: published.name }
-    }
-    return undefined
-  }
-
   private async enqueue(botId: string, key: string, trigger: BotActivationTrigger): Promise<BotActivationSummary> {
     const existing = this.store.activationByKey(key)
     if (existing) {
@@ -635,61 +613,6 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       }
     }
     return inserted
-  }
-
-  // -- Channel replies (PR 6 §6) ----------------------------------------------------------------
-
-  /**
-   * What a channel activation tells its chat now, claimed once per state: its final message when
-   * done, "Waiting for approval in Mousse" at a wall, or that it stopped. Undefined when there is
-   * nothing new to say. The claim comes before the send, so a crash never posts a state twice.
-   */
-  channelReply(activationId: string, options: { canSend?: (replyTo: BotChannelReplyTo) => boolean } = {}): { replyTo: BotChannelReplyTo; text: string; release(): void } | undefined {
-    const row = this.store.activation(activationId)
-    if (!row || row.trigger.kind !== 'channel') return undefined
-    let state: string
-    let text: string
-    switch (row.status) {
-      case 'waiting_grant': {
-        const open = this.store.escalations({ activationId: row.id, status: 'open' }).at(-1)
-        if (!open) return undefined
-        state = `waiting_grant:${open.id}`
-        text = 'Waiting for approval in Mousse.'
-        break
-      }
-      case 'done':
-        state = 'done'
-        text = row.result?.trim() ? row.result : 'Done.'
-        break
-      case 'paused':
-      case 'blocked':
-        state = `${row.status}:${row.endReason ?? ''}`
-        text = 'The bot stopped and needs you in Mousse to go on.'
-        break
-      case 'failed':
-        state = 'failed'
-        text = `The bot could not finish${row.endReason ? ` (${row.endReason})` : ''}.`
-        break
-      case 'cancelled':
-        state = 'cancelled'
-        text = 'The bot\'s run was stopped.'
-        break
-      default:
-        return undefined
-    }
-    // Nothing is claimed while the chat cannot be reached: the reply goes once the channel connects.
-    if (options.canSend && !options.canSend(row.trigger.replyTo)) return undefined
-    if (!this.store.claimReply(row.id, state)) return undefined
-    // A send that failed gives the claim back (only if nobody claimed a later state meanwhile).
-    return { replyTo: row.trigger.replyTo, text, release: () => { this.store.releaseReply(row.id, state) } }
-  }
-
-  /** Channel activations of the last day: what a channel that just connected may still owe its chat. */
-  recentChannelActivations(sinceMs = 24 * 60 * 60_000): string[] {
-    const since = new Date(this.now() - sinceMs).toISOString()
-    return this.store.all('SELECT id, trigger_json FROM bot_activations WHERE created_at >= ? ORDER BY created_at', since)
-      .filter((row) => (JSON.parse(row.trigger_json as string) as { kind?: string }).kind === 'channel')
-      .map((row) => row.id as string)
   }
 
   listActivations(botId?: string): BotActivationSummary[] {

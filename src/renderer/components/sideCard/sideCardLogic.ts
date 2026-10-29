@@ -20,7 +20,6 @@ export interface SideCardVisibilityInput {
   settingsOpen: boolean
   usageOpen: boolean
   scheduledOpen: boolean
-  channelsOpen: boolean
   sidebarMode: 'projects' | 'chats'
   /** The overlay is open. Only counts in overlay mode; it is never persisted. */
   sideCardOverlayOpen: boolean
@@ -43,7 +42,7 @@ export interface SideCardState {
 
 /**
  * One answer for the card and its title-bar button. The card needs a view that
- * shows a thread (not Settings, Usage, Scheduled, Channels or Chats). Within
+ * shows a thread (not Settings, Usage, Scheduled or Chats). Within
  * that, a thread area wide enough docks it: it shows when switched on and the
  * app panel is closed. A narrower one opens it as an overlay, which shows only
  * while `sideCardOverlayOpen` is set, so a narrow window never opens it by
@@ -56,7 +55,6 @@ export function deriveSideCardState(input: SideCardVisibilityInput): SideCardSta
   const viewBlocked = input.settingsOpen
     || input.usageOpen
     || input.scheduledOpen
-    || input.channelsOpen
     || input.sidebarMode === 'chats'
   if (viewBlocked) return { visible: false, mode, unavailable: 'view' }
   // Unmeasured never flashes the card; the first measurement lands before the first paint.

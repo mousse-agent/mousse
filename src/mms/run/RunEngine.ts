@@ -146,7 +146,7 @@ export type { RunTerminalStatus } from './terminal'
 /** A Stop of one thread and everything below it (`RunEngine.stopSubtree`). */
 export interface StopRequest {
   threadId: string
-  /** Why: `user`, `cli`, `channel`, `remote`, `task_cancel`, `thread_deleted`, `settled`. Recorded on the runs it cancels. */
+  /** Why: `user`, `cli`, `remote`, `task_cancel`, `thread_deleted`, `settled`. Recorded on the runs it cancels. */
   reason: string
   /** A repeat with the same id returns the first result and raises no generation. */
   clientRequestId?: string

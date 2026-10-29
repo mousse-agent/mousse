@@ -31,12 +31,10 @@ import { OwnedWorkBarrier } from '../execution/OwnedWorkBarrier'
 import type { WorkflowChatExecutor } from '../platform/MmsWorkflowChatBridge'
 import type { WorkflowChatRun } from '../../shared/workflowChat'
 import {
-  channelWorkflowInvocationId,
   formatBackgroundWorkflowDelivery,
   isBackgroundWorkflowWaiting,
   scheduleWorkflowInvocationId,
   type BackgroundWorkflowTurnResult,
-  type ChannelWorkflowHostIngress,
   type ScheduledJobIngress
 } from '../platform/MmsWorkflowChat'
 import { DomainRpcError } from '../protocol/domainRegistry'
@@ -500,6 +498,19 @@ export interface OrchestratorSendOptions {
   onAdmitted?: (runId: string) => void
 }
 
+/** Options of `runRemoteTurn`. */
+export interface RemoteTurnOptions {
+  modelOverride?: ModelOverride
+  /** Ends the turn; without one, only the profile's shutdown does. */
+  signal?: AbortSignal
+  drainSteer?: () => string | undefined
+  /** The mode the sender chose; agent when absent. */
+  mode?: ChatMode
+  images?: ChatImageAttachment[]
+  /** Called once the user's message is stored on the thread; not called if the turn never starts. */
+  onUserInputAccepted?: () => void
+}
+
 /** The scheduled occurrence a turn is; `jobName` lets the thread show who sent the prompt. */
 export interface ScheduledTurnRef {
   jobId: string
@@ -816,7 +827,6 @@ export class OrchestratorService extends EventEmitter {
     this.questions.shutdown()
     // The shutdown reason marks these turns as cut off by a restart, not stopped by a user.
     for (const session of new Set([this.boundSession, ...this.sessions.values()])) session.activeTurn?.abort.abort(this.lifecycle.signal.reason)
-    for (const turn of this.channelTurns.values()) turn.abort.abort()
   }
 
   /** A turn abort caused by the profile shutting down (worker stop or lifecycle), not by a user. */
@@ -864,7 +874,7 @@ export class OrchestratorService extends EventEmitter {
   /**
    * Trusted GUI/main-agent browser context. Root supplies source/profile/thread/turn
    * and resolved grants; this runtime never infers a tab owner from model text.
-   * Not applied to scheduled/channel turns.
+   * Not applied to scheduled or remote turns.
    */
   setMainAgentBrowserExecution(binding: BrowserExecutionBinding | undefined): void {
     this.mainAgentBrowser = binding
@@ -1384,11 +1394,6 @@ export class OrchestratorService extends EventEmitter {
   private persistFn?: (threadId?: string | null) => void
   /** Per-thread delayed persist timers (concurrent turns must not suppress each other). */
   private persistTimers = new Map<string, ReturnType<typeof setTimeout>>()
-  /** In-flight channel turns keyed by mousse thread id; `runId` once the turn is an engine run. */
-  private channelTurns = new Map<
-    string,
-    { abort: AbortController; pendingSteer: SteerEntry[]; runId?: string }
-  >()
   /** Optional thread store for durable queue persistence. */
   private threadStore: ThreadDataStore | null = null
   /** Optional Run Engine (Phase 1 dual-write bridge). */
@@ -2017,7 +2022,7 @@ export class OrchestratorService extends EventEmitter {
    * before the report and its effect waits behind this one in the lane, this one goes first: Claude's
    * turn already exists and cannot be cancelled, and that effect runs as soon as this one ends. Only a turn
    * whose own `turn.start` effect holds the admission is passed (a queue drain's turn gets its effect with
-   * the admission held, so it is passable too); a turn that already runs, or one of a channel, finishes first.
+   * the admission held, so it is passable too); a turn that already runs, or a remote turn, finishes first.
    */
   private async executeContinuationEffect(effect: EffectRecord, payload: ContinuationTurnPayload, signal: AbortSignal): Promise<void> {
     const engine = this.requireRunEngine()
@@ -2048,7 +2053,7 @@ export class OrchestratorService extends EventEmitter {
         // Only a turn whose own turn.start effect holds the admission and is still waiting behind this one
         // may be passed: a send's turn, or a queue drain's (the drain gets its effect with the admission held,
         // and startTurn records that run as the owner). An admission with no owner effect belongs to a turn
-        // that does not run through the engine (a channel turn): it finishes first.
+        // that does not run through the engine (a remote turn): it finishes first.
         const owner = session.admissionRunId
         const waiting =
           owner !== undefined &&
@@ -2319,7 +2324,7 @@ export class OrchestratorService extends EventEmitter {
 
   /**
    * The one Stop (issue #142): every public Stop (the protocol's `orchestrator.abort`, with or without
-   * a `runId`, `abortRun`, the CLI, a channel's `/stop`, the remote hub, Lineage's Stop and Stop all,
+   * a `runId`, `abortRun`, the CLI, the remote hub, Lineage's Stop and Stop all,
    * `task_cancel`, deleting or settling a thread) comes here, and so does nothing else. An internal
    * abort (a steer that restarts the turn, a question that preempts it, a shutdown) stays local, on
    * `abortActiveTurn`, which this wraps and which never calls back.
@@ -2341,9 +2346,7 @@ export class OrchestratorService extends EventEmitter {
     const engine = this.runEngine
     if (!engine) {
       // Without a run engine there is only the local turn and its queue.
-      const turnAborted = this.abortActiveTurn(threadId, { clearQueue: opts.clearQueue })
-      const channelAborted = this.abortChannelTurn(threadId)
-      const aborted = turnAborted || channelAborted
+      const aborted = this.abortActiveTurn(threadId, { clearQueue: opts.clearQueue })
       return { ok: aborted, status: 'stopped', replayed: false, threadId, threads: [threadId], activeRuns: [], cancelledRuns: [], delegations: [] }
     }
     const result = engine.stopSubtree({ threadId, reason, ...opts })
@@ -2383,10 +2386,9 @@ export class OrchestratorService extends EventEmitter {
         // The worker runs the interrupt effect `stopSubtree` queued; without one, the interrupt runs now.
         if (!this.effectsEnabled()) void this.interruptRun(run.runId, run.threadId)
       }
-      // A live turn that is not an engine run (a legacy turn, a channel turn) is still the Stop's to end,
+      // A live turn that is not an engine run (a legacy turn) is still the Stop's to end,
       // for the thread the Stop was aimed at; nothing can have started since the transaction.
       if (!result.activeRuns.some((run) => run.threadId === threadId)) aborted = this.abortActiveTurn(threadId) || aborted
-      for (const id of result.threads) aborted = this.abortChannelTurn(id) || aborted
       this.removeStoppedQueueEntries(result, opts.clearQueue === true, opts.actor !== undefined)
     }
     // A replayed Stop reaches the provider only for threads that have no work newer than the Stop: a process
@@ -2424,8 +2426,8 @@ export class OrchestratorService extends EventEmitter {
    * Whether the thread has work the replayed Stop did not cover: a run admitted at or after the generation
    * the Stop raised it to (any status; its process may still hold helpers), or any run that is still not
    * terminal (the original Stop already ended its provider work once, and the stale-run Stop uses the same
-   * guard). Any turn still in this process counts, whether or not it is an engine run: a channel turn, and
-   * also one the first Stop aborted that is still unwinding. That last case is safe, since the first Stop
+   * guard). Any turn still in this process counts, whether or not it is an engine run, and also one the
+   * first Stop aborted that is still unwinding. That last case is safe, since the first Stop
    * already reached the provider. An unknown generation counts as newer work, so nothing is closed on a guess.
    */
   private hasWorkAfterStop(threadId: string, generation: number | undefined): boolean {
@@ -2689,7 +2691,7 @@ export class OrchestratorService extends EventEmitter {
    * - a bot thread: `lineage` (its turns act for a person outside Mousse, who must not reach the owner's
    *   other threads through the setting; takes effect once the bot engine registers its threads);
    * - a read-only subagent: `read`;
-   * - the thread's stored ceiling (`Thread.accessCeiling`: a fork's, and a channel thread's);
+   * - the thread's stored ceiling (`Thread.accessCeiling`: a fork's, and a thread a remote send drove);
    * - every delegation that gave the thread work, not just the first and the latest, so a follow-up
    *   never restores a level an earlier one narrowed (a row from before levels existed is `lineage`);
    * - `lineage` for a fork or subagent that has no trustworthy grant (no stored ceiling, no delegation).
@@ -2742,7 +2744,7 @@ export class OrchestratorService extends EventEmitter {
 
   /**
    * What a job created or changed by an agent's run may be granted: the access level the run holds (its grant narrowed by
-   * the profile's setting now) and the permission mode it is bound to. A run that is not a person's turn (a channel,
+   * the profile's setting now) and the permission mode it is bound to. A run that is not a person's turn (a remote turn,
    * a bot, a scheduled run, a workflow or a definition) gets the narrowest of both, and so does any run whose
    * origin cannot be read, so a job made by an unattended agent is never wider than that agent was.
    */
@@ -3043,7 +3045,7 @@ export class OrchestratorService extends EventEmitter {
     if (asking?.status === 'pending' && this.askedInPersonTurn(asking.runId)) return { ok: false, reason: 'person_turn' }
     let level: AgentAccessLevel
     try {
-      // The most the thread may have whatever the profile says (a bot or channel thread is lineage) narrows what the credential was granted.
+      // The most the thread may have whatever the profile says (a bot or remote turn's thread is lineage) narrows what the credential was granted.
       level = narrowAgentAccess(this.effectiveAccess(options.accessLevel), this.staticAccessCeiling(actor.threadId)) ?? 'lineage'
     } catch {
       level = 'lineage'
@@ -3892,10 +3894,10 @@ export class OrchestratorService extends EventEmitter {
     await this.interruptRun(runId, threadId)
   }
 
-  /** The thread has a turn in this process: running, admitted (setting up) or a channel turn. */
+  /** The thread has a turn in this process: running or admitted (setting up). */
   private hasLocalTurn(threadId: string): boolean {
     const session = this.boundSession.threadId === threadId ? this.boundSession : this.sessions.get(threadId)
-    return Boolean(session?.activeTurn || session?.turnAdmitted || this.channelTurns.has(threadId))
+    return Boolean(session?.activeTurn || session?.turnAdmitted)
   }
 
   /**
@@ -4603,10 +4605,9 @@ export class OrchestratorService extends EventEmitter {
   }
 
   /**
-   * How a new binding answers tool approvals. A channel turn passes `never` (`CHANNEL_POLICY`),
-   * whatever the thread's permission mode grants. A provider continuation (a background task the
-   * runtime finished later) keeps `never` when the thread's previous binding had it, since nobody in
-   * the channel can answer either.
+   * How a new binding answers tool approvals. A caller may fix it (`never`), whatever the thread's
+   * permission mode grants. A provider continuation (a background task the runtime finished later)
+   * keeps `never` when the thread's previous binding had it, since nobody can answer it either.
    */
   private turnApprovals(threadId: string, runId: string | undefined, opts?: { approvals?: RunPolicy['approvals']; source?: string }): Pick<BindInput, 'approvals'> {
     if (opts?.approvals) return { approvals: opts.approvals }
@@ -6426,7 +6427,7 @@ export class OrchestratorService extends EventEmitter {
 
   /**
    * Queues a message and makes sure it runs: after the current turn settles (whoever owns it,
-   * including a channel or remote turn that suppresses its own drain), or now when the thread is idle.
+   * including a remote turn that suppresses its own drain), or now when the thread is idle.
    */
   enqueueAndDrain(threadId: string, input: OrchestratorSendInput, source: string): QueuedMessage {
     this.assertQueueOpen(threadId)
@@ -6584,7 +6585,7 @@ export class OrchestratorService extends EventEmitter {
     const session = this.getOrCreateSession(threadId)
     if (session.queue.find((entry) => entry.id === itemId)?.inboxIds?.length)
       throw new QueueValidationError('A queued subagent result is delivered as its own turn; it cannot be sent as a steer.')
-    const localActive = session.isTurnActive() || this.isChannelTurnActive(threadId)
+    const localActive = session.isTurnActive()
     const externalActive = this.isThreadLeaseHeldExternally(
       threadId,
       session.executionLease?.owner.token
@@ -7797,7 +7798,7 @@ export class OrchestratorService extends EventEmitter {
     this.transcript.tool(event)
   }
 
-  // retained for non-GUI callers (CLI/channels)
+  // retained for non-GUI callers (CLI, remote)
   isTurnActive(threadId?: string): boolean {
     if (threadId) {
       const session =
@@ -8162,14 +8163,6 @@ export class OrchestratorService extends EventEmitter {
       this.emit('turn-steered', { threadId, text: trimmed })
       return true
     }
-    // Local channel turn for this thread. A steer that carries notices is not given to it: the turn
-    // would take the text without the rows' identity, so it is queued as a turn of its own instead. An agent's
-    // steer, and a promoted item with a mode ceiling, are not given to it either: the channel turn would run
-    // them as a person's text and under its own mode.
-    if (!carried && !origin && !permissionMode && this.steerChannelTurn(threadId, trimmed, item)) {
-      this.emit('turn-steered', { threadId, text: trimmed })
-      return true
-    }
     return false
   }
 
@@ -8189,7 +8182,7 @@ export class OrchestratorService extends EventEmitter {
     if (this.steerThread(threadId, text, undefined, undefined, undefined, opts?.permissionMode, undefined, opts?.sentFrom)) {
       return { steered: true, queued: false }
     }
-    if (this.isThreadLeaseHeldExternally(threadId) || this.isChannelTurnActive(threadId)) {
+    if (this.isThreadLeaseHeldExternally(threadId)) {
       const item = this.enqueueExternalSteer(threadId, text, opts)
       if (item) return { steered: false, queued: true, item }
     }
@@ -8205,62 +8198,20 @@ export class OrchestratorService extends EventEmitter {
   }
 
   /**
-   * Abort an in-flight channel turn for a Mousse thread (Telegram/Discord). The abort is immediate;
-   * a channel turn that is an engine run also gets its `stop` recorded against that run.
-   */
-  abortChannelTurn(threadId: string): boolean {
-    const turn = this.channelTurns.get(threadId)
-    if (!turn || turn.abort.signal.aborted) return false
-    turn.pendingSteer = []
-    turn.abort.abort()
-    this.recordChannelControl('stop', threadId, turn.runId)
-    return true
-  }
-
-  /**
-   * Steer an in-flight channel turn for a Mousse thread. The text reaches the turn through its own
-   * steer queue; an engine-run channel turn also records the `steer` against its run.
-   */
-  steerChannelTurn(threadId: string, text: string, item?: { id: string; runId?: string }): boolean {
-    const trimmed = text.trim()
-    const turn = this.channelTurns.get(threadId)
-    if (!trimmed || !turn || turn.abort.signal.aborted) return false
-    // A promotion checked against a run joins only that run's turn.
-    if (item?.runId && turn.runId !== item.runId) return false
-    turn.pendingSteer.push({ text: trimmed, ...(item ? { itemId: item.id } : {}) })
-    this.recordChannelControl('steer', threadId, turn.runId)
-    return true
-  }
-
-  /** Records a channel turn's stop or steer as a command on its run (delivery already happened). */
-  private recordChannelControl(kind: 'stop' | 'steer', threadId: string, runId: string | undefined): void {
-    const engine = this.runEngine
-    if (!engine || !runId) return
-    void engine.dispatch({ kind, threadId, clientRequestId: `channel-${kind}:${uuidv4()}`, runId }).catch((error: unknown) => {
-      console.warn(`channel ${kind} could not be recorded`, { runId, error: error instanceof Error ? error.message : String(error) })
-    })
-  }
-
-  /**
-   * C4: a channel turn is an engine run, created through the same `send` command as any other
-   * (`source: 'channel'`), so rule 4 and the rest of the engine see the thread busy. A run that
+   * C4: a remote turn is an engine run, created through the same `send` command as any other
+   * (`source: 'remote'`), so rule 4 and the rest of the engine see the thread busy. A run that
    * cannot be recorded leaves the turn to run without one, like any other bridge write.
    */
-  private async recordChannelRun(threadId: string): Promise<string | undefined> {
+  private async recordRemoteRun(threadId: string): Promise<string | undefined> {
     const engine = this.runEngine
     if (!engine) return undefined
     try {
-      const result = await engine.dispatch({ kind: 'send', threadId, clientRequestId: `channel:${uuidv4()}`, source: 'channel' })
+      const result = await engine.dispatch({ kind: 'send', threadId, clientRequestId: `remote:${uuidv4()}`, source: 'remote' })
       return result.status === 'accepted' ? result.runId : undefined
     } catch (error) {
-      console.warn('run engine could not record a channel turn', { threadId, error: error instanceof Error ? error.message : String(error) })
+      console.warn('run engine could not record a remote turn', { threadId, error: error instanceof Error ? error.message : String(error) })
       return undefined
     }
-  }
-
-  isChannelTurnActive(threadId: string): boolean {
-    const turn = this.channelTurns.get(threadId)
-    return Boolean(turn && !turn.abort.signal.aborted)
   }
 
   /**
@@ -8475,7 +8426,6 @@ export class OrchestratorService extends EventEmitter {
 
     const externalLease =
       !session.isTurnRunning() &&
-      !this.isChannelTurnActive(threadId) &&
       (() => {
         // Drop a dead owner's lease first so a restarted daemon does not
         // enqueue behind a ghost instead of running the turn directly.
@@ -8600,7 +8550,7 @@ export class OrchestratorService extends EventEmitter {
       /** When true, executeTurn must not chain ordinary post-turn queue drains. */
       suppressAutoQueueDrain?: boolean
       externalSignal?: AbortSignal
-      /** Steers a channel turn collected: plain text, or entries that keep the queue items they came from. */
+      /** Steers a remote turn collected: plain text, or entries that keep the queue items they came from. */
       externalDrainSteer?: () => string | SteerEntry[] | undefined
       modelOverride?: ModelOverride
       /** Who the turn runs for, when it is not the thread's own (a scheduled job). */
@@ -8623,7 +8573,7 @@ export class OrchestratorService extends EventEmitter {
       permissionMode?: PermissionMode
       /** A bot dispatch (PR 6 §4): its policy, authority and scratch folder. */
       bot?: PreparedBotTurn
-      /** How the turn's binding answers tool approvals; `never` for channel turns (`CHANNEL_POLICY`). */
+      /** How the turn's binding answers tool approvals, when the caller fixes it. */
       approvals?: RunPolicy['approvals']
     }
   ): Promise<OrchestratorResponse> {
@@ -9426,7 +9376,7 @@ export class OrchestratorService extends EventEmitter {
       let drains = 0
       let returnedAhead = 0
       const drainEntry = (): { text: string; token: string } | undefined => {
-        // A channel turn's steers, then the thread's own (and the durable queue's).
+        // A remote turn's steers, then the thread's own (and the durable queue's).
         const raw = opts?.externalDrainSteer?.()
         const external: SteerEntry[] = typeof raw === 'string' ? (raw.trim() ? [{ text: raw.trim() }] : []) : (raw ?? [])
         for (const steer of external) if (steer.itemId) session.drainedExternalSteerIds.add(steer.itemId)
@@ -11000,7 +10950,7 @@ export class OrchestratorService extends EventEmitter {
     const thread = store.createThread('Scheduled: ' + (ingress.jobName ?? 'job'), ingress.projectId, projectPath, {
       ...(ingress.selection ? { modelOverride: ingress.selection } : {}),
       scheduledJobId: ingress.jobId,
-      // What agents in this thread may reach, fixed like a channel thread's: the job creator's level, `lineage` when unknown.
+      // What agents in this thread may reach, fixed like a remote turn's thread: the job creator's level, `lineage` when unknown.
       accessCeiling: this.scheduledAccessCap(ingress.accessCap),
       ...(ingress.projectId && ingress.workspace?.kind !== 'newWorktree' ? { workspaceBinding: { policy: 'primary' as const } } : {})
     })
@@ -11077,69 +11027,39 @@ export class OrchestratorService extends EventEmitter {
     return { ...base, text, silent }
   }
 
-  async runChannelTurn(
+  /**
+   * A turn sent through the remote bridge (`MmsBackend.run`), such as a linked phone's send. It takes the
+   * thread's cross-process lease, runs in the caller's mode (agent by default) and ends with the caller's signal.
+   */
+  async runRemoteTurn(
     threadId: string,
     content: string,
     threadStore: ThreadDataStore,
-    opts?: {
-      modelOverride?: ModelOverride
-      signal?: AbortSignal
-      drainSteer?: () => string | undefined
-      hostIngress?: ChannelWorkflowHostIngress
-      /** Remote sends choose a mode and attach images; channel turns run in agent mode without images. */
-      mode?: ChatMode
-      images?: ChatImageAttachment[]
-      /** Called once the user's message is stored on the thread; not called if the turn never starts. */
-      onUserInputAccepted?: () => void
-      /** Channel turns pass `never` (`CHANNEL_POLICY`): nobody in a channel answers a tool approval. */
-      approvals?: RunPolicy['approvals']
-    }
+    opts?: RemoteTurnOptions
   ): Promise<BackgroundWorkflowTurnResult> {
-    return this.lifecycle.run('channel-turn', () => this.runChannelTurnOwned(threadId, content, threadStore, opts))
+    return this.lifecycle.run('remote-turn', () => this.runRemoteTurnOwned(threadId, content, threadStore, opts))
   }
 
-  private async runChannelTurnOwned(
+  private async runRemoteTurnOwned(
     threadId: string,
     content: string,
     threadStore: ThreadDataStore,
-    opts?: {
-      modelOverride?: ModelOverride
-      signal?: AbortSignal
-      drainSteer?: () => string | undefined
-      hostIngress?: ChannelWorkflowHostIngress
-      /** Remote sends choose a mode and attach images; channel turns run in agent mode without images. */
-      mode?: ChatMode
-      images?: ChatImageAttachment[]
-      /** Called once the user's message is stored on the thread; not called if the turn never starts. */
-      onUserInputAccepted?: () => void
-      /** Channel turns pass `never` (`CHANNEL_POLICY`): nobody in a channel answers a tool approval. */
-      approvals?: RunPolicy['approvals']
-    }
+    opts?: RemoteTurnOptions
   ): Promise<BackgroundWorkflowTurnResult> {
-    // The turn registers itself only when the caller passes no signal. Production callers (ChannelRouter and the
-    // remote MmsBackend) always pass one, so this path runs only for callers without one (today, tests).
-    const ownedTurn = !opts?.signal
-    const channelTurn: { abort: AbortController; pendingSteer: SteerEntry[]; runId?: string } | null = ownedTurn
-      ? { abort: new AbortController(), pendingSteer: [] }
-      : null
-    if (channelTurn) this.channelTurns.set(threadId, channelTurn)
-
-    const signal = AbortSignal.any([opts?.signal ?? channelTurn!.abort.signal, this.lifecycle.signal])
+    const signal = opts?.signal ? AbortSignal.any([opts.signal, this.lifecycle.signal]) : this.lifecycle.signal
     let lease: ThreadLeaseHandle | null = null
-    // Session admitted by this channel turn until it hands admission to runTurnOnSession.
+    // Session admitted by this turn until it hands admission to runTurnOnSession.
     let admittedSession: ThreadSession | null = null
 
     try {
       if (!threadStore.getThread(threadId)) {
         return { text: '', silent: false, error: `Thread not found: ${threadId}` }
       }
-      // A chat bound to a bot's thread (`/threads`) never writes into it: only the bot's own
-      // dispatches run there, and a channel reaches the bot through `/bot` (PR 6 §6).
+      // A bot's thread is never written into from outside: only the bot's own dispatches run there (PR 6 §6).
       const botRefusal = this.botThreadRefusal(threadId)
       if (botRefusal) return { text: '', silent: false, error: botRefusal.message }
-      // A person outside Mousse drives this thread (a paired chat user, a webhook caller): agents in it
-      // reach no other thread through the profile's setting, now or in any later turn, and what they
-      // delegate inherits the limit (SPEC §15.1).
+      // A turn sent from outside this computer: agents in it reach no other thread through the profile's
+      // setting, now or in any later turn, and what they delegate inherits the limit (SPEC §15.1).
       try {
         threadStore.capAccessCeiling(threadId, 'lineage')
       } catch (error) {
@@ -11148,7 +11068,7 @@ export class OrchestratorService extends EventEmitter {
 
       try {
         lease = await waitAcquireExecutionLease(threadStore.getThreadDir(threadId), {
-          source: 'channel',
+          source: 'remote',
           signal,
           maxAttempts: 240,
           retryDelayMs: 50
@@ -11165,7 +11085,7 @@ export class OrchestratorService extends EventEmitter {
       }
 
       // Hydrate the canonical live session after acquiring the cross-process lease.
-      // This refreshes a GUI session that may have been opened before a channel/CLI write.
+      // This refreshes a GUI session that may have been opened before a remote or CLI write.
       const data = threadStore.loadThreadData(threadId)
       const session = this.getOrCreateSession(threadId)
       session.load(
@@ -11197,11 +11117,9 @@ export class OrchestratorService extends EventEmitter {
       // Transfer lease ownership to the regular turn path so every exit releases it.
       session.executionLease = lease
       lease = null
-      const hostRequestId = opts?.hostIngress ? channelWorkflowInvocationId(opts.hostIngress) : undefined
       const workflow = await this.admitBackgroundWorkflowTurn({
         content,
-        source: 'channel',
-        requestId: hostRequestId,
+        source: 'remote',
         threadId,
         signal,
         session,
@@ -11214,8 +11132,7 @@ export class OrchestratorService extends EventEmitter {
         return workflow
       }
       let wasAborted = false
-      const runId = await this.recordChannelRun(threadId)
-      if (channelTurn) channelTurn.runId = runId
+      const runId = await this.recordRemoteRun(threadId)
       admittedSession = null
       const result = await this.runTurnOnSession(
         session,
@@ -11227,18 +11144,9 @@ export class OrchestratorService extends EventEmitter {
           suppressAutoQueueDrain: true,
           externalSignal: signal,
           runId,
-          externalDrainSteer: opts?.drainSteer ?? (channelTurn
-            ? () => {
-                if (channelTurn.pendingSteer.length === 0) return undefined
-                // Entries, so a promoted item keeps its id through the drain, a return and the turn's end.
-                const steers = channelTurn.pendingSteer
-                channelTurn.pendingSteer = []
-                return steers
-              }
-            : undefined),
+          externalDrainSteer: opts?.drainSteer,
           modelOverride: opts?.modelOverride,
           onUserInputAccepted: opts?.onUserInputAccepted,
-          ...(opts?.approvals ? { approvals: opts.approvals } : {}),
           onTurnSettled: (aborted) => {
             wasAborted = aborted
             try {
@@ -11260,14 +11168,10 @@ export class OrchestratorService extends EventEmitter {
     } catch (err) {
       const isAbort =
         signal.aborted ||
-        channelTurn?.abort.signal.aborted ||
         (err instanceof Error && (err.name === 'AbortError' || /abort/i.test(err.message)))
       if (isAbort) return { text: '', silent: true, aborted: true }
       return { text: '', silent: false, error: err instanceof Error ? err.message : String(err) }
     } finally {
-      // A later channel turn on this thread may have registered itself while this one ran (it waits for the
-      // lease): only this turn's own entry is removed.
-      if (channelTurn && this.channelTurns.get(threadId) === channelTurn) this.channelTurns.delete(threadId)
       if (lease) releaseExecutionLeaseHandle(lease)
       if (admittedSession) {
         this.releaseSessionExecutionLease(admittedSession)
@@ -11298,7 +11202,7 @@ export class OrchestratorService extends EventEmitter {
    */
   private async admitBackgroundWorkflowTurn(input: {
     content: string
-    source: 'channel' | 'schedule'
+    source: 'remote' | 'schedule'
     requestId?: string
     threadId?: string
     signal: AbortSignal

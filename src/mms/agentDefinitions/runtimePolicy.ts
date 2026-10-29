@@ -57,13 +57,13 @@ export function isFilesystemTool(classification: AgentRuntimeToolClassification)
 }
 
 export function isUnattendedSource(source: AgentExecutionSource): boolean {
-  return source === 'schedule' || source === 'channel'
+  return source === 'schedule' || source === 'remote'
 }
 
 /**
  * Whether nobody watches a definition run as it goes (`AgentRuntimePolicy.unattended`). Fails
  * closed: only a run whose host marks it attended (`AgentRuntimeHostBindings.attended`: Try Run, an
- * agent chat's reply) is watched, and never one from a schedule, a channel or a workflow, whatever
+ * agent chat's reply) is watched, and never one from a schedule, a remote turn or a workflow, whatever
  * its host says. Every other run (a workflow node, a bridge dispatch, any host added later) is
  * unattended. Wider than `isUnattendedSource`, whose approval rules do not change.
  */

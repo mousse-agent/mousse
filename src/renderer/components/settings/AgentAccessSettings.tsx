@@ -31,7 +31,7 @@ export const AGENT_ACCESS_LEVELS: ReadonlyArray<{ value: AgentAccessLevel; label
 
 /** Threads whose level stays lower than the setting, whatever it says (SPEC §15.1, static ceiling). */
 export const CAPPED_THREADS: ReadonlyArray<{ id: string; label: string; cap: string }> = [
-  { id: 'channels', label: 'Threads driven from a channel (Telegram, Discord, a webhook or a remote send)', cap: 'Lineage only' },
+  { id: 'remote', label: 'Threads driven by a remote send, such as from a linked phone', cap: 'Lineage only' },
   { id: 'bots', label: 'Bot threads', cap: 'Lineage only' },
   { id: 'plan', label: 'Turns in Plan mode, and read-only subagents', cap: 'Read at most' }
 ]

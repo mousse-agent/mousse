@@ -234,7 +234,7 @@ export interface HarnessGateway {
    * the cached result while a due refresh runs in the background and arrives as a snapshots event.
    */
   llmProviders(scope: ProviderScope): Promise<LlmProviderOption[]>
-  /** The same listing from what is known now, without waiting (synchronous readers: channel `/model`). */
+  /** The same listing from what is known now, without waiting (synchronous readers). */
   listedLlmProviders(scope: ProviderScope): LlmProviderOption[]
   /** Stops the instances' runtimes and running operations. */
   stop(): void
@@ -291,7 +291,6 @@ export type ResolvePurpose =
   | 'delegate_task'
   | 'definition'
   | 'workflow'
-  | 'channel_model'
   | 'cli_model'
   | 'title'
   | 'schedule'
@@ -722,7 +721,7 @@ function retiredPrompt(driver: HarnessDriver, instanceId: string, config: Instan
   return config.movedTo ? undefined : driver.retired?.(instanceId)
 }
 
-/** The refusal of a turn on a retired entry: where to go, for callers with no Move button (channels). */
+/** The refusal of a turn on a retired entry: where to go, for callers with no Move button. */
 function retiredError(name: string, prompt: RetiredPrompt, instanceId: string) {
   return harnessAppError({
     code: 'provider_retired',

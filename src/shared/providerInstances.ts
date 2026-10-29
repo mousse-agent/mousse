@@ -28,7 +28,7 @@ export interface ProviderSelection {
 }
 
 /**
- * A stored model selection (thread and channel-session `modelOverride`). `instanceId` is
+ * A stored model selection (a thread's `modelOverride`). `instanceId` is
  * authoritative; `llmProvider` is derived from the instance and kept so the current GUI and older
  * daemons can still read the record. Records written before instances existed carry only
  * `llmProvider` and are mapped with `instanceIdForLegacyProvider` when read.

@@ -1,5 +1,5 @@
 /**
- * Durable cross-process file locks for scheduled jobs / channels / tick.
+ * Durable cross-process file locks for scheduled jobs and the tick.
  * Exclusive create (O_EXCL / wx) is the ownership primitive.
  * No event-loop busy-spin; fail fast after one safe stale-reclaim retry.
  */

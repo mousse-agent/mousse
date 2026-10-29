@@ -12,7 +12,7 @@ import type {
 import { DEFAULT_CHAT_MODE } from '../../shared/types'
 import { fileWorkspaceScope } from '../stores/filesStore'
 import { DEFAULT_PERMISSION_MODE, normalizePermissionMode, permissionCeilingOf, type PermissionMode } from '../../shared/permissionMode'
-import { removeInlineSkillToken } from '../../shared/channelCommands'
+import { removeInlineSkillToken } from '../../shared/composerCommands'
 import type { SkillDescriptor } from '../../shared/integrations'
 import { isTurnActivePhase } from '../../shared/types'
 import { useAppStore } from '../stores/appStore'

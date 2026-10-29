@@ -582,7 +582,7 @@ export class ProviderAuthService {
 
   /**
    * Provider-native subscription usage text for a single provider.
-   * Shared by channel `/usage` and the desktop usage view — never derive or
+   * Shown by the desktop usage view — never derive or
    * estimate quotas, only render what the provider API returned.
    * Returns undefined when the provider has no quota API.
    */

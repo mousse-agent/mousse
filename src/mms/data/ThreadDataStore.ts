@@ -348,7 +348,7 @@ export class ThreadDataStore extends EventEmitter {
     }
 
     // This is the authoritative creation notification for every producer:
-    // GUI/CLI protocol calls, channels, and scheduled jobs.
+    // GUI/CLI protocol calls, remote sends, and scheduled jobs.
     this.emit('created', meta)
     return meta
   }
@@ -513,7 +513,7 @@ export class ThreadDataStore extends EventEmitter {
 
   /**
    * `listThreads(projectId)` without the subagent threads that sit under a parent. For clients that
-   * show threads as a flat list (channels); the parents are looked up in the complete inventory, so
+   * show threads as a flat list; the parents are looked up in the complete inventory, so
    * a subagent whose parent is in another project, or gone, is still judged correctly.
    */
   listVisibleThreads(projectId?: string): Thread[] {

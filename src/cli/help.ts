@@ -19,7 +19,6 @@ Usage:
   mousse-cli browser <status|install|cancel> Manage browser automation setup
   mousse-cli agents <subcommand>             Spawn/list/stop background CLI agents
   mousse-cli engine fsck                     Check Run Engine state for inconsistencies
-  mousse-cli channels <subcommand>           Channel setup (Telegram, Discord, Webhook)
   mousse-cli config <subcommand>             Read/write ~/.mousse/mousse.conf
   mousse-cli service <subcommand>            MMS daemon control and startup install
   mousse-cli relay serve                    Run a self-hosted relay in the foreground
@@ -190,24 +189,6 @@ export const THREAD_ACTION_HELP = `Usage:
   mousse-cli operation abort <operation> --session <thread>
 `
 
-export const CHANNELS_HELP = `Usage:
-  mousse-cli channels list
-  mousse-cli channels add <telegram|discord|webhook> [options]
-  mousse-cli channels remove <platform>
-  mousse-cli channels enable <platform>
-  mousse-cli channels disable <platform>
-  mousse-cli channels pair list
-  mousse-cli channels pair approve <code>
-  mousse-cli channels pair reject <code>
-
-Platform flags:
-  --token <token>             Bot token (Telegram/Discord)
-  --webhook-port <port>       Webhook listener port
-  --webhook-secret <secret>   Webhook HMAC secret
-  --allow-all                 Allow all users (not recommended)
-  --user-id <id>              Allowed user/chat id (repeatable)
-`
-
 export const CONFIG_HELP = `Usage:
   mousse-cli config list [prefix]
   mousse-cli config get <dotted.path>
@@ -252,8 +233,6 @@ export function commandHelp(command: string): string | null {
       return AGENTS_HELP
     case 'engine':
       return ENGINE_HELP
-    case 'channels':
-      return CHANNELS_HELP
     case 'config':
       return CONFIG_HELP
     case 'service':

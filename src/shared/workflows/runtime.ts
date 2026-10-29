@@ -35,7 +35,7 @@ export type WorkflowNodeAttemptOutcome =
   | 'output-stale'
 
 export interface WorkflowTriggerPayload {
-  kind: 'gui' | 'cli' | 'schedule' | 'channel' | 'control'
+  kind: 'gui' | 'cli' | 'schedule' | 'remote' | 'control'
   triggerId?: string
   projectId?: string
   threadId: string

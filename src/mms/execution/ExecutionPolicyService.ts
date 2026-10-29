@@ -45,7 +45,7 @@ export class ExecutionPolicyService {
     if (effect.capability && !policy.allowedCapabilities.includes(effect.capability)) return { status: 'denied', code: 'capability_denied' }
     if (policy.approvalEffects.includes(effect.classification)) return {
       status: 'approval-required', policySnapshotId: policy.id, requestDigest: effect.requestDigest,
-      unattended: context.source === 'schedule' || context.source === 'channel'
+      unattended: context.source === 'schedule' || context.source === 'remote'
     }
     return { status: 'allowed', policySnapshotId: policy.id }
   }

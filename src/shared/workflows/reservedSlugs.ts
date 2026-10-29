@@ -1,5 +1,5 @@
 /**
- * Built-in and alias slugs reserved across app, CLI, and channels.
+ * Built-in and alias slugs reserved across the app and the CLI, including a few retired command names.
  * Publication must reject these so workflows cannot shadow built-in commands.
  */
 export const RESERVED_WORKFLOW_SLUGS: readonly string[] = [

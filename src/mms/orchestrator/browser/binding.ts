@@ -47,7 +47,7 @@ export function browserRuntimeHostBindingMessage(): string {
 export function mapAgentSourceToExecutionSource(source: AgentExecutionSource): ExecutionSource {
   if (source === 'cli') return 'cli'
   if (source === 'schedule') return 'schedule'
-  if (source === 'channel') return 'channel'
+  if (source === 'remote') return 'remote'
   return 'gui'
 }
 

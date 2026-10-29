@@ -582,7 +582,6 @@ export class ProfileManager {
       paths.mcpOAuthDir,
       paths.controlDir,
       paths.scheduledDir,
-      paths.channelsDir,
       paths.browserDir,
       paths.artifactsDir,
       paths.draftsDir,

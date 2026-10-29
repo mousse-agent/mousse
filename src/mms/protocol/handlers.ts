@@ -63,13 +63,10 @@ import {
   asProviderScope,
   asSignInResponse,
   asBoolean,
-  asChannelConfigPatch,
-  asChannelPlatform,
   asCreateScheduledJobInput,
   asCursorMcpConfigPatch,
   asOptionalBoolean,
   asOptionalBoundedInt,
-  asOptionalChannelPlatform,
   asOptionalChatImages,
   asOptionalChatMode,
   asOptionalString,
@@ -2316,99 +2313,6 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const id = asString(p.id, 'id', 256)
       // The URL lets a page that opens later show where senders post; it carries no secret.
       return withWebhookRefusals(async () => ({ deliveries: ctx.mms.scheduled.listWebhookDeliveries(id), url: ctx.mms.scheduledWebhookUrl(id) }))
-    }
-    // ── Channels ──────────────────────────────────────────────────────────
-    case 'channels.getSnapshot':
-      return { snapshot: ctx.mms.channels.getSnapshot() }
-    case 'channels.getConfig':
-      return { config: ctx.mms.channels.getConfig() }
-    case 'channels.updateConfig': {
-      const p = isObject(params) ? params : {}
-      const patch = asChannelConfigPatch(p.patch)
-      // Validated nested patch; service deep-merges partial platforms.
-      const config = ctx.mms.channels.updateConfig(
-        patch as Parameters<typeof ctx.mms.channels.updateConfig>[0]
-      )
-      return { config, snapshot: ctx.mms.channels.getSnapshot() }
-    }
-    case 'channels.connect': {
-      const p = isObject(params) ? params : {}
-      const platform = asOptionalChannelPlatform(p.platform)
-      await ctx.mms.channels.connect(platform)
-      return { snapshot: ctx.mms.channels.getSnapshot() }
-    }
-    case 'channels.disconnect': {
-      const p = isObject(params) ? params : {}
-      const platform = asOptionalChannelPlatform(p.platform)
-      await ctx.mms.channels.disconnect(platform)
-      return { snapshot: ctx.mms.channels.getSnapshot() }
-    }
-    case 'channels.listPairingRequests':
-      return { requests: ctx.mms.channels.listPairingRequests() }
-    case 'channels.approvePairing': {
-      const p = isObject(params) ? params : {}
-      const code = asString(p.code, 'code', 128)
-      const ok = await ctx.mms.channels.approvePairing(code)
-      return { ok }
-    }
-    case 'channels.rejectPairing': {
-      const p = isObject(params) ? params : {}
-      const code = asString(p.code, 'code', 128)
-      const ok = await ctx.mms.channels.rejectPairing(code)
-      return { ok }
-    }
-    case 'channels.sendTest': {
-      const p = isObject(params) ? params : {}
-      const platform = asChannelPlatform(p.platform)
-      const chatId = asString(p.chatId, 'chatId', 256)
-      const text = asString(p.text, 'text')
-      const threadId = asOptionalString(p.threadId, 256)
-      const result = await ctx.mms.channels.sendTest(platform, chatId, text, threadId)
-      return { result }
-    }
-    case 'channels.getActivity': {
-      const p = isObject(params) ? params : {}
-      const limit =
-        typeof p.limit === 'number' && Number.isFinite(p.limit)
-          ? Math.min(Math.floor(p.limit), 500)
-          : undefined
-      return { activity: ctx.mms.channels.getRecentActivity(limit) }
-    }
-    // "This is me" (PR 6 §6): a code shown here, `/owner <code>` from the account, then confirm.
-    case 'channels.owner.start': {
-      const p = isObject(params) ? params : {}
-      try {
-        return { claim: ctx.mms.channels.startOwnerClaim(asChannelPlatform(p.platform)) }
-      } catch (error) {
-        if ((error as { code?: unknown }).code === 'channel_owner_unconfirmed')
-          throw knownAppError({ code: 'channel_owner_unconfirmed', message: (error as Error).message }, { category: 'invalid', retryable: false })
-        throw error
-      }
-    }
-    case 'channels.owner.status': {
-      const p = isObject(params) ? params : {}
-      return { claim: ctx.mms.channels.ownerClaimStatus(asChannelPlatform(p.platform)) }
-    }
-    case 'channels.owner.confirm': {
-      const p = isObject(params) ? params : {}
-      const platform = asChannelPlatform(p.platform)
-      const userId = asString(p.userId, 'userId', 256)
-      try {
-        return { owners: ctx.mms.channels.confirmOwner(platform, userId) }
-      } catch (error) {
-        if ((error as { code?: unknown }).code === 'channel_owner_unconfirmed')
-          throw knownAppError({ code: 'channel_owner_unconfirmed', message: (error as Error).message }, { category: 'invalid', retryable: false })
-        throw error
-      }
-    }
-    case 'channels.owner.cancel': {
-      const p = isObject(params) ? params : {}
-      ctx.mms.channels.cancelOwnerClaim(asChannelPlatform(p.platform))
-      return { ok: true }
-    }
-    case 'channels.owner.clear': {
-      const p = isObject(params) ? params : {}
-      return { owners: ctx.mms.channels.clearOwner(asChannelPlatform(p.platform)) }
     }
     // ── MCP / skills ──────────────────────────────────────────────────────
     case 'mcp.listServers': {

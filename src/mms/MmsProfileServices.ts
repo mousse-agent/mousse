@@ -55,10 +55,6 @@ import { ScheduledJobStore } from './scheduled/ScheduledJobStore'
 import { ScheduledWebhookServer, scheduledWebhookPort } from './scheduled/ScheduledWebhookServer'
 import { WebhookSecretCache } from './scheduled/webhookSecretCache'
 import { scheduledJobOptionsDepsFrom, validateScheduledJobOptions } from './scheduled/validateJobOptions'
-import { ChannelService } from './channels/ChannelService'
-import { channelModelOptions } from './channels/channelModels'
-import { ChannelStore } from './channels/ChannelStore'
-import type { ChannelBots } from './channels/channelBots'
 import { AgentRegistry } from './agents/AgentRegistry'
 import { TaskQueue } from './tasks/TaskQueue'
 import { WorktreeManager } from './worktree/WorktreeManager'
@@ -182,7 +178,6 @@ export class MmsProfileServices {
   readonly storageUsage: StorageUsageService
   readonly orchestrator: OrchestratorService
   readonly scheduled: ScheduledJobService
-  readonly channels: ChannelService
   readonly agents: AgentRegistry
   readonly tasks: TaskQueue
   readonly events: MmsEventBus
@@ -271,7 +266,6 @@ export class MmsProfileServices {
   readonly integrationContext: IntegrationRuntimeContext
   readonly platform: MmsProfilePlatform
 
-  private readonly channelStore: ChannelStore
   private readonly scheduledStore: ScheduledJobStore
   private readonly scheduledWebhookServer: ScheduledWebhookServer
   private readonly webhookSecretCache: WebhookSecretCache
@@ -299,7 +293,8 @@ export class MmsProfileServices {
       personal?: boolean
       profileId?: string
       allowLegacyProjectData?: boolean
-      inheritChannelEnvironment?: boolean
+      /** The profile's integration secrets may fall back to the daemon's environment (the Default profile only). */
+      inheritProcessEnvironment?: boolean
       includeExternalCliConfigs?: boolean
       /** The installation's profiles: an agent install another profile uses counts only while it is listed. */
       listProfiles?: () => Array<{ id: string; displayName?: string }>
@@ -387,7 +382,7 @@ export class MmsProfileServices {
           profileRoot: homeDir,
           secrets: createProfileSecretAdapter({
             profileRoot: homeDir,
-            inheritProcessEnv: shared.inheritChannelEnvironment === true
+            inheritProcessEnv: shared.inheritProcessEnvironment === true
           })
         }
       : createLegacySingleProfileContext({ profileId: this.profileId, profileRoot: homeDir })
@@ -441,7 +436,7 @@ export class MmsProfileServices {
       { questions: this.questions, modeRegistry: this.modeRegistry }
     )
     // MMS owns the canonical per-thread transcript and durable message queue for
-    // every surface (GUI client, CLI client, channels). Electron never owns MMS.
+    // every surface (GUI client, CLI client, remote sends). Electron never owns MMS.
     this.orchestrator.setThreadStore(this.threads)
     this.runEngine = new RunEngine({ store: new RunStore(new ProfileDatabase({ profileHome: homeDir })) })
     this.orchestrator.setRunEngine(this.runEngine)
@@ -602,9 +597,6 @@ export class MmsProfileServices {
       }
     })
 
-    this.channelStore = new ChannelStore(config, {
-      inheritEnvironment: shared.inheritChannelEnvironment ?? !shared.personal
-    })
     this.scheduledStore = new ScheduledJobStore(config)
     this.scheduled = new ScheduledJobService(
       {
@@ -668,36 +660,6 @@ export class MmsProfileServices {
       recordRejection: (jobId, outcome, bodyBytes) => this.scheduledStore.recordWebhookRejection(jobId, outcome, bodyBytes),
       accepted: () => this.scheduled.wake()
     })
-    const channelCapsOf = (instanceId: string) => harness.resolve({ instanceId, model: '' }, { kind: 'device' }, 'channel_model').caps
-    const bots = this.personalBots
-    this.channels = new ChannelService(
-      this.orchestrator,
-      this.threads,
-      this.channelStore,
-      this.settings,
-      this.providerAuth,
-      this.agents,
-      {
-        // `/model` lists what a channel turn can run on and hold `CHANNEL_POLICY` (disabled
-        // instances and hidden models already left the listing); nothing is picked by name.
-        listModels: () => channelModelOptions(harness.listedLlmProviders({ kind: 'device' }), channelCapsOf),
-        capsOf: channelCapsOf,
-        getSubscriptionUsage: (providerId) => this.providerAccess.subscriptionUsage(providerId),
-        // Personal bots answer their owner's DMs (PR 6 §6); without bots.db the channel has none.
-        ...(bots ? {
-          bots: {
-            findByName: (name: string) => bots.findByName(name),
-            activateFromChannel: (input) => bots.activateFromChannel(input),
-            channelReply: (activationId, options) => bots.channelReply(activationId, options),
-            recentChannelActivations: () => bots.recentChannelActivations(),
-            onChanged: (listener) => {
-              bots.events.on('changed', listener)
-              return () => { bots.events.off('changed', listener) }
-            }
-          } satisfies ChannelBots
-        } : {})
-      }
-    )
 
     this.net = new NetService({
       profileDir: this.homeDir,
@@ -894,7 +856,6 @@ export class MmsProfileServices {
       ...turns,
       platform: this.platform.getActiveCount(),
       scheduled: this.scheduled.getActiveCount(),
-      channels: this.channels.getActiveCount(),
       // Headless CLI agents are retired; the key stays for protocol stability.
       headless: 0,
       mcp: this.mcpManager.getActiveCount()
@@ -1119,7 +1080,6 @@ export class MmsProfileServices {
       headlessProcesses: 0,
       agentRuns: this.platform.getActiveCount() + (this.chatNetwork?.activeCount() ?? 0),
       mcpWork: this.mcpManager.getActiveCount(),
-      channelWork: this.channels.getActiveCount(),
       netWork: this.net.getActiveCount()
     }
   }
@@ -1136,7 +1096,6 @@ export class MmsProfileServices {
     // the relay.
     this.speechRelay.shutdown()
     this.mcpManager.beginShutdown()
-    this.channels.beginShutdown()
     this.chatNetwork?.beginShutdown()
     this.net.beginShutdown()
     this.platform.beginShutdown()
@@ -1198,9 +1157,6 @@ export class MmsProfileServices {
     })
     this.scheduled.on('status', (status) => {
       this.events.emit({ channel: 'scheduled:status', data: status })
-    })
-    this.channels.on('updated', (snapshot) => {
-      this.events.emit({ channel: 'channels:updated', data: snapshot })
     })
   }
 
@@ -1316,7 +1272,7 @@ export class MmsProfileServices {
     this.started = true
 
     // Runs the previous daemon left active cannot resume (SPEC §5); settle them before any turn,
-    // and before anything that can send one (H4): scheduled jobs, channels and the network all
+    // and before anything that can send one (H4): scheduled jobs and the network both
     // start below, so none of their sends can create a run that boot recovery then interrupts.
     this.orchestrator.recoverRunEngineOnBoot()
     // Personal bots settle what the crash left before any worker can change a bot run (PR 6 §5a).
@@ -1334,7 +1290,6 @@ export class MmsProfileServices {
       // Bot schedules follow the same switch: with the scheduler off, nothing starts on its own.
       this.botScheduler?.start()
     }
-    await this.channels.startEnabled()
     await this.net.start()
     // After the net service has loaded its ports, so the listener can refuse one of them.
     await this.listenScheduledWebhooksIfEnabled()
@@ -1362,7 +1317,6 @@ export class MmsProfileServices {
     this.events.emit({ channel: 'threads:updated', data: this.threads.listAllThreads() })
     this.events.emit({ channel: 'scheduled:updated', data: this.scheduled.listJobs() })
     this.events.emit({ channel: 'scheduled:status', data: this.scheduled.getStatus() })
-    this.events.emit({ channel: 'channels:updated', data: this.channels.getSnapshot() })
   }
 
   /**
@@ -1522,7 +1476,7 @@ export class MmsProfileServices {
   /**
    * Stops the reconciler and the worker (in-flight turns abort through their effect signal) and
    * waits for the orchestrator and every executor to drain. The clean daemon end is not written
-   * here: `finishStop` writes it (`endRunEngineEpoch`) once channels are shut and requests idle.
+   * here: `finishStop` writes it (`endRunEngineEpoch`) once requests are idle.
    */
   private async stopRunEngine(): Promise<void> {
     if (this.daemonHeartbeat) clearInterval(this.daemonHeartbeat)
@@ -1551,7 +1505,7 @@ export class MmsProfileServices {
 
   /**
    * H5: the clean `ended_at` of this daemon epoch, written only after every cleanup settled, the
-   * channels shut down, the requests went idle and no owner reports activity, so no live writer
+   * requests went idle and no owner reports activity, so no live writer
    * can still touch the run database. A stop that failed to drain leaves the epoch open: the next
    * boot treats it as a crash, which is the conservative reading.
    */
@@ -1578,7 +1532,6 @@ export class MmsProfileServices {
       () => this.platform.dispose(),
       () => this.scheduledWebhookServer.stop(),
       () => this.scheduled.shutdown(),
-      () => this.channels.shutdown(),
       () => this.stopRunEngine(),
       () => this.net.shutdown(),
       () => this.requests.waitForIdle(),

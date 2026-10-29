@@ -852,7 +852,7 @@ export const ROUTED_LOCAL_METHODS: readonly RoutedLocalRule[] = [
       'A workflow starts from a /workflow command in a routed send, and reconciling an uncertain effect is decided on the computer that ran it.'
   },
   {
-    prefixes: ['settings.', 'stats.', 'storage.', 'scheduled.', 'channels.', 'mcp.', 'webTools.'],
+    prefixes: ['settings.', 'stats.', 'storage.', 'scheduled.', 'mcp.', 'webTools.'],
     reason: 'Settings and services of the computer, not thread features.'
   },
   {
