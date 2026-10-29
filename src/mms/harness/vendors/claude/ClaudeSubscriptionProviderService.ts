@@ -54,7 +54,8 @@ import {
 import { parseClaudeSubscriptionUsage } from './usage'
 import { claudeMcpToolBlocked, claudeProxiedMcpServer, type ClaudeTurnIntegrations } from './integrations'
 import { claudeActionOf, claudeChildToolDenial, claudePermissionKey } from './childPolicy'
-import { CancelInProgress, DEFAULT_LIVE_TIMINGS, LiveSession, type LiveRun, type LiveTimings } from './liveSession'
+import { CancelInProgress, claudeQueryPid, DEFAULT_LIVE_TIMINGS, LiveSession, type LiveRun, type LiveTimings } from './liveSession'
+import { reapProcessTree } from '../../stopProcesses'
 import { TurnFrames } from './turnFrames'
 import { readUsageLimit } from '../../../orchestrator/providerErrors'
 import { USAGE_LIMIT_HOLD_MS, usageLimitFromResult, usageLimitFromWindows, type RejectedWindows } from './usageLimit'
@@ -194,6 +195,11 @@ type Dependencies = {
   live?: false | Partial<LiveTimings>
   /** How long a turn Claude Code holds after a rejected plan window runs before Mousse ends it (tests). */
   usageLimitHoldMs?: number
+  /**
+   * Ends a closed Claude Code process that has not exited by itself (`reapProcessTree`), with the
+   * commands it started; tests substitute the grace or the kill.
+   */
+  reap?: (pid: number) => Promise<'ended' | 'killed' | 'survived'>
   query?: (input: { prompt: string | AsyncIterable<SDKUserMessage>; options: Options }) => Query
   runAuth?: (
     binary: string,
@@ -1127,15 +1133,37 @@ export class ClaudeSubscriptionProviderService {
   /**
    * Stop reaches Claude's process: the live query is closed, which ends its background agents and
    * shells, and the thread's obligations end with it. Works on a thread whose turn already ended.
+   * A process that has not exited by itself shortly after is killed with everything it started
+   * (`reapClosed`).
    */
   stopThread(threadId: string): 'stopped' | 'not_active' {
     this.liveCommits.delete(threadId)
     const live = this.live.get(threadId)
     if (!live || live.dead) return 'not_active'
     this.questions.dismissAllForThread(threadId)
+    const pid = live.processId()
     live.close('closed')
     this.live.delete(threadId)
+    this.reapClosed(threadId, pid)
     return 'stopped'
+  }
+  /**
+   * Issue #417: a closed Claude Code process normally exits at once, ending the commands it runs
+   * (the Stop's interrupt already ended the one in the foreground). One that is still running after
+   * the Stop grace is killed with every process below it, so no command outlives the Stop; one that
+   * cannot be killed is said in the thread, so it does not look stopped while it still runs.
+   */
+  private reapClosed(threadId: string, pid: number | undefined): void {
+    if (pid === undefined) return
+    const reap = this.dependencies.reap ?? ((target: number) => reapProcessTree(target))
+    void reap(pid).then(
+      (outcome) => {
+        if (outcome === 'killed') console.warn('[claude-subscription] Claude Code did not exit after Stop; its processes were killed', { threadId, pid })
+        if (outcome === 'survived')
+          this.notifyHost(() => this.liveHost?.notice?.(threadId, `Stop could not end Claude Code's process for this chat (process ${pid}). It, or a command it started, may still be running.`))
+      },
+      (error: unknown) => console.warn('[claude-subscription] could not end a stopped Claude Code process', { threadId, pid, error: error instanceof Error ? error.message : String(error) })
+    )
   }
   /** Threads that hold a live Claude process (diagnostics and tests). */
   liveThreadIds(): string[] {
@@ -1600,7 +1628,12 @@ export class ClaudeSubscriptionProviderService {
       // A live query outlives the turn: the turn is interrupted, and only Stop, an idle release or a
       // replacement closes the query.
       if (live && liveRun) live.abandon(liveRun)
-      else query?.close()
+      else if (query) {
+        // A one-shot query ends its process with the turn; one that does not exit is killed (`reapClosed`).
+        const pid = claudeQueryPid(query)
+        query.close()
+        this.reapClosed(input.threadId, pid)
+      }
       this.questions.dismissAllForThread(input.threadId)
     }
     input.signal?.addEventListener('abort', cancel, { once: true })
