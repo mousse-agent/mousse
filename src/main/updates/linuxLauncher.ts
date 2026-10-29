@@ -1,21 +1,39 @@
 import { spawn } from 'node:child_process'
-import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, utimesSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
 import { basename, dirname, join } from 'node:path'
+import type { UpdateChannel } from '../../shared/updates'
 
-/** The icon theme name launchers use; the file sits in the user's hicolor theme. */
-export const LAUNCHER_ICON_NAME = 'mousse'
 /** Matches the Wayland app id Electron derives from the package name, so the window joins its launcher. */
 const CREATED_LAUNCHER = 'mousse.desktop'
-const ICON_SIZE_DIR = '512x512'
 const APPIMAGE_NAME = /^mousse.*\.appimage$/i
+/** The hicolor sizes Mousse installs. Panels ask for small sizes and take the nearest one. */
+export const LAUNCHER_ICON_SIZES = [16, 22, 24, 32, 48, 64, 128, 256, 512] as const
+const ICON_FILE_TYPES = ['.png', '.svg', '.svgz', '.xpm']
+
+/**
+ * The icon theme name launchers use; the files sit in the user's hicolor theme. Nightlies use
+ * their own name, so a stable icon installed under `mousse`, at any size or in a desktop's
+ * memory, never stands in for the nightly one.
+ */
+export function launcherIconName(channel: UpdateChannel): string {
+  return channel === 'nightly' ? 'mousse-nightly' : 'mousse'
+}
+
+export interface LauncherIcon {
+  /** Width and height in pixels. */
+  size: number
+  png: Buffer
+}
 
 export interface LauncherSyncOptions {
   /** The AppImage that should start Mousse from now on. */
   appImage: string
   /** An AppImage path an update just replaced, which launchers may still name. */
   previousAppImage?: string
-  /** The icon this build ships. */
-  iconSource?: string
+  /** The icon theme name launchers get (`launcherIconName`). */
+  iconName: string
+  /** This build's icon at the sizes to install, usually `LAUNCHER_ICON_SIZES`. */
+  icons?: LauncherIcon[]
   env: NodeJS.ProcessEnv
   home: string
   /** Rebuilds the desktop's menu and icon caches. */
@@ -28,6 +46,7 @@ export interface LauncherChanges {
   /** Launcher files written, created ones included. */
   launchers: string[]
   created: boolean
+  /** Icon files written or removed. */
   iconChanged: boolean
 }
 
@@ -100,22 +119,22 @@ export function rewriteLauncher(text: string, options: LauncherSyncOptions): str
     if (section === 'Desktop Entry' && line.trim()) entryEnd = index
     if (section === 'Desktop Entry' && /^\s*Icon\s*=/.test(line)) {
       iconSet = true
-      return `Icon=${LAUNCHER_ICON_NAME}`
+      return `Icon=${options.iconName}`
     }
     return line
   })
-  if (!iconSet && entryEnd >= 0) withIcon.splice(entryEnd + 1, 0, `Icon=${LAUNCHER_ICON_NAME}`)
+  if (!iconSet && entryEnd >= 0) withIcon.splice(entryEnd + 1, 0, `Icon=${options.iconName}`)
   return withIcon.join('\n')
 }
 
-function createdLauncher(appImage: string): string {
+function createdLauncher(appImage: string, iconName: string): string {
   return [
     '[Desktop Entry]',
     'Type=Application',
     'Name=Mousse',
     'Comment=AI coding workspace',
     `Exec=${escapeValue(quoteProgram(appImage))}`,
-    `Icon=${LAUNCHER_ICON_NAME}`,
+    `Icon=${iconName}`,
     'Terminal=false',
     'Categories=Development;IDE;',
     'StartupWMClass=Mousse',
@@ -140,15 +159,7 @@ export function syncLinuxLauncher(options: LauncherSyncOptions): LauncherChanges
   const iconThemeDir = join(share, 'icons', 'hicolor')
   const changes: LauncherChanges = { applicationsDir, iconThemeDir, launchers: [], created: false, iconChanged: false }
 
-  if (options.iconSource && existsSync(options.iconSource)) {
-    const iconPath = join(iconThemeDir, ICON_SIZE_DIR, 'apps', `${LAUNCHER_ICON_NAME}.png`)
-    const icon = readFileSync(options.iconSource)
-    if (!existsSync(iconPath) || !readFileSync(iconPath).equals(icon)) {
-      mkdirSync(dirname(iconPath), { recursive: true })
-      writeAtomic(iconPath, icon)
-      changes.iconChanged = true
-    }
-  }
+  if (options.icons && options.icons.length > 0) changes.iconChanged = installIcons(iconThemeDir, options.iconName, options.icons)
 
   mkdirSync(applicationsDir, { recursive: true })
   let found = false
@@ -170,13 +181,44 @@ export function syncLinuxLauncher(options: LauncherSyncOptions): LauncherChanges
   }
   const createdPath = join(applicationsDir, CREATED_LAUNCHER)
   if (!found && !existsSync(createdPath)) {
-    writeAtomic(createdPath, createdLauncher(options.appImage))
+    writeAtomic(createdPath, createdLauncher(options.appImage, options.iconName))
     changes.launchers.push(createdPath)
     changes.created = true
   }
 
   if (changes.launchers.length > 0 || changes.iconChanged) (options.refresh ?? refreshDesktopCaches)(changes)
   return changes
+}
+
+/**
+ * Writes the icon at every given size and removes other files of the same name in the theme
+ * (other sizes, scalable or 2x copies), which a desktop would otherwise prefer at the sizes
+ * they are closer to. Returns whether anything changed.
+ */
+function installIcons(iconThemeDir: string, iconName: string, icons: LauncherIcon[]): boolean {
+  let changed = false
+  const written = new Set<string>()
+  for (const { size, png } of icons) {
+    const path = join(iconThemeDir, `${size}x${size}`, 'apps', `${iconName}.png`)
+    written.add(path)
+    if (existsSync(path) && readFileSync(path).equals(png)) continue
+    mkdirSync(dirname(path), { recursive: true })
+    writeAtomic(path, png)
+    changed = true
+  }
+  for (const sizeDir of readdirSync(iconThemeDir)) {
+    for (const type of ICON_FILE_TYPES) {
+      const path = join(iconThemeDir, sizeDir, 'apps', `${iconName}${type}`)
+      if (written.has(path) || !existsSync(path)) continue
+      try {
+        rmSync(path, { force: true })
+        changed = true
+      } catch {
+        // Not ours to remove after all, such as a read-only folder.
+      }
+    }
+  }
+  return changed
 }
 
 function run(command: string, args: string[]): Promise<boolean> {
@@ -204,6 +246,10 @@ export function refreshDesktopCaches(changes: LauncherChanges): void {
   // A theme with a cache file ignores icons the cache does not list, so only an existing cache is rebuilt.
   if (existsSync(join(changes.iconThemeDir, 'icon-theme.cache'))) {
     void run('gtk-update-icon-cache', ['-f', '-t', '-q', changes.iconThemeDir])
+  }
+  // KDE keeps loaded icons in memory by name and reloads them only when told.
+  if (changes.iconChanged) {
+    void run('dbus-send', ['--session', '--type=signal', '/KIconLoader', 'org.kde.KIconLoader.iconChanged', 'int32:0'])
   }
   void run('update-desktop-database', ['-q', changes.applicationsDir])
   // KDE's menu reads launchers from its sycoca cache.

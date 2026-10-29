@@ -1,12 +1,12 @@
-import { app, BrowserWindow, ipcMain } from 'electron'
-import { writeFileSync } from 'node:fs'
+import { app, BrowserWindow, ipcMain, nativeImage } from 'electron'
+import { readFileSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
-import { UPDATE_IPC, type UpdateChannel, type UpdateState } from '../../shared/updates'
+import { channelForVersion, UPDATE_IPC, type UpdateChannel, type UpdateState } from '../../shared/updates'
 import { getAppIconPath } from '../appIcon'
 import { installAppImage, startAfterExit } from './appImageInstall'
 import { DesktopUpdater, type UpdaterBackend } from './DesktopUpdater'
-import { syncLinuxLauncher } from './linuxLauncher'
+import { LAUNCHER_ICON_SIZES, launcherIconName, syncLinuxLauncher, type LauncherIcon } from './linuxLauncher'
 import { updaterRecordFile } from './updaterRecord'
 
 const REPOSITORY_URL = 'https://github.com/mousse-agent/mousse'
@@ -69,14 +69,29 @@ function replaceAppImageInstall(autoUpdater: import('electron-updater').AppUpdat
   }
 }
 
+/** This build's icon at every size the launcher installs. */
+function launcherIcons(): LauncherIcon[] | undefined {
+  const path = getAppIconPath()
+  if (!path) return undefined
+  const image = nativeImage.createFromPath(path)
+  if (image.isEmpty()) return undefined
+  const width = image.getSize().width
+  return LAUNCHER_ICON_SIZES.map((size) => ({
+    size,
+    png: size === width ? readFileSync(path) : image.resize({ width: size, height: size, quality: 'best' }).toPNG()
+  }))
+}
+
 /** Points the user's Mousse launchers at `appImage` and installs this build's icon. */
 function syncLauncher(appImage: string, previousAppImage?: string): void {
   try {
-    const iconSource = previousAppImage ? undefined : getAppIconPath()
+    // During an install the running build is the old one, so its icon waits for the next start.
+    const icons = previousAppImage ? undefined : launcherIcons()
     syncLinuxLauncher({
       appImage,
       ...(previousAppImage ? { previousAppImage } : {}),
-      ...(iconSource ? { iconSource } : {}),
+      iconName: launcherIconName(channelForVersion(app.getVersion())),
+      ...(icons ? { icons } : {}),
       env: process.env,
       home: homedir()
     })
