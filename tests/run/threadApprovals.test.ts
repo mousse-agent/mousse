@@ -552,6 +552,18 @@ describe('saved approval requests: the store and the question service', () => {
       expect((await probe(strict, BASH('npm test'))).asked).toBe(true)
     })
 
+    it('a request asked under Auto saves its mode, and its rule holds in Auto and Full access but pauses in Auto-accept edits', async () => {
+      const f = await asking('auto')
+      const first = await allowAlways(f, BASH('npm test'))
+      expect(f.engine.approvals.get(first.requestId)).toMatchObject({ permissionMode: 'auto' })
+      expect(rules(f)[0]!.grantedUnder).toBe('auto')
+      expect((await probe(f, BASH('npm test'))).asked).toBe(false)
+      f.modes.set('t', 'accept_edits')
+      expect((await probe(f, BASH('npm test'))).asked).toBe(true)
+      f.modes.set('t', 'auto')
+      expect((await probe(f, BASH('npm test'))).asked).toBe(false)
+    })
+
     it('asked again under a stricter mode, the rule keeps the stricter grant', async () => {
       const f = await asking('accept_edits')
       await allowAlways(f, BASH('npm test'))

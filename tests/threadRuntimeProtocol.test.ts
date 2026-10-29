@@ -235,6 +235,11 @@ describe('ThreadRuntime over the protocol', () => {
     await expect(c.request('threads.setPermissionMode', { threadId: 'missing', mode: 'full' })).rejects.toMatchObject({ code: 'thread_not_found' })
     await expect(c.request('threads.setPermissionMode', { threadId: thread.id, mode: 'full', extra: true })).rejects.toBeTruthy()
     expect(mms.threads.getThread(thread.id)?.permissionMode).toBe('ask')
+    // Auto is a mode like the others; a thread saved before it, without a mode, still reads as before.
+    expect((await c.request<{ thread: { permissionMode?: string } }>('threads.setPermissionMode', { threadId: thread.id, mode: 'auto' })).thread.permissionMode).toBe('auto')
+    expect(mms.threads.getThread(thread.id)?.permissionMode).toBe('auto')
+    expect(mms.threads.getThread(mms.threads.createThread('Old').id)?.permissionMode).toBeUndefined()
+    await c.request('threads.setPermissionMode', { threadId: thread.id, mode: 'ask' })
 
     mms.questions.submitAnswers(pendingId, { q1: 'a' }, { kind: 'user' })
     await wait

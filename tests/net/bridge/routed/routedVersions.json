@@ -680,7 +680,7 @@
     "security": "926c4af141d1208d"
   },
   "threads.setPermissionMode": {
-    "version": 1,
+    "version": 2,
     "digest": "4ec36e005f81decc",
     "security": "926c4af141d1208d"
   },

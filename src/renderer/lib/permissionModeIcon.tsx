@@ -1,5 +1,5 @@
 import type { ReactNode } from 'react'
-import { Pencil, ShieldCheck, Zap } from './icons'
+import { Pencil, ShieldCheck, Wand2, Zap } from './icons'
 import type { PermissionMode } from '../../shared/permissionMode'
 
 type ModeIcon = typeof ShieldCheck
@@ -8,11 +8,13 @@ type ModeIcon = typeof ShieldCheck
 const PERMISSION_MODE_ICONS: Record<PermissionMode, ModeIcon> = {
   ask: ShieldCheck,
   accept_edits: Pencil,
+  auto: Wand2,
   full: Zap
 }
 
+/** A mode this version does not know (a newer computer's) gets the strictest mode's icon, never none. */
 export function permissionModeIcon(mode: PermissionMode): ModeIcon {
-  return PERMISSION_MODE_ICONS[mode]
+  return PERMISSION_MODE_ICONS[mode] ?? PERMISSION_MODE_ICONS.ask
 }
 
 /** The icon for `mode` followed by `children` (its label), for a menu row or a select value. */

@@ -1,3 +1,4 @@
+import { normalizePermissionMode } from '../../../shared/permissionMode'
 import type { Project, Thread, ThreadActivityState } from '../../../shared/types'
 import type { ListsStatus } from '../remote/MmsListsSource'
 
@@ -150,8 +151,9 @@ export function threadRow(
   if (typeof raw.startedAt === 'string') row.startedAt = raw.startedAt
   if (raw.worktreeEnabled === true) row.worktreeEnabled = true
   if (isRecord(raw.lineage)) row.lineage = raw.lineage as unknown as Thread['lineage']
+  // A mode a newer computer added and this one does not know reads as the strictest, never a looser one.
   if (typeof raw.permissionMode === 'string')
-    row.permissionMode = raw.permissionMode as Thread['permissionMode']
+    row.permissionMode = normalizePermissionMode(raw.permissionMode)
   if (isRecord(raw.modelOverride))
     row.modelOverride = raw.modelOverride as unknown as Thread['modelOverride']
   if (isRecord(raw.startedFrom))

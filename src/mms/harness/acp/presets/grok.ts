@@ -58,6 +58,7 @@ export const GROK_CAPS: HarnessCaps = Object.freeze({
   planMode: false,
   contextUsage: 'none',
   toolControl: 'approval_only',
+  autoPermissionMode: false,
   budgets: 'unsupported',
   spendLimits: 'unsupported'
 })

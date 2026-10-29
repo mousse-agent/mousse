@@ -564,6 +564,45 @@ describe('ProfileDatabase', () => {
     })
   })
 
+  describe('the Auto permission mode in approval rules and requests (migration 16)', () => {
+    const migration = RUN_MIGRATIONS.find((candidate) => candidate.sql.includes("granted_under IN ('ask','accept_edits','auto','full')"))!
+    const before = RUN_MIGRATIONS.filter((candidate) => candidate.version < migration.version)
+    const columns = (database: ProfileDatabase, table: string) => database.database.prepare(`PRAGMA table_info(${table})`).all().map((column) => String(column.name))
+    const indexes = (database: ProfileDatabase, table: string) => database.database.prepare(`PRAGMA index_list(${table})`).all().map((index) => String(index.name)).filter((name) => !name.startsWith('sqlite_')).sort()
+    const request = (database: ProfileDatabase, id: string, mode?: string) =>
+      database.database.exec(`INSERT INTO approval_requests(request_id, thread_id, instance_id, provider, action, permission_key, questions, answer_path, status, created_at${mode ? ', permission_mode' : ''})
+        VALUES('${id}', 't1', 'claude', 'claude', 'command', 'claude:command', '[]', 'live', 'pending', '2026-10-12T00:00:02.000Z'${mode ? `, '${mode}'` : ''})`)
+    const rule = (database: ProfileDatabase, fingerprint: string, grantedUnder: string) =>
+      database.database.prepare("INSERT INTO approval_rules(thread_id, fingerprint, permission_key, action, summary, granted_under, created_at) VALUES('t1', ?, 'claude:command', 'command', 'npm test', ?, '2026-10-12T00:00:02.000Z')").run(fingerprint, grantedUnder)
+
+    it('keeps saved rules and requests, their columns and indexes, and then accepts auto', () => {
+      expect(migration.version).toBe(16)
+      const database = open()
+      database.migrate(before)
+      request(database, 'old')
+      request(database, 'edits', 'accept_edits')
+      rule(database, 'f1', 'full')
+      expect(() => rule(database, 'f2', 'auto')).toThrow(/CHECK/)
+      const requestColumns = columns(database, 'approval_requests')
+      const ruleColumns = columns(database, 'approval_rules')
+      const requestIndexes = indexes(database, 'approval_requests')
+      database.migrate(RUN_MIGRATIONS)
+      expect(columns(database, 'approval_requests')).toEqual(requestColumns)
+      expect(columns(database, 'approval_rules')).toEqual(ruleColumns)
+      expect(indexes(database, 'approval_requests')).toEqual(requestIndexes)
+      expect(database.database.prepare('SELECT request_id, permission_mode FROM approval_requests ORDER BY request_id').all()).toEqual([
+        { request_id: 'edits', permission_mode: 'accept_edits' },
+        { request_id: 'old', permission_mode: null }
+      ])
+      expect(database.database.prepare('SELECT fingerprint, granted_under FROM approval_rules').all()).toEqual([{ fingerprint: 'f1', granted_under: 'full' }])
+      rule(database, 'f2', 'auto')
+      request(database, 'auto', 'auto')
+      expect(() => rule(database, 'f3', 'yolo')).toThrow(/CHECK/)
+      expect(() => request(database, 'bad', 'yolo')).toThrow(/CHECK/)
+      expect(() => rule(database, 'f2', 'ask')).toThrow(/UNIQUE|PRIMARY/)
+    })
+  })
+
   it('refuses a symlinked run directory', () => {
     profileHome = mkdtempSync(join(tmpdir(), 'mousse-run-db-'))
     const elsewhere = join(profileHome, 'elsewhere')
