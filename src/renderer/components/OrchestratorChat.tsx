@@ -32,7 +32,7 @@ import { MousseAgentChatShell } from '../chat/components/MousseAgentChatShell'
 import { SubagentParentBar } from './SubagentParentBar'
 import { SubagentComposerBanner } from './SubagentComposerBanner'
 import { ThreadMoveBanner } from './providers/MoveProviderDialog'
-import { mousseToUIMessages, chatStatusFromPhase } from '../chat/adapters/mousseToUI'
+import { mousseToUIMessages, chatStatusFromTurn } from '../chat/adapters/mousseToUI'
 import { useTurnSenders } from '../hooks/useTurnSenders'
 import {
   findQuickActionCardForApproval,
@@ -272,7 +272,7 @@ export function OrchestratorChat() {
   useEffect(() => {
     if (shownRemote && activeThreadId) void hydrateMessageImages(activeThreadId)
   }, [shownRemote, activeThreadId, messages.length])
-  const chatStatus = useMemo(() => chatStatusFromPhase(turnState?.phase ?? 'idle'), [turnState])
+  const chatStatus = useMemo(() => chatStatusFromTurn(turnState), [turnState])
   const turnActive = isTurnActivePhase(turnState?.phase ?? 'idle')
 
   // Visible steer feedback: the daemon emits turn-steered when prompt text is

@@ -1240,13 +1240,18 @@ export const MessageList = memo(function MessageList({
     const turnId = lastUserMessageId;
     if (!turnId) return;
     if (isStreaming) {
-      if (workClockRef.current?.turnId !== turnId) {
+      const clock = workClockRef.current;
+      if (clock?.turnId !== turnId) {
         const user = normalizedMessages.find((message) => message.id === turnId);
         workClockRef.current = {
           turnId,
           startedAt: readCreatedAt(user) ?? Date.now(),
           endedAt: null,
         };
+      } else if (clock.endedAt != null) {
+        // The same reply goes on after a pause (an answered approval or
+        // question): its time runs to where it really ends.
+        clock.endedAt = null;
       }
       return;
     }
