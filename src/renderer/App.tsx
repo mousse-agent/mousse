@@ -24,6 +24,7 @@ import { SubscriptionUsagePage } from './components/SubscriptionUsagePage'
 import { CommandPalette } from './components/CommandPalette'
 
 import { openSurface } from './lib/surfaces'
+import { isSessionClosing } from './lib/errorText'
 import { useAppStore } from './stores/appStore'
 import { useAppCommands } from './commands/useAppCommands'
 import { useCommandShortcuts } from './commands/useCommandShortcuts'
@@ -145,7 +146,7 @@ export default function App() {
         }
         useAppStore.getState().activateProfile(bound)
       }).catch((error: unknown) => {
-        if (!disposed) setBootstrapError(error instanceof Error ? error.message : String(error))
+        if (!disposed && !isSessionClosing(error)) setBootstrapError(error instanceof Error ? error.message : String(error))
       })
     return () => { disposed = true }
   }, [profileReady, bootstrapAttempt])
@@ -353,7 +354,8 @@ export default function App() {
       hydrationFinished = true
       finishHydration()
     }).catch((error: unknown) => {
-      if (isCurrentProfile()) setBootstrapError(error instanceof Error ? error.message : String(error))
+      // A window whose service connection is closing quits or reloads next; it shows nothing.
+      if (isCurrentProfile() && !isSessionClosing(error)) setBootstrapError(error instanceof Error ? error.message : String(error))
     })
 
     const threadSyncTimer = window.setInterval(() => {

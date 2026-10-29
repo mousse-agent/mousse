@@ -57,6 +57,7 @@ import { forgetMessageImageRequests, hydrateMessageImages } from '../lib/message
 import { isOutcomeUncertain, settleUncertainSend } from '../lib/uncertainSend'
 import { onProviderListingsChanged, pickerIdFor, pickerProviders, projectScope, useProviderSnapshots } from '../lib/providerSnapshots'
 import { errorText, sendErrorLine } from '../lib/errorText'
+import { PromptUndoNotice } from './PromptUndoControls'
 import { pendingChangesDetails, type PendingChangesDetails } from '../../shared/workspace'
 import { PendingChangesNotice } from './PendingChangesNotice'
 import { composerThreadActions } from '../lib/composerThreadActions'
@@ -1102,6 +1103,7 @@ export function OrchestratorChat() {
           ? <PendingChangesNotice className="connection-failed-pill" threadId={activeThreadId} message={sendChanges.message} details={sendChanges.details}
               onResolved={() => { setSendError(null); setSendChanges(null); void handleSend() }} />
           : <ComputerNotice message={sendError} />)}
+        {!sendError && !connectionFailed && <PromptUndoNotice />}
         {connectionFailed && (
           <div className="connection-failed-pill" role="alert">
             <span>Connection Failed</span>

@@ -21,6 +21,22 @@ export function ipcErrorLine(error: unknown): string {
   return stripped.split('\n').map((part) => part.trim()).find(Boolean) ?? ''
 }
 
+// What the main process says when a window's connection to the background service is shut down
+// (app quit or restart, an update install) while the window still asks for something.
+const SESSION_CLOSING_LINES = new Set([
+  'Window MMS session is closing',
+  'Window MMS session closed while opening',
+  'GuiMmsController is stopped'
+])
+
+/**
+ * Whether a call failed only because this window's connection to the background service is closing.
+ * The window is about to quit or reload, so such a failure is never shown.
+ */
+export function isSessionClosing(error: unknown): boolean {
+  return SESSION_CLOSING_LINES.has(ipcErrorLine(error))
+}
+
 /** Whether a call failed because too many requests to the background service were in flight. */
 export function isServiceBusy(error: unknown): boolean {
   return ipcErrorLine(error) === 'Too many pending requests'
