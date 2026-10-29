@@ -6,6 +6,8 @@ import { UndoService } from '../src/mms/actions/UndoService'
 import { RedoService } from '../src/mms/actions/RedoService'
 import { CodeRevertService } from '../src/mms/actions/CodeRevertService'
 import { ConversationBranchService } from '../src/mms/actions/ConversationBranchService'
+import { ChangeReceiptService } from '../src/mms/actions/ChangeReceiptService'
+import { ThreadJournal } from '../src/mms/data/ThreadJournal'
 import { PublishService } from '../src/mms/actions/PublishService'
 import { keptPendingChangesNotice, type KeptPendingChanges } from '../src/mms/actions/git'
 import { WorkspaceResolver } from '../src/mms/workspace/WorkspaceResolver'
@@ -47,62 +49,68 @@ describe('operations in a thread worktree with uncommitted changes', () => {
   beforeEach(() => { f = gitFoundationFixture() })
   afterEach(() => f.dispose())
 
-  it('Undo and Redo run and give the pending changes back exactly, staged and untracked, and the turn stays undoable', async () => {
+  it('Undo and Redo leave the user’s pending edits and staging exactly as they were, and the turn stays undoable', async () => {
     const actions = new ThreadActionService(f.thread)
     const { action: turn } = await actions.runCheckpointedAction(actionOptions(f.repo), () => writeFileSync(join(f.repo, 'agent.txt'), 'agent\n'))
     userEdits(f.repo)
     const before = pending(f.repo)
+    const head = git(f.repo, 'rev-parse', 'HEAD')
 
     await new UndoService(f.thread).undoLatest('main', f.repo)
     expect(actions.get(turn.id)?.state).toBe('undone')
     expect(existsSync(join(f.repo, 'agent.txt'))).toBe(false)
-    expect(pending(f.repo)).toEqual(before)
-    // Nothing was committed for the user, and nothing is left aside.
+    // The turn's file is gone and nothing else moved: the staged and unstaged diffs, the untracked screenshot and the ignored file are the user's.
+    expect(pending(f.repo)).toEqual({ ...before, status: before.status.replace('?? agent.txt\n', '') })
+    // Nothing was committed or saved for the user, and nothing is left aside.
     expect(actions.list().some((action) => action.turnId.startsWith('user-changes:'))).toBe(false)
-    expect(git(f.repo, 'rev-parse', 'HEAD^{tree}')).toBe(git(f.repo, 'rev-parse', `${turn.startSha}^{tree}`))
+    expect(git(f.repo, 'rev-parse', 'HEAD')).toBe(head)
     expect(keptRefs(f.repo)).toEqual([])
 
     await new RedoService(f.thread).redoLatest('main', f.repo)
     expect(readFileSync(join(f.repo, 'agent.txt'), 'utf8')).toBe('agent\n')
     expect(pending(f.repo)).toEqual(before)
+    expect(git(f.repo, 'rev-parse', 'HEAD')).toBe(head)
     expect(keptRefs(f.repo)).toEqual([])
     // The shared stash is never used.
     expect(() => git(f.repo, 'rev-parse', '--verify', '-q', 'refs/stash')).toThrow()
   })
 
-  it('keeps the Undo when the changes no longer fit, leaves them under a ref and says where', async () => {
+  it('refuses the Undo when the user’s edits overlap with it, names the files and changes nothing', async () => {
     const actions = new ThreadActionService(f.thread)
     const { action: turn } = await actions.runCheckpointedAction(actionOptions(f.repo), () => writeFileSync(join(f.repo, 'agent.txt'), 'agent\n'))
     // The user edits the file the turn created, which Undo deletes.
     writeFileSync(join(f.repo, 'agent.txt'), 'the user built on it\n')
     writeFileSync(join(f.repo, 'notes.md'), 'mine\n')
-    const kept: KeptPendingChanges[] = []
+    const before = git(f.repo, 'status', '--porcelain', '--untracked-files=all')
 
-    await new UndoService(f.thread, { onPendingChangesKept: (item) => kept.push(item) }).undoLatest('main', f.repo)
-    expect(actions.get(turn.id)?.state).toBe('undone')
-    expect(git(f.repo, 'status', '--porcelain', '--untracked-files=all')).toBe('')
-    expect(kept).toEqual([{ path: git(f.repo, 'rev-parse', '--show-toplevel'), ref: expect.stringMatching(/^refs\/mousse\/pending-changes\//), files: ['agent.txt'], operation: 'Undo' }])
-    expect(keptRefs(f.repo)).toEqual([kept[0].ref])
-    expect(git(f.repo, 'show', `${kept[0].ref}:agent.txt`)).toBe('the user built on it')
-    expect(git(f.repo, 'show', `${kept[0].ref}^3:notes.md`)).toBe('mine')
-    expect(keptPendingChangesNotice(kept[0])).toBe(`Your uncommitted changes in ${kept[0].path} were not put back after Undo: agent.txt changed in both. They are saved in Git; to restore them, run \`git stash apply ${kept[0].ref}\` in that folder.`)
+    const refusal = await new UndoService(f.thread).undoLatest('main', f.repo).catch((error: unknown) => error)
+    expect(refusal).toMatchObject({ name: 'UndoConflictError', files: ['agent.txt'] })
+    expect(actions.get(turn.id)?.state).toBe('completed')
+    expect(readFileSync(join(f.repo, 'agent.txt'), 'utf8')).toBe('the user built on it\n')
+    expect(readFileSync(join(f.repo, 'notes.md'), 'utf8')).toBe('mine\n')
+    expect(git(f.repo, 'status', '--porcelain', '--untracked-files=all')).toBe(before)
+    // No operation is left pending, so the thread is not locked by the refusal.
+    expect(new ThreadJournal(f.thread).list().some((entry) => entry.operationType === 'undo')).toBe(false)
+    new ChangeReceiptService(f.thread).assertNoPendingOperation()
   })
 
-  it('a code revert runs and the pending changes come back on top of it', async () => {
+  it('a code revert runs and the pending changes stay on top of it', async () => {
     const actions = new ThreadActionService(f.thread)
     const { action: first } = await actions.runCheckpointedAction(actionOptions(f.repo, 'first'), () => writeFileSync(join(f.repo, 'first.txt'), 'first\n'))
     await actions.runCheckpointedAction({ ...actionOptions(f.repo, 'second'), presentationMessageStart: 2, presentationMessageEnd: 4 }, () => writeFileSync(join(f.repo, 'second.txt'), 'second\n'))
     userEdits(f.repo)
     const before = pending(f.repo)
+    const head = git(f.repo, 'rev-parse', 'HEAD')
 
     await new CodeRevertService(f.thread).revertCode(first.id, f.repo)
     expect(existsSync(join(f.repo, 'first.txt'))).toBe(false)
     expect(existsSync(join(f.repo, 'second.txt'))).toBe(true)
-    expect(pending(f.repo)).toEqual(before)
+    expect(pending(f.repo)).toEqual({ ...before, status: before.status.replace('?? first.txt\n', '') })
+    expect(git(f.repo, 'rev-parse', 'HEAD')).toBe(head)
     expect(keptRefs(f.repo)).toEqual([])
   })
 
-  it('a conflict still stops Undo, names the folder and files and offers Discard', async () => {
+  it('a conflict in the checkout still stops Undo, names the folder and files and offers Discard', async () => {
     const actions = new ThreadActionService(f.thread)
     await actions.runCheckpointedAction(actionOptions(f.repo), () => writeFileSync(join(f.repo, 'agent.txt'), 'agent\n'))
     const head = git(f.repo, 'rev-parse', 'HEAD')
@@ -113,7 +121,7 @@ describe('operations in a thread worktree with uncommitted changes', () => {
     const mergeHead = git(f.repo, 'rev-parse', 'HEAD')
 
     const refusal = await new UndoService(f.thread).undoLatest('main', f.repo).catch((error: unknown) => error)
-    expect(refusal).toMatchObject({ code: 'workspace_conflict', details: { conflict: true, discard: true, operation: 'merge', files: ['value.txt'] } })
+    expect(refusal).toMatchObject({ code: 'workspace_conflict', details: { conflict: true, discard: true, operation: 'merge', files: ['value.txt', 'agent.txt'] } })
     expect((refusal as Error).message).toBe(`Thread workspace ${git(f.repo, 'rev-parse', '--show-toplevel')} has a merge in progress with conflicts in value.txt. Resolve it or discard the changes, then try again.`)
     expect(pendingChangesDetails(refusal)?.discard).toBe(true)
     expect(git(f.repo, 'rev-parse', 'HEAD')).toBe(mergeHead)
@@ -121,29 +129,45 @@ describe('operations in a thread worktree with uncommitted changes', () => {
     expect(head).not.toBe(mergeHead)
   })
 
-  it('conversation branches switch with pending changes, which stay with the branch they were made on', async () => {
+  it('conversation branches switch the files to the code each branch last had, and keep what the person was working on', async () => {
     const workspace = (await new WorkspaceResolver(f.thread, 'task', f.repo).resolve('agent')).workspacePath!
     const actions = new ThreadActionService(f.thread)
     const { action } = await actions.runCheckpointedAction(actionOptions(workspace), () => writeFileSync(join(workspace, 'agent.txt'), 'agent\n'))
     const branches = new ConversationBranchService(f.thread)
     userEdits(workspace)
-    const before = pending(workspace)
+    const head = git(workspace, 'rev-parse', 'HEAD')
+    const gitBranch = git(workspace, 'branch', '--show-current')
+    const status = git(workspace, 'status', '--porcelain', '--untracked-files=all')
+    const gitBranches = git(workspace, 'branch', '--list', '--format=%(refname:short)')
 
-    // A fork only adds a branch; the checkout is untouched.
+    // A fork only adds a ref; the checkout is untouched and no Git branch is made.
     const first = await branches.fork(workspace, 'main', action.id, 'First')
     const second = await branches.fork(workspace, 'main', action.id, 'Second')
-    expect(pending(workspace)).toEqual(before)
-    // The thread's first branch can't be activated again, so its changes move with the person.
+    expect(git(workspace, 'status', '--porcelain', '--untracked-files=all')).toBe(status)
+    expect(git(workspace, 'branch', '--list', '--format=%(refname:short)')).toBe(gitBranches)
+    expect(git(workspace, 'rev-parse', first.retainedRef)).toBe(action.endSha)
+
+    // Leaving the thread's first branch records what changed outside Mousse as the user's, then the files become the fork's code.
     await branches.activate(workspace, first.id)
-    expect(pending(workspace)).toEqual(before)
-    // Leaving a branch that can come back parks them; returning puts them back exactly.
+    const saved = actions.list().find((item) => item.turnId.startsWith('user-changes:'))!
+    expect(git(workspace, 'show', `${saved.endSha}:value.txt`)).toBe('user edit')
+    expect(git(workspace, 'show', `${saved.endSha}:notes/screen shot.png`)).toBeTruthy()
+    expect(readFileSync(join(workspace, 'value.txt'), 'utf8')).toBe('base\n')
+    expect(existsSync(join(workspace, 'notes'))).toBe(false)
+    expect(readFileSync(join(workspace, 'agent.txt'), 'utf8')).toBe('agent\n')
+    // HEAD, the Git branch and the ignored file are untouched by switching.
+    expect(git(workspace, 'rev-parse', 'HEAD')).toBe(head)
+    expect(git(workspace, 'branch', '--show-current')).toBe(gitBranch)
+    expect(readFileSync(join(workspace, 'ignored.log'), 'utf8')).toBe('keep me\n')
+
+    // Work on the first branch stays with it while the second is active, and comes back exactly.
+    writeFileSync(join(workspace, 'first-branch.txt'), 'on first\n')
     await branches.activate(workspace, second.id)
-    expect(git(workspace, 'status', '--porcelain', '--untracked-files=all')).toBe('')
-    expect(keptRefs(workspace)).toHaveLength(1)
+    expect(existsSync(join(workspace, 'first-branch.txt'))).toBe(false)
     await branches.activate(workspace, first.id)
-    expect(pending(workspace)).toEqual(before)
+    expect(readFileSync(join(workspace, 'first-branch.txt'), 'utf8')).toBe('on first\n')
+    expect(git(workspace, 'rev-parse', 'HEAD')).toBe(head)
     expect(keptRefs(workspace)).toEqual([])
-    expect(actions.list().some((item) => item.turnId.startsWith('user-changes:'))).toBe(false)
   })
 
   it('Publish runs with pending changes in both folders: the thread’s stay unpublished, the primary checkout’s come back', async () => {

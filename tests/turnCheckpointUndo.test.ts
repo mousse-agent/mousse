@@ -20,21 +20,25 @@ afterEach(() => { while (roots.length) rmSync(roots.pop()!, { recursive: true, f
 const boundary = { messageIndex: 0, compactionGeneration: 0, fidelity: 'exact' as const, safeBoundaryProof: 'test' }
 
 describe('turn checkpoints and compensating undo', () => {
-  it('commits every non-ignored turn change and undoes it without rewriting history', async () => {
+  it('snapshots every non-ignored turn change and undoes it without adding or rewriting a commit', async () => {
     const { repo, thread } = fixture(); const actions = new ThreadActionService(thread)
     const before = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repo, encoding: 'utf8' }).trim()
     const { action } = await actions.runCheckpointedAction({
       threadId: 'thread', turnId: 'turn', conversationBranchId: 'main', workspacePath: repo,
       presentationMessageStart: 0, presentationMessageEnd: 1, nativeContextBoundary: boundary
     }, () => { writeFileSync(join(repo, 'value.txt'), 'changed\n'); writeFileSync(join(repo, 'new.txt'), 'new\n') })
-    expect(action.startSha).toBe(before)
-    expect(action.endSha).not.toBe(before)
+    // The turn runs between two snapshots, whose parent is the HEAD they were taken on; nothing is committed on the branch.
+    expect(execFileSync('git', ['rev-parse', `${action.startSha}^`], { cwd: repo, encoding: 'utf8' }).trim()).toBe(before)
+    expect(action.endSha).not.toBe(action.startSha)
+    expect(action.commits).toEqual([])
+    expect(execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repo, encoding: 'utf8' }).trim()).toBe(before)
     expect(action.changedPaths.map((item) => item.path).sort()).toEqual(['new.txt', 'value.txt'])
 
     const compensation = await new UndoService(thread).undoLatest('main', repo)
     expect(readFileSync(join(repo, 'value.txt'), 'utf8').replace(/\r\n/g, '\n')).toBe('base\n')
     expect(compensation.endSha).not.toBe(action.startSha)
-    expect(execFileSync('git', ['rev-list', '--count', 'HEAD'], { cwd: repo, encoding: 'utf8' }).trim()).toBe('3')
+    expect(execFileSync('git', ['rev-list', '--count', 'HEAD'], { cwd: repo, encoding: 'utf8' }).trim()).toBe('1')
+    expect(execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repo, encoding: 'utf8' }).trim()).toBe(before)
     expect(actions.get(action.id)?.state).toBe('undone')
   }, 15_000)
 
@@ -85,7 +89,7 @@ describe('turn checkpoints and compensating undo', () => {
   }, 15_000)
 })
 
-describe('checkpoint safety during in-progress git operations', () => {
+describe('checkpoints during in-progress git operations', () => {
   const head = (cwd: string) => execFileSync('git', ['rev-parse', 'HEAD'], { cwd, encoding: 'utf8' }).trim()
   const gitIn = (cwd: string, args: string[]) => execFileSync('git', args, { cwd, encoding: 'utf8' })
 
@@ -101,27 +105,33 @@ describe('checkpoint safety during in-progress git operations', () => {
     return { worktree, thread }
   }
 
-  it('refuses to checkpoint conflict markers and leaves HEAD and the index untouched', async () => {
+  it('records conflict markers as files, says a merge is in progress, and leaves HEAD, the index and the merge untouched', async () => {
     const { worktree, thread } = conflictedWorktree()
     const before = head(worktree); const indexBefore = gitIn(worktree, ['ls-files', '-s'])
-    await expect(new ThreadActionService(thread).checkpointExistingTurn({
+    const action = await new ThreadActionService(thread).checkpointExistingTurn({
       threadId: 'thread', turnId: 'retry', conversationBranchId: 'main', workspacePath: worktree,
       presentationMessageStart: 0, presentationMessageEnd: 1, nativeContextBoundary: boundary
-    }, before, 'completed')).rejects.toThrow(/in-progress Git operation|unmerged/)
+    }, before, 'completed')
+    expect(action.state).toBe('completed')
+    expect(action.git?.operationInProgress).toBe('merge')
+    expect(gitIn(worktree, ['show', `${action.endSha}:value.txt`])).toContain('<<<<<<<')
     expect(head(worktree)).toBe(before)
     expect(gitIn(worktree, ['ls-files', '-s'])).toBe(indexBefore)
     expect(readFileSync(join(worktree, 'value.txt'), 'utf8')).toContain('<<<<<<<')
+    expect(gitIn(worktree, ['rev-parse', '--verify', 'MERGE_HEAD']).trim()).toBeTruthy()
   }, 30_000)
 
-  it('refuses when only unmerged index entries remain after MERGE_HEAD is gone', async () => {
+  it('records the files when only unmerged index entries remain after MERGE_HEAD is gone', async () => {
     const { worktree, thread } = conflictedWorktree()
     const mergeHead = gitIn(worktree, ['rev-parse', '--git-path', 'MERGE_HEAD']).trim()
     rmSync(resolve(worktree, mergeHead), { force: true })
-    const before = head(worktree)
-    await expect(new ThreadActionService(thread).checkpointExistingTurn({
+    const before = head(worktree); const indexBefore = gitIn(worktree, ['ls-files', '-s'])
+    const action = await new ThreadActionService(thread).checkpointExistingTurn({
       threadId: 'thread', turnId: 'retry2', conversationBranchId: 'main', workspacePath: worktree,
       presentationMessageStart: 0, presentationMessageEnd: 1, nativeContextBoundary: boundary
-    }, before, 'completed')).rejects.toThrow(/unmerged/)
+    }, before, 'completed')
+    expect(action.state).toBe('completed')
     expect(head(worktree)).toBe(before)
+    expect(gitIn(worktree, ['ls-files', '-s'])).toBe(indexBefore)
   }, 30_000)
 })

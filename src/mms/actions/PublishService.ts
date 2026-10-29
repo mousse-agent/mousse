@@ -105,7 +105,10 @@ export class PublishService {
 
   private completePublish(threadWorkspace: string, primaryCheckout: string, operationId: string, prePublishSha: string, expectedSourceSha: string, publishSha: string): PublishResult {
       const receipts = new ChangeReceiptService(this.threadDirectory)
-      const publishedReceiptIds = receipts.list().filter((item) => item.kind !== 'publish' && tryGit(threadWorkspace, ['merge-base', '--is-ancestor', item.afterSha, expectedSourceSha]).ok).map((item) => item.id)
+      // A receipt is published when its end state is in the published commit; a snapshot is no ancestor of anything,
+      // so a snapshot receipt counts when every commit it added to the branch is. (Phase 3 replaces this with squashed publishes.)
+      const inSource = (sha: string): boolean => tryGit(threadWorkspace, ['merge-base', '--is-ancestor', sha, expectedSourceSha]).ok
+      const publishedReceiptIds = receipts.list().filter((item) => item.kind !== 'publish' && (inSource(item.afterSha) || (item.git !== undefined && item.introducedCommits.length > 0 && item.introducedCommits.every(inSource)))).map((item) => item.id)
       const receipt = receipts.record(primaryCheckout, { operationId, kind: 'publish', actor: { kind: 'user' }, beforeSha: prePublishSha, afterSha: publishSha, introducedCommits: prePublishSha === publishSha ? [] : [publishSha], contributions: [{ baseSha: prePublishSha, resultSha: expectedSourceSha }], externalEffects: [], publishedReceiptIds })
       const result: PublishResult = { operationId, state: 'completed', prePublishSha, publishSha, sourceSha: expectedSourceSha, receiptId: receipt.id }
       this.journal.append({ operationId, operationType: 'publish', state: 'completed', details: result })

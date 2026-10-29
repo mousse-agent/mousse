@@ -8,6 +8,7 @@ import { CodeRevertService } from '../src/mms/actions/CodeRevertService'
 import { PublishService } from '../src/mms/actions/PublishService'
 import { ChildAgentIntegrationService } from '../src/mms/agents/ChildAgentIntegrationService'
 import { ChangeReceiptService } from '../src/mms/actions/ChangeReceiptService'
+import { worktreeTree } from '../src/mms/actions/snapshots'
 import { ThreadJournal } from '../src/mms/data/ThreadJournal'
 import { UndoService } from '../src/mms/actions/UndoService'
 import { CRASH_CHILD_REQUIRE, actionOptions, git, gitFoundationFixture } from './fixtures/gitFoundation'
@@ -46,14 +47,17 @@ it.each(['checkpoint', 'revert', 'integration', 'publish'].flatMap((kind) => ['b
     await build({ entryPoints: ['tests/fixtures/git-foundation-operation-crash.ts'], outfile: runner, bundle: true, platform: 'node', format: 'esm', logLevel: 'silent', banner: { js: CRASH_CHILD_REQUIRE } })
     const child = spawnSync(process.execPath, [runner, configPath], { env: { ...process.env, MOUSSE_HOME: f.home }, windowsHide: true, encoding: 'utf8', timeout: 20_000 })
     expect(child.status, child.stderr).toBe(86)
+    // A checkpoint or a revert changes files only; merging a child's result or publishing moves HEAD.
+    const movesHead = kind === 'integration' || kind === 'publish'
     const appliedHead = git(f.repo, 'rev-parse', 'HEAD')
-    expect(appliedHead).not.toBe(f.baseSha)
+    expect(appliedHead === f.baseSha).toBe(!movesHead)
     await recover!()
     expect(git(f.repo, 'rev-parse', 'HEAD')).toBe(appliedHead)
-    expect(git(f.repo, 'status', '--porcelain')).toBe('')
+    // The checkpoint's change is uncommitted (it is a snapshot); the others leave a clean checkout.
+    expect(git(f.repo, 'status', '--porcelain')).toBe(kind === 'checkpoint' ? 'M value.txt' : '')
     expect(new ChangeReceiptService(f.thread).list().filter((receipt) => receipt.kind === kind)).toHaveLength(1)
     expect([...new ThreadJournal(f.thread).latestByOperation().values()].filter((entry) => ['prepared', 'git_applied', 'running', 'context_pending', 'recovery_required'].includes(entry.state))).toEqual([])
-    if (kind === 'checkpoint') expect(new ThreadActionService(f.thread).latest('main')?.endSha).toBe(appliedHead)
+    if (kind === 'checkpoint') expect(git(f.repo, 'rev-parse', `${new ThreadActionService(f.thread).latest('main')!.endSha}^{tree}`)).toBe(worktreeTree(f.repo))
     if (kind === 'integration') expect(new ThreadActionService(f.thread).latest('main')?.endSha).toBe(appliedHead)
     expect(f.read(f.repo)).toBe(kind === 'checkpoint' ? 'checkpoint result\n' : kind === 'revert' ? 'base\n' : 'child result\n')
     const journalSize = new ThreadJournal(f.thread).list().length
@@ -76,11 +80,13 @@ it('recovers an interrupted nested snapshot before its parent and keeps whole-pa
   await actions.recoverPending(f.repo)
   expect(git(f.repo, 'rev-parse', 'HEAD')).toBe(appliedHead)
   expect(actions.list()).toHaveLength(2)
-  expect(actions.latest('main')).toMatchObject({ turnId: 'parent-turn', state: 'stopped', endSha: appliedHead })
+  expect(actions.latest('main')).toMatchObject({ turnId: 'parent-turn', state: 'stopped' })
+  expect(git(f.repo, 'rev-parse', `${actions.latest('main')!.endSha}^{tree}`)).toBe(worktreeTree(f.repo))
   expect(actions.list()[0].turnId).toBe('nested-snapshot')
   const parentReceipt = new ChangeReceiptService(f.thread).list().find((receipt) => receipt.id === actions.latest('main')!.receiptId)!
   expect(parentReceipt.contributions.some((item) => item.receiptId === actions.list()[0].receiptId)).toBe(true)
   await new UndoService(f.thread).undoLatest('main', f.repo)
   expect(f.read(f.repo)).toBe('base\n')
   expect(git(f.repo, 'status', '--porcelain')).toBe('')
+  expect(git(f.repo, 'rev-parse', 'HEAD')).toBe(appliedHead)
 }, 30_000)

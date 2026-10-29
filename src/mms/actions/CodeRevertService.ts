@@ -7,17 +7,33 @@ import { withGitMutationLocks } from './GitOperationCoordinator'
 import type { ThreadLeaseHandle } from '../queue/ThreadExecutionLease'
 import { ThreadWorkspaceManager } from '../workspace/ThreadWorkspaceManager'
 import { ChangeReceiptService } from './ChangeReceiptService'
-import { changedPaths, commitParents, git, introducedCommits, MOUSSE_COMMIT_ENV, refuseUnsafeChanges, tryGit, withPendingChangesSetAside, type PendingChangesOwnerOptions } from './git'
+import { changedPaths, commitParents, git, refuseUnsafeChanges, treeOf } from './git'
+import { UndoConflictError } from './UndoService'
+import { describeGit, pushedNotice, pushedTo, restoreChange, sameTree, snapshotOrigin, takeSnapshot, worktreeTree, type Snapshot } from './snapshots'
+
+/** What `prepared` records: the files before the revert and the tree they become. */
+interface RevertIntent {
+  target: ThreadAction
+  latest?: ThreadAction
+  /** The snapshot of the files before the revert; absent in intents written before snapshots. */
+  ours?: string
+  expectedTree?: string
+}
 
 /** Revert an older action's code while preserving current conversation/model context. */
 export class CodeRevertService {
   private readonly actions: ThreadActionService
   private readonly journal: ThreadJournal
-  constructor(private readonly threadDirectory: string, private readonly options: PendingChangesOwnerOptions = {}) {
+  constructor(private readonly threadDirectory: string) {
     this.actions = new ThreadActionService(threadDirectory)
     this.journal = new ThreadJournal(threadDirectory)
   }
 
+  /**
+   * Takes an older action's code back by the same three-way file merge as Undo (from the action's end snapshot, onto
+   * the files as they are, towards its start snapshot). Later work stays unless it overlaps, in which case nothing
+   * changes and the conflicting files are named. No commit is made and HEAD does not move.
+   */
   async revertCode(
     actionId: string,
     workspacePath: string,
@@ -35,46 +51,49 @@ export class CodeRevertService {
       if (workspace && target.conversationBranchId !== workspace.conversationBranchId) throw new Error('Code revert requires an action on the active conversation branch.')
       const receipts = new ChangeReceiptService(this.threadDirectory)
       if (target.receiptId && receipts.list().some((item) => item.contributions.some((contribution) => contribution.receiptId === target.receiptId))) throw new Error('This change belongs to a completed parent action; revert the parent boundary instead.')
-      if (!target.reversible || target.commits.length === 0) throw new Error('The selected action has no reversible repository changes.')
-      // The user's pending edits are set aside and come back on top of the revert as uncommitted changes.
-      return withPendingChangesSetAside(workspacePath, { label: 'Thread workspace', operation: 'the code revert', discard: true, onKept: this.options.onPendingChangesKept }, () => {
-        const startSha = git(workspacePath, ['rev-parse', 'HEAD']); const operationId = randomUUID()
-        this.journal.append({ operationId, operationType: 'code-revert', state: 'prepared', expectedPreState: { startSha, actionId }, details: { target, latest: actions.at(-1) } })
-        for (const sha of introducedCommits(workspacePath, target.startSha, target.endSha).reverse()) {
-          const args = ['revert', '--no-commit']; if (commitParents(workspacePath, sha).length > 1) args.push('-m', '1'); args.push(sha)
-          const result = tryGit(workspacePath, args)
-          if (!result.ok) {
-            const conflictFiles = git(workspacePath, ['diff', '--name-only', '--diff-filter=U']).split(/\r?\n/).filter(Boolean)
-            this.journal.append({ operationId, operationType: 'code-revert', state: 'recovery_required', details: { startSha, actionId, currentCommit: sha, conflictFiles } })
-            throw new Error(`Code revert conflict: ${conflictFiles.join(', ')}`)
-          }
-        }
-        if (!tryGit(workspacePath, ['diff', '--cached', '--quiet']).ok) {
-          git(workspacePath, ['commit', '--no-verify', '-m', `mousse: revert code action ${actionId} (${operationId})`], MOUSSE_COMMIT_ENV)
-        }
-        const endSha = git(workspacePath, ['rev-parse', 'HEAD'])
-        const record: ThreadAction = {
-          id: operationId, turnId: operationId, conversationBranchId: target.conversationBranchId,
-          parentActionId: actions.at(-1)?.id,
-          presentationMessageStart: actions.at(-1)?.presentationMessageEnd ?? 0,
-          presentationMessageEnd: actions.at(-1)?.presentationMessageEnd ?? 0,
-          nativeContextBoundary: actions.at(-1)?.nativeContextBoundary ?? target.nativeContextBoundary,
-          startSha, endSha, commits: startSha === endSha ? [] : [endSha], childIntegrations: [],
-          changedPaths: changedPaths(workspacePath, startSha, endSha), externalEffects: target.externalEffects, reversible: true,
-          state: 'completed', createdAt: new Date().toISOString(), completedAt: new Date().toISOString()
-        }
-        const receipt = new ChangeReceiptService(this.threadDirectory).record(workspacePath, {
-          operationId, kind: 'revert', actor: { kind: 'user' }, actionId: record.id,
-          beforeSha: startSha, afterSha: endSha, introducedCommits: record.commits,
-          contributions: [], externalEffects: target.externalEffects, reversesReceiptId: target.receiptId
-        })
-      record.receiptId = receipt.id
-      actions.push(record); this.actions.replace(actions)
-      this.journal.append({ operationId, operationType: 'code-revert', state: 'completed', details: { actionId, compensationActionId: record.id, startSha, endSha } })
-      return record
+      if (!target.reversible || sameTree(workspacePath, target.startSha, target.endSha)) throw new Error('The selected action has no reversible repository changes.')
+      const operationId = randomUUID()
+      const threadId = workspace?.threadId
+      // The files as they are now, including edits made since: they are part of the merge, so they stay.
+      const ours = takeSnapshot(workspacePath, { reason: 'before code revert', threadId, operationId })
+      const restored = restoreChange(workspacePath, { reason: `revert code action ${actionId}`, threadId, operationId, base: target.endSha, ours: ours.sha, theirs: target.startSha }, (expectedTree) => {
+        const intent: RevertIntent = { target, latest: actions.at(-1), ours: ours.sha, expectedTree }
+        this.journal.append({ operationId, operationType: 'code-revert', state: 'prepared', expectedPreState: { startSha: ours.sha, actionId }, details: intent })
       })
+      if ('conflicts' in restored) throw new UndoConflictError(restored.conflicts, 'The code revert')
+      const pushed = pushedTo(workspacePath, target.commits)
+      return this.complete(workspacePath, operationId, { target, latest: actions.at(-1) }, ours.sha, restored.snapshot, new Date().toISOString(), pushed ? pushedNotice('Revert', pushed) : undefined)
     })
   }
+
+  /** Records the revert as an action and a receipt, and ends its journal entry. */
+  private complete(workspacePath: string, operationId: string, intent: RevertIntent, startSha: string, end: Snapshot, createdAt: string, notice?: string): ThreadAction {
+    const { target, latest } = intent
+    const record: ThreadAction = {
+      id: operationId, turnId: operationId, conversationBranchId: target.conversationBranchId,
+      parentActionId: latest?.id,
+      presentationMessageStart: latest?.presentationMessageEnd ?? 0,
+      presentationMessageEnd: latest?.presentationMessageEnd ?? 0,
+      nativeContextBoundary: latest?.nativeContextBoundary ?? target.nativeContextBoundary,
+      startSha, endSha: end.sha, commits: [], childIntegrations: [],
+      changedPaths: changedPaths(workspacePath, startSha, end.sha), externalEffects: target.externalEffects, reversible: true,
+      git: describeGit(workspacePath, startSha, end).record, ...(notice ? { notice } : {}),
+      state: 'completed', createdAt, completedAt: new Date().toISOString()
+    }
+    const receipts = new ChangeReceiptService(this.threadDirectory)
+    const existing = receipts.list().find((item) => item.operationId === operationId)
+    const receipt = existing ? receipts.replay(workspacePath, existing) : receipts.record(workspacePath, {
+      operationId, kind: 'revert', actor: { kind: 'user' }, actionId: record.id,
+      beforeSha: startSha, afterSha: end.sha, introducedCommits: [],
+      contributions: [], externalEffects: target.externalEffects, reversesReceiptId: target.receiptId, git: record.git
+    })
+    record.receiptId = receipt.id
+    const actions = this.actions.list()
+    if (!actions.some((item) => item.id === record.id)) { actions.push(record); this.actions.replace(actions) }
+    this.journal.append({ operationId, operationType: 'code-revert', state: 'completed', details: { actionId: target.id, compensationActionId: record.id, startSha, endSha: end.sha } })
+    return record
+  }
+
   async recoverPending(workspacePath: string, heldThreadLease?: ThreadLeaseHandle): Promise<void> {
     return withGitMutationLocks(this.threadDirectory, workspacePath, 'code-revert-recovery', async () => {
       const receipts = new ChangeReceiptService(this.threadDirectory)
@@ -82,34 +101,37 @@ export class CodeRevertService {
         if (!['code-revert', 'change-revert'].includes(entry.operationType) || !['prepared', 'git_applied'].includes(entry.state)) continue
         const intent = this.journal.list().find((item) => item.operationId === entry.operationId && item.state === 'prepared')
         const expected = intent?.expectedPreState as { startSha: string; actionId: string } | undefined
-        const details = intent?.details as { target: ThreadAction; latest?: ThreadAction } | undefined
+        const details = intent?.details as RevertIntent | undefined
         if (!expected || !details?.target) throw new Error('Code revert recovery intent is missing.')
-        // Recovery reads HEAD and records; it changes no files, so uncommitted edits stay where they are.
-        refuseUnsafeChanges(workspacePath, 'Thread workspace', { discard: true })
-        const head = git(workspacePath, ['rev-parse', 'HEAD'])
         const prior = receipts.list().find((item) => item.operationId === entry.operationId)
-        if (!prior && head === expected.startSha) {
+        const applied = details.ours ? this.provenApplied(workspacePath, entry.operationId, details, prior) : this.legacyApplied(workspacePath, entry.operationId, expected.startSha, prior)
+        if (!applied) {
           this.journal.append({ operationId: entry.operationId, operationType: 'code-revert', state: 'cancelled', details: { recoveredBeforeGit: true } })
           continue
         }
-        if (prior ? prior.afterSha !== head : commitParents(workspacePath, head)[0] !== expected.startSha || !git(workspacePath, ['log', '-1', '--format=%B']).includes(entry.operationId)) throw new Error('Code revert recovery HEAD does not match the operation.')
-        const target = details.target
-        const record: ThreadAction = {
-          id: entry.operationId, turnId: entry.operationId, conversationBranchId: target.conversationBranchId,
-          parentActionId: details.latest?.id, presentationMessageStart: details.latest?.presentationMessageEnd ?? 0,
-          presentationMessageEnd: details.latest?.presentationMessageEnd ?? 0,
-          nativeContextBoundary: details.latest?.nativeContextBoundary ?? target.nativeContextBoundary,
-          startSha: expected.startSha, endSha: head, commits: head === expected.startSha ? [] : [head], childIntegrations: [],
-          changedPaths: changedPaths(workspacePath, expected.startSha, head), externalEffects: target.externalEffects,
-          reversible: true, state: 'completed', createdAt: intent!.createdAt, completedAt: new Date().toISOString()
-        }
-        const receipt = receipts.record(workspacePath, { operationId: entry.operationId, kind: 'revert', actor: { kind: 'user' }, actionId: record.id, beforeSha: record.startSha, afterSha: head, introducedCommits: record.commits, contributions: [], externalEffects: target.externalEffects, reversesReceiptId: target.receiptId })
-        record.receiptId = receipt.id
-        const all = this.actions.list()
-        if (!all.some((item) => item.id === record.id)) { all.push(record); this.actions.replace(all) }
-        this.journal.append({ operationId: entry.operationId, operationType: 'code-revert', state: 'completed', details: { actionId: target.id, compensationActionId: record.id, startSha: record.startSha, endSha: head } })
+        this.complete(workspacePath, entry.operationId, details, applied.startSha, applied.end, intent!.createdAt)
       }
     }, undefined, heldThreadLease)
   }
 
+  /**
+   * Whether an interrupted revert landed, read from the files: the receipt when it was recorded; otherwise the files
+   * match the planned result (landed) or still match the snapshot before it (did not). Anything else is left for
+   * a person to look at.
+   */
+  private provenApplied(workspacePath: string, operationId: string, details: RevertIntent, prior?: { beforeSha: string; afterSha: string }): { startSha: string; end: Snapshot } | undefined {
+    if (prior) return { startSha: prior.beforeSha, end: { sha: prior.afterSha, tree: treeOf(workspacePath, prior.afterSha), ...snapshotOrigin(workspacePath, prior.afterSha) } }
+    const current = worktreeTree(workspacePath)
+    if (current === details.expectedTree) return { startSha: details.ours!, end: takeSnapshot(workspacePath, { reason: `revert code action ${details.target.id}`, operationId }) }
+    if (current === treeOf(workspacePath, details.ours!)) return undefined
+    throw new Error('Code revert recovery found files that match neither the state before nor the state after the revert; resolve the differences by hand.')
+  }
+
+  /** The proof for an intent written before snapshots: the revert was a commit on the branch. */
+  private legacyApplied(workspacePath: string, operationId: string, startSha: string, prior?: { afterSha: string }): { startSha: string; end: Snapshot } | undefined {
+    const head = git(workspacePath, ['rev-parse', 'HEAD'])
+    if (!prior && head === startSha) return undefined
+    if (prior ? prior.afterSha !== head : commitParents(workspacePath, head)[0] !== startSha || !git(workspacePath, ['log', '-1', '--format=%B']).includes(operationId)) throw new Error('Code revert recovery HEAD does not match the operation.')
+    return { startSha, end: { sha: head, tree: treeOf(workspacePath, head), head } }
+  }
 }
