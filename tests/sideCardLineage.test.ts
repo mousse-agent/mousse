@@ -1,11 +1,14 @@
 import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it, vi } from 'vitest'
-import { LineageList, LineageSection } from '../src/renderer/components/sideCard/LineageSection'
+import { LINEAGE_CLOSED, LineageList, LineageSection, type LineageOpenParts } from '../src/renderer/components/sideCard/LineageSection'
 import {
   LINEAGE_COLLAPSED_COUNT,
+  LINEAGE_RUNNING_COUNT,
   countRunningSubagents,
+  finishedGroupLabel,
   formatAgo,
+  groupLineageSubagents,
   lineageModelLabel,
   lineageStatusLabel,
   lineageSubagentName,
@@ -109,6 +112,24 @@ describe('orderLineageSubagents', () => {
   })
 })
 
+describe('groupLineageSubagents and finishedGroupLabel', () => {
+  it('splits running from finished subagents, each in its own order', () => {
+    const { running, finished } = groupLineageSubagents([
+      subagent('old-done', { state: 'done', updatedAt: minutesAgo(50) }),
+      subagent('live', { createdAt: minutesAgo(5) }),
+      subagent('new-done', { state: 'failed', updatedAt: minutesAgo(1) }),
+      subagent('asking', { state: 'needs_input', createdAt: minutesAgo(40) })
+    ])
+    expect(ids(running)).toEqual(['asking', 'live'])
+    expect(ids(finished)).toEqual(['new-done', 'old-done'])
+  })
+
+  it('counts finished subagents and names failures', () => {
+    expect(finishedGroupLabel([subagent('a', { state: 'done' })])).toBe('1 finished')
+    expect(finishedGroupLabel([subagent('a', { state: 'done' }), subagent('b', { state: 'failed' }), subagent('c', { state: 'stopped' })])).toBe('3 finished · 1 failed')
+  })
+})
+
 describe('sliceLineage', () => {
   const rows = Array.from({ length: 8 }, (_, index) => index)
 
@@ -187,16 +208,17 @@ describe('lineageSubagentName and lineageModelLabel', () => {
 })
 
 describe('LineageList rendering', () => {
-  const render = (subagents: SubagentSummary[], extra: { expanded?: boolean; inheritedProvider?: string } = {}) =>
+  const render = (subagents: SubagentSummary[], extra: { open?: Partial<LineageOpenParts>; inheritedProvider?: string } = {}) =>
     renderToStaticMarkup(createElement(LineageList, {
       subagents,
       now: NOW,
       inheritedProvider: extra.inheritedProvider ?? null,
-      expanded: extra.expanded ?? false,
-      onExpand: () => undefined,
+      open: { ...LINEAGE_CLOSED, ...extra.open },
+      onOpenPart: () => undefined,
       onOpen: () => undefined,
       onStop: () => undefined
     }))
+  const finishedOpen = { open: { finished: true } }
 
   it('renders nothing for an empty list; the section collapses instead', () => {
     expect(render([])).toBe('')
@@ -208,7 +230,7 @@ describe('LineageList rendering', () => {
       subagent('live', { title: 'Live job', provider: 'claude' }),
       subagent('failed', { state: 'failed', title: 'Broken job' }),
       subagent('asking', { state: 'needs_input', title: 'Asking job' })
-    ])
+    ], finishedOpen)
     expect(html.indexOf('Live job')).toBeLessThan(html.indexOf('Finished job'))
     expect(html.match(/class="subagent-avatar"/g)).toHaveLength(4)
     expect(html).toContain('background-color:#D97757')
@@ -220,6 +242,33 @@ describe('LineageList rendering', () => {
     expect(html).toContain('Working')
   })
 
+  it('folds finished subagents into one closed row with a count and the latest finish time', () => {
+    const html = render([
+      subagent('live', { title: 'Live job' }),
+      subagent('done', { state: 'done', title: 'Finished job', updatedAt: minutesAgo(4) }),
+      subagent('old', { state: 'failed', title: 'Broken job', updatedAt: minutesAgo(90) })
+    ])
+    expect(html).toContain('Live job')
+    expect(html).not.toContain('Finished job')
+    expect(html).not.toContain('Broken job')
+    expect(html).toContain('2 finished · 1 failed')
+    expect(html).toContain('aria-expanded="false"')
+    expect(html).toContain('4m ago')
+    expect(html.match(/class="subagent-avatar"/g)).toHaveLength(1)
+  })
+
+  it('opens the finished group in place, with its own "Show N more" past five', () => {
+    const finished = Array.from({ length: 7 }, (_, index) => subagent(`d${index}`, { state: 'done', updatedAt: minutesAgo(index + 1) }))
+    const opened = render(finished, finishedOpen)
+    expect(opened).toMatch(/aria-expanded="true" aria-controls="[^"]+"/)
+    expect(opened).toContain('class="lineage-list lineage-sublist"')
+    expect(opened.match(/class="lineage-item"/g)).toHaveLength(5)
+    expect(opened).toContain('Show 2 more')
+    const all = render(finished, { open: { finished: true, finishedAll: true } })
+    expect(all.match(/class="lineage-item"/g)).toHaveLength(7)
+    expect(all).not.toContain('Show')
+  })
+
   it('draws the thread provider for a subagent that inherited it', () => {
     const html = render([subagent('a', { provider: null })], { inheritedProvider: 'claude' })
     expect(html).toContain('background-color:#D97757')
@@ -227,8 +276,8 @@ describe('LineageList rendering', () => {
   })
 
   it('opens a subagent from its row and offers Stop on running rows only', () => {
-    const html = render([subagent('live', { title: 'Live job' }), subagent('done', { state: 'done', title: 'Finished job' })])
-    expect(html.match(/class="lineage-row/g)).toHaveLength(2)
+    const html = render([subagent('live', { title: 'Live job' }), subagent('done', { state: 'done', title: 'Finished job' })], finishedOpen)
+    expect(html.match(/class="lineage-item"/g)).toHaveLength(2)
     expect(html.match(/title="Live job"/g)).toHaveLength(1)
     expect(html.match(/lineage-stop/g)).toHaveLength(1)
     expect(html).toContain('aria-label="Stop Live job"')
@@ -245,12 +294,13 @@ describe('LineageList rendering', () => {
     expect(html.match(/lineage-model/g)).toHaveLength(1)
   })
 
-  it('adds a "Show N more" row past five subagents and drops it when expanded', () => {
+  it('shows three running subagents with a "Show N more" row, and all of them once expanded', () => {
+    expect(LINEAGE_RUNNING_COUNT).toBe(3)
     const many = Array.from({ length: 7 }, (_, index) => subagent(`a${index}`, { createdAt: minutesAgo(index + 1) }))
     const collapsed = render(many)
-    expect(collapsed).toContain('Show 2 more')
-    expect(collapsed.match(/lineage-name/g)).toHaveLength(5)
-    const expanded = render(many, { expanded: true })
+    expect(collapsed).toContain('Show 4 more')
+    expect(collapsed.match(/lineage-name/g)).toHaveLength(3)
+    const expanded = render(many, { open: { running: true } })
     expect(expanded).not.toContain('Show')
     expect(expanded.match(/lineage-name/g)).toHaveLength(7)
   })
@@ -319,7 +369,8 @@ describe('LineageSection rendering', () => {
       const html = renderToStaticMarkup(createElement(LineageSection, { threadId: 't1', projectId: null }))
       expect(html).toContain('side-card-section-name">Lineage · 1 running<')
       expect(html).toContain('Task one')
-      expect(html).toContain('Task two')
+      expect(html).toContain('1 finished')
+      expect(html).not.toContain('Task two')
       expect(html).not.toContain('Elsewhere')
       expect(html).not.toContain('No subagents started yet')
     })
