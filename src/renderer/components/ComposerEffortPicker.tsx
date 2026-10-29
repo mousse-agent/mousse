@@ -2,16 +2,11 @@ import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent as Rea
 import type { LlmModelOption } from '../../shared/settings'
 import { applyEffortToModelId, findModelFamily, formatEffortLabel, getModelFastToggle, parseModelVariant, parseThinkingSuffixFromModelId, reasoningLevelLabel, resolveModelVariant, resolveReasoning } from '../../shared/modelVariants'
 import { describePermissionMode } from '../../shared/permissionMode'
-import { Brain, Check, ChevronDown } from '../lib/icons'
+import { Brain, ChevronDown } from '../lib/icons'
 import { FloatingPortal, useFloatingPosition } from '../lib/floatingLayer'
 import { permissionModeIcon } from '../lib/permissionModeIcon'
 import { PermissionModeSection, permissionChoice, type PermissionControl } from './ComposerPermissionPicker'
 import '../styles/composer-run-controls.css'
-
-/** The check column shared by the composer's single-line menus (same as Select). */
-export function MenuCheck({ on }: { on: boolean }) {
-  return <span className="composer-mode-menu-check" aria-hidden="true">{on && <Check size={14} strokeWidth={2} />}</span>
-}
 
 type Selection = { providerId: string; modelId: string; models: LlmModelOption[] }
 
@@ -119,7 +114,7 @@ function RunMenu({ selection, onSelect, permission, readOnly, contentRef, style,
   if (reasoning.levels.length > 0) sections.push(<div key="reasoning" className="composer-mode-menu-section" role="group" aria-label="Reasoning">
     <div className="composer-mode-menu-heading">Reasoning</div>
     {reasoning.levels.map((value) => <button key={value} type="button" role="menuitemradio" aria-checked={effort === value} disabled={readOnly} title={reasoning.descriptions[value]} className={`composer-mode-menu-item${effort === value ? ' selected' : ''}`} onClick={() => { onClose(); if (value !== effort || reasoning.unsupported) pickEffort(value) }}>
-      <MenuCheck on={effort === value} /><span>{reasoningLevelLabel(value)}</span>
+      <span>{reasoningLevelLabel(value)}</span>
       {value === reasoning.defaultLevel && <span className="composer-mode-menu-item-meta">Default</span>}
     </button>)}
     {reasoning.unsupported && <div className="composer-run-menu-note" role="note">
@@ -128,7 +123,7 @@ function RunMenu({ selection, onSelect, permission, readOnly, contentRef, style,
   </div>)
   if (fast) sections.push(<div key="speed" className="composer-mode-menu-section" role="group" aria-label="Speed">
     <div className="composer-mode-menu-heading">Speed</div>
-    {[false, true].map((enabled) => <button key={String(enabled)} type="button" role="menuitemradio" aria-checked={fast.active === enabled} disabled={readOnly} className={`composer-mode-menu-item${fast.active === enabled ? ' selected' : ''}`} onClick={() => { onClose(); pickSpeed(enabled) }}><MenuCheck on={fast.active === enabled} /><span>{enabled ? 'Fast' : 'Standard'}</span></button>)}
+    {[false, true].map((enabled) => <button key={String(enabled)} type="button" role="menuitemradio" aria-checked={fast.active === enabled} disabled={readOnly} className={`composer-mode-menu-item${fast.active === enabled ? ' selected' : ''}`} onClick={() => { onClose(); pickSpeed(enabled) }}><span>{enabled ? 'Fast' : 'Standard'}</span></button>)}
   </div>)
   if (permission && choice) sections.push(<PermissionModeSection key="permissions" control={permission} choice={choice} onPicked={onClose} />)
   return <FloatingPortal><div ref={contentRef} style={style} className={`composer-mode-menu composer-mode-menu-floating composer-run-menu${permission ? ' has-permissions' : ''}`} role="menu" aria-label="Run options" onKeyDown={moveFocus}>

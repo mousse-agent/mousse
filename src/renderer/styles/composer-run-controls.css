@@ -7,6 +7,10 @@
   min-width: 0;
 }
 
+.composer-run-controls .composer-model-btn {
+  padding-right: 6px;
+}
+
 .composer-run-picker {
   display: inline-flex;
   align-items: center;
@@ -14,6 +18,7 @@
 }
 
 .composer-run-sep {
+  /* The model button and the run button each keep 6px beside the dot, so it sits midway. */
   font-size: 12px;
   color: var(--text-secondary);
   opacity: 0.7;
@@ -66,6 +71,30 @@
   min-width: 0;
 }
 
+/* Every section marks its selection the same way: the neutral fill with the shared top light, no
+   check mark. Keyboard focus adds the focus ring, so it stays distinct from the selection. */
+.composer-run-menu .composer-mode-menu-item {
+  padding-left: var(--ui-menu-row-x);
+}
+
+.composer-mode-menu.composer-run-menu .composer-mode-menu-item.selected,
+.composer-run-menu-permission.selected {
+  background: color-mix(in srgb, var(--text-primary) 11%, transparent);
+  box-shadow: var(--ui-specular);
+  color: var(--text-primary);
+}
+
+.composer-run-menu .composer-mode-menu-item:focus-visible,
+.composer-run-menu-permission:focus-visible {
+  outline: none;
+  box-shadow: var(--ui-focus-ring);
+}
+
+.composer-mode-menu.composer-run-menu .composer-mode-menu-item.selected:focus-visible,
+.composer-run-menu-permission.selected:focus-visible {
+  box-shadow: var(--ui-specular), var(--ui-focus-ring);
+}
+
 /* A saved level the model no longer offers: one muted line under the levels. */
 .composer-run-menu-note {
   padding: 4px var(--ui-menu-row-x) 2px;
@@ -96,20 +125,9 @@
   color: var(--text-primary);
 }
 
-/* The chosen mode: the neutral raised fill with the shared top light, never a check or accent. */
-.composer-run-menu-permission.selected {
-  background: color-mix(in srgb, var(--text-primary) 11%, transparent);
-  box-shadow: var(--ui-specular);
-  color: var(--text-primary);
-}
-
 .composer-run-menu-permission.is-disabled {
   opacity: 0.4;
   cursor: default;
-}
-
-.composer-run-menu-permission:focus-visible {
-  box-shadow: var(--ui-focus-ring);
 }
 
 /* One fixed block under the row for the chosen (or hovered) mode: two lines tall, so it never jumps. */

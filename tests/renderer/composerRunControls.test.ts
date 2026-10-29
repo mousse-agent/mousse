@@ -135,7 +135,9 @@ describe('composer run controls', () => {
     const selected = modes().filter((mode) => mode.getAttribute('aria-checked') === 'true')
     expect(selected.map((mode) => mode.getAttribute('aria-label'))).toEqual(['Ask before acting'])
     expect(selected[0]!.classList.contains('selected')).toBe(true)
-    expect(menu()!.querySelector('.composer-run-menu-permissions .composer-mode-menu-check')).toBeNull()
+    // No section marks its selection with a check: the chosen item is highlighted.
+    expect(menu()!.querySelector('.composer-mode-menu-check, svg.lucide-check')).toBeNull()
+    expect(menu()!.querySelector('[aria-label="Reasoning"] [aria-checked="true"]')!.classList.contains('selected')).toBe(true)
     // One line names and describes the chosen mode; hovering another previews it.
     expect(line()).toBe('Ask before actingAsks before every command and file edit.')
     act(() => { modes()[3]!.dispatchEvent(new MouseEvent('mouseover', { bubbles: true })) })
