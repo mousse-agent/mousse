@@ -67,14 +67,15 @@ export function ComposerPermissionPicker({ mode, agent, caps, limits, ceiling, c
 
   // Without a snapshot yet the instance is assumed able: the daemon still refuses what it cannot enforce.
   const supported = supportedPermissionModes(caps ?? { toolControl: 'exact' }, limits)
-  const effective = effectivePermissionMode(mode, supported, { agent, ...(limits ? { limits } : {}) })
-  const shown = effective.refused ? mode : effective.mode
+  // On an agent without an auto mode, Auto is not offered and a thread set to it shows as Auto-accept edits, which is how it runs.
+  const autoOffered = supported.includes('auto')
+  const selected = mode === 'auto' && !autoOffered ? 'accept_edits' : mode
+  const effective = effectivePermissionMode(selected, supported, { agent, ...(limits ? { limits } : {}) })
+  const shown = effective.refused ? selected : effective.mode
   const reason = effective.reason
   const approvesItself = supported.length === 1 && supported[0] === 'full'
-  // On an agent without an auto mode the Auto row says, for this thread, that it runs as Auto-accept edits.
-  const autoFallback = supported.includes('auto') ? undefined : `Works as ${describePermissionMode('accept_edits')}: ${limits?.unavailable?.auto ?? `${agent} has no auto mode`}.`
   // Only Full access is offered on an agent that approves tools itself.
-  const offered = approvesItself ? PERMISSION_MODES.filter((entry) => entry === 'full') : PERMISSION_MODES
+  const offered = approvesItself ? PERMISSION_MODES.filter((entry) => entry === 'full') : PERMISSION_MODES.filter((entry) => entry !== 'auto' || autoOffered)
   const label = describePermissionMode(shown)
   const ShownIcon = permissionModeIcon(shown)
   const title = reason ? `${label}. ${reason}` : label
@@ -88,12 +89,12 @@ export function ComposerPermissionPicker({ mode, agent, caps, limits, ceiling, c
         {offered.map((entry) => {
           const aboveCeiling = ceiling !== undefined && isStricter(ceiling, entry)
           const EntryIcon = permissionModeIcon(entry)
-          return <button key={entry} type="button" role="menuitemradio" aria-checked={mode === entry} disabled={aboveCeiling} className={`composer-mode-menu-item${mode === entry ? ' selected' : ''}`} onClick={() => { setOpen(false); anchorRef.current?.focus(); if (entry !== mode) onSelect(entry) }}>
-            <MenuCheck on={mode === entry} />
+          return <button key={entry} type="button" role="menuitemradio" aria-checked={selected === entry} disabled={aboveCeiling} className={`composer-mode-menu-item${selected === entry ? ' selected' : ''}`} onClick={() => { setOpen(false); anchorRef.current?.focus(); if (entry !== selected) onSelect(entry) }}>
+            <MenuCheck on={selected === entry} />
             <EntryIcon size={14} aria-hidden="true" />
             <span className="composer-mode-menu-item-text">
               <span>{describePermissionMode(entry)}</span>
-              <span className="composer-mode-menu-item-desc">{aboveCeiling ? ceilingReason ?? 'A thread this subagent belongs to is set lower.' : entry === 'auto' && autoFallback ? autoFallback : modeDescription(entry, agent, limits?.sandboxOffInFull === true)}</span>
+              <span className="composer-mode-menu-item-desc">{aboveCeiling ? ceilingReason ?? 'A thread this subagent belongs to is set lower.' : modeDescription(entry, agent, limits?.sandboxOffInFull === true)}</span>
             </span>
           </button>
         })}
