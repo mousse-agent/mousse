@@ -13,6 +13,8 @@ import {
   inferModelBrand,
   modelNewnessScore,
   parseModelVariant,
+  resolveReasoning,
+  supportedEffortOf,
   parseThinkingSuffixFromModelId,
   resolveModelVariant
 } from '../src/shared/modelVariants'
@@ -279,5 +281,32 @@ describe('Fast endpoint toggle', () => {
       { id: 'normal:high', label: 'Model' },
       { id: 'quick:high', label: 'Model (fast)' }
     ])).toEqual({ active: false, targetModelId: 'quick:high' })
+  })
+})
+
+describe('reasoning levels each model reports', () => {
+  const codex = [{ id: 'gpt-6.1-sol', label: 'GPT-6.1-Sol', efforts: ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'], defaultEffort: 'low', thinkingOff: false as const, effortDescriptions: { ultra: 'Maximum reasoning with automatic task delegation' } }]
+
+  it('offers the reported levels, extra ones included, and no Off where thinking cannot be turned off', () => {
+    expect(resolveReasoning('codex', 'gpt-6.1-sol:ultra', codex)).toMatchObject({ levels: ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'], current: 'ultra', defaultLevel: 'low' })
+    expect(parseThinkingSuffixFromModelId('gpt-6.1-sol:ultra')).toEqual({ baseId: 'gpt-6.1-sol', effort: 'ultra' })
+    expect(parseThinkingSuffixFromModelId('opus:ultracode')).toEqual({ baseId: 'opus', effort: 'ultracode' })
+    // A model that can turn thinking off keeps Off first, as before.
+    expect(resolveReasoning('p', 'm:high', [{ id: 'm', label: 'M', efforts: ['low', 'high'] }]).levels).toEqual(['off', 'low', 'high'])
+  })
+
+  it('runs a model without a chosen level at its reported default', () => {
+    expect(resolveReasoning('codex', 'gpt-6.1-sol', codex).current).toBe('low')
+    expect(getCurrentEffort('gpt-6.1-sol', codex, 'codex')).toBe('low')
+  })
+
+  it('falls back to the default for a saved level the model does not offer', () => {
+    const haiku = [{ id: 'haiku', label: 'Haiku 5.5', efforts: ['low', 'medium', 'high'], defaultEffort: 'high', thinkingOff: false as const }]
+    expect(resolveReasoning('claude-subscription', 'haiku:max', haiku)).toMatchObject({ current: 'high', unsupported: 'max', defaultLevel: 'high' })
+    expect(resolveReasoning('claude-subscription', 'haiku:off', haiku)).toMatchObject({ current: 'high', unsupported: 'off' })
+    expect(supportedEffortOf('haiku:max', haiku, new Set(['max']))).toBeUndefined()
+    expect(supportedEffortOf('haiku:medium', haiku, new Set())).toBe('medium')
+    // A model listed without levels sends what the agent accepts.
+    expect(supportedEffortOf('other:max', haiku, new Set(['max']))).toBe('max')
   })
 })
