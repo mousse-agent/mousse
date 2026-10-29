@@ -14,6 +14,8 @@ import {
   type PullRequestDetail,
   type PullRequestIdentity,
   type PullRequestListItem,
+  type PullRequestMergeMethod,
+  type PullRequestMergeState,
   type PullRequestReview,
   type PullRequestReviewDecision,
   type PullRequestReviewVerdict,
@@ -93,6 +95,16 @@ const PULL_REQUEST_CANDIDATES = 10
  * repository (a fork's branch can share the name), 'empty' for none, or null when unreadable.
  */
 export function parsePullRequestList(stdout: string): GitPullRequestInfo | 'empty' | null {
+  const all = parseOwnPullRequests(stdout)
+  if (!all) return null
+  return all[0] ?? 'empty'
+}
+
+/**
+ * Every pull request of this repository in `gh pr list --json …` output (a fork's branch can share the name), in
+ * gh's order (newest first); null when unreadable.
+ */
+export function parseOwnPullRequests(stdout: string): GitPullRequestInfo[] | null {
   let data: unknown
   try {
     data = JSON.parse(stdout)
@@ -100,9 +112,9 @@ export function parsePullRequestList(stdout: string): GitPullRequestInfo | 'empt
     return null
   }
   if (!Array.isArray(data)) return null
-  if (data.length === 0) return 'empty'
-  const own = data.find((item) => item && typeof item === 'object' && (item as { isCrossRepository?: unknown }).isCrossRepository !== true)
-  return own === undefined ? 'empty' : parsePullRequest(own)
+  const own = data.filter((item) => item && typeof item === 'object' && (item as { isCrossRepository?: unknown }).isCrossRepository !== true)
+  const parsed = own.map(parsePullRequest)
+  return parsed.every((item): item is GitPullRequestInfo => item !== null) ? parsed : null
 }
 
 /** Parses one pull request from gh's JSON (`number,title,url,state,isDraft,statusCheckRollup`). */
@@ -176,7 +188,7 @@ export function classifyPullRequestFailure(message: string): 'none' | 'not-githu
 const PULL_REQUEST_DETAIL_FIELDS = [
   'number', 'title', 'url', 'state', 'isDraft', 'body', 'author', 'authorAssociation', 'baseRefName', 'headRefName', 'headRefOid',
   'headRepository', 'headRepositoryOwner', 'isCrossRepository', 'reviewDecision', 'reviews', 'comments',
-  'statusCheckRollup', 'updatedAt', 'mergedAt', 'closedAt'
+  'statusCheckRollup', 'updatedAt', 'mergedAt', 'closedAt', 'mergeable', 'mergeStateStatus'
 ].join(',')
 
 /** Longest conversation comment or review body kept; the full text stays on the host. */
@@ -436,8 +448,59 @@ export function parsePullRequestDetail(
     checkRuns: parseCheckRuns(value.statusCheckRollup),
     updatedAt: text(value.updatedAt),
     mergedAt: text(value.mergedAt) || null,
-    closedAt: text(value.closedAt) || null
+    closedAt: text(value.closedAt) || null,
+    mergeState: parseMergeState(value.mergeable, value.mergeStateStatus)
   }
+}
+
+const MERGE_STATES: Record<string, PullRequestMergeState> = {
+  CLEAN: 'clean',
+  // Hooks run after the merge; the merge itself is clean.
+  HAS_HOOKS: 'clean',
+  UNSTABLE: 'unstable',
+  BLOCKED: 'blocked',
+  BEHIND: 'behind',
+  DIRTY: 'conflicting',
+  DRAFT: 'draft'
+}
+
+/** GitHub's `mergeable` and `mergeStateStatus` as one state; a conflict wins over whatever else is said. */
+export function parseMergeState(mergeable: unknown, mergeStateStatus: unknown): PullRequestMergeState {
+  if (upper(mergeable) === 'CONFLICTING') return 'conflicting'
+  return MERGE_STATES[upper(mergeStateStatus)] ?? 'unknown'
+}
+
+const MERGE_METHODS: Record<string, PullRequestMergeMethod> = { MERGE: 'merge', SQUASH: 'squash', REBASE: 'rebase' }
+
+/**
+ * The merge method GitHub's own merge button would offer from `gh repo view --json viewerDefaultMergeMethod,…Allowed`:
+ * the account's default when the repository allows it, else squash, merge commit and rebase in that order of what is
+ * allowed. Null when the answer is unreadable.
+ */
+export function parseDefaultMergeMethod(stdout: string): PullRequestMergeMethod | null {
+  let value: Record<string, unknown>
+  try {
+    const parsed = JSON.parse(stdout) as unknown
+    if (!parsed || typeof parsed !== 'object') return null
+    value = parsed as Record<string, unknown>
+  } catch {
+    return null
+  }
+  const allowed: Record<PullRequestMergeMethod, boolean> = {
+    merge: value.mergeCommitAllowed !== false,
+    squash: value.squashMergeAllowed !== false,
+    rebase: value.rebaseMergeAllowed !== false
+  }
+  const preferred = MERGE_METHODS[upper(value.viewerDefaultMergeMethod)]
+  if (preferred && allowed[preferred]) return preferred
+  return (['squash', 'merge', 'rebase'] as const).find((method) => allowed[method]) ?? null
+}
+
+/** The first line of a failed `gh` call that says something, without gh's leading cross mark. */
+function ghFailureText(error: unknown): string {
+  const message = processMessage(error)
+  const line = message.split(/\r?\n/).map((part) => part.replace(/^[X✗!]\s+/, '').trim()).find(Boolean)
+  return line ?? message
 }
 
 /** Parses `gh repo view --json nameWithOwner,url`; the host is the host of the repository's web URL. */
@@ -711,17 +774,21 @@ export class GitHubCodeHost implements CodeHost {
   private async readLookup(cwd: string, branch: string): Promise<GitPullRequestLookup> {
     try {
       // `pr list --head` matches branch names only; `pr view <branch>` reads an all-digit branch as a PR number.
-      // An open pull request wins over a newer closed one, as `pr view` would choose.
+      // One read of every state lists the branch's pull requests; an open one wins over a newer closed one, as `pr view` would choose.
       const list = (state: 'open' | 'all') => this.runExecutable(
         'gh',
         ['pr', 'list', '--head', branch, '--state', state, '--limit', String(PULL_REQUEST_CANDIDATES), '--json', PULL_REQUEST_FIELDS],
         { cwd }
-      ).then((result) => parsePullRequestList(result.stdout))
-      let listed = await list('open')
-      if (listed === 'empty') listed = await list('all')
-      if (listed === 'empty') return { state: 'none', isDefaultBranch: await this.isDefaultBranch(cwd, branch) }
-      if (listed) return { state: 'found', pullRequest: listed }
-      return { state: 'unavailable', reason: 'error', message: 'GitHub CLI returned an unexpected pull request response.' }
+      ).then((result) => parseOwnPullRequests(result.stdout))
+      const all = await list('all')
+      if (!all) return { state: 'unavailable', reason: 'error', message: 'GitHub CLI returned an unexpected pull request response.' }
+      let open = all.find((pullRequest) => pullRequest.state === 'open')
+      // A full page may have left an open one out behind newer closed ones.
+      if (!open && all.length >= PULL_REQUEST_CANDIDATES) open = (await list('open'))?.[0]
+      const pullRequest = open ?? all[0]
+      if (!pullRequest) return { state: 'none', isDefaultBranch: await this.isDefaultBranch(cwd, branch) }
+      const others = all.filter((other) => other.number !== pullRequest.number).sort((a, b) => b.number - a.number)
+      return others.length > 0 ? { state: 'found', pullRequest, others } : { state: 'found', pullRequest }
     } catch (error) {
       return this.lookupFailure(cwd, branch, error)
     }
@@ -878,6 +945,60 @@ export class GitHubCodeHost implements CodeHost {
       baseRefName: base,
       ...summarizeCheckRollup([])
     }
+  }
+
+  async defaultMergeMethod(cwd: string): Promise<PullRequestMergeMethod | null> {
+    try {
+      const { stdout } = await this.runExecutable(
+        'gh',
+        ['repo', 'view', '--json', 'viewerDefaultMergeMethod,mergeCommitAllowed,squashMergeAllowed,rebaseMergeAllowed'],
+        { cwd }
+      )
+      return parseDefaultMergeMethod(stdout)
+    } catch {
+      return null
+    }
+  }
+
+  async mergePullRequest(cwd: string, number: number, options: { method: PullRequestMergeMethod; headSha?: string }): Promise<GitPullRequestInfo> {
+    const flag = { merge: '--merge', squash: '--squash', rebase: '--rebase' }[options.method]
+    // The branch is kept: a thread's worktree may still be on it.
+    const args = ['pr', 'merge', String(this.requireNumber(number)), flag]
+    if (options.headSha) {
+      if (!/^[0-9a-f]{7,64}$/i.test(options.headSha)) throw new Error('Unsupported commit.')
+      args.push(`--match-head-commit=${options.headSha}`)
+    }
+    return this.changePullRequest(cwd, number, args)
+  }
+
+  async closePullRequest(cwd: string, number: number): Promise<GitPullRequestInfo> {
+    return this.changePullRequest(cwd, number, ['pr', 'close', String(this.requireNumber(number))])
+  }
+
+  private requireNumber(number: number): number {
+    if (!Number.isSafeInteger(number) || number < 1) throw new Error('Unsupported pull request number.')
+    return number
+  }
+
+  /** Runs a merge or close and reads the pull request back; every read of the repository is forgotten, whatever the outcome. */
+  private async changePullRequest(cwd: string, number: number, args: string[]): Promise<GitPullRequestInfo> {
+    const identity = await this.repositoryIdentity(cwd).catch(() => null)
+    try {
+      await this.runExecutable('gh', args, { cwd })
+    } catch (error) {
+      if (isMissingExecutable(error)) throw new Error('GitHub CLI (gh) was not found. Install it and try again.')
+      throw new Error(ghFailureText(error))
+    } finally {
+      if (identity) {
+        this.lookups.invalidatePrefix(repositoryPrefix(identity))
+        this.lists.invalidatePrefix(repositoryPrefix(identity))
+        this.details.invalidatePrefix(repositoryPrefix(identity))
+      }
+    }
+    const { stdout } = await this.runExecutable('gh', ['pr', 'view', String(number), '--json', PULL_REQUEST_FIELDS], { cwd })
+    const pullRequest = parsePullRequestJson(stdout)
+    if (!pullRequest) throw new Error('GitHub CLI returned an unexpected pull request response.')
+    return pullRequest
   }
 
   async listBaseBranches(cwd: string): Promise<PullRequestBaseBranches> {

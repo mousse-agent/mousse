@@ -70,7 +70,7 @@ describe('pull request methods through the daemon protocol', () => {
   const normalized = (path: unknown) => String(path).replace(/\\/g, '/').toLowerCase()
 
   it('lists the methods', () => {
-    for (const method of ['pullRequests.get', 'pullRequests.detail', 'pullRequests.draft', 'pullRequests.create', 'pullRequests.baseBranches', 'pullRequests.link', 'pullRequests.unlink']) {
+    for (const method of ['pullRequests.get', 'pullRequests.detail', 'pullRequests.draft', 'pullRequests.create', 'pullRequests.merge', 'pullRequests.close', 'pullRequests.baseBranches', 'pullRequests.link', 'pullRequests.unlink']) {
       expect(PROTOCOL_METHODS).toContain(method)
     }
   })
@@ -130,6 +130,65 @@ describe('pull request methods through the daemon protocol', () => {
       baseBranches: { defaultBranch: 'main', branches: ['main', 'dev'] }
     })
     expect(normalized(branches.mock.calls[0][0])).toBe(normalized(f.repo))
+  })
+
+  describe('merging and closing a pull request', () => {
+    it('merges with the method the host offers, in the thread\'s own worktree, passing the shown head', async () => {
+      const method = vi.spyOn(mms.gitService.codeHost, 'defaultMergeMethod').mockResolvedValue('merge')
+      const merge = vi.spyOn(mms.gitService.codeHost, 'mergePullRequest').mockResolvedValue(info({ state: 'merged' }))
+      const project = mms.projects.openProject(f.repo)
+      const thread = mms.threads.createThread('Task A', project.id)
+      const workspace = await new WorkspaceResolver(mms.threads.getThreadDir(thread.id), thread.id, f.repo).resolve('agent')
+      expect(await client.request('pullRequests.merge', { threadId: thread.id, number: 12, headSha: 'abc1234' })).toEqual({
+        pullRequest: info({ state: 'merged' }),
+        method: 'merge'
+      })
+      expect(normalized(method.mock.calls[0][0])).toBe(normalized(workspace.workspacePath))
+      expect(normalized(merge.mock.calls[0][0])).toBe(normalized(workspace.workspacePath))
+      expect(merge.mock.calls[0].slice(1)).toEqual([12, { method: 'merge', headSha: 'abc1234' }])
+    })
+
+    it('squashes when the host\'s method cannot be read', async () => {
+      vi.spyOn(mms.gitService.codeHost, 'defaultMergeMethod').mockResolvedValue(null)
+      const merge = vi.spyOn(mms.gitService.codeHost, 'mergePullRequest').mockResolvedValue(info({ state: 'merged' }))
+      const project = mms.projects.openProject(f.repo)
+      expect(await client.request('pullRequests.merge', { projectId: project.id, number: 12 })).toMatchObject({ method: 'squash' })
+      expect(normalized(merge.mock.calls[0][0])).toBe(normalized(f.repo))
+      expect(merge.mock.calls[0].slice(1)).toEqual([12, { method: 'squash' }])
+    })
+
+    it('closes in the project folder', async () => {
+      const close = vi.spyOn(mms.gitService.codeHost, 'closePullRequest').mockResolvedValue(info({ state: 'closed' }))
+      const project = mms.projects.openProject(f.repo)
+      expect(await client.request('pullRequests.close', { projectId: project.id, number: 12 })).toEqual({ pullRequest: info({ state: 'closed' }) })
+      expect(normalized(close.mock.calls[0][0])).toBe(normalized(f.repo))
+      expect(close.mock.calls[0][1]).toBe(12)
+    })
+
+    it('says why the host refused, in its own words', async () => {
+      vi.spyOn(mms.gitService.codeHost, 'defaultMergeMethod').mockResolvedValue('squash')
+      vi.spyOn(mms.gitService.codeHost, 'mergePullRequest').mockRejectedValue(new Error('Pull request acme/app#12 is not mergeable: the base branch policy prohibits the merge.'))
+      vi.spyOn(mms.gitService.codeHost, 'closePullRequest').mockRejectedValue(new Error('Pull request acme/app#12 is already closed'))
+      const project = mms.projects.openProject(f.repo)
+      await expect(client.request('pullRequests.merge', { projectId: project.id, number: 12 })).rejects.toThrow('the base branch policy prohibits the merge')
+      await expect(client.request('pullRequests.close', { projectId: project.id, number: 12 })).rejects.toThrow('already closed')
+    })
+
+    it('rejects unknown keys, a bad number or commit, and both or no ids before reaching the host', async () => {
+      const merge = vi.spyOn(mms.gitService.codeHost, 'mergePullRequest').mockResolvedValue(info())
+      const close = vi.spyOn(mms.gitService.codeHost, 'closePullRequest').mockResolvedValue(info())
+      const project = mms.projects.openProject(f.repo)
+      const thread = mms.threads.createThread('Task A', project.id)
+      await expect(client.request('pullRequests.merge', { projectId: project.id, number: 12, method: 'rebase' })).rejects.toThrow(/method is not allowed/)
+      await expect(client.request('pullRequests.merge', { projectId: project.id, number: 12, headSha: '--admin' })).rejects.toThrow(/not a commit/)
+      await expect(client.request('pullRequests.merge', { projectId: project.id, number: 0 })).rejects.toThrow(/number/)
+      await expect(client.request('pullRequests.merge', { number: 12 })).rejects.toThrow(/projectId or threadId is required/)
+      await expect(client.request('pullRequests.close', { projectId: project.id, threadId: thread.id, number: 12 })).rejects.toThrow(/either threadId or projectId/)
+      await expect(client.request('pullRequests.close', { projectId: project.id, number: 12, deleteBranch: true })).rejects.toThrow(/deleteBranch is not allowed/)
+      await expect(client.request('pullRequests.close', { threadId: 'missing', number: 12 })).rejects.toThrow(/not found/i)
+      expect(merge).not.toHaveBeenCalled()
+      expect(close).not.toHaveBeenCalled()
+    })
   })
 
   describe('drafting and creating for the branch a form opened on', () => {

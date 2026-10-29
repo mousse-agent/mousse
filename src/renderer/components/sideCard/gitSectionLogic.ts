@@ -1,6 +1,7 @@
 import type {
   PullRequestCheck,
   PullRequestDetail,
+  PullRequestMergeMethod,
   PullRequestPushTarget,
   PullRequestReviewDecision,
   PullRequestScope,
@@ -70,7 +71,7 @@ export function changesSummary(status: GitStatusSnapshot | null): string {
   return count === 1 ? '1 file changed' : `${count} files changed`
 }
 
-/** Compact age for a commit date: "now", "5m", "3h", "2d", "6w", "4mo", "2y". Empty when the date is unreadable. */
+/** Compact age for a date: "now", "5m", "3h", "2d", "6w", "4mo", "2y". Empty when the date is unreadable. */
 export function relativeTime(date: string, now: number): string {
   const then = Date.parse(date)
   if (Number.isNaN(then)) return ''
@@ -87,23 +88,6 @@ export function relativeTime(date: string, now: number): string {
   const months = Math.round(days / 30)
   if (days < 365) return `${months}mo`
   return `${Math.round(days / 365)}y`
-}
-
-export interface CommitLine {
-  subject: string
-  shortHash: string
-  when: string
-  /** Full message and details for the tooltip. */
-  title: string
-}
-
-/** The latest-commit row: first line of the message, short hash and age. */
-export function formatCommitLine(commit: GitCommit, now: number): CommitLine {
-  const message = commit.message.trim()
-  const subject = message.split('\n', 1)[0]?.trim() || '(no message)'
-  const when = relativeTime(commit.date, now)
-  const details = [commit.shortHash, commit.author, commit.date].filter(Boolean).join(' · ')
-  return { subject, shortHash: commit.shortHash, when, title: message ? `${message}\n\n${details}` : details }
 }
 
 const isRemoteBranch = (name: string) => name.startsWith('remotes/')
@@ -125,6 +109,9 @@ export function branchLabel(status: GitStatusSnapshot | null): string {
 
 /** Shown in place of the branch picker while the folder is a thread's own worktree. */
 export const THREAD_BRANCH_LABEL = 'This thread works on its own branch'
+
+/** Why the branch picker of a thread with its own worktree lists no branches to switch to. */
+export const THREAD_BRANCH_SWITCH_REASON = 'This thread has its own branch and worktree, so its branch stays fixed.'
 
 export interface BranchActionState {
   enabled: boolean
@@ -294,18 +281,21 @@ export interface GitCollapseInput {
   status: GitStatusSnapshot | null
 }
 
+/** Shown while the folder or its status is still being read. */
+export const GIT_CHECKING_LABEL = 'Checking…'
+
 /**
- * The single muted line shown instead of the section when there is nothing to
- * manage, or null when the full section applies.
+ * The single muted line shown under the Git heading instead of the section's controls when there is
+ * nothing to manage, or null when the full section applies.
  */
 export function gitCollapsedLabel(input: GitCollapseInput): string | null {
-  if (!input.hasProject) return 'Git: no project'
-  if (input.pathPending) return 'Git: checking…'
-  if (!input.hasPath) return 'Git: no project folder'
-  if (!input.loaded) return 'Git: checking…'
-  if (!input.status) return 'Git: unavailable'
-  if (input.status.missing === true) return 'Git: folder not found'
-  if (!input.status.isRepo) return 'Git: not a repository'
+  if (!input.hasProject) return 'No project'
+  if (input.pathPending) return GIT_CHECKING_LABEL
+  if (!input.hasPath) return 'No project folder'
+  if (!input.loaded) return GIT_CHECKING_LABEL
+  if (!input.status) return 'Unavailable'
+  if (input.status.missing === true) return 'Folder not found'
+  if (!input.status.isRepo) return 'Not a repository'
   return null
 }
 
@@ -413,26 +403,37 @@ export function pullRequestCheckRows(checks: readonly PullRequestCheck[]): PullR
 /** Shown on a linked pull request of a thread that works in its own worktree. */
 export const LINKED_WORKTREE_HINT = 'Merge back targets the primary checkout, not the PR'
 
+/** What the Merge button of an open pull request does: enabled (and then the one primary action) or dimmed with why. */
+export interface PullRequestMergeAction {
+  enabled: boolean
+  /** Why it is dimmed; null when it is enabled. */
+  reason: string | null
+  /** The head that was shown: a merge is refused if more was pushed since. Null when it is not known. */
+  headSha: string | null
+}
+
 export interface PullRequestFoundRow {
   kind: 'found'
   url: string
   /** "#123" */
   number: string
+  /** The pull request's number, for merging or closing it. */
+  value: number
+  /** The branch it merges into, as named in the merge prompt. */
+  base: string
+  /** Merge and Close for an open pull request; null for a merged or closed one. */
+  merge: PullRequestMergeAction | null
   title: string
   /** Icon for the check state; null when there are no checks or the PR is finished. */
   checks: PullRequestChecksTone | null
   /** "Checks passed", "2 failing", "Checks running" or "Waiting for approval". */
   checksLabel: string | null
-  /** Muted word after the title. */
+  /** What colours and shapes the pull request icon. */
+  state: 'open' | 'draft' | 'merged' | 'closed'
+  /** Muted word after the number. */
   suffix: 'Draft' | 'Merged' | 'Closed' | null
-  /** The reviewers' verdict of an open pull request; null when the host has none (a draft, merged or closed pull request shows its suffix instead). */
+  /** The reviewers' verdict of an open pull request, for the tooltip; null when the host has none (a draft, merged or closed pull request has its suffix instead). */
   review: { label: string; tone: PullRequestReviewTone } | null
-  /** Each check with its state and link; only for an open pull request whose detail has been read. */
-  checkRows: PullRequestCheckRow[]
-  /** Conversation and line comments read so far. */
-  commentCount: number
-  /** "3 comments"; null when there are none. */
-  commentsLabel: string | null
   /** The thread is linked to this pull request, which it did not only find by its branch. */
   linked: boolean
   /** A short note about what the pull request means for this thread; null when there is none. */
@@ -464,8 +465,7 @@ function checksText(tone: PullRequestChecksTone, counts: GitPullRequestInfo['che
 /**
  * The pull request row under the branch row. Only a found pull request, or a branch
  * with none that could get one, shows a row; every unavailable lookup shows nothing.
- * `detail` (the same pull request, read in full) adds the reviewers' verdict, each check and the comment
- * count; `link` and `worktreeThread` say whether the thread is linked to it and works in its own worktree.
+ * `detail` (the same pull request, read in full) adds the reviewers' verdict; `link` and `worktreeThread` say whether the thread is linked to it and works in its own worktree.
  */
 export function pullRequestRow(
   lookup: GitPullRequestLookup | null,
@@ -483,7 +483,15 @@ export function pullRequestRow(
   }
   if (lookup.state !== 'found') return null
 
-  const { pullRequest } = lookup
+  return foundRow(lookup.pullRequest, detail, link, worktreeThread)
+}
+
+function foundRow(
+  pullRequest: GitPullRequestInfo,
+  detail: PullRequestDetail | null,
+  link: Pick<ThreadPullRequestLink, 'number'> | null,
+  worktreeThread: boolean
+): PullRequestFoundRow {
   const open = pullRequest.state === 'open'
   const tone = open && pullRequest.checks !== 'none' ? pullRequest.checks : null
   const checks = tone ? checksText(tone, pullRequest.checkCounts) : null
@@ -496,27 +504,101 @@ export function pullRequestRow(
   const review = verdict && (verdict.key === 'approved' || verdict.key === 'changes_requested' || verdict.key === 'review_required')
     ? { label: verdict.label, tone: verdict.tone }
     : null
-  const commentCount = own?.comments.length ?? 0
   const linked = link?.number === pullRequest.number
   return {
     kind: 'found',
     url: pullRequest.url,
     number,
+    value: pullRequest.number,
+    base: own?.baseRefName || pullRequest.baseRefName || 'the base branch',
+    merge: open ? mergeAction(pullRequest, own) : null,
     title,
     checks: tone,
     checksLabel: checks?.label ?? null,
+    state: pullRequest.state === 'open' && pullRequest.isDraft ? 'draft' : pullRequest.state,
     suffix,
     review,
-    checkRows: own ? pullRequestCheckRows(own.checkRuns) : [],
-    commentCount,
-    commentsLabel: commentCount > 0
-      ? `${commentCount}${own?.commentsTruncated ? '+' : ''} ${commentCount === 1 && !own?.commentsTruncated ? 'comment' : 'comments'}`
-      : null,
     linked,
     hint: linked && worktreeThread ? LINKED_WORKTREE_HINT : null,
     tooltip: [title ? `${number} ${title}` : number, review?.label, checks?.label].filter(Boolean).join('\n'),
     ariaLabel: ['Pull request ' + number, title, suffix?.toLowerCase(), review?.label.toLowerCase(), checks?.spoken].filter(Boolean).join(', ')
   }
+}
+
+/**
+ * Whether an open pull request can be merged from the side card: its checks pass (or it has none) and GitHub says it would
+ * merge cleanly. Anything else dims Merge with the reason. `detail` is the same pull request read in full; without it
+ * the host's answer is not known yet.
+ */
+export function mergeAction(pullRequest: GitPullRequestInfo, detail: PullRequestDetail | null): PullRequestMergeAction {
+  const headSha = detail?.headSha || null
+  const dimmed = (reason: string): PullRequestMergeAction => ({ enabled: false, reason, headSha })
+  const base = detail?.baseRefName || pullRequest.baseRefName || 'the base branch'
+  if (pullRequest.isDraft || detail?.mergeState === 'draft') return dimmed('A draft can’t be merged until it is ready for review')
+  if (pullRequest.checks === 'failing') {
+    const count = Math.max(1, pullRequest.checkCounts.failed)
+    return dimmed(`${count} ${count === 1 ? 'check is' : 'checks are'} failing`)
+  }
+  if (pullRequest.checks === 'pending') {
+    const counts = pullRequest.checkCounts
+    return dimmed(counts.waiting > 0 && counts.waiting >= counts.pending ? 'Checks are waiting for approval' : 'Checks are still running')
+  }
+  switch (detail?.mergeState) {
+    case 'clean':
+      return { enabled: true, reason: null, headSha }
+    case 'conflicting':
+      return dimmed(`Has conflicts with ${base}`)
+    case 'behind':
+      return dimmed(`Behind ${base}; update the branch first`)
+    case 'unstable':
+      return dimmed('Some checks are not passing')
+    case 'blocked':
+      if (detail.reviewDecision === 'changes_requested') return dimmed('Changes were requested')
+      if (detail.reviewDecision === 'review_required') return dimmed('Needs an approving review')
+      return dimmed(`Blocked by the rules of ${base}`)
+    default:
+      return dimmed('GitHub is still working out whether it can be merged')
+  }
+}
+
+/**
+ * Every pull request the section lists: the lookup's own (as `pullRequestRow` builds it) and the branch's other ones.
+ * Only the lookup's own has a full read, so only it can say whether it would merge.
+ */
+export function pullRequestRows(
+  lookup: GitPullRequestLookup | null,
+  status: GitStatusSnapshot | null,
+  detail: PullRequestDetail | null = null,
+  link: Pick<ThreadPullRequestLink, 'number'> | null = null,
+  worktreeThread = false
+): PullRequestFoundRow[] {
+  const row = pullRequestRow(lookup, status, detail, link, worktreeThread)
+  if (row?.kind !== 'found' || lookup?.state !== 'found') return []
+  return [row, ...(lookup.others ?? []).map((other) => foundRow(other, null, link, worktreeThread))]
+}
+
+const MERGE_METHOD_WORDS: Record<PullRequestMergeMethod, string> = {
+  merge: 'with a merge commit',
+  squash: 'squashed into one commit',
+  rebase: 'rebased onto the base branch'
+}
+
+/** Said once a merge went through: "Merged #12 squashed into one commit." */
+export function mergedNotice(number: number, method: PullRequestMergeMethod | undefined): string {
+  return method ? `Merged #${number} ${MERGE_METHOD_WORDS[method]}.` : `Merged #${number}.`
+}
+
+/** Pull requests shown before "Show N more". */
+export const PULL_REQUESTS_SHOWN = 1
+
+/**
+ * The thread's pull requests as the section lists them: the newest first and shown, the rest counted behind
+ * "Show N more" until expanded. Pull requests are newest when their number is highest.
+ */
+export function pullRequestList<T extends Pick<PullRequestFoundRow, 'number'>>(rows: readonly T[], expanded: boolean): { shown: T[]; hidden: number } {
+  const ordered = [...rows].sort((a, b) => Number(b.number.slice(1)) - Number(a.number.slice(1)))
+  if (expanded || ordered.length <= PULL_REQUESTS_SHOWN) return { shown: ordered, hidden: 0 }
+  return { shown: ordered.slice(0, PULL_REQUESTS_SHOWN), hidden: ordered.length - PULL_REQUESTS_SHOWN }
 }
 
 /**
@@ -869,7 +951,7 @@ export function chooseAmend(form: CommitForm, checked: boolean): CommitForm {
 /** Why mutating Git controls are disabled while one action runs. */
 export const GIT_BUSY_REASON = 'Another Git action is running'
 
-export type GitAction = 'checkout' | 'branch' | 'commit' | 'push' | 'pullRequest' | 'init'
+export type GitAction = 'checkout' | 'branch' | 'commit' | 'push' | 'pullRequest' | 'merge' | 'close' | 'init'
 
 export interface GitActionLock {
   disabled: boolean

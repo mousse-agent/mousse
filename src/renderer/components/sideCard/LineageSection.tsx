@@ -117,6 +117,7 @@ export function LineageSection({ threadId }: SideCardSectionContext) {
   return (
     <SideCardSection
       title={lineageTitle(subagents)}
+      collapseKey="Lineage"
       threadId={threadId}
       action={
         // Stop all stops each subagent that is working, with everything below it, and leaves this thread's own turn running.

@@ -458,6 +458,8 @@ export const PROTOCOL_METHODS = [
   'pullRequests.detail',
   'pullRequests.draft',
   'pullRequests.create',
+  'pullRequests.merge',
+  'pullRequests.close',
   'pullRequests.baseBranches',
   'pullRequests.link',
   'pullRequests.unlink',

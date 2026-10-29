@@ -487,6 +487,8 @@ export const ROUTED_METHODS: Readonly<Record<string, RoutedRow>> = Object.freeze
   'pullRequests.draft': write('folder', [...FOLDER, 'originThreadId', 'expectedBranch', 'base'], {
     owned: { originThreadId: 'thread' }
   }),
+  'pullRequests.merge': write('folder', [...FOLDER, 'number', 'headSha'], { required: ['number'] }),
+  'pullRequests.close': write('folder', [...FOLDER, 'number'], { required: ['number'] }),
   'pullRequests.link': write('thread', ['threadId', 'number'], { required: ['number'] }),
   'pullRequests.unlink': write('thread', ['threadId']),
   'pullRequests.pushTarget': write('thread', ['threadId']),

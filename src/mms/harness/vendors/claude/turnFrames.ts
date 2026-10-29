@@ -11,6 +11,12 @@ import { claudeActivityComplete, claudeActivityStart, claudeCallContext, type Cl
 import type { ClaudeMetricsCollector } from './metrics'
 import { observeRateLimit, RejectedWindows } from './usageLimit'
 
+/**
+ * Launch arguments every turn adds. Claude Code sends a headless session (as the SDK runs it) no
+ * thinking text unless the session asks for a display: thought rows would show "Thinking" and nothing else.
+ */
+export const CLAUDE_TURN_EXTRA_ARGS: Readonly<Record<string, string>> = { 'thinking-display': 'summarized' }
+
 /** Where a turn's frames are reported; the slice of the chat input the stream needs. */
 export interface TurnFrameSink {
   onText: (text: string) => void
@@ -76,9 +82,13 @@ export class TurnFrames {
         }
         if (event.delta.type === 'thinking_delta') {
           this.thinking += event.delta.thinking
-          this.sink.onThinking?.(this.thinking)
+          // A block whose text is omitted streams an empty delta: there is no thought to show yet.
+          if (this.thinking) this.sink.onThinking?.(this.thinking)
         }
       }
+      // Each thinking block is a paragraph of its own.
+      if (event.type === 'content_block_start' && event.content_block.type === 'thinking' && !message.parent_tool_use_id && this.thinking)
+        this.thinking += '\n\n'
       if (event.type === 'content_block_start' && event.content_block.type === 'tool_use') {
         const parent = message.parent_tool_use_id ?? undefined
         // A call of a subagent this turn does not have open (a background agent of an earlier turn) is not this turn's.

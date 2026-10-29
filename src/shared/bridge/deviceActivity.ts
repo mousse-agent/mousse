@@ -260,6 +260,8 @@ const PHRASES: Record<string, Phrase> = {
   'git.init': GIT_INIT,
   'pullRequests.create': PULL_REQUEST,
   'pullRequests.draft': PULL_REQUEST,
+  'pullRequests.merge': PULL_REQUEST,
+  'pullRequests.close': PULL_REQUEST,
   'pullRequests.link': PULL_REQUEST,
   'pullRequests.unlink': PULL_REQUEST,
   'pullRequests.pushTarget': PULL_REQUEST,

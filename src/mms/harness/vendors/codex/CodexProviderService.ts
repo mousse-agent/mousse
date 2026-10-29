@@ -2413,7 +2413,9 @@ export class CodexProviderService {
         approvalPolicy: policy.approvalPolicy,
         sandboxPolicy: policy.sandboxPolicy,
         ...(baseId !== CODEX_DEFAULT_MODEL_ID ? { model: baseId } : {}),
-        ...(effort && EFFORTS.has(effort) ? { effort } : {})
+        ...(effort && EFFORTS.has(effort) ? { effort } : {}),
+        // Without it the server streams no reasoning summaries, and thought rows would stay empty.
+        summary: 'auto' as const
       }
 
       // Steers join the running turn (`turn/steer`); one that arrives after the turn ended

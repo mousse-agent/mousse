@@ -702,14 +702,14 @@ describe('branch picker in the side card', () => {
   })
 
   describe('in a thread worktree', () => {
-    it('shows the branch as a disabled label with the reason, and offers nothing', async () => {
+    it('opens the full branch name and the reason it stays fixed, and offers no switch', async () => {
       act(() => root.render(createElement(GitSectionView, props(repoStatus({ branch: 'mousse/thread/t1' }), 'thread-1'))))
-      expect(trigger()).toBeNull()
-      const label = host.querySelector('.side-card-git-branch-static')
-      expect(label?.getAttribute('aria-disabled')).toBe('true')
-      expect(label?.getAttribute('title')).toBe('This thread works on its own branch')
-      expect(label?.getAttribute('aria-label')).toContain('This thread works on its own branch')
+      const label = trigger()
+      expect(label?.disabled).toBe(false)
+      expect(label?.getAttribute('title')).toBe('mousse/thread/t1')
       await click(label)
+      expect(label?.getAttribute('aria-expanded')).toBe('true')
+      expect(dialog('Branch')?.textContent).toContain('This thread has its own branch and worktree, so its branch stays fixed.')
       expect(dialog('Switch branch')).toBeUndefined()
       expect(byText('button', 'New branch…')).toBeUndefined()
       expect(git.checkout).not.toHaveBeenCalled()

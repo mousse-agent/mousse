@@ -158,6 +158,9 @@ interface AppState {
   /** The side card is open as an overlay in a narrow thread area. Temporary: not persisted, closed again by `shouldCloseSideCardOverlay`. */
   sideCardOverlayOpen: boolean
   setSideCardOverlayOpen: (sideCardOverlayOpen: boolean) => void
+  /** Side card sections the user collapsed (true) or expanded (false) by hand, by section key; a missing key uses the section's default. */
+  sideCardCollapsed: Record<string, boolean>
+  setSideCardSectionCollapsed: (key: string, collapsed: boolean) => void
   activeThreadId: string | null
   projects: Project[]
   threads: Thread[]
@@ -355,7 +358,7 @@ const personalWorkspaceKeys = [
   'projectTerminalTabs', 'activeProjectTerminalTabByThread', 'browserTabs',
   'browserActiveTabByThread', 'browserElementAttachmentsByThread', 'mainView',
   'sidebarMode', 'sidebarWidth', 'threadsSidebarWidth', 'threadsSidebarOpen', 'mainAreaOpen', 'chatMode',
-  'openedSurfaceKinds',
+  'openedSurfaceKinds', 'sideCardCollapsed',
   'composerDrafts', 'composerReferences', 'composerWorkspaceDrafts', 'threadsSidebarView',
   'reviewIgnoreWhitespace'
 ] as const
@@ -413,6 +416,7 @@ export const useAppStore = create<AppState>()(persist((set) => ({
   sideCardOn: true,
   sideCardFits: null,
   sideCardOverlayOpen: false,
+  sideCardCollapsed: {},
   activeThreadId: null,
   projects: [],
   threads: [],
@@ -524,6 +528,7 @@ export const useAppStore = create<AppState>()(persist((set) => ({
   setSideCardOn: (sideCardOn) => set({ sideCardOn }),
   setSideCardFits: (sideCardFits) => set({ sideCardFits }),
   setSideCardOverlayOpen: (sideCardOverlayOpen) => set({ sideCardOverlayOpen }),
+  setSideCardSectionCollapsed: (key, collapsed) => set((s) => ({ sideCardCollapsed: { ...s.sideCardCollapsed, [key]: collapsed } })),
   setTurnState: (state) => set((s) => ({ turnStates: { ...s.turnStates, [state.threadId]: state } })),
   setTurnSnapshot: (snap) => set({ turnStates: snap }),
   setActiveThreadId: (activeThreadId) => set({ activeThreadId }),
@@ -685,6 +690,7 @@ export const useAppStore = create<AppState>()(persist((set) => ({
       threadsSidebarWidth: 260,
       threadsSidebarOpen: true,
       mainAreaOpen: false,
+      sideCardCollapsed: {} as Record<string, boolean>,
       chatMode: DEFAULT_CHAT_MODE
     }
     if (typeof window !== 'undefined') {

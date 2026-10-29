@@ -28,6 +28,7 @@ import {
 } from "../../../utils/assistantMessageActions";
 import { ToolRenderer as DefaultToolRenderer } from "./tools/tool-renderer";
 import { ToolCallsGroup } from "./tools/tool-calls-group";
+import { LiveThinkingRow } from "./tools/thinking-tool";
 import {
   PermissionRequestRow,
   isPermissionRequestPart,
@@ -1766,18 +1767,24 @@ export const MessageList = memo(function MessageList({
                     );
                   })()}
 
-                {isLastTurn &&
-                  (showAwaitingReply || (showPlanning && turn.assistantMsgs.length === 0)) && (
-                  <TurnWorkStatus
-                    active
-                    startedAt={
-                      turn.userMsg &&
-                      workClockRef.current?.turnId === turn.userMsg.id
-                        ? workClockRef.current.startedAt
-                        : readCreatedAt(turn.userMsg)
-                    }
-                    durationMs={null}
-                  />
+                {isLastTurn && (showAwaitingReply || showPlanning) && (
+                  // Laid out like the turn's answer below, so its first row
+                  // takes the live row's place without moving.
+                  <div className="group/assistant-turn">
+                    <TurnWorkStatus
+                      active
+                      startedAt={
+                        turn.userMsg &&
+                        workClockRef.current?.turnId === turn.userMsg.id
+                          ? workClockRef.current.startedAt
+                          : readCreatedAt(turn.userMsg)
+                      }
+                      durationMs={null}
+                    />
+                    <div className="turn-answer flex flex-col gap-3">
+                      <LiveThinkingRow />
+                    </div>
+                  </div>
                 )}
               </div>
             );

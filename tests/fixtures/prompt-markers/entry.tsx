@@ -15,8 +15,9 @@ function Fixture() {
   update = (next, absent) => { setIds(next); setMissing(absent) }
   const messages: UIMessage[] = ids.map(id => ({ id, role: 'user', parts: [{ type: 'text', text: `Prompt ${id}` }] }))
   return <div className="an-message-list-wrap" style={{ position: 'relative', width: 420, height: 320 }}>
-    <div ref={containerRef} id="viewport" style={{ width: 300, height: 150, overflowY: 'auto' }}>
-      <div ref={contentRef}>
+    <div ref={containerRef} id="viewport" className="an-message-list" style={{ width: 300, height: 150, overflowY: 'auto' }}>
+      {/* The transcript's own padding (px-6); the pane is narrow enough that it reaches the rail. */}
+      <div ref={contentRef} style={{ paddingInline: 24 }}>
         {ids.map((id, index) => <div key={index} data-prompt-id={id === missing ? undefined : id} style={{ height: 40, marginBottom: 40 }}>{id === missing ? null : `Prompt ${id}`}</div>)}
       </div>
     </div>

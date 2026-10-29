@@ -7,6 +7,7 @@ import type {
   PullRequestDetail,
   PullRequestIdentity,
   PullRequestListItem,
+  PullRequestMergeMethod,
   RepositoryIdentity
 } from '../../shared/pullRequests'
 
@@ -29,6 +30,15 @@ export interface CodeHost {
   getPullRequestDetail(cwd: string, number: number, options?: { force?: boolean; lineComments?: boolean }): Promise<PullRequestDetail>
   createPullRequest(cwd: string, input: CreatePullRequestInput): Promise<GitPullRequestInfo>
   listBaseBranches(cwd: string): Promise<PullRequestBaseBranches>
+  /** The merge method the host's own merge button offers the signed-in account in the folder's repository; null when it cannot be read. */
+  defaultMergeMethod(cwd: string): Promise<PullRequestMergeMethod | null>
+  /**
+   * Merges a pull request of the folder's repository and returns it as read back. The head branch is kept. With `headSha`
+   * the host refuses when the head moved since. A failure throws with the host's own reason.
+   */
+  mergePullRequest(cwd: string, number: number, options: { method: PullRequestMergeMethod; headSha?: string }): Promise<GitPullRequestInfo>
+  /** Closes a pull request of the folder's repository without merging it, keeping its branch; returns it as read back. */
+  closePullRequest(cwd: string, number: number): Promise<GitPullRequestInfo>
   /**
    * The remote that points at the folder's repository, else `origin`, else the only remote; null when there is none.
    * With `identity` it is only a remote whose URL is exactly that repository (same host and `owner/repo`, whatever

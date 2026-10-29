@@ -42,13 +42,19 @@ export function ToolRowBase({
         canToggle ? "cursor-pointer" : "cursor-default",
       )}
     >
-      <div className="flex items-center gap-2 min-w-0 text-base text-muted-foreground">
+      <div className="flex items-center gap-2 min-w-0 text-[15px] leading-[22px] text-muted-foreground">
         {icon && (
           <span className="flex items-center justify-center size-[18px] shrink-0">
             {icon}
           </span>
         )}
-        <span className="font-[450] whitespace-nowrap shrink-0">
+        <span
+          className={cn(
+            "font-[450] whitespace-nowrap",
+            // A label with nothing after it (a thought) keeps to one line.
+            detail || trailingContent ? "shrink-0" : "min-w-0 truncate",
+          )}
+        >
           {isAnimating && shimmerLabel ? (
             <TextShimmer
               as="span"

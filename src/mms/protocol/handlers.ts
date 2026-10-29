@@ -3515,6 +3515,35 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       await linkOriginThread(ctx, originThreadId, root, pullRequest)
       return { pullRequest, existing: false }
     }
+    case 'pullRequests.merge': {
+      // Merges a pull request of the folder's repository with the method the host's merge button offers, else squash.
+      const p = isObject(params) ? params : {}
+      rejectUnknownKeys(p, ['threadId', 'projectId', 'number', 'headSha'])
+      const number = asBoundedInt(p.number, 'number', { min: 1, max: Number.MAX_SAFE_INTEGER })
+      const headSha = asOptionalString(p.headSha, 64)
+      if (headSha !== undefined && !/^[0-9a-f]{7,64}$/i.test(headSha)) throw new DomainRpcError('invalid_params', 'headSha is not a commit')
+      await materializeRequestedWorkspace(ctx, p)
+      const root = pullRequestFolder(ctx, p)
+      const codeHost = ctx.mms.gitService.codeHost
+      const method = await codeHost.defaultMergeMethod(root) ?? 'squash'
+      try {
+        const pullRequest = await codeHost.mergePullRequest(root, number, { method, ...(headSha ? { headSha } : {}) })
+        return { pullRequest, method }
+      } catch (error) {
+        throw new DomainRpcError('pull_request_merge_failed', error instanceof Error ? error.message : String(error), { number })
+      }
+    }
+    case 'pullRequests.close': {
+      const p = isObject(params) ? params : {}
+      rejectUnknownKeys(p, ['threadId', 'projectId', 'number'])
+      const number = asBoundedInt(p.number, 'number', { min: 1, max: Number.MAX_SAFE_INTEGER })
+      await materializeRequestedWorkspace(ctx, p)
+      try {
+        return { pullRequest: await ctx.mms.gitService.codeHost.closePullRequest(pullRequestFolder(ctx, p), number) }
+      } catch (error) {
+        throw new DomainRpcError('pull_request_close_failed', error instanceof Error ? error.message : String(error), { number })
+      }
+    }
     case 'pullRequests.baseBranches': {
       const p = isObject(params) ? params : {}
       rejectUnknownKeys(p, ['threadId', 'projectId'])

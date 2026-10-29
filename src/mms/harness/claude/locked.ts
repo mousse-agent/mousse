@@ -12,6 +12,7 @@ import { withoutTransportFields } from '../../agentDefinitions/definitionGate'
 import { CLAUDE_MOUSSE_TOOL_PREFIX } from '../../run/mcp/attachment'
 import type { ToolLedger } from '../../run/mcp/appTools/types'
 import { hasContainmentEvidence, type ContainmentEvidence } from '../compatibility'
+import { CLAUDE_TURN_EXTRA_ARGS } from '../vendors/claude/turnFrames'
 
 /**
  * The locked Claude Code profile (PR 6 §3): how a bot's turn runs on Claude Code. An instance with
@@ -200,7 +201,8 @@ export function claudeLockedOptions(turn: ClaudeLockedTurn, input: {
     settingSources: [],
     strictMcpConfig: true,
     plugins: [],
-    extraArgs: {},
+    // Only Mousse's own launch arguments; none of the user's.
+    extraArgs: { ...CLAUDE_TURN_EXTRA_ARGS },
     mcpServers: input.mcpServers,
     tools,
     disallowedTools,
