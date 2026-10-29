@@ -11,7 +11,6 @@ vi.mock('../src/renderer/components/sideCard/DeviceSection', () => ({
 vi.mock('../src/renderer/components/sideCard/GitSection', () => ({ GitSection: () => null }))
 vi.mock('../src/renderer/components/sideCard/ActionsSection', () => ({ ActionsSection: () => null }))
 vi.mock('../src/renderer/components/sideCard/LineageSection', () => ({ LineageSection: () => null }))
-vi.mock('../src/renderer/components/sideCard/PermissionSection', () => ({ PermissionSection: () => null }))
 
 import { ThreadSideCard } from '../src/renderer/components/sideCard/ThreadSideCard'
 import { useAppStore } from '../src/renderer/stores/appStore'
