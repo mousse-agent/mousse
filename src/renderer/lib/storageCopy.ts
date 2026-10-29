@@ -39,7 +39,7 @@ export const STORAGE_RULE_COPY: Record<StorageRuleId, StorageRuleCopy> = {
     title: 'Remove worktrees whose work is merged into the default branch',
     line: 'Restored when you use the thread again.',
     deletes: 'the worktree folder of a thread once its commits are in the default branch. It is restored the next time you use the thread.',
-    note: 'Merged means the worktree’s commits are in the default branch. A pull request’s state is not checked, and a rebased or squashed branch counts as not merged.'
+    note: 'Merged means the worktree’s commits are in the default branch, or Publish put exactly the worktree’s files into your checkout. A pull request’s state is not checked, and a rebased or squashed branch counts as not merged.'
   },
   captures: {
     title: 'Delete saved browser captures after',
@@ -57,10 +57,10 @@ export function ruleTooltip(rule: StorageRuleId): string {
 }
 
 /** The Worktrees group's one-line note: what no worktree rule ever removes. */
-export const WORKTREE_GROUP_DESCRIPTION = 'Worktrees with local files, unpublished commits or a running thread are always kept.'
+export const WORKTREE_GROUP_DESCRIPTION = 'Worktrees with ignored files, unpublished commits or a running thread are always kept. Uncommitted changes are saved when a worktree is removed.'
 
 /** Its tooltip: what counts as a local file, and how to remove such a worktree. */
-export const WORKTREE_GROUP_TOOLTIP = 'Uncommitted, untracked and ignored files (such as .env or node_modules) all keep a worktree, as do commits that are not in the default branch and a thread that is running or waiting. Delete the thread to remove such a worktree; you review what is discarded.'
+export const WORKTREE_GROUP_TOOLTIP = 'Ignored files (such as .env or node_modules) keep a worktree, as do commits that are not in the default branch, staged changes, a merge or rebase in progress, and a thread that is running or waiting. Uncommitted and untracked files do not: they are saved when the worktree is removed and come back with it. Delete the thread to remove a worktree that is kept; you review what is discarded.'
 
 export const CLEANUP_COPY = {
   idle: 'Runs the rules above now. You see what would be removed, and confirm, before anything is deleted.',

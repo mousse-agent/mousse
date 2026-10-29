@@ -106,12 +106,30 @@ test('retireTrashed removes a clean exclusive checkout and clears an earlier blo
   expect(existsSync(f.worktree)).toBe(false)
   expect(f.store.require('task')).toMatchObject({ state: 'trashed' }); expect(f.store.require('task').blockedReason).toBeUndefined()
 })
-test('retireTrashed keeps a checkout holding sole-copy changes and records why', async () => {
+test('retireTrashed removes a checkout holding uncommitted files into a pinned snapshot, and a purge still asks before that work is dropped', async () => {
   const f = fixture({ git: true }); writeFileSync(join(f.worktree, 'secret.txt'), 'only copy')
   await f.coordinator.trash({ taskId: 'task', operationId: 'trash' })
   await f.coordinator.cleanup.retireTrashed('task')
+  expect(existsSync(f.worktree)).toBe(false)
+  expect(f.store.require('task').blockedReason).toBeUndefined()
+  const retirement = new WorktreeRetirementService(f.store)
+  const manifest = retirement.load(retirement.pathFor('task', f.worktree))
+  expect(git(f.repo, ['show', `${manifest.snapshotSha}:secret.txt`])).toBe('only copy')
+  expect(git(f.repo, ['rev-parse', manifest.snapshotRef!])).toBe(manifest.snapshotSha)
+  const preview = await f.coordinator.cleanup.preview('task')
+  expect(preview.blockers).toEqual([]); expect(preview.items.find((item) => item.kind === 'worktree')).toMatchObject({ discardRequired: true })
+  expect(preview.items.filter((item) => item.kind === 'ref').map((item) => item.identity)).toContain(manifest.snapshotRef)
+  const request = { taskId: 'task', operationId: 'purge', expectedGeneration: preview.generation, previewDigest: preview.digest }
+  await expect(f.coordinator.purge(request)).rejects.toMatchObject({ code: 'resource_purge_discard_required' })
+  expect((await f.coordinator.purge({ ...request, discard: true, human: true })).state).toBe('purged')
+  expect(git(f.repo, ['for-each-ref', '--format=%(refname)', 'refs/mousse/'])).toBe('')
+})
+test('retireTrashed keeps a checkout holding what a snapshot cannot hold (staged changes) and records why', async () => {
+  const f = fixture({ git: true }); writeFileSync(join(f.worktree, 'secret.txt'), 'only copy'); git(f.worktree, ['add', 'secret.txt'])
+  await f.coordinator.trash({ taskId: 'task', operationId: 'trash' })
+  await f.coordinator.cleanup.retireTrashed('task')
   expect(readFileSync(join(f.worktree, 'secret.txt'), 'utf8')).toBe('only copy')
-  expect(f.store.require('task').blockedReason).toMatch(/^Checkout retained: /)
+  expect(f.store.require('task').blockedReason).toMatch(/^Checkout retained: .*Staged changes/)
 })
 test('retireTrashed keeps the checkout and reports the cause when the exact retirement fails', async () => {
   const f = fixture({ git: true }); await f.coordinator.trash({ taskId: 'task', operationId: 'trash' })

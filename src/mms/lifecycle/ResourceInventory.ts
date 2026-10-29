@@ -117,8 +117,7 @@ export function buildResourceInventory(store: ResourceLifecycleStore, record: Ta
         const common = realpathSync(resolve(path, git('rev-parse', '--git-common-dir')))
         const repositoryId = digest(common.toLowerCase()).slice(0, 32)
         if (expectedRepository && repositoryId !== expectedRepository) throw new Error('Repository common-directory identity changed')
-        const branch = git('branch', '--show-current')
-        if (!/^mousse\/(thread|agent|workflow)\//.test(branch) || (expectedBranch && branch !== expectedBranch)) throw new Error('Worktree branch is not the source-owned branch')
+        // The branch is the owner's record, not proof: the agent is free to switch to another, so the checkout is known by its path, registration and repository.
         const top = realpathSync(git('rev-parse', '--show-toplevel'))
         if (top.toLowerCase() !== realpathSync(path).toLowerCase()) throw new Error('Source path is not the registered worktree root')
         const listed = git('worktree', 'list', '--porcelain').split(/\r?\n/).some((line) => line.startsWith('worktree ') && resolve(line.slice(9)).toLowerCase() === resolve(path).toLowerCase())
@@ -157,6 +156,8 @@ export function buildResourceInventory(store: ResourceLifecycleStore, record: Ta
       resource('worktree', text(value?.worktreePath), workspace.source.id, 'current-result', 'Task workspace is the authoritative current result', task.taskId, repositoryId)
       resource('git-ref', text(value?.retainedRef), workspace.source.id, 'current-result', 'Task result remains retained', task.taskId, repositoryId)
       if (text(value?.branch)) resource('git-ref', `refs/heads/${value!.branch}`, workspace.source.id, 'current-result', 'Task branch remains retained', task.taskId, repositoryId)
+      // Publish remembers the files it last put into the primary checkout; the next publish is a merge from them.
+      resource('git-ref', `refs/mousse/published/${task.taskId}`, workspace.source.id, 'recall', 'The last published files are the base of the next publish', task.taskId, repositoryId)
       verifyWorktree(text(value?.worktreePath), text(value?.branch), repositoryId)
       if (['conflicted', 'recovery_required', 'provisioning'].includes(String(value?.lifecycle))) resource('worktree', text(value?.worktreePath), workspace.source.id, value?.lifecycle === 'conflicted' ? 'conflict' : 'recovery', 'Workspace operation has not settled', task.taskId, repositoryId)
     }
@@ -339,7 +340,7 @@ export function buildResourceInventory(store: ResourceLifecycleStore, record: Ta
           const agentId = `wf-${digest(`${store.profileId}:${owner}:${key}`).slice(0, 40)}`
           if (data.kind !== 'git-worktree' || data.branch !== `mousse/agent/${agentId}` || data.retainedRef !== `refs/mousse/workflows/${store.profileId}/${owner}/${agentId}` || !/^[a-f0-9]{32}$/.test(String(data.repositoryId))) throw new Error('Workflow checkout namespace does not match its owner')
           const receipts = new ThreadJournal(owned.get(owner)!.location, { readOnly: true }).list().map((entry) => object(object(entry.details)?.receipt))
-          const integrated = data.resultSha === data.baseSha || receipts.some((receipt) => receipt?.kind === 'integration' && receipt.operationId === `workflow-integration:${key}` && rows(receipt.contributions).some((contribution) => contribution.actorId === agentId && contribution.resultSha === data.resultSha))
+          const integrated = data.resultSha === data.baseSha || (data.baseSnapshot !== undefined && data.resultSha === data.baseSnapshot) || receipts.some((receipt) => receipt?.kind === 'integration' && receipt.operationId === `workflow-integration:${key}` && rows(receipt.contributions).some((contribution) => contribution.actorId === agentId && contribution.resultSha === data.resultSha))
           const claim = integrated ? undefined : 'pending-integration'
           resource('worktree', text(data.worktreePath), found.source.id, claim, 'Workflow result awaits matching durable integration receipt', owner, text(data.repositoryId))
           resource('git-ref', text(data.retainedRef), found.source.id, claim, 'Workflow source owns its retained result', owner, text(data.repositoryId))
@@ -404,6 +405,8 @@ export function buildResourceInventory(store: ResourceLifecycleStore, record: Ta
       for (const claim of claims) {
         resource('git-ref', text(value.baseRef), found.source.id, claim, 'Workspace owner retains its reconstruction base', task.taskId, text(value.repositoryId))
         resource('git-ref', text(value.resultRef), found.source.id, claim, 'Workspace owner retains its reconstruction result', task.taskId, text(value.repositoryId))
+        // The files of a worktree that held uncommitted work, kept as a snapshot until the owner is permanently deleted.
+        resource('git-ref', text(value.snapshotRef), found.source.id, claim, 'Workspace owner retains its uncommitted files', task.taskId, text(value.repositoryId))
         resource('runtime', found.source.path, found.source.id, claim, 'Workspace reconstruction metadata follows its owner claims', task.taskId)
       }
     }

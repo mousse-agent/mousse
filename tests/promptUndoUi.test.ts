@@ -189,7 +189,7 @@ it('offers Discard for an Undo refused over a conflict, runs it only after confi
   const buttons = shown.props.children.filter((child: any) => child?.type === 'button')
   expect(buttons.map((button: any) => button.props.children)).toEqual(['Discard'])
   buttons[0].props.onClick()
-  expect(confirm).toHaveBeenCalledWith(expect.stringContaining('Discard 1 changed file in /w? The unfinished merge is ended too.'))
+  expect(confirm).toHaveBeenCalledWith(expect.stringContaining('Discard 1 changed file in /w? This includes uncommitted results of the thread\'s earlier turns. The unfinished merge is ended too.'))
   expect(discardPendingChanges).not.toHaveBeenCalled()
   buttons[0].props.onClick()
   await vi.waitFor(() => expect(discardPendingChanges).toHaveBeenCalledExactlyOnceWith(threadId))
