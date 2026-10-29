@@ -83,8 +83,8 @@
 
 .chat-input-area .composer-workspace-toolbar {
   gap: 12px;
-  margin: 0 8px -12px;
-  padding: 5px 10px 17px;
+  margin: 0 8px -1px;
+  padding: 5px 10px 6px;
   border-color: var(--border);
   border-radius: 10px 10px 0 0;
 }
