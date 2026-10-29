@@ -155,7 +155,7 @@ it('edits policies, shows usage across machines, and cleans up only after the pl
     expect(report.links.remoteThread).toEqual({ select: 'nod_laptop:r1', dialog: false })
 
     // Trash is reviewed from the sidebar: the row says so, and Settings has no trash dialog or other-threads list.
-    expect(report.trash.row).toContain('1 thread in trash · restore or delete them from Recently deleted in the sidebar.')
+    expect(report.trash.row).toContain('1 thread in trash, listed under Recently deleted.')
     expect(report.trash.reviewButton).toBe(false)
     expect(report.trash.otherThreads).toBe(false)
 

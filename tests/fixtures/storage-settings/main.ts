@@ -18,6 +18,9 @@ void (async () => {
   const errors: string[] = []
   window.webContents.on('console-message', (_event, level, message) => { if (level >= 3) errors.push(message) })
   const run = (source: string): Promise<any> => window.webContents.executeJavaScript(source)
+  // A page error reaches here as a plain object, which String() would print as "[object Object]".
+  const describe = (error: unknown): string =>
+    error instanceof Error ? error.message : typeof error === 'object' && error ? String((error as { message?: unknown }).message ?? JSON.stringify(error)) : String(error)
   const wait = async (source: string) => {
     const end = Date.now() + 15000
     while (!await run(source)) {
@@ -42,12 +45,14 @@ void (async () => {
       }
       await run('document.documentElement.dataset.theme = "dark"')
     }
-    const evidence = await run('window.storageFixture.run()')
+    // A page error loses its message on the way out of executeJavaScript, so the page sends it as text.
+    const evidence = await run('window.storageFixture.run().catch((error) => ({ pageError: String(error && error.stack || error) }))')
+    if (evidence.pageError) throw new Error(evidence.pageError)
     writeFileSync(join(directory, 'evidence.json'), JSON.stringify({ ok: true, errors, ...evidence }))
     window.destroy()
     app.exit(0)
   } catch (error) {
-    writeFileSync(join(directory, 'evidence.json'), JSON.stringify({ ok: false, error: String(error), errors }))
+    writeFileSync(join(directory, 'evidence.json'), JSON.stringify({ ok: false, error: describe(error), errors }))
     window.destroy()
     app.exit(1)
   }
