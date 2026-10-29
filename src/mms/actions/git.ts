@@ -213,24 +213,6 @@ export function setAsidePendingChanges(cwd: string, label: string, options: Pend
   return snapshot
 }
 
-/** Keeps a snapshot under another ref (pending changes that wait for their conversation branch). */
-export function movePendingSnapshot(snapshot: PendingChangesSnapshot, ref: string): PendingChangesSnapshot {
-  git(snapshot.top, ['update-ref', ref, snapshot.commit, ''])
-  git(snapshot.top, ['update-ref', '-d', snapshot.ref, snapshot.commit])
-  return { ...snapshot, ref }
-}
-
-/** The snapshots kept under `prefix` (see `movePendingSnapshot`), oldest first. */
-export function pendingSnapshotsUnder(cwd: string, prefix: string): PendingChangesSnapshot[] {
-  const top = git(cwd, ['rev-parse', '--show-toplevel'])
-  const refs = git(top, ['for-each-ref', '--sort=refname', '--format=%(refname) %(objectname)', prefix]).split(/\r?\n/).filter(Boolean)
-  return refs.map((line) => {
-    const [ref, commit] = line.split(' ')
-    const [base, index, untracked] = commitParents(top, commit)
-    return { top, ref, commit, base, index, ...(untracked ? { untracked } : {}) }
-  })
-}
-
 function occupied(path: string): boolean {
   try { lstatSync(path); return true } catch { return false }
 }
@@ -387,15 +369,6 @@ export function discardPendingChanges(cwd: string): { backupRef: string } {
 export function commitParents(cwd: string, sha: string): string[] {
   const line = git(cwd, ['rev-list', '--parents', '-n', '1', sha])
   return line.split(/\s+/).slice(1)
-}
-
-/** Child commits are contributions of their merge, never a second reversal unit. */
-export function introducedCommits(cwd: string, start: string, end: string): string[] {
-  if (start === end) return []
-  if (!tryGit(cwd, ['merge-base', '--is-ancestor', start, end]).ok) {
-    throw new Error('Workspace history diverged from the recorded change boundary.')
-  }
-  return git(cwd, ['rev-list', '--first-parent', '--reverse', `${start}..${end}`]).split(/\r?\n/).filter(Boolean)
 }
 
 export function changedPaths(cwd: string, start: string, end: string): Array<{ path: string; beforeHash?: string; afterHash?: string }> {

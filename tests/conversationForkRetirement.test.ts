@@ -13,7 +13,7 @@ import { releaseExecutionLeaseHandle, waitAcquireExecutionLease } from '../src/m
 import { ThreadWorkspaceManager } from '../src/mms/workspace/ThreadWorkspaceManager'
 import { actionOptions, git, gitFoundationFixture } from './fixtures/gitFoundation'
 
-test('an activated historical conversation fork retires and reconstructs at its original provisioned checkout', async () => {
+test('an activated historical conversation fork retires and reconstructs at its original provisioned checkout once its code is committed', async () => {
   const f = gitFoundationFixture()
   try {
     const directory = join(f.home, 'thread-data', 'task')
@@ -34,11 +34,17 @@ test('an activated historical conversation fork retires and reconstructs at its 
     const branches = new ConversationBranchService(directory)
     const fork = await branches.fork(original.worktreePath, 'main', forkPoint.id, 'Historical alternative')
     await branches.activate(original.worktreePath, fork.id)
+    // Activating a fork switches the files only: the checkout stays on the thread's own Git branch.
+    expect(manager.load()!.worktreePath).toBe(original.worktreePath)
+    expect(manager.load()!.branch).toBe(original.branch)
+    expect(manager.load()!.conversationBranchId).toBe(fork.id)
+    expect(f.read(original.worktreePath)).toBe('historical fork result\n')
+    // A checkout retires only when it holds nothing uncommitted (retiring from snapshots is still to come), so the person commits the fork's code.
+    git(original.worktreePath, 'add', '-A'); git(original.worktreePath, 'commit', '-qm', 'historical fork result')
+    const committed = git(original.worktreePath, 'rev-parse', 'HEAD')
+    await actions.recordOutsideChanges({ threadId: 'task', conversationBranchId: fork.id, workspacePath: original.worktreePath })
     const selected = manager.load()!
-    expect(selected.worktreePath).toBe(original.worktreePath)
-    expect(selected.branch).toBe(fork.gitBranch)
-    expect(selected.branch).not.toBe(original.branch)
-    expect(f.read(selected.worktreePath)).toBe('historical fork result\n')
+    expect(selected.headSha).toBe(committed)
     const taskLease = await waitAcquireExecutionLease(directory)
     const repositoryLease = await acquireRepositoryLease(resolveRepositoryIdentity(f.repo))
     try {
@@ -46,28 +52,26 @@ test('an activated historical conversation fork retires and reconstructs at its 
       const input = { taskId: 'task', worktreePath: selected.worktreePath,
         branch: selected.branch, sourcePath: manager.workspacePath, baseSha: selected.baseSha, resultSha: selected.headSha }
       const journal = new ThreadJournal(directory, { readOnly: true })
-      for (const operationType of ['conversation-fork', 'action-checkpoint']) {
-        const authority = journal.list().find((entry) => entry.operationType === operationType && entry.state === 'completed' &&
-          (operationType === 'conversation-fork' || entry.operationId === forkPoint.id))!
-        expect(authority).toBeDefined()
-        const path = join(journal.directory, `${String(authority.sequence).padStart(16, '0')}.json`)
-        renameSync(path, path + '.withheld')
-        try {
-          expect(() => retirement.prepare(input)).toThrow(/Known source/)
-          expect(f.read(selected.worktreePath)).toBe('historical fork result\n')
-        } finally { renameSync(path + '.withheld', path) }
-      }
+      // The checkout is the thread's own: without the provisioning record that says so, it is retained.
+      const authority = journal.list().find((entry) => entry.operationType === 'workspace-provision' && entry.state === 'planned')!
+      expect(authority).toBeDefined()
+      const path = join(journal.directory, `${String(authority.sequence).padStart(16, '0')}.json`)
+      renameSync(path, path + '.withheld')
+      try {
+        expect(() => retirement.prepare(input)).toThrow(/Known source/)
+        expect(f.read(selected.worktreePath)).toBe('historical fork result\n')
+      } finally { renameSync(path + '.withheld', path) }
       const manifest = retirement.prepare(input)
-      expect(manifest.branch).toBe(fork.gitBranch)
+      expect(manifest.branch).toBe(original.branch)
       retirement.retire(retirement.pathFor('task', selected.worktreePath))
       expect(existsSync(selected.worktreePath)).toBe(false)
     } finally { repositoryLease.release(); releaseExecutionLeaseHandle(taskLease) }
     const restored = await new ThreadWorkspaceManager(directory).restore(f.repo)
     expect(restored.lifecycle).toBe('ready')
     expect(restored.worktreePath).toBe(original.worktreePath)
-    expect(restored.branch).toBe(fork.gitBranch)
+    expect(restored.branch).toBe(original.branch)
     expect(restored.conversationBranchId).toBe(fork.id)
-    expect(git(restored.worktreePath, 'rev-parse', 'HEAD')).toBe(forkPoint.endSha)
+    expect(git(restored.worktreePath, 'rev-parse', 'HEAD')).toBe(committed)
     expect(f.read(restored.worktreePath)).toBe('historical fork result\n')
     expect(f.read(f.repo)).toBe('base\n')
     expect(git(f.repo, 'rev-parse', 'HEAD')).toBe(f.baseSha)

@@ -8,6 +8,7 @@ import { RedoService } from '../src/mms/actions/RedoService'
 import { ThreadActionService } from '../src/mms/actions/ThreadActionService'
 import { UndoService } from '../src/mms/actions/UndoService'
 import { restoreChange, takeSnapshot, worktreeTree } from '../src/mms/actions/snapshots'
+import { ChildAgentIntegrationService } from '../src/mms/agents/ChildAgentIntegrationService'
 import { ThreadJournal } from '../src/mms/data/ThreadJournal'
 import { ThreadWorkspaceManager } from '../src/mms/workspace/ThreadWorkspaceManager'
 import type { ThreadAction } from '../src/shared/threadActions'
@@ -440,5 +441,56 @@ describe('conversation forks', () => {
     // The files the person had when leaving were recorded as theirs first.
     const outside = actions.list().find((item) => item.turnId.startsWith('user-changes:'))!
     expect(git(cwd, 'show', `${outside.endSha}:later.txt`)).toBe('later')
+  })
+})
+
+describe('seeding another worktree from a snapshot', () => {
+  it('a cross-thread fork starts at the commit the snapshot was taken on and gets its files, without a snapshot commit on its branch', async () => {
+    write('earlier.txt', 'earlier\n'); git(cwd, 'add', 'earlier.txt'); git(cwd, 'commit', '-qm', 'earlier')
+    const head = git(cwd, 'rev-parse', 'HEAD')
+    const { action } = await turn('turn', () => { write('value.txt', 'turn result\n'); write('new.txt', 'new\n') })
+    const forkThread = join(f.root, 'fork-thread'); mkdirSync(forkThread)
+    const manager = new ThreadWorkspaceManager(forkThread)
+    const seeded = await manager.provision('fork', 'main', f.repo, undefined, undefined, head, { snapshot: action.endSha })
+    expect(f.read(seeded.worktreePath)).toBe('turn result\n')
+    expect(f.read(seeded.worktreePath, 'new.txt')).toBe('new\n')
+    expect(f.read(seeded.worktreePath, 'earlier.txt')).toBe('earlier\n')
+    // The branch is at the real commit, the files are uncommitted, and the first turn will not call them outside changes.
+    expect(git(seeded.worktreePath, 'rev-parse', 'HEAD')).toBe(head)
+    expect(git(seeded.worktreePath, 'status', '--porcelain', '--untracked-files=all')).toBe('M value.txt\n?? new.txt')
+    expect(seeded.snapshotSha).toBe(action.endSha)
+    expect(git(seeded.worktreePath, 'rev-parse', seeded.retainedRef)).toBe(action.endSha)
+    const forkActions = new ThreadActionService(forkThread)
+    expect((await forkActions.recordOutsideChanges({ threadId: 'fork', conversationBranchId: 'main', workspacePath: seeded.worktreePath })).action).toBeUndefined()
+    // The source thread's files are untouched.
+    expect(f.read(cwd)).toBe('turn result\n')
+  })
+})
+
+describe('subagent results', () => {
+  it('a worker’s snapshot is merged into the thread by the pinned integration, whatever the worker did to its own HEAD since', async () => {
+    const worker = f.child('worker-branch', git(cwd, 'rev-parse', 'HEAD'))
+    git(worker, 'config', 'user.name', 'Test'); git(worker, 'config', 'user.email', 'test@example.test')
+    const workerActions = new ThreadActionService(join(f.root, 'worker-journal'))
+    const { action } = await workerActions.runCheckpointedAction({ ...actionOptions(worker, 'worker-result'), threadId: 'worker' }, () => writeFileSync(join(worker, 'worker.txt'), 'worker\n'))
+    // The worker keeps going: its own HEAD and files move on after the result it reported.
+    writeFileSync(join(worker, 'worker.txt'), 'worker, later\n'); git(worker, 'add', 'worker.txt'); git(worker, 'commit', '-qm', 'later')
+    const head = git(cwd, 'rev-parse', 'HEAD')
+    const record = await new ChildAgentIntegrationService(f.thread).integrate({
+      agentId: 'worker', workerWorktree: worker, workerBranch: 'worker-branch', spawnBaseSha: head,
+      expectedWorkerHead: action.endSha, pinnedWorkerSha: action.endSha, threadWorkspace: cwd, expectedDestinationHead: head
+    })
+    expect(f.read(cwd, 'worker.txt')).toBe('worker\n')
+    expect(record.workerHeadSha).toBe(action.endSha)
+    expect(git(cwd, 'rev-parse', 'HEAD')).toBe(record.integrationSha)
+    // The latest snapshot already includes the merge, so the next turn does not record it as outside changes.
+    expect((await actions.recordOutsideChanges({ threadId: 'task', conversationBranchId: 'main', workspacePath: cwd })).action).toBeUndefined()
+    // A worker that changed nothing has no result to merge.
+    const idle = f.child('idle-branch', head)
+    const { action: none } = await new ThreadActionService(join(f.root, 'idle-journal')).runCheckpointedAction({ ...actionOptions(idle, 'idle-result'), threadId: 'idle' }, () => undefined)
+    await expect(new ChildAgentIntegrationService(f.thread).integrate({
+      agentId: 'idle', operationId: 'idle', workerWorktree: idle, workerBranch: 'idle-branch', spawnBaseSha: head,
+      expectedWorkerHead: none.endSha, pinnedWorkerSha: none.endSha, threadWorkspace: cwd, expectedDestinationHead: git(cwd, 'rev-parse', 'HEAD')
+    })).rejects.toThrow(/no authored commit/)
   })
 })

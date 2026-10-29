@@ -640,9 +640,11 @@ describe('workflow agent worktrees', () => {
       expect(git(f.repo, ['branch', '--list', 'mousse/agent/*'])).toBe('')
       const agentAttempt = done.attempts.find((attempt) => attempt.nodeId === 'agent')!
       const verification = done.attempts.find((attempt) => attempt.nodeId === 'verify')!
-      expect(agentAttempt.workspaceRevision?.writeSha).toBe(result.sha)
+      // The writer's result is a snapshot of the files, not a commit: the script reads exactly it, and HEAD never moved.
+      expect(agentAttempt.workspaceRevision?.writeSha).not.toBe(result.sha)
       expect(agentAttempt.workspaceRevision?.receiptId).toBeTruthy()
-      expect(verification.workspaceRevision?.readSha).toBe(result.sha)
+      expect(verification.workspaceRevision?.readSha).toBe(agentAttempt.workspaceRevision?.writeSha)
+      expect(result.sha).toBe(f.primaryHead)
       expect(existsSync(join(f.repo, 'branch.txt'))).toBe(false)
       expect(git(f.repo, ['rev-parse', 'HEAD'])).toBe(f.primaryHead)
       await new UndoService(directory).undoLatest('main', metadata.worktreePath)
@@ -827,9 +829,10 @@ describe('workflow agent worktrees', () => {
         .filter((path) => path.toLowerCase().includes('/wf/') || path.toLowerCase().includes('\\wf\\'))
       expect(paths).toHaveLength(2)
       expect(paths.map((path) => readFileSync(join(path, 'branch.txt'), 'utf8')).sort()).toEqual(['left-result', 'right-result'])
+      // Each worker's result is uncommitted files in its worktree (a snapshot records it); HEAD is where it started.
       for (const path of paths) {
-        expect(git(path, ['status', '--porcelain'])).toBe('')
-        expect(git(path, ['rev-parse', 'HEAD'])).not.toBe(f.primaryHead)
+        expect(git(path, ['status', '--porcelain'])).toBe('?? branch.txt')
+        expect(git(path, ['rev-parse', 'HEAD'])).toBe(f.primaryHead)
       }
       const metadata = new ThreadWorkspaceManager(f.services.threads.getThreadDir(f.thread.id)).load()!
       expect(git(metadata.worktreePath, ['diff', '--name-only', '--diff-filter=U'])).toBe('branch.txt')
