@@ -58,9 +58,11 @@
   }
 }
 
-/* The run menu: the shared menu material with even padding; wide enough for the permission line. */
-.composer-run-menu {
-  max-height: min(480px, calc(100vh - 96px));
+/* The run menu: the shared menu material with even padding; wide enough for the permission line.
+   It shows every option without scrolling: only the window bounds it (the floating layer keeps 8px
+   from each edge), not the shared menu's 280px cap, which app.css sets after this file. */
+.composer-mode-menu.composer-run-menu {
+  max-height: calc(100vh - 16px);
 }
 
 .composer-run-menu.has-permissions {
