@@ -112,6 +112,7 @@ describe('composer picker from snapshots', () => {
       expect(modelRowSubtitle({ providerName: 'Anthropic', makerLabel: undefined }, true)).toBeUndefined()
       expect(makerLabelOf('anthropic', 'Anthropic', family('claude-opus-4', 'Claude Opus 4', 'anthropic'))).toBeUndefined()
       expect(makerLabelOf('claude', 'Claude Code', family('claude-opus-4', 'Claude Opus 4', 'claude'))).toBeUndefined()
+      expect(makerLabelOf('claude:work', 'Claude Code', { brandId: 'anthropic', brandLabel: 'Anthropic' })).toBeUndefined()
     })
 
     it('never shows a raw provider id as the maker', () => {

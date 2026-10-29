@@ -20,7 +20,7 @@ import {
   resolveModelVariant,
   type ModelFamily
 } from '../../shared/modelVariants'
-import { ProviderIcon, normalizeProviderId } from '../lib/providerIcons'
+import { ProviderIcon, normalizeProviderId, providerMakerId } from '../lib/providerIcons'
 import { instanceBadges, knownModelLabel } from '../lib/providerSnapshots'
 import { listingKey, listingServes } from '../../shared/providerInstances'
 import { useAppStore } from '../stores/appStore'
@@ -707,11 +707,8 @@ function ProfileModelFamilyMenu({
 
 /** Brand ids that are the provider's own, so naming them would only repeat the provider. */
 function sameMaker(providerId: string, providerLabel: string, family: Pick<ModelFamily, 'brandId' | 'brandLabel'>): boolean {
-  const provider = normalizeProviderId(providerId)
-  const brand = normalizeProviderId(family.brandId)
   return (
-    brand === provider ||
-    (provider === 'claude' && brand === 'anthropic') ||
+    providerMakerId(family.brandId) === providerMakerId(providerId) ||
     family.brandLabel.trim().toLowerCase() === providerLabel.trim().toLowerCase()
   )
 }
