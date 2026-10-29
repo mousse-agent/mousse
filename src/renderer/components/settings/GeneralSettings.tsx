@@ -3,12 +3,13 @@ import type { MousseSettings, MousseSettingsUpdate, SettingsOptions, ThemeId } f
 import type { UpdateState } from '../../../shared/updates'
 import { subscribeToUpdates, updateActions, useUpdateStore } from '../../stores/updateStore'
 import { InstallConfirm } from '../updates/InstallConfirm'
+import { UpdateErrorNotice } from '../updates/UpdateErrorNotice'
 import { Bell, Download, Info, Loader2, Palette, RefreshCw, RotateCcw, ShieldCheck } from '../../lib/icons'
 import { describePermissionMode, PERMISSION_MODES } from '../../../shared/permissionMode'
+import { PermissionModeLabel } from '../../lib/permissionModeIcon'
 import { Select } from '../ui/Select'
 import { SettingsGroup, SettingsRow, Switch } from './SettingsRow'
 import { RunSettingsGroup } from './RunSettingsGroup'
-import { PrivacySettingsGroup } from './PrivacySettingsGroup'
 
 /** Set at build time from package.json (electron.vite.config.ts). */
 declare const __MOUSSE_VERSION__: string | undefined
@@ -190,13 +191,13 @@ export function GeneralSettings({
       <SettingsGroup title="Permissions" icon={ShieldCheck}>
         <SettingsRow
           title="Default permission mode"
-          description="What an agent may do in a new chat without asking. Each chat can change it from the composer."
+          description={<span title="What an agent may do in a new chat without asking. Each chat can change it from the composer.">What an agent may do without asking in new chats.</span>}
           control={
             <Select
               ariaLabel="Default permission mode"
               value={settings.permissions.defaultMode}
               onChange={(defaultMode) => void onUpdate({ permissions: { defaultMode } })}
-              options={PERMISSION_MODES.map((mode) => ({ value: mode, label: describePermissionMode(mode) }))}
+              options={PERMISSION_MODES.map((mode) => ({ value: mode, label: <PermissionModeLabel mode={mode}>{describePermissionMode(mode)}</PermissionModeLabel>, textValue: describePermissionMode(mode) }))}
             />
           }
         />
@@ -218,7 +219,7 @@ export function GeneralSettings({
         />
         <SettingsRow
           title="All threads on my other computers"
-          description="Notify when any thread on another of your computers needs you or finishes. Off: only threads you started or sent a message in from this computer, or opened here in the last 7 days."
+          description={<span title="Off: only threads you started or sent a message in from this computer, or opened here in the last 7 days.">Notify when any thread on another computer needs you or finishes.</span>}
           control={
             <Switch
               label="Notify for all threads on my other computers"
@@ -228,8 +229,6 @@ export function GeneralSettings({
           }
         />
       </SettingsGroup>
-
-      <PrivacySettingsGroup />
 
       <SettingsGroup title="About" icon={Info}>
         <AboutRow />
@@ -245,16 +244,16 @@ function updateStatus(state: UpdateState): string | undefined {
     case 'up-to-date': return 'Up to date'
     case 'available': return `Version ${state.availableVersion} is available`
     case 'downloading': return `Downloading ${state.availableVersion}… ${state.downloadPercent ?? 0}%`
-    case 'downloaded': return state.error ? `Update not installed: ${state.error.message}` : `${state.availableVersion} is ready to install`
+    case 'downloaded': return state.error ? `${state.availableVersion} is downloaded but not installed` : `${state.availableVersion} is ready to install`
     case 'installing': return `Installing ${state.availableVersion}…`
-    case 'error': return state.error?.message ?? 'The last update check failed.'
+    case 'error': return state.availableVersion ? `Version ${state.availableVersion} is available` : 'The last update check failed.'
     default: return undefined
   }
 }
 
-/** Colours only outcomes: a failure, up to date, or an update ready to install. */
+/** Colours only outcomes: up to date, or an update ready to install. A failure shows in UpdateErrorNotice. */
 function updateStatusClass(state: UpdateState): string | undefined {
-  if (state.phase === 'error' || (state.phase === 'downloaded' && state.error)) return 'settings-status-bad'
+  if (state.phase === 'error' || state.error) return undefined
   if (state.phase === 'up-to-date' || state.phase === 'downloaded') return 'settings-status-ok'
   return undefined
 }
@@ -307,7 +306,9 @@ function AboutRow() {
         title={version ? `Mousse ${version}` : 'Mousse'}
         description={status && <span role="status" className={updateStatusClass(state)}>{status}</span>}
         control={control}
-      />
+      >
+        {state.error && <UpdateErrorNotice error={state.error} />}
+      </SettingsRow>
       <InstallConfirm open={confirming} version={state.availableVersion ?? ''} onClose={() => setConfirming(false)} />
     </>
   )

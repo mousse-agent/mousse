@@ -203,6 +203,16 @@ describe('Claude background helpers through the orchestrator (issue #142)', () =
     expect(manager.getActivity(s.childThread)).toBe('completed')
   })
 
+  it('a Stop that cannot end what the provider runs says so in the thread (issue #417)', async () => {
+    const s = await scene()
+    vi.spyOn(s.service, 'stopThread').mockImplementation(() => {
+      throw new Error('Claude Code could not be stopped.')
+    })
+    expect(await s.d.orch.stopProviderWork(s.childThread)).toBe(false)
+    const messages = s.d.orch.getOrCreateSession(s.childThread).messages
+    expect(messages.some((message) => message.content === 'Stop could not end everything this chat started. Claude Code could not be stopped.')).toBe(true)
+  })
+
   it('writes a note into the thread when Claude says a helper\'s result may not have arrived', async () => {
     const s = await scene()
     ;(s.service as any).liveHost.notice(s.childThread, 'A helper finished while a message was being cancelled; its result may not have been delivered.')

@@ -31,7 +31,7 @@ const CODEX_MOUSSE_TOOL_PREFIX = `mcp__${MOUSSE_MCP_SERVER_NAME}__`
 export type CodexClient = Pick<
   CodexProviderService,
   'chat' | 'commitConversation' | 'standaloneWorkspace' | 'configured' | 'interrupt' | 'steer' | 'userSetup'
-> & Partial<Pick<CodexProviderService, 'commitInterrupted'>>
+> & Partial<Pick<CodexProviderService, 'commitInterrupted' | 'stopThread'>>
 
 /** How Codex 0.162.1 begins the message of a turn its `auth.command` failed (wire test). */
 const TOKEN_COMMAND_FAILED = 'provider auth command '
@@ -295,6 +295,14 @@ export class CodexAdapter implements ProviderAdapter {
   /** Interrupts the live Codex turn of `ref` (`turn/interrupt`); Stop also aborts the turn's signal. */
   async interrupt(ref: ProviderRef): Promise<'interrupted' | 'not_active'> {
     return (await this.service()?.interrupt(ref.sessionId)) ?? 'not_active'
+  }
+
+  /**
+   * Stop: the thread's commands (its helpers' too) that Codex still runs after the interrupt are
+   * killed with everything they started. Rejects when one could not be stopped.
+   */
+  async stopThread(threadId: string): Promise<'stopped' | 'not_active'> {
+    return (await this.service()?.stopThread?.(threadId)) ?? 'not_active'
   }
 
   /** Adds `text` to the live Codex turn of `ref` without cancelling it (`turn/steer`). */

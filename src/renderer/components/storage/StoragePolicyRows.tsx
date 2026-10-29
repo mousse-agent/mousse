@@ -2,22 +2,26 @@ import { useState, type ReactNode } from 'react'
 import type { TrashRetentionPolicy } from '../../../shared/resourceLifecycle'
 import { STORAGE_POLICY_MAX_DAYS, type StoragePolicy } from '../../../shared/storage'
 import { GitBranch, Globe, Trash2 } from '../../lib/icons'
-import { KEEP_WHEN_COPY, STORAGE_RULE_COPY, WORKTREE_GROUP_DESCRIPTION, trashCountSentence, type StorageRuleId } from '../../lib/storageCopy'
+import { STORAGE_RULE_COPY, WORKTREE_GROUP_DESCRIPTION, WORKTREE_GROUP_TOOLTIP, ruleTooltip, trashCountSentence, type StorageRuleId } from '../../lib/storageCopy'
 import { SettingsGroup, SettingsRow, Switch } from '../settings/SettingsRow'
 import { Select } from '../ui/Select'
 
 const PRESET_DAYS = [7, 30, 90]
 const CUSTOM = 'custom'
 
-/** The words under a rule: what it deletes and what it never deletes. */
-export function RuleDescription({ rule, extra }: { rule: StorageRuleId; extra?: ReactNode }) {
+/** The full words for a rule, where there is room for them (the recommended-rules dialog). */
+export function RuleDescription({ rule }: { rule: StorageRuleId }) {
   const copy = STORAGE_RULE_COPY[rule]
   return <>
     <span className="storage-rule-line"><strong>Deletes</strong> {copy.deletes}</span>
-    <span className="storage-rule-line"><strong>Never deletes</strong> {copy.never}</span>
+    {copy.never && <span className="storage-rule-line"><strong>Never deletes</strong> {copy.never}</span>}
     {copy.note && <span className="storage-rule-line">{copy.note}</span>}
-    {extra && <span className="storage-rule-line">{extra}</span>}
   </>
+}
+
+/** The one short line under a rule's title; the details are its tooltip. */
+function RuleLine({ rule, text }: { rule: StorageRuleId; text?: string }) {
+  return <span title={ruleTooltip(rule)}>{text ?? STORAGE_RULE_COPY[rule].line}</span>
 }
 
 /** Days from a typed value, or undefined when it is not a whole number the daemon accepts. */
@@ -132,7 +136,7 @@ export function StoragePolicyRows(props: StoragePolicyRowsProps) {
         data-testid="storage-auto-empty"
         title={STORAGE_RULE_COPY.trash.title}
         htmlFor="storage-auto-empty-select"
-        description={props.trashPaused ? 'Paused after a system clock change.' : <RuleDescription rule="trash" extra={trashCountSentence(props.trashCount)} />}
+        description={props.trashPaused ? 'Paused after a system clock change.' : <RuleLine rule="trash" text={trashCountSentence(props.trashCount)} />}
         control={<>
           {props.trashPaused && trash && <button type="button" className="settings-btn" disabled={busy} onClick={props.onResumeTrash}>Resume</button>}
           <DaysSelect
@@ -149,7 +153,7 @@ export function StoragePolicyRows(props: StoragePolicyRowsProps) {
       />
     </SettingsGroup>
 
-    <SettingsGroup title="Worktrees" icon={GitBranch} id="storage-worktrees" description={WORKTREE_GROUP_DESCRIPTION}>
+    <SettingsGroup title="Worktrees" icon={GitBranch} id="storage-worktrees" description={<span title={WORKTREE_GROUP_TOOLTIP}>{WORKTREE_GROUP_DESCRIPTION}</span>}>
       {props.storagePaused && <SettingsRow
         data-testid="storage-clock-paused"
         title="Time-based cleanup is paused"
@@ -160,14 +164,14 @@ export function StoragePolicyRows(props: StoragePolicyRowsProps) {
         data-testid="storage-remove-deleted"
         title={STORAGE_RULE_COPY.deletedThreads.title}
         htmlFor="storage-remove-deleted-switch"
-        description={<RuleDescription rule="deletedThreads" />}
+        description={<RuleLine rule="deletedThreads" />}
         control={<Switch id="storage-remove-deleted-switch" checked={policy?.worktrees.removeWithDeletedThreads ?? false} disabled={busy || !policy} onChange={(next) => setWorktrees({ removeWithDeletedThreads: next })} />}
       />
       <SettingsRow
         data-testid="storage-inactive"
         title={STORAGE_RULE_COPY.inactive.title}
         htmlFor="storage-inactive-select"
-        description={<RuleDescription rule="inactive" />}
+        description={<RuleLine rule="inactive" />}
         control={<DaysSelect
           id="storage-inactive-select"
           testId="storage-inactive-select"
@@ -183,10 +187,9 @@ export function StoragePolicyRows(props: StoragePolicyRowsProps) {
         data-testid="storage-merged"
         title={STORAGE_RULE_COPY.merged.title}
         htmlFor="storage-merged-switch"
-        description={<RuleDescription rule="merged" />}
+        description={<RuleLine rule="merged" />}
         control={<Switch id="storage-merged-switch" checked={policy?.worktrees.removeMerged ?? false} disabled={busy || !policy} onChange={(next) => setWorktrees({ removeMerged: next })} />}
       />
-      <SettingsRow data-testid="storage-keep-when" title={KEEP_WHEN_COPY.title} description={KEEP_WHEN_COPY.description} />
     </SettingsGroup>
 
     <SettingsGroup title="Browser data" icon={Globe} id="storage-browser">
@@ -194,7 +197,7 @@ export function StoragePolicyRows(props: StoragePolicyRowsProps) {
         data-testid="storage-captures"
         title={STORAGE_RULE_COPY.captures.title}
         htmlFor="storage-captures-select"
-        description={<RuleDescription rule="captures" />}
+        description={<RuleLine rule="captures" />}
         control={<DaysSelect
           id="storage-captures-select"
           testId="storage-captures-select"

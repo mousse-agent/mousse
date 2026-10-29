@@ -154,7 +154,7 @@ describe.skipIf(!windows)('programs on a Windows owner', () => {
 
   it('runs from a helper whose path has a space, as under a profile name with one', async () => {
     const root = await mkdtemp(join(tmpdir(), 'mousse helper '))
-    cleanup.push(() => rm(root, { recursive: true, force: true }))
+    cleanup.push(() => rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }))
     const helper = join(root, 'with space', 'sshd.exe')
     await mkdir(dirname(helper))
     await copyFile(sshdHelper!, helper)
@@ -461,7 +461,7 @@ describe.skipIf(!windows)('a daemon that is a process of its own', () => {
 
   it('survives the daemon’s death: a detached server keeps running, and a new daemon’s sweep ends it', async () => {
     const root = await mkdtemp(join(tmpdir(), 'mousse daemon '))
-    cleanup.push(() => rm(root, { recursive: true, force: true }))
+    cleanup.push(() => rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }))
     const home = join(root, 'home')
     await mkdir(home)
     const host = await bundledHost(root)
@@ -562,7 +562,7 @@ describe.skipIf(!windows)('the helper', () => {
 
   it('makes the endpoint unavailable when it cannot run, and tries again later', async () => {
     const root = await mkdtemp(join(tmpdir(), 'mousse retry '))
-    cleanup.push(() => rm(root, { recursive: true, force: true }))
+    cleanup.push(() => rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }))
     const helper = join(root, 'sshd.exe')
     const missing = createWindowsHost({ helper, retryDelays: [300] })
     cleanup.push(() => missing.release())

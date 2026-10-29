@@ -343,6 +343,14 @@ export class ThreadApprovals {
     return threadId === undefined ? select(this.store, "status = 'pending'") : select(this.store, "status = 'pending' AND thread_id = ?", threadId)
   }
 
+  /** The thread's newest `limit` requests in any status, oldest first: what its transcript shows. */
+  listForThread(threadId: string, limit = 200): ApprovalRecord[] {
+    return this.db
+      .statement('SELECT * FROM (SELECT rowid AS seq, * FROM approval_requests WHERE thread_id = ? ORDER BY created_at DESC, rowid DESC LIMIT ?) ORDER BY created_at, seq')
+      .all(threadId, limit)
+      .map(toRecord)
+  }
+
   listPendingForRun(runId: string): ApprovalRecord[] {
     return select(this.store, "status = 'pending' AND run_id = ?", runId)
   }

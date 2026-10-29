@@ -255,6 +255,39 @@ describe('what a computer refused, in words', () => {
   }, 60_000)
 })
 
+describe('the Auto permission mode', () => {
+  it('is set on a computer that knows it, and reaches an older one as Auto-accept edits', async () => {
+    const thread = t.thread()
+    const id = t.qualified(thread.id)
+    const stored = () => t.owner.threads.getThread(thread.id)!.permissionMode
+    // The owner lets this device use Auto at most.
+    await t.owner.net.request('bridge.policy', { node: t.callerNode, maxPermissionMode: 'auto' })
+    try {
+      await t.dispatch('threads.setPermissionMode', { threadId: id, mode: 'auto' })
+      expect(stored()).toBe('auto')
+      await t.dispatch('threads.setPermissionMode', { threadId: id, mode: 'ask' })
+      const older = clientWith((real) => ({
+        rpc: async (method: string, params: unknown, options: unknown) => {
+          const answer = await real.rpc(method, params, options)
+          if (method !== 'net.info') return answer
+          const info = answer as { routed: Record<string, number> }
+          // A computer from before Auto: version 1 of the row.
+          return { ...info, routed: { ...info.routed, 'threads.setPermissionMode': 1 } }
+        }
+      }))
+      await withClient(older, async () => {
+        await t.dispatch('threads.setPermissionMode', { threadId: id, mode: 'auto' })
+        expect(stored()).toBe('accept_edits')
+        // The other modes go as they are.
+        await t.dispatch('threads.setPermissionMode', { threadId: id, mode: 'ask' })
+        expect(stored()).toBe('ask')
+      })
+    } finally {
+      await t.owner.net.request('bridge.policy', { node: t.callerNode, maxPermissionMode: 'accept_edits' })
+    }
+  }, 60_000)
+})
+
 describe('a call that takes too long', () => {
   it('is sent once: a slow read on a connected computer is not a lost link', async () => {
     const thread = t.thread()

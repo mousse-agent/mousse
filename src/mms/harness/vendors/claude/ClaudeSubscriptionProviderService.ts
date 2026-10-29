@@ -44,7 +44,7 @@ import {
   type StoredCliConfig
 } from '../../cliConfig'
 import { resolveWindowsShim } from '../../resolveWindowsShim'
-import { claudeAccountSubject, claudeBypassDisabled } from './accountSubject'
+import { claudeAccountSubject, claudeAutoModeDisabled, claudeBypassDisabled } from './accountSubject'
 import {
   ClaudeMetricsCollector,
   ClaudeNativeEditCounter,
@@ -54,7 +54,8 @@ import {
 import { parseClaudeSubscriptionUsage } from './usage'
 import { claudeMcpToolBlocked, claudeProxiedMcpServer, type ClaudeTurnIntegrations } from './integrations'
 import { claudeActionOf, claudeChildToolDenial, claudePermissionKey } from './childPolicy'
-import { CancelInProgress, DEFAULT_LIVE_TIMINGS, LiveSession, type LiveRun, type LiveTimings } from './liveSession'
+import { CancelInProgress, claudeQueryPid, DEFAULT_LIVE_TIMINGS, LiveSession, type LiveRun, type LiveTimings } from './liveSession'
+import { reapProcessTree } from '../../stopProcesses'
 import { CLAUDE_TURN_EXTRA_ARGS, TurnFrames } from './turnFrames'
 import { readUsageLimit } from '../../../orchestrator/providerErrors'
 import { USAGE_LIMIT_HOLD_MS, usageLimitFromResult, usageLimitFromWindows, type RejectedWindows } from './usageLimit'
@@ -107,9 +108,10 @@ export type ClaudeSubscriptionChatInput = {
   signal?: AbortSignal
   mode?: 'plan' | 'default'
   /**
-   * The thread's permission mode for this turn (`ask`, `accept_edits`, `full`); absent reads as the
-   * default (`accept_edits`). Enforced through Claude Code's own permission mode, the PreToolUse
-   * hook and `canUseTool`; a live query follows it turn by turn.
+   * The thread's permission mode for this turn (`ask`, `accept_edits`, `auto`, `full`); absent reads as
+   * the default (`accept_edits`). Enforced through Claude Code's own permission mode, the PreToolUse
+   * hook and `canUseTool`; a live query follows it turn by turn. `auto` arrives only when the gateway
+   * found this Claude Code able to run it (`HarnessCaps.autoPermissionMode`).
    */
   permissionMode?: ThreadPermissionMode
   /** Set for a delegated child's turns (first and resumed); see `claudeChildToolDenial`. */
@@ -194,6 +196,11 @@ type Dependencies = {
   live?: false | Partial<LiveTimings>
   /** How long a turn Claude Code holds after a rejected plan window runs before Mousse ends it (tests). */
   usageLimitHoldMs?: number
+  /**
+   * Ends a closed Claude Code process that has not exited by itself (`reapProcessTree`), with the
+   * commands it started; tests substitute the grace or the kill.
+   */
+  reap?: (pid: number) => Promise<'ended' | 'killed' | 'survived'>
   query?: (input: { prompt: string | AsyncIterable<SDKUserMessage>; options: Options }) => Query
   runAuth?: (
     binary: string,
@@ -303,6 +310,30 @@ export type AuthProbe =
 
 /** How long a live `claude auth status` result stands before it is checked again. */
 export const CLAUDE_AUTH_STATUS_TTL_MS = 5 * 60_000
+
+/** Each thread permission mode as the Claude Code permission mode a turn runs in. */
+export const CLAUDE_PERMISSION_MODES: Readonly<Record<ThreadPermissionMode, PermissionMode>> = Object.freeze({
+  ask: 'default',
+  accept_edits: 'acceptEdits',
+  auto: 'auto',
+  full: 'bypassPermissions'
+})
+
+/** Why a thread set to Auto runs as Auto-accept edits on a Claude Code whose settings turn auto mode off. */
+export const CLAUDE_AUTO_MODE_DISABLED = 'Claude Code settings turn auto mode off'
+
+/**
+ * Whether Mousse's `PreToolUse` hook sends a call to `canUseTool` (Mousse asks the user) instead of
+ * leaving it to Claude Code. A command, and under Ask an edit, that the thread's mode does not allow
+ * always asks, so the user's own allow rules cannot skip Mousse's check. Under Auto, Claude Code's auto
+ * mode decides commands itself: its classifier runs what it judges safe and sends the rest to
+ * `canUseTool`, so the hook does not ask first. Edits under Auto go ahead as under Auto-accept edits.
+ */
+export function claudeModeAsks(mode: ThreadPermissionMode, action: ReturnType<typeof claudeActionOf>): boolean {
+  if (action !== 'command' && action !== 'edit') return false
+  if (mode === 'auto') return false
+  return !permissionModeAllows(mode, action)
+}
 const FALLBACK_MODELS: LlmModelOption[] = ['sonnet', 'opus', 'haiku'].map((id) => ({
   id,
   label: `Claude ${id[0].toUpperCase()}${id.slice(1)}`
@@ -719,11 +750,20 @@ export class ClaudeSubscriptionProviderService {
     return claudeAccountSubject(this.environment())
   }
   /**
-   * Whether the user's Claude settings forbid `bypassPermissions` for a turn in `cwd`
-   * (`claudeBypassDisabled`), read again every time: nothing is cached, and nothing edits the settings.
+   * Whether the user's Claude settings forbid `bypassPermissions` (`claudeBypassDisabled`) or turn auto
+   * mode off (`claudeAutoModeDisabled`) for a turn in `cwd`, read again every time: nothing is cached,
+   * and nothing edits the settings.
    */
   permissionLimits(cwd?: string): PermissionLimits | undefined {
-    return claudeBypassDisabled(this.environment(), cwd ? { cwd } : {}) ? { bypassDisabled: true } : undefined
+    const env = this.environment()
+    const options = cwd ? { cwd } : {}
+    const bypassDisabled = claudeBypassDisabled(env, options)
+    const autoDisabled = claudeAutoModeDisabled(env, options)
+    if (!bypassDisabled && !autoDisabled) return undefined
+    return {
+      ...(bypassDisabled ? { bypassDisabled: true } : {}),
+      ...(autoDisabled ? { unavailable: { auto: CLAUDE_AUTO_MODE_DISABLED } } : {})
+    }
   }
   /** Checks the sign-in with the environment the caller captured for its turn. */
   private async authenticated(signal?: AbortSignal, env = this.environment()): Promise<boolean> {
@@ -1127,15 +1167,37 @@ export class ClaudeSubscriptionProviderService {
   /**
    * Stop reaches Claude's process: the live query is closed, which ends its background agents and
    * shells, and the thread's obligations end with it. Works on a thread whose turn already ended.
+   * A process that has not exited by itself shortly after is killed with everything it started
+   * (`reapClosed`).
    */
   stopThread(threadId: string): 'stopped' | 'not_active' {
     this.liveCommits.delete(threadId)
     const live = this.live.get(threadId)
     if (!live || live.dead) return 'not_active'
     this.questions.dismissAllForThread(threadId)
+    const pid = live.processId()
     live.close('closed')
     this.live.delete(threadId)
+    this.reapClosed(threadId, pid)
     return 'stopped'
+  }
+  /**
+   * Issue #417: a closed Claude Code process normally exits at once, ending the commands it runs
+   * (the Stop's interrupt already ended the one in the foreground). One that is still running after
+   * the Stop grace is killed with every process below it, so no command outlives the Stop; one that
+   * cannot be killed is said in the thread, so it does not look stopped while it still runs.
+   */
+  private reapClosed(threadId: string, pid: number | undefined): void {
+    if (pid === undefined) return
+    const reap = this.dependencies.reap ?? ((target: number) => reapProcessTree(target))
+    void reap(pid).then(
+      (outcome) => {
+        if (outcome === 'killed') console.warn('[claude-subscription] Claude Code did not exit after Stop; its processes were killed', { threadId, pid })
+        if (outcome === 'survived')
+          this.notifyHost(() => this.liveHost?.notice?.(threadId, `Stop could not end Claude Code's process for this chat (process ${pid}). It, or a command it started, may still be running.`))
+      },
+      (error: unknown) => console.warn('[claude-subscription] could not end a stopped Claude Code process', { threadId, pid, error: error instanceof Error ? error.message : String(error) })
+    )
   }
   /** Threads that hold a live Claude process (diagnostics and tests). */
   liveThreadIds(): string[] {
@@ -1366,7 +1428,7 @@ export class ClaudeSubscriptionProviderService {
                 // does not allow without asking: the user's own allow rules must not skip Mousse's
                 // check. Other tools (MCP tools, reads) follow Claude Code's own rules.
                 const action = event.hook_event_name === 'PreToolUse' ? claudeActionOf(event.tool_name) : 'read'
-                const modeAsks = (action === 'command' || action === 'edit') && !permissionModeAllows(turn.permissionMode, action)
+                const modeAsks = claudeModeAsks(turn.permissionMode, action)
                 if (turn.restricted || modeAsks)
                   return { hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'ask', ...stamp } }
                 return stamp ? { hookSpecificOutput: { hookEventName: 'PreToolUse', ...stamp } } : {}
@@ -1600,7 +1662,12 @@ export class ClaudeSubscriptionProviderService {
       // A live query outlives the turn: the turn is interrupted, and only Stop, an idle release or a
       // replacement closes the query.
       if (live && liveRun) live.abandon(liveRun)
-      else query?.close()
+      else if (query) {
+        // A one-shot query ends its process with the turn; one that does not exit is killed (`reapClosed`).
+        const pid = claudeQueryPid(query)
+        query.close()
+        this.reapClosed(input.threadId, pid)
+      }
       this.questions.dismissAllForThread(input.threadId)
     }
     input.signal?.addEventListener('abort', cancel, { once: true })
@@ -1680,7 +1747,10 @@ export class ClaudeSubscriptionProviderService {
     // since then from ever starting a bypass Claude Code would refuse.
     const bypassDisabled = claudeBypassDisabled(this.environment(), { cwd: input.cwd })
     const requestedMode = normalizePermissionMode(input.permissionMode)
-    const threadMode: ThreadPermissionMode = requestedMode === 'full' && bypassDisabled ? 'accept_edits' : requestedMode
+    // The same for auto mode: settings that turned it off since admission make the turn Auto-accept edits.
+    const threadMode: ThreadPermissionMode = (requestedMode === 'full' && bypassDisabled) || (requestedMode === 'auto' && claudeAutoModeDisabled(this.environment(), { cwd: input.cwd }))
+      ? 'accept_edits'
+      : requestedMode
     const turn: TurnContext = { input, controller, integrations, editCounter, planTurn, restricted, permissionMode: threadMode, ...(locked ? { locked: new ClaudeLockedGate(locked, Boolean(input.mcp)) } : {}) }
     try {
       const signedIn = await this.authenticated(controller.signal, env)
@@ -1693,12 +1763,14 @@ export class ClaudeSubscriptionProviderService {
       const effort = ['low', 'medium', 'high', 'xhigh', 'max'].includes(selected.effort ?? '')
         ? selected.effort as Options['effort'] : undefined
       // The thread's permission mode, in Claude Code's own terms: Ask asks about everything it would
-      // not allow itself, Auto-accept edits lets edits through, Full access bypasses its checks.
+      // not allow itself, Auto-accept edits lets edits through, Auto hands the decision to Claude Code's
+      // auto mode (its classifier runs what it judges safe and asks through canUseTool about the rest),
+      // Full access bypasses its checks.
       const permissionMode: PermissionMode = planTurn
         ? 'plan'
         : readOnlyChild
           ? 'default'
-          : { ask: 'default', accept_edits: 'acceptEdits', full: 'bypassPermissions' }[threadMode] as PermissionMode
+          : CLAUDE_PERMISSION_MODES[threadMode]
       const launchAppend = locked ? [] : claudeLaunchAppendSystemPrompt(claudeExtraArgs(storedCliArgs(this.launchSettings())), input.cwd)
       const appendTexts = [input.systemPromptAppend ?? '', ...launchAppend]
       // What a live process is started for (`HARD_PARTS`); a process the turn can reuse already holds the conversation.

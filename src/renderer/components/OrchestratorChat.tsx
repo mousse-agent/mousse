@@ -32,8 +32,10 @@ import { MousseAgentChatShell } from '../chat/components/MousseAgentChatShell'
 import { SubagentParentBar } from './SubagentParentBar'
 import { SubagentComposerBanner } from './SubagentComposerBanner'
 import { ThreadMoveBanner } from './providers/MoveProviderDialog'
-import { mousseToUIMessages, chatStatusFromPhase } from '../chat/adapters/mousseToUI'
+import { mousseToUIMessages, chatStatusFromTurn } from '../chat/adapters/mousseToUI'
 import { useTurnSenders } from '../hooks/useTurnSenders'
+import { usePermissionRequests } from '../hooks/usePermissionRequests'
+import { permissionRequestOptions } from '../chat/components/agent-elements/tools/permission-request'
 import {
   findQuickActionCardForApproval,
   questionAnswerThreadId,
@@ -262,7 +264,10 @@ export function OrchestratorChat() {
   // A turn that a person on another of the user's computers sent says which one (the sender is kept on the run).
   const userTurns = useMemo(() => messages.reduce((count, message) => count + (message.role === 'user' && message.turnId ? 1 : 0), 0), [messages])
   const turnSenders = useTurnSenders(activeThreadId, Boolean(activeThread?.sentFrom && !activeThread.node), userTurns)
-  const uiMessages = useMemo(() => mousseToUIMessages(messages, turnSenders), [messages, turnSenders])
+  // Permission requests show inline in the turn that asked them, with the answer they got; agent questions keep the dialog.
+  const permissionRequests = usePermissionRequests(activeThreadId, setSendError, describeAnswerOutcome)
+  const placePermissionRequests = permissionRequests.place
+  const uiMessages = useMemo(() => placePermissionRequests(mousseToUIMessages(messages, turnSenders)), [messages, turnSenders, placePermissionRequests])
   // The older images of a long thread of another computer come by name; their bytes are fetched as the thread is shown.
   const shownRemote = Boolean(activeThread?.node)
   // Opening a thread (also Retry, which opens it again) asks again for images that could not be fetched before.
@@ -272,7 +277,7 @@ export function OrchestratorChat() {
   useEffect(() => {
     if (shownRemote && activeThreadId) void hydrateMessageImages(activeThreadId)
   }, [shownRemote, activeThreadId, messages.length])
-  const chatStatus = useMemo(() => chatStatusFromPhase(turnState?.phase ?? 'idle'), [turnState])
+  const chatStatus = useMemo(() => chatStatusFromTurn(turnState), [turnState])
   const turnActive = isTurnActivePhase(turnState?.phase ?? 'idle')
 
   // Visible steer feedback: the daemon emits turn-steered when prompt text is
@@ -407,6 +412,8 @@ export function OrchestratorChat() {
 
   useEffect(() => {
     const unsub = window.mousse.orchestrator.onQuestionsPending((payload) => {
+      // A permission request is answered inline in the transcript (usePermissionRequests), never in the dialog.
+      if (permissionRequestOptions(payload)) return
       if (!payload.threadId || payload.threadId === activeThreadId) {
         setPendingQuestions(payload)
       }
@@ -1074,6 +1081,7 @@ export function OrchestratorChat() {
         onSend={() => void handleSend()}
         onStop={() => void handleStop()}
         quickActionApproval={quickActionApproval}
+        permissionRequests={permissionRequests.controls}
         composer={(
       <div
         ref={inputAreaRef}
@@ -1240,7 +1248,7 @@ export function OrchestratorChat() {
               contextOpen={contextOpen}
               onContextOpenChange={setContextOpen}
               loading={turnActive || loading}
-              placeholder={workspaceReady ? (pendingQuestions?.approval ? APPROVAL_COMPOSER_PLACEHOLDER : undefined) : 'Loading workspace...'}
+              placeholder={workspaceReady ? (permissionRequests.waiting || pendingQuestions?.approval ? APPROVAL_COMPOSER_PLACEHOLDER : undefined) : 'Loading workspace...'}
               onSend={(skillMode) => void handleSend(skillMode)}
               onStop={() => void handleStop()}
               banner={<SubagentComposerBanner threadId={activeThreadId} />}

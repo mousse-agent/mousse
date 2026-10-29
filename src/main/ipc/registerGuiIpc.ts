@@ -26,6 +26,7 @@ import { randomUUID } from 'node:crypto'
 import type { GuiMmsController } from '../mms/GuiMmsController'
 import { PresentationState } from '../mms/PresentationState'
 import { bootstrapPresentation } from '../mms/bootstrapPresentation'
+import { coalescedRunner } from '../mms/coalescedRunner'
 export { bootstrapPresentation } from '../mms/bootstrapPresentation'
 import { MmsProtocolError } from '../../mms/protocol/client'
 import { guiChatRequestError } from '../mms/requestErrors'
@@ -112,7 +113,6 @@ import type {
   GitPullOptions,
   GitPushOptions,
   GitScope,
-  ApprovalRuleInfo,
   MainView,
   OrchestratorContextUsageInput,
   OrchestratorSendInput,
@@ -128,6 +128,8 @@ import type {
   TurnState,
   TurnStateSnapshot,
   QuestionAnswerOutcome,
+  PendingUserQuestions,
+  ThreadApprovalRequest,
   UserQuestionAnswers
 } from '../../shared/types'
 import { isThreadActivityActive } from '../../shared/types'
@@ -934,7 +936,10 @@ export function registerGuiIpc(
     }
   })
 
-  guiMms.on('window-resnapshot', async ({ senderId }: { senderId: number }) => {
+  // A window asks for a resnapshot on every event while its gap flag is set, which is a burst during
+  // streaming. One snapshot runs at a time per window (and one more if asked meanwhile); one per
+  // event filled the connection's request limit and failed unrelated calls.
+  const resnapshotWindow = coalescedRunner(async (senderId: number) => {
     const win = BrowserWindow.getAllWindows().find((candidate) => candidate.webContents.id === senderId)
     const binding = guiMms.getWindowBindingForSender(senderId)
     if (!win || win.isDestroyed() || !binding) return
@@ -945,11 +950,11 @@ export function registerGuiIpc(
       const target = (channel: string, data: unknown): void => {
         if (!win.isDestroyed()) win.webContents.send(channel, data)
       }
-      const full = snap as { agents?: unknown[]; tasks?: unknown[]; pendingQuestions?: Array<{ requestId: string; questions: unknown }> }
+      const full = snap as { agents?: unknown[]; tasks?: unknown[]; pendingQuestions?: Array<{ requestId: string; questions: unknown; approval?: unknown }> }
       target('queue:updated', { threadId: activeId, items: snap.queue })
       target('agents:updated', full.agents ?? [])
       target('tasks:updated', full.tasks ?? [])
-      for (const q of full.pendingQuestions ?? []) target('orchestrator:questionsPending', { requestId: q.requestId, questions: q.questions, threadId: activeId })
+      for (const q of full.pendingQuestions ?? []) target('orchestrator:questionsPending', { requestId: q.requestId, questions: q.questions, threadId: activeId, ...(q.approval ? { approval: q.approval } : {}) })
       const state = snap.activeTurn?.active ? { threadId: activeId, state: snap.activeTurn.running ? 'processing' : 'idle' } : { threadId: activeId, state: 'idle' }
       turnStateMapFor(binding.profileId).set(activeId, state as unknown as TurnState)
       target('orchestrator:turn-state', state)
@@ -958,10 +963,12 @@ export function registerGuiIpc(
       console.error('window resnapshot failed:', error)
     }
   })
+  guiMms.on('window-resnapshot', ({ senderId }: { senderId: number }) => {
+    void resnapshotWindow(senderId)
+  })
 
-  guiMms.on('resnapshot', async (event?: { reason?: string }) => {
-    // A reconnect may be to a restarted service: provider operations the windows wait on are gone.
-    if (event?.reason?.startsWith('reconnect')) broadcast('providers:serviceRestarted', null)
+  // Same burst for the base connection, and each run here costs three requests.
+  const resnapshotBase = coalescedRunner(async (_key: 'base') => {
     const activeId = currentPresentation().getActiveThreadId()
     if (!activeId || !guiMms.connected) return
     try {
@@ -969,7 +976,7 @@ export function registerGuiIpc(
       const full = snap as {
         agents?: unknown[]
         tasks?: unknown[]
-        pendingQuestions?: Array<{ requestId: string; questions: unknown }>
+        pendingQuestions?: Array<{ requestId: string; questions: unknown; approval?: unknown }>
       }
       syncDaemonTurnSnapshot(snap)
       broadcastThreadSnapshot(
@@ -988,7 +995,8 @@ export function registerGuiIpc(
       for (const q of full.pendingQuestions ?? []) {
         broadcast('orchestrator:questionsPending', {
           requestId: q.requestId,
-          questions: q.questions
+          questions: q.questions,
+          ...(q.approval ? { approval: q.approval } : {})
         })
       }
       const projects = await guiMms.request<{ projects: unknown[] }>('projects.list')
@@ -999,6 +1007,11 @@ export function registerGuiIpc(
     } catch (err) {
       console.error('resnapshot failed:', err)
     }
+  })
+  guiMms.on('resnapshot', (event?: { reason?: string }) => {
+    // A reconnect may be to a restarted service: provider operations the windows wait on are gone.
+    if (event?.reason?.startsWith('reconnect')) broadcast('providers:serviceRestarted', null)
+    void resnapshotBase('base')
   })
 
   browserView.init(getWindow, (state) => broadcast('browser:state', state))
@@ -1099,6 +1112,16 @@ export function registerGuiIpc(
       requestId
     }, threadId))
     return res.ok
+  })
+  // A thread's saved approval requests and their answers, which its transcript shows where they were asked.
+  registerHandler('orchestrator:approvalRequests', async (_e, threadId: string) => {
+    const res = await guiMms.request<{ requests: ThreadApprovalRequest[] }>('threads.approvalRequests', { threadId })
+    return res.requests
+  })
+  // Every thread's waiting questions and approval requests, so the sidebar can tell which threads wait for an approval.
+  registerHandler('orchestrator:pendingQuestions', async () => {
+    const res = await guiMms.request<{ pending: PendingUserQuestions[] }>('orchestrator.pendingQuestions', {})
+    return res.pending
   })
 
   registerHandler('orchestrator:abort', async (_e, threadId?: string) => {
@@ -1369,7 +1392,7 @@ export function registerGuiIpc(
       activity?: import('../../shared/types').ThreadActivityState
       agents?: unknown[]
       tasks?: unknown[]
-      pendingQuestions?: Array<{ requestId: string; questions: unknown }>
+      pendingQuestions?: Array<{ requestId: string; questions: unknown; approval?: unknown }>
     }
     syncDaemonTurnSnapshot(snap)
     // The runtime activity label is normally authoritative. During reconnects or
@@ -1410,7 +1433,8 @@ export function registerGuiIpc(
     for (const q of full.pendingQuestions ?? []) {
       broadcast('orchestrator:questionsPending', {
         requestId: q.requestId,
-        questions: q.questions
+        questions: q.questions,
+        ...(q.approval ? { approval: q.approval } : {})
       })
     }
     // Selecting a thread does not mutate the thread list — skip threads.list
@@ -1553,14 +1577,6 @@ export function registerGuiIpc(
     )
     broadcast('threads:updated', res.threads)
     return res.thread
-  })
-  registerHandler('threads:approvalRules', async (_e, threadId: string) => {
-    const res = await guiMms.request<{ rules: ApprovalRuleInfo[] }>('threads.approvalRules', { threadId })
-    return res.rules
-  })
-  registerHandler('threads:clearApprovalRules', async (_e, threadId: string, ruleId?: string) => {
-    const res = await guiMms.request<{ rules: ApprovalRuleInfo[] }>('threads.clearApprovalRules', { threadId, ...(ruleId ? { ruleId } : {}) })
-    return res.rules
   })
   registerHandler('threads:settle', async (_e, threadId: string, settled: boolean) => {
     const res = await guiMms.request<{ thread: unknown; threads: unknown[] }>(

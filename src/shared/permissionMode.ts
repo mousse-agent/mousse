@@ -3,13 +3,19 @@ import type { ChatMessage } from './types'
 
 /**
  * How much an agent may do in a thread without asking: `ask` (commands and edits ask), `accept_edits`
- * (edits go ahead, commands ask) or `full` (nothing asks). Every provider enforces it with its own
- * controls; one that cannot is refused at turn admission rather than run unenforced.
+ * (edits go ahead, commands ask), `auto` (edits go ahead, and the agent's own auto mode decides which
+ * commands are safe to run and asks about the rest) or `full` (nothing asks). Every provider enforces
+ * it with its own controls; one that cannot is refused at turn admission rather than run unenforced.
+ *
+ * Only an agent with an auto mode of its own (`HarnessCaps.autoPermissionMode`) runs in `auto`. On any
+ * other agent a thread set to Auto runs exactly as Auto-accept edits would (`effectivePermissionMode`),
+ * and Mousse's own checks treat `auto` as `accept_edits` (`permissionModeAllows`): only the agent's own
+ * auto mode ever lets a command through without asking.
  */
-export type PermissionMode = 'ask' | 'accept_edits' | 'full'
+export type PermissionMode = 'ask' | 'accept_edits' | 'auto' | 'full'
 
 /** Strictest first: a lower index is a stricter mode. */
-export const PERMISSION_MODES: readonly PermissionMode[] = ['ask', 'accept_edits', 'full']
+export const PERMISSION_MODES: readonly PermissionMode[] = ['ask', 'accept_edits', 'auto', 'full']
 
 export const DEFAULT_PERMISSION_MODE: PermissionMode = 'accept_edits'
 
@@ -44,10 +50,14 @@ export function narrowPermissionMode(...modes: Array<PermissionMode | undefined>
   return strictest ?? DEFAULT_PERMISSION_MODE
 }
 
-/** Whether `action` may go ahead without asking in `mode`. */
+/**
+ * Whether `action` may go ahead without asking in `mode`, as far as Mousse itself decides. Auto lets no
+ * more through here than Auto-accept edits: what Auto adds is the agent's own auto mode deciding, which
+ * only that agent's driver hands over to (Claude Code's `auto` permission mode).
+ */
 export function permissionModeAllows(mode: PermissionMode, action: PermissionAction): boolean {
   if (mode === 'full') return true
-  if (mode === 'accept_edits') return action === 'edit'
+  if (mode === 'accept_edits' || mode === 'auto') return action === 'edit'
   return false
 }
 
@@ -55,6 +65,7 @@ export function describePermissionMode(mode: PermissionMode): string {
   switch (mode) {
     case 'ask': return 'Ask before acting'
     case 'accept_edits': return 'Auto-accept edits'
+    case 'auto': return 'Auto'
     case 'full': return 'Full access'
   }
 }
@@ -63,7 +74,10 @@ export function describePermissionMode(mode: PermissionMode): string {
 export interface PermissionLimits {
   /** Claude Code: the user's settings forbid `bypassPermissions`. */
   bypassDisabled?: boolean
-  /** Modes the runtime cannot enforce, each with the reason shown when a thread resolves to a stricter one. */
+  /**
+   * Modes the runtime cannot enforce, each with the reason shown when a thread resolves to a stricter one
+   * (Claude Code: `auto` while its settings turn auto mode off).
+   */
   unavailable?: Partial<Record<PermissionMode, string>>
   /** Full access also turns the agent's own sandbox off (Codex), which the permission menu says. */
   sandboxOffInFull?: boolean
@@ -71,12 +85,17 @@ export interface PermissionLimits {
 
 /**
  * The modes an instance can enforce, strictest first. `exact` and `approval_only` instances can
- * enforce all three; one that approves tools itself (`uncontrolled`) can only run in Full access.
+ * enforce Ask, Auto-accept edits and Full access, and Auto when the agent has an auto mode of its own
+ * (`autoPermissionMode`); one that approves tools itself (`uncontrolled`) can only run in Full access.
  */
-export function supportedPermissionModes(caps: Partial<Pick<HarnessCaps, 'toolControl'>>, limits: PermissionLimits = {}): PermissionMode[] {
+export function supportedPermissionModes(caps: Partial<Pick<HarnessCaps, 'toolControl' | 'autoPermissionMode'>>, limits: PermissionLimits = {}): PermissionMode[] {
   // Caps from before the key existed read as uncontrolled: Mousse never assumes control it cannot show.
   if ((caps.toolControl ?? 'uncontrolled') === 'uncontrolled') return ['full']
-  return PERMISSION_MODES.filter((mode) => !(mode === 'full' && limits.bypassDisabled) && !limits.unavailable?.[mode])
+  return PERMISSION_MODES.filter((mode) =>
+    !(mode === 'full' && limits.bypassDisabled) &&
+    // Caps from before the key existed, and every agent without an auto mode, have no Auto.
+    !(mode === 'auto' && caps.autoPermissionMode !== true) &&
+    !limits.unavailable?.[mode])
 }
 
 export type EffectivePermissionMode =
@@ -86,7 +105,8 @@ export type EffectivePermissionMode =
 /**
  * The mode a turn runs in: the requested one when supported, else the nearest stricter supported
  * mode with the reason, else refused (an `ask` or `accept_edits` thread on an agent that approves
- * tools itself has no stricter mode to fall back to).
+ * tools itself has no stricter mode to fall back to). Auto on an agent that cannot run it resolves
+ * exactly as Auto-accept edits does there: the same mode or the same refusal, never anything wider.
  */
 export function effectivePermissionMode(
   requested: PermissionMode,
@@ -95,6 +115,12 @@ export function effectivePermissionMode(
 ): EffectivePermissionMode {
   if (supported.includes(requested)) return { mode: requested }
   const agent = context.agent ?? 'This provider'
+  if (requested === 'auto') {
+    const reason = context.limits?.unavailable?.auto ?? `${agent} has no auto mode`
+    const asEdits = effectivePermissionMode('accept_edits', supported, context)
+    if (asEdits.refused) return asEdits
+    return { mode: asEdits.mode, reason: asEdits.reason ? `${reason}. ${asEdits.reason}` : reason }
+  }
   const stricter = PERMISSION_MODES.filter((mode) => isStricter(mode, requested) && supported.includes(mode))
   const nearest = stricter[stricter.length - 1]
   if (nearest) {
@@ -153,6 +179,7 @@ function permissionModeSummary(mode: PermissionMode): string {
   switch (mode) {
     case 'ask': return 'Commands and file edits now ask the user before they run.'
     case 'accept_edits': return 'File edits now go ahead without asking; commands ask the user before they run.'
+    case 'auto': return 'File edits now go ahead without asking; your own auto mode decides which commands are safe to run without asking and asks the user about the rest.'
     case 'full': return 'Commands and file edits now run without asking.'
   }
 }

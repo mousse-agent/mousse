@@ -4,6 +4,11 @@ import type { QueuedMessage } from '../../shared/types'
 import { FloatingPortal, useFloatingPosition } from '../lib/floatingLayer'
 import { imagePayloadToDataUrl } from '../utils/imageAttachments'
 import { noticeSummary } from '../chat/adapters/subagentNotice'
+import { readableError } from '../lib/errorText'
+
+/** Waits before the first tries of a queue load that failed; after these it tries every `QUEUE_LOAD_RETRY_CAP_MS`. */
+export const QUEUE_LOAD_RETRY_DELAYS_MS: readonly number[] = [500, 1000, 2000]
+export const QUEUE_LOAD_RETRY_CAP_MS = 5000
 
 export interface QueuedMessagesProps {
   threadId: string | null
@@ -125,13 +130,39 @@ export function QueuedMessages({
   itemsRef.current = items
   const dragFromIndexRef = useRef<number | null>(null)
 
+  const threadIdRef = useRef(threadId)
+  threadIdRef.current = threadId
+  // Bumped by every load, every queue update, and when the thread changes or the component unmounts,
+  // so a load that finishes or wakes late changes nothing and stops retrying.
+  const loadGeneration = useRef(0)
+  const retryTimer = useRef<number | null>(null)
+  const loggedLoadFailure = useRef(false)
+
+  // A failed load is never shown: the last list stays, and the load keeps retrying quietly with
+  // backoff until it succeeds or is superseded. Only the first failure of a streak is logged.
   const loadQueue = useCallback(async (id: string) => {
-    try {
-      const list = await window.mousse.queue.list(id)
-      setItems(list)
-      setError(null)
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to load queue')
+    const generation = ++loadGeneration.current
+    const current = () => loadGeneration.current === generation && threadIdRef.current === id
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        const list = await window.mousse.queue.list(id)
+        if (!current()) return
+        loggedLoadFailure.current = false
+        setItems(list)
+        setError(null)
+        return
+      } catch (err) {
+        if (!current()) return
+        if (!loggedLoadFailure.current) {
+          loggedLoadFailure.current = true
+          console.warn('Loading the queued messages failed; retrying in the background.', err)
+        }
+        const delay = QUEUE_LOAD_RETRY_DELAYS_MS[attempt] ?? QUEUE_LOAD_RETRY_CAP_MS
+        await new Promise<void>((resolve) => {
+          retryTimer.current = window.setTimeout(resolve, delay)
+        })
+        if (!current()) return
+      }
     }
   }, [])
 
@@ -150,6 +181,7 @@ export function QueuedMessages({
     const unsub = window.mousse.queue.onUpdated(({ threadId: updatedId, items: next }) => {
       if (updatedId !== threadId) return
       settled = true
+      loadGeneration.current += 1
       setItems(next)
       setError(null)
     })
@@ -159,6 +191,11 @@ export function QueuedMessages({
     return () => {
       unsub()
       window.clearTimeout(fallback)
+      // Stops a load that is retrying for this thread.
+      loadGeneration.current += 1
+      loggedLoadFailure.current = false
+      if (retryTimer.current !== null) window.clearTimeout(retryTimer.current)
+      retryTimer.current = null
     }
   }, [threadId, loadQueue])
 
@@ -200,7 +237,7 @@ export function QueuedMessages({
         setError(null)
       } catch (err) {
         setItems(previous)
-        setError(err instanceof Error ? err.message : 'Could not reorder queue')
+        setError(readableError(err, 'Could not reorder the queue.'))
         void loadQueue(threadId)
       }
     },
@@ -214,7 +251,7 @@ export function QueuedMessages({
       await window.mousse.queue.remove(threadId, itemId)
       setError(null)
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Could not remove queued message')
+      setError(readableError(err, 'Could not remove the queued message.'))
       void loadQueue(threadId)
     } finally {
       setBusyIds((current) => {
@@ -236,11 +273,7 @@ export function QueuedMessages({
         void loadQueue(threadId)
       }
     } catch (err) {
-      setError(
-        err instanceof Error
-          ? err.message
-          : 'Could not steer — the turn may have ended. The message remains in the queue.'
-      )
+      setError(readableError(err, 'Could not steer — the turn may have ended. The message remains in the queue.'))
       void loadQueue(threadId)
     } finally {
       setBusyIds((current) => {

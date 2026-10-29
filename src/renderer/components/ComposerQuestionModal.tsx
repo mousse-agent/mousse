@@ -1,5 +1,5 @@
-import { useEffect, useState } from 'react'
-import { X } from '../lib/icons'
+import { useEffect, useState, type KeyboardEvent } from 'react'
+import { Check, X } from '../lib/icons'
 import { ALWAYS_OPTION_NOTE } from '../../shared/permissionKeys'
 import type { PendingApprovalInfo, PendingUserQuestions, QuestionAnswerOutcome, UserQuestion, UserQuestionAnswers } from '../../shared/types'
 
@@ -78,6 +78,45 @@ function initAnswers(questions: UserQuestion[]): UserQuestionAnswers {
     initial[question.id] = question.allowMultiple ? [] : ''
   }
   return initial
+}
+
+/** The choices of one question: a filled row marks what is selected; arrow keys move between rows. */
+export function QuestionOptionList({ options, value, allowMultiple, onToggle }: {
+  options: UserQuestion['options']
+  value: string | string[] | undefined
+  allowMultiple?: boolean
+  onToggle: (optionId: string) => void
+}) {
+  const moveFocus = (event: KeyboardEvent<HTMLDivElement>) => {
+    const step = event.key === 'ArrowDown' ? 1 : event.key === 'ArrowUp' ? -1 : 0
+    if (!step) return
+    const rows = Array.from(event.currentTarget.querySelectorAll<HTMLButtonElement>('button'))
+    const at = rows.indexOf(document.activeElement as HTMLButtonElement)
+    if (at < 0) return
+    event.preventDefault()
+    rows[(at + step + rows.length) % rows.length]?.focus()
+  }
+  return (
+    <div className="composer-question-options" onKeyDown={moveFocus}>
+      {options.map((option) => {
+        const selected = allowMultiple
+          ? Array.isArray(value) && value.includes(option.id)
+          : value === option.id
+        return (
+          <button
+            key={option.id}
+            type="button"
+            className={`composer-question-option${selected ? ' selected' : ''}`}
+            aria-pressed={selected}
+            onClick={() => onToggle(option.id)}
+          >
+            <span className="composer-question-option-label">{option.label}</span>
+            {selected && <Check size={14} strokeWidth={2} className="composer-question-option-check" aria-hidden="true" />}
+          </button>
+        )
+      })}
+    </div>
+  )
 }
 
 export function ComposerQuestionModal({ pending, onSubmit, onDismiss }: ComposerQuestionModalProps) {
@@ -187,24 +226,12 @@ export function ComposerQuestionModal({ pending, onSubmit, onDismiss }: Composer
           {pending.approval && active.options.some((option) => option.scope === 'always') && (
             <p className="composer-question-reason">{ALWAYS_OPTION_NOTE}</p>
           )}
-          <div className="composer-question-options">
-            {active.options.map((option) => {
-              const selected = active.allowMultiple
-                ? Array.isArray(value) && value.includes(option.id)
-                : value === option.id
-              return (
-                <button
-                  key={option.id}
-                  type="button"
-                  className={`composer-question-option${selected ? ' selected' : ''}`}
-                  aria-pressed={selected}
-                  onClick={() => toggleOption(active.id, option.id, active.allowMultiple)}
-                >
-                  {option.label}
-                </button>
-              )
-            })}
-          </div>
+          <QuestionOptionList
+            options={active.options}
+            value={value}
+            allowMultiple={active.allowMultiple}
+            onToggle={(optionId) => toggleOption(active.id, optionId, active.allowMultiple)}
+          />
           <input
             type="text"
             value={customValue}

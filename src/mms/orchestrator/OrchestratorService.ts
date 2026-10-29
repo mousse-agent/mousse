@@ -138,6 +138,7 @@ import {
   type AgentOrigin,
   type AgentStatus,
   type ApprovalRuleInfo,
+  type ThreadApprovalRequest,
   type ChatImageAttachment,
   type ChatMode,
   type ChatMessage,
@@ -161,6 +162,7 @@ import { isDefaultThreadName } from '../../shared/threadTitle'
 import {
   buildPermissionModeChangeNotice,
   getLastUserPermissionMode,
+  describePermissionMode,
   isPermissionMode,
   isStricter,
   narrowPermissionMode,
@@ -598,6 +600,25 @@ function approvalRuleInfo(rule: ApprovalRule, mode: PermissionMode): ApprovalRul
     grantedUnder: rule.grantedUnder,
     active: !isStricter(mode, rule.grantedUnder),
     createdAt: rule.createdAt
+  }
+}
+
+/** A saved approval request as the transcript shows it: the prompt, when it was asked and the answer it got. */
+function threadApprovalRequest(record: ApprovalRecord): ThreadApprovalRequest {
+  const by = record.answeredBy
+  return {
+    requestId: record.requestId,
+    ...(record.runId ? { runId: record.runId } : {}),
+    action: record.action,
+    prompt: record.questions[0]?.prompt ?? '',
+    status: record.status,
+    ...(record.decision ? { decision: record.decision } : {}),
+    ...(record.decisionScope ? { scope: record.decisionScope } : {}),
+    // Who answered, without an agent's run or a computer's id: the transcript only says whether it was the user.
+    ...(by ? { answeredBy: by.kind === 'user' ? { kind: 'user' as const, ...(by.via ? { via: by.via } : {}) } : { kind: 'agent' as const } } : {}),
+    ...(record.cancelReason ? { cancelReason: record.cancelReason } : {}),
+    createdAt: record.createdAt,
+    ...(record.settledAt ? { settledAt: record.settledAt } : {})
   }
 }
 
@@ -1748,7 +1769,7 @@ export class OrchestratorService extends EventEmitter {
       },
       effectDelivery: () => this.effectsEnabled(),
       continuationDue: (due, answeredBy) => this.startApprovalContinuation(due, answeredBy),
-      ruleApplied: (threadId, rule) => this.noteProviderNotice(threadId, `Allowed without asking by your "Always for this thread" rule (${rule.summary.slice(0, 200)}). Revoke it in the thread side card.`)
+      ruleApplied: (threadId, rule) => this.noteProviderNotice(threadId, `Allowed without asking by your "Always for this thread" rule (${rule.summary.slice(0, 200)}).`)
     })
   }
 
@@ -2552,14 +2573,17 @@ export class OrchestratorService extends EventEmitter {
 
   /**
    * Stop reaches the provider's process for the thread (`HarnessGateway.stopThread`): what it still
-   * runs in the background ends, whether or not a turn is live. True when there was a process to end.
-   * Never throws.
+   * runs in the background ends, whether or not a turn is live, and a command still running after the
+   * Stop's interrupt is killed. True when there was a process to end. What could not be ended is said
+   * in the thread, so it never looks stopped while something still runs. Never throws.
    */
   async stopProviderWork(threadId: string): Promise<boolean> {
     try {
       return (await this.harness.stopThread(threadId)) === 'stopped'
     } catch (error) {
-      console.warn('provider stop failed', { threadId, error: error instanceof Error ? error.message : String(error) })
+      const message = error instanceof Error ? error.message : String(error)
+      console.warn('provider stop failed', { threadId, error: message })
+      this.noteProviderNotice(threadId, `Stop could not end everything this chat started. ${message}`)
       return false
     }
   }
@@ -4437,10 +4461,10 @@ export class OrchestratorService extends EventEmitter {
     if (!thread) throw new DomainRpcError('thread_not_found', 'Thread not found', { threadId })
     const ceiling = this.permissionCeilingFor(threadId)
     if (isStricter(ceiling, mode))
-      throw new DomainRpcError('permission_mode_above_ceiling', `This subagent cannot run above ${ceiling === 'ask' ? 'Ask before acting' : 'Auto-accept edits'}: a thread it belongs to is set to it.`, { threadId, ceiling })
+      throw new DomainRpcError('permission_mode_above_ceiling', `This subagent cannot run above ${describePermissionMode(ceiling)}: a thread it belongs to is set to it.`, { threadId, ceiling })
     // A person on another of the user's computers sets modes up to the limit this computer gave that device.
     if (by && isStricter(by.maxPermissionMode, mode))
-      throw new DomainRpcError('permission_mode_above_ceiling', `The computer that runs this thread lets this device set ${by.maxPermissionMode === 'ask' ? 'Ask before acting' : 'Auto-accept edits'} at most. To allow more, raise the limit for this device on that computer, in Settings, Devices.`, { threadId, limit: by.maxPermissionMode, reason: 'device_limit' })
+      throw new DomainRpcError('permission_mode_above_ceiling', `The computer that runs this thread lets this device set ${describePermissionMode(by.maxPermissionMode)} at most. To allow more, raise the limit for this device on that computer, in Settings, Devices.`, { threadId, limit: by.maxPermissionMode, reason: 'device_limit' })
     const previous = thread.permissionMode
     const updated = store.updateThreadMeta(threadId, { permissionMode: mode }, { touch: false })
     try {
@@ -4460,6 +4484,11 @@ export class OrchestratorService extends EventEmitter {
     if (!approvals) return []
     const mode = this.requestedPermissionMode(threadId)
     return approvals.listRules(threadId).map((rule) => approvalRuleInfo(rule, mode))
+  }
+
+  /** The thread's saved approval requests, oldest first, with the answers they got (the newest 200). */
+  listApprovalRequests(threadId: string): ThreadApprovalRequest[] {
+    return (this.runEngine?.approvals.listForThread(threadId) ?? []).map(threadApprovalRequest)
   }
 
   /** The "Always for this thread" rules that a person on the computer `node` made, in every thread. */

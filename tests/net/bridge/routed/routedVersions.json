@@ -614,6 +614,11 @@
     "digest": "f27b6fe4a93d6472",
     "security": "04f7c680ffd36337"
   },
+  "threads.approvalRequests": {
+    "version": 1,
+    "digest": "2a27f073e7829290",
+    "security": "04f7c680ffd36337"
+  },
   "threads.approvalRules": {
     "version": 1,
     "digest": "2a27f073e7829290",
@@ -680,7 +685,7 @@
     "security": "926c4af141d1208d"
   },
   "threads.setPermissionMode": {
-    "version": 1,
+    "version": 2,
     "digest": "4ec36e005f81decc",
     "security": "926c4af141d1208d"
   },

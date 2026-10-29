@@ -457,7 +457,7 @@ export function EnvRow({ snapshot, onSave }: { snapshot: InstanceSnapshot; onSav
   }
   const update = (uid: number, patch: Partial<EnvDraft>) =>
     setRows((current) => current.map((row) => (row.uid === uid ? { ...row, ...patch } : row)))
-  // Variables the Privacy switch sets last: a row naming one is not what the agent gets.
+  // Variables the Telemetry switch sets last: a row naming one is not what the agent gets.
   const enforced = new Set(snapshot.telemetry?.setting === 'off' ? (snapshot.telemetry.variables ?? []).map((name) => name.toUpperCase()) : [])
 
   return (

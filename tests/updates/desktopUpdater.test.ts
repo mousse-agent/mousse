@@ -171,6 +171,19 @@ describe('DesktopUpdater', () => {
     updater.dispose()
   })
 
+  it('downloads again when the user retries after a failed download', async () => {
+    const { backend, updater } = setup()
+    backend.offer('0.1.2-nightly.20261022.3')
+    await updater.check()
+    backend.downloadResult = Promise.reject(new Error('net::ERR_CONNECTION_RESET'))
+    await updater.download()
+    expect(updater.getState()).toMatchObject({ phase: 'error', availableVersion: '0.1.2-nightly.20261022.3', error: { during: 'download' } })
+    backend.downloadResult = Promise.resolve([])
+    await updater.download()
+    expect(updater.getState()).toMatchObject({ phase: 'downloaded', downloadPercent: 100 })
+    expect(updater.getState().error).toBeUndefined()
+  })
+
   it('records the install, stops the service, then installs silently and restarts', async () => {
     const { backend, store, hooks, updater } = setup()
     backend.offer('0.1.2-nightly.20261022.3')
