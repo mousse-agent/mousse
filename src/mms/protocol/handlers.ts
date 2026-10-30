@@ -89,6 +89,7 @@ import { isQualifiedId } from '../../shared/threadRef'
 import { resolveThreadProjectPath } from '../data/resolveActiveProjectPath'
 import { ThreadJournal } from '../data/ThreadJournal'
 import { ThreadWorkspaceManager } from '../workspace/ThreadWorkspaceManager'
+import { describeRecovery, recoveryErrorText, switchBackToThreadBranch } from '../workspace/workspaceRecovery'
 import { resolveEditorFolder } from '../workspace/editorFolder'
 import type { NodeId } from '../../shared/net/ids'
 import { scheduledJobOptionsDepsFrom, validateScheduledJobOptions, type ScheduledJobOptionsDeps } from '../scheduled/validateJobOptions'
@@ -2658,8 +2659,11 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const metadata = stored && lookup.projectPath ? manager.verify(stored) : stored
       // Never restores: the hover card and the active-project lookup call this for passive reads.
       const marker = stored && !existsSync(stored.worktreePath) ? readCleanupMarker(ctx.mms.threads.lifecycleStore, lookup.threadId) : undefined
+      // Why every turn, Undo and Publish are refused, for the banner and the CLI; absent while the thread is fine.
+      const recovery = metadata && lookup.projectPath ? describeRecovery(lookup.threadDirectory, metadata) : undefined
       return {
         metadata,
+        ...(recovery ? { recovery } : {}),
         execution: lookup.projectPath
           ? manager.executionContext(lookup.projectPath, metadata)
           : manager.unboundExecutionContext(lookup.threadId),
@@ -2940,20 +2944,37 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       await ensureWorkspaceMaterialized(ctx, operation.threadId, operation.projectPath)
       const workspace = new ThreadWorkspaceManager(operation.threadDirectory).load()
       if (!workspace || workspace.lifecycle !== 'ready') throw new DomainRpcError('workspace_not_ready', 'Thread workspace is not ready')
-      const onPendingChangesKept = ctx.mms.orchestrator.pendingChangesKeptNotice(operation.threadId)
-      await new ChildAgentIntegrationService(operation.threadDirectory, { onPendingChangesKept }).recoverPending(workspace.worktreePath)
-      await new PublishService(operation.threadDirectory, { onPendingChangesKept }).recoverPending(workspace.worktreePath, operation.projectPath)
-      await new ThreadActionService(operation.threadDirectory).recoverPending(workspace.worktreePath)
-      await new CodeRevertService(operation.threadDirectory).recoverPending(workspace.worktreePath)
-      await new UndoService(operation.threadDirectory).recoverPending(workspace.worktreePath, (target, kind) => {
-        if (kind === 'redo' && target.nativeContextStartBoundary) ctx.mms.orchestrator.restoreConversationActionEnd(operation.threadId, target.presentationMessageStart, target.presentationMessageEnd, target.nativeContextBoundary)
-        else if (target.nativeContextStartBoundary) ctx.mms.orchestrator.restoreConversationBoundary(operation.threadId, target.presentationMessageStart, target.nativeContextStartBoundary)
-      })
-      await new ConversationBranchService(operation.threadDirectory).recoverPending(workspace.worktreePath, (branch) => {
-        const target = loadConversationState(operation.threadDirectory, branch.id)
-        ctx.mms.orchestrator.replaceConversationState(operation.threadId, target.messages, target.nativeContext)
-      })
-      return { ok: true }
+      // The Switch back and continue button: the agent checked out another branch. Everything is checked before Git moves.
+      let switched: { from: string; message: string } | undefined
+      if (p.switchBack !== undefined && typeof p.switchBack !== 'boolean') throw new DomainRpcError('invalid_params', 'switchBack must be a boolean')
+      if (p.switchBack === true) {
+        if (ctx.mms.orchestrator.isConversationHistoryBusy(operation.threadId)) throw new DomainRpcError('thread_busy', 'Wait for active or queued work to finish.')
+        try {
+          switched = await withGitMutationLocks(operation.threadDirectory, workspace.worktreePath, 'switch-back', () => switchBackToThreadBranch(workspace))
+        } catch (error) {
+          throw new DomainRpcError('switch_back_refused', error instanceof Error ? error.message : String(error))
+        }
+      }
+      try {
+        const onPendingChangesKept = ctx.mms.orchestrator.pendingChangesKeptNotice(operation.threadId)
+        await new ChildAgentIntegrationService(operation.threadDirectory, { onPendingChangesKept }).recoverPending(workspace.worktreePath)
+        await new PublishService(operation.threadDirectory, { onPendingChangesKept }).recoverPending(workspace.worktreePath, operation.projectPath)
+        await new ThreadActionService(operation.threadDirectory).recoverPending(workspace.worktreePath)
+        await new CodeRevertService(operation.threadDirectory).recoverPending(workspace.worktreePath)
+        await new UndoService(operation.threadDirectory).recoverPending(workspace.worktreePath, (target, kind) => {
+          if (kind === 'redo' && target.nativeContextStartBoundary) ctx.mms.orchestrator.restoreConversationActionEnd(operation.threadId, target.presentationMessageStart, target.presentationMessageEnd, target.nativeContextBoundary)
+          else if (target.nativeContextStartBoundary) ctx.mms.orchestrator.restoreConversationBoundary(operation.threadId, target.presentationMessageStart, target.nativeContextStartBoundary)
+        })
+        await new ConversationBranchService(operation.threadDirectory).recoverPending(workspace.worktreePath, (branch) => {
+          const target = loadConversationState(operation.threadDirectory, branch.id)
+          ctx.mms.orchestrator.replaceConversationState(operation.threadId, target.messages, target.nativeContext)
+        })
+      } catch (error) {
+        // What stopped recovery is for the person to read in the banner or the CLI, never an internal error.
+        if (error instanceof DomainRpcError) throw error
+        throw new DomainRpcError('recovery_failed', recoveryErrorText(error))
+      }
+      return { ok: true, ...(switched ? { switchedFrom: switched.from, message: switched.message } : {}) }
     }
     case 'operations.abort': {
       const p = isObject(params) ? params : {}
