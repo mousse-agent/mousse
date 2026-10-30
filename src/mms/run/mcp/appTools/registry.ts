@@ -12,6 +12,7 @@ import type { IntegrationActor } from '../../../../shared/integrations/actor'
 import type { McpToolCallResult } from '../../../../shared/integrations/results'
 import type { McpManager } from '../../../integrations/mcp/McpManager'
 import type { ModeCeiling } from '../../types'
+import type { RelayGrant } from '../relay/types'
 import type { AppToolTurns } from './turns'
 import { callerThreadOnly } from './thread'
 import {
@@ -59,6 +60,8 @@ export interface McpCredentialAuthority {
   /** The level the credential was granted for this run (SPEC §15.1). */
   accessLevel: AgentAccessLevel
   binding: McpTurnBinding
+  /** The MCP relay the turn attached (`RelayGrant`), copied from the credential; absent: none. */
+  relay?: RelayGrant
   /** Still live and of the thread's current runtime epoch (re-read after any wait). */
   current(): boolean
 }

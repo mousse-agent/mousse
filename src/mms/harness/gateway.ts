@@ -27,6 +27,7 @@ import type {
 import type { NeutralTool } from '../../shared/harness/tools'
 import type { CliProviderConfigPatch } from '../../shared/providerAuth'
 import type { ModelOverride } from '../../shared/providerInstances'
+import type { McpRelayRuntime } from '../../shared/integrations'
 import type { AgentAccessLevel, LlmProviderOption } from '../../shared/settings'
 import type { ChatMode } from '../../shared/types'
 import { parseThinkingSuffixFromModelId } from '../../shared/modelVariants'
@@ -484,6 +485,11 @@ export interface TurnAppContext {
    * `AdapterHost.bot` so built-ins and app and MCP tools are held to one authority.
    */
   bot?: BotAuthority
+  /**
+   * The MCP relay for this turn: the catalogue revision (a soft reopen key for the runtime) and, per
+   * runtime, whether the relay is on. Absent: no relay (a bot or definition turn, or no catalogue).
+   */
+  relay?: { revision: string; runtimes: Partial<Record<McpRelayRuntime, boolean>> }
 }
 
 export interface TurnHandle {

@@ -5,6 +5,9 @@ import { fail } from '../db/RunStoreError'
 import type { RunStore } from '../RunStore'
 import type { ModeCeiling } from '../types'
 import type { McpTurnBinding } from './appTools/registry'
+import type { RelayGrant } from './relay/types'
+
+export type { RelayGrant } from './relay/types'
 
 /** A credential expires after this long without a request (SPEC §15.1). */
 export const CREDENTIAL_IDLE_TTL_MS = 24 * 60 * 60 * 1000
@@ -32,6 +35,8 @@ export interface CredentialRecord {
   epoch: number
   /** How the runtime's calls are tied to a turn (in memory, like `epoch`). */
   binding: McpTurnBinding
+  /** The MCP relay the turn attached, and who asks before a relayed tool runs (in memory, like `epoch`). */
+  relay?: RelayGrant
   createdAt: string
   revokedAt: string | null
   lastSeenAt: string
@@ -54,6 +59,8 @@ export interface BearerTurn {
   /** The level the turn was granted; absent, or anything but a known level, is `lineage`. */
   accessLevel?: AgentAccessLevel
   binding: McpTurnBinding
+  /** The turn attaches the MCP relay. Not part of `generation`: turning it on or off keeps the bearer. */
+  relay?: RelayGrant
   /**
    * The runtime the turn runs in: driver, home, account generation and config revision (and the
    * engine, once an instance has two). A change is a new runtime, so a new epoch.
@@ -72,6 +79,13 @@ export interface TurnSettlement {
    * runtime itself (a Codex completion it sent, an ACP `completed` update).
    */
   drain?: { mousseCalls?: number; toolCalls?: number; toolsSettled?: boolean }
+}
+
+/** What this process keeps of a credential it minted, beside its token. */
+interface CredentialMeta {
+  epoch: number
+  binding: McpTurnBinding
+  relay?: RelayGrant
 }
 
 interface EpochState {
@@ -103,8 +117,8 @@ interface CallCounts {
 export class McpCredentials {
   /** Tokens minted by this process, by hash; the database never holds them. */
   private readonly tokens = new Map<string, string>()
-  /** The epoch and turn binding of each credential this process minted, by hash. */
-  private readonly meta = new Map<string, { epoch: number; binding: McpTurnBinding }>()
+  /** The epoch, turn binding and relay grant of each credential this process minted, by hash. */
+  private readonly meta = new Map<string, CredentialMeta>()
   /** The current runtime epoch per (thread, instance). */
   private readonly epochs = new Map<string, EpochState>()
   /** Calls received and running under each credential since it was bound to its run. */
@@ -148,6 +162,8 @@ export class McpCredentials {
         .statement('UPDATE credentials SET run_id = ?, mode_ceiling = ?, access_level = ?, last_seen_at = ? WHERE token_hash = ?')
         .run(input.runId, input.modeCeiling, grantedLevel(input.accessLevel), new Date(now).toISOString(), reusable.record.tokenHash)
       this.calls.set(reusable.record.tokenHash, { runId: input.runId, received: 0, running: 0 })
+      const meta = this.meta.get(reusable.record.tokenHash)
+      if (meta) this.meta.set(reusable.record.tokenHash, withRelay({ epoch: meta.epoch, binding: meta.binding }, input.relay))
       return { token: reusable.token, tokenHash: reusable.record.tokenHash, reused: true, epoch }
     })
   }
@@ -156,7 +172,7 @@ export class McpCredentials {
    * A fresh credential for a run in the given epoch (default: the current one of thread and
    * instance). Tests and `bearerForTurn` use it; a turn takes its bearer from `bearerForTurn`.
    */
-  mint(input: { threadId: string; runId: string; provider?: string; instanceId?: string; modeCeiling: ModeCeiling; accessLevel?: AgentAccessLevel; binding?: McpTurnBinding; epoch?: number }): {
+  mint(input: { threadId: string; runId: string; provider?: string; instanceId?: string; modeCeiling: ModeCeiling; accessLevel?: AgentAccessLevel; binding?: McpTurnBinding; epoch?: number; relay?: RelayGrant }): {
     token: string
     tokenHash: string
   } {
@@ -178,7 +194,7 @@ export class McpCredentials {
       )
       .run(tokenHash, input.threadId, input.runId, provider, input.modeCeiling, grantedLevel(input.accessLevel), now, now)
     this.tokens.set(tokenHash, token)
-    this.meta.set(tokenHash, { epoch, binding })
+    this.meta.set(tokenHash, withRelay({ epoch, binding }, input.relay))
     this.calls.set(tokenHash, { runId: input.runId, received: 0, running: 0 })
     return { token, tokenHash }
   }
@@ -380,7 +396,11 @@ function epochKey(threadId: string, instanceId: string): string {
   return `${threadId}\u0000${instanceId}`
 }
 
-function rowRecord(row: Row, meta: { epoch: number; binding: McpTurnBinding } | undefined): CredentialRecord {
+function withRelay(meta: CredentialMeta, relay: RelayGrant | undefined): CredentialMeta {
+  return relay ? { ...meta, relay: { approvals: relay.approvals } } : meta
+}
+
+function rowRecord(row: Row, meta: CredentialMeta | undefined): CredentialRecord {
   return {
     tokenHash: String(row.token_hash),
     threadId: String(row.thread_id),
@@ -391,6 +411,7 @@ function rowRecord(row: Row, meta: { epoch: number; binding: McpTurnBinding } | 
     // A row this process did not mint (one from before a restart, revoked at boot) is of epoch 0 and rotates.
     epoch: meta?.epoch ?? 0,
     binding: meta?.binding ?? 'rotate',
+    ...(meta?.relay ? { relay: meta.relay } : {}),
     createdAt: String(row.created_at),
     revokedAt: str(row.revoked_at),
     lastSeenAt: String(row.last_seen_at)

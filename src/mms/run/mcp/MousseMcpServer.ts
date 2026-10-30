@@ -9,10 +9,19 @@ import { McpToolError, type McpCredentialAuthority, type McpToolErrorCode, type 
 import { mousseOrchestrationInstructions } from './instructions'
 import type { BearerTurn, CredentialRecord, McpCredentials, TurnSettlement } from './McpCredentials'
 
+/** The MCP relay (`mousse-relay`) a turn attaches: its URL on the same listener, and the catalogue revision. */
+export interface McpRelayAttachment {
+  url: string
+  /** The relay catalogue's revision; a runtime that caches the tool list reopens when it changes. */
+  revision: string
+}
+
 /** Where a provider runtime reaches the server, and the bearer token of one thread's turn. */
 export interface McpAttachment {
   url: string
   token: string
+  /** The MCP relay, under the same bearer; absent: the turn attaches only `mousse`. */
+  relay?: McpRelayAttachment
 }
 
 /**
@@ -21,7 +30,8 @@ export interface McpAttachment {
  * abort), and revocation when a thread is deleted or switches instance.
  */
 export interface McpAttachmentProvider {
-  bearerForTurn(input: BearerTurn): (McpAttachment & { tokenHash: string }) | null
+  /** `relayUrl`: where the same listener serves the MCP relay (`RELAY_PATH`). */
+  bearerForTurn(input: BearerTurn): (McpAttachment & { tokenHash: string; relayUrl: string }) | null
   turnEnded(input: { threadId: string; runId: string; tokenHash?: string; settlement: TurnSettlement }): 'kept' | 'rotated' | undefined
   revokeThread(threadId: string): void
 }
@@ -38,6 +48,8 @@ export const MCP_ERROR_CODES: Record<McpToolErrorCode | 'mousse_unauthorized', n
 }
 
 const MCP_PATH = '/mcp'
+/** Where the same listener serves the MCP relay (`mousse-relay`), under the same bearer. */
+export const RELAY_PATH = '/mcp/relay'
 const MAX_BODY_BYTES = 4 * 1024 * 1024
 
 /**
@@ -68,6 +80,12 @@ export class MousseMcpServer implements McpAttachmentProvider {
   get url(): string {
     if (!this.address) throw new Error('The Mousse MCP server is not running')
     return `http://${this.address.address}:${this.address.port}${MCP_PATH}`
+  }
+
+  /** The MCP relay's URL on the same listener (`RELAY_PATH`). */
+  get relayUrl(): string {
+    if (!this.address) throw new Error('The Mousse MCP server is not running')
+    return `http://${this.address.address}:${this.address.port}${RELAY_PATH}`
   }
 
   get running(): boolean {
@@ -111,10 +129,10 @@ export class MousseMcpServer implements McpAttachmentProvider {
   }
 
   /** The turn's bearer (`McpCredentials.bearerForTurn`); null when the server is not running. */
-  bearerForTurn(input: BearerTurn): (McpAttachment & { tokenHash: string }) | null {
+  bearerForTurn(input: BearerTurn): (McpAttachment & { tokenHash: string; relayUrl: string }) | null {
     if (!this.http) return null
     const { token, tokenHash } = this.options.credentials.bearerForTurn(input)
-    return { url: this.url, token, tokenHash }
+    return { url: this.url, token, tokenHash, relayUrl: this.relayUrl }
   }
 
   /**
