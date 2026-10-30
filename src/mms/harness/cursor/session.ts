@@ -3,6 +3,7 @@ import type { ChatImageAttachment } from '../../../shared/types'
 import { cursorMcpServers } from '../../run/mcp/attachment'
 import type { CursorAgentSetup, CursorHostMethods, CursorUsage } from '../hosts/cursorProtocol'
 import { interruptWithDeadline, LOAD_DEADLINE_MS, loadWithDeadline, recoverActiveRun, SessionLoadTimeoutError } from '../supervise'
+import type { McpAttachment } from '../../run/mcp/MousseMcpServer'
 import { CursorHostCallError, CursorHostExitedError, type CursorHostClient, type CursorRunListener } from './hostClient'
 
 /**
@@ -52,7 +53,7 @@ export interface CursorChatInput {
   history?: string
   images?: ChatImageAttachment[]
   signal?: AbortSignal
-  mcp?: { url: string; token: string } | null
+  mcp?: McpAttachment | null
   orchestrationInstructions?: string
   onText(text: string): void
   onThinking?(text: string): void
