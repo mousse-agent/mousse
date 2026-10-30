@@ -2902,7 +2902,8 @@ export class OrchestratorService extends EventEmitter {
     // Agent and Plan run natively in the runtime; another mode's own instructions go into the preamble.
     const modePrompt = descriptor && !['agent', 'plan', 'build'].includes(descriptor.id) ? descriptor.prompt : undefined
     const appletCatalogue = this.appletStore ? this.appletCatalogue() : undefined
-    const relay = await this.relayForTurn(turn)
+    // Only a profile with an MCP manager can relay; the others start the turn without waiting.
+    const relay = this.mcpManager ? await this.relayForTurn(turn) : undefined
     return {
       turnToken: turn.turnToken,
       modeCeiling: turn.modeCeiling,
