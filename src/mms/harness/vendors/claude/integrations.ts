@@ -13,7 +13,7 @@ import type { McpRegistry } from '../../../integrations/mcp/McpRegistry'
 import { shortHash } from '../../../integrations/revision'
 import type { IntegrationSecretAdapter } from '../../../integrations/secrets'
 import type { SkillsRegistry } from '../../../integrations/skills/SkillsRegistry'
-import { MOUSSE_MCP_SERVER_NAME } from '../../../run/mcp/attachment'
+import { MOUSSE_MCP_SERVER_NAME, MOUSSE_RELAY_SERVER_NAME } from '../../../run/mcp/attachment'
 
 /** A user MCP server in the Claude Agent SDK `mcpServers` shape. Values hold `${VAR}` references only. */
 export type ClaudeUserMcpServer =
@@ -157,7 +157,8 @@ export class ClaudeIntegrationResolver implements ClaudeIntegrationSource {
     projectPath: string | undefined,
     actor: IntegrationActor
   ): Promise<void> {
-    const used = new Set<string>([MOUSSE_MCP_SERVER_NAME])
+    // The names Mousse's own servers take: a user server never shadows one, nor is shadowed by one.
+    const used = new Set<string>([MOUSSE_MCP_SERVER_NAME, MOUSSE_RELAY_SERVER_NAME])
     let variable = 0
     // Secrets travel in the environment: the SDK puts the server list on Claude's command line.
     const indirect = (record: Record<string, string> | undefined): Record<string, string> | undefined => {

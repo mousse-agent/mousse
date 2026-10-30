@@ -102,6 +102,7 @@ Legacy theme ids `dark-acrylic`, `light-acrylic`, and `system-acrylic` are migra
 | `integrations.mcp.enabledServers` | `string[]` | `[]` | MCP server IDs/names enabled for orchestrator/agents |
 | `integrations.mcp.enableForMainAgent` | `boolean` | `true` | Expose MCP tools to the orchestrator |
 | `integrations.mcp.enableForAgents` | `Record<AgentTypeId, boolean>` | all `true` | Per CLI agent type |
+| `integrations.mcp.relay.runtimes` | `Partial<Record<'claude' \| 'codex' \| 'cursor' \| 'acp' \| 'antigravity' \| 'grok', boolean>>` | `{}` (on for all) | Which runtimes reach the MCP servers through the MCP relay (`mousse-relay`). A runtime is on unless set to `false`; MCP must be on. Settings, Skills & MCP, Advanced, "Share with other agents" |
 | `integrations.skills.enabled` | `boolean` | `true` | Master switch for skills |
 | `integrations.skills.enabledSkills` | `string[]` | `[]` | Skill IDs to materialize |
 | `integrations.skills.enableForMainAgent` | `boolean` | `true` | Skills in orchestrator prompt |

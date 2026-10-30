@@ -308,8 +308,11 @@ export interface RecoveredContext {
  * runtime stamps on each call, and the two instruction texts.
  */
 export interface TurnBridge {
-  /** The Mousse MCP server and this turn's bearer (SPEC §15.2); null: attach nothing. */
-  mcp: { url: string; token: string } | null
+  /**
+   * The Mousse MCP server and this turn's bearer (SPEC §15.2); null: attach nothing. `relay`: the MCP
+   * relay (`mousse-relay`, same bearer) and its catalogue revision, when the turn attaches it.
+   */
+  mcp: { url: string; token: string; relay?: { url: string; revision: string } } | null
   /** Stamped on every Mousse call of a `per_call` runtime that tags calls by turn (Claude Code). */
   turnToken: string
   /**

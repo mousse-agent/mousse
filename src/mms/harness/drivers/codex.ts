@@ -247,6 +247,8 @@ export function codexDriver(options: CodexDriverOptions): HarnessDriver {
     // Codex forks a loaded thread when its bearer changes, so the bearer is kept after turns proven drained.
     mcpTurnBinding: 'drained_turn',
     userMcp: 'native',
+    // Codex has no approval request for MCP tools Mousse handles: the relay asks through its cards.
+    relay: { approvals: 'mousse' },
     // Codex passes MCP image content to the model; the ChatGPT models it runs read images.
     mcpImageResults: true,
     mirrorsVendorFile: true,

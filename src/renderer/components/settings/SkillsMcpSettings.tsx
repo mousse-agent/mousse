@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import type { IntegrationPlatformClient } from '../../../shared/integrationPlatform'
-import { MOUSSE_BUILTIN_TOOL_GROUPS, MOUSSE_BUILTIN_TOOLS } from '../../../shared/integrations'
+import { MCP_RELAY_RUNTIMES, MOUSSE_BUILTIN_TOOL_GROUPS, MOUSSE_BUILTIN_TOOLS, relayEnabledFor, type McpRelayRuntime } from '../../../shared/integrations'
 import type { AgentTypeId, MousseSettings, MousseSettingsUpdate, SettingsOptions } from '../../../shared/settings'
 import { confirmNavigation } from '../../services/navigationGuards'
 import { IntegrationsWorkspace, type IntegrationPolicy } from '../integrations/IntegrationsWorkspace'
@@ -13,6 +13,11 @@ import { Select } from '../ui/Select'
 type WebService = 'exa' | 'parallel'
 const WEB_SERVICES: Array<{ id: WebService; label: string }> = [{ id: 'exa', label: 'Exa' }, { id: 'parallel', label: 'Parallel' }]
 
+/** How the providers page names each runtime that can reach the MCP relay. */
+const RELAY_RUNTIME_LABELS: Record<McpRelayRuntime, string> = {
+  claude: 'Claude Code', codex: 'Codex', cursor: 'Cursor', acp: 'ACP agents', antigravity: 'Antigravity', grok: 'Grok'
+}
+
 /**
  * A nested integrations update. The settings store deep-merges objects, but
  * DeepPartial stops at interfaces, so a narrow patch needs this one cast.
@@ -20,7 +25,7 @@ const WEB_SERVICES: Array<{ id: WebService; label: string }> = [{ id: 'exa', lab
  */
 type IntegrationsPatch = {
   tools?: { enabled?: boolean; enabledTools?: string[] }
-  mcp?: { enableForMainAgent?: boolean; enableForAgents?: Partial<Record<AgentTypeId, boolean>> }
+  mcp?: { enableForMainAgent?: boolean; enableForAgents?: Partial<Record<AgentTypeId, boolean>>; relay?: { runtimes?: Partial<Record<McpRelayRuntime, boolean>> } }
   skills?: { enableForMainAgent?: boolean; enableForAgents?: Partial<Record<AgentTypeId, boolean>>; model?: Record<string, { instanceId?: string; llmProvider: string; model: string }> }
 }
 const patch = (integrations: IntegrationsPatch) => ({ integrations }) as unknown as MousseSettingsUpdate
@@ -91,6 +96,7 @@ export function SkillsMcpSettings({
       <SettingsAdvanced>
         <MainAgentAvailability settings={live} onUpdate={onUpdate} />
         <AgentAvailability settings={live} options={options} onUpdate={onUpdate} />
+        <RelayAvailability settings={live} onUpdate={onUpdate} />
         <BuiltInTools settings={live} onUpdate={onUpdate} />
       </SettingsAdvanced>
     </section>
@@ -211,6 +217,32 @@ function AgentAvailability({ settings, options, onUpdate }: {
             {chip('skills', agent.id, 'Skills', agent.label)}
             {chip('mcp', agent.id, 'MCP', agent.label)}
           </div>}
+        />
+      ))}
+    </SettingsGroup>
+  )
+}
+
+/** Which runtimes reach the MCP servers through the MCP relay (`mousse-relay`). Exported for tests. */
+export function RelayAvailability({ settings, onUpdate }: { settings: MousseSettings; onUpdate: (partial: MousseSettingsUpdate) => Promise<void> }) {
+  const { mcp } = settings.integrations
+  // The hidden MCP gate shows every runtime as off; there is nothing to share until a server is turned on.
+  const disabled = mcp.enabled === false
+  return (
+    <SettingsGroup
+      title="Share with other agents"
+      description="Claude Code, Codex and other agents reach the MCP servers that are on through Mousse, as the mousse-relay server. Claude Code also keeps the servers Mousse adds to it directly, so their tools can appear twice."
+      className="skills-mcp-compact"
+    >
+      {MCP_RELAY_RUNTIMES.map((runtime) => (
+        <SettingsRow
+          key={runtime}
+          title={RELAY_RUNTIME_LABELS[runtime]}
+          htmlFor={`mcp-relay-${runtime}`}
+          disabled={disabled}
+          control={<Switch id={`mcp-relay-${runtime}`} label={`Share MCP servers with ${RELAY_RUNTIME_LABELS[runtime]}`} disabled={disabled}
+            checked={relayEnabledFor(mcp, runtime)}
+            onChange={(next) => void onUpdate(patch({ mcp: { relay: { runtimes: { [runtime]: next } } } }))} />}
         />
       ))}
     </SettingsGroup>

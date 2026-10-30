@@ -131,6 +131,8 @@ export function cursorDriver(options: CursorDriverOptions = {}): HarnessDriver {
     canInstall: false,
     customModels: false,
     methodLabel: 'Cursor account or API key',
+    // Cursor approves its tools itself (Auto-review), with no request to Mousse: the relay asks through its cards.
+    relay: { approvals: 'mousse' },
     decodeConfig: (raw) => decodeInstanceConfig(raw, { privateHome: false }),
     caps: () => CURSOR_CAPS,
     versionArgs: () => null,
