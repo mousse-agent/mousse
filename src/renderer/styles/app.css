@@ -6024,7 +6024,7 @@ html[data-theme='high-contrast'] .composer-question-option.selected {
 .subscription-usage-page-body { flex: 1; min-height: 0; overflow: auto; padding: 24px; }
 
 /* Rail destinations share the window chrome and navigation. */
-.scheduled-page[hidden], .channels-page[hidden] { display: none; }
+.scheduled-page[hidden] { display: none; }
 .rail-page-header { flex: none; padding: 16px 24px; }
 .rail-page-header h1 { margin: 0; font-size: 16px; font-weight: 600; }
 

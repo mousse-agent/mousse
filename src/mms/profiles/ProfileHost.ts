@@ -273,13 +273,7 @@ export class ProfileHost {
       activeTurns: live ? countActiveTurns(live) : 0,
       // Unfinished bot activations (running, waiting, paused, queued) end with the profile.
       ownedActivity: { ...(live?.getOwnedActivity() ?? {}), ...(live?.personalBots ? { bots: live.personalBots.ownedActivity() } : {}) },
-      scheduledJobs: live?.scheduled.listJobs().filter((job) => job.enabled).length ?? 0,
-      channelsEnabled: Boolean(
-        live &&
-          Object.values(live.channels.getSnapshot()?.config?.platforms ?? {}).some(
-            (platform) => (platform as { enabled?: boolean }).enabled
-          )
-      )
+      scheduledJobs: live?.scheduled.listJobs().filter((job) => job.enabled).length ?? 0
     }
   }
 
@@ -487,7 +481,7 @@ export class ProfileHost {
       // A sign-in the profiles share stays while another profile still uses it.
       otherProfilesUse: (instanceId) => this.otherProfilesUse(record.id, instanceId),
       allowLegacyProjectData: isDefault,
-      inheritChannelEnvironment: isDefault,
+      inheritProcessEnvironment: isDefault,
       includeExternalCliConfigs: isDefault
     })
     this.shared.configureServices?.(services)

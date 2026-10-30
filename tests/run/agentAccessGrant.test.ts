@@ -271,23 +271,23 @@ describe('agent access grant (SPEC §15.1)', () => {
     }
   }, 30_000)
 
-  it('a thread a channel drives is capped at lineage for every later turn, and what it delegates inherits the cap', async () => {
+  it('a thread a remote send drives is capped at lineage for every later turn, and what it delegates inherits the cap', async () => {
     const out: Started[] = []
     const { d, project } = daemon(async (delegation) => {
-      out.push(await delegate(delegation, 'from-channel'))
+      out.push(await delegate(delegation, 'from-remote'))
     })
     setProfile(d, 'manage')
     const mine = d.store.createThread('Mine', project.id)
-    const chat = d.store.createThread('Telegram chat', project.id)
+    const chat = d.store.createThread('Remote chat', project.id)
     expect(grant(d, chat.id)).toBe('manage')
-    const result = await d.orch.runChannelTurn(chat.id, 'Delegate it', d.store, {})
+    const result = await d.orch.runRemoteTurn(chat.id, 'Delegate it', d.store, {})
     expect(result.error).toBeUndefined()
     // The turn's own grant and its child's are lineage although the profile says manage.
     expect(levelsOf(d, chat.id)).toEqual(['lineage'])
     await finished(d, out[0])
     expect(grant(d, chat.id)).toBe('lineage')
     expect(grant(d, out[0].childThreadId)).toBe('lineage')
-    // The cap is on the thread: it holds for turns that are not channel turns, and after a restart.
+    // The cap is on the thread: it holds for turns that are not remote turns, and after a restart.
     expect(d.store.getThread(chat.id)?.accessCeiling).toBe('lineage')
     expect(new ThreadDataStore(d.projects).getThread(chat.id)?.accessCeiling).toBe('lineage')
     await d.orch.send('A message typed in the app', false, { threadId: chat.id, clientRequestId: 'app-send' })

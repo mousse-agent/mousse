@@ -39,9 +39,7 @@ export function plantLegacyHome(homeDir) {
   mkdirSync(join(homeDir, 'scheduled'), { recursive: true })
   writeFileSync(join(homeDir, 'scheduled', 'jobs-runtime.json'), JSON.stringify({ 'job-1': { state: 'idle' } }))
   mkdirSync(join(homeDir, 'channels'), { recursive: true })
-  // Production ChannelStore.listSessions() JSON.parse-casts an array. An object
-  // map throws `sessions is not iterable` during MMS start and leaves the owner
-  // lease held. Keep the array shape used by the live store.
+  // Leftover data of the removed Channels feature, in the array shape older builds wrote.
   writeFileSync(join(homeDir, 'channels', 'sessions.json'), JSON.stringify([]))
   mkdirSync(join(homeDir, 'mcp-oauth'), { recursive: true })
   writeFileSync(join(homeDir, 'mcp-oauth', 'session.json'), JSON.stringify({ token: 'mcp-not-live' }))

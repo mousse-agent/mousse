@@ -313,107 +313,6 @@ export interface ThreadSearchResponse {
 
 export const SILENT_MARKER = '[SILENT]'
 
-export type ChannelPlatform = 'telegram' | 'discord' | 'webhook'
-
-export type ChannelConnectionState = 'disconnected' | 'connecting' | 'connected' | 'error'
-
-export type ChannelChatType = 'dm' | 'group' | 'channel' | 'thread'
-
-export interface ChannelPlatformConfig {
-  enabled: boolean
-  token?: string
-  allowedUserIds?: string[]
-  allowAllUsers?: boolean
-  homeChatId?: string
-  webhookPort?: number
-  webhookSecret?: string
-}
-
-/**
- * The account confirmed as a platform's owner (Settings → Channels → "This is me"). Personal bots
- * answer only this account, in a direct message. Never inferred from allowed users or pairing.
- * Stored in `channels/owners.json`, outside the channel config, so older builds never see it.
- */
-export interface ChannelOwner {
-  userId: string
-  displayName: string
-  confirmedAt: string
-}
-
-/** A "This is me" code in progress: when it expires, whether its one attempt was used, and who sent it. */
-export interface ChannelOwnerClaim {
-  expiresAt: string
-  /** Accounts that sent a wrong code (each has one attempt). */
-  failedAttempts: number
-  claimant?: { userId: string; displayName: string }
-}
-
-export interface ChannelConfig {
-  platforms: Record<ChannelPlatform, ChannelPlatformConfig>
-  filterSilenceNarration: boolean
-  unauthorizedDmBehavior: 'pair' | 'ignore'
-}
-
-export interface ChannelSession {
-  sessionKey: string
-  platform: ChannelPlatform
-  chatId: string
-  threadId?: string
-  chatName?: string
-  userId?: string
-  userName?: string
-  chatType: ChannelChatType
-  mousseThreadId: string
-  lastMessageAt?: string
-  createdAt: string
-  /** Session model; `instanceId` is absent on sessions saved before provider instances existed. */
-  modelOverride?: ModelOverride
-  /** The personal bot this DM talks to (`/bot <name>`); its messages activate the bot instead of a chat turn. */
-  botId?: string
-}
-
-export interface ChannelDirectoryEntry {
-  id: string
-  name: string
-  type?: string
-  guild?: string
-  threadId?: string
-}
-
-export interface ChannelStatus {
-  platform: ChannelPlatform
-  state: ChannelConnectionState
-  error?: string
-  connectedAt?: string
-}
-
-export interface ChannelsSnapshot {
-  config: ChannelConfig
-  sessions: ChannelSession[]
-  statuses: ChannelStatus[]
-  directoryUpdatedAt?: string
-  /** Each platform's confirmed owner ("This is me"); absent from older daemons. */
-  owners?: Partial<Record<ChannelPlatform, ChannelOwner>>
-}
-
-export interface PairingRequest {
-  code: string
-  platform: ChannelPlatform
-  userId: string
-  userName?: string
-  createdAt: string
-  expiresAt: string
-}
-
-export interface ChannelActivityEvent {
-  id: string
-  direction: 'inbound' | 'outbound'
-  platform: ChannelPlatform
-  sessionKey: string
-  text: string
-  timestamp: string
-}
-
 export type BuiltInChatMode = string
 
 export interface SkillChatMode {
@@ -924,7 +823,7 @@ export interface QueuedMessageClaim {
   ownerToken: string
   /** ISO-8601 claim timestamp. */
   claimedAt: string
-  /** Optional owner surface tag (gui | cli | channel | orchestrator | …). */
+  /** Optional owner surface tag (gui | cli | remote | orchestrator | …). */
   source?: string
 }
 
@@ -949,7 +848,7 @@ export interface QueuedMessage {
   state: QueuedMessageState
   /** Present when state is `claimed`. */
   claim?: QueuedMessageClaim
-  /** Optional caller tag (gui | cli | channel | …). */
+  /** Optional caller tag (gui | cli | remote | …). */
   source?: string
   /** Internal orchestration input: durable and executable, but hidden from queue/transcript UI. */
   internal?: boolean
@@ -1119,7 +1018,7 @@ export interface Thread {
   /**
    * The most an agent running in this thread may reach beyond its own thread and lineage (agent access
    * level, SPEC §15.1), fixed for the thread's life. Set on a fork from its source and the forking agent,
-   * and on a thread a remote person drives (a channel); it only ever narrows. Absent: no limit of its own
+   * and on a thread a remote send drives (a linked phone's); it only ever narrows. Absent: no limit of its own
    * (the profile's setting and the thread's delegations still apply).
    */
   accessCeiling?: import('./settings').AgentAccessLevel

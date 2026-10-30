@@ -11,7 +11,7 @@ import { buildScheduleAddInput } from '../src/cli/commands/schedule'
 import { parseArgs } from '../src/cli/parseArgs'
 
 /**
- * Several clients of one daemon: settings, scheduled jobs, channels, skills and MCP
+ * Several clients of one daemon: settings, scheduled jobs, skills and MCP
  * snapshots are daemon-owned and survive any single client disconnecting.
  */
 describe('daemon protocol across clients', () => {
@@ -173,24 +173,22 @@ describe('daemon protocol across clients', () => {
     await b.close()
   })
 
-  it('channel snapshot and activity answer after a client disconnects', async () => {
+  it('daemon reads answer after a client disconnects', async () => {
     const c = await connect()
-    const snap1 = await c.request<{ snapshot: { platforms?: unknown } }>('channels.getSnapshot')
-    expect(snap1.snapshot).toBeTruthy()
+    const before = await c.request<{ status: unknown }>('scheduled.status')
+    expect(before.status).toBeTruthy()
     await c.close()
 
     const c2 = await connect()
-    const snap2 = await c2.request<{ snapshot: unknown }>('channels.getSnapshot')
-    expect(snap2.snapshot).toBeTruthy()
-    const activity = await c2.request<{ activity: unknown[] }>('channels.getActivity', { limit: 10 })
-    expect(Array.isArray(activity.activity)).toBe(true)
+    const after = await c2.request<{ status: unknown }>('scheduled.status')
+    expect(after.status).toBeTruthy()
+    const settings = await c2.request<{ settings: unknown }>('settings.get')
+    expect(settings.settings).toBeTruthy()
     await c2.close()
   })
 
-  it('settings, channel, skills and MCP snapshots round-trip', async () => {
+  it('skills and MCP snapshots round-trip', async () => {
     const c = await connect()
-    const cfg = await c.request<{ config: unknown }>('channels.getConfig')
-    expect(cfg.config).toBeTruthy()
     const skills = await c.request<{ snapshot: unknown }>('skills.list', {})
     expect(skills.snapshot).toBeTruthy()
     const mcp = await c.request<{ servers: unknown[] }>('mcp.listServers', {})

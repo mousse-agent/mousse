@@ -44,7 +44,7 @@ export function definitionProblem(definition: BotDefinition): string | undefined
     keys.add(context.key)
   }
   if (!definition.triggers || definition.triggers.manual !== true || Object.keys(definition.triggers).some((key) => key !== 'manual' && key !== 'schedules'))
-    return 'A bot is started by hand, by its schedules or from a channel.'
+    return 'A bot is started by hand or by its schedules.'
   const schedules = definition.triggers.schedules
   if (schedules !== undefined) {
     if (!Array.isArray(schedules) || schedules.length > MAX_BOT_SCHEDULES) return `A bot can have at most ${MAX_BOT_SCHEDULES} schedules.`

@@ -151,7 +151,7 @@ it('steers and aborts the exact composed remote native run without cancelling a 
   })
   gates[1].resolve()
   const local = new AbortController(),
-    later = f.target.orchestrator.runChannelTurn(
+    later = f.target.orchestrator.runRemoteTurn(
       thread.id,
       'Later local owned prompt',
       f.target.threads,

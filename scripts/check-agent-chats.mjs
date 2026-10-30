@@ -57,7 +57,7 @@ try {
         orchestrator:{getMessages:async()=>[],answerQuestions:async(requestId,answers)=>{fixture.calls.push({method:'answerQuestions',params:{requestId,answers}});Object.values(fixture.conversations).forEach(chat=>{chat.pendingQuestions=[]})},dismissQuestions:async(requestId)=>{fixture.calls.push({method:'dismissQuestions',params:{requestId}});Object.values(fixture.conversations).forEach(chat=>{chat.pendingQuestions=[]})},onThreadMessage:subscription,onThreadMessageUpdated:subscription,onThreadMessages:subscription},
         agents:{list:async()=>[],onUpdated:subscription},tasks:{list:async()=>[],onUpdated:subscription},
         projects:{list:async()=>fixture.projects,onUpdated:subscription},threads:{listAll:async()=>fixture.threads,active:async()=>null,getActivity:async()=>({}),onUpdated:subscription,onSelected:subscription,onActivity:subscription,onView:subscription},
-        turn:{getSnapshot:async()=>({}),onTurnState:subscription,onTurnSnapshot:subscription},channels:{onActivity:subscription},documents:{onOpened:subscription}}
+        turn:{getSnapshot:async()=>({}),onTurnState:subscription,onTurnSnapshot:subscription},documents:{onOpened:subscription}}
       useAppStore.setState({mainAreaOpen:false,threadsSidebarOpen:true,threadsSidebarWidth:280,sidebarMode:'projects'})
       createRoot(document.getElementById('root')).render(<App />)
     ` },

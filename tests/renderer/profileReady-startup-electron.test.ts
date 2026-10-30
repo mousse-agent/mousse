@@ -10,8 +10,8 @@ it('paints the real shell and retryable skeleton before trusted binding, then pr
   const temporaryRoot = realpathSync(tmpdir())
   const directory = realpathSync(mkdtempSync(join(temporaryRoot, 'mousse-startup-mounted-')))
   let child: ChildProcess | undefined, exited: Promise<number | null> | undefined
-  // I retain the real root, App, profile switcher, browser permission poll and
-  // hidden ChannelsPanel; unrelated editors/transcripts are outside this check.
+  // I retain the real root, App, profile switcher and browser permission poll;
+  // unrelated editors/transcripts are outside this check.
   const displays = ['OrchestratorChat', 'ChatWorkspace', 'ThreadsSidebar', 'ProjectTerminalPanel', 'FilesPanel', 'GitPanel', 'DocumentPanel', 'SettingsPage', 'ScheduledPage']
   try {
     await build({
@@ -43,11 +43,11 @@ it('paints the real shell and retryable skeleton before trusted binding, then pr
     expect(await exited, output).toBe(0)
     const report = JSON.parse(readFileSync(join(directory, 'evidence.json'), 'utf8'))
     expect(report.rendererErrors).toEqual([])
-    expect(report.before).toMatchObject({ ready: false, profile: 'default', channels: false, main: false, skeleton: true, titlebar: true, theme: 'dark-modern', surface: '#1f1f1f', acrylic: 'false' })
+    expect(report.before).toMatchObject({ ready: false, profile: 'default', scheduled: false, main: false, skeleton: true, titlebar: true, theme: 'dark-modern', surface: '#1f1f1f', acrylic: 'false' })
     expect(report.failed).toMatchObject({ ready: false, main: false, skeleton: true })
     expect(report.failed.error).toContain('Controlled workspace service unavailable')
-    expect(report.before.calls.some((row: any) => row.method.startsWith('channels.') || row.method.startsWith('settings.') || row.method === 'platformRequest.request')).toBe(false)
-    expect(report.after).toMatchObject({ ready: true, profile: 'prf_startup-bound', channels: true, main: true, errors: [], workspaceReady: false, skeleton: true, transcript: false })
+    expect(report.before.calls.some((row: any) => row.method.startsWith('settings.') || row.method === 'platformRequest.request')).toBe(false)
+    expect(report.after).toMatchObject({ ready: true, profile: 'prf_startup-bound', scheduled: true, main: true, errors: [], workspaceReady: false, skeleton: true, transcript: false })
     expect(report.hydrated).toMatchObject({ workspaceReady: true, transcript: true, errors: [] })
     expect(report.after.calls.some((row: any) => row.method === 'settings.get')).toBe(true)
     expect(report.after.calls.some((row: any) => row.method === 'platformRequest.request' && row.params === 'chats.snapshot')).toBe(true)
@@ -73,7 +73,7 @@ it('paints the real shell and retryable skeleton before trusted binding, then pr
       expect(page.workspaceRetained).toBe(true)
     }
     expect(report.overlays).toHaveLength(1)
-    expect(report.railPages).toHaveLength(2)
+    expect(report.railPages).toHaveLength(1)
     for (const page of report.railPages) {
       expect(page).toEqual({ appVisibility: 'visible', appInert: false, insideShell: true, workspaceDisplay: 'none', navigationVisible: true, visiblePages: 1, workspaceRetained: true })
     }

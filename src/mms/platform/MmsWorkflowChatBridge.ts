@@ -106,7 +106,7 @@ export class MmsWorkflowChatBridge implements WorkflowChatExecutor {
     if (receipt.cancelled) throw new DomainRpcError('invocation_cancelled', 'The queued workflow was removed')
     if (signal.aborted) throw new DomainRpcError('cancelled', 'Workflow start cancelled before admission')
     const snapshot = await this.options.runs.start(receipt.params, {
-      connectionId: (receipt.source === 'channel' || receipt.source === 'schedule' ? receipt.source : 'chat') + ':' + invocationId,
+      connectionId: (receipt.source === 'remote' || receipt.source === 'schedule' ? receipt.source : 'chat') + ':' + invocationId,
       source: receipt.source
     })
     return { invocationId, profileId: receipt.profileId, threadId, definitionId: receipt.params.definitionId,

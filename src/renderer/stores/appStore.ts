@@ -127,7 +127,6 @@ interface AppState {
   setUsageOpen: (open: boolean) => void
   settingsOpen: boolean
   scheduledOpen: boolean
-  channelsOpen: boolean
   /** @deprecated use turnStates[threadId]?.phase instead â€” kept for compat */
   loading: boolean
   appInfo: { platform: string; repoRoot: string; llmProvider: string; deviceName?: string } | null
@@ -211,7 +210,6 @@ interface AppState {
   setThreadsSidebarWidth: (width: number) => void
   setSettingsOpen: (open: boolean) => void
   setScheduledOpen: (open: boolean) => void
-  setChannelsOpen: (open: boolean) => void
   setLoading: (loading: boolean) => void
   setAppInfo: (info: AppState['appInfo']) => void
   setThreadsSidebarOpen: (open: boolean) => void
@@ -398,10 +396,9 @@ export const useAppStore = create<AppState>()(persist((set) => ({
   sidebarWidth: 30,
   threadsSidebarWidth: 260,
   usageOpen: false,
-  setUsageOpen: (usageOpen) => set(usageOpen ? { usageOpen, settingsOpen: false, scheduledOpen: false, channelsOpen: false } : { usageOpen }),
+  setUsageOpen: (usageOpen) => set(usageOpen ? { usageOpen, settingsOpen: false, scheduledOpen: false } : { usageOpen }),
   settingsOpen: false,
   scheduledOpen: false,
-  channelsOpen: false,
   loading: false,
   appInfo: null,
   shortcuts: {},
@@ -518,9 +515,8 @@ export const useAppStore = create<AppState>()(persist((set) => ({
   setTasks: (tasks) => set({ tasks }),
   setSidebarWidth: (sidebarWidth) => set({ sidebarWidth }),
   setThreadsSidebarWidth: (threadsSidebarWidth) => set({ threadsSidebarWidth }),
-  setSettingsOpen: (settingsOpen) => set(settingsOpen ? { settingsOpen, scheduledOpen: false, channelsOpen: false } : { settingsOpen }),
-  setScheduledOpen: (scheduledOpen) => set(scheduledOpen ? { scheduledOpen, settingsOpen: false, channelsOpen: false } : { scheduledOpen }),
-  setChannelsOpen: (channelsOpen) => set(channelsOpen ? { channelsOpen, settingsOpen: false, scheduledOpen: false } : { channelsOpen }),
+  setSettingsOpen: (settingsOpen) => set(settingsOpen ? { settingsOpen, scheduledOpen: false } : { settingsOpen }),
+  setScheduledOpen: (scheduledOpen) => set(scheduledOpen ? { scheduledOpen, settingsOpen: false } : { scheduledOpen }),
   setLoading: (loading) => set({ loading }),
   setAppInfo: (appInfo) => set({ appInfo }),
   setThreadsSidebarOpen: (threadsSidebarOpen) => set({ threadsSidebarOpen }),
@@ -922,7 +918,6 @@ export function shouldCloseSideCardOverlay(state: AppState, previous: AppState):
     || state.settingsOpen
     || state.usageOpen
     || state.scheduledOpen
-    || state.channelsOpen
     || state.sidebarMode === 'chats'
 }
 

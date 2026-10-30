@@ -338,7 +338,7 @@ describe('RunEngine delegation (SPEC §14.1-§14.2)', () => {
     const send = (f: DelegationFixture, source: string, id = `send:${source}`) =>
       f.engine.dispatch({ kind: 'send', threadId: 'child-1', clientRequestId: id, source, prompt: 'hello' })
 
-    it.each(['gui', 'cli', 'channel', 'internal'])('a %s message gets a delegation row tied to the parent\'s latest run, with the subagent\'s policy', async (source) => {
+    it.each(['gui', 'cli', 'remote', 'internal'])('a %s message gets a delegation row tied to the parent\'s latest run, with the subagent\'s policy', async (source) => {
       f = delegationFixture()
       const parent = await f.runningRun('parent')
       const first = await f.delegate(parent.runId, 'call-1', { workspace: 'shared', role: 'review', modeCeiling: 'plan', accessLevel: 'read' })

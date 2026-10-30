@@ -60,7 +60,7 @@ try {
               window.fixture.threads.push(thread); return thread
             } },
           turn: { getSnapshot: async () => ({}), onTurnState: subscription, onTurnSnapshot: subscription },
-          channels: { onActivity: subscription }, documents: { onOpened: subscription }
+          documents: { onOpened: subscription }
         }
         useAppStore.setState({ mainAreaOpen: false, threadsSidebarOpen: true, threadsSidebarWidth: 240 })
         createRoot(document.getElementById('root')).render(<App />)
@@ -129,9 +129,8 @@ try {
           assert.equal(await evaluate('document.querySelector(".navigation-rail [aria-label=Home]").getAttribute("aria-current")'), 'page')
           assert.equal(await evaluate('!!document.querySelector(".navigation-rail [aria-label=Browser]")'), false)
           assert.equal(await evaluate('!!document.querySelector(".navigation-rail [aria-label=Automations] .lucide-workflow")'), true)
-          assert.equal(await evaluate('!!document.querySelector(".navigation-rail [aria-label=Channels] .lucide-radio")'), true)
           assert.deepEqual(await evaluate('Array.from(document.querySelectorAll(".navigation-rail button")).map(b=>b.getAttribute("aria-label"))'),
-            ['Home', 'Automations', 'Channels', 'More', 'Subscription usage', 'Settings'])
+            ['Home', 'Automations', 'More', 'Subscription usage', 'Settings'])
           assert.equal(await evaluate('!!document.querySelector(".titlebar [aria-label=Settings], .titlebar .titlebar-usage-btn")'), false)
           const loads = await evaluate('fixture.usageLoads')
           await railClick('Subscription usage')
@@ -148,10 +147,7 @@ try {
           await evaluate('fixture.store.setState({settingsOpen:false})')
           await railClick('Automations')
           assert.equal(await evaluate('fixture.store.getState().scheduledOpen'), true)
-          await evaluate('fixture.store.setState({scheduledOpen:false})')
-          await railClick('Channels')
-          assert.equal(await evaluate('fixture.store.getState().channelsOpen'), true)
-          await evaluate('fixture.store.setState({channelsOpen:false,threadsSidebarOpen:false})')
+          await evaluate('fixture.store.setState({scheduledOpen:false,threadsSidebarOpen:false})')
           await pause(240)
           assert.equal(await evaluate('!!document.querySelector(".threads-sidebar-pane")'), false)
           assert.equal((await rect('.navigation-rail')).width, 72)

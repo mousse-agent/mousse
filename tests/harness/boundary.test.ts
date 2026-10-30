@@ -103,7 +103,7 @@ const CURSOR_SDK_IMPORTERS = [/^src\/mms\/harness\/hosts\//]
 // -- Rule 2: driver-name literals at branch sites --------------------------------------------------
 
 /** Where application branches live. Declarations and data tables are out of scope (plan v3). */
-const BRANCH_SCOPES = ['src/renderer/', 'src/mms/orchestrator/', 'src/mms/protocol/', 'src/mms/channels/', 'src/mms/providers/', 'src/cli/']
+const BRANCH_SCOPES = ['src/renderer/', 'src/mms/orchestrator/', 'src/mms/protocol/', 'src/mms/providers/', 'src/cli/']
 
 const DRIVER_NAMES = ['antigravity', 'claude-subscription', 'codex', 'pi', 'claude', 'acp', 'cursor', 'grok', 'xai']
 const NAME = `['"\`](${DRIVER_NAMES.join('|')})['"\`]`

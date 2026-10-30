@@ -454,21 +454,6 @@ export function asPlainObject(v: unknown, name: string): Record<string, unknown>
   return v
 }
 
-export function asChannelPlatform(v: unknown, name = 'platform'): 'telegram' | 'discord' | 'webhook' {
-  if (v !== 'telegram' && v !== 'discord' && v !== 'webhook') {
-    throw new Error(`${name} must be telegram|discord|webhook`)
-  }
-  return v
-}
-
-export function asOptionalChannelPlatform(
-  v: unknown,
-  name = 'platform'
-): 'telegram' | 'discord' | 'webhook' | undefined {
-  if (v === undefined || v === null) return undefined
-  return asChannelPlatform(v, name)
-}
-
 export function asScope(v: unknown, name = 'scope'): 'global' | 'project' {
   if (v !== 'global' && v !== 'project') throw new Error(`${name} must be global|project`)
   return v
@@ -893,98 +878,6 @@ export function asScheduledJobPatch(v: unknown): {
     const r = asPlainObject(o.repeat, 'repeat')
     const times = asOptionalBoundedInt(r.times, 'repeat.times', { min: 1, max: 10_000 })
     patch.repeat = times !== undefined ? { times } : {}
-  }
-  return patch
-}
-
-function asChannelPlatformConfig(
-  v: unknown,
-  name: string
-): {
-  enabled: boolean
-  token?: string
-  allowedUserIds?: string[]
-  allowAllUsers?: boolean
-  homeChatId?: string
-  webhookPort?: number
-  webhookSecret?: string
-} {
-  const o = asPlainObject(v, name)
-  const allowed = new Set([
-    'enabled',
-    'token',
-    'allowedUserIds',
-    'allowAllUsers',
-    'homeChatId',
-    'webhookPort',
-    'webhookSecret'
-  ])
-  for (const key of Object.keys(o)) {
-    if (!allowed.has(key)) throw new Error(`${name}.${key} is not allowed`)
-  }
-  const cfg: ReturnType<typeof asChannelPlatformConfig> = {
-    enabled: asBoolean(o.enabled ?? false, `${name}.enabled`)
-  }
-  if (o.token !== undefined) {
-    const token = asOptionalNonEmptyString(o.token, `${name}.token`, 4096)
-    if (token !== undefined) cfg.token = token
-  }
-  if (o.allowedUserIds !== undefined) {
-    cfg.allowedUserIds = asStringArray(o.allowedUserIds, `${name}.allowedUserIds`, {
-      maxItems: 500,
-      maxItemLen: 256
-    })
-  }
-  if (o.allowAllUsers !== undefined) {
-    cfg.allowAllUsers = asBoolean(o.allowAllUsers, `${name}.allowAllUsers`)
-  }
-  if (o.homeChatId !== undefined) {
-    const homeChatId = asOptionalNonEmptyString(o.homeChatId, `${name}.homeChatId`, 256)
-    if (homeChatId !== undefined) cfg.homeChatId = homeChatId
-  }
-  if (o.webhookPort !== undefined) {
-    cfg.webhookPort = asBoundedInt(o.webhookPort, `${name}.webhookPort`, {
-      min: 1,
-      max: 65535
-    })
-  }
-  if (o.webhookSecret !== undefined) {
-    const webhookSecret = asOptionalNonEmptyString(o.webhookSecret, `${name}.webhookSecret`, 1024)
-    if (webhookSecret !== undefined) cfg.webhookSecret = webhookSecret
-  }
-  return cfg
-}
-
-export function asChannelConfigPatch(v: unknown): {
-  platforms?: Partial<
-    Record<'telegram' | 'discord' | 'webhook', Partial<ReturnType<typeof asChannelPlatformConfig>>>
-  >
-  filterSilenceNarration?: boolean
-  unauthorizedDmBehavior?: 'pair' | 'ignore'
-} {
-  const o = asPlainObject(v, 'patch')
-  const allowed = new Set(['platforms', 'filterSilenceNarration', 'unauthorizedDmBehavior'])
-  for (const key of Object.keys(o)) {
-    if (!allowed.has(key)) throw new Error(`patch.${key} is not allowed`)
-  }
-  const patch: ReturnType<typeof asChannelConfigPatch> = {}
-  if (o.filterSilenceNarration !== undefined) {
-    patch.filterSilenceNarration = asBoolean(o.filterSilenceNarration, 'filterSilenceNarration')
-  }
-  if (o.unauthorizedDmBehavior !== undefined) {
-    if (o.unauthorizedDmBehavior !== 'pair' && o.unauthorizedDmBehavior !== 'ignore') {
-      throw new Error('unauthorizedDmBehavior must be pair|ignore')
-    }
-    patch.unauthorizedDmBehavior = o.unauthorizedDmBehavior
-  }
-  if (o.platforms !== undefined) {
-    const platforms = asPlainObject(o.platforms, 'platforms')
-    const out: NonNullable<ReturnType<typeof asChannelConfigPatch>['platforms']> = {}
-    for (const key of Object.keys(platforms)) {
-      const platform = asChannelPlatform(key, 'platforms key')
-      out[platform] = asChannelPlatformConfig(platforms[key], `platforms.${platform}`)
-    }
-    patch.platforms = out
   }
   return patch
 }

@@ -93,7 +93,7 @@ export interface BotDefinition {
   /** Context threads it consults (6c-2); at most 8. */
   context: BotThreadSpec[]
   permissions: BotManifest
-  /** Manual activation always; schedules on the bot itself (6d). Channels attach from the chat (`/bot`). */
+  /** Manual activation always; schedules on the bot itself (6d). */
   triggers: { manual: true; schedules?: BotSchedule[] }
 }
 
@@ -112,21 +112,13 @@ export interface BotSchedule {
 /** Most schedules one bot may have. */
 export const MAX_BOT_SCHEDULES = 8
 
-/** Where a channel activation replies (the chat the owner wrote from). */
-export interface BotChannelReplyTo {
-  platform: 'telegram' | 'discord' | 'webhook'
-  chatId: string
-  threadId?: string
-  messageId?: string
-  /** The owner who wrote: a reply goes only while this account is still the platform's owner. */
-  userId?: string
-}
-
-/** What started an activation: the Bots tab, a schedule occurrence, or the owner's channel DM. */
+/**
+ * What started an activation: the Bots tab or a schedule occurrence. Activations saved by older
+ * builds may carry other kinds (the removed Channels feature); they are read like these, by `input`.
+ */
 export type BotActivationTrigger =
   | { kind: 'manual'; input: string }
   | { kind: 'schedule'; input: string; scheduleId: string; occurrenceAt: string }
-  | { kind: 'channel'; input: string; replyTo: BotChannelReplyTo }
 
 /** The default active time of one activation: 15 minutes. */
 export const DEFAULT_BOT_ACTIVE_MS = 15 * 60_000

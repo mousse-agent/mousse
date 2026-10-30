@@ -174,7 +174,7 @@ export interface AgentScheduleHost {
   validate(job: ScheduledJobOptionsInput): { selection?: ModelOverride; threadId?: string }
   /**
    * Whether a person started the caller's run (`startedByPerson`: an interactive turn from the app or the CLI). Fails
-   * closed: a scheduled or webhook run, an agent's message, a subagent, a wake, a continuation, a bot, a channel, a run with
+   * closed: a scheduled or webhook run, an agent's message, a subagent, a wake, a continuation, a bot, a remote send, a run with
    * no recorded binding or one that cannot be read is not a person's turn. Only a person's turn may create or start jobs.
    */
   startedByPerson(caller: { threadId: string; runId: string }): boolean

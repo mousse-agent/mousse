@@ -38,7 +38,7 @@ export interface ProfileInstances {
 export interface ProviderAccess {
   synthesizeSpeech(request: ProviderSpeechRequest): Promise<ProviderSpeechResult>
   transcribeAudio(request: ProviderTranscriptionRequest): Promise<ProviderTranscriptionResult>
-  /** Usage text for one provider (channel `/usage`, the usage view); undefined without a usage reader. */
+  /** Usage text for one provider (the usage view); undefined without a usage reader. */
   subscriptionUsage(providerId: string): Promise<string | undefined>
   /** Usage of every credentialed provider, without the ones removed from this profile. */
   usage(): Promise<ProvidersUsageResponse>

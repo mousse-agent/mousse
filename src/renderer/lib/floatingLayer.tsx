@@ -7,7 +7,7 @@ import {
 } from 'react'
 import { createPortal } from 'react-dom'
 
-/** Above settings/channel overlays (1100–1200) and other UI chrome. */
+/** Above settings overlays (1100–1200) and other UI chrome. */
 export const FLOATING_LAYER_Z_INDEX = 50_000
 
 export function FloatingPortal({ children }: { children: ReactNode }) {

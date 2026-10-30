@@ -7,14 +7,9 @@ import type { WorkflowChatRun } from '../../shared/workflowChat'
 import type { WorkflowRunState } from '../../shared/workflowRunPlatform'
 import type { WorkflowRunSnapshot } from '../../shared/workflows'
 
-export type WorkflowChatSource = 'gui' | 'cli' | 'channel' | 'schedule'
-export const WORKFLOW_CHAT_SOURCES: readonly WorkflowChatSource[] = ['gui', 'cli', 'channel', 'schedule']
-
-export interface ChannelWorkflowHostIngress {
-  platform: string
-  chatId: string
-  messageId: string
-}
+/** Where a slash workflow came from; `remote` is a turn sent through the remote bridge (`runRemoteTurn`). */
+export type WorkflowChatSource = 'gui' | 'cli' | 'remote' | 'schedule'
+export const WORKFLOW_CHAT_SOURCES: readonly WorkflowChatSource[] = ['gui', 'cli', 'remote', 'schedule']
 
 export interface ScheduledJobIngress {
   jobId: string
@@ -84,14 +79,6 @@ export function assertWorkflowHostToken(value: string, label: string): void {
   if (typeof value !== 'string' || !value.trim() || value.length > 256 || value.includes('\0')) {
     throw new Error('Invalid ' + label)
   }
-}
-
-/** Host-owned channel message identity. Caller request IDs are ignored. */
-export function channelWorkflowInvocationId(identity: ChannelWorkflowHostIngress): string {
-  assertWorkflowHostToken(identity.platform, 'channel platform')
-  assertWorkflowHostToken(identity.chatId, 'channel chat')
-  assertWorkflowHostToken(identity.messageId, 'channel message')
-  return uuidv5(`mousse-channel-workflow:${identity.platform}:${identity.chatId}:${identity.messageId}`, uuidv5.URL)
 }
 
 /** Host-owned scheduled occurrence identity. Caller request IDs are ignored. */

@@ -189,8 +189,8 @@ function matchPin(pins: WorkflowAgentPin[], ref: AgentRef): WorkflowAgentPin | u
   return matches.length === 1 ? matches[0] : matches.find((pin) => pin.requestedRevision === undefined)
 }
 
-function agentSource(source: ExecutionSource): 'workflow' | 'cli' | 'schedule' | 'channel' {
-  if (source === 'cli' || source === 'schedule' || source === 'channel') return source
+function agentSource(source: ExecutionSource): 'workflow' | 'cli' | 'schedule' | 'remote' {
+  if (source === 'cli' || source === 'schedule' || source === 'remote') return source
   return 'workflow'
 }
 

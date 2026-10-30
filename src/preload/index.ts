@@ -58,12 +58,6 @@ import type {
   ScheduledSettings,
   ScheduledSettingsUpdate,
   SchedulerStatus,
-  ChannelActivityEvent,
-  ChannelConfig,
-  ChannelOwnerClaim,
-  ChannelPlatform,
-  ChannelsSnapshot,
-  PairingRequest,
   ThreadSearchResponse,
   PendingUserQuestions,
   Task,
@@ -877,54 +871,6 @@ const api = {
       const handler = (_: Electron.IpcRendererEvent, status: SchedulerStatus) => cb(status)
       ipcRenderer.on('scheduled:status', handler)
       return () => ipcRenderer.removeListener('scheduled:status', handler)
-    }
-  },
-  channels: {
-    getSnapshot: (): Promise<ChannelsSnapshot> => ipcRenderer.invoke('channels:getSnapshot'),
-    getConfig: (): Promise<ChannelConfig> => ipcRenderer.invoke('channels:getConfig'),
-    updateConfig: (patch: Partial<ChannelConfig>): Promise<ChannelConfig> =>
-      ipcRenderer.invoke('channels:updateConfig', patch),
-    connect: (platform?: ChannelPlatform): Promise<ChannelsSnapshot> =>
-      ipcRenderer.invoke('channels:connect', platform),
-    disconnect: (platform?: ChannelPlatform): Promise<ChannelsSnapshot> =>
-      ipcRenderer.invoke('channels:disconnect', platform),
-    listPairingRequests: (): Promise<PairingRequest[]> =>
-      ipcRenderer.invoke('channels:listPairingRequests'),
-    approvePairing: (code: string): Promise<boolean> =>
-      ipcRenderer.invoke('channels:approvePairing', code),
-    rejectPairing: (code: string): Promise<boolean> =>
-      ipcRenderer.invoke('channels:rejectPairing', code),
-    sendTest: (
-      platform: ChannelPlatform,
-      chatId: string,
-      text: string,
-      threadId?: string
-    ): Promise<{ success: boolean; error?: string }> =>
-      ipcRenderer.invoke('channels:sendTest', platform, chatId, text, threadId),
-    getActivity: (limit?: number): Promise<ChannelActivityEvent[]> =>
-      ipcRenderer.invoke('channels:getActivity', limit),
-    /** "This is me": the code, its status, and the confirmation that stores the owner. */
-    owner: {
-      start: (platform: ChannelPlatform): Promise<{ code: string; expiresAt: string }> =>
-        ipcRenderer.invoke('channels:owner:start', platform),
-      status: (platform: ChannelPlatform): Promise<ChannelOwnerClaim | null> =>
-        ipcRenderer.invoke('channels:owner:status', platform),
-      confirm: (platform: ChannelPlatform, userId: string): Promise<unknown> =>
-        ipcRenderer.invoke('channels:owner:confirm', platform, userId),
-      cancel: (platform: ChannelPlatform): Promise<void> =>
-        ipcRenderer.invoke('channels:owner:cancel', platform),
-      clear: (platform: ChannelPlatform): Promise<unknown> =>
-        ipcRenderer.invoke('channels:owner:clear', platform)
-    },
-    onUpdated: (cb: (snapshot: ChannelsSnapshot) => void): (() => void) => {
-      const handler = (_: Electron.IpcRendererEvent, snapshot: ChannelsSnapshot) => cb(snapshot)
-      ipcRenderer.on('channels:updated', handler)
-      return () => ipcRenderer.removeListener('channels:updated', handler)
-    },
-    onActivity: (cb: (event: ChannelActivityEvent) => void): (() => void) => {
-      const handler = (_: Electron.IpcRendererEvent, event: ChannelActivityEvent) => cb(event)
-      ipcRenderer.on('channels:activity', handler)
-      return () => ipcRenderer.removeListener('channels:activity', handler)
     }
   },
   webTools: {

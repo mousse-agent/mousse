@@ -1,5 +1,5 @@
 import { useEffect } from 'react'
-import { Gauge, House, Radio, Settings, Workflow, type LucideIcon } from '../lib/icons'
+import { Gauge, House, Settings, Workflow, type LucideIcon } from '../lib/icons'
 import { refreshStorageReview, useStorageReviewPending } from '../lib/storageReview'
 import { confirmNavigation } from '../services/navigationGuards'
 import { useAppStore } from '../stores/appStore'
@@ -16,11 +16,9 @@ export function NavigationRail({ onMouseEnter, onMouseLeave }: NavigationRailPro
   const sidebarMode = useAppStore((s) => s.sidebarMode)
   const mainAreaOpen = useAppStore((s) => s.mainAreaOpen)
   const scheduledOpen = useAppStore((s) => s.scheduledOpen)
-  const channelsOpen = useAppStore((s) => s.channelsOpen)
   const setMainAreaOpen = useAppStore((s) => s.setMainAreaOpen)
   const setThreadsSidebarOpen = useAppStore((s) => s.setThreadsSidebarOpen)
   const setScheduledOpen = useAppStore((s) => s.setScheduledOpen)
-  const setChannelsOpen = useAppStore((s) => s.setChannelsOpen)
   const usageOpen = useAppStore((s) => s.usageOpen)
   const settingsOpen = useAppStore((s) => s.settingsOpen)
   const setSettingsOpen = useAppStore((s) => s.setSettingsOpen)
@@ -30,7 +28,6 @@ export function NavigationRail({ onMouseEnter, onMouseLeave }: NavigationRailPro
 
   const leaveRailPage = () => {
     setScheduledOpen(false)
-    setChannelsOpen(false)
   }
   const navigateRail = async (action: () => void) => {
     if (!await confirmNavigation()) return
@@ -39,13 +36,13 @@ export function NavigationRail({ onMouseEnter, onMouseLeave }: NavigationRailPro
   }
 
   const showHome = async () => {
-    if ((scheduledOpen || channelsOpen || sidebarMode !== 'projects') && !await confirmNavigation()) return
+    if ((scheduledOpen || sidebarMode !== 'projects') && !await confirmNavigation()) return
     leaveRailPage()
     useAppStore.getState().setSidebarMode('projects')
     setThreadsSidebarOpen(true)
     setMainAreaOpen(false)
   }
-  const overlayOpen = scheduledOpen || channelsOpen || searchOpen
+  const overlayOpen = scheduledOpen || searchOpen
   const reviewPending = useStorageReviewPending()
   useEffect(() => { void refreshStorageReview() }, [])
   const shortcut = (label: string, Icon: LucideIcon, active: boolean, onClick: () => void, disabled = false) => (
@@ -63,7 +60,6 @@ export function NavigationRail({ onMouseEnter, onMouseLeave }: NavigationRailPro
       <nav className="navigation-rail" aria-label="Mousse navigation" onMouseEnter={onMouseEnter} onMouseLeave={onMouseLeave}>
         {shortcut('Home', House, !overlayOpen && !mainAreaOpen && sidebarMode === 'projects', () => void showHome())}
         {shortcut('Automations', Workflow, scheduledOpen, () => void navigateRail(() => setScheduledOpen(true)))}
-        {shortcut('Channels', Radio, channelsOpen, () => void navigateRail(() => setChannelsOpen(true)))}
         <div className="navigation-rail-separator" role="separator" />
         {shortcut('Subscription usage', Gauge, usageOpen, () => void navigateRail(() => useAppStore.getState().setUsageOpen(true)))}
         {shortcut('Settings', Settings, settingsOpen, () => void navigateRail(() => setSettingsOpen(true)))}

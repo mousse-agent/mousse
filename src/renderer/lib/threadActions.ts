@@ -13,7 +13,6 @@ export async function selectThread(threadId: string): Promise<void> {
   store.setSidebarMode('projects')
   // A page opened from the rail covers the workspace; the thread has to be visible.
   store.setScheduledOpen(false)
-  store.setChannelsOpen(false)
   if (threadId === store.activeThreadId) return
   // One store update: highlight + restore cached transcript (if any) while
   // the daemon snapshot loads. Main also broadcasts thread:selected early.

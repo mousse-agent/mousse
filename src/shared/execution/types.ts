@@ -1,6 +1,6 @@
 export const EXECUTION_CONTRACT_VERSION = 1 as const
 export type EffectClass = 'pure' | 'read' | 'write' | 'external' | 'unknown'
-export type ExecutionSource = 'gui' | 'cli' | 'schedule' | 'channel' | 'control'
+export type ExecutionSource = 'gui' | 'cli' | 'schedule' | 'remote' | 'control'
 
 /** Revision actually consumed/produced by an execution attempt. */
 export interface ExecutionWorkspaceRevision {
@@ -12,7 +12,7 @@ export interface ExecutionWorkspaceRevision {
 }
 
 export interface ExecutionActor {
-  readonly kind: 'main' | 'agent' | 'workflow' | 'scheduler' | 'channel'
+  readonly kind: 'main' | 'agent' | 'workflow' | 'scheduler'
   readonly definitionId?: string
   readonly definitionRevision?: string
 }

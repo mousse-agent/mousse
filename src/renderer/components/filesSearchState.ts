@@ -1,4 +1,4 @@
-import { isImeComposing, moveSelection } from '../../shared/channelCommands'
+import { isImeComposing, moveSelection } from '../../shared/composerCommands'
 import type { FileGrepMatch, FileGrepResponse, FileSearchResponse, FileSearchResult } from '../../shared/types'
 
 /** Quick open finds files by name; text search finds lines inside files. */

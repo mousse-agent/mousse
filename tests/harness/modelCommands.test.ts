@@ -1,12 +1,10 @@
 /**
- * `/model` in channels and the interactive CLI lists the profile's models through the gateway's
- * view: hidden models and disabled instances are not offered, so they cannot be picked.
+ * `/model` in the interactive CLI lists the profile's models through the gateway's view: hidden
+ * models and disabled instances are not offered, so they cannot be picked.
  */
 import { describe, expect, it } from 'vitest'
 import { handleInteractiveSlash, type InteractiveCommandContext } from '../../src/cli/interactive/sessionCommands'
-import { dispatchSlashCommand, type SlashContext } from '../../src/mms/channels/slash/handlers'
-import { parseSlashCommand } from '../../src/mms/channels/slash/parse'
-import { piInstanceId, piProviderIdOf } from '../../src/shared/providerInstances'
+import { piInstanceId } from '../../src/shared/providerInstances'
 import { ProviderInstanceService } from '../../src/mms/harness/instanceMap'
 import { PiStubAdapter } from '../support/piStub'
 import type { ProviderAdapter } from '../../src/mms/harness/adapter'
@@ -46,24 +44,6 @@ async function profile() {
   return { harness, instances }
 }
 
-function channelContext(listModels: () => LlmProviderOption[], text: string) {
-  const parsed = parseSlashCommand(text)!
-  const overrides: Array<unknown> = []
-  const session = { sessionKey: 's', platform: 'telegram', chatId: 'c' }
-  const ctx = {
-    message: { platform: 'telegram', chatId: 'c', text },
-    session,
-    args: parsed.args,
-    parsed,
-    sessionManager: { getSession: () => session, setModelOverride: (_key: string, value: unknown) => overrides.push(value) },
-    settings: { get: () => ({ provider: { llmProvider: 'openai', model: 'gpt-a' } }), set: () => {} },
-    listModels,
-    bumpGeneration: () => 1,
-    getGeneration: () => 1
-  } as unknown as SlashContext
-  return { ctx, overrides }
-}
-
 function cliContext(listModels: () => LlmProviderOption[]) {
   const overrides: unknown[] = []
   const ctx: InteractiveCommandContext = {
@@ -90,22 +70,6 @@ describe('/model honours hidden models and disabled instances', () => {
       ['pi:openai', ['gpt-a']],
       ['claude', ['sonnet']]
     ])
-  })
-
-  it('channel /model cannot select a hidden model or a disabled instance', async () => {
-    const { harness } = await profile()
-    // The profile's channel listing (MmsProfileServices): pi-ai providers through the gateway's listing.
-    const listModels = () => harness.listedLlmProviders({ kind: 'device' }).filter((option) => option.instanceId && piProviderIdOf(option.instanceId))
-    for (const name of ['gpt-hidden', 'claude-x']) {
-      const { ctx, overrides } = channelContext(listModels, `/model ${name}`)
-      const result = await dispatchSlashCommand(ctx)
-      expect(result.reply, name).toMatch(/Model not found/)
-      expect(overrides).toEqual([])
-    }
-    const { ctx, overrides } = channelContext(listModels, '/model gpt-a')
-    expect((await dispatchSlashCommand(ctx)).reply).toMatch(/Session model set to openai\/gpt-a/)
-    expect(overrides).toEqual([{ instanceId: 'pi:openai', llmProvider: 'openai', model: 'gpt-a' }])
-    expect(JSON.stringify(listModels())).not.toMatch(/gpt-hidden|claude-x/)
   })
 
   it('CLI /models cannot select a hidden model or a disabled instance', async () => {
@@ -147,9 +111,6 @@ describe('/model honours hidden models and disabled instances', () => {
     expect(handleInteractiveSlash('/models work-only', cli.ctx).reply).toMatch(/claude-subscription\/work-only/)
     expect(cli.overrides).toEqual([{ instanceId: 'claude:work', llmProvider: 'claude-subscription', model: 'work-only' }])
     expect(handleInteractiveSlash('/models opus', cliContext(listModels).ctx).reply).toMatch(/Model not found/)
-    const channel = channelContext(listModels, '/model work-only')
-    await dispatchSlashCommand(channel.ctx)
-    expect(channel.overrides).toEqual([{ instanceId: 'claude:work', llmProvider: 'claude-subscription', model: 'work-only' }])
     // The selection resolves to Work, not the disabled built-in instance.
     expect(harness.resolve({ instanceId: 'claude:work', model: 'work-only' }, { kind: 'device' }, 'cli_model').selection.instanceId).toBe('claude:work')
 
@@ -185,7 +146,7 @@ describe('/model honours hidden models and disabled instances', () => {
 
   it('resolve() rejects them for the /model purposes too', async () => {
     const { harness } = await profile()
-    expect(() => harness.resolve({ instanceId: 'pi:openai', model: 'gpt-hidden' }, { kind: 'device' }, 'channel_model')).toThrow(/hidden/)
+    expect(() => harness.resolve({ instanceId: 'pi:openai', model: 'gpt-hidden' }, { kind: 'device' }, 'cli_model')).toThrow(/hidden/)
     expect(() => harness.resolve({ instanceId: 'pi:anthropic', model: 'claude-x' }, { kind: 'device' }, 'cli_model')).toThrow(/disabled/)
   })
 })

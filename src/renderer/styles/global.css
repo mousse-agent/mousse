@@ -378,7 +378,6 @@ html.platform-darwin .overlay-titlebar {
 .overlay-page-drag-header .overlay-titlebar-back,
 .overlay-page-drag-header .settings-back-btn,
 .overlay-page-drag-header .scheduled-page-back-btn,
-.overlay-page-drag-header .channels-page-back-btn,
 .overlay-page-drag-header .overlay-page-back {
   cursor: pointer;
   -webkit-app-region: no-drag;
@@ -439,11 +438,11 @@ html.platform-darwin .overlay-titlebar {
 }
 
 /* Six :not() classes of specificity on purpose: sideCard.css beats this rule by one class.
-   .agents-tasks-task-icon-spin matches nothing now but still counts toward that six. */
+   .agents-tasks-task-icon-spin and .specificity-pad match nothing; they only count toward that six. */
 @media (prefers-reduced-motion: reduce) {
-  *:not(.icon-spin):not(.spin):not(.agents-tasks-task-icon-spin):not(.channels-spin):not(.channels-spinner):not(.shimmer-text),
-  *:not(.icon-spin):not(.spin):not(.agents-tasks-task-icon-spin):not(.channels-spin):not(.channels-spinner):not(.shimmer-text)::before,
-  *:not(.icon-spin):not(.spin):not(.agents-tasks-task-icon-spin):not(.channels-spin):not(.channels-spinner):not(.shimmer-text)::after {
+  *:not(.icon-spin):not(.spin):not(.agents-tasks-task-icon-spin):not(.specificity-pad):not(.specificity-pad):not(.shimmer-text),
+  *:not(.icon-spin):not(.spin):not(.agents-tasks-task-icon-spin):not(.specificity-pad):not(.specificity-pad):not(.shimmer-text)::before,
+  *:not(.icon-spin):not(.spin):not(.agents-tasks-task-icon-spin):not(.specificity-pad):not(.specificity-pad):not(.shimmer-text)::after {
     animation-duration: 0.01ms !important;
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;

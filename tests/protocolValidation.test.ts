@@ -6,8 +6,6 @@ import { describe, expect, it } from 'vitest'
 import { buildScheduleAddInput } from '../src/cli/commands/schedule'
 import { parseArgs } from '../src/cli/parseArgs'
 import {
-  asChannelConfigPatch,
-  asChannelPlatform,
   asCreateScheduledJobInput,
   asCursorMcpConfigPatch,
   asPlainObject,
@@ -116,32 +114,6 @@ describe('protocol nested validators', () => {
   it('lets a patch clear the model, mode and workspace with null', () => {
     expect(asScheduledJobPatch({ selection: null, mode: null, workspace: null })).toMatchObject({ selection: null, mode: null, workspace: null })
     expect(asScheduledJobPatch({ mode: 'agent', workspace: { kind: 'project' } })).toMatchObject({ mode: 'agent', workspace: { kind: 'project' } })
-  })
-
-  it('validates channel platforms and config patches', () => {
-    expect(asChannelPlatform('telegram')).toBe('telegram')
-    expect(() => asChannelPlatform('irc')).toThrow()
-    const patch = asChannelConfigPatch({
-      platforms: { telegram: { enabled: true, token: 't' } },
-      filterSilenceNarration: true
-    })
-    expect(patch.platforms?.telegram?.enabled).toBe(true)
-    expect(() =>
-      asChannelConfigPatch({ platforms: { telegram: { enabled: true, hack: 1 } } })
-    ).toThrow(/not allowed/)
-  })
-
-  it('drops blank optional channel secrets instead of throwing', () => {
-    const patch = asChannelConfigPatch({
-      platforms: {
-        webhook: { enabled: false, webhookSecret: '', webhookPort: 18789 },
-        telegram: { enabled: false, token: '  ', homeChatId: '' }
-      }
-    })
-    expect(patch.platforms?.webhook?.webhookSecret).toBeUndefined()
-    expect(patch.platforms?.webhook?.webhookPort).toBe(18789)
-    expect(patch.platforms?.telegram?.token).toBeUndefined()
-    expect(patch.platforms?.telegram?.homeChatId).toBeUndefined()
   })
 
   it('bounds settings partials and env maps', () => {

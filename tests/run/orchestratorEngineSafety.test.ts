@@ -1,7 +1,7 @@
 /**
  * Review round 2 (docs/run-engine/SPEC.md §5, §12-§16) through a real `OrchestratorService`, Run
  * Engine and effect worker: a cancelled child never reaches its provider (C2), the pi path enforces
- * the caller's mode ceiling like the MCP server (C3), channel turns are engine runs and a busy thread
+ * the caller's mode ceiling like the MCP server (C3), remote turns are engine runs and a busy thread
  * defers its wake instead of looping (C4), Stop follows `CommandPolicy.stopStrategy` (S2) and a
  * replayed stop re-enqueues its interrupt (M4), and thread deletion cancels the thread's work (H7).
  */
@@ -188,72 +188,22 @@ describe('orchestrator and engine safety (review round 2)', () => {
     expect(broaderViaMcp).toMatchObject({ code: 'mousse_ceiling_exceeded' })
   }, 30_000)
 
-  it('C4: a channel turn is an engine run; its stop and steer are recorded on the run', async () => {
+  it('C4: a remote turn is an engine run of its own source', async () => {
     const gate = deferred()
     releases.push(gate.resolve)
-    let current = gate
     const adapter = new HostAdapter(async (input) => {
-      await until(current.promise, input.signal)
-      return `channel reply to ${input.prompt}`
+      await until(gate.promise, input.signal)
+      return `remote reply to ${input.prompt}`
     })
     const d = start(adapter)
-    const threadId = thread(d, 'Channel')
-    const turn = d.orch.runChannelTurn(threadId, 'From the channel', d.store)
-    await waitFor(() => adapter.turns.length === 1, 'the channel turn')
+    const threadId = thread(d, 'Remote')
+    const turn = d.orch.runRemoteTurn(threadId, 'From a phone', d.store)
+    await waitFor(() => adapter.turns.length === 1, 'the remote turn')
     const run = d.engine.listRuns(threadId)[0]
-    expect(run).toMatchObject({ source: 'channel', status: 'running' })
-    expect(d.orch.steerChannelTurn(threadId, 'also this')).toBe(true)
+    expect(run).toMatchObject({ source: 'remote', status: 'running' })
     gate.resolve()
-    expect(await turn).toMatchObject({ text: 'channel reply to From the channel' })
+    expect(await turn).toMatchObject({ text: 'remote reply to From a phone' })
     expect(d.engine.getRun(run.runId)!.status).toBe('completed')
-    const commands = () => d.engine.store.db
-      .statement('SELECT command_kind FROM receipts WHERE thread_id = ? ORDER BY created_at, rowid')
-      .all(threadId)
-      .map((row) => row.command_kind)
-    await waitFor(() => commands().length === 2, 'the recorded steer')
-    expect(commands()).toEqual(['send', 'steer'])
-
-    // A stopped channel turn: aborted at once, its stop recorded on its run, which ends interrupted.
-    const second = deferred()
-    releases.push(second.resolve)
-    current = second
-    adapter.turns.length = 0
-    const again = d.orch.runChannelTurn(threadId, 'Second', d.store)
-    await waitFor(() => adapter.turns.length === 1, 'the second channel turn')
-    const live = d.engine.listRuns(threadId)[0]
-    expect(live).toMatchObject({ source: 'channel', status: 'running' })
-    expect(d.orch.abortChannelTurn(threadId)).toBe(true)
-    expect(await again).toMatchObject({ aborted: true })
-    await waitFor(() => commands().length === 4, 'the recorded stop')
-    expect(commands().slice(2)).toEqual(['send', 'stop'])
-    expect(d.engine.getRun(live.runId)!.status).toBe('interrupted')
-  }, 30_000)
-
-  it('a channel turn that ends while a later one waits on the same thread leaves the later turn registered, so a Stop still reaches it', async () => {
-    const gateA = deferred()
-    const gateB = deferred()
-    releases.push(gateA.resolve, gateB.resolve)
-    const adapter = new HostAdapter(async (input) => {
-      await until(input.prompt === 'A' ? gateA.promise : gateB.promise, input.signal)
-      return `reply to ${input.prompt}`
-    })
-    const d = start(adapter)
-    const threadId = thread(d, 'Overlap')
-    const turns = (d.orch as unknown as { channelTurns: Map<string, unknown> }).channelTurns
-    const first = d.orch.runChannelTurn(threadId, 'A', d.store)
-    await waitFor(() => adapter.turns.length === 1, 'turn A')
-    const entryA = turns.get(threadId)
-    // A second channel message arrives while A runs: it registers itself and waits for the thread's lease.
-    const second = d.orch.runChannelTurn(threadId, 'B', d.store)
-    await waitFor(() => turns.get(threadId) !== entryA, 'turn B to register')
-    gateA.resolve()
-    expect(await first).toMatchObject({ text: 'reply to A' })
-    // A's end must not unregister B's turn.
-    expect(turns.has(threadId)).toBe(true)
-    await waitFor(() => adapter.turns.length === 2, 'turn B')
-    expect(d.orch.abortChannelTurn(threadId)).toBe(true)
-    expect(await second).toMatchObject({ aborted: true })
-    expect(turns.has(threadId)).toBe(false)
   }, 30_000)
 
   it('C4: a wake on a thread busy with a turn the engine does not schedule stays queued (one wake run) and runs once after', async () => {

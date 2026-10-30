@@ -97,7 +97,7 @@ export interface DaemonLifecycleState {
 }
 
 /**
- * Idempotent daemon teardown: stop protocol → stop MMS (scheduler/channels) →
+ * Idempotent daemon teardown: stop protocol → stop MMS (scheduler) →
  * runtime record → clear stop request. Safe to call multiple times.
  */
 export async function shutdownDaemonLifecycle(

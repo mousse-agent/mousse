@@ -8,8 +8,6 @@ import { MousseConfigStore } from '../src/mms/config/MousseConfigStore'
 import { ProjectManager } from '../src/mms/data/ProjectManager'
 import { ThreadDataStore } from '../src/mms/data/ThreadDataStore'
 import { ThreadStorageLayout } from '../src/mms/data/ThreadStorageLayout'
-import { ChannelStore } from '../src/mms/channels/ChannelStore'
-import { ChannelAuth } from '../src/mms/channels/ChannelAuth'
 import { ScheduledJobStore, readTickerHeartbeat, recordTickerHeartbeat } from '../src/mms/scheduled/ScheduledJobStore'
 import { LineEditStatsStore } from '../src/mms/stats/LineEditStatsStore'
 import { MmsProfileServices } from '../src/mms/MmsProfileServices'
@@ -55,7 +53,7 @@ describe('explicit profile store roots', () => {
     expect(({} as { polluted?: boolean }).polluted).toBeUndefined()
   })
 
-  it('keeps trash and pairing authorization inside the profile even after switching ambient home', async () => {
+  it('keeps trash inside the profile even after switching ambient home', async () => {
     const a = home('a'), b = home('b')
     const threadsA = new ThreadDataStore(new ProjectManager(a), a, { allowLegacyProjectData: false })
     const threadsB = new ThreadDataStore(new ProjectManager(b), b, { allowLegacyProjectData: false })
@@ -70,38 +68,6 @@ describe('explicit profile store roots', () => {
     await expect(coordinator(threadsB).restore({ taskId: thread.id, operationId: 'restore-b' })).rejects.toThrow('no lifecycle owner')
     await coordinator(threadsA).restore({ taskId: thread.id, operationId: 'restore-a' })
     expect(threadsA.getThread(thread.id)?.id).toBe(thread.id)
-    const authA = new ChannelAuth(join(a, 'channels', 'pairing')), authB = new ChannelAuth(join(b, 'channels', 'pairing'))
-    const message = { platform: 'telegram' as const, userId: 'fixture-user', chatId: 'fixture-chat', text: 'hello', messageId: 'fixture-id', isDm: true }
-    const request = authA.createPairingRequest(message)
-    expect(request).not.toBeNull()
-    expect(authB.approvePairing(request!.code)).toBe(false)
-    expect(authA.approvePairing(request!.code)).toBe(true)
-    const config = MousseConfigStore.load(a).getChannelsSection()
-    expect(authA.isAuthorized(config, message)).toBe(true)
-    expect(authB.isAuthorized(config, message)).toBe(false)
-
-    const inheritedId = { ...message, userId: 'toString', messageId: 'prototype-id' }
-    expect(authA.isAuthorized(config, inheritedId)).toBe(false)
-    const protoId = { ...message, userId: '__proto__', messageId: 'proto-id' }
-    const protoRequest = authA.createPairingRequest(protoId)
-    expect(protoRequest).not.toBeNull()
-    expect(authA.approvePairing(protoRequest!.code)).toBe(true)
-    expect(authA.isAuthorized(config, protoId)).toBe(true)
-  })
-
-  it('captures legacy channel credentials once and leaves new profiles unconfigured', () => {
-    const a = home('a'), b = home('b')
-    vi.stubEnv('MOUSSE_TELEGRAM_BOT_TOKEN', 'fixture-original')
-    const legacy = new ChannelStore(MousseConfigStore.load(a))
-    const personal = new ChannelStore(MousseConfigStore.load(b), { inheritEnvironment: false })
-    vi.stubEnv('MOUSSE_TELEGRAM_BOT_TOKEN', 'fixture-later')
-    expect(legacy.getConfig().platforms.telegram.token).toBe('fixture-original')
-    expect(personal.getConfig().platforms.telegram.token).toBeUndefined()
-    expect(personal.getConfig().platforms.telegram.enabled).toBe(false)
-    legacy.updateConfig({ filterSilenceNarration: false })
-    const persisted = JSON.parse(readFileSync(join(a, 'mousse.conf'), 'utf8'))
-    expect(persisted.channels.platforms.telegram.token).toBeUndefined()
-    expect(legacy.getConfig().platforms.telegram.token).toBe('fixture-original')
   })
 
   it('loads/migrates config from its explicit root without mutating ambient home', () => {
@@ -112,6 +78,19 @@ describe('explicit profile store roots', () => {
     expect(process.env.MOUSSE_HOME).toBe(a)
     expect(existsSync(join(b, 'mousse.conf'))).toBe(true)
     expect(existsSync(join(a, 'mousse.conf'))).toBe(false)
+  })
+
+  it('loads a config an older build wrote with a channels section and writes that section back unchanged', () => {
+    const a = home('a')
+    const channels = { platforms: { telegram: { enabled: true, token: 'fixture-token' } }, filterSilenceNarration: true }
+    writeFileSync(join(a, 'mousse.conf'), JSON.stringify({ version: 1, scheduled: { enabled: false, jobs: [] }, channels }))
+    const config = MousseConfigStore.load(a)
+    expect(config.getScheduledSection().enabled).toBe(false)
+    config.set('settings.profile.username', 'Changed')
+    config.save()
+    const disk = JSON.parse(readFileSync(join(a, 'mousse.conf'), 'utf8'))
+    expect(disk.settings.profile.username).toBe('Changed')
+    expect(disk.channels).toEqual(channels)
   })
 
   it('keeps projects, standalone threads and active selection in their captured home', () => {
@@ -149,19 +128,15 @@ describe('explicit profile store roots', () => {
     expect(() => new ThreadStorageLayout(b).standaloneThreadDir('../a')).toThrow('Invalid storage identity')
   })
 
-  it('keeps channels, job runtime, ticker state and usage history isolated after an ambient switch', () => {
+  it('keeps job runtime, ticker state and usage history isolated after an ambient switch', () => {
     const a = home('a'), b = home('b')
     const configA = MousseConfigStore.load(a), configB = MousseConfigStore.load(b)
-    const channelsA = new ChannelStore(configA), channelsB = new ChannelStore(configB)
     const jobsA = new ScheduledJobStore(configA), jobsB = new ScheduledJobStore(configB)
     const statsA = new LineEditStatsStore(a), statsB = new LineEditStatsStore(b)
     vi.stubEnv('MOUSSE_HOME', b)
-    channelsA.saveDirectory({ telegram: [{ id: 'only-a', name: 'Only A', type: 'private' }], discord: [], webhook: [] })
     const job = jobsA.createJob({ name: 'Only A', prompt: 'Fixture', schedule: { kind: 'interval', minutes: 1 } })
     recordTickerHeartbeat(true, a)
     statsA.record('manual', 7)
-    expect(channelsB.getDirectory().telegram).toEqual([])
-    expect(channelsA.getDirectory().telegram[0].id).toBe('only-a')
     expect(jobsB.listJobs()).toEqual([])
     expect(jobsA.getJob(job.id)?.name).toBe('Only A')
     expect(readTickerHeartbeat(a).successAt).not.toBeNull()
@@ -187,7 +162,6 @@ describe('explicit profile store roots', () => {
       platform: { dispose: async () => { calls.push('platform') } },
       scheduledWebhookServer: { stop: async () => { calls.push('webhooks') } },
       scheduled: { shutdown: () => { calls.push('scheduled'); if (failed === 'scheduled') throw new Error('scheduled failed') } },
-      channels: { shutdown: async () => { calls.push('channels') } },
       orchestrator: { holdApprovals: () => undefined, shutdown: async () => { calls.push('orchestrator') } },
       net: { shutdown: async () => { calls.push('net') } },
       requests: { waitForIdle: async () => { calls.push('requests') } },
@@ -197,14 +171,14 @@ describe('explicit profile store roots', () => {
       ptyManager: { shutdown: async () => { calls.push('pty') } },
       mcpManager: { shutdown: async () => { calls.push('mcp') } },
       config: { stopWatching: () => { calls.push('config') } },
-      getOwnedActivity: () => ({ platform: 0, scheduled: 0, channels: 0, orchestrator: 0, net: 0, requests: 0, ptys: 0, headless: 0, mcp: 0 })
+      getOwnedActivity: () => ({ platform: 0, scheduled: 0, orchestrator: 0, net: 0, requests: 0, ptys: 0, headless: 0, mcp: 0 })
     })
     const stop = MmsProfileServices.prototype.stop as (this: typeof service) => Promise<void>
     await expect(stop.call(service)).rejects.toMatchObject({
       message: 'Failed to drain profile services',
       errors: [expect.objectContaining({ message: `${failed} failed` })]
     })
-    expect(calls).toEqual(['begin', 'undoRetention', 'pullRequestWatch', 'storageCleanup', 'storageUsage', 'lifecycle', 'platform', 'webhooks', 'scheduled', 'channels', 'orchestrator', 'net', 'requests', 'antigravity', 'claudeSubscription', 'codex', 'pty', 'mcp'])
+    expect(calls).toEqual(['begin', 'undoRetention', 'pullRequestWatch', 'storageCleanup', 'storageUsage', 'lifecycle', 'platform', 'webhooks', 'scheduled', 'orchestrator', 'net', 'requests', 'antigravity', 'claudeSubscription', 'codex', 'pty', 'mcp'])
     expect(service.started).toBe(true)
   })
 
@@ -223,9 +197,8 @@ describe('explicit profile store roots', () => {
       lifecycle: { cleanup: { stop: async () => { calls.push('lifecycle') } } },
       platform: { dispose: async () => { calls.push('platform') } },
       scheduledWebhookServer: { stop: async () => undefined },
-      scheduled: { shutdown: () => { calls.push('scheduled') } },
-      // Channels and requests settle late: the clean epoch end must still come after them.
-      channels: { shutdown: async () => { await new Promise((resolve) => setTimeout(resolve, 20)); calls.push('channels done'); if (failing === 'channels') throw new Error('channels failed') } },
+      // The scheduler and requests settle late: the clean epoch end must still come after them.
+      scheduled: { shutdown: async () => { await new Promise((resolve) => setTimeout(resolve, 20)); calls.push('scheduled done'); if (failing === 'scheduled') throw new Error('scheduled failed') } },
       orchestrator: { holdApprovals: () => undefined, shutdown: async () => { calls.push('orchestrator') }, setRunEngine: () => { calls.push('detach') }, setBotDispatcher: () => undefined, setBotThreads: () => undefined },
       net: { shutdown: async () => { calls.push('net') } },
       requests: { waitForIdle: async () => { await new Promise((resolve) => setTimeout(resolve, 10)); calls.push('requests idle') } },
@@ -236,15 +209,15 @@ describe('explicit profile store roots', () => {
       mcpManager: { shutdown: async () => { calls.push('mcp') } },
       config: { stopWatching: () => { calls.push('config') } },
       runEngine: { shutdown: () => { calls.push('epoch ended') }, store: { db: { close: () => { calls.push('db closed') } } } },
-      getOwnedActivity: () => ({ platform: 0, scheduled: 0, channels: 0, orchestrator: 0, net: 0, requests: 0, ptys: 0, headless: 0, mcp: 0 })
+      getOwnedActivity: () => ({ platform: 0, scheduled: 0, orchestrator: 0, net: 0, requests: 0, ptys: 0, headless: 0, mcp: 0 })
     })
 
-  it('writes the clean daemon end only after channels shut down and requests went idle (H5)', async () => {
+  it('writes the clean daemon end only after the scheduler shut down and requests went idle (H5)', async () => {
     const calls: string[] = []
     const service = stoppingProfile(calls)
     const stop = MmsProfileServices.prototype.stop as (this: typeof service) => Promise<void>
     await stop.call(service)
-    expect(calls.indexOf('epoch ended')).toBeGreaterThan(calls.indexOf('channels done'))
+    expect(calls.indexOf('epoch ended')).toBeGreaterThan(calls.indexOf('scheduled done'))
     expect(calls.indexOf('epoch ended')).toBeGreaterThan(calls.indexOf('requests idle'))
     expect(calls.indexOf('epoch ended')).toBeGreaterThan(calls.indexOf('orchestrator'))
     expect(calls.slice(-4)).toEqual(['epoch ended', 'config', 'detach', 'db closed'])
@@ -252,7 +225,7 @@ describe('explicit profile store roots', () => {
 
   it('leaves the daemon epoch open when a cleanup fails (the next boot reads it as a crash) (H5)', async () => {
     const calls: string[] = []
-    const service = stoppingProfile(calls, 'channels')
+    const service = stoppingProfile(calls, 'scheduled')
     const stop = MmsProfileServices.prototype.stop as (this: typeof service) => Promise<void>
     await expect(stop.call(service)).rejects.toMatchObject({ message: 'Failed to drain profile services' })
     expect(calls).not.toContain('epoch ended')
@@ -260,11 +233,11 @@ describe('explicit profile store roots', () => {
 })
 
 describe('profile start order (H4)', () => {
-  it('recovers the run engine before scheduled jobs, channels or the network can send a turn', async () => {
+  it('recovers the run engine before scheduled jobs or the network can send a turn', async () => {
     const profileHome = home('start-order')
     const engine = new RunEngine({ store: new RunStore(new ProfileDatabase({ profileHome })) })
     const calls: string[] = []
-    let channelRunId = ''
+    let netRunId = ''
     const service = Object.assign(Object.create(MmsProfileServices.prototype) as object, {
       started: false,
       requests: { assertAccepting: () => undefined },
@@ -274,19 +247,17 @@ describe('profile start order (H4)', () => {
       storageCleanup: { start: () => undefined },
       storageUsage: { start: () => undefined },
       scheduled: { start: () => { calls.push('scheduled') }, listJobs: () => [], getStatus: () => ({}) },
-      channels: {
-        // A channel delivers a message as soon as it starts: its turn is a run that starts at once.
-        startEnabled: async () => {
-          const sent = await engine.dispatch({ kind: 'send', threadId: 'channel-thread', clientRequestId: 'channel-msg', source: 'channel' })
+      net: {
+        // A remote send arrives as soon as the network starts: its turn is a run that starts at once.
+        start: async () => {
+          const sent = await engine.dispatch({ kind: 'send', threadId: 'remote-thread', clientRequestId: 'remote-msg', source: 'remote' })
           if (sent.status !== 'accepted') throw new Error('send rejected')
-          channelRunId = sent.runId
+          netRunId = sent.runId
           engine.markStarting(sent.runId)
           engine.markRunning(sent.runId)
-          calls.push('channels')
-        },
-        getSnapshot: () => ({})
+          calls.push('net')
+        }
       },
-      net: { start: async () => { calls.push('net') } },
       orchestrator: {
         recoverRunEngineOnBoot: () => { engine.reconcileOnBoot(); calls.push('recover') },
         scheduleStartupQueueRecovery: () => undefined
@@ -305,9 +276,9 @@ describe('profile start order (H4)', () => {
     try {
       const startOwned = (MmsProfileServices.prototype as unknown as { startOwned: (this: typeof service) => Promise<void> }).startOwned
       await startOwned.call(service)
-      expect(calls).toEqual(['recover', 'workers', 'scheduled', 'channels', 'net'])
-      // Boot recovery ran first, so the channel's live run was not interrupted as a leftover.
-      expect(engine.getRun(channelRunId)!.status).toBe('running')
+      expect(calls).toEqual(['recover', 'workers', 'scheduled', 'net'])
+      // Boot recovery ran first, so the remote send's live run was not interrupted as a leftover.
+      expect(engine.getRun(netRunId)!.status).toBe('running')
     } finally {
       engine.store.db.close()
     }

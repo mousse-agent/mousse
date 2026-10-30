@@ -24,7 +24,7 @@ export interface OutboundEntry {
   /** `contacted`: the files (from the repository root) that make the request. */
   sources?: readonly string[]
   /**
-   * `contacted` through a dependency rather than an address in Mousse's own code (`discord.js`):
+   * `contacted` through a dependency rather than an address in Mousse's own code (a platform's SDK):
    * the package, which one of `sources` imports.
    */
   via?: string
@@ -139,23 +139,6 @@ export const OUTBOUND: readonly OutboundEntry[] = [
       'src/mms/providers/ProviderAuthService.ts',
       'src/mms/providers/xaiBilling.ts'
     ]
-  },
-  {
-    label: 'Telegram',
-    kind: 'contacted',
-    hosts: ['api.telegram.org'],
-    when: 'When you connect a Telegram channel.',
-    sends: 'the channel\'s messages and the replies.',
-    sources: ['src/mms/channels/adapters/TelegramAdapter.ts']
-  },
-  {
-    label: 'Discord',
-    kind: 'contacted',
-    hosts: ['discord.com', 'gateway.discord.gg'],
-    when: 'When you connect a Discord channel.',
-    sends: 'your bot\'s token, the channel\'s messages and the replies, and the slash commands Mousse registers for the bot.',
-    sources: ['src/mms/channels/adapters/DiscordAdapter.ts'],
-    via: 'discord.js'
   },
   {
     label: 'Links and names Mousse never connects to',

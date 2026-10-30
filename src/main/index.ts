@@ -304,7 +304,7 @@ function startGuiApp(): void {
         process.env.MOUSSE_REPO_ROOT || (app.isPackaged ? homedir() : process.cwd())
 
       // Local settings for window chrome only — not MMS ownership. Never
-      // persist: this conf is loaded once and its channels/scheduled sections go
+      // persist: this conf is loaded once and its scheduled section goes
       // stale; a whole-file write from here would stomp daemon-owned changes.
       const config = MousseConfigStore.load(homeDir, { persist: false })
       settings = new SettingsStore(config)

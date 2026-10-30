@@ -72,7 +72,7 @@ export function inventoryLegacyHome(installation: InstallationPaths): LegacyHome
     fileEntry('thread-data/repositories', join(home, 'thread-data', 'repositories'), 'profile', 'Durable repository-backed thread layout.', 'thread-data/repositories'),
     fileEntry('.data', join(home, '.data'), 'profile', 'Legacy standalone thread data.', 'thread-data/standalone'),
     fileEntry('scheduled/', join(home, 'scheduled'), 'profile', 'Scheduler runtime and history.', 'scheduled'),
-    fileEntry('channels/', join(home, 'channels'), 'profile', 'Channel sessions, directory, and pairing.', 'channels'),
+    fileEntry('channels/', join(home, 'channels'), 'profile', 'Leftover data of the removed Channels feature; kept with the profile, never read.', 'channels'),
     fileEntry('control/', join(home, 'control'), 'profile', 'Mousse ID/control stores. Credentials are re-encrypted, not byte-copied.', 'control'),
     fileEntry('mcp-oauth/', join(home, 'mcp-oauth'), 'profile', 'Integration OAuth sessions.', 'mcp-oauth'),
     fileEntry('agent-configs/', join(home, 'agent-configs'), 'profile', 'Generated agent configs.', 'agent-configs'),

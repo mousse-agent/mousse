@@ -1,5 +1,4 @@
 import type { AgentTypeId } from '../../shared/settings'
-import type { ChannelConfig } from '../../shared/types'
 import type { JobSchedule, ScheduledJob } from '../../shared/types'
 import type { MousseSettings } from '../../shared/settings'
 import type { MousseFeatureFlags } from '../../shared/featureFlags'
@@ -113,7 +112,6 @@ export interface MousseConf {
   providers: MousseProvidersConfig
   agents: MousseAgentsConfig
   scheduled: ScheduledConfigSection
-  channels: ChannelConfig
   mms: MmsConfigSection
   features: MousseFeatureFlags
 }

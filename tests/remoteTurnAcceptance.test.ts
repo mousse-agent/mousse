@@ -1,5 +1,5 @@
 /**
- * runChannelTurn tells its caller once the user's message is stored, on an ordinary turn and on a
+ * runRemoteTurn tells its caller once the user's message is stored, on an ordinary turn and on a
  * slash-workflow admission. A turn that never stores the message does not report acceptance, and a
  * throwing observer cannot abort a turn whose message is already stored.
  */
@@ -13,7 +13,7 @@ import { OrchestratorService } from '../src/mms/orchestrator/OrchestratorService
 import type { WorkflowChatRun } from '../src/shared/workflowChat'
 import { createOrchestrator, piAdapter } from './run/phase6Fixture'
 
-describe('channel turn input acceptance', () => {
+describe('remote turn input acceptance', () => {
   let home: string
   let store: ThreadDataStore
   let orch: OrchestratorService
@@ -58,7 +58,7 @@ describe('channel turn input acceptance', () => {
       // The message is already on the thread when the observer runs.
       expect(orch.getMessages(thread.id).map((m) => m.content)).toContain('hello')
     })
-    const result = await orch.runChannelTurn(thread.id, 'hello', store, { onUserInputAccepted: accepted })
+    const result = await orch.runRemoteTurn(thread.id, 'hello', store, { onUserInputAccepted: accepted })
     expect(result.error).toBeUndefined()
     expect(accepted).toHaveBeenCalledTimes(1)
     expect(chatCalls).toBe(1)
@@ -68,8 +68,7 @@ describe('channel turn input acceptance', () => {
     const thread = store.createThread('Workflow')
     stubWorkflowChat(thread.id)
     const accepted = vi.fn()
-    const result = await orch.runChannelTurn(thread.id, '/review', store, {
-      hostIngress: { platform: 'telegram', chatId: '1', messageId: 'm1' } as never,
+    const result = await orch.runRemoteTurn(thread.id, '/review', store, {
       onUserInputAccepted: accepted
     })
     expect(result.error).toBeUndefined()
@@ -82,13 +81,13 @@ describe('channel turn input acceptance', () => {
   it('does not report acceptance when the thread does not exist or the turn is cancelled first', async () => {
     const accepted = vi.fn()
     expect(
-      await orch.runChannelTurn('missing', 'hello', store, { onUserInputAccepted: accepted })
+      await orch.runRemoteTurn('missing', 'hello', store, { onUserInputAccepted: accepted })
     ).toMatchObject({ error: expect.stringMatching(/not found/i) })
 
     const thread = store.createThread('Cancelled')
     const cancelled = new AbortController()
     cancelled.abort()
-    const result = await orch.runChannelTurn(thread.id, 'hello', store, {
+    const result = await orch.runRemoteTurn(thread.id, 'hello', store, {
       signal: cancelled.signal,
       onUserInputAccepted: accepted
     })
@@ -100,7 +99,7 @@ describe('channel turn input acceptance', () => {
   it('keeps running an ordinary turn when the observer throws', async () => {
     const thread = store.createThread('Throwing')
     const accepted = vi.fn(() => { throw new Error('observer failed') })
-    const result = await orch.runChannelTurn(thread.id, 'hello', store, { onUserInputAccepted: accepted })
+    const result = await orch.runRemoteTurn(thread.id, 'hello', store, { onUserInputAccepted: accepted })
     expect(accepted).toHaveBeenCalledTimes(1)
     expect(result.error).toBeUndefined()
     expect(chatCalls).toBe(1)
@@ -111,8 +110,7 @@ describe('channel turn input acceptance', () => {
     const thread = store.createThread('Throwing workflow')
     stubWorkflowChat(thread.id)
     const accepted = vi.fn(() => { throw new Error('observer failed') })
-    const result = await orch.runChannelTurn(thread.id, '/review', store, {
-      hostIngress: { platform: 'telegram', chatId: '1', messageId: 'm1' } as never,
+    const result = await orch.runRemoteTurn(thread.id, '/review', store, {
       onUserInputAccepted: accepted
     })
     expect(accepted).toHaveBeenCalledTimes(1)
@@ -121,12 +119,11 @@ describe('channel turn input acceptance', () => {
     expect(orch.getMessages(thread.id).some((m) => m.workflowRun?.runId === 'run-1')).toBe(true)
   }, 30_000)
 
-  it('refuses a channel turn on a bot\'s thread before storing the message (PR 6 §6)', async () => {
+  it('refuses a remote turn on a bot\'s thread before storing the message (PR 6 §6)', async () => {
     const thread = store.createThread('Bot thread')
-    // A chat bound to a bot's thread (through /threads) reaches the bot only through /bot.
     orch.setBotDispatcher({ ownerOf: (threadId: string) => (threadId === thread.id ? 'Site editor' : undefined) } as never)
     const accepted = vi.fn()
-    const result = await orch.runChannelTurn(thread.id, 'hello', store, { onUserInputAccepted: accepted })
+    const result = await orch.runRemoteTurn(thread.id, 'hello', store, { onUserInputAccepted: accepted })
     expect(result.error).toMatch(/belongs to the bot Site editor/)
     expect(orch.getMessages(thread.id)).toEqual([])
     expect(accepted).not.toHaveBeenCalled()

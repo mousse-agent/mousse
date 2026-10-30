@@ -7,7 +7,7 @@ or remove autostart manually.
 
 ## Multiple profiles and background work
 
-Start one MMS daemon for an installation home, not one daemon per profile. It owns the profile service graphs, scheduled occurrences, channel ingress, and durable workflow recovery. GUI disconnect and profile switching leave background work running. A waiting scheduled workflow retains its occurrence and receipt until terminal completion; the next claim resumes the same run. Stopping the daemon joins owned work before releasing its owner lease.
+Start one MMS daemon for an installation home, not one daemon per profile. It owns the profile service graphs, scheduled occurrences, and durable workflow recovery. GUI disconnect and profile switching leave background work running. A waiting scheduled workflow retains its occurrence and receipt until terminal completion; the next claim resumes the same run. Stopping the daemon joins owned work before releasing its owner lease.
 
 Keep `MOUSSE_HOME` stable across GUI, CLI, and autostart. Separate development worktrees use isolated homes by default. Back up the installation home, including profiles and migration records, before upgrading. Use [the support guide](implementation/agent-platform/usage-and-support.md) for profile removal, browser setup, and workflow recovery behavior.
 
