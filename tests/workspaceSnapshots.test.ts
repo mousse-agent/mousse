@@ -376,6 +376,21 @@ describe('recovery', () => {
     expect(actions.get(legacy.id)!.commits).toHaveLength(1)
   })
 
+  it('a retake that fails again keeps the operation waiting with what stopped it this time', async () => {
+    const legacy = legacyLock('Error: Workspace branch changed during execution; recovery is required.')
+    // Something that stops every snapshot: a file where Mousse keeps its private index.
+    const blocker = join(git(cwd, 'rev-parse', '--absolute-git-dir'), 'mousse')
+    rmSync(blocker, { recursive: true, force: true }); writeFileSync(blocker, 'in the way\n')
+    await expect(actions.recoverPending(cwd)).rejects.toThrow(/EEXIST/)
+    const latest = new ThreadJournal(f.thread).latestByOperation().get(legacy.id)!
+    expect(latest.state).toBe('recovery_required')
+    expect((latest.details as { error?: string }).error).toMatch(/EEXIST/)
+
+    rmSync(blocker)
+    await actions.recoverPending(cwd)
+    noPending()
+  })
+
   it('records an interrupted checkpoint again from the files, whatever branch they are on', async () => {
     const options = { ...actionOptions(cwd, 'crashed'), threadId: 'task' }
     const { startSha } = await actions.recordOutsideChanges(options)

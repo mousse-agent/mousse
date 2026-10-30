@@ -314,7 +314,13 @@ export class ThreadActionService {
         } else {
           // Nothing landed that a retake would not capture, whatever stopped the first attempt (this includes
           // threads that an earlier version locked when the agent had switched branches or rewritten history).
-          this.checkpoint(workspacePath, action, state)
+          try {
+            this.checkpoint(workspacePath, action, state)
+          } catch (error) {
+            // The retake failed as well: the operation stays waiting, with what stopped it this time.
+            this.journal.append({ operationId: entry.operationId, operationType: entry.operationType, state: 'recovery_required', details: { actionId: action.id, actionState: state, startSha: action.startSha, error: String(error) } })
+            throw error
+          }
         }
         const index = all.findIndex((item) => item.id === action.id)
         if (index >= 0) all.splice(index, 1)

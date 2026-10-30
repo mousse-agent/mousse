@@ -69,7 +69,7 @@ What still stops a turn: an operation Mousse left unfinished (an interrupted res
 
 A subagent's result or a nested snapshot recorded while the action runs becomes one of its `contributions`, found by the action's time window (a snapshot has no ancestry to test).
 
-Interrupted checkpoints recover by taking the snapshot again from the files.
+Interrupted checkpoints recover by taking the snapshot again from the files. If that fails too, the operation stays `recovery_required` with the new error, so the reason shown is what stopped the retake.
 
 ## Undo, Redo and revert
 
@@ -171,7 +171,7 @@ Phase 4: projects without Git and standalone threads get snapshots and Undo thro
 
 ## Tests
 
-- `tests/workspaceSnapshots.test.ts`: the snapshot model, an agent that switches branches, rewrites history, commits and pushes, creates a repository with no commit, rebase in progress, outside changes, three-way Undo/Redo/revert, recovery including locked legacy threads, forks and fork seeding, subagent results (files arrive with the thread's uncommitted work and staging kept, conflict refuses and changes nothing, no-change refusal, recovery), Publish (one commit with the person's identity and no snapshot in its history, a second publish, stale review, conflict, dirty primary, missing identity), rebuilding a worktree from its snapshot, and GC.
+- `tests/workspaceSnapshots.test.ts`: the snapshot model, an agent that switches branches, rewrites history, commits and pushes, creates a repository with no commit, rebase in progress, outside changes, three-way Undo/Redo/revert, recovery including locked legacy threads and a retake that fails again, forks and fork seeding, subagent results (files arrive with the thread's uncommitted work and staging kept, conflict refuses and changes nothing, no-change refusal, recovery), Publish (one commit with the person's identity and no snapshot in its history, a second publish, stale review, conflict, dirty primary, missing identity), rebuilding a worktree from its snapshot, and GC.
 - `tests/storageCleanupService.test.ts`, `tests/resourcePurge.test.ts`: a worktree with uncommitted files retires into a snapshot and comes back with identical files; what a snapshot cannot hold keeps the worktree; permanent deletion asks first.
 - `tests/dirtyWorkspaceProtocol.test.ts`: push with uncommitted files, and Discard's record and notice.
 - Updated for the new model: `tests/dirtyWorkspace*.test.ts`, `tests/reviewRange.test.ts`, `tests/reviewProtocol.test.ts`, `tests/promptUndoUi.test.ts`, `tests/net/bridge/routed/editorFolder.test.ts`, the Git panel tests.
