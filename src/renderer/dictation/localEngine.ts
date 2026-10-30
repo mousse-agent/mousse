@@ -1,4 +1,5 @@
 import { findLocalSttModel, type LocalSttModel, type LocalSttModelId } from '../../shared/dictation'
+import { joinTranscriptSegments } from '../../shared/dictationPostProcess'
 import { serveModelFiles } from '../speechModels/pageSupport'
 import { MIN_SEGMENT_SECONDS, decodeRecording, splitIntoSegments } from './audio'
 import type { LocalSttWorkerEvent, LocalSttWorkerRequest } from './workerProtocol'
@@ -122,11 +123,11 @@ export async function transcribeWithLocalModel(
       const text = await transcribeSegment(model, segment)
       if (text) {
         parts.push(text)
-        if (!signal?.aborted) onPartial?.(parts.join(' '))
+        if (!signal?.aborted) onPartial?.(joinTranscriptSegments(parts))
       }
     }
     signal?.throwIfAborted()
-    return parts.join(' ')
+    return joinTranscriptSegments(parts)
   } finally {
     activeTranscriptions--
     if (activeTranscriptions === 0) scheduleIdleDispose()

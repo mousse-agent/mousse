@@ -2,7 +2,8 @@ import { useEffect, useRef, useState } from 'react'
 import type { AppErrorShape } from '../../shared/errors'
 import { useAppStore } from '../stores/appStore'
 import { normalizeTranscriptionError, normalizeVoiceError } from '../utils/voiceErrors'
-import { currentSpeechPreferences } from '../speech/speechPreferences'
+import { polishTranscript } from '../../shared/dictationPostProcess'
+import { currentSpeechPreferences, dictationPolishOptions } from '../speech/speechPreferences'
 import { useDictationStore } from './dictationStore'
 import { openMicrophone, type Microphone } from './microphone'
 import type { AudioLevels } from '../speech/audioLevels'
@@ -84,7 +85,8 @@ export function useDictation({ disabled, loading, onTranscript }: UseDictationOp
     try {
       const selection = useDictationStore.getState().selection
       if (!selection) throw new Error('No dictation model is selected. Choose one under Settings, Speech.')
-      const text = blob.size > 0 ? (await transcribeRecording(blob, selection)).trim() : ''
+      const raw = blob.size > 0 ? await transcribeRecording(blob, selection) : ''
+      const text = polishTranscript(raw, dictationPolishOptions(currentSpeechPreferences()))
       if (!live()) return
       if (text) onTranscriptRef.current(text)
       else showNotice(NO_SPEECH_MESSAGE)

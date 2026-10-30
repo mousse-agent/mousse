@@ -45,3 +45,12 @@ describe('Speech settings sample button', () => {
     expect(button).not.toContain('icon-spin')
   })
 })
+
+describe('Speech settings dictation cleanup', () => {
+  it('shows the cleanup switches and the default vocabulary', () => {
+    const html = renderToStaticMarkup(createElement(SpeechSettings))
+    expect(html).toContain('Write spoken symbols')
+    expect(html).toContain('Number the points')
+    expect(html).toMatch(/<textarea[^>]*class="speech-vocabulary"[^>]*>MOVES = mousse\n/)
+  })
+})

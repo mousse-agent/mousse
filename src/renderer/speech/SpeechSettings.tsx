@@ -1,5 +1,6 @@
-import { useEffect, useId } from 'react'
+import { useEffect, useId, useState } from 'react'
 import { LOCAL_STT_MODELS, sttModelsFromProviders } from '../../shared/dictation'
+import { formatVocabularyText, parseVocabularyText } from '../../shared/dictationPostProcess'
 import {
   LOCAL_TTS_MODELS,
   findLocalTtsModel,
@@ -175,8 +176,19 @@ function DictationSpeechSettings() {
   const setSelection = useDictationStore((state) => state.setSelection)
   const syncDictation = useDictationStore((state) => state.syncProfile)
   const reduceNoise = useSpeechPreferences((state) => state.preferences.reduceNoise)
+  const expandSymbols = useSpeechPreferences((state) => state.preferences.expandSymbols)
+  const detectLists = useSpeechPreferences((state) => state.preferences.detectLists)
+  const vocabulary = useSpeechPreferences((state) => state.preferences.vocabulary)
   const syncPreferences = useSpeechPreferences((state) => state.syncProfile)
   const setReduceNoise = useSpeechPreferences((state) => state.setReduceNoise)
+  const setExpandSymbols = useSpeechPreferences((state) => state.setExpandSymbols)
+  const setDetectLists = useSpeechPreferences((state) => state.setDetectLists)
+  const setVocabulary = useSpeechPreferences((state) => state.setVocabulary)
+  const symbolsSwitchId = useId()
+  const listsSwitchId = useId()
+  const vocabularyId = useId()
+  // Typed text is kept as is while editing and parsed into entries when the field loses focus.
+  const [vocabularyDraft, setVocabularyDraft] = useState<string | null>(null)
   const providerModels = useProviderSpeechModels(sttModelsFromProviders)
 
   useEffect(() => {
@@ -204,6 +216,36 @@ function DictationSpeechSettings() {
         htmlFor={noiseSwitchId}
         control={<Switch id={noiseSwitchId} checked={reduceNoise} onChange={setReduceNoise} />}
       />
+      <SettingsRow
+        title="Write spoken symbols"
+        description='"dot dot slash mousse hyphen plus" becomes ../mousse-plus and "five point five" becomes 5.5.'
+        htmlFor={symbolsSwitchId}
+        control={<Switch id={symbolsSwitchId} checked={expandSymbols} onChange={setExpandSymbols} />}
+      />
+      <SettingsRow
+        title="Number the points"
+        description='"Point number one ... point number two ..." becomes a numbered list, one point per paragraph.'
+        htmlFor={listsSwitchId}
+        control={<Switch id={listsSwitchId} checked={detectLists} onChange={setDetectLists} />}
+      />
+      <SettingsRow
+        title="Vocabulary"
+        description="Words the model keeps getting wrong, one per line as spoken = written. An entry in capitals matches only that spelling."
+        htmlFor={vocabularyId}
+      >
+        <textarea
+          id={vocabularyId}
+          className="speech-vocabulary"
+          spellCheck={false}
+          value={vocabularyDraft ?? formatVocabularyText(vocabulary)}
+          onChange={(event) => setVocabularyDraft(event.target.value)}
+          onBlur={() => {
+            if (vocabularyDraft === null) return
+            setVocabulary(parseVocabularyText(vocabularyDraft))
+            setVocabularyDraft(null)
+          }}
+        />
+      </SettingsRow>
     </SettingsGroup>
   )
 }
