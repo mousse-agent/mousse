@@ -114,6 +114,25 @@ describe('an agent that does its own Git work', () => {
     expect(existsSync(join(cwd, 'feature.txt'))).toBe(true)
   })
 
+  it('can create a repository with no commit inside the worktree: the turn is recorded without it and nothing locks', async () => {
+    const tool = join(cwd, 'tool')
+    const { action } = await turn('turn', () => {
+      write('kept.txt', 'kept\n')
+      mkdirSync(tool); git(tool, 'init', '-q'); writeFileSync(join(tool, 'x.txt'), 'x\n')
+    })
+    expect(action.state).toBe('completed')
+    expect(action.changedPaths.map((item) => item.path)).toEqual(['kept.txt'])
+    expect(git(cwd, 'ls-tree', '--name-only', action.endSha).split('\n')).not.toContain('tool')
+    expect(new ThreadWorkspaceManager(f.thread).verify().lifecycle).toBe('ready')
+    noPending()
+
+    // Once it has a commit it is recorded as a link to that commit, like any nested repository.
+    const { action: next } = await turn('next', () => {
+      git(tool, 'add', 'x.txt'); git(tool, '-c', 'user.name=Agent', '-c', 'user.email=agent@example.test', 'commit', '-qm', 'x')
+    }, 2)
+    expect(git(cwd, 'ls-tree', next.endSha, 'tool')).toMatch(/^160000 commit /)
+  })
+
   it('Undo of a turn that committed restores the files and leaves HEAD and the branch alone', async () => {
     const { action } = await turn('turn', () => {
       git(cwd, 'switch', '-q', '-c', 'issue-2-task')
@@ -355,6 +374,21 @@ describe('recovery', () => {
     noPending()
     expect(actions.get(legacy.id)).toMatchObject({ state: 'completed' })
     expect(actions.get(legacy.id)!.commits).toHaveLength(1)
+  })
+
+  it('a retake that fails again keeps the operation waiting with what stopped it this time', async () => {
+    const legacy = legacyLock('Error: Workspace branch changed during execution; recovery is required.')
+    // Something that stops every snapshot: a file where Mousse keeps its private index.
+    const blocker = join(git(cwd, 'rev-parse', '--absolute-git-dir'), 'mousse')
+    rmSync(blocker, { recursive: true, force: true }); writeFileSync(blocker, 'in the way\n')
+    await expect(actions.recoverPending(cwd)).rejects.toThrow(/EEXIST/)
+    const latest = new ThreadJournal(f.thread).latestByOperation().get(legacy.id)!
+    expect(latest.state).toBe('recovery_required')
+    expect((latest.details as { error?: string }).error).toMatch(/EEXIST/)
+
+    rmSync(blocker)
+    await actions.recoverPending(cwd)
+    noPending()
   })
 
   it('records an interrupted checkpoint again from the files, whatever branch they are on', async () => {

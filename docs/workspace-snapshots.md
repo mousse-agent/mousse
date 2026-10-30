@@ -15,7 +15,7 @@ A **snapshot** is a commit whose tree holds every file of a worktree: tracked an
 `takeSnapshot` (`src/mms/actions/snapshots.ts`):
 
 1. Uses a private, persistent index at `git rev-parse --git-path mousse/snapshot-index`. Git keeps names it doesn't know in each linked worktree's own Git directory, so every worktree has its own. The index is persistent so Git's stat cache keeps the next snapshot fast. It is seeded from `HEAD` (or empty) when missing, and rebuilt, lock file included, when it is corrupt.
-2. Runs `GIT_INDEX_FILE=<it> git add -A -- . ':(exclude).mousse'`, `write-tree`, then `commit-tree <tree> [-p HEAD]` as `Mousse <mousse@local>` with the message `mousse snapshot: <reason>` and the trailers `Mousse-Thread`, `Mousse-Operation`, `Mousse-Head` and `Mousse-Branch`. Every command goes through the hardened `git()` helper: no repository hook, filter driver or program runs.
+2. Runs `GIT_INDEX_FILE=<it> git add -A -- . ':(exclude).mousse'`, `write-tree`, then `commit-tree <tree> [-p HEAD]` as `Mousse <mousse@local>` with the message `mousse snapshot: <reason>` and the trailers `Mousse-Thread`, `Mousse-Operation`, `Mousse-Head` and `Mousse-Branch`. Every command goes through the hardened `git()` helper: no repository hook, filter driver or program runs. A nested repository is recorded as a link to its HEAD, as Git does. One with no commit yet (an agent ran `git init` or a project generator inside the worktree) cannot be added, so when `add` fails the snapshot looks for such repositories and leaves them out; the turn is recorded and nothing locks.
 3. Never changes HEAD, a branch, the real index or a file. It works during a merge, rebase, revert or cherry-pick and records that (`operationInProgress`) instead of refusing.
 4. Returns the previous snapshot when the tree and HEAD are what it had (`mousse/snapshot-last.json` next to the index), so a turn that changes nothing starts and ends on one commit.
 
@@ -70,7 +70,7 @@ What still stops a turn: an operation Mousse left unfinished (an interrupted res
 
 A subagent's result or a nested snapshot recorded while the action runs becomes one of its `contributions`, found by the action's time window (a snapshot has no ancestry to test).
 
-Interrupted checkpoints recover by taking the snapshot again from the files.
+Interrupted checkpoints recover by taking the snapshot again from the files. If that fails too, the operation stays `recovery_required` with the new error, so the reason shown is what stopped the retake.
 
 ## Undo, Redo and revert
 
@@ -250,7 +250,7 @@ The phase 5 documentation of the model's terms (the architecture doc's body and 
 
 ## Tests
 
-- `tests/workspaceSnapshots.test.ts`: the snapshot model, an agent that switches branches, rewrites history, commits and pushes, rebase in progress, outside changes, three-way Undo/Redo/revert, recovery including locked legacy threads, forks and fork seeding, subagent results (files arrive with the thread's uncommitted work and staging kept, conflict refuses and changes nothing, no-change refusal, recovery), Publish (one commit with the person's identity and no snapshot in its history, a second publish, stale review, conflict, dirty primary, missing identity), rebuilding a worktree from its snapshot, and GC.
+- `tests/workspaceSnapshots.test.ts`: the snapshot model, an agent that switches branches, rewrites history, commits and pushes, creates a repository with no commit, rebase in progress, outside changes, three-way Undo/Redo/revert, recovery including locked legacy threads and a retake that fails again, forks and fork seeding, subagent results (files arrive with the thread's uncommitted work and staging kept, conflict refuses and changes nothing, no-change refusal, recovery), Publish (one commit with the person's identity and no snapshot in its history, a second publish, stale review, conflict, dirty primary, missing identity), rebuilding a worktree from its snapshot, and GC.
 - `tests/snapshotWorkspace.test.ts`, `tests/snapshotWorkspaceProtocol.test.ts` (phase 4): a project without Git (a turn is a snapshot, Undo restores, the folder never gains a `.git`, `.gitignore` and the built-in list are honored, a repository with no commit keeps its `.git`), review from the store, folders past a limit and home folders (the turn runs and says why), threads that share a folder (Undo keeps the other's edits, overlap refuses, the store is the lock), a thread with no project, release and garbage collection, thread and project deletion, and the whole of it through the daemon with a scripted runtime.
 - `tests/storageCleanupService.test.ts`, `tests/resourcePurge.test.ts`: a worktree with uncommitted files retires into a snapshot and comes back with identical files; what a snapshot cannot hold keeps the worktree; permanent deletion asks first.
 - `tests/dirtyWorkspaceProtocol.test.ts`: push with uncommitted files, and Discard's record and notice.
