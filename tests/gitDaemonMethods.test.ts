@@ -363,7 +363,11 @@ describe('Git mutations through the daemon', () => {
       expect(git(t.path, 'rev-parse', 'HEAD')).toBe(head)
       expect(new ThreadActionService(t.directory).list()).toEqual([])
       await client.request('files.write', { threadId: t.threadId, path: 'next.txt', content: 'next\n' })
-      expect(git(t.path, 'show', '--name-only', '--format=', 'HEAD').split('\n').filter(Boolean)).toEqual(['next.txt'])
+      // The write is recorded as a snapshot on top of HEAD; the branch does not move.
+      const action = new ThreadActionService(t.directory).list().at(-1)!
+      expect(action.state).toBe('completed')
+      expect(git(t.path, 'rev-parse', 'HEAD')).toBe(head)
+      expect(git(t.path, 'diff', '--name-only', head, action.endSha)).toBe('next.txt')
     })
 
     it('commits staged A and unstaged B as one commit through the hooks, with no extra checkpoint', async () => {
