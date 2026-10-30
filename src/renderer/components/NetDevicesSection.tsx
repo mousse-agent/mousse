@@ -28,7 +28,10 @@ function networkingLine(status?: NetStatus): string {
   if (!status) return 'Loading…'
   if (status.restartRequired) return 'Off · restart the background service before turning it on again'
   const error = status.error ? ` · ${netErrorWords(status.error)}` : ''
-  if (!status.self) return status.enabled ? `No network identity yet${error}` : 'Off · turning it on creates a network identity for this device'
+  if (!status.self) {
+    if (status.enabled) return `No network identity yet${error}`
+    return status.vaultUnavailable ? 'Off · set a passphrase to turn it on' : 'Off · turning it on creates a network identity for this device'
+  }
   if (!status.enabled) return status.keystore === 'unlocked' ? `Off · local conversations and network records are kept${error}` : `Off · unlock below to turn it on${error}`
   if (status.keystore === 'locked') return `On · locked until you enter the passphrase${error}`
   if (status.rosterState === 'conflict') return `On · device list conflict, recovery required${error}`
@@ -104,7 +107,7 @@ export function NetDevicesSection() {
   const id = useId()
   const alive = useRef(true), generation = useRef(0)
   const [status, setStatus] = useState<NetStatus>(), [devices, setDevices] = useState<Device[]>([]), [manifests, setManifests] = useState<TransportManifest[]>([])
-  const [error, setError] = useState(''), [busy, setBusy] = useState(false), [passphrase, setPassphrase] = useState(''), [name, setName] = useState('My device'), [invite, setInvite] = useState(''), [joinText, setJoinText] = useState(''), [doctor, setDoctor] = useState<NetDoctor>()
+  const [error, setError] = useState(''), [keychainRefusal, setKeychainRefusal] = useState(''), [busy, setBusy] = useState(false), [passphrase, setPassphrase] = useState(''), [name, setName] = useState('My device'), [invite, setInvite] = useState(''), [joinText, setJoinText] = useState(''), [doctor, setDoctor] = useState<NetDoctor>()
   const [relayAddress, setRelayAddress] = useState(''), [named, setNamed] = useState(false), [tunnelId, setTunnelId] = useState(''), [hostname, setHostname] = useState(''), [credentialsFile, setCredentialsFile] = useState('')
   const [sshEndpoint, setSshEndpoint] = useState(''), [sshPort, setSshPort] = useState('')
   const [adding, setAdding] = useState(false), [addKind, setAddKind] = useState<'computer'>(), [revoking, setRevoking] = useState<Device>(), [updating, setUpdating] = useState<Device>()
@@ -147,7 +150,14 @@ export function NetDevicesSection() {
   const action = async (method: PlatformRequestMethod, params: unknown, capture?: (value: unknown) => void) => {
     generation.current++; setBusy(true); setError('')
     try { const result = await window.mousse.platformRequest.request(method, params); if (!alive.current) return; capture?.(result); await reload() }
-    catch (cause) { if (alive.current) { setError(String((cause as Error)?.message ?? cause)); if (method === 'net.disable') { setDevices([]); setManifests([]); await reload().catch(() => undefined) } } }
+    catch (cause) {
+      if (alive.current) {
+        const message = String((cause as Error)?.message ?? cause)
+        setError(message)
+        if (method === 'net.init' && (cause as { code?: unknown })?.code === 'keystore_locked') { setKeychainRefusal(message); await reload().catch(() => undefined) }
+        if (method === 'net.disable') { setDevices([]); setManifests([]); await reload().catch(() => undefined) }
+      }
+    }
     finally { if (alive.current) { setBusy(false); setPassphrase('') } }
   }
   const transport = (transportId: string, enabled: boolean, settings?: Record<string, unknown>) => action('net.transport.configure', { id: transportId, enabled, ...(settings ? { settings } : {}) })
@@ -220,12 +230,18 @@ export function NetDevicesSection() {
   // On unless this computer turned it off; an older daemon that does not report it has no such switch.
   const workOnThreads = status?.workOnThreads !== false
 
+  // The keychain refused to protect a new identity's keys, so a passphrase protects them instead.
+  const needsPassphrase = !self && !!status?.vaultUnavailable
   const toggleNetworking = (next: boolean) => {
     if (!next) { setInvite(''); void action('net.disable', {}) }
     else if (self) void action('net.init', {})
-    else void action('net.init', { name: name.trim(), listen: true })
+    else void action('net.init', { name: name.trim(), listen: true, ...(needsPassphrase ? { passphrase } : {}) })
   }
-  const networkingLocked = !status || (!status.enabled && (!!status.restartRequired || (self ? !unlocked : !name.trim())))
+  const networkingLocked = !status || (!status.enabled && (!!status.restartRequired || (self ? !unlocked : !name.trim() || (needsPassphrase && !passphrase))))
+  const submitNewPassphrase = (event: FormEvent) => {
+    event.preventDefault()
+    if (!networkingLocked && !busy) toggleNetworking(true)
+  }
 
   const locked = status?.keystore === 'locked'
   const submitPassphrase = (event: FormEvent) => {
@@ -286,7 +302,8 @@ export function NetDevicesSection() {
   }
 
   return <>
-    {error && !adding && <p role="alert" className="chat-error devices-error">{error}</p>}
+    {/* The passphrase row answers a refused keychain; its "locked" error would only repeat it. */}
+    {error && !adding && !(needsPassphrase && error === keychainRefusal) && <p role="alert" className="chat-error devices-error">{error}</p>}
 
     <SettingsGroup title="This device" icon={Monitor} className="devices-group">
       {!self && (
@@ -294,6 +311,19 @@ export function NetDevicesSection() {
           title="Device name"
           htmlFor={`${id}-name`}
           control={<input id={`${id}-name`} className="settings-input" value={name} maxLength={120} disabled={busy || !!status?.restartRequired} onChange={(event) => { nameEdited.current = true; setName(event.target.value) }} />}
+        />
+      )}
+      {needsPassphrase && (
+        <SettingsRow
+          title="Passphrase"
+          htmlFor={`${id}-new-passphrase`}
+          description="Protects network keys instead of the keychain. You enter it after each restart."
+          control={
+            <form className="devices-inline-form" onSubmit={submitNewPassphrase}>
+              <input id={`${id}-new-passphrase`} className="settings-input" type="password" value={passphrase} disabled={busy || !!status?.restartRequired} onChange={(event) => setPassphrase(event.target.value)} autoComplete="new-password" />
+              <button type="submit" className="settings-btn" disabled={busy || networkingLocked}>Turn on</button>
+            </form>
+          }
         />
       )}
       <SettingsRow
