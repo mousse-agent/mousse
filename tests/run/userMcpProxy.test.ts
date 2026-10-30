@@ -6,8 +6,8 @@ import { injectedFactory, settingsStore, testServerConfig } from '../fixtures/ag
 import { appTurn } from './appToolsFixture'
 
 // PR 4 unit 4h: a turn of a runtime Mousse sends the user's MCP tools (Pi's agent) calls them by the
-// name it was offered. The real `McpManager` names a tool anew on each listing, so a call must
-// resolve from what the turn was offered, never from a new listing.
+// name it was offered. The real `McpManager` keeps a tool's name across listings, but a call still
+// resolves from what the turn was offered, never from a new listing (a server may drop the tool).
 
 function setup() {
   const store = settingsStore((settings) => {

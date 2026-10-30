@@ -12,7 +12,7 @@ import type { IntegrationActor } from '../../../../shared/integrations/actor'
 import type { McpToolCallResult } from '../../../../shared/integrations/results'
 import type { McpManager } from '../../../integrations/mcp/McpManager'
 import type { ModeCeiling } from '../../types'
-import type { RelayGrant } from '../relay/types'
+import type { RelayAdmission, RelayGrant } from '../relay/types'
 import type { AppToolTurns } from './turns'
 import { callerThreadOnly } from './thread'
 import {
@@ -386,35 +386,8 @@ export class ToolRegistry {
     const tool = registered && !registered.hidden ? registered : undefined
     // Any other name can only be one of the turn's proxied user MCP tools, looked up once the turn is known.
     if (!tool && (registered || !this.options.userMcp)) throw new McpToolError('mousse_unknown_tool', `No Mousse tool named ${name}.`)
+    const { threadId, active, turn, args, caller, boundToken } = await this.admit(rawArgs, request)
     const { credential } = request
-    const threadId = credential.threadId
-    const gate = await this.options.awaitLiveRun?.(threadId)
-    const active = this.options.activeRunId(threadId)
-    // A call that waited for a particular run acts as that run or not at all: never as another one that
-    // happens to be active (a person's turn stuck in its sign-in check, say).
-    if (gate && (gate.runId === null || gate.runId !== active))
-      throw notLive(`The turn the runtime started for thread ${threadId} did not become active; its tools are closed.`)
-    if (!active) throw notLive(`Thread ${threadId} has no active run; its tools are closed until the next turn.`)
-    if (!credential.current()) throw notLive(`This credential of thread ${threadId} was replaced; its tools are closed.`)
-    // The credential acts for its own run only. A gate is the thread owner's word that the waiting
-    // call belongs to the run that became active (a turn the runtime started itself).
-    if (credential.runId !== active && !gate) throw notLive(`This credential belongs to an earlier turn of thread ${threadId}; its tools are closed.`)
-    const turn = this.options.turns?.get(active)
-    if (!turn) throw notLive(`The turn of thread ${threadId} is not running; its tools are closed.`)
-    const args = { ...rawArgs }
-    const turnToken = args[TURN_TOKEN_KEY]
-    const attemptToken = args[ATTEMPT_TOKEN_KEY]
-    delete args[TURN_TOKEN_KEY]
-    delete args[ATTEMPT_TOKEN_KEY]
-    // The token the call is bound to: the attempt's when it carries one, else the turn's.
-    const boundToken = turn.attemptToken !== undefined && attemptToken !== undefined ? turn.attemptToken : turn.turnToken
-    if (credential.binding === 'per_call') {
-      const tagged = turn.attemptToken !== undefined && attemptToken !== undefined
-        ? attemptToken === turn.attemptToken
-        : turnToken === turn.turnToken
-      if (!tagged) throw notLive(`This call was made for an earlier turn of thread ${threadId}; it was not run.`)
-    }
-    const caller: McpCaller = { threadId, runId: active, provider: credential.provider, modeCeiling: credential.modeCeiling, accessLevel: credential.accessLevel }
     if (!tool) return this.callUserMcp(name, args, { threadId, active, turn, credential, boundToken, request })
     // Scope and level are checked first: a refused call asks nobody anything and leaves no ledger row.
     const scope = this.authorize(tool, args, caller, this.options.readOnlyThread?.(threadId) === true)
@@ -458,6 +431,46 @@ export class ToolRegistry {
       else ledger?.commit(ledgerId)
     }
     return outcome
+  }
+
+  /**
+   * The checks every call over MCP passes before anything about its tool: the thread has an active
+   * run, the credential is current and acts for that run (or a run the owner says it waited for),
+   * the run's turn is registered, and a `per_call` runtime's call carries that turn's token. Returns
+   * where the call stands, with the turn and attempt tokens taken out of its arguments. The MCP relay
+   * admits its calls here too.
+   */
+  async admit(rawArgs: Record<string, unknown>, request: McpCallRequest): Promise<RelayAdmission> {
+    const { credential } = request
+    const threadId = credential.threadId
+    const gate = await this.options.awaitLiveRun?.(threadId)
+    const active = this.options.activeRunId(threadId)
+    // A call that waited for a particular run acts as that run or not at all: never as another one that
+    // happens to be active (a person's turn stuck in its sign-in check, say).
+    if (gate && (gate.runId === null || gate.runId !== active))
+      throw notLive(`The turn the runtime started for thread ${threadId} did not become active; its tools are closed.`)
+    if (!active) throw notLive(`Thread ${threadId} has no active run; its tools are closed until the next turn.`)
+    if (!credential.current()) throw notLive(`This credential of thread ${threadId} was replaced; its tools are closed.`)
+    // The credential acts for its own run only. A gate is the thread owner's word that the waiting
+    // call belongs to the run that became active (a turn the runtime started itself).
+    if (credential.runId !== active && !gate) throw notLive(`This credential belongs to an earlier turn of thread ${threadId}; its tools are closed.`)
+    const turn = this.options.turns?.get(active)
+    if (!turn) throw notLive(`The turn of thread ${threadId} is not running; its tools are closed.`)
+    const args = { ...rawArgs }
+    const turnToken = args[TURN_TOKEN_KEY]
+    const attemptToken = args[ATTEMPT_TOKEN_KEY]
+    delete args[TURN_TOKEN_KEY]
+    delete args[ATTEMPT_TOKEN_KEY]
+    // The token the call is bound to: the attempt's when it carries one, else the turn's.
+    const boundToken = turn.attemptToken !== undefined && attemptToken !== undefined ? turn.attemptToken : turn.turnToken
+    if (credential.binding === 'per_call') {
+      const tagged = turn.attemptToken !== undefined && attemptToken !== undefined
+        ? attemptToken === turn.attemptToken
+        : turnToken === turn.turnToken
+      if (!tagged) throw notLive(`This call was made for an earlier turn of thread ${threadId}; it was not run.`)
+    }
+    const caller: McpCaller = { threadId, runId: active, provider: credential.provider, modeCeiling: credential.modeCeiling, accessLevel: credential.accessLevel }
+    return { threadId, active, turn, args, caller, boundToken }
   }
 
   /**

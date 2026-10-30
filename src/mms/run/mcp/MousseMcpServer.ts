@@ -8,6 +8,7 @@ import { mousseVersion } from '../../appVersion'
 import { McpToolError, type McpCredentialAuthority, type McpToolErrorCode, type ToolOutcome, type ToolRegistry } from './appTools'
 import { mousseOrchestrationInstructions } from './instructions'
 import type { BearerTurn, CredentialRecord, McpCredentials, TurnSettlement } from './McpCredentials'
+import { RELAY_INSTRUCTIONS, type RelayHandler } from './relay/handler'
 
 /** The MCP relay (`mousse-relay`) a turn attaches: its URL on the same listener, and the catalogue revision. */
 export interface McpRelayAttachment {
@@ -70,6 +71,8 @@ export class MousseMcpServer implements McpAttachmentProvider {
     private readonly options: {
       credentials: McpCredentials
       registry: ToolRegistry
+      /** The MCP relay served at `RELAY_PATH`; absent: that path is not found. */
+      relay?: RelayHandler
       /** Defaults to `127.0.0.1`. */
       host?: string
       /** Defaults to 0 (a random free port). */
@@ -161,7 +164,8 @@ export class MousseMcpServer implements McpAttachmentProvider {
 
   private async handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const path = (req.url ?? '').split('?')[0]
-    if (path !== MCP_PATH) {
+    const relay = path === RELAY_PATH ? this.options.relay : undefined
+    if (path !== MCP_PATH && !relay) {
       res.writeHead(404).end()
       return
     }
@@ -185,7 +189,7 @@ export class MousseMcpServer implements McpAttachmentProvider {
     }
     const request = new AbortController()
     this.track(credential.threadId, request)
-    const server = this.mcpServer(credential, request.signal)
+    const server = relay ? this.relayServer(relay, credential, request.signal) : this.mcpServer(credential, request.signal)
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true })
     res.once('close', () => {
       request.abort(new Error('The MCP request closed'))
@@ -219,35 +223,73 @@ export class MousseMcpServer implements McpAttachmentProvider {
       const toolCallId = typeof clientRequestId === 'string' && clientRequestId.trim()
         ? `mcp:${clientRequestId.trim()}`
         : `mcp:${randomUUID()}`
-      // The credential as it stands for this call: the run it is bound to now, and its ceiling.
-      const record = credentials.current(resolved.tokenHash) ?? resolved
-      credentials.callReceived(record.tokenHash, record.runId)
-      credentials.callRunning(record.tokenHash, record.runId, 1)
-      const authority: McpCredentialAuthority = {
-        threadId: record.threadId,
-        runId: record.runId,
-        provider: record.provider,
-        modeCeiling: record.modeCeiling,
-        accessLevel: record.accessLevel,
-        binding: record.binding,
-        current: () => credentials.isCurrent(record)
-      }
-      try {
-        const outcome = await registry.call(request.params.name, args, {
-          credential: authority,
-          toolCallId,
-          signal: AbortSignal.any([requestSignal, extra.signal])
-        })
-        return toolContent(outcome)
-      } catch (error) {
-        if (error instanceof McpToolError)
-          throw Object.assign(new Error(error.message), { code: MCP_ERROR_CODES[error.code], data: { ...error.details, reason: error.code } })
-        throw error
-      } finally {
-        credentials.callRunning(record.tokenHash, record.runId, -1)
-      }
+      return this.tracked(resolved, (authority) =>
+        registry.call(request.params.name, args, { credential: authority, toolCallId, signal: AbortSignal.any([requestSignal, extra.signal]) })
+      )
     })
     return server
+  }
+
+  /**
+   * One SDK server per relay request (`mousse-relay`, SPEC §15.5): the catalogue's listing for the
+   * credential's thread (never a connection to a server inside the request), and calls under the same
+   * tracking as Mousse's own, so a drained turn counts them. A relayed tool's arguments are its
+   * server's, so `clientRequestId` is passed through.
+   */
+  private relayServer(relay: RelayHandler, resolved: CredentialRecord, requestSignal: AbortSignal): Server {
+    const server = new Server(
+      { name: 'mousse-relay', version: mousseVersion() },
+      { capabilities: { tools: {} }, instructions: RELAY_INSTRUCTIONS }
+    )
+    const { credentials } = this.options
+    server.setRequestHandler(ListToolsRequestSchema, async () => ({
+      tools: relay.list(credentials.current(resolved.tokenHash) ?? resolved).map((tool) => ({
+        name: tool.name,
+        description: tool.description,
+        inputSchema: tool.inputSchema as { type: 'object'; properties?: Record<string, object> }
+      }))
+    }))
+    server.setRequestHandler(CallToolRequestSchema, async (request, extra) =>
+      this.tracked(resolved, (authority) =>
+        relay.call(request.params.name, (request.params.arguments ?? {}) as Record<string, unknown>, {
+          credential: authority,
+          toolCallId: `mcp:${randomUUID()}`,
+          signal: AbortSignal.any([requestSignal, extra.signal])
+        })
+      )
+    )
+    return server
+  }
+
+  /**
+   * Runs one tool call under the credential as it stands for it (the run it is bound to now, its
+   * ceiling and relay grant), counted as received and running for the drained-turn check; a
+   * refusal becomes a JSON-RPC error.
+   */
+  private async tracked(resolved: CredentialRecord, run: (authority: McpCredentialAuthority) => Promise<ToolOutcome>) {
+    const { credentials } = this.options
+    const record = credentials.current(resolved.tokenHash) ?? resolved
+    credentials.callReceived(record.tokenHash, record.runId)
+    credentials.callRunning(record.tokenHash, record.runId, 1)
+    const authority: McpCredentialAuthority = {
+      threadId: record.threadId,
+      runId: record.runId,
+      provider: record.provider,
+      modeCeiling: record.modeCeiling,
+      accessLevel: record.accessLevel,
+      binding: record.binding,
+      ...(record.relay ? { relay: record.relay } : {}),
+      current: () => credentials.isCurrent(record)
+    }
+    try {
+      return toolContent(await run(authority))
+    } catch (error) {
+      if (error instanceof McpToolError)
+        throw Object.assign(new Error(error.message), { code: MCP_ERROR_CODES[error.code], data: { ...error.details, reason: error.code } })
+      throw error
+    } finally {
+      credentials.callRunning(record.tokenHash, record.runId, -1)
+    }
   }
 
   private track(threadId: string, controller: AbortController): void {

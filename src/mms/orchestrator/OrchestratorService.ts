@@ -79,6 +79,8 @@ import { QueueCommands, type QueueIntent } from '../run/QueueCommands'
 import type { PlannedQueueCommand, QueueEffects } from '../queue/queueJournal'
 import { modeFactsFor, prepareSkills, sessionInstructions, settingsToolEnabled, turnPreamble } from '../run/mcp/appTools/assemble'
 import { questionApproval } from '../run/mcp/appTools/quickActions'
+import { RelayCatalog, relayTurnContext } from '../run/mcp/relay/catalog'
+import { RelayHandler } from '../run/mcp/relay/handler'
 import { APPLET_GENERATION_GUIDANCE } from '../../shared/appletGuidance'
 import { defaultIntegrationActor } from '../../shared/integrations/actor'
 import { DevGuiTools } from '../devgui/DevGuiTools'
@@ -825,6 +827,7 @@ export class OrchestratorService extends EventEmitter {
     // Before any turn is stopped: a provider's stop handler dismisses its pending requests, and a dismissal
     // while the profile stops is no withdrawal. The saved requests stay pending for the next boot.
     this.questions.shutdown()
+    this.relayCatalogImpl?.dispose()
     // The shutdown reason marks these turns as cut off by a restart, not stopped by a user.
     for (const session of new Set([this.boundSession, ...this.sessions.values()])) session.activeTurn?.abort.abort(this.lifecycle.signal.reason)
   }
@@ -1412,6 +1415,9 @@ export class OrchestratorService extends EventEmitter {
   /** Phase 5: mints a Mousse MCP credential per MCP-capable turn. Null attaches nothing. */
   private mcpAttachment: McpAttachmentProvider | null = null
   private mcpRegistry?: ToolRegistry
+  /** The MCP relay's catalogue and handler (SPEC §15.5), built on first use; none without an MCP manager. */
+  private relayCatalogImpl?: RelayCatalog
+  private relayHandlerImpl?: RelayHandler
   /** The app-tool context of each running turn (PR 2 §2), for the Mousse MCP server's calls. */
   readonly appToolTurns = new AppToolTurns()
   /** The definition runs of each thread, for its public Stop (`stopDefinitionRuns`). */
@@ -2896,6 +2902,7 @@ export class OrchestratorService extends EventEmitter {
     // Agent and Plan run natively in the runtime; another mode's own instructions go into the preamble.
     const modePrompt = descriptor && !['agent', 'plan', 'build'].includes(descriptor.id) ? descriptor.prompt : undefined
     const appletCatalogue = this.appletStore ? this.appletCatalogue() : undefined
+    const relay = await this.relayForTurn(turn)
     return {
       turnToken: turn.turnToken,
       modeCeiling: turn.modeCeiling,
@@ -2903,6 +2910,7 @@ export class OrchestratorService extends EventEmitter {
       mcpEligible: Boolean(this.runEngine),
       ...(turn.definition ? { definition: turn.definition } : {}),
       ...(turn.bot ? { bot: turn.bot } : {}),
+      ...(relay ? { relay } : {}),
       // A definition's turn runs on its own prompt and its granted skills only (`runDefinitionTurn`).
       instructions: (mcpAttached) => turn.definition ? { sessionInstructions: '', turnPreamble: '' } : ({
         sessionInstructions: sessionInstructions({ mcp: mcpAttached, appletGuidance: this.appletStore ? APPLET_GENERATION_GUIDANCE : undefined }),
@@ -2913,6 +2921,20 @@ export class OrchestratorService extends EventEmitter {
           usableTools: mcpAttached ? this.usableAppTools(this.appToolTurns.get(turn.runId) ?? turn) : undefined
         }))
       })
+    }
+  }
+
+  /**
+   * The turn's MCP relay context: a cold catalogue is warmed within its budget, so the turn's runtime
+   * lists the tools. The gateway attaches it only to a runtime whose driver declares the relay. The
+   * relay is optional: a failure starts the turn without it.
+   */
+  private async relayForTurn(turn: AppToolTurn): Promise<TurnAppContext['relay']> {
+    try {
+      return await relayTurnContext(this.runEngine ? this.relayCatalog() : undefined, this.settingsStore.get().integrations.mcp, turn)
+    } catch (error) {
+      console.warn('the MCP relay is unavailable for the turn', { threadId: turn.threadId, error: error instanceof Error ? error.message : String(error) })
+      return undefined
     }
   }
 
@@ -2945,6 +2967,32 @@ export class OrchestratorService extends EventEmitter {
     return this.mcpRegistry
   }
 
+  /** The MCP relay's catalogue of the user's servers' tools; undefined without an MCP manager. */
+  relayCatalog(): RelayCatalog | undefined {
+    if (!this.mcpManager) return undefined
+    this.relayCatalogImpl ??= new RelayCatalog({ manager: this.mcpManager, settings: () => this.settingsStore.get().integrations.mcp })
+    return this.relayCatalogImpl
+  }
+
+  /** What the Mousse MCP server serves at its relay path; undefined without an MCP manager. */
+  relayHandler(): RelayHandler | undefined {
+    const catalog = this.relayCatalog()
+    if (!catalog || !this.mcpManager) return undefined
+    if (this.relayHandlerImpl) return this.relayHandlerImpl
+    const host = this.mcpToolHost()
+    this.relayHandlerImpl = new RelayHandler({
+      catalog,
+      manager: this.mcpManager,
+      registry: this.mcpToolRegistry(),
+      projectPathFor: (threadId) => host.projectPathFor!(threadId),
+      readOnlyThread: host.readOnlyThread,
+      permissionModeFor: host.permissionModeFor,
+      askApproval: host.askApproval,
+      toolLedger: host.toolLedger
+    })
+    return this.relayHandlerImpl
+  }
+
   /**
    * What the Mousse MCP server's tools need from the thread owner (SPEC §15.1). Every call acts as
    * the credential's caller: its thread's session, run and mode ceiling.
@@ -2972,6 +3020,7 @@ export class OrchestratorService extends EventEmitter {
       projectGit: true,
       toolLedger: (runId) => this.toolLedgerFor(runId),
       readOnlyThread: (threadId) => this.isReadOnlyChild(threadId),
+      projectPathFor: (threadId) => this.getOrCreateSession(threadId).projectCwd ?? undefined,
       // The ceiling the thread's delegations gave it: a Plan turn narrows only its own calls.
       threadCeiling: (threadId) => this.modeCeilingFor(threadId, 'agent'),
       // Only a bot's threads list the bot tools (`escalate`; `consult` on its activation thread).
