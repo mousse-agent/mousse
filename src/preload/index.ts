@@ -694,8 +694,8 @@ const api = {
     getStatus: (threadId: string): Promise<unknown> => ipcRenderer.invoke('workspace:getStatus', threadId),
     restore: (threadId: string, expectedJournalGeneration?: number): Promise<unknown> =>
       ipcRenderer.invoke('workspace:restore', threadId, expectedJournalGeneration),
-    /** Discard on a conflict in the thread worktree, after the person confirmed. Keeps a copy under `backupRef`. */
-    discardPendingChanges: (threadId: string): Promise<{ backupRef: string }> =>
+    /** Discard on a conflict in the thread worktree, after the person confirmed. Keeps a copy under `backupRef`, and `notice` says how to bring the files back. */
+    discardPendingChanges: (threadId: string): Promise<{ backupRef: string; notice: string }> =>
       ipcRenderer.invoke('workspace:discardPendingChanges', threadId)
   },
   actions: {

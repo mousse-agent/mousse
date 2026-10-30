@@ -118,8 +118,8 @@ describe('row actions', () => {
 
   it("refuses stage and unstage in a thread's own worktree before asking the daemon, and still discards", async () => {
     const { git } = install()
-    expect(await runRowAction(PATH, thread, { action: 'stage', files: [file('a.ts')] })).toEqual({ kind: 'failed', message: "This thread's branch is checkpointed" })
-    expect(await runRowAction(PATH, thread, { action: 'unstage', files: 'all' })).toEqual({ kind: 'failed', message: "This thread's branch is checkpointed" })
+    expect(await runRowAction(PATH, thread, { action: 'stage', files: [file('a.ts')] })).toEqual({ kind: 'failed', message: "Not available in this thread's worktree" })
+    expect(await runRowAction(PATH, thread, { action: 'unstage', files: 'all' })).toEqual({ kind: 'failed', message: "Not available in this thread's worktree" })
     expect(git.stage).not.toHaveBeenCalled()
     expect(git.unstage).not.toHaveBeenCalled()
     expect(await runRowAction(PATH, thread, { action: 'discard', files: [file('a.ts')] })).toEqual({ kind: 'done' })

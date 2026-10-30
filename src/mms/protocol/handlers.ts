@@ -768,15 +768,19 @@ async function ensureOwnedTaskWorkspace(ctx: HandlerContext, params: Record<stri
   if (manager.verify().lifecycle !== 'ready') throw new DomainRpcError('workspace_recovery_required', 'Task workspace requires recovery before mutation')
 }
 
-/** Refusals that follow from a thread's worktree being checkpointed. Each has a fixed code the GUI can show copy for. */
+/** Refusals that follow from a thread's worktree being the thread's own. Each has a fixed code the GUI can show copy for. */
 const gitThreadRules = createErrorProvider({
   task_branch_authoritative: { category: 'denied', retryable: false, message: 'Task branches are authoritative. Use the conversation branch controls to switch task revisions.' },
-  thread_worktree_checkpointed: { category: 'denied', retryable: false, message: "This thread's branch is checkpointed; commits include every change." },
-  git_amend_in_thread: { category: 'denied', retryable: false, message: "This thread's branch is checkpointed; amend is not available." },
-  git_thread_dirty: { category: 'conflict', retryable: false, message: "Commit this thread's changes before pushing." }
+  thread_worktree_checkpointed: { category: 'denied', retryable: false, message: "Staging is not available in a thread's worktree; a commit there includes every change." },
+  git_amend_in_thread: { category: 'denied', retryable: false, message: "Amend is not available in a thread's worktree." }
 })
 
 const GIT_PATHS_MAX = 5_000
+
+/** The line a push of a thread's branch carries when the worktree holds files that are not committed: they stay out of the push. */
+function uncommittedNotPushedNotice(count: number): string {
+  return `Pushed the commits. ${count === 1 ? '1 uncommitted file was' : `${count} uncommitted files were`} not pushed.`
+}
 
 interface GitMutationTarget {
   root: string
@@ -832,7 +836,7 @@ function gitPaths(ctx: HandlerContext, root: string, value: unknown): string[] {
 async function runUserThreadGitAction<T>(
   ctx: HandlerContext,
   target: Required<Pick<GitMutationTarget, 'root' | 'directory' | 'workspace'>>,
-  extra: Pick<RunThreadActionOptions, 'onFailure' | 'externalEffects' | 'signal'>,
+  extra: Pick<RunThreadActionOptions, 'externalEffects' | 'signal'>,
   mutate: () => Promise<T>
 ): Promise<T> {
   const { root, directory, workspace } = target
@@ -2043,8 +2047,8 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
           mkdirSync(cwd, { recursive: true })
           cwd = assertEpisodePath(directory!, binding.workspaceRelativePath)
         }
-        // The user's pending edits are saved as their own checkpoint first; the terminal's action covers only what it changes.
-        const startSha = actions && actionOptions ? (await actions.saveUserChanges(actionOptions)).startSha : undefined
+        // Edits made outside the terminal are recorded as their own action first; the terminal's action covers only what it changes.
+        const startSha = actions && actionOptions ? (await actions.recordOutsideChanges(actionOptions)).startSha : undefined
         if (actions && actionOptions) actions.beginTurn(actionOptions, startSha!)
         ptyId = ctx.mms.ptyManager.create(agentId, cwd, command, { threadId, env, shellArgs,
           ownership: lease ? { assert: () => assertHeldThreadLease(directory!, lease), heartbeat: () => { heartbeatExecutionLease(lease) },
@@ -2708,7 +2712,15 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       await ensureWorkspaceMaterialized(ctx, operation.threadId, operation.projectPath)
       const workspace = new ThreadWorkspaceManager(operation.threadDirectory).load()
       if (!workspace || workspace.lifecycle !== 'ready') throw new DomainRpcError('workspace_not_ready', 'Thread workspace is not ready')
-      return await withGitMutationLocks(operation.threadDirectory, workspace.worktreePath, 'discard-pending-changes', () => discardPendingChanges(workspace.worktreePath))
+      // Everything uncommitted goes, the results of the thread's turns included. The files as they are now are recorded
+      // as a snapshot first (the turns' receipts keep theirs), and a copy stays under refs/mousse/discarded/.
+      return await withGitMutationLocks(operation.threadDirectory, workspace.worktreePath, 'discard-pending-changes', () => {
+        let before: string | undefined
+        // The copy below holds everything too, so a record that cannot be written (a pending operation) does not stop the person.
+        try { before = new ThreadActionService(operation.threadDirectory).recordOutsideChangesHeld({ threadId: workspace.threadId, conversationBranchId: workspace.conversationBranchId, workspacePath: workspace.worktreePath }).startSha } catch { /* see above */ }
+        const { backupRef } = discardPendingChanges(workspace.worktreePath)
+        return { backupRef, ...(before ? { snapshotSha: before } : {}), notice: `The files as they were are kept in Git as ${backupRef}. To bring them back, run \`git restore --source=${backupRef} --worktree -- .\` in ${workspace.worktreePath}.` }
+      })
     }
     case 'actions.list': {
       const p = isObject(params) ? params : {}
@@ -2843,7 +2855,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const ran = await localActionRun(ctx, operation.threadId, 'undo', async () =>
         latest?.scope === 'conversation'
           ? new ConversationActionService(operation.threadDirectory).apply(branchId, 'undo', operation.currentGeneration, expectedTurnId, validate, restore)
-          : await new UndoService(operation.threadDirectory, { onPendingChangesKept: ctx.mms.orchestrator.pendingChangesKeptNotice(operation.threadId) }).undoLatest(branchId, workspace!.worktreePath, undefined, operation.currentGeneration, restore, 'undo', expectedTurnId, validate),
+          : await new UndoService(operation.threadDirectory).undoLatest(branchId, workspace!.worktreePath, undefined, operation.currentGeneration, restore, 'undo', expectedTurnId, validate),
       { gate, outcome: { undoStrategy } })
       if ('review' in ran) return ran.review
       const { runId, result: action } = ran
@@ -2860,7 +2872,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const target = new ThreadActionService(operation.threadDirectory).get(actionId)
       const reviewedDiffSha = asReviewedDiffSha(p)
       const ran = await localActionRun(ctx, operation.threadId, 'revert', () =>
-        new CodeRevertService(operation.threadDirectory, { onPendingChangesKept: ctx.mms.orchestrator.pendingChangesKeptNotice(operation.threadId) }).revertCode(actionId, workspace.worktreePath, operation.currentGeneration),
+        new CodeRevertService(operation.threadDirectory).revertCode(actionId, workspace.worktreePath, operation.currentGeneration),
       { gate: () => restoreGate(ctx, { threadId: operation.threadId, workspace, target, kind: 'revert', reviewedDiffSha }) })
       if ('review' in ran) return ran.review
       const { runId, result: action } = ran
@@ -2886,7 +2898,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       }
       await ensureWorkspaceMaterialized(ctx, operation.threadId, operation.projectPath ?? undefined)
       if (!workspace || workspace.lifecycle !== 'ready') throw new DomainRpcError('workspace_not_ready', 'Thread workspace is not ready')
-      const action = await new RedoService(operation.threadDirectory, { onPendingChangesKept: ctx.mms.orchestrator.pendingChangesKeptNotice(operation.threadId) }).redoLatest(branchId, workspace.worktreePath, operation.currentGeneration, (original) => {
+      const action = await new RedoService(operation.threadDirectory).redoLatest(branchId, workspace.worktreePath, operation.currentGeneration, (original) => {
         if (original.nativeContextStartBoundary) ctx.mms.orchestrator.restoreConversationActionEnd(operation.threadId, original.presentationMessageStart, original.presentationMessageEnd, original.nativeContextBoundary)
       })
       return { action }
@@ -2919,7 +2931,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       await ensureWorkspaceMaterialized(ctx, operation.threadId, operation.projectPath)
       const workspace = new ThreadWorkspaceManager(operation.threadDirectory).load()
       if (!workspace || workspace.lifecycle !== 'ready') throw new DomainRpcError('workspace_not_ready', 'Thread workspace is not ready')
-      const branches = new ConversationBranchService(operation.threadDirectory, { onPendingChangesKept: ctx.mms.orchestrator.pendingChangesKeptNotice(operation.threadId) })
+      const branches = new ConversationBranchService(operation.threadDirectory)
       const current = branches.list().find((branch) => branch.lifecycle === 'active')
       const target = loadConversationState(operation.threadDirectory, branchId)
       const branch = await branches.activate(workspace.worktreePath, branchId, operation.currentGeneration, () => {
@@ -2940,9 +2952,8 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       await ensureWorkspaceMaterialized(ctx, operation.threadId, operation.projectPath)
       const workspace = new ThreadWorkspaceManager(operation.threadDirectory).load()
       if (!workspace || workspace.lifecycle !== 'ready') throw new DomainRpcError('workspace_not_ready', 'Thread workspace is not ready')
-      const onPendingChangesKept = ctx.mms.orchestrator.pendingChangesKeptNotice(operation.threadId)
-      await new ChildAgentIntegrationService(operation.threadDirectory, { onPendingChangesKept }).recoverPending(workspace.worktreePath)
-      await new PublishService(operation.threadDirectory, { onPendingChangesKept }).recoverPending(workspace.worktreePath, operation.projectPath)
+      await new ChildAgentIntegrationService(operation.threadDirectory).recoverPending(workspace.worktreePath)
+      await new PublishService(operation.threadDirectory).recoverPending(workspace.worktreePath, operation.projectPath)
       await new ThreadActionService(operation.threadDirectory).recoverPending(workspace.worktreePath)
       await new CodeRevertService(operation.threadDirectory).recoverPending(workspace.worktreePath)
       await new UndoService(operation.threadDirectory).recoverPending(workspace.worktreePath, (target, kind) => {
@@ -2971,7 +2982,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const operation = threadOperationContext(ctx, p)
       await ensureWorkspaceMaterialized(ctx, operation.threadId, operation.projectPath)
       const workspace = new ThreadWorkspaceManager(operation.threadDirectory).load()
-      return { available: Boolean(workspace?.lifecycle === 'ready'), workspace, sourceSha: workspace?.lifecycle === 'ready' ? workspaceGit(workspace.worktreePath, ['rev-parse', 'HEAD']) : undefined, targetSha: workspaceGit(operation.projectPath, ['rev-parse', 'HEAD']), journalGeneration: operation.currentGeneration }
+      return { available: Boolean(workspace?.lifecycle === 'ready'), workspace, sourceSha: workspace?.lifecycle === 'ready' ? workspace.snapshotSha ?? workspaceGit(workspace.worktreePath, ['rev-parse', 'HEAD']) : undefined, targetSha: workspaceGit(operation.projectPath, ['rev-parse', 'HEAD']), journalGeneration: operation.currentGeneration }
     }
     case 'publish.start': {
       const p = isObject(params) ? params : {}
@@ -2981,7 +2992,9 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       await ensureWorkspaceMaterialized(ctx, operation.threadId, operation.projectPath)
       const workspace = new ThreadWorkspaceManager(operation.threadDirectory).load()
       if (!workspace || workspace.lifecycle !== 'ready') throw new DomainRpcError('workspace_not_ready', 'Thread workspace is not ready')
-      return await new PublishService(operation.threadDirectory, { onPendingChangesKept: ctx.mms.orchestrator.pendingChangesKeptNotice(operation.threadId) }).publish(workspace.worktreePath, operation.projectPath, targetBranch, undefined, { expectedSourceSha: asOptionalString(p.expectedSourceSha, 64), expectedTargetSha: asOptionalString(p.expectedTargetSha, 64), expectedJournalRevision: asOptionalBoundedInt(p.expectedJournalGeneration, 'expectedJournalGeneration', { min: 0, max: Number.MAX_SAFE_INTEGER }) ?? operation.currentGeneration, operationId: asOptionalString(p.operationId, 256) })
+      // The thread's name is the commit message in the primary checkout, where the person's own history reads it.
+      const message = ctx.mms.threads.getThread(operation.threadId)?.name?.trim() || undefined
+      return await new PublishService(operation.threadDirectory).publish(workspace.worktreePath, operation.projectPath, targetBranch, undefined, { message, expectedSourceSha: asOptionalString(p.expectedSourceSha, 64), expectedTargetSha: asOptionalString(p.expectedTargetSha, 64), expectedJournalRevision: asOptionalBoundedInt(p.expectedJournalGeneration, 'expectedJournalGeneration', { min: 0, max: Number.MAX_SAFE_INTEGER }) ?? operation.currentGeneration, operationId: asOptionalString(p.operationId, 256) })
     }
     case 'files.root': {
       const p = isObject(params) ? params : {}
@@ -3184,11 +3197,11 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const expectedBranch = asOptionalString(p.expectedBranch, 512)
       const thread = threadWorktree(target)
       if (thread) {
-        // The branch is checkpointed: an amend would replace the recorded head, so it is refused before Git runs.
+        // A thread's commits are recorded one by one with the actions that made them, so an amend is refused before Git runs.
         if (amend) throw gitThreadRules.create('git_amend_in_thread')
-        // Everything is committed through the user's hooks as one commit; a rejected commit is recorded, never swept in with --no-verify.
+        // Everything is committed through the user's hooks as one commit; a rejected commit is recorded as a failed action.
         await followedGitAction(ctx, p, target.root, 'commit', (request, signal) =>
-          runUserThreadGitAction(ctx, thread, { onFailure: 'record', signal }, () => ctx.mms.gitService.commit(target.root, message, { all: true, expectedBranch, ...request })))
+          runUserThreadGitAction(ctx, thread, { signal }, () => ctx.mms.gitService.commit(target.root, message, { all: true, expectedBranch, ...request })))
       } else await followedGitAction(ctx, p, target.root, 'commit', (request) => ctx.mms.gitService.commit(target.root, message, { amend, expectedBranch, ...request }))
       return gitStatusResult(ctx, target.root)
     }
@@ -3200,17 +3213,20 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       // A thread's own branch goes to its pull request's branch when that is provably the same repository (never a client's choice).
       const threadId = asOptionalString(p.threadId, 256)
       const prTarget = metadata && threadId ? await pullRequestPushTarget(ctx, threadId, root) : null
+      let notice: string | undefined
       const toPullRequest = prTarget?.remote && prTarget.branch ? { toRemote: prTarget.remote, toBranch: prTarget.branch } : {}
       await followedGitAction(ctx, p, root, 'push', (request, signal) => {
         if (!metadata || !directory) return ctx.mms.gitService.push(root, { expectedBranch, ...request })
         return withGitMutationLocks(directory, root, 'user-git-push', async () => {
           const manager = new ThreadWorkspaceManager(directory)
           if (manager.verify().lifecycle !== 'ready' || manager.load()?.headSha !== metadata.headSha) throw new DomainRpcError('task_revision_changed', 'Task revision changed before push; refresh the reviewed revision')
-          if (workspaceGit(root, ['status', '--porcelain'])) throw gitThreadRules.create('git_thread_dirty')
+          // A push sends commits. Files that are not committed are not in them, and they are not a reason to hold the commits back.
+          const uncommitted = workspaceGit(root, ['status', '--porcelain', '--untracked-files=all']).split(/\r?\n/).filter(Boolean).length
           await ctx.mms.gitService.push(root, { expectedBranch, ...toPullRequest, ...request })
+          if (uncommitted) notice = uncommittedNotPushedNotice(uncommitted)
         }, signal)
       })
-      return gitStatusResult(ctx, root)
+      return gitStatusResult(ctx, root, notice ? { notice } : {})
     }
     case 'git.suggestCommitMessage': {
       const p = isObject(params) ? params : {}
@@ -3230,7 +3246,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     case 'git.stage':
     case 'git.unstage': {
       const p = isObject(params) ? params : {}
-      // The next checkpoint would sweep the index anyway.
+      // A commit in a thread's worktree takes every change, so staging has no effect there.
       const target = await gitMutationTarget(ctx, p, 'thread_worktree_checkpointed')
       const all = asOptionalBoolean(p.all, 'all') === true
       const staging = method === 'git.stage'
@@ -3244,7 +3260,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const paths = gitPaths(ctx, target.root, p.paths)
       const thread = threadWorktree(target)
       if (thread) {
-        // The remainder is checkpointed afterwards, so the tree is clean again and the discard is on record.
+        // The discard is recorded as an action of the person, so the files before it are in a snapshot.
         const effects: ExternalEffect[] = [{ kind: 'unknown', description: `Discarded ${paths.length} ${paths.length === 1 ? 'file' : 'files'}`, reversible: false }]
         await runUserThreadGitAction(ctx, thread, { externalEffects: effects }, () => ctx.mms.gitService.discard(target.root, paths))
       } else await ctx.mms.gitService.discard(target.root, paths)

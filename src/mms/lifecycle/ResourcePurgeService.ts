@@ -250,7 +250,9 @@ export class ResourcePurgeService {
           const sources = inventory.sources.filter((source) => resource.sourceIds.includes(source.id))
           const source = sources.find((source) => basename(source.path) === 'agent-episodes.json') ?? sources.find((source) => ['workspace.json', 'agents.json', 'mousse-agent-sessions.json'].includes(basename(source.path))) ?? sources.find((source) => source.path.includes('workflow'))
           if (!source) throw new Error('Workspace has no supported owner source')
-          const branch = lifecycleGit(resource.identity, ['branch', '--show-current'])
+          const current = lifecycleGit(resource.identity, ['branch', '--show-current'])
+          // The owner's record names the branch; the checkout may be on another one the agent switched to.
+          const branch = this.retirement.ownedBranch(source.path, resource.identity) ?? current
           if (readOnly) {
             // No repository lease and no `prepare`, which writes a manifest and Git refs: judge the checkout by
             // what `prepare` would refuse. The item is for display only; it is never signed or acted on.
@@ -260,8 +262,9 @@ export class ResourcePurgeService {
             try { this.retirement.inspectContent(resource.identity) } catch (error) { retained = (error as Error).message }
             let discardRequired = Boolean(retained) || resource.claims.some((claim) => ['pending-integration', 'conflict'].includes(claim.kind))
             for (const source of inventory.sources.filter((source) => resource.sourceIds.includes(source.id) && basename(source.path) === 'workspace.json')) {
-              const workspace = JSON.parse(readFileSync(source.path, 'utf8')) as { headSha?: string; integrationTarget?: { baseSha?: string } }
-              if (workspace.headSha !== workspace.integrationTarget?.baseSha) discardRequired = true
+              // The thread's branch is the agent's to move, so the commits it holds are read from HEAD, not from the record.
+              const workspace = JSON.parse(readFileSync(source.path, 'utf8')) as { integrationTarget?: { baseSha?: string } }
+              if (discard.resultSha !== workspace.integrationTarget?.baseSha) discardRequired = true
             }
             preview.items.push({ id: resource.id, kind: 'worktree', identity: resource.identity, ownerTaskId: resource.ownerTaskId, commonDir: discard.commonDir, expectedValue: discard.resultSha, discardRequired, ...(discardRequired ? { reason: retained ?? 'This result may contain unpublished work' } : {}), status: 'pending' })
             preview.exclusiveBytes += discard.content.reduce((sum, entry) => sum + entry.bytes, 0)
@@ -276,7 +279,8 @@ export class ResourcePurgeService {
             catch (error) {
               const discard = this.retirement.inspectForDiscard(input)
               repositories.set(discard.repositoryId, discard.commonDir)
-              preview.items.push({ id: resource.id, kind: 'worktree', identity: resource.identity, ownerTaskId: resource.ownerTaskId, commonDir: discard.commonDir, expectedValue: discard.resultSha, rootIdentity: discard.rootIdentity, content: discard.content, indexDigest: discard.indexDigest, branch, sourcePath: source.path, discardRequired: true, discardState: 'pending', reason: (error as Error).message, status: 'pending' })
+              // The discard path compares the checkout's own branch when it removes it.
+              preview.items.push({ id: resource.id, kind: 'worktree', identity: resource.identity, ownerTaskId: resource.ownerTaskId, commonDir: discard.commonDir, expectedValue: discard.resultSha, rootIdentity: discard.rootIdentity, content: discard.content, indexDigest: discard.indexDigest, branch: current, sourcePath: source.path, discardRequired: true, discardState: 'pending', reason: (error as Error).message, status: 'pending' })
               preview.exclusiveBytes += discard.content.reduce((sum, entry) => sum + entry.bytes, 0)
               continue
             }
@@ -285,10 +289,11 @@ export class ResourcePurgeService {
         if (!manifest) throw new Error('Absent workspace lacks a reconstruction manifest')
         this.retirement.verifyPins(manifest)
         repositories.set(manifest.repositoryId, manifest.commonDir)
-        let discardRequired = resource.claims.some((claim) => ['pending-integration', 'conflict'].includes(claim.kind))
+        // A worktree that held uncommitted files is kept as a snapshot; deleting the snapshot deletes that work.
+        let discardRequired = resource.claims.some((claim) => ['pending-integration', 'conflict'].includes(claim.kind)) || manifest.snapshotSha !== undefined
         for (const source of inventory.sources.filter((source) => resource.sourceIds.includes(source.id) && basename(source.path) === 'workspace.json')) {
-          const workspace = JSON.parse(readFileSync(source.path, 'utf8')) as { headSha?: string; integrationTarget?: { baseSha?: string } }
-          if (workspace.headSha !== workspace.integrationTarget?.baseSha) discardRequired = true
+          const workspace = JSON.parse(readFileSync(source.path, 'utf8')) as { integrationTarget?: { baseSha?: string } }
+          if (manifest.resultSha !== workspace.integrationTarget?.baseSha) discardRequired = true
         }
         preview.items.push({ id: resource.id, kind: 'worktree', identity: resource.identity, ownerTaskId: resource.ownerTaskId, manifestPath, commonDir: manifest.commonDir, expectedValue: manifest.resultSha, discardRequired, ...(discardRequired ? { reason: 'This result may contain unpublished work' } : {}), status: 'pending' })
         preview.exclusiveBytes += manifest.content.reduce((sum, entry) => sum + entry.bytes, 0)

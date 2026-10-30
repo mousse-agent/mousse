@@ -1,15 +1,17 @@
 import { readDirectLifecycleRef } from '../lifecycle/WorktreeRetirementService'
 import { randomUUID } from 'node:crypto'
+import { AppError } from '../../shared/errors'
 import { ThreadJournal } from '../data/ThreadJournal'
 import { ThreadActionService } from '../actions/ThreadActionService'
 import { withGitMutationLocks } from '../actions/GitOperationCoordinator'
-import { changedPaths, commitParents, git, MOUSSE_COMMIT_ENV, refuseUnsafeChanges, requireClean, tryGit, withPendingChangesSetAside, type PendingChangesOwnerOptions } from '../actions/git'
+import { changedPaths, git, tryGit } from '../actions/git'
+import { describeGit, restoreChange, sameTree, takeSnapshot } from '../actions/snapshots'
 import { ChangeReceiptService } from '../actions/ChangeReceiptService'
 import type { ThreadLeaseHandle } from '../queue/ThreadExecutionLease'
 import type { WorkspaceActor } from '../../shared/workspace'
 import { resolveRepositoryIdentity } from '../git/RepositoryIdentity'
 import { ThreadWorkspaceManager } from '../workspace/ThreadWorkspaceManager'
-import type { ChildIntegrationRecord, ExternalEffect } from '../../shared/threadActions'
+import type { ChildIntegrationRecord, ExternalEffect, GitRecord } from '../../shared/threadActions'
 
 export interface ChildIntegrationRequest {
   agentId: string
@@ -20,162 +22,176 @@ export interface ChildIntegrationRequest {
   externalEffects?: ExternalEffect[]
   runId?: string
   turnId?: string
-  expectedDestinationHead?: string
   workerWorktree: string
-  workerBranch: string
-  spawnBaseSha: string
-  expectedWorkerHead?: string
   /**
-   * Merge exactly this commit of the worker instead of the worktree's live HEAD (a delegated task's
-   * checkpoint). The worker may have moved on or hold uncommitted changes, so its clean-worktree,
-   * branch and HEAD checks are skipped; repository, ancestry, the merge and recovery are still checked.
-   * Set it together with `expectedWorkerHead`.
+   * The worker's result: the snapshot of its files that its task or workflow step ended with. The worker may have
+   * moved on since, so nothing else about its worktree (files, HEAD, branch) is read.
    */
-  pinnedWorkerSha?: string
+  pinnedWorkerSha: string
+  /** The code the worker started from, a commit or a snapshot: the base of the merge. */
+  spawnBaseSha: string
   threadWorkspace: string
   actionId?: string
   signal?: AbortSignal
 }
 
+/** What `prepared` records: the pinned request and what recovery needs to tell whether the files changed. */
+interface IntegrationIntent {
+  preSnapshot: string
+  workerSha: string
+  spawnBaseSha: string
+  expectedTree: string
+}
+
+/** The worker's change overlaps with edits in the thread: nothing was changed, and the files are named. */
+export class ChildIntegrationConflictError extends AppError {
+  constructor(readonly files: string[]) {
+    super({
+      code: 'integration_conflict',
+      message: `Child integration conflict: ${files.join(', ') || 'some files'}. Nothing was changed; the worker's result stays pinned.`,
+      details: { files }, errorInfo: { category: 'conflict', retryable: false }
+    })
+    this.name = 'ChildIntegrationConflictError'
+  }
+}
+
+/**
+ * Brings a worker's result into the thread as files. The base is the code the worker started from, `ours` is a
+ * fresh snapshot of the thread (uncommitted turn work included, left exactly where it is) and `theirs` is the
+ * worker's snapshot; `restoreChange` merges them by three-way merge and rewrites only the files the merge changes.
+ * Nothing is committed, no branch or HEAD moves, and a conflict refuses with the file names and changes nothing.
+ */
 export class ChildAgentIntegrationService {
   private readonly journal: ThreadJournal
   private readonly actions: ThreadActionService
-  constructor(private readonly threadDirectory: string, private readonly options: PendingChangesOwnerOptions = {}) {
+  constructor(private readonly threadDirectory: string) {
     this.journal = new ThreadJournal(threadDirectory)
     this.actions = new ThreadActionService(threadDirectory)
   }
 
   async integrate(request: ChildIntegrationRequest): Promise<ChildIntegrationRecord> {
-    const expectedDestination = request.expectedDestinationHead ?? git(request.threadWorkspace, ['rev-parse', 'HEAD'])
     return withGitMutationLocks(this.threadDirectory, request.threadWorkspace, 'child-integration', async () => {
       const receipts = new ChangeReceiptService(this.threadDirectory)
+      if (resolveRepositoryIdentity(request.workerWorktree).key !== resolveRepositoryIdentity(request.threadWorkspace).key) throw new Error('Worker belongs to a different repository.')
+      // A pinned result does not depend on the live worktree, which may be running or hold newer files.
+      if (!tryGit(request.workerWorktree, ['cat-file', '-e', `${request.pinnedWorkerSha}^{commit}`]).ok) throw new Error('The delegated result is no longer in the repository.')
+      const workerSha = git(request.workerWorktree, ['rev-parse', `${request.pinnedWorkerSha}^{commit}`])
       const previous = request.operationId ? receipts.list().find((item) => item.operationId === request.operationId) : undefined
       const pending = request.operationId ? this.journal.latestByOperation().get(request.operationId) : undefined
-      if (previous || pending) {
-        if (previous && (previous.kind !== 'integration' || previous.contributions[0]?.resultSha !== (request.expectedWorkerHead ?? git(request.workerWorktree, ['rev-parse', 'HEAD'])) || previous.contributions[0]?.actorId !== request.agentId)) throw new Error('Integration operation identity was reused for a different result.')
-        const completed = this.journal.list().find((item) => item.operationId === request.operationId && item.state === 'completed')
-        if (completed) {
-          const { retainedRef: _retainedRef, ...record } = completed.details as ChildIntegrationRecord & { retainedRef?: string }
-          return record
-        }
-        const intent = this.journal.list().find((item) => item.operationId === request.operationId && item.state === 'prepared')
-        const expected = intent?.expectedPreState as { preMergeSha: string; workerHeadSha: string; spawnBaseSha: string } | undefined
-        if (!expected || expected.workerHeadSha !== (request.expectedWorkerHead ?? git(request.workerWorktree, ['rev-parse', 'HEAD'])) || expected.spawnBaseSha !== request.spawnBaseSha) throw new Error('Integration recovery requires its original pinned request.')
-        // Recovery reads HEAD and records; uncommitted edits stay where they are.
-        refuseUnsafeChanges(request.threadWorkspace, 'Thread workspace', { discard: true })
-        const head = git(request.threadWorkspace, ['rev-parse', 'HEAD'])
-        const parents = commitParents(request.threadWorkspace, head)
-        if (previous?.afterSha === head || (parents[0] === expected.preMergeSha && parents[1] === expected.workerHeadSha)) {
-          return this.completeIntegration(request, request.operationId!, expected.preMergeSha, expected.workerHeadSha, head)
-        }
-        if (head !== expected.preMergeSha) throw new Error('Integration recovery HEAD does not match the original operation.')
-        // Git was not applied. An explicit retry may execute this same pinned intent once.
+      if (previous && (previous.kind !== 'integration' || previous.contributions[0]?.resultSha !== workerSha || previous.contributions[0]?.actorId !== request.agentId)) throw new Error('Integration operation identity was reused for a different result.')
+      if (pending?.state === 'recovery_required') throw new Error('The earlier integration of this result is waiting for recovery; abort it or resolve it first.')
+      const completed = request.operationId ? this.journal.list().find((item) => item.operationId === request.operationId && item.state === 'completed') : undefined
+      if (completed) {
+        const { retainedRef: _retainedRef, ...record } = completed.details as ChildIntegrationRecord & { retainedRef?: string }
+        return record
       }
-      if (resolveRepositoryIdentity(request.workerWorktree).key !== resolveRepositoryIdentity(request.threadWorkspace).key) throw new Error('Worker belongs to a different repository.')
-      refuseUnsafeChanges(request.threadWorkspace, 'Thread workspace', { discard: true })
-      let workerHeadSha: string
-      if (request.pinnedWorkerSha) {
-        // A pinned result does not depend on the live worktree, which may be running or dirty.
-        if (!tryGit(request.workerWorktree, ['cat-file', '-e', `${request.pinnedWorkerSha}^{commit}`]).ok) throw new Error('The delegated result is no longer in the repository.')
-        workerHeadSha = git(request.workerWorktree, ['rev-parse', request.pinnedWorkerSha])
-      } else {
-        requireClean(request.workerWorktree, 'Worker worktree')
-        const actualBranch = git(request.workerWorktree, ['branch', '--show-current'])
-        if (actualBranch !== request.workerBranch) throw new Error(`Worker branch changed: expected ${request.workerBranch}, found ${actualBranch}`)
-        workerHeadSha = git(request.workerWorktree, ['rev-parse', 'HEAD'])
-        if (request.expectedWorkerHead && request.expectedWorkerHead !== workerHeadSha) throw new Error('Worker HEAD changed after readiness validation.')
-      }
-      if (workerHeadSha === request.spawnBaseSha) throw new Error('Worker produced no authored commit.')
-      const preMergeSha = git(request.threadWorkspace, ['rev-parse', 'HEAD'])
-      if (preMergeSha !== expectedDestination) throw new Error('Integration destination HEAD changed after readiness validation.')
-      if (!tryGit(request.workerWorktree, ['merge-base', '--is-ancestor', request.spawnBaseSha, workerHeadSha]).ok) throw new Error('Worker history no longer descends from its spawn base.')
+      const inFlight = pending && ['prepared', 'git_applied'].includes(pending.state)
+      const intent = inFlight ? this.intentOf(request.operationId!) : undefined
+      if (inFlight && (!intent || intent.workerSha !== workerSha || intent.spawnBaseSha !== request.spawnBaseSha)) throw new Error('Integration recovery requires its original pinned request.')
       const operationId = request.operationId ?? randomUUID()
-      // Uncommitted edits in the thread worktree (the user's, or the running turn's own) are set aside for the merge
-      // and put back on top of it, still uncommitted, so they stay with whoever made them.
-      return withPendingChangesSetAside<ChildIntegrationRecord>(request.threadWorkspace, { label: 'Thread workspace', operation: 'merging the subagent’s result', discard: true, onKept: this.options.onPendingChangesKept }, () => {
+      const top = git(request.threadWorkspace, ['rev-parse', '--show-toplevel'])
+      const threadId = new ThreadWorkspaceManager(this.threadDirectory).load()?.threadId
+      // The receipt was recorded and only the action's bookkeeping was interrupted: the files are already merged.
+      if (previous) return this.completeIntegration(request, operationId, workerSha, previous.beforeSha, previous.afterSha, previous.git)
+      if (!tryGit(top, ['cat-file', '-e', `${request.spawnBaseSha}^{commit}`]).ok) throw new Error('The worker’s spawn base is no longer in the repository.')
+      // A worker that changed nothing has no result to merge; this is read from the files, not from commits.
+      if (sameTree(request.workerWorktree, workerSha, request.spawnBaseSha)) throw new Error('Worker produced no change.')
+      const ours = takeSnapshot(top, { reason: `before subagent result ${request.agentId}`, threadId, operationId })
+      // A repeated run (recovery, or an explicit retry of an interrupted one) merges from the files as they are now:
+      // changes that already landed are the same on both sides, so only what is missing is written.
+      const merged = restoreChange(top, { base: request.spawnBaseSha, ours: ours.sha, theirs: workerSha, reason: `subagent result ${request.agentId}`, threadId, operationId }, (expectedTree) => {
+        if (inFlight) return
         this.journal.append({
           operationId,
           operationType: 'child-integration',
           state: 'prepared',
-          expectedPreState: { preMergeSha, workerHeadSha, spawnBaseSha: request.spawnBaseSha },
-          details: { request: { agentId: request.agentId, retainedResultId: request.retainedResultId, operationId, workerWorktree: request.workerWorktree, workerBranch: request.workerBranch, spawnBaseSha: request.spawnBaseSha, expectedWorkerHead: workerHeadSha, ...(request.pinnedWorkerSha ? { pinnedWorkerSha: request.pinnedWorkerSha } : {}), expectedDestinationHead: preMergeSha, threadWorkspace: request.threadWorkspace, actionId: request.actionId, actor: request.actor, externalEffects: request.externalEffects, runId: request.runId, turnId: request.turnId } }
+          expectedPreState: { preSnapshot: ours.sha, workerSha, spawnBaseSha: request.spawnBaseSha, expectedTree } satisfies IntegrationIntent,
+          details: { request: { agentId: request.agentId, retainedResultId: request.retainedResultId, operationId, workerWorktree: request.workerWorktree, spawnBaseSha: request.spawnBaseSha, pinnedWorkerSha: workerSha, threadWorkspace: request.threadWorkspace, actionId: request.actionId, actor: request.actor, externalEffects: request.externalEffects, runId: request.runId, turnId: request.turnId } }
         })
-        const merge = tryGit(request.threadWorkspace, ['merge', '--no-ff', '--no-edit', workerHeadSha], MOUSSE_COMMIT_ENV)
-        if (!merge.ok) {
-          const conflictFiles = git(request.threadWorkspace, ['diff', '--name-only', '--diff-filter=U']).split(/\r?\n/).filter(Boolean)
-          this.journal.append({
-            operationId,
-            operationType: 'child-integration',
-            state: 'recovery_required',
-            details: { preMergeSha, workerHeadSha, conflictFiles, error: merge.stderr }
-          })
-          throw new Error(`Child integration conflict: ${conflictFiles.join(', ')}`)
-        }
-        const integrationSha = git(request.threadWorkspace, ['rev-parse', 'HEAD'])
-        return this.completeIntegration(request, operationId, preMergeSha, workerHeadSha, integrationSha)
       })
+      if ('conflicts' in merged) {
+        // A retried operation must not stay pending and lock the thread; the result is still pinned for another try.
+        if (inFlight) this.journal.append({ operationId, operationType: 'child-integration', state: 'cancelled', details: { conflictFiles: merged.conflicts, workerSha } })
+        throw new ChildIntegrationConflictError(merged.conflicts)
+      }
+      const { record } = describeGit(top, ours.sha, merged.snapshot)
+      return this.completeIntegration(request, operationId, workerSha, intent?.preSnapshot ?? ours.sha, merged.snapshot.sha, record)
     }, request.signal, request.heldThreadLease)
   }
-  private completeIntegration(request: ChildIntegrationRequest, operationId: string, preMergeSha: string, workerHeadSha: string, integrationSha: string): ChildIntegrationRecord {
-      const actions = this.actions.list()
-      const previousReceipt = new ChangeReceiptService(this.threadDirectory).list().find((item) => item.operationId === operationId)
-      const previousParent = previousReceipt?.actionId ? actions.find((item) => item.id === previousReceipt.actionId && item.id !== operationId) : undefined
-      const parent = previousParent ?? (request.actionId ? actions.find((item) => item.id === request.actionId) : actions.find((item) => item.state === 'running' && item.turnId === request.turnId))
-      const actionId = parent?.id ?? operationId
-      const retainedRef = `refs/mousse/agents/${request.retainedResultId ?? request.agentId}`
-      const previousPin = readDirectLifecycleRef(request.threadWorkspace, retainedRef)
-      git(request.threadWorkspace, ['update-ref', '--no-deref', retainedRef, workerHeadSha, previousPin ?? '0'.repeat(workerHeadSha.length)])
-      const receipt = new ChangeReceiptService(this.threadDirectory).record(request.threadWorkspace, {
-        operationId, kind: 'integration', actor: request.actor ?? { kind: 'agent', id: request.agentId },
-        turnId: request.turnId, runId: request.runId, actionId,
-        beforeSha: preMergeSha, afterSha: integrationSha,
-        introducedCommits: preMergeSha === integrationSha ? [] : [integrationSha],
-        contributions: [{ actorId: request.agentId, baseSha: request.spawnBaseSha, resultSha: workerHeadSha }], externalEffects: request.externalEffects ?? []
+
+  /** The latest `prepared` intent of an operation. One written before snapshots (a merge commit) is read as the same pinned request. */
+  private intentOf(operationId: string): IntegrationIntent | undefined {
+    const prepared = [...this.journal.list()].reverse().find((item) => item.operationId === operationId && item.state === 'prepared')?.expectedPreState as
+      (Partial<IntegrationIntent> & { preMergeSha?: string; workerHeadSha?: string; spawnBaseSha?: string }) | undefined
+    if (!prepared) return undefined
+    const workerSha = prepared.workerSha ?? prepared.workerHeadSha
+    const preSnapshot = prepared.preSnapshot ?? prepared.preMergeSha
+    if (!workerSha || !preSnapshot || !prepared.spawnBaseSha) return undefined
+    return { preSnapshot, workerSha, spawnBaseSha: prepared.spawnBaseSha, expectedTree: prepared.expectedTree ?? '' }
+  }
+
+  private completeIntegration(request: ChildIntegrationRequest, operationId: string, workerSha: string, beforeSha: string, afterSha: string, gitRecord?: GitRecord): ChildIntegrationRecord {
+    const actions = this.actions.list()
+    const previousReceipt = new ChangeReceiptService(this.threadDirectory).list().find((item) => item.operationId === operationId)
+    const previousParent = previousReceipt?.actionId ? actions.find((item) => item.id === previousReceipt.actionId && item.id !== operationId) : undefined
+    const parent = previousParent ?? (request.actionId ? actions.find((item) => item.id === request.actionId) : actions.find((item) => item.state === 'running' && item.turnId === request.turnId))
+    const actionId = parent?.id ?? operationId
+    const retainedRef = `refs/mousse/agents/${request.retainedResultId ?? request.agentId}`
+    const previousPin = readDirectLifecycleRef(request.threadWorkspace, retainedRef)
+    git(request.threadWorkspace, ['update-ref', '--no-deref', retainedRef, workerSha, previousPin ?? '0'.repeat(workerSha.length)])
+    const receipt = new ChangeReceiptService(this.threadDirectory).record(request.threadWorkspace, {
+      operationId, kind: 'integration', actor: request.actor ?? { kind: 'agent', id: request.agentId },
+      turnId: request.turnId, runId: request.runId, actionId,
+      beforeSha, afterSha,
+      introducedCommits: [],
+      contributions: [{ actorId: request.agentId, baseSha: request.spawnBaseSha, resultSha: workerSha }], externalEffects: request.externalEffects ?? [],
+      ...(gitRecord ? { git: gitRecord } : {})
+    })
+    const changed = changedPaths(request.threadWorkspace, beforeSha, afterSha)
+    const record: ChildIntegrationRecord = {
+      receiptId: receipt.id, operationId, preMergeSha: beforeSha,
+      agentId: request.agentId,
+      spawnBaseSha: request.spawnBaseSha,
+      workerHeadSha: workerSha,
+      integrationSha: afterSha,
+      changedPaths: changed.map((item) => item.path)
+    }
+    if (parent) {
+      if (!parent.childIntegrations.some((item) => item.integrationSha === afterSha)) parent.childIntegrations.push(record)
+    } else if (!actions.some((item) => item.id === actionId)) {
+      const latest = actions.at(-1)
+      actions.push({
+        id: actionId, receiptId: receipt.id, turnId: request.turnId ?? operationId,
+        conversationBranchId: new ThreadWorkspaceManager(this.threadDirectory).load()?.conversationBranchId ?? 'main',
+        actor: request.actor ?? { kind: 'agent', id: request.agentId }, runId: request.runId,
+        parentActionId: latest?.id, presentationMessageStart: latest?.presentationMessageEnd ?? 0,
+        presentationMessageEnd: latest?.presentationMessageEnd ?? 0,
+        // Code-only integration deliberately has no conversation start boundary.
+        nativeContextBoundary: latest?.nativeContextBoundary ?? { messageIndex: 0, compactionGeneration: 0, fidelity: 'legacy' },
+        startSha: beforeSha, endSha: afterSha, commits: [],
+        childIntegrations: [record], changedPaths: changed,
+        externalEffects: request.externalEffects ?? [], ...(gitRecord ? { git: gitRecord } : {}),
+        reversible: true, state: 'completed', createdAt: receipt.createdAt, completedAt: receipt.createdAt
       })
-      const record: ChildIntegrationRecord = {
-        receiptId: receipt.id, operationId, preMergeSha,
-        agentId: request.agentId,
-        spawnBaseSha: request.spawnBaseSha,
-        workerHeadSha,
-        integrationSha,
-        mainlineParent: 1,
-        changedPaths: changedPaths(request.threadWorkspace, preMergeSha, integrationSha).map((item) => item.path)
-      }
-      if (parent) {
-        if (!parent.childIntegrations.some((item) => item.integrationSha === integrationSha)) parent.childIntegrations.push(record)
-      } else if (!actions.some((item) => item.id === actionId)) {
-        const latest = actions.at(-1)
-        actions.push({
-          id: actionId, receiptId: receipt.id, turnId: request.turnId ?? operationId,
-          conversationBranchId: new ThreadWorkspaceManager(this.threadDirectory).load()?.conversationBranchId ?? 'main',
-          actor: request.actor ?? { kind: 'agent', id: request.agentId }, runId: request.runId,
-          parentActionId: latest?.id, presentationMessageStart: latest?.presentationMessageEnd ?? 0,
-          presentationMessageEnd: latest?.presentationMessageEnd ?? 0,
-          // Code-only integration deliberately has no conversation start boundary.
-          nativeContextBoundary: latest?.nativeContextBoundary ?? { messageIndex: 0, compactionGeneration: 0, fidelity: 'legacy' },
-          startSha: preMergeSha, endSha: integrationSha, commits: receipt.introducedCommits,
-          childIntegrations: [record], changedPaths: changedPaths(request.threadWorkspace, preMergeSha, integrationSha),
-          externalEffects: request.externalEffects ?? [], reversible: true, state: 'completed', createdAt: receipt.createdAt, completedAt: receipt.createdAt
-        })
-      }
-      this.actions.replace(actions)
-      this.journal.append({
-        operationId,
-        operationType: 'child-integration',
-        state: 'completed',
-        details: { ...record, retainedRef }
-      })
-      return record
+    }
+    this.actions.replace(actions)
+    this.journal.append({
+      operationId,
+      operationType: 'child-integration',
+      state: 'completed',
+      details: { ...record, retainedRef }
+    })
+    return record
   }
 
   async recoverPending(threadWorkspace: string, heldThreadLease?: ThreadLeaseHandle): Promise<void> {
     for (const entry of this.journal.latestByOperation().values()) {
       if (!['child-integration', 'change-integration'].includes(entry.operationType) || !['prepared', 'git_applied'].includes(entry.state)) continue
       const intent = this.journal.list().find((item) => item.operationId === entry.operationId && item.state === 'prepared')
-      const request = (intent?.details as { request?: ChildIntegrationRequest } | undefined)?.request
+      const request = (intent?.details as { request?: ChildIntegrationRequest & { expectedWorkerHead?: string } } | undefined)?.request
       if (!request || request.threadWorkspace !== threadWorkspace) throw new Error('Integration recovery workspace does not match its durable owner.')
-      await this.integrate({ ...request, heldThreadLease })
+      // A request written before snapshots named the worker's result as `expectedWorkerHead`.
+      await this.integrate({ ...request, pinnedWorkerSha: request.pinnedWorkerSha ?? request.expectedWorkerHead!, heldThreadLease })
     }
   }
-
 }

@@ -286,7 +286,8 @@ function fixture(outputs: Array<string | AssistantMessage> = ['done'], override?
       expect(new ThreadWorkspaceManager(f.threads.getThreadDir(group.threadId)).verify().lifecycle).toBe('ready')
     }
     const binding = f.service.resourceBinding(group.id)
-    expect(execFileSync('git', ['status', '--porcelain'], { cwd: binding.workspaceRoot, encoding: 'utf8' })).toBe('')
+    // Each run is a private snapshot; the agent's uncommitted edit stays uncommitted in the worktree.
+    expect(execFileSync('git', ['status', '--porcelain'], { cwd: binding.workspaceRoot, encoding: 'utf8' })).toBe(kind === 'commit' ? '' : ' M tracked.txt\n')
     const actions = new ThreadActionService(f.threads.getThreadDir(group.threadId)).list()
     expect(actions).toHaveLength(2)
     expect(actions.every(action => action.actor?.kind === 'agent' && action.changedPaths.some(change => change.path === 'tracked.txt') && action.state === (kind === 'failed' ? 'failed' : 'completed'))).toBe(true)

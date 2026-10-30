@@ -192,7 +192,7 @@ describe('the folder an editor opens for a thread', () => {
     // Asking never brings the checkout back.
     expect(manager.verify().lifecycle).toBe('missing')
 
-    // Its HEAD moved outside a recorded operation: the worktree needs recovery.
+    // Its HEAD moved (an agent committed in it): the worktree is still the thread's folder, as HEAD and the branch are the agent's to move.
     const moved = o.thread('Moved', project.id, primary)
     const movedMeta = await new ThreadWorkspaceManager(o.f.mms.threads.getThreadDir(moved.id)).provision(
       moved.id,
@@ -203,15 +203,10 @@ describe('the folder an editor opens for a thread', () => {
       cwd: movedMeta.worktreePath,
       stdio: 'pipe'
     })
-    const needsRecovery = await o.call('editor.folder', { threadId: moved.id })
-    expect(needsRecovery).toMatchObject({
-      ok: false,
-      error: {
-        code: 'workspace_not_ready',
-        details: { threadId: moved.id, state: 'recovery_required' }
-      }
+    expect(await o.ok('editor.folder', { threadId: moved.id })).toMatchObject({
+      path: movedMeta.worktreePath,
+      kind: 'worktree'
     })
-    expect(JSON.stringify(needsRecovery)).not.toContain(movedMeta.worktreePath)
   }, 180_000)
 
   it('is refused for a thread that is not there, has no folder, or whose folder is gone', async () => {
