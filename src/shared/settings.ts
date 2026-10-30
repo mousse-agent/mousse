@@ -153,10 +153,13 @@ export function normalizeAgentAccessSettings(raw?: Partial<AgentAccessSettings> 
  * by itself when the limit resets, at most `usageLimitPauseCap` times in a row on one thread; without
  * it the pause waits for Resume now. Read when a run pauses, never afterwards: turning it on does not
  * arm runs that are already paused.
+ * `worktreeByDefault` is where a new chat in a project starts: its own worktree, or the project's
+ * folder. Each new chat can change it from the composer before its first message.
  */
 export interface RunSettings {
   resumeAfterUsageLimit: boolean
   usageLimitPauseCap: number
+  worktreeByDefault: boolean
 }
 
 export const DEFAULT_USAGE_LIMIT_PAUSE_CAP = 3
@@ -169,7 +172,8 @@ export function normalizeRunSettings(raw?: Partial<RunSettings> | null): RunSett
     usageLimitPauseCap:
       typeof cap === 'number' && Number.isInteger(cap) && cap >= 1 && cap <= MAX_USAGE_LIMIT_PAUSE_CAP
         ? cap
-        : DEFAULT_USAGE_LIMIT_PAUSE_CAP
+        : DEFAULT_USAGE_LIMIT_PAUSE_CAP,
+    worktreeByDefault: raw?.worktreeByDefault !== false
   }
 }
 

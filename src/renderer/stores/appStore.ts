@@ -184,6 +184,9 @@ interface AppState {
   browserElementAttachmentsByThread: Record<string, BrowserElementAttachment[]>
   /** Workspace choices for each new-chat draft, isolated by profile. */
   composerWorkspaceDrafts: Record<string, ComposerWorkspace>
+  /** The profile's "Start new chats in a worktree" setting: the worktree choice of a draft that has not made one. */
+  worktreeByDefault: boolean
+  setWorktreeByDefault: (worktreeByDefault: boolean) => void
   setComposerWorkspaceDraft: (threadId: string | null, workspace?: ComposerWorkspace) => void
   /**
    * New threads or blank drafts whose workspace a send is preparing, keyed by
@@ -453,6 +456,8 @@ export const useAppStore = create<AppState>()(persist((set) => ({
   threadsSidebarView: 'projects',
   setThreadsSidebarView: (threadsSidebarView) => set({ threadsSidebarView }),
   composerWorkspaceDrafts: {},
+  worktreeByDefault: true,
+  setWorktreeByDefault: (worktreeByDefault) => set({ worktreeByDefault }),
   workspacePending: {},
   setWorkspacePending: (profileId, threadId, pending) => set((state) => {
     const key = workspacePendingKey(profileId, threadId)
