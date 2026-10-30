@@ -7,6 +7,7 @@ import { CommandRejection, fail, reject, RunStoreError } from './db/RunStoreErro
 import { inheritedAgentHops } from './agentHops'
 import { isFencedSource, isFollowUpSource, isPauseHeldSource, isResumeSource } from './delegation/sources'
 import { cancelAcknowledgedWakes, recoverWakesOnBoot } from './delegation/wake'
+import { RemoteSubagentRecords, type RemoteSubagentMode } from './delegation/remoteSubagents'
 import { Delegations } from './Delegations'
 import { EffectOutbox } from './EffectOutbox'
 import { HandoffService } from './handoff/HandoffService'
@@ -228,6 +229,27 @@ export interface DelegationRequest {
   modeCeiling?: ModeCeiling
   /** The agent access level the child is granted (SPEC §15.1); the caller has already narrowed it by its own. */
   accessLevel?: AgentAccessLevel
+  /**
+   * A remote subagent (issue #469): the child runs on another of the user's computers. Its run here is a
+   * stand-in with no `turn.start`; a `remote_subagents` row binds it to the run there instead.
+   */
+  remote?: RemoteDelegationTarget
+}
+
+/** Where and how a remote subagent's task runs; the caller has already checked and narrowed all of it. */
+export interface RemoteDelegationTarget {
+  node: string
+  /** The task as that computer's thread receives it (the subagent's guidance and the prompt). */
+  prompt: string
+  permissionMode: RemoteSubagentMode
+  chatMode: 'agent' | 'plan'
+  worktree: boolean
+  projectId: string | null
+  instanceId: string | null
+  model: string | null
+  deadlineAt: string | null
+  /** The far thread, for a follow-up on a subagent that already has one. */
+  remoteThreadId?: string | null
 }
 
 export interface DelegationAccepted {
@@ -392,6 +414,8 @@ export class RunEngine extends EventEmitter {
   readonly daemonEpochs: DaemonEpoch
   readonly inbox: Inbox
   readonly delegations: Delegations
+  /** Remote subagents' tasks and the runs on other computers that do them (issue #469). */
+  readonly remoteSubagents: RemoteSubagentRecords
   /** Saved approval requests (SPEC §17). */
   readonly approvals: ThreadApprovals
   /** Context handoffs (SPEC §16.1). */
@@ -426,6 +450,7 @@ export class RunEngine extends EventEmitter {
     this.daemonEpochs = new DaemonEpoch(opts.store)
     this.inbox = new Inbox(opts.store)
     this.delegations = new Delegations(opts.store, this.inbox)
+    this.remoteSubagents = new RemoteSubagentRecords(opts.store)
     this.approvals = new ThreadApprovals(opts.store, { outbox: this.outbox, lineage: (threadId) => this.delegations.getLineage(threadId) })
     this.handoffs = new HandoffService(opts.store)
     this.transfers = new ContextTransfers(opts.store)
@@ -1308,12 +1333,15 @@ export class RunEngine extends EventEmitter {
       workspace: input.workspace,
       role: input.role
     })
-    this.outbox.enqueue({
-      threadId: childThreadId,
-      runId: child.runId,
-      kind: 'turn.start',
-      payload: host.buildChildTurnPayload({ childThreadId, childRunId: child.runId, prompt: input.prompt, request: input })
-    })
+    // A remote subagent's run here only stands in for the run on its computer: no turn starts for it.
+    if (input.remote) this.remoteSubagents.create({ delegationId: delegation.delegationId, childThreadId, childRunId: child.runId, ...input.remote })
+    else
+      this.outbox.enqueue({
+        threadId: childThreadId,
+        runId: child.runId,
+        kind: 'turn.start',
+        payload: host.buildChildTurnPayload({ childThreadId, childRunId: child.runId, prompt: input.prompt, request: input })
+      })
     const accepted = { delegationId: delegation.delegationId, childThreadId, childRunId: child.runId }
     this.store.putReceipt({
       clientRequestId: input.clientRequestId,
@@ -1325,6 +1353,78 @@ export class RunEngine extends EventEmitter {
     })
     this.store.db.checkpoint('delegation.beforeCommit')
     return { ...accepted, replayed: false }
+  }
+
+  /**
+   * `continue_subagent` on a remote subagent (issue #469), under the subagent's mutex: replay the receipt
+   * of `clientRequestId`, or, in one transaction, the stand-in run (`source: 'delegation'`, no
+   * `turn.start`), its delegation row and its `remote_subagents` row, which carries the far thread. The
+   * same checks as a local follow-up apply (`checkFollowUp`).
+   */
+  requestRemoteFollowUp(input: {
+    childThreadId: string
+    clientRequestId: string
+    delegation: SendDelegation
+    remote: RemoteDelegationTarget
+  }): Promise<DelegationAccepted> {
+    return this.mutex.withLock(input.childThreadId, () => {
+      const receipt = this.store.getReceipt(input.clientRequestId)
+      if (receipt) {
+        if (receipt.threadId !== input.childThreadId || receipt.commandKind !== 'delegation.remote_follow_up')
+          fail('conflict', `Request ${input.clientRequestId} belongs to another command.`)
+        const stored = receipt.result as Omit<DelegationAccepted, 'replayed'>
+        return { delegationId: stored.delegationId, childThreadId: stored.childThreadId, childRunId: stored.childRunId, replayed: true }
+      }
+      if (!input.delegation.prompt.trim()) fail('bad_request', 'A delegated task needs a prompt.')
+      return this.store.db.transaction(() => {
+        this.checkFollowUp(input.childThreadId, input.delegation)
+        const tracked = input.delegation
+        const run = this.store.createRun({ threadId: input.childThreadId, source: 'delegation', clientRequestId: input.clientRequestId })
+        const delegation = this.delegations.create({
+          parentRunId: tracked.parentRunId,
+          parentThreadId: tracked.parentThreadId,
+          childThreadId: input.childThreadId,
+          childRunId: run.runId,
+          provider: tracked.provider,
+          model: tracked.model,
+          prompt: tracked.prompt,
+          wake: tracked.wake,
+          modeCeiling: tracked.modeCeiling,
+          accessLevel: narrowAgentAccess(tracked.accessLevel, narrowestAccess(this.delegations.listForChildThread(input.childThreadId))),
+          workspace: tracked.workspace,
+          role: tracked.role
+        })
+        this.remoteSubagents.create({ delegationId: delegation.delegationId, childThreadId: input.childThreadId, childRunId: run.runId, ...input.remote })
+        const accepted = { delegationId: delegation.delegationId, childThreadId: input.childThreadId, childRunId: run.runId }
+        this.store.putReceipt({
+          clientRequestId: input.clientRequestId,
+          threadId: input.childThreadId,
+          commandKind: 'delegation.remote_follow_up',
+          status: 'accepted',
+          result: { ...accepted, sequence: this.store.maxSeq(input.childThreadId) },
+          createdAt: this.now()
+        })
+        return { ...accepted, replayed: false }
+      })
+    })
+  }
+
+  /**
+   * Ends a remote subagent's stand-in run with what the run on its computer ended with (or why it
+   * cannot be followed any more), under the subagent's mutex. The same terminal write as a local child
+   * run's, so the task publishes, and its parent hears, exactly as for a local subagent. A run that has
+   * already ended (a Stop got there first) is left as it is: returns false.
+   */
+  settleRemoteRun(runId: string, status: RunTerminalStatus, outcome: RunOutcome | undefined, resultText?: string): Promise<boolean> {
+    const run = this.store.getRun(runId)
+    if (!run) return Promise.resolve(false)
+    return this.mutex.withLock(run.threadId, () => {
+      const current = this.store.getRun(runId)
+      if (!current || TERMINAL_RUN_STATUSES.has(current.status)) return false
+      this.writeTerminal(current, current.epoch, status, outcome, resultText)
+      this.epochs.delete(runId)
+      return true
+    })
   }
 
   /** `task_status` read: a published result becomes `acknowledged` with its inbox rows. */
@@ -1981,6 +2081,8 @@ export class RunEngine extends EventEmitter {
       const run = this.store.getRun(String(row.child_run_id))
       if (!run || run.status !== 'queued') continue
       if (this.hasLiveTurnStart(run.runId)) continue
+      // A remote subagent's stand-in never had a `turn.start`: its run goes on on the other computer.
+      if (this.remoteSubagents.getByChildRun(run.runId)) continue
       this.writeTerminal(run, run.epoch, 'interrupted', {
         interruptedBy: 'daemon_restart',
         error: 'The daemon stopped before the delegated task started.'
