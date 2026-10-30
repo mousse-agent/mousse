@@ -454,7 +454,12 @@ describe('normal behaviour is kept', () => {
     expect(plain(cwd, 'cat-file', '-p', 'HEAD:big.bin')).toBe('content')
   })
 
-  it('LFS pointers committed without a filter installed stay as stored, and checkpoints still work', async () => {
+  it('LFS pointers stay as stored under the user\'s own Git LFS, and checkpoints still work', async () => {
+    // The user's Git LFS, as a system install provides it; its clean filter passes a pointer through unchanged.
+    // Without one, a repository-local install is refused (see above), so the machine's own config is left out.
+    process.env.GIT_CONFIG_NOSYSTEM = '1'
+    const userFilter = (name: string): string => command(name, true).replace(/"/g, '\\"')
+    writeFileSync(process.env.GIT_CONFIG_GLOBAL!, `${readFileSync(process.env.GIT_CONFIG_GLOBAL!, 'utf8')}[filter "lfs"]\n\tclean = ${userFilter('user-lfs-clean')}\n\tsmudge = ${userFilter('user-lfs-smudge')}\n\trequired = true\n`)
     const cwd = repo()
     const pointer = 'version https://git-lfs.github.com/spec/v1\noid sha256:4d7a214614ab2935c943f9e0ff69d22eadbb8f32b1258daaa5e2ca24d17e2393\nsize 12345\n'
     writeFileSync(join(cwd, '.gitattributes'), '*.bin filter=lfs diff=lfs merge=lfs -text\n')
@@ -467,7 +472,7 @@ describe('normal behaviour is kept', () => {
     writeFileSync(join(cwd, 'a.txt'), 'next\n')
     mousseGit(cwd, ['add', '-A']); mousseGit(cwd, ['commit', '--no-verify', '-m', 'next'])
     expect(mousseGit(cwd, ['status', '--porcelain'])).toBe('')
-    expect(ran()).toEqual([])
+    expect(ran()).toEqual(['user-lfs-clean'])
   })
 })
 
