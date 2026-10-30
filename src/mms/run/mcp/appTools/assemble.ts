@@ -158,14 +158,18 @@ export function offeredDefinitions(registry: ToolRegistry, families: Record<AppT
   return out
 }
 
+/** The session sentence of a turn that attaches the MCP relay. */
+export const RELAY_SESSION_INSTRUCTION = 'The user\'s MCP servers set up in Mousse are also available through the "mousse-relay" server as <server>__<tool>.'
+
 /**
  * Stable session text for a runtime with its own loop, delivered where the runtime applies session
- * text: Mousse's tool guidance when its MCP server is attached, and the applet guidance when applets
- * are on. Empty when there is neither.
+ * text: Mousse's tool guidance when its MCP server is attached (with one sentence for the MCP relay
+ * when that is attached too), and the applet guidance when applets are on. Empty when there is neither.
  */
-export function sessionInstructions(input: { mcp: boolean; appletGuidance?: string }): string {
+export function sessionInstructions(input: { mcp: boolean; relay?: boolean; appletGuidance?: string }): string {
   return [
     ...(input.mcp ? [mousseOrchestrationInstructions()] : []),
+    ...(input.mcp && input.relay ? [RELAY_SESSION_INSTRUCTION] : []),
     ...(input.appletGuidance?.trim() ? [input.appletGuidance.trim()] : [])
   ].join('\n\n')
 }

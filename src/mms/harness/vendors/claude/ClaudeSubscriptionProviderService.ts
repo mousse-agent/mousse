@@ -25,7 +25,8 @@ import { atomicWriteJsonSync } from '../../../data/AtomicFs'
 import type { UserQuestionService } from '../../../orchestrator/UserQuestionService'
 import { exactDirectory } from '../../../run/approvalFingerprint'
 import { APPROVALS_REFUSED_MESSAGE, QUESTIONS_REFUSED_MESSAGE } from '../../acp/permissions'
-import { CLAUDE_MOUSSE_TOOL_PREFIX, claudeMcpServers } from '../../../run/mcp/attachment'
+import { CLAUDE_MOUSSE_TOOL_PREFIX, claudeMcpServers, isMousseServerTool } from '../../../run/mcp/attachment'
+import type { McpAttachment, McpRelayAttachment } from '../../../run/mcp/MousseMcpServer'
 import { TURN_TOKEN_KEY } from '../../../run/mcp/appTools/registry'
 import type { LoginSession } from '../../../providers/LoginSession'
 import { settingsMirror, type MirrorField, type VendorMirror } from '../../vendorMirror'
@@ -116,8 +117,8 @@ export type ClaudeSubscriptionChatInput = {
   permissionMode?: ThreadPermissionMode
   /** Set for a delegated child's turns (first and resumed); see `claudeChildToolDenial`. */
   child?: ChildTurnPolicy
-  /** The Mousse MCP server for this run (SPEC §15.2); null attaches no server. */
-  mcp?: { url: string; token: string } | null
+  /** The Mousse MCP server for this run (SPEC §15.2), and the MCP relay when the turn attaches it; null attaches no server. */
+  mcp?: McpAttachment | null
   /**
    * The turn's token, stamped into every Mousse call's input (`_mousse_turn`) by Mousse's own
    * `PreToolUse` hook, so a call Claude made for an earlier turn is refused (`per_call` turn binding).
@@ -1434,7 +1435,7 @@ export class ClaudeSubscriptionProviderService {
                     const decided = turn.locked.preToolUse(event.tool_name, args)
                     if (!decided.ok) return deny(decided.reason)
                     await turn.editCounter.start(event.tool_use_id, event.tool_name, event.tool_input)
-                    const stamped = turn.input.mcp && turn.input.mcpTurnToken && event.tool_name.startsWith(CLAUDE_MOUSSE_TOOL_PREFIX)
+                    const stamped = turn.input.mcp && turn.input.mcpTurnToken && isMousseServerTool(event.tool_name)
                       ? { updatedInput: { ...args, [TURN_TOKEN_KEY]: turn.input.mcpTurnToken } }
                       : undefined
                     return { hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'ask', ...stamped } }
@@ -1468,7 +1469,7 @@ export class ClaudeSubscriptionProviderService {
                 // for an earlier turn. Claude forwards the changed input to the server unchanged, and the
                 // model never sees the key.
                 const stamp = event.hook_event_name === 'PreToolUse' && turn.input.mcp && turn.input.mcpTurnToken &&
-                  event.tool_name.startsWith(CLAUDE_MOUSSE_TOOL_PREFIX)
+                  isMousseServerTool(event.tool_name)
                   ? { updatedInput: { ...(event.tool_input as Record<string, unknown>), [TURN_TOKEN_KEY]: turn.input.mcpTurnToken } }
                   : undefined
                 // Restricted turns route every call through canUseTool so its read-only allowlist holds.
@@ -1896,7 +1897,8 @@ export class ClaudeSubscriptionProviderService {
           ...buildOptions(sdkController, turnOf, false),
           ...claudeLockedOptions(locked!, {
             env,
-            mcpServers: claudeMcpServers(input.mcp),
+            // A bot's turn never attaches the MCP relay: its grant gate knows only Mousse's own tools.
+            mcpServers: claudeMcpServers(input.mcp ? { url: input.mcp.url, token: input.mcp.token } : null),
             mousseTools: Boolean(input.mcp),
             spawn: claudeLockedSpawn(locked!.onProcess ? { onProcess: locked!.onProcess } : {})
           })
@@ -1935,7 +1937,7 @@ export class ClaudeSubscriptionProviderService {
         metrics.beginQuery(live.sessionId, saved?.usageBaseline)
         liveRun.attach((message) => frames.observe(message))
       } else {
-        const key = { hard, soft: this.launchKey(env, integrations, turnSettings), mode: permissionMode, historyNow }
+        const key = { hard, soft: this.launchKey(env, integrations, turnSettings, input.mcp?.relay ?? null), mode: permissionMode, historyNow }
         try {
           // A bot's process is never kept warm: a locked turn is one query.
           live = locked ? undefined : await this.acquireLive(input.threadId, key, resume, (created) => {
@@ -2169,7 +2171,7 @@ export class ClaudeSubscriptionProviderService {
     }
   }
   /** What a new process would start with besides the turn's model and folder: launch settings and integrations. */
-  private launchKey(env: NodeJS.ProcessEnv, integrations: ClaudeTurnIntegrations | undefined, settings?: SdkSettings): string {
+  private launchKey(env: NodeJS.ProcessEnv, integrations: ClaudeTurnIntegrations | undefined, settings?: SdkSettings, relay: McpRelayAttachment | null = null): string {
     const launch = this.launchTarget()
     return createHash('sha256')
       .update(
@@ -2182,7 +2184,9 @@ export class ClaudeSubscriptionProviderService {
           integrations?.mcpServers,
           Object.entries(integrations?.proxiedServers ?? {}).map(([name, proxied]) => [name, proxied.tools]),
           integrations?.pluginPath,
-          settings ?? null
+          settings ?? null,
+          // The MCP relay and its catalogue revision: Claude Code reads its tool list once per process.
+          ...(relay ? [relay] : [])
         ])
       )
       .digest('hex')

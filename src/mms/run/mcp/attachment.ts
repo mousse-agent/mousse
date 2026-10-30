@@ -179,7 +179,9 @@ function codexRelayOverrides(attachment: McpAttachment, relay: NonNullable<McpAt
   return {
     [`${prefix}.url`]: relay.url,
     [`${prefix}.http_headers`]: { Authorization: bearerHeader(attachment) },
-    [`${prefix}.tool_timeout_sec`]: RELAY_CALL_TIMEOUT_MS / 1000,
+    // As long as Mousse's own: Codex counts the time the user takes on the relay's approval card,
+    // and the relay's own call timeout starts only once the call is approved.
+    [`${prefix}.tool_timeout_sec`]: MOUSSE_MCP_TOOL_TIMEOUT_MS / 1000,
     [`${prefix}.default_tools_approval_mode`]: 'approve'
   }
 }

@@ -82,7 +82,7 @@ describe('MCP relay attachment', () => {
     for (const server of stdio) expect('args' in server ? server.args.join(' ') : '').not.toContain('tok-secret')
   })
 
-  it('Codex gets pre-approved relay keys with the relay\'s timeout', () => {
+  it('Codex gets pre-approved relay keys with Mousse\'s timeout: the approval card counts against it', () => {
     expect(codexMcpConfigOverrides(RELAYED)).toEqual({
       'mcp_servers.mousse.url': PLAIN.url,
       'mcp_servers.mousse.http_headers': { Authorization: AUTH },
@@ -90,7 +90,7 @@ describe('MCP relay attachment', () => {
       'mcp_servers.mousse.default_tools_approval_mode': 'approve',
       'mcp_servers.mousse-relay.url': RELAYED.relay.url,
       'mcp_servers.mousse-relay.http_headers': { Authorization: AUTH },
-      'mcp_servers.mousse-relay.tool_timeout_sec': 240,
+      'mcp_servers.mousse-relay.tool_timeout_sec': 3600,
       'mcp_servers.mousse-relay.default_tools_approval_mode': 'approve'
     })
   })
