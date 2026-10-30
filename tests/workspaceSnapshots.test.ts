@@ -114,6 +114,25 @@ describe('an agent that does its own Git work', () => {
     expect(existsSync(join(cwd, 'feature.txt'))).toBe(true)
   })
 
+  it('can create a repository with no commit inside the worktree: the turn is recorded without it and nothing locks', async () => {
+    const tool = join(cwd, 'tool')
+    const { action } = await turn('turn', () => {
+      write('kept.txt', 'kept\n')
+      mkdirSync(tool); git(tool, 'init', '-q'); writeFileSync(join(tool, 'x.txt'), 'x\n')
+    })
+    expect(action.state).toBe('completed')
+    expect(action.changedPaths.map((item) => item.path)).toEqual(['kept.txt'])
+    expect(git(cwd, 'ls-tree', '--name-only', action.endSha).split('\n')).not.toContain('tool')
+    expect(new ThreadWorkspaceManager(f.thread).verify().lifecycle).toBe('ready')
+    noPending()
+
+    // Once it has a commit it is recorded as a link to that commit, like any nested repository.
+    const { action: next } = await turn('next', () => {
+      git(tool, 'add', 'x.txt'); git(tool, '-c', 'user.name=Agent', '-c', 'user.email=agent@example.test', 'commit', '-qm', 'x')
+    }, 2)
+    expect(git(cwd, 'ls-tree', next.endSha, 'tool')).toMatch(/^160000 commit /)
+  })
+
   it('Undo of a turn that committed restores the files and leaves HEAD and the branch alone', async () => {
     const { action } = await turn('turn', () => {
       git(cwd, 'switch', '-q', '-c', 'issue-2-task')
