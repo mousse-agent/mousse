@@ -297,7 +297,7 @@ export class MmsListsSource {
           pinnedAt: thread.pinnedAt,
           settledAt: thread.settledAt,
           startedAt: thread.startedAt,
-          worktreeEnabled: thread.worktreeEnabled || undefined,
+          worktreeEnabled: thread.worktreeEnabled,
           ...(own
             ? {
                 lineage: thread.lineage,

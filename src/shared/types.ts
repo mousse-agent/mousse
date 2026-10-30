@@ -1034,10 +1034,11 @@ export interface Thread {
   /** How much the agent may do without asking; absent means the profile default. */
   permissionMode?: PermissionMode
   /**
-   * Opt-in isolated git worktree for this thread. OFF by default (undefined/false
-   * means run on the primary checkout). Toggleable from the new-chat input bar
-   * before the first message; locked once a workspace is provisioned or the
-   * thread has started.
+   * Whether this thread works in its own git worktree. `false` runs it on the project's
+   * folder. Unset means no choice was recorded: the composer shows the "Start new chats in a
+   * worktree" setting, and a thread from before the toggle was honoured gets a worktree.
+   * Toggleable from the new-chat input bar before the first message; locked once a
+   * workspace is provisioned or the thread has started.
    */
   worktreeEnabled?: boolean
   /** The pull request this thread created, started from, or watches; set by the daemon, never inferred from a branch name. */

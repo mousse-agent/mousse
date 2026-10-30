@@ -44,7 +44,8 @@ export function useActiveProjectLocation(): ActiveProject {
   ))
   const draftProjectId = useAppStore((s) => localWorkspaceFor(
     s.composerWorkspaceDrafts[s.activeThreadId ?? '__blank__'],
-    s.threads.find((thread) => thread.id === s.activeThreadId)
+    s.threads.find((thread) => thread.id === s.activeThreadId),
+    s.worktreeByDefault
   ).projectId)
   const scope = `${profileId}:${activeThreadId ?? '__blank__'}`
   const [resolved, setResolved] = useState<({ scope: string } & ResolvedWorkspace) | null>(null)

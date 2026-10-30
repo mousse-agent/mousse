@@ -3371,7 +3371,8 @@ export class OrchestratorService extends EventEmitter {
       id: intent.threadId,
       // Listed from the first write, never an empty draft the app's "New chat" would take over.
       started: true,
-      worktreeEnabled: intent.worktreeEnabled,
+      // Only `new_worktree` is recorded: `project` on a Git project still edits in a worktree of its own (`runsIn`).
+      ...(intent.worktreeEnabled ? { worktreeEnabled: true } : {}),
       ...(intent.modelOverride ? { modelOverride: intent.modelOverride } : {}),
       permissionMode: intent.permissionMode,
       // Launched by the caller's thread, never owned by it: it is neither nested under it nor deleted with it.
@@ -4989,6 +4990,11 @@ export class OrchestratorService extends EventEmitter {
     return this.forkCheckpoint(sourceDir, sourceRunId) ? 'checkpoint' : 'missing'
   }
 
+  /** False once the thread chose its project's folder (worktree toggle off); unset keeps a worktree. */
+  private threadWantsWorktree(threadId: string): boolean {
+    return this.threadStore?.getThread(threadId)?.worktreeEnabled !== false
+  }
+
   private async seedForkWorkspace(threadId: string, projectPath: string, threadDir: string, signal?: AbortSignal, lease?: ThreadSession['executionLease']): Promise<void> {
     const engine = this.runEngine
     const fork = engine?.transfers.listPending(threadId, 'fork')[0]
@@ -4997,6 +5003,7 @@ export class OrchestratorService extends EventEmitter {
     let seed: Record<string, unknown>
     try {
       if (manager.load()) seed = { kind: 'existing_workspace' }
+      else if (!this.threadWantsWorktree(threadId)) seed = { kind: 'worktree_off' }
       else if (!manager.resolveRepository(projectPath).capability.gitBacked) seed = { kind: 'not_git_backed' }
       else {
         const sourceDir = this.resolveThreadDir(fork.sourceThreadId)
@@ -5670,7 +5677,7 @@ export class OrchestratorService extends EventEmitter {
     if (!project) throw new Error('Integration requires a task project')
     const lease = await waitAcquireExecutionLease(parentDirectory, { source: 'delegation-integration', signal })
     try {
-      const target = await new WorkspaceResolver(parentDirectory, parentThreadId, project).resolve('agent', 'main', signal, lease)
+      const target = await new WorkspaceResolver(parentDirectory, parentThreadId, project, this.threadWantsWorktree(parentThreadId)).resolve('agent', 'main', signal, lease)
       if (!target.capability.checkpointable) throw new Error('Integration requires an owned Git workspace')
       // The task's own checkpoint, not the worktree as it is now: the subagent may have worked on since.
       // The run whose text the task published (it can be a later run than the task's own, once the
@@ -8924,7 +8931,7 @@ export class OrchestratorService extends EventEmitter {
         const threadDir = this.resolveThreadDir(session.threadId)
         if (projectPath && threadDir) {
           await this.seedForkWorkspace(session.threadId, projectPath, threadDir, opts?.externalSignal, session.executionLease)
-          session.workspace = await new WorkspaceResolver(threadDir, session.threadId, projectPath)
+          session.workspace = await new WorkspaceResolver(threadDir, session.threadId, projectPath, this.threadWantsWorktree(session.threadId))
             .resolve(request.mode, 'main', opts?.externalSignal, session.executionLease ?? undefined)
           session.projectCwd = session.workspace.projectPath
         } else {
@@ -10483,7 +10490,7 @@ export class OrchestratorService extends EventEmitter {
       const project = resolveThreadProjectPath(this.projectManager, this.threadStore, session.threadId)
       if (!project) throw new Error('Isolated agents require a project')
       if (!held || !session.workspace) {
-        session.workspace = await new WorkspaceResolver(directory, session.threadId, project).resolve('agent', 'main', this.lifecycle.signal, lease)
+        session.workspace = await new WorkspaceResolver(directory, session.threadId, project, this.threadWantsWorktree(session.threadId)).resolve('agent', 'main', this.lifecycle.signal, lease)
       }
       if (!session.workspace.capability.checkpointable) throw new Error('Isolated agents require an owned Git workspace')
       session.projectCwd = session.workspace.projectPath

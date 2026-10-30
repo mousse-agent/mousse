@@ -149,7 +149,7 @@ export function threadRow(
   if (typeof raw.pinnedAt === 'string') row.pinnedAt = raw.pinnedAt
   if (typeof raw.settledAt === 'string') row.settledAt = raw.settledAt
   if (typeof raw.startedAt === 'string') row.startedAt = raw.startedAt
-  if (raw.worktreeEnabled === true) row.worktreeEnabled = true
+  if (typeof raw.worktreeEnabled === 'boolean') row.worktreeEnabled = raw.worktreeEnabled
   if (isRecord(raw.lineage)) row.lineage = raw.lineage as unknown as Thread['lineage']
   // A mode a newer computer added and this one does not know reads as the strictest, never a looser one.
   if (typeof raw.permissionMode === 'string')

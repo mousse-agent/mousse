@@ -10,11 +10,25 @@ export function capChoices(current: number): number[] {
   return [...new Set<number>([...USAGE_LIMIT_CAP_CHOICES, current])].sort((a, b) => a - b)
 }
 
-/** Settings → General → Runs: whether a run paused by a usage limit continues by itself, and how often in a row. */
+/**
+ * Settings → General → Runs: where new chats start, and whether a run paused by a usage limit continues by
+ * itself, and how often in a row.
+ */
 export function RunSettingsGroup({ runs, onUpdate }: { runs: MousseSettings['runs']; onUpdate: (partial: MousseSettingsUpdate) => Promise<void> }) {
   const cap = runs.usageLimitPauseCap
   return (
     <SettingsGroup title="Runs" icon={Pause}>
+      <SettingsRow
+        title="Start new chats in a worktree"
+        description={<span title="Each new chat in a project gets its own Git worktree, so its changes stay apart from the project folder until you publish them. A new chat can still change this from the composer before its first message.">New chats in a project work in their own worktree.</span>}
+        control={
+          <Switch
+            label="Start new chats in a worktree"
+            checked={runs.worktreeByDefault}
+            onChange={(worktreeByDefault) => void onUpdate({ runs: { ...runs, worktreeByDefault } })}
+          />
+        }
+      />
       <SettingsRow
         title="Resume after usage limits reset"
         description={<span title={`Sends one continue message when the limit resets, at most ${cap} ${cap === 1 ? 'time' : 'times'} in a row. Runs already paused are not resumed; press Resume now.`}>Continues a paused run when the limit resets.</span>}

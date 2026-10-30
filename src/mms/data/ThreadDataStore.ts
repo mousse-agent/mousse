@@ -321,7 +321,8 @@ export class ThreadDataStore extends EventEmitter {
       order: this.nextThreadOrder(projectId, projectPath)
     }
     if (opts?.started === true) meta.startedAt = now
-    if (opts?.worktreeEnabled === true) meta.worktreeEnabled = true
+    // `false` is kept: a thread that chose its project's folder never gets a worktree (`WorkspaceResolver`).
+    if (typeof opts?.worktreeEnabled === 'boolean') meta.worktreeEnabled = opts.worktreeEnabled
     if (opts?.lineage) meta.lineage = structuredClone(opts.lineage)
     if (opts?.createdByThreadId) meta.createdByThreadId = opts.createdByThreadId
     if (isAgentAccessLevel(opts?.accessCeiling)) meta.accessCeiling = opts.accessCeiling
@@ -637,10 +638,9 @@ export class ThreadDataStore extends EventEmitter {
     }
     const updated: Thread = {
       ...thread,
+      worktreeEnabled: enabled,
       updatedAt: new Date().toISOString()
     }
-    if (enabled) updated.worktreeEnabled = true
-    else delete updated.worktreeEnabled
 
     const threadDir = this.getThreadDir(id)
     this.writeJsonAtomic(join(threadDir, 'meta.json'), updated)

@@ -31,10 +31,12 @@ export function unprovisionedContext(threadId: string, projectPath: string, gitB
 }
 
 export class WorkspaceResolver {
+  /** `worktree`: false for a thread whose worktree toggle is off; it runs on the project's folder and provisions nothing. */
   constructor(
     private readonly threadDirectory: string,
     private readonly threadId: string,
-    private readonly projectPath: string
+    private readonly projectPath: string,
+    private readonly worktree = true
   ) {}
 
   async resolve(
@@ -58,6 +60,10 @@ export class WorkspaceResolver {
     if (!mutating) {
       const repository = manager.resolveRepository(this.projectPath)
       return unprovisionedContext(this.threadId, this.projectPath, repository.capability.gitBacked, 'Read-only turn uses the primary checkout')
+    }
+    if (!this.worktree) {
+      const repository = manager.resolveRepository(this.projectPath)
+      return unprovisionedContext(this.threadId, this.projectPath, repository.capability.gitBacked, 'Worktree is off for this thread; it works in the project folder')
     }
     const repository = manager.resolveRepository(this.projectPath)
     if (!repository.capability.gitBacked) {
