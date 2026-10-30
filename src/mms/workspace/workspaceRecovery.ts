@@ -12,6 +12,16 @@ function currentBranch(worktreePath: string): string {
 }
 
 /**
+ * An operation's error as the person reads it. A failed Git command's message starts with the whole command line
+ * (`Command failed: git -c core.fsmonitor=false -c … add -A …`); only what Git said after it is kept.
+ */
+export function recoveryErrorText(error: unknown): string {
+  const text = (error instanceof Error ? error.message : String(error)).replace(/^Error: /, '').trim()
+  if (!text.startsWith('Command failed: ')) return text
+  return text.split('\n').slice(1).map((line) => line.trim()).filter(Boolean).join(' ') || 'A Git command failed without saying why.'
+}
+
+/**
  * Why a thread needs recovery, or undefined when it does not. `verified` is `ThreadWorkspaceManager.verify()`
  * of the stored metadata: its `lifecycle` is `recovery_required` when the branch or HEAD differ from `workspace.json`.
  */
@@ -24,7 +34,7 @@ export function describeRecovery(threadDirectory: string, verified: ThreadWorksp
     return { reason: `The worktree is on branch ${actual} instead of ${verified.branch}.`, ...operation, branch: { expected: verified.branch, actual } }
   }
   const error = (pending?.details as { error?: unknown } | undefined)?.error
-  if (typeof error === 'string' && error) return { reason: error.replace(/^Error: /, ''), ...operation }
+  if (typeof error === 'string' && error) return { reason: recoveryErrorText(error), ...operation }
   if (verified.lifecycle === 'recovery_required') return { reason: 'The worktree’s history changed outside Mousse.', ...operation }
   return { reason: `The ${pending!.operationType} operation did not finish.`, ...operation }
 }

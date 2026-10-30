@@ -92,7 +92,7 @@ import { isQualifiedId } from '../../shared/threadRef'
 import { resolveThreadProjectPath } from '../data/resolveActiveProjectPath'
 import { ThreadJournal } from '../data/ThreadJournal'
 import { ThreadWorkspaceManager } from '../workspace/ThreadWorkspaceManager'
-import { describeRecovery, switchBackToThreadBranch } from '../workspace/workspaceRecovery'
+import { describeRecovery, recoveryErrorText, switchBackToThreadBranch } from '../workspace/workspaceRecovery'
 import { resolveEditorFolder } from '../workspace/editorFolder'
 import type { NodeId } from '../../shared/net/ids'
 import { scheduledJobOptionsDepsFrom, validateScheduledJobOptions, type ScheduledJobOptionsDeps } from '../scheduled/validateJobOptions'
@@ -3051,19 +3051,25 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
           throw new DomainRpcError('switch_back_refused', error instanceof Error ? error.message : String(error))
         }
       }
-      const onPendingChangesKept = ctx.mms.orchestrator.pendingChangesKeptNotice(operation.threadId)
-      await new ChildAgentIntegrationService(operation.threadDirectory, { onPendingChangesKept }).recoverPending(workspace.worktreePath)
-      await new PublishService(operation.threadDirectory, { onPendingChangesKept }).recoverPending(workspace.worktreePath, operation.projectPath)
-      await new ThreadActionService(operation.threadDirectory).recoverPending(workspace.worktreePath)
-      await new CodeRevertService(operation.threadDirectory).recoverPending(workspace.worktreePath)
-      await new UndoService(operation.threadDirectory).recoverPending(workspace.worktreePath, (target, kind) => {
-        if (kind === 'redo' && target.nativeContextStartBoundary) ctx.mms.orchestrator.restoreConversationActionEnd(operation.threadId, target.presentationMessageStart, target.presentationMessageEnd, target.nativeContextBoundary)
-        else if (target.nativeContextStartBoundary) ctx.mms.orchestrator.restoreConversationBoundary(operation.threadId, target.presentationMessageStart, target.nativeContextStartBoundary)
-      })
-      await new ConversationBranchService(operation.threadDirectory).recoverPending(workspace.worktreePath, (branch) => {
-        const target = loadConversationState(operation.threadDirectory, branch.id)
-        ctx.mms.orchestrator.replaceConversationState(operation.threadId, target.messages, target.nativeContext)
-      })
+      try {
+        const onPendingChangesKept = ctx.mms.orchestrator.pendingChangesKeptNotice(operation.threadId)
+        await new ChildAgentIntegrationService(operation.threadDirectory, { onPendingChangesKept }).recoverPending(workspace.worktreePath)
+        await new PublishService(operation.threadDirectory, { onPendingChangesKept }).recoverPending(workspace.worktreePath, operation.projectPath)
+        await new ThreadActionService(operation.threadDirectory).recoverPending(workspace.worktreePath)
+        await new CodeRevertService(operation.threadDirectory).recoverPending(workspace.worktreePath)
+        await new UndoService(operation.threadDirectory).recoverPending(workspace.worktreePath, (target, kind) => {
+          if (kind === 'redo' && target.nativeContextStartBoundary) ctx.mms.orchestrator.restoreConversationActionEnd(operation.threadId, target.presentationMessageStart, target.presentationMessageEnd, target.nativeContextBoundary)
+          else if (target.nativeContextStartBoundary) ctx.mms.orchestrator.restoreConversationBoundary(operation.threadId, target.presentationMessageStart, target.nativeContextStartBoundary)
+        })
+        await new ConversationBranchService(operation.threadDirectory).recoverPending(workspace.worktreePath, (branch) => {
+          const target = loadConversationState(operation.threadDirectory, branch.id)
+          ctx.mms.orchestrator.replaceConversationState(operation.threadId, target.messages, target.nativeContext)
+        })
+      } catch (error) {
+        // What stopped recovery is for the person to read in the banner or the CLI, never an internal error.
+        if (error instanceof DomainRpcError) throw error
+        throw new DomainRpcError('recovery_failed', recoveryErrorText(error))
+      }
       return { ok: true, ...(switched ? { switchedFrom: switched.from, message: switched.message } : {}) }
     }
     case 'operations.abort': {
