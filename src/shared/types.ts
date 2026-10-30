@@ -988,6 +988,19 @@ export interface ThreadSentFrom {
   node: string
 }
 
+/**
+ * Where a remote subagent runs: another of the user's computers (its Net node id) and, once that
+ * computer created it, the thread there as a qualified id (`<node>:<id>`), which this computer opens
+ * as a thread of that computer. The subagent's thread here is a stand-in that holds its tasks.
+ */
+export interface ThreadRunsOn {
+  node: string
+  /** What the computer was called when the subagent started. */
+  computerName: string
+  /** The thread on that computer, qualified; absent until that computer has created it. */
+  ref?: string
+}
+
 export interface Thread {
   id: string
   name: string
@@ -1015,6 +1028,8 @@ export interface Thread {
   notShared?: true
   /** The other computer of the user a message in this thread was last sent from; absent when every message came from this one. */
   sentFrom?: ThreadSentFrom
+  /** Set on a remote subagent: the computer and thread that run it. No turn runs on this computer. */
+  runsOn?: ThreadRunsOn
   /**
    * The most an agent running in this thread may reach beyond its own thread and lineage (agent access
    * level, SPEC §15.1), fixed for the thread's life. Set on a fork from its source and the forking agent,

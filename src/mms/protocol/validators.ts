@@ -933,13 +933,17 @@ export function asSettingsPartial(v: unknown): Record<string, unknown> {
 function assertAgentAccessPatch(value: unknown): void {
   const patch = asPlainObject(value, 'partial.agentAccess')
   for (const key of Object.keys(patch)) {
-    if (key !== 'level' && key !== 'projectIds' && key !== 'answerApprovals') throw new Error(`partial.agentAccess.${key} is not allowed`)
+    if (key !== 'level' && key !== 'projectIds' && key !== 'answerApprovals' && key !== 'computers') throw new Error(`partial.agentAccess.${key} is not allowed`)
   }
   if (patch.level !== undefined && !isAgentAccessLevel(patch.level)) throw new Error('partial.agentAccess.level must be lineage, read or manage')
   if (patch.answerApprovals !== undefined && typeof patch.answerApprovals !== 'boolean') throw new Error('partial.agentAccess.answerApprovals must be a boolean')
   if (patch.projectIds !== undefined) {
     if (!Array.isArray(patch.projectIds) || patch.projectIds.some((id) => typeof id !== 'string' || id.length === 0 || id.length > 256))
       throw new Error('partial.agentAccess.projectIds must be an array of project ids')
+  }
+  if (patch.computers !== undefined) {
+    if (!Array.isArray(patch.computers) || patch.computers.some((node) => typeof node !== 'string' || node.length === 0 || node.length > 256))
+      throw new Error('partial.agentAccess.computers must be an array of computer ids')
   }
 }
 

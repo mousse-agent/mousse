@@ -45,6 +45,13 @@ export interface DelegateTaskInput {
    * defaults it to the caller's ceiling and refuses a broader one.
    */
   modeCeiling?: 'plan' | 'default'
+  /**
+   * Another of the user's computers to run the subagent on (issue #469): its name or id from
+   * `list_computers`. Absent: this computer.
+   */
+  computer?: string
+  /** A remote subagent is stopped after this many minutes (1-1440; default 360). */
+  maxMinutes?: number
 }
 
 /** The model's tool call that invoked a delegation tool; its id derives the clientRequestId. */
@@ -73,6 +80,8 @@ export interface DelegationToolHost {
   taskCancel(input: SubagentRef): Promise<unknown>
   listDelegations(): unknown
   listSubagents(): unknown
+  /** The user's other computers a subagent may run on, and whether each can take this caller's work. */
+  listComputers(): Promise<unknown> | unknown
   integrateDelegation(input: SubagentRef, call: DelegationToolCall): Promise<unknown>
   named: {
     create(input: NamedAgentToolRequest, call: DelegationToolCall): Promise<unknown>
@@ -82,12 +91,16 @@ export interface DelegationToolHost {
   }
 }
 
+/** The longest `maxMinutes` of a remote subagent: a day. */
+export const MAX_REMOTE_MINUTES = 1440
+
 /** Delegation tool schemas (SPEC §14.2) plus the named-agent compatibility wrappers. */
 const DELEGATION_TOOLS: Tool[] = [
-  { name: 'delegate_task', description: 'Start a new subagent on its own thread and return at once with its delegationId. Mousse sends you a notice with the result when it finishes. title is a short role-like name ("API reviewer"), unique among your subagents: it is how you address the subagent later (continue_subagent, task_status, task_cancel); when it is taken the call returns title_taken and starts nothing. workspace isolated gives the subagent its own worktree; shared is only for read-only roles (research, review). instanceId (the agent to run, such as "claude" or "pi:openai") and model default to yours; provider is the older name form of instanceId.',
+  { name: 'delegate_task', description: 'Start a new subagent on its own thread and return at once with its delegationId. Mousse sends you a notice with the result when it finishes. title is a short role-like name ("API reviewer"), unique among your subagents: it is how you address the subagent later (continue_subagent, task_status, task_cancel); when it is taken the call returns title_taken and starts nothing. workspace isolated gives the subagent its own worktree; shared is only for read-only roles (research, review). instanceId (the agent to run, such as "claude" or "pi:openai") and model default to yours; provider is the older name form of instanceId. computer runs the subagent on another of the user\'s computers (a name from list_computers), in its copy of this repository and under its own agents; there instanceId and model default to that computer\'s, and maxMinutes (default 360) stops it if it runs longer. Its result names the branch its work is on there.',
     parameters: Type.Object({ prompt: Type.String(), title: Type.String(), instanceId: Type.Optional(Type.String()), provider: Type.Optional(Type.String()), model: Type.Optional(Type.String()), role: Type.Optional(Type.String()),
       workspace: Type.Union([Type.Literal('isolated'), Type.Literal('shared')]),
-      wake: Type.Optional(Type.Union([Type.Literal('always'), Type.Literal('settled_only')])) }) },
+      wake: Type.Optional(Type.Union([Type.Literal('always'), Type.Literal('settled_only')])),
+      computer: Type.Optional(Type.String()), maxMinutes: Type.Optional(Type.Integer({ minimum: 1, maximum: MAX_REMOTE_MINUTES })) }) },
   { name: 'continue_subagent', description: 'Send a follow-up to a subagent you already started, by title (or childThreadId, or delegationId). It continues on the same thread with the context it has, so use it when the next step builds on what it read or did. Starts a new task, returns at once with its delegationId, and Mousse sends you a notice with the result. A subagent that is busy runs the follow-up after its current task (status queued). A subagent waiting for an answer returns needs_answer with its question; answer it with answer_subagent. It cannot change workspace, provider or model; start a new subagent for that.',
     parameters: Type.Object({ subagent: Type.String(), prompt: Type.String() }) },
   { name: 'answer_subagent', description: 'Answer a question one of your subagents asked (ask_user), using the requestId from continue_subagent (needs_answer) or from the question notice. answers maps each question id to the chosen option id (an array when several are allowed) or free text.',
@@ -107,7 +120,8 @@ const DELEGATION_TOOLS: Tool[] = [
       workspace: Type.Optional(Type.Union([Type.Literal('shared'), Type.Literal('isolated')])),
       access: Type.Optional(Type.Union([Type.Literal('read-only'), Type.Literal('write')])),
       contextMode: Type.Optional(Type.Union([Type.Literal('continue'), Type.Literal('fresh')])), resumeResult: Type.Optional(Type.Boolean()) }) },
-  { name: 'list_subagents', description: 'List your subagents, one row per subagent: title, childThreadId, state, latest delegationId, whether a result is unread, workspace, provider and model.', parameters: Type.Object({}) }
+  { name: 'list_subagents', description: 'List your subagents, one row per subagent: title, childThreadId, state, latest delegationId, whether a result is unread, workspace, provider and model, and the computer a remote one runs on.', parameters: Type.Object({}) },
+  { name: 'list_computers', description: 'List the user\'s other computers you may start subagents on (delegate_task computer): name, whether it is online, whether the user allowed it, and whether it has this repository. Starts nothing.', parameters: Type.Object({}) }
 ]
 
 /** Every name `dispatchDelegationTool` runs, the hidden compatibility aliases included. */
@@ -118,7 +132,7 @@ export const DELEGATION_TOOL_NAMES: ReadonlySet<string> = new Set(DELEGATION_TOO
  * (`create_subagent(s)`, `recall_subagent`, `integrate_subagent`, `list_delegations`) stay
  * dispatchable for replayed transcripts but are not listed.
  */
-export const LISTED_DELEGATION_TOOL_NAMES = ['delegate_task', 'continue_subagent', 'answer_subagent', 'task_status', 'task_cancel', 'list_subagents', 'integrate_delegation'] as const
+export const LISTED_DELEGATION_TOOL_NAMES = ['delegate_task', 'continue_subagent', 'answer_subagent', 'task_status', 'task_cancel', 'list_subagents', 'integrate_delegation', 'list_computers'] as const
 
 /** Definitions shared by the pi loop and the Mousse MCP server, so both offer identical schemas. */
 export function delegationToolDefinitions(names: readonly string[] = LISTED_DELEGATION_TOOL_NAMES): Tool[] {
@@ -151,10 +165,16 @@ export async function dispatchDelegationTool(host: DelegationToolHost, toolCall:
       for (const key of ['instanceId', 'provider', 'model', 'role'] as const)
         if (args[key] !== undefined && (typeof args[key] !== 'string' || !String(args[key]).trim())) throw new Error(`${key} must be a non-empty string`)
       if (args.modeCeiling !== undefined && args.modeCeiling !== 'plan' && args.modeCeiling !== 'default') throw new Error('modeCeiling must be plan or default')
+      if (args.computer !== undefined && (typeof args.computer !== 'string' || !args.computer.trim())) throw new Error('computer must be a non-empty string: a name from list_computers')
+      if (args.maxMinutes !== undefined && !(Number.isInteger(args.maxMinutes) && (args.maxMinutes as number) >= 1 && (args.maxMinutes as number) <= MAX_REMOTE_MINUTES))
+        throw new Error(`maxMinutes must be a whole number from 1 to ${MAX_REMOTE_MINUTES}`)
+      if (args.maxMinutes !== undefined && args.computer === undefined) throw new Error('maxMinutes applies only with computer')
       const title = requireString(args, 'title', 'delegate_task requires a title: a short role-like name for the subagent, such as "API reviewer"').trim()
       return host.delegateTask({ prompt, title, workspace: args.workspace, wake: args.wake as DelegateTaskInput['wake'],
         instanceId: args.instanceId as string | undefined, provider: args.provider as string | undefined, model: args.model as string | undefined, role: args.role as string | undefined,
-        ...(args.modeCeiling !== undefined ? { modeCeiling: args.modeCeiling as DelegateTaskInput['modeCeiling'] } : {}) }, call)
+        ...(args.modeCeiling !== undefined ? { modeCeiling: args.modeCeiling as DelegateTaskInput['modeCeiling'] } : {}),
+        ...(args.computer !== undefined ? { computer: (args.computer as string).trim() } : {}),
+        ...(args.maxMinutes !== undefined ? { maxMinutes: args.maxMinutes as number } : {}) }, call)
     }
     case 'continue_subagent':
       return host.continueSubagent({
@@ -197,6 +217,8 @@ export async function dispatchDelegationTool(host: DelegationToolHost, toolCall:
     }
     case 'list_subagents':
       return host.listSubagents()
+    case 'list_computers':
+      return host.listComputers()
     default:
       throw new Error(`Unknown delegation tool ${toolCall.name}`)
   }

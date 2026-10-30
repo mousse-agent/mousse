@@ -139,7 +139,7 @@ export function toolResultText(content: unknown): string | undefined {
 /**
  * What a transcript row keeps of a Mousse subagent tool call, so the app can tell which task a
  * card is for without guessing. Only the fields that name the subagent or task go in, each
- * clipped, and a version that marks the row as recorded: the call's title, subagent and delegation id, and the result's delegation id, thread,
+ * clipped, and a version that marks the row as recorded: the call's title, subagent, delegation id and computer, and the result's delegation id, thread,
  * title, status and, for a refusal or error, its code and a short message. The prompt, the answers
  * and the result text never do. Null for any other tool.
  */
@@ -151,7 +151,7 @@ export function recordSubagentCall(
   if (!subagentToolName(rawName)) return null
   const args = input && typeof input === 'object' && !Array.isArray(input) ? (input as Record<string, unknown>) : {}
   const keptInput: Record<string, unknown> = { recordVersion: SUBAGENT_RECORD_VERSION }
-  for (const key of ['title', 'subagent', 'delegationId'] as const) {
+  for (const key of ['title', 'subagent', 'delegationId', 'computer'] as const) {
     const value = clip(args[key])
     if (value !== undefined) keptInput[key] = value
   }
