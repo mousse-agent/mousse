@@ -250,7 +250,6 @@ Refused or absent, as before: Publish (`workspace_not_ready`), push, forks and b
 
 ### Known limits
 
-- A folder that holds a nested repository with no commit makes `git add` fail, as it does in a worktree; the turn runs with Undo off for that folder and says why.
 - Nested repositories with commits are recorded as links, not read.
 - A store only shrinks when a receipt expires or a thread or project goes. A deleted thread whose purge never ran leaves its store until the profile's data is cleaned by hand.
 - The three-way restore protects another thread's edits, not its running turn's: Undo waits for it (the gate refuses), but the two turns' edits to one file are not separated.
