@@ -13,6 +13,7 @@ import {
   cursorMcpServers,
   isMousseServerTool,
   MOUSSE_MCP_TOKEN_ENV,
+  MOUSSE_MCP_TOOL_TIMEOUT_MS,
   MOUSSE_RELAY_SERVER_NAME,
   RELAY_CALL_TIMEOUT_MS,
   type CliCommand
@@ -59,7 +60,7 @@ describe('MCP relay attachment', () => {
   it('Claude Code and Cursor get a second HTTP server under the same bearer', () => {
     expect(claudeMcpServers(RELAYED)).toEqual({
       mousse: { type: 'http', url: PLAIN.url, headers: { Authorization: AUTH }, timeout: 3_600_000 },
-      'mousse-relay': { type: 'http', url: RELAYED.relay.url, headers: { Authorization: AUTH }, timeout: RELAY_CALL_TIMEOUT_MS }
+      'mousse-relay': { type: 'http', url: RELAYED.relay.url, headers: { Authorization: AUTH }, timeout: MOUSSE_MCP_TOOL_TIMEOUT_MS }
     })
     expect(cursorMcpServers(RELAYED)).toEqual({
       mousse: { type: 'http', url: PLAIN.url, headers: { Authorization: AUTH } },

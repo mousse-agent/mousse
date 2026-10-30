@@ -160,7 +160,7 @@ describe('Claude subscription attachment', () => {
     await claude.chat({ threadId: 't2', cwd: home, model: 'sonnet', prompt: 'hi', onText: vi.fn(), mcp: { ...MCP, relay }, mode: 'plan' })
     expect(options[0].mcpServers).toEqual({
       mousse: { type: 'http', url: MCP.url, headers: { Authorization: 'Bearer tok-secret' }, timeout: 3_600_000 },
-      'mousse-relay': { type: 'http', url: relay.url, headers: { Authorization: 'Bearer tok-secret' }, timeout: 240_000 }
+      'mousse-relay': { type: 'http', url: relay.url, headers: { Authorization: 'Bearer tok-secret' }, timeout: 3_600_000 }
     })
     // The relayed tool goes to Mousse's card like any other MCP tool, and the user's answer holds.
     expect(ask).toHaveBeenCalledTimes(1)

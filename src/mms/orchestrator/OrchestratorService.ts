@@ -2912,8 +2912,8 @@ export class OrchestratorService extends EventEmitter {
       ...(turn.bot ? { bot: turn.bot } : {}),
       ...(relay ? { relay } : {}),
       // A definition's turn runs on its own prompt and its granted skills only (`runDefinitionTurn`).
-      instructions: (mcpAttached) => turn.definition ? { sessionInstructions: '', turnPreamble: '' } : ({
-        sessionInstructions: sessionInstructions({ mcp: mcpAttached, appletGuidance: this.appletStore ? APPLET_GENERATION_GUIDANCE : undefined }),
+      instructions: (mcpAttached, relayAttached) => turn.definition ? { sessionInstructions: '', turnPreamble: '' } : ({
+        sessionInstructions: sessionInstructions({ mcp: mcpAttached, relay: relayAttached, appletGuidance: this.appletStore ? APPLET_GENERATION_GUIDANCE : undefined }),
         turnPreamble: withBotInstructions(input.botInstructions, turnPreamble({
           loadedSkills: turn.loadedSkills,
           modePrompt,

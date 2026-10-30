@@ -83,7 +83,8 @@ export function claudeMcpServers(attachment: McpAttachment | null | undefined): 
             type: 'http' as const,
             url: attachment.relay.url,
             headers: { Authorization: bearerHeader(attachment) },
-            timeout: RELAY_CALL_TIMEOUT_MS
+            // Longer than the relay's own call timeout, so the model gets the relay's timeout result.
+            timeout: MOUSSE_MCP_TOOL_TIMEOUT_MS
           }
         }
       : {})
