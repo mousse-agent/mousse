@@ -5,7 +5,10 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { ChangeReceiptService } from '../src/mms/actions/ChangeReceiptService'
 import { ThreadActionService } from '../src/mms/actions/ThreadActionService'
 import { ThreadWorkspaceManager } from '../src/mms/workspace/ThreadWorkspaceManager'
-import { describeRecovery, switchBackToThreadBranch } from '../src/mms/workspace/workspaceRecovery'
+import { MousseMainService } from '../src/mms/MousseMainService'
+import { dispatchMethod } from '../src/mms/protocol/handlers'
+import { WorkspaceResolver } from '../src/mms/workspace/WorkspaceResolver'
+import { describeRecovery, recoveryErrorText, switchBackToThreadBranch } from '../src/mms/workspace/workspaceRecovery'
 import { actionOptions, git } from './fixtures/gitFoundation'
 
 /** A repository with one commit, a thread directory, and an own Mousse home for the worktree. */
@@ -96,6 +99,18 @@ describe('why a thread needs recovery', () => {
     expect(recovery.operationType).toBe('action-checkpoint')
   })
 
+  it('gives what Git said, not the command line, when a Git command stopped the checkpoint', async () => {
+    const manager = new ThreadWorkspaceManager(f.thread)
+    const workspace = await manager.provision('task', 'main', f.repo)
+    // A nested repository with no commit makes `git add -A` fail.
+    const tool = join(workspace.worktreePath, 'tool')
+    mkdirSync(tool); git(tool, 'init', '-q')
+    await expect(new ThreadActionService(f.thread).checkpointExistingTurn(actionOptions(workspace.worktreePath), workspace.headSha, 'completed')).rejects.toThrow(/does not have a commit checked out/)
+    const recovery = describeRecovery(f.thread, manager.verify())!
+    expect(recovery.reason).toMatch(/^error: 'tool\/' does not have a commit checked out/)
+    expect(recovery.reason).not.toMatch(/Command failed|core\.fsmonitor/)
+  })
+
   it('says the history changed when HEAD moved with no operation recorded', async () => {
     const manager = new ThreadWorkspaceManager(f.thread)
     const workspace = await manager.provision('task', 'main', f.repo)
@@ -154,5 +169,42 @@ describe('switching back to the thread branch', () => {
     expect(() => switchBackToThreadBranch(manager.load()!)).toThrow(/not on a branch/)
     git(cwd, 'switch', '-q', workspace.branch)
     expect(() => switchBackToThreadBranch(manager.load()!)).toThrow(/already on/)
+  })
+})
+
+describe('the text of a failed operation', () => {
+  it('keeps a plain message, without the Error: prefix', () => {
+    expect(recoveryErrorText(new Error('Interrupted commit needs recovery.'))).toBe('Interrupted commit needs recovery.')
+    expect(recoveryErrorText('Error: Workspace branch changed during execution; recovery is required.')).toBe('Workspace branch changed during execution; recovery is required.')
+  })
+
+  it('drops the command line of a failed Git command and keeps what Git said', () => {
+    const failed = "Error: Command failed: git -c core.fsmonitor=false -c core.hooksPath=/dev/null add -A -- . :(exclude).mousse\nerror: 'tool/' does not have a commit checked out\nfatal: adding files failed\n"
+    expect(recoveryErrorText(failed)).toBe("error: 'tool/' does not have a commit checked out fatal: adding files failed")
+    expect(recoveryErrorText('Command failed: git status')).toBe('A Git command failed without saying why.')
+  })
+})
+
+describe('operations.recover', () => {
+  it('refuses with what stopped recovery, not an internal error', async () => {
+    const home = join(f.root, 'mms-home')
+    mkdirSync(home)
+    const mms = await MousseMainService.create({ homeDir: home, headless: true, ownerKind: 'test' })
+    await mms.start()
+    try {
+      const thread = mms.threads.createThread('Locked', mms.projects.openProject(f.repo).id)
+      const directory = mms.threads.getThreadDir(thread.id)
+      const cwd = (await new WorkspaceResolver(directory, thread.id, f.repo).resolve('agent')).workspacePath!
+      const tool = join(cwd, 'tool')
+      mkdirSync(tool); git(tool, 'init', '-q')
+      const workspace = new ThreadWorkspaceManager(directory).load()!
+      await expect(new ThreadActionService(directory).checkpointExistingTurn({ ...actionOptions(cwd), threadId: thread.id }, workspace.headSha, 'completed')).rejects.toThrow()
+
+      // Recovery retakes the checkpoint, which fails the same way while the nested repository is there.
+      const refused = await dispatchMethod({ mms, globalSequence: () => 0 }, 'operations.recover', { threadId: thread.id }).then(() => undefined, (error: unknown) => error)
+      expect(refused).toMatchObject({ code: 'recovery_failed', message: expect.stringMatching(/^error: 'tool\/' does not have a commit checked out/) })
+    } finally {
+      await mms.stop()
+    }
   })
 })
