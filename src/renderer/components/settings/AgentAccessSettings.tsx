@@ -9,6 +9,7 @@ import type { Project } from '../../../shared/types'
 import { SettingsGroup, SettingsRow, Switch } from './SettingsRow'
 import { Select } from '../ui/Select'
 import { Check, ShieldCheck } from '../../lib/icons'
+import { useComputers } from '../../lib/computers'
 
 /** What each level lets an agent do, in the words the screen uses (SPEC §15.1). */
 export const AGENT_ACCESS_LEVELS: ReadonlyArray<{ value: AgentAccessLevel; label: string; summary: string }> = [
@@ -71,6 +72,13 @@ export function AgentAccessSettings({
   const access = normalizeAgentAccessSettings(settings.agentAccess)
   const level = AGENT_ACCESS_LEVELS.find((entry) => entry.value === access.level) ?? AGENT_ACCESS_LEVELS[0]
   const projectsId = useId()
+  const computersId = useId()
+  const { routed, byNode } = useComputers()
+  const computers = Object.values(byNode).sort((a, b) => a.name.localeCompare(b.name))
+  // Allowed computers that are no longer the user's stay visible so the person can remove them.
+  const goneComputers = access.computers.filter((node) => !byNode[node])
+  const toggleComputer = (node: string) =>
+    save({ computers: access.computers.includes(node) ? access.computers.filter((entry) => entry !== node) : [...access.computers, node] })
 
   // Always the whole setting: a partial write must not drop the project list or the approvals switch.
   const save = (next: Partial<typeof access>) => void updateSettings({ agentAccess: { ...access, ...next } })
@@ -181,6 +189,20 @@ export function AgentAccessSettings({
           }
         />
       )}
+      {(routed && computers.length > 0) || goneComputers.length > 0 ? (
+        <SettingsRow
+          title="Subagents on other computers"
+          titleId={computersId}
+          description="An agent can start a subagent on a checked computer. It runs there under that computer's agents and accounts, in its copy of the repository, at no more than Auto-accept edits and the limit that computer set for this one. None are checked at first."
+        >
+          <div role="group" aria-labelledby={computersId} className="agent-access-projects" onKeyDown={moveFocus}>
+            {computers.map((computer) =>
+              projectRow(computer.node, computer.online ? computer.name : `${computer.name} (offline)`, access.computers.includes(computer.node), () => toggleComputer(computer.node))
+            )}
+            {goneComputers.map((node) => projectRow(node, 'Removed computer', true, () => toggleComputer(node)))}
+          </div>
+        </SettingsRow>
+      ) : null}
       <SettingsRow
         title="Capped threads"
         description="These keep a lower level whatever you choose above."
