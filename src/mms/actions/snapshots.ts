@@ -1,7 +1,9 @@
+import { spawnSync } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import type { GitRecord } from '../../shared/threadActions'
+import { repoProgramEnv } from '../git/repoPrograms'
 import { git, mergeTrees, MOUSSE_COMMIT_ENV, NOT_MOUSSE, operationInProgress, tryGit, treeOf } from './git'
 
 /**
@@ -44,14 +46,34 @@ function headOf(top: string): string | undefined {
 }
 
 /**
+ * Repositories inside the worktree that have no commit yet (an agent ran `git init` or a project generator there).
+ * `git add` records a nested repository as a link to its HEAD, so it cannot add one with none, and the whole snapshot
+ * would fail. A snapshot leaves them out instead, as it leaves out the files of every nested repository. Looked for
+ * only after an add failed, so a worktree without one is walked once.
+ */
+function nestedRepositoriesWithoutCommit(top: string, env: NodeJS.ProcessEnv): string[] {
+  // Git lists a nested repository it would add as one entry ending in a slash.
+  const untracked = git(top, ['ls-files', '-z', '--others', '--exclude-standard'], env).split('\0')
+  return untracked.filter((path) => path.endsWith('/')).map((path) => path.slice(0, -1)).filter((path) =>
+    spawnSync('git', ['rev-parse', '--verify', '-q', 'HEAD^{commit}'], { cwd: join(top, path), env: repoProgramEnv(), stdio: 'ignore' }).status !== 0)
+}
+
+/**
  * The tree of every file in the worktree, from the persistent private index. The index stays between snapshots so
  * Git's stat cache keeps the next one fast; a missing, locked or corrupt one is rebuilt from HEAD.
  */
 function indexTree(top: string, index: string, head: string | undefined): string {
   const env = { GIT_INDEX_FILE: index }
+  const add = (skipped: string[]) => git(top, ['add', '-A', '--', '.', NOT_MOUSSE, ...skipped.map((path) => `:(exclude,literal)${path}`)], env)
   const attempt = (): string => {
     if (!existsSync(index)) git(top, head ? ['read-tree', head] : ['read-tree', '--empty'], env)
-    git(top, ['add', '-A', '--', '.', NOT_MOUSSE], env)
+    try {
+      add([])
+    } catch (error) {
+      const skipped = nestedRepositoriesWithoutCommit(top, env)
+      if (!skipped.length) throw error
+      add(skipped)
+    }
     return git(top, ['write-tree'], env)
   }
   try {
