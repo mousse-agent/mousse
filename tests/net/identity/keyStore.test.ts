@@ -136,6 +136,34 @@ describe('FileKeyStore real key files and restart', () => {
     expect(unavailable.state()).toBe('missing')
   })
 
+  it('creates passphrase-protected keys after the system keychain refuses', async () => {
+    const dir = profile(),
+      refused = { ...noVault, encryptionRequired: true },
+      keys = new FileKeyStore(dir, { codec: refused })
+    expect(keys.vaultUnavailable()).toBe(false)
+    await expect(keys.initialize({ asAuthority: true })).rejects.toMatchObject({ code: 'keystore_locked' })
+    expect(keys.vaultUnavailable()).toBe(true)
+    await expect(keys.initialize({ asAuthority: true, passphrase: '' })).rejects.toMatchObject({ code: 'bad_request' })
+    await keys.initialize({ asAuthority: true, passphrase: 'correct phrase' })
+    expect(keys.state()).toBe('unlocked')
+    expect(keys.encryptedAtRest()).toBe(true)
+    const stored = readFileSync(join(dir, 'net', 'keys.json')).toString()
+    expect(JSON.parse(stored).mode).toBe('passphrase')
+    expect(stored).not.toContain('PRIVATE KEY')
+    const reopened = new FileKeyStore(dir, { codec: refused })
+    expect(reopened.state()).toBe('locked')
+    await reopened.unlock('correct phrase')
+    expect(reopened.nodeKeys()).toEqual(keys.nodeKeys())
+  })
+
+  it('protects new keys with a given passphrase even when the vault works', async () => {
+    const dir = profile(),
+      keys = new FileKeyStore(dir, { codec: vault().codec })
+    await keys.initialize({ asAuthority: false, passphrase: 'joiner phrase' })
+    expect(JSON.parse(readFileSync(join(dir, 'net', 'keys.json')).toString()).mode).toBe('passphrase')
+    expect(keys.vaultUnavailable()).toBe(false)
+  })
+
   it('authenticates encrypted recovery, preserves same root and does not replace another identity', async () => {
     const keys = new FileKeyStore(profile(), { codec: noVault })
     await keys.initialize({ asAuthority: true })

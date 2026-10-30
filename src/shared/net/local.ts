@@ -150,6 +150,11 @@ export interface NetStatus {
     detail?: string
   }>
   protected?: boolean
+  /**
+   * The system keychain refused to protect network keys (it is missing, or access was denied). Until
+   * Mousse restarts, only a passphrase can protect them.
+   */
+  vaultUnavailable?: boolean
   self?: { node: NodeId; user: UserId; isAuthority: boolean }
   rosterState?: RosterState
   routes: Route[]
