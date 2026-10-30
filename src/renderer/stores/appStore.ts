@@ -137,7 +137,7 @@ interface AppState {
   /** The bound profile's shortcut overrides (`settings.shortcuts`). Not persisted here; the daemon owns them. */
   shortcuts: ShortcutOverrides
   setShortcuts: (shortcuts: ShortcutOverrides) => void
-  /** The Search threads dialog, opened from the rail's menu, the threads sidebar and its shortcut. */
+  /** The Search threads dialog, opened from the threads sidebar, the command palette and its shortcut. */
   threadSearchOpen: boolean
   setThreadSearchOpen: (open: boolean) => void
   /** The command palette. Not persisted. */

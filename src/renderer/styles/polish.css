@@ -874,7 +874,6 @@ html .chat-dialog .chat-primary-button {
 
 /* ---------- Floating surfaces ---------- */
 html .threads-context-menu,
-html .navigation-rail-menu,
 html .composer-workspace-menu {
   border: 1px solid var(--ui-line-strong);
   border-radius: var(--ui-menu-radius);
@@ -882,7 +881,6 @@ html .composer-workspace-menu {
 }
 
 html .threads-context-menu-item,
-html .navigation-rail-menu button,
 html .composer-workspace-menu .composer-workspace-menu-item {
   min-height: 30px;
   padding: 5px var(--ui-menu-row-x);
@@ -891,7 +889,6 @@ html .composer-workspace-menu .composer-workspace-menu-item {
 }
 
 html .threads-context-menu-item:hover,
-html .navigation-rail-menu button:hover,
 html .composer-workspace-menu-item:hover,
 html .composer-workspace-menu-item:focus {
   background: var(--ui-hover);
@@ -989,7 +986,6 @@ html .thread-hover-card {
 }
 
 html .threads-context-menu,
-html .navigation-rail-menu,
 html .composer-workspace-menu {
   box-shadow: var(--ui-specular), var(--ui-menu-drop);
 }
