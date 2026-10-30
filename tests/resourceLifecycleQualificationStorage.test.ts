@@ -25,10 +25,15 @@ it('repeated multi-task trash and restore retains sole-copy workspace bytes with
     expect(baseline.materializedBytes).toBeGreaterThan(10 * 1024)
     for (let cycle = 0; cycle < 3; cycle++) {
       for (const task of tasks) await f.rpc.request('threads.trash', { threadId: task.id })
+      // Uncommitted files no longer keep a checkout: trash retires each one into a pinned snapshot.
+      expect(checkoutStorageSnapshot(repo).materializedCheckouts).toBe(0)
       for (const task of tasks) {
-        expect(measureTree(task.workspace, new Set(['.git']))).toEqual(task.contents)
         await f.rpc.request('threads.restore', { threadId: task.id })
         expect((await f.rpc.request<{ thread: Thread }>('threads.get', { threadId: task.id })).thread.id).toBe(task.id)
+        // The checkout comes back at the same path from its snapshot, with the same sole-copy bytes.
+        const resolved = await new WorkspaceResolver(f.services.threads.getThreadDir(task.id), task.id, repo).resolve('agent')
+        expect(resolved.workspacePath).toBe(task.workspace)
+        expect(measureTree(task.workspace, new Set(['.git']))).toEqual(task.contents)
       }
       const current = checkoutStorageSnapshot(repo)
       expect(current.materializedCheckouts).toBe(baseline.materializedCheckouts)
