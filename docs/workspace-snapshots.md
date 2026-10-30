@@ -186,7 +186,7 @@ The refusal is a `SnapshotRefusedError` with a message the person can read ("Und
 
 - At turn start, the turn runs without snapshots. Its conversation is recorded alone (a conversation action), carrying the message as its `notice`, so Undo of that turn takes back the conversation and says why the files stay. The reason is kept in `snapshot-workspace.json` (`off`) and cleared by the next turn that can take a snapshot.
 - If the folder grows past a limit while the turn runs, the turn is recorded without its files: it ends where it started, cannot be undone, and carries the reason in `notice` and an external effect.
-- Any other failure to start (a nested repository with no commit that `git add` cannot index, an unreadable folder) is handled the same way, with `Undo is off for this folder: <what Git said>`.
+- Any other failure to start (an unreadable folder) is handled the same way, with `Undo is off for this folder: <what Git said>`. A nested repository with no commit is left out of the snapshot, as in a worktree, so it does not turn Undo off.
 
 ### Admission and turns
 
@@ -224,7 +224,6 @@ Refused or absent, as before: Publish (`workspace_not_ready`), push, forks and b
 
 ### Known limits
 
-- A folder that holds a nested repository with no commit makes `git add` fail, as it does in a worktree; the turn runs with Undo off for that folder and says why.
 - Nested repositories with commits are recorded as links, not read.
 - A store only shrinks when a receipt expires or a thread or project goes. A deleted thread whose purge never ran leaves its store until the profile's data is cleaned by hand.
 - The three-way restore protects another thread's edits, not its running turn's: Undo waits for it (the gate refuses), but the two turns' edits to one file are not separated.

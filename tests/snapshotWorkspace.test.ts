@@ -137,6 +137,22 @@ describe('a project without Git', () => {
     expect(git(work, 'status', '--porcelain')).toBe('?? a.txt')
   })
 
+  it('leaves a nested repository with no commit out of the snapshot instead of turning Undo off', async () => {
+    const work = folder('work')
+    write(work, 'a.txt', 'a\n')
+    const t = thread('a', work, 'project-1')
+    const { action } = await t.turn('turn', () => {
+      write(work, 'b.txt', 'b\n')
+      git(folder('work/tool'), 'init', '-q'); write(work, 'tool/x.txt', 'x\n')
+    })
+    expect(action).toMatchObject({ state: 'completed', reversible: true })
+    expect(action.notice).toBeUndefined()
+    expect(t.store('ls-tree', '-r', '--name-only', action.endSha).split('\n')).toEqual(['a.txt', 'b.txt'])
+    await t.undo()
+    expect(existsSync(join(work, 'b.txt'))).toBe(false)
+    expect(readFileSync(join(work, 'tool', 'x.txt'), 'utf8')).toBe('x\n')
+  })
+
   it('records the user’s own edits between turns as an action of theirs, which Undo of the turn leaves alone', async () => {
     const work = folder('work')
     const t = thread('a', work, 'project-1')
