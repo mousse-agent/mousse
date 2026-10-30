@@ -30,6 +30,11 @@ export function unprovisionedContext(threadId: string, projectPath: string, gitB
   }
 }
 
+/** Whether a turn in `mode` changes files, so it is the kind that is recorded and can be undone. */
+export function modeMutatesFiles(mode: ChatMode): boolean {
+  return mode === 'agent' || mode === 'build' || (typeof mode === 'object' && 'skillId' in mode)
+}
+
 export class WorkspaceResolver {
   constructor(
     private readonly threadDirectory: string,
@@ -44,7 +49,7 @@ export class WorkspaceResolver {
     heldThreadLease?: ThreadLeaseHandle
   ): Promise<WorkspaceExecutionContext> {
     const manager = new ThreadWorkspaceManager(this.threadDirectory)
-    const mutating = mode === 'agent' || mode === 'build' || (typeof mode === 'object' && 'skillId' in mode)
+    const mutating = modeMutatesFiles(mode)
     const existing = manager.load()
     if (existing) {
       if (existing.lifecycle !== 'ready') throw workspaceErrors.create('workspace_recovery_required', undefined, { state: existing.lifecycle })

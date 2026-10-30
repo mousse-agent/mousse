@@ -4,6 +4,7 @@ import { dirname, join, resolve } from 'node:path'
 import simpleGit, { type SimpleGit, type SimpleGitOptions } from 'simple-git'
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
 import { NO_HOOKS_PATH } from './gitNullDevice'
+import { activeHiddenStore, hiddenStoreEnv } from './hiddenStore'
 import { isTrustedRepoEntry, readRepoTrust, repoTrustPath, TRUSTED_FILTER_KEY, writeRepoTrust, type RepoTrustRecord } from './repoTrust'
 
 /**
@@ -430,7 +431,9 @@ export function guardedSimpleGit(cwd: string, options: Partial<Omit<SimpleGitOpt
       return (...parameters: unknown[]) => {
         // Only `raw` takes free-form arguments; every other method used here only reads.
         const args = key === 'raw' ? parameters.flat().filter((value): value is string => typeof value === 'string') : []
-        const instance = forCommand(args).env(repoProgramEnv()) as unknown as Record<string, (...values: unknown[]) => unknown>
+        // Inside a hidden store's scope (snapshot review) the command goes through the store; nowhere else is a folder's Git redirected.
+        const store = activeHiddenStore(cwd)
+        const instance = forCommand(args).env(repoProgramEnv(store ? { ...process.env, ...hiddenStoreEnv(store) } : undefined)) as unknown as Record<string, (...values: unknown[]) => unknown>
         return instance[key]!(...parameters)
       }
     }

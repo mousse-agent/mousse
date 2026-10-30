@@ -3,7 +3,7 @@ import { createReadStream } from 'node:fs'
 import { lstat, open, readlink, realpath } from 'node:fs/promises'
 import { dirname, isAbsolute, join, relative } from 'node:path'
 import { leavesFolder } from '../files/pathGuard'
-import { guardedSimpleGit, NO_DIFF_PROGRAMS, repoProgramEnv, withoutRepoPrograms } from './repoPrograms'
+import { guardedSimpleGit, NO_DIFF_PROGRAMS, repoProgramEnv } from './repoPrograms'
 import {
   EMPTY_TREE_SHA,
   REVIEW_MAX_COUNTED_UNTRACKED,
@@ -17,7 +17,8 @@ import {
   type ReviewRange,
   type ReviewSide
 } from '../../shared/review'
-import { tryGit } from '../actions/git'
+import { guarded, tryGit } from '../actions/git'
+import { inSnapshotScope } from './hiddenStore'
 
 /** Git's own heuristic: a NUL byte in the first 8 KB means the file is binary. */
 const BINARY_SNIFF_BYTES = 8192
@@ -113,7 +114,7 @@ export function parseNumstatZ(output: string): NumstatEntry[] {
 
 function hashEmptyTree(cwd: string): Promise<string> {
   return new Promise((resolve, reject) => {
-    const child = execFile('git', withoutRepoPrograms(cwd, ['hash-object', '-t', 'tree', '--stdin']), { cwd, env: repoProgramEnv(), encoding: 'utf8' }, (error, stdout) => {
+    const child = execFile('git', guarded(cwd, ['hash-object', '-t', 'tree', '--stdin']), { cwd, env: repoProgramEnv(), encoding: 'utf8' }, (error, stdout) => {
       if (error) reject(error)
       else resolve(stdout.trim())
     })
@@ -129,7 +130,7 @@ export async function emptyTreeSha(cwd: string): Promise<string> {
 
 /** Whether a commit object is still in the repository, for example after a receipt's refs were released. */
 export function commitExists(cwd: string, sha: string): boolean {
-  return tryGit(cwd, ['cat-file', '-e', `${sha}^{commit}`]).ok
+  return inSnapshotScope(cwd, () => tryGit(cwd, ['cat-file', '-e', `${sha}^{commit}`]).ok)
 }
 
 /** The range for the working tree: HEAD to index when staged, index to working tree otherwise. */
@@ -209,8 +210,15 @@ async function forEachLimited<T>(items: T[], limit: number, work: (item: T) => P
   }))
 }
 
-/** Changed files of a range with status and counts. Counts are total: no whitespace flag is passed. */
-export async function listChangedFiles(cwd: string, range: ReviewRange, options: ListChangedFilesOptions = {}): Promise<ChangedFiles> {
+/**
+ * Changed files of a range with status and counts. Counts are total: no whitespace flag is passed. A folder whose
+ * snapshots live in a hidden store is read through it (a turn of a project without Git).
+ */
+export function listChangedFiles(cwd: string, range: ReviewRange, options: ListChangedFilesOptions = {}): Promise<ChangedFiles> {
+  return inSnapshotScope(cwd, () => listChangedFilesIn(cwd, range, options))
+}
+
+async function listChangedFilesIn(cwd: string, range: ReviewRange, options: ListChangedFilesOptions): Promise<ChangedFiles> {
   const revision = await revisionArgs(cwd, range)
   if (revision === null) return { files: [], truncated: false, mergeCommits: 0 }
   const git = guardedSimpleGit(cwd)
@@ -367,7 +375,11 @@ async function readSide(cwd: string, side: ReviewSide | null, path: string): Pro
 }
 
 /** Both sides of one file. A rename's original side is read at `oldPath`. */
-export async function readFileVersions(cwd: string, range: ReviewRange, path: string, oldPath?: string): Promise<ReviewFileResult> {
+export function readFileVersions(cwd: string, range: ReviewRange, path: string, oldPath?: string): Promise<ReviewFileResult> {
+  return inSnapshotScope(cwd, () => readFileVersionsIn(cwd, range, path, oldPath))
+}
+
+async function readFileVersionsIn(cwd: string, range: ReviewRange, path: string, oldPath?: string): Promise<ReviewFileResult> {
   for (const candidate of [path, oldPath]) {
     if (candidate !== undefined && (isAbsolute(candidate) || candidate.split(/[\\/]/).includes('..'))) throw new Error('Path is outside the review root')
   }

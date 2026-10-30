@@ -1,16 +1,22 @@
 import { spawnSync } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
-import { copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
-import { join, resolve } from 'node:path'
+import { copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { homedir } from 'node:os'
+import { join, parse, resolve, sep } from 'node:path'
 import type { GitRecord } from '../../shared/threadActions'
+import { activeHiddenStore } from '../git/hiddenStore'
 import { repoProgramEnv } from '../git/repoPrograms'
-import { git, mergeTrees, MOUSSE_COMMIT_ENV, NOT_MOUSSE, operationInProgress, tryGit, treeOf } from './git'
+import { git, guarded, mergeTrees, MOUSSE_COMMIT_ENV, NOT_MOUSSE, operationInProgress, tryGit, treeOf } from './git'
 
 /**
  * Workspace snapshots (docs/workspace-snapshots.md): a commit whose tree is every file of a worktree (tracked and
  * untracked, never ignored files or `.mousse/`), built with a private index so that HEAD, the branches, the real
  * index and the files are never touched. Its parent is the worktree's HEAD, so it is reachable from nowhere until a
  * ref under `refs/mousse/` pins it.
+ *
+ * A folder with no Git Mousse may use has its snapshots in a hidden store instead (`inHiddenStore`): the same
+ * commands run with `--git-dir` and `--work-tree`, the store's own index is the persistent one, and a snapshot has no
+ * parent because there is no HEAD.
  */
 export interface Snapshot {
   sha: string
@@ -34,7 +40,97 @@ const SUBJECT = 'mousse snapshot: '
 
 interface LastSnapshot { sha: string; tree: string; head?: string }
 
+/** What a hidden store refuses to snapshot, so that a folder too large to walk quickly never slows or fails a turn. */
+export interface SnapshotLimits {
+  /** Files in a snapshot. */
+  files: number
+  /** Their total size. */
+  bytes: number
+  /** One file's size. */
+  fileBytes: number
+}
+
+const DEFAULT_LIMITS: SnapshotLimits = { files: 50_000, bytes: 1024 ** 3, fileBytes: 50 * 1024 ** 2 }
+let limits: SnapshotLimits = { ...DEFAULT_LIMITS }
+
+/** For tests: the limits a hidden store applies. No argument restores the defaults. */
+export function configureSnapshotLimits(next: Partial<SnapshotLimits> = {}): void {
+  limits = { ...DEFAULT_LIMITS, ...next }
+}
+
+/** Snapshots are off for this folder: the reason is for the person, and the turn that met it carries on without them. */
+export class SnapshotRefusedError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'SnapshotRefusedError'
+  }
+}
+
+function canonicalPath(path: string): string {
+  const resolved = resolve(path)
+  try { return realpathSync.native(resolved) } catch { return resolved }
+}
+
+/**
+ * A folder that must never be snapshotted: the filesystem root, the home folder, or a folder that holds it. A project
+ * there would put someone's whole account in a store.
+ */
+export function isUnsafeSnapshotRoot(path: string, home = homedir()): boolean {
+  const target = canonicalPath(path)
+  if (target === parse(target).root) return true
+  const user = canonicalPath(home)
+  return user === target || user.startsWith(target.endsWith(sep) ? target : `${target}${sep}`)
+}
+
+const UNSAFE_ROOT = 'Undo is off for this folder because it is a home or system folder.'
+
+function sizeText(bytes: number): string {
+  return bytes >= 1024 ** 3 ? `${Math.round(bytes / 1024 ** 3)} GB` : `${Math.round(bytes / 1024 ** 2)} MB`
+}
+
+/** The files a snapshot would hold, as `git add -A` finds them: tracked by the store's index, or new and not ignored. */
+function candidateFiles(top: string): string[] {
+  const result = spawnSync('git', guarded(top, ['ls-files', '-z', '--cached', '--others', '--exclude-standard']), {
+    cwd: top, encoding: 'utf8', env: repoProgramEnv(), maxBuffer: 32 * 1024 * 1024, timeout: 60_000
+  })
+  const code = (result.error as NodeJS.ErrnoException | undefined)?.code
+  // A listing that does not fit, or does not end in a minute, is a folder past the limit.
+  if (code === 'ENOBUFS' || code === 'ETIMEDOUT') throw new SnapshotRefusedError(`Undo is off for this folder because it is too large (more than ${limits.files.toLocaleString('en-US')} files).`)
+  if (result.error || result.status !== 0) throw new Error((result.stderr ?? '').trim() || 'git ls-files failed')
+  return result.stdout.split('\0').filter(Boolean)
+}
+
+/**
+ * Refuses a hidden store's folder that is a home or system folder, or past a limit, before anything is added to the
+ * store. The walk is the one `git add -A` makes next, so Git's own ignore rules decide what counts.
+ */
+function assertSnapshotable(top: string): void {
+  if (isUnsafeSnapshotRoot(top)) throw new SnapshotRefusedError(UNSAFE_ROOT)
+  const files = candidateFiles(top)
+  if (files.length > limits.files) throw new SnapshotRefusedError(`Undo is off for this folder because it is too large (more than ${limits.files.toLocaleString('en-US')} files).`)
+  let total = 0
+  for (const path of files) {
+    let size: number
+    try {
+      const info = lstatSync(join(top, path))
+      // A directory here is a nested repository, kept as a link and not read.
+      if (!info.isFile()) continue
+      size = info.size
+    } catch { continue }
+    if (size > limits.fileBytes) throw new SnapshotRefusedError(`Undo is off for this folder because it is too large (${path} is over ${sizeText(limits.fileBytes)}).`)
+    total += size
+    if (total > limits.bytes) throw new SnapshotRefusedError(`Undo is off for this folder because it is too large (more than ${sizeText(limits.bytes)}).`)
+  }
+}
+
 function privateFiles(top: string): { directory: string; index: string; last: string } {
+  const store = activeHiddenStore(top)
+  if (store) {
+    // The store has no worktree index of anyone's, so its own is the persistent one: `git diff` against the folder reads it.
+    const directory = join(store.gitDir, 'mousse')
+    mkdirSync(directory, { recursive: true })
+    return { directory, index: join(store.gitDir, 'index'), last: join(directory, 'snapshot-last.json') }
+  }
   // `--git-path` keeps names Git doesn't know in the worktree's own Git directory, so each linked worktree has its own.
   const directory = resolve(top, git(top, ['rev-parse', '--git-path', 'mousse']))
   mkdirSync(directory, { recursive: true })
@@ -42,6 +138,8 @@ function privateFiles(top: string): { directory: string; index: string; last: st
 }
 
 function headOf(top: string): string | undefined {
+  // A hidden store has no HEAD, whatever the folder's own repository says.
+  if (activeHiddenStore(top)) return undefined
   return tryGit(top, ['rev-parse', '--verify', '-q', 'HEAD^{commit}']).stdout || undefined
 }
 
@@ -63,8 +161,11 @@ function nestedRepositoriesWithoutCommit(top: string, env: NodeJS.ProcessEnv): s
  * Git's stat cache keeps the next one fast; a missing, locked or corrupt one is rebuilt from HEAD.
  */
 function indexTree(top: string, index: string, head: string | undefined): string {
+  const hidden = activeHiddenStore(top) !== undefined
+  if (hidden) assertSnapshotable(top)
   const env = { GIT_INDEX_FILE: index }
-  const add = (skipped: string[]) => git(top, ['add', '-A', '--', '.', NOT_MOUSSE, ...skipped.map((path) => `:(exclude,literal)${path}`)], env)
+  // The store's exclude list already leaves `.mousse/` out, and Git refuses an exclusion that names an ignored path.
+  const add = (skipped: string[]) => git(top, ['add', '-A', '--', '.', ...(hidden ? [] : [NOT_MOUSSE]), ...skipped.map((path) => `:(exclude,literal)${path}`)], env)
   const attempt = (): string => {
     if (!existsSync(index)) git(top, head ? ['read-tree', head] : ['read-tree', '--empty'], env)
     try {
@@ -74,6 +175,8 @@ function indexTree(top: string, index: string, head: string | undefined): string
       if (!skipped.length) throw error
       add(skipped)
     }
+    // A `.gitignore` of the folder's that takes `.mousse/` back in is answered by dropping it from the index.
+    if (hidden && existsSync(join(top, '.mousse'))) git(top, ['rm', '-r', '--cached', '--ignore-unmatch', '-q', '--', '.mousse'], env)
     return git(top, ['write-tree'], env)
   }
   try {
@@ -106,7 +209,8 @@ export function takeSnapshot(cwd: string, input: SnapshotInput): Snapshot {
   const files = privateFiles(top)
   const head = headOf(top)
   const tree = indexTree(top, files.index, head)
-  const branch = tryGit(top, ['branch', '--show-current']).stdout || undefined
+  const hidden = activeHiddenStore(top) !== undefined
+  const branch = hidden ? undefined : tryGit(top, ['branch', '--show-current']).stdout || undefined
   const operation = operationInProgress(top)
   const state = { tree, ...(head ? { head } : {}), ...(branch ? { branch } : {}), ...(operation ? { operationInProgress: operation } : {}) }
   const previous = readLast(files.last)

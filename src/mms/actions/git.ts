@@ -6,6 +6,17 @@ import { copyFileSync, existsSync, rmSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { filterRefusal, repoProgramEnv, withoutRepoPrograms } from '../git/repoPrograms'
 import { IN_PROGRESS_GIT_MARKERS } from '../git/gitMarkers'
+import { activeHiddenStore, hiddenStoreArgs } from '../git/hiddenStore'
+
+/**
+ * `args` as Mousse's own commands run them: no repository program, and, for a folder whose snapshots live in a hidden
+ * store (see `inHiddenStore`), through that store instead of a repository of the folder's own.
+ */
+export function guarded(cwd: string, args: string[]): string[] {
+  const store = activeHiddenStore(cwd)
+  const safe = withoutRepoPrograms(cwd, args)
+  return store ? [...hiddenStoreArgs(store), ...safe] : safe
+}
 
 /**
  * Git for Mousse's own actions (checkpoints, restore, undo, revert): no program the repository
@@ -14,7 +25,7 @@ import { IN_PROGRESS_GIT_MARKERS } from '../git/gitMarkers'
  */
 export function git(cwd: string, args: string[], env?: NodeJS.ProcessEnv): string {
   try {
-    return execFileSync('git', withoutRepoPrograms(cwd, args), {
+    return execFileSync('git', guarded(cwd, args), {
       cwd,
       env: repoProgramEnv(env ? { ...process.env, ...env } : process.env),
       encoding: 'utf8',
@@ -28,13 +39,13 @@ export function git(cwd: string, args: string[], env?: NodeJS.ProcessEnv): strin
 }
 
 export function tryGit(cwd: string, args: string[], env?: NodeJS.ProcessEnv): { ok: boolean; stdout: string; stderr: string } {
-  let guarded: string[]
+  let safe: string[]
   try {
-    guarded = withoutRepoPrograms(cwd, args)
+    safe = guarded(cwd, args)
   } catch (error) {
     return { ok: false, stdout: '', stderr: error instanceof Error ? error.message : String(error) }
   }
-  const result = spawnSync('git', guarded, { cwd, encoding: 'utf8', env: repoProgramEnv(env ? { ...process.env, ...env } : process.env) })
+  const result = spawnSync('git', safe, { cwd, encoding: 'utf8', env: repoProgramEnv(env ? { ...process.env, ...env } : process.env) })
   const stderr = result.stderr.trim()
   return { ok: result.status === 0, stdout: result.stdout.trim(), stderr: (result.status !== 0 && filterRefusal(stderr)) || stderr }
 }
@@ -52,7 +63,7 @@ export const NOT_MOUSSE = `:(exclude)${MOUSSE_DIRECTORY}`
 
 /** Git output exactly as printed (NUL-separated lists keep leading and trailing spaces), optionally fed `input`. */
 function gitRaw(cwd: string, args: string[], env?: NodeJS.ProcessEnv, input?: string): string {
-  const result = spawnSync('git', withoutRepoPrograms(cwd, args), { cwd, encoding: 'utf8', input, env: repoProgramEnv(env ? { ...process.env, ...env } : process.env) })
+  const result = spawnSync('git', guarded(cwd, args), { cwd, encoding: 'utf8', input, env: repoProgramEnv(env ? { ...process.env, ...env } : process.env) })
   if (result.status !== 0) {
     const stderr = (result.stderr ?? '').trim()
     throw new Error(filterRefusal(stderr) || stderr || `git ${args[0]} failed`)
@@ -73,6 +84,9 @@ export interface PendingChanges {
 
 /** What is pending in a checkout, read from the top of the repository. */
 export function inspectPendingChanges(cwd: string): PendingChanges {
+  // A hidden store has no index of the person's, no merge and no rebase: nothing in it waits for them.
+  const store = activeHiddenStore(cwd)
+  if (store) return { top: store.workTree, files: [], unmerged: [] }
   const top = git(cwd, ['rev-parse', '--show-toplevel'])
   const entries = gitRaw(top, ['status', '--porcelain=v2', '-z', '--untracked-files=all']).split('\0')
   const files: string[] = []
@@ -93,6 +107,7 @@ export function inspectPendingChanges(cwd: string): PendingChanges {
 
 /** The merge, revert, cherry-pick or rebase that waits for the user in a checkout, if any. */
 export function operationInProgress(cwd: string): PendingChanges['operation'] {
+  if (activeHiddenStore(cwd)) return undefined
   for (const marker of IN_PROGRESS_GIT_MARKERS) {
     const resolved = tryGit(cwd, ['rev-parse', '--git-path', marker])
     if (resolved.ok && existsSync(resolve(cwd, resolved.stdout))) return OPERATION_OF[marker]
@@ -138,6 +153,7 @@ export function pendingChangesError(cwd: string, label: string, options: Pending
 
 /** For checks after Mousse's own steps (an aborted merge, a worker's result): any change is refused. */
 export function requireClean(cwd: string, label: string): void {
+  if (activeHiddenStore(cwd)) return
   const status = git(cwd, ['status', '--porcelain=v2', '--untracked-files=all'])
   if (status) throw pendingChangesError(cwd, label)
 }
