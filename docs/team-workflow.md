@@ -4,7 +4,7 @@ GitHub records work intended for the shared codebase: meaningful tasks, ownershi
 
 ## Using the skills
 
-The repository contains two shared skills under `.agents/skills/`: `work` and `end-session`. Simply describe what to implement or resume; `work` automatically handles coordination, checkpoints, verification, and PR preparation. Skill names are optional. Only an explicit request to end the session triggers `end-session`; normal task completion and casual goodbyes do not. `AGENTS.md` routes these requests to the same files even for clients that do not automatically discover this directory.
+The repository contains three shared workflow skills under `.agents/skills/`: `work`, `check-related-work` and `end-session`. Simply describe what to implement or resume; `work` automatically handles coordination, checkpoints, verification, and PR preparation. Skill names are optional. `check-related-work` runs before a plan is presented as final or a substantial implementation starts, and reports open and merged work that overlaps it. Only an explicit request to end the session triggers `end-session`; normal task completion and casual goodbyes do not. `AGENTS.md` routes these requests to the same files even for clients that do not automatically discover this directory.
 
 Clients must load this checkout's project instructions. OpenCode discovery has been verified; Grok's inspector suppresses project instructions and skills in an untrusted checkout, so its discovery must be checked after the user trusts the project through the normal client UI.
 
