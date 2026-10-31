@@ -756,7 +756,7 @@ describe('agent access over the Mousse MCP server', () => {
       return 'Done.'
     })
     await attach()
-    expect((d.orch as unknown as { settingsStore: { get(): { agentAccess: unknown } } }).settingsStore.get().agentAccess).toEqual({ level: 'lineage', projectIds: [], answerApprovals: false, computers: [] })
+    expect((d.orch as unknown as { settingsStore: { get(): { agentAccess: unknown } } }).settingsStore.get().agentAccess).toEqual({ level: 'lineage', projectIds: [], answerApprovals: false, remoteSubagents: false, computers: [] })
     await d.orch.send('Hello', false, { threadId: parent.id, clientRequestId: 'hello' })
     expect(credentials.listForThread(parent.id).map((row) => row.accessLevel)).toEqual(['lineage'])
     expect(seen.listed).not.toContain('thread_list')

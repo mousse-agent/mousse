@@ -189,11 +189,26 @@ export function AgentAccessSettings({
           }
         />
       )}
-      {(routed && computers.length > 0) || goneComputers.length > 0 ? (
+      <SettingsRow
+        title="Allow agents to create Subagents on other Devices"
+        htmlFor="agent-access-remote-subagents"
+        description={access.remoteSubagents && !(routed && computers.length > 0) && goneComputers.length === 0
+          ? 'No other computers are connected yet. Pair them in Settings → Devices, then check the ones agents may use.'
+          : 'An agent can start a subagent on another of your computers. It runs there under that computer\'s agents and accounts, in its copy of the repository, at no more than Auto-accept edits and the limit that computer set for this one. Off by default.'}
+        control={
+          <Switch
+            id="agent-access-remote-subagents"
+            label="Allow agents to create Subagents on other Devices"
+            checked={access.remoteSubagents}
+            onChange={(remoteSubagents) => save({ remoteSubagents })}
+          />
+        }
+      />
+      {access.remoteSubagents && ((routed && computers.length > 0) || goneComputers.length > 0) ? (
         <SettingsRow
-          title="Subagents on other computers"
+          title="Computers"
           titleId={computersId}
-          description="An agent can start a subagent on a checked computer. It runs there under that computer's agents and accounts, in its copy of the repository, at no more than Auto-accept edits and the limit that computer set for this one. None are checked at first."
+          description="Agents can start subagents only on the checked computers. None are checked at first."
         >
           <div role="group" aria-labelledby={computersId} className="agent-access-projects" onKeyDown={moveFocus}>
             {computers.map((computer) =>

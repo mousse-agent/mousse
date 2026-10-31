@@ -5305,8 +5305,8 @@ export class OrchestratorService extends EventEmitter {
     if (!found.ok) return refuse(found.code, found.message, found.extra)
     const computer = found.computer
     if (!prior) {
-      if (!this.agentAccessSettings().computers.includes(computer.node))
-        return refuse('computer_not_allowed', `The user has not allowed agents to start subagents on ${computer.name}. They can allow it in Settings → Agents → Agent access.`)
+      const denied = this.remoteSubagentDenial(computer.node, computer.name)
+      if (denied) return refuse(denied.code, denied.message)
       if (!computer.online) return refuse('computer_offline', `${computer.name} is offline.`)
       if (Boolean(input.model?.trim()) !== Boolean(input.instanceId?.trim() || input.provider?.trim()))
         return refuse('selection_incomplete', `On another computer an agent is named with its model: pass both instanceId and model, or leave both out to use ${computer.name}'s default.`)
@@ -5389,6 +5389,19 @@ export class OrchestratorService extends EventEmitter {
     }
   }
 
+  /**
+   * Why an agent may not start a subagent on `node` now (issue #469): the switch in Agent access is off, or
+   * that computer is not checked under it. Undefined when it may.
+   */
+  private remoteSubagentDenial(node: string, name: string): { code: string; message: string } | undefined {
+    const access = this.agentAccessSettings()
+    if (!access.remoteSubagents)
+      return { code: 'remote_subagents_off', message: 'The user has not allowed agents to create subagents on other devices. They can turn it on in Settings → Agents → Agent access.' }
+    if (!access.computers.includes(node))
+      return { code: 'computer_not_allowed', message: `The user has not allowed agents to start subagents on ${name}. They can allow it in Settings → Agents → Agent access.` }
+    return undefined
+  }
+
   /** The computer `ref` names among the user's other computers: its id, or its name (any case). */
   private findComputer(ref: string):
     | { ok: true; computer: { node: string; name: string; online: boolean } }
@@ -5412,7 +5425,10 @@ export class OrchestratorService extends EventEmitter {
   private async listComputers(parentThreadId: string) {
     if (!this.remoteSubagents || !this.remoteComputers)
       return { computers: [], note: 'This computer is not connected to the user\'s other computers.' }
-    const allowed = new Set(this.agentAccessSettings().computers)
+    const access = this.agentAccessSettings()
+    if (!access.remoteSubagents)
+      return { computers: [], note: 'The user has not allowed agents to create subagents on other devices (Settings → Agents → Agent access).' }
+    const allowed = new Set(access.computers)
     const projectId = this.threadStore?.getThread(parentThreadId)?.projectId
     const projectPath = projectId ? this.projectManager?.getProject(projectId)?.path : undefined
     const port = this.remoteComputers
@@ -5602,8 +5618,8 @@ export class OrchestratorService extends EventEmitter {
       const open = bindings.find((binding) => binding.state === 'starting' || binding.state === 'running')
       if (open?.waitingInput) return refuse('needs_answer', `"${target.title}" is waiting for an answer on ${name}; the user answers it there.`)
       if (open) return refuse('subagent_busy', `"${target.title}" is still working on ${name}. Wait for its result, then continue it.`)
-      if (!this.agentAccessSettings().computers.includes(first.node))
-        return refuse('computer_not_allowed', `The user no longer allows agents to start subagents on ${name}.`)
+      const denied = this.remoteSubagentDenial(first.node, name)
+      if (denied) return refuse(denied.code, denied.message)
       if (!remote.computers().find((computer) => computer.node === first.node)?.online) return refuse('computer_offline', `${name} is offline.`)
     }
     const tasks = engine.delegations.listForChildThread(target.childThreadId)

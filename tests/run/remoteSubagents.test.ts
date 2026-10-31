@@ -83,10 +83,10 @@ describe('remote subagents (issue #469)', () => {
   const world = useSubagentWorld()
 
   /** A world whose parent may start subagents on the fake Mac. */
-  const remoteWorld = (options: { allow?: boolean } = {}) => {
+  const remoteWorld = (options: { on?: boolean; allow?: boolean } = {}) => {
     const w = world()
     const mac = new FakeComputer()
-    w.d.settings.agentAccess = { level: 'lineage', projectIds: [], answerApprovals: false, computers: options.allow === false ? [] : [MAC] }
+    w.d.settings.agentAccess = { level: 'lineage', projectIds: [], answerApprovals: false, remoteSubagents: options.on !== false, computers: options.allow === false ? [] : [MAC] }
     w.d.orch.setRemoteComputers(mac)
     const service = (w.d.orch as unknown as { remoteSubagents: RemoteSubagents }).remoteSubagents
     // The tests move the tasks along themselves.
@@ -140,9 +140,12 @@ describe('remote subagents (issue #469)', () => {
     expect(messages.map((message) => message.role)).toEqual(['user', 'assistant'])
   })
 
-  it('refuses before anything exists: a computer the user did not allow, an unknown one, one that is offline', async () => {
-    const { d, parent, steps, out, say, mac, startOnMac } = remoteWorld({ allow: false })
+  it('refuses before anything exists: the switch off, a computer the user did not allow, an unknown one, one that is offline', async () => {
+    const { d, parent, steps, out, say, mac, startOnMac } = remoteWorld({ on: false, allow: false })
     steps['go'] = async (tools) => {
+      out.off = await startOnMac(tools, 'O')
+      out.offList = await tools.listComputers() as Json
+      d.settings.agentAccess = { ...d.settings.agentAccess, remoteSubagents: true }
       out.notAllowed = await startOnMac(tools, 'A')
       d.settings.agentAccess = { ...d.settings.agentAccess, computers: [MAC] }
       out.unknown = await startOnMac(tools, 'B', { computer: 'Windows box' })
@@ -152,6 +155,9 @@ describe('remote subagents (issue #469)', () => {
       out.half = await startOnMac(tools, 'E', { model: 'opus' })
     }
     await say('go')
+    expect(out.off).toMatchObject({ started: false, code: 'remote_subagents_off' })
+    expect(out.off.message).toContain('Settings → Agents → Agent access')
+    expect(out.offList).toMatchObject({ computers: [] })
     expect(out.notAllowed).toMatchObject({ started: false, code: 'computer_not_allowed' })
     expect(out.notAllowed.message).toContain('Settings → Agents → Agent access')
     expect(out.unknown).toMatchObject({ started: false, code: 'unknown_computer' })
@@ -289,7 +295,7 @@ describe('remote subagents (issue #469)', () => {
 
   it('without Bridge an agent is told how to connect its computers', async () => {
     const w = world()
-    w.d.settings.agentAccess = { level: 'lineage', projectIds: [], answerApprovals: false, computers: [MAC] }
+    w.d.settings.agentAccess = { level: 'lineage', projectIds: [], answerApprovals: false, remoteSubagents: true, computers: [MAC] }
     w.steps['go'] = async (tools) => { w.out.started = await w.start(tools, 'Mac tester', { computer: MAC, workspace: 'isolated', role: 'implement' }) }
     await w.say('go')
     expect(w.out.started).toMatchObject({ started: false, code: 'remote_unavailable' })
