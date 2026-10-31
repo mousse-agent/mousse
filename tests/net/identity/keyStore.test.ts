@@ -146,7 +146,7 @@ describe('FileKeyStore real key files and restart', () => {
     await expect(keys.initialize({ asAuthority: true, passphrase: '' })).rejects.toMatchObject({ code: 'bad_request' })
     await keys.initialize({ asAuthority: true, passphrase: 'correct phrase' })
     expect(keys.state()).toBe('unlocked')
-    expect(keys.encryptedAtRest()).toBe(true)
+    expect(keys.protectedAtRest()).toBe(true)
     const stored = readFileSync(join(dir, 'net', 'keys.json')).toString()
     expect(JSON.parse(stored).mode).toBe('passphrase')
     expect(stored).not.toContain('PRIVATE KEY')
@@ -162,6 +162,31 @@ describe('FileKeyStore real key files and restart', () => {
     await keys.initialize({ asAuthority: false, passphrase: 'joiner phrase' })
     expect(JSON.parse(readFileSync(join(dir, 'net', 'keys.json')).toString()).mode).toBe('passphrase')
     expect(keys.vaultUnavailable()).toBe(false)
+  })
+
+  it('keeps keys in an owner-only file under a codec that skips the keychain, and a keychain build takes them back', async () => {
+    const dir = profile(),
+      storage = vault(),
+      ownerFile: SecretCodec = { plainAtRest: true, canEncrypt: () => false, encrypt: () => null, decrypt: storage.codec.decrypt },
+      file = join(dir, 'net', 'keys.json'),
+      mode = () => JSON.parse(readFileSync(file).toString()).mode
+    const created = await new FileKeyStore(dir, { codec: storage.codec }).initialize({ asAuthority: true })
+    expect(mode()).toBe('vault')
+    const keys = new FileKeyStore(dir, { codec: ownerFile })
+    expect(keys.state()).toBe('unlocked')
+    expect(keys.nodeKeys()).toEqual(created.node)
+    expect(mode()).toBe('plain')
+    if (process.platform !== 'win32') expect(statSync(file).mode & 0o077).toBe(0)
+    expect(keys.protectedAtRest()).toBe(true)
+    keys.protect()
+    expect(mode()).toBe('plain')
+    const fresh = new FileKeyStore(profile(), { codec: ownerFile })
+    await fresh.initialize({ asAuthority: true })
+    expect(fresh.protectedAtRest()).toBe(true)
+    expect(new FileKeyStore(profile(), { codec: noVault }).protectedAtRest()).toBe(false)
+    const signed = new FileKeyStore(dir, { codec: storage.codec })
+    expect(signed.nodeKeys()).toEqual(created.node)
+    expect(mode()).toBe('vault')
   })
 
   it('authenticates encrypted recovery, preserves same root and does not replace another identity', async () => {

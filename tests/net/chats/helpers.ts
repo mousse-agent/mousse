@@ -67,7 +67,7 @@ export async function profile(input: { home?: string; profileId?: string; initia
     const rt = services.net.runtime()
     if (rt.identity.self() && rt.keys.state() === 'locked') await services.net.request('net.unlock', { passphrase: 'chats-candidate-fixture-protection' })
     else await services.net.request('net.init', { listen: true })
-    if (input.protect !== false && !rt.keys.encryptedAtRest()) await services.net.request('net.protect', { passphrase: 'chats-candidate-fixture-protection' })
+    if (input.protect !== false && !rt.keys.protectedAtRest()) await services.net.request('net.protect', { passphrase: 'chats-candidate-fixture-protection' })
   }
   const createGroup = async () => {
     const registry = services.platform.agentDefinitions

@@ -83,7 +83,7 @@ export class HostedNetController implements HostedNet {
       state &&
       state.identity.self() &&
       state.keys.state() === 'unlocked' &&
-      state.keys.encryptedAtRest()
+      state.keys.protectedAtRest()
       ? this.service().status()
       : hostedNotConfigured()
   }
@@ -274,7 +274,7 @@ export class HostedNetController implements HostedNet {
     if (
       !this.hostedRelayEnabled() ||
       state?.keys.state() !== 'unlocked' ||
-      !state.keys.encryptedAtRest()
+      !state.keys.protectedAtRest()
     )
       return
     try {
@@ -341,7 +341,7 @@ export class HostedNetController implements HostedNet {
       !this.host.enabled() ||
       !state?.identity.self() ||
       state.keys.state() !== 'unlocked' ||
-      !state.keys.encryptedAtRest()
+      !state.keys.protectedAtRest()
     )
       return
     void this.host
@@ -457,7 +457,7 @@ export class HostedNetController implements HostedNet {
         !this.host.signal.aborted &&
         !!state?.identity.self()?.isAuthority &&
         state.keys.state() === 'unlocked' &&
-        state.keys.encryptedAtRest() &&
+        state.keys.protectedAtRest() &&
         this.service().status().connected
       )
     } catch {

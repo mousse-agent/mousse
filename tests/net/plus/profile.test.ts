@@ -269,7 +269,7 @@ it('keeps the registration renewal at its original time while reconciles repeat'
     const controller = fakeClockController(p, {
       loadedRuntime: () => ({
         identity: { self: () => ({ isAuthority: false }) },
-        keys: { state: () => 'unlocked', encryptedAtRest: () => true }
+        keys: { state: () => 'unlocked', protectedAtRest: () => true }
       }),
       enabled: () => true
     })

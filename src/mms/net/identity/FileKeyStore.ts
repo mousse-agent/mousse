@@ -161,7 +161,10 @@ function material(value: unknown): KeyMaterial {
   }
 }
 
-/** Profile-owned keys. Encryption mode is pinned in the file and never silently downgraded. */
+/**
+ * Profile-owned keys. Encryption mode is pinned in the file and never silently downgraded, except to
+ * an owner-only file under a codec that keeps secrets that way (`plainAtRest`).
+ */
 export class FileKeyStore implements KeyStore {
   private readonly file: string
   private readonly codec: SecretCodec
@@ -203,12 +206,10 @@ export class FileKeyStore implements KeyStore {
       )
         throw new NetError('storage_corrupt')
       if (this.stored.mode === 'plain') {
-        if (this.codec.encryptionRequired)
-          throw new NetError(
-            'keystore_locked',
-            'An Electron vault must explicitly migrate the plaintext key store.'
-          )
-        this.keys = material(this.stored.data)
+        const keys = material(this.stored.data)
+        // A plain file left by a build without the keychain moves into the vault this build requires.
+        if (this.codec.encryptionRequired) this.persist(keys, false, 'vault')
+        this.keys = keys
       } else if (this.stored.mode === 'vault') this.tryVault()
     }
   }
@@ -225,15 +226,20 @@ export class FileKeyStore implements KeyStore {
     return this.vaultRefused
   }
 
-  /** Reports the persisted protection, rather than assuming a headless vault exists. */
-  encryptedAtRest(): boolean {
-    return this.stored?.mode === 'vault' || this.stored?.mode === 'passphrase'
+  /**
+   * Reports the persisted protection, rather than assuming a headless vault exists: encrypted, or an
+   * owner-only plain file kept by design (a macOS build without a stable signature).
+   */
+  protectedAtRest(): boolean {
+    const mode = this.stored?.mode
+    return mode === 'vault' || mode === 'passphrase' || (mode === 'plain' && !!this.codec.plainAtRest)
   }
 
   /** Explicitly protects an unlocked existing profile; a failed write retains its previous mode. */
   protect(passphrase?: string): void {
     const keys = structuredClone(this.required())
     if (passphrase !== undefined && !passphrase) throw new NetError('bad_request')
+    if (passphrase === undefined && this.codec.plainAtRest) return
     if (passphrase === undefined && !this.codec.canEncrypt()) {
       this.vaultRefused = true
       throw new NetError('keystore_locked', 'No encrypted key-store backend is available.')
@@ -457,7 +463,15 @@ export class FileKeyStore implements KeyStore {
   private tryVault(): void {
     if (this.stored?.mode !== 'vault') return
     const plain = this.codec.decrypt(decodeBase64(this.stored.data))
-    if (plain !== null) this.keys = material(parse(Buffer.from(plain)))
+    if (plain === null) return
+    this.keys = material(parse(Buffer.from(plain)))
+    // Saved plain right away, so a later build without the keychain never has to ask for it again.
+    if (this.codec.plainAtRest)
+      try {
+        this.persist(this.keys)
+      } catch {
+        // Stays in the vault until the next change.
+      }
   }
   private mutate(change: (next: KeyMaterial) => void): void {
     const next = structuredClone(this.required())
@@ -560,7 +574,8 @@ export class FileKeyStore implements KeyStore {
   private persist(keys: KeyMaterial, initial = false, protection?: 'vault' | 'passphrase'): void {
     const plain = JSON.stringify(keys)
     let stored: StoredKeys
-    const mode = protection ?? this.stored?.mode
+    const pinned = this.stored?.mode === 'vault' && this.codec.plainAtRest ? undefined : this.stored?.mode,
+      mode = protection ?? pinned
     if (mode === 'vault' || (!mode && this.codec.canEncrypt())) {
       const value = this.codec.encrypt(plain)
       if (!value) {
