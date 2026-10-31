@@ -28,7 +28,7 @@ const subagent = (id: string, state: SubagentState, patch: Partial<SubagentSumma
 describe('collectNeedingInput', () => {
   it('lists the subagents of the thread that ask a question, and nothing else', () => {
     const found = collectNeedingInput({ p: [subagent('a', 'needs_input'), subagent('b', 'working'), subagent('c', 'done')] }, 'p')
-    expect(found).toEqual([{ childThreadId: 'a', title: 'Subagent a', via: null }])
+    expect(found).toEqual([{ childThreadId: 'a', openId: 'a', title: 'Subagent a', via: null }])
   })
 
   it('finds a question asked deeper down, under the subagent of this thread it belongs to', () => {
@@ -36,7 +36,14 @@ describe('collectNeedingInput', () => {
       { p: [subagent('a', 'waiting')], a: [subagent('g', 'needs_input')] },
       'p'
     )
-    expect(found).toEqual([{ childThreadId: 'g', title: 'Subagent g', via: 'Subagent a' }])
+    expect(found).toEqual([{ childThreadId: 'g', openId: 'g', title: 'Subagent g', via: 'Subagent a' }])
+  })
+
+  it('a remote subagent that asks opens its thread on its computer, where it is answered', () => {
+    const computer = { node: 'node-mac', name: 'Studio Mac', online: true, ref: 'node-mac:far-1' }
+    const found = collectNeedingInput({ p: [subagent('a', 'needs_input', { computer })] }, 'p')
+    expect(found).toEqual([{ childThreadId: 'a', openId: 'node-mac:far-1', title: 'Subagent a', via: null, computer: 'Studio Mac' }])
+    expect(needingInputLabel(found[0])).toBe('Subagent a has a question on Studio Mac')
   })
 
   it('does not look under a subagent that has finished, past the depth limit, or around a cycle', () => {
@@ -53,8 +60,8 @@ describe('collectNeedingInput', () => {
   })
 
   it('words a row by the subagent that asks and where it hangs', () => {
-    expect(needingInputLabel({ childThreadId: 'a', title: 'API reviewer', via: null })).toBe('API reviewer has a question')
-    expect(needingInputLabel({ childThreadId: 'g', title: 'Linter', via: 'API reviewer' })).toBe('Linter has a question, via API reviewer')
+    expect(needingInputLabel({ childThreadId: 'a', openId: 'a', title: 'API reviewer', via: null })).toBe('API reviewer has a question')
+    expect(needingInputLabel({ childThreadId: 'g', openId: 'g', title: 'Linter', via: 'API reviewer' })).toBe('Linter has a question, via API reviewer')
   })
 })
 
@@ -62,7 +69,7 @@ describe('the composer banner', () => {
   const html = (props: Parameters<typeof SubagentComposerBannerView>[0]) => renderToStaticMarkup(createElement(SubagentComposerBannerView, props))
 
   it('shows a row that opens the question in the subagent, and hides without one', () => {
-    const shown = html({ asking: [{ childThreadId: 'a', title: 'API reviewer', via: null }], onOpen: () => undefined })
+    const shown = html({ asking: [{ childThreadId: 'a', openId: 'a', title: 'API reviewer', via: null }], onOpen: () => undefined })
     expect(shown).toContain('API reviewer has a question')
     expect(shown).toContain('title="Open API reviewer"')
     expect(html({ asking: [], onOpen: () => undefined })).toBe('')

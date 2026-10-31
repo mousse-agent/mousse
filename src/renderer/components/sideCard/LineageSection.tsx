@@ -3,6 +3,7 @@ import { isRunningSubagent, type SubagentSummary } from '../../../shared/subagen
 import { useSubagents } from '../../hooks/useSubagents'
 import { ChevronRight } from '../../lib/icons'
 import { openThread } from '../../lib/openThread'
+import { ComputerBadgeView } from '../ComputerBadge'
 import { SubagentAvatar, useThreadProviderId } from '../SubagentAvatar'
 import { subagentBadgeTone, subagentIconId } from '../subagentStatus'
 import {
@@ -50,8 +51,8 @@ interface LineageListProps {
   inheritedProvider?: string | null
   open: LineageOpenParts
   onOpenPart: (part: keyof LineageOpenParts, value: boolean) => void
-  /** Opens a subagent's own thread. */
-  onOpen: (childThreadId: string) => void
+  /** Opens a subagent's own thread (a remote subagent's thread on its computer). */
+  onOpen: (threadId: string) => void
   /** Stops the work a running subagent is doing. */
   onStop: (childThreadId: string) => void
 }
@@ -60,7 +61,7 @@ interface LineageRowProps {
   subagent: SubagentSummary
   now: number
   inheritedProvider?: string | null
-  onOpen: (childThreadId: string) => void
+  onOpen: (threadId: string) => void
   onStop: (childThreadId: string) => void
 }
 
@@ -74,12 +75,23 @@ function LineageRow({ subagent, now, inheritedProvider, onOpen, onStop }: Lineag
         type="button"
         className={`lineage-row${running ? ' is-working' : ''}`}
         title={name}
-        onClick={() => onOpen(subagent.childThreadId)}
+        // A remote subagent opens on its computer, where its turns run and its questions are answered.
+        onClick={() => onOpen(subagent.computer?.ref ?? subagent.childThreadId)}
       >
         <SubagentAvatar providerId={subagentIconId(subagent.provider, inheritedProvider)} tone={subagentBadgeTone(subagent)} />
         <span className="lineage-text">
           <span className="lineage-name">{name}</span>
           {model && <span className="lineage-model">{model}</span>}
+          {subagent.computer && (
+            <ComputerBadgeView
+              name={subagent.computer.name}
+              // Offline is how the computer is now, not how the subagent ended: it may still be working there.
+              state={subagent.computer.online ? 'online' : 'offline'}
+              offline={running ? 'Offline · it may still be working there' : 'Offline'}
+              withName
+              className="lineage-computer"
+            />
+          )}
         </span>
         <span className="lineage-status">{lineageStatusLabel(subagent, now)}</span>
       </button>
@@ -199,7 +211,7 @@ export function LineageSection({ threadId }: SideCardSectionContext) {
         inheritedProvider={inheritedProvider}
         open={open}
         onOpenPart={(part, value) => setOpenState({ threadId, parts: { ...open, [part]: value } })}
-        onOpen={(childThreadId) => void openThread(childThreadId)}
+        onOpen={(id) => void openThread(id)}
         onStop={(childThreadId) => void window.mousse.orchestrator.abort(childThreadId)}
       />
     </SideCardSection>

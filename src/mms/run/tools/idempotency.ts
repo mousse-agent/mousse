@@ -20,6 +20,8 @@ export const IDEMPOTENT_TOOLS: ReadonlySet<string> = new Set([
   'list_tasks',
   'list_subagents',
   'list_delegations',
+  // Asks the user's other computers whether they have the repository; changes nothing anywhere.
+  'list_computers',
   // Phase 5 Mousse MCP server (SPEC §15.1).
   'thread_read',
   'queue_list',

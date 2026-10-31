@@ -138,7 +138,7 @@ function start(): () => void {
   const refresh = () => void refreshComputers()
   window.addEventListener('focus', refresh)
   // Net reports a change whenever a device connects or drops.
-  const offNet = window.mousse.net?.onUpdated?.(refresh)
+  const offNet = window.mousse?.net?.onUpdated?.(refresh)
   // The list belongs to one profile.
   const offProfile = useAppStore.subscribe((state, previous) => {
     if (state.profileId === previous.profileId) return
