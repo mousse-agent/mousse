@@ -188,7 +188,7 @@ it.each(['public', 'private'] as const)(
     await member.bridge.spaces.client.join(joinId)
     await member.bridge.spaces.client.connect(created.space)
     await member.bridge.spaces.client.subscribe(channel)
-    expect(member.net.runtime().keys.encryptedAtRest()).toBe(true)
+    expect(member.net.runtime().keys.protectedAtRest()).toBe(true)
     const id = await mention(member, created.space, channel, bot)
     const rt = host.net.runtime()
     await vi.waitFor(

@@ -51,9 +51,11 @@ export function openSecretFile(raw: string, codec: SecretCodec): { value: unknow
 
 /**
  * The stored form of `serialized`. It is encrypted when the codec requires it (Electron), when the
- * vault is available, or when the file was encrypted before: a store never downgrades to plain text.
+ * vault is available, or when the file was encrypted before: a store never downgrades to plain text,
+ * except under a codec that keeps secrets in owner-only files by design (`plainAtRest`).
  */
 export function sealSecretFile(serialized: string, codec: SecretCodec, wasEncrypted: boolean): { stored: string; encrypted: boolean } {
+  if (codec.plainAtRest) return { stored: serialized, encrypted: false }
   let encrypted: Buffer | null = null
   try {
     if (wasEncrypted || codec.encryptionRequired || codec.canEncrypt()) {

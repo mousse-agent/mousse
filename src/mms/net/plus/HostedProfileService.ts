@@ -402,7 +402,7 @@ export class HostedProfileService {
   }
   private guard(): void {
     if (this.options.signal.aborted) throw new NetError('cancelled')
-    if (this.options.keys.state() !== 'unlocked' || !this.options.keys.encryptedAtRest())
+    if (this.options.keys.state() !== 'unlocked' || !this.options.keys.protectedAtRest())
       throw new NetError('keystore_locked')
   }
   private read(): Stored | undefined {

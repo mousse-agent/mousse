@@ -6,7 +6,8 @@ import { createSecretCodec, type SecretCodec } from '../providers/secretCodec'
 /**
  * Secrets of one instance (`<stateDir>/secrets.json`): string values by name, encrypted at rest
  * with the OS vault whenever Electron offers it, under the same rules as the provider credential
- * file. Only the instance's own runtime reads it; the values never reach a snapshot or a log.
+ * file (an owner-only plain file under a `plainAtRest` codec). Only the instance's own runtime reads
+ * it; the values never reach a snapshot or a log.
  */
 
 const ENVELOPE_KEY = '__mousse_encrypted_v1'
@@ -36,7 +37,8 @@ export class InstanceVault {
     } catch {
       throw this.failure('the stored data is invalid')
     }
-    if (parsed && typeof parsed === 'object' && Object.hasOwn(parsed, ENVELOPE_KEY)) {
+    const encrypted = !!parsed && typeof parsed === 'object' && Object.hasOwn(parsed, ENVELOPE_KEY)
+    if (encrypted) {
       const payload = (parsed as Record<string, unknown>)[ENVELOPE_KEY]
       let decrypted: string | null = null
       try {
@@ -53,6 +55,10 @@ export class InstanceVault {
     }
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw this.failure('the stored data is invalid')
     const values = Object.fromEntries(Object.entries(parsed as Record<string, unknown>).filter((entry): entry is [string, string] => typeof entry[1] === 'string'))
+    // Saved plain right away, so a later build without the keychain never has to ask for it again.
+    if (encrypted && this.codec.plainAtRest && Object.keys(values).length) {
+      try { this.write(values) } catch { /* stays encrypted until the next save */ }
+    }
     return (this.cache = values)
   }
 

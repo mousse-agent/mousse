@@ -513,7 +513,7 @@ export class ChatNetworkBindingService {
       throw new NetError('conflict')
     const self = rt.identity.self()
     if (!self?.isAuthority || !rt.keys.rootKey()) throw new NetError('forbidden')
-    if (!rt.keys.encryptedAtRest() || rt.keys.state() !== 'unlocked')
+    if (!rt.keys.protectedAtRest() || rt.keys.state() !== 'unlocked')
       throw new NetError('keystore_locked')
     const spaces = this.options.spaces()
     rt.db.transaction(() => {

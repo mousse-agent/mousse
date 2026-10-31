@@ -555,7 +555,7 @@ export class NetService {
         },
         handle: async () => {
           return {
-            protected: keys.encryptedAtRest(),
+            protected: keys.protectedAtRest(),
             unlocked: keys.state() === 'unlocked',
             node: identity.self()?.node
           }
@@ -2534,7 +2534,7 @@ export class NetService {
         rt.keys.protect(passphrase)
       }
     }
-    if (needsProtection && !rt.keys.encryptedAtRest()) throw new NetError('keystore_locked')
+    if (needsProtection && !rt.keys.protectedAtRest()) throw new NetError('keystore_locked')
     const prepared = await rt.enrollment.prepareNodeJoin(invite, name)
     if (prepared.state !== 'enrolled') {
       const transport = new ProfileTransports({
@@ -2751,7 +2751,7 @@ export class NetService {
         editorServer: this.editorServerView(),
         ...(this.disabled ? { restartRequired: true } : {}),
         keystore: rt.keys.state(),
-        protected: rt.keys.encryptedAtRest(),
+        protected: rt.keys.protectedAtRest(),
         ...(rt.keys.vaultUnavailable?.() ? { vaultUnavailable: true } : {}),
         ...(self ? { self, rosterState: rt.identity.rosterState(self.user) } : {}),
         routes: this.transport?.routes() ?? [],

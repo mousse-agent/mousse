@@ -64,6 +64,10 @@ export class FileCredentialStore implements CredentialStore {
       throw this.failure('the credential structure is invalid')
     }
     this.data = new Map(Object.entries(parsed) as [string, Credential][])
+    // Saved plain right away, so a later build without the keychain never has to ask for it again.
+    if (encrypted && this.codec.plainAtRest) {
+      try { this.persist(this.data) } catch { /* stays encrypted until the next save */ }
+    }
   }
 
   listProviderIds(): string[] { return [...this.data.keys()] }
