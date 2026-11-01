@@ -24,9 +24,10 @@ export function teamCleanup({
   cwd = process.cwd(), apply = false, branch: only = null,
   recentMs = DAY_MS, now = Date.now(), listPullRequests = ghPullRequests,
 } = {}) {
+  // --no-optional-locks: a read such as git status never refreshes and rewrites an index.
   function git(args, optional = false, at = cwd) {
     try {
-      return execFileSync('git', args, {
+      return execFileSync('git', ['--no-optional-locks', ...args], {
         cwd: at, encoding: 'utf8', timeout: 60_000,
         stdio: ['ignore', 'pipe', 'pipe'],
       }).trimEnd();
