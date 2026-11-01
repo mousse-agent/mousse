@@ -39,6 +39,8 @@ export interface ComposerFooterProps {
   /** Picker entries; `caps` and `status` come from the instance snapshots. */
   providers: ProviderWithStatus[]
   selectedProviderId: string
+  /** The selection's instance, when it names one: two accounts of one provider read apart. */
+  selectedInstanceId?: string
   selectedModelId: string
   modelMenuOpen: boolean
   onModelMenuOpenChange: (open: boolean) => void
@@ -79,6 +81,7 @@ export interface ComposerFooterProps {
 export function ComposerFooter({
   providers,
   selectedProviderId,
+  selectedInstanceId,
   selectedModelId,
   modelMenuOpen,
   onModelMenuOpenChange,
@@ -110,7 +113,7 @@ export function ComposerFooter({
   const modelMenuContentRef = useRef<HTMLDivElement>(null)
   const contextBtnRef = useRef<HTMLButtonElement>(null)
   const handleMenuScroll = useMenuScrollFade()
-  const modelButtonParts = getGroupedModelButtonParts(selectedProviderId, selectedModelId, providers, false)
+  const modelButtonParts = getGroupedModelButtonParts(selectedProviderId, selectedModelId, providers, false, selectedInstanceId)
   const modelButtonLabel = modelButtonParts.join(' · ')
   const selectedProvider = providers.find((entry) => entry.id === selectedProviderId)
   const providerModels = selectedProvider?.models ?? []
@@ -207,6 +210,7 @@ export function ComposerFooter({
                   <ModelFamilyMenu
                     providers={providers}
                     selectedProviderId={selectedProviderId}
+                    selectedInstanceId={selectedInstanceId}
                     selectedModelId={selectedModelId}
                     onSelect={onModelSelect}
                     onMenuScroll={handleMenuScroll}

@@ -189,7 +189,7 @@ describe('Scheduled page: editing a job saves only what changed', () => {
     ['cron schedule', job, async () => { await click(button('Cron')); await setValue(control('Cron expression'), '0 8 * * 1') }, { schedule: { kind: 'cron', expr: '0 8 * * 1' } }],
     ['one-time schedule', job, async () => { await click(button('Once')); await setValue(control('Run at'), '2030-01-02T03:04') }, { schedule: { kind: 'once', runAt: new Date('2030-01-02T03:04').toISOString() } }],
     ['manual schedule', job, () => click(button('Manual')), { schedule: { kind: 'manual' } }],
-    ['model', job, () => choose('Model', 'Sonnet'), { selection: sonnet }],
+    ['model', job, () => choose('Model', 'Claude Sonnet'), { selection: sonnet }],
     ['clearing the model', () => job({ selection: sonnet }), () => choose('Model', 'Default model'), { selection: null }],
     ['mode', job, () => choose('Mode', 'Plan (no changes)'), { mode: 'plan' }],
     ['clearing the mode', () => job({ mode: 'agent' }), () => choose('Mode', 'Default'), { mode: null }],
@@ -242,7 +242,7 @@ describe('Scheduled page: editing a job saves only what changed', () => {
     const stale = { instanceId: 'gone:one', llmProvider: 'gone', model: 'retired' }
     const h = await mount([job({ selection: stale })])
     await openEdit()
-    expect(control<HTMLSelectElement>('Model').selectedOptions[0].textContent).toBe('retired (not available now)')
+    expect(control<HTMLSelectElement>('Model').selectedOptions[0].textContent).toBe('Retired (not available now)')
     await setValue(control('Name'), 'Still nightly')
     await save()
     expect(h.api.scheduled.update).toHaveBeenCalledWith('job-1', { name: 'Still nightly' })
@@ -349,7 +349,7 @@ describe('Scheduled page: creating a job', () => {
     await click(button('New job'))
     await setValue(control('Name'), 'Check CI')
     await setValue(control('Prompt'), 'Check CI in the repo')
-    await choose('Model', 'Sonnet')
+    await choose('Model', 'Claude Sonnet')
     await choose('Mode', 'Agent')
     await choose('Project', 'Mousse')
     await choose('Workspace', 'New worktree per run (recommended)')

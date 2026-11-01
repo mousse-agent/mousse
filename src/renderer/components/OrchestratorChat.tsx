@@ -1252,6 +1252,7 @@ export function OrchestratorChat() {
               enabledSkills={enabledSkills}
               providers={providers}
               selectedProviderId={selectedProviderId}
+              selectedInstanceId={selectedInstanceId}
               selectedModelId={selectedModelId}
               modelMenuOpen={modelMenuOpen}
               onModelMenuOpenChange={setModelMenuOpen}

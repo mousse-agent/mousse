@@ -156,6 +156,22 @@ describe('harness gateway: scope and model prefs', () => {
     expect((await harness.instances.setEnabled('claude', project, null)).enabled).toEqual({ device: true, effective: true, setBy: 'device' })
   })
 
+  it('lists models by name in one style, and keeps their names while the list is empty', async () => {
+    const listed = { codex: [{ id: 'gpt-6.1-sol', label: 'gpt-6.1-sol' }, { id: 'gpt-6-luna', label: 'GPT-6 Luna' }], claude: [{ id: 'opus', label: 'Opus 5.5' }] }
+    const { harness } = full(instances(), { models: listed })
+    const codexOf = async () => (await harness.instances.snapshots({ kind: 'device' })).find((entry) => entry.instanceId === 'codex')!
+    const claude = (await harness.instances.snapshots({ kind: 'device' })).find((entry) => entry.instanceId === 'claude')!
+    expect(claude.models.entries.map((entry) => entry.label)).toEqual(['Claude Opus 5.5'])
+    const first = await codexOf()
+    expect(first.models.entries.map((entry) => entry.label)).toEqual(['GPT-6.1 Sol', 'GPT-6 Luna'])
+    expect(first.models.names).toBeUndefined()
+    // Codex before its first listing, or after an account change: nothing listed, names kept.
+    listed.codex.splice(0)
+    const empty = await codexOf()
+    expect(empty.models.entries).toEqual([])
+    expect(empty.models.names).toEqual({ 'gpt-6.1-sol': 'GPT-6.1 Sol', 'gpt-6-luna': 'GPT-6 Luna' })
+  })
+
   it('hidden models are rejected for every purpose and leave the pickers', async () => {
     const store: Record<string, unknown> = {}
     const { harness } = full(instances(undefined, []), { models: { claude: [{ id: 'opus', label: 'Opus' }, { id: 'sonnet', label: 'Sonnet' }] } })
@@ -173,7 +189,7 @@ describe('harness gateway: scope and model prefs', () => {
     for (const selection of representations)
       expect(codeOf(() => harness.resolveStored({ instanceId: 'claude', llmProvider: '', model: selection.model }, { purpose: 'turn' }))).toBe('model_hidden')
     // The refusal names the model as the instance lists it, not its id.
-    expect(() => harness.resolve({ instanceId: 'claude', model: 'opus:low' }, { kind: 'device' }, 'turn')).toThrow(/^Opus is hidden\. /)
+    expect(() => harness.resolve({ instanceId: 'claude', model: 'opus:low' }, { kind: 'device' }, 'turn')).toThrow(/^Claude Opus is hidden\. /)
     // Another model at an effort still resolves; a colon that is not an effort is part of the id.
     expect(harness.resolve({ instanceId: 'claude', model: 'sonnet:high' }, { kind: 'device' }, 'turn').driver).toBe('claude')
     expect(harness.resolve({ instanceId: 'claude', model: 'opus:thinking' }, { kind: 'device' }, 'turn').driver).toBe('claude')

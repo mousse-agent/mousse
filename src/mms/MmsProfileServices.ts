@@ -503,6 +503,10 @@ export class MmsProfileServices {
         read: () => config.getProvidersSection().modelPrefs,
         write: (modelPrefs) => config.updateProvidersSection({ modelPrefs })
       },
+      names: {
+        read: () => config.getProvidersSection().modelNames,
+        write: (modelNames) => config.updateProvidersSection({ modelNames })
+      },
       cwd: () => this.worktrees.getRepoRoot(),
       piDisplayName: (providerId) => this.providerAuth.getProviderDisplayName(providerId),
       // A moved entry's device default follows it to the agent; its title model becomes Automatic.

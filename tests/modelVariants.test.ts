@@ -47,7 +47,7 @@ describe('modelVariants', () => {
 
     const families = groupModelsByFamily('cursor', models)
     expect(families).toHaveLength(2)
-    const fable = families.find((family) => family.familyLabel === 'Fable 5')
+    const fable = families.find((family) => family.familyLabel === 'Claude Fable 5')
     expect(fable?.variants).toHaveLength(3)
     expect(fable?.hasSubOptions).toBe(true)
     expect(fable?.contexts).toEqual(['1m', '300k'])
@@ -94,7 +94,7 @@ describe('modelVariants', () => {
     ]
 
     const families = groupModelsByFamily('cursor', models)
-    const fable = families.find((family) => family.familyLabel === 'Fable 5')
+    const fable = families.find((family) => family.familyLabel === 'Claude Fable 5')
     expect(fable?.efforts).toEqual(['low', 'medium', 'high', 'xhigh'])
     expect(fable?.hasSubOptions).toBe(true)
     expect(resolveModelVariant(fable!, { context: '1m', effort: 'high' })?.id).toBe('fable-5@1m:high')
@@ -130,7 +130,7 @@ describe('modelVariants', () => {
       'xhigh'
     ])
     expect(getCurrentEffort('fable-5@300k:high', models, 'cursor')).toBe('high')
-    expect(findModelFamily('cursor', models, 'fable-5@300k:high')?.familyLabel).toBe('Fable 5')
+    expect(findModelFamily('cursor', models, 'fable-5@300k:high')?.familyLabel).toBe('Claude Fable 5')
   })
 
   it('parses effort suffix from stored model ids', () => {

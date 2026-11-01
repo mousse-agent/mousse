@@ -1,5 +1,6 @@
 import { piInstanceId } from '../../shared/providerInstances'
 import type { MousseSettings, MousseSettingsUpdate } from '../../shared/settings'
+import { modelChoiceOf, modelLabel } from '../../shared/modelChoice'
 
 /** A selection names `instanceId`: by its instance, else (older records) by its pi provider name. */
 function names(selection: { llmProvider?: string; instanceId?: string } | undefined, instanceId: string): boolean {
@@ -12,6 +13,9 @@ function names(selection: { llmProvider?: string; instanceId?: string } | undefi
  * - the default model follows the entry to the agent, with the agent's model for it;
  * - a title model on the moved entry becomes Automatic, since an agent runtime names no chats.
  */
+/** A model as the list of what moved names it, from its id: no listing is on hand here. */
+const named = (model: string): string => modelLabel(modelChoiceOf({ provider: '', model }))
+
 export function rewriteMovedDefaults(
   settings: Pick<MousseSettings, 'provider' | 'title'>,
   from: string,
@@ -23,7 +27,7 @@ export function rewriteMovedDefaults(
   if (names(provider, from)) {
     const model = to.model(provider.model)
     patch.provider = { ...provider, instanceId: to.instanceId, llmProvider: to.llmProvider, model }
-    rewritten.push(model === provider.model ? 'Default model' : `Default model: ${model} instead of ${provider.model}`)
+    rewritten.push(model === provider.model ? 'Default model' : `Default model: ${named(model)} instead of ${named(provider.model)}`)
   }
   if (names(settings.title, from)) {
     patch.title = { llmProvider: '', model: '', instanceId: '' }

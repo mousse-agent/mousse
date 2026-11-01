@@ -9,6 +9,7 @@ import {
 import { isExecutableJobEdit, isWorkflowPrompt } from '../../../shared/jobPermissionEdit'
 import { listingKey, listingServes, selectionFromListing, type ModelOverride } from '../../../shared/providerInstances'
 import type { LlmProviderOption } from '../../../shared/settings'
+import { modelChoiceOf, modelLabel } from '../../../shared/modelChoice'
 import type {
   CreateScheduledJobInput,
   JobSchedule,
@@ -52,7 +53,7 @@ export function modelGroups(providers: LlmProviderOption[]): ModelGroup[] {
       label: provider.label,
       choices: provider.models.map((model) => ({
         key: `${listingKey(provider)}${KEY_SEPARATOR}${model.id}`,
-        label: model.label || model.id,
+        label: modelLabel(modelChoiceOf({ instanceId: provider.instanceId, provider: provider.id, model: model.id }, model.label)),
         selection: selectionFromListing(provider, model.id)
       }))
     }))
