@@ -14,6 +14,7 @@ import { buildSubagentResultReport, formatSubagentResultReport } from '../src/mm
 import { ThreadJournal } from '../src/mms/data/ThreadJournal'
 import { ThreadWorkspaceManager } from '../src/mms/workspace/ThreadWorkspaceManager'
 import { WorkspaceGcService } from '../src/mms/workspace/WorkspaceGcService'
+import { resolveOwnedThreadWorkspace } from '../src/mms/workspace/WorkflowWorkspace'
 import type { ThreadAction } from '../src/shared/threadActions'
 import { actionOptions, git, gitFoundationFixture } from './fixtures/gitFoundation'
 
@@ -802,6 +803,20 @@ describe('publish', () => {
     expect(new ThreadWorkspaceManager(f.thread).verify().lifecycle).toBe('ready')
     expect(git(f.repo, 'rev-parse', 'HEAD')).toBe(prePublishSha)
     expect((await publish()).state).toBe('completed')
+  })
+
+  it('the workflow path recovers a thread an older version left waiting, instead of calling it stale', async () => {
+    const { prePublishSha } = await interruptedBeforeTheMove('recovery_required')
+    const owner = {
+      profileId: 'profile',
+      projects: { getProject: (id: string) => id === 'project' ? { id, path: f.repo } : undefined },
+      threads: { getThread: (id: string) => id === 'task' ? { id, projectId: 'project' } : undefined, getThreadDir: () => f.thread }
+    }
+    const workspace = await resolveOwnedThreadWorkspace(owner as never, { profileId: 'profile', projectId: 'project', threadId: 'task' })
+    expect(workspace.workspacePath).toBe(cwd)
+    expect(new ThreadJournal(f.thread).latestByOperation().get('interrupted')).toMatchObject({ state: 'cancelled', details: { recovered: true } })
+    expect(git(f.repo, 'rev-parse', 'HEAD')).toBe(prePublishSha)
+    noPending()
   })
 
   it('a fast-forward Git refuses closes the attempt instead of locking the thread', async () => {
