@@ -375,6 +375,8 @@ export function claudeCodeDriver(options: ClaudeCodeDriverOptions = {}): Harness
         service = entry.service
       }
       let stopped = false
+      // A listing that finished on its own (after a sign-in check) reaches open pickers.
+      const stopModelUpdates = service.onModelsChanged?.(() => context.changed())
 
       /** The sign-in terminal that is running, so removing the instance can end it. */
       let activeRun: PtyRun | undefined
@@ -570,6 +572,7 @@ export function claudeCodeDriver(options: ClaudeCodeDriverOptions = {}): Harness
         hasContinuation: (threadId, id) => service.hasContinuation(threadId, id),
         discardContinuations: (threadId, id) => service.discardContinuations(threadId, id),
         stop: () => {
+          stopModelUpdates?.()
           if (!entry || stopped) return
           stopped = true
           const user = entry

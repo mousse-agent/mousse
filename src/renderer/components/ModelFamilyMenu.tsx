@@ -506,13 +506,15 @@ function ProfileModelFamilyMenu({
     return <>{emptyState}</>
   }
 
-  // Rows filtered to one single-maker provider drop the logo and provider line, which would only
-  // repeat the selected rail item on every row. A multi-brand API keeps them: the logo is the maker.
   const oneProvider =
     (railFilter !== null || railItems.length <= 1) &&
     filteredEntries.length > 0 &&
     filteredEntries.every((entry) => entry.listing === filteredEntries[0]!.listing)
-  const compactRows = oneProvider && filteredEntries.every((entry) => !entry.multiBrand)
+  const { compact: compactRows, icon: rowIcons } = modelRowLayout(
+    oneProvider,
+    filteredEntries.some((entry) => entry.multiBrand),
+    railItems.length > 1
+  )
 
   const renderEntry = (entry: FlatModelEntry, index: number) => {
     const selected = isEntrySelected(entry)
@@ -562,7 +564,7 @@ function ProfileModelFamilyMenu({
           }}
           onClick={() => selectEntry(entry)}
         >
-          {compactRows ? null : (
+          {!rowIcons ? null : (
             <span className="model-picker-row-icon">
               <ProviderIcon providerId={entry.brandId === 'anthropic' ? 'claude' : entry.brandId} size={16} />
               {entry.badge ? <span className="model-picker-instance-badge" aria-hidden="true">{entry.badge}</span> : null}
@@ -735,6 +737,17 @@ export function makerLabelOf(
 export function modelRowSubtitle(entry: { providerName: string; makerLabel?: string }, oneProvider: boolean): string | undefined {
   if (oneProvider) return entry.makerLabel
   return [entry.providerName, entry.makerLabel].filter(Boolean).join(' · ')
+}
+
+/**
+ * How the rows of the list are drawn. Rows of one single-maker provider are compact, with no
+ * provider line. They drop the logo only when the rail shows it, where it would repeat the selected
+ * rail item on every row; with one provider configured there is no rail, and the rows are the only
+ * place its logo shows. A multi-brand API keeps full rows: the logo is the maker.
+ */
+export function modelRowLayout(oneProvider: boolean, multiBrand: boolean, railShown: boolean): { compact: boolean; icon: boolean } {
+  const compact = oneProvider && !multiBrand
+  return { compact, icon: !compact || !railShown }
 }
 
 /** Favorites first, then by provider, then by the provider's saved model order. */

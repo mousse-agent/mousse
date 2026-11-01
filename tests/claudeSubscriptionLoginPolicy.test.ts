@@ -236,6 +236,24 @@ describe('Claude terminal sign-in status', () => {
     expect(service.llmProvider()?.models).toEqual([{ id: 'opus', label: 'Opus', efforts: undefined }])
   })
 
+  it('tells listeners when a listing started by a sign-in check saves the models', async () => {
+    const supportedModels = vi.fn(async () => [{ value: 'sonnet', displayName: 'Sonnet', description: 'Sonnet 5.5 · Efficient' }])
+    const { service } = profile({
+      cli: JSON.stringify({ loggedIn: true, authMethod: 'claude.ai' }),
+      settings: { models: [] },
+      query: () => Object.assign(fakeQuery(), { supportedModels }) as unknown as Query
+    })
+    const changed = vi.fn()
+    const unsubscribe = service.onModelsChanged(changed)
+    // Open pickers show the aliases until the listing that this check starts in the background is saved.
+    await service.status()
+    await vi.waitFor(() => expect(changed).toHaveBeenCalledTimes(1), { timeout: 10_000 })
+    expect(service.llmProvider()?.models.map((model) => model.label)).toEqual(['Sonnet 5.5'])
+    unsubscribe()
+    await service.refreshModels(process.cwd())
+    expect(changed).toHaveBeenCalledTimes(1)
+  })
+
   it('separates missing binary and probe errors', async () => {
     const missing = profile({ binary: false })
     await expect(missing.service.status()).resolves.toMatchObject({ state: 'missing_binary' })
