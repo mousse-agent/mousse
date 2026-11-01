@@ -10,12 +10,13 @@ import {
   type RepositoryIdentity,
   type StartPullRequestThreadInput,
   type StartPullRequestThreadResult,
-  type ThreadPullRequestLink
+  type ThreadPullRequestLink,
+  WORKTREE_CONFIG_ENABLED
 } from '../../shared/pullRequests'
 import { buildPullRequestSeed, pullRequestSeedTrust } from '../../shared/pullRequestSeed'
 import type { Thread } from '../../shared/types'
 import type { ThreadDataStore } from '../data/ThreadDataStore'
-import { ThreadWorkspaceManager } from '../workspace/ThreadWorkspaceManager'
+import { enablePerWorktreeConfig, perWorktreeConfigEnabled, ThreadWorkspaceManager } from '../workspace/ThreadWorkspaceManager'
 import type { CodeHost } from './CodeHost'
 import { PullRequestReadError } from './GitHubCodeHost'
 import { acquireRepositoryLease } from './RepositoryLease'
@@ -49,6 +50,8 @@ export interface ResolvedPullRequest {
   detail: PullRequestDetail
   /** Threads that are linked to this pull request and not archived. */
   threads: Array<{ id: string; name: string }>
+  /** Starting would turn on `extensions.worktreeConfig` in the repository, which the start dialog says before it runs. */
+  enablesWorktreeConfig: boolean
 }
 
 function git(cwd: string, args: string[]): string {
@@ -140,7 +143,7 @@ export class PullRequestThreadService {
         { number: parsed.number }
       )
     }
-    return { detail, threads: this.threadsOf(detail.identity) }
+    return { detail, threads: this.threadsOf(detail.identity), enablesWorktreeConfig: !perWorktreeConfigEnabled(project.path) }
   }
 
   private threadsOf(identity: PullRequestIdentity): Array<{ id: string; name: string }> {
@@ -199,19 +202,25 @@ export class PullRequestThreadService {
     const headMoved = headSha.toLowerCase() !== detail.headSha.toLowerCase()
     const name = `PR #${detail.number}: ${detail.title}`.replace(/\s+/g, ' ').trim().slice(0, THREAD_NAME_MAX)
     let thread = this.deps.threads.createThread(name, project.id, project.path, { worktreeEnabled: true })
+    // The one change this start makes to the person's repository configuration, said in its result (and in the dialog
+    // before it runs). Never turned off again: other worktrees may rely on it by then.
+    let repositoryConfigChange: string | null = null
     try {
+      if (enablePerWorktreeConfig(topLevel)) repositoryConfigChange = WORKTREE_CONFIG_ENABLED
       const threadDirectory = this.deps.threads.getThreadDir(thread.id)
       await new ThreadWorkspaceManager(threadDirectory).provision(thread.id, 'main', project.path, undefined, undefined, headSha, { untrusted: true })
     } catch (error) {
       await this.discard(thread.id, project.path, topLevel)
-      throw new PullRequestThreadError('pull_request_workspace_failed', `Could not create the worktree for pull request #${detail.number}: ${error instanceof Error ? error.message : String(error)}`)
+      const said = repositoryConfigChange ? ` ${repositoryConfigChange}` : ''
+      throw new PullRequestThreadError('pull_request_workspace_failed', `Could not create the worktree for pull request #${detail.number}: ${error instanceof Error ? error.message : String(error)}${said}`)
     }
     try {
       thread = this.deps.threads.updateThreadMeta(thread.id, { pullRequest: linkFromDetail(detail) })
       if (this.deps.prepareThread) thread = this.deps.prepareThread(thread)
     } catch (error) {
       await this.discard(thread.id, project.path, topLevel)
-      throw new PullRequestThreadError('pull_request_workspace_failed', `Could not set up the thread for pull request #${detail.number}: ${error instanceof Error ? error.message : String(error)}`)
+      const said = repositoryConfigChange ? ` ${repositoryConfigChange}` : ''
+      throw new PullRequestThreadError('pull_request_workspace_failed', `Could not set up the thread for pull request #${detail.number}: ${error instanceof Error ? error.message : String(error)}${said}`)
     }
 
     const seed = buildPullRequestSeed(detail, { headSha })
@@ -233,7 +242,7 @@ export class PullRequestThreadService {
         }
       }
     }
-    return { thread, seed, headSha, headMoved, sent, withheld }
+    return { thread, seed, headSha, headMoved, sent, withheld, repositoryConfigChange }
   }
 
   /**

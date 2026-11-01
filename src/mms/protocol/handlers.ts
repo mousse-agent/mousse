@@ -3493,7 +3493,8 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const { detail } = resolved
       return {
         pullRequest: { number: detail.number, title: detail.title, url: detail.url, state: detail.state, isDraft: detail.isDraft, author: detail.author, headRefName: detail.headRefName, isCrossRepository: detail.isCrossRepository },
-        threads: resolved.threads
+        threads: resolved.threads,
+        enablesWorktreeConfig: resolved.enablesWorktreeConfig
       }
     }
     case 'pullRequests.startThread': {

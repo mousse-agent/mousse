@@ -272,7 +272,17 @@ export interface ResolvedPullRequestSummary {
   pullRequest: PullRequestSummary
   /** Threads that already work on this pull request (not archived). */
   threads: Array<{ id: string; name: string }>
+  /** Starting turns on `extensions.worktreeConfig` in the repository (see `WORKTREE_CONFIG_NOTICE`), so the dialog says so first. */
+  enablesWorktreeConfig: boolean
 }
+
+/**
+ * What Start from pull request tells the person when it turns on Git's per-worktree settings in their repository. A
+ * worktree of someone else's commits needs them to keep that worktree's hooks and filters off. It is written once,
+ * as part of the start, and left on.
+ */
+export const WORKTREE_CONFIG_NOTICE = "Starting also turns on extensions.worktreeConfig in this repository's Git settings, so the worktree can keep hooks and filters off. It stays on."
+export const WORKTREE_CONFIG_ENABLED = "Turned on extensions.worktreeConfig in this repository's Git settings, so the worktree keeps hooks and filters off. It stays on."
 
 export interface StartPullRequestThreadInput {
   projectId: string
@@ -299,6 +309,8 @@ export interface StartPullRequestThreadResult {
   sent: boolean
   /** Why a requested send did not happen (the text is from people who are not owners, members or collaborators, or the send failed); null otherwise. */
   withheld: string | null
+  /** `WORKTREE_CONFIG_ENABLED` when this start turned on `extensions.worktreeConfig` in the repository; null when it changed no repository setting. */
+  repositoryConfigChange: string | null
 }
 
 /** Where a thread's Push goes and why, when the thread is linked to a pull request. */

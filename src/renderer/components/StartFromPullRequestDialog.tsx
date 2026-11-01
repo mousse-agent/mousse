@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { createPortal } from 'react-dom'
-import type { PullRequestListItem, ResolvedPullRequestSummary } from '../../shared/pullRequests'
+import { WORKTREE_CONFIG_NOTICE, type PullRequestListItem, type ResolvedPullRequestSummary } from '../../shared/pullRequests'
 import { openThreadFromPullRequest, selectThread } from '../lib/threadActions'
 import { Spinner } from './ui/Spinner'
 import { Modal } from './ui/Modal'
@@ -181,6 +181,7 @@ export function StartFromPullRequestDialog({ projectId, projectName, onClose }: 
       {summary && summary.state !== 'open' && (
         <p className="start-from-pr-note">This pull request is {summary.state}; the thread starts from its last head commit.</p>
       )}
+      {resolved.status === 'ready' && resolved.resolved.enablesWorktreeConfig && <p className="start-from-pr-note">{WORKTREE_CONFIG_NOTICE}</p>}
       {startError && (
         <p className="start-from-pr-error" role="alert">
           {startError}

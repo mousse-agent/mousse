@@ -5,7 +5,7 @@ import { MousseMainService } from '../src/mms/MousseMainService'
 import { execRunner, type ExecutableRunner } from '../src/mms/git/ghRunner'
 import { GitHubCodeHost, parsePullRequestDetail } from '../src/mms/git/GitHubCodeHost'
 import { PullRequestThreadError, PullRequestThreadService } from '../src/mms/git/PullRequestThreadService'
-import type { PullRequestDetail } from '../src/shared/pullRequests'
+import { WORKTREE_CONFIG_ENABLED, type PullRequestDetail } from '../src/shared/pullRequests'
 import { ThreadWorkspaceManager } from '../src/mms/workspace/ThreadWorkspaceManager'
 import { git, gitFoundationFixture } from './fixtures/gitFoundation'
 
@@ -344,6 +344,27 @@ describe('starting a thread from a pull request', () => {
     expect(existsSync(marker)).toBe(false)
     // The setting itself is left as the project had it.
     expect(git(f.repo, 'config', '--get', 'core.hooksPath')).toBe(hooks)
+  })
+
+  it('turns on per-worktree Git settings once, says so first and in the result, and never turns them off', async () => {
+    const setting = () => { try { return git(f.repo, 'config', '--local', '--get', 'extensions.worktreeConfig') } catch { return null } }
+    expect(setting()).toBeNull()
+    expect((await service.resolve(projectId, '7')).enablesWorktreeConfig).toBe(true)
+
+    const first = await start()
+    expect(first.repositoryConfigChange).toBe(WORKTREE_CONFIG_ENABLED)
+    expect(setting()).toBe('true')
+    expect((await service.resolve(projectId, '7')).enablesWorktreeConfig).toBe(false)
+    const second = await start({ allowDuplicate: true })
+    expect(second.repositoryConfigChange).toBeNull()
+
+    // Turned off by the person later: a restore refuses rather than turning it on again behind their back.
+    const workspace = workspaceOf(first.thread.id)
+    git(f.repo, 'worktree', 'remove', '--force', workspace.worktreePath)
+    git(f.repo, 'config', '--local', '--unset', 'extensions.worktreeConfig')
+    await expect(new ThreadWorkspaceManager(mms.threads.getThreadDir(first.thread.id)).restore(f.repo)).rejects.toThrow(/per-worktree Git settings are off/)
+    expect(setting()).toBeNull()
+    expect(existsSync(workspace.worktreePath)).toBe(false)
   })
 
   describe('when the worktree cannot be made', () => {
