@@ -6,6 +6,10 @@ export const BANNER_MAX_DEPTH = 3
 
 export interface NeedingInput {
   childThreadId: string
+  /** The thread a row opens: the subagent's own, or for a remote subagent its thread on that computer, where it is answered. */
+  openId: string
+  /** The computer a remote subagent asks on. */
+  computer?: string
   /** The subagent that asks. */
   title: string
   /** The subagent of this thread it belongs to, when it is deeper than a direct subagent. */
@@ -28,7 +32,13 @@ export function collectNeedingInput(
   const walk = (parentId: string, depth: number, via: string | null): void => {
     for (const subagent of listsByParent[parentId] ?? []) {
       if (subagent.state === 'needs_input') {
-        found.push({ childThreadId: subagent.childThreadId, title: lineageSubagentName(subagent), via })
+        found.push({
+          childThreadId: subagent.childThreadId,
+          openId: subagent.computer?.ref ?? subagent.childThreadId,
+          title: lineageSubagentName(subagent),
+          via,
+          ...(subagent.computer ? { computer: subagent.computer.name } : {})
+        })
       }
       if (depth < maxDepth && isRunningSubagent(subagent) && !visited.has(subagent.childThreadId)) {
         visited.add(subagent.childThreadId)
@@ -42,5 +52,6 @@ export function collectNeedingInput(
 
 /** What a banner row says for a subagent that asks: its name, and which subagent of the thread it hangs under. */
 export function needingInputLabel(entry: NeedingInput): string {
-  return entry.via ? `${entry.title} has a question, via ${entry.via}` : `${entry.title} has a question`
+  const where = entry.computer ? ` on ${entry.computer}` : ''
+  return entry.via ? `${entry.title} has a question${where}, via ${entry.via}` : `${entry.title} has a question${where}`
 }

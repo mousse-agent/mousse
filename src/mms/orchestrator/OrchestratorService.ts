@@ -98,8 +98,11 @@ import { planWakeNotice, type NoticeContext } from '../run/delegation/notice'
 import { acknowledgeRows } from '../run/terminal'
 import { cancelQueuedWakes } from '../run/delegation/wake'
 import { taskCheckpoint } from '../run/delegation/checkpoint'
-import { subagentPreamble } from '../run/delegation/guidance'
-import { isRunningSubagent, type SubagentNoticeItem } from '../../shared/subagents'
+import { remoteSubagentPreamble, subagentPreamble } from '../run/delegation/guidance'
+import { RemoteSubagents } from './RemoteSubagents'
+import type { RemoteComputersPort } from '../protocol/remoteComputersPort'
+import { MAX_REMOTE_MINUTES } from '../run/mcp/appTools/delegation'
+import { isRunningSubagent, type SubagentNoticeItem, type SubagentSummary } from '../../shared/subagents'
 import type { DelegationRequest, ForkPointSeed, ThreadCreation } from '../run/RunEngine'
 import type { HandoffItem } from '../run/handoff/budget'
 import { committedTransfers, TurnHandoffs, type PlannedHandoff } from './turnHandoffs'
@@ -742,6 +745,8 @@ const SHARED_READER_POLICY: AgentWorkspacePolicy = { version: 1, workspace: 'sha
 const SHARED_WORKSPACE_ROLES: ReadonlySet<string> = new Set(['research', 'review'])
 /** Most named assignments one `create_subagents` call may start. */
 const NAMED_BATCH_LIMIT = 8
+/** How long a remote subagent may run when `delegate_task` gives no `maxMinutes`: as long as a local turn may. */
+const DEFAULT_REMOTE_MINUTES = 360
 
 /** In-process result of a `turn.start` effect, settled by its executor. */
 interface TurnResult {
@@ -836,6 +841,7 @@ export class OrchestratorService extends EventEmitter {
 
   async shutdown(timeoutMs = 30_000): Promise<void> {
     this.beginShutdown()
+    this.remoteSubagents?.close()
     await this.lifecycle.waitForIdle(timeoutMs)
     for (const timer of this.persistTimers.values()) clearTimeout(timer)
     this.persistTimers.clear()
@@ -857,6 +863,19 @@ export class OrchestratorService extends EventEmitter {
 
   /** The profile's scheduled jobs, for the agents' `schedule_*` tools; without them the tools are not registered. */
   setScheduledJobs(jobs: Omit<AgentScheduleHost, 'limits' | 'startedByPerson'> | undefined): void { this.scheduledJobs = jobs }
+
+  private remoteComputers?: RemoteComputersPort
+  /** Remote subagents' tasks on other computers (issue #469); present while a run engine is attached. */
+  private remoteSubagents?: RemoteSubagents
+
+  /**
+   * The user's other computers, for remote subagents (issue #469). Composed with Bridge, which sets it
+   * when it comes up and clears it when it closes; without it `delegate_task` cannot take `computer`.
+   */
+  setRemoteComputers(port: RemoteComputersPort | undefined): void {
+    this.remoteComputers = port
+    if (port) this.remoteSubagents?.start()
+  }
 
   private browserRuntime?: BrowserRuntimePort
   private mainAgentBrowser?: BrowserExecutionBinding
@@ -1682,10 +1701,23 @@ export class OrchestratorService extends EventEmitter {
     this.questionRouterOff = null
     this.runEngine?.handoffs.setTranscriptSource(null)
     this.unbindApprovals()
+    this.remoteSubagents?.close()
+    this.remoteSubagents = undefined
     this.runEngine = engine
     this.installQueueJournal()
     if (!engine) return
     this.bindApprovals(engine)
+    this.remoteSubagents = new RemoteSubagents({
+      engine,
+      port: () => this.remoteComputers,
+      titleOf: (threadId) => this.titleOf(threadId),
+      setRunsOn: (threadId, runsOn) => { this.threadStore?.updateThreadMeta(threadId, { runsOn }, { touch: false }) },
+      recordMessage: (threadId, role, text) => { this.recordRemoteSubagentMessage(threadId, role, text) },
+      changed: (childThreadId) => { this.emit('subagent-changed', { threadId: childThreadId }) }
+    })
+    // Tasks left open by the previous daemon go on: their runs on the other computers did not stop with it.
+    // Without Bridge the passes reach no computer, but a task's time limit still ends it here.
+    this.remoteSubagents.start()
     this.installTitleGuard()
     this.attachInFlightCanceller()
     // Input (4) of the hold predicate: synchronous, in memory, never throws (it is read inside transactions).
@@ -1715,9 +1747,12 @@ export class OrchestratorService extends EventEmitter {
     })
     const onEvent = (event: ThreadEvent): void => {
       // Running delegated tasks wake the parent when they finish; until then its thread is Waiting.
-      if (event.type === 'delegation.status')
+      if (event.type === 'delegation.status') {
         this.runtimeManager?.setPendingDelegations(event.threadId,
           engine.delegations.listForParentThread(event.threadId).some((delegation) => delegation.status === 'running'))
+        // A remote subagent's task that was cancelled here tells its computer at once, not on the next pass.
+        if (engine.remoteSubagents.hasOpen()) this.remoteSubagents?.kick()
+      }
       if (event.type === 'reconcile.delivery_failed') this.noteUndeliveredResult(event)
       // A saved approval request closed without an answer (its run ended, a Stop, the thread was
       // deleted): its card goes and the provider callback that still waits for it is released.
@@ -4649,6 +4684,18 @@ export class OrchestratorService extends EventEmitter {
     if (!parentThread) throw new Error(`Thread not found: ${request.parentThreadId}`)
     const parent = this.getOrCreateSession(request.parentThreadId)
     const title = request.title?.trim() || `Delegated: ${request.prompt.trim().split('\n')[0].slice(0, 60)}`
+    if (request.remote) {
+      // A remote subagent's thread here is a stand-in: its agent, model and workspace are the other
+      // computer's, so it gets none of its own, and nothing ever runs here (`sendOwned` refuses).
+      const child = this.threadStore.createThread(title, parentThread.projectId, undefined, {
+        lineage: lineageForChild(parentThread),
+        ownerThreadId: parentThread.id,
+        workspaceBinding: { policy: request.workspace === 'shared' ? 'shared' : 'isolated' },
+        permissionMode: request.remote.permissionMode,
+        runsOn: { node: request.remote.node, computerName: this.remoteSubagents?.computerName(request.remote.node) ?? 'the other computer' }
+      })
+      return { threadId: child.id }
+    }
     const inherited = this.harness.instanceMap.migrate(parent.modelOverride ?? undefined)
     const base = (): ModelOverride => inherited ?? this.defaultAgentModel()
     // The requested instance (already resolved by `delegateTask`) or the parent's. Resolved before the
@@ -5114,6 +5161,8 @@ export class OrchestratorService extends EventEmitter {
         throw new McpToolError('mousse_ceiling_exceeded', 'Integration writes the workspace; a plan ceiling cannot integrate.')
       const task = this.resolveTask(parentThreadId, ref, 'finished')
       if (!task.ok) return task.refusal
+      if (this.requireRunEngine().remoteSubagents.get(task.delegation.delegationId))
+        return { started: false as const, code: 'remote_integration_unsupported' as const, message: 'This subagent worked on another computer; its result names the branch its work is on there. Fetch that branch to use it here.' }
       return this.integrateDelegation(parentThreadId, parentRunId, task.delegation.delegationId, call)
     }
     const listDelegations = () => this.listDelegations(parentThreadId)
@@ -5135,6 +5184,7 @@ export class OrchestratorService extends EventEmitter {
       taskCancel: (ref) => this.taskCancel(parentThreadId, ref),
       listDelegations,
       listSubagents: () => this.listSubagents(parentThreadId),
+      listComputers: () => this.listComputers(parentThreadId),
       integrateDelegation,
       named: {
         create: async (request, call) => ({ name: request.name, ...(await delegateTask(named(request), call)) }),
@@ -5171,6 +5221,7 @@ export class OrchestratorService extends EventEmitter {
     const role = input.role?.trim() || undefined
     if (input.workspace === 'shared' && !(role && SHARED_WORKSPACE_ROLES.has(role)))
       throw new Error('workspace "shared" is allowed only for read-only roles (role "research" or "review"); use workspace "isolated" for work that edits, builds or tests.')
+    if (input.computer !== undefined) return this.delegateRemoteTask(parentThreadId, parentRunId, input, call, { modeCeiling, accessLevel, role })
     // SPEC §13.8: the child names an instance; an older `provider` name is mapped to one. An unknown
     // or disabled instance fails the tool call here, before any thread is created.
     const requested = input.instanceId?.trim() || input.provider?.trim()
@@ -5219,6 +5270,182 @@ export class OrchestratorService extends EventEmitter {
     }
   }
 
+  /**
+   * `delegate_task` with `computer` (issue #469): the subagent runs on another of the user's computers.
+   * Everything that can be checked here is checked before anything exists: Bridge is on, the computer is
+   * one of the user's, the user allowed it, it is online, and it has this repository. Then the task is
+   * committed like a local one, except that its child run is a stand-in, and the first call to that
+   * computer is made at once, so a refusal there reaches the caller instead of a notice later.
+   */
+  private async delegateRemoteTask(
+    parentThreadId: string,
+    parentRunId: string,
+    input: DelegateTaskInput,
+    call: DelegationToolCall,
+    policy: { modeCeiling?: ModeCeiling; accessLevel: AgentAccessLevel; role?: string }
+  ) {
+    const engine = this.requireRunEngine()
+    const refuse = (code: string, message: string, extra: Record<string, unknown> = {}) => ({ started: false as const, code, message, ...extra })
+    // A retry of an accepted call returns that task before anything else is checked.
+    const requestKey = delegationRequestKey(parentThreadId, parentRunId, call.toolCallId)
+    const prior = engine.store.getReceipt(requestKey)
+    const remote = this.remoteSubagents
+    if (!prior) {
+      if (input.workspace !== 'shared' && this.isReadOnlyChild(parentThreadId))
+        return refuse('read_only_caller_requires_shared', 'You are a read-only subagent, so your own subagents must be read-only too: start them with workspace "shared" and role "research" or "review".')
+      // A chain stays one computer deep: work another device started here never reaches a third computer.
+      const parent = this.threadStore?.getThread(parentThreadId)
+      const root = parent?.lineage ? this.threadStore?.getThread(parent.lineage.rootThreadId) : parent
+      if (root?.startedFrom)
+        return refuse('remote_from_remote', 'A thread another device started cannot start subagents on other computers.')
+    }
+    if (!remote || !this.remoteComputers)
+      return refuse('remote_unavailable', 'Subagents on other computers need Mousse to be connected to your other computers (Settings → Devices).')
+    const found = this.findComputer(input.computer!)
+    if (!found.ok) return refuse(found.code, found.message, found.extra)
+    const computer = found.computer
+    if (!prior) {
+      const denied = this.remoteSubagentDenial(computer.node, computer.name)
+      if (denied) return refuse(denied.code, denied.message)
+      if (!computer.online) return refuse('computer_offline', `${computer.name} is offline.`)
+      if (Boolean(input.model?.trim()) !== Boolean(input.instanceId?.trim() || input.provider?.trim()))
+        return refuse('selection_incomplete', `On another computer an agent is named with its model: pass both instanceId and model, or leave both out to use ${computer.name}'s default.`)
+    }
+    const projectId = this.threadStore?.getThread(parentThreadId)?.projectId
+    const projectPath = projectId ? this.projectManager?.getProject(projectId)?.path : undefined
+    let farProjectId: string | null = null
+    if (projectPath && !prior) {
+      let match: { projectId: string; weak: boolean } | null
+      try {
+        match = await this.remoteComputers.matchProject(computer.node, projectPath, AbortSignal.timeout(30_000))
+      } catch (error) {
+        return refuse(error instanceof DomainRpcError ? error.code : 'computer_unreachable', error instanceof Error ? error.message : String(error))
+      }
+      if (!match || match.weak)
+        return refuse('no_matching_project', match?.weak
+          ? `${computer.name} has a project that shares this repository's first commit but not its remotes, so it may be another repository. Open the same repository there first.`
+          : `${computer.name} has no project for this repository. Open (or clone) it there first.`)
+      farProjectId = match.projectId
+    }
+    // Never looser than the run that asks, never Full access; the other computer narrows it to its own limit for this one.
+    const permissionMode = narrowPermissionMode(this.requestedPermissionMode(parentThreadId), this.runPermissionMode(parentRunId), 'accept_edits') as Exclude<PermissionMode, 'full'>
+    const minutes = input.maxMinutes ?? DEFAULT_REMOTE_MINUTES
+    const title = input.title?.trim() || undefined
+    let accepted: Awaited<ReturnType<RunEngine['requestDelegation']>>
+    try {
+      accepted = await engine.requestDelegation({
+        parentThreadId,
+        parentRunId,
+        clientRequestId: requestKey,
+        prompt: input.prompt,
+        instanceId: input.instanceId?.trim() || input.provider?.trim() || undefined,
+        model: input.model?.trim() || undefined,
+        role: policy.role,
+        workspace: input.workspace,
+        wake: input.wake ?? 'always',
+        title,
+        ...(policy.modeCeiling ? { modeCeiling: policy.modeCeiling } : {}),
+        accessLevel: policy.accessLevel,
+        remote: {
+          node: computer.node,
+          prompt: `${remoteSubagentPreamble(this.titleOf(parentThreadId))}\n\n${input.prompt}`,
+          permissionMode,
+          // A read-only task, or one under a plan ceiling, plans and reads there: it never edits.
+          chatMode: input.workspace === 'shared' || policy.modeCeiling === 'plan' ? 'plan' : 'agent',
+          worktree: input.workspace === 'isolated',
+          projectId: farProjectId,
+          instanceId: input.instanceId?.trim() || input.provider?.trim() || null,
+          model: input.model?.trim() || null,
+          deadlineAt: new Date(Date.now() + Math.min(minutes, MAX_REMOTE_MINUTES) * 60_000).toISOString()
+        }
+      })
+    } catch (error) {
+      if (error instanceof TitleTakenRejection) return this.titleTakenValue(parentThreadId, error)
+      if (error instanceof CommandRejection && error.reason === 'parent_stopping')
+        return { started: false as const, code: 'parent_stopping' as const, message: error.message }
+      throw error
+    }
+    const value = {
+      delegationId: accepted.delegationId,
+      childThreadId: accepted.childThreadId,
+      childRunId: accepted.childRunId,
+      title: this.titleOf(accepted.childThreadId) ?? title ?? null,
+      computer: computer.name
+    }
+    if (accepted.replayed) return { ...value, replayed: true, note: 'Started. Mousse sends you the result when it finishes; end your turn.' }
+    this.recordRemoteSubagentMessage(accepted.childThreadId, 'user', input.prompt)
+    const launched = await remote.launch(accepted.delegationId)
+    if (launched.ok === false) {
+      // Nothing runs there: the task ends here without a notice, and its title is free again.
+      await engine.cancelDelegation(accepted.delegationId).catch(() => [])
+      this.threadStore?.updateThreadMeta(accepted.childThreadId, { name: `${value.title ?? 'Subagent'} (not started)` }, { touch: false })
+      return refuse(launched.code, `${computer.name} did not start the subagent: ${launched.message}`)
+    }
+    return {
+      ...value,
+      note: launched.ok === true
+        ? `Started on ${computer.name}. Mousse sends you the result when it finishes; end your turn.`
+        : `Sent to ${computer.name}, which has not confirmed it yet (${launched.message}). Mousse keeps trying and sends you the result; end your turn.`
+    }
+  }
+
+  /**
+   * Why an agent may not start a subagent on `node` now (issue #469): the switch in Agent access is off, or
+   * that computer is not checked under it. Undefined when it may.
+   */
+  private remoteSubagentDenial(node: string, name: string): { code: string; message: string } | undefined {
+    const access = this.agentAccessSettings()
+    if (!access.remoteSubagents)
+      return { code: 'remote_subagents_off', message: 'The user has not allowed agents to create subagents on other devices. They can turn it on in Settings → Agents → Agent access.' }
+    if (!access.computers.includes(node))
+      return { code: 'computer_not_allowed', message: `The user has not allowed agents to start subagents on ${name}. They can allow it in Settings → Agents → Agent access.` }
+    return undefined
+  }
+
+  /** The computer `ref` names among the user's other computers: its id, or its name (any case). */
+  private findComputer(ref: string):
+    | { ok: true; computer: { node: string; name: string; online: boolean } }
+    | { ok: false; code: string; message: string; extra: Record<string, unknown> } {
+    const computers = this.remoteSubagents?.computers() ?? []
+    const wanted = ref.trim().toLowerCase()
+    const byNode = computers.find((computer) => computer.node === ref.trim())
+    const byName = computers.filter((computer) => computer.name.trim().toLowerCase() === wanted)
+    if (byNode) return { ok: true, computer: byNode }
+    if (byName.length === 1) return { ok: true, computer: byName[0] }
+    const names = computers.map((computer) => computer.name)
+    if (byName.length > 1)
+      return { ok: false, code: 'ambiguous_computer', message: `Several of the user's computers are called "${ref}"; name one by its id from list_computers.`, extra: { computers: byName.map(({ node, name }) => ({ id: node, name })) } }
+    return { ok: false, code: 'unknown_computer', message: names.length ? `No computer is called "${ref}". The user's other computers: ${names.join(', ')}.` : 'This computer is not connected to any other computer of the user.', extra: {} }
+  }
+
+  /**
+   * `list_computers`: the user's other computers, each with what decides whether a subagent can start
+   * there now. The repository match is asked of each online computer that is allowed, in parallel.
+   */
+  private async listComputers(parentThreadId: string) {
+    if (!this.remoteSubagents || !this.remoteComputers)
+      return { computers: [], note: 'This computer is not connected to the user\'s other computers.' }
+    const access = this.agentAccessSettings()
+    if (!access.remoteSubagents)
+      return { computers: [], note: 'The user has not allowed agents to create subagents on other devices (Settings → Agents → Agent access).' }
+    const allowed = new Set(access.computers)
+    const projectId = this.threadStore?.getThread(parentThreadId)?.projectId
+    const projectPath = projectId ? this.projectManager?.getProject(projectId)?.path : undefined
+    const port = this.remoteComputers
+    const computers = await Promise.all(this.remoteSubagents.computers().map(async (computer) => {
+      let repository: 'same' | 'none' | 'unknown' | 'no_project' = projectPath ? 'unknown' : 'no_project'
+      if (projectPath && computer.online && allowed.has(computer.node)) {
+        const match = await port.matchProject(computer.node, projectPath, AbortSignal.timeout(15_000)).catch(() => undefined)
+        if (match !== undefined) repository = match && !match.weak ? 'same' : 'none'
+      }
+      return { id: computer.node, name: computer.name, online: computer.online, allowed: allowed.has(computer.node), repository }
+    }))
+    return {
+      computers,
+      note: 'A subagent can start on a computer that is online and allowed, and that has this repository (repository "same"; "no_project" when this thread has none).'
+    }
+  }
+
   /** The value `delegate_task` returns when its title belongs to another of the caller's subagents. */
   private titleTakenValue(parentThreadId: string, taken: TitleTakenRejection) {
     const existing = taken.childThreadIds.map((childThreadId) => {
@@ -5242,7 +5469,8 @@ export class OrchestratorService extends EventEmitter {
       inbox: engine.inbox,
       store: engine.store,
       thread: (threadId) => this.threadStore?.getThread(threadId),
-      hasPendingQuestion: (threadId) => this.questions.listPendingForThread(threadId).length > 0
+      hasPendingQuestion: (threadId) => this.questions.listPendingForThread(threadId).length > 0,
+      remote: (threadId) => this.threadStore?.getThread(threadId)?.runsOn ? this.remoteSubagents?.overlay(threadId) : undefined
     }, parentThreadId)
   }
 
@@ -5311,6 +5539,8 @@ export class OrchestratorService extends EventEmitter {
       const task = engine.delegations.getByChildRun(runId)
       if (task) return this.followUpValue(task, target.title, { replayed: true })
     }
+    if (this.threadStore?.getThread(childThreadId)?.runsOn)
+      return this.continueRemoteSubagent(parentThreadId, parentRunId, { childThreadId, title: target.title, requestId, prompt: input.prompt }, callerCeiling, callerAccess)
     const pending = this.questions.listPendingForThread(childThreadId)
     if (pending.length)
       return {
@@ -5363,6 +5593,102 @@ export class OrchestratorService extends EventEmitter {
     return this.followUpValue(task, target.title, response.queued ? { queued: true } : {})
   }
 
+  /**
+   * `continue_subagent` on a remote subagent (issue #469): a follow-up on the same thread on its computer,
+   * as a task of its own. Its computer runs one task at a time for it, so a subagent that is still working
+   * (or waiting for an answer there) takes no new work yet.
+   */
+  private async continueRemoteSubagent(
+    parentThreadId: string,
+    parentRunId: string,
+    target: { childThreadId: string; title: string; requestId: string; prompt: string },
+    callerCeiling?: ModeCeiling,
+    callerAccess?: AgentAccessLevel
+  ) {
+    const engine = this.requireRunEngine()
+    const remote = this.remoteSubagents
+    const refuse = (code: string, message: string) => ({ started: false as const, code, message, subagent: target.title, childThreadId: target.childThreadId })
+    const bindings = engine.remoteSubagents.listForChildThread(target.childThreadId)
+    const first = bindings.find((binding) => binding.remoteThreadId)
+    const replay = engine.store.getReceipt(target.requestId)
+    if (!replay) {
+      if (!remote || !this.remoteComputers) return refuse('remote_unavailable', 'Subagents on other computers need Mousse to be connected to your other computers (Settings → Devices).')
+      if (!first?.remoteThreadId) return refuse('not_started', `"${target.title}" never started on its computer, so it cannot be continued. Start a new subagent.`)
+      const name = remote.computerName(first.node)
+      const open = bindings.find((binding) => binding.state === 'starting' || binding.state === 'running')
+      if (open?.waitingInput) return refuse('needs_answer', `"${target.title}" is waiting for an answer on ${name}; the user answers it there.`)
+      if (open) return refuse('subagent_busy', `"${target.title}" is still working on ${name}. Wait for its result, then continue it.`)
+      const denied = this.remoteSubagentDenial(first.node, name)
+      if (denied) return refuse(denied.code, denied.message)
+      if (!remote.computers().find((computer) => computer.node === first.node)?.online) return refuse('computer_offline', `${name} is offline.`)
+    }
+    const tasks = engine.delegations.listForChildThread(target.childThreadId)
+    const task = tasks.find((entry) => entry.parentThreadId === parentThreadId)
+    const modeCeiling = narrowCeiling(callerCeiling, task?.modeCeiling)
+    const accessLevel = narrowAgentAccess(this.effectiveAccess(callerAccess ?? 'lineage'), narrowestAccess(tasks)) ?? 'lineage'
+    const base = bindings[0]
+    let accepted: Awaited<ReturnType<RunEngine['requestRemoteFollowUp']>>
+    try {
+      accepted = await engine.requestRemoteFollowUp({
+        childThreadId: target.childThreadId,
+        clientRequestId: target.requestId,
+        delegation: {
+          parentThreadId,
+          parentRunId,
+          prompt: target.prompt,
+          wake: 'always',
+          ...(modeCeiling ? { modeCeiling } : {}),
+          accessLevel,
+          workspace: task?.workspace,
+          role: task?.role,
+          provider: task?.provider,
+          model: task?.model
+        },
+        remote: {
+          node: base?.node ?? '',
+          prompt: target.prompt,
+          // Never looser than the run that asks now, nor than the subagent started with.
+          permissionMode: narrowPermissionMode(this.runPermissionMode(parentRunId), base?.permissionMode) as Exclude<PermissionMode, 'full'>,
+          chatMode: base?.chatMode === 'plan' || modeCeiling === 'plan' ? 'plan' : 'agent',
+          worktree: base?.worktree ?? false,
+          projectId: base?.projectId ?? null,
+          instanceId: null,
+          model: null,
+          deadlineAt: new Date(Date.now() + DEFAULT_REMOTE_MINUTES * 60_000).toISOString(),
+          remoteThreadId: first?.remoteThreadId ?? null
+        }
+      })
+    } catch (error) {
+      if (error instanceof CommandRejection && error.reason === 'parent_stopping')
+        return { started: false as const, code: 'parent_stopping' as const, message: error.message }
+      throw error
+    }
+    const delegation = engine.delegations.get(accepted.delegationId)
+    if (!delegation) throw new Error('The follow-up was not recorded as a task')
+    if (accepted.replayed) return this.followUpValue(delegation, target.title, { replayed: true })
+    this.recordRemoteSubagentMessage(target.childThreadId, 'user', target.prompt)
+    const launched = await remote!.launch(accepted.delegationId)
+    if (launched.ok === false) {
+      await engine.cancelDelegation(accepted.delegationId).catch(() => [])
+      return refuse(launched.code, `${remote!.computerName(base?.node ?? '')} did not take the follow-up: ${launched.message}`)
+    }
+    return this.followUpValue(delegation, target.title, {})
+  }
+
+  /** A line a remote subagent's stand-in shows in its transcript: what it was asked, what it answered. Never sent to a model. */
+  private recordRemoteSubagentMessage(threadId: string, role: 'user' | 'assistant', content: string): void {
+    const text = content.trim()
+    if (!text || (this.threadStore && !this.threadStore.getThread(threadId))) return
+    const session = this.getOrCreateSession(threadId)
+    if (session.deleted) return
+    this.sessionAls.run(session, () => {
+      const msg: ChatMessage = { id: uuidv4(), role, content: text, timestamp: new Date().toISOString() }
+      this.messages.push(msg)
+      this.emitMessageAdded(msg)
+      this.persist(true)
+    })
+  }
+
   private followUpValue(task: DelegationRecord, title: string, extra: { queued?: boolean; replayed?: boolean }) {
     return {
       delegationId: task.delegationId,
@@ -5384,6 +5710,9 @@ export class OrchestratorService extends EventEmitter {
   private answerSubagent(parentThreadId: string, parentRunId: string, input: { subagent: string; requestId: string; answers: Record<string, string | string[]> }) {
     const target = this.resolveSubagentTarget(parentThreadId, input.subagent)
     if (!target.ok) return { answered: false as const, ...target.refusal }
+    const runsOn = this.threadStore?.getThread(target.childThreadId)?.runsOn
+    if (runsOn)
+      return { answered: false as const, code: 'answer_on_computer' as const, message: `"${target.title}" runs on ${runsOn.computerName}; its questions are answered there.` }
     const pending = this.questions.getPending(input.requestId)
     if (!pending || pending.threadId !== target.childThreadId)
       return {
@@ -5451,7 +5780,20 @@ export class OrchestratorService extends EventEmitter {
         ? { workState: 'waiting_for_subagents' as const, waitingOn: row.waitingOn }
         : {}),
       ...(pending.length ? { pendingQuestion: pending.map(({ requestId, questions }) => ({ requestId, questions })) } : {}),
+      ...(row?.computer ? { computer: this.remoteTaskStatus(delegationId, row.computer) } : {}),
       ...(delegation.result ? { result: delegation.result } : {})
+    }
+  }
+
+  /** What `task_status` says about the computer a remote subagent's task runs on. */
+  private remoteTaskStatus(delegationId: string, computer: NonNullable<SubagentSummary['computer']>) {
+    const binding = this.requireRunEngine().remoteSubagents.get(delegationId)
+    return {
+      name: computer.name,
+      online: computer.online,
+      ...(binding?.waitingInput ? { waitingForAnswer: true, note: `It waits for an answer on ${computer.name}; the user answers it there.` } : {}),
+      ...(binding?.lastError && binding.state !== 'done' ? { lastError: binding.lastError } : {}),
+      ...(binding?.lastSeenAt ? { lastSeenAt: binding.lastSeenAt } : {})
     }
   }
 
@@ -5536,7 +5878,8 @@ export class OrchestratorService extends EventEmitter {
       workspace: row.workspace,
       role: row.role,
       provider: row.provider,
-      model: row.model
+      model: row.model,
+      ...(row.computer ? { computer: row.computer.name, computerOnline: row.computer.online } : {})
     }))
   }
 
@@ -8322,6 +8665,11 @@ export class OrchestratorService extends EventEmitter {
     if (this.threadStore && !this.threadStore.getThread(threadId)) {
       throw new Error(`Thread not found: ${threadId}`)
     }
+    // A remote subagent's thread here only stands in for the thread on its computer (issue #469): no turn
+    // runs here. Its parent continues it with continue_subagent; a person writes to it on that computer.
+    const runsOn = this.threadStore?.getThread(threadId)?.runsOn
+    if (runsOn)
+      throw new DomainRpcError('runs_on_other_computer', `This subagent runs on ${runsOn.computerName}. Open its thread there to write to it.`, { node: runsOn.node, ...(runsOn.ref ? { ref: runsOn.ref } : {}) })
 
     const session = this.getOrCreateSession(threadId)
     if (session.deleted) {

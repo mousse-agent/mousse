@@ -71,6 +71,21 @@ export interface SubagentSummary {
   waitingOn: SubagentWaitingOn[]
   /** Every task given to this child, oldest first. */
   tasks: SubagentTaskSummary[]
+  /** Set on a remote subagent (issue #469): the computer that runs it. */
+  computer?: SubagentComputer
+}
+
+/** The computer a remote subagent runs on, as its row shows it. */
+export interface SubagentComputer {
+  /** Its Net node id. */
+  node: string
+  name: string
+  /** Connected now. An offline computer's subagent may still be working there: this is not an outcome. */
+  online: boolean
+  /** Its thread there, as a qualified id this computer opens; absent until that computer created it. */
+  ref?: string
+  /** Why the latest call to that computer failed, while its task is still open. */
+  lastError?: string
 }
 
 /**

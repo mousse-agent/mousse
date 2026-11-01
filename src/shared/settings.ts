@@ -108,6 +108,17 @@ export interface AgentAccessSettings {
   projectIds: string[]
   /** `manage` only: an agent may answer a pending approval on another thread. */
   answerApprovals: boolean
+  /**
+   * "Allow agents to create Subagents on other Devices". Off, the default, refuses every remote subagent
+   * whatever `computers` lists; the list is kept, so turning it back on restores the same computers.
+   */
+  remoteSubagents: boolean
+  /**
+   * With `remoteSubagents` on, the user's other computers an agent may start subagents on (their Net node
+   * ids). Empty means none: a remote subagent runs under that computer's provider accounts, so each one is
+   * chosen here.
+   */
+  computers: string[]
 }
 
 const AGENT_ACCESS_LEVELS: readonly AgentAccessLevel[] = ['lineage', 'read', 'manage']
@@ -136,11 +147,17 @@ export function normalizeAgentAccessSettings(raw?: Partial<AgentAccessSettings> 
   const ids: unknown = raw?.projectIds
   const malformed =
     ids !== undefined && ids !== null && (!Array.isArray(ids) || ids.some((id) => typeof id !== 'string' || id.length === 0))
-  if (malformed) return { level: 'lineage', projectIds: [], answerApprovals: false }
+  // A computer list that cannot be read allows none, whatever else the setting says.
+  const nodes: unknown = raw?.computers
+  const computers = Array.isArray(nodes) && nodes.every((node) => typeof node === 'string' && node.length > 0) ? [...new Set(nodes as string[])] : []
+  const remoteSubagents = raw?.remoteSubagents === true
+  if (malformed) return { level: 'lineage', projectIds: [], answerApprovals: false, remoteSubagents, computers }
   const level = isAgentAccessLevel(raw?.level) ? raw.level : 'lineage'
   return {
     level,
     projectIds: Array.isArray(ids) ? [...new Set(ids as string[])] : [],
+    remoteSubagents,
+    computers,
     // Answering approvals is part of Manage. Below it the switch reads, and is saved, as off, whoever wrote the
     // level (the Settings screen, a partial update from another client, a hand edit), so raising the level
     // again never brings the permission back by itself.

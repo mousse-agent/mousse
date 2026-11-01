@@ -31,6 +31,7 @@ import { stripComposerTransportMarkers } from './QueuedMessages'
 import { MousseAgentChatShell } from '../chat/components/MousseAgentChatShell'
 import { SubagentParentBar } from './SubagentParentBar'
 import { SubagentComposerBanner } from './SubagentComposerBanner'
+import { RemoteSubagentNotice } from './RemoteSubagentNotice'
 import { ThreadMoveBanner } from './providers/MoveProviderDialog'
 import { mousseToUIMessages, chatStatusFromTurn } from '../chat/adapters/mousseToUI'
 import { useTurnSenders } from '../hooks/useTurnSenders'
@@ -1264,7 +1265,7 @@ export function OrchestratorChat() {
               placeholder={workspaceReady ? (permissionRequests.waiting || pendingQuestions?.approval ? APPROVAL_COMPOSER_PLACEHOLDER : undefined) : 'Loading workspace...'}
               onSend={(skillMode) => void handleSend(skillMode)}
               onStop={() => void handleStop()}
-              banner={<SubagentComposerBanner threadId={activeThreadId} />}
+              banner={<><RemoteSubagentNotice runsOn={activeThread?.runsOn} /><SubagentComposerBanner threadId={activeThreadId} /></>}
               searchMentions={searchMentions}
               mentionScope={mentionScope}
               permission={{ mode: shownPermissionMode, ceiling: shownCeiling.ceiling, ceilingReason: shownCeiling.reason, onSelect: (mode) => void handlePermissionSelect(mode) }}

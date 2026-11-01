@@ -26,6 +26,7 @@ import type {
   Thread,
   ThreadData,
   ThreadLineage,
+  ThreadRunsOn,
   ThreadSentFrom,
   ThreadStartedFrom
 } from '../../shared/types'
@@ -65,6 +66,8 @@ interface ThreadMeta {
   startedFrom?: ThreadStartedFrom
   /** See `Thread.sentFrom`. */
   sentFrom?: ThreadSentFrom
+  /** See `Thread.runsOn`. */
+  runsOn?: ThreadRunsOn
   /** See `Thread.accessCeiling`. */
   accessCeiling?: AgentAccessLevel
   workspaceBinding?: SubagentWorkspaceBinding
@@ -306,6 +309,8 @@ export class ThreadDataStore extends EventEmitter {
       /** See `Thread.accessCeiling`. */
       accessCeiling?: AgentAccessLevel
       scheduledJobId?: string
+      /** See `Thread.runsOn`: a remote subagent's stand-in. */
+      runsOn?: ThreadRunsOn
     }
   ): Thread {
     const id = opts?.id ?? uuidv4()
@@ -329,6 +334,7 @@ export class ThreadDataStore extends EventEmitter {
     if (opts?.permissionMode) meta.permissionMode = opts.permissionMode
     if (opts?.workspaceBinding) meta.workspaceBinding = structuredClone(opts.workspaceBinding)
     if (opts?.scheduledJobId) meta.scheduledJobId = opts.scheduledJobId
+    if (opts?.runsOn) meta.runsOn = structuredClone(opts.runsOn)
 
     const threadDir = this.resolveThreadDir(meta, projectPath)
     // An owner without a lifecycle record yet (an older thread) is registered first; the child's
@@ -595,7 +601,7 @@ export class ThreadDataStore extends EventEmitter {
   /** `touch: false` keeps `updatedAt`, for repairs that must not reorder the sidebar. */
   updateThreadMeta(
     id: string,
-    partial: Partial<Pick<Thread, 'name' | 'modelOverride' | 'permissionMode' | 'worktreeEnabled' | 'lineage' | 'createdByThreadId' | 'startedFrom' | 'sentFrom' | 'accessCeiling' | 'workspaceBinding' | 'pullRequest'>>,
+    partial: Partial<Pick<Thread, 'name' | 'modelOverride' | 'permissionMode' | 'worktreeEnabled' | 'lineage' | 'createdByThreadId' | 'startedFrom' | 'sentFrom' | 'runsOn' | 'accessCeiling' | 'workspaceBinding' | 'pullRequest'>>,
     opts: { touch?: boolean } = {}
   ): Thread {
     const thread = this.getThread(id)

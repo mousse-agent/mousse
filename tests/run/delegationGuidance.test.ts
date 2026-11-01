@@ -29,6 +29,7 @@ describe('subagent guidance', () => {
       - Pick workspace "isolated" for work that edits, builds or tests; "shared" only for read-only roles (role "research" or "review").
       - After delegating or continuing, end your turn. Mousse sends you a notice with the result, so do not poll; call task_status only when the notice says the result was cut off. Use integrate_delegation to merge a finished isolated task.
       - When a subagent asks a question you can answer, use answer_subagent; otherwise ask the user. A subagent that needs input is reported as needing it.
+      - To run a subagent on another of the user's computers (another operating system, a stronger machine, a job that should outlive this one), pass computer to delegate_task; list_computers shows which ones you may use. It runs there under that computer's agents, in its copy of this repository; its questions are answered there, and its result names the branch its work is on.
       - clientRequestId: pass a fresh clientRequestId for every new action that changes state (delegate_task, continue_subagent, answer_subagent, integrate_delegation). Reuse the same value only when retrying the same call after an error or timeout; Mousse then returns the first result instead of acting twice.
       - A delegated task can never exceed your own mode ceiling: a planning turn may only start planning children and cannot integrate.
       - Use ask_user for clarifying questions and present_plan for a plan the user should approve; use thread_read to read your thread's run events (and those of your parent or children).
@@ -82,7 +83,7 @@ describe('the delegation tools models are offered', () => {
     }))).toMatchInlineSnapshot(`
       [
         {
-          "description": "Start a new subagent on its own thread and return at once with its delegationId. Mousse sends you a notice with the result when it finishes. title is a short role-like name ("API reviewer"), unique among your subagents: it is how you address the subagent later (continue_subagent, task_status, task_cancel); when it is taken the call returns title_taken and starts nothing. workspace isolated gives the subagent its own worktree; shared is only for read-only roles (research, review). instanceId (the agent to run, such as "claude" or "pi:openai") and model default to yours; provider is the older name form of instanceId.",
+          "description": "Start a new subagent on its own thread and return at once with its delegationId. Mousse sends you a notice with the result when it finishes. title is a short role-like name ("API reviewer"), unique among your subagents: it is how you address the subagent later (continue_subagent, task_status, task_cancel); when it is taken the call returns title_taken and starts nothing. workspace isolated gives the subagent its own worktree; shared is only for read-only roles (research, review). instanceId (the agent to run, such as "claude" or "pi:openai") and model default to yours; provider is the older name form of instanceId. computer runs the subagent on another of the user's computers (a name from list_computers), in its copy of this repository and under its own agents; there instanceId and model default to that computer's, and maxMinutes (default 360) stops it if it runs longer. Its result names the branch its work is on there.",
           "name": "delegate_task",
           "parameters": [
             "prompt",
@@ -93,6 +94,8 @@ describe('the delegation tools models are offered', () => {
             "role",
             "workspace",
             "wake",
+            "computer",
+            "maxMinutes",
           ],
           "required": [
             "prompt",
@@ -154,8 +157,14 @@ describe('the delegation tools models are offered', () => {
           "required": [],
         },
         {
-          "description": "List your subagents, one row per subagent: title, childThreadId, state, latest delegationId, whether a result is unread, workspace, provider and model.",
+          "description": "List your subagents, one row per subagent: title, childThreadId, state, latest delegationId, whether a result is unread, workspace, provider and model, and the computer a remote one runs on.",
           "name": "list_subagents",
+          "parameters": [],
+          "required": [],
+        },
+        {
+          "description": "List the user's other computers you may start subagents on (delegate_task computer): name, whether it is online, whether the user allowed it, and whether it has this repository. Starts nothing.",
+          "name": "list_computers",
           "parameters": [],
           "required": [],
         },
@@ -185,7 +194,7 @@ describe('the delegation tools models are offered', () => {
         const mcpProperties = Object.keys((served.inputSchema as { properties: Record<string, unknown> }).properties)
         // The MCP server adds only what its callers need on top: a retry key, and a ceiling for delegate_task.
         expect(mcpProperties.filter((name) => !piProperties.includes(name)).sort()).toEqual(
-          tool.name === 'delegate_task' ? ['clientRequestId', 'modeCeiling'] : tool.name === 'list_subagents' || tool.name === 'task_status' || tool.name === 'task_cancel' ? [] : ['clientRequestId']
+          tool.name === 'delegate_task' ? ['clientRequestId', 'modeCeiling'] : tool.name === 'list_subagents' || tool.name === 'list_computers' || tool.name === 'task_status' || tool.name === 'task_cancel' ? [] : ['clientRequestId']
         )
         expect(piProperties.every((name) => mcpProperties.includes(name))).toBe(true)
       }
