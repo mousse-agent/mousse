@@ -314,6 +314,15 @@ export class ChatGptStore {
     try {
       value = openSecretFile(row.payload, this.codec).value
     } catch (error) {
+      if (error instanceof SecretFileError && error.kind === 'unavailable' && this.codec.plainAtRest) {
+        // Saved through the keychain, which this build never asks: kept aside, and the next sign-in replaces it.
+        try {
+          writeFileSync(`${this.path}.keychain-${row.revision}`, row.payload, { flag: 'wx', mode: 0o600 })
+        } catch (copy) {
+          if ((copy as NodeJS.ErrnoException).code !== 'EEXIST') throw new ChatGptAuthError('protocol', 'storage', MESSAGES.storageWrite)
+        }
+        return { ...emptyStore(), revision: row.revision, signInFence: row.fence, incarnation }
+      }
       if (error instanceof SecretFileError && error.kind === 'unavailable') throw new ChatGptAuthError('unsupported', 'storage_locked', MESSAGES.storageLocked)
       throw corrupt()
     }

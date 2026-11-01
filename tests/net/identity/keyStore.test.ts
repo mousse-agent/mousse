@@ -167,23 +167,17 @@ describe('FileKeyStore real key files and restart', () => {
   it('keeps keys in an owner-only file under a codec that skips the keychain, and a keychain build takes them back', async () => {
     const dir = profile(),
       storage = vault(),
-      ownerFile: SecretCodec = { plainAtRest: true, canEncrypt: () => false, encrypt: () => null, decrypt: storage.codec.decrypt },
+      ownerFile: SecretCodec = { plainAtRest: true, canEncrypt: () => false, encrypt: () => null, decrypt: () => null },
       file = join(dir, 'net', 'keys.json'),
       mode = () => JSON.parse(readFileSync(file).toString()).mode
-    const created = await new FileKeyStore(dir, { codec: storage.codec }).initialize({ asAuthority: true })
-    expect(mode()).toBe('vault')
     const keys = new FileKeyStore(dir, { codec: ownerFile })
-    expect(keys.state()).toBe('unlocked')
-    expect(keys.nodeKeys()).toEqual(created.node)
+    const created = await keys.initialize({ asAuthority: true })
     expect(mode()).toBe('plain')
     if (process.platform !== 'win32') expect(statSync(file).mode & 0o077).toBe(0)
     expect(keys.protectedAtRest()).toBe(true)
     keys.protect()
     expect(mode()).toBe('plain')
-    const fresh = new FileKeyStore(profile(), { codec: ownerFile })
-    await fresh.initialize({ asAuthority: true })
-    expect(fresh.protectedAtRest()).toBe(true)
-    expect(new FileKeyStore(profile(), { codec: noVault }).protectedAtRest()).toBe(false)
+    expect(new FileKeyStore(dir, { codec: noVault }).protectedAtRest()).toBe(false)
     const signed = new FileKeyStore(dir, { codec: storage.codec })
     expect(signed.nodeKeys()).toEqual(created.node)
     expect(mode()).toBe('vault')

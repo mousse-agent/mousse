@@ -12,8 +12,8 @@ import { createRequire } from 'node:module'
  *
  * The exception is a macOS build without a stable signature (ad hoc, as local
  * and CI builds are today). The keychain trusts each such build separately, so
- * every update would ask for the login password again. Those builds keep
- * secrets in owner-only files instead (`plainAtRest`).
+ * every update would ask for the login password again. Those builds never use
+ * the keychain and keep secrets in owner-only files instead (`plainAtRest`).
  *
  * No static electron import: resolved lazily via process detection so src/mms
  * stays loadable in plain node and tests.
@@ -30,7 +30,8 @@ export interface SecretCodec {
   readonly encryptionRequired?: boolean
   /**
    * Secrets are deliberately saved as owner-only files without the OS vault, and count as
-   * protected. Data a vault encrypted before is still read, and saved plain from then on.
+   * protected. The vault is never asked, so data it encrypted before cannot be read: each store
+   * sets such a file aside (`setAsideSecretFile`) and starts empty.
    */
   readonly plainAtRest?: boolean
   /** True when payloads written now will be encrypted. */
@@ -82,26 +83,9 @@ class SafeStorageCodec implements SecretCodec {
   }
 }
 
-/** Reads data a keychain-backed build encrypted; never writes to the keychain. */
-class OwnerFileCodec implements SecretCodec {
+/** Never touches the keychain: reading from it would ask for the login password. */
+class OwnerFileCodec extends PassthroughCodec {
   readonly plainAtRest = true
-  constructor(private readonly safeStorage: SafeStorageLike) {}
-
-  canEncrypt(): boolean {
-    return false
-  }
-
-  encrypt(): Buffer | null {
-    return null
-  }
-
-  decrypt(stored: Buffer): string | null {
-    try {
-      return this.safeStorage.decryptString(stored)
-    } catch {
-      return null
-    }
-  }
 }
 
 /**
@@ -132,7 +116,7 @@ export function createSecretCodec(): SecretCodec {
     const requireFromHere = createRequire(typeof __filename === 'string' ? __filename : import.meta.url)
     const electron = requireFromHere('electron') as { safeStorage?: SafeStorageLike }
     if (!electron?.safeStorage) return new PassthroughCodec(true)
-    if (process.platform === 'darwin' && !signedMacApp()) return new OwnerFileCodec(electron.safeStorage)
+    if (process.platform === 'darwin' && !signedMacApp()) return new OwnerFileCodec()
     return new SafeStorageCodec(electron.safeStorage)
   } catch {
     return new PassthroughCodec(true)

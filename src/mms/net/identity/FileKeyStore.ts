@@ -162,9 +162,26 @@ function material(value: unknown): KeyMaterial {
 }
 
 /**
- * Profile-owned keys. Encryption mode is pinned in the file and never silently downgraded, except to
- * an owner-only file under a codec that keeps secrets that way (`plainAtRest`).
+ * Moves a profile's network data aside (`net` becomes `net.keychain-<time>`) when its keys were saved
+ * through the keychain and this build never asks the keychain (`plainAtRest`), so networking starts
+ * over with a new identity instead of asking for the login password. Nothing is deleted. Call it
+ * before anything opens the network database.
  */
+export function setAsideKeychainNetwork(profileDir: string, codec: SecretCodec = createSecretCodec()): boolean {
+  if (!codec.plainAtRest) return false
+  const directory = join(profileDir, 'net')
+  let mode: unknown
+  try {
+    mode = (parse(readFileSync(join(directory, 'keys.json'))) as { mode?: unknown }).mode
+  } catch {
+    return false
+  }
+  if (mode !== 'vault') return false
+  renameSync(directory, `${directory}.keychain-${Date.now()}`)
+  return true
+}
+
+/** Profile-owned keys. Encryption mode is pinned in the file and never silently downgraded. */
 export class FileKeyStore implements KeyStore {
   private readonly file: string
   private readonly codec: SecretCodec
@@ -463,15 +480,7 @@ export class FileKeyStore implements KeyStore {
   private tryVault(): void {
     if (this.stored?.mode !== 'vault') return
     const plain = this.codec.decrypt(decodeBase64(this.stored.data))
-    if (plain === null) return
-    this.keys = material(parse(Buffer.from(plain)))
-    // Saved plain right away, so a later build without the keychain never has to ask for it again.
-    if (this.codec.plainAtRest)
-      try {
-        this.persist(this.keys)
-      } catch {
-        // Stays in the vault until the next change.
-      }
+    if (plain !== null) this.keys = material(parse(Buffer.from(plain)))
   }
   private mutate(change: (next: KeyMaterial) => void): void {
     const next = structuredClone(this.required())
@@ -574,8 +583,7 @@ export class FileKeyStore implements KeyStore {
   private persist(keys: KeyMaterial, initial = false, protection?: 'vault' | 'passphrase'): void {
     const plain = JSON.stringify(keys)
     let stored: StoredKeys
-    const pinned = this.stored?.mode === 'vault' && this.codec.plainAtRest ? undefined : this.stored?.mode,
-      mode = protection ?? pinned
+    const mode = protection ?? this.stored?.mode
     if (mode === 'vault' || (!mode && this.codec.canEncrypt())) {
       const value = this.codec.encrypt(plain)
       if (!value) {

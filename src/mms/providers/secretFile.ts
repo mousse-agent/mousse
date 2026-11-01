@@ -1,3 +1,4 @@
+import { renameSync } from 'node:fs'
 import type { SecretCodec } from './secretCodec'
 
 /** The JSON key of an encrypted secret file: `{ "__mousse_encrypted_v1": "<base64>" }`. */
@@ -27,6 +28,14 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function parse(raw: string): unknown {
   // Never include parser errors: they may quote credential material.
   try { return JSON.parse(raw) } catch { throw new SecretFileError('the stored data is invalid JSON') }
+}
+
+/**
+ * Moves a file the OS vault encrypted out of the way, next to it, so a build that keeps secrets
+ * in owner-only files (`plainAtRest`) starts empty instead of failing. Nothing is deleted.
+ */
+export function setAsideSecretFile(path: string): void {
+  renameSync(path, `${path}.keychain-${Date.now()}`)
 }
 
 /** Reads a stored secret file: plain JSON, or the encrypted envelope around it. */

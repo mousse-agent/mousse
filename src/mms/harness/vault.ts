@@ -2,6 +2,7 @@ import { mkdirSync, readFileSync, rmSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { atomicWriteFileSync } from '../data/AtomicFs'
 import { createSecretCodec, type SecretCodec } from '../providers/secretCodec'
+import { setAsideSecretFile } from '../providers/secretFile'
 
 /**
  * Secrets of one instance (`<stateDir>/secrets.json`): string values by name, encrypted at rest
@@ -37,8 +38,7 @@ export class InstanceVault {
     } catch {
       throw this.failure('the stored data is invalid')
     }
-    const encrypted = !!parsed && typeof parsed === 'object' && Object.hasOwn(parsed, ENVELOPE_KEY)
-    if (encrypted) {
+    if (parsed && typeof parsed === 'object' && Object.hasOwn(parsed, ENVELOPE_KEY)) {
       const payload = (parsed as Record<string, unknown>)[ENVELOPE_KEY]
       let decrypted: string | null = null
       try {
@@ -46,7 +46,12 @@ export class InstanceVault {
       } catch {
         decrypted = null
       }
-      if (decrypted === null) throw this.failure('decryption is unavailable or failed')
+      if (decrypted === null) {
+        if (!this.codec.plainAtRest) throw this.failure('decryption is unavailable or failed')
+        // Saved through the keychain, which this build never asks: start empty.
+        setAsideSecretFile(this.path)
+        return (this.cache = {})
+      }
       try {
         parsed = JSON.parse(decrypted)
       } catch {
@@ -55,10 +60,6 @@ export class InstanceVault {
     }
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw this.failure('the stored data is invalid')
     const values = Object.fromEntries(Object.entries(parsed as Record<string, unknown>).filter((entry): entry is [string, string] => typeof entry[1] === 'string'))
-    // Saved plain right away, so a later build without the keychain never has to ask for it again.
-    if (encrypted && this.codec.plainAtRest && Object.keys(values).length) {
-      try { this.write(values) } catch { /* stays encrypted until the next save */ }
-    }
     return (this.cache = values)
   }
 

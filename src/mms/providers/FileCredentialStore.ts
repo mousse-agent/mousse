@@ -3,7 +3,7 @@ import type { Credential, CredentialStore } from '@earendil-works/pi-ai'
 import { atomicWriteFileSync } from '../data/AtomicFs'
 import { withFileLock } from '../scheduled/fileLock'
 import { createSecretCodec, type SecretCodec } from './secretCodec'
-import { openSecretFile, sealSecretFile, SecretFileError } from './secretFile'
+import { openSecretFile, sealSecretFile, SecretFileError, setAsideSecretFile } from './secretFile'
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -58,16 +58,23 @@ export class FileCredentialStore implements CredentialStore {
     // Reading a missing store must not create or overwrite anything.
     if (this.source === null) return
     const source = this.source
-    const { value: parsed, encrypted } = this.secretFile(() => openSecretFile(source, this.codec))
+    let opened: ReturnType<typeof openSecretFile>
+    try {
+      opened = openSecretFile(source, this.codec)
+    } catch (error) {
+      if (!(error instanceof SecretFileError)) throw error
+      if (error.kind !== 'unavailable' || !this.codec.plainAtRest) throw this.failure(error.reason)
+      // Saved through the keychain, which this build never asks: sign in again.
+      setAsideSecretFile(this.path)
+      this.source = null
+      return
+    }
+    const { value: parsed, encrypted } = opened
     this.encrypted = encrypted
     if (!isRecord(parsed) || !Object.values(parsed).every(isCredential)) {
       throw this.failure('the credential structure is invalid')
     }
     this.data = new Map(Object.entries(parsed) as [string, Credential][])
-    // Saved plain right away, so a later build without the keychain never has to ask for it again.
-    if (encrypted && this.codec.plainAtRest) {
-      try { this.persist(this.data) } catch { /* stays encrypted until the next save */ }
-    }
   }
 
   listProviderIds(): string[] { return [...this.data.keys()] }
