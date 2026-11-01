@@ -286,6 +286,59 @@ describe('OrchestratorService over the Run Engine', () => {
     ).rejects.toThrow('client_request_id_conflict')
   }, 30_000)
 
+  it('answers a send whose turn failed after it started with its run, and a retry runs nothing', async () => {
+    const thread = store.createThread('failed-after-start')
+    orch.getOrCreateSession(thread.id).projectCwd = projectRepo
+    releaseFirst()
+    // The provider has answered, then the turn fails as a turn-end checkpoint does when the agent moved the
+    // workspace's branch ("recovery is required"). The agent's work is done by then.
+    const internals = orch as unknown as { setTurnPhase: (threadId: string, phase: string, ...rest: unknown[]) => void }
+    const setTurnPhase = internals.setTurnPhase.bind(orch)
+    internals.setTurnPhase = (threadId, phase, ...rest) => {
+      if (phase === 'finalizing') throw new Error('Workspace branch changed during execution; recovery is required.')
+      setTurnPhase(threadId, phase, ...rest)
+    }
+    const first = await orch.send('push and open a PR', false, { threadId: thread.id, clientRequestId: 'failed-send' })
+    expect(chatCalls).toBe(1)
+    expect(first.runId).toBeTruthy()
+    expect(first.error).toMatchObject({ code: 'orchestrator_turn_failed' })
+    expect(first.message).toMatch(/^\[orchestrator_turn_failed\] /)
+    expect(engine.getRun(first.runId!)).toMatchObject({
+      status: 'failed',
+      outcome: { error: 'Workspace branch changed during execution; recovery is required.' }
+    })
+    expect(engine.getRun(first.runId!)!.startedAt).not.toBeNull()
+
+    const again = await orch.send('push and open a PR', false, { threadId: thread.id, clientRequestId: 'failed-send' })
+    expect(again).toMatchObject({ runId: first.runId, replayed: true })
+    expect(chatCalls).toBe(1)
+    expect(engine.listRuns(thread.id)).toHaveLength(1)
+  }, 30_000)
+
+  it('fails a send whose turn could not start, and nothing of it runs later', async () => {
+    const thread = store.createThread('failed-before-start')
+    orch.getOrCreateSession(thread.id).projectCwd = projectRepo
+    releaseFirst()
+    // The message cannot be taken into the thread: the turn ends before its run starts.
+    const internals = orch as unknown as { acceptTurnUserInput: (...args: unknown[]) => void }
+    const accept = internals.acceptTurnUserInput
+    internals.acceptTurnUserInput = () => { throw new Error('transcript is not writable') }
+    await expect(
+      orch.send('never runs', false, { threadId: thread.id, clientRequestId: 'refused-send' })
+    ).rejects.toThrow('transcript is not writable')
+    const [run] = engine.listRuns(thread.id)
+    expect(run).toMatchObject({ status: 'failed', startedAt: null })
+    internals.acceptTurnUserInput = accept
+    // The worker and reconciler get their chance: the refused run never reaches the provider.
+    await new Promise((resolve) => setTimeout(resolve, 300))
+    expect(chatCalls).toBe(0)
+    expect(effectStatuses(engine, thread.id, 'turn.start', run.runId).at(-1)).toBe('succeeded')
+    // Sent again as a new message, it runs once.
+    const next = await orch.send('never runs', false, { threadId: thread.id, clientRequestId: 'refused-send-2' })
+    expect(next.message).toBe('hello from probe')
+    expect(chatCalls).toBe(1)
+  }, 30_000)
+
   it('gives a pre-upgrade queue item a run when it drains', async () => {
     const thread = store.createThread('legacy-queue')
     orch.getOrCreateSession(thread.id).projectCwd = projectRepo

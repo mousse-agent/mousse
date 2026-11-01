@@ -55,6 +55,7 @@ import { ThreadComputerBar } from './ThreadComputerBar'
 import { EarlierMessagesBar } from './EarlierMessagesBar'
 import { forgetMessageImageRequests, hydrateMessageImages } from '../lib/messageImages'
 import { isOutcomeUncertain, settleUncertainSend } from '../lib/uncertainSend'
+import { SendRetryIds } from '../lib/sendRetryIds'
 import { onProviderListingsChanged, pickerIdFor, pickerProviders, projectScope, useProviderSnapshots } from '../lib/providerSnapshots'
 import { errorText, sendErrorLine } from '../lib/errorText'
 import { PromptUndoNotice } from './PromptUndoControls'
@@ -250,7 +251,7 @@ export function OrchestratorChat() {
     state.addComposerReference(expectedThread, resolved)
     setSendError(null)
   }, [])
-  const pendingSends = useRef(new Map<string, string>())
+  const sendIds = useRef(new SendRetryIds())
   const blankSendPending = useRef(false)
   useEffect(() => { setSendError(null); setSendChanges(null) }, [profileId, activeThreadId])
   const [optimisticQueueItems, setOptimisticQueueItems] = useState<QueuedMessage[]>([])
@@ -668,9 +669,8 @@ export function OrchestratorChat() {
       const bytes = new TextEncoder().encode(JSON.stringify({ profileId, threadId: targetThreadId, content, mode, images }))
       const signature = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', bytes)), (byte) => byte.toString(16).padStart(2, '0')).join('')
       if (!stillVisible()) return
-      const requestId = pendingSends.current.get(signature) ?? crypto.randomUUID()
-      pendingSends.current.set(signature, requestId)
-      if (pendingSends.current.size > 32) pendingSends.current.delete(pendingSends.current.keys().next().value!)
+      // The service's retry key: a send that may have arrived lends its id to the same message sent again.
+      const requestId = sendIds.current.begin(signature)
       const request = {
         requestId,
         content: content || (images?.length ? '[Image attachment]' : ''),
@@ -728,11 +728,12 @@ export function OrchestratorChat() {
         }
       }
       try {
-        const result = targetThreadId
-          ? await window.mousse.orchestrator.sendToThread(targetThreadId, request)
-          : await window.mousse.orchestrator.send(request)
+        const result = await (targetThreadId
+          ? window.mousse.orchestrator.sendToThread(targetThreadId, request)
+          : window.mousse.orchestrator.send(request)
+        ).finally(() => sendIds.current.replied(requestId))
         if (result.error && result.requestAcknowledged === false) throw result.error
-        pendingSends.current.delete(signature)
+        sendIds.current.settle(signature, requestId)
         if (!stillVisible()) return
         // Queued sends return quickly while an earlier turn remains active — do not clear loading.
         if (optimisticQueueId) {
@@ -762,6 +763,9 @@ export function OrchestratorChat() {
         if (stillVisible()) setLoading(stillActive)
         return true
       } catch (error) {
+        // A send the service refused ran nothing: the same text sent again is a new message. Replaying the
+        // refused id would answer with that run and run nothing.
+        if (!isOutcomeUncertain(error)) sendIds.current.settle(signature, requestId)
         if (!stillVisible()) return
         setSendError(sendErrorLine(error))
         const changes = pendingChangesDetails(error)

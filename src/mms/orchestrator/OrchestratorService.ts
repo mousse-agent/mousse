@@ -437,6 +437,8 @@ export interface OrchestratorSendOptions {
   /**
    * `turn` (default) resolves with the turn's result; `ack` resolves once the send is committed
    * and its `turn.start` effect recorded (SPEC §12.7). Only the engine path honours `ack`.
+   * With `turn`, a turn that started and then failed still resolves, with the run and `error`:
+   * only a send whose turn never started rejects.
    */
   awaitMode?: 'turn' | 'ack'
   /** SPEC §16.4: the interrupted run this send continues (the restart note's "Continue"). */
@@ -8378,7 +8380,11 @@ export class OrchestratorService extends EventEmitter {
         const live = this.turnResults.get(result.runId)
         const run = live ? this.runEngine.getRun(result.runId) : null
         if (live && opts?.awaitMode !== 'ack' && run && !TERMINAL_RUN_STATUSES.has(run.status)) {
-          return { ...(await live.promise), ...replayed }
+          try {
+            return { ...(await live.promise), ...replayed }
+          } catch (error) {
+            return this.startedTurnFailure(error, replayed)
+          }
         }
         return { message: '', actions: [], ...replayed }
       }
@@ -8468,19 +8474,60 @@ export class OrchestratorService extends EventEmitter {
         pending.catch(() => undefined)
         return { message: '', actions: [], ...run, accepted: true }
       }
-      return { ...(await pending), ...run }
+      try {
+        return { ...(await pending), ...run }
+      } catch (error) {
+        return this.startedTurnFailure(error, run)
+      }
     }
 
-    const response = await this.runTurnOnSession(session, input, reuseLastUser, opts?.source !== 'wake', {
-      source: opts?.source,
-      runId: run?.runId,
-      modelOverride: opts?.modelOverride,
-      origin: opts?.origin,
-      schedule: opts?.schedule,
-      ...(opts?.agent ? { agent: agentOriginOf(opts.agent) } : {}),
-      ...(opts?.permissionMode ? { permissionMode: opts.permissionMode } : {})
-    })
+    let response: OrchestratorResponse
+    try {
+      response = await this.runTurnOnSession(session, input, reuseLastUser, opts?.source !== 'wake', {
+        source: opts?.source,
+        runId: run?.runId,
+        modelOverride: opts?.modelOverride,
+        origin: opts?.origin,
+        schedule: opts?.schedule,
+        ...(opts?.agent ? { agent: agentOriginOf(opts.agent) } : {}),
+        ...(opts?.permissionMode ? { permissionMode: opts.permissionMode } : {})
+      })
+    } catch (error) {
+      if (!run) throw error
+      return this.startedTurnFailure(error, run)
+    }
     return run ? { ...response, ...run } : response
+  }
+
+  /**
+   * The reply to a send whose turn failed. Once the run has started, the agent may already have done
+   * work (tools, subagents, pushes), so the send succeeded: the reply carries the run and the error,
+   * as a provider failure's does, and a client never mistakes it for a message that did not arrive and
+   * sends it again. A turn that failed before its run started ran nothing; the send fails with it, and
+   * its run is already ended, so nothing runs it later.
+   */
+  private startedTurnFailure(error: unknown, run: { runId: string; sequence: number }): OrchestratorResponse {
+    if (!this.runStarted(run.runId)) throw error
+    const failure = serializeAppError(
+      error instanceof AppError
+        ? error
+        : error instanceof DomainRpcError
+          ? knownAppError({ code: error.code, message: error.message, details: error.details })
+          : normalizeAppError(error, 'orchestrator_turn_failed')
+    )
+    return { message: `[${failure.code}] ${failure.message}`, actions: [], ...run, error: failure }
+  }
+
+  /** Whether the run's turn got as far as starting: the point after which an agent can act. */
+  private runStarted(runId: string): boolean {
+    let record: RunRecord | null | undefined
+    try {
+      record = this.runEngine?.getRun(runId)
+    } catch {
+      return false
+    }
+    if (!record) return false
+    return record.startedAt !== null || record.status === 'completed' || record.status === 'uncertain'
   }
 
   /**

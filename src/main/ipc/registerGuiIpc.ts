@@ -1042,12 +1042,16 @@ export function registerGuiIpc(
     setThreadActivity(targetThreadId, 'processing')
     try {
       const body = normalizeSendContent(request)
+      const requestId = body.requestId ?? randomUUID()
       const result = await guiMms.request<{ queued?: boolean; message?: string }>(
         'orchestrator.send',
         {
           threadId: targetThreadId,
           content: body.content,
-          requestId: body.requestId ?? randomUUID(),
+          requestId,
+          // The composer sends a message again with the same id only when it may have arrived, so the
+          // service answers with the run it already has instead of running it twice.
+          clientRequestId: requestId,
           mode: body.mode,
           images: body.images,
           source: 'gui'
