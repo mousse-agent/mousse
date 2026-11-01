@@ -1,9 +1,9 @@
-import { spawnSync } from 'node:child_process'
+import { execFileSync, spawnSync } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import type { GitRecord } from '../../shared/threadActions'
-import { repoProgramEnv } from '../git/repoPrograms'
+import { repoProgramEnv, withoutRepoPrograms } from '../git/repoPrograms'
 import { git, mergeTrees, MOUSSE_COMMIT_ENV, NOT_MOUSSE, operationInProgress, tryGit, treeOf } from './git'
 
 /**
@@ -58,9 +58,42 @@ function nestedRepositoriesWithoutCommit(top: string, env: NodeJS.ProcessEnv): s
     spawnSync('git', ['rev-parse', '--verify', '-q', 'HEAD^{commit}'], { cwd: join(top, path), env: repoProgramEnv(), stdio: 'ignore' }).status !== 0)
 }
 
+const nul = (text: string): string[] => text.split('\0').filter(Boolean)
+const literal = (paths: string[]): string[] => paths.map((path) => `:(literal)${path}`)
+const ownPath = (path: string): boolean => path !== '.mousse' && !path.startsWith('.mousse/')
+
+/** Git with the paths on standard input, for path lists too long for the command line. */
+function gitWithPaths(top: string, args: string[], paths: string[], env?: NodeJS.ProcessEnv): string {
+  return execFileSync('git', withoutRepoPrograms(top, [...args, '--pathspec-from-file=-', '--pathspec-file-nul']), {
+    cwd: top, env: repoProgramEnv({ ...process.env, ...env }), encoding: 'utf8', input: literal(paths).join('\0') + '\0', stdio: ['pipe', 'pipe', 'pipe'], maxBuffer: 256 * 1024 * 1024
+  })
+}
+
+/**
+ * Makes the private index follow the files Git tracks, for the ones `add -A` cannot see: ignored files. A file that is
+ * ignored but tracked by HEAD or by the real index (force-added) is in the snapshot whenever it is on disk, and an
+ * ignored file that neither tracks any more leaves it. Reads HEAD and the real index; writes only the private index.
+ */
+function followTrackedFiles(top: string, env: NodeJS.ProcessEnv, head: string | undefined): void {
+  // HEAD's paths the private index lacks (it was seeded from an older HEAD), and the real index's ignored entries.
+  const fromHead = head ? nul(git(top, ['diff-index', '--cached', '--no-renames', '--diff-filter=D', '--name-only', '-z', head], env)) : []
+  const fromIndex = nul(git(top, ['ls-files', '-z', '--cached', '--ignored', '--exclude-standard']))
+  const missing = [...new Set([...fromHead, ...fromIndex])].filter((path) => ownPath(path) && existsSync(join(top, path)))
+  if (missing.length) gitWithPaths(top, ['add', '-f'], missing, env)
+  const ignored = nul(git(top, ['ls-files', '-z', '--cached', '--ignored', '--exclude-standard'], env))
+  if (!ignored.length) return
+  // Rare: an ignored file stays in the private index after HEAD and the real index stopped tracking it.
+  const tracked = new Set(nul(git(top, ['ls-files', '-z', '--cached', '--', ...literal(ignored)])))
+  if (head) for (const path of nul(git(top, ['ls-tree', '-r', '-z', '--name-only', '--full-tree', head, '--', ...ignored]))) tracked.add(path)
+  const untracked = ignored.filter((path) => !tracked.has(path))
+  if (untracked.length) gitWithPaths(top, ['rm', '-q', '--cached', '--ignore-unmatch'], untracked, env)
+}
+
 /**
  * The tree of every file in the worktree, from the persistent private index. The index stays between snapshots so
- * Git's stat cache keeps the next one fast; a missing, locked or corrupt one is rebuilt from HEAD.
+ * Git's stat cache keeps the next one fast; a missing, locked or corrupt one is rebuilt from HEAD. Every snapshot also
+ * brings it in line with the files HEAD and the real index track (`followTrackedFiles`), so a file that is ignored but
+ * was force-added and committed later is in it.
  */
 function indexTree(top: string, index: string, head: string | undefined): string {
   const env = { GIT_INDEX_FILE: index }
@@ -74,6 +107,7 @@ function indexTree(top: string, index: string, head: string | undefined): string
       if (!skipped.length) throw error
       add(skipped)
     }
+    followTrackedFiles(top, env, head)
     return git(top, ['write-tree'], env)
   }
   try {

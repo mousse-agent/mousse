@@ -89,6 +89,27 @@ describe('turns are recorded as private snapshots', () => {
     expect(git(cwd, 'ls-tree', '--name-only', second.sha).split('\n')).toEqual(expect.arrayContaining(['a.txt', 'b.txt']))
     expect(second.sha).not.toBe(first.sha)
   })
+
+  it('follows the files HEAD tracks on every snapshot: an ignored file force-added and committed later is in it', () => {
+    write('.gitignore', '*.local\n'); git(cwd, 'add', '.gitignore'); git(cwd, 'commit', '-qm', 'ignore')
+    write('settings.local', 'one\n')
+    // The private index exists before the file is tracked, so seeding it from HEAD alone would never see the file.
+    const before = takeSnapshot(cwd, { reason: 'before' })
+    expect(git(cwd, 'ls-tree', '--name-only', before.sha)).not.toMatch(/settings\.local/)
+    git(cwd, 'add', '-f', 'settings.local')
+    const index = git(cwd, 'ls-files', '--stage')
+    // Staged but not committed: the real index tracks it.
+    expect(git(cwd, 'show', `${takeSnapshot(cwd, { reason: 'staged' }).sha}:settings.local`)).toBe('one')
+    git(cwd, 'commit', '-qm', 'track the local settings')
+    write('settings.local', 'two\n')
+    const after = takeSnapshot(cwd, { reason: 'after' })
+    expect(git(cwd, 'show', `${after.sha}:settings.local`)).toBe('two')
+    expect(git(cwd, 'ls-files', '--stage')).toBe(index)
+    // Untracked again by HEAD and the real index: an ignored file leaves the snapshot.
+    git(cwd, 'rm', '-q', '--cached', 'settings.local'); git(cwd, 'commit', '-qm', 'untrack')
+    expect(git(cwd, 'ls-tree', '--name-only', takeSnapshot(cwd, { reason: 'untracked' }).sha)).not.toMatch(/settings\.local/)
+    expect(f.read(cwd, 'settings.local')).toBe('two\n')
+  })
 })
 
 describe('an agent that does its own Git work', () => {
