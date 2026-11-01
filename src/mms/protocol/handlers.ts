@@ -3545,12 +3545,12 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       return { thread, threads: listedThreadsFor(ctx, threads) }
     }
     case 'pullRequests.watch': {
-      // Turns a thread's watch of its pull request off, to notify (a line in the thread) or to act (also wakes the agent).
+      // Turns a thread's watch of its pull request off, or on to notify (a line in the thread). A watch never wakes the agent.
       const p = isObject(params) ? params : {}
       rejectUnknownKeys(p, ['threadId', 'watch', 'number'])
       const threadId = asString(p.threadId, 'threadId', 256)
       const mode = asString(p.watch, 'watch', 16)
-      if (mode !== 'off' && mode !== 'notify' && mode !== 'act') throw new DomainRpcError('invalid_params', 'watch must be off, notify or act')
+      if (mode !== 'off' && mode !== 'notify') throw new DomainRpcError('invalid_params', 'watch must be off or notify')
       const number = asOptionalBoundedInt(p.number, 'number', { min: 1, max: Number.MAX_SAFE_INTEGER })
       if (!ctx.mms.threads.getThread(threadId)) throw new DomainRpcError('thread_not_found', 'Thread not found', { threadId })
       ctx.mms.threads.assertThreadAdmission(threadId)

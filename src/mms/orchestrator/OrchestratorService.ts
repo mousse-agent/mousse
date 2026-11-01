@@ -5755,12 +5755,6 @@ export class OrchestratorService extends EventEmitter {
       }
       throw new EffectDeferredError(this.wakeBusyDeferMs, 'thread_busy')
     }
-    // A pull request update asks the agent to change code. While the thread waits on an approval (one a restart left saved
-    // included) it must not start a turn of its own, which would also settle that approval: the wake stays queued, as for a
-    // busy thread, and runs once nothing waits.
-    if (rows.some((row) => row.kind === 'pr_update') && this.threadWaitsOnApproval(payload.threadId)) {
-      throw new EffectDeferredError(this.wakeBusyDeferMs, 'approval_waiting')
-    }
     const notice = planWakeNotice(rows, this.noticeContext())
     engine.inbox.recordNoticeVisibility(rows, notice.items)
     try {
@@ -5775,13 +5769,6 @@ export class OrchestratorService extends EventEmitter {
       const run = engine.getRun(payload.runId)
       if (!run || !TERMINAL_RUN_STATUSES.has(run.status)) throw error
     }
-  }
-
-  /** A saved approval request of the thread is waiting for an answer, or was answered and not yet delivered to its run. */
-  private threadWaitsOnApproval(threadId: string): boolean {
-    const approvals = this.runEngine?.approvals
-    if (!approvals) return false
-    return approvals.listPending(threadId).length > 0 || approvals.listUndelivered().some((row) => row.threadId === threadId)
   }
 
   private requireRunEngine(): RunEngine {

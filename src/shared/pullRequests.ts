@@ -322,8 +322,8 @@ export interface PullRequestPushTarget {
   reason: string | null
 }
 
-/** What a watch does when its pull request changes: nothing, tell the thread, or tell the thread and wake the agent. */
-export type PullRequestWatchMode = 'off' | 'notify' | 'act'
+/** What a watch does when its pull request changes: nothing, or tell the thread with a line in it. It never wakes the agent. */
+export type PullRequestWatchMode = 'off' | 'notify'
 
 /** One page-bounded read of line comments: `drained` says the read reached the end; otherwise it continues at `nextPage`. */
 export interface LineCommentRead {
@@ -362,8 +362,6 @@ export interface PullRequestWatchStatus {
   /** The account the host's credential belongs to; its own comments are not reported. */
   viewer: string | null
   host: string | null
-  /** `act` cannot be turned on: a subagent's pending notice would hold its parent's task open. */
-  actRefusal: string | null
 }
 
 /** A thread's link to a pull request, set when it creates one, starts from one, or watches one. */
