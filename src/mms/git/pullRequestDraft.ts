@@ -3,9 +3,13 @@
  * thread, the branch and the template, and the one model call lives beside the title call.
  */
 
+import { MOUSSE_COMMIT_EMAIL } from './mousseCommitIdentity'
+
 export interface DraftCommit {
   subject: string
   body: string
+  /** The author's email, kept so Mousse's own commits can be told apart by who made them. */
+  authorEmail?: string
 }
 
 export interface PullRequestDraftInputs {
@@ -31,6 +35,9 @@ export const PULL_REQUEST_DRAFT_LIMITS = {
   patch: 24 * 1024,
   template: 4 * 1024
 } as const
+
+/** Commits a draft is written from, newest first, counted after Mousse's own are left out. */
+export const PULL_REQUEST_DRAFT_COMMITS = 50
 
 export const PULL_REQUEST_TITLE_MAX = 72
 
@@ -145,14 +152,12 @@ export function parsePullRequestDraft(text: string): { title: string; body: stri
 }
 
 /**
- * Mousse's own bookkeeping on a thread's branch: turn checkpoints, undo and redo, reverts, set-aside changes, and the
- * merges that bring a subagent's or another branch's work in. They say nothing a reader of the pull request needs.
+ * A commit Mousse made itself (turn checkpoints, undo and redo, reverts, set-aside changes, merges of subagents'
+ * work), known by its author. They say nothing a reader of the pull request needs. A subject alone never decides it:
+ * a person may well write "mousse: …".
  */
-export function isMousseCommit(commit: Pick<DraftCommit, 'subject'>): boolean {
-  const subject = commit.subject.trim()
-  return /^mousse: /i.test(subject) ||
-    /: mousse pending changes$/.test(subject) ||
-    /^Merge (commit|branch) '[^']*'( of \S+)? into mousse\//.test(subject)
+export function isMousseCommit(commit: Pick<DraftCommit, 'authorEmail'>): boolean {
+  return commit.authorEmail === MOUSSE_COMMIT_EMAIL
 }
 
 /** The commits a person or an agent wrote, without Mousse's own. */

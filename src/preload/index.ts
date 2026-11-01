@@ -532,12 +532,15 @@ const api = {
       ipcRenderer.invoke('pullRequests:draft', scope, base),
     create: (scope: PullRequestScope, input: PullRequestFormInput): Promise<CreatePullRequestResult> =>
       ipcRenderer.invoke('pullRequests:create', scope, input),
-    /** The method Merge uses in this folder's repository: the host's usual one, else squash. */
-    mergeMethod: (ref: PullRequestRef): Promise<PullRequestMergeMethod> =>
+    /** The method the host's merge button offers in this folder's repository; null when it cannot be read. */
+    mergeMethod: (ref: PullRequestRef): Promise<PullRequestMergeMethod | null> =>
       ipcRenderer.invoke('pullRequests:mergeMethod', ref),
-    /** Merges the pull request with the repository's usual method; `headSha` refuses when its head moved since. */
-    merge: (ref: PullRequestRef, number: number, headSha?: string): Promise<PullRequestActionResult> =>
-      ipcRenderer.invoke('pullRequests:merge', ref, number, headSha),
+    /**
+     * Merges the pull request with `method`, the one the person confirmed, exactly; without it, the repository's usual
+     * method, else squash. `headSha` refuses when its head moved since.
+     */
+    merge: (ref: PullRequestRef, number: number, headSha?: string, method?: PullRequestMergeMethod): Promise<PullRequestActionResult> =>
+      ipcRenderer.invoke('pullRequests:merge', ref, number, headSha, method),
     /** Closes the pull request without merging it; its branch stays. */
     close: (ref: PullRequestRef, number: number): Promise<PullRequestActionResult> =>
       ipcRenderer.invoke('pullRequests:close', ref, number),

@@ -259,7 +259,8 @@ describe('merging and closing from a pull request row', () => {
     // The prompt's own Merge stands in for the row's while it asks: one primary action at a time.
     expect(host.querySelectorAll('.side-card-git-pr-merge')).toHaveLength(1)
     await click(confirmIn(shown))
-    expect(merge).toHaveBeenCalledWith({ threadId: 't1' }, 12, 'abc1234')
+    // The merge is sent with the method the prompt named, so it cannot do something else.
+    expect(merge).toHaveBeenCalledWith({ threadId: 't1' }, 12, 'abc1234', 'merge')
     expect(dialog('Merge #12')).toBeNull()
     expect(host.querySelector('.side-card-git-notice')?.textContent).toBe('Merged #12 with a merge commit.')
   })
@@ -285,15 +286,31 @@ describe('merging and closing from a pull request row', () => {
     expect(merge).not.toHaveBeenCalled()
   })
 
-  it('says it uses the repository\'s usual method when that cannot be read, and still merges', async () => {
-    mergeMethod.mockRejectedValueOnce(new Error('No handler registered'))
+  it('says what a merge falls back to when the method cannot be read, and sends none', async () => {
+    for (const unreadable of [() => mergeMethod.mockResolvedValueOnce(null), () => mergeMethod.mockRejectedValueOnce(new Error('No handler registered'))]) {
+      unreadable()
+      merge.mockClear()
+      await mount()
+      await click(host.querySelector('.side-card-git-pr-merge'))
+      const shown = dialog('Merge #12')
+      expect(shown?.textContent).toContain("Merge #12 into main? The merge method couldn't be read, so the repository's default is used, else squash.")
+      expect(confirmIn(shown)?.textContent).toBe('Merge')
+      await click(confirmIn(shown))
+      expect(merge).toHaveBeenCalledWith({ threadId: 't1' }, 12, 'abc1234', undefined)
+      await act(async () => root.render(createElement('div')))
+    }
+  })
+
+  it('merges with the method a confirmation named, not one read again after a refusal', async () => {
+    mergeMethod.mockResolvedValueOnce('rebase')
+    merge.mockRejectedValueOnce(new Error('Pull request acme/app#12 is not mergeable: the base branch was modified.'))
     await mount()
     await click(host.querySelector('.side-card-git-pr-merge'))
-    const shown = dialog('Merge #12')
-    expect(shown?.textContent).toContain("Merge #12 into main with the repository's usual merge method?")
-    expect(confirmIn(shown)?.textContent).toBe('Merge')
-    await click(confirmIn(shown))
-    expect(merge).toHaveBeenCalledWith({ threadId: 't1' }, 12, 'abc1234')
+    await click(confirmIn(dialog('Merge #12')))
+    // Asked again from the same prompt: the same method, even though a new read would now say merge.
+    await click(confirmIn(dialog('Merge #12')))
+    expect(merge.mock.calls.map((call) => call[3])).toEqual(['rebase', 'rebase'])
+    expect(mergeMethod).toHaveBeenCalledTimes(1)
   })
 
   it('puts the row\'s buttons back on Cancel, merging nothing', async () => {

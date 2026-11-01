@@ -572,9 +572,20 @@ describe('commit button label', () => {
 
   it('says Commit staged with how many of the changed files go in when only staged files are committed', () => {
     const changes = [fileChange('a.ts', { staged: true }), fileChange('new.ts', { status: 'added', staged: true }), fileChange('b.ts'), fileChange('c.ts', { status: 'untracked' })]
-    expect(trigger(changes)).toEqual({ label: 'Commit staged (2 of 4)', title: 'Commit only the 2 staged files; 2 other changed files stay uncommitted' })
-    expect(trigger([fileChange('a.ts', { staged: true }), fileChange('b.ts')]).title).toBe('Commit only the 1 staged file; 1 other changed file stays uncommitted')
+    expect(trigger(changes)).toEqual({ label: 'Commit staged (2 of 4)', title: 'Commit only the 2 staged files; unstaged changes in 2 files stay out' })
+    expect(trigger([fileChange('a.ts', { staged: true }), fileChange('b.ts')]).title).toBe('Commit only the 1 staged file; unstaged changes in 1 file stay out')
     expect(trigger([fileChange('a.ts', { staged: true })])).toEqual({ label: 'Commit staged (1 of 1)', title: 'Commit only the 1 staged file' })
+  })
+
+  it('says the unstaged part of a partly staged file stays out', () => {
+    // Staged, then edited again: one file on both sides.
+    const partly = [fileChange('mm.ts', { staged: true }), fileChange('mm.ts')]
+    expect(trigger(partly)).toEqual({ label: 'Commit staged (1 of 1)', title: 'Commit only the 1 staged file; the unstaged part of the partly staged file stays out' })
+    expect(trigger([...partly, fileChange('nn.ts', { staged: true }), fileChange('nn.ts')]).title).toBe('Commit only the 2 staged files; the unstaged part of the 2 partly staged files stays out')
+    expect(trigger([...partly, fileChange('b.ts')])).toEqual({
+      label: 'Commit staged (1 of 2)',
+      title: 'Commit only the 1 staged file; unstaged changes in 2 files stay out, including the unstaged part of 1 partly staged file'
+    })
   })
 
   it('says Commit all in a thread\'s worktree, whatever is staged', () => {
@@ -591,8 +602,16 @@ describe('commit button label', () => {
     expect(trigger([], { scope: { workspaceThreadId: 't1' } })).toEqual({ label: 'Commit', title: 'No changes to commit' })
   })
 
-  it('names a merge it finishes and conflicts it waits on', () => {
-    expect(trigger([fileChange('a.ts', { staged: true })], { inProgress: 'merge' })).toEqual({ label: 'Commit merge', title: 'Finish the merge with 1 staged file' })
+  it('names a merge it finishes, with what goes in, and conflicts it waits on', () => {
+    expect(trigger([fileChange('a.ts', { staged: true }), fileChange('b.ts')], { inProgress: 'merge' })).toEqual({
+      label: 'Commit merge (1 of 2 staged)',
+      title: 'Finish the merge with only the 1 staged file; unstaged changes in 1 file stay out'
+    })
+    // Nothing staged: the commit stages everything first, so the button says so.
+    expect(trigger([fileChange('a.ts'), fileChange('n.ts', { status: 'untracked' })], { inProgress: 'merge' })).toEqual({
+      label: 'Commit merge (all 2)',
+      title: 'Finish the merge, staging and committing all 2 changed files, including 1 untracked file'
+    })
     expect(trigger([fileChange('a.ts', { status: 'conflicted' }), fileChange('b.ts', { staged: true })])).toEqual({ label: 'Commit', title: 'Resolve 1 conflicted file first' })
   })
 })
@@ -606,7 +625,7 @@ describe('merge confirmation', () => {
 
   it('asks plainly while the method is read, and says what it uses when it cannot be read', () => {
     expect(mergeConfirmation('#12', 'main', undefined)).toEqual({ text: 'Merge #12 into main?', action: 'Merge' })
-    expect(mergeConfirmation('#12', 'main', null)).toEqual({ text: "Merge #12 into main with the repository's usual merge method?", action: 'Merge' })
+    expect(mergeConfirmation('#12', 'main', null)).toEqual({ text: "Merge #12 into main? The merge method couldn't be read, so the repository's default is used, else squash.", action: 'Merge' })
     expect(mergeConfirmation('#12', '', 'squash').text).toBe('Squash #12 into one commit?')
   })
 })
@@ -1089,7 +1108,7 @@ describe('git section actions markup', () => {
 
   it('names what the Commit button commits on the button itself', () => {
     const html = render(view({ commits: [commit()], status: status({ changes: [fileChange('a.ts', { staged: true }), fileChange('b.ts'), fileChange('c.ts', { status: 'untracked' })] }) }))
-    expect(html).toMatch(/class="side-card-git-commit-button"[^>]*title="Commit only the 1 staged file; 2 other changed files stay uncommitted"[\s\S]*?<span>Commit staged \(1 of 3\)<\/span><\/button>/)
+    expect(html).toMatch(/class="side-card-git-commit-button"[^>]*title="Commit only the 1 staged file; unstaged changes in 2 files stay out"[\s\S]*?<span>Commit staged \(1 of 3\)<\/span><\/button>/)
   })
 
   describe('not a repository, once expanded', () => {

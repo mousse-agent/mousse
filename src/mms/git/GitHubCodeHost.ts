@@ -21,6 +21,7 @@ import {
   type PullRequestReviewVerdict,
   type RepositoryIdentity
 } from '../../shared/pullRequests'
+import { UNCHECKED_ASSOCIATION } from '../../shared/pullRequestSeed'
 import type { CodeHost } from './CodeHost'
 import {
   classifyGhFailure,
@@ -876,16 +877,16 @@ export class GitHubCodeHost implements CodeHost {
 
   /**
    * How the pull request's author relates to the repository (`OWNER`, `MEMBER`, `CONTRIBUTOR`…), from the REST API.
-   * A failed or unreadable answer is empty, read as `NONE`, the least trusted: it only decides whether the author's
-   * activity may wake the thread, and a pull request must still open when it cannot be read.
+   * A failed or unreadable answer (often GitHub's rate limit) is `UNCHECKED`: never trusted, as `NONE` is, but not
+   * reported as the person being a stranger. A pull request must still open when it cannot be read.
    */
   private async readAuthorAssociation(cwd: string, host: string, pull: string): Promise<string> {
     try {
       const { stdout } = await this.runExecutable('gh', ['api', '--hostname', host, pull, '--jq', '.author_association'], { cwd })
       const association = stdout.trim().toUpperCase()
-      return /^[A-Z_]{1,40}$/.test(association) ? association : ''
+      return /^[A-Z_]{1,40}$/.test(association) ? association : UNCHECKED_ASSOCIATION
     } catch {
-      return ''
+      return UNCHECKED_ASSOCIATION
     }
   }
 

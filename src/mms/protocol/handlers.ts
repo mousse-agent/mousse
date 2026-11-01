@@ -28,7 +28,7 @@ import { PROVIDER_STT_MAX_BYTES } from '../../shared/dictation'
 import { PROVIDER_TTS_MAX_CHARS } from '../../shared/readAloud'
 import type { ExternalEffect, ThreadAction } from '../../shared/threadActions'
 import type { ThreadWorkspaceMetadata } from '../../shared/workspace'
-import { relinked, sameLinkedPullRequest, type GitPullRequestInfo, type PullRequestDetail, type PullRequestPushTarget, type PullRequestWatchMode, type RepositoryIdentity, type ThreadPullRequestLink } from '../../shared/pullRequests'
+import { relinked, sameLinkedPullRequest, type GitPullRequestInfo, type PullRequestDetail, type PullRequestMergeMethod, type PullRequestPushTarget, type PullRequestWatchMode, type RepositoryIdentity, type ThreadPullRequestLink } from '../../shared/pullRequests'
 import { PULL_REQUEST_EXISTS, PullRequestReadError } from '../git/GitHubCodeHost'
 import { PullRequestThreadError, PullRequestThreadService } from '../git/PullRequestThreadService'
 import { PullRequestWatchError } from '../git/PullRequestWatchService'
@@ -197,6 +197,10 @@ function questionAnswerer(ctx: HandlerContext): Answerer {
 /** Messages `thread.messages` returns when the caller names no limit, and the most it will. */
 const MESSAGES_PAGE_DEFAULT = 100
 const MESSAGES_PAGE_MAX = 500
+
+function isMergeMethod(value: unknown): value is PullRequestMergeMethod {
+  return value === 'merge' || value === 'squash' || value === 'rebase'
+}
 
 function rejectUnknownKeys(p: Record<string, unknown>, allowed: readonly string[]): void {
   for (const key of Object.keys(p)) if (!allowed.includes(key)) throw new DomainRpcError('invalid_params', `${key} is not allowed`)
@@ -3420,16 +3424,19 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       return { pullRequest, existing: false }
     }
     case 'pullRequests.merge': {
-      // Merges a pull request of the folder's repository with the method the host's merge button offers, else squash.
+      // Merges a pull request of the folder's repository. `method` is the one a person confirmed: it is used exactly,
+      // and the host refuses it if the repository does not allow it. Without it (an older client), the method the
+      // host's merge button offers, else squash.
       const p = isObject(params) ? params : {}
-      rejectUnknownKeys(p, ['threadId', 'projectId', 'number', 'headSha'])
+      rejectUnknownKeys(p, ['threadId', 'projectId', 'number', 'headSha', 'method'])
       const number = asBoundedInt(p.number, 'number', { min: 1, max: Number.MAX_SAFE_INTEGER })
       const headSha = asOptionalString(p.headSha, 64)
       if (headSha !== undefined && !/^[0-9a-f]{7,64}$/i.test(headSha)) throw new DomainRpcError('invalid_params', 'headSha is not a commit')
+      if (p.method !== undefined && !isMergeMethod(p.method)) throw new DomainRpcError('invalid_params', 'method must be merge, squash or rebase')
       await materializeRequestedWorkspace(ctx, p)
       const root = pullRequestFolder(ctx, p)
       const codeHost = ctx.mms.gitService.codeHost
-      const method = await codeHost.defaultMergeMethod(root) ?? 'squash'
+      const method = isMergeMethod(p.method) ? p.method : await codeHost.defaultMergeMethod(root) ?? 'squash'
       try {
         const pullRequest = await codeHost.mergePullRequest(root, number, { method, ...(headSha ? { headSha } : {}) })
         return { pullRequest, method }
@@ -3455,11 +3462,12 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       return { baseBranches: await ctx.mms.gitService.codeHost.listBaseBranches(pullRequestFolder(ctx, p)) }
     }
     case 'pullRequests.mergeMethod': {
-      // The method Merge uses, for its confirmation to name: the same answer `pullRequests.merge` gets, else squash.
+      // The method the host's merge button offers, for the Merge confirmation to name and then pass to `pullRequests.merge`.
+      // Null when it cannot be read: nothing is guessed here.
       const p = isObject(params) ? params : {}
       rejectUnknownKeys(p, ['threadId', 'projectId'])
       await materializeRequestedWorkspace(ctx, p)
-      return { method: await ctx.mms.gitService.codeHost.defaultMergeMethod(pullRequestFolder(ctx, p)) ?? 'squash' }
+      return { method: await ctx.mms.gitService.codeHost.defaultMergeMethod(pullRequestFolder(ctx, p)) }
     }
     case 'pullRequests.link': {
       const p = isObject(params) ? params : {}

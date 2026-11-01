@@ -550,17 +550,18 @@ function actionRef(target: PullRequestActionTarget): PullRequestRef {
 }
 
 /**
- * Merges a pull request with the repository's usual method (else squash). `headSha` is the head that was shown: the host
- * refuses if more was pushed since. Rejects with the host's reason; the section shows it.
+ * Merges a pull request with `method`, the one its confirmation named, exactly; without one, the repository's usual
+ * method, else squash. `headSha` is the head that was shown: the host refuses if more was pushed since. Rejects with
+ * the host's reason; the section shows it.
  */
-export async function mergePullRequest(target: PullRequestActionTarget, headSha?: string): Promise<PullRequestActionResult> {
-  const result = await window.mousse.pullRequests.merge(actionRef(target), target.number, headSha)
+export async function mergePullRequest(target: PullRequestActionTarget, headSha?: string, method?: PullRequestMergeMethod): Promise<PullRequestActionResult> {
+  const result = await window.mousse.pullRequests.merge(actionRef(target), target.number, headSha, method)
   afterChange(target, result)
   return result
 }
 
-/** The method Merge will use for this target's repository, for its confirmation to name. Rejects when it cannot be read. */
-export function pullRequestMergeMethod(target: PullRequestActionTarget): Promise<PullRequestMergeMethod> {
+/** The method the host's merge button offers for this target's repository, for the confirmation to name; null when it cannot be read. */
+export function pullRequestMergeMethod(target: PullRequestActionTarget): Promise<PullRequestMergeMethod | null> {
   return window.mousse.pullRequests.mergeMethod(actionRef(target))
 }
 

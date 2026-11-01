@@ -777,8 +777,11 @@ const PULL_REQUEST_ICONS = {
   closed: GitPullRequestClosed
 } as const
 
-/** Merge or close one pull request; resolves with the reason it failed, or null once it is done. */
-export type PullRequestChange = (action: 'merge' | 'close', row: PullRequestFoundRow) => Promise<string | null>
+/**
+ * Merge or close one pull request; resolves with the reason it failed, or null once it is done. `method` is the merge
+ * method the confirmation named, which the merge must use; absent when it could not be read.
+ */
+export type PullRequestChange = (action: 'merge' | 'close', row: PullRequestFoundRow, method?: PullRequestMergeMethod) => Promise<string | null>
 
 /** The method Merge will use for a pull request; null when it cannot be read. */
 export type PullRequestMergeMethodRead = (row: PullRequestFoundRow) => Promise<PullRequestMergeMethod | null>
@@ -841,7 +844,8 @@ export function PullRequestLink({ row, running = null, onChange, readMergeMethod
   const run = async () => {
     if (!confirm || !onChange || running !== null) return
     setError(null)
-    const failure = await onChange(confirm, row)
+    // The merge uses the method the prompt named, never one read again later.
+    const failure = await onChange(confirm, row, confirm === 'merge' ? mergeMethod ?? undefined : undefined)
     if (failure) setError(failure)
     else setConfirm(null)
   }
@@ -1114,12 +1118,12 @@ export function GitSectionView({
   const rows = pullRequestRows(pullRequest, git.status, pullRequestDetail, pullRequestLink, workspaceThreadId !== null)
   // Read as the same thread or project the section's lookup was, so a thread on another computer merges there.
   const readThreadId = pullRequestReadThreadId(ownThreadId, workspaceThreadId)
-  const changePullRequest: PullRequestChange = async (action, row) => {
+  const changePullRequest: PullRequestChange = async (action, row, method) => {
     if (!begin(action)) return GIT_BUSY_REASON
     const target = { path, branch, number: row.value, ...(readThreadId ? { threadId: readThreadId } : projectId ? { projectId } : {}) }
     try {
       if (action === 'merge') {
-        const result = await mergePullRequest(target, row.merge?.headSha ?? undefined)
+        const result = await mergePullRequest(target, row.merge?.headSha ?? undefined, method)
         setNotice(mergedNotice(row.value, result.method))
       } else {
         await closePullRequest(target)

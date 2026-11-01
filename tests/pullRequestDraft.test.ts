@@ -45,8 +45,8 @@ describe('pull request draft prompt', () => {
     const prompt = buildPullRequestDraftPrompt(inputs({
       branch: 'mousse/thread/0b5e2d4c-8f1a-4e57-9d3b-2c6a1f0e9b7d/main',
       commits: [
-        { subject: 'mousse: checkpoint turn run:thread:0b5e2d4c:1 (a1)', body: '' },
-        { subject: 'Retry the login', body: '' }
+        { subject: 'mousse: checkpoint turn run:thread:0b5e2d4c:1 (a1)', body: '', authorEmail: 'mousse@local' },
+        { subject: 'Retry the login', body: '', authorEmail: 'ada@example.com' }
       ]
     }))
     expect(prompt).toContain('Write the title and the description of a pull request into "main"')
@@ -163,11 +163,12 @@ describe('heuristicPullRequestDraft', () => {
   })
 
   const threadBranch = 'mousse/thread/0b5e2d4c-8f1a-4e57-9d3b-2c6a1f0e9b7d/main'
+  const mousse = 'mousse@local'
   const checkpoints = [
-    { subject: 'mousse: checkpoint turn run:thread:0b5e2d4c:2 (a2)', body: '' },
-    { subject: "Merge commit '9f8e7d6c' into mousse/thread/0b5e2d4c-8f1a-4e57-9d3b-2c6a1f0e9b7d/main", body: '' },
-    { subject: 'mousse: undo turn run:thread:0b5e2d4c:1 (op-1)', body: '' },
-    { subject: 'mousse: checkpoint turn run:thread:0b5e2d4c:1 (a1)', body: '' }
+    { subject: 'mousse: checkpoint turn run:thread:0b5e2d4c:2 (a2)', body: '', authorEmail: mousse },
+    { subject: "Merge commit '9f8e7d6c' into mousse/thread/0b5e2d4c-8f1a-4e57-9d3b-2c6a1f0e9b7d/main", body: '', authorEmail: mousse },
+    { subject: 'mousse: undo turn run:thread:0b5e2d4c:1 (op-1)', body: '', authorEmail: mousse },
+    { subject: 'mousse: checkpoint turn run:thread:0b5e2d4c:1 (a1)', body: '', authorEmail: mousse }
   ]
   const stat = ' src/format.js   | 12 ++++++++----\n src/tax.js      |  4 ++++\n 2 files changed, 12 insertions(+), 4 deletions(-)'
 
@@ -189,13 +190,18 @@ describe('heuristicPullRequestDraft', () => {
     expect(heuristicPullRequestDraft(inputs({ branch: threadBranch })).title).toBe('Update')
   })
 
-  it('knows Mousse\'s own commit subjects', () => {
-    for (const subject of [
-      'mousse: checkpoint turn t-1 (a1)', 'mousse: redo turn t-1 (op)', 'mousse: revert code action a1 (op)',
-      'mousse: save pending changes (a1)', 'mousse: copy of discarded changes', 'On main: mousse pending changes',
-      "Merge commit 'abc123' into mousse/thread/x/main", "Merge branch 'mousse/agent/y' into mousse/thread/x/main"
-    ]) expect(isMousseCommit({ subject })).toBe(true)
-    for (const subject of ['Retry the login', 'Merge branch \'main\' into feature/x', 'Document mousse: the dessert']) expect(isMousseCommit({ subject })).toBe(false)
+  it('knows Mousse\'s own commits by their author, never by their subject', () => {
+    expect(isMousseCommit({ authorEmail: 'mousse@local' })).toBe(true)
+    for (const authorEmail of ['ada@example.com', 'Mousse@Local', '', undefined]) expect(isMousseCommit({ authorEmail })).toBe(false)
+    // A person's commit that happens to look like Mousse's stays in the description.
+    const draft = heuristicPullRequestDraft(inputs({
+      commits: [
+        { subject: 'mousse: checkpoint turn t-1 (a1)', body: '', authorEmail: 'mousse@local' },
+        { subject: 'mousse: rename the dessert module', body: '', authorEmail: 'ada@example.com' },
+        { subject: 'MOUSSE: shout less', body: '' }
+      ]
+    }))
+    expect(draft.body).toBe('- MOUSSE: shout less\n- mousse: rename the dessert module')
   })
 
   it('clamps a long title', () => {
@@ -326,7 +332,16 @@ describe('GitService.readBranchSummary', () => {
     git(['add', '.'])
     git(['commit', '-q', '-m', 'Bookkeeping'], MOUSSE_COMMIT_ENV)
     const summary = await new GitService().readBranchSummary(root, { branch: 'mousse/thread/t1/main', base: 'main', remote: null })
-    expect(summary.commits).toEqual([{ subject: 'Retry the login', body: '' }])
+    expect(summary.commits).toEqual([{ subject: 'Retry the login', body: '', authorEmail: 'ada@example.com' }])
     expect(summary.stat).toContain('b.txt')
+  })
+
+  it('keeps a person\'s commit whatever its subject, and counts the limit after Mousse\'s own are left out', async () => {
+    writeFileSync(join(root, 'a.txt'), 'two\n')
+    git(['commit', '-q', '-am', 'mousse: rename the dessert module'])
+    // Sixty checkpoints on top: a limit counted before the filter would leave nothing a person wrote.
+    for (let index = 0; index < 60; index++) git(['commit', '-q', '--allow-empty', '-m', `mousse: checkpoint turn t-${index} (a${index})`], MOUSSE_COMMIT_ENV)
+    const summary = await new GitService().readBranchSummary(root, { branch: 'mousse/thread/t1/main', base: 'main', remote: null })
+    expect(summary.commits.map((commit) => commit.subject)).toEqual(['mousse: rename the dessert module'])
   })
 })

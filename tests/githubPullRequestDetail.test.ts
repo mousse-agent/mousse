@@ -12,6 +12,7 @@ import {
   PullRequestReadError
 } from '../src/mms/git/GitHubCodeHost'
 import type { PullRequestIdentity } from '../src/shared/pullRequests'
+import { isTrustedAssociation } from '../src/shared/pullRequestSeed'
 
 const fixture = (name: string) => readFileSync(new URL(`./fixtures/github/${name}.json`, import.meta.url), 'utf8')
 const failure = (stderr: string) => Object.assign(new Error('exit 1'), { stderr })
@@ -230,11 +231,12 @@ describe('GitHubCodeHost.getPullRequestDetail', () => {
     expect(detail.authorAssociation).toBe('OWNER')
   })
 
-  it('opens the pull request as least trusted when its author\'s association cannot be read', async () => {
-    const failed = await new GitHubCodeHost(runner({ association: async () => { throw failure('HTTP 502') } })).getPullRequestDetail('/repo', 7)
-    expect(failed).toMatchObject({ number: 7, authorAssociation: 'NONE' })
+  it('opens the pull request as unchecked, and so untrusted, when its author\'s association cannot be read', async () => {
+    const limited = await new GitHubCodeHost(runner({ association: async () => { throw failure('API rate limit exceeded for user ID 1.') } })).getPullRequestDetail('/repo', 7)
+    expect(limited).toMatchObject({ number: 7, authorAssociation: 'UNCHECKED' })
+    expect(isTrustedAssociation(limited.authorAssociation)).toBe(false)
     const garbled = await new GitHubCodeHost(runner({ association: async () => ok('{"message":"nope"}') })).getPullRequestDetail('/repo', 7)
-    expect(garbled.authorAssociation).toBe('NONE')
+    expect(garbled.authorAssociation).toBe('UNCHECKED')
   })
 
   it('merges two pages (100 and 37) and shows them oldest first', async () => {
