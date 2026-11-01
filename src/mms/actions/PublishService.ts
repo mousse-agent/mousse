@@ -1,8 +1,9 @@
 import { randomUUID } from 'node:crypto'
+import { existsSync } from 'node:fs'
 import type { ThreadLeaseHandle } from '../queue/ThreadExecutionLease'
 import { ThreadJournal } from '../data/ThreadJournal'
 import { withGitMutationLocks } from './GitOperationCoordinator'
-import { git, mergeTrees, requireClean, refuseUnsafeChanges, treeOf, tryGit } from './git'
+import { git, mergeTrees, requireClean, treeOf, tryGit } from './git'
 import { publishedRef, sameTree, takeSnapshot } from './snapshots'
 import { ChangeReceiptService } from './ChangeReceiptService'
 import { ThreadActionService } from './ThreadActionService'
@@ -42,6 +43,31 @@ interface PublishIntent {
 }
 
 const DEFAULT_MESSAGE = 'Changes from a Mousse thread'
+/** A publish in one of these states started and did not finish; `recovery_required` is what older versions left. */
+const PENDING_STATES = ['prepared', 'git_applied', 'recovery_required']
+
+export type PublishRecovery = { operationId: string; state: 'completed'; result: PublishResult } | { operationId: string; state: 'cancelled' }
+
+/**
+ * Untracked, ignored files in `checkout` that moving from `from` to `to` would write over: a path the new tree adds or
+ * changes, or a folder above one. Reads only.
+ */
+function ignoredInTheWay(checkout: string, from: string, to: string): string[] {
+  const written = git(checkout, ['diff-tree', '-r', '-z', '--no-renames', '--name-only', '--diff-filter=AMT', from, to]).split('\0').filter(Boolean)
+  if (!written.length) return []
+  const candidates = new Set<string>()
+  for (const path of written) {
+    const parts = path.split('/')
+    for (let depth = 1; depth <= parts.length; depth++) candidates.add(parts.slice(0, depth).join('/'))
+  }
+  const found = new Set<string>()
+  const list = [...candidates]
+  for (let start = 0; start < list.length; start += 500) {
+    const chunk = list.slice(start, start + 500).map((path) => `:(literal)${path}`)
+    for (const path of git(checkout, ['ls-files', '-z', '--others', '--ignored', '--exclude-standard', '--', ...chunk]).split('\0').filter(Boolean)) found.add(path)
+  }
+  return [...found].sort()
+}
 
 /**
  * Publishes the thread's files into the primary checkout as one commit on its current branch, made with the person's
@@ -71,22 +97,12 @@ export class PublishService {
         return result
       }
       const receipts = new ChangeReceiptService(this.threadDirectory)
-      if (previous && ['prepared', 'git_applied'].includes(previous.state)) {
-        const intent = this.journal.list().find((entry) => entry.operationId === options.operationId && entry.state === 'prepared')
-        const expected = intent?.expectedPreState as PublishIntent | undefined
-        if (!expected || this.differs(threadWorkspace, options.expectedSourceSha, expected.sourceSha) || (options.expectedTargetSha && expected.prePublishSha !== options.expectedTargetSha) || expected.targetBranch !== targetBranch) throw new Error('Publish recovery requires the original reviewed revisions.')
-        // Recovery reads HEAD and records; nothing else in the checkout is touched.
-        refuseUnsafeChanges(primaryCheckout, 'Primary checkout')
-        if (git(primaryCheckout, ['branch', '--show-current']) !== targetBranch) throw new Error('Publish recovery destination branch changed.')
-        const head = git(primaryCheckout, ['rev-parse', 'HEAD'])
-        const receipt = receipts.list().find((item) => item.operationId === options.operationId)
-        // A publish interrupted before snapshots was a merge commit that has the reviewed commit as a parent.
-        const mergedBefore = !expected.publishSha && head !== expected.prePublishSha && tryGit(primaryCheckout, ['merge-base', '--is-ancestor', expected.sourceSha, head]).ok
-        if (receipt?.afterSha === head || (expected.publishSha && head === expected.publishSha) || mergedBefore) {
-          return this.completePublish(primaryCheckout, options.operationId!, expected.prePublishSha, expected.sourceSha, head)
-        }
-        if (head !== expected.prePublishSha) throw new Error('Publish recovery HEAD does not match the original operation.')
-        this.journal.append({ operationId: options.operationId!, operationType: 'publish', state: 'cancelled', details: { recoveredBeforeGit: true } })
+      if (previous && PENDING_STATES.includes(previous.state)) {
+        const intent = this.intentOf(options.operationId!)
+        if (!intent || this.differs(threadWorkspace, options.expectedSourceSha, intent.expected.sourceSha) || (options.expectedTargetSha && intent.expected.prePublishSha !== options.expectedTargetSha) || intent.expected.targetBranch !== targetBranch) throw new Error('Publish recovery requires the original reviewed revisions.')
+        // The earlier attempt is recorded first. Only when it did not land does this explicit Publish go on to publish again.
+        const recovered = this.settle(primaryCheckout, options.operationId!, intent.expected)
+        if (recovered.state === 'completed') return recovered.result
       }
       receipts.assertNoPendingOperation()
       new ThreadActionService(this.threadDirectory).assertExpectedRevision(options.expectedJournalRevision)
@@ -110,6 +126,9 @@ export class PublishService {
       if ('conflicts' in merged) return { operationId, state: 'conflict', prePublishSha, sourceSha: source, conflictFiles: merged.conflicts }
       // Nothing to add: the primary already has these files, as when the same changes were merged another way.
       if (merged.tree === treeOf(primaryCheckout, prePublishSha)) return this.completePublish(primaryCheckout, operationId, prePublishSha, source, prePublishSha)
+      // An ignored file in the primary is the person's (a local config, a build output) and is never written over.
+      const ignored = ignoredInTheWay(primaryCheckout, prePublishSha, merged.tree)
+      if (ignored.length) throw new Error(`Publish would overwrite ignored files in ${primaryCheckout}: ${ignored.slice(0, 10).join(', ')}${ignored.length > 10 ? ` and ${ignored.length - 10} more` : ''}. Move them aside, then publish again. Nothing was changed.`)
       const publishSha = this.commit(primaryCheckout, merged.tree, prePublishSha, options.message)
       this.journal.append({
         operationId,
@@ -118,12 +137,14 @@ export class PublishService {
         expectedPreState: { prePublishSha, targetBranch, sourceBranch: tryGit(threadWorkspace, ['branch', '--show-current']).stdout || undefined, sourceSha: source, publishSha, tree: merged.tree } satisfies PublishIntent,
         details: { threadWorkspace, primaryCheckout }
       })
-      // The branch, the index and the files move together or not at all; a fast-forward refuses before touching anything it cannot update.
-      const moved = tryGit(primaryCheckout, ['merge', '--ff-only', publishSha])
+      // The branch, the index and the files move together or not at all; a fast-forward refuses before touching anything
+      // it cannot update, and never writes over an ignored file.
+      const moved = tryGit(primaryCheckout, ['merge', '--ff-only', '--no-overwrite-ignore', publishSha])
       if (!moved.ok) {
+        // The branch did not move, so there is nothing to recover: the attempt is closed and the thread stays usable.
         const left = git(primaryCheckout, ['status', '--porcelain', '--untracked-files=all'])
-        this.journal.append({ operationId, operationType: 'publish', state: left ? 'recovery_required' : 'cancelled', details: { prePublishSha, targetBranch, error: moved.stderr } })
-        throw new Error(`Publish could not update ${primaryCheckout}: ${moved.stderr || 'Git refused the update'}. ${left ? 'Its files were partly updated; check git status there.' : 'Nothing was changed.'}`)
+        this.journal.append({ operationId, operationType: 'publish', state: 'cancelled', details: { prePublishSha, targetBranch, error: moved.stderr, ...(left ? { leftFiles: true } : {}) } })
+        throw new Error(`Publish could not update ${primaryCheckout}: ${moved.stderr || 'Git refused the update'}. ${left ? 'Some of its files may have been updated; check git status there.' : 'Nothing was changed.'}`)
       }
       return this.completePublish(primaryCheckout, operationId, prePublishSha, source, publishSha)
     }, signal, options.heldThreadLease)
@@ -176,15 +197,51 @@ export class PublishService {
     }).map((item) => item.id)
   }
 
-  async recoverPending(threadWorkspace: string, primaryCheckout: string, heldThreadLease?: ThreadLeaseHandle): Promise<void> {
-    for (const entry of this.journal.latestByOperation().values()) {
-      if (!['publish', 'change-publish'].includes(entry.operationType) || !['prepared', 'git_applied'].includes(entry.state)) continue
-      const intent = this.journal.list().find((item) => item.operationId === entry.operationId && item.state === 'prepared')
-      const expected = intent?.expectedPreState as PublishIntent | undefined
-      const paths = intent?.details as { threadWorkspace?: string; primaryCheckout?: string } | undefined
-      if (!expected || paths?.threadWorkspace !== threadWorkspace || paths.primaryCheckout !== primaryCheckout) throw new Error('Publish recovery paths do not match their durable owner.')
-      await this.publish(threadWorkspace, primaryCheckout, expected.targetBranch, undefined, { heldThreadLease, operationId: entry.operationId, expectedSourceSha: expected.sourceSha, expectedTargetSha: expected.prePublishSha })
-    }
+  /**
+   * Settles every publish that did not finish: one that landed is recorded as completed, any other is cancelled. It
+   * only reads the primary checkout and records; it never publishes again and never touches the primary's files,
+   * index or branches. A publish an older version left waiting (`recovery_required`) is settled the same way.
+   */
+  async recoverPending(_threadWorkspace: string, primaryCheckout: string, heldThreadLease?: ThreadLeaseHandle): Promise<PublishRecovery[]> {
+    const pending = [...this.journal.latestByOperation().values()].filter((entry) => ['publish', 'change-publish'].includes(entry.operationType) && PENDING_STATES.includes(entry.state))
+    if (!pending.length) return []
+    return withGitMutationLocks(this.threadDirectory, primaryCheckout, 'publish-recovery', async () => pending.map((entry) => {
+      const intent = this.intentOf(entry.operationId)
+      if (!intent) {
+        this.journal.append({ operationId: entry.operationId, operationType: 'publish', state: 'cancelled', details: { recovered: true, reason: 'The publish left no record of what it was about to do; nothing was checked or changed.' } })
+        return { operationId: entry.operationId, state: 'cancelled' as const }
+      }
+      // The checkout the publish was made in; the one the thread now names when that one is gone.
+      const recorded = intent.paths.primaryCheckout
+      const checkout = recorded && existsSync(recorded) ? recorded : primaryCheckout
+      return this.settle(checkout, entry.operationId, intent.expected)
+    }), undefined, heldThreadLease)
+  }
+
+  /** The intent a publish recorded before it moved the primary, and where it ran. */
+  private intentOf(operationId: string): { expected: PublishIntent; paths: { threadWorkspace?: string; primaryCheckout?: string } } | undefined {
+    const intent = [...this.journal.list()].reverse().find((entry) => entry.operationId === operationId && entry.state === 'prepared')
+    const expected = intent?.expectedPreState as PublishIntent | undefined
+    if (!expected?.prePublishSha || !expected.sourceSha || !expected.targetBranch) return undefined
+    return { expected, paths: (intent!.details ?? {}) as { threadWorkspace?: string; primaryCheckout?: string } }
+  }
+
+  /**
+   * Records how an interrupted publish ended, from the target branch's tip: completed when its commit is there (or,
+   * for one made before snapshots, its merge), cancelled otherwise. Reads only; never publishes again.
+   */
+  private settle(primaryCheckout: string, operationId: string, expected: PublishIntent): PublishRecovery {
+    const tip = existsSync(primaryCheckout) ? tryGit(primaryCheckout, ['rev-parse', '--verify', '-q', `refs/heads/${expected.targetBranch}^{commit}`]).stdout : ''
+    const contains = (sha: string): boolean => Boolean(tip) && (tip === sha || tryGit(primaryCheckout, ['merge-base', '--is-ancestor', sha, tip]).ok)
+    const receipt = new ChangeReceiptService(this.threadDirectory).list().find((item) => item.operationId === operationId)
+    // A publish interrupted before snapshots was a merge commit that has the reviewed commit as a parent.
+    const mergedBefore = !expected.publishSha && Boolean(tip) && tip !== expected.prePublishSha && contains(expected.sourceSha)
+    const landed = receipt?.afterSha && contains(receipt.afterSha) ? receipt.afterSha : expected.publishSha && contains(expected.publishSha) ? expected.publishSha : mergedBefore ? tip : undefined
+    if (landed) return { operationId, state: 'completed', result: this.completePublish(primaryCheckout, operationId, expected.prePublishSha, expected.sourceSha, landed) }
+    const reason = !tip ? `${primaryCheckout} or its branch ${expected.targetBranch} could not be read`
+      : tip === expected.prePublishSha ? `${expected.targetBranch} did not move` : `${expected.targetBranch} moved elsewhere`
+    this.journal.append({ operationId, operationType: 'publish', state: 'cancelled', details: { recovered: true, prePublishSha: expected.prePublishSha, targetBranch: expected.targetBranch, ...(tip ? { tip } : {}), reason: `The publish did not land: ${reason}. Nothing was changed by recovery.` } })
+    return { operationId, state: 'cancelled' }
   }
 
   async abortConflict(primaryCheckout: string, operationId: string): Promise<void> {

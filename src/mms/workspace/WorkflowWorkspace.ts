@@ -203,9 +203,10 @@ export async function resolveOwnedThreadWorkspace(
   let existing = manager.load()
   if (existing) {
     validateThreadWorkspaceMetadata(manager, existing, repository, context.threadId)
+    // `recovery_required` is admitted too: a thread an older version left waiting recovers on its own instead of staying locked.
     const pending = [...manager.journal.latestByOperation().values()].some((entry) =>
       ['action-checkpoint', 'change-checkpoint', 'child-integration', 'change-integration', 'publish', 'change-publish', 'code-revert', 'change-revert'].includes(entry.operationType)
-      && ['running', 'prepared', 'git_applied'].includes(entry.state))
+      && ['running', 'prepared', 'git_applied', 'recovery_required'].includes(entry.state))
     if (pending) {
       const lease = await waitAcquireExecutionLease(threadDirectory, { source: 'workflow-workspace-recovery', signal, maxAttempts: 36_000 })
       try {

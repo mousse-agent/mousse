@@ -745,6 +745,86 @@ describe('publish', () => {
     expect(await service.publish(cwd, f.repo, target(), undefined, { operationId: 'replay' })).toEqual(first)
     expect(git(f.repo, 'rev-list', '--count', `${first.prePublishSha}..HEAD`)).toBe('1')
   })
+
+  it('never overwrites an ignored file in the primary: it refuses with the file names and changes nothing', async () => {
+    writeFileSync(join(f.repo, '.gitignore'), '*.env\nout\n'); git(f.repo, 'add', '.gitignore'); git(f.repo, 'commit', '-qm', 'ignore')
+    git(cwd, 'merge', '-q', '--ff-only', git(f.repo, 'rev-parse', 'HEAD'))
+    // The person's own ignored files in the primary, at paths the thread's snapshot has a file.
+    writeFileSync(join(f.repo, 'local.env'), 'SECRET=mine\n')
+    writeFileSync(join(f.repo, 'out'), 'an ignored file where the thread has a folder\n')
+    await turn('one', () => {
+      write('value.txt', 'one\n')
+      write('local.env', 'SECRET=thread\n'); git(cwd, 'add', '-f', 'local.env')
+      mkdirSync(join(cwd, 'out')); write('out/result.txt', 'result\n'); git(cwd, 'add', '-f', 'out/result.txt')
+    })
+    const head = git(f.repo, 'rev-parse', 'HEAD')
+    await expect(publish()).rejects.toThrow(/would overwrite ignored files in .*: local\.env, out\. Move them aside/)
+    expect(git(f.repo, 'rev-parse', 'HEAD')).toBe(head)
+    expect(readFileSync(join(f.repo, 'local.env'), 'utf8')).toBe('SECRET=mine\n')
+    expect(readFileSync(join(f.repo, 'out'), 'utf8')).toBe('an ignored file where the thread has a folder\n')
+    expect(f.read(f.repo)).toBe('base\n')
+    noPending()
+    // Moved aside, the same publish goes through.
+    rmSync(join(f.repo, 'local.env')); rmSync(join(f.repo, 'out'))
+    expect((await publish()).state).toBe('completed')
+    expect(readFileSync(join(f.repo, 'local.env'), 'utf8')).toBe('SECRET=thread\n')
+  })
+
+  /** A publish that wrote its intent and its commit, then stopped before the primary moved. */
+  async function interruptedBeforeTheMove(state: 'prepared' | 'recovery_required') {
+    await turn('one', () => write('value.txt', 'one\n'))
+    const journal = new ThreadJournal(f.thread)
+    const prePublishSha = git(f.repo, 'rev-parse', 'HEAD')
+    const sourceSha = new ThreadWorkspaceManager(f.thread).load()!.snapshotSha!
+    const publishSha = git(f.repo, 'commit-tree', git(cwd, 'rev-parse', `${sourceSha}^{tree}`), '-p', prePublishSha, '-m', 'interrupted')
+    journal.append({ operationId: 'interrupted', operationType: 'publish', state: 'prepared', expectedPreState: { prePublishSha, targetBranch: target(), sourceSha, publishSha, tree: git(cwd, 'rev-parse', `${sourceSha}^{tree}`) }, details: { threadWorkspace: cwd, primaryCheckout: f.repo } })
+    if (state === 'recovery_required') journal.append({ operationId: 'interrupted', operationType: 'publish', state, details: { prePublishSha, targetBranch: target(), error: 'fatal: Not possible to fast-forward' } })
+    return { prePublishSha, publishSha, sourceSha }
+  }
+
+  it('recovery of a publish stopped before the primary moved only cancels it: no new commit, snapshot or fast-forward', async () => {
+    const { prePublishSha } = await interruptedBeforeTheMove('prepared')
+    const refs = git(f.repo, 'for-each-ref', '--format=%(refname) %(objectname)')
+    expect(await new PublishService(f.thread).recoverPending(cwd, f.repo)).toEqual([{ operationId: 'interrupted', state: 'cancelled' }])
+    expect(git(f.repo, 'rev-parse', 'HEAD')).toBe(prePublishSha)
+    expect(f.read(f.repo)).toBe('base\n')
+    expect(git(f.repo, 'status', '--porcelain', '--untracked-files=all')).toBe('')
+    expect(git(f.repo, 'for-each-ref', '--format=%(refname) %(objectname)')).toBe(refs)
+    expect(new ChangeReceiptService(f.thread).list().filter((item) => item.kind === 'publish')).toEqual([])
+    expect(new ThreadJournal(f.thread).latestByOperation().get('interrupted')).toMatchObject({ state: 'cancelled', details: { recovered: true } })
+    noPending()
+  })
+
+  it('recovery records a publish whose fast-forward landed, also after the person committed on top', async () => {
+    const { publishSha, sourceSha } = await interruptedBeforeTheMove('prepared')
+    git(f.repo, 'merge', '-q', '--ff-only', publishSha); f.commit(f.repo, 'the person’s next commit\n')
+    const [settled] = await new PublishService(f.thread).recoverPending(cwd, f.repo)
+    expect(settled).toMatchObject({ state: 'completed', result: { publishSha, sourceSha } })
+    expect(git(f.repo, 'rev-parse', publishedRef('task'))).toBe(sourceSha)
+    noPending()
+  })
+
+  it('a thread an older version locked after a failed fast-forward recovers on its own and can publish again', async () => {
+    const { prePublishSha } = await interruptedBeforeTheMove('recovery_required')
+    expect(new ThreadWorkspaceManager(f.thread).verify().lifecycle).toBe('recovery_required')
+    await new PublishService(f.thread).recoverPending(cwd, f.repo)
+    expect(new ThreadWorkspaceManager(f.thread).verify().lifecycle).toBe('ready')
+    expect(git(f.repo, 'rev-parse', 'HEAD')).toBe(prePublishSha)
+    expect((await publish()).state).toBe('completed')
+  })
+
+  it('a fast-forward Git refuses closes the attempt instead of locking the thread', async () => {
+    await turn('one', () => write('value.txt', 'one\n'))
+    const head = git(f.repo, 'rev-parse', 'HEAD')
+    // Git refuses the update itself: a stale lock on the primary's index.
+    const lock = join(git(f.repo, 'rev-parse', '--absolute-git-dir'), 'index.lock')
+    writeFileSync(lock, '')
+    try { await expect(publish()).rejects.toThrow(/could not update [\s\S]*Nothing was changed/) } finally { rmSync(lock, { force: true }) }
+    expect(git(f.repo, 'rev-parse', 'HEAD')).toBe(head)
+    expect(new ThreadWorkspaceManager(f.thread).verify().lifecycle).toBe('ready')
+    noPending()
+    expect((await publish()).state).toBe('completed')
+  })
 })
 
 describe('rebuilding a worktree from its snapshot', () => {
