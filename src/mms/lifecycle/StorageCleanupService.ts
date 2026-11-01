@@ -21,7 +21,7 @@ import type { ResourcePurgeService, TrashSweepOutcome } from './ResourcePurgeSer
 import { assertLifecyclePath, type ResourceLifecycleStore } from './ResourceLifecycleStore'
 import type { PolicySnapshot, StoragePolicyStore } from './StoragePolicyStore'
 import type { StorageSweepClock } from './sweepClock'
-import { PartialWorktreeRemovalError, WorktreeRetirementService } from './WorktreeRetirementService'
+import { WORKTREE_TRASH_QUIET_MS, WorktreeRetirementService } from './WorktreeRetirementService'
 
 const DAY_MS = 86_400_000
 const FIRST_RUN_DELAY_MS = 5 * 60_000
@@ -210,7 +210,8 @@ function onlyControlFiles(worktree: string, entry: string): boolean {
  * The daemon's storage cleanup rules. It evaluates thread worktrees in a fixed order with a plain
  * reason for every keep, retires a worktree only after the thread and repository leases are held and
  * the checks are repeated, runs the trash sweep through a reporting seam, guards against a clock set
- * backwards and stores the last report. Retirement is reversible: the worktree comes back on use.
+ * backwards and stores the last report. Retirement is reversible: the worktree moves into the trash
+ * and comes back on use, from the trash or, once the trash has deleted it, from its snapshot.
  */
 export class StorageCleanupService {
   private current?: Promise<StorageCleanupReport>
@@ -473,6 +474,13 @@ export class StorageCleanupService {
     if (snapshot && (hasRule || trigger === 'manual')) {
       try { items.push(...await this.worktreePhase(snapshot, !clock.suspended, startedMs, trigger, allowed)) }
       catch (error) { items.push({ rule: 'worktree-inactive', label: 'Worktrees', bytes: 0, outcome: 'failed', reason: (error as Error).message }) }
+    }
+    // Worktrees already in the trash are settled whatever rules are on now; a confirmed plan touches only what it named.
+    if (!allowed && !clock.suspended && !this.stopping) {
+      try { items.push(...await this.worktreeTrashItems(startedMs)) }
+      catch (error) { items.push({ rule: 'trash', label: 'Worktrees in the trash', bytes: 0, outcome: 'failed', reason: (error as Error).message }) }
+    }
+    if (snapshot && (hasRule || trigger === 'manual')) {
       try { items.push(...await this.trashPhase(startedMs, trigger, allowed)) }
       catch (error) { items.push({ rule: 'trash', label: 'Trash', bytes: 0, outcome: 'failed', reason: (error as Error).message }) }
       // A time-based rule, so it waits while the clock is suspended (the report already says why).
@@ -828,8 +836,9 @@ export class StorageCleanupService {
    * Take the thread lease, then the repository lease (the order `ThreadWorkspaceManager.restore` and
    * `GitOperationCoordinator` use), repeat the checks that can change, and only then prepare and
    * retire. Expected hold time is the re-check plus `prepare` and `retire`, plus up to two seconds
-   * waiting for the repository lease. Removed means `retire` returned. A removal that Git stopped
-   * partway (files in use) is a failure, not a keep.
+   * waiting for the repository lease. Removed means `retire` moved the folder into the trash; a later
+   * run deletes it from there after a snapshot (`worktreeTrashItems`). A folder that cannot be moved
+   * (files in use) is kept where it is.
    */
   private async retire(entry: Evaluation, verdict: Extract<Verdict, { rule: unknown }>): Promise<StorageCleanupItem> {
     const { record, label, projectId } = entry
@@ -860,8 +869,8 @@ export class StorageCleanupService {
         let inUse: string | undefined
         try { inUse = this.probeRemoval(workspace.worktreePath) } catch (error) { return failed((error as Error).message) }
         if (inUse) return kept(inUse)
-        try { retirement.retire(retirement.pathFor(record.taskId, workspace.worktreePath)) }
-        catch (error) { if (error instanceof PartialWorktreeRemovalError) return failed(error.message); throw error }
+        // The folder moves into the trash in one step or not at all; a folder in use stays where it is.
+        retirement.retire(retirement.pathFor(record.taskId, workspace.worktreePath))
         try { atomicWriteJsonSync(cleanupMarkerPath(this.deps.store, record.taskId), { retiredAt: new Date(this.now()).toISOString(), rule: verdict.rule } satisfies CleanupMarker) }
         catch { /* The checkout is gone and restorable; only the status note is missing. */ }
         return { ...base, bytes: measurement.bytes, files: measurement.files, ...approximate(measurement), outcome: 'removed', reason: verdict.reason }
@@ -871,6 +880,49 @@ export class StorageCleanupService {
     } catch (error) {
       return kept((error as Error).message)
     } finally { releaseExecutionLeaseHandle(taskLease) }
+  }
+
+  /**
+   * Worktrees the rules moved into the trash. One that has waited an hour with nothing in it changing has its files
+   * snapshotted and is deleted (`WorktreeRetirementService.expireTrash`); what a snapshot cannot hold keeps it in the
+   * trash, with the reason. Only the repository lease is taken: the thread's own worktree is not the one in the trash.
+   */
+  private async worktreeTrashItems(now: number): Promise<StorageCleanupItem[]> {
+    const items: StorageCleanupItem[] = []
+    const root = join(this.deps.store.root, 'workspaces')
+    const reader = new WorktreeRetirementService(this.deps.store)
+    let owners: string[]
+    try { owners = readdirSync(root) } catch { return items }
+    for (const owner of owners) {
+      let names: string[]
+      try { names = readdirSync(join(root, owner)).filter((name) => name.endsWith('.json')) } catch { continue }
+      for (const name of names) {
+        if (this.stopping) return items
+        const path = join(root, owner, name)
+        let manifest: ReturnType<WorktreeRetirementService['load']>
+        try { manifest = reader.load(path) } catch { continue }
+        if (!manifest.trashPath || !existsSync(manifest.trashPath)) continue
+        if (manifest.state === 'trashed' && now - Date.parse(manifest.trashedAt ?? '') < WORKTREE_TRASH_QUIET_MS) continue
+        const { label, projectId } = this.labelFor(manifest.taskId)
+        const base = { rule: 'trash' as const, threadId: manifest.taskId, projectId, label: `${label}: worktree in the trash` }
+        try {
+          let lease
+          try { lease = await acquireRepositoryLease(resolveRepositoryIdentity(manifest.trashPath, { requireMutationCapability: true }), { signal: AbortSignal.timeout(REPOSITORY_LEASE_WAIT_MS) }) }
+          catch { items.push({ ...base, bytes: 0, outcome: 'kept', reason: 'Repository is busy' }); continue }
+          let outcome: ReturnType<WorktreeRetirementService['expireTrash']>
+          try { outcome = new WorktreeRetirementService(this.deps.store, { repositoryLease: lease }).expireTrash(path, { now, inUse: this.probeRemoval }) }
+          finally { lease.release() }
+          if (!outcome || 'waiting' in outcome) continue
+          items.push('removed' in outcome
+            ? { ...base, bytes: 0, outcome: 'removed', reason: 'Deleted from the trash after an hour with no changes; its files are kept as a snapshot' }
+            : { ...base, bytes: 0, outcome: 'kept', reason: outcome.kept })
+        } catch (error) {
+          items.push({ ...base, bytes: 0, outcome: 'failed', reason: (error as Error).message })
+        }
+        await yieldToLoop()
+      }
+    }
+    return items
   }
 
   // ---- Browser captures ----

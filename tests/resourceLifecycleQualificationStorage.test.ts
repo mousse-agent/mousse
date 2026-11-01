@@ -1,4 +1,4 @@
-import { writeFileSync } from 'node:fs'
+import { existsSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { expect, it } from 'vitest'
 import type { Thread } from '../src/shared/types'
@@ -25,12 +25,15 @@ it('repeated multi-task trash and restore retains sole-copy workspace bytes with
     expect(baseline.materializedBytes).toBeGreaterThan(10 * 1024)
     for (let cycle = 0; cycle < 3; cycle++) {
       for (const task of tasks) await f.rpc.request('threads.trash', { threadId: task.id })
-      // Uncommitted files no longer keep a checkout: trash retires each one into a pinned snapshot.
-      expect(checkoutStorageSnapshot(repo).materializedCheckouts).toBe(0)
+      // Uncommitted files no longer keep a checkout: trash moves each one into Mousse's trash in one step, with every byte.
+      const trashed = checkoutStorageSnapshot(repo)
+      for (const task of tasks) expect(existsSync(task.workspace)).toBe(false)
+      expect(trashed.materializedCheckouts).toBe(4)
+      expect(trashed.materializedBytes).toBe(baseline.materializedBytes)
       for (const task of tasks) {
         await f.rpc.request('threads.restore', { threadId: task.id })
         expect((await f.rpc.request<{ thread: Thread }>('threads.get', { threadId: task.id })).thread.id).toBe(task.id)
-        // The checkout comes back at the same path from its snapshot, with the same sole-copy bytes.
+        // The checkout comes back from the trash at the same path, with the same sole-copy bytes.
         const resolved = await new WorkspaceResolver(f.services.threads.getThreadDir(task.id), task.id, repo).resolve('agent')
         expect(resolved.workspacePath).toBe(task.workspace)
         expect(measureTree(task.workspace, new Set(['.git']))).toEqual(task.contents)

@@ -196,7 +196,9 @@ describe('public inventory and request identity', () => {
       expect(existsSync(parentWorkspace.worktreePath)).toBe(false)
       const retirement = new WorktreeRetirementService(f.services.threads.lifecycleStore)
       const manifest = retirement.load(retirement.pathFor(thread.id, parentWorkspace.worktreePath))
-      expect(manifest.state).toBe('retired')
+      // The folder waits in the trash, still a registered checkout, until nothing in it has changed for an hour.
+      expect(manifest.state).toBe('trashed')
+      expect(existsSync(manifest.trashPath!)).toBe(true)
       expect(manifest.resultSha).toBe(parentWorkspace.headSha)
       expect(readFileSync(join(child.worktreePath, 'SOLE-COPY.bin'))).toEqual(Buffer.from([0, 255, 17]))
       await f.rpc.request('threads.restore', { threadId: thread.id })

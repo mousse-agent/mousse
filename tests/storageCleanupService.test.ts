@@ -146,15 +146,41 @@ describe('inactive rule', () => {
     expect(restored.lifecycle).toBe('ready'); expect(readFileSync(join(f.worktree, 'a.txt'), 'utf8').replace(/\r\n/g, '\n')).toBe('first\n')
   }, 60_000)
 
+  it('moves a retired worktree into the trash, and a later run deletes it only after an hour with no changes, keeping its files as a snapshot', async () => {
+    const f = fixture(); setPolicy(f, inactive())
+    expect(item(await f.service.run('manual'))).toMatchObject({ outcome: 'removed' })
+    const trashed = JSON.parse(readFileSync(manifestPath(f), 'utf8'))
+    expect(trashed).toMatchObject({ state: 'trashed' })
+    expect(readFileSync(join(trashed.trashPath, 'a.txt'), 'utf8').replace(/\r\n/g, '\n')).toBe('first\n')
+    // Something still writing there within the hour keeps it waiting.
+    writeFileSync(join(trashed.trashPath, 'late.txt'), 'late\n')
+    f.clockState.offset += HOUR / 2
+    expect((await f.service.run('manual')).items.filter((entry) => entry.rule === 'trash')).toEqual([])
+    expect(existsSync(trashed.trashPath)).toBe(true)
+    f.clockState.offset += 2 * HOUR
+    const report = await f.service.run('manual')
+    expect(report.items.find((entry) => entry.rule === 'trash')).toMatchObject({ outcome: 'removed', threadId: 'task', label: 'Task one: worktree in the trash' })
+    expect(existsSync(trashed.trashPath)).toBe(false)
+    const retired = JSON.parse(readFileSync(manifestPath(f), 'utf8'))
+    expect(retired.state).toBe('retired')
+    const restored = await new ThreadWorkspaceManager(f.location).restore(f.repo)
+    expect(restored.lifecycle).toBe('ready')
+    expect(readFileSync(join(f.worktree, 'late.txt'), 'utf8')).toBe('late\n')
+  }, 90_000)
+
   it('leaves a thread that a rule retired deletable: the status note does not block its trash or purge', async () => {
     const f = fixture(); setPolicy(f, inactive())
     expect(item(await f.service.run('manual'))).toMatchObject({ outcome: 'removed' })
     expect(existsSync(cleanupMarkerPath(f.store, 'task'))).toBe(true)
+    const { trashPath } = JSON.parse(readFileSync(manifestPath(f), 'utf8'))
+    expect(existsSync(trashPath)).toBe(true)
     await f.coordinator.trash({ taskId: 'task', operationId: 'trash' })
     const preview = await f.coordinator.cleanup.preview('task')
     expect(preview.blockers).toEqual([]); expect(preview.items.some((entry) => entry.discardRequired)).toBe(false)
     const record = await f.coordinator.purge({ taskId: 'task', operationId: 'purge', expectedGeneration: preview.generation, previewDigest: preview.digest })
     expect(record.state).toBe('purged')
+    // Permanent deletion takes what waited in the trash with it.
+    expect(existsSync(trashPath)).toBe(false)
   }, 60_000)
 
   it('keeps a recent thread with the days it has been inactive', async () => {
@@ -995,7 +1021,7 @@ describe('use after the check', () => {
   }, 90_000)
 })
 
-describe.runIf(process.platform === 'win32')('files in use block a removal that would stop partway', () => {
+describe.runIf(process.platform === 'win32')('files in use keep a worktree where it is', () => {
   /** A process whose working directory is inside the worktree, which is what stops Git from deleting it. */
   async function holdFolder(f: Fixture): Promise<{ child: ChildProcess; release: () => Promise<void> }> {
     // The commit counts as published, so only where the files are decides the outcome.
@@ -1019,31 +1045,14 @@ describe.runIf(process.platform === 'win32')('files in use block a removal that 
     } finally { await held.release() }
   }, 90_000)
 
-  it('reports a removal Git stopped partway as failed, records it, and the next restore sets the leftover aside and rebuilds', async () => {
+  it('without the check, the move into the trash fails as a whole: the worktree is kept intact and nothing is half removed', async () => {
     const f = fixture({ probeRemoval: () => undefined }); setPolicy(f, inactive())
     const held = await holdFolder(f)
     try {
-      const report = await f.service.run('manual')
-      expect(item(report)).toMatchObject({ outcome: 'failed', reason: expect.stringContaining('partly removed') })
-      expect(report.counts).toMatchObject({ failed: 1, removed: 0 })
-      expect(existsSync(f.worktree)).toBe(true); expect(existsSync(join(f.worktree, '.git'))).toBe(false)
-      expect(history(f)).toEqual([expect.objectContaining({ outcome: 'failed', rule: 'worktree-inactive', threadId: 'task' })])
-      // Later runs say what is wrong instead of failing on "not a git repository".
-      expect(item(await f.service.run('manual'))).toMatchObject({ outcome: 'kept', reason: expect.stringContaining('partly removed') })
+      expect(item(await f.service.run('manual'))).toMatchObject({ outcome: 'kept', reason: expect.stringContaining('could not be moved to the trash') })
+      expect(existsSync(join(f.worktree, '.git'))).toBe(true); expect(readFileSync(join(f.worktree, 'sub', 'x.txt'), 'utf8').replace(/\r\n/g, '\n')).toBe('x\n')
     } finally { await held.release() }
-    const restored = await new ThreadWorkspaceManager(f.location).restore(f.repo)
-    expect(restored.lifecycle).toBe('ready')
-    expect(readFileSync(join(f.worktree, 'sub', 'x.txt'), 'utf8').replace(/\r\n/g, '\n')).toBe('x\n'); expect(existsSync(join(f.worktree, '.git'))).toBe(true)
-    expect(readdirSync(join(f.worktree, '..')).filter((name) => name.startsWith('main.partial-'))).toEqual([])
-  }, 120_000)
-
-  it('keeps a leftover it cannot prove is only retained content next to the rebuilt checkout', async () => {
-    const f = fixture({ probeRemoval: () => undefined }); setPolicy(f, inactive())
-    const held = await holdFolder(f)
-    try { await f.service.run('manual'); writeFileSync(join(f.worktree, 'sub', 'mine.txt'), 'not from the repository') } finally { await held.release() }
-    await new ThreadWorkspaceManager(f.location).restore(f.repo)
-    const aside = readdirSync(join(f.worktree, '..')).filter((name) => name.startsWith('main.partial-'))
-    expect(aside).toHaveLength(1); expect(readFileSync(join(f.worktree, '..', aside[0]!, 'sub', 'mine.txt'), 'utf8')).toBe('not from the repository')
+    expect(item(await f.service.run('manual'))).toMatchObject({ outcome: 'removed' })
   }, 120_000)
 })
 
