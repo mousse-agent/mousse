@@ -282,6 +282,7 @@ export interface ResolvedPullRequestSummary {
  * as part of the start, and left on.
  */
 export const WORKTREE_CONFIG_NOTICE = "Starting also turns on extensions.worktreeConfig in this repository's Git settings, so the worktree can keep hooks and filters off. It stays on."
+export const WORKTREE_CONFIG_NEEDED = "Starting from a pull request needs extensions.worktreeConfig turned on in this repository's Git settings, so the worktree can keep hooks and filters off. It is off. Start again from a Mousse that asks first, or turn it on with `git config extensions.worktreeConfig true`."
 export const WORKTREE_CONFIG_ENABLED = "Turned on extensions.worktreeConfig in this repository's Git settings, so the worktree keeps hooks and filters off. It stays on."
 
 export interface StartPullRequestThreadInput {
@@ -295,6 +296,11 @@ export interface StartPullRequestThreadInput {
   allowClosed?: boolean
   /** Start even though another thread already works on this pull request. */
   allowDuplicate?: boolean
+  /**
+   * The person was shown `WORKTREE_CONFIG_NOTICE` and started anyway, so the start may turn on `extensions.worktreeConfig`.
+   * Without it, a repository with the setting off is refused (`pull_request_worktree_config_needed`) and nothing changes.
+   */
+  allowWorktreeConfig?: boolean
 }
 
 /** What starting a thread from a pull request returns beside the thread itself. */

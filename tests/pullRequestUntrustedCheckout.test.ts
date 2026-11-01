@@ -156,7 +156,7 @@ describe('a pull request that tries to run code', () => {
   })
 
   it("starts the thread without running a filter, a hook or a request to the pull request's server, and keeps the files as committed", async () => {
-    const started = await service.startThread({ projectId, reference: '7' })
+    const started = await service.startThread({ projectId, reference: '7', allowWorktreeConfig: true })
     const workspace = workspaceOf(started.thread.id)
     expect(workspace).toMatchObject({ lifecycle: 'ready', untrusted: true })
 
@@ -177,7 +177,7 @@ describe('a pull request that tries to run code', () => {
   }, 60_000)
 
   it("runs no hook or filter in the commands Mousse runs there afterwards: the checkpoint commit, the side card's Commit and Push", async () => {
-    const { thread } = await service.startThread({ projectId, reference: '7' })
+    const { thread } = await service.startThread({ projectId, reference: '7', allowWorktreeConfig: true })
     const { worktreePath } = workspaceOf(thread.id)
     expect(marked()).toEqual([])
 
@@ -205,7 +205,7 @@ describe('a pull request that tries to run code', () => {
   }, 90_000)
 
   it('keeps the safety when the worktree is made again after it was removed', async () => {
-    const { thread } = await service.startThread({ projectId, reference: '7' })
+    const { thread } = await service.startThread({ projectId, reference: '7', allowWorktreeConfig: true })
     const workspace = workspaceOf(thread.id)
     git(f.repo, 'worktree', 'remove', '--force', workspace.worktreePath)
     expect(existsSync(workspace.worktreePath)).toBe(false)
@@ -225,7 +225,7 @@ describe('a pull request that tries to run code', () => {
     authorGit('commit', '-qm', 'drop the attributes')
     authorGit('push', '-q', '--force', 'origin', 'HEAD:refs/pull/7/head')
     prSha = authorGit('rev-parse', 'HEAD')
-    const { thread } = await service.startThread({ projectId, reference: '7' })
+    const { thread } = await service.startThread({ projectId, reference: '7', allowWorktreeConfig: true })
     const workspace = workspaceOf(thread.id)
     // An inactive-worktree rule 40 days on retires it; only manual runs may act, as a scheduled one could retire it again.
     const manualRun = mms.storageCleanup.run.bind(mms.storageCleanup)
@@ -241,8 +241,23 @@ describe('a pull request that tries to run code', () => {
     expect(existsSync(workspace.worktreePath)).toBe(false)
     expect(marked()).toEqual([])
 
-    const restored = await new ThreadWorkspaceManager(mms.threads.getThreadDir(thread.id)).restore(f.repo)
+    // With the repository's per-worktree settings turned off since, the rebuild is refused before anything is registered:
+    // no empty folder that would read as ready, and the setting is not turned on again.
+    const registered = () => git(f.repo, 'worktree', 'list', '--porcelain').split('\n').filter((line) => line.startsWith('worktree '))
+    const before = registered()
+    git(f.repo, 'config', '--local', '--unset', 'extensions.worktreeConfig')
+    const manager = new ThreadWorkspaceManager(mms.threads.getThreadDir(thread.id))
+    await expect(manager.restore(f.repo)).rejects.toThrow(/per-worktree Git settings are off/)
+    expect(registered()).toEqual(before)
+    expect(existsSync(workspace.worktreePath)).toBe(false)
+    expect(manager.verify().lifecycle).not.toBe('ready')
+    expect(() => git(f.repo, 'config', '--local', '--get', 'extensions.worktreeConfig')).toThrow()
+
+    // Turned on again, the same restore rebuilds the whole worktree with its safety.
+    git(f.repo, 'config', '--local', 'extensions.worktreeConfig', 'true')
+    const restored = await manager.restore(f.repo)
     expect(restored.lifecycle).toBe('ready')
+    expect(git(restored.worktreePath, 'status', '--porcelain')).toBe('')
     expect(f.read(restored.worktreePath, 'value.txt')).toBe('pull request value\n')
     expect(git(restored.worktreePath, 'config', '--show-scope', '--get', 'core.hooksPath')).toMatch(/^worktree\s+\/dev\/null$/)
     expect(git(restored.worktreePath, 'config', '--worktree', '--get', 'filter.evil.smudge')).toBe('')
@@ -256,11 +271,13 @@ describe('a pull request that tries to run code', () => {
   it('refuses, and leaves nothing, when a filter driver is configured for the repository itself', async () => {
     git(f.repo, 'config', 'filter.evil.smudge', 'sh tools/smudge.sh')
     const threadsBefore = mms.threads.listAllThreads().length
-    await expect(service.startThread({ projectId, reference: '7' })).rejects.toMatchObject({
+    await expect(service.startThread({ projectId, reference: '7', allowWorktreeConfig: true })).rejects.toMatchObject({
       code: 'pull_request_workspace_failed',
       message: expect.stringContaining('Safe checkout refuses configured external clean, smudge or process filters.')
     })
     expect(mms.threads.listAllThreads()).toHaveLength(threadsBefore)
     expect(marked()).toEqual([])
+    // Refused before the repository's configuration was changed.
+    expect(() => git(f.repo, 'config', '--local', '--get', 'extensions.worktreeConfig')).toThrow()
   }, 60_000)
 })

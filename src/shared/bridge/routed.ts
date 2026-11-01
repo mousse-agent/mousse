@@ -384,15 +384,12 @@ export const ROUTED_METHODS: Readonly<Record<string, RoutedRow>> = Object.freeze
     routeOnly: ['threadId']
   }),
   // Starting a thread from a pull request can send a first message, so it is chat, not only write.
-  'pullRequests.startThread': chat('project', [
-    'projectId',
-    'number',
-    'reference',
-    'send',
-    'message',
-    'allowClosed',
-    'allowDuplicate'
-  ]),
+  // Version 2: `allowWorktreeConfig`. A version 1 caller never sends it, so a repository with the setting off is refused.
+  'pullRequests.startThread': chat(
+    'project',
+    ['projectId', 'number', 'reference', 'send', 'message', 'allowClosed', 'allowDuplicate', 'allowWorktreeConfig'],
+    { version: 2, since: { allowWorktreeConfig: 2 } }
+  ),
 
   // ---------------------------------------------------------------- thread writes
   'threads.rename': write('thread', ['threadId', 'name'], { required: ['name'] }),

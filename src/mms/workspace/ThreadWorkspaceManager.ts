@@ -96,11 +96,16 @@ function pinUntrustedWorktree(primaryCheckoutPath: string, worktreePath: string,
   }
 }
 
-/** `git worktree add` for commits from someone else: nothing they carry runs, no LFS content is fetched, and the safety stays pinned. */
-async function addUntrustedWorktree(primaryCheckoutPath: string, addArguments: string[], worktreePath: string): Promise<void> {
+/**
+ * `git worktree add` for commits from someone else: nothing they carry runs, no LFS content is fetched, and the safety
+ * stays pinned. `enableWorktreeConfig` (see `provision`) turns the setting on once the safety checks have passed.
+ */
+async function addUntrustedWorktree(primaryCheckoutPath: string, addArguments: string[], worktreePath: string, enableWorktreeConfig?: () => void): Promise<void> {
+  // A repository whose filters cannot be switched off is refused here, before its configuration is changed.
+  const safety = await untrustedSafety(primaryCheckoutPath)
+  if (enableWorktreeConfig && enablePerWorktreeConfig(primaryCheckoutPath)) enableWorktreeConfig()
   // Refused before anything is checked out, not after: the worktree must never exist without its safety settings.
   assertPerWorktreeConfig(primaryCheckoutPath)
-  const safety = await untrustedSafety(primaryCheckoutPath)
   execFileSync('git', [...safety, 'worktree', 'add', ...addArguments], {
     cwd: primaryCheckoutPath,
     env: repoProgramEnv({ ...process.env, ...nonInteractiveGitEnv(), GIT_LFS_SKIP_SMUDGE: '1' }),
@@ -194,8 +199,13 @@ export class ThreadWorkspaceManager {
      * is looked up in the checkout), filter, smudge and process drivers its `.gitattributes` selects, Git LFS
      * (no smudge, so its `.lfsconfig` is never read) and the file system monitor are switched off in the
      * worktree's own configuration, and the workspace is marked so a restore does the same.
+     *
+     * `enableWorktreeConfig`: the person agreed to turn on `extensions.worktreeConfig`, which that safety needs. It is
+     * turned on here, under the repository's lease and after every check that can refuse, so a refused start leaves
+     * the setting as it was; the callback runs when this call turned it on. Without it, a repository with the
+     * setting off is refused.
      */
-    options: { untrusted?: boolean } = {}
+    options: { untrusted?: boolean; enableWorktreeConfig?: () => void } = {}
   ): Promise<ThreadWorkspaceMetadata> {
     const existing = this.load()
     if (existing?.lifecycle === 'ready') return this.verify(existing)
@@ -245,7 +255,7 @@ export class ThreadWorkspaceManager {
         lastVerifiedAt: new Date().toISOString(),
         ...(options.untrusted ? { untrusted: true as const } : {})
       } satisfies ThreadWorkspaceMetadata)
-      if (options.untrusted) await addUntrustedWorktree(repository.primaryCheckoutPath, ['-b', branch, worktreePath, head], worktreePath)
+      if (options.untrusted) await addUntrustedWorktree(repository.primaryCheckoutPath, ['-b', branch, worktreePath, head], worktreePath, options.enableWorktreeConfig)
       else git(repository.primaryCheckoutPath, ['worktree', 'add', '-b', branch, worktreePath, head])
       git(repository.primaryCheckoutPath, ['update-ref', retainedRef, head])
       const metadata: ThreadWorkspaceMetadata = {
@@ -325,6 +335,8 @@ export class ThreadWorkspaceManager {
         const manifestPath = retirement.pathFor(metadata.threadId, metadata.worktreePath)
         const manifest = retirement.load(manifestPath)
         if (manifest.branch !== metadata.branch || manifest.resultSha !== metadata.headSha || manifest.repositoryId !== metadata.repositoryId) throw new Error('Retired workspace manifest disagrees with authoritative task binding')
+        // Refused before the rebuild registers anything: a worktree made and then refused would be left empty, without its safety.
+        if (metadata.untrusted) assertPerWorktreeConfig(repository.gitTopLevel)
         // The worktree's own configuration went with the worktree: for someone else's commits it is put back before anything is checked out.
         const safety = metadata.untrusted ? await untrustedSafety(repository.gitTopLevel) : undefined
         retirement.reconstruct(manifestPath, safety ? { prepare: (path) => pinUntrustedWorktree(repository.gitTopLevel, path, safety), env: { ...nonInteractiveGitEnv(), GIT_LFS_SKIP_SMUDGE: '1' } } : undefined)

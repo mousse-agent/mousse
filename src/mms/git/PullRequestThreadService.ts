@@ -11,12 +11,13 @@ import {
   type StartPullRequestThreadInput,
   type StartPullRequestThreadResult,
   type ThreadPullRequestLink,
-  WORKTREE_CONFIG_ENABLED
+  WORKTREE_CONFIG_ENABLED,
+  WORKTREE_CONFIG_NEEDED
 } from '../../shared/pullRequests'
 import { buildPullRequestSeed, pullRequestSeedTrust } from '../../shared/pullRequestSeed'
 import type { Thread } from '../../shared/types'
 import type { ThreadDataStore } from '../data/ThreadDataStore'
-import { enablePerWorktreeConfig, perWorktreeConfigEnabled, ThreadWorkspaceManager } from '../workspace/ThreadWorkspaceManager'
+import { perWorktreeConfigEnabled, ThreadWorkspaceManager } from '../workspace/ThreadWorkspaceManager'
 import type { CodeHost } from './CodeHost'
 import { PullRequestReadError } from './GitHubCodeHost'
 import { acquireRepositoryLease } from './RepositoryLease'
@@ -43,6 +44,8 @@ export interface PullRequestThreadDeps {
   prepareThread?(thread: Thread): Thread
   /** Sends the first message of a thread. */
   send(threadId: string, content: string): Promise<void>
+  /** Writes a line into a thread once per `messageId`, waking nothing: how a start says what it changed in the repository. */
+  note?(threadId: string, text: string, messageId: string): Promise<unknown>
 }
 
 /** What `resolve` tells a client about a pull request before a thread is started. */
@@ -178,6 +181,11 @@ export class PullRequestThreadService {
     } catch {
       throw new PullRequestThreadError('pull_request_not_git', 'The project folder is not a Git repository.')
     }
+    // The repository's configuration changes only when the person agreed to it; a client that did not ask (an older one
+    // included) is refused before anything is fetched or made.
+    if (input.allowWorktreeConfig !== true && !perWorktreeConfigEnabled(topLevel)) {
+      throw new PullRequestThreadError('pull_request_worktree_config_needed', WORKTREE_CONFIG_NEEDED, { setting: 'extensions.worktreeConfig' })
+    }
     let headSha: string
     try {
       headSha = await this.deps.codeHost.fetchPullRequestHead(topLevel, detail.identity)
@@ -202,13 +210,16 @@ export class PullRequestThreadService {
     const headMoved = headSha.toLowerCase() !== detail.headSha.toLowerCase()
     const name = `PR #${detail.number}: ${detail.title}`.replace(/\s+/g, ' ').trim().slice(0, THREAD_NAME_MAX)
     let thread = this.deps.threads.createThread(name, project.id, project.path, { worktreeEnabled: true })
-    // The one change this start makes to the person's repository configuration, said in its result (and in the dialog
-    // before it runs). Never turned off again: other worktrees may rely on it by then.
+    // The one change this start may make to the person's repository configuration, only when they agreed to it, made
+    // under the repository's lease once nothing can refuse, and said in the result and in the thread. Never turned off
+    // again: other worktrees may rely on it by then.
     let repositoryConfigChange: string | null = null
     try {
-      if (enablePerWorktreeConfig(topLevel)) repositoryConfigChange = WORKTREE_CONFIG_ENABLED
       const threadDirectory = this.deps.threads.getThreadDir(thread.id)
-      await new ThreadWorkspaceManager(threadDirectory).provision(thread.id, 'main', project.path, undefined, undefined, headSha, { untrusted: true })
+      await new ThreadWorkspaceManager(threadDirectory).provision(thread.id, 'main', project.path, undefined, undefined, headSha, {
+        untrusted: true,
+        ...(input.allowWorktreeConfig === true ? { enableWorktreeConfig: () => { repositoryConfigChange = WORKTREE_CONFIG_ENABLED } } : {})
+      })
     } catch (error) {
       await this.discard(thread.id, project.path, topLevel)
       const said = repositoryConfigChange ? ` ${repositoryConfigChange}` : ''
@@ -221,6 +232,12 @@ export class PullRequestThreadService {
       await this.discard(thread.id, project.path, topLevel)
       const said = repositoryConfigChange ? ` ${repositoryConfigChange}` : ''
       throw new PullRequestThreadError('pull_request_workspace_failed', `Could not set up the thread for pull request #${detail.number}: ${error instanceof Error ? error.message : String(error)}${said}`)
+    }
+
+    if (repositoryConfigChange && this.deps.note) {
+      await this.deps.note(thread.id, repositoryConfigChange, `msg:worktree-config:${thread.id}`).catch((error: unknown) => {
+        console.warn('the repository setting notice could not be written', { threadId: thread.id, error: error instanceof Error ? error.message : String(error) })
+      })
     }
 
     const seed = buildPullRequestSeed(detail, { headSha })

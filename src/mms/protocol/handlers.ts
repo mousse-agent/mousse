@@ -722,6 +722,8 @@ function pullRequestThreadService(ctx: HandlerContext): PullRequestThreadService
       if (sentFrom) prepared = ctx.mms.threads.updateThreadMeta(thread.id, { startedFrom: { node: sentFrom.node } }, { touch: false })
       return prepared
     },
+    // A notice from Mousse itself, so the thread shows it even before its first turn.
+    note: (threadId, text, messageId) => ctx.mms.orchestrator.noteThreadUpdate(threadId, text, { messageId, kind: 'warning' }),
     send: async (threadId, content) => {
       ctx.mms.orchestrator.getOrCreateSession(threadId)
       const input = await prepareChatInput(ctx, threadId, { content }, {})
@@ -3499,7 +3501,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     }
     case 'pullRequests.startThread': {
       const p = isObject(params) ? params : {}
-      rejectUnknownKeys(p, ['projectId', 'number', 'reference', 'send', 'message', 'allowClosed', 'allowDuplicate'])
+      rejectUnknownKeys(p, ['projectId', 'number', 'reference', 'send', 'message', 'allowClosed', 'allowDuplicate', 'allowWorktreeConfig'])
       const projectId = asString(p.projectId, 'projectId', 256)
       if ((p.number === undefined) === (p.reference === undefined)) throw new DomainRpcError('invalid_params', 'Give either number or reference')
       const reference = p.reference !== undefined
@@ -3515,7 +3517,8 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
           send,
           ...(message !== undefined ? { message } : {}),
           allowClosed: asOptionalBoolean(p.allowClosed, 'allowClosed') === true,
-          allowDuplicate: asOptionalBoolean(p.allowDuplicate, 'allowDuplicate') === true
+          allowDuplicate: asOptionalBoolean(p.allowDuplicate, 'allowDuplicate') === true,
+          allowWorktreeConfig: asOptionalBoolean(p.allowWorktreeConfig, 'allowWorktreeConfig') === true
         }))
         return { ...started, threads: listedThreadsFor(ctx, ctx.mms.threads.listAllThreads()) }
       } finally {
