@@ -368,9 +368,14 @@ describe('OrchestratorService over the Run Engine', () => {
     expect(first).toMatchObject({ workflowRun, error: { code: 'orchestrator_turn_failed' } })
     expect(engine.getRun(first.runId!)).toMatchObject({ status: 'failed' })
     expect(engine.getRun(first.runId!)!.startedAt).not.toBeNull()
-    // A repeat answers with the same run; the workflow is not admitted again and the repeat is not refused.
+    // The transcript has no record of the workflow run: its message was never saved.
+    expect(orch.getOrCreateSession(thread.id).messages.some((message) => message.workflowRun)).toBe(false)
+    // A repeat answers with the same run and the workflow run it admitted, so the caller can still follow it;
+    // the workflow is not admitted again and the repeat is not refused.
     const again = await orch.send(input, false, { threadId: thread.id, clientRequestId: 'workflow-send' })
-    expect(again).toMatchObject({ runId: first.runId, replayed: true })
+    expect(again).toMatchObject({ runId: first.runId, replayed: true, workflowRun })
+    const once = await orch.send(input, false, { threadId: thread.id, clientRequestId: 'workflow-send' })
+    expect(once).toMatchObject({ runId: first.runId, replayed: true, workflowRun })
     expect(executed).toBe(1)
     expect(chatCalls).toBe(0)
   }, 30_000)

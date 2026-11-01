@@ -8401,7 +8401,7 @@ export class OrchestratorService extends EventEmitter {
             { runId: result.runId, status: record.status }
           )
         // A slash workflow's repeat answers with the workflow run it admitted, as its first send did.
-        const workflowRun = this.admittedWorkflowRun(session, normalizeSendRequest(input).workflowInvocationId)
+        const workflowRun = this.admittedWorkflowRun(session, normalizeSendRequest(input).workflowInvocationId, result.runId)
         return { message: '', actions: [], ...(workflowRun ? { workflowRun } : {}), ...replayed }
       }
       run = { runId: result.runId, sequence: result.sequence }
@@ -8541,10 +8541,25 @@ export class OrchestratorService extends EventEmitter {
     }
   }
 
-  /** The workflow run a slash workflow admitted, as its transcript records it. */
-  private admittedWorkflowRun(session: ThreadSession, invocationId: string | undefined): WorkflowChatRun | undefined {
+  /**
+   * The workflow run a slash workflow admitted: from the transcript, or, when its message could not be
+   * saved there, from the `run.workflow_admitted` event its run recorded at admission.
+   */
+  private admittedWorkflowRun(session: ThreadSession, invocationId: string | undefined, runId: string): WorkflowChatRun | undefined {
     if (!invocationId) return undefined
-    return session.messages.find((message) => message.workflowRun?.invocationId === invocationId)?.workflowRun
+    const shown = session.messages.find((message) => message.workflowRun?.invocationId === invocationId)?.workflowRun
+    if (shown) return shown
+    try {
+      const row = this.runEngine?.store.db
+        .statement("SELECT payload FROM thread_events WHERE thread_id = ? AND run_id = ? AND type = 'run.workflow_admitted' ORDER BY seq DESC LIMIT 1")
+        .get(session.threadId, runId) as { payload?: unknown } | undefined
+      if (!row) return undefined
+      const recorded = (JSON.parse(String(row.payload)) as { workflowRun?: WorkflowChatRun }).workflowRun
+      return recorded?.invocationId === invocationId ? recorded : undefined
+    } catch (error) {
+      logDebug('OrchestratorService', 'admitted workflow run could not be read', error, { threadId: session.threadId, runId })
+      return undefined
+    }
   }
 
   /** Whether the run's turn got as far as starting: the point after which an agent can act. */
@@ -8814,6 +8829,9 @@ export class OrchestratorService extends EventEmitter {
       admitted = run
       this.markRun(opts?.runId, (engine, id) => {
         if (engine.getRun(id)?.status === 'queued') engine.markStarting(id)
+        // Recorded with the run before the transcript is written, so a repeat of the send finds the
+        // workflow run even when its message could not be saved.
+        engine.store.appendEvent({ threadId: session.threadId, runId: id, type: 'run.workflow_admitted', payload: { workflowRun: run } })
       })
       if (!session.messages.some((message) => message.role === 'user' && message.workflowInvocationId === run.invocationId)) {
         this.touchUserActivityAndNotify(session.threadId)
