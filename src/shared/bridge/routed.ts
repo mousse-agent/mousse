@@ -212,6 +212,7 @@ export const ROUTED_METHODS: Readonly<Record<string, RoutedRow>> = Object.freeze
   'pullRequests.get': read('folder', [...FOLDER, 'branch', 'force']),
   'pullRequests.detail': read('folder', [...FOLDER, 'number', 'force'], { required: ['number'] }),
   'pullRequests.baseBranches': read('folder', [...FOLDER]),
+  'pullRequests.mergeMethod': read('folder', [...FOLDER]),
   'pullRequests.watchStatus': read('thread', ['threadId']),
   'applets.get': read('thread', ['threadId', 'appletId', 'revisionId'], {
     required: ['appletId', 'revisionId']

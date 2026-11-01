@@ -70,7 +70,7 @@ describe('pull request methods through the daemon protocol', () => {
   const normalized = (path: unknown) => String(path).replace(/\\/g, '/').toLowerCase()
 
   it('lists the methods', () => {
-    for (const method of ['pullRequests.get', 'pullRequests.detail', 'pullRequests.draft', 'pullRequests.create', 'pullRequests.merge', 'pullRequests.close', 'pullRequests.baseBranches', 'pullRequests.link', 'pullRequests.unlink']) {
+    for (const method of ['pullRequests.get', 'pullRequests.detail', 'pullRequests.draft', 'pullRequests.create', 'pullRequests.merge', 'pullRequests.close', 'pullRequests.baseBranches', 'pullRequests.mergeMethod', 'pullRequests.link', 'pullRequests.unlink']) {
       expect(PROTOCOL_METHODS).toContain(method)
     }
   })
@@ -155,6 +155,18 @@ describe('pull request methods through the daemon protocol', () => {
       expect(await client.request('pullRequests.merge', { projectId: project.id, number: 12 })).toMatchObject({ method: 'squash' })
       expect(normalized(merge.mock.calls[0][0])).toBe(normalized(f.repo))
       expect(merge.mock.calls[0].slice(1)).toEqual([12, { method: 'squash' }])
+    })
+
+    it('tells the Merge confirmation the method a merge would use, else squash, and merges nothing', async () => {
+      const method = vi.spyOn(mms.gitService.codeHost, 'defaultMergeMethod').mockResolvedValue('rebase')
+      const merge = vi.spyOn(mms.gitService.codeHost, 'mergePullRequest').mockResolvedValue(info({ state: 'merged' }))
+      const project = mms.projects.openProject(f.repo)
+      expect(await client.request('pullRequests.mergeMethod', { projectId: project.id })).toEqual({ method: 'rebase' })
+      expect(normalized(method.mock.calls[0][0])).toBe(normalized(f.repo))
+      method.mockResolvedValue(null)
+      expect(await client.request('pullRequests.mergeMethod', { projectId: project.id })).toEqual({ method: 'squash' })
+      await expect(client.request('pullRequests.mergeMethod', { projectId: project.id, number: 12 })).rejects.toThrow(/number is not allowed/)
+      expect(merge).not.toHaveBeenCalled()
     })
 
     it('closes in the project folder', async () => {

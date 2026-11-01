@@ -8,6 +8,7 @@ import type {
   PullRequestDetail,
   PullRequestDraft,
   PullRequestFormInput,
+  PullRequestMergeMethod,
   PullRequestRef,
   PullRequestScope,
   ThreadPullRequestLink
@@ -556,6 +557,11 @@ export async function mergePullRequest(target: PullRequestActionTarget, headSha?
   const result = await window.mousse.pullRequests.merge(actionRef(target), target.number, headSha)
   afterChange(target, result)
   return result
+}
+
+/** The method Merge will use for this target's repository, for its confirmation to name. Rejects when it cannot be read. */
+export function pullRequestMergeMethod(target: PullRequestActionTarget): Promise<PullRequestMergeMethod> {
+  return window.mousse.pullRequests.mergeMethod(actionRef(target))
 }
 
 /** Closes a pull request without merging it; its branch stays. Rejects with the host's reason. */

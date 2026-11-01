@@ -7,6 +7,7 @@ import { dirname, join, resolve, sep } from 'node:path'
 import type { SimpleGit, StatusResult } from 'simple-git'
 import { redactGitText } from '../../shared/gitText'
 import { holdsRepositoryMutation } from '../actions/GitOperationCoordinator'
+import { MOUSSE_COMMIT_EMAIL } from '../actions/git'
 import type { CodeHost } from './CodeHost'
 import { COMMIT_SUGGESTION_LIMITS, EMPTY_COMMIT_INPUT, fitPatch, parseNumstat, type CommitInput } from './commitSuggestion'
 import { explicitActionGitEnv } from './gitEnv'
@@ -960,13 +961,14 @@ export class GitService {
     // No external diff driver or text conversion: a repository's configuration must not run programs here.
     const diff = ['diff', '--no-color', '--no-ext-diff', '--no-textconv']
     const [log, stat, patch] = await Promise.all([
-      readBoundedGit(cwd, ['log', '--no-color', '--max-count=50', '--format=%x1e%s%x1f%b', `${from}..${head}`], 2 * PULL_REQUEST_DRAFT_LIMITS.commits),
+      readBoundedGit(cwd, ['log', '--no-color', '--max-count=50', '--format=%x1e%ae%x1f%s%x1f%b', `${from}..${head}`], 2 * PULL_REQUEST_DRAFT_LIMITS.commits),
       readBoundedGit(cwd, [...diff, '--stat=100', `${from}...${head}`], 2 * PULL_REQUEST_DRAFT_LIMITS.stat),
       readBoundedGit(cwd, [...diff, '--unified=3', `${from}...${head}`], 2 * PULL_REQUEST_DRAFT_LIMITS.patch)
     ])
-    const commits = log.split('\x1e').filter((entry) => entry.trim()).map((entry) => {
-      const [subject = '', ...body] = entry.split('\x1f')
-      return { subject: subject.trim(), body: body.join('\x1f').trim() }
+    // Mousse's own commits (checkpoints, undo, merges of subagents' work) are left out: a pull request is about the change.
+    const commits = log.split('\x1e').filter((entry) => entry.trim()).flatMap((entry) => {
+      const [author = '', subject = '', ...body] = entry.split('\x1f')
+      return author.trim() === MOUSSE_COMMIT_EMAIL ? [] : [{ subject: subject.trim(), body: body.join('\x1f').trim() }]
     })
     return { commits, stat: stat.trim(), patch }
   }

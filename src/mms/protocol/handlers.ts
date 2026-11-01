@@ -3454,6 +3454,13 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       await materializeRequestedWorkspace(ctx, p)
       return { baseBranches: await ctx.mms.gitService.codeHost.listBaseBranches(pullRequestFolder(ctx, p)) }
     }
+    case 'pullRequests.mergeMethod': {
+      // The method Merge uses, for its confirmation to name: the same answer `pullRequests.merge` gets, else squash.
+      const p = isObject(params) ? params : {}
+      rejectUnknownKeys(p, ['threadId', 'projectId'])
+      await materializeRequestedWorkspace(ctx, p)
+      return { method: await ctx.mms.gitService.codeHost.defaultMergeMethod(pullRequestFolder(ctx, p)) ?? 'squash' }
+    }
     case 'pullRequests.link': {
       const p = isObject(params) ? params : {}
       rejectUnknownKeys(p, ['threadId', 'number'])

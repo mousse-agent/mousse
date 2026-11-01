@@ -1,7 +1,10 @@
+import { execFileSync } from 'node:child_process'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { MOUSSE_COMMIT_ENV } from '../src/mms/actions/git'
+import { GitService } from '../src/mms/git/GitService'
 import { OrchestratorService } from '../src/mms/orchestrator/OrchestratorService'
 import {
   PULL_REQUEST_DRAFT_LIMITS,
@@ -10,6 +13,7 @@ import {
   capText,
   conversationExcerpt,
   heuristicPullRequestDraft,
+  isMousseCommit,
   parsePullRequestDraft,
   type PullRequestDraftInputs
 } from '../src/mms/git/pullRequestDraft'
@@ -35,6 +39,20 @@ describe('pull request draft prompt', () => {
     expect(prompt).toContain(`at most ${PULL_REQUEST_TITLE_MAX} characters`)
     expect(prompt).toContain('Commits:\nRetry the login')
     expect(prompt).not.toContain('template')
+  })
+
+  it('does not name a thread\'s own branch, and leaves Mousse\'s checkpoint commits out', () => {
+    const prompt = buildPullRequestDraftPrompt(inputs({
+      branch: 'mousse/thread/0b5e2d4c-8f1a-4e57-9d3b-2c6a1f0e9b7d/main',
+      commits: [
+        { subject: 'mousse: checkpoint turn run:thread:0b5e2d4c:1 (a1)', body: '' },
+        { subject: 'Retry the login', body: '' }
+      ]
+    }))
+    expect(prompt).toContain('Write the title and the description of a pull request into "main"')
+    expect(prompt).not.toContain('mousse/thread')
+    expect(prompt).not.toContain('checkpoint')
+    expect(prompt).toContain('Commits:\nRetry the login')
   })
 
   it('carries the template and asks for it to be filled in', () => {
@@ -144,6 +162,42 @@ describe('heuristicPullRequestDraft', () => {
     expect(heuristicPullRequestDraft(inputs())).toEqual({ title: 'login retry', body: '' })
   })
 
+  const threadBranch = 'mousse/thread/0b5e2d4c-8f1a-4e57-9d3b-2c6a1f0e9b7d/main'
+  const checkpoints = [
+    { subject: 'mousse: checkpoint turn run:thread:0b5e2d4c:2 (a2)', body: '' },
+    { subject: "Merge commit '9f8e7d6c' into mousse/thread/0b5e2d4c-8f1a-4e57-9d3b-2c6a1f0e9b7d/main", body: '' },
+    { subject: 'mousse: undo turn run:thread:0b5e2d4c:1 (op-1)', body: '' },
+    { subject: 'mousse: checkpoint turn run:thread:0b5e2d4c:1 (a1)', body: '' }
+  ]
+  const stat = ' src/format.js   | 12 ++++++++----\n src/tax.js      |  4 ++++\n 2 files changed, 12 insertions(+), 4 deletions(-)'
+
+  it('describes a thread\'s branch by its changed files, without checkpoint subjects, ids or the branch name', () => {
+    const draft = heuristicPullRequestDraft(inputs({ branch: threadBranch, threadName: 'Add sales tax', commits: checkpoints, stat }))
+    expect(draft.title).toBe('Add sales tax')
+    expect(draft.body).toBe('Changes 2 files (+12 \u22124):\n\n- `src/format.js`\n- `src/tax.js`')
+    expect(`${draft.title}\n${draft.body}`).not.toMatch(/mousse|checkpoint|0b5e2d4c|run:thread/)
+  })
+
+  it('keeps the commits someone wrote and drops Mousse\'s own between them', () => {
+    const draft = heuristicPullRequestDraft(inputs({ branch: threadBranch, commits: [checkpoints[0], ...commits, checkpoints[3]], stat }))
+    expect(draft).toEqual({ title: 'Retry the login', body: '- Retry the login\n- Add the retry test' })
+  })
+
+  it('titles a thread\'s unnamed branch from its files, never from the branch name', () => {
+    expect(heuristicPullRequestDraft(inputs({ branch: threadBranch, commits: checkpoints, stat })).title).toBe('Update 2 files')
+    expect(heuristicPullRequestDraft(inputs({ branch: threadBranch, stat: ' README.md | 2 +-\n 1 file changed, 1 insertion(+), 1 deletion(-)' })).title).toBe('Update README.md')
+    expect(heuristicPullRequestDraft(inputs({ branch: threadBranch })).title).toBe('Update')
+  })
+
+  it('knows Mousse\'s own commit subjects', () => {
+    for (const subject of [
+      'mousse: checkpoint turn t-1 (a1)', 'mousse: redo turn t-1 (op)', 'mousse: revert code action a1 (op)',
+      'mousse: save pending changes (a1)', 'mousse: copy of discarded changes', 'On main: mousse pending changes',
+      "Merge commit 'abc123' into mousse/thread/x/main", "Merge branch 'mousse/agent/y' into mousse/thread/x/main"
+    ]) expect(isMousseCommit({ subject })).toBe(true)
+    for (const subject of ['Retry the login', 'Merge branch \'main\' into feature/x', 'Document mousse: the dessert']) expect(isMousseCommit({ subject })).toBe(false)
+  })
+
   it('clamps a long title', () => {
     expect(heuristicPullRequestDraft(inputs({ threadName: 'n'.repeat(200) })).title).toHaveLength(PULL_REQUEST_TITLE_MAX)
   })
@@ -245,5 +299,34 @@ describe('OrchestratorService.draftPullRequest', () => {
     const { orch, readBranchSummary } = orchestrator()
     readBranchSummary.mockRejectedValue(new Error('not a repository'))
     expect(await orch.draftPullRequest(params())).toMatchObject({ title: 'Fix flaky login', source: 'heuristic' })
+  })
+})
+
+describe('GitService.readBranchSummary', () => {
+  let root: string
+  const git = (args: string[], env: NodeJS.ProcessEnv = {}) =>
+    execFileSync('git', args, { cwd: root, env: { ...process.env, GIT_AUTHOR_NAME: 'Ada', GIT_AUTHOR_EMAIL: 'ada@example.com', GIT_COMMITTER_NAME: 'Ada', GIT_COMMITTER_EMAIL: 'ada@example.com', ...env }, stdio: 'pipe' })
+
+  beforeEach(() => {
+    root = mkdtempSync(join(tmpdir(), 'mousse-pr-summary-'))
+    git(['init', '-q', '-b', 'main'])
+    writeFileSync(join(root, 'a.txt'), 'one\n')
+    git(['add', '.'])
+    git(['commit', '-q', '-m', 'Start'])
+    git(['checkout', '-q', '-b', 'mousse/thread/t1/main'])
+  })
+  afterEach(() => {
+    rmSync(root, { recursive: true, force: true })
+  })
+
+  it('leaves out the commits Mousse made itself, whatever their subject', async () => {
+    writeFileSync(join(root, 'a.txt'), 'two\n')
+    git(['commit', '-q', '-am', 'Retry the login'])
+    writeFileSync(join(root, 'b.txt'), 'new\n')
+    git(['add', '.'])
+    git(['commit', '-q', '-m', 'Bookkeeping'], MOUSSE_COMMIT_ENV)
+    const summary = await new GitService().readBranchSummary(root, { branch: 'mousse/thread/t1/main', base: 'main', remote: null })
+    expect(summary.commits).toEqual([{ subject: 'Retry the login', body: '' }])
+    expect(summary.stat).toContain('b.txt')
   })
 })

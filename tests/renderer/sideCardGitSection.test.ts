@@ -202,6 +202,7 @@ describe('merging and closing from a pull request row', () => {
   })
   let merge: ReturnType<typeof vi.fn>
   let close: ReturnType<typeof vi.fn>
+  let mergeMethod: ReturnType<typeof vi.fn>
 
   const mount = async (props: Partial<Parameters<typeof GitSectionView>[0]> = {}) => {
     await act(async () => {
@@ -230,7 +231,8 @@ describe('merging and closing from a pull request row', () => {
     useAppStore.setState({ sideCardCollapsed: {}, mainView: 'git', openedSurfaceKinds: [] })
     merge = vi.fn(async () => ({ pullRequest: info({ state: 'merged' }), method: 'merge' }))
     close = vi.fn(async () => ({ pullRequest: info({ state: 'closed' }) }))
-    vi.stubGlobal('mousse', { pullRequests: { merge, close, get: vi.fn(() => new Promise(() => {})), detail: vi.fn(() => new Promise(() => {})) } })
+    mergeMethod = vi.fn(async () => 'merge')
+    vi.stubGlobal('mousse', { pullRequests: { merge, close, mergeMethod, get: vi.fn(() => new Promise(() => {})), detail: vi.fn(() => new Promise(() => {})) } })
     host = document.createElement('div')
     document.body.appendChild(host)
     root = createRoot(host)
@@ -248,7 +250,10 @@ describe('merging and closing from a pull request row', () => {
     expect(button?.hasAttribute('data-ready')).toBe(true)
     await click(button)
     const shown = dialog('Merge #12')
-    expect(shown?.textContent).toContain('Merge #12 into main?')
+    // The prompt names the method the merge will use, read as the same thread.
+    expect(mergeMethod).toHaveBeenCalledWith({ threadId: 't1' })
+    expect(shown?.textContent).toContain('Merge #12 into main with a merge commit?')
+    expect(confirmIn(shown)?.textContent).toBe('Create a merge commit')
     expect(merge).not.toHaveBeenCalled()
     expect(document.activeElement?.textContent).toBe('Cancel')
     // The prompt's own Merge stands in for the row's while it asks: one primary action at a time.
@@ -257,6 +262,38 @@ describe('merging and closing from a pull request row', () => {
     expect(merge).toHaveBeenCalledWith({ threadId: 't1' }, 12, 'abc1234')
     expect(dialog('Merge #12')).toBeNull()
     expect(host.querySelector('.side-card-git-notice')?.textContent).toBe('Merged #12 with a merge commit.')
+  })
+
+  it('names a squash or a rebase, and waits for the method before it can merge', async () => {
+    mergeMethod.mockResolvedValueOnce('squash')
+    await mount()
+    await click(host.querySelector('.side-card-git-pr-merge'))
+    expect(dialog('Merge #12')?.textContent).toContain('Squash #12 into one commit on main?')
+    expect(confirmIn(dialog('Merge #12'))?.textContent).toBe('Squash and merge')
+    await click(dialog('Merge #12')?.querySelector('button'))
+
+    mergeMethod.mockResolvedValueOnce('rebase')
+    await click(host.querySelector('.side-card-git-pr-merge'))
+    expect(dialog('Merge #12')?.textContent).toContain('Rebase the commits of #12 onto main?')
+    expect(confirmIn(dialog('Merge #12'))?.textContent).toBe('Rebase and merge')
+    await click(dialog('Merge #12')?.querySelector('button'))
+
+    mergeMethod.mockReturnValueOnce(new Promise(() => {}))
+    await click(host.querySelector('.side-card-git-pr-merge'))
+    expect(dialog('Merge #12')?.textContent).toContain('Merge #12 into main?')
+    expect((confirmIn(dialog('Merge #12')) as HTMLButtonElement).disabled).toBe(true)
+    expect(merge).not.toHaveBeenCalled()
+  })
+
+  it('says it uses the repository\'s usual method when that cannot be read, and still merges', async () => {
+    mergeMethod.mockRejectedValueOnce(new Error('No handler registered'))
+    await mount()
+    await click(host.querySelector('.side-card-git-pr-merge'))
+    const shown = dialog('Merge #12')
+    expect(shown?.textContent).toContain("Merge #12 into main with the repository's usual merge method?")
+    expect(confirmIn(shown)?.textContent).toBe('Merge')
+    await click(confirmIn(shown))
+    expect(merge).toHaveBeenCalledWith({ threadId: 't1' }, 12, 'abc1234')
   })
 
   it('puts the row\'s buttons back on Cancel, merging nothing', async () => {

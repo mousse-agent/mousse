@@ -78,6 +78,7 @@ import type {
   PullRequestDraft,
   PullRequestFormInput,
   PullRequestListItem,
+  PullRequestMergeMethod,
   PullRequestPushTarget,
   PullRequestRef,
   PullRequestScope,
@@ -531,6 +532,9 @@ const api = {
       ipcRenderer.invoke('pullRequests:draft', scope, base),
     create: (scope: PullRequestScope, input: PullRequestFormInput): Promise<CreatePullRequestResult> =>
       ipcRenderer.invoke('pullRequests:create', scope, input),
+    /** The method Merge uses in this folder's repository: the host's usual one, else squash. */
+    mergeMethod: (ref: PullRequestRef): Promise<PullRequestMergeMethod> =>
+      ipcRenderer.invoke('pullRequests:mergeMethod', ref),
     /** Merges the pull request with the repository's usual method; `headSha` refuses when its head moved since. */
     merge: (ref: PullRequestRef, number: number, headSha?: string): Promise<PullRequestActionResult> =>
       ipcRenderer.invoke('pullRequests:merge', ref, number, headSha),

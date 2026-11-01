@@ -141,6 +141,7 @@ import type {
   PullRequestDraft,
   PullRequestFormInput,
   PullRequestListItem,
+  PullRequestMergeMethod,
   PullRequestPushTarget,
   PullRequestRef,
   PullRequestScope,
@@ -2222,6 +2223,13 @@ export function registerGuiIpc(
       number
     })
     return { pullRequest: response.pullRequest } satisfies PullRequestActionResult
+  })
+  registerHandler('pullRequests:mergeMethod', async (_e, ref: PullRequestRef | undefined) => {
+    const response = await guiMms.request<{ method: PullRequestMergeMethod }>('pullRequests.mergeMethod', {
+      ...(typeof ref?.threadId === 'string' ? { threadId: ref.threadId } : {}),
+      ...(typeof ref?.projectId === 'string' ? { projectId: ref.projectId } : {})
+    })
+    return response.method
   })
   registerHandler('pullRequests:baseBranches', async (_e, ref: PullRequestRef | undefined) => {
     const response = await guiMms.request<{ baseBranches: PullRequestBaseBranches }>('pullRequests.baseBranches', {

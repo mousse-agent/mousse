@@ -403,9 +403,12 @@ export function changedPaths(cwd: string, start: string, end: string): Array<{ p
   return paths.map((path) => ({ path, beforeHash: blob(start, path), afterHash: blob(end, path) }))
 }
 
+/** The author of the commits Mousse makes itself (checkpoints, undo, merges of subagents' work). */
+export const MOUSSE_COMMIT_EMAIL = 'mousse@local'
+
 export const MOUSSE_COMMIT_ENV: NodeJS.ProcessEnv = {
   GIT_AUTHOR_NAME: 'Mousse',
-  GIT_AUTHOR_EMAIL: 'mousse@local',
+  GIT_AUTHOR_EMAIL: MOUSSE_COMMIT_EMAIL,
   GIT_COMMITTER_NAME: 'Mousse',
-  GIT_COMMITTER_EMAIL: 'mousse@local'
+  GIT_COMMITTER_EMAIL: MOUSSE_COMMIT_EMAIL
 }

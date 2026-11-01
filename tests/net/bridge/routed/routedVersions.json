@@ -409,6 +409,11 @@
     "digest": "be5c180f1cc0b52d",
     "security": "23c8269058d1b9db"
   },
+  "pullRequests.mergeMethod": {
+    "version": 1,
+    "digest": "be5c180f1cc0b52d",
+    "security": "23c8269058d1b9db"
+  },
   "pullRequests.close": {
     "version": 1,
     "digest": "cf3ce34633230e04",

@@ -51,7 +51,11 @@ interface Setup {
   page?: (page: number, args: readonly string[]) => Promise<{ stdout: string; stderr: string }>
   identity?: (cwd: string | undefined) => string
   viewer?: () => Promise<{ stdout: string; stderr: string }>
+  /** The REST read of the pull request, projected to its author's association. */
+  association?: () => Promise<{ stdout: string; stderr: string }>
 }
+
+const isAssociationRead = (args: readonly string[]) => args[0] === 'api' && args.some((arg) => /^repos\/[^?]+\/pulls\/\d+$/.test(arg))
 
 const commentPage = (args: readonly string[]) => Number(/[?&]page=(\d+)/.exec(args.find((arg) => arg.startsWith('repos/')) ?? '')?.[1])
 
@@ -65,12 +69,13 @@ const runner = (setup: Setup = {}) =>
       return typeof view === 'string' ? ok(view) : view()
     }
     if (args[0] === 'api' && args.includes('user')) return (setup.viewer ?? (async () => ok('octocat\n')))()
+    if (isAssociationRead(args)) return (setup.association ?? (async () => ok('MEMBER\n')))()
     if (args[0] === 'api') return (setup.page ?? (async () => ok('[]')))(commentPage(args), args)
     throw new Error(`unexpected ${args.join(' ')}`)
   })
 
 const callsTo = (run: ReturnType<typeof runner>, kind: 'view' | 'comments') =>
-  run.mock.calls.filter((call) => (kind === 'view' ? call[1][0] === 'pr' && call[1][1] === 'view' : call[1][0] === 'api' && call[1].some((arg) => arg.includes('/pulls/'))))
+  run.mock.calls.filter((call) => (kind === 'view' ? call[1][0] === 'pr' && call[1][1] === 'view' : call[1][0] === 'api' && call[1].some((arg) => arg.includes('/comments'))))
 
 describe('parseReviewDecision', () => {
   it('maps the host\'s decision, and an empty one is none', () => {
@@ -204,6 +209,32 @@ describe('GitHubCodeHost.getPullRequestDetail', () => {
       'repos/acme/app/pulls/7/comments?sort=created&direction=desc&per_page=100&page=1',
       '--jq', LINE_COMMENT_JQ
     ])
+  })
+
+  it('asks gh only for fields gh 2.98 knows, and reads the author\'s association from the REST API', async () => {
+    // `gh pr view --json` with no fields lists what gh 2.98.0 accepts; `authorAssociation` is not among them.
+    const GH_2_98_PR_VIEW_FIELDS = new Set([
+      'additions', 'assignees', 'author', 'autoMergeRequest', 'baseRefName', 'baseRefOid', 'body', 'changedFiles', 'closed',
+      'closedAt', 'closingIssuesReferences', 'comments', 'commits', 'createdAt', 'deletions', 'files', 'fullDatabaseId',
+      'headRefName', 'headRefOid', 'headRepository', 'headRepositoryOwner', 'id', 'isCrossRepository', 'isDraft', 'labels',
+      'latestReviews', 'maintainerCanModify', 'mergeCommit', 'mergeStateStatus', 'mergeable', 'mergedAt', 'mergedBy',
+      'milestone', 'number', 'potentialMergeCommit', 'projectCards', 'projectItems', 'reactionGroups', 'reviewDecision',
+      'reviewRequests', 'reviews', 'state', 'statusCheckRollup', 'title', 'updatedAt', 'url'
+    ])
+    const run = runner({ association: async () => ok('OWNER\n') })
+    const detail = await new GitHubCodeHost(run).getPullRequestDetail('/repo', 7)
+    const [view] = callsTo(run, 'view')
+    const fields = String(view[1][4]).split(',')
+    expect(fields.filter((field) => !GH_2_98_PR_VIEW_FIELDS.has(field))).toEqual([])
+    expect(run).toHaveBeenCalledWith('gh', ['api', '--hostname', 'github.com', 'repos/acme/app/pulls/7', '--jq', '.author_association'], { cwd: '/repo' })
+    expect(detail.authorAssociation).toBe('OWNER')
+  })
+
+  it('opens the pull request as least trusted when its author\'s association cannot be read', async () => {
+    const failed = await new GitHubCodeHost(runner({ association: async () => { throw failure('HTTP 502') } })).getPullRequestDetail('/repo', 7)
+    expect(failed).toMatchObject({ number: 7, authorAssociation: 'NONE' })
+    const garbled = await new GitHubCodeHost(runner({ association: async () => ok('{"message":"nope"}') })).getPullRequestDetail('/repo', 7)
+    expect(garbled.authorAssociation).toBe('NONE')
   })
 
   it('merges two pages (100 and 37) and shows them oldest first', async () => {
