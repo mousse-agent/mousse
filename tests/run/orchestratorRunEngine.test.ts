@@ -333,9 +333,58 @@ describe('OrchestratorService over the Run Engine', () => {
     await new Promise((resolve) => setTimeout(resolve, 300))
     expect(chatCalls).toBe(0)
     expect(effectStatuses(engine, thread.id, 'turn.start', run.runId).at(-1)).toBe('succeeded')
+    // A repeat with the same id fails as the first send did, instead of answering as if it had run.
+    await expect(
+      orch.send('never runs', false, { threadId: thread.id, clientRequestId: 'refused-send' })
+    ).rejects.toMatchObject({ code: 'run_not_started', message: expect.stringContaining('transcript is not writable') })
+    expect(engine.listRuns(thread.id)).toHaveLength(1)
     // Sent again as a new message, it runs once.
     const next = await orch.send('never runs', false, { threadId: thread.id, clientRequestId: 'refused-send-2' })
     expect(next.message).toBe('hello from probe')
+    expect(chatCalls).toBe(1)
+  }, 30_000)
+
+  it('answers a slash workflow that was admitted and then failed with its run, its workflow run and the error', async () => {
+    const thread = store.createThread('workflow-admitted')
+    orch.getOrCreateSession(thread.id).projectCwd = projectRepo
+    releaseFirst()
+    const workflowRun = {
+      invocationId: 'invocation-1', profileId: 'profile', threadId: thread.id, definitionId: 'definition',
+      revisionId: 'revision', runId: 'workflow-run-1', title: 'Fixture', state: 'running' as const
+    }
+    let executed = 0
+    orch.setWorkflowChatExecutor({
+      prepare: async () => { throw new Error('not used') },
+      execute: async () => { executed += 1; return workflowRun },
+      observe: async () => { throw new Error('not used') },
+      abandon: () => undefined
+    })
+    // The workflow is admitted; then its message cannot be saved in the thread.
+    const internals = orch as unknown as { acceptTurnUserInput: (...args: unknown[]) => void }
+    internals.acceptTurnUserInput = () => { throw new Error('transcript is not writable') }
+    const input = { content: '/fixture', workflowInvocationId: workflowRun.invocationId }
+    const first = await orch.send(input, false, { threadId: thread.id, clientRequestId: 'workflow-send' })
+    expect(executed).toBe(1)
+    expect(first).toMatchObject({ workflowRun, error: { code: 'orchestrator_turn_failed' } })
+    expect(engine.getRun(first.runId!)).toMatchObject({ status: 'failed' })
+    expect(engine.getRun(first.runId!)!.startedAt).not.toBeNull()
+    // A repeat answers with the same run; the workflow is not admitted again and the repeat is not refused.
+    const again = await orch.send(input, false, { threadId: thread.id, clientRequestId: 'workflow-send' })
+    expect(again).toMatchObject({ runId: first.runId, replayed: true })
+    expect(executed).toBe(1)
+    expect(chatCalls).toBe(0)
+  }, 30_000)
+
+  it('refuses a repeated id that comes with other text', async () => {
+    const thread = store.createThread('id-reused')
+    orch.getOrCreateSession(thread.id).projectCwd = projectRepo
+    releaseFirst()
+    const first = await orch.send('first text', false, { threadId: thread.id, clientRequestId: 'reused-id' })
+    expect(first.message).toBe('hello from probe')
+    await expect(
+      orch.send('other text', false, { threadId: thread.id, clientRequestId: 'reused-id' })
+    ).rejects.toMatchObject({ code: 'client_request_id_conflict' })
+    expect(engine.listRuns(thread.id)).toHaveLength(1)
     expect(chatCalls).toBe(1)
   }, 30_000)
 

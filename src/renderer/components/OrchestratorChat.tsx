@@ -733,7 +733,7 @@ export function OrchestratorChat() {
           : window.mousse.orchestrator.send(request)
         ).finally(() => sendIds.current.replied(requestId))
         if (result.error && result.requestAcknowledged === false) throw result.error
-        sendIds.current.settle(signature, requestId)
+        sendIds.current.settle(signature, requestId, 'answered')
         if (!stillVisible()) return
         // Queued sends return quickly while an earlier turn remains active — do not clear loading.
         if (optimisticQueueId) {
@@ -763,15 +763,15 @@ export function OrchestratorChat() {
         if (stillVisible()) setLoading(stillActive)
         return true
       } catch (error) {
-        // A send the service refused ran nothing: the same text sent again is a new message. Replaying the
-        // refused id would answer with that run and run nothing.
-        if (!isOutcomeUncertain(error)) sendIds.current.settle(signature, requestId)
+        // A send the service refused ran nothing: the same text sent again is a new message. One with no
+        // answer (a timeout, another computer that did not confirm) keeps its id, so sending it again replays it.
+        sendIds.current.settle(signature, requestId, isOutcomeUncertain(error) ? 'unknown' : 'refused')
         if (!stillVisible()) return
         setSendError(sendErrorLine(error))
         const changes = pendingChangesDetails(error)
         setSendChanges(changes ? { line: sendErrorLine(error), message: errorText(error), details: changes } : null)
         if (isOutcomeUncertain(error) && targetThreadId) {
-          // The other computer did not confirm: the message may be there. Keep what is shown, read the thread again,
+          // No answer came (another computer did not confirm, or the reply timed out): the message may be there. Keep what is shown, read the thread again,
           // and only then say whether it arrived. Sending the same text again replays this request, so it cannot run twice.
           const thread = targetThreadId
           void settleUncertainSend({
@@ -789,6 +789,8 @@ export function OrchestratorChat() {
               }
             }
           }).then((outcome) => {
+            // It arrived: the same text sent later is a new message, not a repeat of this one.
+            sendIds.current.settle(signature, requestId, outcome === 'arrived' ? 'arrived' : 'unknown')
             if (!stillVisible()) return
             if (outcome === 'missing') {
               setSendError(`${sendErrorLine(error)} It did not arrive, so it is back in the composer.`)

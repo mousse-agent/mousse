@@ -1,11 +1,20 @@
 /**
+ * What became of a send, as far as the composer knows:
+ * - `answered`: the service replied that it took the message (run, queued or failed after it started);
+ * - `refused`: the service replied with an error, so nothing ran;
+ * - `arrived`: no reply came, and reading the thread again found the message;
+ * - `unknown`: no reply came (a timeout, another computer that did not confirm), or the thread was read
+ *   again and the message was not there yet.
+ */
+export type SendOutcome = 'answered' | 'refused' | 'arrived' | 'unknown'
+
+/**
  * The request ids of the composer's sends. The id is the service's retry key (`clientRequestId`): a send
  * with an id the service already has is answered with that run and never runs a second time.
  *
  * - A send whose outcome is unknown keeps its id, so sending the same message again replays it.
  * - The same message sent while the first is still waiting for its reply is a new message, with a new id.
- * - A send that arrived, or that the service refused (nothing ran), gives its id up: the same text sent
- *   later is a new message.
+ * - A send that arrived, or that the service refused, gives its id up: the same text sent later is a new message.
  */
 export class SendRetryIds {
   private readonly retained = new Map<string, string>()
@@ -27,13 +36,15 @@ export class SendRetryIds {
     return id
   }
 
-  /** The send's reply came, or the call failed: the id no longer waits. */
+  /** The send's call returned or failed: the id no longer waits. */
   replied(id: string): void {
     this.waiting.delete(id)
   }
 
-  /** The send arrived or was refused: its id is not used again. Kept when a later send of the message took it over. */
-  settle(signature: string, id: string): void {
+  /** Records what became of the send. Only an unknown outcome keeps the id for the same message sent again. */
+  settle(signature: string, id: string, outcome: SendOutcome): void {
+    if (outcome === 'unknown') return
+    // A later send of the same message may have taken the signature over; its id stays.
     if (this.retained.get(signature) === id) this.retained.delete(signature)
   }
 }

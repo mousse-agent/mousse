@@ -136,6 +136,30 @@ describe('structured workflow CLI', () => {
     } finally { await gui.close(); await f.close() }
   }, 30_000)
 
+  it('answers a slash workflow sent again with the same clientRequestId with the workflow run it admitted', async () => {
+    const f = await fixture()
+    const gui = new LocalMmsClient({ homeDir: f.homeDir, endpoint: f.endpoint, ownerToken: f.main.getOwnerRecord()!.token, clientType: 'gui', requestedCapabilities: ['profiles-v1', WORKFLOW_RUN_CAPABILITY] })
+    try {
+      const model = vi.spyOn(Harness.prototype, 'startTurn').mockImplementation(() => { throw new Error('Workflow commands must not ask a model to schedule their graph') })
+      vi.spyOn(Harness.prototype, 'oneShot').mockRejectedValue(new Error('No model title request for explicit workflow execution'))
+      const published = await f.publish()
+      const { thread } = await f.rpc.request<{ thread: { id: string } }>('threads.create', { name: 'Slash retry' })
+      const services = await f.main.getProfileServices(f.alice.id)
+      await gui.connect(); await gui.request('profiles.bind', { profile: f.alice.id })
+      // The app and the CLI send their request id as the retry key too.
+      const requestId = randomUUID()
+      const params = { threadId: thread.id, content: '/' + published.slug, requestId, clientRequestId: requestId, source: 'cli' }
+      const first = await gui.request<OrchestratorResponse>('orchestrator.send', params)
+      expect(first.workflowRun).toMatchObject({ threadId: thread.id, definitionId: published.id })
+      const repeated = await gui.request<OrchestratorResponse>('orchestrator.send', params)
+      expect(repeated).toMatchObject({ replayed: true, runId: first.runId })
+      expect(repeated.workflowRun?.runId).toBe(first.workflowRun!.runId)
+      await vi.waitFor(async () => expect((await services.platform.workflowRuns.runtime.get(first.workflowRun!.runId, { profileId: f.alice.id })).manifest.state).toBe('succeeded'))
+      expect(await services.platform.workflowRuns.runtime.list({ profileId: f.alice.id })).toHaveLength(1)
+      expect(model).not.toHaveBeenCalled()
+    } finally { await gui.close(); await f.close() }
+  }, 30_000)
+
   it('pins queued slash commands before publication changes, survives host reconstruction, and tombstones removals', async () => {
     const f = await fixture()
     let fresh: MousseMainService | undefined

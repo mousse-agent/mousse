@@ -1557,8 +1557,9 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       if (!ctx.mms.threads.getThread(threadId)) {
         throw new DomainRpcError('thread_not_found', 'Thread not found', { threadId })
       }
-      // Idempotency key (SPEC §6). `requestId` is deliberately not reused: the GUI keeps one per
-      // content hash while a send is in flight, so it would turn a repeated message into a replay.
+      // Idempotency key (SPEC §6): a repeat with the same id and text answers with the first send's run.
+      // It is not taken from `requestId`, which names a slash workflow's receipt and is optional; the
+      // app and the CLI pass the same value in both when a repeat must not run twice.
       const clientRequestId = asOptionalClientRequestId(p.clientRequestId)
       // SPEC §12.7: `ack` returns once the send and its turn.start effect are committed.
       const awaitMode = asOptionalSendAwaitMode(p.await)
