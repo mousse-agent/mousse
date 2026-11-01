@@ -54,6 +54,23 @@ test('dry run reports a merged branch and its clean worktree without changing an
   assert.ok(git(repo, 'rev-parse', '--verify', 'done'));
 });
 
+test('dry run fetches and prunes nothing: stale remote refs and worktree registrations stay', (t) => {
+  const { root, repo, git, commitOn, run } = fixture(t);
+  commitOn('gone', 'gone.txt');
+  git(repo, 'push', 'origin', 'gone');
+  git(repo, 'push', 'origin', '--delete', 'gone');
+  git(repo, 'update-ref', 'refs/remotes/origin/gone', git(repo, 'rev-parse', 'gone'));
+  const missing = join(root, 'missing-tree');
+  git(repo, 'worktree', 'add', missing, 'gone');
+  rmSync(missing, { recursive: true, force: true });
+  const refsBefore = git(repo, 'for-each-ref');
+  const result = run();
+  assert.equal(result.mode, 'dry-run');
+  assert.equal(git(repo, 'for-each-ref'), refsBefore);
+  assert.ok(git(repo, 'worktree', 'list', '--porcelain').includes('missing-tree'));
+  assert.ok(!existsSync(join(repo, '.git', 'FETCH_HEAD')));
+});
+
 test('apply removes a merged branch and its worktree, keeping one with uncommitted changes', (t) => {
   const { root, repo, git, commitOn, mergeToTrunk, run } = fixture(t);
   commitOn('done', 'done.txt');

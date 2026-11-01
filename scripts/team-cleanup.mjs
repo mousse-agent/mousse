@@ -17,7 +17,9 @@ function ghPullRequests(cwd) {
 }
 
 // Removes worktrees and branches whose work is already on the default branch.
-// Dry run unless apply is set. Anything uncertain is kept and reported.
+// Dry run unless apply is set. A dry run changes nothing: no fetch, no prune,
+// no ref update; it reads origin with ls-remote and compares against commits
+// already fetched. Anything uncertain is kept and reported.
 export function teamCleanup({
   cwd = process.cwd(), apply = false, branch: only = null,
   recentMs = DAY_MS, now = Date.now(), listPullRequests = ghPullRequests,
@@ -36,26 +38,32 @@ export function teamCleanup({
   const isAncestor = (sha, ref) => git(['merge-base', '--is-ancestor', sha, ref], true) !== null;
 
   const here = resolve(git(['rev-parse', '--show-toplevel']));
-  git(['fetch', '--prune', 'origin']);
+  if (apply) git(['fetch', '--prune', 'origin']);
   const remoteHeads = git(['ls-remote', '--symref', 'origin', 'HEAD', 'refs/heads/*']);
   const match = /^ref: refs\/heads\/(.+)\tHEAD$/m.exec(remoteHeads);
   if (!match) throw new Error('origin did not advertise a default branch; nothing was cleaned.');
   const defaultBranch = match[1];
-  const defaultRef = `refs/remotes/origin/${defaultBranch}`;
-  const defaultHead = git(['rev-parse', '--verify', defaultRef]);
   const remoteTips = new Map(remoteHeads.split('\n')
     .filter((line) => /^[a-f0-9]+\trefs\/heads\//.test(line))
     .map((line) => {
       const [sha, ref] = line.split('\t');
       return [ref.slice('refs/heads/'.length), sha];
     }));
+  const warnings = [];
+  // The default branch's tip on origin when this clone has it; a dry run that
+  // has not fetched it compares against the last fetched one and says so.
+  const remoteDefault = remoteTips.get(defaultBranch);
+  let defaultHead = remoteDefault && git(['rev-parse', '--verify', '--quiet', `${remoteDefault}^{commit}`], true);
+  if (!defaultHead) {
+    defaultHead = git(['rev-parse', '--verify', `refs/remotes/origin/${defaultBranch}`]);
+    warnings.push(`origin/${defaultBranch} has commits this clone has not fetched; the dry run used the last fetched ${defaultBranch}. Run git fetch origin for a current check.`);
+  }
 
   let pulls = null;
-  let warning = null;
   try {
     pulls = listPullRequests(here);
   } catch (error) {
-    warning = `Pull requests unavailable (${error.message.split('\n')[0]}); only branches already on ${defaultBranch} were considered.`;
+    warnings.push(`Pull requests unavailable (${error.message.split('\n')[0]}); only branches already on ${defaultBranch} were considered.`);
   }
   const openNames = new Set((pulls ?? []).filter((pr) => pr.state === 'OPEN').map((pr) => pr.headRefName));
   const mergedHeads = new Map((pulls ?? []).filter((pr) => pr.state === 'MERGED')
@@ -66,7 +74,7 @@ export function teamCleanup({
     if (openNames.has(name)) return null;
     const pr = mergedHeads.get(`${name}\0${sha}`);
     if (pr) return `PR #${pr} merged`;
-    if (sha !== defaultHead && isAncestor(sha, defaultRef)) return `already on ${defaultBranch}`;
+    if (sha !== defaultHead && isAncestor(sha, defaultHead)) return `already on ${defaultBranch}`;
     return null;
   }
 
@@ -117,7 +125,7 @@ export function teamCleanup({
   const result = {
     mode: apply ? 'apply' : 'dry-run', defaultBranch,
     worktrees: [], branches: [], remoteBranches: [], kept: [],
-    warnings: warning ? [warning] : [],
+    warnings,
   };
   const keep = (kind, name, reason) => result.kept.push({ kind, name, reason });
   const checkedOut = new Map(worktrees.filter((tree) => tree.branch).map((tree) => [tree.branch, tree]));
