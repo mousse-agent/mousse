@@ -429,6 +429,41 @@
   border-radius: 10px;
 }
 
+/* Threads tab: a thread's card carries a faint wash of its project's hue. The wash is its own layer, under the
+   row's content and over whichever background the row has, so the hover background still shows through. */
+.threads-sidebar-thread.threads-sidebar-card.project-tinted {
+  --project-tint-strength: 8%;
+  position: relative;
+  isolation: isolate;
+}
+
+html[data-theme='light'] .threads-sidebar-thread.threads-sidebar-card.project-tinted {
+  --project-tint-strength: 6%;
+}
+
+@media (prefers-color-scheme: light) {
+  html[data-theme='system'] .threads-sidebar-thread.threads-sidebar-card.project-tinted {
+    --project-tint-strength: 6%;
+  }
+}
+
+.threads-sidebar-thread.threads-sidebar-card.project-tinted::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  border-radius: inherit;
+  background: color-mix(in srgb, var(--project-tint) var(--project-tint-strength), transparent);
+  pointer-events: none;
+}
+
+/* The selected row keeps its plain raised look, so the selection reads first; its mark still shows the hue. */
+.threads-sidebar-thread.threads-sidebar-card.project-tinted.active::after,
+.threads-sidebar-thread.threads-sidebar-card.project-tinted.has-open-subagent::after,
+html[data-theme='high-contrast'] .threads-sidebar-thread.threads-sidebar-card.project-tinted::after {
+  content: none;
+}
+
 .threads-sidebar-card-mark {
   display: grid;
   place-items: center;
