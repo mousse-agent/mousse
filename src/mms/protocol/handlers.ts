@@ -120,7 +120,7 @@ import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync } from 'no
 import { FILE_ASSET_PIECE_BYTES, SAVE_TOO_LARGE_MESSAGE, saveExceedsRequest } from '../../shared/fileAssets'
 import { homedir } from 'node:os'
 import { isAbsolute, join, relative, resolve } from 'node:path'
-import { folderAccess } from '../files/folderAccess'
+import { waitForFolderAccess } from '../files/folderAccess'
 import type { DomainConnectionContext } from './domainRegistry'
 import { DomainRpcError } from './domainRegistry'
 import { WORKFLOW_RUN_CAPABILITY } from '../../shared/workflowRunPlatform'
@@ -1118,8 +1118,42 @@ function scheduledJobOptionsDeps(ctx: HandlerContext): ScheduledJobOptionsDeps {
   })
 }
 
-/** Methods that only signal work already in memory, never reading a folder; they answer at once. */
-const FOLDER_FREE_METHODS = new Set(['threads.focus', 'git.cancelOperation', 'pty.isAlive', 'pty.lookup', 'pty.write', 'pty.resize', 'pty.kill'])
+/**
+ * Methods that read or write a project folder synchronously (Git, files, the checkout, project config). They
+ * wait for the folder's volume first; every other method (Stop, thread metadata, queues, settings) answers
+ * at once whatever a folder is waiting for.
+ */
+const FOLDER_METHOD_PREFIXES = ['git.', 'files.', 'workspace.', 'review.', 'actions.', 'pullRequests.', 'publish.', 'skills.']
+const FOLDER_METHODS = new Set([
+  'projects.open', 'projects.identity', 'projects.trustGitSettings', 'orchestrator.send', 'orchestrator.retry',
+  'thread.fork', 'thread.mergeBack', 'threads.setWorktreeEnabled', 'threads.purge', 'agents.spawn', 'tasks.create',
+  'pty.create', 'editor.folder', 'github.cloneRepository', 'github.createRepository', 'mcp.getConfigSources',
+  'mcp.listServers', 'mcp.writeCursorConfig', 'storage.cleanup.plan', 'storage.cleanup.run'
+])
+/** Methods under those prefixes that only signal work already in memory. */
+const FOLDER_FREE_METHODS = new Set(['git.cancelOperation', 'pullRequests.watchStatus'])
+
+function readsFolder(method: string): boolean {
+  if (FOLDER_FREE_METHODS.has(method)) return false
+  return FOLDER_METHODS.has(method) || FOLDER_METHOD_PREFIXES.some((prefix) => method.startsWith(prefix))
+}
+
+/**
+ * Waits for the folders a request works in. A Stop of its thread or the profile's shutdown ends the wait
+ * with an error, so neither waits on a pending macOS permission prompt.
+ */
+async function waitForRequestFolders(ctx: HandlerContext, method: string, params: unknown): Promise<void> {
+  if (!readsFolder(method)) return
+  const folders = requestFolders(ctx, params)
+  if (folders.length === 0) return
+  const threadId = isObject(params) && typeof params.threadId === 'string' ? params.threadId : undefined
+  const shutdown = ctx.mms.requestShutdownSignal
+  const waited = ctx.mms.orchestrator?.waitForThreadFolders
+    ? await ctx.mms.orchestrator.waitForThreadFolders(threadId, folders, shutdown)
+    : await waitForFolderAccess(folders, { signal: shutdown }).then(() => 'ready' as const, () => 'aborted' as const)
+  if (waited === 'stopped') throw new DomainRpcError('thread_stopped', 'The thread was stopped before this request started.', { threadId })
+  if (waited === 'aborted') throw Object.assign(new Error('Profile work is shutting down'), { code: 'profile_draining' })
+}
 
 /** Parameters that name a folder by its absolute path. A relative `path` is a file inside the project and is skipped. */
 const FOLDER_PARAMS = ['path', 'cwd', 'root', 'projectPath', 'workspacePath', 'folder', 'directory'] as const
@@ -1163,7 +1197,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     ctx.mms.threads.assertThreadAdmission(params.threadId)
   }
   // Before any synchronous work in the folder: a pending macOS permission prompt then holds only this request.
-  if (!FOLDER_FREE_METHODS.has(method)) await folderAccess.ready(requestFolders(ctx, params))
+  await waitForRequestFolders(ctx, method, params)
   if (ctx.mms.domains?.has(method)) return ctx.mms.domains.dispatch(ctx, method, params)
   switch (method) {
     case 'threads.focus': {
