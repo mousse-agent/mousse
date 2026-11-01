@@ -409,8 +409,17 @@ export interface AgentActor {
   hops?: number
 }
 
-/** `pr_update` is no longer written: rows an earlier version left are acknowledged when the pull request watch starts. */
+/** `pr_update` is no longer written (see `isRetiredInboxRow`). */
 export type InboxKind = 'child_result' | 'restart_note' | 'reconcile_notice' | 'pr_update'
+
+/**
+ * A row of a kind no longer written: `pr_update`, which an earlier pull request watch used to wake the agent to change
+ * code and push. One an earlier version left is never delivered; it is acknowledged before the run engine's workers
+ * start, and the wake and steer paths acknowledge any they still meet.
+ */
+export function isRetiredInboxRow(row: Pick<InboxRecord, 'kind'>): boolean {
+  return row.kind === 'pr_update'
+}
 
 export type InboxStatus = 'pending' | 'delivered' | 'acknowledged'
 

@@ -227,3 +227,29 @@ describe('the watch through the daemon protocol', () => {
     })
   })
 })
+
+describe('wake rows an earlier pull request watch left', () => {
+  it('are withdrawn at startup before any run engine worker starts, for a thread with no link too', async () => {
+    const f = gitFoundationFixture()
+    const mms = await MousseMainService.create({ homeDir: f.home, headless: true, ownerKind: 'test' })
+    try {
+      const project = mms.projects.openProject(f.repo)
+      const thread = mms.threads.createThread('No link any more', project.id)
+      const row = mms.runEngine.inbox.append({ inboxId: `inbox:pr-update:${thread.id}:1:0`, threadId: thread.id, kind: 'pr_update', payload: { text: 'Address what needs code changes and push when done.' } })
+      const services = mms as unknown as { startRunEngineWorkers(): void }
+      const startWorkers = services.startRunEngineWorkers.bind(mms)
+      let statusWhenWorkersStarted: string | undefined
+      vi.spyOn(services, 'startRunEngineWorkers').mockImplementation(() => {
+        statusWhenWorkersStarted = mms.runEngine.inbox.get(row.inboxId)?.status
+        startWorkers()
+      })
+      await mms.start()
+      expect(statusWhenWorkersStarted).toBe('acknowledged')
+      expect(mms.runEngine.store.listNonTerminalRuns().filter((run) => run.threadId === thread.id)).toEqual([])
+    } finally {
+      vi.restoreAllMocks()
+      await mms.stop()
+      f.dispose()
+    }
+  }, 30_000)
+})

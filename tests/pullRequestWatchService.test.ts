@@ -97,7 +97,6 @@ function setup(options: { threads?: string[]; maxReadsPerTick?: number; maxReque
     folderFor: () => projectFolder,
     isAvailable: (id) => !unavailable.has(id),
     runStore: () => f.store,
-    inbox: () => f.engine.inbox,
     notify: async (threadId, text, messageId) => {
       sink.before?.()
       if (sink.failures > 0) {
@@ -323,15 +322,6 @@ describe('PullRequestWatchService', () => {
       h = setup()
       expect(() => h!.service.setMode('t1', 'act' as unknown as PullRequestWatchMode)).toThrow(/Unknown watch mode/)
       expect(h.service.status('t1')).not.toHaveProperty('actRefusal')
-    })
-
-    it('withdraws, at start, a wake row an earlier version wrote, so it cannot start a turn', async () => {
-      h = setup()
-      const row = h.f.engine.inbox.append({ inboxId: 'inbox:pr-update:t1:1:0', threadId: 't1', kind: 'pr_update', payload: { text: 'Address what needs code changes and push when done.' } })
-      h.service.start()
-      await h.service.stop()
-      expect(h.f.engine.inbox.get(row.inboxId)).toMatchObject({ status: 'acknowledged' })
-      expect(h.f.reconciler.runOnce().wakes.wakes).toEqual([])
     })
 
     it('reads a watch an earlier version set to wake the agent as Notify, and reports what it had prepared as a notice', async () => {

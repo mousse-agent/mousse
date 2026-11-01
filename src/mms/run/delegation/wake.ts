@@ -10,6 +10,7 @@ import { writeTerminalRun } from '../terminal'
 import {
   TERMINAL_RUN_STATUSES,
   stoppedByPerson,
+  isRetiredInboxRow,
   isWakeTurnPayload,
   type ChildResultPayload,
   type EffectRecord,
@@ -228,7 +229,11 @@ export function wakeThreads(
   for (const threadId of inbox.listThreadsWithPending()) {
     try {
       store.db.transaction(() => {
-        const rows = inbox.listPending(threadId)
+        const pending = inbox.listPending(threadId)
+        // A row of a kind no longer written never wakes or steers: it is settled here instead.
+        const retired = pending.filter(isRetiredInboxRow)
+        if (retired.length) inbox.markAcknowledged(retired.map((row) => row.inboxId))
+        const rows = pending.filter((row) => !isRetiredInboxRow(row))
         if (rows.length === 0) return
         // A paused thread is busy for wakes: the rows wait, and the resume item carries them (SPEC §14.3).
         if (store.getPausedRun(threadId)) return

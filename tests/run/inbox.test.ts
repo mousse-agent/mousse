@@ -113,6 +113,37 @@ describe('Inbox (SPEC §14.1)', () => {
     })
   })
 
+  describe('pull request update rows an earlier version left', () => {
+    const leftover = (fixture: DelegationFixture, threadId: string, n = 0) =>
+      fixture.engine.inbox.append({ inboxId: `inbox:pr-update:${threadId}:1:${n}`, threadId, kind: 'pr_update', payload: { text: 'Address what needs code changes and push when done.' } })
+
+    it('are all withdrawn, whatever their thread or state, and other rows are left alone', () => {
+      f = delegationFixture()
+      const pending = leftover(f, 'unlinked-thread')
+      const delivered = leftover(f, 'linked-thread')
+      f.engine.inbox.markDelivered([delivered.inboxId], null)
+      const notice = f.engine.inbox.append({ threadId: 'linked-thread', kind: 'reconcile_notice', payload: { text: 'kept' } })
+      expect(f.engine.inbox.withdrawRetiredRows().map((row) => row.inboxId).sort()).toEqual([delivered.inboxId, pending.inboxId].sort())
+      expect(f.engine.inbox.get(pending.inboxId)).toMatchObject({ status: 'acknowledged' })
+      expect(f.engine.inbox.get(delivered.inboxId)).toMatchObject({ status: 'acknowledged' })
+      expect(f.engine.inbox.get(notice.inboxId)).toMatchObject({ status: 'pending' })
+      expect(f.engine.inbox.withdrawRetiredRows()).toEqual([])
+    })
+
+    it('never wake an idle thread or steer a running one: reconciliation acknowledges them instead', async () => {
+      f = delegationFixture()
+      const idle = leftover(f, 'idle')
+      await f.runningRun('busy')
+      const busy = leftover(f, 'busy')
+      const report = f.reconciler.runOnce().wakes
+      expect(report.wakes).toEqual([])
+      expect(report.steers).toEqual([])
+      expect(f.engine.inbox.get(idle.inboxId)).toMatchObject({ status: 'acknowledged' })
+      expect(f.engine.inbox.get(busy.inboxId)).toMatchObject({ status: 'acknowledged' })
+      expect(f.store.listNonTerminalRuns().filter((run) => run.source === 'wake')).toEqual([])
+    })
+  })
+
   describe('wake notices (issue #142)', () => {
     const row = (delegationId: string, result: { runStatus: string; text?: string; error?: string }, childThreadId = 'c'): InboxRecord => ({
       inboxId: `i:${delegationId}`, threadId: 't', runId: 'r', kind: 'child_result', status: 'pending', createdAt: '',

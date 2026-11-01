@@ -15,7 +15,6 @@ import {
 } from '../../shared/pullRequests'
 import type { Thread } from '../../shared/types'
 import { atomicWriteJsonSync } from '../data/AtomicFs'
-import type { Inbox } from '../run/Inbox'
 import type { RunStore } from '../run/RunStore'
 import { currentStopGeneration } from '../run/stopGeneration'
 import type { CodeHost } from './CodeHost'
@@ -92,8 +91,6 @@ export interface PullRequestWatchDeps {
   /** False once the thread is in the trash or being purged. */
   isAvailable(threadId: string): boolean
   runStore(): RunStore | null
-  /** Only to withdraw the wake rows an earlier version wrote (see `withdrawEarlierWakes`). */
-  inbox(): Inbox | null
   /**
    * Writes a system line into the thread, once per `messageId`, and answers only after it is on disk: `delivered` when
    * it wrote it, `already` when the thread already held it. It throws when the line could not be saved.
@@ -153,7 +150,6 @@ export class PullRequestWatchService extends EventEmitter {
   /** Starts the timer (unref'd) and the first tick, which also replays any notice a restart cut off. */
   start(): void {
     if (this.timer || this.stopped) return
-    this.withdrawEarlierWakes()
     this.timer = setInterval(() => { void this.tick() }, this.deps.tickMs ?? TICK_MS)
     this.timer.unref()
     this.unsubscribe = this.deps.onRunEnd?.((threadId) => this.onRunEnded(threadId))
@@ -623,24 +619,6 @@ export class PullRequestWatchService extends EventEmitter {
     }
   }
 
-  /**
-   * An earlier version could let a watch wake the agent through `pr_update` inbox rows. A watch only notifies now, so
-   * any such row that nobody has read is acknowledged once at start, and none of them can still start a turn.
-   */
-  private withdrawEarlierWakes(): void {
-    try {
-      const inbox = this.deps.inbox()
-      if (!inbox) return
-      for (const thread of this.deps.threads.listAllThreads()) {
-        if (!thread.pullRequest) continue
-        const open = inbox.listForThread(thread.id).filter((row) => row.kind === 'pr_update' && row.status !== 'acknowledged')
-        if (open.length) inbox.markAcknowledged(open.map((row) => row.inboxId))
-      }
-    } catch (error) {
-      console.warn('earlier pull request wakes could not be withdrawn', error instanceof Error ? error.message : String(error))
-    }
-  }
-
   private hostIsPaused(host: string): boolean {
     return (this.hostPaused.get(host) ?? 0) > this.clock()
   }
@@ -675,7 +653,8 @@ export class PullRequestWatchService extends EventEmitter {
 
 /**
  * A sidecar as a watch that only notifies keeps it. One an earlier version wrote for a watch that woke the agent reads as
- * Notify, and the wakes it had prepared are dropped: their remarks are not remembered, so the next read reports them as a notice.
+ * Notify, and the wakes it had prepared are dropped. The remarks in them were not remembered yet, so the next read
+ * reports them as a notice; a check result in them was already recorded as seen, so it is not reported again.
  */
 function notifyOnly(entry: Sidecar): Sidecar {
   const legacy = entry as Omit<Sidecar, 'mode'> & { mode: string }
