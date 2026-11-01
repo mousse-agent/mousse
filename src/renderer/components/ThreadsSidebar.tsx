@@ -31,6 +31,7 @@ import { ThreadHoverCard } from './ThreadHoverCard'
 import { ThreadComputerBadge } from './ComputerBadge'
 import { UNKNOWN_COMPUTER_NAME, useComputers } from '../lib/computers'
 import { groupComputers, groupProjects } from '../lib/projectGroups'
+import { projectHues } from '../lib/projectHues'
 import { ThreadSpeechIndicator, useSpeakingThreadId } from '../readAloud/ThreadSpeechIndicator'
 
 import '../styles/threads-sidebar.css'
@@ -224,7 +225,7 @@ function SidebarRenameInput({
 function ThreadCardBody({
   thread,
   projectName,
-  projectKey,
+  hue,
   activity,
   awaitsApproval,
   startedAt,
@@ -237,8 +238,8 @@ function ThreadCardBody({
 }: {
   thread: Pick<Thread, 'name' | 'projectId' | 'updatedAt' | 'pinnedAt' | 'worktreeEnabled' | 'node' | 'offline' | 'notShared'>
   projectName?: string
-  /** What the project's color comes from: the id of its group, so a project on several computers is one color. */
-  projectKey?: string
+  /** The project's hue (`--hue-N`), shared with the row's tint. */
+  hue?: number
   activity?: ThreadActivityState
   /** The input it waits for is a permission request. */
   awaitsApproval?: boolean
@@ -252,13 +253,11 @@ function ThreadCardBody({
   onRename: (name: string) => void
   onCancelRename: () => void
 }) {
-  const colorKey = projectKey ?? thread.projectId
-  const hue = colorKey ? (Math.abs(hashText(colorKey)) % 6) + 1 : 0
   const age = threadAge(isThreadActivityActive(activity) ? startedAt ?? thread.updatedAt : thread.updatedAt)
   return (
     <>
       {projectName ? (
-        <span className="threads-sidebar-card-mark" style={{ color: `var(--hue-${hue})` }} aria-hidden="true">{projectInitials(projectName)}</span>
+        <span className="threads-sidebar-card-mark" style={hue ? { color: `var(--hue-${hue})` } : undefined} aria-hidden="true">{projectInitials(projectName)}</span>
       ) : (
         <span className="threads-sidebar-card-mark threads-sidebar-card-mark-empty" aria-hidden="true">
           <Folder size={13} strokeWidth={1.8} />
@@ -325,12 +324,6 @@ function ThreadCardBody({
       </span>
     </>
   )
-}
-
-function hashText(value: string): number {
-  let hash = 0
-  for (let index = 0; index < value.length; index += 1) hash = (hash * 31 + value.charCodeAt(index)) | 0
-  return hash
 }
 
 export function ThreadsSidebar({ className = '' }: { className?: string }) {
@@ -422,6 +415,10 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
   // match none of this computer's stay groups of their own, named with their computer.
   const { groups: projectGroups, groupOf } = useMemo(() => groupProjects(projects), [projects])
   const groupById = useMemo(() => new Map(projectGroups.map((group) => [group.id, group])), [projectGroups])
+  const hueByGroup = useMemo(
+    () => projectHues(projectGroups.map((group) => ({ id: group.id, createdAt: group.project.createdAt }))),
+    [projectGroups]
+  )
   const { byNode: computers } = useComputers(projects.some((project) => project.node))
   const groupIdOf = (projectId: string | undefined): string | undefined => (projectId ? groupOf.get(projectId) ?? projectId : undefined)
 
@@ -858,6 +855,10 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
     const isGeneratingTitle = pendingTitleIds.has(thread.id)
     const statusNode = renderThreadStatus(thread.id)
     const showTrailing = Boolean(statusNode || thread.worktreeEnabled || thread.node)
+    const groupId = groupIdOf(thread.projectId)
+    const group = groupId ? groupById.get(groupId) : undefined
+    // Only the Threads tab's cards carry the project's tint; a thread without a project has none.
+    const hue = layout === 'card' && group ? hueByGroup.get(group.id) : undefined
 
 
 
@@ -891,7 +892,9 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
           activeThreadId === thread.id ? ' active' : openSubagentParentId === thread.id ? ' has-open-subagent' : ''
 
-        }${thread.pinnedAt ? ' pinned' : ''}${isSettled ? ' settled' : ''}`}
+        }${thread.pinnedAt ? ' pinned' : ''}${isSettled ? ' settled' : ''}${hue ? ' project-tinted' : ''}`}
+
+        style={hue ? ({ '--project-tint': `var(--hue-${hue})` } as CSSProperties) : undefined}
 
         aria-current={activeThreadId === thread.id ? 'page' : undefined}
 
@@ -947,8 +950,8 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
         {layout === 'card' ? (
           <ThreadCardBody
             thread={thread}
-            projectName={groupById.get(groupIdOf(thread.projectId) ?? '')?.project.name}
-            projectKey={groupIdOf(thread.projectId)}
+            projectName={group?.project.name}
+            hue={hue}
             activity={rolledUpActivity[thread.id] ?? threadActivity[thread.id]}
             awaitsApproval={approvalThreads.has(thread.id)}
             startedAt={turnStates[thread.id]?.startedAt}
