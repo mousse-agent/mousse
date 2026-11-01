@@ -1,12 +1,13 @@
 import { execFileSync } from 'node:child_process'
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs'
+import { lutimesSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { gitDirectoryEnv, isGitDirectory, withGitConfigEnv } from '../src/mms/git/gitEnv'
 import { GitService } from '../src/mms/git/GitService'
 import { readOnlyGit, runReadOnlyGit } from '../src/mms/git/readOnlyGit'
-import { conflictPair, readWorkingTreeStatus } from '../src/mms/git/workingTreeStatus'
+import { conflictPair, readWorkingTreeStatus, readWorkingTreeStatusSync } from '../src/mms/git/workingTreeStatus'
+import { inspectPendingChanges } from '../src/mms/actions/git'
 import { lifecycleGit, lifecycleRead } from '../src/mms/lifecycle/WorktreeRetirementService'
 
 const roots: string[] = []
@@ -208,6 +209,39 @@ describe('Status reads use plumbing and never write the index', () => {
     expect(conflictPair(new Set([2]))).toBe('AU')
     expect(conflictPair(new Set([3]))).toBe('UA')
     expect(conflictPair(new Set([1]))).toBe('DD')
+  })
+
+  it.skipIf(process.platform === 'win32')('compares a link by its target: new times are no change, a new target is', async () => {
+    const cwd = join(scratch('mousse-plumbing-link-'), 'work')
+    git(tmpdir(), 'init', '-q', '-b', 'main', cwd)
+    configure(cwd)
+    write(cwd, 'target.txt'); write(cwd, 'other.txt')
+    symlinkSync('target.txt', join(cwd, 'link'))
+    git(cwd, 'add', '-A'); git(cwd, 'commit', '-qm', 'base')
+    // Same target, other times: a stat-only difference `diff-files` reports as a change.
+    lutimesSync(join(cwd, 'link'), new Date('2020-01-01'), new Date('2020-01-01'))
+    expect(git(cwd, 'diff-files', '--name-only')).toBe('link')
+    expect(await readWorkingTreeStatus(cwd)).toEqual([])
+    expect(readWorkingTreeStatusSync(cwd)).toEqual([])
+    unlinkSync(join(cwd, 'link')); symlinkSync('other.txt', join(cwd, 'link'))
+    expect(await readWorkingTreeStatus(cwd)).toEqual([{ path: 'link', index: '', workdir: 'M' }])
+  })
+
+  it('inspectPendingChanges reads with plumbing and leaves the index alone', () => {
+    const cwd = busy()
+    const index = join(cwd, '.git', 'index')
+    const before = readFileSync(index)
+    const mtime = statSync(index).mtimeMs
+    const pending = inspectPendingChanges(cwd)
+    expect(readFileSync(index).equals(before)).toBe(true)
+    expect(statSync(index).mtimeMs).toBe(mtime)
+    expect(pending.unmerged).toEqual(['conflict.txt'])
+    expect(pending.operation).toBe('merge')
+    expect(pending.files).toContain('moved.txt')
+    expect(pending.files).toContain('dir/untracked.txt')
+    expect(pending.files).not.toContain('touched.txt')
+    expect(pending.files).not.toContain('ignored.txt')
+    expect(pending.files[0]).toBe('conflict.txt')
   })
 
   it('lifecycle reads before a delete take no optional lock', () => {
