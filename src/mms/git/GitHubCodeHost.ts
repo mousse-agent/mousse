@@ -1180,7 +1180,7 @@ export class GitHubCodeHost implements CodeHost {
       // not followed, a credential prompt cannot wait for a person, and a large pull request gets five minutes.
       await this.runExecutable(
         'git',
-        ['-c', 'transfer.fsckObjects=true', 'fetch', '--no-tags', '--no-recurse-submodules', '--no-write-fetch-head', '--', remote, `+${source}:${destination}`],
+        ['-c', 'transfer.fsckObjects=true', 'fetch', '--no-tags', '--no-prune', '--no-prune-tags', '--no-recurse-submodules', '--no-write-fetch-head', '--', remote, `+${source}:${destination}`],
         { cwd, env: { GIT_TERMINAL_PROMPT: '0' }, timeoutMs: FETCH_TIMEOUT_MS }
       )
     } catch (error) {

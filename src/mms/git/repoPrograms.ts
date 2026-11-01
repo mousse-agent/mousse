@@ -3,6 +3,7 @@ import { statSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import simpleGit, { type SimpleGit, type SimpleGitOptions } from 'simple-git'
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
+import { gitDirectoryEnv, withGitConfigEnv } from './gitEnv'
 import { NO_HOOKS_PATH } from './gitNullDevice'
 import { isTrustedRepoEntry, readRepoTrust, repoTrustPath, TRUSTED_FILTER_KEY, writeRepoTrust, type RepoTrustRecord } from './repoTrust'
 
@@ -139,9 +140,12 @@ const LFS_EXTENSION = /^lfs\.extension\..+\.(clean|smudge)$/
  */
 export const SAFE_LOOKUP_ENV: Readonly<Record<string, string>> = { PYTHONSAFEPATH: '1', NoDefaultCurrentDirectoryInExePath: '1' }
 
-/** `env` (the process's own by default) with {@link SAFE_LOOKUP_ENV}, for a Git command Mousse runs by itself. */
+/**
+ * `env` (the process's own by default) with {@link SAFE_LOOKUP_ENV} and the settings every Git process
+ * Mousse starts carries ({@link withGitConfigEnv}), for a Git command Mousse runs by itself.
+ */
 export function repoProgramEnv(env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
-  return { ...env, ...SAFE_LOOKUP_ENV }
+  return withGitConfigEnv({ ...env, ...SAFE_LOOKUP_ENV })
 }
 
 /** Keys whose repository value cannot be overridden from the command line; such a repository is refused. */
@@ -270,7 +274,8 @@ function remember(key: string, paths: Iterable<string>, programs: RepoPrograms):
 
 /** `failed` is set when Git could not be run or read in full (a timeout, output past the limit). */
 function bareGit(cwd: string, args: string[]): { ok: boolean; stdout: string; failed: boolean } {
-  const result = spawnSync('git', ['-c', 'core.fsmonitor=false', ...args], { cwd, encoding: 'utf8', windowsHide: true, timeout: 30_000, maxBuffer: 16 * 1024 * 1024, env: { ...process.env, ...SAFE_LOOKUP_ENV, GIT_OPTIONAL_LOCKS: '0' } })
+  // A common directory Mousse names is named the same way for the probe as for the command it is for.
+  const result = spawnSync('git', ['-c', 'core.fsmonitor=false', ...args], { cwd, encoding: 'utf8', windowsHide: true, timeout: 30_000, maxBuffer: 16 * 1024 * 1024, env: repoProgramEnv({ ...process.env, GIT_OPTIONAL_LOCKS: '0', ...gitDirectoryEnv(cwd) }) })
   return { ok: !result.error && result.status === 0, stdout: result.error ? '' : result.stdout ?? '', failed: Boolean(result.error) }
 }
 
@@ -388,7 +393,8 @@ export function withoutRepoPrograms(cwd: string, args: readonly string[], option
   return [...noRepoProgramArgs(cwd, args, options), ...args]
 }
 
-const UNSAFE_ALLOWED = {
+/** simple-git's checks Mousse turns off: the values it sets are its own, never a caller's (see {@link guardedSimpleGit}). */
+export const UNSAFE_ALLOWED = {
   allowUnsafeHooksPath: true,
   allowUnsafeFsMonitor: true,
   allowUnsafeFilter: true,
@@ -430,7 +436,8 @@ export function guardedSimpleGit(cwd: string, options: Partial<Omit<SimpleGitOpt
       return (...parameters: unknown[]) => {
         // Only `raw` takes free-form arguments; every other method used here only reads.
         const args = key === 'raw' ? parameters.flat().filter((value): value is string => typeof value === 'string') : []
-        const instance = forCommand(args).env(repoProgramEnv()) as unknown as Record<string, (...values: unknown[]) => unknown>
+        // No optional locks: a status or diff read here never refreshes and rewrites the index.
+        const instance = forCommand(args).env(repoProgramEnv({ ...process.env, GIT_OPTIONAL_LOCKS: '0' })) as unknown as Record<string, (...values: unknown[]) => unknown>
         return instance[key]!(...parameters)
       }
     }

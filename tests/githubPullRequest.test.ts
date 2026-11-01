@@ -911,7 +911,7 @@ describe('GitHubCodeHost.fetchPullRequestHead', () => {
     const run = fetchRunner()
     expect(await new GitHubCodeHost(run).fetchPullRequestHead('/repo', pullRequest)).toBe(SHA)
     const fetch = run.mock.calls.find((call) => call[1].includes('fetch'))!
-    expect(fetch[1]).toEqual(['-c', 'transfer.fsckObjects=true', 'fetch', '--no-tags', '--no-recurse-submodules', '--no-write-fetch-head', '--', 'upstream', '+refs/pull/7/head:refs/mousse/pull/7/head'])
+    expect(fetch[1]).toEqual(['-c', 'transfer.fsckObjects=true', 'fetch', '--no-tags', '--no-prune', '--no-prune-tags', '--no-recurse-submodules', '--no-write-fetch-head', '--', 'upstream', '+refs/pull/7/head:refs/mousse/pull/7/head'])
     expect(fetch[2]).toEqual({ cwd: '/repo', env: { GIT_TERMINAL_PROMPT: '0' }, timeoutMs: 5 * 60_000 })
     expect(run).toHaveBeenCalledWith('git', ['rev-parse', '--verify', '--quiet', 'refs/mousse/pull/7/head^{commit}'], { cwd: '/repo' })
     // No remote is added and no branch is created.

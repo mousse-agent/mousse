@@ -3,7 +3,7 @@ import { existsSync, lstatSync, readFileSync, realpathSync, statSync } from 'nod
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { englishMessagesEnv } from './gitProcess'
 import { GIT_NULL_DEVICE } from './gitNullDevice'
-import { nonInteractiveGitEnv } from './gitEnv'
+import { nonInteractiveGitEnv, withGitConfigEnv } from './gitEnv'
 import { touchesGitMetadata } from '../agents/gitMetadata'
 
 /**
@@ -85,12 +85,12 @@ function gitEnv(repo?: Repo, withSystem = false): NodeJS.ProcessEnv {
   for (const [key, value] of Object.entries(process.env)) {
     if (!/^GIT_/i.test(key) || /^GIT_CONFIG_(GLOBAL|SYSTEM)$/i.test(key)) env[key] = value
   }
-  return {
+  return withGitConfigEnv({
     ...env, ...englishMessagesEnv(), ...nonInteractiveGitEnv(),
     GIT_OPTIONAL_LOCKS: '0', GIT_NO_LAZY_FETCH: '1', GIT_NO_REPLACE_OBJECTS: '1',
     ...(withSystem ? {} : { GIT_CONFIG_NOSYSTEM: '1' }),
     ...(repo ? { GIT_DIR: repo.gitDir, GIT_WORK_TREE: repo.top, GIT_CEILING_DIRECTORIES: dirname(repo.top) } : {})
-  }
+  })
 }
 
 function git(cwd: string, args: readonly string[], repo?: Repo, withSystem = false): Promise<GitResult> {

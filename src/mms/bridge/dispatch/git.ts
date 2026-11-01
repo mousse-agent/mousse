@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process'
-import { nonInteractiveGitEnv } from '../../git/gitEnv'
+import { gitDirectoryEnv, nonInteractiveGitEnv, withGitConfigEnv } from '../../git/gitEnv'
 import { GIT_NULL_DEVICE } from '../../git/gitNullDevice'
 import { HOOK_EVENTS } from '../../git/repoPrograms'
 import { NetError } from '../../../shared/net'
@@ -10,7 +10,7 @@ const remoteConfiguration = new Set([
   'GIT_CONFIG_NOSYSTEM'
 ])
 
-function environment(trustRemoteConfiguration: boolean): NodeJS.ProcessEnv {
+function environment(cwd: string, trustRemoteConfiguration: boolean): NodeJS.ProcessEnv {
   const env = { ...process.env }
   for (const key of Object.keys(env)) {
     if (!key.startsWith('GIT_')) continue
@@ -24,7 +24,8 @@ function environment(trustRemoteConfiguration: boolean): NodeJS.ProcessEnv {
   }
   // GIT_LFS_SKIP_SMUDGE is a bundle-ingest choice, not a prompt setting, so it stays here.
   Object.assign(env, nonInteractiveGitEnv(), { GIT_LFS_SKIP_SMUDGE: '1' })
-  return env
+  // The quarantine is a bare repository Mousse made; it is named, since Git no longer finds one by itself.
+  return withGitConfigEnv({ ...env, ...gitDirectoryEnv(cwd) })
 }
 
 function runGit(
@@ -54,7 +55,7 @@ function runGit(
       [...safety, ...args],
       {
         cwd,
-        env: environment(trustRemoteConfiguration),
+        env: environment(cwd, trustRemoteConfiguration),
         encoding: 'utf8',
         maxBuffer: maximumBytes,
         timeout: 60_000,

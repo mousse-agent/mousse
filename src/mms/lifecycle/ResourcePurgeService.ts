@@ -9,7 +9,7 @@ import { resolveRepositoryIdentity } from '../git/RepositoryIdentity'
 import { buildResourceInventory } from './ResourceInventory'
 import { measureTree } from './diskMeasure'
 import { assertLifecyclePath, ResourceLifecycleStore } from './ResourceLifecycleStore'
-import { assertFrozenContentEntry, lifecycleGit, readDirectLifecycleRef, walkOwnedContent, WorktreeRetirementService } from './WorktreeRetirementService'
+import { assertFrozenContentEntry, lifecycleGit, lifecycleRead, readDirectLifecycleRef, walkOwnedContent, WorktreeRetirementService } from './WorktreeRetirementService'
 import { isOwnerLive, PROCESS_INSTANCE_ID } from '../queue/processLiveness'
 import { getExternalResourceClaims } from './LifecycleClaims'
 import { withFileLock } from '../scheduled/fileLock'
@@ -250,7 +250,7 @@ export class ResourcePurgeService {
           const sources = inventory.sources.filter((source) => resource.sourceIds.includes(source.id))
           const source = sources.find((source) => basename(source.path) === 'agent-episodes.json') ?? sources.find((source) => ['workspace.json', 'agents.json', 'mousse-agent-sessions.json'].includes(basename(source.path))) ?? sources.find((source) => source.path.includes('workflow'))
           if (!source) throw new Error('Workspace has no supported owner source')
-          const branch = lifecycleGit(resource.identity, ['branch', '--show-current'])
+          const branch = lifecycleRead(resource.identity, ['branch', '--show-current'])
           if (readOnly) {
             // No repository lease and no `prepare`, which writes a manifest and Git refs: judge the checkout by
             // what `prepare` would refuse. The item is for display only; it is never signed or acted on.
@@ -456,7 +456,7 @@ export class ResourcePurgeService {
     }
     const commonDir = item.commonDir!
     if (!existsSync(commonDir)) throw purgeErrors.create('resource_purge_repository_unavailable')
-    const worktree = lifecycleGit(commonDir, ['worktree', 'list', '--porcelain']).split(/\r?\n/).find((line) => line.startsWith('worktree '))?.slice(9)
+    const worktree = lifecycleRead(commonDir, ['worktree', 'list', '--porcelain']).split(/\r?\n/).find((line) => line.startsWith('worktree '))?.slice(9)
     if (!worktree || !existsSync(worktree)) throw purgeErrors.create('resource_purge_repository_unavailable')
     const identity = resolveRepositoryIdentity(worktree, { requireMutationCapability: true })
     if (resolve(identity.commonDir) !== resolve(commonDir)) throw new Error('Repository identity changed')
@@ -467,13 +467,13 @@ export class ResourcePurgeService {
       if (item.kind === 'worktree') {
         if (item.content && item.discardState) {
           if (!existsSync(item.identity)) {
-            if (lifecycleGit(commonDir, ['worktree', 'list', '--porcelain']).includes(`worktree ${item.identity.replaceAll('\\', '/')}`)) throw new Error('Missing discarded worktree is still registered')
+            if (lifecycleRead(commonDir, ['worktree', 'list', '--porcelain']).includes(`worktree ${item.identity.replaceAll('\\', '/')}`)) throw new Error('Missing discarded worktree is still registered')
             return
           }
           const stat = lstatSync(item.identity)
-          if (digest({ dev: stat.dev, ino: stat.ino, birthtimeMs: stat.birthtimeMs }) !== digest(item.rootIdentity) || lifecycleGit(item.identity, ['branch', '--show-current']) !== item.branch || lifecycleGit(item.identity, ['rev-parse', 'HEAD']) !== item.expectedValue) throw new Error('Discarded checkout identity changed')
+          if (digest({ dev: stat.dev, ino: stat.ino, birthtimeMs: stat.birthtimeMs }) !== digest(item.rootIdentity) || lifecycleRead(item.identity, ['branch', '--show-current']) !== item.branch || lifecycleRead(item.identity, ['rev-parse', 'HEAD']) !== item.expectedValue) throw new Error('Discarded checkout identity changed')
           if (item.discardState === 'pending') {
-            if (createHash('sha256').update(lifecycleGit(item.identity, ['ls-files', '--stage', '-v', '-z'])).digest('hex') !== item.indexDigest) throw new Error('Staged sole-copy content changed after the reviewed discard')
+            if (createHash('sha256').update(lifecycleRead(item.identity, ['ls-files', '--stage', '-v', '-z'])).digest('hex') !== item.indexDigest) throw new Error('Staged sole-copy content changed after the reviewed discard')
             const content = walkOwnedContent(item.identity, true)
             const expected = new Map(item.content.map((entry) => [entry.path, digest(entry)]))
             for (const entry of content) if (expected.get(entry.path) !== digest(entry)) throw new Error('Sole-copy content changed after the reviewed discard')
