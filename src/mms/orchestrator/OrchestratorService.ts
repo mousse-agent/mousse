@@ -213,7 +213,7 @@ import type { LineEditStatsStore } from '../stats/LineEditStatsStore'
 import type { ProjectManager } from '../data/ProjectManager'
 import type { ThreadDataStore } from '../data/ThreadDataStore'
 import { resolveThreadProjectPath } from '../data/resolveActiveProjectPath'
-import { waitForFolderAccess } from '../files/folderAccess'
+import { waitForFolderAccess, type WaitOptions } from '../files/folderAccess'
 import { resolveProjectWorkingDirectory } from '../data/projectWorkingDirectory'
 import { lineageForChild } from '../data/subagentLineage'
 import { WorkspaceResolver, unprovisionedContext } from '../workspace/WorkspaceResolver'
@@ -2357,9 +2357,10 @@ export class OrchestratorService extends EventEmitter {
    * Waits until the volumes of the folders a thread's request or turn works in answer (see `folderAccess`),
    * without blocking the daemon while macOS asks for permission. A Stop of the thread ends the wait
    * (`'stopped'`), and so do `signal` and the orchestrator's shutdown (`'aborted'`). Without folders it
-   * waits for the thread's project folder.
+   * waits for the thread's project folder. With `whenNotAnswering: 'fail'` it throws `FolderNotAnsweringError`
+   * once a volume stops answering.
    */
-  async waitForThreadFolders(threadId: string | undefined, folders?: Array<string | null | undefined>, signal?: AbortSignal): Promise<'ready' | 'stopped' | 'aborted'> {
+  async waitForThreadFolders(threadId: string | undefined, folders?: Array<string | null | undefined>, signal?: AbortSignal, options: Pick<WaitOptions, 'whenNotAnswering'> = {}): Promise<'ready' | 'stopped' | 'aborted'> {
     const paths = folders ?? [threadId ? this.threadProjectPath(threadId) : undefined]
     const stop = new AbortController()
     const key = threadId ?? ''
@@ -2367,7 +2368,7 @@ export class OrchestratorService extends EventEmitter {
     if (!waits) this.folderWaits.set(key, waits = new Set())
     waits.add(stop)
     try {
-      await waitForFolderAccess(paths, { signal: AbortSignal.any([stop.signal, this.lifecycle.signal, ...(signal ? [signal] : [])]) })
+      await waitForFolderAccess(paths, { ...options, signal: AbortSignal.any([stop.signal, this.lifecycle.signal, ...(signal ? [signal] : [])]) })
       return 'ready'
     } catch (error) {
       if (stop.signal.aborted) return 'stopped'

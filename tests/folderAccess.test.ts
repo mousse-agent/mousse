@@ -5,7 +5,7 @@ import { join, sep } from 'path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { MousseMainService } from '../src/mms/MousseMainService'
 import { dispatchMethod } from '../src/mms/protocol/handlers'
-import { FolderAccessGate, folderAccess, volumeKey, type FolderAccessDeps } from '../src/mms/files/folderAccess'
+import { FolderAccessGate, FolderNotAnsweringError, folderAccess, volumeKey, type FolderAccessDeps } from '../src/mms/files/folderAccess'
 
 function deferred(): { promise: Promise<void>; resolve: () => void } {
   let resolve!: () => void
@@ -87,22 +87,45 @@ describe('FolderAccessGate', () => {
     expect(await settledSoon(waiting)).toBe(false)
   })
 
-  it('runs at most two checks at once across volumes', async () => {
-    const started: string[] = []
-    const answers = new Map<string, () => void>()
-    const gate = fakeGate({
-      probe: (path) => {
-        started.push(path)
-        return new Promise<void>((settle) => answers.set(path, settle))
-      }
-    })
-    const waits = ['/Volumes/A/x', '/Volumes/B/x', '/Volumes/C/x'].map((path) => gate.ready([path]))
-    await settledSoon(Promise.race(waits))
-    expect(started).toEqual(['/Volumes/A/x', '/Volumes/B/x'])
-    answers.get('/Volumes/A/x')!()
-    await waits[0]
-    await settledSoon(waits[2]!)
-    expect(started).toEqual(['/Volumes/A/x', '/Volumes/B/x', '/Volumes/C/x'])
+  it('never delays a healthy folder behind hung volumes', async () => {
+    const probe = vi.fn((path: string) => path.startsWith('/Volumes/') ? new Promise<void>(() => undefined) : Promise.resolve())
+    const gate = fakeGate({ probe, stuckAfterMs: 60_000 })
+    const hung = [gate.ready(['/Volumes/Network/app']), gate.ready(['/Volumes/Usb/app'])]
+    await expect(gate.ready(['/Users/me/code/app'])).resolves.toBeUndefined()
+    expect(await settledSoon(Promise.race(hung))).toBe(false)
+    expect(probe).toHaveBeenCalledTimes(3)
+  })
+
+  it('a cancelled wait releases its volume: the stuck check is left behind, and new requests fail at once', async () => {
+    const answer = deferred()
+    const probe = vi.fn(() => answer.promise)
+    const gate = fakeGate({ probe, stuckAfterMs: 60_000 })
+    const abort = new AbortController()
+    const waiting = gate.ready(['/Volumes/Usb/app'], { signal: abort.signal })
+    expect(await settledSoon(waiting)).toBe(false)
+    abort.abort(new DOMException('Stopped', 'AbortError'))
+    await expect(waiting).rejects.toThrow('Stopped')
+    // No new check queues behind the stuck one.
+    await expect(gate.ready(['/Volumes/Usb/other'], { whenNotAnswering: 'fail' })).rejects.toBeInstanceOf(FolderNotAnsweringError)
+    expect(probe).toHaveBeenCalledTimes(1)
+    // A turn waits for the check left behind; once the prompt is answered the volume is trusted again.
+    const turn = gate.ready(['/Volumes/Usb/app'])
+    expect(await settledSoon(turn)).toBe(false)
+    answer.resolve()
+    await turn
+    await gate.ready(['/Volumes/Usb/third'], { whenNotAnswering: 'fail' })
+    expect(probe).toHaveBeenCalledTimes(1)
+  })
+
+  it('a check that runs too long fails waiting requests at once and lets turns keep waiting', async () => {
+    const answer = deferred()
+    const gate = fakeGate({ probe: () => answer.promise, stuckAfterMs: 20 })
+    const request = gate.ready(['/Volumes/Usb/app'], { whenNotAnswering: 'fail' })
+    const turn = gate.ready(['/Volumes/Usb/app'])
+    await expect(request).rejects.toMatchObject({ code: 'folder_not_answering', volume: '/Volumes/Usb' })
+    expect(await settledSoon(turn)).toBe(false)
+    answer.resolve()
+    await expect(turn).resolves.toBeUndefined()
   })
 
   it('ends a wait when its signal aborts', async () => {
@@ -245,6 +268,23 @@ describe('a folder waiting for a permission prompt', () => {
     const cancelled = mms.orchestrator.waitForThreadFolders(thread.id, undefined, abort.signal)
     abort.abort()
     await expect(cancelled).resolves.toBe('aborted')
+  })
+
+  it('once the volume stops answering, its requests fail at once until the prompt is answered', async () => {
+    const { ctx, stuck, answer } = await projects()
+    folderAccess.reset({
+      keyOf: (path) => path.startsWith(join(home, 'external')) ? 'external' : 'internal',
+      probe: async (path) => { if (path.startsWith(join(home, 'external'))) await answered },
+      stuckAfterMs: 20
+    })
+    let release!: () => void
+    const answered = new Promise<void>((settle) => { release = settle })
+    await expect(dispatchMethod(ctx, 'git.status', { projectId: stuck.id })).rejects.toMatchObject({ code: 'folder_not_answering' })
+    await expect(dispatchMethod(ctx, 'git.branches', { projectId: stuck.id })).rejects.toMatchObject({ code: 'folder_not_answering' })
+    release()
+    answer()
+    await new Promise((settle) => setTimeout(settle, 10))
+    await expect(dispatchMethod(ctx, 'git.status', { projectId: stuck.id })).resolves.toBeDefined()
   })
 
   it('stopping the service does not wait on a pending prompt', async () => {

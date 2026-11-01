@@ -978,9 +978,11 @@ export class MmsProfileServices {
       expectedGeneration
     })
     // The trash is done; removing the checkout works in the project's repository, so it waits for the folder's
-    // volume (a pending macOS permission prompt). Shutdown ends the wait, and the hourly cleanup removes it later.
+    // volume (a pending macOS permission prompt). A volume that is not answering, or shutdown, leaves the
+    // checkout to the hourly cleanup.
     if (record.state === 'trashed' && this.removesWorktreesWithDeletedThreads() &&
-        await this.orchestrator.waitForThreadFolders(taskId, [projectPath], this.requests.signal) === 'ready') {
+        await this.orchestrator.waitForThreadFolders(taskId, [projectPath], this.requests.signal, { whenNotAnswering: 'fail' })
+          .catch(() => 'aborted' as const) === 'ready') {
       try {
         // The same keep rules as the hourly run (unpublished commits, links, files in use); a checkout that is kept stays until purge.
         const item = await this.storageCleanup.retireDeletedWorktree(taskId)

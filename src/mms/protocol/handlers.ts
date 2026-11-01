@@ -120,7 +120,7 @@ import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync } from 'no
 import { FILE_ASSET_PIECE_BYTES, SAVE_TOO_LARGE_MESSAGE, saveExceedsRequest } from '../../shared/fileAssets'
 import { homedir } from 'node:os'
 import { isAbsolute, join, relative, resolve } from 'node:path'
-import { waitForFolderAccess } from '../files/folderAccess'
+import { FolderNotAnsweringError, waitForFolderAccess } from '../files/folderAccess'
 import type { DomainConnectionContext } from './domainRegistry'
 import { DomainRpcError } from './domainRegistry'
 import { WORKFLOW_RUN_CAPABILITY } from '../../shared/workflowRunPlatform'
@@ -1133,6 +1133,9 @@ const FOLDER_METHODS = new Set([
 /** Methods under those prefixes that only signal work already in memory. */
 const FOLDER_FREE_METHODS = new Set(['git.cancelOperation', 'pullRequests.watchStatus'])
 
+/** Methods that start a turn: like the turn, they wait for a volume that is not answering instead of failing. */
+const WAIT_WHEN_NOT_ANSWERING = new Set(['orchestrator.send', 'orchestrator.retry'])
+
 function readsFolder(method: string): boolean {
   if (FOLDER_FREE_METHODS.has(method)) return false
   return FOLDER_METHODS.has(method) || FOLDER_METHOD_PREFIXES.some((prefix) => method.startsWith(prefix))
@@ -1148,9 +1151,20 @@ async function waitForRequestFolders(ctx: HandlerContext, method: string, params
   if (folders.length === 0) return
   const threadId = isObject(params) && typeof params.threadId === 'string' ? params.threadId : undefined
   const shutdown = ctx.mms.requestShutdownSignal
-  const waited = ctx.mms.orchestrator?.waitForThreadFolders
-    ? await ctx.mms.orchestrator.waitForThreadFolders(threadId, folders, shutdown)
-    : await waitForFolderAccess(folders, { signal: shutdown }).then(() => 'ready' as const, () => 'aborted' as const)
+  // A volume that stopped answering fails other requests at once, so polls do not pile up behind it.
+  const whenNotAnswering = WAIT_WHEN_NOT_ANSWERING.has(method) ? 'wait' as const : 'fail' as const
+  let waited: 'ready' | 'stopped' | 'aborted'
+  try {
+    waited = ctx.mms.orchestrator?.waitForThreadFolders
+      ? await ctx.mms.orchestrator.waitForThreadFolders(threadId, folders, shutdown, { whenNotAnswering })
+      : await waitForFolderAccess(folders, { signal: shutdown, whenNotAnswering }).then(() => 'ready' as const, (error: unknown) => {
+        if (error instanceof FolderNotAnsweringError) throw error
+        return 'aborted' as const
+      })
+  } catch (error) {
+    if (error instanceof FolderNotAnsweringError) throw new DomainRpcError('folder_not_answering', error.message, { volume: error.volume })
+    throw error
+  }
   if (waited === 'stopped') throw new DomainRpcError('thread_stopped', 'The thread was stopped before this request started.', { threadId })
   if (waited === 'aborted') throw Object.assign(new Error('Profile work is shutting down'), { code: 'profile_draining' })
 }
