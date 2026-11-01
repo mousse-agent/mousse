@@ -402,6 +402,27 @@ describe('starting a thread from a pull request', () => {
       await expect(start()).resolves.toMatchObject({ sent: false })
     })
 
+    it('removes only its own worktree: the person\'s other stale worktree registrations stay', async () => {
+      // A worktree of the person's whose folder is gone: `git worktree prune` would drop its registration.
+      const theirs = join(f.root, 'their-worktree')
+      git(f.repo, 'worktree', 'add', '-q', '-b', 'their-branch', theirs, 'HEAD')
+      rmSync(theirs, { recursive: true, force: true })
+      const failing = new PullRequestThreadService({
+        codeHost: host,
+        projects: mms.projects,
+        threads: mms.threads,
+        trashThread: trash,
+        send,
+        prepareThread: () => { throw new Error('model store unavailable') }
+      })
+      await expect(failing.startThread({ projectId, reference: '7' })).rejects.toMatchObject({ code: 'pull_request_workspace_failed' })
+      const registered = git(f.repo, 'worktree', 'list', '--porcelain').split('\n').filter((line) => line.startsWith('worktree '))
+      expect(registered).toHaveLength(2)
+      expect(registered.some((line) => line.endsWith('their-worktree'))).toBe(true)
+      expect(git(f.repo, 'for-each-ref', '--format=%(refname)', 'refs/heads/mousse', 'refs/mousse')).toBe('')
+      expect(trash).not.toHaveBeenCalled()
+    })
+
     it('trashes the thread instead, leaving its worktree and branch, when the worktree cannot be removed', async () => {
       const blocked = blockWorktree()
       vi.spyOn(console, 'warn').mockImplementation(() => {})

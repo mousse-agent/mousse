@@ -259,8 +259,9 @@ export class PullRequestThreadService {
             return false
           }
         }
-        if (existsSync(workspace.worktreePath)) attempt(['worktree', 'remove', '--force', workspace.worktreePath])
-        attempt(['worktree', 'prune'])
+        // Only this worktree's registration goes, also when its folder is already gone. No `git worktree prune`: that
+        // would drop every stale registration in the person's repository, not just the one this start made.
+        attempt(['worktree', 'remove', '--force', workspace.worktreePath])
         removed = !existsSync(workspace.worktreePath)
         if (removed) {
           attempt(['branch', '-D', workspace.branch])
