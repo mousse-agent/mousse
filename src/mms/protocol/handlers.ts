@@ -107,7 +107,7 @@ import { ConversationBranchService } from '../actions/ConversationBranchService'
 import { discardPendingChanges, git as workspaceGit } from '../actions/git'
 import { randomUUID } from 'node:crypto'
 import { ManagedConflictService } from '../actions/ManagedConflictService'
-import { ChildAgentIntegrationService } from '../agents/ChildAgentIntegrationService'
+import { cancelPendingIntegrations } from '../agents/ChildAgentIntegrationService'
 import { ChangeReceiptService } from '../actions/ChangeReceiptService'
 import { PublishService } from '../actions/PublishService'
 import { atomicWriteJsonSync } from '../data/AtomicFs'
@@ -3064,7 +3064,8 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       await ensureWorkspaceMaterialized(ctx, operation.threadId, operation.projectPath)
       const workspace = new ThreadWorkspaceManager(operation.threadDirectory).load()
       if (!workspace || workspace.lifecycle !== 'ready') throw new DomainRpcError('workspace_not_ready', 'Thread workspace is not ready')
-      await new ChildAgentIntegrationService(operation.threadDirectory).recoverPending(workspace.worktreePath)
+      // A merge of a subagent result an older version left unfinished is cancelled, never run again.
+      const cancelledIntegrations = cancelPendingIntegrations(operation.threadDirectory)
       await new PublishService(operation.threadDirectory).recoverPending(workspace.worktreePath, operation.projectPath)
       await new ThreadActionService(operation.threadDirectory).recoverPending(workspace.worktreePath)
       await new CodeRevertService(operation.threadDirectory).recoverPending(workspace.worktreePath)
@@ -3076,7 +3077,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         const target = loadConversationState(operation.threadDirectory, branch.id)
         ctx.mms.orchestrator.replaceConversationState(operation.threadId, target.messages, target.nativeContext)
       })
-      return { ok: true }
+      return { ok: true, ...(cancelledIntegrations.length ? { cancelledIntegrations } : {}) }
     }
     case 'operations.abort': {
       const p = isObject(params) ? params : {}

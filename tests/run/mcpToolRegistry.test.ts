@@ -21,7 +21,6 @@ const PHASE5_TOOLS: Record<string, string> = {
   task_status: 'actsAsCaller',
   task_cancel: 'actsAsCaller',
   list_subagents: 'actsAsCaller',
-  integrate_delegation: 'editsWorkspace',
   ask_user: 'actsAsCaller',
   present_plan: 'actsAsCaller',
   create_task: 'actsAsCaller',
@@ -84,7 +83,7 @@ describe('Mousse tool registry (SPEC §15.1)', () => {
     }
     expect((registry.get('delegate_task')!.inputSchema.properties as Record<string, unknown>).modeCeiling).toBeTruthy()
     // The older delegation names stay dispatchable in process but are never listed.
-    for (const hidden of ['create_subagent', 'create_subagents', 'recall_subagent', 'integrate_subagent', 'list_delegations', 'show_document'])
+    for (const hidden of ['create_subagent', 'create_subagents', 'recall_subagent', 'integrate_delegation', 'integrate_subagent', 'list_delegations', 'show_document'])
       expect(listed.some((tool) => tool.name === hidden), hidden).toBe(false)
   })
 
@@ -263,15 +262,15 @@ describe('Mousse tool registry (SPEC §15.1)', () => {
     })
   })
 
-  it('children inherit the caller ceiling and cannot exceed it; a plan ceiling cannot integrate', async () => {
+  it('children inherit the caller ceiling and cannot exceed it; the retired integrate_delegation only reports, even under plan', async () => {
     const { registry, ctx, delegation } = await setup('plan')
     await registry.call('delegate_task', { prompt: 'Look', title: 'Looker', workspace: 'shared', role: 'research' }, ctx({ toolCallId: 'mcp:a' }))
     expect(delegation.delegateTask).toHaveBeenCalledWith(expect.objectContaining({ modeCeiling: 'plan' }), { toolCallId: 'mcp:a' })
     const broader = await registry.call('delegate_task', { prompt: 'Edit', title: 'Editor', workspace: 'isolated', modeCeiling: 'default' }, ctx()).catch((error) => error)
     expect(broader.code).toBe('mousse_ceiling_exceeded')
-    const integrate = await registry.call('integrate_delegation', { delegationId: 'd1' }, ctx()).catch((error) => error)
-    expect(integrate.code).toBe('mousse_ceiling_exceeded')
-    expect(delegation.integrateDelegation).not.toHaveBeenCalled()
+    // The retired merge tool is not offered over MCP any more.
+    await expect(registry.call('integrate_delegation', { delegationId: 'd1' }, ctx())).rejects.toMatchObject({ code: 'mousse_unknown_tool' })
+    expect(delegation.reportResult).not.toHaveBeenCalled()
     const agentTurn = await registry.call('queue_enqueue', { content: 'go', mode: 'agent' }, ctx()).catch((error) => error)
     expect(agentTurn.code).toBe('mousse_ceiling_exceeded')
   })
@@ -1000,32 +999,40 @@ describe('workspace-changing tools and the permission mode', () => {
     })
     const { registry, turns, request } = appToolRegistry(fx.engine, fake.host)
     turns.register(appTurn({ threadId: 'parent', runId: run.runId }))
-    const call = (name = 'integrate_delegation', args: Record<string, unknown> = { delegationId: 'd1' }) =>
+    const call = (name = 'thread_merge_back', args: Record<string, unknown> = {}) =>
       registry.call(name, args, request({ threadId: 'parent', runId: run.runId }))
     return { call, asked, registry, run, turns, ...fake }
   }
+  const refused = (result: { isError?: boolean; text: string }) => result.isError === true && result.text.includes('did not approve')
 
   it('asks under Ask before the handler runs, and a rejection leaves the workspace untouched', async () => {
-    const { call, asked, delegation } = await setup('ask', 'reject')
+    const { call, asked } = await setup('ask', 'reject')
     await expect(call()).resolves.toMatchObject({ isError: true, text: expect.stringContaining('did not approve') })
-    expect(delegation.integrateDelegation).not.toHaveBeenCalled()
-    expect(asked).toEqual([{ threadId: 'parent', approval: expect.objectContaining({ action: 'edit', permissionKey: 'mousse:integrate' }) }])
+    expect(asked).toEqual([{ threadId: 'parent', approval: expect.objectContaining({ action: 'edit', permissionKey: 'mousse:merge_back' }) }])
   })
 
   it('runs after the user allows it once, and counts a dismissed question as a rejection', async () => {
     const allowed = await setup('ask', 'allow')
-    await allowed.call()
-    expect(allowed.delegation.integrateDelegation).toHaveBeenCalledTimes(1)
+    // The handler runs (and refuses on its own: this thread is not a fork), so the approval did not stop it.
+    expect(refused(await allowed.call().catch((error) => ({ isError: true, text: String(error) })))).toBe(false)
+    expect(allowed.asked).toHaveLength(1)
     const dismissed = await setup('ask', 'throw')
     await expect(dismissed.call()).resolves.toMatchObject({ isError: true })
-    expect(dismissed.delegation.integrateDelegation).not.toHaveBeenCalled()
   })
 
   it.each(['accept_edits', 'full'] as const)('runs without asking under %s', async (mode) => {
-    const { call, asked, delegation } = await setup(mode)
-    await call()
-    expect(delegation.integrateDelegation).toHaveBeenCalledTimes(1)
+    const { call, asked } = await setup(mode)
+    expect(refused(await call().catch((error) => ({ isError: true, text: String(error) })))).toBe(false)
     expect(asked).toEqual([])
+  })
+
+  it('the retired integrate_delegation is not offered over MCP and asks nothing', async () => {
+    const { call, asked, delegation, registry } = await setup('ask', 'reject')
+    await expect(call('integrate_delegation', { delegationId: 'd1' })).rejects.toMatchObject({ code: 'mousse_unknown_tool' })
+    expect(delegation.reportResult).not.toHaveBeenCalled()
+    expect(asked).toEqual([])
+    // In process it stays dispatchable for replayed transcripts, and changes no workspace.
+    expect(registry.get('integrate_delegation')).toMatchObject({ hidden: true, access: 'actsAsCaller', readOnlySafe: true })
   })
 
   it('refuses a call that names another thread before it asks the user anything', async () => {
@@ -1045,9 +1052,8 @@ describe('workspace-changing tools and the permission mode', () => {
     const fake = fakeAppToolHost({ permissionModeFor: () => 'ask' })
     const { registry, turns, request } = appToolRegistry(fx.engine, fake.host)
     turns.register(appTurn({ threadId: 'parent', runId: run.runId }))
-    await expect(registry.call('integrate_delegation', { delegationId: 'd1' }, request({ threadId: 'parent', runId: run.runId })))
+    await expect(registry.call('thread_merge_back', {}, request({ threadId: 'parent', runId: run.runId })))
       .resolves.toMatchObject({ isError: true })
-    expect(fake.delegation.integrateDelegation).not.toHaveBeenCalled()
   })
 
 })

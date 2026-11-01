@@ -13,7 +13,7 @@ import { LocalMmsClient } from '../src/mms/protocol/client'
 import { WorkspaceResolver } from '../src/mms/workspace/WorkspaceResolver'
 import { ThreadActionService } from '../src/mms/actions/ThreadActionService'
 import { worktreeTree } from '../src/mms/actions/snapshots'
-import { ChildAgentIntegrationService } from '../src/mms/agents/ChildAgentIntegrationService'
+import { buildSubagentResultReport } from '../src/mms/agents/subagentResultReport'
 import { waitAcquireExecutionLease, releaseExecutionLeaseHandle } from '../src/mms/queue/ThreadExecutionLease'
 import { acquireWorkspaceMutationLease, isWorkflowRevisionCurrent, resolveOwnedThreadWorkspace } from '../src/mms/workspace/WorkflowWorkspace'
 import { ThreadWorkspaceManager } from '../src/mms/workspace/ThreadWorkspaceManager'
@@ -87,11 +87,8 @@ describe('Git foundation through daemon protocol', () => {
       git(metadata.worktreePath, 'commit', '-qam', 'conflicting parent')
     })
     const before = git(metadata.worktreePath, 'status', '--porcelain', '--untracked-files=all')
-    await expect(new ChildAgentIntegrationService(directory).integrate({
-      operationId: 'main-conflict', agentId: 'conflicting-main-child', workerWorktree: child,
-      spawnBaseSha: currentHead, pinnedWorkerSha: childResult, threadWorkspace: metadata.worktreePath
-    })).rejects.toMatchObject({ code: 'integration_conflict', details: { files: ['value.txt'] } })
-    // A refused integration changes nothing and locks nothing: no merge is left in the worktree, and the next turn runs.
+    // The child's result is reported, never merged: the thread's files stay as they are, and the next turn runs.
+    expect(buildSubagentResultReport({ cwd: child, workedIn: child, shared: false, baseSha: currentHead, resultSha: childResult })).toMatchObject({ changedFiles: ['value.txt'] })
     expect(git(metadata.worktreePath, 'status', '--porcelain', '--untracked-files=all')).toBe(before)
     expect(f.read(metadata.worktreePath)).toBe('conflicting parent\n')
     replies.push(() => 'Continued after the conflict.')
@@ -147,7 +144,7 @@ describe('Git foundation through daemon protocol', () => {
     expect(git(f.repo, 'status', '--porcelain')).toBe('')
   }, 30_000)
 
-  it('public undo/redo selects a parent turn completed after its midturn snapshot and child integration', async () => {
+  it('public undo/redo selects a parent turn completed after its midturn snapshot and a child result it brought in', async () => {
     const project = mms.projects.openProject(f.repo)
     const thread = mms.threads.createThread('Parent turn', project.id)
     const threadDir = mms.threads.getThreadDir(thread.id)
@@ -177,11 +174,8 @@ describe('Git foundation through daemon protocol', () => {
       const child = f.child('nested-child', snapshot.endSha)
       f.commit(child, 'child first\n')
       const result = f.commit(child, 'child second\n')
-      await new ChildAgentIntegrationService(threadDir).integrate({
-        agentId: 'nested-child', workerWorktree: child,
-        spawnBaseSha: snapshot.endSha, pinnedWorkerSha: result,
-        threadWorkspace: workspace, heldThreadLease: lease, actionId: parent.id, turnId: 'parent-turn'
-      })
+      // Mousse merges nothing: the parent agent brings the child's file in itself, during its turn.
+      writeFileSync(join(workspace, 'value.txt'), `${git(workspace, 'show', `${result}:value.txt`)}\n`)
       writeFileSync(join(workspace, 'parent.txt'), 'parent after child\n')
       const completed = await actions.checkpointExistingTurn(options, f.baseSha, 'completed')
       expect(completed.id).toBe(parent.id)

@@ -15,12 +15,12 @@ describe('isIdempotentTool', () => {
   it('classifies the SPEC §12.6 lists', () => {
     for (const name of ['read_file', 'list_dir', 'ls', 'git_status', 'git_diff', 'web_search',
       'web_fetch', 'browser_observe', 'browser_find', 'browser_extract', 'browser_screenshot',
-      'browser_tabs', 'list_tasks', 'list_subagents', 'list_delegations'])
+      'browser_tabs', 'list_tasks', 'list_subagents', 'list_delegations', 'integrate_delegation', 'integrate_subagent'])
       expect(isIdempotentTool(name), name).toBe(true)
     for (const name of ['bash', 'run_command', 'write_file', 'edit_file', 'browser_act',
       'browser_open', 'create_task', 'update_task', 'create_subagent', 'create_subagents',
-      'integrate_subagent', 'recall_subagent', 'delegate_task', 'continue_subagent', 'answer_subagent', 'task_status', 'task_cancel',
-      'integrate_delegation', 'present_plan', 'ask_user'])
+      'recall_subagent', 'delegate_task', 'continue_subagent', 'answer_subagent', 'task_status', 'task_cancel',
+      'present_plan', 'ask_user'])
       expect(isIdempotentTool(name), name).toBe(false)
   })
 

@@ -16,7 +16,8 @@ export function delegationGuidanceLines(): string[] {
     'Start a new subagent (delegate_task) for independent work, a deliberately fresh or independent review, a different workspace, provider or model, or when the old subagent\'s context is wrong or too long. A title is unique among your subagents; delegate_task returns title_taken when one already exists, and then you continue it or choose another title.',
     'The user cannot create subagents. When the user names one ("ask the API reviewer to ..."), use continue_subagent with that title.',
     'Pick workspace "isolated" for work that edits, builds or tests; "shared" only for read-only roles (role "research" or "review").',
-    'After delegating or continuing, end your turn. Mousse sends you a notice with the result, so do not poll; call task_status only when the notice says the result was cut off. Use integrate_delegation to merge a finished isolated task.',
+    'After delegating or continuing, end your turn. Mousse sends you a notice with the result, so do not poll; call task_status only when the notice says the result was cut off.',
+    'Mousse never merges a subagent\'s work into your files. The notice of a finished task says where it worked, its base and result snapshots (SHAs kept under refs/mousse/) and the Git state it left (branch, HEAD, commits). Bring the work in yourself with git, for example `git diff --binary <base> <result> | git apply --3way` or `git cherry-pick` of its commits, and check the result.',
     'When a subagent asks a question you can answer, use answer_subagent; otherwise ask the user. A subagent that needs input is reported as needing it.'
   ]
 }

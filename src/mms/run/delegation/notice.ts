@@ -12,6 +12,8 @@ export interface NoticeContext {
   titleOf?(threadId: string): string | undefined
   /** The prompts of the pending question `requestId`, or null when it is not pending any more. */
   questionPrompts?(requestId: string): string[] | null
+  /** What a finished task left in its folder and Git (`formatSubagentResultReport`), when it is known. */
+  resultReport?(payload: ChildResultPayload): string | undefined
 }
 
 export interface PlannedNotice {
@@ -51,9 +53,12 @@ export function planWakeNotice(rows: readonly InboxRecord[], context: NoticeCont
       ? `${who} finished task ${payload.delegationId}.`
       : `${who} ended task ${payload.delegationId} (${result.runStatus}${result.error && result.text ? `: ${head(result.error)}` : ''}).`
     const text = shown.trim() ? `${headline}\n${shown}` : headline
-    return fullyShown
+    const message = fullyShown
       ? `${text}\n${shown.trim() ? 'Full result above.' : 'It left no message.'}`
       : `${text}\n[Result cut at ${shown.length} of ${body.length} characters; call task_status with ${payload.delegationId} for the rest.]`
+    // The files and Git state it left, outside the text budget: Mousse merges nothing, the parent brings them in.
+    const workspace = context.resultReport?.(payload)
+    return workspace ? `${message}\n${workspace}` : message
   })
   return { text: lines.join('\n\n'), items }
 }

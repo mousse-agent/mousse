@@ -182,7 +182,17 @@ export function buildResourceInventory(store: ResourceLifecycleStore, record: Ta
         if (name === 'agents.json' && text(agent.branch)) {
           resource('git-ref', `refs/mousse/agents/${agentId}/base`, found.source.id, 'recall', 'Agent spawn base is retained', task.taskId, repositoryId)
           resource('git-ref', `refs/mousse/agents/${agentId}`, found.source.id, claim, 'Agent result retention is source-derived; physical ref may be absent', task.taskId, repositoryId)
+          resource('git-ref', `refs/mousse/agents/${agentId}/result`, found.source.id, 'recall', 'The reported result of a completed agent is retained', task.taskId, repositoryId)
         }
+      }
+    }
+    // The frozen results of the tasks this thread ran as a subagent: their base and result pins go with the thread.
+    const results = source(join(task.location, 'subagent-results.json'))
+    if (results) for (const row of recordRows(results.data, 'subagent results')) {
+      const report = object(row.report)
+      for (const ref of [text(report?.baseRef), text(report?.resultRef)]) {
+        if (ref && !ref.startsWith(`refs/mousse/delegations/${task.taskId}/`)) { result.blockers.push(`Subagent result ref outside its thread's namespace: ${ref}`); continue }
+        resource('git-ref', ref, results.source.id, 'recall', 'A reported subagent result is retained for its parent', task.taskId, text(row.repositoryId) ?? repositoryId)
       }
     }
     const branches = source(join(task.location, 'conversation-branches.json'))
@@ -340,10 +350,13 @@ export function buildResourceInventory(store: ResourceLifecycleStore, record: Ta
           const agentId = `wf-${digest(`${store.profileId}:${owner}:${key}`).slice(0, 40)}`
           if (data.kind !== 'git-worktree' || data.branch !== `mousse/agent/${agentId}` || data.retainedRef !== `refs/mousse/workflows/${store.profileId}/${owner}/${agentId}` || !/^[a-f0-9]{32}$/.test(String(data.repositoryId))) throw new Error('Workflow checkout namespace does not match its owner')
           const receipts = new ThreadJournal(owned.get(owner)!.location, { readOnly: true }).list().map((entry) => object(object(entry.details)?.receipt))
-          const integrated = data.resultSha === data.baseSha || (data.baseSnapshot !== undefined && data.resultSha === data.baseSnapshot) || receipts.some((receipt) => receipt?.kind === 'integration' && receipt.operationId === `workflow-integration:${key}` && rows(receipt.contributions).some((contribution) => contribution.actorId === agentId && contribution.resultSha === data.resultSha))
+          // A result is settled once it is pinned and reported (Mousse no longer merges it), or was merged by an older version.
+          const reported = typeof data.resultSha === 'string' && /^[a-f0-9]{40,64}$/.test(data.resultSha)
+          const integrated = reported || data.resultSha === data.baseSha || (data.baseSnapshot !== undefined && data.resultSha === data.baseSnapshot) || receipts.some((receipt) => receipt?.kind === 'integration' && receipt.operationId === `workflow-integration:${key}` && rows(receipt.contributions).some((contribution) => contribution.actorId === agentId && contribution.resultSha === data.resultSha))
           const claim = integrated ? undefined : 'pending-integration'
-          resource('worktree', text(data.worktreePath), found.source.id, claim, 'Workflow result awaits matching durable integration receipt', owner, text(data.repositoryId))
+          resource('worktree', text(data.worktreePath), found.source.id, claim, 'Workflow result is not pinned and reported yet', owner, text(data.repositoryId))
           resource('git-ref', text(data.retainedRef), found.source.id, claim, 'Workflow source owns its retained result', owner, text(data.repositoryId))
+          resource('git-ref', `${text(data.retainedRef)}-base`, found.source.id, claim, 'Workflow source owns the base of its reported result', owner, text(data.repositoryId))
           resource('git-ref', `refs/heads/${data.branch}`, found.source.id, claim, 'Workflow source owns its result branch', owner, text(data.repositoryId))
           resource('git-ref', `refs/mousse/agents/${agentId}`, found.source.id, claim, 'Workflow integration owns its attributed result pin', owner, text(data.repositoryId))
           verifyWorktree(text(data.worktreePath), text(data.branch), text(data.repositoryId))

@@ -6,7 +6,6 @@ import { afterEach, beforeEach, expect, it } from 'vitest'
 import { ThreadActionService } from '../src/mms/actions/ThreadActionService'
 import { CodeRevertService } from '../src/mms/actions/CodeRevertService'
 import { PublishService } from '../src/mms/actions/PublishService'
-import { ChildAgentIntegrationService } from '../src/mms/agents/ChildAgentIntegrationService'
 import { ChangeReceiptService } from '../src/mms/actions/ChangeReceiptService'
 import { worktreeTree } from '../src/mms/actions/snapshots'
 import { ThreadJournal } from '../src/mms/data/ThreadJournal'
@@ -17,7 +16,7 @@ let f: ReturnType<typeof gitFoundationFixture>
 beforeEach(() => { f = gitFoundationFixture() })
 afterEach(() => f.dispose())
 
-it.each(['checkpoint', 'revert', 'integration', 'publish'].flatMap((kind) => ['before', 'after'].map((phase) => ({ kind, phase }))))(
+it.each(['checkpoint', 'revert', 'publish'].flatMap((kind) => ['before', 'after'].map((phase) => ({ kind, phase }))))(
   'recovers $kind after process exit $phase its receipt write without repeating Git', async ({ kind, phase }) => {
     const config: Record<string, unknown> = { kind, phase, thread: f.thread, repo: f.repo }
     let recover: () => Promise<void>
@@ -31,15 +30,9 @@ it.each(['checkpoint', 'revert', 'integration', 'publish'].flatMap((kind) => ['b
     } else {
       const source = f.child('child')
       const result = f.commit(source, 'child result\n')
-      if (kind === 'integration') {
-        config.request = { operationId: 'crash-integration', agentId: 'child', workerWorktree: source,
-          spawnBaseSha: f.baseSha, pinnedWorkerSha: result, threadWorkspace: f.repo }
-        recover = () => new ChildAgentIntegrationService(f.thread).recoverPending(f.repo)
-      } else {
-        config.source = source; config.target = git(f.repo, 'branch', '--show-current')
-        config.options = { operationId: 'crash-publish', expectedSourceSha: result, expectedTargetSha: f.baseSha }
-        recover = () => new PublishService(f.thread).recoverPending(source, f.repo)
-      }
+      config.source = source; config.target = git(f.repo, 'branch', '--show-current')
+      config.options = { operationId: 'crash-publish', expectedSourceSha: result, expectedTargetSha: f.baseSha }
+      recover = () => new PublishService(f.thread).recoverPending(source, f.repo)
     }
     const configPath = join(f.root, 'crash.json')
     writeFileSync(configPath, JSON.stringify(config))
@@ -47,18 +40,17 @@ it.each(['checkpoint', 'revert', 'integration', 'publish'].flatMap((kind) => ['b
     await build({ entryPoints: ['tests/fixtures/git-foundation-operation-crash.ts'], outfile: runner, bundle: true, platform: 'node', format: 'esm', logLevel: 'silent', banner: { js: CRASH_CHILD_REQUIRE } })
     const child = spawnSync(process.execPath, [runner, configPath], { env: { ...process.env, MOUSSE_HOME: f.home }, windowsHide: true, encoding: 'utf8', timeout: 20_000 })
     expect(child.status, child.stderr).toBe(86)
-    // A checkpoint, a revert or a child's result changes files only; publishing moves the primary's branch.
+    // A checkpoint or a revert changes files only; publishing moves the primary's branch.
     const movesHead = kind === 'publish'
     const appliedHead = git(f.repo, 'rev-parse', 'HEAD')
     expect(appliedHead === f.baseSha).toBe(!movesHead)
     await recover!()
     expect(git(f.repo, 'rev-parse', 'HEAD')).toBe(appliedHead)
-    // The checkpoint's and the child's changes are uncommitted files (snapshots); the others leave a clean checkout.
-    expect(git(f.repo, 'status', '--porcelain')).toBe(kind === 'checkpoint' || kind === 'integration' ? 'M value.txt' : '')
+    // The checkpoint's changes are uncommitted files (a snapshot); the others leave a clean checkout.
+    expect(git(f.repo, 'status', '--porcelain')).toBe(kind === 'checkpoint' ? 'M value.txt' : '')
     expect(new ChangeReceiptService(f.thread).list().filter((receipt) => receipt.kind === kind)).toHaveLength(1)
     expect([...new ThreadJournal(f.thread).latestByOperation().values()].filter((entry) => ['prepared', 'git_applied', 'running', 'context_pending', 'recovery_required'].includes(entry.state))).toEqual([])
     if (kind === 'checkpoint') expect(git(f.repo, 'rev-parse', `${new ThreadActionService(f.thread).latest('main')!.endSha}^{tree}`)).toBe(worktreeTree(f.repo))
-    if (kind === 'integration') expect(new ThreadActionService(f.thread).latest('main')?.endSha).toBe(new ChangeReceiptService(f.thread).list().find((receipt) => receipt.kind === 'integration')!.afterSha)
     expect(f.read(f.repo)).toBe(kind === 'checkpoint' ? 'checkpoint result\n' : kind === 'revert' ? 'base\n' : 'child result\n')
     const journalSize = new ThreadJournal(f.thread).list().length
     await recover!()

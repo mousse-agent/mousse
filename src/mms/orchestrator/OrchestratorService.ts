@@ -231,7 +231,8 @@ import { ConversationBranchService } from '../actions/ConversationBranchService'
 import type { MousseFeatureFlags } from '../../shared/featureFlags'
 import { DEFAULT_FEATURE_FLAGS } from '../../shared/featureFlags'
 import { ThreadActionService } from '../actions/ThreadActionService'
-import { ChildAgentIntegrationService, ChildIntegrationConflictError } from '../agents/ChildAgentIntegrationService'
+import { cancelledIntegrationsNotice, cancelPendingIntegrations } from '../agents/ChildAgentIntegrationService'
+import { buildSubagentResultReport, delegationResultRefPrefix, formatSubagentResultReport, readSubagentResults, recordedFilesAt, SUBAGENT_RESULTS_FILE, writeSubagentResults, type SubagentResultReport } from '../agents/subagentResultReport'
 import type { NativeContextBoundary } from '../../shared/threadActions'
 import { snapshotOrigin } from '../actions/snapshots'
 import { git as actionGit, requireClean as requireCleanWorkspace } from '../actions/git'
@@ -4324,7 +4325,14 @@ export class OrchestratorService extends EventEmitter {
   private noticeContext(): NoticeContext {
     return {
       titleOf: (threadId) => this.titleOf(threadId),
-      questionPrompts: (requestId) => this.questions.getPending(requestId)?.questions.map((question) => question.prompt) ?? null
+      questionPrompts: (requestId) => this.questions.getPending(requestId)?.questions.map((question) => question.prompt) ?? null,
+      resultReport: (payload) => {
+        const delegation = this.runEngine?.delegations.get(payload.delegationId)
+        if (!delegation) return undefined
+        const report = this.delegationResultReport(delegation)
+        if (report) return formatSubagentResultReport(report)
+        return delegation.workspace === 'shared' ? 'It worked in your own folder, shared with you; Mousse merged nothing.' : undefined
+      }
     }
   }
 
@@ -5176,14 +5184,18 @@ export class OrchestratorService extends EventEmitter {
       this.delegateTask(parentThreadId, parentRunId, input, call, callerCeiling, callerAccess)
     const continueSubagent = (input: { subagent: string; prompt: string }, call: DelegationToolCall) =>
       this.continueSubagent(parentThreadId, parentRunId, input, call, callerCeiling, callerAccess)
-    const integrateDelegation = async (ref: SubagentRef, call: DelegationToolCall) => {
-      if (this.isReadOnlyChild(parentThreadId))
-        throw new McpToolError('mousse_read_only', 'Integration writes the workspace; a read-only subagent cannot integrate.')
-      if (callerCeiling === 'plan')
-        throw new McpToolError('mousse_ceiling_exceeded', 'Integration writes the workspace; a plan ceiling cannot integrate.')
+    // The retired merge tools (`integrate_delegation`, `integrate_subagent`) merge nothing: they return the task's
+    // frozen result, which the caller brings in with Git.
+    const reportResult = (ref: SubagentRef) => {
       const task = this.resolveTask(parentThreadId, ref, 'finished')
       if (!task.ok) return task.refusal
-      return this.integrateDelegation(parentThreadId, parentRunId, task.delegation.delegationId, call)
+      const report = this.delegationResultReport(task.delegation)
+      return {
+        delegationId: task.delegation.delegationId,
+        merged: false,
+        note: 'Mousse no longer merges subagent results into your files. Bring the work in yourself with git, from the snapshots below.',
+        ...(report ? { workspaceResult: report, workspaceResultText: formatSubagentResultReport(report) } : { workspaceResultText: 'The task left no recorded file change.' })
+      }
     }
     const listDelegations = () => this.listDelegations(parentThreadId)
     const named = (request: NamedAgentToolRequest): DelegateTaskInput => {
@@ -5204,7 +5216,7 @@ export class OrchestratorService extends EventEmitter {
       taskCancel: (ref) => this.taskCancel(parentThreadId, ref),
       listDelegations,
       listSubagents: () => this.listSubagents(parentThreadId),
-      integrateDelegation,
+      reportResult,
       named: {
         create: async (request, call) => ({ name: request.name, ...(await delegateTask(named(request), call)) }),
         createBatch: async (requests, call) => {
@@ -5221,8 +5233,7 @@ export class OrchestratorService extends EventEmitter {
           return { results }
         },
         // The older name for `continue_subagent`.
-        recall: async (request, call) => ({ name: request.agent, ...(await continueSubagent({ subagent: request.agent, prompt: request.task }, call) as object) }),
-        integrate: ({ agent }, call) => integrateDelegation({ subagent: agent }, call)
+        recall: async (request, call) => ({ name: request.agent, ...(await continueSubagent({ subagent: request.agent, prompt: request.task }, call) as object) })
       }
     }
   }
@@ -5508,6 +5519,7 @@ export class OrchestratorService extends EventEmitter {
     if (delegation.status === 'result_available' || delegation.status === 'failed') delegation = engine.acknowledgeDelegation(delegationId)
     const row = this.subagentView(parentThreadId).find((subagent) => subagent.childThreadId === delegation.childThreadId)
     const pending = this.questions.listPendingForThread(delegation.childThreadId)
+    const workspaceResult = delegation.result ? this.delegationResultReport(delegation) : undefined
     return {
       delegationId,
       childThreadId: delegation.childThreadId,
@@ -5520,7 +5532,8 @@ export class OrchestratorService extends EventEmitter {
         ? { workState: 'waiting_for_subagents' as const, waitingOn: row.waitingOn }
         : {}),
       ...(pending.length ? { pendingQuestion: pending.map(({ requestId, questions }) => ({ requestId, questions })) } : {}),
-      ...(delegation.result ? { result: delegation.result } : {})
+      ...(delegation.result ? { result: delegation.result } : {}),
+      ...(workspaceResult ? { workspaceResult, workspaceResultText: formatSubagentResultReport(workspaceResult) } : {})
     }
   }
 
@@ -5610,162 +5623,82 @@ export class OrchestratorService extends EventEmitter {
   }
 
   /**
-   * `integrate_delegation` (SPEC §14.4): an `integration` run on the parent thread. It is queued
-   * behind the calling turn (one active run per thread) and runs as its own `turn.start` effect;
-   * its outcome is posted to the parent's inbox.
-   */
-  private async integrateDelegation(parentThreadId: string, parentRunId: string, delegationId: string, call: DelegationToolCall) {
-    const engine = this.requireRunEngine()
-    if (!this.effectsEnabled()) throw new Error('Integration needs the run engine worker')
-    const delegation = this.ownedDelegation(parentThreadId, delegationId)
-    if (delegation.status !== 'result_available' && delegation.status !== 'acknowledged')
-      throw new Error(`Delegated task ${delegationId} is ${delegation.status}; only a finished task can integrate`)
-    if (delegation.result?.runStatus !== 'completed')
-      throw new Error(`Delegated task ${delegationId} ended ${delegation.result?.runStatus ?? 'without a result'}; only a completed task can integrate`)
-    const result = await engine.dispatch({
-      kind: 'send',
-      threadId: parentThreadId,
-      clientRequestId: `integration:${parentRunId}:${call.toolCallId}`,
-      source: 'integration'
-    })
-    if (result.status !== 'accepted') throw new Error(result.reason)
-    const payload: IntegrationTurnPayload = { kind: 'integration', threadId: parentThreadId, runId: result.runId, delegationId }
-    engine.outbox.enqueue({ effectId: `effect:${result.runId}:turn.start:1`, threadId: parentThreadId, runId: result.runId, kind: 'turn.start', payload })
-    return { delegationId, integrationRunId: result.runId, status: 'queued', note: 'The integration runs after this turn; Mousse notifies you of the outcome.' }
-  }
-
-  /**
-   * An `integration` run (SPEC §14.4). Every step after the queued check, the run's own status
-   * marks included, is inside the `try`: any failure ends the run `failed` and the parent learns of
-   * it through an `integration_failed` notice in its inbox, never through a thrown effect.
+   * An `integration` run an older version queued (the retired `integrate_delegation`). Mousse no longer merges a
+   * subagent's result, so it runs nothing: the run ends `cancelled`, and the parent hears why, with the task's
+   * frozen result so it can bring the work in with Git.
    */
   private async executeIntegrationEffect(payload: IntegrationTurnPayload, signal: AbortSignal): Promise<void> {
     const engine = this.requireRunEngine()
     if (engine.getRun(payload.runId)?.status !== 'queued') return
     if (this.refuseOnBotThread(payload.runId, payload.threadId)) return
-    // The outcome is a row for this thread, written with the run's terminal state: the thread stays
-    // busy until its model reads it, so a task waiting on this thread (it may be a subagent that
-    // integrates its own subagent's work) never publishes an answer that predates the outcome.
-    const outcomeRow = (text: string, type: 'integration_completed' | 'integration_failed') => ({
-      kind: 'reconcile_notice' as const,
-      payload: { type, delegationId: payload.delegationId, text }
-    })
-    // Success is the merge, not the run's terminal write: a run something else ended while the merge
-    // was committing (a stop, the reconciler) cannot be marked completed, and the merge still happened.
-    let merged: Awaited<ReturnType<OrchestratorService['integrateDelegationResult']>> | undefined
-    let notice: string
+    let report: SubagentResultReport | undefined
     try {
-      engine.markStarting(payload.runId)
-      engine.markRunning(payload.runId)
-      merged = await this.lifecycle.run('delegation-integration', async () => {
-        const integration = AbortSignal.any([signal, this.lifecycle.signal])
-        // The merge works in the thread's checkout and repository: a pending macOS permission prompt holds only this run.
-        const waited = await this.waitForThreadFolders(payload.threadId, undefined, integration)
-        if (waited !== 'ready') throw integration.reason ?? new DOMException(waited === 'stopped' ? 'Thread stopped' : 'Aborted', 'AbortError')
-        return this.integrateDelegationResult(payload.threadId, payload.delegationId, payload.runId, integration)
-      })
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error)
-      notice = `Integration of delegated task ${payload.delegationId} failed: ${message}`
-      this.markRun(payload.runId, (runs, id) => {
-        const run = runs.getRun(id)
-        if (run && !TERMINAL_RUN_STATUSES.has(run.status)) runs.markTerminal(id, 'failed', { error: message }, { notice: outcomeRow(notice, 'integration_failed') })
-      })
-    }
-    if (merged) {
-      notice = `Integration of delegated task ${payload.delegationId} finished: merged ${merged.workerHeadSha.slice(0, 12)} as ${merged.integrationSha.slice(0, 12)} (${merged.changedPaths.length} path(s)).`
-      try {
-        engine.markTerminal(payload.runId, 'completed', undefined, { resultText: notice, notice: outcomeRow(notice, 'integration_completed') })
-      } catch (error) {
-        console.warn('integration run could not be marked completed; its merge stands', { runId: payload.runId, error: error instanceof Error ? error.message : String(error) })
-      }
-    }
+      // Building the report reads the thread's repository: a pending macOS permission prompt holds only this run.
+      const waited = await this.waitForThreadFolders(payload.threadId, undefined, AbortSignal.any([signal, this.lifecycle.signal]))
+      const delegation = waited === 'ready' ? engine.delegations.get(payload.delegationId) : undefined
+      if (delegation) report = this.delegationResultReport(delegation)
+    } catch { /* The notice still says nothing was merged. */ }
+    const notice = `Integration of delegated task ${payload.delegationId}, queued by an earlier version, was not run: Mousse no longer merges subagent results. Nothing in your files changed; bring the work in with git.${report ? `\n${formatSubagentResultReport(report)}` : ''}`
+    this.markRun(payload.runId, (runs, id) => {
+      if (runs.getRun(id)?.status === 'queued') runs.markTerminal(id, 'cancelled', { error: 'Mousse no longer merges subagent results.' }, { notice: { kind: 'reconcile_notice', payload: { type: 'integration_failed', delegationId: payload.delegationId, text: notice } } })
+    })
     try {
       const session = this.getOrCreateSession(payload.threadId)
       this.sessionAls.run(session, () => this.addSystemMessage(notice))
     } catch (error) {
       console.warn('integration notice could not reach the transcript', { runId: payload.runId, error: error instanceof Error ? error.message : String(error) })
     }
-    this.settleIntegrationOutcome(payload, notice!, merged !== undefined)
   }
 
   /**
-   * Makes sure the thread has exactly one right outcome row for an integration run. Normally the
-   * terminal write has written it. A run something else ended while the merge was still going
-   * (reconciler rule 2, boot) has an "interrupted before its outcome was known" row instead
-   * (`writeTerminalRun`), and the merge may then have finished:
-   * - the row is still `pending`: it is rewritten in place to the `integration_completed` outcome, in
-   *   one write, so the thread never has two rows for one run and never reads the wrong one;
-   * - it has been delivered or read already: its text cannot be taken back, so a short correction row
-   *   follows, which is actionable and so keeps the thread busy until it has been read.
-   * Residual: the thread may have read the interrupted row and the task waiting on it published
-   * before the merge returned. That needs a reconciler interrupt in the middle of a live merge.
-   * With no row at all (the terminal write failed for another reason) the outcome row is appended.
+   * The frozen result of a delegated task: the files its subagent started from and finished with, pinned under
+   * `refs/mousse/delegations/<child>/<delegation>/`, where it worked and the Git state it left. Built once, from
+   * snapshots already recorded (the subagent's task checkpoint, or for a shared folder the parent's own turn
+   * records), and kept in the subagent's thread folder, so it reads the same however often it is asked for and
+   * whatever the worktree does next. Nothing is merged. Undefined when the task left no recorded files.
    */
-  private settleIntegrationOutcome(payload: IntegrationTurnPayload, notice: string, merged: boolean): void {
-    const engine = this.requireRunEngine()
-    const outcomeRow = (text: string, type: 'integration_completed' | 'integration_failed') => ({
-      kind: 'reconcile_notice' as const,
-      payload: { type, delegationId: payload.delegationId, text }
-    })
-    engine.store.db.transaction(() => {
-      const rows = engine.inbox.listForThread(payload.threadId).filter((row) => row.runId === payload.runId && row.kind === 'reconcile_notice')
-      const typeOf = (row: InboxRecord): string => String((row.payload as { type?: unknown } | null)?.type)
-      if (!merged) {
-        if (!rows.some((row) => typeOf(row).startsWith('integration_')))
-          engine.inbox.append({ threadId: payload.threadId, runId: payload.runId, ...outcomeRow(notice, 'integration_failed') })
-        return
-      }
-      if (rows.some((row) => typeOf(row) === 'integration_completed')) return
-      const interrupted = rows.find((row) => typeOf(row) === 'integration_failed' && (row.payload as { interrupted?: unknown }).interrupted === true)
-      if (!interrupted) {
-        engine.inbox.append({ threadId: payload.threadId, runId: payload.runId, ...outcomeRow(notice, 'integration_completed') })
-      } else if (interrupted.status === 'pending') {
-        engine.inbox.patchPayload(interrupted.inboxId, { type: 'integration_completed', text: notice, interrupted: null })
-      } else {
-        engine.inbox.append({
-          threadId: payload.threadId,
-          runId: payload.runId,
-          ...outcomeRow(`The integration did finish, after the notice that it was interrupted: ${notice.replace(/^Integration of delegated task \S+ finished: /, '')}`, 'integration_completed')
-        })
-      }
-    })
-  }
-
-  private async integrateDelegationResult(parentThreadId: string, delegationId: string, runId: string, signal: AbortSignal) {
-    const delegation = this.requireRunEngine().delegations.get(delegationId)
-    if (!delegation) throw new Error(`Unknown delegation ${delegationId}`)
-    const parentDirectory = this.resolveThreadDir(parentThreadId)
+  private delegationResultReport(delegation: DelegationRecord): SubagentResultReport | undefined {
     const childDirectory = this.resolveThreadDir(delegation.childThreadId)
-    if (!parentDirectory || !childDirectory || !this.projectManager || !this.threadStore) throw new Error('Integration requires task workspaces')
-    const child = new ThreadWorkspaceManager(childDirectory).load()
-    if (!child || !existsSync(child.worktreePath)) throw new Error('The delegated task has no isolated workspace to integrate; shared and read-only tasks change nothing.')
-    const project = resolveThreadProjectPath(this.projectManager, this.threadStore, parentThreadId)
-    if (!project) throw new Error('Integration requires a task project')
-    const lease = await waitAcquireExecutionLease(parentDirectory, { source: 'delegation-integration', signal })
+    if (!childDirectory) return undefined
+    const path = join(childDirectory, SUBAGENT_RESULTS_FILE)
+    const saved = readSubagentResults(path)
+    const known = saved.find((row) => row.delegationId === delegation.delegationId)
+    if (known) return known.report
     try {
-      const target = await new WorkspaceResolver(parentDirectory, parentThreadId, project).resolve('agent', 'main', signal, lease)
-      if (!target.capability.checkpointable) throw new Error('Integration requires an owned Git workspace')
-      // The task's own checkpoint, not the worktree as it is now: the subagent may have worked on since.
-      // The run whose text the task published (it can be a later run than the task's own, once the
-      // subagent had waited on its own subagents), and the task's own run for a result that predates `runId`.
-      const pinned = taskCheckpoint(new ThreadActionService(childDirectory).list(), delegation.result?.runId ?? delegation.childRunId)
-      if (!pinned) throw new Error('The delegated task left no code checkpoint to integrate.')
-      return await new ChildAgentIntegrationService(parentDirectory).integrate({
-        agentId: delegation.childThreadId,
-        operationId: `delegation-integration:${delegationId}:${pinned}`,
-        actor: { kind: 'agent', id: delegation.childThreadId },
-        workerWorktree: child.worktreePath,
-        spawnBaseSha: child.baseSha,
-        pinnedWorkerSha: pinned,
-        threadWorkspace: target.workspacePath,
-        heldThreadLease: lease,
-        signal,
-        runId,
-        externalEffects: [{ kind: 'unknown', reversible: false, description: 'The delegated thread may have performed external effects; integration reverses repository changes only.' }]
-      })
-    } finally {
-      releaseExecutionLeaseHandle(lease)
+      const prefix = delegationResultRefPrefix(delegation.childThreadId, delegation.delegationId)
+      const pins = { base: `${prefix}/base`, result: `${prefix}/result` }
+      const project = this.projectManager && this.threadStore ? resolveThreadProjectPath(this.projectManager, this.threadStore, delegation.parentThreadId) : undefined
+      let built: { report: SubagentResultReport; repositoryId: string } | undefined
+      if (delegation.workspace === 'shared') {
+        // The subagent read and wrote the parent's own folder: what changed there during the task is in the parent's turn records.
+        const parentDirectory = this.resolveThreadDir(delegation.parentThreadId)
+        const parent = parentDirectory ? new ThreadWorkspaceManager(parentDirectory).load() : undefined
+        if (!parent || !parentDirectory) return undefined
+        const actions = new ThreadActionService(parentDirectory).list()
+        const base = recordedFilesAt(actions, delegation.createdAt)
+        const result = recordedFilesAt(actions, delegation.completedAt ?? new Date().toISOString()) ?? parent.snapshotSha
+        if (!base || !result) return undefined
+        const cwd = existsSync(parent.worktreePath) ? parent.worktreePath : project
+        if (!cwd) return undefined
+        built = { repositoryId: parent.repositoryId, report: buildSubagentResultReport({ cwd, workedIn: this.sharedWorkspaceOf(delegation.parentThreadId)?.path ?? parent.worktreePath, shared: true, baseSha: base, resultSha: result, pins }) }
+      } else {
+        const child = new ThreadWorkspaceManager(childDirectory).load()
+        if (!child) return undefined
+        const actions = new ThreadActionService(childDirectory).list()
+        // The task's own checkpoint, not the worktree as it is now: the subagent may have worked on since.
+        const resultSha = taskCheckpoint(actions, delegation.result?.runId ?? delegation.childRunId)
+        if (!resultSha) return undefined
+        // Where the subagent's worktree started: everything it holds is measured from there.
+        const baseSha = [...actions].sort((a, b) => a.createdAt.localeCompare(b.createdAt)).find((action) => action.scope !== 'conversation' && action.startSha)?.startSha ?? child.baseSha
+        const cwd = existsSync(child.worktreePath) ? child.worktreePath : project
+        if (!cwd) return undefined
+        built = { repositoryId: child.repositoryId, report: buildSubagentResultReport({ cwd, workedIn: child.worktreePath, shared: false, baseSha, resultSha, pins }) }
+      }
+      writeSubagentResults(path, [...saved, { delegationId: delegation.delegationId, repositoryId: built.repositoryId, report: built.report }])
+      return built.report
+    } catch (error) {
+      console.warn('the result of a delegated task could not be recorded', { delegationId: delegation.delegationId, error: error instanceof Error ? error.message : String(error) })
+      return undefined
     }
   }
 
@@ -9055,7 +8988,9 @@ export class OrchestratorService extends EventEmitter {
 
     if (recoveryDirectory && recoveryWorkspace && session.executionLease) {
       const heldLease = session.executionLease
-      await new ChildAgentIntegrationService(recoveryDirectory).recoverPending(recoveryWorkspace.worktreePath, heldLease)
+      // A merge of a subagent's result an older version left unfinished is cancelled, never run again; the thread hears of it.
+      const cancelledIntegrations = cancelledIntegrationsNotice(cancelPendingIntegrations(recoveryDirectory))
+      if (cancelledIntegrations) this.sessionAls.run(session, () => this.addSystemMessage(cancelledIntegrations))
       const primary = this.projectManager && this.threadStore
         ? resolveThreadProjectPath(this.projectManager, this.threadStore, session.threadId) : undefined
       if (primary) await new PublishService(recoveryDirectory).recoverPending(recoveryWorkspace.worktreePath, primary, heldLease)
@@ -10798,41 +10733,34 @@ export class OrchestratorService extends EventEmitter {
     return logs
   }
 
-  private async integrateAgentResult(agent: Agent): Promise<{ success: boolean; conflict?: boolean; conflicts?: string[]; error?: string }> {
+  /**
+   * Records a chat agent's result and reports it; nothing is merged into its thread. The worker's files are checkpointed
+   * in its own worktree, and its base and result are pinned under `refs/mousse/agents/<id>/`. The main agent brings
+   * the work in with Git.
+   */
+  private async reportAgentResult(agent: Agent): Promise<{ report: SubagentResultReport } | { error: string }> {
     const owner = this.agentOwner(agent.id) ?? this.session
     try {
       return await this.withTaskWriter(owner, async () => {
         const directory = this.resolveThreadDir(owner.threadId)!
-        const parent = owner.workspace!.workspacePath
-        if (agent.repositoryRoot && actionGit(agent.repositoryRoot, ['rev-parse', '--show-toplevel']) !== actionGit(parent, ['rev-parse', '--show-toplevel'])) {
-          throw new Error('Child integration target no longer matches its owned task workspace')
-        }
         const base = actionGit(agent.worktreePath, ['rev-parse', `refs/mousse/agents/${agent.id}/base`])
         const workerHead = actionGit(agent.worktreePath, ['rev-parse', 'HEAD'])
         if (agent.readyCommit && agent.readyCommit !== workerHead) throw new Error('Worker HEAD changed after readiness validation')
-        if (agent.readyCommit) requireCleanWorkspace(agent.worktreePath, 'Ready worker')
         const workerAction = await new ThreadActionService(join(directory, 'agent-changes', agent.id)).checkpointExistingTurn({
           threadId: agent.id, turnId: `worker-result:${agent.id}`, conversationBranchId: 'main',
           actor: { kind: 'agent', id: agent.id }, workspacePath: agent.worktreePath,
-          externalEffects: [{ kind: 'unknown', reversible: false, description: 'Child tools may affect ignored files or external services; integrating or undoing code does not reverse those effects.' }],
+          externalEffects: [{ kind: 'unknown', reversible: false, description: 'Child tools may affect ignored files or external services; Mousse records the files only.' }],
           presentationMessageStart: 0, presentationMessageEnd: 0,
           nativeContextBoundary: { messageIndex: 0, compactionGeneration: 0, fidelity: 'exact' }
         }, base, 'completed')
-        await new ChildAgentIntegrationService(directory).integrate({
-          agentId: agent.id, operationId: `chat-integration:${agent.id}:${workerAction.endSha}`,
-          workerWorktree: agent.worktreePath,
-          spawnBaseSha: base,
-          pinnedWorkerSha: workerAction.endSha,
-          threadWorkspace: parent, heldThreadLease: owner.executionLease ?? undefined,
-          externalEffects: workerAction.externalEffects,
-          actor: { kind: 'agent', id: agent.id }
+        const report = buildSubagentResultReport({
+          cwd: agent.worktreePath, workedIn: agent.worktreePath, shared: false, baseSha: base, resultSha: workerAction.endSha,
+          pins: { result: `refs/mousse/agents/${agent.id}/result` }
         })
-        // Retain the worker and pinned result for undo/recovery. GC owns retirement.
-        return { success: true }
+        return { report: { ...report, baseRef: `refs/mousse/agents/${agent.id}/base` } }
       })
     } catch (error) {
-      const conflicts = error instanceof ChildIntegrationConflictError ? error.files : []
-      return { success: false, conflict: conflicts.length > 0, conflicts, error: error instanceof Error ? error.message : String(error) }
+      return { error: error instanceof Error ? error.message : String(error) }
     }
   }
 
@@ -10865,35 +10793,24 @@ export class OrchestratorService extends EventEmitter {
     }
 
     if (merge) {
-      const result = await this.integrateAgentResult(agent)
-      if (result.success) {
-        logs.push(`[merge] Merged ${agent.branch}`)
+      // Completing an agent records its result and reports it; the thread's files are never merged into.
+      const result = await this.reportAgentResult(agent)
+      if ('report' in result) {
+        logs.push(`[result] Recorded the result of ${agent.branch}; nothing was merged.\n${formatSubagentResultReport(result.report)}`)
         this.agents.updateStatus(agent.id, 'completed')
         if (task) {
           this.tasks.updateProgress(task.id, {
             progress: 100,
-            message: `Merged ${agent.branch}`
+            message: `Result of ${agent.branch} recorded; not merged`
           })
           this.tasks.updateStatus(task.id, 'completed')
         }
-      } else if (result.conflict) {
-        const files = result.conflicts?.join(', ') || 'unknown files'
-        logs.push(`[merge] Conflict for ${agent.branch}: ${files}`)
-        logs.push(`[merge] Details: ${result.error}`)
-        this.agents.updateStatus(agent.id, 'conflict')
-        task && this.tasks.updateProgress(task.id, {
-          message: `Merge conflict: ${files}`
-        })
-        // The thread's files are untouched; the worker's worktree, branch and pinned result stay for another try.
-        return logs
       } else {
-        logs.push(`[merge] Failed for ${agent.branch}: ${result.error}`)
-        // A non-conflict Git failure can be transient (locked index, hook failure, etc.).
-        // Keep the branch eligible for complete_task retry instead of classifying the
-        // worker as failed and silently excluding its surviving commit.
+        logs.push(`[result] Could not record the result of ${agent.branch}: ${result.error}`)
+        // Nothing was changed; the worker's worktree and branch stay, and completing it can be tried again.
         this.agents.updateStatus(agent.id, 'ready')
         task && this.tasks.updateProgress(task.id, {
-          message: `Merge failed; branch preserved for retry: ${result.error}`
+          message: `Result not recorded; worktree and branch kept: ${result.error}`
         })
       }
     } else {

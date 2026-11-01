@@ -51,7 +51,7 @@ import type { MmsProfileServices } from '../MmsProfileServices'
 import type { WorkflowRecordSnapshot } from '../workflows/registry/WorkflowRegistry'
 import { collectTransitiveWorkflowRecords } from '../workflows/engine/childAdmission'
 import { executionThreadId } from '../data/ThreadDataStore'
-import { acquireWorkspaceMutationLease, integrateOwnedAgentWorkspace, isWorkflowRevisionCurrent, provisionOwnedAgentWorkspace } from '../workspace/WorkflowWorkspace'
+import { acquireWorkspaceMutationLease, isWorkflowRevisionCurrent, reportOwnedAgentWorkspace, provisionOwnedAgentWorkspace } from '../workspace/WorkflowWorkspace'
 import { SharedAgentModelLookup } from './SharedAgentModelLookup'
 
 const SNAPSHOT_RECORD_MAX_BYTES = WORKFLOW_AGENT_BINDINGS_MAX_BYTES
@@ -642,7 +642,7 @@ export class MmsWorkflowAgents {
       let workspaceRevision = await writer?.complete(result.status === 'completed' ? 'completed' : result.status === 'cancelled' ? 'stopped' : 'failed')
       checkpointed = true
       if (writer && !writer.release()) throw new Error('Workflow workspace writer ownership was lost')
-      // Invalid output never publishes the worker's code to its parent.
+      // A completed worker's result is pinned and reported with its output; nothing is merged into the parent.
       if (result.status === 'completed' && !signal.aborted) {
         const output = parseOutput(result.text, Boolean(request.outputSchema))
         this.writeInvocation({
@@ -651,7 +651,7 @@ export class MmsWorkflowAgents {
           modelCompleted: true, integrationState: 'pending', output,
           tokens: result.usage.totalTokens, cost: result.usage.costUsd, workspaceRevision
         })
-        if (workspaceRevision) workspaceRevision = await integrateOwnedAgentWorkspace({
+        if (workspaceRevision) workspaceRevision = await reportOwnedAgentWorkspace({
           owner: this.services, context, workspace, revision: workspaceRevision,
           idempotencyKey: request.idempotencyKey, signal
         })

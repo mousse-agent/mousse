@@ -9,7 +9,8 @@ import { RedoService } from '../src/mms/actions/RedoService'
 import { ThreadActionService } from '../src/mms/actions/ThreadActionService'
 import { UndoService } from '../src/mms/actions/UndoService'
 import { publishedRef, restoreChange, takeSnapshot, worktreeTree } from '../src/mms/actions/snapshots'
-import { ChildAgentIntegrationService } from '../src/mms/agents/ChildAgentIntegrationService'
+import { cancelPendingIntegrations } from '../src/mms/agents/ChildAgentIntegrationService'
+import { buildSubagentResultReport, formatSubagentResultReport } from '../src/mms/agents/subagentResultReport'
 import { ThreadJournal } from '../src/mms/data/ThreadJournal'
 import { ThreadWorkspaceManager } from '../src/mms/workspace/ThreadWorkspaceManager'
 import { WorkspaceGcService } from '../src/mms/workspace/WorkspaceGcService'
@@ -544,102 +545,81 @@ async function worker(name: string, files: Record<string, string>) {
   })
   return { path, result: action.endSha, base: git(cwd, 'rev-parse', 'HEAD') }
 }
-const integrate = (agent: Awaited<ReturnType<typeof worker>>, operationId = `integrate-${agent.result}`) => new ChildAgentIntegrationService(f.thread).integrate({
-  agentId: 'worker', operationId, workerWorktree: agent.path, spawnBaseSha: agent.base, pinnedWorkerSha: agent.result, threadWorkspace: cwd
-})
 
 describe('subagent results', () => {
-  it('arrive as files: the thread’s uncommitted work stays, nothing is committed, and the receipt records both snapshots', async () => {
-    const agent = await worker('worker', { 'worker.txt': 'worker\n' })
-    // The thread has uncommitted work of its own, in another file and as a staged edit, that the merge must not touch.
+  const pins = { base: 'refs/mousse/agents/worker/base', result: 'refs/mousse/agents/worker/result' }
+
+  it('are reported, never merged: the parent keeps its files, HEAD, index and branches, and both snapshots outlive the worktree', async () => {
+    // The worker edits a file, commits another and leaves a third uncommitted.
+    const path = f.child('worker-branch', git(cwd, 'rev-parse', 'HEAD'))
+    git(path, 'config', 'user.name', 'Test'); git(path, 'config', 'user.email', 'test@example.test')
+    const { action } = await new ThreadActionService(join(f.root, 'worker-journal')).runCheckpointedAction({ ...actionOptions(path, 'worker-result'), threadId: 'worker' }, () => {
+      writeFileSync(join(path, 'committed.txt'), 'committed\n'); git(path, 'add', 'committed.txt'); git(path, 'commit', '-qm', 'worker commit')
+      writeFileSync(join(path, 'worker.txt'), 'worker\n')
+    })
+    const base = git(cwd, 'rev-parse', 'HEAD')
+    // The parent has uncommitted work of its own, and a staged edit.
     await turn('parent', () => write('parent.txt', 'parent\n'))
     write('notes.txt', 'mine\n'); git(cwd, 'add', 'notes.txt')
-    const head = git(cwd, 'rev-parse', 'HEAD')
-    const branchesBefore = branches()
-    const cached = git(cwd, 'diff', '--cached', '--binary')
-
-    const record = await integrate(agent)
-    expect(f.read(cwd, 'worker.txt')).toBe('worker\n')
-    expect(f.read(cwd, 'parent.txt')).toBe('parent\n')
-    expect(f.read(cwd, 'notes.txt')).toBe('mine\n')
-    // No commit, no merge, no set-aside copy; HEAD, branches and the real index are as they were.
-    expect(git(cwd, 'rev-parse', 'HEAD')).toBe(head)
-    expect(branches()).toBe(branchesBefore)
-    expect(git(cwd, 'diff', '--cached', '--binary')).toBe(cached)
-    expect(git(cwd, 'for-each-ref', 'refs/mousse/pending-changes')).toBe('')
-    expect(git(cwd, 'log', '--format=%s', '-3')).not.toMatch(/mousse|merge/i)
-    expect(() => git(cwd, 'rev-parse', '--verify', '-q', 'MERGE_HEAD')).toThrow()
-    // The receipt is between two snapshots of the thread; the worker's result is pinned.
-    const receipt = new ChangeReceiptService(f.thread).list().find((item) => item.id === record.receiptId)!
-    expect(receipt).toMatchObject({ kind: 'integration', introducedCommits: [], contributions: [{ actorId: 'worker', baseSha: agent.base, resultSha: agent.result }] })
-    expect(receipt.git).toMatchObject({ rewroteHistory: false, headBefore: head, headAfter: head })
-    expect(git(cwd, 'ls-tree', '--name-only', receipt.beforeSha).split('\n')).not.toContain('worker.txt')
-    expect(git(cwd, 'show', `${receipt.afterSha}:worker.txt`)).toBe('worker')
-    expect(git(cwd, 'show', `${receipt.afterSha}:notes.txt`)).toBe('mine')
-    expect(record).toMatchObject({ workerHeadSha: agent.result, preMergeSha: receipt.beforeSha, integrationSha: receipt.afterSha, changedPaths: ['worker.txt'] })
-    expect(git(cwd, 'rev-parse', `refs/mousse/agents/worker`)).toBe(agent.result)
-    expect(new ThreadWorkspaceManager(f.thread).load()!.snapshotSha).toBe(receipt.afterSha)
-    // The next turn records nothing as outside changes.
-    expect((await actions.recordOutsideChanges({ threadId: 'task', conversationBranchId: 'main', workspacePath: cwd })).action).toBeUndefined()
-    noPending()
-  })
-
-  it('arrive whatever the worker did to its own HEAD and files since', async () => {
-    const agent = await worker('worker', { 'worker.txt': 'worker\n' })
-    writeFileSync(join(agent.path, 'worker.txt'), 'worker, later\n'); git(agent.path, 'add', 'worker.txt'); git(agent.path, 'commit', '-qm', 'later')
-    await integrate(agent)
-    expect(f.read(cwd, 'worker.txt')).toBe('worker\n')
-  })
-
-  it('a conflict refuses with the file names and changes nothing: no merge, no set-aside, no pending operation', async () => {
-    const agent = await worker('worker', { 'value.txt': 'from the worker\n', 'worker.txt': 'worker\n' })
-    await turn('parent', () => { write('value.txt', 'from the parent\n'); write('parent.txt', 'parent\n') })
     const status = git(cwd, 'status', '--porcelain', '--untracked-files=all')
+    const cached = git(cwd, 'diff', '--cached', '--binary')
+    const branchesBefore = branches()
     const journal = new ThreadJournal(f.thread).list().length
-    const refs = git(cwd, 'for-each-ref', '--format=%(refname)', 'refs/mousse')
-    await expect(integrate(agent)).rejects.toMatchObject({ code: 'integration_conflict', details: { files: ['value.txt'] }, message: expect.stringContaining('value.txt') })
+
+    const report = buildSubagentResultReport({ cwd: path, workedIn: path, shared: false, baseSha: base, resultSha: action.endSha, pins })
+    expect(report).toMatchObject({
+      workedIn: path, shared: false, baseSha: base, resultSha: action.endSha, baseRef: pins.base, resultRef: pins.result,
+      changedFileCount: 2, changedFiles: ['committed.txt', 'worker.txt'],
+      git: { branch: 'worker-branch', head: git(path, 'rev-parse', 'HEAD'), commitCount: 1, commits: [{ sha: git(path, 'rev-parse', 'HEAD'), subject: 'worker commit' }] }
+    })
+    // Nothing in the parent changed, and nothing was recorded for it.
     expect(git(cwd, 'status', '--porcelain', '--untracked-files=all')).toBe(status)
-    expect(f.read(cwd)).toBe('from the parent\n')
+    expect(git(cwd, 'diff', '--cached', '--binary')).toBe(cached)
+    expect(git(cwd, 'rev-parse', 'HEAD')).toBe(base)
+    expect(branches()).toBe(branchesBefore)
     expect(existsSync(join(cwd, 'worker.txt'))).toBe(false)
-    expect(git(cwd, 'for-each-ref', '--format=%(refname)', 'refs/mousse')).toBe(refs)
     expect(new ThreadJournal(f.thread).list().length).toBe(journal)
     expect(new ChangeReceiptService(f.thread).list().filter((item) => item.kind === 'integration')).toEqual([])
     noPending()
-    // The thread goes on: a turn starts, and the same result integrates once the overlap is gone.
-    write('value.txt', 'base\n')
-    await turn('next', () => undefined, 2)
-    await integrate(agent)
-    expect(f.read(cwd, 'worker.txt')).toBe('worker\n')
+    // The pins keep both revisions after the worktree and its branch are gone.
+    git(f.repo, 'worktree', 'remove', '--force', path); git(f.repo, 'branch', '-D', 'worker-branch')
+    expect(git(cwd, 'rev-parse', pins.base)).toBe(base)
+    expect(git(cwd, 'show', `${pins.result}:worker.txt`)).toBe('worker')
+    const text = formatSubagentResultReport(report)
+    expect(text).toContain('Mousse merged nothing')
+    expect(text).toContain(`git diff --binary ${base} ${action.endSha} | git apply --3way`)
+    expect(text).toContain('on branch worker-branch')
   })
 
-  it('refuses a worker that produced no change, by comparing files', async () => {
-    const agent = await worker('idle', {})
-    await expect(integrate(agent)).rejects.toThrow(/produced no change/)
-    // A worker that rewrote a file to what it already was changed nothing either.
-    const same = await worker('same', { 'value.txt': 'base\n' })
-    await expect(integrate(same)).rejects.toThrow(/produced no change/)
-    noPending()
+  it('a worker that changed nothing says so', async () => {
+    const agent = await worker('idle', { 'value.txt': 'base\n' })
+    const report = buildSubagentResultReport({ cwd: agent.path, workedIn: agent.path, shared: false, baseSha: agent.base, resultSha: agent.result })
+    expect(report).toMatchObject({ changedFileCount: 0, changedFiles: [], git: { commitCount: 0, commits: [] } })
+    expect(formatSubagentResultReport(report)).toContain('no change from where it started')
   })
 
-  it('recovers an interrupted integration by merging again, and never twice', async () => {
+  it('a merge an older version left unfinished is cancelled, not replayed, and the files stay as they are', async () => {
     const agent = await worker('worker', { 'worker.txt': 'worker\n' })
-    const service = new ChildAgentIntegrationService(f.thread)
-    // The crash: the intent was written and the files changed, but no receipt exists yet.
     const ours = takeSnapshot(cwd, { reason: 'ours' })
-    new ThreadJournal(f.thread).append({
-      operationId: 'crashed', operationType: 'child-integration', state: 'prepared',
-      expectedPreState: { preSnapshot: ours.sha, workerSha: agent.result, spawnBaseSha: agent.base, expectedTree: '' },
-      details: { request: { agentId: 'worker', operationId: 'crashed', workerWorktree: agent.path, spawnBaseSha: agent.base, pinnedWorkerSha: agent.result, threadWorkspace: cwd } }
-    })
-    write('worker.txt', 'worker\n')
-    await service.recoverPending(cwd)
-    const receipts = new ChangeReceiptService(f.thread).list().filter((item) => item.kind === 'integration')
-    expect(receipts).toHaveLength(1)
-    expect(receipts[0]).toMatchObject({ operationId: 'crashed', beforeSha: ours.sha })
-    expect(f.read(cwd, 'worker.txt')).toBe('worker\n')
+    const journal = new ThreadJournal(f.thread)
+    for (const [operationId, state] of [['crashed', 'prepared'], ['stuck', 'recovery_required']] as const) {
+      journal.append({
+        operationId, operationType: 'child-integration', state: 'prepared',
+        expectedPreState: { preSnapshot: ours.sha, workerSha: agent.result, spawnBaseSha: agent.base, expectedTree: '' },
+        details: { request: { agentId: 'worker', operationId, workerWorktree: agent.path, spawnBaseSha: agent.base, pinnedWorkerSha: agent.result, threadWorkspace: cwd } }
+      })
+      if (state !== 'prepared') journal.append({ operationId, operationType: 'child-integration', state })
+    }
+    expect(() => noPending()).toThrow()
+    expect(cancelPendingIntegrations(f.thread)).toEqual([
+      { operationId: 'crashed', agentId: 'worker', resultSha: agent.result, spawnBaseSha: agent.base },
+      { operationId: 'stuck', agentId: 'worker', resultSha: agent.result, spawnBaseSha: agent.base }
+    ])
+    expect(existsSync(join(cwd, 'worker.txt'))).toBe(false)
+    expect(new ChangeReceiptService(f.thread).list().filter((item) => item.kind === 'integration')).toEqual([])
+    expect(new ThreadJournal(f.thread).latestByOperation().get('crashed')).toMatchObject({ state: 'cancelled' })
     noPending()
-    await service.recoverPending(cwd)
-    expect(new ChangeReceiptService(f.thread).list().filter((item) => item.kind === 'integration')).toHaveLength(1)
+    expect(cancelPendingIntegrations(f.thread)).toEqual([])
   })
 })
 
