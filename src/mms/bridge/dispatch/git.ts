@@ -1,6 +1,7 @@
 import { execFile } from 'node:child_process'
 import { gitDirectoryEnv, nonInteractiveGitEnv, withGitConfigEnv } from '../../git/gitEnv'
 import { GIT_NULL_DEVICE } from '../../git/gitNullDevice'
+import { assertGitAllowed } from '../../git/gitPolicy'
 import { HOOK_EVENTS } from '../../git/repoPrograms'
 import { NetError } from '../../../shared/net'
 
@@ -50,6 +51,12 @@ function runGit(
     'credential.interactive=false'
   ]
   return new Promise((resolve, reject) => {
+    try {
+      assertGitAllowed({ cwd, args })
+    } catch (error) {
+      reject(error)
+      return
+    }
     execFile(
       'git',
       [...safety, ...args],

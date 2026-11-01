@@ -1,4 +1,5 @@
 import { AppError, createErrorProvider } from '../../shared/errors'
+import { AsyncLocalStorage } from 'node:async_hooks'
 import { spawn } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import { mkdtemp, rm, rmdir, stat, writeFile } from 'node:fs/promises'
@@ -22,6 +23,7 @@ import { resolveRepositoryIdentity } from './RepositoryIdentity'
 import { acquireRepositoryLease, RepositoryLeaseAbortedError } from './RepositoryLease'
 import { guardedSimpleGit, NO_DIFF_PROGRAMS, repoProgramEnv, SAFE_LOOKUP_ENV, withoutRepoPrograms } from './repoPrograms'
 import { readWorkingTreeStatus, type StatusEntry } from './workingTreeStatus'
+import type { UserAction } from './gitPolicy'
 import type {
   GitBranchInfo,
   GitBranchOptions,
@@ -369,6 +371,9 @@ function readBoundedGit(cwd: string, args: readonly string[], maxBytes: number):
   })
 }
 
+/** The user's request behind the GitService mutation running now, for the central Git check. */
+const userRequests = new AsyncLocalStorage<UserAction>()
+
 export class GitService {
   /** Profile-scoped GitHub CLI integration alongside the existing Git operations. */
   readonly github = new GitHubService()
@@ -397,8 +402,18 @@ export class GitService {
    */
   private runGit(cwd: string, args: readonly string[], options?: GitRunOptions & { userAction?: boolean }): Promise<GitRun> {
     const { userAction, ...run } = options ?? {}
+    // Every change here is one the user asked for: the mutation that runs it passed their request in.
+    const guarded = withoutRepoPrograms(cwd, args, { userAction, userRequested: userRequests.getStore(), env: run.env })
     // Mousse's own commands take no optional lock, so a read never refreshes and rewrites the index.
-    return runGit(cwd, withoutRepoPrograms(cwd, args, { userAction }), userAction ? run : { ...run, env: { ...run.env, ...SAFE_LOOKUP_ENV, GIT_OPTIONAL_LOCKS: '0' } })
+    return runGit(cwd, guarded, userAction ? run : { ...run, env: { ...run.env, ...SAFE_LOOKUP_ENV, GIT_OPTIONAL_LOCKS: '0' } })
+  }
+
+  /**
+   * Runs a mutation for the user's request. Every GitService method that changes the repository takes
+   * one: the central Git check (`gitPolicy`) allows a change Mousse does not own only with it.
+   */
+  private asUser<T>(userRequested: UserAction, work: () => Promise<T>): Promise<T> {
+    return userRequests.run(userRequested, work)
   }
 
   /**
@@ -713,12 +728,17 @@ export class GitService {
   }
 
   /** Turns a project folder into a Git repository. Never touches an existing one. */
-  async init(cwd: string): Promise<void> {
+  init(cwd: string, userRequested: UserAction): Promise<void> {
+    return this.asUser(userRequested, () => this.initNow(cwd))
+  }
+
+  private async initNow(cwd: string): Promise<void> {
     await this.serialized(cwd, async () => {
       const info = await stat(cwd).catch(() => null)
       if (!info?.isDirectory()) throw gitErrors.create('git_init_no_folder')
       if (await this.isRepo(cwd)) throw gitErrors.create('git_already_repo')
-      await this.gitFor(cwd).init()
+      const run = await this.runGit(cwd, ['init'], { userAction: true })
+      if (!run.ok) throw failure('git_failed', run)
     })
   }
 
@@ -759,7 +779,11 @@ export class GitService {
   }
 
   /** Stages the working tree state of these paths, including deletions and new files. Paths with nothing to stage are skipped. */
-  async stage(cwd: string, paths: readonly string[]): Promise<void> {
+  stage(cwd: string, userRequested: UserAction, paths: readonly string[]): Promise<void> {
+    return this.asUser(userRequested, () => this.stageNow(cwd, paths))
+  }
+
+  private async stageNow(cwd: string, paths: readonly string[]): Promise<void> {
     await this.serialized(cwd, async () => {
       const top = await this.toplevel(cwd)
       const targets = selectEntries(await this.statusEntries(top), paths).filter((entry) => entry.workdir !== '')
@@ -767,7 +791,11 @@ export class GitService {
     })
   }
 
-  async stageAll(cwd: string): Promise<void> {
+  stageAll(cwd: string, userRequested: UserAction): Promise<void> {
+    return this.asUser(userRequested, () => this.stageAllNow(cwd))
+  }
+
+  private async stageAllNow(cwd: string): Promise<void> {
     await this.serialized(cwd, async () => {
       const run = await this.runGit(await this.toplevel(cwd), ['add', '-A'], { userAction: true })
       if (!run.ok) throw failure('git_failed', run)
@@ -775,7 +803,11 @@ export class GitService {
   }
 
   /** Takes these paths out of the index and leaves the working tree alone. A staged rename is unstaged on both names. */
-  async unstage(cwd: string, paths: readonly string[]): Promise<void> {
+  unstage(cwd: string, userRequested: UserAction, paths: readonly string[]): Promise<void> {
+    return this.asUser(userRequested, () => this.unstageNow(cwd, paths))
+  }
+
+  private async unstageNow(cwd: string, paths: readonly string[]): Promise<void> {
     await this.serialized(cwd, async () => {
       const top = await this.toplevel(cwd)
       const targets = selectEntries(await this.statusEntries(top), paths).filter((entry) => entry.index !== '' && entry.index !== '?' && !isConflicted(entry))
@@ -790,7 +822,11 @@ export class GitService {
     })
   }
 
-  async unstageAll(cwd: string): Promise<void> {
+  unstageAll(cwd: string, userRequested: UserAction): Promise<void> {
+    return this.asUser(userRequested, () => this.unstageAllNow(cwd))
+  }
+
+  private async unstageAllNow(cwd: string): Promise<void> {
     await this.serialized(cwd, async () => {
       const top = await this.toplevel(cwd)
       const unborn = !await this.hasHead(top)
@@ -804,7 +840,11 @@ export class GitService {
    * working tree), files HEAD does not have are removed, untracked files are deleted.
    * This cannot be undone, so the caller confirms first.
    */
-  async discard(cwd: string, paths: readonly string[]): Promise<void> {
+  discard(cwd: string, userRequested: UserAction, paths: readonly string[]): Promise<void> {
+    return this.asUser(userRequested, () => this.discardNow(cwd, paths))
+  }
+
+  private async discardNow(cwd: string, paths: readonly string[]): Promise<void> {
     await this.serialized(cwd, async () => {
       const top = await this.toplevel(cwd)
       const selected = selectEntries(await this.statusEntries(top), paths)
@@ -849,7 +889,11 @@ export class GitService {
     }
   }
 
-  async fetch(cwd: string, options: GitOperationRequest = {}): Promise<GitFetchResult> {
+  fetch(cwd: string, userRequested: UserAction, options: GitOperationRequest = {}): Promise<GitFetchResult> {
+    return this.asUser(userRequested, () => this.fetchNow(cwd, options))
+  }
+
+  private async fetchNow(cwd: string, options: GitOperationRequest = {}): Promise<GitFetchResult> {
     return this.runOperation(cwd, 'fetch', options, true, (live) => this.serialized(cwd, async () => {
       assertNotCancelled(live)
       const git = this.gitFor(cwd)
@@ -878,7 +922,11 @@ export class GitService {
    * conflicts is returned as `conflicted` and left as Git left it, for the user to
    * resolve or abort.
    */
-  async pull(cwd: string, options: GitPullOptions & GitOperationRequest = {}): Promise<GitPullResult> {
+  pull(cwd: string, userRequested: UserAction, options: GitPullOptions & GitOperationRequest = {}): Promise<GitPullResult> {
+    return this.asUser(userRequested, () => this.pullNow(cwd, options))
+  }
+
+  private async pullNow(cwd: string, options: GitPullOptions & GitOperationRequest = {}): Promise<GitPullResult> {
     const strategy = options.strategy ?? 'ff-only'
     return this.runOperation(cwd, 'pull', options, true, (live) => this.serialized(cwd, async () => {
       assertNotCancelled(live)
@@ -930,7 +978,11 @@ export class GitService {
   }
 
   /** Gives up a merge or rebase that stopped on conflicts. Only ever called by an explicit user action. */
-  async abortInProgress(cwd: string, kind: 'merge' | 'rebase'): Promise<void> {
+  abortInProgress(cwd: string, userRequested: UserAction, kind: 'merge' | 'rebase'): Promise<void> {
+    return this.asUser(userRequested, () => this.abortInProgressNow(cwd, kind))
+  }
+
+  private async abortInProgressNow(cwd: string, kind: 'merge' | 'rebase'): Promise<void> {
     await this.serialized(cwd, async () => {
       const run = await this.runGit(cwd, [kind, '--abort'], { userAction: true })
       if (!run.ok) throw failure('git_failed', run)
@@ -1071,7 +1123,11 @@ export class GitService {
     return (listed ?? '').split('\n').includes(name)
   }
 
-  async createBranch(cwd: string, name: string, options: GitBranchOptions = {}): Promise<void> {
+  createBranch(cwd: string, userRequested: UserAction, name: string, options: GitBranchOptions = {}): Promise<void> {
+    return this.asUser(userRequested, () => this.createBranchNow(cwd, name, options))
+  }
+
+  private async createBranchNow(cwd: string, name: string, options: GitBranchOptions = {}): Promise<void> {
     await this.serialized(cwd, async () => {
       await this.assertBranchName(cwd, name)
       if (await this.branchExists(cwd, name)) throw gitErrors.create('git_branch_exists')
@@ -1079,29 +1135,38 @@ export class GitService {
       if (from !== undefined && (from.startsWith('-') || await this.read(cwd, ['rev-parse', '--verify', '--quiet', `${from}^{commit}`]) === null)) throw gitErrors.create('git_ref_not_found')
       const args = options.checkout === false ? ['branch', name] : ['switch', '-c', name]
       if (from !== undefined) args.push(from)
-      const run = await this.runGit(cwd, args)
+      // The user's own action, as from a terminal: their hooks run, and a switch writes files through their filters (#344).
+      const run = await this.runGit(cwd, args, { userAction: true })
       if (!run.ok) throw this.checkoutFailure(run, 'git_branch_failed')
     })
   }
 
-  async renameBranch(cwd: string, name: string, newName: string): Promise<void> {
+  renameBranch(cwd: string, userRequested: UserAction, name: string, newName: string): Promise<void> {
+    return this.asUser(userRequested, () => this.renameBranchNow(cwd, name, newName))
+  }
+
+  private async renameBranchNow(cwd: string, name: string, newName: string): Promise<void> {
     await this.serialized(cwd, async () => {
       if (isManagedBranch(name)) throw gitErrors.create('git_branch_protected')
       await this.assertBranchName(cwd, newName)
       if (!await this.branchExists(cwd, name)) throw gitErrors.create('git_ref_not_found')
       if (name !== newName && await this.branchExists(cwd, newName)) throw gitErrors.create('git_branch_exists')
-      const run = await this.runGit(cwd, ['branch', '-m', '--', name, newName])
+      const run = await this.runGit(cwd, ['branch', '-m', '--', name, newName], { userAction: true })
       if (!run.ok) throw failure('git_branch_failed', run)
     })
   }
 
-  async deleteBranch(cwd: string, name: string, options: GitDeleteBranchOptions = {}): Promise<void> {
+  deleteBranch(cwd: string, userRequested: UserAction, name: string, options: GitDeleteBranchOptions = {}): Promise<void> {
+    return this.asUser(userRequested, () => this.deleteBranchNow(cwd, name, options))
+  }
+
+  private async deleteBranchNow(cwd: string, name: string, options: GitDeleteBranchOptions = {}): Promise<void> {
     await this.serialized(cwd, async () => {
       if (isManagedBranch(name)) throw gitErrors.create('git_branch_protected')
       // Only an exact name is deleted; a differently cased one could still reach the current or a managed branch.
       if (!await this.branchExists(cwd, name)) throw gitErrors.create('git_ref_not_found')
       if ((await this.currentBranch(cwd))?.toLowerCase() === name.toLowerCase()) throw gitErrors.create('git_branch_current')
-      const run = await this.runGit(cwd, ['branch', options.force ? '-D' : '-d', '--', name])
+      const run = await this.runGit(cwd, ['branch', options.force ? '-D' : '-d', '--', name], { userAction: true })
       if (run.ok) return
       if (/not fully merged/i.test(run.output)) throw classified('git_branch_unmerged', run)
       if (/checked out at|used by worktree/i.test(run.output)) throw classified('git_branch_in_worktree', run)
@@ -1127,7 +1192,11 @@ export class GitService {
    * included) are stashed, the switch happens, and they are re-applied; if re-applying
    * conflicts, the stash is kept and `stashKept` says so.
    */
-  async checkout(cwd: string, branch: string, options: GitCheckoutOptions & GitOperationRequest = {}): Promise<GitCheckoutResult> {
+  checkout(cwd: string, userRequested: UserAction, branch: string, options: GitCheckoutOptions & GitOperationRequest = {}): Promise<GitCheckoutResult> {
+    return this.asUser(userRequested, () => this.checkoutNow(cwd, branch, options))
+  }
+
+  private async checkoutNow(cwd: string, branch: string, options: GitCheckoutOptions & GitOperationRequest = {}): Promise<GitCheckoutResult> {
     return this.runOperation(cwd, 'checkout', options, false, (live) => this.serialized(cwd, async () => {
       if (options.dirty !== 'stash') {
         await this.switchTo(cwd, branch, live)
@@ -1181,7 +1250,11 @@ export class GitService {
    * loses its skip-worktree marks in that restore, and an intent-to-add entry comes back
    * as an untracked file.
    */
-  async commit(cwd: string, message: string, options: GitCommitOptions & GitOperationRequest = {}): Promise<void> {
+  commit(cwd: string, userRequested: UserAction, message: string, options: GitCommitOptions & GitOperationRequest = {}): Promise<void> {
+    return this.asUser(userRequested, () => this.commitNow(cwd, message, options))
+  }
+
+  private async commitNow(cwd: string, message: string, options: GitCommitOptions & GitOperationRequest = {}): Promise<void> {
     await this.runOperation(cwd, 'commit', options, true, (live) => this.serialized(cwd, async () => {
       assertNotCancelled(live)
       const git = this.gitFor(cwd)
@@ -1253,7 +1326,11 @@ ${run.output}`))
     if (onRemote) throw gitErrors.create('git_amend_pushed')
   }
 
-  async push(cwd: string, options: GitPushOptions & GitPushTarget & GitOperationRequest = {}): Promise<void> {
+  push(cwd: string, userRequested: UserAction, options: GitPushOptions & GitPushTarget & GitOperationRequest = {}): Promise<void> {
+    return this.asUser(userRequested, () => this.pushQueued(cwd, options))
+  }
+
+  private async pushQueued(cwd: string, options: GitPushOptions & GitPushTarget & GitOperationRequest = {}): Promise<void> {
     await this.runOperation(cwd, 'push', options, true, (live) => this.serialized(cwd, () => this.pushNow(cwd, options, live), live.signal))
   }
 

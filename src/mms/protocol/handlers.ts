@@ -1,4 +1,6 @@
 import { repositoryIdentitiesFor } from '../bridge/remote/repositoryIdentity'
+import { userAction, withGitAccess, type UserAction } from '../git/gitPolicy'
+import { gitAccessOf } from './gitAccess'
 import type { StorageCleanupPlanToken } from '../../shared/storage'
 import { validateAppletAppearance } from '../../shared/appletAppearance'
 import { appletJsonBytes, APPLET_STATE_LIMIT } from '../../shared/applets'
@@ -873,6 +875,14 @@ async function underThreadLocks<T>(target: GitMutationTarget, label: string, run
  * Lets the client that sent a long Git request follow it: its events travel on that connection only, never to
  * other clients or windows, and only that connection can cancel it. Without an `operationId` nothing is sent.
  */
+/**
+ * The request behind a Git panel action: what the user pressed, or the CLI command they ran. The central Git
+ * check (`gitPolicy`) allows a change to something Mousse does not own only with one.
+ */
+function gitUserAction(ctx: HandlerContext, label: string): UserAction {
+  return userAction(ctx.connection?.clientType === 'cli' ? 'cli' : 'button', label)
+}
+
 function gitOperationOptions(ctx: HandlerContext, p: Record<string, unknown>): GitOperationOptions {
   const operationId = asOptionalString(p.operationId, 64)
   if (!operationId) return {}
@@ -1047,6 +1057,12 @@ export async function dispatchMethod(
   method: string,
   params: unknown
 ): Promise<unknown> {
+  // Git commands a method runs are checked against what it declares in GIT_ACCESS; a mismatch is logged.
+  const access = gitAccessOf(method)
+  return access ? withGitAccess(method, access, () => dispatchAdmitted(ctx, method, params)) : dispatchAdmitted(ctx, method, params)
+}
+
+function dispatchAdmitted(ctx: HandlerContext, method: string, params: unknown): Promise<unknown> {
   // Installation lifecycle commands must not wait on themselves in a personal
   // request barrier. Every actual personal service has this ownership method;
   // the fallback preserves legacy isolated handler test doubles.
@@ -3260,7 +3276,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const target = await gitMutationTarget(ctx, p, 'task_branch_authoritative')
       const dirty = asOptionalString(p.dirty, 16)
       if (dirty !== undefined && dirty !== 'carry' && dirty !== 'stash') throw new DomainRpcError('invalid_params', 'dirty must be carry or stash')
-      const result = await ctx.mms.gitService.checkout(target.root, asString(p.branch, 'branch', 512), { ...(dirty ? { dirty } : {}), ...gitOperationOptions(ctx, p) })
+      const result = await ctx.mms.gitService.checkout(target.root, gitUserAction(ctx, 'Switch branch'), asString(p.branch, 'branch', 512), { ...(dirty ? { dirty } : {}), ...gitOperationOptions(ctx, p) })
       return gitStatusResult(ctx, target.root, { ...result })
     }
     case 'git.commit': {
@@ -3275,8 +3291,8 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         if (amend) throw gitThreadRules.create('git_amend_in_thread')
         // Everything is committed through the user's hooks as one commit; a rejected commit is recorded, never swept in with --no-verify.
         await followedGitAction(ctx, p, target.root, 'commit', (request, signal) =>
-          runUserThreadGitAction(ctx, thread, { onFailure: 'record', signal }, () => ctx.mms.gitService.commit(target.root, message, { all: true, expectedBranch, ...request })))
-      } else await followedGitAction(ctx, p, target.root, 'commit', (request) => ctx.mms.gitService.commit(target.root, message, { amend, expectedBranch, ...request }))
+          runUserThreadGitAction(ctx, thread, { onFailure: 'record', signal }, () => ctx.mms.gitService.commit(target.root, gitUserAction(ctx, 'Commit'), message, { all: true, expectedBranch, ...request })))
+      } else await followedGitAction(ctx, p, target.root, 'commit', (request) => ctx.mms.gitService.commit(target.root, gitUserAction(ctx, amend ? 'Amend the last commit' : 'Commit'), message, { amend, expectedBranch, ...request }))
       return gitStatusResult(ctx, target.root)
     }
     case 'git.push': {
@@ -3289,12 +3305,12 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const prTarget = metadata && threadId ? await pullRequestPushTarget(ctx, threadId, root) : null
       const toPullRequest = prTarget?.remote && prTarget.branch ? { toRemote: prTarget.remote, toBranch: prTarget.branch } : {}
       await followedGitAction(ctx, p, root, 'push', (request, signal) => {
-        if (!metadata || !directory) return ctx.mms.gitService.push(root, { expectedBranch, ...request })
+        if (!metadata || !directory) return ctx.mms.gitService.push(root, gitUserAction(ctx, 'Push'), { expectedBranch, ...request })
         return withGitMutationLocks(directory, root, 'user-git-push', async () => {
           const manager = new ThreadWorkspaceManager(directory)
           if (manager.verify().lifecycle !== 'ready' || manager.load()?.headSha !== metadata.headSha) throw new DomainRpcError('task_revision_changed', 'Task revision changed before push; refresh the reviewed revision')
           if (workspaceGit(root, ['status', '--porcelain'])) throw gitThreadRules.create('git_thread_dirty')
-          await ctx.mms.gitService.push(root, { expectedBranch, ...toPullRequest, ...request })
+          await ctx.mms.gitService.push(root, gitUserAction(ctx, 'Push'), { expectedBranch, ...toPullRequest, ...request })
         }, signal)
       })
       return gitStatusResult(ctx, root)
@@ -3321,8 +3337,9 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const target = await gitMutationTarget(ctx, p, 'thread_worktree_checkpointed')
       const all = asOptionalBoolean(p.all, 'all') === true
       const staging = method === 'git.stage'
-      if (all) await (staging ? ctx.mms.gitService.stageAll(target.root) : ctx.mms.gitService.unstageAll(target.root))
-      else await (staging ? ctx.mms.gitService.stage(target.root, gitPaths(ctx, target.root, p.paths)) : ctx.mms.gitService.unstage(target.root, gitPaths(ctx, target.root, p.paths)))
+      const action = gitUserAction(ctx, staging ? 'Stage' : 'Unstage')
+      if (all) await (staging ? ctx.mms.gitService.stageAll(target.root, action) : ctx.mms.gitService.unstageAll(target.root, action))
+      else await (staging ? ctx.mms.gitService.stage(target.root, action, gitPaths(ctx, target.root, p.paths)) : ctx.mms.gitService.unstage(target.root, action, gitPaths(ctx, target.root, p.paths)))
       return gitStatusResult(ctx, target.root)
     }
     case 'git.discard': {
@@ -3333,14 +3350,14 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       if (thread) {
         // The remainder is checkpointed afterwards, so the tree is clean again and the discard is on record.
         const effects: ExternalEffect[] = [{ kind: 'unknown', description: `Discarded ${paths.length} ${paths.length === 1 ? 'file' : 'files'}`, reversible: false }]
-        await runUserThreadGitAction(ctx, thread, { externalEffects: effects }, () => ctx.mms.gitService.discard(target.root, paths))
-      } else await ctx.mms.gitService.discard(target.root, paths)
+        await runUserThreadGitAction(ctx, thread, { externalEffects: effects }, () => ctx.mms.gitService.discard(target.root, gitUserAction(ctx, 'Discard changes'), paths))
+      } else await ctx.mms.gitService.discard(target.root, gitUserAction(ctx, 'Discard changes'), paths)
       return gitStatusResult(ctx, target.root)
     }
     case 'git.fetch': {
       const p = isObject(params) ? params : {}
       const target = await gitMutationTarget(ctx, p)
-      const result = await followedGitAction(ctx, p, target.root, 'fetch', (request, signal) => underThreadLocks(target, 'user-git-fetch', () => ctx.mms.gitService.fetch(target.root, request), signal))
+      const result = await followedGitAction(ctx, p, target.root, 'fetch', (request, signal) => underThreadLocks(target, 'user-git-fetch', () => ctx.mms.gitService.fetch(target.root, gitUserAction(ctx, 'Fetch'), request), signal))
       return gitStatusResult(ctx, target.root, { ...result })
     }
     case 'git.pull': {
@@ -3348,7 +3365,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const target = await gitMutationTarget(ctx, p, 'task_branch_authoritative')
       const strategy = asOptionalString(p.strategy, 16) ?? 'ff-only'
       if (strategy !== 'ff-only' && strategy !== 'merge' && strategy !== 'rebase') throw new DomainRpcError('invalid_params', 'strategy must be ff-only, merge or rebase')
-      const result = await followedGitAction(ctx, p, target.root, 'pull', (request) => ctx.mms.gitService.pull(target.root, { strategy: strategy as GitPullStrategy, ...request }))
+      const result = await followedGitAction(ctx, p, target.root, 'pull', (request) => ctx.mms.gitService.pull(target.root, gitUserAction(ctx, 'Pull'), { strategy: strategy as GitPullStrategy, ...request }))
       return gitStatusResult(ctx, target.root, { ...result })
     }
     case 'git.abortInProgress': {
@@ -3357,25 +3374,25 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const kind = asString(p.kind, 'kind', 16)
       if (kind !== 'merge' && kind !== 'rebase') throw new DomainRpcError('invalid_params', 'kind must be merge or rebase')
       // A thread worktree allows it: it gives up a merge or rebase a terminal started, back to the recorded head.
-      await underThreadLocks(target, 'user-git-abort', () => ctx.mms.gitService.abortInProgress(target.root, kind))
+      await underThreadLocks(target, 'user-git-abort', () => ctx.mms.gitService.abortInProgress(target.root, gitUserAction(ctx, `Abort the ${kind}`), kind))
       return gitStatusResult(ctx, target.root)
     }
     case 'git.createBranch': {
       const p = isObject(params) ? params : {}
       const target = await gitMutationTarget(ctx, p, 'task_branch_authoritative')
-      await ctx.mms.gitService.createBranch(target.root, asString(p.name, 'name', 512), { from: asOptionalString(p.from, 512), checkout: asOptionalBoolean(p.checkout, 'checkout') })
+      await ctx.mms.gitService.createBranch(target.root, gitUserAction(ctx, 'Create branch'), asString(p.name, 'name', 512), { from: asOptionalString(p.from, 512), checkout: asOptionalBoolean(p.checkout, 'checkout') })
       return gitStatusResult(ctx, target.root)
     }
     case 'git.renameBranch': {
       const p = isObject(params) ? params : {}
       const target = await gitMutationTarget(ctx, p, 'task_branch_authoritative')
-      await ctx.mms.gitService.renameBranch(target.root, asString(p.name, 'name', 512), asString(p.newName, 'newName', 512))
+      await ctx.mms.gitService.renameBranch(target.root, gitUserAction(ctx, 'Rename branch'), asString(p.name, 'name', 512), asString(p.newName, 'newName', 512))
       return gitStatusResult(ctx, target.root)
     }
     case 'git.deleteBranch': {
       const p = isObject(params) ? params : {}
       const target = await gitMutationTarget(ctx, p, 'task_branch_authoritative')
-      await ctx.mms.gitService.deleteBranch(target.root, asString(p.name, 'name', 512), { force: asOptionalBoolean(p.force, 'force') === true })
+      await ctx.mms.gitService.deleteBranch(target.root, gitUserAction(ctx, 'Delete branch'), asString(p.name, 'name', 512), { force: asOptionalBoolean(p.force, 'force') === true })
       return gitStatusResult(ctx, target.root)
     }
     case 'git.cancelOperation': {
@@ -3387,7 +3404,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const p = isObject(params) ? params : {}
       if (p.threadId !== undefined) throw new DomainRpcError('invalid_params', 'git.init takes a projectId, not a threadId')
       const root = projectRootContext(ctx, p)
-      await ctx.mms.gitService.init(root)
+      await ctx.mms.gitService.init(root, gitUserAction(ctx, 'Initialize Git'))
       return gitStatusResult(ctx, root)
     }
     case 'github.status':
@@ -3406,7 +3423,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const result = await ctx.mms.gitService.github.createRepository(project.path, {
         name: asString(p.name, 'name', 100),
         visibility
-      })
+      }, gitUserAction(ctx, 'Create GitHub repository'))
       return { result }
     }
     case 'github.cloneRepository': {
@@ -3417,7 +3434,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const destination = await ctx.mms.gitService.github.cloneRepository({
         repository: asString(p.repository, 'repository', 512),
         destination: asString(p.destination, 'destination', 4096)
-      })
+      }, gitUserAction(ctx, 'Clone repository'))
       const project = ctx.mms.projects.openProject(destination)
       const projects = ctx.mms.projects.listProjects()
       ctx.emitEvent?.('projects.updated', { projects })
@@ -3492,7 +3509,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       let pullRequest: GitPullRequestInfo
       try {
         // The branch is the one the caller opened the form on and the daemon has just checked out.
-        pullRequest = await codeHost.createPullRequest(root, { title, body, base, draft, head: branch })
+        pullRequest = await codeHost.createPullRequest(root, { title, body, base, draft, head: branch }, gitUserAction(ctx, 'Create pull request'))
       } catch (error) {
         // The host's message is what the user needs (gh says why); a plain error would reach the form as "something went wrong".
         const failure = new DomainRpcError('pull_request_create_failed', error instanceof Error ? error.message : String(error))
@@ -3521,7 +3538,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const codeHost = ctx.mms.gitService.codeHost
       const method = isMergeMethod(p.method) ? p.method : await codeHost.defaultMergeMethod(root) ?? 'squash'
       try {
-        const pullRequest = await codeHost.mergePullRequest(root, number, { method, ...(headSha ? { headSha } : {}) })
+        const pullRequest = await codeHost.mergePullRequest(root, number, { method, ...(headSha ? { headSha } : {}) }, gitUserAction(ctx, 'Merge pull request'))
         return { pullRequest, method }
       } catch (error) {
         throw new DomainRpcError('pull_request_merge_failed', error instanceof Error ? error.message : String(error), { number })
@@ -3533,7 +3550,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const number = asBoundedInt(p.number, 'number', { min: 1, max: Number.MAX_SAFE_INTEGER })
       await materializeRequestedWorkspace(ctx, p)
       try {
-        return { pullRequest: await ctx.mms.gitService.codeHost.closePullRequest(pullRequestFolder(ctx, p), number) }
+        return { pullRequest: await ctx.mms.gitService.codeHost.closePullRequest(pullRequestFolder(ctx, p), number, gitUserAction(ctx, 'Close pull request')) }
       } catch (error) {
         throw new DomainRpcError('pull_request_close_failed', error instanceof Error ? error.message : String(error), { number })
       }

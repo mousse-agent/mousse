@@ -4,6 +4,7 @@ import { getThreadLifecycleGate } from '../queue/ThreadLifecycleAdmission'
 import { execFileSync } from 'node:child_process'
 import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync } from 'node:fs'
 import { nonInteractiveGitEnv } from '../git/gitEnv'
+import { assertGitAllowed } from '../git/gitPolicy'
 import { safeWorktreeGit } from '../worktree/WorktreeManager'
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { assertHeldThreadLease } from '../actions/GitOperationCoordinator'
@@ -106,6 +107,7 @@ async function addUntrustedWorktree(primaryCheckoutPath: string, addArguments: s
   if (enableWorktreeConfig && enablePerWorktreeConfig(primaryCheckoutPath)) enableWorktreeConfig()
   // Refused before anything is checked out, not after: the worktree must never exist without its safety settings.
   assertPerWorktreeConfig(primaryCheckoutPath)
+  assertGitAllowed({ cwd: primaryCheckoutPath, args: [...safety, 'worktree', 'add', ...addArguments] })
   execFileSync('git', [...safety, 'worktree', 'add', ...addArguments], {
     cwd: primaryCheckoutPath,
     env: repoProgramEnv({ ...process.env, ...nonInteractiveGitEnv(), GIT_LFS_SKIP_SMUDGE: '1' }),

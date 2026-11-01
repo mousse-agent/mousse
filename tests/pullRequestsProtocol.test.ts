@@ -145,7 +145,7 @@ describe('pull request methods through the daemon protocol', () => {
       })
       expect(normalized(method.mock.calls[0][0])).toBe(normalized(workspace.workspacePath))
       expect(normalized(merge.mock.calls[0][0])).toBe(normalized(workspace.workspacePath))
-      expect(merge.mock.calls[0].slice(1)).toEqual([12, { method: 'merge', headSha: 'abc1234' }])
+      expect(merge.mock.calls[0].slice(1)).toEqual([12, { method: 'merge', headSha: 'abc1234' }, { via: 'button', label: 'Merge pull request' }])
     })
 
     it('squashes when the host\'s method cannot be read', async () => {
@@ -154,7 +154,7 @@ describe('pull request methods through the daemon protocol', () => {
       const project = mms.projects.openProject(f.repo)
       expect(await client.request('pullRequests.merge', { projectId: project.id, number: 12 })).toMatchObject({ method: 'squash' })
       expect(normalized(merge.mock.calls[0][0])).toBe(normalized(f.repo))
-      expect(merge.mock.calls[0].slice(1)).toEqual([12, { method: 'squash' }])
+      expect(merge.mock.calls[0].slice(1)).toEqual([12, { method: 'squash' }, { via: 'button', label: 'Merge pull request' }])
     })
 
     it('tells the Merge confirmation the method the host offers, null when it cannot be read, and merges nothing', async () => {
@@ -803,7 +803,8 @@ describe('pull request methods through the daemon protocol', () => {
         const { thread, branch } = await linkedWorktreeThread()
         const push = vi.spyOn(mms.gitService, 'push').mockResolvedValue()
         await client.request('git.push', { threadId: thread.id, expectedBranch: branch })
-        expect(push.mock.calls[0][1]).toMatchObject({ expectedBranch: branch, toRemote: 'upstream', toBranch: 'fix-thing' })
+        expect(push.mock.calls[0][1]).toEqual({ via: 'button', label: 'Push' })
+        expect(push.mock.calls[0][2]).toMatchObject({ expectedBranch: branch, toRemote: 'upstream', toBranch: 'fix-thing' })
         expect(await client.request('pullRequests.pushTarget', { threadId: thread.id })).toEqual({ target: { remote: 'upstream', branch: 'fix-thing', reason: null } })
       })
 
@@ -812,8 +813,8 @@ describe('pull request methods through the daemon protocol', () => {
         const push = vi.spyOn(mms.gitService, 'push').mockResolvedValue()
         const noRemote = await linkedWorktreeThread()
         await client.request('git.push', { threadId: noRemote.thread.id, expectedBranch: noRemote.branch })
-        expect(push.mock.calls[0][1]).not.toHaveProperty('toRemote')
-        expect(push.mock.calls[0][1]).not.toHaveProperty('toBranch')
+        expect(push.mock.calls[0][2]).not.toHaveProperty('toRemote')
+        expect(push.mock.calls[0][2]).not.toHaveProperty('toBranch')
         expect(await client.request('pullRequests.pushTarget', { threadId: noRemote.thread.id })).toEqual({
           target: { remote: null, branch: null, reason: 'No remote of this checkout fetches from and pushes to acme/app; push by hand' }
         })
@@ -835,7 +836,7 @@ describe('pull request methods through the daemon protocol', () => {
         const push = vi.spyOn(mms.gitService, 'push').mockResolvedValue()
         const byHand = await linkedWorktreeThread({ startedFromPullRequest: undefined })
         await client.request('git.push', { threadId: byHand.thread.id, expectedBranch: byHand.branch })
-        expect(push.mock.calls[0][1]).not.toHaveProperty('toRemote')
+        expect(push.mock.calls[0][2]).not.toHaveProperty('toRemote')
         expect(await client.request('pullRequests.pushTarget', { threadId: byHand.thread.id })).toEqual({ target: { remote: null, branch: null, reason: null } })
       })
 
@@ -845,7 +846,7 @@ describe('pull request methods through the daemon protocol', () => {
         const push = vi.spyOn(mms.gitService, 'push').mockResolvedValue()
         const { thread, branch } = await linkedWorktreeThread()
         await client.request('git.push', { threadId: thread.id, expectedBranch: branch })
-        expect(push.mock.calls[0][1]).not.toHaveProperty('toRemote')
+        expect(push.mock.calls[0][2]).not.toHaveProperty('toRemote')
         expect(await client.request('pullRequests.pushTarget', { threadId: thread.id })).toEqual({
           target: { remote: null, branch: null, reason: 'No remote of this checkout fetches from and pushes to acme/app; push by hand' }
         })
@@ -859,7 +860,7 @@ describe('pull request methods through the daemon protocol', () => {
         const push = vi.spyOn(mms.gitService, 'push').mockResolvedValue()
         const release = await linkedWorktreeThread({ headRefName: 'main', baseRefName: 'release' })
         await client.request('git.push', { threadId: release.thread.id, expectedBranch: release.branch })
-        expect(push.mock.calls[0][1]).not.toHaveProperty('toRemote')
+        expect(push.mock.calls[0][2]).not.toHaveProperty('toRemote')
         expect((await client.request<{ target: { reason: string } }>('pullRequests.pushTarget', { threadId: release.thread.id })).target.reason).toMatch(/default branch, which Push never updates/)
 
         vi.mocked(mms.gitService.codeHost.listBaseBranches).mockResolvedValue({ defaultBranch: null, branches: [] })
@@ -874,7 +875,7 @@ describe('pull request methods through the daemon protocol', () => {
         const plain = mms.threads.createThread('Plain', project.id)
         await new WorkspaceResolver(mms.threads.getThreadDir(plain.id), plain.id, f.repo).resolve('agent')
         await client.request('git.push', { threadId: plain.id, expectedBranch: `mousse/thread/${plain.id}/main` })
-        expect(push.mock.calls[0][1]).not.toHaveProperty('toRemote')
+        expect(push.mock.calls[0][2]).not.toHaveProperty('toRemote')
         expect(await client.request('pullRequests.pushTarget', { threadId: plain.id })).toEqual({ target: { remote: null, branch: null, reason: null } })
 
         // On the project's own checkout nothing is redirected, linked or not.

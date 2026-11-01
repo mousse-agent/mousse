@@ -7,6 +7,10 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { nonInteractiveGitEnv } from '../src/mms/git/gitEnv'
 import { GitService } from '../src/mms/git/GitService'
+import { userAction } from '../src/mms/git/gitPolicy'
+
+/** The user's request a test passes to a GitService change. */
+const USER = userAction('button', 'Test action')
 
 const roots: string[] = []
 function git(cwd: string, ...args: string[]): string {
@@ -70,7 +74,7 @@ describe('GitService configured upstream and push behavior', () => {
 
   it('pushes to the configured differently named upstream without changing tracking', async () => {
     const fixture = repo()
-    await new GitService().push(fixture.cwd)
+    await new GitService().push(fixture.cwd, USER)
     expect(git(fixture.upstream, 'rev-parse', 'refs/heads/release')).toBe(fixture.local)
     expect(git(fixture.cwd, 'rev-parse', '--abbrev-ref', '@{upstream}')).toBe('team/release')
     expect(() => git(fixture.origin, 'rev-parse', '--verify', 'refs/heads/feature')).toThrow()
@@ -80,7 +84,7 @@ describe('GitService configured upstream and push behavior', () => {
     const fixture = repo()
     git(fixture.cwd, 'config', 'branch.feature.pushRemote', 'team')
     git(fixture.cwd, 'config', 'push.default', 'current')
-    await new GitService().push(fixture.cwd)
+    await new GitService().push(fixture.cwd, USER)
     expect(git(fixture.upstream, 'rev-parse', 'refs/heads/feature')).toBe(fixture.local)
     expect(git(fixture.upstream, 'rev-parse', 'refs/heads/release')).toBe(fixture.base)
     expect(git(fixture.cwd, 'rev-parse', '--abbrev-ref', '@{upstream}')).toBe('team/release')
@@ -89,7 +93,7 @@ describe('GitService configured upstream and push behavior', () => {
   it('publishes to origin and sets the upstream when plain push lacks one', async () => {
     const fixture = repo()
     git(fixture.cwd, 'branch', '--unset-upstream')
-    await new GitService().push(fixture.cwd)
+    await new GitService().push(fixture.cwd, USER)
     expect(git(fixture.cwd, 'rev-parse', '--abbrev-ref', '@{upstream}')).toBe('origin/feature')
     expect(git(fixture.origin, 'rev-parse', '--verify', 'refs/heads/feature')).toBe(git(fixture.cwd, 'rev-parse', 'HEAD'))
   })
@@ -98,7 +102,7 @@ describe('GitService configured upstream and push behavior', () => {
     const fixture = repo()
     git(fixture.cwd, 'branch', '--unset-upstream')
     git(fixture.cwd, 'config', 'branch.feature.pushRemote', 'team')
-    await new GitService().push(fixture.cwd)
+    await new GitService().push(fixture.cwd, USER)
     expect(git(fixture.cwd, 'rev-parse', '--abbrev-ref', '@{upstream}')).toBe('team/feature')
     expect(() => git(fixture.origin, 'rev-parse', '--verify', 'refs/heads/feature')).toThrow()
   })
@@ -128,10 +132,10 @@ describe('GitService configured upstream and push behavior', () => {
     git(root, 'init', '-b', 'new-work'); git(root, 'config', 'user.name', 'x'); git(root, 'config', 'user.email', 'x@example.invalid')
     git(root, 'config', 'commit.gpgsign', 'false'); git(root, 'config', 'core.hooksPath', join(root, 'no-hooks'))
     writeFileSync(join(root, 'a.txt'), 'a\n'); writeFileSync(join(root, 'b.txt'), 'b\n')
-    await new GitService().stage(root, ['a.txt'])
-    await new GitService().commit(root, 'first')
+    await new GitService().stage(root, USER, ['a.txt'])
+    await new GitService().commit(root, USER, 'first')
     expect(git(root, 'show', '--name-only', '--format=', 'HEAD')).toBe('a.txt')
-    await new GitService().commit(root, 'second')
+    await new GitService().commit(root, USER, 'second')
     expect(git(root, 'show', '--name-only', '--format=', 'HEAD')).toBe('b.txt')
   })
 })
@@ -142,7 +146,7 @@ describe('GitService push to a named remote and branch', () => {
     // The branch is configured to publish to `team`, and tracks team/release; the target is origin's pr-branch.
     git(fixture.cwd, 'config', 'branch.feature.pushRemote', 'team')
     git(fixture.cwd, 'config', 'push.default', 'current')
-    await new GitService().push(fixture.cwd, { toRemote: 'origin', toBranch: 'pr-branch' })
+    await new GitService().push(fixture.cwd, USER, { toRemote: 'origin', toBranch: 'pr-branch' })
     expect(git(fixture.origin, 'rev-parse', 'refs/heads/pr-branch')).toBe(fixture.local)
     expect(() => git(fixture.origin, 'rev-parse', '--verify', 'refs/heads/feature')).toThrow()
     expect(git(fixture.upstream, 'rev-parse', 'refs/heads/release')).toBe(fixture.base)
@@ -152,16 +156,16 @@ describe('GitService push to a named remote and branch', () => {
     writeFileSync(join(fixture.cwd, 'more.txt'), 'more\n')
     git(fixture.cwd, 'add', 'more.txt')
     git(fixture.cwd, 'commit', '-m', 'more')
-    await new GitService().push(fixture.cwd, { toRemote: 'origin', toBranch: 'pr-branch' })
+    await new GitService().push(fixture.cwd, USER, { toRemote: 'origin', toBranch: 'pr-branch' })
     expect(git(fixture.origin, 'rev-parse', 'refs/heads/pr-branch')).toBe(git(fixture.cwd, 'rev-parse', 'HEAD'))
   })
 
   it('refuses a stale expectedBranch before any push', async () => {
     const fixture = repo()
-    await expect(new GitService().push(fixture.cwd, { expectedBranch: 'other', toRemote: 'origin', toBranch: 'pr-branch' })).rejects.toMatchObject({ code: 'git_branch_changed' })
+    await expect(new GitService().push(fixture.cwd, USER, { expectedBranch: 'other', toRemote: 'origin', toBranch: 'pr-branch' })).rejects.toMatchObject({ code: 'git_branch_changed' })
     expect(() => git(fixture.origin, 'rev-parse', '--verify', 'refs/heads/pr-branch')).toThrow()
     // The branch the caller expects is accepted.
-    await new GitService().push(fixture.cwd, { expectedBranch: 'feature', toRemote: 'origin', toBranch: 'pr-branch' })
+    await new GitService().push(fixture.cwd, USER, { expectedBranch: 'feature', toRemote: 'origin', toBranch: 'pr-branch' })
     expect(git(fixture.origin, 'rev-parse', 'refs/heads/pr-branch')).toBe(fixture.local)
   })
 
@@ -172,7 +176,7 @@ describe('GitService push to a named remote and branch', () => {
     writeFileSync(join(fixture.cwd, 'other.txt'), 'other\n')
     git(fixture.cwd, 'add', 'other.txt')
     git(fixture.cwd, 'commit', '-m', 'diverged')
-    await expect(new GitService().push(fixture.cwd, { toRemote: 'origin', toBranch: 'pr-branch' })).rejects.toMatchObject({ code: 'git_push_rejected' })
+    await expect(new GitService().push(fixture.cwd, USER, { toRemote: 'origin', toBranch: 'pr-branch' })).rejects.toMatchObject({ code: 'git_push_rejected' })
     expect(git(fixture.origin, 'rev-parse', 'refs/heads/pr-branch')).toBe(fixture.local)
   })
 
@@ -185,19 +189,19 @@ describe('GitService push to a named remote and branch', () => {
     ['a branch without a remote', { toBranch: 'pr-branch' }, 'git_branch_invalid']
   ])('refuses %s without pushing', async (_name, target, code) => {
     const fixture = repo()
-    await expect(new GitService().push(fixture.cwd, target)).rejects.toMatchObject({ code })
+    await expect(new GitService().push(fixture.cwd, USER, target)).rejects.toMatchObject({ code })
     expect(git(fixture.origin, 'for-each-ref', '--format=%(refname)')).toBe('refs/heads/main')
   })
 
   it('refuses a detached HEAD', async () => {
     const fixture = repo()
     git(fixture.cwd, 'checkout', '--detach')
-    await expect(new GitService().push(fixture.cwd, { toRemote: 'origin', toBranch: 'pr-branch' })).rejects.toMatchObject({ code: 'git_detached_head' })
+    await expect(new GitService().push(fixture.cwd, USER, { toRemote: 'origin', toBranch: 'pr-branch' })).rejects.toMatchObject({ code: 'git_detached_head' })
   })
 
   it('leaves a plain push as it was', async () => {
     const fixture = repo()
-    await new GitService().push(fixture.cwd)
+    await new GitService().push(fixture.cwd, USER)
     expect(git(fixture.upstream, 'rev-parse', 'refs/heads/release')).toBe(fixture.local)
     expect(git(fixture.origin, 'for-each-ref', '--format=%(refname)')).toBe('refs/heads/main')
   })
@@ -228,24 +232,24 @@ function synced() {
 describe('GitService fetch and pull', () => {
   it('fetch reports how far behind the branch was and is afterwards', async () => {
     const { cwd, remoteCommit } = synced(), service = new GitService()
-    await expect(service.fetch(cwd)).resolves.toEqual({ behindBefore: 0, behindAfter: 0 })
+    await expect(service.fetch(cwd, USER)).resolves.toEqual({ behindBefore: 0, behindAfter: 0 })
     remoteCommit('two.txt', 'two\n', 'two'); remoteCommit('three.txt', 'three\n', 'three')
-    await expect(service.fetch(cwd)).resolves.toEqual({ behindBefore: 0, behindAfter: 2 })
+    await expect(service.fetch(cwd, USER)).resolves.toEqual({ behindBefore: 0, behindAfter: 2 })
     expect(await service.getStatus(cwd)).toMatchObject({ behind: 2, ahead: 0 })
-    await expect(service.fetch(cwd)).resolves.toEqual({ behindBefore: 2, behindAfter: 2 })
+    await expect(service.fetch(cwd, USER)).resolves.toEqual({ behindBefore: 2, behindAfter: 2 })
   })
 
   it('fetch without a remote says so', async () => {
     const root = mkdtempSync(join(tmpdir(), 'mousse-sync-')); roots.push(root)
     git(root, 'init', '-b', 'main')
-    await expect(new GitService().fetch(root)).rejects.toMatchObject({ code: 'git_no_remote' })
+    await expect(new GitService().fetch(root, USER)).rejects.toMatchObject({ code: 'git_no_remote' })
   })
 
   it('pull fast-forwards, and reports up to date when there is nothing new', async () => {
     const { cwd, remoteCommit } = synced(), service = new GitService()
-    await expect(service.pull(cwd)).resolves.toEqual({ result: 'up-to-date' })
+    await expect(service.pull(cwd, USER)).resolves.toEqual({ result: 'up-to-date' })
     remoteCommit('two.txt', 'two\n', 'two')
-    await expect(service.pull(cwd)).resolves.toEqual({ result: 'fast-forwarded' })
+    await expect(service.pull(cwd, USER)).resolves.toEqual({ result: 'fast-forwarded' })
     expect(git(cwd, 'log', '-1', '--format=%s')).toBe('two')
   })
 
@@ -254,7 +258,7 @@ describe('GitService fetch and pull', () => {
     remoteCommit('remote.txt', 'r\n', 'remote'); localCommit('local.txt', 'l\n', 'local')
     const head = git(cwd, 'rev-parse', 'HEAD')
     // pull.rebase=false is configured on purpose: the strategy is the caller's choice, not the user's config.
-    await expect(service.pull(cwd)).rejects.toMatchObject({ code: 'git_pull_diverged' })
+    await expect(service.pull(cwd, USER)).rejects.toMatchObject({ code: 'git_pull_diverged' })
     expect(git(cwd, 'rev-parse', 'HEAD')).toBe(head)
     expect((await service.getStatus(cwd)).inProgress).toBeNull()
   })
@@ -262,14 +266,14 @@ describe('GitService fetch and pull', () => {
   it('pull with merge joins diverged branches', async () => {
     const { cwd, remoteCommit, localCommit } = synced()
     remoteCommit('remote.txt', 'r\n', 'remote'); localCommit('local.txt', 'l\n', 'local')
-    await expect(new GitService().pull(cwd, { strategy: 'merge' })).resolves.toEqual({ result: 'merged' })
+    await expect(new GitService().pull(cwd, USER, { strategy: 'merge' })).resolves.toEqual({ result: 'merged' })
     expect(git(cwd, 'rev-list', '--parents', '-n', '1', 'HEAD').split(' ')).toHaveLength(3)
   })
 
   it('pull with rebase replays local commits on top', async () => {
     const { cwd, remoteCommit, localCommit } = synced()
     remoteCommit('remote.txt', 'r\n', 'remote'); localCommit('local.txt', 'l\n', 'local')
-    await expect(new GitService().pull(cwd, { strategy: 'rebase' })).resolves.toEqual({ result: 'rebased' })
+    await expect(new GitService().pull(cwd, USER, { strategy: 'rebase' })).resolves.toEqual({ result: 'rebased' })
     expect(git(cwd, 'log', '--format=%s', '-3')).toBe('local\nremote\none')
   })
 
@@ -278,11 +282,11 @@ describe('GitService fetch and pull', () => {
       const { cwd, remoteCommit, localCommit } = synced(), service = new GitService()
       remoteCommit('shared.txt', 'remote edit\n', 'remote'); localCommit('shared.txt', 'local edit\n', 'local')
       const head = git(cwd, 'rev-parse', 'HEAD')
-      await expect(service.pull(cwd, { strategy })).resolves.toEqual({ result: 'conflicted' })
+      await expect(service.pull(cwd, USER, { strategy })).resolves.toEqual({ result: 'conflicted' })
       const status = await service.getStatus(cwd)
       expect(status.inProgress).toBe(strategy)
       expect(status.changes).toEqual([{ path: 'shared.txt', status: 'conflicted', staged: false }])
-      await service.abortInProgress(cwd, strategy)
+      await service.abortInProgress(cwd, USER, strategy)
       expect((await service.getStatus(cwd)).inProgress).toBeNull()
       expect(git(cwd, 'rev-parse', 'HEAD')).toBe(head)
       expect(git(cwd, 'status', '--porcelain')).toBe('')
@@ -292,21 +296,21 @@ describe('GitService fetch and pull', () => {
   it('pull while a merge already waits is an error, not a new conflict', async () => {
     const { cwd, remoteCommit, localCommit } = synced(), service = new GitService()
     remoteCommit('shared.txt', 'remote edit\n', 'remote'); localCommit('shared.txt', 'local edit\n', 'local')
-    await expect(service.pull(cwd, { strategy: 'merge' })).resolves.toEqual({ result: 'conflicted' })
-    await expect(service.pull(cwd, { strategy: 'merge' })).rejects.toMatchObject({ code: 'git_pull_failed' })
+    await expect(service.pull(cwd, USER, { strategy: 'merge' })).resolves.toEqual({ result: 'conflicted' })
+    await expect(service.pull(cwd, USER, { strategy: 'merge' })).rejects.toMatchObject({ code: 'git_pull_failed' })
     expect((await service.getStatus(cwd)).inProgress).toBe('merge')
   })
 
   it('pull on a branch without an upstream says so', async () => {
     const { cwd } = synced()
     git(cwd, 'checkout', '-b', 'local-only')
-    await expect(new GitService().pull(cwd)).rejects.toMatchObject({ code: 'git_no_upstream' })
+    await expect(new GitService().pull(cwd, USER)).rejects.toMatchObject({ code: 'git_no_upstream' })
   })
 
   it('pull refuses to overwrite uncommitted changes', async () => {
     const { cwd, remoteCommit } = synced()
     remoteCommit('shared.txt', 'remote edit\n', 'remote'); writeFileSync(join(cwd, 'shared.txt'), 'dirty\n')
-    await expect(new GitService().pull(cwd)).rejects.toMatchObject({ code: 'git_pull_dirty' })
+    await expect(new GitService().pull(cwd, USER)).rejects.toMatchObject({ code: 'git_pull_dirty' })
     expect(readFileSync(join(cwd, 'shared.txt'), 'utf8')).toBe('dirty\n')
   })
 })
@@ -315,9 +319,9 @@ describe('GitService push failures', () => {
   it('classifies a non-fast-forward push to a bare remote and honors expectedBranch', async () => {
     const { cwd, remoteCommit, localCommit } = synced(), service = new GitService()
     remoteCommit('remote.txt', 'r\n', 'remote'); localCommit('local.txt', 'l\n', 'local')
-    await expect(service.push(cwd)).rejects.toMatchObject({ code: 'git_push_rejected', errorInfo: { category: 'conflict' } })
+    await expect(service.push(cwd, USER)).rejects.toMatchObject({ code: 'git_push_rejected', errorInfo: { category: 'conflict' } })
     git(cwd, 'checkout', '-b', 'moved')
-    await expect(service.push(cwd, { expectedBranch: 'main' })).rejects.toMatchObject({ code: 'git_branch_changed' })
+    await expect(service.push(cwd, USER, { expectedBranch: 'main' })).rejects.toMatchObject({ code: 'git_branch_changed' })
     expect(() => git(cwd, 'rev-parse', '--verify', 'origin/moved')).toThrow()
   })
 
@@ -326,14 +330,14 @@ describe('GitService push failures', () => {
     const hooks = join(origin, 'hooks'); mkdirSync(hooks, { recursive: true })
     writeFileSync(join(hooks, 'pre-receive'), '#!/bin/sh\necho "no pushes today" >&2\nexit 1\n', { mode: 0o755 })
     localCommit('local.txt', 'l\n', 'local')
-    await expect(new GitService().push(cwd)).rejects.toMatchObject({ code: 'git_push_rejected_by_remote' })
+    await expect(new GitService().push(cwd, USER)).rejects.toMatchObject({ code: 'git_push_rejected_by_remote' })
   })
 
   it('classifies an unreachable remote', async () => {
     const { cwd, localCommit } = synced()
     git(cwd, 'remote', 'set-url', 'origin', 'https://127.0.0.1:9/x.git'); git(cwd, 'config', 'credential.helper', '')
     localCommit('local.txt', 'l\n', 'local')
-    await expect(new GitService().push(cwd)).rejects.toMatchObject({ code: 'git_remote_unreachable' })
+    await expect(new GitService().push(cwd, USER)).rejects.toMatchObject({ code: 'git_remote_unreachable' })
   })
 
   it('classifies a remote that asks for credentials nobody can type, without opening a prompt', async () => {
@@ -347,7 +351,7 @@ describe('GitService push failures', () => {
       // The fixture must never open a credential window on a developer machine.
       for (const [key, value] of Object.entries(nonInteractiveGitEnv())) vi.stubEnv(key, value)
       const started = Date.now()
-      await expect(new GitService().push(cwd)).rejects.toMatchObject({ code: 'git_auth_failed' })
+      await expect(new GitService().push(cwd, USER)).rejects.toMatchObject({ code: 'git_auth_failed' })
       expect(Date.now() - started).toBeLessThan(30_000)
     } finally {
       vi.unstubAllEnvs()

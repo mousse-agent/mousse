@@ -12,6 +12,10 @@ import { PullRequestThreadService } from '../src/mms/git/PullRequestThreadServic
 import { ThreadWorkspaceManager } from '../src/mms/workspace/ThreadWorkspaceManager'
 import type { PullRequestDetail } from '../src/shared/pullRequests'
 import { git, gitFoundationFixture } from './fixtures/gitFoundation'
+import { userAction } from '../src/mms/git/gitPolicy'
+
+/** The user's request a test passes to a GitService change. */
+const USER = userAction('button', 'Test action')
 
 const REMOTES = 'origin\thttps://github.com/bob/app.git (fetch)\norigin\thttps://github.com/bob/app.git (push)\nupstream\thttps://github.com/acme/app.git (fetch)\nupstream\thttps://github.com/acme/app.git (push)\n'
 const HOOKS = ['pre-commit', 'commit-msg', 'post-commit', 'post-checkout', 'pre-push', 'reference-transaction', 'post-merge']
@@ -192,9 +196,9 @@ describe('a pull request that tries to run code', () => {
 
     // The side card's Commit (which lets hooks run) and Push (to the pull request's branch).
     writeFileSync(join(worktreePath, 'edit.txt'), 'an edit\n')
-    await mms.gitService.commit(worktreePath, 'A commit from the side card', { all: true })
+    await mms.gitService.commit(worktreePath, USER, 'A commit from the side card', { all: true })
     expect(marked()).toEqual([])
-    await mms.gitService.push(worktreePath, { toRemote: 'upstream', toBranch: 'fix-thing' })
+    await mms.gitService.push(worktreePath, USER, { toRemote: 'upstream', toBranch: 'fix-thing' })
     expect(git(join(f.root, 'base.git'), 'rev-parse', 'refs/heads/fix-thing')).toBe(git(worktreePath, 'rev-parse', 'HEAD'))
     // A plain status or diff runs no filter either.
     git(worktreePath, 'status', '--porcelain')

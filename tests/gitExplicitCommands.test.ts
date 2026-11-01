@@ -5,10 +5,14 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { gitDirectoryEnv, isGitDirectory, withGitConfigEnv } from '../src/mms/git/gitEnv'
 import { GitService } from '../src/mms/git/GitService'
+import { userAction } from '../src/mms/git/gitPolicy'
 import { readOnlyGit, runReadOnlyGit } from '../src/mms/git/readOnlyGit'
 import { conflictPair, readWorkingTreeStatus, readWorkingTreeStatusSync } from '../src/mms/git/workingTreeStatus'
 import { git as actionGit, inspectPendingChanges } from '../src/mms/actions/git'
 import { lifecycleGit, lifecycleRead, readDirectLifecycleRef } from '../src/mms/lifecycle/WorktreeRetirementService'
+
+/** The user's request a test passes to a GitService change. */
+const USER = userAction('button', 'Test action')
 
 const roots: string[] = []
 function git(cwd: string, ...args: string[]): string {
@@ -64,7 +68,7 @@ describe('Push sends only the branch it names', () => {
     git(cwd, 'checkout', '-q', 'main')
     write(cwd, 'main.txt'); git(cwd, 'add', '-A'); git(cwd, 'commit', '-qm', 'main')
     git(cwd, 'tag', '-a', 'v1', '-m', 'v1')
-    await new GitService().push(cwd)
+    await new GitService().push(cwd, USER)
     expect(git(origin, 'rev-parse', 'refs/heads/main')).toBe(git(cwd, 'rev-parse', 'main'))
     expect(git(origin, 'rev-parse', 'refs/heads/other')).toBe(base)
     expect(git(origin, 'tag', '--list')).toBe('')
@@ -74,7 +78,7 @@ describe('Push sends only the branch it names', () => {
     const { origin, cwd, base } = cloned()
     git(cwd, 'checkout', '-q', '-b', 'feature', '--track', 'origin/main')
     write(cwd, 'feature.txt'); git(cwd, 'add', '-A'); git(cwd, 'commit', '-qm', 'feature')
-    await expect(new GitService().push(cwd)).rejects.toMatchObject({ code: 'git_upstream_name_differs' })
+    await expect(new GitService().push(cwd, USER)).rejects.toMatchObject({ code: 'git_upstream_name_differs' })
     expect(git(origin, 'rev-parse', 'refs/heads/main')).toBe(base)
     expect(git(origin, 'for-each-ref', '--format=%(refname)', 'refs/heads/feature')).toBe('')
   })
@@ -82,7 +86,7 @@ describe('Push sends only the branch it names', () => {
   it('refuses a branch that tracks a local branch instead of publishing it over that choice', async () => {
     const { cwd } = cloned()
     git(cwd, 'checkout', '-q', '-b', 'feature', '--track', 'main')
-    await expect(new GitService().push(cwd)).rejects.toMatchObject({ code: 'git_upstream_local' })
+    await expect(new GitService().push(cwd, USER)).rejects.toMatchObject({ code: 'git_upstream_local' })
     expect(git(cwd, 'rev-parse', '--abbrev-ref', '@{upstream}')).toBe('main')
   })
 
@@ -91,7 +95,7 @@ describe('Push sends only the branch it names', () => {
     git(cwd, 'config', 'push.default', 'nothing')
     git(cwd, 'checkout', '-q', '-b', 'fresh')
     write(cwd, 'fresh.txt'); git(cwd, 'add', '-A'); git(cwd, 'commit', '-qm', 'fresh')
-    await new GitService().push(cwd)
+    await new GitService().push(cwd, USER)
     expect(git(origin, 'rev-parse', 'refs/heads/fresh')).toBe(git(cwd, 'rev-parse', 'HEAD'))
     expect(git(cwd, 'rev-parse', '--abbrev-ref', '@{upstream}')).toBe('origin/fresh')
   })
@@ -106,8 +110,8 @@ describe('Fetch and pull never prune', () => {
     git(cwd, 'config', 'fetch.pruneTags', 'true')
     git(cwd, 'config', 'remote.origin.prune', 'true')
     const service = new GitService()
-    await service.fetch(cwd)
-    await service.pull(cwd)
+    await service.fetch(cwd, USER)
+    await service.pull(cwd, USER)
     expect(git(cwd, 'for-each-ref', '--format=%(refname)', 'refs/remotes/origin/other')).toBe('refs/remotes/origin/other')
     expect(git(cwd, 'tag', '--list', 'local-only')).toBe('local-only')
   })

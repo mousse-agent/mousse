@@ -1,3 +1,4 @@
+import type { UserAction } from './gitPolicy'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -914,7 +915,7 @@ export class GitHubCodeHost implements CodeHost {
     return new PullRequestReadError(message, kind === 'none' ? 'error' : kind)
   }
 
-  async createPullRequest(cwd: string, input: CreatePullRequestInput): Promise<GitPullRequestInfo> {
+  async createPullRequest(cwd: string, input: CreatePullRequestInput, userRequested: UserAction): Promise<GitPullRequestInfo> {
     const title = input.title.trim()
     if (title.length < 1 || title.length > 256) throw new Error('The title must be 1–256 characters.')
     const base = input.base.trim()
@@ -934,7 +935,7 @@ export class GitHubCodeHost implements CodeHost {
       const args = ['pr', 'create', `--title=${title}`, `--body-file=${bodyFile}`, `--base=${base}`, `--head=${head}`]
       if (input.draft) args.push('--draft')
       try {
-        ({ stdout, stderr } = await this.runExecutable('gh', args, { cwd }))
+        ({ stdout, stderr } = await this.runExecutable('gh', args, { cwd, userRequested }))
       } catch (error) {
         if (isMissingExecutable(error)) throw new Error('GitHub CLI (gh) was not found. Install it and try again.')
         const message = processMessage(error)
@@ -986,7 +987,7 @@ export class GitHubCodeHost implements CodeHost {
     }
   }
 
-  async mergePullRequest(cwd: string, number: number, options: { method: PullRequestMergeMethod; headSha?: string }): Promise<GitPullRequestInfo> {
+  async mergePullRequest(cwd: string, number: number, options: { method: PullRequestMergeMethod; headSha?: string }, userRequested: UserAction): Promise<GitPullRequestInfo> {
     const flag = { merge: '--merge', squash: '--squash', rebase: '--rebase' }[options.method]
     // The branch is kept: a thread's worktree may still be on it.
     const args = ['pr', 'merge', String(this.requireNumber(number)), flag]
@@ -994,11 +995,11 @@ export class GitHubCodeHost implements CodeHost {
       if (!/^[0-9a-f]{7,64}$/i.test(options.headSha)) throw new Error('Unsupported commit.')
       args.push(`--match-head-commit=${options.headSha}`)
     }
-    return this.changePullRequest(cwd, number, args)
+    return this.changePullRequest(cwd, number, args, userRequested)
   }
 
-  async closePullRequest(cwd: string, number: number): Promise<GitPullRequestInfo> {
-    return this.changePullRequest(cwd, number, ['pr', 'close', String(this.requireNumber(number))])
+  async closePullRequest(cwd: string, number: number, userRequested: UserAction): Promise<GitPullRequestInfo> {
+    return this.changePullRequest(cwd, number, ['pr', 'close', String(this.requireNumber(number))], userRequested)
   }
 
   private requireNumber(number: number): number {
@@ -1007,10 +1008,10 @@ export class GitHubCodeHost implements CodeHost {
   }
 
   /** Runs a merge or close and reads the pull request back; every read of the repository is forgotten, whatever the outcome. */
-  private async changePullRequest(cwd: string, number: number, args: string[]): Promise<GitPullRequestInfo> {
+  private async changePullRequest(cwd: string, number: number, args: string[], userRequested: UserAction): Promise<GitPullRequestInfo> {
     const identity = await this.repositoryIdentity(cwd).catch(() => null)
     try {
-      await this.runExecutable('gh', args, { cwd })
+      await this.runExecutable('gh', args, { cwd, userRequested })
     } catch (error) {
       if (isMissingExecutable(error)) throw new Error('GitHub CLI (gh) was not found. Install it and try again.')
       throw new Error(ghFailureText(error))

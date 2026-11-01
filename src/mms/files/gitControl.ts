@@ -3,7 +3,8 @@ import { existsSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { realPathOrAncestor } from './realPath'
-import { withGitConfigEnv } from '../git/gitEnv'
+import { mousseGitEnv } from '../git/gitEnv'
+import { assertGitAllowed } from '../git/gitPolicy'
 
 /**
  * What a repository reads that can run programs and that lies in the working tree, as real paths:
@@ -28,15 +29,19 @@ interface GitRun {
 /** Runs Git without blocking the daemon. A non-zero exit is a result (`status`); a failure to run is thrown. */
 function runGit(root: string, args: string[]): Promise<GitRun> {
   return new Promise((resolveRun, reject) => {
+    // Run in the folder rather than with `-C`, which the central check refuses; a missing folder is Git's "not a repository".
+    if (!existsSync(root)) return resolveRun({ status: 128, stdout: '', missing: false })
+    assertGitAllowed({ cwd: root, args })
     execFile(
       'git',
-      ['-C', root, ...args],
+      args,
       {
+        cwd: root,
         encoding: 'utf8',
         timeout: GIT_TIMEOUT_MS,
         maxBuffer: 4 * 1024 * 1024,
         windowsHide: true,
-        env: withGitConfigEnv({ ...process.env, GIT_TERMINAL_PROMPT: '0' })
+        env: mousseGitEnv({ ...process.env, GIT_TERMINAL_PROMPT: '0' })
       },
       (error, stdout) => {
         if (!error) return resolveRun({ status: 0, stdout, missing: false })

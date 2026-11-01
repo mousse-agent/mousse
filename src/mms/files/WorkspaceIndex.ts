@@ -6,6 +6,7 @@ import { promisify } from 'node:util'
 import { lowerPath } from '../../shared/fuzzyPath'
 import { SKIP_DIR_NAMES } from './pathGuard'
 import { repoProgramEnv, withoutRepoPrograms } from '../git/repoPrograms'
+import { assertGitAllowed } from '../git/gitPolicy'
 
 export type WorkspaceIndexFallbackReason = 'not-a-repo' | 'git-missing' | 'git-too-old'
 
@@ -80,6 +81,7 @@ export async function detectGitRoute(root: string): Promise<GitRoute> {
     return { ok: false, reason: 'git-too-old' }
   }
   try {
+    assertGitAllowed({ cwd: root, args: ['rev-parse', '--show-toplevel'] })
     await execFileAsync('git', ['rev-parse', '--show-toplevel'], { cwd: root, env: repoProgramEnv(), windowsHide: true })
     return { ok: true, version }
   } catch {

@@ -4,6 +4,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'nod
 import { englishMessagesEnv } from './gitProcess'
 import { GIT_NULL_DEVICE } from './gitNullDevice'
 import { nonInteractiveGitEnv, withGitConfigEnv } from './gitEnv'
+import { assertGitAllowed } from './gitPolicy'
 import { touchesGitMetadata } from '../agents/gitMetadata'
 
 /**
@@ -95,6 +96,12 @@ function gitEnv(repo?: Repo, withSystem = false): NodeJS.ProcessEnv {
 
 function git(cwd: string, args: readonly string[], repo?: Repo, withSystem = false): Promise<GitResult> {
   return new Promise((resolvePromise, reject) => {
+    try {
+      assertGitAllowed({ cwd, args })
+    } catch (error) {
+      reject(error)
+      return
+    }
     execFile('git', [...SAFE_CONFIG, ...args], {
       cwd, encoding: 'utf8', windowsHide: true, timeout: 30_000, maxBuffer: 32 * 1024 * 1024, env: gitEnv(repo, withSystem)
     }, (error, stdout, stderr) => {

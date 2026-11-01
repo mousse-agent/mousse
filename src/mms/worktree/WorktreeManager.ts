@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, readdirSync, statSync } from 'fs'
 import { GIT_NULL_DEVICE } from '../git/gitNullDevice'
 import { basename, join, relative, resolve, sep } from 'path'
 import simpleGit, { SimpleGit } from 'simple-git'
-import { guardedSimpleGit, HOOK_EVENTS, repoProgramEnv, UNSAFE_ALLOWED } from '../git/repoPrograms'
+import { guardedSimpleGit, HOOK_EVENTS, policedSimpleGit, repoProgramEnv, UNSAFE_ALLOWED } from '../git/repoPrograms'
 import { RepositoryContext } from './RepositoryContext'
 import { WorktreeIdentity } from './WorktreeIdentity'
 import { resolveRepositoryIdentity } from '../git/RepositoryIdentity'
@@ -322,7 +322,7 @@ export class WorktreeManager {
  */
 export async function safeWorktreeGit(repositoryRoot: string): Promise<{ git: SimpleGit; safety: string[] }> {
   // The unsafe library flags only permit fixed disabling overrides and the process's own environment.
-  const git = simpleGit({ baseDir: repositoryRoot, unsafe: UNSAFE_ALLOWED }).env(repoProgramEnv())
+  const git = policedSimpleGit(repositoryRoot, simpleGit({ baseDir: repositoryRoot, unsafe: UNSAFE_ALLOWED }).env(repoProgramEnv()))
   const safety = ['-c', `core.hooksPath=${GIT_NULL_DEVICE}`, '-c', 'core.fsmonitor=false', ...HOOK_EVENTS.flatMap((event) => ['-c', `hook.${event}.enabled=false`])]
   // Git LFS and other inherited drivers must never execute on dispatched content,
   // including Git's dirty-file check before worktree removal.

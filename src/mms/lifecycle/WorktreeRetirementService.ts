@@ -20,7 +20,7 @@ import { repoProgramEnv, withoutRepoPrograms } from '../git/repoPrograms'
 
 const hash = (value: string | Buffer): string => createHash('sha256').update(value).digest('hex')
 export function lifecycleGit(cwd: string, args: string[], input?: string, maxBuffer = 32 * 1024 * 1024, env?: NodeJS.ProcessEnv): string {
-  return execFileSync('git', withoutRepoPrograms(cwd, args), { cwd, input, env: repoProgramEnv({ ...process.env, ...gitDirectoryEnv(cwd), ...env }), encoding: 'utf8', windowsHide: true, timeout: 30_000, maxBuffer, stdio: ['pipe', 'pipe', 'pipe'] }).trimEnd()
+  return execFileSync('git', withoutRepoPrograms(cwd, args, { stdin: input, env }), { cwd, input, env: repoProgramEnv({ ...process.env, ...gitDirectoryEnv(cwd), ...env }), encoding: 'utf8', windowsHide: true, timeout: 30_000, maxBuffer, stdio: ['pipe', 'pipe', 'pipe'] }).trimEnd()
 }
 /** A lifecycle read (a preview, the checks before a delete): it never refreshes the index and never fetches a missing object. */
 export function lifecycleRead(cwd: string, args: string[], input?: string, maxBuffer?: number): string {

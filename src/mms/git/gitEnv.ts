@@ -1,6 +1,7 @@
 import { existsSync, statSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { GIT_NULL_DEVICE } from './gitNullDevice'
+import { stripInheritedGitEnv } from './gitPolicy'
 
 /**
  * Environment for Git that runs without the user asking for it (the bridge's bundle
@@ -62,6 +63,15 @@ export function withGitConfigEnv(env: NodeJS.ProcessEnv, entries: ReadonlyArray<
   }
   next.GIT_CONFIG_COUNT = String(count)
   return next
+}
+
+/**
+ * The environment for a Git process Mousse starts: `GIT_*` variables inherited from Mousse's own
+ * environment that could send it elsewhere are dropped ({@link stripInheritedGitEnv}), then
+ * {@link MOUSSE_GIT_CONFIG} is added.
+ */
+export function mousseGitEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  return withGitConfigEnv(stripInheritedGitEnv(env))
 }
 
 /**
