@@ -191,6 +191,20 @@ describe('Status reads use plumbing and never write the index', () => {
     ]))
   })
 
+  it('GitService diffs and diff stats leave the index alone, where plain git diff rewrites it', async () => {
+    const cwd = busy()
+    const index = join(cwd, '.git', 'index')
+    const before = readFileSync(index)
+    const service = new GitService()
+    expect(await service.getDiff(cwd, 'modified.txt', false)).toContain('+changed')
+    expect(await service.getDiff(cwd, 'touched.txt', false)).toBe('')
+    expect((await service.getDiffStats(cwd)).filesChanged).toBeGreaterThan(0)
+    expect(readFileSync(index).equals(before)).toBe(true)
+    // The control: Git's own default refreshes the touched file into the index.
+    execFileSync('git', ['diff', '--quiet', '--', 'touched.txt'], { cwd, stdio: 'ignore' })
+    expect(readFileSync(index).equals(before)).toBe(false)
+  })
+
   it('reads an unborn branch against the empty tree', async () => {
     const cwd = join(scratch('mousse-plumbing-unborn-'), 'work')
     git(tmpdir(), 'init', '-q', cwd)

@@ -96,6 +96,14 @@ const FIXED = [
   'diff.submodule=short'
 ]
 
+/**
+ * For Mousse's own commands: a read never writes the index. `git status` refreshes and writes it back
+ * unless optional locks are off (`--no-optional-locks`, added in {@link withoutRepoPrograms}), and
+ * `git diff` does whenever it finds a file whose stat data alone changed, unless this is off. A command
+ * that writes the index on purpose still does.
+ */
+export const NO_INDEX_REFRESH = ['diff.autoRefreshIndex=false'] as const
+
 const HOOKS_OFF = [`core.hooksPath=${NO_HOOKS_PATH}`, ...HOOK_EVENTS.map((event) => `hook.${event}.enabled=false`)]
 
 /** Config written by the user (or their environment) rather than by the repository. */
@@ -326,7 +334,7 @@ export function repoProgramSettings(cwd: string, options: RepoProgramOptions & {
   const programs = programsFor(cwd)
   const hooks = [...HOOKS_OFF, ...programs.hookNames.filter((name) => !(HOOK_EVENTS as readonly string[]).includes(name)).map((name) => `hook.${name}.enabled=false`)]
   const required = programs.emptiedFilters.map((name) => `filter.${name}.required=${options.write ? 'true' : 'false'}`)
-  return [...FIXED, ...hooks, ...programs.overrides, ...required]
+  return [...FIXED, ...NO_INDEX_REFRESH, ...hooks, ...programs.overrides, ...required]
 }
 
 /** `-c` arguments that go before the Git subcommand `args`. */
@@ -390,7 +398,8 @@ export function trustExistingProjectsOnce(profileHome: string, projectPaths: rea
  */
 export function withoutRepoPrograms(cwd: string, args: readonly string[], options?: RepoProgramOptions): string[] {
   if (args[0] === 'config') return [...args]
-  return [...noRepoProgramArgs(cwd, args, options), ...args]
+  // Optional locks are off for Mousse's own commands, so `status` does not refresh and write the index.
+  return [...(options?.userAction ? [] : ['--no-optional-locks']), ...noRepoProgramArgs(cwd, args, options), ...args]
 }
 
 /** simple-git's checks Mousse turns off: the values it sets are its own, never a caller's (see {@link guardedSimpleGit}). */
