@@ -119,7 +119,8 @@ import { devGuiBridge } from '../devgui/DevGuiBridge'
 import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync } from 'node:fs'
 import { FILE_ASSET_PIECE_BYTES, SAVE_TOO_LARGE_MESSAGE, saveExceedsRequest } from '../../shared/fileAssets'
 import { homedir } from 'node:os'
-import { join, relative, resolve } from 'node:path'
+import { isAbsolute, join, relative, resolve } from 'node:path'
+import { folderAccess } from '../files/folderAccess'
 import type { DomainConnectionContext } from './domainRegistry'
 import { DomainRpcError } from './domainRegistry'
 import { WORKFLOW_RUN_CAPABILITY } from '../../shared/workflowRunPlatform'
@@ -1117,6 +1118,35 @@ function scheduledJobOptionsDeps(ctx: HandlerContext): ScheduledJobOptionsDeps {
   })
 }
 
+/** Methods that only signal work already in memory, never reading a folder; they answer at once. */
+const FOLDER_FREE_METHODS = new Set(['threads.focus', 'git.cancelOperation', 'pty.isAlive', 'pty.lookup', 'pty.write', 'pty.resize', 'pty.kill'])
+
+/** Parameters that name a folder by its absolute path. A relative `path` is a file inside the project and is skipped. */
+const FOLDER_PARAMS = ['path', 'cwd', 'root', 'projectPath', 'workspacePath', 'folder', 'directory'] as const
+
+/** The project folders a request names: its thread's project, its project, or a folder path. */
+function requestFolders(ctx: HandlerContext, params: unknown): string[] {
+  if (!isObject(params)) return []
+  const folders: string[] = []
+  try {
+    if (typeof params.threadId === 'string') {
+      const path = resolveThreadProjectPath(ctx.mms.projects, ctx.mms.threads, params.threadId)
+      if (path) folders.push(path)
+    }
+    if (typeof params.projectId === 'string') {
+      const path = ctx.mms.projects.getProject(params.projectId)?.path
+      if (path) folders.push(path)
+    }
+  } catch {
+    // An unknown thread or project is the handler's to report.
+  }
+  for (const key of FOLDER_PARAMS) {
+    const value = params[key]
+    if (typeof value === 'string' && isAbsolute(value)) folders.push(value)
+  }
+  return folders
+}
+
 async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: unknown): Promise<unknown> {
   // A call that names a thread (or project) of another of the user's computers goes to that computer.
   // This runs inside the profile's request barrier, so such calls drain with the profile.
@@ -1132,6 +1162,8 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       ctx.mms.threads?.lifecycleStore?.get(params.threadId)) {
     ctx.mms.threads.assertThreadAdmission(params.threadId)
   }
+  // Before any synchronous work in the folder: a pending macOS permission prompt then holds only this request.
+  if (!FOLDER_FREE_METHODS.has(method)) await folderAccess.ready(requestFolders(ctx, params))
   if (ctx.mms.domains?.has(method)) return ctx.mms.domains.dispatch(ctx, method, params)
   switch (method) {
     case 'threads.focus': {

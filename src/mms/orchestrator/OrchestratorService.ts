@@ -213,6 +213,7 @@ import type { LineEditStatsStore } from '../stats/LineEditStatsStore'
 import type { ProjectManager } from '../data/ProjectManager'
 import type { ThreadDataStore } from '../data/ThreadDataStore'
 import { resolveThreadProjectPath } from '../data/resolveActiveProjectPath'
+import { waitForFolderAccess } from '../files/folderAccess'
 import { resolveProjectWorkingDirectory } from '../data/projectWorkingDirectory'
 import { lineageForChild } from '../data/subagentLineage'
 import { WorkspaceResolver, unprovisionedContext } from '../workspace/WorkspaceResolver'
@@ -8925,6 +8926,14 @@ export class OrchestratorService extends EventEmitter {
       }
       throw new Error('An orchestrator turn is already running. Use /stop or the stop button first.')
     }
+    // Before recovery and provisioning read the folder synchronously: a pending macOS permission prompt
+    // then holds only this turn, not the daemon. Turns from schedules, channels and restarts start here too.
+    await waitForFolderAccess(
+      session.sharedWorkspace?.path,
+      session.primaryCheckout?.path,
+      session.threadId !== '__unbound__' && this.projectManager && this.threadStore
+        ? resolveThreadProjectPath(this.projectManager, this.threadStore, session.threadId) : undefined
+    )
 
     // Load recovery identity before acquiring the writer. Reconcile interrupted
     // operations below under that lease, before workspace verification/dispatch.
