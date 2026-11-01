@@ -463,6 +463,16 @@ export class ThreadWorkspaceManager {
     }
   }
 
+  /**
+   * The branch HEAD is on now: the agent may have switched from the thread's own. None when HEAD is detached. The
+   * recorded branch stands in only while the worktree cannot be read (retired, or not there yet).
+   */
+  private currentBranch(metadata: ThreadWorkspaceMetadata): string | undefined {
+    if (!existsSync(metadata.worktreePath)) return metadata.branch
+    const current = tryGit(metadata.worktreePath, ['branch', '--show-current'])
+    return current.ok ? current.stdout || undefined : metadata.branch
+  }
+
   executionContext(projectPath: string, metadata = this.load()): WorkspaceExecutionContext {
     if (!metadata) {
       return {
@@ -482,7 +492,7 @@ export class ThreadWorkspaceManager {
       workspacePath: metadata.worktreePath,
       projectPath: relativeProject,
       primaryPath: projectPath,
-      branch: metadata.branch,
+      branch: this.currentBranch(metadata),
       workspaceId: metadata.workspaceId ?? `${metadata.repositoryId}:${metadata.threadId}`,
       generation: metadata.generation ?? 0,
       baseSha: metadata.baseSha,

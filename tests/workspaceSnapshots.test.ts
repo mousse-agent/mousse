@@ -135,6 +135,17 @@ describe('an agent that does its own Git work', () => {
     expect(existsSync(join(cwd, 'feature.txt'))).toBe(true)
   })
 
+  it('the thread reports the branch HEAD is on now, not the one it was created with', () => {
+    const manager = new ThreadWorkspaceManager(f.thread)
+    expect(manager.executionContext(f.repo).branch).toBe('mousse/thread/task/main')
+    git(cwd, 'switch', '-q', '-c', 'issue-2-task')
+    expect(manager.executionContext(f.repo).branch).toBe('issue-2-task')
+    git(cwd, 'switch', '-q', '--detach')
+    expect(manager.executionContext(f.repo).branch).toBeUndefined()
+    // The record keeps the branch the worktree was made on.
+    expect(manager.load()!.branch).toBe('mousse/thread/task/main')
+  })
+
   it('can create a repository with no commit inside the worktree: the turn is recorded without it and nothing locks', async () => {
     const tool = join(cwd, 'tool')
     const { action } = await turn('turn', () => {
