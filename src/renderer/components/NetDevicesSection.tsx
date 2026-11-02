@@ -262,7 +262,9 @@ export function NetDevicesSection() {
   }
 
   const devicesDescription = !status ? undefined
-    : !self ? 'Join devices you already use, or turn on networking to start a new set.'
+    : !self ? (mousseIdAvailable(useMousseIdStore.getState())
+      ? 'Sign in to Mousse ID under Account to join the computers signed in to it, or turn on networking to start a new set.'
+      : 'Join devices you already use, or turn on networking to start a new set.')
       : !unlocked ? 'Unlock this device to see your other devices.'
         : !authority ? 'Add devices from the device that owns this identity.'
           : !inviteReady ? 'Protect network keys to add devices.'
