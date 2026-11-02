@@ -4,9 +4,8 @@ import { copyFileSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSy
 import { homedir } from 'node:os'
 import { join, parse, resolve, sep } from 'node:path'
 import type { GitRecord } from '../../shared/threadActions'
-import { activeHiddenStore, outsideHiddenStore } from '../git/hiddenStore'
-import { repoProgramEnv } from '../git/repoPrograms'
-import { git, guarded, mergeTrees, MOUSSE_COMMIT_ENV, NOT_MOUSSE, operationInProgress, tryGit, treeOf } from './git'
+import { activeHiddenStore, builtInPathspecs, outsideHiddenStore } from '../git/hiddenStore'
+import { git, gitEnv, guarded, mergeTrees, MOUSSE_COMMIT_ENV, NOT_MOUSSE, operationInProgress, tryGit, treeOf } from './git'
 
 /**
  * Workspace snapshots (docs/workspace-snapshots.md): a commit whose tree is every file of a worktree (tracked and
@@ -125,8 +124,8 @@ function sizeText(bytes: number): string {
 
 /** The files a snapshot would hold, as `git add -A` finds them: tracked by the store's index, or new and not ignored. */
 function candidateFiles(top: string): string[] {
-  const result = spawnSync('git', guarded(top, ['ls-files', '-z', '--cached', '--others', '--exclude-standard']), {
-    cwd: top, encoding: 'utf8', env: repoProgramEnv(), maxBuffer: 32 * 1024 * 1024, timeout: 60_000
+  const result = spawnSync('git', guarded(top, ['ls-files', '-z', '--cached', '--others', '--exclude-standard', '--', '.', ...builtInPathspecs().exclude]), {
+    cwd: top, encoding: 'utf8', env: gitEnv(top), maxBuffer: 32 * 1024 * 1024, timeout: 60_000
   })
   const code = (result.error as NodeJS.ErrnoException | undefined)?.code
   // A listing that does not fit, or does not end in a minute, is a folder past the limit.
@@ -140,12 +139,27 @@ const UNNAMED_EXCLUSIONS = new Set(['.git', '.mousse', '.DS_Store', '__pycache__
 const LEFT_OUT_BY_MOUSSE = 'dependency or build folder, never kept in snapshots'
 
 /**
- * What a hidden store leaves out of a snapshot of its folder: files over the size limit (`leftOut`, kept out of the
- * store's index) and the folders its built-in list excludes that are there (`excluded`, named only). A home or system
- * folder, or one past the file count or total size, cannot be snapshotted at all and is refused. The walk is the one
- * `git add -A` makes next, so Git's own ignore rules decide what counts.
+ * The folders of the built-in list that are in the folder, read after they were taken out of the store's index: what
+ * the snapshot does not hold, whatever the folder's `.gitignore` says. Only the store's exclude file is read, so a
+ * `!pattern` of the folder's does not hide one.
  */
-function hiddenStoreCoverage(top: string, gitDir: string): { leftOut: CoverageGap[]; excluded: CoverageGap[] } {
+function excludedFolders(top: string, gitDir: string): CoverageGap[] {
+  const exclude = join(gitDir, 'info', 'exclude')
+  const listed = existsSync(exclude)
+    ? tryGit(top, ['ls-files', '-z', '--others', '--ignored', '--directory', `--exclude-from=${exclude}`])
+    : { ok: true, stdout: '' }
+  return (listed.ok ? listed.stdout.split('\0').filter(Boolean) : [])
+    .map((path) => path.replace(/\/$/, ''))
+    .filter((path) => !UNNAMED_EXCLUSIONS.has(path.split('/').at(-1)!))
+    .map((path) => ({ path, reason: LEFT_OUT_BY_MOUSSE }))
+}
+
+/**
+ * The files over the size limit a hidden store leaves out of a snapshot of its folder (kept out of the store's index).
+ * A home or system folder, or one past the file count or total size, cannot be snapshotted at all and is refused. The
+ * walk is the one `git add -A` makes next, so Git's own ignore rules and the built-in list decide what counts.
+ */
+function hiddenStoreCoverage(top: string): { leftOut: CoverageGap[] } {
   if (isUnsafeSnapshotRoot(top)) throw new SnapshotRefusedError(UNSAFE_ROOT)
   const files = candidateFiles(top)
   if (files.length > limits.files) throw new SnapshotRefusedError(`Undo is off for this folder because it is too large (more than ${limits.files.toLocaleString('en-US')} files).`)
@@ -166,15 +180,7 @@ function hiddenStoreCoverage(top: string, gitDir: string): { leftOut: CoverageGa
     total += size
     if (total > limits.bytes) throw new SnapshotRefusedError(`Undo is off for this folder because it is too large (more than ${sizeText(limits.bytes)}).`)
   }
-  const exclude = join(gitDir, 'info', 'exclude')
-  const listed = existsSync(exclude)
-    ? tryGit(top, ['ls-files', '-z', '--others', '--ignored', '--directory', `--exclude-from=${exclude}`])
-    : { ok: true, stdout: '' }
-  const excluded = (listed.ok ? listed.stdout.split('\0').filter(Boolean) : [])
-    .map((path) => path.replace(/\/$/, ''))
-    .filter((path) => !UNNAMED_EXCLUSIONS.has(path.split('/').at(-1)!))
-    .map((path) => ({ path, reason: LEFT_OUT_BY_MOUSSE }))
-  return { leftOut, excluded }
+  return { leftOut }
 }
 
 function privateFiles(top: string): { directory: string; index: string; last: string } {
@@ -250,7 +256,7 @@ function indexTree(top: string, index: string, head: string | undefined): { tree
   // A hidden store first leaves out what it does not keep (files over the size limit) and refuses a folder it cannot
   // snapshot at all; what it leaves out is named with the rest.
   const store = activeHiddenStore(top)
-  const hidden = store ? hiddenStoreCoverage(top, store.gitDir) : undefined
+  const hidden = store ? hiddenStoreCoverage(top) : undefined
   const env = { GIT_INDEX_FILE: index }
   // The store's exclude list already leaves `.mousse/` out, and Git refuses an exclusion that names an ignored path.
   const addAll = (left: CoverageGap[]) => tryGit(top, ['add', '-A', '--', '.', ...(hidden ? [] : [NOT_MOUSSE]), ...left.map((gap) => `:(exclude,literal)${gap.path}`)], env)
@@ -279,11 +285,11 @@ function indexTree(top: string, index: string, head: string | undefined): { tree
       for (const path of found) gaps.push({ path, reason: UNREADABLE })
     }
     if (hidden) {
-      // A `.gitignore` of the folder's that takes `.mousse/` back in is answered by dropping it from the index. A hidden
-      // store has no HEAD and no index of anyone's to follow.
-      if (existsSync(join(top, '.mousse'))) git(top, ['rm', '-r', '--cached', '--ignore-unmatch', '-q', '--', '.mousse'], env)
+      // The built-in list holds whatever the folder's `.gitignore` takes back in (`!node_modules/`): what is under it
+      // leaves the index here. A hidden store has no HEAD and no index of anyone's to follow.
+      git(top, ['rm', '-r', '-q', '--cached', '--ignore-unmatch', '--', ...builtInPathspecs().match], env)
       gaps.push(...nestedWithChanges(top, env, gaps))
-      return { tree: git(top, ['write-tree'], env), gaps: [...gaps, ...hidden.excluded] }
+      return { tree: git(top, ['write-tree'], env), gaps: [...gaps, ...excludedFolders(top, store!.gitDir)] }
     }
     followTrackedFiles(top, env, head, gaps.map((gap) => gap.path))
     gaps.push(...nestedWithChanges(top, env, gaps))

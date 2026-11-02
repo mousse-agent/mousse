@@ -4,7 +4,7 @@ import { join, resolve } from 'node:path'
 import type { ThreadWorkspaceMetadata } from '../../shared/workspace'
 import { atomicWriteJsonSync } from '../data/AtomicFs'
 import { getMousseHomeDir } from '../data/paths'
-import { inHiddenStore, insideFolder, registerHiddenStore, type HiddenStore } from '../git/hiddenStore'
+import { BUILT_IN_EXCLUDES, inHiddenStore, insideFolder, isolatedEnv, registerHiddenStore, type HiddenStore } from '../git/hiddenStore'
 import { repoProgramEnv } from '../git/repoPrograms'
 import { isUnsafeSnapshotRoot, SnapshotRefusedError } from '../actions/snapshots'
 
@@ -18,14 +18,8 @@ import { isUnsafeSnapshotRoot, SnapshotRefusedError } from '../actions/snapshots
  */
 export const SNAPSHOT_WORKSPACE_FILE = 'snapshot-workspace.json'
 
-/**
- * What a store never saves, besides the folder's own `.gitignore` files. Directories whose name says "generated
- * output" are matched only at the top of the folder, where a person's own `build/` source folder is not likely to be.
- */
-export const BUILT_IN_EXCLUDES = [
-  '.git/', '.mousse/', 'node_modules/', '.venv/', 'venv/', '__pycache__/', '.DS_Store',
-  '/dist/', '/build/', '/target/', '/.next/', '/.cache/'
-] as const
+/** What a store never saves, besides the folder's own `.gitignore` files (see `hiddenStore.ts`). */
+export { BUILT_IN_EXCLUDES }
 
 export interface SnapshotWorkspaceRecord {
   schemaVersion: 1
@@ -77,8 +71,9 @@ function storePathOf(record: SnapshotWorkspaceRecord, home = getMousseHomeDir())
   return threadStorePath(record.threadId, home)
 }
 
-function runGit(gitDir: string, args: string[]): string {
-  return execFileSync('git', ['--git-dir', gitDir, ...args], { cwd: gitDir, env: repoProgramEnv(), encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim()
+/** Git on the store itself, isolated from the person's config like every store command. */
+function runGit(store: HiddenStore, args: string[]): string {
+  return execFileSync('git', ['--git-dir', store.gitDir, ...args], { cwd: store.gitDir, env: isolatedEnv(store, repoProgramEnv()), encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim()
 }
 
 /** Whether a store that exists has the settings `prepareStore` gives it (a creation another thread started may not have finished). */
@@ -99,11 +94,11 @@ export function prepareStore(store: HiddenStore): void {
       try {
         mkdirSync(store.gitDir, { recursive: true })
         // No template: the person's init.templateDir would put its hooks and files into Mousse's store.
-        execFileSync('git', ['init', '--bare', '--quiet', '--template=', store.gitDir], { env: repoProgramEnv(), encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })
+        execFileSync('git', ['init', '--bare', '--quiet', '--template=', store.gitDir], { env: isolatedEnv(store, repoProgramEnv()), encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })
         // Git needs a work tree to add files; `--work-tree` supplies the folder, so the store itself stays independent of where it is.
-        runGit(store.gitDir, ['config', 'core.bare', 'false'])
+        runGit(store, ['config', 'core.bare', 'false'])
         // Mousse decides when to collect garbage (after it releases a snapshot's refs), never Git in the middle of an operation.
-        runGit(store.gitDir, ['config', 'gc.auto', '0'])
+        runGit(store, ['config', 'gc.auto', '0'])
         break
       } catch (error) {
         if (attempt >= 4) throw error
@@ -283,5 +278,5 @@ export function removeThreadSnapshots(threadId: string, home = getMousseHomeDir(
 
 /** Collects the garbage in a store Mousse owns. Never run on a repository of the person's. */
 export function collectStoreGarbage(store: HiddenStore): void {
-  runGit(store.gitDir, ['gc', '--prune=now', '--quiet'])
+  runGit(store, ['gc', '--prune=now', '--quiet'])
 }

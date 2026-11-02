@@ -519,10 +519,11 @@ export function policedSimpleGit(cwd: string, git: SimpleGit): SimpleGit {
  * allowed; they are only ever set to the values above, never to a caller's.
  */
 export function guardedSimpleGit(cwd: string, options: Partial<Omit<SimpleGitOptions, 'baseDir' | 'config' | 'unsafe'>> = {}): SimpleGit {
-  const forCommand = (args: readonly string[]): SimpleGit => simpleGit({
+  // A command in a hidden store reads only the store's config (`hiddenStoreEnv`): nothing of the folder's is overridden.
+  const forCommand = (args: readonly string[], hidden: boolean): SimpleGit => simpleGit({
     ...options,
     baseDir: cwd,
-    config: repoProgramSettings(cwd, { write: writesThroughFilters(args) }),
+    config: hidden ? [] : repoProgramSettings(cwd, { write: writesThroughFilters(args) }),
     unsafe: UNSAFE_ALLOWED
   })
   return new Proxy({} as SimpleGit, {
@@ -537,7 +538,7 @@ export function guardedSimpleGit(cwd: string, options: Partial<Omit<SimpleGitOpt
         // Inside a hidden store's scope (snapshot review) the command goes through the store; nowhere else is a folder's Git redirected.
         // No optional locks: a status or diff read here never refreshes and rewrites the index.
         const store = activeHiddenStore(cwd)
-        const instance = forCommand(args).env(repoProgramEnv({ ...process.env, GIT_OPTIONAL_LOCKS: '0', ...(store ? hiddenStoreEnv(store) : {}) })) as unknown as Record<string, (...values: unknown[]) => unknown>
+        const instance = forCommand(args, Boolean(store)).env(store ? hiddenStoreEnv(store, repoProgramEnv({ ...process.env, GIT_OPTIONAL_LOCKS: '0' })) : repoProgramEnv({ ...process.env, GIT_OPTIONAL_LOCKS: '0' })) as unknown as Record<string, (...values: unknown[]) => unknown>
         return instance[key]!(...parameters)
       }
     }

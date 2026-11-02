@@ -9,7 +9,7 @@ import { IN_PROGRESS_GIT_MARKERS } from '../git/gitMarkers'
 import { MOUSSE_COMMIT_EMAIL, MOUSSE_COMMIT_NAME } from '../git/mousseCommitIdentity'
 import { readWorkingTreeStatusSync, type StatusEntry } from '../git/workingTreeStatus'
 import { rethrowGitPolicyError } from '../git/gitPolicy'
-import { activeHiddenStore, hiddenStoreArgs } from '../git/hiddenStore'
+import { activeHiddenStore, hiddenStoreArgs, isolatedEnv } from '../git/hiddenStore'
 import type { GitCheckOptions, RepoProgramOptions } from '../git/repoPrograms'
 
 /**
@@ -18,8 +18,18 @@ import type { GitCheckOptions, RepoProgramOptions } from '../git/repoPrograms'
  */
 export function guarded(cwd: string, args: string[], options?: RepoProgramOptions & GitCheckOptions): string[] {
   const store = activeHiddenStore(cwd)
-  const safe = withoutRepoPrograms(cwd, args, options)
-  return store ? [...hiddenStoreArgs(store), ...safe] : safe
+  // A store command reads no config but the store's own (`gitEnv`), so no program can be configured for it to run.
+  return store ? [...hiddenStoreArgs(store), ...args] : withoutRepoPrograms(cwd, args, options)
+}
+
+/**
+ * The environment for one of Mousse's Git commands in `cwd`: the process's with `env` on top, and, in a hidden store's
+ * scope, isolated from the person's system and global config and attributes so the store keeps exact bytes.
+ */
+export function gitEnv(cwd: string, env?: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const base = repoProgramEnv(env ? { ...process.env, ...env } : process.env)
+  const store = activeHiddenStore(cwd)
+  return store ? isolatedEnv(store, base) : base
 }
 
 /**
@@ -31,7 +41,7 @@ export function git(cwd: string, args: string[], env?: NodeJS.ProcessEnv, input?
   try {
     return execFileSync('git', guarded(cwd, args, { ...(env ? { env } : {}), ...(input !== undefined ? { stdin: input } : {}) }), {
       cwd,
-      env: repoProgramEnv(env ? { ...process.env, ...env } : process.env),
+      env: gitEnv(cwd, env),
       encoding: 'utf8',
       ...(input !== undefined ? { input, maxBuffer: 256 * 1024 * 1024 } : {}),
       stdio: [input !== undefined ? 'pipe' : 'ignore', 'pipe', 'pipe']
@@ -52,7 +62,7 @@ export function tryGit(cwd: string, args: string[], env?: NodeJS.ProcessEnv): { 
     rethrowGitPolicyError(error)
     return { ok: false, stdout: '', stderr: error instanceof Error ? error.message : String(error) }
   }
-  const result = spawnSync('git', safe, { cwd, encoding: 'utf8', env: repoProgramEnv(env ? { ...process.env, ...env } : process.env) })
+  const result = spawnSync('git', safe, { cwd, encoding: 'utf8', env: gitEnv(cwd, env) })
   const stderr = result.stderr.trim()
   return { ok: result.status === 0, stdout: result.stdout.trim(), stderr: (result.status !== 0 && filterRefusal(stderr)) || stderr }
 }
@@ -70,7 +80,7 @@ export const NOT_MOUSSE = `:(exclude)${MOUSSE_DIRECTORY}`
 
 /** Git output exactly as printed (NUL-separated lists keep leading and trailing spaces), optionally fed `input`. */
 function gitRaw(cwd: string, args: string[], env?: NodeJS.ProcessEnv, input?: string): string {
-  const result = spawnSync('git', guarded(cwd, args, { env, stdin: input }), { cwd, encoding: 'utf8', input, env: repoProgramEnv(env ? { ...process.env, ...env } : process.env) })
+  const result = spawnSync('git', guarded(cwd, args, { env, stdin: input }), { cwd, encoding: 'utf8', input, env: gitEnv(cwd, env) })
   if (result.status !== 0) {
     const stderr = (result.stderr ?? '').trim()
     throw new Error(filterRefusal(stderr) || stderr || `git ${args[0]} failed`)

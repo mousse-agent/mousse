@@ -64,6 +64,60 @@ function thread(name: string, work: string, projectId?: string) {
   return { directory, space, actions, turn, undo, store, work: space.record.workTree }
 }
 
+describe('a hidden store keeps exact bytes', () => {
+  let previousGlobal: string | undefined
+  /** The person's global Git config for the test, as `~/.gitconfig` would be. */
+  const globalConfig = (text: string): void => {
+    const path = join(root, 'global.gitconfig')
+    writeFileSync(path, text)
+    previousGlobal = process.env.GIT_CONFIG_GLOBAL
+    process.env.GIT_CONFIG_GLOBAL = path
+  }
+  afterEach(() => {
+    if (previousGlobal === undefined) delete process.env.GIT_CONFIG_GLOBAL
+    else process.env.GIT_CONFIG_GLOBAL = previousGlobal
+    previousGlobal = undefined
+  })
+  /** The blob a snapshot holds for `path`, byte for byte. */
+  const blob = (t: ReturnType<typeof thread>, sha: string, path: string): Buffer =>
+    execFileSync('git', ['--git-dir', t.space.store.gitDir, 'cat-file', 'blob', `${sha}:${path}`], { env: { ...process.env, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null' } })
+
+  it('ignores a clean filter in the person’s global config and the folder’s attributes, and Undo restores the original', async () => {
+    const attributes = join(root, 'global.gitattributes')
+    writeFileSync(attributes, '* filter=upper\n')
+    globalConfig(`[filter "upper"]\n\tclean = tr a-z A-Z\n\tsmudge = cat\n[core]\n\tattributesFile = ${attributes}\n`)
+    const work = folder('work')
+    write(work, 'a.txt', 'original lowercase\n')
+    write(work, '.gitattributes', '*.md filter=upper\n')
+    write(work, 'b.md', 'also lowercase\n')
+    const t = thread('a', work, 'project-1')
+    const { action } = await t.turn('turn', () => { write(work, 'a.txt', 'changed\n'); write(work, 'b.md', 'changed too\n') })
+    expect(blob(t, action.startSha, 'a.txt').toString()).toBe('original lowercase\n')
+    expect(blob(t, action.endSha, 'b.md').toString()).toBe('changed too\n')
+    await t.undo()
+    expect(readFileSync(join(work, 'a.txt'), 'utf8')).toBe('original lowercase\n')
+    expect(readFileSync(join(work, 'b.md'), 'utf8')).toBe('also lowercase\n')
+  })
+
+  it('converts no line endings, whatever core.autocrlf or the folder’s eol attributes say', async () => {
+    globalConfig('[core]\n\tautocrlf = true\n\tsafecrlf = true\n')
+    const work = folder('work')
+    const mixed = Buffer.from('one\r\ntwo\nthree\r\n')
+    const lf = Buffer.from('lf only\n')
+    write(work, '.gitattributes', '* text eol=crlf\n')
+    writeFileSync(join(work, 'mixed.txt'), mixed)
+    writeFileSync(join(work, 'lf.txt'), lf)
+    const t = thread('a', work, 'project-1')
+    const { action } = await t.turn('turn', () => { writeFileSync(join(work, 'mixed.txt'), 'gone\n'); writeFileSync(join(work, 'lf.txt'), 'gone\r\n') })
+    expect(blob(t, action.startSha, 'mixed.txt').equals(mixed)).toBe(true)
+    expect(blob(t, action.startSha, 'lf.txt').equals(lf)).toBe(true)
+    expect(blob(t, action.endSha, 'lf.txt').toString()).toBe('gone\r\n')
+    await t.undo()
+    expect(readFileSync(join(work, 'mixed.txt')).equals(mixed)).toBe(true)
+    expect(readFileSync(join(work, 'lf.txt')).equals(lf)).toBe(true)
+  })
+})
+
 describe('a project without Git', () => {
   it('records a turn as a snapshot, Undo restores the files, and the folder never gains a .git', async () => {
     const work = folder('work')
@@ -131,6 +185,23 @@ describe('a project without Git', () => {
     expect(receipt.notCovered).toMatch(/^Not covered: .*node_modules \(dependency or build folder, never kept in snapshots\)/)
     expect(action.notCovered).toBe(receipt.notCovered)
     expect(action.reversible).toBe(true)
+  })
+
+  it('keeps the built-in list out even when the folder’s .gitignore takes it back in, and names what it left out', async () => {
+    const work = folder('work')
+    write(work, '.gitignore', '!node_modules/\n!dist/\n!.mousse/\n')
+    write(work, 'node_modules/pkg/index.js', 'x\n'); write(work, 'dist/out.js', 'x\n'); write(work, '.mousse/state.json', '{}\n')
+    write(work, 'kept.txt', 'kept\n')
+    const t = thread('a', work, 'project-1')
+    const { action } = await t.turn('turn', () => { write(work, 'node_modules/pkg/index.js', 'y\n'); write(work, 'added.txt', 'added\n') })
+    expect(t.store('ls-tree', '-r', '--name-only', action.endSha).split('\n')).toEqual(['.gitignore', 'added.txt', 'kept.txt'])
+    expect(t.store('ls-tree', '-r', '--name-only', action.startSha).split('\n')).toEqual(['.gitignore', 'kept.txt'])
+    // What is named is what the snapshot does not hold.
+    expect(action.git?.coverageGaps?.map((gap) => gap.path).sort()).toEqual(['dist', 'node_modules'])
+    // Undo takes back the recorded files and leaves the folders it never held as they are.
+    await t.undo()
+    expect(existsSync(join(work, 'added.txt'))).toBe(false)
+    expect(readFileSync(join(work, 'node_modules/pkg/index.js'), 'utf8')).toBe('y\n')
   })
 
   it('treats a repository with no commit the same, and leaves its own .git alone', async () => {
