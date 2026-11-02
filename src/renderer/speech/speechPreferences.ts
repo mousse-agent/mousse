@@ -1,4 +1,9 @@
 import { create } from 'zustand'
+import {
+  DEFAULT_DICTATION_VOCABULARY,
+  type DictationPolishOptions,
+  type DictationVocabularyEntry
+} from '../../shared/dictationPostProcess'
 import { findLocalTtsModel, resolveProviderTtsVoice, type ReadAloudSelection } from '../../shared/readAloud'
 import { profilePreferenceKey } from '../lib/profilePreferences'
 import { useAppStore } from '../stores/appStore'
@@ -11,11 +16,24 @@ export interface SpeechPreferences {
   voices: Record<string, string>
   /** Dictation runs the microphone through noise suppression before the model hears it. */
   reduceNoise: boolean
+  /** Words the dictation model keeps mishearing, and their spelling. */
+  vocabulary: DictationVocabularyEntry[]
+  /** Dictation writes spoken paths and numbers as symbols: "dot dot slash" is ../, "five point five" is 5.5. */
+  expandSymbols: boolean
+  /** Dictation writes "point number one ... point number two ..." as a numbered list. */
+  detectLists: boolean
 }
 
 export const SPEECH_SPEEDS = [0.75, 1, 1.25, 1.5, 1.75, 2] as const
 
-export const DEFAULT_SPEECH_PREFERENCES: SpeechPreferences = { speed: 1, voices: {}, reduceNoise: true }
+export const DEFAULT_SPEECH_PREFERENCES: SpeechPreferences = {
+  speed: 1,
+  voices: {},
+  reduceNoise: true,
+  vocabulary: [...DEFAULT_DICTATION_VOCABULARY],
+  expandSymbols: true,
+  detectLists: true
+}
 
 const PREFERENCE_NAME = 'speech'
 
@@ -29,8 +47,23 @@ export function parseSpeechPreferences(value: unknown): SpeechPreferences {
       if (typeof voice === 'string' && voice) voices[key] = voice
     }
   }
-  const reduceNoise = typeof record.reduceNoise === 'boolean' ? record.reduceNoise : DEFAULT_SPEECH_PREFERENCES.reduceNoise
-  return { speed, voices, reduceNoise }
+  const flag = (name: 'reduceNoise' | 'expandSymbols' | 'detectLists'): boolean =>
+    typeof record[name] === 'boolean' ? (record[name] as boolean) : DEFAULT_SPEECH_PREFERENCES[name]
+  // A saved list, even an empty one, is the user's; only a missing one gets the defaults.
+  const vocabulary = Array.isArray(record.vocabulary)
+    ? (record.vocabulary as unknown[]).flatMap((entry) => {
+        const item = entry && typeof entry === 'object' ? (entry as Record<string, unknown>) : {}
+        return typeof item.spoken === 'string' && item.spoken.trim() && typeof item.written === 'string' && item.written.trim()
+          ? [{ spoken: item.spoken.trim(), written: item.written.trim() }]
+          : []
+      })
+    : [...DEFAULT_DICTATION_VOCABULARY]
+  return { speed, voices, reduceNoise: flag('reduceNoise'), vocabulary, expandSymbols: flag('expandSymbols'), detectLists: flag('detectLists') }
+}
+
+/** The cleanup dictation applies to a finished transcript under `preferences`. */
+export function dictationPolishOptions(preferences: SpeechPreferences): DictationPolishOptions {
+  return { vocabulary: preferences.vocabulary, expandSymbols: preferences.expandSymbols, detectLists: preferences.detectLists }
 }
 
 export function readAloudVoiceKey(selection: ReadAloudSelection): string {
@@ -70,6 +103,9 @@ interface SpeechPreferencesState {
   setSpeed: (speed: number) => void
   setVoice: (selection: ReadAloudSelection, voice: string) => void
   setReduceNoise: (reduceNoise: boolean) => void
+  setVocabulary: (vocabulary: DictationVocabularyEntry[]) => void
+  setExpandSymbols: (expandSymbols: boolean) => void
+  setDetectLists: (detectLists: boolean) => void
 }
 
 export const useSpeechPreferences = create<SpeechPreferencesState>((set, get) => {
@@ -90,7 +126,10 @@ export const useSpeechPreferences = create<SpeechPreferencesState>((set, get) =>
     },
     setSpeed: (speed) => update({ speed }),
     setVoice: (selection, voice) => update({ voices: { ...get().preferences.voices, [readAloudVoiceKey(selection)]: voice } }),
-    setReduceNoise: (reduceNoise) => update({ reduceNoise })
+    setReduceNoise: (reduceNoise) => update({ reduceNoise }),
+    setVocabulary: (vocabulary) => update({ vocabulary }),
+    setExpandSymbols: (expandSymbols) => update({ expandSymbols }),
+    setDetectLists: (detectLists) => update({ detectLists })
   }
 })
 

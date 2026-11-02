@@ -129,3 +129,16 @@
   position: relative;
   border-radius: 50%;
 }
+
+.speech-vocabulary {
+  width: 100%;
+  min-height: 120px;
+  padding: var(--space-4) var(--space-8);
+  border: 1px solid var(--ui-line-strong);
+  border-radius: var(--ui-control-radius);
+  background: transparent;
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: var(--settings-fs-small);
+  resize: vertical;
+}
