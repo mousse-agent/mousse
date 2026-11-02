@@ -56,7 +56,7 @@ import { EarlierMessagesBar } from './EarlierMessagesBar'
 import { forgetMessageImageRequests, hydrateMessageImages } from '../lib/messageImages'
 import { isOutcomeUncertain, settleUncertainSend } from '../lib/uncertainSend'
 import { SendRetryIds } from '../lib/sendRetryIds'
-import { onProviderListingsChanged, pickerIdFor, pickerProviders, projectScope, useProviderSnapshots } from '../lib/providerSnapshots'
+import { composerAutoModel, onProviderListingsChanged, pickerIdFor, pickerProviders, projectScope, useProviderSnapshots, type PickerSelection } from '../lib/providerSnapshots'
 import { errorText, sendErrorLine } from '../lib/errorText'
 import { PromptUndoNotice } from './PromptUndoControls'
 import { pendingChangesDetails, type PendingChangesDetails } from '../../shared/workspace'
@@ -199,6 +199,21 @@ export function OrchestratorChat() {
   const [selectedInstanceId, setSelectedInstanceId] = useState<string | undefined>(undefined)
   const selectedProviderId = pickerIdFor({ instanceId: selectedInstanceId, llmProvider: selectedLlmProvider }, providers)
   const [selectedModelId, setSelectedModelId] = useState('')
+  // The profile's default model, once settings are read; undefined until then.
+  const [profileDefault, setProfileDefault] = useState<PickerSelection | undefined>(undefined)
+  // With no thread model and no default the picker offers, the composer starts on the first ready
+  // provider's model, and a send stamps it on the thread.
+  const autoModel = useMemo(
+    () => composerAutoModel({ remote: Boolean(remoteNode), threadModel: activeThreadModelOverride, profileDefault, providers }),
+    [remoteNode, activeThreadModelOverride, profileDefault, providers]
+  )
+  // Also re-applied after a settings refresh puts the unusable default back.
+  useEffect(() => {
+    if (!autoModel) return
+    setSelectedLlmProvider(autoModel.llmProvider)
+    setSelectedInstanceId(autoModel.instanceId)
+    setSelectedModelId(autoModel.model)
+  }, [autoModel, selectedLlmProvider, selectedInstanceId, selectedModelId])
   const [enabledSkills, setEnabledSkills] = useState<SkillDescriptor[]>([])
   const [modelMenuOpen, setModelMenuOpen] = useState(false)
   // Pasted/dropped files and voice notes are kept per-thread in memory (not the
@@ -461,6 +476,13 @@ export function OrchestratorChat() {
     setCatalog(options.llmProviders)
     setDefaultPermissionMode(normalizePermissionMode(settings.permissions?.defaultMode))
     const selectedModel = activeThreadModelOverride ?? settings.provider
+    setProfileDefault((current) =>
+      current?.llmProvider === settings.provider.llmProvider &&
+      current.instanceId === settings.provider.instanceId &&
+      current.model === settings.provider.model
+        ? current
+        : { ...settings.provider }
+    )
     // The picker shows the other computer's model while a chat that runs there is open.
     if (!remoteNodeRef.current) {
       setSelectedLlmProvider(selectedModel.llmProvider)
@@ -943,6 +965,11 @@ export function OrchestratorChat() {
         setBlankPermissionMode(undefined)
         if (updated) useAppStore.getState().upsertThread(updated)
       }
+    } else if (autoModel && activeThreadId) {
+      // A thread without a model of its own would run on the unusable default: give it the shown one.
+      const updated = await window.mousse.threads.setModel(activeThreadId, autoModel)
+      if (!stillVisible()) return
+      if (updated) useAppStore.getState().upsertThread(updated)
     }
 
     // Clear only after we accept the send/queue path (control commands already cleared above).
@@ -988,9 +1015,13 @@ export function OrchestratorChat() {
     // own modelOverride, which is stamped at create time from this value.
     if (!activeThreadId) {
       // A chat for another computer takes its model there; this computer's default stays as it is.
-      if (!remoteDraft) void window.mousse.settings.set({
-        provider: { ...instance, model: modelId }
-      })
+      if (!remoteDraft) {
+        // The new default wins over the automatic model at once, not after settings reply.
+        setProfileDefault({ ...instance, model: modelId })
+        void window.mousse.settings.set({
+          provider: { ...instance, model: modelId }
+        })
+      }
       return
     }
     // The empty local thread behind a remote draft is not the chat; its model is not the other computer's pick.

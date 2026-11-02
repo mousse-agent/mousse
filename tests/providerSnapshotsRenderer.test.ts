@@ -10,9 +10,12 @@ import {
 } from '../src/renderer/lib/modelFavorites'
 import {
   beginProfileSwitch,
+  composerAutoModel,
+  fallbackModel,
   instanceBadges,
   modelDisplayName,
   pickerIdFor,
+  pickerOffers,
   pickerProviders,
   showsContextGauge,
   sortInstances,
@@ -78,6 +81,53 @@ describe('composer picker from snapshots', () => {
       []
     )
     expect(providers.map((entry) => entry.instanceId)).toEqual(['claude', 'codex'])
+  })
+
+  describe('model a composer starts on without a usable default (#495)', () => {
+    const codex = (overrides = {}) =>
+      snapshot({ instanceId: 'codex', driver: 'codex', displayName: 'Codex', models: { entries: [model('gpt-5'), model('gpt-5-mini')], source: 'live' }, ...overrides })
+    const claude = (overrides = {}) => snapshot({ models: { entries: claudeModels, source: 'live' }, ...overrides })
+
+    it('takes the first listed model of the first ready provider, in picker order', () => {
+      const providers = pickerProviders([codex(), claude()], [])
+      expect(fallbackModel(providers)).toEqual({ instanceId: 'claude', llmProvider: 'claude-subscription', model: 'claude-opus-4' })
+    })
+
+    it('skips a provider that is switched off, signed out, or lists nothing', () => {
+      const off = claude({ enabled: { device: false, effective: false, setBy: 'device' } })
+      expect(fallbackModel(pickerProviders([off, codex()], []))?.model).toBe('gpt-5')
+      const signedOut = claude({ auth: { state: 'signed_out' } })
+      expect(fallbackModel(pickerProviders([signedOut, codex()], []))?.model).toBe('gpt-5')
+      expect(fallbackModel(pickerProviders([snapshot(), codex()], []))?.model).toBe('gpt-5')
+    })
+
+    it('uses the first offered provider when none is ready, and nothing when none is offered', () => {
+      expect(fallbackModel(pickerProviders([claude({ auth: { state: 'signed_out' } })], []))?.model).toBe('claude-opus-4')
+      expect(fallbackModel([])).toBeUndefined()
+    })
+
+    it('treats an empty default, or one on a provider switched off or removed, as not offered', () => {
+      const providers = pickerProviders([claude(), codex({ enabled: { device: false, effective: false, setBy: 'device' } })], [])
+      expect(pickerOffers({ llmProvider: '', model: '' }, providers)).toBe(false)
+      expect(pickerOffers({ instanceId: 'codex', llmProvider: 'codex', model: 'gpt-5' }, providers)).toBe(false)
+      expect(pickerOffers({ instanceId: 'claude:gone', llmProvider: 'claude:gone', model: 'claude-opus-4' }, providers)).toBe(false)
+      expect(pickerOffers({ instanceId: 'claude', llmProvider: 'claude-subscription', model: 'claude-sonnet-4' }, providers)).toBe(true)
+    })
+
+    it('picks only when nothing chosen by hand applies', () => {
+      const providers = pickerProviders([claude(), codex()], [])
+      const none = { llmProvider: '', model: '' }
+      const base = { remote: false, threadModel: undefined, profileDefault: none, providers }
+      expect(composerAutoModel(base)?.model).toBe('claude-opus-4')
+      // A default the picker offers, a thread's own model, another computer, or settings not read yet.
+      expect(composerAutoModel({ ...base, profileDefault: { instanceId: 'codex', llmProvider: 'codex', model: 'gpt-5-mini' } })).toBeUndefined()
+      expect(composerAutoModel({ ...base, threadModel: { llmProvider: 'codex', model: 'gpt-5' } })).toBeUndefined()
+      expect(composerAutoModel({ ...base, remote: true })).toBeUndefined()
+      expect(composerAutoModel({ ...base, profileDefault: undefined })).toBeUndefined()
+      // A provider set up later gives a profile still without a default a model.
+      expect(composerAutoModel({ ...base, providers: [] })).toBeUndefined()
+      expect(composerAutoModel({ ...base, providers: pickerProviders([codex()], []) })?.model).toBe('gpt-5')
+    })
   })
 
   it('keeps the saved model order and puts favorites first in the picker (D6)', () => {
