@@ -127,7 +127,8 @@ import {
   type RunResumePayload,
   type ThreadEvent,
   type TransferRecord,
-  type WakeTurnPayload
+  type WakeTurnPayload,
+  isRetiredInboxRow
 } from '../run/types'
 import {
   isTerminalAgentStatus,
@@ -3915,6 +3916,13 @@ export class OrchestratorService extends EventEmitter {
    * delivered. A live turn that takes it marks the rows delivered to that run; one that does not
    * hands the rows to the queued turn it becomes.
    */
+  /** Rows of a kind no longer written (`isRetiredInboxRow`) are acknowledged, never run; the rest are returned. */
+  private settleRetiredRows(rows: InboxRecord[]): InboxRecord[] {
+    const retired = rows.filter(isRetiredInboxRow)
+    if (retired.length) this.requireRunEngine().inbox.markAcknowledged(retired.map((row) => row.inboxId))
+    return retired.length ? rows.filter((row) => !isRetiredInboxRow(row)) : rows
+  }
+
   private executeTurnSteerEffect(effect: EffectRecord): void {
     const { runId, threadId, text, inboxIds, origin, permissionMode, deviceLimit, sentFrom } = effect.payload as { runId: string; threadId: string; text: string; inboxIds?: string[]; origin?: AgentOrigin; permissionMode?: PermissionMode; deviceLimit?: PermissionMode; sentFrom?: { node: string } }
     // An agent's steer always carries its sender's mode; one that lost it (a damaged payload) reads as the strictest.
@@ -3932,7 +3940,7 @@ export class OrchestratorService extends EventEmitter {
     let notice: SubagentNoticeItem[] | undefined
     let carried: { inboxIds: string[]; effectId: string } | undefined
     if (inboxIds?.length) {
-      const rows = this.dropStaleQuestionRows(engine.inbox.getMany(inboxIds).filter((row) => row.status === 'delivered' && row.deliveredBy === effect.effectId))
+      const rows = this.dropStaleQuestionRows(this.settleRetiredRows(engine.inbox.getMany(inboxIds).filter((row) => row.status === 'delivered' && row.deliveredBy === effect.effectId)))
       if (rows.length === 0) return
       const planned = planWakeNotice(rows, this.noticeContext())
       engine.inbox.recordNoticeVisibility(rows, planned.items)
@@ -5719,7 +5727,7 @@ export class OrchestratorService extends EventEmitter {
   private async executeWakeEffect(effect: EffectRecord, payload: WakeTurnPayload, signal: AbortSignal): Promise<void> {
     const engine = this.requireRunEngine()
     if (engine.getRun(payload.runId)?.status !== 'queued') return
-    const rows = this.dropStaleQuestionRows(engine.inbox.getMany(payload.inboxIds).filter((row) => row.status !== 'acknowledged'))
+    const rows = this.dropStaleQuestionRows(this.settleRetiredRows(engine.inbox.getMany(payload.inboxIds).filter((row) => row.status !== 'acknowledged')))
     // A bot thread is never woken as a plain turn; its notices are settled so rule 4 does not wake it again.
     if (this.botThreadRefusal(payload.threadId)) {
       engine.store.db.transaction(() => {
@@ -5763,12 +5771,6 @@ export class OrchestratorService extends EventEmitter {
       }
       throw new EffectDeferredError(this.wakeBusyDeferMs, 'thread_busy')
     }
-    // A pull request update asks the agent to change code. While the thread waits on an approval (one a restart left saved
-    // included) it must not start a turn of its own, which would also settle that approval: the wake stays queued, as for a
-    // busy thread, and runs once nothing waits.
-    if (rows.some((row) => row.kind === 'pr_update') && this.threadWaitsOnApproval(payload.threadId)) {
-      throw new EffectDeferredError(this.wakeBusyDeferMs, 'approval_waiting')
-    }
     const notice = planWakeNotice(rows, this.noticeContext())
     engine.inbox.recordNoticeVisibility(rows, notice.items)
     try {
@@ -5783,13 +5785,6 @@ export class OrchestratorService extends EventEmitter {
       const run = engine.getRun(payload.runId)
       if (!run || !TERMINAL_RUN_STATUSES.has(run.status)) throw error
     }
-  }
-
-  /** A saved approval request of the thread is waiting for an answer, or was answered and not yet delivered to its run. */
-  private threadWaitsOnApproval(threadId: string): boolean {
-    const approvals = this.runEngine?.approvals
-    if (!approvals) return false
-    return approvals.listPending(threadId).length > 0 || approvals.listUndelivered().some((row) => row.threadId === threadId)
   }
 
   private requireRunEngine(): RunEngine {

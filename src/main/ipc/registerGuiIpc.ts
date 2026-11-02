@@ -2260,15 +2260,16 @@ export function registerGuiIpc(
       projectId: input?.projectId,
       reference: input?.reference,
       ...(input?.allowClosed === true ? { allowClosed: true } : {}),
-      ...(input?.allowDuplicate === true ? { allowDuplicate: true } : {})
+      ...(input?.allowDuplicate === true ? { allowDuplicate: true } : {}),
+      ...(input?.allowWorktreeConfig === true ? { allowWorktreeConfig: true } : {})
     })
-    return { thread: response.thread, seed: response.seed, headSha: response.headSha, headMoved: response.headMoved, sent: response.sent, withheld: response.withheld }
+    return { thread: response.thread, seed: response.seed, headSha: response.headSha, headMoved: response.headMoved, sent: response.sent, withheld: response.withheld, repositoryConfigChange: response.repositoryConfigChange ?? null }
   })
   registerHandler('pullRequests:pushTarget', async (_e, threadId: string) => {
     const response = await guiMms.request<{ target: PullRequestPushTarget }>('pullRequests.pushTarget', { threadId })
     return response.target
   })
-  // A thread's watch of its pull request: `off`, `notify` (a line in the thread) or `act` (also wakes the agent).
+  // A thread's watch of its pull request: `off` or `notify` (a line in the thread).
   registerHandler('pullRequests:watch', async (_e, threadId: string, watch: PullRequestWatchMode, number?: number) => {
     const response = await guiMms.request<{ status: PullRequestWatchStatus }>('pullRequests.watch', {
       threadId,

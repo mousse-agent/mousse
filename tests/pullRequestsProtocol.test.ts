@@ -9,7 +9,7 @@ import { WorkspaceResolver } from '../src/mms/workspace/WorkspaceResolver'
 import { ThreadWorkspaceManager } from '../src/mms/workspace/ThreadWorkspaceManager'
 import type { GitPullRequestInfo, GitPullRequestLookup, Thread } from '../src/shared/types'
 import { parsePullRequestDetail, PULL_REQUEST_EXISTS, PullRequestReadError } from '../src/mms/git/GitHubCodeHost'
-import type { PullRequestDetail } from '../src/shared/pullRequests'
+import { WORKTREE_CONFIG_ENABLED, WORKTREE_CONFIG_NEEDED, type PullRequestDetail } from '../src/shared/pullRequests'
 import { git, gitFoundationFixture } from './fixtures/gitFoundation'
 
 const info = (patch: Partial<GitPullRequestInfo> = {}): GitPullRequestInfo => ({
@@ -718,8 +718,18 @@ describe('pull request methods through the daemon protocol', () => {
       const project = mms.projects.openProject(f.repo)
       events.length = 0
 
-      const started = await client.request<{ thread: Thread; threads: Thread[]; seed: string; headSha: string; headMoved: boolean; sent: boolean }>('pullRequests.startThread', { projectId: project.id, number: 7 })
-      expect(started).toMatchObject({ headSha: head, headMoved: false, sent: false })
+      // A request that did not agree to the repository setting (as an older client sends it) changes nothing.
+      await expect(client.request('pullRequests.startThread', { projectId: project.id, number: 7 })).rejects.toMatchObject({ code: 'pull_request_worktree_config_needed', message: WORKTREE_CONFIG_NEEDED })
+      expect(fetch).not.toHaveBeenCalled()
+      expect(() => git(f.repo, 'config', '--local', '--get', 'extensions.worktreeConfig')).toThrow()
+      expect((await client.request<{ enablesWorktreeConfig: boolean }>('pullRequests.resolve', { projectId: project.id, reference: '7' })).enablesWorktreeConfig).toBe(true)
+
+      const started = await client.request<{ thread: Thread; threads: Thread[]; seed: string; headSha: string; headMoved: boolean; sent: boolean; repositoryConfigChange: string | null }>('pullRequests.startThread', { projectId: project.id, number: 7, allowWorktreeConfig: true })
+      expect(started).toMatchObject({ headSha: head, headMoved: false, sent: false, repositoryConfigChange: WORKTREE_CONFIG_ENABLED })
+      expect(git(f.repo, 'config', '--local', '--get', 'extensions.worktreeConfig')).toBe('true')
+      // The thread says so too, for every client, with a line that wakes nothing.
+      expect(mms.orchestrator.getMessages(started.thread.id).filter((message) => message.role === 'system').map((message) => [message.kind, message.content])).toEqual([['warning', WORKTREE_CONFIG_ENABLED]])
+      expect(mms.runEngine.inbox.listForThread(started.thread.id)).toEqual([])
       expect(started.thread.pullRequest).toMatchObject({ number: 7, nameWithOwner: 'acme/app', headRefName: 'fix-thing' })
       expect(started.threads.some((thread) => thread.id === started.thread.id)).toBe(true)
       expect(normalized(fetch.mock.calls[0][0])).toBe(normalized(f.repo))
@@ -738,7 +748,7 @@ describe('pull request methods through the daemon protocol', () => {
       vi.spyOn(mms.gitService.codeHost, 'fetchPullRequestHead').mockResolvedValue(head)
       const send = vi.spyOn(mms.orchestrator, 'send').mockResolvedValue({} as never)
       const project = mms.projects.openProject(f.repo)
-      const started = await client.request<{ thread: Thread; seed: string; sent: boolean }>('pullRequests.startThread', { projectId: project.id, number: 7, send: true, message: 'Fix the review comments.' })
+      const started = await client.request<{ thread: Thread; seed: string; sent: boolean }>('pullRequests.startThread', { projectId: project.id, number: 7, send: true, message: 'Fix the review comments.', allowWorktreeConfig: true })
       expect(started.sent).toBe(true)
       expect(send).toHaveBeenCalledTimes(1)
       expect(send.mock.calls[0][0]).toBe(`${started.seed}\n\nFix the review comments.`)
@@ -751,7 +761,7 @@ describe('pull request methods through the daemon protocol', () => {
       vi.spyOn(mms.gitService.codeHost, 'fetchPullRequestHead').mockResolvedValue(head)
       const send = vi.spyOn(mms.orchestrator, 'send').mockResolvedValue({} as never)
       const project = mms.projects.openProject(f.repo)
-      const started = await client.request<{ seed: string; sent: boolean; withheld: string }>('pullRequests.startThread', { projectId: project.id, number: 7, send: true })
+      const started = await client.request<{ seed: string; sent: boolean; withheld: string }>('pullRequests.startThread', { projectId: project.id, number: 7, send: true, allowWorktreeConfig: true })
       expect(started.sent).toBe(false)
       expect(started.withheld).toMatch(/not owners, members or collaborators \(stranger\)/)
       expect(started.seed).toContain('Quoted from GitHub:')
@@ -763,7 +773,7 @@ describe('pull request methods through the daemon protocol', () => {
       vi.spyOn(mms.gitService.codeHost, 'fetchPullRequestHead').mockRejectedValue(new Error('offline'))
       const project = mms.projects.openProject(f.repo)
       events.length = 0
-      await expect(client.request('pullRequests.startThread', { projectId: project.id, number: 7 })).rejects.toMatchObject({ code: 'pull_request_fetch_failed' })
+      await expect(client.request('pullRequests.startThread', { projectId: project.id, number: 7, allowWorktreeConfig: true })).rejects.toMatchObject({ code: 'pull_request_fetch_failed' })
       await vi.waitFor(() => expect(events.some((event) => event.type === 'threads.updated')).toBe(true))
     })
 
@@ -772,7 +782,7 @@ describe('pull request methods through the daemon protocol', () => {
       vi.spyOn(mms.gitService.codeHost, 'fetchPullRequestHead').mockRejectedValue(new Error("No remote of this checkout points at github.com/acme/app, the pull request's repository."))
       const project = mms.projects.openProject(f.repo)
       const before = mms.threads.listAllThreads().length
-      await expect(client.request('pullRequests.startThread', { projectId: project.id, number: 7 })).rejects.toMatchObject({ code: 'pull_request_fetch_failed', message: /No remote of this checkout points at github\.com\/acme\/app/ })
+      await expect(client.request('pullRequests.startThread', { projectId: project.id, number: 7, allowWorktreeConfig: true })).rejects.toMatchObject({ code: 'pull_request_fetch_failed', message: /No remote of this checkout points at github\.com\/acme\/app/ })
       expect(mms.threads.listAllThreads()).toHaveLength(before)
     })
 

@@ -794,15 +794,7 @@ export class MmsProfileServices {
         const record = this.threads.lifecycleStore.get(threadId)
         return !record || record.state === 'active'
       },
-      isSubagent: (threadId) => Boolean(this.threads.getThread(threadId)?.lineage || this.runEngine.delegations.getLineage(threadId)),
       runStore: () => this.runEngine.store,
-      inbox: () => this.runEngine.inbox,
-      // A person's message is a visible user message that is not a job's prompt; wakes and notices are hidden or not user messages.
-      lastPersonMessageAt: (threadId) => {
-        const mine = this.orchestrator.getMessages(threadId).filter((message) => message.role === 'user' && !message.scheduled && !message.subagentNotice?.length)
-        const at = Date.parse(mine.at(-1)?.timestamp ?? '')
-        return Number.isNaN(at) ? null : at
-      },
       notify: (threadId, text, messageId) => this.orchestrator.noteThreadUpdate(threadId, text, { messageId }),
       onRunEnd: (listener) => {
         const handler = (event: ThreadEvent): void => {
@@ -1283,6 +1275,8 @@ export class MmsProfileServices {
         console.warn('the bot startup pass failed', { error: error instanceof Error ? error.message : String(error) })
       }
     }
+    // Wake rows of a kind no longer written (an earlier pull request watch's) are settled before any worker can run one.
+    this.runEngine.inbox.withdrawRetiredRows()
     this.startRunEngineWorkers()
 
     if (this.config.getScheduledSection().enabled) {

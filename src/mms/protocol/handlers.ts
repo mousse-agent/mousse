@@ -726,6 +726,8 @@ function pullRequestThreadService(ctx: HandlerContext): PullRequestThreadService
       if (sentFrom) prepared = ctx.mms.threads.updateThreadMeta(thread.id, { startedFrom: { node: sentFrom.node } }, { touch: false })
       return prepared
     },
+    // A notice from Mousse itself, so the thread shows it even before its first turn.
+    note: (threadId, text, messageId) => ctx.mms.orchestrator.noteThreadUpdate(threadId, text, { messageId, kind: 'warning' }),
     send: async (threadId, content) => {
       ctx.mms.orchestrator.getOrCreateSession(threadId)
       const input = await prepareChatInput(ctx, threadId, { content }, {})
@@ -3509,12 +3511,13 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const { detail } = resolved
       return {
         pullRequest: { number: detail.number, title: detail.title, url: detail.url, state: detail.state, isDraft: detail.isDraft, author: detail.author, headRefName: detail.headRefName, isCrossRepository: detail.isCrossRepository },
-        threads: resolved.threads
+        threads: resolved.threads,
+        enablesWorktreeConfig: resolved.enablesWorktreeConfig
       }
     }
     case 'pullRequests.startThread': {
       const p = isObject(params) ? params : {}
-      rejectUnknownKeys(p, ['projectId', 'number', 'reference', 'send', 'message', 'allowClosed', 'allowDuplicate'])
+      rejectUnknownKeys(p, ['projectId', 'number', 'reference', 'send', 'message', 'allowClosed', 'allowDuplicate', 'allowWorktreeConfig'])
       const projectId = asString(p.projectId, 'projectId', 256)
       if ((p.number === undefined) === (p.reference === undefined)) throw new DomainRpcError('invalid_params', 'Give either number or reference')
       const reference = p.reference !== undefined
@@ -3530,7 +3533,8 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
           send,
           ...(message !== undefined ? { message } : {}),
           allowClosed: asOptionalBoolean(p.allowClosed, 'allowClosed') === true,
-          allowDuplicate: asOptionalBoolean(p.allowDuplicate, 'allowDuplicate') === true
+          allowDuplicate: asOptionalBoolean(p.allowDuplicate, 'allowDuplicate') === true,
+          allowWorktreeConfig: asOptionalBoolean(p.allowWorktreeConfig, 'allowWorktreeConfig') === true
         }))
         return { ...started, threads: listedThreadsFor(ctx, ctx.mms.threads.listAllThreads()) }
       } finally {
@@ -3560,12 +3564,12 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       return { thread, threads: listedThreadsFor(ctx, threads) }
     }
     case 'pullRequests.watch': {
-      // Turns a thread's watch of its pull request off, to notify (a line in the thread) or to act (also wakes the agent).
+      // Turns a thread's watch of its pull request off, or on to notify (a line in the thread). A watch never wakes the agent.
       const p = isObject(params) ? params : {}
       rejectUnknownKeys(p, ['threadId', 'watch', 'number'])
       const threadId = asString(p.threadId, 'threadId', 256)
       const mode = asString(p.watch, 'watch', 16)
-      if (mode !== 'off' && mode !== 'notify' && mode !== 'act') throw new DomainRpcError('invalid_params', 'watch must be off, notify or act')
+      if (mode !== 'off' && mode !== 'notify') throw new DomainRpcError('invalid_params', 'watch must be off or notify')
       const number = asOptionalBoundedInt(p.number, 'number', { min: 1, max: Number.MAX_SAFE_INTEGER })
       if (!ctx.mms.threads.getThread(threadId)) throw new DomainRpcError('thread_not_found', 'Thread not found', { threadId })
       ctx.mms.threads.assertThreadAdmission(threadId)

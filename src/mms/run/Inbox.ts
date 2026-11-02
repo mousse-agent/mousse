@@ -339,6 +339,15 @@ export class Inbox {
     return Number(row?.n ?? 0) - Number((this.get(inboxId)?.payload as { releases?: unknown } | null)?.releases ?? 0)
   }
 
+  /** Every row of a retired kind (`isRetiredInboxRow`) not yet acknowledged, whatever its thread: acknowledged, never delivered. */
+  withdrawRetiredRows(): InboxRecord[] {
+    const ids = (this.db
+      .statement(`SELECT inbox_id FROM inbox WHERE kind = 'pr_update' AND status != 'acknowledged' ORDER BY created_at, rowid`)
+      .all() as Array<{ inbox_id: string }>)
+      .map((row) => row.inbox_id)
+    return ids.length ? this.markAcknowledged(ids) : []
+  }
+
   /** pending|delivered -> acknowledged. */
   markAcknowledged(ids: readonly string[]): InboxRecord[] {
     return this.move(ids, 'acknowledged', ['pending', 'delivered'])

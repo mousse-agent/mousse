@@ -465,8 +465,8 @@
     "security": "066fa977e9dd8084"
   },
   "pullRequests.startThread": {
-    "version": 1,
-    "digest": "849069a63c4901c0",
+    "version": 2,
+    "digest": "5a7096400a2cdeb9",
     "security": "33563a9a1f06aab9"
   },
   "pullRequests.unlink": {
