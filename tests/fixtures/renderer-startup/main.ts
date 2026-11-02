@@ -43,7 +43,7 @@ async function main() {
     const workspaceSize = await execute('({width:document.querySelector(".app").offsetWidth,height:document.querySelector(".app").offsetHeight})')
     await execute('window.retainedWorkspace=document.querySelector(".startup-transcript")')
     const acrylic = []
-    for (const [theme, intensity] of [['blacksphere-plus', 20], ['blacksphere-plus', 90], ['dark-modern', 55], ['light', 55]]) {
+    for (const [theme, intensity] of [['blacksphere-plus', 20], ['blacksphere-plus', 90], ['github-dark', 55], ['light', 55]]) {
       await execute(`qa.acrylic(${JSON.stringify(theme)},${intensity})`)
       acrylic.push(await execute(`(() => {
         const style = element => ({background:getComputedStyle(element).backgroundColor,image:getComputedStyle(element).backgroundImage});
