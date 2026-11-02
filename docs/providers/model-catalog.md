@@ -94,9 +94,14 @@ Within format 1:
 - Add optional fields only. Never rename, remove or change the meaning of a field.
 - Never reuse an `id`.
 - Deleting a model is allowed: older builds stop offering it.
-- Raise `revision` with every change.
-- A change that adds or retires a Claude model says in its PR what the check found for each
-  candidate on a signed-in machine (runs, refused, remapped, unknown).
+- Raise `revision` with every change. CI's static checks fail a pull request that changes the file
+  without raising it (`scripts/check-model-catalog-revision.mjs --base HEAD^1`, against the base
+  branch side of the PR's merge commit).
+- A change that adds or retires a Claude model pastes into its PR what the check finds for each
+  model on a signed-in machine. `node scripts/check-model-catalog.mjs [--claude <path>]` prints it:
+  it starts one idle Claude Code query, sends no prompt, switches it to every model with a `claude`
+  route and prints runs, refused, remapped or unknown by the rules below. Run it on your own
+  machine, never in CI; it never signs in.
 
 A breaking change becomes `format: 2` in a new file (`models-2.json`); the format-1 file stays
 published until no supported build reads it.
@@ -104,6 +109,66 @@ published until no supported build reads it.
 The bundled-file test checks: the schema, unique ids and unique ids per route, valid dates, known
 route keys, `short` equal to `name` without the brand, and every `minMousse` at or below
 `package.json`'s version.
+
+## Publishing
+
+A merge doesn't publish the catalog. After merge, the **Model catalog** workflow
+(`.github/workflows/model-catalog.yml`) publishes it as an asset of the `models` release:
+
+- `https://github.com/mousse-agent/mousse/releases/download/models/models-1.json`
+- `https://github.com/mousse-agent/mousse/releases/download/models/models-1.json.sig`
+
+Builds don't download it yet; the bundled copy is the only one in use.
+
+**To publish:** run the workflow from master (Actions → Model catalog → Run workflow, or
+`gh workflow run model-catalog.yml --ref master`), then approve it when GitHub asks. The workflow:
+
+1. runs `tests/modelCatalogBundled.test.ts` on `src/mms/models/models.json`;
+2. copies it to `models-1.json` byte for byte, and fails unless its `revision` is higher than the
+   published copy's or the bytes are identical (with nothing published yet, any revision passes);
+3. signs it (`scripts/sign-model-catalog.mjs`) and checks the signature against the public keys in
+   code;
+4. creates the `models` release the first time, as a prerelease that is never "latest", and fails
+   if it is anything else. A normal release would become "latest", and stable builds would then
+   look for their update file there and fail to update. Nightly and stable release scripts only
+   read `v…` tags, so they skip it;
+5. uploads both files, replacing the old ones.
+
+A rollback is a new revision with the old content.
+
+### Signature
+
+`models-1.json.sig` is the raw 64-byte Ed25519 signature over the exact bytes of `models-1.json`:
+binary, with no base64 and no line ending. `verifyModelCatalogSignature(bytes, signature)` in
+`src/mms/models/catalogSignature.ts` checks it with `node:crypto` against
+`MODEL_CATALOG_PUBLIC_KEYS`: the base64 text of each raw 32-byte public key. The list has room for
+two keys, so a new key ships in a release before the workflow signs with it. With no key listed,
+every signature is rejected.
+
+The private key exists only as the `MODEL_CATALOG_SIGNING_KEY` secret of the `model-catalog`
+environment (base64 PKCS#8 text), which only an approved run of the workflow can read.
+
+### One-time setup (owner)
+
+1. Create the `model-catalog` environment, with you as required reviewer and master as its only
+   branch:
+
+   ```sh
+   id=$(gh api user --jq .id)
+   gh api -X PUT repos/mousse-agent/mousse/environments/model-catalog --input - <<EOF
+   {"reviewers":[{"type":"User","id":$id}],"deployment_branch_policy":{"protected_branches":false,"custom_branch_policies":true}}
+   EOF
+   gh api -X POST repos/mousse-agent/mousse/environments/model-catalog/deployment-branch-policies -f name=master -f type=branch
+   ```
+
+2. Make the key: `node scripts/model-catalog-keygen.mjs --repo mousse-agent/mousse`. It saves the
+   private key as the environment's secret through `gh secret set` (never printed, never on disk)
+   and prints one line, the public key.
+3. Paste that line into `MODEL_CATALOG_PUBLIC_KEYS` in a PR. Once it merges, the workflow can
+   publish.
+
+To replace the key, add the new public key as the second entry and ship it in a release, run the
+keygen script again, and remove the old key once builds that know only it are unsupported.
 
 ## Older Claude models
 
@@ -139,10 +204,9 @@ never delays or changes the live list. Each model it finds running updates open 
 
 Not built yet:
 
-- **Downloads:** the file published as a GitHub release asset (`models-1.json`), fetched at most
-  every 6 hours with a timeout and a size cap, and used only when its `revision` is higher than the
-  copy in use. The bundled copy is trusted as part of the install.
-- **Signing:** a detached Ed25519 signature over the downloaded bytes, checked before use.
+- **Downloads:** the published `models-1.json` fetched at most every 6 hours with a timeout and a
+  size cap, and used only when its signature checks and its `revision` is higher than the copy in
+  use. The bundled copy is trusted as part of the install.
 - **API routes:** names and order for model API lists (`anthropic`, `openai`), and later a per-route
   block with what each adapter needs (context and output limits, input types, reasoning, price).
 - **Moving a thread off a model that is no longer offered,** to the newest model of the same
