@@ -1,5 +1,7 @@
 import { spawnSync } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
+import { lstatSync, type Stats } from 'node:fs'
+import { lstat } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join, parse, resolve, sep } from 'node:path'
 import type { GitRecord } from '../../shared/threadActions'
@@ -248,22 +250,34 @@ function* hiddenStoreCoverage(top: string): Steps<{ leftOut: CoverageGap[] }> {
   if (files.length > limits.files) throw new SnapshotRefusedError(`Undo is off for this folder because it is too large (more than ${limits.files.toLocaleString('en-US')} files).`)
   const leftOut: CoverageGap[] = []
   let total = 0
-  for (const path of files) {
-    let size: number
-    try {
-      const info = yield* disk.lstat(join(top, path))
-      // A directory here is a nested repository, kept as a link and not read.
-      if (!info.isFile()) continue
-      size = info.size
-    } catch { continue }
-    if (size > limits.fileBytes) {
-      leftOut.push({ path, reason: `over ${sizeText(limits.fileBytes)}` })
-      continue
+  for (let start = 0; start < files.length; start += SIZE_BATCH) {
+    const batch = files.slice(start, start + SIZE_BATCH)
+    const sizes = yield* fileSizes(batch.map((path) => join(top, path)))
+    for (const [index, path] of batch.entries()) {
+      const size = sizes[index]
+      // Not a file (a nested repository, kept as a link and not read), or gone since it was listed.
+      if (size === undefined) continue
+      if (size > limits.fileBytes) {
+        leftOut.push({ path, reason: `over ${sizeText(limits.fileBytes)}` })
+        continue
+      }
+      total += size
+      if (total > limits.bytes) throw new SnapshotRefusedError(`Undo is off for this folder because it is too large (more than ${sizeText(limits.bytes)}).`)
     }
-    total += size
-    if (total > limits.bytes) throw new SnapshotRefusedError(`Undo is off for this folder because it is too large (more than ${sizeText(limits.bytes)}).`)
   }
   return { leftOut }
+}
+
+/** Files whose size is read together, so a folder of many files is not walked one call at a time. */
+const SIZE_BATCH = 256
+
+/** The size of each path that is a file; undefined for anything else, or a path that cannot be read. */
+function fileSizes(paths: string[]): Steps<Array<number | undefined>> {
+  const sizeOf = (info: Stats): number | undefined => info.isFile() ? info.size : undefined
+  return step(
+    () => paths.map((path) => { try { return sizeOf(lstatSync(path)) } catch { return undefined } }),
+    () => Promise.all(paths.map((path) => lstat(path).then(sizeOf, () => undefined)))
+  )
 }
 
 function* privateFiles(top: string): Steps<{ directory: string; index: string; last: string }> {

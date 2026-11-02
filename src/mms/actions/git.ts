@@ -136,7 +136,9 @@ export function tryGit(cwd: string, args: string[], env?: NodeJS.ProcessEnv): { 
   }
   const result = spawnSync('git', safe, { cwd, encoding: 'utf8', env: gitEnv(cwd, env) })
   const stderr = result.stderr.trim()
-  return { ok: result.status === 0, stdout: result.stdout.trim(), stderr: (result.status !== 0 && filterRefusal(stderr)) || stderr }
+  // Output cut off at the limit is a failure, even when Git exited 0 before it was stopped (`spawnSync` reports both).
+  const ok = !result.error && result.status === 0
+  return { ok, stdout: result.stdout.trim(), stderr: (!ok && filterRefusal(stderr)) || stderr }
 }
 
 /** {@link tryGit} without blocking the daemon. */
@@ -150,7 +152,9 @@ export async function tryGitAsync(cwd: string, args: string[], env?: NodeJS.Proc
   }
   const result = await runGitProcess(safe, { cwd, env: gitEnv(cwd, env) })
   const stderr = result.stderr.trim()
-  return { ok: result.status === 0, stdout: result.stdout.trim(), stderr: (result.status !== 0 && filterRefusal(stderr)) || stderr }
+  // As in `tryGit`: output cut off at the limit is a failure.
+  const ok = !result.error && result.status === 0
+  return { ok, stdout: result.stdout.trim(), stderr: (!ok && filterRefusal(stderr)) || stderr }
 }
 
 /** {@link git} as a step: see `steps.ts`. */
@@ -177,7 +181,7 @@ export const NOT_MOUSSE = `:(exclude)${MOUSSE_DIRECTORY}`
 /** Git output exactly as printed (NUL-separated lists keep leading and trailing spaces), optionally fed `input`. */
 function gitRaw(cwd: string, args: string[], env?: NodeJS.ProcessEnv, input?: string): string {
   const result = spawnSync('git', guarded(cwd, args, { env, stdin: input }), { cwd, encoding: 'utf8', input, env: gitEnv(cwd, env) })
-  if (result.status !== 0) {
+  if (result.error || result.status !== 0) {
     const stderr = (result.stderr ?? '').trim()
     throw new Error(filterRefusal(stderr) || stderr || `git ${args[0]} failed`)
   }
@@ -187,7 +191,7 @@ function gitRaw(cwd: string, args: string[], env?: NodeJS.ProcessEnv, input?: st
 /** {@link gitRaw} without blocking the daemon. */
 async function gitRawAsync(cwd: string, args: string[], env?: NodeJS.ProcessEnv, input?: string): Promise<string> {
   const result = await runGitProcess(await guardedAsync(cwd, args, { env, stdin: input }), { cwd, env: gitEnv(cwd, env), input })
-  if (result.status !== 0) {
+  if (result.error || result.status !== 0) {
     const stderr = (result.stderr ?? '').trim()
     throw new Error(filterRefusal(stderr) || stderr || `git ${args[0]} failed`)
   }

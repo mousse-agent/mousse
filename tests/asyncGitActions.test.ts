@@ -10,7 +10,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { MousseMainService } from '../src/mms/MousseMainService'
 import { dispatchMethod } from '../src/mms/protocol/handlers'
 import { ThreadWorkspaceManager } from '../src/mms/workspace/ThreadWorkspaceManager'
-import { gitAsync, inspectPendingChanges, inspectPendingChangesAsync, runGitProcess, tryGit, tryGitAsync } from '../src/mms/actions/git'
+import { gitAsync, gitRawStep, inspectPendingChanges, inspectPendingChangesAsync, runGitProcess, tryGit, tryGitAsync } from '../src/mms/actions/git'
+import { runAsync, runSync } from '../src/mms/actions/steps'
 import { takeSnapshot, takeSnapshotAsync, worktreeTree, worktreeTreeAsync } from '../src/mms/actions/snapshots'
 import { testHarness } from '../src/mms/run/testkit/harness'
 import { git, gitFoundationFixture } from './fixtures/gitFoundation'
@@ -47,6 +48,18 @@ describe('the synchronous and async forms', () => {
     expect(await tryGitAsync(f.repo, ['rev-parse', '--verify', '-q', 'nothing'])).toEqual(tryGit(f.repo, ['rev-parse', '--verify', '-q', 'nothing']))
     // A failed command carries Git's own message, as `execFileSync` does.
     await expect(gitAsync(f.repo, ['rev-parse', '--verify', 'nothing^{commit}'])).rejects.toMatchObject({ status: 128, stderr: expect.stringContaining('fatal') })
+  })
+
+  it('count a run cut off at the output limit as failed, even when Git exited 0 first', async () => {
+    // One byte past the 1 MiB both forms read by default.
+    writeFileSync(join(f.repo, 'large.bin'), Buffer.alloc(1024 * 1024 + 1, 0x61))
+    const blob = git(f.repo, 'hash-object', '-w', 'large.bin').trim()
+    const sync = tryGit(f.repo, ['cat-file', '-p', blob])
+    const async = await tryGitAsync(f.repo, ['cat-file', '-p', blob])
+    expect(sync.ok).toBe(false)
+    expect(async.ok).toBe(sync.ok)
+    expect(() => runSync(gitRawStep(f.repo, ['cat-file', '-p', blob]))).toThrow()
+    await expect(runAsync(gitRawStep(f.repo, ['cat-file', '-p', blob]))).rejects.toThrow()
   })
 
   it('report output past the limit as spawnSync does', async () => {
