@@ -182,6 +182,11 @@ export function isUnsafeSnapshotRoot(path: string, home = homedir()): boolean {
   return runSync(unsafeSnapshotRoot(path, home))
 }
 
+/** {@link isUnsafeSnapshotRoot} without blocking the daemon. */
+export function isUnsafeSnapshotRootAsync(path: string, home = homedir()): Promise<boolean> {
+  return runAsync(unsafeSnapshotRoot(path, home))
+}
+
 function* unsafeSnapshotRoot(path: string, home = homedir()): Steps<boolean> {
   const target = yield* canonicalPath(path)
   if (target === parse(target).root) return true

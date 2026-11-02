@@ -54,7 +54,7 @@ describe('Git foundation pinned child results', () => {
     expect(f.read(f.repo)).toBe('base\n')
   })
 
-  it('an integration an older version left half done is cancelled, never replayed, and the files stay as they are', () => {
+  it('an integration an older version left half done is cancelled, never replayed, and the files stay as they are', async () => {
     const child = f.child()
     const pinned = f.commit(child, 'task A\n')
     new ThreadJournal(f.thread).append({
@@ -62,10 +62,10 @@ describe('Git foundation pinned child results', () => {
       expectedPreState: { preSnapshot: f.baseSha, workerSha: pinned, spawnBaseSha: f.baseSha, expectedTree: '' },
       details: { request: { agentId: 'child', operationId: 'crashed', workerWorktree: child, spawnBaseSha: f.baseSha, pinnedWorkerSha: pinned, threadWorkspace: f.repo } }
     })
-    expect(cancelPendingIntegrations(f.thread)).toEqual([{ operationId: 'crashed', agentId: 'child', resultSha: pinned, spawnBaseSha: f.baseSha }])
+    expect(await cancelPendingIntegrations(f.thread)).toEqual([{ operationId: 'crashed', agentId: 'child', resultSha: pinned, spawnBaseSha: f.baseSha }])
     expect(new ThreadJournal(f.thread).latestByOperation().get('crashed')).toMatchObject({ state: 'cancelled' })
     expect(f.read(f.repo)).toBe('base\n')
     expect(new ChangeReceiptService(f.thread).list()).toEqual([])
-    expect(cancelPendingIntegrations(f.thread)).toEqual([])
+    expect(await cancelPendingIntegrations(f.thread)).toEqual([])
   })
 })

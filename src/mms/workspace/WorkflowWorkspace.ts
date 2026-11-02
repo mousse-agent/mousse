@@ -8,9 +8,10 @@ import { ChangeReceiptService } from '../actions/ChangeReceiptService'
 import { CodeRevertService } from '../actions/CodeRevertService'
 import { PublishService } from '../actions/PublishService'
 import { ConversationBranchService } from '../actions/ConversationBranchService'
-import { moveFiles, sameTree, takeSnapshot } from '../actions/snapshots'
+import { moveFiles, sameTreeAsync, takeSnapshot } from '../actions/snapshots'
+import { gitAsync } from '../actions/git'
 import { cancelPendingIntegrations, cancelledIntegrationsNotice } from '../agents/ChildAgentIntegrationService'
-import { buildSubagentResultReport } from '../agents/subagentResultReport'
+import { buildSubagentResultReportAsync } from '../agents/subagentResultReport'
 import { withGitMutationLocks } from '../actions/GitOperationCoordinator'
 import {
   isWorkflowWorkingDirectory,
@@ -220,7 +221,7 @@ export async function resolveOwnedThreadWorkspace(
       const lease = await waitAcquireExecutionLease(threadDirectory, { source: 'workflow-workspace-recovery', signal, maxAttempts: 36_000 })
       try {
         // A merge of a subagent's result an older version left unfinished is recorded as cancelled, never run again.
-        const notice = cancelledIntegrationsNotice(cancelPendingIntegrations(threadDirectory, existing.worktreePath))
+        const notice = cancelledIntegrationsNotice(await cancelPendingIntegrations(threadDirectory, existing.worktreePath))
         if (notice) owner.orchestrator?.noteThreadNotice(context.threadId, notice)
         await new PublishService(threadDirectory).recoverPending(existing.worktreePath, repository.primaryCheckoutPath, lease)
         await new ThreadActionService(threadDirectory).recoverPending(existing.worktreePath, lease)
@@ -501,11 +502,11 @@ export async function reportOwnedAgentWorkspace(input: {
   const resultSha = input.revision.writeSha
   const spawnBase = record.baseSnapshot ?? workspace.baseSha
   // A worker that changed nothing has no result: its files are the ones it started from.
-  const unchanged = sameTree(workspace.worktreePath, resultSha, spawnBase)
-  const report = await withGitMutationLocks(`${workspace.recordPath}.changes`, workspace.worktreePath, 'workflow-result-pin', () => {
+  const unchanged = await sameTreeAsync(workspace.worktreePath, resultSha, spawnBase)
+  const report = await withGitMutationLocks(`${workspace.recordPath}.changes`, workspace.worktreePath, 'workflow-result-pin', async () => {
     // The result is a snapshot of the worker's files, which stays valid whatever the worker did to its own HEAD since.
-    git(workspace.worktreePath, ['cat-file', '-e', `${resultSha}^{commit}`])
-    const frozen = buildSubagentResultReport({
+    await gitAsync(workspace.worktreePath, ['cat-file', '-e', `${resultSha}^{commit}`])
+    const frozen = await buildSubagentResultReportAsync({
       cwd: workspace.worktreePath, workedIn: workspace.worktreePath, shared: false,
       baseSha: spawnBase, resultSha: unchanged ? spawnBase : resultSha,
       pins: workspace.retainedRef ? { base: workflowBaseRef(workspace.retainedRef), result: workspace.retainedRef } : undefined
@@ -516,7 +517,7 @@ export async function reportOwnedAgentWorkspace(input: {
   // The parent's files are not touched: the revision names them as they are, and carries the report.
   const metadata = new ThreadWorkspaceManager(workspace.parent.threadDirectory).load()
   return { workspaceId: metadata?.workspaceId ?? context.threadId, readSha: workspace.baseSha,
-    writeSha: metadata?.snapshotSha ?? git(workspace.parent.workspacePath, ['rev-parse', 'HEAD']), generation: metadata?.generation, result: report }
+    writeSha: metadata?.snapshotSha ?? await gitAsync(workspace.parent.workspacePath, ['rev-parse', 'HEAD']), generation: metadata?.generation, result: report }
 }
 
 /** Where a workflow agent's base is kept, beside its result ref (a ref cannot also be a folder of other refs). */

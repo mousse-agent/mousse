@@ -3,13 +3,13 @@ import { join } from 'node:path'
 import { ThreadJournal } from '../data/ThreadJournal'
 import { acquireRepositoryLease } from '../git/RepositoryLease'
 import { getMousseHomeDir } from '../data/paths'
-import { hiddenStoreIdentity, inHiddenStore, runStoreGit } from '../git/hiddenStore'
+import { hiddenStoreIdentity, inHiddenStore, runStoreGit, runStoreGitAsync } from '../git/hiddenStore'
 import { repoProgramEnv } from '../git/repoPrograms'
 import type { ThreadLeaseHandle } from '../queue/ThreadExecutionLease'
-import { collectStoreGarbage, dropSnapshotStoreUser, loadSnapshotWorkspace, projectStorePath, readSnapshotWorkspaceRecord, removeThreadSnapshots, SNAPSHOT_TRASH_QUIET_MS, threadPinRef, threadStorePath, trashProjectStoreIfUnused } from '../workspace/SnapshotWorkspace'
+import { collectStoreGarbageAsync, dropSnapshotStoreUser, loadSnapshotWorkspaceAsync, projectStorePath, readSnapshotWorkspaceRecord, removeThreadSnapshots, SNAPSHOT_TRASH_QUIET_MS, threadPinRef, threadStorePath, trashProjectStoreIfUnused } from '../workspace/SnapshotWorkspace'
 import { ChangeReceiptService } from './ChangeReceiptService'
 import { withGitMutationLocks } from './GitOperationCoordinator'
-import { git, gitAsync, tryGit, tryGitAsync } from './git'
+import { gitAsync, tryGitAsync } from './git'
 import { UndoRetentionService } from './UndoRetentionService'
 import { keptFilesFromListing, PRESERVED_EXPIRY_OPERATION, PRESERVED_REF_FORMAT, PRESERVED_REFS, threadPreservedIndex, type KeptFilesRef } from './preservedFiles'
 
@@ -21,10 +21,6 @@ export interface SnapshotReleaseResult {
 }
 
 const ACTIVE = ['planned', 'running', 'prepared', 'git_applied', 'context_pending', 'recovery_required']
-
-function refValue(top: string, name: string): string | undefined {
-  return tryGit(top, ['rev-parse', '--verify', '-q', name]).stdout || undefined
-}
 
 async function refValueAsync(top: string, name: string): Promise<string | undefined> {
   return (await tryGitAsync(top, ['rev-parse', '--verify', '-q', name])).stdout || undefined
@@ -40,7 +36,7 @@ async function refValueAsync(top: string, name: string): Promise<string | undefi
  * receipt says. The thread's latest-snapshot pin and its conversation branches' pins stay.
  */
 export async function releaseSnapshotRefs(threadDirectory: string, options: { limit?: number; signal?: AbortSignal; heldThreadLease?: ThreadLeaseHandle; now?: () => number } = {}): Promise<SnapshotReleaseResult> {
-  const workspace = loadSnapshotWorkspace(threadDirectory)
+  const workspace = await loadSnapshotWorkspaceAsync(threadDirectory)
   if (!workspace) throw new Error('This thread has no snapshot workspace.')
   const limit = options.limit ?? 20
   return withGitMutationLocks(threadDirectory, workspace.record.workTree, 'undo-ref-release', async () => {
@@ -74,7 +70,7 @@ export async function releaseSnapshotRefs(threadDirectory: string, options: { li
       }
     }
     if (result.releasedRefs.length) {
-      collectStoreGarbage(workspace.store)
+      await collectStoreGarbageAsync(workspace.store)
       result.collected = true
     }
     return result
@@ -95,6 +91,16 @@ export function threadStoreKeptFiles(threadDirectory: string, now = Date.now()):
   return { gitDir, refs: keptFilesFromListing(listing, threadDirectory, now) }
 }
 
+/** {@link threadStoreKeptFiles} without blocking the daemon: the store's Git runs as a child process. */
+export async function threadStoreKeptFilesAsync(threadDirectory: string, now = Date.now()): Promise<{ gitDir: string; refs: KeptFilesRef[] } | undefined> {
+  const record = readSnapshotWorkspaceRecord(threadDirectory)
+  if (!record || (record.kind === 'project' && !record.projectId)) return undefined
+  const gitDir = record.kind === 'project' ? projectStorePath(record.projectId!) : threadStorePath(record.threadId)
+  if (!existsSync(join(gitDir, 'HEAD'))) return undefined
+  const listing = await runStoreGitAsync({ workTree: gitDir, gitDir }, ['for-each-ref', `--format=${PRESERVED_REF_FORMAT}`, PRESERVED_REFS], repoProgramEnv())
+  return { gitDir, refs: keptFilesFromListing(listing, threadDirectory, now) }
+}
+
 /**
  * What a thread leaves in snapshot stores when it is deleted for good. A thread with no project has a store of its own,
  * which is removed. A thread of a project that is not a Git repository shares the project's store: its
@@ -105,21 +111,22 @@ export function threadStoreKeptFiles(threadDirectory: string, now = Date.now()):
  */
 export async function releaseThreadSnapshots(threadDirectory: string, signal?: AbortSignal, options: { discardAuthorized?: boolean } = {}): Promise<string[]> {
   // Kept files that may be the only copy of a file leave only with the person's discard (the purge preview lists them).
-  const young = options.discardAuthorized ? [] : threadStoreKeptFiles(threadDirectory)?.refs.filter((item) => item.discardReason) ?? []
+  const young = options.discardAuthorized ? [] : (await threadStoreKeptFilesAsync(threadDirectory))?.refs.filter((item) => item.discardReason) ?? []
   if (young.length) throw new Error(`Files set aside before a restore or an abort may be the only copy (${young.map((item) => item.ref).join(', ')}); deleting this thread for good needs them discarded.`)
   const record = readSnapshotWorkspaceRecord(threadDirectory)
   if (record?.kind === 'standalone') {
     removeThreadSnapshots(record.threadId)
     return []
   }
-  const workspace = loadSnapshotWorkspace(threadDirectory)
+  const workspace = await loadSnapshotWorkspaceAsync(threadDirectory)
   if (!workspace || workspace.record.kind !== 'project') return []
   const lease = await acquireRepositoryLease(hiddenStoreIdentity(workspace.store), { signal })
   try {
-    return inHiddenStore(workspace.store, () => {
+    // Awaited here, so the lease is let go only once the work in the store is done.
+    return await inHiddenStore(workspace.store, async () => {
       const top = workspace.store.workTree
       const names = new Set<string>()
-      const pins = tryGit(top, ['for-each-ref', '--format=%(refname)', `refs/mousse/threads/${workspace.record.threadId}/`])
+      const pins = await tryGitAsync(top, ['for-each-ref', '--format=%(refname)', `refs/mousse/threads/${workspace.record.threadId}/`])
       for (const name of pins.stdout.split(/\r?\n/).filter(Boolean)) names.add(name)
       names.add(threadPinRef(workspace.record.threadId))
       for (const receipt of new ChangeReceiptService(threadDirectory, { readOnly: true }).list()) for (const name of receipt.retainedRefs) names.add(name)
@@ -136,26 +143,26 @@ export async function releaseThreadSnapshots(threadDirectory: string, signal?: A
       for (const name of names) {
         // Only Mousse's own namespaces: a name that came from a record is never trusted to point elsewhere.
         if (!name.startsWith('refs/mousse/')) continue
-        const current = refValue(top, name)
+        const current = await refValueAsync(top, name)
         if (current === undefined) continue
-        git(top, ['update-ref', '-d', name, current])
+        await gitAsync(top, ['update-ref', '-d', name, current])
         released.push(name)
       }
       // Files a restore of this thread kept (`refs/mousse/preserved/<operation>-…`) exist nowhere else: they move to the
       // trash namespace, which the storage cleanup empties after the trash's wait (`expireTrashedSnapshotRefs`).
       // Only the thread's own, by the exact names their writers use (`threadPreservedIndex`), never by a prefix.
       const owned = threadPreservedIndex(threadDirectory)
-      const preserved = tryGit(top, ['for-each-ref', '--format=%(refname) %(objectname)', PRESERVED_REFS]).stdout.split(/\r?\n/).filter(Boolean)
+      const preserved = (await tryGitAsync(top, ['for-each-ref', '--format=%(refname) %(objectname)', PRESERVED_REFS])).stdout.split(/\r?\n/).filter(Boolean)
       const trashed = `refs/mousse/trash/${Date.now()}`
       for (const line of preserved) {
         const [name, sha] = line.split(' ') as [string, string]
         const leaf = name.slice(PRESERVED_REFS.length)
         if (!owned.owns(name)) continue
-        git(top, ['update-ref', '--no-deref', `${trashed}/preserved/${leaf}`, sha])
-        git(top, ['update-ref', '-d', name, sha])
+        await gitAsync(top, ['update-ref', '--no-deref', `${trashed}/preserved/${leaf}`, sha])
+        await gitAsync(top, ['update-ref', '-d', name, sha])
         released.push(name)
       }
-      if (released.length) collectStoreGarbage(workspace.store)
+      if (released.length) await collectStoreGarbageAsync(workspace.store)
       dropSnapshotStoreUser(workspace.store.gitDir, workspace.record.threadId)
       return released
     })
@@ -181,18 +188,18 @@ export async function expireTrashedSnapshotRefs(now = Date.now(), home = getMous
     const store = { workTree: gitDir, gitDir }
     const lease = await acquireRepositoryLease(hiddenStoreIdentity(store))
     try {
-      const run = (args: string[]): string => runStoreGit(store, args, repoProgramEnv())
-      const refs = run(['for-each-ref', '--format=%(refname) %(objectname)', 'refs/mousse/trash/']).split(/\r?\n/).filter(Boolean)
+      const run = (args: string[]): Promise<string> => runStoreGitAsync(store, args, repoProgramEnv())
+      const refs = (await run(['for-each-ref', '--format=%(refname) %(objectname)', 'refs/mousse/trash/'])).split(/\r?\n/).filter(Boolean)
       let removed = 0
       for (const line of refs) {
         const [name, sha] = line.split(' ') as [string, string]
         const at = Number(name.split('/')[3])
         if (!Number.isFinite(at) || now - at < SNAPSHOT_TRASH_QUIET_MS) continue
-        run(['update-ref', '-d', name, sha])
+        await run(['update-ref', '-d', name, sha])
         deleted.push(name)
         removed++
       }
-      if (removed) collectStoreGarbage(store)
+      if (removed) await collectStoreGarbageAsync(store)
     } finally {
       lease.release()
     }

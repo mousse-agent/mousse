@@ -6,6 +6,7 @@ import { dirname, join, resolve, sep } from 'node:path'
 import type { RepositoryIdentity } from './RepositoryIdentity'
 import { assertGitAllowed, assertGitAllowedAsync, type GitCommandRequest, type UserAction } from './gitPolicy'
 import { GIT_NULL_DEVICE, NO_HOOKS_PATH } from './gitNullDevice'
+import { gitRunError, runGitProcess } from './runGitProcess'
 
 /**
  * A hidden snapshot store (docs/workspace-snapshots.md, "Folders without Git"): a Git repository Mousse owns, kept in its own
@@ -219,6 +220,18 @@ export function runStoreGit(store: HiddenStore, args: readonly string[], base: N
   }
   checkStoreCommand(store, store.gitDir, run, {}, false)
   return execFileSync('git', run, { cwd: store.gitDir, env: { ...isolatedEnv(store, base), ...location(store, false) }, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim()
+}
+
+/** {@link runStoreGit} without blocking the daemon: the same central check (read without blocking), command and answer. */
+export async function runStoreGitAsync(store: HiddenStore, args: readonly string[], base: NodeJS.ProcessEnv = process.env): Promise<string> {
+  const run = ['--no-optional-locks', ...args]
+  const init = args[0] === 'init'
+  const cwd = init ? dirname(store.gitDir) : store.gitDir
+  if (init) await assertGitAllowedAsync({ cwd, args: run, env: isolation(), lockFree: true })
+  else await checkStoreCommandAsync(store, store.gitDir, run, {}, false)
+  const ran = await runGitProcess(run, { cwd, env: init ? isolatedEnv(store, base) : { ...isolatedEnv(store, base), ...location(store, false) } })
+  if (ran.error || ran.status !== 0) throw gitRunError(run, ran)
+  return ran.stdout.trim()
 }
 
 /** The identity that mutation leases of the store are keyed on: every thread that shares the store shares the lease. */

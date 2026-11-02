@@ -297,7 +297,7 @@ describe('a project without Git', () => {
     expect(readFileSync(join(work, 'a.txt'), 'utf8')).toBe('two\n')
     expect(existsSync(join(work, 'c.txt'))).toBe(false)
     // The turn before git init is still reviewed from the store.
-    const earlier = resolveReviewScope(t.directory, { kind: 'turn', turnId: 'first' })!
+    const earlier = (await resolveReviewScope(t.directory, { kind: 'turn', turnId: 'first' }))!
     expect(earlier.unavailable).toBeUndefined()
     const listed = await inThreadSnapshotScope(t.directory, work, () => listChangedFiles(work, earlier.range))
     expect(listed.files.map((file) => file.path)).toEqual(['a.txt', 'b.txt'])
@@ -584,7 +584,7 @@ describe('a project without Git', () => {
     write(work, 'keep.txt', 'one\ntwo\n')
     const t = thread('a', work, 'project-1')
     const { action } = await t.turn('turn', () => { write(work, 'keep.txt', 'one\ntwo\nthree\n'); write(work, 'new.txt', 'new\n') })
-    const scope = resolveReviewScope(t.directory, { kind: 'turn', turnId: 'turn' })!
+    const scope = (await resolveReviewScope(t.directory, { kind: 'turn', turnId: 'turn' }))!
     expect(scope.unavailable).toBeUndefined()
     expect(scope.cwd).toBe(work)
     // Read in the thread's scope, as the review does; outside it the folder is just a folder.
@@ -600,7 +600,7 @@ describe('a project without Git', () => {
     // The restore review the gate shows is the same store's diff.
     expect(restoreDiff(t.directory, work, action.endSha, action.startSha)).toContain('-three')
     // The whole thread, from its first recorded action to the folder now.
-    const whole = resolveReviewScope(t.directory, { kind: 'thread' })!
+    const whole = (await resolveReviewScope(t.directory, { kind: 'thread' }))!
     expect(whole.range.from).toEqual({ kind: 'commit', sha: action.startSha })
     write(work, 'later.txt', 'later\n')
     expect((await read(() => listChangedFiles(whole.cwd, whole.range))).files.map((file) => file.path).sort()).toEqual(['keep.txt', 'later.txt', 'new.txt'])

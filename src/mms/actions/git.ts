@@ -1,6 +1,6 @@
 import { type AppError, knownAppError } from '../../shared/errors'
 import type { PendingChangesDetails } from '../../shared/workspace'
-import { execFileSync, spawn, spawnSync } from 'node:child_process'
+import { execFileSync, spawnSync } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { join, resolve } from 'node:path'
 import { filterRefusal, repoProgramEnv, withoutRepoPrograms, withoutRepoProgramsAsync } from '../git/repoPrograms'
@@ -11,6 +11,7 @@ import { rethrowGitPolicyError } from '../git/gitPolicy'
 import { activeHiddenStore, checkStoreCommand, checkStoreCommandAsync, hiddenStoreEnv } from '../git/hiddenStore'
 import type { GitCheckOptions, RepoProgramOptions } from '../git/repoPrograms'
 import { waitForFolderAccess } from '../files/folderAccess'
+import { runGitProcess } from '../git/runGitProcess'
 import { files, runAsync, runSync, step, type Steps } from './steps'
 
 /**
@@ -51,47 +52,10 @@ export function gitEnv(cwd: string, env?: NodeJS.ProcessEnv): NodeJS.ProcessEnv 
   return store ? hiddenStoreEnv(store, base) : base
 }
 
-/** What a Git process left: as `spawnSync` reports it. */
-interface GitProcess { status: number | null; stdout: string; stderr: string; error?: NodeJS.ErrnoException }
+export { runGitProcess }
 
 /** The output limit `spawnSync` and `execFileSync` use when none is given. */
 const DEFAULT_MAX_BUFFER = 1024 * 1024
-
-/**
- * Runs `git argv` without blocking and reports it as `spawnSync` would: output past `maxBuffer` (on either stream)
- * or a run past `timeout` stops Git and is an `ENOBUFS` or `ETIMEDOUT` error, with the output read so far.
- */
-export function runGitProcess(argv: string[], options: { cwd: string; env: NodeJS.ProcessEnv; input?: string; maxBuffer?: number; timeout?: number }): Promise<GitProcess> {
-  const limit = options.maxBuffer ?? DEFAULT_MAX_BUFFER
-  return new Promise((settle) => {
-    const child = spawn('git', argv, { cwd: options.cwd, env: options.env, windowsHide: true, stdio: [options.input !== undefined ? 'pipe' : 'ignore', 'pipe', 'pipe'] })
-    const out: Buffer[] = []
-    const err: Buffer[] = []
-    let outSize = 0
-    let errSize = 0
-    let error: NodeJS.ErrnoException | undefined
-    const stop = (code: 'ENOBUFS' | 'ETIMEDOUT'): void => {
-      if (error) return
-      error = Object.assign(new Error(`spawnSync git ${code}`), { code, syscall: 'spawnSync git' })
-      child.kill()
-    }
-    const timer = options.timeout ? setTimeout(() => stop('ETIMEDOUT'), options.timeout) : undefined
-    child.stdout!.on('data', (chunk: Buffer) => { outSize += chunk.length; if (outSize > limit) stop('ENOBUFS'); else out.push(chunk) })
-    child.stderr!.on('data', (chunk: Buffer) => { errSize += chunk.length; if (errSize > limit) stop('ENOBUFS'); else err.push(chunk) })
-    child.on('error', (spawnError) => { error ??= spawnError })
-    child.on('close', (code) => {
-      if (timer) clearTimeout(timer)
-      // As `spawnSync`: the exit code even when the output was cut off; none for a process that was killed or never started.
-      const started = !error || error.code === 'ENOBUFS' || error.code === 'ETIMEDOUT'
-      settle({ status: started ? code : null, stdout: Buffer.concat(out).toString('utf8'), stderr: Buffer.concat(err).toString('utf8'), ...(error ? { error } : {}) })
-    })
-    if (options.input !== undefined) {
-      // Git may stop reading early (a refusal); what it did not read is dropped, as with `spawnSync`.
-      child.stdin!.on('error', () => undefined)
-      child.stdin!.end(options.input)
-    }
-  })
-}
 
 /**
  * Git for Mousse's own actions (checkpoints, restore, undo, revert): no program the repository

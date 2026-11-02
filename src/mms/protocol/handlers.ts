@@ -1044,7 +1044,7 @@ async function reviewTarget(ctx: HandlerContext, p: Record<string, unknown>): Pr
   // Turns and the thread's base belong to a thread's own worktree; a project id has neither.
   if (p.projectId !== undefined) throw new DomainRpcError('invalid_params', 'Turn and thread scopes need a threadId, not a projectId')
   const lookup = threadLookupContext(ctx, p)
-  const resolved = resolveReviewScope(lookup.threadDirectory, scope)
+  const resolved = await resolveReviewScope(lookup.threadDirectory, scope)
   if (!resolved) {
     return { scope, root: lookup.projectPath ?? '', range: { from: null, to: { kind: 'worktree' } }, unavailable: 'This thread has no worktree of its own, so its changes cannot be reviewed.' }
   }
@@ -2204,7 +2204,9 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         }
         // Edits made outside the terminal are recorded as their own action first; the terminal's action covers only what it changes.
         const startSha = actions && actionOptions ? (await actions.recordOutsideChanges(actionOptions)).startSha : undefined
-        if (actions && actionOptions) actions.beginTurn(actionOptions, startSha!)
+        // What `beginTurn` checks of the start, read right after the snapshot without blocking; `beginTurn` then runs no Git.
+        const startCheck = actions && actionOptions ? await actions.checkTurnStart(actionOptions.workspacePath, startSha!) : undefined
+        if (actions && actionOptions) actions.beginTurn(actionOptions, startSha!, startCheck)
         ptyId = ctx.mms.ptyManager.create(agentId, cwd, command, { threadId, env, shellArgs,
           ownership: lease ? { assert: () => assertHeldThreadLease(directory!, lease), heartbeat: () => { heartbeatExecutionLease(lease) },
             settled: async () => {
@@ -3132,12 +3134,12 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const workspace = new ThreadWorkspaceManager(operation.threadDirectory).loadOrSnapshot()
       if (!workspace || workspace.lifecycle !== 'ready') throw new DomainRpcError('workspace_not_ready', 'Thread workspace is not ready')
       assertNoRunningTurn(ctx, operation.threadId)
-      let cancelledIntegrations: ReturnType<typeof cancelPendingIntegrations>
+      let cancelledIntegrations: Awaited<ReturnType<typeof cancelPendingIntegrations>>
       let publish: Awaited<ReturnType<PublishService['recoverPending']>>
       let releaseRetained: string | undefined
       try {
         // A merge of a subagent result an older version left unfinished is cancelled, never run again.
-        cancelledIntegrations = cancelPendingIntegrations(operation.threadDirectory, workspace.worktreePath)
+        cancelledIntegrations = await cancelPendingIntegrations(operation.threadDirectory, workspace.worktreePath)
         // A left merge that was finished, aborted or replaced since is no longer offered for Abort.
         clearStaleLeftMerges(operation.threadDirectory)
         // A folder with no worktree has nothing to publish, and neither has a thread in its project's own folder: its work

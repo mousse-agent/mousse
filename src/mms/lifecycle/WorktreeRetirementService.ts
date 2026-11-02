@@ -16,9 +16,10 @@ import { WorktreeIdentity } from '../worktree/WorktreeIdentity'
 import { ThreadJournal } from '../data/ThreadJournal'
 import { getExternalResourceClaims } from './LifecycleClaims'
 import type { ConversationBranch, ThreadAction } from '../../shared/threadActions'
-import { gitDirectoryEnv } from '../git/gitEnv'
+import { gitDirectoryEnv, gitDirectoryEnvAsync } from '../git/gitEnv'
 import { READ_ONLY_GIT_ENV } from '../git/readOnlyGit'
-import { repoProgramEnv, withoutRepoPrograms } from '../git/repoPrograms'
+import { repoProgramEnv, withoutRepoPrograms, withoutRepoProgramsAsync } from '../git/repoPrograms'
+import { gitRunError, runGitProcess } from '../git/runGitProcess'
 import { renameFolder } from './renameFolder'
 import { isIdNamedMousseBranch, isMousseBranchName } from '../../shared/mousseBranches'
 
@@ -43,6 +44,35 @@ export function readDirectLifecycleRef(cwd: string, ref: string): string | undef
   const row = rows.find((entry) => entry.split('\0')[0] === ref)
   if (!row) return undefined
   const sha = row?.split('\0')[1]
+  if (!sha || !/^[a-f0-9]{40,64}$/.test(sha) || /^0+$/.test(sha)) throw new Error(`Existing resource reference is malformed or unreadable: ${ref}`)
+  return sha
+}
+/**
+ * {@link lifecycleGit} without blocking the daemon: it waits until the folder's volume answers, runs the same central
+ * check without blocking, and the same command with the same time and output limits. It fails as `execFileSync` does:
+ * the error carries Git's `status`, `stdout` and `stderr`.
+ */
+export async function lifecycleGitAsync(cwd: string, args: string[], input?: string, maxBuffer = 32 * 1024 * 1024, env?: NodeJS.ProcessEnv): Promise<string> {
+  const argv = await withoutRepoProgramsAsync(cwd, args, { stdin: input, env })
+  const ran = await runGitProcess(argv, { cwd, input, env: repoProgramEnv({ ...process.env, ...await gitDirectoryEnvAsync(cwd), ...env }), timeout: 30_000, maxBuffer })
+  if (ran.error || ran.status !== 0) throw gitRunError(argv, ran)
+  return ran.stdout.trimEnd()
+}
+/** {@link lifecycleRead} without blocking the daemon. */
+export function lifecycleReadAsync(cwd: string, args: string[], input?: string, maxBuffer?: number): Promise<string> {
+  return lifecycleGitAsync(cwd, args, input, maxBuffer, READ_ONLY_GIT_ENV)
+}
+/** {@link readDirectLifecycleRef} without blocking the daemon: the same reads, the same refusals. */
+export async function readDirectLifecycleRefAsync(cwd: string, ref: string): Promise<string | undefined> {
+  try { await lifecycleGitAsync(cwd, ['symbolic-ref', '-q', ref]); throw new Error(`Symbolic resource reference is not cleanup authority: ${ref}`) }
+  catch (error) { if ((error as { status?: number }).status !== 1) throw error }
+  const args = ['for-each-ref', '--format=%(refname)%00%(objectname)', ref]
+  const listing = await runGitProcess(await withoutRepoProgramsAsync(cwd, args), { cwd, env: repoProgramEnv({ ...process.env, ...await gitDirectoryEnvAsync(cwd), ...READ_ONLY_GIT_ENV }), timeout: 30_000, maxBuffer: 32 * 1024 * 1024 })
+  // Git may warn about a corrupt loose ref while exiting successfully and omitting it.
+  if (listing.error || listing.status !== 0 || listing.stderr.trim()) throw new Error(`Resource reference inventory is unreadable: ${ref}`)
+  const row = listing.stdout.split(/\r?\n/).find((entry) => entry.split('\0')[0] === ref)
+  if (!row) return undefined
+  const sha = row.split('\0')[1]
   if (!sha || !/^[a-f0-9]{40,64}$/.test(sha) || /^0+$/.test(sha)) throw new Error(`Existing resource reference is malformed or unreadable: ${ref}`)
   return sha
 }

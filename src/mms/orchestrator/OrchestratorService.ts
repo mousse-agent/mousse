@@ -237,7 +237,7 @@ import type { MousseFeatureFlags } from '../../shared/featureFlags'
 import { DEFAULT_FEATURE_FLAGS } from '../../shared/featureFlags'
 import { ThreadActionService } from '../actions/ThreadActionService'
 import { cancelledIntegrationsNotice, cancelPendingIntegrations } from '../agents/ChildAgentIntegrationService'
-import { buildSubagentResultReport, delegationResultRefPrefix, formatSubagentResultReport, readSubagentResults, recordedFilesAt, SUBAGENT_RESULTS_FILE, writeSubagentResults, type SubagentResultReport } from '../agents/subagentResultReport'
+import { buildSubagentResultReport, buildSubagentResultReportAsync, delegationResultRefPrefix, formatSubagentResultReport, readSubagentResults, recordedFilesAt, SUBAGENT_RESULTS_FILE, writeSubagentResults, type SubagentResultReport } from '../agents/subagentResultReport'
 import type { NativeContextBoundary } from '../../shared/threadActions'
 import { coverageNotice, SnapshotRefusedError, snapshotOrigin } from '../actions/snapshots'
 import { git as actionGit, gitAsync as actionGitAsync, requireCleanAsync as requireCleanWorkspaceAsync } from '../actions/git'
@@ -9142,7 +9142,7 @@ export class OrchestratorService extends EventEmitter {
     if (recoveryDirectory && recoveryWorkspace && session.executionLease) {
       const heldLease = session.executionLease
       // A merge of a subagent's result an older version left unfinished is cancelled, never run again; the thread hears of it.
-      const cancelledIntegrations = cancelledIntegrationsNotice(cancelPendingIntegrations(recoveryDirectory, recoveryWorkspace.worktreePath))
+      const cancelledIntegrations = cancelledIntegrationsNotice(await cancelPendingIntegrations(recoveryDirectory, recoveryWorkspace.worktreePath))
       if (cancelledIntegrations) this.sessionAls.run(session, () => this.addSystemMessage(cancelledIntegrations))
       const primary = this.projectManager && this.threadStore
         ? resolveThreadProjectPath(this.projectManager, this.threadStore, session.threadId) : undefined
@@ -10950,7 +10950,7 @@ export class OrchestratorService extends EventEmitter {
           presentationMessageStart: 0, presentationMessageEnd: 0,
           nativeContextBoundary: { messageIndex: 0, compactionGeneration: 0, fidelity: 'exact' }
         }, base, 'completed')
-        const report = buildSubagentResultReport({
+        const report = await buildSubagentResultReportAsync({
           cwd: agent.worktreePath, workedIn: agent.worktreePath, shared: false, baseSha: base, resultSha: workerAction.endSha,
           pins: { result: `refs/mousse/agents/${agent.id}/result` }
         })

@@ -132,7 +132,9 @@ export function createMmsChatResourceService(services: MmsProfileServices, resol
               externalEffects: [{ kind: 'unknown', reversible: false, description: 'Shared terminal commands may affect external services or ignored files.' }] }
             // Edits made outside the terminal are recorded as their own action first; the terminal's action covers only what it changes.
             startSha = (await actions.recordOutsideChanges(actionOptions)).startSha
-            actions.beginTurn(actionOptions, startSha)
+            // What `beginTurn` checks of the start, read right after the snapshot without blocking; `beginTurn` then runs no Git.
+            const startCheck = await actions.checkTurnStart(actionOptions.workspacePath, startSha)
+            actions.beginTurn(actionOptions, startSha, startCheck)
           }
           const id = services.ptyManager.create(`chat:${binding.groupId}`, binding.workspaceRoot, undefined, {
             threadId: binding.threadId,

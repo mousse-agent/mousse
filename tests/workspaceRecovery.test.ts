@@ -75,12 +75,12 @@ function stoppedMerge(cwd: string, side: string) {
 }
 
 /** The record an upgrade leaves for a subagent merge an older version stopped in the worktree. */
-function leftIntegration(threadDirectory: string, cwd: string) {
+async function leftIntegration(threadDirectory: string, cwd: string) {
   const { before, theirs } = stoppedMerge(cwd, 'old-worker')
   const journal = new ThreadJournal(threadDirectory)
   journal.append({ operationId: 'old', operationType: 'child-integration', state: 'prepared', expectedPreState: { preMergeSha: before, workerHeadSha: theirs }, details: { request: { agentId: 'worker', operationId: 'old', expectedWorkerHead: theirs, threadWorkspace: cwd } } })
   journal.append({ operationId: 'old', operationType: 'child-integration', state: 'recovery_required', details: { preMergeSha: before, workerHeadSha: theirs } })
-  expect(cancelPendingIntegrations(threadDirectory, cwd)).toEqual([expect.objectContaining({ operationId: 'old', mergeInProgress: cwd })])
+  expect(await cancelPendingIntegrations(threadDirectory, cwd)).toEqual([expect.objectContaining({ operationId: 'old', mergeInProgress: cwd })])
   return { before }
 }
 
@@ -136,7 +136,7 @@ describe('what a thread is waiting on', () => {
 
   it('reports a merge an earlier version left in the worktree, without pausing the thread, until it is aborted', async () => {
     const workspace = await new ThreadWorkspaceManager(f.thread).provision('task', 'main', f.repo)
-    const { before } = leftIntegration(f.thread, workspace.worktreePath)
+    const { before } = await leftIntegration(f.thread, workspace.worktreePath)
     expect(new ThreadWorkspaceManager(f.thread).verify().lifecycle).toBe('ready')
     expect(status()).toEqual({
       kind: 'merge',
@@ -152,7 +152,7 @@ describe('what a thread is waiting on', () => {
   it('stops reporting that merge once it is finished with Git, and never reports a merge someone else started', async () => {
     const workspace = await new ThreadWorkspaceManager(f.thread).provision('task', 'main', f.repo)
     const cwd = workspace.worktreePath
-    leftIntegration(f.thread, cwd)
+    await leftIntegration(f.thread, cwd)
     git(cwd, 'merge', '--abort')
     expect(status()).toBeUndefined()
     // A merge the agent starts later in the same folder is the agent's, not the one recorded.
@@ -163,7 +163,7 @@ describe('what a thread is waiting on', () => {
   it('never offers a merge started again by hand, even of the same commit at the same HEAD, and Abort leaves its edits alone', async () => {
     const workspace = await new ThreadWorkspaceManager(f.thread).provision('task', 'main', f.repo)
     const cwd = workspace.worktreePath
-    const { before } = leftIntegration(f.thread, cwd)
+    const { before } = await leftIntegration(f.thread, cwd)
     expect(status()).toMatchObject({ kind: 'merge' })
     // The person aborts the old merge, starts the same merge again at the same HEAD, and resolves part of it.
     git(cwd, 'merge', '--abort')
@@ -182,7 +182,7 @@ describe('what a thread is waiting on', () => {
   it('keeps every file, edits in conflicted ones included, before aborting the recorded merge', async () => {
     const workspace = await new ThreadWorkspaceManager(f.thread).provision('task', 'main', f.repo)
     const cwd = workspace.worktreePath
-    leftIntegration(f.thread, cwd)
+    await leftIntegration(f.thread, cwd)
     // Editing a conflicted file and adding a new one does not make it another merge, but Abort must not lose them.
     writeFileSync(join(cwd, 'value.txt'), 'half resolved\n')
     writeFileSync(join(cwd, 'notes.txt'), 'notes\n')
@@ -444,7 +444,7 @@ describe('through the daemon', () => {
         expect(readFileSync(join(f.repo, 'value.txt'), 'utf8')).toBe('three\n')
 
         // A merge an older version left in the project folder: Abort keeps every file first, then aborts it, as the person asked.
-        const { before } = leftIntegration(directory, f.repo)
+        const { before } = await leftIntegration(directory, f.repo)
         expect(await recovery()).toMatchObject({ kind: 'merge', folder: f.repo, operationId: 'old' })
         const aborted = await call('operations.abort', { operationId: 'old' }) as { ok: boolean; preservedRef: string }
         expect(aborted).toEqual({ ok: true, preservedRef: expect.stringMatching(/^refs\/mousse\/preserved\/old-abort-/), notice: expect.stringContaining('for 30 days') })

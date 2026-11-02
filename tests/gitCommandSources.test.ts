@@ -12,7 +12,6 @@ const ROOT = join(__dirname, '..')
 
 /** Every file that starts `git` itself, and how it reaches the central check. */
 const APPROVED_GIT_SPAWNERS: Record<string, string> = {
-  'src/mms/actions/ReceiptRefReleaseService.ts': 'withoutRepoPrograms',
   'src/mms/actions/git.ts': 'withoutRepoPrograms',
   'src/mms/bridge/dispatch/git.ts': 'assertGitAllowed',
   'src/mms/files/WorkspaceGrep.ts': 'withoutRepoPrograms',
@@ -23,6 +22,8 @@ const APPROVED_GIT_SPAWNERS: Record<string, string> = {
   'src/mms/git/PullRequestThreadService.ts': 'withoutRepoPrograms',
   'src/mms/git/RepositoryIdentity.ts': 'withoutRepoPrograms',
   'src/mms/git/gitProcess.ts': 'callers pass withoutRepoPrograms',
+  // The async Git process runner (`runGitProcess`): its callers pass arguments from `withoutRepoProgramsAsync`, `guardedAsync` or the store check.
+  'src/mms/git/runGitProcess.ts': 'callers pass withoutRepoPrograms',
   // The check itself reads where a symbolic ref points (`git symbolic-ref -q`), a read.
   'src/mms/git/gitPolicy.ts': 'finalRef',
   'src/mms/git/readOnlyGit.ts': 'withoutRepoPrograms',

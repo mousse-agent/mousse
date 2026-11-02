@@ -9,7 +9,7 @@ import { safeWorktreeGit } from '../worktree/WorktreeManager'
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { assertHeldThreadLease } from '../actions/GitOperationCoordinator'
 import { moveFiles, snapshotOrigin } from '../actions/snapshots'
-import { loadSnapshotWorkspaceMetadata } from './SnapshotWorkspace'
+import { loadSnapshotWorkspaceMetadata, loadSnapshotWorkspaceMetadataAsync } from './SnapshotWorkspace'
 import { atomicWriteJsonSync } from '../data/AtomicFs'
 import { ThreadJournal } from '../data/ThreadJournal'
 import { getMousseHomeDir } from '../data/paths'
@@ -219,6 +219,11 @@ export class ThreadWorkspaceManager {
    */
   loadOrSnapshot(): ThreadWorkspaceMetadata | undefined {
     return this.load() ?? loadSnapshotWorkspaceMetadata(this.threadDirectory)
+  }
+
+  /** {@link loadOrSnapshot} without blocking the daemon: a snapshot workspace's folder is looked at with async calls. */
+  async loadOrSnapshotAsync(): Promise<ThreadWorkspaceMetadata | undefined> {
+    return this.load() ?? await loadSnapshotWorkspaceMetadataAsync(this.threadDirectory)
   }
 
   resolveRepository(projectPath: string): RepositoryContextData {

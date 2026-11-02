@@ -3,7 +3,7 @@ import { ThreadJournal, type ThreadJournalRecord } from '../data/ThreadJournal'
 import { waitForFolderAccess } from '../files/folderAccess'
 import { withGitAccess } from '../git/gitPolicy'
 import type { ThreadLeaseHandle } from '../queue/ThreadExecutionLease'
-import { collectStoreGarbage, threadSnapshotStore } from '../workspace/SnapshotWorkspace'
+import { collectStoreGarbageAsync, threadSnapshotStoreAsync } from '../workspace/SnapshotWorkspace'
 import { PRESERVED_EXPIRY_OPERATION, PRESERVED_REFS } from '../../shared/resourceLifecycle'
 import { withGitMutationLocks } from './GitOperationCoordinator'
 import { gitAsync } from './git'
@@ -178,11 +178,11 @@ export async function expirePreservedFiles(threadDirectory: string, workspacePat
   return withGitAccess('undoRetention.expirePreservedFiles', 'owned', () => withGitMutationLocks(threadDirectory, workspacePath, 'preserved-files-expiry', async (): Promise<PreservedFilesExpiry> => {
     const retention = new UndoRetentionService(threadDirectory, options.now)
     const journal = new ThreadJournal(threadDirectory)
-    const store = threadSnapshotStore(threadDirectory, workspacePath)
+    const store = await threadSnapshotStoreAsync(threadDirectory, workspacePath)
     const listing = () => gitAsync(workspacePath, ['for-each-ref', `--format=${PRESERVED_REF_FORMAT}`, PRESERVED_REFS])
     const present = async () => new Set(parsePreservedRefs(await listing()).map((item) => item.ref))
-    const finish = (went: string[], skipped?: string): PreservedFilesExpiry => {
-      if (went.length && store) collectStoreGarbage(store)
+    const finish = async (went: string[], skipped?: string): Promise<PreservedFilesExpiry> => {
+      if (went.length && store) await collectStoreGarbageAsync(store)
       return { expiredRefs: went, ...(skipped ? { skipped } : {}) }
     }
     // An interrupted expiry is settled first, whatever else holds this one back: settling only records what is gone.

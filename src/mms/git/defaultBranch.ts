@@ -1,4 +1,4 @@
-import { readOnlyGit, runReadOnlyGit } from './readOnlyGit'
+import { readOnlyGit, readOnlyGitAsync, runReadOnlyGit, runReadOnlyGitAsync } from './readOnlyGit'
 
 export interface DefaultBranch {
   name: string
@@ -53,6 +53,50 @@ export function resolveDefaultBranch(checkoutPath: string, codeHost?: { cachedDe
 export function isIntegrated(worktreePath: string, head: string, refs: readonly string[]): boolean {
   for (const ref of refs) {
     const run = runReadOnlyGit(worktreePath, ['merge-base', '--is-ancestor', head, ref])
+    if (run.status === 0) return true
+    if (run.status !== 1) throw new Error(run.stderr.trim() || `git merge-base failed for ${ref}`)
+  }
+  return false
+}
+
+/** {@link primaryRemote} without blocking the daemon. */
+export async function primaryRemoteAsync(checkoutPath: string): Promise<string | undefined> {
+  const remotes = (await readOnlyGitAsync(checkoutPath, ['remote'])).split(/\r?\n/).map((line) => line.trim()).filter(Boolean)
+  if (remotes.includes('origin')) return 'origin'
+  return remotes.length === 1 ? remotes[0] : undefined
+}
+
+async function refExistsAsync(cwd: string, ref: string): Promise<boolean> {
+  const run = await runReadOnlyGitAsync(cwd, ['rev-parse', '--verify', '--quiet', `${ref}^{commit}`])
+  if (run.status === 0) return true
+  if (run.status === 1) return false
+  throw new Error(run.stderr.trim() || `git rev-parse failed for ${ref}`)
+}
+
+/** {@link resolveDefaultBranch} without blocking the daemon: the same reads in the same order. */
+export async function resolveDefaultBranchAsync(checkoutPath: string, codeHost?: { cachedDefaultBranch(cwd: string): string | undefined }): Promise<DefaultBranch | null> {
+  const remote = await primaryRemoteAsync(checkoutPath)
+  let name: string | undefined
+  if (remote) {
+    const run = await runReadOnlyGitAsync(checkoutPath, ['symbolic-ref', '-q', `refs/remotes/${remote}/HEAD`])
+    if (run.status === 0) {
+      const prefix = `refs/remotes/${remote}/`
+      const target = run.stdout.trim()
+      if (target.startsWith(prefix)) name = target.slice(prefix.length)
+    } else if (run.status !== 1) throw new Error(run.stderr.trim() || 'git symbolic-ref failed')
+  }
+  name ??= codeHost?.cachedDefaultBranch(checkoutPath)
+  if (!name || !BRANCH_NAME.test(name) || name.includes('..')) return null
+  const candidates = [`refs/heads/${name}`, ...(remote ? [`refs/remotes/${remote}/${name}`] : [])]
+  const refs: string[] = []
+  for (const ref of candidates) if (await refExistsAsync(checkoutPath, ref)) refs.push(ref)
+  return refs.length ? { name, refs } : null
+}
+
+/** {@link isIntegrated} without blocking the daemon. */
+export async function isIntegratedAsync(worktreePath: string, head: string, refs: readonly string[]): Promise<boolean> {
+  for (const ref of refs) {
+    const run = await runReadOnlyGitAsync(worktreePath, ['merge-base', '--is-ancestor', head, ref])
     if (run.status === 0) return true
     if (run.status !== 1) throw new Error(run.stderr.trim() || `git merge-base failed for ${ref}`)
   }

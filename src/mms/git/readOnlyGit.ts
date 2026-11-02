@@ -1,5 +1,6 @@
 import { spawnSync } from 'node:child_process'
-import { repoProgramEnv, withoutRepoPrograms } from './repoPrograms'
+import { repoProgramEnv, withoutRepoPrograms, withoutRepoProgramsAsync } from './repoPrograms'
+import { runGitProcess } from './runGitProcess'
 
 export interface GitRun { status: number | null; stdout: string; stderr: string }
 
@@ -31,6 +32,29 @@ export function runReadOnlyGit(cwd: string, args: string[]): GitRun {
 /** The trimmed standard output, or a thrown error carrying Git's message. */
 export function readOnlyGit(cwd: string, args: string[]): string {
   const run = runReadOnlyGit(cwd, args)
+  if (run.status !== 0) throw new Error(run.stderr.trim() || `git ${args[0]} failed with exit code ${run.status}`)
+  return run.stdout.trimEnd()
+}
+
+/**
+ * {@link runReadOnlyGit} without blocking the daemon: it waits until the folder's volume answers, runs the same central
+ * check without blocking, and the same command with the same limits. A run that could not finish (Git missing, a
+ * timeout, output past the limit) throws, as the synchronous form does.
+ */
+export async function runReadOnlyGitAsync(cwd: string, args: string[]): Promise<GitRun> {
+  const result = await runGitProcess(await withoutRepoProgramsAsync(cwd, args), {
+    cwd,
+    timeout: 30_000,
+    maxBuffer: 32 * 1024 * 1024,
+    env: repoProgramEnv({ ...process.env, ...READ_ONLY_GIT_ENV })
+  })
+  if (result.error) throw result.error
+  return { status: result.status, stdout: result.stdout, stderr: result.stderr }
+}
+
+/** {@link readOnlyGit} without blocking the daemon. */
+export async function readOnlyGitAsync(cwd: string, args: string[]): Promise<string> {
+  const run = await runReadOnlyGitAsync(cwd, args)
   if (run.status !== 0) throw new Error(run.stderr.trim() || `git ${args[0]} failed with exit code ${run.status}`)
   return run.stdout.trimEnd()
 }

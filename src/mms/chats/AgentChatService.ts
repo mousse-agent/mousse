@@ -21,7 +21,6 @@ import { approvalTooLongReason, assertRuntimeSettingsSupported } from '../agentD
 import type { DefinitionHostBindings } from '../agentDefinitions/definitionRuntime'
 import { ChatStore, type ChatRecord } from './ChatStore'
 import { ThreadActionService, type RunThreadActionOptions } from '../actions/ThreadActionService'
-import { git, tryGit } from '../actions/git'
 import { ThreadWorkspaceManager } from '../workspace/ThreadWorkspaceManager'
 
 export interface AgentChatServiceOptions {
@@ -367,7 +366,9 @@ export class AgentChatService {
         } : undefined
         // Edits made outside this response are recorded as their own action first, so its Undo leaves them.
         const startSha = actions && actionOptions ? (await actions.recordOutsideChanges(actionOptions)).startSha : undefined
-        if (actions && actionOptions) actions.beginTurn(actionOptions, startSha!)
+        // What `beginTurn` checks of the start, read right after the snapshot without blocking; `beginTurn` then runs no Git.
+        const startCheck = actions && actionOptions ? await actions.checkTurnStart(actionOptions.workspacePath, startSha!) : undefined
+        if (actions && actionOptions) actions.beginTurn(actionOptions, startSha!, startCheck)
         let result: AgentExecutionResult | undefined
         try {
           result = await this.options.services.orchestrator.runAgentDefinition({ profileId: this.profileId, resolved,

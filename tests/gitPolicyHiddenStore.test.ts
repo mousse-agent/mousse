@@ -103,7 +103,7 @@ describe('a folder without Git under MOUSSE_GIT_POLICY=refuse', () => {
     expect(first.action.reversible && second.action.reversible).toBe(true)
 
     // The review reads the store, through the review's own runner.
-    const scope = resolveReviewScope(t.location, { kind: 'turn', turnId: 'turn-1' })!
+    const scope = (await resolveReviewScope(t.location, { kind: 'turn', turnId: 'turn-1' }))!
     const files = await inThreadSnapshotScope(t.location, work, () => listChangedFiles(work, scope.range))
     expect(files.files.map((file) => file.path)).toEqual(['a.txt'])
     const versions = await inThreadSnapshotScope(t.location, work, () => readFileVersions(work, scope.range, 'a.txt'))

@@ -53,7 +53,7 @@ export class UndoRetentionSweeper {
       try {
         lease = tryAcquireExecutionLease(task.location, { source: 'undo-retention-sweep' })
         if (!lease) continue
-        const workspace = new ThreadWorkspaceManager(task.location).loadOrSnapshot()
+        const workspace = await new ThreadWorkspaceManager(task.location).loadOrSnapshotAsync()
         if (!workspace || workspace.lifecycle !== 'ready') continue
         const result = await new UndoRetentionService(task.location).sweep(workspace.worktreePath, this.abort.signal, lease)
         if (!result.suspended && !startup) {

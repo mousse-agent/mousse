@@ -745,7 +745,7 @@ describe('subagent results', () => {
       if (state !== 'prepared') journal.append({ operationId, operationType: 'child-integration', state })
     }
     expect(() => noPending()).toThrow()
-    expect(cancelPendingIntegrations(f.thread)).toEqual([
+    expect(await cancelPendingIntegrations(f.thread)).toEqual([
       { operationId: 'crashed', agentId: 'worker', resultSha: agent.result, spawnBaseSha: agent.base },
       { operationId: 'stuck', agentId: 'worker', resultSha: agent.result, spawnBaseSha: agent.base }
     ])
@@ -753,7 +753,7 @@ describe('subagent results', () => {
     expect(new ChangeReceiptService(f.thread).list().filter((item) => item.kind === 'integration')).toEqual([])
     expect(new ThreadJournal(f.thread).latestByOperation().get('crashed')).toMatchObject({ state: 'cancelled' })
     noPending()
-    expect(cancelPendingIntegrations(f.thread)).toEqual([])
+    expect(await cancelPendingIntegrations(f.thread)).toEqual([])
   })
 
   it('a merge an older version left in progress is cancelled with a true message, and can still be aborted', async () => {
@@ -767,7 +767,7 @@ describe('subagent results', () => {
     const journal = new ThreadJournal(f.thread)
     journal.append({ operationId: 'old', operationType: 'child-integration', state: 'prepared', expectedPreState: { preMergeSha: before, workerHeadSha, spawnBaseSha: preMergeSha }, details: { request: { agentId: 'worker', operationId: 'old', expectedWorkerHead: workerHeadSha, spawnBaseSha: preMergeSha, threadWorkspace: cwd } } })
     journal.append({ operationId: 'old', operationType: 'child-integration', state: 'recovery_required', details: { preMergeSha: before, workerHeadSha } })
-    const cancelled = cancelPendingIntegrations(f.thread, cwd)
+    const cancelled = await cancelPendingIntegrations(f.thread, cwd)
     expect(cancelled).toEqual([expect.objectContaining({ operationId: 'old', mergeInProgress: cwd })])
     expect(cancelledIntegrationsNotice(cancelled)).toMatch(/A merge from an earlier version is still in progress in .*; abort it/)
     expect(cancelledIntegrationsNotice(cancelled)).not.toMatch(/left as they are/)
