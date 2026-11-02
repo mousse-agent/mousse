@@ -1,4 +1,5 @@
 import type { LocalSttModel } from '../../shared/dictation'
+import { speechModelThreads } from '../speechModels/threads'
 import { setupLocalModelWorker } from '../speechModels/workerSupport'
 import { resolveWorkerModel } from './workerModel'
 import type { LocalSttWorkerEvent, LocalSttWorkerRequest } from './workerProtocol'
@@ -32,8 +33,10 @@ export function serveSttWorker<Runtime extends LocalSttModel['runtime']>(
   const init = (modelId: string): void => {
     try {
       const model = resolveWorkerModel(modelId, runtimes)
-      // Also points onnxruntime-web, which transformers.js shares, at the bundled WebAssembly files.
-      handleFileResponse = setupLocalModelWorker({ repo: model.repo, files: model.files, post }).handleMessage
+      // Also points onnxruntime-web, which transformers.js shares, at the bundled WebAssembly files,
+      // with as many threads as the window allows (see `enableBlinkFeatures` in src/main/index.ts).
+      const threads = speechModelThreads(navigator.hardwareConcurrency, typeof SharedArrayBuffer === 'function')
+      handleFileResponse = setupLocalModelWorker({ repo: model.repo, files: model.files, post, threads }).handleMessage
       engine = start(model)
     } catch (error) {
       startError = error instanceof Error ? error : new Error(String(error))
