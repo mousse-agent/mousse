@@ -15,13 +15,14 @@ import { rethrowGitPolicyError } from '../git/gitPolicy'
  * configures runs. Files under a filter only the repository defines (git-crypt) are refused, with a
  * message saying why, rather than stored unfiltered.
  */
-export function git(cwd: string, args: string[], env?: NodeJS.ProcessEnv): string {
+export function git(cwd: string, args: string[], env?: NodeJS.ProcessEnv, input?: string): string {
   try {
-    return execFileSync('git', withoutRepoPrograms(cwd, args, { env }), {
+    return execFileSync('git', withoutRepoPrograms(cwd, args, { ...(env ? { env } : {}), ...(input !== undefined ? { stdin: input } : {}) }), {
       cwd,
       env: repoProgramEnv(env ? { ...process.env, ...env } : process.env),
       encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'pipe']
+      ...(input !== undefined ? { input, maxBuffer: 256 * 1024 * 1024 } : {}),
+      stdio: [input !== undefined ? 'pipe' : 'ignore', 'pipe', 'pipe']
     }).trim()
   } catch (error) {
     const refusal = filterRefusal(String((error as { stderr?: unknown }).stderr ?? ''))
@@ -172,19 +173,21 @@ export function mergeTrees(top: string, base: string, ours: string, theirs: stri
 }
 
 /**
- * Keeps a copy of every pending change (tracked and untracked, not ignored) as a commit on top of HEAD under
- * `refs/mousse/discarded/<id>`, without touching the index or the files. Uses a private index file.
+ * Keeps a copy of every pending change as a commit on top of HEAD under `refs/mousse/discarded/<id>`, without touching
+ * the index or the files. It starts from a copy of the real index, so what is staged is in it, a force-added ignored
+ * file included, and then adds the files as they are (tracked and untracked, not ignored). Throws when it cannot.
  */
 export function backupPendingChanges(top: string): string {
+  const realIndex = resolve(top, git(top, ['rev-parse', '--git-path', 'index']))
   return withIndexFile(top, (env) => {
-    git(top, ['read-tree', 'HEAD'], env)
+    if (!existsSync(realIndex)) git(top, ['read-tree', 'HEAD'], env)
     git(top, ['add', '-A', '--', '.', NOT_MOUSSE], env)
     const tree = git(top, ['write-tree'], env)
     const commit = git(top, ['commit-tree', tree, '-p', 'HEAD', '-m', 'mousse: copy of discarded changes'], MOUSSE_COMMIT_ENV)
     const ref = `refs/mousse/discarded/${new Date().toISOString().replace(/[:.]/g, '-')}-${randomUUID().slice(0, 8)}`
-    git(top, ['update-ref', ref, commit])
+    git(top, ['update-ref', '--no-deref', ref, commit])
     return ref
-  })
+  }, realIndex)
 }
 
 /**

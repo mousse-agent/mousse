@@ -110,7 +110,7 @@ export class WorkspaceGcService {
       }
       for (const ref of report.unreferencedRefs) {
         if (!fresh.unreferencedRefs.includes(ref) || !report.refHeads?.[ref]) throw new Error('GC reference is retained or changed; refresh inventory.')
-        git(this.repositoryPath, ['update-ref', '-d', ref, report.refHeads[ref]])
+        git(this.repositoryPath, ['update-ref', '--no-deref', '-d', ref, report.refHeads[ref]])
       }
       this.issuedReports.delete(report)
     } finally {

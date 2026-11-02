@@ -105,6 +105,7 @@ import { RedoService } from '../actions/RedoService'
 import { CodeRevertService } from '../actions/CodeRevertService'
 import { ConversationBranchService } from '../actions/ConversationBranchService'
 import { discardPendingChanges, git as workspaceGit } from '../actions/git'
+import { takeSnapshot } from '../actions/snapshots'
 import { randomUUID } from 'node:crypto'
 import { ManagedConflictService } from '../actions/ManagedConflictService'
 import { cancelPendingIntegrations } from '../agents/ChildAgentIntegrationService'
@@ -2827,11 +2828,17 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       // Everything uncommitted goes, the results of the thread's turns included. The files as they are now are recorded
       // as a snapshot first (the turns' receipts keep theirs), and a copy stays under refs/mousse/discarded/.
       return await withGitMutationLocks(operation.threadDirectory, workspace.worktreePath, 'discard-pending-changes', () => {
-        let before: string | undefined
-        // The copy below holds everything too, so a record that cannot be written (a pending operation) does not stop the person.
-        try { before = new ThreadActionService(operation.threadDirectory).recordOutsideChangesHeld({ threadId: workspace.threadId, conversationBranchId: workspace.conversationBranchId, workspacePath: workspace.worktreePath }).startSha } catch { /* see above */ }
+        let before: string
+        // The files are recorded first. When the record cannot be written (a pending operation), a plain snapshot stands in;
+        // when even that fails, nothing is discarded. The copy is made inside `discardPendingChanges`, before any reset.
+        try { before = new ThreadActionService(operation.threadDirectory).recordOutsideChangesHeld({ threadId: workspace.threadId, conversationBranchId: workspace.conversationBranchId, workspacePath: workspace.worktreePath }).startSha }
+        catch {
+          try { before = takeSnapshot(workspace.worktreePath, { reason: 'before discard', threadId: workspace.threadId }).sha }
+          catch (error) { throw new DomainRpcError('discard_unsafe', `Nothing was discarded: the files could not be recorded first (${(error as Error).message.split(/\r?\n/)[0]}).`) }
+          workspaceGit(workspace.worktreePath, ['update-ref', '--no-deref', `refs/mousse/discarded/snapshot-${before}`, before])
+        }
         const { backupRef } = discardPendingChanges(workspace.worktreePath)
-        return { backupRef, ...(before ? { snapshotSha: before } : {}), notice: `The files as they were are kept in Git as ${backupRef}. To bring them back, run \`git restore --source=${backupRef} --worktree -- .\` in ${workspace.worktreePath}.` }
+        return { backupRef, snapshotSha: before, notice: `The files as they were are kept in Git as ${backupRef}. To bring them back, run \`git restore --source=${backupRef} --worktree -- .\` in ${workspace.worktreePath}.` }
       })
     }
     case 'actions.list': {
@@ -3065,7 +3072,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const workspace = new ThreadWorkspaceManager(operation.threadDirectory).load()
       if (!workspace || workspace.lifecycle !== 'ready') throw new DomainRpcError('workspace_not_ready', 'Thread workspace is not ready')
       // A merge of a subagent result an older version left unfinished is cancelled, never run again.
-      const cancelledIntegrations = cancelPendingIntegrations(operation.threadDirectory)
+      const cancelledIntegrations = cancelPendingIntegrations(operation.threadDirectory, workspace.worktreePath)
       await new PublishService(operation.threadDirectory).recoverPending(workspace.worktreePath, operation.projectPath)
       await new ThreadActionService(operation.threadDirectory).recoverPending(workspace.worktreePath)
       await new CodeRevertService(operation.threadDirectory).recoverPending(workspace.worktreePath)

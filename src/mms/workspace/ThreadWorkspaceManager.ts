@@ -268,7 +268,7 @@ export class ThreadWorkspaceManager {
       if (options.untrusted) await addUntrustedWorktree(repository.primaryCheckoutPath, ['-b', branch, worktreePath, head], worktreePath, options.enableWorktreeConfig, options.userRequested)
       else git(repository.primaryCheckoutPath, ['worktree', 'add', '-b', branch, worktreePath, head])
       if (options.snapshot) moveFiles(worktreePath, git(worktreePath, ['rev-parse', 'HEAD^{tree}']), git(worktreePath, ['rev-parse', `${options.snapshot}^{tree}`]))
-      git(repository.primaryCheckoutPath, ['update-ref', retainedRef, options.snapshot ?? head])
+      git(repository.primaryCheckoutPath, ['update-ref', '--no-deref', retainedRef, options.snapshot ?? head])
       const metadata: ThreadWorkspaceMetadata = {
         schemaVersion: 1,
         threadId,
@@ -335,7 +335,7 @@ export class ThreadWorkspaceManager {
       if (verified.lifecycle === 'ready') {
         const ready = this.verify(metadata)
         if (ready.lifecycle !== 'ready') throw new Error('Workspace changed while acquiring recovery ownership.')
-        git(ready.worktreePath, ['update-ref', ready.retainedRef, ready.snapshotSha ?? ready.headSha])
+        git(ready.worktreePath, ['update-ref', '--no-deref', ready.retainedRef, ready.snapshotSha ?? ready.headSha])
         atomicWriteJsonSync(this.workspacePath, ready)
         this.finishProvisionRecovery(ready)
         return ready
@@ -430,7 +430,8 @@ export class ThreadWorkspaceManager {
 
   /** An operation that started and did not finish, so a person or recovery has to settle it before the next one. */
   hasPendingOperation(): boolean {
-    return [...this.journal.latestByOperation().values()].some((entry) => ['prepared', 'git_applied', 'context_pending', 'recovery_required'].includes(entry.state))
+    // A publish waiting to be settled concerns the primary checkout only, so it does not hold up the thread.
+    return [...this.journal.latestByOperation().values()].some((entry) => ['prepared', 'git_applied', 'context_pending', 'recovery_required'].includes(entry.state) && !['publish', 'change-publish'].includes(entry.operationType))
   }
 
   verify(metadata = this.load()): ThreadWorkspaceMetadata {

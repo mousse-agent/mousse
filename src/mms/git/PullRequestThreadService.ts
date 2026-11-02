@@ -305,7 +305,7 @@ export class PullRequestThreadService {
         removed = !existsSync(workspace.worktreePath)
         if (removed) {
           attempt(['branch', '-D', workspace.branch])
-          attempt(['update-ref', '-d', workspace.retainedRef])
+          attempt(['update-ref', '--no-deref', '-d', workspace.retainedRef])
           try {
             // The folder provisioning made for the worktree; only removed when it is empty.
             rmdirSync(dirname(workspace.worktreePath))

@@ -1897,6 +1897,9 @@ export class OrchestratorService extends EventEmitter {
     if (!active) this.runEngine?.store.settleHold(threadId)
   }
 
+  /** A line in a thread from outside a turn, such as work an older version left unfinished. */
+  noteThreadNotice(threadId: string, text: string): void { this.noteProviderNotice(threadId, text) }
+
   /** A line in the thread about its provider's process (a helper's result that may not have arrived). */
   private noteProviderNotice(threadId: string, text: string): void {
     try {
@@ -8989,11 +8992,15 @@ export class OrchestratorService extends EventEmitter {
     if (recoveryDirectory && recoveryWorkspace && session.executionLease) {
       const heldLease = session.executionLease
       // A merge of a subagent's result an older version left unfinished is cancelled, never run again; the thread hears of it.
-      const cancelledIntegrations = cancelledIntegrationsNotice(cancelPendingIntegrations(recoveryDirectory))
+      const cancelledIntegrations = cancelledIntegrationsNotice(cancelPendingIntegrations(recoveryDirectory, recoveryWorkspace.worktreePath))
       if (cancelledIntegrations) this.sessionAls.run(session, () => this.addSystemMessage(cancelledIntegrations))
       const primary = this.projectManager && this.threadStore
         ? resolveThreadProjectPath(this.projectManager, this.threadStore, session.threadId) : undefined
-      if (primary) await new PublishService(recoveryDirectory).recoverPending(recoveryWorkspace.worktreePath, primary, heldLease)
+      if (primary) {
+        const settled = await new PublishService(recoveryDirectory).recoverPending(recoveryWorkspace.worktreePath, primary, heldLease)
+        const merging = [...new Set(settled.flatMap((item) => item.state === 'cancelled' && item.mergeInProgress ? [item.mergeInProgress] : []))]
+        if (merging.length) this.sessionAls.run(session, () => this.addSystemMessage(`A publish merge from an earlier version is still in progress in ${merging.join(', ')}; abort it (operations abort) or finish it with Git. It was not run again.`))
+      }
       await new ThreadActionService(recoveryDirectory).recoverPending(recoveryWorkspace.worktreePath, heldLease)
       await new CodeRevertService(recoveryDirectory).recoverPending(recoveryWorkspace.worktreePath, heldLease)
       await new UndoService(recoveryDirectory).recoverPending(recoveryWorkspace.worktreePath, (action, kind) => {

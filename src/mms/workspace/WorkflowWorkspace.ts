@@ -9,7 +9,7 @@ import { CodeRevertService } from '../actions/CodeRevertService'
 import { PublishService } from '../actions/PublishService'
 import { ConversationBranchService } from '../actions/ConversationBranchService'
 import { moveFiles, sameTree, takeSnapshot } from '../actions/snapshots'
-import { cancelPendingIntegrations } from '../agents/ChildAgentIntegrationService'
+import { cancelPendingIntegrations, cancelledIntegrationsNotice } from '../agents/ChildAgentIntegrationService'
 import { buildSubagentResultReport } from '../agents/subagentResultReport'
 import { withGitMutationLocks } from '../actions/GitOperationCoordinator'
 import {
@@ -40,6 +40,8 @@ export interface WorkflowWorkspaceOwner {
   profileId: string
   threads: Pick<ThreadDataStore, 'getThread' | 'getThreadDir'>
   projects: Pick<ProjectManager, 'getProject'>
+  /** Writes a line in a thread; used to tell it about work an older version left unfinished. */
+  orchestrator?: { noteThreadNotice(threadId: string, text: string): void }
 }
 
 export interface OwnedThreadWorkspace {
@@ -212,7 +214,8 @@ export async function resolveOwnedThreadWorkspace(
       const lease = await waitAcquireExecutionLease(threadDirectory, { source: 'workflow-workspace-recovery', signal, maxAttempts: 36_000 })
       try {
         // A merge of a subagent's result an older version left unfinished is recorded as cancelled, never run again.
-        cancelPendingIntegrations(threadDirectory)
+        const notice = cancelledIntegrationsNotice(cancelPendingIntegrations(threadDirectory, existing.worktreePath))
+        if (notice) owner.orchestrator?.noteThreadNotice(context.threadId, notice)
         await new PublishService(threadDirectory).recoverPending(existing.worktreePath, repository.primaryCheckoutPath, lease)
         await new ThreadActionService(threadDirectory).recoverPending(existing.worktreePath, lease)
         await new CodeRevertService(threadDirectory).recoverPending(existing.worktreePath, lease)
@@ -374,7 +377,8 @@ function verifyWorkspaceWriterAdmission(
     if (metadata.lifecycle !== 'ready' || manager.verify(metadata).lifecycle !== 'ready') {
       throw new DomainRpcError('thread_unavailable', 'Workspace needs recovery before it can be written')
     }
-    if (!pathsEqual(metadata.worktreePath, workspace.workspacePath) || metadata.branch !== workspace.branch) {
+    // Bound by where the worktree is and which repository it belongs to. The branch is the agent's to switch or detach.
+    if (!pathsEqual(metadata.worktreePath, workspace.workspacePath) || resolveRepositoryIdentity(workspace.workspacePath).key !== metadata.repositoryId) {
       throw new DomainRpcError('thread_unavailable', 'Workspace binding changed while waiting; resolve its current revision again')
     }
     validateThreadWorkspacePaths(workspace.workspacePath, workspace.cwd, repository)
@@ -382,7 +386,7 @@ function verifyWorkspaceWriterAdmission(
     // Isolated children have a separate journal but no task-binding metadata.
     // Their repository identity is the admission authority instead; HEAD and branch are the agent's to move.
     if (pathsEqual(workspace.threadDirectory, owner.threads.getThreadDir(context.threadId)) ||
-        !workspace.expectedHeadSha || !workspace.branch ||
+        !workspace.expectedHeadSha ||
         resolveRepositoryIdentity(workspace.workspacePath).key !== workspace.repositoryId) {
       throw new DomainRpcError('thread_unavailable', 'Workspace admission revision changed; recovery is required')
     }
@@ -654,9 +658,9 @@ function reuseAgentWorktree(
     throw new DomainRpcError('thread_unavailable', 'Workflow agent workspace is bound to a different repository')
   }
   if (!existsSync(record.worktreePath) || !listedWorktree(thread.gitTopLevel, record.worktreePath)) return undefined
-  const branch = git(record.worktreePath, ['branch', '--show-current'])
-  if (branch !== identity.branch || resolveRepositoryIdentity(record.worktreePath).key !== thread.repositoryId) {
-    throw new DomainRpcError('thread_unavailable', 'Workflow agent worktree branch changed')
+  // Bound by its path, its top level and its repository; the agent may have switched or detached its branch.
+  if (!pathsEqual(canonicalPath(git(record.worktreePath, ['rev-parse', '--show-toplevel'])), canonicalPath(record.worktreePath)) || resolveRepositoryIdentity(record.worktreePath).key !== thread.repositoryId) {
+    throw new DomainRpcError('thread_unavailable', 'Workflow agent worktree changed')
   }
   return {
     cwd: record.projectCwd,
@@ -716,7 +720,7 @@ async function createAgentWorktree(input: {
       git(input.thread.workspacePath, ['worktree', 'add', '-b', identity.branch, identity.path, baseSha])
       moveFiles(identity.path, git(identity.path, ['rev-parse', 'HEAD^{tree}']), threadFiles.tree)
     }
-    git(input.thread.gitTopLevel, ['update-ref', retainedRef, threadFiles.sha])
+    git(input.thread.gitTopLevel, ['update-ref', '--no-deref', retainedRef, threadFiles.sha])
     const cwd = projectCwd(identity.path, input.thread.projectRelativeSubdirectory)
     writeAgentRecord(input.recordPath, {
       version: 1,

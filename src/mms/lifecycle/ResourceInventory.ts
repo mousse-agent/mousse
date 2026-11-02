@@ -420,6 +420,7 @@ export function buildResourceInventory(store: ResourceLifecycleStore, record: Ta
         resource('git-ref', text(value.resultRef), found.source.id, claim, 'Workspace owner retains its reconstruction result', task.taskId, text(value.repositoryId))
         // The files of a worktree that held uncommitted work, kept as a snapshot until the owner is permanently deleted.
         resource('git-ref', text(value.snapshotRef), found.source.id, claim, 'Workspace owner retains its uncommitted files', task.taskId, text(value.repositoryId))
+        for (const ref of Array.isArray(value.keptRefs) ? value.keptRefs : []) resource('git-ref', text(ref), found.source.id, claim, 'Workspace owner retains an earlier pin of its files', task.taskId, text(value.repositoryId))
         resource('runtime', found.source.path, found.source.id, claim, 'Workspace reconstruction metadata follows its owner claims', task.taskId)
       }
     }

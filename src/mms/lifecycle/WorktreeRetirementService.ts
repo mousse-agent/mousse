@@ -124,8 +124,15 @@ export interface WorktreeReconstructionManifest {
   trashPath?: string
   /** When the folder reached the trash; set with state `trashed`. */
   trashedAt?: string
+  /**
+   * Earlier pins the trash expiry did not replace because the new pin does not contain them (the folder's HEAD moved
+   * away from them): each stays under its own ref, `<prefix>/kept/<sha>`, and goes only with the owner.
+   */
+  keptRefs?: string[]
   /** Owned branches deleted once their tips were kept by the pins here, so a restore can bring them back. */
   deletedBranches?: Array<{ name: string; sha: string }>
+  /** Branches a restore could not bring back because their commit is gone from the repository. */
+  branchesNotRestored?: Array<{ name: string; sha: string }>
   /**
    * `prepared`: pins written, folder in place. `trashed`: the folder is in the trash. `retired`: its files were
    * snapshotted and it was deleted. `materialized`: the worktree is back at its own path.
@@ -180,6 +187,7 @@ export class WorktreeRetirementService {
     if (value.snapshotSha !== undefined && (value.snapshotRef !== `${prefix}/snapshot` || ![value.snapshotSha, value.snapshotTree].every((sha) => typeof sha === 'string' && /^[a-f0-9]{40,64}$/.test(sha)))) throw new Error('Malformed workspace reconstruction manifest')
     if (value.baseRef !== `${prefix}/base` || value.resultRef !== `${prefix}/result` || ![value.worktreePath, value.commonDir, value.gitDirectory, value.sourcePath].every(isAbsolute) || ![value.baseSha, value.resultSha, value.treeSha].every((sha) => /^[a-f0-9]{40,64}$/.test(sha)) || !/^[a-f0-9]{32}$/.test(value.repositoryId) || !Array.isArray(value.content) || !Array.isArray(value.auxiliary) || !['prepared', 'trashed', 'retired', 'materialized'].includes(value.state)) throw new Error('Malformed workspace reconstruction manifest')
     if (value.trashPath !== undefined && !same(value.trashPath, this.trashPathFor(value)) || value.state === 'trashed' && (!value.trashPath || typeof value.trashedAt !== 'string')) throw new Error('Malformed workspace trash location')
+    if (value.keptRefs !== undefined && (!Array.isArray(value.keptRefs) || !value.keptRefs.every((ref) => typeof ref === 'string' && ref.startsWith(`${prefix}/kept/`)))) throw new Error('Malformed workspace kept pins')
     if (value.deletedBranches !== undefined && (!Array.isArray(value.deletedBranches) || !value.deletedBranches.every((entry) => /^mousse\/(thread|agent|workflow)\//.test(entry?.name) && /^[a-f0-9]{40,64}$/.test(entry?.sha)))) throw new Error('Malformed workspace branch record')
     for (const entry of value.content) if (isAbsolute(entry.path) || entry.path.split(/[\\/]/).includes('..') || !['file', 'directory', 'link'].includes(entry.kind) || !Number.isSafeInteger(entry.bytes) || entry.bytes < 0) throw new Error('Manifest content path is invalid')
     for (const entry of value.auxiliary) if (!MOUSSE_CONTROL_FILE_PATHS.includes(entry.path) || typeof entry.content !== 'string' || entry.content.length > 2 * 1024 * 1024) throw new Error('Manifest auxiliary payload is invalid')
@@ -326,8 +334,19 @@ export class WorktreeRetirementService {
     try { contents = this.inspectContent(trashPath, dirty ? snapshot!.tree : undefined) }
     catch (error) { return { kept: `Kept in the trash at ${trashPath}: ${(error as Error).message}` } }
     const prefix = manifest.resultRef.slice(0, -'/result'.length)
+    // A pin is never replaced by one that does not contain it: the earlier commit or snapshot stays under a ref of its own.
+    const keep = (old: string | undefined, next: string): void => {
+      if (!old || old === next || spawnSync('git', withoutRepoPrograms(trashPath, ['merge-base', '--is-ancestor', old, next]), { cwd: trashPath, env: repoProgramEnv(), stdio: 'ignore', windowsHide: true }).status === 0) return
+      const ref = `${prefix}/kept/${old}`
+      if (readDirectLifecycleRef(trashPath, ref) !== old) lifecycleGit(trashPath, ['update-ref', '--no-deref', ref, old, '0'.repeat(old.length)])
+      manifest.keptRefs = [...new Set([...(manifest.keptRefs ?? []), ref])]
+    }
+    const previousSnapshot = readDirectLifecycleRef(trashPath, `${prefix}/snapshot`)
+    keep(manifest.resultSha, head)
+    if (dirty) keep(previousSnapshot, snapshot!.sha)
+    atomicWriteJsonSync(manifestPath, manifest)
     lifecycleGit(trashPath, ['update-ref', '--no-deref', manifest.resultRef, head, manifest.resultSha])
-    if (dirty) lifecycleGit(trashPath, ['update-ref', '--no-deref', `${prefix}/snapshot`, snapshot!.sha, readDirectLifecycleRef(trashPath, `${prefix}/snapshot`) ?? '0'.repeat(snapshot!.sha.length)])
+    if (dirty) lifecycleGit(trashPath, ['update-ref', '--no-deref', `${prefix}/snapshot`, snapshot!.sha, previousSnapshot ?? '0'.repeat(snapshot!.sha.length)])
     const headBranch = lifecycleGit(trashPath, ['branch', '--show-current'])
     // A clean folder drops the snapshot fields; an earlier snapshot ref stays where it is, as every pin does.
     delete manifest.snapshotSha; delete manifest.snapshotTree; delete manifest.snapshotRef; delete manifest.headBranch; delete manifest.sparse
@@ -373,16 +392,21 @@ export class WorktreeRetirementService {
       if (!name || !/^mousse\/(thread|agent|workflow)\//.test(name) || checkedOut.has(name)) continue
       const tip = this.tip(manifest, name)
       if (!tip || !pins.some((pin) => pin === tip || spawnSync('git', withoutRepoPrograms(manifest.commonDir, ['merge-base', '--is-ancestor', tip, pin]), { cwd: manifest.commonDir, env: repoProgramEnv(), stdio: 'ignore', windowsHide: true }).status === 0)) continue
-      lifecycleGit(manifest.commonDir, ['update-ref', '-d', `refs/heads/${name}`, tip])
+      lifecycleGit(manifest.commonDir, ['update-ref', '--no-deref', '-d', `refs/heads/${name}`, tip])
       manifest.deletedBranches = [...(manifest.deletedBranches ?? []).filter((entry) => entry.name !== name), { name, sha: tip }]
     }
   }
   /** Brings back the branches `releaseBranches` deleted, at their tips, where nothing has taken the name since. */
   private restoreBranches(manifest: WorktreeReconstructionManifest): void {
+    const missing: Array<{ name: string; sha: string }> = []
     for (const entry of manifest.deletedBranches ?? []) {
-      if (!this.tip(manifest, entry.name)) lifecycleGit(manifest.commonDir, ['update-ref', `refs/heads/${entry.name}`, entry.sha, '0'.repeat(entry.sha.length)])
+      if (this.branchTaken(manifest, entry.name)) continue
+      // A commit that is no longer in the repository cannot be a branch again; it is reported, never a reason to fail.
+      if (spawnSync('git', withoutRepoPrograms(manifest.commonDir, ['cat-file', '-e', `${entry.sha}^{commit}`]), { cwd: manifest.commonDir, env: repoProgramEnv(), stdio: 'ignore', windowsHide: true }).status !== 0) { missing.push(entry); continue }
+      lifecycleGit(manifest.commonDir, ['update-ref', '--no-deref', `refs/heads/${entry.name}`, entry.sha, '0'.repeat(entry.sha.length)])
     }
     delete manifest.deletedBranches
+    if (missing.length) manifest.branchesNotRestored = missing
   }
   /**
    * `untrusted` is for a checkout of someone else's commits: `prepare` runs on the new worktree before anything is checked
@@ -448,8 +472,17 @@ export class WorktreeRetirementService {
     if (lifecycleGit(manifest.commonDir, ['rev-parse', `${manifest.resultSha}^{tree}`]) !== manifest.treeSha) throw new Error('Retained result tree changed')
     if (manifest.snapshotSha && lifecycleGit(manifest.commonDir, ['rev-parse', `${manifest.snapshotSha}^{tree}`]) !== manifest.snapshotTree) throw new Error('Retained snapshot tree changed')
   }
+  /**
+   * The commit a branch points at, never following a symbolic ref: a branch that is a symbolic ref (or unreadable) is
+   * not owned, so it is neither deleted nor used as a checkout target.
+   */
   private tip(manifest: WorktreeReconstructionManifest, branch: string): string | undefined {
-    try { return lifecycleGit(manifest.commonDir, ['rev-parse', '--verify', '-q', `refs/heads/${branch}`]) } catch { return undefined }
+    try { return readDirectLifecycleRef(manifest.commonDir, `refs/heads/${branch}`) } catch { return undefined }
+  }
+  /** Whether a branch name is taken at all, as a branch or as a symbolic ref. */
+  private branchTaken(manifest: WorktreeReconstructionManifest, branch: string): boolean {
+    return spawnSync('git', withoutRepoPrograms(manifest.commonDir, ['show-ref', '--verify', '-q', `refs/heads/${branch}`]), { cwd: manifest.commonDir, env: repoProgramEnv(), stdio: 'ignore', windowsHide: true }).status === 0
+      || spawnSync('git', withoutRepoPrograms(manifest.commonDir, ['symbolic-ref', '-q', `refs/heads/${branch}`]), { cwd: manifest.commonDir, env: repoProgramEnv(), stdio: 'ignore', windowsHide: true }).status === 0
   }
   /** Adds the worktree on a branch; false when Git refuses, as when another worktree has the branch checked out. */
   private tryAdd(manifest: WorktreeReconstructionManifest, target: string[]): boolean {

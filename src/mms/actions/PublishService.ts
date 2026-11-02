@@ -46,7 +46,11 @@ const DEFAULT_MESSAGE = 'Changes from a Mousse thread'
 /** A publish in one of these states started and did not finish; `recovery_required` is what older versions left. */
 const PENDING_STATES = ['prepared', 'git_applied', 'recovery_required']
 
-export type PublishRecovery = { operationId: string; state: 'completed'; result: PublishResult } | { operationId: string; state: 'cancelled' }
+export type PublishRecovery =
+  | { operationId: string; state: 'completed'; result: PublishResult }
+  | { operationId: string; state: 'cancelled'; mergeInProgress?: string }
+  /** The primary checkout could not be read; the publish stays as it is and is looked at again on the next recovery. */
+  | { operationId: string; state: 'pending'; reason: string }
 
 /**
  * Untracked, ignored files in `checkout` that moving from `from` to `to` would write over: a path the new tree adds or
@@ -103,6 +107,14 @@ export class PublishService {
         // The earlier attempt is recorded first. Only when it did not land does this explicit Publish go on to publish again.
         const recovered = this.settle(primaryCheckout, options.operationId!, intent.expected)
         if (recovered.state === 'completed') return recovered.result
+        if (recovered.state === 'pending') throw new Error(`An earlier publish is not settled yet: ${recovered.reason}.`)
+      }
+      // Another publish that did not finish is settled first; one that cannot be settled yet stops only this publish.
+      for (const entry of this.journal.latestByOperation().values()) {
+        if (entry.operationId === options.operationId || !['publish', 'change-publish'].includes(entry.operationType) || !PENDING_STATES.includes(entry.state)) continue
+        const intent = this.intentOf(entry.operationId)
+        const settled = intent ? this.settle(intent.paths.primaryCheckout && existsSync(intent.paths.primaryCheckout) ? intent.paths.primaryCheckout : primaryCheckout, entry.operationId, intent.expected) : undefined
+        if (settled?.state === 'pending') throw new Error(`An earlier publish is not settled yet: ${settled.reason}.`)
       }
       receipts.assertNoPendingOperation()
       new ThreadActionService(this.threadDirectory).assertExpectedRevision(options.expectedJournalRevision)
@@ -170,7 +182,7 @@ export class PublishService {
     const receipts = new ChangeReceiptService(this.threadDirectory)
     const metadata = new ThreadWorkspaceManager(this.threadDirectory).load()
     // The next publish brings in only what the thread changed after these files.
-    if (metadata) git(primaryCheckout, ['update-ref', publishedRef(metadata.threadId), sourceSha])
+    if (metadata) git(primaryCheckout, ['update-ref', '--no-deref', publishedRef(metadata.threadId), sourceSha])
     const receipt = receipts.record(primaryCheckout, {
       operationId, kind: 'publish', actor: { kind: 'user' }, beforeSha: prePublishSha, afterSha: publishSha,
       introducedCommits: prePublishSha === publishSha ? [] : [publishSha],
@@ -205,6 +217,8 @@ export class PublishService {
   async recoverPending(_threadWorkspace: string, primaryCheckout: string, heldThreadLease?: ThreadLeaseHandle): Promise<PublishRecovery[]> {
     const pending = [...this.journal.latestByOperation().values()].filter((entry) => ['publish', 'change-publish'].includes(entry.operationType) && PENDING_STATES.includes(entry.state))
     if (!pending.length) return []
+    // The primary cannot even be locked when it cannot be read: nothing is decided, and the next recovery tries again.
+    if (!existsSync(primaryCheckout) || !tryGit(primaryCheckout, ['rev-parse', '--git-dir']).ok) return pending.map((entry) => ({ operationId: entry.operationId, state: 'pending' as const, reason: `${primaryCheckout} could not be read` }))
     return withGitMutationLocks(this.threadDirectory, primaryCheckout, 'publish-recovery', async () => pending.map((entry) => {
       const intent = this.intentOf(entry.operationId)
       if (!intent) {
@@ -238,22 +252,27 @@ export class PublishService {
     const mergedBefore = !expected.publishSha && Boolean(tip) && tip !== expected.prePublishSha && contains(expected.sourceSha)
     const landed = receipt?.afterSha && contains(receipt.afterSha) ? receipt.afterSha : expected.publishSha && contains(expected.publishSha) ? expected.publishSha : mergedBefore ? tip : undefined
     if (landed) return { operationId, state: 'completed', result: this.completePublish(primaryCheckout, operationId, expected.prePublishSha, expected.sourceSha, landed) }
-    const reason = !tip ? `${primaryCheckout} or its branch ${expected.targetBranch} could not be read`
-      : tip === expected.prePublishSha ? `${expected.targetBranch} did not move` : `${expected.targetBranch} moved elsewhere`
-    this.journal.append({ operationId, operationType: 'publish', state: 'cancelled', details: { recovered: true, prePublishSha: expected.prePublishSha, targetBranch: expected.targetBranch, ...(tip ? { tip } : {}), reason: `The publish did not land: ${reason}. Nothing was changed by recovery.` } })
-    return { operationId, state: 'cancelled' }
+    // Unreadable now (a disk that is not mounted, a branch being rewritten): nothing is decided, and recovery tries again.
+    if (!tip) return { operationId, state: 'pending', reason: `${primaryCheckout} or its branch ${expected.targetBranch} could not be read` }
+    // A publish made before snapshots merged in the primary; a merge it left there is reported, and stays abortable.
+    const mergeInProgress = !expected.publishSha && tryGit(primaryCheckout, ['rev-parse', '--verify', '-q', 'MERGE_HEAD']).ok ? primaryCheckout : undefined
+    const reason = mergeInProgress ? `a merge from an earlier version is still in progress in ${primaryCheckout}; abort it or finish it with Git`
+      : tip === expected.prePublishSha ? `${expected.targetBranch} did not move, and nothing was changed by recovery` : `${expected.targetBranch} moved elsewhere, and nothing was changed by recovery`
+    this.journal.append({ operationId, operationType: 'publish', state: 'cancelled', details: { recovered: true, prePublishSha: expected.prePublishSha, targetBranch: expected.targetBranch, tip, ...(mergeInProgress ? { mergeInProgress, sourceSha: expected.sourceSha } : {}), reason: `The publish did not land: ${reason}.` } })
+    return { operationId, state: 'cancelled', ...(mergeInProgress ? { mergeInProgress } : {}) }
   }
 
   async abortConflict(primaryCheckout: string, operationId: string): Promise<void> {
     return withGitMutationLocks(this.threadDirectory, primaryCheckout, 'publish-abort', async () => {
       const record = this.journal.latestByOperation().get(operationId)
-      if (!record || record.operationType !== 'publish' || record.state !== 'recovery_required') {
+      const leftMerge = record?.state === 'cancelled' && typeof (record.details as { mergeInProgress?: unknown } | undefined)?.mergeInProgress === 'string'
+      if (!record || record.operationType !== 'publish' || (record.state !== 'recovery_required' && !leftMerge)) {
         throw new Error('No matching publish conflict is active.')
       }
       // Only a publish made before snapshots left a merge in progress.
       const result = tryGit(primaryCheckout, ['merge', '--abort'])
       if (!result.ok) throw new Error(result.stderr || 'Unable to abort publish merge')
-      this.journal.append({ operationId, operationType: 'publish', state: 'cancelled' })
+      this.journal.append({ operationId, operationType: 'publish', state: 'cancelled', details: { conflictAborted: true } })
     })
   }
 }

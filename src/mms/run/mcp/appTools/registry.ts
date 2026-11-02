@@ -603,7 +603,7 @@ export class ToolRegistry {
           id: 'permission',
           prompt: tool.name === 'thread_merge_back'
             ? "Allow Mousse to hand this fork's work back to the thread it was forked from?"
-            : "Allow Mousse to merge a subagent's work into this workspace?",
+            : 'Allow this Mousse tool to change files in this workspace?',
           options: [{ id: 'allow', label: 'Allow once' }, { id: 'reject', label: 'Reject' }]
         }],
         {

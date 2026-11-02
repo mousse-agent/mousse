@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { ChangeReceiptService } from '../src/mms/actions/ChangeReceiptService'
@@ -9,12 +9,15 @@ import { RedoService } from '../src/mms/actions/RedoService'
 import { ThreadActionService } from '../src/mms/actions/ThreadActionService'
 import { UndoService } from '../src/mms/actions/UndoService'
 import { publishedRef, restoreChange, takeSnapshot, worktreeTree } from '../src/mms/actions/snapshots'
-import { cancelPendingIntegrations } from '../src/mms/agents/ChildAgentIntegrationService'
+import { cancelledIntegrationsNotice, cancelPendingIntegrations } from '../src/mms/agents/ChildAgentIntegrationService'
+import { ManagedConflictService } from '../src/mms/actions/ManagedConflictService'
+import { spawnSync } from 'node:child_process'
 import { buildSubagentResultReport, formatSubagentResultReport } from '../src/mms/agents/subagentResultReport'
 import { ThreadJournal } from '../src/mms/data/ThreadJournal'
 import { ThreadWorkspaceManager } from '../src/mms/workspace/ThreadWorkspaceManager'
 import { WorkspaceGcService } from '../src/mms/workspace/WorkspaceGcService'
-import { resolveOwnedThreadWorkspace } from '../src/mms/workspace/WorkflowWorkspace'
+import { discardPendingChanges } from '../src/mms/actions/git'
+import { acquireWorkspaceMutationLease, provisionOwnedAgentWorkspace, resolveOwnedThreadWorkspace } from '../src/mms/workspace/WorkflowWorkspace'
 import type { ThreadAction } from '../src/shared/threadActions'
 import { actionOptions, git, gitFoundationFixture } from './fixtures/gitFoundation'
 
@@ -32,6 +35,7 @@ const write = (path: string, value: string) => writeFileSync(join(cwd, path), va
 const turn = (id: string, mutate: () => void, start = 0) =>
   actions.runCheckpointedAction({ ...actionOptions(cwd, id), presentationMessageStart: start, presentationMessageEnd: start + 2 }, mutate)
 const branches = () => git(cwd, 'for-each-ref', '--format=%(refname) %(objectname)', 'refs/heads')
+const tryGitOk = (dir: string, ...args: string[]) => spawnSync('git', args, { cwd: dir }).status === 0
 const noPending = () => new ChangeReceiptService(f.thread).assertNoPendingOperation()
 
 describe('turns are recorded as private snapshots', () => {
@@ -148,6 +152,28 @@ describe('an agent that does its own Git work', () => {
     expect(manager.load()!.branch).toBe('mousse/thread/task/main')
   })
 
+  it.each([['detaches HEAD', ['switch', '-q', '--detach']], ['switches to a branch of its own', ['switch', '-q', '-c', 'agent/own']]])('when the agent %s, a workflow write script and an isolated workflow agent still run', async (_name, command) => {
+    const owner = {
+      profileId: 'profile',
+      projects: { getProject: (id: string) => id === 'project' ? { id, path: f.repo } : undefined },
+      threads: { getThread: (id: string) => id === 'task' ? { id, projectId: 'project' } : undefined, getThreadDir: () => f.thread }
+    }
+    const context = { profileId: 'profile', projectId: 'project', threadId: 'task' }
+    const workspace = await resolveOwnedThreadWorkspace(owner as never, context)
+    git(cwd, ...(command as string[]))
+    // Resolved before the switch, admitted after it.
+    const writer = await acquireWorkspaceMutationLease(owner as never, context, workspace, new AbortController().signal)
+    write('from-script.txt', 'script\n')
+    expect((await writer.complete('completed')).writeSha).toBeTruthy()
+    writer.release()
+    // An isolated agent spawn admits the writer the same way, and a second resolve of the same agent reuses its worktree after it switches too.
+    const roots = { registrationRoot: join(f.root, 'registrations'), scratchRoot: join(f.root, 'scratch') }
+    const agent = await provisionOwnedAgentWorkspace({ owner: owner as never, context, idempotencyKey: 'step-1', isolated: true, ...roots })
+    git(agent.worktreePath, ...(command as string[]).map((part) => part === 'agent/own' ? 'agent/worker-own' : part))
+    const again = await provisionOwnedAgentWorkspace({ owner: owner as never, context, idempotencyKey: 'step-1', isolated: true, ...roots })
+    expect(again.worktreePath).toBe(agent.worktreePath)
+  })
+
   it('can create a repository with no commit inside the worktree: the turn is recorded without it and nothing locks', async () => {
     const tool = join(cwd, 'tool')
     const { action } = await turn('turn', () => {
@@ -158,7 +184,8 @@ describe('an agent that does its own Git work', () => {
     expect(action.changedPaths.map((item) => item.path)).toEqual(['kept.txt'])
     expect(git(cwd, 'ls-tree', '--name-only', action.endSha).split('\n')).not.toContain('tool')
     // Left out, and said so: the turn record names what the snapshot does not hold.
-    expect(action.git?.coverageGaps).toEqual([{ path: 'tool', reason: expect.stringMatching(/no commit yet.*not in the snapshot/) }])
+    expect(action.git?.coverageGaps).toEqual([{ path: 'tool', reason: 'nested repository with no commits' }])
+    expect(new ChangeReceiptService(f.thread).list().find((item) => item.id === action.receiptId)?.notCovered).toBe('Not covered: tool (nested repository with no commits).')
     expect(new ThreadWorkspaceManager(f.thread).verify().lifecycle).toBe('ready')
     noPending()
 
@@ -427,19 +454,40 @@ describe('recovery', () => {
     expect(actions.get(legacy.id)!.commits).toHaveLength(1)
   })
 
-  it('a retake that fails again keeps the operation waiting with what stopped it this time', async () => {
+  it('a retake that fails again still settles: the action is recorded with what stopped it, and the thread is not locked', async () => {
     const legacy = legacyLock('Error: Workspace branch changed during execution; recovery is required.')
     // Something that stops every snapshot: a file where Mousse keeps its private index.
     const blocker = join(git(cwd, 'rev-parse', '--absolute-git-dir'), 'mousse')
     rmSync(blocker, { recursive: true, force: true }); writeFileSync(blocker, 'in the way\n')
-    await expect(actions.recoverPending(cwd)).rejects.toThrow(/EEXIST/)
-    const latest = new ThreadJournal(f.thread).latestByOperation().get(legacy.id)!
-    expect(latest.state).toBe('recovery_required')
-    expect((latest.details as { error?: string }).error).toMatch(/EEXIST/)
-
-    rmSync(blocker)
     await actions.recoverPending(cwd)
     noPending()
+    const recovered = actions.get(legacy.id)!
+    expect(recovered).toMatchObject({ endSha: legacy.startSha, reversible: false })
+    expect(recovered.git?.coverageGaps).toEqual([{ path: '.', reason: expect.stringMatching(/^no snapshot could be taken \(.*EEXIST/) }])
+    expect(new ThreadWorkspaceManager(f.thread).verify().lifecycle).toBe('ready')
+    // The next turn runs too, still without a snapshot, and says so.
+    const { action } = await turn('next', () => write('next.txt', 'x\n'), 2)
+    expect(action.git?.coverageGaps?.[0]?.reason).toMatch(/no snapshot could be taken/)
+    expect(new ChangeReceiptService(f.thread).list().find((item) => item.id === action.receiptId)?.notCovered).toMatch(/^Not covered: \. \(no snapshot could be taken/)
+    rmSync(blocker)
+    await turn('after', () => write('after.txt', 'x\n'), 4)
+  })
+
+  it('an unreadable file is left out of the snapshot and named; the turn completes and the thread stays ready', async () => {
+    const { action } = await turn('turn', () => {
+      write('kept.txt', 'kept\n'); write('x.bin', 'secret\n'); chmodSync(join(cwd, 'x.bin'), 0o000)
+      write('y.bin', 'other\n'); chmodSync(join(cwd, 'y.bin'), 0o000)
+    })
+    try {
+      expect(action.state).toBe('completed')
+      expect(action.changedPaths.map((item) => item.path)).toEqual(['kept.txt'])
+      expect(action.git?.coverageGaps).toEqual([{ path: 'x.bin', reason: 'unreadable' }, { path: 'y.bin', reason: 'unreadable' }])
+      expect(new ChangeReceiptService(f.thread).list().find((item) => item.id === action.receiptId)?.notCovered).toBe('Not covered: x.bin (unreadable), y.bin (unreadable).')
+      expect(new ThreadWorkspaceManager(f.thread).verify().lifecycle).toBe('ready')
+      noPending()
+      // Undo of the turn says the same.
+      expect((await new UndoService(f.thread).undoLatest('main', cwd)).notice).toMatch(/Not covered: x\.bin \(unreadable\), y\.bin \(unreadable\)\./)
+    } finally { chmodSync(join(cwd, 'x.bin'), 0o644); chmodSync(join(cwd, 'y.bin'), 0o644) }
   })
 
   it('records an interrupted checkpoint again from the files, whatever branch they are on', async () => {
@@ -639,6 +687,42 @@ describe('subagent results', () => {
     noPending()
     expect(cancelPendingIntegrations(f.thread)).toEqual([])
   })
+
+  it('a merge an older version left in progress is cancelled with a true message, and can still be aborted', async () => {
+    // What an older version left: a real `git merge` of the worker's branch that stopped on a conflict.
+    const preMergeSha = git(cwd, 'rev-parse', 'HEAD')
+    git(cwd, 'switch', '-q', '-c', 'old-worker'); write('value.txt', 'worker\n'); git(cwd, 'commit', '-qam', 'worker')
+    const workerHeadSha = git(cwd, 'rev-parse', 'HEAD')
+    git(cwd, 'switch', '-q', '-'); write('value.txt', 'thread\n'); git(cwd, 'commit', '-qam', 'thread')
+    const before = git(cwd, 'rev-parse', 'HEAD')
+    expect(() => git(cwd, 'merge', '-q', 'old-worker')).toThrow()
+    const journal = new ThreadJournal(f.thread)
+    journal.append({ operationId: 'old', operationType: 'child-integration', state: 'prepared', expectedPreState: { preMergeSha: before, workerHeadSha, spawnBaseSha: preMergeSha }, details: { request: { agentId: 'worker', operationId: 'old', expectedWorkerHead: workerHeadSha, spawnBaseSha: preMergeSha, threadWorkspace: cwd } } })
+    journal.append({ operationId: 'old', operationType: 'child-integration', state: 'recovery_required', details: { preMergeSha: before, workerHeadSha } })
+    const cancelled = cancelPendingIntegrations(f.thread, cwd)
+    expect(cancelled).toEqual([expect.objectContaining({ operationId: 'old', mergeInProgress: cwd })])
+    expect(cancelledIntegrationsNotice(cancelled)).toMatch(/A merge from an earlier version is still in progress in .*; abort it/)
+    expect(cancelledIntegrationsNotice(cancelled)).not.toMatch(/left as they are/)
+    // Not locked over it, and abort still works for that record.
+    noPending()
+    expect(new ThreadWorkspaceManager(f.thread).verify().lifecycle).toBe('ready')
+    await new ManagedConflictService(f.thread).abort(cwd, 'old')
+    expect(tryGitOk(cwd, 'rev-parse', '--verify', '-q', 'MERGE_HEAD')).toBe(false)
+    expect(git(cwd, 'rev-parse', 'HEAD')).toBe(before)
+    expect(f.read(cwd)).toBe('thread\n')
+  })
+})
+
+describe('discard', () => {
+  it('keeps a staged, force-added ignored file in its copy before it resets anything', () => {
+    write('.gitignore', '*.local\n'); git(cwd, 'add', '.gitignore'); git(cwd, 'commit', '-qm', 'ignore')
+    write('settings.local', 'staged only\n'); git(cwd, 'add', '-f', 'settings.local')
+    write('value.txt', 'edited\n')
+    const { backupRef } = discardPendingChanges(cwd)
+    expect(git(cwd, 'show', `${backupRef}:settings.local`)).toBe('staged only')
+    expect(git(cwd, 'show', `${backupRef}:value.txt`)).toBe('edited')
+    expect(existsSync(join(cwd, 'settings.local'))).toBe(false)
+  })
 })
 
 describe('publish', () => {
@@ -813,9 +897,20 @@ describe('publish', () => {
     noPending()
   })
 
+  it('recovery leaves a publish pending while the primary cannot be read, without holding up the thread, and settles it later', async () => {
+    await interruptedBeforeTheMove('prepared')
+    // The primary checkout the thread now names is on a disk that is not mounted.
+    expect(await new PublishService(f.thread).recoverPending(cwd, join(f.root, 'unmounted'))).toEqual([{ operationId: 'interrupted', state: 'pending', reason: expect.stringMatching(/could not be read/) }])
+    expect(new ThreadJournal(f.thread).latestByOperation().get('interrupted')?.state).toBe('prepared')
+    noPending()
+    expect(new ThreadWorkspaceManager(f.thread).verify().lifecycle).toBe('ready')
+    expect(await new PublishService(f.thread).recoverPending(cwd, f.repo)).toEqual([{ operationId: 'interrupted', state: 'cancelled' }])
+  })
+
   it('a thread an older version locked after a failed fast-forward recovers on its own and can publish again', async () => {
     const { prePublishSha } = await interruptedBeforeTheMove('recovery_required')
-    expect(new ThreadWorkspaceManager(f.thread).verify().lifecycle).toBe('recovery_required')
+    // A publish waiting to be settled concerns the primary only; the thread itself was never held up by it.
+    expect(new ThreadWorkspaceManager(f.thread).verify().lifecycle).toBe('ready')
     await new PublishService(f.thread).recoverPending(cwd, f.repo)
     expect(new ThreadWorkspaceManager(f.thread).verify().lifecycle).toBe('ready')
     expect(git(f.repo, 'rev-parse', 'HEAD')).toBe(prePublishSha)

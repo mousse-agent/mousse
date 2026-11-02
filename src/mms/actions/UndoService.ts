@@ -10,7 +10,7 @@ import { ChangeReceiptService } from './ChangeReceiptService'
 import { withGitMutationLocks } from './GitOperationCoordinator'
 import { ThreadWorkspaceManager } from '../workspace/ThreadWorkspaceManager'
 import { changedPaths, commitParents, git, refuseUnsafeChanges, treeOf } from './git'
-import { describeGit, pushedNotice, preservedNotice, pushedTo, restoreChange, sameTree, snapshotOrigin, takeSnapshot, worktreeTree, type Snapshot } from './snapshots'
+import { describeGit, pushedNotice, preservedNotice, coverageNotice, pushedTo, restoreChange, sameTree, snapshotOrigin, takeSnapshot, worktreeTree, type Snapshot } from './snapshots'
 
 export type RestoreActionContext = (action: ThreadAction, kind: 'undo' | 'redo') => void | Promise<void>
 interface UndoRecovery {
@@ -107,7 +107,7 @@ export class UndoService {
       })
       if ('conflicts' in restored) throw new UndoConflictError(restored.conflicts)
       const pushed = pushedTo(workspacePath, target.commits)
-      const compensation = this.compensationFor(workspacePath, { target, contextAction, kind, compensationId }, ours.sha, restored.snapshot, new Date().toISOString(), [pushed ? pushedNotice(label, pushed) : '', restored.preserved ? preservedNotice(restored.preserved) : ''].filter(Boolean).join(' ') || undefined)
+      const compensation = this.compensationFor(workspacePath, { target, contextAction, kind, compensationId }, ours.sha, restored.snapshot, new Date().toISOString(), [pushed ? pushedNotice(label, pushed) : '', restored.preserved ? preservedNotice(restored.preserved) : '', coverageNotice(target.git?.coverageGaps, ours.coverageGaps, restored.snapshot.coverageGaps) ?? ''].filter(Boolean).join(' ') || undefined)
       const receipt = receipts.record(workspacePath, { operationId, kind, actor: { kind: 'user' }, actionId: compensation.id,
         beforeSha: ours.sha, afterSha: restored.snapshot.sha, introducedCommits: [],
         contributions: [], externalEffects: target.externalEffects, reversesReceiptId: target.receiptId, git: compensation.git })

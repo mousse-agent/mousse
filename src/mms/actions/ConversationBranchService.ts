@@ -62,12 +62,12 @@ export class ConversationBranchService {
           const current = this.actions.recordOutsideChangesHeld({ threadId: threadId ?? '', conversationBranchId: leaving, workspacePath }).startSha
           const left = branches.find((branch) => branch.id === leaving && branch.lifecycle !== 'tombstoned')
           // The thread's first branch can't be activated again; its code stays under the thread's own ref.
-          if (left) git(workspacePath, ['update-ref', left.retainedRef, current])
+          if (left) git(workspacePath, ['update-ref', '--no-deref', left.retainedRef, current])
           const wanted = git(workspacePath, ['rev-parse', '--verify', `${selected.retainedRef}^{commit}`])
           moveFiles(git(workspacePath, ['rev-parse', '--show-toplevel']), treeOf(workspacePath, current), treeOf(workspacePath, wanted))
         }
         const snapshot = takeSnapshot(workspacePath, { reason: `activate conversation branch ${selected.id}`, threadId, operationId })
-        git(workspacePath, ['update-ref', selected.retainedRef, snapshot.sha])
+        git(workspacePath, ['update-ref', '--no-deref', selected.retainedRef, snapshot.sha])
         for (const branch of branches) branch.lifecycle = branch.id === branchId ? 'active' : 'inactive'
         atomicWriteJsonSync(this.path, branches)
         if (metadata) atomicWriteJsonSync(manager.workspacePath, { ...metadata, conversationBranchId: selected.id, retainedRef: selected.retainedRef, snapshotSha: snapshot.sha, headSha: snapshot.head ?? metadata.headSha, generation: (metadata.generation ?? 0) + 1 })
@@ -141,7 +141,7 @@ export class ConversationBranchService {
         expectedPreState: { sourceBranchId, actionId, codeMode, codeSha }
       })
       try {
-        git(workspacePath, ['update-ref', retainedRef, codeSha])
+        git(workspacePath, ['update-ref', '--no-deref', retainedRef, codeSha])
         const record: ConversationBranch = {
           id,
           name,

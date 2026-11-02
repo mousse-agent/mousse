@@ -142,6 +142,39 @@ test('trash expiry reads the folder again before deleting it: a change since its
   expect(f.service.expireTrash(f.path, { now: later + 2 * WORKTREE_TRASH_QUIET_MS })).toEqual({ removed: true })
 })
 
+test('an owned branch name that is a symbolic ref is never followed: the branch it points at stays', async () => {
+  const f = await fixture()
+  const main = git(f.repo, ['symbolic-ref', '--short', 'HEAD']), mainSha = git(f.repo, ['rev-parse', main])
+  git(f.worktree, ['switch', '-q', '--detach'])
+  git(f.repo, ['symbolic-ref', `refs/heads/${f.branch}`, `refs/heads/${main}`])
+  f.service.prepare(f.input)
+  f.service.retire(f.path)
+  expect(f.service.expireTrash(f.path, { now: Date.now() + 2 * WORKTREE_TRASH_QUIET_MS })).toEqual({ removed: true })
+  expect(git(f.repo, ['rev-parse', main])).toBe(mainSha)
+  expect(git(f.repo, ['symbolic-ref', `refs/heads/${f.branch}`])).toBe(`refs/heads/${main}`)
+  expect(JSON.parse(readFileSync(f.path, 'utf8')).deletedBranches).toBeUndefined()
+})
+
+test('trash expiry never drops an earlier pin: a commit the folder moved away from stays kept, and a restore brings its branch back', async () => {
+  const f = await fixture()
+  writeFileSync(join(f.worktree, 'a.txt'), 'committed\n'); git(f.worktree, ['commit', '-qam', 'work'])
+  const work = git(f.worktree, ['rev-parse', 'HEAD'])
+  git(f.worktree, ['switch', '-q', '--detach'])
+  f.service.prepare(f.input)
+  const trashed = f.service.retire(f.path)
+  // The branch was not checked out anywhere, so the move released it: only the pin keeps its commit now.
+  expect(JSON.parse(readFileSync(f.path, 'utf8')).deletedBranches).toEqual([{ name: f.branch, sha: work }])
+  // In the trash, the folder goes back to where it started, away from the commit.
+  git(trashed.trashPath!, ['checkout', '-q', `${work}^`])
+  expect(f.service.expireTrash(f.path, { now: Date.now() + 2 * WORKTREE_TRASH_QUIET_MS })).toEqual({ removed: true })
+  const retired = JSON.parse(readFileSync(f.path, 'utf8'))
+  expect(retired.keptRefs).toEqual([expect.stringMatching(new RegExp(`/kept/${work}$`))])
+  git(f.repo, ['gc', '--prune=now', '-q'])
+  expect(git(f.repo, ['cat-file', '-t', work])).toBe('commit')
+  f.service.reconstruct(f.path)
+  expect(git(f.repo, ['rev-parse', `refs/heads/${f.branch}`])).toBe(work)
+})
+
 test('a branch the agent made itself, and a worktree the agent added, are never touched', async () => {
   const f = await fixture()
   git(f.worktree, ['switch', '-q', '-c', 'agent/own-work'])

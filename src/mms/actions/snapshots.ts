@@ -1,9 +1,7 @@
-import { execFileSync, spawnSync } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { copyFileSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, rmSync, writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import type { GitRecord } from '../../shared/threadActions'
-import { repoProgramEnv, withoutRepoPrograms } from '../git/repoPrograms'
 import { git, mergeTrees, MOUSSE_COMMIT_ENV, NOT_MOUSSE, operationInProgress, tryGit, treeOf } from './git'
 
 /**
@@ -26,7 +24,16 @@ export interface Snapshot {
 }
 
 export interface CoverageGap { path: string; reason: string }
-const NESTED_WITHOUT_COMMIT = 'a repository inside the worktree with no commit yet; its files are not in the snapshot'
+
+/** The words for what a snapshot left out, or undefined when it covers everything. Ignored files are left out by design and never listed. */
+export function coverageNotice(...lists: Array<CoverageGap[] | undefined>): string | undefined {
+  const gaps = [...new Map(lists.flatMap((list) => list ?? []).map((gap) => [gap.path, gap])).values()]
+  if (!gaps.length) return undefined
+  const named = gaps.slice(0, 10).map((gap) => `${gap.path} (${gap.reason})`).join(', ')
+  return `Not covered: ${named}${gaps.length > 10 ? ` and ${gaps.length - 10} more` : ''}.`
+}
+const NESTED_WITHOUT_COMMIT = 'nested repository with no commits'
+const UNREADABLE = 'unreadable'
 
 export interface SnapshotInput {
   /** Why it was taken, for the commit message: "turn end", "outside changes". One line. */
@@ -60,7 +67,7 @@ function nestedRepositoriesWithoutCommit(top: string, env: NodeJS.ProcessEnv): s
   // Git lists a nested repository it would add as one entry ending in a slash.
   const untracked = git(top, ['ls-files', '-z', '--others', '--exclude-standard'], env).split('\0')
   return untracked.filter((path) => path.endsWith('/')).map((path) => path.slice(0, -1)).filter((path) =>
-    spawnSync('git', ['rev-parse', '--verify', '-q', 'HEAD^{commit}'], { cwd: join(top, path), env: repoProgramEnv(), stdio: 'ignore' }).status !== 0)
+    !tryGit(join(top, path), ['rev-parse', '--verify', '-q', 'HEAD^{commit}']).ok)
 }
 
 const nul = (text: string): string[] => text.split('\0').filter(Boolean)
@@ -69,9 +76,7 @@ const ownPath = (path: string): boolean => path !== '.mousse' && !path.startsWit
 
 /** Git with the paths on standard input, for path lists too long for the command line. */
 function gitWithPaths(top: string, args: string[], paths: string[], env?: NodeJS.ProcessEnv): string {
-  return execFileSync('git', withoutRepoPrograms(top, [...args, '--pathspec-from-file=-', '--pathspec-file-nul']), {
-    cwd: top, env: repoProgramEnv({ ...process.env, ...env }), encoding: 'utf8', input: literal(paths).join('\0') + '\0', stdio: ['pipe', 'pipe', 'pipe'], maxBuffer: 256 * 1024 * 1024
-  })
+  return git(top, [...args, '--pathspec-from-file=-', '--pathspec-file-nul'], env, literal(paths).join('\0') + '\0')
 }
 
 /**
@@ -79,11 +84,12 @@ function gitWithPaths(top: string, args: string[], paths: string[], env?: NodeJS
  * ignored but tracked by HEAD or by the real index (force-added) is in the snapshot whenever it is on disk, and an
  * ignored file that neither tracks any more leaves it. Reads HEAD and the real index; writes only the private index.
  */
-function followTrackedFiles(top: string, env: NodeJS.ProcessEnv, head: string | undefined): void {
+function followTrackedFiles(top: string, env: NodeJS.ProcessEnv, head: string | undefined, skip: string[] = []): void {
   // HEAD's paths the private index lacks (it was seeded from an older HEAD), and the real index's ignored entries.
   const fromHead = head ? nul(git(top, ['diff-index', '--cached', '--no-renames', '--diff-filter=D', '--name-only', '-z', head], env)) : []
   const fromIndex = nul(git(top, ['ls-files', '-z', '--cached', '--ignored', '--exclude-standard']))
-  const missing = [...new Set([...fromHead, ...fromIndex])].filter((path) => ownPath(path) && existsSync(join(top, path)))
+  const left = (path: string) => skip.some((gap) => path === gap || path.startsWith(`${gap}/`))
+  const missing = [...new Set([...fromHead, ...fromIndex])].filter((path) => ownPath(path) && !left(path) && existsSync(join(top, path)))
   if (missing.length) gitWithPaths(top, ['add', '-f'], missing, env)
   const ignored = nul(git(top, ['ls-files', '-z', '--cached', '--ignored', '--exclude-standard'], env))
   if (!ignored.length) return
@@ -100,21 +106,33 @@ function followTrackedFiles(top: string, env: NodeJS.ProcessEnv, head: string | 
  * brings it in line with the files HEAD and the real index track (`followTrackedFiles`), so a file that is ignored but
  * was force-added and committed later is in it.
  */
-function indexTree(top: string, index: string, head: string | undefined): { tree: string; skipped: string[] } {
+function indexTree(top: string, index: string, head: string | undefined): { tree: string; gaps: CoverageGap[] } {
   const env = { GIT_INDEX_FILE: index }
-  const add = (skipped: string[]) => git(top, ['add', '-A', '--', '.', NOT_MOUSSE, ...skipped.map((path) => `:(exclude,literal)${path}`)], env)
-  const attempt = (): { tree: string; skipped: string[] } => {
+  const add = (left: CoverageGap[]) => tryGit(top, ['add', '-A', '--', '.', NOT_MOUSSE, ...left.map((gap) => `:(exclude,literal)${gap.path}`)], env)
+  const attempt = (): { tree: string; gaps: CoverageGap[] } => {
     if (!existsSync(index)) git(top, head ? ['read-tree', head] : ['read-tree', '--empty'], env)
-    let skipped: string[] = []
-    try {
-      add([])
-    } catch (error) {
-      skipped = nestedRepositoriesWithoutCommit(top, env)
-      if (!skipped.length) throw error
-      add(skipped)
+    // What can be read is recorded; what cannot (an unreadable file or folder, a nested repository with no commit) is
+    // left out and named. Git stops at the first file it cannot read, so each one found is left out and it runs again.
+    const gaps: CoverageGap[] = []
+    let nestedChecked = false
+    for (let round = 0; ; round++) {
+      const result = add(gaps)
+      for (const match of result.stderr.matchAll(/could not open directory '([^']+?)\/?': Permission denied/g)) {
+        if (!gaps.some((gap) => gap.path === match[1])) gaps.push({ path: match[1]!, reason: UNREADABLE })
+      }
+      if (result.ok) break
+      const found = [...result.stderr.matchAll(/unable to index file '([^']+)'/g)].map((match) => match[1]!).filter((path) => !gaps.some((gap) => gap.path === path))
+      if (!found.length && !nestedChecked) {
+        nestedChecked = true
+        const nested = nestedRepositoriesWithoutCommit(top, env).filter((path) => !gaps.some((gap) => gap.path === path))
+        for (const path of nested) gaps.push({ path, reason: NESTED_WITHOUT_COMMIT })
+        if (nested.length) continue
+      }
+      if (!found.length || round >= 200) throw new Error(result.stderr || 'git add failed')
+      for (const path of found) gaps.push({ path, reason: UNREADABLE })
     }
-    followTrackedFiles(top, env, head)
-    return { tree: git(top, ['write-tree'], env), skipped }
+    followTrackedFiles(top, env, head, gaps.map((gap) => gap.path))
+    return { tree: git(top, ['write-tree'], env), gaps }
   }
   try {
     return attempt()
@@ -145,8 +163,7 @@ export function takeSnapshot(cwd: string, input: SnapshotInput): Snapshot {
   const top = git(cwd, ['rev-parse', '--show-toplevel'])
   const files = privateFiles(top)
   const head = headOf(top)
-  const { tree, skipped } = indexTree(top, files.index, head)
-  const coverageGaps = skipped.map((path) => ({ path, reason: NESTED_WITHOUT_COMMIT }))
+  const { tree, gaps: coverageGaps } = indexTree(top, files.index, head)
   const branch = tryGit(top, ['branch', '--show-current']).stdout || undefined
   const operation = operationInProgress(top)
   const state = { tree, ...(head ? { head } : {}), ...(branch ? { branch } : {}), ...(operation ? { operationInProgress: operation } : {}), ...(coverageGaps.length ? { coverageGaps } : {}) }
@@ -297,18 +314,16 @@ function preserveFiles(top: string, paths: string[], directory: string, operatio
     const entries = paths.map((path) => {
       const absolute = join(top, path)
       const link = lstatSync(absolute).isSymbolicLink()
-      const sha = link
-        ? execFileSync('git', withoutRepoPrograms(top, ['hash-object', '-w', '--stdin']), { cwd: top, env: repoProgramEnv(), encoding: 'utf8', input: readlinkSync(absolute) }).trim()
-        : git(top, ['hash-object', '-w', '--no-filters', '--', path])
+      const sha = link ? git(top, ['hash-object', '-w', '--stdin'], undefined, readlinkSync(absolute)) : git(top, ['hash-object', '-w', '--no-filters', '--', path])
       const mode = link ? '120000' : (lstatSync(absolute).mode & 0o111) ? '100755' : '100644'
       return `${mode} ${sha}\t${path}`
     })
-    execFileSync('git', withoutRepoPrograms(top, ['update-index', '--index-info']), { cwd: top, env: repoProgramEnv({ ...process.env, ...env }), input: entries.join('\n') + '\n' })
+    git(top, ['update-index', '--index-info'], env, entries.join('\n') + '\n')
     const tree = git(top, ['write-tree'], env)
     const head = headOf(top)
     const sha = git(top, ['commit-tree', tree, ...(head ? ['-p', head] : []), '-m', `${SUBJECT}files kept before a restore`], MOUSSE_COMMIT_ENV)
     const ref = `refs/mousse/preserved/${operationId ?? randomUUID()}-${sha.slice(0, 12)}`
-    git(top, ['update-ref', ref, sha])
+    git(top, ['update-ref', '--no-deref', ref, sha])
     return { ref, paths }
   } finally {
     rmSync(temporary, { force: true })

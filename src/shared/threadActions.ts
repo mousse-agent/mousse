@@ -36,6 +36,8 @@ export interface ChangeReceipt {
   externalEffects: ExternalEffect[]
   /** Set when `beforeSha` and `afterSha` are workspace snapshots (see docs/workspace-snapshots.md); absent on commit-based receipts. */
   git?: GitRecord
+  /** What of the files this receipt does not cover, in words: "Not covered: vendor/sub (nested repository with no commits)". */
+  notCovered?: string
   reversesReceiptId?: string
   publishedReceiptIds?: string[]
   createdAt: string

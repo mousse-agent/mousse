@@ -13,7 +13,7 @@ import { ChangeReceiptService } from './ChangeReceiptService'
 import { assertHeldThreadLease, withGitMutationLocks } from './GitOperationCoordinator'
 import { IN_PROGRESS_GIT_MARKERS } from '../git/gitMarkers'
 import { changedPaths, git, tryGit } from './git'
-import { describeGit, sameTree, takeSnapshot } from './snapshots'
+import { describeGit, sameTree, takeSnapshot, type Snapshot } from './snapshots'
 
 export interface RunThreadActionOptions {
   threadId: string
@@ -146,9 +146,17 @@ export class ThreadActionService {
 
   /** `recordOutsideChanges` for a caller that already holds the mutation locks. */
   recordOutsideChangesHeld(options: OutsideChangesOptions): { startSha: string; action?: ThreadAction } {
-    const snapshot = takeSnapshot(options.workspacePath, { reason: 'before the next action', threadId: options.threadId })
     const metadata = new ThreadWorkspaceManager(this.threadDirectory).load()
     const latest = this.latest(options.conversationBranchId)
+    let snapshot: Snapshot
+    try {
+      snapshot = takeSnapshot(options.workspacePath, { reason: 'before the next action', threadId: options.threadId })
+    } catch (error) {
+      // No snapshot now never stops the turn: it starts from the last one recorded, and its end says what was not covered.
+      const fallback = metadata?.snapshotSha ?? latest?.endSha ?? metadata?.headSha ?? (tryGit(options.workspacePath, ['rev-parse', '--verify', '-q', 'HEAD^{commit}']).stdout || undefined)
+      if (!fallback) throw error
+      return { startSha: fallback }
+    }
     // The latest recorded snapshot. Workspaces recorded before snapshots have none; their last checkpoint commit was HEAD.
     const known = metadata?.snapshotSha ?? latest?.endSha ?? metadata?.headSha ?? snapshot.head
     const receipts = new ChangeReceiptService(this.threadDirectory)
@@ -284,7 +292,9 @@ export class ThreadActionService {
 
   /** The snapshot an explicit human action starts from: the files as they are, which the action then covers. */
   private startFromFiles(options: RunThreadActionOptions): string {
-    const snapshot = takeSnapshot(options.workspacePath, { reason: 'before the action', threadId: options.threadId })
+    let snapshot: Snapshot
+    try { snapshot = takeSnapshot(options.workspacePath, { reason: 'before the action', threadId: options.threadId }) }
+    catch { return this.recordOutsideChangesHeld(options).startSha }
     new ChangeReceiptService(this.threadDirectory).adoptSnapshot(options.workspacePath, snapshot)
     return snapshot.sha
   }
@@ -344,7 +354,18 @@ export class ThreadActionService {
     this.journal.append({ operationId: action.id, operationType: 'action-checkpoint', state: 'prepared', expectedPreState: { startSha: action.startSha }, details: { action, actionState: state } })
     const threadId = new ThreadWorkspaceManager(this.threadDirectory).load()?.threadId
     const reason = action.turnId.startsWith(USER_CHANGES_TURN_PREFIX) ? 'outside changes' : `end of turn ${action.turnId}`
-    const snapshot = takeSnapshot(workspacePath, { reason, threadId, operationId: action.id })
+    let snapshot: Snapshot
+    try {
+      snapshot = takeSnapshot(workspacePath, { reason, threadId, operationId: action.id })
+    } catch (error) {
+      // A snapshot that cannot be taken never locks the thread: the action ends where it started, says nothing of its
+      // files was covered and why, and cannot be undone (there is nothing recorded to restore).
+      const head = tryGit(workspacePath, ['rev-parse', '--verify', '-q', 'HEAD^{commit}']).stdout || undefined
+      const branch = tryGit(workspacePath, ['branch', '--show-current']).stdout || undefined
+      snapshot = { sha: action.startSha, tree: git(workspacePath, ['rev-parse', `${action.startSha}^{tree}`]), ...(head ? { head } : {}), ...(branch ? { branch } : {}),
+        coverageGaps: [{ path: '.', reason: `no snapshot could be taken (${String((error as Error).message ?? error).split(/\r?\n/)[0]})` }] }
+      action.reversible = false
+    }
     const { record, commits } = describeGit(workspacePath, action.startSha, snapshot)
     action.endSha = snapshot.sha
     action.commits = commits

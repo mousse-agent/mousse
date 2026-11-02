@@ -543,7 +543,7 @@ export class MmsWorkflowAgents {
         throw new DomainRpcError('profile_mismatch', 'Workflow agent invocation identity does not match this run')
       }
       if (existing.state === 'dispatched') throw new DomainRpcError('unknown_effect', existing.modelCompleted
-        ? `Model output is retained; code integration is ${existing.integrationState ?? 'pending'} and requires reconciliation`
+        ? `Model output is retained; reporting its result to the thread is ${existing.integrationState ?? 'pending'} and requires reconciliation`
         : 'Agent effect was dispatched without a durable result')
       if (existing.state === 'cancelled') throw new DomainRpcError('cancelled', existing.error?.message ?? 'Workflow agent call cancelled')
       if (existing.state === 'failed') throw new DomainRpcError(existing.error?.code ?? 'invalid_input', existing.error?.message ?? 'Workflow agent call failed')

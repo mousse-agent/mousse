@@ -1196,7 +1196,7 @@ export class GitHubCodeHost implements CodeHost {
   async releasePullRequestHead(cwd: string, pullRequest: PullRequestIdentity, sha: string): Promise<void> {
     if (!Number.isSafeInteger(pullRequest.number) || pullRequest.number < 1 || !/^[0-9a-f]{40,64}$/.test(sha)) return
     // Only when the ref still holds this commit: a start that fetched a newer head meanwhile keeps its own.
-    await this.runExecutable('git', ['update-ref', '-d', `refs/mousse/pull/${pullRequest.number}/head`, sha], { cwd }).catch(() => undefined)
+    await this.runExecutable('git', ['update-ref', '--no-deref', '-d', `refs/mousse/pull/${pullRequest.number}/head`, sha], { cwd }).catch(() => undefined)
   }
 
   /**
