@@ -21,15 +21,6 @@
   opacity: 0.75;
 }
 
-.composer-model-btn-mode {
-  flex-shrink: 0;
-}
-
-/* The agent runs a stricter mode than the thread's (the tooltip says why). */
-.composer-model-btn.is-limited .composer-model-btn-mode {
-  color: var(--warning);
-}
-
 .composer-model-btn:disabled {
   cursor: default;
 }

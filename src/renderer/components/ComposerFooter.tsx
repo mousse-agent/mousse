@@ -1,17 +1,16 @@
 import { useCallback, useEffect, useRef } from 'react'
 import { ArrowUp, Mic, Paperclip, Square, Zap } from '../lib/icons'
 import { showsContextGauge, type ProviderWithStatus } from '../lib/providerSnapshots'
-import { describePermissionMode, type PermissionMode } from '../../shared/permissionMode'
+import type { PermissionMode } from '../../shared/permissionMode'
 import type { ContextUsageSnapshot } from '../../shared/types'
 import { listingServes } from '../../shared/providerInstances'
 import { getModelSpeedOptions, parseThinkingSuffixFromModelId } from '../../shared/modelVariants'
 import { shortModelName } from '../../shared/modelNames'
 import { carryReasoningLevel, ComposerRunMenu, PermissionMenuButton, ReasoningColumn, hasReasoningLevels, runFasterSpeed, runLevelText, shownReasoningLevel, SpeedToggle, type RunSettingsTarget } from './ComposerEffortPicker'
-import { permissionChoice, type PermissionControl } from './ComposerPermissionPicker'
+import type { PermissionControl } from './ComposerPermissionPicker'
 import { FloatingPortal, useFloatingPosition } from '../lib/floatingLayer'
 import { getGroupedModelButtonParts, ModelFamilyMenu, type ModelPickTarget } from './ModelFamilyMenu'
 import { ProviderIcon } from '../lib/providerIcons'
-import { permissionModeIcon } from '../lib/permissionModeIcon'
 import { ContextUsagePopover, ContextUsageRing } from './ContextUsagePopover'
 
 function useMenuScrollFade() {
@@ -134,11 +133,8 @@ export function ComposerFooter({
   const fasterSpeed = runFasterSpeed(selection)
   const modelButtonParts = fasterSpeed ? [namedParts[0]!.replace(/\s*\((?:ultra)?fast\)$/i, ''), ...namedParts.slice(1)] : namedParts
   const modelButtonLabel = modelButtonParts.join(' · ')
-  const choice = permissionControl ? permissionChoice(permissionControl) : undefined
-  const ModeIcon = choice ? permissionModeIcon(choice.shown) : undefined
-  const modeTitle = choice ? `${describePermissionMode(choice.shown)}${choice.reason ? `. ${choice.reason}` : ''}` : ''
   const buttonText = [modelButtonLabel, fasterSpeed, levelText].filter(Boolean).join(' ')
-  const buttonLabel = `${modelReadOnly ? 'Assigned model' : 'Model'}: ${buttonText}${choice ? `. Permission mode: ${modeTitle}` : ''}`
+  const buttonLabel = `${modelReadOnly ? 'Assigned model' : 'Model'}: ${buttonText}`
   const modelButtonTitle = providerAttention ? `${buttonLabel} · ${selectedProvider?.label}: ${providerAttention.headline}` : buttonLabel
   // An assigned model (a subagent's) cannot change; its permission mode still can.
   const runOnly = modelReadOnly && Boolean(permissionControl)
@@ -295,7 +291,7 @@ export function ComposerFooter({
             <button
               ref={modelButtonRef}
               type="button"
-              className={`composer-model-btn${modelMenuOpen ? ' open' : ''}${choice?.reason ? ' is-limited' : ''}`}
+              className={`composer-model-btn${modelMenuOpen ? ' open' : ''}`}
               aria-expanded={pickerDisabled ? undefined : modelMenuOpen}
               aria-haspopup={pickerDisabled ? undefined : runOnly ? 'menu' : 'listbox'}
               aria-label={buttonLabel}
@@ -312,7 +308,6 @@ export function ComposerFooter({
                 {fasterSpeed ? <Zap size={12} aria-hidden="true" className="composer-model-btn-speed" /> : null}
                 {levelText ? <span className="composer-model-btn-level">{levelText}</span> : null}
               </span>
-              {ModeIcon ? <ModeIcon size={14} aria-hidden="true" className="composer-model-btn-mode" /> : null}
               {providerAttention && (providerAttention.tone === 'warning' || providerAttention.tone === 'error') ? (
                 <span className={`composer-model-btn-dot is-${providerAttention.tone}`} aria-label={providerAttention.headline} />
               ) : null}
