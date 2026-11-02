@@ -60,7 +60,7 @@ describe('Give each subagent its own worktree', () => {
    * A pi parent in a Git project. Its turn commits once in its own worktree (so its HEAD is ahead of the project's), then
    * runs `onParent` with the delegation tools. The child (Claude) writes `child.txt` where it runs.
    */
-  const daemon = (subagentWorktrees: boolean, onParent: (delegation: DelegationToolHost) => Promise<void>) => {
+  const daemon = (subagentWorktrees: boolean, onParent: (delegation: DelegationToolHost) => Promise<void>, options: { parentWorktree?: boolean } = {}) => {
     home = mkdtempSync(join(tmpdir(), 'mousse-subagent-worktrees-'))
     previousHome = process.env.MOUSSE_HOME
     process.env.MOUSSE_HOME = home
@@ -85,7 +85,8 @@ describe('Give each subagent its own worktree', () => {
     stops.push(d.stop)
     ;(d.settings as { experimental: { subagentWorktrees: boolean } }).experimental = { subagentWorktrees }
     const project = d.projects.openProject(projectDir)
-    const thread = d.store.createThread('Parent', project.id)
+    // A parent with its worktree off works in the project folder itself.
+    const thread = d.store.createThread('Parent', project.id, undefined, options.parentWorktree === false ? { worktreeEnabled: false } : {})
     return { d, thread, projectDir, state, child }
   }
 
@@ -151,6 +152,54 @@ describe('Give each subagent its own worktree', () => {
     expect(existsSync(join(parentWorkspace.worktreePath, 'child.txt'))).toBe(false)
     expect(existsSync(join(projectDir, 'child.txt'))).toBe(false)
     expect(git(projectDir, 'status', '--porcelain')).toBe('')
+  }, 60_000)
+
+  it('on, with the parent in its project folder: every subagent still gets its own worktree, from the folder\'s HEAD', async () => {
+    const outcomes: Record<string, Record<string, unknown>> = {}
+    const { d, thread, projectDir, state } = daemon(true, async (delegation) => {
+      outcomes.reader = await delegate(delegation, { workspace: 'shared', role: 'research' }, 'reader')
+      outcomes.worker = await delegate(delegation, { workspace: 'isolated', role: 'implement' }, 'worker')
+    }, { parentWorktree: false })
+    await d.orch.send('Delegate it', false, { threadId: thread.id, clientRequestId: 'parent' })
+    for (const key of ['reader', 'worker']) await waitFor(() => d.engine.getRun(outcomes[key].childRunId as string)?.status === 'completed', `the ${key} run`)
+
+    // The parent worked in the project folder: no worktree of its own, and its commit is the folder's HEAD.
+    expect(workspaceOf(d, thread.id)).toMatchObject({ kind: 'project-folder' })
+    expect(state.parentHead).toBe(git(projectDir, 'rev-parse', 'HEAD'))
+    for (const key of ['reader', 'worker']) {
+      const child = d.store.getThread(outcomes[key].childThreadId as string)!
+      expect(child.workspaceBinding, key).toEqual({ policy: 'isolated', startSha: state.parentHead })
+      const workspace = workspaceOf(d, child.id)!
+      expect(workspace.kind, key).toBeUndefined()
+      expect(workspace.lifecycle, key).toBe('ready')
+      expect(workspace.worktreePath.startsWith(home!), key).toBe(true)
+      expect(workspace.baseSha, key).toBe(state.parentHead)
+    }
+    // The children ran in their own worktrees and their files stayed there, out of the project folder.
+    expect(state.childCwds.every((cwd) => cwd && !cwd.startsWith(projectDir))).toBe(true)
+    expect(existsSync(join(projectDir, 'child.txt'))).toBe(false)
+  }, 60_000)
+
+  it('off, with the parent in its project folder: the main agent decides; a shared reader gets no worktree, an isolated child its own', async () => {
+    const outcomes: Record<string, Record<string, unknown>> = {}
+    const { d, thread, projectDir } = daemon(false, async (delegation) => {
+      outcomes.reader = await delegate(delegation, { workspace: 'shared', role: 'research' }, 'reader')
+      outcomes.worker = await delegate(delegation, { workspace: 'isolated', role: 'implement' }, 'worker')
+    }, { parentWorktree: false })
+    await d.orch.send('Delegate it', false, { threadId: thread.id, clientRequestId: 'parent' })
+    for (const key of ['reader', 'worker']) await waitFor(() => d.engine.getRun(outcomes[key].childRunId as string)?.status === 'completed', `the ${key} run`)
+
+    expect(workspaceOf(d, thread.id)).toMatchObject({ kind: 'project-folder' })
+    const reader = d.store.getThread(outcomes.reader.childThreadId as string)!
+    expect(reader.workspaceBinding).toMatchObject({ policy: 'shared' })
+    expect(workspaceOf(d, reader.id)).toBeUndefined()
+    const worker = d.store.getThread(outcomes.worker.childThreadId as string)!
+    expect(worker.workspaceBinding).toEqual({ policy: 'isolated' })
+    expect(workspaceOf(d, worker.id)).toMatchObject({ lifecycle: 'ready', branch: 'mousse/look-at-the-worker-path' })
+    expect(workspaceOf(d, worker.id)!.kind).toBeUndefined()
+    // The isolated child worked in its own worktree; the shared reader, as the main agent asked, in the parent's folder.
+    expect(existsSync(join(workspaceOf(d, worker.id)!.worktreePath, 'child.txt'))).toBe(true)
+    expect(workspaceOf(d, worker.id)!.worktreePath.startsWith(projectDir)).toBe(false)
   }, 60_000)
 
   it('on: the result is reported with its base and result pinned under refs/mousse/delegations/, and never merged', async () => {

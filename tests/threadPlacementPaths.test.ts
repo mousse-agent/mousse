@@ -199,6 +199,31 @@ describe('where a thread works', () => {
     expect(status.execution).toMatchObject({ placement: 'project-folder', capability: { publishable: false, undoable: true } })
   }, 60_000)
 
+  it('records a worktree-off turn in a folder without Git in its hidden store, and Undo restores it, the folder gaining no .git', async () => {
+    const plainFolder = join(home, 'plain'); mkdirSync(plainFolder)
+    writeFileSync(join(plainFolder, 'notes.txt'), 'the person\'s notes\n')
+    const plainProject = main.projects.openProject(plainFolder).id
+    const off = main.threads.createThread('Plain', plainProject, plainFolder, { worktreeEnabled: false })
+    onTurn = (cwd) => {
+      writeFileSync(join(cwd, 'notes.txt'), 'rewritten by the agent\n')
+      writeFileSync(join(cwd, 'agent-new.txt'), 'made by the agent\n')
+    }
+    const sent = await main.orchestrator.send({ content: 'edit the notes', mode: 'agent' }, false, { threadId: off.id })
+    expect(sent.error).toBeUndefined()
+    expect(turnFolders.at(-1)).toBe(plainFolder)
+    // No worktree and no project-folder record: the folder's hidden store records the turn.
+    expect(workspaceOf(off.id)).toBeUndefined()
+    const turn = new ThreadActionService(main.threads.getThreadDir(off.id)).list().filter((action) => !action.turnId.startsWith('user-changes:')).at(-1)!
+    expect(turn.scope).toBeUndefined()
+    expect(turn.changedPaths.map((change) => change.path).sort()).toEqual(['agent-new.txt', 'notes.txt'])
+
+    onTurn = undefined
+    await undo(off.id)
+    expect(readFileSync(join(plainFolder, 'notes.txt'), 'utf8')).toBe('the person\'s notes\n')
+    expect(existsSync(join(plainFolder, 'agent-new.txt'))).toBe(false)
+    expect(existsSync(join(plainFolder, '.git'))).toBe(false)
+  }, 60_000)
+
   it('still makes a worktree for a thread with its worktree on, from a file write as from a send', async () => {
     const on = thread(true)
     await dispatchMethod(ctx(), 'files.write', { threadId: on.id, path: 'written.txt', content: 'x\n' })
