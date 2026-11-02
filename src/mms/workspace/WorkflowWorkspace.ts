@@ -433,12 +433,15 @@ export async function acquireWorkspaceMutationLease(
       presentationMessageStart: 0, nativeContextBoundary: { messageIndex: 0, compactionGeneration: 0, fidelity: 'exact' }
     })).startSha
     const turnId = `${context.turnId ?? context.runId ?? 'workflow'}:${crypto.randomUUID()}`
-    new ThreadActionService(workspace.threadDirectory).beginTurn({
+    const actions = new ThreadActionService(workspace.threadDirectory)
+    // Checked without blocking, right after the snapshot it checks; `beginTurn` then runs no Git.
+    const startCheck = await actions.checkTurnStart(workspace.workspacePath, startSha)
+    actions.beginTurn({
       threadId: context.threadId, turnId, conversationBranchId, workspacePath: workspace.workspacePath,
       presentationMessageStart: 0, presentationMessageEnd: 0,
       nativeContextBoundary: { messageIndex: 0, compactionGeneration: 0, fidelity: 'exact' },
       actor: { kind: 'workflow', id: context.runId }, runId: context.runId, heldThreadLease: threadLease
-    }, startSha)
+    }, startSha, startCheck)
     let revision: ExecutionWorkspaceRevision | undefined
     let healthy = true
     let released = false

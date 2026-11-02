@@ -103,7 +103,7 @@ it('Undo refreshes only its matching pair and receipt replay cannot revive expir
   expect(result.expired).toEqual([first.receiptId, second.receiptId, undo.receiptId])
   const receiptService = new ChangeReceiptService(f.thread), receipt = receiptService.list()[0]!
   const { id: _id, workspaceId: _workspaceId, generation: _generation, retainedRefs: _refs, createdAt: _createdAt, ...input } = receipt
-  expect(receiptService.record(f.repo, input)).toEqual(receipt)
+  await expect(receiptService.record(f.repo, input)).resolves.toEqual(receipt)
   expect(retention.isReceiptExpired(receipt.id)).toBe(true)
 })
 

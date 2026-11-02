@@ -6,7 +6,7 @@ import type { ThreadLeaseHandle } from '../queue/ThreadExecutionLease'
 import { collectStoreGarbage, threadSnapshotStore } from '../workspace/SnapshotWorkspace'
 import { PRESERVED_EXPIRY_OPERATION, PRESERVED_REFS } from '../../shared/resourceLifecycle'
 import { withGitMutationLocks } from './GitOperationCoordinator'
-import { git } from './git'
+import { gitAsync } from './git'
 import { UndoRetentionService } from './UndoRetentionService'
 
 /**
@@ -143,14 +143,14 @@ const detailsOf = (entry: ThreadJournalRecord): ExpiryDetails | undefined => {
  * Records the outcome of an expiry that stopped between its intent and its outcome: the refs of its intent that are
  * gone. Returns them.
  */
-function settleInterrupted(journal: ThreadJournal, present: () => Set<string>): string[] {
+async function settleInterrupted(journal: ThreadJournal, present: () => Promise<Set<string>>): Promise<string[]> {
   const records = journal.list().filter((entry) => entry.operationType === PRESERVED_EXPIRY_OPERATION)
   const settled = new Set(records.filter((entry) => detailsOf(entry)?.phase === 'outcome').map((entry) => entry.operationId))
   const went: string[] = []
   for (const intent of records) {
     const details = detailsOf(intent)
     if (details?.phase !== 'intent' || settled.has(intent.operationId)) continue
-    const now = present()
+    const now = await present()
     const gone = details.refs.filter((item) => !now.has(item.name))
     journal.append({ operationId: intent.operationId, operationType: PRESERVED_EXPIRY_OPERATION, state: gone.length ? 'completed' : 'failed', details: { phase: 'outcome', refs: gone, interrupted: true } satisfies ExpiryDetails })
     settled.add(intent.operationId)
@@ -175,33 +175,33 @@ function settleInterrupted(journal: ThreadJournal, present: () => Set<string>): 
  */
 export async function expirePreservedFiles(threadDirectory: string, workspacePath: string, options: { signal?: AbortSignal; heldThreadLease?: ThreadLeaseHandle; now?: () => number } = {}): Promise<PreservedFilesExpiry> {
   await waitForFolderAccess([threadDirectory, workspacePath], { whenNotAnswering: 'fail', signal: options.signal })
-  return withGitAccess('undoRetention.expirePreservedFiles', 'owned', () => withGitMutationLocks(threadDirectory, workspacePath, 'preserved-files-expiry', (): PreservedFilesExpiry => {
+  return withGitAccess('undoRetention.expirePreservedFiles', 'owned', () => withGitMutationLocks(threadDirectory, workspacePath, 'preserved-files-expiry', async (): Promise<PreservedFilesExpiry> => {
     const retention = new UndoRetentionService(threadDirectory, options.now)
     const journal = new ThreadJournal(threadDirectory)
     const store = threadSnapshotStore(threadDirectory, workspacePath)
-    const listing = () => git(workspacePath, ['for-each-ref', `--format=${PRESERVED_REF_FORMAT}`, PRESERVED_REFS])
-    const present = () => new Set(parsePreservedRefs(listing()).map((item) => item.ref))
+    const listing = () => gitAsync(workspacePath, ['for-each-ref', `--format=${PRESERVED_REF_FORMAT}`, PRESERVED_REFS])
+    const present = async () => new Set(parsePreservedRefs(await listing()).map((item) => item.ref))
     const finish = (went: string[], skipped?: string): PreservedFilesExpiry => {
       if (went.length && store) collectStoreGarbage(store)
       return { expiredRefs: went, ...(skipped ? { skipped } : {}) }
     }
     // An interrupted expiry is settled first, whatever else holds this one back: settling only records what is gone.
-    const settled = settleInterrupted(journal, present)
+    const settled = await settleInterrupted(journal, present)
     if (!retention.clockAllowsRelease()) return finish(settled, 'The Undo retention clock needs review before kept files expire.')
     if (retention.unfinishedOperation(PRESERVED_EXPIRY_OPERATION)) return finish(settled, 'An unfinished operation protects kept files.')
     const now = (options.now ?? Date.now)()
-    const due = threadPreservedRefs(listing(), threadDirectory).filter((item) => item.keptAt !== undefined && retention.retainedUntil(item.keptAt) <= now)
+    const due = threadPreservedRefs(await listing(), threadDirectory).filter((item) => item.keptAt !== undefined && retention.retainedUntil(item.keptAt) <= now)
     if (!due.length) return finish(settled)
     const operationId = randomUUID()
     const refs = due.map((item) => ({ name: item.ref, sha: item.sha, keptAt: new Date(item.keptAt!).toISOString() }))
     journal.append({ operationId, operationType: PRESERVED_EXPIRY_OPERATION, state: 'prepared', details: { phase: 'intent', windowMs: retention.policy().windowMs, refs } satisfies ExpiryDetails })
     let error: string | undefined
     try {
-      git(workspacePath, ['update-ref', '--no-deref', '--stdin'], undefined, `start\n${due.map((item) => `delete ${item.ref} ${item.sha}`).join('\n')}\nprepare\ncommit\n`)
+      await gitAsync(workspacePath, ['update-ref', '--no-deref', '--stdin'], undefined, `start\n${due.map((item) => `delete ${item.ref} ${item.sha}`).join('\n')}\nprepare\ncommit\n`)
     } catch (cause) {
       error = cause instanceof Error ? cause.message : String(cause)
     }
-    const remaining = present()
+    const remaining = await present()
     const went = refs.filter((item) => !remaining.has(item.name))
     journal.append({ operationId, operationType: PRESERVED_EXPIRY_OPERATION, state: went.length ? 'completed' : 'failed', details: { phase: 'outcome', refs: went, ...(error ? { error } : {}) } satisfies ExpiryDetails })
     return finish([...settled, ...went.map((item) => item.name)], error ? `Kept files could not be deleted: ${error.split('\n').find((line) => /fatal|error/i.test(line)) ?? error}` : undefined)
