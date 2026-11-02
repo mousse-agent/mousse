@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
-  assertGitAllowed, clearGitPolicyLog, decideGitCommand, GitPolicyError, gitPolicyLog, gitPolicyMode, isOwnedPath, isOwnedRef,
+  assertGitAllowed, assertGitAllowedAsync, clearGitPolicyLog, decideGitCommand, GitPolicyError, gitPolicyLog, gitPolicyMode, isOwnedPath, isOwnedRef,
   currentUserRequest, registerOwnedGitRoot, stripInheritedGitEnv, userAction, withGitAccess, withUserRequest, type GitCommandRequest, type GitDecision
 } from '../src/mms/git/gitPolicy'
 import { guardedSimpleGit, repoProgramEnv, withoutDeref, withoutRepoPrograms } from '../src/mms/git/repoPrograms'
@@ -359,6 +359,13 @@ describe('refuse by default, log when asked', () => {
     // Reads and the user's own requests still run.
     expect(() => assertGitAllowed({ cwd: outside, args: ['status'], env: { GIT_OPTIONAL_LOCKS: '0' } })).not.toThrow()
     expect(() => assertGitAllowed({ cwd: outside, args: ['update-ref', 'refs/heads/main', 'abc'], userRequested: USER })).not.toThrow()
+  })
+
+  it('applies the same default to the async check', async () => {
+    await expect(assertGitAllowedAsync({ cwd: outside, args: ['update-ref', 'refs/heads/main', 'abc'] })).rejects.toThrow('Mousse does not run "git update-ref refs/heads/main abc" here: it writes refs/heads/main, and the user did not ask for it.')
+    await expect(assertGitAllowedAsync({ cwd: outside, args: ['update-ref', 'refs/heads/main', 'abc'], userRequested: USER })).resolves.toMatchObject({ allowed: true })
+    vi.stubEnv('MOUSSE_GIT_POLICY', 'log')
+    await expect(assertGitAllowedAsync({ cwd: outside, args: ['update-ref', 'refs/heads/main', 'abc'] })).resolves.toMatchObject({ allowed: false })
   })
 
   it('refuses for any value but log, refuse included', () => {

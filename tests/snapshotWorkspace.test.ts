@@ -708,7 +708,7 @@ describe('what happens to a store when its owner goes', () => {
       expect(() => a.store('cat-file', '-e', mineSha)).toThrow()
       expect(b.store('for-each-ref', '--format=%(refname)', 'refs/mousse/preserved/')).toBe(theirs)
     } finally { vi.useRealTimers() }
-    await new UndoService(join(root, 'thread-b')).undoLatest('main', work)
+    await pressed('Undo', () => new UndoService(join(root, 'thread-b')).undoLatest('main', work))
     expect(existsSync(join(work, 'b.txt'))).toBe(false)
   })
 
