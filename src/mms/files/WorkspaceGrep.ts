@@ -6,7 +6,7 @@ import type { FileGrepMatch, FileGrepResponse } from '../../shared/types'
 import { SKIP_DIR_NAMES, resolveWithinRoot } from './pathGuard'
 import { detectGitRoute, isPhysicallyWithin, type GitRoute } from './WorkspaceIndex'
 import { getWorkspaceIndexRegistry, type WorkspaceIndexLookup } from './WorkspaceIndexRegistry'
-import { repoProgramEnv, withoutRepoPrograms } from '../git/repoPrograms'
+import { repoProgramEnv, withoutRepoProgramsAsync } from '../git/repoPrograms'
 
 export interface GrepWorkspaceOptions {
   /** Regular expressions run in `git grep` only; elsewhere the query is searched literally. */
@@ -284,22 +284,24 @@ async function grepWithGit(
   let acc = newAccumulator()
   let timedOut = false
 
-  const run = (mode: 'regex' | 'fixed'): Promise<GitRunResult> =>
-    new Promise<GitRunResult>((resolvePromise, reject) => {
+  const run = async (mode: 'regex' | 'fixed'): Promise<GitRunResult> => {
+    if (signal?.aborted) throw abortError()
+    // The query is the value of `-e` and everything after `--` is a pathspec,
+    // so no query can be read as an option. Arguments are an array: no shell.
+    const args = ['grep', '-I', '-n', '--column', '--no-color', '-z', '--untracked']
+    // One more than the per-file limit, so the parser can tell the cap was hit.
+    if (supportsMaxCount) args.push('-m', String(context.perFileLimit + 1))
+    if (!context.caseSensitive) args.push('-i')
+    if (context.wholeWord) args.push('-w')
+    args.push(mode === 'regex' ? '-E' : '-F', '-e', query, '--')
+    const argv = await withoutRepoProgramsAsync(root, args)
+
+    return new Promise<GitRunResult>((resolvePromise, reject) => {
       if (signal?.aborted) {
         reject(abortError())
         return
       }
-      // The query is the value of `-e` and everything after `--` is a pathspec,
-      // so no query can be read as an option. Arguments are an array: no shell.
-      const args = ['grep', '-I', '-n', '--column', '--no-color', '-z', '--untracked']
-      // One more than the per-file limit, so the parser can tell the cap was hit.
-      if (supportsMaxCount) args.push('-m', String(context.perFileLimit + 1))
-      if (!context.caseSensitive) args.push('-i')
-      if (context.wholeWord) args.push('-w')
-      args.push(mode === 'regex' ? '-E' : '-F', '-e', query, '--')
-
-      const child = spawnGit('git', withoutRepoPrograms(root, args), {
+      const child = spawnGit('git', argv, {
         cwd: root,
         windowsHide: true,
         stdio: ['ignore', 'pipe', 'pipe'],
@@ -378,6 +380,7 @@ async function grepWithGit(
         resolvePromise({ failed: !stoppedByUs && code !== 0 && code !== 1, stderr })
       })
     })
+  }
 
   let regexError: string | undefined
   let result = await run(context.regex ? 'regex' : 'fixed')

@@ -12,7 +12,7 @@ import { operationInProgress } from '../actions/git'
 import { publishedRef } from '../actions/snapshots'
 import { readOnlyGit, runReadOnlyGit } from '../git/readOnlyGit'
 import { acquireRepositoryLease } from '../git/RepositoryLease'
-import { resolveRepositoryIdentity } from '../git/RepositoryIdentity'
+import { resolveRepositoryIdentity, resolveRepositoryIdentityAsync } from '../git/RepositoryIdentity'
 import { isExecutionLeaseHeld, releaseExecutionLeaseHandle, STORAGE_CLEANUP_LEASE_SOURCE, tryAcquireExecutionLease } from '../queue/ThreadExecutionLease'
 import { MOUSSE_CONTROL_FILE_PATHS } from '../worktree/controlFiles'
 import { measureTree, type Measurement } from './diskMeasure'
@@ -911,7 +911,7 @@ export class StorageCleanupService {
         const base = { rule: 'trash' as const, threadId: manifest.taskId, projectId, label: `${label}: worktree in the trash` }
         try {
           let lease
-          try { lease = await acquireRepositoryLease(resolveRepositoryIdentity(manifest.trashPath, { requireMutationCapability: true }), { signal: AbortSignal.timeout(REPOSITORY_LEASE_WAIT_MS) }) }
+          try { lease = await acquireRepositoryLease(await resolveRepositoryIdentityAsync(manifest.trashPath, { requireMutationCapability: true }), { signal: AbortSignal.timeout(REPOSITORY_LEASE_WAIT_MS) }) }
           catch { items.push({ ...base, bytes: 0, outcome: 'kept', reason: 'Repository is busy' }); continue }
           let outcome: ReturnType<WorktreeRetirementService['expireTrash']>
           try { outcome = new WorktreeRetirementService(this.deps.store, { repositoryLease: lease }).expireTrash(path, { now, inUse: this.probeRemoval }) }

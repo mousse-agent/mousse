@@ -1,5 +1,6 @@
-import { spawnSync } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import { statSync } from 'node:fs'
+import { stat } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
 import simpleGit, { type SimpleGit, type SimpleGitOptions } from 'simple-git'
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
@@ -7,7 +8,8 @@ import { gitDirectoryEnv, mousseGitEnv } from './gitEnv'
 import { assertGitAllowed, type UserAction } from './gitPolicy'
 import { NO_HOOKS_PATH } from './gitNullDevice'
 import { activeHiddenStore, checkStoreCommand, hiddenStoreEnv } from './hiddenStore'
-import { isTrustedRepoEntry, readRepoTrust, repoTrustPath, TRUSTED_FILTER_KEY, writeRepoTrust, type RepoTrustRecord } from './repoTrust'
+import { isTrustedRepoEntry, readRepoTrust, readRepoTrustAsync, repoTrustPath, TRUSTED_FILTER_KEY, writeRepoTrust, type RepoTrustRecord } from './repoTrust'
+import { waitForFolderAccess } from '../files/folderAccess'
 
 /**
  * Git commands Mousse runs on a user's repository start no program the repository configures.
@@ -287,21 +289,101 @@ function dotGitsUpFrom(dir: string, top?: string): string[] {
   return paths
 }
 
-function remember(key: string, paths: Iterable<string>, programs: RepoPrograms): void {
+function remember(key: string, paths: Iterable<string>, signatures: readonly string[], programs: RepoPrograms): void {
   if (cache.size >= CACHE_LIMIT) cache.delete(cache.keys().next().value!)
-  cache.set(key, { watched: [...new Set(paths)].map((path) => [path, signature(path)] as const), programs })
+  cache.set(key, { watched: [...paths].map((path, index) => [path, signatures[index]!] as const), programs })
 }
 
-/** `failed` is set when Git could not be run or read in full (a timeout, output past the limit). */
-function bareGit(cwd: string, args: string[]): { ok: boolean; stdout: string; failed: boolean } {
-  assertGitAllowed({ cwd, args })
-  // A common directory Mousse names is named the same way for the probe as for the command it is for.
-  const result = spawnSync('git', ['-c', 'core.fsmonitor=false', ...args], { cwd, encoding: 'utf8', windowsHide: true, timeout: 30_000, maxBuffer: 16 * 1024 * 1024, env: repoProgramEnv({ ...process.env, GIT_OPTIONAL_LOCKS: '0', ...gitDirectoryEnv(cwd) }) })
+/** What a probe of the repository's config returns. */
+interface BareResult {
+  ok: boolean
+  stdout: string
+  /** Git could not be run or read in full (a timeout, output past the limit). */
+  failed: boolean
+}
+
+const PROBE_TIMEOUT_MS = 30_000
+const PROBE_MAX_BUFFER = 16 * 1024 * 1024
+
+/** The probe's command line and environment. A common directory Mousse names is named the same way for the probe as for the command it is for. */
+function bareGitCommand(cwd: string, args: readonly string[]): { argv: string[]; env: NodeJS.ProcessEnv } {
+  assertGitAllowed({ cwd, args: [...args] })
+  return { argv: ['-c', 'core.fsmonitor=false', ...args], env: repoProgramEnv({ ...process.env, GIT_OPTIONAL_LOCKS: '0', ...gitDirectoryEnv(cwd) }) }
+}
+
+function bareGit(cwd: string, args: string[]): BareResult {
+  const { argv, env } = bareGitCommand(cwd, args)
+  const result = spawnSync('git', argv, { cwd, encoding: 'utf8', windowsHide: true, timeout: PROBE_TIMEOUT_MS, maxBuffer: PROBE_MAX_BUFFER, env })
   return { ok: !result.error && result.status === 0, stdout: result.error ? '' : result.stdout ?? '', failed: Boolean(result.error) }
+}
+
+/**
+ * {@link bareGit} without blocking: the same command, the same time and output limits, and the same
+ * answer. Git running past the limit is stopped, as `spawnSync` stops it.
+ */
+function bareGitAsync(cwd: string, args: string[]): Promise<BareResult> {
+  const { argv, env } = bareGitCommand(cwd, args)
+  return new Promise((settle) => {
+    const child = spawn('git', argv, { cwd, windowsHide: true, env, stdio: ['ignore', 'pipe', 'ignore'] })
+    const chunks: Buffer[] = []
+    let size = 0
+    let failed = false
+    let done = false
+    const finish = (result: BareResult): void => {
+      if (done) return
+      done = true
+      clearTimeout(timer)
+      settle(result)
+    }
+    const stop = (): void => {
+      failed = true
+      child.kill()
+    }
+    const timer = setTimeout(stop, PROBE_TIMEOUT_MS)
+    child.stdout.on('data', (chunk: Buffer) => {
+      if (failed) return
+      size += chunk.length
+      if (size > PROBE_MAX_BUFFER) stop()
+      else chunks.push(chunk)
+    })
+    child.on('error', () => finish({ ok: false, stdout: '', failed: true }))
+    child.on('close', (code) => finish(failed ? { ok: false, stdout: '', failed: true } : { ok: code === 0, stdout: Buffer.concat(chunks).toString('utf8'), failed: false }))
+  })
+}
+
+/** {@link signature} without blocking. */
+async function signatureAsync(path: string): Promise<string> {
+  const found = await stat(path, { bigint: true }).catch((error: NodeJS.ErrnoException) => {
+    // `statSync` with `throwIfNoEntry: false` returns nothing only for a path that is not there; any other failure throws.
+    if (error.code === 'ENOENT' || error.code === 'ENOTDIR') return undefined
+    throw error
+  })
+  if (!found) return '-'
+  return found.isDirectory() ? `dir:${found.dev}:${found.ino}` : `${found.mtimeNs}:${found.ctimeNs}:${found.size}:${found.ino}`
 }
 
 const UNREADABLE = "This repository's Git config could not be read in full (it may be very large or include a file that cannot be read), so Mousse does not run Git here."
 
+/**
+ * What reading a repository's programs needs from the folder. {@link programsFor} answers each step
+ * synchronously and {@link programsForAsync} without blocking; both run the same steps in the same
+ * order, so they reach the same answer.
+ */
+type Step =
+  | { kind: 'git'; cwd: string; args: string[] }
+  | { kind: 'signature'; path: string }
+  | { kind: 'trust'; commonDir: string }
+
+/** The answer to a `trust` step: where the repository's trust record is kept, and the record. */
+interface TrustRead { path: string; record: RepoTrustRecord | null }
+
+type Reading<T> = Generator<Step, T, unknown>
+
+function* signaturesOf(paths: readonly string[]): Reading<string[]> {
+  const signatures: string[] = []
+  for (const path of paths) signatures.push((yield { kind: 'signature', path }) as string)
+  return signatures
+}
 
 /**
  * The repository's programs, read from its config. Cached until a file that could change the answer
@@ -309,50 +391,111 @@ const UNREADABLE = "This repository's Git config could not be read in full (it m
  * the top of the worktree (a new or rewritten one would make Git find another repository). A
  * repository that includes other files from its own config is read every time.
  */
-function programsFor(cwd: string): RepoPrograms {
-  const key = resolve(cwd)
+function* readPrograms(key: string): Reading<RepoPrograms> {
   const hit = cache.get(key)
-  if (hit && hit.watched.every(([path, sig]) => signature(path) === sig)) return hit.programs
+  if (hit) {
+    let same = true
+    // One at a time, stopping at the first change.
+    for (const [path, sig] of hit.watched) {
+      if ((yield { kind: 'signature', path }) !== sig) { same = false; break }
+    }
+    if (same) return hit.programs
+  }
   cache.delete(key)
   probes += 1
-  const where = bareGit(key, ['rev-parse', '--path-format=absolute', '--git-dir', '--git-common-dir', '--show-toplevel'])
+  const where = (yield { kind: 'git', cwd: key, args: ['rev-parse', '--path-format=absolute', '--git-dir', '--git-common-dir', '--show-toplevel'] }) as BareResult
   if (where.failed) throw new RepoProgramError(UNREADABLE)
   // Not a repository: nothing of a repository's own can run. Remembered until a `.git` appears above it.
   if (!where.ok) {
-    remember(key, [key, ...dotGitsUpFrom(key)], NONE)
+    const paths = [...new Set([key, ...dotGitsUpFrom(key)])]
+    remember(key, paths, yield* signaturesOf(paths), NONE)
     return NONE
   }
   // Without the listing, nothing can be overridden: refuse rather than run the repository's programs.
-  const listing = bareGit(key, ['config', '--null', '--show-scope', '--show-origin', '--list'])
+  const listing = (yield { kind: 'git', cwd: key, args: ['config', '--null', '--show-scope', '--show-origin', '--list'] }) as BareResult
   if (!listing.ok) throw new RepoProgramError(UNREADABLE)
   const entries = parseConfig(listing.stdout)
   const [gitDir, commonDir, top] = where.stdout.split(/\r?\n/).map((line) => line.trim())
-  const programs = repoProgramOverrides(entries, commonDir ? readRepoTrust(commonDir) : null)
+  const trust = commonDir ? (yield { kind: 'trust', commonDir }) as TrustRead : null
+  const programs = repoProgramOverrides(entries, trust?.record ?? null)
   const includes = entries.some((entry) => !TRUSTED_SCOPES.has(entry.scope) && /^include(if\..+)?\.path$/i.test(entry.key))
-  if (where.ok && gitDir && commonDir && top && !includes) {
-    const paths = new Set<string>([join(gitDir, 'config'), join(gitDir, 'config.worktree'), join(gitDir, 'commondir'), join(commonDir, 'config'), repoTrustPath(commonDir)])
+  if (where.ok && gitDir && commonDir && top && trust && !includes) {
+    const paths = new Set<string>([join(gitDir, 'config'), join(gitDir, 'config.worktree'), join(gitDir, 'commondir'), join(commonDir, 'config'), trust.path])
     for (const entry of entries) if (entry.origin.startsWith('file:')) paths.add(resolve(key, entry.origin.slice(5)))
     for (const path of dotGitsUpFrom(key, top)) paths.add(path)
-    remember(key, paths, programs)
+    remember(key, paths, yield* signaturesOf([...paths]), programs)
   }
   return programs
 }
 
+function programsFor(cwd: string): RepoPrograms {
+  const reading = readPrograms(resolve(cwd))
+  for (let step = reading.next(); ; ) {
+    if (step.done) return step.value
+    const need = step.value
+    step = reading.next(need.kind === 'git' ? bareGit(need.cwd, need.args) : need.kind === 'signature' ? signature(need.path) : { path: repoTrustPath(need.commonDir), record: readRepoTrust(need.commonDir) })
+  }
+}
+
+/**
+ * {@link programsFor} without blocking: Git runs as a child process and files are read with async calls.
+ * It first waits until the folder's volume answers ({@link waitForFolderAccess}), so the central check's
+ * own look at the folder, which is synchronous, never waits on a volume that is not answering.
+ */
+async function programsForAsync(cwd: string): Promise<RepoPrograms> {
+  const key = resolve(cwd)
+  await waitForFolderAccess([key])
+  const reading = readPrograms(key)
+  for (let step = reading.next(); ; ) {
+    if (step.done) return step.value
+    const need = step.value
+    step = reading.next(need.kind === 'git' ? await bareGitAsync(need.cwd, need.args) : need.kind === 'signature' ? await signatureAsync(need.path) : await readRepoTrustAsync(need.commonDir))
+  }
+}
+
+function settingsFrom(programs: RepoPrograms, write: boolean | undefined): string[] {
+  const hooks = [...HOOKS_OFF, ...programs.hookNames.filter((name) => !(HOOK_EVENTS as readonly string[]).includes(name)).map((name) => `hook.${name}.enabled=false`)]
+  const required = programs.emptiedFilters.map((name) => `filter.${name}.required=${write ? 'true' : 'false'}`)
+  return [...FIXED, ...NO_INDEX_REFRESH, ...hooks, ...programs.overrides, ...required]
+}
+
 /**
  * The `key=value` settings for a Git command in `cwd`. `write` keeps an emptied filter required (see
- * {@link writesThroughFilters}).
+ * {@link writesThroughFilters}). Code that can wait uses {@link repoProgramSettingsAsync}.
  */
 export function repoProgramSettings(cwd: string, options: RepoProgramOptions & { write?: boolean } = {}): string[] {
   if (options.userAction) return [...FIXED]
-  const programs = programsFor(cwd)
-  const hooks = [...HOOKS_OFF, ...programs.hookNames.filter((name) => !(HOOK_EVENTS as readonly string[]).includes(name)).map((name) => `hook.${name}.enabled=false`)]
-  const required = programs.emptiedFilters.map((name) => `filter.${name}.required=${options.write ? 'true' : 'false'}`)
-  return [...FIXED, ...NO_INDEX_REFRESH, ...hooks, ...programs.overrides, ...required]
+  return settingsFrom(programsFor(cwd), options.write)
+}
+
+/** {@link repoProgramSettings} without blocking the daemon: the same settings, or the same refusal. */
+export async function repoProgramSettingsAsync(cwd: string, options: RepoProgramOptions & { write?: boolean } = {}): Promise<string[]> {
+  if (options.userAction) {
+    await waitForFolderAccess([resolve(cwd)])
+    return [...FIXED]
+  }
+  return settingsFrom(await programsForAsync(cwd), options.write)
+}
+
+/**
+ * Waits until `cwd`'s volume answers and reads its repository's programs, without blocking: throws the
+ * {@link RepoProgramError} a Git command there would. Called before a run of simple-git commands whose
+ * failures the caller turns into defaults, so a refused repository still shows its reason.
+ */
+export async function checkRepoPrograms(cwd: string): Promise<void> {
+  // Inside a hidden store's scope, `guardedSimpleGit` runs nothing of the folder's config, so there is nothing to refuse.
+  if (activeHiddenStore(cwd)) return
+  await programsForAsync(cwd)
 }
 
 /** `-c` arguments that go before the Git subcommand `args`. */
 export function noRepoProgramArgs(cwd: string, args: readonly string[], options?: RepoProgramOptions): string[] {
   return repoProgramSettings(cwd, { ...options, write: writesThroughFilters(args) }).flatMap((value) => ['-c', value])
+}
+
+/** {@link noRepoProgramArgs} without blocking. */
+export async function noRepoProgramArgsAsync(cwd: string, args: readonly string[], options?: RepoProgramOptions): Promise<string[]> {
+  return (await repoProgramSettingsAsync(cwd, { ...options, write: writesThroughFilters(args) })).flatMap((value) => ['-c', value])
 }
 
 /**
@@ -418,6 +561,22 @@ export function withoutRepoPrograms(cwd: string, args: readonly string[], option
   if (run[0] === 'config') return [...named, ...run]
   // Optional locks are off for Mousse's own commands, so `status` does not refresh and write the index.
   return [...named, ...(own ? ['--no-optional-locks'] : []), ...noRepoProgramArgs(cwd, run, options), ...run]
+}
+
+/**
+ * {@link withoutRepoPrograms} without blocking the daemon, for code that can wait: what new code uses.
+ * It waits until `cwd`'s volume answers, then runs the same central check and the same reading of the
+ * repository's programs, so it returns the same arguments or refuses the same way (as a rejection).
+ */
+export async function withoutRepoProgramsAsync(cwd: string, args: readonly string[], options?: RepoProgramOptions & GitCheckOptions): Promise<string[]> {
+  // The central check below looks at the folder synchronously; it runs once the folder's volume answered.
+  await waitForFolderAccess([resolve(cwd)])
+  const own = !options?.userAction
+  const run = own ? withoutDeref(args) : [...args]
+  assertGitAllowed({ cwd, args: run, userRequested: options?.userRequested, stdin: options?.stdin, env: options?.env, lockFree: own && run[0] !== 'config' })
+  const named = gitDirectoryArgs(cwd)
+  if (run[0] === 'config') return [...named, ...run]
+  return [...named, ...(own ? ['--no-optional-locks'] : []), ...await noRepoProgramArgsAsync(cwd, run, options), ...run]
 }
 
 /**
@@ -517,13 +676,18 @@ export function policedSimpleGit(cwd: string, git: SimpleGit): SimpleGit {
  * simple-git for `cwd`. Each method call gets a fresh instance with the settings worked out for that
  * command, so a config written after an earlier call is seen. simple-git refuses these keys unless
  * allowed; they are only ever set to the values above, never to a caller's.
+ *
+ * The settings are worked out without blocking ({@link repoProgramSettingsAsync}), so each method returns
+ * a promise, and a repository whose programs Mousse cannot turn off rejects it rather than throwing. A
+ * caller that turns failed reads into defaults calls {@link checkRepoPrograms} first, so that refusal still
+ * reaches the user. The central check still throws at once, as before.
  */
 export function guardedSimpleGit(cwd: string, options: Partial<Omit<SimpleGitOptions, 'baseDir' | 'config' | 'unsafe'>> = {}): SimpleGit {
   // A command in a hidden store reads only the store's config (`hiddenStoreEnv`): nothing of the folder's is overridden.
-  const forCommand = (args: readonly string[], hidden: boolean): SimpleGit => simpleGit({
+  const forCommand = (config: string[]): SimpleGit => simpleGit({
     ...options,
     baseDir: cwd,
-    config: hidden ? [] : repoProgramSettings(cwd, { write: writesThroughFilters(args) }),
+    config,
     unsafe: UNSAFE_ALLOWED
   })
   return new Proxy({} as SimpleGit, {
@@ -541,8 +705,12 @@ export function guardedSimpleGit(cwd: string, options: Partial<Omit<SimpleGitOpt
         if (store) checkStoreCommand(store, cwd, command)
         else assertGitAllowed({ cwd, args: command, lockFree: true })
         // No optional locks: a status or diff read here never refreshes and rewrites the index.
-        const instance = forCommand(args, Boolean(store)).env(store ? hiddenStoreEnv(store, repoProgramEnv({ ...process.env, GIT_OPTIONAL_LOCKS: '0' })) : repoProgramEnv({ ...process.env, GIT_OPTIONAL_LOCKS: '0' })) as unknown as Record<string, (...values: unknown[]) => unknown>
-        return instance[key]!(...parameters)
+        const run = (config: string[]): unknown => {
+          const instance = forCommand(config).env(store ? hiddenStoreEnv(store, repoProgramEnv({ ...process.env, GIT_OPTIONAL_LOCKS: '0' })) : repoProgramEnv({ ...process.env, GIT_OPTIONAL_LOCKS: '0' })) as unknown as Record<string, (...values: unknown[]) => unknown>
+          return instance[key]!(...parameters)
+        }
+        if (store) return run([])
+        return repoProgramSettingsAsync(cwd, { write: writesThroughFilters(args) }).then(run)
       }
     }
   })

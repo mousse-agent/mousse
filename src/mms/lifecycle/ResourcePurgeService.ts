@@ -5,7 +5,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:pat
 import type { LifecyclePurgeItem, LifecyclePurgePreview, TaskLifecycleRecord, TrashRetentionPolicy } from '../../shared/resourceLifecycle'
 import { atomicWriteJsonSync } from '../data/AtomicFs'
 import { acquireRepositoryLease } from '../git/RepositoryLease'
-import { resolveRepositoryIdentity } from '../git/RepositoryIdentity'
+import { resolveRepositoryIdentity, resolveRepositoryIdentityAsync } from '../git/RepositoryIdentity'
 import { buildResourceInventory } from './ResourceInventory'
 import { projectFolderPurgeRefs } from './projectFolderRefs'
 import { measureTree } from './diskMeasure'
@@ -181,7 +181,7 @@ export class ResourcePurgeService {
         if (!item.manifestPath) { retained.push(`Checkout retained: ${item.reason ?? item.identity}`); continue }
         if (!existsSync(item.identity)) continue
         try {
-          const lease = await acquireRepositoryLease(resolveRepositoryIdentity(item.identity, { requireMutationCapability: true }), { signal: AbortSignal.timeout(10_000) })
+          const lease = await acquireRepositoryLease(await resolveRepositoryIdentityAsync(item.identity, { requireMutationCapability: true }), { signal: AbortSignal.timeout(10_000) })
           try { this.assertReservation(taskId, token, record.generation); const refusal = options.recheck?.(item.identity); if (refusal) throw new Error(refusal); new WorktreeRetirementService(this.store, { repositoryLease: lease, cleanupTaskId: taskId, cleanupToken: token, cleanupGeneration: record.generation }).retire(item.manifestPath) } finally { lease.release() }
         } catch (error) { retained.push(`Checkout retained: ${(error as Error).message}`) }
       }

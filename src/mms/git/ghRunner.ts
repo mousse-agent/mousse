@@ -2,7 +2,7 @@ import { execFile } from 'node:child_process'
 import { basename } from 'node:path'
 import { mousseGitEnv } from './gitEnv'
 import { assertGitAllowed, type UserAction } from './gitPolicy'
-import { repoProgramEnv, withoutRepoPrograms } from './repoPrograms'
+import { repoProgramEnv, withoutRepoProgramsAsync } from './repoPrograms'
 
 export interface ExecutableResult {
   stdout: string
@@ -22,17 +22,11 @@ export type ExecutableRunner = (
 ) => Promise<ExecutableResult>
 
 /** Runs a program; `git` runs no program the repository configures (`repoPrograms`). */
-export const execRunner: ExecutableRunner = (executable, args, options) =>
-  new Promise((resolvePromise, reject) => {
-    let argv: string[]
-    try {
-      const cwd = options?.cwd ?? process.cwd()
-      if (/^gh(\.exe)?$/i.test(basename(executable))) assertGitAllowed({ executable: 'gh', cwd, args, userRequested: options?.userRequested })
-      argv = executable === 'git' ? withoutRepoPrograms(cwd, args, { userRequested: options?.userRequested }) : [...args]
-    } catch (error) {
-      reject(error)
-      return
-    }
+export const execRunner: ExecutableRunner = async (executable, args, options) => {
+  const cwd = options?.cwd ?? process.cwd()
+  if (/^gh(\.exe)?$/i.test(basename(executable))) assertGitAllowed({ executable: 'gh', cwd, args, userRequested: options?.userRequested })
+  const argv = executable === 'git' ? await withoutRepoProgramsAsync(cwd, args, { userRequested: options?.userRequested }) : [...args]
+  return new Promise((resolvePromise, reject) => {
     execFile(
       executable,
       argv,
@@ -55,6 +49,7 @@ export const execRunner: ExecutableRunner = (executable, args, options) =>
       }
     )
   })
+}
 
 /** A packaged macOS app gets a minimal PATH, so Homebrew's gh is not found by name. */
 export function createGhFallbackRunner(

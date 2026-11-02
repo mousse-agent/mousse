@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from 'node:fs'
+import { readFile, realpath } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
 import { getMousseHomeDir } from '../data/paths'
 
@@ -32,7 +33,11 @@ function canonical(path: string): string {
 
 /** Where the record for a repository whose common Git folder is `commonDir` is kept. */
 export function repoTrustPath(commonDir: string): string {
-  const digest = createHash('sha256').update(canonical(commonDir)).digest('hex').slice(0, 32)
+  return trustPathFor(canonical(commonDir))
+}
+
+function trustPathFor(canonicalCommonDir: string): string {
+  const digest = createHash('sha256').update(canonicalCommonDir).digest('hex').slice(0, 32)
   return join(getMousseHomeDir(), 'git-trust', `${digest}.json`)
 }
 
@@ -45,6 +50,24 @@ export function readRepoTrust(commonDir: string): RepoTrustRecord | null {
     return record && typeof record.filters === 'object' && record.filters ? record : null
   } catch {
     return null
+  }
+}
+
+/**
+ * {@link readRepoTrust} without blocking, and where the record is kept: the common directory's real
+ * path is read with an async call, as it can be on a volume that is slow to answer.
+ */
+export async function readRepoTrustAsync(commonDir: string): Promise<{ path: string; record: RepoTrustRecord | null }> {
+  let real = resolve(commonDir)
+  // `fs/promises` `realpath` has the semantics of `realpathSync.native`.
+  try { real = await realpath(real) } catch { /* recorded as given */ }
+  const path = trustPathFor(process.platform === 'win32' ? real.toLowerCase() : real)
+  try {
+    const record = JSON.parse(await readFile(path, 'utf8')) as RepoTrustRecord
+    return { path, record: record && typeof record.filters === 'object' && record.filters ? record : null }
+  } catch {
+    // Not there, or not readable: no record, as `readRepoTrust` says.
+    return { path, record: null }
   }
 }
 

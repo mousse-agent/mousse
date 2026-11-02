@@ -1,5 +1,5 @@
 import { acquireRepositoryLease } from '../git/RepositoryLease'
-import { resolveRepositoryIdentity } from '../git/RepositoryIdentity'
+import { resolveRepositoryIdentityAsync } from '../git/RepositoryIdentity'
 import { hiddenStoreIdentity, inHiddenStore } from '../git/hiddenStore'
 import { threadSnapshotStore } from '../workspace/SnapshotWorkspace'
 import {
@@ -43,7 +43,7 @@ export async function withGitMutationLocks<T>(
   if (heldThreadLease) assertHeldThreadLease(threadDirectory, heldThreadLease)
   // The thread's own store, read from its record: the same folder may also be a person's repository now.
   const store = threadSnapshotStore(threadDirectory, repositoryPath)
-  const repository = store ? hiddenStoreIdentity(store) : resolveRepositoryIdentity(repositoryPath, { requireMutationCapability: true })
+  const repository = store ? hiddenStoreIdentity(store) : await resolveRepositoryIdentityAsync(repositoryPath, { requireMutationCapability: true })
   const heldRepositories = mutationContext.getStore()
   if (heldRepositories?.has(repository.key)) throw new Error('Nested repository mutation is not allowed; finish the owning operation first.')
   const threadLease = heldThreadLease ?? await waitAcquireExecutionLease(threadDirectory, { source, signal })

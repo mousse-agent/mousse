@@ -21,7 +21,7 @@ import { perWorktreeConfigEnabled, ThreadWorkspaceManager } from '../workspace/T
 import type { CodeHost } from './CodeHost'
 import { PullRequestReadError } from './GitHubCodeHost'
 import { acquireRepositoryLease } from './RepositoryLease'
-import { resolveRepositoryIdentity } from './RepositoryIdentity'
+import { resolveRepositoryIdentityAsync } from './RepositoryIdentity'
 import { repoProgramEnv, withoutRepoPrograms } from './repoPrograms'
 import { rethrowGitPolicyError, type UserAction } from './gitPolicy'
 
@@ -289,7 +289,7 @@ export class PullRequestThreadService {
       const manager = new ThreadWorkspaceManager(this.deps.threads.getThreadDir(threadId))
       const workspace = manager.load()
       if (workspace) {
-        lease = await acquireRepositoryLease(resolveRepositoryIdentity(topLevel, { requireMutationCapability: true }))
+        lease = await acquireRepositoryLease(await resolveRepositoryIdentityAsync(topLevel, { requireMutationCapability: true }))
         const primary = manager.resolveRepository(projectPath).primaryCheckoutPath
         const attempt = (args: string[]) => {
           try {
