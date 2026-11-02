@@ -726,7 +726,10 @@ const api = {
     start: (params: Record<string, unknown>): Promise<unknown> => ipcRenderer.invoke('publish:start', params)
   },
   operations: {
-    abort: (params: Record<string, unknown>): Promise<unknown> => ipcRenderer.invoke('operations:abort', params)
+    abort: (params: Record<string, unknown>): Promise<unknown> => ipcRenderer.invoke('operations:abort', params),
+    /** Finishes or settles what a thread's worktree or its Publish is waiting on. Never moves the branch or HEAD. */
+    recover: (threadId: string): Promise<import('../shared/workspace').WorkspaceRecoverResult> =>
+      ipcRenderer.invoke('operations:recover', threadId)
   },
   projects: {
     list: (): Promise<Project[]> => ipcRenderer.invoke('projects:list'),

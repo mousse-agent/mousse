@@ -91,6 +91,7 @@ import { isQualifiedId } from '../../shared/threadRef'
 import { resolveThreadProjectPath } from '../data/resolveActiveProjectPath'
 import { ThreadJournal } from '../data/ThreadJournal'
 import { ThreadWorkspaceManager } from '../workspace/ThreadWorkspaceManager'
+import { clearStaleLeftMerges, recoveryErrorText, threadRecovery } from '../workspace/workspaceRecovery'
 import { resolveEditorFolder } from '../workspace/editorFolder'
 import type { NodeId } from '../../shared/net/ids'
 import { scheduledJobOptionsDepsFrom, validateScheduledJobOptions, type ScheduledJobOptionsDeps } from '../scheduled/validateJobOptions'
@@ -393,6 +394,18 @@ function threadLookupContext(ctx: HandlerContext, params: Record<string, unknown
     throw new StaleThreadActionRevisionError(currentGeneration)
   }
   return { threadId, thread, threadDirectory, projectPath, currentGeneration }
+}
+
+const THREAD_BUSY_TEXT = 'The current turn is still running. Try again once it finishes.'
+
+/** Another holder of the thread's execution lease (a turn, a sweep) refused this action after its wait. */
+function isLeaseBusy(error: unknown): boolean {
+  return /execution lease busy/i.test(error instanceof Error ? error.message : String(error))
+}
+
+/** Recovery and Abort wait for no turn: a running one is said at once, instead of after the lease wait times out. */
+function assertNoRunningTurn(ctx: HandlerContext, threadId: string): void {
+  if (ctx.mms.orchestrator.isTurnActive(threadId)) throw new DomainRpcError('thread_busy', THREAD_BUSY_TEXT)
 }
 
 function threadOperationContext(ctx: HandlerContext, params: Record<string, unknown>) {
@@ -2790,8 +2803,12 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const metadata = stored && lookup.projectPath ? manager.verify(stored) : stored
       // Never restores: the hover card and the active-project lookup call this for passive reads.
       const marker = stored && !existsSync(stored.worktreePath) ? readCleanupMarker(ctx.mms.threads.lifecycleStore, lookup.threadId) : undefined
+      // What the thread waits on, for the banner and the CLI; absent while nothing does. A thread recording into a hidden
+      // store (no Git of its own) is read through `loadOrSnapshot`, so it shows the banner too.
+      const recovery = threadRecovery(lookup.threadDirectory, lookup.projectPath)
       return {
         metadata,
+        ...(recovery ? { recovery } : {}),
         execution: lookup.projectPath
           ? manager.executionContext(lookup.projectPath, metadata)
           : manager.unboundExecutionContext(lookup.threadId),
@@ -3090,21 +3107,59 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       await ensureWorkspaceMaterialized(ctx, operation.threadId, operation.projectPath)
       const workspace = new ThreadWorkspaceManager(operation.threadDirectory).loadOrSnapshot()
       if (!workspace || workspace.lifecycle !== 'ready') throw new DomainRpcError('workspace_not_ready', 'Thread workspace is not ready')
-      // A merge of a subagent result an older version left unfinished is cancelled, never run again.
-      const cancelledIntegrations = cancelPendingIntegrations(operation.threadDirectory, workspace.worktreePath)
-      // A folder with no worktree has nothing to publish.
-      if (operation.projectPath && !workspace.snapshotOnly) await new PublishService(operation.threadDirectory).recoverPending(workspace.worktreePath, operation.projectPath)
-      await new ThreadActionService(operation.threadDirectory).recoverPending(workspace.worktreePath)
-      await new CodeRevertService(operation.threadDirectory).recoverPending(workspace.worktreePath)
-      await new UndoService(operation.threadDirectory).recoverPending(workspace.worktreePath, (target, kind) => {
-        if (kind === 'redo' && target.nativeContextStartBoundary) ctx.mms.orchestrator.restoreConversationActionEnd(operation.threadId, target.presentationMessageStart, target.presentationMessageEnd, target.nativeContextBoundary)
-        else if (target.nativeContextStartBoundary) ctx.mms.orchestrator.restoreConversationBoundary(operation.threadId, target.presentationMessageStart, target.nativeContextStartBoundary)
-      })
-      await new ConversationBranchService(operation.threadDirectory).recoverPending(workspace.worktreePath, (branch) => {
-        const target = loadConversationState(operation.threadDirectory, branch.id)
-        ctx.mms.orchestrator.replaceConversationState(operation.threadId, target.messages, target.nativeContext)
-      })
-      return { ok: true, ...(cancelledIntegrations.length ? { cancelledIntegrations } : {}) }
+      assertNoRunningTurn(ctx, operation.threadId)
+      let cancelledIntegrations: ReturnType<typeof cancelPendingIntegrations>
+      let publish: Awaited<ReturnType<PublishService['recoverPending']>>
+      let releaseRetained: string | undefined
+      try {
+        // A merge of a subagent result an older version left unfinished is cancelled, never run again.
+        cancelledIntegrations = cancelPendingIntegrations(operation.threadDirectory, workspace.worktreePath)
+        // A left merge that was finished, aborted or replaced since is no longer offered for Abort.
+        clearStaleLeftMerges(operation.threadDirectory)
+        // A folder with no worktree has nothing to publish.
+        publish = operation.projectPath && !workspace.snapshotOnly ? await new PublishService(operation.threadDirectory).recoverPending(workspace.worktreePath, operation.projectPath) : []
+        await new ThreadActionService(operation.threadDirectory).recoverPending(workspace.worktreePath)
+        await new CodeRevertService(operation.threadDirectory).recoverPending(workspace.worktreePath)
+        await new UndoService(operation.threadDirectory).recoverPending(workspace.worktreePath, (target, kind) => {
+          if (kind === 'redo' && target.nativeContextStartBoundary) ctx.mms.orchestrator.restoreConversationActionEnd(operation.threadId, target.presentationMessageStart, target.presentationMessageEnd, target.nativeContextBoundary)
+          else if (target.nativeContextStartBoundary) ctx.mms.orchestrator.restoreConversationBoundary(operation.threadId, target.presentationMessageStart, target.nativeContextStartBoundary)
+        })
+        await new ConversationBranchService(operation.threadDirectory).recoverPending(workspace.worktreePath, (branch) => {
+          const target = loadConversationState(operation.threadDirectory, branch.id)
+          ctx.mms.orchestrator.replaceConversationState(operation.threadId, target.messages, target.nativeContext)
+        })
+        // Last, since it waits for every other operation: a release of old Undo history that stopped halfway is finished
+        // by the release itself, limited to the ones that stopped.
+        // A hidden store's release never leaves one stopped halfway; it refuses whole, and is said below if anything waits.
+        const releases = workspace.snapshotOnly ? 0 : [...new ThreadJournal(operation.threadDirectory).latestByOperation().values()].filter((entry) => entry.operationType === 'undo-ref-release' && entry.state === 'prepared').length
+        if (releases) {
+          try {
+            const released = await new ReceiptRefReleaseService(ctx.mms.threads.lifecycleStore, operation.threadId).release(workspace.worktreePath, { limit: releases })
+            releaseRetained = released.retained[0]?.reason
+          } catch (error) {
+            // Refused as a whole (another operation still waits, the clock needs a review): the release stays pending.
+            if (isLeaseBusy(error)) throw error
+            releaseRetained = recoveryErrorText(error)
+          }
+        }
+      } catch (error) {
+        // What stopped recovery is for the person to read in the banner or the CLI, never an internal error.
+        if (error instanceof DomainRpcError) throw error
+        throw new DomainRpcError(isLeaseBusy(error) ? 'thread_busy' : 'recovery_failed', isLeaseBusy(error) ? THREAD_BUSY_TEXT : recoveryErrorText(error))
+      }
+      // What still waits after this attempt, in plain words: recovery reports the truth, not only that it ran.
+      const left = threadRecovery(operation.threadDirectory, operation.projectPath)
+      const stillWaiting = !left ? undefined
+        : publish.some((item) => item.state === 'pending') && left.kind === 'publish' ? "the project folder can't be read, so Mousse can't tell yet whether the Publish reached its branch"
+        : releaseRetained && left.operationType === 'undo-ref-release' ? `old Undo history could not be released yet: ${releaseRetained}`
+        : left.kind === 'merge' ? 'a merge from an earlier version is still in progress; abort it, or finish it with Git'
+        : left.operationType ? `recovery could not finish the ${left.operationType} operation: ${left.reason}` : left.reason
+      return {
+        ok: true,
+        settled: !left,
+        ...(left ? { recovery: left, stillWaiting } : {}),
+        ...(cancelledIntegrations.length ? { cancelledIntegrations } : {})
+      }
     }
     case 'operations.abort': {
       const p = isObject(params) ? params : {}
@@ -3114,8 +3169,16 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       if (!record) throw new DomainRpcError('operation_not_found', `Operation not found: ${operationId}`)
       const workspace = new ThreadWorkspaceManager(operation.threadDirectory).load()
       if (record.operationType !== 'publish' && !workspace) throw new DomainRpcError('workspace_not_ready', 'Thread workspace is missing')
-      await new ManagedConflictService(operation.threadDirectory).abort(record.operationType === 'publish' ? operation.projectPath : workspace!.worktreePath, operationId)
-      return { ok: true }
+      assertNoRunningTurn(ctx, operation.threadId)
+      let aborted: { preservedRef: string }
+      try {
+        aborted = await new ManagedConflictService(operation.threadDirectory).abort(record.operationType === 'publish' ? operation.projectPath : workspace!.worktreePath, operationId)
+      } catch (error) {
+        // Why the merge could not be aborted is for the person to read in the banner or the CLI.
+        throw new DomainRpcError(isLeaseBusy(error) ? 'thread_busy' : 'abort_failed', isLeaseBusy(error) ? THREAD_BUSY_TEXT : recoveryErrorText(error))
+      }
+      // Every file as it was before the abort, conflicted ones with their edits, is kept under this ref.
+      return { ok: true, preservedRef: aborted.preservedRef }
     }
     case 'publish.status': {
       const p = isObject(params) ? params : {}

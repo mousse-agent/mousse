@@ -1262,6 +1262,9 @@ export function registerGuiIpc(
   registerHandler('operations:abort', async (_e, params: Record<string, unknown>) =>
     guiMms.request('operations.abort', params)
   )
+  registerHandler('operations:recover', async (_e, threadId: string) =>
+    guiMms.request('operations.recover', { threadId })
+  )
   registerStorageHandler('threads:restore', async (_e, threadId: string) =>
     guiMms.request('threads.restore', { threadId })
   )

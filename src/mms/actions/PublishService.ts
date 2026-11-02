@@ -9,6 +9,7 @@ import { publishedRef, sameTree, takeSnapshot } from './snapshots'
 import { ChangeReceiptService } from './ChangeReceiptService'
 import { ThreadActionService } from './ThreadActionService'
 import { ThreadWorkspaceManager } from '../workspace/ThreadWorkspaceManager'
+import { mergeIdentity } from './leftMerge'
 import { resolveRepositoryIdentity } from '../git/RepositoryIdentity'
 
 export interface PublishOptions {
@@ -275,7 +276,7 @@ export class PublishService {
     const mergeInProgress = !expected.publishSha && tryGit(primaryCheckout, ['rev-parse', '--verify', '-q', 'MERGE_HEAD']).ok ? primaryCheckout : undefined
     const reason = mergeInProgress ? `a merge from an earlier version is still in progress in ${primaryCheckout}; abort it or finish it with Git`
       : tip === expected.prePublishSha ? `${expected.targetBranch} did not move, and nothing was changed by recovery` : `${expected.targetBranch} moved elsewhere, and nothing was changed by recovery`
-    this.journal.append({ operationId, operationType: 'publish', state: 'cancelled', details: { recovered: true, prePublishSha: expected.prePublishSha, targetBranch: expected.targetBranch, tip, ...(mergeInProgress ? { mergeInProgress, sourceSha: expected.sourceSha } : {}), reason: `The publish did not land: ${reason}.` } })
+    this.journal.append({ operationId, operationType: 'publish', state: 'cancelled', details: { recovered: true, prePublishSha: expected.prePublishSha, targetBranch: expected.targetBranch, tip, ...(mergeInProgress ? { mergeInProgress, mergeIdentity: mergeIdentity(mergeInProgress), sourceSha: expected.sourceSha } : {}), reason: `The publish did not land: ${reason}.` } })
     return { operationId, state: 'cancelled', ...(mergeInProgress ? { mergeInProgress } : {}) }
   }
 

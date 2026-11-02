@@ -95,6 +95,36 @@ export interface WorkspaceExecutionContext {
   provenance?: WorkspaceProvenance
 }
 
+/**
+ * What a thread is waiting on; `workspace.getStatus` returns it until it is settled.
+ * - `paused`: an operation other than Publish did not finish, or Git cannot read the worktree. Every turn, Undo and
+ *   Publish are refused until `operations.recover` settles it.
+ * - `merge`: a merge an earlier version of Mousse started is still in progress in `folder`. Nothing is refused;
+ *   `operations.abort` with `operationId` aborts it.
+ * - `publish`: a Publish did not finish. Nothing is refused; `operations.recover` finds out whether it landed.
+ */
+export interface WorkspaceRecovery {
+  kind: 'paused' | 'merge' | 'publish'
+  /** One plain sentence. */
+  reason: string
+  /** The operation it concerns, when there is one. */
+  operationId?: string
+  operationType?: string
+  /** The folder the merge is in, for `merge`: the worktree or the primary checkout. */
+  folder?: string
+}
+
+/** The result of `operations.recover`: whether nothing waits any more, and otherwise what still does. */
+export interface WorkspaceRecoverResult {
+  ok: true
+  /** True when nothing waits after recovery. */
+  settled: boolean
+  /** What still waits, as `workspace.getStatus` reports it, when not settled. */
+  recovery?: WorkspaceRecovery
+  /** Why it still waits, in plain words, to follow "Still waiting:". */
+  stillWaiting?: string
+}
+
 export const PENDING_CHANGES_ERROR_CODES = ['workspace_not_clean', 'workspace_conflict'] as const
 
 /**

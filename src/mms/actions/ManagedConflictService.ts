@@ -2,18 +2,28 @@ import { ThreadJournal } from '../data/ThreadJournal'
 import { ThreadActionService } from './ThreadActionService'
 import { withGitMutationLocks } from './GitOperationCoordinator'
 import { git, requireClean, tryGit } from './git'
+import { leftMergeRefusal, preserveBeforeAbort } from './leftMerge'
 
 /** Abort only the Git sequencer belonging to the selected durable operation. */
 export class ManagedConflictService {
   constructor(private readonly threadDirectory: string) {}
 
-  async abort(workspacePath: string, operationId: string): Promise<void> {
+  /** Aborts the operation's merge or revert. Every file is kept first under the returned `refs/mousse/preserved/` ref. */
+  async abort(workspacePath: string, operationId: string): Promise<{ preservedRef: string }> {
     return withGitMutationLocks(this.threadDirectory, workspacePath, 'operation-abort', async () => {
       const journal = new ThreadJournal(this.threadDirectory)
       const record = journal.latestByOperation().get(operationId)
       // A merge an older version left in progress stays abortable after its record was cancelled on upgrade.
       const leftMerge = record?.state === 'cancelled' && typeof (record.details as { mergeInProgress?: unknown } | undefined)?.mergeInProgress === 'string'
       if (!record || (record.state !== 'recovery_required' && !leftMerge)) throw new Error('No matching operation conflict is active.')
+      // A merge an older version left is aborted only while it is that very merge (`leftMergeRefusal`, which the banner
+      // shares): one started later, even of the same commit at the same HEAD, is the person's or the agent's. A record that
+      // can never be aborted is cleared, so nothing offers it again.
+      const refusal = leftMerge ? leftMergeRefusal(workspacePath, record, journal.list()) : undefined
+      if (refusal) {
+        journal.append({ operationId, operationType: record.operationType, state: 'cancelled', details: { mergeNoLongerRecorded: true } })
+        throw new Error(refusal)
+      }
       const merge = ['publish', 'child-integration', 'change-integration'].includes(record.operationType)
       if (!merge && !['undo', 'redo', 'code-revert'].includes(record.operationType)) throw new Error(`Abort is unavailable for ${record.operationType}`)
       const details = record.details as { preMergeSha?: string; prePublishSha?: string; preUndoSha?: string; startSha?: string; workerHeadSha?: string; currentCommit?: string; actionId?: string }
@@ -25,6 +35,8 @@ export class ManagedConflictService {
       const sourceSha = (intent?.expectedPreState as { sourceSha?: string } | undefined)?.sourceSha ?? (details as { sourceSha?: string }).sourceSha
       const expected = merge ? details.workerHeadSha ?? sourceSha : details.currentCommit
       if (!expected || marker.stdout !== expected) throw new Error('Git sequencer belongs to another operation.')
+      // An abort rewrites conflicted files, edits in them included: they are kept first, so nothing is lost.
+      const preservedRef = preserveBeforeAbort(workspacePath, operationId)
       const result = tryGit(workspacePath, [merge ? 'merge' : 'revert', '--abort'])
       if (!result.ok) throw new Error(result.stderr || 'Unable to abort the operation conflict.')
       // The merge is gone; what else the folder holds is someone's work and stays as it is.
@@ -34,7 +46,8 @@ export class ManagedConflictService {
         const all = actions.list(); const target = all.find((item) => item.id === details.actionId)
         if (target?.state === 'undo_conflict') { target.state = 'completed'; actions.replace(all) }
       }
-      journal.append({ operationId, operationType: record.operationType, state: 'cancelled', details: { conflictAborted: true, beforeSha: before } })
+      journal.append({ operationId, operationType: record.operationType, state: 'cancelled', details: { conflictAborted: true, beforeSha: before, preservedRef } })
+      return { preservedRef }
     })
   }
 }

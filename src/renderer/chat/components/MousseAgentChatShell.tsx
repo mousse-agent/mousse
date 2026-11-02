@@ -7,6 +7,7 @@ import { PromptUndoProvider } from '../../components/PromptUndoControls'
 import { useSubagentCardModels } from '../../hooks/useSubagentCards'
 import { AgentChat } from './agent-elements/agent-chat'
 import { PausedRunBanner, usePausedRun } from './PausedRunBanner'
+import { WorkspaceRecoveryBanner } from './WorkspaceRecoveryBanner'
 import { SubagentCardsContext, SubagentInheritedProviderContext } from './agent-elements/tools/subagent-cards-context'
 import { useThreadProviderId } from '../../components/SubagentAvatar'
 import type { CustomToolRendererProps } from './agent-elements/types'
@@ -111,12 +112,15 @@ export function MousseAgentChatShell({
           error={error}
           toolRenderers={toolRenderers}
           slots={slots}
-          lastTurnNotice={paused ? <PausedRunBanner threadId={threadId} onStop={onStop} /> : interrupted ? <div className="chat-run-interrupted" role="status">
-            <span className="chat-run-interrupted-label">
-              <X size={12} strokeWidth={1.8} aria-hidden="true" />
-              <span>Run interrupted</span>
-            </span>
-          </div> : undefined}
+          lastTurnNotice={<>
+            <WorkspaceRecoveryBanner threadId={threadId} />
+            {paused ? <PausedRunBanner threadId={threadId} onStop={onStop} /> : interrupted ? <div className="chat-run-interrupted" role="status">
+              <span className="chat-run-interrupted-label">
+                <X size={12} strokeWidth={1.8} aria-hidden="true" />
+                <span>Run interrupted</span>
+              </span>
+            </div> : undefined}
+          </>}
           showCopyToolbar
           enableImagePreview
           enableFind
