@@ -4709,7 +4709,6 @@ export class OrchestratorService extends EventEmitter {
     return threadTurnOrigin({ ...(botRole ? { botRole } : {}), workflow: Boolean(workflowInvocationId), ...(lineage ? { lineage } : {}) })
   }
 
-  /** The parent's workspace path a `shared` child observes, or null when the parent has none. */
   /** Whether "Give each subagent its own worktree" (Settings > Agents > Experimental) is on. */
   private subagentWorktreesOn(): boolean {
     try {
@@ -4745,6 +4744,7 @@ export class OrchestratorService extends EventEmitter {
     await manager.provision(threadId, 'main', projectPath, signal, lease ?? undefined, startSha)
   }
 
+  /** The parent's workspace path a `shared` child observes, or null when the parent has none. */
   private sharedWorkspaceOf(parentThreadId: string): ThreadSession['sharedWorkspace'] {
     const parent = this.getOrCreateSession(parentThreadId)
     const path = parent.sharedWorkspace?.path ?? parent.workspace?.projectPath ?? parent.projectCwd
