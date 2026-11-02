@@ -1,5 +1,4 @@
 import { Type, type JsonObject, type Tool, type ToolCall, type ToolResultMessage } from '@earendil-works/pi-ai'
-import { PERMISSION_KEYS } from '../../../../shared/permissionKeys'
 import { recordSubagentCall } from '../../../../shared/subagentTools'
 import type { LlmToolEvent, StreamingLlmToolEvent } from '../../../harness/turnEvents'
 import {
@@ -73,18 +72,21 @@ export interface DelegationToolHost {
   taskCancel(input: SubagentRef): Promise<unknown>
   listDelegations(): unknown
   listSubagents(): unknown
-  integrateDelegation(input: SubagentRef, call: DelegationToolCall): Promise<unknown>
+  /**
+   * The retired merge tools (`integrate_delegation`, `integrate_subagent`): a finished task's frozen result, with a
+   * note that Mousse merged nothing. They stay callable for older transcripts and agents.
+   */
+  reportResult(input: SubagentRef): Promise<unknown> | unknown
   named: {
     create(input: NamedAgentToolRequest, call: DelegationToolCall): Promise<unknown>
     createBatch(input: NamedAgentToolRequest[], call: DelegationToolCall): Promise<unknown>
     recall(input: NamedAgentRecallRequest, call: DelegationToolCall): Promise<unknown>
-    integrate(input: { agent: string }, call: DelegationToolCall): Promise<unknown>
   }
 }
 
 /** Delegation tool schemas (SPEC §14.2) plus the named-agent compatibility wrappers. */
 const DELEGATION_TOOLS: Tool[] = [
-  { name: 'delegate_task', description: 'Start a new subagent on its own thread and return at once with its delegationId. Mousse sends you a notice with the result when it finishes. title is a short role-like name ("API reviewer"), unique among your subagents: it is how you address the subagent later (continue_subagent, task_status, task_cancel); when it is taken the call returns title_taken and starts nothing. workspace isolated gives the subagent its own worktree; shared is only for read-only roles (research, review). instanceId (the agent to run, such as "claude" or "pi:openai") and model default to yours; provider is the older name form of instanceId.',
+  { name: 'delegate_task', description: 'Start a new subagent on its own thread and return at once with its delegationId. Mousse sends you a notice with the result when it finishes. title is a short role-like name ("API reviewer"), unique among your subagents: it is how you address the subagent later (continue_subagent, task_status, task_cancel); when it is taken the call returns title_taken and starts nothing. workspace isolated gives the subagent its own worktree; shared is only for read-only roles (research, review). Mousse never merges a subagent\'s files into yours: the notice gives the base and result snapshots (pinned under refs/mousse/), where it worked and the Git state it left, and you bring the work in with git. instanceId (the agent to run, such as "claude" or "pi:openai") and model default to yours; provider is the older name form of instanceId.',
     parameters: Type.Object({ prompt: Type.String(), title: Type.String(), instanceId: Type.Optional(Type.String()), provider: Type.Optional(Type.String()), model: Type.Optional(Type.String()), role: Type.Optional(Type.String()),
       workspace: Type.Union([Type.Literal('isolated'), Type.Literal('shared')]),
       wake: Type.Optional(Type.Union([Type.Literal('always'), Type.Literal('settled_only')])) }) },
@@ -92,16 +94,16 @@ const DELEGATION_TOOLS: Tool[] = [
     parameters: Type.Object({ subagent: Type.String(), prompt: Type.String() }) },
   { name: 'answer_subagent', description: 'Answer a question one of your subagents asked (ask_user), using the requestId from continue_subagent (needs_answer) or from the question notice. answers maps each question id to the chosen option id (an array when several are allowed) or free text.',
     parameters: Type.Object({ subagent: Type.String(), requestId: Type.String(), answers: Type.Record(Type.String(), Type.Union([Type.String(), Type.Array(Type.String())])) }) },
-  { name: 'task_status', description: 'Status of a subagent task, with its result once finished (bounded). Pass the delegationId, or the subagent title for its latest task. Reading a result acknowledges it.', parameters: Type.Object({ delegationId: Type.Optional(Type.String()), subagent: Type.Optional(Type.String()) }) },
+  { name: 'task_status', description: 'Status of a subagent task, with its result once finished (bounded) and, for a task that changed files, workspaceResult: its base and result snapshots, where it worked and the Git state it left. Pass the delegationId, or the subagent title for its latest task. Reading a result acknowledges it.', parameters: Type.Object({ delegationId: Type.Optional(Type.String()), subagent: Type.Optional(Type.String()) }) },
   { name: 'task_cancel', description: 'Cancel a subagent task and everything that subagent delegated, deepest first. Pass the delegationId, or the subagent title to cancel all of its open tasks.', parameters: Type.Object({ delegationId: Type.Optional(Type.String()), subagent: Type.Optional(Type.String()) }) },
   { name: 'list_delegations', description: 'List the tasks this thread delegated, with their status.', parameters: Type.Object({}) },
-  { name: 'integrate_delegation', description: 'Merge a finished isolated subagent task into this thread workspace. Pass the delegationId, or the subagent title for its latest finished task. Merges exactly what that task finished with, even if the subagent has worked since. Runs as its own integration run after this turn; you are notified of the outcome.', parameters: Type.Object({ delegationId: Type.Optional(Type.String()), subagent: Type.Optional(Type.String()) }) },
+  { name: 'integrate_delegation', description: 'Retired: Mousse no longer merges subagent results. Returns the finished task\'s result (base and result snapshots, where it worked, the Git state it left) so you can bring it in with git. Pass the delegationId, or the subagent title for its latest finished task.', parameters: Type.Object({ delegationId: Type.Optional(Type.String()), subagent: Type.Optional(Type.String()) }) },
   { name: 'create_subagent', description: 'Named wrapper over delegate_task: starts a child thread titled with the name and returns at once. Defaults to shared read-only research; access write runs in an isolated worktree.',
     parameters: Type.Object({ name: Type.String(), task: Type.String(),
       workspace: Type.Optional(Type.Union([Type.Literal('shared'), Type.Literal('isolated')])),
       access: Type.Optional(Type.Union([Type.Literal('read-only'), Type.Literal('write')])) }) },
   { name: 'create_subagents', description: 'Start up to eight named delegated tasks at once (see create_subagent).', parameters: Type.Object({ agents: Type.Array(Type.Object({ name: Type.String(), task: Type.String(), workspace: Type.Optional(Type.Union([Type.Literal('shared'), Type.Literal('isolated')])), access: Type.Optional(Type.Union([Type.Literal('read-only'), Type.Literal('write')])) }), { minItems: 1, maxItems: 8 }) }) },
-  { name: 'integrate_subagent', description: 'Named wrapper over integrate_delegation for the latest finished task of the named child.', parameters: Type.Object({ agent: Type.String(), episodeId: Type.Optional(Type.String()), expectedResultSha: Type.Optional(Type.String()), expectedDestinationSha: Type.Optional(Type.String()) }) },
+  { name: 'integrate_subagent', description: 'Retired named wrapper over integrate_delegation: returns the latest finished task\'s result for the named child; merges nothing.', parameters: Type.Object({ agent: Type.String(), episodeId: Type.Optional(Type.String()), expectedResultSha: Type.Optional(Type.String()), expectedDestinationSha: Type.Optional(Type.String()) }) },
   { name: 'recall_subagent', description: 'Send a follow-up task to an existing named child thread; returns at once and wakes you when it finishes.',
     parameters: Type.Object({ agent: Type.String(), task: Type.String(), expectedAgentGeneration: Type.Optional(Type.Integer({ minimum: 0 })),
       workspace: Type.Optional(Type.Union([Type.Literal('shared'), Type.Literal('isolated')])),
@@ -115,10 +117,10 @@ export const DELEGATION_TOOL_NAMES: ReadonlySet<string> = new Set(DELEGATION_TOO
 
 /**
  * The tools both the pi loop and the Mousse MCP server offer, in one list. The older names
- * (`create_subagent(s)`, `recall_subagent`, `integrate_subagent`, `list_delegations`) stay
- * dispatchable for replayed transcripts but are not listed.
+ * (`create_subagent(s)`, `recall_subagent`, `integrate_delegation`, `integrate_subagent`, `list_delegations`)
+ * stay dispatchable for replayed transcripts and older agents but are not listed.
  */
-export const LISTED_DELEGATION_TOOL_NAMES = ['delegate_task', 'continue_subagent', 'answer_subagent', 'task_status', 'task_cancel', 'list_subagents', 'integrate_delegation'] as const
+export const LISTED_DELEGATION_TOOL_NAMES = ['delegate_task', 'continue_subagent', 'answer_subagent', 'task_status', 'task_cancel', 'list_subagents'] as const
 
 /** Definitions shared by the pi loop and the Mousse MCP server, so both offer identical schemas. */
 export function delegationToolDefinitions(names: readonly string[] = LISTED_DELEGATION_TOOL_NAMES): Tool[] {
@@ -179,7 +181,7 @@ export async function dispatchDelegationTool(host: DelegationToolHost, toolCall:
     case 'list_delegations':
       return host.listDelegations()
     case 'integrate_delegation':
-      return host.integrateDelegation(subagentRef(args, 'integrate_delegation'), call)
+      return host.reportResult(subagentRef(args, 'integrate_delegation'))
     case 'create_subagent': {
       if (typeof args.name !== 'string' || typeof args.task !== 'string') throw new Error('Named subagent requires name and task')
       return host.named.create(args as unknown as NamedAgentToolRequest, call)
@@ -190,7 +192,7 @@ export async function dispatchDelegationTool(host: DelegationToolHost, toolCall:
       return host.named.createBatch(agents, call)
     }
     case 'integrate_subagent':
-      return host.named.integrate({ agent: requireString(args, 'agent', 'Integration requires the agent name') }, call)
+      return host.reportResult({ subagent: requireString(args, 'agent', 'integrate_subagent requires the agent name') })
     case 'recall_subagent': {
       if (typeof args.agent !== 'string' || typeof args.task !== 'string' || args.contextMode !== undefined && !['continue', 'fresh'].includes(String(args.contextMode))) throw new Error('Recall requires agent and task')
       return host.named.recall(args as unknown as NamedAgentRecallRequest, call)
@@ -278,14 +280,13 @@ export function delegationTools(host: DelegationToolsHost): MousseTool[] {
     description: definition.description,
     inputSchema: plainSchema(definition, extra),
     definition: () => definition,
-    // Integration writes the workspace: it asks unless the run's permission mode allows edits.
-    access: definition.name === 'integrate_delegation' || definition.name === 'integrate_subagent' ? 'editsWorkspace' : 'actsAsCaller',
-    ...(definition.name === 'integrate_delegation' || definition.name === 'integrate_subagent' ? { permissionKey: PERMISSION_KEYS.mousseIntegrate } : {}),
+    // No delegation tool writes the caller's workspace: the retired merge tools only report a result.
+    access: 'actsAsCaller',
     class: 'delegation',
     hidden: !listed.has(definition.name),
     // A read-only subagent may start (read-only) subagents and follow them; `delegateTask` checks the
-    // workspace of each one. Integration writes the workspace and stays refused.
-    readOnlySafe: definition.name !== 'integrate_delegation' && definition.name !== 'integrate_subagent',
+    // workspace of each one.
+    readOnlySafe: true,
     describe: () => `Called mousse.${definition.name}`,
     handler: async (args, ctx): Promise<ToolOutcome> => {
       // The ceiling checks and defaults are the MCP surface's; the in-process host applies its own.
@@ -309,11 +310,6 @@ export function delegationTools(host: DelegationToolsHost): MousseTool[] {
         if (requested === 'default' && caller.modeCeiling === 'plan')
           throw new McpToolError('mousse_ceiling_exceeded', 'A plan-ceiling caller cannot start a child with the default ceiling.')
         if (requested === undefined) args.modeCeiling = caller.modeCeiling
-      })
-    if (definition.name === 'integrate_delegation')
-      return tool(definition, { clientRequestId: CLIENT_REQUEST_ID_SCHEMA }, (_args, caller) => {
-        if (caller.modeCeiling === 'plan')
-          throw new McpToolError('mousse_ceiling_exceeded', 'Integration writes the workspace; a plan ceiling cannot integrate.')
       })
     // Both act on the caller's own subagent, which the host's handler checks; they stay `actsAsCaller`
     // like `delegate_task` rather than loosening the thread-writing scope check for other tools.

@@ -1,5 +1,5 @@
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
-import { dirname } from 'node:path'
+import { readFileSync } from 'node:fs'
+import { atomicWriteJsonSync } from '../../mms/data/AtomicFs'
 import type { UpdateChannel } from '../../shared/updates'
 
 /** What the updater keeps between launches, in Electron's userData directory. */
@@ -37,10 +37,8 @@ export function updaterRecordFile(path: string): UpdaterRecordStore {
       }
     },
     write(record) {
-      mkdirSync(dirname(path), { recursive: true })
-      const temp = `${path}.${process.pid}.tmp`
-      writeFileSync(temp, `${JSON.stringify(record, null, 2)}\n`)
-      renameSync(temp, path)
+      // Retries the rename while Windows briefly holds the file, and removes the temp file on failure.
+      atomicWriteJsonSync(path, record)
     }
   }
 }

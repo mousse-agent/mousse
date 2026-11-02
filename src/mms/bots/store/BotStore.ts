@@ -163,7 +163,7 @@ CREATE TABLE bot_contexts(
   },
   {
     // 6d: when each schedule of a bot runs next (the schedule as it was read, so an edit restarts
-    // it), and the last state a channel activation told its chat about (each state is posted once).
+    // it), and `reply_status`, which only the removed Channels feature used.
     version: 3,
     sql: `
 CREATE TABLE bot_schedule_state(
@@ -701,7 +701,7 @@ export class BotStore {
     return this.all(`SELECT * FROM bot_activations WHERE status IN (${marks}) ORDER BY created_at, id`, ...statuses).map(activationOf)
   }
 
-  // -- Schedules and channel replies (6d) -------------------------------------------------------
+  // -- Schedules (6d) -----------------------------------------------------------------------------
 
   scheduleStates(botId: string): Array<{ scheduleId: string; spec: string; nextRunAt: string | null; lastSkipAt: string | null; lastSkipReason: string | null }> {
     return this.all('SELECT * FROM bot_schedule_state WHERE bot_id = ? ORDER BY schedule_id', botId).map((row) => ({
@@ -743,16 +743,6 @@ export class BotStore {
     this.run('INSERT INTO bot_counters(activation_id, limits_json) VALUES(?, ?)', row.id, JSON.stringify(limits))
     this.run('INSERT INTO bot_spend(activation_id) VALUES(?)', row.id)
     return true
-  }
-
-  /** Claims telling the chat about `status` (compare-and-set): false when it was told already. */
-  claimReply(activationId: string, status: string): boolean {
-    return this.run('UPDATE bot_activations SET reply_status = ? WHERE id = ? AND (reply_status IS NULL OR reply_status <> ?)', status, activationId, status) > 0
-  }
-
-  /** Gives back a claim whose send failed, unless a later state was claimed since. */
-  releaseReply(activationId: string, status: string): void {
-    this.run('UPDATE bot_activations SET reply_status = NULL WHERE id = ? AND reply_status = ?', activationId, status)
   }
 
   setAutoRestarts(id: string, count: number): void {

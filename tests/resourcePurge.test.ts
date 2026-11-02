@@ -4,16 +4,20 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { ResourceLifecycleStore } from '../src/mms/lifecycle/ResourceLifecycleStore'
 import { ResourceLifecycleCoordinator } from '../src/mms/lifecycle/ResourceLifecycleCoordinator'
-import { lifecycleGit as git, WorktreeRetirementService } from '../src/mms/lifecycle/WorktreeRetirementService'
+import { WorktreeRetirementService } from '../src/mms/lifecycle/WorktreeRetirementService'
+import { fixtureGit as git, ownedHome } from './support/fixtureGit'
 import { resolveRepositoryIdentity } from '../src/mms/git/RepositoryIdentity'
 import { registerThreadLifecycleGate } from '../src/mms/queue/ThreadLifecycleAdmission'
 import { createHash } from 'node:crypto'
+import { preserveBeforeAbort } from '../src/mms/actions/leftMerge'
+import { ThreadJournal } from '../src/mms/data/ThreadJournal'
 
 const roots: string[] = []
-afterEach(() => { vi.restoreAllMocks(); for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }) })
+const owned: Array<() => void> = []
+afterEach(() => { vi.restoreAllMocks(); for (const undo of owned.splice(0)) undo(); for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }) })
 function fixture(options: { git?: boolean } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'mousse-purge-')); roots.push(root)
-  const home = join(root, 'profile'), location = join(home, 'thread-data', 'task'); mkdirSync(location, { recursive: true })
+  const home = join(root, 'profile'), location = join(home, 'thread-data', 'task'); mkdirSync(location, { recursive: true }); owned.push(ownedHome(home))
   writeFileSync(join(location, 'meta.json'), JSON.stringify({ id: 'task' })); writeFileSync(join(location, 'messages.json'), '[]')
   const store = new ResourceLifecycleStore({ profileId: 'test', profileHome: home }); store.registerTask({ taskId: 'task', location })
   registerThreadLifecycleGate(home, store)
@@ -42,6 +46,29 @@ test('complete purge removes exclusive checkout, refs and task data and retains 
   expect(git(f.repo, ['status', '--porcelain'])).toBe('')
   expect(() => f.store.registerTask({ taskId: 'task', location: f.location, creating: true })).toThrow(/tombstone/)
   expect((await f.coordinator.purge({ taskId: 'task', operationId: 'purge' })).state).toBe('purged')
+})
+test('a purge releases the files the thread’s aborts kept, asks first while they may be the only copy, and leaves another thread’s', async () => {
+  const f = fixture({ git: true })
+  const keep = (operationId: string, at: number) => {
+    vi.useFakeTimers({ toFake: ['Date'] }); vi.setSystemTime(at)
+    try {
+      const ref = preserveBeforeAbort(f.worktree, operationId)
+      new ThreadJournal(f.location).append({ operationId, operationType: 'publish', state: 'cancelled', details: { conflictAborted: true, preservedRef: ref } })
+      return ref
+    } finally { vi.useRealTimers() }
+  }
+  const old = keep('old-abort', Date.now() - 40 * 24 * 60 * 60 * 1000)
+  const young = keep('young-abort', Date.now())
+  // Another thread's abort, whose id starts with this thread's: never this thread's.
+  const theirs = preserveBeforeAbort(f.worktree, 'old-abort-other')
+  await f.coordinator.trash({ taskId: 'task', operationId: 'trash' })
+  const preview = await f.coordinator.cleanup.preview('task'); expect(preview.blockers).toEqual([])
+  const kept = preview.items.filter((item) => item.kind === 'ref' && item.identity.startsWith('refs/mousse/preserved/'))
+  expect(kept.map((item) => [item.identity, Boolean(item.discardRequired)]).sort()).toEqual([[old, false], [young, true]].sort())
+  // Automatic cleanup keeps the thread while the young ones may be the only copy.
+  await expect(f.coordinator.purge({ taskId: 'task', operationId: 'purge', expectedGeneration: preview.generation, previewDigest: preview.digest })).rejects.toMatchObject({ code: 'resource_purge_discard_required' })
+  expect((await f.coordinator.purge({ taskId: 'task', operationId: 'purge', expectedGeneration: preview.generation, previewDigest: preview.digest, discard: true, human: true })).state).toBe('purged')
+  expect(git(f.repo, ['for-each-ref', '--format=%(refname)', 'refs/mousse/', 'refs/heads/mousse/'])).toBe(theirs)
 })
 test('dirty sole copy needs a human exact preview discard; automatic request preserves it', async () => {
   const f = fixture({ git: true }); writeFileSync(join(f.worktree, 'secret.txt'), 'only copy')
@@ -106,12 +133,30 @@ test('retireTrashed removes a clean exclusive checkout and clears an earlier blo
   expect(existsSync(f.worktree)).toBe(false)
   expect(f.store.require('task')).toMatchObject({ state: 'trashed' }); expect(f.store.require('task').blockedReason).toBeUndefined()
 })
-test('retireTrashed keeps a checkout holding sole-copy changes and records why', async () => {
+test('retireTrashed removes a checkout holding uncommitted files into a pinned snapshot, and a purge still asks before that work is dropped', async () => {
   const f = fixture({ git: true }); writeFileSync(join(f.worktree, 'secret.txt'), 'only copy')
   await f.coordinator.trash({ taskId: 'task', operationId: 'trash' })
   await f.coordinator.cleanup.retireTrashed('task')
+  expect(existsSync(f.worktree)).toBe(false)
+  expect(f.store.require('task').blockedReason).toBeUndefined()
+  const retirement = new WorktreeRetirementService(f.store)
+  const manifest = retirement.load(retirement.pathFor('task', f.worktree))
+  expect(git(f.repo, ['show', `${manifest.snapshotSha}:secret.txt`])).toBe('only copy')
+  expect(git(f.repo, ['rev-parse', manifest.snapshotRef!])).toBe(manifest.snapshotSha)
+  const preview = await f.coordinator.cleanup.preview('task')
+  expect(preview.blockers).toEqual([]); expect(preview.items.find((item) => item.kind === 'worktree')).toMatchObject({ discardRequired: true })
+  expect(preview.items.filter((item) => item.kind === 'ref').map((item) => item.identity)).toContain(manifest.snapshotRef)
+  const request = { taskId: 'task', operationId: 'purge', expectedGeneration: preview.generation, previewDigest: preview.digest }
+  await expect(f.coordinator.purge(request)).rejects.toMatchObject({ code: 'resource_purge_discard_required' })
+  expect((await f.coordinator.purge({ ...request, discard: true, human: true })).state).toBe('purged')
+  expect(git(f.repo, ['for-each-ref', '--format=%(refname)', 'refs/mousse/'])).toBe('')
+})
+test('retireTrashed keeps a checkout holding what a snapshot cannot hold (staged changes) and records why', async () => {
+  const f = fixture({ git: true }); writeFileSync(join(f.worktree, 'secret.txt'), 'only copy'); git(f.worktree, ['add', 'secret.txt'])
+  await f.coordinator.trash({ taskId: 'task', operationId: 'trash' })
+  await f.coordinator.cleanup.retireTrashed('task')
   expect(readFileSync(join(f.worktree, 'secret.txt'), 'utf8')).toBe('only copy')
-  expect(f.store.require('task').blockedReason).toMatch(/^Checkout retained: /)
+  expect(f.store.require('task').blockedReason).toMatch(/^Checkout retained: .*Staged changes/)
 })
 test('retireTrashed keeps the checkout and reports the cause when the exact retirement fails', async () => {
   const f = fixture({ git: true }); await f.coordinator.trash({ taskId: 'task', operationId: 'trash' })
@@ -197,3 +242,23 @@ test('a purge that fails reports no bytes and records why', async () => {
   expect(await f.coordinator.cleanup.sweep(Date.now())).toEqual([{ taskId: 'task', outcome: 'failed', reason: 'locked', bytes: 0 }])
   expect(f.store.require('task').blockedReason).toBe('locked')
 })
+
+test('the release of what a deleted thread holds outside its folder runs on every pass, and a failure leaves the purge to resume', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'mousse-purge-')); roots.push(root)
+  const home = join(root, 'profile'), location = join(home, 'thread-data', 'task'); mkdirSync(location, { recursive: true }); owned.push(ownedHome(home))
+  writeFileSync(join(location, 'meta.json'), JSON.stringify({ id: 'task' })); writeFileSync(join(location, 'messages.json'), '[]')
+  const store = new ResourceLifecycleStore({ profileId: 'test', profileHome: home }); store.registerTask({ taskId: 'task', location })
+  registerThreadLifecycleGate(home, store)
+  let passes = 0
+  const coordinator = new ResourceLifecycleCoordinator(store, { drain: async () => {}, settleMutationOwnership: async () => {}, projectIndex: () => {}, projectPurged: () => {},
+    beforePurgeRemoval: () => { passes++; if (passes === 1) throw new Error('a file another process holds') } })
+  await coordinator.trash({ taskId: 'task', operationId: 'trash' })
+  const preview = await coordinator.cleanup.preview('task')
+  await expect(coordinator.purge({ taskId: 'task', operationId: 'purge', expectedGeneration: preview.generation, previewDigest: preview.digest })).rejects.toThrow()
+  // Nothing was removed and the purge stays started: the next pass releases again and finishes.
+  expect(store.require('task').state).toBe('purge-started')
+  expect(existsSync(store.require('task').location)).toBe(true)
+  expect((await coordinator.purge({ taskId: 'task', operationId: 'purge' })).state).toBe('purged')
+  expect(passes).toBe(2)
+})
+

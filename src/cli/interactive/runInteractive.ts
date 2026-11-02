@@ -143,13 +143,10 @@ export async function runInteractiveChat(opts: InteractiveChatOptions): Promise<
     modelCache = await listModels()
     try {
       const s = await client.request<{
-        settings: { provider: { instanceId?: string; llmProvider: string; model: string } }
+        settings: { provider: SessionModel }
       }>('settings.get')
-      globalModel = {
-        ...(s.settings.provider.instanceId ? { instanceId: s.settings.provider.instanceId } : {}),
-        llmProvider: s.settings.provider.llmProvider,
-        model: s.settings.provider.model
-      }
+      const { instanceId, llmProvider, model, effort, name } = s.settings.provider
+      globalModel = { ...(instanceId ? { instanceId } : {}), llmProvider, model, ...(effort ? { effort } : {}), ...(name ? { name } : {}) }
     } catch {
       /* keep prior */
     }

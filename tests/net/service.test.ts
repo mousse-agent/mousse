@@ -250,6 +250,28 @@ it('keeps networking disabled until explicit init and listening off unless reque
     code: 'route_unreachable'
   })
 })
+it('creates a passphrase-protected identity when the keychain refuses, and unlocks it after restart', async () => {
+  const { net, path } = service()
+  await net.start()
+  vi.spyOn(net.runtime().keys, 'vaultUnavailable').mockReturnValue(true)
+  expect(net.status()).toMatchObject({ keystore: 'missing', vaultUnavailable: true })
+  await net.request('net.init', { name: 'authority', passphrase: 'test-new-identity' })
+  expect(net.status()).toMatchObject({
+    enabled: true,
+    keystore: 'unlocked',
+    protected: true,
+    self: { isAuthority: true }
+  })
+  await net.shutdown()
+  const reopened = new NetService({ profileDir: path })
+  cleanups.push(() => reopened.shutdown())
+  await reopened.start()
+  expect(reopened.status()).toMatchObject({ keystore: 'locked', protected: true })
+  expect(reopened.status().vaultUnavailable).toBeUndefined()
+  await expect(reopened.request('net.init', { passphrase: 'wrong' })).rejects.toMatchObject({ code: 'keystore_locked' })
+  await reopened.request('net.init', { passphrase: 'test-new-identity' })
+  expect(reopened.status()).toMatchObject({ enabled: true, keystore: 'unlocked' })
+})
 it('enrolls through the real direct gateway and reconnects both profiles after restart', async () => {
   const a = service(),
     b = service()

@@ -127,7 +127,7 @@ function permissionFieldsAfterAgentEdit(job: ScheduledJob, editor: PermissionMod
  * `schedule_list`, `schedule_create`, `schedule_update`, `schedule_pause` and `schedule_run`: an agent's hand on the jobs
  * its own thread made (docs/run-engine/SPEC.md §15.1). Every tool needs the `manage` agent access level and
  * `scheduled.agentJobs` to be on. Only a turn a person started may create or start a job or change what one does, so
- * no scheduled run, agent message, subagent or channel can make jobs of its own and no chain of jobs can form. A job an
+ * no scheduled run, agent message, subagent or remote send can make jobs of its own and no chain of jobs can form. A job an
  * agent creates runs no wider than the agent that made it (its access level and permission mode are recorded on the
  * job, and a later change can only narrow them), ends after the profile's lifetime for such jobs unless a person
  * extends it, and counts against a profile-wide cap. The three limits are settings only a person changes
@@ -167,7 +167,7 @@ export function scheduleTools(host: AppToolHost, engine: RunEngine): MousseTool[
     if (!person)
       throw new McpToolError(
         'mousse_scope_denied',
-        `${what} is only for a turn a person started. This run was started by a job, an agent's message, a subagent, a wake, a continuation, a bot or a channel, or its origin cannot be read; ask from the person's own turn.`
+        `${what} is only for a turn a person started. This run was started by a job, an agent's message, a subagent, a wake, a continuation, a bot or a remote send, or its origin cannot be read; ask from the person's own turn.`
       )
   }
   /** Every change an agent makes is an `agent.action` event on its own thread, with a row in its transcript. */
@@ -270,7 +270,7 @@ export function scheduleTools(host: AppToolHost, engine: RunEngine): MousseTool[
       // Read at every listing: the tool is built once, and a person may change the limits at any time.
       get description() {
         const limits = limitsNow()
-        return `Create a scheduled job that runs a prompt later or on a cadence, as a turn in a thread (needs the manage agent access level, "Agents may create jobs" turned on, and a turn a person started: a job, another agent, a subagent or a channel cannot create jobs). The job outlives this run. It runs no wider than you do: its runs get at most your access level and permission mode. It takes your thread's project. Leave threadId out for a new thread per run, or give your own thread or one of your lineage. Not allowed: a prompt that starts with "/", a webhook trigger, a worktree workspace, an interval under ${limits.minIntervalMinutes} minutes. The profile allows ${limits.maxActive} active jobs made by agents in all, and a job ends ${limits.lifetimeDays} days after it is made unless a person extends it. A person sets these limits; you cannot change them. The job is labelled as made by an agent and each change you make is recorded in your thread. Use schedule_run to start it at once.`
+        return `Create a scheduled job that runs a prompt later or on a cadence, as a turn in a thread (needs the manage agent access level, "Agents may create jobs" turned on, and a turn a person started: a job, another agent, a subagent or a remote send cannot create jobs). The job outlives this run. It runs no wider than you do: its runs get at most your access level and permission mode. It takes your thread's project. Leave threadId out for a new thread per run, or give your own thread or one of your lineage. Not allowed: a prompt that starts with "/", a webhook trigger, a worktree workspace, an interval under ${limits.minIntervalMinutes} minutes. The profile allows ${limits.maxActive} active jobs made by agents in all, and a job ends ${limits.lifetimeDays} days after it is made unless a person extends it. A person sets these limits; you cannot change them. The job is labelled as made by an agent and each change you make is recorded in your thread. Use schedule_run to start it at once.`
       },
       get inputSchema() {
         return {

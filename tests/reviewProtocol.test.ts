@@ -66,7 +66,8 @@ describe('review.files and review.file through the daemon', () => {
   it('lists the working tree by thread or project, staged and unstaged apart', async () => {
     writeFileSync(join(worktree, 'value.txt'), 'turn one then edited\n')
     const unstaged = await client.request<ReviewFilesResult>('review.files', { threadId, scope: { kind: 'worktree' } })
-    expect(unstaged.files.map((file) => file.path)).toEqual(['value.txt'])
+    // The turn's own changes are uncommitted too: a turn is recorded as a snapshot, not committed on the branch.
+    expect(unstaged.files.map((file) => file.path)).toEqual(['added.txt', 'value.txt'])
     const staged = await client.request<ReviewFilesResult>('review.files', { threadId, scope: { kind: 'worktree', staged: true } })
     expect(staged.files).toEqual([])
     const byProject = await client.request<ReviewFilesResult>('review.files', { projectId, scope: { kind: 'worktree' } })

@@ -18,7 +18,7 @@ export type AgentExecutionStatus = 'completed' | 'failed' | 'cancelled'
 
 export type AgentExecutionLimitKind = 'turns' | 'tool_calls' | 'input_tokens' | 'output_tokens' | 'cost_usd' | 'elapsed_ms'
 
-export type AgentExecutionSource = 'editor' | 'workflow' | 'cli' | 'schedule' | 'channel' | 'chat'
+export type AgentExecutionSource = 'editor' | 'workflow' | 'cli' | 'schedule' | 'remote' | 'chat'
 
 export type AgentRuntimeToolClassification = 'read' | 'write' | 'script' | 'mcp' | 'ask' | 'other'
 
@@ -119,7 +119,7 @@ export interface AgentRuntimePolicy {
   fallbackModels: ResolvedAgentDefinition['model']['fallbacks']
   /**
    * Nobody watches this run as it goes (`definitionRunUnattended`: every run whose host does not
-   * mark it attended, and every schedule, channel or workflow run). Where the platform's shell is not
+   * mark it attended, and every schedule, remote or workflow run). Where the platform's shell is not
    * contained, its shell commands are refused rather than asked about. Absent: a person watches it.
    */
   unattended?: true

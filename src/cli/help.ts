@@ -19,7 +19,6 @@ Usage:
   mousse-cli browser <status|install|cancel> Manage browser automation setup
   mousse-cli agents <subcommand>             Spawn/list/stop background CLI agents
   mousse-cli engine fsck                     Check Run Engine state for inconsistencies
-  mousse-cli channels <subcommand>           Channel setup (Telegram, Discord, Webhook)
   mousse-cli config <subcommand>             Read/write ~/.mousse/mousse.conf
   mousse-cli service <subcommand>            MMS daemon control and startup install
   mousse-cli relay serve                    Run a self-hosted relay in the foreground
@@ -37,6 +36,7 @@ Usage:
   mousse-cli revert-code --session <id> --action <id>
   mousse-cli fork --session <id> --action <id>
   mousse-cli operation abort <id> --session <id>
+  mousse-cli operation recover --session <id>
 
 Global options:
   -p, --print                 Print response and exit (non-interactive / automation)
@@ -77,7 +77,7 @@ One-shot (-p / piped / non-TTY):
   /stop                       Abort if a turn is in-flight in this process
   /steer <prompt>             Steers only when a turn is active (no silent fallback)
   /<workflow> [arguments]     Run via the same resolver used by the app
-  --request-id <uuid>         Reuse with identical slash input after a lost reply
+  --request-id <uuid>         Reuse after a lost reply: the same send is answered, never run twice
   --no-wait                  Return after workflow admission (otherwise wait)
 
 Quote a complete slash invocation so the shell passes its named arguments as text.
@@ -188,24 +188,7 @@ export const THREAD_ACTION_HELP = `Usage:
   mousse-cli revert-code --session <thread> --action <action>
   mousse-cli fork --session <thread> --action <action> [--name <name>]
   mousse-cli operation abort <operation> --session <thread>
-`
-
-export const CHANNELS_HELP = `Usage:
-  mousse-cli channels list
-  mousse-cli channels add <telegram|discord|webhook> [options]
-  mousse-cli channels remove <platform>
-  mousse-cli channels enable <platform>
-  mousse-cli channels disable <platform>
-  mousse-cli channels pair list
-  mousse-cli channels pair approve <code>
-  mousse-cli channels pair reject <code>
-
-Platform flags:
-  --token <token>             Bot token (Telegram/Discord)
-  --webhook-port <port>       Webhook listener port
-  --webhook-secret <secret>   Webhook HMAC secret
-  --allow-all                 Allow all users (not recommended)
-  --user-id <id>              Allowed user/chat id (repeatable)
+  mousse-cli operation recover --session <thread>
 `
 
 export const CONFIG_HELP = `Usage:
@@ -252,8 +235,6 @@ export function commandHelp(command: string): string | null {
       return AGENTS_HELP
     case 'engine':
       return ENGINE_HELP
-    case 'channels':
-      return CHANNELS_HELP
     case 'config':
       return CONFIG_HELP
     case 'service':

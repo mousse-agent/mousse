@@ -2,10 +2,8 @@ import { useEffect, useRef, useState, type ReactNode, type RefObject } from 'rea
 import { Bot, GitBranch, Server, Sparkles } from '../lib/icons'
 import type { Thread } from '../../shared/types'
 import { isRunningSubagent } from '../../shared/subagents'
-import {
-  formatEffortLabel,
-  parseThinkingSuffixFromModelId
-} from '../../shared/modelVariants'
+import { modelLabel as modelChoiceLabel } from '../../shared/modelChoice'
+import { useModelChoice } from '../lib/modelChoice'
 import { FloatingPortal, useFloatingPosition } from '../lib/floatingLayer'
 import { ProviderIcon } from '../lib/providerIcons'
 import { useSubagents } from '../hooks/useSubagents'
@@ -16,8 +14,11 @@ const HOVER_OPEN_DELAY_MS = 420
 const HOVER_CLOSE_DELAY_MS = 120
 
 interface DefaultModel {
+  instanceId?: string
   llmProvider: string
   model: string
+  effort?: string
+  name?: string
 }
 
 interface WorkspaceHoverInfo {
@@ -34,15 +35,6 @@ function shortBranchLabel(branch?: string | null, fallback?: string | null): str
   if (!raw) return null
   const parts = raw.split('/').filter(Boolean)
   return parts[parts.length - 1] || raw
-}
-
-function formatModelLabel(modelId: string): string {
-  if (!modelId) return 'Default model'
-  const { baseId, effort } = parseThinkingSuffixFromModelId(modelId)
-  if (effort && effort !== 'off') {
-    return `${baseId} · ${formatEffortLabel(effort)}`
-  }
-  return baseId
 }
 
 function basenamePath(path: string | null | undefined): string | null {
@@ -79,9 +71,10 @@ export function ThreadHoverCard({ thread, enabled = true, children }: ThreadHove
   // The subagents this thread started, from the daemon's read model; watched only while the card is open.
   const subagentCount = useSubagents(open ? thread.id : null).filter(isRunningSubagent).length
 
-  const providerId = thread.modelOverride?.llmProvider || defaultModel?.llmProvider || ''
-  const modelId = thread.modelOverride?.model || defaultModel?.model || ''
-  const modelLabel = formatModelLabel(modelId)
+  const selection = thread.modelOverride?.model ? thread.modelOverride : defaultModel
+  const modelChoice = useModelChoice({ instanceId: selection?.instanceId, provider: selection?.llmProvider ?? '', model: selection?.model ?? '', effort: selection?.effort, name: selection?.name })
+  const providerId = selection?.llmProvider ?? ''
+  const modelLabel = selection?.model ? modelChoiceLabel(modelChoice) : 'Default model'
   const modelIsOverride = Boolean(thread.modelOverride?.model)
 
   const floatingStyle = useFloatingPosition({
@@ -115,7 +108,8 @@ export function ThreadHoverCard({ thread, enabled = true, children }: ThreadHove
         const llmProvider = settings?.provider?.llmProvider ?? ''
         const model = settings?.provider?.model ?? ''
         if (llmProvider || model) {
-          setDefaultModel({ llmProvider, model })
+          const { instanceId, effort, name } = settings.provider
+          setDefaultModel({ ...(instanceId ? { instanceId } : {}), llmProvider, model, ...(effort ? { effort } : {}), ...(name ? { name } : {}) })
         }
       } catch {
         // Keep card usable without settings.

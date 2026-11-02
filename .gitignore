@@ -60,3 +60,6 @@ ehthumbs.db
 
 # Pinned downloads for local gates (npm run codex:pin)
 .cache/
+
+# Screenshots saved in the repo root while checking the app
+/*.png

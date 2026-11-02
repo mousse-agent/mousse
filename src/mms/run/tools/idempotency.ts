@@ -20,6 +20,9 @@ export const IDEMPOTENT_TOOLS: ReadonlySet<string> = new Set([
   'list_tasks',
   'list_subagents',
   'list_delegations',
+  // The retired merge tools only report a finished task's result (and pin it again).
+  'integrate_delegation',
+  'integrate_subagent',
   // Phase 5 Mousse MCP server (SPEC §15.1).
   'thread_read',
   'queue_list',
@@ -41,7 +44,6 @@ export const NON_IDEMPOTENT_TOOLS: ReadonlySet<string> = new Set([
   'update_task',
   'create_subagent',
   'create_subagents',
-  'integrate_subagent',
   'recall_subagent',
   // Phase 4 delegation (SPEC §14.2). `task_status` acknowledges a published result.
   'delegate_task',
@@ -49,7 +51,6 @@ export const NON_IDEMPOTENT_TOOLS: ReadonlySet<string> = new Set([
   'answer_subagent',
   'task_status',
   'task_cancel',
-  'integrate_delegation',
   'present_plan',
   'ask_user',
   'queue_enqueue'

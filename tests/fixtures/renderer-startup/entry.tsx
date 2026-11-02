@@ -9,7 +9,7 @@ import '../../../src/renderer/styles/scheduled-panel.css'
 const calls: Array<{ method: string; params?: unknown; input?: unknown }> = []
 const errors: string[] = []
 const profile = { id: 'prf_startup-bound', displayName: 'Startup profile', isDefault: true, revision: 1 }
-const appearance = { ...getDefaultSettings().appearance, theme: 'dark-modern' as const, acrylic: false }
+const appearance = { ...getDefaultSettings().appearance, theme: 'github-dark' as const, acrylic: false }
 let finishList!: (value: unknown) => void, finishStatus!: (value: unknown) => void
 let failList!: (reason: Error) => void, failStatus!: (reason: Error) => void
 let list: Promise<unknown>, status: Promise<unknown>
@@ -48,8 +48,6 @@ function api(path: string[] = []): unknown {
       if (method === 'threads.getActivity' || method === 'turn.getSnapshot') return Promise.resolve({})
       if (method === 'threads.listAll') return Promise.resolve([])
       if (method === 'threads.initialize') return hydration
-      if (method === 'channels.getSnapshot') return Promise.reject(new Error('Controlled channels unavailable'))
-      if (method === 'channels.listPairingRequests' || method === 'channels.getActivity') return Promise.resolve([])
       if (method === 'platformRequest.request') {
         const [name, params] = args
         if (name === 'chats.snapshot') return Promise.resolve({ chats: [], agents: [], devices: [] })
@@ -82,14 +80,13 @@ function api(path: string[] = []): unknown {
   },
   profile: () => useAppStore.getState().profileId,
   workspaceReady: () => useAppStore.getState().workspaceReady,
-  acrylic: (theme: 'blacksphere-plus' | 'dark-modern' | 'light', intensity: number) => {
+  acrylic: (theme: 'blacksphere-plus' | 'github-dark' | 'light', intensity: number) => {
     applyAppearance({ ...appearance, theme, acrylic: true, acrylicIntensity: intensity })
   },
-  overlay: (page: 'settings' | 'scheduled' | 'channels', open: boolean) => {
+  overlay: (page: 'settings' | 'scheduled', open: boolean) => {
     const store = useAppStore.getState()
     if (page === 'settings') store.setSettingsOpen(open)
-    else if (page === 'scheduled') store.setScheduledOpen(open)
-    else store.setChannelsOpen(open)
+    else store.setScheduledOpen(open)
   },
   hydrate: () => {
     for (const listener of listeners.get('orchestrator.onThreadMessages') ?? []) {

@@ -57,7 +57,7 @@ export function ThreadSearchDialog({ open, onClose, onSelect }: ThreadSearchDial
 
     // A newer query replaces this one: its answer is dropped, and the daemon ends the calls it made to other computers.
     let current = true
-    const timer = setTimeout(async () => {
+    const search = async () => {
       setLoading(true)
       try {
         const found = await window.mousse.threads.search(trimmed, 40)
@@ -65,10 +65,13 @@ export function ThreadSearchDialog({ open, onClose, onSelect }: ThreadSearchDial
         setResults(found.results)
         setSkipped(found.skipped)
         setActiveIndex(0)
+      } catch (error) {
+        if (current) console.error('Thread search failed', error)
       } finally {
         if (current) setLoading(false)
       }
-    }, THREAD_SEARCH_DEBOUNCE_MS)
+    }
+    const timer = setTimeout(() => void search(), THREAD_SEARCH_DEBOUNCE_MS)
 
     return () => {
       current = false

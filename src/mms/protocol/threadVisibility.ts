@@ -7,7 +7,7 @@ import type { ProtocolClientType, ProtocolEvent } from './types'
  * Which threads a client is shown. The thread inventory is always complete; this is the one place
  * that decides who sees subagent threads. Only the desktop app does, and a routed call from another
  * of the user's computers (the same person, in the same app): it needs them to fold each under its
- * parent (Lineage, sidebar roll-up). Every other client (CLI, channels, linked phones, tests,
+ * parent (Lineage, sidebar roll-up). Every other client (CLI, linked phones, tests,
  * unknown) gets lists without subagent threads. A client with no connection at all, such as a
  * phone's backend, is one of those.
  */

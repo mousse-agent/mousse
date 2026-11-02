@@ -3,6 +3,9 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { describe, expect, it, vi } from 'vitest'
 import { GitHubService, type ExecutableRunner } from '../src/mms/git/GitHubService'
+import { userAction } from '../src/mms/git/gitPolicy'
+
+const USER = userAction('button', 'Test action')
 
 function runnerMock(implementation?: ExecutableRunner) {
   return vi.fn<ExecutableRunner>(implementation ?? (async () => ({ stdout: '', stderr: '' })))
@@ -34,10 +37,10 @@ describe('GitHubService', () => {
     const result = await new GitHubService(run).createRepository(root, {
       name: 'sample',
       visibility: 'private'
-    })
+    }, USER)
 
     expect(result.repositoryUrl).toBe('https://github.com/acme/sample')
-    expect(run).toHaveBeenCalledWith('git', ['init'], { cwd: root })
+    expect(run).toHaveBeenCalledWith('git', ['init'], { cwd: root, userRequested: USER })
     const createCall = run.mock.calls.find((call) => call[0] === 'gh' && call[1][0] === 'repo')
     expect(createCall?.[1]).toEqual([
       'repo', 'create', 'sample', '--source=.', '--private', '--remote=origin'
@@ -67,8 +70,8 @@ describe('GitHubService', () => {
     await expect(new GitHubService(run).cloneRepository({
       repository: 'acme/sample',
       destination
-    })).resolves.toBe(destination)
-    expect(run).toHaveBeenCalledWith('gh', ['repo', 'clone', 'acme/sample', destination])
+    }, USER)).resolves.toBe(destination)
+    expect(run).toHaveBeenCalledWith('gh', ['repo', 'clone', 'acme/sample', destination], { userRequested: USER })
   })
 
   it('rejects values that could be interpreted as options', async () => {

@@ -11,7 +11,8 @@ it('marks only admitted transitions, including provider switches with equal mode
  expect(contextHandoff(undefined, to)).toBeUndefined()
  expect(contextHandoff(to, to)).toBeUndefined()
  expect(contextHandoff(to, {...to, model: 'opus:high'})).toBeUndefined()
- expect(contextHandoff(from, to)).toEqual({ from, to })
+ // The level packed into older selections is read apart from the model.
+ expect(contextHandoff(from, to)).toEqual({ from, to: { provider: 'claude-subscription', model: 'opus', effort: 'medium' } })
  expect(contextHandoff({ ...to, provider: 'other' }, to)).toBeDefined()
 })
 it('uses persisted admitted selections and ignores hidden undo history', () => {

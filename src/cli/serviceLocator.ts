@@ -14,7 +14,6 @@ export type {
   ThreadDataStore,
   OrchestratorService,
   ScheduledJobService,
-  ChannelService,
   AgentRegistry,
   TaskQueue,
   MmsEvent,

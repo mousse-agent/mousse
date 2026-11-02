@@ -8,7 +8,6 @@ export interface ThreadIdleServices {
   orchestrator: {
     isTurnActive(threadId: string): boolean
     isActiveTurnRunning(threadId: string): boolean
-    isChannelTurnActive(threadId: string): boolean
   }
   /**
    * Runs that have not ended, whatever their state: running, waiting to start, held, or paused until a
@@ -47,7 +46,6 @@ export function threadDescendants(threads: Array<Pick<Thread, 'id' | 'lineage'>>
 
 function ownPendingWork(services: ThreadIdleServices, threadId: string): string | undefined {
   if (services.orchestrator.isTurnActive(threadId) || services.orchestrator.isActiveTurnRunning(threadId)) return 'A turn is running'
-  if (services.orchestrator.isChannelTurnActive(threadId)) return 'A channel turn is running'
   const run = services.runEngine?.store.listNonTerminalRuns().find((candidate) => candidate.threadId === threadId)
   if (run) return run.status === 'queued' ? 'A run is waiting to start' : run.status === 'paused' ? 'A run is paused until a usage limit resets' : 'A run is active'
   if (services.pendingQueueLength(threadId) > 0) return 'Messages are waiting in the queue'

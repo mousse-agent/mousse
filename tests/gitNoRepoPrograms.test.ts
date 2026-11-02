@@ -3,13 +3,23 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSy
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { git as mousseGit } from '../src/mms/actions/git'
+import { git as actionGit } from '../src/mms/actions/git'
 import { ThreadActionService } from '../src/mms/actions/ThreadActionService'
 import { GitService } from '../src/mms/git/GitService'
+import { userAction, withUserRequest } from '../src/mms/git/gitPolicy'
 import { ProjectManager } from '../src/mms/data/ProjectManager'
 import { clearRepoProgramCache, guardedSimpleGit, repoProgramOverrides, repoProgramProbes, trustExistingProjectsOnce, trustRepositoryPrograms, withoutRepoPrograms, writesThroughFilters } from '../src/mms/git/repoPrograms'
 import { ThreadWorkspaceManager } from '../src/mms/workspace/ThreadWorkspaceManager'
 import { actionOptions, gitFoundationFixture } from './fixtures/gitFoundation'
+
+/** The user's request a test passes to a GitService change. */
+const USER = userAction('button', 'Test action')
+
+/**
+ * Mousse's checkpoint runner, run as asked for: these repositories are outside the Mousse home, so the central Git
+ * check would refuse its changes first. The cases here check what the runner keeps from running, not that check.
+ */
+const mousseGit = (cwd: string, args: string[]): string => withUserRequest(USER, () => actionGit(cwd, args))
 
 /**
  * Programs a repository can name for Git to run, each planted the way an agent with only file access
@@ -199,7 +209,7 @@ describe('files under a filter only the repository defines are refused, never st
   it("the user's own Stage runs the filter, as a terminal would", async () => {
     const cwd = cryptRepo()
     writeFileSync(join(cwd, 'secrets.env'), 'TOKEN=two\n')
-    await new GitService().stageAll(cwd)
+    await new GitService().stageAll(cwd, USER)
     expect(ran()).toEqual(['crypt-clean'])
   })
 
@@ -386,8 +396,8 @@ describe("the user's own actions keep the repository's programs; Mousse's own co
     const cwd = repo()
     plain(cwd, 'config', 'core.sshCommand', command('ssh'))
     plain(cwd, 'remote', 'add', 'origin', 'ssh://git@example.invalid/work/repo.git')
-    expect(withoutRepoPrograms(cwd, ['fetch'])).toContain('core.sshcommand=ssh')
-    await new GitService().fetch(cwd).catch(() => undefined)
+    expect(withUserRequest(USER, () => withoutRepoPrograms(cwd, ['fetch']))).toContain('core.sshcommand=ssh')
+    await new GitService().fetch(cwd, USER).catch(() => undefined)
     expect(ran()).toEqual(['ssh'])
   })
 
@@ -397,7 +407,7 @@ describe("the user's own actions keep the repository's programs; Mousse's own co
     writeHook(join(cwd, '.git', 'hooks'), 'post-checkout', 'post-checkout')
     mousseGit(cwd, ['checkout', '-q', 'other'])
     expect(ran()).toEqual([])
-    await new GitService().checkout(cwd, 'main')
+    await new GitService().checkout(cwd, USER, 'main')
     expect(ran()).toEqual(['post-checkout'])
   })
 })
@@ -454,7 +464,12 @@ describe('normal behaviour is kept', () => {
     expect(plain(cwd, 'cat-file', '-p', 'HEAD:big.bin')).toBe('content')
   })
 
-  it('LFS pointers committed without a filter installed stay as stored, and checkpoints still work', async () => {
+  it('LFS pointers stay as stored under the user\'s own Git LFS, and checkpoints still work', async () => {
+    // The user's Git LFS, as a system install provides it; its clean filter passes a pointer through unchanged.
+    // Without one, a repository-local install is refused (see above), so the machine's own config is left out.
+    process.env.GIT_CONFIG_NOSYSTEM = '1'
+    const userFilter = (name: string): string => command(name, true).replace(/"/g, '\\"')
+    writeFileSync(process.env.GIT_CONFIG_GLOBAL!, `${readFileSync(process.env.GIT_CONFIG_GLOBAL!, 'utf8')}[filter "lfs"]\n\tclean = ${userFilter('user-lfs-clean')}\n\tsmudge = ${userFilter('user-lfs-smudge')}\n\trequired = true\n`)
     const cwd = repo()
     const pointer = 'version https://git-lfs.github.com/spec/v1\noid sha256:4d7a214614ab2935c943f9e0ff69d22eadbb8f32b1258daaa5e2ca24d17e2393\nsize 12345\n'
     writeFileSync(join(cwd, '.gitattributes'), '*.bin filter=lfs diff=lfs merge=lfs -text\n')
@@ -467,7 +482,7 @@ describe('normal behaviour is kept', () => {
     writeFileSync(join(cwd, 'a.txt'), 'next\n')
     mousseGit(cwd, ['add', '-A']); mousseGit(cwd, ['commit', '--no-verify', '-m', 'next'])
     expect(mousseGit(cwd, ['status', '--porcelain'])).toBe('')
-    expect(ran()).toEqual([])
+    expect(ran()).toEqual(['user-lfs-clean'])
   })
 })
 

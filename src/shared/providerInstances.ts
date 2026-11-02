@@ -28,7 +28,7 @@ export interface ProviderSelection {
 }
 
 /**
- * A stored model selection (thread and channel-session `modelOverride`). `instanceId` is
+ * A stored model selection (a thread's `modelOverride`). `instanceId` is
  * authoritative; `llmProvider` is derived from the instance and kept so the current GUI and older
  * daemons can still read the record. Records written before instances existed carry only
  * `llmProvider` and are mapped with `instanceIdForLegacyProvider` when read.
@@ -37,7 +37,12 @@ export interface ModelOverride {
   instanceId?: string
   /** @deprecated Derived from `instanceId`; kept for readers that predate provider instances. */
   llmProvider: string
+  /** The model as its agent lists it, never with a reasoning level attached (see `modelSelection.ts`). */
   model: string
+  /** The reasoning level; absent = the model's default. */
+  effort?: string
+  /** The model's name when it was chosen, for screens and devices that have no listing of it. */
+  name?: string
 }
 
 export const CLAUDE_INSTANCE_ID = 'claude'

@@ -152,7 +152,7 @@ export interface ScriptSpawnResult {
 }
 
 export interface ApprovalHostAdapter {
-  /** Optional UI/channel notifier. Decisions are stored by ApprovalService, not invented here. */
+  /** Optional UI notifier. Decisions are stored by ApprovalService, not invented here. */
   notify?(record: {
     approvalId: string
     profileId: string

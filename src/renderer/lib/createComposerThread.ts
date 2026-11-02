@@ -11,7 +11,10 @@ export async function createComposerThread(deps: {
   const thread = await deps.create()
   if (!deps.stillVisible()) return null
   deps.activate(thread)
-  await deps.select(thread.id)
+  // A new thread on another computer has no transcript to read yet: its first message is sent
+  // while it is opened, as fast as on this computer, instead of after that round trip.
+  if (thread.node) void deps.select(thread.id).catch(() => undefined)
+  else await deps.select(thread.id)
   return deps.stillVisible() ? thread.id : null
 }
 
@@ -39,7 +42,8 @@ export async function prepareComposerThread(deps: {
       create: () => deps.create(workspace.projectId, { worktreeEnabled: enabled, ...(workspace.node ? { node: workspace.node } : {}) })
     })
   }
-  if (Boolean(thread.worktreeEnabled) !== enabled) {
+  // An unset choice is recorded too, so the thread keeps the one it was sent with.
+  if (thread.worktreeEnabled !== enabled) {
     const updated = await deps.setWorktreeEnabled(thread.id, enabled)
     if (!deps.stillVisible()) return null
     deps.update(updated)

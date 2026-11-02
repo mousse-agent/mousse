@@ -330,21 +330,6 @@ export const PROTOCOL_METHODS = [
   'scheduled.webhook.rotate',
   'scheduled.webhook.disable',
   'scheduled.webhook.deliveries',
-  'channels.getSnapshot',
-  'channels.getConfig',
-  'channels.updateConfig',
-  'channels.connect',
-  'channels.disconnect',
-  'channels.listPairingRequests',
-  'channels.approvePairing',
-  'channels.rejectPairing',
-  'channels.sendTest',
-  'channels.getActivity',
-  'channels.owner.start',
-  'channels.owner.status',
-  'channels.owner.confirm',
-  'channels.owner.cancel',
-  'channels.owner.clear',
   'mcp.listServers',
   'mcp.listTools',
   'mcp.testServer',
@@ -461,6 +446,7 @@ export const PROTOCOL_METHODS = [
   'pullRequests.merge',
   'pullRequests.close',
   'pullRequests.baseBranches',
+  'pullRequests.mergeMethod',
   'pullRequests.link',
   'pullRequests.unlink',
   'pullRequests.list',
@@ -491,7 +477,6 @@ export const PROTOCOL_CAPABILITIES = [
   'pty',
   'questions',
   'scheduled',
-  'channels',
   'mcp',
   'skills',
   'settings',
@@ -539,8 +524,6 @@ export type ProtocolEventType =
   | 'pty.created'
   | 'scheduled.updated'
   | 'scheduled.status'
-  | 'channels.updated'
-  | 'channels.activity'
   | 'stats.lineEdits.updated'
   | 'settings.changed'
   | 'providers.install-event'
@@ -564,8 +547,6 @@ export type ProtocolEventType =
   | 'pty.created'
   | 'scheduled.updated'
   | 'scheduled.status'
-  | 'channels.updated'
-  | 'channels.activity'
   | 'settings.changed'
   | 'mcp.changed'
   | 'ui.focus-intent'

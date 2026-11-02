@@ -115,6 +115,11 @@ export const NET_ERRORS = {
     message: 'No route to the peer is reachable.'
   },
   peer_offline: { category: 'unavailable', retryable: true, message: 'The peer is offline.' },
+  authority_offline: {
+    category: 'unavailable',
+    retryable: true,
+    message: 'The computer that adds devices to this account is offline.'
+  },
   deadline_exceeded: { category: 'timeout', retryable: true, message: 'The operation timed out.' },
   cancelled: { category: 'cancelled', retryable: false, message: 'The operation was cancelled.' },
   budget_exhausted: {

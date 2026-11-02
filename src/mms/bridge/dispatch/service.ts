@@ -1,3 +1,4 @@
+import { userAction } from '../../git/gitPolicy'
 import { createHash } from 'node:crypto'
 import { realpath } from 'node:fs/promises'
 import {
@@ -26,7 +27,7 @@ import {
 } from './bundle'
 import { canonicalRepository, portableRepository, REPO_ID } from './repository'
 import { dispatchRequest } from './validate'
-import { git, remoteGit } from './git'
+import { commitDispatchResult, git, remoteGit } from './git'
 import type {
   DispatchArtifacts,
   DispatchRecord,
@@ -218,6 +219,9 @@ export class DispatchService {
             'fetch.fsckObjects=true',
             'fetch',
             '--no-tags',
+            '--no-prune',
+            '--no-prune-tags',
+            '--no-recurse-submodules',
             '--no-write-fetch-head',
             record.binding.options.remote,
             request.baseCommit
@@ -298,26 +302,12 @@ export class DispatchService {
       this.phase(record, 'publishing')
       await git(record.worktree.path, ['add', '--all'], controller.signal)
       if (await git(record.worktree.path, ['diff', '--cached', '--name-only'], controller.signal))
-        await git(
-          record.worktree.path,
-          [
-            '-c',
-            'user.name=Mousse Dispatch',
-            '-c',
-            'user.email=dispatch@localhost',
-            '-c',
-            'commit.gpgsign=false',
-            'commit',
-            '-m',
-            `Dispatch ${record.id}`
-          ],
-          controller.signal
-        )
+        await commitDispatchResult(record.worktree.path, `Dispatch ${record.id}`, controller.signal)
       const head = await git(record.worktree.path, ['rev-parse', 'HEAD'], controller.signal)
       await git(root, ['merge-base', '--is-ancestor', request.baseCommit, head], controller.signal)
       await git(
         root,
-        ['update-ref', resultRef(record.id), head, '0'.repeat(head.length)],
+        ['update-ref', '--no-deref', resultRef(record.id), head, '0'.repeat(head.length)],
         controller.signal
       )
       if (request.push) {
@@ -326,10 +316,15 @@ export class DispatchService {
           [
             'push',
             '--no-verify',
+            '--no-follow-tags',
+            '--recurse-submodules=no',
             record.binding.options.remote!,
             `${resultRef(record.id)}:refs/heads/mousse/dispatch/${record.id}`
           ],
-          controller.signal
+          controller.signal,
+          undefined,
+          // The dispatching device asked for the push, on a binding its owner allowed to push.
+          userAction('device', `Push dispatch result to ${record.binding.options.remote}`)
         )
       }
       const bytes = await createResultBundle(root, quarantine, record.id, controller.signal),

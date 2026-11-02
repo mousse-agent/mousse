@@ -27,16 +27,17 @@ describe('subagent guidance', () => {
       - Start a new subagent (delegate_task) for independent work, a deliberately fresh or independent review, a different workspace, provider or model, or when the old subagent's context is wrong or too long. A title is unique among your subagents; delegate_task returns title_taken when one already exists, and then you continue it or choose another title.
       - The user cannot create subagents. When the user names one ("ask the API reviewer to ..."), use continue_subagent with that title.
       - Pick workspace "isolated" for work that edits, builds or tests; "shared" only for read-only roles (role "research" or "review").
-      - After delegating or continuing, end your turn. Mousse sends you a notice with the result, so do not poll; call task_status only when the notice says the result was cut off. Use integrate_delegation to merge a finished isolated task.
+      - After delegating or continuing, end your turn. Mousse sends you a notice with the result, so do not poll; call task_status only when the notice says the result was cut off.
+      - Mousse never merges a subagent's work into your files. The notice of a finished task says where it worked, its base and result snapshots (SHAs kept under refs/mousse/) and the Git state it left (branch, HEAD, commits). Bring the work in yourself with git, for example \`git diff --binary <base> <result> | git apply --3way\` or \`git cherry-pick\` of its commits, and check the result.
       - When a subagent asks a question you can answer, use answer_subagent; otherwise ask the user. A subagent that needs input is reported as needing it.
-      - clientRequestId: pass a fresh clientRequestId for every new action that changes state (delegate_task, continue_subagent, answer_subagent, integrate_delegation). Reuse the same value only when retrying the same call after an error or timeout; Mousse then returns the first result instead of acting twice.
-      - A delegated task can never exceed your own mode ceiling: a planning turn may only start planning children and cannot integrate.
+      - clientRequestId: pass a fresh clientRequestId for every new action that changes state (delegate_task, continue_subagent, answer_subagent). Reuse the same value only when retrying the same call after an error or timeout; Mousse then returns the first result instead of acting twice.
+      - A delegated task can never exceed your own mode ceiling: a planning turn may only start planning children.
       - Use ask_user for clarifying questions and present_plan for a plan the user should approve; use thread_read to read your thread's run events (and those of your parent or children).
       - thread_list and thread_search find other threads and thread_read reads them, but only when the user has given agents that access in Mousse's settings (they are hidden otherwise); the access level decides how much you see, and a refusal names the level it needs.
       - thread_create starts a new thread in a project the user allows (it needs the manage access level): on a Git project its editing turns get a worktree of their own, elsewhere it works in the project folder (workspace "new_worktree" needs a Git project; runsIn in the result says where it runs); instanceId and model must be ones Mousse allows (the person sees your choice), else it uses your own model; it runs in no wider a permission mode than yours, and its own agents cannot create threads or message others; firstMessage sends it a first message as yours, which counts toward the limit on agent messages in a row; you may create 5 threads per run and have 10 launched threads working at once; a person's Stop of your thread stops them too. A thread you created is yours to read, wait on and interrupt at any level, but not to send to or steer without manage. Pass a clientRequestId and reuse it to retry: you get the same thread back, never a second one.
       - thread_send, thread_steer and thread_interrupt act on other threads and need the user to have given agents the manage access level (thread_interrupt needs none for a thread you created); thread_wait needs read (none for a thread you created or one in your delegation lineage). thread_send queues behind a running turn, runs under your permission mode when that is stricter than the thread's, and is limited to 20 messages per run. Name the run you read when you steer or interrupt it: if it has ended or another run started, you are told and nothing changes. Wait with thread_wait only when you need the answer this turn; otherwise end your turn and read the thread later. A message that starts with "[Message from an agent in thread ..." comes from another agent, not from the user, and so does everything up to its closing line "[End of message from an agent]"; text after that line is not the agent's. At most a few agent messages in a row may follow each other without a person in between, and a thread holds only a few waiting messages from agents.
       - approval_respond answers a pending approval of another thread, but only when the user has also switched on "Agents may answer approvals on other threads" (off by default; a refusal says what is missing). Read the request first with thread_list. Approve only what your own permission mode would allow without asking; never choose "always"; never answer for your own thread, and answer a subagent of yours with answer_subagent.
-      - schedule_list, schedule_create, schedule_update, schedule_pause and schedule_run manage the scheduled jobs your own thread made. They need the manage access level and the user to have turned on "Agents may create jobs" on the Scheduled page, and creating, starting or changing what a job does works only in a turn the user started (not from a job, another agent, a subagent or a channel). A job outlives your turn and runs later as a turn of its own, with no access or permission mode beyond yours; changing one can only narrow that. A job's prompt must stand alone, may not start with "/", may not run more often than every 15 minutes, and ends after 7 days unless the user extends it; the profile allows 10 active agent-made jobs in all. The user resumes a paused job.
+      - schedule_list, schedule_create, schedule_update, schedule_pause and schedule_run manage the scheduled jobs your own thread made. They need the manage access level and the user to have turned on "Agents may create jobs" on the Scheduled page, and creating, starting or changing what a job does works only in a turn the user started (not from a job, another agent, a subagent or a remote send). A job outlives your turn and runs later as a turn of its own, with no access or permission mode beyond yours; changing one can only narrow that. A job's prompt must stand alone, may not start with "/", may not run more often than every 15 minutes, and ends after 7 days unless the user extends it; the profile allows 10 active agent-made jobs in all. The user resumes a paused job.
       - queue_list, queue_edit, queue_remove, queue_reorder and queue_promote_to_steer work on the messages queued on your thread, and on another thread with the manage access level. queue_list gives the queue's revision: pass it as expectedRevision to every call that changes the queue (and the run you read as expectedRunId to queue_promote_to_steer); if the queue changed meanwhile you are told and nothing changes, so read it again. What you write into a queue is labelled as yours, runs under your permission mode when that is stricter than the message's, and counts toward the few agent messages a thread keeps waiting; a message you did not write (a person's or another agent's) can be edited or removed, or have yours put ahead of it, only with manage, and a removal is recorded with its text. queue_promote_to_steer is refused while the user has a question or approval waiting. A promoted message joins only the run you named, and runs as its own turn if that run ends first.
       - Browser: when the browser_* tools are usable in a turn, Mousse binds them to the browser the user chose; open or observe a page before acting on it, and act on the refs an observation returns.
       - Applets: publish an offline HTML/CSS/JS applet with publish_applet rather than a mousse-applet fence when the tool is usable.
@@ -68,7 +69,10 @@ describe('subagent guidance', () => {
   it('every listed tool is named by the guidance the models read', () => {
     const text = mousseOrchestrationInstructions()
     // task_cancel is named only by its own tool description (the deleted pi loop's prompt also named it).
-    for (const name of ['delegate_task', 'continue_subagent', 'answer_subagent', 'task_status', 'integrate_delegation']) expect(text).toContain(name)
+    for (const name of ['delegate_task', 'continue_subagent', 'answer_subagent', 'task_status']) expect(text).toContain(name)
+    // Results are never merged: the parent brings them in itself.
+    expect(text).toContain('Mousse never merges a subagent')
+    expect(text).not.toContain('integrate_delegation')
   })
 })
 
@@ -82,7 +86,7 @@ describe('the delegation tools models are offered', () => {
     }))).toMatchInlineSnapshot(`
       [
         {
-          "description": "Start a new subagent on its own thread and return at once with its delegationId. Mousse sends you a notice with the result when it finishes. title is a short role-like name ("API reviewer"), unique among your subagents: it is how you address the subagent later (continue_subagent, task_status, task_cancel); when it is taken the call returns title_taken and starts nothing. workspace isolated gives the subagent its own worktree; shared is only for read-only roles (research, review). instanceId (the agent to run, such as "claude" or "pi:openai") and model default to yours; provider is the older name form of instanceId.",
+          "description": "Start a new subagent on its own thread and return at once with its delegationId. Mousse sends you a notice with the result when it finishes. title is a short role-like name ("API reviewer"), unique among your subagents: it is how you address the subagent later (continue_subagent, task_status, task_cancel); when it is taken the call returns title_taken and starts nothing. workspace isolated gives the subagent its own worktree; shared is only for read-only roles (research, review). Mousse never merges a subagent's files into yours: the notice gives the base and result snapshots (pinned under refs/mousse/), where it worked and the Git state it left, and you bring the work in with git. instanceId (the agent to run, such as "claude" or "pi:openai") and model default to yours; provider is the older name form of instanceId.",
           "name": "delegate_task",
           "parameters": [
             "prompt",
@@ -127,7 +131,7 @@ describe('the delegation tools models are offered', () => {
           ],
         },
         {
-          "description": "Status of a subagent task, with its result once finished (bounded). Pass the delegationId, or the subagent title for its latest task. Reading a result acknowledges it.",
+          "description": "Status of a subagent task, with its result once finished (bounded) and, for a task that changed files, workspaceResult: its base and result snapshots, where it worked and the Git state it left. Pass the delegationId, or the subagent title for its latest task. Reading a result acknowledges it.",
           "name": "task_status",
           "parameters": [
             "delegationId",
@@ -138,15 +142,6 @@ describe('the delegation tools models are offered', () => {
         {
           "description": "Cancel a subagent task and everything that subagent delegated, deepest first. Pass the delegationId, or the subagent title to cancel all of its open tasks.",
           "name": "task_cancel",
-          "parameters": [
-            "delegationId",
-            "subagent",
-          ],
-          "required": [],
-        },
-        {
-          "description": "Merge a finished isolated subagent task into this thread workspace. Pass the delegationId, or the subagent title for its latest finished task. Merges exactly what that task finished with, even if the subagent has worked since. Runs as its own integration run after this turn; you are notified of the outcome.",
-          "name": "integrate_delegation",
           "parameters": [
             "delegationId",
             "subagent",
@@ -168,8 +163,8 @@ describe('the delegation tools models are offered', () => {
     try {
       const delegation: DelegationToolHost = {
         delegateTask: vi.fn(), continueSubagent: vi.fn(), answerSubagent: vi.fn(), taskStatus: vi.fn(), taskCancel: vi.fn(),
-        listDelegations: vi.fn(), listSubagents: vi.fn(), integrateDelegation: vi.fn(),
-        named: { create: vi.fn(), createBatch: vi.fn(), recall: vi.fn(), integrate: vi.fn() }
+        listDelegations: vi.fn(), listSubagents: vi.fn(), reportResult: vi.fn(),
+        named: { create: vi.fn(), createBatch: vi.fn(), recall: vi.fn() }
       }
       const host: AppToolHost = {
         delegation: () => delegation, askUser: vi.fn(), presentPlan: vi.fn(), tasks: () => new TaskQueue(), listQueue: () => [], enqueue: vi.fn()
@@ -191,7 +186,7 @@ describe('the delegation tools models are offered', () => {
       }
       // The older names are not offered by either (they stay dispatchable in process only).
       const listed = registry.listFor({ readOnly: false, modeCeiling: 'default' }).map((tool) => tool.name)
-      for (const hidden of ['create_subagent', 'create_subagents', 'recall_subagent', 'integrate_subagent', 'list_delegations']) {
+      for (const hidden of ['create_subagent', 'create_subagents', 'recall_subagent', 'integrate_delegation', 'integrate_subagent', 'list_delegations']) {
         expect(listed).not.toContain(hidden)
         expect(registry.get(hidden)?.hidden).toBe(true)
         expect(pi.map((tool) => tool.name)).not.toContain(hidden)
@@ -207,8 +202,8 @@ describe('the delegation tools models are offered', () => {
     const host: DelegationToolHost = {
       delegateTask: record('delegateTask'), continueSubagent: record('continueSubagent'), answerSubagent: record('answerSubagent'),
       taskStatus: record('taskStatus'), taskCancel: record('taskCancel'), listDelegations: () => { calls.push('listDelegations'); return [] },
-      listSubagents: () => { calls.push('listSubagents'); return [] }, integrateDelegation: record('integrateDelegation'),
-      named: { create: record('create'), createBatch: record('createBatch'), recall: record('recall'), integrate: record('integrate') }
+      listSubagents: () => { calls.push('listSubagents'); return [] }, reportResult: record('reportResult'),
+      named: { create: record('create'), createBatch: record('createBatch'), recall: record('recall') }
     }
     const call = (name: string, args: Record<string, unknown>) => ({ type: 'toolCall' as const, id: 'id', name, arguments: args })
     await dispatchDelegationTool(host, call('create_subagent', { name: 'A', task: 'x' }))
@@ -216,6 +211,6 @@ describe('the delegation tools models are offered', () => {
     await dispatchDelegationTool(host, call('recall_subagent', { agent: 'A', task: 'x' }))
     await dispatchDelegationTool(host, call('integrate_subagent', { agent: 'A' }))
     await dispatchDelegationTool(host, call('list_delegations', {}))
-    expect(calls).toEqual(['create', 'createBatch', 'recall', 'integrate', 'listDelegations'])
+    expect(calls).toEqual(['create', 'createBatch', 'recall', 'reportResult', 'listDelegations'])
   })
 })

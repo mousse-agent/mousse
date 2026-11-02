@@ -36,7 +36,7 @@ const call = (runPolicy: AgentRuntimePolicy, uncontainedShell?: boolean) =>
   prepareTrustedToolDispatch({ policy: runPolicy, grants, toolName: 'bash', args: { command: 'npm test' }, isMcp: false, projectPath: root, ...(uncontainedShell ? { uncontainedShell } : {}) })
 
 describe('who watches a definition run', () => {
-  it('only a host that marks the run attended is watched; schedules, channels and workflows never are', () => {
+  it('only a host that marks the run attended is watched; schedules, remote turns and workflows never are', () => {
     expect(definitionRunUnattended('editor', { attended: true })).toBe(false)
     expect(definitionRunUnattended('chat', { attended: true })).toBe(false)
     // A host without the mark (a workflow node from the CLI, a bridge dispatch, any later host) is unattended.
@@ -44,7 +44,7 @@ describe('who watches a definition run', () => {
       expect(definitionRunUnattended(source), source).toBe(true)
       expect(definitionRunUnattended(source, {}), source).toBe(true)
     }
-    for (const source of ['schedule', 'channel', 'workflow'] as const)
+    for (const source of ['schedule', 'remote', 'workflow'] as const)
       expect(definitionRunUnattended(source, { attended: true }), source).toBe(true)
   })
 })

@@ -12,10 +12,10 @@ import {
 } from 'fs'
 import { basename, dirname, join } from 'path'
 import { quarantineUnreadableFileSync } from '../data/AtomicFs'
+import { upgradeSelection } from '../../shared/modelSelection'
 import { getDefaultSettings, type MousseSettings } from '../../shared/settings'
 import { DEFAULT_FEATURE_FLAGS, validateFeatureFlags } from '../../shared/featureFlags'
 import { getMousseHomeDir } from '../data/paths'
-import { defaultChannelConfig } from '../channels/ChannelStore'
 import type {
   MmsConfigSection,
   MousseAgentsConfig,
@@ -26,7 +26,6 @@ import type {
   ScheduledJobDefinition
 } from './types'
 import { MOUSSE_CONF_VERSION } from './types'
-import type { ChannelConfig } from '../../shared/types'
 import type { ScheduledJob } from '../../shared/types'
 import { MOUSSE_CONF_PROFILE_KEYS } from '../../shared/profiles/settingsClassification'
 import { pathsEqual } from '../profiles/pathSafety'
@@ -99,6 +98,7 @@ function splitSettings(full: MousseSettings): {
       context: full.context,
       agentAccess: full.agentAccess,
       runs: full.runs,
+      experimental: full.experimental,
       integrations: full.integrations,
       title: full.title
     },
@@ -155,7 +155,6 @@ function defaultConf(): MousseConf {
     providers: split.providers,
     agents: split.agents,
     scheduled: { enabled: true, jobs: [] },
-    channels: defaultChannelConfig(),
     mms: defaultMmsSection(),
     features: { ...DEFAULT_FEATURE_FLAGS }
   }
@@ -245,7 +244,7 @@ export class MousseConfigStore {
    * Load the shared mousse.conf. Ownership model: exactly ONE process (the MMS
    * daemon) owns the file on disk. Presentation-only mirrors (e.g. the Electron
    * main-process chrome store) must pass `{ persist: false }` so their whole-file
-   * persist() never stomps sections they loaded stale (channels, scheduled, mms).
+   * persist() never stomps sections they loaded stale (scheduled, mms).
    */
   static load(homeDir?: string, opts?: { persist?: boolean }): MousseConfigStore {
     const confPath = join(homeDir ?? getMousseHomeDir(), 'mousse.conf')
@@ -296,6 +295,8 @@ export class MousseConfigStore {
   private static normalize(raw: Partial<MousseConf>): MousseConf {
     const base = defaultConf()
     const normalized: MousseConf = {
+      // Keys this build does not read stay as they are and are written back unchanged, such as the
+      // `channels` section of the removed Channels feature.
       ...raw,
       version: raw.version ?? MOUSSE_CONF_VERSION,
       settings: deepMerge(
@@ -309,15 +310,12 @@ export class MousseConfigStore {
       ) as unknown as MousseAgentsConfig,
       scheduled: {
         enabled: raw.scheduled?.enabled ?? base.scheduled.enabled,
-        jobs: raw.scheduled?.jobs ?? base.scheduled.jobs,
+        // A job's model with a level packed into it (written before #490) is upgraded.
+        jobs: (raw.scheduled?.jobs ?? base.scheduled.jobs).map((job) => (job?.selection ? { ...job, selection: upgradeSelection(job.selection) } : job)),
         ...(raw.scheduled?.webhooks ? { webhooks: raw.scheduled.webhooks } : {}),
         ...(typeof raw.scheduled?.agentJobs === 'boolean' ? { agentJobs: raw.scheduled.agentJobs } : {}),
         ...savedAgentJobLimits(raw.scheduled)
       },
-      channels: deepMerge(
-        base.channels as unknown as Record<string, unknown>,
-        (raw.channels ?? {}) as Partial<Record<string, unknown>>
-      ) as unknown as ChannelConfig,
       mms: { ...base.mms, ...(raw.mms ?? {}) },
       features: { ...base.features, ...(raw.features ?? {}) }
     }
@@ -343,20 +341,6 @@ export class MousseConfigStore {
         if (markMigrated) writeMigratedMarker(settingsPath)
       } catch (err) {
         console.error('[MousseConfigStore] settings.json migration failed:', err)
-      }
-    }
-
-    const channelsPath = join(home, 'channels', 'config.json')
-    if (existsSync(channelsPath) && !existsSync(`${channelsPath}.migrated`)) {
-      try {
-        const raw = JSON.parse(readFileSync(channelsPath, 'utf-8')) as ChannelConfig
-        conf.channels = deepMerge(
-          defaultChannelConfig() as unknown as Record<string, unknown>,
-          raw as unknown as Partial<Record<string, unknown>>
-        ) as unknown as ChannelConfig
-        if (markMigrated) writeMigratedMarker(channelsPath)
-      } catch (err) {
-        console.error('[MousseConfigStore] channels config migration failed:', err)
       }
     }
 
@@ -408,10 +392,6 @@ export class MousseConfigStore {
     return structuredClone(this.conf.scheduled)
   }
 
-  getChannelsSection(): ChannelConfig {
-    return structuredClone(this.conf.channels)
-  }
-
   getMmsSection(): MmsConfigSection {
     return this.installation?.getMmsSection() ?? structuredClone(this.conf.mms)
   }
@@ -427,7 +407,7 @@ export class MousseConfigStore {
 
   persist(): void {
     // Mirrors must never write: their in-memory conf is loaded once and can go
-    // stale relative to daemon-owned sections (e.g. channels). A whole-file write
+    // stale relative to daemon-owned sections (e.g. scheduled). A whole-file write
     // from a stale mirror silently reverts those sections on disk.
     if (!this.autoPersist) return
     const payload = { ...this.conf } as Record<string, unknown>
@@ -449,7 +429,7 @@ export class MousseConfigStore {
     if (segments.length === 0) {
       throw new Error('config set requires a key path')
     }
-    const sections = ['settings', 'providers', 'agents', 'scheduled', 'channels', 'mms', 'features']
+    const sections = ['settings', 'providers', 'agents', 'scheduled', 'mms', 'features']
     if (!sections.includes(segments[0])) {
       throw new Error(`Unknown config section '${segments[0]}'. Expected one of: ${sections.join(', ')}`)
     }
@@ -564,12 +544,6 @@ export class MousseConfigStore {
     }
   }
 
-  updateChannelsSection(config: ChannelConfig): void {
-    this.assertPersonalMutation('channels')
-    this.conf.channels = structuredClone(config)
-    this.persist()
-  }
-
   updateMmsSection(partial: Partial<MmsConfigSection>): void {
     if (this.installation) {
       this.installation.updateMmsSection(partial)
@@ -595,6 +569,7 @@ export class MousseConfigStore {
       partial.context ||
       partial.agentAccess ||
       partial.runs ||
+      partial.experimental ||
       partial.integrations ||
       partial.title
     ) {
@@ -602,6 +577,7 @@ export class MousseConfigStore {
         ...(partial.context ? { context: partial.context as MousseSettingsSection['context'] } : {}),
         ...(partial.agentAccess ? { agentAccess: partial.agentAccess as MousseSettingsSection['agentAccess'] } : {}),
         ...(partial.runs ? { runs: partial.runs as MousseSettingsSection['runs'] } : {}),
+        ...(partial.experimental ? { experimental: partial.experimental as MousseSettingsSection['experimental'] } : {}),
         ...(partial.profile ? { profile: partial.profile as MousseSettingsSection['profile'] } : {}),
         ...(partial.appearance
           ? { appearance: partial.appearance as MousseSettingsSection['appearance'] }

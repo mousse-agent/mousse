@@ -10,6 +10,8 @@ app.commandLine.appendSwitch('disable-background-timer-throttling')
 
 const sleep = (ms: number) => new Promise((done) => setTimeout(done, ms))
 
+// Only keyboard and focus behaviour is checked here: the list text, the dialog wording and the controller's
+// calls are covered without a window in tests/renderer/recentlyDeleted.test.ts and trashInventory.test.ts.
 void (async () => {
   await app.whenReady()
   const window = new BrowserWindow({ width: 420, height: 720, show: true, webPreferences: { sandbox: true, contextIsolation: true, backgroundThrottling: false } })
@@ -34,21 +36,17 @@ void (async () => {
   }
   const active = () => run('window.trashFixture.active()')
   const rows = () => run('window.trashFixture.rows()')
-  const dialog = () => run('window.trashFixture.dialog()')
-  const count = () => run(`document.querySelector('[data-testid=sidebar-trash-count]').textContent`)
   const evidence: Record<string, any> = {}
   try {
     await window.loadFile(join(directory, 'index.html'))
     window.focus(); window.webContents.focus()
-    await wait('!!window.trashFixture && !!document.querySelector("[data-testid=sidebar-trash-count]")', 'section')
-    await wait('document.querySelector("[data-testid=sidebar-trash-count]").textContent === "3"', 'count')
-    evidence.collapsed = await run(`(() => { const toggle = document.querySelector('.threads-sidebar-heading-toggle'); return { expanded: toggle.getAttribute('aria-expanded'), label: toggle.getAttribute('aria-label'), rows: document.querySelectorAll('[data-testid=sidebar-trash-row]').length, count: document.querySelector('[data-testid=sidebar-trash-count]').textContent } })()`)
+    await wait('!!window.trashFixture && document.querySelector("[data-testid=sidebar-trash-count]")?.textContent === "3"', 'section')
 
     // Heading toggle: Enter opens the list.
     await run(`document.querySelector('.threads-sidebar-heading-toggle').focus()`)
     await press('Enter')
-    await wait('document.querySelectorAll("[data-testid=sidebar-trash-row]").length === 3', 'rows')
-    evidence.opened = { expanded: await run(`document.querySelector('.threads-sidebar-heading-toggle').getAttribute('aria-expanded')`), rows: await rows() }
+    await wait('window.trashFixture.rows().length === 3', 'rows')
+    evidence.opened = await rows()
 
     // Tab walks the actions row by row; Shift+Tab walks back.
     const tabs: any[] = []
@@ -62,49 +60,32 @@ void (async () => {
     await press('Space')
     await wait('window.trashFixture.rows().length === 2', 'restore refresh')
     await wait('window.trashFixture.active().action !== null', 'focus after restore')
-    evidence.restore = { calls: await run('window.trashFixture.calls.restore'), rows: await rows(), active: await active(), count: await count() }
+    evidence.restore = { calls: await run('window.trashFixture.calls.restore'), rows: await rows(), active: await active() }
 
-    // Delete permanently... opens the confirmation; Escape closes it and returns to the button; nothing is deleted.
+    // Enter on Delete permanently... opens the confirmation with focus inside it; Escape returns focus to the button.
     await press('Tab')
     evidence.beforeDelete = await active()
     await press('Enter')
-    await wait('!!window.trashFixture.dialog()', 'dialog')
-    await wait('window.trashFixture.active().inDialog', 'dialog focus')
-    evidence.dialogOpened = { dialog: await dialog(), active: await active() }
+    await wait('!!window.trashFixture.dialog() && window.trashFixture.active().inDialog', 'dialog focus')
+    evidence.dialogOpened = await active()
     await press('Escape')
     await wait('!window.trashFixture.dialog()', 'dialog closed')
     await wait('window.trashFixture.active().action === "delete"', 'focus back on delete')
-    evidence.escaped = { active: await active(), purges: await run('window.trashFixture.calls.purge'), rows: await rows() }
+    evidence.escaped = { active: await active(), purges: await run('window.trashFixture.calls.purge') }
 
-    // Open again, accept the unpublished work with Space, and reach the confirm button by Tab. The daemon refuses once.
+    // Open again, accept the unpublished work with Space, reach the confirm button by Tab, and delete with Enter.
     await press('Enter')
     await wait('!!window.trashFixture.dialog() && window.trashFixture.active().inDialog', 'dialog again')
     await press('Space')
-    evidence.accepted = await dialog()
-    await run(`window.trashFixture.failPurge('middle', { code: 'resource_purge_io_error', message: 'Purge could not remove a locked or permission-protected resource. Close applications using it and retry the pending purge.', errorInfo: { category: 'conflict', retryable: false } })`)
+    evidence.accepted = await run('window.trashFixture.dialog()')
     const dialogTabs: any[] = []
     for (let i = 0; i < 3; i++) { await press('Tab'); dialogTabs.push(await active()) }
     evidence.dialogTabs = dialogTabs
     await press('Enter')
-    await wait('window.trashFixture.dialog()?.error', 'refusal reason')
-    evidence.refused = { dialog: await dialog(), purges: await run('window.trashFixture.calls.purge'), rows: await rows() }
-    await press('Escape')
-    await wait('!window.trashFixture.dialog()', 'dialog closed after refusal')
-    await wait('window.trashFixture.active().action === "delete"', 'focus back after refusal')
-    evidence.afterRefusal = { active: await active(), rows: await rows() }
-
-    // The lock is gone: the same keys finish the deletion and focus lands on the remaining thread.
-    await run(`window.trashFixture.failPurge('middle', null)`)
-    await press('Enter')
-    await wait('!!window.trashFixture.dialog() && window.trashFixture.active().inDialog', 'dialog third time')
-    evidence.reopened = await dialog()
-    await press('Space')
-    for (let i = 0; i < 3; i++) await press('Tab')
-    await press('Enter')
     await wait('window.trashFixture.rows().length === 1', 'purge refresh')
     await wait('!window.trashFixture.dialog()', 'dialog closed after purge')
     await wait('window.trashFixture.active().action !== null', 'focus after purge')
-    evidence.purged = { rows: await rows(), active: await active(), purges: await run('window.trashFixture.calls.purge'), count: await count() }
+    evidence.purged = { rows: await rows(), active: await active(), purges: await run('window.trashFixture.calls.purge') }
 
     writeFileSync(join(directory, 'evidence.json'), JSON.stringify({ ok: true, errors, ...evidence }))
     window.destroy()

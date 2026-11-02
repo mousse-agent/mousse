@@ -247,7 +247,7 @@ describe('retired legacy-only Pi connections', () => {
       // The composer reads the snapshot's models: a retired entry offers none.
       expect(snapshot.models.entries).toEqual([])
     }
-    // Nor do the pickers that read the pi listings (composer, defaults, channels, settings).
+    // Nor do the pickers that read the pi listings (composer, defaults, settings).
     const offered = profile.harness.listedLlmProviders({ kind: 'device' }).map((option) => option.instanceId)
     expect(offered).not.toContain('pi:openai-codex')
     expect(offered).not.toContain('pi:cursor')
@@ -274,11 +274,11 @@ describe('retired legacy-only Pi connections', () => {
     const profile = await upgraded({ expired })
     const { harness } = profile
     const pinned = read('thread.json').modelOverride
-    const purposes: ResolvePurpose[] = ['composer', 'default', 'turn', 'title', 'definition', 'workflow', 'schedule', 'channel_model', 'delegate_task']
+    const purposes: ResolvePurpose[] = ['composer', 'default', 'turn', 'title', 'definition', 'workflow', 'schedule', 'delegate_task']
     for (const purpose of purposes)
       expect(refusal(() => harness.resolveStored(pinned, { purpose })), purpose).toMatchObject({
         code: 'provider_retired',
-        // It says where to go: a channel has no Move button.
+        // It says where to go: a caller may have no Move button.
         message: 'ChatGPT was retired by a Mousse update. Move it to ChatGPT subscription in Settings → Providers to keep chatting. Your chats stay.'
       })
     expect(refusal(() => harness.resolve({ instanceId: 'pi:cursor', model: 'composer-1' }, device, 'turn'))).toMatchObject({ code: 'provider_retired' })

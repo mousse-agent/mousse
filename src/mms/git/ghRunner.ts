@@ -1,5 +1,8 @@
 import { execFile } from 'node:child_process'
-import { repoProgramEnv, withoutRepoPrograms } from './repoPrograms'
+import { basename } from 'node:path'
+import { mousseGitEnv } from './gitEnv'
+import { assertGitAllowed, type UserAction } from './gitPolicy'
+import { repoProgramEnv, withoutRepoProgramsAsync } from './repoPrograms'
 
 export interface ExecutableResult {
   stdout: string
@@ -9,25 +12,28 @@ export interface ExecutableResult {
 export type ExecutableRunner = (
   executable: string,
   args: readonly string[],
-  options?: { cwd?: string; /** Added to the process environment. */ env?: Record<string, string>; /** Longer than the default minute, for a download. */ timeoutMs?: number }
+  options?: {
+    cwd?: string
+    /** Added to the process environment. */ env?: Record<string, string>
+    /** Longer than the default minute, for a download. */ timeoutMs?: number
+    /** The user's request, for a command that changes something (a pull request, a branch on GitHub, a clone). */
+    userRequested?: UserAction
+  }
 ) => Promise<ExecutableResult>
 
 /** Runs a program; `git` runs no program the repository configures (`repoPrograms`). */
-export const execRunner: ExecutableRunner = (executable, args, options) =>
-  new Promise((resolvePromise, reject) => {
-    let argv: string[]
-    try {
-      argv = executable === 'git' ? withoutRepoPrograms(options?.cwd ?? process.cwd(), args) : [...args]
-    } catch (error) {
-      reject(error)
-      return
-    }
+export const execRunner: ExecutableRunner = async (executable, args, options) => {
+  const cwd = options?.cwd ?? process.cwd()
+  if (/^gh(\.exe)?$/i.test(basename(executable))) assertGitAllowed({ executable: 'gh', cwd, args, userRequested: options?.userRequested })
+  const argv = executable === 'git' ? await withoutRepoProgramsAsync(cwd, args, { userRequested: options?.userRequested }) : [...args]
+  return new Promise((resolvePromise, reject) => {
     execFile(
       executable,
       argv,
       {
         cwd: options?.cwd,
-        ...(executable === 'git' ? { env: repoProgramEnv({ ...process.env, ...options?.env }) } : options?.env ? { env: { ...process.env, ...options.env } } : {}),
+        // `gh` runs Git itself (remotes, `pr checkout`), so its Git gets the same settings as Mousse's own.
+        env: executable === 'git' ? repoProgramEnv({ ...process.env, ...options?.env }) : mousseGitEnv({ ...process.env, ...options?.env }),
         windowsHide: true,
         encoding: 'utf8',
         timeout: options?.timeoutMs ?? 60_000,
@@ -43,6 +49,7 @@ export const execRunner: ExecutableRunner = (executable, args, options) =>
       }
     )
   })
+}
 
 /** A packaged macOS app gets a minimal PATH, so Homebrew's gh is not found by name. */
 export function createGhFallbackRunner(

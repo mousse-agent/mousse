@@ -95,8 +95,6 @@ import { NotificationThreadIndex } from '../notifications/threadNotificationTarg
 import { playThreadCompletionSound } from '../notifications/completionSound'
 import type {
   BrowserBounds,
-  ChannelConfig,
-  ChannelPlatform,
   CreateScheduledJobInput,
   FileAsset,
   FileEntry,
@@ -143,6 +141,7 @@ import type {
   PullRequestDraft,
   PullRequestFormInput,
   PullRequestListItem,
+  PullRequestMergeMethod,
   PullRequestPushTarget,
   PullRequestRef,
   PullRequestScope,
@@ -1044,12 +1043,16 @@ export function registerGuiIpc(
     setThreadActivity(targetThreadId, 'processing')
     try {
       const body = normalizeSendContent(request)
+      const requestId = body.requestId ?? randomUUID()
       const result = await guiMms.request<{ queued?: boolean; message?: string }>(
         'orchestrator.send',
         {
           threadId: targetThreadId,
           content: body.content,
-          requestId: body.requestId ?? randomUUID(),
+          requestId,
+          // The composer sends a message again with the same id only when it may have arrived, so the
+          // service answers with the run it already has instead of running it twice.
+          clientRequestId: requestId,
           mode: body.mode,
           images: body.images,
           source: 'gui'
@@ -1259,6 +1262,9 @@ export function registerGuiIpc(
   registerHandler('operations:abort', async (_e, params: Record<string, unknown>) =>
     guiMms.request('operations.abort', params)
   )
+  registerHandler('operations:recover', async (_e, threadId: string) =>
+    guiMms.request('operations.recover', { threadId })
+  )
   registerStorageHandler('threads:restore', async (_e, threadId: string) =>
     guiMms.request('threads.restore', { threadId })
   )
@@ -1465,7 +1471,7 @@ export function registerGuiIpc(
   const createParams = (name: string | undefined, projectId: string | undefined, opts: { worktreeEnabled?: boolean; node?: string } | undefined) => ({
     name: name?.trim() || 'New Chat',
     projectId,
-    worktreeEnabled: opts?.worktreeEnabled === true,
+    ...(typeof opts?.worktreeEnabled === 'boolean' ? { worktreeEnabled: opts.worktreeEnabled } : {}),
     ...(typeof opts?.node === 'string' && opts.node ? { node: opts.node } : {})
   })
 
@@ -1561,7 +1567,7 @@ export function registerGuiIpc(
     async (
       _e,
       threadId: string,
-      model?: { instanceId?: string; llmProvider: string; model: string }
+      model?: { instanceId?: string; llmProvider: string; model: string; effort?: string }
     ) => {
       const res = await guiMms.request<{ thread: unknown; threads: unknown[] }>('threads.setModel', {
         threadId,
@@ -1756,7 +1762,7 @@ export function registerGuiIpc(
     await guiMms.request('pty.kill', withThreadId({ ptyId }, threadId))
   })
 
-  // ── Scheduler / channels / mcp / skills (daemon protocol) ──────────────
+  // ── Scheduler / mcp / skills (daemon protocol) ─────────────────────────
 
   registerHandler('scheduled:list', async () => {
     const res = await guiMms.request<{ jobs: unknown[] }>('scheduled.list')
@@ -1831,80 +1837,6 @@ export function registerGuiIpc(
   registerHandler('scheduled:settings:set', async (_e, update: ScheduledSettingsUpdate) => {
     const res = await guiMms.request<{ settings: unknown }>('scheduled.settings.set', { ...update })
     return res.settings
-  })
-
-  registerHandler('channels:getSnapshot', async () => {
-    const res = await guiMms.request<{ snapshot: unknown }>('channels.getSnapshot')
-    return res.snapshot
-  })
-  registerHandler('channels:getConfig', async () => {
-    const res = await guiMms.request<{ config: unknown }>('channels.getConfig')
-    return res.config
-  })
-  registerHandler('channels:updateConfig', async (_e, patch: Partial<ChannelConfig>) => {
-    const res = await guiMms.request<{ config: unknown }>('channels.updateConfig', { patch })
-    return res.config
-  })
-  registerHandler('channels:connect', async (_e, platform?: ChannelPlatform) => {
-    const res = await guiMms.request<{ snapshot: unknown }>('channels.connect', { platform })
-    return res.snapshot
-  })
-  registerHandler('channels:disconnect', async (_e, platform?: ChannelPlatform) => {
-    const res = await guiMms.request<{ snapshot: unknown }>('channels.disconnect', {
-      platform
-    })
-    return res.snapshot
-  })
-  registerHandler('channels:listPairingRequests', async () => {
-    const res = await guiMms.request<{ requests: unknown[] }>(
-      'channels.listPairingRequests'
-    )
-    return res.requests
-  })
-  registerHandler('channels:approvePairing', async (_e, code: string) => {
-    const res = await guiMms.request<{ ok: boolean }>('channels.approvePairing', { code })
-    return res.ok
-  })
-  registerHandler('channels:rejectPairing', async (_e, code: string) => {
-    const res = await guiMms.request<{ ok: boolean }>('channels.rejectPairing', { code })
-    return res.ok
-  })
-  registerHandler(
-    'channels:sendTest',
-    async (_e, platform: ChannelPlatform, chatId: string, text: string, threadId?: string) => {
-      const res = await guiMms.request<{ result: unknown }>('channels.sendTest', {
-        platform,
-        chatId,
-        text,
-        threadId
-      })
-      return res.result
-    }
-  )
-  registerHandler('channels:getActivity', async (_e, limit?: number) => {
-    const res = await guiMms.request<{ activity: unknown[] }>('channels.getActivity', {
-      limit
-    })
-    return res.activity
-  })
-  registerHandler('channels:owner:start', async (_e, platform: ChannelPlatform) => {
-    const res = await guiMms.request<{ claim: unknown }>('channels.owner.start', { platform })
-    return res.claim
-  })
-  registerHandler('channels:owner:status', async (_e, platform: ChannelPlatform) => {
-    const res = await guiMms.request<{ claim: unknown }>('channels.owner.status', { platform })
-    return res.claim
-  })
-  registerHandler('channels:owner:confirm', async (_e, platform: ChannelPlatform, userId: string) => {
-    const res = await guiMms.request<{ owners: unknown }>('channels.owner.confirm', { platform, userId })
-    return res.owners
-  })
-  registerHandler('channels:owner:cancel', async (_e, platform: ChannelPlatform) => {
-    await guiMms.request<{ ok: boolean }>('channels.owner.cancel', { platform })
-  })
-  registerHandler('channels:owner:clear', async (_e, platform: ChannelPlatform) => {
-    const res = await guiMms.request<{ owners: unknown }>('channels.owner.clear', { platform })
-    return res.owners
   })
 
   registerHandler('mcp:listServers', async (_e, projectId?: string) => {
@@ -2282,12 +2214,13 @@ export function registerGuiIpc(
     return { pullRequest: response.pullRequest, existing: response.existing === true } satisfies CreatePullRequestResult
   })
   // Merge and close answer with the pull request read back; a refusal carries the host's own reason.
-  registerHandler('pullRequests:merge', async (_e, ref: PullRequestRef | undefined, number: number, headSha?: string) => {
+  registerHandler('pullRequests:merge', async (_e, ref: PullRequestRef | undefined, number: number, headSha?: string, method?: PullRequestMergeMethod) => {
     const response = await guiMms.request<PullRequestActionResult>('pullRequests.merge', {
       ...(typeof ref?.threadId === 'string' ? { threadId: ref.threadId } : {}),
       ...(typeof ref?.projectId === 'string' ? { projectId: ref.projectId } : {}),
       number,
-      ...(typeof headSha === 'string' && headSha ? { headSha } : {})
+      ...(typeof headSha === 'string' && headSha ? { headSha } : {}),
+      ...(typeof method === 'string' ? { method } : {})
     })
     return { pullRequest: response.pullRequest, method: response.method } satisfies PullRequestActionResult
   })
@@ -2298,6 +2231,13 @@ export function registerGuiIpc(
       number
     })
     return { pullRequest: response.pullRequest } satisfies PullRequestActionResult
+  })
+  registerHandler('pullRequests:mergeMethod', async (_e, ref: PullRequestRef | undefined) => {
+    const response = await guiMms.request<{ method: PullRequestMergeMethod | null }>('pullRequests.mergeMethod', {
+      ...(typeof ref?.threadId === 'string' ? { threadId: ref.threadId } : {}),
+      ...(typeof ref?.projectId === 'string' ? { projectId: ref.projectId } : {})
+    })
+    return response.method
   })
   registerHandler('pullRequests:baseBranches', async (_e, ref: PullRequestRef | undefined) => {
     const response = await guiMms.request<{ baseBranches: PullRequestBaseBranches }>('pullRequests.baseBranches', {
@@ -2323,15 +2263,16 @@ export function registerGuiIpc(
       projectId: input?.projectId,
       reference: input?.reference,
       ...(input?.allowClosed === true ? { allowClosed: true } : {}),
-      ...(input?.allowDuplicate === true ? { allowDuplicate: true } : {})
+      ...(input?.allowDuplicate === true ? { allowDuplicate: true } : {}),
+      ...(input?.allowWorktreeConfig === true ? { allowWorktreeConfig: true } : {})
     })
-    return { thread: response.thread, seed: response.seed, headSha: response.headSha, headMoved: response.headMoved, sent: response.sent, withheld: response.withheld }
+    return { thread: response.thread, seed: response.seed, headSha: response.headSha, headMoved: response.headMoved, sent: response.sent, withheld: response.withheld, repositoryConfigChange: response.repositoryConfigChange ?? null }
   })
   registerHandler('pullRequests:pushTarget', async (_e, threadId: string) => {
     const response = await guiMms.request<{ target: PullRequestPushTarget }>('pullRequests.pushTarget', { threadId })
     return response.target
   })
-  // A thread's watch of its pull request: `off`, `notify` (a line in the thread) or `act` (also wakes the agent).
+  // A thread's watch of its pull request: `off` or `notify` (a line in the thread).
   registerHandler('pullRequests:watch', async (_e, threadId: string, watch: PullRequestWatchMode, number?: number) => {
     const response = await guiMms.request<{ status: PullRequestWatchStatus }>('pullRequests.watch', {
       threadId,

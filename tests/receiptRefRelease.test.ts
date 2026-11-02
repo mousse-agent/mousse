@@ -45,7 +45,7 @@ it('releases only exclusive expired receipt refs and leaves current/user branche
   expect(git(workspace.worktreePath, 'rev-parse', workspace.retainedRef)).toBe(action.endSha)
   expect(f.read(f.thread, 'messages.json')).toContain('retained transcript')
   const { id: _id, workspaceId: _workspaceId, generation: _generation, retainedRefs: _refs, createdAt: _createdAt, ...input } = receipt
-  expect(new ChangeReceiptService(f.thread).record(workspace.worktreePath, input)).toEqual(receipt)
+  await expect(new ChangeReceiptService(f.thread).record(workspace.worktreePath, input)).resolves.toEqual(receipt)
   expect(git(f.repo, 'for-each-ref', '--format=%(refname)', `refs/mousse/changes/${receipt.id}`)).toBe('')
   await expect(new CodeRevertService(f.thread).revertCode(action.id, workspace.worktreePath)).rejects.toThrow('expired')
 })
@@ -96,7 +96,7 @@ it('admits history honestly after expired code objects are genuinely collected i
   writeFileSync(join(f.thread, 'messages.json'), '[{"content":"conversation survives collection"}]')
   expect((await release.release(workspace.worktreePath)).releasedRefs).toEqual(receipt.retainedRefs)
   // This fixture deliberately discards its test task result and reflogs. Production never does this.
-  git(f.repo, 'worktree', 'remove', workspace.worktreePath)
+  git(f.repo, 'worktree', 'remove', '--force', workspace.worktreePath) // the turn's result is uncommitted: it is a snapshot
   git(f.repo, 'update-ref', '-d', workspace.retainedRef, action.endSha)
   git(f.repo, 'branch', '-D', workspace.branch)
   git(f.repo, 'reflog', 'expire', '--expire=now', '--all')

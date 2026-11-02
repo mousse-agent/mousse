@@ -184,7 +184,7 @@ describe('definition browser runtime binding', () => {
       threadId: 'thread-main', turnId: 'turn-cli', source: 'cli', mode: 'agent'
     })?.execution.source).toBe('cli')
     expect(mainBrowserBinding(services, {
-      threadId: 'thread-main', turnId: 'turn-channel', source: 'channel', mode: 'agent'
+      threadId: 'thread-main', turnId: 'turn-remote', source: 'remote', mode: 'agent'
     })).toBeUndefined()
   })
 

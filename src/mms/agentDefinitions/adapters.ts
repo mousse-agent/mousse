@@ -16,7 +16,7 @@ export interface AgentDefinitionExecutionContext {
   profileId: string
   threadId: string
   turnId?: string
-  source: 'gui' | 'cli' | 'schedule' | 'channel' | 'control'
+  source: 'gui' | 'cli' | 'schedule' | 'remote' | 'control'
   task: string
 }
 

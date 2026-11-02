@@ -25,8 +25,8 @@ export function fakeAppToolHost(overrides: Partial<AppToolHost> = {}) {
     taskCancel: vi.fn(async () => ({ cancelled: [] })),
     listDelegations: vi.fn(() => []),
     listSubagents: vi.fn(() => []),
-    integrateDelegation: vi.fn(async () => ({ status: 'queued' })),
-    named: { create: vi.fn(), createBatch: vi.fn(), recall: vi.fn(), integrate: vi.fn() }
+    reportResult: vi.fn(() => ({ merged: false })),
+    named: { create: vi.fn(), createBatch: vi.fn(), recall: vi.fn() }
   }
   const tasks = new TaskQueue()
   const enqueued: Array<{ threadId: string; input: unknown }> = []

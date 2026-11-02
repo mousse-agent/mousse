@@ -74,7 +74,7 @@ export class MousseMainService extends MmsProfileServices {
       personal: true,
       profileId,
       allowLegacyProjectData: isDefault,
-      inheritChannelEnvironment: isDefault,
+      inheritProcessEnvironment: isDefault,
       includeExternalCliConfigs: isDefault
     })
     this.installationLease = owner

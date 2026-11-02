@@ -172,20 +172,6 @@ export function bridgeProtocolEvent(
       )
       return true
     }
-    case 'channels.updated': {
-      broadcast(
-        'channels:updated',
-        (event.data as { snapshot?: unknown })?.snapshot ?? event.data
-      )
-      return true
-    }
-    case 'channels.activity': {
-      broadcast(
-        'channels:activity',
-        (event.data as { event?: unknown })?.event ?? event.data
-      )
-      return true
-    }
     case 'settings.changed': {
       broadcast(
         'settings:changed',

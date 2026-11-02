@@ -52,7 +52,11 @@ export async function runThreadActionCommand(args: ParsedArgs): Promise<void> {
         break
       }
       case 'operation': {
-        if (args.subcommand !== 'abort') exitWithError('operation requires the abort subcommand.', args.globals.mode)
+        if (args.subcommand === 'recover') {
+          result = await context.client.request('operations.recover', { threadId })
+          break
+        }
+        if (args.subcommand !== 'abort') exitWithError('operation requires the abort or recover subcommand.', args.globals.mode)
         const operationId = args.positional[0] ?? flagString(args.flags, 'operation')
         if (!operationId) exitWithError('operation abort requires an operation id.', args.globals.mode)
         result = await context.client.request('operations.abort', { threadId, operationId, expectedJournalGeneration })

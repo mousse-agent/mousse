@@ -48,6 +48,8 @@ export function antigravityDriver(options: { builtIn: () => AntigravityProviderS
     // ACP updates do not name the MCP server: the bearer is kept only after a turn whose tool calls all completed.
     mcpTurnBinding: 'drained_turn',
     userMcp: 'native',
+    // The agent's own `session/request_permission` flow decides (when it asks at all).
+    relay: { approvals: 'runtime' },
     mirrorsVendorFile: true,
     // The Google sign-in is the profile's session Mousse keeps, with the installed or a manual agent.
     ownsSignIn: true,

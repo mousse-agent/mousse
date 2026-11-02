@@ -6,6 +6,7 @@ import { NetIdentityService } from '../../../../src/mms/net/identity/NetIdentity
 import { ProjectManager } from '../../../../src/mms/data/ProjectManager'
 import { ThreadDataStore } from '../../../../src/mms/data/ThreadDataStore'
 import { DispatchService } from '../../../../src/mms/bridge/dispatch/service'
+import { registerOwnedGitRoot } from '../../../../src/mms/git/gitPolicy'
 import type { ResolvedAgentDefinition } from '../../../../src/shared/agents/types'
 import type { Roster, NodeDelegation } from '../../../../src/shared/net'
 
@@ -13,6 +14,9 @@ async function main() {
   const input = JSON.parse(process.argv[2]),
     db = new NetDatabase({ profileDir: input.profile }),
     keys = new FileKeyStore(input.profile)
+  // The profile and installation homes are Mousse's, as in the test process.
+  registerOwnedGitRoot(input.profile)
+  registerOwnedGitRoot(input.home)
   const identity = new NetIdentityService({
     database: db.database,
     keys,

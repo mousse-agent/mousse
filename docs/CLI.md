@@ -148,7 +148,7 @@ mousse-cli [options] [message...]
 Without `-p`/`--print`, on an interactive terminal, `mousse-cli` opens a **pi-style** session:
 
 - A line editor (readline). The pi-style terminal UI is meant to load from `@earendil-works/pi-tui`, but it does not load today, so readline is what runs.
-- Slash commands shared with Telegram/Discord (`/threads`, `/models`, `/steer`, `/stop`, …)
+- Slash commands (`/threads`, `/models`, `/steer`, `/stop`, …)
 - Ordinary messages submitted while a turn is busy **stack FIFO** and run next
 - `/steer <text>` targets the **active turn** only (never rewritten as a normal message)
 - Ctrl+C once stops the in-flight turn; twice (or `/exit`) leaves the session
@@ -185,7 +185,6 @@ mousse-cli -c -p "Continue where we left off"
 mousse-cli --session abc123 -p "Follow up on the plan"
 ```
 
-Channel surfaces (Telegram/Discord) expose the same `/threads`, `/models`, `/steer`, and FIFO stacking semantics via the shared registry in `src/shared/channelCommands.ts`.
 ## schedule
 
 Manage scheduled orchestrator jobs (stored in `mousse.conf` → `scheduled.jobs`).
@@ -276,25 +275,6 @@ mousse-cli agents stop <agent-id>
 mousse-cli agents stop <agent-id> --merge
 ```
 
-## channels
-
-Configure Telegram, Discord, and Webhook adapters from the CLI.
-
-```bash
-mousse-cli channels list
-mousse-cli channels add telegram --token "$TELEGRAM_BOT_TOKEN" --user-id 123456789
-mousse-cli channels add discord --token "$DISCORD_BOT_TOKEN"
-mousse-cli channels add webhook --webhook-port 8787 --webhook-secret "$SECRET"
-mousse-cli channels enable telegram
-mousse-cli channels disable discord
-mousse-cli channels remove webhook
-mousse-cli channels pair list
-mousse-cli channels pair approve <code>
-mousse-cli channels pair reject <code>
-```
-
-Channel secrets are stored in `mousse.conf` (redacted in list output). Pairing codes approve DMs when `unauthorizedDmBehavior` is `pair`.
-
 ## config
 
 Dotted-path access to unified config at `~/.mousse/mousse.conf`.
@@ -352,7 +332,7 @@ mousse-cli service install
 | Config | `~/.mousse/mousse.conf` | Same file |
 | Secrets | `~/.mousse/auth.json` | Same file |
 | Orchestrator chat | Renderer UI | Interactive TUI (TTY) or `-p` one-shot |
-| Channels / scheduler | Settings panels | `channels`, `schedule` subcommands |
+| Scheduler | Automations page | `schedule` subcommands |
 | Agents | Try Agent in Automations, terminals | `agents` subcommands |
 | Startup | Optional MMS autostart | `service install` |
 
@@ -377,6 +357,9 @@ mousse-cli undo --session <thread>
 mousse-cli redo --session <thread>
 mousse-cli fork --session <thread> --action <action> [--name <name>]
 mousse-cli operation abort <operation> --session <thread>
+mousse-cli operation recover --session <thread>
 ```
+
+`workspace` shows under `recovery` what a thread is waiting on: an operation that did not finish (turns, Undo and Publish wait for it), a merge an earlier version left in progress, or a Publish that did not finish. `operation recover` finishes or settles what is waiting and answers with `settled`; when something still waits it says what, under `stillWaiting`. `operation abort` aborts a merge an earlier version left in progress, after keeping every file under the `preservedRef` it returns. Neither moves the worktree's branch or HEAD, and both refuse at once while a turn of the thread runs.
 
 Mutating commands are daemon-backed and include the observed journal generation. A stale client is rejected instead of executing against obsolete state. `--session` is mandatory whenever more than one open thread exists.

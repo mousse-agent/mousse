@@ -60,6 +60,7 @@ export interface ProfilePaths {
   readonly secretsDir: string
   readonly controlDir: string
   readonly scheduledDir: string
+  /** Leftover folder of the removed Channels feature: the legacy-home migration still copies it here, nothing reads it. */
   readonly channelsDir: string
   readonly browserDir: string
   readonly artifactsDir: string

@@ -54,30 +54,6 @@ export function getScheduledTickerSuccessPath(): string {
   return join(getScheduledDir(), 'ticker_last_success')
 }
 
-export function getChannelsDir(): string {
-  return join(getMousseHomeDir(), 'channels')
-}
-
-export function getChannelsConfigPath(): string {
-  return join(getChannelsDir(), 'config.json')
-}
-
-export function getChannelsSessionsPath(): string {
-  return join(getChannelsDir(), 'sessions.json')
-}
-
-export function getChannelsDirectoryPath(): string {
-  return join(getChannelsDir(), 'directory.json')
-}
-
-export function getChannelsPairingDir(): string {
-  return join(getChannelsDir(), 'pairing')
-}
-
-export function getChannelsLockPath(): string {
-  return join(getChannelsDir(), '.channels.lock')
-}
-
 export function getMcpOAuthDir(): string {
   return join(getMousseHomeDir(), 'mcp-oauth')
 }

@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process'
-import { constants, cpSync, existsSync, lstatSync, mkdtempSync, readdirSync, rmSync } from 'node:fs'
+import { constants, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { beginFixturePhase } from './phaseTiming'
@@ -28,8 +28,12 @@ export function committedGitTemplate(initialize: (repo: string) => void): (desti
     }
     const finish = beginFixturePhase('git-base', 'copy')
     try {
-      // Copy-on-write when supported, with ordinary independent copies as the portable fallback.
-      cpSync(base.repo, destination, { recursive: true, force: false, errorOnExist: true, mode: constants.COPYFILE_FICLONE })
+      // Node 26 refuses to copy a folder onto an existing one, even an empty one, so copy what it contains.
+      mkdirSync(destination, { recursive: true })
+      for (const entry of readdirSync(base.repo)) {
+        // Copy-on-write when supported, with ordinary independent copies as the portable fallback.
+        cpSync(join(base.repo, entry), join(destination, entry), { recursive: true, force: false, errorOnExist: true, mode: constants.COPYFILE_FICLONE })
+      }
       return base.sha
     } finally { finish() }
   }

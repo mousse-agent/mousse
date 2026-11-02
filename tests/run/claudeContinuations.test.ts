@@ -491,7 +491,7 @@ describe('Claude background helpers through the orchestrator (issue #142)', () =
     const s = await scene()
     const session = s.d.orch.getOrCreateSession(s.childThread)
     ;(s.d.orch as any).wakeBusyDeferMs = 50
-    // A queue drain or a channel turn holds the admission; no run of the engine owns it.
+    // A queue drain or a remote turn holds the admission; no run of the engine owns it.
     session.turnAdmitted = true
     session.admissionRunId = undefined
     s.cli.last.emit(notification('build-1'), textDelta('reading the report'))

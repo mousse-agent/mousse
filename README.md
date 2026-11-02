@@ -22,7 +22,7 @@ It drives Claude Code, Codex, Google Antigravity, and any agent that speaks [ACP
 
 Chat apps for agents already exist. They stop at the edge of your laptop.
 
-Mousse doesn't. Link your machines and every thread, on any of them, shows up in one list. Message your agents from Telegram or Discord. Put a bot into a Space with your teammates, and it answers them using your machine and your keys. Schedule the boring work for 3 a.m. and turn the things you do every week into workflows you run with one message.
+Mousse doesn't. Link your machines and every thread, on any of them, shows up in one list. Reach them from your phone with the Mousse app. Put a bot into a Space with your teammates, and it answers them using your machine and your keys. Schedule the boring work for 3 a.m. and turn the things you do every week into workflows you run with one message.
 
 It is for your teammates too. A Space is a chat where people and bots sit together, so the conversation about the work and the work itself happen in one place. One subscription on one machine can serve a whole small team, because the bots run on their owner's computer with the owner's keys. The goal is simple: you open Mousse in the morning and never have to leave it.
 

@@ -16,6 +16,7 @@ import {
   commitHint,
   commitMenuState,
   commitPhaseLabel,
+  commitTrigger,
   commitScope,
   emptyCommitForm,
   existingPullRequestNotice,
@@ -26,6 +27,7 @@ import {
   gitActionLock,
   prefillAmendDraft,
   LINKED_WORKTREE_HINT,
+  mergeConfirmation,
   pullRequestCheckRows,
   pullRequestReadThreadId,
   pullRequestReviewState,
@@ -493,15 +495,15 @@ describe('commit menu state', () => {
   })
 
   it('enables the trigger for changes or an amendable commit', () => {
-    expect(commitMenuState([commit()], 2, false)).toMatchObject({ triggerEnabled: true, triggerTitle: 'Commit all changes' })
+    expect(commitMenuState([commit()], 2, false)).toMatchObject({ triggerEnabled: true, forced: false })
     expect(commitMenuState([commit({ onRemote: true })], 2, false).triggerEnabled).toBe(true)
     expect(commitMenuState([], 1, false).triggerEnabled).toBe(true)
-    expect(commitMenuState([commit()], 0, false)).toMatchObject({ triggerEnabled: true, triggerTitle: 'Amend the last commit' })
+    expect(commitMenuState([commit()], 0, false)).toMatchObject({ triggerEnabled: true, forced: true })
   })
 
   it('disables the trigger when there is nothing to commit or amend', () => {
     const state = commitMenuState([commit({ onRemote: true })], 0, false)
-    expect(state).toMatchObject({ triggerEnabled: false, triggerTitle: 'No changes to commit' })
+    expect(state).toMatchObject({ triggerEnabled: false })
     expect(commitMenuState([], 0, false).triggerEnabled).toBe(false)
   })
 
@@ -548,6 +550,83 @@ describe('commit menu state', () => {
     expect(commitHint(true, 'a1b2c3d', 2)).toBe('Amends a1b2c3d · stages 2 files')
     expect(commitButtonLabels(false)).toEqual({ commit: 'Commit', commitAndPush: 'Commit and push', commitPushAndOpenPr: 'Commit, push and open PR' })
     expect(commitButtonLabels(true)).toEqual({ commit: 'Amend', commitAndPush: 'Amend and push', commitPushAndOpenPr: 'Amend, push and open PR' })
+  })
+})
+
+describe('commit button label', () => {
+  const trigger = (changes: GitFileChange[], options: { commits?: GitCommit[]; scope?: { workspaceThreadId: string | null }; inProgress?: GitStatusSnapshot['inProgress'] } = {}) => {
+    const scope = options.scope ?? { workspaceThreadId: null }
+    const commits = options.commits ?? [commit()]
+    const snapshot = status({ changes, ...(options.inProgress ? { inProgress: options.inProgress } : {}) })
+    const fileCount = new Set(changes.map((change) => change.path)).size
+    return commitTrigger(commitMenuState(commits, fileCount, false, scope.workspaceThreadId !== null), gitActionAvailability(snapshot, null, commits.length, scope).commit)
+  }
+
+  it('says Commit all with every changed file counted, untracked ones included', () => {
+    expect(trigger([fileChange('a.ts'), fileChange('b.ts'), fileChange('c.ts', { status: 'untracked' })])).toEqual({
+      label: 'Commit all (3)',
+      title: 'Stage and commit all 3 changed files, including 1 untracked file'
+    })
+    expect(trigger([fileChange('a.ts')])).toEqual({ label: 'Commit all (1)', title: 'Stage and commit all 1 changed file' })
+  })
+
+  it('says Commit staged with how many of the changed files go in when only staged files are committed', () => {
+    const changes = [fileChange('a.ts', { staged: true }), fileChange('new.ts', { status: 'added', staged: true }), fileChange('b.ts'), fileChange('c.ts', { status: 'untracked' })]
+    expect(trigger(changes)).toEqual({ label: 'Commit staged (2 of 4)', title: 'Commit only the 2 staged files; unstaged changes in 2 files stay out' })
+    expect(trigger([fileChange('a.ts', { staged: true }), fileChange('b.ts')]).title).toBe('Commit only the 1 staged file; unstaged changes in 1 file stay out')
+    expect(trigger([fileChange('a.ts', { staged: true })])).toEqual({ label: 'Commit staged (1 of 1)', title: 'Commit only the 1 staged file' })
+  })
+
+  it('says the unstaged part of a partly staged file stays out', () => {
+    // Staged, then edited again: one file on both sides.
+    const partly = [fileChange('mm.ts', { staged: true }), fileChange('mm.ts')]
+    expect(trigger(partly)).toEqual({ label: 'Commit staged (1 of 1)', title: 'Commit only the 1 staged file; the unstaged part of the partly staged file stays out' })
+    expect(trigger([...partly, fileChange('nn.ts', { staged: true }), fileChange('nn.ts')]).title).toBe('Commit only the 2 staged files; the unstaged part of the 2 partly staged files stays out')
+    expect(trigger([...partly, fileChange('b.ts')])).toEqual({
+      label: 'Commit staged (1 of 2)',
+      title: 'Commit only the 1 staged file; unstaged changes in 2 files stay out, including the unstaged part of 1 partly staged file'
+    })
+  })
+
+  it('says Commit all in a thread\'s worktree, whatever is staged', () => {
+    expect(trigger([fileChange('a.ts', { staged: true }), fileChange('b.ts')], { scope: { workspaceThreadId: 't1' } })).toEqual({
+      label: 'Commit all (2)',
+      title: "Commit all 2 changed files on this thread's branch"
+    })
+  })
+
+  it('never offers an amend under the Commit label: with no changes the button says Amend, or stays disabled', () => {
+    expect(trigger([])).toEqual({ label: 'Amend', title: 'No changes to commit. Amend a1b2c3d to change its message' })
+    expect(trigger([], { commits: [commit({ onRemote: true })] })).toEqual({ label: 'Commit', title: 'No changes to commit' })
+    expect(trigger([], { commits: [] })).toEqual({ label: 'Commit', title: 'No changes to commit' })
+    expect(trigger([], { scope: { workspaceThreadId: 't1' } })).toEqual({ label: 'Commit', title: 'No changes to commit' })
+  })
+
+  it('names a merge it finishes, with what goes in, and conflicts it waits on', () => {
+    expect(trigger([fileChange('a.ts', { staged: true }), fileChange('b.ts')], { inProgress: 'merge' })).toEqual({
+      label: 'Commit merge (1 of 2 staged)',
+      title: 'Finish the merge with only the 1 staged file; unstaged changes in 1 file stay out'
+    })
+    // Nothing staged: the commit stages everything first, so the button says so.
+    expect(trigger([fileChange('a.ts'), fileChange('n.ts', { status: 'untracked' })], { inProgress: 'merge' })).toEqual({
+      label: 'Commit merge (all 2)',
+      title: 'Finish the merge, staging and committing all 2 changed files, including 1 untracked file'
+    })
+    expect(trigger([fileChange('a.ts', { status: 'conflicted' }), fileChange('b.ts', { staged: true })])).toEqual({ label: 'Commit', title: 'Resolve 1 conflicted file first' })
+  })
+})
+
+describe('merge confirmation', () => {
+  it('names the method the merge uses, in GitHub\'s words on the button', () => {
+    expect(mergeConfirmation('#12', 'main', 'merge')).toEqual({ text: 'Merge #12 into main with a merge commit?', action: 'Create a merge commit' })
+    expect(mergeConfirmation('#12', 'main', 'squash')).toEqual({ text: 'Squash #12 into one commit on main?', action: 'Squash and merge' })
+    expect(mergeConfirmation('#12', 'main', 'rebase')).toEqual({ text: 'Rebase the commits of #12 onto main?', action: 'Rebase and merge' })
+  })
+
+  it('asks plainly while the method is read, and says what it uses when it cannot be read', () => {
+    expect(mergeConfirmation('#12', 'main', undefined)).toEqual({ text: 'Merge #12 into main?', action: 'Merge' })
+    expect(mergeConfirmation('#12', 'main', null)).toEqual({ text: "Merge #12 into main? The merge method couldn't be read, so the repository's default is used, else squash.", action: 'Merge' })
+    expect(mergeConfirmation('#12', '', 'squash').text).toBe('Squash #12 into one commit?')
   })
 })
 
@@ -649,7 +728,7 @@ describe('git action availability', () => {
   })
 
   it('refuses amend in a thread worktree with the reason, and without commits', () => {
-    expect(available({}, inThread).amend).toEqual({ enabled: false, reason: "This thread's branch is checkpointed" })
+    expect(available({}, inThread).amend).toEqual({ enabled: false, reason: "Not available in this thread's worktree" })
     expect(available({}, project).amend).toEqual({ enabled: true, reason: null })
     expect(available({}, project, none, 0).amend).toEqual({ enabled: false, reason: 'No commits yet' })
   })
@@ -1022,7 +1101,14 @@ describe('git section actions markup', () => {
   it('keeps the commit trigger enabled when only an amend is possible', () => {
     const html = render(view({ commits: [commit()] }))
     expect(html).toMatch(/<button[^>]*class="side-card-git-commit-button"(?![^>]*disabled)/)
-    expect(html).toContain('title="Amend the last commit"')
+    // Labelled Amend, never Commit: amending is not a silent default.
+    expect(html).toContain('title="No changes to commit. Amend a1b2c3d to change its message"')
+    expect(html).toMatch(/class="side-card-git-commit-button"[\s\S]*?<span>Amend<\/span><\/button>/)
+  })
+
+  it('names what the Commit button commits on the button itself', () => {
+    const html = render(view({ commits: [commit()], status: status({ changes: [fileChange('a.ts', { staged: true }), fileChange('b.ts'), fileChange('c.ts', { status: 'untracked' })] }) }))
+    expect(html).toMatch(/class="side-card-git-commit-button"[^>]*title="Commit only the 1 staged file; unstaged changes in 2 files stay out"[\s\S]*?<span>Commit staged \(1 of 3\)<\/span><\/button>/)
   })
 
   describe('not a repository, once expanded', () => {

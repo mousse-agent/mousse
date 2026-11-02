@@ -1,6 +1,6 @@
 import type { ReactNode } from 'react'
 import { File, Folder, Sparkles } from '../lib/icons'
-import type { MentionItem } from '../../shared/channelCommands'
+import type { MentionItem } from '../../shared/composerCommands'
 
 export interface SuggestionRow {
   key: string

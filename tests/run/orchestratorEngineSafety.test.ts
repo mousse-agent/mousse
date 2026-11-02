@@ -1,7 +1,7 @@
 /**
  * Review round 2 (docs/run-engine/SPEC.md §5, §12-§16) through a real `OrchestratorService`, Run
  * Engine and effect worker: a cancelled child never reaches its provider (C2), the pi path enforces
- * the caller's mode ceiling like the MCP server (C3), channel turns are engine runs and a busy thread
+ * the caller's mode ceiling like the MCP server (C3), remote turns are engine runs and a busy thread
  * defers its wake instead of looping (C4), Stop follows `CommandPolicy.stopStrategy` (S2) and a
  * replayed stop re-enqueues its interrupt (M4), and thread deletion cancels the thread's work (H7).
  */
@@ -159,101 +159,49 @@ describe('orchestrator and engine safety (review round 2)', () => {
     expect(d.orch.getMessages(threadId)).toEqual([])
   }, 30_000)
 
-  it('C3: a plan-mode pi turn cannot start a default child or integrate; the MCP host refuses the same way', async () => {
+  it('C3: a plan-mode pi turn cannot start a default child; the MCP host refuses the same way', async () => {
     let parentId = ''
     const outcomes: Record<string, unknown> = {}
     const adapter = new HostAdapter(async (input, delegation) => {
       if (input.threadId !== parentId) return 'child'
       outcomes.broader = await delegation!.delegateTask({ prompt: 'Write code', workspace: 'isolated', modeCeiling: 'default' }, { toolCallId: 'broader' }).catch((error: unknown) => error)
-      outcomes.integrate = await delegation!.integrateDelegation({ delegationId: 'delegation:any' }, { toolCallId: 'integrate' }).catch((error: unknown) => error)
+      outcomes.result = await Promise.resolve().then(() => delegation!.reportResult({ delegationId: 'delegation:any' })).catch((error: unknown) => error)
       outcomes.inherited = await delegation!.delegateTask({ prompt: 'Plan it', workspace: 'isolated' }, { toolCallId: 'inherited' })
       return 'planned'
     })
     const d = start(adapter)
     parentId = thread(d, 'Planner')
     const response = await d.orch.send({ content: 'Plan the work', mode: 'plan' }, false, { threadId: parentId, clientRequestId: 'plan' })
-    for (const key of ['broader', 'integrate']) {
-      expect(outcomes[key]).toBeInstanceOf(McpToolError)
-      expect((outcomes[key] as McpToolError).code).toBe('mousse_ceiling_exceeded')
-    }
+    expect(outcomes.broader).toBeInstanceOf(McpToolError)
+    expect((outcomes.broader as McpToolError).code).toBe('mousse_ceiling_exceeded')
+    // The retired merge tool changes nothing, so a plan caller may ask for a result: it is refused only as unknown.
+    expect(outcomes.result).not.toBeInstanceOf(McpToolError)
     const inherited = d.engine.delegations.get((outcomes.inherited as { delegationId: string }).delegationId)!
     expect(inherited.modeCeiling).toBe('plan')
     expect(d.engine.delegations.listForParentThread(parentId)).toHaveLength(1)
 
     // The MCP server's host for a plan-ceiling caller is the same dispatch.
     const mcp = d.orch.mcpToolHost().delegation({ threadId: parentId, runId: response.runId!, provider: 'claude-subscription', modeCeiling: 'plan' })
-    const viaMcp = await mcp.integrateDelegation({ delegationId: inherited.delegationId }, { toolCallId: 'mcp-integrate' }).catch((error: unknown) => error)
-    expect(viaMcp).toMatchObject({ code: 'mousse_ceiling_exceeded' })
     const broaderViaMcp = await mcp.delegateTask({ prompt: 'x', workspace: 'isolated', modeCeiling: 'default' }, { toolCallId: 'mcp-broader' }).catch((error: unknown) => error)
     expect(broaderViaMcp).toMatchObject({ code: 'mousse_ceiling_exceeded' })
   }, 30_000)
 
-  it('C4: a channel turn is an engine run; its stop and steer are recorded on the run', async () => {
+  it('C4: a remote turn is an engine run of its own source', async () => {
     const gate = deferred()
     releases.push(gate.resolve)
-    let current = gate
     const adapter = new HostAdapter(async (input) => {
-      await until(current.promise, input.signal)
-      return `channel reply to ${input.prompt}`
+      await until(gate.promise, input.signal)
+      return `remote reply to ${input.prompt}`
     })
     const d = start(adapter)
-    const threadId = thread(d, 'Channel')
-    const turn = d.orch.runChannelTurn(threadId, 'From the channel', d.store)
-    await waitFor(() => adapter.turns.length === 1, 'the channel turn')
+    const threadId = thread(d, 'Remote')
+    const turn = d.orch.runRemoteTurn(threadId, 'From a phone', d.store)
+    await waitFor(() => adapter.turns.length === 1, 'the remote turn')
     const run = d.engine.listRuns(threadId)[0]
-    expect(run).toMatchObject({ source: 'channel', status: 'running' })
-    expect(d.orch.steerChannelTurn(threadId, 'also this')).toBe(true)
+    expect(run).toMatchObject({ source: 'remote', status: 'running' })
     gate.resolve()
-    expect(await turn).toMatchObject({ text: 'channel reply to From the channel' })
+    expect(await turn).toMatchObject({ text: 'remote reply to From a phone' })
     expect(d.engine.getRun(run.runId)!.status).toBe('completed')
-    const commands = () => d.engine.store.db
-      .statement('SELECT command_kind FROM receipts WHERE thread_id = ? ORDER BY created_at, rowid')
-      .all(threadId)
-      .map((row) => row.command_kind)
-    await waitFor(() => commands().length === 2, 'the recorded steer')
-    expect(commands()).toEqual(['send', 'steer'])
-
-    // A stopped channel turn: aborted at once, its stop recorded on its run, which ends interrupted.
-    const second = deferred()
-    releases.push(second.resolve)
-    current = second
-    adapter.turns.length = 0
-    const again = d.orch.runChannelTurn(threadId, 'Second', d.store)
-    await waitFor(() => adapter.turns.length === 1, 'the second channel turn')
-    const live = d.engine.listRuns(threadId)[0]
-    expect(live).toMatchObject({ source: 'channel', status: 'running' })
-    expect(d.orch.abortChannelTurn(threadId)).toBe(true)
-    expect(await again).toMatchObject({ aborted: true })
-    await waitFor(() => commands().length === 4, 'the recorded stop')
-    expect(commands().slice(2)).toEqual(['send', 'stop'])
-    expect(d.engine.getRun(live.runId)!.status).toBe('interrupted')
-  }, 30_000)
-
-  it('a channel turn that ends while a later one waits on the same thread leaves the later turn registered, so a Stop still reaches it', async () => {
-    const gateA = deferred()
-    const gateB = deferred()
-    releases.push(gateA.resolve, gateB.resolve)
-    const adapter = new HostAdapter(async (input) => {
-      await until(input.prompt === 'A' ? gateA.promise : gateB.promise, input.signal)
-      return `reply to ${input.prompt}`
-    })
-    const d = start(adapter)
-    const threadId = thread(d, 'Overlap')
-    const turns = (d.orch as unknown as { channelTurns: Map<string, unknown> }).channelTurns
-    const first = d.orch.runChannelTurn(threadId, 'A', d.store)
-    await waitFor(() => adapter.turns.length === 1, 'turn A')
-    const entryA = turns.get(threadId)
-    // A second channel message arrives while A runs: it registers itself and waits for the thread's lease.
-    const second = d.orch.runChannelTurn(threadId, 'B', d.store)
-    await waitFor(() => turns.get(threadId) !== entryA, 'turn B to register')
-    gateA.resolve()
-    expect(await first).toMatchObject({ text: 'reply to A' })
-    // A's end must not unregister B's turn.
-    expect(turns.has(threadId)).toBe(true)
-    await waitFor(() => adapter.turns.length === 2, 'turn B')
-    expect(d.orch.abortChannelTurn(threadId)).toBe(true)
-    expect(await second).toMatchObject({ aborted: true })
-    expect(turns.has(threadId)).toBe(false)
   }, 30_000)
 
   it('C4: a wake on a thread busy with a turn the engine does not schedule stays queued (one wake run) and runs once after', async () => {

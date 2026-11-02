@@ -9,6 +9,7 @@ import { CodeRevertService } from '../src/mms/actions/CodeRevertService'
 import { ConversationBranchService } from '../src/mms/actions/ConversationBranchService'
 import { ThreadJournal } from '../src/mms/data/ThreadJournal'
 import { actionOptions, git, gitFoundationFixture } from './fixtures/gitFoundation'
+import { pressed } from './support/userRequest'
 
 let f: ReturnType<typeof gitFoundationFixture>
 let now: number
@@ -46,8 +47,8 @@ it('adopts existing history with grace, expires at the deadline and keeps audit/
 it('blocks historical Undo, code revert and exact-code fork even when Git still has every object', async () => {
   const target = await action()
   await policy(); now += 20000; await retention.sweep(f.repo)
-  await expect(new UndoService(f.thread).undoLatest('main', f.repo)).rejects.toThrow('expired')
-  await expect(new CodeRevertService(f.thread).revertCode(target.id, f.repo)).rejects.toThrow('expired')
+  await expect(pressed('Undo', () => new UndoService(f.thread).undoLatest('main', f.repo))).rejects.toThrow('expired')
+  await expect(pressed('Revert', () => new CodeRevertService(f.thread).revertCode(target.id, f.repo))).rejects.toThrow('expired')
   await expect(new ConversationBranchService(f.thread).fork(f.repo, 'main', target.id, 'old code')).rejects.toThrow('expired')
   expect(git(f.repo, 'cat-file', '-t', target.endSha)).toBe('commit')
 })
@@ -94,7 +95,7 @@ it('clock rollback cannot accelerate expiry and forward jumps suspend until huma
 it('Undo refreshes only its matching pair and receipt replay cannot revive expiration', async () => {
   const first = await action('first'), second = await action('second')
   await policy()
-  const undo = await new UndoService(f.thread).undoLatest('main', f.repo)
+  const undo = await pressed('Undo', () => new UndoService(f.thread).undoLatest('main', f.repo))
   const pairEvent = new ThreadJournal(f.thread).list().find((entry) => (entry.details as { kind?: string })?.kind === 'refresh-pair')!
   expect((pairEvent.details as { ids: string[] }).ids).toEqual([second.receiptId, undo.receiptId])
   now = (pairEvent.details as { deadline: number }).deadline
@@ -102,14 +103,14 @@ it('Undo refreshes only its matching pair and receipt replay cannot revive expir
   expect(result.expired).toEqual([first.receiptId, second.receiptId, undo.receiptId])
   const receiptService = new ChangeReceiptService(f.thread), receipt = receiptService.list()[0]!
   const { id: _id, workspaceId: _workspaceId, generation: _generation, retainedRefs: _refs, createdAt: _createdAt, ...input } = receipt
-  expect(receiptService.record(f.repo, input)).toEqual(receipt)
+  await expect(receiptService.record(f.repo, input)).resolves.toEqual(receipt)
   expect(retention.isReceiptExpired(receipt.id)).toBe(true)
 })
 
 it('bounds sweep batches without expiring one half of a compensation pair', async () => {
   const first = await action('first'), second = await action('second')
   await policy()
-  const undo = await new UndoService(f.thread).undoLatest('main', f.repo)
+  const undo = await pressed('Undo', () => new UndoService(f.thread).undoLatest('main', f.repo))
   await retention.configure(f.repo, { batchSize: 2 }, true)
   now = Date.now() + 20000
   expect((await retention.sweep(f.repo)).expired).toEqual([first.receiptId])
@@ -131,9 +132,11 @@ it('offers conversation-only continuation on current code after exact-code eligi
   const target = await action('historical')
   await action('current')
   await policy(); now += 30000; await retention.sweep(f.repo)
-  const current = git(f.repo, 'rev-parse', 'HEAD')
+  const head = git(f.repo, 'rev-parse', 'HEAD')
   const branch = await new ConversationBranchService(f.thread).fork(f.repo, 'main', target.id, 'Current-code conversation', undefined, 'current')
-  expect(git(f.repo, 'rev-parse', branch.retainedRef)).toBe(current)
+  // The current code is a snapshot of the files as they are now, taken on top of HEAD, kept under the branch's ref.
+  expect(git(f.repo, 'rev-parse', `${branch.retainedRef}^`)).toBe(head)
+  expect(git(f.repo, 'show', `${branch.retainedRef}:value.txt`)).toBe('current')
   expect(branch.contextBoundary).toEqual(target.nativeContextBoundary)
 })
 

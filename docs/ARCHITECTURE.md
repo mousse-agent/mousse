@@ -1,12 +1,12 @@
 # Mousse Architecture
 
-Mousse is a **local multi-agent orchestrator**: a daemon-owned MMS (Mousse Main Service) executes agents, queues, scheduler, and channels; GUI and CLI are thin local clients over a framed duplex protocol. The local client protocol is **local-only** (Unix domain socket / Windows named pipe) with no HTTP listener. A separate remote-control path (Control Protocol 2.0: device pairing, Noise-encrypted relay sessions, per-device scopes; `src/mms/control/`) ships and is composed per profile.
+Mousse is a **local multi-agent orchestrator**: a daemon-owned MMS (Mousse Main Service) executes agents, queues, and the scheduler; GUI and CLI are thin local clients over a framed duplex protocol. The local client protocol is **local-only** (Unix domain socket / Windows named pipe) with no HTTP listener. A separate remote-control path (Control Protocol 2.0: device pairing, Noise-encrypted relay sessions, per-device scopes; `src/mms/control/`) ships and is composed per profile.
 
 ## Agent platform and profile ownership
 
-One installation daemon hosts profile-owned service graphs. Threads, projects, Mousse ID/control accounts, schedules, channels, integrations, Agent definitions, workflow revisions/runs, browser storage, and preferences belong to a profile. Provider credentials and the model catalog remain installation-wide. GUI/CLI connections bind to a profile before personal operations; switching a window does not stop other profiles' background work. Archive/removal drains owned work before moving data and retains failed owners for retry.
+One installation daemon hosts profile-owned service graphs. Threads, projects, Mousse ID/control accounts, schedules, integrations, Agent definitions, workflow revisions/runs, browser storage, and preferences belong to a profile. Provider credentials and the model catalog remain installation-wide. GUI/CLI connections bind to a profile before personal operations; switching a window does not stop other profiles' background work. Archive/removal drains owned work before moving data and retains failed owners for retry.
 
-Published workflows compile into durable executions shared by canvas, chat slash commands, CLI, channels, and schedules. Admission pins revisions and policy; approvals, input waits, child execution, and uncertain effects survive recovery. Agent/Instruction, scripts, project tools, MCP, Skills, and browser nodes use the profile's real runtime adapters.
+Published workflows compile into durable executions shared by canvas, chat slash commands, CLI, and schedules. Admission pins revisions and policy; approvals, input waits, child execution, and uncertain effects survive recovery. Agent/Instruction, scripts, project tools, MCP, Skills, and browser nodes use the profile's real runtime adapters.
 
 Browser automation in the GUI controls the selected existing Electron guest through the owning GUI connection. CLI/background work uses the managed browser worker. A missing attached tab never silently becomes another browser. See the [detailed architecture](agents-workflows-profiles-browser-architecture.md), [usage/support guide](implementation/agent-platform/usage-and-support.md), and [verified delivery status](implementation/agent-platform/status.md).
 
@@ -25,7 +25,7 @@ Browser automation in the GUI controls the selected existing Electron guest thro
              ┌──────────────────────────────────┐
              │  MMS daemon (`service run`)      │
              │  Sole owner of MousseMainService │
-             │  Scheduler · Channels · PTY      │
+             │  Scheduler · PTY                 │
              │  Orchestrator · ThreadRuntime    │
              │  Settings · ProviderAuth · MCP   │
              └──────────────────────────────────┘
@@ -40,20 +40,20 @@ Browser automation in the GUI controls the selected existing Electron guest thro
 | Normal CLI commands | **Never** | Client; may autostart daemon |
 | Tests | May create service with `ownerKind: 'test'` | Isolated fixtures |
 
-Production `src/main/**` never constructs or owns MMS. GUI quit disconnects the client only; the daemon keeps scheduler/channels running.
+Production `src/main/**` never constructs or owns MMS. GUI quit disconnects the client only; the daemon keeps the scheduler running.
 
 ## Process lifecycle
 
 1. **Daemon start:** `mousse-cli service run` (or GUI/CLI autostart) acquires owner lease, starts MMS, binds local endpoint, publishes runtime readiness.
 2. **Clients connect:** Hello with owner token → allowlisted methods → `events.subscribe` for sequenced events.
 3. **GUI quit / CLI exit:** Client disconnect; no stop of daemon.
-4. **Daemon stop:** `service stop` prefers `daemon.shutdown` (authenticated), falls back to owner-token stop file. Order: stop protocol intake → close server → stop scheduler/channels/MCP → remove runtime record → release owner lease.
+4. **Daemon stop:** `service stop` prefers `daemon.shutdown` (authenticated), falls back to owner-token stop file. Order: stop protocol intake → close server → stop scheduler/MCP → remove runtime record → release owner lease.
 
 ## Protocol
 
 - **Transport:** framed duplex on local socket/pipe (`src/mms/protocol/`).
 - **Auth:** owner token from lease file; never exposed to renderer or protocol events/health payloads.
-- **Methods:** allowlisted in `PROTOCOL_METHODS`; every nested mutable payload is runtime-validated (schedules, channel config, settings partials, PTY env/dims, MCP/skills scope). Unknown keys, prototype pollution, and oversized values are rejected.
+- **Methods:** allowlisted in `PROTOCOL_METHODS`; every nested mutable payload is runtime-validated (schedules, settings partials, PTY env/dims, MCP/skills scope). Unknown keys, prototype pollution, and oversized values are rejected.
 - **Events:** per-profile sequenced rings (plus a legacy global ring); clients resubscribe after gaps; `requiresResnapshot` forces authoritative thread snapshots.
 
 ## GUI architecture (`src/main/`)
@@ -79,11 +79,11 @@ Production `src/main/**` never constructs or owns MMS. GUI quit disconnects the 
 | Message queue | `queue.json` + queue mutation lock only | Never written by `saveThreadData` / `mutateThreadData` |
 | Pending user questions | Process memory | **Do not survive daemon restart**; marked interrupted, not answerable |
 | Non-reattachable agents/PTYs | Startup restore | Marked `interrupted` |
-| Scheduled jobs / channels | Daemon services | Continue with zero clients |
+| Scheduled jobs | Daemon services | Continue with zero clients |
 
 ## CLI
 
-- **Client commands:** `chat`, `config`, `schedule`, `channels`, `agents` → `openMms()` → `LocalMmsClient`.
+- **Client commands:** `chat`, `config`, `schedule`, `agents` → `openMms()` → `LocalMmsClient`.
 - **Interactive chat:** protocol-only readline loop (`/stop`, `/steer`, `/threads`, `/exit`, event stream).
 - **Owner:** only `cli/daemonOwner.ts` used by `service run`.
 

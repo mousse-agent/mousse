@@ -13,10 +13,13 @@ import { mkdtemp, writeFile, rm, realpath, access } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { WorktreeManager } from '../../../src/mms/worktree/WorktreeManager'
+import { ownedHome } from '../../support/fixtureGit'
 
 const roots: string[] = []
+const owned: Array<() => void> = []
 afterEach(async () => {
   vi.unstubAllEnvs()
+  for (const undo of owned.splice(0)) undo()
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })))
 })
 
@@ -45,6 +48,8 @@ async function fixture() {
     `#!/bin/sh\nprintf executed > '${marker}'\n`,
     { mode: 0o700 }
   )
+  // The installation home is Mousse's, as the real one (the Mousse home) is.
+  owned.push(ownedHome(join(root, 'owned-installation')))
   return { root, git, marker, manager: new WorktreeManager(root, join(root, 'owned-installation')) }
 }
 it('suppresses a real installed checkout hook while creating a usable isolated worktree', async () => {
@@ -106,6 +111,7 @@ function filterFixture(processFilter: boolean) {
     program = join(root, 'filter.cjs')
   mkdirSync(repo)
   mkdirSync(home)
+  owned.push(ownedHome(home))
   const plain = {
     ...process.env,
     GIT_CONFIG_GLOBAL: join(root, 'empty'),

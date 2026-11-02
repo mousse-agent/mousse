@@ -176,6 +176,11 @@ export interface InstanceSnapshot {
   config?: InstanceConfigView
   models: {
     entries: InstanceModel[]
+    /**
+     * Names listings gave models the instance does not list now (an empty Codex list, a removed
+     * model), by model id, so a selection that names one still reads by name.
+     */
+    names?: Record<string, string>
     source: 'live' | 'cached' | 'manifest' | 'none'
     /** The runtime runs a model by id, so the editor offers adding custom models. */
     canAddCustom?: boolean

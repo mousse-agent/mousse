@@ -19,10 +19,7 @@ import { ROUTED_SNAPSHOT_MESSAGE_BYTES } from '../../../shared/bridge/routed'
 import type { RemoteBackendPort, RemoteChatExtras } from './RemoteApi'
 import { mmsJson } from './jsonOutput'
 import type { BridgeOrdinaryMethod } from './capabilities'
-import {
-  CHANNEL_COMMAND_REGISTRY,
-  COMPOSER_DESKTOP_COMMANDS
-} from '../../../shared/channelCommands'
+import { COMPOSER_COMMANDS } from '../../../shared/composerCommands'
 import { resolveThreadProjectPath } from '../../data/resolveActiveProjectPath'
 import type { OrchestratorSendRequest, QueuedMessage } from '../../../shared/types'
 import { defaultIntegrationActor } from '../../../shared/integrations/actor'
@@ -302,7 +299,7 @@ export class MmsRemoteBackend implements RemoteBackendPort {
       case 'composer.options':
         return this.composerOptions(params.threadId as string | undefined, caller)
       case 'threads.setModel': {
-        const model = params.model as { instanceId?: string; llmProvider?: string; model: string }
+        const model = params.model as { instanceId?: string; llmProvider?: string; model: string; effort?: string }
         try {
           // Unknown or disabled instances are refused before anything is stored.
           const override = s.providerInstances.overrideFor(model)
@@ -380,24 +377,25 @@ export class MmsRemoteBackend implements RemoteBackendPort {
     const projectPath = threadId
       ? resolveThreadProjectPath(s.projects, s.threads, threadId)
       : undefined
-    let skills: Array<{ id: string; name: string; description: string }> = []
-    try {
-      skills = (await this.effectiveSkills(projectPath)).map((skill) => ({
-        id: skill.id,
-        name: skill.name,
-        description: skill.description
-      }))
-    } catch {
-      // Skills are optional in the composer; models still load.
-    }
+    // Read together: skills are optional and must not hold back the models.
+    const [skills, providers] = await Promise.all([
+      this.effectiveSkills(projectPath).then(
+        (found) => found.map((skill) => ({ id: skill.id, name: skill.name, description: skill.description })),
+        // Skills are optional in the composer; models still load.
+        () => [] as Array<{ id: string; name: string; description: string }>
+      ),
+      s.harness?.llmProviders({ kind: 'device' })
+    ])
     const provider = settings.provider
     return {
-      providers: (await s.harness?.llmProviders({ kind: 'device' })) ?? [],
+      providers: providers ?? [],
       defaultModel: provider?.model
         ? {
             ...(provider.instanceId ? { instanceId: provider.instanceId } : {}),
             llmProvider: provider.llmProvider,
-            model: provider.model
+            model: provider.model,
+            ...(provider.effort ? { effort: provider.effort } : {}),
+            ...(provider.name ? { name: provider.name } : {})
           }
         : null,
       modes: REMOTE_CHAT_MODES,
@@ -408,7 +406,7 @@ export class MmsRemoteBackend implements RemoteBackendPort {
         ...(caller && this.deviceLimit ? { limit: this.deviceLimit(caller.node) } : {})
       },
       skills,
-      commands: [...CHANNEL_COMMAND_REGISTRY, ...COMPOSER_DESKTOP_COMMANDS].map((command) => ({
+      commands: COMPOSER_COMMANDS.map((command) => ({
         name: command.name,
         description: command.description,
         ...(command.aliases ? { aliases: command.aliases } : {}),
@@ -486,7 +484,6 @@ export class MmsRemoteBackend implements RemoteBackendPort {
     return (
       o.isTurnActive(threadId) ||
       o.isActiveTurnRunning(threadId) ||
-      o.isChannelTurnActive(threadId) ||
       engine.getActiveRun(threadId) !== null ||
       engine.store.listQueuedRuns(threadId).some((run) => engine.outbox.listForRun(run.runId).some((effect) => effect.kind === 'turn.start' && effect.status === 'running'))
     )
@@ -518,7 +515,7 @@ export class MmsRemoteBackend implements RemoteBackendPort {
     }
     // Existing MMS takes an owned cross-process lease and binds this exact signal to executeTurn.
     return mmsJson(
-      await this.services.orchestrator.runChannelTurn(threadId, content, this.services.threads, {
+      await this.services.orchestrator.runRemoteTurn(threadId, content, this.services.threads, {
         signal: control.signal,
         drainSteer: control.drainSteer,
         onUserInputAccepted: control.onAccepted,

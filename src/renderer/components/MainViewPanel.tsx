@@ -14,7 +14,7 @@ import { ComputerSurfaceNote } from './ComputerSurfaceNote'
 export function MainViewPanel() {
   const mainView = useAppStore((s) => s.mainView)
   const mainAreaOpen = useAppStore((s) => s.mainAreaOpen)
-  const overlayOpen = useAppStore((s) => s.settingsOpen || s.scheduledOpen || s.channelsOpen)
+  const overlayOpen = useAppStore((s) => s.settingsOpen || s.scheduledOpen)
   const activeThreadId = useAppStore((s) => s.activeThreadId)
   const opened = useAppStore((s) => s.openedSurfaceKinds)
   const terminals = useAppStore((s) => s.projectTerminalTabs)

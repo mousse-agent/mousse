@@ -107,6 +107,24 @@ describe('the Projects view with a project on several computers', () => {
     expect(html).not.toContain('mousse-on-studio')
     expect(html).toContain('computer-badge-name">Studio<')
   })
+
+  it('tints each thread card in the Threads view by its project group, and leaves a standalone thread untinted', () => {
+    const standalone = thread('t3', 'Standalone thread')
+    setStores({ projects, threads: [...threads, thread('t2', 'Notes thread', { projectId: 'p2' }), standalone], threadsSidebarView: 'threads' })
+    const html = render()
+    const tintOf = (id: string) => {
+      const button = html.match(new RegExp(`<button[^>]*data-thread-id="${id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}"[^>]*>`))?.[0] ?? ''
+      return button.includes('project-tinted') ? button.match(/--project-tint:([^;"]+)/)?.[1] : undefined
+    }
+    expect(tintOf('t1')).toMatch(/^var\(--hue-[1-6]\)$/)
+    // A project on another computer is the same group, so the same color.
+    expect(tintOf(`${B}:r1`)).toBe(tintOf('t1'))
+    expect(tintOf('t2')).toMatch(/^var\(--hue-[1-6]\)$/)
+    expect(tintOf('t2')).not.toBe(tintOf('t1'))
+    expect(tintOf('t3')).toBeUndefined()
+    // Only the Threads view's cards are tinted: the Projects view's rows are rendered too, without it.
+    expect(html.match(/project-tinted/g)?.length).toBe(3)
+  })
 })
 
 describe('the menu of a project group', () => {

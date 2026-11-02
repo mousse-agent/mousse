@@ -360,7 +360,7 @@ describe('subagent status model (plan §3.3)', () => {
       ['wake', false],
       ['provider-continuation', false],
       ['gui', true],
-      ['channel', true],
+      ['remote', true],
       ['delegation', true]
     ])('a live %s run on the child: continued is %s', async (source, expected) => {
       const { child } = await started()

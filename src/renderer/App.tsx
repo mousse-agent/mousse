@@ -12,7 +12,6 @@ import { KeepMounted } from './components/KeepMounted'
 import { ThreadsSidebar } from './components/ThreadsSidebar'
 import { SlidingThreadsPane } from './components/SlidingThreadsPane'
 import { ScheduledPage } from './components/ScheduledPage'
-import { ChannelsPage } from './components/ChannelsPage'
 import { NavigationRail } from './components/NavigationRail'
 import { ThreadSideCard } from './components/sideCard/ThreadSideCard'
 import { QuickActionEditorHost } from './components/QuickActionEditor'
@@ -26,6 +25,7 @@ import { CommandPalette } from './components/CommandPalette'
 import { openSurface } from './lib/surfaces'
 import { isSessionClosing } from './lib/errorText'
 import { useAppStore } from './stores/appStore'
+import { normalizeRunSettings } from '../shared/settings'
 import { useAppCommands } from './commands/useAppCommands'
 import { useCommandShortcuts } from './commands/useCommandShortcuts'
 
@@ -62,7 +62,7 @@ export default function App() {
   const profileId = useAppStore((s) => s.profileId)
   const profileReady = useAppStore((s) => s.profileReady)
   const overlayOpen = useAppStore((s) => s.settingsOpen)
-  const railPageOpen = useAppStore((s) => s.scheduledOpen || s.channelsOpen)
+  const railPageOpen = useAppStore((s) => s.scheduledOpen)
   const workspaceReady = useAppStore((s) => s.workspaceReady)
   const sidebarMode = useAppStore((s) => s.sidebarMode)
   const threadsSidebarView = useAppStore((s) => s.threadsSidebarView)
@@ -255,7 +255,7 @@ export default function App() {
         }
       }
     }
-    window.mousse.app.getInfo().then((info) => {
+    void window.mousse.app.getInfo().then((info) => {
       if (!isCurrentProfile()) return
       setAppInfo(info)
       const root = document.documentElement
@@ -265,9 +265,12 @@ export default function App() {
 
 
 
-    // The bound profile's shortcut overrides; later changes arrive through settings.onChanged below.
-    window.mousse.settings.get().then(applyIfCurrent((settings) => setShortcuts(settings.shortcuts ?? {}))).catch(() => {})
-    window.mousse.threads.getActivity().then(applyIfCurrent(setThreadActivity))
+    // The bound profile's shortcut overrides and new-chat worktree default; later changes arrive through settings.onChanged below.
+    window.mousse.settings.get().then(applyIfCurrent((settings) => {
+      setShortcuts(settings.shortcuts ?? {})
+      useAppStore.getState().setWorktreeByDefault(normalizeRunSettings(settings.runs).worktreeByDefault)
+    })).catch(() => {})
+    void window.mousse.threads.getActivity().then(applyIfCurrent(setThreadActivity))
     window.mousse.turn.getSnapshot().then(applyIfCurrent(setTurnSnapshot)).catch(() => {})
 
     const isSelectedThread = (threadId: string): boolean => {
@@ -319,9 +322,6 @@ export default function App() {
       window.mousse.tasks.onUpdated(applyIfCurrent(setTasks)),
       window.mousse.projects.onUpdated(applyIfCurrent(setProjects)),
       window.mousse.threads.onUpdated(applyThreadList),
-      // Channel activity is emitted for Telegram/Discord/webhook messages. Reconcile
-      // immediately as an additional guard around channel-session thread creation.
-      window.mousse.channels.onActivity(() => void refreshThreads()),
       // Sidebar already calls switchToThread optimistically; this covers createAndSelect
       // and other main-driven selection without showing the previous transcript.
       window.mousse.threads.onSelected(applyIfCurrent(({ id }) => switchToThread(id))),
@@ -332,6 +332,7 @@ export default function App() {
         const llmProvider = settings?.provider?.llmProvider ?? ''
         if (info && info.llmProvider !== llmProvider) setAppInfo({ ...info, llmProvider })
         setShortcuts(settings?.shortcuts ?? {})
+        useAppStore.getState().setWorktreeByDefault(normalizeRunSettings(settings?.runs).worktreeByDefault)
       })),
       window.mousse.turn.onTurnState(applyIfCurrent(setTurnState)),
       window.mousse.turn.onTurnSnapshot(applyIfCurrent(setTurnSnapshot)),
@@ -506,10 +507,7 @@ export default function App() {
           onMouseLeave={!threadsSidebarOpen ? scheduleThreadsPeekClose : undefined}
         />
 
-        {profileReady && <>
-          <ScheduledPage />
-          <ChannelsPage />
-        </>}
+        {profileReady && <ScheduledPage />}
         <div className="app-workspace" style={{ display: railPageOpen ? 'none' : 'flex', flex: 1, minWidth: 0, minHeight: 0 }}>
         {!profileReady && <WorkspaceLoading
           error={bootstrapError}

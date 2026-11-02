@@ -146,10 +146,13 @@ export class NetIdentityService implements IdentityService {
       this.deleteRetiredRoot()
   }
 
-  /** Explicit initialization seam; KeyStore initialization can safely precede its first roster. */
-  async bootstrapAuthority(name: string): Promise<Signed> {
+  /**
+   * Explicit initialization seam; KeyStore initialization can safely precede its first roster. A
+   * `passphrase` protects newly created keys instead of the OS vault.
+   */
+  async bootstrapAuthority(name: string, passphrase?: string): Promise<Signed> {
     if (this.load().self) throw new NetError('conflict', 'Local identity already exists.')
-    if (this.keys.state() === 'missing') await this.keys.initialize({ asAuthority: true })
+    if (this.keys.state() === 'missing') await this.keys.initialize({ asAuthority: true, passphrase })
     const root = this.keys.rootKey()
     if (!root) throw new NetError('forbidden', 'Initialization requires an authority root key.')
     const self = { user: newId('user'), node: newId('node') }

@@ -101,14 +101,13 @@ describe('public inventory and request identity', () => {
       const owner = f.services.orchestrator as unknown as {
         getOrCreateSession(threadId: string): { workspace: { workspacePath: string } | null; agents: { create(input: Omit<Agent, 'id' | 'createdAt' | 'updatedAt'>, id?: string): Agent } }
         withTaskWriter<T>(session: unknown, work: () => Promise<T>): Promise<T>
-        snapshotOwnedParent(session: unknown, label: string): Promise<string>
-        worktrees: { createSelectiveWorktree(id: string, files: string[], repositoryPath: string, base: string): Promise<{ path: string; branch: string }> }
+        worktrees: { createWorktree(id: string, repositoryPath: string, base: string): Promise<{ path: string; branch: string }> }
       }
       const session = owner.getOrCreateSession(thread.id)
       const childIdentity = randomUUID()
       const created = await owner.withTaskWriter(session, async () => {
-        const base = await owner.snapshotOwnedParent(session, 'child-base')
-        return owner.worktrees.createSelectiveWorktree(childIdentity, ['PRIMARY.txt'], session.workspace!.workspacePath, base)
+        const base = git(session.workspace!.workspacePath, 'rev-parse', 'HEAD')
+        return owner.worktrees.createWorktree(childIdentity, session.workspace!.workspacePath, base)
       })
       session.agents.create({ cliType: 'mousse', worktreePath: created.path, branch: created.branch, repositoryRoot: session.workspace!.workspacePath,
         executionMode: 'gui', status: 'running', task: 'Inspect PRIMARY.txt and retain your result.' } as Omit<Agent, 'id' | 'createdAt' | 'updatedAt'>, childIdentity)
@@ -197,7 +196,9 @@ describe('public inventory and request identity', () => {
       expect(existsSync(parentWorkspace.worktreePath)).toBe(false)
       const retirement = new WorktreeRetirementService(f.services.threads.lifecycleStore)
       const manifest = retirement.load(retirement.pathFor(thread.id, parentWorkspace.worktreePath))
-      expect(manifest.state).toBe('retired')
+      // The folder waits in the trash, still a registered checkout, until nothing in it has changed for an hour.
+      expect(manifest.state).toBe('trashed')
+      expect(existsSync(manifest.trashPath!)).toBe(true)
       expect(manifest.resultSha).toBe(parentWorkspace.headSha)
       expect(readFileSync(join(child.worktreePath, 'SOLE-COPY.bin'))).toEqual(Buffer.from([0, 255, 17]))
       await f.rpc.request('threads.restore', { threadId: thread.id })
