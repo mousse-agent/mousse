@@ -22,6 +22,7 @@ import { resolveRepositoryIdentityAsync } from './RepositoryIdentity'
 import { acquireRepositoryLease, RepositoryLeaseAbortedError } from './RepositoryLease'
 import { checkRepoPrograms, guardedSimpleGit, NO_DIFF_PROGRAMS, repoProgramEnv, SAFE_LOOKUP_ENV, withoutRepoProgramsAsync } from './repoPrograms'
 import { readWorkingTreeStatus, type StatusEntry } from './workingTreeStatus'
+import { waitForFolderAccess } from '../files/folderAccess'
 import { GitPolicyError, withUserRequest, type UserAction } from './gitPolicy'
 import type {
   GitBranchInfo,
@@ -401,12 +402,19 @@ export class GitService {
    * switch, push): the repository's hooks and programs run, as from a terminal. Every other command
    * here (status polling, diffs, the reads behind them) runs none of them.
    */
-  private runGit(cwd: string, args: readonly string[], options?: GitRunOptions & { userAction?: boolean }): Promise<GitRun> {
+  private async runGit(cwd: string, args: readonly string[], options?: GitRunOptions & { userAction?: boolean }): Promise<GitRun> {
     const { userAction, ...run } = options ?? {}
-    // Every change here is one the user asked for: the mutation that runs it passed their request in.
-    return withoutRepoProgramsAsync(cwd, args, { userAction, env: run.env }).then((guarded) =>
-      // Mousse's own commands take no optional lock, so a read never refreshes and rewrites the index.
-      runGit(cwd, guarded, userAction ? run : { ...run, env: { ...run.env, ...SAFE_LOOKUP_ENV, GIT_OPTIONAL_LOCKS: '0' } }))
+    let guarded: string[]
+    try {
+      // Every change here is one the user asked for: the mutation that runs it passed their request in.
+      guarded = await withoutRepoProgramsAsync(cwd, args, { userAction, env: run.env, signal: run.signal })
+    } catch (error) {
+      // Cancelled during the check before it: the answer `runGit` gives a run cancelled before it starts.
+      if (run.signal?.aborted && error === run.signal.reason) return { ok: false, code: null, stalled: false, cancelled: true, exited: true, stdout: '', output: '' }
+      throw error
+    }
+    // Mousse's own commands take no optional lock, so a read never refreshes and rewrites the index.
+    return runGit(cwd, guarded, userAction ? run : { ...run, env: { ...run.env, ...SAFE_LOOKUP_ENV, GIT_OPTIONAL_LOCKS: '0' } })
   }
 
   /**
@@ -513,6 +521,8 @@ export class GitService {
   }
 
   async isRepo(cwd: string): Promise<boolean> {
+    // The folder answers before anything looks at it.
+    await waitForFolderAccess([resolve(cwd)])
     if (!await pathExists(cwd)) return false
     // A repository whose programs Mousse cannot turn off is refused here, with its reason, before the reads below turn failures into defaults.
     await checkRepoPrograms(cwd)
@@ -705,6 +715,7 @@ export class GitService {
   private async withLease<T>(cwd: string, operation: () => Promise<T>, signal?: AbortSignal): Promise<T> {
     let identity: Awaited<ReturnType<typeof resolveRepositoryIdentityAsync>> | null = null
     try {
+      await waitForFolderAccess([resolve(cwd)])
       identity = await pathExists(cwd) ? await resolveRepositoryIdentityAsync(cwd) : null
     } catch {
       identity = null

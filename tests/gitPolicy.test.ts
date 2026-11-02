@@ -311,7 +311,8 @@ describe('round 3: private indexes in linked worktrees, update-ref options, simp
     expect(gitPolicyLog().at(-1)).toMatchObject({ kind: 'violation', command: 'git branch -d feature' })
     vi.stubEnv('MOUSSE_GIT_POLICY', 'refuse')
     git(outside, 'branch', 'feature')
-    expect(() => guardedSimpleGit(outside).branch(['-D', 'feature'])).toThrow(GitPolicyError)
+    // Refused before Git runs; the check reads without blocking, so the refusal rejects the call.
+    await expect(guardedSimpleGit(outside).branch(['-D', 'feature'])).rejects.toThrow(GitPolicyError)
     expect(git(outside, 'branch', '--list', 'feature')).toContain('feature')
     // A listing is still a read.
     await expect(guardedSimpleGit(outside).branchLocal()).resolves.toBeTruthy()

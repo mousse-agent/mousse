@@ -294,7 +294,26 @@ async function grepWithGit(
     if (!context.caseSensitive) args.push('-i')
     if (context.wholeWord) args.push('-w')
     args.push(mode === 'regex' ? '-E' : '-F', '-e', query, '--')
-    const argv = await withoutRepoProgramsAsync(root, args)
+    // The check before Git runs under the same cancellation and deadline as Git itself.
+    const preflight = new AbortController()
+    const onAbort = (): void => preflight.abort(abortError())
+    signal?.addEventListener('abort', onAbort, { once: true })
+    const deadlineTimer = setTimeout(() => preflight.abort(new Error('deadline')), wallClockRemaining(now, deadline))
+    let argv: string[]
+    try {
+      argv = await withoutRepoProgramsAsync(root, args, { signal: preflight.signal })
+    } catch (error) {
+      if (signal?.aborted) throw abortError()
+      // The deadline passed before Git could start: nothing was found in time.
+      if (preflight.signal.aborted) {
+        timedOut = true
+        return { failed: false, stderr: '' }
+      }
+      throw error
+    } finally {
+      clearTimeout(deadlineTimer)
+      signal?.removeEventListener('abort', onAbort)
+    }
 
     return new Promise<GitRunResult>((resolvePromise, reject) => {
       if (signal?.aborted) {

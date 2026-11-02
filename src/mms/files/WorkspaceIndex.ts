@@ -220,8 +220,9 @@ function hasSkippedSegment(segments: string[]): boolean {
 async function listWithGit(root: string, collector: IndexCollector, signal: AbortSignal | undefined): Promise<boolean> {
   let args: string[]
   try {
-    args = await withoutRepoProgramsAsync(root, ['ls-files', '-z', '--cached', '--others', '--exclude-standard', '--'])
+    args = await withoutRepoProgramsAsync(root, ['ls-files', '-z', '--cached', '--others', '--exclude-standard', '--'], { signal })
   } catch (error) {
+    if (signal?.aborted) throw abortError()
     if (error instanceof GitPolicyError) throw error
     return false
   }

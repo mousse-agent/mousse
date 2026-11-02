@@ -1,4 +1,5 @@
 import { existsSync, statSync } from 'node:fs'
+import { access, stat } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import { GIT_NULL_DEVICE } from './gitNullDevice'
 
@@ -84,6 +85,23 @@ export function isGitDirectory(path: string): boolean {
   } catch {
     return false
   }
+}
+
+/** {@link isGitDirectory} without blocking: the same checks, read with async calls. */
+export async function isGitDirectoryAsync(path: string): Promise<boolean> {
+  try {
+    // `existsSync`: anything there that can be reached, whatever it is.
+    if (await access(join(path, '.git')).then(() => true, () => false)) return false
+    const [head, objects, refs] = await Promise.all([stat(join(path, 'HEAD')), stat(join(path, 'objects')), stat(join(path, 'refs'))])
+    return head.isFile() && objects.isDirectory() && refs.isDirectory()
+  } catch {
+    return false
+  }
+}
+
+/** {@link gitDirectoryEnv} without blocking. */
+export async function gitDirectoryEnvAsync(cwd: string): Promise<Record<string, string>> {
+  return await isGitDirectoryAsync(cwd) ? { GIT_DIR: resolve(cwd) } : {}
 }
 
 /**

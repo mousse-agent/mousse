@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from 'node:fs'
 import { dirname, join, resolve, sep } from 'node:path'
 import type { RepositoryIdentity } from './RepositoryIdentity'
-import { assertGitAllowed, type UserAction } from './gitPolicy'
+import { assertGitAllowed, assertGitAllowedAsync, type GitCommandRequest, type UserAction } from './gitPolicy'
 import { GIT_NULL_DEVICE, NO_HOOKS_PATH } from './gitNullDevice'
 
 /**
@@ -186,7 +186,16 @@ export interface StoreCommandOptions {
  * as `GIT_WORK_TREE`, and the isolation. Throws a refusal; the command never runs without it.
  */
 export function checkStoreCommand(store: HiddenStore, cwd: string, args: readonly string[], options: StoreCommandOptions = {}, workTree = true): void {
-  assertGitAllowed({ cwd, args, env: { ...options.env, ...location(store, workTree), ...isolation() }, stdin: options.stdin, userRequested: options.userRequested, lockFree: true })
+  assertGitAllowed(storeCommandRequest(store, cwd, args, options, workTree))
+}
+
+/** {@link checkStoreCommand} without blocking (`assertGitAllowedAsync`). */
+export async function checkStoreCommandAsync(store: HiddenStore, cwd: string, args: readonly string[], options: StoreCommandOptions = {}, workTree = true): Promise<void> {
+  await assertGitAllowedAsync(storeCommandRequest(store, cwd, args, options, workTree))
+}
+
+function storeCommandRequest(store: HiddenStore, cwd: string, args: readonly string[], options: StoreCommandOptions, workTree: boolean): GitCommandRequest {
+  return { cwd, args, env: { ...options.env, ...location(store, workTree), ...isolation() }, stdin: options.stdin, userRequested: options.userRequested, lockFree: true }
 }
 
 

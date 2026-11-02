@@ -43,31 +43,40 @@ function trustPathFor(canonicalCommonDir: string): string {
 
 /** The record for `commonDir`, or null when there is none (or it cannot be read). */
 export function readRepoTrust(commonDir: string): RepoTrustRecord | null {
-  const path = repoTrustPath(commonDir)
+  return readRepoTrustAt(repoTrustPath(commonDir))
+}
+
+/** The record kept at `path` ({@link repoTrustPath}), or null when there is none (or it cannot be read). */
+export function readRepoTrustAt(path: string): RepoTrustRecord | null {
   if (!existsSync(path)) return null
   try {
-    const record = JSON.parse(readFileSync(path, 'utf8')) as RepoTrustRecord
-    return record && typeof record.filters === 'object' && record.filters ? record : null
+    return validRecord(JSON.parse(readFileSync(path, 'utf8')) as RepoTrustRecord)
   } catch {
     return null
   }
 }
 
+function validRecord(record: RepoTrustRecord): RepoTrustRecord | null {
+  return record && typeof record.filters === 'object' && record.filters ? record : null
+}
+
 /**
- * {@link readRepoTrust} without blocking, and where the record is kept: the common directory's real
- * path is read with an async call, as it can be on a volume that is slow to answer.
+ * {@link repoTrustPath} without blocking: the common directory's real path is read with an async call, as it
+ * can be on a volume that is slow to answer. `fs/promises` `realpath` has the semantics of `realpathSync.native`.
  */
-export async function readRepoTrustAsync(commonDir: string): Promise<{ path: string; record: RepoTrustRecord | null }> {
+export async function repoTrustPathAsync(commonDir: string): Promise<string> {
   let real = resolve(commonDir)
-  // `fs/promises` `realpath` has the semantics of `realpathSync.native`.
   try { real = await realpath(real) } catch { /* recorded as given */ }
-  const path = trustPathFor(process.platform === 'win32' ? real.toLowerCase() : real)
+  return trustPathFor(process.platform === 'win32' ? real.toLowerCase() : real)
+}
+
+/** {@link readRepoTrustAt} without blocking. */
+export async function readRepoTrustAtAsync(path: string): Promise<RepoTrustRecord | null> {
   try {
-    const record = JSON.parse(await readFile(path, 'utf8')) as RepoTrustRecord
-    return { path, record: record && typeof record.filters === 'object' && record.filters ? record : null }
+    return validRecord(JSON.parse(await readFile(path, 'utf8')) as RepoTrustRecord)
   } catch {
-    // Not there, or not readable: no record, as `readRepoTrust` says.
-    return { path, record: null }
+    // Not there, or not readable: no record, as `readRepoTrustAt` says.
+    return null
   }
 }
 

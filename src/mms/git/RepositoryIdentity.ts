@@ -1,11 +1,13 @@
 /** Stable repository identity derived from Git's canonical common directory. */
 import { createHash } from 'node:crypto'
-import { mkdirSync, realpathSync, writeFileSync, unlinkSync, readFileSync } from 'node:fs'
-import { mkdir, readFile, realpath, stat, unlink, writeFile } from 'node:fs/promises'
+import { mkdirSync, realpath as realpathCallback, realpathSync, readFileSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
+import { mkdir, readFile, stat, unlink, writeFile } from 'node:fs/promises'
+import { promisify } from 'node:util'
 import { homedir } from 'node:os'
 import { isAbsolute, join, resolve } from 'node:path'
 import { execFile, execFileSync } from 'node:child_process'
 import { repoProgramEnv, withoutRepoPrograms, withoutRepoProgramsAsync } from './repoPrograms'
+import { waitForFolderAccess } from '../files/folderAccess'
 
 export type RepositoryMutationCapability =
   | { allowed: true }
@@ -44,14 +46,12 @@ function git(cwd: string, ...args: string[]): string | null {
   } catch { return null }
 }
 function canonical(path: string): string { try { return realpathSync(path) } catch { return resolve(path) } }
-function writable(dir: string): boolean {
-  try {
-    mkdirSync(dir, { recursive: true })
-    const probe = join(dir, `.mousse-write-${process.pid}-${Date.now()}`)
-    writeFileSync(probe, '')
-    unlinkSync(probe)
-    return true
-  } catch { return false }
+
+/** `realpathSync` without blocking. Not `fs/promises`' `realpath`, which answers like `realpathSync.native` and can spell the same folder differently (Unicode normalization, Windows short names), so keys would differ. */
+const realpathLikeSync = promisify(realpathCallback)
+
+async function canonicalAsync(path: string): Promise<string> {
+  try { return await realpathLikeSync(path) } catch { return resolve(path) }
 }
 
 /** What a repository allows, from Git's answers; `head` is asked only when the rest allow a mutation. */
@@ -66,6 +66,129 @@ function keyOf(commonDir: string): string {
   return createHash('sha256').update(commonDir.toLowerCase()).digest('hex').slice(0, 32)
 }
 
+// ---------------------------------------------------------------------------------------------------------
+// The metadata folder
+
+/** How long the metadata folder chosen for a repository is reused before it is chosen again. */
+const METADATA_REUSE_MS = 60_000
+const METADATA_LIMIT = 256
+
+/**
+ * The metadata folder chosen for each repository (and fallback home), shared by the synchronous and the async
+ * call, so both always name the same folder and so the same lease file.
+ */
+const metadataFolders = new Map<string, { at: number; metadataDir: string }>()
+
+type MetadataStep =
+  | { kind: 'isDirectory'; path: string }
+  | { kind: 'writable'; dir: string }
+  | { kind: 'mkdir'; dir: string }
+  | { kind: 'read'; path: string }
+  | { kind: 'write'; path: string; content: string }
+
+/**
+ * The repository's metadata folder: its own `mousse` folder when it can be written, else one under
+ * `metadataHome`. Once chosen (created, and its location hint written) the choice is reused for
+ * {@link METADATA_REUSE_MS} while the folder is still there, so a status poll does not write to the repository
+ * each time. `movedFrom` is reported by the call that chose it. Run by both the synchronous and the async call.
+ */
+function* chooseMetadata(commonDir: string, key: string, metadataHome: string | undefined): Generator<MetadataStep, { metadataDir: string; movedFrom?: string }, unknown> {
+  const id = `${commonDir}\0${metadataHome ?? ''}`
+  const known = metadataFolders.get(id)
+  if (known && Date.now() - known.at < METADATA_REUSE_MS && (yield { kind: 'isDirectory', path: known.metadataDir })) return { metadataDir: known.metadataDir }
+  const localMetadata = join(commonDir, 'mousse')
+  const metadataDir = (yield { kind: 'writable', dir: localMetadata })
+    ? localMetadata
+    : join(metadataHome ?? join(homedir(), '.mousse', 'repositories'), key)
+  yield { kind: 'mkdir', dir: metadataDir }
+  const hintPath = join(metadataDir, 'repository-location.json')
+  let movedFrom: string | undefined
+  try {
+    const previous = JSON.parse((yield { kind: 'read', path: hintPath }) as string) as { commonDir?: string }
+    if (previous.commonDir && previous.commonDir !== commonDir) movedFrom = previous.commonDir
+  } catch { /* first use */ }
+  // A fallback directory is stable by common-dir hash; this hint provides diagnostics after a move.
+  yield { kind: 'write', path: hintPath, content: JSON.stringify({ commonDir, updatedAt: new Date().toISOString() }) + '\n' }
+  metadataFolders.delete(id)
+  if (metadataFolders.size >= METADATA_LIMIT) metadataFolders.delete(metadataFolders.keys().next().value!)
+  metadataFolders.set(id, { at: Date.now(), metadataDir })
+  return { metadataDir, movedFrom }
+}
+
+function writeProbe(dir: string): string {
+  return join(dir, `.mousse-write-${process.pid}-${Date.now()}`)
+}
+
+/** Answers a step at once. A failed `read` throws into the choice, as `readFileSync` did; a failed `mkdir` or `write` throws out of it. */
+function metadataStepSync(step: MetadataStep): unknown {
+  switch (step.kind) {
+    case 'isDirectory': try { return statSync(step.path).isDirectory() } catch { return false }
+    case 'writable':
+      try {
+        mkdirSync(step.dir, { recursive: true })
+        const probe = writeProbe(step.dir)
+        writeFileSync(probe, '')
+        unlinkSync(probe)
+        return true
+      } catch { return false }
+    case 'mkdir': return mkdirSync(step.dir, { recursive: true })
+    case 'read': return readFileSync(step.path, 'utf8')
+    case 'write': return writeFileSync(step.path, step.content)
+  }
+}
+
+async function metadataStepAsync(step: MetadataStep): Promise<unknown> {
+  switch (step.kind) {
+    case 'isDirectory': return stat(step.path).then((found) => found.isDirectory(), () => false)
+    case 'writable':
+      try {
+        await mkdir(step.dir, { recursive: true })
+        const probe = writeProbe(step.dir)
+        await writeFile(probe, '')
+        await unlink(probe)
+        return true
+      } catch { return false }
+    case 'mkdir': return mkdir(step.dir, { recursive: true })
+    case 'read': return readFile(step.path, 'utf8')
+    case 'write': return writeFile(step.path, step.content)
+  }
+}
+
+type MetadataChoice = Generator<MetadataStep, { metadataDir: string; movedFrom?: string }, unknown>
+
+function metadataFor(commonDir: string, key: string, metadataHome: string | undefined): { metadataDir: string; movedFrom?: string } {
+  const choice: MetadataChoice = chooseMetadata(commonDir, key, metadataHome)
+  let step = choice.next()
+  while (!step.done) {
+    let answer: unknown
+    try { answer = metadataStepSync(step.value) } catch (error) {
+      if (step.value.kind !== 'read') throw error
+      step = choice.throw(error)
+      continue
+    }
+    step = choice.next(answer)
+  }
+  return step.value
+}
+
+async function metadataForAsync(commonDir: string, key: string, metadataHome: string | undefined): Promise<{ metadataDir: string; movedFrom?: string }> {
+  const choice: MetadataChoice = chooseMetadata(commonDir, key, metadataHome)
+  let step = choice.next()
+  while (!step.done) {
+    let answer: unknown
+    try { answer = await metadataStepAsync(step.value) } catch (error) {
+      if (step.value.kind !== 'read') throw error
+      step = choice.throw(error)
+      continue
+    }
+    step = choice.next(answer)
+  }
+  return step.value
+}
+
+// ---------------------------------------------------------------------------------------------------------
+// The identity
+
 /** Resolve a stable identity. Git's common-dir intentionally makes linked worktrees share it. Code that can wait uses {@link resolveRepositoryIdentityAsync}. */
 export function resolveRepositoryIdentity(cwd: string, options: ResolveRepositoryIdentityOptions = {}): RepositoryIdentity {
   const worktreePath = canonical(cwd)
@@ -79,19 +202,7 @@ export function resolveRepositoryIdentity(cwd: string, options: ResolveRepositor
   const key = keyOf(commonDir)
   // Not a repository: the folder is the person's and no mutation lease is ever taken in it, so nothing is written there.
   if (!commonRaw) return { commonDir, key, worktreePath, metadataDir: '', capability }
-  const localMetadata = join(commonDir, 'mousse')
-  const metadataDir = writable(localMetadata)
-    ? localMetadata
-    : join(options.metadataHome ?? join(homedir(), '.mousse', 'repositories'), key)
-  mkdirSync(metadataDir, { recursive: true })
-  const hintPath = join(metadataDir, 'repository-location.json')
-  let movedFrom: string | undefined
-  try {
-    const previous = JSON.parse(readFileSync(hintPath, 'utf8')) as { commonDir?: string }
-    if (previous.commonDir && previous.commonDir !== commonDir) movedFrom = previous.commonDir
-  } catch { /* first use */ }
-  // A fallback directory is stable by common-dir hash; this hint provides diagnostics after a move.
-  writeFileSync(hintPath, JSON.stringify({ commonDir, updatedAt: new Date().toISOString() }) + '\n')
+  const { metadataDir, movedFrom } = metadataFor(commonDir, key, options.metadataHome)
   return { commonDir, key, worktreePath, metadataDir, capability, movedFrom }
 }
 
@@ -104,78 +215,14 @@ function gitAsync(cwd: string, ...args: string[]): Promise<string | null> {
   )
 }
 
-async function canonicalAsync(path: string): Promise<string> {
-  try { return await realpath(path) } catch { return resolve(path) }
-}
-
-async function writableAsync(dir: string): Promise<boolean> {
-  try {
-    await mkdir(dir, { recursive: true })
-    const probe = join(dir, `.mousse-write-${process.pid}-${Date.now()}`)
-    await writeFile(probe, '')
-    await unlink(probe)
-    return true
-  } catch { return false }
-}
-
-/** How long the metadata folder chosen for a repository is reused before it is checked again. */
-const METADATA_REUSE_MS = 60_000
-const METADATA_LIMIT = 256
-
-interface Metadata { at: number; metadataDir: string }
-
-/** The metadata folder chosen for each repository (and fallback home), with when it was chosen. */
-const metadataFolders = new Map<string, Metadata>()
-/** Choices being made, so callers at the same time share one. */
-const choosing = new Map<string, Promise<{ metadataDir: string; movedFrom?: string }>>()
-
 /**
- * The repository's metadata folder: its own `mousse` folder when it can be written, else one under
- * `metadataHome`. It is chosen, created and its location hint written as {@link resolveRepositoryIdentity}
- * does, then reused for {@link METADATA_REUSE_MS} while the folder is still there. `movedFrom` is only
- * reported by the call that chose it, as a second synchronous call would not report it either.
- */
-async function metadataFor(commonDir: string, key: string, metadataHome: string | undefined): Promise<{ metadataDir: string; movedFrom?: string }> {
-  const id = `${commonDir}\0${metadataHome ?? ''}`
-  const known = metadataFolders.get(id)
-  if (known && Date.now() - known.at < METADATA_REUSE_MS && await stat(known.metadataDir).then((found) => found.isDirectory(), () => false)) {
-    return { metadataDir: known.metadataDir }
-  }
-  const pending = choosing.get(id)
-  if (pending) return pending
-  const choice = (async () => {
-    const localMetadata = join(commonDir, 'mousse')
-    const metadataDir = await writableAsync(localMetadata)
-      ? localMetadata
-      : join(metadataHome ?? join(homedir(), '.mousse', 'repositories'), key)
-    await mkdir(metadataDir, { recursive: true })
-    const hintPath = join(metadataDir, 'repository-location.json')
-    let movedFrom: string | undefined
-    try {
-      const previous = JSON.parse(await readFile(hintPath, 'utf8')) as { commonDir?: string }
-      if (previous.commonDir && previous.commonDir !== commonDir) movedFrom = previous.commonDir
-    } catch { /* first use */ }
-    // A fallback directory is stable by common-dir hash; this hint provides diagnostics after a move.
-    await writeFile(hintPath, JSON.stringify({ commonDir, updatedAt: new Date().toISOString() }) + '\n')
-    if (metadataFolders.size >= METADATA_LIMIT) metadataFolders.delete(metadataFolders.keys().next().value!)
-    metadataFolders.set(id, { at: Date.now(), metadataDir })
-    return { metadataDir, movedFrom }
-  })()
-  choosing.set(id, choice)
-  try {
-    return await choice
-  } finally {
-    choosing.delete(id)
-  }
-}
-
-/**
- * {@link resolveRepositoryIdentity} without blocking the daemon: Git runs as a child process (after its
- * folder's volume answers) and the metadata folder is checked and written with async calls. The same
- * Git questions are asked on every call, so the capability is always current; only the metadata folder
- * is reused for a minute, so a status poll does not write to the repository each time.
+ * {@link resolveRepositoryIdentity} without blocking the daemon. It first waits until the folder's volume
+ * answers; then Git runs as a child process and the folder is read and written with async calls. It asks Git
+ * the same questions on every call, so the capability is always current, and it shares the metadata folder
+ * choice with the synchronous call, so both name the same lease file.
  */
 export async function resolveRepositoryIdentityAsync(cwd: string, options: ResolveRepositoryIdentityOptions = {}): Promise<RepositoryIdentity> {
+  await waitForFolderAccess([resolve(cwd)])
   const worktreePath = await canonicalAsync(cwd)
   const commonRaw = await gitAsync(worktreePath, 'rev-parse', '--git-common-dir')
   const bare = await gitAsync(worktreePath, 'rev-parse', '--is-bare-repository')
@@ -188,7 +235,7 @@ export async function resolveRepositoryIdentityAsync(cwd: string, options: Resol
   const key = keyOf(commonDir)
   // Not a repository: the folder is the person's and no mutation lease is ever taken in it, so nothing is written there.
   if (!commonRaw) return { commonDir, key, worktreePath, metadataDir: '', capability }
-  const { metadataDir, movedFrom } = await metadataFor(commonDir, key, options.metadataHome)
+  const { metadataDir, movedFrom } = await metadataForAsync(commonDir, key, options.metadataHome)
   return { commonDir, key, worktreePath, metadataDir, capability, movedFrom }
 }
 
