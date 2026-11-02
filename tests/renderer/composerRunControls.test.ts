@@ -63,6 +63,7 @@ const levels = () => [...column()!.querySelectorAll('[aria-label="Reasoning"] [r
 const level = (name: string) => [...column()!.querySelectorAll<HTMLButtonElement>('[aria-label="Reasoning"] [role="menuitemradio"]')].find((item) => item.textContent!.startsWith(name))!
 const checkedLevel = () => column()!.querySelector('[aria-label="Reasoning"] [aria-checked="true"]')!.textContent
 const note = () => column()!.querySelector('[role="note"]')?.textContent ?? null
+const speeds = () => [...column()!.querySelectorAll<HTMLElement>('[aria-label="Speed"] [role="menuitemradio"]')]
 const modes = () => [...column()!.querySelectorAll<HTMLElement>('.composer-run-menu-permission')]
 const line = () => column()!.querySelector('.composer-run-menu-permission-line')!.textContent
 const row = (name: string) => [...document.querySelectorAll<HTMLElement>('.model-picker-row')].find((entry) => entry.querySelector('.model-picker-row-title')!.textContent === name)!
@@ -163,13 +164,53 @@ describe('composer model picker', () => {
     expect(onModelSelect).toHaveBeenCalledWith('claude-subscription', 'opus:medium', undefined)
   })
 
-  it('shows Speed when the model has a fast mode', () => {
+  it('shows Speed as one line of segments when the model lists more than one speed', () => {
     const standard: LlmModelOption = { id: 'fast-model', label: 'Fast 1', efforts: ['low', 'high'], thinkingOff: false }
     const fast: LlmModelOption = { id: 'fast-model:fast', label: 'Fast 1 (fast)', efforts: ['low', 'high'], speed: 'fast', thinkingOff: false }
-    render({ models: [standard, fast], modelId: 'fast-model:high' })
+    const { onModelSelect } = render({ models: [standard, fast], modelId: 'fast-model:high' })
     expect(sections()).toEqual(['Reasoning', 'Speed', 'Permissions'])
     // No "Off" where the model cannot turn thinking off.
     expect(levels()).toEqual(['Low', 'High'])
+    const segments = speeds()
+    expect(segments.map((segment) => segment.textContent)).toEqual(['Standard', 'Fast'])
+    expect(segments.every((segment) => segment.parentElement === segments[0]!.parentElement)).toBe(true)
+    expect(segments.map((segment) => segment.getAttribute('aria-checked'))).toEqual(['true', 'false'])
+    expect(segments[0]!.classList.contains('selected')).toBe(true)
+    act(() => segments[1]!.click())
+    expect(onModelSelect).toHaveBeenCalledWith('claude-subscription', 'fast-model:fast:high', undefined)
+  })
+
+  it('adds a faster tier to the Speed line only when the model lists it', () => {
+    const standard: LlmModelOption = { id: 'gpt', label: 'GPT 9', efforts: ['low', 'high'], thinkingOff: false }
+    const fast: LlmModelOption = { id: 'gpt-fast', label: 'GPT 9 (fast)', efforts: ['low', 'high'], speed: 'fast', thinkingOff: false }
+    const ultra = { id: 'gpt-ultra', label: 'GPT 9', efforts: ['low', 'high'], speed: 'ultrafast', thinkingOff: false } as unknown as LlmModelOption
+    render({ models: [standard, fast, ultra], modelId: 'gpt-ultra:high' })
+    expect(speeds().map((segment) => segment.textContent)).toEqual(['Standard', 'Fast', 'Ultrafast'])
+    expect(modelButton().querySelector('.composer-model-btn-level')!.textContent).toBe('High Ultrafast')
+  })
+
+  it('moves between speeds with Left and Right, and back to the list from the first', () => {
+    const standard: LlmModelOption = { id: 'fast-model', label: 'Fast 1', efforts: ['low', 'high'], thinkingOff: false }
+    const fast: LlmModelOption = { id: 'fast-model:fast', label: 'Fast 1 (fast)', efforts: ['low', 'high'], speed: 'fast', thinkingOff: false }
+    render({ models: [standard, fast], modelId: 'fast-model:high' })
+    act(() => search().focus())
+    key(search(), 'ArrowRight')
+    expect(document.activeElement!.textContent).toBe('High')
+    // Down enters the Speed line on its chosen segment; Right and Left move inside it.
+    key(document.activeElement!, 'ArrowDown')
+    expect(document.activeElement!.textContent).toBe('Standard')
+    key(document.activeElement!, 'ArrowRight')
+    expect(document.activeElement!.textContent).toBe('Fast')
+    key(document.activeElement!, 'ArrowRight')
+    expect(document.activeElement!.textContent).toBe('Fast')
+    key(document.activeElement!, 'ArrowLeft')
+    expect(document.activeElement!.textContent).toBe('Standard')
+    // Down leaves the line as one stop.
+    key(document.activeElement!, 'ArrowDown')
+    expect(document.activeElement!.getAttribute('aria-label')).toBe('Auto-accept edits')
+    key(document.activeElement!, 'ArrowUp')
+    key(document.activeElement!, 'ArrowLeft')
+    expect(document.activeElement).toBe(search())
   })
 
   it('shows only the model list for a model with no run settings', async () => {

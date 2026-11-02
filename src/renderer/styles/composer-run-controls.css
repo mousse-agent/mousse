@@ -87,21 +87,24 @@
 
 .composer-mode-menu.composer-run-menu .composer-mode-menu-item.selected,
 .model-picker-run .composer-mode-menu-item.selected,
-.composer-run-menu-permission.selected {
+.composer-run-menu-permission.selected,
+.composer-run-menu-segment.selected {
   background: color-mix(in srgb, var(--text-primary) 11%, transparent);
   box-shadow: var(--ui-specular);
   color: var(--text-primary);
 }
 
 :is(.composer-run-menu, .model-picker-run) .composer-mode-menu-item:focus-visible,
-.composer-run-menu-permission:focus-visible {
+.composer-run-menu-permission:focus-visible,
+.composer-run-menu-segment:focus-visible {
   outline: none;
   box-shadow: var(--ui-focus-ring);
 }
 
 .composer-mode-menu.composer-run-menu .composer-mode-menu-item.selected:focus-visible,
 .model-picker-run .composer-mode-menu-item.selected:focus-visible,
-.composer-run-menu-permission.selected:focus-visible {
+.composer-run-menu-permission.selected:focus-visible,
+.composer-run-menu-segment.selected:focus-visible {
   box-shadow: var(--ui-specular), var(--ui-focus-ring);
 }
 
@@ -113,13 +116,16 @@
   color: var(--text-secondary);
 }
 
-.composer-run-menu-permission-row {
+/* One-line rows of choices: the permission modes (icons) and the speeds (text segments). */
+.composer-run-menu-permission-row,
+.composer-run-menu-segments {
   display: flex;
   gap: var(--ui-menu-pad);
   padding: 2px var(--ui-menu-pad) 0;
 }
 
-.composer-run-menu-permission {
+.composer-run-menu-permission,
+.composer-run-menu-segment {
   display: inline-flex;
   flex: 1 1 0;
   align-items: center;
@@ -130,7 +136,8 @@
   transition: background 0.12s, color 0.12s;
 }
 
-.composer-run-menu-permission:hover:not(.is-disabled) {
+.composer-run-menu-permission:hover:not(.is-disabled),
+.composer-run-menu-segment:hover:not(:disabled):not(.selected) {
   background: var(--ui-hover);
   color: var(--text-primary);
 }
@@ -154,4 +161,21 @@
   margin-right: 4px;
   font-weight: 500;
   color: var(--text-primary);
+}
+
+/* Speed: the heading and one line of segments, no description under it. */
+.composer-run-menu-segments {
+  padding-bottom: 2px;
+}
+
+.composer-run-menu-segment {
+  min-width: 0;
+  padding: 0 6px;
+  font-size: 12.5px;
+  white-space: nowrap;
+}
+
+.composer-run-menu-segment:disabled {
+  opacity: 0.55;
+  cursor: default;
 }

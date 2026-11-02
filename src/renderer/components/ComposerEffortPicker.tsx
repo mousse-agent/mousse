@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode, type RefObject } from 'react'
 import type { LlmModelOption } from '../../shared/settings'
-import { applyEffortToModelId, findModelFamily, formatEffortLabel, getModelFastToggle, parseModelVariant, parseThinkingSuffixFromModelId, reasoningLevelLabel, resolveModelVariant, resolveReasoning } from '../../shared/modelVariants'
+import { applyEffortToModelId, findModelFamily, formatEffortLabel, getModelSpeedOptions, parseModelVariant, parseThinkingSuffixFromModelId, reasoningLevelLabel, resolveModelVariant, resolveReasoning, speedLabel } from '../../shared/modelVariants'
 import { Brain, ChevronDown } from '../lib/icons'
 import { FloatingPortal, useFloatingPosition } from '../lib/floatingLayer'
 import { PermissionModeSection, permissionChoice, type PermissionControl } from './ComposerPermissionPicker'
@@ -36,17 +36,20 @@ export function shownReasoningLevel(selection: Selection): string | undefined {
   return reasoning.levels.length > 0 ? reasoning.current : undefined
 }
 
-/** The selected model's reasoning levels, speed toggle and how to pick each. */
+/** The selected model's reasoning levels, speeds and how to pick each. */
 function useRunOptions({ providerId, modelId, models }: Selection, onSelect: (providerId: string, modelId: string) => void) {
   const reasoning = resolveReasoning(providerId, modelId, models)
-  const fast = getModelFastToggle(providerId, modelId, models)
+  const speeds = getModelSpeedOptions(providerId, modelId, models)
   const effort = reasoning.current
   const pickEffort = (value: string) => onSelect(providerId, withReasoningLevel({ providerId, modelId, models }, value))
-  const pickSpeed = (enabled: boolean) => {
-    if (!fast || fast.active === enabled) return
-    onSelect(providerId, effort === 'off' ? `${parseThinkingSuffixFromModelId(fast.targetModelId).baseId}:off` : fast.targetModelId)
-  }
-  return { reasoning, fast, effort, pickEffort, pickSpeed }
+  const pickSpeed = (targetModelId: string) =>
+    onSelect(providerId, effort === 'off' ? `${parseThinkingSuffixFromModelId(targetModelId).baseId}:off` : targetModelId)
+  return { reasoning, speeds, effort, pickEffort, pickSpeed }
+}
+
+/** The speed after the level, when it is not the standard one ("Fast"). */
+function speedText(speeds: { current: string } | undefined): string {
+  return speeds && speeds.current !== 'standard' ? speedLabel(speeds.current) : ''
 }
 
 /** Closes the menu on a press outside it or Escape (focus back on the trigger). */
@@ -63,11 +66,13 @@ function useDismiss(open: boolean, setOpen: (open: boolean) => void, anchorRef: 
   }, [open, setOpen, anchorRef, contentRef])
 }
 
-const ROW = '.composer-run-menu-permission-row'
+/** A one-line row of choices (speeds, permission modes): one stop for Up and Down, Left and Right inside. */
+const ROW = '.composer-run-menu-permission-row, .composer-run-menu-segments'
 
 /**
- * Arrow keys across the run settings: Up and Down move between rows (the permission row is one stop,
- * entered on its chosen mode), Left and Right between the modes in the row, Home and End to the ends.
+ * Arrow keys across the run settings: Up and Down move between rows (a one-line row is one stop,
+ * entered on its chosen item), Left and Right between the items in the row, Home and End to the ends.
+ * Left from a row's first item is left to the caller (the model picker goes back to the list).
  * Enter and Space pick the focused item (they are buttons).
  */
 function moveFocus(event: ReactKeyboardEvent<HTMLElement>) {
@@ -88,7 +93,9 @@ function moveFocus(event: ReactKeyboardEvent<HTMLElement>) {
       if (!row) return
       const inRow = [...row.querySelectorAll<HTMLElement>('[role="menuitemradio"]')]
       const at = inRow.indexOf(active!)
-      focus(inRow[(at + (event.key === 'ArrowRight' ? 1 : -1) + inRow.length) % inRow.length])
+      if (event.key === 'ArrowLeft' && at === 0) return
+      if (event.key === 'ArrowRight' && at === inRow.length - 1) { event.preventDefault(); return }
+      focus(inRow[at + (event.key === 'ArrowRight' ? 1 : -1)])
       return
     }
     case 'ArrowDown':
@@ -113,7 +120,7 @@ function focusRunSettings(container: HTMLElement | null | undefined): boolean {
 }
 
 /**
- * How a turn runs: reasoning level, speed when the model has a fast mode, and the permission mode,
+ * How a turn runs: reasoning level, speed when the model lists more than one, and the permission mode,
  * each section only when the agent and model offer it. A level the model does not offer (saved, or
  * carried over from the model picked before) runs at the model's default, and a line says so.
  */
@@ -128,7 +135,7 @@ function runSections({ selection, onSelect, permission, readOnly, onClose, dropp
   /** The selection is the thread's: picking the level already chosen changes nothing. */
   current?: boolean
 }, run: ReturnType<typeof useRunOptions>): ReactNode[] {
-  const { reasoning, fast, effort, pickEffort, pickSpeed } = run
+  const { reasoning, speeds, effort, pickEffort, pickSpeed } = run
   const choice = permission ? permissionChoice(permission) : undefined
   const modelName = parseThinkingSuffixFromModelId(selection.modelId).baseId
   const model = selection.models.find((entry) => entry.id === selection.modelId || entry.id === modelName)
@@ -146,9 +153,15 @@ function runSections({ selection, onSelect, permission, readOnly, onClose, dropp
       {reasoningLevelLabel(unsupported)} isn't offered for {model ? parseModelVariant(model).familyLabel : 'this model'}; using {reasoning.defaultLevel ? 'its default' : reasoningLevelLabel(effort ?? '')}.
     </div>}
   </div>)
-  if (fast) sections.push(<div key="speed" className="composer-mode-menu-section" role="group" aria-label="Speed">
+  // Speed is one line of segments, one per speed the model lists (Standard | Fast, and any faster tier).
+  if (speeds) sections.push(<div key="speed" className="composer-mode-menu-section composer-run-menu-speed" role="group" aria-label="Speed">
     <div className="composer-mode-menu-heading">Speed</div>
-    {[false, true].map((enabled) => <button key={String(enabled)} type="button" role="menuitemradio" aria-checked={fast.active === enabled} disabled={readOnly} className={`composer-mode-menu-item${fast.active === enabled ? ' selected' : ''}`} onClick={() => { onClose(); if (current || fast.active !== enabled) pickSpeed(enabled); else onSelect(selection.providerId, selection.modelId) }}><span>{enabled ? 'Fast' : 'Standard'}</span></button>)}
+    <div className="composer-run-menu-segments">
+      {speeds.options.map((option) => {
+        const on = option.speed === speeds.current
+        return <button key={option.speed} type="button" role="menuitemradio" aria-checked={on} disabled={readOnly} className={`composer-run-menu-segment${on ? ' selected' : ''}`} onClick={() => { onClose(); if (!current || !on) pickSpeed(option.modelId) }}>{speedLabel(option.speed)}</button>
+      })}
+    </div>
   </div>)
   if (permission && choice) sections.push(<PermissionModeSection key="permissions" control={permission} choice={choice} onPicked={onClose} />)
   return sections.map((section, index) => index === 0 ? section : <div key={`group-${index}`} className="composer-mode-menu-group">{section}</div>)
@@ -184,14 +197,15 @@ export function ComposerEffortPicker({ providerId, modelId, models, readOnly, on
   const [open, setOpen] = useState(false)
   const anchorRef = useRef<HTMLButtonElement>(null)
   const contentRef = useRef<HTMLDivElement>(null)
-  const { reasoning, fast, effort } = useRunOptions({ providerId, modelId, models }, onSelect)
+  const { reasoning, speeds, effort } = useRunOptions({ providerId, modelId, models }, onSelect)
   const style = useFloatingPosition({ open, anchorRef, contentRef, placement: 'above-start', deps: [modelId] })
   useDismiss(open, setOpen, anchorRef, contentRef)
   const close = () => { setOpen(false); anchorRef.current?.focus() }
-  if (!reasoning.levels.length && !fast) return null
+  const speed = speedText(speeds)
+  if (!reasoning.levels.length && !speeds) return null
   return <div className="composer-effort-picker">
     <button ref={anchorRef} type="button" className={`composer-pill-btn${open ? ' open' : ''}`} disabled={readOnly} aria-label="Reasoning effort and speed" aria-haspopup="menu" aria-expanded={open} onClick={() => setOpen(!open)}>
-      <Brain size={14} aria-hidden="true" /><span>{effort ? formatEffortLabel(effort) : 'Effort'}{fast?.active ? ' · Fast' : ''}</span><ChevronDown size={12} />
+      <Brain size={14} aria-hidden="true" /><span>{effort ? formatEffortLabel(effort) : 'Effort'}{speed ? ` · ${speed}` : ''}</span><ChevronDown size={12} />
     </button>
     {open && !readOnly && <RunMenu selection={{ providerId, modelId, models }} onSelect={onSelect} readOnly={readOnly} contentRef={contentRef} style={style} onClose={close} />}
   </div>
@@ -200,9 +214,9 @@ export function ComposerEffortPicker({ providerId, modelId, models, readOnly, on
 /** The level as the composer shows it after the model name ("High", "High Fast"). */
 export function runLevelText(selection: Selection): string {
   const reasoning = resolveReasoning(selection.providerId, selection.modelId, selection.models)
-  const fast = getModelFastToggle(selection.providerId, selection.modelId, selection.models)
-  const effort = reasoning.levels.length > 0 || fast ? reasoning.current : undefined
-  return [effort && reasoningLevelLabel(effort), fast?.active && 'Fast'].filter(Boolean).join(' ')
+  const speeds = getModelSpeedOptions(selection.providerId, selection.modelId, selection.models)
+  const effort = reasoning.levels.length > 0 || speeds ? reasoning.current : undefined
+  return [effort && reasoningLevelLabel(effort), speedText(speeds)].filter(Boolean).join(' ')
 }
 
 /** The composer's run settings menu for an assigned model: its level shows, only the permission mode changes. */
@@ -228,8 +242,8 @@ export interface RunSettingsTarget extends Selection {
 /** How many rows a target's run settings take, to size the picker's column to the largest. */
 export function runSettingsRows(target: RunSettingsTarget, permission: boolean): number {
   const reasoning = resolveReasoning(target.providerId, target.modelId, target.models)
-  const fast = getModelFastToggle(target.providerId, target.modelId, target.models)
-  return (reasoning.levels.length > 0 ? reasoning.levels.length + 1 + (target.dropped || reasoning.unsupported ? 1 : 0) : 0) + (fast ? 3 : 0) + (permission ? 3 : 0)
+  const speeds = getModelSpeedOptions(target.providerId, target.modelId, target.models)
+  return (reasoning.levels.length > 0 ? reasoning.levels.length + 1 + (target.dropped || reasoning.unsupported ? 1 : 0) : 0) + (speeds ? 2 : 0) + (permission ? 3 : 0)
 }
 
 /**
