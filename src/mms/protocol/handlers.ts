@@ -3138,8 +3138,9 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         cancelledIntegrations = cancelPendingIntegrations(operation.threadDirectory, workspace.worktreePath)
         // A left merge that was finished, aborted or replaced since is no longer offered for Abort.
         clearStaleLeftMerges(operation.threadDirectory)
-        // A folder with no worktree has nothing to publish.
-        publish = operation.projectPath && !workspace.snapshotOnly ? await new PublishService(operation.threadDirectory).recoverPending(workspace.worktreePath, operation.projectPath) : []
+        // A folder with no worktree has nothing to publish, and neither has a thread in its project's own folder: its work
+        // is already there, so there is no Publish to recover, and the person's checkout is never treated as one's target.
+        publish = operation.projectPath && !workspace.snapshotOnly && !isProjectFolderWorkspace(workspace) ? await new PublishService(operation.threadDirectory).recoverPending(workspace.worktreePath, operation.projectPath) : []
         await new ThreadActionService(operation.threadDirectory).recoverPending(workspace.worktreePath)
         await new CodeRevertService(operation.threadDirectory).recoverPending(workspace.worktreePath)
         await new UndoService(operation.threadDirectory).recoverPending(workspace.worktreePath, (target, kind) => {

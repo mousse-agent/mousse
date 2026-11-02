@@ -7,6 +7,8 @@ import { ThreadWorkspaceManager } from '../src/mms/workspace/ThreadWorkspaceMana
 import { MousseMainService } from '../src/mms/MousseMainService'
 import { dispatchMethod } from '../src/mms/protocol/handlers'
 import { WorkspaceResolver } from '../src/mms/workspace/WorkspaceResolver'
+import { threadPlacement } from '../src/mms/workspace/threadPlacement'
+import { PublishService } from '../src/mms/actions/PublishService'
 import { describeRecovery, recoveryErrorText } from '../src/mms/workspace/workspaceRecovery'
 import { ManagedConflictService } from '../src/mms/actions/ManagedConflictService'
 import { tryGit } from '../src/mms/actions/git'
@@ -405,6 +407,58 @@ describe('through the daemon', () => {
         expect(entries).toEqual([])
       } finally {
         await d.mms.stop()
+      }
+    })
+
+    it('a thread in its project folder, whose turn was interrupted, shows the banner, and Try recovery and Abort run with no violation', async () => {
+      const home = join(f.root, 'mms-home'); mkdirSync(home)
+      const mms = await MousseMainService.create({ homeDir: home, headless: true, ownerKind: 'test' })
+      await mms.start()
+      try {
+        // A thread with its worktree off: its record is the project folder itself, read through `project-folder.json`.
+        const thread = mms.threads.createThread('Folder', mms.projects.openProject(f.repo).id, undefined, { worktreeEnabled: false })
+        const directory = mms.threads.getThreadDir(thread.id)
+        const call = (method: string, params: Record<string, unknown> = {}) => dispatchMethod({ mms, globalSequence: () => 0 }, method, { threadId: thread.id, ...params })
+        const recovery = async () => (await call('workspace.getStatus') as { recovery?: unknown }).recovery
+        const execution = await new WorkspaceResolver(directory, thread.id, f.repo, threadPlacement(thread)).resolve('agent')
+        expect(execution).toMatchObject({ placement: 'project-folder', workspacePath: realpathSync(f.repo) })
+        expect(existsSync(join(directory, 'project-folder.json'))).toBe(true)
+        expect(existsSync(join(directory, 'workspace.json'))).toBe(false)
+        await new ThreadActionService(directory).runCheckpointedAction({ ...actionOptions(f.repo, 'turn-1'), threadId: thread.id }, () => writeFileSync(join(f.repo, 'value.txt'), 'two\n'))
+        expect(await recovery()).toBeUndefined()
+
+        // Mousse stopped while it recorded the next turn: its intent is written, its snapshot is not.
+        const [previousAction] = new ThreadActionService(directory).list().slice(-1)
+        const interrupted = { ...structuredClone(previousAction!), id: randomUUID(), turnId: 'turn-2', startSha: previousAction!.endSha, state: 'running' as const, receiptId: undefined, completedAt: undefined }
+        writeFileSync(join(f.repo, 'value.txt'), 'three\n')
+        new ThreadJournal(directory).append({ operationId: interrupted.id, operationType: 'action-checkpoint', state: 'prepared', details: { action: interrupted, actionState: 'completed' } })
+        expect(await recovery()).toEqual({ kind: 'paused', reason: 'The action-checkpoint operation did not finish.', operationId: interrupted.id, operationType: 'action-checkpoint' })
+
+        // Try recovery retakes the snapshot in the project folder. It never looks for a Publish to recover: the thread's
+        // work is already in the folder.
+        const publishRecovery = vi.spyOn(PublishService.prototype, 'recoverPending')
+        await expect(call('operations.recover')).resolves.toEqual({ ok: true, settled: true })
+        expect(publishRecovery).not.toHaveBeenCalled()
+        expect(await recovery()).toBeUndefined()
+        expect(new ThreadJournal(directory).latestByOperation().get(interrupted.id)?.state).toBe('completed')
+        expect(readFileSync(join(f.repo, 'value.txt'), 'utf8')).toBe('three\n')
+
+        // A merge an older version left in the project folder: Abort keeps every file first, then aborts it, as the person asked.
+        const { before } = leftIntegration(directory, f.repo)
+        expect(await recovery()).toMatchObject({ kind: 'merge', folder: f.repo, operationId: 'old' })
+        const aborted = await call('operations.abort', { operationId: 'old' }) as { ok: boolean; preservedRef: string }
+        expect(aborted).toEqual({ ok: true, preservedRef: expect.stringMatching(/^refs\/mousse\/preserved\/old-abort-/) })
+        expect(git(f.repo, 'rev-parse', '--verify', aborted.preservedRef)).toMatch(/^[0-9a-f]{40}$/)
+        expect(mergeHead(f.repo).ok).toBe(false)
+        expect(git(f.repo, 'rev-parse', 'HEAD')).toBe(before)
+        expect(await recovery()).toBeUndefined()
+
+        expect(violations()).toEqual([])
+        // Nothing ran beyond what the methods declare either.
+        expect(entries).toEqual([])
+      } finally {
+        vi.restoreAllMocks()
+        await mms.stop()
       }
     })
 
