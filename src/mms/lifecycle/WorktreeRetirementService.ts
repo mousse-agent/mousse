@@ -15,7 +15,8 @@ import { PROCESS_INSTANCE_ID } from '../queue/processLiveness'
 import { AgentEpisodeStore } from '../agents/AgentEpisodeStore'
 import { WorktreeIdentity } from '../worktree/WorktreeIdentity'
 import { ThreadJournal } from '../data/ThreadJournal'
-import { getExternalResourceClaims } from './LifecycleClaims'
+import { getExternalResourceClaims, getExternalResourceClaimsFromFacts } from './LifecycleClaims'
+import { OwnershipFacts } from './ResourceInventory'
 import type { ConversationBranch, ThreadAction } from '../../shared/threadActions'
 import { gitDirectoryEnvAsync } from '../git/gitEnv'
 import { READ_ONLY_GIT_ENV } from '../git/readOnlyGit'
@@ -27,13 +28,21 @@ import { isIdNamedMousseBranch, isMousseBranchName } from '../../shared/mousseBr
 const hash = (value: string | Buffer): string => createHash('sha256').update(value).digest('hex')
 /** A retired worktree waits in the trash until nothing in it has changed for this long; then its files are snapshotted and it is deleted. */
 export const WORKTREE_TRASH_QUIET_MS = 60 * 60_000
+/** The record of a worktree in the trash changed or went (a permanent deletion) while it was being expired. */
+class TrashRecordChanged extends Error {
+  constructor() { super('Its record changed while it was being deleted; it is looked at again on the next run') }
+}
 /**
  * Git for lifecycle work, without blocking the daemon: it waits until the folder's volume answers, runs the central
  * check, and the command with a 30-second limit. A failure carries Git's `status`, `stdout` and `stderr`.
+ * `beforeStart` runs synchronously right before Git starts, after every wait: a check that must hold when a destructive
+ * command begins goes there, so nothing is awaited between it and the command.
  */
-export async function lifecycleGitAsync(cwd: string, args: string[], input?: string, maxBuffer = 32 * 1024 * 1024, env?: NodeJS.ProcessEnv): Promise<string> {
+export async function lifecycleGitAsync(cwd: string, args: string[], input?: string, maxBuffer = 32 * 1024 * 1024, env?: NodeJS.ProcessEnv, beforeStart?: () => void): Promise<string> {
   const argv = await withoutRepoProgramsAsync(cwd, args, { stdin: input, env })
-  const ran = await runGitProcess(argv, { cwd, input, env: repoProgramEnv({ ...process.env, ...await gitDirectoryEnvAsync(cwd), ...env }), timeout: 30_000, maxBuffer })
+  const runEnv = repoProgramEnv({ ...process.env, ...await gitDirectoryEnvAsync(cwd), ...env })
+  beforeStart?.()
+  const ran = await runGitProcess(argv, { cwd, input, env: runEnv, timeout: 30_000, maxBuffer })
   if (ran.error || ran.status !== 0) throw gitRunError(argv, ran)
   return ran.stdout.trimEnd()
 }
@@ -347,7 +356,15 @@ export class WorktreeRetirementService {
    * deleted later by `expireTrash`, after a snapshot of it, or right away when `purging` (a permanent deletion the
    * person confirmed). Owned branches whose tips the pins keep are deleted once no worktree has them checked out.
    */
-  async retire(manifestPath: string, options: { purging?: boolean } = {}): Promise<WorktreeReconstructionManifest> {
+  async retire(manifestPath: string, options: {
+    purging?: boolean
+    /**
+     * The caller's own checks, run synchronously right before the worktree moves (or, for a purge of one already in the
+     * trash, right before Git deletes it), after the ownership and claims checks and with nothing awaited in between. It
+     * refuses by throwing; nothing has moved then.
+     */
+    beforeMove?: () => void
+  } = {}): Promise<WorktreeReconstructionManifest> {
     const manifest = this.load(manifestPath)
     await this.checkOwnership(manifest.taskId, manifest.commonDir, manifest.repositoryId)
     await this.verifyPins(manifest)
@@ -355,27 +372,50 @@ export class WorktreeRetirementService {
     await this.settleTrashRegistration(manifest)
     if (!await exists(manifest.worktreePath)) {
       if (await this.registered(manifest)) throw new Error('Missing worktree remains registered; recovery is required')
-      // Permanent deletion: what waits in the trash goes too.
-      if (options.purging && manifest.trashPath && await exists(manifest.trashPath)) await this.removeTrashed(manifest)
+      // Permanent deletion: what waits in the trash goes too. Ownership is checked again right before Git deletes it.
+      if (options.purging && manifest.trashPath && await exists(manifest.trashPath)) {
+        const lease = await this.readRepositoryLease()
+        await this.removeTrashed(manifest, () => {
+          this.store.withGate(manifest.taskId, () => this.assertOwnership(manifest.taskId, manifest.commonDir, manifest.repositoryId, lease))
+          options.beforeMove?.()
+        })
+      }
       manifest.state = manifest.trashPath && await exists(manifest.trashPath) ? 'trashed' : 'retired'; save(); return manifest
     }
     this.store.withGate(manifest.taskId, () => this.verifySource(manifest, options.purging))
     const identity = await this.inspectIdentity(manifest.worktreePath, manifest.branch, manifest.repositoryId)
     if (JSON.stringify(identity.rootIdentity) !== JSON.stringify(manifest.rootIdentity) || identity.gitDirectory !== manifest.gitDirectory || identity.commonDir !== manifest.commonDir) throw new Error('Workspace directory was replaced')
-    const excluded = new Set([this.ownership?.cleanupTaskId ?? manifest.taskId])
-    if (this.ownership?.cleanupTaskId) {
-      const records = this.store.list()
-      for (let added = true; added;) { added = false; for (const record of records) if (record.parentTaskId && excluded.has(record.parentTaskId) && record.state !== 'trashed' && !excluded.has(record.taskId)) { excluded.add(record.taskId); added = true } }
+    const excludedNow = (): Set<string> => {
+      const excluded = new Set([this.ownership?.cleanupTaskId ?? manifest.taskId])
+      if (this.ownership?.cleanupTaskId) {
+        const records = this.store.list()
+        for (let added = true; added;) { added = false; for (const record of records) if (record.parentTaskId && excluded.has(record.parentTaskId) && record.state !== 'trashed' && !excluded.has(record.taskId)) { excluded.add(record.taskId); added = true } }
+      }
+      return excluded
     }
     const overlaps = (left: string, right: string) => { const rel = relative(resolve(left), resolve(right)); return !isAbsolute(rel) && rel !== '..' && !rel.startsWith(`..${process.platform === 'win32' ? '\\' : '/'}`) }
-    const shared = (await getExternalResourceClaims(this.store, excluded)).some((resource) => !(resource.peerProfileId === this.store.profileId && excluded.has(resource.ownerTaskId)) && isAbsolute(resource.identity) && (overlaps(resource.identity, manifest.worktreePath) || overlaps(manifest.worktreePath, resource.identity)))
-    if (shared) throw new Error('Another task or profile retains this checkout; retirement is blocked')
+    const shares = (claims: Awaited<ReturnType<typeof getExternalResourceClaims>>, excluded: Set<string>): boolean => claims.some((resource) => !(resource.peerProfileId === this.store.profileId && excluded.has(resource.ownerTaskId)) && isAbsolute(resource.identity) && (overlaps(resource.identity, manifest.worktreePath) || overlaps(manifest.worktreePath, resource.identity)))
+    const blocked = 'Another task or profile retains this checkout; retirement is blocked'
+    const excluded = excludedNow()
+    if (shares(await getExternalResourceClaims(this.store, excluded), excluded)) throw new Error(blocked)
     await this.verifyPins(manifest)
     const trashPath = this.trashPathFor(manifest)
     if (await exists(trashPath)) throw new Error(`An earlier copy of this worktree is still in the trash at ${trashPath}; it is kept`)
     await mkdir(dirname(trashPath), { recursive: true })
-    // Ownership is checked again right before the move.
-    await this.checkOwnership(manifest.taskId, manifest.commonDir, manifest.repositoryId)
+    // Right before the move, with nothing awaited between these checks and its start: the checkouts other records name
+    // are read again now, then the leases, the reservation, the source and every claim are checked from the records, and
+    // last the caller's own checks run. A claim on a checkout not read here fails closed.
+    const facts = new OwnershipFacts()
+    // Only the facts are wanted: a refusal is made again, from the records, by the check below.
+    await getExternalResourceClaims(this.store, excludedNow(), facts).catch(() => undefined)
+    const lease = await this.readRepositoryLease()
+    this.store.withGate(manifest.taskId, () => {
+      this.assertOwnership(manifest.taskId, manifest.commonDir, manifest.repositoryId, lease)
+      this.verifySource(manifest, options.purging)
+      const current = excludedNow()
+      if (shares(getExternalResourceClaimsFromFacts(this.store, current, facts), current)) throw new Error(blocked)
+    })
+    options.beforeMove?.()
     // The destination is fixed by the manifest, so a crash after the move finds the folder there.
     manifest.trashPath = trashPath; save()
     try { await renameFolderAsync(manifest.worktreePath, trashPath) }
@@ -397,17 +437,25 @@ export class WorktreeRetirementService {
    */
   async expireTrash(manifestPath: string, options: { now?: number; inUse?: (path: string) => string | undefined; /** Test seam: runs between the snapshot and the check before the delete. */ afterCapture?: (path: string) => void } = {}): Promise<{ removed: true } | { kept: string; waiting?: true } | undefined> {
     const manifest = this.load(manifestPath)
+    const record = { text: JSON.stringify(manifest) }
+    try { return await this.expireLoaded(manifestPath, manifest, record, options) }
+    catch (error) {
+      if (error instanceof TrashRecordChanged) return { kept: error.message, waiting: true }
+      throw error
+    }
+  }
+  private async expireLoaded(manifestPath: string, manifest: WorktreeReconstructionManifest, record: { text: string }, options: { now?: number; inUse?: (path: string) => string | undefined; afterCapture?: (path: string) => void }): Promise<{ removed: true } | { kept: string; waiting?: true } | undefined> {
     this.assertRepositoryLease(manifest.commonDir, manifest.repositoryId, await this.readRepositoryLease())
     // A move a crash interrupted before it was recorded: the folder is in the trash and starts waiting now.
     if (manifest.state === 'prepared' && manifest.trashPath && await exists(manifest.trashPath) && !await exists(manifest.worktreePath)) {
       await this.settleTrashRegistration(manifest)
-      manifest.state = 'trashed'; manifest.trashedAt = new Date(options.now ?? Date.now()).toISOString(); atomicWriteJsonSync(manifestPath, manifest)
+      manifest.state = 'trashed'; manifest.trashedAt = new Date(options.now ?? Date.now()).toISOString(); this.saveTrashed(manifestPath, manifest, record)
     }
     if (manifest.state !== 'trashed' || !manifest.trashPath) return undefined
     const trashPath = manifest.trashPath
     if (!await exists(trashPath)) {
       // Deleted by someone else: the pins from `prepare` are what is left.
-      manifest.state = 'retired'; delete manifest.trashPath; delete manifest.trashedAt; atomicWriteJsonSync(manifestPath, manifest)
+      manifest.state = 'retired'; delete manifest.trashPath; delete manifest.trashedAt; this.saveTrashed(manifestPath, manifest, record)
       return undefined
     }
     await this.settleTrashRegistration(manifest)
@@ -418,26 +466,31 @@ export class WorktreeRetirementService {
     // In use (Windows: open files) is asked before anything is captured, so whatever it lets through is in the snapshot.
     const busy = options.inUse?.(trashPath)
     if (busy) return { kept: busy }
-    const first = await this.captureTrashed(manifestPath, manifest)
+    const first = await this.captureTrashed(manifestPath, manifest, record)
     if ('kept' in first) return first
     options.afterCapture?.(trashPath)
     // Right before the delete, the folder is read again: a change since the snapshot is captured and the delete waits.
     const again = await this.trashedState(manifest)
     if (again !== first.state) {
-      const retaken = await this.captureTrashed(manifestPath, manifest)
+      const retaken = await this.captureTrashed(manifestPath, manifest, record)
       return { kept: `Files in it changed while it was being deleted${'kept' in retaken ? `; ${retaken.kept}` : '; they are kept as a snapshot'}. It is looked at again on the next run.`, waiting: true }
     }
-    await this.removeTrashed(manifest)
+    // Right before Git deletes it: the repository lease is still held, and the record is still the one this pass read.
+    const lease = await this.readRepositoryLease()
+    await this.removeTrashed(manifest, () => this.store.withGate(manifest.taskId, () => {
+      this.assertRepositoryLease(manifest.commonDir, manifest.repositoryId, lease)
+      this.assertTrashRecord(manifestPath, record)
+    }))
     manifest.state = 'retired'; delete manifest.trashPath; delete manifest.trashedAt
-    atomicWriteJsonSync(manifestPath, manifest)
-    await this.releaseBranches(manifest); atomicWriteJsonSync(manifestPath, manifest)
+    this.saveTrashed(manifestPath, manifest, record)
+    await this.releaseBranches(manifest); this.saveTrashed(manifestPath, manifest, record)
     return { removed: true }
   }
   /**
    * Takes a snapshot of the folder in the trash and pins it in place of the earlier pins (`result` at its HEAD,
    * `snapshot` when it has uncommitted files), recording both in the manifest. What a snapshot cannot hold keeps it.
    */
-  private async captureTrashed(manifestPath: string, manifest: WorktreeReconstructionManifest): Promise<{ state: string } | { kept: string }> {
+  private async captureTrashed(manifestPath: string, manifest: WorktreeReconstructionManifest, record: { text: string }): Promise<{ state: string } | { kept: string }> {
     const trashPath = manifest.trashPath!
     const head = await lifecycleReadAsync(trashPath, ['rev-parse', 'HEAD'])
     const treeSha = await lifecycleReadAsync(trashPath, ['rev-parse', 'HEAD^{tree}'])
@@ -457,18 +510,35 @@ export class WorktreeRetirementService {
     const previousSnapshot = await readDirectLifecycleRefAsync(trashPath, `${prefix}/snapshot`)
     await keepPin(manifest.resultSha, head)
     if (dirty) await keepPin(previousSnapshot, snapshot!.sha)
-    atomicWriteJsonSync(manifestPath, manifest)
+    this.saveTrashed(manifestPath, manifest, record)
     await lifecycleGitAsync(trashPath, ['update-ref', '--no-deref', manifest.resultRef, head, manifest.resultSha])
     if (dirty) await lifecycleGitAsync(trashPath, ['update-ref', '--no-deref', `${prefix}/snapshot`, snapshot!.sha, previousSnapshot ?? '0'.repeat(snapshot!.sha.length)])
     const headBranch = await lifecycleReadAsync(trashPath, ['branch', '--show-current'])
     // A clean folder drops the snapshot fields; an earlier snapshot ref stays where it is, as every pin does.
     delete manifest.snapshotSha; delete manifest.snapshotTree; delete manifest.snapshotRef; delete manifest.headBranch; delete manifest.sparse
     Object.assign(manifest, { resultSha: head, treeSha, ...(dirty ? { snapshotSha: snapshot!.sha, snapshotTree: snapshot!.tree, snapshotRef: `${prefix}/snapshot` } : {}), ...(headBranch ? { headBranch } : {}), ...contents })
-    atomicWriteJsonSync(manifestPath, manifest)
+    this.saveTrashed(manifestPath, manifest, record)
     await this.verifyPins(manifest)
     return { state: await this.trashedState(manifest) }
   }
   /** What the folder in the trash holds now, to compare with what was captured: HEAD, the tree of its files and every entry's bytes. */
+  /**
+   * The record of a worktree in the trash is written only while it is still the one this pass read or last wrote, checked
+   * under the task's gate in the same synchronous step: a permanent deletion may have removed it meanwhile, and it is
+   * never written back then.
+   */
+  private saveTrashed(manifestPath: string, manifest: WorktreeReconstructionManifest, record: { text: string }): void {
+    this.store.withGate(manifest.taskId, () => {
+      this.assertTrashRecord(manifestPath, record)
+      atomicWriteJsonSync(manifestPath, manifest)
+      record.text = JSON.stringify(manifest)
+    })
+  }
+  private assertTrashRecord(manifestPath: string, record: { text: string }): void {
+    let current: string | undefined
+    try { current = JSON.stringify(JSON.parse(readFileSync(manifestPath, 'utf8'))) } catch { current = undefined }
+    if (current !== record.text) throw new TrashRecordChanged()
+  }
   private async trashedState(manifest: WorktreeReconstructionManifest): Promise<string> {
     const trashPath = manifest.trashPath!
     try {
@@ -482,11 +552,14 @@ export class WorktreeRetirementService {
     await lifecycleGitAsync(manifest.commonDir, ['worktree', 'repair', trashPath])
   }
   /** Deletes the folder in the trash through Git, so its registration goes with it. */
-  private async removeTrashed(manifest: WorktreeReconstructionManifest): Promise<void> {
+  private async removeTrashed(manifest: WorktreeReconstructionManifest, beforeStart?: () => void): Promise<void> {
     const trashPath = manifest.trashPath!
     await assertLifecyclePathAsync(join(this.store.profileHome, 'trash'), trashPath)
-    try { await lifecycleGitAsync(manifest.commonDir, ['worktree', 'remove', '--force', trashPath]) }
+    // Whether the checks before Git passed: a refusal there deletes nothing, by Git or otherwise.
+    let cleared = false
+    try { await lifecycleGitAsync(manifest.commonDir, ['worktree', 'remove', '--force', trashPath], undefined, undefined, undefined, () => { beforeStart?.(); cleared = true }) }
     catch (error) {
+      if (!cleared) throw error
       // Git deleted `.git` and unregistered it, then stopped at a file in use: what is left is no checkout any more.
       if (!await exists(trashPath) || await exists(join(trashPath, '.git')) || await this.registeredAt(manifest.commonDir, trashPath)) throw error
       await rm(trashPath, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 })

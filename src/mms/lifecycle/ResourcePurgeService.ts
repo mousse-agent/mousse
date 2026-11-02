@@ -56,6 +56,11 @@ const purgeErrors = createErrorProvider({
 })
 
 /** External purge ledger survives deletion of every task-owned source. No Git object pruning. */
+export interface RetireTrashedOptions {
+  recheck?: (worktreePath: string) => string | undefined | Promise<string | undefined>
+  beforeMove?: (worktreePath: string) => string | undefined
+}
+
 export class ResourcePurgeService {
   readonly retirement: WorktreeRetirementService
   private timer?: ReturnType<typeof setInterval>
@@ -175,12 +180,14 @@ export class ResourcePurgeService {
    * Retires the checkouts of a trashed thread. `recheck` runs for each checkout under the cleanup
    * reservation and the repository lease, just before it is removed; a returned reason keeps that
    * checkout. Automatic rules use it to repeat their location and content checks at that point.
+   * `beforeMove` runs synchronously right before the checkout moves, with nothing awaited in between,
+   * for the checks that must hold at that moment; a returned reason keeps the checkout too.
    */
-  async retireTrashed(taskId: string, options: { recheck?: (worktreePath: string) => string | undefined | Promise<string | undefined> } = {}): Promise<void> {
+  async retireTrashed(taskId: string, options: RetireTrashedOptions = {}): Promise<void> {
     const release = await this.hooks.quiesceDisk?.()
     try { await this.retireTrashedQuiet(taskId, options) } finally { release?.() }
   }
-  private async retireTrashedQuiet(taskId: string, options: { recheck?: (worktreePath: string) => string | undefined | Promise<string | undefined> }): Promise<void> {
+  private async retireTrashedQuiet(taskId: string, options: RetireTrashedOptions): Promise<void> {
     await this.withOwnership(taskId, async () => {
       const record = this.store.require(taskId), token = record.cleanupOwner!.token
       if (record.state !== 'trashed') return
@@ -191,7 +198,19 @@ export class ResourcePurgeService {
         if (!await present(item.identity)) continue
         try {
           const lease = await acquireRepositoryLease(await resolveRepositoryIdentityAsync(item.identity, { requireMutationCapability: true }), { signal: AbortSignal.timeout(10_000) })
-          try { this.assertReservation(taskId, token, record.generation); const refusal = await options.recheck?.(item.identity); if (refusal) throw new Error(refusal); this.assertReservation(taskId, token, record.generation); await new WorktreeRetirementService(this.store, { repositoryLease: lease, cleanupTaskId: taskId, cleanupToken: token, cleanupGeneration: record.generation }).retire(item.manifestPath) } finally { lease.release() }
+          try {
+            this.assertReservation(taskId, token, record.generation)
+            const refusal = await options.recheck?.(item.identity)
+            if (refusal) throw new Error(refusal)
+            this.assertReservation(taskId, token, record.generation)
+            // The reservation and the caller's own last checks run again right before the move, with nothing awaited in between.
+            const beforeMove = (): void => {
+              this.assertReservation(taskId, token, record.generation)
+              const late = options.beforeMove?.(item.identity)
+              if (late) throw new Error(late)
+            }
+            await new WorktreeRetirementService(this.store, { repositoryLease: lease, cleanupTaskId: taskId, cleanupToken: token, cleanupGeneration: record.generation }).retire(item.manifestPath, { beforeMove })
+          } finally { lease.release() }
         } catch (error) { retained.push(`Checkout retained: ${(error as Error).message}`) }
       }
       this.store.update(taskId, (current) => { if (retained.length) current.blockedReason = retained.join('; '); else delete current.blockedReason })
@@ -548,7 +567,8 @@ export class ResourcePurgeService {
         }
         // Purge reuses the verifier; its source is fenced by the external irreversible owner.
         unclaimed()
-        await new WorktreeRetirementService(this.store, { repositoryLease: lease, cleanupTaskId: reservation.taskId, cleanupToken: reservation.token, cleanupGeneration: reservation.generation }).retire(item.manifestPath!, { purging: true })
+        // Checked again right before the checkout moves (or Git deletes it from the trash), with nothing awaited in between.
+        await new WorktreeRetirementService(this.store, { repositoryLease: lease, cleanupTaskId: reservation.taskId, cleanupToken: reservation.token, cleanupGeneration: reservation.generation }).retire(item.manifestPath!, { purging: true, beforeMove: unclaimed })
       } else {
         const current = await readDirectLifecycleRefAsync(commonDir, item.identity)
         if (!current) return

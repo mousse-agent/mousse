@@ -62,6 +62,9 @@ describe('Git foundation pinned child results', () => {
       expectedPreState: { preSnapshot: f.baseSha, workerSha: pinned, spawnBaseSha: f.baseSha, expectedTree: '' },
       details: { request: { agentId: 'child', operationId: 'crashed', workerWorktree: child, spawnBaseSha: f.baseSha, pinnedWorkerSha: pinned, threadWorkspace: f.repo } }
     })
+    // A caller holding no thread lease (operations.recover) checks right before the record; a refusal there writes nothing.
+    await expect(cancelPendingIntegrations(f.thread, undefined, () => { throw new Error('A turn is running') })).rejects.toThrow('A turn is running')
+    expect(new ThreadJournal(f.thread).latestByOperation().get('crashed')).toMatchObject({ state: 'prepared' })
     expect(await cancelPendingIntegrations(f.thread)).toEqual([{ operationId: 'crashed', agentId: 'child', resultSha: pinned, spawnBaseSha: f.baseSha }])
     expect(new ThreadJournal(f.thread).latestByOperation().get('crashed')).toMatchObject({ state: 'cancelled' })
     expect(f.read(f.repo)).toBe('base\n')

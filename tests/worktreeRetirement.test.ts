@@ -1,4 +1,4 @@
-import { afterEach, expect, test } from 'vitest'
+import { afterEach, expect, test, vi } from 'vitest'
 import { mkdtempSync, mkdirSync, writeFileSync, existsSync, rmSync, renameSync, cpSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
@@ -148,6 +148,18 @@ test('trash expiry reads the folder again before deleting it: a change since its
   expect(await f.service.expireTrash(f.path, { now: later + 2 * WORKTREE_TRASH_QUIET_MS })).toEqual({ removed: true })
 })
 
+test('trash expiry never writes back a record a permanent deletion removed meanwhile, and deletes nothing then', async () => {
+  const f = await fixture()
+  await f.service.prepare(f.input)
+  const trashed = await f.service.retire(f.path)
+  const later = Date.now() + 2 * WORKTREE_TRASH_QUIET_MS
+  // Between the snapshot and the delete, a purge removes the record (it does so under its reservation, without this lease).
+  const outcome = await f.service.expireTrash(f.path, { now: later, afterCapture: () => rmSync(f.path) })
+  expect(outcome).toEqual({ kept: expect.stringMatching(/record changed while it was being deleted/), waiting: true })
+  expect(existsSync(f.path)).toBe(false)
+  expect(existsSync(join(trashed.trashPath!, 'a.txt'))).toBe(true)
+})
+
 test('an owned branch name that is a symbolic ref is never followed: the branch it points at stays', async () => {
   const f = await fixture()
   const main = git(f.repo, ['symbolic-ref', '--short', 'HEAD']), mainSha = git(f.repo, ['rev-parse', main])
@@ -237,6 +249,37 @@ test('direct retirement preserves a checkout still referenced by another task', 
   f.store.registerTask({ taskId: 'peer', location: peer })
   await expect(f.service.retire(f.path)).rejects.toThrow(/Another task/)
   expect(readFileSync(join(f.worktree, 'a.txt'), 'utf8')).toBe('first\n')
+})
+
+test('a claim by another task that appears while retirement waits stops the move: the claims are read again right before it', async () => {
+  const f = await fixture(); await f.service.prepare(f.input)
+  const peer = join(f.home, 'thread-data', 'peer')
+  // The second pin check comes after the first claims check; the other task names this checkout from then on.
+  const verifyPins = WorktreeRetirementService.prototype.verifyPins
+  let calls = 0
+  const spy = vi.spyOn(WorktreeRetirementService.prototype, 'verifyPins').mockImplementation(async function (this: WorktreeRetirementService, manifest) {
+    await verifyPins.call(this, manifest)
+    if (++calls === 2) {
+      mkdirSync(peer, { recursive: true })
+      writeFileSync(join(peer, 'meta.json'), JSON.stringify({ id: 'peer' }))
+      writeFileSync(join(peer, 'agents.json'), JSON.stringify([{ id: 'worker', branch: f.branch, worktreePath: f.worktree, status: 'ready' }]))
+      f.store.registerTask({ taskId: 'peer', location: peer })
+    }
+  })
+  try {
+    await expect(f.service.retire(f.path)).rejects.toThrow(/Another task/)
+  } finally { spy.mockRestore() }
+  expect(calls).toBeGreaterThanOrEqual(2)
+  expect(readFileSync(join(f.worktree, 'a.txt'), 'utf8')).toBe('first\n')
+  expect(f.service.load(f.path).trashPath).toBeUndefined()
+})
+
+test("the caller's own check runs right before the move, and a refusal there moves nothing", async () => {
+  const f = await fixture(); await f.service.prepare(f.input)
+  await expect(f.service.retire(f.path, { beforeMove: () => { throw new Error('Thread became busy') } })).rejects.toThrow('Thread became busy')
+  expect(readFileSync(join(f.worktree, 'a.txt'), 'utf8')).toBe('first\n')
+  expect(f.service.load(f.path)).toMatchObject({ state: 'prepared' })
+  expect(f.service.load(f.path).trashPath).toBeUndefined()
 })
 
 test('retains Git-clean mixed line endings that checkout cannot reconstruct byte for byte', async () => {

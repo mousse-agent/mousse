@@ -678,7 +678,15 @@ export class StorageCleanupService {
         return this.probeRemoval(path)
       } catch (error) { return (error as Error).message }
     }
-    try { await this.deps.purge.retireTrashed(record.taskId, { recheck }) }
+    // The checks that can change without the reads above, once more right before the move, with nothing awaited between
+    // them and its start (retirement prepares first): the settings, and on Windows whether a file in it is open.
+    const beforeMove = (): string | undefined => {
+      try {
+        if (this.deps.policy.digest() !== snapshot.digest) return 'Settings changed since check'
+        return this.probeRemoval(path)
+      } catch (error) { return (error as Error).message }
+    }
+    try { await this.deps.purge.retireTrashed(record.taskId, { recheck, beforeMove }) }
     catch (error) {
       const reason = (error as Error).message
       return BUSY_REASON.test(reason) ? kept(reason) : { ...base, bytes: 0, outcome: 'failed', reason }
@@ -893,8 +901,23 @@ export class StorageCleanupService {
         let inUse: string | undefined
         try { inUse = this.probeRemoval(workspace.worktreePath) } catch (error) { return failed((error as Error).message) }
         if (inUse) return kept(inUse)
+        // Preparing and retiring wait, so the checks above that can change without those reads run once more right before
+        // the move, with nothing awaited between them and its start: the outcome they give is the one they gave before.
+        let stopped: StorageCleanupItem | undefined
+        const stop = (item: StorageCleanupItem): never => { stopped = item; throw new Error(item.reason ?? 'Kept') }
+        const beforeMove = (): void => {
+          if (this.deps.policy.digest() !== verdict.policyDigest) stop(kept('Settings changed since check'))
+          const busyNow = this.deps.idle(record.taskId)
+          if (busyNow) stop(kept('Thread became busy'))
+          const boundNow = readWorkspaceFile(record.location)
+          if (!boundNow || boundNow.worktreePath !== workspace.worktreePath || boundNow.branch !== workspace.branch || boundNow.headSha !== workspace.headSha || boundNow.lifecycle !== workspace.lifecycle) stop(kept('Workspace changed since check'))
+          let inUseNow: string | undefined
+          try { inUseNow = this.probeRemoval(workspace.worktreePath) } catch (error) { stop(failed((error as Error).message)) }
+          if (inUseNow) stop(kept(inUseNow))
+        }
         // The folder moves into the trash in one step or not at all; a folder in use stays where it is.
-        await retirement.retire(retirement.pathFor(record.taskId, workspace.worktreePath))
+        try { await retirement.retire(retirement.pathFor(record.taskId, workspace.worktreePath), { beforeMove }) }
+        catch (error) { if (stopped) return stopped; throw error }
         try { atomicWriteJsonSync(cleanupMarkerPath(this.deps.store, record.taskId), { retiredAt: new Date(this.now()).toISOString(), rule: verdict.rule } satisfies CleanupMarker) }
         catch { /* The checkout is gone and restorable; only the status note is missing. */ }
         return { ...base, bytes: measurement.bytes, files: measurement.files, ...approximate(measurement), outcome: 'removed', reason: verdict.reason }

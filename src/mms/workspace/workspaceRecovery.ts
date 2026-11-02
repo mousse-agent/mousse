@@ -48,11 +48,14 @@ async function leftMerge(entry: ThreadJournalRecord, records: readonly ThreadJou
  * Called where Mousse already writes the journal (`operations.recover`); `workspace.getStatus` only reads, since a
  * journal write changes the generation clients send with their next action.
  */
-export async function clearStaleLeftMerges(threadDirectory: string): Promise<void> {
+export async function clearStaleLeftMerges(threadDirectory: string, beforeRecord?: () => void): Promise<void> {
   const journal = new ThreadJournal(threadDirectory)
   const records = journal.list()
   for (const entry of journal.latestByOperation().values()) {
-    if (recordedLeftMerge(entry) && !await leftMerge(entry, records)) journal.append({ operationId: entry.operationId, operationType: entry.operationType, state: 'cancelled', details: { mergeNoLongerRecorded: true } })
+    if (!recordedLeftMerge(entry) || await leftMerge(entry, records)) continue
+    // A caller holding no thread lease checks again here, after the Git reads, that no turn has started.
+    beforeRecord?.()
+    journal.append({ operationId: entry.operationId, operationType: entry.operationType, state: 'cancelled', details: { mergeNoLongerRecorded: true } })
   }
 }
 

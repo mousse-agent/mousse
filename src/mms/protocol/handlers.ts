@@ -3140,9 +3140,11 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       let releaseRetained: string | undefined
       try {
         // A merge of a subagent result an older version left unfinished is cancelled, never run again.
-        cancelledIntegrations = await cancelPendingIntegrations(operation.threadDirectory, workspace.worktreePath)
+        // This request holds no thread lease: right before each record, after the Git reads, no turn may have started.
+        const noTurn = (): void => assertNoRunningTurn(ctx, operation.threadId)
+        cancelledIntegrations = await cancelPendingIntegrations(operation.threadDirectory, workspace.worktreePath, noTurn)
         // A left merge that was finished, aborted or replaced since is no longer offered for Abort.
-        await clearStaleLeftMerges(operation.threadDirectory)
+        await clearStaleLeftMerges(operation.threadDirectory, noTurn)
         // A folder with no worktree has nothing to publish, and neither has a thread in its project's own folder: its work
         // is already there, so there is no Publish to recover, and the person's checkout is never treated as one's target.
         publish = operation.projectPath && !workspace.snapshotOnly && !isProjectFolderWorkspace(workspace) ? await new PublishService(operation.threadDirectory).recoverPending(workspace.worktreePath, operation.projectPath) : []
