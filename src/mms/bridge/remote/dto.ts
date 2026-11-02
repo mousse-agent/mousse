@@ -205,12 +205,13 @@ export function validateRemoteParams(
       if (!model || typeof model !== 'object' || Array.isArray(model))
         throw new NetError('bad_request')
       const m = model as Record<string, unknown>
-      if (Object.keys(m).some((key) => !['instanceId', 'llmProvider', 'model'].includes(key)))
+      if (Object.keys(m).some((key) => !['instanceId', 'llmProvider', 'model', 'effort'].includes(key)))
         throw new NetError('bad_request')
       for (const [key, max, required] of [
         ['instanceId', 256, false],
         ['llmProvider', 256, false],
-        ['model', 512, true]
+        ['model', 512, true],
+        ['effort', 64, false]
       ] as const) {
         if (!required && m[key] === undefined) continue
         if (

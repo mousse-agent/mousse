@@ -66,6 +66,7 @@ import { ComposerWorkspaceToolbar } from './ComposerWorkspaceToolbar'
 import { ChatBrowserAccess } from './chats/ChatBrowserAccess'
 import { extractChatReferences, type ChatReference } from '../../shared/chatReferences'
 import { resolveChatReference, resolveChatReferences } from '../utils/chatLinks'
+import { pickedSelection, pickerModelId } from '../../shared/modelSelection'
 import '../styles/compact-composer.css'
 
 const EMPTY_CONTEXT_USAGE: ContextUsageSnapshot = {
@@ -464,7 +465,7 @@ export function OrchestratorChat() {
     if (!remoteNodeRef.current) {
       setSelectedLlmProvider(selectedModel.llmProvider)
       setSelectedInstanceId(selectedModel.instanceId)
-      setSelectedModelId(selectedModel.model)
+      setSelectedModelId(pickerModelId(selectedModel))
     }
 
     const skillsSnapshot = await skillsRequest
@@ -494,7 +495,7 @@ export function OrchestratorChat() {
     const pick = remoteDraft ? remoteDefault : (activeThreadModelOverride ?? remoteDefault)
     setSelectedLlmProvider(pick?.llmProvider ?? '')
     setSelectedInstanceId(pick?.instanceId)
-    setSelectedModelId(pick?.model ?? '')
+    setSelectedModelId(pick ? pickerModelId(pick) : '')
   }, [remoteNode, remoteDraft, remoteOptions.loaded, remoteDefault, activeThreadModelOverride])
 
   useEffect(() => {
@@ -925,7 +926,7 @@ export function OrchestratorChat() {
       if (selectedProviderId && selectedModelId) {
         const updated = await window.mousse.threads.setModel(id, {
           ...selectionFor(selectedProviderId),
-          model: selectedModelId
+          ...pickedSelection(selectedModelId)
         })
         if (!stillVisible()) return
         if (updated) useAppStore.getState().upsertThread(updated)
@@ -977,13 +978,15 @@ export function OrchestratorChat() {
     setSelectedLlmProvider(instance.llmProvider)
     setSelectedInstanceId(instance.instanceId)
     setSelectedModelId(modelId)
+    // Stored as the model and its level apart; no level is the model's default.
+    const pick = pickedSelection(modelId)
 
     // Persist as last-used default for new threads. Existing chats keep their
     // own modelOverride, which is stamped at create time from this value.
     if (!activeThreadId) {
       // A chat for another computer takes its model there; this computer's default stays as it is.
       if (!remoteDraft) void window.mousse.settings.set({
-        provider: { ...instance, model: modelId }
+        provider: { ...instance, model: pick.model, effort: pick.effort }
       })
       return
     }
@@ -995,15 +998,12 @@ export function OrchestratorChat() {
     if (current) {
       useAppStore.getState().upsertThread({
         ...current,
-        modelOverride: { ...instance, model: modelId },
+        modelOverride: { ...instance, ...pick },
         updatedAt: new Date().toISOString()
       })
     }
 
-    const updated = await window.mousse.threads.setModel(activeThreadId, {
-      ...instance,
-      model: modelId
-    })
+    const updated = await window.mousse.threads.setModel(activeThreadId, { ...instance, ...pick })
     if (updated) useAppStore.getState().upsertThread(updated)
   }
 

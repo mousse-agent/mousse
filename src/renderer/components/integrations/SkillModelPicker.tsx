@@ -1,10 +1,11 @@
+import { pickedSelection, pickerModelId } from '../../../shared/modelSelection'
 import { useEffect, useRef, useState } from 'react'
 import type { LlmProviderOption } from '../../../shared/settings'
 import { listingServes } from '../../../shared/providerInstances'
 import { getGroupedModelButtonParts, ModelFamilyMenu } from '../ModelFamilyMenu'
 
 /** `instanceId` tells apart two accounts of one provider; absent on older records. */
-export interface SkillModelChoice { instanceId?: string; llmProvider: string; model: string }
+export interface SkillModelChoice { instanceId?: string; llmProvider: string; model: string; effort?: string }
 
 /** Settings-side default model per skill (`integrations.skills.model[skillId]`). */
 export interface SkillModelBinding {
@@ -24,7 +25,7 @@ export function SkillModelPicker({ skillId, binding, disabled }: { skillId: stri
   const providers = binding.providers
   const provider = value ? providers.find((entry) => listingServes(entry, value)) : undefined
   const label = value
-    ? `${provider?.label ?? value.llmProvider} · ${getGroupedModelButtonParts(value.llmProvider, value.model, providers, true, value.instanceId).join(' · ')}`
+    ? `${provider?.label ?? value.llmProvider} · ${getGroupedModelButtonParts(value.llmProvider, pickerModelId(value), providers, true, value.instanceId).join(' · ')}`
     : 'Default model'
 
   useEffect(() => {
@@ -71,10 +72,10 @@ export function SkillModelPicker({ skillId, binding, disabled }: { skillId: stri
       providers={providers}
       selectedProviderId={value?.llmProvider ?? ''}
       selectedInstanceId={value?.instanceId}
-      selectedModelId={value?.model ?? ''}
+      selectedModelId={value ? pickerModelId(value) : ''}
       anchorRef={buttonRef}
       contentRef={menuRef}
-      onSelect={(llmProvider, model, instanceId) => { setOpen(false); save({ ...(instanceId ? { instanceId } : {}), llmProvider, model }) }}
+      onSelect={(llmProvider, model, instanceId) => { setOpen(false); save({ ...(instanceId ? { instanceId } : {}), llmProvider, ...pickedSelection(model) }) }}
     /> : null}
     {error ? <p className="integration-error" role="alert">{error}</p> : null}
   </div>

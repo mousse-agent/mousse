@@ -102,7 +102,8 @@ export interface BridgeRemoteParams {
   }
   'threads.setModel': {
     threadId: string
-    model: { instanceId?: string; llmProvider?: string; model: string }
+    /** The model as its agent lists it; the reasoning level is `effort`. */
+    model: { instanceId?: string; llmProvider?: string; model: string; effort?: string }
   }
   'attachments.stage': {
     /** Caller-chosen id the send names in `attachments`. */

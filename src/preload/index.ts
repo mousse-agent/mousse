@@ -772,7 +772,7 @@ const api = {
       ipcRenderer.invoke('threads:regenerateTitle', threadId),
     setModel: (
       threadId: string,
-      model?: { instanceId?: string; llmProvider: string; model: string }
+      model?: { instanceId?: string; llmProvider: string; model: string; effort?: string }
     ): Promise<Thread> => ipcRenderer.invoke('threads:setModel', threadId, model),
     pin: (threadId: string, pinned: boolean): Promise<Thread> =>
       ipcRenderer.invoke('threads:pin', threadId, pinned),

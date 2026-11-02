@@ -89,8 +89,11 @@ export function sameThreadSnapshot(a: Thread[], b: Thread[]): boolean {
       left.node !== right.node ||
       left.offline !== right.offline ||
       left.notShared !== right.notShared ||
+      left.modelOverride?.instanceId !== right.modelOverride?.instanceId ||
       left.modelOverride?.llmProvider !== right.modelOverride?.llmProvider ||
-      left.modelOverride?.model !== right.modelOverride?.model
+      left.modelOverride?.model !== right.modelOverride?.model ||
+      left.modelOverride?.effort !== right.modelOverride?.effort ||
+      left.modelOverride?.name !== right.modelOverride?.name
     ) {
       return false
     }

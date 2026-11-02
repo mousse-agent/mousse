@@ -162,6 +162,22 @@ describe('execution bindings', () => {
     }
   })
 
+  it('a thread keeps the reasoning level apart from the model; only the agent is given `model:level`', async () => {
+    const thread = store.createThread('levels')
+    // A client from before #490 sends the level packed into the model.
+    const stored = orch.setThreadModelOverride(thread.id, { instanceId: 'claude', llmProvider: 'claude-subscription', model: 'opus:high' })
+    expect(stored).toMatchObject({ instanceId: 'claude', model: 'opus', effort: 'high', name: 'Claude Opus' })
+    expect(store.getThread(thread.id)?.modelOverride).toMatchObject({ model: 'opus', effort: 'high' })
+    await orch.send('hi', false, { threadId: thread.id, clientRequestId: 'send-1' })
+    const [run] = engine.listRuns(thread.id)
+    expect(bindingOf(run.runId)).toMatchObject({ model: 'opus', effort: 'high' })
+    expect(adapter.turns.map((turn) => turn.model)).toEqual(['opus:high'])
+    // A binding recorded before #490 runs as it did, and reads back as the model and its level.
+    const legacy = { ...bindingOf(run.runId)!, model: 'sonnet:low' }
+    delete legacy.effort
+    expect(harness.selectionOf(legacy)).toMatchObject({ instanceId: 'claude', model: 'sonnet', effort: 'low' })
+  })
+
   it('a message for a hidden model or a turned-off provider is refused before it is a run or a transcript entry', async () => {
     const thread = store.createThread('refused')
     orch.setThreadModelOverride(thread.id, { instanceId: 'claude', llmProvider: 'claude-subscription', model: 'haiku:low' })

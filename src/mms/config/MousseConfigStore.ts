@@ -12,6 +12,7 @@ import {
 } from 'fs'
 import { basename, dirname, join } from 'path'
 import { quarantineUnreadableFileSync } from '../data/AtomicFs'
+import { upgradeSelection } from '../../shared/modelSelection'
 import { getDefaultSettings, type MousseSettings } from '../../shared/settings'
 import { DEFAULT_FEATURE_FLAGS, validateFeatureFlags } from '../../shared/featureFlags'
 import { getMousseHomeDir } from '../data/paths'
@@ -308,7 +309,8 @@ export class MousseConfigStore {
       ) as unknown as MousseAgentsConfig,
       scheduled: {
         enabled: raw.scheduled?.enabled ?? base.scheduled.enabled,
-        jobs: raw.scheduled?.jobs ?? base.scheduled.jobs,
+        // A job's model with a level packed into it (written before #490) is upgraded.
+        jobs: (raw.scheduled?.jobs ?? base.scheduled.jobs).map((job) => (job?.selection ? { ...job, selection: upgradeSelection(job.selection) } : job)),
         ...(raw.scheduled?.webhooks ? { webhooks: raw.scheduled.webhooks } : {}),
         ...(typeof raw.scheduled?.agentJobs === 'boolean' ? { agentJobs: raw.scheduled.agentJobs } : {}),
         ...savedAgentJobLimits(raw.scheduled)

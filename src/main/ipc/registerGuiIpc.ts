@@ -1559,7 +1559,7 @@ export function registerGuiIpc(
     async (
       _e,
       threadId: string,
-      model?: { instanceId?: string; llmProvider: string; model: string }
+      model?: { instanceId?: string; llmProvider: string; model: string; effort?: string }
     ) => {
       const res = await guiMms.request<{ thread: unknown; threads: unknown[] }>('threads.setModel', {
         threadId,

@@ -1469,17 +1469,19 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
           ? (model.llmProvider === undefined ? undefined : asString(model.llmProvider, 'model.llmProvider', 256))
           : asString(model.llmProvider, 'model.llmProvider', 256)
         const modelId = asString(model.model, 'model.model', 512)
+        const effort = asOptionalString(model.effort, 64)
         if ((!instanceId && !llmProvider) || !modelId) throw new DomainRpcError('invalid_params', 'Model provider and id are required')
-        // Unknown or disabled instances are rejected here, before anything is stored.
-        override = ctx.mms.providerInstances.overrideFor({ instanceId, llmProvider, model: modelId })
+        // Unknown or disabled instances are rejected here, before anything is stored. A level
+        // packed into the model (an older client) is moved into its own field.
+        override = ctx.mms.providerInstances.overrideFor({ instanceId, llmProvider, model: modelId, ...(effort ? { effort } : {}) })
         // Hidden models and instances the thread's project turned off are rejected too.
         const projectId = ctx.mms.threads.getThread(threadId)?.projectId
         ctx.mms.harness?.resolveStored(override, { purpose: 'composer', scope: projectId ? { kind: 'project', projectId } : { kind: 'device' } })
       }
       const next = ctx.mms.orchestrator.setThreadModelOverride(threadId, override)
-      if (override) {
+      if (next) {
         // The global default keeps the instance, so later default turns resolve the same agent.
-        ctx.mms.settings.set({ provider: { instanceId: override.instanceId, llmProvider: override.llmProvider, model: override.model } })
+        ctx.mms.settings.set({ provider: { instanceId: next.instanceId, llmProvider: next.llmProvider, model: next.model, effort: next.effort, name: next.name } })
         ctx.emitEvent?.('settings.changed', { settings: ctx.mms.settings.get() })
       }
       const thread = ctx.mms.threads.getThread(threadId)
@@ -2459,6 +2461,10 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     case 'settings.set': {
       const p = isObject(params) ? params : {}
       const partial = asSettingsPartial(p.partial) as MousseSettingsUpdate
+      // A default model chosen here carries its name, for the CLI and devices that have no listing of it.
+      const chosen = partial.provider
+      if (chosen?.model && !chosen.name && ctx.mms.harness)
+        partial.provider = { ...chosen, name: ctx.mms.harness.modelName(chosen.instanceId || (chosen.llmProvider ?? ''), chosen.model) }
       const settings = ctx.mms.settings.set(partial)
       // Fan-out so all clients observe the same daemon-owned settings immediately.
       ctx.emitEvent?.('settings.changed', { settings })

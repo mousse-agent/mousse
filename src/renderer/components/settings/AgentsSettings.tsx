@@ -1,3 +1,5 @@
+import { findListedModel, modelLabel } from '../../../shared/modelChoice'
+import { resolveModelChoice } from '../../lib/modelChoice'
 import type { MousseSettings, MousseSettingsUpdate, SettingsOptions } from '../../../shared/settings'
 import { CONTEXT_COMPACTION_OPTIONS, normalizeContextSettings, oneShotProviderOptions, type ContextCompactionTokens } from '../../../shared/settings'
 import type { Project } from '../../../shared/types'
@@ -38,7 +40,7 @@ export function AgentsSettings({
   const titleInstance = settings.title?.instanceId
   const titleUnavailable = !titleIsAutomatic && providers.length > 0 && !titleProviders.some((provider) =>
     (titleInstance ? provider.instanceId === titleInstance : provider.id === titleProvider) &&
-    provider.models.some((model) => model.id === titleModel || titleModel.startsWith(`${model.id}:`)))
+    Boolean(findListedModel(provider.models, titleModel)))
 
   const context = normalizeContextSettings(settings.context)
 
@@ -59,9 +61,10 @@ export function AgentsSettings({
               providerId={settings.provider.llmProvider}
               instanceId={settings.provider.instanceId}
               modelId={settings.provider.model}
-              onSelect={(llmProvider, model, instanceId) =>
-                // Always the whole selection: a write without the instance clears it.
-                void updateSettings({ provider: { ...(instanceId ? { instanceId } : {}), llmProvider, model } })
+              effort={settings.provider.effort}
+              onSelect={(llmProvider, pick, instanceId) =>
+                // Always the whole selection: a write without the instance or level clears it.
+                void updateSettings({ provider: { ...(instanceId ? { instanceId } : {}), llmProvider, model: pick.model, effort: pick.effort } })
               }
             />
           }
@@ -70,7 +73,7 @@ export function AgentsSettings({
           title="Chat titles"
           titleId="agents-title-model-title"
           description={titleUnavailable
-            ? `${titleModel} can't name chats here, so chats keep their first line as the title. Choose another model or Automatic.`
+            ? `${modelLabel(resolveModelChoice({ instanceId: titleInstance, provider: titleProvider, model: titleModel }, providers), { effort: false })} can't name chats here, so chats keep their first line as the title. Choose another model or Automatic.`
             : 'Automatic picks a fast connected model to name chats.'}
           titleAction={!titleIsAutomatic && (
             <button
@@ -92,9 +95,10 @@ export function AgentsSettings({
               providerId={titleIsAutomatic ? '' : titleProvider}
               instanceId={titleIsAutomatic ? undefined : settings.title?.instanceId}
               modelId={titleIsAutomatic ? '' : titleModel}
-              onSelect={(llmProvider, model, instanceId) =>
-                // Always the whole selection: a write without the instance clears it.
-                void updateSettings({ title: { ...(instanceId ? { instanceId } : {}), llmProvider, model } })
+              effort={titleIsAutomatic ? undefined : settings.title?.effort}
+              onSelect={(llmProvider, pick, instanceId) =>
+                // Always the whole selection: a write without the instance or level clears it.
+                void updateSettings({ title: { ...(instanceId ? { instanceId } : {}), llmProvider, model: pick.model, ...(pick.effort ? { effort: pick.effort } : {}) } })
               }
             />
           }

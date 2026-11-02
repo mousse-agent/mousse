@@ -1,5 +1,6 @@
 import { formatEffortLabel, parseIdSuffixes, parseModelVariant, parseThinkingSuffixFromModelId } from './modelVariants'
 import { canonicalModelName, modelNameFromId, shortModelName } from './modelNames'
+import { upgradeSelection } from './modelSelection'
 
 /**
  * A model as Mousse shows it: which instance runs it, the model, what was chosen for it, and its
@@ -20,31 +21,41 @@ export interface ModelChoice {
   speed?: string
 }
 
-/** A selection as it is stored today: the model string carries the context, speed and level. */
+/**
+ * A stored selection: the model as listed, its reasoning level, and the name it had when chosen.
+ * A listed id can itself name a context or speed (`fable-5@1m`, `gpt-6:fast`); records written
+ * before #490 also carry the level in the model.
+ */
 export interface StoredModelSelection {
   instanceId?: string
   provider: string
   model: string
+  effort?: string
+  name?: string
 }
 
 /**
  * The choice a stored selection makes. `listedLabel` is the name the instance lists the model
- * under, when anything on hand lists it; without one the name comes from the id.
+ * under, when anything on hand lists it; without one the selection's stored name stands, else the
+ * name comes from the id.
  */
-export function modelChoiceOf(selection: StoredModelSelection, listedLabel?: string): ModelChoice {
-  const stored = parseIdSuffixes(selection.model)
+export function modelChoiceOf(stored: StoredModelSelection, listedLabel?: string): ModelChoice {
+  const selection = upgradeSelection(stored)
+  const parsed = parseIdSuffixes(selection.model)
+  const effort = selection.effort ?? parsed.effort
   const base = {
     ...(selection.instanceId ? { instanceId: selection.instanceId } : {}),
     provider: selection.provider,
-    modelId: stored.baseId,
-    ...(stored.effort ? { effort: stored.effort } : {})
+    modelId: parsed.baseId,
+    ...(effort ? { effort } : {})
   }
-  if (!listedLabel?.trim()) {
-    return { ...base, name: modelNameFromId(stored.baseId), ...(stored.context ? { context: stored.context } : {}), ...(stored.speed ? { speed: stored.speed } : {}) }
+  const label = listedLabel?.trim() || selection.name?.trim()
+  if (!label) {
+    return { ...base, name: modelNameFromId(parsed.baseId), ...(parsed.context ? { context: parsed.context } : {}), ...(parsed.speed ? { speed: parsed.speed } : {}) }
   }
-  const listed = parseModelVariant({ id: selection.model, label: canonicalModelName(listedLabel, stored.baseId) })
-  const context = listed.context ?? stored.context
-  const speed = stored.speed ?? (listed.speed !== 'standard' ? listed.speed : undefined)
+  const listed = parseModelVariant({ id: selection.model, label: canonicalModelName(label, parsed.baseId) })
+  const context = listed.context ?? parsed.context
+  const speed = parsed.speed ?? (listed.speed !== 'standard' ? listed.speed : undefined)
   return { ...base, name: listed.familyLabel, ...(context ? { context } : {}), ...(speed ? { speed } : {}) }
 }
 
