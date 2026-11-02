@@ -6,7 +6,7 @@ import { knownAppError, parseErrorInfo } from '../../shared/errors'
 
 import type { ChatImageAttachment, ChatMode, ScheduledJobWorkspace } from '../../shared/types'
 import { PROVIDER_DRIVER_KINDS, type ModelOverride } from '../../shared/providerInstances'
-import { isAgentAccessLevel } from '../../shared/settings'
+import { isAgentAccessLevel, MAX_USAGE_LIMIT_PAUSE_CAP } from '../../shared/settings'
 import { isPermissionMode, type PermissionMode } from '../../shared/permissionMode'
 import {
   RESERVED_AGENT_IDS,
@@ -890,8 +890,10 @@ export function asSettingsPartial(v: unknown): Record<string, unknown> {
     'appearance',
     'notifications',
     'shortcuts',
+    'permissions',
     'context',
     'agentAccess',
+    'runs',
     'provider',
     'title',
     'agents',
@@ -926,7 +928,30 @@ export function asSettingsPartial(v: unknown): Record<string, unknown> {
   }
   const walked = walk(o, 'partial', 0) as Record<string, unknown>
   if (walked.agentAccess !== undefined) assertAgentAccessPatch(walked.agentAccess)
+  if (walked.permissions !== undefined) assertPermissionsPatch(walked.permissions)
+  if (walked.runs !== undefined) assertRunsPatch(walked.runs)
   return walked
+}
+
+/** The default permission mode decides what new threads may do without asking, so an unknown mode is refused. */
+function assertPermissionsPatch(value: unknown): void {
+  const patch = asPlainObject(value, 'partial.permissions')
+  for (const key of Object.keys(patch)) {
+    if (key !== 'defaultMode') throw new Error(`partial.permissions.${key} is not allowed`)
+  }
+  if (patch.defaultMode !== undefined && !isPermissionMode(patch.defaultMode))
+    throw new Error('partial.permissions.defaultMode must be ask, accept_edits, auto or full')
+}
+
+function assertRunsPatch(value: unknown): void {
+  const patch = asPlainObject(value, 'partial.runs')
+  for (const key of Object.keys(patch)) {
+    if (key !== 'resumeAfterUsageLimit' && key !== 'usageLimitPauseCap') throw new Error(`partial.runs.${key} is not allowed`)
+  }
+  if (patch.resumeAfterUsageLimit !== undefined && typeof patch.resumeAfterUsageLimit !== 'boolean')
+    throw new Error('partial.runs.resumeAfterUsageLimit must be a boolean')
+  if (patch.usageLimitPauseCap !== undefined && (!Number.isInteger(patch.usageLimitPauseCap) || (patch.usageLimitPauseCap as number) < 1 || (patch.usageLimitPauseCap as number) > MAX_USAGE_LIMIT_PAUSE_CAP))
+    throw new Error(`partial.runs.usageLimitPauseCap must be a whole number from 1 to ${MAX_USAGE_LIMIT_PAUSE_CAP}`)
 }
 
 /** `agentAccess` narrows what agents may reach, so a malformed patch is refused rather than guessed at. */
