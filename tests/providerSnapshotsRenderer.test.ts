@@ -20,7 +20,7 @@ import {
 } from '../src/renderer/lib/providerSnapshots'
 import { useAppStore } from '../src/renderer/stores/appStore'
 import { sendErrorLine } from '../src/renderer/lib/errorText'
-import { getGroupedModelButtonParts, makerLabelOf, modelRowSubtitle, sortPickerEntries } from '../src/renderer/components/ModelFamilyMenu'
+import { getGroupedModelButtonParts, makerLabelOf, modelRowLayout, modelRowSubtitle, sortPickerEntries } from '../src/renderer/components/ModelFamilyMenu'
 import { profilePreferenceKey } from '../src/renderer/lib/profilePreferences'
 import { model, snapshot } from './providerSnapshotFixture'
 
@@ -120,6 +120,21 @@ describe('composer picker from snapshots', () => {
       expect(maker).toBeUndefined()
       expect(modelRowSubtitle({ providerName: 'Vercel AI Gateway', makerLabel: maker }, false)).toBe('Vercel AI Gateway')
       expect(modelRowSubtitle({ providerName: 'Vercel AI Gateway', makerLabel: maker }, true)).toBeUndefined()
+    })
+  })
+
+  describe('row layout', () => {
+    it('keeps the logo on compact rows when one provider is configured and there is no rail', () => {
+      expect(modelRowLayout(true, false, false)).toEqual({ compact: true, icon: true })
+    })
+
+    it('drops the logo from compact rows when the selected rail item already shows it', () => {
+      expect(modelRowLayout(true, false, true)).toEqual({ compact: true, icon: false })
+    })
+
+    it('draws full rows with logos across providers and for a multi-brand API', () => {
+      expect(modelRowLayout(false, false, true)).toEqual({ compact: false, icon: true })
+      expect(modelRowLayout(true, true, true)).toEqual({ compact: false, icon: true })
     })
   })
 

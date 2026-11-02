@@ -554,6 +554,8 @@ export class ClaudeSubscriptionProviderService {
   private cliProbe?: { at: number; result: AuthProbe }
   private probing?: Promise<void>
   private modelDiscoveryStarted = false
+  /** Told when a listing saves a new model list (`onModelsChanged`). */
+  private readonly modelListeners = new Set<() => void>()
   /** The loaded settings already record the terminal sign-in; otherwise `status()` saves the migration. */
   private policyStored = false
 
@@ -727,6 +729,19 @@ export class ClaudeSubscriptionProviderService {
       configured: this.configured(),
       guidedLogin: true,
       description: 'Official Claude Code · personal account'
+    }
+  }
+  /**
+   * Calls `listener` when a listing saves a new model list, including one that started on its own
+   * after a sign-in check, so open pickers replace the CLI aliases. Returns the unsubscribe.
+   */
+  onModelsChanged(listener: () => void): () => void {
+    this.modelListeners.add(listener)
+    return () => this.modelListeners.delete(listener)
+  }
+  private modelsChanged(): void {
+    for (const listener of [...this.modelListeners]) {
+      try { listener() } catch { /* a listener must not break the listing */ }
     }
   }
   /** The discovered models, or the CLI aliases until discovery runs. */
@@ -1053,6 +1068,7 @@ export class ClaudeSubscriptionProviderService {
         this.settings.models = claudeModelOptions(models, extras)
         this.settings.modelsRefreshedAt = new Date().toISOString()
         this.save()
+        this.modelsChanged()
       }
     } finally {
       clearTimeout(timer)
