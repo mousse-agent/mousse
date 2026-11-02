@@ -687,16 +687,20 @@ function ProfileBrowserPanel({ profileId, active }: { profileId: string; active:
                     <button type="button" onClick={() => updateTab(activeTab.id, { deviceToolbarOpen: !activeTab.deviceToolbarOpen })}>
                       <span>Show device toolbar</span>{activeTab.deviceToolbarOpen && <Check size={14} />}
                     </button>
-                    <div className="browser-menu-zoom"><span>Zoom</span><button type="button" onClick={() => changeZoom(-0.1)}><Minus size={13} /></button><span>{Math.round(activeTab.zoomFactor * 100)}%</span><button type="button" onClick={() => changeZoom(0.1)}><Plus size={13} /></button></div>
+                    <div className="browser-menu-zoom"><span>Zoom</span><button type="button" aria-label="Zoom out" title="Zoom out" onClick={() => changeZoom(-0.1)}><Minus size={13} aria-hidden="true" /></button><span>{Math.round(activeTab.zoomFactor * 100)}%</span><button type="button" aria-label="Zoom in" title="Zoom in" onClick={() => changeZoom(0.1)}><Plus size={13} aria-hidden="true" /></button></div>
                     <button type="button" onClick={() => updateTab(activeTab.id, { ownerThreadId: activeTab.ownerThreadId === null ? activeThreadId : null })}>
                       <span>{activeTab.ownerThreadId === null ? 'Unpin from all threads' : 'Pin across threads'}</span>{activeTab.ownerThreadId === null ? <PinOffRegular /> : <PinRegular />}
                     </button>
                     <div className="browser-menu-separator" />
-                    <button type="button" onClick={() => { void window.mousse.browser.clearCookies(); setMenuOpen(false) }}>
+                    <button type="button" onClick={() => {
+                      setMenuOpen(false)
+                      if (!window.confirm('Clear browser cookies? You are signed out of every site.')) return
+                      void window.mousse.browser.clearCookies().catch((error) => console.error('Clearing browser cookies failed', error))
+                    }}>
                       <span className="browser-menu-label"><CookiesRegular />Clear cookies</span>
                       <DeleteDismissRegular />
                     </button>
-                    <button type="button" onClick={() => { void window.mousse.browser.clearCache(); setMenuOpen(false) }}>
+                    <button type="button" onClick={() => { void window.mousse.browser.clearCache().catch((error) => console.error('Clearing the browser cache failed', error)); setMenuOpen(false) }}>
                       <span className="browser-menu-label"><BroomRegular />Clear cache</span>
                     </button>
                     </div>
