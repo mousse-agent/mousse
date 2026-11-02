@@ -64,8 +64,10 @@ The `id` of a route can differ from the model's: Claude Code takes Haiku 4.5 onl
 
 ### Version limits (`minMousse`)
 
-- A route below its `minMousse` is not listed, not checked and not selectable. The model stays
-  available through its other routes.
+- A route below its `minMousse` is not listed, not checked and not selectable. That includes a
+  model the agent lists itself: Claude Code's live list drops a row whose alias or resolved model is
+  such a route id. The model stays available through its other routes. A live model with no catalog
+  entry is listed as the agent names it.
 - It is compared with `compareVersions` (`src/mms/harness/driver.ts`) against `mousseVersion()`
   (`src/mms/appVersion.ts`). A missing version (`0.0.0`: a checkout or a test) counts as newest. A
   value that does not parse drops the route.

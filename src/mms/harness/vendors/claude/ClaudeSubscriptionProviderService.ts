@@ -22,7 +22,7 @@ import { AppError } from '../../../../shared/errors'
 import type { ProviderToolEvent } from '../../../../shared/agentActivity'
 import { CLAUDE_INSTANCE_ID } from '../../../../shared/providerInstances'
 import { catalogModelsOnRoute, MODEL_CATALOG_FORMAT, type ModelCatalog, type ModelCatalogEntry, type ModelCatalogRoute } from '../../../../shared/modelCatalog'
-import { modelCatalog } from '../../../models/modelCatalog'
+import { bundledModelCatalog, catalogForThisMousse } from '../../../models/modelCatalog'
 import { atomicWriteJsonSync } from '../../../data/AtomicFs'
 import type { UserQuestionService } from '../../../orchestrator/UserQuestionService'
 import { exactDirectory } from '../../../run/approvalFingerprint'
@@ -209,7 +209,10 @@ type TurnContext = {
   locked?: ClaudeLockedGate
 }
 type Dependencies = {
-  /** Mousse's model catalog, gated for this version (default `modelCatalog()`); tests use made-up models. */
+  /**
+   * Mousse's model catalog as read, before version limits (default `bundledModelCatalog()`); this
+   * service gates it for the running Mousse. Tests use made-up models.
+   */
   modelCatalog?: () => ModelCatalog
   /** How long the older-model check may take after the live list is saved (default 20 s; tests). */
   olderCheckMs?: number
@@ -462,6 +465,18 @@ export type ClaudeOlderCandidate = ModelCatalogEntry & { route: ModelCatalogRout
 /** Catalog models on the `claude` route that Claude Code does not list live, newest first. */
 export function claudeOlderCandidates(catalog: ModelCatalog, live: ReadonlySet<string>): ClaudeOlderCandidate[] {
   return catalogModelsOnRoute(catalog, 'claude').filter((entry) => !live.has(bareModelId(entry.route.id)))
+}
+
+/**
+ * Claude Code's live listing without the models this Mousse does not handle yet: a row whose alias
+ * or resolved model is a `claude` route id the catalog has (`read`) but version limits removed
+ * (`gated`). A model with no catalog entry stays.
+ */
+export function claudeLiveModelsForThisMousse(models: readonly ModelInfo[], read: ModelCatalog, gated: ModelCatalog): ModelInfo[] {
+  const allowed = new Set(catalogModelsOnRoute(gated, 'claude').map((entry) => entry.route.id))
+  const held = new Set(catalogModelsOnRoute(read, 'claude').map((entry) => entry.route.id).filter((id) => !allowed.has(id)))
+  if (!held.size) return [...models]
+  return models.filter((model) => !held.has(bareModelId(model.value)) && !(model.resolvedModel && held.has(bareModelId(model.resolvedModel))))
 }
 
 /** The cache key of a check: the Claude Code program file, the account and the candidate route ids. */
@@ -883,10 +898,16 @@ export class ClaudeSubscriptionProviderService {
   }
   /** The model catalog; one that cannot be read offers no older models. */
   private catalog(): ModelCatalog {
+    return this.catalogs().gated
+  }
+  /** The catalog as read, and gated for this Mousse version (`minMousse`). */
+  private catalogs(): { read: ModelCatalog; gated: ModelCatalog } {
     try {
-      return (this.dependencies.modelCatalog ?? modelCatalog)()
+      const read = (this.dependencies.modelCatalog ?? bundledModelCatalog)()
+      return { read, gated: catalogForThisMousse(read) }
     } catch {
-      return { format: MODEL_CATALOG_FORMAT, revision: 0, models: [] }
+      const empty: ModelCatalog = { format: MODEL_CATALOG_FORMAT, revision: 0, models: [] }
+      return { read: empty, gated: empty }
     }
   }
   /** When Claude Code last listed the models, kept with them across restarts. */
@@ -1202,8 +1223,11 @@ export class ClaudeSubscriptionProviderService {
         tools: [],
         canUseTool: async () => ({ behavior: 'deny', message: 'Model discovery cannot run tools' })
       })
-      const models = await query.supportedModels()
+      const listed = await query.supportedModels()
       controller.signal.throwIfAborted()
+      // A model whose catalog route needs a newer Mousse is not offered, even when Claude Code lists it.
+      const { read, gated } = this.catalogs()
+      const models = claudeLiveModelsForThisMousse(listed, read, gated)
       if (models.length) {
         const extras = await claudeModelExtras(query, models, controller.signal)
         controller.signal.throwIfAborted()
@@ -1211,7 +1235,7 @@ export class ClaudeSubscriptionProviderService {
         this.settings.modelsRefreshedAt = new Date().toISOString()
         this.save()
         try {
-          handedOver = this.startOlderCheck(query, controller, models)
+          handedOver = this.startOlderCheck(query, controller, listed)
         } catch {
           // The live list is saved; the older models wait for the next refresh.
         }

@@ -5,19 +5,23 @@ import { compareVersions } from '../harness/driver'
 // builds read no file at run time.
 import bundled from './models.json'
 
+let read: ModelCatalog | undefined
+
 /** The catalog every release ships, as read (not yet gated by version). */
 export function bundledModelCatalog(): ModelCatalog {
-  return parseModelCatalog(bundled)
+  read ??= parseModelCatalog(bundled)
+  return read
 }
 
-let cached: { version: string; catalog: ModelCatalog } | undefined
+/** `catalog` with the routes this Mousse version does not handle yet (`minMousse`) removed. */
+export function catalogForThisMousse(catalog: ModelCatalog): ModelCatalog {
+  return gateModelCatalog(catalog, mousseVersion(), compareVersions)
+}
 
 /**
- * The model catalog this Mousse uses: the bundled copy, with the routes this version does not
- * handle yet (`minMousse`) removed. One per installation, shared by every profile.
+ * The model catalog this Mousse uses: the bundled copy, gated for this version. One per
+ * installation, shared by every profile.
  */
 export function modelCatalog(): ModelCatalog {
-  const version = mousseVersion()
-  if (cached?.version !== version) cached = { version, catalog: gateModelCatalog(bundledModelCatalog(), version, compareVersions) }
-  return cached.catalog
+  return catalogForThisMousse(bundledModelCatalog())
 }

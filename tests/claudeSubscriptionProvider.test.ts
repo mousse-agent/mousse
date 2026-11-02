@@ -946,7 +946,7 @@ describe('older Claude models', () => {
   const live = { value: 'ember', resolvedModel: 'ember-live[1m]', displayName: 'Ember', description: 'Ember 9 · test model' }
   type Behaviour = { refuse?: true; fail?: true; applied?: string | null; effort?: string; hang?: true }
   /** An idle query whose `setModel` and `get_settings` act per model as `behaviour` says. */
-  function olderQuery(behaviour: Record<string, Behaviour>) {
+  function olderQuery(behaviour: Record<string, Behaviour>, listed: unknown[] = [live]) {
     let current = 'ember'
     const setModel = vi.fn(async (model: string) => {
       if (behaviour[model]?.refuse) throw new Error(`API error: 400 unknown provider for model ${model} · model not changed`)
@@ -959,7 +959,7 @@ describe('older Claude models', () => {
       const model = acting?.applied === undefined ? current : acting.applied
       return { applied: { ...(model === null ? {} : { model }), ...(acting?.effort ? { effort: acting.effort } : {}) } }
     })
-    const query = Object.assign(fakeQuery(), { supportedModels: vi.fn(async () => [live]), setModel, getSettings }) as unknown as Query
+    const query = Object.assign(fakeQuery(), { supportedModels: vi.fn(async () => listed), setModel, getSettings }) as unknown as Query
     return { query, setModel, close: (query as unknown as { close: ReturnType<typeof vi.fn> }).close }
   }
   const standard: Record<string, Behaviour> = {
@@ -1048,6 +1048,38 @@ describe('older Claude models', () => {
       ['ember', 'ember-runs'],
       ['ember', 'ember-runs', 'ember-old-20290101']
     ])
+  })
+
+  it('does not offer a model Claude Code lists when its catalog route needs a newer Mousse', async () => {
+    vi.stubEnv('MOUSSE_VERSION', '1.2.0')
+    const limited = parseModelCatalog({
+      format: 1,
+      revision: 2,
+      models: [
+        ...catalog.models,
+        entry('ember-next', '2031-02-01', { routes: { claude: { id: 'ember-next', minMousse: '1.3.0' } } }),
+        entry('ember-soon', '2031-03-01', { routes: { claude: { id: 'ember-soon', minMousse: '2.0' } } }),
+        entry('ember-now', '2031-04-01', { routes: { claude: { id: 'ember-now', minMousse: '1.2.0' } } })
+      ]
+    })
+    const listed = [
+      live,
+      // By its alias's resolved model, by its own id with a variant suffix, and one this version handles.
+      { value: 'next', resolvedModel: 'ember-next', displayName: 'Next', description: 'Ember 10 · test model' },
+      { value: 'ember-soon[1m]', displayName: 'Soon', description: 'Ember 11 · test model' },
+      { value: 'ember-now', displayName: 'Now', description: 'Ember 12 · test model' },
+      // No catalog entry: Claude Code's own word stands.
+      { value: 'custom', displayName: 'Custom', description: 'model' }
+    ]
+    const check = olderQuery(standard, listed)
+    const { service, home } = fixture(() => check.query, true, undefined, undefined, { modelCatalog: () => limited })
+    await service.refreshModels(home)
+    await service.olderCheck
+    expect(service.models().map((model) => model.id)).toEqual(['ember', 'ember-now', 'custom', 'ember-runs', 'ember-old-20290101'])
+    // Neither is switched to, for its levels or as an older model.
+    expect(check.setModel.mock.calls.map(([model]) => model)).not.toContain('next')
+    expect(check.setModel.mock.calls.map(([model]) => model)).not.toContain('ember-next')
+    expect(check.setModel.mock.calls.map(([model]) => model)).not.toContain('ember-soon[1m]')
   })
 
   it('runs an older model at a level its catalog entry lists', async () => {
