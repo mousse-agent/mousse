@@ -31,7 +31,7 @@ import type { McpRelayRuntime } from '../../shared/integrations'
 import type { AgentAccessLevel, LlmProviderOption } from '../../shared/settings'
 import type { ChatMode } from '../../shared/types'
 import { findListedModel, modelChoiceOf } from '../../shared/modelChoice'
-import { parseThinkingSuffixFromModelId } from '../../shared/modelVariants'
+import { modelVariantOf, parseThinkingSuffixFromModelId } from '../../shared/modelVariants'
 import { agentModelId, upgradeSelection, type ModelPick } from '../../shared/modelSelection'
 import type { LoginSession } from '../providers/LoginSession'
 import type { ProviderInstanceService } from './instanceMap'
@@ -160,6 +160,14 @@ export interface HarnessGateway {
    * default when nothing is chosen, so blank means there is no default either.
    */
   resolveStored(selection: Pick<ModelOverride, 'instanceId' | 'llmProvider' | 'model' | 'effort'>, options: ResolveStoredOptions): ResolvedTurnSelection
+  /**
+   * Where a stored selection goes when its instance no longer offers its model
+   * (`DriverRuntime.modelStanding` says `not_offered`, which needs a fresh listing): `instead`, the
+   * model of the same instance it runs now (`landedPick` keeps its context, speed and effort where
+   * that model has them), or no `instead` when the instance offers none. Undefined leaves the
+   * selection as it is: the model is offered, unknown, hidden, added by the user, or its entry moved.
+   */
+  replacementFor?(selection: Pick<ModelOverride, 'instanceId' | 'llmProvider' | 'model' | 'effort'>): { instead?: ModelPick } | undefined
   /**
    * The immutable binding of one attempt, from a resolved selection and the current counters. A
    * runtime with native sessions has its account read first (bounded; concurrent reads share one),
@@ -737,6 +745,27 @@ function harnessFail(code: HarnessErrorCode, message: string, instanceId?: strin
   throw harnessAppError({ code, message, ...(instanceId ? { instanceId } : {}) })
 }
 
+/**
+ * A model a selection moves to from `from`: the listed variant of `landed` that keeps `from`'s
+ * context (`@1m`, `[1m]`) and speed (`:fast`) where one is listed, never one `from` did not have,
+ * and `effort` when that model takes it.
+ */
+function landedPick(available: readonly InstanceModel[], landed: InstanceModel, from: string, effort: string | undefined): ModelPick {
+  const wanted = modelVariantOf(from)
+  const base = modelVariantOf(landed.id).baseId
+  let best = landed
+  let bestScore = -1
+  for (const entry of available) {
+    if (entry.hidden && entry !== landed) continue
+    const variant = modelVariantOf(entry.id)
+    if (variant.baseId !== base) continue
+    if ((variant.context && variant.context !== wanted.context) || (variant.speed && variant.speed !== wanted.speed)) continue
+    const score = (variant.context ? 2 : 0) + (variant.speed ? 1 : 0)
+    if (score > bestScore) [best, bestScore] = [entry, score]
+  }
+  return { model: best.id, ...(effort && best.capabilities.efforts.includes(effort) ? { effort } : {}) }
+}
+
 /** The Move prompt of an instance a Mousse update retired, while it has not moved. */
 function retiredPrompt(driver: HarnessDriver, instanceId: string, config: InstanceConfig): RetiredPrompt | undefined {
   return config.movedTo ? undefined : driver.retired?.(instanceId)
@@ -1000,7 +1029,30 @@ export class Harness implements HarnessGateway {
     const find = (id: string | undefined) => (id ? available.find((entry) => entry.id === id) : undefined)
     const landed = find(model) ?? find(runtime.movedModel?.(model)) ?? available.find((entry) => !entry.hidden) ?? available[0]!
     if (landed.id === model) return same
-    return { model: landed.id, ...(effort && landed.capabilities.efforts.includes(effort) ? { effort } : {}) }
+    return landedPick(available, landed, model, effort)
+  }
+
+  replacementFor(stored: Pick<ModelOverride, 'instanceId' | 'llmProvider' | 'model' | 'effort'>): { instead?: ModelPick } | undefined {
+    const selection = upgradeSelection(stored)
+    if (!selection.model || (!selection.instanceId?.trim() && !selection.llmProvider?.trim()) || onRetiredBareRoute(selection.instanceId)) return undefined
+    let named: string
+    try {
+      named = this.instanceMap.instanceIdOf(selection)
+    } catch {
+      return undefined
+    }
+    // A moved entry's thread lands on the new entry's model already (`movedModel`).
+    if (this.movedTarget(named)) return undefined
+    const record = this.recordOrUndefined(named)
+    if (!record?.runtime.modelStanding || retiredPrompt(record.driver, named, record.config)) return undefined
+    const prefs = this.prefs.get(named)
+    // A model the user hid is refused as hidden; one they added is theirs to keep.
+    if (hidesModel(prefs, selection.model) || prefs.custom.some((model) => model.id === selection.model)) return undefined
+    const standing = record.runtime.modelStanding(selection.model)
+    if (standing.standing !== 'not_offered') return undefined
+    const available = this.catalog.models(named, { kind: 'device' })
+    const landed = standing.instead.map((id) => available.find((entry) => entry.id === id && !entry.hidden)).find((entry) => entry !== undefined)
+    return landed ? { instead: landedPick(available, landed, selection.model, selection.effort) } : {}
   }
 
   /** The entry an instance moved to (one hop), when that entry still exists. */
