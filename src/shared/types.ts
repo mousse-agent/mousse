@@ -981,6 +981,11 @@ export interface SubagentWorkspaceBinding {
   policy: 'shared' | 'isolated' | 'primary'
   /** The parent's workspace path a `shared` child observes read-only. */
   sharedPath?: string
+  /**
+   * An `isolated` child started with "Give each subagent its own worktree" on: the parent's HEAD when it was started. Its
+   * worktree is made from this commit before its first turn, whatever that turn's mode.
+   */
+  startSha?: string
 }
 
 /**

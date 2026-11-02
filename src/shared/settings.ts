@@ -174,6 +174,21 @@ export function normalizeRunSettings(raw?: Partial<RunSettings> | null): RunSett
   }
 }
 
+/**
+ * Features that are still being tried out, each off until turned on.
+ *
+ * `subagentWorktrees`: Mousse gives every subagent it starts a worktree of its own, made when the subagent starts from the
+ * parent's current HEAD, on a `mousse/` branch, whatever the main agent asked for. Off: the main agent chooses, as it
+ * always has (`workspace` isolated or shared). Either way a subagent's work is reported, never merged.
+ */
+export interface ExperimentalSettings {
+  subagentWorktrees: boolean
+}
+
+export function normalizeExperimentalSettings(raw?: Partial<ExperimentalSettings> | null): ExperimentalSettings {
+  return { subagentWorktrees: raw?.subagentWorktrees === true }
+}
+
 export interface MousseSettings {
   profile: {
     username: string
@@ -186,6 +201,7 @@ export interface MousseSettings {
   context: ContextSettings
   agentAccess: AgentAccessSettings
   runs: RunSettings
+  experimental: ExperimentalSettings
   provider: {
     llmProvider: LlmProviderId
     /** The model as its agent lists it; the reasoning level is `effort` (absent = the model's default). */
@@ -500,6 +516,7 @@ export function getDefaultSettings(): MousseSettings {
     context: normalizeContextSettings(),
     agentAccess: normalizeAgentAccessSettings(),
     runs: normalizeRunSettings(),
+    experimental: normalizeExperimentalSettings(),
     provider: {
       llmProvider: '',
       model: ''
