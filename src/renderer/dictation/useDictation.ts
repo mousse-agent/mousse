@@ -6,6 +6,7 @@ import { currentSpeechPreferences } from '../speech/speechPreferences'
 import { useDictationStore } from './dictationStore'
 import { openMicrophone, type Microphone } from './microphone'
 import type { AudioLevels } from '../speech/audioLevels'
+import { warmLocalEngine } from './localEngine'
 import { transcribeRecording } from './transcribe'
 
 const NOTICE_VISIBLE_MS = 4000
@@ -27,6 +28,8 @@ export function useDictation({ disabled, loading, onTranscript }: UseDictationOp
   const recordingChunksRef = useRef<Blob[]>([])
   const recordingTimerRef = useRef<number | null>(null)
   const recordingStartRef = useRef<number>(0)
+  /** When the user asked to stop, for the stop-to-text time in the log. */
+  const stopRequestedRef = useRef<number | null>(null)
   const noticeTimerRef = useRef<number | null>(null)
   const captureTicket = useRef(0)
   const capturePending = useRef(false)
@@ -80,11 +83,18 @@ export function useDictation({ disabled, loading, onTranscript }: UseDictationOp
 
   const transcribe = async (blob: Blob, ticket: number) => {
     const live = () => captureMounted.current && ticket === captureTicket.current
+    const stopRequested = stopRequestedRef.current ?? performance.now()
+    const recordingReady = performance.now()
+    stopRequestedRef.current = null
     setTranscribing(true)
     try {
       const selection = useDictationStore.getState().selection
       if (!selection) throw new Error('No dictation model is selected. Choose one under Settings, Speech.')
       const text = blob.size > 0 ? (await transcribeRecording(blob, selection)).trim() : ''
+      console.info(
+        `[dictation] stop to text ${Math.round(performance.now() - stopRequested)} ms ` +
+          `(recording ready after ${Math.round(recordingReady - stopRequested)} ms)`
+      )
       if (!live()) return
       if (text) onTranscriptRef.current(text)
       else showNotice(NO_SPEECH_MESSAGE)
@@ -102,6 +112,9 @@ export function useDictation({ disabled, loading, onTranscript }: UseDictationOp
     setRecordingPending(true)
     setError(undefined)
     setNotice(null)
+    // Load the model while the user speaks rather than after they stop.
+    const selection = useDictationStore.getState().selection
+    if (selection?.source === 'local') warmLocalEngine(selection.modelId)
     let microphone: Microphone | undefined
     const fail = (failure: unknown) => {
       stopRecordingTimer()
@@ -179,7 +192,9 @@ export function useDictation({ disabled, loading, onTranscript }: UseDictationOp
   startRef.current = start
 
   const stop = () => {
-    if (mediaRecorderRef.current?.state === 'recording') mediaRecorderRef.current.stop()
+    if (mediaRecorderRef.current?.state !== 'recording') return
+    stopRequestedRef.current = performance.now()
+    mediaRecorderRef.current.stop()
   }
 
   return {

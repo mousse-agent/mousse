@@ -17,5 +17,10 @@ serveSttWorker(['whisper'], (model) => {
     return loaded
   }
 
-  return async (samples) => transcribeWhisper(await load(), samples)
+  return {
+    warm: async () => {
+      await load()
+    },
+    transcribe: async (samples) => transcribeWhisper(await load(), samples)
+  }
 })
