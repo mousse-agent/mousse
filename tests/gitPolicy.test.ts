@@ -5,9 +5,10 @@ import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   assertGitAllowed, clearGitPolicyLog, decideGitCommand, GitPolicyError, gitPolicyLog, isOwnedPath, isOwnedRef,
-  registerOwnedGitRoot, stripInheritedGitEnv, userAction, withGitAccess, type GitCommandRequest
+  currentUserRequest, registerOwnedGitRoot, stripInheritedGitEnv, userAction, withGitAccess, withUserRequest, type GitCommandRequest, type GitDecision
 } from '../src/mms/git/gitPolicy'
 import { repoProgramEnv, withoutRepoPrograms } from '../src/mms/git/repoPrograms'
+import { tryGit } from '../src/mms/actions/git'
 
 const USER = userAction('button', 'Push')
 const roots: string[] = []
@@ -95,11 +96,11 @@ describe('Mousse may change what it owns', () => {
     expect(decide({ args: ['fetch', '--progress'], userRequested: USER })).toMatchObject({ access: 'userRequested', allowed: true })
   })
 
-  it('allows a push only of owned refs, without -u', () => {
-    expect(decide({ args: ['push', '--no-verify', 'origin', 'refs/mousse/r/1:refs/heads/mousse/dispatch/1'] })).toMatchObject({ access: 'owned', allowed: true })
+  it('never treats a push as owned, whatever the branch is called: it publishes to the user\'s remote', () => {
+    expect(decide({ args: ['push', '--no-verify', 'origin', 'refs/mousse/r/1:refs/heads/mousse/dispatch/1'] })).toMatchObject({ access: 'userRequested', allowed: false, reason: expect.stringContaining('pushes to a remote') })
     expect(decide({ args: ['push', 'origin', 'HEAD:refs/heads/main'] })).toMatchObject({ allowed: false })
     expect(decide({ args: ['push', '-u', 'origin', 'HEAD:refs/heads/mousse/x'] })).toMatchObject({ allowed: false })
-    expect(decide({ args: ['push', '--mirror', 'origin'] })).toMatchObject({ allowed: false })
+    expect(decide({ args: ['push', 'origin', 'HEAD:refs/heads/mousse/x'], userRequested: USER })).toMatchObject({ access: 'userRequested', allowed: true })
   })
 
   it('allows worktree content changes inside the Mousse home only', () => {
@@ -202,6 +203,67 @@ describe('worktree config', () => {
     expect(decide({ cwd: outside, args: ['config', '--worktree', 'core.hooksPath', '/dev/null'] })).toMatchObject({ allowed: false })
     expect(decide({ cwd: owned, args: ['config', 'extensions.worktreeConfig', 'true'] })).toMatchObject({ allowed: false })
     expect(decide({ cwd: outside, args: ['config', 'extensions.worktreeConfig', 'true'], userRequested: userAction('button', 'Start thread from pull request') })).toMatchObject({ access: 'userRequested', allowed: true })
+  })
+})
+
+describe('round 2: work tree, sparse checkout, protocols and the environment', () => {
+  it('judges read-tree -u as a work tree write, and read-tree alone as an index write', () => {
+    expect(decide({ args: ['read-tree', '-m', '-u', 'HEAD'] })).toMatchObject({ allowed: false, reason: expect.stringContaining('outside a Mousse worktree') })
+    expect(decide({ args: ['read-tree', '--reset', '-u', 'HEAD'] })).toMatchObject({ allowed: false })
+    expect(decide({ cwd: owned, args: ['read-tree', '-m', '-u', 'HEAD'] })).toMatchObject({ access: 'owned', allowed: true })
+    // Into a private index Mousse made in the repository's Git directory: owned, and the checkout is untouched.
+    const index = join(outside, '.git', 'mousse-pending-1.index')
+    expect(decide({ args: ['read-tree', 'HEAD'], env: { GIT_INDEX_FILE: index } })).toMatchObject({ access: 'owned', allowed: true })
+    expect(decide({ args: ['read-tree', '-m', '-u', 'HEAD'], env: { GIT_INDEX_FILE: index } })).toMatchObject({ allowed: false })
+    expect(decide({ args: ['read-tree', 'HEAD'], env: { GIT_INDEX_FILE: join(outside, '.git', 'index') } })).toMatchObject({ allowed: false })
+  })
+
+  it('judges sparse-checkout as a config write unless the worktree keeps its own config', () => {
+    const worktree = join(owned, 'sparse')
+    git(owned, 'init', '-q', '-b', 'mousse/thread/1/main', worktree)
+    expect(decide({ cwd: worktree, args: ['sparse-checkout', 'list'] })).toMatchObject({ access: 'read' })
+    expect(decide({ cwd: worktree, args: ['sparse-checkout', 'set', '--no-cone', '--stdin'] })).toMatchObject({ allowed: false, reason: expect.stringContaining('config') })
+    git(worktree, 'config', 'extensions.worktreeConfig', 'true')
+    expect(decide({ cwd: worktree, args: ['sparse-checkout', 'set', '--no-cone', '--stdin'] })).toMatchObject({ access: 'owned', allowed: true })
+    expect(decide({ args: ['sparse-checkout', 'set', 'src'] })).toMatchObject({ allowed: false })
+  })
+
+  it('accepts only restrictive protocol settings', () => {
+    expect(decide({ args: ['-c', 'protocol.file.allow=always', 'status', '--no-optional-locks'] })).toMatchObject({ allowed: false })
+    expect(decide({ args: ['-c', 'protocol.allow=always', 'log'] })).toMatchObject({ allowed: false })
+    expect(decide({ args: ['-c', 'protocol.ext.allow=never', '-c', 'protocol.file.allow=user', 'log'] })).toMatchObject({ access: 'read', allowed: true })
+  })
+
+  it('checks redirects and config the caller sets in the environment, as it checks flags', () => {
+    expect(decide({ args: ['update-ref', 'refs/mousse/x', 'a'.repeat(40)], env: { GIT_DIR: '/elsewhere/.git' } })).toMatchObject({ allowed: false, reason: expect.stringContaining('GIT_DIR') })
+    expect(decide({ args: ['add', '-A'], cwd: owned, env: { GIT_WORK_TREE: outside } })).toMatchObject({ allowed: false, reason: expect.stringContaining('GIT_WORK_TREE') })
+    // A read may name another repository; scoped reads do.
+    expect(decide({ args: ['log', '-1'], env: { GIT_DIR: '/elsewhere/.git', GIT_WORK_TREE: '/elsewhere' } })).toMatchObject({ access: 'read', allowed: true })
+    expect(decide({ args: ['log'], env: { GIT_CONFIG_PARAMETERS: "'core.hookspath'='/tmp/hooks'" } })).toMatchObject({ allowed: false })
+    expect(decide({ args: ['log'], env: { GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'push.default', GIT_CONFIG_VALUE_0: 'matching' } })).toMatchObject({ allowed: false })
+    expect(decide({ args: ['log'], env: { GIT_CONFIG_GLOBAL: '/tmp/other.gitconfig' } })).toMatchObject({ allowed: false })
+    expect(decide({ args: ['log'], env: { GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' } })).toMatchObject({ access: 'read', allowed: true })
+  })
+
+  it('keeps a refusal its own error in tryGit, never an ordinary failed run', () => {
+    vi.stubEnv('MOUSSE_GIT_POLICY', 'refuse')
+    expect(() => tryGit(outside, ['update-ref', 'refs/heads/main', 'a'.repeat(40)])).toThrow(GitPolicyError)
+    // An ordinary failure is still an answer.
+    expect(tryGit(outside, ['rev-parse', '--verify', '--quiet', 'refs/heads/none'])).toMatchObject({ ok: false })
+  })
+
+  it('a user request covers what its handler runs, and ends when the handler returns', async () => {
+    vi.stubEnv('MOUSSE_GIT_POLICY', 'refuse')
+    const write = (): GitDecision => assertGitAllowed({ cwd: outside, args: ['update-ref', 'refs/heads/main', 'a'.repeat(40)] })
+    let later: Promise<unknown> = Promise.resolve()
+    await withUserRequest(userAction('button', 'Publish'), async () => {
+      expect(currentUserRequest()).toMatchObject({ label: 'Publish' })
+      expect(write()).toMatchObject({ allowed: true })
+      // Work the handler starts but does not wait for.
+      later = new Promise((resolve) => setTimeout(resolve, 20)).then(() => write())
+    })
+    expect(currentUserRequest()).toBeUndefined()
+    await expect(later).rejects.toBeInstanceOf(GitPolicyError)
   })
 })
 

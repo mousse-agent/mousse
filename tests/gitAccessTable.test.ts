@@ -1,7 +1,8 @@
-import { readFileSync } from 'node:fs'
+import { readdirSync, readFileSync, statSync } from 'node:fs'
 import { join } from 'node:path'
+import ts from 'typescript'
 import { describe, expect, it } from 'vitest'
-import { GIT_ACCESS, gitAccessOf } from '../src/mms/protocol/gitAccess'
+import { GIT_ACCESS, gitAccessOf, USER_REQUEST_LABELS } from '../src/mms/protocol/gitAccess'
 import { PROTOCOL_METHODS } from '../src/mms/protocol/types'
 
 /** Each `case '<method>':` block of the protocol handlers, with the labels that share it. */
@@ -24,6 +25,155 @@ function handlerBlocks(): Map<string, string> {
   }
   return blocks
 }
+
+// ---------------------------------------------------------------------------------------------------------
+// Following calls through services
+
+const ROOT = join(__dirname, '..', 'src', 'mms')
+
+function sources(dir: string): string[] {
+  return readdirSync(dir).flatMap((name) => {
+    const path = join(dir, name)
+    return statSync(path).isDirectory() ? sources(path) : /\.ts$/.test(name) && !name.endsWith('.d.ts') ? [path] : []
+  })
+}
+
+/** Git subcommands that change something; a call whose argument list starts with one is a Git write. */
+const WRITE_SUBCOMMANDS = new Set([
+  'add', 'am', 'apply', 'branch', 'checkout', 'cherry-pick', 'clean', 'clone', 'commit', 'fetch', 'init', 'merge', 'mv', 'pull', 'push',
+  'read-tree', 'rebase', 'reset', 'restore', 'revert', 'rm', 'sparse-checkout', 'stash', 'switch', 'update-index', 'update-ref', 'worktree'
+])
+/** Functions that run the Git command in their argument list. */
+const RUNNERS = new Set(['git', 'gitRaw', 'tryGit', 'actionGit', 'lifecycleGit', 'workspaceGit', 'runGit', 'runLive', 'withoutRepoPrograms', 'raw'])
+/** GitService and code host methods that change the repository or GitHub. */
+const SERVICE_WRITES = /^(GitService\.(stage|stageAll|unstage|unstageAll|discard|fetch|pull|abortInProgress|init|createBranch|renameBranch|deleteBranch|checkout|commit|push)|CodeHost\.(createPullRequest|mergePullRequest|closePullRequest|fetchPullRequestHead|releasePullRequestHead)|GitHubService\.(createRepository|cloneRepository))$/
+
+/** The callee a call expression names: `Class.method` where the class can be told, else the bare name. */
+function calleeOf(call: ts.CallExpression, className: string | undefined, locals: Map<string, string>): string | null {
+  const target = call.expression
+  if (ts.isIdentifier(target)) return target.text
+  if (!ts.isPropertyAccessExpression(target)) return null
+  const name = target.name.text
+  const owner = target.expression
+  if (owner.kind === ts.SyntaxKind.ThisKeyword) return className ? `${className}.${name}` : name
+  if (ts.isNewExpression(owner) && ts.isIdentifier(owner.expression)) return `${owner.expression.text}.${name}`
+  if (ts.isParenthesizedExpression(owner) && ts.isNewExpression(owner.expression) && ts.isIdentifier(owner.expression.expression)) return `${owner.expression.expression.text}.${name}`
+  if (ts.isIdentifier(owner) && locals.has(owner.text)) return `${locals.get(owner.text)}.${name}`
+  const text = owner.getText()
+  if (/\bgitService$/.test(text)) return `GitService.${name}`
+  if (/\bcodeHost$/.test(text)) return `CodeHost.${name}`
+  if (/\bgithub$/.test(text)) return `GitHubService.${name}`
+  return name
+}
+
+/** Whether a call runs a Git write itself: a runner whose argument list starts with a write subcommand. */
+function writesGit(call: ts.CallExpression, callee: string | null): boolean {
+  if (!callee || !RUNNERS.has(callee.split('.').pop()!)) return false
+  return call.arguments.some((argument) => {
+    if (!ts.isArrayLiteralExpression(argument)) return false
+    const first = argument.elements.find((element) => !ts.isSpreadElement(element))
+    // A literal subcommand, or either branch of `a ? 'merge' : 'revert'`.
+    const names = !first ? [] : ts.isConditionalExpression(first) ? [first.whenTrue, first.whenFalse] : [first]
+    return names.some((name) => ts.isStringLiteralLike(name) && WRITE_SUBCOMMANDS.has(name.text))
+  })
+}
+
+interface Graph { calls: Map<string, Set<string>>; writes: Set<string> }
+
+/** Every named function and method in `src/mms`, what it calls, and which run a Git write themselves. */
+function callGraph(): Graph {
+  const calls = new Map<string, Set<string>>()
+  const writes = new Set<string>()
+  for (const path of sources(ROOT)) {
+    const source = ts.createSourceFile(path, readFileSync(path, 'utf8'), ts.ScriptTarget.Latest, true)
+    const record = (key: string, body: ts.Node, className: string | undefined): void => {
+      const out = calls.get(key) ?? new Set<string>()
+      calls.set(key, out)
+      const locals = new Map<string, string>()
+      const visit = (node: ts.Node): void => {
+        if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.initializer && ts.isNewExpression(node.initializer) && ts.isIdentifier(node.initializer.expression)) locals.set(node.name.text, node.initializer.expression.text)
+        if (ts.isCallExpression(node)) {
+          const callee = calleeOf(node, className, locals)
+          if (callee) out.add(callee)
+          if (writesGit(node, callee)) writes.add(key)
+        }
+        ts.forEachChild(node, visit)
+      }
+      visit(body)
+    }
+    const visit = (node: ts.Node, className?: string): void => {
+      if (ts.isClassDeclaration(node) && node.name) {
+        for (const member of node.members) {
+          if ((ts.isMethodDeclaration(member) || ts.isPropertyDeclaration(member) || ts.isGetAccessor(member)) && member.name && ts.isIdentifier(member.name)) record(`${node.name.text}.${member.name.text}`, member, node.name.text)
+        }
+        return
+      }
+      if (ts.isFunctionDeclaration(node) && node.name) record(node.name.text, node, className)
+      if (ts.isVariableStatement(node)) for (const declaration of node.declarationList.declarations) {
+        if (ts.isIdentifier(declaration.name) && declaration.initializer && (ts.isArrowFunction(declaration.initializer) || ts.isFunctionExpression(declaration.initializer))) record(declaration.name.text, declaration.initializer, className)
+      }
+      ts.forEachChild(node, (child) => visit(child, className))
+    }
+    visit(source)
+  }
+  return { calls, writes }
+}
+
+/** Every function or method that reaches a Git write or a changing GitService call, through any number of calls. */
+function mutating(graph: Graph): Set<string> {
+  const reached = new Set<string>(graph.writes)
+  for (const key of graph.calls.keys()) if (SERVICE_WRITES.test(key)) reached.add(key)
+  let grew = true
+  while (grew) {
+    grew = false
+    for (const [key, callees] of graph.calls) {
+      if (reached.has(key)) continue
+      if ([...callees].some((callee) => reached.has(callee) || SERVICE_WRITES.test(callee))) {
+        reached.add(key)
+        grew = true
+      }
+    }
+  }
+  return reached
+}
+
+/** What each handler block calls, as `Class.method` or a bare function name. */
+function handlerCalls(): Map<string, Set<string>> {
+  const path = join(ROOT, 'protocol', 'handlers.ts')
+  const source = ts.createSourceFile(path, readFileSync(path, 'utf8'), ts.ScriptTarget.Latest, true)
+  const result = new Map<string, Set<string>>()
+  const visit = (node: ts.Node): void => {
+    if (ts.isCaseBlock(node)) {
+      let labels: string[] = []
+      for (const clause of node.clauses) {
+        if (ts.isCaseClause(clause) && ts.isStringLiteralLike(clause.expression)) labels.push(clause.expression.text)
+        if (!clause.statements.length) continue
+        const out = new Set<string>()
+        const locals = new Map<string, string>()
+        const walk = (child: ts.Node): void => {
+          if (ts.isVariableDeclaration(child) && ts.isIdentifier(child.name) && child.initializer && ts.isNewExpression(child.initializer) && ts.isIdentifier(child.initializer.expression)) locals.set(child.name.text, child.initializer.expression.text)
+          if (ts.isCallExpression(child)) {
+            const callee = calleeOf(child, undefined, locals)
+            if (callee) out.add(callee)
+          }
+          ts.forEachChild(child, walk)
+        }
+        for (const statement of clause.statements) walk(statement)
+        for (const label of labels) if (!result.has(label)) result.set(label, out)
+        labels = []
+      }
+    }
+    ts.forEachChild(node, visit)
+  }
+  visit(source)
+  return result
+}
+
+/**
+ * Services and functions that change the user's own checkout or remote rather than Mousse's: their handler
+ * must declare `userRequested` and carry the user's request.
+ */
+const USER_CHANGES = /^(PublishService\.(publish|recoverPending)|CodeRevertService\.\w+|ManagedConflictService\.abort|discardPendingChanges|PullRequestThreadService\.startThread|startThread)$/
 
 const MUTATIONS = /gitService\.(stage|stageAll|unstage|unstageAll|discard|fetch|pull|abortInProgress|init|createBranch|renameBranch|deleteBranch|checkout|commit|push)\(|codeHost\.(createPullRequest|mergePullRequest|closePullRequest)\(|github\.(createRepository|cloneRepository)\(|gitUserAction\(/
 const READS = /gitService\.(getStatus|getDiff|getLog|getBranches|getDiffStats|lastCommitMessage|readBranchSummary|describeCommitInput|isRepo)\(|codeHost\.\w+\(/
@@ -55,8 +205,32 @@ describe('GIT_ACCESS', () => {
     expect(wrong).toEqual([])
   })
 
+  it('follows calls through other services: a handler that reaches a Git write declares owned or userRequested', () => {
+    const graph = callGraph()
+    const reached = mutating(graph)
+    const handlers = handlerCalls()
+    const wrong = [...new Set(PROTOCOL_METHODS)]
+      .filter((method) => [...(handlers.get(method) ?? [])].some((callee) => reached.has(callee) || SERVICE_WRITES.test(callee)))
+      .filter((method) => GIT_ACCESS[method] === 'none' || GIT_ACCESS[method] === 'read')
+      .map((method) => `${method}: ${[...handlers.get(method)!].filter((callee) => reached.has(callee) || SERVICE_WRITES.test(callee)).join(', ')}`)
+    expect(wrong).toEqual([])
+    // The analysis itself finds the paths it must: Revert, Publish, Abort, Discard, Start from a pull request.
+    for (const key of ['CodeRevertService.revertCode', 'PublishService.publish', 'ManagedConflictService.abort', 'PullRequestThreadService.startThread', 'discardPendingChanges']) expect(reached.has(key), key).toBe(true)
+    // Undo and Redo only rewind the conversation on this branch; they are declared for the file restore that follows.
+    expect(reached.has('ConversationActionService.apply')).toBe(false)
+  })
+
+  it('a handler that changes the user\'s checkout through a service declares userRequested and carries the request', () => {
+    const handlers = handlerCalls()
+    const blocks = handlerBlocks()
+    const wrong = [...new Set(PROTOCOL_METHODS)]
+      .filter((method) => [...(handlers.get(method) ?? [])].some((callee) => USER_CHANGES.test(callee)))
+      .filter((method) => GIT_ACCESS[method] !== 'userRequested' || !(method in USER_REQUEST_LABELS || /gitUserAction\(/.test(blocks.get(method) ?? '')))
+    expect(wrong).toEqual([])
+  })
+
   it('declares userRequested only where a handler passes the user\'s request, or says why not', () => {
-    const unexplained = [...new Set(PROTOCOL_METHODS)].filter((method) => GIT_ACCESS[method] === 'userRequested' && !MUTATIONS.test(blocks.get(method) ?? '') && !(method in USER_REQUESTED_ELSEWHERE))
+    const unexplained = [...new Set(PROTOCOL_METHODS)].filter((method) => GIT_ACCESS[method] === 'userRequested' && !MUTATIONS.test(blocks.get(method) ?? '') && !(method in USER_REQUEST_LABELS) && !(method in USER_REQUESTED_ELSEWHERE))
     expect(unexplained).toEqual([])
   })
 })

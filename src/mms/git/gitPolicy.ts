@@ -1,9 +1,9 @@
 import { AsyncLocalStorage } from 'node:async_hooks'
 import { spawnSync } from 'node:child_process'
 import { realpathSync } from 'node:fs'
-import { dirname, isAbsolute, join, resolve, sep } from 'node:path'
+import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path'
 import { getMousseHomeDir } from '../data/paths'
-import { gitDirectoryEnv, stripInheritedGitEnv, withGitConfigEnv } from './gitEnv'
+import { gitDirectoryEnv, isGitDirectory, stripInheritedGitEnv, withGitConfigEnv } from './gitEnv'
 import { GIT_NULL_DEVICE, NO_HOOKS_PATH } from './gitNullDevice'
 
 /**
@@ -81,6 +81,11 @@ export interface GitDecision {
   reason: string
 }
 
+/** Rethrows a refusal of the central check, so a caller that treats a failed Git run as an answer never swallows it. */
+export function rethrowGitPolicyError(error: unknown): void {
+  if (error instanceof GitPolicyError) throw error
+}
+
 export class GitPolicyError extends Error {
   constructor(readonly decision: GitDecision, readonly command: string) {
     super(`Mousse does not run "${command}" here: ${decision.reason}.`)
@@ -141,20 +146,34 @@ export function isOwnedRef(ref: string): boolean {
 }
 
 /**
- * Where `ref` points in the repository of `cwd`, following symbolic refs to the end: the ref itself when it
- * is not symbolic or does not exist, its final target when it is, `detached` for a HEAD that is not
- * symbolic, and null when Git cannot tell. Runs `git symbolic-ref`, a read, with nothing it inherited that
- * could send it elsewhere.
+ * A read the check itself runs (a symbolic ref's target, a config value), with nothing it inherited that
+ * could send it elsewhere. Null when Git could not be run.
  */
-function finalRef(cwd: string, ref: string, env?: NodeJS.ProcessEnv): string | null {
-  const result = spawnSync('git', ['-c', 'core.fsmonitor=false', 'symbolic-ref', '-q', ref], {
+function readGit(cwd: string, args: readonly string[], env?: NodeJS.ProcessEnv): { status: number | null; stdout: string } | null {
+  const result = spawnSync('git', ['-c', 'core.fsmonitor=false', ...args], {
     cwd,
     encoding: 'utf8',
     windowsHide: true,
     timeout: 10_000,
     env: withGitConfigEnv({ ...stripInheritedGitEnv(process.env), ...gitDirectoryEnv(cwd), ...(env?.GIT_DIR ? { GIT_DIR: env.GIT_DIR } : {}), GIT_OPTIONAL_LOCKS: '0' })
   })
-  if (result.error) return null
+  return result.error ? null : { status: result.status, stdout: result.stdout }
+}
+
+/** Whether `extensions.worktreeConfig` is already on, so per-worktree settings stay out of the shared config. */
+function worktreeConfigOn(cwd: string, env?: NodeJS.ProcessEnv): boolean {
+  return readGit(cwd, ['config', '--bool', '--get', 'extensions.worktreeConfig'], env)?.stdout.trim() === 'true'
+}
+
+/**
+ * Where `ref` points in the repository of `cwd`, following symbolic refs to the end: the ref itself when it
+ * is not symbolic or does not exist, its final target when it is, `detached` for a HEAD that is not
+ * symbolic, and null when Git cannot tell. Runs `git symbolic-ref`, a read, with nothing it inherited that
+ * could send it elsewhere.
+ */
+function finalRef(cwd: string, ref: string, env?: NodeJS.ProcessEnv): string | null {
+  const result = readGit(cwd, ['symbolic-ref', '-q', ref], env)
+  if (!result) return null
   if (result.status === 0) return result.stdout.trim() || null
   // Exit 1: not a symbolic ref (or none at all), so a write lands on the ref itself.
   if (result.status === 1) return ref === 'HEAD' ? 'detached' : ref
@@ -188,7 +207,8 @@ const ALLOWED_SETTINGS: ReadonlyArray<readonly [RegExp, (value: string) => boole
   [/^filter\..+\.(clean|smudge|process)$/, (value) => value === ''],
   [/^filter\..+\.required$/, () => true],
   [/^core\.(quotepath|autocrlf|eol|safecrlf|symlinks)$/, () => true],
-  [/^protocol\.(.+\.)?allow$/, () => true],
+  // Only restrictive values: `always` would open a protocol Git keeps closed by default.
+  [/^protocol\.(.+\.)?allow$/, (value) => value === 'never' || value === 'user'],
   [/^credential\.interactive$/, (value) => value === 'false'],
   [/^(transfer|fetch|receive)\.fsckobjects$/, (value) => value === 'true'],
   [/^submodule\.recurse$/, (value) => value === 'false'],
@@ -276,6 +296,8 @@ interface Effect {
   /** Folders it creates, moves or removes; each must be owned. */
   paths?: string[]
   remote?: boolean
+  /** It sends commits to a remote repository. */
+  publishes?: boolean
   config?: boolean
   /** A command Mousse never runs: it can delete what nothing else keeps. */
   banned?: string
@@ -283,11 +305,13 @@ interface Effect {
   deref?: boolean
   /** It writes the worktree's own config (`config --worktree`), which only that worktree reads. */
   worktreeConfig?: boolean
+  /** A sparse-checkout change: worktree config when `extensions.worktreeConfig` is on, else the shared config. */
+  sparse?: boolean
 }
 
 const READ: Effect = { refs: [] }
 const isRead = (effect: Effect): boolean =>
-  !effect.refs.length && !effect.unlistedRefs && !effect.worktree && !effect.index && !effect.headBranch && !effect.head && !effect.paths?.length && !effect.remote && !effect.config && !effect.worktreeConfig && !effect.banned
+  !effect.refs.length && !effect.unlistedRefs && !effect.worktree && !effect.index && !effect.headBranch && !effect.head && !effect.paths?.length && !effect.remote && !effect.publishes && !effect.config && !effect.worktreeConfig && !effect.sparse && !effect.banned
 
 /** Commands that only read, whatever their arguments. */
 const READ_ONLY = new Set([
@@ -349,8 +373,9 @@ function pushEffect(rest: readonly string[]): Effect {
     const colon = spec.indexOf(':')
     return colon < 0 ? spec : spec.slice(colon + 1)
   })
-  // `-u` writes branch.<name>.remote and .merge to the repository's config.
-  return { refs, unlistedRefs: widening || refspecs.length === 0, remote: !refs.every(isOwnedRef) || widening || refspecs.length === 0, config: has(rest, '-u', '--set-upstream') }
+  // A push publishes to the user's remote whatever the branch is called, so it is always theirs to ask for.
+  // `-u` also writes branch.<name>.remote and .merge to the repository's config.
+  return { refs, unlistedRefs: widening || refspecs.length === 0, publishes: true, config: has(rest, '-u', '--set-upstream') }
 }
 
 /** What the command runs with that decides whether `status` and `diff` write the index. */
@@ -462,10 +487,19 @@ function gitEffect(sub: string, rest: readonly string[], stdin: string | undefin
       const created = rest.flatMap((arg, index) => (['-b', '-B', '-c', '-C', '--orphan'].includes(arg) && rest[index + 1] ? [rest[index + 1]!] : []))
       return { refs: heads(created), worktree: true, head: true, config: has(rest, '--track', '-t') }
     }
-    case 'add':
     case 'read-tree':
+      // `-u` (with `-m` or `--reset`) also writes the files of the work tree it runs in.
+      return has(rest, '-u') ? { refs: [], index: true, worktree: true } : { refs: [], index: true }
+    case 'add':
     case 'update-index':
       return { refs: [], index: true }
+    case 'sparse-checkout': {
+      const [first] = positionals(rest)
+      if (first === 'list' || first === 'check-rules') return READ
+      // Rewrites the work tree, and writes `core.sparseCheckout`: to the worktree's own config once
+      // `extensions.worktreeConfig` is on, and otherwise to the shared config (a linked worktree turns that on).
+      return { refs: [], worktree: true, sparse: true }
+    }
     case 'rm':
       return has(rest, '--cached') ? { refs: [], index: true } : { refs: [], worktree: true }
     case 'restore':
@@ -476,7 +510,6 @@ function gitEffect(sub: string, rest: readonly string[], stdin: string | undefin
     case 'mv':
     case 'clean':
     case 'checkout-index':
-    case 'sparse-checkout':
       return { refs: [], worktree: true }
     case 'stash': {
       const [first] = positionals(rest)
@@ -527,6 +560,51 @@ function ghReads(args: readonly string[]): boolean {
 // Deciding
 
 /**
+ * A private index Mousse made: under the Mousse home, or a `mousse-*.index` file directly in a repository's
+ * Git directory (where the pending-changes snapshot builds its tree). A checkout's own `index` never is.
+ */
+function isOwnedIndex(file: string): boolean {
+  if (isOwnedPath(file)) return true
+  return /^mousse-[\w.-]+\.index$/.test(basename(file)) && isGitDirectory(dirname(file))
+}
+
+/** Variables that send Git to another repository, work tree, object store or index. */
+const REDIRECT_VARIABLES = ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR', 'GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES', 'GIT_NAMESPACE']
+/** Variables that point Git at other config files. Only the null device (no file) is accepted. */
+const CONFIG_FILE_VARIABLES = ['GIT_CONFIG', 'GIT_CONFIG_GLOBAL', 'GIT_CONFIG_SYSTEM']
+
+/**
+ * What the caller's own environment does, as the flags would: `refuse` for config a `-c` could not set,
+ * `moved` for a redirect a change may not run under. Values the process itself inherited are the user's
+ * and not judged here; `stripInheritedGitEnv` drops the ones that redirect.
+ */
+function environmentProblem(cwd: string, env: NodeJS.ProcessEnv): { refuse?: string; moved?: string } {
+  const own = (key: string): string | undefined => (env[key] !== undefined && env[key] !== process.env[key] ? env[key] : undefined)
+  for (const key of CONFIG_FILE_VARIABLES) {
+    const value = own(key)
+    if (value !== undefined && !NULL_DEVICES.has(value)) return { refuse: `it sets ${key}, which points Git at other config` }
+  }
+  const settings: string[] = []
+  // Entries the process inherited come first and are the user's; only those after them are the caller's.
+  const count = Number(own('GIT_CONFIG_COUNT') ?? 0)
+  const inherited = Number(process.env.GIT_CONFIG_COUNT ?? 0)
+  for (let index = Number.isSafeInteger(inherited) ? inherited : 0; Number.isSafeInteger(count) && index < count; index++) settings.push(`${env[`GIT_CONFIG_KEY_${index}`] ?? ''}=${env[`GIT_CONFIG_VALUE_${index}`] ?? ''}`)
+  const parameters = own('GIT_CONFIG_PARAMETERS')
+  if (parameters) for (const match of parameters.matchAll(/'([^']*)'(?:=\s*'([^']*)')?/g)) settings.push(match[2] === undefined ? match[1]! : `${match[1]}=${match[2]}`)
+  const bad = settings.find((pair) => !allowedSetting(pair))
+  if (bad !== undefined) return { refuse: `it sets "${bad.split('=')[0]}" in the environment, which could change what the command does` }
+  const ownGitDir = gitDirectoryEnv(cwd).GIT_DIR
+  for (const key of REDIRECT_VARIABLES) {
+    const value = own(key)
+    if (value === undefined) continue
+    // Naming the Git directory the command runs in is what `withoutRepoPrograms` does itself.
+    if (key === 'GIT_DIR' && ownGitDir && resolve(cwd, value) === ownGitDir) continue
+    return { moved: `it sets ${key}, which points Git at another place` }
+  }
+  return {}
+}
+
+/**
  * What `request` needs, and whether it may run. Runs Git only to read where a symbolic ref points, for a
  * write to an owned ref or to the branch HEAD is on.
  */
@@ -543,17 +621,26 @@ export function decideGitCommand(request: GitCommandRequest): GitDecision {
   if (parsed.problem) return { access: 'userRequested', allowed: false, reason: parsed.problem }
   if (!parsed.sub) return { access: 'read', allowed: true, reason: 'no command' }
   const env = request.env ?? {}
+  const redirect = environmentProblem(request.cwd, env)
   const effect = gitEffect(parsed.sub, parsed.rest, request.stdin, {
     optionalLocksOff: Boolean(request.lockFree || parsed.noOptionalLocks || env.GIT_OPTIONAL_LOCKS === '0'),
     autoRefreshOff: Boolean(request.lockFree || parsed.settings?.get('diff.autorefreshindex') === 'false')
   })
   if (effect.banned) return { access: 'userRequested', allowed: false, reason: effect.banned }
+  if (redirect.refuse) return { access: 'userRequested', allowed: false, reason: redirect.refuse }
   if (isRead(effect)) return { access: 'read', allowed: true, reason: 'a read' }
+  // A read may name another repository (a scoped read does); a change may not.
+  if (redirect.moved) return { access: 'userRequested', allowed: false, reason: redirect.moved }
 
   const cwdOwned = isOwnedPath(request.cwd)
   const problems: string[] = []
   if (effect.config) problems.push('it writes the repository\'s config')
   if (effect.remote) problems.push('it changes a remote')
+  if (effect.publishes) problems.push('it pushes to a remote')
+  if (effect.sparse) {
+    if (!worktreeConfigOn(request.cwd, env)) problems.push('it writes the repository\'s config (sparse checkout without extensions.worktreeConfig)')
+    else if (!cwdOwned) problems.push('it writes the config of a worktree Mousse does not own')
+  }
   if (effect.unlistedRefs) problems.push('it writes refs it does not name')
   // An owned ref that is symbolic is judged by its target: `refs/mousse/x` -> `refs/heads/main` writes `main`.
   const written = effect.refs.map((ref) => {
@@ -570,7 +657,7 @@ export function decideGitCommand(request: GitCommandRequest): GitDecision {
   if (effect.worktreeConfig && !cwdOwned) problems.push('it writes the config of a worktree Mousse does not own')
   if (effect.worktree && !cwdOwned) problems.push('it changes files outside a Mousse worktree')
   const indexFile = request.env?.GIT_INDEX_FILE
-  if (effect.index && !cwdOwned && !(indexFile && isOwnedPath(resolve(request.cwd, indexFile)))) problems.push('it writes the index of a checkout Mousse does not own')
+  if (effect.index && !(indexFile ? isOwnedIndex(resolve(request.cwd, indexFile)) : cwdOwned)) problems.push('it writes the index of a checkout Mousse does not own')
   if (effect.head && !cwdOwned) problems.push('it moves HEAD of a checkout Mousse does not own')
   if (effect.headBranch) {
     const head = cwdOwned ? finalRef(request.cwd, 'HEAD', env) : null
@@ -584,6 +671,34 @@ export function decideGitCommand(request: GitCommandRequest): GitDecision {
 
 // ---------------------------------------------------------------------------------------------------------
 // Where a command came from
+
+/** The user's request a protocol handler is carrying out, active only until that handler returns. */
+interface RequestScope { action: UserAction; active: boolean }
+const requests = new AsyncLocalStorage<RequestScope>()
+
+/**
+ * Runs `work` for the user's request `action`: every Git command it runs (through any runner) counts as asked
+ * for. The request ends when `work` settles, so a turn or a timer it started does not carry it on.
+ */
+export function withUserRequest<T>(action: UserAction, work: () => T): T {
+  const entry: RequestScope = { action, active: true }
+  let result: T
+  try {
+    result = requests.run(entry, work)
+  } catch (error) {
+    entry.active = false
+    throw error
+  }
+  if (result instanceof Promise) return result.finally(() => { entry.active = false }) as T
+  entry.active = false
+  return result
+}
+
+/** The user's request the current code is carrying out, if any. */
+export function currentUserRequest(): UserAction | undefined {
+  const entry = requests.getStore()
+  return entry?.active ? entry.action : undefined
+}
 
 interface AccessScope { method: string; access: GitAccess }
 const scope = new AsyncLocalStorage<AccessScope>()
@@ -653,6 +768,8 @@ function record(entry: GitPolicyEntry): void {
  * under declared is logged too, never refused.
  */
 export function assertGitAllowed(request: GitCommandRequest): GitDecision {
+  const userRequested = request.userRequested ?? currentUserRequest()
+  if (userRequested && !request.userRequested) request = { ...request, userRequested }
   const decision = decideGitCommand(request)
   const current = scope.getStore()
   if (!decision.allowed) {

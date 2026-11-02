@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto'
 import { lstatSync, readFileSync, readlinkSync } from 'node:fs'
 import { join } from 'node:path'
 import { englishMessagesEnv } from './gitProcess'
+import { GitPolicyError } from './gitPolicy'
 import { READ_ONLY_GIT_ENV } from './readOnlyGit'
 import { repoProgramEnv, withoutRepoPrograms } from './repoPrograms'
 
@@ -212,7 +213,7 @@ export async function readWorkingTreeStatus(top: string): Promise<StatusEntry[]>
   let next = steps.next([])
   while (!next.done) {
     next = steps.next(await Promise.all(next.value.map((read) => plumbing(top, read.args).catch((error: unknown) => {
-      if (read.optional) return ''
+      if (read.optional && !(error instanceof GitPolicyError)) return ''
       throw error
     }))))
   }
@@ -228,7 +229,7 @@ export function readWorkingTreeStatusSync(top: string): StatusEntry[] {
       try {
         return plumbingSync(top, read.args)
       } catch (error) {
-        if (read.optional) return ''
+        if (read.optional && !(error instanceof GitPolicyError)) return ''
         throw error
       }
     }))

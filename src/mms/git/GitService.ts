@@ -1,5 +1,4 @@
 import { AppError, createErrorProvider } from '../../shared/errors'
-import { AsyncLocalStorage } from 'node:async_hooks'
 import { spawn } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import { mkdtemp, rm, rmdir, stat, writeFile } from 'node:fs/promises'
@@ -23,7 +22,7 @@ import { resolveRepositoryIdentity } from './RepositoryIdentity'
 import { acquireRepositoryLease, RepositoryLeaseAbortedError } from './RepositoryLease'
 import { guardedSimpleGit, NO_DIFF_PROGRAMS, repoProgramEnv, SAFE_LOOKUP_ENV, withoutRepoPrograms } from './repoPrograms'
 import { readWorkingTreeStatus, type StatusEntry } from './workingTreeStatus'
-import type { UserAction } from './gitPolicy'
+import { GitPolicyError, withUserRequest, type UserAction } from './gitPolicy'
 import type {
   GitBranchInfo,
   GitBranchOptions,
@@ -328,12 +327,13 @@ const SUMMARY_KILL_SETTLE_MS = 5_000
 const DRAFT_COMMITS_SCANNED = 2000
 
 function readBoundedGit(cwd: string, args: readonly string[], maxBytes: number): Promise<string> {
-  return new Promise((resolvePromise) => {
+  return new Promise((resolvePromise, reject) => {
     let guarded: string[]
     try {
       guarded = withoutRepoPrograms(cwd, args)
-    } catch {
-      resolvePromise('')
+    } catch (error) {
+      if (error instanceof GitPolicyError) reject(error)
+      else resolvePromise('')
       return
     }
     const child = spawn('git', guarded, {
@@ -371,9 +371,6 @@ function readBoundedGit(cwd: string, args: readonly string[], maxBytes: number):
   })
 }
 
-/** The user's request behind the GitService mutation running now, for the central Git check. */
-const userRequests = new AsyncLocalStorage<UserAction>()
-
 export class GitService {
   /** Profile-scoped GitHub CLI integration alongside the existing Git operations. */
   readonly github = new GitHubService()
@@ -403,7 +400,7 @@ export class GitService {
   private runGit(cwd: string, args: readonly string[], options?: GitRunOptions & { userAction?: boolean }): Promise<GitRun> {
     const { userAction, ...run } = options ?? {}
     // Every change here is one the user asked for: the mutation that runs it passed their request in.
-    const guarded = withoutRepoPrograms(cwd, args, { userAction, userRequested: userRequests.getStore(), env: run.env })
+    const guarded = withoutRepoPrograms(cwd, args, { userAction, env: run.env })
     // Mousse's own commands take no optional lock, so a read never refreshes and rewrites the index.
     return runGit(cwd, guarded, userAction ? run : { ...run, env: { ...run.env, ...SAFE_LOOKUP_ENV, GIT_OPTIONAL_LOCKS: '0' } })
   }
@@ -413,7 +410,7 @@ export class GitService {
    * one: the central Git check (`gitPolicy`) allows a change Mousse does not own only with it.
    */
   private asUser<T>(userRequested: UserAction, work: () => Promise<T>): Promise<T> {
-    return userRequests.run(userRequested, work)
+    return withUserRequest(userRequested, work)
   }
 
   /**
@@ -737,8 +734,7 @@ export class GitService {
       const info = await stat(cwd).catch(() => null)
       if (!info?.isDirectory()) throw gitErrors.create('git_init_no_folder')
       if (await this.isRepo(cwd)) throw gitErrors.create('git_already_repo')
-      const run = await this.runGit(cwd, ['init'], { userAction: true })
-      if (!run.ok) throw failure('git_failed', run)
+      await this.gitFor(cwd).init()
     })
   }
 
@@ -1135,8 +1131,7 @@ export class GitService {
       if (from !== undefined && (from.startsWith('-') || await this.read(cwd, ['rev-parse', '--verify', '--quiet', `${from}^{commit}`]) === null)) throw gitErrors.create('git_ref_not_found')
       const args = options.checkout === false ? ['branch', name] : ['switch', '-c', name]
       if (from !== undefined) args.push(from)
-      // The user's own action, as from a terminal: their hooks run, and a switch writes files through their filters (#344).
-      const run = await this.runGit(cwd, args, { userAction: true })
+      const run = await this.runGit(cwd, args)
       if (!run.ok) throw this.checkoutFailure(run, 'git_branch_failed')
     })
   }
@@ -1151,7 +1146,7 @@ export class GitService {
       await this.assertBranchName(cwd, newName)
       if (!await this.branchExists(cwd, name)) throw gitErrors.create('git_ref_not_found')
       if (name !== newName && await this.branchExists(cwd, newName)) throw gitErrors.create('git_branch_exists')
-      const run = await this.runGit(cwd, ['branch', '-m', '--', name, newName], { userAction: true })
+      const run = await this.runGit(cwd, ['branch', '-m', '--', name, newName])
       if (!run.ok) throw failure('git_branch_failed', run)
     })
   }
@@ -1166,7 +1161,7 @@ export class GitService {
       // Only an exact name is deleted; a differently cased one could still reach the current or a managed branch.
       if (!await this.branchExists(cwd, name)) throw gitErrors.create('git_ref_not_found')
       if ((await this.currentBranch(cwd))?.toLowerCase() === name.toLowerCase()) throw gitErrors.create('git_branch_current')
-      const run = await this.runGit(cwd, ['branch', options.force ? '-D' : '-d', '--', name], { userAction: true })
+      const run = await this.runGit(cwd, ['branch', options.force ? '-D' : '-d', '--', name])
       if (run.ok) return
       if (/not fully merged/i.test(run.output)) throw classified('git_branch_unmerged', run)
       if (/checked out at|used by worktree/i.test(run.output)) throw classified('git_branch_in_worktree', run)

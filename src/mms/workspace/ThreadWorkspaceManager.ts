@@ -4,7 +4,7 @@ import { getThreadLifecycleGate } from '../queue/ThreadLifecycleAdmission'
 import { execFileSync } from 'node:child_process'
 import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync } from 'node:fs'
 import { nonInteractiveGitEnv } from '../git/gitEnv'
-import { assertGitAllowed } from '../git/gitPolicy'
+import { assertGitAllowed, rethrowGitPolicyError, type UserAction } from '../git/gitPolicy'
 import { safeWorktreeGit } from '../worktree/WorktreeManager'
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { assertHeldThreadLease } from '../actions/GitOperationCoordinator'
@@ -26,7 +26,6 @@ import type {
   WorkspaceExecutionContext
 } from '../../shared/workspace'
 import { repoProgramEnv, withoutRepoPrograms } from '../git/repoPrograms'
-import type { UserAction } from '../git/gitPolicy'
 
 function git(cwd: string, args: string[], userRequested?: UserAction): string {
   return execFileSync('git', withoutRepoPrograms(cwd, args, { userRequested }), { cwd, env: repoProgramEnv(), encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim()
@@ -35,7 +34,8 @@ function git(cwd: string, args: string[], userRequested?: UserAction): string {
 function tryGit(cwd: string, args: string[]): { ok: boolean; stdout: string } {
   try {
     return { ok: true, stdout: git(cwd, args) }
-  } catch {
+  } catch (error) {
+    rethrowGitPolicyError(error)
     return { ok: false, stdout: '' }
   }
 }

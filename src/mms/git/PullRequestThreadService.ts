@@ -23,7 +23,7 @@ import { PullRequestReadError } from './GitHubCodeHost'
 import { acquireRepositoryLease } from './RepositoryLease'
 import { resolveRepositoryIdentity } from './RepositoryIdentity'
 import { repoProgramEnv, withoutRepoPrograms } from './repoPrograms'
-import type { UserAction } from './gitPolicy'
+import { rethrowGitPolicyError, type UserAction } from './gitPolicy'
 
 /** A refusal with a code a client can show copy for; the daemon turns it into its own error type. */
 export class PullRequestThreadError extends Error {
@@ -294,7 +294,8 @@ export class PullRequestThreadService {
           try {
             git(primary, args)
             return true
-          } catch {
+          } catch (error) {
+            rethrowGitPolicyError(error)
             return false
           }
         }

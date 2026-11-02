@@ -176,7 +176,7 @@ describe('pull request methods through the daemon protocol', () => {
       const { method: confirmed } = await client.request('pullRequests.mergeMethod', { projectId: project.id }) as { method: string }
       expect(await client.request('pullRequests.merge', { projectId: project.id, number: 12, method: confirmed })).toMatchObject({ method: 'rebase' })
       // A rebase confirmed is a rebase: the unreadable second answer never turns it into a squash.
-      expect(merge.mock.calls[0].slice(1)).toEqual([12, { method: 'rebase' }])
+      expect(merge.mock.calls[0].slice(1)).toEqual([12, { method: 'rebase' }, { via: 'button', label: 'Merge pull request' }])
       expect(method).toHaveBeenCalledTimes(1)
     })
 
@@ -187,7 +187,7 @@ describe('pull request methods through the daemon protocol', () => {
       // The confirmation is told the method is unknown, not "squash", so it does not promise one.
       expect(await client.request('pullRequests.mergeMethod', { projectId: project.id })).toEqual({ method: null })
       expect(await client.request('pullRequests.merge', { projectId: project.id, number: 12 })).toMatchObject({ method: 'merge' })
-      expect(merge.mock.calls[0].slice(1)).toEqual([12, { method: 'merge' }])
+      expect(merge.mock.calls[0].slice(1)).toEqual([12, { method: 'merge' }, { via: 'button', label: 'Merge pull request' }])
     })
 
     it('uses a confirmed method even when the host now offers another, and refuses one it does not know', async () => {
@@ -195,7 +195,7 @@ describe('pull request methods through the daemon protocol', () => {
       const merge = vi.spyOn(mms.gitService.codeHost, 'mergePullRequest').mockResolvedValue(info({ state: 'merged' }))
       const project = mms.projects.openProject(f.repo)
       expect(await client.request('pullRequests.merge', { projectId: project.id, number: 12, method: 'merge' })).toMatchObject({ method: 'merge' })
-      expect(merge.mock.calls[0].slice(1)).toEqual([12, { method: 'merge' }])
+      expect(merge.mock.calls[0].slice(1)).toEqual([12, { method: 'merge' }, { via: 'button', label: 'Merge pull request' }])
       expect(method).not.toHaveBeenCalled()
       await expect(client.request('pullRequests.merge', { projectId: project.id, number: 12, method: 'fast-forward' })).rejects.toThrow(/merge, squash or rebase/)
       await expect(client.request('pullRequests.merge', { projectId: project.id, number: 12, method: 'SQUASH' })).rejects.toThrow(/merge, squash or rebase/)

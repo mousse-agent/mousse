@@ -1,6 +1,6 @@
 import { repositoryIdentitiesFor } from '../bridge/remote/repositoryIdentity'
-import { userAction, withGitAccess, type UserAction } from '../git/gitPolicy'
-import { gitAccessOf } from './gitAccess'
+import { userAction, withGitAccess, withUserRequest, type UserAction } from '../git/gitPolicy'
+import { gitAccessOf, USER_REQUEST_LABELS } from './gitAccess'
 import type { StorageCleanupPlanToken } from '../../shared/storage'
 import { validateAppletAppearance } from '../../shared/appletAppearance'
 import { appletJsonBytes, APPLET_STATE_LIMIT } from '../../shared/applets'
@@ -1059,7 +1059,10 @@ export async function dispatchMethod(
 ): Promise<unknown> {
   // Git commands a method runs are checked against what it declares in GIT_ACCESS; a mismatch is logged.
   const access = gitAccessOf(method)
-  return access ? withGitAccess(method, access, () => dispatchAdmitted(ctx, method, params)) : dispatchAdmitted(ctx, method, params)
+  // A button whose handler carries out the user's request without passing it down runs as that request.
+  const label = (USER_REQUEST_LABELS as Record<string, string | undefined>)[method]
+  const run = label ? () => withUserRequest(gitUserAction(ctx, label), () => dispatchAdmitted(ctx, method, params)) : () => dispatchAdmitted(ctx, method, params)
+  return access ? withGitAccess(method, access, run) : run()
 }
 
 function dispatchAdmitted(ctx: HandlerContext, method: string, params: unknown): Promise<unknown> {

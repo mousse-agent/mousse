@@ -51,8 +51,9 @@ function runGit(
     'credential.interactive=false'
   ]
   return new Promise((resolve, reject) => {
+    const env = environment(cwd, trustRemoteConfiguration)
     try {
-      assertGitAllowed({ cwd, args })
+      assertGitAllowed({ cwd, args, env })
     } catch (error) {
       reject(error)
       return
@@ -62,7 +63,7 @@ function runGit(
       [...safety, ...args],
       {
         cwd,
-        env: environment(cwd, trustRemoteConfiguration),
+        env,
         encoding: 'utf8',
         maxBuffer: maximumBytes,
         timeout: 60_000,

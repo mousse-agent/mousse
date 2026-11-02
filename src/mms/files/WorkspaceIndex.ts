@@ -6,7 +6,7 @@ import { promisify } from 'node:util'
 import { lowerPath } from '../../shared/fuzzyPath'
 import { SKIP_DIR_NAMES } from './pathGuard'
 import { repoProgramEnv, withoutRepoPrograms } from '../git/repoPrograms'
-import { assertGitAllowed } from '../git/gitPolicy'
+import { assertGitAllowed, GitPolicyError, rethrowGitPolicyError } from '../git/gitPolicy'
 
 export type WorkspaceIndexFallbackReason = 'not-a-repo' | 'git-missing' | 'git-too-old'
 
@@ -84,7 +84,8 @@ export async function detectGitRoute(root: string): Promise<GitRoute> {
     assertGitAllowed({ cwd: root, args: ['rev-parse', '--show-toplevel'] })
     await execFileAsync('git', ['rev-parse', '--show-toplevel'], { cwd: root, env: repoProgramEnv(), windowsHide: true })
     return { ok: true, version }
-  } catch {
+  } catch (error) {
+    rethrowGitPolicyError(error)
     return { ok: false, reason: 'not-a-repo' }
   }
 }
@@ -221,7 +222,8 @@ async function listWithGit(root: string, collector: IndexCollector, signal: Abor
     let args: string[]
     try {
       args = withoutRepoPrograms(root, ['ls-files', '-z', '--cached', '--others', '--exclude-standard', '--'])
-    } catch {
+    } catch (error) {
+      if (error instanceof GitPolicyError) return reject(error)
       resolvePromise(false)
       return
     }
