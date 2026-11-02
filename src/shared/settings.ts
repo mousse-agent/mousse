@@ -13,15 +13,19 @@ export type ThemeId =
   | 'blacksphere-plus'
   | 'dark'
   | 'light'
-  | 'dark-modern'
-  | 'one-dark'
-  | 'monokai'
   | 'solarized-dark'
   | 'github-dark'
   | 'high-contrast'
 
 /** @deprecated Legacy theme ids persisted before acrylic was decoupled. */
 export type LegacyThemeId = 'dark-acrylic' | 'light-acrylic' | 'system-acrylic'
+
+/** Removed themes, mapped to the closest one that remains. */
+export const REMOVED_THEME_IDS: Readonly<Record<string, ThemeId>> = {
+  'dark-modern': 'dark',
+  'one-dark': 'github-dark',
+  monokai: 'dark'
+}
 
 export type ThemeScheme = 'dark' | 'light' | 'system'
 
@@ -465,11 +469,8 @@ const DEFAULT_AGENT_HEADLESS: Record<AgentTypeId, boolean> = {
 
 export const THEME_OPTIONS: ThemeOption[] = [
   { id: 'system', label: 'System', scheme: 'system' },
-  { id: 'blacksphere-plus', label: 'mousse dark', scheme: 'dark' },
+  { id: 'blacksphere-plus', label: 'Mousse Dark', scheme: 'dark' },
   { id: 'dark', label: 'Dark', scheme: 'dark' },
-  { id: 'dark-modern', label: 'Dark Modern', scheme: 'dark' },
-  { id: 'one-dark', label: 'One Dark', scheme: 'dark' },
-  { id: 'monokai', label: 'Monokai', scheme: 'dark' },
   { id: 'solarized-dark', label: 'Solarized Dark', scheme: 'dark' },
   { id: 'github-dark', label: 'GitHub Dark', scheme: 'dark' },
   { id: 'high-contrast', label: 'High Contrast', scheme: 'dark' },
@@ -512,7 +513,7 @@ export function getDefaultSettings(): MousseSettings {
     appearance: {
       theme: 'blacksphere-plus',
       accentColor: '#a785c7',
-      acrylic: true,
+      acrylic: false,
       acrylicIntensity: ACRYLIC_INTENSITY_DEFAULT,
       renderMath: true
     },
@@ -606,6 +607,8 @@ export function normalizeAppearance(
     theme = 'system'
     if (acrylic === undefined) acrylic = true
   }
+
+  theme = REMOVED_THEME_IDS[theme] ?? theme
 
   if (!VALID_THEME_IDS.has(theme)) {
     theme = defaults.theme

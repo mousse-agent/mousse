@@ -12,19 +12,20 @@ describe('appearance settings', () => {
     const ids = THEME_OPTIONS.map((t) => t.id)
     expect(ids).toContain('blacksphere-plus')
     expect(ids).toContain('github-dark')
-    expect(ids).toContain('dark-modern')
-    expect(ids).toContain('one-dark')
+    expect(ids).not.toContain('dark-modern')
+    expect(ids).not.toContain('one-dark')
+    expect(ids).not.toContain('monokai')
     expect(ids.indexOf('blacksphere-plus')).toBe(1)
-    expect(THEME_OPTIONS[1].label).toBe('mousse dark')
+    expect(THEME_OPTIONS[1].label).toBe('Mousse Dark')
     expect(ids).not.toContain('cursor-dark')
     expect(ids).not.toContain('dark-acrylic')
     expect(ids).not.toContain('system-acrylic')
   })
 
-  it('defaults acrylic on with a mid intensity dial', () => {
+  it('defaults acrylic off with a mid intensity dial', () => {
     const appearance = getDefaultSettings().appearance
     expect(appearance.theme).toBe('blacksphere-plus')
-    expect(appearance.acrylic).toBe(true)
+    expect(appearance.acrylic).toBe(false)
     expect(appearance.acrylicIntensity).toBe(55)
   })
 
@@ -52,6 +53,12 @@ describe('appearance settings', () => {
       theme: 'light',
       acrylic: false
     })
+  })
+
+  it('moves removed themes to the closest remaining one', () => {
+    expect(normalizeAppearance({ theme: 'dark-modern' as never }).theme).toBe('dark')
+    expect(normalizeAppearance({ theme: 'one-dark' as never }).theme).toBe('github-dark')
+    expect(normalizeAppearance({ theme: 'monokai' as never, acrylic: false }).theme).toBe('dark')
   })
 
   it('clamps intensity and maps glass tokens', () => {

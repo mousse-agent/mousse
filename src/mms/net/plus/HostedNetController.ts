@@ -1,4 +1,4 @@
-import { randomBytes } from 'node:crypto'
+import { generateKeyPairSync, randomBytes } from 'node:crypto'
 import type { NodeId, UserId } from '../../../shared/net'
 import { NetError } from '../../../shared/net'
 import type { NetLocalMethod, PlusConfiguration, PlusStatus } from '../../../shared/net/local'
@@ -9,9 +9,12 @@ import { HostedProfileService, type PlusEnrollmentRequest } from './HostedProfil
 import {
   enrollmentJoinUrl,
   enrollmentMatchCode,
+  openRequestSeal,
   sealInviteForOffer,
   sealInviteForRequest
 } from './enrollmentSeal'
+import { joinTarget, MousseIdJoin, type JoinGrant } from './MousseIdJoin'
+import { rawPublicKey } from '../identity/crypto'
 import { createHostedRelayTransports } from './relayTransports'
 import { DEFAULT_DIRECT_PATH, type DirectPathConfig } from '../transports/phoneWebRtc'
 
@@ -52,12 +55,36 @@ export function renewalDelayMs(
 
 /** How often a signed-in authority checks Mousse ID for phones asking to join. */
 const PLUS_ENROLLMENT_POLL_MS = 15000
+/** How often a joining computer asks Mousse ID whether its request was approved. */
+const JOIN_POLL_MS = 2000
 /** How often a signed-in computer reads Mousse ID's direct-path configuration again. */
 const DIRECT_PATH_REFRESH_MS = 10 * 60_000
 
 /** The Mousse ID module: account sign-in, the hosted relay lease and phone enrollment. */
 export const mousseIdNetModule: HostedNetModule = {
   create: (host) => new HostedNetController(host)
+}
+
+interface JoinRun {
+  id: string
+  settled: boolean
+  status?: PlusStatus
+  error?: unknown
+}
+
+function abortableDelay(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal.aborted) return reject(new NetError('cancelled'))
+    const timer = setTimeout(() => {
+      signal.removeEventListener('abort', stop)
+      resolve()
+    }, ms)
+    const stop = () => {
+      clearTimeout(timer)
+      reject(new NetError('cancelled'))
+    }
+    signal.addEventListener('abort', stop, { once: true })
+  })
 }
 
 export class HostedNetController implements HostedNet {
@@ -70,8 +97,13 @@ export class HostedNetController implements HostedNet {
   private enrollmentList: PlusEnrollmentRequest[] = []
   private enrollmentPoll?: ReturnType<typeof setTimeout>
   private enrollmentAbortBound = false
+  /** Computer requests already approved (or tried) once; a failed one is not retried every poll. */
+  private computerRequestsTried = new Set<string>()
   private direct: DirectPathConfig = DEFAULT_DIRECT_PATH
   private directReadAt?: number
+  private joinClient?: MousseIdJoin
+  /** The join sign-in whose approval arrived: joining runs in the background while `finish` is polled. */
+  private joining?: JoinRun
 
   constructor(private readonly host: HostedNetHost) {
     this.transports = createHostedRelayTransports(() => this.service())
@@ -127,7 +159,102 @@ export class HostedNetController implements HostedNet {
 
   cancelLogin(): { cancelled: true } {
     this.hostedProfile?.cancelLogin()
+    this.joinClient?.cancel()
     return { cancelled: true }
+  }
+
+  private join(): MousseIdJoin {
+    return (this.joinClient ??= new MousseIdJoin({
+      signal: this.host.signal,
+      now: () => this.host.clock.now()
+    }))
+  }
+
+  handlesJoin(id: string): boolean {
+    return this.joining?.id === id || !!this.joinClient?.pending(id)
+  }
+
+  /**
+   * Sign-in on a computer with no network identity. Approval in the browser is the only step:
+   * the computer then joins the account's existing network (its owner adds it without a code),
+   * or, on an account with no computers yet, creates the network.
+   */
+  async joinSignIn(method: NetLocalMethod, params: Record<string, unknown>): Promise<unknown> {
+    switch (method) {
+      case 'net.plus.discover':
+        return this.join().discover(String(params.apiOrigin))
+      case 'net.plus.login.begin':
+        this.joining = undefined
+        return this.join().begin(
+          params.configuration as Omit<PlusConfiguration, 'accountId'>,
+          String(params.deviceName)
+        )
+      case 'net.plus.login.finish': {
+        const id = String(params.id),
+          running = this.joining
+        if (running?.id !== id) {
+          const entry: JoinRun = { id, settled: false }
+          const grant = await this.join().finish(id)
+          this.joining = entry
+          void this.completeJoin(grant)
+            .then(
+              (status) => {
+                entry.status = status
+              },
+              (error) => {
+                entry.error = error
+              }
+            )
+            .finally(() => {
+              entry.settled = true
+              this.host.emit()
+            })
+        } else if (running.settled) {
+          this.joining = undefined
+          if (running.error) throw running.error
+          return running.status
+        }
+        throw new NetError('peer_offline', 'Adding this computer to your devices.')
+      }
+      default:
+        throw new NetError('bad_request')
+    }
+  }
+
+  private async completeJoin(grant: JoinGrant): Promise<PlusStatus> {
+    const client = this.join(),
+      deviceName = grant.deviceName,
+      target = joinTarget(await client.inventory(grant)),
+      account = grant.email ? { email: grant.email } : {}
+    if (target) {
+      if (!target.online) throw new NetError('authority_offline')
+      const { transportFingerprint } = await this.host.serial(() => this.host.prepareJoin())
+      const box = generateKeyPairSync('x25519').privateKey,
+        request = await client.requestToJoin(grant, {
+          target: target.node,
+          deviceName,
+          boxPublicKey: rawPublicKey(box),
+          transportFingerprint
+        })
+      let sealed: string | undefined
+      while (!(sealed = await client.readRequest(grant, request.id))) {
+        if (this.host.clock.now() + JOIN_POLL_MS >= Math.min(request.expiresAt, grant.expiresAt))
+          throw new NetError('authority_offline')
+        await abortableDelay(JOIN_POLL_MS, this.host.signal)
+      }
+      const invite = openRequestSeal(
+        sealed,
+        box.export({ type: 'pkcs8', format: 'der' }).subarray(-32),
+        request.id
+      )
+      await this.host.serial(() => this.host.joinWithInvite(invite, deviceName))
+    } else await this.host.serial(() => this.host.createIdentity(deviceName))
+    return this.host.serial(async () => {
+      this.assertTransportCapacity()
+      const status = await this.service().useGrant(grant.configuration, grant.accessToken, !target, account)
+      await this.useHostedRelay()
+      return status
+    })
   }
 
   async request(method: NetLocalMethod, params: Record<string, unknown>): Promise<unknown> {
@@ -195,22 +322,9 @@ export class HostedNetController implements HostedNet {
             (await this.refreshEnrollmentRequests()).find((row) => row.id === id)
         if (!request || request.expiresAt <= this.host.clock.now())
           throw new NetError('invite_invalid', 'This phone request has expired or was withdrawn.')
-        const invite = await this.host.issueRendezvousInvite({
-          name: request.deviceName,
-          joinerTransportFingerprint: request.transportFingerprint,
-          kind: request.kind
-        })
-        try {
-          await this.service().approveEnrollmentRequest(
-            id,
-            sealInviteForRequest(invite.text, request.boxPublicKey, id)
-          )
-        } catch (error) {
-          this.host.revokeUnsentInvite(invite.invite, error)
-          throw error
-        }
+        const invite = await this.approveRequest(request)
         this.setEnrollmentRequests(this.enrollmentList.filter((row) => row.id !== id))
-        return { approved: true, inviteId: invite.invite, expiresAt: invite.expiresAt }
+        return { approved: true, ...invite }
       }
       case 'net.plus.enrollment.deny': {
         const id = String(params.id)
@@ -473,20 +587,55 @@ export class HostedNetController implements HostedNet {
     if (changed) this.host.emit()
   }
 
-  private async refreshEnrollmentRequests(): Promise<PlusEnrollmentRequest[]> {
+  /** With `approveComputers` (the poll, outside the serial queue) computer requests are approved. */
+  private async refreshEnrollmentRequests(approveComputers = false): Promise<PlusEnrollmentRequest[]> {
     if (!this.enrollmentEligible()) {
       this.setEnrollmentRequests([])
       return []
     }
-    this.setEnrollmentRequests(await this.service().enrollmentRequests())
+    const requests = await this.service().enrollmentRequests()
+    // A computer asks only after signing in to this same account, which is the consent: it is
+    // added without a question. Phones are still shown with their match code.
+    for (const request of requests)
+      if (approveComputers && request.kind === 'computer' && !this.computerRequestsTried.has(request.id)) {
+        this.computerRequestsTried.add(request.id)
+        await this.host
+          .serial(() => this.approveRequest(request))
+          .catch((error) => {
+            this.host.fail(error)
+            this.host.emit()
+          })
+      }
+    this.setEnrollmentRequests(requests.filter((row) => row.kind !== 'computer'))
     return this.enrollmentList
+  }
+
+  /** Sends the device an invite sealed to its key, pinned to the transport key it asked with. */
+  private async approveRequest(
+    request: PlusEnrollmentRequest
+  ): Promise<{ inviteId: string; expiresAt: number }> {
+    const invite = await this.host.issueRendezvousInvite({
+      name: request.deviceName,
+      joinerTransportFingerprint: request.transportFingerprint,
+      kind: request.kind
+    })
+    try {
+      await this.service().approveEnrollmentRequest(
+        request.id,
+        sealInviteForRequest(invite.text, request.boxPublicKey, request.id)
+      )
+    } catch (error) {
+      this.host.revokeUnsentInvite(invite.invite, error)
+      throw error
+    }
+    return { inviteId: invite.invite, expiresAt: invite.expiresAt }
   }
 
   private armEnrollmentPoll(delayMs = PLUS_ENROLLMENT_POLL_MS): void {
     if (this.enrollmentPoll || !this.enrollmentEligible()) return
     this.enrollmentPoll = setTimeout(() => {
       this.enrollmentPoll = undefined
-      void this.refreshEnrollmentRequests()
+      void this.refreshEnrollmentRequests(true)
         .catch(() => {
           // Mousse ID may be unreachable or predate the mailbox; keep the last list and retry.
         })

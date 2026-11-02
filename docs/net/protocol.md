@@ -244,7 +244,7 @@ Inbound carriers share one profile-owned admission allocator. A lease is reserve
 
 WireError is `{code,message,retryable,cause?}` with a cause array outermost first of `{message,code?}`. Code and retryability MUST follow `NET_ERRORS`; receivers derive retryability from their own registry rather than trusting a peer flag. Diagnostic messages/causes MUST redact secrets and sealed/private/message content. Errors do not prove replay safety. A response error preserves causes while stable code drives the UI.
 
-The exhaustive stable codes are: unsupported_version, incompatible_peer, upgrade_required, downgrade_unsupported, bad_request, too_large, bad_signature, bad_delegation, peer_key_mismatch, revoked, not_enrolled, not_member, forbidden, invite_invalid, roster_conflict, conflict, stream_unknown, snapshot_required, meta_stale, space_frozen, rate_limited, quota_exceeded, storage_full, storage_corrupt, keystore_locked, keystore_missing, clock_skew, route_unreachable, peer_offline, deadline_exceeded, cancelled, budget_exhausted, profile_unsupported, repo_not_bound, outcome_uncertain, internal. The exact categories/default messages/retryability are in `errors.ts`.
+The exhaustive stable codes are: unsupported_version, incompatible_peer, upgrade_required, downgrade_unsupported, bad_request, too_large, bad_signature, bad_delegation, peer_key_mismatch, revoked, not_enrolled, not_member, forbidden, invite_invalid, roster_conflict, conflict, stream_unknown, snapshot_required, meta_stale, space_frozen, rate_limited, quota_exceeded, storage_full, storage_corrupt, keystore_locked, keystore_missing, clock_skew, route_unreachable, peer_offline, authority_offline, deadline_exceeded, cancelled, budget_exhausted, profile_unsupported, repo_not_bound, outcome_uncertain, internal. The exact categories/default messages/retryability are in `errors.ts`.
 
 Schema/codec fixtures and focused tests establish encoding and rejection behavior only. They do not establish a working distributed session or a security-qualified runtime; P0 independent review and P1 integration gates remain required.
 
@@ -261,6 +261,15 @@ A phone joins as a leaf node of the same user. It receives an ordinary `mj1_` no
 3. posts it to the request's approve route. If posting fails, the unsent invite is revoked.
 
 Deny posts to the deny route.
+
+**Computers on the same account.** A computer with no network identity signs in to Mousse ID without one: its sign-in carries a throwaway signing key instead of a user, root and node, and the account grant it gets may read the account's inventory, post a computer enrollment request, read its own requests and then bind or register (Mousse ID contract, join sign-in). The computer then:
+
+1. picks the authority of the account's network with the most devices (the oldest on a tie) from the inventory. With no network on the account it creates its own identity, binds its root and registers, as a first computer does. When that authority is not online it stops with `authority_offline`;
+2. creates its node keys, protects them, and posts a `kind: 'computer'` request to that authority with a fresh `boxPublicKey` and its transport fingerprint;
+3. reads the request every 2 seconds until it is approved, opens the sealed invite, and joins with it (§8, through the invite's relay rendezvous);
+4. registers its new node with the same grant.
+
+The authority approves computer requests itself when it polls the mailbox, with no prompt and no match code: signing in to the same Mousse ID account is the consent. The invite is a computer invite (computer capabilities, kind recorded as computer) pinned to the requested transport fingerprint. Phone requests are still shown with their match code.
 
 **Request seal.** The sender generates an ephemeral X25519 key `e`. Let `box` be the 32-byte raw `boxPublicKey`.
 

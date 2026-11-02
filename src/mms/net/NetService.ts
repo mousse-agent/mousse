@@ -128,6 +128,8 @@ import type { RelayIdentity } from './relay/protocol'
 import { inviteRequiresProtection } from './enrollment/service'
 import { RouteManagerImpl } from './link/routeManager'
 import { openSecureChannel } from './link/secureChannel'
+import { fingerprint } from './link/selfSignedCert'
+import { decodeBase64 } from './identity/crypto'
 import { NetSyncSession, type SyncSessionOptions } from './sync/session'
 import { NodeStreamAuthority } from './sync/nodeAuthority'
 import { SyncSupervisor } from './sync/supervisor'
@@ -766,6 +768,14 @@ export class NetService {
     if (method === 'net.transport.list' && (this.disabled || !this.config.enabled))
       return this.transportList()
     if (this.disabled) throw new NetError('disabled')
+    // Signing in to Mousse ID on a computer with no network identity joins the account's network.
+    if (
+      this.hosted &&
+      ['net.plus.discover', 'net.plus.login.begin', 'net.plus.login.finish'].includes(method) &&
+      ((method === 'net.plus.login.finish' && this.hosted.handlesJoin(String(params.id))) ||
+        !this.hasIdentity())
+    )
+      return this.track(this.hosted.joinSignIn(method, params))
     if (!['net.init', 'bridge.join'].includes(method)) this.assertEnabled()
     if (method.startsWith('bridge.') && method !== 'bridge.join') this.assertFeature('netBridge')
     if (method === 'net.doctor') return this.doctor()
@@ -1182,8 +1192,33 @@ export class NetService {
       directPathChanged: () => this.syncPhoneWebRtc(),
       relayIdentity: () => this.relayIdentity(),
       issueRendezvousInvite: (input) => this.issueRendezvousInvite(input),
-      revokeUnsentInvite: (invite, error) => this.revokeUnsentInvite(invite, error)
+      revokeUnsentInvite: (invite, error) => this.revokeUnsentInvite(invite, error),
+      createIdentity: async (name) => {
+        await this.init({ name })
+        const rt = this.runtime()
+        if (!rt.keys.encryptedAtRest()) rt.keys.protect()
+        this.emit()
+      },
+      prepareJoin: async () => {
+        const rt = this.runtime()
+        if (rt.identity.self()) throw new NetError('conflict', 'This profile already has an identity.')
+        if (rt.keys.state() === 'missing') await rt.keys.initialize({ asAuthority: false })
+        this.config.preparedForJoin = true
+        this.saveConfig()
+        if (rt.keys.state() !== 'unlocked') throw new NetError('keystore_locked')
+        if (!rt.keys.encryptedAtRest()) rt.keys.protect()
+        return { transportFingerprint: fingerprint(decodeBase64(rt.keys.nodeKeys().transport)) }
+      },
+      joinWithInvite: async (invite, name) => {
+        await this.join(invite, name)
+      }
     }
+  }
+  /** A network identity exists for this profile; never creates the network database. */
+  private hasIdentity(): boolean {
+    return (
+      existsSync(join(this.options.profileDir, 'net', 'net.db')) && !!this.runtime().identity.self()
+    )
   }
   /** Invites that a phone redeems over a relay rendezvous; the only route a phone can dial. */
   private async issueRendezvousInvite(
