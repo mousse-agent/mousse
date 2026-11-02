@@ -90,6 +90,7 @@ import { listedProjectsFor, listedThreadsFor } from './threadVisibility'
 import { isQualifiedId } from '../../shared/threadRef'
 import { resolveThreadProjectPath } from '../data/resolveActiveProjectPath'
 import { ThreadJournal } from '../data/ThreadJournal'
+import { PROJECT_FOLDER_REASON, threadPlacement } from '../workspace/threadPlacement'
 import { ThreadWorkspaceManager } from '../workspace/ThreadWorkspaceManager'
 import { clearStaleLeftMerges, recoveryErrorText, threadRecovery } from '../workspace/workspaceRecovery'
 import { resolveEditorFolder } from '../workspace/editorFolder'
@@ -787,12 +788,18 @@ function branchNameSource(ctx: HandlerContext, threadId: string): string | undef
   return first?.content ?? ctx.mms.threads.getThread(threadId)?.name
 }
 
+/**
+ * Makes sure a thread that works in its own worktree has one before a file write, terminal or Git action uses it.
+ * A thread in its project's folder (`threadPlacement`) gets none: those actions run in the project folder.
+ */
 async function ensureOwnedTaskWorkspace(ctx: HandlerContext, params: Record<string, unknown>): Promise<void> {
   if (!params.threadId) return
   const threadId = asString(params.threadId, 'threadId', 256)
-  if (!ctx.mms.threads.getThread(threadId)) throw new DomainRpcError('thread_not_found', 'Thread not found')
+  const thread = ctx.mms.threads.getThread(threadId)
+  if (!thread) throw new DomainRpcError('thread_not_found', 'Thread not found')
   const project = resolveThreadProjectPath(ctx.mms.projects, ctx.mms.threads, threadId)
   if (!project) throw new DomainRpcError('thread_has_no_folder', 'Task has no project workspace')
+  if (threadPlacement(thread) === 'project-folder') return
   const manager = new ThreadWorkspaceManager(ctx.mms.threads.getThreadDir(threadId))
   if (!manager.load()) await manager.provision(threadId, 'main', project, undefined, undefined, undefined, { nameFrom: branchNameSource(ctx, threadId) })
   await ensureWorkspaceMaterialized(ctx, threadId, project)
@@ -2155,6 +2162,8 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         }
       }
       if (task && ctx.mms.threadRuntimes.listAgents(threadId).find((agent) => agent.id === agentId)?.workspacePolicy?.access === 'read-only') throw new DomainRpcError('terminal_not_allowed', 'Read-only agents cannot open an arbitrary shell')
+      // A thread in its project's folder has no worktree: its terminal starts in the project folder.
+      if (!metadata && task?.projectId && (routed || p.cwd === undefined)) cwd = resolveThreadProjectPath(ctx.mms.projects, ctx.mms.threads, threadId) ?? cwd
       if (metadata) {
         if (manager!.verify(metadata).lifecycle !== 'ready') throw new DomainRpcError('workspace_recovery_required', 'Task workspace requires recovery before opening a terminal')
         const projectPath = resolveThreadProjectPath(ctx.mms.projects, ctx.mms.threads, threadId)
@@ -2840,6 +2849,10 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const branchId = asOptionalString(p.conversationBranchId, 256) ?? new ThreadWorkspaceManager(operation.threadDirectory).load()?.conversationBranchId ?? 'main'
       const manager = new ThreadWorkspaceManager(operation.threadDirectory)
       const current = manager.load()
+      // Nothing to restore for a thread in its project's folder, and no worktree is made for it here either.
+      if (!current && threadPlacement(ctx.mms.threads.getThread(operation.threadId)) === 'project-folder') {
+        throw new DomainRpcError('thread_in_project_folder', PROJECT_FOLDER_REASON)
+      }
       const metadata = current
         ? await manager.restore(operation.projectPath)
         : await manager.provision(operation.threadId, branchId, operation.projectPath, undefined, undefined, undefined, { nameFrom: branchNameSource(ctx, operation.threadId) })

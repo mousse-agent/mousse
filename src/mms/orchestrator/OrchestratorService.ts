@@ -224,6 +224,7 @@ import { resolveProjectWorkingDirectory } from '../data/projectWorkingDirectory'
 import { lineageForChild } from '../data/subagentLineage'
 import { SNAPSHOT_STORE_REASON, WorkspaceResolver, modeMutatesFiles, unprovisionedContext } from '../workspace/WorkspaceResolver'
 import { ensureSnapshotWorkspace, setSnapshotsOff } from '../workspace/SnapshotWorkspace'
+import { threadPlacement, type ThreadPlacement } from '../workspace/threadPlacement'
 import { ThreadWorkspaceManager } from '../workspace/ThreadWorkspaceManager'
 import { findWorktreeOwner } from '../scheduled/validateJobOptions'
 import { jobPermissionRequest } from '../scheduled/jobPermission'
@@ -5168,9 +5169,9 @@ export class OrchestratorService extends EventEmitter {
     return this.forkCheckpoint(sourceDir, sourceRunId) ? 'checkpoint' : 'missing'
   }
 
-  /** False once the thread chose its project's folder (worktree toggle off); unset keeps a worktree. */
-  private threadWantsWorktree(threadId: string): boolean {
-    return this.threadStore?.getThread(threadId)?.worktreeEnabled !== false
+  /** Where the thread works (`threadPlacement`): every path here that could make its worktree asks this first. */
+  private placementOf(threadId: string): ThreadPlacement {
+    return threadPlacement(this.threadStore?.getThread(threadId))
   }
 
   /** What a thread's worktree branch is named from: its first message, else its name. */
@@ -5189,7 +5190,7 @@ export class OrchestratorService extends EventEmitter {
     let seed: Record<string, unknown>
     try {
       if (manager.load()) seed = { kind: 'existing_workspace' }
-      else if (!this.threadWantsWorktree(threadId)) seed = { kind: 'worktree_off' }
+      else if (this.placementOf(threadId) === 'project-folder') seed = { kind: 'project_folder' }
       else if (!manager.resolveRepository(projectPath).capability.gitBacked) seed = { kind: 'not_git_backed' }
       else {
         const sourceDir = this.resolveThreadDir(fork.sourceThreadId)
@@ -9195,7 +9196,7 @@ export class OrchestratorService extends EventEmitter {
         if (projectPath && threadDir) {
           await this.seedForkWorkspace(session.threadId, projectPath, threadDir, opts?.externalSignal, session.executionLease)
           await this.seedSubagentWorkspace(session.threadId, projectPath, threadDir, opts?.externalSignal, session.executionLease, this.branchNameSource(session.threadId, session.messages, request.content))
-          session.workspace = await new WorkspaceResolver(threadDir, session.threadId, projectPath, this.threadWantsWorktree(session.threadId))
+          session.workspace = await new WorkspaceResolver(threadDir, session.threadId, projectPath, this.placementOf(session.threadId))
             .resolve(request.mode, 'main', opts?.externalSignal, session.executionLease ?? undefined, this.branchNameSource(session.threadId, session.messages, request.content))
           session.projectCwd = session.workspace.projectPath
         } else {
@@ -9229,6 +9230,8 @@ export class OrchestratorService extends EventEmitter {
     let snapshotsOff: string | undefined
     /** The same, as the coverage line a receipt carries: "Not covered: . (too large (more than 1 GB))". */
     let snapshotsNotCovered: string | undefined
+    // Set only when this turn made the thread's worktree while the project folder held uncommitted changes.
+    const turnStartNote = session.workspace?.startNote
     const conversationBranchId = recoveryManager?.load()?.conversationBranchId ?? 'main'
     const externalEffects = mode === 'agent' || mode === 'build' || typeof mode === 'object'
       ? [{ kind: 'unknown' as const, description: 'Agent tools may affect processes, ignored files, or external services; code undo only restores tracked workspace changes.', reversible: false as const }]
@@ -9379,6 +9382,7 @@ export class OrchestratorService extends EventEmitter {
       new ThreadActionService(directory).beginTurn({
         threadId: session.threadId, turnId, conversationBranchId,
         workspacePath: checkpointCwd, heldThreadLease: session.executionLease ?? undefined, externalEffects,
+        ...(turnStartNote ? { startNote: turnStartNote } : {}),
         presentationMessageStart: turnPresentationStart, presentationMessageEnd: session.messages.length,
         nativeContextStartBoundary: turnNativeStartBoundary, nativeContextBoundary: turnNativeStartBoundary
       }, turnStartSha)
@@ -9414,6 +9418,7 @@ export class OrchestratorService extends EventEmitter {
         turnId,
         heldThreadLease: session.executionLease ?? undefined,
         externalEffects,
+        ...(turnStartNote ? { startNote: turnStartNote } : {}),
         conversationBranchId,
         workspacePath: checkpointCwd!,
         presentationMessageStart: turnPresentationStart,
@@ -10786,9 +10791,10 @@ export class OrchestratorService extends EventEmitter {
       const project = resolveThreadProjectPath(this.projectManager, this.threadStore, session.threadId)
       if (!project) throw new Error('Isolated agents require a project')
       if (!held || !session.workspace) {
-        session.workspace = await new WorkspaceResolver(directory, session.threadId, project, this.threadWantsWorktree(session.threadId)).resolve('agent', 'main', this.lifecycle.signal, lease, this.branchNameSource(session.threadId, session.messages))
+        session.workspace = await new WorkspaceResolver(directory, session.threadId, project, this.placementOf(session.threadId)).resolve('agent', 'main', this.lifecycle.signal, lease, this.branchNameSource(session.threadId, session.messages))
       }
-      if (!session.workspace.capability.checkpointable) throw new Error('Isolated agents require an owned Git workspace')
+      // A thread in its project's folder has no worktree of its own, and that is fine: the main agent chose where its
+      // subagents work, and their results are recorded in their own worktrees.
       session.projectCwd = session.workspace.projectPath
       return await work()
     } finally {

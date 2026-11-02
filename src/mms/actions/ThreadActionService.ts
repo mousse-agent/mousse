@@ -35,6 +35,8 @@ export interface RunThreadActionOptions {
   /** Compare under the owning mutation lock before changing Git or metadata. */
   expectedJournalRevision?: number
   signal?: AbortSignal
+  /** Kept on the action as `startNote`; see `ThreadAction.startNote`. */
+  startNote?: string
 }
 
 /** Turn ids of the checkpoints that record changes made outside Mousse before a turn (see `recordOutsideChanges`). */
@@ -116,7 +118,8 @@ export class ThreadActionService {
       presentationMessageStart: options.presentationMessageStart, presentationMessageEnd: options.presentationMessageEnd,
       nativeContextStartBoundary: options.nativeContextStartBoundary, nativeContextBoundary: options.nativeContextBoundary,
       startSha, endSha: startSha, commits: [], childIntegrations: [], changedPaths: [],
-      externalEffects: options.externalEffects ?? [], reversible: true, state: 'running', createdAt: new Date().toISOString()
+      externalEffects: options.externalEffects ?? [], reversible: true, state: 'running', createdAt: new Date().toISOString(),
+      ...(options.startNote ? { startNote: options.startNote } : {})
     }
   }
 
@@ -228,6 +231,7 @@ export class ThreadActionService {
     action.presentationMessageEnd = options.presentationMessageEnd
     action.nativeContextBoundary = options.nativeContextBoundary
     action.externalEffects = options.externalEffects ?? action.externalEffects
+    if (options.startNote) action.startNote = options.startNote
     try {
       this.checkpoint(options.workspacePath, action, state)
       // Admission order differs from completion order when a turn snapshots before child spawn.

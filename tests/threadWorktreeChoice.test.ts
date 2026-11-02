@@ -11,6 +11,7 @@ import { ProjectManager } from '../src/mms/data/ProjectManager'
 import { ThreadDataStore } from '../src/mms/data/ThreadDataStore'
 import { ThreadWorkspaceManager } from '../src/mms/workspace/ThreadWorkspaceManager'
 import { WorkspaceResolver } from '../src/mms/workspace/WorkspaceResolver'
+import { threadPlacement } from '../src/mms/workspace/threadPlacement'
 
 describe('thread worktree choice', () => {
   let root: string
@@ -49,7 +50,7 @@ describe('thread worktree choice', () => {
   it('an editing turn of a thread with its worktree off runs in the project folder and provisions nothing', async () => {
     const thread = store.createThread('Folder', undefined, undefined, { worktreeEnabled: false })
     const directory = store.getThreadDir(thread.id)
-    const execution = await new WorkspaceResolver(directory, thread.id, repo, false).resolve('agent')
+    const execution = await new WorkspaceResolver(directory, thread.id, repo, threadPlacement(thread)).resolve('agent')
     expect(execution.workspacePath).toBe(repo)
     expect(execution.lifecycle).toBe('unprovisioned')
     expect(execution.capability).toMatchObject({ gitBacked: true, checkpointable: false })
@@ -59,7 +60,7 @@ describe('thread worktree choice', () => {
   it('an editing turn of a thread with its worktree on gets a worktree of its own', async () => {
     const thread = store.createThread('Worktree', undefined, undefined, { worktreeEnabled: true })
     const directory = store.getThreadDir(thread.id)
-    const execution = await new WorkspaceResolver(directory, thread.id, repo).resolve('agent')
+    const execution = await new WorkspaceResolver(directory, thread.id, repo, threadPlacement(thread)).resolve('agent')
     expect(execution.workspacePath).not.toBe(repo)
     expect(new ThreadWorkspaceManager(directory).load()?.lifecycle).toBe('ready')
   }, 30_000)

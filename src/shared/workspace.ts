@@ -93,6 +93,11 @@ export interface WorkspaceExecutionContext {
   baseSha?: string
   headSha?: string
   provenance?: WorkspaceProvenance
+  /**
+   * Set only on the context of the turn that made the thread's worktree, when the project folder then held
+   * uncommitted changes the worktree (cut from HEAD) does not have. The turn's record keeps it as `startNote`.
+   */
+  startNote?: string
 }
 
 /**

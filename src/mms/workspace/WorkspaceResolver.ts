@@ -2,6 +2,8 @@ import { createErrorProvider } from '../../shared/errors'
 import type { ThreadLeaseHandle } from '../queue/ThreadExecutionLease'
 import type { ChatMode } from '../../shared/types'
 import type { WorkspaceExecutionContext } from '../../shared/workspace'
+import { inspectPendingChanges } from '../actions/git'
+import { PROJECT_FOLDER_REASON, type ThreadPlacement } from './threadPlacement'
 import { ThreadWorkspaceManager } from './ThreadWorkspaceManager'
 import { startedInSnapshotStore } from './SnapshotWorkspace'
 
@@ -39,13 +41,35 @@ export function modeMutatesFiles(mode: ChatMode): boolean {
   return mode === 'agent' || mode === 'build' || (typeof mode === 'object' && 'skillId' in mode)
 }
 
+/** Paths named in a turn's note about uncommitted changes the new worktree does not have; the rest are counted. */
+const START_NOTE_PATHS = 5
+
+/**
+ * The note for a turn whose worktree was just made from the project's committed HEAD while the project folder held
+ * uncommitted changes, which the worktree therefore does not have. They are not copied over and nothing waits on
+ * them; the turn record says so. Undefined when the folder is clean or cannot be read.
+ */
+export function uncommittedLeftBehindNote(projectPath: string): string | undefined {
+  let paths: string[]
+  try {
+    paths = inspectPendingChanges(projectPath).files.filter((path) => path !== '.mousse' && !path.startsWith('.mousse/'))
+  } catch {
+    return undefined
+  }
+  if (paths.length === 0) return undefined
+  const named = paths.slice(0, START_NOTE_PATHS).join(', ')
+  const more = paths.length > START_NOTE_PATHS ? ` and ${paths.length - START_NOTE_PATHS} more` : ''
+  const files = paths.length === 1 ? '1 file' : `${paths.length} files`
+  return `The project folder had uncommitted changes the worktree doesn't have (${files}: ${named}${more}). The worktree started from the last commit; the changes stay in the project folder.`
+}
+
 export class WorkspaceResolver {
-  /** `worktree`: false for a thread whose worktree toggle is off; it runs on the project's folder and provisions nothing. */
+  /** `placement` comes from `threadPlacement`: a `project-folder` thread works in the project's folder and never gets a worktree. */
   constructor(
     private readonly threadDirectory: string,
     private readonly threadId: string,
     private readonly projectPath: string,
-    private readonly worktree = true
+    private readonly placement: ThreadPlacement
   ) {}
 
   async resolve(
@@ -72,10 +96,6 @@ export class WorkspaceResolver {
       const repository = manager.resolveRepository(this.projectPath)
       return unprovisionedContext(this.threadId, this.projectPath, repository.capability.gitBacked, 'Read-only turn uses the primary checkout')
     }
-    if (!this.worktree) {
-      const repository = manager.resolveRepository(this.projectPath)
-      return unprovisionedContext(this.threadId, this.projectPath, repository.capability.gitBacked, 'Worktree is off for this thread; it works in the project folder')
-    }
     const repository = manager.resolveRepository(this.projectPath)
     // A thread that started in the folder's hidden store keeps it, even after someone made the folder a Git repository:
     // its turns are recorded there. Only new threads use the repository.
@@ -83,10 +103,17 @@ export class WorkspaceResolver {
       return { threadId: this.threadId, workspacePath: this.projectPath, projectPath: this.projectPath, primaryPath: this.projectPath, lifecycle: 'unprovisioned',
         capability: { gitBacked: repository.capability.gitBacked, checkpointable: false, publishable: false, undoable: false, unavailableReason: SNAPSHOT_STORE_REASON } }
     }
+    if (this.placement === 'project-folder' && repository.capability.gitBacked) {
+      return unprovisionedContext(this.threadId, this.projectPath, true, PROJECT_FOLDER_REASON)
+    }
+    // A folder without Git (or with no commit yet) works in place whatever the placement: its turns are recorded in the
+    // folder's hidden store, as for any thread there.
     if (!repository.capability.gitBacked) {
       return { threadId: this.threadId, workspacePath: this.projectPath, projectPath: this.projectPath, primaryPath: this.projectPath, lifecycle: 'unprovisioned', capability: repository.capability }
     }
-    if (!manager.load()) await manager.provision(this.threadId, conversationBranchId, this.projectPath, signal, heldThreadLease, undefined, { nameFrom })
-    return manager.executionContext(this.projectPath)
+    // Read before the worktree exists: what the project folder holds that the new worktree, cut from HEAD, will not.
+    const startNote = uncommittedLeftBehindNote(this.projectPath)
+    await manager.provision(this.threadId, conversationBranchId, this.projectPath, signal, heldThreadLease, undefined, { nameFrom })
+    return { ...manager.executionContext(this.projectPath), ...(startNote ? { startNote } : {}) }
   }
 }
