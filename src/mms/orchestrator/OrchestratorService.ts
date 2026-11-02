@@ -1481,15 +1481,15 @@ export class OrchestratorService extends EventEmitter {
       ...(patch?.activeMessageId !== undefined ? { activeMessageId: patch.activeMessageId } : existing?.activeMessageId ? { activeMessageId: existing.activeMessageId } : {}),
       ...(patch?.error ? { error: patch.error } : existing?.error && phase === 'failed' ? { error: existing.error } : {}),
     } as TurnState
-    if (patch?.turnId !== undefined && patch.turnId !== existing?.turnId) (state as any).startedAt = now
-    if (phase !== 'streaming' && phase !== 'tool_running') delete (state as any).activeMessageId
-    if (phase === 'idle') { state.turnId = null; delete (state as any).startedAt }
-    if (phase !== 'failed') { delete (state as any).error; delete state.errorDescriptor }
+    if (patch?.turnId !== undefined && patch.turnId !== existing?.turnId) state.startedAt = now
+    if (phase !== 'streaming' && phase !== 'tool_running') delete state.activeMessageId
+    if (phase === 'idle') { state.turnId = null; delete state.startedAt }
+    if (phase !== 'failed') { delete state.error; delete state.errorDescriptor }
     // The pause is only part of the paused state; any other phase drops it.
     if (phase === 'paused' && patch?.pause) state.pause = patch.pause
     else delete state.pause
-    if ((phase === 'queued' || phase === 'thinking') && !existing?.startedAt) (state as any).startedAt = now
-    if (phase !== 'idle' && !(state as any).startedAt) (state as any).startedAt = existing?.startedAt ?? now
+    if ((phase === 'queued' || phase === 'thinking') && !existing?.startedAt) state.startedAt = now
+    if (phase !== 'idle' && !state.startedAt) state.startedAt = existing?.startedAt ?? now
     this.turnStates.set(threadId, state)
     if (HEARTBEAT_TURN_PHASES.has(phase)) this.heartbeatRun(state.turnId)
     else if (existing?.turnId) this.runHeartbeats.delete(existing.turnId)
