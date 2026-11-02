@@ -9,10 +9,11 @@ import { resolveRepositoryIdentity } from '../git/RepositoryIdentity'
 import { buildResourceInventory } from './ResourceInventory'
 import { measureTree } from './diskMeasure'
 import { assertLifecyclePath, ResourceLifecycleStore } from './ResourceLifecycleStore'
-import { assertFrozenContentEntry, lifecycleGit, readDirectLifecycleRef, walkOwnedContent, WorktreeRetirementService } from './WorktreeRetirementService'
+import { assertFrozenContentEntry, lifecycleGit, lifecycleRead, readDirectLifecycleRef, walkOwnedContent, WorktreeRetirementService } from './WorktreeRetirementService'
 import { isOwnerLive, PROCESS_INSTANCE_ID } from '../queue/processLiveness'
 import { getExternalResourceClaims } from './LifecycleClaims'
 import { withFileLock } from '../scheduled/fileLock'
+import { isMousseOwnedRef } from '../../shared/mousseBranches'
 
 const digest = (value: unknown): string => createHash('sha256').update(JSON.stringify(value)).digest('hex')
 const within = (root: string, path: string): boolean => { const rel = relative(resolve(root), resolve(path)); return !isAbsolute(rel) && rel !== '..' && !rel.startsWith(`..${process.platform === 'win32' ? '\\' : '/'}`) }
@@ -250,7 +251,9 @@ export class ResourcePurgeService {
           const sources = inventory.sources.filter((source) => resource.sourceIds.includes(source.id))
           const source = sources.find((source) => basename(source.path) === 'agent-episodes.json') ?? sources.find((source) => ['workspace.json', 'agents.json', 'mousse-agent-sessions.json'].includes(basename(source.path))) ?? sources.find((source) => source.path.includes('workflow'))
           if (!source) throw new Error('Workspace has no supported owner source')
-          const branch = lifecycleGit(resource.identity, ['branch', '--show-current'])
+          const current = lifecycleRead(resource.identity, ['branch', '--show-current'])
+          // The owner's record names the branch; the checkout may be on another one the agent switched to.
+          const branch = this.retirement.ownedBranch(source.path, resource.identity) ?? current
           if (readOnly) {
             // No repository lease and no `prepare`, which writes a manifest and Git refs: judge the checkout by
             // what `prepare` would refuse. The item is for display only; it is never signed or acted on.
@@ -260,8 +263,9 @@ export class ResourcePurgeService {
             try { this.retirement.inspectContent(resource.identity) } catch (error) { retained = (error as Error).message }
             let discardRequired = Boolean(retained) || resource.claims.some((claim) => ['pending-integration', 'conflict'].includes(claim.kind))
             for (const source of inventory.sources.filter((source) => resource.sourceIds.includes(source.id) && basename(source.path) === 'workspace.json')) {
-              const workspace = JSON.parse(readFileSync(source.path, 'utf8')) as { headSha?: string; integrationTarget?: { baseSha?: string } }
-              if (workspace.headSha !== workspace.integrationTarget?.baseSha) discardRequired = true
+              // The thread's branch is the agent's to move, so the commits it holds are read from HEAD, not from the record.
+              const workspace = JSON.parse(readFileSync(source.path, 'utf8')) as { integrationTarget?: { baseSha?: string } }
+              if (discard.resultSha !== workspace.integrationTarget?.baseSha) discardRequired = true
             }
             preview.items.push({ id: resource.id, kind: 'worktree', identity: resource.identity, ownerTaskId: resource.ownerTaskId, commonDir: discard.commonDir, expectedValue: discard.resultSha, discardRequired, ...(discardRequired ? { reason: retained ?? 'This result may contain unpublished work' } : {}), status: 'pending' })
             preview.exclusiveBytes += discard.content.reduce((sum, entry) => sum + entry.bytes, 0)
@@ -276,7 +280,8 @@ export class ResourcePurgeService {
             catch (error) {
               const discard = this.retirement.inspectForDiscard(input)
               repositories.set(discard.repositoryId, discard.commonDir)
-              preview.items.push({ id: resource.id, kind: 'worktree', identity: resource.identity, ownerTaskId: resource.ownerTaskId, commonDir: discard.commonDir, expectedValue: discard.resultSha, rootIdentity: discard.rootIdentity, content: discard.content, indexDigest: discard.indexDigest, branch, sourcePath: source.path, discardRequired: true, discardState: 'pending', reason: (error as Error).message, status: 'pending' })
+              // The discard path compares the checkout's own branch when it removes it.
+              preview.items.push({ id: resource.id, kind: 'worktree', identity: resource.identity, ownerTaskId: resource.ownerTaskId, commonDir: discard.commonDir, expectedValue: discard.resultSha, rootIdentity: discard.rootIdentity, content: discard.content, indexDigest: discard.indexDigest, branch: current, sourcePath: source.path, discardRequired: true, discardState: 'pending', reason: (error as Error).message, status: 'pending' })
               preview.exclusiveBytes += discard.content.reduce((sum, entry) => sum + entry.bytes, 0)
               continue
             }
@@ -285,10 +290,11 @@ export class ResourcePurgeService {
         if (!manifest) throw new Error('Absent workspace lacks a reconstruction manifest')
         this.retirement.verifyPins(manifest)
         repositories.set(manifest.repositoryId, manifest.commonDir)
-        let discardRequired = resource.claims.some((claim) => ['pending-integration', 'conflict'].includes(claim.kind))
+        // A worktree that held uncommitted files is kept as a snapshot; deleting the snapshot deletes that work.
+        let discardRequired = resource.claims.some((claim) => ['pending-integration', 'conflict'].includes(claim.kind)) || manifest.snapshotSha !== undefined
         for (const source of inventory.sources.filter((source) => resource.sourceIds.includes(source.id) && basename(source.path) === 'workspace.json')) {
-          const workspace = JSON.parse(readFileSync(source.path, 'utf8')) as { headSha?: string; integrationTarget?: { baseSha?: string } }
-          if (workspace.headSha !== workspace.integrationTarget?.baseSha) discardRequired = true
+          const workspace = JSON.parse(readFileSync(source.path, 'utf8')) as { integrationTarget?: { baseSha?: string } }
+          if (manifest.resultSha !== workspace.integrationTarget?.baseSha) discardRequired = true
         }
         preview.items.push({ id: resource.id, kind: 'worktree', identity: resource.identity, ownerTaskId: resource.ownerTaskId, manifestPath, commonDir: manifest.commonDir, expectedValue: manifest.resultSha, discardRequired, ...(discardRequired ? { reason: 'This result may contain unpublished work' } : {}), status: 'pending' })
         preview.exclusiveBytes += manifest.content.reduce((sum, entry) => sum + entry.bytes, 0)
@@ -302,7 +308,7 @@ export class ResourcePurgeService {
       if (shared(resource.identity, resource.repositoryId)) { preview.retained.push({ identity: resource.identity, reason: 'Another owner retains this resource' }); continue }
       if (resource.kind === 'git-ref') {
         try {
-          if (!/^(refs\/mousse\/|refs\/heads\/mousse\/(thread|agent|workflow)\/)/.test(resource.identity)) throw new Error('Source ref is not Mousse-owned')
+          if (!isMousseOwnedRef(resource.identity)) throw new Error('Source ref is not Mousse-owned')
           const commonDir = resource.repositoryId ? repositories.get(resource.repositoryId) : repositories.size === 1 ? [...repositories.values()][0] : undefined
           if (!commonDir) throw new Error('Repository is unavailable; ref existence cannot be established')
           const expectedValue = readDirectLifecycleRef(commonDir, resource.identity)
@@ -456,7 +462,7 @@ export class ResourcePurgeService {
     }
     const commonDir = item.commonDir!
     if (!existsSync(commonDir)) throw purgeErrors.create('resource_purge_repository_unavailable')
-    const worktree = lifecycleGit(commonDir, ['worktree', 'list', '--porcelain']).split(/\r?\n/).find((line) => line.startsWith('worktree '))?.slice(9)
+    const worktree = lifecycleRead(commonDir, ['worktree', 'list', '--porcelain']).split(/\r?\n/).find((line) => line.startsWith('worktree '))?.slice(9)
     if (!worktree || !existsSync(worktree)) throw purgeErrors.create('resource_purge_repository_unavailable')
     const identity = resolveRepositoryIdentity(worktree, { requireMutationCapability: true })
     if (resolve(identity.commonDir) !== resolve(commonDir)) throw new Error('Repository identity changed')
@@ -467,13 +473,13 @@ export class ResourcePurgeService {
       if (item.kind === 'worktree') {
         if (item.content && item.discardState) {
           if (!existsSync(item.identity)) {
-            if (lifecycleGit(commonDir, ['worktree', 'list', '--porcelain']).includes(`worktree ${item.identity.replaceAll('\\', '/')}`)) throw new Error('Missing discarded worktree is still registered')
+            if (lifecycleRead(commonDir, ['worktree', 'list', '--porcelain']).includes(`worktree ${item.identity.replaceAll('\\', '/')}`)) throw new Error('Missing discarded worktree is still registered')
             return
           }
           const stat = lstatSync(item.identity)
-          if (digest({ dev: stat.dev, ino: stat.ino, birthtimeMs: stat.birthtimeMs }) !== digest(item.rootIdentity) || lifecycleGit(item.identity, ['branch', '--show-current']) !== item.branch || lifecycleGit(item.identity, ['rev-parse', 'HEAD']) !== item.expectedValue) throw new Error('Discarded checkout identity changed')
+          if (digest({ dev: stat.dev, ino: stat.ino, birthtimeMs: stat.birthtimeMs }) !== digest(item.rootIdentity) || lifecycleRead(item.identity, ['branch', '--show-current']) !== item.branch || lifecycleRead(item.identity, ['rev-parse', 'HEAD']) !== item.expectedValue) throw new Error('Discarded checkout identity changed')
           if (item.discardState === 'pending') {
-            if (createHash('sha256').update(lifecycleGit(item.identity, ['ls-files', '--stage', '-v', '-z'])).digest('hex') !== item.indexDigest) throw new Error('Staged sole-copy content changed after the reviewed discard')
+            if (createHash('sha256').update(lifecycleRead(item.identity, ['ls-files', '--stage', '-v', '-z'])).digest('hex') !== item.indexDigest) throw new Error('Staged sole-copy content changed after the reviewed discard')
             const content = walkOwnedContent(item.identity, true)
             const expected = new Map(item.content.map((entry) => [entry.path, digest(entry)]))
             for (const entry of content) if (expected.get(entry.path) !== digest(entry)) throw new Error('Sole-copy content changed after the reviewed discard')

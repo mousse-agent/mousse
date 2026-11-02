@@ -1,3 +1,4 @@
+import { canonicalModelName } from './modelNames'
 import type { LlmModelOption } from './settings'
 
 export interface ParsedModelVariant {
@@ -93,7 +94,7 @@ function parseContextFromLabel(label: string): string | undefined {
   return match?.[1]?.trim()
 }
 
-function parseIdSuffixes(id: string): {
+export function parseIdSuffixes(id: string): {
   baseId: string
   context?: string
   effort?: string
@@ -127,7 +128,8 @@ function parseIdSuffixes(id: string): {
 
 export function parseModelVariant(model: LlmModelOption): ParsedModelVariant {
   const parsedId = parseIdSuffixes(model.id)
-  const familyLabel = extractFamilyLabel(model.label)
+  // Families are named in Mousse's one style whatever style the listing used.
+  const familyLabel = extractFamilyLabel(canonicalModelName(model.label, model.id))
   const context = parseContextFromLabel(model.label) ?? parsedId.context
   const alias = parseAliasFromLabel(model.label)
   const speed =
@@ -412,7 +414,7 @@ export function findModelFamily(
         family.variants.some((variant) => variant.id === baseId)
     )
   }
-  const familyLabel = extractFamilyLabel(parsed.label)
+  const { familyLabel } = parseModelVariant(parsed)
   return groupModelsByFamily(providerId, models).find((family) => family.familyLabel === familyLabel)
 }
 
@@ -458,27 +460,6 @@ export function resolveModelVariant(
   }
 
   return best
-}
-
-export function getModelDisplayLabel(
-  providerId: string,
-  modelId: string,
-  models: LlmModelOption[],
-  providerLabel?: string
-): string {
-  const model = models.find((entry) => entry.id === modelId)
-  if (!model) return modelId || providerLabel || 'Select model'
-  return model.label
-}
-
-export function getFamilyDisplayLabel(
-  providerId: string,
-  modelId: string,
-  models: LlmModelOption[]
-): string {
-  const model = models.find((entry) => entry.id === modelId)
-  if (!model) return 'Select model'
-  return extractFamilyLabel(model.label)
 }
 
 /** Strip an existing effort suffix and optionally re-apply a new one. */

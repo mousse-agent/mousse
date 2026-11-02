@@ -13,7 +13,10 @@ const budgetedTests = [...processTests, ...heavyTests]
 const shared = {
   environment: 'node',
   setupFiles: ['tests/setup/mousseHome.ts'],
-  testTimeout: 20_000
+  testTimeout: 20_000,
+  // Node 25 and later define a localStorage global that is undefined without --localstorage-file
+  // and hides jsdom's. Node 24 has it off already; this older flag name works on both.
+  execArgv: ['--no-experimental-webstorage']
 } as const
 
 // Changes to these affect every test, so `--changed`, `related` and scripts/test-select.mjs run everything.

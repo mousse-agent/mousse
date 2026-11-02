@@ -122,6 +122,7 @@ import SidebarRight01Icon from '@hugeicons/core-free-icons/SidebarRight01Icon'
 import SmartPhone01Icon from '@hugeicons/core-free-icons/SmartPhone01Icon'
 import SourceCodeIcon from '@hugeicons/core-free-icons/SourceCodeIcon'
 import SparklesIcon from '@hugeicons/core-free-icons/SparklesIcon'
+import FlaskConicalIcon from '@hugeicons/core-free-icons/FlaskConicalIcon'
 import SquareIcon from '@hugeicons/core-free-icons/SquareIcon'
 import SquareLock01Icon from '@hugeicons/core-free-icons/SquareLock01Icon'
 import StarIcon from '@hugeicons/core-free-icons/StarIcon'
@@ -281,6 +282,7 @@ export const ShieldOff = /* @__PURE__ */ createIcon('ShieldOff', ShieldOffIcon)
 export const Brain = /* @__PURE__ */ createIcon('Brain', Brain01Icon)
 export const SidebarRight = /* @__PURE__ */ createIcon('SidebarRight', SidebarRight01Icon)
 export const Sparkles = /* @__PURE__ */ createIcon('Sparkles', SparklesIcon)
+export const FlaskConical = /* @__PURE__ */ createIcon('FlaskConical', FlaskConicalIcon)
 export const Square = /* @__PURE__ */ createIcon('Square', SquareIcon)
 export const Smartphone = /* @__PURE__ */ createIcon('Smartphone', SmartPhone01Icon)
 export const SquarePlus =/* @__PURE__ */ createIcon('SquarePlus', AddSquareIcon)

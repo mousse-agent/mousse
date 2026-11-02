@@ -15,21 +15,16 @@ import {
 } from '../../shared/pullRequests'
 import type { Thread } from '../../shared/types'
 import { atomicWriteJsonSync } from '../data/AtomicFs'
-import type { Inbox } from '../run/Inbox'
 import type { RunStore } from '../run/RunStore'
 import { currentStopGeneration } from '../run/stopGeneration'
-import type { PullRequestUpdatePayload } from '../run/types'
 import type { CodeHost } from './CodeHost'
 import { PullRequestReadError } from './GitHubCodeHost'
 import {
   advanceWatchReads,
-  AUTONOMOUS_WAKE_LIMIT,
   changeIds,
-  checksMayWake,
   changeKinds,
   completeDelivery,
   cutoffMs,
-  downgradeDelivery,
   dropPendingDeliveries,
   evaluatePullRequestWatch,
   formatPullRequestNotice,
@@ -37,11 +32,7 @@ import {
   initialWatchState,
   prepareDeliveries,
   reconcileDue,
-  splitByTrust,
-  wakeLimitLine,
   watchEndedLine,
-  type PendingDelivery,
-  type PullRequestChange,
   type WatchState
 } from './pullRequestWatch'
 
@@ -67,7 +58,6 @@ const RATE_LIMIT_PAUSE_MS = 10 * 60_000
 const SIGNED_OUT_PAUSE_MAX_MS = 30 * 60_000
 const READ_FAILURE_LIMIT = 8
 const NOT_FOUND_LIMIT = 3
-const SUBAGENT_REFUSAL = "A subagent thread can only be notified: a pending notice would hold its parent's task open"
 
 /** What a watch keeps on disk next to the thread: its state and when it reads next. */
 interface Sidecar {
@@ -100,9 +90,7 @@ export interface PullRequestWatchDeps {
   folderFor(threadId: string): string | null
   /** False once the thread is in the trash or being purged. */
   isAvailable(threadId: string): boolean
-  isSubagent(threadId: string): boolean
   runStore(): RunStore | null
-  inbox(): Inbox | null
   /**
    * Writes a system line into the thread, once per `messageId`, and answers only after it is on disk: `delivered` when
    * it wrote it, `already` when the thread already held it. It throws when the line could not be saved.
@@ -110,8 +98,6 @@ export interface PullRequestWatchDeps {
   notify(threadId: string, text: string, messageId: string): Promise<'delivered' | 'already'>
   /** Calls `listener` when a run of any thread ends; returns the unsubscribe function. */
   onRunEnd?(listener: (threadId: string) => void): () => void
-  /** When a person last wrote to the thread (a message they sent, not a notice or a wake), in epoch milliseconds; null when never. */
-  lastPersonMessageAt(threadId: string): number | null
   clock?: () => number
   minIntervalMs?: number
   maxIntervalMs?: number
@@ -127,9 +113,9 @@ interface Due {
 }
 
 /**
- * Watches the pull requests of the threads that asked, and tells the thread (or, when it opted in, wakes its agent) when
- * checks finish or a review or comment arrives. Bounded: one read per pull request however many threads watch it, at
- * most `maxReadsPerTick` pull requests per tick, a floor of a minute per thread that doubles while quiet up to ten, a
+ * Watches the pull requests of the threads that asked, and tells the thread when checks finish or a review or comment
+ * arrives. It only notifies: it never starts a turn, so nothing runs on the person's code or repository without them.
+ * Bounded: one read per pull request however many threads watch it, at most `maxReadsPerTick` pull requests per tick, a floor of a minute per thread that doubles while quiet up to ten, a
  * pause for a rate limit or a sign-out, and an end after repeated failures. Each thread's progress is a sidecar file;
  * a notice is delivered through three steps (record, write, complete) so that a restart at any point repeats and loses nothing.
  */
@@ -206,39 +192,30 @@ export class PullRequestWatchService extends EventEmitter {
 
   /**
    * Sets the watch of a linked thread. Turning it on (from off or from an ended watch) starts a new one: a new cutoff and
-   * an empty memory, so nothing that already happened is reported. Changing between `notify` and `act` keeps the memory.
+   * an empty memory, so nothing that already happened is reported. Turning on a watch that runs keeps its memory.
    */
   setMode(threadId: string, mode: PullRequestWatchMode): PullRequestWatchStatus {
     const thread = this.deps.threads.getThread(threadId)
     if (!thread) throw new PullRequestWatchError('thread_not_found', 'Thread not found')
     const link = thread.pullRequest
     if (!link) throw new PullRequestWatchError('pull_request_not_linked', 'This thread has no pull request to watch.')
-    if (mode === 'act' && this.deps.isSubagent(threadId)) throw new PullRequestWatchError('invalid_params', SUBAGENT_REFUSAL)
     const previous = this.load(threadId)
     const now = this.clock()
     if (mode === 'off') {
+      // What was prepared but not yet delivered is withdrawn.
       if (previous) this.saveOrRefuse(threadId, { ...previous, mode: 'off', ended: null, state: dropPendingDeliveries(previous.state), watchRevision: previous.watchRevision + 1 })
-      // What was prepared but not yet delivered is withdrawn, and a notice that waits for a wake no longer wakes.
-      this.revokeWakes(threadId)
       this.writeLinkWatch(threadId, 'off')
       return this.status(threadId)
     }
-    if (mode !== 'notify' && mode !== 'act') throw new PullRequestWatchError('invalid_params', 'Unknown watch mode')
+    if (mode !== 'notify') throw new PullRequestWatchError('invalid_params', 'Unknown watch mode')
     if (!(previous && previous.mode !== 'off' && !previous.ended) && this.activeCount() >= MAX_WATCHED_THREADS) {
       throw new PullRequestWatchError('too_many_watches', `At most ${MAX_WATCHED_THREADS} threads can watch a pull request at once. Turn another watch off first.`)
     }
     const pr: PullRequestIdentity = { host: link.host, nameWithOwner: link.nameWithOwner, number: link.number }
     const running = previous && previous.mode !== 'off' && !previous.ended && sameLinkedPullRequest(previous.pr, pr)
     const revision = (previous?.watchRevision ?? Math.floor(now / 1000)) + 1
-    // Choosing Notify takes the right to wake from what was prepared; choosing Let the agent act starts the count of wakes over.
-    const downgraded = running && mode === 'notify' ? { ...previous.state, pending: previous.state.pending.map(downgradeDelivery) } : undefined
     const next: Sidecar = running
-      ? {
-          ...previous,
-          mode,
-          watchRevision: revision,
-          state: downgraded ?? (mode === 'act' && previous.mode !== 'act' ? { ...previous.state, autonomousWakes: 0, wakeCountSince: new Date(now).toISOString() } : previous.state)
-        }
+      ? { ...previous, mode, watchRevision: revision }
       : {
           version: 1,
           mode,
@@ -252,7 +229,6 @@ export class PullRequestWatchService extends EventEmitter {
           ended: null
         }
     this.saveOrRefuse(threadId, next)
-    if (mode === 'notify') this.revokeWakes(threadId)
     this.writeLinkWatch(threadId, mode)
     this.nudge()
     return this.status(threadId)
@@ -263,8 +239,7 @@ export class PullRequestWatchService extends EventEmitter {
     const thread = this.deps.threads.getThread(threadId)
     const link = thread?.pullRequest
     const entry = this.load(threadId)
-    const actRefusal = this.deps.isSubagent(threadId) ? SUBAGENT_REFUSAL : null
-    const base = { threadId, viewer: null as string | null, host: link?.host ?? null, actRefusal }
+    const base = { threadId, viewer: null as string | null, host: link?.host ?? null }
     if (!entry || !link || !sameLinkedPullRequest(entry.pr, link)) return { ...base, mode: 'off', state: 'off', nextCheckAt: null, ended: null }
     if (entry.ended) return { ...base, mode: 'off', state: 'ended', nextCheckAt: null, ended: entry.ended }
     if (entry.mode === 'off') return { ...base, mode: 'off', state: 'off', nextCheckAt: null, ended: null }
@@ -318,6 +293,8 @@ export class PullRequestWatchService extends EventEmitter {
     for (const thread of this.deps.threads.listAllThreads()) {
       const link = thread.pullRequest
       if (!link?.watch || link.watch === 'off') continue
+      // A link an earlier version set to wake the agent now reads Notify.
+      if ((link.watch as string) === 'act') this.writeLinkWatch(thread.id, 'notify')
       const entry = this.entryFor(thread.id, link)
       if (!entry || entry.mode === 'off' || entry.ended) continue
       const reason = this.ineligible(thread.id, entry)
@@ -413,65 +390,27 @@ export class PullRequestWatchService extends EventEmitter {
     const changed = evaluated.changes.length > 0
     // The baseline only records, so it does not count as a quiet read.
     const intervalMs = changed || state.baseline ? this.minInterval : Math.min(entry.intervalMs * 2, this.maxInterval)
-    const plan = this.deliveriesFor(member.threadId, entry, next, detail, evaluated.changes, viewer !== null, now)
-    const prepared = prepareDeliveries(plan.state, plan.deliveries, now)
-    // Step 1 must be on disk before any sink is touched: if it cannot be written, nothing is delivered and the read repeats.
+    // One notice for everything that changed.
+    const notices = changed ? [{ idPrefix: `pr-update:${member.threadId}:${entry.watchRevision}`, text: formatPullRequestNotice(evaluated.changes, detail), ids: changeIds(evaluated.changes) }] : []
+    const prepared = prepareDeliveries(next, notices, now)
+    // Step 1 must be on disk before the thread is written to: if it cannot be written, nothing is delivered and the read repeats.
     try {
-      this.saveStrict(member.threadId, { ...entry, mode: plan.mode, state: prepared.next, intervalMs, nextAt: new Date(now + intervalMs).toISOString(), pausedUntil: null, lastReadAt: new Date(startedAt).toISOString() })
+      this.saveStrict(member.threadId, { ...entry, state: prepared.next, intervalMs, nextAt: new Date(now + intervalMs).toISOString(), pausedUntil: null, lastReadAt: new Date(startedAt).toISOString() })
     } catch (error) {
       if (this.current(member.threadId, revision)) this.readFailed(member.threadId, error)
       return
-    }
-    if (plan.mode !== entry.mode) {
-      this.writeLinkWatch(member.threadId, plan.mode)
-      this.emit('updated', { threadId: member.threadId, number: detail.number, changes: ['wake_limit'] })
     }
     if (!(await this.replay(member.threadId, revision))) return
     if (changed) this.emit('updated', { threadId: member.threadId, number: detail.number, changes: changeKinds(evaluated.changes) })
     if (evaluated.ended && this.current(member.threadId, revision)) this.end(member.threadId, evaluated.ended)
   }
 
-  /**
-   * The notices a batch becomes. With `notify`, one for everything. With `act`, one that wakes the agent for what may wake it
-   * (a failed check of a pull request from a branch of the repository opened by a maintainer, and what owners, members and
-   * collaborators wrote) and a plain notice for the rest: the agent never acts on a stranger. Each wake counts; the count
-   * starts over when a person writes to the thread, and at `AUTONOMOUS_WAKE_LIMIT` the watch switches itself to Notify and says so.
-   */
-  private deliveriesFor(threadId: string, entry: Sidecar, state: WatchState, detail: PullRequestDetail, changes: PullRequestChange[], viewerKnown: boolean, now: number) {
-    type Planned = { idPrefix: string; mode: 'notify' | 'act'; text: string; payload: PullRequestUpdatePayload | null; ids: string[]; final?: true }
-    const idPrefix = `pr-update:${threadId}:${entry.watchRevision}`
-    const make = (mode: 'notify' | 'act', part: PullRequestChange[]): Planned => {
-      const text = formatPullRequestNotice(part, detail, mode)
-      const payload: PullRequestUpdatePayload | null = mode === 'act' ? { text, number: detail.number, headSha: detail.headSha, changes: changeKinds(part) } : null
-      return { idPrefix, mode, text, payload, ids: changeIds(part) }
-    }
-    let counted = state
-    // A person's message since the count began starts it over.
-    const person = this.deps.lastPersonMessageAt(threadId)
-    if (person !== null && person > Date.parse(counted.wakeCountSince)) counted = { ...counted, autonomousWakes: 0, wakeCountSince: new Date(person).toISOString() }
-    if (!changes.length) return { deliveries: [] as Planned[], state: counted, mode: entry.mode }
-    if (entry.mode !== 'act' || this.deps.isSubagent(threadId)) return { deliveries: [make('notify', changes)], state: counted, mode: entry.mode }
-    const { act, notify } = splitByTrust(changes, { checksMayWake: checksMayWake(detail) })
-    const isRemark = (change: PullRequestChange): boolean => change.kind === 'review' || change.kind === 'comment'
-    // Without the signed-in account the agent's own comments cannot be told from anyone's, so no remark wakes it.
-    const waking = viewerKnown ? act : act.filter((change) => !isRemark(change))
-    const rest = viewerKnown ? notify : [...act.filter(isRemark), ...notify]
-    const deliveries: Planned[] = [...(waking.length ? [make('act', waking)] : []), ...(rest.length ? [make('notify', rest)] : [])]
-    if (!waking.length) return { deliveries, state: counted, mode: entry.mode }
-    counted = { ...counted, autonomousWakes: counted.autonomousWakes + 1 }
-    if (counted.autonomousWakes < AUTONOMOUS_WAKE_LIMIT) return { deliveries, state: counted, mode: entry.mode }
-    // The last wake the watch allows: it goes out, then the watch only notifies, with a line that says why.
-    for (const delivery of deliveries) if (delivery.mode === 'act') delivery.final = true
-    deliveries.push({ idPrefix, mode: 'notify', text: wakeLimitLine(detail.number), payload: null, ids: [] })
-    return { deliveries, state: counted, mode: 'notify' as const }
-  }
-
   // Delivery -----------------------------------------------------------------------------------------------------
 
   /**
-   * Steps 2 and 3 of a delivery for every notice prepared and not yet complete: write it to its sink (idempotent by the
-   * delivery id), then record its remarks as delivered. A thread that is no longer eligible drops them instead. False when
-   * a sink failed (counted as a read failure, so the watch backs off and ends after eight) or the watch changed.
+   * Steps 2 and 3 of a delivery for every notice prepared and not yet complete: write it into the thread (idempotent by
+   * the delivery id), then record its remarks as delivered. A thread that is no longer eligible drops them instead. False
+   * when the write failed (counted as a read failure, so the watch backs off and ends after eight) or the watch changed.
    */
   private async replay(threadId: string, revision: number): Promise<boolean> {
     for (;;) {
@@ -486,7 +425,7 @@ export class PullRequestWatchService extends EventEmitter {
         return false
       }
       try {
-        await this.sink(threadId, delivery)
+        await this.deps.notify(threadId, delivery.text, `msg:${delivery.deliveryId}`)
       } catch (error) {
         if (this.current(threadId, revision)) this.readFailed(threadId, error)
         return false
@@ -505,25 +444,6 @@ export class PullRequestWatchService extends EventEmitter {
         return false
       }
     }
-  }
-
-  private async sink(threadId: string, prepared: PendingDelivery): Promise<'delivered' | 'already'> {
-    const messageId = `msg:${prepared.deliveryId}`
-    // Whether it may wake is decided now, not when it was prepared: a watch that is no longer set to act, and a subagent, only notify.
-    const permitted = (this.entries.get(threadId)?.mode === 'act' || prepared.final === true) && !this.deps.isSubagent(threadId)
-    const delivery = permitted ? prepared : downgradeDelivery(prepared)
-    if (delivery.mode === 'act' && delivery.payload) {
-      const inbox = this.deps.inbox()
-      const store = this.deps.runStore()
-      if (!inbox || !store) throw new Error('The run engine is not available to wake the thread.')
-      const inboxId = `inbox:${delivery.deliveryId}`
-      return store.db.transaction(() => {
-        if (inbox.get(inboxId)) return 'already' as const
-        inbox.append({ inboxId, threadId, kind: 'pr_update', payload: delivery.payload })
-        return 'delivered' as const
-      })
-    }
-    return this.deps.notify(threadId, delivery.text, messageId)
   }
 
   // Failures and ends --------------------------------------------------------------------------------------------
@@ -570,8 +490,6 @@ export class PullRequestWatchService extends EventEmitter {
     if (!entry) return
     const now = new Date(this.clock()).toISOString()
     this.save(threadId, { ...entry, ended: { reason, at: now }, state: dropPendingDeliveries(entry.state), watchRevision: entry.watchRevision + 1 })
-    // A notice written for the agent and not yet read is withdrawn with the watch.
-    this.revokeWakes(threadId)
     if (reason !== 'unlinked') this.writeLinkWatch(threadId, 'off')
     if (reason === 'trashed') return
     const line = watchEndedLine(reason, entry.pr.number)
@@ -610,7 +528,7 @@ export class PullRequestWatchService extends EventEmitter {
   /** Whether the thread's link says it is watched; cheap, so every run end and Stop can ask. */
   private isWatched(threadId: string): boolean {
     const watch = this.deps.threads.getThread(threadId)?.pullRequest?.watch
-    return watch === 'notify' || watch === 'act'
+    return Boolean(watch && watch !== 'off')
   }
 
   private activeCount(): number {
@@ -629,10 +547,9 @@ export class PullRequestWatchService extends EventEmitter {
     const existing = this.load(threadId)
     if (existing && sameLinkedPullRequest(existing.pr, link)) return existing
     const now = this.clock()
-    const mode = link.watch === 'act' ? 'act' : 'notify'
     const fresh: Sidecar = {
       version: 1,
-      mode,
+      mode: 'notify',
       pr: { host: link.host, nameWithOwner: link.nameWithOwner, number: link.number },
       watchRevision: (existing?.watchRevision ?? Math.floor(now / 1000)) + 1,
       stopGeneration: this.stopGeneration(threadId),
@@ -662,8 +579,9 @@ export class PullRequestWatchService extends EventEmitter {
     try {
       const value = JSON.parse(readFileSync(file, 'utf8')) as Sidecar
       if (value?.version !== 1 || !value.state || !value.pr) return undefined
-      this.entries.set(threadId, value)
-      return value
+      const current = notifyOnly(value)
+      this.entries.set(threadId, current)
+      return current
     } catch {
       return undefined
     }
@@ -701,18 +619,6 @@ export class PullRequestWatchService extends EventEmitter {
     }
   }
 
-  /** The inbox rows a watch wrote that nobody has read are acknowledged, so none of them can still wake the thread. */
-  private revokeWakes(threadId: string): void {
-    try {
-      const inbox = this.deps.inbox()
-      if (!inbox) return
-      const open = inbox.listForThread(threadId).filter((row) => row.kind === 'pr_update' && row.status !== 'acknowledged')
-      if (open.length) inbox.markAcknowledged(open.map((row) => row.inboxId))
-    } catch (error) {
-      console.warn('pull request updates could not be withdrawn', { threadId, error: error instanceof Error ? error.message : String(error) })
-    }
-  }
-
   private hostIsPaused(host: string): boolean {
     return (this.hostPaused.get(host) ?? 0) > this.clock()
   }
@@ -743,4 +649,16 @@ export class PullRequestWatchService extends EventEmitter {
       // The thread is being removed; nothing to show.
     }
   }
+}
+
+/**
+ * A sidecar as a watch that only notifies keeps it. One an earlier version wrote for a watch that woke the agent reads as
+ * Notify, and the wakes it had prepared are dropped. The remarks in them were not remembered yet, so the next read
+ * reports them as a notice; a check result in them was already recorded as seen, so it is not reported again.
+ */
+function notifyOnly(entry: Sidecar): Sidecar {
+  const legacy = entry as Omit<Sidecar, 'mode'> & { mode: string }
+  if (legacy.mode !== 'act' && !entry.state.pending.some((delivery) => (delivery as { mode?: string }).mode === 'act')) return entry
+  const pending = entry.state.pending.filter((delivery) => (delivery as { mode?: string }).mode !== 'act')
+  return { ...entry, mode: legacy.mode === 'act' ? 'notify' : entry.mode, state: { ...entry.state, pending } }
 }

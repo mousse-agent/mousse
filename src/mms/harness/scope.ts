@@ -3,6 +3,7 @@ import { join } from 'node:path'
 import type { InstanceEnabled } from '../../shared/harness/status'
 import type { HarnessScopesFile, ProjectProviderOverrides, ProviderScope, ProviderSelection } from '../../shared/harness/types'
 import { atomicWriteJsonSync } from '../data/AtomicFs'
+import { upgradeSelection, type ModelPick } from '../../shared/modelSelection'
 
 /**
  * Project overrides of the profile's provider instances, in `<profileHome>/harness/scopes.json`.
@@ -52,14 +53,15 @@ export class HarnessScopeStore {
   }
 
   /** Project defaults that named `from` name `to` now, with `model` mapping their models; returns what changed. */
-  moveDefaults(from: string, to: string, model: (id: string) => string = (id) => id): Array<{ projectId: string; from: string; to: string }> {
+  moveDefaults(from: string, to: string, model: (pick: ModelPick) => ModelPick = (pick) => pick): Array<{ projectId: string; from: string; to: string }> {
     const file = structuredClone(this.read())
     const moved: Array<{ projectId: string; from: string; to: string }> = []
     for (const [projectId, project] of Object.entries(file.projects)) {
       if (project.defaultSelection?.instanceId !== from) continue
-      const mapped = model(project.defaultSelection.model)
-      moved.push({ projectId, from: project.defaultSelection.model, to: mapped })
-      project.defaultSelection = { ...project.defaultSelection, instanceId: to, model: mapped }
+      const { effort: _effort, ...rest } = project.defaultSelection
+      const mapped = model(project.defaultSelection)
+      moved.push({ projectId, from: project.defaultSelection.model, to: mapped.model })
+      project.defaultSelection = { ...rest, instanceId: to, model: mapped.model, ...(mapped.effort ? { effort: mapped.effort } : {}) }
     }
     if (moved.length) this.write(file)
     return moved
@@ -123,11 +125,12 @@ export function decodeScopes(raw: unknown): HarnessScopesFile {
         if (instanceId !== '__proto__' && isRecord(entry) && typeof entry.enabled === 'boolean') project.instances[instanceId] = { enabled: entry.enabled }
     const selection = value.defaultSelection
     if (isRecord(selection) && typeof selection.instanceId === 'string' && typeof selection.model === 'string')
-      project.defaultSelection = {
+      // A level packed into the model (written before #490) moves into its own field.
+      project.defaultSelection = upgradeSelection({
         instanceId: selection.instanceId,
         model: selection.model,
         ...(typeof selection.effort === 'string' ? { effort: selection.effort } : {})
-      }
+      })
     file.projects[projectId] = project
   }
   return file

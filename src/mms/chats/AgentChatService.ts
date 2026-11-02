@@ -149,7 +149,7 @@ export class AgentChatService {
     let workspaceRoot: string
     if (projectPath) {
       const manager = new ThreadWorkspaceManager(this.options.services.threads.getThreadDir(thread.id))
-      const metadata = await manager.provision(thread.id, 'main', projectPath, this.lifecycle.signal)
+      const metadata = await manager.provision(thread.id, 'main', projectPath, this.lifecycle.signal, undefined, undefined, { nameFrom: name })
       workspaceRoot = manager.executionContext(projectPath, metadata).projectPath
       // A local untracked AGENTS.md still applies to this newly admitted project workspace.
       const source = join(projectPath, 'AGENTS.md'), target = join(workspaceRoot, 'AGENTS.md')
@@ -306,8 +306,6 @@ export class AgentChatService {
       const executing = [...this.active.values()].some((run) => run.threadId === thread.id)
       const metadata = executing ? manager.load()! : manager.verify()
       if (!metadata) throw new DomainRpcError('workspace_changed', 'The chat task workspace metadata is unavailable')
-      if (executing && (git(metadata.worktreePath, ['branch', '--show-current']) !== metadata.branch
-        || !tryGit(metadata.worktreePath, ['merge-base', '--is-ancestor', metadata.headSha, 'HEAD']).ok)) throw new DomainRpcError('workspace_changed', 'The active chat workspace history changed')
       if (metadata.lifecycle !== 'ready' || realpathSync(manager.executionContext(project.path, metadata).projectPath) !== record.workspaceRoot) throw new DomainRpcError('workspace_changed', 'The chat task workspace changed')
     } else if (record.workspaceRoot !== join(realpathSync(this.store.root), record.conversation.id, 'workspace')
       || record.workspaceRoot !== realpathSync(join(this.store.root, record.conversation.id, 'workspace'))) throw new DomainRpcError('workspace_changed', 'The chat scratch workspace changed')
@@ -367,8 +365,8 @@ export class AgentChatService {
           nativeContextBoundary: { messageIndex: 0, compactionGeneration: 0, fidelity: 'legacy' },
           externalEffects: [{ kind: 'unknown', reversible: false, description: 'Agent tools may affect external services or ignored files.' }]
         } : undefined
-        // The user's pending edits are saved as their own checkpoint first, so this response's Undo leaves them.
-        const startSha = actions && actionOptions ? (await actions.saveUserChanges(actionOptions)).startSha : undefined
+        // Edits made outside this response are recorded as their own action first, so its Undo leaves them.
+        const startSha = actions && actionOptions ? (await actions.recordOutsideChanges(actionOptions)).startSha : undefined
         if (actions && actionOptions) actions.beginTurn(actionOptions, startSha!)
         let result: AgentExecutionResult | undefined
         try {

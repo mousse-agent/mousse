@@ -2,7 +2,6 @@ import { useCallback, useEffect } from 'react'
 import { create } from 'zustand'
 import { describeStatus, type InstanceSnapshot, type ProviderSnapshotsEvent, type StatusDescription } from '../../shared/harness/status'
 import type { HarnessCaps, HarnessDriverKind, ProviderOperationEvent, ProviderOperationStarted, ProviderScope, SignInPrompt } from '../../shared/harness/types'
-import { formatEffortLabel, parseThinkingSuffixFromModelId } from '../../shared/modelVariants'
 import type { PermissionLimits } from '../../shared/permissionMode'
 import { legacyProviderForInstance } from '../../shared/providerInstances'
 import type { LlmModelOption, LlmProviderOption } from '../../shared/settings'
@@ -408,56 +407,6 @@ export function pickerProviders(snapshots: readonly InstanceSnapshot[] | undefin
   return providers
 }
 
-/**
- * The name an instance lists a model under, hidden models included, from the snapshots of any
- * scope on hand. `providerId` is a picker id or provider name; `instanceId`, when known, decides.
- * The effort an id carries (`haiku:low`) is not part of the name. Undefined when none lists it.
- */
-export function knownModelLabel(selection: { providerId: string; instanceId?: string }, modelId: string): string | undefined {
-  if (!modelId) return undefined
-  const { baseId } = parseThinkingSuffixFromModelId(modelId)
-  for (const scope of Object.values(useProviderSnapshotsStore.getState().scopes)) {
-    for (const snapshot of scope.snapshots ?? []) {
-      const serves = selection.instanceId
-        ? snapshot.instanceId === selection.instanceId
-        : pickerIdOf(snapshot) === selection.providerId || llmProviderOf(snapshot) === selection.providerId
-      if (!serves) continue
-      const entries = snapshot.models.entries
-      const model = entries.find((entry) => entry.id === modelId) ?? entries.find((entry) => entry.id === baseId)
-      if (model?.label) return model.label
-    }
-  }
-  return undefined
-}
-
-/** Claude's model families, which Claude Code lists without the brand ("Sonnet 5.5"). */
-const CLAUDE_FAMILY = /^(?:claude[- ])?(opus|sonnet|haiku|fable)(?:[- ](\d+)(?:[-.](\d{1,2}))?(?![\d.]))?/i
-
-/**
- * A name for a model no loaded list names: "claude-haiku-5-5" → "Claude Haiku 5.5", "sonnet" →
- * "Claude Sonnet". A variant the id carries stays ("opus:fast" → "Claude Opus (fast)"), so two
- * variants never read the same; a release date is dropped.
- */
-function modelNameFromId(baseId: string): string {
-  const claude = CLAUDE_FAMILY.exec(baseId)
-  if (!claude) return baseId
-  const family = claude[1]!.charAt(0).toUpperCase() + claude[1]!.slice(1).toLowerCase()
-  const version = claude[2] ? ` ${claude[2]}${claude[3] ? `.${claude[3]}` : ''}` : ''
-  const variant = baseId.slice(claude[0].length).replace(/^-\d{8}/, '').replace(/^[-:@]/, '')
-  return `Claude ${family}${version}${variant ? ` (${variant})` : ''}`
-}
-
-/**
- * A model as a transcript names it: its listed name with the brand, and the effort its id carries
- * ("Claude Haiku 4.5 · Low"). Without a loaded list the name comes from the id itself.
- */
-export function modelDisplayName(providerId: string, modelId: string): string {
-  const { baseId, effort } = parseThinkingSuffixFromModelId(modelId)
-  const label = knownModelLabel({ providerId }, modelId)
-  const name = !label ? modelNameFromId(baseId) : CLAUDE_FAMILY.test(label) && !/^claude/i.test(label) ? `Claude ${label}` : label
-  return effort ? `${name} · ${formatEffortLabel(effort)}` : name
-}
-
 /** The picker entry a stored selection names: by instance first, then by its provider name. */
 export function pickerIdFor(selection: { instanceId?: string; llmProvider: string }, providers: readonly PickerProvider[]): string {
   if (selection.instanceId) {
@@ -465,6 +414,51 @@ export function pickerIdFor(selection: { instanceId?: string; llmProvider: strin
     if (byInstance) return byInstance.id
   }
   return selection.llmProvider
+}
+
+/** A model the composer can start on, in the shape `threads.setModel` takes. */
+export interface PickerSelection {
+  instanceId?: string
+  llmProvider: string
+  model: string
+}
+
+/**
+ * The model a composer starts on when no usable default was chosen: the first provider in picker
+ * order that is ready (else the first offered at all), on its first listed model, which a provider
+ * lists as its default. Undefined while the picker offers nothing.
+ */
+export function fallbackModel(providers: readonly PickerProvider[]): PickerSelection | undefined {
+  const offered = providers.filter((provider) => provider.models.length > 0)
+  const provider = offered.find((entry) => entry.status?.tone === 'ready') ?? offered[0]
+  if (!provider) return undefined
+  return {
+    ...(provider.instanceId ? { instanceId: provider.instanceId } : {}),
+    llmProvider: provider.llmProvider,
+    model: provider.models[0]!.id
+  }
+}
+
+/** The selection names a model on a provider the picker offers (a default on a provider switched off or removed does not). */
+export function pickerOffers(selection: { instanceId?: string; llmProvider: string; model: string }, providers: readonly PickerProvider[]): boolean {
+  if (!selection.model) return false
+  const id = pickerIdFor(selection, providers)
+  return providers.some((provider) => provider.id === id)
+}
+
+/**
+ * The model a composer picks by itself: only on this computer, for a thread without a model of its
+ * own, once the profile default is read and the picker does not offer it. A model or default chosen
+ * by hand always wins.
+ */
+export function composerAutoModel(input: {
+  remote: boolean
+  threadModel: unknown
+  profileDefault: PickerSelection | undefined
+  providers: readonly PickerProvider[]
+}): PickerSelection | undefined {
+  if (input.remote || input.threadModel || !input.profileDefault) return undefined
+  return pickerOffers(input.profileDefault, input.providers) ? undefined : fallbackModel(input.providers)
 }
 
 /** Model ids hidden or starred per instance, from device snapshots (prefs are not per project). */

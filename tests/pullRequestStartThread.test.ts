@@ -5,9 +5,13 @@ import { MousseMainService } from '../src/mms/MousseMainService'
 import { execRunner, type ExecutableRunner } from '../src/mms/git/ghRunner'
 import { GitHubCodeHost, parsePullRequestDetail } from '../src/mms/git/GitHubCodeHost'
 import { PullRequestThreadError, PullRequestThreadService } from '../src/mms/git/PullRequestThreadService'
-import type { PullRequestDetail } from '../src/shared/pullRequests'
+import { WORKTREE_CONFIG_ENABLED, WORKTREE_CONFIG_NEEDED, type PullRequestDetail } from '../src/shared/pullRequests'
 import { ThreadWorkspaceManager } from '../src/mms/workspace/ThreadWorkspaceManager'
 import { git, gitFoundationFixture } from './fixtures/gitFoundation'
+import { userAction } from '../src/mms/git/gitPolicy'
+
+/** The user's Start thread from pull request. */
+const START = userAction('button', 'Start thread from pull request')
 
 const REMOTES = 'origin\thttps://github.com/bob/app.git (fetch)\norigin\thttps://github.com/bob/app.git (push)\nupstream\thttps://github.com/acme/app.git (fetch)\nupstream\thttps://github.com/acme/app.git (push)\n'
 
@@ -56,7 +60,7 @@ describe('starting a thread from a pull request', () => {
 
   const workspaceOf = (threadId: string) => new ThreadWorkspaceManager(mms.threads.getThreadDir(threadId)).load()!
   const start = (patch: Partial<Parameters<PullRequestThreadService['startThread']>[0]> = {}) =>
-    service.startThread({ projectId, reference: '7', ...patch })
+    service.startThread({ projectId, reference: '7', allowWorktreeConfig: true, ...patch }, START)
 
   beforeEach(async () => {
     f = gitFoundationFixture()
@@ -124,7 +128,7 @@ describe('starting a thread from a pull request', () => {
     expect(git(workspace.worktreePath, 'rev-parse', 'HEAD')).toBe(prSha)
     expect(f.read(workspace.worktreePath)).toBe('pull request value\n')
     // The thread's branch is its own; no remote or branch was added for the fork, and the primary checkout stays put.
-    expect(workspace.branch).toBe(`mousse/thread/${result.thread.id}/main`)
+    expect(workspace.branch).toBe('mousse/pr-7-fix-the-thing')
     expect(git(f.repo, 'remote')).toBe(remotesBefore)
     expect(git(f.repo, 'rev-parse', '--abbrev-ref', 'HEAD')).toBe(primaryBranch)
     expect(git(f.repo, 'rev-parse', 'HEAD')).toBe(primaryHead)
@@ -166,6 +170,14 @@ describe('starting a thread from a pull request', () => {
     expect(send).toHaveBeenCalledWith(result.thread.id, `${result.seed}\n\nPlease address the review.`)
     const alone = await start({ send: true, allowDuplicate: true })
     expect(send).toHaveBeenLastCalledWith(alone.thread.id, alone.seed)
+  })
+
+  it('says the author\'s status could not be checked, rather than calling them a stranger, and still does not send', async () => {
+    vi.mocked(host.getPullRequestDetail).mockImplementation(async () => detailOf({ author: 'ada', authorAssociation: 'UNCHECKED' }))
+    const result = await start({ send: true })
+    expect(send).not.toHaveBeenCalled()
+    expect(result.sent).toBe(false)
+    expect(result.withheld).toBe('Not sent: GitHub could not be asked whether ada is an owner, member or collaborator. Read it and send it yourself.')
   })
 
   it('does not send text from people who are not owners, members or collaborators, and says so; the seed is still returned', async () => {
@@ -298,12 +310,12 @@ describe('starting a thread from a pull request', () => {
   })
 
   it('refuses a URL of another repository or host before reading anything', async () => {
-    await expect(service.startThread({ projectId, reference: 'https://github.com/other/app/pull/7' })).rejects.toMatchObject({ code: 'pull_request_wrong_repository' })
-    await expect(service.startThread({ projectId, reference: 'https://ghe.example.com/acme/app/pull/7' })).rejects.toMatchObject({ code: 'pull_request_wrong_repository' })
-    await expect(service.startThread({ projectId, reference: 'not a pull request' })).rejects.toMatchObject({ code: 'invalid_params' })
-    await expect(service.startThread({ projectId, reference: '0' })).rejects.toMatchObject({ code: 'invalid_params' })
+    await expect(service.startThread({ projectId, reference: 'https://github.com/other/app/pull/7' }, START)).rejects.toMatchObject({ code: 'pull_request_wrong_repository' })
+    await expect(service.startThread({ projectId, reference: 'https://ghe.example.com/acme/app/pull/7' }, START)).rejects.toMatchObject({ code: 'pull_request_wrong_repository' })
+    await expect(service.startThread({ projectId, reference: 'not a pull request' }, START)).rejects.toMatchObject({ code: 'invalid_params' })
+    await expect(service.startThread({ projectId, reference: '0' }, START)).rejects.toMatchObject({ code: 'invalid_params' })
     expect(host.getPullRequestDetail).not.toHaveBeenCalled()
-    const result = await service.startThread({ projectId, reference: 'https://github.com/acme/app/pull/7/files' })
+    const result = await service.startThread({ projectId, reference: 'https://github.com/acme/app/pull/7/files', allowWorktreeConfig: true }, START)
     expect(result.thread.pullRequest?.number).toBe(7)
   })
 
@@ -346,19 +358,56 @@ describe('starting a thread from a pull request', () => {
     expect(git(f.repo, 'config', '--get', 'core.hooksPath')).toBe(hooks)
   })
 
+  it('turns on per-worktree Git settings only when the person agreed, once, says so, and never turns them off', async () => {
+    const setting = () => { try { return git(f.repo, 'config', '--local', '--get', 'extensions.worktreeConfig') } catch { return null } }
+    const note = vi.fn(async () => 'delivered')
+    service = new PullRequestThreadService({ codeHost: host, projects: mms.projects, threads: mms.threads, trashThread: trash, send, note })
+    expect(setting()).toBeNull()
+    expect((await service.resolve(projectId, '7')).enablesWorktreeConfig).toBe(true)
+
+    // Not agreed (an older client sends no flag): refused before anything is fetched or made.
+    const threadsBefore = mms.threads.listAllThreads().length
+    await expect(start({ allowWorktreeConfig: undefined })).rejects.toMatchObject({ code: 'pull_request_worktree_config_needed', message: WORKTREE_CONFIG_NEEDED })
+    expect(setting()).toBeNull()
+    expect(mms.threads.listAllThreads()).toHaveLength(threadsBefore)
+    expect(git(f.repo, 'for-each-ref', '--format=%(refname)', 'refs/mousse')).toBe('')
+
+    const first = await start()
+    expect(first.repositoryConfigChange).toBe(WORKTREE_CONFIG_ENABLED)
+    expect(setting()).toBe('true')
+    expect(note).toHaveBeenCalledWith(first.thread.id, WORKTREE_CONFIG_ENABLED, `msg:worktree-config:${first.thread.id}`)
+    expect((await service.resolve(projectId, '7')).enablesWorktreeConfig).toBe(false)
+    // Once it is on, a start needs no agreement and changes nothing.
+    const second = await start({ allowDuplicate: true, allowWorktreeConfig: undefined })
+    expect(second.repositoryConfigChange).toBeNull()
+    expect(note).toHaveBeenCalledTimes(1)
+
+    // Turned off by the person later: a restore refuses rather than turning it on again behind their back.
+    const workspace = workspaceOf(first.thread.id)
+    git(f.repo, 'worktree', 'remove', '--force', workspace.worktreePath)
+    git(f.repo, 'config', '--local', '--unset', 'extensions.worktreeConfig')
+    await expect(new ThreadWorkspaceManager(mms.threads.getThreadDir(first.thread.id)).restore(f.repo)).rejects.toThrow(/per-worktree Git settings are off/)
+    expect(setting()).toBeNull()
+    expect(existsSync(workspace.worktreePath)).toBe(false)
+  })
+
   describe('when the worktree cannot be made', () => {
-    /** Makes `git worktree add` fail after provisioning began: the thread's branch name is already taken. */
-    function blockWorktree(): { threadId: () => string } {
+    /**
+     * Makes `git worktree add` fail after provisioning began: the repository has a branch named `mousse`, so Git can make
+     * no branch under `mousse/`. (A taken thread branch name no longer blocks it: the thread gets the next free name.)
+     */
+    function blockWorktree(): { threadId: () => string; unblock: () => void } {
       let id = ''
       const create = mms.threads.createThread.bind(mms.threads)
       vi.spyOn(mms.threads, 'createThread').mockImplementation((...args) => {
         const thread = create(...args)
         id = thread.id
-        git(f.repo, 'branch', `mousse/thread/${thread.id}/main`, 'HEAD')
+        git(f.repo, 'branch', 'mousse', 'HEAD')
         return thread
       })
-      return { threadId: () => id }
+      return { threadId: () => id, unblock: () => { git(f.repo, 'branch', '-D', 'mousse') } }
     }
+    const mousseRefs = () => git(f.repo, 'for-each-ref', '--format=%(refname)').split('\n').filter((ref) => ref.startsWith('refs/heads/mousse/'))
 
     it('removes the thread, its folder and what provisioning left in the repository, and says why', async () => {
       const blocked = blockWorktree()
@@ -371,7 +420,8 @@ describe('starting a thread from a pull request', () => {
       const id = blocked.threadId()
       expect(mms.threads.listAllThreads()).toHaveLength(threadsBefore)
       expect(mms.threads.listAllThreads().some((thread) => thread.id === id)).toBe(false)
-      expect(git(f.repo, 'for-each-ref', '--format=%(refname)', `refs/heads/mousse/thread/${id}`, `refs/mousse/threads/${id}`)).toBe('')
+      expect(mousseRefs()).toEqual([])
+      expect(git(f.repo, 'for-each-ref', '--format=%(refname)', `refs/mousse/threads/${id}`)).toBe('')
       expect(git(f.repo, 'worktree', 'list', '--porcelain').split('\n').filter((line) => line.startsWith('worktree '))).toHaveLength(1)
       expect(trash).not.toHaveBeenCalled()
       // Nothing was sent and nothing is left to retry against; the fetched ref went too, so no fork history stays reachable.
@@ -379,6 +429,7 @@ describe('starting a thread from a pull request', () => {
       expect(git(f.repo, 'for-each-ref', '--format=%(refname)', 'refs/mousse/pull')).toBe('')
       // A retry is not refused as a duplicate.
       vi.mocked(mms.threads.createThread).mockRestore()
+      blocked.unblock()
       await expect(start()).resolves.toMatchObject({ sent: false })
     })
 
@@ -392,7 +443,7 @@ describe('starting a thread from a pull request', () => {
         prepareThread: () => { throw new Error('model store unavailable') }
       })
       const threadsBefore = mms.threads.listAllThreads().length
-      await expect(failing.startThread({ projectId, reference: '7' })).rejects.toMatchObject({
+      await expect(failing.startThread({ projectId, reference: '7', allowWorktreeConfig: true }, START)).rejects.toMatchObject({
         code: 'pull_request_workspace_failed',
         message: expect.stringContaining('model store unavailable')
       })
@@ -400,6 +451,27 @@ describe('starting a thread from a pull request', () => {
       expect(git(f.repo, 'worktree', 'list', '--porcelain').split('\n').filter((line) => line.startsWith('worktree '))).toHaveLength(1)
       expect(git(f.repo, 'for-each-ref', '--format=%(refname)', 'refs/heads/mousse', 'refs/mousse')).toBe('')
       await expect(start()).resolves.toMatchObject({ sent: false })
+    })
+
+    it('removes only its own worktree: the person\'s other stale worktree registrations stay', async () => {
+      // A worktree of the person's whose folder is gone: `git worktree prune` would drop its registration.
+      const theirs = join(f.root, 'their-worktree')
+      git(f.repo, 'worktree', 'add', '-q', '-b', 'their-branch', theirs, 'HEAD')
+      rmSync(theirs, { recursive: true, force: true })
+      const failing = new PullRequestThreadService({
+        codeHost: host,
+        projects: mms.projects,
+        threads: mms.threads,
+        trashThread: trash,
+        send,
+        prepareThread: () => { throw new Error('model store unavailable') }
+      })
+      await expect(failing.startThread({ projectId, reference: '7', allowWorktreeConfig: true }, START)).rejects.toMatchObject({ code: 'pull_request_workspace_failed' })
+      const registered = git(f.repo, 'worktree', 'list', '--porcelain').split('\n').filter((line) => line.startsWith('worktree '))
+      expect(registered).toHaveLength(2)
+      expect(registered.some((line) => line.endsWith('their-worktree'))).toBe(true)
+      expect(git(f.repo, 'for-each-ref', '--format=%(refname)', 'refs/heads/mousse', 'refs/mousse')).toBe('')
+      expect(trash).not.toHaveBeenCalled()
     })
 
     it('trashes the thread instead, leaving its worktree and branch, when the worktree cannot be removed', async () => {

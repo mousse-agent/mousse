@@ -10,9 +10,11 @@ import {
 } from '../src/renderer/lib/modelFavorites'
 import {
   beginProfileSwitch,
+  composerAutoModel,
+  fallbackModel,
   instanceBadges,
-  modelDisplayName,
   pickerIdFor,
+  pickerOffers,
   pickerProviders,
   showsContextGauge,
   sortInstances,
@@ -22,6 +24,8 @@ import { useAppStore } from '../src/renderer/stores/appStore'
 import { sendErrorLine } from '../src/renderer/lib/errorText'
 import { getGroupedModelButtonParts, makerLabelOf, modelRowSubtitle, sortPickerEntries } from '../src/renderer/components/ModelFamilyMenu'
 import { profilePreferenceKey } from '../src/renderer/lib/profilePreferences'
+import { resolveModelChoice } from '../src/renderer/lib/modelChoice'
+import { modelLabel } from '../src/shared/modelChoice'
 import { model, snapshot } from './providerSnapshotFixture'
 
 const claudeModels = [model('claude-opus-4', { label: 'Claude Opus 4' }), model('claude-sonnet-4', { label: 'Claude Sonnet 4' })]
@@ -78,6 +82,53 @@ describe('composer picker from snapshots', () => {
       []
     )
     expect(providers.map((entry) => entry.instanceId)).toEqual(['claude', 'codex'])
+  })
+
+  describe('model a composer starts on without a usable default (#495)', () => {
+    const codex = (overrides = {}) =>
+      snapshot({ instanceId: 'codex', driver: 'codex', displayName: 'Codex', models: { entries: [model('gpt-5'), model('gpt-5-mini')], source: 'live' }, ...overrides })
+    const claude = (overrides = {}) => snapshot({ models: { entries: claudeModels, source: 'live' }, ...overrides })
+
+    it('takes the first listed model of the first ready provider, in picker order', () => {
+      const providers = pickerProviders([codex(), claude()], [])
+      expect(fallbackModel(providers)).toEqual({ instanceId: 'claude', llmProvider: 'claude-subscription', model: 'claude-opus-4' })
+    })
+
+    it('skips a provider that is switched off, signed out, or lists nothing', () => {
+      const off = claude({ enabled: { device: false, effective: false, setBy: 'device' } })
+      expect(fallbackModel(pickerProviders([off, codex()], []))?.model).toBe('gpt-5')
+      const signedOut = claude({ auth: { state: 'signed_out' } })
+      expect(fallbackModel(pickerProviders([signedOut, codex()], []))?.model).toBe('gpt-5')
+      expect(fallbackModel(pickerProviders([snapshot(), codex()], []))?.model).toBe('gpt-5')
+    })
+
+    it('uses the first offered provider when none is ready, and nothing when none is offered', () => {
+      expect(fallbackModel(pickerProviders([claude({ auth: { state: 'signed_out' } })], []))?.model).toBe('claude-opus-4')
+      expect(fallbackModel([])).toBeUndefined()
+    })
+
+    it('treats an empty default, or one on a provider switched off or removed, as not offered', () => {
+      const providers = pickerProviders([claude(), codex({ enabled: { device: false, effective: false, setBy: 'device' } })], [])
+      expect(pickerOffers({ llmProvider: '', model: '' }, providers)).toBe(false)
+      expect(pickerOffers({ instanceId: 'codex', llmProvider: 'codex', model: 'gpt-5' }, providers)).toBe(false)
+      expect(pickerOffers({ instanceId: 'claude:gone', llmProvider: 'claude:gone', model: 'claude-opus-4' }, providers)).toBe(false)
+      expect(pickerOffers({ instanceId: 'claude', llmProvider: 'claude-subscription', model: 'claude-sonnet-4' }, providers)).toBe(true)
+    })
+
+    it('picks only when nothing chosen by hand applies', () => {
+      const providers = pickerProviders([claude(), codex()], [])
+      const none = { llmProvider: '', model: '' }
+      const base = { remote: false, threadModel: undefined, profileDefault: none, providers }
+      expect(composerAutoModel(base)?.model).toBe('claude-opus-4')
+      // A default the picker offers, a thread's own model, another computer, or settings not read yet.
+      expect(composerAutoModel({ ...base, profileDefault: { instanceId: 'codex', llmProvider: 'codex', model: 'gpt-5-mini' } })).toBeUndefined()
+      expect(composerAutoModel({ ...base, threadModel: { llmProvider: 'codex', model: 'gpt-5' } })).toBeUndefined()
+      expect(composerAutoModel({ ...base, remote: true })).toBeUndefined()
+      expect(composerAutoModel({ ...base, profileDefault: undefined })).toBeUndefined()
+      // A provider set up later gives a profile still without a default a model.
+      expect(composerAutoModel({ ...base, providers: [] })).toBeUndefined()
+      expect(composerAutoModel({ ...base, providers: pickerProviders([codex()], []) })?.model).toBe('gpt-5')
+    })
   })
 
   it('keeps the saved model order and puts favorites first in the picker (D6)', () => {
@@ -139,8 +190,10 @@ describe('composer picker from snapshots', () => {
       { id: 'claude-subscription', instanceId: 'claude:work', label: 'Claude Code 2', models: [{ id: 'work-only', label: 'Work Model' }] }
     ]
     expect(getGroupedModelButtonParts('claude-subscription', 'work-only', listings, false, 'claude:work')).toEqual(['Work Model'])
-    expect(getGroupedModelButtonParts('claude-subscription', 'opus', listings, false, 'claude')).toEqual(['Claude Opus'])
-    expect(getGroupedModelButtonParts('claude-subscription', 'work-only', listings, false)).toEqual(['work-only'])
+    // Beside the maker's logo the button drops the brand.
+    expect(getGroupedModelButtonParts('claude-subscription', 'opus', listings, false, 'claude')).toEqual(['Opus'])
+    // Without its instance the selection is not found in a listing, and is named from its id.
+    expect(getGroupedModelButtonParts('claude-subscription', 'work-only', listings, false)).toEqual(['Work Only'])
   })
 
   it('names a hidden model by its listed name on the model button, in a switch marker and in a send error', () => {
@@ -149,21 +202,46 @@ describe('composer picker from snapshots', () => {
     try {
       const listings = pickerProviders(useProviderSnapshotsStore.getState().scopes.device!.snapshots, [])
       expect(getGroupedModelButtonParts('claude-subscription', 'haiku:low', listings, false)).toEqual(['Haiku 4.5'])
-      expect(modelDisplayName('claude-subscription', 'haiku:low')).toBe('Claude Haiku 4.5 · Low')
-      expect(modelDisplayName('claude-subscription', 'claude-opus-4')).toBe('Claude Opus 4')
-      expect(modelDisplayName('claude-subscription', 'unknown-model')).toBe('unknown-model')
+      expect(modelLabel(resolveModelChoice({ provider: 'claude-subscription', model: 'haiku:low' }))).toBe('Claude Haiku 4.5 · Low')
+      expect(modelLabel(resolveModelChoice({ provider: 'claude-subscription', model: 'claude-opus-4' }))).toBe('Claude Opus 4')
+      expect(modelLabel(resolveModelChoice({ provider: 'claude-subscription', model: 'unknown-model' }))).toBe('Unknown Model')
     } finally {
       useProviderSnapshotsStore.setState({ scopes: {} })
     }
     // Before any list loads, a switch marker still reads as names, not ids.
-    expect(modelDisplayName('claude-subscription', 'sonnet:low')).toBe('Claude Sonnet · Low')
-    expect(modelDisplayName('claude-subscription', 'claude-haiku-5-5')).toBe('Claude Haiku 5.5')
-    expect(modelDisplayName('claude-subscription', 'claude-sonnet-4-5-20250929:high')).toBe('Claude Sonnet 4.5 · High')
-    expect(modelDisplayName('claude-subscription', 'opus:fast')).toBe('Claude Opus (fast)')
-    expect(modelDisplayName('claude-subscription', 'opus@1m:high')).toBe('Claude Opus (1m) · High')
-    expect(modelDisplayName('codex', 'gpt-5.3-codex:xhigh')).toBe('gpt-5.3-codex · XHigh')
+    const named = (provider: string, stored: string) => modelLabel(resolveModelChoice({ provider, model: stored }))
+    expect(named('claude-subscription', 'sonnet:low')).toBe('Claude Sonnet · Low')
+    expect(named('claude-subscription', 'claude-haiku-5-5')).toBe('Claude Haiku 5.5')
+    expect(named('claude-subscription', 'claude-sonnet-4-5-20250929:high')).toBe('Claude Sonnet 4.5 · High')
+    expect(named('claude-subscription', 'opus:fast')).toBe('Claude Opus (fast)')
+    expect(named('claude-subscription', 'opus@1m:high')).toBe('Claude Opus · 1m · High')
+    expect(named('codex', 'gpt-5.3-codex:xhigh')).toBe('GPT-5.3 Codex · XHigh')
     expect(sendErrorLine({ code: 'model_hidden', message: 'Haiku 4.5 is hidden.' })).toBe('Haiku 4.5 is hidden.')
     expect(sendErrorLine({ code: 'internal_error', message: 'Boom' })).toBe('[internal_error] Boom')
+  })
+
+  it('names a Codex selection while its list is empty: by the name it last had, else from its id', () => {
+    const codex = (names?: Record<string, string>) =>
+      snapshot({ instanceId: 'codex', driver: 'codex', displayName: 'Codex', models: { entries: [], source: 'none', ...(names ? { names } : {}) } })
+    const codexChoice = { instanceId: 'codex', provider: 'codex', model: 'gpt-6.1-sol:low' }
+    useProviderSnapshotsStore.setState({ scopes: { device: { loading: false, snapshots: [codex({ 'gpt-6.1-sol': 'GPT-6.1 Sol (preview)' })] } } })
+    try {
+      // The empty listing leaves the picker, so the button is named from what the daemon remembers.
+      const listings = pickerProviders(useProviderSnapshotsStore.getState().scopes.device!.snapshots, [])
+      expect(listings).toEqual([])
+      expect(getGroupedModelButtonParts('codex', 'gpt-6.1-sol:low', listings, false, 'codex')).toEqual(['GPT-6.1 Sol'])
+      expect(modelLabel(resolveModelChoice(codexChoice))).toBe('GPT-6.1 Sol · Low')
+      useProviderSnapshotsStore.setState({ scopes: { device: { loading: false, snapshots: [codex()] } } })
+      expect(getGroupedModelButtonParts('codex', 'gpt-6.1-sol:low', [], false, 'codex')).toEqual(['GPT-6.1 Sol'])
+    } finally {
+      useProviderSnapshotsStore.setState({ scopes: {} })
+    }
+    // With nothing loaded at all, the stored string never shows.
+    for (const stored of ['gpt-6.1-sol:low', 'opus@1m:fast:high', 'claude-3-5-haiku-20241022:max']) {
+      const parts = getGroupedModelButtonParts('codex', stored, [], true)
+      expect(parts.join(' · ')).not.toContain(':')
+      expect(parts.join(' · ')).not.toContain(stored)
+    }
   })
 
   it('reads the context gauge from caps, keeping it when unknown', () => {

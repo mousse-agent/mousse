@@ -113,6 +113,37 @@ describe('Inbox (SPEC §14.1)', () => {
     })
   })
 
+  describe('pull request update rows an earlier version left', () => {
+    const leftover = (fixture: DelegationFixture, threadId: string, n = 0) =>
+      fixture.engine.inbox.append({ inboxId: `inbox:pr-update:${threadId}:1:${n}`, threadId, kind: 'pr_update', payload: { text: 'Address what needs code changes and push when done.' } })
+
+    it('are all withdrawn, whatever their thread or state, and other rows are left alone', () => {
+      f = delegationFixture()
+      const pending = leftover(f, 'unlinked-thread')
+      const delivered = leftover(f, 'linked-thread')
+      f.engine.inbox.markDelivered([delivered.inboxId], null)
+      const notice = f.engine.inbox.append({ threadId: 'linked-thread', kind: 'reconcile_notice', payload: { text: 'kept' } })
+      expect(f.engine.inbox.withdrawRetiredRows().map((row) => row.inboxId).sort()).toEqual([delivered.inboxId, pending.inboxId].sort())
+      expect(f.engine.inbox.get(pending.inboxId)).toMatchObject({ status: 'acknowledged' })
+      expect(f.engine.inbox.get(delivered.inboxId)).toMatchObject({ status: 'acknowledged' })
+      expect(f.engine.inbox.get(notice.inboxId)).toMatchObject({ status: 'pending' })
+      expect(f.engine.inbox.withdrawRetiredRows()).toEqual([])
+    })
+
+    it('never wake an idle thread or steer a running one: reconciliation acknowledges them instead', async () => {
+      f = delegationFixture()
+      const idle = leftover(f, 'idle')
+      await f.runningRun('busy')
+      const busy = leftover(f, 'busy')
+      const report = f.reconciler.runOnce().wakes
+      expect(report.wakes).toEqual([])
+      expect(report.steers).toEqual([])
+      expect(f.engine.inbox.get(idle.inboxId)).toMatchObject({ status: 'acknowledged' })
+      expect(f.engine.inbox.get(busy.inboxId)).toMatchObject({ status: 'acknowledged' })
+      expect(f.store.listNonTerminalRuns().filter((run) => run.source === 'wake')).toEqual([])
+    })
+  })
+
   describe('wake notices (issue #142)', () => {
     const row = (delegationId: string, result: { runStatus: string; text?: string; error?: string }, childThreadId = 'c'): InboxRecord => ({
       inboxId: `i:${delegationId}`, threadId: 't', runId: 'r', kind: 'child_result', status: 'pending', createdAt: '',
@@ -146,19 +177,6 @@ describe('Inbox (SPEC §14.1)', () => {
       expect(planned.items.map((item) => item.fullyShown)).toEqual([true, true, true, true, false])
       expect(planned.text.length).toBeLessThan(NOTICE_WAKE_CHARS + 2_000)
       expect(planned.text).toContain('call task_status with delegation:5 for the rest')
-    })
-
-    it('prints the text of a pull request update as written, and waits pending like any notice', () => {
-      f = delegationFixture()
-      const text = 'Update on pull request #7 (https://github.com/acme/app/pull/7) at abcdef0.\n\nChecks failed\nQuoted from GitHub:\n> build'
-      const appended = f.engine.inbox.append({ threadId: 't', kind: 'pr_update', inboxId: 'inbox:pr-update:t:1:0', payload: { text, number: 7, headSha: 'abcdef0', changes: ['checks_failed'] } })
-      expect(appended).toMatchObject({ inboxId: 'inbox:pr-update:t:1:0', kind: 'pr_update', status: 'pending' })
-      expect(f.engine.inbox.listPending('t').map((row) => row.inboxId)).toEqual(['inbox:pr-update:t:1:0'])
-      expect(formatInboxNotice(appended)).toBe(text)
-      expect(formatWakeNotice([appended, { ...appended, inboxId: 'x', payload: { text: 'second' } }])).toBe(`${text}\n\nsecond`)
-      // The same delivery written again is refused by the primary key, not duplicated.
-      expect(() => f!.engine.inbox.append({ threadId: 't', kind: 'pr_update', inboxId: 'inbox:pr-update:t:1:0', payload: { text } })).toThrow()
-      expect(f.engine.inbox.listForThread('t')).toHaveLength(1)
     })
 
     it('reports a failed task with its error, and joins other rows after a blank line', () => {

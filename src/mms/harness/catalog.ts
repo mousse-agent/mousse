@@ -1,5 +1,6 @@
 import type { Api, Model } from '@earendil-works/pi-ai'
 import type { CustomModel, InstanceModel, ModelCapabilities, ModelPrefs, ModelPrefsPatch } from '../../shared/harness/types'
+import { canonicalModelName } from '../../shared/modelNames'
 import { parseThinkingSuffixFromModelId } from '../../shared/modelVariants'
 import type { LlmModelOption, LlmProviderOption } from '../../shared/settings'
 
@@ -101,6 +102,58 @@ export class ModelPrefsService {
   }
 }
 
+/** Where remembered model names are persisted (the profile config's providers section). */
+export interface ModelNamesStore {
+  read(): Record<string, unknown> | undefined
+  write(names: Record<string, Record<string, string>>): void
+}
+
+const MAX_NAME = 200
+
+function decodeNames(raw: unknown): Record<string, string> {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {}
+  const entries = Object.entries(raw as Record<string, unknown>)
+    .filter((entry): entry is [string, string] => entry[0].length > 0 && entry[0].length <= MAX_ID && typeof entry[1] === 'string' && entry[1].length > 0 && entry[1].length <= MAX_NAME)
+  return Object.fromEntries(entries.slice(-MAX_IDS))
+}
+
+/**
+ * Every name an instance's listing gave a model, by model id, kept in the profile config
+ * (`providers.modelNames`). A list that is empty for now (Codex before its first listing, or after
+ * an account change) or no longer has a model forgets nothing, so a selection keeps its name.
+ */
+export class ModelNamesService {
+  constructor(private readonly store: ModelNamesStore) {}
+
+  get(instanceId: string): Record<string, string> {
+    return decodeNames((this.store.read() ?? {})[instanceId])
+  }
+
+  /** Remembers the names of `models`; writes only when one is new or changed. */
+  remember(instanceId: string, models: ReadonlyArray<{ id: string; label: string }>): void {
+    const known = this.get(instanceId)
+    const changed = models.filter((model) => model.label && model.label !== model.id && known[model.id] !== model.label)
+    if (!changed.length) return
+    // The newest names last, so the oldest are the ones dropped past the limit.
+    for (const model of changed) {
+      delete known[model.id]
+      known[model.id] = model.label
+    }
+    this.store.write({ ...this.all(), [instanceId]: decodeNames(known) })
+  }
+
+  remove(instanceId: string): void {
+    const all = this.all()
+    if (!(instanceId in all)) return
+    delete all[instanceId]
+    this.store.write(all)
+  }
+
+  private all(): Record<string, Record<string, string>> {
+    return Object.fromEntries(Object.entries(this.store.read() ?? {}).map(([instanceId, value]) => [instanceId, decodeNames(value)]))
+  }
+}
+
 /**
  * Whether prefs hide the model a selection names. A selection carries its effort in the id
  * (`opus:high` is `opus` at high effort), so the canonical model behind it counts, not the string.
@@ -143,7 +196,8 @@ function listedCapabilities(model: LlmModelOption): ModelCapabilities {
 
 /**
  * The instance's models with prefs applied: listed models then custom ones (a custom id that the
- * runtime also lists keeps the listed entry), in the stored order, hidden ones flagged.
+ * runtime also lists keeps the listed entry), in the stored order, hidden ones flagged. Listed
+ * models get their name in Mousse's one style; a custom model keeps the name its user gave it.
  */
 export function modelsWithPrefs(listed: readonly LlmModelOption[], prefs: ModelPrefs): InstanceModel[] {
   const hidden = new Set(prefs.hidden)
@@ -153,7 +207,7 @@ export function modelsWithPrefs(listed: readonly LlmModelOption[], prefs: ModelP
   for (const model of listed) {
     if (seen.has(model.id)) continue
     seen.add(model.id)
-    entries.push({ id: model.id, label: model.label || model.id, source: 'catalog', capabilities: listedCapabilities(model), hidden: hidden.has(model.id), favorite: favorites.has(model.id) })
+    entries.push({ id: model.id, label: canonicalModelName(model.label, model.id), source: 'catalog', capabilities: listedCapabilities(model), hidden: hidden.has(model.id), favorite: favorites.has(model.id) })
   }
   for (const model of prefs.custom) {
     if (seen.has(model.id)) continue
@@ -176,6 +230,9 @@ export function visibleProviderOption(option: LlmProviderOption, prefs: ModelPre
   const customOneShot = option.models[0]?.oneShot === false ? { oneShot: false as const } : {}
   const models = modelsWithPrefs(option.models, prefs)
     .filter((model) => !model.hidden)
-    .map((model) => byId.get(model.id) ?? { id: model.id, label: model.label, ...(model.capabilities.efforts.length ? { efforts: model.capabilities.efforts } : {}), ...customOneShot })
+    .map((model) => {
+      const listed = byId.get(model.id)
+      return listed ? { ...listed, label: model.label } : { id: model.id, label: model.label, ...(model.capabilities.efforts.length ? { efforts: model.capabilities.efforts } : {}), ...customOneShot }
+    })
   return { ...option, models }
 }

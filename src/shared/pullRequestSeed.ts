@@ -64,6 +64,12 @@ function selection(detail: PullRequestDetail): { reviews: PullRequestReview[]; l
 
 const TRUSTED_ASSOCIATIONS = new Set(['OWNER', 'MEMBER', 'COLLABORATOR'])
 
+/**
+ * The association of an author whose status could not be read from the host (a rate limit, a failed request). It is
+ * never trusted, but it is not reported as the person being a stranger either.
+ */
+export const UNCHECKED_ASSOCIATION = 'UNCHECKED'
+
 /** Whether the host calls the author an owner, member or collaborator of the repository: the only people whose words may start an agent turn. */
 export function isTrustedAssociation(association: string): boolean {
   return TRUSTED_ASSOCIATIONS.has(association.toUpperCase())
@@ -72,14 +78,17 @@ export function isTrustedAssociation(association: string): boolean {
 /**
  * Whether everyone whose words are in the seed is an owner, member or collaborator of the repository, the same rule
  * that decides who may wake an agent. Only then may a client send the seed as a turn without a person reading it.
- * `untrusted` names the authors that are not.
+ * `untrusted` names the authors the host says are not; `unchecked` those whose status could not be read, who are not
+ * trusted either.
  */
-export function pullRequestSeedTrust(detail: PullRequestDetail): { trusted: boolean; untrusted: string[] } {
+export function pullRequestSeedTrust(detail: PullRequestDetail): { trusted: boolean; untrusted: string[]; unchecked: string[] } {
   const chosen = selection(detail)
   const authors = new Map<string, string>([[detail.author, detail.authorAssociation]])
   for (const item of [...chosen.reviews, ...chosen.lineComments, ...chosen.conversation]) authors.set(item.author, item.authorAssociation)
-  const untrusted = [...authors].filter(([, association]) => !isTrustedAssociation(association)).map(([author]) => author)
-  return { trusted: untrusted.length === 0, untrusted }
+  const doubted = [...authors].filter(([, association]) => !isTrustedAssociation(association))
+  const unchecked = doubted.filter(([, association]) => association === UNCHECKED_ASSOCIATION).map(([author]) => author)
+  const untrusted = doubted.filter(([, association]) => association !== UNCHECKED_ASSOCIATION).map(([author]) => author)
+  return { trusted: doubted.length === 0, untrusted, unchecked }
 }
 
 function section(title: string, lines: readonly string[]): string[] {

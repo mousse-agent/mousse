@@ -3,7 +3,8 @@ import { existsSync, lstatSync, readFileSync, realpathSync, statSync } from 'nod
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { englishMessagesEnv } from './gitProcess'
 import { GIT_NULL_DEVICE } from './gitNullDevice'
-import { nonInteractiveGitEnv } from './gitEnv'
+import { nonInteractiveGitEnv, withGitConfigEnv } from './gitEnv'
+import { assertGitAllowed } from './gitPolicy'
 import { touchesGitMetadata } from '../agents/gitMetadata'
 
 /**
@@ -64,6 +65,8 @@ const SAFE_CONFIG = [
   ...HOOK_EVENTS.flatMap((event) => ['-c', `hook.${event}.enabled=false`]),
   '-c', 'core.quotepath=false',
   '-c', 'diff.submodule=short',
+  // With GIT_OPTIONAL_LOCKS=0 (see gitEnv below), a read never refreshes and writes the user's index.
+  '-c', 'diff.autoRefreshIndex=false',
   '-c', 'status.submoduleSummary=false',
   '-c', 'protocol.allow=never',
   '-c', 'credential.interactive=false'
@@ -85,16 +88,22 @@ function gitEnv(repo?: Repo, withSystem = false): NodeJS.ProcessEnv {
   for (const [key, value] of Object.entries(process.env)) {
     if (!/^GIT_/i.test(key) || /^GIT_CONFIG_(GLOBAL|SYSTEM)$/i.test(key)) env[key] = value
   }
-  return {
+  return withGitConfigEnv({
     ...env, ...englishMessagesEnv(), ...nonInteractiveGitEnv(),
     GIT_OPTIONAL_LOCKS: '0', GIT_NO_LAZY_FETCH: '1', GIT_NO_REPLACE_OBJECTS: '1',
     ...(withSystem ? {} : { GIT_CONFIG_NOSYSTEM: '1' }),
     ...(repo ? { GIT_DIR: repo.gitDir, GIT_WORK_TREE: repo.top, GIT_CEILING_DIRECTORIES: dirname(repo.top) } : {})
-  }
+  })
 }
 
 function git(cwd: string, args: readonly string[], repo?: Repo, withSystem = false): Promise<GitResult> {
   return new Promise((resolvePromise, reject) => {
+    try {
+      assertGitAllowed({ cwd, args, lockFree: true })
+    } catch (error) {
+      reject(error)
+      return
+    }
     execFile('git', [...SAFE_CONFIG, ...args], {
       cwd, encoding: 'utf8', windowsHide: true, timeout: 30_000, maxBuffer: 32 * 1024 * 1024, env: gitEnv(repo, withSystem)
     }, (error, stdout, stderr) => {

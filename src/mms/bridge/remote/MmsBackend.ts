@@ -299,7 +299,7 @@ export class MmsRemoteBackend implements RemoteBackendPort {
       case 'composer.options':
         return this.composerOptions(params.threadId as string | undefined, caller)
       case 'threads.setModel': {
-        const model = params.model as { instanceId?: string; llmProvider?: string; model: string }
+        const model = params.model as { instanceId?: string; llmProvider?: string; model: string; effort?: string }
         try {
           // Unknown or disabled instances are refused before anything is stored.
           const override = s.providerInstances.overrideFor(model)
@@ -394,7 +394,9 @@ export class MmsRemoteBackend implements RemoteBackendPort {
         ? {
             ...(provider.instanceId ? { instanceId: provider.instanceId } : {}),
             llmProvider: provider.llmProvider,
-            model: provider.model
+            model: provider.model,
+            ...(provider.effort ? { effort: provider.effort } : {}),
+            ...(provider.name ? { name: provider.name } : {})
           }
         : null,
       modes: REMOTE_CHAT_MODES,

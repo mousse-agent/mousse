@@ -12,6 +12,7 @@ import {
 } from 'fs'
 import { basename, dirname, join } from 'path'
 import { quarantineUnreadableFileSync } from '../data/AtomicFs'
+import { upgradeSelection } from '../../shared/modelSelection'
 import { getDefaultSettings, type MousseSettings } from '../../shared/settings'
 import { DEFAULT_FEATURE_FLAGS, validateFeatureFlags } from '../../shared/featureFlags'
 import { getMousseHomeDir } from '../data/paths'
@@ -97,6 +98,7 @@ function splitSettings(full: MousseSettings): {
       context: full.context,
       agentAccess: full.agentAccess,
       runs: full.runs,
+      experimental: full.experimental,
       integrations: full.integrations,
       title: full.title
     },
@@ -308,7 +310,8 @@ export class MousseConfigStore {
       ) as unknown as MousseAgentsConfig,
       scheduled: {
         enabled: raw.scheduled?.enabled ?? base.scheduled.enabled,
-        jobs: raw.scheduled?.jobs ?? base.scheduled.jobs,
+        // A job's model with a level packed into it (written before #490) is upgraded.
+        jobs: (raw.scheduled?.jobs ?? base.scheduled.jobs).map((job) => (job?.selection ? { ...job, selection: upgradeSelection(job.selection) } : job)),
         ...(raw.scheduled?.webhooks ? { webhooks: raw.scheduled.webhooks } : {}),
         ...(typeof raw.scheduled?.agentJobs === 'boolean' ? { agentJobs: raw.scheduled.agentJobs } : {}),
         ...savedAgentJobLimits(raw.scheduled)
@@ -566,6 +569,7 @@ export class MousseConfigStore {
       partial.context ||
       partial.agentAccess ||
       partial.runs ||
+      partial.experimental ||
       partial.integrations ||
       partial.title
     ) {
@@ -573,6 +577,7 @@ export class MousseConfigStore {
         ...(partial.context ? { context: partial.context as MousseSettingsSection['context'] } : {}),
         ...(partial.agentAccess ? { agentAccess: partial.agentAccess as MousseSettingsSection['agentAccess'] } : {}),
         ...(partial.runs ? { runs: partial.runs as MousseSettingsSection['runs'] } : {}),
+        ...(partial.experimental ? { experimental: partial.experimental as MousseSettingsSection['experimental'] } : {}),
         ...(partial.profile ? { profile: partial.profile as MousseSettingsSection['profile'] } : {}),
         ...(partial.appearance
           ? { appearance: partial.appearance as MousseSettingsSection['appearance'] }

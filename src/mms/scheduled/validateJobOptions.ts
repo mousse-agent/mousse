@@ -8,7 +8,7 @@ import { ThreadWorkspaceManager } from '../workspace/ThreadWorkspaceManager'
 /** What the validator needs to know about the profile; the protocol handler wires the real services in. */
 export interface ScheduledJobOptionsDeps {
   /** `ProviderInstanceService.overrideFor`: the instance must exist and be enabled; throws the instance errors. */
-  overrideFor(input: { instanceId?: string; llmProvider?: string; model: string }): ModelOverride
+  overrideFor(input: { instanceId?: string; llmProvider?: string; model: string; effort?: string }): ModelOverride
   /** `harness.resolveStored`: refuses a hidden model, a disabled instance and an `uncontrolled` instance for `schedule`. */
   resolveStored(selection: ModelOverride, options: { purpose: 'schedule'; scope: ProviderScope }): unknown
   getProject(projectId: string): { id: string; path: string } | undefined
@@ -86,7 +86,7 @@ export function validateScheduledJobOptions(
   let selection: ModelOverride | undefined
   if (job.selection) {
     if (!job.selection.model?.trim()) throw new Error('selection.model is required')
-    selection = deps.overrideFor({ instanceId: job.selection.instanceId, llmProvider: job.selection.llmProvider, model: job.selection.model })
+    selection = deps.overrideFor({ instanceId: job.selection.instanceId, llmProvider: job.selection.llmProvider, model: job.selection.model, ...(job.selection.effort ? { effort: job.selection.effort } : {}) })
     deps.resolveStored(selection, { purpose: 'schedule', scope: projectId ? { kind: 'project', projectId } : { kind: 'device' } })
   }
   if (job.mode !== undefined && job.mode !== 'agent' && job.mode !== 'plan') throw new Error("mode must be 'agent' or 'plan'")

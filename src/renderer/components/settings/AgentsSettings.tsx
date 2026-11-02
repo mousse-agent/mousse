@@ -1,15 +1,17 @@
+import { findListedModel, modelLabel } from '../../../shared/modelChoice'
+import { resolveModelChoice } from '../../lib/modelChoice'
 import type { MousseSettings, MousseSettingsUpdate, SettingsOptions } from '../../../shared/settings'
-import { CONTEXT_COMPACTION_OPTIONS, normalizeContextSettings, oneShotProviderOptions, type ContextCompactionTokens } from '../../../shared/settings'
+import { CONTEXT_COMPACTION_OPTIONS, normalizeContextSettings, normalizeExperimentalSettings, oneShotProviderOptions, type ContextCompactionTokens } from '../../../shared/settings'
 import type { Project } from '../../../shared/types'
 import { AgentAccessSettings } from './AgentAccessSettings'
 import { SettingsGroup, SettingsRow, Switch } from './SettingsRow'
 import { SettingsModelPicker } from './SettingsModelPicker'
 import { Select } from '../ui/Select'
-import { Brain, Layers, RotateCcw } from '../../lib/icons'
+import { Brain, FlaskConical, Layers, RotateCcw } from '../../lib/icons'
 
 /**
  * Settings > Agents: the default model and chat title model, plus context
- * compaction, and how far agents may reach into other threads. Replaces the old Models, Context and
+ * compaction, how far agents may reach into other threads, and features still being tried out. Replaces the old Models, Context and
  * per-CLI Agents pages; their stored keys are left untouched.
  */
 export function AgentsSettings({
@@ -38,9 +40,10 @@ export function AgentsSettings({
   const titleInstance = settings.title?.instanceId
   const titleUnavailable = !titleIsAutomatic && providers.length > 0 && !titleProviders.some((provider) =>
     (titleInstance ? provider.instanceId === titleInstance : provider.id === titleProvider) &&
-    provider.models.some((model) => model.id === titleModel || titleModel.startsWith(`${model.id}:`)))
+    Boolean(findListedModel(provider.models, titleModel)))
 
   const context = normalizeContextSettings(settings.context)
+  const experimental = normalizeExperimentalSettings(settings.experimental)
 
   return (
     <section id="agents" className="settings-section">
@@ -59,9 +62,10 @@ export function AgentsSettings({
               providerId={settings.provider.llmProvider}
               instanceId={settings.provider.instanceId}
               modelId={settings.provider.model}
-              onSelect={(llmProvider, model, instanceId) =>
-                // Always the whole selection: a write without the instance clears it.
-                void updateSettings({ provider: { ...(instanceId ? { instanceId } : {}), llmProvider, model } })
+              effort={settings.provider.effort}
+              onSelect={(llmProvider, pick, instanceId) =>
+                // Always the whole selection: a write without the instance or level clears it.
+                void updateSettings({ provider: { ...(instanceId ? { instanceId } : {}), llmProvider, model: pick.model, effort: pick.effort } })
               }
             />
           }
@@ -70,7 +74,7 @@ export function AgentsSettings({
           title="Chat titles"
           titleId="agents-title-model-title"
           description={titleUnavailable
-            ? `${titleModel} can't name chats here, so chats keep their first line as the title. Choose another model or Automatic.`
+            ? `${modelLabel(resolveModelChoice({ instanceId: titleInstance, provider: titleProvider, model: titleModel }, providers), { effort: false })} can't name chats here, so chats keep their first line as the title. Choose another model or Automatic.`
             : 'Automatic picks a fast connected model to name chats.'}
           titleAction={!titleIsAutomatic && (
             <button
@@ -92,9 +96,10 @@ export function AgentsSettings({
               providerId={titleIsAutomatic ? '' : titleProvider}
               instanceId={titleIsAutomatic ? undefined : settings.title?.instanceId}
               modelId={titleIsAutomatic ? '' : titleModel}
-              onSelect={(llmProvider, model, instanceId) =>
-                // Always the whole selection: a write without the instance clears it.
-                void updateSettings({ title: { ...(instanceId ? { instanceId } : {}), llmProvider, model } })
+              effort={titleIsAutomatic ? undefined : settings.title?.effort}
+              onSelect={(llmProvider, pick, instanceId) =>
+                // Always the whole selection: a write without the instance or level clears it.
+                void updateSettings({ title: { ...(instanceId ? { instanceId } : {}), llmProvider, model: pick.model, ...(pick.effort ? { effort: pick.effort } : {}) } })
               }
             />
           }
@@ -133,6 +138,22 @@ export function AgentsSettings({
       </SettingsGroup>
 
       <AgentAccessSettings settings={settings} projects={projects} updateSettings={updateSettings} />
+
+      <SettingsGroup title="Experimental" icon={FlaskConical}>
+        <SettingsRow
+          title="Give each subagent its own worktree"
+          htmlFor="agents-subagent-worktrees"
+          description="Each subagent starts on its own branch from the main agent's current commit. Off: the main agent decides."
+          control={
+            <Switch
+              id="agents-subagent-worktrees"
+              label="Give each subagent its own worktree"
+              checked={experimental.subagentWorktrees}
+              onChange={(subagentWorktrees) => void updateSettings({ experimental: { ...experimental, subagentWorktrees } })}
+            />
+          }
+        />
+      </SettingsGroup>
     </section>
   )
 }

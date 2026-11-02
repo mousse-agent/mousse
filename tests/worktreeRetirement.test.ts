@@ -7,8 +7,13 @@ import { resolveRepositoryIdentity } from '../src/mms/git/RepositoryIdentity'
 import { waitAcquireExecutionLease, releaseExecutionLeaseHandle } from '../src/mms/queue/ThreadExecutionLease'
 import { registerThreadLifecycleGate } from '../src/mms/queue/ThreadLifecycleAdmission'
 import { ResourceLifecycleStore } from '../src/mms/lifecycle/ResourceLifecycleStore'
-import { lifecycleGit as git, WorktreeRetirementService } from '../src/mms/lifecycle/WorktreeRetirementService'
+import { lifecycleGit as git, WORKTREE_TRASH_QUIET_MS, WorktreeRetirementService } from '../src/mms/lifecycle/WorktreeRetirementService'
+import { ThreadJournal } from '../src/mms/data/ThreadJournal'
+import { ThreadWorkspaceManager } from '../src/mms/workspace/ThreadWorkspaceManager'
 
+/** Git lists worktrees with forward slashes on every platform; paths are compared in that form, and case-folded on Windows. */
+const slashes = (path: string): string => { const value = resolve(path).replaceAll('\\', '/'); return process.platform === 'win32' ? value.toLowerCase() : value }
+const listed = (repo: string): string[] => git(repo, ['worktree', 'list', '--porcelain']).split(/\r?\n/).filter((line) => line.startsWith('worktree ')).map((line) => slashes(line.slice(9)))
 const roots: string[] = []
 const releases: Array<() => unknown> = []
 afterEach(() => { for (const release of releases.splice(0)) release(); for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }) })
@@ -57,9 +62,136 @@ test('ignored sole copy, hidden index flags and changed content block retirement
   git(f.worktree, ['update-index', '--assume-unchanged', 'a.txt'])
   expect(() => f.service.prepare(f.input)).toThrow(/flags/)
   git(f.worktree, ['update-index', '--no-assume-unchanged', 'a.txt'])
+  // A write after the checks moves with the folder into the trash; the trash keeps it there, since no snapshot can hold it.
   f.service.prepare(f.input); writeFileSync(join(f.worktree, '.mousse', 'secret'), 'late copy')
-  expect(() => f.service.retire(f.path)).toThrow(/Uncaptured/)
-  expect(existsSync(f.worktree)).toBe(true)
+  const trashed = f.service.retire(f.path)
+  expect(trashed.state).toBe('trashed')
+  expect(readFileSync(join(trashed.trashPath!, '.mousse', 'secret'), 'utf8')).toBe('late copy')
+  expect(f.service.expireTrash(f.path, { now: Date.now() + 2 * WORKTREE_TRASH_QUIET_MS })).toEqual({ kept: expect.stringMatching(/^Kept in the trash at .*requires retention/) })
+  expect(readFileSync(join(trashed.trashPath!, '.mousse', 'secret'), 'utf8')).toBe('late copy')
+})
+
+test('retirement moves the folder into the trash in one step, and a restore moves it back as it is', async () => {
+  const f = await fixture()
+  f.service.prepare(f.input)
+  // Written after the checks: a process that keeps its working directory in the worktree.
+  writeFileSync(join(f.worktree, 'late.txt'), 'late write\n')
+  const trashed = f.service.retire(f.path)
+  expect(existsSync(f.worktree)).toBe(false)
+  expect(trashed.trashPath).toBe(f.service.trashPathFor(trashed))
+  expect(readFileSync(join(trashed.trashPath!, 'late.txt'), 'utf8')).toBe('late write\n')
+  // Git follows the move, and the folder is still a working checkout on its branch.
+  expect(listed(f.repo)).toContain(slashes(trashed.trashPath!))
+  expect(git(trashed.trashPath!, ['branch', '--show-current'])).toBe(f.branch)
+  expect(git(trashed.trashPath!, ['status', '--porcelain', '--untracked-files=all'])).toBe('?? late.txt')
+  // Checked out in the trash, so the branch is kept for now.
+  expect(git(f.repo, ['rev-parse', '--verify', `refs/heads/${f.branch}`])).toBe(trashed.resultSha)
+  // Waiting, and nothing in it is old enough yet: the trash keeps it.
+  expect(f.service.expireTrash(f.path)).toEqual({ kept: 'Waiting in the trash', waiting: true })
+  f.service.reconstruct(f.path)
+  expect(existsSync(trashed.trashPath!)).toBe(false)
+  expect(readFileSync(join(f.worktree, 'late.txt'), 'utf8')).toBe('late write\n')
+  expect(git(f.worktree, ['branch', '--show-current'])).toBe(f.branch)
+  expect(listed(f.repo)).toContain(slashes(f.worktree))
+  expect(JSON.parse(readFileSync(f.path, 'utf8'))).toMatchObject({ state: 'materialized' })
+})
+
+test('trash expiry snapshots the folder, deletes it and its branch, and a restore rebuilds both with the same files', async () => {
+  const f = await fixture()
+  f.service.prepare(f.input)
+  const trashed = f.service.retire(f.path)
+  // Changed in the trash after the move: the expiry snapshot is taken from the folder as it is then.
+  writeFileSync(join(trashed.trashPath!, 'a.txt'), 'edited in the trash\n'); writeFileSync(join(trashed.trashPath!, 'new.txt'), 'new\n')
+  const later = Date.now() + 2 * WORKTREE_TRASH_QUIET_MS
+  expect(f.service.expireTrash(f.path, { now: later, inUse: () => 'Files in this worktree are in use' })).toEqual({ kept: 'Files in this worktree are in use' })
+  expect(existsSync(trashed.trashPath!)).toBe(true)
+  expect(f.service.expireTrash(f.path, { now: later })).toEqual({ removed: true })
+  expect(existsSync(trashed.trashPath!)).toBe(false)
+  expect(listed(f.repo)).not.toContain(slashes(trashed.trashPath!))
+  const retired = JSON.parse(readFileSync(f.path, 'utf8'))
+  expect(retired).toMatchObject({ state: 'retired', deletedBranches: [{ name: f.branch, sha: trashed.resultSha }] })
+  expect(retired.trashPath).toBeUndefined()
+  // The branch is gone; its tip is the HEAD the pins keep, and the snapshot holds the files.
+  expect(git(f.repo, ['branch', '--list', f.branch])).toBe('')
+  expect(git(f.repo, ['show', `${retired.snapshotRef}:a.txt`])).toBe('edited in the trash')
+  expect(git(f.repo, ['rev-parse', `${retired.snapshotRef}^`])).toBe(trashed.resultSha)
+  f.service.reconstruct(f.path)
+  expect(git(f.worktree, ['branch', '--show-current'])).toBe(f.branch)
+  expect(readFileSync(join(f.worktree, 'a.txt'), 'utf8')).toBe('edited in the trash\n')
+  expect(readFileSync(join(f.worktree, 'new.txt'), 'utf8')).toBe('new\n')
+})
+
+test('trash expiry asks whether the folder is in use before its snapshot, so a write that slips in then is in the snapshot', async () => {
+  const f = await fixture()
+  f.service.prepare(f.input)
+  const trashed = f.service.retire(f.path)
+  const later = Date.now() + 2 * WORKTREE_TRASH_QUIET_MS
+  expect(f.service.expireTrash(f.path, { now: later, inUse: (path) => { writeFileSync(join(path, 'a.txt'), 'written during the check\n'); return undefined } })).toEqual({ removed: true })
+  expect(existsSync(trashed.trashPath!)).toBe(false)
+  const retired = JSON.parse(readFileSync(f.path, 'utf8'))
+  expect(git(f.repo, ['show', `${retired.snapshotRef}:a.txt`])).toBe('written during the check')
+})
+
+test('trash expiry reads the folder again before deleting it: a change since its snapshot is captured and the delete waits', async () => {
+  const f = await fixture()
+  f.service.prepare(f.input)
+  const trashed = f.service.retire(f.path)
+  const later = Date.now() + 2 * WORKTREE_TRASH_QUIET_MS
+  const outcome = f.service.expireTrash(f.path, { now: later, afterCapture: (path) => writeFileSync(join(path, 'b.txt'), 'written after the snapshot\n') })
+  expect(outcome).toEqual({ kept: expect.stringMatching(/changed while it was being deleted.*kept as a snapshot.*next run/), waiting: true })
+  expect(readFileSync(join(trashed.trashPath!, 'b.txt'), 'utf8')).toBe('written after the snapshot\n')
+  const manifest = JSON.parse(readFileSync(f.path, 'utf8'))
+  expect(manifest.state).toBe('trashed')
+  expect(git(f.repo, ['show', `${manifest.snapshotRef}:b.txt`])).toBe('written after the snapshot')
+  // With nothing changing any more, a later run deletes it.
+  expect(f.service.expireTrash(f.path, { now: later + 2 * WORKTREE_TRASH_QUIET_MS })).toEqual({ removed: true })
+})
+
+test('an owned branch name that is a symbolic ref is never followed: the branch it points at stays', async () => {
+  const f = await fixture()
+  const main = git(f.repo, ['symbolic-ref', '--short', 'HEAD']), mainSha = git(f.repo, ['rev-parse', main])
+  git(f.worktree, ['switch', '-q', '--detach'])
+  git(f.repo, ['symbolic-ref', `refs/heads/${f.branch}`, `refs/heads/${main}`])
+  f.service.prepare(f.input)
+  f.service.retire(f.path)
+  expect(f.service.expireTrash(f.path, { now: Date.now() + 2 * WORKTREE_TRASH_QUIET_MS })).toEqual({ removed: true })
+  expect(git(f.repo, ['rev-parse', main])).toBe(mainSha)
+  expect(git(f.repo, ['symbolic-ref', `refs/heads/${f.branch}`])).toBe(`refs/heads/${main}`)
+  expect(JSON.parse(readFileSync(f.path, 'utf8')).deletedBranches).toBeUndefined()
+})
+
+test('trash expiry never drops an earlier pin: a commit the folder moved away from stays kept, and a restore brings its branch back', async () => {
+  const f = await fixture()
+  writeFileSync(join(f.worktree, 'a.txt'), 'committed\n'); git(f.worktree, ['commit', '-qam', 'work'])
+  const work = git(f.worktree, ['rev-parse', 'HEAD'])
+  git(f.worktree, ['switch', '-q', '--detach'])
+  f.service.prepare(f.input)
+  const trashed = f.service.retire(f.path)
+  // The branch was not checked out anywhere, so the move released it: only the pin keeps its commit now.
+  expect(JSON.parse(readFileSync(f.path, 'utf8')).deletedBranches).toEqual([{ name: f.branch, sha: work }])
+  // In the trash, the folder goes back to where it started, away from the commit.
+  git(trashed.trashPath!, ['checkout', '-q', `${work}^`])
+  expect(f.service.expireTrash(f.path, { now: Date.now() + 2 * WORKTREE_TRASH_QUIET_MS })).toEqual({ removed: true })
+  const retired = JSON.parse(readFileSync(f.path, 'utf8'))
+  expect(retired.keptRefs).toEqual([expect.stringMatching(new RegExp(`/kept/${work}$`))])
+  git(f.repo, ['gc', '--prune=now', '-q'])
+  expect(git(f.repo, ['cat-file', '-t', work])).toBe('commit')
+  f.service.reconstruct(f.path)
+  expect(git(f.repo, ['rev-parse', `refs/heads/${f.branch}`])).toBe(work)
+})
+
+test('a branch the agent made itself, and a worktree the agent added, are never touched', async () => {
+  const f = await fixture()
+  git(f.worktree, ['switch', '-q', '-c', 'agent/own-work'])
+  const own = join(f.root, 'agent-worktree'); git(f.worktree, ['worktree', 'add', '-q', '-b', 'agent/second', own])
+  f.service.prepare(f.input)
+  const trashed = f.service.retire(f.path)
+  expect(f.service.expireTrash(f.path, { now: Date.now() + 2 * WORKTREE_TRASH_QUIET_MS })).toEqual({ removed: true })
+  // The thread's own branch was not checked out anywhere, so it went with the move; the agent's branches stay.
+  expect(JSON.parse(readFileSync(f.path, 'utf8')).deletedBranches).toEqual([{ name: f.branch, sha: trashed.resultSha }])
+  expect(git(f.repo, ['branch', '--list', 'agent/own-work', 'agent/second', '--format=%(refname:short)'])).toBe('agent/own-work\nagent/second')
+  expect(readFileSync(join(own, 'a.txt'), 'utf8')).toBe('first\n')
+  expect(listed(f.repo)).toContain(slashes(own))
 })
 test('missing pins never authorize recall or retirement', async () => {
   const f = await fixture(); const manifest = f.service.prepare(f.input)
@@ -145,4 +277,74 @@ test('refuses a reconstruction pin redirected to a primary branch before updatin
   expect(() => f.service.prepare(f.input)).toThrow(/symbolic|pin|reference/i)
   expect(git(f.repo, ['rev-parse', primary])).toBe(original)
   expect(git(f.repo, ['symbolic-ref', manifest.resultRef])).toBe(primary)
+})
+
+/**
+ * A thread's own worktree, as `ThreadWorkspaceManager.provision` makes it (its branch named from the first message), or as
+ * an earlier version made it (an id-named `mousse/thread/<thread>/main`, with the same records).
+ */
+async function threadFixture(kind: 'named' | 'id-named') {
+  const root = mkdtempSync(join(tmpdir(), 'mousse-retire-thread-')); roots.push(root)
+  const repo = join(root, 'repo'); mkdirSync(repo)
+  git(repo, ['init']); git(repo, ['config', 'user.email', 'test@example.com']); git(repo, ['config', 'user.name', 'Test'])
+  writeFileSync(join(repo, 'a.txt'), 'first\n'); git(repo, ['add', '.']); git(repo, ['commit', '-m', 'base'])
+  const home = join(root, 'profile'), task = join(home, 'thread-data', 'task'); mkdirSync(task, { recursive: true })
+  writeFileSync(join(task, 'meta.json'), JSON.stringify({ id: 'task' }))
+  const store = new ResourceLifecycleStore({ profileId: 'test', profileHome: home }); store.registerTask({ taskId: 'task', location: task })
+  registerThreadLifecycleGate(home, store)
+  const previous = process.env.MOUSSE_HOME; process.env.MOUSSE_HOME = home
+  releases.push(() => { if (previous === undefined) delete process.env.MOUSSE_HOME; else process.env.MOUSSE_HOME = previous })
+  let worktree: string, branch: string
+  if (kind === 'named') {
+    const metadata = await new ThreadWorkspaceManager(task).provision('task', 'main', repo, undefined, undefined, undefined, { nameFrom: 'Fix the login button' })
+    worktree = metadata.worktreePath; branch = metadata.branch
+  } else {
+    worktree = join(home, 'repositories', resolveRepositoryIdentity(repo).key, 'worktrees', 'threads', 'task', 'main'); branch = 'mousse/thread/task/main'
+    mkdirSync(join(worktree, '..'), { recursive: true })
+    new ThreadJournal(task).append({ operationId: 'provision', operationType: 'workspace-provision', state: 'planned', expectedPreState: { branch, worktreePath: worktree } })
+    git(repo, ['worktree', 'add', '-b', branch, worktree])
+    writeFileSync(join(task, 'workspace.json'), JSON.stringify({ schemaVersion: 1, threadId: 'task', conversationBranchId: 'main', worktreePath: worktree, branch, baseSha: git(repo, ['rev-parse', 'HEAD']) }))
+  }
+  const taskLease = await waitAcquireExecutionLease(task), repositoryLease = await acquireRepositoryLease(resolveRepositoryIdentity(repo))
+  releases.push(() => repositoryLease.release(), () => releaseExecutionLeaseHandle(taskLease))
+  const service = new WorktreeRetirementService(store, { taskLease, repositoryLease })
+  return { repo, task, worktree, branch, service, input: { taskId: 'task', worktreePath: worktree, branch, sourcePath: join(task, 'workspace.json') }, path: service.pathFor('task', worktree) }
+}
+
+test.each(['named', 'id-named'] as const)('a thread worktree whose branch is %s is owned: it retires, its branch goes at trash expiry, and a restore brings both back', async (kind) => {
+  const f = await threadFixture(kind)
+  expect(f.branch).toBe(kind === 'named' ? 'mousse/fix-the-login-button' : 'mousse/thread/task/main')
+  f.service.prepare(f.input)
+  const trashed = f.service.retire(f.path)
+  expect(f.service.expireTrash(f.path, { now: Date.now() + 2 * WORKTREE_TRASH_QUIET_MS })).toEqual({ removed: true })
+  expect(JSON.parse(readFileSync(f.path, 'utf8')).deletedBranches).toEqual([{ name: f.branch, sha: trashed.resultSha }])
+  expect(git(f.repo, ['branch', '--list', f.branch])).toBe('')
+  f.service.reconstruct(f.path)
+  expect(git(f.worktree, ['branch', '--show-current'])).toBe(f.branch)
+})
+
+test('a thread\'s agent-made branches are never touched, a mousse/ one included, unless it is an id-named one of Mousse\'s', async () => {
+  const f = await threadFixture('named')
+  // The agent switches to a branch of its own whose name happens to start with mousse/, and makes another outside it.
+  git(f.worktree, ['switch', '-q', '-c', 'mousse/agents-own-idea'])
+  git(f.worktree, ['branch', 'feature/agent-work'])
+  f.service.prepare(f.input)
+  const trashed = f.service.retire(f.path)
+  expect(trashed.headBranch).toBe('mousse/agents-own-idea')
+  expect(f.service.expireTrash(f.path, { now: Date.now() + 2 * WORKTREE_TRASH_QUIET_MS })).toEqual({ removed: true })
+  // Only the thread's own branch went; the branches the agent made stay where they were.
+  expect(JSON.parse(readFileSync(f.path, 'utf8')).deletedBranches).toEqual([{ name: f.branch, sha: git(f.repo, ['rev-parse', 'mousse/agents-own-idea']) }])
+  expect(git(f.repo, ['branch', '--list', 'mousse/agents-own-idea', 'feature/agent-work', '--format=%(refname:short)'])).toBe('feature/agent-work\nmousse/agents-own-idea')
+})
+
+test('a thread record that names a branch outside mousse/, or another thread\'s id-named branch, owns nothing', async () => {
+  const f = await threadFixture('id-named')
+  git(f.repo, ['branch', 'feature/theirs'])
+  expect(() => f.service.prepare({ ...f.input, branch: 'feature/theirs' })).toThrow(/Only owned linked worktrees can retire|no longer owns/)
+  const record = JSON.parse(readFileSync(join(f.task, 'workspace.json'), 'utf8'))
+  writeFileSync(join(f.task, 'workspace.json'), JSON.stringify({ ...record, branch: 'mousse/thread/other-task/main' }))
+  // Not this thread's provision record, and not a fork of it either: refused before anything moves.
+  expect(() => f.service.prepare({ ...f.input, branch: 'mousse/thread/other-task/main' })).toThrow()
+  expect(existsSync(f.worktree)).toBe(true)
+  expect(git(f.repo, ['branch', '--list', 'feature/theirs', '--format=%(refname:short)'])).toBe('feature/theirs')
 })

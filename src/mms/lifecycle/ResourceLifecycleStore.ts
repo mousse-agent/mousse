@@ -7,6 +7,7 @@ import { atomicWriteJsonSync } from '../data/AtomicFs'
 import { isOwnerLive, PROCESS_INSTANCE_ID } from '../queue/processLiveness'
 import { canonicalizeAbsolutePath } from '../profiles/pathSafety'
 import { RESOURCE_LIFECYCLE_VERSION, RETENTION_CLAIM_KINDS, type LifecycleAdmission, type ResourceInventorySnapshot, type TaskLifecycleRecord } from '../../shared/resourceLifecycle'
+import { isMousseOwnedRef } from '../../shared/mousseBranches'
 
 export class ResourceLifecycleError extends AppError {
   constructor(code: 'busy' | 'stale' | 'unavailable' | 'ambiguous' | 'unsupported', message: string, cause?: unknown) {
@@ -419,7 +420,7 @@ export class ResourceLifecycleStore {
       for (const item of purge.items) {
         if (!item.id || ids.has(item.id) || !purge.ownedTaskIds.includes(item.ownerTaskId) || !['worktree', 'ref', 'path', 'scheduled-row'].includes(item.kind) || !['pending', 'removed', 'retained'].includes(item.status) || item.discardRequired && !purge.discardAuthorized) throw new ResourceLifecycleError('ambiguous', 'Invalid purge resource progress')
         ids.add(item.id)
-        if (item.kind === 'ref' && (!/^(refs\/mousse\/|refs\/heads\/mousse\/(thread|agent|workflow)\/)/.test(item.identity) || !/^[a-f0-9]{40,64}$/.test(item.expectedValue ?? '') || !isAbsolute(item.commonDir ?? ''))) throw new ResourceLifecycleError('ambiguous', 'Invalid purge reference intent')
+        if (item.kind === 'ref' && (!isMousseOwnedRef(item.identity) || !/^[a-f0-9]{40,64}$/.test(item.expectedValue ?? '') || !isAbsolute(item.commonDir ?? ''))) throw new ResourceLifecycleError('ambiguous', 'Invalid purge reference intent')
         if (item.kind === 'path') {
           assertLifecyclePath(this.profileHome, item.identity)
           if (!item.content || !item.rootIdentity) throw new ResourceLifecycleError('ambiguous', 'Purge path lacks its frozen content proof')

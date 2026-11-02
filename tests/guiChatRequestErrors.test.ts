@@ -20,6 +20,14 @@ describe('GUI chat connection errors', () => {
     expect(error.code).toBe('thread_not_found')
     expect(error.message).toBe('Thread not found')
   })
+  it('treats a request the client stopped waiting for as one that may have happened', () => {
+    const cause = new Error('Request timeout: orchestrator.send')
+    const error = guiChatRequestError(cause)
+    expect(error.code).toBe('outcome_uncertain')
+    expect(error.message).toContain('may have arrived')
+    expect(error.errorInfo).toEqual({ category: 'unavailable', retryable: true })
+    expect(error.cause).toBe(cause)
+  })
   it('does not misclassify unrelated internal errors as a disconnect', () => {
     expect(guiChatRequestError(new Error('Other bug')).code).toBe('internal_error')
   })

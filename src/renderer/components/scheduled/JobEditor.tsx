@@ -1,5 +1,7 @@
 import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent } from 'react'
 import { errorText } from './scheduledLabels'
+import { modelLabel } from '../../../shared/modelChoice'
+import { resolveModelChoice } from '../../lib/modelChoice'
 import { describePermissionMode, isPermissionMode, type PermissionMode } from '../../../shared/permissionMode'
 import { PermissionModeLabel } from '../../lib/permissionModeIcon'
 import type { ScheduledJob, ScheduleKind } from '../../../shared/types'
@@ -190,7 +192,7 @@ export function JobEditor({
           <select id={id('model')} className="scheduled-input" value={draft.modelKey} onChange={(event) => patch({ modelKey: event.target.value })}>
             <option value="">Default model</option>
             {draft.staleSelection && draft.modelKey !== '' && !catalog.models.some((group) => group.choices.some((choice) => choice.key === draft.modelKey)) ? (
-              <option value={draft.modelKey}>{draft.staleSelection.model} (not available now)</option>
+              <option value={draft.modelKey}>{modelLabel(resolveModelChoice({ ...draft.staleSelection, provider: draft.staleSelection.llmProvider }))} (not available now)</option>
             ) : null}
             {catalog.models.map((group) => (
               <optgroup key={group.label} label={group.label}>

@@ -1,15 +1,13 @@
 import { createHash } from 'node:crypto'
-import { execFileSync } from 'node:child_process'
 import { existsSync, lstatSync, readFileSync, readdirSync, realpathSync } from 'node:fs'
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import type { LifecycleResource, ResourceInventorySnapshot, ResourceSource, RetentionClaimKind, TaskLifecycleRecord } from '../../shared/resourceLifecycle'
 import { assertLifecyclePath, ResourceLifecycleStore, validateResourceInventory } from './ResourceLifecycleStore'
 import { canonicalJson, sha256Hex } from '../../shared/agents/hashes'
-import { WorktreeRetirementService } from './WorktreeRetirementService'
+import { lifecycleRead, WorktreeRetirementService } from './WorktreeRetirementService'
 import { UndoRetentionService } from '../actions/UndoRetentionService'
 import { AgentEpisodeStore } from '../agents/AgentEpisodeStore'
 import { ThreadJournal } from '../data/ThreadJournal'
-import { repoProgramEnv, withoutRepoPrograms } from '../git/repoPrograms'
 
 type JsonObject = Record<string, unknown>
 const object = (value: unknown): JsonObject | undefined => value !== null && typeof value === 'object' && !Array.isArray(value) ? value as JsonObject : undefined
@@ -115,12 +113,11 @@ export function buildResourceInventory(store: ResourceLifecycleStore, record: Ta
           return
         }
         if (lstatSync(path).isSymbolicLink() || !lstatSync(join(path, '.git')).isFile()) throw new Error('Not a regular linked Git worktree')
-        const git = (...args: string[]) => execFileSync('git', withoutRepoPrograms(path, args), { cwd: path, env: repoProgramEnv(), encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true }).trim()
+        const git = (...args: string[]) => lifecycleRead(path, args).trim()
         const common = realpathSync(resolve(path, git('rev-parse', '--git-common-dir')))
         const repositoryId = digest(common.toLowerCase()).slice(0, 32)
         if (expectedRepository && repositoryId !== expectedRepository) throw new Error('Repository common-directory identity changed')
-        const branch = git('branch', '--show-current')
-        if (!/^mousse\/(thread|agent|workflow)\//.test(branch) || (expectedBranch && branch !== expectedBranch)) throw new Error('Worktree branch is not the source-owned branch')
+        // The branch is the owner's record, not proof: the agent is free to switch to another, so the checkout is known by its path, registration and repository.
         const top = realpathSync(git('rev-parse', '--show-toplevel'))
         if (top.toLowerCase() !== realpathSync(path).toLowerCase()) throw new Error('Source path is not the registered worktree root')
         const listed = git('worktree', 'list', '--porcelain').split(/\r?\n/).some((line) => line.startsWith('worktree ') && resolve(line.slice(9)).toLowerCase() === resolve(path).toLowerCase())
@@ -159,6 +156,8 @@ export function buildResourceInventory(store: ResourceLifecycleStore, record: Ta
       resource('worktree', text(value?.worktreePath), workspace.source.id, 'current-result', 'Task workspace is the authoritative current result', task.taskId, repositoryId)
       resource('git-ref', text(value?.retainedRef), workspace.source.id, 'current-result', 'Task result remains retained', task.taskId, repositoryId)
       if (text(value?.branch)) resource('git-ref', `refs/heads/${value!.branch}`, workspace.source.id, 'current-result', 'Task branch remains retained', task.taskId, repositoryId)
+      // Publish remembers the files it last put into the primary checkout; the next publish is a merge from them.
+      resource('git-ref', `refs/mousse/published/${task.taskId}`, workspace.source.id, 'recall', 'The last published files are the base of the next publish', task.taskId, repositoryId)
       verifyWorktree(text(value?.worktreePath), text(value?.branch), repositoryId)
       if (['conflicted', 'recovery_required', 'provisioning'].includes(String(value?.lifecycle))) resource('worktree', text(value?.worktreePath), workspace.source.id, value?.lifecycle === 'conflicted' ? 'conflict' : 'recovery', 'Workspace operation has not settled', task.taskId, repositoryId)
     }
@@ -183,7 +182,17 @@ export function buildResourceInventory(store: ResourceLifecycleStore, record: Ta
         if (name === 'agents.json' && text(agent.branch)) {
           resource('git-ref', `refs/mousse/agents/${agentId}/base`, found.source.id, 'recall', 'Agent spawn base is retained', task.taskId, repositoryId)
           resource('git-ref', `refs/mousse/agents/${agentId}`, found.source.id, claim, 'Agent result retention is source-derived; physical ref may be absent', task.taskId, repositoryId)
+          resource('git-ref', `refs/mousse/agents/${agentId}/result`, found.source.id, 'recall', 'The reported result of a completed agent is retained', task.taskId, repositoryId)
         }
+      }
+    }
+    // The frozen results of the tasks this thread ran as a subagent: their base and result pins go with the thread.
+    const results = source(join(task.location, 'subagent-results.json'))
+    if (results) for (const row of recordRows(results.data, 'subagent results')) {
+      const report = object(row.report)
+      for (const ref of [text(report?.baseRef), text(report?.resultRef)]) {
+        if (ref && !ref.startsWith(`refs/mousse/delegations/${task.taskId}/`)) { result.blockers.push(`Subagent result ref outside its thread's namespace: ${ref}`); continue }
+        resource('git-ref', ref, results.source.id, 'recall', 'A reported subagent result is retained for its parent', task.taskId, text(row.repositoryId) ?? repositoryId)
       }
     }
     const branches = source(join(task.location, 'conversation-branches.json'))
@@ -341,10 +350,13 @@ export function buildResourceInventory(store: ResourceLifecycleStore, record: Ta
           const agentId = `wf-${digest(`${store.profileId}:${owner}:${key}`).slice(0, 40)}`
           if (data.kind !== 'git-worktree' || data.branch !== `mousse/agent/${agentId}` || data.retainedRef !== `refs/mousse/workflows/${store.profileId}/${owner}/${agentId}` || !/^[a-f0-9]{32}$/.test(String(data.repositoryId))) throw new Error('Workflow checkout namespace does not match its owner')
           const receipts = new ThreadJournal(owned.get(owner)!.location, { readOnly: true }).list().map((entry) => object(object(entry.details)?.receipt))
-          const integrated = data.resultSha === data.baseSha || receipts.some((receipt) => receipt?.kind === 'integration' && receipt.operationId === `workflow-integration:${key}` && rows(receipt.contributions).some((contribution) => contribution.actorId === agentId && contribution.resultSha === data.resultSha))
+          // A result is settled once it is pinned and reported (Mousse no longer merges it), or was merged by an older version.
+          const reported = typeof data.resultSha === 'string' && /^[a-f0-9]{40,64}$/.test(data.resultSha)
+          const integrated = reported || data.resultSha === data.baseSha || (data.baseSnapshot !== undefined && data.resultSha === data.baseSnapshot) || receipts.some((receipt) => receipt?.kind === 'integration' && receipt.operationId === `workflow-integration:${key}` && rows(receipt.contributions).some((contribution) => contribution.actorId === agentId && contribution.resultSha === data.resultSha))
           const claim = integrated ? undefined : 'pending-integration'
-          resource('worktree', text(data.worktreePath), found.source.id, claim, 'Workflow result awaits matching durable integration receipt', owner, text(data.repositoryId))
+          resource('worktree', text(data.worktreePath), found.source.id, claim, 'Workflow result is not pinned and reported yet', owner, text(data.repositoryId))
           resource('git-ref', text(data.retainedRef), found.source.id, claim, 'Workflow source owns its retained result', owner, text(data.repositoryId))
+          resource('git-ref', `${text(data.retainedRef)}-base`, found.source.id, claim, 'Workflow source owns the base of its reported result', owner, text(data.repositoryId))
           resource('git-ref', `refs/heads/${data.branch}`, found.source.id, claim, 'Workflow source owns its result branch', owner, text(data.repositoryId))
           resource('git-ref', `refs/mousse/agents/${agentId}`, found.source.id, claim, 'Workflow integration owns its attributed result pin', owner, text(data.repositoryId))
           verifyWorktree(text(data.worktreePath), text(data.branch), text(data.repositoryId))
@@ -406,6 +418,9 @@ export function buildResourceInventory(store: ResourceLifecycleStore, record: Ta
       for (const claim of claims) {
         resource('git-ref', text(value.baseRef), found.source.id, claim, 'Workspace owner retains its reconstruction base', task.taskId, text(value.repositoryId))
         resource('git-ref', text(value.resultRef), found.source.id, claim, 'Workspace owner retains its reconstruction result', task.taskId, text(value.repositoryId))
+        // The files of a worktree that held uncommitted work, kept as a snapshot until the owner is permanently deleted.
+        resource('git-ref', text(value.snapshotRef), found.source.id, claim, 'Workspace owner retains its uncommitted files', task.taskId, text(value.repositoryId))
+        for (const ref of Array.isArray(value.keptRefs) ? value.keptRefs : []) resource('git-ref', text(ref), found.source.id, claim, 'Workspace owner retains an earlier pin of its files', task.taskId, text(value.repositoryId))
         resource('runtime', found.source.path, found.source.id, claim, 'Workspace reconstruction metadata follows its owner claims', task.taskId)
       }
     }

@@ -30,7 +30,9 @@ import type { ModelOverride } from '../../shared/providerInstances'
 import type { McpRelayRuntime } from '../../shared/integrations'
 import type { AgentAccessLevel, LlmProviderOption } from '../../shared/settings'
 import type { ChatMode } from '../../shared/types'
+import { findListedModel, modelChoiceOf } from '../../shared/modelChoice'
 import { parseThinkingSuffixFromModelId } from '../../shared/modelVariants'
+import { agentModelId, upgradeSelection, type ModelPick } from '../../shared/modelSelection'
 import type { LoginSession } from '../providers/LoginSession'
 import type { ProviderInstanceService } from './instanceMap'
 import type { AdapterHost, TurnBridge, TurnControl, TurnInput, TurnResult, TurnSink } from './adapter'
@@ -54,7 +56,7 @@ import {
 import type { UserQuestionService } from '../orchestrator/UserQuestionService'
 import { LoginSession as LoginSessionImpl } from '../providers/LoginSession'
 import { fail } from '../run/db/RunStoreError'
-import { hidesModel, modelsWithPrefs, ModelPrefsService, visibleProviderOption, type ModelPrefsStore } from './catalog'
+import { hidesModel, modelsWithPrefs, ModelNamesService, ModelPrefsService, visibleProviderOption, type ModelNamesStore, type ModelPrefsStore } from './catalog'
 import { privateHomeRule, type AuthReading, type DriverRuntime, type HarnessDriver, type RetiredPrompt, type InstallProgress, type InstanceConfig, type LiveProcessHost, type OneShotTask } from './driver'
 import { DEFAULT_HOME_ID, findOnPath, instanceEnv, reservedEnvName, reservedLaunchKeys, type InstanceEnv } from './env'
 import { addedInstanceId, defaultInstanceId, InstanceCounterStore, instanceStateDir, isBuiltInInstance } from './instances'
@@ -157,7 +159,7 @@ export interface HarnessGateway {
    * selection (no instance, no provider) fails with `no_model_selected`: callers pass the profile's
    * default when nothing is chosen, so blank means there is no default either.
    */
-  resolveStored(selection: Pick<ModelOverride, 'instanceId' | 'llmProvider' | 'model'>, options: ResolveStoredOptions): ResolvedTurnSelection
+  resolveStored(selection: Pick<ModelOverride, 'instanceId' | 'llmProvider' | 'model' | 'effort'>, options: ResolveStoredOptions): ResolvedTurnSelection
   /**
    * The immutable binding of one attempt, from a resolved selection and the current counters. A
    * runtime with native sessions has its account read first (bounded; concurrent reads share one),
@@ -201,7 +203,9 @@ export interface HarnessGateway {
    */
   check(resolved: ResolvedTurnSelection, policy: RunPolicy): Enforceability
   /** The selection a binding runs: a retry or recovery of a run executes its binding, never the current selection. */
-  selectionOf(binding: ExecutionBinding): Pick<ModelOverride, 'instanceId' | 'llmProvider' | 'model'>
+  selectionOf(binding: ExecutionBinding): Pick<ModelOverride, 'instanceId' | 'llmProvider' | 'model' | 'effort'>
+  /** The model's name as Mousse shows it: the instance's listing (an instance id, or a provider name), else a name it listed before, else one made from the id. */
+  modelName(instanceId: string, model: string): string
   /**
    * Issue #142: the instance's look at the user's own setup before a delegated child runs on it
    * (`ProviderAdapter.childPreflight`); null when nothing stands in the way. Reads, never changes.
@@ -272,7 +276,11 @@ export interface ResolvedTurnSelection {
   /** The legacy provider name turns on the instance report (`TurnInput.llmProvider`). */
   llmProvider: string
   driver: HarnessDriverKind
+  /** The model as the instance lists it; the reasoning level is `effort`. */
   model: string
+  effort?: string
+  /** The model's name (`modelName`). */
+  name: string
   caps: HarnessCaps
   /** The selection named an entry that moved to this instance (`config.movedTo`). */
   movedFrom?: string
@@ -298,8 +306,8 @@ export type ResolvePurpose =
 
 /** `HarnessGateway.oneShot`. */
 export interface OneShotRequest {
-  /** A stored selection (the title setting); a `:effort` suffix on the model is kept. */
-  selection: Pick<ModelOverride, 'instanceId' | 'llmProvider' | 'model'>
+  /** A stored selection (the title setting), with its reasoning level. */
+  selection: Pick<ModelOverride, 'instanceId' | 'llmProvider' | 'model' | 'effort'>
   scope?: ProviderScope
   purpose: 'title'
   system: string
@@ -538,6 +546,8 @@ export interface HarnessGatewayOptions {
   questions: UserQuestionService
   /** Model prefs persistence; in memory when absent. */
   prefs?: ModelPrefsStore
+  /** Remembered model names; in memory when absent. */
+  names?: ModelNamesStore
   /** The folder sign-in and model listing run in (the profile's repo root). */
   cwd?: () => string
   /** Display names of pi providers (`ProviderAuthService.getProviderDisplayName`). */
@@ -553,7 +563,7 @@ export interface HarnessGatewayOptions {
    * The profile's own default selections (Settings), rewritten when an entry moves; returns what
    * changed, for the Move dialog. Project defaults are the gateway's own.
    */
-  defaults?: { rewrite(from: string, to: { instanceId: string; llmProvider: string; model(model: string): string }): string[] }
+  defaults?: { rewrite(from: string, to: { instanceId: string; llmProvider: string; model(pick: ModelPick): ModelPick }): string[] }
   /**
    * Whether another profile of this device still has an unmoved entry `instanceId` (or cannot be
    * read), so a sign-in the profiles share is kept when this profile moves. Absent: none does.
@@ -750,6 +760,11 @@ function memoryPrefs(): ModelPrefsStore {
   return { read: () => value, write: (next) => { value = next } }
 }
 
+function memoryNames(): ModelNamesStore {
+  let value: Record<string, Record<string, string>> = {}
+  return { read: () => value, write: (next) => { value = next } }
+}
+
 export class Harness implements HarnessGateway {
   readonly instances: HarnessInstances
   readonly catalog: HarnessCatalog
@@ -797,6 +812,7 @@ export class Harness implements HarnessGateway {
   private readonly counters: InstanceCounterStore
   private readonly latest: LatestVersionCache
   private readonly prefs: ModelPrefsService
+  private readonly names: ModelNamesService
   private searchPath: string[] = []
   private readonly shellPath: Promise<void>
   private stopped = false
@@ -823,6 +839,7 @@ export class Harness implements HarnessGateway {
     this.facts = new RuntimeFactsStore(options.profileHome)
     this.latest = options.latest ?? new LatestVersionCache(options.profileHome, options.now ? { now: options.now } : {})
     this.prefs = new ModelPrefsService(options.prefs ?? memoryPrefs())
+    this.names = new ModelNamesService(options.names ?? memoryNames())
     // Captured once at boot; probes that ran before it arrived and found nothing run again.
     this.shellPath = (options.shellPath ?? sharedShellPath)()
       .then((result) => {
@@ -907,14 +924,16 @@ export class Harness implements HarnessGateway {
   resolve(selection: ProviderSelection, scope: ProviderScope, purpose: ResolvePurpose): ResolvedSelection {
     let resolved: ResolvedTurnSelection
     try {
-      resolved = this.resolveStored({ instanceId: selection.instanceId, llmProvider: '', model: selection.model }, { purpose, scope })
+      resolved = this.resolveStored({ instanceId: selection.instanceId, llmProvider: '', model: selection.model, ...(selection.effort ? { effort: selection.effort } : {}) }, { purpose, scope })
     } catch (error) {
       throw asHarnessError(error, selection.instanceId)
     }
     return { selection: { ...selection, instanceId: resolved.instanceId }, driver: resolved.driver, caps: resolved.caps }
   }
 
-  resolveStored(selection: Pick<ModelOverride, 'instanceId' | 'llmProvider' | 'model'>, options: ResolveStoredOptions): ResolvedTurnSelection {
+  resolveStored(stored: Pick<ModelOverride, 'instanceId' | 'llmProvider' | 'model' | 'effort'>, options: ResolveStoredOptions): ResolvedTurnSelection {
+    // A selection stored before #490 carries its reasoning level in the model.
+    const selection = upgradeSelection(stored)
     const blank = !selection.instanceId?.trim() && !selection.llmProvider?.trim()
     if (blank || onRetiredBareRoute(selection.instanceId)) harnessFail('no_model_selected', 'No model is selected. Choose a model.', '')
     const named = this.instanceMap.instanceIdOf(selection)
@@ -946,12 +965,14 @@ export class Harness implements HarnessGateway {
         missing: ['toolControl'],
         instanceId: resolved.instanceId
       })
-    const model = target ? this.movedModel(target, selection.model) : selection.model
+    const { model, effort } = target ? this.movedModel(target, selection.model, selection.effort) : selection
     return {
       instanceId: resolved.instanceId,
       llmProvider: resolved.llmProvider,
       driver: driver.kind,
       model,
+      ...(effort ? { effort } : {}),
+      name: this.modelName(resolved.instanceId, model),
       caps,
       ...(target ? { movedFrom: named } : {}),
       ...(target && model !== selection.model ? { movedFromModel: selection.model } : {})
@@ -962,19 +983,19 @@ export class Harness implements HarnessGateway {
    * The agent's model for a model of an entry that moved to it: the same id when the agent has it
    * (its listing or a custom model of the user's), else the agent's own name for it
    * (`DriverRuntime.movedModel`, a family alias), else the agent's default (its first model). A
-   * reasoning effort (`:high`) stays when the model it lands on takes it. The move lists every
-   * default whose model changed, and a moved thread is told once.
+   * reasoning effort stays when the model it lands on takes it. The move lists every default whose
+   * model changed, and a moved thread is told once.
    */
-  private movedModel(instanceId: string, model: string): string {
+  private movedModel(instanceId: string, model: string, effort: string | undefined): { model: string; effort?: string } {
+    const same = { model, ...(effort ? { effort } : {}) }
     const runtime = this.recordOrUndefined(instanceId)?.runtime
-    if (!runtime) return model
+    if (!runtime) return same
     const available = this.catalog.models(instanceId, { kind: 'device' })
-    if (!available.length) return model
-    const { baseId, effort } = parseThinkingSuffixFromModelId(model)
+    if (!available.length) return same
     const find = (id: string | undefined) => (id ? available.find((entry) => entry.id === id) : undefined)
-    const landed = find(model) ?? find(baseId) ?? find(runtime.movedModel?.(baseId)) ?? available.find((entry) => !entry.hidden) ?? available[0]!
-    if (landed.id === model) return model
-    return effort && landed.capabilities.efforts.includes(effort) ? `${landed.id}:${effort}` : landed.id
+    const landed = find(model) ?? find(runtime.movedModel?.(model)) ?? available.find((entry) => !entry.hidden) ?? available[0]!
+    if (landed.id === model) return same
+    return { model: landed.id, ...(effort && landed.capabilities.efforts.includes(effort) ? { effort } : {}) }
   }
 
   /** The entry an instance moved to (one hop), when that entry still exists. */
@@ -1052,7 +1073,7 @@ export class Harness implements HarnessGateway {
   check(resolved: ResolvedTurnSelection, policy: RunPolicy): Enforceability {
     const record = this.recordOrUndefined(resolved.instanceId)
     const caps = record ? this.recordCaps(record) : resolved.caps
-    const spendModel = hasSpendLimit(policy) ? record?.runtime.spendModel?.(resolved.model) : undefined
+    const spendModel = hasSpendLimit(policy) ? record?.runtime.spendModel?.(agentModelId(resolved.model, resolved.effort)) : undefined
     const verdict = checkPolicy(caps, policy, resolved.instanceId, spendModel, record ? this.policyOptions(record) : undefined)
     // An agent definition names the provider that cannot hold it, for the editor and the run's error.
     if (!verdict.ok && verdict.error.missing?.includes('toolControl') && (policy.origin === 'definition' || policy.origin === 'workflow')) {
@@ -1104,7 +1125,7 @@ export class Harness implements HarnessGateway {
       configRevision: counters.configRevision,
       ...(accountId ? { accountId } : {}),
       model,
-      ...(input.effort ? { effort: input.effort } : {}),
+      ...((input.effort ?? resolved.effort) ? { effort: input.effort ?? resolved.effort } : {}),
       policy,
       ...(input.policy ? { policyDigest: policyDigest(policy) } : {}),
       caps: { ...caps },
@@ -1155,9 +1176,11 @@ export class Harness implements HarnessGateway {
     }
   }
 
-  selectionOf(binding: ExecutionBinding): Pick<ModelOverride, 'instanceId' | 'llmProvider' | 'model'> {
+  selectionOf(binding: ExecutionBinding): Pick<ModelOverride, 'instanceId' | 'llmProvider' | 'model' | 'effort'> {
     const entry = this.instanceMap.list()[binding.instanceId]
-    return { instanceId: binding.instanceId, llmProvider: (entry && legacyProviderForInstance(binding.instanceId, entry)) || '', model: binding.model }
+    // A binding recorded before #490 carries its reasoning level in the model.
+    const { model, effort } = upgradeSelection({ model: binding.model, ...(binding.effort ? { effort: binding.effort } : {}) })
+    return { instanceId: binding.instanceId, llmProvider: (entry && legacyProviderForInstance(binding.instanceId, entry)) || '', model, ...(effort ? { effort } : {}) }
   }
 
   /**
@@ -1312,8 +1335,10 @@ export class Harness implements HarnessGateway {
         // A wall-clock budget (a bot dispatch's deadline) stops the attempt when it runs out.
         const wallMs = spec.binding.policy.budget?.maxWallMs
         if (wallMs !== undefined) signal = AbortSignal.any([signal, AbortSignal.timeout(Math.max(0, wallMs))])
+        // The agent is given the model with its reasoning level attached (`modelSelection.ts`).
         const input: TurnInput = {
           ...spec.input,
+          model: agentModelId(spec.binding.model, spec.binding.effort),
           signal,
           ...(spec.session ? { session: spec.session } : {}),
           ...(spec.instructions ? { instructions: { ...spec.instructions } } : {})
@@ -1412,12 +1437,11 @@ export class Harness implements HarnessGateway {
       timer = setTimeout(() => idle.abort(), ONE_SHOT_INACTIVITY_MS)
     }
     const signal = request.signal ? AbortSignal.any([request.signal, idle.signal]) : idle.signal
-    const { baseId } = parseThinkingSuffixFromModelId(resolved.model)
-    const customModel = this.catalog.customModel(record.instanceId, baseId)
+    const customModel = this.catalog.customModel(record.instanceId, resolved.model)
     restart()
     try {
       const { text } = await runtime.oneShot({
-        model: resolved.model,
+        model: agentModelId(resolved.model, resolved.effort),
         ...(customModel ? { customModel } : {}),
         system: request.system,
         prompt: request.prompt,
@@ -1467,7 +1491,7 @@ export class Harness implements HarnessGateway {
     // in-process Pi loop, which no longer runs anything: the live ones).
     const caps = binding.caps && !loopCaps(binding.caps) ? binding.caps : this.recordCaps(record)
     // Token and spend limits also need the model's own facts (an output cap, a price).
-    const spendModel = hasSpendLimit(binding.policy) ? record.runtime.spendModel?.(binding.model) : undefined
+    const spendModel = hasSpendLimit(binding.policy) ? record.runtime.spendModel?.(agentModelId(binding.model, binding.effort)) : undefined
     const enforceable = checkPolicy(caps, binding.policy, binding.instanceId, spendModel, this.policyOptions(record))
     if (!enforceable.ok) throw harnessAppError(enforceable.error)
     // The runtime takes its permission mode from the input: it must be the binding's.
@@ -1566,7 +1590,7 @@ export class Harness implements HarnessGateway {
     this.toolNotices.add(key)
     const from = this.recordOrUndefined(movedFrom)
     // A pinned model the agent runs under another name, or not at all, is said.
-    const model = moved.model ? ` It runs ${this.modelName(record.instanceId, moved.model.to)} instead of ${moved.model.from}.` : ''
+    const model = moved.model ? ` It runs ${this.modelName(record.instanceId, moved.model.to)} instead of ${this.modelName(movedFrom, moved.model.from)}.` : ''
     try {
       this.liveHost?.notice?.(threadId, `${from ? this.displayName(from) : movedFrom} moved to ${this.displayName(record)}. This chat continues there with its history handed over.${model}`)
     } catch (error) {
@@ -1869,13 +1893,30 @@ export class Harness implements HarnessGateway {
     return next
   }
 
-  /** The name the instance lists a model under (hidden models included), else its id without the effort. */
-  private modelName(instanceId: string, model: string): string {
-    const { baseId } = parseThinkingSuffixFromModelId(model)
-    const listed = this.recordOrUndefined(instanceId)?.runtime.models() ?? []
-    return (listed.find((entry) => entry.id === model) ?? listed.find((entry) => entry.id === baseId))?.label?.trim()
-      || this.prefs.get(instanceId).custom.find((entry) => entry.id === baseId)?.label
-      || baseId
+  /**
+   * A model's name as notices say it: the name the instance lists it under (hidden models
+   * included), else the one a custom model was given, else the last name a listing gave it, else
+   * a name made from its id. Never the stored string with its level.
+   */
+  modelName(named: string, model: string): string {
+    // Callers holding only a provider name (older selections, a default set by provider) get its instance.
+    let instanceId = named
+    try {
+      if (!this.instanceMap.get(named)) instanceId = this.instanceMap.instanceIdOf({ llmProvider: named }) || named
+    } catch {
+      // Unknown either way: the name is made from the id.
+    }
+    const listed = findListedModel(this.recordOrUndefined(instanceId)?.runtime.models() ?? [], model)
+    const { modelId } = modelChoiceOf({ provider: instanceId, model })
+    const label = listed?.label?.trim() || findListedModel(this.prefs.get(instanceId).custom, model)?.label || this.names.get(instanceId)[modelId]
+    return modelChoiceOf({ provider: instanceId, model }, label).name
+  }
+
+  /** The names listings gave models the instance does not list now, for a selection that still names one. */
+  private unlistedNames(instanceId: string, entries: readonly InstanceModel[]): Record<string, string> | undefined {
+    const listed = new Set(entries.map((entry) => entry.id))
+    const names = Object.entries(this.names.get(instanceId)).filter(([id]) => !listed.has(id))
+    return names.length ? Object.fromEntries(names) : undefined
   }
 
   private recordOrUndefined(instanceId: string): InstanceRecord | undefined {
@@ -2232,6 +2273,10 @@ export class Harness implements HarnessGateway {
     const retired = retiredPrompt(driver, instanceId, record.config)
     const nextStep: NextStep | undefined = retired ? { action: 'move', label: 'Move', title: retired.title, detail: retired.detail } : signInStep
     const allowed = shown ? this.knownProblemAllowed(record, shown) : false
+    // A retired entry offers no model to choose, custom ones included (its prefs are kept).
+    const entries = retired ? [] : modelsWithPrefs(listed, prefs)
+    this.names.remember(instanceId, entries)
+    const names = this.unlistedNames(instanceId, entries)
     return {
       instanceId,
       driver: driver.kind,
@@ -2271,8 +2316,8 @@ export class Harness implements HarnessGateway {
       ...(limits ? { permissionLimits: limits } : {}),
       config: this.configView(record),
       models: {
-        // A retired entry offers no model to choose, custom ones included (its prefs are kept).
-        entries: retired ? [] : modelsWithPrefs(listed, prefs),
+        entries,
+        ...(names ? { names } : {}),
         source: listed.length ? (models?.live || (runtime.modelsRefreshedAt && refreshedAt) ? 'live' : 'cached') : prefs.custom.length ? 'manifest' : 'none',
         canAddCustom: driver.customModels && !retired,
         ...(refreshedAt ? { refreshedAt } : {}),
@@ -2605,6 +2650,7 @@ export class Harness implements HarnessGateway {
     this.instanceMap.removeEntry(instanceId)
     this.records.delete(instanceId)
     this.prefs.remove(instanceId)
+    this.names.remove(instanceId)
     this.scopes.forgetInstance(instanceId)
     this.counters.forget(instanceId)
     this.facts.forget(instanceId)
@@ -3196,11 +3242,11 @@ export class Harness implements HarnessGateway {
     // here, before anything else changed: the old sign-in is still there and the entry still works.
     this.instanceMap.setEntry(fromId, { ...from.entry, enabled: false, config: { ...(from.entry.config ?? {}), movedTo: toId } })
     const llmProvider = legacyProviderForInstance(toId, to.entry) ?? ''
-    const model = (id: string) => this.movedModel(toId, id)
+    const model = (pick: ModelPick) => this.movedModel(toId, pick.model, pick.effort)
     const rewritten = [
       ...this.options.defaults?.rewrite(fromId, { instanceId: toId, llmProvider, model }) ?? [],
       ...this.scopes.moveDefaults(fromId, toId, model).map(({ projectId, from: before, to: after }) =>
-        `Project default (${projectId})${before !== after ? `: ${this.modelName(toId, after)} instead of ${before}` : ''}`)
+        `Project default (${projectId})${before !== after ? `: ${this.modelName(toId, after)} instead of ${this.modelName(fromId, before)}` : ''}`)
     ]
     const oldSignIn = retiring ? await this.dropOldSignIn(from) : undefined
     this.changed(fromId)

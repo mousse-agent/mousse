@@ -4,9 +4,11 @@ import { getThreadLifecycleGate } from '../queue/ThreadLifecycleAdmission'
 import { execFileSync } from 'node:child_process'
 import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync } from 'node:fs'
 import { nonInteractiveGitEnv } from '../git/gitEnv'
+import { assertGitAllowed, rethrowGitPolicyError, type UserAction } from '../git/gitPolicy'
 import { safeWorktreeGit } from '../worktree/WorktreeManager'
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { assertHeldThreadLease } from '../actions/GitOperationCoordinator'
+import { moveFiles, snapshotOrigin } from '../actions/snapshots'
 import { atomicWriteJsonSync } from '../data/AtomicFs'
 import { ThreadJournal } from '../data/ThreadJournal'
 import { getMousseHomeDir } from '../data/paths'
@@ -25,15 +27,17 @@ import type {
   WorkspaceExecutionContext
 } from '../../shared/workspace'
 import { repoProgramEnv, withoutRepoPrograms } from '../git/repoPrograms'
+import { threadBranchName } from '../../shared/mousseBranches'
 
-function git(cwd: string, args: string[]): string {
-  return execFileSync('git', withoutRepoPrograms(cwd, args), { cwd, env: repoProgramEnv(), encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim()
+function git(cwd: string, args: string[], userRequested?: UserAction): string {
+  return execFileSync('git', withoutRepoPrograms(cwd, args, { userRequested }), { cwd, env: repoProgramEnv(), encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim()
 }
 
 function tryGit(cwd: string, args: string[]): { ok: boolean; stdout: string } {
   try {
     return { ok: true, stdout: git(cwd, args) }
-  } catch {
+  } catch (error) {
+    rethrowGitPolicyError(error)
     return { ok: false, stdout: '' }
   }
 }
@@ -47,17 +51,44 @@ async function untrustedSafety(repositoryRoot: string): Promise<string[]> {
   return [...safety, '-c', 'submodule.recurse=false']
 }
 
+const CORE_WORKTREE_REFUSAL = 'This repository sets core.worktree, so a worktree cannot hold its own safety configuration.'
+
+/** Whether the repository already keeps Git configuration per worktree (`extensions.worktreeConfig`). */
+export function perWorktreeConfigEnabled(checkoutPath: string): boolean {
+  return tryGit(checkoutPath, ['config', '--local', '--type=bool', '--get', 'extensions.worktreeConfig']).stdout === 'true'
+}
+
+/**
+ * Turns on `extensions.worktreeConfig` in the repository's own configuration, which a worktree of someone else's
+ * commits needs to hold its safety settings. It changes the person's repository, so it runs only as part of the
+ * action that asked for such a worktree (Start from pull request), and that action says so. It is written at most
+ * once and never turned off again. True when this call turned it on. `userRequested` is that action, which the
+ * central Git check needs for a change to the repository's own config.
+ */
+export function enablePerWorktreeConfig(primaryCheckoutPath: string, userRequested?: UserAction): boolean {
+  if (perWorktreeConfigEnabled(primaryCheckoutPath)) return false
+  if (tryGit(primaryCheckoutPath, ['config', '--get', 'core.worktree']).stdout) throw new Error(CORE_WORKTREE_REFUSAL)
+  git(primaryCheckoutPath, ['config', '--local', 'extensions.worktreeConfig', 'true'], userRequested)
+  return true
+}
+
+/** Refuses unless the repository keeps configuration per worktree, so a worktree of someone else's commits can be protected. */
+function assertPerWorktreeConfig(primaryCheckoutPath: string): void {
+  if (tryGit(primaryCheckoutPath, ['config', '--get', 'core.worktree']).stdout) throw new Error(CORE_WORKTREE_REFUSAL)
+  if (!perWorktreeConfigEnabled(primaryCheckoutPath)) {
+    throw new Error("This repository's per-worktree Git settings are off (extensions.worktreeConfig), so a worktree of a pull request cannot be made safely. Start from the pull request again, or turn them on with `git config extensions.worktreeConfig true`.")
+  }
+}
+
 /**
  * Makes the overrides part of the worktree's own configuration, so every Git command run there (a checkpoint
  * commit, the side card's Commit and Push, an agent's shell) is bound by them. A relative `core.hooksPath` or
  * a `.gitattributes` filter would otherwise act on the checkout's own files. Refuses when Git cannot keep
- * configuration per worktree, rather than leaving the worktree unprotected.
+ * configuration per worktree, rather than leaving the worktree unprotected. It never changes the repository's own
+ * configuration: `enablePerWorktreeConfig` does that, once, as part of the action the person asked for.
  */
 function pinUntrustedWorktree(primaryCheckoutPath: string, worktreePath: string, safety: readonly string[]): void {
-  if (tryGit(primaryCheckoutPath, ['config', '--get', 'core.worktree']).stdout) {
-    throw new Error('This repository sets core.worktree, so a worktree cannot hold its own safety configuration.')
-  }
-  git(primaryCheckoutPath, ['config', 'extensions.worktreeConfig', 'true'])
+  assertPerWorktreeConfig(primaryCheckoutPath)
   for (let index = 0; index < safety.length; index++) {
     if (safety[index] !== '-c') continue
     const setting = safety[index + 1]
@@ -70,9 +101,18 @@ function pinUntrustedWorktree(primaryCheckoutPath: string, worktreePath: string,
   }
 }
 
-/** `git worktree add` for commits from someone else: nothing they carry runs, no LFS content is fetched, and the safety stays pinned. */
-async function addUntrustedWorktree(primaryCheckoutPath: string, addArguments: string[], worktreePath: string): Promise<void> {
+/**
+ * `git worktree add` for commits from someone else: nothing they carry runs, no LFS content is fetched, and the safety
+ * stays pinned. `enableWorktreeConfig` (see `provision`) turns the setting on once the safety checks have passed;
+ * `userRequested` is the user's Start thread from pull request, which that change to the repository's config needs.
+ */
+async function addUntrustedWorktree(primaryCheckoutPath: string, addArguments: string[], worktreePath: string, enableWorktreeConfig?: () => void, userRequested?: UserAction): Promise<void> {
+  // A repository whose filters cannot be switched off is refused here, before its configuration is changed.
   const safety = await untrustedSafety(primaryCheckoutPath)
+  if (enableWorktreeConfig && enablePerWorktreeConfig(primaryCheckoutPath, userRequested)) enableWorktreeConfig()
+  // Refused before anything is checked out, not after: the worktree must never exist without its safety settings.
+  assertPerWorktreeConfig(primaryCheckoutPath)
+  assertGitAllowed({ cwd: primaryCheckoutPath, args: [...safety, 'worktree', 'add', ...addArguments] })
   execFileSync('git', [...safety, 'worktree', 'add', ...addArguments], {
     cwd: primaryCheckoutPath,
     env: repoProgramEnv({ ...process.env, ...nonInteractiveGitEnv(), GIT_LFS_SKIP_SMUDGE: '1' }),
@@ -166,8 +206,20 @@ export class ThreadWorkspaceManager {
      * is looked up in the checkout), filter, smudge and process drivers its `.gitattributes` selects, Git LFS
      * (no smudge, so its `.lfsconfig` is never read) and the file system monitor are switched off in the
      * worktree's own configuration, and the workspace is marked so a restore does the same.
+     *
+     * `enableWorktreeConfig`: the person agreed to turn on `extensions.worktreeConfig`, which that safety needs. It is
+     * turned on here, under the repository's lease and after every check that can refuse, so a refused start leaves
+     * the setting as it was; the callback runs when this call turned it on. Without it, a repository with the
+     * setting off is refused. `userRequested` is that agreement as the central Git check sees it.
+     *
+     * `snapshot`: a workspace snapshot (a fork's source checkpoint) whose files are written into the new worktree
+     * after it is made at `startSha`, which is the commit the snapshot was taken on; the snapshot becomes the
+     * thread's latest one, so the first turn starts from it instead of recording it as outside changes.
+     *
+     * `nameFrom`: the thread's first message. The worktree's branch is named from it once, here, as `mousse/<slug>`
+     * (see `threadBranchName`), and never renamed; the name is checked against the repository under its lease.
      */
-    options: { untrusted?: boolean } = {}
+    options: { untrusted?: boolean; enableWorktreeConfig?: () => void; userRequested?: UserAction; snapshot?: string; nameFrom?: string } = {}
   ): Promise<ThreadWorkspaceMetadata> {
     const existing = this.load()
     if (existing?.lifecycle === 'ready') return this.verify(existing)
@@ -188,7 +240,8 @@ export class ThreadWorkspaceManager {
       if (provisioned) throw new Error(`Workspace provisioning requires recovery: ${provisioned.lifecycle}`)
       const primaryHead = git(repository.primaryCheckoutPath, ['rev-parse', 'HEAD'])
       const head = startSha ? git(repository.primaryCheckoutPath, ['rev-parse', '--verify', `${startSha}^{commit}`]) : primaryHead
-      const branch = `mousse/thread/${threadId}/${conversationBranchId}`
+      // Named once, under the repository's lease, so two threads cannot take the same name.
+      const branch = threadBranchName(options.nameFrom, threadId, (name) => tryGit(repository.primaryCheckoutPath, ['for-each-ref', '--count=1', '--format=%(refname)', `refs/heads/${name}`]).stdout !== '')
       const retainedRef = `refs/mousse/threads/${threadId}/${conversationBranchId}`
       const worktreePath = join(repository.worktreeBase, 'threads', threadId, conversationBranchId)
       mkdirSync(join(repository.worktreeBase, 'threads', threadId), { recursive: true })
@@ -217,9 +270,10 @@ export class ThreadWorkspaceManager {
         lastVerifiedAt: new Date().toISOString(),
         ...(options.untrusted ? { untrusted: true as const } : {})
       } satisfies ThreadWorkspaceMetadata)
-      if (options.untrusted) await addUntrustedWorktree(repository.primaryCheckoutPath, ['-b', branch, worktreePath, head], worktreePath)
+      if (options.untrusted) await addUntrustedWorktree(repository.primaryCheckoutPath, ['-b', branch, worktreePath, head], worktreePath, options.enableWorktreeConfig, options.userRequested)
       else git(repository.primaryCheckoutPath, ['worktree', 'add', '-b', branch, worktreePath, head])
-      git(repository.primaryCheckoutPath, ['update-ref', retainedRef, head])
+      if (options.snapshot) moveFiles(worktreePath, git(worktreePath, ['rev-parse', 'HEAD^{tree}']), git(worktreePath, ['rev-parse', `${options.snapshot}^{tree}`]))
+      git(repository.primaryCheckoutPath, ['update-ref', '--no-deref', retainedRef, options.snapshot ?? head])
       const metadata: ThreadWorkspaceMetadata = {
         schemaVersion: 1,
         threadId,
@@ -235,6 +289,7 @@ export class ThreadWorkspaceManager {
         projectRelativeSubdirectory: repository.projectRelativeSubdirectory,
         baseSha: head,
         headSha: head,
+        ...(options.snapshot ? { snapshotSha: options.snapshot } : {}),
         lifecycle: 'ready',
         lastVerifiedAt: new Date().toISOString(),
         ...(options.untrusted ? { untrusted: true as const } : {})
@@ -285,7 +340,7 @@ export class ThreadWorkspaceManager {
       if (verified.lifecycle === 'ready') {
         const ready = this.verify(metadata)
         if (ready.lifecycle !== 'ready') throw new Error('Workspace changed while acquiring recovery ownership.')
-        git(ready.worktreePath, ['update-ref', ready.retainedRef, ready.headSha])
+        git(ready.worktreePath, ['update-ref', '--no-deref', ready.retainedRef, ready.snapshotSha ?? ready.headSha])
         atomicWriteJsonSync(this.workspacePath, ready)
         this.finishProvisionRecovery(ready)
         return ready
@@ -296,7 +351,10 @@ export class ThreadWorkspaceManager {
         const retirement = new WorktreeRetirementService(gate, { taskLease: threadLease, repositoryLease })
         const manifestPath = retirement.pathFor(metadata.threadId, metadata.worktreePath)
         const manifest = retirement.load(manifestPath)
-        if (manifest.branch !== metadata.branch || manifest.resultSha !== metadata.headSha || manifest.repositoryId !== metadata.repositoryId) throw new Error('Retired workspace manifest disagrees with authoritative task binding')
+        // HEAD is the agent's to move, so the one the worktree had when retired is not compared with the last one Mousse saw.
+        if (manifest.branch !== metadata.branch || manifest.repositoryId !== metadata.repositoryId) throw new Error('Retired workspace manifest disagrees with authoritative task binding')
+        // Refused before the rebuild registers anything: a worktree made and then refused would be left empty, without its safety.
+        if (metadata.untrusted) assertPerWorktreeConfig(repository.gitTopLevel)
         // The worktree's own configuration went with the worktree: for someone else's commits it is put back before anything is checked out.
         const safety = metadata.untrusted ? await untrustedSafety(repository.gitTopLevel) : undefined
         retirement.reconstruct(manifestPath, safety ? { prepare: (path) => pinUntrustedWorktree(repository.gitTopLevel, path, safety), env: { ...nonInteractiveGitEnv(), GIT_LFS_SKIP_SMUDGE: '1' } } : undefined)
@@ -305,12 +363,22 @@ export class ThreadWorkspaceManager {
         atomicWriteJsonSync(this.workspacePath, restored)
         return restored
       }
-      const retained = git(repository.gitTopLevel, ['rev-parse', '--verify', metadata.retainedRef])
-      const branchHead = git(repository.gitTopLevel, ['rev-parse', '--verify', metadata.branch])
-      if (retained !== branchHead) throw new Error('Workspace branch and retained ref disagree; manual recovery is required.')
+      // The files come from the retained snapshot, and the worktree starts at the HEAD the snapshot was taken on: on the
+      // branch it was on, or on the thread's own, when that branch still is at that commit; detached there otherwise.
+      const retained = git(repository.gitTopLevel, ['rev-parse', '--verify', `${metadata.retainedRef}^{commit}`])
+      const origin = snapshotOrigin(repository.gitTopLevel, retained)
+      const head = origin.head ?? git(repository.gitTopLevel, ['rev-parse', '--verify', `${metadata.branch}^{commit}`])
+      const tip = (branch: string): string | undefined => tryGit(repository.gitTopLevel, ['rev-parse', '--verify', '-q', `refs/heads/${branch}^{commit}`]).stdout || undefined
+      const branch = [origin.branch, metadata.branch].find((name) => name && tip(name) === head)
       mkdirSync(dirname(metadata.worktreePath), { recursive: true })
-      if (metadata.untrusted) await addUntrustedWorktree(repository.gitTopLevel, [metadata.worktreePath, metadata.branch], metadata.worktreePath)
-      else git(repository.gitTopLevel, ['worktree', 'add', metadata.worktreePath, metadata.branch])
+      const add = async (target: string[]): Promise<void> => {
+        if (metadata.untrusted) await addUntrustedWorktree(repository.gitTopLevel, target, metadata.worktreePath)
+        else git(repository.gitTopLevel, ['worktree', 'add', ...target])
+      }
+      // A branch that another worktree has checked out cannot be added again; the commit can.
+      if (branch) { try { await add([metadata.worktreePath, branch]) } catch { await add(['--detach', metadata.worktreePath, head]) } }
+      else await add(['--detach', metadata.worktreePath, head])
+      moveFiles(metadata.worktreePath, git(metadata.worktreePath, ['rev-parse', 'HEAD^{tree}']), git(metadata.worktreePath, ['rev-parse', `${retained}^{tree}`]))
       const restored = this.verify(metadata)
       atomicWriteJsonSync(this.workspacePath, restored)
       this.finishProvisionRecovery(restored)
@@ -365,6 +433,12 @@ export class ThreadWorkspaceManager {
     }
   }
 
+  /** An operation that started and did not finish, so a person or recovery has to settle it before the next one. */
+  hasPendingOperation(): boolean {
+    // A publish waiting to be settled concerns the primary checkout only, so it does not hold up the thread.
+    return [...this.journal.latestByOperation().values()].some((entry) => ['prepared', 'git_applied', 'context_pending', 'recovery_required'].includes(entry.state) && !['publish', 'change-publish'].includes(entry.operationType))
+  }
+
   verify(metadata = this.load()): ThreadWorkspaceMetadata {
     if (!metadata) throw new Error('Thread workspace metadata is missing')
     if (!existsSync(metadata.worktreePath)) {
@@ -372,10 +446,10 @@ export class ThreadWorkspaceManager {
       return missing
     }
     try {
-      const branch = git(metadata.worktreePath, ['branch', '--show-current'])
-      const headSha = git(metadata.worktreePath, ['rev-parse', 'HEAD'])
-      if (branch !== metadata.branch) throw new Error(`Expected ${metadata.branch}, found ${branch}`)
-      if (headSha !== metadata.headSha) throw new Error('Workspace HEAD moved outside a recorded operation.')
+      // The branch and HEAD are the agent's to move: ready means the checkout is there and no Mousse operation waits.
+      git(metadata.worktreePath, ['rev-parse', '--show-toplevel'])
+      if (this.hasPendingOperation()) throw new Error('A Mousse operation is waiting for recovery.')
+      const headSha = tryGit(metadata.worktreePath, ['rev-parse', 'HEAD']).stdout || metadata.headSha
       const verified = { ...metadata, lifecycle: 'ready' as const, headSha, lastVerifiedAt: new Date().toISOString() }
       return verified
     } catch {
@@ -393,6 +467,18 @@ export class ThreadWorkspaceManager {
       lifecycle: 'unprovisioned',
       capability: capability('Thread has no project workspace')
     }
+  }
+
+  /**
+   * The branch HEAD is on now: the agent may have switched from the thread's own. None when HEAD is detached. The
+   * recorded branch stands in only while the worktree cannot be read (retired, or not there yet).
+   */
+  private currentBranch(metadata: ThreadWorkspaceMetadata): string | undefined {
+    if (!existsSync(metadata.worktreePath)) return metadata.branch
+    // A plain read: a branch name when HEAD is on one; detached HEAD answers nothing.
+    if (!tryGit(metadata.worktreePath, ['rev-parse', '--git-dir']).ok) return metadata.branch
+    const current = tryGit(metadata.worktreePath, ['symbolic-ref', '-q', '--short', 'HEAD'])
+    return current.ok ? current.stdout.replace(/^heads\//, '') || undefined : undefined
   }
 
   executionContext(projectPath: string, metadata = this.load()): WorkspaceExecutionContext {
@@ -414,7 +500,7 @@ export class ThreadWorkspaceManager {
       workspacePath: metadata.worktreePath,
       projectPath: relativeProject,
       primaryPath: projectPath,
-      branch: metadata.branch,
+      branch: this.currentBranch(metadata),
       workspaceId: metadata.workspaceId ?? `${metadata.repositoryId}:${metadata.threadId}`,
       generation: metadata.generation ?? 0,
       baseSha: metadata.baseSha,

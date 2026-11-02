@@ -102,6 +102,22 @@ it('uses authoritative conversation redo after Undo hides the prompt', async () 
   await vi.waitFor(() => expect(redo).toHaveBeenCalledExactlyOnceWith(threadId, 8))
 })
 
+it('shows the line an Undo returns with its result, such as commits that were already pushed, until it is dismissed', async () => {
+  const text = 'These commits were already pushed to origin/feature; Undo restores files only.'
+  const undoLatest = vi.fn().mockResolvedValue({ action: { notice: text }, runId: 'run' })
+  await mount(vi.fn().mockResolvedValue(history), undoLatest)
+  PromptUndoButton({ messageId: target.messageId }).props.onClick()
+  await vi.waitFor(() => expect(hooks.states[4]).toBe(text))
+  render()
+  const shown = PromptUndoNotice()!
+  expect(shown.props.role).toBe('status')
+  expect(shown.props.children[0].props.children).toBe(text)
+  const dismiss = shown.props.children.find((child: any) => child?.type === 'button')
+  expect(dismiss.props.children).toBe('Dismiss')
+  dismiss.props.onClick()
+  expect(hooks.states[4]).toBeNull()
+})
+
 it('does not let a completion from an unmounted profile alter the new binding', async () => {
   let complete!: () => void
   const oldUndo = vi.fn(() => new Promise<void>(resolve => { complete = resolve }))
@@ -173,7 +189,7 @@ it('offers Discard for an Undo refused over a conflict, runs it only after confi
   const buttons = shown.props.children.filter((child: any) => child?.type === 'button')
   expect(buttons.map((button: any) => button.props.children)).toEqual(['Discard'])
   buttons[0].props.onClick()
-  expect(confirm).toHaveBeenCalledWith(expect.stringContaining('Discard 1 changed file in /w? The unfinished merge is ended too.'))
+  expect(confirm).toHaveBeenCalledWith(expect.stringContaining('Discard 1 changed file in /w? This includes uncommitted results of the thread\'s earlier turns. The unfinished merge is ended too.'))
   expect(discardPendingChanges).not.toHaveBeenCalled()
   buttons[0].props.onClick()
   await vi.waitFor(() => expect(discardPendingChanges).toHaveBeenCalledExactlyOnceWith(threadId))

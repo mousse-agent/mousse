@@ -154,9 +154,10 @@ it('E2E04 executes script, condition, isolated mutating Agents, deterministic jo
     const branchPaths = worktrees.filter((path) => realpathSync(path) !== scriptCwd && (existsSync(join(path, 'branch-a.txt')) || existsSync(join(path, 'branch-z.txt'))))
     expect(branchPaths).toHaveLength(2)
     expect(new Set(branchPaths.flatMap((path) => ['branch-a.txt', 'branch-z.txt'].filter((name) => existsSync(join(path, name))).map((name) => readFileSync(join(path, name), 'utf8'))))).toEqual(new Set(['branch-a', 'branch-z']))
-    expect(readFileSync(join(scriptCwd, 'branch-a.txt'), 'utf8')).toBe('branch-a')
-    expect(readFileSync(join(scriptCwd, 'branch-z.txt'), 'utf8')).toBe('branch-z')
-    expect(snapshot.attempts.filter((attempt) => ['agent-a', 'agent-z'].includes(attempt.nodeId)).every((attempt) => attempt.workspaceRevision?.receiptId)).toBe(true)
+    // Neither agent's result was merged into the thread: each is reported, with its snapshots pinned.
+    expect(existsSync(join(scriptCwd, 'branch-a.txt'))).toBe(false)
+    expect(existsSync(join(scriptCwd, 'branch-z.txt'))).toBe(false)
+    expect(snapshot.attempts.filter((attempt) => ['agent-a', 'agent-z'].includes(attempt.nodeId)).map((attempt) => attempt.workspaceRevision?.result?.changedFiles).sort()).toEqual([['branch-a.txt'], ['branch-z.txt']])
     expect(branchPaths.map((path) => realpathSync(path))).not.toContain(realpathSync(repo))
     expect(existsSync(join(repo, 'script-proof.txt'))).toBe(false)
     expect(existsSync(join(repo, 'branch-a.txt'))).toBe(false)

@@ -1057,9 +1057,12 @@ export class NetService {
   }
   private async init(input: NetInitInput): Promise<NetStatus> {
     const rt = this.runtime()
-    if (input.passphrase !== undefined) await rt.keys.unlock(input.passphrase)
+    // With no keys yet, the passphrase protects the new ones; otherwise it unlocks the existing ones.
+    const creating = rt.keys.state() === 'missing'
+    if (input.passphrase !== undefined && !creating) await rt.keys.unlock(input.passphrase)
     if (!rt.identity.self() && this.config.preparedForJoin) throw new NetError('conflict')
-    if (!rt.identity.self()) await rt.identity.bootstrapAuthority(input.name ?? 'My device')
+    if (!rt.identity.self())
+      await rt.identity.bootstrapAuthority(input.name ?? 'My device', creating ? input.passphrase : undefined)
     this.assertInstanceOpen()
     this.config.enabled = true
     this.config.features = {
@@ -2523,12 +2526,13 @@ export class NetService {
       )
         throw new NetError('bad_request')
       if (rt.keys.state() === 'missing') {
-        await rt.keys.initialize({ asAuthority: false })
+        await rt.keys.initialize({ asAuthority: false, passphrase })
         this.config.preparedForJoin = true
         this.saveConfig()
+      } else {
+        if (rt.keys.state() !== 'unlocked') throw new NetError('keystore_locked')
+        rt.keys.protect(passphrase)
       }
-      if (rt.keys.state() !== 'unlocked') throw new NetError('keystore_locked')
-      rt.keys.protect(passphrase)
     }
     if (needsProtection && !rt.keys.encryptedAtRest()) throw new NetError('keystore_locked')
     const prepared = await rt.enrollment.prepareNodeJoin(invite, name)
@@ -2748,6 +2752,7 @@ export class NetService {
         ...(this.disabled ? { restartRequired: true } : {}),
         keystore: rt.keys.state(),
         protected: rt.keys.encryptedAtRest(),
+        ...(rt.keys.vaultUnavailable?.() ? { vaultUnavailable: true } : {}),
         ...(self ? { self, rosterState: rt.identity.rosterState(self.user) } : {}),
         routes: this.transport?.routes() ?? [],
         transports: this.transport?.statuses() ?? [],

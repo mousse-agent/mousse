@@ -35,8 +35,8 @@ import {
   type CommitPhase,
   type GitStatusView
 } from '../../stores/gitStatusStore'
-import { closePullRequest, createPullRequestForBranch, mergePullRequest, useGitPullRequestStore } from '../../stores/pullRequestStore'
-import type { PullRequestDetail, PullRequestPushTarget, PullRequestScope, ThreadPullRequestLink } from '../../../shared/pullRequests'
+import { closePullRequest, createPullRequestForBranch, mergePullRequest, pullRequestMergeMethod, useGitPullRequestStore } from '../../stores/pullRequestStore'
+import type { PullRequestDetail, PullRequestMergeMethod, PullRequestPushTarget, PullRequestScope, ThreadPullRequestLink } from '../../../shared/pullRequests'
 import { usePullRequestPushTarget } from './usePullRequestPushTarget'
 import { gitScopeFor } from '../../lib/activeProject'
 import type { GitCommit, GitPullRequestLookup, GitScope } from '../../../shared/types'
@@ -75,6 +75,7 @@ import {
   commitFormFor,
   commitHint,
   commitMenuState,
+  commitTrigger,
   commitPhaseLabel,
   commitScope,
   diffStatLabel,
@@ -93,6 +94,7 @@ import {
   localBranchNames,
   openPullRequestFailedMessage,
   prefillAmendDraft,
+  mergeConfirmation,
   mergedNotice,
   pullRequestList,
   pullRequestReadThreadId,
@@ -526,6 +528,7 @@ function CommitButton({ path, scope: gitScope, branch, fileCount, commits, pusha
   }, [updateForm])
   const setAmendChecked = useCallback((checked: boolean) => updateForm((value) => chooseAmend(value, checked)), [updateForm])
   const menu = commitMenuState(commits, fileCount, amendChecked, gitScope.workspaceThreadId !== null)
+  const trigger = commitTrigger(menu, commitAvailability)
   const { amend } = menu
   const trimmed = draft.message.trim()
   const blocked = lock.reason !== null
@@ -637,7 +640,8 @@ function CommitButton({ path, scope: gitScope, branch, fileCount, commits, pusha
         ref={triggerRef}
         type="button"
         className="side-card-git-commit-button"
-        title={lock.reason ?? menu.triggerTitle}
+        title={lock.reason ?? trigger.title}
+        aria-label={`${trigger.label}: ${lock.reason ?? trigger.title}`}
         aria-haspopup="dialog"
         aria-expanded={open}
         disabled={!menu.triggerEnabled || blocked}
@@ -649,7 +653,7 @@ function CommitButton({ path, scope: gitScope, branch, fileCount, commits, pusha
         }}
       >
         <GitCommitHorizontal size={14} strokeWidth={1.8} aria-hidden="true" />
-        <span>Commit</span>
+        <span>{trigger.label}</span>
       </button>
       <CardPopover
         open={open}
@@ -773,26 +777,36 @@ const PULL_REQUEST_ICONS = {
   closed: GitPullRequestClosed
 } as const
 
-/** Merge or close one pull request; resolves with the reason it failed, or null once it is done. */
-export type PullRequestChange = (action: 'merge' | 'close', row: PullRequestFoundRow) => Promise<string | null>
+/**
+ * Merge or close one pull request; resolves with the reason it failed, or null once it is done. `method` is the merge
+ * method the confirmation named, which the merge must use; absent when it could not be read.
+ */
+export type PullRequestChange = (action: 'merge' | 'close', row: PullRequestFoundRow, method?: PullRequestMergeMethod) => Promise<string | null>
+
+/** The method Merge will use for a pull request; null when it cannot be read. */
+export type PullRequestMergeMethodRead = (row: PullRequestFoundRow) => Promise<PullRequestMergeMethod | null>
 
 interface PullRequestLinkProps {
   row: PullRequestFoundRow
   /** The Git action running in the section, if any: one at a time. */
   running?: GitAction | null
   onChange?: PullRequestChange
+  /** Reads the merge method when the Merge confirmation opens, so it can name it. */
+  readMergeMethod?: PullRequestMergeMethodRead
 }
 
 /**
  * One of the thread's pull requests: an icon coloured by its state, the title in bold over at most two lines, and the
  * number with its checks on a quiet line. The title opens the pull request panel; the arrow opens it on the host. An open
  * pull request has Merge (the primary action once GitHub would merge it; dimmed with the reason otherwise) and Close,
- * each confirmed first.
+ * each confirmed first. The Merge confirmation names the merge method it will use.
  */
-export function PullRequestLink({ row, running = null, onChange }: PullRequestLinkProps) {
+export function PullRequestLink({ row, running = null, onChange, readMergeMethod }: PullRequestLinkProps) {
   const Icon = PULL_REQUEST_ICONS[row.state]
   const [confirm, setConfirm] = useState<'merge' | 'close' | null>(null)
   const [error, setError] = useState<string | null>(null)
+  // Undefined while it is read, null when it could not be.
+  const [mergeMethod, setMergeMethod] = useState<PullRequestMergeMethod | null | undefined>(undefined)
   const mergeRef = useRef<HTMLButtonElement>(null)
   const closeRef = useRef<HTMLButtonElement>(null)
   const cancelRef = useRef<HTMLButtonElement>(null)
@@ -801,12 +815,24 @@ export function PullRequestLink({ row, running = null, onChange }: PullRequestLi
   const busy = running !== null && !working
   const ask = (action: 'merge' | 'close') => {
     setError(null)
+    setMergeMethod(undefined)
     setConfirm(action)
   }
   // The prompt takes focus when it opens, on Cancel: nothing final happens on a stray Enter.
   useEffect(() => {
     if (confirm) cancelRef.current?.focus()
   }, [confirm])
+  // The method is read once per confirmation; a refreshed row does not ask again.
+  const readRef = useRef({ readMergeMethod, row })
+  readRef.current = { readMergeMethod, row }
+  useEffect(() => {
+    const { readMergeMethod: read, row: asked } = readRef.current
+    if (confirm !== 'merge' || !read) return
+    let current = true
+    read(asked).then((method) => { if (current) setMergeMethod(method) }, () => { if (current) setMergeMethod(null) })
+    return () => { current = false }
+  }, [confirm])
+  const mergePrompt = mergeConfirmation(row.number, row.base, readMergeMethod ? mergeMethod : null)
   // The row's buttons come back once the prompt is gone; focus returns to the one that opened it.
   const dismiss = () => {
     if (working || !confirm) return
@@ -818,7 +844,8 @@ export function PullRequestLink({ row, running = null, onChange }: PullRequestLi
   const run = async () => {
     if (!confirm || !onChange || running !== null) return
     setError(null)
-    const failure = await onChange(confirm, row)
+    // The merge uses the method the prompt named, never one read again later.
+    const failure = await onChange(confirm, row, confirm === 'merge' ? mergeMethod ?? undefined : undefined)
     if (failure) setError(failure)
     else setConfirm(null)
   }
@@ -858,12 +885,13 @@ export function PullRequestLink({ row, running = null, onChange }: PullRequestLi
               ref={closeRef}
               type="button"
               className="side-card-git-pr-close"
-              title={busy ? GIT_BUSY_REASON : 'Close pull request'}
-              aria-label={`Close pull request ${row.number}`}
+              title={busy ? GIT_BUSY_REASON : `Close ${row.number} without merging`}
+              aria-label={`Close pull request ${row.number} without merging`}
               aria-disabled={busy || undefined}
               onClick={() => { if (!busy) ask('close') }}
             >
               <GitPullRequestClosed size={13} strokeWidth={1.8} aria-hidden="true" />
+              <span>Close</span>
             </button>
             <button
               ref={mergeRef}
@@ -894,7 +922,7 @@ export function PullRequestLink({ row, running = null, onChange }: PullRequestLi
           }}
         >
           <p className="side-card-git-pr-confirm-text">
-            {confirm === 'close' ? `Close ${row.number} without merging? Its branch stays.` : `Merge ${row.number} into ${row.base}?`}
+            {confirm === 'close' ? `Close ${row.number} without merging? Its branch stays.` : mergePrompt.text}
           </p>
           {error && <p className="side-card-git-error" role="alert" title={error}>{error}</p>}
           <div className="side-card-git-pr-confirm-actions">
@@ -902,9 +930,17 @@ export function PullRequestLink({ row, running = null, onChange }: PullRequestLi
               Cancel
             </button>
             {confirm === 'merge' ? (
-              <button type="button" className="side-card-git-pr-merge" data-ready aria-busy={working} disabled={running !== null} onClick={() => void run()}>
+              <button
+                type="button"
+                className="side-card-git-pr-merge"
+                data-ready
+                aria-busy={working}
+                // Not before the method is known: the button names what it does.
+                disabled={running !== null || (readMergeMethod !== undefined && mergeMethod === undefined)}
+                onClick={() => void run()}
+              >
                 <GitMerge size={13} strokeWidth={1.8} aria-hidden="true" />
-                <span>{working ? 'Merging…' : 'Merge'}</span>
+                <span>{working ? 'Merging…' : mergePrompt.action}</span>
               </button>
             ) : (
               <button type="button" className="side-card-git-submit" aria-busy={working} disabled={running !== null} onClick={() => void run()}>
@@ -919,13 +955,13 @@ export function PullRequestLink({ row, running = null, onChange }: PullRequestLi
 }
 
 /** The thread's pull requests, newest first; the rest wait behind "Show N more". */
-export function PullRequestList({ rows, running = null, onChange }: { rows: readonly PullRequestFoundRow[]; running?: GitAction | null; onChange?: PullRequestChange }) {
+export function PullRequestList({ rows, running = null, onChange, readMergeMethod }: { rows: readonly PullRequestFoundRow[]; running?: GitAction | null; onChange?: PullRequestChange; readMergeMethod?: PullRequestMergeMethodRead }) {
   const [expanded, setExpanded] = useState(false)
   const { shown, hidden } = pullRequestList(rows, expanded)
   if (shown.length === 0) return null
   return (
     <div className="side-card-git-prs">
-      {shown.map((row) => <PullRequestLink key={row.number} row={row} running={running} onChange={onChange} />)}
+      {shown.map((row) => <PullRequestLink key={row.number} row={row} running={running} onChange={onChange} readMergeMethod={readMergeMethod} />)}
       {hidden > 0 && (
         <button type="button" className="side-card-git-pr-more" aria-expanded={false} onClick={() => setExpanded(true)}>
           <ChevronDown size={12} aria-hidden="true" />
@@ -1082,12 +1118,12 @@ export function GitSectionView({
   const rows = pullRequestRows(pullRequest, git.status, pullRequestDetail, pullRequestLink, workspaceThreadId !== null)
   // Read as the same thread or project the section's lookup was, so a thread on another computer merges there.
   const readThreadId = pullRequestReadThreadId(ownThreadId, workspaceThreadId)
-  const changePullRequest: PullRequestChange = async (action, row) => {
+  const changePullRequest: PullRequestChange = async (action, row, method) => {
     if (!begin(action)) return GIT_BUSY_REASON
     const target = { path, branch, number: row.value, ...(readThreadId ? { threadId: readThreadId } : projectId ? { projectId } : {}) }
     try {
       if (action === 'merge') {
-        const result = await mergePullRequest(target, row.merge?.headSha ?? undefined)
+        const result = await mergePullRequest(target, row.merge?.headSha ?? undefined, method)
         setNotice(mergedNotice(row.value, result.method))
       } else {
         await closePullRequest(target)
@@ -1100,6 +1136,9 @@ export function GitSectionView({
       end()
     }
   }
+
+  const readMergeMethod: PullRequestMergeMethodRead = (row) =>
+    pullRequestMergeMethod({ path, branch, number: row.value, ...(readThreadId ? { threadId: readThreadId } : projectId ? { projectId } : {}) })
 
   return (
     <SideCardSection title="Git" threadId={threadId} collapseKey={GIT_KEY}>
@@ -1157,7 +1196,7 @@ export function GitSectionView({
         scope={createForm && createForm.path === path && createForm.branch === branch ? createForm : null}
         anchorRef={rowRef}
       />
-      <PullRequestList key={`${path}\u0000${branch ?? ''}`} rows={rows} running={running} onChange={changePullRequest} />
+      <PullRequestList key={`${path}\u0000${branch ?? ''}`} rows={rows} running={running} onChange={changePullRequest} readMergeMethod={readMergeMethod} />
       {prRow?.kind === 'found' && prRow.hint && <p className="side-card-git-pr-hint">{prRow.hint}</p>}
       {pullRequestError && (
         <p className="side-card-git-pr-error" role="alert" title={pullRequestError}>

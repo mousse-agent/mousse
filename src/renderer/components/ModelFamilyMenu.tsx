@@ -11,17 +11,18 @@ import { ChevronRight, LayoutGrid, Star } from '../lib/icons'
 import { SettingsSearch } from './settings/SettingsSearch'
 import type { LlmProviderOption } from '../../shared/settings'
 import {
-  formatEffortLabel,
   getCurrentEffort,
   getEffortsForModel,
   groupProviderModels,
-  parseModelVariant,
   parseThinkingSuffixFromModelId,
   resolveModelVariant,
   type ModelFamily
 } from '../../shared/modelVariants'
+import { findListedModel, modelLabelParts } from '../../shared/modelChoice'
+import { shortModelName } from '../../shared/modelNames'
+import { resolveModelChoice } from '../lib/modelChoice'
 import { ProviderIcon, normalizeProviderId, providerMakerId } from '../lib/providerIcons'
-import { instanceBadges, knownModelLabel } from '../lib/providerSnapshots'
+import { instanceBadges } from '../lib/providerSnapshots'
 import { listingKey, listingServes } from '../../shared/providerInstances'
 import { useAppStore } from '../stores/appStore'
 import { useCommandBindings, useCommandOverlay, useCommands } from '../commands/commandRegistry'
@@ -86,11 +87,11 @@ function getInitialVariantOptions(
     family.variants.find((variant) => variant.id === selectedModelId) ??
     family.variants.find((variant) => variant.id === baseId)
 
+  // With no level chosen the model runs at its own default, so none is saved for it.
   const effortCandidate = effortFromId ?? preferredEffort
   const effort =
     (effortCandidate && family.efforts.includes(effortCandidate) ? effortCandidate : undefined) ??
-    selected?.effort ??
-    family.efforts[0]
+    selected?.effort
 
   if (!selected) {
     return {
@@ -569,7 +570,8 @@ function ProfileModelFamilyMenu({
             </span>
           )}
           <span className="model-picker-row-text">
-            <span className="model-picker-row-title">{entry.family.familyLabel}</span>
+            {/* Beside the maker's logo the brand is not repeated ("Opus 5.5"). */}
+            <span className="model-picker-row-title">{compactRows ? entry.family.familyLabel : shortModelName(entry.family.familyLabel)}</span>
             {!subtitle && !entry.providerStatus ? null : (
               <span className="model-picker-row-subtitle">
                 {subtitle ? <span className="model-picker-row-provider">{subtitle}</span> : null}
@@ -745,6 +747,11 @@ export function sortPickerEntries<T extends { providerRank: number; familyRank: 
     .map(({ entry }) => entry)
 }
 
+/**
+ * The parts of a model button's label ("Opus 5.5", "1M", "High"), for a selection whether or not
+ * the picker lists its model: the name comes from `resolveModelChoice`, never the stored string. The
+ * level shown is the one the next turn runs at, when the listing says the model has levels.
+ */
 export function getGroupedModelButtonParts(
   providerId: string,
   modelId: string,
@@ -753,28 +760,10 @@ export function getGroupedModelButtonParts(
   /** The selection's instance: picks the right listing when one provider has several. */
   instanceId?: string
 ): string[] {
-  if (!providerId) return ['Select model']
-  const provider = providers.find((entry) => listingServes(entry, { instanceId, llmProvider: providerId }))
-  const { baseId } = parseThinkingSuffixFromModelId(modelId)
-  const model =
-    provider?.models.find((entry) => entry.id === modelId) ??
-    provider?.models.find((entry) => entry.id === baseId)
-  if (!provider || !model) {
-    // A model the picker does not offer (hidden, or its provider is off) keeps its listed name.
-    const known = knownModelLabel({ providerId, instanceId }, modelId)
-    if (known) {
-      const parsed = parseModelVariant({ id: baseId, label: known })
-      return parsed.context ? [parsed.familyLabel, parsed.context] : [parsed.familyLabel]
-    }
-    return [modelId || provider?.label || 'Select model']
-  }
-
-  const parsed = parseModelVariant(model)
-  const bits = [parsed.familyLabel]
-  if (parsed.context) bits.push(parsed.context)
-  const effort = getCurrentEffort(modelId, provider.models, providerId)
-  if (includeEffort && effort && getEffortsForModel(providerId, modelId, provider.models).length > 0) {
-    bits.push(formatEffortLabel(effort))
-  }
-  return bits
+  if (!providerId || !modelId) return ['Select model']
+  const choice = resolveModelChoice({ instanceId, provider: providerId, model: modelId }, providers)
+  const listing = providers.find((entry) => listingServes(entry, { instanceId, llmProvider: providerId }))
+  const listed = listing ? findListedModel(listing.models, modelId) : undefined
+  const effort = listing && listed && getEffortsForModel(providerId, modelId, listing.models).length > 0 ? getCurrentEffort(modelId, listing.models, providerId) : undefined
+  return modelLabelParts({ ...choice, effort: includeEffort ? effort : undefined }, { short: true })
 }

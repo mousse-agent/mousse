@@ -1,6 +1,7 @@
 import type { MousseIntegrationsSettings, SkillModelSettings } from './integrations'
 import { MOUSSE_BUILTIN_TOOL_IDS } from './integrations'
 import type { ChatMode } from './types'
+import type { ModelOverride } from './providerInstances'
 import { getSkillIdFromMode } from './chatMode'
 import { DEFAULT_PERMISSION_MODE, normalizePermissionMode, type PermissionMode } from './permissionMode'
 import { generateRandomUsername } from './randomUsername'
@@ -173,6 +174,21 @@ export function normalizeRunSettings(raw?: Partial<RunSettings> | null): RunSett
   }
 }
 
+/**
+ * Features that are still being tried out, each off until turned on.
+ *
+ * `subagentWorktrees`: Mousse gives every subagent it starts a worktree of its own, made when the subagent starts from the
+ * parent's current HEAD, on a `mousse/` branch, whatever the main agent asked for. Off: the main agent chooses, as it
+ * always has (`workspace` isolated or shared). Either way a subagent's work is reported, never merged.
+ */
+export interface ExperimentalSettings {
+  subagentWorktrees: boolean
+}
+
+export function normalizeExperimentalSettings(raw?: Partial<ExperimentalSettings> | null): ExperimentalSettings {
+  return { subagentWorktrees: raw?.subagentWorktrees === true }
+}
+
 export interface MousseSettings {
   profile: {
     username: string
@@ -185,9 +201,14 @@ export interface MousseSettings {
   context: ContextSettings
   agentAccess: AgentAccessSettings
   runs: RunSettings
+  experimental: ExperimentalSettings
   provider: {
     llmProvider: LlmProviderId
+    /** The model as its agent lists it; the reasoning level is `effort` (absent = the model's default). */
     model: string
+    effort?: string
+    /** The model's name when it was chosen, for the CLI and devices that have no listing of it. */
+    name?: string
     /**
      * Provider instance of the default selection. Authoritative when set; a later update that names
      * only `llmProvider` clears it (see `SettingsStore.set`).
@@ -200,6 +221,7 @@ export interface MousseSettings {
   title: {
     llmProvider: LlmProviderId
     model: string
+    effort?: string
     /** Provider instance of the title model; absent on records from before instances (legacy mapping). */
     instanceId?: string
   }
@@ -494,6 +516,7 @@ export function getDefaultSettings(): MousseSettings {
     context: normalizeContextSettings(),
     agentAccess: normalizeAgentAccessSettings(),
     runs: normalizeRunSettings(),
+    experimental: normalizeExperimentalSettings(),
     provider: {
       llmProvider: '',
       model: ''
@@ -617,25 +640,26 @@ export function resolveSkillModelSettings(
   // The skill's own instance, so a second account of one provider runs the skill (legacy records
   // name only `llmProvider` and map to its built-in instance when the turn resolves).
   const instanceId = skillModel.instanceId?.trim()
-  return { ...(instanceId ? { instanceId } : {}), llmProvider: skillModel.llmProvider, model: skillModel.model }
+  return { ...(instanceId ? { instanceId } : {}), llmProvider: skillModel.llmProvider, model: skillModel.model, ...(skillModel.effort ? { effort: skillModel.effort } : {}) }
 }
 
 /** Last composer/chat model. Used as the default for newly created threads. */
 export function lastUsedChatModel(
   settings: Pick<MousseSettings, 'provider'>
-): { instanceId?: string; llmProvider: string; model: string } | undefined {
+): ModelOverride | undefined {
   const llmProvider = settings.provider.llmProvider?.trim() ?? ''
   const model = settings.provider.model?.trim() ?? ''
   if (!llmProvider || !model) return undefined
-  const instanceId = settings.provider.instanceId?.trim()
-  return { ...(instanceId ? { instanceId } : {}), llmProvider, model }
+  const { instanceId: rawInstance, effort, name } = settings.provider
+  const instanceId = rawInstance?.trim()
+  return { ...(instanceId ? { instanceId } : {}), llmProvider, model, ...(effort ? { effort } : {}), ...(name ? { name } : {}) }
 }
 
 export function resolveModelForMode(
   settings: MousseSettings,
   mode: ChatMode,
   connectedProviderIds: Set<string> | string[] = []
-): { instanceId?: string; llmProvider: string; model: string } {
+): ModelOverride {
   const connected = connectedProviderIds instanceof Set
     ? connectedProviderIds
     : new Set(connectedProviderIds)
@@ -649,9 +673,9 @@ export function resolveModelForMode(
   }
 
   // The default keeps its provider instance so a turn resolves the instance that was picked.
-  const { llmProvider, model } = settings.provider
+  const { llmProvider, model, effort, name } = settings.provider
   const instanceId = settings.provider.instanceId?.trim()
-  const selection = { ...(instanceId ? { instanceId } : {}), llmProvider, model }
+  const selection = { ...(instanceId ? { instanceId } : {}), llmProvider, model, ...(effort ? { effort } : {}), ...(name ? { name } : {}) }
   if (llmProvider && model && connected.has(llmProvider)) {
     return selection
   }

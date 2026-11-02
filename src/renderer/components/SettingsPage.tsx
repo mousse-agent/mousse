@@ -1,3 +1,4 @@
+import { findListedModel } from '../../shared/modelChoice'
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { applyAcrylicIntensity, persistLinuxAcrylicIntensity } from '../lib/acrylicIntensity'
 import { ArrowLeft, Bot, Keyboard, Laptop, Plug, Server, Settings, Sparkles, UserCircle, VolumeHigh } from '../lib/icons'
@@ -42,7 +43,7 @@ const SETTINGS_SECTIONS = [
   { id: 'general', label: 'General', icon: Settings, hue: 0, group: 'Settings', keywords: ['appearance', 'theme', 'dark', 'light', 'acrylic', 'glass', 'accent', 'color', 'notification', 'sound', 'alert', 'completion', 'update', 'version', 'about'] },
   { id: 'account', label: 'Account', icon: UserCircle, hue: 5, group: 'Settings', keywords: ['mousse id', 'sign in', 'login', 'profile', 'name', 'avatar', 'environment', 'activity'] },
   { id: 'providers', label: 'Providers', icon: Plug, hue: 4, group: 'Settings', keywords: ['api key', 'subscription', 'claude', 'codex', 'openai', 'login'] },
-  { id: 'agents', label: 'Agents', icon: Bot, hue: 1, group: 'Customize', keywords: ['main agent', 'orchestrator', 'model', 'title', 'subagent', 'cli', 'headless', 'claude code', 'codex', 'context', 'compaction', 'tokens', 'agent access', 'access level', 'lineage', 'read other threads', 'manage threads', 'projects', 'bot'] },
+  { id: 'agents', label: 'Agents', icon: Bot, hue: 1, group: 'Customize', keywords: ['main agent', 'orchestrator', 'model', 'title', 'subagent', 'cli', 'headless', 'claude code', 'codex', 'context', 'compaction', 'tokens', 'agent access', 'access level', 'lineage', 'read other threads', 'manage threads', 'projects', 'bot', 'experimental', 'worktree', 'subagent worktree'] },
   { id: 'integrations', label: 'Skills & MCP', icon: Sparkles, hue: 6, group: 'Customize', keywords: ['skills', 'mcp', 'integrations', 'tools', 'web search', 'exa', 'parallel', 'servers', 'skill defaults'] },
   { id: 'speech', label: 'Speech', icon: VolumeHigh, hue: 3, group: 'Customize', keywords: ['voice', 'read aloud', 'dictation', 'microphone', 'noise', 'speed'] },
   { id: 'shortcuts', label: 'Shortcuts', icon: Keyboard, hue: 2, group: 'Customize', keywords: ['keyboard', 'keys', 'keybindings', 'hotkeys', 'rebind', 'command palette', 'accelerator', 'reset'] },
@@ -232,7 +233,8 @@ function ProfileSettingsPage({ profileId }: { profileId: string }) {
       const current = nextSettings.provider
       // By instance first: two accounts of one provider are two listings.
       const selectedProvider = providers.find((p) => listingServes(p, current))
-      const modelExists = selectedProvider?.models.some((m) => m.id === current.model)
+      // The default's level is its own field; one packed into the model (an older record) still matches.
+      const modelExists = Boolean(selectedProvider && findListedModel(selectedProvider.models, current.model))
 
       if (selectedProvider && modelExists) return nextSettings
 

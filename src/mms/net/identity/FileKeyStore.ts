@@ -169,6 +169,7 @@ export class FileKeyStore implements KeyStore {
   private keys?: KeyMaterial
   private stored?: StoredKeys
   private passphrase?: string
+  private vaultRefused = false
   private readonly fault?: FileKeyStoreOptions['fault']
 
   constructor(profileDir: string, options: FileKeyStoreOptions = {}) {
@@ -216,6 +217,14 @@ export class FileKeyStore implements KeyStore {
     return this.keys ? 'unlocked' : this.stored ? 'locked' : 'missing'
   }
 
+  /**
+   * The OS vault refused to encrypt in this process: the system keychain is missing or access was
+   * denied. Electron keeps that answer until the app restarts, so only a passphrase can protect keys now.
+   */
+  vaultUnavailable(): boolean {
+    return this.vaultRefused
+  }
+
   /** Reports the persisted protection, rather than assuming a headless vault exists. */
   encryptedAtRest(): boolean {
     return this.stored?.mode === 'vault' || this.stored?.mode === 'passphrase'
@@ -225,8 +234,10 @@ export class FileKeyStore implements KeyStore {
   protect(passphrase?: string): void {
     const keys = structuredClone(this.required())
     if (passphrase !== undefined && !passphrase) throw new NetError('bad_request')
-    if (passphrase === undefined && !this.codec.canEncrypt())
+    if (passphrase === undefined && !this.codec.canEncrypt()) {
+      this.vaultRefused = true
       throw new NetError('keystore_locked', 'No encrypted key-store backend is available.')
+    }
     const prior = this.passphrase
     this.passphrase = passphrase
     try {
@@ -251,8 +262,10 @@ export class FileKeyStore implements KeyStore {
 
   async initialize(options: {
     asAuthority: boolean
+    passphrase?: string
   }): Promise<{ node: NodePublicKeys; rootKey?: string }> {
     if (this.stored || this.keys) throw new NetError('conflict', 'Keys already exist.')
+    if (options.passphrase !== undefined && !options.passphrase) throw new NetError('bad_request')
     const signing = generateSigningKey()
     const agreement = generateKeyPairSync('x25519')
     const transport = generateSelfSignedCert('Mousse Net')
@@ -265,8 +278,13 @@ export class FileKeyStore implements KeyStore {
       secrets: {}
     }
     if (options.asAuthority) keys.root = generateSigningKey().privateKey
-    this.passphrase = this.configuredPassphrase
-    this.persist(keys, true)
+    this.passphrase = options.passphrase ?? this.configuredPassphrase
+    try {
+      this.persist(keys, true, options.passphrase ? 'passphrase' : undefined)
+    } catch (error) {
+      this.passphrase = undefined
+      throw error
+    }
     return { node: this.nodeKeys(), ...(keys.root ? { rootKey: this.rootKey() } : {}) }
   }
 
@@ -545,14 +563,19 @@ export class FileKeyStore implements KeyStore {
     const mode = protection ?? this.stored?.mode
     if (mode === 'vault' || (!mode && this.codec.canEncrypt())) {
       const value = this.codec.encrypt(plain)
-      if (!value) throw new NetError('keystore_locked', 'OS vault encryption is unavailable.')
+      if (!value) {
+        this.vaultRefused = true
+        throw new NetError('keystore_locked', 'OS vault encryption is unavailable.')
+      }
       stored = { v: 1, mode: 'vault', data: value.toString('base64url') }
     } else if (mode === 'passphrase' || (!mode && this.passphrase)) {
       if (!this.passphrase) throw new NetError('keystore_locked')
       stored = { v: 1, mode: 'passphrase', data: encrypted(plain, this.passphrase, AAD_KEYS) }
     } else {
-      if (this.codec.encryptionRequired)
+      if (this.codec.encryptionRequired) {
+        this.vaultRefused = true
         throw new NetError('keystore_locked', 'OS vault encryption is required.')
+      }
       stored = { v: 1, mode: 'plain', data: keys }
     }
     const lock = this.file + '.lock',

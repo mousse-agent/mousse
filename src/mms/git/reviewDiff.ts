@@ -18,6 +18,7 @@ import {
   type ReviewSide
 } from '../../shared/review'
 import { tryGit } from '../actions/git'
+import { unchangedWorktreePaths } from './workingTreeStatus'
 
 /** Git's own heuristic: a NUL byte in the first 8 KB means the file is binary. */
 const BINARY_SNIFF_BYTES = 8192
@@ -216,14 +217,20 @@ export async function listChangedFiles(cwd: string, range: ReviewRange, options:
   const git = guardedSimpleGit(cwd)
   const base = ['diff', ...NO_DIFF_PROGRAMS, '--no-color', '--relative', '-M', '-z']
   const includeUntracked = range.to.kind === 'worktree'
-  const [nameStatus, numstat, untracked] = await Promise.all([
+  const [nameStatus, numstat, untracked, raw] = await Promise.all([
     git.raw([...base, '--name-status', ...revision, ...PATHSPEC]),
     git.raw([...base, '--numstat', ...revision, ...PATHSPEC]),
-    includeUntracked ? git.raw(['ls-files', '--others', '--exclude-standard', '-z', ...PATHSPEC]) : Promise.resolve('')
+    includeUntracked ? git.raw(['ls-files', '--others', '--exclude-standard', '-z', ...PATHSPEC]) : Promise.resolve(''),
+    // Full object names (`--no-abbrev`), to compare with the working tree's content.
+    includeUntracked ? git.raw([...base, '--raw', '--no-abbrev', ...revision, ...PATHSPEC]) : Promise.resolve('')
   ])
+  // Against the working tree the index is not refreshed, so `--name-status` also lists files whose stat data
+  // alone changed. Those whose content still matches are left out; a changed mode or content stays.
+  const unchanged = includeUntracked ? await unchangedWorktreePaths(cwd, raw) : new Set<string>()
 
   const byPath = new Map<string, ReviewFileEntry>()
   for (const item of parseNameStatusZ(nameStatus)) {
+    if (item.status === 'modified' && unchanged.has(item.path)) continue
     byPath.set(item.path, {
       path: item.path,
       ...(item.oldPath !== undefined ? { oldPath: item.oldPath } : {}),

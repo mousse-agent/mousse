@@ -31,7 +31,7 @@ function provider(models: LlmModelOption[], autoPermissionMode = true, label = '
   return { id: 'claude-subscription', label, models, caps: { toolControl: 'exact', autoPermissionMode, contextUsage: 'none' } as ProviderWithStatus['caps'] }
 }
 
-function render(options: { models?: LlmModelOption[]; modelId?: string; mode?: PermissionMode; auto?: boolean; permission?: boolean; ceiling?: PermissionMode; agent?: string } = {}) {
+function render(options: { models?: LlmModelOption[]; modelId?: string; mode?: PermissionMode; auto?: boolean; permission?: boolean; ceiling?: PermissionMode; agent?: string; menuOpen?: boolean } = {}) {
   const onModelMenuOpenChange = vi.fn()
   const onModelSelect = vi.fn()
   const onPermission = vi.fn()
@@ -39,7 +39,7 @@ function render(options: { models?: LlmModelOption[]; modelId?: string; mode?: P
     providers: [provider(options.models ?? [opus], options.auto ?? true, options.agent)],
     selectedProviderId: 'claude-subscription',
     selectedModelId: options.modelId ?? 'opus:high',
-    modelMenuOpen: false,
+    modelMenuOpen: options.menuOpen ?? false,
     onModelMenuOpenChange,
     onModelSelect,
     onOpenSettings: vi.fn(),
@@ -63,6 +63,26 @@ const openMenu = () => act(() => runButton()!.click())
 const key = (target: Element, name: string) => act(() => { target.dispatchEvent(new KeyboardEvent('keydown', { key: name, bubbles: true })) })
 
 describe('composer run controls', () => {
+  it('names a model the picker does not list, never by its stored string', () => {
+    render({ modelId: 'gpt-6.1-sol:low' })
+    expect(modelButton().textContent).toContain('GPT-6.1 Sol')
+    expect(modelButton().textContent).not.toContain('gpt-6.1-sol')
+  })
+
+  it('picking a model keeps the chosen level, and saves none when none was chosen', () => {
+    const sonnet: LlmModelOption = { id: 'sonnet', label: 'Sonnet 5.5', efforts: ['low', 'medium', 'high'], defaultEffort: 'medium' }
+    const pick = (modelId: string) => {
+      const { onModelSelect } = render({ models: [opus, sonnet], modelId, menuOpen: true })
+      const row = [...document.querySelectorAll<HTMLButtonElement>('.model-picker-row-main')].find((item) => item.textContent?.includes('Sonnet 5.5'))!
+      act(() => row.click())
+      return onModelSelect.mock.calls[0]?.slice(0, 2)
+    }
+    // The model then runs at its own default, not the lowest level it offers.
+    expect(pick('opus')).toEqual(['claude-subscription', 'sonnet'])
+    act(() => root.render(createElement('div')))
+    expect(pick('opus:high')).toEqual(['claude-subscription', 'sonnet:high'])
+  })
+
   it('shows "Opus 5.5 · High" as adjacent text with the mode icon, and each part opens its own picker', () => {
     const { onModelMenuOpenChange } = render()
     // The model keeps its provider icon and has no chevron.
@@ -119,7 +139,7 @@ describe('composer run controls', () => {
     const { onModelSelect } = render({ modelId: 'opus:ultra' })
     expect(runButton()!.textContent).toBe('Medium')
     openMenu()
-    expect(menu()!.querySelector('[role="note"]')!.textContent).toBe("Ultra isn't offered for Opus 5.5; using its default.")
+    expect(menu()!.querySelector('[role="note"]')!.textContent).toBe("Ultra isn't offered for Claude Opus 5.5; using its default.")
     const checked = menu()!.querySelector('[aria-label="Reasoning"] [aria-checked="true"]')!
     expect(checked.textContent).toBe('MediumDefault')
     // Picking the default stores it, so the note goes away.

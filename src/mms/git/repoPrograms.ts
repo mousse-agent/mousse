@@ -3,6 +3,8 @@ import { statSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import simpleGit, { type SimpleGit, type SimpleGitOptions } from 'simple-git'
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
+import { gitDirectoryEnv, mousseGitEnv } from './gitEnv'
+import { assertGitAllowed, type UserAction } from './gitPolicy'
 import { NO_HOOKS_PATH } from './gitNullDevice'
 import { isTrustedRepoEntry, readRepoTrust, repoTrustPath, TRUSTED_FILTER_KEY, writeRepoTrust, type RepoTrustRecord } from './repoTrust'
 
@@ -60,6 +62,16 @@ export interface RepoProgramOptions {
   userAction?: boolean
 }
 
+/** What the central Git check ({@link assertGitAllowed}) needs besides the command itself. */
+export interface GitCheckOptions {
+  /** The user's request, for a command that changes something Mousse does not own. */
+  userRequested?: UserAction
+  /** Standard input, for `update-ref --stdin`. */
+  stdin?: string
+  /** The environment the caller sets explicitly (a private `GIT_INDEX_FILE`). */
+  env?: NodeJS.ProcessEnv
+}
+
 /** Subcommands that write the index, objects from files, or the working tree through filters. */
 const WRITES = new Set([
   'add', 'commit', 'checkout', 'switch', 'restore', 'reset', 'stash', 'merge', 'pull', 'rebase', 'cherry-pick',
@@ -94,6 +106,14 @@ const FIXED = [
   'status.submoduleSummary=false',
   'diff.submodule=short'
 ]
+
+/**
+ * For Mousse's own commands: a read never writes the index. `git status` refreshes and writes it back
+ * unless optional locks are off (`--no-optional-locks`, added in {@link withoutRepoPrograms}), and
+ * `git diff` does whenever it finds a file whose stat data alone changed, unless this is off. A command
+ * that writes the index on purpose still does.
+ */
+export const NO_INDEX_REFRESH = ['diff.autoRefreshIndex=false'] as const
 
 const HOOKS_OFF = [`core.hooksPath=${NO_HOOKS_PATH}`, ...HOOK_EVENTS.map((event) => `hook.${event}.enabled=false`)]
 
@@ -139,9 +159,12 @@ const LFS_EXTENSION = /^lfs\.extension\..+\.(clean|smudge)$/
  */
 export const SAFE_LOOKUP_ENV: Readonly<Record<string, string>> = { PYTHONSAFEPATH: '1', NoDefaultCurrentDirectoryInExePath: '1' }
 
-/** `env` (the process's own by default) with {@link SAFE_LOOKUP_ENV}, for a Git command Mousse runs by itself. */
+/**
+ * `env` (the process's own by default) with {@link SAFE_LOOKUP_ENV} and the settings every Git process
+ * Mousse starts carries ({@link mousseGitEnv}), for a Git command Mousse runs by itself.
+ */
 export function repoProgramEnv(env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
-  return { ...env, ...SAFE_LOOKUP_ENV }
+  return mousseGitEnv({ ...env, ...SAFE_LOOKUP_ENV })
 }
 
 /** Keys whose repository value cannot be overridden from the command line; such a repository is refused. */
@@ -270,7 +293,9 @@ function remember(key: string, paths: Iterable<string>, programs: RepoPrograms):
 
 /** `failed` is set when Git could not be run or read in full (a timeout, output past the limit). */
 function bareGit(cwd: string, args: string[]): { ok: boolean; stdout: string; failed: boolean } {
-  const result = spawnSync('git', ['-c', 'core.fsmonitor=false', ...args], { cwd, encoding: 'utf8', windowsHide: true, timeout: 30_000, maxBuffer: 16 * 1024 * 1024, env: { ...process.env, ...SAFE_LOOKUP_ENV, GIT_OPTIONAL_LOCKS: '0' } })
+  assertGitAllowed({ cwd, args })
+  // A common directory Mousse names is named the same way for the probe as for the command it is for.
+  const result = spawnSync('git', ['-c', 'core.fsmonitor=false', ...args], { cwd, encoding: 'utf8', windowsHide: true, timeout: 30_000, maxBuffer: 16 * 1024 * 1024, env: repoProgramEnv({ ...process.env, GIT_OPTIONAL_LOCKS: '0', ...gitDirectoryEnv(cwd) }) })
   return { ok: !result.error && result.status === 0, stdout: result.error ? '' : result.stdout ?? '', failed: Boolean(result.error) }
 }
 
@@ -321,7 +346,7 @@ export function repoProgramSettings(cwd: string, options: RepoProgramOptions & {
   const programs = programsFor(cwd)
   const hooks = [...HOOKS_OFF, ...programs.hookNames.filter((name) => !(HOOK_EVENTS as readonly string[]).includes(name)).map((name) => `hook.${name}.enabled=false`)]
   const required = programs.emptiedFilters.map((name) => `filter.${name}.required=${options.write ? 'true' : 'false'}`)
-  return [...FIXED, ...hooks, ...programs.overrides, ...required]
+  return [...FIXED, ...NO_INDEX_REFRESH, ...hooks, ...programs.overrides, ...required]
 }
 
 /** `-c` arguments that go before the Git subcommand `args`. */
@@ -383,12 +408,52 @@ export function trustExistingProjectsOnce(profileHome: string, projectPaths: rea
  * program and must read the repository's values as they are (a `-c` would answer for them), so it
  * is left alone.
  */
-export function withoutRepoPrograms(cwd: string, args: readonly string[], options?: RepoProgramOptions): string[] {
-  if (args[0] === 'config') return [...args]
-  return [...noRepoProgramArgs(cwd, args, options), ...args]
+export function withoutRepoPrograms(cwd: string, args: readonly string[], options?: RepoProgramOptions & GitCheckOptions): string[] {
+  const own = !options?.userAction
+  const run = own ? withoutDeref(args) : [...args]
+  // Checked as it runs: Mousse's own commands are lock-free (`--no-optional-locks`, NO_INDEX_REFRESH).
+  assertGitAllowed({ cwd, args: run, userRequested: options?.userRequested, stdin: options?.stdin, env: options?.env, lockFree: own && run[0] !== 'config' })
+  const named = gitDirectoryArgs(cwd)
+  if (run[0] === 'config') return [...named, ...run]
+  // Optional locks are off for Mousse's own commands, so `status` does not refresh and write the index.
+  return [...named, ...(own ? ['--no-optional-locks'] : []), ...noRepoProgramArgs(cwd, run, options), ...run]
 }
 
-const UNSAFE_ALLOWED = {
+/**
+ * `--git-dir` for a command Mousse runs inside a Git directory it chose (a repository's shared directory, a
+ * bare clone with linked worktrees, the bridge's quarantine). `safe.bareRepository=explicit` stops Git from
+ * finding such a folder by itself, and Git before 2.45 refuses even a `.git` folder that way. Only the
+ * folder the command runs in is named, never one Git would reach by walking up.
+ */
+function gitDirectoryArgs(cwd: string): string[] {
+  const dir = gitDirectoryEnv(cwd).GIT_DIR
+  return dir ? [`--git-dir=${dir}`] : []
+}
+
+/**
+ * `update-ref` that writes the ref it names, never through it: Mousse's own refs are written with
+ * `--no-deref`, so a symbolic `refs/mousse/x` pointing at `refs/heads/main` cannot move `main`. `HEAD` is
+ * left alone (moving the branch it is on is what such a command asks for), and so is `--stdin`, whose
+ * callers pass `--no-deref` themselves.
+ */
+export function withoutDeref(args: readonly string[]): string[] {
+  if (args[0] !== 'update-ref' || args.includes('--no-deref') || args.includes('--stdin')) return [...args]
+  // The first positional argument, past options: `-m <reason>` takes a value, `--` ends the options.
+  let ref: string | undefined
+  for (let index = 1; index < args.length; index++) {
+    const arg = args[index]!
+    if (arg === '--') { ref = args[index + 1]; break }
+    if (arg === '-m') { index += 1; continue }
+    if (arg.startsWith('-')) continue
+    ref = arg
+    break
+  }
+  if (!ref || ref === 'HEAD') return [...args]
+  return ['update-ref', '--no-deref', ...args.slice(1)]
+}
+
+/** simple-git's checks Mousse turns off: the values it sets are its own, never a caller's (see {@link guardedSimpleGit}). */
+export const UNSAFE_ALLOWED = {
   allowUnsafeHooksPath: true,
   allowUnsafeFsMonitor: true,
   allowUnsafeFilter: true,
@@ -411,6 +476,42 @@ const UNSAFE_ALLOWED = {
   allowUnsafePager: true
 } as const
 
+/** The Git subcommand a simple-git method other than `raw` runs, for the central check. */
+const SIMPLE_GIT_COMMANDS: Record<string, readonly string[]> = {
+  status: ['status'], diff: ['diff'], diffSummary: ['diff'], log: ['log'], show: ['show'], branchLocal: ['branch'], branch: ['branch'],
+  checkIsRepo: ['rev-parse'], revparse: ['rev-parse'], listRemote: ['ls-remote'], getRemotes: ['remote'], tags: ['tag'], init: ['init'],
+  deleteLocalBranch: ['branch', '-d'], deleteLocalBranches: ['branch', '-d'], checkoutBranch: ['checkout', '-b'], checkoutLocalBranch: ['checkout', '-b'],
+  addConfig: ['config'], addRemote: ['remote', 'add'], removeRemote: ['remote', 'remove'], addTag: ['tag'], addAnnotatedTag: ['tag', '-a']
+}
+
+/**
+ * The command a simple-git call runs, as the check should see it: the method's subcommand followed by the
+ * string arguments it was given (`branch(['-d', name])` is `git branch -d name`, not a branch listing).
+ * An options object only ever adds reading options for the methods used here, so only strings are kept.
+ */
+function simpleGitCommand(method: string, parameters: readonly unknown[] = []): string[] {
+  const words = parameters.flat().filter((value): value is string => typeof value === 'string')
+  return [...(SIMPLE_GIT_COMMANDS[method] ?? [method]), ...words]
+}
+
+/**
+ * `git` with every `raw` command, and every other method, checked by {@link assertGitAllowed} first: for
+ * a simple-git instance made with settings of its own (`safeWorktreeGit`).
+ */
+export function policedSimpleGit(cwd: string, git: SimpleGit): SimpleGit {
+  return new Proxy(git, {
+    get(target, key, receiver) {
+      const value = Reflect.get(target, key, receiver) as unknown
+      if (typeof key === 'symbol' || typeof value !== 'function' || key === 'env' || key === 'then') return value
+      return (...parameters: unknown[]) => {
+        const args = key === 'raw' ? parameters.flat().filter((item): item is string => typeof item === 'string') : simpleGitCommand(key, parameters)
+        assertGitAllowed({ cwd, args })
+        return (value as (...values: unknown[]) => unknown).apply(target, parameters)
+      }
+    }
+  })
+}
+
 /**
  * simple-git for `cwd`. Each method call gets a fresh instance with the settings worked out for that
  * command, so a config written after an earlier call is seen. simple-git refuses these keys unless
@@ -430,7 +531,10 @@ export function guardedSimpleGit(cwd: string, options: Partial<Omit<SimpleGitOpt
       return (...parameters: unknown[]) => {
         // Only `raw` takes free-form arguments; every other method used here only reads.
         const args = key === 'raw' ? parameters.flat().filter((value): value is string => typeof value === 'string') : []
-        const instance = forCommand(args).env(repoProgramEnv()) as unknown as Record<string, (...values: unknown[]) => unknown>
+        // Lock-free: the instance's config holds NO_INDEX_REFRESH and its environment turns optional locks off.
+        assertGitAllowed({ cwd, args: key === 'raw' ? args : simpleGitCommand(key, parameters), lockFree: true })
+        // No optional locks: a status or diff read here never refreshes and rewrites the index.
+        const instance = forCommand(args).env(repoProgramEnv({ ...process.env, GIT_OPTIONAL_LOCKS: '0' })) as unknown as Record<string, (...values: unknown[]) => unknown>
         return instance[key]!(...parameters)
       }
     }
