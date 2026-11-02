@@ -470,8 +470,10 @@ export class ThreadWorkspaceManager {
    */
   private currentBranch(metadata: ThreadWorkspaceMetadata): string | undefined {
     if (!existsSync(metadata.worktreePath)) return metadata.branch
-    const current = tryGit(metadata.worktreePath, ['branch', '--show-current'])
-    return current.ok ? current.stdout || undefined : metadata.branch
+    // A plain read: a branch name when HEAD is on one; detached HEAD answers nothing.
+    if (!tryGit(metadata.worktreePath, ['rev-parse', '--git-dir']).ok) return metadata.branch
+    const current = tryGit(metadata.worktreePath, ['symbolic-ref', '-q', '--short', 'HEAD'])
+    return current.ok ? current.stdout.replace(/^heads\//, '') || undefined : undefined
   }
 
   executionContext(projectPath: string, metadata = this.load()): WorkspaceExecutionContext {

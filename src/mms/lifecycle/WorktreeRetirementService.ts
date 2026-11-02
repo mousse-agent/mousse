@@ -200,20 +200,20 @@ export class WorktreeRetirementService {
       const source = this.verifySource({ ...input, repositoryId: identity.repositoryId })
       this.assertOwnership(input.taskId, identity.commonDir, identity.repositoryId)
       this.store.enableCleanupWriter()
-      const resultSha = lifecycleGit(input.worktreePath, ['rev-parse', 'HEAD'])
+      const resultSha = lifecycleRead(input.worktreePath, ['rev-parse', 'HEAD'])
       // Uncommitted files are kept as a snapshot: a worktree whose status is clean has nothing to snapshot.
-      const snapshot = lifecycleGit(input.worktreePath, ['status', '--porcelain=v1', '--untracked-files=all']) ? takeSnapshot(input.worktreePath, { reason: 'retirement', threadId: input.taskId }) : undefined
-      const treeSha = lifecycleGit(input.worktreePath, ['rev-parse', 'HEAD^{tree}'])
+      const snapshot = lifecycleRead(input.worktreePath, ['status', '--porcelain=v1', '--untracked-files=all']) ? takeSnapshot(input.worktreePath, { reason: 'retirement', threadId: input.taskId }) : undefined
+      const treeSha = lifecycleRead(input.worktreePath, ['rev-parse', 'HEAD^{tree}'])
       const dirty = Boolean(snapshot && snapshot.tree !== treeSha)
       // A result the owner recorded is a commit (the HEAD) or a snapshot of the files; either way the files must still be those.
       if ((input.resultSha && input.resultSha !== resultSha) || (source.resultSha && source.resultSha !== resultSha && !sameTree(input.worktreePath, source.resultSha, snapshot?.sha ?? resultSha))) throw new Error('Workspace result changed before retirement')
       if (input.baseSha && source.baseSha && input.baseSha !== source.baseSha) throw new Error('Workspace base changed before retirement')
       const baseSha = input.baseSha ?? source.baseSha ?? resultSha
-      lifecycleGit(input.worktreePath, ['cat-file', '-e', `${baseSha}^{commit}`])
+      lifecycleRead(input.worktreePath, ['cat-file', '-e', `${baseSha}^{commit}`])
       const contents = this.inspectContent(input.worktreePath, snapshot?.tree)
       const key = hash(input.worktreePath).slice(0, 32)
       const prefix = `refs/mousse/lifecycle/${this.store.profileId}/${input.taskId}/${key}`
-      const headBranch = lifecycleGit(input.worktreePath, ['branch', '--show-current'])
+      const headBranch = lifecycleRead(input.worktreePath, ['branch', '--show-current'])
       const manifest: WorktreeReconstructionManifest = { schemaVersion: 1, profileId: this.store.profileId, ...input, ...identity, baseSha, resultSha, treeSha, checkoutFingerprint: this.checkoutFingerprint(input.worktreePath), baseRef: `${prefix}/base`, resultRef: `${prefix}/result`, ...(dirty ? { snapshotSha: snapshot!.sha, snapshotTree: snapshot!.tree, snapshotRef: `${prefix}/snapshot` } : {}), ...(headBranch ? { headBranch } : {}), ...contents, state: 'prepared' }
       const manifestPath = this.pathFor(input.taskId, input.worktreePath)
       // Intent precedes pins. Recovery can distinguish an incomplete preparation from retirement.
@@ -326,28 +326,28 @@ export class WorktreeRetirementService {
    */
   private captureTrashed(manifestPath: string, manifest: WorktreeReconstructionManifest): { state: string } | { kept: string } {
     const trashPath = manifest.trashPath!
-    const head = lifecycleGit(trashPath, ['rev-parse', 'HEAD'])
-    const treeSha = lifecycleGit(trashPath, ['rev-parse', 'HEAD^{tree}'])
-    const snapshot = lifecycleGit(trashPath, ['status', '--porcelain=v1', '--untracked-files=all']) ? takeSnapshot(trashPath, { reason: 'trash expiry', threadId: manifest.taskId }) : undefined
+    const head = lifecycleRead(trashPath, ['rev-parse', 'HEAD'])
+    const treeSha = lifecycleRead(trashPath, ['rev-parse', 'HEAD^{tree}'])
+    const snapshot = lifecycleRead(trashPath, ['status', '--porcelain=v1', '--untracked-files=all']) ? takeSnapshot(trashPath, { reason: 'trash expiry', threadId: manifest.taskId }) : undefined
     const dirty = Boolean(snapshot && snapshot.tree !== treeSha)
     let contents: ReturnType<WorktreeRetirementService['inspectContent']>
     try { contents = this.inspectContent(trashPath, dirty ? snapshot!.tree : undefined) }
     catch (error) { return { kept: `Kept in the trash at ${trashPath}: ${(error as Error).message}` } }
     const prefix = manifest.resultRef.slice(0, -'/result'.length)
     // A pin is never replaced by one that does not contain it: the earlier commit or snapshot stays under a ref of its own.
-    const keep = (old: string | undefined, next: string): void => {
+    const keepPin = (old: string | undefined, next: string): void => {
       if (!old || old === next || spawnSync('git', withoutRepoPrograms(trashPath, ['merge-base', '--is-ancestor', old, next]), { cwd: trashPath, env: repoProgramEnv(), stdio: 'ignore', windowsHide: true }).status === 0) return
       const ref = `${prefix}/kept/${old}`
       if (readDirectLifecycleRef(trashPath, ref) !== old) lifecycleGit(trashPath, ['update-ref', '--no-deref', ref, old, '0'.repeat(old.length)])
       manifest.keptRefs = [...new Set([...(manifest.keptRefs ?? []), ref])]
     }
     const previousSnapshot = readDirectLifecycleRef(trashPath, `${prefix}/snapshot`)
-    keep(manifest.resultSha, head)
-    if (dirty) keep(previousSnapshot, snapshot!.sha)
+    keepPin(manifest.resultSha, head)
+    if (dirty) keepPin(previousSnapshot, snapshot!.sha)
     atomicWriteJsonSync(manifestPath, manifest)
     lifecycleGit(trashPath, ['update-ref', '--no-deref', manifest.resultRef, head, manifest.resultSha])
     if (dirty) lifecycleGit(trashPath, ['update-ref', '--no-deref', `${prefix}/snapshot`, snapshot!.sha, previousSnapshot ?? '0'.repeat(snapshot!.sha.length)])
-    const headBranch = lifecycleGit(trashPath, ['branch', '--show-current'])
+    const headBranch = lifecycleRead(trashPath, ['branch', '--show-current'])
     // A clean folder drops the snapshot fields; an earlier snapshot ref stays where it is, as every pin does.
     delete manifest.snapshotSha; delete manifest.snapshotTree; delete manifest.snapshotRef; delete manifest.headBranch; delete manifest.sparse
     Object.assign(manifest, { resultSha: head, treeSha, ...(dirty ? { snapshotSha: snapshot!.sha, snapshotTree: snapshot!.tree, snapshotRef: `${prefix}/snapshot` } : {}), ...(headBranch ? { headBranch } : {}), ...contents })
@@ -359,7 +359,7 @@ export class WorktreeRetirementService {
   private trashedState(manifest: WorktreeReconstructionManifest): string {
     const trashPath = manifest.trashPath!
     try {
-      return JSON.stringify([lifecycleGit(trashPath, ['rev-parse', 'HEAD']), worktreeTree(trashPath), walkOwnedContent(trashPath, true)])
+      return JSON.stringify([lifecycleRead(trashPath, ['rev-parse', 'HEAD']), worktreeTree(trashPath), walkOwnedContent(trashPath, true)])
     } catch (error) { return `unreadable: ${(error as Error).message}` }
   }
   /** Points Git's registration at the trash after a move that a crash interrupted. Idempotent. */
@@ -386,7 +386,7 @@ export class WorktreeRetirementService {
    * itself is never touched. Each deletion is recorded so a restore brings the branch back.
    */
   private releaseBranches(manifest: WorktreeReconstructionManifest): void {
-    const checkedOut = new Set(lifecycleGit(manifest.commonDir, ['worktree', 'list', '--porcelain']).split(/\r?\n/).filter((line) => line.startsWith('branch refs/heads/')).map((line) => line.slice('branch refs/heads/'.length)))
+    const checkedOut = new Set(lifecycleRead(manifest.commonDir, ['worktree', 'list', '--porcelain']).split(/\r?\n/).filter((line) => line.startsWith('branch refs/heads/')).map((line) => line.slice('branch refs/heads/'.length)))
     const pins = [manifest.resultSha, manifest.snapshotSha].filter((sha): sha is string => Boolean(sha))
     for (const name of new Set([manifest.branch, manifest.headBranch])) {
       if (!name || !/^mousse\/(thread|agent|workflow)\//.test(name) || checkedOut.has(name)) continue
@@ -489,7 +489,7 @@ export class WorktreeRetirementService {
     try { lifecycleGit(manifest.commonDir, ['worktree', 'add', '--no-checkout', ...target]); return true } catch { return false }
   }
   private registered(manifest: WorktreeReconstructionManifest): boolean { return this.registeredAt(manifest.commonDir, manifest.worktreePath) }
-  private registeredAt(commonDir: string, path: string): boolean { return lifecycleGit(commonDir, ['worktree', 'list', '--porcelain']).split(/\r?\n/).some((line) => line.startsWith('worktree ') && same(line.slice(9), path)) }
+  private registeredAt(commonDir: string, path: string): boolean { return lifecycleRead(commonDir, ['worktree', 'list', '--porcelain']).split(/\r?\n/).some((line) => line.startsWith('worktree ') && same(line.slice(9), path)) }
   private verifySource(input: RetirementInput, purging = false): { baseSha?: string; resultSha?: string } {
     const task = this.store.require(input.taskId)
     if (['purged', 'blocked'].includes(task.state) || task.state === 'purge-started' && (!purging || !task.purge?.items.some((item) => item.kind === 'worktree' && item.identity === input.worktreePath && item.status === 'pending'))) throw new Error('Workspace owner is unavailable for retirement or recall')

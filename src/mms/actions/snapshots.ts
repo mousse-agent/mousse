@@ -121,15 +121,15 @@ function followTrackedFiles(top: string, env: NodeJS.ProcessEnv, head: string | 
  */
 function indexTree(top: string, index: string, head: string | undefined): { tree: string; gaps: CoverageGap[] } {
   const env = { GIT_INDEX_FILE: index }
-  const add = (left: CoverageGap[]) => tryGit(top, ['add', '-A', '--', '.', NOT_MOUSSE, ...left.map((gap) => `:(exclude,literal)${gap.path}`)], env)
-  const attempt = (): { tree: string; gaps: CoverageGap[] } => {
+  const addAll = (left: CoverageGap[]) => tryGit(top, ['add', '-A', '--', '.', NOT_MOUSSE, ...left.map((gap) => `:(exclude,literal)${gap.path}`)], env)
+  const indexOnce = (): { tree: string; gaps: CoverageGap[] } => {
     if (!existsSync(index)) git(top, head ? ['read-tree', head] : ['read-tree', '--empty'], env)
     // What can be read is recorded; what cannot (an unreadable file or folder, a nested repository with no commit) is
     // left out and named. Git stops at the first file it cannot read, so each one found is left out and it runs again.
     const gaps: CoverageGap[] = []
     let nestedChecked = false
     for (let round = 0; ; round++) {
-      const result = add(gaps)
+      const result = addAll(gaps)
       for (const match of result.stderr.matchAll(/could not open directory '([^']+?)\/?': Permission denied/g)) {
         if (!gaps.some((gap) => gap.path === match[1])) gaps.push({ path: match[1]!, reason: UNREADABLE })
       }
@@ -149,12 +149,12 @@ function indexTree(top: string, index: string, head: string | undefined): { tree
     return { tree: git(top, ['write-tree'], env), gaps }
   }
   try {
-    return attempt()
+    return indexOnce()
   } catch {
     // The caller holds the mutation locks, so a lock file left by a crash is nobody's.
     rmSync(index, { force: true })
     rmSync(`${index}.lock`, { force: true })
-    return attempt()
+    return indexOnce()
   }
 }
 

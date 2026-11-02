@@ -3,6 +3,7 @@ import { existsSync } from 'node:fs'
 import type { ThreadLeaseHandle } from '../queue/ThreadExecutionLease'
 import { ThreadJournal } from '../data/ThreadJournal'
 import { withGitMutationLocks } from './GitOperationCoordinator'
+import { currentUserRequest, withoutUserRequest, withUserRequest, type UserAction } from '../git/gitPolicy'
 import { git, mergeTrees, requireClean, treeOf, tryGit } from './git'
 import { publishedRef, sameTree, takeSnapshot } from './snapshots'
 import { ChangeReceiptService } from './ChangeReceiptService'
@@ -19,6 +20,8 @@ export interface PublishOptions {
   expectedJournalRevision?: number
   /** The commit message in the primary checkout. */
   message?: string
+  /** The user's request to publish; the commit and the fast-forward in the primary checkout run under it. */
+  userRequested?: UserAction
 }
 
 export interface PublishResult {
@@ -105,7 +108,7 @@ export class PublishService {
         const intent = this.intentOf(options.operationId!)
         if (!intent || this.differs(threadWorkspace, options.expectedSourceSha, intent.expected.sourceSha) || (options.expectedTargetSha && intent.expected.prePublishSha !== options.expectedTargetSha) || intent.expected.targetBranch !== targetBranch) throw new Error('Publish recovery requires the original reviewed revisions.')
         // The earlier attempt is recorded first. Only when it did not land does this explicit Publish go on to publish again.
-        const recovered = this.settle(primaryCheckout, options.operationId!, intent.expected)
+        const recovered = withoutUserRequest(() => this.settle(primaryCheckout, options.operationId!, intent.expected))
         if (recovered.state === 'completed') return recovered.result
         if (recovered.state === 'pending') throw new Error(`An earlier publish is not settled yet: ${recovered.reason}.`)
       }
@@ -113,7 +116,7 @@ export class PublishService {
       for (const entry of this.journal.latestByOperation().values()) {
         if (entry.operationId === options.operationId || !['publish', 'change-publish'].includes(entry.operationType) || !PENDING_STATES.includes(entry.state)) continue
         const intent = this.intentOf(entry.operationId)
-        const settled = intent ? this.settle(intent.paths.primaryCheckout && existsSync(intent.paths.primaryCheckout) ? intent.paths.primaryCheckout : primaryCheckout, entry.operationId, intent.expected) : undefined
+        const settled = intent ? withoutUserRequest(() => this.settle(intent.paths.primaryCheckout && existsSync(intent.paths.primaryCheckout) ? intent.paths.primaryCheckout : primaryCheckout, entry.operationId, intent.expected)) : undefined
         if (settled?.state === 'pending') throw new Error(`An earlier publish is not settled yet: ${settled.reason}.`)
       }
       receipts.assertNoPendingOperation()
@@ -141,7 +144,10 @@ export class PublishService {
       // An ignored file in the primary is the person's (a local config, a build output) and is never written over.
       const ignored = ignoredInTheWay(primaryCheckout, prePublishSha, merged.tree)
       if (ignored.length) throw new Error(`Publish would overwrite ignored files in ${primaryCheckout}: ${ignored.slice(0, 10).join(', ')}${ignored.length > 10 ? ` and ${ignored.length - 10} more` : ''}. Move them aside, then publish again. Nothing was changed.`)
-      const publishSha = this.commit(primaryCheckout, merged.tree, prePublishSha, options.message)
+      // The commit and the move of the primary's branch are the user's request; nothing else in a publish borrows it.
+      const request = options.userRequested ?? currentUserRequest()
+      const asked = <T>(work: () => T): T => request ? withUserRequest(request, work) : work()
+      const publishSha = asked(() => this.commit(primaryCheckout, merged.tree, prePublishSha, options.message))
       this.journal.append({
         operationId,
         operationType: 'publish',
@@ -151,7 +157,7 @@ export class PublishService {
       })
       // The branch, the index and the files move together or not at all; a fast-forward refuses before touching anything
       // it cannot update, and never writes over an ignored file.
-      const moved = tryGit(primaryCheckout, ['merge', '--ff-only', '--no-overwrite-ignore', publishSha])
+      const moved = asked(() => tryGit(primaryCheckout, ['merge', '--ff-only', '--no-overwrite-ignore', publishSha]))
       if (!moved.ok) {
         // The branch did not move, so there is nothing to recover: the attempt is closed and the thread stays usable.
         const left = git(primaryCheckout, ['status', '--porcelain', '--untracked-files=all'])
@@ -215,21 +221,24 @@ export class PublishService {
    * index or branches. A publish an older version left waiting (`recovery_required`) is settled the same way.
    */
   async recoverPending(_threadWorkspace: string, primaryCheckout: string, heldThreadLease?: ThreadLeaseHandle): Promise<PublishRecovery[]> {
-    const pending = [...this.journal.latestByOperation().values()].filter((entry) => ['publish', 'change-publish'].includes(entry.operationType) && PENDING_STATES.includes(entry.state))
-    if (!pending.length) return []
-    // The primary cannot even be locked when it cannot be read: nothing is decided, and the next recovery tries again.
-    if (!existsSync(primaryCheckout) || !tryGit(primaryCheckout, ['rev-parse', '--git-dir']).ok) return pending.map((entry) => ({ operationId: entry.operationId, state: 'pending' as const, reason: `${primaryCheckout} could not be read` }))
-    return withGitMutationLocks(this.threadDirectory, primaryCheckout, 'publish-recovery', async () => pending.map((entry) => {
-      const intent = this.intentOf(entry.operationId)
-      if (!intent) {
-        this.journal.append({ operationId: entry.operationId, operationType: 'publish', state: 'cancelled', details: { recovered: true, reason: 'The publish left no record of what it was about to do; nothing was checked or changed.' } })
-        return { operationId: entry.operationId, state: 'cancelled' as const }
-      }
-      // The checkout the publish was made in; the one the thread now names when that one is gone.
-      const recorded = intent.paths.primaryCheckout
-      const checkout = recorded && existsSync(recorded) ? recorded : primaryCheckout
-      return this.settle(checkout, entry.operationId, intent.expected)
-    }), undefined, heldThreadLease)
+    // Recovery only records what an interrupted publish did; it never runs under the user's request.
+    return withoutUserRequest(async () => {
+      const pending = [...this.journal.latestByOperation().values()].filter((entry) => ['publish', 'change-publish'].includes(entry.operationType) && PENDING_STATES.includes(entry.state))
+      if (!pending.length) return []
+      // The primary cannot even be locked when it cannot be read: nothing is decided, and the next recovery tries again.
+      if (!existsSync(primaryCheckout) || !tryGit(primaryCheckout, ['rev-parse', '--git-dir']).ok) return pending.map((entry) => ({ operationId: entry.operationId, state: 'pending' as const, reason: `${primaryCheckout} could not be read` }))
+      return withGitMutationLocks(this.threadDirectory, primaryCheckout, 'publish-recovery', async () => pending.map((entry) => {
+        const intent = this.intentOf(entry.operationId)
+        if (!intent) {
+          this.journal.append({ operationId: entry.operationId, operationType: 'publish', state: 'cancelled', details: { recovered: true, reason: 'The publish left no record of what it was about to do; nothing was checked or changed.' } })
+          return { operationId: entry.operationId, state: 'cancelled' as const }
+        }
+        // The checkout the publish was made in; the one the thread now names when that one is gone.
+        const recorded = intent.paths.primaryCheckout
+        const checkout = recorded && existsSync(recorded) ? recorded : primaryCheckout
+        return this.settle(checkout, entry.operationId, intent.expected)
+      }), undefined, heldThreadLease)
+    })
   }
 
   /** The intent a publish recorded before it moved the primary, and where it ran. */
