@@ -330,9 +330,9 @@ export class EnrollmentService {
   private protected(): boolean {
     const keys = this.options.keys
     return (
-      'encryptedAtRest' in keys &&
-      typeof keys.encryptedAtRest === 'function' &&
-      keys.encryptedAtRest() === true
+      'protectedAtRest' in keys &&
+      typeof keys.protectedAtRest === 'function' &&
+      keys.protectedAtRest() === true
     )
   }
   private encodeAuthorization(signed: Signed): string {

@@ -198,8 +198,8 @@ export class BotRegistrationService {
   private authority(input: Input): NodeDelegation {
     const rt = this.profile.options.runtime,
       self = rt.identity.self(),
-      keys = rt.keys as typeof rt.keys & { encryptedAtRest?(): boolean }
-    if (keys.state() !== 'unlocked' || keys.encryptedAtRest?.() !== true)
+      keys = rt.keys as typeof rt.keys & { protectedAtRest?(): boolean }
+    if (keys.state() !== 'unlocked' || keys.protectedAtRest?.() !== true)
       throw new NetError('keystore_locked')
     if (
       !self?.isAuthority ||

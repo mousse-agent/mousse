@@ -72,7 +72,7 @@ import { SqliteNodePolicy } from './store/nodePolicy'
 import { SqliteBridgeAudit } from './store/audit'
 import { SqliteRemoteLists } from './store/remoteLists'
 import { FileBlobStore } from './store/blobs'
-import { FileKeyStore, NetIdentityService } from './identity'
+import { FileKeyStore, NetIdentityService, setAsideKeychainNetwork } from './identity'
 import { ProfileTransports } from './transports/manager'
 import { DirectTransport } from './transports/direct'
 import { inboundPrincipal } from './transports/admission'
@@ -351,6 +351,7 @@ export class NetService {
   runtime(): NetRuntime {
     if (this.stopped) throw new NetError('cancelled')
     if (this.state) return this.state
+    setAsideKeychainNetwork(this.options.profileDir)
     const db = new NetDatabase({ profileDir: this.options.profileDir, clock: this.clock })
     try {
       db.transaction(() =>
@@ -555,7 +556,7 @@ export class NetService {
         },
         handle: async () => {
           return {
-            protected: keys.encryptedAtRest(),
+            protected: keys.protectedAtRest(),
             unlocked: keys.state() === 'unlocked',
             node: identity.self()?.node
           }
@@ -2534,7 +2535,7 @@ export class NetService {
         rt.keys.protect(passphrase)
       }
     }
-    if (needsProtection && !rt.keys.encryptedAtRest()) throw new NetError('keystore_locked')
+    if (needsProtection && !rt.keys.protectedAtRest()) throw new NetError('keystore_locked')
     const prepared = await rt.enrollment.prepareNodeJoin(invite, name)
     if (prepared.state !== 'enrolled') {
       const transport = new ProfileTransports({
@@ -2751,7 +2752,7 @@ export class NetService {
         editorServer: this.editorServerView(),
         ...(this.disabled ? { restartRequired: true } : {}),
         keystore: rt.keys.state(),
-        protected: rt.keys.encryptedAtRest(),
+        protected: rt.keys.protectedAtRest(),
         ...(rt.keys.vaultUnavailable?.() ? { vaultUnavailable: true } : {}),
         ...(self ? { self, rosterState: rt.identity.rosterState(self.user) } : {}),
         routes: this.transport?.routes() ?? [],

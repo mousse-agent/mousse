@@ -102,7 +102,7 @@ async function main() {
         reopened = new FileKeyStore(profile, { codec })
       output.vaultRoundtrip =
         output.vaultBackend === 'gnome_libsecret' &&
-        keys.encryptedAtRest() &&
+        keys.protectedAtRest() &&
         JSON.parse(stored).mode === 'vault' &&
         reopened.state() === 'unlocked' &&
         !stored.includes('PRIVATE KEY') &&

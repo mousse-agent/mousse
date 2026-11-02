@@ -1,4 +1,4 @@
-export { FileKeyStore } from './FileKeyStore'
+export { FileKeyStore, setAsideKeychainNetwork } from './FileKeyStore'
 export type { FileKeyStoreOptions } from './FileKeyStore'
 export { NetIdentityService } from './NetIdentityService'
 export type {

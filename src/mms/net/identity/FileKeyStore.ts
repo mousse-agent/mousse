@@ -161,6 +161,26 @@ function material(value: unknown): KeyMaterial {
   }
 }
 
+/**
+ * Moves a profile's network data aside (`net` becomes `net.keychain-<time>`) when its keys were saved
+ * through the keychain and this build never asks the keychain (`plainAtRest`), so networking starts
+ * over with a new identity instead of asking for the login password. Nothing is deleted. Call it
+ * before anything opens the network database.
+ */
+export function setAsideKeychainNetwork(profileDir: string, codec: SecretCodec = createSecretCodec()): boolean {
+  if (!codec.plainAtRest) return false
+  const directory = join(profileDir, 'net')
+  let mode: unknown
+  try {
+    mode = (parse(readFileSync(join(directory, 'keys.json'))) as { mode?: unknown }).mode
+  } catch {
+    return false
+  }
+  if (mode !== 'vault') return false
+  renameSync(directory, `${directory}.keychain-${Date.now()}`)
+  return true
+}
+
 /** Profile-owned keys. Encryption mode is pinned in the file and never silently downgraded. */
 export class FileKeyStore implements KeyStore {
   private readonly file: string
@@ -203,12 +223,10 @@ export class FileKeyStore implements KeyStore {
       )
         throw new NetError('storage_corrupt')
       if (this.stored.mode === 'plain') {
-        if (this.codec.encryptionRequired)
-          throw new NetError(
-            'keystore_locked',
-            'An Electron vault must explicitly migrate the plaintext key store.'
-          )
-        this.keys = material(this.stored.data)
+        const keys = material(this.stored.data)
+        // A plain file left by a build without the keychain moves into the vault this build requires.
+        if (this.codec.encryptionRequired) this.persist(keys, false, 'vault')
+        this.keys = keys
       } else if (this.stored.mode === 'vault') this.tryVault()
     }
   }
@@ -225,15 +243,20 @@ export class FileKeyStore implements KeyStore {
     return this.vaultRefused
   }
 
-  /** Reports the persisted protection, rather than assuming a headless vault exists. */
-  encryptedAtRest(): boolean {
-    return this.stored?.mode === 'vault' || this.stored?.mode === 'passphrase'
+  /**
+   * Reports the persisted protection, rather than assuming a headless vault exists: encrypted, or an
+   * owner-only plain file kept by design (a macOS build without a stable signature).
+   */
+  protectedAtRest(): boolean {
+    const mode = this.stored?.mode
+    return mode === 'vault' || mode === 'passphrase' || (mode === 'plain' && !!this.codec.plainAtRest)
   }
 
   /** Explicitly protects an unlocked existing profile; a failed write retains its previous mode. */
   protect(passphrase?: string): void {
     const keys = structuredClone(this.required())
     if (passphrase !== undefined && !passphrase) throw new NetError('bad_request')
+    if (passphrase === undefined && this.codec.plainAtRest) return
     if (passphrase === undefined && !this.codec.canEncrypt()) {
       this.vaultRefused = true
       throw new NetError('keystore_locked', 'No encrypted key-store backend is available.')

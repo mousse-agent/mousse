@@ -227,9 +227,9 @@ export class SpaceClientService {
     if (!displayName || [...displayName].length > 256) return fail('bad_request')
     if (invite.authorization.expiresAt <= this.clock.now()) return fail('invite_invalid')
     if (
-      !('encryptedAtRest' in this.options.keys) ||
-      typeof this.options.keys.encryptedAtRest !== 'function' ||
-      this.options.keys.encryptedAtRest() !== true
+      !('protectedAtRest' in this.options.keys) ||
+      typeof this.options.keys.protectedAtRest !== 'function' ||
+      this.options.keys.protectedAtRest() !== true
     )
       return fail('keystore_locked')
     const pin = this.options.identity.pinnedRootKey(invite.descriptor.owner)

@@ -1,3 +1,4 @@
+import { renameSync } from 'node:fs'
 import type { SecretCodec } from './secretCodec'
 
 /** The JSON key of an encrypted secret file: `{ "__mousse_encrypted_v1": "<base64>" }`. */
@@ -29,6 +30,14 @@ function parse(raw: string): unknown {
   try { return JSON.parse(raw) } catch { throw new SecretFileError('the stored data is invalid JSON') }
 }
 
+/**
+ * Moves a file the OS vault encrypted out of the way, next to it, so a build that keeps secrets
+ * in owner-only files (`plainAtRest`) starts empty instead of failing. Nothing is deleted.
+ */
+export function setAsideSecretFile(path: string): void {
+  renameSync(path, `${path}.keychain-${Date.now()}`)
+}
+
 /** Reads a stored secret file: plain JSON, or the encrypted envelope around it. */
 export function openSecretFile(raw: string, codec: SecretCodec): { value: unknown; encrypted: boolean } {
   const parsed = parse(raw)
@@ -51,9 +60,11 @@ export function openSecretFile(raw: string, codec: SecretCodec): { value: unknow
 
 /**
  * The stored form of `serialized`. It is encrypted when the codec requires it (Electron), when the
- * vault is available, or when the file was encrypted before: a store never downgrades to plain text.
+ * vault is available, or when the file was encrypted before: a store never downgrades to plain text,
+ * except under a codec that keeps secrets in owner-only files by design (`plainAtRest`).
  */
 export function sealSecretFile(serialized: string, codec: SecretCodec, wasEncrypted: boolean): { stored: string; encrypted: boolean } {
+  if (codec.plainAtRest) return { stored: serialized, encrypted: false }
   let encrypted: Buffer | null = null
   try {
     if (wasEncrypted || codec.encryptionRequired || codec.canEncrypt()) {

@@ -155,11 +155,11 @@ export class SpaceArchiveService {
   private owner(): { user: import('../../../shared/net').UserId; rootKey: string } {
     const rt = this.options.spaces.options.runtime,
       self = rt.identity.self(),
-      keys = rt.keys as typeof rt.keys & { encryptedAtRest?(): boolean },
+      keys = rt.keys as typeof rt.keys & { protectedAtRest?(): boolean },
       root = self && rt.identity.pinnedRootKey(self.user)
     if (keys.state() === 'locked') throw new NetError('keystore_locked')
     if (!self?.isAuthority || !root) throw new NetError('forbidden')
-    if (keys.state() !== 'unlocked' || keys.encryptedAtRest?.() !== true)
+    if (keys.state() !== 'unlocked' || keys.protectedAtRest?.() !== true)
       throw new NetError('keystore_locked')
     if (keys.rootKey() !== root) throw new NetError('forbidden')
     return { user: self.user, rootKey: root }
