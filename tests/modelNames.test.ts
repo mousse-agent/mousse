@@ -88,6 +88,15 @@ describe('model names in the catalog', () => {
     expect(option.models).toEqual([{ id: 'opus', label: 'Claude Opus 5.5', efforts: ['high'] }])
   })
 
+  it('keeps an older model\'s flag and names it in the same style', () => {
+    const listed = [{ id: 'ember', label: 'Ember 9' }, { id: 'ember-1', label: 'Opus 1.5', older: true as const }]
+    expect(modelsWithPrefs(listed, EMPTY_PREFS).map((entry) => [entry.id, entry.label, entry.older])).toEqual([
+      ['ember', 'Ember 9', undefined],
+      ['ember-1', 'Claude Opus 1.5', true]
+    ])
+    expect(visibleProviderOption({ id: 'claude-subscription', label: 'Claude Code', models: listed }, EMPTY_PREFS).models[1]).toEqual({ id: 'ember-1', label: 'Claude Opus 1.5', older: true })
+  })
+
   it('remembers every name a listing gave, writes only on a change, and forgets an instance on removal', () => {
     let stored: Record<string, Record<string, string>> = {}
     let writes = 0

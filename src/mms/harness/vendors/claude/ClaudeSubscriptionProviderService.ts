@@ -21,6 +21,8 @@ import { parseThinkingSuffixFromModelId, supportedEffortOf } from '../../../../s
 import { AppError } from '../../../../shared/errors'
 import type { ProviderToolEvent } from '../../../../shared/agentActivity'
 import { CLAUDE_INSTANCE_ID } from '../../../../shared/providerInstances'
+import { catalogModelsOnRoute, MODEL_CATALOG_FORMAT, type ModelCatalog, type ModelCatalogEntry, type ModelCatalogRoute } from '../../../../shared/modelCatalog'
+import { modelCatalog } from '../../../models/modelCatalog'
 import { atomicWriteJsonSync } from '../../../data/AtomicFs'
 import type { UserQuestionService } from '../../../orchestrator/UserQuestionService'
 import { exactDirectory } from '../../../run/approvalFingerprint'
@@ -34,6 +36,7 @@ import { withEnforced } from '../../env'
 import { CLAUDE_LOCKED_REMOVED_OPTIONS, ClaudeLockedGate, claudeLockedOptions, claudeLockedSpawn, type ClaudeLockedTurn } from '../../claude/locked'
 import {
   claudeExtraArgs,
+  cliFingerprint,
   cliLaunch,
   requireExecutable,
   sharedCliVersions,
@@ -93,8 +96,24 @@ type Settings = {
   models?: LlmModelOption[]
   /** ISO time `models` was last listed by Claude Code (absent for the fallback aliases). */
   modelsRefreshedAt?: string
+  /** What the older-model check found (`claudeOlderModelCheck`), for the key it ran under. */
+  olderModels?: OlderModelsState
   sessions?: Record<string, SavedSession>
 }
+/**
+ * The older-model check's results, by `claude` route id. `key` hashes the Claude Code program file,
+ * the account and the candidate route ids: a change to any of them starts the check over. A
+ * candidate with no result is unknown and is checked again on the next refresh.
+ */
+export type OlderModelsState = {
+  key: string
+  results: Record<string, OlderModelOutcome>
+}
+/** `runs`: Claude Code reports the model itself as applied. `refused` and `remapped` are not offered. */
+export type OlderModelOutcome =
+  | { outcome: 'runs'; defaultEffort?: string }
+  | { outcome: 'refused' }
+  | { outcome: 'remapped'; to: string }
 export type ClaudeSubscriptionChatInput = {
   threadId: string
   /** Provider instance running the turn; a saved session resumes only on the same instance. */
@@ -190,6 +209,10 @@ type TurnContext = {
   locked?: ClaudeLockedGate
 }
 type Dependencies = {
+  /** Mousse's model catalog, gated for this version (default `modelCatalog()`); tests use made-up models. */
+  modelCatalog?: () => ModelCatalog
+  /** How long the older-model check may take after the live list is saved (default 20 s; tests). */
+  olderCheckMs?: number
   /**
    * Live queries (the default) or `false` for one query per turn. Timings and the cap can be tuned
    * for tests.
@@ -388,15 +411,15 @@ export function claudeModelOptions(models: ModelInfo[], extras: Record<string, C
  * it (or a model it refuses) report nothing, and the model keeps only its listed levels.
  */
 export async function claudeModelExtras(query: Query, models: ModelInfo[], signal: AbortSignal): Promise<Record<string, ClaudeModelExtras>> {
-  const settingsOf = (query as Query & { getSettings?: () => Promise<{ applied?: { effort?: unknown; ultracodeAvailable?: unknown } }> }).getSettings
-  if (typeof settingsOf !== 'function') return {}
+  const settingsOf = appliedSettingsOf(query)
+  if (!settingsOf) return {}
   const extras: Record<string, ClaudeModelExtras> = {}
   for (const model of models) {
     if (signal.aborted) break
     if (model.value === 'default') continue
     try {
       await query.setModel(model.value)
-      const applied = (await settingsOf.call(query))?.applied
+      const applied = (await settingsOf())?.applied
       extras[model.value] = {
         ...(typeof applied?.effort === 'string' ? { defaultEffort: applied.effort } : {}),
         ...(applied?.ultracodeAvailable === true ? { ultracode: true } : {})
@@ -406,6 +429,121 @@ export async function claudeModelExtras(query: Query, models: ModelInfo[], signa
     }
   }
   return extras
+}
+
+/**
+ * What `get_settings` reports as applied, read through a cast: the SDK types declare neither the
+ * method on older versions nor `applied.model` (the model actually running after `setModel`).
+ */
+type AppliedSettings = { applied?: { model?: unknown; effort?: unknown; ultracodeAvailable?: unknown } }
+function appliedSettingsOf(query: Query): (() => Promise<AppliedSettings>) | undefined {
+  const settingsOf = (query as Query & { getSettings?: () => Promise<AppliedSettings> }).getSettings
+  return typeof settingsOf === 'function' ? () => settingsOf.call(query) : undefined
+}
+
+/** A model id as Claude Code lists it, without a `[…]` variant suffix (`claude-fable-5-1[1m]`). */
+function bareModelId(id: string): string {
+  return id.replace(/\[[^\]]*\]$/, '')
+}
+
+/** The model ids Claude Code lists live: each alias and the model it resolves to. */
+export function claudeLiveModelIds(models: readonly ModelInfo[]): Set<string> {
+  const ids = new Set<string>()
+  for (const model of models) {
+    ids.add(bareModelId(model.value))
+    if (model.resolvedModel) ids.add(bareModelId(model.resolvedModel))
+  }
+  return ids
+}
+
+/** A catalog model on the `claude` route, as the older-model check and the listing use it. */
+export type ClaudeOlderCandidate = ModelCatalogEntry & { route: ModelCatalogRoute }
+
+/** Catalog models on the `claude` route that Claude Code does not list live, newest first. */
+export function claudeOlderCandidates(catalog: ModelCatalog, live: ReadonlySet<string>): ClaudeOlderCandidate[] {
+  return catalogModelsOnRoute(catalog, 'claude').filter((entry) => !live.has(bareModelId(entry.route.id)))
+}
+
+/** The cache key of a check: the Claude Code program file, the account and the candidate route ids. */
+export function claudeOlderCheckKey(fingerprint: string | undefined, subject: string | undefined, candidates: readonly ClaudeOlderCandidate[]): string {
+  const routes = candidates.map((entry) => entry.route.id).sort()
+  return createHash('sha256').update(JSON.stringify([fingerprint ?? '', subject ?? '', routes])).digest('hex')
+}
+
+/** `setModel`'s words when Claude Code refuses a model for this account (`400 unknown provider for model … · model not changed`). */
+const REFUSED_MODEL = /model not changed|unknown provider for model/i
+/** Words of a failure that may pass on retry: a timeout, a rate limit, a server or network error. */
+const PASSING_FAILURE = /\b(?:408|429|5\d\d)\b|time(?:d)? ?out|network|ECONN|ETIMEDOUT|ENOTFOUND|overloaded/i
+
+/**
+ * Switches the idle discovery query to each candidate in turn (no prompt is sent) and reads the model
+ * Claude Code reports as applied. It runs when that is the route id itself, with the reported effort
+ * as its default; it is refused when `setModel` says so, and remapped when another model is applied.
+ * A timeout, an abort, any other failure or no reported model leaves the candidate out: unknown, so
+ * it is checked again later. `onResult` is called as each outcome is known.
+ */
+export async function claudeOlderModelCheck(
+  query: Query,
+  candidates: readonly ClaudeOlderCandidate[],
+  signal: AbortSignal,
+  onResult: (routeId: string, outcome: OlderModelOutcome) => void
+): Promise<void> {
+  const settingsOf = appliedSettingsOf(query)
+  if (!settingsOf || typeof query.setModel !== 'function') return
+  // A call that never answers ends with the budget instead of holding the check.
+  const bounded = <T>(pending: Promise<T>): Promise<T> =>
+    new Promise<T>((resolveBounded, reject) => {
+      const stop = () => reject(new Error('Older-model check stopped'))
+      if (signal.aborted) return stop()
+      signal.addEventListener('abort', stop, { once: true })
+      pending.then(resolveBounded, reject).finally(() => signal.removeEventListener('abort', stop))
+    })
+  for (const candidate of candidates) {
+    if (signal.aborted) return
+    const routeId = candidate.route.id
+    try {
+      await bounded(query.setModel(routeId))
+    } catch (error) {
+      if (signal.aborted) return
+      const message = error instanceof Error ? error.message : String(error)
+      if (REFUSED_MODEL.test(message) && !PASSING_FAILURE.test(message)) onResult(routeId, { outcome: 'refused' })
+      continue
+    }
+    let applied: AppliedSettings['applied']
+    try {
+      applied = (await bounded(settingsOf()))?.applied
+    } catch {
+      if (signal.aborted) return
+      continue
+    }
+    if (typeof applied?.model !== 'string' || !applied.model) continue
+    if (bareModelId(applied.model) !== routeId) {
+      onResult(routeId, { outcome: 'remapped', to: applied.model })
+      continue
+    }
+    onResult(routeId, { outcome: 'runs', ...(typeof applied.effort === 'string' ? { defaultEffort: applied.effort } : {}) })
+  }
+}
+
+/**
+ * The older models the check found running, after the live ones, newest first: named by the catalog's
+ * short name, with the catalog's levels that Claude Code takes and the default effort it reported.
+ */
+export function claudeOlderModelOptions(candidates: readonly ClaudeOlderCandidate[], results: Readonly<Record<string, OlderModelOutcome>>): LlmModelOption[] {
+  const options: LlmModelOption[] = []
+  for (const candidate of candidates) {
+    const result = results[candidate.route.id]
+    if (result?.outcome !== 'runs') continue
+    const efforts = candidate.efforts?.filter((level) => CLAUDE_EFFORTS.has(level))
+    options.push({
+      id: candidate.route.id,
+      label: candidate.short,
+      ...(efforts?.length ? { efforts, thinkingOff: false as const } : {}),
+      ...(result.defaultEffort && efforts?.includes(result.defaultEffort) ? { defaultEffort: result.defaultEffort } : {}),
+      older: true
+    })
+  }
+  return options
 }
 
 /** Variables a running Claude Code session sets for the commands it starts. */
@@ -730,9 +868,26 @@ export class ClaudeSubscriptionProviderService {
       description: 'Official Claude Code · personal account'
     }
   }
-  /** The discovered models, or the CLI aliases until discovery runs. */
+  /**
+   * The discovered models, then the older ones the check found running (`claudeOlderModelOptions`),
+   * or the CLI aliases until discovery runs.
+   */
   models(): LlmModelOption[] {
-    return this.settings.models?.length ? this.settings.models : FALLBACK_MODELS
+    const live = this.settings.models
+    if (!live?.length) return FALLBACK_MODELS
+    const results = this.settings.olderModels?.results
+    if (!results || !Object.keys(results).length) return live
+    const listed = new Set(live.map((model) => model.id))
+    const older = claudeOlderModelOptions(claudeOlderCandidates(this.catalog(), listed), results).filter((model) => !listed.has(model.id))
+    return older.length ? [...live, ...older] : live
+  }
+  /** The model catalog; one that cannot be read offers no older models. */
+  private catalog(): ModelCatalog {
+    try {
+      return (this.dependencies.modelCatalog ?? modelCatalog)()
+    } catch {
+      return { format: MODEL_CATALOG_FORMAT, revision: 0, models: [] }
+    }
   }
   /** When Claude Code last listed the models, kept with them across restarts. */
   modelsRefreshedAt(): string | undefined {
@@ -741,8 +896,7 @@ export class ClaudeSubscriptionProviderService {
   llmProvider(): LlmProviderOption | undefined {
     if (!this.configured()) return undefined
     // Offer the CLI aliases until model discovery runs.
-    const models = this.settings.models?.length ? this.settings.models : FALLBACK_MODELS
-    return { id: CLAUDE_SUBSCRIPTION_PROVIDER_ID, label: 'Claude Subscription', models }
+    return { id: CLAUDE_SUBSCRIPTION_PROVIDER_ID, label: 'Claude Subscription', models: this.models() }
   }
   /**
    * Any sign-in Claude Code reports counts, whatever its method (Claude account, OAuth token, API
@@ -1032,6 +1186,8 @@ export class ClaudeSubscriptionProviderService {
     signal?.addEventListener('abort', cancel, { once: true })
     const timer = setTimeout(cancel, 15_000)
     let query: Query | undefined
+    // Once the live list is saved, the older-model check may take the idle query over.
+    let handedOver = false
     try {
       signal?.throwIfAborted()
       // Streaming input stays empty: initialize/discover only, never submit a billable prompt.
@@ -1054,14 +1210,60 @@ export class ClaudeSubscriptionProviderService {
         this.settings.models = claudeModelOptions(models, extras)
         this.settings.modelsRefreshedAt = new Date().toISOString()
         this.save()
+        try {
+          handedOver = this.startOlderCheck(query, controller, models)
+        } catch {
+          // The live list is saved; the older models wait for the next refresh.
+        }
       }
     } finally {
       clearTimeout(timer)
-      controller.abort()
-      query?.close()
-      this.controllers.delete(controller)
       signal?.removeEventListener('abort', cancel)
+      if (!handedOver) {
+        controller.abort()
+        query?.close()
+        this.controllers.delete(controller)
+      }
     }
+  }
+  /** The older-model check in progress, if any (tests wait for it). */
+  olderCheck: Promise<void> | undefined
+  /**
+   * Starts the older-model check on the idle discovery query once the live list is saved: it owns
+   * the query from then on, with its own budget, and `refreshModels` returns without waiting for it.
+   * A changed key (Claude Code updated, another account, other candidates) drops the old results at
+   * once. Nothing starts when every candidate has a result, or when a check is already running.
+   * Returns whether it took the query.
+   */
+  private startOlderCheck(query: Query, controller: AbortController, live: ModelInfo[]): boolean {
+    const candidates = claudeOlderCandidates(this.catalog(), claudeLiveModelIds(live))
+    const key = claudeOlderCheckKey(cliFingerprint(this.launchTarget()), this.accountSubject(), candidates)
+    if (this.settings.olderModels?.key !== key) {
+      this.settings.olderModels = { key, results: {} }
+      this.save()
+    }
+    const results = this.settings.olderModels.results
+    const pending = candidates.filter((candidate) => !results[candidate.route.id])
+    if (!pending.length || this.olderCheck || this.stopped) return false
+    const budget = setTimeout(() => controller.abort(), this.dependencies.olderCheckMs ?? 20_000)
+    this.olderCheck = claudeOlderModelCheck(query, pending, controller.signal, (routeId, outcome) => {
+      // A later refresh may have changed the key; its results are not this check's to write.
+      const state = this.settings.olderModels
+      if (this.stopped || state?.key !== key) return
+      state.results[routeId] = outcome
+      this.save()
+    })
+      .catch(() => {
+        /* the candidates left are unknown and checked on the next refresh */
+      })
+      .finally(() => {
+        clearTimeout(budget)
+        controller.abort()
+        query.close()
+        this.controllers.delete(controller)
+        this.olderCheck = undefined
+      })
+    return true
   }
   async getUsage(cwd: string, signal?: AbortSignal): Promise<ProviderUsage> {
     const unavailable = parseClaudeSubscriptionUsage(undefined)
@@ -1810,7 +2012,7 @@ export class ClaudeSubscriptionProviderService {
       controller.signal.throwIfAborted()
       const selected = parseThinkingSuffixFromModelId(input.model)
       // A level the model does not offer (saved for another model) runs at the model's default.
-      const level = supportedEffortOf(input.model, this.settings.models ?? [], new Set([...CLAUDE_EFFORTS, 'ultracode']))
+      const level = supportedEffortOf(input.model, this.settings.models?.length ? this.models() : [], new Set([...CLAUDE_EFFORTS, 'ultracode']))
       // Ultracode runs at the model's default effort, with Claude Code's `ultracode` setting on.
       const ultracode = level === 'ultracode'
       const effort = level && CLAUDE_EFFORTS.has(level) ? level as Options['effort'] : undefined

@@ -181,8 +181,22 @@ const runVersion: VersionRunner = (launch, env) =>
   })
 
 /**
+ * The program file a launch runs, as its command, path, size and modification time: it changes when
+ * the CLI is updated or replaced. Undefined when the file cannot be read.
+ */
+export function cliFingerprint(launch: CliLaunch | undefined): string | undefined {
+  if (!launch) return undefined
+  try {
+    const stat = statSync(launch.path)
+    return `${launch.command}\0${launch.path}\0${stat.size}\0${stat.mtimeMs}`
+  } catch {
+    return undefined
+  }
+}
+
+/**
  * `<binary> --version` run the way the CLI launches (a resolved shim runs its target), cached per
- * program file (path, size and modification time).
+ * program file (`cliFingerprint`).
  */
 export class CliVersionCache {
   private readonly cache = new Map<string, Promise<string | undefined>>()
@@ -190,13 +204,8 @@ export class CliVersionCache {
 
   version(launch: CliLaunch | undefined, env: NodeJS.ProcessEnv): Promise<string | undefined> {
     if (!launch) return Promise.resolve(undefined)
-    let key: string
-    try {
-      const stat = statSync(launch.path)
-      key = `${launch.command}\0${launch.path}\0${stat.size}\0${stat.mtimeMs}`
-    } catch {
-      return Promise.resolve(undefined)
-    }
+    const key = cliFingerprint(launch)
+    if (key === undefined) return Promise.resolve(undefined)
     let pending = this.cache.get(key)
     if (!pending) {
       pending = this.run(launch, env).then(parseCliVersion, () => undefined)
