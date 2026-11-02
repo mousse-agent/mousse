@@ -4,26 +4,35 @@ import type { TaskLifecycleRecord } from '../../shared/resourceLifecycle'
 import type { ThreadWorkspaceMetadata } from '../../shared/workspace'
 import type { ChangeReceipt } from '../../shared/threadActions'
 import { ThreadJournal } from '../data/ThreadJournal'
+import { keptFilesFromListing, PRESERVED_REF_FORMAT, PRESERVED_REFS, type KeptFilesRef } from '../actions/preservedFiles'
 import { resolveRepositoryIdentity } from '../git/RepositoryIdentity'
-import { lifecycleGit, readDirectLifecycleRef } from './WorktreeRetirementService'
+import { lifecycleGit, lifecycleRead, readDirectLifecycleRef } from './WorktreeRetirementService'
 
 /** What a purge releases for a thread that worked in its project's own folder: refs only, in that folder's repository. */
 export type ProjectFolderPurgeRefs =
-  | { commonDir: string; refs: Array<{ ref: string; sha: string }> }
+  | { commonDir: string; refs: Array<{ ref: string; sha: string; discardReason?: string }> }
   | { unavailable: string }
 
-/**
- * Files a restore kept before writing over them are in `refs/mousse/preserved/*` and exist nowhere else, so a purge never
- * releases them; nor anything outside Mousse's own namespace, whatever a record names.
- */
+/** A purge never releases anything outside Mousse's own namespace, whatever a record names. */
 function releasable(ref: string): boolean {
-  return ref.startsWith('refs/mousse/') && !ref.startsWith('refs/mousse/preserved/') && !/[\s\0]/.test(ref)
+  return ref.startsWith('refs/mousse/') && !/[\s\0]/.test(ref)
+}
+
+/**
+ * The thread's own `refs/mousse/preserved/` refs in the repository of `cwd`: files set aside before a restore or an abort
+ * of this thread wrote over them (see `threadPreservedIndex` for which refs are the thread's). They go with the thread's
+ * other refs when it is purged; while they may be the only copy of a file they carry a `discardReason`
+ * (`keptFilesFromListing`), so a purge asks the person to discard them and automatic cleanup keeps the thread. Reads only.
+ */
+export function threadKeptFilesRefs(cwd: string, threadDirectory: string, now = Date.now()): KeptFilesRef[] {
+  return keptFilesFromListing(lifecycleRead(cwd, ['for-each-ref', `--format=${PRESERVED_REF_FORMAT}`, PRESERVED_REFS]), threadDirectory, now)
 }
 
 /**
  * The refs a project-folder thread (`project-folder.json`, see `ThreadWorkspaceManager.ensureProjectFolder`) holds in
  * the person's repository, for a purge to delete one by one: its pins under `refs/mousse/threads/<id>/`, its receipts'
- * `refs/mousse/changes/<receipt>/{before,after}` and its conversation branches' pins, each with the value it has now.
+ * `refs/mousse/changes/<receipt>/{before,after}`, its conversation branches' pins and the files its restores kept
+ * (`threadKeptFilesRefs`), each with the value it has now.
  *
  * Only reads. The record is used for its repository, never as a place to change: nothing in the person's folder is
  * deleted or moved, and the folder's own index, HEAD and branches are never touched. Undefined for a thread without such
@@ -75,10 +84,14 @@ export function projectFolderPurgeRefs(task: Pick<TaskLifecycleRecord, 'taskId' 
     }
   }
 
-  const refs: Array<{ ref: string; sha: string }> = []
+  const refs: Array<{ ref: string; sha: string; discardReason?: string }> = []
   for (const ref of [...names].filter(releasable).sort()) {
     const sha = readDirectLifecycleRef(commonDir, ref)
     if (sha) refs.push({ ref, sha })
+  }
+  for (const kept of threadKeptFilesRefs(commonDir, task.location)) {
+    const sha = readDirectLifecycleRef(commonDir, kept.ref)
+    if (sha === kept.sha && !refs.some((item) => item.ref === kept.ref)) refs.push(kept)
   }
   return { commonDir, refs }
 }

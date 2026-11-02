@@ -261,3 +261,12 @@ export const MOUSSE_COMMIT_ENV: NodeJS.ProcessEnv = {
   GIT_COMMITTER_NAME: MOUSSE_COMMIT_NAME,
   GIT_COMMITTER_EMAIL: MOUSSE_COMMIT_EMAIL
 }
+
+/**
+ * `MOUSSE_COMMIT_ENV` with the commit times set to Mousse's clock now, for a commit whose time a retention rule reads
+ * (files a restore kept): a `GIT_COMMITTER_DATE` or `GIT_AUTHOR_DATE` inherited from the environment never dates it.
+ */
+export function mousseCommitEnvNow(now = Date.now()): NodeJS.ProcessEnv {
+  const date = `@${Math.floor(now / 1000)} +0000`
+  return { ...MOUSSE_COMMIT_ENV, GIT_AUTHOR_DATE: date, GIT_COMMITTER_DATE: date }
+}

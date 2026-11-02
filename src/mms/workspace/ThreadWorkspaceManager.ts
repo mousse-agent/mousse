@@ -29,6 +29,7 @@ import type {
 } from '../../shared/workspace'
 import { repoProgramEnv, withoutRepoPrograms } from '../git/repoPrograms'
 import { threadBranchName } from '../../shared/mousseBranches'
+import { PRESERVED_EXPIRY_OPERATION } from '../../shared/resourceLifecycle'
 
 function git(cwd: string, args: string[], userRequested?: UserAction): string {
   return execFileSync('git', withoutRepoPrograms(cwd, args, { userRequested }), { cwd, env: repoProgramEnv(), encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim()
@@ -503,7 +504,7 @@ export class ThreadWorkspaceManager {
   /** An operation that started and did not finish, so a person or recovery has to settle it before the next one. */
   hasPendingOperation(): boolean {
     // A publish waiting to be settled concerns the primary checkout only, so it does not hold up the thread.
-    return [...this.journal.latestByOperation().values()].some((entry) => ['prepared', 'git_applied', 'context_pending', 'recovery_required'].includes(entry.state) && !['publish', 'change-publish'].includes(entry.operationType))
+    return [...this.journal.latestByOperation().values()].some((entry) => ['prepared', 'git_applied', 'context_pending', 'recovery_required'].includes(entry.state) && !['publish', 'change-publish', PRESERVED_EXPIRY_OPERATION].includes(entry.operationType))
   }
 
   verify(metadata = this.load()): ThreadWorkspaceMetadata {

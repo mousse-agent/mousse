@@ -278,7 +278,7 @@ describe('through the daemon', () => {
       const { before } = leftPublishMerge(d.directory)
       expect(await d.recovery()).toMatchObject({ kind: 'merge', folder: f.repo, operationId: 'old-publish' })
       const aborted = await d.call('operations.abort', { operationId: 'old-publish' }) as { ok: boolean; preservedRef: string }
-      expect(aborted).toEqual({ ok: true, preservedRef: expect.stringMatching(/^refs\/mousse\/preserved\/old-publish-abort-/) })
+      expect(aborted).toEqual({ ok: true, preservedRef: expect.stringMatching(/^refs\/mousse\/preserved\/old-publish-abort-/), notice: expect.stringMatching(/^Every file as it was before the abort is kept under refs\/mousse\/preserved\/old-publish-abort-\S+ for 30 days\. Bring one back before then/) })
       expect(git(f.repo, 'rev-parse', '--verify', aborted.preservedRef)).toMatch(/^[0-9a-f]{40}$/)
       expect(mergeHead(f.repo).ok).toBe(false)
       expect(git(f.repo, 'rev-parse', 'HEAD')).toBe(before)
@@ -447,7 +447,7 @@ describe('through the daemon', () => {
         const { before } = leftIntegration(directory, f.repo)
         expect(await recovery()).toMatchObject({ kind: 'merge', folder: f.repo, operationId: 'old' })
         const aborted = await call('operations.abort', { operationId: 'old' }) as { ok: boolean; preservedRef: string }
-        expect(aborted).toEqual({ ok: true, preservedRef: expect.stringMatching(/^refs\/mousse\/preserved\/old-abort-/) })
+        expect(aborted).toEqual({ ok: true, preservedRef: expect.stringMatching(/^refs\/mousse\/preserved\/old-abort-/), notice: expect.stringContaining('for 30 days') })
         expect(git(f.repo, 'rev-parse', '--verify', aborted.preservedRef)).toMatch(/^[0-9a-f]{40}$/)
         expect(mergeHead(f.repo).ok).toBe(false)
         expect(git(f.repo, 'rev-parse', 'HEAD')).toBe(before)

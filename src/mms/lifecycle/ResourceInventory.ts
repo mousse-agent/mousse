@@ -8,6 +8,7 @@ import { lifecycleRead, WorktreeRetirementService } from './WorktreeRetirementSe
 import { UndoRetentionService } from '../actions/UndoRetentionService'
 import { AgentEpisodeStore } from '../agents/AgentEpisodeStore'
 import { ThreadJournal } from '../data/ThreadJournal'
+import { PRESERVED_EXPIRY_OPERATION } from '../../shared/resourceLifecycle'
 
 type JsonObject = Record<string, unknown>
 const object = (value: unknown): JsonObject | undefined => value !== null && typeof value === 'object' && !Array.isArray(value) ? value as JsonObject : undefined
@@ -276,7 +277,8 @@ export function buildResourceInventory(store: ResourceLifecycleStore, record: Ta
         }
       } catch (error) { result.blockers.push(`Journal inventory failed: ${(error as Error).message}`) }
     }
-    for (const entry of latest.values()) if (['planned', 'running', 'prepared', 'git_applied', 'context_pending', 'recovery_required'].includes(String(entry.data.state))) resource('task-data', task.location, entry.source.id, 'recovery', `Unsettled operation ${entry.data.operationId}`, task.taskId)
+    // An unsettled expiry of kept files only records which refs went; the purge lists the refs themselves.
+    for (const entry of latest.values()) if (entry.data.operationType !== PRESERVED_EXPIRY_OPERATION && ['planned', 'running', 'prepared', 'git_applied', 'context_pending', 'recovery_required'].includes(String(entry.data.state))) resource('task-data', task.location, entry.source.id, 'recovery', `Unsettled operation ${entry.data.operationId}`, task.taskId)
     // Attachments are retained associations. No blob is unlinked in this phase.
     const messages = source(join(task.location, 'messages.json'))
     if (messages) {

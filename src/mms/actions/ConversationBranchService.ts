@@ -64,7 +64,7 @@ export class ConversationBranchService {
           // The thread's first branch can't be activated again; its code stays under the thread's own ref.
           if (left) git(workspacePath, ['update-ref', '--no-deref', left.retainedRef, current])
           const wanted = git(workspacePath, ['rev-parse', '--verify', `${selected.retainedRef}^{commit}`])
-          moveFiles(git(workspacePath, ['rev-parse', '--show-toplevel']), treeOf(workspacePath, current), treeOf(workspacePath, wanted))
+          moveFiles(git(workspacePath, ['rev-parse', '--show-toplevel']), treeOf(workspacePath, current), treeOf(workspacePath, wanted), operationId)
         }
         const snapshot = takeSnapshot(workspacePath, { reason: `activate conversation branch ${selected.id}`, threadId, operationId })
         git(workspacePath, ['update-ref', '--no-deref', selected.retainedRef, snapshot.sha])
