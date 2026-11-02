@@ -1035,6 +1035,21 @@ describe('older Claude models', () => {
     expect(settings().olderModels.results).toEqual({})
   })
 
+  it('tells listeners each time it finds a model that runs, after the refresh returned', async () => {
+    const check = olderQuery(standard)
+    const { service, home } = fixture(() => check.query, true, undefined, undefined, { modelCatalog: () => catalog })
+    const changed = vi.fn(() => service.models().map((model) => model.id))
+    service.hooks.changed = changed
+    await service.refreshModels(home)
+    expect(changed).not.toHaveBeenCalled()
+    await service.olderCheck
+    // One call per model that runs, each seeing it listed; refused, remapped and unknown ones change nothing.
+    expect(changed.mock.results.map((call) => call.value)).toEqual([
+      ['ember', 'ember-runs'],
+      ['ember', 'ember-runs', 'ember-old-20290101']
+    ])
+  })
+
   it('runs an older model at a level its catalog entry lists', async () => {
     const captured: Options[] = []
     const check = olderQuery(standard)

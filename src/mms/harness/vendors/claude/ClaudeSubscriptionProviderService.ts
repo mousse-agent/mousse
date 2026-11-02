@@ -1252,6 +1252,8 @@ export class ClaudeSubscriptionProviderService {
       if (this.stopped || state?.key !== key) return
       state.results[routeId] = outcome
       this.save()
+      // A model that runs changes the listing: open windows read it again now, not at the next refresh.
+      if (outcome.outcome === 'runs') this.notifyChanged()
     })
       .catch(() => {
         /* the candidates left are unknown and checked on the next refresh */
@@ -1264,6 +1266,19 @@ export class ClaudeSubscriptionProviderService {
         this.olderCheck = undefined
       })
     return true
+  }
+  /**
+   * Who hears about changes this service makes on its own, after the call that started them returned
+   * (older models found in the background). The driver points `changed` at its runtime's context.
+   */
+  readonly hooks: { changed?: () => void } = {}
+  private notifyChanged(): void {
+    if (this.stopped) return
+    try {
+      this.hooks.changed?.()
+    } catch {
+      /* a listener must not break provider work */
+    }
   }
   async getUsage(cwd: string, signal?: AbortSignal): Promise<ProviderUsage> {
     const unavailable = parseClaudeSubscriptionUsage(undefined)

@@ -130,7 +130,8 @@ After a model refresh has saved that live list, Mousse checks the catalog's othe
    section opens when the selected model is older, and nothing folds while searching.
 
 The check runs after the live list is saved and the refresh returns without waiting for it, so it
-never delays or changes the live list.
+never delays or changes the live list. Each model it finds running updates open windows at once
+(the service's `hooks.changed`, which the driver points at its runtime's `changed`).
 
 ## Planned
 
