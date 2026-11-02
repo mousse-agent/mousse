@@ -287,6 +287,22 @@ describe('a folder waiting for a permission prompt', () => {
     await expect(dispatchMethod(ctx, 'git.status', { projectId: stuck.id })).resolves.toBeDefined()
   })
 
+  it('a turn whose caller gives up during the wait never runs, now or after the prompt is answered', async () => {
+    const { ctx, thread, answer } = await projects()
+    const cancel = new AbortController()
+    const turn = mms.orchestrator.runRemoteTurn(thread.id, 'hello from the phone', mms.threads, { signal: cancel.signal })
+    expect(await settledSoon(turn)).toBe(false)
+    // The phone disconnects while macOS still asks about the volume.
+    cancel.abort(new DOMException('Client disconnected', 'AbortError'))
+    await turn.catch(() => undefined)
+    answer()
+    await new Promise((settle) => setTimeout(settle, 50))
+    const { items } = await dispatchMethod(ctx, 'queue.list', { threadId: thread.id }) as { items: unknown[] }
+    expect(items).toEqual([])
+    expect(mms.orchestrator.getMessages(thread.id).map((message) => message.content)).not.toContain('hello from the phone')
+    expect(mms.orchestrator.isTurnActive(thread.id)).toBe(false)
+  })
+
   it('stopping the service does not wait on a pending prompt', async () => {
     const { ctx, stuck } = await projects()
     const waiting = dispatchMethod(ctx, 'git.status', { projectId: stuck.id })

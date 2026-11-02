@@ -9014,14 +9014,23 @@ export class OrchestratorService extends EventEmitter {
         [session.sharedWorkspace?.path, session.primaryCheckout?.path, this.threadProjectPath(session.threadId)],
         opts?.externalSignal
       )
-      const run = opts?.runId ? this.runEngine?.getRun(opts.runId) : undefined
-      if (waited === 'stopped' || (waited === 'aborted' && run && TERMINAL_RUN_STATUSES.has(run.status))) {
-        // The Stop ended this turn before it started; its queue item goes with it, as a Stop's cancelled runs' entries do.
+      if (waited !== 'ready') {
+        const run = opts?.runId ? this.runEngine?.getRun(opts.runId) : undefined
+        // Only the profile shutting down (the orchestrator's or the effect worker's stop) puts the turn back,
+        // to run after the restart. A run something already ended stays ended.
+        const shutdown = this.lifecycle.signal.aborted || this.isShutdownAbort(opts?.externalSignal?.reason)
+        if (waited === 'aborted' && shutdown && !(run && TERMINAL_RUN_STATUSES.has(run.status))) return requeueUnstarted()
+        // A Stop, a delegation cancel, or the caller giving up (a phone send that disconnected, a time limit):
+        // nothing of the turn runs, now or later. Its queue item goes, as a Stop's cancelled runs' entries do.
+        if (opts?.runId) this.markRun(opts.runId, (engine, id) => {
+          const current = engine.getRun(id)
+          if (current && !TERMINAL_RUN_STATUSES.has(current.status)) engine.markTerminal(id, 'cancelled', { error: 'cancelled_before_start' })
+        })
         if (queueItemId) this.completeSessionClaim(session, queueItemId, claimOwnerToken)
+        // The run is ended: the same refusal a turn of an ended run always gets.
+        this.markRunStarting(opts?.runId)
         return { message: '', actions: [] }
       }
-      // Shutdown: the turn runs after the restart.
-      if (waited === 'aborted') return requeueUnstarted()
     }
 
     // Load recovery identity before acquiring the writer. Reconcile interrupted
