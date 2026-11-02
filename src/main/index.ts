@@ -224,6 +224,11 @@ function startGuiApp(): void {
         nodeIntegration: false,
         sandbox: false,
         webviewTag: true,
+        // Lets the local speech models run ONNX Runtime on several threads. The window is not
+        // cross-origin isolated (it loads from file:// and embeds webviews), so this enables
+        // SharedArrayBuffer for this window and its workers only: webview guests and other
+        // windows do not inherit it, unlike the app-wide `enable-features` switch.
+        enableBlinkFeatures: 'SharedArrayBuffer',
         additionalArguments: [startupAppearanceArgument(appearance)]
       }
     })
@@ -252,6 +257,7 @@ function startGuiApp(): void {
         return
       }
       webPreferences.partition = profileBrowserPartition(boundProfile)
+      delete webPreferences.enableBlinkFeatures
       webPreferences.nodeIntegration = false
       webPreferences.contextIsolation = true
       webPreferences.sandbox = true
