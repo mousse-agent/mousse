@@ -6,6 +6,7 @@ import type { LineEditStatsStore } from '../../stats/LineEditStatsStore'
 import { isFilesystemWideBashCommand } from '../../orchestrator/toolPathSafety'
 import { runProjectGitTool } from '../../git/scopedRead'
 import { projectGitToolDefinitions } from '../../run/mcp/appTools/projectGit'
+import { killProcessTree } from '../../execution/processTree'
 
 const COMMAND_TIMEOUT_MS = 120_000
 const MAX_COMMAND_OUTPUT = 32_000
@@ -166,11 +167,12 @@ export class ProjectGitTools {
         resolve({ text: truncateOutput(text), isError })
       }
 
+      // Only the first MAX_COMMAND_OUTPUT characters are returned, so a noisy command stops being buffered past that.
       child.stdout?.on('data', (chunk: Buffer) => {
-        stdout += chunk.toString()
+        if (stdout.length <= MAX_COMMAND_OUTPUT) stdout += chunk.toString()
       })
       child.stderr?.on('data', (chunk: Buffer) => {
-        stderr += chunk.toString()
+        if (stderr.length <= MAX_COMMAND_OUTPUT) stderr += chunk.toString()
       })
       child.on('error', (err) => finish(err.message, true))
       child.on('close', (code) => {
@@ -179,7 +181,9 @@ export class ProjectGitTools {
       })
 
       const timeout = setTimeout(() => {
-        child.kill()
+        // On Windows the command runs under cmd.exe; killing only the shell would leave the command running.
+        if (child.pid) killProcessTree(child.pid)
+        else child.kill()
         finish(`${stdout}\n${stderr}\nCommand timed out after ${COMMAND_TIMEOUT_MS}ms`.trim(), true)
       }, COMMAND_TIMEOUT_MS)
     })
