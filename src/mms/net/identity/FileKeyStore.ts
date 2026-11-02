@@ -203,12 +203,19 @@ export class FileKeyStore implements KeyStore {
       )
         throw new NetError('storage_corrupt')
       if (this.stored.mode === 'plain') {
-        if (this.codec.encryptionRequired)
-          throw new NetError(
-            'keystore_locked',
-            'An Electron vault must explicitly migrate the plaintext key store.'
-          )
         this.keys = material(this.stored.data)
+        // Keys that a process without the OS vault saved unencrypted (the standalone CLI, for one) are
+        // moved into the vault here. Refusing to read them would protect nothing, since they are already
+        // on disk, and would leave nothing able to protect them. When the vault refuses, they stay usable
+        // and unencrypted at rest (`encryptedAtRest` says so): a passphrase can still protect them, and
+        // nothing is written unencrypted again where encryption is required.
+        if (this.codec.encryptionRequired && this.codec.canEncrypt()) {
+          try {
+            this.protect()
+          } catch {
+            /* The file keeps its previous mode; `vaultUnavailable` reports a refused vault. */
+          }
+        }
       } else if (this.stored.mode === 'vault') this.tryVault()
     }
   }
