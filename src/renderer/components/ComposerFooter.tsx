@@ -1,12 +1,12 @@
 import { useCallback, useEffect, useRef } from 'react'
-import { ArrowUp, Mic, Paperclip, Square } from '../lib/icons'
+import { ArrowUp, Mic, Paperclip, Square, Zap } from '../lib/icons'
 import { showsContextGauge, type ProviderWithStatus } from '../lib/providerSnapshots'
 import { describePermissionMode, type PermissionMode } from '../../shared/permissionMode'
 import type { ContextUsageSnapshot } from '../../shared/types'
 import { listingServes } from '../../shared/providerInstances'
 import { getModelSpeedOptions, parseThinkingSuffixFromModelId } from '../../shared/modelVariants'
 import { shortModelName } from '../../shared/modelNames'
-import { carryReasoningLevel, ComposerRunMenu, PermissionMenuButton, ReasoningColumn, reasoningRows, runLevelText, shownReasoningLevel, SpeedToggle, type RunSettingsTarget } from './ComposerEffortPicker'
+import { carryReasoningLevel, ComposerRunMenu, PermissionMenuButton, ReasoningColumn, hasReasoningLevels, runFasterSpeed, runLevelText, shownReasoningLevel, SpeedToggle, type RunSettingsTarget } from './ComposerEffortPicker'
 import { permissionChoice, type PermissionControl } from './ComposerPermissionPicker'
 import { FloatingPortal, useFloatingPosition } from '../lib/floatingLayer'
 import { getGroupedModelButtonParts, ModelFamilyMenu, type ModelPickTarget } from './ModelFamilyMenu'
@@ -118,8 +118,7 @@ export function ComposerFooter({
   const modelMenuContentRef = useRef<HTMLDivElement>(null)
   const contextBtnRef = useRef<HTMLButtonElement>(null)
   const handleMenuScroll = useMenuScrollFade()
-  const modelButtonParts = getGroupedModelButtonParts(selectedProviderId, selectedModelId, providers, false, selectedInstanceId)
-  const modelButtonLabel = modelButtonParts.join(' · ')
+  const namedParts = getGroupedModelButtonParts(selectedProviderId, selectedModelId, providers, false, selectedInstanceId)
   const selectedProvider = providers.find((entry) => entry.id === selectedProviderId)
   const providerModels = selectedProvider?.models ?? []
   // A selected instance that needs a step (signed out, not found) says so on the model button.
@@ -130,10 +129,15 @@ export function ComposerFooter({
   const permissionControl = permissionFor(selectedProvider)
   const selection = { providerId: selectedProviderId, modelId: selectedModelId, models: providerModels }
   const levelText = runLevelText(selection)
+  // A Fast (or faster) thread shows a lightning icon after the model name, in place of the name's "(fast)";
+  // the label says the word.
+  const fasterSpeed = runFasterSpeed(selection)
+  const modelButtonParts = fasterSpeed ? [namedParts[0]!.replace(/\s*\((?:ultra)?fast\)$/i, ''), ...namedParts.slice(1)] : namedParts
+  const modelButtonLabel = modelButtonParts.join(' · ')
   const choice = permissionControl ? permissionChoice(permissionControl) : undefined
   const ModeIcon = choice ? permissionModeIcon(choice.shown) : undefined
   const modeTitle = choice ? `${describePermissionMode(choice.shown)}${choice.reason ? `. ${choice.reason}` : ''}` : ''
-  const buttonText = [modelButtonLabel, levelText].filter(Boolean).join(' ')
+  const buttonText = [modelButtonLabel, fasterSpeed, levelText].filter(Boolean).join(' ')
   const buttonLabel = `${modelReadOnly ? 'Assigned model' : 'Model'}: ${buttonText}${choice ? `. Permission mode: ${modeTitle}` : ''}`
   const modelButtonTitle = providerAttention ? `${buttonLabel} · ${selectedProvider?.label}: ${providerAttention.headline}` : buttonLabel
   // An assigned model (a subagent's) cannot change; its permission mode still can.
@@ -157,20 +161,11 @@ export function ComposerFooter({
   }
   const runSettings = {
     pick: (target: ModelPickTarget) => resolveTarget(target).modelId,
-    // Beside the list: the highlighted model's reasoning levels, while any listed model has levels.
-    render: (target: ModelPickTarget, listed: ModelPickTarget[]) => {
-      // A hidden copy of the largest model's column holds its size while the highlight moves.
-      let largest: { target: ModelPickTarget; resolved: RunSettingsTarget; rows: number } | undefined
-      for (const entry of listed) {
-        const each = resolveTarget(entry)
-        const rows = reasoningRows(each)
-        if (!largest || rows > largest.rows) largest = { target: entry, resolved: each, rows }
-      }
-      if (!largest || largest.rows === 0) return null
-      return <>
-        <ReasoningColumn target={resolveTarget(target)} label={shortModelName(target.label)} onSelect={onModelSelect} onClose={closePicker} />
-        <ReasoningColumn sizer target={largest.resolved} label={shortModelName(largest.target.label)} onSelect={onModelSelect} onClose={closePicker} />
-      </>
+    // Beside the list: the highlighted model's reasoning levels, whenever any model the picker lists has
+    // levels, so the column stays in place while you search or switch providers.
+    render: (target: ModelPickTarget | undefined, all: ModelPickTarget[]) => {
+      if (!all.some((entry) => hasReasoningLevels(resolveTarget(entry)))) return null
+      return <ReasoningColumn key={target ? `${target.instanceId ?? target.providerId}:${target.label}` : 'none'} target={target && resolveTarget(target)} label={target && shortModelName(target.label)} onSelect={onModelSelect} onClose={closePicker} />
     },
     // Under the picker: the highlighted model's speed on the left, the thread's permission mode on the right.
     footer: (target: ModelPickTarget | undefined) => {
@@ -314,6 +309,7 @@ export function ComposerFooter({
               <span className="composer-model-btn-label">
                 <span className="composer-model-btn-name">{modelButtonParts[0]}</span>
                 {modelButtonParts.length > 1 ? ` · ${modelButtonParts.slice(1).join(' · ')}` : null}
+                {fasterSpeed ? <Zap size={12} aria-hidden="true" className="composer-model-btn-speed" /> : null}
                 {levelText ? <span className="composer-model-btn-level">{levelText}</span> : null}
               </span>
               {ModeIcon ? <ModeIcon size={14} aria-hidden="true" className="composer-model-btn-mode" /> : null}

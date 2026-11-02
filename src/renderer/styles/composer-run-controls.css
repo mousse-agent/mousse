@@ -13,6 +13,14 @@
   opacity: 0.75;
 }
 
+/* A Fast thread: a lightning icon between the name and the level, in the level's weight and colour. */
+.composer-model-btn-speed {
+  display: inline-block;
+  margin-left: 0.3em;
+  vertical-align: -1px;
+  opacity: 0.75;
+}
+
 .composer-model-btn-mode {
   flex-shrink: 0;
 }
@@ -26,18 +34,32 @@
   cursor: default;
 }
 
-/* The composer's model picker: rail, search and list, and a reasoning column for the highlighted
-   model on the same surface, divided by hairlines; under them a footer bar with the speed toggle and
-   the permission button. The column keeps the size of the largest model's levels (a hidden copy holds
-   it), so moving through models never resizes the picker. */
-.model-picker-panel.has-run-settings {
-  min-width: min(600px, calc(100vw - 48px));
-  max-width: min(720px, calc(100vw - 48px));
+/* The composer's model picker is one fixed box: rail, search and list, and a reasoning column for the
+   highlighted model, with a footer bar (speed, permission) pinned at the bottom. Nothing inside it
+   changes its size: the list and the column scroll on their own, long names are cut short, and the
+   permission menu floats above the footer. 440px shows seven two-line model rows (eight one-line
+   ones) under the search; a short window gets the space it has. */
+.model-picker-panel.is-fixed {
+  width: min(720px, calc(100vw - 48px));
+  min-width: 0;
+  max-width: none;
+  height: min(440px, calc(100vh - 16px));
+  overflow: visible;
 }
 
-/* The permission menu opens above the footer and may overlap the list. */
-.model-picker-panel.has-footer {
-  overflow: visible;
+.model-picker-panel.is-fixed .model-picker-main {
+  flex: 1;
+  min-height: 0;
+}
+
+.model-picker-panel.is-fixed .model-picker-center {
+  min-height: 0;
+}
+
+.model-picker-panel.is-fixed .model-picker-list {
+  flex: 1;
+  min-height: 0;
+  max-height: none;
 }
 
 .model-picker-panel.has-run-settings .model-picker-center {
@@ -45,23 +67,14 @@
 }
 
 .model-picker-run {
-  display: grid;
   flex: 0 0 236px;
-  align-self: flex-start;
   width: 236px;
-  max-height: calc(100vh - 140px);
+  min-height: 0;
   overflow-y: auto;
 }
 
-.model-picker-run > * {
-  grid-area: 1 / 1;
-  min-width: 0;
+.model-picker-run-settings {
   padding-bottom: var(--ui-menu-pad);
-}
-
-.model-picker-run-sizer {
-  visibility: hidden;
-  pointer-events: none;
 }
 
 /* "Reasoning" and, muted on the right, the model whose levels show; as tall as the search row. */

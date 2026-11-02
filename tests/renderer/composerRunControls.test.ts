@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import { readFileSync } from 'node:fs'
 import { act, createElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -78,6 +79,12 @@ const line = () => lineItems().filter((item) => !item.classList.contains('is-hid
 const row = (name: string) => [...document.querySelectorAll<HTMLElement>('.model-picker-row')].find((entry) => entry.querySelector('.model-picker-row-title')!.textContent === name)!
 const search = () => document.querySelector<HTMLInputElement>('.model-picker-search input')!
 const key = (target: Element, name: string, init: KeyboardEventInit = {}) => act(() => { target.dispatchEvent(new KeyboardEvent('keydown', { key: name, bubbles: true, ...init })) })
+/** Types into the model search. */
+const type = (text: string) => act(() => {
+  const input = search()
+  Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(input, text)
+  input.dispatchEvent(new Event('input', { bubbles: true }))
+})
 /** Rests the pointer on a model long enough for its run settings to show. */
 async function hover(name: string) {
   await act(async () => {
@@ -217,7 +224,53 @@ describe('composer model picker', () => {
     const ultra = { id: 'gpt-ultra', label: 'GPT 9', efforts: ['low', 'high'], speed: 'ultrafast', thinkingOff: false } as unknown as LlmModelOption
     render({ models: [standard, fast, ultra], modelId: 'gpt-ultra:high' })
     expect(speeds().map((segment) => segment.textContent)).toEqual(['Standard', 'Fast', 'Ultrafast'])
-    expect(modelButton().querySelector('.composer-model-btn-level')!.textContent).toBe('High Ultrafast')
+    expect(modelButton().querySelector('.composer-model-btn-level')!.textContent).toBe('High')
+    expect(modelButton().getAttribute('aria-label')).toContain('GPT 9 Ultrafast High')
+  })
+
+  it('shows a lightning icon after the model name on Fast, and none on Standard', () => {
+    render({ models: [standardSpeed, fastSpeed], modelId: 'fast-model:fast:high', open: false })
+    const label = () => modelButton().querySelector('.composer-model-btn-label')!
+    // Name, icon, then the lighter level; the icon has no text of its own.
+    const parts = ['composer-model-btn-name', 'composer-model-btn-speed', 'composer-model-btn-level']
+    expect([...label().children].map((child) => parts.find((part) => child.classList.contains(part)))).toEqual(parts)
+    expect(label().textContent).toBe('Fast 1High')
+    expect(modelButton().getAttribute('aria-label')).toBe('Model: Fast 1 Fast High. Permission mode: Auto-accept edits')
+    expect(modelButton().getAttribute('title')).toContain('Fast 1 Fast High')
+    act(() => root.unmount())
+    root = createRoot(host)
+    render({ models: [standardSpeed, fastSpeed], modelId: 'fast-model:high', open: false })
+    expect(modelButton().querySelector('.composer-model-btn-speed')).toBeNull()
+    expect(modelButton().getAttribute('aria-label')).toBe('Model: Fast 1 High. Permission mode: Auto-accept edits')
+  })
+
+  it('keeps the picker one fixed box whatever is inside it', () => {
+    render()
+    const panel = () => document.querySelector('.model-picker-panel')!
+    expect(panel().classList.contains('is-fixed')).toBe(true)
+    // A search with no results keeps the column (its header alone) and the footer in place.
+    type('nothing like this')
+    expect(document.querySelectorAll('.model-picker-row')).toHaveLength(0)
+    expect(panel().classList.contains('is-fixed')).toBe(true)
+    expect(document.querySelector('.model-picker-run-head')!.textContent).toBe('Reasoning')
+    expect(footer()).not.toBeNull()
+    // The box's size comes from the stylesheet alone: a fixed width and height, the list and column scrolling inside.
+    const css = readFileSync('src/renderer/styles/composer-run-controls.css', 'utf8')
+    const rule = css.slice(css.indexOf('.model-picker-panel.is-fixed {'), css.indexOf('}', css.indexOf('.model-picker-panel.is-fixed {')))
+    expect(rule).toMatch(/\n  width: min\(720px, calc\(100vw - 48px\)\);/)
+    expect(rule).toMatch(/\n  height: min\(440px, calc\(100vh - 16px\)\);/)
+    expect(rule).not.toMatch(/fit-content|max-content|min-content|auto/)
+  })
+
+  it('keeps a long model name to one line, with the full name in the tooltip', () => {
+    const long: LlmModelOption = { id: 'long', label: 'Opus 5.5 Extended Thinking Research Preview Edition' }
+    render({ models: [opus, long] })
+    const longRow = row('Opus 5.5 Extended Thinking Research Preview Edition')
+    expect(longRow.querySelector('.model-picker-row-main')!.getAttribute('title')).toContain('Opus 5.5 Extended Thinking Research Preview Edition')
+    const css = readFileSync('src/renderer/styles/app.css', 'utf8')
+    const title = css.slice(css.indexOf('.model-picker-row-title {'), css.indexOf('}', css.indexOf('.model-picker-row-title {')))
+    expect(title).toContain('text-overflow: ellipsis')
+    expect(title).toContain('white-space: nowrap')
   })
 
   it('shows only the model list when no listed model has run settings', async () => {

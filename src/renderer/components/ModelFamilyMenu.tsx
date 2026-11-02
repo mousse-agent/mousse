@@ -66,14 +66,15 @@ interface ModelFamilyMenuProps {
   /** Optional ref to the floating shell (outside-click handling). */
   contentRef?: RefObject<HTMLDivElement | null>
   /**
-   * Run settings for the highlighted model (the composer's): `render` draws the column beside the list,
-   * or returns null when no listed model has any (`listed` lets the column keep one size across
-   * models); `footer` draws the bar under the whole picker; `pick` turns the id the menu would select
-   * for a model into the one it selects.
+   * Run settings for the highlighted model (the composer's). The picker is then one fixed box: nothing
+   * inside it (hover, search, rail, the footer's menus) changes its size. `render` draws the column
+   * beside the list for the highlighted model (none when a search finds nothing), or returns null when
+   * none of `all` (every model the picker lists) has any; `footer` draws the bar under the whole
+   * picker; `pick` turns the id the menu would select for a model into the one it selects.
    */
   runSettings?: {
     pick: (target: ModelPickTarget) => string
-    render: (target: ModelPickTarget, listed: ModelPickTarget[]) => ReactNode
+    render: (target: ModelPickTarget | undefined, all: ModelPickTarget[]) => ReactNode
     footer?: (target: ModelPickTarget | undefined) => ReactNode
   }
 }
@@ -465,13 +466,13 @@ function ProfileModelFamilyMenu({
     [onSelect, runSettings, targetOf]
   )
 
-  const listedTargets = useMemo(
-    () => (runSettings ? filteredEntries.map(targetOf).filter((target): target is ModelPickTarget => Boolean(target)) : []),
-    [filteredEntries, runSettings, targetOf]
+  const allTargets = useMemo(
+    () => (runSettings ? allEntries.map(targetOf).filter((target): target is ModelPickTarget => Boolean(target)) : []),
+    [allEntries, runSettings, targetOf]
   )
   const highlightedEntry = filteredEntries[highlightIndex]
   const highlightedTarget = runSettings && highlightedEntry ? targetOf(highlightedEntry) : undefined
-  const runColumn = runSettings && highlightedTarget ? runSettings.render(highlightedTarget, listedTargets) : null
+  const runColumn = runSettings ? runSettings.render(highlightedTarget, allTargets) : null
   const runFooter = runSettings?.footer ? runSettings.footer(highlightedTarget) : null
   const footerRef = useRef<HTMLDivElement>(null)
 
@@ -712,7 +713,7 @@ function ProfileModelFamilyMenu({
       ref={setShellNode}
       style={portaled ? floatingStyle : undefined}
     >
-      <div className={`model-picker-panel${runColumn ? ' has-run-settings' : ''}${runFooter ? ' has-footer' : ''}`}>
+      <div className={`model-picker-panel${runSettings ? ' is-fixed' : ''}${runColumn ? ' has-run-settings' : ''}${runFooter ? ' has-footer' : ''}`}>
         <div className="model-picker-main">
           {railItems.length > 1 ? (
             <div className="model-picker-rail" data-tooltip-placement="outside-left">

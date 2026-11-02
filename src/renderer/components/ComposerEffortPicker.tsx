@@ -219,12 +219,18 @@ export function ComposerEffortPicker({ providerId, modelId, models, readOnly, on
   </div>
 }
 
-/** The level as the composer shows it after the model name ("High", "High Fast"). */
+/** The level as the composer shows it after the model name ("High"). */
 export function runLevelText(selection: Selection): string {
   const reasoning = resolveReasoning(selection.providerId, selection.modelId, selection.models)
   const speeds = getModelSpeedOptions(selection.providerId, selection.modelId, selection.models)
   const effort = reasoning.levels.length > 0 || speeds ? reasoning.current : undefined
-  return [effort && reasoningLevelLabel(effort), speedText(speeds)].filter(Boolean).join(' ')
+  return effort ? reasoningLevelLabel(effort) : ''
+}
+
+/** The chosen speed when it is faster than standard ("Fast", "Ultrafast"); the composer shows it as a lightning icon. */
+export function runFasterSpeed(selection: Selection): string {
+  const speeds = getModelSpeedOptions(selection.providerId, selection.modelId, selection.models)
+  return speeds && speeds.current !== 'standard' && speeds.current !== 'slow' ? speedLabel(speeds.current) : ''
 }
 
 /** The composer's run settings menu for an assigned model: its level shows, only the permission mode changes. */
@@ -247,24 +253,40 @@ export interface RunSettingsTarget extends Selection {
   dropped?: string
 }
 
-/** How many rows a target's reasoning column takes, to size the column to the largest listed model. */
-export function reasoningRows(target: RunSettingsTarget): number {
-  const reasoning = resolveReasoning(target.providerId, target.modelId, target.models)
-  return reasoning.levels.length + (target.dropped || reasoning.unsupported ? 1 : 0)
+/** Whether a target's model has reasoning levels. */
+export function hasReasoningLevels(target: RunSettingsTarget): boolean {
+  return resolveReasoning(target.providerId, target.modelId, target.models).levels.length > 0
+}
+
+/** The reasoning column's header: "Reasoning" and, muted and cut short when long, the model's name. */
+function ReasoningHead({ label }: { label?: string }) {
+  return <div className="model-picker-run-head">
+    <span className="model-picker-run-title">Reasoning</span>
+    {label ? <span className="model-picker-run-model" title={label}>{label}</span> : null}
+  </div>
 }
 
 /**
  * The model picker's reasoning column: a header naming the model, then its levels, the chosen one
- * checked and the default labelled. Picking a level picks that model too. `sizer` draws it hidden,
- * only to hold the column's size while the highlight moves.
+ * checked and the default labelled. Picking a level picks that model too. With no model highlighted
+ * (a search with no results) only the header shows. The column scrolls on its own inside the picker.
  */
-export function ReasoningColumn({ target, label, onSelect, onClose, sizer = false }: {
-  target: RunSettingsTarget
+export function ReasoningColumn({ target, label, onSelect, onClose }: {
+  target?: RunSettingsTarget
   /** The model's name as the column header shows it. */
+  label?: string
+  onSelect: (providerId: string, modelId: string, instanceId?: string) => void
+  onClose: () => void
+}) {
+  if (!target) return <div className="model-picker-run-settings" role="group" aria-label="Reasoning"><ReasoningHead /></div>
+  return <ReasoningLevels target={target} label={label ?? ''} onSelect={onSelect} onClose={onClose} />
+}
+
+function ReasoningLevels({ target, label, onSelect, onClose }: {
+  target: RunSettingsTarget
   label: string
   onSelect: (providerId: string, modelId: string, instanceId?: string) => void
   onClose: () => void
-  sizer?: boolean
 }) {
   const pick = (providerId: string, modelId: string) => onSelect(providerId, modelId, target.instanceId)
   const { reasoning, effort, pickEffort } = useRunOptions(target, pick)
@@ -273,11 +295,8 @@ export function ReasoningColumn({ target, label, onSelect, onClose, sizer = fals
   // Picking the level the thread runs at by default saves it as chosen, so it carries to the next model.
   const chosen = parseThinkingSuffixFromModelId(target.modelId).effort
   const unsupported = target.dropped ?? reasoning.unsupported
-  const body = <>
-    <div className="model-picker-run-head">
-      <span className="model-picker-run-title">Reasoning</span>
-      <span className="model-picker-run-model">{label}</span>
-    </div>
+  return <div className="model-picker-run-settings" role="menu" aria-label={`Reasoning for ${label}`} onKeyDown={moveFocus}>
+    <ReasoningHead label={label} />
     {reasoning.levels.length === 0 ? <div className="model-picker-run-empty">None for this model</div> : null}
     {reasoning.levels.map((value) => <button key={value} type="button" role="menuitemradio" aria-checked={effort === value} title={reasoning.descriptions[value]} className={`composer-mode-menu-item model-picker-level${effort === value ? ' selected' : ''}`} onClick={() => { onClose(); if (!target.selected || value !== chosen) pickEffort(value) }}>
       <span>{reasoningLevelLabel(value)}</span>
@@ -285,9 +304,7 @@ export function ReasoningColumn({ target, label, onSelect, onClose, sizer = fals
       <span className="model-picker-level-check" aria-hidden="true">{effort === value ? <Check size={14} /> : null}</span>
     </button>)}
     {unsupported && reasoning.levels.length > 0 ? <div className="composer-run-menu-note" role="note" aria-live="polite">{levelNote(unsupported, model, reasoning, effort)}</div> : null}
-  </>
-  if (sizer) return <div className="model-picker-run-sizer" aria-hidden="true" inert>{body}</div>
-  return <div className="model-picker-run-settings" role="menu" aria-label={`Reasoning for ${label}`} onKeyDown={moveFocus}>{body}</div>
+  </div>
 }
 
 /**
