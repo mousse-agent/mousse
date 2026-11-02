@@ -561,6 +561,24 @@ export function supportedEffortOf(modelId: string, models: readonly LlmModelOpti
   return accepted.has(effort) ? effort : undefined
 }
 
+/**
+ * The id among `candidates` (variants of one speed) that runs at the current model's level: the same
+ * selectable id over a provider alias, an explicit speed endpoint over a provider default.
+ */
+function speedEndpoint(model: LlmModelOption, candidates: ParsedModelVariant[], effort: string | undefined): string | undefined {
+  const currentBase = parseIdSuffixes(model.id).baseId
+  const matching = candidates.filter((variant) => parseIdSuffixes(variant.id).baseId === currentBase)
+  // Explicit endpoints override provider defaults, which may themselves enable Fast.
+  const endpoints = (matching.length > 0 ? matching : candidates).sort((a, b) =>
+    Number(parseIdSuffixes(b.id).speed !== undefined) - Number(parseIdSuffixes(a.id).speed !== undefined)
+  )
+  const target = endpoints.find((variant) => variant.effort === effort) ??
+    endpoints.find((variant) => !variant.effort && effort && variant.availableEfforts?.includes(effort)) ??
+    endpoints.find((variant) => !variant.effort) ?? endpoints[0]
+  if (!target) return undefined
+  return effort && !target.effort && target.availableEfforts?.includes(effort) ? applyEffortToModelId(target.id, effort) : target.id
+}
+
 /** Resolve a toggle only when the catalog lists both endpoint speeds for this context. */
 export function getModelFastToggle(
   providerId: string,
@@ -578,24 +596,45 @@ export function getModelFastToggle(
       !variants.some((variant) => variant.speed !== 'fast')) return undefined
 
   const active = current.speed === 'fast'
-  const candidates = variants.filter((variant) => (variant.speed === 'fast') !== active)
-  // Prefer the same selectable id over a provider alias for this family.
-  const currentBase = parseIdSuffixes(model.id).baseId
-  const matching = candidates.filter((variant) => parseIdSuffixes(variant.id).baseId === currentBase)
-  // Explicit endpoints override provider defaults, which may themselves enable Fast.
-  const endpoints = (matching.length > 0 ? matching : candidates).sort((a, b) =>
-    Number(parseIdSuffixes(b.id).speed !== undefined) - Number(parseIdSuffixes(a.id).speed !== undefined)
-  )
-  const effort = effortFromId ?? current.effort
-  const target = endpoints.find((variant) => variant.effort === effort) ??
-    endpoints.find((variant) => !variant.effort && effort && variant.availableEfforts?.includes(effort)) ??
-    endpoints.find((variant) => !variant.effort) ?? endpoints[0]
-  if (!target) return undefined
+  const target = speedEndpoint(model, variants.filter((variant) => (variant.speed === 'fast') !== active), effortFromId ?? current.effort)
+  return target ? { active, targetModelId: target } : undefined
+}
 
-  return {
-    active,
-    targetModelId: effort && !target.effort && target.availableEfforts?.includes(effort)
-      ? applyEffortToModelId(target.id, effort)
-      : target.id
-  }
+/** Speeds slowest first; one the list does not know goes last. */
+const SPEED_ORDER = ['slow', 'standard', 'fast', 'ultrafast']
+
+/** A speed's name in the run settings ("Fast"). */
+export function speedLabel(speed: string): string {
+  return speed.charAt(0).toUpperCase() + speed.slice(1)
+}
+
+/**
+ * Every speed the catalog lists for the model's context, slowest first, with the id that runs each at
+ * the model's current level; undefined when it lists one speed. A tier the agent adds later (an
+ * "ultrafast" variant) shows up here with no change.
+ */
+export function getModelSpeedOptions(
+  providerId: string,
+  modelId: string,
+  models: LlmModelOption[]
+): { current: string; options: Array<{ speed: string; modelId: string }> } | undefined {
+  const { baseId, effort: effortFromId } = parseThinkingSuffixFromModelId(modelId)
+  const model = models.find((entry) => entry.id === modelId) ?? models.find((entry) => entry.id === baseId)
+  const family = findModelFamily(providerId, models, modelId)
+  if (!model || !family) return undefined
+
+  const current = parseModelVariant(model)
+  const currentSpeed = current.speed ?? 'standard'
+  const variants = family.variants.filter((variant) => variant.context === current.context)
+  const rank = (speed: string) => { const index = SPEED_ORDER.indexOf(speed); return index === -1 ? SPEED_ORDER.length : index }
+  const speeds = [...new Set(variants.map((variant) => variant.speed ?? 'standard'))].sort((a, b) => rank(a) - rank(b) || a.localeCompare(b))
+  if (speeds.length < 2) return undefined
+
+  const effort = effortFromId ?? current.effort
+  const options = speeds.flatMap((speed) => {
+    if (speed === currentSpeed) return [{ speed, modelId }]
+    const target = speedEndpoint(model, variants.filter((variant) => (variant.speed ?? 'standard') === speed), effort)
+    return target ? [{ speed, modelId: target }] : []
+  })
+  return options.length > 1 ? { current: currentSpeed, options } : undefined
 }
