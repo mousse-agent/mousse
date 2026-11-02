@@ -11,6 +11,7 @@ import { worktreeTree } from '../src/mms/actions/snapshots'
 import { ThreadJournal } from '../src/mms/data/ThreadJournal'
 import { UndoService } from '../src/mms/actions/UndoService'
 import { CRASH_CHILD_REQUIRE, actionOptions, git, gitFoundationFixture } from './fixtures/gitFoundation'
+import { pressed } from './support/userRequest'
 
 let f: ReturnType<typeof gitFoundationFixture>
 beforeEach(() => { f = gitFoundationFixture() })
@@ -77,7 +78,7 @@ it('recovers an interrupted nested snapshot before its parent and keeps whole-pa
   expect(actions.list()[0].turnId).toBe('nested-snapshot')
   const parentReceipt = new ChangeReceiptService(f.thread).list().find((receipt) => receipt.id === actions.latest('main')!.receiptId)!
   expect(parentReceipt.contributions.some((item) => item.receiptId === actions.list()[0].receiptId)).toBe(true)
-  await new UndoService(f.thread).undoLatest('main', f.repo)
+  await pressed('Undo', () => new UndoService(f.thread).undoLatest('main', f.repo))
   expect(f.read(f.repo)).toBe('base\n')
   expect(git(f.repo, 'status', '--porcelain')).toBe('')
   expect(git(f.repo, 'rev-parse', 'HEAD')).toBe(appliedHead)

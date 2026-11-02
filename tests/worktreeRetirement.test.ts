@@ -7,7 +7,8 @@ import { resolveRepositoryIdentity } from '../src/mms/git/RepositoryIdentity'
 import { waitAcquireExecutionLease, releaseExecutionLeaseHandle } from '../src/mms/queue/ThreadExecutionLease'
 import { registerThreadLifecycleGate } from '../src/mms/queue/ThreadLifecycleAdmission'
 import { ResourceLifecycleStore } from '../src/mms/lifecycle/ResourceLifecycleStore'
-import { lifecycleGit as git, WORKTREE_TRASH_QUIET_MS, WorktreeRetirementService } from '../src/mms/lifecycle/WorktreeRetirementService'
+import { WORKTREE_TRASH_QUIET_MS, WorktreeRetirementService } from '../src/mms/lifecycle/WorktreeRetirementService'
+import { fixtureGit as git, ownedHome } from './support/fixtureGit'
 import { ThreadJournal } from '../src/mms/data/ThreadJournal'
 import { ThreadWorkspaceManager } from '../src/mms/workspace/ThreadWorkspaceManager'
 
@@ -27,7 +28,7 @@ async function fixture(sparse = false, crlf = false) {
     writeFileSync(join(repo, '.gitattributes'), 'value.txt text eol=crlf\n'); writeFileSync(join(repo, 'value.txt'), 'first\nsecond\n')
     git(repo, ['add', '.']); git(repo, ['commit', '-m', 'explicit checkout line endings'])
   }
-  const home = join(root, 'profile'), task = join(home, 'thread-data', 'task'); mkdirSync(task, { recursive: true })
+  const home = join(root, 'profile'), task = join(home, 'thread-data', 'task'); mkdirSync(task, { recursive: true }); releases.push(ownedHome(home))
   writeFileSync(join(task, 'meta.json'), JSON.stringify({ id: 'task' }))
   const store = new ResourceLifecycleStore({ profileId: 'test', profileHome: home }); store.registerTask({ taskId: 'task', location: task })
   const worktree = join(home, 'repositories', resolveRepositoryIdentity(repo).key, 'worktrees', 'agents', 'worker'), branch = 'mousse/agent/worker'
@@ -288,7 +289,7 @@ async function threadFixture(kind: 'named' | 'id-named') {
   const repo = join(root, 'repo'); mkdirSync(repo)
   git(repo, ['init']); git(repo, ['config', 'user.email', 'test@example.com']); git(repo, ['config', 'user.name', 'Test'])
   writeFileSync(join(repo, 'a.txt'), 'first\n'); git(repo, ['add', '.']); git(repo, ['commit', '-m', 'base'])
-  const home = join(root, 'profile'), task = join(home, 'thread-data', 'task'); mkdirSync(task, { recursive: true })
+  const home = join(root, 'profile'), task = join(home, 'thread-data', 'task'); mkdirSync(task, { recursive: true }); releases.push(ownedHome(home))
   writeFileSync(join(task, 'meta.json'), JSON.stringify({ id: 'task' }))
   const store = new ResourceLifecycleStore({ profileId: 'test', profileHome: home }); store.registerTask({ taskId: 'task', location: task })
   registerThreadLifecycleGate(home, store)

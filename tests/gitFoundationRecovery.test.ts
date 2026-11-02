@@ -9,6 +9,7 @@ import { ChangeReceiptService } from '../src/mms/actions/ChangeReceiptService'
 import { worktreeTree } from '../src/mms/actions/snapshots'
 import { ThreadJournal } from '../src/mms/data/ThreadJournal'
 import { CRASH_CHILD_REQUIRE, actionOptions, git, gitFoundationFixture } from './fixtures/gitFoundation'
+import { pressed } from './support/userRequest'
 
 describe('Git foundation undo recovery', () => {
   let f: ReturnType<typeof gitFoundationFixture>
@@ -44,7 +45,7 @@ describe('Git foundation undo recovery', () => {
   it.each(['receipt', 'context'])('preserves the original conversation range when recovering redo at %s then undoing again', async (phase) => {
     const actions = new ThreadActionService(f.thread)
     const { action } = await actions.runCheckpointedAction(actionOptions(f.repo), () => writeFileSync(join(f.repo, 'value.txt'), 'changed\n'))
-    await new UndoService(f.thread).undoLatest('main', f.repo)
+    await pressed('Undo', () => new UndoService(f.thread).undoLatest('main', f.repo))
     const runner = join(f.root, 'redo-crash-child.mjs')
     await build({ entryPoints: ['tests/fixtures/git-foundation-crash-child.ts'], outfile: runner, bundle: true, platform: 'node', format: 'esm', logLevel: 'silent', banner: { js: CRASH_CHILD_REQUIRE } })
     const child = spawnSync(process.execPath, [runner, f.thread, f.repo, phase, 'redo'], {
@@ -61,7 +62,7 @@ describe('Git foundation undo recovery', () => {
     expect(git(f.repo, 'rev-parse', 'HEAD')).toBe(restoredHead)
     expect(git(f.repo, 'rev-parse', `${actions.latest('main')!.endSha}^{tree}`)).toBe(restoredTree)
     const undoAgain = vi.fn()
-    await new UndoService(f.thread).undoLatest('main', f.repo, undefined, undefined, undoAgain)
+    await pressed('Undo', () => new UndoService(f.thread).undoLatest('main', f.repo, undefined, undefined, undoAgain))
     expect(f.read(f.repo)).toBe('base\n')
     expect(undoAgain).toHaveBeenCalledWith(expect.objectContaining({ presentationMessageStart: 0, nativeContextStartBoundary: { messageIndex: 0, compactionGeneration: 0, fidelity: 'exact', safeBoundaryProof: 'fixture' } }), 'undo')
   }, 30_000)
@@ -70,14 +71,14 @@ describe('Git foundation undo recovery', () => {
     const actions = new ThreadActionService(f.thread)
     const { action } = await actions.runCheckpointedAction(actionOptions(f.repo), () => writeFileSync(join(f.repo, 'value.txt'), 'changed\n'))
     const failedRestore = vi.fn(() => { throw new Error('injected context storage interruption') })
-    await expect(new UndoService(f.thread).undoLatest('main', f.repo, undefined, undefined, failedRestore))
+    await expect(pressed('Undo', () => new UndoService(f.thread).undoLatest('main', f.repo, undefined, undefined, failedRestore)))
       .rejects.toThrow('injected context storage interruption')
     expect(f.read(f.repo)).toBe('base\n')
     const head = git(f.repo, 'rev-parse', 'HEAD')
     const compensatedTree = worktreeTree(f.repo)
     const pending = [...new ThreadJournal(f.thread).latestByOperation().values()].find((entry) => entry.operationType === 'undo')!
     expect(pending.state).toBe('context_pending')
-    await expect(new UndoService(f.thread).undoLatest('main', f.repo)).rejects.toThrow(/recovery required/i)
+    await expect(pressed('Undo', () => new UndoService(f.thread).undoLatest('main', f.repo))).rejects.toThrow(/recovery required/i)
     const restore = vi.fn()
     // A fresh service instance reads only durable state, as it would after restart.
     await new UndoService(f.thread).recoverPending(f.repo, restore)
@@ -96,7 +97,7 @@ describe('Git foundation undo recovery', () => {
 
   it('recovers the context after the agent moved HEAD or switched branches, since the restore is read from the files', async () => {
     await new ThreadActionService(f.thread).runCheckpointedAction(actionOptions(f.repo), () => writeFileSync(join(f.repo, 'value.txt'), 'changed\n'))
-    await expect(new UndoService(f.thread).undoLatest('main', f.repo, undefined, undefined, () => { throw new Error('interrupt') })).rejects.toThrow('interrupt')
+    await expect(pressed('Undo', () => new UndoService(f.thread).undoLatest('main', f.repo, undefined, undefined, () => { throw new Error('interrupt') }))).rejects.toThrow('interrupt')
     git(f.repo, 'switch', '-q', '-c', 'elsewhere')
     writeFileSync(join(f.repo, 'other.txt'), 'outside change\n'); git(f.repo, 'add', 'other.txt'); git(f.repo, 'commit', '-qm', 'outside change')
     const moved = git(f.repo, 'rev-parse', 'HEAD')

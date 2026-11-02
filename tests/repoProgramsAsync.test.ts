@@ -8,7 +8,7 @@ import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, 
 import { tmpdir } from 'node:os'
 import { delimiter, join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { decideGitCommand, decideGitCommandAsync, GitPolicyError, registerOwnedGitRoot } from '../src/mms/git/gitPolicy'
+import { decideGitCommand, decideGitCommandAsync, GitPolicyError, registerOwnedGitRoot, userAction, withUserRequest } from '../src/mms/git/gitPolicy'
 import { grepWorkspace } from '../src/mms/files/WorkspaceGrep'
 import { checkRepoPrograms, clearRepoProgramCache, guardedSimpleGit, repoProgramProbes, repoProgramSettings, repoProgramSettingsAsync, RepoProgramError, withoutRepoPrograms, withoutRepoProgramsAsync } from '../src/mms/git/repoPrograms'
 import { clearRepositoryIdentityCache, resolveRepositoryIdentity, resolveRepositoryIdentityAsync, RepositoryIdentityError } from '../src/mms/git/RepositoryIdentity'
@@ -110,8 +110,9 @@ describe('the async check before a Git command', () => {
     const outside = join(root, 'not-a-repository')
     mkdirSync(outside)
     for (const cwd of [path, outside]) {
+      // As asked for, so the central Git check lets `add -A` in this repository through and the arguments can be compared.
       for (const args of [['status'], ['add', '-A'], ['config', '--get', 'user.name'], ['update-ref', 'refs/mousse/x', 'HEAD']]) {
-        expect(await withoutRepoProgramsAsync(cwd, args)).toEqual(withoutRepoPrograms(cwd, args))
+        expect(await withUserRequest(userAction('cli', 'git add'), () => withoutRepoProgramsAsync(cwd, args))).toEqual(withUserRequest(userAction('cli', 'git add'), () => withoutRepoPrograms(cwd, args)))
       }
       expect(await repoProgramSettingsAsync(cwd, { write: true })).toEqual(repoProgramSettings(cwd, { write: true }))
       expect(await repoProgramSettingsAsync(cwd, { userAction: true })).toEqual(repoProgramSettings(cwd, { userAction: true }))

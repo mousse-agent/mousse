@@ -14,16 +14,17 @@ import { preserveBeforeAbort } from '../src/mms/actions/leftMerge'
 import { ResourceLifecycleCoordinator } from '../src/mms/lifecycle/ResourceLifecycleCoordinator'
 import { ResourceLifecycleStore } from '../src/mms/lifecycle/ResourceLifecycleStore'
 import { ResourcePurgeService } from '../src/mms/lifecycle/ResourcePurgeService'
-import { lifecycleGit as git } from '../src/mms/lifecycle/WorktreeRetirementService'
+import { fixtureGit as git, ownedHome } from './support/fixtureGit'
 import { registerThreadLifecycleGate } from '../src/mms/queue/ThreadLifecycleAdmission'
 import { ThreadWorkspaceManager } from '../src/mms/workspace/ThreadWorkspaceManager'
 
 const roots: string[] = []
-afterEach(() => { vi.restoreAllMocks(); for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }) })
+const owned: Array<() => void> = []
+afterEach(() => { vi.restoreAllMocks(); for (const undo of owned.splice(0)) undo(); for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }) })
 
 async function fixture() {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'mousse-folder-purge-'))); roots.push(root)
-  const home = join(root, 'profile'), location = join(home, 'thread-data', 'task'); mkdirSync(location, { recursive: true })
+  const home = join(root, 'profile'), location = join(home, 'thread-data', 'task'); mkdirSync(location, { recursive: true }); owned.push(ownedHome(home))
   writeFileSync(join(location, 'meta.json'), JSON.stringify({ id: 'task' })); writeFileSync(join(location, 'messages.json'), '[]')
   const store = new ResourceLifecycleStore({ profileId: 'test', profileHome: home }); store.registerTask({ taskId: 'task', location })
   registerThreadLifecycleGate(home, store)

@@ -96,7 +96,7 @@ export const GIT_ACCESS = {
   'actions.revertCode': 'userRequested',
   'actions.redo': 'userRequested',
   'actions.fork': 'owned',
-  'actions.activateBranch': 'owned',
+  'actions.activateBranch': 'userRequested',
   'operations.get': 'read',
   'operations.abort': 'userRequested',
   'operations.recover': 'userRequested',
@@ -261,6 +261,8 @@ export function gitAccessOf(method: string): GitAccess | undefined {
 export const USER_REQUEST_LABELS: Partial<Record<ProtocolMethod, string>> = {
   'actions.undoLatest': 'Undo',
   'actions.redo': 'Redo',
+  // Switching writes the selected branch's files over the folder's, which in a project-folder thread are the person's.
+  'actions.activateBranch': 'Switch conversation branch',
   'actions.revertCode': 'Revert',
   'workspace.discardPendingChanges': 'Discard changes',
   'publish.start': 'Publish',

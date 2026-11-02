@@ -2,6 +2,7 @@ import { ThreadJournal } from '../../src/mms/data/ThreadJournal'
 import { UndoService } from '../../src/mms/actions/UndoService'
 import { ResourceLifecycleStore } from '../../src/mms/lifecycle/ResourceLifecycleStore'
 import { registerThreadLifecycleGate } from '../../src/mms/queue/ThreadLifecycleAdmission'
+import { pressed } from '../support/userRequest'
 
 const [thread, workspace, phase, operation = 'undo', profileHome, profileId] = process.argv.slice(2)
 if (operation !== 'undo' && operation !== 'redo') throw new Error('Invalid fixture operation')
@@ -26,7 +27,7 @@ ThreadJournal.prototype.append = function (record) {
   return result
 } as typeof append
 
-await new UndoService(thread).undoLatest('main', workspace, undefined, undefined, () => {
+await pressed('Undo', () => new UndoService(thread).undoLatest('main', workspace, undefined, undefined, () => {
   throw new Error('Unexpected context callback after crash boundary')
-}, operation)
+}, operation))
 throw new Error('Crash boundary was not reached')

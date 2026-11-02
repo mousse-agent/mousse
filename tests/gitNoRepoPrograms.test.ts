@@ -3,10 +3,10 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSy
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { git as mousseGit } from '../src/mms/actions/git'
+import { git as actionGit } from '../src/mms/actions/git'
 import { ThreadActionService } from '../src/mms/actions/ThreadActionService'
 import { GitService } from '../src/mms/git/GitService'
-import { userAction } from '../src/mms/git/gitPolicy'
+import { userAction, withUserRequest } from '../src/mms/git/gitPolicy'
 import { ProjectManager } from '../src/mms/data/ProjectManager'
 import { clearRepoProgramCache, guardedSimpleGit, repoProgramOverrides, repoProgramProbes, trustExistingProjectsOnce, trustRepositoryPrograms, withoutRepoPrograms, writesThroughFilters } from '../src/mms/git/repoPrograms'
 import { ThreadWorkspaceManager } from '../src/mms/workspace/ThreadWorkspaceManager'
@@ -14,6 +14,12 @@ import { actionOptions, gitFoundationFixture } from './fixtures/gitFoundation'
 
 /** The user's request a test passes to a GitService change. */
 const USER = userAction('button', 'Test action')
+
+/**
+ * Mousse's checkpoint runner, run as asked for: these repositories are outside the Mousse home, so the central Git
+ * check would refuse its changes first. The cases here check what the runner keeps from running, not that check.
+ */
+const mousseGit = (cwd: string, args: string[]): string => withUserRequest(USER, () => actionGit(cwd, args))
 
 /**
  * Programs a repository can name for Git to run, each planted the way an agent with only file access
@@ -390,7 +396,7 @@ describe("the user's own actions keep the repository's programs; Mousse's own co
     const cwd = repo()
     plain(cwd, 'config', 'core.sshCommand', command('ssh'))
     plain(cwd, 'remote', 'add', 'origin', 'ssh://git@example.invalid/work/repo.git')
-    expect(withoutRepoPrograms(cwd, ['fetch'])).toContain('core.sshcommand=ssh')
+    expect(withUserRequest(USER, () => withoutRepoPrograms(cwd, ['fetch']))).toContain('core.sshcommand=ssh')
     await new GitService().fetch(cwd, USER).catch(() => undefined)
     expect(ran()).toEqual(['ssh'])
   })

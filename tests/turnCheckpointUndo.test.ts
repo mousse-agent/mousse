@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { ThreadActionService } from '../src/mms/actions/ThreadActionService'
 import { UndoService } from '../src/mms/actions/UndoService'
 import { CodeRevertService } from '../src/mms/actions/CodeRevertService'
+import { pressed } from './support/userRequest'
 
 const roots: string[] = []
 function fixture() {
@@ -34,7 +35,7 @@ describe('turn checkpoints and compensating undo', () => {
     expect(execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repo, encoding: 'utf8' }).trim()).toBe(before)
     expect(action.changedPaths.map((item) => item.path).sort()).toEqual(['new.txt', 'value.txt'])
 
-    const compensation = await new UndoService(thread).undoLatest('main', repo)
+    const compensation = await pressed('Undo', () => new UndoService(thread).undoLatest('main', repo))
     expect(readFileSync(join(repo, 'value.txt'), 'utf8').replace(/\r\n/g, '\n')).toBe('base\n')
     expect(compensation.endSha).not.toBe(action.startSha)
     expect(execFileSync('git', ['rev-list', '--count', 'HEAD'], { cwd: repo, encoding: 'utf8' }).trim()).toBe('1')
@@ -52,7 +53,7 @@ describe('turn checkpoints and compensating undo', () => {
       threadId: 'thread', turnId: 'second', conversationBranchId: 'main', workspacePath: repo,
       presentationMessageStart: 1, presentationMessageEnd: 2, nativeContextBoundary: boundary
     }, () => writeFileSync(join(repo, 'other.txt'), 'second\n'))
-    const reverted = await new CodeRevertService(thread).revertCode(first.action.id, repo)
+    const reverted = await pressed('Revert', () => new CodeRevertService(thread).revertCode(first.action.id, repo))
     expect(readFileSync(join(repo, 'value.txt'), 'utf8').trim()).toBe('base')
     expect(readFileSync(join(repo, 'other.txt'), 'utf8').trim()).toBe('second')
     expect(reverted.parentActionId).toBe(actions.list()[1].id)

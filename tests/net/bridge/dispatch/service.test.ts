@@ -21,7 +21,7 @@ import {
   type DispatchRequest,
   type DispatchRuntime
 } from '../../../../src/mms/bridge/dispatch'
-import { git } from '../../../../src/mms/bridge/dispatch/git'
+import { fixtureGitAsync as git, ownedHome } from '../../../support/fixtureGit'
 import { inputRef, resultRef } from '../../../../src/mms/bridge/dispatch/bundle'
 import { authenticatedRemote } from './http-fixture'
 import { FakeClock } from '../../harness/FakeClock'
@@ -29,9 +29,11 @@ import type { Clock } from '../../../../src/mms/net/contracts'
 import { sharedBuild } from '../../../support/build'
 
 const roots: string[] = [],
-  databases: NetDatabase[] = []
+  databases: NetDatabase[] = [],
+  owned: Array<() => void> = []
 afterEach(async () => {
   vi.unstubAllEnvs()
+  for (const undo of owned.splice(0)) undo()
   for (const db of databases.splice(0)) db.close()
   for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true })
 })
@@ -67,6 +69,8 @@ async function fixture(runtimeOverride?: DispatchRuntime['run'], clock?: Clock) 
     home = join(root, 'home')
   await mkdir(profile)
   await mkdir(home)
+  // The profile and installation homes are Mousse's, as the real ones under the Mousse home are.
+  owned.push(ownedHome(profile), ownedHome(home))
   const base = await repository(repo),
     identityRepo = await portableRepository(repo)
   const db = new NetDatabase({ profileDir: profile, clock })

@@ -4,7 +4,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { ResourceLifecycleStore } from '../src/mms/lifecycle/ResourceLifecycleStore'
 import { ResourceLifecycleCoordinator } from '../src/mms/lifecycle/ResourceLifecycleCoordinator'
-import { lifecycleGit as git, WorktreeRetirementService } from '../src/mms/lifecycle/WorktreeRetirementService'
+import { WorktreeRetirementService } from '../src/mms/lifecycle/WorktreeRetirementService'
+import { fixtureGit as git, ownedHome } from './support/fixtureGit'
 import { resolveRepositoryIdentity } from '../src/mms/git/RepositoryIdentity'
 import { registerThreadLifecycleGate } from '../src/mms/queue/ThreadLifecycleAdmission'
 import { createHash } from 'node:crypto'
@@ -12,10 +13,11 @@ import { preserveBeforeAbort } from '../src/mms/actions/leftMerge'
 import { ThreadJournal } from '../src/mms/data/ThreadJournal'
 
 const roots: string[] = []
-afterEach(() => { vi.restoreAllMocks(); for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }) })
+const owned: Array<() => void> = []
+afterEach(() => { vi.restoreAllMocks(); for (const undo of owned.splice(0)) undo(); for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }) })
 function fixture(options: { git?: boolean } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'mousse-purge-')); roots.push(root)
-  const home = join(root, 'profile'), location = join(home, 'thread-data', 'task'); mkdirSync(location, { recursive: true })
+  const home = join(root, 'profile'), location = join(home, 'thread-data', 'task'); mkdirSync(location, { recursive: true }); owned.push(ownedHome(home))
   writeFileSync(join(location, 'meta.json'), JSON.stringify({ id: 'task' })); writeFileSync(join(location, 'messages.json'), '[]')
   const store = new ResourceLifecycleStore({ profileId: 'test', profileHome: home }); store.registerTask({ taskId: 'task', location })
   registerThreadLifecycleGate(home, store)
@@ -243,7 +245,7 @@ test('a purge that fails reports no bytes and records why', async () => {
 
 test('the release of what a deleted thread holds outside its folder runs on every pass, and a failure leaves the purge to resume', async () => {
   const root = mkdtempSync(join(tmpdir(), 'mousse-purge-')); roots.push(root)
-  const home = join(root, 'profile'), location = join(home, 'thread-data', 'task'); mkdirSync(location, { recursive: true })
+  const home = join(root, 'profile'), location = join(home, 'thread-data', 'task'); mkdirSync(location, { recursive: true }); owned.push(ownedHome(home))
   writeFileSync(join(location, 'meta.json'), JSON.stringify({ id: 'task' })); writeFileSync(join(location, 'messages.json'), '[]')
   const store = new ResourceLifecycleStore({ profileId: 'test', profileHome: home }); store.registerTask({ taskId: 'task', location })
   registerThreadLifecycleGate(home, store)
