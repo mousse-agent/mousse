@@ -98,9 +98,9 @@ describe('composer model picker', () => {
     const { onModelMenuOpenChange } = render({ open: false })
     expect(host.querySelector('.composer-run-controls')!.textContent).toBe('Opus 5.5High')
     expect(modelButton().querySelector('.composer-model-btn-level')!.textContent).toBe('High')
-    expect(modelButton().getAttribute('aria-label')).toBe('Model: Opus 5.5 High. Permission mode: Auto-accept edits')
-    // The permission mode's icon follows the level; there is no separate reasoning button.
-    expect(modelButton().querySelector('svg.composer-model-btn-mode')).not.toBeNull()
+    expect(modelButton().getAttribute('aria-label')).toBe('Model: Opus 5.5 High')
+    // The button names only the model and level; the permission mode lives in the picker's footer.
+    expect(modelButton().querySelector('svg.lucide')).toBeNull()
     expect(host.querySelectorAll('button')).toHaveLength(3)
     expect(host.querySelector('.composer-run-btn, .composer-run-sep, .composer-pill-btn')).toBeNull()
     act(() => modelButton().click())
@@ -235,13 +235,13 @@ describe('composer model picker', () => {
     const parts = ['composer-model-btn-name', 'composer-model-btn-speed', 'composer-model-btn-level']
     expect([...label().children].map((child) => parts.find((part) => child.classList.contains(part)))).toEqual(parts)
     expect(label().textContent).toBe('Fast 1High')
-    expect(modelButton().getAttribute('aria-label')).toBe('Model: Fast 1 Fast High. Permission mode: Auto-accept edits')
+    expect(modelButton().getAttribute('aria-label')).toBe('Model: Fast 1 Fast High')
     expect(modelButton().getAttribute('title')).toContain('Fast 1 Fast High')
     act(() => root.unmount())
     root = createRoot(host)
     render({ models: [standardSpeed, fastSpeed], modelId: 'fast-model:high', open: false })
     expect(modelButton().querySelector('.composer-model-btn-speed')).toBeNull()
-    expect(modelButton().getAttribute('aria-label')).toBe('Model: Fast 1 High. Permission mode: Auto-accept edits')
+    expect(modelButton().getAttribute('aria-label')).toBe('Model: Fast 1 High')
   })
 
   it('keeps the picker one fixed box whatever is inside it', () => {
@@ -291,7 +291,7 @@ describe('composer model picker', () => {
   it('shows only the permission button for a model without reasoning or speeds', () => {
     render({ models: [plain], modelId: 'plain' })
     expect(modelButton().querySelector('.composer-model-btn-level')).toBeNull()
-    expect(modelButton().getAttribute('aria-label')).toBe('Model: Plain 1. Permission mode: Auto-accept edits')
+    expect(modelButton().getAttribute('aria-label')).toBe('Model: Plain 1')
     expect(document.querySelector('.model-picker-run')).toBeNull()
     expect(speeds()).toHaveLength(0)
     expect(permissionButton()).not.toBeNull()
@@ -389,7 +389,7 @@ describe('composer model picker', () => {
 
   it('hides Auto on an agent without an auto mode and shows a thread set to Auto as Auto-accept edits', () => {
     const { onPermission } = render({ mode: 'auto', auto: false, agent: 'Grok' })
-    expect(modelButton().getAttribute('aria-label')).toContain('Permission mode: Auto-accept edits')
+    expect(permissionButton().textContent).toBe('Auto-accept edits')
     openPermissions()
     expect(modes().map((mode) => mode.getAttribute('aria-label'))).toEqual(['Ask before acting', 'Auto-accept edits', 'Full access'])
     expect(modes().find((mode) => mode.getAttribute('aria-checked') === 'true')!.getAttribute('aria-label')).toBe('Auto-accept edits')
@@ -413,7 +413,7 @@ describe('composer model picker', () => {
   it('opens only the run settings for an assigned model, where just the permission mode changes', () => {
     const { onPermission } = render({ readOnly: true })
     expect(modelButton().disabled).toBe(false)
-    expect(modelButton().getAttribute('aria-label')).toBe('Assigned model: Opus 5.5 High. Permission mode: Auto-accept edits')
+    expect(modelButton().getAttribute('aria-label')).toBe('Assigned model: Opus 5.5 High')
     expect(document.querySelector('.model-picker-row')).toBeNull()
     const menu = document.querySelector<HTMLElement>('[role="menu"][aria-label="Run options"]')!
     expect([...menu.querySelectorAll<HTMLButtonElement>('[aria-label="Reasoning"] [role="menuitemradio"]')].every((item) => item.disabled)).toBe(true)
