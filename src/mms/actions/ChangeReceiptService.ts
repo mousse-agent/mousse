@@ -19,8 +19,9 @@ const isPublish = (type: string): boolean => type === 'publish' || type === 'cha
 
 export class ChangeReceiptService {
   private readonly journal: ThreadJournal
-  constructor(private readonly threadDirectory: string) {
-    this.journal = new ThreadJournal(threadDirectory)
+  /** `readOnly`: only lists receipts, so it never needs the thread's admission (a permanent delete fences it). */
+  constructor(private readonly threadDirectory: string, options: { readOnly?: boolean } = {}) {
+    this.journal = new ThreadJournal(threadDirectory, options.readOnly ? { readOnly: true } : {})
   }
 
   list(): ChangeReceipt[] {

@@ -3,7 +3,7 @@ import { createReadStream } from 'node:fs'
 import { lstat, open, readlink, realpath } from 'node:fs/promises'
 import { dirname, isAbsolute, join, relative } from 'node:path'
 import { leavesFolder } from '../files/pathGuard'
-import { guardedSimpleGit, NO_DIFF_PROGRAMS, repoProgramEnv } from './repoPrograms'
+import { guardedSimpleGit, NO_DIFF_PROGRAMS } from './repoPrograms'
 import {
   EMPTY_TREE_SHA,
   REVIEW_MAX_COUNTED_UNTRACKED,
@@ -17,7 +17,7 @@ import {
   type ReviewRange,
   type ReviewSide
 } from '../../shared/review'
-import { guarded, tryGit } from '../actions/git'
+import { gitEnv, guarded, tryGit } from '../actions/git'
 import { unchangedWorktreePaths } from './workingTreeStatus'
 
 /** Git's own heuristic: a NUL byte in the first 8 KB means the file is binary. */
@@ -114,7 +114,7 @@ export function parseNumstatZ(output: string): NumstatEntry[] {
 
 function hashEmptyTree(cwd: string): Promise<string> {
   return new Promise((resolve, reject) => {
-    const child = execFile('git', guarded(cwd, ['hash-object', '-t', 'tree', '--stdin']), { cwd, env: repoProgramEnv(), encoding: 'utf8' }, (error, stdout) => {
+    const child = execFile('git', guarded(cwd, ['hash-object', '-t', 'tree', '--stdin']), { cwd, env: gitEnv(cwd), encoding: 'utf8' }, (error, stdout) => {
       if (error) reject(error)
       else resolve(stdout.trim())
     })

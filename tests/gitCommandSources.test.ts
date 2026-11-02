@@ -27,7 +27,11 @@ const APPROVED_GIT_SPAWNERS: Record<string, string> = {
   'src/mms/git/gitPolicy.ts': 'finalRef',
   'src/mms/git/readOnlyGit.ts': 'withoutRepoPrograms',
   'src/mms/git/repoPrograms.ts': 'assertGitAllowed',
-  'src/mms/git/reviewDiff.ts': 'withoutRepoPrograms',
+  // `guarded` (actions/git.ts): `withoutRepoPrograms`, or for a snapshot store `checkStoreCommand`.
+  'src/mms/git/reviewDiff.ts': 'guarded',
+  'src/mms/actions/snapshots.ts': 'guarded',
+  // A snapshot store's own commands (`runStoreGit`) and the check of every store command (`checkStoreCommand`).
+  'src/mms/git/hiddenStore.ts': 'assertGitAllowed',
   'src/mms/git/scopedRead.ts': 'assertGitAllowed',
   'src/mms/git/workingTreeStatus.ts': 'withoutRepoPrograms',
   'src/mms/lifecycle/WorktreeRetirementService.ts': 'withoutRepoPrograms',
@@ -112,7 +116,11 @@ describe('Git command sources', () => {
   })
 
   it('never runs gc, prune, worktree prune or reflog expire', () => {
-    expect(found.banned).toEqual([])
+    // The one exception: the garbage of a snapshot store Mousse owns (`collectStoreGarbage`), which the central check
+    // allows only for a store under the Mousse home (`isOwnedSnapshotStore`), after Mousse released the refs.
+    const storeGarbage = (finding: Finding): boolean => finding.file === 'src/mms/workspace/SnapshotWorkspace.ts' && finding.text.startsWith("['gc', '--prune=now', '--quiet']")
+    expect(found.banned.filter((finding) => !storeGarbage(finding))).toEqual([])
+    expect(found.banned.filter(storeGarbage)).toHaveLength(1)
   })
 
   it('imports the Git process runner only where its callers guard the arguments', () => {

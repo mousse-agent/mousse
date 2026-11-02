@@ -9,7 +9,7 @@ import { IN_PROGRESS_GIT_MARKERS } from '../git/gitMarkers'
 import { MOUSSE_COMMIT_EMAIL, MOUSSE_COMMIT_NAME } from '../git/mousseCommitIdentity'
 import { readWorkingTreeStatusSync, type StatusEntry } from '../git/workingTreeStatus'
 import { rethrowGitPolicyError } from '../git/gitPolicy'
-import { activeHiddenStore, hiddenStoreArgs, isolatedEnv } from '../git/hiddenStore'
+import { activeHiddenStore, checkStoreCommand, hiddenStoreEnv } from '../git/hiddenStore'
 import type { GitCheckOptions, RepoProgramOptions } from '../git/repoPrograms'
 
 /**
@@ -18,8 +18,13 @@ import type { GitCheckOptions, RepoProgramOptions } from '../git/repoPrograms'
  */
 export function guarded(cwd: string, args: string[], options?: RepoProgramOptions & GitCheckOptions): string[] {
   const store = activeHiddenStore(cwd)
-  // A store command reads no config but the store's own (`gitEnv`), so no program can be configured for it to run.
-  return store ? [...hiddenStoreArgs(store), ...args] : withoutRepoPrograms(cwd, args, options)
+  if (!store) return withoutRepoPrograms(cwd, args, options)
+  // A store command reads no config but the store's own (`gitEnv` names the store and isolates it), so no program can be
+  // configured for it to run. It is never given the folder's own `--git-dir`, which after `git init` is the person's.
+  // The central Git check sees it as it runs: lock-free, the store as `GIT_DIR`, its folder as `GIT_WORK_TREE`.
+  const run = ['--no-optional-locks', ...args]
+  checkStoreCommand(store, cwd, run, { env: options?.env, stdin: options?.stdin, userRequested: options?.userRequested })
+  return run
 }
 
 /**
@@ -29,7 +34,7 @@ export function guarded(cwd: string, args: string[], options?: RepoProgramOption
 export function gitEnv(cwd: string, env?: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   const base = repoProgramEnv(env ? { ...process.env, ...env } : process.env)
   const store = activeHiddenStore(cwd)
-  return store ? isolatedEnv(store, base) : base
+  return store ? hiddenStoreEnv(store, base) : base
 }
 
 /**

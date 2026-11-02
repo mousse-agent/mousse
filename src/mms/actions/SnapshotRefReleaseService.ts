@@ -1,10 +1,9 @@
-import { execFileSync } from 'node:child_process'
 import { existsSync, readdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { ThreadJournal } from '../data/ThreadJournal'
 import { acquireRepositoryLease } from '../git/RepositoryLease'
 import { getMousseHomeDir } from '../data/paths'
-import { hiddenStoreIdentity, inHiddenStore, isolatedEnv } from '../git/hiddenStore'
+import { hiddenStoreIdentity, inHiddenStore, runStoreGit } from '../git/hiddenStore'
 import { repoProgramEnv } from '../git/repoPrograms'
 import type { ThreadLeaseHandle } from '../queue/ThreadExecutionLease'
 import { collectStoreGarbage, dropSnapshotStoreUser, loadSnapshotWorkspace, readSnapshotWorkspaceRecord, removeThreadSnapshots, SNAPSHOT_TRASH_QUIET_MS, threadPinRef, trashProjectStoreIfUnused } from '../workspace/SnapshotWorkspace'
@@ -96,7 +95,7 @@ export async function releaseThreadSnapshots(threadDirectory: string, signal?: A
       const pins = tryGit(top, ['for-each-ref', '--format=%(refname)', `refs/mousse/threads/${workspace.record.threadId}/`])
       for (const name of pins.stdout.split(/\r?\n/).filter(Boolean)) names.add(name)
       names.add(threadPinRef(workspace.record.threadId))
-      for (const receipt of new ChangeReceiptService(threadDirectory).list()) for (const name of receipt.retainedRefs) names.add(name)
+      for (const receipt of new ChangeReceiptService(threadDirectory, { readOnly: true }).list()) for (const name of receipt.retainedRefs) names.add(name)
       const branches = join(threadDirectory, 'conversation-branches.json')
       if (existsSync(branches)) {
         try {
@@ -117,7 +116,7 @@ export async function releaseThreadSnapshots(threadDirectory: string, signal?: A
       }
       // Files a restore of this thread kept (`refs/mousse/preserved/<operation>-…`) exist nowhere else: they move to the
       // trash namespace, which the storage cleanup empties after the trash's wait (`expireTrashedSnapshotRefs`).
-      const operations = new ChangeReceiptService(threadDirectory).list().map((receipt) => receipt.operationId)
+      const operations = new ChangeReceiptService(threadDirectory, { readOnly: true }).list().map((receipt) => receipt.operationId)
       const preserved = tryGit(top, ['for-each-ref', '--format=%(refname) %(objectname)', 'refs/mousse/preserved/']).stdout.split(/\r?\n/).filter(Boolean)
       const trashed = `refs/mousse/trash/${Date.now()}`
       for (const line of preserved) {
@@ -154,7 +153,7 @@ export async function expireTrashedSnapshotRefs(now = Date.now(), home = getMous
     const store = { workTree: gitDir, gitDir }
     const lease = await acquireRepositoryLease(hiddenStoreIdentity(store))
     try {
-      const run = (args: string[]): string => execFileSync('git', ['--git-dir', gitDir, ...args], { cwd: gitDir, env: isolatedEnv(store, repoProgramEnv()), encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim()
+      const run = (args: string[]): string => runStoreGit(store, args, repoProgramEnv())
       const refs = run(['for-each-ref', '--format=%(refname) %(objectname)', 'refs/mousse/trash/']).split(/\r?\n/).filter(Boolean)
       let removed = 0
       for (const line of refs) {

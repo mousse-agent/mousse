@@ -5,7 +5,7 @@ import { join, resolve } from 'node:path'
 import type { ThreadWorkspaceMetadata } from '../../shared/workspace'
 import { atomicWriteJsonSync } from '../data/AtomicFs'
 import { getMousseHomeDir } from '../data/paths'
-import { BUILT_IN_EXCLUDES, ensureStoreRules, inHiddenStore, insideFolder, isolatedEnv, registerHiddenStore, type HiddenStore } from '../git/hiddenStore'
+import { BUILT_IN_EXCLUDES, ensureStoreRules, inHiddenStore, insideFolder, registerHiddenStore, runStoreGit, type HiddenStore } from '../git/hiddenStore'
 import { repoProgramEnv } from '../git/repoPrograms'
 import { isUnsafeSnapshotRoot, SnapshotRefusedError } from '../actions/snapshots'
 
@@ -72,34 +72,18 @@ function storePathOf(record: SnapshotWorkspaceRecord, home = getMousseHomeDir())
   return threadStorePath(record.threadId, home)
 }
 
-/** Git on the store itself, isolated from the person's config like every store command. */
-function runGit(store: HiddenStore, args: string[]): string {
-  return execFileSync('git', ['--git-dir', store.gitDir, ...args], { cwd: store.gitDir, env: isolatedEnv(store, repoProgramEnv()), encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim()
-}
-
-/** Whether a store that exists has the settings `prepareStore` gives it (a creation another thread started may not have finished). */
-function storeConfigured(store: HiddenStore): boolean {
-  try {
-    const config = readFileSync(join(store.gitDir, 'config'), 'utf8')
-    return /^\s*bare\s*=\s*false\s*$/m.test(config) && /^\s*auto\s*=\s*0\s*$/m.test(config)
-  } catch { return false }
-}
-
 /**
  * Makes the store if it is missing and writes its settings and exclude list; the same call keeps an older store current.
  * Two threads of one project may start their first turns together, so a creation that meets the other's lock is tried again.
  */
 export function prepareStore(store: HiddenStore): void {
-  if (!existsSync(join(store.gitDir, 'HEAD')) || !storeConfigured(store)) {
+  if (!existsSync(join(store.gitDir, 'HEAD'))) {
     for (let attempt = 0; ; attempt++) {
       try {
         mkdirSync(store.gitDir, { recursive: true })
-        // No template: the person's init.templateDir would put its hooks and files into Mousse's store.
-        execFileSync('git', ['init', '--bare', '--quiet', '--template=', store.gitDir], { env: isolatedEnv(store, repoProgramEnv()), encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })
-        // Git needs a work tree to add files; `--work-tree` supplies the folder, so the store itself stays independent of where it is.
-        runGit(store, ['config', 'core.bare', 'false'])
-        // Mousse decides when to collect garbage (after it releases a snapshot's refs), never Git in the middle of an operation.
-        runGit(store, ['config', 'gc.auto', '0'])
+        // No template: the person's init.templateDir would put its hooks and files into Mousse's store. The store's config
+        // is never written: each command names the folder as `GIT_WORK_TREE` and turns automatic collection off itself.
+        runStoreGit(store, ['init', '--bare', '--quiet', '--template=', store.gitDir], repoProgramEnv())
         break
       } catch (error) {
         if (attempt >= 4) throw error
@@ -368,5 +352,5 @@ export function expireSnapshotTrash(now = Date.now(), home = getMousseHomeDir())
 
 /** Collects the garbage in a store Mousse owns. Never run on a repository of the person's. */
 export function collectStoreGarbage(store: HiddenStore): void {
-  runGit(store, ['gc', '--prune=now', '--quiet'])
+  runStoreGit(store, ['gc', '--prune=now', '--quiet'], repoProgramEnv())
 }

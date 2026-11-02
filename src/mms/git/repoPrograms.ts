@@ -6,7 +6,7 @@ import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
 import { gitDirectoryEnv, mousseGitEnv } from './gitEnv'
 import { assertGitAllowed, type UserAction } from './gitPolicy'
 import { NO_HOOKS_PATH } from './gitNullDevice'
-import { activeHiddenStore, hiddenStoreEnv } from './hiddenStore'
+import { activeHiddenStore, checkStoreCommand, hiddenStoreEnv } from './hiddenStore'
 import { isTrustedRepoEntry, readRepoTrust, repoTrustPath, TRUSTED_FILTER_KEY, writeRepoTrust, type RepoTrustRecord } from './repoTrust'
 
 /**
@@ -533,11 +533,14 @@ export function guardedSimpleGit(cwd: string, options: Partial<Omit<SimpleGitOpt
       return (...parameters: unknown[]) => {
         // Only `raw` takes free-form arguments; every other method used here only reads.
         const args = key === 'raw' ? parameters.flat().filter((value): value is string => typeof value === 'string') : []
-        // Lock-free: the instance's config holds NO_INDEX_REFRESH and its environment turns optional locks off.
-        assertGitAllowed({ cwd, args: key === 'raw' ? args : simpleGitCommand(key, parameters), lockFree: true })
         // Inside a hidden store's scope (snapshot review) the command goes through the store; nowhere else is a folder's Git redirected.
-        // No optional locks: a status or diff read here never refreshes and rewrites the index.
         const store = activeHiddenStore(cwd)
+        const command = key === 'raw' ? args : simpleGitCommand(key, parameters)
+        // Lock-free: the instance's config holds NO_INDEX_REFRESH (a store's isolation turns it off too) and its
+        // environment turns optional locks off. A store command is checked with the store it names.
+        if (store) checkStoreCommand(store, cwd, command)
+        else assertGitAllowed({ cwd, args: command, lockFree: true })
+        // No optional locks: a status or diff read here never refreshes and rewrites the index.
         const instance = forCommand(args, Boolean(store)).env(store ? hiddenStoreEnv(store, repoProgramEnv({ ...process.env, GIT_OPTIONAL_LOCKS: '0' })) : repoProgramEnv({ ...process.env, GIT_OPTIONAL_LOCKS: '0' })) as unknown as Record<string, (...values: unknown[]) => unknown>
         return instance[key]!(...parameters)
       }
