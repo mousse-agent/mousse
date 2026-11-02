@@ -511,7 +511,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
         : event.key === 'ArrowRight'
           ? SIDEBAR_VIEWS[(index + 1) % SIDEBAR_VIEWS.length]
           : SIDEBAR_VIEWS[(index + SIDEBAR_VIEWS.length - 1) % SIDEBAR_VIEWS.length]
-    setSidebarView(nextView)
+    void setSidebarView(nextView)
     const buttons = event.currentTarget.querySelectorAll<HTMLButtonElement>('[role="tab"]')
     buttons[SIDEBAR_VIEWS.indexOf(nextView)]?.focus()
   }
@@ -913,7 +913,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
         onClick={() => {
 
-          if (!isRenaming && !isSettled && !suppressClick.current) selectThread(thread.id)
+          if (!isRenaming && !isSettled && !suppressClick.current) void selectThread(thread.id)
 
         }}
 
@@ -951,7 +951,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
             isRenaming={isRenaming}
             renamingName={renaming?.name ?? ''}
             isGeneratingTitle={isGeneratingTitle}
-            onRename={submitRename}
+            onRename={(name) => void submitRename(name)}
             onCancelRename={() => setRenaming(null)}
           />
         ) : (
@@ -968,7 +968,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
             initialName={renaming.name}
 
-            onSubmit={submitRename}
+            onSubmit={(name) => void submitRename(name)}
 
             onCancel={() => setRenaming(null)}
 
@@ -1074,7 +1074,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
             title={label}
             aria-label={label}
             className={`threads-sidebar-tab${sidebarView === view ? ' active' : ''}`}
-            onClick={() => setSidebarView(view)}
+            onClick={() => void setSidebarView(view)}
           >
             <Icon size={16} strokeWidth={1.8} aria-hidden="true" />
             {sidebarView === view && <span>{label}</span>}
@@ -1201,7 +1201,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
                           initialName={renaming.name}
 
-                          onSubmit={submitRename}
+                          onSubmit={(name) => void submitRename(name)}
 
                           onCancel={() => setRenaming(null)}
 
@@ -1422,16 +1422,16 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
           onClose={closeContextMenu}
 
-          onPin={handlePin}
+          onPin={() => void handlePin()}
 
-          onSettle={handleSettle}
+          onSettle={() => void handleSettle()}
 
-          onRegenerateTitle={handleRegenerateTitle}
+          onRegenerateTitle={() => void handleRegenerateTitle()}
 
           onRename={handleRename}
 
-          onRemove={handleRemove}
-          onTrustGitSettings={handleTrustGitSettings}
+          onRemove={() => void handleRemove()}
+          onTrustGitSettings={() => void handleTrustGitSettings()}
 
         />
 

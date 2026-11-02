@@ -653,7 +653,7 @@ export class McpManager {
       throw error
     })
     this.drain = work
-    this.awaitRaw('mcp-drain', work)
+    void this.awaitRaw('mcp-drain', work)
   }
 
   private async drainOwned(): Promise<void> {
@@ -693,7 +693,7 @@ export class McpManager {
       release = resolve
     })
     connection.releaseLifetime = release
-    this.awaitRaw('mcp-connection', lifetime)
+    void this.awaitRaw('mcp-connection', lifetime)
   }
 
   /**
@@ -719,7 +719,7 @@ export class McpManager {
       throw error
     })
     connection.closing = work
-    this.awaitRaw('mcp-close', work)
+    void this.awaitRaw('mcp-close', work)
     return work
   }
 
@@ -757,7 +757,7 @@ export class McpManager {
       return withAbortTimeout(
         (callSignal) => {
           const raw = run(callSignal)
-          this.awaitRaw(`${label}-raw`, raw)
+          void this.awaitRaw(`${label}-raw`, raw)
           return raw
         },
         timeoutMs,
@@ -909,7 +909,7 @@ export class McpManager {
         const client = await withAbortTimeout(
           (callSignal) => {
             raw = this.clientFactory!.connect(server, key, callSignal)
-            this.awaitRaw('mcp-connect-raw', raw)
+            void this.awaitRaw('mcp-connect-raw', raw)
             return raw
           },
           START_TIMEOUT_MS,
@@ -926,7 +926,7 @@ export class McpManager {
         return connection
       } catch (error) {
         if (raw) {
-          this.awaitRaw(
+          void this.awaitRaw(
             'mcp-connect-late-close',
             raw.then(
               (client) => client.close(),
@@ -953,7 +953,7 @@ export class McpManager {
         (callSignal) => {
           if (callSignal.aborted) throw abortFrom(callSignal.reason)
           const raw = client.connect(transport)
-          this.awaitRaw('mcp-connect-raw', raw)
+          void this.awaitRaw('mcp-connect-raw', raw)
           return raw
         },
         START_TIMEOUT_MS,
@@ -961,7 +961,7 @@ export class McpManager {
         signal
       )
     } catch (error) {
-      this.awaitRaw('mcp-connect-late-close', transport.close().catch(() => undefined))
+      void this.awaitRaw('mcp-connect-late-close', transport.close().catch(() => undefined))
       throw error
     }
 

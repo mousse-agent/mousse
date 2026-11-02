@@ -697,7 +697,9 @@ export async function executeNetCommand(
       if (fd !== undefined) {
         try {
           unlinkSync(request.recoveryOutput)
-        } catch {}
+        } catch {
+          // Best effort: the error below already says the recovery file was not created.
+        }
       }
       invalid('I could not create the new private recovery file.')
     } finally {
