@@ -397,9 +397,21 @@ export function trustExistingProjectsOnce(profileHome: string, projectPaths: rea
  * is left alone.
  */
 export function withoutRepoPrograms(cwd: string, args: readonly string[], options?: RepoProgramOptions): string[] {
-  if (args[0] === 'config') return [...args]
+  const named = gitDirectoryArgs(cwd)
+  if (args[0] === 'config') return [...named, ...args]
   // Optional locks are off for Mousse's own commands, so `status` does not refresh and write the index.
-  return [...(options?.userAction ? [] : ['--no-optional-locks']), ...noRepoProgramArgs(cwd, args, options), ...args]
+  return [...named, ...(options?.userAction ? [] : ['--no-optional-locks']), ...noRepoProgramArgs(cwd, args, options), ...args]
+}
+
+/**
+ * `--git-dir` for a command Mousse runs inside a Git directory it chose (a repository's shared directory, a
+ * bare clone with linked worktrees, the bridge's quarantine). `safe.bareRepository=explicit` stops Git from
+ * finding such a folder by itself, and Git before 2.45 refuses even a `.git` folder that way. Only the
+ * folder the command runs in is named, never one Git would reach by walking up.
+ */
+function gitDirectoryArgs(cwd: string): string[] {
+  const dir = gitDirectoryEnv(cwd).GIT_DIR
+  return dir ? [`--git-dir=${dir}`] : []
 }
 
 /** simple-git's checks Mousse turns off: the values it sets are its own, never a caller's (see {@link guardedSimpleGit}). */

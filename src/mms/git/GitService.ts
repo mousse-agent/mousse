@@ -109,8 +109,11 @@ const COMMIT_SILENCE_MS = 10 * 60_000
  */
 const FETCH = ['fetch', '--no-auto-gc', '--progress', '--no-prune', '--no-prune-tags', '--recurse-submodules=no'] as const
 
-/** A push sends the one ref it names: no tags through `push.followTags`, no submodules through `push.recurseSubmodules`. */
-const PUSH = ['push', '--progress', '--no-follow-tags', '--recurse-submodules=no'] as const
+/**
+ * A push sends the one ref it names, and no tags through `push.followTags`. `push.recurseSubmodules` is the
+ * user's own choice and still applies (`check` refuses a push whose submodule commits are not on a remote).
+ */
+const PUSH = ['push', '--progress', '--no-follow-tags'] as const
 
 export interface PushRemoteInputs {
   pushRemote: string | null

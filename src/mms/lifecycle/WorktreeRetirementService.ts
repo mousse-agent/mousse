@@ -30,7 +30,7 @@ export function lifecycleRead(cwd: string, args: string[], input?: string, maxBu
 export function readDirectLifecycleRef(cwd: string, ref: string): string | undefined {
   try { lifecycleGit(cwd, ['symbolic-ref', '-q', ref]); throw new Error(`Symbolic resource reference is not cleanup authority: ${ref}`) }
   catch (error) { if ((error as { status?: number }).status !== 1) throw error }
-  const listing = spawnSync('git', withoutRepoPrograms(cwd, ['for-each-ref', '--format=%(refname)%00%(objectname)', ref]), { cwd, env: repoProgramEnv(), encoding: 'utf8', windowsHide: true, timeout: 30_000, maxBuffer: 32 * 1024 * 1024 })
+  const listing = spawnSync('git', withoutRepoPrograms(cwd, ['for-each-ref', '--format=%(refname)%00%(objectname)', ref]), { cwd, env: repoProgramEnv({ ...process.env, ...gitDirectoryEnv(cwd), ...READ_ONLY_GIT_ENV }), encoding: 'utf8', windowsHide: true, timeout: 30_000, maxBuffer: 32 * 1024 * 1024 })
   // Git may warn about a corrupt loose ref while exiting successfully and omitting it.
   if (listing.error || listing.status !== 0 || listing.stderr.trim()) throw new Error(`Resource reference inventory is unreadable: ${ref}`)
   const rows = listing.stdout.split(/\r?\n/)

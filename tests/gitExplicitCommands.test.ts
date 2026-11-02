@@ -7,8 +7,8 @@ import { gitDirectoryEnv, isGitDirectory, withGitConfigEnv } from '../src/mms/gi
 import { GitService } from '../src/mms/git/GitService'
 import { readOnlyGit, runReadOnlyGit } from '../src/mms/git/readOnlyGit'
 import { conflictPair, readWorkingTreeStatus, readWorkingTreeStatusSync } from '../src/mms/git/workingTreeStatus'
-import { inspectPendingChanges } from '../src/mms/actions/git'
-import { lifecycleGit, lifecycleRead } from '../src/mms/lifecycle/WorktreeRetirementService'
+import { git as actionGit, inspectPendingChanges } from '../src/mms/actions/git'
+import { lifecycleGit, lifecycleRead, readDirectLifecycleRef } from '../src/mms/lifecycle/WorktreeRetirementService'
 
 const roots: string[] = []
 function git(cwd: string, ...args: string[]): string {
@@ -303,5 +303,28 @@ describe('Every Git run carries safe.bareRepository=explicit', () => {
     expect(gitDirectoryEnv(bare)).toEqual({ GIT_DIR: bare })
     expect(lifecycleGit(bare, ['worktree', 'list', '--porcelain'])).toContain(`worktree ${join(root, 'main')}`)
     expect(readOnlyGit(join(root, 'main'), ['rev-parse', '--abbrev-ref', 'HEAD'])).toBe('main')
+  })
+
+  it('reads lifecycle refs and runs Mousse\'s own commands in a bare clone with linked worktrees, and in a .git folder', () => {
+    const root = realpathSync(scratch('mousse-bare-layout-'))
+    const bare = join(root, 'repo.git')
+    git(root, 'init', '-q', '--bare', '-b', 'main', bare)
+    const seed = join(root, 'seed')
+    git(root, 'clone', '-q', bare, seed); configure(seed)
+    write(seed, 'a.txt'); git(seed, 'add', '-A'); git(seed, 'commit', '-qm', 'a'); git(seed, 'push', '-q', 'origin', 'main')
+    git(bare, 'worktree', 'add', '-q', join(root, 'main'), 'main')
+    const head = git(bare, 'rev-parse', 'main')
+    git(bare, 'update-ref', 'refs/mousse/lifecycle/x', head)
+    // Restore checks and purge read refs in the shared directory.
+    expect(readDirectLifecycleRef(bare, 'refs/mousse/lifecycle/x')).toBe(head)
+    expect(readDirectLifecycleRef(bare, 'refs/mousse/lifecycle/missing')).toBeUndefined()
+    expect(lifecycleRead(bare, ['worktree', 'list', '--porcelain'])).toContain(`worktree ${join(root, 'main')}`)
+    expect(actionGit(bare, ['rev-parse', '--verify', 'refs/mousse/lifecycle/x'])).toBe(head)
+    expect(readOnlyGit(bare, ['rev-parse', 'main'])).toBe(head)
+    // The same in a repository's own .git folder.
+    const dotGit = join(seed, '.git')
+    git(seed, 'update-ref', 'refs/mousse/lifecycle/y', head)
+    expect(readDirectLifecycleRef(dotGit, 'refs/mousse/lifecycle/y')).toBe(head)
+    expect(lifecycleRead(dotGit, ['worktree', 'list', '--porcelain'])).toContain(`worktree ${seed}`)
   })
 })
