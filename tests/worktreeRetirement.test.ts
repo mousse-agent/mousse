@@ -9,6 +9,9 @@ import { registerThreadLifecycleGate } from '../src/mms/queue/ThreadLifecycleAdm
 import { ResourceLifecycleStore } from '../src/mms/lifecycle/ResourceLifecycleStore'
 import { lifecycleGit as git, WORKTREE_TRASH_QUIET_MS, WorktreeRetirementService } from '../src/mms/lifecycle/WorktreeRetirementService'
 
+/** Git lists worktrees with forward slashes on every platform; paths are compared in that form, and case-folded on Windows. */
+const slashes = (path: string): string => { const value = resolve(path).replaceAll('\\', '/'); return process.platform === 'win32' ? value.toLowerCase() : value }
+const listed = (repo: string): string[] => git(repo, ['worktree', 'list', '--porcelain']).split(/\r?\n/).filter((line) => line.startsWith('worktree ')).map((line) => slashes(line.slice(9)))
 const roots: string[] = []
 const releases: Array<() => unknown> = []
 afterEach(() => { for (const release of releases.splice(0)) release(); for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }) })
@@ -76,7 +79,7 @@ test('retirement moves the folder into the trash in one step, and a restore move
   expect(trashed.trashPath).toBe(f.service.trashPathFor(trashed))
   expect(readFileSync(join(trashed.trashPath!, 'late.txt'), 'utf8')).toBe('late write\n')
   // Git follows the move, and the folder is still a working checkout on its branch.
-  expect(git(f.repo, ['worktree', 'list', '--porcelain'])).toContain(`worktree ${trashed.trashPath}`)
+  expect(listed(f.repo)).toContain(slashes(trashed.trashPath!))
   expect(git(trashed.trashPath!, ['branch', '--show-current'])).toBe(f.branch)
   expect(git(trashed.trashPath!, ['status', '--porcelain', '--untracked-files=all'])).toBe('?? late.txt')
   // Checked out in the trash, so the branch is kept for now.
@@ -87,7 +90,7 @@ test('retirement moves the folder into the trash in one step, and a restore move
   expect(existsSync(trashed.trashPath!)).toBe(false)
   expect(readFileSync(join(f.worktree, 'late.txt'), 'utf8')).toBe('late write\n')
   expect(git(f.worktree, ['branch', '--show-current'])).toBe(f.branch)
-  expect(git(f.repo, ['worktree', 'list', '--porcelain'])).toContain(`worktree ${f.worktree}`)
+  expect(listed(f.repo)).toContain(slashes(f.worktree))
   expect(JSON.parse(readFileSync(f.path, 'utf8'))).toMatchObject({ state: 'materialized' })
 })
 
@@ -102,7 +105,7 @@ test('trash expiry snapshots the folder, deletes it and its branch, and a restor
   expect(existsSync(trashed.trashPath!)).toBe(true)
   expect(f.service.expireTrash(f.path, { now: later })).toEqual({ removed: true })
   expect(existsSync(trashed.trashPath!)).toBe(false)
-  expect(git(f.repo, ['worktree', 'list', '--porcelain'])).not.toContain(trashed.trashPath!)
+  expect(listed(f.repo)).not.toContain(slashes(trashed.trashPath!))
   const retired = JSON.parse(readFileSync(f.path, 'utf8'))
   expect(retired).toMatchObject({ state: 'retired', deletedBranches: [{ name: f.branch, sha: trashed.resultSha }] })
   expect(retired.trashPath).toBeUndefined()
@@ -186,7 +189,7 @@ test('a branch the agent made itself, and a worktree the agent added, are never 
   expect(JSON.parse(readFileSync(f.path, 'utf8')).deletedBranches).toEqual([{ name: f.branch, sha: trashed.resultSha }])
   expect(git(f.repo, ['branch', '--list', 'agent/own-work', 'agent/second', '--format=%(refname:short)'])).toBe('agent/own-work\nagent/second')
   expect(readFileSync(join(own, 'a.txt'), 'utf8')).toBe('first\n')
-  expect(git(f.repo, ['worktree', 'list', '--porcelain'])).toContain(`worktree ${own}`)
+  expect(listed(f.repo)).toContain(slashes(own))
 })
 test('missing pins never authorize recall or retirement', async () => {
   const f = await fixture(); const manifest = f.service.prepare(f.input)
