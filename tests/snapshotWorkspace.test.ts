@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
@@ -12,11 +12,14 @@ import { resolveReviewScope } from '../src/mms/actions/reviewRange'
 import { configureSnapshotLimits, isUnsafeSnapshotRoot, SnapshotRefusedError, takeSnapshot } from '../src/mms/actions/snapshots'
 import { ChangeReceiptService } from '../src/mms/actions/ChangeReceiptService'
 import { ProjectManager } from '../src/mms/data/ProjectManager'
-import { clearHiddenStores, hiddenStoreFor, inHiddenStore } from '../src/mms/git/hiddenStore'
+import { inHiddenStore } from '../src/mms/git/hiddenStore'
 import { isGitRepository, listChangedFiles, readFileVersions } from '../src/mms/git/reviewDiff'
 import { restoreDiff } from '../src/mms/run/workspace/restoreSafety'
 import { ThreadWorkspaceManager } from '../src/mms/workspace/ThreadWorkspaceManager'
-import { ensureSnapshotWorkspace, loadSnapshotWorkspace, projectStorePath, snapshotsOffReason, threadStorePath } from '../src/mms/workspace/SnapshotWorkspace'
+import { WorkspaceResolver } from '../src/mms/workspace/WorkspaceResolver'
+import { activeHiddenStore } from '../src/mms/git/hiddenStore'
+import { tryGit } from '../src/mms/actions/git'
+import { ensureSnapshotWorkspace, inThreadSnapshotScope, loadSnapshotWorkspace, projectStorePath, snapshotsOffReason, threadSnapshotStore, threadStorePath } from '../src/mms/workspace/SnapshotWorkspace'
 import { actionOptions } from './fixtures/gitFoundation'
 
 const git = (cwd: string, ...args: string[]): string => execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim()
@@ -33,7 +36,6 @@ beforeEach(() => {
 })
 afterEach(() => {
   configureSnapshotLimits()
-  clearHiddenStores()
   if (previousHome === undefined) delete process.env.MOUSSE_HOME
   else process.env.MOUSSE_HOME = previousHome
   rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 })
@@ -102,7 +104,9 @@ describe('a project without Git', () => {
     await t.turn('turn', () => write(work, 'b.txt', 'b\n'))
     expect(() => git(work, 'rev-parse', '--git-dir')).toThrow()
     expect(await isGitRepository(work)).toBe(false)
-    expect(hiddenStoreFor(work)?.gitDir).toBe(t.space.store.gitDir)
+    // The store is the thread's, found from its own record; another thread's directory has none.
+    expect(threadSnapshotStore(t.directory, work)?.gitDir).toBe(t.space.store.gitDir)
+    expect(threadSnapshotStore(folder('thread-other'), work)).toBeUndefined()
   })
 
   it('keeps what the folder’s own .gitignore and the built-in list leave out of every snapshot', async () => {
@@ -119,6 +123,14 @@ describe('a project without Git', () => {
     const t = thread('a', work, 'project-1')
     const { action } = await t.turn('turn', () => write(work, 'added.txt', 'added\n'))
     expect(t.store('ls-tree', '-r', '--name-only', action.endSha).split('\n')).toEqual(['.gitignore', 'added.txt', 'kept.txt', 'src/build/keep.ts'])
+    // What the built-in list leaves out is named; the folder's own .gitignore, Git's and Mousse's folders and caches are not.
+    const reported = { path: expect.any(String), reason: 'dependency or build folder, never kept in snapshots' }
+    expect(action.git?.coverageGaps?.map((gap) => gap.path).sort()).toEqual(['.cache', '.next', '.venv', 'build', 'dist', 'node_modules', 'src/node_modules', 'target', 'venv'])
+    expect(action.git?.coverageGaps?.every((gap) => gap.reason === reported.reason)).toBe(true)
+    const receipt = new ChangeReceiptService(t.directory).list().find((item) => item.id === action.receiptId)!
+    expect(receipt.notCovered).toMatch(/^Not covered: .*node_modules \(dependency or build folder, never kept in snapshots\)/)
+    expect(action.notCovered).toBe(receipt.notCovered)
+    expect(action.reversible).toBe(true)
   })
 
   it('treats a repository with no commit the same, and leaves its own .git alone', async () => {
@@ -135,6 +147,56 @@ describe('a project without Git', () => {
     expect(gitFiles()).toBe(before)
     expect(git(work, 'for-each-ref')).toBe('')
     expect(git(work, 'status', '--porcelain')).toBe('?? a.txt')
+  })
+
+  it('keeps the store a thread started with after git init, while a new thread uses the repository', async () => {
+    const work = folder('work')
+    write(work, 'a.txt', 'one\n')
+    const t = thread('a', work, 'project-1')
+    const first = await t.turn('first', () => { write(work, 'a.txt', 'two\n'); write(work, 'b.txt', 'b\n') })
+    expect(first.action.reversible).toBe(true)
+
+    // The person makes the folder a repository with a commit, and stages another file.
+    const identity = ['-c', 'user.name=Ada', '-c', 'user.email=ada@example.test']
+    git(work, 'init', '-q', '-b', 'main')
+    git(work, 'add', 'a.txt')
+    git(work, ...identity, 'commit', '-q', '-m', 'init')
+    write(work, 'staged.txt', 'staged\n')
+    git(work, 'add', 'staged.txt')
+    const repository = () => ({ head: git(work, 'rev-parse', 'HEAD'), index: git(work, 'ls-files', '--stage'), branches: git(work, 'for-each-ref', '--format=%(refname) %(objectname)', 'refs/heads') })
+    const before = repository()
+    const storeRefs = t.store('for-each-ref', '--format=%(refname)')
+
+    // The thread keeps its store: no worktree is made for it, and its turns and Undo run there.
+    const resolved = await new WorkspaceResolver(t.directory, 'a', work).resolve('agent')
+    expect(resolved).toMatchObject({ lifecycle: 'unprovisioned', capability: { checkpointable: false, unavailableReason: 'snapshot-store' } })
+    expect(new ThreadWorkspaceManager(t.directory).load()).toBeUndefined()
+    const second = await t.turn('second', () => { write(work, 'a.txt', 'three\n'); write(work, 'c.txt', 'c\n') })
+    expect(second.action.reversible).toBe(true)
+    expect(t.store('ls-tree', '-r', '--name-only', second.action.endSha).split('\n')).toEqual(['a.txt', 'b.txt', 'c.txt', 'staged.txt'])
+    // A file the person committed is restored from the store, like any other.
+    await t.undo()
+    expect(readFileSync(join(work, 'a.txt'), 'utf8')).toBe('two\n')
+    expect(existsSync(join(work, 'c.txt'))).toBe(false)
+    // The turn before git init is still reviewed from the store.
+    const earlier = resolveReviewScope(t.directory, { kind: 'turn', turnId: 'first' })!
+    expect(earlier.unavailable).toBeUndefined()
+    const listed = await inThreadSnapshotScope(t.directory, work, () => listChangedFiles(work, earlier.range))
+    expect(listed.files.map((file) => file.path)).toEqual(['a.txt', 'b.txt'])
+    // Undo restored files only: the person's HEAD, index and branches are as they left them.
+    expect(repository()).toEqual(before)
+    expect(readFileSync(join(work, 'staged.txt'), 'utf8')).toBe('staged\n')
+    expect(git(work, 'status', '--porcelain')).toBe('A  staged.txt\n?? b.txt')
+
+    // A new thread on the folder uses the repository: Mousse's Git for it never goes through the other thread's store.
+    const fresh = folder('thread-new')
+    await withGitMutationLocks(fresh, work, 'new thread', () => {
+      expect(activeHiddenStore(work)).toBeUndefined()
+      expect(tryGit(work, ['rev-parse', 'HEAD']).stdout).toBe(before.head)
+    })
+    expect(inThreadSnapshotScope(fresh, work, () => tryGit(work, ['rev-parse', 'HEAD']).stdout)).toBe(before.head)
+    expect(inThreadSnapshotScope(t.directory, work, () => tryGit(work, ['rev-parse', '--verify', '-q', 'HEAD']).ok)).toBe(false)
+    expect(t.store('for-each-ref', '--format=%(refname)').split('\n')).toEqual(expect.arrayContaining(storeRefs.split('\n')))
   })
 
   it('leaves a nested repository with no commit out of the snapshot instead of turning Undo off', async () => {
@@ -253,15 +315,47 @@ describe('a project without Git', () => {
     expect(action.reversible).toBe(true)
   })
 
-  it.each([
-    ['total size', { bytes: 100 }, /too large \(more than/],
-    ['one large file', { fileBytes: 10 }, /too large \(big\.bin is over/]
-  ] as const)('refuses on %s', async (_label, limits, message) => {
+  it('refuses a folder past the total size', async () => {
     const work = folder('work')
     write(work, 'big.bin', 'x'.repeat(200))
-    configureSnapshotLimits(limits)
+    configureSnapshotLimits({ bytes: 100 })
     const t = thread('a', work, 'project-1')
-    await expect(t.actions.recordOutsideChanges({ threadId: 'a', conversationBranchId: 'main', workspacePath: work })).rejects.toThrow(message)
+    await expect(t.actions.recordOutsideChanges({ threadId: 'a', conversationBranchId: 'main', workspacePath: work })).rejects.toThrow(/too large \(more than 100 bytes\)/)
+  })
+
+  it('leaves a file over the size limit out, names it, and still records and undoes the rest', async () => {
+    const work = folder('work')
+    write(work, 'small.txt', 'one\n')
+    write(work, 'big.bin', 'x'.repeat(200))
+    configureSnapshotLimits({ fileBytes: 100 })
+    const t = thread('a', work, 'project-1')
+    const { action } = await t.turn('turn', () => { write(work, 'small.txt', 'two\n'); write(work, 'big.bin', 'y'.repeat(300)) })
+    expect(action).toMatchObject({ state: 'completed', reversible: true })
+    expect(t.store('ls-tree', '-r', '--name-only', action.endSha).split('\n')).toEqual(['small.txt'])
+    expect(action.git?.coverageGaps).toEqual([{ path: 'big.bin', reason: 'over 100 bytes' }])
+    const receipt = new ChangeReceiptService(t.directory).list().find((item) => item.id === action.receiptId)!
+    expect(receipt.notCovered).toBe('Not covered: big.bin (over 100 bytes).')
+    // Undo takes back what was recorded and never touches the file it left out.
+    await t.undo()
+    expect(readFileSync(join(work, 'small.txt'), 'utf8')).toBe('one\n')
+    expect(readFileSync(join(work, 'big.bin'), 'utf8')).toBe('y'.repeat(300))
+  })
+
+  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)('leaves an unreadable file out and names it, as in a worktree', async () => {
+    const work = folder('work')
+    write(work, 'a.txt', 'a\n')
+    write(work, 'locked.txt', 'secret\n')
+    const t = thread('a', work, 'project-1')
+    chmodSync(join(work, 'locked.txt'), 0o000)
+    try {
+      const { action } = await t.turn('turn', () => write(work, 'b.txt', 'b\n'))
+      expect(action).toMatchObject({ state: 'completed', reversible: true })
+      expect(action.git?.coverageGaps).toContainEqual({ path: 'locked.txt', reason: 'unreadable' })
+      expect(action.notCovered).toMatch(/locked\.txt \(unreadable\)/)
+    } finally {
+      chmodSync(join(work, 'locked.txt'), 0o600)
+    }
+    expect(readFileSync(join(work, 'locked.txt'), 'utf8')).toBe('secret\n')
   })
 
   it('a turn that makes the folder too large is recorded without its files, cannot be undone, and says why', async () => {
@@ -272,7 +366,11 @@ describe('a project without Git', () => {
     const { action } = await t.turn('turn', () => { for (let index = 0; index < 5; index += 1) write(work, `n${index}.txt`, 'x\n') })
     expect(action).toMatchObject({ state: 'completed', reversible: false, changedPaths: [] })
     expect(action.endSha).toBe(action.startSha)
-    expect(action.notice).toMatch(/Undo is off for this folder because it is too large/)
+    // Reported as Git threads report a snapshot that could not be taken: the whole folder is not covered.
+    expect(action.git?.coverageGaps).toEqual([{ path: '.', reason: 'too large (more than 3 files)' }])
+    expect(action.notCovered).toBe('Not covered: . (too large (more than 3 files)).')
+    const receipt = new ChangeReceiptService(t.directory).list().find((item) => item.id === action.receiptId)!
+    expect(receipt.notCovered).toBe(action.notCovered)
     expect(snapshotsOffReason(t.directory)).toMatch(/too large/)
     // The files are still there: nothing was taken back or lost.
     expect(readdirSync(work)).toHaveLength(6)
@@ -303,21 +401,23 @@ describe('a project without Git', () => {
     const scope = resolveReviewScope(t.directory, { kind: 'turn', turnId: 'turn' })!
     expect(scope.unavailable).toBeUndefined()
     expect(scope.cwd).toBe(work)
-    const listed = await listChangedFiles(scope.cwd, scope.range)
+    // Read in the thread's scope, as the review does; outside it the folder is just a folder.
+    const read = <T>(work: () => T): T => inThreadSnapshotScope(t.directory, scope.cwd, work)
+    const listed = await read(() => listChangedFiles(scope.cwd, scope.range))
     expect(listed.files.map((file) => ({ path: file.path, status: file.status, additions: file.additions, deletions: file.deletions }))).toEqual([
       { path: 'keep.txt', status: 'modified', additions: 1, deletions: 0 },
       { path: 'new.txt', status: 'added', additions: 1, deletions: 0 }
     ])
-    const versions = await readFileVersions(scope.cwd, scope.range, 'keep.txt')
+    const versions = await read(() => readFileVersions(scope.cwd, scope.range, 'keep.txt'))
     expect(versions.original).toMatchObject({ content: 'one\ntwo\n' })
     expect(versions.modified).toMatchObject({ content: 'one\ntwo\nthree\n' })
     // The restore review the gate shows is the same store's diff.
-    expect(restoreDiff(work, action.endSha, action.startSha)).toContain('-three')
+    expect(restoreDiff(t.directory, work, action.endSha, action.startSha)).toContain('-three')
     // The whole thread, from its first recorded action to the folder now.
     const whole = resolveReviewScope(t.directory, { kind: 'thread' })!
     expect(whole.range.from).toEqual({ kind: 'commit', sha: action.startSha })
     write(work, 'later.txt', 'later\n')
-    expect((await listChangedFiles(whole.cwd, whole.range)).files.map((file) => file.path).sort()).toEqual(['keep.txt', 'later.txt', 'new.txt'])
+    expect((await read(() => listChangedFiles(whole.cwd, whole.range))).files.map((file) => file.path).sort()).toEqual(['keep.txt', 'later.txt', 'new.txt'])
   })
 
   it('offers the snapshot workspace to Undo and review as metadata, and the worktree code never sees it', async () => {

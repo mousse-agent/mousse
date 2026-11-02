@@ -117,7 +117,9 @@ export function isUnsafeSnapshotRoot(path: string, home = homedir()): boolean {
 const UNSAFE_ROOT = 'Undo is off for this folder because it is a home or system folder.'
 
 function sizeText(bytes: number): string {
-  return bytes >= 1024 ** 3 ? `${Math.round(bytes / 1024 ** 3)} GB` : `${Math.round(bytes / 1024 ** 2)} MB`
+  if (bytes >= 1024 ** 3) return `${Math.round(bytes / 1024 ** 3)} GB`
+  if (bytes >= 1024 ** 2) return `${Math.round(bytes / 1024 ** 2)} MB`
+  return bytes >= 1024 ? `${Math.round(bytes / 1024)} KB` : `${bytes} bytes`
 }
 
 /** The files a snapshot would hold, as `git add -A` finds them: tracked by the store's index, or new and not ignored. */

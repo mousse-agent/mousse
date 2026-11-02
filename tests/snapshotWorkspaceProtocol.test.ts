@@ -8,7 +8,6 @@ import { MmsProtocolServer } from '../src/mms/protocol/server'
 import { LocalMmsClient } from '../src/mms/protocol/client'
 import { ThreadActionService } from '../src/mms/actions/ThreadActionService'
 import { configureSnapshotLimits } from '../src/mms/actions/snapshots'
-import { clearHiddenStores } from '../src/mms/git/hiddenStore'
 import { snapshotWorkspacePath, snapshotsOffReason } from '../src/mms/workspace/SnapshotWorkspace'
 import { ThreadWorkspaceManager } from '../src/mms/workspace/ThreadWorkspaceManager'
 import { gitFoundationFixture } from './fixtures/gitFoundation'
@@ -45,7 +44,6 @@ describe('Undo without Git', () => {
   afterEach(async () => {
     vi.restoreAllMocks()
     configureSnapshotLimits()
-    clearHiddenStores()
     await client?.close()
     await server?.stop()
     await mms?.stop()
@@ -158,6 +156,8 @@ describe('Undo without Git', () => {
     const [first] = new ThreadActionService(directory).list()
     expect(first).toMatchObject({ scope: 'conversation', state: 'completed' })
     expect(first!.notice).toMatch(/Undo is off for this folder because it is too large/)
+    // Reported in the shape a Git thread's snapshot gaps take: the whole folder is not covered.
+    expect(first!.notCovered).toBe('Not covered: . (too large (more than 4 files)).')
     expect(snapshotsOffReason(directory)).toMatch(/too large/)
     expect(existsSync(join(work, '.git'))).toBe(false)
     // Undo of that turn takes the conversation back only, and says so where the person sees the result.
