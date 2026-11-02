@@ -125,6 +125,11 @@ export interface ThreadAction {
    * big.bin (over 50 MB)". The whole folder (".") when its files could not be recorded at all.
    */
   notCovered?: string
+  /**
+   * What a reader of the turn needs to know about where it started, recorded when it starts: the project folder had
+   * uncommitted changes the thread's new worktree doesn't have. Nothing was blocked or copied.
+   */
+  startNote?: string
   reversible: boolean
   state: ThreadActionState
   compensationActionId?: ActionId

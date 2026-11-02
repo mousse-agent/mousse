@@ -45,7 +45,7 @@ async function threadForSend(profileId: string): Promise<string | null> {
   try {
     return await prepareComposerThread({
       thread,
-      workspace: localWorkspaceFor(store.composerWorkspaceDrafts[startId ?? '__blank__'], thread),
+      workspace: localWorkspaceFor(store.composerWorkspaceDrafts[startId ?? '__blank__'], thread, store.worktreeByDefault),
       ...composerThreadActions(),
       stillVisible,
       activate: (created) => {

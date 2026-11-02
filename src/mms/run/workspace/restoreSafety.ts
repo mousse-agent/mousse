@@ -3,7 +3,7 @@ import { realpathSync } from 'node:fs'
 import { resolve, sep } from 'node:path'
 import { tryGit } from '../../actions/git'
 import { inThreadSnapshotScope } from '../../workspace/SnapshotWorkspace'
-import { ThreadWorkspaceManager } from '../../workspace/ThreadWorkspaceManager'
+import { isProjectFolderWorkspace, ThreadWorkspaceManager } from '../../workspace/ThreadWorkspaceManager'
 import type { ThreadWorkspaceMetadata } from '../../../shared/workspace'
 import type { RunCapabilities as ProviderCapabilities } from '../../../shared/harness/types'
 import { restoreMode, type RestoreMode } from '../policy/featureGates'
@@ -75,7 +75,10 @@ export function evaluateRestore(input: {
     }
   const worktree = input.metadata.worktreePath
   const others = typeof input.others === 'function' ? input.others() : input.others
-  const conflicts = others.filter((claim) => claim.threadId !== input.threadId && pathsOverlap(claim.path, worktree))
+  // A project folder is shared by design: other threads' records of it never stop a restore, which merges in three
+  // ways and keeps what they wrote. Only a turn running there now does.
+  const shared = isProjectFolderWorkspace(input.metadata)
+  const conflicts = others.filter((claim) => claim.threadId !== input.threadId && (!shared || claim.kind === 'live_cwd') && pathsOverlap(claim.path, worktree))
   if (conflicts.length)
     return {
       action: 'refuse',

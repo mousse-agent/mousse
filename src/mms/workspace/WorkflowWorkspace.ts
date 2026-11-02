@@ -34,6 +34,7 @@ import {
 import { WorktreeIdentity } from '../worktree/WorktreeIdentity'
 import { ThreadWorkspaceManager } from './ThreadWorkspaceManager'
 import { WorkspaceResolver } from './WorkspaceResolver'
+import { PROJECT_FOLDER_WORKFLOW_REASON, threadPlacement } from './threadPlacement'
 import { repoProgramEnv, withoutRepoPrograms } from '../git/repoPrograms'
 import { isIdNamedMousseBranch, isMousseBranchName } from '../../shared/mousseBranches'
 
@@ -192,8 +193,12 @@ export async function resolveOwnedThreadWorkspace(
   signal?: AbortSignal
 ): Promise<OwnedThreadWorkspace> {
   if (signal?.aborted) throw new DomainRpcError('cancelled', 'Workflow workspace resolution cancelled')
-  const { project } = liveBinding(owner, context)
+  const { project, thread } = liveBinding(owner, context)
   if (!project) throw new DomainRpcError('project_required', 'Thread workspace requires a project')
+  // Workflows write through the thread's own worktree (its leases, receipts and step worktrees). A thread in its
+  // project's folder never gets one, so a workflow there is refused before anything is made.
+  const placement = threadPlacement(thread)
+  if (placement === 'project-folder') throw new DomainRpcError('thread_in_project_folder', PROJECT_FOLDER_WORKFLOW_REASON)
   const projectPath = canonicalPath(project.path)
   const threadDirectory = owner.threads.getThreadDir(context.threadId)
   const manager = new ThreadWorkspaceManager(threadDirectory)
@@ -247,7 +252,7 @@ export async function resolveOwnedThreadWorkspace(
       branch: execution.branch
     }
   }
-  const execution = await new WorkspaceResolver(threadDirectory, context.threadId, projectPath).resolve('agent', 'main', signal)
+  const execution = await new WorkspaceResolver(threadDirectory, context.threadId, projectPath, placement).resolve('agent', 'main', signal)
   liveBinding(owner, context)
   if (execution.lifecycle !== 'ready' || !execution.capability.gitBacked) {
     throw new DomainRpcError(

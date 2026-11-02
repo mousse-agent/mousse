@@ -90,7 +90,8 @@ import { listedProjectsFor, listedThreadsFor } from './threadVisibility'
 import { isQualifiedId } from '../../shared/threadRef'
 import { resolveThreadProjectPath } from '../data/resolveActiveProjectPath'
 import { ThreadJournal } from '../data/ThreadJournal'
-import { ThreadWorkspaceManager } from '../workspace/ThreadWorkspaceManager'
+import { PROJECT_FOLDER_PUBLISH_REASON, PROJECT_FOLDER_REASON, threadPlacement } from '../workspace/threadPlacement'
+import { isProjectFolderWorkspace, ThreadWorkspaceManager } from '../workspace/ThreadWorkspaceManager'
 import { clearStaleLeftMerges, recoveryErrorText, threadRecovery } from '../workspace/workspaceRecovery'
 import { resolveEditorFolder } from '../workspace/editorFolder'
 import type { NodeId } from '../../shared/net/ids'
@@ -787,12 +788,22 @@ function branchNameSource(ctx: HandlerContext, threadId: string): string | undef
   return first?.content ?? ctx.mms.threads.getThread(threadId)?.name
 }
 
+/**
+ * Makes sure a thread that works in its own worktree has one before a file write, terminal or Git action uses it.
+ * A thread in its project's folder (`threadPlacement`) gets none: those actions run in the project folder.
+ */
 async function ensureOwnedTaskWorkspace(ctx: HandlerContext, params: Record<string, unknown>): Promise<void> {
   if (!params.threadId) return
   const threadId = asString(params.threadId, 'threadId', 256)
-  if (!ctx.mms.threads.getThread(threadId)) throw new DomainRpcError('thread_not_found', 'Thread not found')
+  const thread = ctx.mms.threads.getThread(threadId)
+  if (!thread) throw new DomainRpcError('thread_not_found', 'Thread not found')
   const project = resolveThreadProjectPath(ctx.mms.projects, ctx.mms.threads, threadId)
   if (!project) throw new DomainRpcError('thread_has_no_folder', 'Task has no project workspace')
+  // No worktree for a thread in its project's folder; its record lets file writes and terminals be recorded and undone.
+  if (threadPlacement(thread) === 'project-folder') {
+    new ThreadWorkspaceManager(ctx.mms.threads.getThreadDir(threadId)).ensureProjectFolder(threadId, 'main', project)
+    return
+  }
   const manager = new ThreadWorkspaceManager(ctx.mms.threads.getThreadDir(threadId))
   if (!manager.load()) await manager.provision(threadId, 'main', project, undefined, undefined, undefined, { nameFrom: branchNameSource(ctx, threadId) })
   await ensureWorkspaceMaterialized(ctx, threadId, project)
@@ -826,12 +837,15 @@ interface GitMutationTarget {
  * create a worktree as a side effect.
  */
 async function gitMutationTarget(ctx: HandlerContext, p: Record<string, unknown>, refuseInThread?: 'task_branch_authoritative' | 'thread_worktree_checkpointed'): Promise<GitMutationTarget> {
-  if (refuseInThread && p.threadId !== undefined && p.threadId !== null) throw gitThreadRules.create(refuseInThread)
+  const threadId = asOptionalString(p.threadId, 256)
+  // A thread in its project's folder uses the project's Git as the person does: staging, branches and amend included.
+  const inProjectFolder = threadId !== undefined && threadPlacement(ctx.mms.threads.getThread(threadId)) === 'project-folder'
+  if (refuseInThread && p.threadId !== undefined && p.threadId !== null && !inProjectFolder) throw gitThreadRules.create(refuseInThread)
   await ensureOwnedTaskWorkspace(ctx, p)
   const root = projectRootContext(ctx, p)
-  const threadId = asOptionalString(p.threadId, 256)
-  const directory = threadId ? ctx.mms.threads.getThreadDir(threadId) : undefined
-  const workspace = directory ? new ThreadWorkspaceManager(directory).load() : undefined
+  const directory = threadId && !inProjectFolder ? ctx.mms.threads.getThreadDir(threadId) : undefined
+  const loaded = directory ? new ThreadWorkspaceManager(directory).load() : undefined
+  const workspace = loaded && !isProjectFolderWorkspace(loaded) ? loaded : undefined
   return { root, directory, workspace }
 }
 
@@ -1415,7 +1429,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const p = isObject(params) ? params : {}
       const name = asString(p.name, 'name', 512)
       const projectId = asOptionalString(p.projectId, 256)
-      const worktreeEnabled = asOptionalBoolean(p.worktreeEnabled, 'worktreeEnabled') === true
+      const worktreeEnabled = asOptionalBoolean(p.worktreeEnabled, 'worktreeEnabled')
       const projectPath = projectId
         ? ctx.mms.projects.getProject(projectId)?.path
         : undefined
@@ -2155,6 +2169,8 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         }
       }
       if (task && ctx.mms.threadRuntimes.listAgents(threadId).find((agent) => agent.id === agentId)?.workspacePolicy?.access === 'read-only') throw new DomainRpcError('terminal_not_allowed', 'Read-only agents cannot open an arbitrary shell')
+      // A thread in its project's folder has no worktree: its terminal starts in the project folder.
+      if (!metadata && task?.projectId && (routed || p.cwd === undefined)) cwd = resolveThreadProjectPath(ctx.mms.projects, ctx.mms.threads, threadId) ?? cwd
       if (metadata) {
         if (manager!.verify(metadata).lifecycle !== 'ready') throw new DomainRpcError('workspace_recovery_required', 'Task workspace requires recovery before opening a terminal')
         const projectPath = resolveThreadProjectPath(ctx.mms.projects, ctx.mms.threads, threadId)
@@ -2840,6 +2856,10 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const branchId = asOptionalString(p.conversationBranchId, 256) ?? new ThreadWorkspaceManager(operation.threadDirectory).load()?.conversationBranchId ?? 'main'
       const manager = new ThreadWorkspaceManager(operation.threadDirectory)
       const current = manager.load()
+      // Nothing to restore for a thread in its project's folder, and no worktree is made for it here either.
+      if (!current && threadPlacement(ctx.mms.threads.getThread(operation.threadId)) === 'project-folder') {
+        throw new DomainRpcError('thread_in_project_folder', PROJECT_FOLDER_REASON)
+      }
       const metadata = current
         ? await manager.restore(operation.projectPath)
         : await manager.provision(operation.threadId, branchId, operation.projectPath, undefined, undefined, undefined, { nameFrom: branchNameSource(ctx, operation.threadId) })
@@ -2856,6 +2876,8 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       if (ctx.mms.orchestrator.isConversationHistoryBusy(operation.threadId)) throw new DomainRpcError('thread_busy', 'Wait for active or queued work to finish.')
       await ensureWorkspaceMaterialized(ctx, operation.threadId, operation.projectPath)
       const workspace = new ThreadWorkspaceManager(operation.threadDirectory).load()
+      // The project folder's uncommitted changes are the person's own; this button only ever cleans a thread's worktree.
+      if (isProjectFolderWorkspace(workspace)) throw new DomainRpcError('thread_in_project_folder', 'This chat works in the project folder, whose uncommitted changes are yours; Mousse does not discard them.')
       if (!workspace || workspace.lifecycle !== 'ready') throw new DomainRpcError('workspace_not_ready', 'Thread workspace is not ready')
       // Everything uncommitted goes, the results of the thread's turns included. The files as they are now are recorded
       // as a snapshot first (the turns' receipts keep theirs), and a copy stays under refs/mousse/discarded/.
@@ -3116,8 +3138,9 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         cancelledIntegrations = cancelPendingIntegrations(operation.threadDirectory, workspace.worktreePath)
         // A left merge that was finished, aborted or replaced since is no longer offered for Abort.
         clearStaleLeftMerges(operation.threadDirectory)
-        // A folder with no worktree has nothing to publish.
-        publish = operation.projectPath && !workspace.snapshotOnly ? await new PublishService(operation.threadDirectory).recoverPending(workspace.worktreePath, operation.projectPath) : []
+        // A folder with no worktree has nothing to publish, and neither has a thread in its project's own folder: its work
+        // is already there, so there is no Publish to recover, and the person's checkout is never treated as one's target.
+        publish = operation.projectPath && !workspace.snapshotOnly && !isProjectFolderWorkspace(workspace) ? await new PublishService(operation.threadDirectory).recoverPending(workspace.worktreePath, operation.projectPath) : []
         await new ThreadActionService(operation.threadDirectory).recoverPending(workspace.worktreePath)
         await new CodeRevertService(operation.threadDirectory).recoverPending(workspace.worktreePath)
         await new UndoService(operation.threadDirectory).recoverPending(workspace.worktreePath, (target, kind) => {
@@ -3185,6 +3208,8 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const operation = threadOperationContext(ctx, p)
       await ensureWorkspaceMaterialized(ctx, operation.threadId, operation.projectPath)
       const workspace = new ThreadWorkspaceManager(operation.threadDirectory).load()
+      // A thread in its project's folder has nothing to publish: its work is already in the primary checkout.
+      if (isProjectFolderWorkspace(workspace)) return { available: false, workspace, reason: PROJECT_FOLDER_PUBLISH_REASON }
       return { available: Boolean(workspace?.lifecycle === 'ready'), workspace, sourceSha: workspace?.lifecycle === 'ready' ? workspace.snapshotSha ?? workspaceGit(workspace.worktreePath, ['rev-parse', 'HEAD']) : undefined, targetSha: workspaceGit(operation.projectPath, ['rev-parse', 'HEAD']), journalGeneration: operation.currentGeneration }
     }
     case 'publish.start': {
@@ -3194,6 +3219,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const targetBranch = asString(p.targetBranch, 'targetBranch', 512)
       await ensureWorkspaceMaterialized(ctx, operation.threadId, operation.projectPath)
       const workspace = new ThreadWorkspaceManager(operation.threadDirectory).load()
+      if (isProjectFolderWorkspace(workspace)) throw new DomainRpcError('thread_in_project_folder', PROJECT_FOLDER_PUBLISH_REASON)
       if (!workspace || workspace.lifecycle !== 'ready') throw new DomainRpcError('workspace_not_ready', 'Thread workspace is not ready')
       // The thread's name is the commit message in the primary checkout, where the person's own history reads it.
       const message = ctx.mms.threads.getThread(operation.threadId)?.name?.trim() || undefined
