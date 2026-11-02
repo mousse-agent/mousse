@@ -12,6 +12,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import type { AdapterHost, ProviderAdapter, ProviderCapabilities, TurnControl, TurnInput, TurnResult, TurnSink } from '../../src/mms/harness/adapter'
 import type { DelegateTaskInput, DelegationToolHost } from '../../src/mms/run/mcp/appTools/delegation'
 import { ThreadWorkspaceManager } from '../../src/mms/workspace/ThreadWorkspaceManager'
+import { onGitPolicyEntry, type GitPolicyEntry } from '../../src/mms/git/gitPolicy'
 import type { ProviderDriverKind } from '../../src/shared/providerInstances'
 import type { SubagentResultReport } from '../../src/shared/subagentResult'
 import { PI_TEST_CAPABILITIES } from '../support/piStub'
@@ -164,5 +165,30 @@ describe('Give each subagent its own worktree', () => {
     // The parent's commit is where the child started, and the parent is still there, unmerged.
     expect(git(projectDir, 'rev-parse', `${result.baseSha}^`) === state.parentHead || result.baseSha === state.parentHead).toBe(true)
     expect(existsSync(join(workspaceOf(d, thread.id)!.worktreePath, 'child.txt'))).toBe(false)
+  }, 60_000)
+
+  it('on, under MOUSSE_GIT_POLICY=refuse: making the subagents\' worktrees and reporting their results need nothing the central check refuses', async () => {
+    const previousMode = process.env.MOUSSE_GIT_POLICY
+    process.env.MOUSSE_GIT_POLICY = 'refuse'
+    const entries: GitPolicyEntry[] = []
+    const stop = onGitPolicyEntry((entry) => entries.push(entry))
+    try {
+      const outcomes: Record<string, Record<string, unknown>> = {}
+      const { d, thread } = daemon(true, async (delegation) => {
+        outcomes.reader = await delegate(delegation, { workspace: 'shared', role: 'research' }, 'reader')
+        outcomes.worker = await delegate(delegation, { workspace: 'isolated', role: 'implement' }, 'worker')
+      })
+      await d.orch.send('Delegate it', false, { threadId: thread.id, clientRequestId: 'parent' })
+      for (const key of ['reader', 'worker']) await waitFor(() => d.engine.getRun(outcomes[key].childRunId as string)?.status === 'completed', `the ${key} run`)
+      for (const key of ['reader', 'worker']) {
+        expect(workspaceOf(d, outcomes[key].childThreadId as string)?.lifecycle, key).toBe('ready')
+        expect(report(d, outcomes[key].delegationId as string)?.resultRef, key).toMatch(/^refs\/mousse\/delegations\//)
+      }
+      expect(entries.filter((entry) => entry.kind === 'violation').map((entry) => `${entry.command} (${entry.decision.reason})`)).toEqual([])
+    } finally {
+      stop()
+      if (previousMode === undefined) delete process.env.MOUSSE_GIT_POLICY
+      else process.env.MOUSSE_GIT_POLICY = previousMode
+    }
   }, 60_000)
 })
