@@ -512,7 +512,7 @@ export function getDefaultSettings(): MousseSettings {
     appearance: {
       theme: 'blacksphere-plus',
       accentColor: '#a785c7',
-      acrylic: true,
+      acrylic: false,
       acrylicIntensity: ACRYLIC_INTENSITY_DEFAULT,
       renderMath: true
     },

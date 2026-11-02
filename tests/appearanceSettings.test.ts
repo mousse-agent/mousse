@@ -21,10 +21,10 @@ describe('appearance settings', () => {
     expect(ids).not.toContain('system-acrylic')
   })
 
-  it('defaults acrylic on with a mid intensity dial', () => {
+  it('defaults acrylic off with a mid intensity dial', () => {
     const appearance = getDefaultSettings().appearance
     expect(appearance.theme).toBe('blacksphere-plus')
-    expect(appearance.acrylic).toBe(true)
+    expect(appearance.acrylic).toBe(false)
     expect(appearance.acrylicIntensity).toBe(55)
   })
 
