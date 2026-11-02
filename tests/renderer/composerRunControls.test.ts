@@ -124,6 +124,17 @@ describe('composer model picker', () => {
     expect(onModelSelect).toHaveBeenCalledWith('claude-subscription', 'sonnet:high', undefined)
   })
 
+  it('saves the default level as chosen when picked, and changes nothing for the level already chosen', () => {
+    const { onModelSelect } = render({ modelId: 'opus' })
+    act(() => level('Medium').click())
+    expect(onModelSelect).toHaveBeenCalledWith('claude-subscription', 'opus:medium', undefined)
+    act(() => root.unmount())
+    root = createRoot(host)
+    const chosen = render({ modelId: 'opus:high' })
+    act(() => level('High').click())
+    expect(chosen.onModelSelect).not.toHaveBeenCalled()
+  })
+
   it('saves no level for the next model when none was chosen', async () => {
     const { onModelSelect } = render({ modelId: 'opus' })
     await hover('Sonnet 5')

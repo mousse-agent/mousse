@@ -125,7 +125,7 @@ function runSections({ selection, onSelect, permission, readOnly, onClose, dropp
   onClose: () => void
   /** A level carried over from the model picked before that this one does not offer. */
   dropped?: string
-  /** The selection is the thread's: picking the level it already runs at changes nothing. */
+  /** The selection is the thread's: picking the level already chosen changes nothing. */
   current?: boolean
 }, run: ReturnType<typeof useRunOptions>): ReactNode[] {
   const { reasoning, fast, effort, pickEffort, pickSpeed } = run
@@ -133,10 +133,12 @@ function runSections({ selection, onSelect, permission, readOnly, onClose, dropp
   const modelName = parseThinkingSuffixFromModelId(selection.modelId).baseId
   const model = selection.models.find((entry) => entry.id === selection.modelId || entry.id === modelName)
   const unsupported = dropped ?? reasoning.unsupported
+  // Picking the level the thread runs at by default saves it as chosen, so it carries to the next model.
+  const chosen = parseThinkingSuffixFromModelId(selection.modelId).effort
   const sections: ReactNode[] = []
   if (reasoning.levels.length > 0) sections.push(<div key="reasoning" className="composer-mode-menu-section" role="group" aria-label="Reasoning">
     <div className="composer-mode-menu-heading">Reasoning</div>
-    {reasoning.levels.map((value) => <button key={value} type="button" role="menuitemradio" aria-checked={effort === value} disabled={readOnly} title={reasoning.descriptions[value]} className={`composer-mode-menu-item${effort === value ? ' selected' : ''}`} onClick={() => { onClose(); if (!current || value !== effort || reasoning.unsupported) pickEffort(value) }}>
+    {reasoning.levels.map((value) => <button key={value} type="button" role="menuitemradio" aria-checked={effort === value} disabled={readOnly} title={reasoning.descriptions[value]} className={`composer-mode-menu-item${effort === value ? ' selected' : ''}`} onClick={() => { onClose(); if (!current || value !== chosen) pickEffort(value) }}>
       <span>{reasoningLevelLabel(value)}</span>
       {value === reasoning.defaultLevel && <span className="composer-mode-menu-item-meta">Default</span>}
     </button>)}
