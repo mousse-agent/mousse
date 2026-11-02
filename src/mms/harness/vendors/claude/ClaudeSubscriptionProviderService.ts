@@ -889,7 +889,8 @@ export class ClaudeSubscriptionProviderService {
    */
   models(): LlmModelOption[] {
     const live = this.settings.models
-    if (!live?.length) return FALLBACK_MODELS
+    // Never listed: the CLI aliases. Listed but empty (every model needs a newer Mousse): older ones only.
+    if (!live || (!live.length && !this.settings.modelsRefreshedAt)) return FALLBACK_MODELS
     const results = this.settings.olderModels?.results
     if (!results || !Object.keys(results).length) return live
     const listed = new Set(live.map((model) => model.id))
@@ -1228,8 +1229,9 @@ export class ClaudeSubscriptionProviderService {
       // A model whose catalog route needs a newer Mousse is not offered, even when Claude Code lists it.
       const { read, gated } = this.catalogs()
       const models = claudeLiveModelsForThisMousse(listed, read, gated)
-      if (models.length) {
-        const extras = await claudeModelExtras(query, models, controller.signal)
+      // A listing whose every model is gated still replaces the saved one: it is empty, not unknown.
+      if (listed.length) {
+        const extras = models.length ? await claudeModelExtras(query, models, controller.signal) : {}
         controller.signal.throwIfAborted()
         this.settings.models = claudeModelOptions(models, extras)
         this.settings.modelsRefreshedAt = new Date().toISOString()

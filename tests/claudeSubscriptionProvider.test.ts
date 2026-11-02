@@ -1082,6 +1082,28 @@ describe('older Claude models', () => {
     expect(check.setModel.mock.calls.map(([model]) => model)).not.toContain('ember-soon[1m]')
   })
 
+  it('drops a saved listing when every model Claude Code lists now needs a newer Mousse', async () => {
+    const limited = parseModelCatalog({
+      format: 1,
+      revision: 2,
+      models: [...catalog.models, entry('ember-next', '2031-02-01', { routes: { claude: { id: 'ember-next', minMousse: '1.3.0' } } })]
+    })
+    const listed = [{ value: 'next', resolvedModel: 'ember-next', displayName: 'Next', description: 'Ember 10 · test model' }]
+    const queries = [olderQuery(standard, listed), olderQuery(standard, listed)]
+    let index = 0
+    const { service, home } = fixture(() => queries[index++]!.query, true, undefined, undefined, { modelCatalog: () => limited })
+    vi.stubEnv('MOUSSE_VERSION', '1.3.0')
+    await service.refreshModels(home)
+    await service.olderCheck
+    expect(service.models().map((model) => model.id)).toContain('next')
+    // The same listing on a Mousse below the route's limit: the saved listing goes, not just the new one.
+    vi.stubEnv('MOUSSE_VERSION', '1.2.0')
+    await service.refreshModels(home)
+    await service.olderCheck
+    expect(service.models().map((model) => model.id)).not.toContain('next')
+    expect(queries[1]!.setModel.mock.calls.map(([model]) => model)).not.toContain('next')
+  })
+
   it('replaces a check still running for an earlier key with one for the new key', async () => {
     const held = olderQuery({ ...standard, 'ember-refused': { hang: true } })
     const next = olderQuery(standard)
