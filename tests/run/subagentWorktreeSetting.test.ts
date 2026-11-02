@@ -90,7 +90,7 @@ describe('Give each subagent its own worktree', () => {
   }
 
   const delegate = (delegation: DelegationToolHost, patch: Partial<DelegateTaskInput>, id: string) =>
-    delegation.delegateTask({ prompt: 'Look at it', title: id, instanceId: 'claude', workspace: 'isolated', ...patch }, { toolCallId: id }) as Promise<Record<string, unknown>>
+    delegation.delegateTask({ prompt: `Look at the ${id} path`, title: id, instanceId: 'claude', workspace: 'isolated', ...patch }, { toolCallId: id }) as Promise<Record<string, unknown>>
   const workspaceOf = (d: ReturnType<typeof daemon>['d'], threadId: string) => new ThreadWorkspaceManager(d.store.getThreadDir(threadId)).load()
   const report = (d: ReturnType<typeof daemon>['d'], delegationId: string): SubagentResultReport | undefined =>
     (d.orch as unknown as { delegationResultReport(delegation: unknown): SubagentResultReport | undefined }).delegationResultReport(d.engine.delegations.get(delegationId))
@@ -112,6 +112,8 @@ describe('Give each subagent its own worktree', () => {
 
     const worker = d.store.getThread(outcomes.worker.childThreadId as string)!
     expect(worker.workspaceBinding).toEqual({ policy: 'isolated' })
+    // Named from its task, not the guidance before it.
+    expect(workspaceOf(d, worker.id)!.branch).toBe('mousse/look-at-the-worker-path')
     // Made at its first editing turn, from the project's committed HEAD, as before: not the parent's newer commit.
     expect(workspaceOf(d, worker.id)!.baseSha).toBe(git(projectDir, 'rev-parse', 'HEAD'))
     expect(workspaceOf(d, worker.id)!.baseSha).not.toBe(state.parentHead)
@@ -135,7 +137,8 @@ describe('Give each subagent its own worktree', () => {
       expect(child.workspaceBinding).toEqual({ policy: 'isolated', startSha: state.parentHead })
       const workspace = workspaceOf(d, child.id)!
       expect(workspace.lifecycle, key).toBe('ready')
-      expect(workspace.branch.startsWith('mousse/'), key).toBe(true)
+      // A mousse/ branch named from the subagent's task, not from the guidance its first message starts with.
+      expect(workspace.branch, key).toBe(`mousse/look-at-the-${key}-path`)
       expect(workspace.worktreePath.startsWith(home!), key).toBe(true)
       expect(workspace.worktreePath).not.toBe(parentWorkspace.worktreePath)
       // Its own checkout, at the parent's commit: the parent's committed work is there.
@@ -191,4 +194,13 @@ describe('Give each subagent its own worktree', () => {
       else process.env.MOUSSE_GIT_POLICY = previousMode
     }
   }, 60_000)
+})
+
+describe('a subagent\'s first message', () => {
+  it('names its branch from the task, without the guidance before it', async () => {
+    const { subagentPreamble, withoutSubagentPreamble } = await import('../../src/mms/run/delegation/guidance')
+    expect(withoutSubagentPreamble(`${subagentPreamble('Parent')}\n\nFix the login button`)).toBe('Fix the login button')
+    expect(withoutSubagentPreamble(`${subagentPreamble()}\n\nAdd tests\n\nwith details`)).toBe('Add tests\n\nwith details')
+    expect(withoutSubagentPreamble('Fix the login button')).toBe('Fix the login button')
+  })
 })

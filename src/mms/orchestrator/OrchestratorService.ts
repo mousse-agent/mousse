@@ -100,7 +100,7 @@ import { planWakeNotice, type NoticeContext } from '../run/delegation/notice'
 import { acknowledgeRows } from '../run/terminal'
 import { cancelQueuedWakes } from '../run/delegation/wake'
 import { taskCheckpoint } from '../run/delegation/checkpoint'
-import { subagentPreamble } from '../run/delegation/guidance'
+import { subagentPreamble, withoutSubagentPreamble } from '../run/delegation/guidance'
 import { isRunningSubagent, type SubagentNoticeItem } from '../../shared/subagents'
 import type { DelegationRequest, ForkPointSeed, ThreadCreation } from '../run/RunEngine'
 import type { HandoffItem } from '../run/handoff/budget'
@@ -4734,14 +4734,15 @@ export class OrchestratorService extends EventEmitter {
 
   /**
    * A child started with "Give each subagent its own worktree" on gets its worktree before its first turn, from the
-   * parent's HEAD recorded when it was started, on a `mousse/` branch under the Mousse home, whatever the turn's mode.
+   * parent's HEAD recorded when it was started, under the Mousse home, whatever the turn's mode. Its `mousse/` branch is named
+   * from its task (`nameFrom`), as any thread's is from its first message.
    */
-  private async seedSubagentWorkspace(threadId: string, projectPath: string, threadDir: string, signal?: AbortSignal, lease?: ThreadSession['executionLease']): Promise<void> {
+  private async seedSubagentWorkspace(threadId: string, projectPath: string, threadDir: string, signal?: AbortSignal, lease?: ThreadSession['executionLease'], nameFrom?: string): Promise<void> {
     const startSha = this.threadStore?.getThread(threadId)?.workspaceBinding?.startSha
     if (!startSha) return
     const manager = new ThreadWorkspaceManager(threadDir)
     if (manager.load()) return
-    await manager.provision(threadId, 'main', projectPath, signal, lease ?? undefined, startSha)
+    await manager.provision(threadId, 'main', projectPath, signal, lease ?? undefined, startSha, { nameFrom })
   }
 
   /** The parent's workspace path a `shared` child observes, or null when the parent has none. */
@@ -5105,9 +5106,11 @@ export class OrchestratorService extends EventEmitter {
   }
 
   /** What a thread's worktree branch is named from: its first message, else its name. */
-  private branchNameSource(threadId: string, messages?: readonly ChatMessage[]): string | undefined {
-    const first = (messages ?? this.sessions.get(threadId)?.messages ?? []).find((message) => message.role === 'user' && message.content.trim())
-    return first?.content ?? this.threadStore?.getThread(threadId)?.name
+  private branchNameSource(threadId: string, messages?: readonly ChatMessage[], pending?: string): string | undefined {
+    const first = (messages ?? this.sessions.get(threadId)?.messages ?? []).find((message) => message.role === 'user' && message.content.trim())?.content ?? pending
+    // A subagent's first message is its guidance, then its task: the branch is named from the task.
+    const text = first ? withoutSubagentPreamble(first).trim() : ''
+    return text || this.threadStore?.getThread(threadId)?.name
   }
 
   private async seedForkWorkspace(threadId: string, projectPath: string, threadDir: string, signal?: AbortSignal, lease?: ThreadSession['executionLease']): Promise<void> {
@@ -9095,9 +9098,9 @@ export class OrchestratorService extends EventEmitter {
         const threadDir = this.resolveThreadDir(session.threadId)
         if (projectPath && threadDir) {
           await this.seedForkWorkspace(session.threadId, projectPath, threadDir, opts?.externalSignal, session.executionLease)
-          await this.seedSubagentWorkspace(session.threadId, projectPath, threadDir, opts?.externalSignal, session.executionLease)
+          await this.seedSubagentWorkspace(session.threadId, projectPath, threadDir, opts?.externalSignal, session.executionLease, this.branchNameSource(session.threadId, session.messages, request.content))
           session.workspace = await new WorkspaceResolver(threadDir, session.threadId, projectPath)
-            .resolve(request.mode, 'main', opts?.externalSignal, session.executionLease ?? undefined, this.branchNameSource(session.threadId, session.messages) ?? request.content)
+            .resolve(request.mode, 'main', opts?.externalSignal, session.executionLease ?? undefined, this.branchNameSource(session.threadId, session.messages, request.content))
           session.projectCwd = session.workspace.projectPath
         } else {
           session.workspace = null
