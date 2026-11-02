@@ -71,6 +71,12 @@ export interface HostedNetHost {
   ): Promise<{ text: string; invite: InviteId; expiresAt: number }>
   /** Drops an invite whose sealed copy never reached the service. */
   revokeUnsentInvite(invite: InviteId, error: unknown): void
+  /** A computer with no network identity creates one, as the owner of a new network. */
+  createIdentity(name: string): Promise<void>
+  /** Readies protected keys for joining; the fingerprint pins the invite to them. */
+  prepareJoin(): Promise<{ transportFingerprint: string }>
+  /** `bridge.join` with an invite that arrived through Mousse ID. */
+  joinWithInvite(invite: string, name: string): Promise<void>
 }
 
 /** The module's side, called by NetService at the points where hosted behavior joins core. */
@@ -83,6 +89,13 @@ export interface HostedNet {
   /** Hosted routes are held back until the Spaces owner consents to every hosted peer. */
   consentFenced(): boolean
   cancelLogin(): { cancelled: true }
+  /** Whether `id` is a join sign-in this module started (see `joinSignIn`). */
+  handlesJoin(id: string): boolean
+  /**
+   * `net.plus.discover`, `net.plus.login.begin` and `net.plus.login.finish` on a computer with no
+   * network identity, outside NetService's serial queue: the computer joins the account's network.
+   */
+  joinSignIn(method: NetLocalMethod, params: Record<string, unknown>): Promise<unknown>
   enrollmentRequests(): { requests: PlusEnrollmentRequestView[] }
   /** Every other `net.plus.*` method, already inside NetService's serial queue. */
   request(method: NetLocalMethod, params: Record<string, unknown>): Promise<unknown>
