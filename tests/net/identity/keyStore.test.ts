@@ -136,6 +136,46 @@ describe('FileKeyStore real key files and restart', () => {
     expect(unavailable.state()).toBe('missing')
   })
 
+  it('moves keys another process saved unencrypted into the vault, and keeps them usable when the vault refuses', async () => {
+    const dir = profile(),
+      file = join(dir, 'net', 'keys.json')
+    const plain = new FileKeyStore(dir, { codec: noVault })
+    await plain.initialize({ asAuthority: true })
+    expect(JSON.parse(readFileSync(file).toString()).mode).toBe('plain')
+
+    // The vault refuses: the keys are read, stay as they are on disk, and are not written unencrypted again.
+    const refused = new FileKeyStore(dir, { codec: { ...noVault, encryptionRequired: true } })
+    expect(refused.state()).toBe('unlocked')
+    expect(refused.encryptedAtRest()).toBe(false)
+    expect(refused.nodeKeys()).toEqual(plain.nodeKeys())
+    expect(JSON.parse(readFileSync(file).toString()).mode).toBe('plain')
+    expect(() => refused.putSecret('new', Buffer.from('x'))).toThrow(expect.objectContaining({ code: 'keystore_locked' }))
+
+    // The vault works: the same keys are moved into it at once.
+    const storage = vault()
+    const moved = new FileKeyStore(dir, { codec: storage.codec })
+    expect(moved.state()).toBe('unlocked')
+    expect(moved.encryptedAtRest()).toBe(true)
+    expect(moved.nodeKeys()).toEqual(plain.nodeKeys())
+    const stored = readFileSync(file).toString()
+    expect(JSON.parse(stored).mode).toBe('vault')
+    expect(stored).not.toContain('PRIVATE KEY')
+    expect(new FileKeyStore(dir, { codec: storage.codec }).nodeKeys()).toEqual(plain.nodeKeys())
+  })
+
+  it('protects unencrypted keys with a passphrase when the vault refuses', async () => {
+    const dir = profile()
+    await new FileKeyStore(dir, { codec: noVault }).initialize({ asAuthority: false })
+    const refused = { ...noVault, encryptionRequired: true }
+    const keys = new FileKeyStore(dir, { codec: refused })
+    keys.protect('a phrase')
+    expect(keys.encryptedAtRest()).toBe(true)
+    const reopened = new FileKeyStore(dir, { codec: refused })
+    expect(reopened.state()).toBe('locked')
+    await reopened.unlock('a phrase')
+    expect(reopened.nodeKeys()).toEqual(keys.nodeKeys())
+  })
+
   it('creates passphrase-protected keys after the system keychain refuses', async () => {
     const dir = profile(),
       refused = { ...noVault, encryptionRequired: true },
