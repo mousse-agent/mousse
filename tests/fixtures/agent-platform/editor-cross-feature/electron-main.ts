@@ -106,7 +106,6 @@ async function run(): Promise<void> {
       if (!agentId) throw new Error('Published renderer agent was not persisted')
       const storedAgent = await gui.runWithSender(win.webContents, () => gui.request<{ visual?: { palette?: string } }>('agentDefinitions.get', { profileId: config.profileId, id: agentId }))
       const palette = storedAgent.visual?.palette
-      const appearanceAccessible = true
       await click('[data-fixture="workflows"]')
       await waitFor('Boolean(document.querySelector("[data-workflow-library]"))', 'workflow library')
       await click('[data-action="new-workflow"]')
@@ -148,7 +147,7 @@ async function run(): Promise<void> {
         await delay(50)
       }
       if (!importedId) throw new Error('UI import did not persist a second workflow: ' + await js(`document.querySelector('[data-import-error]')?.textContent ?? document.body.innerText`))
-      writeFileSync(config.evidence, JSON.stringify({ ok: true, agentId, prompt, palette, appearanceAccessible, workflowId, importedId, semantic }))
+      writeFileSync(config.evidence, JSON.stringify({ ok: true, agentId, prompt, palette, workflowId, importedId, semantic }))
     } else {
       const prompt = 'Run through the production renderer bridge.'
       const palette = JSON.parse(await js<string>('document.querySelector("#appearance-value").textContent')).palette
