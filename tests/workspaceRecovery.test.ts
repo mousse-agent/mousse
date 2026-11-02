@@ -11,7 +11,10 @@ import { describeRecovery, recoveryErrorText } from '../src/mms/workspace/worksp
 import { ManagedConflictService } from '../src/mms/actions/ManagedConflictService'
 import { tryGit } from '../src/mms/actions/git'
 import { mergeIdentity } from '../src/mms/actions/leftMerge'
-import { readFileSync, rmSync, symlinkSync } from 'node:fs'
+import { onGitPolicyEntry, type GitPolicyEntry } from '../src/mms/git/gitPolicy'
+import { ensureSnapshotWorkspace } from '../src/mms/workspace/SnapshotWorkspace'
+import { existsSync, readFileSync, realpathSync, rmSync, symlinkSync } from 'node:fs'
+import { randomUUID } from 'node:crypto'
 import { vi } from 'vitest'
 import { cancelPendingIntegrations } from '../src/mms/agents/ChildAgentIntegrationService'
 import { ThreadJournal } from '../src/mms/data/ThreadJournal'
@@ -244,10 +247,10 @@ describe('through the daemon', () => {
     await mms.start()
     const thread = mms.threads.createThread('Waiting', mms.projects.openProject(projectPath).id)
     const directory = mms.threads.getThreadDir(thread.id)
-    const cwd = (await new WorkspaceResolver(directory, thread.id, f.repo).resolve('agent')).workspacePath!
+    const cwd = (await new WorkspaceResolver(directory, thread.id, projectPath).resolve('agent')).workspacePath!
     const call = (method: string, params: Record<string, unknown> = {}) => dispatchMethod({ mms, globalSequence: () => 0 }, method, { threadId: thread.id, ...params })
     const recovery = async () => (await call('workspace.getStatus') as { recovery?: unknown }).recovery
-    return { mms, directory, cwd, call, recovery }
+    return { mms, directory, cwd, call, recovery, threadId: thread.id, projectId: thread.projectId! }
   }
 
   it('workspace.getStatus reports a Publish that did not finish, and operations.recover settles it', async () => {
@@ -353,6 +356,76 @@ describe('through the daemon', () => {
       vi.restoreAllMocks()
       await d.mms.stop()
     }
+  })
+
+  describe('under MOUSSE_GIT_POLICY=refuse', () => {
+    let entries: GitPolicyEntry[]
+    let stop: () => void
+    const previous = process.env.MOUSSE_GIT_POLICY
+    beforeEach(() => {
+      process.env.MOUSSE_GIT_POLICY = 'refuse'
+      entries = []
+      stop = onGitPolicyEntry((entry) => entries.push(entry))
+    })
+    afterEach(() => {
+      stop()
+      if (previous === undefined) delete process.env.MOUSSE_GIT_POLICY
+      else process.env.MOUSSE_GIT_POLICY = previous
+    })
+    const violations = () => entries.filter((entry) => entry.kind === 'violation').map((entry) => `${entry.command} (${entry.decision.reason})`)
+
+    it('a thread in a folder without Git, paused by a waiting operation, shows the banner, and Try recovery runs with no violation', async () => {
+      const folder = join(f.root, 'plain-folder')
+      mkdirSync(folder)
+      writeFileSync(join(folder, 'notes.txt'), 'one\n')
+      const d = await daemonThread(folder)
+      try {
+        // The thread records its turns in a hidden store, since the folder has no Git of its own.
+        // The thread records its turns in a hidden store, as its first turn does, and has no worktree.
+        const store = ensureSnapshotWorkspace({ threadDirectory: d.directory, threadId: d.threadId, workTree: folder, projectId: d.projectId })
+        await new ThreadActionService(d.directory).runCheckpointedAction({ ...actionOptions(store.record.workTree, 'turn-1'), threadId: d.threadId }, () => writeFileSync(join(folder, 'notes.txt'), 'two\n'))
+        expect(new ThreadWorkspaceManager(d.directory).load()).toBeUndefined()
+        expect(new ThreadWorkspaceManager(d.directory).loadOrSnapshot()).toMatchObject({ snapshotOnly: true, worktreePath: realpathSync(folder) })
+        expect(await d.recovery()).toBeUndefined()
+        // Mousse stopped while it recorded the next turn: its intent is written, its snapshot is not.
+        const [previousAction] = new ThreadActionService(d.directory).list().slice(-1)
+        const interrupted = { ...structuredClone(previousAction!), id: randomUUID(), turnId: 'turn-2', startSha: previousAction!.endSha, state: 'running' as const, receiptId: undefined, completedAt: undefined }
+        writeFileSync(join(folder, 'notes.txt'), 'three\n')
+        new ThreadJournal(d.directory).append({ operationId: interrupted.id, operationType: 'action-checkpoint', state: 'prepared', details: { action: interrupted, actionState: 'completed' } })
+        // Before, only a worktree's workspace.json was read, and this thread showed nothing.
+        expect(await d.recovery()).toEqual({ kind: 'paused', reason: 'The action-checkpoint operation did not finish.', operationId: interrupted.id, operationType: 'action-checkpoint' })
+        // Try recovery retakes the snapshot through the thread's hidden store, and nothing waits after it.
+        await expect(d.call('operations.recover')).resolves.toEqual({ ok: true, settled: true })
+        expect(await d.recovery()).toBeUndefined()
+        expect(new ThreadJournal(d.directory).latestByOperation().get(interrupted.id)?.state).toBe('completed')
+        // The folder stays the person's: no Git of its own appeared in it.
+        expect(existsSync(join(folder, '.git'))).toBe(false)
+        expect(violations()).toEqual([])
+        // Nothing ran beyond what the method declares either.
+        expect(entries).toEqual([])
+      } finally {
+        await d.mms.stop()
+      }
+    })
+
+    it('Try recovery and Abort the merge on a worktree thread run with no violation', async () => {
+      const d = await daemonThread()
+      try {
+        const prePublishSha = git(f.repo, 'rev-parse', 'HEAD')
+        new ThreadJournal(d.directory).append({ operationId: 'interrupted', operationType: 'publish', state: 'prepared', expectedPreState: { prePublishSha, targetBranch: git(f.repo, 'branch', '--show-current'), sourceSha: git(d.cwd, 'rev-parse', 'HEAD') } })
+        await expect(d.call('operations.recover')).resolves.toEqual({ ok: true, settled: true })
+        const { before } = leftPublishMerge(d.directory)
+        const aborted = await d.call('operations.abort', { operationId: 'old-publish' }) as { preservedRef: string }
+        expect(mergeHead(f.repo).ok).toBe(false)
+        expect(git(f.repo, 'rev-parse', 'HEAD')).toBe(before)
+        expect(git(f.repo, 'rev-parse', '--verify', aborted.preservedRef)).toMatch(/^[0-9a-f]{40}$/)
+        expect(violations()).toEqual([])
+        // Nothing ran beyond what the method declares either.
+        expect(entries).toEqual([])
+      } finally {
+        await d.mms.stop()
+      }
+    })
   })
 
   it('operations.recover refuses with what stopped recovery, not an internal error', async () => {

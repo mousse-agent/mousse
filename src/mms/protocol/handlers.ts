@@ -91,7 +91,7 @@ import { isQualifiedId } from '../../shared/threadRef'
 import { resolveThreadProjectPath } from '../data/resolveActiveProjectPath'
 import { ThreadJournal } from '../data/ThreadJournal'
 import { ThreadWorkspaceManager } from '../workspace/ThreadWorkspaceManager'
-import { clearStaleLeftMerges, describeRecovery, recoveryErrorText } from '../workspace/workspaceRecovery'
+import { clearStaleLeftMerges, recoveryErrorText, threadRecovery } from '../workspace/workspaceRecovery'
 import { resolveEditorFolder } from '../workspace/editorFolder'
 import type { NodeId } from '../../shared/net/ids'
 import { scheduledJobOptionsDepsFrom, validateScheduledJobOptions, type ScheduledJobOptionsDeps } from '../scheduled/validateJobOptions'
@@ -2803,8 +2803,9 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const metadata = stored && lookup.projectPath ? manager.verify(stored) : stored
       // Never restores: the hover card and the active-project lookup call this for passive reads.
       const marker = stored && !existsSync(stored.worktreePath) ? readCleanupMarker(ctx.mms.threads.lifecycleStore, lookup.threadId) : undefined
-      // Why every turn, Undo and Publish are refused, for the banner and the CLI; absent while the thread is fine.
-      const recovery = metadata && lookup.projectPath ? describeRecovery(lookup.threadDirectory, metadata) : undefined
+      // What the thread waits on, for the banner and the CLI; absent while nothing does. A thread recording into a hidden
+      // store (no Git of its own) is read through `loadOrSnapshot`, so it shows the banner too.
+      const recovery = threadRecovery(lookup.threadDirectory, lookup.projectPath)
       return {
         metadata,
         ...(recovery ? { recovery } : {}),
@@ -3129,7 +3130,8 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         })
         // Last, since it waits for every other operation: a release of old Undo history that stopped halfway is finished
         // by the release itself, limited to the ones that stopped.
-        const releases = [...new ThreadJournal(operation.threadDirectory).latestByOperation().values()].filter((entry) => entry.operationType === 'undo-ref-release' && entry.state === 'prepared').length
+        // A hidden store's release never leaves one stopped halfway; it refuses whole, and is said below if anything waits.
+        const releases = workspace.snapshotOnly ? 0 : [...new ThreadJournal(operation.threadDirectory).latestByOperation().values()].filter((entry) => entry.operationType === 'undo-ref-release' && entry.state === 'prepared').length
         if (releases) {
           try {
             const released = await new ReceiptRefReleaseService(ctx.mms.threads.lifecycleStore, operation.threadId).release(workspace.worktreePath, { limit: releases })
@@ -3146,9 +3148,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         throw new DomainRpcError(isLeaseBusy(error) ? 'thread_busy' : 'recovery_failed', isLeaseBusy(error) ? THREAD_BUSY_TEXT : recoveryErrorText(error))
       }
       // What still waits after this attempt, in plain words: recovery reports the truth, not only that it ran.
-      const manager = new ThreadWorkspaceManager(operation.threadDirectory)
-      const stored = manager.load()
-      const left = stored ? describeRecovery(operation.threadDirectory, manager.verify(stored)) : undefined
+      const left = threadRecovery(operation.threadDirectory, operation.projectPath)
       const stillWaiting = !left ? undefined
         : publish.some((item) => item.state === 'pending') && left.kind === 'publish' ? "the project folder can't be read, so Mousse can't tell yet whether the Publish reached its branch"
         : releaseRetained && left.operationType === 'undo-ref-release' ? `old Undo history could not be released yet: ${releaseRetained}`

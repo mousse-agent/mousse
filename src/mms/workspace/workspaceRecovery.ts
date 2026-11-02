@@ -2,6 +2,7 @@ import { existsSync } from 'node:fs'
 import { ThreadJournal, type ThreadJournalRecord } from '../data/ThreadJournal'
 import { leftMergeRefusal } from '../actions/leftMerge'
 import type { ThreadWorkspaceMetadata, WorkspaceRecovery } from '../../shared/workspace'
+import { ThreadWorkspaceManager } from './ThreadWorkspaceManager'
 
 /** Journal states of an operation that has not finished (`ThreadWorkspaceManager.hasPendingOperation`). */
 const PENDING_STATES = ['prepared', 'git_applied', 'context_pending', 'recovery_required']
@@ -70,7 +71,8 @@ export function describeRecovery(threadDirectory: string, verified: ThreadWorksp
   // Turns, Undo and Publish are refused until this is recovered.
   const waiting = latest.find((entry) => PENDING_STATES.includes(entry.state) && !PUBLISH_TYPES.includes(entry.operationType))
   if (waiting) return { kind: 'paused', reason: errorOf(waiting) ?? `The ${waiting.operationType} operation did not finish.`, ...operationOf(waiting) }
-  if (verified.lifecycle === 'recovery_required') return { kind: 'paused', reason: 'Git cannot read the worktree.' }
+  // A folder with no Git of its own (`snapshotOnly`) has no worktree for Git to read: only a waiting operation pauses it.
+  if (!verified.snapshotOnly && verified.lifecycle === 'recovery_required') return { kind: 'paused', reason: 'Git cannot read the worktree.' }
 
   // Nothing is refused, but Git keeps a merge open in that folder until it is aborted or finished.
   for (const entry of latest) {
@@ -88,4 +90,18 @@ export function describeRecovery(threadDirectory: string, verified: ThreadWorksp
   const publish = latest.find((entry) => PENDING_STATES.includes(entry.state) && PUBLISH_TYPES.includes(entry.operationType))
   if (publish) return { kind: 'publish', reason: errorOf(publish) ?? 'A Publish did not finish.', ...operationOf(publish) }
   return undefined
+}
+
+/**
+ * What the thread is waiting on now, for `workspace.getStatus` and for what `operations.recover` leaves. A thread with a
+ * worktree is read from `workspace.json`, verified, and only while it has a project folder (`projectPath`). A thread
+ * that records into a hidden store (a folder without Git, or a standalone thread) is read through `loadOrSnapshot()`,
+ * so a pending operation there shows the banner too; it is never verified with Git, since its folder has none.
+ */
+export function threadRecovery(threadDirectory: string, projectPath: string | undefined): WorkspaceRecovery | undefined {
+  const manager = new ThreadWorkspaceManager(threadDirectory)
+  const stored = manager.load()
+  if (stored) return projectPath ? describeRecovery(threadDirectory, manager.verify(stored)) : undefined
+  const snapshot = manager.loadOrSnapshot()
+  return snapshot ? describeRecovery(threadDirectory, snapshot) : undefined
 }

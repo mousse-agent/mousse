@@ -265,5 +265,5 @@ export const USER_REQUEST_LABELS: Partial<Record<ProtocolMethod, string>> = {
   'workspace.discardPendingChanges': 'Discard changes',
   'publish.start': 'Publish',
   'operations.abort': 'Abort',
-  'operations.recover': 'Recover'
+  'operations.recover': 'Try recovery'
 }
