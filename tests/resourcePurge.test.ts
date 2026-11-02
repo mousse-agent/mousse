@@ -8,6 +8,8 @@ import { lifecycleGit as git, WorktreeRetirementService } from '../src/mms/lifec
 import { resolveRepositoryIdentity } from '../src/mms/git/RepositoryIdentity'
 import { registerThreadLifecycleGate } from '../src/mms/queue/ThreadLifecycleAdmission'
 import { createHash } from 'node:crypto'
+import { preserveBeforeAbort } from '../src/mms/actions/leftMerge'
+import { ThreadJournal } from '../src/mms/data/ThreadJournal'
 
 const roots: string[] = []
 afterEach(() => { vi.restoreAllMocks(); for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }) })
@@ -43,17 +45,28 @@ test('complete purge removes exclusive checkout, refs and task data and retains 
   expect(() => f.store.registerTask({ taskId: 'task', location: f.location, creating: true })).toThrow(/tombstone/)
   expect((await f.coordinator.purge({ taskId: 'task', operationId: 'purge' })).state).toBe('purged')
 })
-test('a purge releases the files the thread’s restores kept and leaves another thread’s', async () => {
+test('a purge releases the files the thread’s aborts kept, asks first while they may be the only copy, and leaves another thread’s', async () => {
   const f = fixture({ git: true })
-  const head = git(f.repo, ['rev-parse', 'HEAD'])
-  // `provision` is an operation in the thread's journal; `other-operation` is not.
-  git(f.repo, ['update-ref', 'refs/mousse/preserved/provision-abc', head])
-  git(f.repo, ['update-ref', 'refs/mousse/preserved/other-operation-abc', head])
+  const keep = (operationId: string, at: number) => {
+    vi.useFakeTimers({ toFake: ['Date'] }); vi.setSystemTime(at)
+    try {
+      const ref = preserveBeforeAbort(f.worktree, operationId)
+      new ThreadJournal(f.location).append({ operationId, operationType: 'publish', state: 'cancelled', details: { conflictAborted: true, preservedRef: ref } })
+      return ref
+    } finally { vi.useRealTimers() }
+  }
+  const old = keep('old-abort', Date.now() - 40 * 24 * 60 * 60 * 1000)
+  const young = keep('young-abort', Date.now())
+  // Another thread's abort, whose id starts with this thread's: never this thread's.
+  const theirs = preserveBeforeAbort(f.worktree, 'old-abort-other')
   await f.coordinator.trash({ taskId: 'task', operationId: 'trash' })
   const preview = await f.coordinator.cleanup.preview('task'); expect(preview.blockers).toEqual([])
-  expect(preview.items.filter((item) => item.kind === 'ref' && item.identity.startsWith('refs/mousse/preserved/')).map((item) => item.identity)).toEqual(['refs/mousse/preserved/provision-abc'])
-  expect((await f.coordinator.purge({ taskId: 'task', operationId: 'purge', expectedGeneration: preview.generation, previewDigest: preview.digest })).state).toBe('purged')
-  expect(git(f.repo, ['for-each-ref', '--format=%(refname)', 'refs/mousse/', 'refs/heads/mousse/'])).toBe('refs/mousse/preserved/other-operation-abc')
+  const kept = preview.items.filter((item) => item.kind === 'ref' && item.identity.startsWith('refs/mousse/preserved/'))
+  expect(kept.map((item) => [item.identity, Boolean(item.discardRequired)]).sort()).toEqual([[old, false], [young, true]].sort())
+  // Automatic cleanup keeps the thread while the young ones may be the only copy.
+  await expect(f.coordinator.purge({ taskId: 'task', operationId: 'purge', expectedGeneration: preview.generation, previewDigest: preview.digest })).rejects.toMatchObject({ code: 'resource_purge_discard_required' })
+  expect((await f.coordinator.purge({ taskId: 'task', operationId: 'purge', expectedGeneration: preview.generation, previewDigest: preview.digest, discard: true, human: true })).state).toBe('purged')
+  expect(git(f.repo, ['for-each-ref', '--format=%(refname)', 'refs/mousse/', 'refs/heads/mousse/'])).toBe(theirs)
 })
 test('dirty sole copy needs a human exact preview discard; automatic request preserves it', async () => {
   const f = fixture({ git: true }); writeFileSync(join(f.worktree, 'secret.txt'), 'only copy')

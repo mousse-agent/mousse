@@ -93,6 +93,17 @@ export interface TaskLifecycleRecord {
   cleanupOwner?: { pid: number; processInstanceId: string; token: string }
 }
 
+/** Where Mousse keeps files a restore or an abort set aside before writing over them. */
+export const PRESERVED_REFS = 'refs/mousse/preserved/'
+
+/** The thread journal's operation type for an expiry of those files (`expirePreservedFiles`). */
+export const PRESERVED_EXPIRY_OPERATION = 'preserved-files-expired'
+
+/** Whether a purge item is files a restore kept (a `refs/mousse/preserved/` ref), which may be the only copy of a file. */
+export function isKeptFilesItem(item: Pick<LifecyclePurgeItem, 'kind' | 'identity'>): boolean {
+  return item.kind === 'ref' && item.identity.startsWith(PRESERVED_REFS)
+}
+
 export interface LifecyclePurgeItem {
   id: string
   kind: 'worktree' | 'ref' | 'path' | 'scheduled-row'

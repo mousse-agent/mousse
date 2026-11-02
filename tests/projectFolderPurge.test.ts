@@ -10,6 +10,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { ThreadActionService } from '../src/mms/actions/ThreadActionService'
 import { ThreadJournal } from '../src/mms/data/ThreadJournal'
+import { preserveBeforeAbort } from '../src/mms/actions/leftMerge'
 import { ResourceLifecycleCoordinator } from '../src/mms/lifecycle/ResourceLifecycleCoordinator'
 import { ResourceLifecycleStore } from '../src/mms/lifecycle/ResourceLifecycleStore'
 import { ResourcePurgeService } from '../src/mms/lifecycle/ResourcePurgeService'
@@ -43,12 +44,12 @@ async function fixture() {
   const head = git(repo, ['rev-parse', 'HEAD'])
   git(repo, ['update-ref', 'refs/mousse/threads/other/main', head])
   git(repo, ['update-ref', 'refs/mousse/preserved/op-1-abc', head])
-  // Files a restore of this thread kept go with the thread.
-  const operation = new ThreadJournal(location, { readOnly: true }).list()[0]!.operationId
-  git(repo, ['update-ref', `refs/mousse/preserved/${operation}-def`, head])
+  // Files an abort of this thread kept go with the thread, but only with the person's say while they may be the only copy.
+  const kept = preserveBeforeAbort(repo, 'abort-op')
+  new ThreadJournal(location).append({ operationId: 'abort-op', operationType: 'publish', state: 'cancelled', details: { conflictAborted: true, preservedRef: kept } })
 
   const coordinator = new ResourceLifecycleCoordinator(store, { drain: async () => {}, settleMutationOwnership: async () => {}, projectIndex: () => {}, projectPurged: () => {} })
-  return { location, repo, store, coordinator }
+  return { location, repo, store, coordinator, kept }
 }
 
 const refsIn = (repo: string) => git(repo, ['for-each-ref', '--format=%(refname)', 'refs/mousse/']).split('\n').filter(Boolean).sort()
@@ -71,11 +72,15 @@ test('purging a project-folder thread releases its pins and receipt refs only, a
   expect(preview.blockers).toEqual([])
   const refItems = preview.items.filter((item) => item.kind === 'ref').map((item) => item.identity).sort()
   expect(refItems).toEqual(before.filter((ref) => ref.startsWith('refs/mousse/changes/') || ref === 'refs/mousse/threads/task/main' || (ref.startsWith('refs/mousse/preserved/') && ref !== 'refs/mousse/preserved/op-1-abc')))
-  expect(refItems.filter((ref) => ref.startsWith('refs/mousse/preserved/'))).toHaveLength(1)
+  expect(refItems.filter((ref) => ref.startsWith('refs/mousse/preserved/'))).toEqual([f.kept])
+  expect(preview.items.find((item) => item.identity === f.kept)).toMatchObject({ discardRequired: true, reason: expect.stringMatching(/^Files a restore set aside before writing over them, kept until \d{4}-\d{2}-\d{2}; they may be the only copy$/) })
+  // Without the person's discard the purge refuses and the kept files stay.
+  await expect(f.coordinator.purge({ taskId: 'task', operationId: 'purge', expectedGeneration: preview.generation, previewDigest: preview.digest })).rejects.toMatchObject({ code: 'resource_purge_discard_required' })
+  expect(refsIn(f.repo)).toContain(f.kept)
   // No worktree item and no path in the person's folder.
   expect(preview.items.some((item) => item.kind === 'worktree' || (item.kind === 'path' && item.identity.startsWith(f.repo)))).toBe(false)
 
-  const record = await f.coordinator.purge({ taskId: 'task', operationId: 'purge', expectedGeneration: preview.generation, previewDigest: preview.digest })
+  const record = await f.coordinator.purge({ taskId: 'task', operationId: 'purge', expectedGeneration: preview.generation, previewDigest: preview.digest, discard: true, human: true })
   expect(record.state).toBe('purged')
   expect(existsSync(record.location)).toBe(false)
   expect(refsIn(f.repo)).toEqual(['refs/mousse/preserved/op-1-abc', 'refs/mousse/threads/other/main'])
@@ -96,7 +101,7 @@ test('a purge that stops partway through the refs resumes and finishes releasing
     if (item.kind === 'ref' && ++refsRemoved === 2) throw new Error('interrupted')
     return remove.apply(this, args)
   })
-  await expect(f.coordinator.purge({ taskId: 'task', operationId: 'purge', expectedGeneration: preview.generation, previewDigest: preview.digest })).rejects.toBeDefined()
+  await expect(f.coordinator.purge({ taskId: 'task', operationId: 'purge', expectedGeneration: preview.generation, previewDigest: preview.digest, discard: true, human: true })).rejects.toBeDefined()
   expect(f.store.require('task').state).toBe('purge-started')
   vi.restoreAllMocks()
 

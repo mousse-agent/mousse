@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import { readFileSync, statSync } from 'node:fs'
-import { MOUSSE_COMMIT_ENV, git, tryGit } from './git'
+import { git, mousseCommitEnvNow, tryGit } from './git'
 import { worktreeTree } from './snapshots'
 
 /**
@@ -72,7 +72,7 @@ export function preserveBeforeAbort(folder: string, operationId: string): string
   const top = git(folder, ['rev-parse', '--show-toplevel'])
   const tree = worktreeTree(top)
   const head = tryGit(top, ['rev-parse', '--verify', '-q', 'HEAD^{commit}']).stdout
-  const sha = git(top, ['commit-tree', tree, ...(head ? ['-p', head] : []), '-m', 'mousse snapshot: files kept before an abort', '-m', `Mousse-Operation: ${operationId}`], MOUSSE_COMMIT_ENV)
+  const sha = git(top, ['commit-tree', tree, ...(head ? ['-p', head] : []), '-m', 'mousse snapshot: files kept before an abort', '-m', `Mousse-Operation: ${operationId}`], mousseCommitEnvNow())
   const ref = `refs/mousse/preserved/${operationId}-abort-${sha.slice(0, 12)}`
   git(top, ['update-ref', '--no-deref', ref, sha])
   return ref

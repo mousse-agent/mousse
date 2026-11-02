@@ -109,7 +109,7 @@ import { RedoService } from '../actions/RedoService'
 import { CodeRevertService } from '../actions/CodeRevertService'
 import { ConversationBranchService } from '../actions/ConversationBranchService'
 import { discardPendingChanges, git as workspaceGit } from '../actions/git'
-import { takeSnapshot } from '../actions/snapshots'
+import { abortPreservedNotice, takeSnapshot } from '../actions/snapshots'
 import { randomUUID } from 'node:crypto'
 import { ManagedConflictService } from '../actions/ManagedConflictService'
 import { cancelPendingIntegrations } from '../agents/ChildAgentIntegrationService'
@@ -3200,8 +3200,8 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         // Why the merge could not be aborted is for the person to read in the banner or the CLI.
         throw new DomainRpcError(isLeaseBusy(error) ? 'thread_busy' : 'abort_failed', isLeaseBusy(error) ? THREAD_BUSY_TEXT : recoveryErrorText(error))
       }
-      // Every file as it was before the abort, conflicted ones with their edits, is kept under this ref.
-      return { ok: true, preservedRef: aborted.preservedRef }
+      // Every file as it was before the abort, conflicted ones with their edits, is kept under this ref for the thread's Undo window.
+      return { ok: true, preservedRef: aborted.preservedRef, notice: abortPreservedNotice(aborted.preservedRef, new UndoRetentionService(operation.threadDirectory).policy().windowMs) }
     }
     case 'publish.status': {
       const p = isObject(params) ? params : {}

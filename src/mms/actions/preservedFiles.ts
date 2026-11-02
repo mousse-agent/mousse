@@ -1,43 +1,68 @@
 import { randomUUID } from 'node:crypto'
-import { ThreadJournal } from '../data/ThreadJournal'
+import { ThreadJournal, type ThreadJournalRecord } from '../data/ThreadJournal'
 import { waitForFolderAccess } from '../files/folderAccess'
 import { withGitAccess } from '../git/gitPolicy'
 import type { ThreadLeaseHandle } from '../queue/ThreadExecutionLease'
 import { collectStoreGarbage, threadSnapshotStore } from '../workspace/SnapshotWorkspace'
+import { PRESERVED_EXPIRY_OPERATION, PRESERVED_REFS } from '../../shared/resourceLifecycle'
 import { withGitMutationLocks } from './GitOperationCoordinator'
 import { git } from './git'
 import { UndoRetentionService } from './UndoRetentionService'
 
 /**
- * Files a restore found in its way, or an abort was about to rewrite, are kept as one commit under
- * `refs/mousse/preserved/<operation>-…` (see `moveFiles` and `preserveBeforeAbort`). The ref names the operation that
- * wrote it, which is how a thread knows the ref is its own.
+ * Files a restore found in its way, or an abort was about to rewrite, are kept as one commit under a
+ * `refs/mousse/preserved/` ref. Two writers name them:
+ * - `moveFiles` (Undo, Redo, revert, switching conversation branches): `<operation>-<12 hex>`, where the operation is a
+ *   UUID Mousse made and recorded in the thread's journal under one of {@link RESTORE_OPERATION_TYPES}.
+ * - `preserveBeforeAbort`: `<operation>-abort-<12 hex>`, and the abort records that exact name as `preservedRef`.
+ * A thread owns a ref only by one of these two exact shapes, so an operation id that is a prefix of another thread's
+ * (a client may choose a Publish's id) never claims it.
  */
-export const PRESERVED_REFS = 'refs/mousse/preserved/'
+export { PRESERVED_REFS }
 
-/** The journal record of an expiry: which refs went, at which commit, and the window they were kept for. */
-export const PRESERVED_EXPIRY_OPERATION = 'preserved-files-expired'
+/** The journal record of an expiry: an intent (`planned`), then its outcome, with exactly the refs that went. */
+export { PRESERVED_EXPIRY_OPERATION }
 
-const ACTIVE = ['planned', 'running', 'prepared', 'git_applied', 'context_pending', 'recovery_required']
+/** Operation types whose restores write `<operation>-<12 hex>` refs. */
+const RESTORE_OPERATION_TYPES = new Set(['undo', 'redo', 'change-undo', 'change-redo', 'code-revert', 'conversation-activate'])
+const UUID = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
+const OPERATION_ID = new RegExp(`^${UUID}$`)
+const RESTORE_REF = new RegExp(`^refs/mousse/preserved/(${UUID})-[0-9a-f]{12}$`)
+const ABORT_REF = /^refs\/mousse\/preserved\/[^\s\0]+-abort-[0-9a-f]{12}$/
 
-/** The operations in a thread's journal. Read only. */
-export function threadOperationIds(threadDirectory: string): Set<string> {
-  return new Set(new ThreadJournal(threadDirectory, { readOnly: true }).list().map((entry) => entry.operationId).filter((id) => typeof id === 'string' && id.length > 0))
+export interface ThreadPreservedIndex {
+  /** Whether the ref is the thread's own: written by one of its operations, by the exact name that writer uses. */
+  owns(ref: string): boolean
+  /**
+   * When the thread's journal last recorded the operation that wrote the ref, in milliseconds of Mousse's clock.
+   * Undefined for a ref that is not the thread's, or whose record has no readable time.
+   */
+  recordedAt(ref: string): number | undefined
 }
 
-/** Whether `ref` holds files one of `operations` kept: `refs/mousse/preserved/<operation>-…`. */
-export function preservedByOperations(ref: string, operations: ReadonlySet<string>): boolean {
-  if (!ref.startsWith(PRESERVED_REFS) || /[\s\0]/.test(ref)) return false
-  const leaf = ref.slice(PRESERVED_REFS.length)
-  for (const operation of operations) if (leaf.startsWith(`${operation}-`)) return true
-  return false
+/** The thread's own preserved refs, read from its journal only. */
+export function threadPreservedIndex(threadDirectory: string): ThreadPreservedIndex {
+  const restores = new Map<string, number | undefined>()
+  const aborts = new Map<string, number | undefined>()
+  const later = (previous: number | undefined, at: number): number | undefined => (Number.isFinite(at) ? Math.max(previous ?? at, at) : previous)
+  for (const entry of new ThreadJournal(threadDirectory, { readOnly: true }).list()) {
+    const at = Date.parse(entry.createdAt)
+    if (RESTORE_OPERATION_TYPES.has(entry.operationType) && OPERATION_ID.test(entry.operationId)) restores.set(entry.operationId, later(restores.get(entry.operationId), at))
+    const named = (entry.details as { preservedRef?: unknown } | undefined)?.preservedRef
+    if (typeof named === 'string' && ABORT_REF.test(named) && named.startsWith(`${PRESERVED_REFS}${entry.operationId}-abort-`)) aborts.set(named, later(aborts.get(named), at))
+  }
+  const operationOf = (ref: string): string | undefined => RESTORE_REF.exec(ref)?.[1]
+  return {
+    owns: (ref) => aborts.has(ref) || restores.has(operationOf(ref) ?? ''),
+    recordedAt: (ref) => (aborts.has(ref) ? aborts.get(ref) : restores.get(operationOf(ref) ?? ''))
+  }
 }
 
 export interface PreservedRef {
   ref: string
   sha: string
-  /** When the files were kept: the commit's committer time, in milliseconds. */
-  keptAt?: number
+  /** The commit's committer time, in milliseconds. Git takes it from the environment, so it only ever extends a wait. */
+  committedAt?: number
 }
 
 /** `for-each-ref` format read by {@link parsePreservedRefs}. */
@@ -50,56 +75,107 @@ export function parsePreservedRefs(listing: string): PreservedRef[] {
     const [ref, sha, date, symref] = line.split('\0')
     if (!ref?.startsWith(PRESERVED_REFS) || !sha || !/^[a-f0-9]{40,64}$/.test(sha) || symref) continue
     const seconds = Number(date)
-    refs.push({ ref, sha, ...(date && Number.isSafeInteger(seconds) && seconds > 0 ? { keptAt: seconds * 1000 } : {}) })
+    refs.push({ ref, sha, ...(date && Number.isSafeInteger(seconds) && seconds > 0 ? { committedAt: seconds * 1000 } : {}) })
   }
   return refs
 }
 
+export interface ThreadPreservedRef {
+  ref: string
+  sha: string
+  /**
+   * When the files were kept: the journal's record of the operation that kept them, under Mousse's clock, or the commit
+   * time when that is later. Undefined when the journal gives no time; such a ref never expires.
+   */
+  keptAt?: number
+}
+
+/** The thread's own refs in a {@link PRESERVED_REF_FORMAT} listing, with when they were kept. */
+export function threadPreservedRefs(listing: string, threadDirectory: string): ThreadPreservedRef[] {
+  const index = threadPreservedIndex(threadDirectory)
+  return parsePreservedRefs(listing).filter((item) => index.owns(item.ref)).map((item) => {
+    const recorded = index.recordedAt(item.ref)
+    return { ref: item.ref, sha: item.sha, ...(recorded !== undefined ? { keptAt: Math.max(recorded, item.committedAt ?? recorded) } : {}) }
+  })
+}
+
 export interface PreservedFilesExpiry {
   expiredRefs: string[]
-  /** Why nothing was looked at this time. */
+  /** Why nothing, or not everything, went this time. */
   skipped?: string
 }
 
+interface ExpiryDetails { phase: 'intent' | 'outcome'; refs: Array<{ name: string; sha: string; keptAt?: string }>; windowMs?: number; error?: string; interrupted?: boolean }
+
+const detailsOf = (entry: ThreadJournalRecord): ExpiryDetails | undefined => {
+  const details = entry.details as Partial<ExpiryDetails> | undefined
+  return details && (details.phase === 'intent' || details.phase === 'outcome') && Array.isArray(details.refs) ? details as ExpiryDetails : undefined
+}
+
 /**
- * Deletes the thread's `refs/mousse/preserved/` refs whose files were kept longer ago than the thread's Undo retention
- * window (`UndoRetentionPolicy.windowMs`, 30 days unless changed), the same window after which the Undo itself expires.
- * Runs from the hourly Undo retention sweep only, never as part of another action.
+ * Records the outcome of an expiry that stopped between its intent and its outcome: the refs of its intent that are
+ * gone. Returns them.
+ */
+function settleInterrupted(journal: ThreadJournal, present: () => Set<string>): string[] {
+  const records = journal.list().filter((entry) => entry.operationType === PRESERVED_EXPIRY_OPERATION)
+  const settled = new Set(records.filter((entry) => detailsOf(entry)?.phase === 'outcome').map((entry) => entry.operationId))
+  const went: string[] = []
+  for (const intent of records) {
+    const details = detailsOf(intent)
+    if (details?.phase !== 'intent' || settled.has(intent.operationId)) continue
+    const now = present()
+    const gone = details.refs.filter((item) => !now.has(item.name))
+    journal.append({ operationId: intent.operationId, operationType: PRESERVED_EXPIRY_OPERATION, state: gone.length ? 'completed' : 'failed', details: { phase: 'outcome', refs: gone, interrupted: true } satisfies ExpiryDetails })
+    settled.add(intent.operationId)
+    went.push(...gone.map((item) => item.name))
+  }
+  return went
+}
+
+/**
+ * Deletes the thread's own `refs/mousse/preserved/` refs once their files have been kept for the thread's Undo retention
+ * window (`UndoRetentionPolicy.windowMs`, 30 days unless changed), counted the way Undo's own deadline is
+ * (`UndoRetentionService.retainedUntil`). Runs from the hourly Undo retention sweep only, never as part of another action.
  *
- * Only refs whose name starts with one of this thread's operations are considered; another thread's, and a ref no thread
- * names, are left. Each is deleted with `update-ref -d` and the value it was read with, so a ref that changed in between
- * stays. What was deleted is recorded in the thread's journal. Nothing happens while the retention clock needs review or
- * an operation is unfinished. In a hidden snapshot store, which only Mousse uses, the garbage is collected afterwards.
+ * The refs that are due are recorded in the thread's journal first (an intent), then deleted together in one
+ * `update-ref --stdin` transaction, each with the value it was read with, so either all go or none does. The outcome
+ * records exactly the refs that went. An expiry that stopped in between is settled by the next one from what is still
+ * there. Nothing is deleted while the retention clock needs review or an operation of the thread is unfinished. In a
+ * hidden snapshot store, which only Mousse uses, the garbage is collected after the outcome is recorded.
  *
  * The folder is checked through the folder access check first: one whose volume is not answering fails at once and is
  * tried again by a later sweep.
  */
 export async function expirePreservedFiles(threadDirectory: string, workspacePath: string, options: { signal?: AbortSignal; heldThreadLease?: ThreadLeaseHandle; now?: () => number } = {}): Promise<PreservedFilesExpiry> {
   await waitForFolderAccess([threadDirectory, workspacePath], { whenNotAnswering: 'fail', signal: options.signal })
-  return withGitAccess('undoRetention.expirePreservedFiles', 'owned', () => withGitMutationLocks(threadDirectory, workspacePath, 'preserved-files-expiry', () => {
+  return withGitAccess('undoRetention.expirePreservedFiles', 'owned', () => withGitMutationLocks(threadDirectory, workspacePath, 'preserved-files-expiry', (): PreservedFilesExpiry => {
     const retention = new UndoRetentionService(threadDirectory, options.now)
     if (!retention.clockAllowsRelease()) return { expiredRefs: [], skipped: 'The Undo retention clock needs review before kept files expire.' }
     const journal = new ThreadJournal(threadDirectory)
-    const records = journal.list()
-    const latest = new Map(records.map((entry) => [entry.operationId, entry.state]))
-    if ([...latest.values()].some((state) => ACTIVE.includes(state))) return { expiredRefs: [], skipped: 'An unfinished operation protects kept files.' }
-    const operations = new Set(records.map((entry) => entry.operationId))
-    const now = (options.now ?? Date.now)()
-    const { windowMs } = retention.policy()
-    const due = parsePreservedRefs(git(workspacePath, ['for-each-ref', `--format=${PRESERVED_REF_FORMAT}`, PRESERVED_REFS]))
-      .filter((item) => preservedByOperations(item.ref, operations) && item.keptAt !== undefined && item.keptAt + windowMs <= now)
-    const expired: PreservedRef[] = []
-    for (const item of due) {
-      git(workspacePath, ['update-ref', '--no-deref', '-d', item.ref, item.sha])
-      expired.push(item)
-    }
-    if (!expired.length) return { expiredRefs: [] }
-    journal.append({
-      operationId: randomUUID(), operationType: PRESERVED_EXPIRY_OPERATION, state: 'completed',
-      details: { windowMs, refs: expired.map((item) => ({ name: item.ref, sha: item.sha, keptAt: new Date(item.keptAt!).toISOString() })) }
-    })
     const store = threadSnapshotStore(threadDirectory, workspacePath)
-    if (store) collectStoreGarbage(store)
-    return { expiredRefs: expired.map((item) => item.ref) }
+    const listing = () => git(workspacePath, ['for-each-ref', `--format=${PRESERVED_REF_FORMAT}`, PRESERVED_REFS])
+    const present = () => new Set(parsePreservedRefs(listing()).map((item) => item.ref))
+    const finish = (went: string[], skipped?: string): PreservedFilesExpiry => {
+      if (went.length && store) collectStoreGarbage(store)
+      return { expiredRefs: went, ...(skipped ? { skipped } : {}) }
+    }
+    const settled = settleInterrupted(journal, present)
+    if (retention.unfinishedOperation(PRESERVED_EXPIRY_OPERATION)) return finish(settled, 'An unfinished operation protects kept files.')
+    const now = (options.now ?? Date.now)()
+    const due = threadPreservedRefs(listing(), threadDirectory).filter((item) => item.keptAt !== undefined && retention.retainedUntil(item.keptAt) <= now)
+    if (!due.length) return finish(settled)
+    const operationId = randomUUID()
+    const refs = due.map((item) => ({ name: item.ref, sha: item.sha, keptAt: new Date(item.keptAt!).toISOString() }))
+    journal.append({ operationId, operationType: PRESERVED_EXPIRY_OPERATION, state: 'planned', details: { phase: 'intent', windowMs: retention.policy().windowMs, refs } satisfies ExpiryDetails })
+    let error: string | undefined
+    try {
+      git(workspacePath, ['update-ref', '--no-deref', '--stdin'], undefined, `start\n${due.map((item) => `delete ${item.ref} ${item.sha}`).join('\n')}\nprepare\ncommit\n`)
+    } catch (cause) {
+      error = cause instanceof Error ? cause.message : String(cause)
+    }
+    const remaining = present()
+    const went = refs.filter((item) => !remaining.has(item.name))
+    journal.append({ operationId, operationType: PRESERVED_EXPIRY_OPERATION, state: went.length ? 'completed' : 'failed', details: { phase: 'outcome', refs: went, ...(error ? { error } : {}) } satisfies ExpiryDetails })
+    return finish([...settled, ...went.map((item) => item.name)], error ? `Kept files could not be deleted: ${error.split('\n').find((line) => /fatal|error/i.test(line)) ?? error}` : undefined)
   }, options.signal, options.heldThreadLease))
 }

@@ -48,16 +48,19 @@ export class UndoRetentionSweeper {
     for (let i = 0; i < batch && !this.abort.signal.aborted; i++) {
       const task = tasks[this.cursor++ % tasks.length]!
       let lease
+      // Kept files have their own outcome: a failure there never holds back the receipt release, nor is hidden by one.
+      let preserved: { expired?: number; reason?: string } = {}
       try {
         lease = tryAcquireExecutionLease(task.location, { source: 'undo-retention-sweep' })
         if (!lease) continue
         const workspace = new ThreadWorkspaceManager(task.location).loadOrSnapshot()
         if (!workspace || workspace.lifecycle !== 'ready') continue
         const result = await new UndoRetentionService(task.location).sweep(workspace.worktreePath, this.abort.signal, lease)
-        // Kept files have their own outcome: a failure here never holds back the receipt release below.
-        let preserved: { expired?: number; reason?: string } = {}
         if (!result.suspended && !startup) {
-          try { preserved = { expired: (await expirePreservedFiles(task.location, workspace.worktreePath, { signal: this.abort.signal, heldThreadLease: lease })).expiredRefs.length } }
+          try {
+            const expiry = await expirePreservedFiles(task.location, workspace.worktreePath, { signal: this.abort.signal, heldThreadLease: lease })
+            preserved = { expired: expiry.expiredRefs.length, ...(expiry.skipped ? { reason: `Kept files: ${expiry.skipped}` } : {}) }
+          }
           catch (error) { preserved = { reason: `Kept files: ${error instanceof Error ? error.message : String(error)}` } }
         }
         // A folder with no worktree keeps its snapshots in a store of Mousse's own, which is also tidied after the release.
@@ -68,7 +71,8 @@ export class UndoRetentionSweeper {
         this.outcomes.set(task.taskId, { at: new Date().toISOString(), expired: result.expired.length, releasedRefs: released?.releasedRefs.length ?? 0,
           ...(preserved.expired !== undefined ? { expiredPreservedRefs: preserved.expired } : {}), ...(reasons.length ? { reason: reasons.join('; ') } : {}) })
       } catch (error) {
-        this.outcomes.set(task.taskId, { at: new Date().toISOString(), reason: error instanceof Error ? error.message : String(error) })
+        this.outcomes.set(task.taskId, { at: new Date().toISOString(), ...(preserved.expired !== undefined ? { expiredPreservedRefs: preserved.expired } : {}),
+          reason: [error instanceof Error ? error.message : String(error), ...(preserved.reason ? [preserved.reason] : [])].join('; ') })
       } finally { if (lease) releaseExecutionLeaseHandle(lease) }
     }
   }

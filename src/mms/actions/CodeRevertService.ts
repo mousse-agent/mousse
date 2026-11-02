@@ -62,7 +62,7 @@ export class CodeRevertService {
       })
       if ('conflicts' in restored) throw new UndoConflictError(restored.conflicts, 'The code revert')
       const pushed = pushedTo(workspacePath, target.commits)
-      return this.complete(workspacePath, operationId, { target, latest: actions.at(-1) }, ours.sha, restored.snapshot, new Date().toISOString(), [pushed ? pushedNotice('Revert', pushed) : '', restored.preserved ? preservedNotice(restored.preserved) : '', leftAsIsNotice(restored.leftAsIs) ?? '', coverageNotice(target.git?.coverageGaps, ours.coverageGaps, restored.snapshot.coverageGaps) ?? ''].filter(Boolean).join(' ') || undefined)
+      return this.complete(workspacePath, operationId, { target, latest: actions.at(-1) }, ours.sha, restored.snapshot, new Date().toISOString(), [pushed ? pushedNotice('Revert', pushed) : '', restored.preserved ? preservedNotice(restored.preserved, new UndoRetentionService(this.threadDirectory).policy().windowMs) : '', leftAsIsNotice(restored.leftAsIs) ?? '', coverageNotice(target.git?.coverageGaps, ours.coverageGaps, restored.snapshot.coverageGaps) ?? ''].filter(Boolean).join(' ') || undefined)
     })
   }
 

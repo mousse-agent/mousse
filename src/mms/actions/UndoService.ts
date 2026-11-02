@@ -107,7 +107,7 @@ export class UndoService {
       })
       if ('conflicts' in restored) throw new UndoConflictError(restored.conflicts)
       const pushed = pushedTo(workspacePath, target.commits)
-      const compensation = this.compensationFor(workspacePath, { target, contextAction, kind, compensationId }, ours.sha, restored.snapshot, new Date().toISOString(), [pushed ? pushedNotice(label, pushed) : '', restored.preserved ? preservedNotice(restored.preserved) : '', leftAsIsNotice(restored.leftAsIs) ?? '', coverageNotice(target.git?.coverageGaps, ours.coverageGaps, restored.snapshot.coverageGaps) ?? ''].filter(Boolean).join(' ') || undefined)
+      const compensation = this.compensationFor(workspacePath, { target, contextAction, kind, compensationId }, ours.sha, restored.snapshot, new Date().toISOString(), [pushed ? pushedNotice(label, pushed) : '', restored.preserved ? preservedNotice(restored.preserved, new UndoRetentionService(this.threadDirectory).policy().windowMs) : '', leftAsIsNotice(restored.leftAsIs) ?? '', coverageNotice(target.git?.coverageGaps, ours.coverageGaps, restored.snapshot.coverageGaps) ?? ''].filter(Boolean).join(' ') || undefined)
       const receipt = receipts.record(workspacePath, { operationId, kind, actor: { kind: 'user' }, actionId: compensation.id,
         beforeSha: ours.sha, afterSha: restored.snapshot.sha, introducedCommits: [],
         contributions: [], externalEffects: target.externalEffects, reversesReceiptId: target.receiptId, git: compensation.git })

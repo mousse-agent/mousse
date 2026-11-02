@@ -344,8 +344,8 @@ describe('Undo, Redo and revert by three-way merge', () => {
     expect(git(cwd, 'ls-tree', '--name-only', takeSnapshot(cwd, { reason: 'check' }).sha)).not.toMatch(/^secret$/m)
     const undone = await new UndoService(f.thread).undoLatest('main', cwd)
     expect(f.read(cwd, 'secret')).toBe('tracked\n')
-    expect(undone.notice).toMatch(/kept under refs\/mousse\/preserved\/\S+: secret/)
-    const ref = undone.notice!.match(/(refs\/mousse\/preserved\/\S+?):/)![1]!
+    expect(undone.notice).toMatch(/kept under refs\/mousse\/preserved\/\S+ for 30 days: secret/)
+    const ref = undone.notice!.match(/(refs\/mousse\/preserved\/\S+?) for /)![1]!
     expect(git(cwd, 'show', `${ref}:secret`)).toBe('only copy')
     expect(action.state).toBe('completed')
   })
@@ -366,7 +366,7 @@ describe('Undo, Redo and revert by three-way merge', () => {
     noPending()
     // Under the limit, the same Undo keeps every file first and goes through.
     const undone = await new UndoService(f.thread).undoLatest('main', cwd)
-    expect(undone.notice).toMatch(/kept under refs\/mousse\/preserved\/\S+: cache\/a\.bin, cache\/b\.bin, cache\/c\.bin, cache\/d\.bin/)
+    expect(undone.notice).toMatch(/kept under refs\/mousse\/preserved\/\S+ for 30 days: cache\/a\.bin, cache\/b\.bin, cache\/c\.bin, cache\/d\.bin/)
     expect(f.read(cwd, 'cache')).toBe('tracked file\n')
   })
 

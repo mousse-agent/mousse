@@ -1,9 +1,15 @@
 import { formatBytes } from '../../../shared/storage'
-import type { LifecyclePurgeItem } from '../../../shared/resourceLifecycle'
+import { isKeptFilesItem, type LifecyclePurgeItem } from '../../../shared/resourceLifecycle'
 import { summarizeDeletion, type PurgeConfirmation } from '../../lib/trashInventory'
 import { Modal } from '../ui/Modal'
 
 const KIND_LABELS: Record<LifecyclePurgeItem['kind'], string> = { worktree: 'Worktree', ref: 'Branch', path: 'Files', 'scheduled-row': 'Scheduled task' }
+
+/** What an item is and, when it needs the person's discard, why. Files a restore set aside are named as such, never as a branch. */
+function itemLabel(item: LifecyclePurgeItem): string {
+  if (isKeptFilesItem(item)) return item.discardRequired ? `Kept files · Only copy: ${item.reason ?? 'files a restore set aside'}` : 'Kept files'
+  return item.discardRequired ? `${KIND_LABELS[item.kind]} · Unpublished: ${item.reason ?? 'may contain unpublished work'}` : KIND_LABELS[item.kind]
+}
 
 /**
  * Confirms a permanent deletion. It leads with what is lost, then what it frees; unpublished
@@ -54,7 +60,7 @@ export function PermanentDeleteDialog({ confirmation, onDiscardChange, onConfirm
           <ul>
             {items.map((item) => <li key={item.id}>
               <span className="trash-delete-identity">{item.identity}</span>
-              <span className="trash-delete-kind">{item.discardRequired ? `${KIND_LABELS[item.kind]} · Unpublished: ${item.reason ?? 'may contain unpublished work'}` : KIND_LABELS[item.kind]}</span>
+              <span className="trash-delete-kind">{itemLabel(item)}</span>
               {item.discardRequired && item.content?.some((entry) => entry.kind !== 'directory') && <details className="trash-delete-files">
                 <summary>Files to discard</summary>
                 {item.content.filter((entry) => entry.kind !== 'directory').map((entry) => <div key={entry.path} className="trash-delete-identity">{entry.path} ({formatBytes(entry.bytes)})</div>)}

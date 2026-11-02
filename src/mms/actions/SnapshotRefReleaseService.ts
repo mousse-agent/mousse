@@ -11,6 +11,7 @@ import { ChangeReceiptService } from './ChangeReceiptService'
 import { withGitMutationLocks } from './GitOperationCoordinator'
 import { git, tryGit } from './git'
 import { UndoRetentionService } from './UndoRetentionService'
+import { PRESERVED_REFS, threadPreservedIndex } from './preservedFiles'
 
 export interface SnapshotReleaseResult {
   releasedRefs: string[]
@@ -116,13 +117,14 @@ export async function releaseThreadSnapshots(threadDirectory: string, signal?: A
       }
       // Files a restore of this thread kept (`refs/mousse/preserved/<operation>-…`) exist nowhere else: they move to the
       // trash namespace, which the storage cleanup empties after the trash's wait (`expireTrashedSnapshotRefs`).
-      const operations = new ChangeReceiptService(threadDirectory, { readOnly: true }).list().map((receipt) => receipt.operationId)
-      const preserved = tryGit(top, ['for-each-ref', '--format=%(refname) %(objectname)', 'refs/mousse/preserved/']).stdout.split(/\r?\n/).filter(Boolean)
+      // Only the thread's own, by the exact names their writers use (`threadPreservedIndex`), never by a prefix.
+      const owned = threadPreservedIndex(threadDirectory)
+      const preserved = tryGit(top, ['for-each-ref', '--format=%(refname) %(objectname)', PRESERVED_REFS]).stdout.split(/\r?\n/).filter(Boolean)
       const trashed = `refs/mousse/trash/${Date.now()}`
       for (const line of preserved) {
         const [name, sha] = line.split(' ') as [string, string]
-        const leaf = name.slice('refs/mousse/preserved/'.length)
-        if (!operations.some((operation) => leaf.startsWith(`${operation}-`))) continue
+        const leaf = name.slice(PRESERVED_REFS.length)
+        if (!owned.owns(name)) continue
         git(top, ['update-ref', '--no-deref', `${trashed}/preserved/${leaf}`, sha])
         git(top, ['update-ref', '-d', name, sha])
         released.push(name)

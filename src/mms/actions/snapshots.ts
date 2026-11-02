@@ -5,7 +5,8 @@ import { homedir } from 'node:os'
 import { join, parse, resolve, sep } from 'node:path'
 import type { GitRecord } from '../../shared/threadActions'
 import { activeHiddenStore, builtInPathspecs, ensureStoreRules, outsideHiddenStore } from '../git/hiddenStore'
-import { git, gitEnv, guarded, mergeTrees, MOUSSE_COMMIT_ENV, NOT_MOUSSE, operationInProgress, tryGit, treeOf } from './git'
+import { git, gitEnv, guarded, mergeTrees, MOUSSE_COMMIT_ENV, mousseCommitEnvNow, NOT_MOUSSE, operationInProgress, tryGit, treeOf } from './git'
+import { retentionWindowText } from '../../shared/undoRetention'
 
 /**
  * Workspace snapshots (docs/workspace-snapshots.md): a commit whose tree is every file of a worktree (tracked and
@@ -470,10 +471,18 @@ export function leftAsIsNotice(left: LeftAsIs[] | undefined): string | undefined
   return `Left as it is: ${named}${left.length > 10 ? ` and ${left.length - 10} more` : ''}.`
 }
 
-/** The line a result carries when a restore kept files no snapshot held before writing over them. */
-export function preservedNotice(preserved: PreservedFiles): string {
+/**
+ * The line a result carries when a restore kept files no snapshot held before writing over them. They are kept for the
+ * thread's Undo retention window (`windowMs`), then expire (`expirePreservedFiles`).
+ */
+export function preservedNotice(preserved: PreservedFiles, windowMs: number): string {
   const named = preserved.paths.slice(0, 10).join(', ') + (preserved.paths.length > 10 ? ` and ${preserved.paths.length - 10} more` : '')
-  return `Files no snapshot held were in the way and are kept under ${preserved.ref}: ${named}. Bring one back with git restore --source=${preserved.ref} -- <path>.`
+  return `Files no snapshot held were in the way and are kept under ${preserved.ref} for ${retentionWindowText(windowMs)}: ${named}. Bring one back before then with git restore --source=${preserved.ref} -- <path>.`
+}
+
+/** The line an abort's reply carries: every file as it was before the abort is kept under `ref` for the thread's Undo window. */
+export function abortPreservedNotice(ref: string, windowMs: number): string {
+  return `Every file as it was before the abort is kept under ${ref} for ${retentionWindowText(windowMs)}. Bring one back before then with git restore --source=${ref} -- <path>.`
 }
 
 export interface RestoreChangeInput extends SnapshotInput {
@@ -613,7 +622,7 @@ function preserveFiles(top: string, paths: string[], directory: string, operatio
     git(top, ['update-index', '--index-info'], env, entries.join('\n') + '\n')
     const tree = git(top, ['write-tree'], env)
     const head = headOf(top)
-    const sha = git(top, ['commit-tree', tree, ...(head ? ['-p', head] : []), '-m', `${SUBJECT}files kept before a restore`], MOUSSE_COMMIT_ENV)
+    const sha = git(top, ['commit-tree', tree, ...(head ? ['-p', head] : []), '-m', `${SUBJECT}files kept before a restore`], mousseCommitEnvNow())
     const ref = `refs/mousse/preserved/${operationId ?? randomUUID()}-${sha.slice(0, 12)}`
     git(top, ['update-ref', '--no-deref', ref, sha])
     return { ref, paths }
