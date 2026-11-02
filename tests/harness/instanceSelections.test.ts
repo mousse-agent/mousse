@@ -188,7 +188,7 @@ describe('agent definition model', () => {
     const lookup = new SharedAgentModelLookup(() => harness)
     // `tools` comes from the driver serving Mousse's tools; vision and the window from the listing.
     expect(lookup.resolve({ providerId: 'claude-subscription', modelId: 'sonnet', instanceId: 'claude:work' })).toMatchObject({
-      available: true, label: 'Sonnet', efforts: ['low', 'high'], capabilities: ['reasoning', 'vision', 'tools', 'long_context']
+      available: true, label: 'Claude Sonnet', efforts: ['low', 'high'], capabilities: ['reasoning', 'vision', 'tools', 'long_context']
     })
     expect(lookup.resolve({ providerId: 'claude-subscription', modelId: 'opus' })).toMatchObject({ available: true, efforts: [], capabilities: ['tools'] })
     // A model the instance does not list is not in the catalogue.

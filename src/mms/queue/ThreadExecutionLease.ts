@@ -55,7 +55,7 @@ export interface ThreadLeaseHandle {
 }
 
 export interface AcquireLeaseOptions {
-  /** Caller identity label (gui, cli, channel, test). */
+  /** Caller identity label (gui, cli, remote, test). */
   source?: string
   /** Override owner pid (tests). */
   pid?: number
@@ -67,7 +67,7 @@ export interface AcquireLeaseOptions {
   maxAttempts?: number
   /** Sleep between attempts (ms) — async wait path only. */
   retryDelayMs?: number
-  /** Optional abort for wait/retry loops (channels). */
+  /** Optional abort for wait/retry loops (remote turns). */
   signal?: AbortSignal
   /** When true, only try once (no wait). Default for sync acquire. */
   tryOnce?: boolean
@@ -384,7 +384,7 @@ export function acquireExecutionLease(
   )
 }
 
-/** Async wait/retry acquire (for channel turns with AbortSignal). */
+/** Async wait/retry acquire (for remote turns with AbortSignal). */
 export async function waitAcquireExecutionLease(
   threadDir: string,
   opts?: AcquireLeaseOptions

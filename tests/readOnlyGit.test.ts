@@ -13,13 +13,13 @@ vi.mock('node:child_process', async (importOriginal) => {
 })
 
 const { readOnlyGit, runReadOnlyGit } = await import('../src/mms/git/readOnlyGit')
-const { lifecycleGit } = await import('../src/mms/lifecycle/WorktreeRetirementService')
+const { fixtureGit } = await import('./support/fixtureGit')
 
 const roots: string[] = []
 afterEach(() => { spawned.length = 0; for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }) })
 function repo(): string {
   const root = mkdtempSync(join(tmpdir(), 'mousse-readonly-git-')); roots.push(root); mkdirSync(join(root, 'r'))
-  const cwd = join(root, 'r'); lifecycleGit(cwd, ['init', '-q']); writeFileSync(join(cwd, 'a.txt'), 'a')
+  const cwd = join(root, 'r'); fixtureGit(cwd, ['init', '-q']); writeFileSync(join(cwd, 'a.txt'), 'a')
   return cwd
 }
 

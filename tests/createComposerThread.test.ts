@@ -87,6 +87,12 @@ describe('blank composer workspace selection', () => {
     expect(deps.create).toHaveBeenCalledWith(undefined, { worktreeEnabled: false })
   })
 
+  it('records worktree off on an existing project draft that never chose', async () => {
+    const deps = { ...setup({ id: 'draft', projectId: 'project-a' } as Thread), workspace: { projectId: 'project-a', worktreeEnabled: false } }
+    expect(await prepareComposerThread(deps)).toBe('draft')
+    expect(deps.setWorktreeEnabled).toHaveBeenCalledWith('draft', false)
+  })
+
   it('leaves an already configured project draft unchanged', async () => {
     const deps = setup({ id: 'draft', projectId: 'project-a', worktreeEnabled: true } as Thread)
     expect(await prepareComposerThread(deps)).toBe('draft')

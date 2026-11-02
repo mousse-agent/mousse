@@ -47,6 +47,8 @@ import { logWarn } from '../../log/diag'
 const START_TIMEOUT_MS = 12_000
 const LIST_TOOLS_TIMEOUT_MS = 8_000
 const CALL_TOOL_TIMEOUT_MS = 20_000
+/** `getEnabledToolsByServer`: one server's connect and listing, after which it is reported as failed. */
+const SERVER_TOOLS_TIMEOUT_MS = 20_000
 
 export interface InjectedMcpClient {
   listTools(options?: { signal?: AbortSignal; cursor?: string }): Promise<{
@@ -79,6 +81,22 @@ export interface McpToolExecutionPin {
   assertExecutionActive?: () => Promise<void>
 }
 
+/** Per-call options of `callTool`. */
+export interface McpCallOptions {
+  /** How long the call may run (default 20 s); drives both Mousse's timer and the SDK request's. */
+  timeoutMs?: number
+}
+
+/** One enabled server's tools (`getEnabledToolsByServer`). */
+export interface McpServerTools {
+  installationId: string
+  serverName: string
+  configRevision?: string
+  tools: McpToolDescriptor[]
+  /** Listing this server failed or timed out (redacted); `tools` is then empty. */
+  error?: string
+}
+
 export interface McpShutdownOptions {
   timeoutMs?: number
 }
@@ -98,6 +116,8 @@ interface ConnectedServer {
   ownedStdio: boolean
   closing?: Promise<void>
   releaseLifetime?: () => void
+  /** Tool calls running on this connection: a timed-out call restarts it only when it was the last. */
+  inFlight: number
 }
 
 export class McpManager {
@@ -112,6 +132,7 @@ export class McpManager {
   private readonly owned = new McpOwnedWork()
   private drain: Promise<void> | null = null
   private drainFinished = false
+  private readonly discoveryListeners = new Set<() => void>()
 
   constructor(
     private registry: McpRegistry,
@@ -159,6 +180,21 @@ export class McpManager {
 
   invalidateDiscoveryCache(): void {
     this.discoveryCache.clear()
+    for (const listener of [...this.discoveryListeners]) {
+      try {
+        listener()
+      } catch (err) {
+        logWarn('McpManager', `A discovery listener failed: ${redactSensitiveText(formatError(err))}`)
+      }
+    }
+  }
+
+  /** Calls `listener` whenever the discovery cache is invalidated; returns the unsubscribe. */
+  onDiscoveryInvalidated(listener: () => void): () => void {
+    this.discoveryListeners.add(listener)
+    return () => {
+      this.discoveryListeners.delete(listener)
+    }
   }
 
   async refresh(projectPath?: string): Promise<McpServerConfig[]> {
@@ -232,6 +268,49 @@ export class McpManager {
     )
 
     return toolLists.flat()
+  }
+
+  /**
+   * `getEnabledTools` per enabled server: each server is listed on its own, within its own timeout, and
+   * one that fails reports its error instead of failing or delaying the rest (the MCP relay's catalogue).
+   */
+  async getEnabledToolsByServer(
+    projectPath?: string,
+    actor: IntegrationActor = defaultIntegrationActor(false)
+  ): Promise<McpServerTools[]> {
+    this.owned.assertAccepting()
+    const settings = this.settingsStore.get().integrations.mcp
+    const snapshot = await this.getDiscoverySnapshot(projectPath, false)
+    const eligibleServers = resolveEffectiveMcpServers({
+      servers: snapshot.servers,
+      settings,
+      actor
+    }).filter((server) => server.status !== 'missing-env' && server.status !== 'failed')
+
+    const listed = await Promise.allSettled(
+      eligibleServers.map((server) =>
+        withAbortTimeout(
+          (signal) => this.listToolsForServer(server, projectPath, signal),
+          SERVER_TOOLS_TIMEOUT_MS,
+          `Timed out listing tools for ${server.name}`
+        )
+      )
+    )
+    return eligibleServers.map((server, index) => {
+      const result = listed[index]!
+      const entry = {
+        installationId: mcpInstallationId(server),
+        serverName: server.name,
+        ...(server.configRevision ? { configRevision: server.configRevision } : {})
+      }
+      if (result.status === 'rejected') {
+        return { ...entry, tools: [], error: redactSensitiveText(formatError(result.reason)) }
+      }
+      return {
+        ...entry,
+        tools: result.value.filter((tool) => isMcpToolAllowedForActor(tool, server, actor) && !tool.schemaError)
+      }
+    })
   }
 
   /** Resolve and connect only the named enabled installation. Used by pinned execution preparation. */
@@ -370,7 +449,8 @@ export class McpManager {
     projectPath?: string,
     signal?: AbortSignal,
     actor: IntegrationActor = defaultIntegrationActor(false),
-    expected?: McpToolExecutionPin
+    expected?: McpToolExecutionPin,
+    options?: McpCallOptions
   ): Promise<McpToolCallResult> {
     this.owned.assertAccepting()
     const descriptor = this.toolMap.get(providerName)
@@ -403,18 +483,22 @@ export class McpManager {
       if (!current.allowed || current.server?.configRevision !== expected.configRevision) throw Object.assign(new Error(current.reason ?? 'MCP dependency is no longer admitted.'), { category: 'disabled', code: 'stale_revision' })
       if (signal?.aborted) throw Object.assign(new Error('MCP call cancelled before dispatch.'), { category: 'cancelled' })
     }
+    const timeoutMs = options?.timeoutMs ?? CALL_TOOL_TIMEOUT_MS
+    connection.inFlight += 1
     try {
       const result = await this.runTimed(
         'mcp-call',
-        CALL_TOOL_TIMEOUT_MS,
+        timeoutMs,
         `Timed out calling MCP tool ${descriptor.toolName}`,
         signal,
         (callSignal) =>
           connection.client.callTool(
             { name: descriptor.toolName, arguments: args },
-            { signal: callSignal, timeout: CALL_TOOL_TIMEOUT_MS }
+            { signal: callSignal, timeout: timeoutMs }
           )
-      )
+      ).finally(() => {
+        connection.inFlight -= 1
+      })
       return mapMcpToolResult({
         result,
         provenance: {
@@ -429,7 +513,8 @@ export class McpManager {
         artifacts: this.context.artifacts
       })
     } catch (err) {
-      if (err instanceof TimeoutError && connection.ownedStdio) {
+      // A stuck stdio server is restarted, but not under another call still running on it.
+      if (err instanceof TimeoutError && connection.ownedStdio && connection.inFlight === 0) {
         await this.restartServer(mcpInstallationId(server))
       }
       const classified = classifyTransportError(err)
@@ -568,7 +653,7 @@ export class McpManager {
       throw error
     })
     this.drain = work
-    this.awaitRaw('mcp-drain', work)
+    void this.awaitRaw('mcp-drain', work)
   }
 
   private async drainOwned(): Promise<void> {
@@ -608,7 +693,23 @@ export class McpManager {
       release = resolve
     })
     connection.releaseLifetime = release
-    this.awaitRaw('mcp-connection', lifetime)
+    void this.awaitRaw('mcp-connection', lifetime)
+  }
+
+  /**
+   * The client closed on its own (the server exited, its stream ended): the connection is dropped if
+   * it is still the current one, so the next call connects again. A close Mousse started is left to it.
+   */
+  private evictClosed(connection: ConnectedServer): void {
+    if (connection.closing || this.connections.get(connection.key) !== connection) return
+    this.connections.delete(connection.key)
+    const work = this.performClose(connection).catch(() => {
+      // Already closed: whatever its transport says, nothing is left to retry.
+      connection.releaseLifetime?.()
+      connection.releaseLifetime = undefined
+    })
+    connection.closing = work
+    void this.awaitRaw('mcp-close', work)
   }
 
   private closeConnected(connection: ConnectedServer): Promise<void> {
@@ -618,7 +719,7 @@ export class McpManager {
       throw error
     })
     connection.closing = work
-    this.awaitRaw('mcp-close', work)
+    void this.awaitRaw('mcp-close', work)
     return work
   }
 
@@ -656,7 +757,7 @@ export class McpManager {
       return withAbortTimeout(
         (callSignal) => {
           const raw = run(callSignal)
-          this.awaitRaw(`${label}-raw`, raw)
+          void this.awaitRaw(`${label}-raw`, raw)
           return raw
         },
         timeoutMs,
@@ -672,8 +773,16 @@ export class McpManager {
     signal?: AbortSignal
   ): Promise<McpToolDescriptor[]> {
     const connection = await this.connect(server, projectPath, signal)
+    const installationId = mcpInstallationId(server)
+    // A tool keeps the name it was given on an earlier listing of its installation, so a name a
+    // runtime holds stays valid; a tool the server no longer lists loses its entry below.
+    const earlier = new Map<string, string>()
+    for (const [name, tool] of this.toolMap) {
+      if ((tool.installationId ?? tool.serverId) === installationId) earlier.set(tool.id, name)
+    }
     const tools: McpToolDescriptor[] = []
     const taken = new Set(this.toolMap.keys())
+    const listed = new Set<string>()
     let cursor: string | undefined
     do {
       const result = await this.runTimed(
@@ -683,18 +792,22 @@ export class McpManager {
         signal,
         (callSignal) => connection.client.listTools({ signal: callSignal, cursor })
       )
-      const installationId = mcpInstallationId(server)
       for (const tool of result.tools) {
         const schemaError = describeSchemaError(tool.inputSchema)
-        const providerName = allocateProviderToolName({
-          serverName: server.name,
-          toolName: tool.name,
-          installationId,
-          taken
-        })
+        const id = `${installationId}:${tool.name}`
+        const kept = earlier.get(id)
+        const providerName = kept && !listed.has(kept)
+          ? kept
+          : allocateProviderToolName({
+              serverName: server.name,
+              toolName: tool.name,
+              installationId,
+              taken
+            })
         taken.add(providerName)
+        listed.add(providerName)
         const descriptor: McpToolDescriptor = {
-          id: `${installationId}:${tool.name}`,
+          id,
           serverId: server.id,
           serverName: server.name,
           toolName: tool.name,
@@ -707,11 +820,14 @@ export class McpManager {
           profileId: this.context.profileId,
           schemaError
         }
-        if (!this.owned.stopping) this.toolMap.set(providerName, descriptor)
         tools.push(descriptor)
       }
       cursor = result.nextCursor
     } while (cursor)
+    if (!this.owned.stopping) {
+      for (const name of earlier.values()) if (!listed.has(name)) this.toolMap.delete(name)
+      for (const tool of tools) this.toolMap.set(tool.providerName, tool)
+    }
     return tools
   }
 
@@ -793,17 +909,24 @@ export class McpManager {
         const client = await withAbortTimeout(
           (callSignal) => {
             raw = this.clientFactory!.connect(server, key, callSignal)
-            this.awaitRaw('mcp-connect-raw', raw)
+            void this.awaitRaw('mcp-connect-raw', raw)
             return raw
           },
           START_TIMEOUT_MS,
           `Timed out starting MCP server ${server.name}`,
           signal
         )
-        return { client, config: server, stderr: [], key, ownedStdio: false }
+        const connection: ConnectedServer = { client, config: server, stderr: [], key, ownedStdio: false, inFlight: 0 }
+        // An injected client has no `onclose`: closing it, by anyone, drops the connection.
+        const close = client.close.bind(client)
+        client.close = async () => {
+          await close()
+          this.evictClosed(connection)
+        }
+        return connection
       } catch (error) {
         if (raw) {
-          this.awaitRaw(
+          void this.awaitRaw(
             'mcp-connect-late-close',
             raw.then(
               (client) => client.close(),
@@ -830,7 +953,7 @@ export class McpManager {
         (callSignal) => {
           if (callSignal.aborted) throw abortFrom(callSignal.reason)
           const raw = client.connect(transport)
-          this.awaitRaw('mcp-connect-raw', raw)
+          void this.awaitRaw('mcp-connect-raw', raw)
           return raw
         },
         START_TIMEOUT_MS,
@@ -838,7 +961,7 @@ export class McpManager {
         signal
       )
     } catch (error) {
-      this.awaitRaw('mcp-connect-late-close', transport.close().catch(() => undefined))
+      void this.awaitRaw('mcp-connect-late-close', transport.close().catch(() => undefined))
       throw error
     }
 
@@ -861,14 +984,17 @@ export class McpManager {
       }
     }
 
-    return {
+    const connection: ConnectedServer = {
       client: wrapped,
       transport,
       config: server,
       stderr: stderrLines,
       key,
-      ownedStdio: transport instanceof OwnedStdioClientTransport
+      ownedStdio: transport instanceof OwnedStdioClientTransport,
+      inFlight: 0
     }
+    client.onclose = () => this.evictClosed(connection)
+    return connection
   }
 
   private async prepareOAuthProvider(server: McpServerConfig): Promise<void> {

@@ -94,7 +94,7 @@ describe('agent hops carried by runs that continue agent work', () => {
     f = delegationFixture()
     const run = await agentRun(f, 't1', 3)
     f.engine.markTerminal(run.runId, 'completed')
-    for (const source of ['gui', 'cli', 'continue', 'delegation', 'integration', 'schedule', 'channel'])
+    for (const source of ['gui', 'cli', 'continue', 'delegation', 'integration', 'schedule', 'remote'])
       expect(inheritedAgentHops(f.store, 't1', source, run.runId), source).toBeUndefined()
     for (const source of ['wake', 'provider-continuation']) expect(inheritedAgentHops(f.store, 't1', source), source).toBe(3)
     for (const source of ['resume', 'resume_now']) expect(inheritedAgentHops(f.store, 't1', source, run.runId), source).toBe(3)

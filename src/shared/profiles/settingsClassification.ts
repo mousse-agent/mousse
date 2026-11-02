@@ -3,8 +3,10 @@ import type { PathOwnershipRule, SettingsClassificationEntry, SettingsScope } fr
 /**
  * Frozen C1 classification of current mousse.conf keys and well-known home files.
  * Provider catalog/credentials and MMS infrastructure stay installation-scoped.
- * Personal selections, catalogs of user work, and control/channel/scheduled stores
- * are profile-scoped after migration.
+ * Personal selections, catalogs of user work, and control/scheduled stores
+ * are profile-scoped after migration. `channels` is the leftover section and folder of the
+ * removed Channels feature: it still moves with its profile so its data (bot tokens included)
+ * never becomes installation-wide, and nothing reads it.
  */
 export const MOUSSE_CONF_INSTALLATION_KEYS = ['version', 'mms', 'features'] as const
 export const MOUSSE_CONF_PROFILE_KEYS = [
@@ -34,6 +36,7 @@ export const SETTINGS_CLASSIFICATION: readonly SettingsClassificationEntry[] = [
   { path: 'settings.shortcuts', scope: 'profile', notes: 'Keyboard shortcut overrides are personal.' },
   { path: 'settings.permissions', scope: 'profile', notes: 'The default permission mode of new threads is personal.' },
   { path: 'settings.runs', scope: 'profile', notes: 'Whether a paused run continues by itself after a usage limit is a per-profile choice.' },
+  { path: 'settings.experimental', scope: 'profile', notes: 'Experimental features, such as a worktree for every subagent, are a per-profile choice.' },
   { path: 'settings.agentAccess', scope: 'profile', notes: 'How far agents may act on other threads is a per-profile trust choice.' },
   { path: 'settings.integrations', scope: 'profile', notes: 'Skill/MCP enablement is profile-owned.' },
   { path: 'settings.title', scope: 'profile', notes: 'Title-model selection points at the shared catalog.' },
@@ -64,7 +67,7 @@ export const SETTINGS_CLASSIFICATION: readonly SettingsClassificationEntry[] = [
   },
   { path: 'agents', scope: 'profile', notes: 'Engine enablement and per-agent model prefs are personal.' },
   { path: 'scheduled', scope: 'profile', notes: 'Job definitions bind their owner at creation.' },
-  { path: 'channels', scope: 'profile', notes: 'Channel routing and pairing maps are profile-owned.' }
+  { path: 'channels', scope: 'profile', notes: 'Leftover settings of the removed Channels feature stay with their profile; nothing reads them.' }
 ]
 
 export const PATH_OWNERSHIP_RULES: readonly PathOwnershipRule[] = [
@@ -185,7 +188,7 @@ export const PATH_OWNERSHIP_RULES: readonly PathOwnershipRule[] = [
     scope: 'profile',
     relativePath: 'channels',
     preservedDuringMigration: false,
-    notes: 'Sessions, directory, and pairing state are profile-owned.'
+    notes: 'Leftover data of the removed Channels feature stays with its profile; nothing reads it.'
   },
   {
     logicalName: 'control/',

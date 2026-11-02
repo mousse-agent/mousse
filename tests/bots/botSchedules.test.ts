@@ -3,7 +3,7 @@
  * `sched:<botId>:<scheduleId>:<occurrenceAt>`, inserted in the same transaction that moves the
  * schedule on, so a repeated tick or a tick after a crash inserts nothing. Occurrences missed while
  * Mousse was closed collapse into one; a busy bot queues the next one; nothing ticks before the
- * startup pass. Channel activations tell their chat each state once.
+ * startup pass.
  */
 import { mkdirSync, mkdtempSync, realpathSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -311,51 +311,18 @@ describe('bot schedules', () => {
   })
 })
 
-describe('channel replies', () => {
-  const replyTo = { platform: 'telegram' as const, chatId: '42', messageId: 'm1' }
-
-  it('a channel activation says it waits for approval once, and its final message once', async () => {
+describe('activation requests', () => {
+  it('two deliveries of one request at the same time give one activation, and no error', async () => {
     publish([])
     approve()
-    const activation = await bots.activateFromChannel({ botId: 'site-editor', input: 'Fix the footer', clientRequestId: 'telegram:42:m1', replyTo })
-    // A repeat of the same chat message is the same activation.
-    expect((await bots.activateFromChannel({ botId: 'site-editor', input: 'Fix the footer', clientRequestId: 'telegram:42:m1', replyTo })).id).toBe(activation.id)
-    expect(activation.trigger).toEqual({ kind: 'channel', input: 'Fix the footer', replyTo })
-    expect(bots.channelReply(activation.id)).toBeUndefined()
-    bots.raiseWall(activation.id, { dispatchN: 1, kind: 'gate', permission: { tool: 'write' }, reason: 'I need to write.' })
-    // While the chat cannot be reached nothing is claimed; the reply waits for the channel.
-    expect(bots.channelReply(activation.id, { canSend: () => false })).toBeUndefined()
-    expect(bots.channelReply(activation.id)).toMatchObject({ replyTo, text: 'Waiting for approval in Mousse.' })
-    expect(bots.channelReply(activation.id)).toBeUndefined()
-    store.run("UPDATE bot_activations SET status = 'done', result = 'Footer fixed.' WHERE id = ?", activation.id)
-    // A send that failed gives the claim back, and the same state is sent again.
-    bots.channelReply(activation.id)!.release()
-    const again = bots.channelReply(activation.id)!
-    expect(again).toMatchObject({ replyTo, text: 'Footer fixed.' })
-    expect(bots.channelReply(activation.id)).toBeUndefined()
-    expect(bots.recentChannelActivations()).toEqual([activation.id])
-  })
-
-  it('two deliveries of one chat message at the same time give one activation, and no error', async () => {
-    publish([])
-    approve()
-    const input = { botId: 'site-editor', input: 'Fix it', clientRequestId: 'telegram:42:m2', replyTo }
+    const input = { botId: 'site-editor', input: 'Fix it', clientRequestId: 'c2' }
     // The second delivery reads no activation yet, then finds the first one's at its insert.
     const byKey = store.activationByKey.bind(store)
     let reads = 0
     vi.spyOn(store, 'activationByKey').mockImplementation((key) => (++reads === 1 ? undefined : byKey(key)))
-    const [a, b] = await Promise.all([bots.activateFromChannel(input), bots.activateFromChannel(input)])
+    const [a, b] = await Promise.all([bots.activate(input), bots.activate(input)])
     expect(a.id).toBe(b.id)
     expect(store.listActivations('site-editor')).toHaveLength(1)
-  })
-
-  it('manual and scheduled activations never reply to a chat', async () => {
-    publish([])
-    approve()
-    const manual = await bots.activate({ botId: 'site-editor', input: 'Fix it', clientRequestId: 'c1' })
-    store.run("UPDATE bot_activations SET status = 'done' WHERE id = ?", manual.id)
-    expect(bots.channelReply(manual.id)).toBeUndefined()
-    expect(bots.recentChannelActivations()).toEqual([])
   })
 })
 
@@ -376,7 +343,8 @@ describe('bots.db v3', () => {
       expect(v3.activation('act_done')).toMatchObject({ status: 'done', result: 'Done.', trigger: { kind: 'manual', input: 'Fix it' } })
       expect(v3.activation('act_wait')!.status).toBe('waiting_grant')
       expect(v3.escalations({ activationId: 'act_wait', status: 'open' })).toHaveLength(1)
-      expect(v3.claimReply('act_done', 'done')).toBe(true)
+      // `reply_status` stays in the schema (the removed Channels feature wrote it).
+      expect(v3.all("SELECT reply_status FROM bot_activations WHERE id = 'act_done'")).toEqual([{ reply_status: null }])
       v3.putScheduleState('site-editor', 'tidy', '{}', iso(T0))
       v3.setScheduleSkip('site-editor', 'tidy', 'bot_waiting_for_owner', iso(T0))
       expect(v3.scheduleStates('site-editor')).toEqual([{ scheduleId: 'tidy', spec: '{}', nextRunAt: iso(T0), lastSkipAt: iso(T0), lastSkipReason: 'bot_waiting_for_owner' }])

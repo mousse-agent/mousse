@@ -389,6 +389,13 @@ export interface HarnessDriver {
   /** The user's own MCP servers: attached by the runtime itself, or proxied by Mousse (default `native`). */
   readonly userMcp?: 'native' | 'proxy'
   /**
+   * The runtime can attach the MCP relay (`mousse-relay`), and who asks the user before a relayed tool
+   * runs. `runtime`: the runtime's own permission flow (Claude Code `canUseTool`, an ACP agent's
+   * `session/request_permission`); `mousse`: the relay asks through the thread's approval cards.
+   * Absent: never attached (pi).
+   */
+  readonly relay?: { approvals: 'runtime' | 'mousse' }
+  /**
    * The runtime hands a Mousse MCP tool result's images to its model, and the models it lists read
    * images (a browser screenshot reaches the model). A custom model's own capabilities win. An ACP
    * agent without it reads images when its `initialize` says so (`promptCapabilities.image`).

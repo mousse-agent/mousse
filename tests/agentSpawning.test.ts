@@ -24,12 +24,11 @@ function fakeHost() {
     taskCancel: record('taskCancel'),
     listDelegations: () => ({ tool: 'listDelegations' }),
     listSubagents: () => ({ tool: 'listSubagents' }),
-    integrateDelegation: record('integrateDelegation'),
+    reportResult: record('reportResult'),
     named: {
       create: record('named.create'),
       createBatch: record('named.createBatch'),
-      recall: record('named.recall'),
-      integrate: record('named.integrate')
+      recall: record('named.recall')
     }
   }
   return { host, calls }
@@ -70,7 +69,7 @@ describe('agent spawning', () => {
     await dispatchDelegationTool(host, call('integrate_subagent', { agent: 'Reviewer' }))
     expect(await dispatchDelegationTool(host, call('list_subagents', {}))).toEqual({ tool: 'listSubagents' })
     expect(await dispatchDelegationTool(host, call('list_delegations', {}))).toEqual({ tool: 'listDelegations' })
-    expect(calls.map((entry) => entry.tool)).toEqual(['named.create', 'named.recall', 'named.integrate'])
+    expect(calls.map((entry) => entry.tool)).toEqual(['named.create', 'named.recall', 'reportResult'])
     await expect(dispatchDelegationTool(host, call('create_subagents', { agents: [{ name: 'x' }] }))).rejects.toThrow('names and tasks')
   })
 
@@ -96,7 +95,7 @@ describe('agent spawning', () => {
     expect(calls).toEqual([])
   })
 
-  it('addresses task_status, task_cancel and integrate_delegation by delegationId or by subagent title', async () => {
+  it('addresses task_status, task_cancel and the retired integrate_delegation by delegationId or by subagent title', async () => {
     const { host, calls } = fakeHost()
     await dispatchDelegationTool(host, call('task_status', { delegationId: 'delegation:1' }))
     await dispatchDelegationTool(host, call('task_status', { subagent: 'API reviewer' }))
@@ -106,7 +105,7 @@ describe('agent spawning', () => {
       ['taskStatus', { delegationId: 'delegation:1' }],
       ['taskStatus', { subagent: 'API reviewer' }],
       ['taskCancel', { subagent: 'API reviewer' }],
-      ['integrateDelegation', { subagent: 'API reviewer' }]
+      ['reportResult', { subagent: 'API reviewer' }]
     ])
     for (const name of ['task_status', 'task_cancel', 'integrate_delegation'])
       await expect(dispatchDelegationTool(host, call(name, {}))).rejects.toThrow('delegationId or a subagent title')

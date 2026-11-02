@@ -2,8 +2,8 @@ import { timingSafeEqual } from 'crypto'
 import type { IncomingHttpHeaders, IncomingMessage } from 'http'
 
 /**
- * Helpers shared by the daemon's loopback HTTP listeners (the channel webhook and the scheduled-job
- * webhooks): body reading with a hard byte limit, the browser and Host checks, and a constant-time
+ * Helpers for the daemon's loopback HTTP listener (the scheduled-job webhooks): body reading with a
+ * hard byte limit, the browser and Host checks, and a constant-time
  * comparison. They deal in raw bytes so a caller can verify a signature over exactly what was sent.
  */
 
@@ -34,7 +34,7 @@ export function declaredLengthExceeds(headers: IncomingHttpHeaders, maxBytes: nu
  *
  * `abortOnClose` rejects when the connection ends before the body does, and `timeoutMs` rejects when the whole
  * body has not arrived by then, so a stalled client cannot hold a handler (or a shutdown) open. Both are
- * off by default: the channel webhook keeps its behaviour.
+ * off by default.
  */
 export function readBodyBytes(
   req: IncomingMessage,

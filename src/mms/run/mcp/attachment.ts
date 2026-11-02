@@ -8,6 +8,10 @@ export const MOUSSE_MCP_SERVER_NAME = 'mousse'
 export const MOUSSE_MCP_TOKEN_ENV = 'MOUSSE_MCP_TOKEN'
 /** Per-call timeout runtimes should allow: `ask_user` may wait up to an hour. */
 export const MOUSSE_MCP_TOOL_TIMEOUT_MS = 60 * 60 * 1000
+/** Name of the MCP relay in a runtime's MCP configuration: the user's Mousse MCP servers, relayed. */
+export const MOUSSE_RELAY_SERVER_NAME = 'mousse-relay'
+/** Per-call timeout of a relayed tool: under the stdio bridge's 300 s fetch ceiling. */
+export const RELAY_CALL_TIMEOUT_MS = 4 * 60_000
 
 export function bearerHeader(attachment: McpAttachment): string {
   return `Bearer ${attachment.token}`
@@ -72,18 +76,41 @@ export function claudeMcpServers(attachment: McpAttachment | null | undefined): 
       url: attachment.url,
       headers: { Authorization: bearerHeader(attachment) },
       timeout: MOUSSE_MCP_TOOL_TIMEOUT_MS
-    }
+    },
+    ...(attachment.relay
+      ? {
+          [MOUSSE_RELAY_SERVER_NAME]: {
+            type: 'http' as const,
+            url: attachment.relay.url,
+            headers: { Authorization: bearerHeader(attachment) },
+            // Longer than the relay's own call timeout, so the model gets the relay's timeout result.
+            timeout: MOUSSE_MCP_TOOL_TIMEOUT_MS
+          }
+        }
+      : {})
   }
 }
 
 /** Cursor SDK `mcpServers` (SPEC §15.2): the Mousse server over HTTP, or none. */
 export function cursorMcpServers(attachment: McpAttachment | null | undefined): Record<string, { type: 'http'; url: string; headers: Record<string, string> }> {
   if (!attachment) return {}
-  return { [MOUSSE_MCP_SERVER_NAME]: { type: 'http', url: attachment.url, headers: { Authorization: bearerHeader(attachment) } } }
+  return {
+    [MOUSSE_MCP_SERVER_NAME]: { type: 'http', url: attachment.url, headers: { Authorization: bearerHeader(attachment) } },
+    ...(attachment.relay
+      ? { [MOUSSE_RELAY_SERVER_NAME]: { type: 'http' as const, url: attachment.relay.url, headers: { Authorization: bearerHeader(attachment) } } }
+      : {})
+  }
 }
 
 /** Tool-name prefix Claude gives the Mousse server's tools. */
 export const CLAUDE_MOUSSE_TOOL_PREFIX = `mcp__${MOUSSE_MCP_SERVER_NAME}__`
+/** Tool-name prefix Claude gives the MCP relay's tools. Never auto-allowed: the runtime's approvals apply. */
+export const CLAUDE_RELAY_TOOL_PREFIX = `mcp__${MOUSSE_RELAY_SERVER_NAME}__`
+
+/** A tool of a server Mousse serves (`mcp__mousse__*` or `mcp__mousse-relay__*`): its calls reach Mousse. */
+export function isMousseServerTool(toolName: string): boolean {
+  return toolName.startsWith(CLAUDE_MOUSSE_TOOL_PREFIX) || toolName.startsWith(CLAUDE_RELAY_TOOL_PREFIX)
+}
 
 /**
  * The Mousse tools a read-only (`shared`) delegated child may call, by name without the prefix:
@@ -106,15 +133,26 @@ export function acpMcpServers(
   options: { http: boolean; cli?: CliCommand }
 ): AcpMcpServer[] {
   if (!attachment) return []
-  if (options.http)
-    return [{ name: MOUSSE_MCP_SERVER_NAME, type: 'http', url: attachment.url, headers: [{ name: 'Authorization', value: bearerHeader(attachment) }] }]
-  const bridge = stdioBridgeCommand(attachment, options.cli)
-  return [{
-    name: MOUSSE_MCP_SERVER_NAME,
+  const relay = attachment.relay ? { ...attachment, url: attachment.relay.url } : null
+  if (options.http) {
+    const servers: AcpMcpServer[] = [{ name: MOUSSE_MCP_SERVER_NAME, type: 'http', url: attachment.url, headers: [{ name: 'Authorization', value: bearerHeader(attachment) }] }]
+    if (relay) servers.push({ name: MOUSSE_RELAY_SERVER_NAME, type: 'http', url: relay.url, headers: [{ name: 'Authorization', value: bearerHeader(attachment) }] })
+    return servers
+  }
+  const servers = [acpStdioServer(MOUSSE_MCP_SERVER_NAME, attachment, options.cli)]
+  // The relay runs a second stdio bridge, pointed at the relay's path on the same listener.
+  if (relay) servers.push(acpStdioServer(MOUSSE_RELAY_SERVER_NAME, relay, options.cli))
+  return servers
+}
+
+function acpStdioServer(name: string, attachment: McpAttachment, cli: CliCommand | undefined): AcpMcpServer {
+  const bridge = stdioBridgeCommand(attachment, cli)
+  return {
+    name,
     command: bridge.command,
     args: bridge.args,
     env: Object.entries(bridge.env).map(([name, value]) => ({ name, value }))
-  }]
+  }
 }
 
 /**
@@ -122,7 +160,8 @@ export function acpMcpServers(
  * keys, the same keys `codex -c key=value` takes. The Codex adapter sends them as the `config` of
  * `thread/start` / `thread/resume`, so each thread gets its own run token and the token never
  * appears in a process argument list. Mousse tools are pre-approved (`approve`): the server itself
- * scopes every call to the run's credential, as for Claude.
+ * scopes every call to the run's credential, as for Claude. The relay's tools are pre-approved too:
+ * Codex has no approval request for MCP tools Mousse handles, so the relay asks through its own cards.
  */
 export function codexMcpConfigOverrides(attachment: McpAttachment | null | undefined): Record<string, string | number | Record<string, string>> {
   if (!attachment) return {}
@@ -130,6 +169,19 @@ export function codexMcpConfigOverrides(attachment: McpAttachment | null | undef
   return {
     [`${prefix}.url`]: attachment.url,
     [`${prefix}.http_headers`]: { Authorization: bearerHeader(attachment) },
+    [`${prefix}.tool_timeout_sec`]: MOUSSE_MCP_TOOL_TIMEOUT_MS / 1000,
+    [`${prefix}.default_tools_approval_mode`]: 'approve',
+    ...(attachment.relay ? codexRelayOverrides(attachment, attachment.relay) : {})
+  }
+}
+
+function codexRelayOverrides(attachment: McpAttachment, relay: NonNullable<McpAttachment['relay']>): Record<string, string | number | Record<string, string>> {
+  const prefix = `mcp_servers.${MOUSSE_RELAY_SERVER_NAME}`
+  return {
+    [`${prefix}.url`]: relay.url,
+    [`${prefix}.http_headers`]: { Authorization: bearerHeader(attachment) },
+    // As long as Mousse's own: Codex counts the time the user takes on the relay's approval card,
+    // and the relay's own call timeout starts only once the call is approved.
     [`${prefix}.tool_timeout_sec`]: MOUSSE_MCP_TOOL_TIMEOUT_MS / 1000,
     [`${prefix}.default_tools_approval_mode`]: 'approve'
   }

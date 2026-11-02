@@ -135,7 +135,7 @@ async function profile(options: ProfileOptions = {}) {
         rewrite: (from, to) => {
           if (options.rewriteFails) throw new Error('Mousse could not save the settings')
           if (deviceDefault.instanceId !== from) return []
-          deviceDefault = { instanceId: to.instanceId, llmProvider: to.llmProvider, model: to.model(deviceDefault.model as string) }
+          deviceDefault = { instanceId: to.instanceId, llmProvider: to.llmProvider, model: to.model({ model: deviceDefault.model as string }).model }
           return ['Default model']
         }
       }

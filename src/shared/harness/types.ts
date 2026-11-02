@@ -412,6 +412,8 @@ export interface InstanceModel {
   capabilities: ModelCapabilities
   hidden: boolean
   favorite: boolean
+  /** An older model the agent does not list itself (`LlmModelOption.older`). */
+  older?: true
 }
 
 /** Instance settings the Add dialog and editor change. `null` clears a field back to its default. */

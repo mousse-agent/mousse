@@ -99,6 +99,8 @@ type ProviderAuthTypeFilter = 'api_key' | 'oauth'
 const DYNAMIC_MODELS_REFRESH_MS = 5 * 60_000
 /** Upper bounds so a hung endpoint cannot stall later refreshes forever. */
 const CATALOG_REFRESH_TIMEOUT_MS = 60_000
+/** One usage read, all its requests together, gives up after this long. */
+const USAGE_FETCH_TIMEOUT_MS = 30_000
 
 export class ProviderAuthService {
   /**
@@ -582,7 +584,7 @@ export class ProviderAuthService {
 
   /**
    * Provider-native subscription usage text for a single provider.
-   * Shared by channel `/usage` and the desktop usage view — never derive or
+   * Shown by the desktop usage view — never derive or
    * estimate quotas, only render what the provider API returned.
    * Returns undefined when the provider has no quota API.
    */
@@ -665,9 +667,10 @@ export class ProviderAuthService {
       // SuperGrok subscription usage: CLI proxy REST first, then grok.com gRPC-web
       // (REST ?format=credits currently 500s for some accounts with a serialize error).
       const headers = grokCliBillingHeaders(token)
+      const signal = AbortSignal.timeout(USAGE_FETCH_TIMEOUT_MS)
       const [creditsRes, monthlyRes] = await Promise.all([
-        fetch('https://cli-chat-proxy.grok.com/v1/billing?format=credits', { headers }),
-        fetch('https://cli-chat-proxy.grok.com/v1/billing', { headers })
+        fetch('https://cli-chat-proxy.grok.com/v1/billing?format=credits', { headers, signal }),
+        fetch('https://cli-chat-proxy.grok.com/v1/billing', { headers, signal })
       ])
 
       if ([creditsRes.status, monthlyRes.status].some((status) => status === 401 || status === 403)) {
@@ -697,7 +700,7 @@ export class ProviderAuthService {
         pushUnique(parseXaiCreditsUsage(body))
       }
       if (!seen.has('weekly')) {
-        pushUnique(await fetchGrokCreditsViaGrpc(token))
+        pushUnique(await fetchGrokCreditsViaGrpc(token, signal))
       }
 
       if (windows.length === 0) {
@@ -738,7 +741,7 @@ export class ProviderAuthService {
           authorization: `Bearer ${apiKey}`,
           accept: 'application/json'
         },
-        signal: AbortSignal.timeout(30_000)
+        signal: AbortSignal.timeout(USAGE_FETCH_TIMEOUT_MS)
       })
       if (response.status === 401 || response.status === 403) {
         throw new Error('OpenCode Go API key was rejected. Check the key in Settings.')

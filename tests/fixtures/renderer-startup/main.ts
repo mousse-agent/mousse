@@ -24,7 +24,7 @@ async function main() {
     await until("!!document.querySelector('.navigation-rail') && qa.calls.filter(row=>row.method==='profiles.status').length>=2")
     // Let mount effects settle with both trusted bootstrap responses held.
     await delay(100)
-    const before = await execute('({calls:qa.calls,ready:qa.ready(),profile:qa.profile(),channels:!!document.querySelector(".channels-page"),main:!!document.querySelector(".main-area"),skeleton:!!document.querySelector("[data-workspace-loading=connection]"),titlebar:!!document.querySelector(".titlebar"),theme:document.documentElement.dataset.theme,surface:getComputedStyle(document.documentElement).getPropertyValue("--surface-base").trim(),acrylic:document.documentElement.dataset.acrylic})')
+    const before = await execute('({calls:qa.calls,ready:qa.ready(),profile:qa.profile(),scheduled:!!document.querySelector(".scheduled-page"),main:!!document.querySelector(".main-area"),skeleton:!!document.querySelector("[data-workspace-loading=connection]"),titlebar:!!document.querySelector(".titlebar"),theme:document.documentElement.dataset.theme,surface:getComputedStyle(document.documentElement).getPropertyValue("--surface-base").trim(),acrylic:document.documentElement.dataset.acrylic})')
     await execute('qa.fail()')
     await until("document.querySelector('[data-workspace-loading=connection] [role=alert]')?.textContent.includes('Controlled workspace service unavailable')")
     const failed = await execute('({ready:qa.ready(),main:!!document.querySelector(".main-area"),skeleton:!!document.querySelector("[data-workspace-loading=connection]"),error:document.querySelector("[data-workspace-loading=connection] [role=alert]")?.textContent})')
@@ -34,9 +34,9 @@ async function main() {
     await execute('qa.bind()')
     await until('qa.ready()')
     await execute('qa.openBrowser()')
-    await until("qa.ready() && qa.calls.some(row=>row.method==='platformRequest.request' && row.params==='browser.access.status') && qa.calls.some(row=>row.method==='channels.getSnapshot')")
+    await until("qa.ready() && qa.calls.some(row=>row.method==='platformRequest.request' && row.params==='browser.access.status') && !!document.querySelector('.scheduled-page')")
     await delay(100)
-    const after = await execute('({calls:qa.calls,ready:qa.ready(),profile:qa.profile(),errors:qa.errors,channels:!!document.querySelector(".channels-page"),main:!!document.querySelector(".main-area"),workspaceReady:qa.workspaceReady(),skeleton:!!document.querySelector("[data-workspace-loading=content]"),transcript:!!document.querySelector(".startup-transcript")})')
+    const after = await execute('({calls:qa.calls,ready:qa.ready(),profile:qa.profile(),errors:qa.errors,scheduled:!!document.querySelector(".scheduled-page"),main:!!document.querySelector(".main-area"),workspaceReady:qa.workspaceReady(),skeleton:!!document.querySelector("[data-workspace-loading=content]"),transcript:!!document.querySelector(".startup-transcript")})')
     await execute('qa.hydrate()')
     await until("qa.workspaceReady() && !!document.querySelector('.startup-transcript') && !document.querySelector('[data-workspace-loading]')")
     const hydrated = await execute('({workspaceReady:qa.workspaceReady(),transcript:!!document.querySelector(".startup-transcript"),errors:qa.errors})')
@@ -54,9 +54,9 @@ async function main() {
     const overlays = []
     const railPages = []
     // Opening another page must replace the previous page, even if it was open.
-    for (const page of ['settings', 'scheduled', 'channels']) {
+    for (const page of ['settings', 'scheduled']) {
       await execute(`qa.overlay(${JSON.stringify(page)},true)`)
-      const visiblePages = `document.querySelectorAll('.settings-page:not([hidden]),.scheduled-page:not([hidden]),.channels-page:not([hidden])').length`
+      const visiblePages = `document.querySelectorAll('.settings-page:not([hidden]),.scheduled-page:not([hidden])').length`
       if (page === 'settings') {
         await until(`document.querySelector('.app').inert && !document.querySelector('.settings-page').hidden`)
         overlays.push(await execute(`(() => {
@@ -72,7 +72,7 @@ async function main() {
         })()`))
       }
     }
-    await execute('qa.overlay("channels",false)')
+    await execute('qa.overlay("scheduled",false)')
     await until('!document.querySelector(".app").inert && getComputedStyle(document.querySelector(".app-workspace")).display !== "none"')
     const restored = await execute('({visibility:getComputedStyle(document.querySelector(".app")).visibility,inert:document.querySelector(".app").inert,retained:retainedWorkspace===document.querySelector(".startup-transcript")})')
     writeFileSync(join(directory, 'evidence.json'), JSON.stringify({ before, failed, after, hydrated, acrylic, overlays, railPages, restored, workspaceSize, rendererErrors }))

@@ -5,8 +5,8 @@
  * and its admission fence) is driven on the engine over a fake clock. `OrchestratorService.stopThread`
  * (the one entry point every public Stop goes through, local aborts, queue entries, provider work, the
  * question router, steers that were never read) is driven through a real orchestrator, run engine and
- * effect worker with scripted providers. The routing of the channel and remote entries is tested where
- * those entries live (`channels.test.ts`, `net/bridge/remote/composer.test.ts`).
+ * effect worker with scripted providers. The routing of the remote entry is tested where it lives
+ * (`net/bridge/remote/composer.test.ts`).
  */
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -298,14 +298,14 @@ describe('RunEngine.stopSubtree (issue #142)', () => {
         integration: await mkRun('thread', 'integration'),
         gui: await mkRun('thread', 'gui'),
         cli: await mkRun('thread', 'cli'),
-        channel: await mkRun('thread', 'channel'),
+        remote: await mkRun('thread', 'remote'),
         internal: await mkRun('thread', 'internal'),
         steerFollowup: await mkRun('thread', 'steer-followup')
       }
       for (const runId of Object.values(runs)) expect(f.engine.isFenced(runId)).toBe(false)
       bumpStopGenerations(f.store, ['thread'], f.now())
       const fenced = Object.fromEntries(Object.entries(runs).map(([name, runId]) => [name, f!.engine.isFenced(runId)]))
-      expect(fenced).toEqual({ delegation: true, wake: true, steerLate: true, continuation: true, integration: true, gui: false, cli: false, channel: false, internal: false, steerFollowup: false })
+      expect(fenced).toEqual({ delegation: true, wake: true, steerLate: true, continuation: true, integration: true, gui: false, cli: false, remote: false, internal: false, steerFollowup: false })
     })
 
     it('refuses delegate_task and continue_subagent from a run that started before the Stop; a run that starts after may', async () => {
@@ -679,21 +679,21 @@ describe('OrchestratorService.stopThread through a real orchestrator (issue #142
     expect(s.generation(s.childThreadId)).toBe(1)
   })
 
-  it('a replayed Stop does not close the provider process under a channel turn that has no run of its own', async () => {
+  it('a replayed Stop does not close the provider process under a turn that has no run of its own', async () => {
     const s = await scene()
     await s.d.orch.stopThread(s.parentId, 'user', { clientRequestId: 'once' })
     await waitFor(() => s.terminal(s.parentRunId) && s.terminal(s.delegation.childRunId), 'both runs to end')
-    // A channel turn starts on the parent after the Stop; it is not an engine run. It is registered directly
-    // on purpose: starting a real channel turn here is heavy and the test only needs Stop to see one.
-    const channelTurns = (s.d.orch as unknown as { channelTurns: Map<string, unknown> }).channelTurns
-    channelTurns.set(s.parentId, { abort: new AbortController(), pendingSteer: [] })
+    // A turn is admitted on the parent after the Stop; it is not an engine run. It is marked directly on
+    // purpose: starting a real turn here is heavy and the test only needs Stop to see one.
+    const session = s.d.orch.getOrCreateSession(s.parentId)
+    session.turnAdmitted = true
     try {
       s.adapter.providerStops.length = 0
       await s.d.orch.stopThread(s.parentId, 'user', { clientRequestId: 'once' })
-      // The subagent has nothing newer, so its process is still ended; the parent's channel turn is newer work.
+      // The subagent has nothing newer, so its process is still ended; the parent's turn is newer work.
       expect(s.adapter.providerStops).toEqual([s.childThreadId])
     } finally {
-      channelTurns.delete(s.parentId)
+      session.turnAdmitted = false
     }
   })
 
@@ -939,17 +939,15 @@ describe('OrchestratorService.stopThread through a real orchestrator (issue #142
   })
 
   describe('a Stop without a run engine', () => {
-    it('ends the thread\'s turn and its channel turn both', async () => {
+    it('ends the thread\'s turn', async () => {
       const dir = mkdtempSync(join(tmpdir(), 'mousse-stop-no-engine-'))
       const previous = process.env.MOUSSE_HOME
       try {
         process.env.MOUSSE_HOME = dir
         const orch = createOrchestrator(dir, new ThreadDataStore(new ProjectManager()))
         const turn = vi.spyOn(orch, 'abortActiveTurn').mockReturnValue(true)
-        const channel = vi.spyOn(orch, 'abortChannelTurn').mockReturnValue(true)
         await expect(orch.stopThread('thread-1', 'user')).resolves.toMatchObject({ ok: true, status: 'stopped' })
         expect(turn).toHaveBeenCalledTimes(1)
-        expect(channel).toHaveBeenCalledTimes(1)
       } finally {
         if (previous === undefined) delete process.env.MOUSSE_HOME
         else process.env.MOUSSE_HOME = previous

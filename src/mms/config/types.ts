@@ -1,5 +1,4 @@
 import type { AgentTypeId } from '../../shared/settings'
-import type { ChannelConfig } from '../../shared/types'
 import type { JobSchedule, ScheduledJob } from '../../shared/types'
 import type { MousseSettings } from '../../shared/settings'
 import type { MousseFeatureFlags } from '../../shared/featureFlags'
@@ -34,6 +33,8 @@ export interface MousseProvidersConfig {
    * harness gateway and validated when read.
    */
   modelPrefs?: Record<string, unknown>
+  /** The names listings gave models, per instance id and model id (`ModelNamesService`). */
+  modelNames?: Record<string, unknown>
 }
 
 export interface MousseAgentsConfig {
@@ -47,7 +48,7 @@ export interface MousseAgentsConfig {
 
 export type MousseSettingsSection = Pick<
   MousseSettings,
-  'profile' | 'appearance' | 'notifications' | 'shortcuts' | 'permissions' | 'context' | 'agentAccess' | 'runs' | 'integrations' | 'title'
+  'profile' | 'appearance' | 'notifications' | 'shortcuts' | 'permissions' | 'context' | 'agentAccess' | 'runs' | 'experimental' | 'integrations' | 'title'
 >
 
 /** Default port of the loopback listener that receives job webhooks. */
@@ -113,7 +114,6 @@ export interface MousseConf {
   providers: MousseProvidersConfig
   agents: MousseAgentsConfig
   scheduled: ScheduledConfigSection
-  channels: ChannelConfig
   mms: MmsConfigSection
   features: MousseFeatureFlags
 }

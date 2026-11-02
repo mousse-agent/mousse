@@ -185,7 +185,7 @@ export function latestResultRun(store: RunStore, delegation: Pick<DelegationReco
 /**
  * A run another thread's agent can wait on: a message an agent sent (`mcp`), or the run that continues
  * one (the resume after a usage-limit pause). Only these keep their final text outside a subagent: a
- * person's own turns, a channel's and a schedule's, are not retained here.
+ * person's own turns, a remote send's and a schedule's, are not retained here.
  */
 function waitableRun(store: RunStore, run: Pick<RunRecord, 'source' | 'outcome'>, depth = 0): boolean {
   if (run.source === 'mcp' || run.outcome?.sentByAgent) return true

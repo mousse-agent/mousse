@@ -3,15 +3,16 @@
  * a delegation row of its own, so the parent hears its result as a new completion.
  *
  * The `source` of a run, classified:
- * - conversational, tracked: `gui`, `cli`, `channel`, and `internal` (authenticated clients that are
- *   neither the GUI nor the CLI, see `admittedChatSource` in the protocol handlers);
+ * - conversational, tracked: `gui`, `cli`, `remote` (a turn sent through the remote bridge, such as a
+ *   linked phone's), and `internal` (authenticated clients that are neither the GUI nor the CLI, see
+ *   `admittedChatSource` in the protocol handlers);
  * - never tracked: `delegation` (it has its row already), `wake` (delivers a result, is not new work),
  *   `provider-continuation`, `integration`, `resume` and `resume_now` (the continue turn after a
  *   usage-limit pause: the task is the paused run's), `steer-late` and `steer-followup` (a steer that
  *   missed its turn), `lease-race`, `queue` (a legacy queue item without a source), `schedule`,
  *   `workflow-observer`, `protocol`, `cli-steer`, `protocol-steer` and local actions (undo, restore).
  */
-export const FOLLOW_UP_SOURCES: ReadonlySet<string> = new Set(['gui', 'cli', 'channel', 'internal'])
+export const FOLLOW_UP_SOURCES: ReadonlySet<string> = new Set(['gui', 'cli', 'remote', 'internal'])
 
 /** Whether a run with this `source` on a subagent thread is tracked as a follow-up. */
 export function isFollowUpSource(source: string): boolean {
@@ -25,7 +26,7 @@ export function isFollowUpSource(source: string): boolean {
  * that follows a usage-limit pause (`resume`, `resume_now`). The Stop fence (`stopGeneration.ts`)
  * refuses such work at execution once a Stop came after it was admitted, and while a thread is
  * paused none of it runs beside the pause, except the resume itself (`RESUME_SOURCES`). Every other
- * source (a person's send from the app, the CLI, a channel or the protocol, a plain steer left for
+ * source (a person's send from the app, the CLI, a remote send or the protocol, a plain steer left for
  * a follow-up turn, a schedule) is new intent and is never fenced.
  */
 export const FENCED_SOURCES: ReadonlySet<string> = new Set([

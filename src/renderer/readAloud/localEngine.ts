@@ -7,9 +7,9 @@ import { serveModelFiles } from '../speechModels/pageSupport'
 import { splitSpeechSegments } from './speechText'
 
 /**
- * The local models run on single-threaded WebAssembly (the window is not cross-origin isolated),
- * where one worker produces audio at roughly 0.6x to 0.7x real time. Two workers voicing
- * consecutive segments in parallel stay ahead of playback.
+ * Each worker runs its model on one WebAssembly thread (only dictation asks for more), where one
+ * worker produces audio at roughly 0.6x to 0.7x real time. Two workers voicing consecutive segments
+ * in parallel stay ahead of playback.
  */
 const POOL_SIZE = 2
 /** Segments voiced ahead of the one playing; each holds a few seconds of audio. */

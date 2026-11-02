@@ -680,7 +680,7 @@ export class MmsProtocolServer {
       }
     )
 
-    // Scheduler / channels (daemon-owned)
+    // Scheduler (daemon-owned)
     onEmitter(services.lineEditStats, 'updated', (snapshot: unknown) => {
       emitToSubscribers(this.ring.push('stats.lineEdits.updated', { snapshot }, undefined))
     })
@@ -694,18 +694,12 @@ export class MmsProtocolServer {
     onEmitter(services.pullRequestWatch, 'updated', (payload: { threadId: string }) => {
       emitToSubscribers(this.ring.push('pullRequests.updated', payload, payload.threadId))
     })
-    onEmitter(services.channels, 'updated', (snapshot: unknown) => {
-      emitToSubscribers(this.ring.push('channels.updated', { snapshot }, undefined))
-    })
     if (services.personalBots) onEmitter(services.personalBots.events, 'changed', (event: unknown) => {
       emitToSubscribers(this.ring.push('bots.changed', event, undefined))
     })
     // A wall asks the owner: the Bots tab's inbox and a desktop notification.
     if (services.personalBots) onEmitter(services.personalBots.events, 'escalation', (escalation: unknown) => {
       emitToSubscribers(this.ring.push('bots.escalation', escalation, undefined))
-    })
-    onEmitter(services.channels, 'activity', (event: unknown) => {
-      emitToSubscribers(this.ring.push('channels.activity', { event }, undefined))
     })
   }
 

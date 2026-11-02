@@ -7,6 +7,7 @@ import {
   formatEffortLabel,
   getCurrentEffort,
   getModelFastToggle,
+  getModelSpeedOptions,
   getEffortsForModel,
   groupModelsByFamily,
   groupProviderModels,
@@ -47,7 +48,7 @@ describe('modelVariants', () => {
 
     const families = groupModelsByFamily('cursor', models)
     expect(families).toHaveLength(2)
-    const fable = families.find((family) => family.familyLabel === 'Fable 5')
+    const fable = families.find((family) => family.familyLabel === 'Claude Fable 5')
     expect(fable?.variants).toHaveLength(3)
     expect(fable?.hasSubOptions).toBe(true)
     expect(fable?.contexts).toEqual(['1m', '300k'])
@@ -94,7 +95,7 @@ describe('modelVariants', () => {
     ]
 
     const families = groupModelsByFamily('cursor', models)
-    const fable = families.find((family) => family.familyLabel === 'Fable 5')
+    const fable = families.find((family) => family.familyLabel === 'Claude Fable 5')
     expect(fable?.efforts).toEqual(['low', 'medium', 'high', 'xhigh'])
     expect(fable?.hasSubOptions).toBe(true)
     expect(resolveModelVariant(fable!, { context: '1m', effort: 'high' })?.id).toBe('fable-5@1m:high')
@@ -130,7 +131,7 @@ describe('modelVariants', () => {
       'xhigh'
     ])
     expect(getCurrentEffort('fable-5@300k:high', models, 'cursor')).toBe('high')
-    expect(findModelFamily('cursor', models, 'fable-5@300k:high')?.familyLabel).toBe('Fable 5')
+    expect(findModelFamily('cursor', models, 'fable-5@300k:high')?.familyLabel).toBe('Claude Fable 5')
   })
 
   it('parses effort suffix from stored model ids', () => {
@@ -257,6 +258,26 @@ describe('Fast endpoint toggle', () => {
     expect(getModelFastToggle('cursor', 'composer@1m:high', models.map(model => ({
       ...model, ...(model.id === 'composer@1m' ? { speed: 'fast' as const } : {})
     })))).toEqual({ active: true, targetModelId: 'composer@1m:slow:high' })
+  })
+
+  it('lists every speed of the context, slowest first, each at the current level', () => {
+    expect(getModelSpeedOptions('cursor', 'composer@1m:high', models)).toEqual({
+      current: 'standard',
+      options: [
+        { speed: 'slow', modelId: 'composer@1m:slow:high' },
+        { speed: 'standard', modelId: 'composer@1m:high' },
+        { speed: 'fast', modelId: 'composer@1m:fast:high' }
+      ]
+    })
+    // A faster tier the agent lists shows up last, with no change here.
+    const ultra = [
+      { id: 'gpt', label: 'GPT' },
+      { id: 'gpt-fast', label: 'GPT (fast)', speed: 'fast' as const },
+      { id: 'gpt-ultra', label: 'GPT', speed: 'ultrafast' as LlmModelOption['speed'] }
+    ]
+    expect(getModelSpeedOptions('codex', 'gpt-fast', ultra)?.options.map((option) => option.speed)).toEqual(['standard', 'fast', 'ultrafast'])
+    expect(getModelSpeedOptions('codex', 'gpt-fast', ultra)?.current).toBe('fast')
+    expect(getModelSpeedOptions('openai', 'one', [{ id: 'one', label: 'One' }])).toBeUndefined()
   })
 
   it('hides the toggle for unsupported models, missing catalog entries, and unmatched contexts', () => {

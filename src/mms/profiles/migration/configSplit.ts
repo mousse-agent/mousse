@@ -17,8 +17,7 @@ const EMPTY_PROFILE: Record<string, unknown> = {
   settings: {},
   providers: {},
   agents: {},
-  scheduled: { enabled: true, jobs: [] },
-  channels: {}
+  scheduled: { enabled: true, jobs: [] }
 }
 
 export function splitMousseConf(raw: Record<string, unknown>): ConfigSplitResult {

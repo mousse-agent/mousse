@@ -5,7 +5,6 @@ export type MmsEvent =
   | { channel: 'threads:updated'; data: unknown }
   | { channel: 'scheduled:updated'; data: unknown }
   | { channel: 'scheduled:status'; data: unknown }
-  | { channel: 'channels:updated'; data: unknown }
   | { channel: 'net:updated'; data: import('../shared/net/local').NetStatus }
   | { channel: 'providers:install'; data: import('../shared/providerAuth').CliInstallEvent }
   /**
@@ -62,7 +61,6 @@ export class MmsEventBus {
       'threads:updated',
       'scheduled:updated',
       'scheduled:status',
-      'channels:updated',
       'net:updated'
     ]
     const listeners = channels.map((channel) => {

@@ -8,7 +8,7 @@ import {
   splitMentionPath,
   type SuggestionRow
 } from '../src/renderer/components/ComposerSuggestionList'
-import type { MentionItem } from '../src/shared/channelCommands'
+import type { MentionItem } from '../src/shared/composerCommands'
 
 const noop = () => {}
 

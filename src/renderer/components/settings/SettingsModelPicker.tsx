@@ -1,3 +1,4 @@
+import { pickedSelection, pickerModelId, type ModelPick } from '../../../shared/modelSelection'
 import { useEffect, useRef, useState } from 'react'
 import type { LlmProviderOption } from '../../../shared/settings'
 import { ChevronDown } from '../../lib/icons'
@@ -9,15 +10,16 @@ import '../../styles/settingsModelPicker.css'
 
 /**
  * One settings control for a model choice: the composer's model menu plus its
- * reasoning/speed menu, joined into a single 28px control. Provider, model,
- * context, effort and speed all land in one `(providerId, modelId)` pair, with
- * the instance serving it when the listing names one.
+ * reasoning/speed menu, joined into a single 28px control. A choice lands as the
+ * provider, the model with its reasoning level apart, and the instance serving
+ * it when the listing names one.
  */
 export function SettingsModelPicker({
   providers,
   providerId,
   instanceId,
   modelId,
+  effort,
   onSelect,
   placeholder = 'Select model',
   ariaLabel = 'Model',
@@ -28,8 +30,10 @@ export function SettingsModelPicker({
   providerId: string
   /** The selection's instance; tells apart two accounts of one provider. */
   instanceId?: string
+  /** The model as listed; its reasoning level is `effort` (absent = the model's default). */
   modelId: string
-  onSelect: (providerId: string, modelId: string, instanceId?: string) => void
+  effort?: string
+  onSelect: (providerId: string, pick: ModelPick, instanceId?: string) => void
   /** Shown when nothing is selected, e.g. "Automatic". */
   placeholder?: string
   ariaLabel?: string
@@ -40,7 +44,9 @@ export function SettingsModelPicker({
   const buttonRef = useRef<HTMLButtonElement>(null)
   const menuRef = useRef<HTMLDivElement>(null)
   const selected = Boolean(providerId && modelId)
-  const parts = selected ? getGroupedModelButtonParts(providerId, modelId, providers, false, instanceId) : [placeholder]
+  // The menus offer each level of a model as an id of its own.
+  const pickerId = pickerModelId({ model: modelId, effort })
+  const parts = selected ? getGroupedModelButtonParts(providerId, pickerId, providers, false, instanceId) : [placeholder]
   const label = parts.join(' · ')
   const listing = providers.find((provider) => listingServes(provider, { instanceId, llmProvider: providerId }))
   const models = listing?.models ?? []
@@ -86,10 +92,10 @@ export function SettingsModelPicker({
       {selected && (
         <ComposerEffortPicker
           providerId={providerId}
-          modelId={modelId}
+          modelId={pickerId}
           models={models}
           readOnly={Boolean(disabled)}
-          onSelect={(nextProviderId, nextModelId) => onSelect(nextProviderId, nextModelId, listing?.instanceId)}
+          onSelect={(nextProviderId, nextModelId) => onSelect(nextProviderId, pickedSelection(nextModelId), listing?.instanceId)}
         />
       )}
       {open && !disabled && (
@@ -97,12 +103,12 @@ export function SettingsModelPicker({
           providers={providers}
           selectedProviderId={providerId}
           selectedInstanceId={instanceId}
-          selectedModelId={modelId}
+          selectedModelId={pickerId}
           anchorRef={buttonRef}
           contentRef={menuRef}
           onSelect={(nextProviderId, nextModelId, nextInstanceId) => {
             setOpen(false)
-            onSelect(nextProviderId, nextModelId, nextInstanceId)
+            onSelect(nextProviderId, pickedSelection(nextModelId), nextInstanceId)
             buttonRef.current?.focus()
           }}
         />

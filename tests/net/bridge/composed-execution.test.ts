@@ -7,7 +7,7 @@ import { MousseMainService } from '../../../src/mms/MousseMainService'
 import { ProviderAuthService } from '../../../src/mms/providers/ProviderAuthService'
 import { Harness } from '../../../src/mms/harness/gateway'
 import { newId } from '../../../src/shared/net'
-import { git } from '../../../src/mms/bridge/dispatch/git'
+import { fixtureGitAsync as git } from '../../support/fixtureGit'
 import { DirectTransport } from '../../../src/mms/net/transports/direct'
 import { ProcessSupervisor } from '../../../src/mms/net/transports/runtime/process'
 import { dispatchMethod } from '../../../src/mms/protocol/handlers'
@@ -151,7 +151,7 @@ it('steers and aborts the exact composed remote native run without cancelling a 
   })
   gates[1].resolve()
   const local = new AbortController(),
-    later = f.target.orchestrator.runChannelTurn(
+    later = f.target.orchestrator.runRemoteTurn(
       thread.id,
       'Later local owned prompt',
       f.target.threads,

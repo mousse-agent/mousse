@@ -157,7 +157,7 @@ export const useMousseIdStore = create<MousseIdState>((set, get) => ({
           busy: false,
           error: conflict ? ''
             : errorCode(cause) === 'keystore_locked'
-              ? 'This computer has no system keychain to protect network keys. Set a passphrase under Devices, then sign in.'
+              ? 'Mousse can’t use this computer’s keychain to protect network keys. Set a passphrase under Devices, then sign in.'
               : `Couldn’t turn on networking: ${message(cause)}`
         })
         await get().refresh()

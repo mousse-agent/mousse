@@ -3,7 +3,7 @@
  * effect worker and Mousse MCP server, with scripted runtimes whose turns call the tool over HTTP. A request is a
  * saved approval of another thread whose provider callback waits in the same process, so an answer is seen
  * reaching it exactly once. Covers the gate (level, project, switch), the bound of the agent's own mode, "always",
- * the caller's own thread and lineage, the record on the target thread, races, replays, bot and channel callers,
+ * the caller's own thread and lineage, the record on the target thread, races, replays, bot and capped callers,
  * and the continuation after a restart.
  */
 import { mkdirSync, mkdtempSync, rmSync } from 'node:fs'
@@ -290,7 +290,7 @@ describe('approval_respond end to end (SPEC §15.1)', () => {
       await w.d.questions.settle(outside.requestId, { permission: 'reject' }, USER)
     })
 
-    it('a bot caller and a channel caller are refused: their turns are granted lineage whatever the profile says', async () => {
+    it('a bot caller and a capped caller are refused: their turns are granted lineage whatever the profile says', async () => {
       const seen: Record<string, { call: Rpc; tools: string[] }> = {}
       const ids: { requestId?: string } = {}
       const w = world(async (input, mcp) => {

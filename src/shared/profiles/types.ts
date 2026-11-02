@@ -12,7 +12,6 @@ export type ProfileEventStreamKind =
   | 'integrations'
   | 'control'
   | 'scheduled'
-  | 'channels'
   | 'browser'
   | 'installation'
 
@@ -162,7 +161,6 @@ export interface ProfileRemovePreview {
   /** All profile-owned work, including browser, integrations and processes. */
   ownedActivity?: Record<string, number>
   scheduledJobs: number
-  channelsEnabled: boolean
 }
 
 export interface ControlCredentialsPlaintext {

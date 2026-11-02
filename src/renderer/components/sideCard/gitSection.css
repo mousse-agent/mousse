@@ -206,10 +206,15 @@
   cursor: pointer;
 }
 
+/* Quiet, but labelled: an icon alone next to Merge was easy to take for it. */
 .side-card-git-pr-close {
-  width: 24px;
+  gap: 4px;
+  padding: 0 8px 0 6px;
   background: transparent;
-  color: var(--ui-faint);
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
 }
 
 .side-card-git-pr-close:hover:not([aria-disabled='true']) {

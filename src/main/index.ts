@@ -111,7 +111,7 @@ if (isChatgptTokenCommand) {
     .then((code) => app.exit(code), () => app.exit(1))
 } else if (isCliMode) {
   // Packaged / dual-mode headless CLI — no GUI, no single-instance lock (GUI may already be open).
-  app.whenReady().then(async () => {
+  void app.whenReady().then(async () => {
     try {
       // Propagate the packaged version into the long-running daemon and HTTP discovery.
       process.env.MOUSSE_VERSION = app.getVersion()
@@ -224,6 +224,11 @@ function startGuiApp(): void {
         nodeIntegration: false,
         sandbox: false,
         webviewTag: true,
+        // Lets the local speech models run ONNX Runtime on several threads. The window is not
+        // cross-origin isolated (it loads from file:// and embeds webviews), so this enables
+        // SharedArrayBuffer for this window and its workers only: webview guests and other
+        // windows do not inherit it, unlike the app-wide `enable-features` switch.
+        enableBlinkFeatures: 'SharedArrayBuffer',
         additionalArguments: [startupAppearanceArgument(appearance)]
       }
     })
@@ -252,6 +257,7 @@ function startGuiApp(): void {
         return
       }
       webPreferences.partition = profileBrowserPartition(boundProfile)
+      delete webPreferences.enableBlinkFeatures
       webPreferences.nodeIntegration = false
       webPreferences.contextIsolation = true
       webPreferences.sandbox = true
@@ -304,7 +310,7 @@ function startGuiApp(): void {
         process.env.MOUSSE_REPO_ROOT || (app.isPackaged ? homedir() : process.cwd())
 
       // Local settings for window chrome only — not MMS ownership. Never
-      // persist: this conf is loaded once and its channels/scheduled sections go
+      // persist: this conf is loaded once and its scheduled section goes
       // stale; a whole-file write from here would stomp daemon-owned changes.
       const config = MousseConfigStore.load(homeDir, { persist: false })
       settings = new SettingsStore(config)

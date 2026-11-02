@@ -24,7 +24,7 @@ describe('Settings usage analytics rendering', () => {
     expect(text).toMatch(/Cached\|+550\b/)
     expect(text).toMatch(/Cache ratio\|+33\.3%/)
     expect(text).toContain('openai')
-    expect(text).toContain('gpt-test')
+    expect(text).toContain('GPT-Test')
     // Counts carry no bar; only the cache ratio gets a gauge.
     expect(html).not.toContain('usage-stat-track')
     expect(html.match(/class="usage-gauge"/g)).toHaveLength(1)
@@ -46,7 +46,9 @@ describe('Settings usage analytics rendering', () => {
     const text = uncached.replace(/<[^>]+>/g, '|')
     expect(uncached).not.toContain('usage-gauge')
     expect(text).toMatch(/Cache ratio\|+0%/)
-    expect(text).toMatch(/Tokens in\|+1\.3M/)
+    // Compact in the machine's locale: 1.3M in US English, 12.5L in Indian English.
+    const compact = new Intl.NumberFormat(undefined, { notation: 'compact', maximumFractionDigits: 1 }).format(1_250_000)
+    expect(text.replace(/\|+/g, '|')).toContain(`|Tokens in|${compact}|`)
     expect(text).toMatch(/Cached\|+0\|/)
   })
 })

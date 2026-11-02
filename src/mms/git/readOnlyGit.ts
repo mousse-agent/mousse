@@ -4,6 +4,12 @@ import { repoProgramEnv, withoutRepoPrograms } from './repoPrograms'
 export interface GitRun { status: number | null; stdout: string; stderr: string }
 
 /**
+ * For a Git read: `GIT_OPTIONAL_LOCKS=0` stops `git status` and `git diff` from taking `index.lock` to
+ * refresh and write the index, and `GIT_NO_LAZY_FETCH` stops a partial clone from fetching.
+ */
+export const READ_ONLY_GIT_ENV: Readonly<Record<string, string>> = { GIT_OPTIONAL_LOCKS: '0', GIT_NO_LAZY_FETCH: '1' }
+
+/**
  * Runs Git for a read-only question. `GIT_OPTIONAL_LOCKS=0` stops `git status` from taking
  * `index.lock` to refresh the index, so a commit from another terminal in the same checkout is not
  * refused while a background check runs. No program the repository configures runs, and a partial
@@ -16,7 +22,7 @@ export function runReadOnlyGit(cwd: string, args: string[]): GitRun {
     windowsHide: true,
     timeout: 30_000,
     maxBuffer: 32 * 1024 * 1024,
-    env: repoProgramEnv({ ...process.env, GIT_OPTIONAL_LOCKS: '0', GIT_NO_LAZY_FETCH: '1' })
+    env: repoProgramEnv({ ...process.env, ...READ_ONLY_GIT_ENV })
   })
   if (result.error) throw result.error
   return { status: result.status, stdout: result.stdout, stderr: result.stderr }

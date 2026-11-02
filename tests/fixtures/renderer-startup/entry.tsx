@@ -48,8 +48,6 @@ function api(path: string[] = []): unknown {
       if (method === 'threads.getActivity' || method === 'turn.getSnapshot') return Promise.resolve({})
       if (method === 'threads.listAll') return Promise.resolve([])
       if (method === 'threads.initialize') return hydration
-      if (method === 'channels.getSnapshot') return Promise.reject(new Error('Controlled channels unavailable'))
-      if (method === 'channels.listPairingRequests' || method === 'channels.getActivity') return Promise.resolve([])
       if (method === 'platformRequest.request') {
         const [name, params] = args
         if (name === 'chats.snapshot') return Promise.resolve({ chats: [], agents: [], devices: [] })
@@ -85,11 +83,10 @@ function api(path: string[] = []): unknown {
   acrylic: (theme: 'blacksphere-plus' | 'dark-modern' | 'light', intensity: number) => {
     applyAppearance({ ...appearance, theme, acrylic: true, acrylicIntensity: intensity })
   },
-  overlay: (page: 'settings' | 'scheduled' | 'channels', open: boolean) => {
+  overlay: (page: 'settings' | 'scheduled', open: boolean) => {
     const store = useAppStore.getState()
     if (page === 'settings') store.setSettingsOpen(open)
-    else if (page === 'scheduled') store.setScheduledOpen(open)
-    else store.setChannelsOpen(open)
+    else store.setScheduledOpen(open)
   },
   hydrate: () => {
     for (const listener of listeners.get('orchestrator.onThreadMessages') ?? []) {

@@ -1,9 +1,10 @@
 import type { MousseSettings, MousseSettingsUpdate } from '../../shared/settings'
-import { getDefaultSettings, normalizeAgentAccessSettings, normalizeAppearance, normalizeContextSettings, normalizePermissionSettings, normalizeRunSettings } from '../../shared/settings'
+import { getDefaultSettings, normalizeAgentAccessSettings, normalizeAppearance, normalizeContextSettings, normalizeExperimentalSettings, normalizePermissionSettings, normalizeRunSettings } from '../../shared/settings'
 import { MOUSSE_BUILTIN_TOOL_IDS } from '../../shared/integrations'
 import { generateRandomUsername } from '../../shared/randomUsername'
 import { normalizeShortcuts } from '../../shared/commands'
 import type { MousseConfigStore } from '../config/MousseConfigStore'
+import { upgradeSelection } from '../../shared/modelSelection'
 
 function deepMerge<T extends Record<string, unknown>>(base: T, partial: Partial<T>): T {
   const result = { ...base }
@@ -30,12 +31,23 @@ function deepMerge<T extends Record<string, unknown>>(base: T, partial: Partial<
   return result
 }
 
-/** A stored selection with its instance id kept only when it names one. */
-function withInstance<T extends { instanceId?: unknown }>(selection: T): T {
+/**
+ * A stored selection with its instance id, reasoning level and name kept only when set (a blank one
+ * is how a deeply merged section clears it), and a level packed into the model (written before
+ * #490) moved into its own field.
+ */
+function withInstance<T extends { instanceId?: unknown; model?: unknown; effort?: unknown; name?: unknown }>(selection: T): T {
   if (!selection || typeof selection !== 'object') return selection
-  const { instanceId, ...rest } = selection
-  const id = typeof instanceId === 'string' ? instanceId.trim() : ''
-  return (id ? { ...rest, instanceId: id } : rest) as T
+  const { instanceId, effort, name, ...rest } = selection
+  const kept = (value: unknown) => (typeof value === 'string' ? value.trim() : '')
+  const id = kept(instanceId)
+  const stored = { ...rest, ...(id ? { instanceId: id } : {}), ...(kept(effort) ? { effort: kept(effort) } : {}), ...(kept(name) ? { name: kept(name) } : {}) }
+  return (typeof rest.model === 'string' ? upgradeSelection(stored as typeof stored & { model: string }) : stored) as T
+}
+
+/** An update that names a model: its reasoning level and name are the update's, or none. */
+function namesModel(selection: { model?: unknown } | undefined): boolean {
+  return selection?.model !== undefined
 }
 
 /** An update that picks a model by provider name alone (no instance, or one cleared to blank). */
@@ -74,6 +86,8 @@ function normalizeSettings(settings: MousseSettings): MousseSettings {
     permissions: normalizePermissionSettings(settings.permissions),
     agentAccess: normalizeAgentAccessSettings(settings.agentAccess),
     runs: normalizeRunSettings(settings.runs),
+    experimental: normalizeExperimentalSettings(settings.experimental),
+    ...(typeof settings.provider?.model === 'string' ? { provider: upgradeSelection(settings.provider) } : {}),
     ...(settings.title ? { title: withInstance(settings.title) } : {}),
     integrations: {
       ...settings.integrations,
@@ -139,14 +153,25 @@ export class SettingsStore {
     // A default chosen by provider name alone must not keep the instance of an earlier choice.
     if (partial.provider?.llmProvider !== undefined && partial.provider.instanceId === undefined)
       merged.provider = { ...merged.provider, instanceId: undefined }
+    // Nor the reasoning level or name of an earlier model.
+    if (namesModel(partial.provider))
+      merged.provider = { ...merged.provider, effort: partial.provider!.effort || undefined, name: partial.provider!.name || undefined }
     const normalized = normalizeSettings(merged)
+    // The providers section is replaced key by key on disk: a cleared level or name is written as
+    // an absent key, so it must be there to overwrite the stored one.
+    if (namesModel(partial.provider)) normalized.provider = { ...normalized.provider, effort: normalized.provider.effort, name: normalized.provider.name }
     // The same for the title model and each skill's model. Their section is merged deeply on
-    // disk, so the instance is cleared by writing it blank; reading drops a blank instance.
-    if (namesProviderOnly(partial.title)) normalized.title = { ...normalized.title, instanceId: '' }
-    const skillModels = Object.entries(partial.integrations?.skills?.model ?? {}).filter(([, value]) => namesProviderOnly(value))
+    // disk, so the instance, level and name are cleared by writing them blank; reading drops them.
+    const cleared = <T extends { instanceId?: string; effort?: string }>(selection: T, update: { llmProvider?: unknown; instanceId?: unknown; model?: unknown; effort?: string }): T => ({
+      ...selection,
+      ...(namesProviderOnly(update) ? { instanceId: '' } : {}),
+      ...(namesModel(update) && !update.effort ? { effort: '' } : {})
+    })
+    if (partial.title) normalized.title = cleared(normalized.title, partial.title)
+    const skillModels = Object.entries(partial.integrations?.skills?.model ?? {})
     if (skillModels.length) {
       const model = { ...normalized.integrations.skills.model }
-      for (const [skillId] of skillModels) model[skillId] = { ...model[skillId]!, instanceId: '' }
+      for (const [skillId, update] of skillModels) if (model[skillId] && update) model[skillId] = cleared(model[skillId]!, update)
       normalized.integrations = { ...normalized.integrations, skills: { ...normalized.integrations.skills, model } }
     }
     this.config.applySettingsPatch(normalized)

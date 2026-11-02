@@ -19,10 +19,7 @@ import { ROUTED_SNAPSHOT_MESSAGE_BYTES } from '../../../shared/bridge/routed'
 import type { RemoteBackendPort, RemoteChatExtras } from './RemoteApi'
 import { mmsJson } from './jsonOutput'
 import type { BridgeOrdinaryMethod } from './capabilities'
-import {
-  CHANNEL_COMMAND_REGISTRY,
-  COMPOSER_DESKTOP_COMMANDS
-} from '../../../shared/channelCommands'
+import { COMPOSER_COMMANDS } from '../../../shared/composerCommands'
 import { resolveThreadProjectPath } from '../../data/resolveActiveProjectPath'
 import type { OrchestratorSendRequest, QueuedMessage } from '../../../shared/types'
 import { defaultIntegrationActor } from '../../../shared/integrations/actor'
@@ -302,7 +299,7 @@ export class MmsRemoteBackend implements RemoteBackendPort {
       case 'composer.options':
         return this.composerOptions(params.threadId as string | undefined, caller)
       case 'threads.setModel': {
-        const model = params.model as { instanceId?: string; llmProvider?: string; model: string }
+        const model = params.model as { instanceId?: string; llmProvider?: string; model: string; effort?: string }
         try {
           // Unknown or disabled instances are refused before anything is stored.
           const override = s.providerInstances.overrideFor(model)
@@ -397,7 +394,9 @@ export class MmsRemoteBackend implements RemoteBackendPort {
         ? {
             ...(provider.instanceId ? { instanceId: provider.instanceId } : {}),
             llmProvider: provider.llmProvider,
-            model: provider.model
+            model: provider.model,
+            ...(provider.effort ? { effort: provider.effort } : {}),
+            ...(provider.name ? { name: provider.name } : {})
           }
         : null,
       modes: REMOTE_CHAT_MODES,
@@ -408,7 +407,7 @@ export class MmsRemoteBackend implements RemoteBackendPort {
         ...(caller && this.deviceLimit ? { limit: this.deviceLimit(caller.node) } : {})
       },
       skills,
-      commands: [...CHANNEL_COMMAND_REGISTRY, ...COMPOSER_DESKTOP_COMMANDS].map((command) => ({
+      commands: COMPOSER_COMMANDS.map((command) => ({
         name: command.name,
         description: command.description,
         ...(command.aliases ? { aliases: command.aliases } : {}),
@@ -486,7 +485,6 @@ export class MmsRemoteBackend implements RemoteBackendPort {
     return (
       o.isTurnActive(threadId) ||
       o.isActiveTurnRunning(threadId) ||
-      o.isChannelTurnActive(threadId) ||
       engine.getActiveRun(threadId) !== null ||
       engine.store.listQueuedRuns(threadId).some((run) => engine.outbox.listForRun(run.runId).some((effect) => effect.kind === 'turn.start' && effect.status === 'running'))
     )
@@ -518,7 +516,7 @@ export class MmsRemoteBackend implements RemoteBackendPort {
     }
     // Existing MMS takes an owned cross-process lease and binds this exact signal to executeTurn.
     return mmsJson(
-      await this.services.orchestrator.runChannelTurn(threadId, content, this.services.threads, {
+      await this.services.orchestrator.runRemoteTurn(threadId, content, this.services.threads, {
         signal: control.signal,
         drainSteer: control.drainSteer,
         onUserInputAccepted: control.onAccepted,

@@ -123,7 +123,8 @@ describe('agent access grant (SPEC §15.1)', () => {
   const delegate = (delegation: DelegationToolHost, id: string, patch: Record<string, unknown> = {}) =>
     delegation.delegateTask({ prompt: `Work on ${id}`, title: id, workspace: 'isolated', role: 'implement', instanceId: 'claude', ...patch } as never, { toolCallId: id }) as Promise<Started>
 
-  const finished = (d: Phase6Daemon, child: Started) => waitFor(() => d.engine.getRun(child.childRunId)?.status === 'completed', `${child.childThreadId} to finish`)
+  // The turn is over once its checkpoint is recorded, which is after its run completes: a send before that queues.
+  const finished = (d: Phase6Daemon, child: Started) => waitFor(() => d.engine.getRun(child.childRunId)?.status === 'completed' && !d.orch.isConversationHistoryBusy(child.childThreadId), `${child.childThreadId} to finish`)
 
   it('a turn granted lineage hands out lineage, even when the profile is raised while it runs', async () => {
     const out: Started[] = []
@@ -271,23 +272,23 @@ describe('agent access grant (SPEC §15.1)', () => {
     }
   }, 30_000)
 
-  it('a thread a channel drives is capped at lineage for every later turn, and what it delegates inherits the cap', async () => {
+  it('a thread a remote send drives is capped at lineage for every later turn, and what it delegates inherits the cap', async () => {
     const out: Started[] = []
     const { d, project } = daemon(async (delegation) => {
-      out.push(await delegate(delegation, 'from-channel'))
+      out.push(await delegate(delegation, 'from-remote'))
     })
     setProfile(d, 'manage')
     const mine = d.store.createThread('Mine', project.id)
-    const chat = d.store.createThread('Telegram chat', project.id)
+    const chat = d.store.createThread('Remote chat', project.id)
     expect(grant(d, chat.id)).toBe('manage')
-    const result = await d.orch.runChannelTurn(chat.id, 'Delegate it', d.store, {})
+    const result = await d.orch.runRemoteTurn(chat.id, 'Delegate it', d.store, {})
     expect(result.error).toBeUndefined()
     // The turn's own grant and its child's are lineage although the profile says manage.
     expect(levelsOf(d, chat.id)).toEqual(['lineage'])
     await finished(d, out[0])
     expect(grant(d, chat.id)).toBe('lineage')
     expect(grant(d, out[0].childThreadId)).toBe('lineage')
-    // The cap is on the thread: it holds for turns that are not channel turns, and after a restart.
+    // The cap is on the thread: it holds for turns that are not remote turns, and after a restart.
     expect(d.store.getThread(chat.id)?.accessCeiling).toBe('lineage')
     expect(new ThreadDataStore(d.projects).getThread(chat.id)?.accessCeiling).toBe('lineage')
     await d.orch.send('A message typed in the app', false, { threadId: chat.id, clientRequestId: 'app-send' })

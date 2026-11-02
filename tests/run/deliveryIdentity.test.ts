@@ -206,14 +206,6 @@ describe('delivering a subagent result to its parent (issue #142)', () => {
       expect(w.d.engine.inbox.get(w.row.inboxId)).toMatchObject({ status: 'delivered', deliveredBy: `queue:${w.item.id}` })
       w.session.turnAdmitted = false
     })
-
-    it('a steer that carries notices is never given to a channel turn, which would take the text without the rows', async () => {
-      const w = await finished()
-      const channel = vi.spyOn(w.d.orch, 'steerChannelTurn').mockReturnValue(true)
-      expect(w.d.orch.steerThread(w.parent.id, 'text', undefined, { inboxIds: [w.row.inboxId], effectId: 'effect:x' })).toBe(false)
-      expect(channel).not.toHaveBeenCalled()
-      expect(w.d.orch.steerThread(w.parent.id, 'plain steer')).toBe(true)
-    })
   })
 
   describe('a steer that has not run when its run ends (the race)', () => {

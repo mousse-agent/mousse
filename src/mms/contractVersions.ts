@@ -12,7 +12,7 @@ import { RUN_MIGRATIONS } from './run/db/migrations'
 
 /**
  * The versions of what other processes, other machines and older or newer builds rely on: wire
- * protocols, saved formats and database schemas. The orchestrator, providers and channels are
+ * protocols, saved formats and database schemas. The orchestrator and providers are
  * internal modules that ship together under the app version and have no version of their own.
  * Bump a contract only for an incompatible change; tests/contractVersions.test.ts lists these
  * values so a bump shows up in review. See docs/releases.md.

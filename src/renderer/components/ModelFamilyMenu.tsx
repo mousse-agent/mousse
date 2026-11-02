@@ -1,27 +1,30 @@
 import {
   useCallback,
   useEffect,
+  useId,
   useLayoutEffect,
   useMemo,
   useRef,
   useState,
+  type ReactNode,
   type RefObject
 } from 'react'
-import { ChevronRight, LayoutGrid, Star } from '../lib/icons'
+import { Check, ChevronRight, Star } from '../lib/icons'
 import { SettingsSearch } from './settings/SettingsSearch'
 import type { LlmProviderOption } from '../../shared/settings'
 import {
-  formatEffortLabel,
   getCurrentEffort,
   getEffortsForModel,
   groupProviderModels,
-  parseModelVariant,
   parseThinkingSuffixFromModelId,
   resolveModelVariant,
   type ModelFamily
 } from '../../shared/modelVariants'
+import { findListedModel, modelLabelParts } from '../../shared/modelChoice'
+import { shortModelName } from '../../shared/modelNames'
+import { resolveModelChoice } from '../lib/modelChoice'
 import { ProviderIcon, normalizeProviderId, providerMakerId } from '../lib/providerIcons'
-import { instanceBadges, knownModelLabel } from '../lib/providerSnapshots'
+import { instanceBadges } from '../lib/providerSnapshots'
 import { listingKey, listingServes } from '../../shared/providerInstances'
 import { useAppStore } from '../stores/appStore'
 import { useCommandBindings, useCommandOverlay, useCommands } from '../commands/commandRegistry'
@@ -29,6 +32,20 @@ import { FloatingPortal, useFloatingPosition } from '../lib/floatingLayer'
 import { favoriteKey, useModelFavorites, type ModelFavoriteKey } from '../lib/modelFavorites'
 import type { StatusDescription } from '../../shared/harness/status'
 import { formatBinding, type CommandId } from '../../shared/commands'
+
+/** A listed model, as the run settings beside the list see it. */
+export interface ModelPickTarget {
+  providerId: string
+  instanceId?: string
+  /** The id the menu picks for the model: the selection's own id for the selected model. */
+  modelId: string
+  /** The model's name ("Opus 5.5"). */
+  label: string
+  selected: boolean
+}
+
+/** How long the pointer rests on a model before its run settings show, so crossing rows on the way to them changes nothing. */
+const RUN_SETTINGS_HOVER_MS = 90
 
 /** The commands behind Ctrl/Cmd+1-5, in list order. */
 const MODEL_PICK_COMMANDS: readonly CommandId[] = ['model.pick1', 'model.pick2', 'model.pick3', 'model.pick4', 'model.pick5']
@@ -48,6 +65,18 @@ interface ModelFamilyMenuProps {
   anchorRef?: RefObject<HTMLElement | null>
   /** Optional ref to the floating shell (outside-click handling). */
   contentRef?: RefObject<HTMLDivElement | null>
+  /**
+   * Run settings for the highlighted model (the composer's). The picker is then one fixed box: nothing
+   * inside it (hover, search, rail, the footer's menus) changes its size. `render` draws the column
+   * beside the list for the highlighted model (none when a search finds nothing), or returns null when
+   * none of `all` (every model the picker lists) has any; `footer` draws the bar under the whole
+   * picker; `pick` turns the id the menu would select for a model into the one it selects.
+   */
+  runSettings?: {
+    pick: (target: ModelPickTarget) => string
+    render: (target: ModelPickTarget | undefined, all: ModelPickTarget[]) => ReactNode
+    footer?: (target: ModelPickTarget | undefined) => ReactNode
+  }
 }
 
 interface FlatModelEntry {
@@ -74,6 +103,8 @@ interface FlatModelEntry {
   /** The provider lists models from several makers (a multi-brand API). */
   multiBrand: boolean
   key: ModelFavoriteKey
+  /** Every model of the family is an older one (`LlmModelOption.older`), folded behind "Show more". */
+  older: boolean
 }
 
 function getInitialVariantOptions(
@@ -86,24 +117,26 @@ function getInitialVariantOptions(
     family.variants.find((variant) => variant.id === selectedModelId) ??
     family.variants.find((variant) => variant.id === baseId)
 
+  // With no level chosen the model runs at its own default, so none is saved for it.
   const effortCandidate = effortFromId ?? preferredEffort
   const effort =
     (effortCandidate && family.efforts.includes(effortCandidate) ? effortCandidate : undefined) ??
-    selected?.effort ??
-    family.efforts[0]
+    selected?.effort
 
+  // Another model starts at its standard speed; Fast is chosen, never picked by alphabetical order.
+  const speed = family.speeds.includes('standard') ? 'standard' : family.speeds[0]
   if (!selected) {
     return {
       context: family.contexts[0],
       effort,
-      speed: family.speeds[0]
+      speed
     }
   }
 
   return {
     context: selected.context ?? family.contexts[0],
     effort,
-    speed: selected.speed ?? family.speeds[0]
+    speed: selected.speed ?? speed
   }
 }
 
@@ -185,7 +218,8 @@ function ProfileModelFamilyMenu({
   onMenuScroll,
   emptyState,
   anchorRef,
-  contentRef
+  contentRef,
+  runSettings
 }: ModelFamilyMenuProps) {
   const favorites = useModelFavorites()
   const { hiddenOf } = favorites
@@ -230,6 +264,7 @@ function ProfileModelFamilyMenu({
           instanceId: provider.instanceId,
           listing: listingKey(provider),
           badge: badges.get(listingKey(provider)),
+          olderIds: new Set(provider.models.filter((model) => model.older).map((model) => model.id)),
           status: provider.status && provider.status.tone !== 'ready' ? provider.status.headline : undefined
         }
       })
@@ -257,7 +292,8 @@ function ProfileModelFamilyMenu({
           brandId: family.brandId,
           brandLabel: family.brandLabel,
           multiBrand: Boolean(provider.multiBrand),
-          key: favoriteKey(provider.instanceId ?? provider.providerId, family.familyId)
+          key: favoriteKey(provider.instanceId ?? provider.providerId, family.familyId),
+          older: family.variants.every((variant) => provider.olderIds.has(variant.id) || provider.olderIds.has(parseThinkingSuffixFromModelId(variant.id).baseId))
         })
       }
     })
@@ -296,6 +332,10 @@ function ProfileModelFamilyMenu({
   const variantPanelRef = useRef<HTMLElement>(null)
   const activeRowRef = useRef<HTMLElement | null>(null)
   const hideTimerRef = useRef<number | null>(null)
+  const hoverTimerRef = useRef<number | null>(null)
+  const runRef = useRef<HTMLDivElement>(null)
+  const idPrefix = useId()
+  const listId = `${idPrefix}-models`
   const portaled = Boolean(anchorRef)
 
   const preferredEffort = parseThinkingSuffixFromModelId(selectedModelId).effort
@@ -310,12 +350,15 @@ function ProfileModelFamilyMenu({
     [contentRef]
   )
 
+  // Providers whose older models are shown; folded until opened, or until the selected model is one.
+  const [openOlder, setOpenOlder] = useState<ReadonlySet<string>>(() => new Set())
+
   const floatingStyle = useFloatingPosition({
     open: portaled,
     anchorRef: anchorRef ?? localShellRef,
     contentRef: localShellRef,
     placement: 'above-start',
-    deps: [providers.length, activeFamily?.family.familyId, panelSide, searchQuery, railFilter]
+    deps: [providers.length, activeFamily?.family.familyId, panelSide, searchQuery, railFilter, openOlder, runSettings ? highlightIndex : null]
   })
 
   const isEntrySelected = useCallback(
@@ -325,7 +368,14 @@ function ProfileModelFamilyMenu({
     [selectedInstanceId, selectedProviderId, selectedModelId]
   )
 
-  const filteredEntries = useMemo(() => {
+  // The selected model's section opens once its row is known, whenever that is (models that arrive
+  // after the menu opened, another selection); closing it by hand again sticks until the next one.
+  const selectedOlderListing = allEntries.find((entry) => entry.older && isEntrySelected(entry))?.listing
+  useLayoutEffect(() => {
+    setOpenOlder((current) => withOpenListing(current, selectedOlderListing))
+  }, [selectedOlderListing])
+
+  const sortedEntries = useMemo(() => {
     const query = searchQuery.trim().toLowerCase()
 
     const list = allEntries.filter((entry) => {
@@ -350,6 +400,19 @@ function ProfileModelFamilyMenu({
     // provider's models in the saved order.
     return sortPickerEntries(list, isEntryFavorite)
   }, [allEntries, isEntryFavorite, favoritesOnly, railFilter, searchQuery])
+
+  const listItems = useMemo(
+    () => foldOlderEntries(sortedEntries, { searching: searchQuery.trim() !== '', open: openOlder, isFavorite: isEntryFavorite }),
+    [sortedEntries, searchQuery, openOlder, isEntryFavorite]
+  )
+  // The rows shown, in order: keyboard moves and Ctrl/Cmd+1-5 count only these.
+  const filteredEntries = useMemo(() => listItems.flatMap((item) => (item.kind === 'model' ? [item.entry] : [])), [listItems])
+  const toggleOlder = (listing: string) =>
+    setOpenOlder((current) => {
+      const next = new Set(current)
+      if (!next.delete(listing)) next.add(listing)
+      return next
+    })
 
   useLayoutEffect(() => {
     const selectedIndex = filteredEntries.findIndex((entry) => isEntrySelected(entry))
@@ -411,16 +474,51 @@ function ProfileModelFamilyMenu({
 
   useEffect(() => () => clearHideTimer(), [])
 
+  const targetOf = useCallback(
+    (entry: FlatModelEntry): ModelPickTarget | undefined => {
+      const selected = isEntrySelected(entry)
+      const modelId = selected && runSettings
+        ? selectedModelId
+        : resolveModelVariant(entry.family, getInitialVariantOptions(entry.family, selectedModelId, preferredEffort))?.id
+      return modelId ? { providerId: entry.providerId, instanceId: entry.instanceId, modelId, label: entry.family.familyLabel, selected } : undefined
+    },
+    [isEntrySelected, preferredEffort, runSettings, selectedModelId]
+  )
+
   const selectEntry = useCallback(
     (entry: FlatModelEntry) => {
-      const resolved = resolveModelVariant(
-        entry.family,
-        getInitialVariantOptions(entry.family, selectedModelId, preferredEffort)
-      )
-      if (resolved) onSelect(entry.providerId, resolved.id, entry.instanceId)
+      const target = targetOf(entry)
+      if (target) onSelect(entry.providerId, runSettings ? runSettings.pick(target) : target.modelId, entry.instanceId)
     },
-    [onSelect, preferredEffort, selectedModelId]
+    [onSelect, runSettings, targetOf]
   )
+
+  const allTargets = useMemo(
+    () => (runSettings ? allEntries.map(targetOf).filter((target): target is ModelPickTarget => Boolean(target)) : []),
+    [allEntries, runSettings, targetOf]
+  )
+  const highlightedEntry = filteredEntries[highlightIndex]
+  const highlightedTarget = runSettings && highlightedEntry ? targetOf(highlightedEntry) : undefined
+  const runColumn = runSettings ? runSettings.render(highlightedTarget, allTargets) : null
+  const runFooter = runSettings?.footer ? runSettings.footer(highlightedTarget) : null
+  const footerRef = useRef<HTMLDivElement>(null)
+
+  const clearHoverTimer = () => {
+    if (hoverTimerRef.current !== null) {
+      window.clearTimeout(hoverTimerRef.current)
+      hoverTimerRef.current = null
+    }
+  }
+  useEffect(() => clearHoverTimer, [])
+
+  /** Moves focus from the list into the run settings, on their chosen item. */
+  const enterRunSettings = (event: React.KeyboardEvent | KeyboardEvent) => {
+    const column = runRef.current?.querySelector<HTMLElement>('[role="menu"]')
+    const item = column?.querySelector<HTMLElement>('[role="menuitemradio"][aria-checked="true"]') ?? column?.querySelector<HTMLElement>('[role="menuitemradio"]')
+    if (!item) return
+    event.preventDefault()
+    item.focus({ preventScroll: true })
+  }
 
   const handleToggleFavorite = (entry: FlatModelEntry, event: React.MouseEvent) => {
     event.preventDefault()
@@ -457,6 +555,12 @@ function ProfileModelFamilyMenu({
         return
       }
 
+      if (event.key === 'ArrowRight') {
+        // From the end of the search text, Right moves into the highlighted model's run settings.
+        const input = searchInputRef.current
+        if (input && event.target === input && (input.selectionStart ?? 0) >= input.value.length) enterRunSettings(event)
+        return
+      }
       if (event.key === 'ArrowDown') {
         event.preventDefault()
         scrollHighlightRef.current = true
@@ -545,14 +649,28 @@ function ProfileModelFamilyMenu({
           isHighlighted ? ' highlighted' : ''
         }${selected ? ' selected' : ''}`}
         onMouseEnter={(event) => {
-          setHighlightIndex(index)
-          openVariantPanel(event.currentTarget)
+          const row = event.currentTarget
+          clearHoverTimer()
+          if (!runSettings) {
+            setHighlightIndex(index)
+            openVariantPanel(row)
+            return
+          }
+          hoverTimerRef.current = window.setTimeout(() => {
+            hoverTimerRef.current = null
+            setHighlightIndex(index)
+            openVariantPanel(row)
+          }, RUN_SETTINGS_HOVER_MS)
         }}
-        onMouseLeave={scheduleHide}
+        onMouseLeave={() => {
+          clearHoverTimer()
+          scheduleHide()
+        }}
       >
         <button
           type="button"
           role="option"
+          id={`${idPrefix}-model-${index}`}
           aria-selected={selected}
           className="model-picker-row-main"
           title={[entry.family.familyLabel, entry.providerLabel, entry.providerStatus].filter(Boolean).join(' · ')}
@@ -561,6 +679,9 @@ function ProfileModelFamilyMenu({
             openVariantPanel(event.currentTarget.parentElement!)
           }}
           onClick={() => selectEntry(entry)}
+          onKeyDown={(event) => {
+            if (event.key === 'ArrowRight') enterRunSettings(event)
+          }}
         >
           {compactRows ? null : (
             <span className="model-picker-row-icon">
@@ -569,7 +690,8 @@ function ProfileModelFamilyMenu({
             </span>
           )}
           <span className="model-picker-row-text">
-            <span className="model-picker-row-title">{entry.family.familyLabel}</span>
+            {/* Beside the maker's logo the brand is not repeated ("Opus 5.5"). */}
+            <span className="model-picker-row-title">{compactRows ? entry.family.familyLabel : shortModelName(entry.family.familyLabel)}</span>
             {!subtitle && !entry.providerStatus ? null : (
               <span className="model-picker-row-subtitle">
                 {subtitle ? <span className="model-picker-row-provider">{subtitle}</span> : null}
@@ -581,6 +703,7 @@ function ProfileModelFamilyMenu({
             <ChevronRight size={12} className="model-picker-row-chevron" />
           ) : null}
           {shortcut ? <span className="model-picker-shortcut">{shortcut}</span> : null}
+          <span className="model-picker-row-check" aria-hidden="true">{selected ? <Check size={14} /> : null}</span>
         </button>
         <button
           type="button"
@@ -595,6 +718,20 @@ function ProfileModelFamilyMenu({
     )
   }
 
+  /** Shows favorites only: at the top of the rail, or beside the search when there is no rail. */
+  const favoritesToggle = (className: string) => (
+    <button
+      type="button"
+      className={`${className}${favoritesOnly ? ' selected active' : ''}`}
+      aria-pressed={favoritesOnly}
+      aria-label={favoritesOnly ? 'Show all models' : 'Show favorites only'}
+      title={favoritesOnly ? 'Show all models' : 'Show favorites only'}
+      onClick={() => setFavoritesOnly((value) => !value)}
+    >
+      <Star size={railItems.length > 1 ? 16 : 14} strokeWidth={2} fill={favoritesOnly ? 'currentColor' : 'none'} />
+    </button>
+  )
+
   const shell = (
     <div
       className={`composer-model-picker-shell model-picker-shell${
@@ -603,80 +740,123 @@ function ProfileModelFamilyMenu({
       ref={setShellNode}
       style={portaled ? floatingStyle : undefined}
     >
-      <div className="model-picker-panel">
-        <div className="model-picker-search">
-          <button
-            type="button"
-            className={`model-picker-favorites-toggle${favoritesOnly ? ' active' : ''}`}
-            aria-pressed={favoritesOnly}
-            aria-label={favoritesOnly ? 'Show all models' : 'Show favorites only'}
-            title={favoritesOnly ? 'Show all models' : 'Show favorites only'}
-            onClick={() => setFavoritesOnly((value) => !value)}
-          >
-            <Star size={14} strokeWidth={2} fill={favoritesOnly ? 'currentColor' : 'none'} />
-          </button>
-          <SettingsSearch
-            className="model-picker-search-field"
-            inputRef={searchInputRef}
-            placeholder="Search models"
-            ariaLabel="Search models"
-            value={searchQuery}
-            onChange={setSearchQuery}
-          />
-        </div>
-
-        <div className="model-picker-body">
+      <div className={`model-picker-panel${runSettings ? ' is-fixed' : ''}${runColumn ? ' has-run-settings' : ''}${runFooter ? ' has-footer' : ''}`}>
+        <div className="model-picker-main">
           {railItems.length > 1 ? (
-            <div
-              className="model-picker-rail"
-              role="tablist"
-              aria-label="Filter by provider"
-              data-tooltip-placement="outside-left"
-            >
-              <button
-                type="button"
-                role="tab"
-                aria-selected={railFilter === null}
-                className={`model-picker-rail-item${railFilter === null ? ' selected' : ''}`}
-                title="All models"
-                onClick={() => setRailFilter(null)}
-              >
-                <LayoutGrid size={16} className="model-picker-rail-all" aria-hidden />
-              </button>
-              {railItems.map((item) => (
-                <button
-                  key={item.key}
-                  type="button"
-                  role="tab"
-                  aria-selected={railFilter === item.key}
-                  className={`model-picker-rail-item${railFilter === item.key ? ' selected' : ''}`}
-                  title={item.label}
-                  aria-label={item.label}
-                  onClick={() => setRailFilter((current) => (current === item.key ? null : item.key))}
-                >
-                  <ProviderIcon providerId={item.iconId} size={16} />
-                  {item.badge ? <span className="model-picker-instance-badge" aria-hidden="true">{item.badge}</span> : null}
-                </button>
-              ))}
+            <div className="model-picker-rail" data-tooltip-placement="outside-left">
+              {favoritesToggle('model-picker-rail-item')}
+              <div className="model-picker-rail-sep" aria-hidden="true" />
+              <div className="model-picker-rail-tabs" role="tablist" aria-label="Filter by provider">
+                {railItems.map((item) => (
+                  <button
+                    key={item.key}
+                    type="button"
+                    role="tab"
+                    aria-selected={railFilter === item.key}
+                    className={`model-picker-rail-item${railFilter === item.key ? ' selected' : ''}`}
+                    title={item.label}
+                    aria-label={item.label}
+                    onClick={() => setRailFilter((current) => (current === item.key ? null : item.key))}
+                  >
+                    <ProviderIcon providerId={item.iconId} size={16} />
+                    {item.badge ? <span className="model-picker-instance-badge" aria-hidden="true">{item.badge}</span> : null}
+                  </button>
+                ))}
+              </div>
             </div>
           ) : null}
 
-          <div
-            ref={menuRef}
-            className="composer-model-menu model-picker-list scrollbar-ultra-thin"
-            role="listbox"
-            aria-label="Select model"
-            onScroll={handleMenuScroll}
-          >
-            {filteredEntries.length === 0 ? (
-              <div className="model-picker-empty">
-                {favoritesOnly ? 'No favorite models yet.' : 'No models match your search.'}
-              </div>
-            ) : (
-              filteredEntries.map((entry, index) => renderEntry(entry, index))
-            )}
+          <div className="model-picker-center">
+            <div className="model-picker-search">
+              {railItems.length > 1 ? null : favoritesToggle('model-picker-favorites-toggle')}
+              <SettingsSearch
+                className="model-picker-search-field"
+                inputRef={searchInputRef}
+                placeholder="Search models"
+                ariaLabel="Search models"
+                value={searchQuery}
+                onChange={setSearchQuery}
+                inputAria={{
+                  role: 'combobox',
+                  'aria-expanded': true,
+                  'aria-controls': listId,
+                  'aria-autocomplete': 'list',
+                  'aria-activedescendant': highlightedEntry ? `${idPrefix}-model-${highlightIndex}` : undefined
+                }}
+              />
+            </div>
+
+            <div
+              ref={menuRef}
+              id={listId}
+              className="composer-model-menu model-picker-list scrollbar-ultra-thin"
+              role="listbox"
+              aria-label="Select model"
+              onScroll={handleMenuScroll}
+            >
+              {filteredEntries.length === 0 ? (
+                <div className="model-picker-empty">
+                  {favoritesOnly ? 'No favorite models yet.' : 'No models match your search.'}
+                </div>
+              ) : (
+                listItems.map((item) =>
+                  item.kind === 'model' ? (
+                    renderEntry(item.entry, filteredEntries.indexOf(item.entry))
+                  ) : (
+                    <button
+                      key={`more:${item.listing}`}
+                      type="button"
+                      className="model-picker-more"
+                      aria-expanded={item.open}
+                      onClick={() => toggleOlder(item.listing)}
+                    >
+                      {item.open ? 'Show less' : 'Show more'}
+                      {item.open ? null : <span className="model-picker-more-count">{item.count}</span>}
+                    </button>
+                  )
+                )
+              )}
+            </div>
           </div>
+
+          {runColumn ? (
+            <div
+              ref={runRef}
+              className="model-picker-run scrollbar-ultra-thin"
+              onMouseEnter={clearHoverTimer}
+              onKeyDown={(event) => {
+                if (event.defaultPrevented) return
+                // Left goes back to the list; Down past the last level goes on to the footer.
+                if (event.key === 'ArrowLeft') {
+                  event.preventDefault()
+                  searchInputRef.current?.focus()
+                } else if (event.key === 'ArrowDown') {
+                  const next = footerRef.current?.querySelector<HTMLElement>('[role="radio"][tabindex="0"], button')
+                  if (next) {
+                    event.preventDefault()
+                    next.focus()
+                  }
+                }
+              }}
+            >
+              {runColumn}
+            </div>
+          ) : null}
         </div>
+
+        {runFooter ? (
+          <div
+            ref={footerRef}
+            className="model-picker-footer"
+            onMouseEnter={clearHoverTimer}
+            onKeyDown={(event) => {
+              // Up from the footer goes back to the levels (inside the permission menu it moves between modes).
+              if (event.key === 'ArrowUp' && !event.defaultPrevented && !(event.target as HTMLElement).closest('[role="menu"]')) enterRunSettings(event)
+            }}
+          >
+            {runFooter}
+          </div>
+        ) : null}
       </div>
 
       {(activeFamily && activeFamily.family.contexts.length > 1) && (
@@ -737,6 +917,43 @@ export function modelRowSubtitle(entry: { providerName: string; makerLabel?: str
   return [entry.providerName, entry.makerLabel].filter(Boolean).join(' · ')
 }
 
+/** `open` with `listing` added: the same set when there is none or it is open already. */
+export function withOpenListing(open: ReadonlySet<string>, listing: string | undefined): ReadonlySet<string> {
+  if (!listing || open.has(listing)) return open
+  return new Set([...open, listing])
+}
+
+/** One row of the picker's list: a model, or the row that folds a provider's older models. */
+export type PickerListItem<T> = { kind: 'model'; entry: T } | { kind: 'more'; listing: string; count: number; open: boolean }
+
+/**
+ * Folds each provider's older models behind one "Show more" row, placed after the provider's last
+ * row. Starred older models stay out, and nothing folds while searching. A provider in `open` shows
+ * them all, with the row (now "Show less") still after its last row.
+ */
+export function foldOlderEntries<T extends { listing: string; older: boolean }>(
+  entries: readonly T[],
+  options: { searching: boolean; open: ReadonlySet<string>; isFavorite: (entry: T) => boolean }
+): PickerListItem<T>[] {
+  const models = entries.map((entry): PickerListItem<T> => ({ kind: 'model', entry }))
+  if (options.searching) return models
+  const folded = new Map<string, number>()
+  const last = new Map<string, number>()
+  entries.forEach((entry, index) => {
+    last.set(entry.listing, index)
+    if (entry.older && !options.isFavorite(entry)) folded.set(entry.listing, (folded.get(entry.listing) ?? 0) + 1)
+  })
+  if (!folded.size) return models
+  const items: PickerListItem<T>[] = []
+  entries.forEach((entry, index) => {
+    const open = options.open.has(entry.listing)
+    if (open || !entry.older || options.isFavorite(entry)) items.push({ kind: 'model', entry })
+    const count = folded.get(entry.listing)
+    if (count && last.get(entry.listing) === index) items.push({ kind: 'more', listing: entry.listing, count, open })
+  })
+  return items
+}
+
 /** Favorites first, then by provider, then by the provider's saved model order. */
 export function sortPickerEntries<T extends { providerRank: number; familyRank: number }>(entries: readonly T[], isFavorite: (entry: T) => boolean): T[] {
   return entries
@@ -745,6 +962,11 @@ export function sortPickerEntries<T extends { providerRank: number; familyRank: 
     .map(({ entry }) => entry)
 }
 
+/**
+ * The parts of a model button's label ("Opus 5.5", "1M", "High"), for a selection whether or not
+ * the picker lists its model: the name comes from `resolveModelChoice`, never the stored string. The
+ * level shown is the one the next turn runs at, when the listing says the model has levels.
+ */
 export function getGroupedModelButtonParts(
   providerId: string,
   modelId: string,
@@ -753,28 +975,10 @@ export function getGroupedModelButtonParts(
   /** The selection's instance: picks the right listing when one provider has several. */
   instanceId?: string
 ): string[] {
-  if (!providerId) return ['Select model']
-  const provider = providers.find((entry) => listingServes(entry, { instanceId, llmProvider: providerId }))
-  const { baseId } = parseThinkingSuffixFromModelId(modelId)
-  const model =
-    provider?.models.find((entry) => entry.id === modelId) ??
-    provider?.models.find((entry) => entry.id === baseId)
-  if (!provider || !model) {
-    // A model the picker does not offer (hidden, or its provider is off) keeps its listed name.
-    const known = knownModelLabel({ providerId, instanceId }, modelId)
-    if (known) {
-      const parsed = parseModelVariant({ id: baseId, label: known })
-      return parsed.context ? [parsed.familyLabel, parsed.context] : [parsed.familyLabel]
-    }
-    return [modelId || provider?.label || 'Select model']
-  }
-
-  const parsed = parseModelVariant(model)
-  const bits = [parsed.familyLabel]
-  if (parsed.context) bits.push(parsed.context)
-  const effort = getCurrentEffort(modelId, provider.models, providerId)
-  if (includeEffort && effort && getEffortsForModel(providerId, modelId, provider.models).length > 0) {
-    bits.push(formatEffortLabel(effort))
-  }
-  return bits
+  if (!providerId || !modelId) return ['Select model']
+  const choice = resolveModelChoice({ instanceId, provider: providerId, model: modelId }, providers)
+  const listing = providers.find((entry) => listingServes(entry, { instanceId, llmProvider: providerId }))
+  const listed = listing ? findListedModel(listing.models, modelId) : undefined
+  const effort = listing && listed && getEffortsForModel(providerId, modelId, listing.models).length > 0 ? getCurrentEffort(modelId, listing.models, providerId) : undefined
+  return modelLabelParts({ ...choice, effort: includeEffort ? effort : undefined }, { short: true })
 }

@@ -23,7 +23,7 @@ import {
   moveSelection,
   pickerKeyAction,
   removeInlineSkillToken
-} from '../src/shared/channelCommands'
+} from '../src/shared/composerCommands'
 import { fileWorkspaceScope } from '../src/renderer/stores/filesStore'
 import { formatChatReferences, parseChatReference } from '../src/shared/chatReferences'
 import { parseActions, stripActionBlocks, filterActionsForChatMode } from '../src/mms/orchestrator/actions'

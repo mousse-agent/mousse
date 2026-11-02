@@ -19,7 +19,6 @@ files:
   - package.json
   - '!**/*.map'
   - '!**/node_modules/@anthropic-ai/claude-agent-sdk-*/**'
-  - '!**/node_modules/@fluentui/**'
   - '!**/node_modules/lucide-react/**'
   - '!**/node_modules/monaco-editor/**'
   - '!**/node_modules/@monaco-editor/**'

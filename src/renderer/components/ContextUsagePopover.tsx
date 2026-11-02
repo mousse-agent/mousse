@@ -1,7 +1,8 @@
 import { forwardRef, useEffect, useRef } from 'react'
 import { Settings } from '../lib/icons'
 import { useAppStore } from '../stores/appStore'
-import { modelDisplayName } from '../lib/providerSnapshots'
+import { modelLabel } from '../../shared/modelChoice'
+import { resolveModelChoice } from '../lib/modelChoice'
 import type { ContextUsageSnapshot } from '../../shared/types'
 import { FloatingPortal, useFloatingPosition } from '../lib/floatingLayer'
 
@@ -96,7 +97,7 @@ export function ContextUsagePopover({
         <div className="context-usage-header">
           <span className="context-usage-title">Context</span>
           {usage.modelName && (
-            <span className="context-usage-model" title={usage.modelName}>{modelDisplayName(providerId, usage.modelName)}</span>
+            <span className="context-usage-model" title={usage.modelName}>{modelLabel(resolveModelChoice({ provider: providerId, model: usage.modelName }))}</span>
           )}
           <button
             type="button"

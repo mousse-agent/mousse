@@ -2,7 +2,6 @@
  * built Electron app. Seeds only temporary state; no provider/network calls. */
 import { writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { randomUUID } from 'node:crypto'
 import { MousseMainService } from '../../src/mms/MousseMainService'
 import { ThreadActionService } from '../../src/mms/actions/ThreadActionService'
 import { WorkspaceResolver } from '../../src/mms/workspace/WorkspaceResolver'
@@ -29,27 +28,8 @@ try {
   await new ThreadActionService(directory).runCheckpointedAction({ ...actionOptions(workspace), threadId: thread.id }, () => {
     writeFileSync(join(workspace, 'value.txt'), 'full application bytes\n')
   })
-  const id = randomUUID()
-  const saved = main.platform.workflowDefinitions.saveDraft({ bundle: {
-    assets: [{ relativePath: 'scripts/verify.mjs', bytes: new TextEncoder().encode(
-      "import {readFileSync} from 'node:fs';process.stdout.write(JSON.stringify({value:readFileSync('value.txt','utf8'),cwd:process.cwd()}))"
-    ) }],
-    manifest: {
-      schemaVersion: 1, id, name: 'Full application task verification', slug: 'full-app-verify', entryNodeId: 'start',
-      inputSchema: { type: 'object' }, outputSchema: { type: 'object', additionalProperties: true },
-      permissions: { capabilities: ['script.trusted-local', 'workspace.read'] },
-      nodes: [
-        { id: 'start', type: 'start', version: 1, config: {} },
-        { id: 'verify', type: 'script', version: 1, effect: 'read', config: {
-          runtime: 'node', file: 'scripts/verify.mjs', executionMode: 'trusted-local', workingDirectory: 'thread-workspace'
-        } },
-        { id: 'end', type: 'end', version: 1, config: {}, inputs: { result: { ref: 'node', nodeId: 'verify', pointer: '' } } }
-      ], edges: [{ from: 'start', port: 'next', to: 'verify' }, { from: 'verify', port: 'success', to: 'end' }]
-    }
-  } })
-  const published = main.platform.workflowDefinitions.publish({ definitionId: id, expectedDraftSemanticHash: saved.semanticHash, expectedHeadRevisionId: null })
   const proof = { root: fixture.root, home: fixture.home, repo: fixture.repo, baseSha: fixture.baseSha,
-    workspace, threadId: thread.id, profileId: main.profileId, definitionId: id, revisionId: published.head!.revisionId }
+    workspace, threadId: thread.id, profileId: main.profileId }
   if (evidence) writeFileSync(evidence, JSON.stringify(proof, null, 2))
   return { ...proof, dispose: fixture.dispose }
 } finally {

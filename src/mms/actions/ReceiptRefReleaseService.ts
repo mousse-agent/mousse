@@ -13,6 +13,7 @@ import { ChangeReceiptService } from './ChangeReceiptService'
 import { withGitMutationLocks } from './GitOperationCoordinator'
 import { UndoRetentionService } from './UndoRetentionService'
 import { repoProgramEnv, withoutRepoPrograms } from '../git/repoPrograms'
+import { PRESERVED_EXPIRY_OPERATION } from '../../shared/resourceLifecycle'
 
 interface ReleaseIntent { version: 1; receiptId: string; repositoryId: string; refs: Array<{ name: string; sha: string }> }
 export interface ReceiptRefReleaseResult { releasedRefs: string[]; retained: Array<{ receiptId: string; reason: string }>; reclaimedGitBytes: null }
@@ -38,7 +39,7 @@ export class ReceiptRefReleaseService {
       const expired = retention.expiredReceiptIds()
       const receipts = new ChangeReceiptService(task.location).list()
       const latest = [...journal.latestByOperation().values()]
-      if (latest.some((entry) => entry.operationType !== 'undo-ref-release' && ['planned', 'running', 'prepared', 'git_applied', 'context_pending', 'recovery_required'].includes(entry.state))) throw new Error('Active or recovery operations protect receipt refs.')
+      if (latest.some((entry) => entry.operationType !== 'undo-ref-release' && entry.operationType !== PRESERVED_EXPIRY_OPERATION && ['planned', 'running', 'prepared', 'git_applied', 'context_pending', 'recovery_required'].includes(entry.state))) throw new Error('Active or recovery operations protect receipt refs.')
       const pending = latest.filter((entry) => entry.operationType === 'undo-ref-release' && entry.state === 'prepared')
       const complete = new Set(latest.filter((entry) => entry.operationType === 'undo-ref-release' && entry.state === 'completed').map((entry) => (entry.details as ReleaseIntent).receiptId))
       const candidates = [...pending.map((entry) => ({ receipt: receipts.find((receipt) => receipt.id === (entry.details as ReleaseIntent).receiptId), operationId: entry.operationId, intent: entry.details as ReleaseIntent })),
@@ -76,8 +77,9 @@ export class ReceiptRefReleaseService {
           })
           if (!candidate.intent) journal.append({ operationId: candidate.operationId, operationType: 'undo-ref-release', state: 'prepared', details: intent })
           options.afterPrepared?.()
-          if (present.length) execFileSync('git', withoutRepoPrograms(workspacePath, ['update-ref', '--no-deref', '--stdin']), {
-            cwd: workspacePath, env: repoProgramEnv(), input: `start\n${present.map((ref) => `delete ${ref.name} ${ref.sha}`).join('\n')}\nprepare\ncommit\n`, encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true
+          const release = `start\n${present.map((ref) => `delete ${ref.name} ${ref.sha}`).join('\n')}\nprepare\ncommit\n`
+          if (present.length) execFileSync('git', withoutRepoPrograms(workspacePath, ['update-ref', '--no-deref', '--stdin'], { stdin: release }), {
+            cwd: workspacePath, env: repoProgramEnv(), input: release, encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true
           })
           options.afterGit?.()
           if (intent.refs.some((ref) => readDirectLifecycleRef(workspacePath, ref.name) !== undefined)) throw new Error('Receipt reference survived the release transaction.')

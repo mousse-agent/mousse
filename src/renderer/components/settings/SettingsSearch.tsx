@@ -1,4 +1,4 @@
-import { useRef, type KeyboardEvent, type Ref } from 'react'
+import { useRef, type AriaAttributes, type AriaRole, type KeyboardEvent, type Ref } from 'react'
 import { Search, X } from '../../lib/icons'
 import '../../styles/settingsSearch.css'
 
@@ -14,7 +14,8 @@ export function SettingsSearch({
   autoFocus,
   onKeyDown,
   inputRef,
-  className
+  className,
+  inputAria
 }: {
   value: string
   onChange: (value: string) => void
@@ -24,6 +25,8 @@ export function SettingsSearch({
   onKeyDown?: (event: KeyboardEvent<HTMLInputElement>) => void
   inputRef?: Ref<HTMLInputElement>
   className?: string
+  /** Extra ARIA for the input, e.g. a combobox naming the list its arrow keys move through. */
+  inputAria?: AriaAttributes & { role?: AriaRole }
 }) {
   const ownRef = useRef<HTMLInputElement | null>(null)
   const setRef = (node: HTMLInputElement | null) => {
@@ -35,6 +38,7 @@ export function SettingsSearch({
     <div className={`settings-search${className ? ` ${className}` : ''}`}>
       <Search size={14} aria-hidden="true" className="settings-search-icon" />
       <input
+        {...inputAria}
         ref={setRef}
         type="search"
         value={value}

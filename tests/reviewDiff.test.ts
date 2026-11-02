@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process'
-import { lstatSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, lstatSync, lutimesSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -101,6 +101,47 @@ describe('parsers', () => {
   it('parses a path that contains a newline or a tab', () => {
     expect(parseNameStatusZ('M\0odd\nname\tx.txt\0')).toEqual([{ path: 'odd\nname\tx.txt', status: 'modified' }])
     expect(parseNumstatZ('1\t0\todd\nname\tx.txt\0')).toEqual([{ path: 'odd\nname\tx.txt', additions: 1, deletions: 0, binary: false }])
+  })
+})
+
+describe('listChangedFiles against the working tree, without refreshing the index', () => {
+  /** A committed repository whose files then get new times only. */
+  function touched() {
+    const cwd = unborn()
+    writeFileSync(join(cwd, 'same.txt'), 'same\n')
+    writeFileSync(join(cwd, 'edited.txt'), 'before\n')
+    writeFileSync(join(cwd, 'script.sh'), 'echo hi\n')
+    writeFileSync(join(cwd, 'blob.bin'), Buffer.from([0, 1, 2, 3]))
+    writeFileSync(join(cwd, 'changed.bin'), Buffer.from([0, 1, 2, 3]))
+    symlinkSync('same.txt', join(cwd, 'link'))
+    git(cwd, 'add', '-A'); git(cwd, 'commit', '-qm', 'base')
+    const old = new Date('2020-01-01')
+    for (const name of ['same.txt', 'edited.txt', 'script.sh', 'blob.bin', 'changed.bin']) utimesSync(join(cwd, name), old, old)
+    lutimesSync(join(cwd, 'link'), old, old)
+    return cwd
+  }
+
+  it('leaves out files whose stat data alone changed, and keeps real content, mode and binary changes', async () => {
+    const cwd = touched()
+    writeFileSync(join(cwd, 'edited.txt'), 'after\n')
+    chmodSync(join(cwd, 'script.sh'), 0o755)
+    writeFileSync(join(cwd, 'changed.bin'), Buffer.from([0, 9, 9, 9]))
+    // Git itself still reports every touched path, since the index is not refreshed.
+    expect(git(cwd, '-c', 'diff.autoRefreshIndex=false', 'diff', '--name-only').split('\n')).toEqual(expect.arrayContaining(['same.txt', 'blob.bin', 'link']))
+    const index = readFileSync(join(cwd, '.git', 'index'))
+    const listed = await listChangedFiles(cwd, await worktreeRange(cwd, false))
+    expect(listed.files.map((file) => [file.path, file.status])).toEqual([['changed.bin', 'modified'], ['edited.txt', 'modified'], ['script.sh', 'modified']])
+    expect(listed.files.find((file) => file.path === 'edited.txt')).toMatchObject({ additions: 1, deletions: 1 })
+    expect(listed.files.find((file) => file.path === 'changed.bin')).toMatchObject({ binary: true })
+    // Reading it changed nothing.
+    expect(readFileSync(join(cwd, '.git', 'index')).equals(index)).toBe(true)
+  })
+
+  it('lists nothing for a working tree that was only touched, against the index or against HEAD', async () => {
+    const cwd = touched()
+    expect((await listChangedFiles(cwd, await worktreeRange(cwd, false))).files).toEqual([])
+    const head = git(cwd, 'rev-parse', 'HEAD')
+    expect((await listChangedFiles(cwd, { from: { kind: 'commit', sha: head }, to: { kind: 'worktree' } })).files).toEqual([])
   })
 })
 

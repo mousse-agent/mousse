@@ -52,11 +52,14 @@ export class ConversationActionService {
     return action
   }
 
-  settle(turnId: string, end: number, boundary: NativeContextBoundary, state: 'completed' | 'stopped' | 'failed', toolsUsed: boolean, lease: ThreadLeaseHandle): ThreadAction {
+  /** `notice`: a line Undo shows with its result, when the turn's files could not be recorded and Undo takes back the conversation only. */
+  settle(turnId: string, end: number, boundary: NativeContextBoundary, state: 'completed' | 'stopped' | 'failed', toolsUsed: boolean, lease: ThreadLeaseHandle, notice?: string, notCovered?: string): ThreadAction {
     assertHeldThreadLease(this.directory, lease)
     const previous = this.actions.list().find((item) => item.turnId === turnId)
     if (!previous || previous.scope !== 'conversation' || previous.state !== 'running') throw new Error('Conversation turn has no open boundary.')
     const action: ThreadAction = { ...previous, presentationMessageEnd: end, nativeContextBoundary: structuredClone(boundary), state,
+      ...(notice ? { notice: `${notice} Only the conversation is taken back.` } : {}),
+      ...(notCovered ? { notCovered } : {}),
       completedAt: new Date().toISOString(), reversible: state === 'completed' && !toolsUsed && previous.nativeContextStartBoundary?.fidelity !== 'legacy' && boundary.fidelity !== 'legacy' && previous.nativeContextStartBoundary?.compactionGeneration === boundary.compactionGeneration,
       externalEffects: toolsUsed ? [{ kind: 'unknown', description: 'This turn dispatched tools without a workspace checkpoint; conversation undo is unavailable.', reversible: false }] : [] }
     this.journal.append({ operationId: action.id, operationType: 'conversation-checkpoint', state: 'prepared', details: { action } })

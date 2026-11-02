@@ -239,16 +239,9 @@ describe('Mousse MCP delegation end to end (SPEC §15)', () => {
     return { seen, asked, parent, engine }
   }
 
-  it('under Ask, integrate_delegation asks first, and a rejection leaves the delegation un-integrated', async () => {
-    const { seen, asked, parent, engine } = await integrateUnder('ask')
-    expect(asked).toEqual([{ threadId: parent.id, prompt: expect.stringContaining('merge') }])
-    expect(seen.integrate?.body.result).toMatchObject({ isError: true, content: [{ text: expect.stringContaining('did not approve') }] })
-    expect(engine.delegations.listForParentThread(parent.id).map((delegation) => delegation.status)).not.toContain('integrated')
-  }, 30_000)
-
-  it('under Auto-accept edits, integrate_delegation does not ask', async () => {
-    const { seen, asked } = await integrateUnder('accept_edits')
+  it.each(['ask', 'accept_edits'] as const)('under %s, the retired integrate_delegation is not offered: nothing is asked and nothing merged', async (mode) => {
+    const { seen, asked } = await integrateUnder(mode)
     expect(asked).toEqual([])
-    expect(JSON.stringify(seen.integrate?.body)).not.toContain('did not approve')
+    expect(JSON.stringify(seen.integrate?.body)).toContain('mousse_unknown_tool')
   }, 30_000)
 })

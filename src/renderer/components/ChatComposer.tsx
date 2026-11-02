@@ -25,9 +25,9 @@ import {
   parseSkillsPickerQuery,
   pickerKeyAction,
   removeInlineSkillToken,
-  type ChannelCommandDef,
+  type ComposerCommandDef,
   type MentionItem
-} from '../../shared/channelCommands'
+} from '../../shared/composerCommands'
 import { ComposerSuggestionList, MentionRowContent, type SuggestionRow } from './ComposerSuggestionList'
 import { ComposerFooter } from './ComposerFooter'
 import { BrowserElementPill } from './BrowserElementPill'
@@ -70,6 +70,8 @@ export interface ChatComposerProps {
   enabledSkills: SkillDescriptor[]
   providers: ProviderWithStatus[]
   selectedProviderId: string
+  /** The selection's instance, when it names one. */
+  selectedInstanceId?: string
   selectedModelId: string
   modelMenuOpen: boolean
   onModelMenuOpenChange: (open: boolean) => void
@@ -152,6 +154,7 @@ export function ChatComposer({
   enabledSkills,
   providers,
   selectedProviderId,
+  selectedInstanceId,
   selectedModelId,
   modelMenuOpen,
   onModelMenuOpenChange,
@@ -421,7 +424,7 @@ export function ChatComposer({
     addFiles(images)
   }
 
-  const applySuggestion = (command: ChannelCommandDef) => {
+  const applySuggestion = (command: ComposerCommandDef) => {
     if (command.name === 'skills') {
       // Keep the slash token so the skills picker opens immediately.
       onInputChange('/skills ')
@@ -838,6 +841,7 @@ export function ChatComposer({
       <ComposerFooter
         providers={providers}
         selectedProviderId={selectedProviderId}
+        selectedInstanceId={selectedInstanceId}
         selectedModelId={selectedModelId}
         modelMenuOpen={modelMenuOpen}
         onModelMenuOpenChange={onModelMenuOpenChange}

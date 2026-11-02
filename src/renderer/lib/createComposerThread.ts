@@ -39,7 +39,8 @@ export async function prepareComposerThread(deps: {
       create: () => deps.create(workspace.projectId, { worktreeEnabled: enabled, ...(workspace.node ? { node: workspace.node } : {}) })
     })
   }
-  if (Boolean(thread.worktreeEnabled) !== enabled) {
+  // An unset choice is recorded too, so the thread keeps the one it was sent with.
+  if (thread.worktreeEnabled !== enabled) {
     const updated = await deps.setWorktreeEnabled(thread.id, enabled)
     if (!deps.stillVisible()) return null
     deps.update(updated)

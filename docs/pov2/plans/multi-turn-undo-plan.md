@@ -31,6 +31,10 @@ subsystem.
 ## 3. Non-Goals
 
 - Snapshot/checkpoint stores outside Git (Cursor-style shadow stores). Git ranges are authoritative.
+  *Superseded by #464:* turns are now recorded as snapshot commits, still stored by Git (the
+  repository's object store and `refs/mousse/`) but not on the thread's branch. See
+  [workspace-snapshots.md](../../workspace-snapshots.md). A stored range is a pair of snapshots, and a
+  restore is a three-way file merge rather than a compensating commit.
 - Rewinding turns whose context lacks a validated safe boundary (`safeBoundaryProof`) — those keep
   the existing code-only "Revert Code Changes" path.
 - Per-turn selective cherry-pick undo within the restored range (e.g., "undo turns 3 and 7 but not

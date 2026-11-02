@@ -86,7 +86,7 @@ describe('"Always for this thread" is per thread: forks and subagents ask for th
     for (const extra of [{ source: 'gui' }, { source: 'cli' }]) expect(await askedBy(extra), JSON.stringify(extra)).toBe(0)
     for (const extra of [
       { source: 'schedule', origin: 'schedule' as const }, { origin: 'schedule' as const, source: 'gui' }, { source: 'schedule' }, { source: 'webhook' },
-      { source: 'internal' }, { source: 'agent' }, { source: 'mcp' }, { source: 'channel' }, { source: 'wake' }, { source: 'protocol' }, {}
+      { source: 'internal' }, { source: 'agent' }, { source: 'mcp' }, { source: 'remote' }, { source: 'wake' }, { source: 'protocol' }, {}
     ]) {
       expect(await askedBy(extra), JSON.stringify(extra)).toBe(1)
       // The card for such a turn offers no "always" either.
