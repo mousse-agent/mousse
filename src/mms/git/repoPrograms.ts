@@ -6,6 +6,7 @@ import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
 import { gitDirectoryEnv, mousseGitEnv } from './gitEnv'
 import { assertGitAllowed, type UserAction } from './gitPolicy'
 import { NO_HOOKS_PATH } from './gitNullDevice'
+import { activeHiddenStore, checkStoreCommand, hiddenStoreEnv } from './hiddenStore'
 import { isTrustedRepoEntry, readRepoTrust, repoTrustPath, TRUSTED_FILTER_KEY, writeRepoTrust, type RepoTrustRecord } from './repoTrust'
 
 /**
@@ -518,10 +519,11 @@ export function policedSimpleGit(cwd: string, git: SimpleGit): SimpleGit {
  * allowed; they are only ever set to the values above, never to a caller's.
  */
 export function guardedSimpleGit(cwd: string, options: Partial<Omit<SimpleGitOptions, 'baseDir' | 'config' | 'unsafe'>> = {}): SimpleGit {
-  const forCommand = (args: readonly string[]): SimpleGit => simpleGit({
+  // A command in a hidden store reads only the store's config (`hiddenStoreEnv`): nothing of the folder's is overridden.
+  const forCommand = (args: readonly string[], hidden: boolean): SimpleGit => simpleGit({
     ...options,
     baseDir: cwd,
-    config: repoProgramSettings(cwd, { write: writesThroughFilters(args) }),
+    config: hidden ? [] : repoProgramSettings(cwd, { write: writesThroughFilters(args) }),
     unsafe: UNSAFE_ALLOWED
   })
   return new Proxy({} as SimpleGit, {
@@ -531,10 +533,15 @@ export function guardedSimpleGit(cwd: string, options: Partial<Omit<SimpleGitOpt
       return (...parameters: unknown[]) => {
         // Only `raw` takes free-form arguments; every other method used here only reads.
         const args = key === 'raw' ? parameters.flat().filter((value): value is string => typeof value === 'string') : []
-        // Lock-free: the instance's config holds NO_INDEX_REFRESH and its environment turns optional locks off.
-        assertGitAllowed({ cwd, args: key === 'raw' ? args : simpleGitCommand(key, parameters), lockFree: true })
+        // Inside a hidden store's scope (snapshot review) the command goes through the store; nowhere else is a folder's Git redirected.
+        const store = activeHiddenStore(cwd)
+        const command = key === 'raw' ? args : simpleGitCommand(key, parameters)
+        // Lock-free: the instance's config holds NO_INDEX_REFRESH (a store's isolation turns it off too) and its
+        // environment turns optional locks off. A store command is checked with the store it names.
+        if (store) checkStoreCommand(store, cwd, command)
+        else assertGitAllowed({ cwd, args: command, lockFree: true })
         // No optional locks: a status or diff read here never refreshes and rewrites the index.
-        const instance = forCommand(args).env(repoProgramEnv({ ...process.env, GIT_OPTIONAL_LOCKS: '0' })) as unknown as Record<string, (...values: unknown[]) => unknown>
+        const instance = forCommand(args, Boolean(store)).env(store ? hiddenStoreEnv(store, repoProgramEnv({ ...process.env, GIT_OPTIONAL_LOCKS: '0' })) : repoProgramEnv({ ...process.env, GIT_OPTIONAL_LOCKS: '0' })) as unknown as Record<string, (...values: unknown[]) => unknown>
         return instance[key]!(...parameters)
       }
     }

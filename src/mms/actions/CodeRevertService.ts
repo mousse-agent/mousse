@@ -9,7 +9,7 @@ import { ThreadWorkspaceManager } from '../workspace/ThreadWorkspaceManager'
 import { ChangeReceiptService } from './ChangeReceiptService'
 import { changedPaths, commitParents, git, refuseUnsafeChanges, treeOf } from './git'
 import { UndoConflictError } from './UndoService'
-import { describeGit, pushedNotice, preservedNotice, coverageNotice, pushedTo, restoreChange, sameTree, snapshotOrigin, takeSnapshot, worktreeTree, type Snapshot } from './snapshots'
+import { describeGit, pushedNotice, leftAsIsNotice, preservedNotice, coverageNotice, pushedTo, restoreChange, sameTree, snapshotOrigin, takeSnapshot, worktreeTree, type Snapshot } from './snapshots'
 
 /** What `prepared` records: the files before the revert and the tree they become. */
 interface RevertIntent {
@@ -56,13 +56,13 @@ export class CodeRevertService {
       const threadId = workspace?.threadId
       // The files as they are now, including edits made since: they are part of the merge, so they stay.
       const ours = takeSnapshot(workspacePath, { reason: 'before code revert', threadId, operationId })
-      const restored = restoreChange(workspacePath, { reason: `revert code action ${actionId}`, threadId, operationId, base: target.endSha, ours: ours.sha, theirs: target.startSha }, (expectedTree) => {
+      const restored = restoreChange(workspacePath, { reason: `revert code action ${actionId}`, threadId, operationId, base: target.endSha, ours: ours.sha, theirs: target.startSha, restoredTo: 'at the start of the turn' }, (expectedTree) => {
         const intent: RevertIntent = { target, latest: actions.at(-1), ours: ours.sha, expectedTree }
         this.journal.append({ operationId, operationType: 'code-revert', state: 'prepared', expectedPreState: { startSha: ours.sha, actionId }, details: intent })
       })
       if ('conflicts' in restored) throw new UndoConflictError(restored.conflicts, 'The code revert')
       const pushed = pushedTo(workspacePath, target.commits)
-      return this.complete(workspacePath, operationId, { target, latest: actions.at(-1) }, ours.sha, restored.snapshot, new Date().toISOString(), [pushed ? pushedNotice('Revert', pushed) : '', restored.preserved ? preservedNotice(restored.preserved) : '', coverageNotice(target.git?.coverageGaps, ours.coverageGaps, restored.snapshot.coverageGaps) ?? ''].filter(Boolean).join(' ') || undefined)
+      return this.complete(workspacePath, operationId, { target, latest: actions.at(-1) }, ours.sha, restored.snapshot, new Date().toISOString(), [pushed ? pushedNotice('Revert', pushed) : '', restored.preserved ? preservedNotice(restored.preserved) : '', leftAsIsNotice(restored.leftAsIs) ?? '', coverageNotice(target.git?.coverageGaps, ours.coverageGaps, restored.snapshot.coverageGaps) ?? ''].filter(Boolean).join(' ') || undefined)
     })
   }
 

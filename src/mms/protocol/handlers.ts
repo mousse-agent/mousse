@@ -101,6 +101,8 @@ import { ActionExecutionError, StaleThreadActionRevisionError, ThreadActionServi
 import { UndoService } from '../actions/UndoService'
 import { UndoRetentionService } from '../actions/UndoRetentionService'
 import { ReceiptRefReleaseService } from '../actions/ReceiptRefReleaseService'
+import { releaseSnapshotRefs } from '../actions/SnapshotRefReleaseService'
+import { inThreadSnapshotScope, snapshotsOffReason } from '../workspace/SnapshotWorkspace'
 import { RedoService } from '../actions/RedoService'
 import { CodeRevertService } from '../actions/CodeRevertService'
 import { ConversationBranchService } from '../actions/ConversationBranchService'
@@ -300,7 +302,7 @@ function restoreGate(
   })
   if (decision.action === 'refuse') throw new DomainRpcError(decision.reason, decision.message, { conflicts: decision.conflicts })
   if (decision.action === 'proceed') return null
-  const diff = input.target ? restoreDiff(input.workspace.worktreePath, input.target.endSha, input.target.startSha) : ''
+  const diff = input.target ? restoreDiff(ctx.mms.threads.getThreadDir(input.threadId), input.workspace.worktreePath, input.target.endSha, input.target.startSha) : ''
   const diffSha = restoreDiffSha(diff)
   if (input.reviewedDiffSha === diffSha) return null
   ctx.mms.runEngine.store.appendEvent({
@@ -991,6 +993,13 @@ interface ReviewTarget {
   root: string
   range: ReviewRange
   unavailable?: string
+  /** The thread whose turns are read: Git in `root` goes through its hidden store, when it records turns in one. */
+  threadDirectory?: string
+}
+
+/** Reads a review target: a thread's turns through its own store, anything else (the working tree) as the folder is. */
+function readReview<T>(target: ReviewTarget, read: () => T): T {
+  return target.threadDirectory ? inThreadSnapshotScope(target.threadDirectory, target.root, read) : read()
 }
 
 /** Resolves a review scope to the root it reads from and the Git range it compares. */
@@ -1010,7 +1019,7 @@ async function reviewTarget(ctx: HandlerContext, p: Record<string, unknown>): Pr
   if (!resolved) {
     return { scope, root: lookup.projectPath ?? '', range: { from: null, to: { kind: 'worktree' } }, unavailable: 'This thread has no worktree of its own, so its changes cannot be reviewed.' }
   }
-  return { scope, root: resolved.cwd, range: resolved.range, unavailable: resolved.unavailable }
+  return { scope, root: resolved.cwd, range: resolved.range, unavailable: resolved.unavailable, threadDirectory: lookup.threadDirectory }
 }
 
 function buildSendInput(
@@ -2873,7 +2882,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       if (latest?.scope === 'conversation') {
         try { ctx.mms.orchestrator.validateConversationActionRestore(operation.threadId, latest, latest.state === 'undone' ? 'redo' : 'undo') } catch { contextMatches = false }
       }
-      const workspaceReady = latest?.scope === 'conversation' || new ThreadWorkspaceManager(operation.threadDirectory).load()?.lifecycle === 'ready'
+      const workspaceReady = latest?.scope === 'conversation' || new ThreadWorkspaceManager(operation.threadDirectory).loadOrSnapshot()?.lifecycle === 'ready'
       const eligible = !busy && contextMatches && workspaceReady && latest?.nativeContextStartBoundary && latest?.reversible && retained
       const matches = latest && prompt && messages.indexOf(prompt) >= latest.presentationMessageStart && messages.indexOf(prompt) < latest.presentationMessageEnd && prompt.turnId === latest.turnId
       const undoTarget = eligible && matches && latest.state === 'completed'
@@ -2889,21 +2898,25 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         && (undoneOriginal.retention?.state === 'available' || undoneOriginal.retention?.state === 'pinned')
       const redoTarget = eligible && ((latest.scope === 'conversation' && latest.state === 'undone') || workspaceRedo)
         ? { actionId: latest.id, turnId: latest.turnId, journalGeneration: operation.currentGeneration } : undefined
+      // A folder Mousse cannot snapshot (too large) says so where Undo would have been offered.
+      const filesOff = snapshotsOffReason(operation.threadDirectory)
       return { actions, retentionPolicy: retention.policy(), receipts, activeBranchId, journalGeneration: operation.currentGeneration, undoTarget, redoTarget,
-        undoUnavailableReason: undoTarget ? undefined : busy ? 'Wait for active or queued work to finish.' : latest?.retention?.state === 'expired' || latest?.retention?.state === 'blocked' ? latest.retention.reason : 'This prompt has no eligible recorded Undo boundary. Tool effects or older unrecorded turns cannot be undone safely.' }
+        undoUnavailableReason: undoTarget ? undefined : busy ? 'Wait for active or queued work to finish.' : filesOff && latest?.scope === 'conversation' ? filesOff : latest?.retention?.state === 'expired' || latest?.retention?.state === 'blocked' ? latest.retention.reason : 'This prompt has no eligible recorded Undo boundary. Tool effects or older unrecorded turns cannot be undone safely.' }
     }
     case 'actions.sweepRetention':
     case 'actions.configureRetention':
     case 'actions.pin': {
       const p = isObject(params) ? params : {}
-      const operation = threadOperationContext(ctx, p)
+      const operation = threadLookupContext(ctx, p)
       await ensureWorkspaceMaterialized(ctx, operation.threadId, operation.projectPath)
-      const workspace = new ThreadWorkspaceManager(operation.threadDirectory).load()
+      const workspace = new ThreadWorkspaceManager(operation.threadDirectory).loadOrSnapshot()
       if (!workspace || workspace.lifecycle !== 'ready') throw new DomainRpcError('workspace_not_ready', 'Thread workspace is not ready')
       const retention = new UndoRetentionService(operation.threadDirectory)
       if (method === 'actions.sweepRetention') {
         const logical = await retention.sweep(workspace.worktreePath)
-        const physical = logical.suspended ? undefined : await new ReceiptRefReleaseService(ctx.mms.threads.lifecycleStore, operation.threadId).release(workspace.worktreePath)
+        const physical = logical.suspended ? undefined
+          : workspace.snapshotOnly ? await releaseSnapshotRefs(operation.threadDirectory)
+            : await new ReceiptRefReleaseService(ctx.mms.threads.lifecycleStore, operation.threadId).release(workspace.worktreePath)
         return { ...logical, physical }
       }
       // CLI/model callers cannot self-assert a human identity in request parameters.
@@ -2930,7 +2943,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const target = await reviewTarget(ctx, p)
       const result: ReviewFilesResult = { root: target.root, scope: target.scope, range: target.range, files: [], truncated: false, mergeCommits: 0 }
       if (target.unavailable) return { ...result, unavailable: target.unavailable }
-      return { ...result, ...await listChangedFiles(target.root, target.range) }
+      return { ...result, ...await readReview(target, () => listChangedFiles(target.root, target.range)) }
     }
     case 'review.file': {
       const p = isObject(params) ? params : {}
@@ -2939,14 +2952,14 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       // The review shows a link at the path as the link text and never reads what it points to.
       const path = requiredContainedPath(ctx, target.root, p.path, 'inspect')
       const oldPath = p.oldPath === undefined ? undefined : requiredContainedPath(ctx, target.root, p.oldPath, 'inspect')
-      return await readFileVersions(target.root, target.range, path, oldPath)
+      return await readReview(target, () => readFileVersions(target.root, target.range, path, oldPath))
     }
     case 'actions.undoLatest': {
       const p = isObject(params) ? params : {}
       const operation = threadLookupContext(ctx, p)
       // A workspace Undo needs the checkout; a conversation-only Undo does not.
       if (operation.projectPath && new ThreadActionService(operation.threadDirectory).latest(new ThreadWorkspaceManager(operation.threadDirectory).load()?.conversationBranchId ?? 'main')?.scope !== 'conversation') await ensureWorkspaceMaterialized(ctx, operation.threadId, operation.projectPath)
-      const workspace = new ThreadWorkspaceManager(operation.threadDirectory).load()
+      const workspace = new ThreadWorkspaceManager(operation.threadDirectory).loadOrSnapshot()
       const branchId = workspace?.conversationBranchId ?? 'main'
       const expectedTurnId = asOptionalString(p.expectedTurnId, 256)
       const validate = (target: import('../../shared/threadActions').ThreadAction): void => {
@@ -2989,10 +3002,10 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     }
     case 'actions.revertCode': {
       const p = isObject(params) ? params : {}
-      const operation = threadOperationContext(ctx, p)
+      const operation = threadLookupContext(ctx, p)
       const actionId = asString(p.actionId, 'actionId', 256)
       await ensureWorkspaceMaterialized(ctx, operation.threadId, operation.projectPath)
-      const workspace = new ThreadWorkspaceManager(operation.threadDirectory).load()
+      const workspace = new ThreadWorkspaceManager(operation.threadDirectory).loadOrSnapshot()
       if (!workspace || workspace.lifecycle !== 'ready') throw new DomainRpcError('workspace_not_ready', 'Thread workspace is not ready')
       const target = new ThreadActionService(operation.threadDirectory).get(actionId)
       const reviewedDiffSha = asReviewedDiffSha(p)
@@ -3007,7 +3020,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const p = isObject(params) ? params : {}
       const operation = threadLookupContext(ctx, p)
       const branchId = asOptionalString(p.conversationBranchId, 256) ?? new ThreadWorkspaceManager(operation.threadDirectory).load()?.conversationBranchId ?? 'main'
-      const workspace = new ThreadWorkspaceManager(operation.threadDirectory).load()
+      const workspace = new ThreadWorkspaceManager(operation.threadDirectory).loadOrSnapshot()
       if (new ThreadActionService(operation.threadDirectory).latest(branchId)?.scope === 'conversation') {
         if (branchId !== (workspace?.conversationBranchId ?? 'main')) throw new DomainRpcError('branch_not_active', 'Conversation history requires the active branch.')
         const action = new ConversationActionService(operation.threadDirectory).apply(branchId, 'redo', operation.currentGeneration, undefined, (target) => {
@@ -3073,13 +3086,14 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     }
     case 'operations.recover': {
       const p = isObject(params) ? params : {}
-      const operation = threadOperationContext(ctx, p)
+      const operation = threadLookupContext(ctx, p)
       await ensureWorkspaceMaterialized(ctx, operation.threadId, operation.projectPath)
-      const workspace = new ThreadWorkspaceManager(operation.threadDirectory).load()
+      const workspace = new ThreadWorkspaceManager(operation.threadDirectory).loadOrSnapshot()
       if (!workspace || workspace.lifecycle !== 'ready') throw new DomainRpcError('workspace_not_ready', 'Thread workspace is not ready')
       // A merge of a subagent result an older version left unfinished is cancelled, never run again.
       const cancelledIntegrations = cancelPendingIntegrations(operation.threadDirectory, workspace.worktreePath)
-      await new PublishService(operation.threadDirectory).recoverPending(workspace.worktreePath, operation.projectPath)
+      // A folder with no worktree has nothing to publish.
+      if (operation.projectPath && !workspace.snapshotOnly) await new PublishService(operation.threadDirectory).recoverPending(workspace.worktreePath, operation.projectPath)
       await new ThreadActionService(operation.threadDirectory).recoverPending(workspace.worktreePath)
       await new CodeRevertService(operation.threadDirectory).recoverPending(workspace.worktreePath)
       await new UndoService(operation.threadDirectory).recoverPending(workspace.worktreePath, (target, kind) => {

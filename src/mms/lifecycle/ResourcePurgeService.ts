@@ -51,7 +51,7 @@ export class ResourcePurgeService {
   private timer?: ReturnType<typeof setInterval>
   private sweepPromise?: Promise<TrashSweepOutcome[]>
   private stopping = false
-  constructor(readonly store: ResourceLifecycleStore, private readonly hooks: { assertIdle(taskId: string): void; projectPurged(record: TaskLifecycleRecord): void | Promise<void>; onBoundary?(record: TaskLifecycleRecord): void | Promise<void>; configurationChanged?(): void; /** Stops background disk measurement until the returned function is called, so no handle of it is open in what is about to be removed. */ quiesceDisk?(): Promise<() => void> }) { this.retirement = new WorktreeRetirementService(store) }
+  constructor(readonly store: ResourceLifecycleStore, private readonly hooks: { assertIdle(taskId: string): void; projectPurged(record: TaskLifecycleRecord): void | Promise<void>; onBoundary?(record: TaskLifecycleRecord): void | Promise<void>; /** Every pass, the first and each resumed one, before any item is removed; a failure stops the pass. */ beforeRemoval?(record: TaskLifecycleRecord): void | Promise<void>; configurationChanged?(): void; /** Stops background disk measurement until the returned function is called, so no handle of it is open in what is about to be removed. */ quiesceDisk?(): Promise<() => void> }) { this.retirement = new WorktreeRetirementService(store) }
 
   policy(): TrashRetentionPolicy {
     const path = join(this.store.root, 'trash-policy.json')
@@ -392,6 +392,7 @@ export class ResourcePurgeService {
         await this.hooks.onBoundary?.(record)
       }
       if (!record.purge) throw new Error('Purge recovery ledger is absent')
+      await this.hooks.beforeRemoval?.(record)
       const reservation = record.cleanupOwner!.token
       for (const item of record.purge.items) {
         if (item.status !== 'pending') continue

@@ -53,8 +53,15 @@ export function buildResourceInventory(store: ResourceLifecycleStore, record: Ta
       return undefined
     }
   }
+  /**
+   * Threads whose turns are recorded in a snapshot store of a folder without Git (`snapshot-workspace.json`, no
+   * `workspace.json`): their refs are the store's, not a repository's, and the permanent delete releases them with the
+   * store (`releaseThreadSnapshots`, on every pass) instead of listing them as refs to find in a repository.
+   */
+  const inSnapshotStore = new Set<string>()
   const resource = (kind: LifecycleResource['kind'], identity: string | undefined, sourceId: string, claim: RetentionClaimKind | undefined, condition: string, ownerTaskId = record.taskId, repositoryId?: string): void => {
     if (!identity) return
+    if (kind === 'git-ref' && inSnapshotStore.has(ownerTaskId)) return
     const id = digest(`${kind}\0${repositoryId ?? ''}\0${identity}`)
     let value = resources.get(id)
     if (!value) {
@@ -297,6 +304,9 @@ export function buildResourceInventory(store: ResourceLifecycleStore, record: Ta
   for (let added = true; added;) {
     added = false
     for (const task of tasks) if (task.parentTaskId && owned.has(task.parentTaskId) && !owned.has(task.taskId)) { owned.set(task.taskId, task); added = true }
+  }
+  for (const task of owned.values()) {
+    if (existsSync(join(task.location, 'snapshot-workspace.json')) && !existsSync(join(task.location, 'workspace.json'))) inSnapshotStore.add(task.taskId)
   }
   for (const task of owned.values()) inventoryTask(task)
   const config = source(join(store.profileHome, 'mousse.conf'))

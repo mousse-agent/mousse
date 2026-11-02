@@ -121,6 +121,10 @@ export class CodexAdapter implements ProviderAdapter {
     return this.service()?.configured() ?? false
   }
 
+  standaloneWorkspace(threadId: string): string | undefined {
+    return this.service()?.standaloneWorkspace(threadId)
+  }
+
   /**
    * What the user's own Codex setup allows for a child; nothing is changed. Mousse cannot deny a
    * Codex MCP tool call (it answers command, file and permission approvals and elicitations, but a

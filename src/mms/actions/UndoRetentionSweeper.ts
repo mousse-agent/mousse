@@ -3,6 +3,7 @@ import { ThreadWorkspaceManager } from '../workspace/ThreadWorkspaceManager'
 import { releaseExecutionLeaseHandle, tryAcquireExecutionLease } from '../queue/ThreadExecutionLease'
 import { UndoRetentionService } from './UndoRetentionService'
 import { ReceiptRefReleaseService } from './ReceiptRefReleaseService'
+import { releaseSnapshotRefs } from './SnapshotRefReleaseService'
 
 /** Small rotating idle-task batches. Shutdown cancels lease waits and awaits completion. */
 export class UndoRetentionSweeper {
@@ -42,10 +43,13 @@ export class UndoRetentionSweeper {
       try {
         lease = tryAcquireExecutionLease(task.location, { source: 'undo-retention-sweep' })
         if (!lease) continue
-        const workspace = new ThreadWorkspaceManager(task.location).load()
+        const workspace = new ThreadWorkspaceManager(task.location).loadOrSnapshot()
         if (!workspace || workspace.lifecycle !== 'ready') continue
         const result = await new UndoRetentionService(task.location).sweep(workspace.worktreePath, this.abort.signal, lease)
-        const released = result.suspended ? undefined : await new ReceiptRefReleaseService(this.store, task.taskId).release(workspace.worktreePath, { signal: this.abort.signal, heldThreadLease: lease })
+        // A folder with no worktree keeps its snapshots in a store of Mousse's own, which is also tidied after the release.
+        const released = result.suspended ? undefined : workspace.snapshotOnly
+          ? await releaseSnapshotRefs(task.location, { signal: this.abort.signal, heldThreadLease: lease })
+          : await new ReceiptRefReleaseService(this.store, task.taskId).release(workspace.worktreePath, { signal: this.abort.signal, heldThreadLease: lease })
         this.outcomes.set(task.taskId, { at: new Date().toISOString(), expired: result.expired.length, releasedRefs: released?.releasedRefs.length ?? 0,
           ...(result.suspended ? { reason: 'Clock review required' } : released?.retained.length ? { reason: released.retained.map((item) => item.reason).join('; ') } : {}) })
       } catch (error) {

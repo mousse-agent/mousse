@@ -103,6 +103,7 @@ import { existsSync } from 'node:fs'
 import { settleThreadMutationOwnership } from './queue/ThreadExecutionLease'
 import type { TaskLifecycleRecord } from '../shared/resourceLifecycle'
 import { UndoRetentionSweeper } from './actions/UndoRetentionSweeper'
+import { releaseThreadSnapshots } from './actions/SnapshotRefReleaseService'
 import { PullRequestWatchService } from './git/PullRequestWatchService'
 import { resolveThreadProjectPath } from './data/resolveActiveProjectPath'
 import { SpeechRelay } from './speech/SpeechRelay'
@@ -777,6 +778,16 @@ export class MmsProfileServices {
         }
       },
       quiesceDisk: () => this.storageUsage.pause(),
+      beforePurgeRemoval: async (record) => {
+        // What a deleted thread holds in a snapshot store goes on every pass, while the receipts that name it still exist.
+        // Releasing again is harmless; a failure (a file another process holds) stops the pass, so the purge resumes and
+        // tries again instead of leaving the refs or the store behind for good.
+        const failures: string[] = []
+        for (const task of this.lifecycleOwnedTasks(record.taskId)) {
+          try { await releaseThreadSnapshots(task.location) } catch (error) { failures.push(`${task.taskId}: ${error instanceof Error ? error.message : String(error)}`) }
+        }
+        if (failures.length) throw new Error(`The snapshots of a deleted thread could not be released yet; the delete will try again. ${failures.join('; ')}`)
+      },
       projectPurged: (record) => {
         // A permanent delete freed space.
         this.storageUsage.rescanSoon()

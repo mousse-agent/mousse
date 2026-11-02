@@ -201,6 +201,10 @@ const NULL_DEVICES = new Set([GIT_NULL_DEVICE, NO_HOOKS_PATH, '/dev/null', 'NUL'
  */
 const ALLOWED_SETTINGS: ReadonlyArray<readonly [RegExp, (value: string) => boolean]> = [
   [/^core\.fsmonitor$/, (value) => value === 'false'],
+  // A snapshot store's isolation (`hiddenStore.ts`): no attributes file, no untracked cache, no automatic collection.
+  [/^core\.attributesfile$/, (value) => NULL_DEVICES.has(value)],
+  [/^core\.untrackedcache$/, (value) => value === 'false'],
+  [/^gc\.auto$/, (value) => value === '0'],
   [/^core\.hookspath$/, (value) => NULL_DEVICES.has(value)],
   [/^core\.excludesfile$/, (value) => NULL_DEVICES.has(value)],
   [/^hook\..+\.enabled$/, (value) => value === 'false'],
@@ -590,7 +594,18 @@ const CONFIG_FILE_VARIABLES = ['GIT_CONFIG', 'GIT_CONFIG_GLOBAL', 'GIT_CONFIG_SY
  * `moved` for a redirect a change may not run under. Values the process itself inherited are the user's
  * and not judged here; `stripInheritedGitEnv` drops the ones that redirect.
  */
-function environmentProblem(cwd: string, env: NodeJS.ProcessEnv): { refuse?: string; moved?: string } {
+/**
+ * A snapshot store Mousse keeps for a folder without Git of its own (`hiddenStore.ts`):
+ * `<home>/project-data/<project>/snapshots.git` or `<home>/thread-snapshots/<thread>/snapshots.git`. It holds only
+ * Mousse's snapshots, so its index, HEAD and refs are Mousse's, and its garbage is Mousse's to collect.
+ */
+export function isOwnedSnapshotStore(path: string): boolean {
+  if (!isOwnedPath(path)) return false
+  const real = canonicalGitPath(path)
+  return basename(real) === 'snapshots.git' && ['project-data', 'thread-snapshots'].includes(basename(dirname(dirname(real))))
+}
+
+function environmentProblem(cwd: string, env: NodeJS.ProcessEnv): { refuse?: string; moved?: string; store?: string } {
   const own = (key: string): string | undefined => (env[key] !== undefined && env[key] !== process.env[key] ? env[key] : undefined)
   for (const key of CONFIG_FILE_VARIABLES) {
     const value = own(key)
@@ -606,14 +621,21 @@ function environmentProblem(cwd: string, env: NodeJS.ProcessEnv): { refuse?: str
   const bad = settings.find((pair) => !allowedSetting(pair))
   if (bad !== undefined) return { refuse: `it sets "${bad.split('=')[0]}" in the environment, which could change what the command does` }
   const ownGitDir = gitDirectoryEnv(cwd).GIT_DIR
+  // A snapshot store as `GIT_DIR`, with the folder the command runs in (or the store itself) as its work tree.
+  const named = own('GIT_DIR')
+  const store = named !== undefined && isOwnedSnapshotStore(resolve(cwd, named)) ? resolve(cwd, named) : undefined
+  const workTree = own('GIT_WORK_TREE')
+  const storeWorkTree = store !== undefined && workTree !== undefined && contains(canonicalGitPath(resolve(cwd, workTree)), canonicalGitPath(cwd))
   for (const key of REDIRECT_VARIABLES) {
     const value = own(key)
     if (value === undefined) continue
     // Naming the Git directory the command runs in is what `withoutRepoPrograms` does itself.
     if (key === 'GIT_DIR' && ownGitDir && resolve(cwd, value) === ownGitDir) continue
+    if (key === 'GIT_DIR' && store) continue
+    if (key === 'GIT_WORK_TREE' && storeWorkTree) continue
     return { moved: `it sets ${key}, which points Git at another place` }
   }
-  return {}
+  return store ? { store } : {}
 }
 
 /**
@@ -638,6 +660,8 @@ export function decideGitCommand(request: GitCommandRequest): GitDecision {
     optionalLocksOff: Boolean(request.lockFree || parsed.noOptionalLocks || env.GIT_OPTIONAL_LOCKS === '0'),
     autoRefreshOff: Boolean(request.lockFree || parsed.settings?.get('diff.autorefreshindex') === 'false')
   })
+  // Only Mousse's snapshots are in a snapshot store: collecting its garbage (after Mousse released the refs) loses nothing else.
+  if (effect.banned && redirect.store && parsed.sub === 'gc') return { access: 'owned', allowed: true, reason: 'it collects the garbage of a snapshot store Mousse owns' }
   if (effect.banned) return { access: 'userRequested', allowed: false, reason: effect.banned }
   if (redirect.refuse) return { access: 'userRequested', allowed: false, reason: redirect.refuse }
   if (isRead(effect)) return { access: 'read', allowed: true, reason: 'a read' }
@@ -645,6 +669,8 @@ export function decideGitCommand(request: GitCommandRequest): GitDecision {
   if (redirect.moved) return { access: 'userRequested', allowed: false, reason: redirect.moved }
 
   const cwdOwned = isOwnedPath(request.cwd)
+  // In a snapshot store the index and HEAD are the store's; the files of its work tree are still the folder's.
+  const repositoryOwned = cwdOwned || redirect.store !== undefined
   const problems: string[] = []
   if (effect.config) problems.push('it writes the repository\'s config')
   if (effect.remote) problems.push('it changes a remote')
@@ -669,8 +695,8 @@ export function decideGitCommand(request: GitCommandRequest): GitDecision {
   if (effect.worktreeConfig && !cwdOwned) problems.push('it writes the config of a worktree Mousse does not own')
   if (effect.worktree && !cwdOwned) problems.push('it changes files outside a Mousse worktree')
   const indexFile = request.env?.GIT_INDEX_FILE
-  if (effect.index && !(indexFile ? isOwnedIndex(resolve(request.cwd, indexFile), request.cwd, env) : cwdOwned)) problems.push('it writes the index of a checkout Mousse does not own')
-  if (effect.head && !cwdOwned) problems.push('it moves HEAD of a checkout Mousse does not own')
+  if (effect.index && !(indexFile ? isOwnedIndex(resolve(request.cwd, indexFile), request.cwd, env) : repositoryOwned)) problems.push('it writes the index of a checkout Mousse does not own')
+  if (effect.head && !repositoryOwned) problems.push('it moves HEAD of a checkout Mousse does not own')
   if (effect.headBranch) {
     const head = cwdOwned ? finalRef(request.cwd, 'HEAD', env) : null
     if (!cwdOwned || !(head === 'detached' || (head !== null && isOwnedRef(head)))) problems.push(`it moves ${head && head !== 'detached' ? head : 'the current branch'}, which Mousse does not own`)

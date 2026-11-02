@@ -215,3 +215,23 @@ test('a purge that fails reports no bytes and records why', async () => {
   expect(await f.coordinator.cleanup.sweep(Date.now())).toEqual([{ taskId: 'task', outcome: 'failed', reason: 'locked', bytes: 0 }])
   expect(f.store.require('task').blockedReason).toBe('locked')
 })
+
+test('the release of what a deleted thread holds outside its folder runs on every pass, and a failure leaves the purge to resume', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'mousse-purge-')); roots.push(root)
+  const home = join(root, 'profile'), location = join(home, 'thread-data', 'task'); mkdirSync(location, { recursive: true })
+  writeFileSync(join(location, 'meta.json'), JSON.stringify({ id: 'task' })); writeFileSync(join(location, 'messages.json'), '[]')
+  const store = new ResourceLifecycleStore({ profileId: 'test', profileHome: home }); store.registerTask({ taskId: 'task', location })
+  registerThreadLifecycleGate(home, store)
+  let passes = 0
+  const coordinator = new ResourceLifecycleCoordinator(store, { drain: async () => {}, settleMutationOwnership: async () => {}, projectIndex: () => {}, projectPurged: () => {},
+    beforePurgeRemoval: () => { passes++; if (passes === 1) throw new Error('a file another process holds') } })
+  await coordinator.trash({ taskId: 'task', operationId: 'trash' })
+  const preview = await coordinator.cleanup.preview('task')
+  await expect(coordinator.purge({ taskId: 'task', operationId: 'purge', expectedGeneration: preview.generation, previewDigest: preview.digest })).rejects.toThrow()
+  // Nothing was removed and the purge stays started: the next pass releases again and finishes.
+  expect(store.require('task').state).toBe('purge-started')
+  expect(existsSync(store.require('task').location)).toBe(true)
+  expect((await coordinator.purge({ taskId: 'task', operationId: 'purge' })).state).toBe('purged')
+  expect(passes).toBe(2)
+})
+

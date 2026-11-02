@@ -13,7 +13,9 @@ import { ChangeReceiptService } from './ChangeReceiptService'
 import { assertHeldThreadLease, withGitMutationLocks } from './GitOperationCoordinator'
 import { IN_PROGRESS_GIT_MARKERS } from '../git/gitMarkers'
 import { changedPaths, git, tryGit } from './git'
-import { describeGit, sameTree, takeSnapshot, type Snapshot } from './snapshots'
+import { coverageNotice, describeGit, sameTree, SnapshotRefusedError, snapshotUncovered, takeSnapshot, type Snapshot } from './snapshots'
+import { activeHiddenStore } from '../git/hiddenStore'
+import { inThreadSnapshotScope, setSnapshotsOff } from '../workspace/SnapshotWorkspace'
 
 export interface RunThreadActionOptions {
   threadId: string
@@ -129,7 +131,7 @@ export class ThreadActionService {
     }
     new ChangeReceiptService(this.threadDirectory).assertNoPendingOperation()
     this.assertExpectedRevision(options.expectedJournalRevision)
-    git(options.workspacePath, ['rev-parse', '--verify', `${startSha}^{commit}`])
+    inThreadSnapshotScope(this.threadDirectory, options.workspacePath, () => git(options.workspacePath, ['rev-parse', '--verify', `${startSha}^{commit}`]))
     const actions = this.list()
     const action = this.newAction(options, startSha, actions)
     this.journal.append({ operationId: action.id, operationType: 'action-checkpoint', state: 'running', expectedPreState: { startSha, actionId: action.id }, details: { action } })
@@ -153,7 +155,7 @@ export class ThreadActionService {
 
   /** `recordOutsideChanges` for a caller that already holds the mutation locks. */
   recordOutsideChangesHeld(options: OutsideChangesOptions): { startSha: string; action?: ThreadAction } {
-    const metadata = new ThreadWorkspaceManager(this.threadDirectory).load()
+    const metadata = new ThreadWorkspaceManager(this.threadDirectory).loadOrSnapshot()
     const latest = this.latest(options.conversationBranchId)
     let snapshot: Snapshot
     try {
@@ -374,20 +376,25 @@ export class ThreadActionService {
     workspacePath = git(workspacePath, ['rev-parse', '--show-toplevel'])
     action.state = 'checkpointing'
     this.journal.append({ operationId: action.id, operationType: 'action-checkpoint', state: 'prepared', expectedPreState: { startSha: action.startSha }, details: { action, actionState: state } })
-    const threadId = new ThreadWorkspaceManager(this.threadDirectory).load()?.threadId
+    const threadId = new ThreadWorkspaceManager(this.threadDirectory).loadOrSnapshot()?.threadId
     const reason = action.turnId.startsWith(USER_CHANGES_TURN_PREFIX) ? 'outside changes' : `end of turn ${action.turnId}`
     let snapshot: Snapshot
     try {
       snapshot = takeSnapshot(workspacePath, { reason, threadId, operationId: action.id })
     } catch (error) {
       // A snapshot that cannot be taken never locks the thread: the action ends where it started, says nothing of its
-      // files was covered and why, and cannot be undone (there is nothing recorded to restore).
-      const head = tryGit(workspacePath, ['rev-parse', '--verify', '-q', 'HEAD^{commit}']).stdout || undefined
-      const branch = tryGit(workspacePath, ['branch', '--show-current']).stdout || undefined
+      // files was covered and why, and cannot be undone (there is nothing recorded to restore). A hidden store has no
+      // HEAD or branch of the folder's to report.
+      const hidden = activeHiddenStore(workspacePath) !== undefined
+      const head = hidden ? undefined : tryGit(workspacePath, ['rev-parse', '--verify', '-q', 'HEAD^{commit}']).stdout || undefined
+      const branch = hidden ? undefined : tryGit(workspacePath, ['branch', '--show-current']).stdout || undefined
+      const why = error instanceof SnapshotRefusedError ? error.gapReason : `no snapshot could be taken (${String((error as Error).message ?? error).split(/\r?\n/)[0]})`
       snapshot = { sha: action.startSha, tree: git(workspacePath, ['rev-parse', `${action.startSha}^{tree}`]), ...(head ? { head } : {}), ...(branch ? { branch } : {}),
-        coverageGaps: [{ path: '.', reason: `no snapshot could be taken (${String((error as Error).message ?? error).split(/\r?\n/)[0]})` }] }
+        coverageGaps: [{ path: '.', reason: why }] }
       action.reversible = false
       if (action.actor?.kind !== 'user') atomicWriteJsonSync(join(this.threadDirectory, UNRECORDED_END_FILE), { actionId: action.id, turnId: action.turnId } satisfies UnrecordedEnd)
+      // A folder past what its hidden store keeps: Undo says why until a turn finds it back within bounds.
+      if (error instanceof SnapshotRefusedError) setSnapshotsOff(this.threadDirectory, error.message)
     }
     // The turn's start could not be captured: the placeholder start is not used. The turn is recorded from its end, so no
     // file is attributed to it and code Undo restores nothing (the conversation still rewinds), and the gap says why.
@@ -397,10 +404,20 @@ export class ThreadActionService {
       snapshot = { ...snapshot, coverageGaps: [{ path: '.', reason: `start of turn not captured: ${uncaptured.error}` }, ...(snapshot.coverageGaps ?? [])] }
       rmSync(join(this.threadDirectory, UNCAPTURED_START_FILE), { force: true })
     }
+    // What the start did not cover is the turn's too: a file left out at the start and recorded at the end was not made
+    // by the turn. The turn's gaps are both sides', the start's named as such where the end covered them.
+    const startGaps = snapshotUncovered(workspacePath, action.startSha)?.gaps ?? []
+    if (startGaps.length) {
+      const endPaths = new Set((snapshot.coverageGaps ?? []).map((gap) => gap.path))
+      const fromStart = startGaps.filter((gap) => !endPaths.has(gap.path)).map((gap) => ({ path: gap.path, reason: `${gap.reason}, at the start of the turn` }))
+      if (fromStart.length) snapshot = { ...snapshot, coverageGaps: [...(snapshot.coverageGaps ?? []), ...fromStart] }
+    }
     const { record, commits } = describeGit(workspacePath, action.startSha, snapshot)
     action.endSha = snapshot.sha
     action.commits = commits
     action.git = record
+    const notCovered = coverageNotice(snapshot.coverageGaps)
+    if (notCovered) action.notCovered = notCovered
     action.changedPaths = changedPaths(workspacePath, action.startSha, snapshot.sha)
     action.state = state
     action.completedAt = new Date().toISOString()

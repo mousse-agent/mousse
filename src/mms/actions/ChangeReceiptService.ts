@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto'
 import type { ChangeReceipt } from '../../shared/threadActions'
 import { ThreadJournal } from '../data/ThreadJournal'
 import { ThreadWorkspaceManager } from '../workspace/ThreadWorkspaceManager'
+import { recordSnapshotSha } from '../workspace/SnapshotWorkspace'
 import { atomicWriteJsonSync } from '../data/AtomicFs'
 import { coverageNotice } from './snapshots'
 import { git } from './git'
@@ -18,8 +19,9 @@ const isPublish = (type: string): boolean => type === 'publish' || type === 'cha
 
 export class ChangeReceiptService {
   private readonly journal: ThreadJournal
-  constructor(private readonly threadDirectory: string) {
-    this.journal = new ThreadJournal(threadDirectory)
+  /** `readOnly`: only lists receipts, so it never needs the thread's admission (a permanent delete fences it). */
+  constructor(private readonly threadDirectory: string, options: { readOnly?: boolean } = {}) {
+    this.journal = new ThreadJournal(threadDirectory, options.readOnly ? { readOnly: true } : {})
   }
 
   list(): ChangeReceipt[] {
@@ -42,7 +44,7 @@ export class ChangeReceiptService {
       return existing
     }
     const manager = new ThreadWorkspaceManager(this.threadDirectory)
-    const workspace = manager.load()
+    const workspace = manager.loadOrSnapshot()
     const id = randomUUID()
     const refs = [`refs/mousse/changes/${id}/before`, `refs/mousse/changes/${id}/after`]
     git(workspacePath, ['update-ref', '--no-deref', refs[0], input.beforeSha])
@@ -69,10 +71,12 @@ export class ChangeReceiptService {
 
   private refreshWorkspace(workspacePath: string, receipt: ChangeReceipt): void {
     const manager = new ThreadWorkspaceManager(this.threadDirectory)
-    const workspace = manager.load()
+    const workspace = manager.loadOrSnapshot()
     if (!workspace || git(workspace.worktreePath, ['rev-parse', '--show-toplevel']) !== git(workspacePath, ['rev-parse', '--show-toplevel'])) return
     if ((workspace.generation ?? 0) > receipt.generation) return
     git(workspacePath, ['update-ref', '--no-deref', workspace.retainedRef, receipt.afterSha])
+    // A folder that is the person's has no `workspace.json`; its record keeps the latest snapshot.
+    if (workspace.snapshotOnly) return recordSnapshotSha(this.threadDirectory, receipt.afterSha)
     // A snapshot receipt moves the pin and the latest snapshot; HEAD is whatever the thread's Git left it at.
     const snapshot = receipt.git ? { snapshotSha: receipt.afterSha } : {}
     atomicWriteJsonSync(manager.workspacePath, { ...workspace, ...snapshot, headSha: receipt.git ? receipt.git.headAfter ?? workspace.headSha : receipt.afterSha, generation: receipt.generation })
@@ -84,10 +88,11 @@ export class ChangeReceiptService {
    */
   adoptSnapshot(workspacePath: string, snapshot: Snapshot): void {
     const manager = new ThreadWorkspaceManager(this.threadDirectory)
-    const workspace = manager.load()
+    const workspace = manager.loadOrSnapshot()
     if (!workspace || git(workspace.worktreePath, ['rev-parse', '--show-toplevel']) !== git(workspacePath, ['rev-parse', '--show-toplevel'])) return
     if (workspace.snapshotSha === snapshot.sha) return
     git(workspacePath, ['update-ref', '--no-deref', workspace.retainedRef, snapshot.sha])
+    if (workspace.snapshotOnly) return recordSnapshotSha(this.threadDirectory, snapshot.sha)
     atomicWriteJsonSync(manager.workspacePath, { ...workspace, snapshotSha: snapshot.sha, headSha: snapshot.head ?? workspace.headSha })
   }
 

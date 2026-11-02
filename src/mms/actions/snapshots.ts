@@ -1,14 +1,21 @@
+import { spawnSync } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
-import { copyFileSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, rmSync, writeFileSync } from 'node:fs'
-import { join, resolve } from 'node:path'
+import { copyFileSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { homedir } from 'node:os'
+import { join, parse, resolve, sep } from 'node:path'
 import type { GitRecord } from '../../shared/threadActions'
-import { git, mergeTrees, MOUSSE_COMMIT_ENV, NOT_MOUSSE, operationInProgress, tryGit, treeOf } from './git'
+import { activeHiddenStore, builtInPathspecs, ensureStoreRules, outsideHiddenStore } from '../git/hiddenStore'
+import { git, gitEnv, guarded, mergeTrees, MOUSSE_COMMIT_ENV, NOT_MOUSSE, operationInProgress, tryGit, treeOf } from './git'
 
 /**
  * Workspace snapshots (docs/workspace-snapshots.md): a commit whose tree is every file of a worktree (tracked and
  * untracked, never ignored files or `.mousse/`), built with a private index so that HEAD, the branches, the real
  * index and the files are never touched. Its parent is the worktree's HEAD, so it is reachable from nowhere until a
  * ref under `refs/mousse/` pins it.
+ *
+ * A folder with no Git Mousse may use has its snapshots in a hidden store instead (`inHiddenStore`): the same
+ * commands run with `--git-dir` and `--work-tree`, the store's own index is the persistent one, and a snapshot has no
+ * parent because there is no HEAD.
  */
 export interface Snapshot {
   sha: string
@@ -44,7 +51,8 @@ const NESTED_COMMIT_ONLY = 'nested repository; only its commit is recorded'
 function nestedWithChanges(top: string, env: NodeJS.ProcessEnv, skip: CoverageGap[]): CoverageGap[] {
   const links = git(top, ['ls-files', '-s', '-z'], env).split('\0').filter((line) => line.startsWith('160000 ')).map((line) => line.slice(line.indexOf('\t') + 1))
   return links.filter((path) => !skip.some((gap) => gap.path === path) && existsSync(join(top, path, '.git')))
-    .filter((path) => { const status = tryGit(join(top, path), ['--no-optional-locks', 'status', '--porcelain', '--untracked-files=all']); return !status.ok || status.stdout !== '' })
+    // The nested repository's own Git, never a hidden store whose folder holds it.
+    .filter((path) => { const status = outsideHiddenStore(() => tryGit(join(top, path), ['--no-optional-locks', 'status', '--porcelain', '--untracked-files=all'])); return !status.ok || status.stdout !== '' })
     .map((path) => ({ path, reason: NESTED_COMMIT_ONLY }))
 }
 
@@ -57,9 +65,180 @@ export interface SnapshotInput {
 
 const SUBJECT = 'mousse snapshot: '
 
-interface LastSnapshot { sha: string; tree: string; head?: string }
+interface LastSnapshot { sha: string; tree: string; head?: string; uncovered?: string }
+
+/**
+ * What a snapshot did not cover, kept with it (a `Mousse-Uncovered:` line of its commit): its coverage gaps, and the
+ * ignored files and folders that were there (collapsed to their folder, at most `IGNORED_RECORDED`). A restore reads it
+ * so it never deletes or writes over what was there but not recorded. `truncated`: more were ignored than recorded.
+ */
+export interface Uncovered { gaps: CoverageGap[]; ignored: string[]; truncated: boolean }
+
+const UNCOVERED_LINE = 'Mousse-Uncovered: '
+const IGNORED_RECORDED = 2000
+
+/** The ignored files and folders in the folder now, collapsed to their folder; never `.mousse`. */
+function ignoredNow(top: string): { ignored: string[]; truncated: boolean } {
+  const listed = tryGit(top, ['ls-files', '-z', '--others', '--ignored', '--exclude-standard', '--directory'])
+  if (!listed.ok) return { ignored: [], truncated: true }
+  const all = listed.stdout.split('\0').filter((path) => path && path !== '.mousse/' && !path.startsWith('.mousse/'))
+  return { ignored: all.slice(0, IGNORED_RECORDED), truncated: all.length > IGNORED_RECORDED }
+}
+
+/** The record of what `sha` did not cover, or undefined for a snapshot taken before snapshots kept one. */
+export function snapshotUncovered(top: string, sha: string): Uncovered | undefined {
+  const commit = tryGit(top, ['cat-file', 'commit', sha])
+  if (!commit.ok) return undefined
+  const line = commit.stdout.split('\n').find((entry) => entry.startsWith(UNCOVERED_LINE))
+  if (!line) return undefined
+  try {
+    const value = JSON.parse(line.slice(UNCOVERED_LINE.length)) as { g?: CoverageGap[]; i?: string[]; t?: boolean }
+    return { gaps: Array.isArray(value.g) ? value.g : [], ignored: Array.isArray(value.i) ? value.i : [], truncated: value.t === true }
+  } catch {
+    return undefined
+  }
+}
+
+/** The reason `path` was not covered in `record`, or undefined when the record covers it. */
+function uncoveredReason(record: Uncovered, path: string): string | undefined {
+  const within = (root: string): boolean => root === '.' || path === root || path.startsWith(`${root.replace(/\/$/, '')}/`)
+  const gap = record.gaps.find((entry) => within(entry.path))
+  if (gap) return gap.reason
+  return record.ignored.some((entry) => entry.endsWith('/') ? within(entry) : entry === path) ? 'ignored' : undefined
+}
+
+/** What a hidden store refuses to snapshot, so that a folder too large to walk quickly never slows or fails a turn. */
+export interface SnapshotLimits {
+  /** Files in a snapshot. */
+  files: number
+  /** Their total size. */
+  bytes: number
+  /** One file's size. */
+  fileBytes: number
+}
+
+const DEFAULT_LIMITS: SnapshotLimits = { files: 50_000, bytes: 1024 ** 3, fileBytes: 50 * 1024 ** 2 }
+let limits: SnapshotLimits = { ...DEFAULT_LIMITS }
+
+/** For tests: the limits a hidden store applies. No argument restores the defaults. */
+export function configureSnapshotLimits(next: Partial<SnapshotLimits> = {}): void {
+  limits = { ...DEFAULT_LIMITS, ...next }
+}
+
+/** Snapshots are off for this folder: the reason is for the person, and the turn that met it carries on without them. */
+export class SnapshotRefusedError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'SnapshotRefusedError'
+  }
+
+  /** The reason as a coverage gap names it: "too large (more than 1 GB)". */
+  get gapReason(): string {
+    return this.message.replace(/^Undo is off for this folder because it is /, '').replace(/\.$/, '')
+  }
+}
+
+function canonicalPath(path: string): string {
+  const resolved = resolve(path)
+  try { return realpathSync.native(resolved) } catch { return resolved }
+}
+
+/** System folders a snapshot never holds, nor anything inside them. */
+const SYSTEM_FOLDERS = process.platform === 'win32'
+  ? [process.env.SystemRoot ?? 'C:\\Windows', process.env.ProgramFiles ?? 'C:\\Program Files', process.env['ProgramFiles(x86)'] ?? 'C:\\Program Files (x86)', process.env.ProgramData ?? 'C:\\ProgramData']
+  : ['/etc', '/usr', '/bin', '/sbin', '/System', '/Library']
+
+/**
+ * A folder that must never be snapshotted: the filesystem root, the home folder or a folder that holds it, or a system
+ * folder (`/etc`, `/usr`, `/System`, `/Library`, `C:\\Windows`, `C:\\Program Files`, `C:\\ProgramData`) or a folder in one.
+ * A project there would put someone's whole account, or the system, in a store.
+ */
+export function isUnsafeSnapshotRoot(path: string, home = homedir()): boolean {
+  const target = canonicalPath(path)
+  if (target === parse(target).root) return true
+  const user = canonicalPath(home)
+  if (user === target || user.startsWith(target.endsWith(sep) ? target : `${target}${sep}`)) return true
+  const fold = (value: string): string => process.platform === 'win32' ? value.toLowerCase() : value
+  return SYSTEM_FOLDERS.map(canonicalPath).some((system) => fold(target) === fold(system) || fold(target).startsWith(fold(system.endsWith(sep) ? system : `${system}${sep}`)))
+}
+
+const UNSAFE_ROOT = 'Undo is off for this folder because it is a home or system folder.'
+
+function sizeText(bytes: number): string {
+  if (bytes >= 1024 ** 3) return `${Math.round(bytes / 1024 ** 3)} GB`
+  if (bytes >= 1024 ** 2) return `${Math.round(bytes / 1024 ** 2)} MB`
+  return bytes >= 1024 ? `${Math.round(bytes / 1024)} KB` : `${bytes} bytes`
+}
+
+/** The files a snapshot would hold, as `git add -A` finds them: tracked by the store's index, or new and not ignored. */
+function candidateFiles(top: string): string[] {
+  const result = spawnSync('git', guarded(top, ['ls-files', '-z', '--cached', '--others', '--exclude-standard', '--', '.', ...builtInPathspecs().exclude]), {
+    cwd: top, encoding: 'utf8', env: gitEnv(top), maxBuffer: 32 * 1024 * 1024, timeout: 60_000
+  })
+  const code = (result.error as NodeJS.ErrnoException | undefined)?.code
+  // A listing that does not fit, or does not end in a minute, is a folder past the limit.
+  if (code === 'ENOBUFS' || code === 'ETIMEDOUT') throw new SnapshotRefusedError(`Undo is off for this folder because it is too large (more than ${limits.files.toLocaleString('en-US')} files).`)
+  if (result.error || result.status !== 0) throw new Error((result.stderr ?? '').trim() || 'git ls-files failed')
+  return result.stdout.split('\0').filter(Boolean)
+}
+
+/** Built-in exclusions that are not worth naming: Git's and Mousse's own folders, and caches. */
+const UNNAMED_EXCLUSIONS = new Set(['.git', '.mousse', '.DS_Store', '__pycache__'])
+const LEFT_OUT_BY_MOUSSE = 'dependency or build folder, never kept in snapshots'
+
+/**
+ * The folders of the built-in list that are in the folder, read after they were taken out of the store's index: what
+ * the snapshot does not hold, whatever the folder's `.gitignore` says. Only the store's exclude file is read, so a
+ * `!pattern` of the folder's does not hide one.
+ */
+function excludedFolders(top: string, gitDir: string): CoverageGap[] {
+  const exclude = join(gitDir, 'info', 'exclude')
+  const listed = existsSync(exclude)
+    ? tryGit(top, ['ls-files', '-z', '--others', '--ignored', '--directory', `--exclude-from=${exclude}`])
+    : { ok: true, stdout: '' }
+  return (listed.ok ? listed.stdout.split('\0').filter(Boolean) : [])
+    .map((path) => path.replace(/\/$/, ''))
+    .filter((path) => !UNNAMED_EXCLUSIONS.has(path.split('/').at(-1)!))
+    .map((path) => ({ path, reason: LEFT_OUT_BY_MOUSSE }))
+}
+
+/**
+ * The files over the size limit a hidden store leaves out of a snapshot of its folder (kept out of the store's index).
+ * A home or system folder, or one past the file count or total size, cannot be snapshotted at all and is refused. The
+ * walk is the one `git add -A` makes next, so Git's own ignore rules and the built-in list decide what counts.
+ */
+function hiddenStoreCoverage(top: string): { leftOut: CoverageGap[] } {
+  if (isUnsafeSnapshotRoot(top)) throw new SnapshotRefusedError(UNSAFE_ROOT)
+  const files = candidateFiles(top)
+  if (files.length > limits.files) throw new SnapshotRefusedError(`Undo is off for this folder because it is too large (more than ${limits.files.toLocaleString('en-US')} files).`)
+  const leftOut: CoverageGap[] = []
+  let total = 0
+  for (const path of files) {
+    let size: number
+    try {
+      const info = lstatSync(join(top, path))
+      // A directory here is a nested repository, kept as a link and not read.
+      if (!info.isFile()) continue
+      size = info.size
+    } catch { continue }
+    if (size > limits.fileBytes) {
+      leftOut.push({ path, reason: `over ${sizeText(limits.fileBytes)}` })
+      continue
+    }
+    total += size
+    if (total > limits.bytes) throw new SnapshotRefusedError(`Undo is off for this folder because it is too large (more than ${sizeText(limits.bytes)}).`)
+  }
+  return { leftOut }
+}
 
 function privateFiles(top: string): { directory: string; index: string; last: string } {
+  const store = activeHiddenStore(top)
+  if (store) {
+    // The store has no worktree index of anyone's, so its own is the persistent one: `git diff` against the folder reads it.
+    const directory = join(store.gitDir, 'mousse')
+    mkdirSync(directory, { recursive: true })
+    return { directory, index: join(store.gitDir, 'index'), last: join(directory, 'snapshot-last.json') }
+  }
   // `--git-path` keeps names Git doesn't know in the worktree's own Git directory, so each linked worktree has its own.
   const directory = resolve(top, git(top, ['rev-parse', '--git-path', 'mousse']))
   mkdirSync(directory, { recursive: true })
@@ -67,6 +246,8 @@ function privateFiles(top: string): { directory: string; index: string; last: st
 }
 
 function headOf(top: string): string | undefined {
+  // A hidden store has no HEAD, whatever the folder's own repository says.
+  if (activeHiddenStore(top)) return undefined
   return tryGit(top, ['rev-parse', '--verify', '-q', 'HEAD^{commit}']).stdout || undefined
 }
 
@@ -80,7 +261,7 @@ function nestedRepositoriesWithoutCommit(top: string, env: NodeJS.ProcessEnv): s
   // Git lists a nested repository it would add as one entry ending in a slash.
   const untracked = git(top, ['ls-files', '-z', '--others', '--exclude-standard'], env).split('\0')
   return untracked.filter((path) => path.endsWith('/')).map((path) => path.slice(0, -1)).filter((path) =>
-    !tryGit(join(top, path), ['rev-parse', '--verify', '-q', 'HEAD^{commit}']).ok)
+    !outsideHiddenStore(() => tryGit(join(top, path), ['rev-parse', '--verify', '-q', 'HEAD^{commit}']).ok))
 }
 
 const nul = (text: string): string[] => text.split('\0').filter(Boolean)
@@ -120,13 +301,22 @@ function followTrackedFiles(top: string, env: NodeJS.ProcessEnv, head: string | 
  * was force-added and committed later is in it.
  */
 function indexTree(top: string, index: string, head: string | undefined): { tree: string; gaps: CoverageGap[] } {
+  // A hidden store first leaves out what it does not keep (files over the size limit) and refuses a folder it cannot
+  // snapshot at all; what it leaves out is named with the rest.
+  const store = activeHiddenStore(top)
+  // Under the store's mutation lock: its exclude list and attributes are current before anything is added.
+  if (store) ensureStoreRules(store)
+  const hidden = store ? hiddenStoreCoverage(top) : undefined
   const env = { GIT_INDEX_FILE: index }
-  const addAll = (left: CoverageGap[]) => tryGit(top, ['add', '-A', '--', '.', NOT_MOUSSE, ...left.map((gap) => `:(exclude,literal)${gap.path}`)], env)
+  // The store's exclude list already leaves `.mousse/` out, and Git refuses an exclusion that names an ignored path.
+  const addAll = (left: CoverageGap[]) => tryGit(top, ['add', '-A', '--', '.', ...(hidden ? [] : [NOT_MOUSSE]), ...left.map((gap) => `:(exclude,literal)${gap.path}`)], env)
   const indexOnce = (): { tree: string; gaps: CoverageGap[] } => {
     if (!existsSync(index)) git(top, head ? ['read-tree', head] : ['read-tree', '--empty'], env)
     // What can be read is recorded; what cannot (an unreadable file or folder, a nested repository with no commit) is
     // left out and named. Git stops at the first file it cannot read, so each one found is left out and it runs again.
-    const gaps: CoverageGap[] = []
+    const gaps: CoverageGap[] = [...(hidden?.leftOut ?? [])]
+    // A file left out must not stay in the store's index from an earlier snapshot: Undo would restore that old copy.
+    if (hidden?.leftOut.length) gitWithPaths(top, ['rm', '-q', '--cached', '--ignore-unmatch'], hidden.leftOut.map((gap) => gap.path), env)
     let nestedChecked = false
     for (let round = 0; ; round++) {
       const result = addAll(gaps)
@@ -143,6 +333,13 @@ function indexTree(top: string, index: string, head: string | undefined): { tree
       }
       if (!found.length || round >= 200) throw new Error(result.stderr || 'git add failed')
       for (const path of found) gaps.push({ path, reason: UNREADABLE })
+    }
+    if (hidden) {
+      // The built-in list holds whatever the folder's `.gitignore` takes back in (`!node_modules/`): what is under it
+      // leaves the index here. A hidden store has no HEAD and no index of anyone's to follow.
+      git(top, ['rm', '-r', '-q', '--cached', '--ignore-unmatch', '--', ...builtInPathspecs().match], env)
+      gaps.push(...nestedWithChanges(top, env, gaps))
+      return { tree: git(top, ['write-tree'], env), gaps: [...gaps, ...excludedFolders(top, store!.gitDir)] }
     }
     followTrackedFiles(top, env, head, gaps.map((gap) => gap.path))
     gaps.push(...nestedWithChanges(top, env, gaps))
@@ -178,18 +375,24 @@ export function takeSnapshot(cwd: string, input: SnapshotInput): Snapshot {
   const files = privateFiles(top)
   const head = headOf(top)
   const { tree, gaps: coverageGaps } = indexTree(top, files.index, head)
-  const branch = tryGit(top, ['branch', '--show-current']).stdout || undefined
+  const hidden = activeHiddenStore(top) !== undefined
+  const branch = hidden ? undefined : tryGit(top, ['branch', '--show-current']).stdout || undefined
   const operation = operationInProgress(top)
   const state = { tree, ...(head ? { head } : {}), ...(branch ? { branch } : {}), ...(operation ? { operationInProgress: operation } : {}), ...(coverageGaps.length ? { coverageGaps } : {}) }
+  const { ignored, truncated } = ignoredNow(top)
+  const uncovered = JSON.stringify({ g: coverageGaps, i: ignored, ...(truncated ? { t: true } : {}) })
   const previous = readLast(files.last)
-  if (previous && previous.tree === tree && previous.head === head && tryGit(top, ['cat-file', '-e', `${previous.sha}^{commit}`]).ok) return { sha: previous.sha, ...state }
+  // Reused only when what it left out is the same too: a restore reads that from the snapshot.
+  if (previous && previous.tree === tree && previous.head === head && previous.uncovered === uncovered && tryGit(top, ['cat-file', '-e', `${previous.sha}^{commit}`]).ok) return { sha: previous.sha, ...state }
   const trailers = [
     input.threadId ? `Mousse-Thread: ${input.threadId}` : '', input.operationId ? `Mousse-Operation: ${input.operationId}` : '',
-    head ? `Mousse-Head: ${head}` : '', branch ? `Mousse-Branch: ${branch}` : ''
+    head ? `Mousse-Head: ${head}` : '', branch ? `Mousse-Branch: ${branch}` : '',
+    // Only when something was not covered: no record and an empty one mean the same to a restore.
+    coverageGaps.length || ignored.length || truncated ? `${UNCOVERED_LINE}${uncovered}` : ''
   ].filter(Boolean).join('\n')
   const subject = `${SUBJECT}${input.reason.split(/\r?\n/)[0]!.trim()}`
   const sha = git(top, ['commit-tree', tree, ...(head ? ['-p', head] : []), '-m', subject, ...(trailers ? ['-m', trailers] : [])], MOUSSE_COMMIT_ENV)
-  writeFileSync(files.last, JSON.stringify({ sha, tree, ...(head ? { head } : {}) } satisfies LastSnapshot))
+  writeFileSync(files.last, JSON.stringify({ sha, tree, ...(head ? { head } : {}), uncovered } satisfies LastSnapshot))
   return { sha, ...state }
 }
 
@@ -255,7 +458,17 @@ export function pushedNotice(operation: string, remote: string): string {
 /** Files a restore was about to overwrite or delete that no snapshot held (ignored, for example), kept first under `ref`. */
 export interface PreservedFiles { ref: string; paths: string[] }
 
-export type RestoreResult = { snapshot: Snapshot; tree: string; preserved?: PreservedFiles } | { conflicts: string[] }
+/** A path a restore left as it is because it was not covered on one side, and why. */
+export interface LeftAsIs { path: string; reason: string }
+
+export type RestoreResult = { snapshot: Snapshot; tree: string; preserved?: PreservedFiles; leftAsIs?: LeftAsIs[] } | { conflicts: string[] }
+
+/** The line a result carries for the paths a restore left as they are. */
+export function leftAsIsNotice(left: LeftAsIs[] | undefined): string | undefined {
+  if (!left?.length) return undefined
+  const named = left.slice(0, 10).map((entry) => `${entry.path} (${entry.reason})`).join(', ')
+  return `Left as it is: ${named}${left.length > 10 ? ` and ${left.length - 10} more` : ''}.`
+}
 
 /** The line a result carries when a restore kept files no snapshot held before writing over them. */
 export function preservedNotice(preserved: PreservedFiles): string {
@@ -270,6 +483,8 @@ export interface RestoreChangeInput extends SnapshotInput {
   ours: string
   /** The code to bring in (Undo: the turn's start). */
   theirs: string
+  /** Where `theirs` is, in words for the result: "at the start of the turn". */
+  restoredTo?: string
 }
 
 /**
@@ -284,11 +499,54 @@ export function restoreChange(cwd: string, input: RestoreChangeInput, planned?: 
   const top = git(cwd, ['rev-parse', '--show-toplevel'])
   const merged = mergeTrees(top, input.base, input.ours, input.theirs)
   if ('conflicts' in merged) return merged
+  const ours = treeOf(top, input.ours)
+  const { tree, leftAsIs } = leaveUncovered(top, input, ours, merged.tree)
   // Checked before the intent is recorded: a folder that cannot be kept refuses the restore with nothing pending.
-  uncapturedInTheWay(top, treeOf(top, input.ours), merged.tree)
-  planned?.(merged.tree)
-  const preserved = moveFiles(top, treeOf(top, input.ours), merged.tree, input.operationId)
-  return { snapshot: takeSnapshot(top, input), tree: merged.tree, ...(preserved ? { preserved } : {}) }
+  uncapturedInTheWay(top, ours, tree)
+  planned?.(tree)
+  const preserved = moveFiles(top, ours, tree, input.operationId)
+  return { snapshot: takeSnapshot(top, input), tree, ...(preserved ? { preserved } : {}), ...(leftAsIs.length ? { leftAsIs } : {}) }
+}
+
+/**
+ * The merge's tree with every path the restore must not touch put back as it is now: a path not covered on the side
+ * being restored to (left out, unreadable or ignored there, so its absence there says nothing), a path that would be
+ * deleted when the record of that side is incomplete, and a file not covered now (over the size limit) that the
+ * restore would write over. Those stay on disk as they are and are named. A snapshot with no record (taken before
+ * snapshots kept one) changes nothing here.
+ */
+function leaveUncovered(top: string, input: RestoreChangeInput, ours: string, merged: string): { tree: string; leftAsIs: LeftAsIs[] } {
+  const target = snapshotUncovered(top, input.theirs)
+  const now = snapshotUncovered(top, input.ours)
+  if (!target && !now) return { tree: merged, leftAsIs: [] }
+  const where = input.restoredTo ?? 'in the version restored'
+  const changes = git(top, ['diff-tree', '-r', '-z', '--no-renames', '--name-status', ours, merged]).split('\0').filter(Boolean)
+  const leftAsIs: LeftAsIs[] = []
+  for (let index = 0; index + 1 < changes.length; index += 2) {
+    const status = changes[index]!
+    const path = changes[index + 1]!
+    const there = target ? uncoveredReason(target, path) : undefined
+    const current = now?.gaps.length ? uncoveredReason({ ...now, ignored: [] }, path) : undefined
+    if (there) leftAsIs.push({ path, reason: `not covered ${where}` })
+    else if (target?.truncated && status === 'D') leftAsIs.push({ path, reason: `not known whether it was there ${where}` })
+    else if (current && existsSync(join(top, path))) leftAsIs.push({ path, reason: `not covered now: ${current}` })
+  }
+  if (!leftAsIs.length) return { tree: merged, leftAsIs }
+  // The kept paths take their entry from `ours` (or none), through a temporary index: nothing on disk changes here.
+  const temporary = join(privateFiles(top).directory, `leave-${randomUUID()}.index`)
+  const env = { GIT_INDEX_FILE: temporary }
+  try {
+    git(top, ['read-tree', merged], env)
+    const kept = new Map(git(top, ['ls-tree', '-r', '-z', ours, '--', ...leftAsIs.map((entry) => entry.path)]).split('\0').filter(Boolean)
+      .map((line) => { const tab = line.indexOf('\t'); const [mode, , sha] = line.slice(0, tab).split(' '); return [line.slice(tab + 1), `${mode} ${sha}`] as const }))
+    const lines = leftAsIs.map((entry) => `${kept.get(entry.path) ?? `0 ${'0'.repeat(merged.length)}`}\t${entry.path}`)
+    git(top, ['update-index', '--index-info'], env, lines.join('\n') + '\n')
+    return { tree: git(top, ['write-tree'], env), leftAsIs }
+  } catch (error) {
+    throw new Error(`The restore would change ${leftAsIs[0]!.path}, which was not recorded, and cannot leave it as it is. Nothing was changed.`, { cause: error })
+  } finally {
+    rmSync(temporary, { force: true })
+  }
 }
 
 /**
