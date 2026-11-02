@@ -1,4 +1,5 @@
 import { ThreadJournal } from '../data/ThreadJournal'
+import { mergeIdentity } from '../actions/leftMerge'
 import { tryGit } from '../actions/git'
 
 /** An integration an older version started and did not finish; it is recorded as cancelled, never run again. */
@@ -38,7 +39,8 @@ export function cancelPendingIntegrations(threadDirectory: string, workspacePath
       details: {
         reason: mergeInProgress ? `A merge from an earlier version is still in progress in ${mergeInProgress}; abort it or finish it with Git.` : 'Mousse no longer merges subagent results; the parent agent brings them in with Git.',
         previousState: entry.state, ...(resultSha ? { resultSha } : {}),
-        ...(mergeInProgress ? { mergeInProgress, ...(left?.preMergeSha ? { preMergeSha: left.preMergeSha } : {}), workerHeadSha: left?.workerHeadSha ?? resultSha } : {})
+        // Which merge it is, so Abort never takes one the person or the agent started later for this one (`isRecordedMerge`).
+        ...(mergeInProgress ? { mergeInProgress, mergeIdentity: mergeIdentity(mergeInProgress), ...(left?.preMergeSha ? { preMergeSha: left.preMergeSha } : {}), workerHeadSha: left?.workerHeadSha ?? resultSha } : {})
       }
     })
     cancelled.push({ operationId: entry.operationId, ...(request?.agentId ? { agentId: request.agentId } : {}), ...(resultSha ? { resultSha } : {}), ...(request?.spawnBaseSha ? { spawnBaseSha: request.spawnBaseSha } : {}), ...(mergeInProgress ? { mergeInProgress } : {}) })

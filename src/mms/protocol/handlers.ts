@@ -91,7 +91,7 @@ import { isQualifiedId } from '../../shared/threadRef'
 import { resolveThreadProjectPath } from '../data/resolveActiveProjectPath'
 import { ThreadJournal } from '../data/ThreadJournal'
 import { ThreadWorkspaceManager } from '../workspace/ThreadWorkspaceManager'
-import { describeRecovery, recoveryErrorText } from '../workspace/workspaceRecovery'
+import { clearStaleLeftMerges, describeRecovery, recoveryErrorText } from '../workspace/workspaceRecovery'
 import { resolveEditorFolder } from '../workspace/editorFolder'
 import type { NodeId } from '../../shared/net/ids'
 import { scheduledJobOptionsDepsFrom, validateScheduledJobOptions, type ScheduledJobOptionsDeps } from '../scheduled/validateJobOptions'
@@ -3098,6 +3098,8 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       try {
         // A merge of a subagent result an older version left unfinished is cancelled, never run again.
         cancelledIntegrations = cancelPendingIntegrations(operation.threadDirectory, workspace.worktreePath)
+        // A left merge that was finished, aborted or replaced since is no longer offered for Abort.
+        clearStaleLeftMerges(operation.threadDirectory)
         // A folder with no worktree has nothing to publish.
         if (operation.projectPath && !workspace.snapshotOnly) await new PublishService(operation.threadDirectory).recoverPending(workspace.worktreePath, operation.projectPath)
         await new ThreadActionService(operation.threadDirectory).recoverPending(workspace.worktreePath)
@@ -3125,13 +3127,15 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       if (!record) throw new DomainRpcError('operation_not_found', `Operation not found: ${operationId}`)
       const workspace = new ThreadWorkspaceManager(operation.threadDirectory).load()
       if (record.operationType !== 'publish' && !workspace) throw new DomainRpcError('workspace_not_ready', 'Thread workspace is missing')
+      let aborted: { preservedRef: string }
       try {
-        await new ManagedConflictService(operation.threadDirectory).abort(record.operationType === 'publish' ? operation.projectPath : workspace!.worktreePath, operationId)
+        aborted = await new ManagedConflictService(operation.threadDirectory).abort(record.operationType === 'publish' ? operation.projectPath : workspace!.worktreePath, operationId)
       } catch (error) {
         // Why the merge could not be aborted is for the person to read in the banner or the CLI.
         throw new DomainRpcError('abort_failed', recoveryErrorText(error))
       }
-      return { ok: true }
+      // Every file as it was before the abort, conflicted ones with their edits, is kept under this ref.
+      return { ok: true, preservedRef: aborted.preservedRef }
     }
     case 'publish.status': {
       const p = isObject(params) ? params : {}
