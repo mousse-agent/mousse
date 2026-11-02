@@ -27,7 +27,7 @@ import {
 } from './bundle'
 import { canonicalRepository, portableRepository, REPO_ID } from './repository'
 import { dispatchRequest } from './validate'
-import { git, remoteGit } from './git'
+import { commitDispatchResult, git, remoteGit } from './git'
 import type {
   DispatchArtifacts,
   DispatchRecord,
@@ -302,21 +302,7 @@ export class DispatchService {
       this.phase(record, 'publishing')
       await git(record.worktree.path, ['add', '--all'], controller.signal)
       if (await git(record.worktree.path, ['diff', '--cached', '--name-only'], controller.signal))
-        await git(
-          record.worktree.path,
-          [
-            '-c',
-            'user.name=Mousse Dispatch',
-            '-c',
-            'user.email=dispatch@localhost',
-            '-c',
-            'commit.gpgsign=false',
-            'commit',
-            '-m',
-            `Dispatch ${record.id}`
-          ],
-          controller.signal
-        )
+        await commitDispatchResult(record.worktree.path, `Dispatch ${record.id}`, controller.signal)
       const head = await git(record.worktree.path, ['rev-parse', 'HEAD'], controller.signal)
       await git(root, ['merge-base', '--is-ancestor', request.baseCommit, head], controller.signal)
       await git(
