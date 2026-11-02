@@ -168,6 +168,14 @@ describe('starting a thread from a pull request', () => {
     expect(send).toHaveBeenLastCalledWith(alone.thread.id, alone.seed)
   })
 
+  it('says the author\'s status could not be checked, rather than calling them a stranger, and still does not send', async () => {
+    vi.mocked(host.getPullRequestDetail).mockImplementation(async () => detailOf({ author: 'ada', authorAssociation: 'UNCHECKED' }))
+    const result = await start({ send: true })
+    expect(send).not.toHaveBeenCalled()
+    expect(result.sent).toBe(false)
+    expect(result.withheld).toBe('Not sent: GitHub could not be asked whether ada is an owner, member or collaborator. Read it and send it yourself.')
+  })
+
   it('does not send text from people who are not owners, members or collaborators, and says so; the seed is still returned', async () => {
     const stranger = { author: 'stranger', authorAssociation: 'NONE' }
     vi.mocked(host.getPullRequestDetail).mockImplementation(async () => detailOf(stranger))

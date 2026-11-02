@@ -665,6 +665,10 @@ export interface GitChangeCounts {
   unstagedCount: number
   conflictedCount: number
   changedCount: number
+  /** New files Git does not track yet; once staged they count as staged. */
+  untrackedCount: number
+  /** Files with changes on both sides: staged, then edited again. Counted in `stagedCount` and in `unstagedCount`. */
+  partlyStagedCount: number
 }
 
 export function gitChangeCounts(status: GitStatusSnapshot | null): GitChangeCounts {
@@ -672,14 +676,23 @@ export function gitChangeCounts(status: GitStatusSnapshot | null): GitChangeCoun
   const unstaged = new Set<string>()
   const conflicted = new Set<string>()
   const changed = new Set<string>()
+  const untracked = new Set<string>()
   for (const change of status?.changes ?? []) {
     if (change.status === 'ignored') continue
     changed.add(change.path)
     if (change.status === 'conflicted') conflicted.add(change.path)
     else if (change.staged) staged.add(change.path)
     else unstaged.add(change.path)
+    if (change.status === 'untracked') untracked.add(change.path)
   }
-  return { stagedCount: staged.size, unstagedCount: unstaged.size, conflictedCount: conflicted.size, changedCount: changed.size }
+  return {
+    stagedCount: staged.size,
+    unstagedCount: unstaged.size,
+    conflictedCount: conflicted.size,
+    changedCount: changed.size,
+    untrackedCount: untracked.size,
+    partlyStagedCount: [...staged].filter((path) => unstaged.has(path)).length
+  }
 }
 
 /** What a commit would include, which decides the hint under the message. */
@@ -792,7 +805,6 @@ export interface CommitMenuState {
   canAmend: boolean
   /** The Commit button opens the menu when there is something to commit or amend. */
   triggerEnabled: boolean
-  triggerTitle: string
   /** Without file changes the only possible commit is an amend, so amend is on and cannot be turned off. */
   forced: boolean
   /** Whether the commit amends: asked for, or the only possible commit. */
@@ -818,13 +830,87 @@ export function commitMenuState(commits: readonly GitCommit[], fileCount: number
   return {
     canAmend,
     triggerEnabled,
-    triggerTitle: !triggerEnabled ? 'No changes to commit' : hasChanges ? 'Commit all changes' : 'Amend the last commit',
     forced,
     amend: canAmend && (amendChecked || forced),
     amendDisabled: amendTitle !== null,
     amendTitle,
     shortHash: commits[0]?.shortHash ?? null
   }
+}
+
+/** The Commit button's own words: what a commit would take, counted, and its tooltip saying it in full. */
+export interface CommitTrigger {
+  label: string
+  title: string
+}
+
+/**
+ * Names on the Commit button exactly what it commits: "Commit all (N)" when every change goes in (untracked files
+ * included), "Commit staged (M of N)" when only the staged files do. With no changes the only commit is an amend, so
+ * the button says Amend; with nothing to amend either it stays Commit, disabled.
+ */
+export function commitTrigger(menu: Pick<CommitMenuState, 'triggerEnabled' | 'forced' | 'shortHash'>, commit: CommitAvailability): CommitTrigger {
+  if (!menu.triggerEnabled) return { label: 'Commit', title: 'No changes to commit' }
+  if (menu.forced) {
+    return { label: 'Amend', title: `No changes to commit. Amend ${menu.shortHash ?? 'the last commit'} to change its message` }
+  }
+  const total = commit.changedCount
+  const untracked = commit.untrackedCount > 0 ? `, including ${plural(commit.untrackedCount, 'untracked file')}` : ''
+  switch (commit.mode) {
+    case 'conflicted':
+      return { label: 'Commit', title: commit.blockedReason ?? 'Resolve the conflicted files first' }
+    case 'finish-merge':
+      // With nothing staged the commit stages everything first (`add -A`), as a plain commit does.
+      if (commit.stagedCount > 0) return { label: `Commit merge (${commit.stagedCount} of ${total} staged)`, title: `Finish the merge with only the ${plural(commit.stagedCount, 'staged file')}${unstagedStaysOut(commit)}` }
+      if (total > 0) return { label: `Commit merge (all ${total})`, title: `Finish the merge, staging and committing all ${plural(total, 'changed file')}${untracked}` }
+      return { label: 'Commit merge', title: 'Finish the merge' }
+    case 'staged':
+      return { label: `Commit staged (${commit.stagedCount} of ${total})`, title: `Commit only the ${plural(commit.stagedCount, 'staged file')}${unstagedStaysOut(commit)}` }
+    case 'thread':
+      return { label: `Commit all (${total})`, title: `Commit all ${plural(total, 'changed file')} on this thread's branch${untracked}` }
+    default:
+      return { label: `Commit all (${total})`, title: `Stage and commit all ${plural(total, 'changed file')}${untracked}` }
+  }
+}
+
+/**
+ * What a staged-only commit leaves out, counted from the unstaged side: a file staged and then edited again goes in
+ * with its staged part only, so its unstaged part is named as staying out. Nothing when everything is staged.
+ */
+function unstagedStaysOut(commit: Pick<CommitAvailability, 'unstagedCount' | 'partlyStagedCount'>): string {
+  const { unstagedCount: unstaged, partlyStagedCount: partly } = commit
+  if (unstaged === 0) return ''
+  if (partly === unstaged) return `; the unstaged part of ${partly === 1 ? 'the partly staged file' : `the ${partly} partly staged files`} stays out`
+  const including = partly > 0 ? `, including the unstaged part of ${plural(partly, 'partly staged file')}` : ''
+  return `; unstaged changes in ${plural(unstaged, 'file')} stay out${including}`
+}
+
+/** A merge method in GitHub's own words, for the button that confirms it. */
+const MERGE_METHOD_ACTIONS: Record<PullRequestMergeMethod, string> = {
+  merge: 'Create a merge commit',
+  squash: 'Squash and merge',
+  rebase: 'Rebase and merge'
+}
+
+/**
+ * The Merge confirmation, naming the method the merge will use: the merge is sent with that method and uses exactly
+ * it. `method` is undefined while it is read and null when it could not be (or the computer is too old to say); the
+ * merge then goes without one, and the computer that merges uses the repository's default, else squash.
+ */
+export function mergeConfirmation(number: string, base: string, method: PullRequestMergeMethod | null | undefined): { text: string; action: string } {
+  const into = base ? ` into ${base}` : ''
+  if (method === undefined) return { text: `Merge ${number}${into}?`, action: 'Merge' }
+  if (method === null) {
+    return { text: `Merge ${number}${into}? The merge method couldn't be read, so the repository's default is used, else squash.`, action: 'Merge' }
+  }
+  const on = base ? ` on ${base}` : ''
+  const onto = base ? ` onto ${base}` : ''
+  const text = {
+    merge: `Merge ${number}${into} with a merge commit?`,
+    squash: `Squash ${number} into one commit${on}?`,
+    rebase: `Rebase the commits of ${number}${onto}?`
+  }[method]
+  return { text, action: MERGE_METHOD_ACTIONS[method] }
 }
 
 /**

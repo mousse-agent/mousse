@@ -936,7 +936,8 @@ describe('Merge and Close on a pull request row', () => {
   it('shows Merge as the primary action and Close beside it, and no watch control', () => {
     const html = sectionWith({})
     expect(html).toMatch(/class="side-card-git-pr-merge"[^>]*data-ready="true"/)
-    expect(html).toContain('aria-label="Close pull request #7"')
+    // Close carries its name, so it is not taken for a second Merge.
+    expect(html).toMatch(/aria-label="Close pull request #7 without merging"[^>]*>[\s\S]*?<span>Close<\/span><\/button>/)
     expect(html).not.toContain('Watch')
     expect(html).not.toContain('Let the agent act')
   })

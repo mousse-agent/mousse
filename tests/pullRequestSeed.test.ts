@@ -223,11 +223,17 @@ describe('pullRequestSeedTrust', () => {
 
   it('trusts a pull request whose author and every quoted remark come from an owner, member or collaborator', () => {
     expect(trust(owned({ reviews: [review(1, { authorAssociation: 'OWNER' })], comments: [lineComment(1, { authorAssociation: 'COLLABORATOR' }), conversation(2, { authorAssociation: 'member' })] })))
-      .toEqual({ trusted: true, untrusted: [] })
+      .toEqual({ trusted: true, untrusted: [], unchecked: [] })
   })
 
   it.each(['NONE', 'CONTRIBUTOR', 'FIRST_TIMER', 'FIRST_TIME_CONTRIBUTOR', 'MANNEQUIN', ''])('does not trust a pull request author whose association is %j (a fork author, a bot)', (association) => {
-    expect(trust(owned({ author: 'stranger', authorAssociation: association }))).toEqual({ trusted: false, untrusted: ['stranger'] })
+    expect(trust(owned({ author: 'stranger', authorAssociation: association }))).toEqual({ trusted: false, untrusted: ['stranger'], unchecked: [] })
+  })
+
+  it('does not trust an author whose status could not be read, and names them apart from strangers', () => {
+    expect(trust(owned({ author: 'ada', authorAssociation: 'UNCHECKED' }))).toEqual({ trusted: false, untrusted: [], unchecked: ['ada'] })
+    expect(trust(owned({ author: 'ada', authorAssociation: 'UNCHECKED', reviews: [review(1, { author: 'r1', authorAssociation: 'NONE' })] })))
+      .toEqual({ trusted: false, untrusted: ['r1'], unchecked: ['ada'] })
   })
 
   it('does not trust a quoted review, line comment or conversation comment from anyone else, and names them', () => {

@@ -16,7 +16,8 @@ import { englishMessagesEnv, runGit, type GitLine, type GitRun, type GitRunOptio
 import { HookTrace, withHookFailure, type HookTraceEvent } from './gitTrace'
 import { GitHubCodeHost } from './GitHubCodeHost'
 import { GitHubService } from './GitHubService'
-import { PULL_REQUEST_DRAFT_LIMITS, type DraftCommit } from './pullRequestDraft'
+import { PULL_REQUEST_DRAFT_COMMITS, PULL_REQUEST_DRAFT_LIMITS, userCommits, type DraftCommit } from './pullRequestDraft'
+import { MOUSSE_COMMIT_EMAIL } from './mousseCommitIdentity'
 import { resolveRepositoryIdentity } from './RepositoryIdentity'
 import { acquireRepositoryLease, RepositoryLeaseAbortedError } from './RepositoryLease'
 import { guardedSimpleGit, NO_DIFF_PROGRAMS, repoProgramEnv, SAFE_LOOKUP_ENV, withoutRepoPrograms } from './repoPrograms'
@@ -304,6 +305,9 @@ const SUMMARY_KILL_SETTLE_MS = 5_000
  * not wait for exit, and on Windows the `git` on PATH is a launcher around the real process). A command
  * that runs past the time limit is stopped, with its whole process tree on Windows.
  */
+/** Commits whose authors are read when drafting a pull request; Mousse's own are left out of these. */
+const DRAFT_COMMITS_SCANNED = 2000
+
 function readBoundedGit(cwd: string, args: readonly string[], maxBytes: number): Promise<string> {
   return new Promise((resolvePromise) => {
     let guarded: string[]
@@ -959,16 +963,29 @@ export class GitService {
     if (!from || await this.read(cwd, ['rev-parse', '--verify', '--quiet', `${head}^{commit}`]) === null) return none
     // No external diff driver or text conversion: a repository's configuration must not run programs here.
     const diff = ['diff', '--no-color', '--no-ext-diff', '--no-textconv']
-    const [log, stat, patch] = await Promise.all([
-      readBoundedGit(cwd, ['log', '--no-color', '--max-count=50', '--format=%x1e%s%x1f%b', `${from}..${head}`], 2 * PULL_REQUEST_DRAFT_LIMITS.commits),
+    const [commits, stat, patch] = await Promise.all([
+      this.readDraftCommits(cwd, from, head),
       readBoundedGit(cwd, [...diff, '--stat=100', `${from}...${head}`], 2 * PULL_REQUEST_DRAFT_LIMITS.stat),
       readBoundedGit(cwd, [...diff, '--unified=3', `${from}...${head}`], 2 * PULL_REQUEST_DRAFT_LIMITS.patch)
     ])
-    const commits = log.split('\x1e').filter((entry) => entry.trim()).map((entry) => {
-      const [subject = '', ...body] = entry.split('\x1f')
-      return { subject: subject.trim(), body: body.join('\x1f').trim() }
-    })
     return { commits, stat: stat.trim(), patch }
+  }
+
+  /**
+   * The newest commits someone wrote on `head` since `from`, newest first, at most `PULL_REQUEST_DRAFT_COMMITS`.
+   * Mousse's own commits are told apart by their author and left out before the limit is applied, so a branch of
+   * many checkpoints still shows the commits a person or an agent wrote. The authors are read first (small), then
+   * the messages of the commits kept (bounded).
+   */
+  private async readDraftCommits(cwd: string, from: string, head: string): Promise<DraftCommit[]> {
+    const authors = await readBoundedGit(cwd, ['log', '--no-color', `--max-count=${DRAFT_COMMITS_SCANNED}`, '--format=%H%x1f%ae', `${from}..${head}`], DRAFT_COMMITS_SCANNED * 160)
+    const kept = authors.split('\n').map((line) => line.split('\x1f')).filter(([hash = '', email = '']) => /^[0-9a-f]{40,64}$/.test(hash) && email.trim() !== MOUSSE_COMMIT_EMAIL).map(([hash]) => hash).slice(0, PULL_REQUEST_DRAFT_COMMITS)
+    if (kept.length === 0) return []
+    const log = await readBoundedGit(cwd, ['log', '--no-color', '--no-walk=unsorted', '--format=%x1e%ae%x1f%s%x1f%b', ...kept], 2 * PULL_REQUEST_DRAFT_LIMITS.commits)
+    return userCommits(log.split('\x1e').filter((entry) => entry.trim()).map((entry) => {
+      const [authorEmail = '', subject = '', ...body] = entry.split('\x1f')
+      return { subject: subject.trim(), body: body.join('\x1f').trim(), authorEmail: authorEmail.trim() }
+    }))
   }
 
   /**

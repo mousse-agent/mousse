@@ -141,6 +141,7 @@ import type {
   PullRequestDraft,
   PullRequestFormInput,
   PullRequestListItem,
+  PullRequestMergeMethod,
   PullRequestPushTarget,
   PullRequestRef,
   PullRequestScope,
@@ -2206,12 +2207,13 @@ export function registerGuiIpc(
     return { pullRequest: response.pullRequest, existing: response.existing === true } satisfies CreatePullRequestResult
   })
   // Merge and close answer with the pull request read back; a refusal carries the host's own reason.
-  registerHandler('pullRequests:merge', async (_e, ref: PullRequestRef | undefined, number: number, headSha?: string) => {
+  registerHandler('pullRequests:merge', async (_e, ref: PullRequestRef | undefined, number: number, headSha?: string, method?: PullRequestMergeMethod) => {
     const response = await guiMms.request<PullRequestActionResult>('pullRequests.merge', {
       ...(typeof ref?.threadId === 'string' ? { threadId: ref.threadId } : {}),
       ...(typeof ref?.projectId === 'string' ? { projectId: ref.projectId } : {}),
       number,
-      ...(typeof headSha === 'string' && headSha ? { headSha } : {})
+      ...(typeof headSha === 'string' && headSha ? { headSha } : {}),
+      ...(typeof method === 'string' ? { method } : {})
     })
     return { pullRequest: response.pullRequest, method: response.method } satisfies PullRequestActionResult
   })
@@ -2222,6 +2224,13 @@ export function registerGuiIpc(
       number
     })
     return { pullRequest: response.pullRequest } satisfies PullRequestActionResult
+  })
+  registerHandler('pullRequests:mergeMethod', async (_e, ref: PullRequestRef | undefined) => {
+    const response = await guiMms.request<{ method: PullRequestMergeMethod | null }>('pullRequests.mergeMethod', {
+      ...(typeof ref?.threadId === 'string' ? { threadId: ref.threadId } : {}),
+      ...(typeof ref?.projectId === 'string' ? { projectId: ref.projectId } : {})
+    })
+    return response.method
   })
   registerHandler('pullRequests:baseBranches', async (_e, ref: PullRequestRef | undefined) => {
     const response = await guiMms.request<{ baseBranches: PullRequestBaseBranches }>('pullRequests.baseBranches', {

@@ -221,7 +221,12 @@ export class PullRequestThreadService {
       // Text from strangers is never a turn nobody read: only owners, members and collaborators may be quoted in one.
       const trust = pullRequestSeedTrust(detail)
       if (!trust.trusted) {
-        withheld = `Not sent: the message quotes people who are not owners, members or collaborators (${trust.untrusted.slice(0, 5).join(', ')}). Read it and send it yourself.`
+        const reasons = [
+          ...(trust.untrusted.length ? [`the message quotes people who are not owners, members or collaborators (${trust.untrusted.slice(0, 5).join(', ')})`] : []),
+          // A failed read (often GitHub's rate limit) is not a verdict on the person.
+          ...(trust.unchecked.length ? [`GitHub could not be asked whether ${trust.unchecked.slice(0, 5).join(', ')} ${trust.unchecked.length === 1 ? 'is an owner, member or collaborator' : 'are owners, members or collaborators'}`] : [])
+        ]
+        withheld = `Not sent: ${reasons.join(', and ')}. Read it and send it yourself.`
       } else {
         const message = input.message?.trim()
         try {

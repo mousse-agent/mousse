@@ -70,7 +70,7 @@ describe('pull request methods through the daemon protocol', () => {
   const normalized = (path: unknown) => String(path).replace(/\\/g, '/').toLowerCase()
 
   it('lists the methods', () => {
-    for (const method of ['pullRequests.get', 'pullRequests.detail', 'pullRequests.draft', 'pullRequests.create', 'pullRequests.merge', 'pullRequests.close', 'pullRequests.baseBranches', 'pullRequests.link', 'pullRequests.unlink']) {
+    for (const method of ['pullRequests.get', 'pullRequests.detail', 'pullRequests.draft', 'pullRequests.create', 'pullRequests.merge', 'pullRequests.close', 'pullRequests.baseBranches', 'pullRequests.mergeMethod', 'pullRequests.link', 'pullRequests.unlink']) {
       expect(PROTOCOL_METHODS).toContain(method)
     }
   })
@@ -157,6 +157,51 @@ describe('pull request methods through the daemon protocol', () => {
       expect(merge.mock.calls[0].slice(1)).toEqual([12, { method: 'squash' }])
     })
 
+    it('tells the Merge confirmation the method the host offers, null when it cannot be read, and merges nothing', async () => {
+      const method = vi.spyOn(mms.gitService.codeHost, 'defaultMergeMethod').mockResolvedValue('rebase')
+      const merge = vi.spyOn(mms.gitService.codeHost, 'mergePullRequest').mockResolvedValue(info({ state: 'merged' }))
+      const project = mms.projects.openProject(f.repo)
+      expect(await client.request('pullRequests.mergeMethod', { projectId: project.id })).toEqual({ method: 'rebase' })
+      expect(normalized(method.mock.calls[0][0])).toBe(normalized(f.repo))
+      method.mockResolvedValue(null)
+      expect(await client.request('pullRequests.mergeMethod', { projectId: project.id })).toEqual({ method: null })
+      await expect(client.request('pullRequests.mergeMethod', { projectId: project.id, number: 12 })).rejects.toThrow(/number is not allowed/)
+      expect(merge).not.toHaveBeenCalled()
+    })
+
+    it('merges with the confirmed method exactly when the host\'s method was read and then cannot be', async () => {
+      const method = vi.spyOn(mms.gitService.codeHost, 'defaultMergeMethod').mockResolvedValueOnce('rebase').mockResolvedValue(null)
+      const merge = vi.spyOn(mms.gitService.codeHost, 'mergePullRequest').mockResolvedValue(info({ state: 'merged' }))
+      const project = mms.projects.openProject(f.repo)
+      const { method: confirmed } = await client.request('pullRequests.mergeMethod', { projectId: project.id }) as { method: string }
+      expect(await client.request('pullRequests.merge', { projectId: project.id, number: 12, method: confirmed })).toMatchObject({ method: 'rebase' })
+      // A rebase confirmed is a rebase: the unreadable second answer never turns it into a squash.
+      expect(merge.mock.calls[0].slice(1)).toEqual([12, { method: 'rebase' }])
+      expect(method).toHaveBeenCalledTimes(1)
+    })
+
+    it('says nothing it cannot back when the method cannot be read and then can, and the merge picks it', async () => {
+      vi.spyOn(mms.gitService.codeHost, 'defaultMergeMethod').mockResolvedValueOnce(null).mockResolvedValue('merge')
+      const merge = vi.spyOn(mms.gitService.codeHost, 'mergePullRequest').mockResolvedValue(info({ state: 'merged' }))
+      const project = mms.projects.openProject(f.repo)
+      // The confirmation is told the method is unknown, not "squash", so it does not promise one.
+      expect(await client.request('pullRequests.mergeMethod', { projectId: project.id })).toEqual({ method: null })
+      expect(await client.request('pullRequests.merge', { projectId: project.id, number: 12 })).toMatchObject({ method: 'merge' })
+      expect(merge.mock.calls[0].slice(1)).toEqual([12, { method: 'merge' }])
+    })
+
+    it('uses a confirmed method even when the host now offers another, and refuses one it does not know', async () => {
+      const method = vi.spyOn(mms.gitService.codeHost, 'defaultMergeMethod').mockResolvedValue('squash')
+      const merge = vi.spyOn(mms.gitService.codeHost, 'mergePullRequest').mockResolvedValue(info({ state: 'merged' }))
+      const project = mms.projects.openProject(f.repo)
+      expect(await client.request('pullRequests.merge', { projectId: project.id, number: 12, method: 'merge' })).toMatchObject({ method: 'merge' })
+      expect(merge.mock.calls[0].slice(1)).toEqual([12, { method: 'merge' }])
+      expect(method).not.toHaveBeenCalled()
+      await expect(client.request('pullRequests.merge', { projectId: project.id, number: 12, method: 'fast-forward' })).rejects.toThrow(/merge, squash or rebase/)
+      await expect(client.request('pullRequests.merge', { projectId: project.id, number: 12, method: 'SQUASH' })).rejects.toThrow(/merge, squash or rebase/)
+      expect(merge).toHaveBeenCalledTimes(1)
+    })
+
     it('closes in the project folder', async () => {
       const close = vi.spyOn(mms.gitService.codeHost, 'closePullRequest').mockResolvedValue(info({ state: 'closed' }))
       const project = mms.projects.openProject(f.repo)
@@ -179,7 +224,7 @@ describe('pull request methods through the daemon protocol', () => {
       const close = vi.spyOn(mms.gitService.codeHost, 'closePullRequest').mockResolvedValue(info())
       const project = mms.projects.openProject(f.repo)
       const thread = mms.threads.createThread('Task A', project.id)
-      await expect(client.request('pullRequests.merge', { projectId: project.id, number: 12, method: 'rebase' })).rejects.toThrow(/method is not allowed/)
+      await expect(client.request('pullRequests.merge', { projectId: project.id, number: 12, deleteBranch: true })).rejects.toThrow(/deleteBranch is not allowed/)
       await expect(client.request('pullRequests.merge', { projectId: project.id, number: 12, headSha: '--admin' })).rejects.toThrow(/not a commit/)
       await expect(client.request('pullRequests.merge', { projectId: project.id, number: 0 })).rejects.toThrow(/number/)
       await expect(client.request('pullRequests.merge', { number: 12 })).rejects.toThrow(/projectId or threadId is required/)
@@ -430,12 +475,12 @@ describe('pull request methods through the daemon protocol', () => {
       git(f.repo, 'checkout', '-q', 'feature-a')
 
       const summary = await mms.gitService.readBranchSummary(f.repo, { branch: 'feature-b', base, remote: null })
-      expect(summary.commits).toEqual([{ subject: 'Add b', body: '' }])
+      expect(summary.commits).toEqual([{ subject: 'Add b', body: '', authorEmail: 'foundation@example.test' }])
       expect(summary.stat).toContain('b.txt')
       expect(summary.stat).not.toContain('a.txt')
       expect(summary.patch).toContain('+++ b/b.txt')
       const a = await mms.gitService.readBranchSummary(f.repo, { branch: 'feature-a', base, remote: null })
-      expect(a.commits).toEqual([{ subject: 'Add a', body: 'Why a' }])
+      expect(a.commits).toEqual([{ subject: 'Add a', body: 'Why a', authorEmail: 'foundation@example.test' }])
     })
 
     it('prefers the remote-tracking base, and reads nothing for a base or branch that does not exist or looks like a flag', async () => {

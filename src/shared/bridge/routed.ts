@@ -212,6 +212,7 @@ export const ROUTED_METHODS: Readonly<Record<string, RoutedRow>> = Object.freeze
   'pullRequests.get': read('folder', [...FOLDER, 'branch', 'force']),
   'pullRequests.detail': read('folder', [...FOLDER, 'number', 'force'], { required: ['number'] }),
   'pullRequests.baseBranches': read('folder', [...FOLDER]),
+  'pullRequests.mergeMethod': read('folder', [...FOLDER]),
   'pullRequests.watchStatus': read('thread', ['threadId']),
   'applets.get': read('thread', ['threadId', 'appletId', 'revisionId'], {
     required: ['appletId', 'revisionId']
@@ -487,7 +488,8 @@ export const ROUTED_METHODS: Readonly<Record<string, RoutedRow>> = Object.freeze
   'pullRequests.draft': write('folder', [...FOLDER, 'originThreadId', 'expectedBranch', 'base'], {
     owned: { originThreadId: 'thread' }
   }),
-  'pullRequests.merge': write('folder', [...FOLDER, 'number', 'headSha'], { required: ['number'] }),
+  // `method` is the one the person confirmed; an owner from before version 2 picks its own.
+  'pullRequests.merge': write('folder', [...FOLDER, 'number', 'headSha', 'method'], { required: ['number'], version: 2, since: { method: 2 } }),
   'pullRequests.close': write('folder', [...FOLDER, 'number'], { required: ['number'] }),
   'pullRequests.link': write('thread', ['threadId', 'number'], { required: ['number'] }),
   'pullRequests.unlink': write('thread', ['threadId']),
