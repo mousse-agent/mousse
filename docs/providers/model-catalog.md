@@ -135,6 +135,22 @@ The check runs after the live list is saved and the refresh returns without wait
 never delays or changes the live list. Each model it finds running updates open windows at once
 (the service's `hooks.changed`, which the driver points at its runtime's `changed`).
 
+## A thread on a model that is no longer offered
+
+On the next send, a thread whose own model Claude Code no longer offers moves to another model
+(`modelStanding` in the service, `replacementFor` in the gateway, `turnSelection` in the orchestrator):
+
+1. **Not offered** means the check found the model refused or remapped, or it is a full `claude-…` id
+   that is neither listed nor in the catalog. Nothing moves unless the listing was refreshed in this
+   run and the check results belong to the Claude Code program and account there now. A model with
+   no result yet (startup, offline, the check starting over after a Claude Code update) stays. A
+   hidden model still fails as hidden, and a custom model stays.
+2. **Where to:** the newest offered model of the same catalog `family`, else the provider's newest
+   model that is not older, else the default model. A 1M context, a fast speed and the reasoning
+   level stay only where the new model has them.
+3. **Shown:** the transcript shows the usual "Model changed" marker on that send, and the new model
+   is saved as the thread's own, so the composer shows it.
+
 ## Planned
 
 Not built yet:
@@ -145,5 +161,3 @@ Not built yet:
 - **Signing:** a detached Ed25519 signature over the downloaded bytes, checked before use.
 - **API routes:** names and order for model API lists (`anthropic`, `openai`), and later a per-route
   block with what each adapter needs (context and output limits, input types, reasoning, price).
-- **Moving a thread off a model that is no longer offered,** to the newest model of the same
-  `family`, then the provider's newest model.

@@ -8403,12 +8403,41 @@ export class OrchestratorService extends EventEmitter {
     }
   }
 
-  /** The model a new turn of the session runs: the given or thread override, else the mode's default. */
+  /**
+   * The model a new turn of the session runs: the given or thread override, else the mode's default.
+   * A thread's own model its provider no longer offers moves (`HarnessGateway.replacementFor`): to
+   * the provider's model the gateway picks, else, when the provider offers none, to the default.
+   */
   private turnSelection(session: ThreadSession, mode: ChatMode, override?: ModelOverride): ModelOverride {
-    return this.harness.instanceMap.migrate(override ?? session.modelOverride ?? resolveModelForMode(this.settingsStore.get(), mode, [
+    const fallback = () => this.harness.instanceMap.migrate(resolveModelForMode(this.settingsStore.get(), mode, [
       ...(this.providerAuth.credentials?.listProviderIds() ?? []),
       ...this.harness.configuredProviderIds()
     ]))
+    if (override) return this.harness.instanceMap.migrate(override)
+    if (!session.modelOverride) return fallback()
+    const saved = this.harness.instanceMap.migrate(session.modelOverride)
+    const moved = this.harness.replacementFor?.(saved)
+    if (!moved) return saved
+    if (!moved.instead) return fallback()
+    const { effort: _effort, name: _name, ...rest } = saved
+    const model = moved.instead.model
+    return { ...rest, model, ...(moved.instead.effort ? { effort: moved.instead.effort } : {}), name: this.harness.modelName(saved.instanceId ?? saved.llmProvider, model) }
+  }
+
+  /**
+   * Saves the model a turn moved the thread to (`turnSelection`) as the thread's own, so the composer
+   * shows it; the transcript marks the switch as it does any other.
+   */
+  private saveMovedModel(session: ThreadSession, selected: ModelOverride): void {
+    const saved = session.modelOverride && this.harness.instanceMap.migrate(session.modelOverride)
+    if (!saved || (saved.instanceId === selected.instanceId && saved.model === selected.model && saved.effort === selected.effort)) return
+    const next = { ...selected, name: this.harness.modelName(selected.instanceId ?? selected.llmProvider, selected.model) }
+    session.modelOverride = structuredClone(next)
+    try {
+      this.threadStore?.updateThreadMeta(session.threadId, { modelOverride: session.modelOverride }, { touch: false })
+    } catch (error) {
+      logDebug('OrchestratorService', 'moved model could not be saved on the thread', error, { threadId: session.threadId })
+    }
   }
 
   /**
@@ -9482,6 +9511,7 @@ export class OrchestratorService extends EventEmitter {
     const recordedBinding = engineRunId ? this.runEngine?.bindingForRun(engineRunId) : undefined
     const runBinding = recordedBinding && !onRetiredBareRoute(recordedBinding.instanceId) ? recordedBinding : undefined
     const selectedModel = runBinding ? this.harness.selectionOf(runBinding) : this.turnSelection(session, mode, opts?.modelOverride)
+    if (!runBinding && !opts?.modelOverride) this.saveMovedModel(session, selectedModel)
     if (displayUserMessage && !reuseLastUser) {
       const selection: MessageModelSelection = {
         provider: selectedModel.llmProvider,
