@@ -315,17 +315,8 @@ function ProfileModelFamilyMenu({
     [contentRef]
   )
 
-  const isEntrySelected = useCallback(
-    (entry: FlatModelEntry) =>
-      listingServes({ id: entry.providerId, instanceId: entry.instanceId }, { instanceId: selectedInstanceId, llmProvider: selectedProviderId }) &&
-      isFamilySelected(entry.family, selectedModelId),
-    [selectedInstanceId, selectedProviderId, selectedModelId]
-  )
-
-  // A provider's older models start folded, unless the selected model is one of them.
-  const [openOlder, setOpenOlder] = useState<ReadonlySet<string>>(
-    () => new Set(allEntries.filter((entry) => entry.older && isEntrySelected(entry)).map((entry) => entry.listing))
-  )
+  // Providers whose older models are shown; folded until opened, or until the selected model is one.
+  const [openOlder, setOpenOlder] = useState<ReadonlySet<string>>(() => new Set())
 
   const floatingStyle = useFloatingPosition({
     open: portaled,
@@ -334,6 +325,20 @@ function ProfileModelFamilyMenu({
     placement: 'above-start',
     deps: [providers.length, activeFamily?.family.familyId, panelSide, searchQuery, railFilter, openOlder]
   })
+
+  const isEntrySelected = useCallback(
+    (entry: FlatModelEntry) =>
+      listingServes({ id: entry.providerId, instanceId: entry.instanceId }, { instanceId: selectedInstanceId, llmProvider: selectedProviderId }) &&
+      isFamilySelected(entry.family, selectedModelId),
+    [selectedInstanceId, selectedProviderId, selectedModelId]
+  )
+
+  // The selected model's section opens once its row is known, whenever that is (models that arrive
+  // after the menu opened, another selection); closing it by hand again sticks until the next one.
+  const selectedOlderListing = allEntries.find((entry) => entry.older && isEntrySelected(entry))?.listing
+  useLayoutEffect(() => {
+    setOpenOlder((current) => withOpenListing(current, selectedOlderListing))
+  }, [selectedOlderListing])
 
   const sortedEntries = useMemo(() => {
     const query = searchQuery.trim().toLowerCase()
@@ -774,6 +779,12 @@ export function makerLabelOf(
 export function modelRowSubtitle(entry: { providerName: string; makerLabel?: string }, oneProvider: boolean): string | undefined {
   if (oneProvider) return entry.makerLabel
   return [entry.providerName, entry.makerLabel].filter(Boolean).join(' · ')
+}
+
+/** `open` with `listing` added: the same set when there is none or it is open already. */
+export function withOpenListing(open: ReadonlySet<string>, listing: string | undefined): ReadonlySet<string> {
+  if (!listing || open.has(listing)) return open
+  return new Set([...open, listing])
 }
 
 /** One row of the picker's list: a model, or the row that folds a provider's older models. */

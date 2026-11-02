@@ -22,7 +22,7 @@ import {
 } from '../src/renderer/lib/providerSnapshots'
 import { useAppStore } from '../src/renderer/stores/appStore'
 import { sendErrorLine } from '../src/renderer/lib/errorText'
-import { foldOlderEntries, getGroupedModelButtonParts, makerLabelOf, modelRowSubtitle, sortPickerEntries } from '../src/renderer/components/ModelFamilyMenu'
+import { foldOlderEntries, withOpenListing, getGroupedModelButtonParts, makerLabelOf, modelRowSubtitle, sortPickerEntries } from '../src/renderer/components/ModelFamilyMenu'
 import { profilePreferenceKey } from '../src/renderer/lib/profilePreferences'
 import { resolveModelChoice } from '../src/renderer/lib/modelChoice'
 import { modelLabel } from '../src/shared/modelChoice'
@@ -172,6 +172,20 @@ describe('composer picker from snapshots', () => {
       expect(rows(foldOlderEntries(entries, { searching: false, open: new Set(['claude']), isFavorite: starred }))).toEqual([
         'starred-old', 'a', 'a-old', 'a-older', 'less:claude:2', 'b', 'c', 'more:pi:x:1'
       ])
+    })
+
+    it('opens the selected model\'s section once its row is known, keeping what is open', () => {
+      // The menu opened before the provider's models arrived: nothing is known to open yet.
+      const empty: ReadonlySet<string> = new Set()
+      expect(withOpenListing(empty, undefined)).toBe(empty)
+      // The models arrive and the selected one is older: its provider opens, others stay as they were.
+      const open = withOpenListing(new Set(['pi:x']), 'claude')
+      expect([...open]).toEqual(['pi:x', 'claude'])
+      expect(rows(foldOlderEntries(entries, { searching: false, open, isFavorite: starred }))).toEqual([
+        'starred-old', 'a', 'a-old', 'a-older', 'less:claude:2', 'b', 'c', 'c-old', 'less:pi:x:1'
+      ])
+      // Already open: the same set, so nothing renders again.
+      expect(withOpenListing(open, 'claude')).toBe(open)
     })
 
     it('folds nothing while searching, and adds no row when nothing is folded', () => {
