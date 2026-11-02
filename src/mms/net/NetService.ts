@@ -707,7 +707,7 @@ export class NetService {
       void this.tunnels.sweepStrays()
       return this.state
     } catch (error) {
-      this.domain?.close?.()
+      void this.domain?.close?.()
       this.domain = undefined
       this.state = undefined
       db.close()

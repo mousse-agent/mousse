@@ -228,7 +228,7 @@ async function runTaskkill(pid: number, mode: OwnedTreeSignal): Promise<void> {
       clearTimeout(timer)
       reject(error)
     })
-    child.once('exit', async (code) => {
+    child.once('exit', (code) => void (async () => {
       clearTimeout(timer)
       if (code === 0 || code === 128 || !isOwnedPidAlive(pid)) return resolve()
       // taskkill can report a nonzero exit while the targeted tree is already
@@ -241,7 +241,7 @@ async function runTaskkill(pid: number, mode: OwnedTreeSignal): Promise<void> {
       } catch (error) {
         reject(error instanceof Error ? error : new Error(String(error)))
       }
-    })
+    })())
   })
 }
 

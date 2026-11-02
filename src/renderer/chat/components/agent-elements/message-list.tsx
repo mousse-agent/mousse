@@ -325,7 +325,7 @@ function CopyButton({
   const copiedTimerRef = useRef<number | null>(null);
 
   const handleCopy = () => {
-    navigator.clipboard.writeText(text);
+    void navigator.clipboard.writeText(text);
     setCopied(true);
     if (copiedTimerRef.current) {
       window.clearTimeout(copiedTimerRef.current);

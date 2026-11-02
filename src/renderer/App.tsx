@@ -255,7 +255,7 @@ export default function App() {
         }
       }
     }
-    window.mousse.app.getInfo().then((info) => {
+    void window.mousse.app.getInfo().then((info) => {
       if (!isCurrentProfile()) return
       setAppInfo(info)
       const root = document.documentElement
@@ -270,7 +270,7 @@ export default function App() {
       setShortcuts(settings.shortcuts ?? {})
       useAppStore.getState().setWorktreeByDefault(normalizeRunSettings(settings.runs).worktreeByDefault)
     })).catch(() => {})
-    window.mousse.threads.getActivity().then(applyIfCurrent(setThreadActivity))
+    void window.mousse.threads.getActivity().then(applyIfCurrent(setThreadActivity))
     window.mousse.turn.getSnapshot().then(applyIfCurrent(setTurnSnapshot)).catch(() => {})
 
     const isSelectedThread = (threadId: string): boolean => {
