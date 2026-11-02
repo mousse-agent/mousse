@@ -205,6 +205,14 @@ sign-in check, chat) runs `grok --permission-mode default agent --no-leader stdi
 - An agent that ignores `session/cancel` (some drop one sent right after the prompt) is ended after
   the cancel deadline, and the next message starts a new session. Agent-specific cancel timing
   belongs in that agent's preset quirks (`harness/acp/quirks.ts`), not in the shared session code.
+- **MCP servers set up in Mousse.** Every agent except the Mousse agent reaches them through the
+  MCP relay: a second MCP server Mousse attaches, named `mousse-relay`, whose tools are named
+  `<server>__<tool>`. Nothing needs to be copied into the agent's own config. A server that is also
+  in the agent's own config (or, for Claude Code, one Mousse adds to it directly) shows up twice,
+  once under its own name and once under `mousse-relay`. To turn the relay off for an agent, open
+  Settings, Skills & MCP, Advanced, and switch that agent off under "Share with other agents".
+  Codex and Cursor relayed tools ask in the thread before they run unless the thread is in Full
+  access; Claude Code and ACP agents use their own approvals.
 - **Agent telemetry.** Each provider has a Telemetry setting, Off or Agent's own setting. Off starts the
   agent with its documented switch (Claude Code, Codex and the Mousse agent have one); the agent's files
   are never edited. See [Privacy and agent telemetry](../CONFIGURATION.md#privacy-and-agent-telemetry).

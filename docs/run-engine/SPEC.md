@@ -511,7 +511,7 @@ Replay scenarios: parent delegates to a child on a different adapter; child comp
 
 ## 15. Phase 5 — Mousse MCP server for every provider
 
-Native-agent providers (Claude subscription, Antigravity) receive `mcpServers: {}` / `[]` today; CLI agents receive copies of the user's MCP servers. None can call Mousse's own tools.
+Every runtime except the pi loop reaches Mousse's own tools through one MCP server, `mousse` (§15.1, §15.2). The user's MCP servers set up in Mousse reach those runtimes through a second server on the same listener, the MCP relay `mousse-relay` (§15.5). Claude Code also keeps the servers Mousse adds to its configuration directly, so a server's tools can appear there twice.
 
 ### 15.1 Server
 
@@ -555,8 +555,15 @@ Native-agent providers (Claude subscription, Antigravity) receive `mcpServers: {
 | `PiLoopAdapter` | in-process `ToolHost`, no MCP needed |
 | `ClaudeSubscriptionAdapter` | SDK `mcpServers: { mousse: { type:'http', url, headers:{ Authorization } } }` |
 | `AcpAdapter` | ACP `session/new` `mcpServers: [{ name:'mousse', type:'http', url, headers }]`; fall back to the stdio bridge when the agent rejects http |
+| `ClaudeSubscriptionAdapter`, relay | a second entry `mcpServers['mousse-relay']: { type:'http', url: <relay url>, headers:{ Authorization }, timeout: 240000 }`, same bearer |
+| Codex, relay | config overrides `mcp_servers.mousse-relay.url`, `.http_headers` (same bearer), `.tool_timeout_sec = 240`, `.default_tools_approval_mode = 'approve'` (Mousse asks instead, §15.5) |
+| Cursor, relay | a second entry `mcpServers['mousse-relay']: { type:'http', url: <relay url>, headers }` in each send |
+| `AcpAdapter`, relay (http) | a second `session/new` entry `{ name:'mousse-relay', type:'http', url: <relay url>, headers }` |
+| `AcpAdapter`, relay (stdio) | a second stdio bridge, `mousse-cli engine mcp-stdio --url <relay url>` with the same `MOUSSE_MCP_TOKEN`, named `mousse-relay` |
 
 `caps.mcp === false` adapters show the orchestration tools as unavailable; nothing is emulated.
+
+The relay entries are added only when the turn's bridge carries a relay (§15.5); without one the attachment is exactly the single `mousse` entry above.
 
 ### 15.3 Prompt guidance
 
@@ -565,6 +572,19 @@ One shared text (`src/mms/run/mcp/instructions.ts`) is part of each turn bridge'
 ### 15.4 Tests
 
 Unit: credential mint/revoke/expiry; ceiling enforcement; access-class registration failure. Integration (replay): a Claude-subscription parent calls `delegate_task` for a pi child and reads the result; a child attempting a write above its ceiling is refused with a reason.
+
+### 15.5 MCP relay
+
+The MCP relay gives every runtime except the pi loop the tools of the user's MCP servers set up in Mousse (Settings, Skills & MCP), so a server is set up once. The pi loop is unchanged: it calls those servers in process.
+
+- **Server.** `MousseMcpServer` serves a second MCP server, `mousse-relay`, at `/mcp/relay` (`RELAY_PATH`) on the same `127.0.0.1` listener, with the same bearer as the `mousse` server of the turn. Authentication, the credential's turn binding and the drained-turn accounting are the same; a runtime's count of its Mousse calls includes both servers. Its `initialize` instructions are a fixed text (`RELAY_INSTRUCTIONS`); no text from a user's server is put there.
+- **Who gets it.** A driver that declares `relay` (`HarnessDriver.relay`: every driver but pi) attaches it when `integrations.mcp.relay` is on for its kind (`relayEnabledFor`: MCP is on and `relay.runtimes[kind]` is not `false`; on by default). Settings, Skills & MCP, Advanced, "Share with other agents" has one switch per runtime: Claude Code, Codex, Cursor, ACP agents, Antigravity and Grok. Bots and definition runs get no relay. Claude Code keeps the servers Mousse adds to its configuration directly (`ClaudeIntegrationResolver`) as well, so their tools can appear twice.
+- **Names.** A relayed tool is named `<server>__<tool>` (Claude Code shows `mcp__mousse-relay__<server>__<tool>`). Both parts are sanitized and never contain `__`. A name is at most 45 characters (`RELAY_NAME_BUDGET`), so Claude's 19-character prefix keeps it within 64: a server part longer than 24 characters is cut and ends in a 6-character hash of its installation; two installations whose server parts are the same each get their installation's hash; a tool part that does not fit is cut and ends in a hash of the installation and tool name. Names are allocated in (server, tool) order and resolved through the listing, never by splitting the name.
+- **Catalogue.** The listing comes from a catalogue per project (`RelayCatalog`) built from the enabled servers' tools, never from a live connect inside `tools/list`. Each server keeps its last good listing when a refresh fails. The turn start waits up to 3 s for a cold catalogue, and a turn may start without relay tools when it is still cold. The catalogue's **revision** (a hash of the eligible servers, their config revisions and tool selections, and the names and input schemas listed; descriptions are left out) is carried in each runtime's soft reopen key (Claude Code's launch key, Codex's loaded-thread key, the ACP session key; Cursor sends its servers with every message), so a changed listing restarts the runtime at its next idle turn. The revision is never part of the bearer's runtime generation, so a change does not revoke the credential of a running turn.
+- **Approvals.** Who asks before a relayed tool runs is declared per driver (`relay.approvals`). `runtime`: the runtime's own approval flow decides (Claude Code's `canUseTool`, which never auto-allows the relay prefix and shows the Mousse card; an ACP agent, Antigravity and Grok through `session/request_permission`, when the agent asks at all). `mousse`: Codex and Cursor have no approval request Mousse handles for MCP tools, so the relay asks through the thread's approval card ("Allow <server> / <tool> (MCP server relayed by Mousse)?", allow once or reject; permission key `relay:<installationId>`), unless the thread is in Full access. A rejection returns a tool error that tells the agent not to retry.
+- **Refusals on the server.** Whatever the runtime decides, the relay itself refuses a call under a `plan` ceiling, from a bot, from a read-only (`shared`) subagent and from a definition run, and refuses when the turn's approvals are `never` and the relay would have to ask. A read-only thread is listed no relay tools. Each call is also checked against the user's current server and tool selection (`McpManager.isToolCallAllowed`) and the actor's MCP access, at listing and at call.
+- **Limits.** At most 128 tools are listed (`RELAY_MAX_TOOLS`, in name order; the rest are dropped and logged). A description is prefixed `[MCP server "<name>"] `, stripped of control characters and cut at 1024 characters. A tool whose input schema is over 16 kB, or has a schema error, is not relayed; a schema that is not an object is listed as an open object. A call's text result is cut at 64 000 characters, and errors are redacted and cut at 2000. A relayed call times out after 4 minutes (`RELAY_CALL_TIMEOUT_MS`, under the stdio bridge's 300 s fetch limit).
+- **Not relayed.** Resources, prompts, sampling, elicitation, progress and `tools/list_changed`.
 
 ## 16. Phase 6 — handoff, fork and merge-back, continue after restart
 

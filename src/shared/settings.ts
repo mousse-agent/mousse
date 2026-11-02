@@ -557,6 +557,7 @@ export function getDefaultSettings(): MousseSettings {
       mcp: {
         enabled: true,
         enabledServers: [],
+        relay: { runtimes: {} },
         enableForMainAgent: true,
         enableForAgents: { ...DEFAULT_AGENT_INTEGRATION_ENABLEMENT }
       },

@@ -175,6 +175,8 @@ export function acpDriver(options: AcpDriverOptions = {}): HarnessDriver {
     // ACP updates do not name the MCP server: the bearer is kept only after a turn whose tool calls all completed.
     mcpTurnBinding: 'drained_turn',
     userMcp: 'native',
+    // The agent's own `session/request_permission` flow decides (when it asks at all).
+    relay: { approvals: 'runtime' },
     decodeConfig: decodeAcpConfig,
     versionArgs: (config) => preset.versionArgs?.(config) ?? null,
     caps: (_config, _version, facts?: RuntimeFacts): HarnessCaps => {

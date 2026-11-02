@@ -145,6 +145,31 @@ describe('Claude subscription attachment', () => {
     expect(claudeMcpServers(null)).toEqual({})
   })
 
+  it('the service attaches the MCP relay beside the Mousse server, and a relayed tool is not allowed without a prompt', async () => {
+    const options: Options[] = []
+    const relayed: unknown[] = []
+    const relayQuery = (o: Options) => Object.assign((async function* () {
+      relayed.push(await o.canUseTool?.('mcp__mousse-relay__github__create_issue', { title: 'x' }, { signal: new AbortController().signal } as never))
+      yield { type: 'result', subtype: 'success', is_error: false, result: 'ok', session_id: 's' }
+    })(), { close: vi.fn(), interrupt: vi.fn(async () => {}) }) as unknown as Query
+    const { home, questions, service: claude } = service(({ options: o }) => { options.push(o); return relayQuery(o) })
+    const ask = vi.spyOn(questions, 'requestAnswers')
+    questions.on('pending', ({ requestId }: { requestId: string }) => questions.submitAnswers(requestId, { permission: 'reject' }, { kind: 'user' }))
+    const relay = { url: 'http://127.0.0.1:4567/mcp/relay', revision: 'rev-1' }
+    await claude.chat({ threadId: 't', cwd: home, model: 'sonnet', prompt: 'hi', onText: vi.fn(), mcp: { ...MCP, relay } })
+    await claude.chat({ threadId: 't2', cwd: home, model: 'sonnet', prompt: 'hi', onText: vi.fn(), mcp: { ...MCP, relay }, mode: 'plan' })
+    expect(options[0].mcpServers).toEqual({
+      mousse: { type: 'http', url: MCP.url, headers: { Authorization: 'Bearer tok-secret' }, timeout: 3_600_000 },
+      'mousse-relay': { type: 'http', url: relay.url, headers: { Authorization: 'Bearer tok-secret' }, timeout: 3_600_000 }
+    })
+    // The relayed tool goes to Mousse's card like any other MCP tool, and the user's answer holds.
+    expect(ask).toHaveBeenCalledTimes(1)
+    expect(ask.mock.calls[0][0][0].prompt).toMatch(/mcp__mousse-relay__github__create_issue/)
+    expect(relayed[0]).toMatchObject({ behavior: 'deny' })
+    // A plan turn refuses it without asking.
+    expect(relayed[1]).toMatchObject({ behavior: 'deny', message: expect.stringMatching(/planning only/) })
+  })
+
   it('the service launches Claude with the user\'s MCP servers, their secrets, the skills plugin and tool limits', async () => {
     const options: Options[] = []
     const { home, questions, service: claude } = service(({ options: o }) => { options.push(o); return finished(o) })

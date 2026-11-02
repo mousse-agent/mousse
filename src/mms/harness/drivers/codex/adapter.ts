@@ -20,12 +20,9 @@ import type {
   TurnSink
 } from '../../adapter'
 import { readUsageLimit } from '../../../orchestrator/providerErrors'
-import { MOUSSE_MCP_SERVER_NAME } from '../../../run/mcp/attachment'
+import { isMousseServerTool } from '../../../run/mcp/attachment'
 import { promptStreams, runtimeToolEvent } from '../../../run/transcript/promptRuntime'
 import { retryContextOverflowOnce } from '../../../run/transcript/retryContextOverflow'
-
-/** Codex names a Mousse server call `mcp__mousse__<tool>` (`CodexProviderService` tool events). */
-const CODEX_MOUSSE_TOOL_PREFIX = `mcp__${MOUSSE_MCP_SERVER_NAME}__`
 
 /** The slice of the provider service a turn drives. */
 export type CodexClient = Pick<
@@ -200,7 +197,8 @@ export class CodexAdapter implements ProviderAdapter {
         sink.tool(runtimeToolEvent(event))
       },
       onToolNotification: (event) => {
-        if (!event.toolName?.startsWith(CODEX_MOUSSE_TOOL_PREFIX)) return
+        // Codex names a call of a server Mousse serves `mcp__mousse__<tool>` or `mcp__mousse-relay__<tool>`.
+        if (!event.toolName || !isMousseServerTool(event.toolName)) return
         mousseCalls.set(event.callId, event.phase === 'complete' || (mousseCalls.get(event.callId) ?? false))
       },
       onHeartbeat: () => ctl.heartbeat(),

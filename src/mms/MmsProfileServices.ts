@@ -443,7 +443,8 @@ export class MmsProfileServices {
     this.mcpCredentials = new McpCredentials(this.runEngine.store)
     this.mcpServer = new MousseMcpServer({
       credentials: this.mcpCredentials,
-      registry: this.orchestrator.mcpToolRegistry()
+      registry: this.orchestrator.mcpToolRegistry(),
+      relay: this.orchestrator.relayHandler()
     })
     this.orchestrator.setAppletStore(this.applets)
     // Registry agents install once per installation; each profile records which versions it uses.
