@@ -6,6 +6,7 @@ import { currentSpeechPreferences } from '../speech/speechPreferences'
 import { useDictationStore } from './dictationStore'
 import { openMicrophone, type Microphone } from './microphone'
 import type { AudioLevels } from '../speech/audioLevels'
+import { startLiveTranscription, type LiveTranscription } from './liveTranscription'
 import { warmLocalEngine } from './localEngine'
 import { transcribeRecording } from './transcribe'
 
@@ -25,6 +26,8 @@ export interface UseDictationOptions {
  */
 export function useDictation({ disabled, loading, onTranscript }: UseDictationOptions) {
   const mediaRecorderRef = useRef<MediaRecorder | null>(null)
+  /** A local model's recording, transcribed while the user speaks; providers use the recorder. */
+  const liveRef = useRef<LiveTranscription | null>(null)
   const recordingChunksRef = useRef<Blob[]>([])
   const recordingTimerRef = useRef<number | null>(null)
   const recordingStartRef = useRef<number>(0)
@@ -61,6 +64,8 @@ export function useDictation({ disabled, loading, onTranscript }: UseDictationOp
         recorder.ondataavailable = null
         if (recorder.state === 'recording') recorder.stop()
       }
+      liveRef.current?.cancel()
+      liveRef.current = null
       captureMicrophone.current?.stop()
     }
   }, [])
@@ -81,16 +86,15 @@ export function useDictation({ disabled, loading, onTranscript }: UseDictationOp
     }, NOTICE_VISIBLE_MS)
   }
 
-  const transcribe = async (blob: Blob, ticket: number) => {
+  /** Shows the text `work` produces for the recording that just stopped. */
+  const transcribe = async (work: () => Promise<string>, ticket: number) => {
     const live = () => captureMounted.current && ticket === captureTicket.current
     const stopRequested = stopRequestedRef.current ?? performance.now()
     const recordingReady = performance.now()
     stopRequestedRef.current = null
     setTranscribing(true)
     try {
-      const selection = useDictationStore.getState().selection
-      if (!selection) throw new Error('No dictation model is selected. Choose one under Settings, Speech.')
-      const text = blob.size > 0 ? (await transcribeRecording(blob, selection)).trim() : ''
+      const text = (await work()).trim()
       console.info(
         `[dictation] stop to text ${Math.round(performance.now() - stopRequested)} ms ` +
           `(recording ready after ${Math.round(recordingReady - stopRequested)} ms)`
@@ -103,6 +107,13 @@ export function useDictation({ disabled, loading, onTranscript }: UseDictationOp
     } finally {
       if (live()) setTranscribing(false)
     }
+  }
+
+  /** Turns a finished recorder file into text with the selected model. */
+  const transcribeBlob = async (blob: Blob): Promise<string> => {
+    const selection = useDictationStore.getState().selection
+    if (!selection) throw new Error('No dictation model is selected. Choose one under Settings, Speech.')
+    return blob.size > 0 ? transcribeRecording(blob, selection) : ''
   }
 
   const begin = async () => {
@@ -125,6 +136,8 @@ export function useDictation({ disabled, loading, onTranscript }: UseDictationOp
         recorder.ondataavailable = null
         if (recorder.state === 'recording') recorder.stop()
       }
+      liveRef.current?.cancel()
+      liveRef.current = null
       microphone?.stop()
       captureMicrophone.current = null
       mediaRecorderRef.current = null
@@ -145,6 +158,28 @@ export function useDictation({ disabled, loading, onTranscript }: UseDictationOp
       captureMicrophone.current = microphone
       const { levels: recordingLevels } = microphone
       setLevels(() => recordingLevels)
+      recordingStartRef.current = Date.now()
+      setRecordingDuration(0)
+      const startTimer = () => {
+        setIsRecording(true)
+        recordingTimerRef.current = window.setInterval(() => setRecordingDuration(Math.floor((Date.now() - recordingStartRef.current) / 1000)), 200)
+      }
+      if (selection?.source === 'local') {
+        const live = await startLiveTranscription(selection.modelId, microphone.stream).catch((error: unknown) => {
+          console.warn('[dictation] Live transcription is unavailable; transcribing after the stop.', error)
+          return null
+        })
+        if (!captureMounted.current || ticket !== captureTicket.current) {
+          live?.cancel()
+          microphone.stop()
+          return
+        }
+        if (live) {
+          liveRef.current = live
+          startTimer()
+          return
+        }
+      }
       const recorder = new MediaRecorder(microphone.stream)
       recordingChunksRef.current = []
       mediaRecorderRef.current = recorder
@@ -160,13 +195,11 @@ export function useDictation({ disabled, loading, onTranscript }: UseDictationOp
         if (!captureMounted.current || ticket !== captureTicket.current) return
         setIsRecording(false)
         setLevels(null)
-        void transcribe(new Blob(recordingChunksRef.current, { type: recorder.mimeType || 'audio/webm' }), ticket)
+        const blob = new Blob(recordingChunksRef.current, { type: recorder.mimeType || 'audio/webm' })
+        void transcribe(() => transcribeBlob(blob), ticket)
       }
-      recordingStartRef.current = Date.now()
-      setRecordingDuration(0)
       recorder.start()
-      setIsRecording(true)
-      recordingTimerRef.current = window.setInterval(() => setRecordingDuration(Math.floor((Date.now() - recordingStartRef.current) / 1000)), 200)
+      startTimer()
     } catch (failure) {
       fail(failure)
     } finally {
@@ -192,6 +225,24 @@ export function useDictation({ disabled, loading, onTranscript }: UseDictationOp
   startRef.current = start
 
   const stop = () => {
+    const live = liveRef.current
+    if (live) {
+      liveRef.current = null
+      stopRequestedRef.current = performance.now()
+      const ticket = captureTicket.current
+      const microphone = captureMicrophone.current
+      const { captured, text } = live.finish()
+      // The microphone stays open until the audio up to the stop has been captured.
+      void captured.finally(() => {
+        microphone?.stop()
+        if (captureMicrophone.current === microphone) captureMicrophone.current = null
+      })
+      stopRecordingTimer()
+      setIsRecording(false)
+      setLevels(null)
+      void transcribe(() => text, ticket)
+      return
+    }
     if (mediaRecorderRef.current?.state !== 'recording') return
     stopRequestedRef.current = performance.now()
     mediaRecorderRef.current.stop()
