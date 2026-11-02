@@ -467,10 +467,43 @@ describe('recovery', () => {
     expect(new ThreadWorkspaceManager(f.thread).verify().lifecycle).toBe('ready')
     // The next turn runs too, still without a snapshot, and says so.
     const { action } = await turn('next', () => write('next.txt', 'x\n'), 2)
-    expect(action.git?.coverageGaps?.[0]?.reason).toMatch(/no snapshot could be taken/)
-    expect(new ChangeReceiptService(f.thread).list().find((item) => item.id === action.receiptId)?.notCovered).toMatch(/^Not covered: \. \(no snapshot could be taken/)
+    expect(action.git?.coverageGaps?.map((gap) => gap.reason)).toEqual([expect.stringMatching(/^start of turn not captured/), expect.stringMatching(/^no snapshot could be taken/)])
+    expect(new ChangeReceiptService(f.thread).list().find((item) => item.id === action.receiptId)?.notCovered).toMatch(/^Not covered: \. \(start of turn not captured.*\), \. \(no snapshot could be taken/)
     rmSync(blocker)
     await turn('after', () => write('after.txt', 'x\n'), 4)
+  })
+
+  it('a turn whose start cannot be snapshotted is recorded from its end: nothing is attributed to it and Undo restores no files', async () => {
+    await turn('first', () => write('first.txt', 'first\n'))
+    write('outside.txt', 'written before the turn\n')
+    const blocker = join(git(cwd, 'rev-parse', '--absolute-git-dir'), 'mousse')
+    rmSync(blocker, { recursive: true, force: true }); writeFileSync(blocker, 'in the way\n')
+    // Admission cannot snapshot; during the turn the way clears and the agent writes, so the end snapshot succeeds.
+    const { action } = await turn('blind', () => { rmSync(blocker); write('agent.txt', 'agent\n') }, 2)
+    expect(action.startSha).toBe(action.endSha)
+    expect(action.changedPaths).toEqual([])
+    expect(action.git?.coverageGaps?.[0]).toEqual({ path: '.', reason: expect.stringMatching(/^start of turn not captured: .*EEXIST/) })
+    expect(new ChangeReceiptService(f.thread).list().find((item) => item.id === action.receiptId)?.notCovered).toMatch(/^Not covered: \. \(start of turn not captured/)
+    // Undo rewinds the turn but has no files of it to restore: neither the outside file nor the agent's goes.
+    const undone = await new UndoService(f.thread).undoLatest('main', cwd)
+    expect(undone.notice).toMatch(/start of turn not captured/)
+    expect(f.read(cwd, 'outside.txt')).toBe('written before the turn\n')
+    expect(f.read(cwd, 'agent.txt')).toBe('agent\n')
+    expect(existsSync(join(f.thread, 'uncaptured-start.json'))).toBe(false)
+  })
+
+  it('a nested repository with a commit is recorded by its commit, and changes inside it are reported as not covered', async () => {
+    const nested = join(cwd, 'vendor', 'x')
+    mkdirSync(nested, { recursive: true }); git(nested, 'init', '-q'); git(nested, 'config', 'user.email', 'n@example.test'); git(nested, 'config', 'user.name', 'N')
+    writeFileSync(join(nested, 'lib.txt'), 'one\n'); git(nested, 'add', '.'); git(nested, 'commit', '-qm', 'lib')
+    // Clean: its commit holds all of it, so nothing is reported.
+    const clean = await turn('clean', () => write('a.txt', 'a\n'))
+    expect(git(cwd, 'ls-tree', clean.action.endSha, 'vendor/x')).toMatch(/^160000 commit /)
+    expect(clean.action.git?.coverageGaps).toBeUndefined()
+    // An uncommitted edit and an untracked file inside it are not in the snapshot, and the turn says so.
+    const { action } = await turn('dirty', () => { writeFileSync(join(nested, 'lib.txt'), 'two\n'); writeFileSync(join(nested, 'new.txt'), 'new\n') }, 2)
+    expect(action.git?.coverageGaps).toEqual([{ path: 'vendor/x', reason: 'nested repository; only its commit is recorded' }])
+    expect(new ChangeReceiptService(f.thread).list().find((item) => item.id === action.receiptId)?.notCovered).toBe('Not covered: vendor/x (nested repository; only its commit is recorded).')
   })
 
   it('an unreadable file is left out of the snapshot and named; the turn completes and the thread stays ready', async () => {

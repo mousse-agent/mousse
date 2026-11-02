@@ -1,7 +1,7 @@
 import { AppError } from '../../shared/errors'
 import { isDeepStrictEqual } from 'node:util'
 import { randomUUID } from 'node:crypto'
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync, readFileSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { atomicWriteJsonSync } from '../data/AtomicFs'
 import { ThreadJournal } from '../data/ThreadJournal'
@@ -60,6 +60,10 @@ export class ActionExecutionError extends Error {
     this.name = 'ActionExecutionError'
   }
 }
+
+/** Written when a turn's start could not be snapshotted; the checkpoint of the action that starts there reads it. */
+const UNCAPTURED_START_FILE = 'uncaptured-start.json'
+interface UncapturedStart { startSha: string; error: string }
 
 export class ThreadActionService {
   private readonly actionsPath: string
@@ -152,11 +156,14 @@ export class ThreadActionService {
     try {
       snapshot = takeSnapshot(options.workspacePath, { reason: 'before the next action', threadId: options.threadId })
     } catch (error) {
-      // No snapshot now never stops the turn: it starts from the last one recorded, and its end says what was not covered.
+      // No snapshot now never stops the turn. The last recorded one stands in only as a placeholder: it is marked as not
+      // this turn's start, so the checkpoint records the turn from its end (nothing attributed, no files for Undo to restore).
       const fallback = metadata?.snapshotSha ?? latest?.endSha ?? metadata?.headSha ?? (tryGit(options.workspacePath, ['rev-parse', '--verify', '-q', 'HEAD^{commit}']).stdout || undefined)
       if (!fallback) throw error
+      atomicWriteJsonSync(join(this.threadDirectory, UNCAPTURED_START_FILE), { startSha: fallback, error: String((error as Error).message ?? error).split(/\r?\n/)[0] } satisfies UncapturedStart)
       return { startSha: fallback }
     }
+    rmSync(join(this.threadDirectory, UNCAPTURED_START_FILE), { force: true })
     // The latest recorded snapshot. Workspaces recorded before snapshots have none; their last checkpoint commit was HEAD.
     const known = metadata?.snapshotSha ?? latest?.endSha ?? metadata?.headSha ?? snapshot.head
     const receipts = new ChangeReceiptService(this.threadDirectory)
@@ -291,6 +298,10 @@ export class ThreadActionService {
   }
 
   /** The snapshot an explicit human action starts from: the files as they are, which the action then covers. */
+  private uncapturedStart(): UncapturedStart | undefined {
+    try { return JSON.parse(readFileSync(join(this.threadDirectory, UNCAPTURED_START_FILE), 'utf8')) as UncapturedStart } catch { return undefined }
+  }
+
   private startFromFiles(options: RunThreadActionOptions): string {
     let snapshot: Snapshot
     try { snapshot = takeSnapshot(options.workspacePath, { reason: 'before the action', threadId: options.threadId }) }
@@ -365,6 +376,14 @@ export class ThreadActionService {
       snapshot = { sha: action.startSha, tree: git(workspacePath, ['rev-parse', `${action.startSha}^{tree}`]), ...(head ? { head } : {}), ...(branch ? { branch } : {}),
         coverageGaps: [{ path: '.', reason: `no snapshot could be taken (${String((error as Error).message ?? error).split(/\r?\n/)[0]})` }] }
       action.reversible = false
+    }
+    // The turn's start could not be captured: the placeholder start is not used. The turn is recorded from its end, so no
+    // file is attributed to it and code Undo restores nothing (the conversation still rewinds), and the gap says why.
+    const uncaptured = this.uncapturedStart()
+    if (uncaptured?.startSha === action.startSha && action.actor?.kind !== 'user') {
+      action.startSha = snapshot.sha
+      snapshot = { ...snapshot, coverageGaps: [{ path: '.', reason: `start of turn not captured: ${uncaptured.error}` }, ...(snapshot.coverageGaps ?? [])] }
+      rmSync(join(this.threadDirectory, UNCAPTURED_START_FILE), { force: true })
     }
     const { record, commits } = describeGit(workspacePath, action.startSha, snapshot)
     action.endSha = snapshot.sha

@@ -27,13 +27,25 @@ export interface CoverageGap { path: string; reason: string }
 
 /** The words for what a snapshot left out, or undefined when it covers everything. Ignored files are left out by design and never listed. */
 export function coverageNotice(...lists: Array<CoverageGap[] | undefined>): string | undefined {
-  const gaps = [...new Map(lists.flatMap((list) => list ?? []).map((gap) => [gap.path, gap])).values()]
+  const gaps = [...new Map(lists.flatMap((list) => list ?? []).map((gap) => [`${gap.path}\0${gap.reason}`, gap])).values()]
   if (!gaps.length) return undefined
   const named = gaps.slice(0, 10).map((gap) => `${gap.path} (${gap.reason})`).join(', ')
   return `Not covered: ${named}${gaps.length > 10 ? ` and ${gaps.length - 10} more` : ''}.`
 }
 const NESTED_WITHOUT_COMMIT = 'nested repository with no commits'
 const UNREADABLE = 'unreadable'
+const NESTED_COMMIT_ONLY = 'nested repository; only its commit is recorded'
+
+/**
+ * Nested repositories (and submodules) the snapshot records as a link to their commit, whose own files differ from
+ * it: uncommitted or untracked changes in them are not in the snapshot. A clean one is fully covered by its commit.
+ */
+function nestedWithChanges(top: string, env: NodeJS.ProcessEnv, skip: CoverageGap[]): CoverageGap[] {
+  const links = git(top, ['ls-files', '-s', '-z'], env).split('\0').filter((line) => line.startsWith('160000 ')).map((line) => line.slice(line.indexOf('\t') + 1))
+  return links.filter((path) => !skip.some((gap) => gap.path === path) && existsSync(join(top, path, '.git')))
+    .filter((path) => { const status = tryGit(join(top, path), ['status', '--porcelain', '--untracked-files=all']); return !status.ok || status.stdout !== '' })
+    .map((path) => ({ path, reason: NESTED_COMMIT_ONLY }))
+}
 
 export interface SnapshotInput {
   /** Why it was taken, for the commit message: "turn end", "outside changes". One line. */
@@ -132,6 +144,7 @@ function indexTree(top: string, index: string, head: string | undefined): { tree
       for (const path of found) gaps.push({ path, reason: UNREADABLE })
     }
     followTrackedFiles(top, env, head, gaps.map((gap) => gap.path))
+    gaps.push(...nestedWithChanges(top, env, gaps))
     return { tree: git(top, ['write-tree'], env), gaps }
   }
   try {
