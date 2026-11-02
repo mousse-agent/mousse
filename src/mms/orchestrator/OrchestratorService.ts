@@ -437,6 +437,8 @@ export interface OrchestratorSendOptions {
   /**
    * `turn` (default) resolves with the turn's result; `ack` resolves once the send is committed
    * and its `turn.start` effect recorded (SPEC §12.7). Only the engine path honours `ack`.
+   * With `turn`, a turn that started and then failed still resolves, with the run and `error`:
+   * only a send whose turn never started rejects.
    */
   awaitMode?: 'turn' | 'ack'
   /** SPEC §16.4: the interrupted run this send continues (the restart note's "Continue"). */
@@ -571,6 +573,12 @@ const CONTINUATION_REFUSALS: ReadonlySet<string> = new Set([
   'continuation_source_active',
   'uncertain_not_acknowledged'
 ])
+
+/**
+ * Failures of turns whose work had already begun when they failed, though their run may not say so (a
+ * workflow admitted before the run could be marked started). The send answers them with the run and the error.
+ */
+const ADMITTED_TURN_FAILURES = new WeakMap<object, { workflowRun?: WorkflowChatRun }>()
 
 /** Agent messages in a row, without a person in between, that a message may be the end of; the next one is refused. */
 export const AGENT_MESSAGE_MAX_HOPS = 3
@@ -8378,9 +8386,23 @@ export class OrchestratorService extends EventEmitter {
         const live = this.turnResults.get(result.runId)
         const run = live ? this.runEngine.getRun(result.runId) : null
         if (live && opts?.awaitMode !== 'ack' && run && !TERMINAL_RUN_STATUSES.has(run.status)) {
-          return { ...(await live.promise), ...replayed }
+          try {
+            return { ...(await live.promise), ...replayed }
+          } catch (error) {
+            return this.startedTurnFailure(error, replayed)
+          }
         }
-        return { message: '', actions: [], ...replayed }
+        // A run that ended before it started ran nothing: the repeat fails as the first send did.
+        const record = this.runEngine.getRun(result.runId)
+        if (record && TERMINAL_RUN_STATUSES.has(record.status) && !this.runStarted(result.runId))
+          throw new DomainRpcError(
+            'run_not_started',
+            record.outcome?.error ? `The message did not run: ${record.outcome.error}` : `The message did not run: its run is ${record.status}.`,
+            { runId: result.runId, status: record.status }
+          )
+        // A slash workflow's repeat answers with the workflow run it admitted, as its first send did.
+        const workflowRun = this.admittedWorkflowRun(session, normalizeSendRequest(input).workflowInvocationId, result.runId)
+        return { message: '', actions: [], ...(workflowRun ? { workflowRun } : {}), ...replayed }
       }
       run = { runId: result.runId, sequence: result.sequence }
       if (opts?.sentFrom) this.recordSentFrom(threadId, run.runId, opts.sentFrom.node)
@@ -8468,19 +8490,88 @@ export class OrchestratorService extends EventEmitter {
         pending.catch(() => undefined)
         return { message: '', actions: [], ...run, accepted: true }
       }
-      return { ...(await pending), ...run }
+      try {
+        return { ...(await pending), ...run }
+      } catch (error) {
+        return this.startedTurnFailure(error, run)
+      }
     }
 
-    const response = await this.runTurnOnSession(session, input, reuseLastUser, opts?.source !== 'wake', {
-      source: opts?.source,
-      runId: run?.runId,
-      modelOverride: opts?.modelOverride,
-      origin: opts?.origin,
-      schedule: opts?.schedule,
-      ...(opts?.agent ? { agent: agentOriginOf(opts.agent) } : {}),
-      ...(opts?.permissionMode ? { permissionMode: opts.permissionMode } : {})
-    })
+    let response: OrchestratorResponse
+    try {
+      response = await this.runTurnOnSession(session, input, reuseLastUser, opts?.source !== 'wake', {
+        source: opts?.source,
+        runId: run?.runId,
+        modelOverride: opts?.modelOverride,
+        origin: opts?.origin,
+        schedule: opts?.schedule,
+        ...(opts?.agent ? { agent: agentOriginOf(opts.agent) } : {}),
+        ...(opts?.permissionMode ? { permissionMode: opts.permissionMode } : {})
+      })
+    } catch (error) {
+      if (!run) throw error
+      return this.startedTurnFailure(error, run)
+    }
     return run ? { ...response, ...run } : response
+  }
+
+  /**
+   * The reply to a send whose turn failed. Once the run has started, the agent may already have done
+   * work (tools, subagents, pushes), so the send succeeded: the reply carries the run and the error,
+   * as a provider failure's does, and a client never mistakes it for a message that did not arrive and
+   * sends it again. A turn that failed before its run started ran nothing; the send fails with it, and
+   * its run is already ended, so nothing runs it later.
+   */
+  private startedTurnFailure(error: unknown, run: { runId: string; sequence: number }): OrchestratorResponse {
+    const admitted = typeof error === 'object' && error !== null ? ADMITTED_TURN_FAILURES.get(error) : undefined
+    if (!admitted && !this.runStarted(run.runId)) throw error
+    const failure = serializeAppError(
+      error instanceof AppError
+        ? error
+        : error instanceof DomainRpcError
+          ? knownAppError({ code: error.code, message: error.message, details: error.details })
+          : normalizeAppError(error, 'orchestrator_turn_failed')
+    )
+    return {
+      message: `[${failure.code}] ${failure.message}`,
+      actions: [],
+      ...(admitted?.workflowRun ? { workflowRun: admitted.workflowRun } : {}),
+      ...run,
+      error: failure
+    }
+  }
+
+  /**
+   * The workflow run a slash workflow admitted: from the transcript, or, when its message could not be
+   * saved there, from the `run.workflow_admitted` event its run recorded at admission.
+   */
+  private admittedWorkflowRun(session: ThreadSession, invocationId: string | undefined, runId: string): WorkflowChatRun | undefined {
+    if (!invocationId) return undefined
+    const shown = session.messages.find((message) => message.workflowRun?.invocationId === invocationId)?.workflowRun
+    if (shown) return shown
+    try {
+      const row = this.runEngine?.store.db
+        .statement("SELECT payload FROM thread_events WHERE thread_id = ? AND run_id = ? AND type = 'run.workflow_admitted' ORDER BY seq DESC LIMIT 1")
+        .get(session.threadId, runId) as { payload?: unknown } | undefined
+      if (!row) return undefined
+      const recorded = (JSON.parse(String(row.payload)) as { workflowRun?: WorkflowChatRun }).workflowRun
+      return recorded?.invocationId === invocationId ? recorded : undefined
+    } catch (error) {
+      logDebug('OrchestratorService', 'admitted workflow run could not be read', error, { threadId: session.threadId, runId })
+      return undefined
+    }
+  }
+
+  /** Whether the run's turn got as far as starting: the point after which an agent can act. */
+  private runStarted(runId: string): boolean {
+    let record: RunRecord | null | undefined
+    try {
+      record = this.runEngine?.getRun(runId)
+    } catch {
+      return false
+    }
+    if (!record) return false
+    return record.startedAt !== null || record.status === 'completed' || record.status === 'uncertain'
   }
 
   /**
@@ -8716,7 +8807,7 @@ export class OrchestratorService extends EventEmitter {
   private async executeWorkflowChatTurn(
     session: ThreadSession,
     request: NormalizedOrchestratorSendRequest,
-    opts?: { queueItemId?: string; claimOwnerToken?: string; suppressAutoQueueDrain?: boolean; externalSignal?: AbortSignal; onTurnSettled?: (aborted: boolean) => void; onUserInputAccepted?: () => void }
+    opts?: { runId?: string; queueItemId?: string; claimOwnerToken?: string; suppressAutoQueueDrain?: boolean; externalSignal?: AbortSignal; onTurnSettled?: (aborted: boolean) => void; onUserInputAccepted?: () => void }
   ): Promise<OrchestratorResponse> {
     if (!this.workflowChat) throw new Error('Workflow command execution is unavailable')
     const turn = { abort: new AbortController(), pendingSteer: [] as SteerEntry[] }
@@ -8727,11 +8818,21 @@ export class OrchestratorService extends EventEmitter {
     this.applyRequestedAbort(session, turn)
     this.setTurnPhase(session.threadId, 'queued', { turnId: uuidv4() })
     let accepted = false
+    let admitted: WorkflowChatRun | undefined
     let outcome: 'completed' | 'stopped' | 'failed' = 'failed'
     try {
       // Admit durably before transcript provenance completes a queue claim.
       // Replaying after a crash returns the same engine run, never a new dispatch.
       const run = await this.workflowChat.execute(request.workflowInvocationId!, session.threadId, request.content, turn.abort.signal)
+      // The workflow now runs whatever happens to the rest of this turn, so its run has started: a later
+      // failure answers the send with the run and the error, and a repeat of the send is not refused.
+      admitted = run
+      this.markRun(opts?.runId, (engine, id) => {
+        if (engine.getRun(id)?.status === 'queued') engine.markStarting(id)
+        // Recorded with the run before the transcript is written, so a repeat of the send finds the
+        // workflow run even when its message could not be saved.
+        engine.store.appendEvent({ threadId: session.threadId, runId: id, type: 'run.workflow_admitted', payload: { workflowRun: run } })
+      })
       if (!session.messages.some((message) => message.role === 'user' && message.workflowInvocationId === run.invocationId)) {
         this.touchUserActivityAndNotify(session.threadId)
         this.acceptTurnUserInput(session, request.content, undefined, true, opts?.queueItemId, request.mode, run)
@@ -8757,7 +8858,10 @@ export class OrchestratorService extends EventEmitter {
       return response
     } catch (error) {
       this.setTurnPhase(session.threadId, 'failed', { error: error instanceof Error ? error.message : 'Workflow command failed' })
-      throw error
+      if (!admitted) throw error
+      const failure = error instanceof Error ? error : new Error(String(error))
+      ADMITTED_TURN_FAILURES.set(failure, { workflowRun: admitted })
+      throw failure
     } finally {
       opts?.externalSignal?.removeEventListener('abort', abort)
       this.activeTurn = null
