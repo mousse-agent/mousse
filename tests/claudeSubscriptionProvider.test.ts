@@ -1082,6 +1082,32 @@ describe('older Claude models', () => {
     expect(check.setModel.mock.calls.map(([model]) => model)).not.toContain('ember-soon[1m]')
   })
 
+  it('replaces a check still running for an earlier key with one for the new key', async () => {
+    const held = olderQuery({ ...standard, 'ember-refused': { hang: true } })
+    const next = olderQuery(standard)
+    const queries = [held, next]
+    let index = 0
+    const { service, home, settings } = fixture(() => queries[index++]!.query, true, undefined, undefined, { modelCatalog: () => catalog })
+    await service.refreshModels(home)
+    await vi.waitFor(() => expect(held.setModel.mock.calls.map(([model]) => model)).toContain('ember-refused'))
+    const first = service.olderCheck
+    // Another account while the first check waits on Claude Code.
+    vi.stubEnv('ANTHROPIC_API_KEY', 'sk-ant-another-account')
+    await service.refreshModels(home)
+    await first
+    expect(held.close).toHaveBeenCalledOnce()
+    await service.olderCheck
+    expect(next.setModel.mock.calls.map(([model]) => model)).toEqual(['ember', 'ember-runs', 'ember-refused', 'ember-remapped', 'ember-unknown', 'ember-old-20290101'])
+    expect(next.close).toHaveBeenCalledOnce()
+    expect(service.olderCheck).toBeUndefined()
+    expect(settings().olderModels.results).toEqual({
+      'ember-runs': { outcome: 'runs', defaultEffort: 'high' },
+      'ember-refused': { outcome: 'refused' },
+      'ember-remapped': { outcome: 'remapped', to: 'ember-live' },
+      'ember-old-20290101': { outcome: 'runs' }
+    })
+  })
+
   it('runs an older model at a level its catalog entry lists', async () => {
     const captured: Options[] = []
     const check = olderQuery(standard)

@@ -124,8 +124,8 @@ After a model refresh has saved that live list, Mousse checks the catalog's othe
      and checked again on the next refresh.
 3. **Cache:** results are saved with the provider's settings, next to `models`. Their key hashes the
    Claude Code program file (path, size, modification time), the account (`claudeAccountSubject`)
-   and the candidate route ids. A changed key checks every candidate again; otherwise only unknown
-   ones are checked. Partial results are saved.
+   and the candidate route ids. A changed key checks every candidate again, and stops a check still
+   running for the old key; otherwise only unknown ones are checked. Partial results are saved.
 4. **Listing:** models that run follow the live ones, newest first, named by `short` and with the
    catalog's `efforts` that Claude Code accepts. They carry `older: true`, and the model picker folds
    them behind "Show more" at the end of the provider's list. Starred older models stay visible, the

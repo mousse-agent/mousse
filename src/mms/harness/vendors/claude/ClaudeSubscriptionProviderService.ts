@@ -1250,13 +1250,16 @@ export class ClaudeSubscriptionProviderService {
       }
     }
   }
-  /** The older-model check in progress, if any (tests wait for it). */
+  /** The newest older-model check in progress, if any (tests wait for it). */
   olderCheck: Promise<void> | undefined
+  /** The running check's key and the controller that ends it (and closes its query). */
+  private olderRun: { key: string; controller: AbortController } | undefined
   /**
    * Starts the older-model check on the idle discovery query once the live list is saved: it owns
    * the query from then on, with its own budget, and `refreshModels` returns without waiting for it.
    * A changed key (Claude Code updated, another account, other candidates) drops the old results at
-   * once. Nothing starts when every candidate has a result, or when a check is already running.
+   * once, and a check still running for the old key is stopped and replaced by this one. Nothing
+   * starts when every candidate has a result, or when a check for the same key is running.
    * Returns whether it took the query.
    */
   private startOlderCheck(query: Query, controller: AbortController, live: ModelInfo[]): boolean {
@@ -1268,9 +1271,14 @@ export class ClaudeSubscriptionProviderService {
     }
     const results = this.settings.olderModels.results
     const pending = candidates.filter((candidate) => !results[candidate.route.id])
-    if (!pending.length || this.olderCheck || this.stopped) return false
+    if (this.stopped || this.olderRun?.key === key) return false
+    // A check for another key writes nothing any more: stop it (its own query closes as it ends).
+    this.olderRun?.controller.abort()
+    if (!pending.length) return false
+    const run = { key, controller }
+    this.olderRun = run
     const budget = setTimeout(() => controller.abort(), this.dependencies.olderCheckMs ?? 20_000)
-    this.olderCheck = claudeOlderModelCheck(query, pending, controller.signal, (routeId, outcome) => {
+    const check = claudeOlderModelCheck(query, pending, controller.signal, (routeId, outcome) => {
       // A later refresh may have changed the key; its results are not this check's to write.
       const state = this.settings.olderModels
       if (this.stopped || state?.key !== key) return
@@ -1287,8 +1295,10 @@ export class ClaudeSubscriptionProviderService {
         controller.abort()
         query.close()
         this.controllers.delete(controller)
-        this.olderCheck = undefined
+        if (this.olderRun === run) this.olderRun = undefined
+        if (this.olderCheck === check) this.olderCheck = undefined
       })
+    this.olderCheck = check
     return true
   }
   /**
