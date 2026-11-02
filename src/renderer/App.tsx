@@ -25,6 +25,7 @@ import { CommandPalette } from './components/CommandPalette'
 import { openSurface } from './lib/surfaces'
 import { isSessionClosing } from './lib/errorText'
 import { useAppStore } from './stores/appStore'
+import { normalizeRunSettings } from '../shared/settings'
 import { useAppCommands } from './commands/useAppCommands'
 import { useCommandShortcuts } from './commands/useCommandShortcuts'
 
@@ -254,7 +255,7 @@ export default function App() {
         }
       }
     }
-    window.mousse.app.getInfo().then((info) => {
+    void window.mousse.app.getInfo().then((info) => {
       if (!isCurrentProfile()) return
       setAppInfo(info)
       const root = document.documentElement
@@ -264,9 +265,12 @@ export default function App() {
 
 
 
-    // The bound profile's shortcut overrides; later changes arrive through settings.onChanged below.
-    window.mousse.settings.get().then(applyIfCurrent((settings) => setShortcuts(settings.shortcuts ?? {}))).catch(() => {})
-    window.mousse.threads.getActivity().then(applyIfCurrent(setThreadActivity))
+    // The bound profile's shortcut overrides and new-chat worktree default; later changes arrive through settings.onChanged below.
+    window.mousse.settings.get().then(applyIfCurrent((settings) => {
+      setShortcuts(settings.shortcuts ?? {})
+      useAppStore.getState().setWorktreeByDefault(normalizeRunSettings(settings.runs).worktreeByDefault)
+    })).catch(() => {})
+    void window.mousse.threads.getActivity().then(applyIfCurrent(setThreadActivity))
     window.mousse.turn.getSnapshot().then(applyIfCurrent(setTurnSnapshot)).catch(() => {})
 
     const isSelectedThread = (threadId: string): boolean => {
@@ -328,6 +332,7 @@ export default function App() {
         const llmProvider = settings?.provider?.llmProvider ?? ''
         if (info && info.llmProvider !== llmProvider) setAppInfo({ ...info, llmProvider })
         setShortcuts(settings?.shortcuts ?? {})
+        useAppStore.getState().setWorktreeByDefault(normalizeRunSettings(settings?.runs).worktreeByDefault)
       })),
       window.mousse.turn.onTurnState(applyIfCurrent(setTurnState)),
       window.mousse.turn.onTurnSnapshot(applyIfCurrent(setTurnSnapshot)),

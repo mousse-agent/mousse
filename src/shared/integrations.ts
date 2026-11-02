@@ -1,3 +1,4 @@
+import type { ProviderDriverKind } from './providerInstances'
 import type { AgentTypeId, LlmProviderId } from './settings'
 
 export type IntegrationScope = 'global' | 'project' | 'generated'
@@ -306,15 +307,35 @@ export const MOUSSE_BUILTIN_TOOLS: MousseBuiltInToolInfo[] = [
 
 export const MOUSSE_BUILTIN_TOOL_IDS: string[] = MOUSSE_BUILTIN_TOOLS.map((tool) => tool.id)
 
+/** Runtimes that can attach the MCP relay: every driver kind except the in-process pi loop. */
+export type McpRelayRuntime = 'claude' | 'codex' | 'cursor' | 'acp' | 'antigravity' | 'grok'
+
+export const MCP_RELAY_RUNTIMES: readonly McpRelayRuntime[] = ['claude', 'codex', 'cursor', 'acp', 'antigravity', 'grok']
+
+export interface McpRelaySettings {
+  /** Per runtime: `false` turns the relay off for it. Absent or `true`: on. */
+  runtimes: Partial<Record<McpRelayRuntime, boolean>>
+}
+
 export interface MousseIntegrationsSettings {
   tools: MousseToolsSettings
   mcp: AgentIntegrationPolicy & {
     enabled: boolean
     enabledServers: string[]
+    /** Which runtimes reach these servers through the MCP relay (`mousse-relay`). Absent: on for all. */
+    relay?: McpRelaySettings
   }
   skills: AgentIntegrationPolicy & {
     enabled: boolean
     enabledSkills: string[]
     model: Record<string, SkillModelSettings>
   }
+}
+
+/** The relay is on for a runtime unless MCP is off, the runtime is pi, or the user turned it off for that runtime. */
+export function relayEnabledFor(
+  settings: Pick<MousseIntegrationsSettings['mcp'], 'enabled' | 'relay'>,
+  runtime: ProviderDriverKind
+): boolean {
+  return settings.enabled && runtime !== 'pi' && settings.relay?.runtimes?.[runtime] !== false
 }

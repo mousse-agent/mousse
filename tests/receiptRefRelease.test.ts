@@ -96,7 +96,7 @@ it('admits history honestly after expired code objects are genuinely collected i
   writeFileSync(join(f.thread, 'messages.json'), '[{"content":"conversation survives collection"}]')
   expect((await release.release(workspace.worktreePath)).releasedRefs).toEqual(receipt.retainedRefs)
   // This fixture deliberately discards its test task result and reflogs. Production never does this.
-  git(f.repo, 'worktree', 'remove', workspace.worktreePath)
+  git(f.repo, 'worktree', 'remove', '--force', workspace.worktreePath) // the turn's result is uncommitted: it is a snapshot
   git(f.repo, 'update-ref', '-d', workspace.retainedRef, action.endSha)
   git(f.repo, 'branch', '-D', workspace.branch)
   git(f.repo, 'reflog', 'expire', '--expire=now', '--all')

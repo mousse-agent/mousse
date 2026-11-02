@@ -325,7 +325,7 @@ function CopyButton({
   const copiedTimerRef = useRef<number | null>(null);
 
   const handleCopy = () => {
-    navigator.clipboard.writeText(text);
+    void navigator.clipboard.writeText(text);
     setCopied(true);
     if (copiedTimerRef.current) {
       window.clearTimeout(copiedTimerRef.current);
@@ -646,7 +646,6 @@ export const PromptMarkersOverlay = memo(function PromptMarkersOverlay({
   const markerPositionsRef = useRef<PromptMarker[]>([]);
   const markerOffsetsRef = useRef<number[]>([]);
   const rafRef = useRef(0);
-  const loggedCountRef = useRef(-1);
 
   const updateActiveMarker = useCallback(() => {
     const container = containerRef.current;
@@ -709,11 +708,6 @@ export const PromptMarkersOverlay = memo(function PromptMarkersOverlay({
           preview: preview || "Your prompt",
           responsePreview: responsePreview || "No response yet",
         });
-      }
-      if (loggedCountRef.current !== next.length) {
-        loggedCountRef.current = next.length;
-        // eslint-disable-next-line no-console
-        console.debug(`[prompt-markers] tracking ${next.length} prompts`);
       }
       markerPositionsRef.current = next;
       markerOffsetsRef.current = next.map((marker) => marker.offset);

@@ -165,7 +165,7 @@ export function userCommits(commits: readonly DraftCommit[]): DraftCommit[] {
   return commits.filter((commit) => commit.subject.trim() && !isMousseCommit(commit))
 }
 
-/** A branch Mousse made for a thread, agent or workflow, named by ids (`mousse/thread/<id>/main`). */
+/** A branch Mousse made for a thread, agent or workflow (`mousse/<slug>`, or `mousse/thread/<id>/main` for older threads). */
 export function isMousseBranch(branch: string): boolean {
   return /^mousse\//.test(branch.trim())
 }

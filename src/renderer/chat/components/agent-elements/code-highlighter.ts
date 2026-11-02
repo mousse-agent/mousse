@@ -156,7 +156,7 @@ export function createCodeHighlighter(
       if (callback) callbacks.add(callback);
       pending.set(key, callbacks);
 
-      tokenize(code, lang, names)
+      void tokenize(code, lang, names)
         .then(
           (result) => {
             cacheResult(key, result);

@@ -255,7 +255,7 @@ export class BotExecutionService {
       refs.thread !== binding.stream
     )
       return
-    this.cancel(record.id)
+    void this.cancel(record.id)
     this.options.output.rejectDependents(record)
   }
   private async run(

@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto'
-import { existsSync, mkdirSync, readFileSync, renameSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { atomicWriteJsonSync, fsyncDirectorySync } from '../data/AtomicFs'
 import { isOwnerLive, PROCESS_INSTANCE_ID } from '../queue/processLiveness'
@@ -8,6 +8,7 @@ import type { LifecycleOperation, LifecycleOperationKind, LifecycleOperationPhas
 import { ResourceLifecycleError, ResourceLifecycleStore, validateResourceInventory } from './ResourceLifecycleStore'
 import { buildResourceInventory } from './ResourceInventory'
 import { ResourcePurgeService } from './ResourcePurgeService'
+import { renameFolder } from './renameFolder'
 
 export interface LifecycleRequest { taskId: string; operationId: string; expectedGeneration?: number }
 export interface ResourceLifecycleHooks {
@@ -29,32 +30,23 @@ export interface ResourceLifecycleHooks {
   quiesceDisk?(): Promise<() => void>
   /** Fault injection / observability after durable boundaries, never used to authorize a move. */
   onPhase?(record: TaskLifecycleRecord, phase: LifecycleOperationPhase): Promise<void> | void
+  /**
+   * Run on every pass of a permanent delete, the first and each resumed one, before anything is removed: what the
+   * deleted threads hold outside their folders (snapshot stores) is let go. It must be safe to run again; a failure
+   * stops the pass, and the purge stays started and resumes later.
+   */
+  beforePurgeRemoval?(record: TaskLifecycleRecord): Promise<void> | void
 }
 
 const running = new Set<string>()
 const LOCATION_MARKER = '.lifecycle-location.json'
 const MOVABLE_LOCKS = ['execution.lease', 'queue.mut.lock', 'thread-data.mut.lock']
 
-/**
- * Moves a thread's folder. On Windows a rename fails with EPERM/EACCES/EBUSY while any process, such as
- * an indexer, a virus scanner or a build tool, has a handle inside the folder; they let go within moments,
- * so the move is retried briefly before the failure is reported.
- */
-function renameFolder(from: string, to: string): void {
-  for (let attempt = 0; ; attempt++) {
-    try { renameSync(from, to); return } catch (error) {
-      const code = (error as NodeJS.ErrnoException).code
-      if (process.platform !== 'win32' || (code !== 'EPERM' && code !== 'EACCES' && code !== 'EBUSY') || attempt >= 10) throw error
-      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50)
-    }
-  }
-}
-
 /** Phase 1 only: reversible metadata moves. No resource deletion, ref updates or Git maintenance. */
 export class ResourceLifecycleCoordinator {
   readonly cleanup: ResourcePurgeService
   constructor(readonly store: ResourceLifecycleStore, private readonly hooks: ResourceLifecycleHooks) {
-    this.cleanup = new ResourcePurgeService(store, { assertIdle: (taskId) => hooks.assertCanTrash?.(store.require(taskId)), projectPurged: (record) => hooks.projectPurged?.(record), onBoundary: (record) => hooks.onPhase?.(record, 'purge-started'), configurationChanged: hooks.configurationChanged, quiesceDisk: hooks.quiesceDisk })
+    this.cleanup = new ResourcePurgeService(store, { assertIdle: (taskId) => hooks.assertCanTrash?.(store.require(taskId)), projectPurged: (record) => hooks.projectPurged?.(record), onBoundary: (record) => hooks.onPhase?.(record, 'purge-started'), beforeRemoval: (record) => hooks.beforePurgeRemoval?.(record), configurationChanged: hooks.configurationChanged, quiesceDisk: hooks.quiesceDisk })
   }
 
   trash(request: LifecycleRequest): Promise<TaskLifecycleRecord> { return this.run('trash', request) }

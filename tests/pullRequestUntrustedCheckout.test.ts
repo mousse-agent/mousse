@@ -12,6 +12,16 @@ import { PullRequestThreadService } from '../src/mms/git/PullRequestThreadServic
 import { ThreadWorkspaceManager } from '../src/mms/workspace/ThreadWorkspaceManager'
 import type { PullRequestDetail } from '../src/shared/pullRequests'
 import { git, gitFoundationFixture } from './fixtures/gitFoundation'
+import { clearGitPolicyLog, gitPolicyLog, userAction } from '../src/mms/git/gitPolicy'
+
+/** A config value, or '' when it is not set. */
+const configOf = (cwd: string, key: string): string => { try { return git(cwd, 'config', '--get', key) } catch { return '' } }
+
+/** The user's Start thread from pull request. */
+const START = userAction('button', 'Start thread from pull request')
+
+/** The user's request a test passes to a GitService change. */
+const USER = userAction('button', 'Test action')
 
 const REMOTES = 'origin\thttps://github.com/bob/app.git (fetch)\norigin\thttps://github.com/bob/app.git (push)\nupstream\thttps://github.com/acme/app.git (fetch)\nupstream\thttps://github.com/acme/app.git (push)\n'
 const HOOKS = ['pre-commit', 'commit-msg', 'post-commit', 'post-checkout', 'pre-push', 'reference-transaction', 'post-merge']
@@ -156,7 +166,7 @@ describe('a pull request that tries to run code', () => {
   })
 
   it("starts the thread without running a filter, a hook or a request to the pull request's server, and keeps the files as committed", async () => {
-    const started = await service.startThread({ projectId, reference: '7', allowWorktreeConfig: true })
+    const started = await service.startThread({ projectId, reference: '7', allowWorktreeConfig: true }, START)
     const workspace = workspaceOf(started.thread.id)
     expect(workspace).toMatchObject({ lifecycle: 'ready', untrusted: true })
 
@@ -176,8 +186,30 @@ describe('a pull request that tries to run code', () => {
     expect(git(workspace.worktreePath, 'config', '--worktree', '--get', 'submodule.recurse')).toBe('false')
   }, 60_000)
 
+  it('sets up the thread with refusal on: every step is owned or covered by the Start thread action', async () => {
+    vi.stubEnv('MOUSSE_GIT_POLICY', 'refuse')
+    clearGitPolicyLog()
+    expect(configOf(f.repo, 'extensions.worktreeConfig')).toBe('')
+    const started = await service.startThread({ projectId, reference: '7', allowWorktreeConfig: true }, START)
+    const workspace = workspaceOf(started.thread.id)
+    expect(workspace).toMatchObject({ lifecycle: 'ready', untrusted: true })
+    expect(git(f.repo, 'config', '--get', 'extensions.worktreeConfig')).toBe('true')
+    expect(git(workspace.worktreePath, 'config', '--show-scope', '--get', 'core.hooksPath')).toMatch(/^worktree\s+\/dev\/null$/)
+    expect(gitPolicyLog()).toEqual([])
+    vi.unstubAllEnvs()
+  }, 60_000)
+
+  it('without the user\'s request, the repository config write is refused and the thread is not set up', async () => {
+    vi.stubEnv('MOUSSE_GIT_POLICY', 'refuse')
+    clearGitPolicyLog()
+    await expect(service.startThread({ projectId, reference: '7', allowWorktreeConfig: true }, undefined as never)).rejects.toThrow()
+    expect(configOf(f.repo, 'extensions.worktreeConfig')).toBe('')
+    expect(gitPolicyLog().map((entry) => entry.command)).toContain('git config --local extensions.worktreeConfig true')
+    vi.unstubAllEnvs()
+  }, 60_000)
+
   it("runs no hook or filter in the commands Mousse runs there afterwards: the checkpoint commit, the side card's Commit and Push", async () => {
-    const { thread } = await service.startThread({ projectId, reference: '7', allowWorktreeConfig: true })
+    const { thread } = await service.startThread({ projectId, reference: '7', allowWorktreeConfig: true }, START)
     const { worktreePath } = workspaceOf(thread.id)
     expect(marked()).toEqual([])
 
@@ -192,9 +224,9 @@ describe('a pull request that tries to run code', () => {
 
     // The side card's Commit (which lets hooks run) and Push (to the pull request's branch).
     writeFileSync(join(worktreePath, 'edit.txt'), 'an edit\n')
-    await mms.gitService.commit(worktreePath, 'A commit from the side card', { all: true })
+    await mms.gitService.commit(worktreePath, USER, 'A commit from the side card', { all: true })
     expect(marked()).toEqual([])
-    await mms.gitService.push(worktreePath, { toRemote: 'upstream', toBranch: 'fix-thing' })
+    await mms.gitService.push(worktreePath, USER, { toRemote: 'upstream', toBranch: 'fix-thing' })
     expect(git(join(f.root, 'base.git'), 'rev-parse', 'refs/heads/fix-thing')).toBe(git(worktreePath, 'rev-parse', 'HEAD'))
     // A plain status or diff runs no filter either.
     git(worktreePath, 'status', '--porcelain')
@@ -205,7 +237,7 @@ describe('a pull request that tries to run code', () => {
   }, 90_000)
 
   it('keeps the safety when the worktree is made again after it was removed', async () => {
-    const { thread } = await service.startThread({ projectId, reference: '7', allowWorktreeConfig: true })
+    const { thread } = await service.startThread({ projectId, reference: '7', allowWorktreeConfig: true }, START)
     const workspace = workspaceOf(thread.id)
     git(f.repo, 'worktree', 'remove', '--force', workspace.worktreePath)
     expect(existsSync(workspace.worktreePath)).toBe(false)
@@ -225,7 +257,7 @@ describe('a pull request that tries to run code', () => {
     authorGit('commit', '-qm', 'drop the attributes')
     authorGit('push', '-q', '--force', 'origin', 'HEAD:refs/pull/7/head')
     prSha = authorGit('rev-parse', 'HEAD')
-    const { thread } = await service.startThread({ projectId, reference: '7', allowWorktreeConfig: true })
+    const { thread } = await service.startThread({ projectId, reference: '7', allowWorktreeConfig: true }, START)
     const workspace = workspaceOf(thread.id)
     // An inactive-worktree rule 40 days on retires it; only manual runs may act, as a scheduled one could retire it again.
     const manualRun = mms.storageCleanup.run.bind(mms.storageCleanup)
@@ -271,7 +303,7 @@ describe('a pull request that tries to run code', () => {
   it('refuses, and leaves nothing, when a filter driver is configured for the repository itself', async () => {
     git(f.repo, 'config', 'filter.evil.smudge', 'sh tools/smudge.sh')
     const threadsBefore = mms.threads.listAllThreads().length
-    await expect(service.startThread({ projectId, reference: '7', allowWorktreeConfig: true })).rejects.toMatchObject({
+    await expect(service.startThread({ projectId, reference: '7', allowWorktreeConfig: true }, START)).rejects.toMatchObject({
       code: 'pull_request_workspace_failed',
       message: expect.stringContaining('Safe checkout refuses configured external clean, smudge or process filters.')
     })

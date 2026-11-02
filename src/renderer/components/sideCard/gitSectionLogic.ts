@@ -648,7 +648,7 @@ export function canPush(status: GitStatusSnapshot | null): boolean {
 }
 
 /** Shown where a thread's own worktree rules out an action, for example amend. */
-export const THREAD_CHECKPOINTED_REASON = "This thread's branch is checkpointed"
+export const THREAD_WORKTREE_REASON = "Not available in this thread's worktree"
 
 const plural = (count: number, noun: string) => `${count} ${noun}${count === 1 ? '' : 's'}`
 
@@ -746,7 +746,7 @@ export function gitActionAvailability(
 
   const offerCommitAndPush = canPush(status) && !behind
   const lookupNone = pullRequest?.state === 'none' && pullRequest.isDefaultBranch === false
-  const amendReason = inThread ? THREAD_CHECKPOINTED_REASON : commitCount === 0 ? 'No commits yet' : null
+  const amendReason = inThread ? THREAD_WORKTREE_REASON : commitCount === 0 ? 'No commits yet' : null
 
   let mode: CommitMode = 'all'
   if (conflictedReason) mode = 'conflicted'
@@ -816,15 +816,15 @@ export interface CommitMenuState {
 }
 
 /**
- * `checkpointed` is a thread's own worktree: its history is recorded commit by commit, so the daemon
+ * `inThread` is a thread's own worktree: a commit there takes every change, so the daemon
  * refuses an amend there and the switch says why instead of failing later.
  */
-export function commitMenuState(commits: readonly GitCommit[], fileCount: number, amendChecked: boolean, checkpointed = false): CommitMenuState {
-  const canAmend = !checkpointed && canAmendCommit(commits)
+export function commitMenuState(commits: readonly GitCommit[], fileCount: number, amendChecked: boolean, inThread = false): CommitMenuState {
+  const canAmend = !inThread && canAmendCommit(commits)
   const hasChanges = fileCount > 0
   const forced = canAmend && !hasChanges
   const amendTitle = !canAmend
-    ? checkpointed ? THREAD_CHECKPOINTED_REASON : commits.length === 0 ? 'No commits yet' : 'The last commit is already pushed'
+    ? inThread ? THREAD_WORKTREE_REASON : commits.length === 0 ? 'No commits yet' : 'The last commit is already pushed'
     : forced ? 'No changes to commit' : null
   const triggerEnabled = hasChanges || canAmend
   return {

@@ -24,6 +24,7 @@ import { withEnforced } from '../../env'
 import { atomicWriteJsonSync } from '../../../data/AtomicFs'
 import type { UserQuestionService } from '../../../orchestrator/UserQuestionService'
 import { codexMcpConfigOverrides } from '../../../run/mcp/attachment'
+import type { McpAttachment } from '../../../run/mcp/MousseMcpServer'
 import type { LoginSession } from '../../../providers/LoginSession'
 import { settingsMirror, type MirrorField, type VendorMirror } from '../../vendorMirror'
 import {
@@ -349,7 +350,7 @@ export type CodexChatInput = {
   /** Set for a delegated child's turns (first and resumed); see `codexTurnPolicy`. */
   child?: ChildTurnPolicy
   /** The Mousse MCP server for this run (SPEC §15.2); null attaches none. */
-  mcp?: { url: string; token: string } | null
+  mcp?: McpAttachment | null
   /**
    * Codex developer instructions for a new, resumed or forked thread (SPEC §15.3). A loaded thread
    * that continues with other instructions gets the new text in that turn's prompt.
@@ -1038,7 +1039,7 @@ export class CodexProviderService {
   /** Running chats by Codex thread id. */
   private readonly turns = new Map<string, TurnRun>()
   /**
-   * Codex threads loaded in the current process, with the MCP token and cwd they were opened with.
+   * Codex threads loaded in the current process, with the MCP token, MCP relay and cwd they were opened with.
    * Only cold opens (start, resume of an unloaded thread, fork) record an entry: Codex applies
    * config overrides when it loads a thread and ignores them on an already-loaded one.
    */
@@ -1047,7 +1048,7 @@ export class CodexProviderService {
   private readonly pendingSweeps = new Map<string, Promise<void>>()
   /** Helpers of finished chats that were told to stop before their turn id was known. */
   private readonly orphans = new Set<NativeHelpers>()
-  private readonly loaded = new Map<string, { mcpToken: string | null; cwd: string; childKey: string; instructionsHash?: string }>()
+  private readonly loaded = new Map<string, { mcpToken: string | null; relayKey: string | null; cwd: string; childKey: string; instructionsHash?: string }>()
   private readonly activeThreads = new Set<string>()
   private readonly controllers = new Set<AbortController>()
   private readonly readyToCommit = new Set<string>()
@@ -2311,6 +2312,8 @@ export class CodexProviderService {
     const instructionsHash = input.developerInstructions ? historyKey(input.developerInstructions).slice(0, 32) : undefined
     const saved = this.settings.threads?.[input.threadId]
     const mcpToken = input.mcp?.token ?? null
+    // The MCP relay and its catalogue revision: Codex lists a server's tools when it loads a thread.
+    const relayKey = input.mcp?.relay ? `${input.mcp.relay.url}|${input.mcp.relay.revision}` : null
     const overrides = codexMcpConfigOverrides(input.mcp) as ThreadConfig
     const { baseId } = parseThinkingSuffixFromModelId(input.model)
     const permissionMode = normalizePermissionMode(input.permissionMode)
@@ -2340,7 +2343,7 @@ export class CodexProviderService {
         if (this.turns.has(saved.codexThreadId)) throw new Error('The previous Codex turn on this thread is still running')
       }
       const loaded = this.loaded.get(saved.codexThreadId)
-      if (loaded && loaded.mcpToken === mcpToken && loaded.cwd === cwd && loaded.childKey === childKey) {
+      if (loaded && loaded.mcpToken === mcpToken && loaded.relayKey === relayKey && loaded.cwd === cwd && loaded.childKey === childKey) {
         // A loaded thread keeps the developer instructions it was opened with: changed ones go into the prompt.
         const instructionsStale = instructionsHash !== undefined && loaded.instructionsHash !== instructionsHash
         loaded.instructionsHash = instructionsHash
@@ -2352,26 +2355,26 @@ export class CodexProviderService {
         // config, and the old thread is released.
         const forked = pinnedProvider(this.modelProvider, await conn.request('thread/fork', { threadId: saved.codexThreadId, excludeTurns: true, ...params }, { signal }))
         this.loaded.delete(saved.codexThreadId)
-        this.loaded.set(forked.thread.id, { mcpToken, cwd, childKey, instructionsHash })
+        this.loaded.set(forked.thread.id, { mcpToken, relayKey, cwd, childKey, instructionsHash })
         await conn.request('thread/unsubscribe', { threadId: saved.codexThreadId }, { signal, timeoutMs: 5_000 }).catch(() => undefined)
         signal.throwIfAborted()
         return { codexThreadId: forked.thread.id, model: forked.model, continued: true }
       }
       try {
         const resumed = pinnedProvider(this.modelProvider, await conn.request('thread/resume', { threadId: saved.codexThreadId, excludeTurns: true, ...params }, { signal }))
-        this.loaded.set(resumed.thread.id, { mcpToken, cwd, childKey, instructionsHash })
+        this.loaded.set(resumed.thread.id, { mcpToken, relayKey, cwd, childKey, instructionsHash })
         return { codexThreadId: resumed.thread.id, model: resumed.model, continued: true }
       } catch (error) {
         signal.throwIfAborted()
         conn.signal.throwIfAborted()
         if (!(error instanceof CodexRpcError)) throw error
         const fresh = pinnedProvider(this.modelProvider, await conn.request('thread/start', params, { signal }))
-        this.loaded.set(fresh.thread.id, { mcpToken, cwd, childKey, instructionsHash })
+        this.loaded.set(fresh.thread.id, { mcpToken, relayKey, cwd, childKey, instructionsHash })
         return { codexThreadId: fresh.thread.id, model: fresh.model, continued: false }
       }
     }
     const fresh = pinnedProvider(this.modelProvider, await conn.request('thread/start', params, { signal }))
-    this.loaded.set(fresh.thread.id, { mcpToken, cwd, childKey, instructionsHash })
+    this.loaded.set(fresh.thread.id, { mcpToken, relayKey, cwd, childKey, instructionsHash })
     return { codexThreadId: fresh.thread.id, model: fresh.model, continued: false }
   }
 

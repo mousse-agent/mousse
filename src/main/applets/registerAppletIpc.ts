@@ -7,6 +7,7 @@ import type { AppletBundle } from '../../shared/applets'
 import type { AppletIdentity, AppletBounds, AppletUiEvent } from '../../shared/appletRuntime'
 import { validateAppletAppearance } from '../../shared/appletAppearance'
 import { AppletRuntimeManager } from './AppletRuntimeManager'
+import { logWarn } from '../../mms/log/diag'
 
 type Register = (channel:string, handler:(event:IpcMainInvokeEvent, input:unknown)=>unknown)=>void
 interface Owner {manager:AppletRuntimeManager;window:BrowserWindow;profileId:string;epoch:number;entries:Map<string,AppletIdentity>}
@@ -36,7 +37,7 @@ export function registerAppletIpc(register:Register, gui:GuiMmsController, allow
       if(eventData.type==='released')value.entries.delete(eventData.runtimeId)
       if(eventData.type==='state') {
         win.webContents.send('applets:event',{runtimeId:eventData.runtimeId,type:'state-changed'} satisfies AppletUiEvent)
-        void gui.runWithSender(win.webContents,()=>gui.request('applets.state.save',{...entry,profileId:ownProfile(value),state:eventData.payload})).catch(()=>{})
+        void gui.runWithSender(win.webContents,()=>gui.request('applets.state.save',{...entry,profileId:ownProfile(value),state:eventData.payload})).catch(error=>logWarn('applets','saving applet state failed',error,{appletId:entry.appletId}))
         return
       }
       const result:AppletUiEvent={runtimeId:eventData.runtimeId,type:eventData.type==='conversation-input'?'conversation-input':eventData.type,

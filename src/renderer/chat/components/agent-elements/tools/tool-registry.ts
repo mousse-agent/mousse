@@ -92,7 +92,7 @@ const SUBAGENT_TOOL_TITLES: Record<SubagentToolName, readonly [pending: string, 
   task_status: ["Checking subagent", "Checked subagent", "Couldn't check subagent"],
   task_cancel: ["Stopping subagent", "Stopped subagent", "Couldn't stop subagent"],
   list_subagents: ["Listing subagents", "Listed subagents", "Couldn't list subagents"],
-  integrate_delegation: ["Merging subagent work", "Merged subagent work", "Couldn't merge subagent work"],
+  integrate_delegation: ["Getting subagent result", "Got subagent result", "Couldn't get subagent result"],
 };
 
 function isSubagentCallFailed(part: any): boolean {

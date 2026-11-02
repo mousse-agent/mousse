@@ -69,11 +69,19 @@ describe('isNewEmptyThread', () => {
 
 describe('composerWorkspaceFor', () => {
   it('prefers the draft and otherwise falls back to the thread', () => {
-    expect(composerWorkspaceFor({ projectId: 'p', worktreeEnabled: true }, thread({ projectId: 'q' })))
+    expect(composerWorkspaceFor({ projectId: 'p', worktreeEnabled: true }, thread({ projectId: 'q' }), false))
       .toEqual({ projectId: 'p', worktreeEnabled: true })
-    expect(composerWorkspaceFor(undefined, thread({ projectId: 'q', worktreeEnabled: true })))
+    expect(composerWorkspaceFor(undefined, thread({ projectId: 'q', worktreeEnabled: true }), false))
       .toEqual({ projectId: 'q', worktreeEnabled: true })
-    expect(composerWorkspaceFor(undefined, undefined)).toEqual({ projectId: undefined, worktreeEnabled: false })
+    expect(composerWorkspaceFor(undefined, undefined, false)).toEqual({ projectId: undefined, worktreeEnabled: false })
+  })
+
+  it('takes the "Start new chats in a worktree" setting until the thread or draft chooses', () => {
+    expect(composerWorkspaceFor(undefined, undefined, true)).toEqual({ projectId: undefined, worktreeEnabled: true })
+    expect(composerWorkspaceFor(undefined, thread({ projectId: 'q' }), true)).toEqual({ projectId: 'q', worktreeEnabled: true })
+    // A thread that chose its project's folder keeps it, whatever the setting says.
+    expect(composerWorkspaceFor(undefined, thread({ projectId: 'q', worktreeEnabled: false }), true)).toEqual({ projectId: 'q', worktreeEnabled: false })
+    expect(composerWorkspaceFor({ projectId: 'q', worktreeEnabled: false }, thread({ projectId: 'q' }), true)).toEqual({ projectId: 'q', worktreeEnabled: false })
   })
 })
 
@@ -131,12 +139,12 @@ describe('picking where a new chat runs', () => {
   })
 
   it('does not use another computer\'s project ids for work that runs here', () => {
-    expect(localWorkspaceFor({ projectId: 'y', worktreeEnabled: true, node }, undefined)).toEqual({ worktreeEnabled: false })
-    expect(localWorkspaceFor({ projectId: 'a', worktreeEnabled: true }, undefined)).toEqual({ projectId: 'a', worktreeEnabled: true })
-    expect(localWorkspaceFor(undefined, thread({ projectId: 'q' }))).toEqual({ projectId: 'q', worktreeEnabled: false })
+    expect(localWorkspaceFor({ projectId: 'y', worktreeEnabled: true, node }, undefined, false)).toEqual({ worktreeEnabled: false })
+    expect(localWorkspaceFor({ projectId: 'a', worktreeEnabled: true }, undefined, false)).toEqual({ projectId: 'a', worktreeEnabled: true })
+    expect(localWorkspaceFor(undefined, thread({ projectId: 'q' }), false)).toEqual({ projectId: 'q', worktreeEnabled: false })
     // An empty chat that was created on another computer is a chat for it.
-    expect(localWorkspaceFor(undefined, thread({ projectId: 'node-1:q', node }))).toEqual({ worktreeEnabled: false })
-    expect(composerWorkspaceFor(undefined, thread({ projectId: 'node-1:q', node }))).toEqual({ projectId: 'node-1:q', worktreeEnabled: false, node })
+    expect(localWorkspaceFor(undefined, thread({ projectId: 'node-1:q', node }), false)).toEqual({ worktreeEnabled: false })
+    expect(composerWorkspaceFor(undefined, thread({ projectId: 'node-1:q', node }), false)).toEqual({ projectId: 'node-1:q', worktreeEnabled: false, node })
   })
 })
 

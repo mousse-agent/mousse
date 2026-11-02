@@ -29,19 +29,25 @@ describe('ThreadWorkspaceManager', () => {
     expect(context.capability.unavailableReason).toBe('Thread has no project workspace')
   })
 
-  it('provisions a durable full-id branch, retained ref, and external worktree', async () => {
+  it('provisions a branch named from the first message, a full-id retained ref, and an external worktree', async () => {
     const fixture = repository(); const previous = process.env.MOUSSE_HOME; process.env.MOUSSE_HOME = fixture.home
     try {
       const manager = new ThreadWorkspaceManager(fixture.thread)
-      const metadata = await manager.provision('thread-full-id', 'branch-full-id', fixture.root)
-      expect(metadata.branch).toBe('mousse/thread/thread-full-id/branch-full-id')
+      const metadata = await manager.provision('thread-full-id', 'branch-full-id', fixture.root, undefined, undefined, undefined, { nameFrom: 'Fix the login button on Safari' })
+      expect(metadata.branch).toBe('mousse/fix-the-login-button-on-safari')
+      expect(metadata.retainedRef).toBe('refs/mousse/threads/thread-full-id/branch-full-id')
+      expect(metadata.worktreePath.endsWith(join('threads', 'thread-full-id', 'branch-full-id'))).toBe(true)
       expect(metadata.worktreePath.startsWith(fixture.home)).toBe(true)
       expect(execFileSync('git', ['branch', '--show-current'], { cwd: metadata.worktreePath, encoding: 'utf8' }).trim()).toBe(metadata.branch)
       expect(execFileSync('git', ['show-ref', '--verify', metadata.retainedRef], { cwd: fixture.root, encoding: 'utf8' })).toContain(metadata.retainedRef)
       expect(manager.executionContext(fixture.root).projectPath).toBe(metadata.worktreePath)
       execFileSync('git', ['worktree', 'remove', metadata.worktreePath], { cwd: fixture.root })
       expect(manager.verify(metadata).lifecycle).toBe('missing')
-      expect((await manager.restore(fixture.root)).lifecycle).toBe('ready')
+      // A restore keeps the name it was given: it is never picked again.
+      const restored = await manager.restore(fixture.root)
+      expect(restored.lifecycle).toBe('ready')
+      expect(restored.branch).toBe('mousse/fix-the-login-button-on-safari')
+      expect(execFileSync('git', ['branch', '--show-current'], { cwd: restored.worktreePath, encoding: 'utf8' }).trim()).toBe(restored.branch)
     } finally {
       if (previous === undefined) delete process.env.MOUSSE_HOME; else process.env.MOUSSE_HOME = previous
     }

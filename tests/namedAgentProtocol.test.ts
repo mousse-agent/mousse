@@ -1,11 +1,13 @@
 import { join } from 'node:path'
-import { readFileSync, writeFileSync } from 'node:fs'
+import { execFileSync } from 'node:child_process'
+import { writeFileSync } from 'node:fs'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import type { Context, AssistantMessage, ToolCall } from '@earendil-works/pi-ai'
 import { MousseMainService } from '../src/mms/MousseMainService'
 import { ProviderAuthService } from '../src/mms/providers/ProviderAuthService'
 import { MmsProtocolServer, LocalMmsClient } from '../src/mms/protocol'
 import { ThreadWorkspaceManager } from '../src/mms/workspace/ThreadWorkspaceManager'
+import { delegationResultRefPrefix } from '../src/mms/agents/subagentResultReport'
 import { gitFoundationFixture } from './fixtures/gitFoundation'
 import { seedLegacyNamedEpisode } from './fixtures/legacy-named-agent'
 import { providerResponse } from './fixtures/agent-platform/agent-runtime-policy/helpers'
@@ -110,96 +112,51 @@ function toolResultsSinceUser(context: Context) {
 const toolCall = (id: string, name: string, args: Record<string, unknown>) => providerResponse([{ type: 'toolCall', id, name, arguments: args }], 'toolUse')
 const text = (value: string) => providerResponse([{ type: 'text', text: value }], 'stop')
 const DELEGATION_ID = /finished task (delegation:[0-9a-f-]+)/
+const gitIn = (cwd: string, ...args: string[]) => execFileSync('git', args, { cwd, encoding: 'utf8' }).trim()
 
-// Phase 4 (SPEC §14): create_subagent is a wrapper over delegate_task. The parent no longer
-// blocks inside the tool call: the child is a thread with lineage, its completion is an inbox row,
-// and reconciler rule 4 wakes the parent, which reads the result and integrates the isolated work.
-it('delegates main to an isolated writer thread, wakes main with its result and integrates it', async () => {
+// Phase 4 (SPEC §14): create_subagent is a wrapper over delegate_task. The parent no longer blocks
+// inside the tool call: the child is a thread with lineage, its completion is an inbox row, and
+// reconciler rule 4 wakes the parent with the result and what the child left in its worktree.
+// Mousse merges nothing; the parent brings the work in itself.
+it('delegates main to an isolated writer thread and wakes main with its result and its frozen files, merging nothing', async () => {
   const project = mms.projects.openProject(f.repo), thread = mms.threads.createThread('Nested writers', project.id)
-  const seen: string[] = []
+  const wakes: string[] = []
   respond = (context) => {
     const prompt = lastUserText(context), results = toolResultsSinceUser(context)
-    seen.push(`${prompt.slice(0, 24)}#${results.length}`)
     if (prompt === 'Delegate the change.') return results.length ? text('Main delegated') : toolCall('create-worker', 'create_subagent', { name: 'Worker', task: 'Write value', access: 'write' })
     if (prompt === 'Write value') return results.length ? text('Worker done') : toolCall('worker-write', 'write', { path: 'value.txt', content: 'child result\n' })
     const delegationId = DELEGATION_ID.exec(prompt)?.[1]
     if (delegationId) {
-      if (results.length === 0) return toolCall('main-status', 'task_status', { delegationId })
-      if (results.length === 1) return toolCall('main-integrate', 'integrate_delegation', { delegationId })
-      return text('Integration requested')
+      if (results.length === 0) { wakes.push(prompt); return toolCall('main-status', 'task_status', { delegationId }) }
+      return text('Main read the result')
     }
-    if (prompt.startsWith('Integration of delegated task')) return text('Integrated')
     return text('unexpected')
   }
   const result = await client.request<{ message: string }>('orchestrator.send', { threadId: thread.id, content: 'Delegate the change.', mode: 'agent' })
   expect(result.message).toBe('Main delegated')
   const [delegation] = mms.orchestrator.listDelegations(thread.id)
-  expect(delegation).toMatchObject({ title: 'Worker' })
   const child = mms.threads.getThread(delegation.childThreadId)!
-  expect(child.projectId).toBe(project.id)
   await vi.waitFor(() => {
-    expect(mms.orchestrator.getMessages(thread.id).some((message) => message.role === 'assistant' && message.content === 'Integrated')).toBe(true)
+    expect(mms.orchestrator.getMessages(thread.id).some((message) => message.role === 'assistant' && message.content === 'Main read the result')).toBe(true)
   }, { timeout: 20_000, interval: 50 })
-  expect(mms.orchestrator.listDelegations(thread.id)[0].status).toBe('acknowledged')
-  const status = captured.flatMap((context) => context.messages).find((message) => message.role === 'toolResult' && message.toolName === 'task_status')
-  expect(JSON.stringify(status)).toContain('Worker done')
   const childWorkspace = new ThreadWorkspaceManager(mms.threads.getThreadDir(child.id)).load()!
-  const mainWorkspace = new ThreadWorkspaceManager(mms.threads.getThreadDir(thread.id)).load()!
-  expect(childWorkspace.worktreePath).not.toBe(mainWorkspace.worktreePath)
+  const resultRef = `${delegationResultRefPrefix(child.id, delegation.delegationId)}/result`
+  // The wake says where the child worked, what it changed and how to bring it in; task_status carries the same.
+  expect(wakes[0]).toContain('Worker done')
+  expect(wakes[0]).toContain(`Worked in: ${childWorkspace.worktreePath} (its own worktree)`)
+  expect(wakes[0]).toContain('Files: 1 changed (value.txt)')
+  expect(wakes[0]).toContain(resultRef)
+  expect(wakes[0]).toMatch(/Mousse merged nothing\. To bring the files in: git diff --binary [0-9a-f]{40} [0-9a-f]{40} \| git apply --3way/)
+  const status = captured.flatMap((context) => context.messages).find((message) => message.role === 'toolResult' && message.toolName === 'task_status')
+  expect(JSON.stringify(status)).toContain('workspaceResult')
+  // Nothing came into the parent; the result is pinned under a ref that outlives the child's worktree.
   expect(f.read(childWorkspace.worktreePath)).toBe('child result\n')
-  expect(f.read(mainWorkspace.worktreePath)).toBe('child result\n')
+  const mainWorkspace = new ThreadWorkspaceManager(mms.threads.getThreadDir(thread.id)).load()
+  if (mainWorkspace) expect(f.read(mainWorkspace.worktreePath)).toBe('base\n')
   expect(f.read(f.repo)).toBe('base\n')
-  expect(seen).toContain('Write value#0')
+  expect(gitIn(f.repo, 'show', `${resultRef}:value.txt`)).toBe('child result')
 }, 45_000)
-// Issue #142, nested results: P -> Coordinator -> Reader, all isolated. The Coordinator integrates the
-// Reader's work in later runs of its own, and P integrates the Coordinator. The task P holds
-// publishes the answer of the Coordinator's last run, so P merges the checkpoint of that run, not
-// the Coordinator's first one, which does not have the Reader's work.
-it('integrates, at depth, the checkpoint of the run whose answer the task published, after the integration outcome was read', async () => {
-  const project = mms.projects.openProject(f.repo), thread = mms.threads.createThread('Nested integration', project.id)
-  let integrationNotices = 0
-  respond = (context) => {
-    const prompt = lastUserText(context), results = toolResultsSinceUser(context)
-    if (prompt === 'Delegate the coordination.') return results.length ? text('Main delegated') : toolCall('create-coordinator', 'create_subagent', { name: 'Coordinator', task: 'Coordinate the reading', access: 'write' })
-    if (prompt === 'Coordinate the reading') return results.length ? text('Coordinator started the Reader') : toolCall('create-reader', 'create_subagent', { name: 'Reader', task: 'Write g.txt', access: 'write' })
-    if (prompt === 'Write g.txt') return results.length ? text('Reader done') : toolCall('reader-write', 'write', { path: 'g.txt', content: 'reader work\n' })
-    const finished = DELEGATION_ID.exec(prompt)?.[1]
-    if (prompt.startsWith('Subagent "Reader"') && finished) {
-      // The Coordinator's wake: integrate the Reader's work, which runs as an integration run of its own.
-      return results.length ? text('Coordinator is integrating') : toolCall('coordinator-integrate', 'integrate_delegation', { delegationId: finished })
-    }
-    if (prompt.startsWith('Integration of delegated task')) {
-      // The first outcome is the Coordinator's: its last run adds a file of its own, then answers.
-      if (results.length === 0) integrationNotices += 1
-      if (integrationNotices === 1) return results.length ? text("Coordinator final: the Reader's work is merged") : toolCall('coordinator-write', 'write', { path: 'c.txt', content: 'coordinator work\n' })
-      return text('Main integrated')
-    }
-    if (prompt.startsWith('Subagent "Coordinator"') && finished) {
-      return results.length ? text('Main is integrating') : toolCall('main-integrate', 'integrate_delegation', { delegationId: finished })
-    }
-    return text('unexpected')
-  }
-  const result = await client.request<{ message: string }>('orchestrator.send', { threadId: thread.id, content: 'Delegate the coordination.', mode: 'agent' })
-  expect(result.message).toBe('Main delegated')
-  await vi.waitFor(() => {
-    expect(mms.orchestrator.getMessages(thread.id).some((message) => message.role === 'assistant' && message.content === 'Main integrated')).toBe(true)
-  }, { timeout: 60_000, interval: 100 })
-  const [task] = mms.orchestrator.listDelegations(thread.id)
-  const engine = (mms.orchestrator as any).runEngine
-  const coordinatorRuns = engine.listRuns(task.childThreadId) as Array<{ runId: string; ordinal: number; source: string; status: string }>
-  const integration = coordinatorRuns.find((run) => run.source === 'integration')!
-  const published = engine.delegations.get(task.delegationId).result as { runId: string; text: string }
-  // The task published after the Coordinator read the integration outcome, from the run that answered it.
-  expect(integration.status).toBe('completed')
-  expect(published.text).toBe("Coordinator final: the Reader's work is merged")
-  expect(coordinatorRuns.find((run) => run.runId === published.runId)!.ordinal).toBeGreaterThan(integration.ordinal)
-  expect(published.runId).not.toBe(engine.delegations.get(task.delegationId).childRunId)
-  // Main merged that run's checkpoint: the Reader's work (integrated into the Coordinator later) and the Coordinator's own.
-  const mainWorkspace = new ThreadWorkspaceManager(mms.threads.getThreadDir(thread.id)).load()!
-  expect(readFileSync(join(mainWorkspace.worktreePath, 'g.txt'), 'utf8')).toBe('reader work\n')
-  expect(readFileSync(join(mainWorkspace.worktreePath, 'c.txt'), 'utf8')).toBe('coordinator work\n')
-  expect(f.read(f.repo)).toBe('base\n')
-}, 90_000)
+
 it('provisions first-use task editor writes and commits only in the owned checkout', async () => {
   const project = mms.projects.openProject(f.repo), thread = mms.threads.createThread('First editor save', project.id)
   await client.request('files.write', { threadId: thread.id, path: 'value.txt', content: 'editor-owned\n' })

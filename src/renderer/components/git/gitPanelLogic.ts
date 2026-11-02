@@ -7,7 +7,7 @@ import type {
   GitScope,
   GitStatusSnapshot
 } from '../../../shared/types'
-import { THREAD_CHECKPOINTED_REASON } from '../sideCard/gitSectionLogic'
+import { THREAD_WORKTREE_REASON } from '../sideCard/gitSectionLogic'
 
 /** Pure state and wording for the Git panel's file rows and its sync bar. */
 
@@ -104,7 +104,7 @@ export function syncControls(status: GitStatusSnapshot | null, scope: Pick<GitSc
   }
   const fetch: SyncControl = status.hasRemote === false ? { enabled: false, reason: 'No remote configured' } : { enabled: true, reason: null }
   let pullReason: string | null = null
-  if (scope.workspaceThreadId !== null) pullReason = THREAD_CHECKPOINTED_REASON
+  if (scope.workspaceThreadId !== null) pullReason = THREAD_WORKTREE_REASON
   else if (state.kind === 'conflicted') pullReason = 'Resolve the conflicted files first'
   else if (state.kind === 'in-progress') pullReason = `Finish or abort the ${state.what ?? 'merge'} first`
   else if (state.noUpstream === 'detached') pullReason = 'Detached HEAD has no upstream'
@@ -177,7 +177,7 @@ export type RowAction = 'stage' | 'unstage' | 'discard'
 
 /**
  * The buttons a file row shows. Stage and unstage are absent in a thread's own worktree, where
- * the next checkpoint commits everything anyway; discard is available everywhere.
+ * a commit there takes every change anyway; discard is available everywhere.
  */
 export function rowActions(file: GitFileChange, scope: Pick<GitScope, 'workspaceThreadId'>): RowAction[] {
   if (file.status === 'ignored') return []

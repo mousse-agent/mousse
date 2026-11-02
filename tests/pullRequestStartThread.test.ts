@@ -8,6 +8,10 @@ import { PullRequestThreadError, PullRequestThreadService } from '../src/mms/git
 import { WORKTREE_CONFIG_ENABLED, WORKTREE_CONFIG_NEEDED, type PullRequestDetail } from '../src/shared/pullRequests'
 import { ThreadWorkspaceManager } from '../src/mms/workspace/ThreadWorkspaceManager'
 import { git, gitFoundationFixture } from './fixtures/gitFoundation'
+import { userAction } from '../src/mms/git/gitPolicy'
+
+/** The user's Start thread from pull request. */
+const START = userAction('button', 'Start thread from pull request')
 
 const REMOTES = 'origin\thttps://github.com/bob/app.git (fetch)\norigin\thttps://github.com/bob/app.git (push)\nupstream\thttps://github.com/acme/app.git (fetch)\nupstream\thttps://github.com/acme/app.git (push)\n'
 
@@ -56,7 +60,7 @@ describe('starting a thread from a pull request', () => {
 
   const workspaceOf = (threadId: string) => new ThreadWorkspaceManager(mms.threads.getThreadDir(threadId)).load()!
   const start = (patch: Partial<Parameters<PullRequestThreadService['startThread']>[0]> = {}) =>
-    service.startThread({ projectId, reference: '7', allowWorktreeConfig: true, ...patch })
+    service.startThread({ projectId, reference: '7', allowWorktreeConfig: true, ...patch }, START)
 
   beforeEach(async () => {
     f = gitFoundationFixture()
@@ -124,7 +128,7 @@ describe('starting a thread from a pull request', () => {
     expect(git(workspace.worktreePath, 'rev-parse', 'HEAD')).toBe(prSha)
     expect(f.read(workspace.worktreePath)).toBe('pull request value\n')
     // The thread's branch is its own; no remote or branch was added for the fork, and the primary checkout stays put.
-    expect(workspace.branch).toBe(`mousse/thread/${result.thread.id}/main`)
+    expect(workspace.branch).toBe('mousse/pr-7-fix-the-thing')
     expect(git(f.repo, 'remote')).toBe(remotesBefore)
     expect(git(f.repo, 'rev-parse', '--abbrev-ref', 'HEAD')).toBe(primaryBranch)
     expect(git(f.repo, 'rev-parse', 'HEAD')).toBe(primaryHead)
@@ -306,12 +310,12 @@ describe('starting a thread from a pull request', () => {
   })
 
   it('refuses a URL of another repository or host before reading anything', async () => {
-    await expect(service.startThread({ projectId, reference: 'https://github.com/other/app/pull/7' })).rejects.toMatchObject({ code: 'pull_request_wrong_repository' })
-    await expect(service.startThread({ projectId, reference: 'https://ghe.example.com/acme/app/pull/7' })).rejects.toMatchObject({ code: 'pull_request_wrong_repository' })
-    await expect(service.startThread({ projectId, reference: 'not a pull request' })).rejects.toMatchObject({ code: 'invalid_params' })
-    await expect(service.startThread({ projectId, reference: '0' })).rejects.toMatchObject({ code: 'invalid_params' })
+    await expect(service.startThread({ projectId, reference: 'https://github.com/other/app/pull/7' }, START)).rejects.toMatchObject({ code: 'pull_request_wrong_repository' })
+    await expect(service.startThread({ projectId, reference: 'https://ghe.example.com/acme/app/pull/7' }, START)).rejects.toMatchObject({ code: 'pull_request_wrong_repository' })
+    await expect(service.startThread({ projectId, reference: 'not a pull request' }, START)).rejects.toMatchObject({ code: 'invalid_params' })
+    await expect(service.startThread({ projectId, reference: '0' }, START)).rejects.toMatchObject({ code: 'invalid_params' })
     expect(host.getPullRequestDetail).not.toHaveBeenCalled()
-    const result = await service.startThread({ projectId, reference: 'https://github.com/acme/app/pull/7/files', allowWorktreeConfig: true })
+    const result = await service.startThread({ projectId, reference: 'https://github.com/acme/app/pull/7/files', allowWorktreeConfig: true }, START)
     expect(result.thread.pullRequest?.number).toBe(7)
   })
 
@@ -388,18 +392,22 @@ describe('starting a thread from a pull request', () => {
   })
 
   describe('when the worktree cannot be made', () => {
-    /** Makes `git worktree add` fail after provisioning began: the thread's branch name is already taken. */
-    function blockWorktree(): { threadId: () => string } {
+    /**
+     * Makes `git worktree add` fail after provisioning began: the repository has a branch named `mousse`, so Git can make
+     * no branch under `mousse/`. (A taken thread branch name no longer blocks it: the thread gets the next free name.)
+     */
+    function blockWorktree(): { threadId: () => string; unblock: () => void } {
       let id = ''
       const create = mms.threads.createThread.bind(mms.threads)
       vi.spyOn(mms.threads, 'createThread').mockImplementation((...args) => {
         const thread = create(...args)
         id = thread.id
-        git(f.repo, 'branch', `mousse/thread/${thread.id}/main`, 'HEAD')
+        git(f.repo, 'branch', 'mousse', 'HEAD')
         return thread
       })
-      return { threadId: () => id }
+      return { threadId: () => id, unblock: () => { git(f.repo, 'branch', '-D', 'mousse') } }
     }
+    const mousseRefs = () => git(f.repo, 'for-each-ref', '--format=%(refname)').split('\n').filter((ref) => ref.startsWith('refs/heads/mousse/'))
 
     it('removes the thread, its folder and what provisioning left in the repository, and says why', async () => {
       const blocked = blockWorktree()
@@ -412,7 +420,8 @@ describe('starting a thread from a pull request', () => {
       const id = blocked.threadId()
       expect(mms.threads.listAllThreads()).toHaveLength(threadsBefore)
       expect(mms.threads.listAllThreads().some((thread) => thread.id === id)).toBe(false)
-      expect(git(f.repo, 'for-each-ref', '--format=%(refname)', `refs/heads/mousse/thread/${id}`, `refs/mousse/threads/${id}`)).toBe('')
+      expect(mousseRefs()).toEqual([])
+      expect(git(f.repo, 'for-each-ref', '--format=%(refname)', `refs/mousse/threads/${id}`)).toBe('')
       expect(git(f.repo, 'worktree', 'list', '--porcelain').split('\n').filter((line) => line.startsWith('worktree '))).toHaveLength(1)
       expect(trash).not.toHaveBeenCalled()
       // Nothing was sent and nothing is left to retry against; the fetched ref went too, so no fork history stays reachable.
@@ -420,6 +429,7 @@ describe('starting a thread from a pull request', () => {
       expect(git(f.repo, 'for-each-ref', '--format=%(refname)', 'refs/mousse/pull')).toBe('')
       // A retry is not refused as a duplicate.
       vi.mocked(mms.threads.createThread).mockRestore()
+      blocked.unblock()
       await expect(start()).resolves.toMatchObject({ sent: false })
     })
 
@@ -433,7 +443,7 @@ describe('starting a thread from a pull request', () => {
         prepareThread: () => { throw new Error('model store unavailable') }
       })
       const threadsBefore = mms.threads.listAllThreads().length
-      await expect(failing.startThread({ projectId, reference: '7', allowWorktreeConfig: true })).rejects.toMatchObject({
+      await expect(failing.startThread({ projectId, reference: '7', allowWorktreeConfig: true }, START)).rejects.toMatchObject({
         code: 'pull_request_workspace_failed',
         message: expect.stringContaining('model store unavailable')
       })
@@ -456,7 +466,7 @@ describe('starting a thread from a pull request', () => {
         send,
         prepareThread: () => { throw new Error('model store unavailable') }
       })
-      await expect(failing.startThread({ projectId, reference: '7', allowWorktreeConfig: true })).rejects.toMatchObject({ code: 'pull_request_workspace_failed' })
+      await expect(failing.startThread({ projectId, reference: '7', allowWorktreeConfig: true }, START)).rejects.toMatchObject({ code: 'pull_request_workspace_failed' })
       const registered = git(f.repo, 'worktree', 'list', '--porcelain').split('\n').filter((line) => line.startsWith('worktree '))
       expect(registered).toHaveLength(2)
       expect(registered.some((line) => line.endsWith('their-worktree'))).toBe(true)

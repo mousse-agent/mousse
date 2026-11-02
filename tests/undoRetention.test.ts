@@ -131,9 +131,11 @@ it('offers conversation-only continuation on current code after exact-code eligi
   const target = await action('historical')
   await action('current')
   await policy(); now += 30000; await retention.sweep(f.repo)
-  const current = git(f.repo, 'rev-parse', 'HEAD')
+  const head = git(f.repo, 'rev-parse', 'HEAD')
   const branch = await new ConversationBranchService(f.thread).fork(f.repo, 'main', target.id, 'Current-code conversation', undefined, 'current')
-  expect(git(f.repo, 'rev-parse', branch.retainedRef)).toBe(current)
+  // The current code is a snapshot of the files as they are now, taken on top of HEAD, kept under the branch's ref.
+  expect(git(f.repo, 'rev-parse', `${branch.retainedRef}^`)).toBe(head)
+  expect(git(f.repo, 'show', `${branch.retainedRef}:value.txt`)).toBe('current')
   expect(branch.contextBoundary).toEqual(target.nativeContextBoundary)
 })
 

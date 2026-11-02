@@ -102,7 +102,8 @@ export function ProjectTerminalPanel() {
       inst.fitAddon.fit()
       const dims = inst.fitAddon.proposeDimensions()
       if (dims) {
-        void window.mousse.pty.resize(ptyId, dims.cols, dims.rows, inst.threadId)
+        // The terminal may already have exited; a failed resize needs no report.
+        void window.mousse.pty.resize(ptyId, dims.cols, dims.rows, inst.threadId).catch(() => {})
       }
       if (focus) {
         inst.terminal.focus()
@@ -143,7 +144,8 @@ export function ProjectTerminalPanel() {
       const threadId =
         useAppStore.getState().projectTerminalTabs.find((entry) => entry.id === tabId)?.ownerThreadId ?? undefined
       terminal.onData((data) => {
-        void window.mousse.pty.write(ptyId, data, threadId)
+        // Typing into a terminal that has exited fails on every key; that is expected, not an error.
+        void window.mousse.pty.write(ptyId, data, threadId).catch(() => {})
       })
 
       instancesRef.current.set(ptyId, {

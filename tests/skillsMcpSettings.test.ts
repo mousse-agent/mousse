@@ -1,13 +1,17 @@
-import { createElement } from 'react'
+// @vitest-environment jsdom
+import { act, createElement } from 'react'
+import { createRoot } from 'react-dom/client'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it, vi } from 'vitest'
 import type { McpServerConfig, SkillDescriptor } from '../src/shared/integrations'
-import { MOUSSE_BUILTIN_TOOLS } from '../src/shared/integrations'
+import { MCP_RELAY_RUNTIMES, MOUSSE_BUILTIN_TOOLS } from '../src/shared/integrations'
 import { getDefaultSettings, type MousseSettings, type SettingsOptions } from '../src/shared/settings'
 import { isIntegrationItemOn } from '../src/renderer/components/integrations/itemState'
 import { groupMcpServers, groupSkills, OtherAppsGroup } from '../src/renderer/components/integrations/otherAppsGroup'
-import { SkillsMcpSettings } from '../src/renderer/components/settings/SkillsMcpSettings'
+import { RelayAvailability, SkillsMcpSettings } from '../src/renderer/components/settings/SkillsMcpSettings'
 import { IsolatedIntegrationPlatformClient } from './fixtures/agent-platform/integration-editor-client'
+
+;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
 // The themed select renders options only while open; the stub lists them as markup.
 vi.mock('../src/renderer/components/ui/Select', () => import('./support/selectStub'))
@@ -108,5 +112,43 @@ describe('Skills & MCP settings', () => {
     expect(open).toContain('Cursor, Claude Code · npx -y fs-server')
     expect(open).toContain('Codex · https://mcp.linear.app/mcp')
     for (const text of ['Read-only', 'role="switch"', 'More actions']) expect(open).not.toContain(text)
+  })
+
+  it('shares the MCP servers with every other runtime by default', () => {
+    const html = render(getDefaultSettings())
+    expect(html).toContain('Share with other agents')
+    expect(html).toContain('mousse-relay')
+    for (const label of ['Claude Code', 'Codex', 'Cursor', 'ACP agents', 'Antigravity', 'Grok']) expect(html).toContain(`Share MCP servers with ${label}`)
+    for (const runtime of MCP_RELAY_RUNTIMES) {
+      expect(html).toMatch(new RegExp(`id="mcp-relay-${runtime}"[^>]*aria-checked="true"|aria-checked="true"[^>]*id="mcp-relay-${runtime}"`))
+    }
+  })
+
+  it('turns the relay off for one runtime and leaves the others alone', async () => {
+    const settings = getDefaultSettings()
+    settings.integrations.mcp.relay = { runtimes: { grok: false } }
+    const onUpdate = vi.fn(async () => {})
+    const host = document.createElement('div')
+    const root = createRoot(host)
+    await act(async () => { root.render(createElement(RelayAvailability, { settings, onUpdate })) })
+    const toggle = (runtime: string) => host.querySelector<HTMLButtonElement>(`#mcp-relay-${runtime}`)!
+    expect(toggle('grok').getAttribute('aria-checked')).toBe('false')
+    expect(toggle('codex').getAttribute('aria-checked')).toBe('true')
+    await act(async () => { toggle('codex').click() })
+    expect(onUpdate).toHaveBeenCalledWith({ integrations: { mcp: { relay: { runtimes: { codex: false } } } } })
+    await act(async () => { toggle('grok').click() })
+    expect(onUpdate).toHaveBeenLastCalledWith({ integrations: { mcp: { relay: { runtimes: { grok: true } } } } })
+    act(() => root.unmount())
+  })
+
+  it('disables sharing while MCP is off', () => {
+    const settings = getDefaultSettings()
+    settings.integrations.mcp.enabled = false
+    const html = render(settings)
+    for (const runtime of MCP_RELAY_RUNTIMES) {
+      const control = html.match(new RegExp(`<button[^>]*id="mcp-relay-${runtime}"[^>]*>`))?.[0] ?? ''
+      expect(control).toContain('disabled=""')
+      expect(control).toContain('aria-checked="false"')
+    }
   })
 })

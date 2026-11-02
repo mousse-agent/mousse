@@ -308,8 +308,11 @@ export interface RecoveredContext {
  * runtime stamps on each call, and the two instruction texts.
  */
 export interface TurnBridge {
-  /** The Mousse MCP server and this turn's bearer (SPEC §15.2); null: attach nothing. */
-  mcp: { url: string; token: string } | null
+  /**
+   * The Mousse MCP server and this turn's bearer (SPEC §15.2); null: attach nothing. `relay`: the MCP
+   * relay (`mousse-relay`, same bearer) and its catalogue revision, when the turn attaches it.
+   */
+  mcp: { url: string; token: string; relay?: { url: string; revision: string } } | null
   /** Stamped on every Mousse call of a `per_call` runtime that tags calls by turn (Claude Code). */
   turnToken: string
   /**
@@ -397,6 +400,11 @@ export interface ProviderAdapter {
   describe?(model: string): ModelInfo
   /** The runtime is signed in and installed, so its models can be selected by default. */
   configured?(): boolean
+  /**
+   * The private folder a turn with no project runs in, for the runtimes that keep one per thread. Mousse records the
+   * thread's snapshots there, so Undo works in it; a runtime without it has no per-thread folder to record.
+   */
+  standaloneWorkspace?(threadId: string): string | undefined
   /**
    * Issue #142: a check of the user's own setup before a child is created on this adapter, for
    * shared and isolated children alike. Returns why the child cannot be held to its policy (the

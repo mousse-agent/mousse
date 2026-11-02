@@ -22,7 +22,7 @@ import {
 } from '../src/renderer/lib/providerSnapshots'
 import { useAppStore } from '../src/renderer/stores/appStore'
 import { sendErrorLine } from '../src/renderer/lib/errorText'
-import { getGroupedModelButtonParts, makerLabelOf, modelRowSubtitle, sortPickerEntries } from '../src/renderer/components/ModelFamilyMenu'
+import { foldOlderEntries, withOpenListing, getGroupedModelButtonParts, makerLabelOf, modelRowSubtitle, sortPickerEntries } from '../src/renderer/components/ModelFamilyMenu'
 import { profilePreferenceKey } from '../src/renderer/lib/profilePreferences'
 import { resolveModelChoice } from '../src/renderer/lib/modelChoice'
 import { modelLabel } from '../src/shared/modelChoice'
@@ -57,6 +57,11 @@ describe('composer picker from snapshots', () => {
       status: { headline: 'Signed in · Max plan', tone: 'ready' }
     })
     expect(providers[0].caps?.planMode).toBe(true)
+  })
+
+  it('carries an older model\'s flag to the picker', () => {
+    const [entry] = pickerProviders([snapshot({ models: { entries: [model('ember'), model('ember-1', { older: true })], source: 'live' } })], [])
+    expect(entry.models).toEqual([{ id: 'ember', label: 'ember' }, { id: 'ember-1', label: 'ember-1', older: true }])
   })
 
   it('tells a second Claude Code account apart by its instance id', () => {
@@ -140,6 +145,54 @@ describe('composer picker from snapshots', () => {
     ]
     expect(sortPickerEntries(entries, () => false).map((entry) => entry.id)).toEqual(['a', 'b', 'c', 'd'])
     expect(sortPickerEntries([...entries].reverse(), (entry) => entry.id === 'd').map((entry) => entry.id)).toEqual(['d', 'a', 'b', 'c'])
+  })
+
+  describe('older models in the picker', () => {
+    // Already sorted: a starred model first, then each provider's rows in order.
+    const entries = [
+      { id: 'starred-old', listing: 'claude', older: true },
+      { id: 'a', listing: 'claude', older: false },
+      { id: 'a-old', listing: 'claude', older: true },
+      { id: 'a-older', listing: 'claude', older: true },
+      { id: 'b', listing: 'codex', older: false },
+      { id: 'c', listing: 'pi:x', older: false },
+      { id: 'c-old', listing: 'pi:x', older: true }
+    ]
+    const starred = (entry: { id: string }) => entry.id === 'starred-old'
+    const rows = (items: ReturnType<typeof foldOlderEntries<(typeof entries)[number]>>) =>
+      items.map((item) => (item.kind === 'model' ? item.entry.id : `${item.open ? 'less' : 'more'}:${item.listing}:${item.count}`))
+
+    it('folds each provider\'s older models behind one row after its last row, keeping starred ones', () => {
+      expect(rows(foldOlderEntries(entries, { searching: false, open: new Set(), isFavorite: starred }))).toEqual([
+        'starred-old', 'a', 'more:claude:2', 'b', 'c', 'more:pi:x:1'
+      ])
+    })
+
+    it('shows an open provider\'s older models with the row after them', () => {
+      expect(rows(foldOlderEntries(entries, { searching: false, open: new Set(['claude']), isFavorite: starred }))).toEqual([
+        'starred-old', 'a', 'a-old', 'a-older', 'less:claude:2', 'b', 'c', 'more:pi:x:1'
+      ])
+    })
+
+    it('opens the selected model\'s section once its row is known, keeping what is open', () => {
+      // The menu opened before the provider's models arrived: nothing is known to open yet.
+      const empty: ReadonlySet<string> = new Set()
+      expect(withOpenListing(empty, undefined)).toBe(empty)
+      // The models arrive and the selected one is older: its provider opens, others stay as they were.
+      const open = withOpenListing(new Set(['pi:x']), 'claude')
+      expect([...open]).toEqual(['pi:x', 'claude'])
+      expect(rows(foldOlderEntries(entries, { searching: false, open, isFavorite: starred }))).toEqual([
+        'starred-old', 'a', 'a-old', 'a-older', 'less:claude:2', 'b', 'c', 'c-old', 'less:pi:x:1'
+      ])
+      // Already open: the same set, so nothing renders again.
+      expect(withOpenListing(open, 'claude')).toBe(open)
+    })
+
+    it('folds nothing while searching, and adds no row when nothing is folded', () => {
+      expect(rows(foldOlderEntries(entries, { searching: true, open: new Set(), isFavorite: starred }))).toEqual(entries.map((entry) => entry.id))
+      const current = entries.filter((entry) => !entry.older || starred(entry))
+      expect(rows(foldOlderEntries(current, { searching: false, open: new Set(), isFavorite: starred }))).toEqual(current.map((entry) => entry.id))
+    })
   })
 
   describe('row subtitle', () => {

@@ -3,8 +3,8 @@ import { dirname, isAbsolute, relative, resolve, sep } from 'node:path'
 import type { AgentWorkspacePolicy } from '../../shared/agentEpisodes'
 
 const READ_TOOLS = new Set(['read', 'read_file', 'ls', 'list_dir', 'find', 'grep'])
-// A read-only agent may start subagents; `delegateTask` lets it start only read-only (shared) ones, and
-// `integrate_delegation` (which merges into the workspace) stays out.
+// A read-only agent may start subagents; `delegateTask` lets it start only read-only (shared) ones. Mousse merges no
+// subagent's result into a workspace, so no delegation tool writes one.
 const DELEGATION_TOOLS = new Set(['delegate_task', 'continue_subagent', 'answer_subagent', 'task_status', 'task_cancel', 'list_delegations', 'create_subagent', 'create_subagents', 'list_subagents', 'recall_subagent'])
 
 /** Internal capability: callers cannot manufacture this object over JSON/RPC. */

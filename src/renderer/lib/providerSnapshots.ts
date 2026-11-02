@@ -342,7 +342,8 @@ function pickerModel(model: InstanceSnapshot['models']['entries'][number], catal
     ...(defaultEffort ? { defaultEffort } : {}),
     ...(effortDescriptions ? { effortDescriptions } : {}),
     ...(model.capabilities.thinkingOff === false || catalog?.thinkingOff === false ? { thinkingOff: false as const } : {}),
-    ...(catalog?.speed ? { speed: catalog.speed } : {})
+    ...(catalog?.speed ? { speed: catalog.speed } : {}),
+    ...(model.older ? { older: true as const } : {})
   }
 }
 

@@ -1,30 +1,42 @@
 import { MOUSSE_CONTROL_FILE_PATHS } from '../worktree/controlFiles'
 import { execFileSync, spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSync, realpathSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { atomicWriteJsonSync } from '../data/AtomicFs'
 import { assertLifecyclePath, ResourceLifecycleStore } from './ResourceLifecycleStore'
 import type { RepositoryLeaseHandle } from '../git/RepositoryLease'
 import type { ThreadLeaseHandle } from '../queue/ThreadExecutionLease'
 import { assertHeldThreadLease } from '../actions/GitOperationCoordinator'
+import { operationInProgress } from '../actions/git'
+import { moveFiles, sameTree, takeSnapshot, worktreeTree } from '../actions/snapshots'
 import { PROCESS_INSTANCE_ID } from '../queue/processLiveness'
 import { AgentEpisodeStore } from '../agents/AgentEpisodeStore'
 import { WorktreeIdentity } from '../worktree/WorktreeIdentity'
 import { ThreadJournal } from '../data/ThreadJournal'
 import { getExternalResourceClaims } from './LifecycleClaims'
 import type { ConversationBranch, ThreadAction } from '../../shared/threadActions'
+import { gitDirectoryEnv } from '../git/gitEnv'
+import { READ_ONLY_GIT_ENV } from '../git/readOnlyGit'
 import { repoProgramEnv, withoutRepoPrograms } from '../git/repoPrograms'
+import { renameFolder } from './renameFolder'
+import { isIdNamedMousseBranch, isMousseBranchName } from '../../shared/mousseBranches'
 
 const hash = (value: string | Buffer): string => createHash('sha256').update(value).digest('hex')
+/** A retired worktree waits in the trash until nothing in it has changed for this long; then its files are snapshotted and it is deleted. */
+export const WORKTREE_TRASH_QUIET_MS = 60 * 60_000
 export function lifecycleGit(cwd: string, args: string[], input?: string, maxBuffer = 32 * 1024 * 1024, env?: NodeJS.ProcessEnv): string {
-  return execFileSync('git', withoutRepoPrograms(cwd, args), { cwd, input, env: repoProgramEnv({ ...process.env, ...env }), encoding: 'utf8', windowsHide: true, timeout: 30_000, maxBuffer, stdio: ['pipe', 'pipe', 'pipe'] }).trimEnd()
+  return execFileSync('git', withoutRepoPrograms(cwd, args, { stdin: input, env }), { cwd, input, env: repoProgramEnv({ ...process.env, ...gitDirectoryEnv(cwd), ...env }), encoding: 'utf8', windowsHide: true, timeout: 30_000, maxBuffer, stdio: ['pipe', 'pipe', 'pipe'] }).trimEnd()
+}
+/** A lifecycle read (a preview, the checks before a delete): it never refreshes the index and never fetches a missing object. */
+export function lifecycleRead(cwd: string, args: string[], input?: string, maxBuffer?: number): string {
+  return lifecycleGit(cwd, args, input, maxBuffer, READ_ONLY_GIT_ENV)
 }
 /** Never treat an unreadable reference as absent, and never dereference an owned symbolic ref. */
 export function readDirectLifecycleRef(cwd: string, ref: string): string | undefined {
   try { lifecycleGit(cwd, ['symbolic-ref', '-q', ref]); throw new Error(`Symbolic resource reference is not cleanup authority: ${ref}`) }
   catch (error) { if ((error as { status?: number }).status !== 1) throw error }
-  const listing = spawnSync('git', withoutRepoPrograms(cwd, ['for-each-ref', '--format=%(refname)%00%(objectname)', ref]), { cwd, env: repoProgramEnv(), encoding: 'utf8', windowsHide: true, timeout: 30_000, maxBuffer: 32 * 1024 * 1024 })
+  const listing = spawnSync('git', withoutRepoPrograms(cwd, ['for-each-ref', '--format=%(refname)%00%(objectname)', ref]), { cwd, env: repoProgramEnv({ ...process.env, ...gitDirectoryEnv(cwd), ...READ_ONLY_GIT_ENV }), encoding: 'utf8', windowsHide: true, timeout: 30_000, maxBuffer: 32 * 1024 * 1024 })
   // Git may warn about a corrupt loose ref while exiting successfully and omitting it.
   if (listing.error || listing.status !== 0 || listing.stderr.trim()) throw new Error(`Resource reference inventory is unreadable: ${ref}`)
   const rows = listing.stdout.split(/\r?\n/)
@@ -93,17 +105,52 @@ export interface WorktreeReconstructionManifest {
   checkoutFingerprint: string
   baseRef: string
   resultRef: string
+  /**
+   * Set when the worktree held uncommitted files: `snapshotSha` is a snapshot of all of its files (its parent is the
+   * HEAD in `resultSha`), pinned under `snapshotRef`, and `snapshotTree` its tree. Reconstruction writes those files
+   * over a checkout of `resultSha`. Absent for a worktree whose files were its HEAD.
+   */
+  snapshotSha?: string
+  snapshotTree?: string
+  snapshotRef?: string
+  /** The branch HEAD was on when the worktree was retired; absent when it was detached. The agent may have left the thread's own branch. */
+  headBranch?: string
   sparse?: { patterns: string; cone: boolean }
   auxiliary: Array<{ path: string; content: string }>
   content: ContentEntry[]
-  state: 'prepared' | 'retired' | 'materialized'
+  /**
+   * Where the folder waits in Mousse's trash (`trashPathFor`), set before it is moved there. It was moved in one step and
+   * stays registered with Git at that path. A process may still have its working directory there and write to it.
+   */
+  trashPath?: string
+  /** When the folder reached the trash; set with state `trashed`. */
+  trashedAt?: string
+  /**
+   * Earlier pins the trash expiry did not replace because the new pin does not contain them (the folder's HEAD moved
+   * away from them): each stays under its own ref, `<prefix>/kept/<sha>`, and goes only with the owner.
+   */
+  keptRefs?: string[]
+  /** Owned branches deleted once their tips were kept by the pins here, so a restore can bring them back. */
+  deletedBranches?: Array<{ name: string; sha: string }>
+  /** Branches a restore could not bring back because their commit is gone from the repository. */
+  branchesNotRestored?: Array<{ name: string; sha: string }>
+  /**
+   * `prepared`: pins written, folder in place. `trashed`: the folder is in the trash. `retired`: its files were
+   * snapshotted and it was deleted. `materialized`: the worktree is back at its own path.
+   */
+  state: 'prepared' | 'trashed' | 'retired' | 'materialized'
 }
-/** Git removed part of a worktree and stopped: files were in use. The folder is left without its `.git` file. */
-export class PartialWorktreeRemovalError extends Error {
-  constructor(readonly worktreePath: string, detail: string) {
-    super(`Worktree was partly removed because files in it were in use; it is rebuilt the next time the thread is used (${detail.split(/\r?\n/)[0]})`)
-    this.name = 'PartialWorktreeRemovalError'
+/** The latest change time of anything in a folder, links not followed; `Infinity` when it is too large to tell. */
+function newestChange(root: string): number {
+  let newest = 0, seen = 0
+  const walk = (path: string, depth: number): boolean => {
+    if (++seen > 100_000 || depth > 64) return false
+    const stat = lstatSync(path)
+    newest = Math.max(newest, stat.mtimeMs, stat.ctimeMs)
+    if (stat.isDirectory() && !stat.isSymbolicLink()) for (const name of readdirSync(path)) if (!walk(join(path, name), depth + 1)) return false
+    return true
   }
+  return walk(root, 0) ? newest : Infinity
 }
 export interface RetirementInput { taskId: string; worktreePath: string; branch: string; sourcePath: string; repositoryId?: string; baseSha?: string; resultSha?: string }
 export interface RetirementOwnership { repositoryLease: RepositoryLeaseHandle; taskLease?: ThreadLeaseHandle; cleanupTaskId?: string; cleanupToken?: string; cleanupGeneration?: number }
@@ -112,17 +159,37 @@ export interface RetirementOwnership { repositoryLease: RepositoryLeaseHandle; t
 export class WorktreeRetirementService {
   constructor(readonly store: ResourceLifecycleStore, private readonly ownership?: RetirementOwnership) {}
   pathFor(taskId: string, worktreePath: string): string { return join(this.store.root, 'workspaces', taskId, `${hash(resolve(worktreePath))}.json`) }
+  /** The one place a retired worktree waits in Mousse's trash; next to the profile, so the move stays on one disk. */
+  trashPathFor(manifest: Pick<WorktreeReconstructionManifest, 'taskId' | 'worktreePath'>): string {
+    return join(this.store.profileHome, 'trash', 'worktrees', hash(manifest.taskId).slice(0, 16), hash(resolve(manifest.worktreePath)).slice(0, 32))
+  }
   inspectForDiscard(input: RetirementInput) {
     const identity = this.inspectIdentity(input.worktreePath, input.branch, input.repositoryId)
     this.verifySource({ ...input, repositoryId: identity.repositoryId })
-    return { ...identity, resultSha: lifecycleGit(input.worktreePath, ['rev-parse', 'HEAD']), indexDigest: hash(lifecycleGit(input.worktreePath, ['ls-files', '--stage', '-v', '-z'])), content: walkOwnedContent(input.worktreePath, true) }
+    return { ...identity, resultSha: lifecycleRead(input.worktreePath, ['rev-parse', 'HEAD']), indexDigest: hash(lifecycleRead(input.worktreePath, ['ls-files', '--stage', '-v', '-z'])), content: walkOwnedContent(input.worktreePath, true) }
+  }
+  /**
+   * The branch an owner's record names for the checkout at `worktreePath`. The checkout may be on another branch
+   * (the agent is free to switch), so the branch that proves ownership is read from the record, not from HEAD.
+   */
+  ownedBranch(sourcePath: string, worktreePath: string): string | undefined {
+    try {
+      const value: unknown = JSON.parse(readFileSync(sourcePath, 'utf8'))
+      const record = (row: unknown): row is { worktreePath: string; branch: string } => Boolean(row) && typeof row === 'object' && (row as { worktreePath?: unknown }).worktreePath === worktreePath && typeof (row as { branch?: unknown }).branch === 'string'
+      const episodes = value && typeof value === 'object' && Array.isArray((value as { episodes?: unknown }).episodes) ? (value as { episodes: Array<{ binding?: unknown }> }).episodes.map((episode) => episode.binding) : []
+      return [...(Array.isArray(value) ? value : [value]), ...episodes].find(record)?.branch
+    } catch { return undefined }
   }
   load(path: string): WorktreeReconstructionManifest {
     assertLifecyclePath(this.store.root, path)
     const value = JSON.parse(readFileSync(path, 'utf8')) as WorktreeReconstructionManifest
-    if (value.schemaVersion !== 1 || value.profileId !== this.store.profileId || !same(path, this.pathFor(value.taskId, value.worktreePath)) || !/^mousse\/(thread|agent|workflow)\//.test(value.branch)) throw new Error('Invalid workspace reconstruction authority')
+    if (value.schemaVersion !== 1 || value.profileId !== this.store.profileId || !same(path, this.pathFor(value.taskId, value.worktreePath)) || !isMousseBranchName(value.branch)) throw new Error('Invalid workspace reconstruction authority')
     const prefix = `refs/mousse/lifecycle/${this.store.profileId}/${value.taskId}/${hash(value.worktreePath).slice(0, 32)}`
-    if (value.baseRef !== `${prefix}/base` || value.resultRef !== `${prefix}/result` || ![value.worktreePath, value.commonDir, value.gitDirectory, value.sourcePath].every(isAbsolute) || ![value.baseSha, value.resultSha, value.treeSha].every((sha) => /^[a-f0-9]{40,64}$/.test(sha)) || !/^[a-f0-9]{32}$/.test(value.repositoryId) || !Array.isArray(value.content) || !Array.isArray(value.auxiliary) || !['prepared', 'retired', 'materialized'].includes(value.state)) throw new Error('Malformed workspace reconstruction manifest')
+    if (value.snapshotSha !== undefined && (value.snapshotRef !== `${prefix}/snapshot` || ![value.snapshotSha, value.snapshotTree].every((sha) => typeof sha === 'string' && /^[a-f0-9]{40,64}$/.test(sha)))) throw new Error('Malformed workspace reconstruction manifest')
+    if (value.baseRef !== `${prefix}/base` || value.resultRef !== `${prefix}/result` || ![value.worktreePath, value.commonDir, value.gitDirectory, value.sourcePath].every(isAbsolute) || ![value.baseSha, value.resultSha, value.treeSha].every((sha) => /^[a-f0-9]{40,64}$/.test(sha)) || !/^[a-f0-9]{32}$/.test(value.repositoryId) || !Array.isArray(value.content) || !Array.isArray(value.auxiliary) || !['prepared', 'trashed', 'retired', 'materialized'].includes(value.state)) throw new Error('Malformed workspace reconstruction manifest')
+    if (value.trashPath !== undefined && !same(value.trashPath, this.trashPathFor(value)) || value.state === 'trashed' && (!value.trashPath || typeof value.trashedAt !== 'string')) throw new Error('Malformed workspace trash location')
+    if (value.keptRefs !== undefined && (!Array.isArray(value.keptRefs) || !value.keptRefs.every((ref) => typeof ref === 'string' && ref.startsWith(`${prefix}/kept/`)))) throw new Error('Malformed workspace kept pins')
+    if (value.deletedBranches !== undefined && (!Array.isArray(value.deletedBranches) || !value.deletedBranches.every((entry) => isMousseBranchName(entry?.name) && /^[a-f0-9]{40,64}$/.test(entry?.sha)))) throw new Error('Malformed workspace branch record')
     for (const entry of value.content) if (isAbsolute(entry.path) || entry.path.split(/[\\/]/).includes('..') || !['file', 'directory', 'link'].includes(entry.kind) || !Number.isSafeInteger(entry.bytes) || entry.bytes < 0) throw new Error('Manifest content path is invalid')
     for (const entry of value.auxiliary) if (!MOUSSE_CONTROL_FILE_PATHS.includes(entry.path) || typeof entry.content !== 'string' || entry.content.length > 2 * 1024 * 1024) throw new Error('Manifest auxiliary payload is invalid')
     if (!/^[a-f0-9]{64}$/.test(value.checkoutFingerprint) || !value.rootIdentity || !Object.values(value.rootIdentity).every(Number.isFinite) || value.sparse && (typeof value.sparse.patterns !== 'string' || typeof value.sparse.cone !== 'boolean')) throw new Error('Manifest reconstruction state is invalid')
@@ -134,19 +201,25 @@ export class WorktreeRetirementService {
       const source = this.verifySource({ ...input, repositoryId: identity.repositoryId })
       this.assertOwnership(input.taskId, identity.commonDir, identity.repositoryId)
       this.store.enableCleanupWriter()
-      const resultSha = lifecycleGit(input.worktreePath, ['rev-parse', 'HEAD'])
-      if ((input.resultSha && input.resultSha !== resultSha) || (source.resultSha && source.resultSha !== resultSha)) throw new Error('Workspace result changed before retirement')
+      const resultSha = lifecycleRead(input.worktreePath, ['rev-parse', 'HEAD'])
+      // Uncommitted files are kept as a snapshot: a worktree whose status is clean has nothing to snapshot.
+      const snapshot = lifecycleRead(input.worktreePath, ['status', '--porcelain=v1', '--untracked-files=all']) ? takeSnapshot(input.worktreePath, { reason: 'retirement', threadId: input.taskId }) : undefined
+      const treeSha = lifecycleRead(input.worktreePath, ['rev-parse', 'HEAD^{tree}'])
+      const dirty = Boolean(snapshot && snapshot.tree !== treeSha)
+      // A result the owner recorded is a commit (the HEAD) or a snapshot of the files; either way the files must still be those.
+      if ((input.resultSha && input.resultSha !== resultSha) || (source.resultSha && source.resultSha !== resultSha && !sameTree(input.worktreePath, source.resultSha, snapshot?.sha ?? resultSha))) throw new Error('Workspace result changed before retirement')
       if (input.baseSha && source.baseSha && input.baseSha !== source.baseSha) throw new Error('Workspace base changed before retirement')
       const baseSha = input.baseSha ?? source.baseSha ?? resultSha
-      lifecycleGit(input.worktreePath, ['cat-file', '-e', `${baseSha}^{commit}`])
-      const contents = this.inspectContent(input.worktreePath)
+      lifecycleRead(input.worktreePath, ['cat-file', '-e', `${baseSha}^{commit}`])
+      const contents = this.inspectContent(input.worktreePath, snapshot?.tree)
       const key = hash(input.worktreePath).slice(0, 32)
       const prefix = `refs/mousse/lifecycle/${this.store.profileId}/${input.taskId}/${key}`
-      const manifest: WorktreeReconstructionManifest = { schemaVersion: 1, profileId: this.store.profileId, ...input, ...identity, baseSha, resultSha, treeSha: lifecycleGit(input.worktreePath, ['rev-parse', 'HEAD^{tree}']), checkoutFingerprint: this.checkoutFingerprint(input.worktreePath), baseRef: `${prefix}/base`, resultRef: `${prefix}/result`, ...contents, state: 'prepared' }
+      const headBranch = lifecycleRead(input.worktreePath, ['branch', '--show-current'])
+      const manifest: WorktreeReconstructionManifest = { schemaVersion: 1, profileId: this.store.profileId, ...input, ...identity, baseSha, resultSha, treeSha, checkoutFingerprint: this.checkoutFingerprint(input.worktreePath), baseRef: `${prefix}/base`, resultRef: `${prefix}/result`, ...(dirty ? { snapshotSha: snapshot!.sha, snapshotTree: snapshot!.tree, snapshotRef: `${prefix}/snapshot` } : {}), ...(headBranch ? { headBranch } : {}), ...contents, state: 'prepared' }
       const manifestPath = this.pathFor(input.taskId, input.worktreePath)
       // Intent precedes pins. Recovery can distinguish an incomplete preparation from retirement.
       if (!existsSync(manifestPath) || JSON.stringify(JSON.parse(readFileSync(manifestPath, 'utf8'))) !== JSON.stringify(manifest)) atomicWriteJsonSync(manifestPath, manifest)
-      for (const [ref, sha] of [[manifest.baseRef, baseSha], [manifest.resultRef, resultSha]]) {
+      for (const [ref, sha] of [[manifest.baseRef, baseSha], [manifest.resultRef, resultSha], ...(manifest.snapshotRef ? [[manifest.snapshotRef, manifest.snapshotSha!]] : [])]) {
         const old = readDirectLifecycleRef(input.worktreePath, ref) ?? '0'.repeat(sha.length)
         lifecycleGit(input.worktreePath, ['update-ref', '--no-deref', ref, sha, old])
       }
@@ -154,20 +227,28 @@ export class WorktreeRetirementService {
       return manifest
     })
   }
+  /**
+   * Moves the worktree into Mousse's trash in one step; Git's registration follows it there. Nothing is deleted and
+   * nothing has to be proven unchanged first: a write that lands after `prepare` moves with the folder. The folder is
+   * deleted later by `expireTrash`, after a snapshot of it, or right away when `purging` (a permanent deletion the
+   * person confirmed). Owned branches whose tips the pins keep are deleted once no worktree has them checked out.
+   */
   retire(manifestPath: string, options: { purging?: boolean } = {}): WorktreeReconstructionManifest {
     const manifest = this.load(manifestPath)
     return this.store.withGate(manifest.taskId, () => {
       this.assertOwnership(manifest.taskId, manifest.commonDir, manifest.repositoryId)
       this.verifyPins(manifest)
+      const save = (): void => { if (!options.purging) atomicWriteJsonSync(manifestPath, manifest) }
+      this.settleTrashRegistration(manifest)
       if (!existsSync(manifest.worktreePath)) {
         if (this.registered(manifest)) throw new Error('Missing worktree remains registered; recovery is required')
-        manifest.state = 'retired'; if (!options.purging) atomicWriteJsonSync(manifestPath, manifest); return manifest
+        // Permanent deletion: what waits in the trash goes too.
+        if (options.purging && manifest.trashPath && existsSync(manifest.trashPath)) this.removeTrashed(manifest)
+        manifest.state = manifest.trashPath && existsSync(manifest.trashPath) ? 'trashed' : 'retired'; save(); return manifest
       }
       this.verifySource(manifest, options.purging)
       const identity = this.inspectIdentity(manifest.worktreePath, manifest.branch, manifest.repositoryId)
       if (JSON.stringify(identity.rootIdentity) !== JSON.stringify(manifest.rootIdentity) || identity.gitDirectory !== manifest.gitDirectory || identity.commonDir !== manifest.commonDir) throw new Error('Workspace directory was replaced')
-      if (lifecycleGit(manifest.worktreePath, ['rev-parse', 'HEAD']) !== manifest.resultSha) throw new Error('Workspace HEAD changed')
-      if (JSON.stringify(this.inspectContent(manifest.worktreePath)) !== JSON.stringify({ content: manifest.content, auxiliary: manifest.auxiliary, ...(manifest.sparse ? { sparse: manifest.sparse } : {}) })) throw new Error('Workspace content changed after retirement preview')
       const excluded = new Set([this.ownership?.cleanupTaskId ?? manifest.taskId])
       if (this.ownership?.cleanupTaskId) {
         const records = this.store.list()
@@ -177,18 +258,158 @@ export class WorktreeRetirementService {
       const shared = getExternalResourceClaims(this.store, excluded).some((resource) => !(resource.peerProfileId === this.store.profileId && excluded.has(resource.ownerTaskId)) && isAbsolute(resource.identity) && (overlaps(resource.identity, manifest.worktreePath) || overlaps(manifest.worktreePath, resource.identity)))
       if (shared) throw new Error('Another task or profile retains this checkout; retirement is blocked')
       this.verifyPins(manifest)
-      try { lifecycleGit(manifest.commonDir, ['worktree', 'remove', manifest.worktreePath]) }
-      catch (error) {
-        // On Windows an open handle or a working directory inside the checkout stops Git from deleting one entry
-        // after it has already deleted `.git` and unregistered the worktree. What is left cannot be used or
-        // reconstructed in place; the next restore sets it aside.
-        if (existsSync(manifest.worktreePath) && !existsSync(join(manifest.worktreePath, '.git'))) throw new PartialWorktreeRemovalError(manifest.worktreePath, (error as Error).message)
-        throw error
-      }
-      if (existsSync(manifest.worktreePath) || this.registered(manifest)) throw new Error('Git did not retire the exact workspace')
-      manifest.state = 'retired'; if (!options.purging) atomicWriteJsonSync(manifestPath, manifest)
+      const trashPath = this.trashPathFor(manifest)
+      if (existsSync(trashPath)) throw new Error(`An earlier copy of this worktree is still in the trash at ${trashPath}; it is kept`)
+      mkdirSync(dirname(trashPath), { recursive: true })
+      // The destination is fixed by the manifest, so a crash after the move finds the folder there.
+      manifest.trashPath = trashPath; save()
+      try { renameFolder(manifest.worktreePath, trashPath) }
+      catch (error) { throw new Error(`The worktree could not be moved to the trash; files in it may be in use (${(error as Error).message.split(/\r?\n/)[0]})`) }
+      this.settleTrashRegistration(manifest)
+      if (this.registered(manifest)) throw new Error('Git still registers the worktree at its old path')
+      if (options.purging) { this.removeTrashed(manifest); manifest.state = 'retired'; return manifest }
+      manifest.state = 'trashed'; manifest.trashedAt = new Date().toISOString(); save()
+      this.releaseBranches(manifest); save()
       return manifest
     })
+  }
+  /**
+   * Deletes a worktree that has waited in the trash with nothing in it changing for `WORKTREE_TRASH_QUIET_MS`: a snapshot
+   * of its files is pinned first (it replaces the pins `prepare` made), then Git removes it. What a snapshot cannot hold
+   * (ignored or untracked files Git does not see, staged changes, an operation in progress) keeps it in the trash, and
+   * the reason is returned. Needs the repository lease; the thread may be busy, since its own worktree is elsewhere.
+   * Order: `inUse` (Windows: open files), then the snapshot, then a second read of the folder; a change since the
+   * snapshot is captured again and the delete waits for the next run. Undefined means there was nothing to do.
+   */
+  expireTrash(manifestPath: string, options: { now?: number; inUse?: (path: string) => string | undefined; /** Test seam: runs between the snapshot and the check before the delete. */ afterCapture?: (path: string) => void } = {}): { removed: true } | { kept: string; waiting?: true } | undefined {
+    const manifest = this.load(manifestPath)
+    return this.store.withGate(manifest.taskId, () => {
+      this.assertRepositoryLease(manifest.commonDir, manifest.repositoryId)
+      // A move a crash interrupted before it was recorded: the folder is in the trash and starts waiting now.
+      if (manifest.state === 'prepared' && manifest.trashPath && existsSync(manifest.trashPath) && !existsSync(manifest.worktreePath)) {
+        this.settleTrashRegistration(manifest)
+        manifest.state = 'trashed'; manifest.trashedAt = new Date(options.now ?? Date.now()).toISOString(); atomicWriteJsonSync(manifestPath, manifest)
+      }
+      if (manifest.state !== 'trashed' || !manifest.trashPath) return undefined
+      const trashPath = manifest.trashPath
+      if (!existsSync(trashPath)) {
+        // Deleted by someone else: the pins from `prepare` are what is left.
+        manifest.state = 'retired'; delete manifest.trashPath; delete manifest.trashedAt; atomicWriteJsonSync(manifestPath, manifest)
+        return undefined
+      }
+      this.settleTrashRegistration(manifest)
+      const now = options.now ?? Date.now()
+      if (now - Date.parse(manifest.trashedAt!) < WORKTREE_TRASH_QUIET_MS) return { kept: 'Waiting in the trash', waiting: true }
+      if (now - newestChange(trashPath) < WORKTREE_TRASH_QUIET_MS) return { kept: 'Files in it changed within the last hour', waiting: true }
+      this.verifyPins(manifest)
+      // In use (Windows: open files) is asked before anything is captured, so whatever it lets through is in the snapshot.
+      const busy = options.inUse?.(trashPath)
+      if (busy) return { kept: busy }
+      const first = this.captureTrashed(manifestPath, manifest)
+      if ('kept' in first) return first
+      options.afterCapture?.(trashPath)
+      // Right before the delete, the folder is read again: a change since the snapshot is captured and the delete waits.
+      const again = this.trashedState(manifest)
+      if (again !== first.state) {
+        const retaken = this.captureTrashed(manifestPath, manifest)
+        return { kept: `Files in it changed while it was being deleted${'kept' in retaken ? `; ${retaken.kept}` : '; they are kept as a snapshot'}. It is looked at again on the next run.`, waiting: true }
+      }
+      this.removeTrashed(manifest)
+      manifest.state = 'retired'; delete manifest.trashPath; delete manifest.trashedAt
+      atomicWriteJsonSync(manifestPath, manifest)
+      this.releaseBranches(manifest); atomicWriteJsonSync(manifestPath, manifest)
+      return { removed: true }
+    })
+  }
+  /**
+   * Takes a snapshot of the folder in the trash and pins it in place of the earlier pins (`result` at its HEAD,
+   * `snapshot` when it has uncommitted files), recording both in the manifest. What a snapshot cannot hold keeps it.
+   */
+  private captureTrashed(manifestPath: string, manifest: WorktreeReconstructionManifest): { state: string } | { kept: string } {
+    const trashPath = manifest.trashPath!
+    const head = lifecycleRead(trashPath, ['rev-parse', 'HEAD'])
+    const treeSha = lifecycleRead(trashPath, ['rev-parse', 'HEAD^{tree}'])
+    const snapshot = lifecycleRead(trashPath, ['status', '--porcelain=v1', '--untracked-files=all']) ? takeSnapshot(trashPath, { reason: 'trash expiry', threadId: manifest.taskId }) : undefined
+    const dirty = Boolean(snapshot && snapshot.tree !== treeSha)
+    let contents: ReturnType<WorktreeRetirementService['inspectContent']>
+    try { contents = this.inspectContent(trashPath, dirty ? snapshot!.tree : undefined) }
+    catch (error) { return { kept: `Kept in the trash at ${trashPath}: ${(error as Error).message}` } }
+    const prefix = manifest.resultRef.slice(0, -'/result'.length)
+    // A pin is never replaced by one that does not contain it: the earlier commit or snapshot stays under a ref of its own.
+    const keepPin = (old: string | undefined, next: string): void => {
+      if (!old || old === next || spawnSync('git', withoutRepoPrograms(trashPath, ['merge-base', '--is-ancestor', old, next]), { cwd: trashPath, env: repoProgramEnv(), stdio: 'ignore', windowsHide: true }).status === 0) return
+      const ref = `${prefix}/kept/${old}`
+      if (readDirectLifecycleRef(trashPath, ref) !== old) lifecycleGit(trashPath, ['update-ref', '--no-deref', ref, old, '0'.repeat(old.length)])
+      manifest.keptRefs = [...new Set([...(manifest.keptRefs ?? []), ref])]
+    }
+    const previousSnapshot = readDirectLifecycleRef(trashPath, `${prefix}/snapshot`)
+    keepPin(manifest.resultSha, head)
+    if (dirty) keepPin(previousSnapshot, snapshot!.sha)
+    atomicWriteJsonSync(manifestPath, manifest)
+    lifecycleGit(trashPath, ['update-ref', '--no-deref', manifest.resultRef, head, manifest.resultSha])
+    if (dirty) lifecycleGit(trashPath, ['update-ref', '--no-deref', `${prefix}/snapshot`, snapshot!.sha, previousSnapshot ?? '0'.repeat(snapshot!.sha.length)])
+    const headBranch = lifecycleRead(trashPath, ['branch', '--show-current'])
+    // A clean folder drops the snapshot fields; an earlier snapshot ref stays where it is, as every pin does.
+    delete manifest.snapshotSha; delete manifest.snapshotTree; delete manifest.snapshotRef; delete manifest.headBranch; delete manifest.sparse
+    Object.assign(manifest, { resultSha: head, treeSha, ...(dirty ? { snapshotSha: snapshot!.sha, snapshotTree: snapshot!.tree, snapshotRef: `${prefix}/snapshot` } : {}), ...(headBranch ? { headBranch } : {}), ...contents })
+    atomicWriteJsonSync(manifestPath, manifest)
+    this.verifyPins(manifest)
+    return { state: this.trashedState(manifest) }
+  }
+  /** What the folder in the trash holds now, to compare with what was captured: HEAD, the tree of its files and every entry's bytes. */
+  private trashedState(manifest: WorktreeReconstructionManifest): string {
+    const trashPath = manifest.trashPath!
+    try {
+      return JSON.stringify([lifecycleRead(trashPath, ['rev-parse', 'HEAD']), worktreeTree(trashPath), walkOwnedContent(trashPath, true)])
+    } catch (error) { return `unreadable: ${(error as Error).message}` }
+  }
+  /** Points Git's registration at the trash after a move that a crash interrupted. Idempotent. */
+  private settleTrashRegistration(manifest: WorktreeReconstructionManifest): void {
+    const trashPath = manifest.trashPath
+    if (!trashPath || !existsSync(join(trashPath, '.git')) || this.registeredAt(manifest.commonDir, trashPath)) return
+    lifecycleGit(manifest.commonDir, ['worktree', 'repair', trashPath])
+  }
+  /** Deletes the folder in the trash through Git, so its registration goes with it. */
+  private removeTrashed(manifest: WorktreeReconstructionManifest): void {
+    const trashPath = manifest.trashPath!
+    assertLifecyclePath(join(this.store.profileHome, 'trash'), trashPath)
+    try { lifecycleGit(manifest.commonDir, ['worktree', 'remove', '--force', trashPath]) }
+    catch (error) {
+      // Git deleted `.git` and unregistered it, then stopped at a file in use: what is left is no checkout any more.
+      if (!existsSync(trashPath) || existsSync(join(trashPath, '.git')) || this.registeredAt(manifest.commonDir, trashPath)) throw error
+      rmSync(trashPath, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 })
+    }
+    if (existsSync(trashPath) || this.registeredAt(manifest.commonDir, trashPath)) throw new Error('Git did not remove the worktree from the trash')
+  }
+  /**
+   * Deletes the worktree's owned `mousse/*` branches whose tips the pins keep (a tip that is HEAD or the commit a pinned
+   * snapshot was taken on, or an ancestor of one), unless a worktree has the branch checked out. Those are the thread's
+   * own branch, and the branch HEAD was on when that is another of Mousse's id-named ones; a branch the agent made itself,
+   * whatever its name, is never touched. Each deletion is recorded so a restore brings the branch back.
+   */
+  private releaseBranches(manifest: WorktreeReconstructionManifest): void {
+    const checkedOut = new Set(lifecycleRead(manifest.commonDir, ['worktree', 'list', '--porcelain']).split(/\r?\n/).filter((line) => line.startsWith('branch refs/heads/')).map((line) => line.slice('branch refs/heads/'.length)))
+    const pins = [manifest.resultSha, manifest.snapshotSha].filter((sha): sha is string => Boolean(sha))
+    const owned = [manifest.branch, ...(isIdNamedMousseBranch(manifest.headBranch) ? [manifest.headBranch] : [])]
+    for (const name of new Set(owned)) {
+      if (!name || !isMousseBranchName(name) || checkedOut.has(name)) continue
+      const tip = this.tip(manifest, name)
+      if (!tip || !pins.some((pin) => pin === tip || spawnSync('git', withoutRepoPrograms(manifest.commonDir, ['merge-base', '--is-ancestor', tip, pin]), { cwd: manifest.commonDir, env: repoProgramEnv(), stdio: 'ignore', windowsHide: true }).status === 0)) continue
+      lifecycleGit(manifest.commonDir, ['update-ref', '--no-deref', '-d', `refs/heads/${name}`, tip])
+      manifest.deletedBranches = [...(manifest.deletedBranches ?? []).filter((entry) => entry.name !== name), { name, sha: tip }]
+    }
+  }
+  /** Brings back the branches `releaseBranches` deleted, at their tips, where nothing has taken the name since. */
+  private restoreBranches(manifest: WorktreeReconstructionManifest): void {
+    const missing: Array<{ name: string; sha: string }> = []
+    for (const entry of manifest.deletedBranches ?? []) {
+      if (this.branchTaken(manifest, entry.name)) continue
+      // A commit that is no longer in the repository cannot be a branch again; it is reported, never a reason to fail.
+      if (spawnSync('git', withoutRepoPrograms(manifest.commonDir, ['cat-file', '-e', `${entry.sha}^{commit}`]), { cwd: manifest.commonDir, env: repoProgramEnv(), stdio: 'ignore', windowsHide: true }).status !== 0) { missing.push(entry); continue }
+      lifecycleGit(manifest.commonDir, ['update-ref', '--no-deref', `refs/heads/${entry.name}`, entry.sha, '0'.repeat(entry.sha.length)])
+    }
+    delete manifest.deletedBranches
+    if (missing.length) manifest.branchesNotRestored = missing
   }
   /**
    * `untrusted` is for a checkout of someone else's commits: `prepare` runs on the new worktree before anything is checked
@@ -199,12 +420,28 @@ export class WorktreeRetirementService {
     return this.store.withGate(manifest.taskId, () => {
       this.assertOwnership(manifest.taskId, manifest.commonDir, manifest.repositoryId)
       this.verifySource(manifest); this.verifyPins(manifest)
+      this.settleTrashRegistration(manifest)
+      if (!existsSync(manifest.worktreePath) && manifest.trashPath && existsSync(manifest.trashPath)) {
+        assertLifecyclePath(dirname(manifest.worktreePath), manifest.worktreePath)
+        if (this.registered(manifest)) throw new Error('Absent worktree has a stale registration')
+        // Still in the trash, maybe still in use: the folder itself comes back, as it is now. Nothing is rebuilt beside it.
+        mkdirSync(dirname(manifest.worktreePath), { recursive: true })
+        renameFolder(manifest.trashPath, manifest.worktreePath)
+        lifecycleGit(manifest.commonDir, ['worktree', 'repair', manifest.worktreePath])
+        this.restoreBranches(manifest)
+        const identity = this.inspectIdentity(manifest.worktreePath, manifest.branch, manifest.repositoryId)
+        delete manifest.trashPath; delete manifest.trashedAt
+        Object.assign(manifest, identity, { state: 'materialized' }); atomicWriteJsonSync(manifestPath, manifest)
+        return manifest
+      }
       if (!existsSync(manifest.worktreePath)) {
         assertLifecyclePath(dirname(manifest.worktreePath), manifest.worktreePath)
         if (this.registered(manifest)) throw new Error('Absent worktree has a stale registration')
-        if (lifecycleGit(manifest.commonDir, ['rev-parse', `refs/heads/${manifest.branch}`]) !== manifest.resultSha) throw new Error('Retired branch moved; explicit rebase or current-code recall is required')
         mkdirSync(dirname(manifest.worktreePath), { recursive: true })
-        lifecycleGit(manifest.commonDir, ['worktree', 'add', '--no-checkout', manifest.worktreePath, manifest.branch])
+        this.restoreBranches(manifest)
+        // On the branch it was on when the tip is still the HEAD it had; otherwise at that HEAD, detached. The branches stay the agent's to move.
+        const onBranch = [manifest.headBranch, manifest.branch].find((name) => name && this.tip(manifest, name) === manifest.resultSha)
+        if (!onBranch || !this.tryAdd(manifest, [manifest.worktreePath, onBranch])) lifecycleGit(manifest.commonDir, ['worktree', 'add', '--no-checkout', '--detach', manifest.worktreePath, manifest.resultSha])
         untrusted?.prepare(manifest.worktreePath)
         if (this.checkoutFingerprint(manifest.worktreePath) !== manifest.checkoutFingerprint) throw new Error('Checkout conversion policy changed; reconstruction requires recovery')
         if (manifest.sparse) lifecycleGit(manifest.worktreePath, ['sparse-checkout', 'set', manifest.sparse.cone ? '--cone' : '--no-cone', '--stdin'], manifest.sparse.patterns)
@@ -215,6 +452,8 @@ export class WorktreeRetirementService {
           writeFileSync(target, Buffer.from(auxiliary.content, 'base64'))
         }
         if (manifest.auxiliary.some((entry) => entry.path === '.mousse/materialized-inputs.exclude')) lifecycleGit(manifest.worktreePath, ['config', '--worktree', 'core.excludesFile', join(manifest.worktreePath, '.mousse', 'materialized-inputs.exclude')])
+        // The uncommitted files come back as the snapshot held them, over the fresh checkout of the HEAD it was taken on.
+        if (manifest.snapshotTree) moveFiles(manifest.worktreePath, manifest.treeSha, manifest.snapshotTree)
         for (const entry of manifest.content) {
           const target = join(manifest.worktreePath, entry.path)
           if (entry.kind === 'directory') { assertLifecyclePath(manifest.worktreePath, target); mkdirSync(target, { recursive: true }) }
@@ -222,8 +461,9 @@ export class WorktreeRetirementService {
         }
       }
       const identity = this.inspectIdentity(manifest.worktreePath, manifest.branch, manifest.repositoryId)
-      if (lifecycleGit(manifest.worktreePath, ['rev-parse', 'HEAD^{tree}']) !== manifest.treeSha || JSON.stringify(this.inspectContent(manifest.worktreePath).content) !== JSON.stringify(manifest.content)) throw new Error('Reconstructed workspace does not match retained content')
+      if (lifecycleGit(manifest.worktreePath, ['rev-parse', 'HEAD^{tree}']) !== manifest.treeSha || (manifest.snapshotTree && worktreeTree(manifest.worktreePath) !== manifest.snapshotTree) || JSON.stringify(this.inspectContent(manifest.worktreePath, manifest.snapshotTree).content) !== JSON.stringify(manifest.content)) throw new Error('Reconstructed workspace does not match retained content')
       this.verifyPins(manifest)
+      delete manifest.trashPath; delete manifest.trashedAt
       Object.assign(manifest, identity, { state: 'materialized' }); atomicWriteJsonSync(manifestPath, manifest)
       return manifest
     })
@@ -231,10 +471,28 @@ export class WorktreeRetirementService {
   verifyPins(manifest: WorktreeReconstructionManifest): void {
     assertLifecyclePath(dirname(manifest.commonDir), manifest.commonDir)
     if (hash(realpathSync(manifest.commonDir).toLowerCase()).slice(0, 32) !== manifest.repositoryId) throw new Error('Repository identity is unavailable or changed')
-    for (const [ref, sha] of [[manifest.baseRef, manifest.baseSha], [manifest.resultRef, manifest.resultSha]]) if (readDirectLifecycleRef(manifest.commonDir, ref) !== sha) throw new Error('Reconstruction pin changed or is unavailable')
+    for (const [ref, sha] of [[manifest.baseRef, manifest.baseSha], [manifest.resultRef, manifest.resultSha], ...(manifest.snapshotRef ? [[manifest.snapshotRef, manifest.snapshotSha!]] : [])]) if (readDirectLifecycleRef(manifest.commonDir, ref) !== sha) throw new Error('Reconstruction pin changed or is unavailable')
     if (lifecycleGit(manifest.commonDir, ['rev-parse', `${manifest.resultSha}^{tree}`]) !== manifest.treeSha) throw new Error('Retained result tree changed')
+    if (manifest.snapshotSha && lifecycleGit(manifest.commonDir, ['rev-parse', `${manifest.snapshotSha}^{tree}`]) !== manifest.snapshotTree) throw new Error('Retained snapshot tree changed')
   }
-  private registered(manifest: WorktreeReconstructionManifest): boolean { return lifecycleGit(manifest.commonDir, ['worktree', 'list', '--porcelain']).split(/\r?\n/).some((line) => line.startsWith('worktree ') && same(line.slice(9), manifest.worktreePath)) }
+  /**
+   * The commit a branch points at, never following a symbolic ref: a branch that is a symbolic ref (or unreadable) is
+   * not owned, so it is neither deleted nor used as a checkout target.
+   */
+  private tip(manifest: WorktreeReconstructionManifest, branch: string): string | undefined {
+    try { return readDirectLifecycleRef(manifest.commonDir, `refs/heads/${branch}`) } catch { return undefined }
+  }
+  /** Whether a branch name is taken at all, as a branch or as a symbolic ref. */
+  private branchTaken(manifest: WorktreeReconstructionManifest, branch: string): boolean {
+    return spawnSync('git', withoutRepoPrograms(manifest.commonDir, ['show-ref', '--verify', '-q', `refs/heads/${branch}`]), { cwd: manifest.commonDir, env: repoProgramEnv(), stdio: 'ignore', windowsHide: true }).status === 0
+      || spawnSync('git', withoutRepoPrograms(manifest.commonDir, ['symbolic-ref', '-q', `refs/heads/${branch}`]), { cwd: manifest.commonDir, env: repoProgramEnv(), stdio: 'ignore', windowsHide: true }).status === 0
+  }
+  /** Adds the worktree on a branch; false when Git refuses, as when another worktree has the branch checked out. */
+  private tryAdd(manifest: WorktreeReconstructionManifest, target: string[]): boolean {
+    try { lifecycleGit(manifest.commonDir, ['worktree', 'add', '--no-checkout', ...target]); return true } catch { return false }
+  }
+  private registered(manifest: WorktreeReconstructionManifest): boolean { return this.registeredAt(manifest.commonDir, manifest.worktreePath) }
+  private registeredAt(commonDir: string, path: string): boolean { return lifecycleRead(commonDir, ['worktree', 'list', '--porcelain']).split(/\r?\n/).some((line) => line.startsWith('worktree ') && same(line.slice(9), path)) }
   private verifySource(input: RetirementInput, purging = false): { baseSha?: string; resultSha?: string } {
     const task = this.store.require(input.taskId)
     if (['purged', 'blocked'].includes(task.state) || task.state === 'purge-started' && (!purging || !task.purge?.items.some((item) => item.kind === 'worktree' && item.identity === input.worktreePath && item.status === 'pending'))) throw new Error('Workspace owner is unavailable for retirement or recall')
@@ -256,8 +514,11 @@ export class WorktreeRetirementService {
       const journal = new ThreadJournal(task.location, { readOnly: true }).list()
       const provisions = journal.filter((entry) => {
         const intent = entry.expectedPreState as { branch?: string; worktreePath?: string } | undefined
-        const leaf = intent?.branch?.slice(`mousse/thread/${task.taskId}/`.length)
-        return entry.schemaVersion === 1 && entry.operationType === 'workspace-provision' && entry.state === 'planned' && intent?.branch?.startsWith(`mousse/thread/${task.taskId}/`) && Boolean(leaf && /^[a-z0-9][a-z0-9_-]{0,127}$/i.test(leaf)) && typeof intent.worktreePath === 'string' && same(intent.worktreePath, input.worktreePath) && same(input.worktreePath, join(worktreeBase, 'threads', task.taskId, leaf!))
+        // The worktree is at `threads/<task>/<conversation branch>`; its branch is `mousse/<slug>`, named once when it was
+        // made, or for a thread made before that, `mousse/thread/<task>/<conversation branch>`.
+        const leaf = typeof intent?.worktreePath === 'string' ? basename(intent.worktreePath) : undefined
+        const branchFits = typeof intent?.branch === 'string' && (intent.branch.startsWith('mousse/thread/') ? intent.branch === `mousse/thread/${task.taskId}/${leaf}` : !isIdNamedMousseBranch(intent.branch) && isMousseBranchName(intent.branch))
+        return entry.schemaVersion === 1 && entry.operationType === 'workspace-provision' && entry.state === 'planned' && branchFits && Boolean(leaf && /^[a-z0-9][a-z0-9_-]{0,127}$/i.test(leaf)) && typeof intent!.worktreePath === 'string' && same(intent!.worktreePath, input.worktreePath) && same(input.worktreePath, join(worktreeBase, 'threads', task.taskId, leaf!))
       })
       let branchOwned = provisions.some((entry) => (entry.expectedPreState as { branch?: string }).branch === input.branch)
       if (!branchOwned && typeof row.conversationBranchId === 'string') {
@@ -304,26 +565,40 @@ export class WorktreeRetirementService {
   }
   private inspectIdentity(path: string, branch: string, expectedRepository?: string) {
     assertLifecyclePath(dirname(path), path)
-    if (!isAbsolute(path) || !lstatSync(join(path, '.git')).isFile() || !/^mousse\/(thread|agent|workflow)\//.test(branch)) throw new Error('Only owned linked worktrees can retire')
-    if (!same(realpathSync(path), lifecycleGit(path, ['rev-parse', '--show-toplevel'])) || lifecycleGit(path, ['branch', '--show-current']) !== branch) throw new Error('Worktree root or branch changed')
-    const commonDir = realpathSync(resolve(path, lifecycleGit(path, ['rev-parse', '--git-common-dir'])))
+    if (!isAbsolute(path) || !lstatSync(join(path, '.git')).isFile() || !isMousseBranchName(branch)) throw new Error('Only owned linked worktrees can retire')
+    // The branch is the owner's record of the thread's own branch; the agent may have switched to another, so it is not compared with HEAD's.
+    if (!same(realpathSync(path), lifecycleRead(path, ['rev-parse', '--show-toplevel']))) throw new Error('Worktree root changed')
+    const commonDir = realpathSync(resolve(path, lifecycleRead(path, ['rev-parse', '--git-common-dir'])))
     const repositoryId = hash(commonDir.toLowerCase()).slice(0, 32)
     if (expectedRepository && expectedRepository !== repositoryId) throw new Error('Worktree repository changed')
-    const gitDirectory = realpathSync(resolve(path, lifecycleGit(path, ['rev-parse', '--git-dir'])))
+    const gitDirectory = realpathSync(resolve(path, lifecycleRead(path, ['rev-parse', '--git-dir'])))
     const stat = lstatSync(path)
     const identity = { commonDir, repositoryId, gitDirectory, rootIdentity: { dev: stat.dev, ino: stat.ino, birthtimeMs: stat.birthtimeMs } }
     if (!this.registered({ ...identity, worktreePath: path } as WorktreeReconstructionManifest)) throw new Error('Worktree is not registered')
     return identity
   }
-  /** Throws unless the checkout holds only tracked, exactly reconstructible content. Reads only; writes nothing. */
-  inspectContent(path: string): Pick<WorktreeReconstructionManifest, 'content' | 'auxiliary' | 'sparse'> {
-    if (lifecycleGit(path, ['status', '--porcelain=v1', '--untracked-files=all'])) throw new Error('Dirty, conflicted or untracked content requires retention')
+  /**
+   * Throws unless the checkout holds only tracked, exactly reconstructible content. Reads only; writes nothing.
+   * `snapshotTree` is the tree of the worktree's files (a snapshot, see `takeSnapshot`): uncommitted files are then
+   * acceptable, because the snapshot holds them, and the files are compared with it instead of with HEAD. What a
+   * snapshot does not hold is refused: staged changes, an unresolved conflict, a merge or rebase in progress, a sparse checkout.
+   */
+  inspectContent(path: string, snapshotTree?: string): Pick<WorktreeReconstructionManifest, 'content' | 'auxiliary' | 'sparse'> {
+    if (!snapshotTree) {
+      if (lifecycleRead(path, ['status', '--porcelain=v1', '--untracked-files=all'])) throw new Error('Dirty, conflicted or untracked content requires retention')
+    } else {
+      if (operationInProgress(path)) throw new Error('A merge, rebase or other Git operation in progress requires retention')
+      if (lifecycleRead(path, ['ls-files', '-u'])) throw new Error('Conflicted content requires retention')
+      if (lifecycleRead(path, ['diff', '--cached', '--name-only'])) throw new Error('Staged changes require retention')
+    }
     const entries = walkOwnedContent(path, true)
-    const tracked = new Map(lifecycleGit(path, ['ls-tree', '-r', '-z', 'HEAD']).split('\0').filter(Boolean).map((line) => { const tab = line.indexOf('\t'), header = line.slice(0, tab).split(' '); return [line.slice(tab + 1), { mode: header[0], sha: header[2] }] }))
+    const tracked = new Map(lifecycleRead(path, ['ls-tree', '-r', '-z', snapshotTree ?? 'HEAD']).split('\0').filter(Boolean).map((line) => { const tab = line.indexOf('\t'), header = line.slice(0, tab).split(' '); return [line.slice(tab + 1), { mode: header[0], sha: header[2] }] }))
     const sparseEnabled = (() => { try { return lifecycleGit(path, ['config', '--bool', 'core.sparseCheckout']) === 'true' } catch { return false } })()
     const sparse = sparseEnabled ? { patterns: readFileSync(resolve(path, lifecycleGit(path, ['rev-parse', '--git-path', 'info/sparse-checkout'])), 'utf8'), cone: (() => { try { return lifecycleGit(path, ['config', '--bool', 'core.sparseCheckoutCone']) === 'true' } catch { return false } })() } : undefined
+    // A snapshot sees a file outside the sparse patterns as deleted, so it cannot stand for the checkout.
+    if (snapshotTree && sparse) throw new Error('A sparse checkout with uncommitted files requires retention')
     const skipped = new Set<string>()
-    for (const flag of lifecycleGit(path, ['ls-files', '-v', '-z']).split('\0').filter(Boolean)) {
+    for (const flag of lifecycleRead(path, ['ls-files', '-v', '-z']).split('\0').filter(Boolean)) {
       if (/^[a-z]/.test(flag) || (flag.startsWith('S ') && (!sparse || existsSync(join(path, flag.slice(2)))))) throw new Error('Hidden index flags require explicit retention')
       if (flag.startsWith('S ')) skipped.add(flag.slice(2))
     }
@@ -369,11 +644,15 @@ export class WorktreeRetirementService {
     const externalAttributes = read('core.attributesFile')
     return hash(JSON.stringify({ autocrlf: read('core.autocrlf'), eol: read('core.eol'), symlinks: read('core.symlinks'), infoAttributes: existsSync(infoAttributes) ? hash(readFileSync(infoAttributes)) : '', externalAttributes, externalDigest: externalAttributes ? hash(readFileSync(externalAttributes)) : '' }))
   }
-  private assertOwnership(taskId: string, commonDir: string, repositoryId: string): void {
-    const ownership = this.ownership, lease = ownership?.repositoryLease
+  private assertRepositoryLease(commonDir: string, repositoryId: string): void {
+    const lease = this.ownership?.repositoryLease
     if (!lease || lease.owner.pid !== process.pid || lease.owner.processInstanceId !== PROCESS_INSTANCE_ID || lease.identity.key !== repositoryId || !same(lease.identity.commonDir, commonDir) || !same(lease.path, join(lease.identity.metadataDir, 'repository-mutation.lease'))) throw new Error('Retirement requires the exact held repository lease')
     const current = JSON.parse(readFileSync(lease.path, 'utf8')) as { token?: string; processInstanceId?: string }
     if (current.token !== lease.owner.token || current.processInstanceId !== PROCESS_INSTANCE_ID) throw new Error('Retirement repository ownership was lost')
+  }
+  private assertOwnership(taskId: string, commonDir: string, repositoryId: string): void {
+    this.assertRepositoryLease(commonDir, repositoryId)
+    const ownership = this.ownership!
     const task = this.store.require(taskId)
     if (ownership.taskLease) {
       assertHeldThreadLease(task.location, ownership.taskLease)

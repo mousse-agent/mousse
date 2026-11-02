@@ -13,7 +13,7 @@ describe('Git foundation reviewed publish and retention', () => {
   beforeEach(() => { f = gitFoundationFixture() })
   afterEach(() => f.dispose())
 
-  it('rejects stale reviewed source or target and publishes the exact pair once across service restart', async () => {
+  it('rejects stale reviewed source or target and publishes the exact pair once, as one commit, across service restart', async () => {
     const workspace = f.child('task')
     const reviewed = f.commit(workspace, 'reviewed\n')
     const newer = f.commit(workspace, 'newer\n')
@@ -27,7 +27,10 @@ describe('Git foundation reviewed publish and retention', () => {
     const current = { ...options, expectedSourceSha: newer, expectedTargetSha: moved }
     const result = await publish.publish(workspace, f.repo, target, undefined, current)
     expect(result.state).toBe('completed')
-    expect(git(f.repo, 'rev-list', '--parents', '-n', '1', 'HEAD').split(/\s+/)).toEqual([result.publishSha, moved, newer])
+    // One new commit on top of the primary's own, with the same files as the thread's; the thread's two commits are not in it.
+    expect(git(f.repo, 'rev-list', '--parents', '-n', '1', 'HEAD').split(/\s+/)).toEqual([result.publishSha, moved])
+    expect(git(f.repo, 'rev-list', '--count', `${moved}..HEAD`)).toBe('1')
+    expect(git(f.repo, 'branch', '--contains', newer, '--list', target)).toBe('')
     expect(f.read(f.repo)).toBe('newer\n')
     expect(f.read(f.repo, 'human.txt')).toBe('human primary commit\n')
     expect(await new PublishService(f.thread).publish(workspace, f.repo, target, undefined, current)).toEqual(result)

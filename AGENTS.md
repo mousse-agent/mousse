@@ -10,6 +10,7 @@
 ## Team workflow
 
 - For authorized implementation or resuming implementation, read and follow `.agents/skills/work/SKILL.md` before editing. Discussion, planning, reviews, and diagnosis alone do not authorize implementation or GitHub writes.
+- Reviews, audits, and diagnosis read the latest remote default branch. Run `git fetch` first; if the checkout is behind, read a detached worktree at the remote default branch instead, or state how many commits behind the reviewed code is. A finding about code the default branch has already changed or removed is not a finding.
 - Before presenting a final plan or starting a substantial implementation, read and follow `.agents/skills/check-related-work/SKILL.md`. It only reads issues, PRs and branches.
 - Only when explicitly asked to end the session, read and follow `.agents/skills/end-session/SKILL.md`. Follow an already selected outcome without asking again. Ordinary task completion, commit/push requests, and casual goodbyes do not trigger session wrap-up.
 - These skills share `docs/team-workflow.md`. Track meaningful work intended for the shared codebase; reuse existing issues/PRs and record material decisions and handoffs. Local PR testing, temporary integrations, and experiments do not create issues, PRs, or pushed checkpoints unless explicitly requested.

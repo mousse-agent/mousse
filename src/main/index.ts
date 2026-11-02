@@ -111,7 +111,7 @@ if (isChatgptTokenCommand) {
     .then((code) => app.exit(code), () => app.exit(1))
 } else if (isCliMode) {
   // Packaged / dual-mode headless CLI — no GUI, no single-instance lock (GUI may already be open).
-  app.whenReady().then(async () => {
+  void app.whenReady().then(async () => {
     try {
       // Propagate the packaged version into the long-running daemon and HTTP discovery.
       process.env.MOUSSE_VERSION = app.getVersion()

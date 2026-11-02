@@ -549,8 +549,8 @@ describe('git section formatting', () => {
   it('disables amend with its reason in a thread worktree', () => {
     const commits = [commit()]
     expect(commitMenuState(commits, 2, false).amendDisabled).toBe(false)
-    const checkpointed = commitMenuState(commits, 2, true, true)
-    expect(checkpointed).toMatchObject({ canAmend: false, amend: false, amendDisabled: true, amendTitle: "This thread's branch is checkpointed" })
+    const inThread = commitMenuState(commits, 2, true, true)
+    expect(inThread).toMatchObject({ canAmend: false, amend: false, amendDisabled: true, amendTitle: "Not available in this thread's worktree" })
     // No changes and nothing else to commit: the trigger stays off instead of forcing an amend.
     expect(commitMenuState(commits, 0, false, true)).toMatchObject({ triggerEnabled: false, amend: false })
   })

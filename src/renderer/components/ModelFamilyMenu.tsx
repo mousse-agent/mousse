@@ -103,6 +103,8 @@ interface FlatModelEntry {
   /** The provider lists models from several makers (a multi-brand API). */
   multiBrand: boolean
   key: ModelFavoriteKey
+  /** Every model of the family is an older one (`LlmModelOption.older`), folded behind "Show more". */
+  older: boolean
 }
 
 function getInitialVariantOptions(
@@ -262,6 +264,7 @@ function ProfileModelFamilyMenu({
           instanceId: provider.instanceId,
           listing: listingKey(provider),
           badge: badges.get(listingKey(provider)),
+          olderIds: new Set(provider.models.filter((model) => model.older).map((model) => model.id)),
           status: provider.status && provider.status.tone !== 'ready' ? provider.status.headline : undefined
         }
       })
@@ -289,7 +292,8 @@ function ProfileModelFamilyMenu({
           brandId: family.brandId,
           brandLabel: family.brandLabel,
           multiBrand: Boolean(provider.multiBrand),
-          key: favoriteKey(provider.instanceId ?? provider.providerId, family.familyId)
+          key: favoriteKey(provider.instanceId ?? provider.providerId, family.familyId),
+          older: family.variants.every((variant) => provider.olderIds.has(variant.id) || provider.olderIds.has(parseThinkingSuffixFromModelId(variant.id).baseId))
         })
       }
     })
@@ -346,12 +350,15 @@ function ProfileModelFamilyMenu({
     [contentRef]
   )
 
+  // Providers whose older models are shown; folded until opened, or until the selected model is one.
+  const [openOlder, setOpenOlder] = useState<ReadonlySet<string>>(() => new Set())
+
   const floatingStyle = useFloatingPosition({
     open: portaled,
     anchorRef: anchorRef ?? localShellRef,
     contentRef: localShellRef,
     placement: 'above-start',
-    deps: [providers.length, activeFamily?.family.familyId, panelSide, searchQuery, railFilter, runSettings ? highlightIndex : null]
+    deps: [providers.length, activeFamily?.family.familyId, panelSide, searchQuery, railFilter, openOlder, runSettings ? highlightIndex : null]
   })
 
   const isEntrySelected = useCallback(
@@ -361,7 +368,14 @@ function ProfileModelFamilyMenu({
     [selectedInstanceId, selectedProviderId, selectedModelId]
   )
 
-  const filteredEntries = useMemo(() => {
+  // The selected model's section opens once its row is known, whenever that is (models that arrive
+  // after the menu opened, another selection); closing it by hand again sticks until the next one.
+  const selectedOlderListing = allEntries.find((entry) => entry.older && isEntrySelected(entry))?.listing
+  useLayoutEffect(() => {
+    setOpenOlder((current) => withOpenListing(current, selectedOlderListing))
+  }, [selectedOlderListing])
+
+  const sortedEntries = useMemo(() => {
     const query = searchQuery.trim().toLowerCase()
 
     const list = allEntries.filter((entry) => {
@@ -386,6 +400,19 @@ function ProfileModelFamilyMenu({
     // provider's models in the saved order.
     return sortPickerEntries(list, isEntryFavorite)
   }, [allEntries, isEntryFavorite, favoritesOnly, railFilter, searchQuery])
+
+  const listItems = useMemo(
+    () => foldOlderEntries(sortedEntries, { searching: searchQuery.trim() !== '', open: openOlder, isFavorite: isEntryFavorite }),
+    [sortedEntries, searchQuery, openOlder, isEntryFavorite]
+  )
+  // The rows shown, in order: keyboard moves and Ctrl/Cmd+1-5 count only these.
+  const filteredEntries = useMemo(() => listItems.flatMap((item) => (item.kind === 'model' ? [item.entry] : [])), [listItems])
+  const toggleOlder = (listing: string) =>
+    setOpenOlder((current) => {
+      const next = new Set(current)
+      if (!next.delete(listing)) next.add(listing)
+      return next
+    })
 
   useLayoutEffect(() => {
     const selectedIndex = filteredEntries.findIndex((entry) => isEntrySelected(entry))
@@ -772,7 +799,22 @@ function ProfileModelFamilyMenu({
                   {favoritesOnly ? 'No favorite models yet.' : 'No models match your search.'}
                 </div>
               ) : (
-                filteredEntries.map((entry, index) => renderEntry(entry, index))
+                listItems.map((item) =>
+                  item.kind === 'model' ? (
+                    renderEntry(item.entry, filteredEntries.indexOf(item.entry))
+                  ) : (
+                    <button
+                      key={`more:${item.listing}`}
+                      type="button"
+                      className="model-picker-more"
+                      aria-expanded={item.open}
+                      onClick={() => toggleOlder(item.listing)}
+                    >
+                      {item.open ? 'Show less' : 'Show more'}
+                      {item.open ? null : <span className="model-picker-more-count">{item.count}</span>}
+                    </button>
+                  )
+                )
               )}
             </div>
           </div>
@@ -873,6 +915,43 @@ export function makerLabelOf(
 export function modelRowSubtitle(entry: { providerName: string; makerLabel?: string }, oneProvider: boolean): string | undefined {
   if (oneProvider) return entry.makerLabel
   return [entry.providerName, entry.makerLabel].filter(Boolean).join(' · ')
+}
+
+/** `open` with `listing` added: the same set when there is none or it is open already. */
+export function withOpenListing(open: ReadonlySet<string>, listing: string | undefined): ReadonlySet<string> {
+  if (!listing || open.has(listing)) return open
+  return new Set([...open, listing])
+}
+
+/** One row of the picker's list: a model, or the row that folds a provider's older models. */
+export type PickerListItem<T> = { kind: 'model'; entry: T } | { kind: 'more'; listing: string; count: number; open: boolean }
+
+/**
+ * Folds each provider's older models behind one "Show more" row, placed after the provider's last
+ * row. Starred older models stay out, and nothing folds while searching. A provider in `open` shows
+ * them all, with the row (now "Show less") still after its last row.
+ */
+export function foldOlderEntries<T extends { listing: string; older: boolean }>(
+  entries: readonly T[],
+  options: { searching: boolean; open: ReadonlySet<string>; isFavorite: (entry: T) => boolean }
+): PickerListItem<T>[] {
+  const models = entries.map((entry): PickerListItem<T> => ({ kind: 'model', entry }))
+  if (options.searching) return models
+  const folded = new Map<string, number>()
+  const last = new Map<string, number>()
+  entries.forEach((entry, index) => {
+    last.set(entry.listing, index)
+    if (entry.older && !options.isFavorite(entry)) folded.set(entry.listing, (folded.get(entry.listing) ?? 0) + 1)
+  })
+  if (!folded.size) return models
+  const items: PickerListItem<T>[] = []
+  entries.forEach((entry, index) => {
+    const open = options.open.has(entry.listing)
+    if (open || !entry.older || options.isFavorite(entry)) items.push({ kind: 'model', entry })
+    const count = folded.get(entry.listing)
+    if (count && last.get(entry.listing) === index) items.push({ kind: 'more', listing: entry.listing, count, open })
+  })
+  return items
 }
 
 /** Favorites first, then by provider, then by the provider's saved model order. */

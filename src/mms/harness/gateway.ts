@@ -27,6 +27,7 @@ import type {
 import type { NeutralTool } from '../../shared/harness/tools'
 import type { CliProviderConfigPatch } from '../../shared/providerAuth'
 import type { ModelOverride } from '../../shared/providerInstances'
+import type { McpRelayRuntime } from '../../shared/integrations'
 import type { AgentAccessLevel, LlmProviderOption } from '../../shared/settings'
 import type { ChatMode } from '../../shared/types'
 import { findListedModel, modelChoiceOf } from '../../shared/modelChoice'
@@ -214,6 +215,11 @@ export interface HarnessGateway {
   interrupt(ref: ProviderRef): Promise<'interrupted' | 'not_active'>
   /** A native fork of `ref` after `atTurnOrdinal`, or null when the instance cannot branch it. */
   forkSession(ref: ProviderRef, atTurnOrdinal: number, target?: { threadId: string }): Promise<ProviderRef | null>
+  /**
+   * The private folder the instance runs a thread with no project in (`ProviderAdapter.standaloneWorkspace`), or
+   * undefined when it has none. Where Mousse records that thread's snapshots.
+   */
+  standaloneWorkspace?(instanceId: string, threadId: string): string | undefined
   /**
    * Ends what a thread's process still runs in the background (`ProviderAdapter.stopThread`), on
    * whichever instance holds it: the thread may have switched instances since. 'stopped' when one did.
@@ -479,8 +485,8 @@ export interface TurnAppContext {
    * MCP bearer cannot be issued is refused before the runtime starts, never run without them.
    */
   requiredTools?: readonly string[]
-  /** The session text and turn preamble, given whether the server was attached. */
-  instructions(mcpAttached: boolean): { sessionInstructions: string; turnPreamble: string }
+  /** The session text and turn preamble, given whether the server and the MCP relay were attached. */
+  instructions(mcpAttached: boolean, relayAttached?: boolean): { sessionInstructions: string; turnPreamble: string }
   /**
    * The definition authority of the turn's registered app tools (`AppToolTurn.definition`): its one
    * source. The gateway hands the same object to the runtime (`AdapterHost.definition`), so Pi's
@@ -492,6 +498,11 @@ export interface TurnAppContext {
    * `AdapterHost.bot` so built-ins and app and MCP tools are held to one authority.
    */
   bot?: BotAuthority
+  /**
+   * The MCP relay for this turn: the catalogue revision (a soft reopen key for the runtime) and, per
+   * runtime, whether the relay is on. Absent: no relay (a bot or definition turn, or no catalogue).
+   */
+  relay?: { revision: string; runtimes: Partial<Record<McpRelayRuntime, boolean>> }
 }
 
 export interface TurnHandle {
@@ -1741,6 +1752,10 @@ export class Harness implements HarnessGateway {
     return adapter?.forkSession ? adapter.forkSession(ref, atTurnOrdinal, target) : null
   }
 
+  standaloneWorkspace(instanceId: string, threadId: string): string | undefined {
+    return this.recordOrUndefined(instanceId)?.runtime.adapter.standaloneWorkspace?.(threadId)
+  }
+
   async stopThread(threadId: string): Promise<'stopped' | 'not_active'> {
     const results = await Promise.allSettled([...this.records.values()].map((record) => record.runtime.adapter.stopThread?.(threadId)))
     const failed = results.find((result): result is PromiseRejectedResult => result.status === 'rejected')
@@ -1770,7 +1785,12 @@ export class Harness implements HarnessGateway {
     if (!app) return undefined
     const { binding, input } = spec
     const caps = this.recordCaps(record)
-    let attachment: { url: string; token: string; tokenHash: string } | null = null
+    // The MCP relay, when the driver can attach it and the user left it on for this runtime. A bot or
+    // definition turn never attaches it, whatever its context says.
+    const relayGrant = app.relay && record.driver.relay && app.relay.runtimes[record.driver.kind as McpRelayRuntime] === true && !app.bot && !app.definition && binding.policy.authority?.kind !== 'bot'
+      ? { approvals: record.driver.relay.approvals }
+      : undefined
+    let attachment: { url: string; token: string; tokenHash: string; relayUrl: string } | null = null
     if (app.mcpEligible && this.mcp && mcpAttachable(caps)) {
       try {
         attachment = this.mcp.bearerForTurn({
@@ -1780,6 +1800,7 @@ export class Harness implements HarnessGateway {
           modeCeiling: app.modeCeiling,
           accessLevel: app.accessLevel,
           binding: record.driver.mcpTurnBinding ?? 'rotate',
+          ...(relayGrant ? { relay: relayGrant } : {}),
           // A new runtime, a new epoch: driver, home, signed-in account and settings, and a caller's
           // policy (a narrower grant must not keep the tool list of the last one). So is a different agent
           // access level (SPEC §15.1): a runtime caches its tool list, so it takes the new level with a new
@@ -1794,10 +1815,11 @@ export class Harness implements HarnessGateway {
       }
     }
     const mcp = this.mcp
-    const texts = app.instructions(attachment !== null)
+    const relay = attachment && relayGrant && app.relay ? { url: attachment.relayUrl, revision: app.relay.revision } : undefined
+    const texts = app.instructions(attachment !== null, relay !== undefined)
     return {
       bridge: {
-        mcp: attachment ? { url: attachment.url, token: attachment.token } : null,
+        mcp: attachment ? { url: attachment.url, token: attachment.token, ...(relay ? { relay } : {}) } : null,
         turnToken: app.turnToken,
         sessionInstructions: texts.sessionInstructions,
         turnPreamble: texts.turnPreamble,

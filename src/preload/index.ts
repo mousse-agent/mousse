@@ -701,8 +701,8 @@ const api = {
     getStatus: (threadId: string): Promise<unknown> => ipcRenderer.invoke('workspace:getStatus', threadId),
     restore: (threadId: string, expectedJournalGeneration?: number): Promise<unknown> =>
       ipcRenderer.invoke('workspace:restore', threadId, expectedJournalGeneration),
-    /** Discard on a conflict in the thread worktree, after the person confirmed. Keeps a copy under `backupRef`. */
-    discardPendingChanges: (threadId: string): Promise<{ backupRef: string }> =>
+    /** Discard on a conflict in the thread worktree, after the person confirmed. Keeps a copy under `backupRef`, and `notice` says how to bring the files back. */
+    discardPendingChanges: (threadId: string): Promise<{ backupRef: string; notice: string }> =>
       ipcRenderer.invoke('workspace:discardPendingChanges', threadId)
   },
   actions: {
@@ -726,7 +726,10 @@ const api = {
     start: (params: Record<string, unknown>): Promise<unknown> => ipcRenderer.invoke('publish:start', params)
   },
   operations: {
-    abort: (params: Record<string, unknown>): Promise<unknown> => ipcRenderer.invoke('operations:abort', params)
+    abort: (params: Record<string, unknown>): Promise<unknown> => ipcRenderer.invoke('operations:abort', params),
+    /** Finishes or settles what a thread's worktree or its Publish is waiting on. Never moves the branch or HEAD. */
+    recover: (threadId: string): Promise<import('../shared/workspace').WorkspaceRecoverResult> =>
+      ipcRenderer.invoke('operations:recover', threadId)
   },
   projects: {
     list: (): Promise<Project[]> => ipcRenderer.invoke('projects:list'),
