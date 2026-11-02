@@ -90,8 +90,8 @@ import { listedProjectsFor, listedThreadsFor } from './threadVisibility'
 import { isQualifiedId } from '../../shared/threadRef'
 import { resolveThreadProjectPath } from '../data/resolveActiveProjectPath'
 import { ThreadJournal } from '../data/ThreadJournal'
-import { PROJECT_FOLDER_REASON, threadPlacement } from '../workspace/threadPlacement'
-import { ThreadWorkspaceManager } from '../workspace/ThreadWorkspaceManager'
+import { PROJECT_FOLDER_PUBLISH_REASON, PROJECT_FOLDER_REASON, threadPlacement } from '../workspace/threadPlacement'
+import { isProjectFolderWorkspace, ThreadWorkspaceManager } from '../workspace/ThreadWorkspaceManager'
 import { clearStaleLeftMerges, recoveryErrorText, threadRecovery } from '../workspace/workspaceRecovery'
 import { resolveEditorFolder } from '../workspace/editorFolder'
 import type { NodeId } from '../../shared/net/ids'
@@ -799,7 +799,11 @@ async function ensureOwnedTaskWorkspace(ctx: HandlerContext, params: Record<stri
   if (!thread) throw new DomainRpcError('thread_not_found', 'Thread not found')
   const project = resolveThreadProjectPath(ctx.mms.projects, ctx.mms.threads, threadId)
   if (!project) throw new DomainRpcError('thread_has_no_folder', 'Task has no project workspace')
-  if (threadPlacement(thread) === 'project-folder') return
+  // No worktree for a thread in its project's folder; its record lets file writes and terminals be recorded and undone.
+  if (threadPlacement(thread) === 'project-folder') {
+    new ThreadWorkspaceManager(ctx.mms.threads.getThreadDir(threadId)).ensureProjectFolder(threadId, 'main', project)
+    return
+  }
   const manager = new ThreadWorkspaceManager(ctx.mms.threads.getThreadDir(threadId))
   if (!manager.load()) await manager.provision(threadId, 'main', project, undefined, undefined, undefined, { nameFrom: branchNameSource(ctx, threadId) })
   await ensureWorkspaceMaterialized(ctx, threadId, project)
@@ -833,12 +837,15 @@ interface GitMutationTarget {
  * create a worktree as a side effect.
  */
 async function gitMutationTarget(ctx: HandlerContext, p: Record<string, unknown>, refuseInThread?: 'task_branch_authoritative' | 'thread_worktree_checkpointed'): Promise<GitMutationTarget> {
-  if (refuseInThread && p.threadId !== undefined && p.threadId !== null) throw gitThreadRules.create(refuseInThread)
+  const threadId = asOptionalString(p.threadId, 256)
+  // A thread in its project's folder uses the project's Git as the person does: staging, branches and amend included.
+  const inProjectFolder = threadId !== undefined && threadPlacement(ctx.mms.threads.getThread(threadId)) === 'project-folder'
+  if (refuseInThread && p.threadId !== undefined && p.threadId !== null && !inProjectFolder) throw gitThreadRules.create(refuseInThread)
   await ensureOwnedTaskWorkspace(ctx, p)
   const root = projectRootContext(ctx, p)
-  const threadId = asOptionalString(p.threadId, 256)
-  const directory = threadId ? ctx.mms.threads.getThreadDir(threadId) : undefined
-  const workspace = directory ? new ThreadWorkspaceManager(directory).load() : undefined
+  const directory = threadId && !inProjectFolder ? ctx.mms.threads.getThreadDir(threadId) : undefined
+  const loaded = directory ? new ThreadWorkspaceManager(directory).load() : undefined
+  const workspace = loaded && !isProjectFolderWorkspace(loaded) ? loaded : undefined
   return { root, directory, workspace }
 }
 
@@ -2869,6 +2876,8 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       if (ctx.mms.orchestrator.isConversationHistoryBusy(operation.threadId)) throw new DomainRpcError('thread_busy', 'Wait for active or queued work to finish.')
       await ensureWorkspaceMaterialized(ctx, operation.threadId, operation.projectPath)
       const workspace = new ThreadWorkspaceManager(operation.threadDirectory).load()
+      // The project folder's uncommitted changes are the person's own; this button only ever cleans a thread's worktree.
+      if (isProjectFolderWorkspace(workspace)) throw new DomainRpcError('thread_in_project_folder', 'This chat works in the project folder, whose uncommitted changes are yours; Mousse does not discard them.')
       if (!workspace || workspace.lifecycle !== 'ready') throw new DomainRpcError('workspace_not_ready', 'Thread workspace is not ready')
       // Everything uncommitted goes, the results of the thread's turns included. The files as they are now are recorded
       // as a snapshot first (the turns' receipts keep theirs), and a copy stays under refs/mousse/discarded/.
@@ -3198,6 +3207,8 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const operation = threadOperationContext(ctx, p)
       await ensureWorkspaceMaterialized(ctx, operation.threadId, operation.projectPath)
       const workspace = new ThreadWorkspaceManager(operation.threadDirectory).load()
+      // A thread in its project's folder has nothing to publish: its work is already in the primary checkout.
+      if (isProjectFolderWorkspace(workspace)) return { available: false, workspace, reason: PROJECT_FOLDER_PUBLISH_REASON }
       return { available: Boolean(workspace?.lifecycle === 'ready'), workspace, sourceSha: workspace?.lifecycle === 'ready' ? workspace.snapshotSha ?? workspaceGit(workspace.worktreePath, ['rev-parse', 'HEAD']) : undefined, targetSha: workspaceGit(operation.projectPath, ['rev-parse', 'HEAD']), journalGeneration: operation.currentGeneration }
     }
     case 'publish.start': {
@@ -3207,6 +3218,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const targetBranch = asString(p.targetBranch, 'targetBranch', 512)
       await ensureWorkspaceMaterialized(ctx, operation.threadId, operation.projectPath)
       const workspace = new ThreadWorkspaceManager(operation.threadDirectory).load()
+      if (isProjectFolderWorkspace(workspace)) throw new DomainRpcError('thread_in_project_folder', PROJECT_FOLDER_PUBLISH_REASON)
       if (!workspace || workspace.lifecycle !== 'ready') throw new DomainRpcError('workspace_not_ready', 'Thread workspace is not ready')
       // The thread's name is the commit message in the primary checkout, where the person's own history reads it.
       const message = ctx.mms.threads.getThread(operation.threadId)?.name?.trim() || undefined

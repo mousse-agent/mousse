@@ -104,6 +104,10 @@ export class WorkspaceResolver {
         capability: { gitBacked: repository.capability.gitBacked, checkpointable: false, publishable: false, undoable: false, unavailableReason: SNAPSHOT_STORE_REASON } }
     }
     if (this.placement === 'project-folder' && repository.capability.gitBacked) {
+      // The project folder itself, with a record of its own so the turn is snapshotted and can be undone. No worktree.
+      const folder = manager.ensureProjectFolder(this.threadId, conversationBranchId, this.projectPath)
+      if (folder) return manager.executionContext(this.projectPath, folder)
+      // Never a worktree for this thread, whatever happened above.
       return unprovisionedContext(this.threadId, this.projectPath, true, PROJECT_FOLDER_REASON)
     }
     // A folder without Git (or with no commit yet) works in place whatever the placement: its turns are recorded in the

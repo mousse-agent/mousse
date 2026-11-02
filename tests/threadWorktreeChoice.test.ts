@@ -3,7 +3,7 @@
  * gets a worktree; a thread that never chose still gets one.
  */
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
@@ -47,14 +47,16 @@ describe('thread worktree choice', () => {
     expect(store.getThread(unset.id)?.worktreeEnabled).toBe(false)
   })
 
-  it('an editing turn of a thread with its worktree off runs in the project folder and provisions nothing', async () => {
+  it('an editing turn of a thread with its worktree off runs in the project folder, snapshotted, with no worktree', async () => {
     const thread = store.createThread('Folder', undefined, undefined, { worktreeEnabled: false })
     const directory = store.getThreadDir(thread.id)
     const execution = await new WorkspaceResolver(directory, thread.id, repo, threadPlacement(thread)).resolve('agent')
-    expect(execution.workspacePath).toBe(repo)
-    expect(execution.lifecycle).toBe('unprovisioned')
-    expect(execution.capability).toMatchObject({ gitBacked: true, checkpointable: false })
-    expect(new ThreadWorkspaceManager(directory).load()).toBeUndefined()
+    expect(execution.workspacePath).toBe(realpathSync(repo))
+    expect(execution).toMatchObject({ lifecycle: 'ready', placement: 'project-folder' })
+    expect(execution.capability).toMatchObject({ gitBacked: true, checkpointable: true, undoable: true, publishable: false })
+    expect(new ThreadWorkspaceManager(directory).load()).toMatchObject({ kind: 'project-folder', worktreePath: realpathSync(repo), branch: '' })
+    expect(execFileSync('git', ['worktree', 'list', '--porcelain'], { cwd: repo, encoding: 'utf8' }).match(/^worktree /gm)).toHaveLength(1)
+    expect(execFileSync('git', ['branch', '--list'], { cwd: repo, encoding: 'utf8' }).trim()).toBe('* main')
   }, 30_000)
 
   it('an editing turn of a thread with its worktree on gets a worktree of its own', async () => {

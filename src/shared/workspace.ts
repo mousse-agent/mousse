@@ -47,6 +47,13 @@ export interface RepositoryContextData {
 
 export interface ThreadWorkspaceMetadata {
   schemaVersion: 1
+  /**
+   * `project-folder`: the thread works in its project's own folder (its worktree is off). `worktreePath` is then the
+   * repository's top folder, `branch` is empty (Mousse made none), and nothing that retires, trashes or deletes
+   * worktrees ever acts on it: it is the person's folder. Turns are still snapshotted and undone as in a worktree.
+   * Absent: the thread's own worktree.
+   */
+  kind?: 'project-folder'
   threadId: string
   repositoryId: RepositoryId
   conversationBranchId: ConversationBranchId
@@ -93,6 +100,8 @@ export interface WorkspaceExecutionContext {
   baseSha?: string
   headSha?: string
   provenance?: WorkspaceProvenance
+  /** `project-folder`: the thread works in its project's own folder; there is nothing to publish. */
+  placement?: 'project-folder'
   /**
    * Set only on the context of the turn that made the thread's worktree, when the project folder then held
    * uncommitted changes the worktree (cut from HEAD) does not have. The turn's record keeps it as `startNote`.

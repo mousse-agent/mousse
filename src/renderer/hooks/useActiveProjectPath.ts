@@ -16,9 +16,10 @@ async function resolveWorkspaceProjectPath(threadId: string | null): Promise<Res
   await window.mousse.app.getFilesRoot(threadId).catch(() => undefined)
   try {
     const status = await window.mousse.workspace.getStatus(threadId) as {
-      execution?: { projectPath?: string; lifecycle?: string }
+      execution?: { projectPath?: string; lifecycle?: string; placement?: 'project-folder' }
     }
-    if (status.execution?.projectPath && status.execution.lifecycle === 'ready') {
+    // A thread in its project's folder works there as the person does: the project's own Git rules, no Publish.
+    if (status.execution?.projectPath && status.execution.lifecycle === 'ready' && status.execution.placement !== 'project-folder') {
       return { path: status.execution.projectPath, workspaceThreadId: threadId }
     }
   } catch {

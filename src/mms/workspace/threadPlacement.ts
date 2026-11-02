@@ -19,3 +19,9 @@ export function threadPlacement(thread: Pick<Thread, 'worktreeEnabled'> | null |
 
 /** Said where a path would have needed the thread's worktree. */
 export const PROJECT_FOLDER_REASON = 'This chat works in the project folder (its worktree is off), so it has no worktree.'
+
+/** Said where Publish is asked of a thread in its project's folder. */
+export const PROJECT_FOLDER_PUBLISH_REASON = "This chat works in the project folder, so its changes are already there; there is nothing to publish."
+
+/** Said where a workflow is started from a thread in its project's folder. */
+export const PROJECT_FOLDER_WORKFLOW_REASON = 'This chat works in the project folder. Turn on the worktree for this chat to run workflows.'

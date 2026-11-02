@@ -132,29 +132,83 @@ function canonicalPath(path: string): string {
   }
 }
 
-function capability(unavailableReason?: string): WorkspaceCapability {
+function capability(unavailableReason?: string, publishable = true): WorkspaceCapability {
   const available = !unavailableReason
   return {
     gitBacked: available,
     checkpointable: available,
-    publishable: available,
+    publishable: available && publishable,
     undoable: available,
     unavailableReason
   }
 }
 
+/** The record of a thread that works in its project's own folder; see `ThreadWorkspaceMetadata.kind`. */
+const PROJECT_FOLDER_RECORD = 'project-folder.json'
+
+/** Whether a workspace record is a project folder (the person's own), not a worktree Mousse made. */
+export function isProjectFolderWorkspace(metadata: Pick<ThreadWorkspaceMetadata, 'kind'> | null | undefined): boolean {
+  return metadata?.kind === 'project-folder'
+}
+
 export class ThreadWorkspaceManager {
-  readonly workspacePath: string
   readonly journal: ThreadJournal
 
   constructor(readonly threadDirectory: string) {
-    this.workspacePath = join(threadDirectory, 'workspace.json')
     this.journal = new ThreadJournal(threadDirectory)
   }
 
+  /**
+   * The file holding the thread's workspace record: `workspace.json` for its own worktree, `project-folder.json` for a
+   * thread in its project's folder. The project folder's record is kept apart on purpose: everything that retires,
+   * trashes, cleans up or purges worktrees reads `workspace.json`, so none of it can ever act on a person's folder.
+   */
+  get workspacePath(): string {
+    const folder = join(this.threadDirectory, PROJECT_FOLDER_RECORD)
+    return existsSync(folder) ? folder : join(this.threadDirectory, 'workspace.json')
+  }
+
   load(): ThreadWorkspaceMetadata | undefined {
-    if (!existsSync(this.workspacePath)) return undefined
-    return JSON.parse(readFileSync(this.workspacePath, 'utf8')) as ThreadWorkspaceMetadata
+    const path = this.workspacePath
+    if (!existsSync(path)) return undefined
+    return JSON.parse(readFileSync(path, 'utf8')) as ThreadWorkspaceMetadata
+  }
+
+  /**
+   * The record of a thread that works in its project's own folder, made the first time it is needed. Nothing is made
+   * in the repository but the thread's pin under `refs/mousse/threads/`: no worktree, no branch, and HEAD, the index and
+   * the branches are never touched. Turns are snapshotted with the private index in the Git directory's `mousse/`
+   * folder and undone by restoring files, as in a worktree. Several threads may share one folder: each records what
+   * changed in it during its own turns. Undefined when the folder is not in a Git repository.
+   */
+  ensureProjectFolder(threadId: string, conversationBranchId: ConversationBranchId, projectPath: string): ThreadWorkspaceMetadata | undefined {
+    const existing = this.load()
+    if (existing) return this.verify(existing)
+    const repository = this.resolveRepository(projectPath)
+    if (!repository.capability.gitBacked) return undefined
+    const head = tryGit(repository.gitTopLevel, ['rev-parse', '--verify', '-q', 'HEAD^{commit}']).stdout
+    const retainedRef = `refs/mousse/threads/${threadId}/${conversationBranchId}`
+    if (head) git(repository.gitTopLevel, ['update-ref', '--no-deref', retainedRef, head])
+    const metadata: ThreadWorkspaceMetadata = {
+      schemaVersion: 1,
+      kind: 'project-folder',
+      threadId,
+      workspaceId: `${repository.repositoryId}:${threadId}`,
+      generation: 0,
+      provenance: { ownerThreadId: threadId },
+      repositoryId: repository.repositoryId,
+      conversationBranchId,
+      branch: '',
+      retainedRef,
+      worktreePath: repository.gitTopLevel,
+      projectRelativeSubdirectory: repository.projectRelativeSubdirectory,
+      baseSha: head,
+      headSha: head,
+      lifecycle: 'ready',
+      lastVerifiedAt: new Date().toISOString()
+    }
+    atomicWriteJsonSync(join(this.threadDirectory, PROJECT_FOLDER_RECORD), metadata)
+    return metadata
   }
 
   /**
@@ -332,6 +386,9 @@ export class ThreadWorkspaceManager {
   }
 
   async restore(projectPath: string, signal?: AbortSignal, heldThreadLease?: ThreadLeaseHandle): Promise<ThreadWorkspaceMetadata> {
+    // The project folder is the person's own: there is no worktree to bring back.
+    const current = this.load()
+    if (isProjectFolderWorkspace(current)) return this.verify(current)
     const metadata = this.load()
     if (!metadata) throw new Error('Thread workspace metadata is missing')
     const verified = this.verify(metadata)
@@ -517,7 +574,9 @@ export class ThreadWorkspaceManager {
       headSha: metadata.headSha,
       provenance: metadata.provenance ?? { ownerThreadId: metadata.threadId },
       lifecycle: metadata.lifecycle,
-      capability: metadata.lifecycle === 'ready' ? capability() : capability(`Workspace is ${metadata.lifecycle}`)
+      // The project folder's work is already in the primary checkout: there is nothing to publish.
+      ...(isProjectFolderWorkspace(metadata) ? { placement: 'project-folder' as const } : {}),
+      capability: metadata.lifecycle === 'ready' ? capability(undefined, !isProjectFolderWorkspace(metadata)) : capability(`Workspace is ${metadata.lifecycle}`)
     }
   }
 }
