@@ -14,6 +14,7 @@ import type { Thread } from '../src/shared/types'
 import { MousseMainService } from '../src/mms/MousseMainService'
 import { ThreadActionService } from '../src/mms/actions/ThreadActionService'
 import type { ProviderAdapter, TurnInput, TurnResult, TurnSink } from '../src/mms/harness/adapter'
+import { onGitPolicyEntry, type GitPolicyEntry } from '../src/mms/git/gitPolicy'
 import { dispatchMethod } from '../src/mms/protocol/handlers'
 import { ProviderAuthService } from '../src/mms/providers/ProviderAuthService'
 import { testHarness } from '../src/mms/run/testkit/harness'
@@ -221,6 +222,56 @@ describe('where a thread works', () => {
     await undo(off.id)
     expect(readFileSync(join(plainFolder, 'notes.txt'), 'utf8')).toBe('the person\'s notes\n')
     expect(existsSync(join(plainFolder, 'agent-new.txt'))).toBe(false)
+    expect(existsSync(join(plainFolder, '.git'))).toBe(false)
+  }, 60_000)
+
+  /** The central check's violations while `work` runs. */
+  const violationsDuring = async (work: () => Promise<void>): Promise<string[]> => {
+    const entries: GitPolicyEntry[] = []
+    const stop = onGitPolicyEntry((entry) => entries.push(entry))
+    try { await work() } finally { stop() }
+    return entries.filter((entry) => entry.kind === 'violation').map((entry) => `${entry.command} (${entry.decision.reason})`)
+  }
+
+  it('switches conversation branches in the project folder as the person asked, with refusal on', async () => {
+    const off = thread(false)
+    const before = gitState()
+    expect(await violationsDuring(async () => {
+      onTurn = (cwd) => writeFileSync(join(cwd, 'notes.txt'), 'first turn\n')
+      await main.orchestrator.send({ content: 'first', mode: 'agent' }, false, { threadId: off.id })
+      onTurn = (cwd) => writeFileSync(join(cwd, 'notes.txt'), 'second turn\n')
+      await main.orchestrator.send({ content: 'second', mode: 'agent' }, false, { threadId: off.id })
+      onTurn = undefined
+      const first = new ThreadActionService(main.threads.getThreadDir(off.id)).list().find((action) => !action.turnId.startsWith('user-changes:'))!
+      const fork = async (name: string, codeMode: 'historical' | 'current') =>
+        (await dispatchMethod(ctx(), 'actions.fork', { threadId: off.id, actionId: first.id, name, codeMode }) as { branch: { id: string } }).branch
+      const older = await fork('Older', 'historical')
+      writeFileSync(join(repo, 'notes.txt'), 'edited after the fork\n')
+      const edited = await fork('Edited', 'current')
+      // Each switch writes the branch's files over the person's folder, as they asked through the protocol.
+      await dispatchMethod(ctx(), 'actions.activateBranch', { threadId: off.id, conversationBranchId: older.id })
+      expect(readFileSync(join(repo, 'notes.txt'), 'utf8')).toBe('first turn\n')
+      await dispatchMethod(ctx(), 'actions.activateBranch', { threadId: off.id, conversationBranchId: edited.id })
+      expect(readFileSync(join(repo, 'notes.txt'), 'utf8')).toBe('edited after the fork\n')
+    })).toEqual([])
+    expect(gitState()).toEqual(before)
+    noWorktree(off.id)
+  }, 60_000)
+
+  it('refuses a conversation branch switch in a folder without Git as not ready, never as a refused Git command', async () => {
+    const plainFolder = join(home, 'plain-branches'); mkdirSync(plainFolder)
+    writeFileSync(join(plainFolder, 'notes.txt'), 'the person\'s notes\n')
+    const off = main.threads.createThread('Plain', main.projects.openProject(plainFolder).id, plainFolder, { worktreeEnabled: false })
+    expect(await violationsDuring(async () => {
+      onTurn = (cwd) => writeFileSync(join(cwd, 'notes.txt'), 'first turn\n')
+      await main.orchestrator.send({ content: 'first', mode: 'agent' }, false, { threadId: off.id })
+      onTurn = undefined
+      const first = new ThreadActionService(main.threads.getThreadDir(off.id)).list().find((action) => !action.turnId.startsWith('user-changes:'))!
+      // The hidden store keeps Undo, not conversation branches: there is no branch to switch to, so nothing is written.
+      await expect(dispatchMethod(ctx(), 'actions.fork', { threadId: off.id, actionId: first.id })).rejects.toMatchObject({ code: 'workspace_not_ready' })
+      await expect(dispatchMethod(ctx(), 'actions.activateBranch', { threadId: off.id, conversationBranchId: 'other' })).rejects.toMatchObject({ code: 'workspace_not_ready' })
+    })).toEqual([])
+    expect(readFileSync(join(plainFolder, 'notes.txt'), 'utf8')).toBe('first turn\n')
     expect(existsSync(join(plainFolder, '.git'))).toBe(false)
   }, 60_000)
 

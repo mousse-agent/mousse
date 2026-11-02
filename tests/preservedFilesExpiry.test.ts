@@ -25,10 +25,11 @@ import { ThreadRecoveryService } from '../src/mms/data/ThreadRecoveryService'
 import { ChangeReceiptService } from '../src/mms/actions/ChangeReceiptService'
 import { clearGitPolicyLog, gitPolicyLog } from '../src/mms/git/gitPolicy'
 import { ResourceLifecycleStore } from '../src/mms/lifecycle/ResourceLifecycleStore'
-import { lifecycleGit } from '../src/mms/lifecycle/WorktreeRetirementService'
 import { registerThreadLifecycleGate } from '../src/mms/queue/ThreadLifecycleAdmission'
 import { ThreadWorkspaceManager } from '../src/mms/workspace/ThreadWorkspaceManager'
 import { actionOptions } from './fixtures/gitFoundation'
+import { fixtureGit } from './support/fixtureGit'
+import { pressed } from './support/userRequest'
 
 const DAY = 24 * 60 * 60 * 1000
 const roots: string[] = []
@@ -48,7 +49,7 @@ async function setup(kind: 'folder' | 'worktree') {
   const store = new ResourceLifecycleStore({ profileId: 'test', profileHome: home }); store.registerTask({ taskId: 'task', location })
   registerThreadLifecycleGate(home, store)
   const repo = join(root, 'repo'); mkdirSync(repo)
-  const git = (cwd: string, ...args: string[]) => lifecycleGit(cwd, args)
+  const git = (cwd: string, ...args: string[]) => fixtureGit(cwd, args)
   git(repo, 'init', '-q', '-b', 'main'); git(repo, 'config', 'user.email', 'test@example.com'); git(repo, 'config', 'user.name', 'Test')
   writeFileSync(join(repo, 'a.txt'), 'first\n'); git(repo, 'add', '.'); git(repo, 'commit', '-qm', 'base')
   const manager = new ThreadWorkspaceManager(location)
@@ -70,7 +71,7 @@ async function setup(kind: 'folder' | 'worktree') {
       git(cwd, 'add', '.gitignore'); git(cwd, 'commit', '-qm', `stop tracking ${name}`)
     })
     write(name, 'only copy\n')
-    const undone = await new UndoService(location).undoLatest('main', cwd)
+    const undone = await pressed('Undo', () => new UndoService(location).undoLatest('main', cwd))
     const ref = /kept under (refs\/mousse\/preserved\/\S+) for /.exec(undone.notice ?? '')?.[1]
     if (!ref) throw new Error(`No kept files in: ${undone.notice}`)
     return { ref, notice: undone.notice! }
@@ -206,7 +207,7 @@ test('switching conversation branches names its operation in the kept files, so 
   f.write('secret', 'only copy\n')
   const service = new ConversationBranchService(f.location)
   const fork = await service.fork(f.cwd, 'main', action.id, 'Back to the secret')
-  await service.activate(f.cwd, fork.id)
+  await pressed('Switch conversation branch', () => service.activate(f.cwd, fork.id))
   const [ref] = f.preserved()
   const operation = new ThreadJournal(f.location, { readOnly: true }).list().find((entry) => entry.operationType === 'conversation-activate')!.operationId
   expect(ref).toMatch(new RegExp(`^refs/mousse/preserved/${operation}-[0-9a-f]{12}$`))
