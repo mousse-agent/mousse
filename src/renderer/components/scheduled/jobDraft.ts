@@ -9,7 +9,7 @@ import {
 import { isExecutableJobEdit, isWorkflowPrompt } from '../../../shared/jobPermissionEdit'
 import { listingKey, listingServes, selectionFromListing, type ModelOverride } from '../../../shared/providerInstances'
 import type { LlmProviderOption } from '../../../shared/settings'
-import { modelChoiceOf, modelLabel } from '../../../shared/modelChoice'
+import { findListedModel, modelChoiceOf, modelLabel } from '../../../shared/modelChoice'
 import type {
   CreateScheduledJobInput,
   JobSchedule,
@@ -59,11 +59,14 @@ export function modelGroups(providers: LlmProviderOption[]): ModelGroup[] {
     }))
 }
 
-/** The key of the choice that serves a job's selection; a model the lists no longer offer gets a key of its own. */
+/**
+ * The key of the choice that serves a job's selection, whatever its reasoning level (the job keeps
+ * its level while its model is unchanged); a model the lists no longer offer gets a key of its own.
+ */
 export function modelKeyOf(selection: ModelOverride | undefined, groups: ModelGroup[], providers: LlmProviderOption[]): string {
   if (!selection) return ''
   const listing = providers.find((provider) => listingServes(provider, selection))
-  if (listing) return `${listingKey(listing)}${KEY_SEPARATOR}${selection.model}`
+  if (listing) return `${listingKey(listing)}${KEY_SEPARATOR}${findListedModel(listing.models, selection.model)?.id ?? selection.model}`
   return `${selection.instanceId ?? selection.llmProvider}${KEY_SEPARATOR}${selection.model}`
 }
 

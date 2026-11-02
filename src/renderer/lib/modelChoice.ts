@@ -5,11 +5,13 @@ import { listingServes } from '../../shared/providerInstances'
 import type { LlmProviderOption } from '../../shared/settings'
 import { llmProviderOf, pickerIdOf, useProviderSnapshotsStore } from './providerSnapshots'
 
-/** A selection as screens hold it: the instance when known, the provider name, the stored model string. */
+/** A selection as screens hold it: the instance when known, the provider name, the model, its level and stored name. */
 export interface ModelSelectionLike {
   instanceId?: string
   provider: string
   model: string
+  effort?: string
+  name?: string
 }
 
 /**
@@ -52,11 +54,11 @@ export function resolveModelChoice(selection: ModelSelectionLike, providers?: re
 /** `resolveModelChoice` that names the model again when snapshots arrive. */
 export function useModelChoice(selection: ModelSelectionLike, providers?: readonly LlmProviderOption[]): ModelChoice {
   const scopes = useProviderSnapshotsStore((state) => state.scopes)
-  const { instanceId, provider, model } = selection
+  const { instanceId, provider, model, effort, name } = selection
   return useMemo(
-    () => resolveModelChoice({ instanceId, provider, model }, providers),
+    () => resolveModelChoice({ instanceId, provider, model, effort, name }, providers),
     // `scopes` is read through the store inside; it is a dependency so new snapshots rename.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [instanceId, provider, model, providers, scopes]
+    [instanceId, provider, model, effort, name, providers, scopes]
   )
 }

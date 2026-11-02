@@ -53,7 +53,10 @@ export function workspaceOnDevice(
 export interface RemoteDefaultModel {
   instanceId?: string
   llmProvider?: string
+  /** The model as its agent lists it; the reasoning level is `effort`. */
   model: string
+  effort?: string
+  name?: string
 }
 
 /** What a turn written from this computer runs in on the other one: its default mode, and the most it lets this device have. */

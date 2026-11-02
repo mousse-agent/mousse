@@ -616,6 +616,14 @@ export interface ThreadMessagesSnapshot {
   replace?: boolean
 }
 
+/** A model as a message records it: the provider, the model as listed, its level and its name. */
+export interface MessageModelSelection {
+  provider: string
+  model: string
+  effort?: string
+  name?: string
+}
+
 export interface ChatMessage {
   /** Durable completed-response applets; generated code never executes in the shell. */
   presentationParts?: import('./applets').AppletPresentationPart[]
@@ -692,10 +700,11 @@ export interface ChatMessage {
     /** Presentation-only model transition; never injected into provider context. */
     | 'context_handoff'
   /** Selection actually admitted for this user turn, independent of composer edits. */
-  modelSelection?: { provider: string; model: string }
+  /** The model the message's turn ran (older messages carry the level packed into `model`). */
+  modelSelection?: MessageModelSelection
   contextHandoff?: {
-    from: { provider: string; model: string }
-    to: { provider: string; model: string }
+    from: MessageModelSelection
+    to: MessageModelSelection
     /** Run Engine handoff artifact (SPEC §16.1) the turn delivered; absent for a display-only switch. */
     handoffId?: string
     strategy?: 'native_resume' | 'delta' | 'full_summary' | 'fork_delta_summary' | 'legacy_import'

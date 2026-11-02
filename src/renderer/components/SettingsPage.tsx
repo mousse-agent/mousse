@@ -1,3 +1,4 @@
+import { findListedModel } from '../../shared/modelChoice'
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { applyAcrylicIntensity, persistLinuxAcrylicIntensity } from '../lib/acrylicIntensity'
 import { ArrowLeft, Bot, Keyboard, Laptop, Plug, Server, Settings, Sparkles, UserCircle, VolumeHigh } from '../lib/icons'
@@ -232,7 +233,8 @@ function ProfileSettingsPage({ profileId }: { profileId: string }) {
       const current = nextSettings.provider
       // By instance first: two accounts of one provider are two listings.
       const selectedProvider = providers.find((p) => listingServes(p, current))
-      const modelExists = selectedProvider?.models.some((m) => m.id === current.model)
+      // The default's level is its own field; one packed into the model (an older record) still matches.
+      const modelExists = Boolean(selectedProvider && findListedModel(selectedProvider.models, current.model))
 
       if (selectedProvider && modelExists) return nextSettings
 

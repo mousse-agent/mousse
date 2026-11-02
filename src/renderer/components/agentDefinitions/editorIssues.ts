@@ -1,3 +1,4 @@
+import { findListedModel } from '../../../shared/modelChoice'
 import type { AgentDefinitionIssue } from '../../../shared/agents/errors'
 import type { AgentDefinitionSettings, AgentModelRef } from '../../../shared/agents/types'
 import type { AgentEditorCatalogs } from './client'
@@ -31,7 +32,8 @@ export function findModelInCatalog(
   instanceId?: string
 ): { providerLabel: string; modelLabel: string } | null {
   const provider = catalogs.providers.find((entry) => listingServes(entry, { instanceId, llmProvider: providerId }))
-  const model = provider?.models.find((entry) => entry.id === modelId)
+  // A ref may carry its level in the model (`opus:high`, written before #490): the model is `opus`.
+  const model = provider && findListedModel(provider.models, modelId)
   if (!provider || !model) return null
   return { providerLabel: provider.label, modelLabel: model.label }
 }

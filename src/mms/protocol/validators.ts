@@ -6,6 +6,7 @@ import { knownAppError, parseErrorInfo } from '../../shared/errors'
 
 import type { ChatImageAttachment, ChatMode, ScheduledJobWorkspace } from '../../shared/types'
 import { PROVIDER_DRIVER_KINDS, type ModelOverride } from '../../shared/providerInstances'
+import { upgradeSelection } from '../../shared/modelSelection'
 import { isAgentAccessLevel } from '../../shared/settings'
 import { isPermissionMode, type PermissionMode } from '../../shared/permissionMode'
 import {
@@ -759,8 +760,10 @@ export function asJobSelection(v: unknown, name = 'selection'): ModelOverride {
   // An empty provider is the stored shape of a selection that names only its instance.
   const llmProvider = o.llmProvider === undefined || o.llmProvider === '' ? undefined : asString(o.llmProvider, `${name}.llmProvider`, 256)
   const model = asString(o.model, `${name}.model`, 512)
+  const effort = asOptionalString(o.effort, 64)
   if (!instanceId && !llmProvider) throw new Error(`${name}.instanceId or ${name}.llmProvider is required`)
-  return { ...(instanceId ? { instanceId } : {}), llmProvider: llmProvider ?? '', model }
+  // A level packed into the model (an older client) is moved into its own field.
+  return upgradeSelection({ ...(instanceId ? { instanceId } : {}), llmProvider: llmProvider ?? '', model, ...(effort ? { effort } : {}) })
 }
 
 export function asJobMode(v: unknown, name = 'mode'): 'agent' | 'plan' {

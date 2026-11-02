@@ -17,6 +17,8 @@ interface DefaultModel {
   instanceId?: string
   llmProvider: string
   model: string
+  effort?: string
+  name?: string
 }
 
 interface WorkspaceHoverInfo {
@@ -70,7 +72,7 @@ export function ThreadHoverCard({ thread, enabled = true, children }: ThreadHove
   const subagentCount = useSubagents(open ? thread.id : null).filter(isRunningSubagent).length
 
   const selection = thread.modelOverride?.model ? thread.modelOverride : defaultModel
-  const modelChoice = useModelChoice({ instanceId: selection?.instanceId, provider: selection?.llmProvider ?? '', model: selection?.model ?? '' })
+  const modelChoice = useModelChoice({ instanceId: selection?.instanceId, provider: selection?.llmProvider ?? '', model: selection?.model ?? '', effort: selection?.effort, name: selection?.name })
   const providerId = selection?.llmProvider ?? ''
   const modelLabel = selection?.model ? modelChoiceLabel(modelChoice) : 'Default model'
   const modelIsOverride = Boolean(thread.modelOverride?.model)
@@ -106,7 +108,8 @@ export function ThreadHoverCard({ thread, enabled = true, children }: ThreadHove
         const llmProvider = settings?.provider?.llmProvider ?? ''
         const model = settings?.provider?.model ?? ''
         if (llmProvider || model) {
-          setDefaultModel({ ...(settings?.provider?.instanceId ? { instanceId: settings.provider.instanceId } : {}), llmProvider, model })
+          const { instanceId, effort, name } = settings.provider
+          setDefaultModel({ ...(instanceId ? { instanceId } : {}), llmProvider, model, ...(effort ? { effort } : {}), ...(name ? { name } : {}) })
         }
       } catch {
         // Keep card usable without settings.

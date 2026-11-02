@@ -1,4 +1,4 @@
-import { parseThinkingSuffixFromModelId } from '../../shared/modelVariants'
+import { upgradeSelection } from '../../shared/modelSelection'
 import type { ChatMessage, NativeLlmContext } from '../../shared/types'
 
 type Selection = NonNullable<ChatMessage['modelSelection']>
@@ -14,7 +14,10 @@ export function previousTurnModel(messages: ChatMessage[], context: NativeLlmCon
   return undefined
 }
 
+/** A switch of provider or model; a change of reasoning level alone is none. */
 export function contextHandoff(previous: Selection | undefined, next: Selection): ChatMessage['contextHandoff'] {
-  return previous && (previous.provider !== next.provider || parseThinkingSuffixFromModelId(previous.model).baseId !== parseThinkingSuffixFromModelId(next.model).baseId)
-    ? { from: { ...previous }, to: { ...next } } : undefined
+  if (!previous) return undefined
+  const from = upgradeSelection({ ...previous })
+  const to = upgradeSelection({ ...next })
+  return from.provider !== to.provider || from.model !== to.model ? { from, to } : undefined
 }

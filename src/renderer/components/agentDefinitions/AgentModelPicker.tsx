@@ -6,6 +6,7 @@ import { ModelFamilyMenu } from '../ModelFamilyMenu'
 import { ModelFamilySettingsFields } from '../ModelFamilySettingsFields'
 import { findModelInCatalog, fieldIdForPointer } from './editorIssues'
 import { agentModelLabel } from './agentModelLabel'
+import { pickedSelection, pickerModelId, upgradeSelection } from '../../../shared/modelSelection'
 import type { AgentEditorCatalogs } from './client'
 
 export function AgentModelPicker({
@@ -25,6 +26,14 @@ export function AgentModelPicker({
 }) {
   const [open, setOpen] = useState(false)
   const buttonRef = useRef<HTMLButtonElement>(null)
+  // The menus show a level as part of the model's id; the ref keeps it in `effort`.
+  const pickerId = pickerModelId(upgradeSelection({ model: value.modelId, ...(value.effort ? { effort: value.effort } : {}) }))
+  /** The ref with the model and level a menu's id names; no level is the model's default. */
+  const withPick = (ref: AgentModelRef, id: string): AgentModelRef => {
+    const { effort: _effort, ...rest } = ref
+    const pick = pickedSelection(id)
+    return { ...rest, modelId: pick.model, ...(pick.effort ? { effort: pick.effort } : {}) }
+  }
   const available = findModelInCatalog(catalogs, value.providerId, value.modelId, value.instanceId)
   const missing = Boolean(value.providerId && value.modelId && !available)
   const provider = catalogs.providers.find((entry) => listingServes(entry, { instanceId: value.instanceId, llmProvider: value.providerId }))
@@ -57,11 +66,11 @@ export function AgentModelPicker({
             providers={catalogs.providers}
             selectedProviderId={value.providerId}
             selectedInstanceId={value.instanceId}
-            selectedModelId={value.modelId}
+            selectedModelId={pickerId}
             anchorRef={buttonRef}
             onSelect={(providerId, modelId, instanceId) => {
               // The whole selection: a listing without an instance drops the earlier one.
-              const next: AgentModelRef = { ...value, providerId, modelId, instanceId }
+              const next: AgentModelRef = { ...withPick(value, modelId), providerId, instanceId }
               if (!instanceId) delete next.instanceId
               onChange(next)
               setOpen(false)
@@ -86,9 +95,9 @@ export function AgentModelPicker({
       {provider && value.modelId ? (
         <ModelFamilySettingsFields
           providerId={value.providerId}
-          modelId={value.modelId}
+          modelId={pickerId}
           models={modelsForFields}
-          onChange={(modelId) => onChange({ ...value, modelId })}
+          onChange={(modelId) => onChange(withPick(value, modelId))}
         />
       ) : null}
     </div>

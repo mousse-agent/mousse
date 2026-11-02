@@ -192,7 +192,7 @@ export function JobEditor({
           <select id={id('model')} className="scheduled-input" value={draft.modelKey} onChange={(event) => patch({ modelKey: event.target.value })}>
             <option value="">Default model</option>
             {draft.staleSelection && draft.modelKey !== '' && !catalog.models.some((group) => group.choices.some((choice) => choice.key === draft.modelKey)) ? (
-              <option value={draft.modelKey}>{modelLabel(resolveModelChoice({ instanceId: draft.staleSelection.instanceId, provider: draft.staleSelection.llmProvider, model: draft.staleSelection.model }))} (not available now)</option>
+              <option value={draft.modelKey}>{modelLabel(resolveModelChoice({ ...draft.staleSelection, provider: draft.staleSelection.llmProvider }))} (not available now)</option>
             ) : null}
             {catalog.models.map((group) => (
               <optgroup key={group.label} label={group.label}>

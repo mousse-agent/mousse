@@ -17,6 +17,7 @@ import type { ProviderAdapter, TurnInput, TurnResult } from '../../src/mms/harne
 import { adapterDriver, testHarness } from '../../src/mms/run/testkit/harness'
 import { claudeFamilyAlias } from '../../src/mms/harness/drivers/claudeCode'
 import { rewriteMovedDefaults } from '../../src/mms/settings/movedDefaults'
+import { agentModelId } from '../../src/shared/modelSelection'
 import { FOLDED_INTO_AGENT, FOLDED_TARGETS, acceptsMove } from '../../src/shared/harness/move'
 
 class Agent implements ProviderAdapter {
@@ -65,7 +66,7 @@ function fixture(keys: { exported?: string; adopted?: string[] } = {}) {
     defaults: {
       rewrite: (from, to) => {
         if (deviceDefault.instanceId !== from) return []
-        const model = to.model(deviceDefault.model)
+        const { model } = to.model({ model: deviceDefault.model })
         deviceDefault = { instanceId: to.instanceId, llmProvider: to.llmProvider, model }
         return [model === 'fake-model' ? 'Default model' : `Default model: ${model} instead of fake-model`]
       }
@@ -229,7 +230,11 @@ describe('moving pi:anthropic to Claude Code on its API key', () => {
     const { harness } = anthropicFixture()
     await harness.instances.setModelPrefs('claude:api', { custom: [{ id: 'claude-sonnet-4-5-20250929', label: 'Sonnet 4.5', capabilities: { efforts: ['high'], images: true } }] })
     await harness.instances.move('pi:anthropic', 'claude:api')
-    const pin = (model: string) => harness.resolveStored({ instanceId: 'pi:anthropic', llmProvider: 'anthropic', model }, { purpose: 'turn' }).model
+    // What the agent is given: the model, with the level it keeps.
+    const pin = (model: string) => {
+      const resolved = harness.resolveStored({ instanceId: 'pi:anthropic', llmProvider: 'anthropic', model }, { purpose: 'turn' })
+      return agentModelId(resolved.model, resolved.effort)
+    }
     // The user's own custom model of that id runs as is, its effort kept.
     expect(pin('claude-sonnet-4-5-20250929')).toBe('claude-sonnet-4-5-20250929')
     expect(pin('claude-sonnet-4-5-20250929:high')).toBe('claude-sonnet-4-5-20250929:high')
@@ -265,7 +270,7 @@ describe('moving pi:anthropic to Claude Code on its API key', () => {
 })
 
 describe('device defaults of a moved entry', () => {
-  const to = { instanceId: 'claude:api', llmProvider: 'claude:api', model: (model: string) => claudeFamilyAlias(model) ?? 'sonnet' }
+  const to = { instanceId: 'claude:api', llmProvider: 'claude:api', model: (pick: { model: string }) => ({ model: claudeFamilyAlias(pick.model) ?? 'sonnet' }) }
 
   it('the default model follows with the agent\'s model, and a title model on the entry becomes Automatic', () => {
     const { patch, rewritten } = rewriteMovedDefaults({

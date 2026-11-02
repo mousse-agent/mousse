@@ -14,6 +14,7 @@ import {
 } from '../../shared/providerInstances'
 import { mirrorHash, tupleConfig, MIRROR_MARKER_KEY, type VendorMirror } from './vendorMirror'
 import { piRetiredOf } from './drivers/pi/retired'
+import { upgradeSelection } from '../../shared/modelSelection'
 import type { ProviderAuthService } from '../providers/ProviderAuthService'
 
 /**
@@ -234,27 +235,30 @@ export class ProviderInstanceService {
    * A selection arriving from protocol or tool input, as stored: the instance must exist and be
    * enabled, and `llmProvider` is re-derived from it. Throws the instance errors.
    */
-  overrideFor(input: { instanceId?: string; llmProvider?: string; model: string }): ModelOverride {
+  overrideFor(input: { instanceId?: string; llmProvider?: string; model: string; effort?: string }): ModelOverride {
     const resolved = this.resolve(this.instanceIdOf(input))
-    return { instanceId: resolved.instanceId, llmProvider: resolved.llmProvider, model: input.model }
+    const { model, effort } = upgradeSelection({ model: input.model, ...(input.effort ? { effort: input.effort } : {}) })
+    return { instanceId: resolved.instanceId, llmProvider: resolved.llmProvider, model, ...(effort ? { effort } : {}) }
   }
 
   /**
-   * Migrate-on-read for a stored selection: adds the instance id when the legacy name maps to one
-   * and re-derives `llmProvider` from a known instance. Never throws; a selection that cannot be
-   * mapped is returned unchanged and fails loudly when a turn resolves it.
+   * Migrate-on-read for a stored selection: adds the instance id when the legacy name maps to one,
+   * re-derives `llmProvider` from a known instance, and moves a reasoning level packed into the
+   * model into its own field. Never throws; a selection whose instance cannot be mapped keeps it and
+   * fails loudly when a turn resolves it.
    */
   migrate<T extends ModelOverride>(override: T): T
   migrate<T extends ModelOverride>(override: T | undefined): T | undefined
   migrate<T extends ModelOverride>(override: T | undefined): T | undefined {
     if (!override) return override
+    const upgraded = upgradeSelection(override)
     try {
-      const instanceId = this.instanceIdOf(override)
+      const instanceId = this.instanceIdOf(upgraded)
       const entry = this.get(instanceId)
       const llmProvider = entry ? legacyProviderForInstance(instanceId, entry) : undefined
-      return { ...override, instanceId, llmProvider: llmProvider ?? override.llmProvider } as T
+      return { ...upgraded, instanceId, llmProvider: llmProvider ?? upgraded.llmProvider } as T
     } catch {
-      return override
+      return upgraded
     }
   }
 

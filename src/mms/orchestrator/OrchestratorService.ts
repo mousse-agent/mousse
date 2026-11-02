@@ -54,7 +54,8 @@ import { definitionToolGranted, type DefinitionAuthority } from '../agentDefinit
 import { DefinitionTurnRecord, definitionActor } from '../agentDefinitions/definitionTurnRecord'
 import type { AgentExecutionLimit, AgentExecutionRequest, AgentExecutionResult } from '../../shared/agents/execution'
 import type { EffectiveAgentGrants } from '../../shared/agents/types'
-import { parseThinkingSuffixFromModelId } from '../../shared/modelVariants'
+import { upgradeSelection } from '../../shared/modelSelection'
+import { modelChoiceOf } from '../../shared/modelChoice'
 import { EventEmitter } from 'events'
 import { nativeAgentAssistantMessage, nativeAgentHistory } from '../providers/nativeAgentHistory'
 import { v4 as uuidv4 } from 'uuid'
@@ -141,6 +142,7 @@ import {
   type ChatImageAttachment,
   type ChatMode,
   type ChatMessage,
+  type MessageModelSelection,
   type CliType,
   type ContextUsageSnapshot,
   type NativeLlmContext,
@@ -974,9 +976,8 @@ export class OrchestratorService extends EventEmitter {
   }
 
   /** The stored selection a definition's model ref names: its instance, else its provider's built-in one. */
-  private definitionSelection(ref: DefinitionCheck['ref']): Pick<ModelOverride, 'instanceId' | 'llmProvider' | 'model'> {
-    const model = ref.effort && !parseThinkingSuffixFromModelId(ref.modelId).effort ? `${ref.modelId}:${ref.effort}` : ref.modelId
-    return { ...(ref.instanceId ? { instanceId: ref.instanceId } : {}), llmProvider: ref.providerId, model }
+  private definitionSelection(ref: DefinitionCheck['ref']): Pick<ModelOverride, 'instanceId' | 'llmProvider' | 'model' | 'effort'> {
+    return upgradeSelection({ ...(ref.instanceId ? { instanceId: ref.instanceId } : {}), llmProvider: ref.providerId, model: ref.modelId, ...(ref.effort ? { effort: ref.effort } : {}) })
   }
 
   /**
@@ -3895,7 +3896,7 @@ export class OrchestratorService extends EventEmitter {
           source: 'bot',
           runId: payload.runId,
           externalSignal: AbortSignal.any([signal, prepared.authority.time.signal]),
-          modelOverride: this.harness.instanceMap.overrideFor({ instanceId: prepared.selection.instanceId, model: prepared.selection.model }),
+          modelOverride: this.harness.instanceMap.overrideFor({ instanceId: prepared.selection.instanceId, model: prepared.selection.model, ...(prepared.selection.effort ? { effort: prepared.selection.effort } : {}) }),
           bot: prepared
         }
       )
@@ -4731,7 +4732,8 @@ export class OrchestratorService extends EventEmitter {
     const override = request.instanceId || request.model
       ? this.harness.instanceMap.overrideFor({
           ...(request.instanceId ? { instanceId: request.instanceId } : { instanceId: base().instanceId, llmProvider: base().llmProvider }),
-          model: request.model ?? base().model
+          // A model of the request's own runs at its default level; the parent's keeps its level.
+          ...(request.model ? { model: request.model } : { model: base().model, ...(base().effort ? { effort: base().effort } : {}) })
         })
       : inherited
     // What the child runs on is fixed now: with no explicit selection it would otherwise follow the
@@ -6207,8 +6209,10 @@ export class OrchestratorService extends EventEmitter {
     override: ThreadSession['modelOverride'] | undefined
   ): ThreadSession['modelOverride'] {
     const session = this.getOrCreateSession(threadId)
-    // Stored in the instance shape (SPEC §13.8); callers that still pass an `llmProvider` are mapped.
-    const next = this.harness.instanceMap.migrate(override)
+    // Stored in the instance shape (SPEC §13.8); callers that still pass an `llmProvider` are mapped,
+    // and the model carries its name for screens and devices that have no listing of it.
+    const migrated = this.harness.instanceMap.migrate(override)
+    const next = migrated && { ...migrated, name: this.harness.modelName(migrated.instanceId ?? migrated.llmProvider, migrated.model) }
     const instanceKey = (selection: ModelOverride | undefined) => {
       const migrated = this.harness.instanceMap.migrate(selection)
       return migrated?.instanceId ?? migrated?.llmProvider
@@ -7458,14 +7462,17 @@ export class OrchestratorService extends EventEmitter {
       if (!caps || contextGauge(caps) !== 'reported') {
         return { percent: 0, used: 0, limit: 0, modelName: selectedModel.model, source: 'estimated', categories: [] }
       }
-      const key = `${selectedModel.llmProvider}:${selectedModel.model}`
+      const prefix = `${selectedModel.llmProvider}:`
       const stored = this.nativeContext.lastTurnUsage
       const capacity = this.nativeContext.nativeProviderModel
-      const matches = stored?.modelKey === key && stored.contextRevision === (this.nativeContext.revision ?? 0)
-      const limit = capacity?.selectedModel === selectedModel.model ? capacity.contextWindow ?? 0 : 0
+      // Measured on this model: records written before #490 name it with its level (`opus:high`).
+      const measured = (model: string | undefined) => model !== undefined && upgradeSelection({ model }).model === selectedModel.model
+      const storedKey = stored?.modelKey ?? ''
+      const matches = stored !== undefined && storedKey.startsWith(prefix) && measured(storedKey.slice(prefix.length)) && stored.contextRevision === (this.nativeContext.revision ?? 0)
+      const limit = measured(capacity?.selectedModel) ? capacity!.contextWindow ?? 0 : 0
       const usage = computeContextUsage({
         messages: getActiveMessages(this.nativeContext), draftInput: request.draftInput,
-        contextLimit: limit, modelName: capacity?.selectedModel === selectedModel.model ? capacity.modelName : selectedModel.model,
+        contextLimit: limit, modelName: measured(capacity?.selectedModel) ? capacity!.modelName : selectedModel.model,
         lastMeasuredInput: matches ? stored.input : null,
         lastMeasuredCacheRead: matches ? stored.cacheRead : null,
         lastMeasuredCacheWrite: matches ? stored.cacheWrite : null,
@@ -9356,7 +9363,12 @@ export class OrchestratorService extends EventEmitter {
     const runBinding = recordedBinding && !onRetiredBareRoute(recordedBinding.instanceId) ? recordedBinding : undefined
     const selectedModel = runBinding ? this.harness.selectionOf(runBinding) : this.turnSelection(session, mode, opts?.modelOverride)
     if (displayUserMessage && !reuseLastUser) {
-      const selection = { provider: selectedModel.llmProvider, model: selectedModel.model }
+      const selection: MessageModelSelection = {
+        provider: selectedModel.llmProvider,
+        model: selectedModel.model,
+        ...(selectedModel.effort ? { effort: selectedModel.effort } : {}),
+        name: this.harness.modelName(selectedModel.instanceId ?? selectedModel.llmProvider, selectedModel.model)
+      }
       const admittedUser = session.messages.slice(turnPresentationStart).find(message => message.role === 'user' && !message.hidden)
       if (admittedUser) {
         admittedUser.modelSelection = selection
@@ -9366,7 +9378,7 @@ export class OrchestratorService extends EventEmitter {
         const handoff = contextHandoff(previousModel, selection)
         if (handoff) {
           const marker: ChatMessage = { id: uuidv4(), role: 'assistant', kind: 'context_handoff',
-            content: `${handoff.from.model} → ${handoff.to.model}`, contextHandoff: handoff,
+            content: `${modelChoiceOf(handoff.from).name} → ${modelChoiceOf(handoff.to).name}`, contextHandoff: handoff,
             timestamp: new Date().toISOString(), turnId }
           session.messages.push(marker)
           this.emitMessageAdded(marker)
