@@ -2832,6 +2832,21 @@ export class Harness implements HarnessGateway {
     this.emitSnapshots({ kind: 'device' })
   }
 
+  /**
+   * Mousse's own model catalog changed (a newer revision was downloaded). Clients read the listings
+   * again now, and each Claude Code instance, the one driver that reads the catalog, queues a model
+   * refresh so the older-model check reaches the catalog's new models. An instance that is busy or
+   * signed out is left to its next scheduled refresh.
+   */
+  modelCatalogChanged(): void {
+    if (this.stopped) return
+    this.emitSnapshots({ kind: 'device' })
+    for (const [instanceId, entry] of Object.entries(this.instanceMap.list())) {
+      if (!entry.enabled || entry.driver !== 'claude') continue
+      void this.refreshModelsOf(instanceId, { minAgeMs: 0, reason: 'catalog' }).catch((error) => console.warn('[harness] model refresh after a model catalog change failed', { instanceId, error: errorText(error) }))
+    }
+  }
+
   /** The instance's launch settings, from its config: what its vendor service starts with. */
   launchFor(instanceId: string): StoredCliConfig {
     const config = (this.records.get(instanceId) ?? this.recordOrUndefined(instanceId))?.config
@@ -3392,7 +3407,7 @@ export class Harness implements HarnessGateway {
    * at once). A refresh that fails is recorded on the instance, never thrown. When `when` is set,
    * the instance is checked again once its turn comes and is left alone if it no longer qualifies.
    */
-  private refreshModelsOf(instanceId: string, when?: { minAgeMs: number; reason: 'schedule' | 'upgrade' }): Promise<void> {
+  private refreshModelsOf(instanceId: string, when?: { minAgeMs: number; reason: 'schedule' | 'upgrade' | 'catalog' }): Promise<void> {
     const running = this.modelRefreshes.get(instanceId)
     if (running) return running
     const job = this.withModelSlot(async () => {

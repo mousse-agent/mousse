@@ -56,6 +56,14 @@ export const OUTBOUND: readonly OutboundEntry[] = [
     sources: ['src/mms/net/ssh/scripts.ts']
   },
   {
+    label: 'Model catalog (GitHub)',
+    kind: 'contacted',
+    hosts: ['github.com'],
+    when: 'At most every 6 hours while Mousse runs, once the build has a key to check the file with: Mousse asks for a newer list of models.',
+    sends: 'a request for the published model catalog and its signature.',
+    sources: ['src/mms/models/catalogDownload.ts']
+  },
+  {
     label: 'ACP agent registry',
     kind: 'contacted',
     hosts: ['cdn.agentclientprotocol.com'],

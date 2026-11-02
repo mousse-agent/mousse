@@ -3,8 +3,9 @@
 `src/mms/models/models.json` is Mousse's own list of models: their names, release dates and the id
 each route accepts. It says what might exist. Whether an account can run a model is decided live,
 per account (see "Older Claude models" below). The daemon reads the file (`src/mms/models/modelCatalog.ts`)
-and clients get names through the provider snapshots. There is one catalog per installation,
-shared by every profile.
+and clients get names through the provider snapshots. A newer revision can also be downloaded
+between releases (see "Downloads" below). There is one catalog per installation, shared by every
+profile.
 
 The reader is `src/shared/modelCatalog.ts`. `tests/modelCatalogBundled.test.ts` checks the bundled
 file; every other test uses made-up models, so adding a real model never touches a test.
@@ -32,7 +33,7 @@ file; every other test uses made-up models, so adding a real model never touches
 | Field | Rule |
 |---|---|
 | `format` | Whole number. This reader knows `1`. |
-| `revision` | Whole number that rises with every change. When downloads arrive, the highest valid copy wins. |
+| `revision` | Whole number that rises with every change. Of the bundled and the downloaded copy, the higher revision is used (see "Downloads"). |
 | `models` | Array. Order carries no meaning: lists are ordered by `released`. |
 
 ### Each model
@@ -118,7 +119,7 @@ A merge doesn't publish the catalog. After merge, the **Model catalog** workflow
 - `https://github.com/mousse-agent/mousse/releases/download/models/models-1.json`
 - `https://github.com/mousse-agent/mousse/releases/download/models/models-1.json.sig`
 
-Builds don't download it yet; the bundled copy is the only one in use.
+Builds download it as "Downloads" below describes.
 
 **To publish:** run the workflow from master (Actions → Model catalog → Run workflow, or
 `gh workflow run model-catalog.yml --ref master`), then approve it when GitHub asks. The workflow:
@@ -170,6 +171,36 @@ environment (base64 PKCS#8 text), which only an approved run of the workflow can
 To replace the key, add the new public key as the second entry and ship it in a release, run the
 keygen script again, and remove the old key once builds that know only it are unsupported.
 
+## Downloads
+
+The daemon fetches the published catalog between releases (`src/mms/models/catalogDownload.ts`),
+so a new revision reaches installed builds without an app release.
+
+- **When:** on the 5-minute model timer of `ProviderAuthService.refreshDynamicModels`, but GitHub is
+  asked at most every 6 hours. `<MOUSSE_HOME>/model-catalog-checked.json` holds the time of the last
+  answer, so a restart does not ask again sooner. A network failure or timeout is tried again on
+  the next tick. The download runs on its own: it never delays or fails the model refresh.
+- **What:** `models-1.json`, then `models-1.json.sig`, from the `models` release. Redirects may go
+  only to GitHub's asset hosts (`REDIRECT_HOSTS`, `src/mms/net/allowedRedirects.ts`, shared with
+  agent installs), at most 5 of them.
+- **Limits:** 15 s for both files, 256 KB for the catalog and 1 KB for the signature.
+- **Used only if** the signature checks against `MODEL_CATALOG_PUBLIC_KEYS`, the file reads as a
+  catalog, its `format` is known, and its `revision` is strictly higher than the catalog in use.
+  Otherwise the catalog in use stays, and the refusal is logged once per check.
+- **Nothing published:** a 404 is quiet.
+- **No key:** while `MODEL_CATALOG_PUBLIC_KEYS` is empty, nothing is fetched or used, and the
+  daemon logs that once.
+- **Cache:** a used copy is saved as `<MOUSSE_HOME>/model-catalog.json` and `model-catalog.json.sig`,
+  next to `pi-catalog-cache.json`. At start-up both are checked again (signature, then the reader);
+  a cache that is missing, corrupt or fails the signature is ignored and the bundled copy is used.
+- **In use:** `modelCatalog()` returns the higher revision of the bundled and the downloaded copy;
+  the bundled copy wins a tie, so an app release with the same revision replaces the download.
+  `onModelCatalogChange` tells subscribers when that changes. The gateway then publishes the
+  listings again and queues a model refresh of each Claude Code instance, so the older-model check
+  reaches the new models.
+
+The privacy list names this request as "Model catalog (GitHub)".
+
 ## Older Claude models
 
 Claude Code lists only its current models (`supportedModels()`), but often still runs older ones.
@@ -187,10 +218,13 @@ After a model refresh has saved that live list, Mousse checks the catalog's othe
      **remapped** (another model is applied): not offered.
    - **Unknown** (a timeout, an abort, any other error, or no applied model reported): not offered,
      and checked again on the next refresh.
-3. **Cache:** results are saved with the provider's settings, next to `models`. Their key hashes the
-   Claude Code program file (path, size, modification time), the account (`claudeAccountSubject`)
-   and the candidate route ids. A changed key checks every candidate again, and stops a check still
-   running for the old key; otherwise only unknown ones are checked. Partial results are saved.
+3. **Cache:** results are saved per route id with the provider's settings, next to `models`. Their
+   key hashes the Claude Code program file (path, size, modification time) and the account
+   (`claudeAccountSubject`). A changed key checks every candidate again, and stops a check still
+   running for the old key. With the same key, only candidates without a result are checked, and
+   results for models that are no longer candidates are dropped. So a catalog revision that adds a
+   model checks only that one. Partial results are saved. Results saved by builds whose key also
+   hashed the candidates never match the new key, so they are dropped and checked once more.
 4. **Listing:** models that run follow the live ones, newest first, named by `short` and with the
    catalog's `efforts` that Claude Code accepts. They carry `older: true`, and the model picker folds
    them behind "Show more" at the end of the provider's list. Starred older models stay visible, the
@@ -204,9 +238,6 @@ never delays or changes the live list. Each model it finds running updates open 
 
 Not built yet:
 
-- **Downloads:** the published `models-1.json` fetched at most every 6 hours with a timeout and a
-  size cap, and used only when its signature checks and its `revision` is higher than the copy in
-  use. The bundled copy is trusted as part of the install.
 - **API routes:** names and order for model API lists (`anthropic`, `openai`), and later a per-route
   block with what each adapter needs (context and output limits, input types, reasoning, price).
 - **Moving a thread off a model that is no longer offered,** to the newest model of the same

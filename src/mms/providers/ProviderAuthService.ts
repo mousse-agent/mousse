@@ -34,6 +34,7 @@ import { FileModelsStore } from './FileModelsStore'
 import { LoginSession } from './LoginSession'
 import { enhanceProvidersWithOpenAiCompatibleFetch } from './openAiCompatibleModelFetch'
 import { PiCatalogOverlay } from './piCatalogOverlay'
+import { ModelCatalogDownload } from '../models/catalogDownload'
 import { getProviderDisplayName as getProductProviderDisplayName } from './providerMetadata'
 import { requestOpenAiSpeech } from './providerSpeech'
 import { requestOpenAiTranscription } from './providerTranscription'
@@ -120,6 +121,10 @@ export class ProviderAuthService {
   readonly models: MutableModels
   private readonly modelsStore: FileModelsStore
   private readonly catalogOverlay: PiCatalogOverlay
+  /** Mousse's own model catalog, downloaded between releases; one per installation, like this service. */
+  private readonly modelCatalogDownload: ModelCatalogDownload
+  /** Ends a model catalog download still running when the service stops. */
+  private readonly modelCatalogStop = new AbortController()
   private readonly catalogListeners = new Set<() => void>()
   private catalogSignature = ''
   private activeSessions = new Map<string, LoginSession>()
@@ -141,6 +146,7 @@ export class ProviderAuthService {
     }
     enhanceProvidersWithOpenAiCompatibleFetch(this.models.getProviders())
     this.catalogOverlay = new PiCatalogOverlay(join(home, 'pi-catalog-cache.json'))
+    this.modelCatalogDownload = new ModelCatalogDownload(home)
     for (const provider of this.models.getProviders()) {
       // Anthropic is replaced by the Claude SDK provider, whose catalog is live; a retired one fetches nothing.
       if (provider.id !== CLAUDE_PROVIDER_ID && !piRetiredOf(provider.id)) this.catalogOverlay.attach(provider)
@@ -154,6 +160,11 @@ export class ProviderAuthService {
    */
   init(): Promise<void> {
     this.initPromise ??= (async () => {
+      try {
+        this.modelCatalogDownload.loadCache()
+      } catch {
+        // The bundled model catalog stays in use.
+      }
       const cachedClaude = await this.modelsStore.read(CLAUDE_PROVIDER_ID).catch(() => undefined)
       await registerClaudeSdkProvider(this.models, this.credentials, {
         allowNetwork: false,
@@ -181,6 +192,7 @@ export class ProviderAuthService {
   stop(): void {
     this.stopped = true
     this.refreshController?.abort()
+    this.modelCatalogStop.abort()
     if (this.refreshTimer) {
       clearInterval(this.refreshTimer)
       this.refreshTimer = null
@@ -199,7 +211,8 @@ export class ProviderAuthService {
 
   /**
    * Network refresh of every provider with a dynamic model list, plus the
-   * published pi-ai catalog overlay. A call made while a refresh is running
+   * published pi-ai catalog overlay, and a check for a newer Mousse model
+   * catalog (`ModelCatalogDownload`) that runs on its own. A call made while a refresh is running
    * queues one follow-up so new credentials are never skipped.
    */
   refreshDynamicModels(): Promise<void> {
@@ -214,6 +227,9 @@ export class ProviderAuthService {
     this.refreshInFlight = (async () => {
       await this.init()
       if (this.stopped) return
+      // Mousse's model catalog rides the same timer but at most every 6 hours, and on its own: it never
+      // holds or fails this refresh. A change reaches its subscribers (`onModelCatalogChange`).
+      void this.modelCatalogDownload.refresh({ signal: this.modelCatalogStop.signal }).catch(() => false)
       const controller = new AbortController()
       this.refreshController = controller
       const signal = AbortSignal.any([controller.signal, AbortSignal.timeout(CATALOG_REFRESH_TIMEOUT_MS)])

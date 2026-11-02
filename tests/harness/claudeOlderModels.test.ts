@@ -103,3 +103,54 @@ it('tells open windows about an older model the background check finds after the
   await builtIn.olderCheck
   await vi.waitFor(() => expect(events.some(olderIn)).toBe(true))
 })
+
+it('checks the models a newer catalog adds once the catalog changes, without asking about the others again', async () => {
+  const profileHome = tempDir('mousse-claude-catalog-')
+  const binary = fakeClaude()
+  const switched: string[] = []
+  const discovery = () => {
+    let applied = 'ember'
+    return Object.assign((async function* () {})(), {
+      close: vi.fn(),
+      interrupt: async () => {},
+      supportedModels: async () => [{ value: 'ember', resolvedModel: 'ember-live', displayName: 'Ember', description: 'Ember 9 · test model' }],
+      setModel: async (model: string) => { switched.push(model); applied = model },
+      getSettings: async () => ({ applied: { model: applied } })
+    }) as unknown as Query
+  }
+  let current = catalog
+  const builtIn = new ClaudeSubscriptionProviderService(profileHome, new UserQuestionService(), {
+    findBinary: () => binary,
+    runAuth: async () => JSON.stringify({ loggedIn: true, authMethod: 'claude.ai', subscriptionType: 'max' }),
+    query: discovery as never,
+    modelCatalog: () => current
+  })
+  let stored: unknown = { claude: { driver: 'claude', enabled: true } }
+  const harness = createHarnessGateway({
+    profileHome,
+    installationHome: profileHome,
+    instanceMap: new ProviderInstanceService({ store: { read: () => ({ instances: stored, seedVersion: 1 }), write: (next) => { stored = next.instances } } }),
+    questions: new UserQuestionService(),
+    shellPath: async () => ({ entries: [dirname(binary)], source: 'login_shell' }),
+    drivers: [claudeCodeDriver({ builtIn: () => builtIn })]
+  })
+  stops.push(() => { harness.stop(); builtIn.stop() })
+  await harness.instances.refreshModels('claude')
+  await builtIn.olderCheck
+  expect(switched).toContain('ember-old')
+  // Any refresh the first sign-in check started in the background has finished too.
+  await vi.waitFor(() => expect(builtIn.olderCheck).toBeUndefined())
+
+  current = parseModelCatalog({
+    format: 1,
+    revision: 2,
+    models: [...catalog.models, { id: 'ember-older', name: 'Claude Ember 7', short: 'Ember 7', maker: 'anthropic', released: '2029-01-01', older: true, routes: { claude: { id: 'ember-older' } } }]
+  })
+  switched.length = 0
+  const refreshes = vi.spyOn(builtIn, 'refreshModels')
+  harness.modelCatalogChanged()
+  await vi.waitFor(() => expect(builtIn.models().map((model) => model.id)).toEqual(['ember', 'ember-old', 'ember-older']))
+  expect(refreshes).toHaveBeenCalled()
+  expect(switched).toContain('ember-older')
+  expect(switched).not.toContain('ember-old')
+})
