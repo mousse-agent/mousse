@@ -16,6 +16,15 @@ import { folderAccess } from '../src/mms/files/folderAccess'
 import { MousseMainService } from '../src/mms/MousseMainService'
 import { dispatchMethod } from '../src/mms/protocol/handlers'
 
+/** A file read that never answers, like one on a volume that hangs: `stat` of a path ending in `held.suffix`. */
+const held = vi.hoisted(() => ({ suffix: null as string | null }))
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const real = await importOriginal<typeof import('node:fs/promises')>()
+  const stat = ((path: Parameters<typeof real.stat>[0], options?: Parameters<typeof real.stat>[1]) =>
+    held.suffix && String(path).endsWith(held.suffix) ? new Promise(() => undefined) : real.stat(path, options)) as typeof real.stat
+  return { ...real, stat }
+})
+
 const previousPath = process.env.PATH
 const previousGlobal = process.env.GIT_CONFIG_GLOBAL
 const previousPolicy = process.env.MOUSSE_GIT_POLICY
@@ -80,6 +89,7 @@ beforeEach(() => {
   folderAccess.reset()
 })
 afterEach(() => {
+  held.suffix = null
   process.env.PATH = previousPath
   if (previousGlobal === undefined) delete process.env.GIT_CONFIG_GLOBAL
   else process.env.GIT_CONFIG_GLOBAL = previousGlobal
@@ -159,6 +169,35 @@ describe('the async check before a Git command', () => {
     git(path, 'config', 'core.sshCommand', 'planted-ssh')
     expect(await reading).toContain('core.sshcommand=ssh')
     expect(await repoProgramSettingsAsync(path)).toContain('core.sshcommand=ssh')
+  })
+
+  it.skipIf(process.platform === 'win32')('decides on answers that held still: a ref retargeted while another is read is seen', async () => {
+    const path = repo('hang-refs')
+    git(path, 'update-ref', 'refs/mousse/a', 'HEAD')
+    git(path, 'update-ref', 'refs/mousse/b', 'HEAD')
+    const head = git(path, 'rev-parse', 'HEAD')
+    const request = { cwd: path, args: ['update-ref', '--stdin'], stdin: `update refs/mousse/a ${head}\nupdate refs/mousse/b ${head}\n` }
+    expect(decideGitCommand(request)).toMatchObject({ allowed: true })
+    const started = slowGit('refs/mousse/b', 1)
+    const deciding = decideGitCommandAsync(request)
+    await vi.waitFor(() => expect(statSync(started).isFile()).toBe(true), { timeout: 5000 })
+    // While the second ref is read, the first is pointed at the user's branch.
+    git(path, 'symbolic-ref', 'refs/mousse/a', 'refs/heads/main')
+    const decision = await deciding
+    expect(decision).toMatchObject({ allowed: false })
+    expect(decision).toEqual(decideGitCommand(request))
+  })
+
+  it('a cancelled check does not wait for a file read that does not answer', async () => {
+    const path = repo('hang-stat')
+    // The check looks at `.git` before Git looks for the repository; that read never answers.
+    held.suffix = join(path, '.git')
+    const controller = new AbortController()
+    const reading = repoProgramSettingsAsync(path, { signal: controller.signal })
+    expect(await pending(reading)).toBe(true)
+    controller.abort()
+    const outcome = await Promise.race([reading.then(() => 'answered', () => 'rejected'), new Promise((resolve) => setTimeout(() => resolve('still waiting'), 1000))])
+    expect(outcome).toBe('rejected')
   })
 
   it.skipIf(process.platform === 'win32')('a slow read in the central Git check holds nothing else', async () => {
@@ -311,19 +350,26 @@ describe('resolveRepositoryIdentityAsync', () => {
     }
   })
 
-  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)('names the same metadata folder as the synchronous call after the repository stops being writable', async () => {
+  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)('falls back at once, on both paths, when the repository stops being writable', async () => {
     const path = repo('writable')
     const home = join(root, 'fallback-home')
     const first = await resolveRepositoryIdentityAsync(path, { metadataHome: home })
     expect(first.metadataDir).toBe(join(first.commonDir, 'mousse'))
     chmodSync(first.metadataDir, 0o555)
     try {
-      // Both keep the folder they chose, so both name the same lease file.
-      expect(resolveRepositoryIdentity(path, { metadataHome: home }).metadataDir).toBe(first.metadataDir)
-      expect((await resolveRepositoryIdentityAsync(path, { metadataHome: home })).metadataDir).toBe(first.metadataDir)
+      // Both name the fallback folder, so both name the same lease file, and a lease can be written there.
+      const fallback = join(home, first.key)
+      expect(resolveRepositoryIdentity(path, { metadataHome: home }).metadataDir).toBe(fallback)
+      expect((await resolveRepositoryIdentityAsync(path, { metadataHome: home })).metadataDir).toBe(fallback)
     } finally {
       chmodSync(first.metadataDir, 0o755)
     }
+  })
+
+  it('lookups at the same time name one metadata folder', async () => {
+    const path = repo('concurrent')
+    const identities = await Promise.all(Array.from({ length: 24 }, () => resolveRepositoryIdentityAsync(path, { metadataHome: join(root, 'fallback-home') })))
+    expect(new Set(identities.map((identity) => identity.metadataDir))).toEqual(new Set([join(identities[0]!.commonDir, 'mousse')]))
   })
 
   it.skipIf(process.platform === 'win32')('resolves another repository while one folder waits on Git', async () => {

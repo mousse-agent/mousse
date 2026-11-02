@@ -5,7 +5,7 @@ import { dirname, join, resolve } from 'node:path'
 import simpleGit, { type SimpleGit, type SimpleGitOptions } from 'simple-git'
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
 import { gitDirectoryEnv, gitDirectoryEnvAsync, mousseGitEnv } from './gitEnv'
-import { assertGitAllowed, assertGitAllowedAsync, type UserAction } from './gitPolicy'
+import { assertGitAllowed, assertGitAllowedAsync, untilAborted, type UserAction } from './gitPolicy'
 import { NO_HOOKS_PATH } from './gitNullDevice'
 import { activeHiddenStore, checkStoreCommandAsync, hiddenStoreEnv } from './hiddenStore'
 import { isTrustedRepoEntry, readRepoTrust, readRepoTrustAt, readRepoTrustAtAsync, repoTrustPath, repoTrustPathAsync, TRUSTED_FILTER_KEY, writeRepoTrust, type RepoTrustRecord } from './repoTrust'
@@ -325,7 +325,7 @@ function bareGit(cwd: string, args: string[]): BareResult {
  */
 async function bareGitAsync(cwd: string, args: string[], signal?: AbortSignal): Promise<BareResult> {
   await assertGitAllowedAsync({ cwd, args }, signal)
-  const env = repoProgramEnv({ ...process.env, GIT_OPTIONAL_LOCKS: '0', ...await gitDirectoryEnvAsync(cwd) })
+  const env = repoProgramEnv({ ...process.env, GIT_OPTIONAL_LOCKS: '0', ...await untilAborted(gitDirectoryEnvAsync(cwd), signal) })
   signal?.throwIfAborted()
   return new Promise((settle, reject) => {
     const child = spawn('git', PROBE_ARGS(args), { cwd, windowsHide: true, env, stdio: ['ignore', 'pipe', 'ignore'], signal })
@@ -496,10 +496,11 @@ async function programsForAsync(cwd: string, signal?: AbortSignal): Promise<Repo
   for (let step = reading.next(); ; ) {
     if (step.done) return step.value
     const need = step.value
+    // A file read that does not answer (a held `stat`) does not hold a cancelled caller: it finishes in the background.
     const answer = need.kind === 'git' ? await bareGitAsync(need.cwd, need.args, signal)
-      : need.kind === 'signature' ? await signatureAsync(need.path)
-        : need.kind === 'trustPath' ? await repoTrustPathAsync(need.commonDir)
-          : await readRepoTrustAtAsync(need.path)
+      : need.kind === 'signature' ? await untilAborted(signatureAsync(need.path), signal)
+        : need.kind === 'trustPath' ? await untilAborted(repoTrustPathAsync(need.commonDir), signal)
+          : await untilAborted(readRepoTrustAtAsync(need.path), signal)
     signal?.throwIfAborted()
     step = reading.next(answer)
   }
@@ -631,7 +632,7 @@ export async function withoutRepoProgramsAsync(cwd: string, args: readonly strin
   const own = !options?.userAction
   const run = own ? withoutDeref(args) : [...args]
   await assertGitAllowedAsync({ cwd, args: run, userRequested: options?.userRequested, stdin: options?.stdin, env: options?.env, lockFree: own && run[0] !== 'config' }, options?.signal)
-  const dir = (await gitDirectoryEnvAsync(cwd)).GIT_DIR
+  const dir = (await untilAborted(gitDirectoryEnvAsync(cwd), options?.signal)).GIT_DIR
   const named = dir ? [`--git-dir=${dir}`] : []
   if (run[0] === 'config') return [...named, ...run]
   return [...named, ...(own ? ['--no-optional-locks'] : []), ...await noRepoProgramArgsAsync(cwd, run, options), ...run]

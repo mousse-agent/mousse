@@ -164,6 +164,23 @@ class NotReadYet {
   constructor(readonly key: string, readonly read: () => Promise<unknown>) {}
 }
 
+/**
+ * `work`, or a rejection with `signal`'s reason as soon as it aborts. A file call already started cannot be
+ * stopped: it finishes in the background and its answer is dropped.
+ */
+export function untilAborted<T>(work: Promise<T>, signal: AbortSignal | undefined): Promise<T> {
+  if (!signal) return work
+  if (signal.aborted) {
+    work.catch(() => undefined)
+    return Promise.reject(signal.reason)
+  }
+  return new Promise<T>((settle, reject) => {
+    const onAbort = (): void => reject(signal.reason)
+    signal.addEventListener('abort', onAbort, { once: true })
+    work.then(settle, reject).finally(() => signal.removeEventListener('abort', onAbort))
+  })
+}
+
 /** A reader that answers from `answers`, and asks for anything else to be read first. */
 function replayReads(answers: Map<string, unknown>, signal: AbortSignal | undefined): CheckReads {
   const answer = <T>(key: string, read: () => Promise<T>): T => {
@@ -171,8 +188,8 @@ function replayReads(answers: Map<string, unknown>, signal: AbortSignal | undefi
     throw new NotReadYet(key, read)
   }
   return {
-    realpath: (path) => answer(`realpath\0${path}`, () => realpath(path).catch(() => null)),
-    isGitDirectory: (path) => answer(`gitdir\0${path}`, () => isGitDirectoryAsync(path)),
+    realpath: (path) => answer(`realpath\0${path}`, () => untilAborted(realpath(path).catch(() => null), signal)),
+    isGitDirectory: (path) => answer(`gitdir\0${path}`, () => untilAborted(isGitDirectoryAsync(path), signal)),
     git: (cwd, args, gitDir) => answer(`git\0${cwd}\0${gitDir ?? ''}\0${args.join('\0')}`, () => readGitAsync(cwd, args, gitDir, signal))
   }
 }
@@ -901,15 +918,39 @@ export async function assertGitAllowedAsync(request: GitCommandRequest, signal?:
 /** Reads the check may need before it has decided; past this, something is wrong with the check itself. */
 const MAX_CHECK_READS = 256
 
+/** Times the async check may find an answer changed on its final read before it refuses for now. */
+const CHECK_PASSES = 3
+
 /**
  * {@link decideGitCommand} without blocking. The decision runs against a reader that answers only what has
  * been read already; each time it needs something else, that is read without blocking and the decision runs
- * again from the start. The decision reads nothing else and changes nothing, so the last run is the decision
- * the synchronous check makes on the same answers.
+ * again from the start. Once it has every answer, all of them are read again in one final pass, and the
+ * decision stands only when none changed: it is then the decision one synchronous check makes on the same
+ * answers. When one did change (a ref retargeted meanwhile), the decision runs again on the new answers; after
+ * {@link CHECK_PASSES} such passes the command is refused for now.
  */
 export async function decideGitCommandAsync(request: GitCommandRequest, signal?: AbortSignal): Promise<GitDecision> {
   const answers = new Map<string, unknown>()
+  const readers = new Map<string, () => Promise<unknown>>()
   const replay = replayReads(answers, signal)
+  for (let pass = 0; pass < CHECK_PASSES; pass++) {
+    const decision = await decideOnAnswers(request, replay, answers, readers, signal)
+    const keys = [...answers.keys()]
+    const again = await Promise.all(keys.map((key) => readers.get(key)!()))
+    signal?.throwIfAborted()
+    let changed = false
+    keys.forEach((key, index) => {
+      if (JSON.stringify(answers.get(key)) === JSON.stringify(again[index])) return
+      changed = true
+      answers.set(key, again[index])
+    })
+    if (!changed) return decision
+  }
+  return { access: 'userRequested', allowed: false, reason: 'what the check reads kept changing while it ran' }
+}
+
+/** Runs the decision on `answers`, reading each answer it is missing first. */
+async function decideOnAnswers(request: GitCommandRequest, replay: CheckReads, answers: Map<string, unknown>, readers: Map<string, () => Promise<unknown>>, signal: AbortSignal | undefined): Promise<GitDecision> {
   for (let round = 0; round <= MAX_CHECK_READS; round++) {
     signal?.throwIfAborted()
     const previous = reads
@@ -923,6 +964,7 @@ export async function decideGitCommandAsync(request: GitCommandRequest, signal?:
     } finally {
       reads = previous
     }
+    readers.set(missing.key, missing.read)
     answers.set(missing.key, await missing.read())
   }
   throw new Error(`The Git check needed more than ${MAX_CHECK_READS} reads for "${describe(request)}".`)

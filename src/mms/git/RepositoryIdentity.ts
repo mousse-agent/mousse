@@ -1,7 +1,7 @@
 /** Stable repository identity derived from Git's canonical common directory. */
-import { createHash } from 'node:crypto'
-import { mkdirSync, realpath as realpathCallback, realpathSync, readFileSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
-import { mkdir, readFile, stat, unlink, writeFile } from 'node:fs/promises'
+import { createHash, randomUUID } from 'node:crypto'
+import { accessSync, constants, mkdirSync, realpath as realpathCallback, realpathSync, readFileSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
+import { access, mkdir, readFile, stat, unlink, writeFile } from 'node:fs/promises'
 import { promisify } from 'node:util'
 import { homedir } from 'node:os'
 import { isAbsolute, join, resolve } from 'node:path'
@@ -80,7 +80,8 @@ const METADATA_LIMIT = 256
 const metadataFolders = new Map<string, { at: number; metadataDir: string }>()
 
 type MetadataStep =
-  | { kind: 'isDirectory'; path: string }
+  /** Whether a folder chosen before is still a folder Mousse may write to. */
+  | { kind: 'usable'; path: string }
   | { kind: 'writable'; dir: string }
   | { kind: 'mkdir'; dir: string }
   | { kind: 'read'; path: string }
@@ -95,7 +96,8 @@ type MetadataStep =
 function* chooseMetadata(commonDir: string, key: string, metadataHome: string | undefined): Generator<MetadataStep, { metadataDir: string; movedFrom?: string }, unknown> {
   const id = `${commonDir}\0${metadataHome ?? ''}`
   const known = metadataFolders.get(id)
-  if (known && Date.now() - known.at < METADATA_REUSE_MS && (yield { kind: 'isDirectory', path: known.metadataDir })) return { metadataDir: known.metadataDir }
+  // A folder that stopped being writable is chosen again at once, as every call did before choices were reused.
+  if (known && Date.now() - known.at < METADATA_REUSE_MS && (yield { kind: 'usable', path: known.metadataDir })) return { metadataDir: known.metadataDir }
   const localMetadata = join(commonDir, 'mousse')
   const metadataDir = (yield { kind: 'writable', dir: localMetadata })
     ? localMetadata
@@ -115,14 +117,19 @@ function* chooseMetadata(commonDir: string, key: string, metadataHome: string | 
   return { metadataDir, movedFrom }
 }
 
+/** A name no other probe uses, so probes at the same time never remove each other's file. */
 function writeProbe(dir: string): string {
-  return join(dir, `.mousse-write-${process.pid}-${Date.now()}`)
+  return join(dir, `.mousse-write-${process.pid}-${randomUUID()}`)
 }
 
 /** Answers a step at once. A failed `read` throws into the choice, as `readFileSync` did; a failed `mkdir` or `write` throws out of it. */
 function metadataStepSync(step: MetadataStep): unknown {
   switch (step.kind) {
-    case 'isDirectory': try { return statSync(step.path).isDirectory() } catch { return false }
+    case 'usable':
+      try {
+        accessSync(step.path, constants.W_OK)
+        return statSync(step.path).isDirectory()
+      } catch { return false }
     case 'writable':
       try {
         mkdirSync(step.dir, { recursive: true })
@@ -139,7 +146,7 @@ function metadataStepSync(step: MetadataStep): unknown {
 
 async function metadataStepAsync(step: MetadataStep): Promise<unknown> {
   switch (step.kind) {
-    case 'isDirectory': return stat(step.path).then((found) => found.isDirectory(), () => false)
+    case 'usable': return access(step.path, constants.W_OK).then(() => stat(step.path)).then((found) => found.isDirectory(), () => false)
     case 'writable':
       try {
         await mkdir(step.dir, { recursive: true })
@@ -171,7 +178,19 @@ function metadataFor(commonDir: string, key: string, metadataHome: string | unde
   return step.value
 }
 
-async function metadataForAsync(commonDir: string, key: string, metadataHome: string | undefined): Promise<{ metadataDir: string; movedFrom?: string }> {
+/** Async lookups under way, by repository and fallback home, so lookups at the same time share one. */
+const choosing = new Map<string, Promise<{ metadataDir: string; movedFrom?: string }>>()
+
+function metadataForAsync(commonDir: string, key: string, metadataHome: string | undefined): Promise<{ metadataDir: string; movedFrom?: string }> {
+  const id = `${commonDir}\0${metadataHome ?? ''}`
+  const pending = choosing.get(id)
+  if (pending) return pending
+  const lookup = runMetadataChoiceAsync(commonDir, key, metadataHome).finally(() => { if (choosing.get(id) === lookup) choosing.delete(id) })
+  choosing.set(id, lookup)
+  return lookup
+}
+
+async function runMetadataChoiceAsync(commonDir: string, key: string, metadataHome: string | undefined): Promise<{ metadataDir: string; movedFrom?: string }> {
   const choice: MetadataChoice = chooseMetadata(commonDir, key, metadataHome)
   let step = choice.next()
   while (!step.done) {
