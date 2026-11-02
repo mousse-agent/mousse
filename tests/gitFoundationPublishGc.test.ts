@@ -46,7 +46,7 @@ describe('Git foundation reviewed publish and retention', () => {
     const receipt = new ChangeReceiptService(f.thread).list().find((item) => item.id === action.receiptId)!
     git(f.repo, 'update-ref', 'refs/mousse/agents/agent', 'HEAD')
     const gc = new WorkspaceGcService(f.repo)
-    const report = gc.dryRun(new Set(), new Set())
+    const report = await gc.dryRun(new Set(), new Set())
     expect(report.staleWorktrees.map((item) => item.path)).not.toContain(workspace)
     for (const ref of receipt.retainedRefs) expect(report.retainedRefs).toContain(ref)
     expect(report.unreferencedRefs).not.toContain('refs/mousse/agents/agent')
@@ -64,7 +64,7 @@ describe('Git foundation reviewed publish and retention', () => {
     const candidate = join(ownedRoot, 'retired')
     git(f.repo, 'worktree', 'add', '-q', '-b', 'retired', candidate)
     const gc = new WorkspaceGcService(f.repo)
-    const report = gc.dryRun(new Set(), new Set())
+    const report = await gc.dryRun(new Set(), new Set())
     expect(report.staleWorktrees).toHaveLength(1)
     const result = f.commit(candidate, 'late unpublished work\n')
     await expect(gc.purge(report, true)).rejects.toThrow(/retained|revision changed/)

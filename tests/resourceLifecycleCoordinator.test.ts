@@ -112,7 +112,7 @@ describe('reversible lifecycle moves and recovery', () => {
   it('blocks ambiguous source ownership and inventory cache never overrides repaired sources', async () => {
     const { location, store, coordinator } = fixture()
     writeFileSync(join(location, 'workspace.json'), '{broken')
-    const inventory = buildResourceInventory(store, store.require('task'))
+    const inventory = (await buildResourceInventory(store, store.require('task')))
     expect(inventory.blockers.length).toBeGreaterThan(0)
     await expect(coordinator.trash({ taskId: 'task', operationId: 'bad' })).rejects.toThrow('ownership')
     expect(store.require('task').state).toBe('active')

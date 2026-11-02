@@ -1,6 +1,7 @@
-import { existsSync } from 'node:fs'
+import { access } from 'node:fs/promises'
 import { ThreadJournal, type ThreadJournalRecord } from '../data/ThreadJournal'
-import { leftMergeRefusal } from '../actions/leftMerge'
+import { leftMergeRefusalAsync } from '../actions/leftMerge'
+import { waitForFolderAccess } from '../files/folderAccess'
 import type { ThreadWorkspaceMetadata, WorkspaceRecovery } from '../../shared/workspace'
 import { ThreadWorkspaceManager } from './ThreadWorkspaceManager'
 import { PRESERVED_EXPIRY_OPERATION } from '../../shared/resourceLifecycle'
@@ -34,10 +35,12 @@ function recordedLeftMerge(entry: ThreadJournalRecord): string | undefined {
  * the check Abort itself runs): once it was finished, aborted or replaced by another (even of the same commit at the
  * same HEAD), it is the person's or the agent's.
  */
-function leftMerge(entry: ThreadJournalRecord, records: readonly ThreadJournalRecord[]): string | undefined {
+async function leftMerge(entry: ThreadJournalRecord, records: readonly ThreadJournalRecord[]): Promise<string | undefined> {
   const folder = recordedLeftMerge(entry)
-  if (!folder || !existsSync(folder)) return undefined
-  return leftMergeRefusal(folder, entry, records) ? undefined : folder
+  if (!folder) return undefined
+  await waitForFolderAccess([folder])
+  if (!await access(folder).then(() => true, () => false)) return undefined
+  return await leftMergeRefusalAsync(folder, entry, records) ? undefined : folder
 }
 
 /**
@@ -45,11 +48,14 @@ function leftMerge(entry: ThreadJournalRecord, records: readonly ThreadJournalRe
  * Called where Mousse already writes the journal (`operations.recover`); `workspace.getStatus` only reads, since a
  * journal write changes the generation clients send with their next action.
  */
-export function clearStaleLeftMerges(threadDirectory: string): void {
+export async function clearStaleLeftMerges(threadDirectory: string, beforeRecord?: () => void): Promise<void> {
   const journal = new ThreadJournal(threadDirectory)
   const records = journal.list()
   for (const entry of journal.latestByOperation().values()) {
-    if (recordedLeftMerge(entry) && !leftMerge(entry, records)) journal.append({ operationId: entry.operationId, operationType: entry.operationType, state: 'cancelled', details: { mergeNoLongerRecorded: true } })
+    if (!recordedLeftMerge(entry) || await leftMerge(entry, records)) continue
+    // A caller holding no thread lease checks again here, after the Git reads, that no turn has started.
+    beforeRecord?.()
+    journal.append({ operationId: entry.operationId, operationType: entry.operationType, state: 'cancelled', details: { mergeNoLongerRecorded: true } })
   }
 }
 
@@ -59,7 +65,7 @@ export function clearStaleLeftMerges(threadDirectory: string): void {
  * Publish waits, or when Git cannot read the worktree. The branch and HEAD are the agent's to move and are never a
  * reason.
  */
-export function describeRecovery(threadDirectory: string, verified: ThreadWorkspaceMetadata): WorkspaceRecovery | undefined {
+export async function describeRecovery(threadDirectory: string, verified: ThreadWorkspaceMetadata): Promise<WorkspaceRecovery | undefined> {
   const journal = new ThreadJournal(threadDirectory, { readOnly: true })
   const records = journal.list()
   const latest = [...journal.latestByOperation().values()]
@@ -78,7 +84,7 @@ export function describeRecovery(threadDirectory: string, verified: ThreadWorksp
 
   // Nothing is refused, but Git keeps a merge open in that folder until it is aborted or finished.
   for (const entry of latest) {
-    const folder = leftMerge(entry, records)
+    const folder = await leftMerge(entry, records)
     if (!folder) continue
     return {
       kind: 'merge',
@@ -97,13 +103,13 @@ export function describeRecovery(threadDirectory: string, verified: ThreadWorksp
 /**
  * What the thread is waiting on now, for `workspace.getStatus` and for what `operations.recover` leaves. A thread with a
  * worktree is read from `workspace.json`, verified, and only while it has a project folder (`projectPath`). A thread
- * that records into a hidden store (a folder without Git, or a standalone thread) is read through `loadOrSnapshot()`,
+ * that records into a hidden store (a folder without Git, or a standalone thread) is read through `loadOrSnapshotAsync()`,
  * so a pending operation there shows the banner too; it is never verified with Git, since its folder has none.
  */
-export function threadRecovery(threadDirectory: string, projectPath: string | undefined): WorkspaceRecovery | undefined {
+export async function threadRecovery(threadDirectory: string, projectPath: string | undefined): Promise<WorkspaceRecovery | undefined> {
   const manager = new ThreadWorkspaceManager(threadDirectory)
   const stored = manager.load()
-  if (stored) return projectPath ? describeRecovery(threadDirectory, manager.verify(stored)) : undefined
-  const snapshot = manager.loadOrSnapshot()
+  if (stored) return projectPath ? describeRecovery(threadDirectory, await manager.verify(stored)) : undefined
+  const snapshot = await manager.loadOrSnapshotAsync()
   return snapshot ? describeRecovery(threadDirectory, snapshot) : undefined
 }

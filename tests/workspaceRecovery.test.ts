@@ -12,9 +12,9 @@ import { PublishService } from '../src/mms/actions/PublishService'
 import { describeRecovery, recoveryErrorText } from '../src/mms/workspace/workspaceRecovery'
 import { ManagedConflictService } from '../src/mms/actions/ManagedConflictService'
 import { tryGit } from '../src/mms/actions/git'
-import { mergeIdentity } from '../src/mms/actions/leftMerge'
+import { mergeIdentityAsync } from '../src/mms/actions/leftMerge'
 import { onGitPolicyEntry, type GitPolicyEntry } from '../src/mms/git/gitPolicy'
-import { ensureSnapshotWorkspace } from '../src/mms/workspace/SnapshotWorkspace'
+import { ensureSnapshotWorkspaceAsync } from '../src/mms/workspace/SnapshotWorkspace'
 import { existsSync, readFileSync, realpathSync, rmSync, symlinkSync } from 'node:fs'
 import { randomUUID } from 'node:crypto'
 import { vi } from 'vitest'
@@ -59,7 +59,7 @@ let f: ReturnType<typeof fixture>
 beforeEach(() => { f = fixture() })
 afterEach(() => f.dispose())
 
-const status = (threadDirectory = f.thread) => describeRecovery(threadDirectory, new ThreadWorkspaceManager(threadDirectory).verify())
+const status = async (threadDirectory = f.thread) => describeRecovery(threadDirectory, await new ThreadWorkspaceManager(threadDirectory).verify())
 const mergeHead = (cwd: string) => tryGit(cwd, ['rev-parse', '--verify', '-q', 'MERGE_HEAD'])
 
 /** A real `git merge` an older version started in `cwd`, stopped on a conflict: its HEAD before, and what it merges. */
@@ -75,28 +75,28 @@ function stoppedMerge(cwd: string, side: string) {
 }
 
 /** The record an upgrade leaves for a subagent merge an older version stopped in the worktree. */
-function leftIntegration(threadDirectory: string, cwd: string) {
+async function leftIntegration(threadDirectory: string, cwd: string) {
   const { before, theirs } = stoppedMerge(cwd, 'old-worker')
   const journal = new ThreadJournal(threadDirectory)
   journal.append({ operationId: 'old', operationType: 'child-integration', state: 'prepared', expectedPreState: { preMergeSha: before, workerHeadSha: theirs }, details: { request: { agentId: 'worker', operationId: 'old', expectedWorkerHead: theirs, threadWorkspace: cwd } } })
   journal.append({ operationId: 'old', operationType: 'child-integration', state: 'recovery_required', details: { preMergeSha: before, workerHeadSha: theirs } })
-  expect(cancelPendingIntegrations(threadDirectory, cwd)).toEqual([expect.objectContaining({ operationId: 'old', mergeInProgress: cwd })])
+  expect(await cancelPendingIntegrations(threadDirectory, cwd)).toEqual([expect.objectContaining({ operationId: 'old', mergeInProgress: cwd })])
   return { before }
 }
 
 /** The record recovery leaves for a Publish an older version stopped as a merge in the primary checkout. */
-function leftPublishMerge(threadDirectory: string) {
+async function leftPublishMerge(threadDirectory: string) {
   const { before, theirs } = stoppedMerge(f.repo, 'old-publish')
   const journal = new ThreadJournal(threadDirectory)
   journal.append({ operationId: 'old-publish', operationType: 'publish', state: 'prepared', expectedPreState: { prePublishSha: before, sourceSha: theirs, targetBranch: 'main' } })
-  journal.append({ operationId: 'old-publish', operationType: 'publish', state: 'cancelled', details: { recovered: true, prePublishSha: before, mergeInProgress: f.repo, mergeIdentity: mergeIdentity(f.repo), sourceSha: theirs, reason: 'The publish did not land.' } })
+  journal.append({ operationId: 'old-publish', operationType: 'publish', state: 'cancelled', details: { recovered: true, prePublishSha: before, mergeInProgress: f.repo, mergeIdentity: (await mergeIdentityAsync(f.repo)), sourceSha: theirs, reason: 'The publish did not land.' } })
   return { before }
 }
 
 describe('what a thread is waiting on', () => {
   it('says nothing about a thread that is fine', async () => {
     await new ThreadWorkspaceManager(f.thread).provision('task', 'main', f.repo)
-    expect(status()).toBeUndefined()
+    expect(await status()).toBeUndefined()
   })
 
   it('says nothing when the agent switched to its own branch and committed, and leaves both where the agent put them', async () => {
@@ -106,8 +106,8 @@ describe('what a thread is waiting on', () => {
     git(cwd, 'switch', '-q', '-c', 'agent/task')
     const agentTip = f.commit(cwd, 'agent work\n', 'agent.txt')
     await new ThreadActionService(f.thread).checkpointExistingTurn(actionOptions(cwd), workspace.headSha, 'completed')
-    expect(manager.verify().lifecycle).toBe('ready')
-    expect(status()).toBeUndefined()
+    expect((await manager.verify()).lifecycle).toBe('ready')
+    expect(await status()).toBeUndefined()
     expect(git(cwd, 'branch', '--show-current')).toBe('agent/task')
     expect(git(cwd, 'rev-parse', 'HEAD')).toBe(agentTip)
   })
@@ -118,27 +118,27 @@ describe('what a thread is waiting on', () => {
       operationId: 'undo-1', operationType: 'undo', state: 'recovery_required',
       details: { error: "Error: Command failed: git -c core.fsmonitor=false -c core.hooksPath=/dev/null read-tree -u\nerror: Entry 'value.txt' not uptodate. Cannot merge.\n" }
     })
-    expect(new ThreadWorkspaceManager(f.thread).verify().lifecycle).toBe('recovery_required')
-    expect(status()).toEqual({ kind: 'paused', reason: "error: Entry 'value.txt' not uptodate. Cannot merge.", operationId: 'undo-1', operationType: 'undo' })
+    expect((await new ThreadWorkspaceManager(f.thread).verify()).lifecycle).toBe('recovery_required')
+    expect(await status()).toEqual({ kind: 'paused', reason: "error: Entry 'value.txt' not uptodate. Cannot merge.", operationId: 'undo-1', operationType: 'undo' })
   })
 
   it('names the operation when it stopped without saying why', async () => {
     await new ThreadWorkspaceManager(f.thread).provision('task', 'main', f.repo)
     new ThreadJournal(f.thread).append({ operationId: 'revert-1', operationType: 'code-revert', state: 'prepared' })
-    expect(status()).toEqual({ kind: 'paused', reason: 'The code-revert operation did not finish.', operationId: 'revert-1', operationType: 'code-revert' })
+    expect(await status()).toEqual({ kind: 'paused', reason: 'The code-revert operation did not finish.', operationId: 'revert-1', operationType: 'code-revert' })
   })
 
   it('pauses the thread when Git cannot read the worktree', async () => {
     const workspace = await new ThreadWorkspaceManager(f.thread).provision('task', 'main', f.repo)
     writeFileSync(join(workspace.worktreePath, '.git'), 'gitdir: /nowhere\n')
-    expect(status()).toEqual({ kind: 'paused', reason: 'Git cannot read the worktree.' })
+    expect(await status()).toEqual({ kind: 'paused', reason: 'Git cannot read the worktree.' })
   })
 
   it('reports a merge an earlier version left in the worktree, without pausing the thread, until it is aborted', async () => {
     const workspace = await new ThreadWorkspaceManager(f.thread).provision('task', 'main', f.repo)
-    const { before } = leftIntegration(f.thread, workspace.worktreePath)
-    expect(new ThreadWorkspaceManager(f.thread).verify().lifecycle).toBe('ready')
-    expect(status()).toEqual({
+    const { before } = await leftIntegration(f.thread, workspace.worktreePath)
+    expect((await new ThreadWorkspaceManager(f.thread).verify()).lifecycle).toBe('ready')
+    expect(await status()).toEqual({
       kind: 'merge',
       reason: `A merge from an earlier version of Mousse is still in progress in ${workspace.worktreePath}. Abort it, or finish it with Git.`,
       folder: workspace.worktreePath, operationId: 'old', operationType: 'child-integration'
@@ -146,47 +146,47 @@ describe('what a thread is waiting on', () => {
     await new ManagedConflictService(f.thread).abort(workspace.worktreePath, 'old')
     expect(mergeHead(workspace.worktreePath).ok).toBe(false)
     expect(git(workspace.worktreePath, 'rev-parse', 'HEAD')).toBe(before)
-    expect(status()).toBeUndefined()
+    expect(await status()).toBeUndefined()
   })
 
   it('stops reporting that merge once it is finished with Git, and never reports a merge someone else started', async () => {
     const workspace = await new ThreadWorkspaceManager(f.thread).provision('task', 'main', f.repo)
     const cwd = workspace.worktreePath
-    leftIntegration(f.thread, cwd)
+    await leftIntegration(f.thread, cwd)
     git(cwd, 'merge', '--abort')
-    expect(status()).toBeUndefined()
+    expect(await status()).toBeUndefined()
     // A merge the agent starts later in the same folder is the agent's, not the one recorded.
     stoppedMerge(cwd, 'agent-side')
-    expect(status()).toBeUndefined()
+    expect(await status()).toBeUndefined()
   })
 
   it('never offers a merge started again by hand, even of the same commit at the same HEAD, and Abort leaves its edits alone', async () => {
     const workspace = await new ThreadWorkspaceManager(f.thread).provision('task', 'main', f.repo)
     const cwd = workspace.worktreePath
-    const { before } = leftIntegration(f.thread, cwd)
-    expect(status()).toMatchObject({ kind: 'merge' })
+    const { before } = await leftIntegration(f.thread, cwd)
+    expect(await status()).toMatchObject({ kind: 'merge' })
     // The person aborts the old merge, starts the same merge again at the same HEAD, and resolves part of it.
     git(cwd, 'merge', '--abort')
     expect(git(cwd, 'rev-parse', 'HEAD')).toBe(before)
     expect(() => git(cwd, 'merge', '-q', '--no-edit', 'old-worker')).toThrow()
     writeFileSync(join(cwd, 'value.txt'), 'resolved by hand\n')
-    expect(status()).toBeUndefined()
+    expect(await status()).toBeUndefined()
     // Abort through any path refuses, clears the record and leaves the merge and the edit as they are.
     await expect(new ManagedConflictService(f.thread).abort(cwd, 'old')).rejects.toThrow(/not the one an earlier version left/)
     expect(readFileSync(join(cwd, 'value.txt'), 'utf8')).toBe('resolved by hand\n')
     expect(mergeHead(cwd).ok).toBe(true)
     expect(new ThreadJournal(f.thread).latestByOperation().get('old')).toMatchObject({ state: 'cancelled', details: { mergeNoLongerRecorded: true } })
-    expect(status()).toBeUndefined()
+    expect(await status()).toBeUndefined()
   })
 
   it('keeps every file, edits in conflicted ones included, before aborting the recorded merge', async () => {
     const workspace = await new ThreadWorkspaceManager(f.thread).provision('task', 'main', f.repo)
     const cwd = workspace.worktreePath
-    leftIntegration(f.thread, cwd)
+    await leftIntegration(f.thread, cwd)
     // Editing a conflicted file and adding a new one does not make it another merge, but Abort must not lose them.
     writeFileSync(join(cwd, 'value.txt'), 'half resolved\n')
     writeFileSync(join(cwd, 'notes.txt'), 'notes\n')
-    expect(status()).toMatchObject({ kind: 'merge', operationId: 'old' })
+    expect(await status()).toMatchObject({ kind: 'merge', operationId: 'old' })
     const { preservedRef } = await new ManagedConflictService(f.thread).abort(cwd, 'old')
     expect(preservedRef).toMatch(/^refs\/mousse\/preserved\/old-abort-[0-9a-f]{12}$/)
     expect(mergeHead(cwd).ok).toBe(false)
@@ -200,30 +200,30 @@ describe('what a thread is waiting on', () => {
     const cwd = workspace.worktreePath
     const { theirs } = stoppedMerge(cwd, 'unrecorded')
     new ThreadJournal(f.thread).append({ operationId: 'older', operationType: 'child-integration', state: 'cancelled', details: { mergeInProgress: cwd, workerHeadSha: theirs } })
-    expect(status()).toBeUndefined()
+    expect(await status()).toBeUndefined()
   })
 
   it('never offers a left merge that Abort would refuse, such as one recorded without the HEAD it started from', async () => {
     const workspace = await new ThreadWorkspaceManager(f.thread).provision('task', 'main', f.repo)
     const cwd = workspace.worktreePath
     const { theirs } = stoppedMerge(cwd, 'no-base')
-    new ThreadJournal(f.thread).append({ operationId: 'no-base', operationType: 'child-integration', state: 'cancelled', details: { mergeInProgress: cwd, mergeIdentity: mergeIdentity(cwd), workerHeadSha: theirs } })
-    expect(status()).toBeUndefined()
+    new ThreadJournal(f.thread).append({ operationId: 'no-base', operationType: 'child-integration', state: 'cancelled', details: { mergeInProgress: cwd, mergeIdentity: (await mergeIdentityAsync(cwd)), workerHeadSha: theirs } })
+    expect(await status()).toBeUndefined()
     await expect(new ManagedConflictService(f.thread).abort(cwd, 'no-base')).rejects.toThrow('Conflict HEAD changed outside the selected operation.')
     expect(mergeHead(cwd).ok).toBe(true)
   })
 
   it('reports a merge a Publish from an earlier version left in the primary checkout', async () => {
     await new ThreadWorkspaceManager(f.thread).provision('task', 'main', f.repo)
-    leftPublishMerge(f.thread)
-    expect(status()).toEqual(expect.objectContaining({ kind: 'merge', folder: f.repo, operationId: 'old-publish', operationType: 'publish' }))
+    await leftPublishMerge(f.thread)
+    expect(await status()).toEqual(expect.objectContaining({ kind: 'merge', folder: f.repo, operationId: 'old-publish', operationType: 'publish' }))
   })
 
   it('reports a Publish that did not finish, without pausing the thread', async () => {
     await new ThreadWorkspaceManager(f.thread).provision('task', 'main', f.repo)
     new ThreadJournal(f.thread).append({ operationId: 'publish-1', operationType: 'publish', state: 'prepared' })
-    expect(new ThreadWorkspaceManager(f.thread).verify().lifecycle).toBe('ready')
-    expect(status()).toEqual({ kind: 'publish', reason: 'A Publish did not finish.', operationId: 'publish-1', operationType: 'publish' })
+    expect((await new ThreadWorkspaceManager(f.thread).verify()).lifecycle).toBe('ready')
+    expect(await status()).toEqual({ kind: 'publish', reason: 'A Publish did not finish.', operationId: 'publish-1', operationType: 'publish' })
   })
 })
 
@@ -233,7 +233,7 @@ describe('the text of a failed operation', () => {
     expect(recoveryErrorText('Error: The publish did not land.')).toBe('The publish did not land.')
   })
 
-  it('drops the command line of a failed Git command and keeps what Git said', () => {
+  it('drops the command line of a failed Git command and keeps what Git said', async () => {
     const failed = "Error: Command failed: git -c core.fsmonitor=false -c core.hooksPath=/dev/null add -A -- . :(exclude).mousse\nerror: 'tool/' does not have a commit checked out\nfatal: adding files failed\n"
     expect(recoveryErrorText(failed)).toBe("error: 'tool/' does not have a commit checked out fatal: adding files failed")
     expect(recoveryErrorText('Command failed: git status')).toBe('A Git command failed without saying why.')
@@ -275,7 +275,7 @@ describe('through the daemon', () => {
   it('operations.abort aborts a merge an earlier version left, and workspace.getStatus stops reporting it', async () => {
     const d = await daemonThread()
     try {
-      const { before } = leftPublishMerge(d.directory)
+      const { before } = (await leftPublishMerge(d.directory))
       expect(await d.recovery()).toMatchObject({ kind: 'merge', folder: f.repo, operationId: 'old-publish' })
       const aborted = await d.call('operations.abort', { operationId: 'old-publish' }) as { ok: boolean; preservedRef: string }
       expect(aborted).toEqual({ ok: true, preservedRef: expect.stringMatching(/^refs\/mousse\/preserved\/old-publish-abort-/), notice: expect.stringMatching(/^Every file as it was before the abort is kept under refs\/mousse\/preserved\/old-publish-abort-\S+ for 30 days\. Bring one back before then/) })
@@ -293,7 +293,7 @@ describe('through the daemon', () => {
   it('operations.recover clears the record of a left merge that was replaced, so it is never offered again', async () => {
     const d = await daemonThread()
     try {
-      leftPublishMerge(d.directory)
+      await leftPublishMerge(d.directory)
       git(f.repo, 'merge', '--abort')
       expect(() => git(f.repo, 'merge', '-q', '--no-edit', 'old-publish')).toThrow()
       expect(await d.recovery()).toBeUndefined()
@@ -350,7 +350,7 @@ describe('through the daemon', () => {
       const started = Date.now()
       await expect(d.call('operations.recover')).rejects.toMatchObject({ code: 'thread_busy', message: 'The current turn is still running. Try again once it finishes.' })
       await expect(d.call('operations.abort', { operationId: 'any' })).rejects.toMatchObject({ code: 'operation_not_found' })
-      leftPublishMerge(d.directory)
+      await leftPublishMerge(d.directory)
       await expect(d.call('operations.abort', { operationId: 'old-publish' })).rejects.toMatchObject({ code: 'thread_busy' })
       expect(Date.now() - started).toBeLessThan(5_000)
       expect(mergeHead(f.repo).ok).toBe(true)
@@ -384,10 +384,10 @@ describe('through the daemon', () => {
       try {
         // The thread records its turns in a hidden store, since the folder has no Git of its own.
         // The thread records its turns in a hidden store, as its first turn does, and has no worktree.
-        const store = ensureSnapshotWorkspace({ threadDirectory: d.directory, threadId: d.threadId, workTree: folder, projectId: d.projectId })
+        const store = (await ensureSnapshotWorkspaceAsync({ threadDirectory: d.directory, threadId: d.threadId, workTree: folder, projectId: d.projectId }))
         await new ThreadActionService(d.directory).runCheckpointedAction({ ...actionOptions(store.record.workTree, 'turn-1'), threadId: d.threadId }, () => writeFileSync(join(folder, 'notes.txt'), 'two\n'))
         expect(new ThreadWorkspaceManager(d.directory).load()).toBeUndefined()
-        expect(new ThreadWorkspaceManager(d.directory).loadOrSnapshot()).toMatchObject({ snapshotOnly: true, worktreePath: realpathSync(folder) })
+        expect(await new ThreadWorkspaceManager(d.directory).loadOrSnapshotAsync()).toMatchObject({ snapshotOnly: true, worktreePath: realpathSync(folder) })
         expect(await d.recovery()).toBeUndefined()
         // Mousse stopped while it recorded the next turn: its intent is written, its snapshot is not.
         const [previousAction] = new ThreadActionService(d.directory).list().slice(-1)
@@ -444,7 +444,7 @@ describe('through the daemon', () => {
         expect(readFileSync(join(f.repo, 'value.txt'), 'utf8')).toBe('three\n')
 
         // A merge an older version left in the project folder: Abort keeps every file first, then aborts it, as the person asked.
-        const { before } = leftIntegration(directory, f.repo)
+        const { before } = await leftIntegration(directory, f.repo)
         expect(await recovery()).toMatchObject({ kind: 'merge', folder: f.repo, operationId: 'old' })
         const aborted = await call('operations.abort', { operationId: 'old' }) as { ok: boolean; preservedRef: string }
         expect(aborted).toEqual({ ok: true, preservedRef: expect.stringMatching(/^refs\/mousse\/preserved\/old-abort-/), notice: expect.stringContaining('for 30 days') })
@@ -468,7 +468,7 @@ describe('through the daemon', () => {
         const prePublishSha = git(f.repo, 'rev-parse', 'HEAD')
         new ThreadJournal(d.directory).append({ operationId: 'interrupted', operationType: 'publish', state: 'prepared', expectedPreState: { prePublishSha, targetBranch: git(f.repo, 'branch', '--show-current'), sourceSha: git(d.cwd, 'rev-parse', 'HEAD') } })
         await expect(d.call('operations.recover')).resolves.toEqual({ ok: true, settled: true })
-        const { before } = leftPublishMerge(d.directory)
+        const { before } = (await leftPublishMerge(d.directory))
         const aborted = await d.call('operations.abort', { operationId: 'old-publish' }) as { preservedRef: string }
         expect(mergeHead(f.repo).ok).toBe(false)
         expect(git(f.repo, 'rev-parse', 'HEAD')).toBe(before)

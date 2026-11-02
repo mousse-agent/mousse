@@ -1,27 +1,31 @@
 import { createErrorProvider, normalizeAppError } from '../../shared/errors'
 import { createHash, randomUUID } from 'node:crypto'
-import { existsSync, lstatSync, readFileSync, readdirSync, rmdirSync, unlinkSync } from 'node:fs'
+import { existsSync, lstatSync, readdirSync, readFileSync, rmdirSync, unlinkSync } from 'node:fs'
+import { access, lstat } from 'node:fs/promises'
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import type { LifecyclePurgeItem, LifecyclePurgePreview, TaskLifecycleRecord, TrashRetentionPolicy } from '../../shared/resourceLifecycle'
 import { atomicWriteJsonSync } from '../data/AtomicFs'
 import { acquireRepositoryLease } from '../git/RepositoryLease'
-import { resolveRepositoryIdentity, resolveRepositoryIdentityAsync } from '../git/RepositoryIdentity'
-import { buildResourceInventory } from './ResourceInventory'
+import { resolveRepositoryIdentityAsync } from '../git/RepositoryIdentity'
+import { buildResourceInventory, OwnershipFacts } from './ResourceInventory'
 import { projectFolderPurgeRefs, threadKeptFilesRefs } from './projectFolderRefs'
 import { measureTree } from './diskMeasure'
-import { assertLifecyclePath, ResourceLifecycleStore } from './ResourceLifecycleStore'
-import { assertFrozenContentEntry, lifecycleGit, lifecycleRead, readDirectLifecycleRef, walkOwnedContent, WorktreeRetirementService } from './WorktreeRetirementService'
+import { assertLifecyclePath, assertLifecyclePathAsync, ResourceLifecycleStore } from './ResourceLifecycleStore'
+import { assertFrozenEntryUnchanged, lifecycleGitAsync, proveFrozenContentEntryAsync, lifecycleReadAsync, readDirectLifecycleRefAsync, walkOwnedContentAsync, WorktreeRetirementService } from './WorktreeRetirementService'
 import { isOwnerLive, PROCESS_INSTANCE_ID } from '../queue/processLiveness'
-import { getExternalResourceClaims } from './LifecycleClaims'
+import { getExternalResourceClaims, getExternalResourceClaimsFromFacts } from './LifecycleClaims'
 import { withFileLock } from '../scheduled/fileLock'
 import { isMousseOwnedRef } from '../../shared/mousseBranches'
 import { isKeptFilesItem } from '../../shared/resourceLifecycle'
 import { isOwnedSnapshotStore } from '../git/gitPolicy'
-import { threadStoreKeptFiles } from '../actions/SnapshotRefReleaseService'
+import { threadStoreKeptFilesAsync } from '../actions/SnapshotRefReleaseService'
 
 const digest = (value: unknown): string => createHash('sha256').update(JSON.stringify(value)).digest('hex')
 const within = (root: string, path: string): boolean => { const rel = relative(resolve(root), resolve(path)); return !isAbsolute(rel) && rel !== '..' && !rel.startsWith(`..${process.platform === 'win32' ? '\\' : '/'}`) }
 const active = new Set<string>()
+/** Whether `path` is there, as `existsSync` answers; a checkout is read without blocking the daemon. */
+const present = (path: string): Promise<boolean> => access(path).then(() => true, () => false)
+const rootIdentity = (stat: { dev: number; ino: number; birthtimeMs: number }) => digest({ dev: stat.dev, ino: stat.ino, birthtimeMs: stat.birthtimeMs })
 /** Time one reclaim estimate may spend measuring files. */
 const RECLAIM_BUDGET_MS = 20_000
 
@@ -50,6 +54,11 @@ const purgeErrors = createErrorProvider({
 })
 
 /** External purge ledger survives deletion of every task-owned source. No Git object pruning. */
+export interface RetireTrashedOptions {
+  recheck?: (worktreePath: string) => string | undefined | Promise<string | undefined>
+  beforeMove?: (worktreePath: string) => string | undefined
+}
+
 export class ResourcePurgeService {
   readonly retirement: WorktreeRetirementService
   private timer?: ReturnType<typeof setInterval>
@@ -114,7 +123,7 @@ export class ResourcePurgeService {
     const total = { bytes: 0, estimated: false, partial: false }
     const deadline = Date.now() + RECLAIM_BUDGET_MS
     for (const item of preview.items) {
-      if ((item.kind !== 'worktree' && item.kind !== 'path') || !existsSync(item.identity)) continue
+      if ((item.kind !== 'worktree' && item.kind !== 'path') || !await present(item.identity)) continue
       const budgetMs = deadline - Date.now()
       if (budgetMs <= 0) { total.partial = true; break }
       const measured = await measureTree(item.identity, { mode: 'reclaim', budgetMs })
@@ -169,12 +178,14 @@ export class ResourcePurgeService {
    * Retires the checkouts of a trashed thread. `recheck` runs for each checkout under the cleanup
    * reservation and the repository lease, just before it is removed; a returned reason keeps that
    * checkout. Automatic rules use it to repeat their location and content checks at that point.
+   * `beforeMove` runs synchronously right before the checkout moves, with nothing awaited in between,
+   * for the checks that must hold at that moment; a returned reason keeps the checkout too.
    */
-  async retireTrashed(taskId: string, options: { recheck?: (worktreePath: string) => string | undefined } = {}): Promise<void> {
+  async retireTrashed(taskId: string, options: RetireTrashedOptions = {}): Promise<void> {
     const release = await this.hooks.quiesceDisk?.()
     try { await this.retireTrashedQuiet(taskId, options) } finally { release?.() }
   }
-  private async retireTrashedQuiet(taskId: string, options: { recheck?: (worktreePath: string) => string | undefined }): Promise<void> {
+  private async retireTrashedQuiet(taskId: string, options: RetireTrashedOptions): Promise<void> {
     await this.withOwnership(taskId, async () => {
       const record = this.store.require(taskId), token = record.cleanupOwner!.token
       if (record.state !== 'trashed') return
@@ -182,10 +193,22 @@ export class ResourcePurgeService {
       const retained = [...preview.blockers]
       if (!preview.blockers.length) for (const item of preview.items.filter((item) => item.kind === 'worktree')) {
         if (!item.manifestPath) { retained.push(`Checkout retained: ${item.reason ?? item.identity}`); continue }
-        if (!existsSync(item.identity)) continue
+        if (!await present(item.identity)) continue
         try {
           const lease = await acquireRepositoryLease(await resolveRepositoryIdentityAsync(item.identity, { requireMutationCapability: true }), { signal: AbortSignal.timeout(10_000) })
-          try { this.assertReservation(taskId, token, record.generation); const refusal = options.recheck?.(item.identity); if (refusal) throw new Error(refusal); new WorktreeRetirementService(this.store, { repositoryLease: lease, cleanupTaskId: taskId, cleanupToken: token, cleanupGeneration: record.generation }).retire(item.manifestPath) } finally { lease.release() }
+          try {
+            this.assertReservation(taskId, token, record.generation)
+            const refusal = await options.recheck?.(item.identity)
+            if (refusal) throw new Error(refusal)
+            this.assertReservation(taskId, token, record.generation)
+            // The reservation and the caller's own last checks run again right before the move, with nothing awaited in between.
+            const beforeMove = (): void => {
+              this.assertReservation(taskId, token, record.generation)
+              const late = options.beforeMove?.(item.identity)
+              if (late) throw new Error(late)
+            }
+            await new WorktreeRetirementService(this.store, { repositoryLease: lease, cleanupTaskId: taskId, cleanupToken: token, cleanupGeneration: record.generation }).retire(item.manifestPath, { beforeMove })
+          } finally { lease.release() }
         } catch (error) { retained.push(`Checkout retained: ${(error as Error).message}`) }
       }
       this.store.update(taskId, (current) => { if (retained.length) current.blockedReason = retained.join('; '); else delete current.blockedReason })
@@ -199,6 +222,17 @@ export class ResourcePurgeService {
   /** Fresh source-derived claims from every installed profile; no cached preview authorizes deletion. */
   private peers(ownedIds: Set<string>) {
     return getExternalResourceClaims(this.store, ownedIds)
+  }
+  /**
+   * The peers' claims for a check right before a destructive step: the checkouts and project folders their records name
+   * are read now, without blocking, and the returned function re-reads the records themselves synchronously, so nothing
+   * is awaited between that check and the step it guards. A record naming a checkout not read here fails closed.
+   */
+  private async peersCheck(ownedIds: Set<string>): Promise<() => ReturnType<typeof getExternalResourceClaimsFromFacts>> {
+    const facts = new OwnershipFacts()
+    // Only the facts are wanted: a refusal is made again, from the records, by the returned check.
+    await getExternalResourceClaims(this.store, ownedIds, facts).catch(() => undefined)
+    return () => getExternalResourceClaimsFromFacts(this.store, ownedIds, facts)
   }
   async preview(taskId: string): Promise<LifecyclePurgePreview> {
     return this.withOwnership(taskId, () => this.previewOwned(taskId))
@@ -239,9 +273,9 @@ export class ResourcePurgeService {
     if (!readOnly) this.hooks.assertIdle(taskId)
     const tasks = this.owned(taskId), ownedIds = new Set(tasks.map((task) => task.taskId))
     const preview: LifecyclePurgePreview = { schemaVersion: 1, taskId, generation: record.generation, digest: '', items: [], ownedTaskIds: [...ownedIds].sort(), blockers: [], retained: [], exclusiveBytes: 0 }
-    let peers: ReturnType<ResourcePurgeService['peers']>
-    try { peers = this.peers(ownedIds) } catch (error) { preview.blockers.push((error as Error).message); return this.sign(preview) }
-    let inventory = buildResourceInventory(this.store, record)
+    let peers: Awaited<ReturnType<ResourcePurgeService['peers']>>
+    try { peers = await this.peers(ownedIds) } catch (error) { preview.blockers.push((error as Error).message); return this.sign(preview) }
+    let inventory = await buildResourceInventory(this.store, record)
     preview.blockers.push(...inventory.blockers)
     if (inventory.blockers.length || inventory.sources.some((source) => source.status !== 'verified')) return this.sign(preview)
     const repositories = new Map<string, string>()
@@ -251,20 +285,20 @@ export class ResourcePurgeService {
       try {
         const manifestPath = this.retirement.pathFor(resource.ownerTaskId, resource.identity)
         let manifest = existsSync(manifestPath) ? this.retirement.load(manifestPath) : undefined
-        if (existsSync(resource.identity)) {
+        if (await present(resource.identity)) {
           const sources = inventory.sources.filter((source) => resource.sourceIds.includes(source.id))
           const source = sources.find((source) => basename(source.path) === 'agent-episodes.json') ?? sources.find((source) => ['workspace.json', 'agents.json', 'mousse-agent-sessions.json'].includes(basename(source.path))) ?? sources.find((source) => source.path.includes('workflow'))
           if (!source) throw new Error('Workspace has no supported owner source')
-          const current = lifecycleRead(resource.identity, ['branch', '--show-current'])
+          const current = await lifecycleReadAsync(resource.identity, ['branch', '--show-current'])
           // The owner's record names the branch; the checkout may be on another one the agent switched to.
           const branch = this.retirement.ownedBranch(source.path, resource.identity) ?? current
           if (readOnly) {
             // No repository lease and no `prepare`, which writes a manifest and Git refs: judge the checkout by
             // what `prepare` would refuse. The item is for display only; it is never signed or acted on.
-            const discard = this.retirement.inspectForDiscard({ taskId: resource.ownerTaskId, sourcePath: source.path, worktreePath: resource.identity, branch, repositoryId: resource.repositoryId })
+            const discard = await this.retirement.inspectForDiscard({ taskId: resource.ownerTaskId, sourcePath: source.path, worktreePath: resource.identity, branch, repositoryId: resource.repositoryId })
             repositories.set(discard.repositoryId, discard.commonDir)
             let retained: string | undefined
-            try { this.retirement.inspectContent(resource.identity) } catch (error) { retained = (error as Error).message }
+            try { await this.retirement.inspectContent(resource.identity) } catch (error) { retained = (error as Error).message }
             let discardRequired = Boolean(retained) || resource.claims.some((claim) => ['pending-integration', 'conflict'].includes(claim.kind))
             for (const source of inventory.sources.filter((source) => resource.sourceIds.includes(source.id) && basename(source.path) === 'workspace.json')) {
               // The thread's branch is the agent's to move, so the commits it holds are read from HEAD, not from the record.
@@ -275,14 +309,14 @@ export class ResourcePurgeService {
             preview.exclusiveBytes += discard.content.reduce((sum, entry) => sum + entry.bytes, 0)
             continue
           }
-          const identity = resolveRepositoryIdentity(resource.identity, { requireMutationCapability: true })
+          const identity = await resolveRepositoryIdentityAsync(resource.identity, { requireMutationCapability: true })
           const lease = await acquireRepositoryLease(identity, { signal: AbortSignal.timeout(10_000) })
           try {
             this.assertReservation(taskId, reservation, record.generation)
             const input = { taskId: resource.ownerTaskId, sourcePath: source.path, worktreePath: resource.identity, branch, repositoryId: resource.repositoryId }
-            try { manifest = new WorktreeRetirementService(this.store, { repositoryLease: lease, cleanupTaskId: taskId, cleanupToken: reservation, cleanupGeneration: record.generation }).prepare(input) }
+            try { manifest = await new WorktreeRetirementService(this.store, { repositoryLease: lease, cleanupTaskId: taskId, cleanupToken: reservation, cleanupGeneration: record.generation }).prepare(input) }
             catch (error) {
-              const discard = this.retirement.inspectForDiscard(input)
+              const discard = await this.retirement.inspectForDiscard(input)
               repositories.set(discard.repositoryId, discard.commonDir)
               // The discard path compares the checkout's own branch when it removes it.
               preview.items.push({ id: resource.id, kind: 'worktree', identity: resource.identity, ownerTaskId: resource.ownerTaskId, commonDir: discard.commonDir, expectedValue: discard.resultSha, rootIdentity: discard.rootIdentity, content: discard.content, indexDigest: discard.indexDigest, branch: current, sourcePath: source.path, discardRequired: true, discardState: 'pending', reason: (error as Error).message, status: 'pending' })
@@ -292,7 +326,7 @@ export class ResourcePurgeService {
           } finally { lease.release() }
         }
         if (!manifest) throw new Error('Absent workspace lacks a reconstruction manifest')
-        this.retirement.verifyPins(manifest)
+        await this.retirement.verifyPins(manifest)
         repositories.set(manifest.repositoryId, manifest.commonDir)
         // A worktree that held uncommitted files is kept as a snapshot; deleting the snapshot deletes that work.
         let discardRequired = resource.claims.some((claim) => ['pending-integration', 'conflict'].includes(claim.kind)) || manifest.snapshotSha !== undefined
@@ -310,8 +344,8 @@ export class ResourcePurgeService {
     const folderRefs: LifecyclePurgeItem[] = []
     for (const task of tasks) {
       if (!ownedIds.has(task.taskId)) continue
-      let plan: ReturnType<typeof projectFolderPurgeRefs>
-      try { plan = projectFolderPurgeRefs(task) } catch (error) { preview.blockers.push(`Project folder refs of ${task.taskId}: ${(error as Error).message}`); continue }
+      let plan: Awaited<ReturnType<typeof projectFolderPurgeRefs>>
+      try { plan = await projectFolderPurgeRefs(task) } catch (error) { preview.blockers.push(`Project folder refs of ${task.taskId}: ${(error as Error).message}`); continue }
       if (!plan) continue
       if ('unavailable' in plan) { preview.retained.push({ identity: join(task.location, 'project-folder.json'), reason: plan.unavailable }); continue }
       for (const { ref, sha, discardReason } of plan.refs) folderRefs.push({ id: `project-folder-ref:${task.taskId}:${ref}`, kind: 'ref', identity: ref, ownerTaskId: task.taskId, commonDir: plan.commonDir, expectedValue: sha, ...(discardReason ? { discardRequired: true, reason: discardReason } : {}), status: 'pending' })
@@ -325,8 +359,8 @@ export class ResourcePurgeService {
         const commonDir = repositories.get(repositoryId)
         if (!commonDir) continue
         try {
-          for (const { ref, sha, discardReason } of threadKeptFilesRefs(commonDir, task.location)) {
-            if (folderRefs.some((item) => item.identity === ref) || readDirectLifecycleRef(commonDir, ref) !== sha) continue
+          for (const { ref, sha, discardReason } of await threadKeptFilesRefs(commonDir, task.location)) {
+            if (folderRefs.some((item) => item.identity === ref) || await readDirectLifecycleRefAsync(commonDir, ref) !== sha) continue
             folderRefs.push({ id: `preserved-ref:${task.taskId}:${ref}`, kind: 'ref', identity: ref, ownerTaskId: task.taskId, commonDir, expectedValue: sha, ...(discardReason ? { discardRequired: true, reason: discardReason } : {}), status: 'pending' })
           }
         } catch (error) { preview.blockers.push(`Files kept by restores of ${task.taskId}: ${(error as Error).message}`) }
@@ -338,14 +372,14 @@ export class ResourcePurgeService {
     for (const task of tasks) {
       if (!ownedIds.has(task.taskId)) continue
       try {
-        const kept = threadStoreKeptFiles(task.location)
+        const kept = await threadStoreKeptFilesAsync(task.location)
         for (const { ref, sha, discardReason } of kept?.refs ?? []) folderRefs.push({ id: `snapshot-kept-ref:${task.taskId}:${ref}`, kind: 'ref', identity: ref, ownerTaskId: task.taskId, commonDir: kept!.gitDir, expectedValue: sha, ...(discardReason ? { discardRequired: true, reason: discardReason } : {}), status: 'pending' })
       } catch (error) { preview.blockers.push(`Files kept in the snapshot store of ${task.taskId}: ${(error as Error).message}`) }
     }
     preview.items.push(...folderRefs)
     const plannedRefs = new Set(folderRefs.map((item) => item.identity))
     // Preparation adds explicit reconstruction pins. Refresh rather than omitting their cleanup.
-    inventory = buildResourceInventory(this.store, this.store.require(taskId))
+    inventory = await buildResourceInventory(this.store, this.store.require(taskId))
     for (const resource of inventory.resources) {
       if (!ownedIds.has(resource.ownerTaskId)) continue
       if (resource.kind === 'worktree' || resource.kind === 'agent-session' || resource.kind === 'artifact') continue
@@ -357,7 +391,7 @@ export class ResourcePurgeService {
           if (!isMousseOwnedRef(resource.identity)) throw new Error('Source ref is not Mousse-owned')
           const commonDir = resource.repositoryId ? repositories.get(resource.repositoryId) : repositories.size === 1 ? [...repositories.values()][0] : undefined
           if (!commonDir) throw new Error('Repository is unavailable; ref existence cannot be established')
-          const expectedValue = readDirectLifecycleRef(commonDir, resource.identity)
+          const expectedValue = await readDirectLifecycleRefAsync(commonDir, resource.identity)
           if (!expectedValue) continue
           preview.items.push({ id: resource.id, kind: 'ref', identity: resource.identity, ownerTaskId: resource.ownerTaskId, commonDir, expectedValue, status: 'pending' })
         } catch (error) { preview.blockers.push((error as Error).message) }
@@ -377,10 +411,10 @@ export class ResourcePurgeService {
       }
       if (!isAbsolute(resource.identity)) { preview.blockers.push('Unknown external resource identity'); continue }
       if (!within(this.store.profileHome, resource.identity)) { preview.blockers.push(`External resource lacks a profile-owned disposal root: ${resource.identity}`); continue }
-      if (!existsSync(resource.identity)) continue
+      if (!await present(resource.identity)) continue
       try {
         assertLifecyclePath(this.store.profileHome, resource.identity)
-        const stat = lstatSync(resource.identity), content = walkOwnedContent(resource.identity)
+        const stat = await lstat(resource.identity), content = await walkOwnedContentAsync(resource.identity)
         const scratch = inventory.sources.filter((source) => resource.sourceIds.includes(source.id)).some((source) => {
           const workflow = dirname(source.path) === join(this.store.profileHome, 'workflow-agent-bindings', 'workspaces')
           const agent = basename(source.path) === 'run.json' && dirname(dirname(source.path)) === join(this.store.profileHome, 'agent-runs')
@@ -443,7 +477,7 @@ export class ResourcePurgeService {
       for (const item of record.purge.items) {
         if (item.status !== 'pending') continue
         // Peer source records are re-read at each step. Partial failure never weakens another owner's claim.
-        const peers = this.peers(new Set(record.purge!.ownedTaskIds))
+        const peers = await this.peers(new Set(record.purge!.ownedTaskIds))
         if (peers.some((peer) => peer.identity === item.identity || isAbsolute(item.identity) && isAbsolute(peer.identity) && (within(item.identity, peer.identity) || within(peer.identity, item.identity)))) throw new Error(`New shared owner retains ${item.identity}`)
         await this.remove(item, new Set(record.purge!.ownedTaskIds), () => this.store.update(input.taskId, (current) => { current.purge!.items.find((entry) => entry.id === item.id)!.discardState = 'cleared' }), () => this.assertReservation(input.taskId, reservation, record.generation), { taskId: input.taskId, token: reservation, generation: record.generation })
         record = this.store.update(input.taskId, (current) => { const progress = current.purge!.items.find((entry) => entry.id === item.id)!; progress.status = 'removed'; delete current.purge!.error; delete current.blockedReason })
@@ -488,72 +522,102 @@ export class ResourcePurgeService {
       return
     }
     if (item.kind === 'path') {
-      if (!existsSync(item.identity)) return
-      assertLifecyclePath(this.store.profileHome, item.identity)
-      const stat = lstatSync(item.identity)
-      if (digest({ dev: stat.dev, ino: stat.ino, birthtimeMs: stat.birthtimeMs }) !== digest(item.rootIdentity)) throw new Error('Owned resource root was replaced')
-      const current = walkOwnedContent(item.identity)
-      const expected = new Map(item.content!.map((entry) => [entry.path, digest(entry)]))
-      // A prior crash may have removed a prefix; every remaining entry must still match the frozen plan.
-      for (const entry of current) if (expected.get(entry.path) !== digest(entry)) throw new Error('Owned resource changed during purge')
-      for (const entry of [...current].reverse()) {
-        const path = join(item.identity, entry.path)
-        assertLifecyclePath(this.store.profileHome, dirname(path))
-        const again = lstatSync(item.identity)
-        if (digest({ dev: again.dev, ino: again.ino, birthtimeMs: again.birthtimeMs }) !== digest(item.rootIdentity)) throw new Error('Owned resource root was replaced during removal')
-        assertFrozenContentEntry(item.identity, entry)
-        if (entry.kind === 'directory') rmdirSync(path)
-        else unlinkSync(path) // Never follows a link or recursively removes an unreviewed subtree.
+      if (!await present(item.identity)) return
+      // Peer claims are read without blocking, then checked again from the records right before each entry is removed.
+      const claims = await this.peersCheck(ownedIds)
+      const unclaimed = (): void => {
+        assertReservation()
+        if (claims().some((peer) => peer.identity === item.identity || isAbsolute(item.identity) && isAbsolute(peer.identity) && (within(item.identity, peer.identity) || within(peer.identity, item.identity)))) throw new Error(`New shared owner retains ${item.identity}`)
       }
+      await this.removeFrozen(item.identity, item.content!, this.store.profileHome, item.rootIdentity, 'Owned resource changed during purge', false, unclaimed)
       return
     }
     const commonDir = item.commonDir!
     // Kept files in a hidden snapshot store were released with the store by `releaseThreadSnapshots` (`beforeRemoval`).
     if (isKeptFilesItem(item) && isOwnedSnapshotStore(commonDir)) return
-    if (!existsSync(commonDir)) throw purgeErrors.create('resource_purge_repository_unavailable')
-    const worktree = lifecycleRead(commonDir, ['worktree', 'list', '--porcelain']).split(/\r?\n/).find((line) => line.startsWith('worktree '))?.slice(9)
-    if (!worktree || !existsSync(worktree)) throw purgeErrors.create('resource_purge_repository_unavailable')
-    const identity = resolveRepositoryIdentity(worktree, { requireMutationCapability: true })
+    if (!await present(commonDir)) throw purgeErrors.create('resource_purge_repository_unavailable')
+    const worktree = (await lifecycleReadAsync(commonDir, ['worktree', 'list', '--porcelain'])).split(/\r?\n/).find((line) => line.startsWith('worktree '))?.slice(9)
+    if (!worktree || !await present(worktree)) throw purgeErrors.create('resource_purge_repository_unavailable')
+    const identity = await resolveRepositoryIdentityAsync(worktree, { requireMutationCapability: true })
     if (resolve(identity.commonDir) !== resolve(commonDir)) throw new Error('Repository identity changed')
     const lease = await acquireRepositoryLease(identity, { signal: AbortSignal.timeout(10_000) })
     try {
       assertReservation()
-      if (this.peers(ownedIds).some((peer) => peer.identity === item.identity)) throw new Error('A new source claim retains the resource')
+      // Re-checked right before each change below, with nothing awaited in between (`peersCheck`).
+      const claims = await this.peersCheck(ownedIds)
+      const unclaimed = (): void => {
+        assertReservation()
+        if (claims().some((peer) => peer.identity === item.identity)) throw new Error('A new source claim retains the resource')
+      }
+      unclaimed()
       if (item.kind === 'worktree') {
         if (item.content && item.discardState) {
-          if (!existsSync(item.identity)) {
-            if (lifecycleRead(commonDir, ['worktree', 'list', '--porcelain']).includes(`worktree ${item.identity.replaceAll('\\', '/')}`)) throw new Error('Missing discarded worktree is still registered')
+          if (!await present(item.identity)) {
+            if ((await lifecycleReadAsync(commonDir, ['worktree', 'list', '--porcelain'])).includes(`worktree ${item.identity.replaceAll('\\', '/')}`)) throw new Error('Missing discarded worktree is still registered')
             return
           }
-          const stat = lstatSync(item.identity)
-          if (digest({ dev: stat.dev, ino: stat.ino, birthtimeMs: stat.birthtimeMs }) !== digest(item.rootIdentity) || lifecycleRead(item.identity, ['branch', '--show-current']) !== item.branch || lifecycleRead(item.identity, ['rev-parse', 'HEAD']) !== item.expectedValue) throw new Error('Discarded checkout identity changed')
+          const stat = await lstat(item.identity)
+          if (rootIdentity(stat) !== digest(item.rootIdentity) || await lifecycleReadAsync(item.identity, ['branch', '--show-current']) !== item.branch || await lifecycleReadAsync(item.identity, ['rev-parse', 'HEAD']) !== item.expectedValue) throw new Error('Discarded checkout identity changed')
+          let emptied = false
           if (item.discardState === 'pending') {
-            if (createHash('sha256').update(lifecycleRead(item.identity, ['ls-files', '--stage', '-v', '-z'])).digest('hex') !== item.indexDigest) throw new Error('Staged sole-copy content changed after the reviewed discard')
-            const content = walkOwnedContent(item.identity, true)
-            const expected = new Map(item.content.map((entry) => [entry.path, digest(entry)]))
-            for (const entry of content) if (expected.get(entry.path) !== digest(entry)) throw new Error('Sole-copy content changed after the reviewed discard')
-            for (const entry of [...content].reverse()) {
-              if (!entry.path) continue
-              const path = join(item.identity, entry.path)
-              assertLifecyclePath(item.identity, dirname(path))
-              assertFrozenContentEntry(item.identity, entry)
-              if (entry.kind === 'directory') rmdirSync(path); else unlinkSync(path)
-            }
+            if (createHash('sha256').update(await lifecycleReadAsync(item.identity, ['ls-files', '--stage', '-v', '-z'])).digest('hex') !== item.indexDigest) throw new Error('Staged sole-copy content changed after the reviewed discard')
+            await this.removeFrozen(item.identity, item.content, item.identity, undefined, 'Sole-copy content changed after the reviewed discard', true, unclaimed)
             onDiscardCleared()
+            emptied = true
           }
-          // Clearing is durably recorded before this idempotent index/worktree reconstruction.
-          lifecycleGit(item.identity, ['restore', '--source=HEAD', '--staged', '--worktree', '--', '.'])
-          lifecycleGit(commonDir, ['worktree', 'remove', item.identity])
+          // Clearing is durably recorded before this idempotent index/worktree reconstruction. The claims are checked again
+          // right before each command starts. Right after the reviewed files went, the checkout holds only its `.git`:
+          // anything written there since was not reviewed, and the restore would write over it, so it stops the purge.
+          await lifecycleGitAsync(item.identity, ['restore', '--source=HEAD', '--staged', '--worktree', '--', '.'], undefined, undefined, undefined, () => {
+            unclaimed()
+            if (emptied && readdirSync(item.identity).some((name) => name !== '.git')) throw new Error('Sole-copy content changed after the reviewed discard')
+          })
+          await lifecycleGitAsync(commonDir, ['worktree', 'remove', item.identity], undefined, undefined, undefined, unclaimed)
           return
         }
         // Purge reuses the verifier; its source is fenced by the external irreversible owner.
-        new WorktreeRetirementService(this.store, { repositoryLease: lease, cleanupTaskId: reservation.taskId, cleanupToken: reservation.token, cleanupGeneration: reservation.generation }).retire(item.manifestPath!, { purging: true })
+        unclaimed()
+        // Checked again right before the checkout moves (or Git deletes it from the trash), with nothing awaited in between.
+        await new WorktreeRetirementService(this.store, { repositoryLease: lease, cleanupTaskId: reservation.taskId, cleanupToken: reservation.token, cleanupGeneration: reservation.generation }).retire(item.manifestPath!, { purging: true, beforeMove: unclaimed })
       } else {
-        const current = readDirectLifecycleRef(commonDir, item.identity)
+        const current = await readDirectLifecycleRefAsync(commonDir, item.identity)
         if (!current) return
         if (current !== item.expectedValue) throw new Error('Owned ref changed after purge preview')
-        lifecycleGit(commonDir, ['update-ref', '--no-deref', '--stdin'], `start\ndelete ${item.identity} ${item.expectedValue!}\nprepare\ncommit\n`)
+        const input = `start\ndelete ${item.identity} ${item.expectedValue!}\nprepare\ncommit\n`
+        // The central check runs first, then the ownership check right before the transaction starts, with nothing awaited in between.
+        await lifecycleGitAsync(commonDir, ['update-ref', '--no-deref', '--stdin'], input, undefined, undefined, unclaimed)
       }
     } finally { lease.release() }
+  }
+
+  /**
+   * Removes the frozen `content` of `root`, deepest first, as the plan recorded it: everything still there must match the
+   * plan (a prior crash may have removed a prefix). Each entry is read and checked against its frozen record without
+   * blocking; then, right before it is removed and with nothing awaited in between, the path, the root, `beforeEach` (the
+   * caller's claims check) and the entry itself are checked again synchronously ({@link assertFrozenEntryUnchanged}), so a
+   * write since its bytes were checked refuses it and nothing unreviewed is unlinked. Never follows a link or removes an
+   * unreviewed subtree. `rootIdentity`, when given, is checked before every removal too. The entries are under the Mousse home.
+   */
+  private async removeFrozen(root: string, content: NonNullable<LifecyclePurgeItem['content']>, owner: string, frozenRoot: LifecyclePurgeItem['rootIdentity'], changed: string, skipRootGit = false, beforeEach?: () => void): Promise<void> {
+    if (frozenRoot) {
+      await assertLifecyclePathAsync(owner, root)
+      if (rootIdentity(await lstat(root)) !== digest(frozenRoot)) throw new Error('Owned resource root was replaced')
+    }
+    const current = await walkOwnedContentAsync(root, skipRootGit)
+    const expected = new Map(content.map((entry) => [entry.path, digest(entry)]))
+    for (const entry of current) if (expected.get(entry.path) !== digest(entry)) throw new Error(changed)
+    for (const entry of [...current].reverse()) {
+      if (skipRootGit && !entry.path) continue
+      const path = join(root, entry.path)
+      await assertLifecyclePathAsync(owner, dirname(path))
+      const proof = await proveFrozenContentEntryAsync(root, entry)
+      // From here to the removal nothing is awaited.
+      beforeEach?.()
+      assertLifecyclePath(owner, dirname(path))
+      if (frozenRoot && rootIdentity(lstatSync(root)) !== digest(frozenRoot)) throw new Error('Owned resource root was replaced during removal')
+      assertFrozenEntryUnchanged(proof)
+      if (entry.kind === 'directory') rmdirSync(path)
+      else unlinkSync(path)
+    }
   }
 }

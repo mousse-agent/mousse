@@ -57,13 +57,13 @@ test('an activated historical conversation fork retires and reconstructs at its 
       const path = join(journal.directory, `${String(authority.sequence).padStart(16, '0')}.json`)
       renameSync(path, path + '.withheld')
       try {
-        expect(() => retirement.prepare(input)).toThrow(/Known source/)
+        await expect(retirement.prepare(input)).rejects.toThrow(/Known source/)
         expect(f.read(selected.worktreePath)).toBe('historical fork result\n')
       } finally { renameSync(path + '.withheld', path) }
-      const manifest = retirement.prepare(input)
+      const manifest = await retirement.prepare(input)
       expect(manifest.branch).toBe(original.branch)
       expect(manifest).toMatchObject({ resultSha: head, snapshotSha: expect.stringMatching(/^[0-9a-f]{40}$/) })
-      retirement.retire(retirement.pathFor('task', selected.worktreePath))
+      await retirement.retire(retirement.pathFor('task', selected.worktreePath))
       expect(existsSync(selected.worktreePath)).toBe(false)
     } finally { repositoryLease.release(); releaseExecutionLeaseHandle(taskLease) }
     const restored = await new ThreadWorkspaceManager(directory).restore(f.repo)

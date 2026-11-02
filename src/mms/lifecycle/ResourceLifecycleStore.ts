@@ -1,6 +1,7 @@
 import { AppError } from '../../shared/errors'
 import { AsyncLocalStorage } from 'node:async_hooks'
 import { closeSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from 'node:fs'
+import { lstat } from 'node:fs/promises'
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { createHash, randomUUID } from 'node:crypto'
 import { atomicWriteJsonSync } from '../data/AtomicFs'
@@ -44,6 +45,21 @@ export function assertLifecyclePath(root: string, path: string): void {
     catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }
     // Each component is checked with lstat; canonicalizing both paths here
     // repeats whole filesystem walks and cannot add authority after links are rejected.
+    if (relative(resolvedRoot, current) === '') break
+    const parent = dirname(current)
+    if (parent === current) throw new ResourceLifecycleError('ambiguous', 'Lifecycle root is not an ancestor')
+    current = parent
+  }
+}
+
+/** {@link assertLifecyclePath} without blocking: the same checks, each component read with an async `lstat`. */
+export async function assertLifecyclePathAsync(root: string, path: string): Promise<void> {
+  if (!isAbsolute(path) || path.includes('\0') || !contains(root, path)) throw new ResourceLifecycleError('ambiguous', 'Lifecycle path escapes its owned root')
+  const resolvedRoot = resolve(root)
+  let current = resolve(path)
+  while (true) {
+    try { if ((await lstat(current)).isSymbolicLink()) throw new ResourceLifecycleError('ambiguous', 'Lifecycle path is a link') }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }
     if (relative(resolvedRoot, current) === '') break
     const parent = dirname(current)
     if (parent === current) throw new ResourceLifecycleError('ambiguous', 'Lifecycle root is not an ancestor')

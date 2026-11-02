@@ -2,8 +2,9 @@ import { existsSync, readFileSync } from 'node:fs'
 import type { SubagentResultReport } from '../../shared/subagentResult'
 import type { ThreadAction } from '../../shared/threadActions'
 import { atomicWriteJsonSync } from '../data/AtomicFs'
-import { git, tryGit } from '../actions/git'
-import { snapshotOrigin } from '../actions/snapshots'
+import { gitStep, tryGitStep } from '../actions/git'
+import { snapshotOriginSteps } from '../actions/snapshots'
+import { runAsync, runSync, type Steps } from '../actions/steps'
 
 export type { SubagentResultReport } from '../../shared/subagentResult'
 
@@ -28,22 +29,22 @@ export interface SubagentResultInput {
  * result was taken on from the snapshot itself (its HEAD and branch), so the report says the same whatever the
  * worktree does next. It writes only the two pins: nothing in the parent's or the subagent's checkout changes.
  */
-export function buildSubagentResultReport(input: SubagentResultInput): SubagentResultReport {
+function* reportSteps(input: SubagentResultInput): Steps<SubagentResultReport> {
   const { cwd } = input
-  const baseSha = git(cwd, ['rev-parse', '--verify', `${input.baseSha}^{commit}`])
-  const resultSha = git(cwd, ['rev-parse', '--verify', `${input.resultSha}^{commit}`])
-  if (input.pins?.base) git(cwd, ['update-ref', '--no-deref', input.pins.base, baseSha])
-  if (input.pins?.result) git(cwd, ['update-ref', '--no-deref', input.pins.result, resultSha])
-  const changed = baseSha === resultSha ? [] : git(cwd, ['diff', '--name-only', '--no-renames', baseSha, resultSha]).split(/\r?\n/).filter(Boolean)
-  const after = snapshotOrigin(cwd, resultSha)
-  const startHead = snapshotOrigin(cwd, baseSha).head ?? baseSha
+  const baseSha = yield* gitStep(cwd, ['rev-parse', '--verify', `${input.baseSha}^{commit}`])
+  const resultSha = yield* gitStep(cwd, ['rev-parse', '--verify', `${input.resultSha}^{commit}`])
+  if (input.pins?.base) yield* gitStep(cwd, ['update-ref', '--no-deref', input.pins.base, baseSha])
+  if (input.pins?.result) yield* gitStep(cwd, ['update-ref', '--no-deref', input.pins.result, resultSha])
+  const changed = baseSha === resultSha ? [] : (yield* gitStep(cwd, ['diff', '--name-only', '--no-renames', baseSha, resultSha])).split(/\r?\n/).filter(Boolean)
+  const after = yield* snapshotOriginSteps(cwd, resultSha)
+  const startHead = (yield* snapshotOriginSteps(cwd, baseSha)).head ?? baseSha
   let commits: Array<{ sha: string; subject: string }> = []
   let commitCount = 0
   let rewroteHistory = false
   if (after.head && after.head !== startHead) {
-    if (tryGit(cwd, ['merge-base', '--is-ancestor', startHead, after.head]).ok) {
-      commitCount = Number(git(cwd, ['rev-list', '--count', '--first-parent', `${startHead}..${after.head}`])) || 0
-      const listed = git(cwd, ['log', '--first-parent', '--format=%H%x00%s', `-n${REPORT_COMMIT_LIMIT}`, `${startHead}..${after.head}`])
+    if ((yield* tryGitStep(cwd, ['merge-base', '--is-ancestor', startHead, after.head])).ok) {
+      commitCount = Number(yield* gitStep(cwd, ['rev-list', '--count', '--first-parent', `${startHead}..${after.head}`])) || 0
+      const listed = yield* gitStep(cwd, ['log', '--first-parent', '--format=%H%x00%s', `-n${REPORT_COMMIT_LIMIT}`, `${startHead}..${after.head}`])
       commits = listed.split(/\r?\n/).filter(Boolean).map((line) => { const [sha, subject] = line.split('\0'); return { sha: sha!, subject: subject ?? '' } }).reverse()
     } else rewroteHistory = true
   }
@@ -58,6 +59,20 @@ export function buildSubagentResultReport(input: SubagentResultInput): SubagentR
     changedFiles: changed.slice(0, REPORT_FILE_LIMIT),
     git: { ...(after.branch ? { branch: after.branch } : {}), ...(after.head ? { head: after.head } : {}), commits, commitCount, ...(rewroteHistory ? { rewroteHistory } : {}) }
   }
+}
+
+/**
+ * The report, read at once. Only the orchestrator's `delegationResultReport` uses this form: its callers (tool and
+ * notice callbacks) answer synchronously, and the report is cached after the first build. Code that can wait uses
+ * {@link buildSubagentResultReportAsync}.
+ */
+export function buildSubagentResultReport(input: SubagentResultInput): SubagentResultReport {
+  return runSync(reportSteps(input))
+}
+
+/** {@link buildSubagentResultReport} without blocking the daemon: the same Git commands in the same order. */
+export function buildSubagentResultReportAsync(input: SubagentResultInput): Promise<SubagentResultReport> {
+  return runAsync(reportSteps(input))
 }
 
 /** Where a delegated task's base and result are pinned: `<prefix>/base` and `<prefix>/result`. A ref name cannot hold `:`. */

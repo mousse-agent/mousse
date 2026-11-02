@@ -40,9 +40,9 @@ describe('ThreadWorkspaceManager', () => {
       expect(metadata.worktreePath.startsWith(fixture.home)).toBe(true)
       expect(execFileSync('git', ['branch', '--show-current'], { cwd: metadata.worktreePath, encoding: 'utf8' }).trim()).toBe(metadata.branch)
       expect(execFileSync('git', ['show-ref', '--verify', metadata.retainedRef], { cwd: fixture.root, encoding: 'utf8' })).toContain(metadata.retainedRef)
-      expect(manager.executionContext(fixture.root).projectPath).toBe(metadata.worktreePath)
+      expect((await manager.executionContext(fixture.root)).projectPath).toBe(metadata.worktreePath)
       execFileSync('git', ['worktree', 'remove', metadata.worktreePath], { cwd: fixture.root })
-      expect(manager.verify(metadata).lifecycle).toBe('missing')
+      expect((await manager.verify(metadata)).lifecycle).toBe('missing')
       // A restore keeps the name it was given: it is never picked again.
       const restored = await manager.restore(fixture.root)
       expect(restored.lifecycle).toBe('ready')

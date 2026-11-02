@@ -10,7 +10,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { ThreadActionService } from '../src/mms/actions/ThreadActionService'
 import { ThreadJournal } from '../src/mms/data/ThreadJournal'
-import { preserveBeforeAbort } from '../src/mms/actions/leftMerge'
+import { preserveBeforeAbortAsync } from '../src/mms/actions/leftMerge'
 import { ResourceLifecycleCoordinator } from '../src/mms/lifecycle/ResourceLifecycleCoordinator'
 import { ResourceLifecycleStore } from '../src/mms/lifecycle/ResourceLifecycleStore'
 import { ResourcePurgeService } from '../src/mms/lifecycle/ResourcePurgeService'
@@ -33,7 +33,7 @@ async function fixture() {
   writeFileSync(join(repo, 'a.txt'), 'first\n'); git(repo, ['add', '.']); git(repo, ['commit', '-qm', 'base'])
 
   // The thread's record and one recorded action in the project folder: a snapshot pair, a receipt and the thread's pin.
-  new ThreadWorkspaceManager(location).ensureProjectFolder('task', 'main', repo)
+  await new ThreadWorkspaceManager(location).ensureProjectFolder('task', 'main', repo)
   await new ThreadActionService(location).runCheckpointedAction({
     threadId: 'task', turnId: 'edit', conversationBranchId: 'main', workspacePath: repo, actor: { kind: 'user' }, allowDirtyInput: true,
     presentationMessageStart: 0, presentationMessageEnd: 0, nativeContextBoundary: { messageIndex: 0, compactionGeneration: 0, fidelity: 'exact' }
@@ -46,7 +46,7 @@ async function fixture() {
   git(repo, ['update-ref', 'refs/mousse/threads/other/main', head])
   git(repo, ['update-ref', 'refs/mousse/preserved/op-1-abc', head])
   // Files an abort of this thread kept go with the thread, but only with the person's say while they may be the only copy.
-  const kept = preserveBeforeAbort(repo, 'abort-op')
+  const kept = (await preserveBeforeAbortAsync(repo, 'abort-op'))
   new ThreadJournal(location).append({ operationId: 'abort-op', operationType: 'publish', state: 'cancelled', details: { conflictAborted: true, preservedRef: kept } })
 
   const coordinator = new ResourceLifecycleCoordinator(store, { drain: async () => {}, settleMutationOwnership: async () => {}, projectIndex: () => {}, projectPurged: () => {} })

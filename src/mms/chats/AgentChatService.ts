@@ -1,4 +1,6 @@
-import { copyFileSync, existsSync, lstatSync, mkdirSync, realpathSync } from 'node:fs'
+import { existsSync, lstatSync, mkdirSync, realpath as realpathCallback, realpathSync } from 'node:fs'
+import { access, copyFile, lstat } from 'node:fs/promises'
+import { promisify } from 'node:util'
 import { hostname } from 'node:os'
 import { randomUUID } from 'node:crypto'
 import { join } from 'node:path'
@@ -21,7 +23,6 @@ import { approvalTooLongReason, assertRuntimeSettingsSupported } from '../agentD
 import type { DefinitionHostBindings } from '../agentDefinitions/definitionRuntime'
 import { ChatStore, type ChatRecord } from './ChatStore'
 import { ThreadActionService, type RunThreadActionOptions } from '../actions/ThreadActionService'
-import { git, tryGit } from '../actions/git'
 import { ThreadWorkspaceManager } from '../workspace/ThreadWorkspaceManager'
 
 export interface AgentChatServiceOptions {
@@ -53,6 +54,11 @@ export function chatMentions(text: string): string[] {
 }
 
 /** Daemon-owned conversation admission and execution; no GUI/provider content grants host authority. */
+/** `realpathSync` without blocking: the same spelling, so it compares equal with the synchronous checks below. */
+const realpathLikeSync = promisify(realpathCallback)
+const exists = (path: string): Promise<boolean> => access(path).then(() => true, () => false)
+const isFolder = (path: string): Promise<boolean> => lstat(path).then((found) => found.isDirectory(), () => false)
+
 export class AgentChatService {
   readonly profileId: string
   private readonly store: ChatStore
@@ -136,8 +142,8 @@ export class AgentChatService {
     let projectPath: string | undefined
     if (input.projectId !== undefined) {
       const project = this.options.services.projects.getProject(input.projectId)
-      if (!project || !existsSync(project.path) || !lstatSync(project.path).isDirectory()) throw new DomainRpcError('project_unavailable', 'The selected project is unavailable')
-      projectPath = realpathSync(project.path)
+      if (!project || !await isFolder(project.path)) throw new DomainRpcError('project_unavailable', 'The selected project is unavailable')
+      projectPath = await realpathLikeSync(project.path)
     }
     if (input.kind === 'direct') {
       const existing = this.store.list().find((record) => record.conversation.kind === 'direct' && record.conversation.projectId === input.projectId
@@ -150,16 +156,17 @@ export class AgentChatService {
     if (projectPath) {
       const manager = new ThreadWorkspaceManager(this.options.services.threads.getThreadDir(thread.id))
       const metadata = await manager.provision(thread.id, 'main', projectPath, this.lifecycle.signal, undefined, undefined, { nameFrom: name })
-      workspaceRoot = manager.executionContext(projectPath, metadata).projectPath
+      workspaceRoot = manager.workingFolder(projectPath, metadata)
       // A local untracked AGENTS.md still applies to this newly admitted project workspace.
       const source = join(projectPath, 'AGENTS.md'), target = join(workspaceRoot, 'AGENTS.md')
-      if (!existsSync(target) && existsSync(source) && lstatSync(source).isFile() && !lstatSync(source).isSymbolicLink()) {
+      const sourceStat = await lstat(source).catch(() => undefined)
+      if (!await exists(target) && sourceStat?.isFile() && !sourceStat.isSymbolicLink()) {
         await new ThreadActionService(this.options.services.threads.getThreadDir(thread.id)).runCheckpointedAction({
           threadId: thread.id, turnId: `chat-instructions:${randomUUID()}`, actor: { kind: 'user' },
           conversationBranchId: metadata.conversationBranchId, workspacePath: workspaceRoot,
           presentationMessageStart: 0, presentationMessageEnd: 0,
           nativeContextBoundary: { messageIndex: 0, compactionGeneration: 0, fidelity: 'legacy' }
-        }, () => copyFileSync(source, target))
+        }, () => copyFile(source, target))
       }
     } else {
       workspaceRoot = join(this.store.root, id, 'workspace')
@@ -167,7 +174,7 @@ export class AgentChatService {
     }
     this.lifecycle.assertAccepting()
     const at = new Date().toISOString()
-    const record: ChatRecord = { version: 1, profileId: this.profileId, workspaceRoot: realpathSync(workspaceRoot), acceptedMessages: {},
+    const record: ChatRecord = { version: 1, profileId: this.profileId, workspaceRoot: await realpathLikeSync(workspaceRoot), acceptedMessages: {},
       conversation: { id, kind: input.kind, name, threadId: thread.id, projectId: input.projectId, participants,
         createdAt: at, updatedAt: at, messages: [] } }
     this.store.write(record)
@@ -304,9 +311,9 @@ export class AgentChatService {
       if (!project) throw new DomainRpcError('project_unavailable', 'The chat project association changed')
       const manager = new ThreadWorkspaceManager(this.options.services.threads.getThreadDir(thread.id))
       const executing = [...this.active.values()].some((run) => run.threadId === thread.id)
-      const metadata = executing ? manager.load()! : manager.verify()
+      const metadata = executing ? manager.load()! : manager.verifySync()
       if (!metadata) throw new DomainRpcError('workspace_changed', 'The chat task workspace metadata is unavailable')
-      if (metadata.lifecycle !== 'ready' || realpathSync(manager.executionContext(project.path, metadata).projectPath) !== record.workspaceRoot) throw new DomainRpcError('workspace_changed', 'The chat task workspace changed')
+      if (metadata.lifecycle !== 'ready' || realpathSync(manager.workingFolder(project.path, metadata)) !== record.workspaceRoot) throw new DomainRpcError('workspace_changed', 'The chat task workspace changed')
     } else if (record.workspaceRoot !== join(realpathSync(this.store.root), record.conversation.id, 'workspace')
       || record.workspaceRoot !== realpathSync(join(this.store.root, record.conversation.id, 'workspace'))) throw new DomainRpcError('workspace_changed', 'The chat scratch workspace changed')
     return record.workspaceRoot
@@ -367,7 +374,9 @@ export class AgentChatService {
         } : undefined
         // Edits made outside this response are recorded as their own action first, so its Undo leaves them.
         const startSha = actions && actionOptions ? (await actions.recordOutsideChanges(actionOptions)).startSha : undefined
-        if (actions && actionOptions) actions.beginTurn(actionOptions, startSha!)
+        // What `beginTurn` checks of the start, read right after the snapshot without blocking; `beginTurn` then runs no Git.
+        const startCheck = actions && actionOptions ? await actions.checkTurnStart(actionOptions.workspacePath, startSha!) : undefined
+        if (actions && actionOptions) actions.beginTurn(actionOptions, startSha!, startCheck)
         let result: AgentExecutionResult | undefined
         try {
           result = await this.options.services.orchestrator.runAgentDefinition({ profileId: this.profileId, resolved,

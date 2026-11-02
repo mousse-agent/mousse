@@ -1,4 +1,4 @@
-import { realpathSync, statSync } from 'node:fs'
+import { realpath, stat } from 'node:fs/promises'
 import { userInfo } from 'node:os'
 import {
   editorFolderStyleOf,
@@ -35,10 +35,11 @@ function loginName(): string | undefined {
 }
 
 /** The real path of `path` if it is a folder, and undefined when it is not there, is a file, or cannot be read. */
-function realFolder(path: string): string | undefined {
+async function realFolder(path: string): Promise<string | undefined> {
   try {
-    const real = realpathSync.native(path)
-    return statSync(real).isDirectory() ? real : undefined
+    // `fs/promises`' `realpath` answers like `realpathSync.native`.
+    const real = await realpath(path)
+    return (await stat(real)).isDirectory() ? real : undefined
   } catch {
     return undefined
   }
@@ -63,7 +64,7 @@ function realFolder(path: string): string | undefined {
  * `folder_protected`, `folder_not_openable` (a Windows network share or `\\?\` path, a `..` segment, a
  * control character) and `workspace_not_ready`.
  */
-export function resolveEditorFolder(input: EditorFolderInput): EditorFolder {
+export async function resolveEditorFolder(input: EditorFolderInput): Promise<EditorFolder> {
   const { threadId, projectPath } = input
   const platform = input.platform ?? process.platform
   const sensitive = input.sensitive ?? ((real: string) => sensitiveFolderContaining(real))
@@ -72,7 +73,7 @@ export function resolveEditorFolder(input: EditorFolderInput): EditorFolder {
   let kind: EditorFolderKind = 'project'
   let path = projectPath
   if (stored) {
-    const verified = manager.verify(stored)
+    const verified = await manager.verify(stored)
     if (verified.lifecycle !== 'ready')
       throw new DomainRpcError(
         'workspace_not_ready',
@@ -82,9 +83,9 @@ export function resolveEditorFolder(input: EditorFolderInput): EditorFolder {
         { threadId, state: verified.lifecycle }
       )
     kind = 'worktree'
-    path = manager.executionContext(projectPath, verified).projectPath
+    path = manager.workingFolder(projectPath, verified)
   }
-  const real = realFolder(path)
+  const real = await realFolder(path)
   if (!real)
     throw new DomainRpcError('folder_missing', "This thread's folder is no longer on this computer.", {
       threadId

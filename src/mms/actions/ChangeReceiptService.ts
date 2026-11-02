@@ -45,7 +45,7 @@ export class ChangeReceiptService {
       return existing
     }
     const manager = new ThreadWorkspaceManager(this.threadDirectory)
-    const workspace = manager.loadOrSnapshot()
+    const workspace = await manager.loadOrSnapshotAsync()
     const id = randomUUID()
     const refs = [`refs/mousse/changes/${id}/before`, `refs/mousse/changes/${id}/after`]
     await gitAsync(workspacePath, ['update-ref', '--no-deref', refs[0], input.beforeSha])
@@ -72,7 +72,7 @@ export class ChangeReceiptService {
 
   private async refreshWorkspace(workspacePath: string, receipt: ChangeReceipt): Promise<void> {
     const manager = new ThreadWorkspaceManager(this.threadDirectory)
-    const workspace = manager.loadOrSnapshot()
+    const workspace = await manager.loadOrSnapshotAsync()
     if (!workspace || await gitAsync(workspace.worktreePath, ['rev-parse', '--show-toplevel']) !== await gitAsync(workspacePath, ['rev-parse', '--show-toplevel'])) return
     if ((workspace.generation ?? 0) > receipt.generation) return
     await gitAsync(workspacePath, ['update-ref', '--no-deref', workspace.retainedRef, receipt.afterSha])
@@ -89,7 +89,7 @@ export class ChangeReceiptService {
    */
   async adoptSnapshot(workspacePath: string, snapshot: Snapshot): Promise<void> {
     const manager = new ThreadWorkspaceManager(this.threadDirectory)
-    const workspace = manager.loadOrSnapshot()
+    const workspace = await manager.loadOrSnapshotAsync()
     if (!workspace || await gitAsync(workspace.worktreePath, ['rev-parse', '--show-toplevel']) !== await gitAsync(workspacePath, ['rev-parse', '--show-toplevel'])) return
     if (workspace.snapshotSha === snapshot.sha) return
     await gitAsync(workspacePath, ['update-ref', '--no-deref', workspace.retainedRef, snapshot.sha])

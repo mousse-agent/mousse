@@ -251,7 +251,7 @@ describe('inactive rule', () => {
     const f = fixture(); setPolicy(f, inactive())
     git(f.worktree, ['switch', '-q', '-c', 'issue-1-work'])
     // The inventory that permanent deletion and shared-ownership proofs are built on does not fail closed either.
-    expect(buildResourceInventory(f.store, f.store.require('task')).blockers).toEqual([])
+    expect((await buildResourceInventory(f.store, f.store.require('task'))).blockers).toEqual([])
     expect(item(await f.service.run('manual'))).toMatchObject({ outcome: 'removed' })
     expect(existsSync(f.worktree)).toBe(false)
     await new ThreadWorkspaceManager(f.location).restore(f.repo)
@@ -449,8 +449,8 @@ describe('leases and re-checks', () => {
     } })
     location = f.location; setPolicy(f, inactive())
     expect(item(await f.service.run('manual'))).toMatchObject({ outcome: 'removed' })
-    // First call: the scan phase, no lease held. Second call: the re-check, where cleanup holds the thread.
-    expect(seen[0]).toBe(true); expect(seen).toHaveLength(2)
+    // First call: the scan phase, no lease held. Then the re-check, and the check right before the move: cleanup holds the thread.
+    expect(seen).toEqual([true, false, false])
   }, 60_000)
 
   it('holds the thread while it waits for the repository: a terminal is refused with the cleanup message and a turn waits for it', async () => {
@@ -499,6 +499,23 @@ describe('leases and re-checks', () => {
       setPolicy(f, inactive(60))
     } finally { repository.release() }
     expect(item(await run)).toMatchObject({ outcome: 'kept', reason: 'Settings changed since check' })
+    expect(existsSync(f.worktree)).toBe(true)
+  }, 60_000)
+
+  it('re-checks the policy right before the move: a settings change while the checkout is prepared keeps it', async () => {
+    const f = fixture(); setPolicy(f, inactive())
+    const prepare = WorktreeRetirementService.prototype.prepare
+    let prepared = 0
+    const spy = vi.spyOn(WorktreeRetirementService.prototype, 'prepare').mockImplementation(async function (this: WorktreeRetirementService, input) {
+      const manifest = await prepare.call(this, input)
+      prepared += 1
+      setPolicy(f, inactive(60))
+      return manifest
+    })
+    let report: StorageCleanupReport
+    try { report = await f.service.run('manual') } finally { spy.mockRestore() }
+    expect(prepared).toBe(1)
+    expect(item(report)).toMatchObject({ outcome: 'kept', reason: 'Settings changed since check' })
     expect(existsSync(f.worktree)).toBe(true)
   }, 60_000)
 

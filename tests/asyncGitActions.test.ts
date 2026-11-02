@@ -1,7 +1,7 @@
 /**
  * Mousse's thread actions (checkpoints, Undo, Discard, Publish) run their Git and file work without blocking the
- * daemon. The synchronous and async forms of the shared helpers give the same answers; an action whose Git does not
- * answer holds only its own thread, and a second action on that thread still waits for the first.
+ * daemon. The async helpers answer as Git does, the synchronous Git runner that remains gives the same answers; an
+ * action whose Git does not answer holds only its own thread, and a second action on that thread still waits for the first.
  */
 import { execFileSync, spawnSync } from 'node:child_process'
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
@@ -10,9 +10,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { MousseMainService } from '../src/mms/MousseMainService'
 import { dispatchMethod } from '../src/mms/protocol/handlers'
 import { ThreadWorkspaceManager } from '../src/mms/workspace/ThreadWorkspaceManager'
-import { gitAsync, gitRawStep, inspectPendingChanges, inspectPendingChangesAsync, runGitProcess, tryGit, tryGitAsync } from '../src/mms/actions/git'
-import { runAsync, runSync } from '../src/mms/actions/steps'
-import { takeSnapshot, takeSnapshotAsync, worktreeTree, worktreeTreeAsync } from '../src/mms/actions/snapshots'
+import { gitAsync, inspectPendingChangesAsync, runGitProcess, tryGit, tryGitAsync } from '../src/mms/actions/git'
+import { takeSnapshotAsync, worktreeTreeAsync } from '../src/mms/actions/snapshots'
 import { testHarness } from '../src/mms/run/testkit/harness'
 import { git, gitFoundationFixture } from './fixtures/gitFoundation'
 import { piAdapter } from './run/phase6Fixture'
@@ -36,13 +35,15 @@ afterEach(() => {
   f.dispose()
 })
 
-describe('the synchronous and async forms', () => {
-  it('give the same answers', async () => {
+describe('the async helpers', () => {
+  it('answer as Git does, and as the synchronous runner that remains', async () => {
     writeFileSync(join(f.repo, 'value.txt'), 'changed\n')
     writeFileSync(join(f.repo, 'new.txt'), 'new\n')
-    expect(await inspectPendingChangesAsync(f.repo)).toEqual(inspectPendingChanges(f.repo))
-    expect(await worktreeTreeAsync(f.repo)).toBe(worktreeTree(f.repo))
-    const snapshot = takeSnapshot(f.repo, { reason: 'test' })
+    expect(await inspectPendingChangesAsync(f.repo)).toMatchObject({ files: expect.arrayContaining(['new.txt', 'value.txt']), unmerged: [] })
+    // The worktree's files as a tree, without writing a commit: the snapshot taken next has the same tree.
+    const tree = await worktreeTreeAsync(f.repo)
+    const snapshot = await takeSnapshotAsync(f.repo, { reason: 'test' })
+    expect(snapshot.tree).toBe(tree)
     // The files did not change, so both name the snapshot just taken.
     expect(await takeSnapshotAsync(f.repo, { reason: 'test' })).toEqual(snapshot)
     expect(await tryGitAsync(f.repo, ['rev-parse', '--verify', '-q', 'nothing'])).toEqual(tryGit(f.repo, ['rev-parse', '--verify', '-q', 'nothing']))
@@ -58,8 +59,6 @@ describe('the synchronous and async forms', () => {
     const async = await tryGitAsync(f.repo, ['cat-file', '-p', blob])
     expect(sync.ok).toBe(false)
     expect(async.ok).toBe(sync.ok)
-    expect(() => runSync(gitRawStep(f.repo, ['cat-file', '-p', blob]))).toThrow()
-    await expect(runAsync(gitRawStep(f.repo, ['cat-file', '-p', blob]))).rejects.toThrow()
   })
 
   it('report output past the limit as spawnSync does', async () => {
@@ -139,6 +138,52 @@ describe.skipIf(process.platform === 'win32')('a thread action whose Git does no
     // Once Git answers, the action finishes as usual.
     await expect(discarding).resolves.toMatchObject({ backupRef: expect.stringMatching(/^refs\/mousse\/discarded\//) })
     expect(git(worktree, 'status', '--porcelain')).toBe('')
+  }, 40_000)
+
+  /**
+   * A `git` first on PATH that answers `seconds` late, once, to the status read retirement makes in `folder` before it
+   * snapshots the checkout (`status --porcelain=v1 --untracked-files=all`, which nothing else runs there). The command is
+   * written to the returned file when it starts, so the test can tell it ran.
+   */
+  function slowRetirementStatus(folder: string, seconds: number): string {
+    const real = execFileSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).trim()
+    const bin = join(f.root, 'bin')
+    mkdirSync(bin, { recursive: true })
+    const started = join(f.root, 'retirement-status-started')
+    const resolved = execFileSync('sh', ['-c', `cd "${folder}" && pwd -P`], { encoding: 'utf8' }).trim()
+    writeFileSync(join(bin, 'git'), [
+      '#!/bin/sh',
+      `if [ "$(pwd -P)" = "${resolved}" ] && [ ! -e "${started}" ]; then`,
+      '  case "$*" in *" status --porcelain=v1 --untracked-files=all")',
+      `    echo "$*" > "${started}"; sleep ${seconds};;`,
+      '  esac',
+      'fi',
+      `exec "${real}" "$@"`,
+      ''
+    ].join('\n'))
+    chmodSync(join(bin, 'git'), 0o755)
+    process.env.PATH = `${bin}${delimiter}${previousPath}`
+    return started
+  }
+
+  it('cleanup of a trashed thread holds only that thread: other requests answer while its retirement waits on Git', async () => {
+    const { ctx, thread, worktree, project } = await threadWithTurn()
+    const other = mms.threads.createThread('Another thread', project.id)
+    const started = slowRetirementStatus(worktree, 3)
+    const begun = Date.now()
+    // Trash retires the thread's checkout in the same request; retirement's status read of it takes 3 seconds.
+    const trashing = dispatchMethod(ctx, 'threads.trash', { threadId: thread.id })
+    await vi.waitFor(() => expect(existsSync(started)).toBe(true), { timeout: 10_000 })
+    expect(readFileSync(started, 'utf8')).toMatch(/ status --porcelain=v1 --untracked-files=all$/m)
+    expect(await pending(trashing)).toBe(true)
+    await expect(dispatchMethod(ctx, 'threads.get', { threadId: other.id })).resolves.toBeDefined()
+    await expect(dispatchMethod(ctx, 'git.status', { projectId: project.id })).resolves.toMatchObject({ status: { isRepo: true } })
+    await expect(dispatchMethod(ctx, 'settings.get', {})).resolves.toBeDefined()
+    expect(Date.now() - begun).toBeLessThan(2500)
+    expect(await pending(trashing)).toBe(true)
+    // Once Git answers, the trash finishes as usual, and the checkout went to the trash.
+    await expect(trashing).resolves.toMatchObject({ ok: true })
+    expect(existsSync(worktree)).toBe(false)
   }, 40_000)
 
   it('a second action on the same thread runs no Git of its own until the first has finished', async () => {

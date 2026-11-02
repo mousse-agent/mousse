@@ -12,7 +12,7 @@ import { MmsProtocolServer } from '../src/mms/protocol/server'
 import { LocalMmsClient } from '../src/mms/protocol/client'
 import { WorkspaceResolver } from '../src/mms/workspace/WorkspaceResolver'
 import { ThreadActionService } from '../src/mms/actions/ThreadActionService'
-import { worktreeTree } from '../src/mms/actions/snapshots'
+import { worktreeTreeAsync } from '../src/mms/actions/snapshots'
 import { buildSubagentResultReport } from '../src/mms/agents/subagentResultReport'
 import { waitAcquireExecutionLease, releaseExecutionLeaseHandle } from '../src/mms/queue/ThreadExecutionLease'
 import { acquireWorkspaceMutationLease, isWorkflowRevisionCurrent, resolveOwnedThreadWorkspace } from '../src/mms/workspace/WorkflowWorkspace'
@@ -209,14 +209,14 @@ describe('Git foundation through daemon protocol', () => {
     expect(undoneHistory.redoTarget?.actionId).toBe(undoneHistory.actions.at(-1)!.id)
     await expect(client.request('actions.redo', { threadId: thread.id, expectedJournalGeneration: undoneHistory.journalGeneration - 1 })).rejects.toThrow()
     // Undo restored the files; no commit was made for the child's result, so the branch has nothing of it either way.
-    expect(worktreeTree(workspace)).toBe(git(f.repo, 'rev-parse', `${f.baseSha}^{tree}`))
+    expect((await worktreeTreeAsync(workspace))).toBe(git(f.repo, 'rev-parse', `${f.baseSha}^{tree}`))
     await client.request('actions.redo', { threadId: thread.id, expectedJournalGeneration: undoneHistory.journalGeneration })
     expect(mms.orchestrator.getMessages(thread.id)).toHaveLength(2)
     await vi.waitFor(() => expect(useAppStore.getState().messages).toHaveLength(2))
     expect((await client.request<{ redoTarget?: unknown }>('actions.list', { threadId: thread.id })).redoTarget).toBeUndefined()
     expect(snapshots.at(-1)?.replace).toBe(true)
     expect(mms.orchestrator.getMessages(thread.id).every((message) => !message.hidden)).toBe(true)
-    expect(worktreeTree(workspace)).toBe(git(workspace, 'rev-parse', `${finalHead!}^{tree}`))
+    expect((await worktreeTreeAsync(workspace))).toBe(git(workspace, 'rev-parse', `${finalHead!}^{tree}`))
     expect(f.read(workspace)).toBe('child second\n')
     expect(f.read(workspace, 'parent.txt')).toBe('parent after child\n')
     // Completion for A after selecting B must only refresh A's cached transcript.

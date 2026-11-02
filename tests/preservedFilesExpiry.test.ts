@@ -12,7 +12,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync,
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { ConversationBranchService } from '../src/mms/actions/ConversationBranchService'
-import { preserveBeforeAbort } from '../src/mms/actions/leftMerge'
+import { preserveBeforeAbortAsync } from '../src/mms/actions/leftMerge'
 import { abortPreservedNotice } from '../src/mms/actions/snapshots'
 import { expirePreservedFiles, PRESERVED_EXPIRY_OPERATION, threadPreservedIndex } from '../src/mms/actions/preservedFiles'
 import { ThreadActionService } from '../src/mms/actions/ThreadActionService'
@@ -77,8 +77,8 @@ async function setup(kind: 'folder' | 'worktree') {
     return { ref, notice: undone.notice! }
   }
   /** What an abort keeps, recorded as `ManagedConflictService.abort` records it. */
-  const keepByAbort = (operationId: string, threadDirectory = location) => {
-    const ref = preserveBeforeAbort(cwd, operationId)
+  const keepByAbort = async (operationId: string, threadDirectory = location) => {
+    const ref = (await preserveBeforeAbortAsync(cwd, operationId))
     new ThreadJournal(threadDirectory).append({ operationId, operationType: 'publish', state: 'cancelled', details: { conflictAborted: true, preservedRef: ref } })
     return ref
   }
@@ -100,7 +100,7 @@ test('kept files expire after the Undo window counted from Mousse’s record, wh
   // A commit date in 2000, as an inherited GIT_COMMITTER_DATE would give every commit.
   vi.stubEnv('GIT_COMMITTER_DATE', '@946684800 +0000'); vi.stubEnv('GIT_AUTHOR_DATE', '@946684800 +0000')
   const restore = await f.keepByUndo('secret')
-  const abort = f.keepByAbort('client-chosen-op')
+  const abort = (await f.keepByAbort('client-chosen-op'))
   // The notice says how long they are kept; the commits are dated by Mousse's clock, not the environment.
   expect(restore.notice).toMatch(/kept under refs\/mousse\/preserved\/\S+ for 30 days: secret\. Bring one back before then/)
   expect(abortPreservedNotice(abort, new UndoRetentionService(f.location).policy().windowMs)).toBe(`Every file as it was before the abort is kept under ${abort} for 30 days. Bring one back before then with git restore --source=${abort} -- <path>.`)
@@ -127,8 +127,8 @@ test('an operation id that starts another thread’s never claims its kept files
   const start = fakeClock()
   const f = await setup('folder')
   const other = join(f.root, 'other-thread'); mkdirSync(other)
-  const mine = f.keepByAbort('op')
-  const theirs = f.keepByAbort('op-other', other)
+  const mine = (await f.keepByAbort('op'))
+  const theirs = (await f.keepByAbort('op-other', other))
   const { ref: restored } = await f.keepByUndo('secret')
   // Shapes no writer of this thread recorded: an abort name for a restore's operation, and a restore name for a plain id.
   const sha = f.git(f.cwd, 'rev-parse', 'HEAD')
@@ -150,7 +150,7 @@ test('an operation id that starts another thread’s never claims its kept files
 test('a ref Git cannot lock stops the whole delete, nothing goes, and the journal says so; the next sweep finishes it', async () => {
   const start = fakeClock()
   const f = await setup('folder')
-  const refs = [(await f.keepByUndo('secret')).ref, f.keepByAbort('op')].sort()
+  const refs = [(await f.keepByUndo('secret')).ref, (await f.keepByAbort('op'))].sort()
   await f.walkClock(start, start + 31 * DAY)
   // The person's Git or IDE holds the second ref's lock.
   const lock = join(f.repo, '.git', `${refs[1]}.lock`)
@@ -169,7 +169,7 @@ test('a ref Git cannot lock stops the whole delete, nothing goes, and the journa
 test('an expiry that stopped after its intent is settled from what is gone', async () => {
   const start = fakeClock()
   const f = await setup('folder')
-  const ref = f.keepByAbort('op')
+  const ref = (await f.keepByAbort('op'))
   const sha = f.git(f.cwd, 'rev-parse', ref)
   await f.walkClock(start, start + 31 * DAY)
   // Stopped after the transaction and before the outcome.
@@ -187,7 +187,7 @@ test('an expiry that stopped after its intent is settled from what is gone', asy
 test('nothing expires while an operation is unfinished or the retention clock needs review', async () => {
   const start = fakeClock()
   const f = await setup('folder')
-  const ref = f.keepByAbort('op')
+  const ref = (await f.keepByAbort('op'))
   await f.walkClock(start, start + 31 * DAY)
   // The clock jumped further ahead than the policy allows in one step.
   vi.setSystemTime(start + 60 * DAY)

@@ -282,7 +282,7 @@ describe('a pull request that tries to run code', () => {
     await expect(manager.restore(f.repo)).rejects.toThrow(/per-worktree Git settings are off/)
     expect(registered()).toEqual(before)
     expect(existsSync(workspace.worktreePath)).toBe(false)
-    expect(manager.verify().lifecycle).not.toBe('ready')
+    expect((await manager.verify()).lifecycle).not.toBe('ready')
     expect(() => git(f.repo, 'config', '--local', '--get', 'extensions.worktreeConfig')).toThrow()
 
     // Turned on again, the same restore rebuilds the whole worktree with its safety.

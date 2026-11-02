@@ -17,7 +17,7 @@ import {
   type ReviewRange,
   type ReviewSide
 } from '../../shared/review'
-import { gitEnv, guarded, tryGit } from '../actions/git'
+import { gitEnv, guarded, tryGit, tryGitAsync } from '../actions/git'
 import { unchangedWorktreePaths } from './workingTreeStatus'
 
 /** Git's own heuristic: a NUL byte in the first 8 KB means the file is binary. */
@@ -133,6 +133,11 @@ export async function emptyTreeSha(cwd: string): Promise<string> {
 /** Whether a commit object is still in the repository, for example after a receipt's refs were released. */
 export function commitExists(cwd: string, sha: string): boolean {
   return tryGit(cwd, ['cat-file', '-e', `${sha}^{commit}`]).ok
+}
+
+/** {@link commitExists} without blocking the daemon. */
+export async function commitExistsAsync(cwd: string, sha: string): Promise<boolean> {
+  return (await tryGitAsync(cwd, ['cat-file', '-e', `${sha}^{commit}`])).ok
 }
 
 /** The range for the working tree: HEAD to index when staged, index to working tree otherwise. */

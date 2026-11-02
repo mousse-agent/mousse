@@ -50,8 +50,8 @@ it('keeps an older unintegrated isolated result and its Undo refs after a newer 
     const repositoryLease = await acquireRepositoryLease(resolveRepositoryIdentity(workspace, { requireMutationCapability: true }))
     try {
       const retirement = new WorktreeRetirementService(f.services.threads.lifecycleStore, { taskLease, repositoryLease })
-      retirement.prepare({ taskId: thread.id, worktreePath: child.path, branch: child.branch, sourcePath: new AgentEpisodeStore(directory).path, baseSha: base })
-      retirement.retire(retirement.pathFor(thread.id, child.path))
+      await retirement.prepare({ taskId: thread.id, worktreePath: child.path, branch: child.branch, sourcePath: new AgentEpisodeStore(directory).path, baseSha: base })
+      await retirement.retire(retirement.pathFor(thread.id, child.path))
     } finally { repositoryLease.release(); releaseExecutionLeaseHandle(taskLease) }
     expect(existsSync(child.path)).toBe(false)
 

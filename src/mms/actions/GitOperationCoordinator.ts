@@ -1,7 +1,7 @@
 import { acquireRepositoryLease } from '../git/RepositoryLease'
 import { resolveRepositoryIdentityAsync, type RepositoryIdentity } from '../git/RepositoryIdentity'
-import { hiddenStoreIdentity, inHiddenStore } from '../git/hiddenStore'
-import { threadSnapshotStore } from '../workspace/SnapshotWorkspace'
+import { hiddenStoreIdentity, inHiddenStore, type HiddenStore } from '../git/hiddenStore'
+import { threadSnapshotStoreAsync } from '../workspace/SnapshotWorkspace'
 import {
   getExecutionLeasePath,
   readLeaseOwner,
@@ -53,18 +53,18 @@ export async function withGitMutationLocks<T>(
   heldThreadLease?: ThreadLeaseHandle
 ): Promise<T> {
   if (heldThreadLease) assertHeldThreadLease(threadDirectory, heldThreadLease)
-  // The thread's own store, read from its record: the same folder may also be a person's repository now.
-  const store = threadSnapshotStore(threadDirectory, repositoryPath)
   const heldRepositories = mutationContext.getStore()
-  const start = async (): Promise<{ repository: RepositoryIdentity; threadLease: Promise<ThreadLeaseHandle> }> => {
+  const start = async (): Promise<{ store: HiddenStore | undefined; repository: RepositoryIdentity; threadLease: Promise<ThreadLeaseHandle> }> => {
+    // The thread's own store, read from its record: the same folder may also be a person's repository now.
+    const store = await threadSnapshotStoreAsync(threadDirectory, repositoryPath)
     const repository = store ? hiddenStoreIdentity(store) : await resolveRepositoryIdentityAsync(repositoryPath, { requireMutationCapability: true })
     if (heldRepositories?.has(repository.key)) throw new Error('Nested repository mutation is not allowed; finish the owning operation first.')
     // Its first attempt runs now, so a free lease goes to the first caller.
-    return { repository, threadLease: heldThreadLease ? Promise.resolve(heldThreadLease) : waitAcquireExecutionLease(threadDirectory, { source, signal }) }
+    return { store, repository, threadLease: heldThreadLease ? Promise.resolve(heldThreadLease) : waitAcquireExecutionLease(threadDirectory, { source, signal }) }
   }
   // Callers for one thread start waiting for its lease in the order they called, as when the repository was found synchronously.
   const started = heldThreadLease ? await start() : await inCallOrder(resolve(threadDirectory), start)
-  const repository = started.repository
+  const { store, repository } = started
   const threadLease = await started.threadLease
   try {
     const repositoryLease = await acquireRepositoryLease(repository, { signal })

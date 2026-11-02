@@ -15,7 +15,7 @@ import { IN_PROGRESS_GIT_MARKERS } from '../git/gitMarkers'
 import { changedPathsAsync, git, gitAsync, tryGitAsync } from './git'
 import { coverageNotice, describeGitAsync, sameTreeAsync, SnapshotRefusedError, snapshotUncoveredAsync, takeSnapshotAsync, type Snapshot } from './snapshots'
 import { activeHiddenStore } from '../git/hiddenStore'
-import { inThreadSnapshotScope, setSnapshotsOff } from '../workspace/SnapshotWorkspace'
+import { inThreadSnapshotScope, inThreadSnapshotScopeAsync, setSnapshotsOff } from '../workspace/SnapshotWorkspace'
 
 export interface RunThreadActionOptions {
   threadId: string
@@ -136,7 +136,7 @@ export class ThreadActionService {
    */
   async checkTurnStart(workspacePath: string, startSha: string): Promise<TurnStartCheck> {
     try {
-      await inThreadSnapshotScope(this.threadDirectory, workspacePath, () => gitAsync(workspacePath, ['rev-parse', '--verify', `${startSha}^{commit}`]))
+      await inThreadSnapshotScopeAsync(this.threadDirectory, workspacePath, () => gitAsync(workspacePath, ['rev-parse', '--verify', `${startSha}^{commit}`]))
       return { workspacePath, startSha }
     } catch (error) {
       return { workspacePath, startSha, error }
@@ -185,7 +185,7 @@ export class ThreadActionService {
 
   /** `recordOutsideChanges` for a caller that already holds the mutation locks. */
   async recordOutsideChangesHeld(options: OutsideChangesOptions): Promise<{ startSha: string; action?: ThreadAction }> {
-    const metadata = new ThreadWorkspaceManager(this.threadDirectory).loadOrSnapshot()
+    const metadata = await new ThreadWorkspaceManager(this.threadDirectory).loadOrSnapshotAsync()
     const latest = this.latest(options.conversationBranchId)
     let snapshot: Snapshot
     try {
@@ -407,7 +407,7 @@ export class ThreadActionService {
     workspacePath = await gitAsync(workspacePath, ['rev-parse', '--show-toplevel'])
     action.state = 'checkpointing'
     this.journal.append({ operationId: action.id, operationType: 'action-checkpoint', state: 'prepared', expectedPreState: { startSha: action.startSha }, details: { action, actionState: state } })
-    const threadId = new ThreadWorkspaceManager(this.threadDirectory).loadOrSnapshot()?.threadId
+    const threadId = (await new ThreadWorkspaceManager(this.threadDirectory).loadOrSnapshotAsync())?.threadId
     const reason = action.turnId.startsWith(USER_CHANGES_TURN_PREFIX) ? 'outside changes' : `end of turn ${action.turnId}`
     let snapshot: Snapshot
     try {

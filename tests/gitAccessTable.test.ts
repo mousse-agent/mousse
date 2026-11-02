@@ -236,7 +236,7 @@ describe('GIT_ACCESS', () => {
       .map((method) => `${method}: ${[...handlers.get(method)!].filter((callee) => reached.has(callee) || SERVICE_WRITES.test(callee)).join(', ')}`)
     expect(wrong).toEqual([])
     // The analysis itself finds the paths it must: Revert, Publish, Abort, Discard, Start from a pull request.
-    for (const key of ['CodeRevertService.revertCode', 'PublishService.publish', 'ManagedConflictService.abort', 'PullRequestThreadService.startThread', 'discardPendingChanges']) expect(reached.has(key), key).toBe(true)
+    for (const key of ['CodeRevertService.revertCode', 'PublishService.publish', 'ManagedConflictService.abort', 'PullRequestThreadService.startThread', 'discardPendingChangesAsync']) expect(reached.has(key), key).toBe(true)
     // Undo and Redo only rewind the conversation on this branch; they are declared for the file restore that follows.
     expect(reached.has('ConversationActionService.apply')).toBe(false)
   })
