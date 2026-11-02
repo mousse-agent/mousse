@@ -377,19 +377,18 @@ export class MmsRemoteBackend implements RemoteBackendPort {
     const projectPath = threadId
       ? resolveThreadProjectPath(s.projects, s.threads, threadId)
       : undefined
-    let skills: Array<{ id: string; name: string; description: string }> = []
-    try {
-      skills = (await this.effectiveSkills(projectPath)).map((skill) => ({
-        id: skill.id,
-        name: skill.name,
-        description: skill.description
-      }))
-    } catch {
-      // Skills are optional in the composer; models still load.
-    }
+    // Read together: skills are optional and must not hold back the models.
+    const [skills, providers] = await Promise.all([
+      this.effectiveSkills(projectPath).then(
+        (found) => found.map((skill) => ({ id: skill.id, name: skill.name, description: skill.description })),
+        // Skills are optional in the composer; models still load.
+        () => [] as Array<{ id: string; name: string; description: string }>
+      ),
+      s.harness?.llmProviders({ kind: 'device' })
+    ])
     const provider = settings.provider
     return {
-      providers: (await s.harness?.llmProviders({ kind: 'device' })) ?? [],
+      providers: providers ?? [],
       defaultModel: provider?.model
         ? {
             ...(provider.instanceId ? { instanceId: provider.instanceId } : {}),

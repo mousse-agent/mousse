@@ -51,11 +51,8 @@ describe('the bar above a thread of another computer', () => {
   const view = (props: Partial<Parameters<typeof ThreadComputerBarView>[0]> = {}) =>
     html(createElement(ThreadComputerBarView, { name: 'Studio', state: 'online', onRetry: () => undefined, ...props }))
 
-  it('names the computer while it is connected, with no Retry', () => {
-    const bar = view()
-    expect(bar).toContain('Runs on Studio')
-    expect(bar).not.toContain('Retry')
-    expect(bar).not.toContain('role="status"')
+  it('shows nothing while the computer is connected, as for a chat on this computer', () => {
+    expect(view()).toBe('')
   })
 
   it('says the computer is offline, when it was last seen, and offers Retry', () => {

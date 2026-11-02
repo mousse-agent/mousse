@@ -16,19 +16,20 @@ interface ThreadComputerBarViewProps {
 
 /**
  * Top of a thread that runs on another computer: whose it is, and when that computer cannot be reached,
- * the last transcript stays with a note and Retry. A connected computer shows only its name.
+ * the last transcript stays with a note and Retry. A connected computer shows nothing.
  */
 export function ThreadComputerBarView({ name, state, offline, retrying, onRetry }: ThreadComputerBarViewProps) {
+  // A connected computer shows nothing here: the chat looks like one on this computer, and the
+  // device menu under the transcript already names where it runs.
+  if (state === 'online') return null
   const message = state === 'offline' ? `${name} · ${offline ?? 'Offline'}` : state === 'not-shared' ? `${name} is not sharing its threads with this computer right now` : name
   return (
-    <div className="thread-computer-bar" data-state={state} role={state === 'online' ? undefined : 'status'}>
+    <div className="thread-computer-bar" data-state={state} role="status">
       <Server size={12} strokeWidth={2} aria-hidden="true" />
-      <span className="thread-computer-bar-text" title={message}>{state === 'online' ? `Runs on ${name}` : message}</span>
-      {state !== 'online' && (
-        <button type="button" className="thread-computer-bar-retry" disabled={retrying} onClick={onRetry}>
-          <RefreshCw size={12} aria-hidden="true" />Retry
-        </button>
-      )}
+      <span className="thread-computer-bar-text" title={message}>{message}</span>
+      <button type="button" className="thread-computer-bar-retry" disabled={retrying} onClick={onRetry}>
+        <RefreshCw size={12} aria-hidden="true" />Retry
+      </button>
     </div>
   )
 }

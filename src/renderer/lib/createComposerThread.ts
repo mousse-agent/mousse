@@ -11,7 +11,10 @@ export async function createComposerThread(deps: {
   const thread = await deps.create()
   if (!deps.stillVisible()) return null
   deps.activate(thread)
-  await deps.select(thread.id)
+  // A new thread on another computer has no transcript to read yet: its first message is sent
+  // while it is opened, as fast as on this computer, instead of after that round trip.
+  if (thread.node) void deps.select(thread.id).catch(() => undefined)
+  else await deps.select(thread.id)
   return deps.stillVisible() ? thread.id : null
 }
 

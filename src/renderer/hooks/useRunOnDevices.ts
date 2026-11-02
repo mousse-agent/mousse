@@ -43,6 +43,7 @@ export function useRemoteComposerOptions(node: NodeId | undefined): RemoteCompos
     if (cached) setState({ node, options: cached })
     const read = () => {
       clearTimeout(timer)
+      if (cancelled) return
       void readRemoteComposerOptions(node).then(
         (options) => {
           if (cancelled) return
@@ -51,6 +52,7 @@ export function useRemoteComposerOptions(node: NodeId | undefined): RemoteCompos
         },
         () => {
           if (cancelled) return
+          clearTimeout(timer)
           timer = setTimeout(read, delay)
           delay = Math.min(delay * 2, RETRY_MAX_MS)
         }
