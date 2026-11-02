@@ -8,6 +8,8 @@ import { waitAcquireExecutionLease, releaseExecutionLeaseHandle } from '../src/m
 import { registerThreadLifecycleGate } from '../src/mms/queue/ThreadLifecycleAdmission'
 import { ResourceLifecycleStore } from '../src/mms/lifecycle/ResourceLifecycleStore'
 import { lifecycleGit as git, WORKTREE_TRASH_QUIET_MS, WorktreeRetirementService } from '../src/mms/lifecycle/WorktreeRetirementService'
+import { ThreadJournal } from '../src/mms/data/ThreadJournal'
+import { ThreadWorkspaceManager } from '../src/mms/workspace/ThreadWorkspaceManager'
 
 /** Git lists worktrees with forward slashes on every platform; paths are compared in that form, and case-folded on Windows. */
 const slashes = (path: string): string => { const value = resolve(path).replaceAll('\\', '/'); return process.platform === 'win32' ? value.toLowerCase() : value }
@@ -275,4 +277,74 @@ test('refuses a reconstruction pin redirected to a primary branch before updatin
   expect(() => f.service.prepare(f.input)).toThrow(/symbolic|pin|reference/i)
   expect(git(f.repo, ['rev-parse', primary])).toBe(original)
   expect(git(f.repo, ['symbolic-ref', manifest.resultRef])).toBe(primary)
+})
+
+/**
+ * A thread's own worktree, as `ThreadWorkspaceManager.provision` makes it (its branch named from the first message), or as
+ * an earlier version made it (an id-named `mousse/thread/<thread>/main`, with the same records).
+ */
+async function threadFixture(kind: 'named' | 'id-named') {
+  const root = mkdtempSync(join(tmpdir(), 'mousse-retire-thread-')); roots.push(root)
+  const repo = join(root, 'repo'); mkdirSync(repo)
+  git(repo, ['init']); git(repo, ['config', 'user.email', 'test@example.com']); git(repo, ['config', 'user.name', 'Test'])
+  writeFileSync(join(repo, 'a.txt'), 'first\n'); git(repo, ['add', '.']); git(repo, ['commit', '-m', 'base'])
+  const home = join(root, 'profile'), task = join(home, 'thread-data', 'task'); mkdirSync(task, { recursive: true })
+  writeFileSync(join(task, 'meta.json'), JSON.stringify({ id: 'task' }))
+  const store = new ResourceLifecycleStore({ profileId: 'test', profileHome: home }); store.registerTask({ taskId: 'task', location: task })
+  registerThreadLifecycleGate(home, store)
+  const previous = process.env.MOUSSE_HOME; process.env.MOUSSE_HOME = home
+  releases.push(() => { if (previous === undefined) delete process.env.MOUSSE_HOME; else process.env.MOUSSE_HOME = previous })
+  let worktree: string, branch: string
+  if (kind === 'named') {
+    const metadata = await new ThreadWorkspaceManager(task).provision('task', 'main', repo, undefined, undefined, undefined, { nameFrom: 'Fix the login button' })
+    worktree = metadata.worktreePath; branch = metadata.branch
+  } else {
+    worktree = join(home, 'repositories', resolveRepositoryIdentity(repo).key, 'worktrees', 'threads', 'task', 'main'); branch = 'mousse/thread/task/main'
+    mkdirSync(join(worktree, '..'), { recursive: true })
+    new ThreadJournal(task).append({ operationId: 'provision', operationType: 'workspace-provision', state: 'planned', expectedPreState: { branch, worktreePath: worktree } })
+    git(repo, ['worktree', 'add', '-b', branch, worktree])
+    writeFileSync(join(task, 'workspace.json'), JSON.stringify({ schemaVersion: 1, threadId: 'task', conversationBranchId: 'main', worktreePath: worktree, branch, baseSha: git(repo, ['rev-parse', 'HEAD']) }))
+  }
+  const taskLease = await waitAcquireExecutionLease(task), repositoryLease = await acquireRepositoryLease(resolveRepositoryIdentity(repo))
+  releases.push(() => repositoryLease.release(), () => releaseExecutionLeaseHandle(taskLease))
+  const service = new WorktreeRetirementService(store, { taskLease, repositoryLease })
+  return { repo, task, worktree, branch, service, input: { taskId: 'task', worktreePath: worktree, branch, sourcePath: join(task, 'workspace.json') }, path: service.pathFor('task', worktree) }
+}
+
+test.each(['named', 'id-named'] as const)('a thread worktree whose branch is %s is owned: it retires, its branch goes at trash expiry, and a restore brings both back', async (kind) => {
+  const f = await threadFixture(kind)
+  expect(f.branch).toBe(kind === 'named' ? 'mousse/fix-the-login-button' : 'mousse/thread/task/main')
+  f.service.prepare(f.input)
+  const trashed = f.service.retire(f.path)
+  expect(f.service.expireTrash(f.path, { now: Date.now() + 2 * WORKTREE_TRASH_QUIET_MS })).toEqual({ removed: true })
+  expect(JSON.parse(readFileSync(f.path, 'utf8')).deletedBranches).toEqual([{ name: f.branch, sha: trashed.resultSha }])
+  expect(git(f.repo, ['branch', '--list', f.branch])).toBe('')
+  f.service.reconstruct(f.path)
+  expect(git(f.worktree, ['branch', '--show-current'])).toBe(f.branch)
+})
+
+test('a thread\'s agent-made branches are never touched, a mousse/ one included, unless it is an id-named one of Mousse\'s', async () => {
+  const f = await threadFixture('named')
+  // The agent switches to a branch of its own whose name happens to start with mousse/, and makes another outside it.
+  git(f.worktree, ['switch', '-q', '-c', 'mousse/agents-own-idea'])
+  git(f.worktree, ['branch', 'feature/agent-work'])
+  f.service.prepare(f.input)
+  const trashed = f.service.retire(f.path)
+  expect(trashed.headBranch).toBe('mousse/agents-own-idea')
+  expect(f.service.expireTrash(f.path, { now: Date.now() + 2 * WORKTREE_TRASH_QUIET_MS })).toEqual({ removed: true })
+  // Only the thread's own branch went; the branches the agent made stay where they were.
+  expect(JSON.parse(readFileSync(f.path, 'utf8')).deletedBranches).toEqual([{ name: f.branch, sha: git(f.repo, ['rev-parse', 'mousse/agents-own-idea']) }])
+  expect(git(f.repo, ['branch', '--list', 'mousse/agents-own-idea', 'feature/agent-work', '--format=%(refname:short)'])).toBe('feature/agent-work\nmousse/agents-own-idea')
+})
+
+test('a thread record that names a branch outside mousse/, or another thread\'s id-named branch, owns nothing', async () => {
+  const f = await threadFixture('id-named')
+  git(f.repo, ['branch', 'feature/theirs'])
+  expect(() => f.service.prepare({ ...f.input, branch: 'feature/theirs' })).toThrow(/Only owned linked worktrees can retire|no longer owns/)
+  const record = JSON.parse(readFileSync(join(f.task, 'workspace.json'), 'utf8'))
+  writeFileSync(join(f.task, 'workspace.json'), JSON.stringify({ ...record, branch: 'mousse/thread/other-task/main' }))
+  // Not this thread's provision record, and not a fork of it either: refused before anything moves.
+  expect(() => f.service.prepare({ ...f.input, branch: 'mousse/thread/other-task/main' })).toThrow()
+  expect(existsSync(f.worktree)).toBe(true)
+  expect(git(f.repo, ['branch', '--list', 'feature/theirs', '--format=%(refname:short)'])).toBe('feature/theirs')
 })

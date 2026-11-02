@@ -149,7 +149,7 @@ export class AgentChatService {
     let workspaceRoot: string
     if (projectPath) {
       const manager = new ThreadWorkspaceManager(this.options.services.threads.getThreadDir(thread.id))
-      const metadata = await manager.provision(thread.id, 'main', projectPath, this.lifecycle.signal)
+      const metadata = await manager.provision(thread.id, 'main', projectPath, this.lifecycle.signal, undefined, undefined, { nameFrom: name })
       workspaceRoot = manager.executionContext(projectPath, metadata).projectPath
       // A local untracked AGENTS.md still applies to this newly admitted project workspace.
       const source = join(projectPath, 'AGENTS.md'), target = join(workspaceRoot, 'AGENTS.md')

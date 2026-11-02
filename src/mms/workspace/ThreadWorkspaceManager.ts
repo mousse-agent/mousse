@@ -27,6 +27,7 @@ import type {
   WorkspaceExecutionContext
 } from '../../shared/workspace'
 import { repoProgramEnv, withoutRepoPrograms } from '../git/repoPrograms'
+import { threadBranchName } from '../../shared/mousseBranches'
 
 function git(cwd: string, args: string[], userRequested?: UserAction): string {
   return execFileSync('git', withoutRepoPrograms(cwd, args, { userRequested }), { cwd, env: repoProgramEnv(), encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim()
@@ -214,8 +215,11 @@ export class ThreadWorkspaceManager {
      * `snapshot`: a workspace snapshot (a fork's source checkpoint) whose files are written into the new worktree
      * after it is made at `startSha`, which is the commit the snapshot was taken on; the snapshot becomes the
      * thread's latest one, so the first turn starts from it instead of recording it as outside changes.
+     *
+     * `nameFrom`: the thread's first message. The worktree's branch is named from it once, here, as `mousse/<slug>`
+     * (see `threadBranchName`), and never renamed; the name is checked against the repository under its lease.
      */
-    options: { untrusted?: boolean; enableWorktreeConfig?: () => void; userRequested?: UserAction; snapshot?: string } = {}
+    options: { untrusted?: boolean; enableWorktreeConfig?: () => void; userRequested?: UserAction; snapshot?: string; nameFrom?: string } = {}
   ): Promise<ThreadWorkspaceMetadata> {
     const existing = this.load()
     if (existing?.lifecycle === 'ready') return this.verify(existing)
@@ -236,7 +240,8 @@ export class ThreadWorkspaceManager {
       if (provisioned) throw new Error(`Workspace provisioning requires recovery: ${provisioned.lifecycle}`)
       const primaryHead = git(repository.primaryCheckoutPath, ['rev-parse', 'HEAD'])
       const head = startSha ? git(repository.primaryCheckoutPath, ['rev-parse', '--verify', `${startSha}^{commit}`]) : primaryHead
-      const branch = `mousse/thread/${threadId}/${conversationBranchId}`
+      // Named once, under the repository's lease, so two threads cannot take the same name.
+      const branch = threadBranchName(options.nameFrom, threadId, (name) => tryGit(repository.primaryCheckoutPath, ['for-each-ref', '--count=1', '--format=%(refname)', `refs/heads/${name}`]).stdout !== '')
       const retainedRef = `refs/mousse/threads/${threadId}/${conversationBranchId}`
       const worktreePath = join(repository.worktreeBase, 'threads', threadId, conversationBranchId)
       mkdirSync(join(repository.worktreeBase, 'threads', threadId), { recursive: true })

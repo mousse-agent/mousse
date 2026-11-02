@@ -41,7 +41,9 @@ export class WorkspaceResolver {
     mode: ChatMode,
     conversationBranchId = 'main',
     signal?: AbortSignal,
-    heldThreadLease?: ThreadLeaseHandle
+    heldThreadLease?: ThreadLeaseHandle,
+    /** The thread's first message: a worktree made now names its branch from it (`ThreadWorkspaceManager.provision`). */
+    nameFrom?: string
   ): Promise<WorkspaceExecutionContext> {
     const manager = new ThreadWorkspaceManager(this.threadDirectory)
     const mutating = mode === 'agent' || mode === 'build' || (typeof mode === 'object' && 'skillId' in mode)
@@ -63,7 +65,7 @@ export class WorkspaceResolver {
     if (!repository.capability.gitBacked) {
       return { threadId: this.threadId, workspacePath: this.projectPath, projectPath: this.projectPath, primaryPath: this.projectPath, lifecycle: 'unprovisioned', capability: repository.capability }
     }
-    if (!manager.load()) await manager.provision(this.threadId, conversationBranchId, this.projectPath, signal, heldThreadLease)
+    if (!manager.load()) await manager.provision(this.threadId, conversationBranchId, this.projectPath, signal, heldThreadLease, undefined, { nameFrom })
     return manager.executionContext(this.projectPath)
   }
 }

@@ -766,6 +766,12 @@ async function asDomainError<T>(run: () => Promise<T>): Promise<T> {
   }
 }
 
+/** What a thread's worktree branch is named from when one is made here: its first message, else its name. */
+function branchNameSource(ctx: HandlerContext, threadId: string): string | undefined {
+  const first = ctx.mms.orchestrator.getMessages(threadId).find((message) => message.role === 'user' && message.content.trim())
+  return first?.content ?? ctx.mms.threads.getThread(threadId)?.name
+}
+
 async function ensureOwnedTaskWorkspace(ctx: HandlerContext, params: Record<string, unknown>): Promise<void> {
   if (!params.threadId) return
   const threadId = asString(params.threadId, 'threadId', 256)
@@ -773,7 +779,7 @@ async function ensureOwnedTaskWorkspace(ctx: HandlerContext, params: Record<stri
   const project = resolveThreadProjectPath(ctx.mms.projects, ctx.mms.threads, threadId)
   if (!project) throw new DomainRpcError('thread_has_no_folder', 'Task has no project workspace')
   const manager = new ThreadWorkspaceManager(ctx.mms.threads.getThreadDir(threadId))
-  if (!manager.load()) await manager.provision(threadId, 'main', project)
+  if (!manager.load()) await manager.provision(threadId, 'main', project, undefined, undefined, undefined, { nameFrom: branchNameSource(ctx, threadId) })
   await ensureWorkspaceMaterialized(ctx, threadId, project)
   if (manager.verify().lifecycle !== 'ready') throw new DomainRpcError('workspace_recovery_required', 'Task workspace requires recovery before mutation')
 }
@@ -2810,7 +2816,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const current = manager.load()
       const metadata = current
         ? await manager.restore(operation.projectPath)
-        : await manager.provision(operation.threadId, branchId, operation.projectPath)
+        : await manager.provision(operation.threadId, branchId, operation.projectPath, undefined, undefined, undefined, { nameFrom: branchNameSource(ctx, operation.threadId) })
       ctx.emitEvent?.('workspace.updated', { threadId: operation.threadId, metadata }, operation.threadId)
       return { metadata }
     }

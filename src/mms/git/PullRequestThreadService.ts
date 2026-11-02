@@ -226,6 +226,7 @@ export class PullRequestThreadService {
       await new ThreadWorkspaceManager(threadDirectory).provision(thread.id, 'main', project.path, undefined, undefined, headSha, {
         untrusted: true,
         userRequested,
+        nameFrom: name,
         ...(input.allowWorktreeConfig === true ? { enableWorktreeConfig: () => { repositoryConfigChange = WORKTREE_CONFIG_ENABLED } } : {})
       })
     } catch (error) {
