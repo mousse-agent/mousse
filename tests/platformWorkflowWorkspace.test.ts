@@ -640,9 +640,11 @@ describe('workflow agent worktrees', () => {
       expect(git(f.repo, ['branch', '--list', 'mousse/agent/*'])).toBe('')
       const agentAttempt = done.attempts.find((attempt) => attempt.nodeId === 'agent')!
       const verification = done.attempts.find((attempt) => attempt.nodeId === 'verify')!
-      expect(agentAttempt.workspaceRevision?.writeSha).toBe(result.sha)
+      // The writer's result is a snapshot of the files, not a commit: the script reads exactly it, and HEAD never moved.
+      expect(agentAttempt.workspaceRevision?.writeSha).not.toBe(result.sha)
       expect(agentAttempt.workspaceRevision?.receiptId).toBeTruthy()
-      expect(verification.workspaceRevision?.readSha).toBe(result.sha)
+      expect(verification.workspaceRevision?.readSha).toBe(agentAttempt.workspaceRevision?.writeSha)
+      expect(result.sha).toBe(f.primaryHead)
       expect(existsSync(join(f.repo, 'branch.txt'))).toBe(false)
       expect(git(f.repo, ['rev-parse', 'HEAD'])).toBe(f.primaryHead)
       await new UndoService(directory).undoLatest('main', metadata.worktreePath)
@@ -732,14 +734,21 @@ describe('workflow agent worktrees', () => {
       expect(threadMeta?.worktreePath).toBeTruthy()
       expect(realpathSync(threadMeta!.worktreePath)).not.toBe(realpathSync(f.repo))
       expect(agentPaths.every((path) => realpathSync(path) !== realpathSync(threadMeta!.worktreePath))).toBe(true)
-      expect(readFileSync(join(threadMeta!.worktreePath, 'left.txt'), 'utf8')).toBe('left-bytes')
-      expect(readFileSync(join(threadMeta!.worktreePath, 'right.txt'), 'utf8')).toBe('right-bytes')
-      expect(left.workspaceRevision?.receiptId).toBeTruthy()
-      expect(right.workspaceRevision?.receiptId).toBeTruthy()
-      const receipts = new ChangeReceiptService(f.services.threads.getThreadDir(f.thread.id)).list().filter((receipt) => receipt.kind === 'integration')
-      expect(receipts).toHaveLength(2)
-      expect(new Set(receipts.map((receipt) => receipt.contributions[0].baseSha)).size).toBe(1)
-      expect(git(threadMeta!.worktreePath, ['status', '--porcelain'])).toBe('')
+      // Nothing was merged into the thread: each result is reported, pinned under its workflow ref, with its base beside it.
+      expect(existsSync(join(threadMeta!.worktreePath, 'left.txt'))).toBe(false)
+      expect(existsSync(join(threadMeta!.worktreePath, 'right.txt'))).toBe(false)
+      expect(new ChangeReceiptService(f.services.threads.getThreadDir(f.thread.id)).list().filter((receipt) => receipt.kind === 'integration')).toEqual([])
+      for (const [revision, file] of [[left.workspaceRevision, 'left.txt'], [right.workspaceRevision, 'right.txt']] as const) {
+        const report = revision!.result!
+        expect(report).toMatchObject({ shared: false, changedFileCount: 1, changedFiles: [file], resultRef: expect.stringMatching(/^refs\/mousse\/workflows\//), baseRef: `${report.resultRef}-base` })
+        expect(git(f.repo, ['rev-parse', report.resultRef!])).toBe(report.resultSha)
+        expect(git(f.repo, ['rev-parse', report.baseRef!])).toBe(report.baseSha)
+        expect(agentPaths.map((path) => realpathSync(path))).toContain(realpathSync(report.workedIn))
+        // The revision names the parent's own files, unchanged.
+        expect(revision!.receiptId).toBeUndefined()
+      }
+      expect(git(threadMeta!.worktreePath, ['rev-parse', 'HEAD'])).toBe(f.primaryHead)
+      expect(git(threadMeta!.worktreePath, ['status', '--porcelain', '--untracked-files=all'])).toBe('')
     } finally { await f.close() }
   }, 45_000)
 
@@ -794,7 +803,7 @@ describe('workflow agent worktrees', () => {
     } finally { await f.close() }
   }, 45_000)
 
-  it('preserves both isolated model results when integration conflicts instead of reporting two code successes', async () => {
+  it('reports both isolated results that touch the same file, and merges neither into the thread', async () => {
     const f = await agentFixture()
     try {
       const created = f.services.platform.agentDefinitions.createDraft({ settings: agentSettings('Conflicting Writers', f.modelRef), systemPrompt: 'Write branch.txt.' })
@@ -820,19 +829,22 @@ describe('workflow agent worktrees', () => {
         instructions: `Write branch.txt with ${side}-result`, input: {}, signal: new AbortController().signal, idempotencyKey: randomUUID()
       })
       const settled = await Promise.allSettled([invoke('left'), invoke('right')])
-      expect(settled.filter((item) => item.status === 'fulfilled')).toHaveLength(1)
-      const failure = settled.find((item) => item.status === 'rejected') as PromiseRejectedResult
-      expect(String(failure.reason)).toMatch(/conflict/i)
+      // Nothing is merged, so nothing conflicts: both complete, each with its own report of branch.txt.
+      expect(settled.filter((item) => item.status === 'fulfilled')).toHaveLength(2)
+      for (const item of settled) expect((item as PromiseFulfilledResult<{ workspaceRevision?: { result?: { changedFiles: string[] } } }>).value.workspaceRevision?.result?.changedFiles).toEqual(['branch.txt'])
       const paths = git(f.repo, ['worktree', 'list', '--porcelain']).split(/\r?\n/).filter((line) => line.startsWith('worktree ')).map((line) => line.slice(9))
         .filter((path) => path.toLowerCase().includes('/wf/') || path.toLowerCase().includes('\\wf\\'))
       expect(paths).toHaveLength(2)
       expect(paths.map((path) => readFileSync(join(path, 'branch.txt'), 'utf8')).sort()).toEqual(['left-result', 'right-result'])
+      // Each worker's result is uncommitted files in its worktree (a snapshot records it); HEAD is where it started.
       for (const path of paths) {
-        expect(git(path, ['status', '--porcelain'])).toBe('')
-        expect(git(path, ['rev-parse', 'HEAD'])).not.toBe(f.primaryHead)
+        expect(git(path, ['status', '--porcelain'])).toBe('?? branch.txt')
+        expect(git(path, ['rev-parse', 'HEAD'])).toBe(f.primaryHead)
       }
       const metadata = new ThreadWorkspaceManager(f.services.threads.getThreadDir(f.thread.id)).load()!
-      expect(git(metadata.worktreePath, ['diff', '--name-only', '--diff-filter=U'])).toBe('branch.txt')
+      // The thread holds neither: its files are as they were.
+      expect(git(metadata.worktreePath, ['status', '--porcelain', '--untracked-files=all'])).toBe('')
+      expect(existsSync(join(metadata.worktreePath, 'branch.txt'))).toBe(false)
       expect(git(f.repo, ['rev-parse', 'HEAD'])).toBe(f.primaryHead)
       expect(existsSync(join(f.repo, 'branch.txt'))).toBe(false)
       const invocationRoot = join(f.services.getProfileHomeDir(), 'workflow-agent-bindings', 'invocations')
@@ -840,8 +852,7 @@ describe('workflow agent worktrees', () => {
       expect(invocations).toHaveLength(2)
       expect(invocations.every((item) => item.modelCompleted && item.workspaceRevision?.writeSha)).toBe(true)
       expect(invocations.map((item) => item.output.side).sort()).toEqual(['left', 'right'])
-      expect(invocations.filter((item) => item.integrationState === 'failed')).toHaveLength(1)
-      expect(invocations.filter((item) => item.integrationState === 'completed')).toHaveLength(1)
+      expect(invocations.filter((item) => item.state === 'completed')).toHaveLength(2)
     } finally { await f.close() }
   }, 45_000)
 

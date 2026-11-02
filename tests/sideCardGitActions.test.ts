@@ -728,7 +728,7 @@ describe('git action availability', () => {
   })
 
   it('refuses amend in a thread worktree with the reason, and without commits', () => {
-    expect(available({}, inThread).amend).toEqual({ enabled: false, reason: "This thread's branch is checkpointed" })
+    expect(available({}, inThread).amend).toEqual({ enabled: false, reason: "Not available in this thread's worktree" })
     expect(available({}, project).amend).toEqual({ enabled: true, reason: null })
     expect(available({}, project, none, 0).amend).toEqual({ enabled: false, reason: 'No commits yet' })
   })

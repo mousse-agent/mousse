@@ -8,7 +8,9 @@ import type { ThreadWorkspaceMetadata } from '../../shared/workspace'
 import { atomicWriteFileSync, atomicWriteJsonSync } from '../data/AtomicFs'
 import { ThreadJournal } from '../data/ThreadJournal'
 import { isIntegrated, primaryRemote, resolveDefaultBranch } from '../git/defaultBranch'
-import { readOnlyGit } from '../git/readOnlyGit'
+import { operationInProgress } from '../actions/git'
+import { publishedRef } from '../actions/snapshots'
+import { readOnlyGit, runReadOnlyGit } from '../git/readOnlyGit'
 import { acquireRepositoryLease } from '../git/RepositoryLease'
 import { resolveRepositoryIdentity } from '../git/RepositoryIdentity'
 import { isExecutionLeaseHeld, releaseExecutionLeaseHandle, STORAGE_CLEANUP_LEASE_SOURCE, tryAcquireExecutionLease } from '../queue/ThreadExecutionLease'
@@ -19,7 +21,7 @@ import type { ResourcePurgeService, TrashSweepOutcome } from './ResourcePurgeSer
 import { assertLifecyclePath, type ResourceLifecycleStore } from './ResourceLifecycleStore'
 import type { PolicySnapshot, StoragePolicyStore } from './StoragePolicyStore'
 import type { StorageSweepClock } from './sweepClock'
-import { PartialWorktreeRemovalError, WorktreeRetirementService } from './WorktreeRetirementService'
+import { WORKTREE_TRASH_QUIET_MS, WorktreeRetirementService } from './WorktreeRetirementService'
 
 const DAY_MS = 86_400_000
 const FIRST_RUN_DELAY_MS = 5 * 60_000
@@ -136,7 +138,7 @@ type DeletedVerdict =
   | { remove: true; head: string; workspace: ThreadWorkspaceMetadata; measurement: Measurement }
 
 /** What the content checks found in a checkout that has nothing to keep it for the location and content reasons. */
-type CheckoutFacts = { head: string; beyondBase: number; integrated: boolean }
+type CheckoutFacts = { head: string; beyondBase: number; integrated: boolean; uncommitted: number }
 
 /** One line of a dry run; the shape the Storage page reads. */
 export type PlannedCleanup = StorageCleanupPlanItem
@@ -208,7 +210,8 @@ function onlyControlFiles(worktree: string, entry: string): boolean {
  * The daemon's storage cleanup rules. It evaluates thread worktrees in a fixed order with a plain
  * reason for every keep, retires a worktree only after the thread and repository leases are held and
  * the checks are repeated, runs the trash sweep through a reporting seam, guards against a clock set
- * backwards and stores the last report. Retirement is reversible: the worktree comes back on use.
+ * backwards and stores the last report. Retirement is reversible: the worktree moves into the trash
+ * and comes back on use, from the trash or, once the trash has deleted it, from its snapshot.
  */
 export class StorageCleanupService {
   private current?: Promise<StorageCleanupReport>
@@ -471,6 +474,13 @@ export class StorageCleanupService {
     if (snapshot && (hasRule || trigger === 'manual')) {
       try { items.push(...await this.worktreePhase(snapshot, !clock.suspended, startedMs, trigger, allowed)) }
       catch (error) { items.push({ rule: 'worktree-inactive', label: 'Worktrees', bytes: 0, outcome: 'failed', reason: (error as Error).message }) }
+    }
+    // Worktrees already in the trash are settled whatever rules are on now; a confirmed plan touches only what it named.
+    if (!allowed && !clock.suspended && !this.stopping) {
+      try { items.push(...await this.worktreeTrashItems(startedMs)) }
+      catch (error) { items.push({ rule: 'trash', label: 'Worktrees in the trash', bytes: 0, outcome: 'failed', reason: (error as Error).message }) }
+    }
+    if (snapshot && (hasRule || trigger === 'manual')) {
       try { items.push(...await this.trashPhase(startedMs, trigger, allowed)) }
       catch (error) { items.push({ rule: 'trash', label: 'Trash', bytes: 0, outcome: 'failed', reason: (error as Error).message }) }
       // A time-based rule, so it waits while the clock is suspended (the report already says why).
@@ -747,10 +757,16 @@ export class StorageCleanupService {
     if (placement) return { keep: placement }
     const unfinished = [...new ThreadJournal(record.location, { readOnly: true }).latestByOperation().values()].find((entry) => !TERMINAL_OPERATION_STATES.has(entry.state))
     if (unfinished) return { keep: 'Workspace has an unfinished operation' }
+    // HEAD and the branch are the agent's to move; the commits it added are counted below.
     const head = readOnlyGit(path, ['rev-parse', 'HEAD'])
-    if (workspace.headSha !== head) return { keep: 'Workspace HEAD moved outside a recorded operation' }
+    // Uncommitted files do not keep a worktree: retiring it saves them as a snapshot first. What a snapshot cannot hold keeps it.
     const changed = readOnlyGit(path, ['status', '--porcelain', '--untracked-files=all']).split(/\r?\n/).filter(Boolean).length
-    if (changed) return { keep: `Has uncommitted changes (${plural(changed, 'file')})` }
+    const operation = operationInProgress(path)
+    if (operation) return { keep: `Has a ${operation} in progress` }
+    if (readOnlyGit(path, ['ls-files', '-u'])) return { keep: 'Has unresolved conflicts' }
+    const staged = readOnlyGit(path, ['diff', '--cached', '--name-only']).split(/\r?\n/).filter(Boolean).length
+    if (staged) return { keep: `Has staged changes (${plural(staged, 'file')})` }
+    if (changed && runReadOnlyGit(path, ['config', '--bool', 'core.sparseCheckout']).stdout.trim() === 'true') return { keep: `Has uncommitted changes in a sparse checkout (${plural(changed, 'file')})` }
     // Cheap checks first: a worktree with ignored files (node_modules, .env) is kept without walking it for another repository.
     const ignored = readOnlyGit(path, ['ls-files', '--others', '--ignored', '--exclude-standard', '--directory', '-z']).split('\0').filter(Boolean).filter((entry) => !onlyControlFiles(path, entry))
     if (ignored.length) return { keep: `Has ignored files (${ignored[0]})` }
@@ -766,10 +782,18 @@ export class StorageCleanupService {
     if (beyondBase > 0) {
       const defaults = resolveDefaultBranch(target.checkoutPath, this.deps.codeHost)
       if (!defaults) return { keep: `Default branch is unavailable; run \`git remote set-head ${primaryRemote(target.checkoutPath) ?? '<remote>'} --auto\`` }
-      integrated = isIntegrated(path, head, defaults.refs)
+      // Ancestry covers a branch that was merged as it is. A publish puts the files into one new commit, so it is also
+      // integrated when the files it last published are the ones in HEAD.
+      integrated = isIntegrated(path, head, defaults.refs) || (changed === 0 && this.publishedAsHead(target.checkoutPath, record.taskId, path))
       if (!integrated) return { keep: `Has ${plural(beyondBase, 'unpublished commit')}` }
     }
-    return { head, beyondBase, integrated }
+    return { head, beyondBase, integrated, uncommitted: changed }
+  }
+
+  /** Whether the thread's last publish put exactly the files HEAD has into the primary checkout. Reads only. */
+  private publishedAsHead(primaryCheckout: string, taskId: string, worktree: string): boolean {
+    const published = runReadOnlyGit(primaryCheckout, ['rev-parse', '--verify', '-q', `${publishedRef(taskId)}^{tree}`])
+    return published.status === 0 && published.stdout.trim() === readOnlyGit(worktree, ['rev-parse', 'HEAD^{tree}'])
   }
 
   /** The fixed order of keep reasons; the first match wins. Undefined means skip silently. */
@@ -785,7 +809,7 @@ export class StorageCleanupService {
     if (isExecutionLeaseHeld(record.location)) return { keep: 'Thread is in use' }
     const facts = await this.inspectCheckout(record, workspace)
     if ('keep' in facts) return facts
-    const { head, beyondBase, integrated } = facts
+    const { head, beyondBase, integrated, uncommitted } = facts
     let rule: 'worktree-inactive' | 'worktree-merged' | undefined
     let reason = ''
     const reasons: string[] = []
@@ -796,6 +820,7 @@ export class StorageCleanupService {
     }
     if (!rule && mergedOn) {
       if (beyondBase === 0 || !integrated) reasons.push('No commits to merge yet')
+      else if (uncommitted) reasons.push(`Has uncommitted changes (${plural(uncommitted, 'file')})`)
       // A merged thread the person keeps coming back to would be retired, restored by the next status
       // refresh and retired again every hour. A worktree used in the last day (a message, an operation,
       // a commit or a restore) is left alone.
@@ -811,8 +836,9 @@ export class StorageCleanupService {
    * Take the thread lease, then the repository lease (the order `ThreadWorkspaceManager.restore` and
    * `GitOperationCoordinator` use), repeat the checks that can change, and only then prepare and
    * retire. Expected hold time is the re-check plus `prepare` and `retire`, plus up to two seconds
-   * waiting for the repository lease. Removed means `retire` returned. A removal that Git stopped
-   * partway (files in use) is a failure, not a keep.
+   * waiting for the repository lease. Removed means `retire` moved the folder into the trash; a later
+   * run deletes it from there after a snapshot (`worktreeTrashItems`). A folder that cannot be moved
+   * (files in use) is kept where it is.
    */
   private async retire(entry: Evaluation, verdict: Extract<Verdict, { rule: unknown }>): Promise<StorageCleanupItem> {
     const { record, label, projectId } = entry
@@ -843,8 +869,8 @@ export class StorageCleanupService {
         let inUse: string | undefined
         try { inUse = this.probeRemoval(workspace.worktreePath) } catch (error) { return failed((error as Error).message) }
         if (inUse) return kept(inUse)
-        try { retirement.retire(retirement.pathFor(record.taskId, workspace.worktreePath)) }
-        catch (error) { if (error instanceof PartialWorktreeRemovalError) return failed(error.message); throw error }
+        // The folder moves into the trash in one step or not at all; a folder in use stays where it is.
+        retirement.retire(retirement.pathFor(record.taskId, workspace.worktreePath))
         try { atomicWriteJsonSync(cleanupMarkerPath(this.deps.store, record.taskId), { retiredAt: new Date(this.now()).toISOString(), rule: verdict.rule } satisfies CleanupMarker) }
         catch { /* The checkout is gone and restorable; only the status note is missing. */ }
         return { ...base, bytes: measurement.bytes, files: measurement.files, ...approximate(measurement), outcome: 'removed', reason: verdict.reason }
@@ -854,6 +880,49 @@ export class StorageCleanupService {
     } catch (error) {
       return kept((error as Error).message)
     } finally { releaseExecutionLeaseHandle(taskLease) }
+  }
+
+  /**
+   * Worktrees the rules moved into the trash. One that has waited an hour with nothing in it changing has its files
+   * snapshotted and is deleted (`WorktreeRetirementService.expireTrash`); what a snapshot cannot hold keeps it in the
+   * trash, with the reason. Only the repository lease is taken: the thread's own worktree is not the one in the trash.
+   */
+  private async worktreeTrashItems(now: number): Promise<StorageCleanupItem[]> {
+    const items: StorageCleanupItem[] = []
+    const root = join(this.deps.store.root, 'workspaces')
+    const reader = new WorktreeRetirementService(this.deps.store)
+    let owners: string[]
+    try { owners = readdirSync(root) } catch { return items }
+    for (const owner of owners) {
+      let names: string[]
+      try { names = readdirSync(join(root, owner)).filter((name) => name.endsWith('.json')) } catch { continue }
+      for (const name of names) {
+        if (this.stopping) return items
+        const path = join(root, owner, name)
+        let manifest: ReturnType<WorktreeRetirementService['load']>
+        try { manifest = reader.load(path) } catch { continue }
+        if (!manifest.trashPath || !existsSync(manifest.trashPath)) continue
+        if (manifest.state === 'trashed' && now - Date.parse(manifest.trashedAt ?? '') < WORKTREE_TRASH_QUIET_MS) continue
+        const { label, projectId } = this.labelFor(manifest.taskId)
+        const base = { rule: 'trash' as const, threadId: manifest.taskId, projectId, label: `${label}: worktree in the trash` }
+        try {
+          let lease
+          try { lease = await acquireRepositoryLease(resolveRepositoryIdentity(manifest.trashPath, { requireMutationCapability: true }), { signal: AbortSignal.timeout(REPOSITORY_LEASE_WAIT_MS) }) }
+          catch { items.push({ ...base, bytes: 0, outcome: 'kept', reason: 'Repository is busy' }); continue }
+          let outcome: ReturnType<WorktreeRetirementService['expireTrash']>
+          try { outcome = new WorktreeRetirementService(this.deps.store, { repositoryLease: lease }).expireTrash(path, { now, inUse: this.probeRemoval }) }
+          finally { lease.release() }
+          if (!outcome || 'waiting' in outcome) continue
+          items.push('removed' in outcome
+            ? { ...base, bytes: 0, outcome: 'removed', reason: 'Deleted from the trash after an hour with no changes; its files are kept as a snapshot' }
+            : { ...base, bytes: 0, outcome: 'kept', reason: outcome.kept })
+        } catch (error) {
+          items.push({ ...base, bytes: 0, outcome: 'failed', reason: (error as Error).message })
+        }
+        await yieldToLoop()
+      }
+    }
+    return items
   }
 
   // ---- Browser captures ----

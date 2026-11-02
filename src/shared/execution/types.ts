@@ -9,6 +9,8 @@ export interface ExecutionWorkspaceRevision {
   writeSha: string
   receiptId?: string
   generation?: number
+  /** A worker in its own worktree: what it left, pinned and reported. Its parent's files are not changed. */
+  result?: import('../subagentResult').SubagentResultReport
 }
 
 export interface ExecutionActor {

@@ -2,6 +2,21 @@
 
 Status: Implemented in gated phases. Core schema, repository coordination, external storage, generations/journal, durable workspaces, checkpoints, child integration, publish, compensating undo/redo, conversation forks, protocol/CLI surfaces, and trash lifecycle are implemented behind dependency-checked feature flags.
 
+> **Update (issue #464, [workspace snapshots](workspace-snapshots.md)).** A turn is no longer a commit range on the thread's branch, and undo no longer creates compensating commits. Phases 7, 8, 10 and 11 below describe the commit-based design they shipped with; read them with these invariants, which replace the matching ones:
+>
+> - A turn maps to a pair of **workspace snapshots** `(startSha, endSha)`: commits that hold every file, with the worktree's HEAD as parent, pinned under `refs/mousse/`. Mousse never commits on, switches, resets or stages in the thread's branch or index. The agent and the person may create branches, commit, rebase and push; the commits the turn added are listed on the action, and what the Git work did is recorded (`git`).
+> - Files changed outside a Mousse action (an editor, a terminal, `git` in a shell) are recorded as an action of the `user` before the next turn, instead of being swept into it or refused.
+> - Undo, Redo and reverting an older turn restore **files** by a three-way merge from the turn's end snapshot onto the files as they are, toward its start snapshot. They add no commit and never move HEAD. An overlap with later edits refuses with the file names and changes nothing. If the turn's commits were already pushed, the result says that only files were restored.
+> - Conversation forks pin a snapshot; they do not create or switch Git branches.
+> - Workspace health no longer depends on the branch name or HEAD. Operations Mousse left unfinished still block the thread until they recover, and recovery runs on its own before the next turn, `recovery_required` included. The thread reports the branch HEAD is on now.
+> - Recovery reads the files (a receipt, the expected tree, the snapshot before) instead of HEAD and commit messages. It only records or cancels what was interrupted; it never starts the operation again.
+>
+> - Mousse never merges a subagent's or workflow agent's work into its parent. Each completion reports a frozen result to the parent agent: base and result snapshots pinned under `refs/mousse/`, where it worked, and the Git state it left. The parent agent brings the work in with Git. Phase 8 below describes the merge design this replaced.
+> - Publish puts the thread's latest snapshot into the primary checkout as one commit with the person's own identity, by a three-way merge onto the primary's HEAD (base: the files the thread last published, else where it started). It is not a `--no-ff` merge of the thread's branch, so uncommitted turn results are published and Mousse's snapshots never reach the primary. It never writes over an ignored file in the primary, and its recovery only records or cancels. Phase 9 below describes the merge it replaced.
+> - A worktree with uncommitted files can be retired: its files are pinned as a snapshot with the real HEAD, and reconstruction writes them back. Retirement moves the worktree into Mousse's trash in one step instead of removing it; the trash deletes it after an hour with no change, once a new snapshot of it is pinned. Its own `mousse/*` branch goes once the pins keep its tip.
+>
+> Still true: the durable worktree and branch per thread, repository and thread leases, the journal and generations, retention, trash, and Publish as an explicit operation.
+
 ## Problem
 
 Threads currently have no undo. Regular thread coding tools (`bash`, `edit`, `write`) mutate the
@@ -11,18 +26,20 @@ integration may fast-forward and then delete the branch/worktree without recordi
 Conversation rows are persisted as independently replaced JSON files, and thread runtime data lives
 inside the project working tree.
 
-A durable per-thread workspace with per-turn commits, conversation branching, and Git revert-based
-undo solves all of these.
+A durable per-thread workspace with per-turn records, conversation branching, and Git-backed undo
+solves all of these. (Records were commits on the thread's branch at first; see the update above.)
 
 ## Core decisions
 
 - Every Git-backed thread owns a durable branch and worktree.
 - All non-ignored changes made in that worktree during a turn belong to that turn. Tool-call
   instrumentation is reporting metadata, not the staging authority.
-- A turn maps to a Git commit range `(startSha, endSha]`, which may contain child-agent merge
-  commits.
+- A turn maps to a pair of workspace snapshots `(startSha, endSha)`; originally a Git commit range
+  `(startSha, endSha]` on the thread's branch, which may contain child-agent merge commits. Old
+  actions keep their commits, which are valid snapshots of the same shape.
 - Conversation history is append-only and branchable.
-- Undo creates compensating commits; it never rewrites Git history.
+- Undo restores files by a three-way merge of snapshots; it never rewrites Git history and, since
+  #464, adds no commit either (it created compensating commits before).
 - Thread runtime data moves outside the repository before worktrees are introduced.
 - Primary-checkout integration is an explicit `Publish` operation.
 - Latest-turn undo, conversation fork, older-change revert, and redo ship separately.

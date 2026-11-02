@@ -159,31 +159,29 @@ describe('orchestrator and engine safety (review round 2)', () => {
     expect(d.orch.getMessages(threadId)).toEqual([])
   }, 30_000)
 
-  it('C3: a plan-mode pi turn cannot start a default child or integrate; the MCP host refuses the same way', async () => {
+  it('C3: a plan-mode pi turn cannot start a default child; the MCP host refuses the same way', async () => {
     let parentId = ''
     const outcomes: Record<string, unknown> = {}
     const adapter = new HostAdapter(async (input, delegation) => {
       if (input.threadId !== parentId) return 'child'
       outcomes.broader = await delegation!.delegateTask({ prompt: 'Write code', workspace: 'isolated', modeCeiling: 'default' }, { toolCallId: 'broader' }).catch((error: unknown) => error)
-      outcomes.integrate = await delegation!.integrateDelegation({ delegationId: 'delegation:any' }, { toolCallId: 'integrate' }).catch((error: unknown) => error)
+      outcomes.result = await Promise.resolve().then(() => delegation!.reportResult({ delegationId: 'delegation:any' })).catch((error: unknown) => error)
       outcomes.inherited = await delegation!.delegateTask({ prompt: 'Plan it', workspace: 'isolated' }, { toolCallId: 'inherited' })
       return 'planned'
     })
     const d = start(adapter)
     parentId = thread(d, 'Planner')
     const response = await d.orch.send({ content: 'Plan the work', mode: 'plan' }, false, { threadId: parentId, clientRequestId: 'plan' })
-    for (const key of ['broader', 'integrate']) {
-      expect(outcomes[key]).toBeInstanceOf(McpToolError)
-      expect((outcomes[key] as McpToolError).code).toBe('mousse_ceiling_exceeded')
-    }
+    expect(outcomes.broader).toBeInstanceOf(McpToolError)
+    expect((outcomes.broader as McpToolError).code).toBe('mousse_ceiling_exceeded')
+    // The retired merge tool changes nothing, so a plan caller may ask for a result: it is refused only as unknown.
+    expect(outcomes.result).not.toBeInstanceOf(McpToolError)
     const inherited = d.engine.delegations.get((outcomes.inherited as { delegationId: string }).delegationId)!
     expect(inherited.modeCeiling).toBe('plan')
     expect(d.engine.delegations.listForParentThread(parentId)).toHaveLength(1)
 
     // The MCP server's host for a plan-ceiling caller is the same dispatch.
     const mcp = d.orch.mcpToolHost().delegation({ threadId: parentId, runId: response.runId!, provider: 'claude-subscription', modeCeiling: 'plan' })
-    const viaMcp = await mcp.integrateDelegation({ delegationId: inherited.delegationId }, { toolCallId: 'mcp-integrate' }).catch((error: unknown) => error)
-    expect(viaMcp).toMatchObject({ code: 'mousse_ceiling_exceeded' })
     const broaderViaMcp = await mcp.delegateTask({ prompt: 'x', workspace: 'isolated', modeCeiling: 'default' }, { toolCallId: 'mcp-broader' }).catch((error: unknown) => error)
     expect(broaderViaMcp).toMatchObject({ code: 'mousse_ceiling_exceeded' })
   }, 30_000)

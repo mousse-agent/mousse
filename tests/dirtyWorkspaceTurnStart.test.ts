@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { ThreadActionService } from '../src/mms/actions/ThreadActionService'
 import { UndoService } from '../src/mms/actions/UndoService'
-import { discardPendingChanges, inspectPendingChanges, requireClean } from '../src/mms/actions/git'
+import { discardPendingChanges, requireClean } from '../src/mms/actions/git'
 import { pendingChangesDetails } from '../src/shared/workspace'
 
 const roots: string[] = []
@@ -24,6 +24,7 @@ afterEach(() => { while (roots.length) rmSync(roots.pop()!, { recursive: true, f
 
 const boundary = { messageIndex: 0, compactionGeneration: 0, fidelity: 'exact' as const, safeBoundaryProof: 'test' }
 const SCREENSHOT = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0xff, 0x10])
+const outside = (repo: string) => ({ threadId: 'thread', conversationBranchId: 'main', workspacePath: repo, presentationMessageStart: 0, nativeContextBoundary: boundary })
 
 function turnOptions(repo: string, turnId: string, start: number) {
   return {
@@ -41,31 +42,40 @@ function userEdits(repo: string): void {
   writeFileSync(join(repo, 'ignored.log'), 'keep me\n')
 }
 
-describe('a turn that starts in a dirty workspace', () => {
-  it('saves the pending changes as their own user checkpoint and the turn starts after it', async () => {
+describe('a turn that starts in a workspace changed outside Mousse', () => {
+  it('records the changes as a user action of their own, without a commit, and the turn starts from its snapshot', async () => {
     const { repo, thread } = fixture(); const actions = new ThreadActionService(thread)
     const before = git(repo, 'rev-parse', 'HEAD')
     userEdits(repo)
+    const status = git(repo, 'status', '--porcelain', '--untracked-files=all')
 
-    const { startSha, action: saved } = await actions.saveUserChanges({ threadId: 'thread', conversationBranchId: 'main', workspacePath: repo, presentationMessageStart: 0, nativeContextBoundary: boundary })
-    expect(saved).toMatchObject({ actor: { kind: 'user' }, state: 'completed', startSha: before, endSha: startSha, presentationMessageStart: 0, presentationMessageEnd: 0, externalEffects: [] })
-    // No conversation start boundary: the app never offers the save as a turn to undo.
+    const { startSha, action: saved } = await actions.recordOutsideChanges(outside(repo))
+    expect(saved).toMatchObject({ actor: { kind: 'user' }, state: 'completed', endSha: startSha, presentationMessageStart: 0, presentationMessageEnd: 0, externalEffects: [], commits: [] })
+    expect(saved!.startSha).toBe(before)
+    // No conversation start boundary: the app never offers the record as a turn to undo.
     expect(saved!.nativeContextStartBoundary).toBeUndefined()
     expect(saved!.changedPaths.map((item) => item.path).sort()).toEqual(['notes/screen shot.png', 'staged.txt', 'value.txt'])
-    expect(git(repo, 'log', '-1', '--format=%s')).toMatch(/^mousse: save pending changes/)
-    // Ignored files are never part of a checkpoint.
-    expect(git(repo, 'status', '--porcelain', '--untracked-files=all')).toBe('')
-    expect(tryGit(repo, 'cat-file', '-e', 'HEAD:ignored.log')).toBe(false)
+    expect(saved!.git).toMatchObject({ headBefore: before, headAfter: before, rewroteHistory: false })
+    // Nothing was committed, switched or staged: the checkout is exactly as the user left it.
+    expect(git(repo, 'rev-parse', 'HEAD')).toBe(before)
+    expect(git(repo, 'log', '-1', '--format=%s')).toBe('base')
+    expect(git(repo, 'status', '--porcelain', '--untracked-files=all')).toBe(status)
+    expect(readFileSync(join(repo, 'ignored.log'), 'utf8')).toBe('keep me\n')
+    // The snapshot has the files but not the ignored one, and it is pinned under a ref, never a branch.
+    expect(git(repo, 'show', `${startSha}:value.txt`)).toBe('user edit')
+    expect(tryGit(repo, 'cat-file', '-e', `${startSha}:ignored.log`)).toBe(false)
+    expect(git(repo, 'branch', '--list', '--format=%(refname:short)')).not.toMatch(/mousse/)
 
     const turn = actions.beginTurn(turnOptions(repo, 'turn', 0), startSha)
     expect(turn.startSha).toBe(startSha)
     expect(turn.parentActionId).toBe(saved!.id)
   })
 
-  it('Undo of that turn brings the user’s edits back exactly, untracked files included, and keeps the agent’s out', async () => {
+  it('Undo of that turn leaves the user’s edits exactly and takes the agent’s out, without a commit', async () => {
     const { repo, thread } = fixture(); const actions = new ThreadActionService(thread)
     userEdits(repo)
-    const { startSha, action: saved } = await actions.saveUserChanges({ threadId: 'thread', conversationBranchId: 'main', workspacePath: repo, presentationMessageStart: 0, nativeContextBoundary: boundary })
+    const { startSha, action: saved } = await actions.recordOutsideChanges(outside(repo))
+    const head = git(repo, 'rev-parse', 'HEAD')
     const options = turnOptions(repo, 'turn', 0)
     actions.beginTurn(options, startSha)
     // The agent edits the user's file, adds one and deletes the user's screenshot.
@@ -81,20 +91,32 @@ describe('a turn that starts in a dirty workspace', () => {
     expect(readFileSync(join(repo, 'notes', 'screen shot.png')).equals(SCREENSHOT)).toBe(true)
     expect(readFileSync(join(repo, 'ignored.log'), 'utf8')).toBe('keep me\n')
     expect(existsSync(join(repo, 'agent.txt'))).toBe(false)
-    expect(git(repo, 'rev-parse', 'HEAD^{tree}')).toBe(git(repo, 'rev-parse', `${saved!.endSha}^{tree}`))
+    expect(git(repo, 'rev-parse', 'HEAD')).toBe(head)
+    // The staging the user did is still there: Undo never touches the real index.
+    expect(git(repo, 'diff', '--cached', '--name-only')).toBe('staged.txt')
     expect(actions.get(saved!.id)?.state).toBe('completed')
     expect(actions.get(turn.id)?.state).toBe('undone')
   })
 
-  it('a clean workspace records nothing', async () => {
+  it('records nothing when only an ignored file changed', async () => {
     const { repo, thread } = fixture(); const actions = new ThreadActionService(thread)
     writeFileSync(join(repo, 'ignored.log'), 'ignored only\n')
-    const result = await actions.saveUserChanges({ threadId: 'thread', conversationBranchId: 'main', workspacePath: repo })
-    expect(result).toEqual({ startSha: git(repo, 'rev-parse', 'HEAD') })
+    const result = await actions.recordOutsideChanges(outside(repo))
+    expect(result.action).toBeUndefined()
+    expect(git(repo, 'show', `${result.startSha}:value.txt`)).toBe('base')
     expect(actions.list()).toEqual([])
   })
 
-  it('an unresolved merge conflict is never saved; the refusal names the folder and files and offers Discard', async () => {
+  it('records the same edits only once: the next turn starts from the snapshot it already has', async () => {
+    const { repo, thread } = fixture(); const actions = new ThreadActionService(thread)
+    userEdits(repo)
+    const first = await actions.recordOutsideChanges(outside(repo))
+    const again = await actions.recordOutsideChanges(outside(repo))
+    expect(again).toEqual({ startSha: first.startSha })
+    expect(actions.list()).toHaveLength(1)
+  })
+
+  it('a merge in progress is recorded with the files, not refused, and HEAD stays where it is', async () => {
     const { repo, thread } = fixture(); const actions = new ThreadActionService(thread)
     git(repo, 'switch', '-q', '-c', 'side'); writeFileSync(join(repo, 'value.txt'), 'side\n'); git(repo, 'commit', '-qam', 'side')
     git(repo, 'switch', '-q', '-'); writeFileSync(join(repo, 'value.txt'), 'main\n'); git(repo, 'commit', '-qam', 'main')
@@ -102,23 +124,19 @@ describe('a turn that starts in a dirty workspace', () => {
     writeFileSync(join(repo, 'untracked.txt'), 'mine\n')
     const head = git(repo, 'rev-parse', 'HEAD')
 
-    const refusal = await actions.saveUserChanges({ threadId: 'thread', conversationBranchId: 'main', workspacePath: repo }).catch((error: unknown) => error)
-    expect(refusal).toMatchObject({ code: 'workspace_conflict', details: { label: 'Thread workspace', conflict: true, discard: true, operation: 'merge', files: ['value.txt', 'untracked.txt'], count: 2 } })
-    expect((refusal as Error).message).toBe(`Thread workspace ${git(repo, 'rev-parse', '--show-toplevel')} has a merge in progress with conflicts in value.txt. Resolve it or discard the changes, then try again.`)
-    expect(pendingChangesDetails(refusal)?.discard).toBe(true)
+    const { startSha, action } = await actions.recordOutsideChanges(outside(repo))
+    expect(action?.git).toMatchObject({ operationInProgress: 'merge' })
+    expect(git(repo, 'show', `${startSha}:untracked.txt`)).toBe('mine')
+    expect(git(repo, 'show', `${startSha}:value.txt`)).toContain('<<<<<<<')
+    // The merge is untouched: still in progress, conflicted, on the same HEAD.
     expect(git(repo, 'rev-parse', 'HEAD')).toBe(head)
-    expect(actions.list()).toEqual([])
+    expect(tryGit(repo, 'rev-parse', '--verify', '-q', 'MERGE_HEAD')).toBe(true)
+    expect(git(repo, 'diff', '--name-only', '--diff-filter=U')).toBe('value.txt')
 
-    // Discard (after the person confirmed) ends the merge and keeps a copy of everything it dropped.
+    // Discard stays what it was for a conflict the user wants gone: it keeps a copy of everything it drops.
     const { backupRef } = discardPendingChanges(repo)
     expect(backupRef).toMatch(/^refs\/mousse\/discarded\//)
-    expect(inspectPendingChanges(repo)).toEqual({ top: git(repo, 'rev-parse', '--show-toplevel'), files: [], unmerged: [] })
     expect(tryGit(repo, 'rev-parse', '--verify', '-q', 'MERGE_HEAD')).toBe(false)
-    expect(git(repo, 'show', `${backupRef}:untracked.txt`)).toBe('mine')
-    expect(git(repo, 'show', `${backupRef}:value.txt`)).toContain('<<<<<<<')
-    expect(git(repo, 'rev-parse', `${backupRef}^`)).toBe(head)
-    // The turn can start now.
-    expect((await actions.saveUserChanges({ threadId: 'thread', conversationBranchId: 'main', workspacePath: repo })).startSha).toBe(head)
   })
 })
 
@@ -134,14 +152,22 @@ describe('refusals about pending changes', () => {
     expect(pendingChangesDetails(refusal)).toBeUndefined()
   })
 
-  it('a rebase in progress offers no Discard', async () => {
+  it('a rebase in progress is recorded, and Undo refuses to restore files over it with no Discard', async () => {
     const { repo, thread } = fixture()
+    const actions = new ThreadActionService(thread)
     const main = git(repo, 'branch', '--show-current')
+    const { startSha } = await actions.recordOutsideChanges(outside(repo))
+    const options = turnOptions(repo, 'turn', 0)
+    actions.beginTurn(options, startSha)
+    writeFileSync(join(repo, 'agent.txt'), 'agent\n')
+    await actions.checkpointExistingTurn(options, startSha, 'completed')
     git(repo, 'switch', '-q', '-c', 'side'); writeFileSync(join(repo, 'value.txt'), 'side\n'); git(repo, 'commit', '-qam', 'side')
     git(repo, 'switch', '-q', main); writeFileSync(join(repo, 'value.txt'), 'main\n'); git(repo, 'commit', '-qam', 'main')
     git(repo, 'switch', '-q', 'side')
     expect(tryGit(repo, 'rebase', '-q', main)).toBe(false)
-    const refusal = await new ThreadActionService(thread).saveUserChanges({ threadId: 'thread', conversationBranchId: 'main', workspacePath: repo }).catch((error: unknown) => error)
+    // A new turn can still start: the rebase is recorded with the snapshot.
+    expect((await actions.recordOutsideChanges(outside(repo))).action?.git).toMatchObject({ operationInProgress: 'rebase' })
+    const refusal = await new UndoService(thread).undoLatest('main', repo).catch((error: unknown) => error)
     expect(refusal).toMatchObject({ code: 'workspace_conflict', details: { operation: 'rebase', discard: false } })
     expect((refusal as Error).message).toMatch(/has a rebase in progress with conflicts in value\.txt\. Finish or abort it in a terminal, then try again\.$/)
     expect(() => discardPendingChanges(repo)).toThrow(/rebase in progress/)

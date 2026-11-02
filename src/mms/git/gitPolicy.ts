@@ -706,6 +706,14 @@ export function withUserRequest<T>(action: UserAction, work: () => T): T {
   return result
 }
 
+/**
+ * Runs `work` outside any user's request, for bookkeeping that runs during one but must never borrow it (recovery
+ * that only records what an interrupted operation did).
+ */
+export function withoutUserRequest<T>(work: () => T): T {
+  return requests.exit(work)
+}
+
 /** The user's request the current code is carrying out, if any. */
 export function currentUserRequest(): UserAction | undefined {
   const entry = requests.getStore()

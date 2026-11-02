@@ -1523,8 +1523,8 @@ export class RunEngine extends EventEmitter {
           forkPointRunId: lineage.parentRunId,
           fromOrdinal: merged + 1,
           toOrdinal: latest.ordinal,
-          // Code integration stays explicit (SPEC §14.4); nothing here touches the parent's files.
-          integration: { kind: 'fork', forkThreadId: input.forkThreadId, through: 'integration_run', merged: false }
+          // Nothing here touches the parent's files: the parent brings the fork's code in with Git (SPEC §14.4).
+          integration: { kind: 'fork', forkThreadId: input.forkThreadId, merged: false }
         }
       })
       const accepted = { transferId: transfer.transferId, parentThreadId }

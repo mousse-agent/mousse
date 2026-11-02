@@ -20,6 +20,17 @@ function git(cwd: string, args: string[]): string {
   return execFileSync('git', withoutRepoPrograms(cwd, args), { cwd, env: repoProgramEnv(), encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim()
 }
 
+/** Namespaces whose refs are released only by their owner: receipts, thread and fork results, agent, delegation and workflow results, retirement pins, the last published files and files a restore kept. */
+const PROTECTED_NAMESPACES = [
+  'refs/mousse/changes/', 'refs/mousse/threads/', 'refs/mousse/conversation-branches/', 'refs/mousse/agents/', 'refs/mousse/workflows/',
+  'refs/mousse/lifecycle/', 'refs/mousse/published/', 'refs/mousse/preserved/', 'refs/mousse/delegations/'
+]
+
+/** Whether a ref points at a workspace snapshot (see `takeSnapshot`), which no branch contains. */
+function isSnapshot(repositoryPath: string, ref: string): boolean {
+  try { return git(repositoryPath, ['log', '-1', '--format=%s', ref]).startsWith('mousse snapshot: ') } catch { return true }
+}
+
 function canonicalPath(path: string): string {
   const resolved = resolve(path)
   try {
@@ -65,8 +76,9 @@ export class WorkspaceGcService {
     const refs = git(this.repositoryPath, ['for-each-ref', '--format=%(refname)', 'refs/mousse']).split(/\r?\n/).filter(Boolean)
     const protectedRefs = new Set(referencedRefs)
     for (const ref of refs) {
-      // Audit/undo references have no implicit expiration; explicit retirement must release them.
-      if (ref.startsWith('refs/mousse/changes/') || ref.startsWith('refs/mousse/threads/') || ref.startsWith('refs/mousse/conversation-branches/') || ref.startsWith('refs/mousse/agents/') || ref.startsWith('refs/mousse/workflows/')) protectedRefs.add(ref)
+      // Audit/undo references have no implicit expiration; explicit retirement must release them. A snapshot of a
+      // worktree's files is work that exists nowhere else, whatever namespace pins it: it is never a candidate.
+      if (PROTECTED_NAMESPACES.some((namespace) => ref.startsWith(namespace)) || isSnapshot(this.repositoryPath, ref)) protectedRefs.add(ref)
       else try { git(this.repositoryPath, ['merge-base', '--is-ancestor', ref, 'HEAD']) } catch { protectedRefs.add(ref) }
     }
     const report: WorkspaceGcReport = {
@@ -98,7 +110,7 @@ export class WorkspaceGcService {
       }
       for (const ref of report.unreferencedRefs) {
         if (!fresh.unreferencedRefs.includes(ref) || !report.refHeads?.[ref]) throw new Error('GC reference is retained or changed; refresh inventory.')
-        git(this.repositoryPath, ['update-ref', '-d', ref, report.refHeads[ref]])
+        git(this.repositoryPath, ['update-ref', '--no-deref', '-d', ref, report.refHeads[ref]])
       }
       this.issuedReports.delete(report)
     } finally {

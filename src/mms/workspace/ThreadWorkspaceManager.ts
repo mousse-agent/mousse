@@ -8,6 +8,7 @@ import { assertGitAllowed, rethrowGitPolicyError, type UserAction } from '../git
 import { safeWorktreeGit } from '../worktree/WorktreeManager'
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { assertHeldThreadLease } from '../actions/GitOperationCoordinator'
+import { moveFiles, snapshotOrigin } from '../actions/snapshots'
 import { atomicWriteJsonSync } from '../data/AtomicFs'
 import { ThreadJournal } from '../data/ThreadJournal'
 import { getMousseHomeDir } from '../data/paths'
@@ -209,8 +210,12 @@ export class ThreadWorkspaceManager {
      * turned on here, under the repository's lease and after every check that can refuse, so a refused start leaves
      * the setting as it was; the callback runs when this call turned it on. Without it, a repository with the
      * setting off is refused. `userRequested` is that agreement as the central Git check sees it.
+     *
+     * `snapshot`: a workspace snapshot (a fork's source checkpoint) whose files are written into the new worktree
+     * after it is made at `startSha`, which is the commit the snapshot was taken on; the snapshot becomes the
+     * thread's latest one, so the first turn starts from it instead of recording it as outside changes.
      */
-    options: { untrusted?: boolean; enableWorktreeConfig?: () => void; userRequested?: UserAction } = {}
+    options: { untrusted?: boolean; enableWorktreeConfig?: () => void; userRequested?: UserAction; snapshot?: string } = {}
   ): Promise<ThreadWorkspaceMetadata> {
     const existing = this.load()
     if (existing?.lifecycle === 'ready') return this.verify(existing)
@@ -262,7 +267,8 @@ export class ThreadWorkspaceManager {
       } satisfies ThreadWorkspaceMetadata)
       if (options.untrusted) await addUntrustedWorktree(repository.primaryCheckoutPath, ['-b', branch, worktreePath, head], worktreePath, options.enableWorktreeConfig, options.userRequested)
       else git(repository.primaryCheckoutPath, ['worktree', 'add', '-b', branch, worktreePath, head])
-      git(repository.primaryCheckoutPath, ['update-ref', retainedRef, head])
+      if (options.snapshot) moveFiles(worktreePath, git(worktreePath, ['rev-parse', 'HEAD^{tree}']), git(worktreePath, ['rev-parse', `${options.snapshot}^{tree}`]))
+      git(repository.primaryCheckoutPath, ['update-ref', '--no-deref', retainedRef, options.snapshot ?? head])
       const metadata: ThreadWorkspaceMetadata = {
         schemaVersion: 1,
         threadId,
@@ -278,6 +284,7 @@ export class ThreadWorkspaceManager {
         projectRelativeSubdirectory: repository.projectRelativeSubdirectory,
         baseSha: head,
         headSha: head,
+        ...(options.snapshot ? { snapshotSha: options.snapshot } : {}),
         lifecycle: 'ready',
         lastVerifiedAt: new Date().toISOString(),
         ...(options.untrusted ? { untrusted: true as const } : {})
@@ -328,7 +335,7 @@ export class ThreadWorkspaceManager {
       if (verified.lifecycle === 'ready') {
         const ready = this.verify(metadata)
         if (ready.lifecycle !== 'ready') throw new Error('Workspace changed while acquiring recovery ownership.')
-        git(ready.worktreePath, ['update-ref', ready.retainedRef, ready.headSha])
+        git(ready.worktreePath, ['update-ref', '--no-deref', ready.retainedRef, ready.snapshotSha ?? ready.headSha])
         atomicWriteJsonSync(this.workspacePath, ready)
         this.finishProvisionRecovery(ready)
         return ready
@@ -339,7 +346,8 @@ export class ThreadWorkspaceManager {
         const retirement = new WorktreeRetirementService(gate, { taskLease: threadLease, repositoryLease })
         const manifestPath = retirement.pathFor(metadata.threadId, metadata.worktreePath)
         const manifest = retirement.load(manifestPath)
-        if (manifest.branch !== metadata.branch || manifest.resultSha !== metadata.headSha || manifest.repositoryId !== metadata.repositoryId) throw new Error('Retired workspace manifest disagrees with authoritative task binding')
+        // HEAD is the agent's to move, so the one the worktree had when retired is not compared with the last one Mousse saw.
+        if (manifest.branch !== metadata.branch || manifest.repositoryId !== metadata.repositoryId) throw new Error('Retired workspace manifest disagrees with authoritative task binding')
         // Refused before the rebuild registers anything: a worktree made and then refused would be left empty, without its safety.
         if (metadata.untrusted) assertPerWorktreeConfig(repository.gitTopLevel)
         // The worktree's own configuration went with the worktree: for someone else's commits it is put back before anything is checked out.
@@ -350,12 +358,22 @@ export class ThreadWorkspaceManager {
         atomicWriteJsonSync(this.workspacePath, restored)
         return restored
       }
-      const retained = git(repository.gitTopLevel, ['rev-parse', '--verify', metadata.retainedRef])
-      const branchHead = git(repository.gitTopLevel, ['rev-parse', '--verify', metadata.branch])
-      if (retained !== branchHead) throw new Error('Workspace branch and retained ref disagree; manual recovery is required.')
+      // The files come from the retained snapshot, and the worktree starts at the HEAD the snapshot was taken on: on the
+      // branch it was on, or on the thread's own, when that branch still is at that commit; detached there otherwise.
+      const retained = git(repository.gitTopLevel, ['rev-parse', '--verify', `${metadata.retainedRef}^{commit}`])
+      const origin = snapshotOrigin(repository.gitTopLevel, retained)
+      const head = origin.head ?? git(repository.gitTopLevel, ['rev-parse', '--verify', `${metadata.branch}^{commit}`])
+      const tip = (branch: string): string | undefined => tryGit(repository.gitTopLevel, ['rev-parse', '--verify', '-q', `refs/heads/${branch}^{commit}`]).stdout || undefined
+      const branch = [origin.branch, metadata.branch].find((name) => name && tip(name) === head)
       mkdirSync(dirname(metadata.worktreePath), { recursive: true })
-      if (metadata.untrusted) await addUntrustedWorktree(repository.gitTopLevel, [metadata.worktreePath, metadata.branch], metadata.worktreePath)
-      else git(repository.gitTopLevel, ['worktree', 'add', metadata.worktreePath, metadata.branch])
+      const add = async (target: string[]): Promise<void> => {
+        if (metadata.untrusted) await addUntrustedWorktree(repository.gitTopLevel, target, metadata.worktreePath)
+        else git(repository.gitTopLevel, ['worktree', 'add', ...target])
+      }
+      // A branch that another worktree has checked out cannot be added again; the commit can.
+      if (branch) { try { await add([metadata.worktreePath, branch]) } catch { await add(['--detach', metadata.worktreePath, head]) } }
+      else await add(['--detach', metadata.worktreePath, head])
+      moveFiles(metadata.worktreePath, git(metadata.worktreePath, ['rev-parse', 'HEAD^{tree}']), git(metadata.worktreePath, ['rev-parse', `${retained}^{tree}`]))
       const restored = this.verify(metadata)
       atomicWriteJsonSync(this.workspacePath, restored)
       this.finishProvisionRecovery(restored)
@@ -410,6 +428,12 @@ export class ThreadWorkspaceManager {
     }
   }
 
+  /** An operation that started and did not finish, so a person or recovery has to settle it before the next one. */
+  hasPendingOperation(): boolean {
+    // A publish waiting to be settled concerns the primary checkout only, so it does not hold up the thread.
+    return [...this.journal.latestByOperation().values()].some((entry) => ['prepared', 'git_applied', 'context_pending', 'recovery_required'].includes(entry.state) && !['publish', 'change-publish'].includes(entry.operationType))
+  }
+
   verify(metadata = this.load()): ThreadWorkspaceMetadata {
     if (!metadata) throw new Error('Thread workspace metadata is missing')
     if (!existsSync(metadata.worktreePath)) {
@@ -417,10 +441,10 @@ export class ThreadWorkspaceManager {
       return missing
     }
     try {
-      const branch = git(metadata.worktreePath, ['branch', '--show-current'])
-      const headSha = git(metadata.worktreePath, ['rev-parse', 'HEAD'])
-      if (branch !== metadata.branch) throw new Error(`Expected ${metadata.branch}, found ${branch}`)
-      if (headSha !== metadata.headSha) throw new Error('Workspace HEAD moved outside a recorded operation.')
+      // The branch and HEAD are the agent's to move: ready means the checkout is there and no Mousse operation waits.
+      git(metadata.worktreePath, ['rev-parse', '--show-toplevel'])
+      if (this.hasPendingOperation()) throw new Error('A Mousse operation is waiting for recovery.')
+      const headSha = tryGit(metadata.worktreePath, ['rev-parse', 'HEAD']).stdout || metadata.headSha
       const verified = { ...metadata, lifecycle: 'ready' as const, headSha, lastVerifiedAt: new Date().toISOString() }
       return verified
     } catch {
@@ -438,6 +462,18 @@ export class ThreadWorkspaceManager {
       lifecycle: 'unprovisioned',
       capability: capability('Thread has no project workspace')
     }
+  }
+
+  /**
+   * The branch HEAD is on now: the agent may have switched from the thread's own. None when HEAD is detached. The
+   * recorded branch stands in only while the worktree cannot be read (retired, or not there yet).
+   */
+  private currentBranch(metadata: ThreadWorkspaceMetadata): string | undefined {
+    if (!existsSync(metadata.worktreePath)) return metadata.branch
+    // A plain read: a branch name when HEAD is on one; detached HEAD answers nothing.
+    if (!tryGit(metadata.worktreePath, ['rev-parse', '--git-dir']).ok) return metadata.branch
+    const current = tryGit(metadata.worktreePath, ['symbolic-ref', '-q', '--short', 'HEAD'])
+    return current.ok ? current.stdout.replace(/^heads\//, '') || undefined : undefined
   }
 
   executionContext(projectPath: string, metadata = this.load()): WorkspaceExecutionContext {
@@ -459,7 +495,7 @@ export class ThreadWorkspaceManager {
       workspacePath: metadata.worktreePath,
       projectPath: relativeProject,
       primaryPath: projectPath,
-      branch: metadata.branch,
+      branch: this.currentBranch(metadata),
       workspaceId: metadata.workspaceId ?? `${metadata.repositoryId}:${metadata.threadId}`,
       generation: metadata.generation ?? 0,
       baseSha: metadata.baseSha,

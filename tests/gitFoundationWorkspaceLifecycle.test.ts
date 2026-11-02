@@ -40,7 +40,8 @@ it('completed checkpoint replay returns the same receipt while repeated executio
   let calls = 0
   const mutate = () => { calls++; writeFileSync(join(f.repo, 'value.txt'), `call ${calls}\n`) }
   const first = await actions.runCheckpointedAction(actionOptions(f.repo, 'stable-turn'), mutate)
-  const second = await actions.checkpointExistingTurn(actionOptions(f.repo, 'stable-turn'), f.baseSha, 'completed')
+  // The turn started from a snapshot, which is what the replay must present again.
+  const second = await actions.checkpointExistingTurn(actionOptions(f.repo, 'stable-turn'), first.action.startSha, 'completed')
   expect(second).toEqual(first.action)
   await expect(actions.runCheckpointedAction(actionOptions(f.repo, 'stable-turn'), mutate)).rejects.toThrow(/must not be replayed/)
   expect(calls).toBe(1)
