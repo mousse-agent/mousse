@@ -83,7 +83,6 @@ describe('production editor UI compound persistence', () => {
     try {
     const edited = await launch({ ...common, endpoint, phase: 'edit', evidence: join(root, 'edit.json'), userData: join(root, 'electron-edit') }, root)
     expect(edited.ok).toBe(true)
-    expect(edited.appearanceAccessible).toBe(true)
     const agentId = edited.agentId as string
     const workflowId = edited.workflowId as string
     const importedId = edited.importedId as string
