@@ -17,17 +17,16 @@ describe('blank composer thread creation', () => {
   })
 
   it('sends the first message to a new thread on another computer without waiting for it to open', async () => {
-    let opened = false
     const remote = { id: 'nod_mac:thread-1', node: 'nod_mac' } as Thread
+    // Opening never finishes here, and the send still goes ahead.
     const select = vi.fn(() => new Promise<void>(() => {}))
     const id = await createComposerThread({ create: async () => remote, stillVisible: () => true, activate: vi.fn(), select })
     expect(id).toBe(remote.id)
     expect(select).toHaveBeenCalledWith(remote.id)
-    expect(opened).toBe(false)
     // A failed open is not a failed send.
     await expect(createComposerThread({
       create: async () => remote, stillVisible: () => true, activate: vi.fn(),
-      select: async () => { opened = true; throw new Error('peer_offline') }
+      select: async () => { throw new Error('peer_offline') }
     })).resolves.toBe(remote.id)
   })
 
