@@ -7,6 +7,7 @@ import { ChangeReceiptService } from '../src/mms/actions/ChangeReceiptService'
 import { WorkspaceResolver } from '../src/mms/workspace/WorkspaceResolver'
 import { WorkspaceGcService } from '../src/mms/workspace/WorkspaceGcService'
 import { actionOptions, git, gitFoundationFixture } from './fixtures/gitFoundation'
+import { pressed } from './support/userRequest'
 
 describe('Git foundation reviewed publish and retention', () => {
   let f: ReturnType<typeof gitFoundationFixture>
@@ -20,12 +21,12 @@ describe('Git foundation reviewed publish and retention', () => {
     const target = git(f.repo, 'branch', '--show-current')
     const options = { operationId: 'publish-reviewed', expectedSourceSha: reviewed, expectedTargetSha: f.baseSha }
     const publish = new PublishService(f.thread)
-    await expect(publish.publish(workspace, f.repo, target, undefined, options)).rejects.toThrow(/source revision changed/)
+    await expect(pressed('Publish', () => publish.publish(workspace, f.repo, target, undefined, options))).rejects.toThrow(/source revision changed/)
     expect(git(f.repo, 'rev-parse', 'HEAD')).toBe(f.baseSha)
     const moved = f.commit(f.repo, 'human primary commit\n', 'human.txt')
-    await expect(publish.publish(workspace, f.repo, target, undefined, { ...options, expectedSourceSha: newer })).rejects.toThrow(/destination revision changed/)
+    await expect(pressed('Publish', () => publish.publish(workspace, f.repo, target, undefined, { ...options, expectedSourceSha: newer }))).rejects.toThrow(/destination revision changed/)
     const current = { ...options, expectedSourceSha: newer, expectedTargetSha: moved }
-    const result = await publish.publish(workspace, f.repo, target, undefined, current)
+    const result = await pressed('Publish', () => publish.publish(workspace, f.repo, target, undefined, current))
     expect(result.state).toBe('completed')
     // One new commit on top of the primary's own, with the same files as the thread's; the thread's two commits are not in it.
     expect(git(f.repo, 'rev-list', '--parents', '-n', '1', 'HEAD').split(/\s+/)).toEqual([result.publishSha, moved])
@@ -33,10 +34,10 @@ describe('Git foundation reviewed publish and retention', () => {
     expect(git(f.repo, 'branch', '--contains', newer, '--list', target)).toBe('')
     expect(f.read(f.repo)).toBe('newer\n')
     expect(f.read(f.repo, 'human.txt')).toBe('human primary commit\n')
-    expect(await new PublishService(f.thread).publish(workspace, f.repo, target, undefined, current)).toEqual(result)
+    expect(await pressed('Publish', () => new PublishService(f.thread).publish(workspace, f.repo, target, undefined, current))).toEqual(result)
     expect(git(f.repo, 'rev-parse', 'HEAD')).toBe(result.publishSha)
     expect(new ChangeReceiptService(f.thread).list().filter((receipt) => receipt.kind === 'publish')).toHaveLength(1)
-    await expect(publish.publish(workspace, f.repo, target, undefined, options)).rejects.toThrow(/identity.*different revisions/)
+    await expect(pressed('Publish', () => publish.publish(workspace, f.repo, target, undefined, options))).rejects.toThrow(/identity.*different revisions/)
   }, 30_000)
 
   it('empty caller inventory cannot retire an owned task or the before/after refs promised by undo', async () => {

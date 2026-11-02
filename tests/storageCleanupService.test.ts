@@ -15,7 +15,8 @@ import { ResourceLifecycleStore } from '../src/mms/lifecycle/ResourceLifecycleSt
 import { cleanupMarkerPath, findNestedRepository, readCleanupMarker, StorageCleanupService } from '../src/mms/lifecycle/StorageCleanupService'
 import { StoragePolicyStore } from '../src/mms/lifecycle/StoragePolicyStore'
 import { StorageSweepClock } from '../src/mms/lifecycle/sweepClock'
-import { lifecycleGit as git, WorktreeRetirementService } from '../src/mms/lifecycle/WorktreeRetirementService'
+import { WorktreeRetirementService } from '../src/mms/lifecycle/WorktreeRetirementService'
+import { fixtureGit as git, ownedHome } from './support/fixtureGit'
 import { acquireExecutionLease, getExecutionLeasePath, isExecutionLeaseHeld, leaseBusyMessage, readLeaseOwner, releaseExecutionLeaseHandle, tryAcquireExecutionLease, waitAcquireExecutionLease } from '../src/mms/queue/ThreadExecutionLease'
 import { registerThreadLifecycleGate } from '../src/mms/queue/ThreadLifecycleAdmission'
 import { ThreadWorkspaceManager } from '../src/mms/workspace/ThreadWorkspaceManager'
@@ -25,7 +26,8 @@ const DAY = 86_400_000
 const HOUR = 3_600_000
 const OLD = new Date(Date.now() - 90 * DAY)
 const roots: string[] = []
-afterEach(() => { vi.restoreAllMocks(); for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }) })
+const owned: Array<() => void> = []
+afterEach(() => { vi.restoreAllMocks(); for (const undo of owned.splice(0)) undo(); for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }) })
 
 // A base commit made 90 days ago, so the commit time of HEAD does not count as recent activity.
 const copyBase = committedGitTemplate((repo) => {
@@ -51,7 +53,7 @@ interface FixtureOptions {
 
 function fixture(options: FixtureOptions = {}) {
   const root = mkdtempSync(join(tmpdir(), 'mousse-storage-')); roots.push(root)
-  const home = join(root, 'profile'), location = join(home, 'thread-data', 'task'); mkdirSync(location, { recursive: true })
+  const home = join(root, 'profile'), location = join(home, 'thread-data', 'task'); mkdirSync(location, { recursive: true }); owned.push(ownedHome(home))
   writeFileSync(join(location, 'meta.json'), JSON.stringify({ id: 'task' })); writeFileSync(join(location, 'messages.json'), '[]')
   const store = new ResourceLifecycleStore({ profileId: 'test', profileHome: home }); store.registerTask({ taskId: 'task', location })
   registerThreadLifecycleGate(home, store)
@@ -1093,7 +1095,7 @@ function captureFixture(options: CaptureOptions = {}) {
     mkdirSync(join(root, 'real')); symlinkSync(join(root, 'real'), join(root, 'linked'), junctionType)
     base = join(root, 'linked')
   }
-  const home = join(base, 'profile'); mkdirSync(home, { recursive: true })
+  const home = join(base, 'profile'); mkdirSync(home, { recursive: true }); owned.push(ownedHome(home))
   const store = new ResourceLifecycleStore({ profileId: 'test', profileHome: home })
   registerThreadLifecycleGate(home, store)
   const coordinator = new ResourceLifecycleCoordinator(store, { drain: async () => {}, settleMutationOwnership: async () => {}, projectIndex: () => {}, projectPurged: () => {} })

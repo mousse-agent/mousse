@@ -20,6 +20,7 @@ import { discardPendingChanges } from '../src/mms/actions/git'
 import { acquireWorkspaceMutationLease, provisionOwnedAgentWorkspace, resolveOwnedThreadWorkspace } from '../src/mms/workspace/WorkflowWorkspace'
 import type { ThreadAction } from '../src/shared/threadActions'
 import { actionOptions, git, gitFoundationFixture } from './fixtures/gitFoundation'
+import { pressed } from './support/userRequest'
 
 let f: ReturnType<typeof gitFoundationFixture>
 let cwd: string
@@ -136,7 +137,7 @@ describe('an agent that does its own Git work', () => {
 
     // The next turn starts on the agent's branch without recovery.
     await turn('next', () => write('next.txt', 'next\n'), 2)
-    await new UndoService(f.thread).undoLatest('main', cwd)
+    await pressed('Undo', () => new UndoService(f.thread).undoLatest('main', cwd))
     expect(existsSync(join(cwd, 'next.txt'))).toBe(false)
     expect(existsSync(join(cwd, 'feature.txt'))).toBe(true)
   })
@@ -203,7 +204,7 @@ describe('an agent that does its own Git work', () => {
       write('value.txt', 'edited\n')
     })
     const head = git(cwd, 'rev-parse', 'HEAD')
-    const undone = await new UndoService(f.thread).undoLatest('main', cwd)
+    const undone = await pressed('Undo', () => new UndoService(f.thread).undoLatest('main', cwd))
     expect(f.read(cwd)).toBe('base\n')
     expect(existsSync(join(cwd, 'feature.txt'))).toBe(false)
     expect(git(cwd, 'rev-parse', 'HEAD')).toBe(head)
@@ -215,7 +216,7 @@ describe('an agent that does its own Git work', () => {
     // No commit of Mousse's anywhere: the branch history is the agent's own.
     expect(git(cwd, 'log', '--format=%s', '-5')).not.toMatch(/mousse/i)
 
-    await new RedoService(f.thread).redoLatest('main', cwd)
+    await pressed('Redo', () => new RedoService(f.thread).redoLatest('main', cwd))
     expect(f.read(cwd)).toBe('edited\n')
     expect(existsSync(join(cwd, 'feature.txt'))).toBe(true)
     expect(git(cwd, 'rev-parse', 'HEAD')).toBe(head)
@@ -234,7 +235,7 @@ describe('an agent that does its own Git work', () => {
     expect(action.commits).toEqual([])
     expect(action.changedPaths.map((item) => item.path).sort()).toEqual(['after-reset.txt', 'earlier.txt'])
     noPending()
-    await new UndoService(f.thread).undoLatest('main', cwd)
+    await pressed('Undo', () => new UndoService(f.thread).undoLatest('main', cwd))
     expect(existsSync(join(cwd, 'after-reset.txt'))).toBe(false)
     expect(existsSync(join(cwd, 'earlier.txt'))).toBe(true)
   })
@@ -250,7 +251,7 @@ describe('an agent that does its own Git work', () => {
     const head = git(cwd, 'rev-parse', 'HEAD')
     expect(action.commits).toEqual([head])
 
-    const undone = await new UndoService(f.thread).undoLatest('main', cwd)
+    const undone = await pressed('Undo', () => new UndoService(f.thread).undoLatest('main', cwd))
     expect(existsSync(join(cwd, 'pushed.txt'))).toBe(false)
     expect(git(cwd, 'rev-parse', 'HEAD')).toBe(head)
     expect(undone.notice).toBe('These commits were already pushed to origin/feature; Undo restores files only.')
@@ -260,7 +261,7 @@ describe('an agent that does its own Git work', () => {
 
   it('has no notice when its commits were not pushed', async () => {
     await turn('turn', () => { write('local.txt', 'x\n'); git(cwd, 'add', 'local.txt'); git(cwd, 'commit', '-qm', 'local') })
-    expect((await new UndoService(f.thread).undoLatest('main', cwd)).notice).toBeUndefined()
+    expect((await pressed('Undo', () => new UndoService(f.thread).undoLatest('main', cwd))).notice).toBeUndefined()
   })
 
   it('takes a snapshot during an in-progress rebase and records it, without touching the rebase', async () => {
@@ -278,7 +279,7 @@ describe('an agent that does its own Git work', () => {
     expect(git(cwd, 'diff', '--name-only', '--diff-filter=U')).toBe('value.txt')
     expect(existsSync(join(git(cwd, 'rev-parse', '--absolute-git-dir'), 'rebase-merge'))).toBe(true)
     // Restoring files over an unfinished rebase is refused until the person finishes it.
-    await expect(new UndoService(f.thread).undoLatest('main', cwd)).rejects.toMatchObject({ code: 'workspace_conflict' })
+    await expect(pressed('Undo', () => new UndoService(f.thread).undoLatest('main', cwd))).rejects.toMatchObject({ code: 'workspace_conflict' })
   })
 })
 
@@ -320,16 +321,16 @@ describe('Undo, Redo and revert by three-way merge', () => {
   it('Undo keeps later edits to other files and refuses overlapping ones, changing nothing', async () => {
     const { action } = await turn('turn', () => { write('agent.txt', 'agent\n'); write('value.txt', 'agent edit\n') })
     write('later.txt', 'later\n')
-    await new UndoService(f.thread).undoLatest('main', cwd)
+    await pressed('Undo', () => new UndoService(f.thread).undoLatest('main', cwd))
     expect(existsSync(join(cwd, 'later.txt'))).toBe(true)
     expect(existsSync(join(cwd, 'agent.txt'))).toBe(false)
     expect(actions.get(action.id)?.state).toBe('undone')
-    await new RedoService(f.thread).redoLatest('main', cwd)
+    await pressed('Redo', () => new RedoService(f.thread).redoLatest('main', cwd))
 
     // An edit inside the same file as the turn's change overlaps with it.
     write('value.txt', 'agent edit then mine\n')
     const before = git(cwd, 'status', '--porcelain', '--untracked-files=all')
-    await expect(new UndoService(f.thread).undoLatest('main', cwd)).rejects.toMatchObject({ code: 'restore_conflict', details: { files: ['value.txt'] } })
+    await expect(pressed('Undo', () => new UndoService(f.thread).undoLatest('main', cwd))).rejects.toMatchObject({ code: 'restore_conflict', details: { files: ['value.txt'] } })
     expect(git(cwd, 'status', '--porcelain', '--untracked-files=all')).toBe(before)
     expect(f.read(cwd)).toBe('agent edit then mine\n')
     noPending()
@@ -342,7 +343,7 @@ describe('Undo, Redo and revert by three-way merge', () => {
     // A new, ignored sole copy at the path the turn removed: no snapshot holds it.
     write('secret', 'only copy\n')
     expect(git(cwd, 'ls-tree', '--name-only', takeSnapshot(cwd, { reason: 'check' }).sha)).not.toMatch(/^secret$/m)
-    const undone = await new UndoService(f.thread).undoLatest('main', cwd)
+    const undone = await pressed('Undo', () => new UndoService(f.thread).undoLatest('main', cwd))
     expect(f.read(cwd, 'secret')).toBe('tracked\n')
     expect(undone.notice).toMatch(/kept under refs\/mousse\/preserved\/\S+ for 30 days: secret/)
     const ref = undone.notice!.match(/(refs\/mousse\/preserved\/\S+?) for /)![1]!
@@ -360,12 +361,12 @@ describe('Undo, Redo and revert by three-way merge', () => {
     const limits = { ...PRESERVE_LIMITS }
     PRESERVE_LIMITS.files = 2
     try {
-      await expect(new UndoService(f.thread).undoLatest('main', cwd)).rejects.toThrow(/would write over cache.*Nothing was changed\. Move cache aside/)
+      await expect(pressed('Undo', () => new UndoService(f.thread).undoLatest('main', cwd))).rejects.toThrow(/would write over cache.*Nothing was changed\. Move cache aside/)
     } finally { Object.assign(PRESERVE_LIMITS, limits) }
     for (const name of ['a', 'b', 'c', 'd']) expect(f.read(cwd, `cache/${name}.bin`)).toBe(`${name}\n`)
     noPending()
     // Under the limit, the same Undo keeps every file first and goes through.
-    const undone = await new UndoService(f.thread).undoLatest('main', cwd)
+    const undone = await pressed('Undo', () => new UndoService(f.thread).undoLatest('main', cwd))
     expect(undone.notice).toMatch(/kept under refs\/mousse\/preserved\/\S+ for 30 days: cache\/a\.bin, cache\/b\.bin, cache\/c\.bin, cache\/d\.bin/)
     expect(f.read(cwd, 'cache')).toBe('tracked file\n')
   })
@@ -375,7 +376,7 @@ describe('Undo, Redo and revert by three-way merge', () => {
     await turn('second', () => write('value.txt', 'two\n'), 2)
     const journal = new ThreadJournal(f.thread).list().length
     const receipts = new ChangeReceiptService(f.thread).list().length
-    await expect(new CodeRevertService(f.thread).revertCode(first.action.id, cwd)).rejects.toMatchObject({ code: 'restore_conflict', details: { files: ['value.txt'] } })
+    await expect(pressed('Revert', () => new CodeRevertService(f.thread).revertCode(first.action.id, cwd))).rejects.toMatchObject({ code: 'restore_conflict', details: { files: ['value.txt'] } })
     expect(f.read(cwd)).toBe('two\n')
     expect(actions.list().filter((item) => item.state === 'completed')).toHaveLength(2)
     expect(new ChangeReceiptService(f.thread).list()).toHaveLength(receipts)
@@ -388,7 +389,7 @@ describe('Undo, Redo and revert by three-way merge', () => {
     const first = await turn('first', () => write('first.txt', 'first\n'))
     await turn('second', () => write('second.txt', 'second\n'), 2)
     const head = git(cwd, 'rev-parse', 'HEAD')
-    const reverted = await new CodeRevertService(f.thread).revertCode(first.action.id, cwd)
+    const reverted = await pressed('Revert', () => new CodeRevertService(f.thread).revertCode(first.action.id, cwd))
     expect(existsSync(join(cwd, 'first.txt'))).toBe(false)
     expect(existsSync(join(cwd, 'second.txt'))).toBe(true)
     expect(reverted).toMatchObject({ commits: [], changedPaths: [expect.objectContaining({ path: 'first.txt' })] })
@@ -397,7 +398,7 @@ describe('Undo, Redo and revert by three-way merge', () => {
 
   it('reverting a turn that changed no files is refused', async () => {
     const empty = await turn('empty', () => undefined)
-    await expect(new CodeRevertService(f.thread).revertCode(empty.action.id, cwd)).rejects.toThrow(/no reversible repository changes/)
+    await expect(pressed('Revert', () => new CodeRevertService(f.thread).revertCode(empty.action.id, cwd))).rejects.toThrow(/no reversible repository changes/)
   })
 
   it('restoreChange never touches the real index, even for a file the user staged', async () => {
@@ -418,7 +419,7 @@ describe('Undo, Redo and revert by three-way merge', () => {
       const service = new ThreadActionService(other.thread)
       const { action } = await service.runCheckpointedAction(actionOptions(other.repo), () => writeFileSync(join(other.repo, 'x.txt'), 'x\n'))
       expect(action.startSha).not.toBe(action.endSha)
-      await new UndoService(other.thread).undoLatest('main', other.repo)
+      await pressed('Undo', () => new UndoService(other.thread).undoLatest('main', other.repo))
       expect(existsSync(join(other.repo, 'x.txt'))).toBe(false)
       expect(git(other.repo, 'log', '--format=%s')).toBe('base')
     } finally { other.dispose() }
@@ -505,7 +506,7 @@ describe('recovery', () => {
     expect(action.git?.coverageGaps?.[0]).toEqual({ path: '.', reason: expect.stringMatching(/^start of turn not captured: .*EEXIST/) })
     expect(new ChangeReceiptService(f.thread).list().find((item) => item.id === action.receiptId)?.notCovered).toMatch(/^Not covered: \. \(start of turn not captured/)
     // Undo rewinds the turn but has no files of it to restore: neither the outside file nor the agent's goes.
-    const undone = await new UndoService(f.thread).undoLatest('main', cwd)
+    const undone = await pressed('Undo', () => new UndoService(f.thread).undoLatest('main', cwd))
     expect(undone.notice).toMatch(/start of turn not captured/)
     expect(f.read(cwd, 'outside.txt')).toBe('written before the turn\n')
     expect(f.read(cwd, 'agent.txt')).toBe('agent\n')
@@ -553,7 +554,7 @@ describe('recovery', () => {
       expect(new ThreadWorkspaceManager(f.thread).verify().lifecycle).toBe('ready')
       noPending()
       // Undo of the turn says the same.
-      expect((await new UndoService(f.thread).undoLatest('main', cwd)).notice).toMatch(/Not covered: x\.bin \(unreadable\), y\.bin \(unreadable\)\./)
+      expect((await pressed('Undo', () => new UndoService(f.thread).undoLatest('main', cwd))).notice).toMatch(/Not covered: x\.bin \(unreadable\), y\.bin \(unreadable\)\./)
     } finally { chmodSync(join(cwd, 'x.bin'), 0o644); chmodSync(join(cwd, 'y.bin'), 0o644) }
   })
 
@@ -609,7 +610,7 @@ describe('recovery', () => {
     await new UndoService(f.thread).recoverPending(cwd, () => undefined)
     noPending()
     expect(actions.get(action.id)?.state).toBe('completed')
-    await new UndoService(f.thread).undoLatest('main', cwd)
+    await pressed('Undo', () => new UndoService(f.thread).undoLatest('main', cwd))
     expect(existsSync(join(cwd, 'agent.txt'))).toBe(false)
   })
 
@@ -794,7 +795,7 @@ describe('discard', () => {
 
 describe('publish', () => {
   const target = () => git(f.repo, 'branch', '--show-current')
-  const publish = (options: Parameters<PublishService['publish']>[4] = {}) => new PublishService(f.thread).publish(cwd, f.repo, target(), undefined, options)
+  const publish = (options: Parameters<PublishService['publish']>[4] = {}) => pressed('Publish', () => new PublishService(f.thread).publish(cwd, f.repo, target(), undefined, options))
 
   it('puts the thread’s files, uncommitted ones included, into the primary as one commit with the person’s own identity', async () => {
     const baseSha = git(f.repo, 'rev-parse', 'HEAD')
@@ -825,7 +826,7 @@ describe('publish', () => {
     expect(published).toMatchObject({ kind: 'publish', beforeSha: baseSha, afterSha: result.publishSha })
     expect(published.publishedReceiptIds).toContain(first.action.receiptId)
     expect(published.publishedReceiptIds).not.toContain(result.receiptId)
-    await expect(new UndoService(f.thread).undoLatest('main', cwd)).rejects.toMatchObject({ code: 'published_changes' })
+    await expect(pressed('Undo', () => new UndoService(f.thread).undoLatest('main', cwd))).rejects.toMatchObject({ code: 'published_changes' })
     expect(git(f.repo, 'rev-parse', publishedRef('task'))).toBe(result.sourceSha)
   })
 
@@ -877,7 +878,7 @@ describe('publish', () => {
     await expect(publish()).rejects.toMatchObject({ code: 'workspace_not_clean' })
     expect(git(f.repo, 'status', '--porcelain', '--untracked-files=all')).toBe('?? mine.txt')
     rmSync(join(f.repo, 'mine.txt'))
-    await expect(new PublishService(f.thread).publish(cwd, f.repo, 'other-branch')).rejects.toThrow(/must be on other-branch/)
+    await expect(pressed('Publish', () => new PublishService(f.thread).publish(cwd, f.repo, 'other-branch'))).rejects.toThrow(/must be on other-branch/)
     expect(f.read(f.repo)).toBe('base\n')
     noPending()
   })
@@ -901,8 +902,8 @@ describe('publish', () => {
   it('a repeated operation is the recorded result, with no second commit', async () => {
     await turn('one', () => write('value.txt', 'one\n'))
     const service = new PublishService(f.thread)
-    const first = await service.publish(cwd, f.repo, target(), undefined, { operationId: 'replay' })
-    expect(await service.publish(cwd, f.repo, target(), undefined, { operationId: 'replay' })).toEqual(first)
+    const first = await pressed('Publish', () => service.publish(cwd, f.repo, target(), undefined, { operationId: 'replay' }))
+    expect(await pressed('Publish', () => service.publish(cwd, f.repo, target(), undefined, { operationId: 'replay' }))).toEqual(first)
     expect(git(f.repo, 'rev-list', '--count', `${first.prePublishSha}..HEAD`)).toBe('1')
   })
 
@@ -979,7 +980,7 @@ describe('publish', () => {
     const target = git(f.repo, 'branch', '--show-current')
     git(f.repo, 'switch', '-q', '-c', 'next-target'); git(f.repo, 'branch', '-D', target)
     // The next publish settles it first instead of refusing.
-    expect((await new PublishService(f.thread).publish(cwd, f.repo, 'next-target')).state).toBe('completed')
+    expect((await pressed('Publish', () => new PublishService(f.thread).publish(cwd, f.repo, 'next-target'))).state).toBe('completed')
     expect(new ThreadJournal(f.thread).latestByOperation().get('interrupted')).toMatchObject({ state: 'cancelled', details: { reason: expect.stringContaining(`target branch ${target} no longer exists`) } })
   })
 

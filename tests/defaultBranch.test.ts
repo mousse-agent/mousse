@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { isIntegrated, primaryRemote, resolveDefaultBranch } from '../src/mms/git/defaultBranch'
-import { lifecycleGit as git } from '../src/mms/lifecycle/WorktreeRetirementService'
+import { fixtureGit as git } from './support/fixtureGit'
 
 const roots: string[] = []
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }) })

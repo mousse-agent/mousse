@@ -25,6 +25,7 @@ import { activeHiddenStore } from '../src/mms/git/hiddenStore'
 import { tryGit } from '../src/mms/actions/git'
 import { expireSnapshotTrash, setSnapshotsOff, snapshotTrashRoot, SNAPSHOT_TRASH_QUIET_MS, startedInSnapshotStore, ensureSnapshotWorkspace, inThreadSnapshotScope, loadSnapshotWorkspace, projectStorePath, snapshotsOffReason, threadSnapshotStore, threadStorePath } from '../src/mms/workspace/SnapshotWorkspace'
 import { actionOptions } from './fixtures/gitFoundation'
+import { pressed } from './support/userRequest'
 
 const git = (cwd: string, ...args: string[]): string => execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim()
 
@@ -62,7 +63,7 @@ function thread(name: string, work: string, projectId?: string) {
     at += 2
     return actions.runCheckpointedAction({ ...actionOptions(space.record.workTree, id), threadId: name, presentationMessageStart: start, presentationMessageEnd: start + 2 }, mutate)
   }
-  const undo = () => new UndoService(directory).undoLatest('main', space.record.workTree)
+  const undo = () => pressed('Undo', () => new UndoService(directory).undoLatest('main', space.record.workTree))
   /** `git` in the store, as the code under test sees the folder. */
   const store = (...args: string[]) => git(space.store.gitDir, ...args)
   return { directory, space, actions, turn, undo, store, work: space.record.workTree }

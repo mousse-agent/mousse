@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
-  assertGitAllowed, clearGitPolicyLog, decideGitCommand, GitPolicyError, gitPolicyLog, isOwnedPath, isOwnedRef,
+  assertGitAllowed, clearGitPolicyLog, decideGitCommand, GitPolicyError, gitPolicyLog, gitPolicyMode, isOwnedPath, isOwnedRef,
   currentUserRequest, registerOwnedGitRoot, stripInheritedGitEnv, userAction, withGitAccess, withUserRequest, type GitCommandRequest, type GitDecision
 } from '../src/mms/git/gitPolicy'
 import { guardedSimpleGit, repoProgramEnv, withoutDeref, withoutRepoPrograms } from '../src/mms/git/repoPrograms'
@@ -307,6 +307,7 @@ describe('round 3: private indexes in linked worktrees, update-ref options, simp
   it('judges a simple-git method by the arguments it was given, not by its name', async () => {
     git(outside, '-c', 'user.name=x', '-c', 'user.email=x@example.invalid', 'commit', '-q', '--allow-empty', '-m', 'base')
     git(outside, 'branch', 'feature')
+    vi.stubEnv('MOUSSE_GIT_POLICY', 'log')
     await guardedSimpleGit(outside).branch(['-d', 'feature'])
     expect(gitPolicyLog().at(-1)).toMatchObject({ kind: 'violation', command: 'git branch -d feature' })
     vi.stubEnv('MOUSSE_GIT_POLICY', 'refuse')
@@ -344,20 +345,39 @@ describe('gh', () => {
   })
 })
 
-describe('log by default, refuse when asked', () => {
-  it('logs a violation and lets it through by default', () => {
+describe('refuse by default, log when asked', () => {
+  it('refuses a violation by default, with an error that names the command and why', () => {
+    let error: unknown
+    try { assertGitAllowed({ cwd: outside, args: ['update-ref', 'refs/heads/main', 'abc'] }) } catch (caught) { error = caught }
+    expect(error).toBeInstanceOf(GitPolicyError)
+    expect((error as GitPolicyError).message).toBe('Mousse does not run "git update-ref refs/heads/main abc" here: it writes refs/heads/main, and the user did not ask for it.')
+    expect(error).toMatchObject({ command: 'git update-ref refs/heads/main abc', decision: { access: 'userRequested', allowed: false } })
+    // A refusal is logged too, once per kind of problem.
+    expect(gitPolicyLog().at(-1)).toMatchObject({ kind: 'violation', command: 'git update-ref refs/heads/main abc' })
+    expect(console.warn).toHaveBeenCalledTimes(1)
+    expect(console.warn).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({ mode: 'refuse' }))
+    // Reads and the user's own requests still run.
+    expect(() => assertGitAllowed({ cwd: outside, args: ['status'], env: { GIT_OPTIONAL_LOCKS: '0' } })).not.toThrow()
+    expect(() => assertGitAllowed({ cwd: outside, args: ['update-ref', 'refs/heads/main', 'abc'], userRequested: USER })).not.toThrow()
+  })
+
+  it('refuses for any value but log, refuse included', () => {
+    for (const value of ['refuse', 'REFUSE', '', 'off', 'warn']) {
+      vi.stubEnv('MOUSSE_GIT_POLICY', value)
+      expect(gitPolicyMode(), value).toBe('refuse')
+      expect(() => assertGitAllowed({ cwd: outside, args: ['update-ref', 'refs/heads/main', 'abc'] }), value).toThrow(GitPolicyError)
+    }
+  })
+
+  it('only logs a violation with MOUSSE_GIT_POLICY=log', () => {
+    vi.stubEnv('MOUSSE_GIT_POLICY', ' Log ')
+    expect(gitPolicyMode()).toBe('log')
     expect(() => assertGitAllowed({ cwd: outside, args: ['update-ref', 'refs/heads/main', 'abc'] })).not.toThrow()
     expect(gitPolicyLog().at(-1)).toMatchObject({ kind: 'violation', command: 'git update-ref refs/heads/main abc' })
     expect(console.warn).toHaveBeenCalledTimes(1)
     // The same problem again is counted, not logged again.
     assertGitAllowed({ cwd: outside, args: ['update-ref', 'refs/heads/main', 'abc'] })
     expect(console.warn).toHaveBeenCalledTimes(1)
-  })
-
-  it('throws with MOUSSE_GIT_POLICY=refuse', () => {
-    vi.stubEnv('MOUSSE_GIT_POLICY', 'refuse')
-    expect(() => assertGitAllowed({ cwd: outside, args: ['update-ref', 'refs/heads/main', 'abc'] })).toThrow(GitPolicyError)
-    expect(() => assertGitAllowed({ cwd: outside, args: ['status'], env: { GIT_OPTIONAL_LOCKS: '0' } })).not.toThrow()
   })
 
   it('logs a command that needs more than its protocol method declared, never refusing it', () => {

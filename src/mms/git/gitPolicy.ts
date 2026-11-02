@@ -25,7 +25,8 @@ import { GIT_NULL_DEVICE, NO_HOOKS_PATH } from './gitNullDevice'
  * only turns things off) are refused whatever they do, and so are `gc`, `prune`, `worktree prune` and
  * `reflog expire`, which can delete what nothing else keeps.
  *
- * For this release a refusal is only logged. `MOUSSE_GIT_POLICY=refuse` turns refusal on; `log` is the default.
+ * A command the rule does not allow is refused with a {@link GitPolicyError} and logged. `MOUSSE_GIT_POLICY=log`
+ * goes back to only logging it, for diagnosing a caller that is refused by mistake.
  */
 
 /** What a protocol method, or a command, needs from Git. Ordered from least to most. */
@@ -52,9 +53,9 @@ function isUserAction(value: unknown): value is UserAction {
 
 export type GitPolicyMode = 'log' | 'refuse'
 
-/** `refuse` only when `MOUSSE_GIT_POLICY=refuse`; anything else logs. */
+/** `log` only when `MOUSSE_GIT_POLICY=log`; anything else refuses. */
 export function gitPolicyMode(): GitPolicyMode {
-  return process.env.MOUSSE_GIT_POLICY?.trim().toLowerCase() === 'refuse' ? 'refuse' : 'log'
+  return process.env.MOUSSE_GIT_POLICY?.trim().toLowerCase() === 'log' ? 'log' : 'refuse'
 }
 
 export interface GitCommandRequest {
@@ -887,15 +888,18 @@ function record(entry: GitPolicyEntry): void {
   const count = (seen.get(key) ?? 0) + 1
   seen.set(key, count)
   if (count === 1 || count % 100 === 0) {
-    console.warn(entry.kind === 'violation' ? 'git policy: Mousse ran a Git command the rule does not allow' : 'git policy: a protocol method ran Git it did not declare', {
+    const message = entry.kind === 'undeclared'
+      ? 'git policy: a protocol method ran Git it did not declare'
+      : gitPolicyMode() === 'refuse' ? 'git policy: Mousse refused a Git command the rule does not allow' : 'git policy: Mousse ran a Git command the rule does not allow'
+    console.warn(message, {
       command: entry.command, cwd: entry.cwd, reason: entry.decision.reason, method: entry.method, mode: gitPolicyMode(), times: count
     })
   }
 }
 
 /**
- * Checks a Git or `gh` command Mousse is about to run. A violation is logged; with `MOUSSE_GIT_POLICY=refuse`
- * it throws a {@link GitPolicyError} instead. A command that needs more than the protocol method it runs
+ * Checks a Git or `gh` command Mousse is about to run. A violation is logged and throws a {@link GitPolicyError};
+ * with `MOUSSE_GIT_POLICY=log` it is only logged. A command that needs more than the protocol method it runs
  * under declared is logged too, never refused.
  */
 export function assertGitAllowed(request: GitCommandRequest): GitDecision {

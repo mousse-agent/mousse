@@ -12,6 +12,7 @@ import { PublishService } from '../src/mms/actions/PublishService'
 import { WorkspaceResolver } from '../src/mms/workspace/WorkspaceResolver'
 import { pendingChangesDetails } from '../src/shared/workspace'
 import { actionOptions, git, gitFoundationFixture } from './fixtures/gitFoundation'
+import { pressed } from './support/userRequest'
 
 const PNG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0xff, 0x10])
 
@@ -54,7 +55,7 @@ describe('operations in a thread worktree with uncommitted changes', () => {
     const before = pending(f.repo)
     const head = git(f.repo, 'rev-parse', 'HEAD')
 
-    await new UndoService(f.thread).undoLatest('main', f.repo)
+    await pressed('Undo', () => new UndoService(f.thread).undoLatest('main', f.repo))
     expect(actions.get(turn.id)?.state).toBe('undone')
     expect(existsSync(join(f.repo, 'agent.txt'))).toBe(false)
     // The turn's file is gone and nothing else moved: the staged and unstaged diffs, the untracked screenshot and the ignored file are the user's.
@@ -64,7 +65,7 @@ describe('operations in a thread worktree with uncommitted changes', () => {
     expect(git(f.repo, 'rev-parse', 'HEAD')).toBe(head)
     expect(keptRefs(f.repo)).toEqual([])
 
-    await new RedoService(f.thread).redoLatest('main', f.repo)
+    await pressed('Redo', () => new RedoService(f.thread).redoLatest('main', f.repo))
     expect(readFileSync(join(f.repo, 'agent.txt'), 'utf8')).toBe('agent\n')
     expect(pending(f.repo)).toEqual(before)
     expect(git(f.repo, 'rev-parse', 'HEAD')).toBe(head)
@@ -81,7 +82,7 @@ describe('operations in a thread worktree with uncommitted changes', () => {
     writeFileSync(join(f.repo, 'notes.md'), 'mine\n')
     const before = git(f.repo, 'status', '--porcelain', '--untracked-files=all')
 
-    const refusal = await new UndoService(f.thread).undoLatest('main', f.repo).catch((error: unknown) => error)
+    const refusal = await pressed('Undo', () => new UndoService(f.thread).undoLatest('main', f.repo)).catch((error: unknown) => error)
     expect(refusal).toMatchObject({ name: 'UndoConflictError', files: ['agent.txt'] })
     expect(actions.get(turn.id)?.state).toBe('completed')
     expect(readFileSync(join(f.repo, 'agent.txt'), 'utf8')).toBe('the user built on it\n')
@@ -100,7 +101,7 @@ describe('operations in a thread worktree with uncommitted changes', () => {
     const before = pending(f.repo)
     const head = git(f.repo, 'rev-parse', 'HEAD')
 
-    await new CodeRevertService(f.thread).revertCode(first.id, f.repo)
+    await pressed('Revert', () => new CodeRevertService(f.thread).revertCode(first.id, f.repo))
     expect(existsSync(join(f.repo, 'first.txt'))).toBe(false)
     expect(existsSync(join(f.repo, 'second.txt'))).toBe(true)
     expect(pending(f.repo)).toEqual({ ...before, status: before.status.replace('?? first.txt\n', '') })
@@ -118,7 +119,7 @@ describe('operations in a thread worktree with uncommitted changes', () => {
     expect(() => git(f.repo, 'merge', 'side')).toThrow()
     const mergeHead = git(f.repo, 'rev-parse', 'HEAD')
 
-    const refusal = await new UndoService(f.thread).undoLatest('main', f.repo).catch((error: unknown) => error)
+    const refusal = await pressed('Undo', () => new UndoService(f.thread).undoLatest('main', f.repo)).catch((error: unknown) => error)
     expect(refusal).toMatchObject({ code: 'workspace_conflict', details: { conflict: true, discard: true, operation: 'merge', files: ['value.txt', 'agent.txt'] } })
     expect((refusal as Error).message).toBe(`Thread workspace ${git(f.repo, 'rev-parse', '--show-toplevel')} has a merge in progress with conflicts in value.txt. Resolve it or discard the changes, then try again.`)
     expect(pendingChangesDetails(refusal)?.discard).toBe(true)
@@ -178,7 +179,7 @@ describe('operations in a thread worktree with uncommitted changes', () => {
     const before = pending(f.repo)
     const target = git(f.repo, 'branch', '--show-current')
 
-    await expect(new PublishService(f.thread).publish(workspace, f.repo, target)).rejects.toMatchObject({ code: 'workspace_not_clean' })
+    await expect(pressed('Publish', () => new PublishService(f.thread).publish(workspace, f.repo, target))).rejects.toMatchObject({ code: 'workspace_not_clean' })
     expect(pending(f.repo)).toEqual(before)
     expect(git(f.repo, 'rev-parse', 'HEAD')).toBe(f.baseSha)
     expect(keptRefs(f.repo)).toEqual([])
