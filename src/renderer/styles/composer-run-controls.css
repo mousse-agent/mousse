@@ -1,64 +1,70 @@
-/* The composer's run controls: "<provider icon> Opus 5.5 · High <mode icon>" as adjacent text.
-   The model name opens the model picker; the level and mode icon open the run menu (reasoning,
-   speed, permissions). Both parts share the model button's text size, hover and radius. */
+/* The composer's model button: "<provider icon> Opus 5.5 High <mode icon>". The level follows the
+   name with no separator, in a lighter weight and colour so the two still read apart. The whole
+   button opens one picker: the models, and beside them the highlighted model's run settings. */
 .composer-run-controls {
   display: inline-flex;
   align-items: center;
   min-width: 0;
 }
 
-.composer-run-controls .composer-model-btn {
-  padding-right: 6px;
+.composer-model-btn-level {
+  margin-left: 0.3em;
+  font-weight: 400;
+  opacity: 0.75;
 }
 
-.composer-run-picker {
-  display: inline-flex;
-  align-items: center;
+.composer-model-btn-mode {
   flex-shrink: 0;
 }
 
-.composer-run-sep {
-  /* The model button and the run button each keep 6px beside the dot, so it sits midway. */
-  font-size: 12px;
-  color: var(--text-secondary);
-  opacity: 0.7;
-}
-
-.composer-run-btn {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 4px 6px;
-  border-radius: 6px;
-  font-size: 12px;
-  color: var(--text-secondary);
-  white-space: nowrap;
-  transition: background 0.15s, color 0.15s;
-}
-
-.composer-run-btn:hover:not(:disabled),
-.composer-run-btn.open {
-  background: var(--ui-hover);
-  color: var(--text-primary);
-}
-
-.composer-run-btn:disabled {
-  cursor: default;
-}
-
 /* The agent runs a stricter mode than the thread's (the tooltip says why). */
-.composer-run-btn.is-limited .composer-run-btn-mode {
+.composer-model-btn.is-limited .composer-model-btn-mode {
   color: var(--warning);
 }
 
-@container composer (max-width: 340px) {
-  .composer-run-btn-level,
-  .composer-run-sep {
-    display: none;
-  }
+.composer-model-btn:disabled {
+  cursor: default;
 }
 
-/* The run menu: the shared menu material with even padding; wide enough for the permission line.
+/* The model picker with run settings: the list, then a column for the highlighted model on the same
+   surface, divided by a hairline. The column keeps the size of the largest model's settings (a hidden
+   copy holds it), so moving through models never resizes the picker. The list grows to the column
+   (ModelFamilyMenu sets its height), so the settings never scroll while the window has room. */
+.model-picker-panel.has-run-settings {
+  min-width: min(560px, calc(100vw - 48px));
+  max-width: min(680px, calc(100vw - 48px));
+}
+
+.model-picker-panel.has-run-settings .model-picker-body {
+  max-height: calc(100vh - 96px);
+}
+
+.model-picker-panel.has-run-settings .model-picker-list {
+  border-right: 1px solid var(--ui-line);
+}
+
+.model-picker-run {
+  display: grid;
+  flex: 0 0 240px;
+  align-self: flex-start;
+  width: 240px;
+  max-height: calc(100vh - 96px);
+  overflow-y: auto;
+  padding: var(--ui-menu-pad);
+}
+
+.model-picker-run > * {
+  grid-area: 1 / 1;
+  min-width: 0;
+}
+
+.model-picker-run-sizer {
+  visibility: hidden;
+  pointer-events: none;
+}
+
+/* The run menu (an assigned model's, and Settings'): the shared menu material with even padding; wide
+   enough for the permission line.
    It shows every option without scrolling: only the window bounds it (the floating layer keeps 8px
    from each edge), not the shared menu's 280px cap, which app.css sets after this file. */
 .composer-mode-menu.composer-run-menu {
@@ -69,35 +75,37 @@
   width: 248px;
 }
 
-.composer-run-menu .composer-mode-menu-section {
+:is(.composer-run-menu, .model-picker-run) .composer-mode-menu-section {
   min-width: 0;
 }
 
 /* Every section marks its selection the same way: the neutral fill with the shared top light, no
    check mark. Keyboard focus adds the focus ring, so it stays distinct from the selection. */
-.composer-run-menu .composer-mode-menu-item {
+:is(.composer-run-menu, .model-picker-run) .composer-mode-menu-item {
   padding-left: var(--ui-menu-row-x);
 }
 
 .composer-mode-menu.composer-run-menu .composer-mode-menu-item.selected,
+.model-picker-run .composer-mode-menu-item.selected,
 .composer-run-menu-permission.selected {
   background: color-mix(in srgb, var(--text-primary) 11%, transparent);
   box-shadow: var(--ui-specular);
   color: var(--text-primary);
 }
 
-.composer-run-menu .composer-mode-menu-item:focus-visible,
+:is(.composer-run-menu, .model-picker-run) .composer-mode-menu-item:focus-visible,
 .composer-run-menu-permission:focus-visible {
   outline: none;
   box-shadow: var(--ui-focus-ring);
 }
 
 .composer-mode-menu.composer-run-menu .composer-mode-menu-item.selected:focus-visible,
+.model-picker-run .composer-mode-menu-item.selected:focus-visible,
 .composer-run-menu-permission.selected:focus-visible {
   box-shadow: var(--ui-specular), var(--ui-focus-ring);
 }
 
-/* A saved level the model no longer offers: one muted line under the levels. */
+/* A level the model does not offer (saved, or carried from the model before): one muted line under the levels. */
 .composer-run-menu-note {
   padding: 4px var(--ui-menu-row-x) 2px;
   font-size: 11.5px;

@@ -1,12 +1,16 @@
 import { useCallback, useEffect, useRef } from 'react'
 import { ArrowUp, Mic, Paperclip, Square } from '../lib/icons'
 import { showsContextGauge, type ProviderWithStatus } from '../lib/providerSnapshots'
-import type { PermissionMode } from '../../shared/permissionMode'
+import { describePermissionMode, type PermissionMode } from '../../shared/permissionMode'
 import type { ContextUsageSnapshot } from '../../shared/types'
-import { ComposerRunPicker } from './ComposerEffortPicker'
+import { listingServes } from '../../shared/providerInstances'
+import { parseThinkingSuffixFromModelId } from '../../shared/modelVariants'
+import { carryReasoningLevel, ComposerRunMenu, RunSettingsColumn, runLevelText, runSettingsRows, shownReasoningLevel, type RunSettingsTarget } from './ComposerEffortPicker'
+import { permissionChoice, type PermissionControl } from './ComposerPermissionPicker'
 import { FloatingPortal, useFloatingPosition } from '../lib/floatingLayer'
-import { getGroupedModelButtonParts, ModelFamilyMenu } from './ModelFamilyMenu'
+import { getGroupedModelButtonParts, ModelFamilyMenu, type ModelPickTarget } from './ModelFamilyMenu'
 import { ProviderIcon } from '../lib/providerIcons'
+import { permissionModeIcon } from '../lib/permissionModeIcon'
 import { ContextUsagePopover, ContextUsageRing } from './ContextUsagePopover'
 
 function useMenuScrollFade() {
@@ -119,7 +123,56 @@ export function ComposerFooter({
   const providerModels = selectedProvider?.models ?? []
   // A selected instance that needs a step (signed out, not found) says so on the model button.
   const providerAttention = selectedProvider?.status && selectedProvider.status.tone !== 'ready' ? selectedProvider.status : null
-  const modelButtonTitle = providerAttention ? `${modelButtonLabel} · ${selectedProvider?.label}: ${providerAttention.headline}` : modelButtonLabel
+  // The permission mode belongs to the thread; what it can be depends on the agent serving the model.
+  const permissionFor = (listing: ProviderWithStatus | undefined): PermissionControl | undefined =>
+    permission && { ...permission, agent: listing?.label ?? 'The agent', caps: listing?.caps, limits: listing?.permissionLimits }
+  const permissionControl = permissionFor(selectedProvider)
+  const selection = { providerId: selectedProviderId, modelId: selectedModelId, models: providerModels }
+  const levelText = runLevelText(selection)
+  const choice = permissionControl ? permissionChoice(permissionControl) : undefined
+  const ModeIcon = choice ? permissionModeIcon(choice.shown) : undefined
+  const modeTitle = choice ? `${describePermissionMode(choice.shown)}${choice.reason ? `. ${choice.reason}` : ''}` : ''
+  const buttonText = [modelButtonLabel, levelText].filter(Boolean).join(' ')
+  const buttonLabel = `${modelReadOnly ? 'Assigned model' : 'Model'}: ${buttonText}${choice ? `. Permission mode: ${modeTitle}` : ''}`
+  const modelButtonTitle = providerAttention ? `${buttonLabel} · ${selectedProvider?.label}: ${providerAttention.headline}` : buttonLabel
+  // An assigned model (a subagent's) cannot change; its permission mode still can.
+  const runOnly = modelReadOnly && Boolean(permissionControl)
+  const pickerDisabled = modelReadOnly && !runOnly
+  const closePicker = () => {
+    onModelMenuOpenChange(false)
+    modelButtonRef.current?.focus()
+  }
+
+  // The picker's run settings column: the highlighted model's, with the chosen level carried over.
+  // With no level chosen (or one this model does not offer) none is carried: the next model runs at its own default.
+  const chosen = parseThinkingSuffixFromModelId(selectedModelId).effort
+  const carried = chosen && chosen === shownReasoningLevel(selection) ? chosen : undefined
+  const listingOf = (target: ModelPickTarget) => providers.find((entry) => listingServes(entry, { instanceId: target.instanceId, llmProvider: target.providerId }))
+  const resolveTarget = (target: ModelPickTarget): RunSettingsTarget => {
+    const pick = { providerId: target.providerId, modelId: target.modelId, models: listingOf(target)?.models ?? [] }
+    if (target.selected) return { ...pick, instanceId: target.instanceId, selected: true }
+    const { modelId, dropped } = carryReasoningLevel(pick, carried)
+    return { ...pick, modelId, instanceId: target.instanceId, selected: false, ...(dropped ? { dropped } : {}) }
+  }
+  const runSettings = {
+    pick: (target: ModelPickTarget) => resolveTarget(target).modelId,
+    render: (target: ModelPickTarget, listed: ModelPickTarget[]) => {
+      const resolved = resolveTarget(target)
+      const control = permissionFor(listingOf(target))
+      if (runSettingsRows(resolved, Boolean(control)) === 0) return null
+      // A hidden copy of the largest model's settings holds the column's size while the highlight moves.
+      let largest: { target: ModelPickTarget; resolved: RunSettingsTarget; rows: number } | undefined
+      for (const entry of listed) {
+        const each = resolveTarget(entry)
+        const rows = runSettingsRows(each, Boolean(permission))
+        if (!largest || rows > largest.rows) largest = { target: entry, resolved: each, rows }
+      }
+      return <>
+        <RunSettingsColumn key={`${target.instanceId ?? target.providerId}:${target.label}`} target={resolved} label={target.label} permission={control} onSelect={onModelSelect} onClose={closePicker} />
+        {largest ? <RunSettingsColumn sizer target={largest.resolved} label={largest.target.label} permission={permissionFor(listingOf(largest.target))} onSelect={onModelSelect} onClose={closePicker} /> : null}
+      </>
+    }
+  }
   const emptyModelMenuStyle = useFloatingPosition({
     open: modelMenuOpen && providers.length === 0,
     anchorRef: modelButtonRef,
@@ -140,7 +193,9 @@ export function ComposerFooter({
       onModelMenuOpenChange(false)
     }
     const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') onModelMenuOpenChange(false)
+      if (event.key !== 'Escape') return
+      onModelMenuOpenChange(false)
+      modelButtonRef.current?.focus()
     }
     document.addEventListener('mousedown', handlePointerDown)
     document.addEventListener('keydown', handleKeyDown)
@@ -178,6 +233,15 @@ export function ComposerFooter({
       <div className="composer-footer-left">
         <div className="composer-run-controls">
           <div className="composer-model-picker" ref={modelPickerRef}>
+            {modelMenuOpen && runOnly && permissionControl ? (
+              <ComposerRunMenu
+                selection={selection}
+                permission={permissionControl}
+                anchorRef={modelButtonRef}
+                contentRef={modelMenuContentRef}
+                onClose={closePicker}
+              />
+            ) : null}
             {!modelReadOnly && modelMenuOpen && (
               <>
                 {providers.length === 0 ? (
@@ -216,6 +280,7 @@ export function ComposerFooter({
                     onMenuScroll={handleMenuScroll}
                     anchorRef={modelButtonRef}
                     contentRef={modelMenuContentRef}
+                    runSettings={runSettings}
                   />
                 )}
               </>
@@ -223,13 +288,13 @@ export function ComposerFooter({
             <button
               ref={modelButtonRef}
               type="button"
-              className={`composer-model-btn${modelMenuOpen ? ' open' : ''}`}
-              aria-expanded={modelReadOnly ? undefined : modelMenuOpen}
-              aria-haspopup={modelReadOnly ? undefined : 'listbox'}
-              aria-label={`${modelReadOnly ? 'Assigned model' : 'Model'}: ${modelButtonLabel}`}
-              title={modelReadOnly ? `Assigned model: ${modelButtonTitle}` : modelButtonTitle}
-              disabled={modelReadOnly}
-              onClick={modelReadOnly ? undefined : handleModelMenuToggle}
+              className={`composer-model-btn${modelMenuOpen ? ' open' : ''}${choice?.reason ? ' is-limited' : ''}`}
+              aria-expanded={pickerDisabled ? undefined : modelMenuOpen}
+              aria-haspopup={pickerDisabled ? undefined : runOnly ? 'menu' : 'listbox'}
+              aria-label={buttonLabel}
+              title={modelButtonTitle}
+              disabled={pickerDisabled}
+              onClick={pickerDisabled ? undefined : handleModelMenuToggle}
             >
               {selectedProviderId ? (
                 <ProviderIcon providerId={selectedProviderId} size={14} />
@@ -237,25 +302,14 @@ export function ComposerFooter({
               <span className="composer-model-btn-label">
                 <span className="composer-model-btn-name">{modelButtonParts[0]}</span>
                 {modelButtonParts.length > 1 ? ` · ${modelButtonParts.slice(1).join(' · ')}` : null}
+                {levelText ? <span className="composer-model-btn-level">{levelText}</span> : null}
               </span>
+              {ModeIcon ? <ModeIcon size={14} aria-hidden="true" className="composer-model-btn-mode" /> : null}
               {providerAttention && (providerAttention.tone === 'warning' || providerAttention.tone === 'error') ? (
                 <span className={`composer-model-btn-dot is-${providerAttention.tone}`} aria-label={providerAttention.headline} />
               ) : null}
             </button>
           </div>
-          <ComposerRunPicker
-            providerId={selectedProviderId}
-            modelId={selectedModelId}
-            models={providerModels}
-            modelReadOnly={modelReadOnly}
-            onSelect={onModelSelect}
-            permission={permission && {
-              ...permission,
-              agent: selectedProvider?.label ?? 'The agent',
-              caps: selectedProvider?.caps,
-              limits: selectedProvider?.permissionLimits
-            }}
-          />
         </div>
       </div>
 
