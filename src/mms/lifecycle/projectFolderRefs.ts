@@ -4,8 +4,7 @@ import type { TaskLifecycleRecord } from '../../shared/resourceLifecycle'
 import type { ThreadWorkspaceMetadata } from '../../shared/workspace'
 import type { ChangeReceipt } from '../../shared/threadActions'
 import { ThreadJournal } from '../data/ThreadJournal'
-import { PRESERVED_REF_FORMAT, PRESERVED_REFS, threadPreservedRefs } from '../actions/preservedFiles'
-import { UndoRetentionService } from '../actions/UndoRetentionService'
+import { keptFilesFromListing, PRESERVED_REF_FORMAT, PRESERVED_REFS, type KeptFilesRef } from '../actions/preservedFiles'
 import { resolveRepositoryIdentity } from '../git/RepositoryIdentity'
 import { lifecycleGit, lifecycleRead, readDirectLifecycleRef } from './WorktreeRetirementService'
 
@@ -19,30 +18,14 @@ function releasable(ref: string): boolean {
   return ref.startsWith('refs/mousse/') && !/[\s\0]/.test(ref)
 }
 
-export interface KeptFilesRef {
-  ref: string
-  sha: string
-  /** Why a purge must not drop it unasked: it is still within its Undo window, so it may be the only copy of a file. */
-  discardReason?: string
-}
-
 /**
- * The thread's own `refs/mousse/preserved/` refs in the repository of `cwd`: files a restore or an abort of this thread
- * set aside before writing over them (see `threadPreservedIndex` for which refs are the thread's). They go with the
- * thread's other refs when it is purged. While their Undo window lasts, or when the thread's journal gives no time for
- * them, they may be the only copy of a person's file (an ignored `.env`, say): such a ref carries a `discardReason`, so a
- * purge asks the person to discard it and automatic cleanup keeps the thread. Reads only.
+ * The thread's own `refs/mousse/preserved/` refs in the repository of `cwd`: files set aside before a restore or an abort
+ * of this thread wrote over them (see `threadPreservedIndex` for which refs are the thread's). They go with the thread's
+ * other refs when it is purged; while they may be the only copy of a file they carry a `discardReason`
+ * (`keptFilesFromListing`), so a purge asks the person to discard them and automatic cleanup keeps the thread. Reads only.
  */
 export function threadKeptFilesRefs(cwd: string, threadDirectory: string, now = Date.now()): KeptFilesRef[] {
-  const refs = threadPreservedRefs(lifecycleRead(cwd, ['for-each-ref', `--format=${PRESERVED_REF_FORMAT}`, PRESERVED_REFS]), threadDirectory)
-  if (!refs.length) return []
-  const retention = new UndoRetentionService(threadDirectory, () => now, true)
-  return refs.map((item) => {
-    const until = item.keptAt === undefined ? undefined : retention.retainedUntil(item.keptAt)
-    if (until !== undefined && until <= now) return { ref: item.ref, sha: item.sha }
-    const kept = until === undefined ? 'kept with no recorded time' : `kept until ${new Date(until).toISOString().slice(0, 10)}`
-    return { ref: item.ref, sha: item.sha, discardReason: `Files a restore set aside before writing over them, ${kept}; they may be the only copy` }
-  })
+  return keptFilesFromListing(lifecycleRead(cwd, ['for-each-ref', `--format=${PRESERVED_REF_FORMAT}`, PRESERVED_REFS]), threadDirectory, now)
 }
 
 /**

@@ -20,7 +20,10 @@ import { UndoRetentionService } from './UndoRetentionService'
  */
 export { PRESERVED_REFS }
 
-/** The journal record of an expiry: an intent (`planned`), then its outcome, with exactly the refs that went. */
+/**
+ * The journal record of an expiry: an intent (`prepared`, which thread recovery leaves to its owner), then its outcome,
+ * with exactly the refs that went. An unsettled intent touches no file and no Undo material, so nothing else waits on it.
+ */
 export { PRESERVED_EXPIRY_OPERATION }
 
 /** Operation types whose restores write `<operation>-<12 hex>` refs. */
@@ -99,6 +102,30 @@ export function threadPreservedRefs(listing: string, threadDirectory: string): T
   })
 }
 
+export interface KeptFilesRef {
+  ref: string
+  sha: string
+  /** Why a purge must not drop it unasked: it is within its Undo window, or has no recorded time, so it may be the only copy of a file. */
+  discardReason?: string
+}
+
+/**
+ * The thread's own kept-files refs in a {@link PRESERVED_REF_FORMAT} listing, each with a `discardReason` while it may
+ * still be the only copy of a person's file (an ignored `.env`, say): within its Undo window
+ * (`UndoRetentionService.retainedUntil`), or with no recorded time. Reads only.
+ */
+export function keptFilesFromListing(listing: string, threadDirectory: string, now = Date.now()): KeptFilesRef[] {
+  const refs = threadPreservedRefs(listing, threadDirectory)
+  if (!refs.length) return []
+  const retention = new UndoRetentionService(threadDirectory, () => now, true)
+  return refs.map((item) => {
+    const until = item.keptAt === undefined ? undefined : retention.retainedUntil(item.keptAt)
+    if (until !== undefined && until <= now) return { ref: item.ref, sha: item.sha }
+    const kept = until === undefined ? 'kept with no recorded time' : `kept until ${new Date(until).toISOString().slice(0, 10)}`
+    return { ref: item.ref, sha: item.sha, discardReason: `Files set aside before a restore or an abort wrote over them, ${kept}; they may be the only copy` }
+  })
+}
+
 export interface PreservedFilesExpiry {
   expiredRefs: string[]
   /** Why nothing, or not everything, went this time. */
@@ -150,7 +177,6 @@ export async function expirePreservedFiles(threadDirectory: string, workspacePat
   await waitForFolderAccess([threadDirectory, workspacePath], { whenNotAnswering: 'fail', signal: options.signal })
   return withGitAccess('undoRetention.expirePreservedFiles', 'owned', () => withGitMutationLocks(threadDirectory, workspacePath, 'preserved-files-expiry', (): PreservedFilesExpiry => {
     const retention = new UndoRetentionService(threadDirectory, options.now)
-    if (!retention.clockAllowsRelease()) return { expiredRefs: [], skipped: 'The Undo retention clock needs review before kept files expire.' }
     const journal = new ThreadJournal(threadDirectory)
     const store = threadSnapshotStore(threadDirectory, workspacePath)
     const listing = () => git(workspacePath, ['for-each-ref', `--format=${PRESERVED_REF_FORMAT}`, PRESERVED_REFS])
@@ -159,14 +185,16 @@ export async function expirePreservedFiles(threadDirectory: string, workspacePat
       if (went.length && store) collectStoreGarbage(store)
       return { expiredRefs: went, ...(skipped ? { skipped } : {}) }
     }
+    // An interrupted expiry is settled first, whatever else holds this one back: settling only records what is gone.
     const settled = settleInterrupted(journal, present)
+    if (!retention.clockAllowsRelease()) return finish(settled, 'The Undo retention clock needs review before kept files expire.')
     if (retention.unfinishedOperation(PRESERVED_EXPIRY_OPERATION)) return finish(settled, 'An unfinished operation protects kept files.')
     const now = (options.now ?? Date.now)()
     const due = threadPreservedRefs(listing(), threadDirectory).filter((item) => item.keptAt !== undefined && retention.retainedUntil(item.keptAt) <= now)
     if (!due.length) return finish(settled)
     const operationId = randomUUID()
     const refs = due.map((item) => ({ name: item.ref, sha: item.sha, keptAt: new Date(item.keptAt!).toISOString() }))
-    journal.append({ operationId, operationType: PRESERVED_EXPIRY_OPERATION, state: 'planned', details: { phase: 'intent', windowMs: retention.policy().windowMs, refs } satisfies ExpiryDetails })
+    journal.append({ operationId, operationType: PRESERVED_EXPIRY_OPERATION, state: 'prepared', details: { phase: 'intent', windowMs: retention.policy().windowMs, refs } satisfies ExpiryDetails })
     let error: string | undefined
     try {
       git(workspacePath, ['update-ref', '--no-deref', '--stdin'], undefined, `start\n${due.map((item) => `delete ${item.ref} ${item.sha}`).join('\n')}\nprepare\ncommit\n`)

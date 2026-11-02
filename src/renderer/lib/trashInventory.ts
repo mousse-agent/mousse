@@ -156,7 +156,7 @@ export interface DeletionSummary {
   unpublishedWorktrees: number
   /** Files outside Git that exist nowhere else. */
   soleCopyPaths: number
-  /** Sets of files a restore set aside that may be the only copy (still within their Undo window). */
+  /** Sets of files set aside before a restore or an abort that may be the only copy (still within their Undo window). */
   keptFiles: number
   needsDiscard: boolean
   /** Names the work that would be lost; present exactly when `needsDiscard`. */
@@ -183,7 +183,7 @@ export function summarizeDeletion(preview: LifecyclePurgePreview, name: string, 
   const lostWork: string[] = []
   if (unpublishedWorktrees) lostWork.push(`${unpublishedWorktrees} ${unpublishedWorktrees === 1 ? 'worktree has' : 'worktrees have'} unpublished work`)
   if (soleCopyPaths) lostWork.push(`${soleCopyPaths} ${soleCopyPaths === 1 ? 'folder holds' : 'folders hold'} files that exist nowhere else`)
-  if (keptFiles) lostWork.push(`${keptFiles} ${keptFiles === 1 ? 'set' : 'sets'} of files a restore set aside may be the only copy`)
+  if (keptFiles) lostWork.push(`${keptFiles} ${keptFiles === 1 ? 'set' : 'sets'} of files set aside before a restore or an abort may be the only copy`)
   return {
     lost,
     headline: `Permanently deletes the ${lost} of “${name}”. This can’t be undone.`,

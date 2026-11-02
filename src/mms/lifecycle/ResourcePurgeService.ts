@@ -15,6 +15,9 @@ import { isOwnerLive, PROCESS_INSTANCE_ID } from '../queue/processLiveness'
 import { getExternalResourceClaims } from './LifecycleClaims'
 import { withFileLock } from '../scheduled/fileLock'
 import { isMousseOwnedRef } from '../../shared/mousseBranches'
+import { isKeptFilesItem } from '../../shared/resourceLifecycle'
+import { isOwnedSnapshotStore } from '../git/gitPolicy'
+import { threadStoreKeptFiles } from '../actions/SnapshotRefReleaseService'
 
 const digest = (value: unknown): string => createHash('sha256').update(JSON.stringify(value)).digest('hex')
 const within = (root: string, path: string): boolean => { const rel = relative(resolve(root), resolve(path)); return !isAbsolute(rel) && rel !== '..' && !rel.startsWith(`..${process.platform === 'win32' ? '\\' : '/'}`) }
@@ -329,6 +332,16 @@ export class ResourcePurgeService {
         } catch (error) { preview.blockers.push(`Files kept by restores of ${task.taskId}: ${(error as Error).message}`) }
       }
     }
+    // A thread in a folder without Git keeps them in its hidden snapshot store, which `releaseThreadSnapshots` empties
+    // before any item is removed (the purge's `beforeRemoval`). They are listed here so the same rule applies: while they
+    // may be the only copy, the person must discard them and automatic cleanup keeps the thread.
+    for (const task of tasks) {
+      if (!ownedIds.has(task.taskId)) continue
+      try {
+        const kept = threadStoreKeptFiles(task.location)
+        for (const { ref, sha, discardReason } of kept?.refs ?? []) folderRefs.push({ id: `snapshot-kept-ref:${task.taskId}:${ref}`, kind: 'ref', identity: ref, ownerTaskId: task.taskId, commonDir: kept!.gitDir, expectedValue: sha, ...(discardReason ? { discardRequired: true, reason: discardReason } : {}), status: 'pending' })
+      } catch (error) { preview.blockers.push(`Files kept in the snapshot store of ${task.taskId}: ${(error as Error).message}`) }
+    }
     preview.items.push(...folderRefs)
     const plannedRefs = new Set(folderRefs.map((item) => item.identity))
     // Preparation adds explicit reconstruction pins. Refresh rather than omitting their cleanup.
@@ -495,6 +508,8 @@ export class ResourcePurgeService {
       return
     }
     const commonDir = item.commonDir!
+    // Kept files in a hidden snapshot store were released with the store by `releaseThreadSnapshots` (`beforeRemoval`).
+    if (isKeptFilesItem(item) && isOwnedSnapshotStore(commonDir)) return
     if (!existsSync(commonDir)) throw purgeErrors.create('resource_purge_repository_unavailable')
     const worktree = lifecycleRead(commonDir, ['worktree', 'list', '--porcelain']).split(/\r?\n/).find((line) => line.startsWith('worktree '))?.slice(9)
     if (!worktree || !existsSync(worktree)) throw purgeErrors.create('resource_purge_repository_unavailable')

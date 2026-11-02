@@ -386,12 +386,12 @@ describe('permanent deletion summary', () => {
     ).toBe('Frees about 1.0 KB.')
   })
 
-  it('names files a restore set aside as kept files, and asks before dropping ones that may be the only copy', () => {
-    const kept = (id: string, discardRequired: boolean) => item('ref', id, { identity: `refs/mousse/preserved/${id}`, ...(discardRequired ? { discardRequired, reason: 'Files a restore set aside before writing over them, kept until 2026-12-02; they may be the only copy' } : {}) })
+  it('names files set aside before a restore or an abort as kept files, and asks before dropping ones that may be the only copy', () => {
+    const kept = (id: string, discardRequired: boolean) => item('ref', id, { identity: `refs/mousse/preserved/${id}`, ...(discardRequired ? { discardRequired, reason: 'Files set aside before a restore or an abort wrote over them, kept until 2026-12-02; they may be the only copy' } : {}) })
     const young = summarizeDeletion(preview('t', [item('path', 'data'), kept('a', true), kept('b', false)]), 'Fix login')
     expect(young.lost).toBe('transcript and kept files')
     expect(young).toMatchObject({ needsDiscard: true, keptFiles: 1 })
-    expect(young.discardWarning).toBe('Unpublished work will be lost: 1 set of files a restore set aside may be the only copy.')
+    expect(young.discardWarning).toBe('Unpublished work will be lost: 1 set of files set aside before a restore or an abort may be the only copy.')
     // Past their Undo window they are listed but need no tick.
     expect(summarizeDeletion(preview('t', [kept('b', false), item('ref', 'branch')]), 'x')).toMatchObject({ lost: 'transcript, branch and kept files', needsDiscard: false, keptFiles: 0 })
   })

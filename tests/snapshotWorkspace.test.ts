@@ -741,8 +741,10 @@ describe('what happens to a store when its owner goes', () => {
     expect(existsSync(projectStorePath(project.id, home))).toBe(true)
     await t.undo()
     expect(existsSync(join(work, 'a.txt'))).toBe(false)
-    // The thread is deleted for good: the store goes to the trash with what it kept, never straight to deletion.
-    await releaseThreadSnapshots(t.directory)
+    // The thread is deleted for good: kept files within their Undo window go only with the person's discard, and then the
+    // store goes to the trash with them, never straight to deletion.
+    await expect(releaseThreadSnapshots(t.directory)).rejects.toThrow(/may be the only copy/)
+    await releaseThreadSnapshots(t.directory, undefined, { discardAuthorized: true })
     expect(existsSync(join(home, 'project-data', project.id))).toBe(false)
     const [trashed] = readdirSync(snapshotTrashRoot(home))
     expect(trashed).toMatch(new RegExp(`^project-${project.id}-`))
@@ -763,7 +765,7 @@ describe('what happens to a store when its owner goes', () => {
     const kept = keepByAbort(a, 'abort-a')
     // B's abort has an id that starts with A's: it stays B's.
     const theirs = keepByAbort(b, 'abort-a-other')
-    const released = await releaseThreadSnapshots(a.directory)
+    const released = await releaseThreadSnapshots(a.directory, undefined, { discardAuthorized: true })
     expect(released).toContain(kept)
     expect(released).not.toContain(theirs)
     expect(a.store('for-each-ref', '--format=%(refname)', 'refs/mousse/preserved/')).toBe(theirs)

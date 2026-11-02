@@ -3,6 +3,7 @@ import { ThreadJournal, type ThreadJournalRecord } from '../data/ThreadJournal'
 import { leftMergeRefusal } from '../actions/leftMerge'
 import type { ThreadWorkspaceMetadata, WorkspaceRecovery } from '../../shared/workspace'
 import { ThreadWorkspaceManager } from './ThreadWorkspaceManager'
+import { PRESERVED_EXPIRY_OPERATION } from '../../shared/resourceLifecycle'
 
 /** Journal states of an operation that has not finished (`ThreadWorkspaceManager.hasPendingOperation`). */
 const PENDING_STATES = ['prepared', 'git_applied', 'context_pending', 'recovery_required']
@@ -69,7 +70,8 @@ export function describeRecovery(threadDirectory: string, verified: ThreadWorksp
   }
 
   // Turns, Undo and Publish are refused until this is recovered.
-  const waiting = latest.find((entry) => PENDING_STATES.includes(entry.state) && !PUBLISH_TYPES.includes(entry.operationType))
+  // An unsettled expiry of kept files touches no file; the next retention sweep settles it, so it pauses nothing.
+  const waiting = latest.find((entry) => PENDING_STATES.includes(entry.state) && !PUBLISH_TYPES.includes(entry.operationType) && entry.operationType !== PRESERVED_EXPIRY_OPERATION)
   if (waiting) return { kind: 'paused', reason: errorOf(waiting) ?? `The ${waiting.operationType} operation did not finish.`, ...operationOf(waiting) }
   // A folder with no Git of its own (`snapshotOnly`) has no worktree for Git to read: only a waiting operation pauses it.
   if (!verified.snapshotOnly && verified.lifecycle === 'recovery_required') return { kind: 'paused', reason: 'Git cannot read the worktree.' }

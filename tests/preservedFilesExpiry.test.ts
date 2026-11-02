@@ -20,6 +20,9 @@ import { UndoRetentionService } from '../src/mms/actions/UndoRetentionService'
 import { UndoRetentionSweeper } from '../src/mms/actions/UndoRetentionSweeper'
 import { UndoService } from '../src/mms/actions/UndoService'
 import { ThreadJournal } from '../src/mms/data/ThreadJournal'
+import { ThreadGenerationStore } from '../src/mms/data/ThreadGenerationStore'
+import { ThreadRecoveryService } from '../src/mms/data/ThreadRecoveryService'
+import { ChangeReceiptService } from '../src/mms/actions/ChangeReceiptService'
 import { clearGitPolicyLog, gitPolicyLog } from '../src/mms/git/gitPolicy'
 import { ResourceLifecycleStore } from '../src/mms/lifecycle/ResourceLifecycleStore'
 import { lifecycleGit } from '../src/mms/lifecycle/WorktreeRetirementService'
@@ -115,7 +118,7 @@ test('kept files expire after the Undo window counted from Mousse’s record, wh
   // Declared as a change to what Mousse owns: the central Git check logged nothing.
   expect(gitPolicyLog()).toEqual([])
   // The intent came first, then the outcome with exactly what went.
-  expect(f.expiries().map((entry) => [entry.state, (entry.details as { phase: string }).phase])).toEqual([['planned', 'intent'], ['completed', 'outcome']])
+  expect(f.expiries().map((entry) => [entry.state, (entry.details as { phase: string }).phase])).toEqual([['prepared', 'intent'], ['completed', 'outcome']])
   expect((f.expiries()[1]!.details as { refs: Array<{ name: string }> }).refs.map((item) => item.name).sort()).toEqual([abort, restore.ref].sort())
 }, 60_000)
 
@@ -155,7 +158,7 @@ test('a ref Git cannot lock stops the whole delete, nothing goes, and the journa
   expect(blocked.expiredRefs).toEqual([])
   expect(blocked.skipped).toMatch(/could not be deleted/)
   expect(f.preserved()).toEqual(refs)
-  expect(f.expiries().map((entry) => [entry.state, (entry.details as { refs: unknown[] }).refs.length])).toEqual([['planned', 2], ['failed', 0]])
+  expect(f.expiries().map((entry) => [entry.state, (entry.details as { refs: unknown[] }).refs.length])).toEqual([['prepared', 2], ['failed', 0]])
 
   rmSync(lock)
   expect((await expirePreservedFiles(f.location, f.cwd)).expiredRefs.sort()).toEqual(refs)
@@ -169,8 +172,13 @@ test('an expiry that stopped after its intent is settled from what is gone', asy
   const sha = f.git(f.cwd, 'rev-parse', ref)
   await f.walkClock(start, start + 31 * DAY)
   // Stopped after the transaction and before the outcome.
-  new ThreadJournal(f.location).append({ operationId: 'interrupted', operationType: PRESERVED_EXPIRY_OPERATION, state: 'planned', details: { phase: 'intent', refs: [{ name: ref, sha }] } })
+  new ThreadJournal(f.location).append({ operationId: 'interrupted', operationType: PRESERVED_EXPIRY_OPERATION, state: 'prepared', details: { phase: 'intent', refs: [{ name: ref, sha }] } })
   f.git(f.cwd, 'update-ref', '-d', ref, sha)
+  // Opening the thread leaves the intent to its owner, and nothing else waits on it: no pause, no blocked Undo.
+  expect(new ThreadRecoveryService(new ThreadGenerationStore(f.location)).reconcile().cancelledOperations).not.toContain('interrupted')
+  expect(f.expiries().at(-1)).toMatchObject({ operationId: 'interrupted', state: 'prepared' })
+  expect(() => new ChangeReceiptService(f.location).assertNoPendingOperation()).not.toThrow()
+  expect(new ThreadWorkspaceManager(f.location).hasPendingOperation()).toBe(false)
   expect(await expirePreservedFiles(f.location, f.cwd)).toEqual({ expiredRefs: [ref] })
   expect(f.expiries().at(-1)).toMatchObject({ operationId: 'interrupted', state: 'completed', details: { phase: 'outcome', refs: [{ name: ref, sha }], interrupted: true } })
 }, 60_000)

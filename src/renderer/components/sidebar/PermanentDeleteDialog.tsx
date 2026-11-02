@@ -5,9 +5,9 @@ import { Modal } from '../ui/Modal'
 
 const KIND_LABELS: Record<LifecyclePurgeItem['kind'], string> = { worktree: 'Worktree', ref: 'Branch', path: 'Files', 'scheduled-row': 'Scheduled task' }
 
-/** What an item is and, when it needs the person's discard, why. Files a restore set aside are named as such, never as a branch. */
+/** What an item is and, when it needs the person's discard, why. Files set aside before a restore or an abort are named as such, never as a branch. */
 function itemLabel(item: LifecyclePurgeItem): string {
-  if (isKeptFilesItem(item)) return item.discardRequired ? `Kept files · Only copy: ${item.reason ?? 'files a restore set aside'}` : 'Kept files'
+  if (isKeptFilesItem(item)) return item.discardRequired ? `Kept files · Only copy: ${item.reason ?? 'files set aside before a restore or an abort'}` : 'Kept files'
   return item.discardRequired ? `${KIND_LABELS[item.kind]} · Unpublished: ${item.reason ?? 'may contain unpublished work'}` : KIND_LABELS[item.kind]
 }
 

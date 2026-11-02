@@ -6,12 +6,12 @@ import { getMousseHomeDir } from '../data/paths'
 import { hiddenStoreIdentity, inHiddenStore, runStoreGit } from '../git/hiddenStore'
 import { repoProgramEnv } from '../git/repoPrograms'
 import type { ThreadLeaseHandle } from '../queue/ThreadExecutionLease'
-import { collectStoreGarbage, dropSnapshotStoreUser, loadSnapshotWorkspace, readSnapshotWorkspaceRecord, removeThreadSnapshots, SNAPSHOT_TRASH_QUIET_MS, threadPinRef, trashProjectStoreIfUnused } from '../workspace/SnapshotWorkspace'
+import { collectStoreGarbage, dropSnapshotStoreUser, loadSnapshotWorkspace, projectStorePath, readSnapshotWorkspaceRecord, removeThreadSnapshots, SNAPSHOT_TRASH_QUIET_MS, threadPinRef, threadStorePath, trashProjectStoreIfUnused } from '../workspace/SnapshotWorkspace'
 import { ChangeReceiptService } from './ChangeReceiptService'
 import { withGitMutationLocks } from './GitOperationCoordinator'
 import { git, tryGit } from './git'
 import { UndoRetentionService } from './UndoRetentionService'
-import { PRESERVED_REFS, threadPreservedIndex } from './preservedFiles'
+import { keptFilesFromListing, PRESERVED_EXPIRY_OPERATION, PRESERVED_REF_FORMAT, PRESERVED_REFS, threadPreservedIndex, type KeptFilesRef } from './preservedFiles'
 
 export interface SnapshotReleaseResult {
   releasedRefs: string[]
@@ -43,7 +43,8 @@ export async function releaseSnapshotRefs(threadDirectory: string, options: { li
     const retention = new UndoRetentionService(threadDirectory, options.now)
     if (!retention.clockAllowsRelease()) throw new Error('Clock review or recovery is required before physical receipt release.')
     const journal = new ThreadJournal(threadDirectory)
-    if ([...journal.latestByOperation().values()].some((entry) => ACTIVE.includes(entry.state))) throw new Error('Active or recovery operations protect receipt refs.')
+    // An unsettled expiry of kept files touches no receipt ref: it never holds this release back.
+    if ([...journal.latestByOperation().values()].some((entry) => ACTIVE.includes(entry.state) && entry.operationType !== PRESERVED_EXPIRY_OPERATION)) throw new Error('Active or recovery operations protect receipt refs.')
     const expired = retention.expiredReceiptIds()
     const result: SnapshotReleaseResult = { releasedRefs: [], retained: [], collected: false }
     const top = workspace.store.workTree
@@ -75,12 +76,31 @@ export async function releaseSnapshotRefs(threadDirectory: string, options: { li
 }
 
 /**
+ * The thread's own kept-files refs in its hidden snapshot store (a folder without Git), with the store's Git directory:
+ * the same `discardReason` rule as in a repository (`keptFilesFromListing`). Undefined for a thread with no store. Reads
+ * only, and needs neither the thread's folder nor a lease.
+ */
+export function threadStoreKeptFiles(threadDirectory: string, now = Date.now()): { gitDir: string; refs: KeptFilesRef[] } | undefined {
+  const record = readSnapshotWorkspaceRecord(threadDirectory)
+  if (!record || (record.kind === 'project' && !record.projectId)) return undefined
+  const gitDir = record.kind === 'project' ? projectStorePath(record.projectId!) : threadStorePath(record.threadId)
+  if (!existsSync(join(gitDir, 'HEAD'))) return undefined
+  const listing = runStoreGit({ workTree: gitDir, gitDir }, ['for-each-ref', `--format=${PRESERVED_REF_FORMAT}`, PRESERVED_REFS], repoProgramEnv())
+  return { gitDir, refs: keptFilesFromListing(listing, threadDirectory, now) }
+}
+
+/**
  * What a thread leaves in snapshot stores when it is deleted for good. A thread with no project has a store of its own,
  * which is removed. A thread of a project that is not a Git repository shares the project's store: its
  * latest-snapshot pin, its receipts' pairs and its conversation branches' pins are dropped and the store's garbage is
- * collected, while another thread's pins, and so the snapshots they hold, stay. Returns the refs dropped.
+ * collected, while another thread's pins, and so the snapshots they hold, stay. Kept files still within their Undo
+ * window go only with `discardAuthorized`, the person's discard in the purge; otherwise nothing is released. Returns the
+ * refs dropped.
  */
-export async function releaseThreadSnapshots(threadDirectory: string, signal?: AbortSignal): Promise<string[]> {
+export async function releaseThreadSnapshots(threadDirectory: string, signal?: AbortSignal, options: { discardAuthorized?: boolean } = {}): Promise<string[]> {
+  // Kept files that may be the only copy of a file leave only with the person's discard (the purge preview lists them).
+  const young = options.discardAuthorized ? [] : threadStoreKeptFiles(threadDirectory)?.refs.filter((item) => item.discardReason) ?? []
+  if (young.length) throw new Error(`Files set aside before a restore or an abort may be the only copy (${young.map((item) => item.ref).join(', ')}); deleting this thread for good needs them discarded.`)
   const record = readSnapshotWorkspaceRecord(threadDirectory)
   if (record?.kind === 'standalone') {
     removeThreadSnapshots(record.threadId)
