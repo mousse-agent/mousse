@@ -1,7 +1,7 @@
 import { AppError, createErrorProvider } from '../../shared/errors'
 import { spawn } from 'node:child_process'
 import { existsSync } from 'node:fs'
-import { mkdtemp, rm, rmdir, stat, writeFile } from 'node:fs/promises'
+import { access, mkdtemp, rm, rmdir, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve, sep } from 'node:path'
 import type { SimpleGit } from 'simple-git'
@@ -18,10 +18,11 @@ import { GitHubCodeHost } from './GitHubCodeHost'
 import { GitHubService } from './GitHubService'
 import { PULL_REQUEST_DRAFT_COMMITS, PULL_REQUEST_DRAFT_LIMITS, userCommits, type DraftCommit } from './pullRequestDraft'
 import { MOUSSE_COMMIT_EMAIL } from './mousseCommitIdentity'
-import { resolveRepositoryIdentity } from './RepositoryIdentity'
+import { resolveRepositoryIdentityAsync } from './RepositoryIdentity'
 import { acquireRepositoryLease, RepositoryLeaseAbortedError } from './RepositoryLease'
-import { guardedSimpleGit, NO_DIFF_PROGRAMS, repoProgramEnv, SAFE_LOOKUP_ENV, withoutRepoPrograms } from './repoPrograms'
+import { checkRepoPrograms, guardedSimpleGit, NO_DIFF_PROGRAMS, repoProgramEnv, SAFE_LOOKUP_ENV, withoutRepoProgramsAsync } from './repoPrograms'
 import { readWorkingTreeStatus, type StatusEntry } from './workingTreeStatus'
+import { waitForFolderAccess } from '../files/folderAccess'
 import { GitPolicyError, withUserRequest, type UserAction } from './gitPolicy'
 import type {
   GitBranchInfo,
@@ -326,16 +327,20 @@ const SUMMARY_KILL_SETTLE_MS = 5_000
 /** Commits whose authors are read when drafting a pull request; Mousse's own are left out of these. */
 const DRAFT_COMMITS_SCANNED = 2000
 
-function readBoundedGit(cwd: string, args: readonly string[], maxBytes: number): Promise<string> {
-  return new Promise((resolvePromise, reject) => {
-    let guarded: string[]
-    try {
-      guarded = withoutRepoPrograms(cwd, args)
-    } catch (error) {
-      if (error instanceof GitPolicyError) reject(error)
-      else resolvePromise('')
-      return
-    }
+/** Whether `path` is there, as `existsSync` answers, without blocking. */
+function pathExists(path: string): Promise<boolean> {
+  return access(path).then(() => true, () => false)
+}
+
+async function readBoundedGit(cwd: string, args: readonly string[], maxBytes: number): Promise<string> {
+  let guarded: string[]
+  try {
+    guarded = await withoutRepoProgramsAsync(cwd, args)
+  } catch (error) {
+    if (error instanceof GitPolicyError) throw error
+    return ''
+  }
+  return new Promise((resolvePromise) => {
     const child = spawn('git', guarded, {
       cwd,
       env: repoProgramEnv({ ...process.env, ...englishMessagesEnv(), GIT_OPTIONAL_LOCKS: '0' }),
@@ -397,10 +402,17 @@ export class GitService {
    * switch, push): the repository's hooks and programs run, as from a terminal. Every other command
    * here (status polling, diffs, the reads behind them) runs none of them.
    */
-  private runGit(cwd: string, args: readonly string[], options?: GitRunOptions & { userAction?: boolean }): Promise<GitRun> {
+  private async runGit(cwd: string, args: readonly string[], options?: GitRunOptions & { userAction?: boolean }): Promise<GitRun> {
     const { userAction, ...run } = options ?? {}
-    // Every change here is one the user asked for: the mutation that runs it passed their request in.
-    const guarded = withoutRepoPrograms(cwd, args, { userAction, env: run.env })
+    let guarded: string[]
+    try {
+      // Every change here is one the user asked for: the mutation that runs it passed their request in.
+      guarded = await withoutRepoProgramsAsync(cwd, args, { userAction, env: run.env, signal: run.signal })
+    } catch (error) {
+      // Cancelled during the check before it: the answer `runGit` gives a run cancelled before it starts.
+      if (run.signal?.aborted && error === run.signal.reason) return { ok: false, code: null, stalled: false, cancelled: true, exited: true, stdout: '', output: '' }
+      throw error
+    }
     // Mousse's own commands take no optional lock, so a read never refreshes and rewrites the index.
     return runGit(cwd, guarded, userAction ? run : { ...run, env: { ...run.env, ...SAFE_LOOKUP_ENV, GIT_OPTIONAL_LOCKS: '0' } })
   }
@@ -509,13 +521,18 @@ export class GitService {
   }
 
   async isRepo(cwd: string): Promise<boolean> {
-    return existsSync(cwd) && this.gitFor(cwd).checkIsRepo().catch(() => false)
+    // The folder answers before anything looks at it.
+    await waitForFolderAccess([resolve(cwd)])
+    if (!await pathExists(cwd)) return false
+    // A repository whose programs Mousse cannot turn off is refused here, with its reason, before the reads below turn failures into defaults.
+    await checkRepoPrograms(cwd)
+    return this.gitFor(cwd).checkIsRepo().catch(() => false)
   }
 
   async getStatus(cwd: string): Promise<GitStatusSnapshot> {
     const isRepo = await this.isRepo(cwd)
     if (!isRepo) {
-      return { isRepo: false, branch: null, upstream: null, tracking: 'none', ahead: 0, behind: 0, changes: [], ...(existsSync(cwd) ? {} : { missing: true }) }
+      return { isRepo: false, branch: null, upstream: null, tracking: 'none', ahead: 0, behind: 0, changes: [], ...(await pathExists(cwd) ? {} : { missing: true }) }
     }
 
     const git = this.gitFor(cwd)
@@ -696,9 +713,10 @@ export class GitService {
   }
 
   private async withLease<T>(cwd: string, operation: () => Promise<T>, signal?: AbortSignal): Promise<T> {
-    let identity: ReturnType<typeof resolveRepositoryIdentity> | null = null
+    let identity: Awaited<ReturnType<typeof resolveRepositoryIdentityAsync>> | null = null
     try {
-      identity = existsSync(cwd) ? resolveRepositoryIdentity(cwd) : null
+      await waitForFolderAccess([resolve(cwd)])
+      identity = await pathExists(cwd) ? await resolveRepositoryIdentityAsync(cwd) : null
     } catch {
       identity = null
     }

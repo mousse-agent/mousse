@@ -8,7 +8,7 @@ import { DomainRpcError } from '../protocol/domainRegistry'
 import type { WorkflowRecordSnapshot } from '../workflows/registry/WorkflowRegistry'
 import { collectTransitiveWorkflowRecords } from '../workflows/engine/childAdmission'
 import { acquireWorkspaceMutationLease, resolveOwnedThreadWorkspace } from '../workspace/WorkflowWorkspace'
-import { resolveRepositoryIdentity } from '../git/RepositoryIdentity'
+import { resolveRepositoryIdentityAsync } from '../git/RepositoryIdentity'
 
 const INPUT_MAX_BYTES = 1024 * 1024
 const RESULT_MAX_BYTES = 4 * 1024 * 1024
@@ -71,7 +71,7 @@ export class MmsWorkflowTools {
     const configured = this.services.settings.get().integrations.tools
     if (!configured.enabled || !configured.enabledTools.includes(request.toolId)) throw new DomainRpcError('capability_denied', `Workflow built-in tool is disabled: ${request.toolId}`)
     if (request.signal.aborted) throw new DomainRpcError('cancelled', 'Workflow tool call cancelled')
-    const repository = resolveRepositoryIdentity(registeredPath)
+    const repository = await resolveRepositoryIdentityAsync(registeredPath)
     const workspace = !repository.capability.allowed && repository.capability.reason === 'not-a-repository'
       ? undefined : await resolveOwnedThreadWorkspace(this.services, request.context, request.signal)
     const writer = workspace ? await acquireWorkspaceMutationLease(this.services, request.context, workspace, request.signal) : undefined

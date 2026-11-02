@@ -5,7 +5,7 @@ import simpleGit, { SimpleGit } from 'simple-git'
 import { guardedSimpleGit, HOOK_EVENTS, policedSimpleGit, repoProgramEnv, UNSAFE_ALLOWED } from '../git/repoPrograms'
 import { RepositoryContext } from './RepositoryContext'
 import { WorktreeIdentity } from './WorktreeIdentity'
-import { resolveRepositoryIdentity } from '../git/RepositoryIdentity'
+import { resolveRepositoryIdentityAsync } from '../git/RepositoryIdentity'
 import { getMousseHomeDir } from '../data/paths'
 
 export interface WorktreeInfo {
@@ -104,7 +104,7 @@ export class WorktreeManager {
     options?: { safeCheckout?: boolean }
   ): Promise<WorktreeInfo> {
     const repository = await RepositoryContext.open(repositoryPath)
-    const repositoryId = resolveRepositoryIdentity(repository.root, { requireMutationCapability: true }).key
+    const repositoryId = (await resolveRepositoryIdentityAsync(repository.root, { requireMutationCapability: true })).key
     const worktreesBase = join(this.installationHome, 'repositories', repositoryId, 'worktrees', 'agents')
     mkdirSync(worktreesBase, { recursive: true })
     const identity = WorktreeIdentity.forAgent(worktreesBase, agentId)
@@ -250,7 +250,7 @@ export class WorktreeManager {
     try {
       const repository = await this.repositoryFor(worktreeInfo)
       const agentId = worktreeInfo.branch.match(/^mousse\/agent\/(.+)$/)?.[1]
-      const repositoryId = resolveRepositoryIdentity(repository.root, { requireMutationCapability: true }).key
+      const repositoryId = (await resolveRepositoryIdentityAsync(repository.root, { requireMutationCapability: true })).key
       const expectedBase = join(this.installationHome, 'repositories', repositoryId, 'worktrees', 'agents')
       const identity = agentId ? WorktreeIdentity.forAgent(expectedBase, agentId) : undefined
       const valid = identity

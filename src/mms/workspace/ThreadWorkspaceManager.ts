@@ -14,7 +14,7 @@ import { atomicWriteJsonSync } from '../data/AtomicFs'
 import { ThreadJournal } from '../data/ThreadJournal'
 import { getMousseHomeDir } from '../data/paths'
 import { acquireRepositoryLease, type RepositoryLeaseHandle } from '../git/RepositoryLease'
-import { resolveRepositoryIdentity } from '../git/RepositoryIdentity'
+import { resolveRepositoryIdentity, resolveRepositoryIdentityAsync } from '../git/RepositoryIdentity'
 import {
   releaseExecutionLeaseHandle,
   waitAcquireExecutionLease,
@@ -404,7 +404,7 @@ export class ThreadWorkspaceManager {
     try {
       if (heldThreadLease) assertHeldThreadLease(this.threadDirectory, heldThreadLease)
       threadLease = heldThreadLease ?? await waitAcquireExecutionLease(this.threadDirectory, { source: 'workspace-restore', signal })
-      repositoryLease = await acquireRepositoryLease(resolveRepositoryIdentity(repository.gitTopLevel, { requireMutationCapability: true }), { signal })
+      repositoryLease = await acquireRepositoryLease(await resolveRepositoryIdentityAsync(repository.gitTopLevel, { requireMutationCapability: true }), { signal })
       if (verified.lifecycle === 'ready') {
         const ready = this.verify(metadata)
         if (ready.lifecycle !== 'ready') throw new Error('Workspace changed while acquiring recovery ownership.')
