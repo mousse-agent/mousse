@@ -8,7 +8,7 @@ import './workspaceRecoveryBanner.css'
 /** A thread stays paused until someone acts, so a fix made by hand in a terminal clears the banner within this long. */
 const POLL_MS = 10_000
 
-export type RecoveryAction = 'switch' | 'recover'
+export type RecoveryAction = 'recover' | 'abort'
 
 export interface WorkspaceRecoveryBannerViewProps {
   recovery: WorkspaceRecovery
@@ -16,39 +16,46 @@ export interface WorkspaceRecoveryBannerViewProps {
   busy: RecoveryAction | null
   /** Why the last press failed, shown under the buttons. */
   error: string | null
-  onSwitchBack: () => void
   onRecover: () => void
+  onAbort: () => void
+}
+
+const TITLES: Record<WorkspaceRecovery['kind'], string> = {
+  paused: 'This thread is paused until its worktree is recovered.',
+  merge: 'A merge from an earlier version of Mousse is still in progress.',
+  publish: 'A Publish did not finish.'
+}
+
+/** The line under the title: the reason, or what recovery does for a Publish that only did not finish. */
+function detailOf(recovery: WorkspaceRecovery): string {
+  if (recovery.kind === 'publish' && recovery.reason === 'A Publish did not finish.') {
+    return 'Recovery checks whether it reached the branch and records what happened. Turns keep working meanwhile.'
+  }
+  return recovery.reason
 }
 
 /**
- * A thread whose worktree needs recovery: every turn, Undo and Publish are refused until it is fixed. Says why in plain
- * words and offers the fix: Switch back and continue when the agent moved the worktree to another branch (its commits
- * stay there), Try recovery for any other reason. A busy button keeps focus (`aria-disabled`, not `disabled`).
+ * What a thread's worktree or its Publish is waiting on, in plain words, with the fix. A thread paused by an unfinished
+ * operation and a Publish that did not finish offer Try recovery; a merge an earlier version left in progress offers
+ * Abort the merge. Nothing here moves the worktree's branch or HEAD. A busy button keeps focus (`aria-disabled`, not
+ * `disabled`).
  */
-export function WorkspaceRecoveryBannerView({ recovery, busy, error, onSwitchBack, onRecover }: WorkspaceRecoveryBannerViewProps) {
+export function WorkspaceRecoveryBannerView({ recovery, busy, error, onRecover, onAbort }: WorkspaceRecoveryBannerViewProps) {
   const press = (action: () => void) => () => { if (busy === null) action() }
-  const { branch } = recovery
+  const merge = recovery.kind === 'merge'
   return (
-    <div className="chat-workspace-recovery" role="group" aria-label="Thread paused: its worktree needs recovery">
+    <div className="chat-workspace-recovery" data-kind={recovery.kind} role="group" aria-label={TITLES[recovery.kind]}>
       <div className="chat-workspace-recovery-text" role="status">
         <span className="chat-workspace-recovery-head">
           <AlertTriangle size={13} strokeWidth={2} aria-hidden="true" />
-          <span className="chat-workspace-recovery-title">
-            {branch
-              ? <>This thread is paused because the agent switched its worktree to <code>{branch.actual}</code>.</>
-              : 'This thread is paused because its worktree needs recovery.'}
-          </span>
+          <span className="chat-workspace-recovery-title">{TITLES[recovery.kind]}</span>
         </span>
-        <span className="chat-workspace-recovery-detail">
-          {branch
-            ? <>Your commits stay on <code>{branch.actual}</code>. Switching back returns the worktree to <code>{branch.expected}</code> so turns, Undo and Publish work again.</>
-            : recovery.reason}
-        </span>
+        <span className="chat-workspace-recovery-detail">{detailOf(recovery)}</span>
       </div>
       <div className="chat-workspace-recovery-actions">
-        {branch ? (
-          <button type="button" className="chat-workspace-recovery-btn chat-workspace-recovery-btn-primary" aria-disabled={busy !== null} aria-busy={busy === 'switch'} onClick={press(onSwitchBack)}>
-            {busy === 'switch' ? 'Switching…' : 'Switch back and continue'}
+        {merge ? (
+          <button type="button" className="chat-workspace-recovery-btn chat-workspace-recovery-btn-primary" aria-disabled={busy !== null} aria-busy={busy === 'abort'} onClick={press(onAbort)}>
+            {busy === 'abort' ? 'Aborting…' : 'Abort the merge'}
           </button>
         ) : (
           <button type="button" className="chat-workspace-recovery-btn chat-workspace-recovery-btn-primary" aria-disabled={busy !== null} aria-busy={busy === 'recover'} onClick={press(onRecover)}>
@@ -61,22 +68,28 @@ export function WorkspaceRecoveryBannerView({ recovery, busy, error, onSwitchBac
   )
 }
 
-/** `recovery` of a `workspace.getStatus` answer; undefined when the thread is fine or the answer has none. */
+const KINDS: ReadonlyArray<WorkspaceRecovery['kind']> = ['paused', 'merge', 'publish']
+
+/** `recovery` of a `workspace.getStatus` answer; undefined when nothing waits or the answer has none. */
 export function recoveryOf(status: unknown): WorkspaceRecovery | undefined {
   const value = (status as { recovery?: unknown } | null | undefined)?.recovery
   if (!value || typeof value !== 'object') return undefined
-  const { reason, operationId, operationType, branch } = value as Record<string, unknown>
+  const { kind, reason, operationId, operationType, folder } = value as Record<string, unknown>
   if (typeof reason !== 'string') return undefined
-  const pair = branch && typeof branch === 'object' ? branch as Record<string, unknown> : undefined
+  // A daemon from before kinds only reported what pauses a thread.
+  const known = KINDS.find((item) => item === kind) ?? 'paused'
+  // Abort needs the operation it aborts.
+  if (known === 'merge' && typeof operationId !== 'string') return undefined
   return {
+    kind: known,
     reason,
     ...(typeof operationId === 'string' ? { operationId } : {}),
     ...(typeof operationType === 'string' ? { operationType } : {}),
-    ...(pair && typeof pair.expected === 'string' && typeof pair.actual === 'string' ? { branch: { expected: pair.expected, actual: pair.actual } } : {})
+    ...(typeof folder === 'string' ? { folder } : {})
   }
 }
 
-/** Why `threadId` needs recovery, read from the workspace status again when a turn changes phase and while it is shown. */
+/** What `threadId` is waiting on, read from the workspace status again when a turn changes phase and while it is shown. */
 function useWorkspaceRecovery(threadId: string | null | undefined): { recovery: WorkspaceRecovery | undefined; refresh: () => void } {
   const phase = useAppStore((state) => (threadId ? state.turnStates[threadId]?.phase : undefined))
   const [read, setRead] = useState<{ threadId: string; recovery: WorkspaceRecovery | undefined } | null>(null)
@@ -102,7 +115,7 @@ function useWorkspaceRecovery(threadId: string | null | undefined): { recovery: 
   return { recovery: shown, refresh }
 }
 
-/** The banner for a thread that needs recovery. Renders nothing while its workspace is ready. */
+/** The banner for a thread whose worktree or Publish is waiting on something. Renders nothing otherwise. */
 export function WorkspaceRecoveryBanner({ threadId }: { threadId?: string | null }) {
   const { recovery, refresh } = useWorkspaceRecovery(threadId)
   const [busy, setBusy] = useState<RecoveryAction | null>(null)
@@ -114,7 +127,8 @@ export function WorkspaceRecoveryBanner({ threadId }: { threadId?: string | null
     setBusy(action)
     setError(null)
     try {
-      await window.mousse.operations.recover(threadId, action === 'switch' ? { switchBack: true } : undefined)
+      if (action === 'abort') await window.mousse.operations.abort({ threadId, operationId: recovery.operationId })
+      else await window.mousse.operations.recover(threadId)
     } catch (failure) {
       setError(ipcErrorLine(failure) || String(failure))
     } finally {
@@ -122,5 +136,5 @@ export function WorkspaceRecoveryBanner({ threadId }: { threadId?: string | null
       refresh()
     }
   }
-  return <WorkspaceRecoveryBannerView recovery={recovery} busy={busy} error={error} onSwitchBack={() => void run('switch')} onRecover={() => void run('recover')} />
+  return <WorkspaceRecoveryBannerView recovery={recovery} busy={busy} error={error} onRecover={() => void run('recover')} onAbort={() => void run('abort')} />
 }

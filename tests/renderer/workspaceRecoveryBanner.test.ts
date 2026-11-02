@@ -7,17 +7,17 @@ import type { WorkspaceRecovery } from '../../src/shared/workspace'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
-const branchCase: WorkspaceRecovery = {
-  reason: 'The worktree is on branch agent/task instead of mousse/thread/t1/main.',
-  operationId: 'op-1',
-  operationType: 'action-checkpoint',
-  branch: { expected: 'mousse/thread/t1/main', actual: 'agent/task' }
+const paused: WorkspaceRecovery = { kind: 'paused', reason: "error: Entry 'value.txt' not uptodate. Cannot merge.", operationId: 'undo-1', operationType: 'undo' }
+const merge: WorkspaceRecovery = {
+  kind: 'merge',
+  reason: 'A merge from an earlier version of Mousse is still in progress in /work/app. Abort it, or finish it with Git.',
+  folder: '/work/app', operationId: 'old-publish', operationType: 'publish'
 }
-const otherCase: WorkspaceRecovery = { reason: 'Workspace history diverged during execution; recovery is required.', operationId: 'op-2', operationType: 'action-checkpoint' }
+const publish: WorkspaceRecovery = { kind: 'publish', reason: 'A Publish did not finish.', operationId: 'publish-1', operationType: 'publish' }
 
 let root: Root
 let host: HTMLElement
-const mousse = { workspace: { getStatus: vi.fn() }, operations: { recover: vi.fn() } }
+const mousse = { workspace: { getStatus: vi.fn() }, operations: { recover: vi.fn(), abort: vi.fn() } }
 
 beforeEach(() => {
   host = document.createElement('div')
@@ -25,6 +25,7 @@ beforeEach(() => {
   root = createRoot(host)
   mousse.workspace.getStatus.mockReset()
   mousse.operations.recover.mockReset()
+  mousse.operations.abort.mockReset()
   ;(window as unknown as { mousse: unknown }).mousse = mousse
 })
 
@@ -40,47 +41,65 @@ const click = (target: Element) => act(() => { (target as HTMLElement).click() }
 const settle = () => act(async () => { await Promise.resolve(); await Promise.resolve() })
 
 function view(recovery: WorkspaceRecovery, patch: Partial<WorkspaceRecoveryBannerViewProps> = {}) {
-  const props: WorkspaceRecoveryBannerViewProps = { recovery, busy: null, error: null, onSwitchBack: vi.fn(), onRecover: vi.fn(), ...patch }
+  const props: WorkspaceRecoveryBannerViewProps = { recovery, busy: null, error: null, onRecover: vi.fn(), onAbort: vi.fn(), ...patch }
   act(() => root.render(createElement(WorkspaceRecoveryBannerView, props)))
   return props
 }
 
 describe('the workspace recovery banner', () => {
-  it('names the branch the agent switched to and offers to switch back', () => {
-    const props = view(branchCase)
-    expect(text()).toContain('This thread is paused because the agent switched its worktree to agent/task.')
-    expect(text()).toContain('Your commits stay on agent/task.')
-    expect(text()).toContain('returns the worktree to mousse/thread/t1/main')
-    expect(buttons().map((entry) => entry.textContent)).toEqual(['Switch back and continue'])
-    click(buttons()[0])
-    expect(props.onSwitchBack).toHaveBeenCalledTimes(1)
-    expect(props.onRecover).not.toHaveBeenCalled()
-  })
-
-  it('gives the reason and a generic Try recovery for anything else', () => {
-    const props = view(otherCase)
-    expect(text()).toContain('This thread is paused because its worktree needs recovery.')
-    expect(text()).toContain('Workspace history diverged during execution; recovery is required.')
+  it('says a thread is paused, gives the reason, and offers Try recovery', () => {
+    const props = view(paused)
+    expect(text()).toContain('This thread is paused until its worktree is recovered.')
+    expect(text()).toContain("error: Entry 'value.txt' not uptodate. Cannot merge.")
     expect(buttons().map((entry) => entry.textContent)).toEqual(['Try recovery'])
     click(buttons()[0])
     expect(props.onRecover).toHaveBeenCalledTimes(1)
-    expect(props.onSwitchBack).not.toHaveBeenCalled()
+    expect(props.onAbort).not.toHaveBeenCalled()
+  })
+
+  it('names the folder of a merge an earlier version left and offers to abort it', () => {
+    const props = view(merge)
+    expect(text()).toContain('A merge from an earlier version of Mousse is still in progress.')
+    expect(text()).toContain('in /work/app. Abort it, or finish it with Git.')
+    expect(buttons().map((entry) => entry.textContent)).toEqual(['Abort the merge'])
+    click(buttons()[0])
+    expect(props.onAbort).toHaveBeenCalledTimes(1)
+    expect(props.onRecover).not.toHaveBeenCalled()
+  })
+
+  it('says a Publish did not finish and that turns keep working', () => {
+    view(publish)
+    expect(text()).toContain('A Publish did not finish.')
+    expect(text()).toContain('Recovery checks whether it reached the branch and records what happened. Turns keep working meanwhile.')
+    expect(text()).not.toContain('paused')
+    expect(buttons().map((entry) => entry.textContent)).toEqual(['Try recovery'])
+  })
+
+  it('never offers to switch branches', () => {
+    for (const recovery of [paused, merge, publish]) {
+      view(recovery)
+      expect(text()).not.toMatch(/switch/i)
+    }
   })
 
   it('ignores presses while one is in flight and shows a failure', () => {
-    const props = view(branchCase, { busy: 'switch', error: 'agent/task has uncommitted changes (a.txt). Commit or discard them, then switch back.' })
-    expect(buttons()[0].textContent).toBe('Switching…')
+    const props = view(merge, { busy: 'abort', error: 'The matching Git sequencer is no longer active.' })
+    expect(buttons()[0].textContent).toBe('Aborting…')
     click(buttons()[0])
-    expect(props.onSwitchBack).not.toHaveBeenCalled()
-    expect(host.querySelector('[role="alert"]')?.textContent).toContain('has uncommitted changes')
+    expect(props.onAbort).not.toHaveBeenCalled()
+    expect(host.querySelector('[role="alert"]')?.textContent).toBe('The matching Git sequencer is no longer active.')
   })
 })
 
 describe('reading the recovery of a workspace status', () => {
-  it('keeps the reason, the operation and the branches, and ignores anything malformed', () => {
-    expect(recoveryOf({ recovery: branchCase })).toEqual(branchCase)
-    expect(recoveryOf({ recovery: otherCase })).toEqual(otherCase)
-    expect(recoveryOf({ recovery: { reason: 'x', branch: { expected: 'a' } } })).toEqual({ reason: 'x' })
+  it('keeps the kind, the reason, the operation and the folder, and ignores anything malformed', () => {
+    expect(recoveryOf({ recovery: paused })).toEqual(paused)
+    expect(recoveryOf({ recovery: merge })).toEqual(merge)
+    expect(recoveryOf({ recovery: publish })).toEqual(publish)
+    // A merge without the operation to abort cannot offer its button.
+    expect(recoveryOf({ recovery: { kind: 'merge', reason: 'x' } })).toBeUndefined()
+    // A daemon from before kinds only reported a paused thread; anything it sends that is not a kind reads as one.
+    expect(recoveryOf({ recovery: { reason: 'x', branch: { expected: 'a', actual: 'b' } } })).toEqual({ kind: 'paused', reason: 'x' })
     expect(recoveryOf({ recovery: { operationId: 'x' } })).toBeUndefined()
     expect(recoveryOf({ metadata: {} })).toBeUndefined()
     expect(recoveryOf(null)).toBeUndefined()
@@ -88,7 +107,7 @@ describe('reading the recovery of a workspace status', () => {
 })
 
 describe('the banner of a thread', () => {
-  it('shows only while the workspace needs recovery', async () => {
+  it('shows only while something waits', async () => {
     mousse.workspace.getStatus.mockResolvedValue({ metadata: { lifecycle: 'ready' } })
     act(() => root.render(createElement(WorkspaceRecoveryBanner, { threadId: 't1' })))
     await settle()
@@ -96,35 +115,47 @@ describe('the banner of a thread', () => {
     expect(mousse.workspace.getStatus).toHaveBeenCalledWith('t1')
   })
 
-  it('switches back with one press, then goes away once the workspace is ready', async () => {
-    mousse.workspace.getStatus.mockResolvedValueOnce({ recovery: branchCase }).mockResolvedValue({ metadata: { lifecycle: 'ready' } })
-    mousse.operations.recover.mockResolvedValue({ ok: true, switchedFrom: 'agent/task' })
+  it('aborts a left merge with one press, by its operation, then goes away', async () => {
+    mousse.workspace.getStatus.mockResolvedValueOnce({ recovery: merge }).mockResolvedValue({ metadata: { lifecycle: 'ready' } })
+    mousse.operations.abort.mockResolvedValue({ ok: true })
     act(() => root.render(createElement(WorkspaceRecoveryBanner, { threadId: 't1' })))
     await settle()
-    expect(text()).toContain('Your commits stay on agent/task.')
     click(buttons()[0])
     await settle()
     await settle()
-    expect(mousse.operations.recover).toHaveBeenCalledExactlyOnceWith('t1', { switchBack: true })
+    expect(mousse.operations.abort).toHaveBeenCalledExactlyOnceWith({ threadId: 't1', operationId: 'old-publish' })
+    expect(mousse.operations.recover).not.toHaveBeenCalled()
     expect(host.querySelector('.chat-workspace-recovery')).toBeNull()
   })
 
-  it('calls plain recovery for other reasons and shows the refusal in the banner', async () => {
-    mousse.workspace.getStatus.mockResolvedValue({ recovery: otherCase })
-    mousse.operations.recover.mockRejectedValue(new Error("Error invoking remote method 'operations:recover': Interrupted commit needs recovery: it landed and the workspace still has uncommitted changes."))
+  it('settles a Publish that did not finish with plain recovery', async () => {
+    mousse.workspace.getStatus.mockResolvedValueOnce({ recovery: publish }).mockResolvedValue({ metadata: { lifecycle: 'ready' } })
+    mousse.operations.recover.mockResolvedValue({ ok: true })
     act(() => root.render(createElement(WorkspaceRecoveryBanner, { threadId: 't1' })))
     await settle()
     click(buttons()[0])
     await settle()
     await settle()
-    expect(mousse.operations.recover).toHaveBeenCalledExactlyOnceWith('t1', undefined)
-    expect(host.querySelector('[role="alert"]')?.textContent).toBe('Interrupted commit needs recovery: it landed and the workspace still has uncommitted changes.')
+    expect(mousse.operations.recover).toHaveBeenCalledExactlyOnceWith('t1')
+    expect(host.querySelector('.chat-workspace-recovery')).toBeNull()
+  })
+
+  it('shows a refused recovery in the banner and keeps the button', async () => {
+    mousse.workspace.getStatus.mockResolvedValue({ recovery: paused })
+    mousse.operations.recover.mockRejectedValue(new Error("Error invoking remote method 'operations:recover': Undo recovery intent is missing."))
+    act(() => root.render(createElement(WorkspaceRecoveryBanner, { threadId: 't1' })))
+    await settle()
+    click(buttons()[0])
+    await settle()
+    await settle()
+    expect(mousse.operations.recover).toHaveBeenCalledExactlyOnceWith('t1')
+    expect(host.querySelector('[role="alert"]')?.textContent).toBe('Undo recovery intent is missing.')
     expect(buttons()[0].textContent).toBe('Try recovery')
   })
 
   it('reads the status again while shown, so a fix made by hand clears it', async () => {
     vi.useFakeTimers()
-    mousse.workspace.getStatus.mockResolvedValueOnce({ recovery: otherCase }).mockResolvedValue({ metadata: { lifecycle: 'ready' } })
+    mousse.workspace.getStatus.mockResolvedValueOnce({ recovery: paused }).mockResolvedValue({ metadata: { lifecycle: 'ready' } })
     act(() => root.render(createElement(WorkspaceRecoveryBanner, { threadId: 't1' })))
     await settle()
     expect(host.querySelector('.chat-workspace-recovery')).not.toBeNull()

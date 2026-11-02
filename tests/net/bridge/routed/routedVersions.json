@@ -265,8 +265,8 @@
     "security": "04f7c680ffd36337"
   },
   "operations.recover": {
-    "version": 2,
-    "digest": "d2583df1cbbadc11",
+    "version": 1,
+    "digest": "5682d15e453fd69e",
     "security": "ceacd93869361a7a"
   },
   "orchestrator.abort": {

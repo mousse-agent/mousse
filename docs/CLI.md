@@ -357,9 +357,9 @@ mousse-cli undo --session <thread>
 mousse-cli redo --session <thread>
 mousse-cli fork --session <thread> --action <action> [--name <name>]
 mousse-cli operation abort <operation> --session <thread>
-mousse-cli operation recover [--switch-back] --session <thread>
+mousse-cli operation recover --session <thread>
 ```
 
-`workspace` shows why a thread needs recovery under `recovery`. `operation recover` finishes the operation the thread's worktree is waiting on. `--switch-back` first puts a worktree the agent moved to another branch back on the thread's branch; it refuses when files are changed or a merge or rebase is in progress, and the agent's commits stay on its own branch.
+`workspace` shows under `recovery` what a thread is waiting on: an operation that did not finish (turns, Undo and Publish wait for it), a merge an earlier version left in progress, or a Publish that did not finish. `operation recover` finishes or settles what is waiting; `operation abort` aborts a merge an earlier version left in progress. Neither moves the worktree's branch or HEAD.
 
 Mutating commands are daemon-backed and include the observed journal generation. A stale client is rejected instead of executing against obsolete state. `--session` is mandatory whenever more than one open thread exists.

@@ -24,21 +24,17 @@ const run = (...argv: string[]) => runThreadActionCommand(parseArgs(argv))
 afterEach(() => vi.restoreAllMocks())
 
 describe('mousse-cli operation recover', () => {
-  it('recovers the thread without switching branches by default', async () => {
+  it('asks the daemon to recover the thread, with nothing else', async () => {
     const calls = daemon()
     vi.spyOn(process.stdout, 'write').mockImplementation(() => true)
     await run('operation', 'recover', '--session', 'thread-1')
     expect(calls.at(-1)).toEqual({ method: 'operations.recover', params: { threadId: 'thread-1' } })
   })
 
-  it('asks for the switch back to the thread branch with --switch-back', async () => {
-    const calls = daemon()
-    vi.spyOn(process.stdout, 'write').mockImplementation(() => true)
-    await run('operation', 'recover', '--switch-back', '--session', 'thread-1')
-    expect(calls.at(-1)).toEqual({ method: 'operations.recover', params: { threadId: 'thread-1', switchBack: true } })
-  })
-
-  it('is listed in the help next to abort', () => {
-    expect(commandHelp('operation')).toContain('mousse-cli operation recover [--switch-back] --session <thread>')
+  it('is listed in the help next to abort, with no option that moves a branch', () => {
+    const help = commandHelp('operation')
+    expect(help).toContain('mousse-cli operation abort <operation> --session <thread>')
+    expect(help).toContain('mousse-cli operation recover --session <thread>')
+    expect(help).not.toContain('switch-back')
   })
 })

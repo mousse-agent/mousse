@@ -95,26 +95,31 @@ export interface WorkspaceExecutionContext {
   provenance?: WorkspaceProvenance
 }
 
-/** Why a thread is refused every turn, Undo and Publish; `workspace.getStatus` returns it while recovery is needed. */
+/**
+ * What a thread is waiting on; `workspace.getStatus` returns it until it is settled.
+ * - `paused`: an operation other than Publish did not finish, or Git cannot read the worktree. Every turn, Undo and
+ *   Publish are refused until `operations.recover` settles it.
+ * - `merge`: a merge an earlier version of Mousse started is still in progress in `folder`. Nothing is refused;
+ *   `operations.abort` with `operationId` aborts it.
+ * - `publish`: a Publish did not finish. Nothing is refused; `operations.recover` finds out whether it landed.
+ */
 export interface WorkspaceRecovery {
+  kind: 'paused' | 'merge' | 'publish'
   /** One plain sentence. */
   reason: string
-  /** The unfinished operation that needs recovery, when there is one. */
+  /** The operation it concerns, when there is one. */
   operationId?: string
   operationType?: string
-  /** Set when the worktree is on another branch than the thread's (an agent checked out its own). */
-  branch?: { expected: string; actual: string }
+  /** The folder the merge is in, for `merge`: the worktree or the primary checkout. */
+  folder?: string
 }
 
-/** The result of `operations.recover`; `switchBack` puts the worktree back on the thread's branch first. */
+/** The result of `operations.recover`. */
 export interface WorkspaceRecoverResult {
   ok: true
-  /** Set when the worktree was switched back; the branch it left, which keeps the agent's commits. */
-  switchedFrom?: string
-  message?: string
 }
 
-export const PENDING_CHANGES_ERROR_CODES =['workspace_not_clean', 'workspace_conflict'] as const
+export const PENDING_CHANGES_ERROR_CODES = ['workspace_not_clean', 'workspace_conflict'] as const
 
 /**
  * `details` of a `workspace_conflict` (or `workspace_not_clean`) error. Mousse sets aside or saves ordinary

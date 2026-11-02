@@ -1,15 +1,11 @@
 import { existsSync } from 'node:fs'
-import { ThreadJournal } from '../data/ThreadJournal'
-import { git, inspectPendingChanges, ownPaths, tryGit } from '../actions/git'
+import { ThreadJournal, type ThreadJournalRecord } from '../data/ThreadJournal'
+import { tryGit } from '../actions/git'
 import type { ThreadWorkspaceMetadata, WorkspaceRecovery } from '../../shared/workspace'
 
-/** Journal states that refuse every turn, Undo and Publish until recovery runs (`ChangeReceiptService.assertNoPendingOperation`). */
+/** Journal states of an operation that has not finished (`ThreadWorkspaceManager.hasPendingOperation`). */
 const PENDING_STATES = ['prepared', 'git_applied', 'context_pending', 'recovery_required']
-
-/** The branch the worktree is on; empty for a detached HEAD or a worktree that is gone. */
-function currentBranch(worktreePath: string): string {
-  return existsSync(worktreePath) ? tryGit(worktreePath, ['branch', '--show-current']).stdout : ''
-}
+const PUBLISH_TYPES = ['publish', 'change-publish']
 
 /**
  * An operation's error as the person reads it. A failed Git command's message starts with the whole command line
@@ -21,41 +17,57 @@ export function recoveryErrorText(error: unknown): string {
   return text.split('\n').slice(1).map((line) => line.trim()).filter(Boolean).join(' ') || 'A Git command failed without saying why.'
 }
 
+interface LeftMergeDetails { mergeInProgress?: unknown; workerHeadSha?: unknown; sourceSha?: unknown; reason?: unknown }
+
 /**
- * Why a thread needs recovery, or undefined when it does not. `verified` is `ThreadWorkspaceManager.verify()`
- * of the stored metadata: its `lifecycle` is `recovery_required` when the branch or HEAD differ from `workspace.json`.
+ * A merge an older version started (a Publish into the primary checkout, a subagent result into the worktree) that
+ * is still in progress in its folder. Its record was cancelled on upgrade and keeps the folder in `mergeInProgress`;
+ * `operations.abort` aborts it while Git's `MERGE_HEAD` is still the one that merge left.
  */
-export function describeRecovery(threadDirectory: string, verified: ThreadWorkspaceMetadata): WorkspaceRecovery | undefined {
-  const pending = [...new ThreadJournal(threadDirectory, { readOnly: true }).latestByOperation().values()].find((entry) => PENDING_STATES.includes(entry.state))
-  if (verified.lifecycle !== 'recovery_required' && !pending) return undefined
-  const operation = pending ? { operationId: pending.operationId, operationType: pending.operationType } : {}
-  const actual = verified.lifecycle === 'recovery_required' ? currentBranch(verified.worktreePath) : ''
-  if (actual && actual !== verified.branch) {
-    return { reason: `The worktree is on branch ${actual} instead of ${verified.branch}.`, ...operation, branch: { expected: verified.branch, actual } }
-  }
-  const error = (pending?.details as { error?: unknown } | undefined)?.error
-  if (typeof error === 'string' && error) return { reason: recoveryErrorText(error), ...operation }
-  if (verified.lifecycle === 'recovery_required') return { reason: 'The worktree’s history changed outside Mousse.', ...operation }
-  return { reason: `The ${pending!.operationType} operation did not finish.`, ...operation }
+function leftMerge(entry: ThreadJournalRecord): string | undefined {
+  if (entry.state !== 'cancelled') return undefined
+  const details = entry.details as LeftMergeDetails | undefined
+  const folder = details?.mergeInProgress
+  if (typeof folder !== 'string' || !existsSync(folder)) return undefined
+  const head = tryGit(folder, ['rev-parse', '--verify', '-q', 'MERGE_HEAD'])
+  if (!head.ok) return undefined
+  const expected = typeof details?.workerHeadSha === 'string' ? details.workerHeadSha : typeof details?.sourceSha === 'string' ? details.sourceSha : undefined
+  return !expected || head.stdout === expected ? folder : undefined
 }
 
 /**
- * Puts a worktree an agent switched to another branch back on the thread's branch. Only when that loses nothing:
- * no merge, rebase or conflict waits, no file is changed, and the branch tip is still where `workspace.json` recorded
- * it. The agent's commits stay on its own branch. The caller holds the mutation locks and runs `recoverPending` after.
+ * What a thread's worktree or its Publish is waiting on, or undefined when nothing is. `verified` is
+ * `ThreadWorkspaceManager.verify()` of the stored metadata: `recovery_required` while a Mousse operation other than
+ * Publish waits, or when Git cannot read the worktree. The branch and HEAD are the agent's to move and are never a
+ * reason.
  */
-export function switchBackToThreadBranch(workspace: ThreadWorkspaceMetadata): { from: string; message: string } {
-  const { worktreePath, branch } = workspace
-  const from = currentBranch(worktreePath)
-  if (!from) throw new Error(`The worktree is not on a branch, so Mousse cannot switch it back to ${branch}.`)
-  if (from === branch) throw new Error(`The worktree is already on ${branch}.`)
-  const pending = inspectPendingChanges(worktreePath)
-  if (pending.operation) throw new Error(`A ${pending.operation} is in progress on ${from}. Finish or abort it, then switch back.`)
-  const changed = ownPaths(pending.files)
-  if (changed.length) throw new Error(`${from} has uncommitted changes (${changed.slice(0, 5).join(', ')}${changed.length > 5 ? `, and ${changed.length - 5} more` : ''}). Commit or discard them, then switch back.`)
-  const tip = tryGit(worktreePath, ['rev-parse', '--verify', '--quiet', `refs/heads/${branch}`])
-  if (!tip.ok) throw new Error(`The thread branch ${branch} no longer exists.`)
-  if (tip.stdout !== workspace.headSha) throw new Error(`The thread branch ${branch} moved since Mousse last saw it, so Mousse will not switch back to it.`)
-  git(worktreePath, ['switch', branch])
-  return { from, message: `Switched the worktree back to ${branch}. The agent’s commits stay on ${from}.` }
+export function describeRecovery(threadDirectory: string, verified: ThreadWorkspaceMetadata): WorkspaceRecovery | undefined {
+  const latest = [...new ThreadJournal(threadDirectory, { readOnly: true }).latestByOperation().values()]
+  const operationOf = (entry: ThreadJournalRecord) => ({ operationId: entry.operationId, operationType: entry.operationType })
+  const errorOf = (entry: ThreadJournalRecord): string | undefined => {
+    const error = (entry.details as { error?: unknown } | undefined)?.error
+    return typeof error === 'string' && error ? recoveryErrorText(error) : undefined
+  }
+
+  // Turns, Undo and Publish are refused until this is recovered.
+  const waiting = latest.find((entry) => PENDING_STATES.includes(entry.state) && !PUBLISH_TYPES.includes(entry.operationType))
+  if (waiting) return { kind: 'paused', reason: errorOf(waiting) ?? `The ${waiting.operationType} operation did not finish.`, ...operationOf(waiting) }
+  if (verified.lifecycle === 'recovery_required') return { kind: 'paused', reason: 'Git cannot read the worktree.' }
+
+  // Nothing is refused, but Git keeps a merge open in that folder until it is aborted or finished.
+  for (const entry of latest) {
+    const folder = leftMerge(entry)
+    if (!folder) continue
+    return {
+      kind: 'merge',
+      reason: `A merge from an earlier version of Mousse is still in progress in ${folder}. Abort it, or finish it with Git.`,
+      folder,
+      ...operationOf(entry)
+    }
+  }
+
+  // A Publish that did not finish (Mousse stopped during it): recovery finds out whether it landed and records that.
+  const publish = latest.find((entry) => PENDING_STATES.includes(entry.state) && PUBLISH_TYPES.includes(entry.operationType))
+  if (publish) return { kind: 'publish', reason: errorOf(publish) ?? 'A Publish did not finish.', ...operationOf(publish) }
+  return undefined
 }

@@ -437,8 +437,7 @@ export const ROUTED_METHODS: Readonly<Record<string, RoutedRow>> = Object.freeze
   'operations.abort': write('thread', ['threadId', 'operationId', GEN], {
     required: ['operationId']
   }),
-  // `switchBack` puts a worktree the agent moved to another branch back on the thread's branch first.
-  'operations.recover': write('thread', ['threadId', GEN, 'switchBack'], { version: 2, since: { switchBack: 2 } }),
+  'operations.recover': write('thread', ['threadId', GEN]),
   // A save from another computer is an action the owner can Undo; it names the thread, never a folder.
   'files.write': write('thread', ['threadId', 'path', 'content', ROUTED_STAGED_KEY], {
     required: ['path', 'content'],
