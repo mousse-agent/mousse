@@ -105,3 +105,20 @@
   margin: 0;
   color: var(--danger);
 }
+
+/* "Still waiting: …" and "Waiting for the current turn to finish.": facts, not failures. */
+.chat-workspace-recovery-note {
+  flex-basis: 100%;
+  margin: 0;
+  color: var(--text-secondary);
+}
+
+/* A kind this build does not know: said, with no button and no warning colour. */
+.chat-workspace-recovery[data-kind="notice"] {
+  border-color: var(--border);
+  background: color-mix(in srgb, var(--text-secondary) 5%, transparent);
+}
+
+.chat-workspace-recovery[data-kind="notice"] .chat-workspace-recovery-head svg {
+  color: var(--text-secondary);
+}

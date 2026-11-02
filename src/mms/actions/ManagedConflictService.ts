@@ -2,7 +2,7 @@ import { ThreadJournal } from '../data/ThreadJournal'
 import { ThreadActionService } from './ThreadActionService'
 import { withGitMutationLocks } from './GitOperationCoordinator'
 import { git, requireClean, tryGit } from './git'
-import { isRecordedMerge, preserveBeforeAbort } from './leftMerge'
+import { leftMergeRefusal, preserveBeforeAbort } from './leftMerge'
 
 /** Abort only the Git sequencer belonging to the selected durable operation. */
 export class ManagedConflictService {
@@ -16,11 +16,13 @@ export class ManagedConflictService {
       // A merge an older version left in progress stays abortable after its record was cancelled on upgrade.
       const leftMerge = record?.state === 'cancelled' && typeof (record.details as { mergeInProgress?: unknown } | undefined)?.mergeInProgress === 'string'
       if (!record || (record.state !== 'recovery_required' && !leftMerge)) throw new Error('No matching operation conflict is active.')
-      // A merge an older version left is aborted only while it is that very merge: one started later, even of the same
-      // commit at the same HEAD, is the person's or the agent's. Its record is cleared so nothing offers to abort it again.
-      if (leftMerge && !isRecordedMerge(workspacePath, (record.details as { mergeIdentity?: unknown }).mergeIdentity)) {
+      // A merge an older version left is aborted only while it is that very merge (`leftMergeRefusal`, which the banner
+      // shares): one started later, even of the same commit at the same HEAD, is the person's or the agent's. A record that
+      // can never be aborted is cleared, so nothing offers it again.
+      const refusal = leftMerge ? leftMergeRefusal(workspacePath, record, journal.list()) : undefined
+      if (refusal) {
         journal.append({ operationId, operationType: record.operationType, state: 'cancelled', details: { mergeNoLongerRecorded: true } })
-        throw new Error('The merge in progress is not the one an earlier version left, so Mousse left it alone.')
+        throw new Error(refusal)
       }
       const merge = ['publish', 'child-integration', 'change-integration'].includes(record.operationType)
       if (!merge && !['undo', 'redo', 'code-revert'].includes(record.operationType)) throw new Error(`Abort is unavailable for ${record.operationType}`)

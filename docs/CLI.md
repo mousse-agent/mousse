@@ -360,6 +360,6 @@ mousse-cli operation abort <operation> --session <thread>
 mousse-cli operation recover --session <thread>
 ```
 
-`workspace` shows under `recovery` what a thread is waiting on: an operation that did not finish (turns, Undo and Publish wait for it), a merge an earlier version left in progress, or a Publish that did not finish. `operation recover` finishes or settles what is waiting; `operation abort` aborts a merge an earlier version left in progress. Neither moves the worktree's branch or HEAD.
+`workspace` shows under `recovery` what a thread is waiting on: an operation that did not finish (turns, Undo and Publish wait for it), a merge an earlier version left in progress, or a Publish that did not finish. `operation recover` finishes or settles what is waiting and answers with `settled`; when something still waits it says what, under `stillWaiting`. `operation abort` aborts a merge an earlier version left in progress, after keeping every file under the `preservedRef` it returns. Neither moves the worktree's branch or HEAD, and both refuse at once while a turn of the thread runs.
 
 Mutating commands are daemon-backed and include the observed journal generation. A stale client is rejected instead of executing against obsolete state. `--session` is mandatory whenever more than one open thread exists.

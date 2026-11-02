@@ -114,9 +114,15 @@ export interface WorkspaceRecovery {
   folder?: string
 }
 
-/** The result of `operations.recover`. */
+/** The result of `operations.recover`: whether nothing waits any more, and otherwise what still does. */
 export interface WorkspaceRecoverResult {
   ok: true
+  /** True when nothing waits after recovery. */
+  settled: boolean
+  /** What still waits, as `workspace.getStatus` reports it, when not settled. */
+  recovery?: WorkspaceRecovery
+  /** Why it still waits, in plain words, to follow "Still waiting:". */
+  stillWaiting?: string
 }
 
 export const PENDING_CHANGES_ERROR_CODES = ['workspace_not_clean', 'workspace_conflict'] as const

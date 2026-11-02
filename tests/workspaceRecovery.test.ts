@@ -11,7 +11,8 @@ import { describeRecovery, recoveryErrorText } from '../src/mms/workspace/worksp
 import { ManagedConflictService } from '../src/mms/actions/ManagedConflictService'
 import { tryGit } from '../src/mms/actions/git'
 import { mergeIdentity } from '../src/mms/actions/leftMerge'
-import { readFileSync } from 'node:fs'
+import { readFileSync, rmSync, symlinkSync } from 'node:fs'
+import { vi } from 'vitest'
 import { cancelPendingIntegrations } from '../src/mms/agents/ChildAgentIntegrationService'
 import { ThreadJournal } from '../src/mms/data/ThreadJournal'
 import { actionOptions, git } from './fixtures/gitFoundation'
@@ -197,6 +198,16 @@ describe('what a thread is waiting on', () => {
     expect(status()).toBeUndefined()
   })
 
+  it('never offers a left merge that Abort would refuse, such as one recorded without the HEAD it started from', async () => {
+    const workspace = await new ThreadWorkspaceManager(f.thread).provision('task', 'main', f.repo)
+    const cwd = workspace.worktreePath
+    const { theirs } = stoppedMerge(cwd, 'no-base')
+    new ThreadJournal(f.thread).append({ operationId: 'no-base', operationType: 'child-integration', state: 'cancelled', details: { mergeInProgress: cwd, mergeIdentity: mergeIdentity(cwd), workerHeadSha: theirs } })
+    expect(status()).toBeUndefined()
+    await expect(new ManagedConflictService(f.thread).abort(cwd, 'no-base')).rejects.toThrow('Conflict HEAD changed outside the selected operation.')
+    expect(mergeHead(cwd).ok).toBe(true)
+  })
+
   it('reports a merge a Publish from an earlier version left in the primary checkout', async () => {
     await new ThreadWorkspaceManager(f.thread).provision('task', 'main', f.repo)
     leftPublishMerge(f.thread)
@@ -225,12 +236,13 @@ describe('the text of a failed operation', () => {
 })
 
 describe('through the daemon', () => {
-  async function daemonThread() {
+  /** A daemon with one thread on the project. `projectPath` is how the project was added (a link to the repository, say). */
+  async function daemonThread(projectPath = f.repo) {
     const home = join(f.root, 'mms-home')
     mkdirSync(home)
     const mms = await MousseMainService.create({ homeDir: home, headless: true, ownerKind: 'test' })
     await mms.start()
-    const thread = mms.threads.createThread('Waiting', mms.projects.openProject(f.repo).id)
+    const thread = mms.threads.createThread('Waiting', mms.projects.openProject(projectPath).id)
     const directory = mms.threads.getThreadDir(thread.id)
     const cwd = (await new WorkspaceResolver(directory, thread.id, f.repo).resolve('agent')).workspacePath!
     const call = (method: string, params: Record<string, unknown> = {}) => dispatchMethod({ mms, globalSequence: () => 0 }, method, { threadId: thread.id, ...params })
@@ -246,7 +258,7 @@ describe('through the daemon', () => {
       const publishSha = git(f.repo, 'commit-tree', git(d.cwd, 'rev-parse', 'HEAD^{tree}'), '-p', prePublishSha, '-m', 'interrupted')
       new ThreadJournal(d.directory).append({ operationId: 'interrupted', operationType: 'publish', state: 'prepared', expectedPreState: { prePublishSha, targetBranch: git(f.repo, 'branch', '--show-current'), sourceSha, publishSha }, details: { threadWorkspace: d.cwd, primaryCheckout: f.repo } })
       expect(await d.recovery()).toMatchObject({ kind: 'publish', operationId: 'interrupted' })
-      await expect(d.call('operations.recover')).resolves.toMatchObject({ ok: true })
+      await expect(d.call('operations.recover')).resolves.toEqual({ ok: true, settled: true })
       expect(await d.recovery()).toBeUndefined()
       // Nothing was published by recovery, and the primary checkout is where it was.
       expect(git(f.repo, 'rev-parse', 'HEAD')).toBe(prePublishSha)
@@ -287,6 +299,58 @@ describe('through the daemon', () => {
       // The person's merge is untouched.
       expect(mergeHead(f.repo).ok).toBe(true)
     } finally {
+      await d.mms.stop()
+    }
+  })
+
+  it('operations.recover says a Publish still waits while the project folder cannot be read, instead of reporting success', async () => {
+    // The project was added through a link that is then gone, as with a drive that is not mounted.
+    const link = join(f.root, 'project-link')
+    symlinkSync(f.repo, link)
+    const d = await daemonThread(link)
+    try {
+      const prePublishSha = git(f.repo, 'rev-parse', 'HEAD')
+      new ThreadJournal(d.directory).append({ operationId: 'interrupted', operationType: 'publish', state: 'prepared', expectedPreState: { prePublishSha, targetBranch: git(f.repo, 'branch', '--show-current'), sourceSha: git(d.cwd, 'rev-parse', 'HEAD') } })
+      rmSync(link)
+      const result = await d.call('operations.recover') as Record<string, unknown>
+      expect(result).toMatchObject({ ok: true, settled: false, recovery: { kind: 'publish', operationId: 'interrupted' } })
+      expect(result.stillWaiting).toBe("the project folder can't be read, so Mousse can't tell yet whether the Publish reached its branch")
+      expect(new ThreadJournal(d.directory).latestByOperation().get('interrupted')?.state).toBe('prepared')
+      // Once the folder is back, the same press settles it.
+      symlinkSync(f.repo, link)
+      await expect(d.call('operations.recover')).resolves.toEqual({ ok: true, settled: true })
+    } finally {
+      await d.mms.stop()
+    }
+  })
+
+  it('operations.recover runs a stopped release of old Undo history again, and says so when it still cannot finish', async () => {
+    const d = await daemonThread()
+    try {
+      // A release interrupted after its intent was written, whose receipt is gone, cannot finish.
+      new ThreadJournal(d.directory).append({ operationId: 'release-1', operationType: 'undo-ref-release', state: 'prepared', details: { version: 1, receiptId: '00000000-0000-0000-0000-000000000000', repositoryId: 'repo', refs: [] } })
+      expect(await d.recovery()).toMatchObject({ kind: 'paused', operationType: 'undo-ref-release' })
+      const result = await d.call('operations.recover') as Record<string, unknown>
+      expect(result).toMatchObject({ ok: true, settled: false, recovery: { kind: 'paused', operationType: 'undo-ref-release' } })
+      expect(result.stillWaiting).toMatch(/^old Undo history could not be released yet: \S/)
+    } finally {
+      await d.mms.stop()
+    }
+  })
+
+  it('Try recovery and Abort during a running turn are refused at once, in plain words', async () => {
+    const d = await daemonThread()
+    try {
+      vi.spyOn(d.mms.orchestrator, 'isTurnActive').mockReturnValue(true)
+      const started = Date.now()
+      await expect(d.call('operations.recover')).rejects.toMatchObject({ code: 'thread_busy', message: 'The current turn is still running. Try again once it finishes.' })
+      await expect(d.call('operations.abort', { operationId: 'any' })).rejects.toMatchObject({ code: 'operation_not_found' })
+      leftPublishMerge(d.directory)
+      await expect(d.call('operations.abort', { operationId: 'old-publish' })).rejects.toMatchObject({ code: 'thread_busy' })
+      expect(Date.now() - started).toBeLessThan(5_000)
+      expect(mergeHead(f.repo).ok).toBe(true)
+    } finally {
+      vi.restoreAllMocks()
       await d.mms.stop()
     }
   })

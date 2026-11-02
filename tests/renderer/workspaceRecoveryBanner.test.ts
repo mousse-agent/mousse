@@ -77,6 +77,29 @@ describe('the workspace recovery banner', () => {
     expect(buttons().map((entry) => entry.textContent)).toEqual(['Try recovery'])
   })
 
+  it('shows a kind it does not know as a neutral notice with no button', () => {
+    view({ kind: 'notice', reason: 'A newer daemon says something this build cannot act on.' })
+    expect(text()).toContain("This thread's worktree needs attention.")
+    expect(text()).toContain('A newer daemon says something this build cannot act on.')
+    expect(text()).not.toContain('paused')
+    expect(buttons()).toEqual([])
+    expect(host.querySelector('[data-kind="notice"]')).not.toBeNull()
+  })
+
+  it('waits for a running turn and says so, instead of pressing into it', () => {
+    const props = view(paused, { turnRunning: true })
+    expect(text()).toContain('Waiting for the current turn to finish.')
+    expect(buttons()[0].getAttribute('aria-disabled')).toBe('true')
+    click(buttons()[0])
+    expect(props.onRecover).not.toHaveBeenCalled()
+  })
+
+  it('says what still waits after a press went through', () => {
+    view(publish, { stillWaiting: "the project folder can't be read, so Mousse can't tell yet whether the Publish reached its branch" })
+    expect(host.querySelector('.chat-workspace-recovery-note')?.textContent).toBe("Still waiting: the project folder can't be read, so Mousse can't tell yet whether the Publish reached its branch.")
+    expect(host.querySelector('[role="alert"]')).toBeNull()
+  })
+
   it('never offers to switch branches', () => {
     for (const recovery of [paused, merge, publish]) {
       view(recovery)
@@ -100,8 +123,9 @@ describe('reading the recovery of a workspace status', () => {
     expect(recoveryOf({ recovery: publish })).toEqual(publish)
     // A merge without the operation to abort cannot offer its button.
     expect(recoveryOf({ recovery: { kind: 'merge', reason: 'x' } })).toBeUndefined()
-    // A daemon from before kinds only reported a paused thread; anything it sends that is not a kind reads as one.
-    expect(recoveryOf({ recovery: { reason: 'x', branch: { expected: 'a', actual: 'b' } } })).toEqual({ kind: 'paused', reason: 'x' })
+    // A kind this build does not know, or none, is a notice: said, never acted on, and not a pause.
+    expect(recoveryOf({ recovery: { kind: 'quarantine', reason: 'x', operationId: 'op' } })).toEqual({ kind: 'notice', reason: 'x' })
+    expect(recoveryOf({ recovery: { reason: 'x', branch: { expected: 'a', actual: 'b' } } })).toEqual({ kind: 'notice', reason: 'x' })
     expect(recoveryOf({ recovery: { operationId: 'x' } })).toBeUndefined()
     expect(recoveryOf({ metadata: {} })).toBeUndefined()
     expect(recoveryOf(null)).toBeUndefined()
@@ -132,7 +156,7 @@ describe('the banner of a thread', () => {
 
   it('settles a Publish that did not finish with plain recovery', async () => {
     mousse.workspace.getStatus.mockResolvedValueOnce({ recovery: publish }).mockResolvedValue({ metadata: { lifecycle: 'ready' } })
-    mousse.operations.recover.mockResolvedValue({ ok: true })
+    mousse.operations.recover.mockResolvedValue({ ok: true, settled: true })
     act(() => root.render(createElement(WorkspaceRecoveryBanner, { threadId: 't1' })))
     await settle()
     click(buttons()[0])
@@ -140,6 +164,19 @@ describe('the banner of a thread', () => {
     await settle()
     expect(mousse.operations.recover).toHaveBeenCalledExactlyOnceWith('t1')
     expect(host.querySelector('.chat-workspace-recovery')).toBeNull()
+  })
+
+  it('keeps the banner and says what still waits when recovery could not settle it', async () => {
+    mousse.workspace.getStatus.mockResolvedValue({ recovery: publish })
+    mousse.operations.recover.mockResolvedValue({ ok: true, settled: false, recovery: publish, stillWaiting: "the project folder can't be read, so Mousse can't tell yet whether the Publish reached its branch" })
+    act(() => root.render(createElement(WorkspaceRecoveryBanner, { threadId: 't1' })))
+    await settle()
+    click(buttons()[0])
+    await settle()
+    await settle()
+    expect(text()).toContain("Still waiting: the project folder can't be read")
+    expect(host.querySelector('[role="alert"]')).toBeNull()
+    expect(buttons()[0].textContent).toBe('Try recovery')
   })
 
   it('shows a refused recovery in the banner and keeps the button', async () => {

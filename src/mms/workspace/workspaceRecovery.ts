@@ -1,6 +1,6 @@
 import { existsSync } from 'node:fs'
 import { ThreadJournal, type ThreadJournalRecord } from '../data/ThreadJournal'
-import { isRecordedMerge } from '../actions/leftMerge'
+import { leftMergeRefusal } from '../actions/leftMerge'
 import type { ThreadWorkspaceMetadata, WorkspaceRecovery } from '../../shared/workspace'
 
 /** Journal states of an operation that has not finished (`ThreadWorkspaceManager.hasPendingOperation`). */
@@ -28,13 +28,14 @@ function recordedLeftMerge(entry: ThreadJournalRecord): string | undefined {
 /**
  * A merge an earlier version started (a Publish into the primary checkout, a subagent result into the worktree) that
  * is still in progress in its folder. Its record was cancelled on upgrade and keeps the folder in `mergeInProgress`
- * and which merge it was in `mergeIdentity`. Only that very merge counts: once it was finished, aborted or replaced by
- * another (even of the same commit at the same HEAD), it is the person's or the agent's and is never offered for Abort.
+ * and which merge it was in `mergeIdentity`. Offered only while `operations.abort` would abort it (`leftMergeRefusal`,
+ * the check Abort itself runs): once it was finished, aborted or replaced by another (even of the same commit at the
+ * same HEAD), it is the person's or the agent's.
  */
-function leftMerge(entry: ThreadJournalRecord): string | undefined {
+function leftMerge(entry: ThreadJournalRecord, records: readonly ThreadJournalRecord[]): string | undefined {
   const folder = recordedLeftMerge(entry)
   if (!folder || !existsSync(folder)) return undefined
-  return isRecordedMerge(folder, (entry.details as LeftMergeDetails).mergeIdentity) ? folder : undefined
+  return leftMergeRefusal(folder, entry, records) ? undefined : folder
 }
 
 /**
@@ -44,8 +45,9 @@ function leftMerge(entry: ThreadJournalRecord): string | undefined {
  */
 export function clearStaleLeftMerges(threadDirectory: string): void {
   const journal = new ThreadJournal(threadDirectory)
+  const records = journal.list()
   for (const entry of journal.latestByOperation().values()) {
-    if (recordedLeftMerge(entry) && !leftMerge(entry)) journal.append({ operationId: entry.operationId, operationType: entry.operationType, state: 'cancelled', details: { mergeNoLongerRecorded: true } })
+    if (recordedLeftMerge(entry) && !leftMerge(entry, records)) journal.append({ operationId: entry.operationId, operationType: entry.operationType, state: 'cancelled', details: { mergeNoLongerRecorded: true } })
   }
 }
 
@@ -56,7 +58,9 @@ export function clearStaleLeftMerges(threadDirectory: string): void {
  * reason.
  */
 export function describeRecovery(threadDirectory: string, verified: ThreadWorkspaceMetadata): WorkspaceRecovery | undefined {
-  const latest = [...new ThreadJournal(threadDirectory, { readOnly: true }).latestByOperation().values()]
+  const journal = new ThreadJournal(threadDirectory, { readOnly: true })
+  const records = journal.list()
+  const latest = [...journal.latestByOperation().values()]
   const operationOf = (entry: ThreadJournalRecord) => ({ operationId: entry.operationId, operationType: entry.operationType })
   const errorOf = (entry: ThreadJournalRecord): string | undefined => {
     const error = (entry.details as { error?: unknown } | undefined)?.error
@@ -70,7 +74,7 @@ export function describeRecovery(threadDirectory: string, verified: ThreadWorksp
 
   // Nothing is refused, but Git keeps a merge open in that folder until it is aborted or finished.
   for (const entry of latest) {
-    const folder = leftMerge(entry)
+    const folder = leftMerge(entry, records)
     if (!folder) continue
     return {
       kind: 'merge',

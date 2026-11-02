@@ -77,3 +77,22 @@ export function preserveBeforeAbort(folder: string, operationId: string): string
   git(top, ['update-ref', '--no-deref', ref, sha])
   return ref
 }
+
+interface LeftMergeRecord { operationId: string; state: string; details?: unknown; expectedPreState?: unknown }
+
+/**
+ * Why `operations.abort` would refuse the left merge `record` describes in `folder`, or undefined when it would abort
+ * it. The one check the banner and Abort share, so the banner never offers an Abort that refuses: the merge must be
+ * exactly the recorded one (`isRecordedMerge`), HEAD must be where it was before that merge, and `MERGE_HEAD` must
+ * name what that merge brought in. `records` is the thread's journal, for the merge's intent.
+ */
+export function leftMergeRefusal(folder: string, record: LeftMergeRecord, records: readonly LeftMergeRecord[]): string | undefined {
+  const details = (record.details ?? {}) as { mergeIdentity?: unknown; preMergeSha?: string; prePublishSha?: string; workerHeadSha?: string; sourceSha?: string }
+  if (!isRecordedMerge(folder, details.mergeIdentity)) return 'The merge in progress is not the one an earlier version left, so Mousse left it alone.'
+  const before = details.preMergeSha ?? details.prePublishSha
+  if (!before || tryGit(folder, ['rev-parse', '--verify', '-q', 'HEAD']).stdout !== before) return 'Conflict HEAD changed outside the selected operation.'
+  const intent = records.find((entry) => entry.operationId === record.operationId && ['prepared', 'running'].includes(entry.state))
+  const expected = details.workerHeadSha ?? (intent?.expectedPreState as { sourceSha?: string } | undefined)?.sourceSha ?? details.sourceSha
+  if (!expected || tryGit(folder, ['rev-parse', '--verify', '-q', 'MERGE_HEAD']).stdout !== expected) return 'Git sequencer belongs to another operation.'
+  return undefined
+}
