@@ -1,10 +1,12 @@
 import {
   useCallback,
   useEffect,
+  useId,
   useLayoutEffect,
   useMemo,
   useRef,
   useState,
+  type ReactNode,
   type RefObject
 } from 'react'
 import { ChevronRight, LayoutGrid, Star } from '../lib/icons'
@@ -31,6 +33,20 @@ import { favoriteKey, useModelFavorites, type ModelFavoriteKey } from '../lib/mo
 import type { StatusDescription } from '../../shared/harness/status'
 import { formatBinding, type CommandId } from '../../shared/commands'
 
+/** A listed model, as the run settings beside the list see it. */
+export interface ModelPickTarget {
+  providerId: string
+  instanceId?: string
+  /** The id the menu picks for the model: the selection's own id for the selected model. */
+  modelId: string
+  /** The model's name ("Opus 5.5"). */
+  label: string
+  selected: boolean
+}
+
+/** How long the pointer rests on a model before its run settings show, so crossing rows on the way to them changes nothing. */
+const RUN_SETTINGS_HOVER_MS = 90
+
 /** The commands behind Ctrl/Cmd+1-5, in list order. */
 const MODEL_PICK_COMMANDS: readonly CommandId[] = ['model.pick1', 'model.pick2', 'model.pick3', 'model.pick4', 'model.pick5']
 
@@ -49,6 +65,15 @@ interface ModelFamilyMenuProps {
   anchorRef?: RefObject<HTMLElement | null>
   /** Optional ref to the floating shell (outside-click handling). */
   contentRef?: RefObject<HTMLDivElement | null>
+  /**
+   * Run settings beside the list (the composer's): `render` draws them for the highlighted model, or
+   * returns null when it has none (`listed` lets the column keep one size across models); `pick`
+   * turns the id the menu would select for a model into the one it selects.
+   */
+  runSettings?: {
+    pick: (target: ModelPickTarget) => string
+    render: (target: ModelPickTarget, listed: ModelPickTarget[]) => ReactNode
+  }
 }
 
 interface FlatModelEntry {
@@ -186,7 +211,8 @@ function ProfileModelFamilyMenu({
   onMenuScroll,
   emptyState,
   anchorRef,
-  contentRef
+  contentRef,
+  runSettings
 }: ModelFamilyMenuProps) {
   const favorites = useModelFavorites()
   const { hiddenOf } = favorites
@@ -297,6 +323,10 @@ function ProfileModelFamilyMenu({
   const variantPanelRef = useRef<HTMLElement>(null)
   const activeRowRef = useRef<HTMLElement | null>(null)
   const hideTimerRef = useRef<number | null>(null)
+  const hoverTimerRef = useRef<number | null>(null)
+  const runRef = useRef<HTMLDivElement>(null)
+  const idPrefix = useId()
+  const listId = `${idPrefix}-models`
   const portaled = Boolean(anchorRef)
 
   const preferredEffort = parseThinkingSuffixFromModelId(selectedModelId).effort
@@ -316,7 +346,7 @@ function ProfileModelFamilyMenu({
     anchorRef: anchorRef ?? localShellRef,
     contentRef: localShellRef,
     placement: 'above-start',
-    deps: [providers.length, activeFamily?.family.familyId, panelSide, searchQuery, railFilter]
+    deps: [providers.length, activeFamily?.family.familyId, panelSide, searchQuery, railFilter, runSettings ? highlightIndex : null]
   })
 
   const isEntrySelected = useCallback(
@@ -412,16 +442,57 @@ function ProfileModelFamilyMenu({
 
   useEffect(() => () => clearHideTimer(), [])
 
+  const targetOf = useCallback(
+    (entry: FlatModelEntry): ModelPickTarget | undefined => {
+      const selected = isEntrySelected(entry)
+      const modelId = selected && runSettings
+        ? selectedModelId
+        : resolveModelVariant(entry.family, getInitialVariantOptions(entry.family, selectedModelId, preferredEffort))?.id
+      return modelId ? { providerId: entry.providerId, instanceId: entry.instanceId, modelId, label: entry.family.familyLabel, selected } : undefined
+    },
+    [isEntrySelected, preferredEffort, runSettings, selectedModelId]
+  )
+
   const selectEntry = useCallback(
     (entry: FlatModelEntry) => {
-      const resolved = resolveModelVariant(
-        entry.family,
-        getInitialVariantOptions(entry.family, selectedModelId, preferredEffort)
-      )
-      if (resolved) onSelect(entry.providerId, resolved.id, entry.instanceId)
+      const target = targetOf(entry)
+      if (target) onSelect(entry.providerId, runSettings ? runSettings.pick(target) : target.modelId, entry.instanceId)
     },
-    [onSelect, preferredEffort, selectedModelId]
+    [onSelect, runSettings, targetOf]
   )
+
+  const listedTargets = useMemo(
+    () => (runSettings ? filteredEntries.map(targetOf).filter((target): target is ModelPickTarget => Boolean(target)) : []),
+    [filteredEntries, runSettings, targetOf]
+  )
+  const highlightedEntry = filteredEntries[highlightIndex]
+  const highlightedTarget = runSettings && highlightedEntry ? targetOf(highlightedEntry) : undefined
+  const runColumn = runSettings && highlightedTarget ? runSettings.render(highlightedTarget, listedTargets) : null
+
+  // The list grows to the run settings beside it, so they never scroll while the window has room.
+  useLayoutEffect(() => {
+    const list = menuRef.current
+    if (!list) return
+    const height = runRef.current?.offsetHeight ?? 0
+    list.style.maxHeight = height > 320 ? `${height}px` : ''
+  })
+
+  const clearHoverTimer = () => {
+    if (hoverTimerRef.current !== null) {
+      window.clearTimeout(hoverTimerRef.current)
+      hoverTimerRef.current = null
+    }
+  }
+  useEffect(() => clearHoverTimer, [])
+
+  /** Moves focus from the list into the run settings, on their chosen item. */
+  const enterRunSettings = (event: React.KeyboardEvent | KeyboardEvent) => {
+    const column = runRef.current?.querySelector<HTMLElement>('[role="menu"]')
+    const item = column?.querySelector<HTMLElement>('[role="menuitemradio"][aria-checked="true"]') ?? column?.querySelector<HTMLElement>('[role="menuitemradio"]')
+    if (!item) return
+    event.preventDefault()
+    item.focus({ preventScroll: true })
+  }
 
   const handleToggleFavorite = (entry: FlatModelEntry, event: React.MouseEvent) => {
     event.preventDefault()
@@ -458,6 +529,12 @@ function ProfileModelFamilyMenu({
         return
       }
 
+      if (event.key === 'ArrowRight') {
+        // From the end of the search text, Right moves into the highlighted model's run settings.
+        const input = searchInputRef.current
+        if (input && event.target === input && (input.selectionStart ?? 0) >= input.value.length) enterRunSettings(event)
+        return
+      }
       if (event.key === 'ArrowDown') {
         event.preventDefault()
         scrollHighlightRef.current = true
@@ -546,14 +623,28 @@ function ProfileModelFamilyMenu({
           isHighlighted ? ' highlighted' : ''
         }${selected ? ' selected' : ''}`}
         onMouseEnter={(event) => {
-          setHighlightIndex(index)
-          openVariantPanel(event.currentTarget)
+          const row = event.currentTarget
+          clearHoverTimer()
+          if (!runSettings) {
+            setHighlightIndex(index)
+            openVariantPanel(row)
+            return
+          }
+          hoverTimerRef.current = window.setTimeout(() => {
+            hoverTimerRef.current = null
+            setHighlightIndex(index)
+            openVariantPanel(row)
+          }, RUN_SETTINGS_HOVER_MS)
         }}
-        onMouseLeave={scheduleHide}
+        onMouseLeave={() => {
+          clearHoverTimer()
+          scheduleHide()
+        }}
       >
         <button
           type="button"
           role="option"
+          id={`${idPrefix}-model-${index}`}
           aria-selected={selected}
           className="model-picker-row-main"
           title={[entry.family.familyLabel, entry.providerLabel, entry.providerStatus].filter(Boolean).join(' · ')}
@@ -562,6 +653,9 @@ function ProfileModelFamilyMenu({
             openVariantPanel(event.currentTarget.parentElement!)
           }}
           onClick={() => selectEntry(entry)}
+          onKeyDown={(event) => {
+            if (event.key === 'ArrowRight') enterRunSettings(event)
+          }}
         >
           {compactRows ? null : (
             <span className="model-picker-row-icon">
@@ -605,7 +699,7 @@ function ProfileModelFamilyMenu({
       ref={setShellNode}
       style={portaled ? floatingStyle : undefined}
     >
-      <div className="model-picker-panel">
+      <div className={`model-picker-panel${runColumn ? ' has-run-settings' : ''}`}>
         <div className="model-picker-search">
           <button
             type="button"
@@ -624,6 +718,13 @@ function ProfileModelFamilyMenu({
             ariaLabel="Search models"
             value={searchQuery}
             onChange={setSearchQuery}
+            inputAria={{
+              role: 'combobox',
+              'aria-expanded': true,
+              'aria-controls': listId,
+              'aria-autocomplete': 'list',
+              'aria-activedescendant': highlightedEntry ? `${idPrefix}-model-${highlightIndex}` : undefined
+            }}
           />
         </div>
 
@@ -665,6 +766,7 @@ function ProfileModelFamilyMenu({
 
           <div
             ref={menuRef}
+            id={listId}
             className="composer-model-menu model-picker-list scrollbar-ultra-thin"
             role="listbox"
             aria-label="Select model"
@@ -678,6 +780,22 @@ function ProfileModelFamilyMenu({
               filteredEntries.map((entry, index) => renderEntry(entry, index))
             )}
           </div>
+
+          {runColumn ? (
+            <div
+              ref={runRef}
+              className="model-picker-run scrollbar-ultra-thin"
+              onMouseEnter={clearHoverTimer}
+              onKeyDown={(event) => {
+                // Left from the levels goes back to the list (in the permission row it moves between modes).
+                if (event.key !== 'ArrowLeft' || event.defaultPrevented) return
+                event.preventDefault()
+                searchInputRef.current?.focus()
+              }}
+            >
+              {runColumn}
+            </div>
+          ) : null}
         </div>
       </div>
 

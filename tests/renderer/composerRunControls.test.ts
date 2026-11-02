@@ -25,23 +25,25 @@ afterEach(() => {
 })
 
 const opus: LlmModelOption = { id: 'opus', label: 'Opus 5.5', efforts: ['low', 'medium', 'high', 'xhigh', 'max', 'ultracode'], defaultEffort: 'medium', thinkingOff: false }
+const sonnet: LlmModelOption = { id: 'sonnet', label: 'Sonnet 5', efforts: ['low', 'medium', 'high'], defaultEffort: 'medium', thinkingOff: false }
 const plain: LlmModelOption = { id: 'plain', label: 'Plain 1' }
 
 function provider(models: LlmModelOption[], autoPermissionMode = true, label = 'Claude Code'): ProviderWithStatus {
   return { id: 'claude-subscription', label, models, caps: { toolControl: 'exact', autoPermissionMode, contextUsage: 'none' } as ProviderWithStatus['caps'] }
 }
 
-function render(options: { models?: LlmModelOption[]; modelId?: string; mode?: PermissionMode; auto?: boolean; permission?: boolean; ceiling?: PermissionMode; agent?: string; menuOpen?: boolean } = {}) {
+function render(options: { models?: LlmModelOption[]; modelId?: string; mode?: PermissionMode; auto?: boolean; permission?: boolean; ceiling?: PermissionMode; agent?: string; open?: boolean; readOnly?: boolean } = {}) {
   const onModelMenuOpenChange = vi.fn()
   const onModelSelect = vi.fn()
   const onPermission = vi.fn()
   const props: ComposerFooterProps = {
-    providers: [provider(options.models ?? [opus], options.auto ?? true, options.agent)],
+    providers: [provider(options.models ?? [opus, sonnet, plain], options.auto ?? true, options.agent)],
     selectedProviderId: 'claude-subscription',
     selectedModelId: options.modelId ?? 'opus:high',
-    modelMenuOpen: options.menuOpen ?? false,
+    modelMenuOpen: options.open ?? true,
     onModelMenuOpenChange,
     onModelSelect,
+    modelReadOnly: options.readOnly ?? false,
     onOpenSettings: vi.fn(),
     contextUsage: { used: 0, limit: 0, percent: 0 } as unknown as ComposerFooterProps['contextUsage'],
     contextOpen: false,
@@ -54,145 +56,182 @@ function render(options: { models?: LlmModelOption[]; modelId?: string; mode?: P
 }
 
 const modelButton = () => host.querySelector<HTMLButtonElement>('.composer-model-btn')!
-const runButton = () => host.querySelector<HTMLButtonElement>('.composer-run-btn')
-const menu = () => document.querySelector<HTMLElement>('[role="menu"][aria-label="Run options"]')
-const sections = () => [...menu()!.querySelectorAll<HTMLElement>('[role="group"]')].map((group) => group.getAttribute('aria-label'))
-const modes = () => [...menu()!.querySelectorAll<HTMLElement>('.composer-run-menu-permission')]
-const line = () => menu()!.querySelector('.composer-run-menu-permission-line')!.textContent
-const openMenu = () => act(() => runButton()!.click())
+/** The run settings column beside the model list (not its hidden sizing copy). */
+const column = () => document.querySelector<HTMLElement>('.model-picker-run-settings')
+const sections = () => [...column()!.querySelectorAll<HTMLElement>('[role="group"]')].map((group) => group.getAttribute('aria-label'))
+const levels = () => [...column()!.querySelectorAll('[aria-label="Reasoning"] [role="menuitemradio"]')].map((item) => item.textContent)
+const level = (name: string) => [...column()!.querySelectorAll<HTMLButtonElement>('[aria-label="Reasoning"] [role="menuitemradio"]')].find((item) => item.textContent!.startsWith(name))!
+const checkedLevel = () => column()!.querySelector('[aria-label="Reasoning"] [aria-checked="true"]')!.textContent
+const note = () => column()!.querySelector('[role="note"]')?.textContent ?? null
+const modes = () => [...column()!.querySelectorAll<HTMLElement>('.composer-run-menu-permission')]
+const line = () => column()!.querySelector('.composer-run-menu-permission-line')!.textContent
+const row = (name: string) => [...document.querySelectorAll<HTMLElement>('.model-picker-row')].find((entry) => entry.querySelector('.model-picker-row-title')!.textContent === name)!
+const search = () => document.querySelector<HTMLInputElement>('.model-picker-search input')!
 const key = (target: Element, name: string) => act(() => { target.dispatchEvent(new KeyboardEvent('keydown', { key: name, bubbles: true })) })
+/** Rests the pointer on a model long enough for its run settings to show. */
+async function hover(name: string) {
+  await act(async () => {
+    row(name).dispatchEvent(new MouseEvent('mouseover', { bubbles: true }))
+    await new Promise((resolve) => setTimeout(resolve, 120))
+  })
+}
 
-describe('composer run controls', () => {
+describe('composer model picker', () => {
+  it('shows "Opus 5.5 High" with no separator, the level apart, and opens one picker', () => {
+    const { onModelMenuOpenChange } = render({ open: false })
+    expect(host.querySelector('.composer-run-controls')!.textContent).toBe('Opus 5.5High')
+    expect(modelButton().querySelector('.composer-model-btn-level')!.textContent).toBe('High')
+    expect(modelButton().getAttribute('aria-label')).toBe('Model: Opus 5.5 High. Permission mode: Auto-accept edits')
+    // The permission mode's icon follows the level; there is no separate reasoning button.
+    expect(modelButton().querySelector('svg.composer-model-btn-mode')).not.toBeNull()
+    expect(host.querySelectorAll('button')).toHaveLength(3)
+    expect(host.querySelector('.composer-run-btn, .composer-run-sep, .composer-pill-btn')).toBeNull()
+    act(() => modelButton().click())
+    expect(onModelMenuOpenChange).toHaveBeenCalledWith(true)
+  })
+
   it('names a model the picker does not list, never by its stored string', () => {
-    render({ modelId: 'gpt-6.1-sol:low' })
+    render({ modelId: 'gpt-6.1-sol:low', open: false })
     expect(modelButton().textContent).toContain('GPT-6.1 Sol')
     expect(modelButton().textContent).not.toContain('gpt-6.1-sol')
   })
 
-  it('picking a model keeps the chosen level, and saves none when none was chosen', () => {
-    const sonnet: LlmModelOption = { id: 'sonnet', label: 'Sonnet 5.5', efforts: ['low', 'medium', 'high'], defaultEffort: 'medium' }
-    const pick = (modelId: string) => {
-      const { onModelSelect } = render({ models: [opus, sonnet], modelId, menuOpen: true })
-      const row = [...document.querySelectorAll<HTMLButtonElement>('.model-picker-row-main')].find((item) => item.textContent?.includes('Sonnet 5.5'))!
-      act(() => row.click())
-      return onModelSelect.mock.calls[0]?.slice(0, 2)
-    }
-    // The model then runs at its own default, not the lowest level it offers.
-    expect(pick('opus')).toEqual(['claude-subscription', 'sonnet'])
-    act(() => root.render(createElement('div')))
-    expect(pick('opus:high')).toEqual(['claude-subscription', 'sonnet:high'])
+  it('lists the models and, beside them, the selected model run settings', () => {
+    render()
+    expect([...document.querySelectorAll('.model-picker-row-title')].map((title) => title.textContent)).toEqual(['Opus 5.5', 'Sonnet 5', 'Plain 1'])
+    expect(column()!.getAttribute('aria-label')).toBe('Claude Opus 5.5 settings')
+    expect(sections()).toEqual(['Reasoning', 'Permissions'])
+    expect(levels()).toEqual(['Low', 'MediumDefault', 'High', 'Extra high', 'Max', 'Ultracode'])
+    expect(checkedLevel()).toBe('High')
+    expect(document.querySelector('[role="menu"][aria-label="Run options"]')).toBeNull()
   })
 
-  it('shows "Opus 5.5 · High" as adjacent text with the mode icon, and each part opens its own picker', () => {
-    const { onModelMenuOpenChange } = render()
-    // The model keeps its provider icon and has no chevron.
-    expect(modelButton().firstElementChild!.classList.contains('composer-model-btn-label')).toBe(false)
-    expect(modelButton().lastElementChild!.classList.contains('composer-model-btn-label')).toBe(true)
-    expect(modelButton().getAttribute('aria-label')).toBe('Model: Opus 5.5')
-    expect(host.querySelector('.composer-run-controls')!.textContent).toBe('Opus 5.5·High')
-    // The level has no icon and no chevron: the one icon is the permission mode's.
-    expect(runButton()!.querySelectorAll('svg')).toHaveLength(1)
-    expect(runButton()!.getAttribute('aria-label')).toBe('Reasoning: High. Permission mode: Auto-accept edits')
-    expect(host.querySelector('.composer-permission-picker, .composer-pill-btn')).toBeNull()
-
-    act(() => modelButton().click())
-    expect(onModelMenuOpenChange).toHaveBeenCalledWith(true)
-    expect(menu()).toBeNull()
-    openMenu()
-    expect(menu()).not.toBeNull()
+  it('shows a hovered model own levels, and picks the model and a level together', async () => {
+    const { onModelSelect } = render({ modelId: 'opus:high' })
+    await hover('Sonnet 5')
+    expect(column()!.getAttribute('aria-label')).toBe('Claude Sonnet 5 settings')
+    expect(levels()).toEqual(['Low', 'MediumDefault', 'High'])
+    // Sonnet offers High, so it keeps it.
+    expect(checkedLevel()).toBe('High')
+    expect(note()).toBeNull()
+    act(() => level('Low').click())
+    expect(onModelSelect).toHaveBeenCalledWith('claude-subscription', 'sonnet:low', undefined)
   })
 
-  it('shows only the model name and the mode icon for a model without reasoning', () => {
-    render({ models: [plain], modelId: 'plain' })
-    expect(host.querySelector('.composer-run-sep')).toBeNull()
-    expect(runButton()!.textContent).toBe('')
-    expect(runButton()!.getAttribute('aria-label')).toBe('Permission mode: Auto-accept edits')
-    openMenu()
-    expect(sections()).toEqual(['Permissions'])
+  it('keeps the current level when the new model offers it', async () => {
+    const { onModelSelect } = render({ modelId: 'opus:high' })
+    act(() => row('Sonnet 5').querySelector<HTMLButtonElement>('.model-picker-row-main')!.click())
+    expect(onModelSelect).toHaveBeenCalledWith('claude-subscription', 'sonnet:high', undefined)
   })
 
-  it('shows each section only when the agent and model offer it', () => {
-    render({ permission: false })
-    openMenu()
-    expect(sections()).toEqual(['Reasoning'])
-    act(() => root.unmount())
-    root = createRoot(host)
-
-    const standard: LlmModelOption = { id: 'fast-model', label: 'Fast 1', efforts: ['low', 'high'], thinkingOff: false }
-    const fast: LlmModelOption = { id: 'fast-model:fast', label: 'Fast 1 (fast)', efforts: ['low', 'high'], speed: 'fast', thinkingOff: false }
-    render({ models: [standard, fast], modelId: 'fast-model:high' })
-    openMenu()
-    expect(sections()).toEqual(['Reasoning', 'Speed', 'Permissions'])
-    // No "Off" where the model cannot turn thinking off.
-    expect([...menu()!.querySelectorAll('[aria-label="Reasoning"] [role="menuitemradio"]')].map((item) => item.textContent)).toEqual(['Low', 'High'])
+  it('saves no level for the next model when none was chosen', async () => {
+    const { onModelSelect } = render({ modelId: 'opus' })
+    await hover('Sonnet 5')
+    expect(checkedLevel()).toBe('MediumDefault')
+    expect(note()).toBeNull()
+    act(() => row('Sonnet 5').querySelector<HTMLButtonElement>('.model-picker-row-main')!.click())
+    expect(onModelSelect).toHaveBeenCalledWith('claude-subscription', 'sonnet', undefined)
   })
 
-  it('lists every level the agent reports for the model, ultra levels included', () => {
-    render({ modelId: 'opus' })
-    expect(runButton()!.textContent).toBe('Medium')
-    openMenu()
-    const levels = [...menu()!.querySelectorAll('[aria-label="Reasoning"] [role="menuitemradio"]')].map((item) => item.textContent)
-    expect(levels).toEqual(['Low', 'MediumDefault', 'High', 'Extra high', 'Max', 'Ultracode'])
+  it('uses the new model default when it does not offer the current level, and says so', async () => {
+    const { onModelSelect } = render({ modelId: 'opus:max' })
+    await hover('Sonnet 5')
+    expect(checkedLevel()).toBe('MediumDefault')
+    expect(note()).toBe("Max isn't offered for Claude Sonnet 5; using its default.")
+    act(() => row('Sonnet 5').querySelector<HTMLButtonElement>('.model-picker-row-main')!.click())
+    expect(onModelSelect).toHaveBeenCalledWith('claude-subscription', 'sonnet', undefined)
   })
 
   it('runs a saved level the model does not offer at its default, and says so', () => {
     const { onModelSelect } = render({ modelId: 'opus:ultra' })
-    expect(runButton()!.textContent).toBe('Medium')
-    openMenu()
-    expect(menu()!.querySelector('[role="note"]')!.textContent).toBe("Ultra isn't offered for Claude Opus 5.5; using its default.")
-    const checked = menu()!.querySelector('[aria-label="Reasoning"] [aria-checked="true"]')!
-    expect(checked.textContent).toBe('MediumDefault')
+    expect(modelButton().querySelector('.composer-model-btn-level')!.textContent).toBe('Medium')
+    expect(note()).toBe("Ultra isn't offered for Claude Opus 5.5; using its default.")
+    expect(checkedLevel()).toBe('MediumDefault')
     // Picking the default stores it, so the note goes away.
-    act(() => (checked as HTMLButtonElement).click())
-    expect(onModelSelect).toHaveBeenCalledWith('claude-subscription', 'opus:medium')
+    act(() => level('Medium').click())
+    expect(onModelSelect).toHaveBeenCalledWith('claude-subscription', 'opus:medium', undefined)
+  })
+
+  it('shows Speed when the model has a fast mode', () => {
+    const standard: LlmModelOption = { id: 'fast-model', label: 'Fast 1', efforts: ['low', 'high'], thinkingOff: false }
+    const fast: LlmModelOption = { id: 'fast-model:fast', label: 'Fast 1 (fast)', efforts: ['low', 'high'], speed: 'fast', thinkingOff: false }
+    render({ models: [standard, fast], modelId: 'fast-model:high' })
+    expect(sections()).toEqual(['Reasoning', 'Speed', 'Permissions'])
+    // No "Off" where the model cannot turn thinking off.
+    expect(levels()).toEqual(['Low', 'High'])
+  })
+
+  it('shows only the model list for a model with no run settings', async () => {
+    render({ permission: false })
+    expect(sections()).toEqual(['Reasoning'])
+    await hover('Plain 1')
+    expect(column()).toBeNull()
+    expect(document.querySelector('.model-picker-run')).toBeNull()
+    expect(document.querySelector('.model-picker-panel')!.classList.contains('has-run-settings')).toBe(false)
+  })
+
+  it('shows only the permission mode for a model without reasoning', async () => {
+    render({ modelId: 'plain' })
+    expect(modelButton().querySelector('.composer-model-btn-level')).toBeNull()
+    expect(modelButton().getAttribute('aria-label')).toBe('Model: Plain 1. Permission mode: Auto-accept edits')
+    expect(sections()).toEqual(['Permissions'])
+  })
+
+  it('moves through models and into their settings with the keyboard', async () => {
+    const { onModelMenuOpenChange } = render({ modelId: 'opus:high' })
+    // The search field drives the list as a combobox.
+    expect(search().getAttribute('role')).toBe('combobox')
+    const activeOption = () => document.getElementById(search().getAttribute('aria-activedescendant')!)!
+    expect(activeOption().textContent).toContain('Opus 5.5')
+    key(search(), 'ArrowDown')
+    expect(activeOption().textContent).toContain('Sonnet 5')
+    expect(column()!.getAttribute('aria-label')).toBe('Claude Sonnet 5 settings')
+    // Right moves into the settings on the level the model would run at; Left goes back.
+    act(() => search().focus())
+    key(search(), 'ArrowRight')
+    expect(document.activeElement!.textContent).toBe('High')
+    key(document.activeElement!, 'ArrowDown')
+    expect(document.activeElement!.getAttribute('aria-label')).toBe('Auto-accept edits')
+    key(document.activeElement!, 'ArrowUp')
+    key(document.activeElement!, 'ArrowLeft')
+    expect(document.activeElement).toBe(search())
+    key(search(), 'Escape')
+    expect(onModelMenuOpenChange).toHaveBeenCalledWith(false)
+    expect(document.activeElement).toBe(modelButton())
   })
 
   it('offers permission modes as a row of named icon buttons, highlighted without a check', () => {
-    const { onPermission } = render({ mode: 'ask' })
-    openMenu()
+    const { onPermission, onModelSelect, onModelMenuOpenChange } = render({ mode: 'ask' })
     expect(modes().map((mode) => mode.getAttribute('aria-label'))).toEqual(['Ask before acting', 'Auto-accept edits', 'Auto', 'Full access'])
     expect(modes().map((mode) => mode.getAttribute('title'))).toEqual(['Ask before acting', 'Auto-accept edits', 'Auto', 'Full access'])
     const selected = modes().filter((mode) => mode.getAttribute('aria-checked') === 'true')
     expect(selected.map((mode) => mode.getAttribute('aria-label'))).toEqual(['Ask before acting'])
     expect(selected[0]!.classList.contains('selected')).toBe(true)
     // No section marks its selection with a check: the chosen item is highlighted.
-    expect(menu()!.querySelector('.composer-mode-menu-check, svg.lucide-check')).toBeNull()
-    expect(menu()!.querySelector('[aria-label="Reasoning"] [aria-checked="true"]')!.classList.contains('selected')).toBe(true)
+    expect(column()!.querySelector('.composer-mode-menu-check, svg.lucide-check')).toBeNull()
+    expect(column()!.querySelector('[aria-label="Reasoning"] [aria-checked="true"]')!.classList.contains('selected')).toBe(true)
     // One line names and describes the chosen mode; hovering another previews it.
     expect(line()).toBe('Ask before actingAsks before every command and file edit.')
     act(() => { modes()[3]!.dispatchEvent(new MouseEvent('mouseover', { bubbles: true })) })
     expect(line()).toBe('Full accessRuns everything without asking.')
     act(() => modes()[3]!.click())
     expect(onPermission).toHaveBeenCalledWith('full')
-    expect(menu()).toBeNull()
+    // The selected model stays as it is.
+    expect(onModelSelect).not.toHaveBeenCalled()
+    expect(onModelMenuOpenChange).toHaveBeenCalledWith(false)
   })
 
-  it('moves through the menu with the arrow keys and closes on Escape', () => {
-    render({ mode: 'accept_edits' })
-    openMenu()
-    // The chosen level takes focus when the menu opens.
-    expect(document.activeElement!.textContent).toBe('High')
-    for (let step = 0; step < 4; step += 1) key(document.activeElement!, 'ArrowDown')
-    // Down from the last level enters the permission row on its chosen mode.
-    expect(document.activeElement!.getAttribute('aria-label')).toBe('Auto-accept edits')
-    key(document.activeElement!, 'ArrowRight')
-    expect(document.activeElement!.getAttribute('aria-label')).toBe('Auto')
-    expect(line()).toBe('AutoEdits go ahead; Claude Code runs the commands it judges safe.')
-    key(document.activeElement!, 'ArrowLeft')
-    key(document.activeElement!, 'ArrowLeft')
-    expect(document.activeElement!.getAttribute('aria-label')).toBe('Ask before acting')
-    // Up leaves the row as one stop.
-    key(document.activeElement!, 'ArrowUp')
-    expect(document.activeElement!.textContent).toBe('Ultracode')
-    key(document.activeElement!, 'Escape')
-    expect(menu()).toBeNull()
-    expect(document.activeElement).toBe(runButton())
+  it('picks a hovered model along with a permission mode chosen in its settings', async () => {
+    const { onPermission, onModelSelect } = render({ modelId: 'opus:high', mode: 'ask' })
+    await hover('Sonnet 5')
+    act(() => modes()[3]!.click())
+    expect(onModelSelect).toHaveBeenCalledWith('claude-subscription', 'sonnet:high', undefined)
+    expect(onPermission).toHaveBeenCalledWith('full')
   })
 
   it('hides Auto on an agent without an auto mode and shows a thread set to Auto as Auto-accept edits', () => {
     const { onPermission } = render({ mode: 'auto', auto: false, agent: 'Grok' })
-    expect(runButton()!.getAttribute('aria-label')).toContain('Permission mode: Auto-accept edits')
-    openMenu()
+    expect(modelButton().getAttribute('aria-label')).toContain('Permission mode: Auto-accept edits')
     expect(modes().map((mode) => mode.getAttribute('aria-label'))).toEqual(['Ask before acting', 'Auto-accept edits', 'Full access'])
     expect(modes().find((mode) => mode.getAttribute('aria-checked') === 'true')!.getAttribute('aria-label')).toBe('Auto-accept edits')
     expect(document.body.textContent).not.toContain('no auto mode')
@@ -202,7 +241,6 @@ describe('composer run controls', () => {
 
   it('keeps a mode above the limit in the row, dimmed, and says why on hover', () => {
     const { onPermission } = render({ mode: 'accept_edits', ceiling: 'accept_edits' })
-    openMenu()
     const full = modes()[3]!
     expect(full.getAttribute('aria-disabled')).toBe('true')
     expect(full.getAttribute('title')).toBe('Full access: This computer allows up to Auto-accept edits.')
@@ -210,6 +248,20 @@ describe('composer run controls', () => {
     expect(line()).toBe('Full accessThis computer allows up to Auto-accept edits.')
     act(() => full.click())
     expect(onPermission).not.toHaveBeenCalled()
-    expect(menu()).not.toBeNull()
+  })
+
+  it('opens only the run settings for an assigned model, where just the permission mode changes', () => {
+    const { onPermission } = render({ readOnly: true })
+    expect(modelButton().disabled).toBe(false)
+    expect(modelButton().getAttribute('aria-label')).toBe('Assigned model: Opus 5.5 High. Permission mode: Auto-accept edits')
+    expect(document.querySelector('.model-picker-row')).toBeNull()
+    const menu = document.querySelector<HTMLElement>('[role="menu"][aria-label="Run options"]')!
+    expect([...menu.querySelectorAll<HTMLButtonElement>('[aria-label="Reasoning"] [role="menuitemradio"]')].every((item) => item.disabled)).toBe(true)
+    act(() => menu.querySelectorAll<HTMLButtonElement>('.composer-run-menu-permission')[0]!.click())
+    expect(onPermission).toHaveBeenCalledWith('ask')
+    act(() => root.unmount())
+    root = createRoot(host)
+    render({ readOnly: true, permission: false, open: false })
+    expect(modelButton().disabled).toBe(true)
   })
 })
