@@ -1,5 +1,5 @@
 import { useEffect, useId, useRef, useState, type FormEvent } from 'react'
-import { AlertTriangle, CircleCheck, Monitor, MonitorSmartphone, MoreHorizontal, Plus, RefreshCw, Smartphone } from '../lib/icons'
+import { AlertTriangle, Bot, CircleCheck, Download, Gauge, Laptop, Monitor, MonitorSmartphone, MoreHorizontal, Pencil, Plus, RefreshCw, ShieldCheck, ShieldOff, Smartphone, Trash2, Undo2, type LucideIcon } from '../lib/icons'
 import { ChangePlanDialog } from './devices/ChangePlanDialog'
 import { AddSshDeviceDialog } from './devices/AddSshDeviceDialog'
 import { ApproveSshRouteDialog } from './devices/ApproveSshRouteDialog'
@@ -64,7 +64,7 @@ function addonLine(manifest: TransportManifest, live?: Transport): string {
   return step.command ? `${step.title}: ${step.command}` : step.title
 }
 
-interface MenuItem { label: string; danger?: boolean; onSelect: () => void }
+interface MenuItem { label: string; icon: LucideIcon; danger?: boolean; onSelect: () => void }
 
 /** Overflow menu on a device row. */
 function DeviceMenu({ name, disabled, items }: { name: string; disabled: boolean; items: MenuItem[] }) {
@@ -95,7 +95,10 @@ function DeviceMenu({ name, disabled, items }: { name: string; disabled: boolean
       {open && (
         <div className="devices-menu-panel" role="menu">
           {items.map((item) => (
-            <button key={item.label} type="button" role="menuitem" className={item.danger ? 'devices-menu-item danger' : 'devices-menu-item'} onClick={() => { setOpen(false); item.onSelect() }}>{item.label}</button>
+            <button key={item.label} type="button" role="menuitem" className={item.danger ? 'devices-menu-item danger' : 'devices-menu-item'} onClick={() => { setOpen(false); item.onSelect() }}>
+              <item.icon size={16} aria-hidden="true" />
+              <span>{item.label}</span>
+            </button>
           ))}
         </div>
       )}
@@ -279,25 +282,26 @@ export function NetDevicesSection() {
       // Limits live on this computer, so they need no authority. A daemon from before them sends no policy.
       ...(device.policy ? [
         blocked
-          ? { label: 'Unblock', onSelect: () => void action('bridge.policy', { node: device.node, blocked: false }) }
-          : { label: 'Block on this computer', danger: true, onSelect: () => void action('bridge.policy', { node: device.node, blocked: true }) },
-        ...(isComputer(device) ? [{ label: 'Limits on this computer…', onSelect: () => setLimits(device) }] : [])
+          ? { label: 'Unblock', icon: ShieldCheck, onSelect: () => void action('bridge.policy', { node: device.node, blocked: false }) }
+          : { label: 'Block on this computer', icon: ShieldOff, danger: true, onSelect: () => void action('bridge.policy', { node: device.node, blocked: true }) },
+        ...(isComputer(device) ? [{ label: 'Limits on this computer…', icon: Gauge, onSelect: () => setLimits(device) }] : [])
       ] : []),
       // Only the device that owns the identity can sign a grant, and only to a device it knows is a
       // computer. One it never recorded a kind for is asked about first.
       ...(authority && canWorkOnThreads(device) ? [{
         label: worksOnThreads(device) ? 'Turn off Works on threads' : 'Turn on Works on threads',
+        icon: Bot,
         onSelect: () => worksOnThreads(device)
           ? void action('bridge.setCaps', { node: device.node, caps: device.caps.filter((cap) => cap !== WORKS_ON_THREADS) })
           : setGranting({ device, kind: 'grant' })
       }] : []),
       ...(authority && device.kind === 'unknown' ? [
-        { label: 'This is a computer', onSelect: () => setGranting({ device, kind: 'computer' }) },
-        { label: 'This is a phone', onSelect: () => void action('bridge.setKind', { node: device.node, kind: 'phone' }) }
+        { label: 'This is a computer', icon: Laptop, onSelect: () => setGranting({ device, kind: 'computer' }) },
+        { label: 'This is a phone', icon: Smartphone, onSelect: () => void action('bridge.setKind', { node: device.node, kind: 'phone' }) }
       ] : []),
-      ...(record ? [{ label: 'Undo setup…', onSelect: open('undo') }, { label: 'Rename SSH endpoint…', onSelect: open('rename') }] : []),
-      ...(record?.owner === 'managed' ? [{ label: 'Update…', onSelect: open('update') }] : []),
-      ...(authority ? [{ label: 'Revoke…', danger: true, onSelect: () => setRevoking(device) }] : [])
+      ...(record ? [{ label: 'Undo setup…', icon: Undo2, onSelect: open('undo') }, { label: 'Rename SSH endpoint…', icon: Pencil, onSelect: open('rename') }] : []),
+      ...(record?.owner === 'managed' ? [{ label: 'Update…', icon: Download, onSelect: open('update') }] : []),
+      ...(authority ? [{ label: 'Revoke…', icon: Trash2, danger: true, onSelect: () => setRevoking(device) }] : [])
     ]
   }
 
