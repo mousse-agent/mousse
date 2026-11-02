@@ -9,6 +9,7 @@ import {
   getModelFastToggle,
   getModelSpeedOptions,
   getEffortsForModel,
+  modelVariantOf,
   groupModelsByFamily,
   groupProviderModels,
   inferModelBrand,
@@ -329,5 +330,14 @@ describe('reasoning levels each model reports', () => {
     expect(supportedEffortOf('haiku:medium', haiku, new Set())).toBe('medium')
     // A model listed without levels sends what the agent accepts.
     expect(supportedEffortOf('other:max', haiku, new Set(['max']))).toBe('max')
+  })
+})
+
+describe('modelVariantOf', () => {
+  it('reads the context and speed of a listed id in either form', () => {
+    expect(modelVariantOf('fable-5@1m:fast')).toEqual({ baseId: 'fable-5', context: '1m', speed: 'fast' })
+    expect(modelVariantOf('sonnet[1m]')).toEqual({ baseId: 'sonnet', context: '1m' })
+    expect(modelVariantOf('opus:high')).toEqual({ baseId: 'opus' })
+    expect(modelVariantOf('claude-opus-5-5')).toEqual({ baseId: 'claude-opus-5-5' })
   })
 })

@@ -552,6 +552,7 @@ export function claudeCodeDriver(options: ClaudeCodeDriverOptions = {}): Harness
         llmProvider: () => service.llmProvider(),
         models: () => service.models(),
         movedModel: claudeFamilyAlias,
+        modelStanding: (model) => service.modelStanding(model),
         modelsRefreshedAt: () => service.modelsRefreshedAt(),
         // The built-in instance mirrors its launch settings and sign-out to its settings.json for an
         // older Mousse; an added one only its sign-out (its launch settings were always in config).
