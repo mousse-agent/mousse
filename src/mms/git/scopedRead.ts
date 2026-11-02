@@ -65,6 +65,8 @@ const SAFE_CONFIG = [
   ...HOOK_EVENTS.flatMap((event) => ['-c', `hook.${event}.enabled=false`]),
   '-c', 'core.quotepath=false',
   '-c', 'diff.submodule=short',
+  // With GIT_OPTIONAL_LOCKS=0 (see gitEnv below), a read never refreshes and writes the user's index.
+  '-c', 'diff.autoRefreshIndex=false',
   '-c', 'status.submoduleSummary=false',
   '-c', 'protocol.allow=never',
   '-c', 'credential.interactive=false'
@@ -97,7 +99,7 @@ function gitEnv(repo?: Repo, withSystem = false): NodeJS.ProcessEnv {
 function git(cwd: string, args: readonly string[], repo?: Repo, withSystem = false): Promise<GitResult> {
   return new Promise((resolvePromise, reject) => {
     try {
-      assertGitAllowed({ cwd, args })
+      assertGitAllowed({ cwd, args, lockFree: true })
     } catch (error) {
       reject(error)
       return

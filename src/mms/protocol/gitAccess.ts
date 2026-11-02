@@ -236,7 +236,7 @@ export const GIT_ACCESS = {
   'pullRequests.unlink': 'none',
   'pullRequests.list': 'read',
   'pullRequests.resolve': 'read',
-  'pullRequests.startThread': 'owned',
+  'pullRequests.startThread': 'userRequested',
   'pullRequests.pushTarget': 'owned',
   'pullRequests.watch': 'read',
   'pullRequests.watchStatus': 'read',

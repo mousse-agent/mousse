@@ -409,11 +409,14 @@ export function trustExistingProjectsOnce(profileHome: string, projectPaths: rea
  * is left alone.
  */
 export function withoutRepoPrograms(cwd: string, args: readonly string[], options?: RepoProgramOptions & GitCheckOptions): string[] {
-  assertGitAllowed({ cwd, args, userRequested: options?.userRequested, stdin: options?.stdin, env: options?.env })
+  const own = !options?.userAction
+  const run = own ? withoutDeref(args) : [...args]
+  // Checked as it runs: Mousse's own commands are lock-free (`--no-optional-locks`, NO_INDEX_REFRESH).
+  assertGitAllowed({ cwd, args: run, userRequested: options?.userRequested, stdin: options?.stdin, env: options?.env, lockFree: own && run[0] !== 'config' })
   const named = gitDirectoryArgs(cwd)
-  if (args[0] === 'config') return [...named, ...args]
+  if (run[0] === 'config') return [...named, ...run]
   // Optional locks are off for Mousse's own commands, so `status` does not refresh and write the index.
-  return [...named, ...(options?.userAction ? [] : ['--no-optional-locks']), ...noRepoProgramArgs(cwd, args, options), ...args]
+  return [...named, ...(own ? ['--no-optional-locks'] : []), ...noRepoProgramArgs(cwd, run, options), ...run]
 }
 
 /**
@@ -425,6 +428,19 @@ export function withoutRepoPrograms(cwd: string, args: readonly string[], option
 function gitDirectoryArgs(cwd: string): string[] {
   const dir = gitDirectoryEnv(cwd).GIT_DIR
   return dir ? [`--git-dir=${dir}`] : []
+}
+
+/**
+ * `update-ref` that writes the ref it names, never through it: Mousse's own refs are written with
+ * `--no-deref`, so a symbolic `refs/mousse/x` pointing at `refs/heads/main` cannot move `main`. `HEAD` is
+ * left alone (moving the branch it is on is what such a command asks for), and so is `--stdin`, whose
+ * callers pass `--no-deref` themselves.
+ */
+export function withoutDeref(args: readonly string[]): string[] {
+  if (args[0] !== 'update-ref' || args.includes('--no-deref') || args.includes('--stdin')) return [...args]
+  const ref = args.slice(1).find((arg) => !arg.startsWith('-'))
+  if (!ref || ref === 'HEAD') return [...args]
+  return ['update-ref', '--no-deref', ...args.slice(1)]
 }
 
 /** simple-git's checks Mousse turns off: the values it sets are its own, never a caller's (see {@link guardedSimpleGit}). */
@@ -498,7 +514,8 @@ export function guardedSimpleGit(cwd: string, options: Partial<Omit<SimpleGitOpt
       return (...parameters: unknown[]) => {
         // Only `raw` takes free-form arguments; every other method used here only reads.
         const args = key === 'raw' ? parameters.flat().filter((value): value is string => typeof value === 'string') : []
-        assertGitAllowed({ cwd, args: key === 'raw' ? args : simpleGitCommand(key) })
+        // Lock-free: the instance's config holds NO_INDEX_REFRESH and its environment turns optional locks off.
+        assertGitAllowed({ cwd, args: key === 'raw' ? args : simpleGitCommand(key), lockFree: true })
         // No optional locks: a status or diff read here never refreshes and rewrites the index.
         const instance = forCommand(args).env(repoProgramEnv({ ...process.env, GIT_OPTIONAL_LOCKS: '0' })) as unknown as Record<string, (...values: unknown[]) => unknown>
         return instance[key]!(...parameters)

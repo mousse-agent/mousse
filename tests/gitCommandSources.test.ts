@@ -22,6 +22,8 @@ const APPROVED_GIT_SPAWNERS: Record<string, string> = {
   'src/mms/git/PullRequestThreadService.ts': 'withoutRepoPrograms',
   'src/mms/git/RepositoryIdentity.ts': 'withoutRepoPrograms',
   'src/mms/git/gitProcess.ts': 'callers pass withoutRepoPrograms',
+  // The check itself reads where a symbolic ref points (`git symbolic-ref -q`), a read.
+  'src/mms/git/gitPolicy.ts': 'finalRef',
   'src/mms/git/readOnlyGit.ts': 'withoutRepoPrograms',
   'src/mms/git/repoPrograms.ts': 'assertGitAllowed',
   'src/mms/git/reviewDiff.ts': 'withoutRepoPrograms',

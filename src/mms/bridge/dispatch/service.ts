@@ -320,7 +320,7 @@ export class DispatchService {
       await git(root, ['merge-base', '--is-ancestor', request.baseCommit, head], controller.signal)
       await git(
         root,
-        ['update-ref', resultRef(record.id), head, '0'.repeat(head.length)],
+        ['update-ref', '--no-deref', resultRef(record.id), head, '0'.repeat(head.length)],
         controller.signal
       )
       if (request.push) {

@@ -26,9 +26,10 @@ import type {
   WorkspaceExecutionContext
 } from '../../shared/workspace'
 import { repoProgramEnv, withoutRepoPrograms } from '../git/repoPrograms'
+import type { UserAction } from '../git/gitPolicy'
 
-function git(cwd: string, args: string[]): string {
-  return execFileSync('git', withoutRepoPrograms(cwd, args), { cwd, env: repoProgramEnv(), encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim()
+function git(cwd: string, args: string[], userRequested?: UserAction): string {
+  return execFileSync('git', withoutRepoPrograms(cwd, args, { userRequested }), { cwd, env: repoProgramEnv(), encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim()
 }
 
 function tryGit(cwd: string, args: string[]): { ok: boolean; stdout: string } {
@@ -59,12 +60,13 @@ export function perWorktreeConfigEnabled(checkoutPath: string): boolean {
  * Turns on `extensions.worktreeConfig` in the repository's own configuration, which a worktree of someone else's
  * commits needs to hold its safety settings. It changes the person's repository, so it runs only as part of the
  * action that asked for such a worktree (Start from pull request), and that action says so. It is written at most
- * once and never turned off again. True when this call turned it on.
+ * once and never turned off again. True when this call turned it on. `userRequested` is that action, which the
+ * central Git check needs for a change to the repository's own config.
  */
-export function enablePerWorktreeConfig(primaryCheckoutPath: string): boolean {
+export function enablePerWorktreeConfig(primaryCheckoutPath: string, userRequested?: UserAction): boolean {
   if (perWorktreeConfigEnabled(primaryCheckoutPath)) return false
   if (tryGit(primaryCheckoutPath, ['config', '--get', 'core.worktree']).stdout) throw new Error(CORE_WORKTREE_REFUSAL)
-  git(primaryCheckoutPath, ['config', '--local', 'extensions.worktreeConfig', 'true'])
+  git(primaryCheckoutPath, ['config', '--local', 'extensions.worktreeConfig', 'true'], userRequested)
   return true
 }
 
@@ -99,12 +101,13 @@ function pinUntrustedWorktree(primaryCheckoutPath: string, worktreePath: string,
 
 /**
  * `git worktree add` for commits from someone else: nothing they carry runs, no LFS content is fetched, and the safety
- * stays pinned. `enableWorktreeConfig` (see `provision`) turns the setting on once the safety checks have passed.
+ * stays pinned. `enableWorktreeConfig` (see `provision`) turns the setting on once the safety checks have passed;
+ * `userRequested` is the user's Start thread from pull request, which that change to the repository's config needs.
  */
-async function addUntrustedWorktree(primaryCheckoutPath: string, addArguments: string[], worktreePath: string, enableWorktreeConfig?: () => void): Promise<void> {
+async function addUntrustedWorktree(primaryCheckoutPath: string, addArguments: string[], worktreePath: string, enableWorktreeConfig?: () => void, userRequested?: UserAction): Promise<void> {
   // A repository whose filters cannot be switched off is refused here, before its configuration is changed.
   const safety = await untrustedSafety(primaryCheckoutPath)
-  if (enableWorktreeConfig && enablePerWorktreeConfig(primaryCheckoutPath)) enableWorktreeConfig()
+  if (enableWorktreeConfig && enablePerWorktreeConfig(primaryCheckoutPath, userRequested)) enableWorktreeConfig()
   // Refused before anything is checked out, not after: the worktree must never exist without its safety settings.
   assertPerWorktreeConfig(primaryCheckoutPath)
   assertGitAllowed({ cwd: primaryCheckoutPath, args: [...safety, 'worktree', 'add', ...addArguments] })
@@ -114,7 +117,7 @@ async function addUntrustedWorktree(primaryCheckoutPath: string, addArguments: s
     encoding: 'utf8',
     stdio: ['ignore', 'pipe', 'pipe']
   })
-  pinUntrustedWorktree(primaryCheckoutPath, worktreePath, safety)
+  pinUntrustedWorktree(primaryCheckoutPath, worktreePath, safety, userRequested)
 }
 
 function canonicalPath(path: string): string {
@@ -205,9 +208,9 @@ export class ThreadWorkspaceManager {
      * `enableWorktreeConfig`: the person agreed to turn on `extensions.worktreeConfig`, which that safety needs. It is
      * turned on here, under the repository's lease and after every check that can refuse, so a refused start leaves
      * the setting as it was; the callback runs when this call turned it on. Without it, a repository with the
-     * setting off is refused.
+     * setting off is refused. `userRequested` is that agreement as the central Git check sees it.
      */
-    options: { untrusted?: boolean; enableWorktreeConfig?: () => void } = {}
+    options: { untrusted?: boolean; enableWorktreeConfig?: () => void; userRequested?: UserAction } = {}
   ): Promise<ThreadWorkspaceMetadata> {
     const existing = this.load()
     if (existing?.lifecycle === 'ready') return this.verify(existing)
@@ -257,7 +260,7 @@ export class ThreadWorkspaceManager {
         lastVerifiedAt: new Date().toISOString(),
         ...(options.untrusted ? { untrusted: true as const } : {})
       } satisfies ThreadWorkspaceMetadata)
-      if (options.untrusted) await addUntrustedWorktree(repository.primaryCheckoutPath, ['-b', branch, worktreePath, head], worktreePath, options.enableWorktreeConfig)
+      if (options.untrusted) await addUntrustedWorktree(repository.primaryCheckoutPath, ['-b', branch, worktreePath, head], worktreePath, options.enableWorktreeConfig, options.userRequested)
       else git(repository.primaryCheckoutPath, ['worktree', 'add', '-b', branch, worktreePath, head])
       git(repository.primaryCheckoutPath, ['update-ref', retainedRef, head])
       const metadata: ThreadWorkspaceMetadata = {

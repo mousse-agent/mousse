@@ -1,7 +1,6 @@
 import { existsSync, statSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { GIT_NULL_DEVICE } from './gitNullDevice'
-import { stripInheritedGitEnv } from './gitPolicy'
 
 /**
  * Environment for Git that runs without the user asking for it (the bridge's bundle
@@ -95,4 +94,25 @@ export function isGitDirectory(path: string): boolean {
  */
 export function gitDirectoryEnv(cwd: string): Record<string, string> {
   return isGitDirectory(cwd) ? { GIT_DIR: resolve(cwd) } : {}
+}
+
+/**
+ * `GIT_*` variables a Git process may inherit from Mousse's own environment: where the user's config lives,
+ * their command-line config, identity and commit dates, and how they reach remotes. Every other `GIT_*` the process
+ * inherited (`GIT_DIR`, `GIT_INDEX_FILE`, `GIT_WORK_TREE`, `GIT_CONFIG_PARAMETERS` from a hook that started
+ * Mousse, ...) is dropped, so it cannot send Mousse's commands to another repository or index.
+ */
+const INHERITED_KEEP = /^GIT_(CONFIG_(GLOBAL|SYSTEM|NOSYSTEM|COUNT|KEY_\d+|VALUE_\d+)|(AUTHOR|COMMITTER)_(NAME|EMAIL|DATE)|SSH|SSH_COMMAND|SSH_VARIANT|SSL_\w+|HTTP_\w+|PROXY_\w+|ASKPASS|TERMINAL_PROMPT|EDITOR|SEQUENCE_EDITOR|PAGER|TRACE2_EVENT|OPTIONAL_LOCKS|NO_LAZY_FETCH|LFS_\w+)$/
+
+/**
+ * `env` without the `GIT_*` variables it inherited from `inherited` (the process's own by default) that
+ * are not in the keep-list. A variable the caller set itself, to a value of its own, stays.
+ */
+export function stripInheritedGitEnv(env: NodeJS.ProcessEnv, inherited: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  const next: NodeJS.ProcessEnv = { ...env }
+  for (const key of Object.keys(next)) {
+    if (!/^GIT_/i.test(key) || INHERITED_KEEP.test(key)) continue
+    if (inherited[key] !== undefined && next[key] === inherited[key]) delete next[key]
+  }
+  return next
 }

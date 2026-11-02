@@ -7,6 +7,7 @@ import {
   assertGitAllowed, clearGitPolicyLog, decideGitCommand, GitPolicyError, gitPolicyLog, isOwnedPath, isOwnedRef,
   registerOwnedGitRoot, stripInheritedGitEnv, userAction, withGitAccess, type GitCommandRequest
 } from '../src/mms/git/gitPolicy'
+import { repoProgramEnv, withoutRepoPrograms } from '../src/mms/git/repoPrograms'
 
 const USER = userAction('button', 'Push')
 const roots: string[] = []
@@ -26,6 +27,8 @@ const decide = (request: Partial<GitCommandRequest> & { args: string[] }) => dec
 
 beforeEach(() => {
   outside = scratch('mousse-policy-user-')
+  // A user's repository: owned ref writes are resolved in it.
+  git(outside, 'init', '-q', '-b', 'main')
   owned = scratch('mousse-policy-home-')
   undo.push(registerOwnedGitRoot(owned))
   clearGitPolicyLog()
@@ -41,7 +44,7 @@ afterEach(() => {
 
 describe('reads come from an allowlist', () => {
   it.each([
-    [['status', '--porcelain']], [['rev-parse', '--show-toplevel']], [['diff', '--cached']], [['log', '-1']], [['for-each-ref', 'refs/heads']],
+    [['--no-optional-locks', 'status', '--porcelain']], [['rev-parse', '--show-toplevel']], [['diff', '--cached']], [['-c', 'diff.autoRefreshIndex=false', 'diff']], [['log', '-1']], [['for-each-ref', 'refs/heads']],
     [['config', '--get', 'user.name']], [['config', 'user.name']], [['config', '--null', '--show-scope', '--show-origin', '--list']],
     [['branch', '--show-current']], [['branch']], [['remote']], [['remote', 'get-url', 'origin']], [['worktree', 'list', '--porcelain']],
     [['symbolic-ref', '--quiet', '--short', 'HEAD']], [['hash-object', '--', 'a.txt']], [['tag', '--list']], [['stash', 'list']],
@@ -135,6 +138,73 @@ describe('Mousse may change what it owns', () => {
   })
 })
 
+describe('symbolic refs are judged by their target', () => {
+  /** A repository outside the Mousse home whose `refs/mousse/x` points at `refs/heads/main`. */
+  function symbolic() {
+    const cwd = join(scratch('mousse-policy-symbolic-'), 'repo')
+    git(tmpdir(), 'init', '-q', '-b', 'main', cwd)
+    git(cwd, '-c', 'user.name=x', '-c', 'user.email=x@example.invalid', 'commit', '-q', '--allow-empty', '-m', 'one')
+    git(cwd, '-c', 'user.name=x', '-c', 'user.email=x@example.invalid', 'commit', '-q', '--allow-empty', '-m', 'two')
+    git(cwd, 'symbolic-ref', 'refs/mousse/x', 'refs/heads/main')
+    return { cwd, main: git(cwd, 'rev-parse', 'main'), older: git(cwd, 'rev-parse', 'main~1') }
+  }
+
+  it('refuses a write through an owned symbolic ref, and allows it with --no-deref', () => {
+    const { cwd, older } = symbolic()
+    expect(decideGitCommand({ cwd, args: ['update-ref', 'refs/mousse/x', older] })).toMatchObject({ allowed: false, reason: expect.stringContaining('refs/heads/main') })
+    expect(decideGitCommand({ cwd, args: ['update-ref', '-d', 'refs/mousse/x'] })).toMatchObject({ allowed: false })
+    expect(decideGitCommand({ cwd, args: ['update-ref', '--stdin'], stdin: `update refs/mousse/x ${older}\n` })).toMatchObject({ allowed: false })
+    expect(decideGitCommand({ cwd, args: ['fetch', '--no-tags', '.', '+refs/heads/main:refs/mousse/x'] })).toMatchObject({ allowed: false })
+    expect(decideGitCommand({ cwd, args: ['update-ref', '--no-deref', 'refs/mousse/x', older] })).toMatchObject({ access: 'owned', allowed: true })
+    expect(decideGitCommand({ cwd, args: ['update-ref', 'refs/mousse/plain', older] })).toMatchObject({ access: 'owned', allowed: true })
+  })
+
+  it('never lets Mousse\'s own update-ref move main through refs/mousse, with refusal on or off', () => {
+    const { cwd, main, older } = symbolic()
+    for (const mode of ['log', 'refuse']) {
+      vi.stubEnv('MOUSSE_GIT_POLICY', mode)
+      // The runner every Mousse ref write goes through adds --no-deref, so the symbolic ref itself is replaced.
+      execFileSync('git', withoutRepoPrograms(cwd, ['update-ref', 'refs/mousse/x', older]), { cwd, env: repoProgramEnv(), stdio: 'ignore' })
+      expect(git(cwd, 'rev-parse', 'main')).toBe(main)
+      git(cwd, 'symbolic-ref', 'refs/mousse/x', 'refs/heads/main')
+    }
+    expect(gitPolicyLog()).toEqual([])
+    vi.stubEnv('MOUSSE_GIT_POLICY', 'refuse')
+    expect(() => assertGitAllowed({ cwd, args: ['update-ref', 'refs/mousse/x', older] })).toThrow(GitPolicyError)
+    expect(git(cwd, 'rev-parse', 'main')).toBe(main)
+  })
+
+  it('refuses a commit in an owned worktree whose owned branch points at a user branch', () => {
+    const worktree = join(owned, 'linked')
+    git(owned, 'init', '-q', '-b', 'main', worktree)
+    git(worktree, 'symbolic-ref', 'refs/heads/mousse/thread/1/main', 'refs/heads/main')
+    git(worktree, 'symbolic-ref', 'HEAD', 'refs/heads/mousse/thread/1/main')
+    expect(decideGitCommand({ cwd: worktree, args: ['commit', '-m', 'checkpoint'] })).toMatchObject({ allowed: false, reason: expect.stringContaining('refs/heads/main') })
+  })
+})
+
+describe('status and diff write the index unless told not to', () => {
+  it('reads only with optional locks or the refresh off, or on the index alone', () => {
+    expect(decide({ args: ['status', '--porcelain'] })).toMatchObject({ allowed: false, reason: expect.stringContaining('index') })
+    expect(decide({ args: ['status', '--porcelain'], env: { GIT_OPTIONAL_LOCKS: '0' } })).toMatchObject({ access: 'read', allowed: true })
+    expect(decide({ args: ['status'], lockFree: true })).toMatchObject({ access: 'read' })
+    expect(decide({ args: ['diff', '--', 'a.txt'] })).toMatchObject({ allowed: false })
+    expect(decide({ args: ['diff', '--', 'a.txt'], lockFree: true })).toMatchObject({ access: 'read' })
+    expect(decide({ args: ['diff', '--no-index', 'a', 'b'] })).toMatchObject({ access: 'read' })
+    // In an owned worktree, a refresh of its own index is Mousse's own business.
+    expect(decide({ cwd: owned, args: ['status'] })).toMatchObject({ access: 'owned', allowed: true })
+  })
+})
+
+describe('worktree config', () => {
+  it('owns the config of its own worktrees, never the repository\'s', () => {
+    expect(decide({ cwd: owned, args: ['config', '--worktree', 'core.hooksPath', '/dev/null'] })).toMatchObject({ access: 'owned', allowed: true })
+    expect(decide({ cwd: outside, args: ['config', '--worktree', 'core.hooksPath', '/dev/null'] })).toMatchObject({ allowed: false })
+    expect(decide({ cwd: owned, args: ['config', 'extensions.worktreeConfig', 'true'] })).toMatchObject({ allowed: false })
+    expect(decide({ cwd: outside, args: ['config', 'extensions.worktreeConfig', 'true'], userRequested: userAction('button', 'Start thread from pull request') })).toMatchObject({ access: 'userRequested', allowed: true })
+  })
+})
+
 describe('redirects and housekeeping are refused', () => {
   it.each([
     [['-C', '/elsewhere', 'status']], [['--git-dir=/x/.git', 'log']], [['--work-tree', '/x', 'status']],
@@ -173,7 +243,7 @@ describe('log by default, refuse when asked', () => {
   it('throws with MOUSSE_GIT_POLICY=refuse', () => {
     vi.stubEnv('MOUSSE_GIT_POLICY', 'refuse')
     expect(() => assertGitAllowed({ cwd: outside, args: ['update-ref', 'refs/heads/main', 'abc'] })).toThrow(GitPolicyError)
-    expect(() => assertGitAllowed({ cwd: outside, args: ['status'] })).not.toThrow()
+    expect(() => assertGitAllowed({ cwd: outside, args: ['status'], env: { GIT_OPTIONAL_LOCKS: '0' } })).not.toThrow()
   })
 
   it('logs a command that needs more than its protocol method declared, never refusing it', () => {

@@ -23,6 +23,7 @@ import { PullRequestReadError } from './GitHubCodeHost'
 import { acquireRepositoryLease } from './RepositoryLease'
 import { resolveRepositoryIdentity } from './RepositoryIdentity'
 import { repoProgramEnv, withoutRepoPrograms } from './repoPrograms'
+import type { UserAction } from './gitPolicy'
 
 /** A refusal with a code a client can show copy for; the daemon turns it into its own error type. */
 export class PullRequestThreadError extends Error {
@@ -155,17 +156,22 @@ export class PullRequestThreadService {
       .map((thread) => ({ id: thread.id, name: thread.name }))
   }
 
-  async startThread(input: StartPullRequestThreadInput): Promise<StartPullRequestThreadResult & { thread: Thread }> {
+  /**
+   * `userRequested` is the user's Start thread from pull request. It covers the steps that action names and
+   * nothing after it: the repository gets `extensions.worktreeConfig` turned on, so the worktree can hold its
+   * own safety settings.
+   */
+  async startThread(input: StartPullRequestThreadInput, userRequested: UserAction): Promise<StartPullRequestThreadResult & { thread: Thread }> {
     const project = this.project(input.projectId)
     const { detail } = await this.resolve(input.projectId, input.reference, { force: true })
     if (detail.state !== 'open' && input.allowClosed !== true) {
       throw new PullRequestThreadError('pull_request_closed', `Pull request #${detail.number} is ${detail.state}. Start from it anyway to see its changes.`, { state: detail.state })
     }
     // From here to the link nobody else starts from this pull request, so the check below holds until the link exists.
-    return exclusively(this.deps.threads, pullRequestIdentityKey(detail.identity), () => this.startExclusively(project, detail, input))
+    return exclusively(this.deps.threads, pullRequestIdentityKey(detail.identity), () => this.startExclusively(project, detail, input, userRequested))
   }
 
-  private async startExclusively(project: { id: string; path: string }, detail: PullRequestDetail, input: StartPullRequestThreadInput): Promise<StartPullRequestThreadResult & { thread: Thread }> {
+  private async startExclusively(project: { id: string; path: string }, detail: PullRequestDetail, input: StartPullRequestThreadInput, userRequested: UserAction): Promise<StartPullRequestThreadResult & { thread: Thread }> {
     const existing = this.threadsOf(detail.identity)
     if (existing.length > 0 && input.allowDuplicate !== true) {
       throw new PullRequestThreadError(
@@ -193,7 +199,7 @@ export class PullRequestThreadService {
       throw new PullRequestThreadError('pull_request_fetch_failed', error instanceof Error ? error.message : String(error))
     }
     try {
-      return await this.createThread(project, topLevel, detail, headSha, input)
+      return await this.createThread(project, topLevel, detail, headSha, input, userRequested)
     } finally {
       // The thread's own branch and retained ref hold the commit now; the fetched ref was only the way to get it.
       await this.deps.codeHost.releasePullRequestHead(topLevel, detail.identity, headSha)
@@ -205,7 +211,8 @@ export class PullRequestThreadService {
     topLevel: string,
     detail: PullRequestDetail,
     headSha: string,
-    input: StartPullRequestThreadInput
+    input: StartPullRequestThreadInput,
+    userRequested: UserAction
   ): Promise<StartPullRequestThreadResult & { thread: Thread }> {
     const headMoved = headSha.toLowerCase() !== detail.headSha.toLowerCase()
     const name = `PR #${detail.number}: ${detail.title}`.replace(/\s+/g, ' ').trim().slice(0, THREAD_NAME_MAX)
@@ -218,6 +225,7 @@ export class PullRequestThreadService {
       const threadDirectory = this.deps.threads.getThreadDir(thread.id)
       await new ThreadWorkspaceManager(threadDirectory).provision(thread.id, 'main', project.path, undefined, undefined, headSha, {
         untrusted: true,
+        userRequested,
         ...(input.allowWorktreeConfig === true ? { enableWorktreeConfig: () => { repositoryConfigChange = WORKTREE_CONFIG_ENABLED } } : {})
       })
     } catch (error) {

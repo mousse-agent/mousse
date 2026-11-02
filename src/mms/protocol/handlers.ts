@@ -3632,7 +3632,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
           allowClosed: asOptionalBoolean(p.allowClosed, 'allowClosed') === true,
           allowDuplicate: asOptionalBoolean(p.allowDuplicate, 'allowDuplicate') === true,
           allowWorktreeConfig: asOptionalBoolean(p.allowWorktreeConfig, 'allowWorktreeConfig') === true
-        }))
+        }, gitUserAction(ctx, 'Start thread from pull request')))
         return { ...started, threads: listedThreadsFor(ctx, ctx.mms.threads.listAllThreads()) }
       } finally {
         // Also after a failure: a thread made and removed, or kept in the trash, must not linger in a client's list.

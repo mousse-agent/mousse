@@ -122,7 +122,7 @@ export class WorktreeManager {
       baseSha ??= (await repository.git.revparse(['HEAD'])).trim()
       beforeCreate?.({ path: identity.path, branch: identity.branch, repositoryRoot: repository.root, baseSha })
       await checkoutGit.raw([...safety, 'worktree', 'add', '-b', identity.branch, identity.path, baseSha])
-      await checkoutGit.raw([...safety, 'update-ref', `refs/mousse/agents/${agentId}/base`, baseSha])
+      await checkoutGit.raw([...safety, 'update-ref', '--no-deref', `refs/mousse/agents/${agentId}/base`, baseSha])
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
       throw new Error(`Failed to create isolated Git worktree ${identity.branch}: ${message}`)
