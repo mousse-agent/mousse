@@ -5,8 +5,12 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { withGitMutationLocks } from '../src/mms/actions/GitOperationCoordinator'
 import { choosePushRemote, GitService } from '../src/mms/git/GitService'
+import { userAction } from '../src/mms/git/gitPolicy'
 import { resolveRepositoryIdentity } from '../src/mms/git/RepositoryIdentity'
 import { acquireRepositoryLease } from '../src/mms/git/RepositoryLease'
+
+/** The user's request a test passes to a GitService change. */
+const USER = userAction('button', 'Test action')
 
 const roots: string[] = []
 const git = (cwd: string, ...args: string[]): string => execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim()
@@ -44,7 +48,7 @@ describe('GitService amend', () => {
   it('amends an unpushed commit with new files and a new message', async () => {
     const { cwd } = fixture(); commitFile(cwd, 'a.txt', 'first')
     writeFileSync(join(cwd, 'b.txt'), 'b\n')
-    await new GitService().commit(cwd, 'first, reworded', { amend: true })
+    await new GitService().commit(cwd, USER, 'first, reworded', { amend: true })
     expect(git(cwd, 'rev-list', '--count', 'HEAD')).toBe('1')
     expect(git(cwd, 'log', '-1', '--format=%s')).toBe('first, reworded')
     expect(git(cwd, 'show', '--name-only', '--format=', 'HEAD').split('\n').sort()).toEqual(['a.txt', 'b.txt'])
@@ -52,7 +56,7 @@ describe('GitService amend', () => {
 
   it('amends only the message when nothing changed', async () => {
     const { cwd } = fixture(); commitFile(cwd, 'a.txt', 'typo')
-    await new GitService().commit(cwd, 'fixed', { amend: true })
+    await new GitService().commit(cwd, USER, 'fixed', { amend: true })
     expect(git(cwd, 'log', '-1', '--format=%s')).toBe('fixed')
     expect(git(cwd, 'rev-list', '--count', 'HEAD')).toBe('1')
   })
@@ -61,21 +65,21 @@ describe('GitService amend', () => {
     const { cwd } = fixture(); git(cwd, 'remote', 'add', 'origin', join(cwd, '..', 'origin.git'))
     commitFile(cwd, 'a.txt', 'shared'); git(cwd, 'push', '-u', 'origin', 'main')
     const before = git(cwd, 'rev-parse', 'HEAD')
-    await expect(new GitService().commit(cwd, 'rewrite', { amend: true })).rejects.toMatchObject({ code: 'git_amend_pushed' })
+    await expect(new GitService().commit(cwd, USER, 'rewrite', { amend: true })).rejects.toMatchObject({ code: 'git_amend_pushed' })
     expect(git(cwd, 'rev-parse', 'HEAD')).toBe(before)
   })
 
   it('amends a commit made after the last push', async () => {
     const { cwd } = fixture(); git(cwd, 'remote', 'add', 'origin', join(cwd, '..', 'origin.git'))
     commitFile(cwd, 'a.txt', 'shared'); git(cwd, 'push', '-u', 'origin', 'main'); commitFile(cwd, 'b.txt', 'local')
-    await new GitService().commit(cwd, 'local, reworded', { amend: true })
+    await new GitService().commit(cwd, USER, 'local, reworded', { amend: true })
     expect(git(cwd, 'log', '-1', '--format=%s')).toBe('local, reworded')
   })
 
   it('refuses to amend a pushed commit on a new branch without an upstream', async () => {
     const { cwd, origin } = fixture(); git(cwd, 'remote', 'add', 'origin', origin)
     commitFile(cwd, 'a.txt', 'shared'); git(cwd, 'push', '-u', 'origin', 'main'); git(cwd, 'checkout', '-b', 'thread-worktree')
-    await expect(new GitService().commit(cwd, 'rewrite', { amend: true })).rejects.toMatchObject({ code: 'git_amend_pushed' })
+    await expect(new GitService().commit(cwd, USER, 'rewrite', { amend: true })).rejects.toMatchObject({ code: 'git_amend_pushed' })
     const [head] = await new GitService().getLog(cwd)
     expect(head).toMatchObject({ pushed: false, onRemote: true })
     commitFile(cwd, 'b.txt', 'local')
@@ -91,7 +95,7 @@ describe('GitService amend', () => {
 
   it('refuses to amend a repository without commits', async () => {
     const { cwd } = fixture()
-    await expect(new GitService().commit(cwd, 'nothing', { amend: true })).rejects.toMatchObject({ code: 'git_amend_no_commit' })
+    await expect(new GitService().commit(cwd, USER, 'nothing', { amend: true })).rejects.toMatchObject({ code: 'git_amend_no_commit' })
   })
 })
 
@@ -109,7 +113,7 @@ describe('GitService push', () => {
   it('publishes a branch without an upstream to origin and sets the upstream', async () => {
     const { cwd, origin } = fixture(); git(cwd, 'remote', 'add', 'origin', origin)
     commitFile(cwd, 'a.txt', 'first'); git(cwd, 'checkout', '-b', 'feature')
-    await new GitService().push(cwd)
+    await new GitService().push(cwd, USER)
     expect(git(cwd, 'rev-parse', '--abbrev-ref', '@{upstream}')).toBe('origin/feature')
     expect(git(origin, 'rev-parse', 'refs/heads/feature')).toBe(git(cwd, 'rev-parse', 'HEAD'))
   })
@@ -117,23 +121,23 @@ describe('GitService push', () => {
   it('publishes to the only remote when it is not called origin', async () => {
     const { cwd, origin } = fixture(); git(cwd, 'remote', 'add', 'team', origin)
     commitFile(cwd, 'a.txt', 'first')
-    await new GitService().push(cwd)
+    await new GitService().push(cwd, USER)
     expect(git(cwd, 'rev-parse', '--abbrev-ref', '@{upstream}')).toBe('team/main')
   })
 
   it('pushes to the existing upstream as before', async () => {
     const { cwd, origin } = fixture(); git(cwd, 'remote', 'add', 'origin', origin)
     commitFile(cwd, 'a.txt', 'first'); git(cwd, 'push', '-u', 'origin', 'main'); commitFile(cwd, 'b.txt', 'second')
-    await new GitService().push(cwd)
+    await new GitService().push(cwd, USER)
     expect(git(origin, 'rev-parse', 'refs/heads/main')).toBe(git(cwd, 'rev-parse', 'HEAD'))
   })
 
   it('reports a missing remote and a detached HEAD with typed errors', async () => {
     const { cwd } = fixture(), service = new GitService()
     commitFile(cwd, 'a.txt', 'first')
-    await expect(service.push(cwd)).rejects.toMatchObject({ code: 'git_no_remote', message: 'Add a remote before pushing.' })
+    await expect(service.push(cwd, USER)).rejects.toMatchObject({ code: 'git_no_remote', message: 'Add a remote before pushing.' })
     git(cwd, 'checkout', '--detach')
-    await expect(service.push(cwd)).rejects.toMatchObject({ code: 'git_detached_head' })
+    await expect(service.push(cwd, USER)).rejects.toMatchObject({ code: 'git_detached_head' })
   })
 })
 
@@ -145,7 +149,7 @@ describe('GitService rejected push', () => {
     git(other, 'config', 'user.name', 'Other'); git(other, 'config', 'user.email', 'other@example.invalid'); git(other, 'config', 'commit.gpgsign', 'false')
     commitFile(other, 'b.txt', 'theirs'); git(other, 'push', '-q')
     commitFile(cwd, 'c.txt', 'mine')
-    await expect(new GitService().push(cwd)).rejects.toMatchObject({ code: 'git_push_rejected' })
+    await expect(new GitService().push(cwd, USER)).rejects.toMatchObject({ code: 'git_push_rejected' })
   })
 })
 
@@ -172,11 +176,11 @@ describe('GitService mutations', () => {
     const service = new GitService()
     const writes = Array.from({ length: 4 }, (_, index) => {
       writeFileSync(join(cwd, `f${index}.txt`), `${index}\n`)
-      return service.commit(cwd, `commit ${index}`)
+      return service.commit(cwd, USER, `commit ${index}`)
     })
     // Every commit after the first finds nothing left to stage, so only the first may succeed;
     // none may fail on Git's index lock, which concurrent `git add` runs would hit.
-    const results = await Promise.allSettled([...writes, service.push(cwd)])
+    const results = await Promise.allSettled([...writes, service.push(cwd, USER)])
     const lockErrors = results.filter((result) => result.status === 'rejected' && /index\.lock/.test(String(result.reason)))
     expect(lockErrors).toEqual([])
     expect(git(cwd, 'status', '--porcelain')).toBe('')
@@ -189,10 +193,10 @@ describe('GitService init', () => {
     const root = mkdtempSync(join(tmpdir(), 'mousse-git-init-')); roots.push(root)
     const folder = join(root, 'plain'); mkdirSync(folder)
     const service = new GitService()
-    await service.init(folder)
+    await service.init(folder, USER)
     expect((await service.getStatus(folder)).isRepo).toBe(true)
-    await expect(service.init(folder)).rejects.toMatchObject({ code: 'git_already_repo' })
-    await expect(service.init(join(root, 'missing'))).rejects.toMatchObject({ code: 'git_init_no_folder' })
+    await expect(service.init(folder, USER)).rejects.toMatchObject({ code: 'git_already_repo' })
+    await expect(service.init(join(root, 'missing'), USER)).rejects.toMatchObject({ code: 'git_init_no_folder' })
   })
 })
 
@@ -204,7 +208,7 @@ describe('GitService lease', () => {
     const held = await acquireRepositoryLease(resolveRepositoryIdentity(linked))
     writeFileSync(join(cwd, 'b.txt'), 'b\n')
     let done = false
-    const committing = new GitService().commit(cwd, 'second').then(() => { done = true })
+    const committing = new GitService().commit(cwd, USER, 'second').then(() => { done = true })
     await new Promise((resolve) => setTimeout(resolve, 400))
     expect(done).toBe(false)
     held.release()
@@ -216,7 +220,7 @@ describe('GitService lease', () => {
     const { root, cwd, origin } = fixture(); git(cwd, 'remote', 'add', 'origin', origin)
     commitFile(cwd, 'a.txt', 'first')
     const threadDir = join(root, 'thread'); mkdirSync(threadDir)
-    await withGitMutationLocks(threadDir, cwd, 'test-push', () => new GitService().push(cwd))
+    await withGitMutationLocks(threadDir, cwd, 'test-push', () => new GitService().push(cwd, USER))
     expect(git(origin, 'rev-parse', 'refs/heads/main')).toBe(git(cwd, 'rev-parse', 'HEAD'))
   })
 
@@ -225,7 +229,7 @@ describe('GitService lease', () => {
     commitFile(cwd, 'a.txt', 'first'); git(cwd, 'push', '-u', 'origin', 'main')
     const results = await Promise.allSettled(Array.from({ length: 4 }, (_, index) => {
       writeFileSync(join(cwd, `f${index}.txt`), `${index}\n`)
-      return new GitService().commit(cwd, `commit ${index}`)
+      return new GitService().commit(cwd, USER, `commit ${index}`)
     }))
     expect(results.filter((result) => result.status === 'rejected' && /index\.lock/.test(String(result.reason)))).toEqual([])
     expect(git(cwd, 'status', '--porcelain')).toBe('')

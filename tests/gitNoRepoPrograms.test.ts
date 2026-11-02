@@ -6,10 +6,14 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { git as mousseGit } from '../src/mms/actions/git'
 import { ThreadActionService } from '../src/mms/actions/ThreadActionService'
 import { GitService } from '../src/mms/git/GitService'
+import { userAction } from '../src/mms/git/gitPolicy'
 import { ProjectManager } from '../src/mms/data/ProjectManager'
 import { clearRepoProgramCache, guardedSimpleGit, repoProgramOverrides, repoProgramProbes, trustExistingProjectsOnce, trustRepositoryPrograms, withoutRepoPrograms, writesThroughFilters } from '../src/mms/git/repoPrograms'
 import { ThreadWorkspaceManager } from '../src/mms/workspace/ThreadWorkspaceManager'
 import { actionOptions, gitFoundationFixture } from './fixtures/gitFoundation'
+
+/** The user's request a test passes to a GitService change. */
+const USER = userAction('button', 'Test action')
 
 /**
  * Programs a repository can name for Git to run, each planted the way an agent with only file access
@@ -199,7 +203,7 @@ describe('files under a filter only the repository defines are refused, never st
   it("the user's own Stage runs the filter, as a terminal would", async () => {
     const cwd = cryptRepo()
     writeFileSync(join(cwd, 'secrets.env'), 'TOKEN=two\n')
-    await new GitService().stageAll(cwd)
+    await new GitService().stageAll(cwd, USER)
     expect(ran()).toEqual(['crypt-clean'])
   })
 
@@ -387,7 +391,7 @@ describe("the user's own actions keep the repository's programs; Mousse's own co
     plain(cwd, 'config', 'core.sshCommand', command('ssh'))
     plain(cwd, 'remote', 'add', 'origin', 'ssh://git@example.invalid/work/repo.git')
     expect(withoutRepoPrograms(cwd, ['fetch'])).toContain('core.sshcommand=ssh')
-    await new GitService().fetch(cwd).catch(() => undefined)
+    await new GitService().fetch(cwd, USER).catch(() => undefined)
     expect(ran()).toEqual(['ssh'])
   })
 
@@ -397,7 +401,7 @@ describe("the user's own actions keep the repository's programs; Mousse's own co
     writeHook(join(cwd, '.git', 'hooks'), 'post-checkout', 'post-checkout')
     mousseGit(cwd, ['checkout', '-q', 'other'])
     expect(ran()).toEqual([])
-    await new GitService().checkout(cwd, 'main')
+    await new GitService().checkout(cwd, USER, 'main')
     expect(ran()).toEqual(['post-checkout'])
   })
 })

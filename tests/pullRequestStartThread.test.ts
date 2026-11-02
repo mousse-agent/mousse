@@ -8,6 +8,10 @@ import { PullRequestThreadError, PullRequestThreadService } from '../src/mms/git
 import { WORKTREE_CONFIG_ENABLED, WORKTREE_CONFIG_NEEDED, type PullRequestDetail } from '../src/shared/pullRequests'
 import { ThreadWorkspaceManager } from '../src/mms/workspace/ThreadWorkspaceManager'
 import { git, gitFoundationFixture } from './fixtures/gitFoundation'
+import { userAction } from '../src/mms/git/gitPolicy'
+
+/** The user's Start thread from pull request. */
+const START = userAction('button', 'Start thread from pull request')
 
 const REMOTES = 'origin\thttps://github.com/bob/app.git (fetch)\norigin\thttps://github.com/bob/app.git (push)\nupstream\thttps://github.com/acme/app.git (fetch)\nupstream\thttps://github.com/acme/app.git (push)\n'
 
@@ -56,7 +60,7 @@ describe('starting a thread from a pull request', () => {
 
   const workspaceOf = (threadId: string) => new ThreadWorkspaceManager(mms.threads.getThreadDir(threadId)).load()!
   const start = (patch: Partial<Parameters<PullRequestThreadService['startThread']>[0]> = {}) =>
-    service.startThread({ projectId, reference: '7', allowWorktreeConfig: true, ...patch })
+    service.startThread({ projectId, reference: '7', allowWorktreeConfig: true, ...patch }, START)
 
   beforeEach(async () => {
     f = gitFoundationFixture()
@@ -306,12 +310,12 @@ describe('starting a thread from a pull request', () => {
   })
 
   it('refuses a URL of another repository or host before reading anything', async () => {
-    await expect(service.startThread({ projectId, reference: 'https://github.com/other/app/pull/7' })).rejects.toMatchObject({ code: 'pull_request_wrong_repository' })
-    await expect(service.startThread({ projectId, reference: 'https://ghe.example.com/acme/app/pull/7' })).rejects.toMatchObject({ code: 'pull_request_wrong_repository' })
-    await expect(service.startThread({ projectId, reference: 'not a pull request' })).rejects.toMatchObject({ code: 'invalid_params' })
-    await expect(service.startThread({ projectId, reference: '0' })).rejects.toMatchObject({ code: 'invalid_params' })
+    await expect(service.startThread({ projectId, reference: 'https://github.com/other/app/pull/7' }, START)).rejects.toMatchObject({ code: 'pull_request_wrong_repository' })
+    await expect(service.startThread({ projectId, reference: 'https://ghe.example.com/acme/app/pull/7' }, START)).rejects.toMatchObject({ code: 'pull_request_wrong_repository' })
+    await expect(service.startThread({ projectId, reference: 'not a pull request' }, START)).rejects.toMatchObject({ code: 'invalid_params' })
+    await expect(service.startThread({ projectId, reference: '0' }, START)).rejects.toMatchObject({ code: 'invalid_params' })
     expect(host.getPullRequestDetail).not.toHaveBeenCalled()
-    const result = await service.startThread({ projectId, reference: 'https://github.com/acme/app/pull/7/files', allowWorktreeConfig: true })
+    const result = await service.startThread({ projectId, reference: 'https://github.com/acme/app/pull/7/files', allowWorktreeConfig: true }, START)
     expect(result.thread.pullRequest?.number).toBe(7)
   })
 
@@ -433,7 +437,7 @@ describe('starting a thread from a pull request', () => {
         prepareThread: () => { throw new Error('model store unavailable') }
       })
       const threadsBefore = mms.threads.listAllThreads().length
-      await expect(failing.startThread({ projectId, reference: '7', allowWorktreeConfig: true })).rejects.toMatchObject({
+      await expect(failing.startThread({ projectId, reference: '7', allowWorktreeConfig: true }, START)).rejects.toMatchObject({
         code: 'pull_request_workspace_failed',
         message: expect.stringContaining('model store unavailable')
       })
@@ -456,7 +460,7 @@ describe('starting a thread from a pull request', () => {
         send,
         prepareThread: () => { throw new Error('model store unavailable') }
       })
-      await expect(failing.startThread({ projectId, reference: '7', allowWorktreeConfig: true })).rejects.toMatchObject({ code: 'pull_request_workspace_failed' })
+      await expect(failing.startThread({ projectId, reference: '7', allowWorktreeConfig: true }, START)).rejects.toMatchObject({ code: 'pull_request_workspace_failed' })
       const registered = git(f.repo, 'worktree', 'list', '--porcelain').split('\n').filter((line) => line.startsWith('worktree '))
       expect(registered).toHaveLength(2)
       expect(registered.some((line) => line.endsWith('their-worktree'))).toBe(true)

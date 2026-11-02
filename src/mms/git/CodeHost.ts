@@ -1,3 +1,4 @@
+import type { UserAction } from './gitPolicy'
 import type {
   CreatePullRequestInput,
   GitPullRequestInfo,
@@ -28,7 +29,8 @@ export interface CodeHost {
    * the conversation only): a watch reads them itself, a page at a time, and keeps its own cache entry.
    */
   getPullRequestDetail(cwd: string, number: number, options?: { force?: boolean; lineComments?: boolean }): Promise<PullRequestDetail>
-  createPullRequest(cwd: string, input: CreatePullRequestInput): Promise<GitPullRequestInfo>
+  /** `userRequested` is the user's Create pull request action; the central Git check (`gitPolicy`) needs it for any change on the host. */
+  createPullRequest(cwd: string, input: CreatePullRequestInput, userRequested: UserAction): Promise<GitPullRequestInfo>
   listBaseBranches(cwd: string): Promise<PullRequestBaseBranches>
   /** The merge method the host's own merge button offers the signed-in account in the folder's repository; null when it cannot be read. */
   defaultMergeMethod(cwd: string): Promise<PullRequestMergeMethod | null>
@@ -36,9 +38,9 @@ export interface CodeHost {
    * Merges a pull request of the folder's repository and returns it as read back. The head branch is kept. With `headSha`
    * the host refuses when the head moved since. A failure throws with the host's own reason.
    */
-  mergePullRequest(cwd: string, number: number, options: { method: PullRequestMergeMethod; headSha?: string }): Promise<GitPullRequestInfo>
+  mergePullRequest(cwd: string, number: number, options: { method: PullRequestMergeMethod; headSha?: string }, userRequested: UserAction): Promise<GitPullRequestInfo>
   /** Closes a pull request of the folder's repository without merging it, keeping its branch; returns it as read back. */
-  closePullRequest(cwd: string, number: number): Promise<GitPullRequestInfo>
+  closePullRequest(cwd: string, number: number, userRequested: UserAction): Promise<GitPullRequestInfo>
   /**
    * The remote that points at the folder's repository, else `origin`, else the only remote; null when there is none.
    * With `identity` it is only a remote whose URL is exactly that repository (same host and `owner/repo`, whatever

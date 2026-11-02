@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process'
 import { StringDecoder } from 'node:string_decoder'
-import { withGitConfigEnv } from './gitEnv'
+import { mousseGitEnv } from './gitEnv'
 
 /** After a stopped process is asked to end, how long it has before its whole process group is killed. */
 const KILL_GRACE_MS = 2_000
@@ -148,7 +148,7 @@ export function runGit(cwd: string, args: readonly string[], options: GitRunOpti
     }
     const child = spawn('git', args, {
       cwd,
-      env: withGitConfigEnv({ ...process.env, ...englishMessagesEnv(), ...options.env }),
+      env: mousseGitEnv({ ...process.env, ...englishMessagesEnv(), ...options.env }),
       stdio: ['ignore', 'pipe', 'pipe'],
       windowsHide: true,
       // Leads its own process group on POSIX, so a stop reaches hooks and helpers too.

@@ -8,6 +8,7 @@ import { filterRefusal, repoProgramEnv, withoutRepoPrograms } from '../git/repoP
 import { IN_PROGRESS_GIT_MARKERS } from '../git/gitMarkers'
 import { MOUSSE_COMMIT_EMAIL, MOUSSE_COMMIT_NAME } from '../git/mousseCommitIdentity'
 import { readWorkingTreeStatusSync, type StatusEntry } from '../git/workingTreeStatus'
+import { rethrowGitPolicyError } from '../git/gitPolicy'
 
 /**
  * Git for Mousse's own actions (checkpoints, restore, undo, revert): no program the repository
@@ -16,7 +17,7 @@ import { readWorkingTreeStatusSync, type StatusEntry } from '../git/workingTreeS
  */
 export function git(cwd: string, args: string[], env?: NodeJS.ProcessEnv): string {
   try {
-    return execFileSync('git', withoutRepoPrograms(cwd, args), {
+    return execFileSync('git', withoutRepoPrograms(cwd, args, { env }), {
       cwd,
       env: repoProgramEnv(env ? { ...process.env, ...env } : process.env),
       encoding: 'utf8',
@@ -32,8 +33,10 @@ export function git(cwd: string, args: string[], env?: NodeJS.ProcessEnv): strin
 export function tryGit(cwd: string, args: string[], env?: NodeJS.ProcessEnv): { ok: boolean; stdout: string; stderr: string } {
   let guarded: string[]
   try {
-    guarded = withoutRepoPrograms(cwd, args)
+    guarded = withoutRepoPrograms(cwd, args, { env })
   } catch (error) {
+    // A refusal by the central Git check is its own error, never an ordinary failed run.
+    rethrowGitPolicyError(error)
     return { ok: false, stdout: '', stderr: error instanceof Error ? error.message : String(error) }
   }
   const result = spawnSync('git', guarded, { cwd, encoding: 'utf8', env: repoProgramEnv(env ? { ...process.env, ...env } : process.env) })
@@ -54,7 +57,7 @@ const NOT_MOUSSE = `:(exclude)${MOUSSE_DIRECTORY}`
 
 /** Git output exactly as printed (NUL-separated lists keep leading and trailing spaces), optionally fed `input`. */
 function gitRaw(cwd: string, args: string[], env?: NodeJS.ProcessEnv, input?: string): string {
-  const result = spawnSync('git', withoutRepoPrograms(cwd, args), { cwd, encoding: 'utf8', input, env: repoProgramEnv(env ? { ...process.env, ...env } : process.env) })
+  const result = spawnSync('git', withoutRepoPrograms(cwd, args, { env, stdin: input }), { cwd, encoding: 'utf8', input, env: repoProgramEnv(env ? { ...process.env, ...env } : process.env) })
   if (result.status !== 0) {
     const stderr = (result.stderr ?? '').trim()
     throw new Error(filterRefusal(stderr) || stderr || `git ${args[0]} failed`)

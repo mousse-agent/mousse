@@ -1,3 +1,4 @@
+import { userAction } from '../../git/gitPolicy'
 import { createHash } from 'node:crypto'
 import { realpath } from 'node:fs/promises'
 import {
@@ -320,7 +321,7 @@ export class DispatchService {
       await git(root, ['merge-base', '--is-ancestor', request.baseCommit, head], controller.signal)
       await git(
         root,
-        ['update-ref', resultRef(record.id), head, '0'.repeat(head.length)],
+        ['update-ref', '--no-deref', resultRef(record.id), head, '0'.repeat(head.length)],
         controller.signal
       )
       if (request.push) {
@@ -334,7 +335,10 @@ export class DispatchService {
             record.binding.options.remote!,
             `${resultRef(record.id)}:refs/heads/mousse/dispatch/${record.id}`
           ],
-          controller.signal
+          controller.signal,
+          undefined,
+          // The dispatching device asked for the push, on a binding its owner allowed to push.
+          userAction('device', `Push dispatch result to ${record.binding.options.remote}`)
         )
       }
       const bytes = await createResultBundle(root, quarantine, record.id, controller.signal),
