@@ -613,7 +613,7 @@ describe('a project without Git', () => {
     const manager = new ThreadWorkspaceManager(t.directory)
     expect(manager.load()).toBeUndefined()
     expect(existsSync(join(t.directory, 'workspace.json'))).toBe(false)
-    expect(manager.loadOrSnapshot()).toMatchObject({ threadId: 'a', lifecycle: 'ready', worktreePath: work, conversationBranchId: 'main', snapshotOnly: true, retainedRef: 'refs/mousse/threads/a/main' })
+    expect(await manager.loadOrSnapshotAsync()).toMatchObject({ threadId: 'a', lifecycle: 'ready', worktreePath: work, conversationBranchId: 'main', snapshotOnly: true, retainedRef: 'refs/mousse/threads/a/main' })
   })
 })
 

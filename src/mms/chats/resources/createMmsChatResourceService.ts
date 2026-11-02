@@ -37,7 +37,7 @@ export function createMmsChatResourceService(services: MmsProfileServices, resol
     if (fresh.profileId !== profileId || fresh.threadId !== binding.threadId || fresh.workspaceRoot !== binding.workspaceRoot || !fresh.participants.some((participant) => participant.id === binding.participant.id)) throw new ChatResourceError('resource_binding_changed', 'Group resource membership or workspace changed')
     const manager = new ThreadWorkspaceManager(services.threads.getThreadDir(binding.threadId))
     const metadata = manager.load()
-    if (metadata && (metadata.lifecycle !== 'ready' || await realpath(manager.executionContext('', metadata).projectPath) !== binding.workspaceRoot)) throw new ChatResourceError('resource_owner_mismatch', 'Group workspace differs from the owned task workspace')
+    if (metadata && (metadata.lifecycle !== 'ready' || await realpath(manager.workingFolder('', metadata)) !== binding.workspaceRoot)) throw new ChatResourceError('resource_owner_mismatch', 'Group workspace differs from the owned task workspace')
   }
   const browserContext = (binding: TrustedChatResourceBinding, sessionId?: string): BrowserToolContext => {
     const scope = sessionId ? services.platform.browser.sessions.trustedSessionScope({ profileId, threadId: binding.threadId, sessionId }) : undefined

@@ -481,9 +481,9 @@ describe('starting a thread from a pull request', () => {
       const realRemove = mms.threads.discardUnusedThread.bind(mms.threads)
       const discard = vi.spyOn(mms.threads, 'discardUnusedThread').mockImplementation((id) => realRemove(id))
       // Provisioning resolves the repository once; the cleanup that follows cannot.
-      const original = ThreadWorkspaceManager.prototype.resolveRepository
+      const original = ThreadWorkspaceManager.prototype.resolveRepositoryAsync
       let calls = 0
-      vi.spyOn(ThreadWorkspaceManager.prototype, 'resolveRepository').mockImplementation(function (this: ThreadWorkspaceManager, path: string) {
+      vi.spyOn(ThreadWorkspaceManager.prototype, 'resolveRepositoryAsync').mockImplementation(async function (this: ThreadWorkspaceManager, path: string) {
         if (++calls > 1) throw new Error('repository is busy')
         return original.call(this, path)
       })

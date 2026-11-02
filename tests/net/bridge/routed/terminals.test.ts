@@ -47,7 +47,7 @@ const create = (o: Owner, threadId: string, extra: Record<string, unknown> = {})
 function threadFolder(o: Owner, threadId: string, projectPath: string): string {
   const manager = new ThreadWorkspaceManager(o.f.mms.threads.getThreadDir(threadId))
   const stored = manager.load()
-  return manager.executionContext(projectPath, stored ?? undefined).projectPath
+  return manager.workingFolder(projectPath, stored ?? undefined)
 }
 
 async function opened(o: Owner) {

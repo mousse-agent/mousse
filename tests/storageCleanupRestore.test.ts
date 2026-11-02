@@ -136,7 +136,7 @@ describe('a worktree retired by a storage rule comes back on demand', () => {
     const { threadId, worktreePath } = await retiredThread()
     await gui.request('files.write', { threadId, path: 'restored.txt', content: 'after restore\n' })
     expect(readFileSync(join(worktreePath, 'restored.txt'), 'utf8')).toBe('after restore\n')
-    expect(new ThreadWorkspaceManager(mms.threads.getThreadDir(threadId)).verify().lifecycle).toBe('ready')
+    expect((await new ThreadWorkspaceManager(mms.threads.getThreadDir(threadId)).verify()).lifecycle).toBe('ready')
   }, 120_000)
 
   it('a terminal asked for while cleanup holds the thread is refused with a message that names cleanup', async () => {

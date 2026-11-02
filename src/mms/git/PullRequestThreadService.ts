@@ -147,7 +147,7 @@ export class PullRequestThreadService {
         { number: parsed.number }
       )
     }
-    return { detail, threads: this.threadsOf(detail.identity), enablesWorktreeConfig: !perWorktreeConfigEnabled(project.path) }
+    return { detail, threads: this.threadsOf(detail.identity), enablesWorktreeConfig: !await perWorktreeConfigEnabled(project.path) }
   }
 
   private threadsOf(identity: PullRequestIdentity): Array<{ id: string; name: string }> {
@@ -189,7 +189,7 @@ export class PullRequestThreadService {
     }
     // The repository's configuration changes only when the person agreed to it; a client that did not ask (an older one
     // included) is refused before anything is fetched or made.
-    if (input.allowWorktreeConfig !== true && !perWorktreeConfigEnabled(topLevel)) {
+    if (input.allowWorktreeConfig !== true && !await perWorktreeConfigEnabled(topLevel)) {
       throw new PullRequestThreadError('pull_request_worktree_config_needed', WORKTREE_CONFIG_NEEDED, { setting: 'extensions.worktreeConfig' })
     }
     let headSha: string
@@ -290,7 +290,7 @@ export class PullRequestThreadService {
       const workspace = manager.load()
       if (workspace) {
         lease = await acquireRepositoryLease(await resolveRepositoryIdentityAsync(topLevel, { requireMutationCapability: true }))
-        const primary = manager.resolveRepository(projectPath).primaryCheckoutPath
+        const primary = (await manager.resolveRepositoryAsync(projectPath)).primaryCheckoutPath
         const attempt = (args: string[]) => {
           try {
             git(primary, args)

@@ -104,7 +104,7 @@ import { UndoService } from '../actions/UndoService'
 import { UndoRetentionService } from '../actions/UndoRetentionService'
 import { ReceiptRefReleaseService } from '../actions/ReceiptRefReleaseService'
 import { releaseSnapshotRefs } from '../actions/SnapshotRefReleaseService'
-import { inThreadSnapshotScope, snapshotsOffReason } from '../workspace/SnapshotWorkspace'
+import { inThreadSnapshotScopeAsync, snapshotsOffReason } from '../workspace/SnapshotWorkspace'
 import { RedoService } from '../actions/RedoService'
 import { CodeRevertService } from '../actions/CodeRevertService'
 import { ConversationBranchService } from '../actions/ConversationBranchService'
@@ -124,7 +124,7 @@ import { getWorkspaceIndexRegistry } from '../files/WorkspaceIndexRegistry'
 import { searchWorkspacePaths } from '../files/WorkspaceSearch'
 import { devGuiBridge } from '../devgui/DevGuiBridge'
 import { existsSync, lstatSync, mkdirSync, readFileSync } from 'node:fs'
-import { realpath as realpathNative } from 'node:fs/promises'
+import { access, realpath as realpathNative } from 'node:fs/promises'
 import { FILE_ASSET_PIECE_BYTES, SAVE_TOO_LARGE_MESSAGE, saveExceedsRequest } from '../../shared/fileAssets'
 import { homedir } from 'node:os'
 import { isAbsolute, join, relative, resolve } from 'node:path'
@@ -480,7 +480,7 @@ function projectRootContext(ctx: HandlerContext, params: Record<string, unknown>
     const manager = new ThreadWorkspaceManager(ctx.mms.threads.getThreadDir(threadId))
     const workspace = manager.load()
     if (workspace && workspace.lifecycle !== 'ready') throw new DomainRpcError('workspace_not_ready', `Task workspace is ${workspace.lifecycle}; recovery is required.`)
-    return workspace ? manager.executionContext(projectPath, workspace).projectPath : projectPath
+    return workspace ? manager.workingFolder(projectPath, workspace) : projectPath
   }
   if (!projectId) throw new Error('projectId or threadId is required')
   const project = ctx.mms.projects.getProject(projectId)
@@ -517,7 +517,7 @@ async function fileCall<T>(ctx: HandlerContext, run: () => Promise<T>): Promise<
  * A thread or project that is named but unknown is refused (`thread_not_found`, `project_not_found`).
  * Never provisions or restores a worktree itself; the calls that use the folder restore a retired one first.
  */
-function localFilesRoot(ctx: HandlerContext, params: Record<string, unknown>): string {
+async function localFilesRoot(ctx: HandlerContext, params: Record<string, unknown>): Promise<string> {
   const threadId = asOptionalString(params.threadId, 256)
   const projectId = asOptionalString(params.projectId, 256)
   // A thread or project that is named but unknown is refused, never answered with the home folder.
@@ -527,8 +527,9 @@ function localFilesRoot(ctx: HandlerContext, params: Record<string, unknown>): s
   if (threadId && threadProject) {
     const manager = new ThreadWorkspaceManager(ctx.mms.threads.getThreadDir(threadId))
     const stored = manager.load()
-    const execution = manager.executionContext(threadProject, stored ? manager.verify(stored) : undefined)
-    if (execution.lifecycle === 'ready' && execution.projectPath) return execution.projectPath
+    const verified = stored ? await manager.verify(stored) : undefined
+    // A ready workspace's folder, as `executionContext` names it; without a record there is none to use.
+    if (verified?.lifecycle === 'ready') return manager.workingFolder(threadProject, verified)
   }
   if (projectId) return ctx.mms.projects.getProject(projectId)!.path
   return threadProject ?? homedir()
@@ -541,7 +542,7 @@ function localFilesRoot(ctx: HandlerContext, params: Record<string, unknown>): s
  */
 async function filesRootContext(ctx: HandlerContext, params: Record<string, unknown>): Promise<string> {
   await materializeRequestedWorkspace(ctx, params)
-  return isLocalWindow(ctx) ? localFilesRoot(ctx, params) : projectRootContext(ctx, params)
+  return isLocalWindow(ctx) ? await localFilesRoot(ctx, params) : projectRootContext(ctx, params)
 }
 
 /** The folder of a `pullRequests.*` call; a missing or doubled reference is the caller's mistake, not an internal error. */
@@ -802,13 +803,13 @@ async function ensureOwnedTaskWorkspace(ctx: HandlerContext, params: Record<stri
   if (!project) throw new DomainRpcError('thread_has_no_folder', 'Task has no project workspace')
   // No worktree for a thread in its project's folder; its record lets file writes and terminals be recorded and undone.
   if (threadPlacement(thread) === 'project-folder') {
-    new ThreadWorkspaceManager(ctx.mms.threads.getThreadDir(threadId)).ensureProjectFolder(threadId, 'main', project)
+    await new ThreadWorkspaceManager(ctx.mms.threads.getThreadDir(threadId)).ensureProjectFolder(threadId, 'main', project)
     return
   }
   const manager = new ThreadWorkspaceManager(ctx.mms.threads.getThreadDir(threadId))
   if (!manager.load()) await manager.provision(threadId, 'main', project, undefined, undefined, undefined, { nameFrom: branchNameSource(ctx, threadId) })
   await ensureWorkspaceMaterialized(ctx, threadId, project)
-  if (manager.verify().lifecycle !== 'ready') throw new DomainRpcError('workspace_recovery_required', 'Task workspace requires recovery before mutation')
+  if ((await manager.verify()).lifecycle !== 'ready') throw new DomainRpcError('workspace_recovery_required', 'Task workspace requires recovery before mutation')
 }
 
 /** Refusals that follow from a thread's worktree being the thread's own. Each has a fixed code the GUI can show copy for. */
@@ -1027,8 +1028,8 @@ interface ReviewTarget {
 }
 
 /** Reads a review target: a thread's turns through its own store, anything else (the working tree) as the folder is. */
-function readReview<T>(target: ReviewTarget, read: () => T): T {
-  return target.threadDirectory ? inThreadSnapshotScope(target.threadDirectory, target.root, read) : read()
+function readReview<T>(target: ReviewTarget, read: () => Promise<T>): Promise<T> {
+  return target.threadDirectory ? inThreadSnapshotScopeAsync(target.threadDirectory, target.root, read) : read()
 }
 
 /** Resolves a review scope to the root it reads from and the Git range it compares. */
@@ -2174,9 +2175,9 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       // A thread in its project's folder has no worktree: its terminal starts in the project folder.
       if (!metadata && task?.projectId && (routed || p.cwd === undefined)) cwd = resolveThreadProjectPath(ctx.mms.projects, ctx.mms.threads, threadId) ?? cwd
       if (metadata) {
-        if (manager!.verify(metadata).lifecycle !== 'ready') throw new DomainRpcError('workspace_recovery_required', 'Task workspace requires recovery before opening a terminal')
+        if ((await manager!.verify(metadata)).lifecycle !== 'ready') throw new DomainRpcError('workspace_recovery_required', 'Task workspace requires recovery before opening a terminal')
         const projectPath = resolveThreadProjectPath(ctx.mms.projects, ctx.mms.threads, threadId)
-        if (routed || p.cwd === undefined || projectPath && cwd === projectPath) cwd = manager!.executionContext(projectPath ?? metadata.worktreePath, metadata).projectPath
+        if (routed || p.cwd === undefined || projectPath && cwd === projectPath) cwd = manager!.workingFolder(projectPath ?? metadata.worktreePath, metadata)
         else cwd = assertEpisodePath(metadata.worktreePath, cwd)
       }
       const lease = directory ? tryAcquireExecutionLease(directory, { source: 'task-terminal' }) : undefined
@@ -2820,17 +2821,17 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const lookup = threadLookupContext(ctx, p)
       const manager = new ThreadWorkspaceManager(lookup.threadDirectory)
       const stored = manager.load()
-      const metadata = stored && lookup.projectPath ? manager.verify(stored) : stored
+      const metadata = stored && lookup.projectPath ? await manager.verify(stored) : stored
       // Never restores: the hover card and the active-project lookup call this for passive reads.
-      const marker = stored && !existsSync(stored.worktreePath) ? readCleanupMarker(ctx.mms.threads.lifecycleStore, lookup.threadId) : undefined
+      const marker = stored && !await access(stored.worktreePath).then(() => true, () => false) ? readCleanupMarker(ctx.mms.threads.lifecycleStore, lookup.threadId) : undefined
       // What the thread waits on, for the banner and the CLI; absent while nothing does. A thread recording into a hidden
-      // store (no Git of its own) is read through `loadOrSnapshot`, so it shows the banner too.
-      const recovery = threadRecovery(lookup.threadDirectory, lookup.projectPath)
+      // store (no Git of its own) is read through `loadOrSnapshotAsync`, so it shows the banner too.
+      const recovery = await threadRecovery(lookup.threadDirectory, lookup.projectPath)
       return {
         metadata,
         ...(recovery ? { recovery } : {}),
         execution: lookup.projectPath
-          ? manager.executionContext(lookup.projectPath, metadata)
+          ? await manager.executionContext(lookup.projectPath, metadata)
           : manager.unboundExecutionContext(lookup.threadId),
         journalGeneration: lookup.currentGeneration,
         ...(marker ? { retiredByCleanup: { at: marker.retiredAt, rule: marker.rule } } : {})
@@ -2842,7 +2843,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       rejectUnknownKeys(p, ['threadId'])
       const lookup = threadLookupContext(ctx, p)
       if (!lookup.projectPath) throw new DomainRpcError('thread_has_no_folder', 'This thread has no folder on this computer.', { threadId: lookup.threadId })
-      return resolveEditorFolder({ threadId: lookup.threadId, threadDirectory: lookup.threadDirectory, projectPath: lookup.projectPath })
+      return await resolveEditorFolder({ threadId: lookup.threadId, threadDirectory: lookup.threadDirectory, projectPath: lookup.projectPath })
     }
     case 'editor.ask': {
       // Another computer asks this one to allow its editor connections. Only a routed call carries the caller.
@@ -2925,7 +2926,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       if (latest?.scope === 'conversation') {
         try { ctx.mms.orchestrator.validateConversationActionRestore(operation.threadId, latest, latest.state === 'undone' ? 'redo' : 'undo') } catch { contextMatches = false }
       }
-      const workspaceReady = latest?.scope === 'conversation' || new ThreadWorkspaceManager(operation.threadDirectory).loadOrSnapshot()?.lifecycle === 'ready'
+      const workspaceReady = latest?.scope === 'conversation' || (await new ThreadWorkspaceManager(operation.threadDirectory).loadOrSnapshotAsync())?.lifecycle === 'ready'
       const eligible = !busy && contextMatches && workspaceReady && latest?.nativeContextStartBoundary && latest?.reversible && retained
       const matches = latest && prompt && messages.indexOf(prompt) >= latest.presentationMessageStart && messages.indexOf(prompt) < latest.presentationMessageEnd && prompt.turnId === latest.turnId
       const undoTarget = eligible && matches && latest.state === 'completed'
@@ -2952,7 +2953,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const p = isObject(params) ? params : {}
       const operation = threadLookupContext(ctx, p)
       await ensureWorkspaceMaterialized(ctx, operation.threadId, operation.projectPath)
-      const workspace = new ThreadWorkspaceManager(operation.threadDirectory).loadOrSnapshot()
+      const workspace = await new ThreadWorkspaceManager(operation.threadDirectory).loadOrSnapshotAsync()
       if (!workspace || workspace.lifecycle !== 'ready') throw new DomainRpcError('workspace_not_ready', 'Thread workspace is not ready')
       const retention = new UndoRetentionService(operation.threadDirectory)
       if (method === 'actions.sweepRetention') {
@@ -3002,7 +3003,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const operation = threadLookupContext(ctx, p)
       // A workspace Undo needs the checkout; a conversation-only Undo does not.
       if (operation.projectPath && new ThreadActionService(operation.threadDirectory).latest(new ThreadWorkspaceManager(operation.threadDirectory).load()?.conversationBranchId ?? 'main')?.scope !== 'conversation') await ensureWorkspaceMaterialized(ctx, operation.threadId, operation.projectPath)
-      const workspace = new ThreadWorkspaceManager(operation.threadDirectory).loadOrSnapshot()
+      const workspace = await new ThreadWorkspaceManager(operation.threadDirectory).loadOrSnapshotAsync()
       const branchId = workspace?.conversationBranchId ?? 'main'
       const expectedTurnId = asOptionalString(p.expectedTurnId, 256)
       const validate = (target: import('../../shared/threadActions').ThreadAction): void => {
@@ -3048,7 +3049,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const operation = threadLookupContext(ctx, p)
       const actionId = asString(p.actionId, 'actionId', 256)
       await ensureWorkspaceMaterialized(ctx, operation.threadId, operation.projectPath)
-      const workspace = new ThreadWorkspaceManager(operation.threadDirectory).loadOrSnapshot()
+      const workspace = await new ThreadWorkspaceManager(operation.threadDirectory).loadOrSnapshotAsync()
       if (!workspace || workspace.lifecycle !== 'ready') throw new DomainRpcError('workspace_not_ready', 'Thread workspace is not ready')
       const target = new ThreadActionService(operation.threadDirectory).get(actionId)
       const reviewedDiffSha = asReviewedDiffSha(p)
@@ -3063,7 +3064,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const p = isObject(params) ? params : {}
       const operation = threadLookupContext(ctx, p)
       const branchId = asOptionalString(p.conversationBranchId, 256) ?? new ThreadWorkspaceManager(operation.threadDirectory).load()?.conversationBranchId ?? 'main'
-      const workspace = new ThreadWorkspaceManager(operation.threadDirectory).loadOrSnapshot()
+      const workspace = await new ThreadWorkspaceManager(operation.threadDirectory).loadOrSnapshotAsync()
       if (new ThreadActionService(operation.threadDirectory).latest(branchId)?.scope === 'conversation') {
         if (branchId !== (workspace?.conversationBranchId ?? 'main')) throw new DomainRpcError('branch_not_active', 'Conversation history requires the active branch.')
         const action = new ConversationActionService(operation.threadDirectory).apply(branchId, 'redo', operation.currentGeneration, undefined, (target) => {
@@ -3131,7 +3132,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const p = isObject(params) ? params : {}
       const operation = threadLookupContext(ctx, p)
       await ensureWorkspaceMaterialized(ctx, operation.threadId, operation.projectPath)
-      const workspace = new ThreadWorkspaceManager(operation.threadDirectory).loadOrSnapshot()
+      const workspace = await new ThreadWorkspaceManager(operation.threadDirectory).loadOrSnapshotAsync()
       if (!workspace || workspace.lifecycle !== 'ready') throw new DomainRpcError('workspace_not_ready', 'Thread workspace is not ready')
       assertNoRunningTurn(ctx, operation.threadId)
       let cancelledIntegrations: Awaited<ReturnType<typeof cancelPendingIntegrations>>
@@ -3141,7 +3142,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         // A merge of a subagent result an older version left unfinished is cancelled, never run again.
         cancelledIntegrations = await cancelPendingIntegrations(operation.threadDirectory, workspace.worktreePath)
         // A left merge that was finished, aborted or replaced since is no longer offered for Abort.
-        clearStaleLeftMerges(operation.threadDirectory)
+        await clearStaleLeftMerges(operation.threadDirectory)
         // A folder with no worktree has nothing to publish, and neither has a thread in its project's own folder: its work
         // is already there, so there is no Publish to recover, and the person's checkout is never treated as one's target.
         publish = operation.projectPath && !workspace.snapshotOnly && !isProjectFolderWorkspace(workspace) ? await new PublishService(operation.threadDirectory).recoverPending(workspace.worktreePath, operation.projectPath) : []
@@ -3175,7 +3176,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         throw new DomainRpcError(isLeaseBusy(error) ? 'thread_busy' : 'recovery_failed', isLeaseBusy(error) ? THREAD_BUSY_TEXT : recoveryErrorText(error))
       }
       // What still waits after this attempt, in plain words: recovery reports the truth, not only that it ran.
-      const left = threadRecovery(operation.threadDirectory, operation.projectPath)
+      const left = await threadRecovery(operation.threadDirectory, operation.projectPath)
       const stillWaiting = !left ? undefined
         : publish.some((item) => item.state === 'pending') && left.kind === 'publish' ? "the project folder can't be read, so Mousse can't tell yet whether the Publish reached its branch"
         : releaseRetained && left.operationType === 'undo-ref-release' ? `old Undo history could not be released yet: ${releaseRetained}`
@@ -3236,7 +3237,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       // Restores a retired worktree like the calls that read it, so the header, the terminal's folder,
       // file links and the tree all name the same folder.
       await materializeRequestedWorkspace(ctx, p)
-      return { root: localFilesRoot(ctx, p) }
+      return { root: await localFilesRoot(ctx, p) }
     }
     case 'files.list': {
       const p = isObject(params) ? params : {}
@@ -3281,7 +3282,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       return await fileCall(ctx, async () => {
         // The file was read from the thread's worktree, so a retired one comes back before it is written.
         await materializeRequestedWorkspace(ctx, p)
-        const root = localFilesRoot(ctx, p)
+        const root = await localFilesRoot(ctx, p)
         const path = requiredContainedPath(ctx, root, p.path)
         const lines = await ctx.mms.fileService.writeFile(root, path, content)
         ctx.mms.lineEditStats.record('manual', lines)
@@ -3453,7 +3454,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         if (!metadata || !directory) return ctx.mms.gitService.push(root, gitUserAction(ctx, 'Push'), { expectedBranch, ...request })
         return withGitMutationLocks(directory, root, 'user-git-push', async () => {
           const manager = new ThreadWorkspaceManager(directory)
-          if (manager.verify().lifecycle !== 'ready' || manager.load()?.headSha !== metadata.headSha) throw new DomainRpcError('task_revision_changed', 'Task revision changed before push; refresh the reviewed revision')
+          if ((await manager.verify()).lifecycle !== 'ready' || manager.load()?.headSha !== metadata.headSha) throw new DomainRpcError('task_revision_changed', 'Task revision changed before push; refresh the reviewed revision')
           // A push sends commits. Files that are not committed are not in them, and they are not a reason to hold the commits back.
           const uncommitted = (await workspaceGitAsync(root, ['status', '--porcelain', '--untracked-files=all'])).split(/\r?\n/).filter(Boolean).length
           await ctx.mms.gitService.push(root, gitUserAction(ctx, 'Push'), { expectedBranch, ...toPullRequest, ...request })

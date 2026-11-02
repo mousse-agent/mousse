@@ -223,7 +223,7 @@ import { waitForFolderAccess, type WaitOptions } from '../files/folderAccess'
 import { resolveProjectWorkingDirectory } from '../data/projectWorkingDirectory'
 import { lineageForChild } from '../data/subagentLineage'
 import { SNAPSHOT_STORE_REASON, WorkspaceResolver, modeMutatesFiles, unprovisionedContext } from '../workspace/WorkspaceResolver'
-import { ensureSnapshotWorkspace, setSnapshotsOff } from '../workspace/SnapshotWorkspace'
+import { ensureSnapshotWorkspaceAsync, loadSnapshotWorkspaceMetadataAsync, setSnapshotsOff } from '../workspace/SnapshotWorkspace'
 import { threadPlacement, type ThreadPlacement } from '../workspace/threadPlacement'
 import { ThreadWorkspaceManager } from '../workspace/ThreadWorkspaceManager'
 import { findWorktreeOwner } from '../scheduled/validateJobOptions'
@@ -3382,6 +3382,9 @@ export class OrchestratorService extends EventEmitter {
     // A bot's thread acts for a person outside Mousse and starts no threads.
     if (this.botThreads?.roleOf(options.actor.threadId)) throw new McpToolError('mousse_scope_denied', 'A thread that belongs to a bot cannot create threads.')
     const key = options.clientRequestId
+    // Whether the project is a Git repository, read ahead without blocking, so the receipt is looked up, planned and
+    // recorded below with nothing awaited in between. Only for a request not seen before.
+    const gitBacked = engine.store.getReceipt(key) ? false : await this.projectGitBacked(input.projectId)
     const stored = engine.store.getReceipt(key)
     let intent: AgentThreadIntent
     if (stored) {
@@ -3390,7 +3393,7 @@ export class OrchestratorService extends EventEmitter {
       intent = earlier.intent
     } else {
       // Everything that can refuse does so here, before anything is recorded or made.
-      intent = this.planAgentThread(input, options)
+      intent = this.planAgentThread(input, options, gitBacked)
       engine.store.putReceipt({
         clientRequestId: key,
         threadId: options.actor.threadId,
@@ -3408,17 +3411,23 @@ export class OrchestratorService extends EventEmitter {
   }
 
   /** The launch an agent asked for, checked against the project, the profile and the caller's own limits. Throws what it refuses. */
-  private planAgentThread(input: AgentThreadRequest, options: { actor: AgentActor; accessLevel: AgentAccessLevel }): AgentThreadIntent {
+  /** Whether a project's folder is a Git repository a worktree can be made in; false for an unknown project or one Git cannot read. */
+  private async projectGitBacked(projectId: string): Promise<boolean> {
+    const project = this.projectManager?.getProject(projectId)
+    if (!project) return false
+    try {
+      return (await new ThreadWorkspaceManager('').resolveRepositoryAsync(project.path)).capability.gitBacked
+    } catch {
+      return false
+    }
+  }
+
+  /** `gitBacked`: {@link projectGitBacked} of the project, read by the caller before the receipt lookup. */
+  private planAgentThread(input: AgentThreadRequest, options: { actor: AgentActor; accessLevel: AgentAccessLevel }, gitBacked: boolean): AgentThreadIntent {
     const engine = this.requireRunEngine()
     const project = this.projectManager?.getProject(input.projectId)
     if (!project) throw new Error(`Project ${input.projectId} was not found.`)
     // A worktree needs Git: on any other project a "new worktree" thread would write in the project folder, beside others.
-    let gitBacked = false
-    try {
-      gitBacked = new ThreadWorkspaceManager('').resolveRepository(project.path).capability.gitBacked
-    } catch {
-      gitBacked = false
-    }
     if (input.workspace === 'new_worktree' && !gitBacked)
       throw new Error('workspace "new_worktree" needs a Git project: this project is not backed by a Git repository, so a thread there would work in the project folder. Use workspace "project". No thread was created.')
     // However many runs this thread has made, only so many of its launched threads may be working at once.
@@ -5191,7 +5200,7 @@ export class OrchestratorService extends EventEmitter {
     try {
       if (manager.load()) seed = { kind: 'existing_workspace' }
       else if (this.placementOf(threadId) === 'project-folder') seed = { kind: 'project_folder' }
-      else if (!manager.resolveRepository(projectPath).capability.gitBacked) seed = { kind: 'not_git_backed' }
+      else if (!(await manager.resolveRepositoryAsync(projectPath)).capability.gitBacked) seed = { kind: 'not_git_backed' }
       else {
         const sourceDir = this.resolveThreadDir(fork.sourceThreadId)
         const sourceRunId = String(fork.payload.sourceRunId ?? '')
@@ -9115,7 +9124,8 @@ export class OrchestratorService extends EventEmitter {
     // operations below under that lease, before workspace verification/dispatch.
     const recoveryDirectory = session.threadId !== '__unbound__' ? this.resolveThreadDir(session.threadId) : undefined
     const recoveryManager = recoveryDirectory ? new ThreadWorkspaceManager(recoveryDirectory) : undefined
-    const recoveryWorkspace = recoveryManager?.loadOrSnapshot()
+    // A thread recording into a hidden store is looked up without blocking; only then does this wait before the lease.
+    const recoveryWorkspace = recoveryManager ? recoveryManager.load() ?? await loadSnapshotWorkspaceMetadataAsync(recoveryDirectory!) : undefined
     // Acquire cross-process execution lease before mutating thread state.
     let lease: ThreadLeaseHandle | null = session.executionLease
     if (session.threadId !== '__unbound__') {
@@ -9180,7 +9190,7 @@ export class OrchestratorService extends EventEmitter {
       let gitBacked = false
       try {
         const threadDir = this.resolveThreadDir(session.threadId)
-        gitBacked = Boolean(threadDir && new ThreadWorkspaceManager(threadDir).resolveRepository(session.primaryCheckout.path).capability.gitBacked)
+        gitBacked = Boolean(threadDir && (await new ThreadWorkspaceManager(threadDir).resolveRepositoryAsync(session.primaryCheckout.path)).capability.gitBacked)
       } catch {
         // Not a repository the checkout code understands: the context says so.
       }
@@ -9258,7 +9268,7 @@ export class OrchestratorService extends EventEmitter {
         // A folder with no worktree: a folder Mousse cannot snapshot (too large, a home folder) never fails the turn;
         // it runs with its conversation recorded alone, and Undo says why the files are not.
         try {
-          const prepared = ensureSnapshotWorkspace({ threadDirectory: snapshotFolder.directory, threadId: snapshotFolder.threadId, workTree: snapshotFolder.workTree, projectId: snapshotFolder.projectId })
+          const prepared = await ensureSnapshotWorkspaceAsync({ threadDirectory: snapshotFolder.directory, threadId: snapshotFolder.threadId, workTree: snapshotFolder.workTree, projectId: snapshotFolder.projectId })
           checkpointCwd = prepared.record.workTree
           turnStartSha = (await new ThreadActionService(snapshotFolder.directory).recordOutsideChanges({
             threadId: session.threadId, conversationBranchId, workspacePath: checkpointCwd,

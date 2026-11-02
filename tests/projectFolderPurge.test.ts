@@ -33,7 +33,7 @@ async function fixture() {
   writeFileSync(join(repo, 'a.txt'), 'first\n'); git(repo, ['add', '.']); git(repo, ['commit', '-qm', 'base'])
 
   // The thread's record and one recorded action in the project folder: a snapshot pair, a receipt and the thread's pin.
-  new ThreadWorkspaceManager(location).ensureProjectFolder('task', 'main', repo)
+  await new ThreadWorkspaceManager(location).ensureProjectFolder('task', 'main', repo)
   await new ThreadActionService(location).runCheckpointedAction({
     threadId: 'task', turnId: 'edit', conversationBranchId: 'main', workspacePath: repo, actor: { kind: 'user' }, allowDirtyInput: true,
     presentationMessageStart: 0, presentationMessageEnd: 0, nativeContextBoundary: { messageIndex: 0, compactionGeneration: 0, fidelity: 'exact' }

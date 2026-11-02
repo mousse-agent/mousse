@@ -1,4 +1,5 @@
-import { existsSync } from 'node:fs'
+import { access } from 'node:fs/promises'
+import { waitForFolderAccess } from '../files/folderAccess'
 import { resolve } from 'node:path'
 import type { SimpleGit } from 'simple-git'
 import { checkRepoPrograms, guardedSimpleGit } from '../git/repoPrograms'
@@ -17,7 +18,8 @@ export class RepositoryContext {
       throw new Error('An explicit repository path is required.')
     }
     const requestedPath = resolve(repositoryPath)
-    if (!existsSync(requestedPath)) {
+    await waitForFolderAccess([requestedPath])
+    if (!await access(requestedPath).then(() => true, () => false)) {
       throw new Error(`Repository path does not exist: ${requestedPath}`)
     }
 

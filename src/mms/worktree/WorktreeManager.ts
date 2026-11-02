@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readdirSync, statSync } from 'fs'
+import { access, mkdir, readdir, stat } from 'fs/promises'
 import { GIT_NULL_DEVICE } from '../git/gitNullDevice'
 import { basename, join, relative, resolve, sep } from 'path'
 import simpleGit, { SimpleGit } from 'simple-git'
@@ -7,6 +7,10 @@ import { RepositoryContext } from './RepositoryContext'
 import { WorktreeIdentity } from './WorktreeIdentity'
 import { resolveRepositoryIdentityAsync } from '../git/RepositoryIdentity'
 import { getMousseHomeDir } from '../data/paths'
+
+
+/** `existsSync` without blocking the daemon. */
+const exists = (path: string): Promise<boolean> => access(path).then(() => true, () => false)
 
 export interface WorktreeInfo {
   path: string
@@ -67,7 +71,7 @@ export class WorktreeManager {
     // callers. RepositoryContext still owns the canonical Git command context.
     this.repository = await RepositoryContext.open(this.repoRoot)
     this.worktreesBase = join(this.repoRoot, '.mousse-worktrees')
-    if (!existsSync(this.worktreesBase)) mkdirSync(this.worktreesBase, { recursive: true })
+    await mkdir(this.worktreesBase, { recursive: true })
   }
 
   private async getRepository(): Promise<RepositoryContext> {
@@ -106,9 +110,9 @@ export class WorktreeManager {
     const repository = await RepositoryContext.open(repositoryPath)
     const repositoryId = (await resolveRepositoryIdentityAsync(repository.root, { requireMutationCapability: true })).key
     const worktreesBase = join(this.installationHome, 'repositories', repositoryId, 'worktrees', 'agents')
-    mkdirSync(worktreesBase, { recursive: true })
+    await mkdir(worktreesBase, { recursive: true })
     const identity = WorktreeIdentity.forAgent(worktreesBase, agentId)
-    if (existsSync(identity.path)) {
+    if (await exists(identity.path)) {
       throw new Error(`Refusing to reuse existing agent worktree path: ${identity.path}`)
     }
     const branchExists = await repository.git.raw(['show-ref', '--verify', `refs/heads/${identity.branch}`])
@@ -138,7 +142,7 @@ export class WorktreeManager {
   async hasMergeCandidate(worktreeInfo: WorktreeInfo): Promise<boolean> {
     const repository = await this.repositoryFor(worktreeInfo)
     return repository.git.raw(['show-ref', '--verify', `refs/heads/${worktreeInfo.branch}`])
-      .then(() => existsSync(worktreeInfo.path))
+      .then(() => exists(worktreeInfo.path))
       .catch(() => false)
   }
 
@@ -183,12 +187,12 @@ export class WorktreeManager {
     const knownAgentDirs: string[] = []
     const recoverableKnown: WorktreeInfo[] = []
 
-    if (existsSync(basePath)) {
-      for (const name of readdirSync(basePath)) {
+    if (await exists(basePath)) {
+      for (const name of await readdir(basePath)) {
         const full = resolve(basePath, name)
         let isDir = false
         try {
-          isDir = statSync(full).isDirectory()
+          isDir = (await stat(full)).isDirectory()
         } catch {
           continue
         }
@@ -202,7 +206,7 @@ export class WorktreeManager {
         }
 
         const isAgentNamed = AGENT_DIR_PATTERN.test(name)
-        const looksLikeGitWorktree = existsSync(join(full, '.git'))
+        const looksLikeGitWorktree = await exists(join(full, '.git'))
         if (!looksLikeGitWorktree) {
           ghostDirectories.push({
             path: full,
@@ -259,7 +263,7 @@ export class WorktreeManager {
       if (!valid) {
         return { success: false, error: `Refusing to remove path that is not a validated agent worktree: ${worktreeInfo.path}` }
       }
-      if (existsSync(worktreeInfo.path)) {
+      if (await exists(worktreeInfo.path)) {
         const { git: cleanupGit, safety } = options.safeCheckout
           ? await safeWorktreeGit(repository.root)
           : { git: repository.git, safety: [] }

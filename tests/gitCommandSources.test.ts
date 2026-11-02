@@ -38,7 +38,6 @@ const APPROVED_GIT_SPAWNERS: Record<string, string> = {
   'src/mms/lifecycle/WorktreeRetirementService.ts': 'withoutRepoPrograms',
   'src/mms/workspace/ThreadWorkspaceManager.ts': 'assertGitAllowed',
   'src/mms/workspace/WorkflowWorkspace.ts': 'withoutRepoPrograms',
-  'src/mms/workspace/WorkspaceGcService.ts': 'withoutRepoPrograms',
   'src/mms/worktree/WorktreeManager.ts': 'policedSimpleGit'
 }
 
