@@ -199,6 +199,26 @@ describe('a project without Git', () => {
     expect(t.store('for-each-ref', '--format=%(refname)').split('\n')).toEqual(expect.arrayContaining(storeRefs.split('\n')))
   })
 
+  it('names a nested repository with uncommitted changes, from its own Git, and not a clean one', async () => {
+    const work = folder('work')
+    write(work, 'a.txt', 'a\n')
+    const identity = ['-c', 'user.name=Ada', '-c', 'user.email=ada@example.test']
+    for (const name of ['clean', 'dirty']) {
+      const nested = folder(`work/${name}`)
+      git(nested, 'init', '-q')
+      write(nested, 'lib.txt', 'one\n')
+      git(nested, 'add', 'lib.txt')
+      git(nested, ...identity, 'commit', '-q', '-m', 'init')
+    }
+    const t = thread('a', work, 'project-1')
+    const { action } = await t.turn('turn', () => write(work, 'dirty/lib.txt', 'two\n'))
+    expect(action.git?.coverageGaps).toEqual([{ path: 'dirty', reason: 'nested repository; only its commit is recorded' }])
+    expect(action.notCovered).toBe('Not covered: dirty (nested repository; only its commit is recorded).')
+    // The nested repositories are their own: their HEAD and status are as their owner left them.
+    expect(git(join(work, 'dirty'), 'status', '--porcelain')).toBe('M lib.txt')
+    expect(git(join(work, 'clean'), 'status', '--porcelain')).toBe('')
+  })
+
   it('leaves a nested repository with no commit out of the snapshot instead of turning Undo off', async () => {
     const work = folder('work')
     write(work, 'a.txt', 'a\n')

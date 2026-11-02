@@ -4,7 +4,7 @@ import { copyFileSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSy
 import { homedir } from 'node:os'
 import { join, parse, resolve, sep } from 'node:path'
 import type { GitRecord } from '../../shared/threadActions'
-import { activeHiddenStore } from '../git/hiddenStore'
+import { activeHiddenStore, outsideHiddenStore } from '../git/hiddenStore'
 import { repoProgramEnv } from '../git/repoPrograms'
 import { git, guarded, mergeTrees, MOUSSE_COMMIT_ENV, NOT_MOUSSE, operationInProgress, tryGit, treeOf } from './git'
 
@@ -52,7 +52,8 @@ const NESTED_COMMIT_ONLY = 'nested repository; only its commit is recorded'
 function nestedWithChanges(top: string, env: NodeJS.ProcessEnv, skip: CoverageGap[]): CoverageGap[] {
   const links = git(top, ['ls-files', '-s', '-z'], env).split('\0').filter((line) => line.startsWith('160000 ')).map((line) => line.slice(line.indexOf('\t') + 1))
   return links.filter((path) => !skip.some((gap) => gap.path === path) && existsSync(join(top, path, '.git')))
-    .filter((path) => { const status = tryGit(join(top, path), ['--no-optional-locks', 'status', '--porcelain', '--untracked-files=all']); return !status.ok || status.stdout !== '' })
+    // The nested repository's own Git, never a hidden store whose folder holds it.
+    .filter((path) => { const status = outsideHiddenStore(() => tryGit(join(top, path), ['--no-optional-locks', 'status', '--porcelain', '--untracked-files=all'])); return !status.ok || status.stdout !== '' })
     .map((path) => ({ path, reason: NESTED_COMMIT_ONLY }))
 }
 
@@ -206,7 +207,7 @@ function nestedRepositoriesWithoutCommit(top: string, env: NodeJS.ProcessEnv): s
   // Git lists a nested repository it would add as one entry ending in a slash.
   const untracked = git(top, ['ls-files', '-z', '--others', '--exclude-standard'], env).split('\0')
   return untracked.filter((path) => path.endsWith('/')).map((path) => path.slice(0, -1)).filter((path) =>
-    !tryGit(join(top, path), ['rev-parse', '--verify', '-q', 'HEAD^{commit}']).ok)
+    !outsideHiddenStore(() => tryGit(join(top, path), ['rev-parse', '--verify', '-q', 'HEAD^{commit}']).ok))
 }
 
 const nul = (text: string): string[] => text.split('\0').filter(Boolean)
@@ -281,6 +282,7 @@ function indexTree(top: string, index: string, head: string | undefined): { tree
       // A `.gitignore` of the folder's that takes `.mousse/` back in is answered by dropping it from the index. A hidden
       // store has no HEAD and no index of anyone's to follow.
       if (existsSync(join(top, '.mousse'))) git(top, ['rm', '-r', '--cached', '--ignore-unmatch', '-q', '--', '.mousse'], env)
+      gaps.push(...nestedWithChanges(top, env, gaps))
       return { tree: git(top, ['write-tree'], env), gaps: [...gaps, ...hidden.excluded] }
     }
     followTrackedFiles(top, env, head, gaps.map((gap) => gap.path))

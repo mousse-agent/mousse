@@ -52,6 +52,14 @@ export function inHiddenStore<T>(store: HiddenStore, operation: () => T): T {
   return scope.run(store, operation)
 }
 
+/**
+ * Runs `operation` with no store in scope: for Git in a repository nested inside a store's folder, which is that
+ * repository's own and must never be redirected into the store.
+ */
+export function outsideHiddenStore<T>(operation: () => T): T {
+  return scope.exit(operation)
+}
+
 /** The store Git commands in `cwd` go through right now, if the caller is inside a scope for it. */
 export function activeHiddenStore(cwd: string): HiddenStore | undefined {
   const store = scope.getStore()

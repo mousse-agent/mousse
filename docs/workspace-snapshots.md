@@ -206,7 +206,7 @@ What a snapshot leaves out is reported in the same shape as for a Git thread: `c
 
 - a file over 50 MB is left out, dropped from the store's index (so no older copy of it can be restored over it) and reported;
 - a folder the built-in list excludes that is there (`node_modules/`, `.venv/`, `/dist/` and the rest; not `.git/`, `.mousse/`, `__pycache__/` or `.DS_Store`) is reported; what the folder's own `.gitignore` files leave out is not, as for a Git thread;
-- an unreadable file or folder, and a nested repository with no commit, are left out and reported, as for a Git thread.
+- an unreadable file or folder, and a nested repository with no commit, are left out and reported, and a nested repository with uncommitted changes is named (only its commit is recorded), as for a Git thread. Git in a nested repository always runs as that repository's own (`outsideHiddenStore`), never through the store.
 
 A whole folder cannot be snapshotted when it is a home or system folder (the filesystem root, the home folder, or a folder that holds it: `isUnsafeSnapshotRoot`), or past 50,000 files or 1 GB in total (`configureSnapshotLimits` changes the limits for a test; a listing that does not fit in memory or does not end in a minute counts as too many files). That is a `SnapshotRefusedError` with a message the person can read ("Undo is off for this folder because it is too large (more than 50,000 files).") and it never fails a turn:
 
