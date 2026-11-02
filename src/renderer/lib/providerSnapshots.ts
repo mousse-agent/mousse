@@ -2,7 +2,6 @@ import { useCallback, useEffect } from 'react'
 import { create } from 'zustand'
 import { describeStatus, type InstanceSnapshot, type ProviderSnapshotsEvent, type StatusDescription } from '../../shared/harness/status'
 import type { HarnessCaps, HarnessDriverKind, ProviderOperationEvent, ProviderOperationStarted, ProviderScope, SignInPrompt } from '../../shared/harness/types'
-import { formatEffortLabel, parseThinkingSuffixFromModelId } from '../../shared/modelVariants'
 import type { PermissionLimits } from '../../shared/permissionMode'
 import { legacyProviderForInstance } from '../../shared/providerInstances'
 import type { LlmModelOption, LlmProviderOption } from '../../shared/settings'
@@ -406,56 +405,6 @@ export function pickerProviders(snapshots: readonly InstanceSnapshot[] | undefin
     })
   }
   return providers
-}
-
-/**
- * The name an instance lists a model under, hidden models included, from the snapshots of any
- * scope on hand. `providerId` is a picker id or provider name; `instanceId`, when known, decides.
- * The effort an id carries (`haiku:low`) is not part of the name. Undefined when none lists it.
- */
-export function knownModelLabel(selection: { providerId: string; instanceId?: string }, modelId: string): string | undefined {
-  if (!modelId) return undefined
-  const { baseId } = parseThinkingSuffixFromModelId(modelId)
-  for (const scope of Object.values(useProviderSnapshotsStore.getState().scopes)) {
-    for (const snapshot of scope.snapshots ?? []) {
-      const serves = selection.instanceId
-        ? snapshot.instanceId === selection.instanceId
-        : pickerIdOf(snapshot) === selection.providerId || llmProviderOf(snapshot) === selection.providerId
-      if (!serves) continue
-      const entries = snapshot.models.entries
-      const model = entries.find((entry) => entry.id === modelId) ?? entries.find((entry) => entry.id === baseId)
-      if (model?.label) return model.label
-    }
-  }
-  return undefined
-}
-
-/** Claude's model families, which Claude Code lists without the brand ("Sonnet 5.5"). */
-const CLAUDE_FAMILY = /^(?:claude[- ])?(opus|sonnet|haiku|fable)(?:[- ](\d+)(?:[-.](\d{1,2}))?(?![\d.]))?/i
-
-/**
- * A name for a model no loaded list names: "claude-haiku-5-5" → "Claude Haiku 5.5", "sonnet" →
- * "Claude Sonnet". A variant the id carries stays ("opus:fast" → "Claude Opus (fast)"), so two
- * variants never read the same; a release date is dropped.
- */
-function modelNameFromId(baseId: string): string {
-  const claude = CLAUDE_FAMILY.exec(baseId)
-  if (!claude) return baseId
-  const family = claude[1]!.charAt(0).toUpperCase() + claude[1]!.slice(1).toLowerCase()
-  const version = claude[2] ? ` ${claude[2]}${claude[3] ? `.${claude[3]}` : ''}` : ''
-  const variant = baseId.slice(claude[0].length).replace(/^-\d{8}/, '').replace(/^[-:@]/, '')
-  return `Claude ${family}${version}${variant ? ` (${variant})` : ''}`
-}
-
-/**
- * A model as a transcript names it: its listed name with the brand, and the effort its id carries
- * ("Claude Haiku 4.5 · Low"). Without a loaded list the name comes from the id itself.
- */
-export function modelDisplayName(providerId: string, modelId: string): string {
-  const { baseId, effort } = parseThinkingSuffixFromModelId(modelId)
-  const label = knownModelLabel({ providerId }, modelId)
-  const name = !label ? modelNameFromId(baseId) : CLAUDE_FAMILY.test(label) && !/^claude/i.test(label) ? `Claude ${label}` : label
-  return effort ? `${name} · ${formatEffortLabel(effort)}` : name
 }
 
 /** The picker entry a stored selection names: by instance first, then by its provider name. */

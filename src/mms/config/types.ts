@@ -33,6 +33,8 @@ export interface MousseProvidersConfig {
    * harness gateway and validated when read.
    */
   modelPrefs?: Record<string, unknown>
+  /** The names listings gave models, per instance id and model id (`ModelNamesService`). */
+  modelNames?: Record<string, unknown>
 }
 
 export interface MousseAgentsConfig {

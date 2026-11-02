@@ -12,7 +12,9 @@ import type { UIMessage, ChatStatus } from "ai";
 import { cn } from "./utils/cn";
 import { ProviderIcon } from "../../../lib/providerIcons";
 import { inferModelBrand } from "../../../../shared/modelVariants";
-import { modelDisplayName, useProviderSnapshotsStore } from "../../../lib/providerSnapshots";
+import { useProviderSnapshotsStore } from "../../../lib/providerSnapshots";
+import { resolveModelChoice } from "../../../lib/modelChoice";
+import { modelLabel } from "../../../../shared/modelChoice";
 
 import { UserMessage } from "./user-message";
 import { AppletCard, isAppletPart } from "../../../components/applets/AppletCard";
@@ -482,7 +484,7 @@ function MetadataButton({
             <div className="flex items-baseline justify-between gap-3">
               <dt className="text-an-foreground-muted">Model</dt>
               <dd className="text-right font-medium text-an-foreground">
-                {metadata.modelName ?? "Unavailable"}
+                {metadata.modelName ? <span title={metadata.modelName}>{modelLabel(resolveModelChoice({ provider: "", model: metadata.modelName }))}</span> : "Unavailable"}
               </dd>
             </div>
             <div className="flex items-baseline justify-between gap-3">
@@ -1908,8 +1910,8 @@ function ContextHandoffMarker({ handoff, text }: { handoff: HandoffMarker; text:
     return brand === 'anthropic' ? 'claude' : brand;
   };
   const status = handoffStatus(handoff, text);
-  const from = modelDisplayName(handoff.from.provider, handoff.from.model);
-  const to = modelDisplayName(handoff.to.provider, handoff.to.model);
+  const from = modelLabel(resolveModelChoice(handoff.from));
+  const to = modelLabel(resolveModelChoice(handoff.to));
   // A transfer that kept the model names it once.
   const sameModel = handoff.from.provider === handoff.to.provider && handoff.from.model === handoff.to.model;
   return <div role="status" aria-label={sameModel ? `${status}: ${to}` : `${status}: ${from} to ${to}`}

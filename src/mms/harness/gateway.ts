@@ -29,6 +29,7 @@ import type { CliProviderConfigPatch } from '../../shared/providerAuth'
 import type { ModelOverride } from '../../shared/providerInstances'
 import type { AgentAccessLevel, LlmProviderOption } from '../../shared/settings'
 import type { ChatMode } from '../../shared/types'
+import { findListedModel, modelChoiceOf } from '../../shared/modelChoice'
 import { parseThinkingSuffixFromModelId } from '../../shared/modelVariants'
 import type { LoginSession } from '../providers/LoginSession'
 import type { ProviderInstanceService } from './instanceMap'
@@ -53,7 +54,7 @@ import {
 import type { UserQuestionService } from '../orchestrator/UserQuestionService'
 import { LoginSession as LoginSessionImpl } from '../providers/LoginSession'
 import { fail } from '../run/db/RunStoreError'
-import { hidesModel, modelsWithPrefs, ModelPrefsService, visibleProviderOption, type ModelPrefsStore } from './catalog'
+import { hidesModel, modelsWithPrefs, ModelNamesService, ModelPrefsService, visibleProviderOption, type ModelNamesStore, type ModelPrefsStore } from './catalog'
 import { privateHomeRule, type AuthReading, type DriverRuntime, type HarnessDriver, type RetiredPrompt, type InstallProgress, type InstanceConfig, type LiveProcessHost, type OneShotTask } from './driver'
 import { DEFAULT_HOME_ID, findOnPath, instanceEnv, reservedEnvName, reservedLaunchKeys, type InstanceEnv } from './env'
 import { addedInstanceId, defaultInstanceId, InstanceCounterStore, instanceStateDir, isBuiltInInstance } from './instances'
@@ -532,6 +533,8 @@ export interface HarnessGatewayOptions {
   questions: UserQuestionService
   /** Model prefs persistence; in memory when absent. */
   prefs?: ModelPrefsStore
+  /** Remembered model names; in memory when absent. */
+  names?: ModelNamesStore
   /** The folder sign-in and model listing run in (the profile's repo root). */
   cwd?: () => string
   /** Display names of pi providers (`ProviderAuthService.getProviderDisplayName`). */
@@ -744,6 +747,11 @@ function memoryPrefs(): ModelPrefsStore {
   return { read: () => value, write: (next) => { value = next } }
 }
 
+function memoryNames(): ModelNamesStore {
+  let value: Record<string, Record<string, string>> = {}
+  return { read: () => value, write: (next) => { value = next } }
+}
+
 export class Harness implements HarnessGateway {
   readonly instances: HarnessInstances
   readonly catalog: HarnessCatalog
@@ -791,6 +799,7 @@ export class Harness implements HarnessGateway {
   private readonly counters: InstanceCounterStore
   private readonly latest: LatestVersionCache
   private readonly prefs: ModelPrefsService
+  private readonly names: ModelNamesService
   private searchPath: string[] = []
   private readonly shellPath: Promise<void>
   private stopped = false
@@ -817,6 +826,7 @@ export class Harness implements HarnessGateway {
     this.facts = new RuntimeFactsStore(options.profileHome)
     this.latest = options.latest ?? new LatestVersionCache(options.profileHome, options.now ? { now: options.now } : {})
     this.prefs = new ModelPrefsService(options.prefs ?? memoryPrefs())
+    this.names = new ModelNamesService(options.names ?? memoryNames())
     // Captured once at boot; probes that ran before it arrived and found nothing run again.
     this.shellPath = (options.shellPath ?? sharedShellPath)()
       .then((result) => {
@@ -1560,7 +1570,7 @@ export class Harness implements HarnessGateway {
     this.toolNotices.add(key)
     const from = this.recordOrUndefined(movedFrom)
     // A pinned model the agent runs under another name, or not at all, is said.
-    const model = moved.model ? ` It runs ${this.modelName(record.instanceId, moved.model.to)} instead of ${moved.model.from}.` : ''
+    const model = moved.model ? ` It runs ${this.modelName(record.instanceId, moved.model.to)} instead of ${this.modelName(movedFrom, moved.model.from)}.` : ''
     try {
       this.liveHost?.notice?.(threadId, `${from ? this.displayName(from) : movedFrom} moved to ${this.displayName(record)}. This chat continues there with its history handed over.${model}`)
     } catch (error) {
@@ -1856,13 +1866,23 @@ export class Harness implements HarnessGateway {
     return next
   }
 
-  /** The name the instance lists a model under (hidden models included), else its id without the effort. */
+  /**
+   * A model's name as notices say it: the name the instance lists it under (hidden models
+   * included), else the one a custom model was given, else the last name a listing gave it, else
+   * a name made from its id. Never the stored string with its level.
+   */
   private modelName(instanceId: string, model: string): string {
-    const { baseId } = parseThinkingSuffixFromModelId(model)
-    const listed = this.recordOrUndefined(instanceId)?.runtime.models() ?? []
-    return (listed.find((entry) => entry.id === model) ?? listed.find((entry) => entry.id === baseId))?.label?.trim()
-      || this.prefs.get(instanceId).custom.find((entry) => entry.id === baseId)?.label
-      || baseId
+    const listed = findListedModel(this.recordOrUndefined(instanceId)?.runtime.models() ?? [], model)
+    const { modelId } = modelChoiceOf({ provider: instanceId, model })
+    const label = listed?.label?.trim() || findListedModel(this.prefs.get(instanceId).custom, model)?.label || this.names.get(instanceId)[modelId]
+    return modelChoiceOf({ provider: instanceId, model }, label).name
+  }
+
+  /** The names listings gave models the instance does not list now, for a selection that still names one. */
+  private unlistedNames(instanceId: string, entries: readonly InstanceModel[]): Record<string, string> | undefined {
+    const listed = new Set(entries.map((entry) => entry.id))
+    const names = Object.entries(this.names.get(instanceId)).filter(([id]) => !listed.has(id))
+    return names.length ? Object.fromEntries(names) : undefined
   }
 
   private recordOrUndefined(instanceId: string): InstanceRecord | undefined {
@@ -2219,6 +2239,10 @@ export class Harness implements HarnessGateway {
     const retired = retiredPrompt(driver, instanceId, record.config)
     const nextStep: NextStep | undefined = retired ? { action: 'move', label: 'Move', title: retired.title, detail: retired.detail } : signInStep
     const allowed = shown ? this.knownProblemAllowed(record, shown) : false
+    // A retired entry offers no model to choose, custom ones included (its prefs are kept).
+    const entries = retired ? [] : modelsWithPrefs(listed, prefs)
+    this.names.remember(instanceId, entries)
+    const names = this.unlistedNames(instanceId, entries)
     return {
       instanceId,
       driver: driver.kind,
@@ -2258,8 +2282,8 @@ export class Harness implements HarnessGateway {
       ...(limits ? { permissionLimits: limits } : {}),
       config: this.configView(record),
       models: {
-        // A retired entry offers no model to choose, custom ones included (its prefs are kept).
-        entries: retired ? [] : modelsWithPrefs(listed, prefs),
+        entries,
+        ...(names ? { names } : {}),
         source: listed.length ? (models?.live || (runtime.modelsRefreshedAt && refreshedAt) ? 'live' : 'cached') : prefs.custom.length ? 'manifest' : 'none',
         canAddCustom: driver.customModels && !retired,
         ...(refreshedAt ? { refreshedAt } : {}),
@@ -2592,6 +2616,7 @@ export class Harness implements HarnessGateway {
     this.instanceMap.removeEntry(instanceId)
     this.records.delete(instanceId)
     this.prefs.remove(instanceId)
+    this.names.remove(instanceId)
     this.scopes.forgetInstance(instanceId)
     this.counters.forget(instanceId)
     this.facts.forget(instanceId)
@@ -3187,7 +3212,7 @@ export class Harness implements HarnessGateway {
     const rewritten = [
       ...this.options.defaults?.rewrite(fromId, { instanceId: toId, llmProvider, model }) ?? [],
       ...this.scopes.moveDefaults(fromId, toId, model).map(({ projectId, from: before, to: after }) =>
-        `Project default (${projectId})${before !== after ? `: ${this.modelName(toId, after)} instead of ${before}` : ''}`)
+        `Project default (${projectId})${before !== after ? `: ${this.modelName(toId, after)} instead of ${this.modelName(fromId, before)}` : ''}`)
     ]
     const oldSignIn = retiring ? await this.dropOldSignIn(from) : undefined
     this.changed(fromId)

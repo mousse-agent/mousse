@@ -5,6 +5,7 @@ import { listingServes } from '../../../shared/providerInstances'
 import { ModelFamilyMenu } from '../ModelFamilyMenu'
 import { ModelFamilySettingsFields } from '../ModelFamilySettingsFields'
 import { findModelInCatalog, fieldIdForPointer } from './editorIssues'
+import { agentModelLabel } from './agentModelLabel'
 import type { AgentEditorCatalogs } from './client'
 
 export function AgentModelPicker({
@@ -27,11 +28,9 @@ export function AgentModelPicker({
   const available = findModelInCatalog(catalogs, value.providerId, value.modelId, value.instanceId)
   const missing = Boolean(value.providerId && value.modelId && !available)
   const provider = catalogs.providers.find((entry) => listingServes(entry, { instanceId: value.instanceId, llmProvider: value.providerId }))
-  const buttonLabel = available
-    ? `${available.providerLabel} · ${available.modelLabel}`
-    : value.modelId
-      ? `${value.providerId}/${value.modelId}`
-      : 'Choose a model'
+  const buttonLabel = value.modelId
+    ? `${available?.providerLabel ?? provider?.label ?? value.providerId} · ${agentModelLabel(value, catalogs.providers)}`
+    : 'Choose a model'
 
   const modelsForFields: LlmProviderOption['models'] = useMemo(
     () => provider?.models ?? [],

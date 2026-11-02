@@ -118,7 +118,7 @@ describe('moving a model API to its agent', () => {
     const { home, harness, stored, deviceDefault, agent, spec } = fixture()
     const result = await harness.instances.move('pi:fake', 'codex')
     // The agent does not list the API's model: both defaults take the agent's default, and say so.
-    expect(result).toEqual({ from: 'pi:fake', to: 'codex', rewritten: ['Default model: agent-model instead of fake-model', 'Project default (project-1): Agent model instead of fake-model'] })
+    expect(result).toEqual({ from: 'pi:fake', to: 'codex', rewritten: ['Default model: agent-model instead of fake-model', 'Project default (project-1): Agent model instead of Fake Model'] })
     expect(stored()['pi:fake']).toEqual({ driver: 'pi', enabled: false, config: { movedTo: 'codex' } })
     expect(deviceDefault()).toEqual({ instanceId: 'codex', llmProvider: 'codex', model: 'agent-model' })
     const projectDefault = new HarnessScopeStore(home).project('project-1')?.defaultSelection
@@ -152,7 +152,7 @@ describe('moving a model API to its agent', () => {
     await harness.startTurn(spec(await harness.bind(harness.resolveStored(pinned, { purpose: 'turn' }), { mode: 'agent' }))).result
     expect(agent.turns.map((turn) => turn.instanceId)).toEqual(['codex', 'codex'])
     // The model the thread pinned is not the agent's: the notice says which one runs instead.
-    expect(notices).toEqual([['pinned', 'fake moved to Test codex. This chat continues there with its history handed over. It runs Agent model instead of fake-model.']])
+    expect(notices).toEqual([['pinned', 'fake moved to Test codex. This chat continues there with its history handed over. It runs Agent model instead of Fake Model.']])
   })
 })
 
@@ -214,7 +214,7 @@ describe('moving pi:anthropic to Claude Code on its API key', () => {
     expect(adopted).toEqual([['claude:api', 'sk-ant-api03-saved']])
     // Off with movedTo, never deleted; its saved key is left where it was.
     expect(stored()['pi:anthropic']).toEqual({ driver: 'pi', enabled: false, config: { movedTo: 'claude:api' } })
-    expect(result.rewritten).toEqual(['Project default (project-1): Opus instead of claude-opus-4-1'])
+    expect(result.rewritten).toEqual(['Project default (project-1): Claude Opus instead of Claude Opus 4.1'])
     expect(new HarnessScopeStore(home).project('project-1')?.defaultSelection).toEqual({ instanceId: 'claude:api', model: 'opus' })
     // A thread pinned to a full model id runs the same family; one of no family runs the default.
     expect(harness.resolveStored({ instanceId: 'pi:anthropic', llmProvider: 'anthropic', model: 'claude-sonnet-4-5-20250929' }, { purpose: 'turn' }))
@@ -260,7 +260,7 @@ describe('moving pi:anthropic to Claude Code on its API key', () => {
       host: {} as TurnSpec['host']
     }).result
     expect(claude.turns.map((turn) => turn.model)).toEqual(['opus'])
-    expect(notices).toEqual([['pinned', 'anthropic moved to Claude Code (API key). This chat continues there with its history handed over. It runs Opus instead of claude-opus-4-1.']])
+    expect(notices).toEqual([['pinned', 'anthropic moved to Claude Code (API key). This chat continues there with its history handed over. It runs Claude Opus instead of Claude Opus 4.1.']])
   })
 })
 
@@ -276,7 +276,7 @@ describe('device defaults of a moved entry', () => {
       provider: { llmProvider: 'claude:api', model: 'opus', instanceId: 'claude:api' },
       title: { llmProvider: '', model: '', instanceId: '' }
     })
-    expect(rewritten).toEqual(['Default model: opus instead of claude-opus-4-1', 'Chat titles: Automatic'])
+    expect(rewritten).toEqual(['Default model: Claude Opus instead of Claude Opus 4.1', 'Chat titles: Automatic'])
   })
 
   it('leaves defaults on other entries alone', () => {
