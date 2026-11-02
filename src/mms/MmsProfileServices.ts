@@ -962,12 +962,19 @@ export class MmsProfileServices {
     // A trashed thread is not listed and cannot be written to, so its watch ends now, while its folder still resolves, and a
     // restore does not bring it back with a backlog.
     this.pullRequestWatch.onEnded(taskId, 'trashed')
+    // Read while the thread is listed: its checkout's repository is in this folder.
+    const projectPath = resolveThreadProjectPath(this.projects, this.threads, taskId)
     const record = await this.lifecycle.trash({
       taskId,
       operationId: this.resolveLifecycleOperationId(taskId, 'trash', operationId),
       expectedGeneration
     })
-    if (record.state === 'trashed' && this.removesWorktreesWithDeletedThreads()) {
+    // The trash is done; removing the checkout works in the project's repository, so it waits for the folder's
+    // volume (a pending macOS permission prompt). A volume that is not answering, or shutdown, leaves the
+    // checkout to the hourly cleanup.
+    if (record.state === 'trashed' && this.removesWorktreesWithDeletedThreads() &&
+        await this.orchestrator.waitForThreadFolders(taskId, [projectPath], this.requests.signal, { whenNotAnswering: 'fail' })
+          .catch(() => 'aborted' as const) === 'ready') {
       try {
         // The same keep rules as the hourly run (unpublished commits, links, files in use); a checkout that is kept stays until purge.
         const item = await this.storageCleanup.retireDeletedWorktree(taskId)
@@ -1012,6 +1019,11 @@ export class MmsProfileServices {
 
   getProfileId(): string {
     return this.profileId
+  }
+
+  /** Aborts when the profile starts shutting down; a request waiting for a folder's volume ends then. */
+  get requestShutdownSignal(): AbortSignal {
+    return this.requests.signal
   }
 
   async runOwnedRequest<T>(method: string, work: () => T | Promise<T>): Promise<T> {

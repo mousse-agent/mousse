@@ -214,6 +214,7 @@ import type { LineEditStatsStore } from '../stats/LineEditStatsStore'
 import type { ProjectManager } from '../data/ProjectManager'
 import type { ThreadDataStore } from '../data/ThreadDataStore'
 import { resolveThreadProjectPath } from '../data/resolveActiveProjectPath'
+import { waitForFolderAccess, type WaitOptions } from '../files/folderAccess'
 import { resolveProjectWorkingDirectory } from '../data/projectWorkingDirectory'
 import { lineageForChild } from '../data/subagentLineage'
 import { WorkspaceResolver, unprovisionedContext } from '../workspace/WorkspaceResolver'
@@ -1057,6 +1058,9 @@ export class OrchestratorService extends EventEmitter {
 
   private async runDefinitionTurn(turn: DefinitionTurnRequest, engine: RunEngine, lease: ThreadLeaseHandle, extras: DefinitionTurnExtras): Promise<DefinitionTurnResult> {
     const { threadId } = turn
+    // Before anything reads the project (the MCP tools, the workspace): a pending macOS permission prompt holds only this turn.
+    const waited = await this.waitForThreadFolders(threadId, [turn.projectPath, this.threadProjectPath(threadId)], turn.signal)
+    if (waited !== 'ready') throw turn.signal.reason ?? new DOMException(waited === 'stopped' ? 'Thread stopped' : 'Aborted', 'AbortError')
     const resolved = this.placeDefinition(turn)
     // The user's MCP tools the definition was granted, by the name the runtime calls them.
     const mcpTools = this.mcpManager && turn.grants.mcpTools.length
@@ -2347,6 +2351,58 @@ export class OrchestratorService extends EventEmitter {
    * anything was running or waiting. A stale `runId` returns its outcome and does not cascade; a
    * repeated `clientRequestId` returns the first result.
    */
+  /** Waits for a folder's volume, per thread, that a Stop of the thread ends (`waitForThreadFolders`). */
+  private readonly folderWaits = new Map<string, Set<AbortController>>()
+
+  /**
+   * Waits until the volumes of the folders a thread's request or turn works in answer (see `folderAccess`),
+   * without blocking the daemon while macOS asks for permission. A Stop of the thread ends the wait
+   * (`'stopped'`), and so do `signal` and the orchestrator's shutdown (`'aborted'`). Without folders it
+   * waits for the thread's project folder. With `whenNotAnswering: 'fail'` it throws `FolderNotAnsweringError`
+   * once a volume stops answering.
+   */
+  async waitForThreadFolders(threadId: string | undefined, folders?: Array<string | null | undefined>, signal?: AbortSignal, options: Pick<WaitOptions, 'whenNotAnswering'> = {}): Promise<'ready' | 'stopped' | 'aborted'> {
+    const paths = folders ?? [threadId ? this.threadProjectPath(threadId) : undefined]
+    const stop = new AbortController()
+    const key = threadId ?? ''
+    let waits = this.folderWaits.get(key)
+    if (!waits) this.folderWaits.set(key, waits = new Set())
+    waits.add(stop)
+    try {
+      await waitForFolderAccess(paths, { ...options, signal: AbortSignal.any([stop.signal, this.lifecycle.signal, ...(signal ? [signal] : [])]) })
+      return 'ready'
+    } catch (error) {
+      if (stop.signal.aborted) return 'stopped'
+      if (signal?.aborted || this.lifecycle.signal.aborted) return 'aborted'
+      throw error
+    } finally {
+      waits.delete(stop)
+      if (waits.size === 0 && this.folderWaits.get(key) === waits) this.folderWaits.delete(key)
+    }
+  }
+
+  /** Ends the folder waits of `threadIds`; true when any was waiting. */
+  private endFolderWaits(threadIds: Iterable<string>): boolean {
+    let ended = false
+    for (const id of threadIds) {
+      for (const stop of this.folderWaits.get(id) ?? []) {
+        stop.abort(new DOMException('Thread stopped', 'AbortError'))
+        ended = true
+      }
+    }
+    return ended
+  }
+
+  /** The thread's project folder, or undefined (no project, unbound session). */
+  private threadProjectPath(threadId: string): string | undefined {
+    if (threadId === '__unbound__' || !this.projectManager || !this.threadStore) return undefined
+    try {
+      return resolveThreadProjectPath(this.projectManager, this.threadStore, threadId)
+    } catch {
+      return undefined
+    }
+  }
+
   async stopThread(
     threadId: string,
     reason: string,
@@ -2355,11 +2411,14 @@ export class OrchestratorService extends EventEmitter {
     const engine = this.runEngine
     if (!engine) {
       // Without a run engine there is only the local turn and its queue.
+      const ended = this.endFolderWaits([threadId])
       const aborted = this.abortActiveTurn(threadId, { clearQueue: opts.clearQueue })
-      return { ok: aborted, status: 'stopped', replayed: false, threadId, threads: [threadId], activeRuns: [], cancelledRuns: [], delegations: [] }
+      return { ok: aborted || ended, status: 'stopped', replayed: false, threadId, threads: [threadId], activeRuns: [], cancelledRuns: [], delegations: [] }
     }
     const result = engine.stopSubtree({ threadId, reason, ...opts })
     if (result.status !== 'stopped') return { ok: false, ...result }
+    // Work still waiting for its folder's volume (a pending macOS permission prompt) never starts.
+    if (!result.replayed) this.endFolderWaits(result.threads)
     // The Stop is recorded (every thread of the subtree has a higher generation): a pull request watch on any of them ends now.
     this.emit('threads-stopped', { threadIds: [...result.threads] })
     // A pause the Stop ended (the engine ends it in the same transaction): the thread no longer shows as paused,
@@ -5604,8 +5663,13 @@ export class OrchestratorService extends EventEmitter {
     try {
       engine.markStarting(payload.runId)
       engine.markRunning(payload.runId)
-      merged = await this.lifecycle.run('delegation-integration', () =>
-        this.integrateDelegationResult(payload.threadId, payload.delegationId, payload.runId, AbortSignal.any([signal, this.lifecycle.signal])))
+      merged = await this.lifecycle.run('delegation-integration', async () => {
+        const integration = AbortSignal.any([signal, this.lifecycle.signal])
+        // The merge works in the thread's checkout and repository: a pending macOS permission prompt holds only this run.
+        const waited = await this.waitForThreadFolders(payload.threadId, undefined, integration)
+        if (waited !== 'ready') throw integration.reason ?? new DOMException(waited === 'stopped' ? 'Thread stopped' : 'Aborted', 'AbortError')
+        return this.integrateDelegationResult(payload.threadId, payload.delegationId, payload.runId, integration)
+      })
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       notice = `Integration of delegated task ${payload.delegationId} failed: ${message}`
@@ -8920,6 +8984,49 @@ export class OrchestratorService extends EventEmitter {
       }
       throw new Error('An orchestrator turn is already running. Use /stop or the stop button first.')
     }
+    // A turn that cannot start now runs later, in its place: a claimed item goes back where it was
+    // (never a replacement at the tail); anything else is queued with its run.
+    const requeueUnstarted = (): OrchestratorResponse => {
+      if (queueItemId) {
+        const released = this.releaseSessionClaim(session, queueItemId, claimOwnerToken)
+        return { message: '', actions: [], queued: true, queueItem: released ?? undefined }
+      }
+      // A scheduled turn keeps its model and origin on the item, so the drain that runs it later binds them;
+      // an agent's message keeps who sent it.
+      const origin = opts?.schedule
+        ? { kind: 'schedule' as const, ...opts.schedule, ...(opts.modelOverride ? { selection: opts.modelOverride } : {}) }
+        : opts?.agent
+          ? agentOriginOf(opts.agent)
+          : undefined
+      const item = this.enqueueForThread(session.threadId, input, { source: opts?.schedule ? 'schedule' : 'lease-race', runId: opts?.runId, permissionMode: opts?.permissionMode, origin })
+      return { message: '', actions: [], queued: true, queueItem: item }
+    }
+    // Before recovery and provisioning read the folder synchronously: a pending macOS permission prompt
+    // then holds only this turn, not the daemon. Turns from schedules, channels and restarts start here too.
+    if (session.threadId !== '__unbound__') {
+      const waited = await this.waitForThreadFolders(
+        session.threadId,
+        [session.sharedWorkspace?.path, session.primaryCheckout?.path, this.threadProjectPath(session.threadId)],
+        opts?.externalSignal
+      )
+      if (waited !== 'ready') {
+        const run = opts?.runId ? this.runEngine?.getRun(opts.runId) : undefined
+        // Only the profile shutting down (the orchestrator's or the effect worker's stop) puts the turn back,
+        // to run after the restart. A run something already ended stays ended.
+        const shutdown = this.lifecycle.signal.aborted || this.isShutdownAbort(opts?.externalSignal?.reason)
+        if (waited === 'aborted' && shutdown && !(run && TERMINAL_RUN_STATUSES.has(run.status))) return requeueUnstarted()
+        // A Stop, a delegation cancel, or the caller giving up (a phone send that disconnected, a time limit):
+        // nothing of the turn runs, now or later. Its queue item goes, as a Stop's cancelled runs' entries do.
+        if (opts?.runId) this.markRun(opts.runId, (engine, id) => {
+          const current = engine.getRun(id)
+          if (current && !TERMINAL_RUN_STATUSES.has(current.status)) engine.markTerminal(id, 'cancelled', { error: 'cancelled_before_start' })
+        })
+        if (queueItemId) this.completeSessionClaim(session, queueItemId, claimOwnerToken)
+        // The run is ended: the same refusal a turn of an ended run always gets.
+        this.markRunStarting(opts?.runId)
+        return { message: '', actions: [] }
+      }
+    }
 
     // Load recovery identity before acquiring the writer. Reconcile interrupted
     // operations below under that lease, before workspace verification/dispatch.
@@ -8935,33 +9042,8 @@ export class OrchestratorService extends EventEmitter {
           source: 'orchestrator',
           token: claimOwnerToken
         })
-        if (!lease) {
-          // Peer won the race. For an existing claim, release at original order —
-          // never enqueue a replacement UUID at the tail.
-          if (queueItemId) {
-            const released = this.releaseSessionClaim(session, queueItemId, claimOwnerToken)
-            return {
-              message: '',
-              actions: [],
-              queued: true,
-              queueItem: released ?? undefined
-            }
-          }
-          // A scheduled turn keeps its model and origin on the item, so the drain that runs it later binds them;
-          // an agent's message keeps who sent it.
-          const origin = opts?.schedule
-            ? { kind: 'schedule' as const, ...opts.schedule, ...(opts.modelOverride ? { selection: opts.modelOverride } : {}) }
-            : opts?.agent
-              ? agentOriginOf(opts.agent)
-              : undefined
-          const item = this.enqueueForThread(session.threadId, input, { source: opts?.schedule ? 'schedule' : 'lease-race', runId: opts?.runId, permissionMode: opts?.permissionMode, origin })
-          return {
-            message: '',
-            actions: [],
-            queued: true,
-            queueItem: item
-          }
-        }
+        // Peer won the race: the turn runs later, in its place.
+        if (!lease) return requeueUnstarted()
         session.executionLease = lease
       }
     }

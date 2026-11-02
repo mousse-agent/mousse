@@ -119,7 +119,8 @@ import { devGuiBridge } from '../devgui/DevGuiBridge'
 import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync } from 'node:fs'
 import { FILE_ASSET_PIECE_BYTES, SAVE_TOO_LARGE_MESSAGE, saveExceedsRequest } from '../../shared/fileAssets'
 import { homedir } from 'node:os'
-import { join, relative, resolve } from 'node:path'
+import { isAbsolute, join, relative, resolve } from 'node:path'
+import { FolderNotAnsweringError, waitForFolderAccess } from '../files/folderAccess'
 import type { DomainConnectionContext } from './domainRegistry'
 import { DomainRpcError } from './domainRegistry'
 import { WORKFLOW_RUN_CAPABILITY } from '../../shared/workflowRunPlatform'
@@ -1119,6 +1120,83 @@ function scheduledJobOptionsDeps(ctx: HandlerContext): ScheduledJobOptionsDeps {
   })
 }
 
+/**
+ * Methods that read or write a project folder synchronously (Git, files, the checkout, project config). They
+ * wait for the folder's volume first; every other method (Stop, thread metadata, queues, settings) answers
+ * at once whatever a folder is waiting for.
+ */
+const FOLDER_METHOD_PREFIXES = ['git.', 'files.', 'workspace.', 'review.', 'actions.', 'pullRequests.', 'publish.', 'skills.']
+const FOLDER_METHODS = new Set([
+  'projects.open', 'projects.identity', 'projects.trustGitSettings', 'orchestrator.send', 'orchestrator.retry',
+  'thread.fork', 'thread.mergeBack', 'threads.setWorktreeEnabled', 'threads.purge', 'agents.spawn', 'tasks.create',
+  'pty.create', 'editor.folder', 'github.cloneRepository', 'github.createRepository', 'mcp.getConfigSources',
+  'mcp.listServers', 'mcp.writeCursorConfig', 'storage.cleanup.plan', 'storage.cleanup.run'
+])
+/** Methods under those prefixes that only signal work already in memory. */
+const FOLDER_FREE_METHODS = new Set(['git.cancelOperation', 'pullRequests.watchStatus'])
+
+/** Methods that start a turn: like the turn, they wait for a volume that is not answering instead of failing. */
+const WAIT_WHEN_NOT_ANSWERING = new Set(['orchestrator.send', 'orchestrator.retry'])
+
+function readsFolder(method: string): boolean {
+  if (FOLDER_FREE_METHODS.has(method)) return false
+  return FOLDER_METHODS.has(method) || FOLDER_METHOD_PREFIXES.some((prefix) => method.startsWith(prefix))
+}
+
+/**
+ * Waits for the folders a request works in. A Stop of its thread or the profile's shutdown ends the wait
+ * with an error, so neither waits on a pending macOS permission prompt.
+ */
+async function waitForRequestFolders(ctx: HandlerContext, method: string, params: unknown): Promise<void> {
+  if (!readsFolder(method)) return
+  const folders = requestFolders(ctx, params)
+  if (folders.length === 0) return
+  const threadId = isObject(params) && typeof params.threadId === 'string' ? params.threadId : undefined
+  const shutdown = ctx.mms.requestShutdownSignal
+  // A volume that stopped answering fails other requests at once, so polls do not pile up behind it.
+  const whenNotAnswering = WAIT_WHEN_NOT_ANSWERING.has(method) ? 'wait' as const : 'fail' as const
+  let waited: 'ready' | 'stopped' | 'aborted'
+  try {
+    waited = ctx.mms.orchestrator?.waitForThreadFolders
+      ? await ctx.mms.orchestrator.waitForThreadFolders(threadId, folders, shutdown, { whenNotAnswering })
+      : await waitForFolderAccess(folders, { signal: shutdown, whenNotAnswering }).then(() => 'ready' as const, (error: unknown) => {
+        if (error instanceof FolderNotAnsweringError) throw error
+        return 'aborted' as const
+      })
+  } catch (error) {
+    if (error instanceof FolderNotAnsweringError) throw new DomainRpcError('folder_not_answering', error.message, { volume: error.volume })
+    throw error
+  }
+  if (waited === 'stopped') throw new DomainRpcError('thread_stopped', 'The thread was stopped before this request started.', { threadId })
+  if (waited === 'aborted') throw Object.assign(new Error('Profile work is shutting down'), { code: 'profile_draining' })
+}
+
+/** Parameters that name a folder by its absolute path. A relative `path` is a file inside the project and is skipped. */
+const FOLDER_PARAMS = ['path', 'cwd', 'root', 'projectPath', 'workspacePath', 'folder', 'directory'] as const
+
+/** The project folders a request names: its thread's project, its project, or a folder path. */
+function requestFolders(ctx: HandlerContext, params: unknown): string[] {
+  if (!isObject(params)) return []
+  const folders: string[] = []
+  try {
+    if (typeof params.threadId === 'string') {
+      const path = resolveThreadProjectPath(ctx.mms.projects, ctx.mms.threads, params.threadId)
+      if (path) folders.push(path)
+    }
+    if (typeof params.projectId === 'string') {
+      const path = ctx.mms.projects.getProject(params.projectId)?.path
+      if (path) folders.push(path)
+    }
+  } catch {
+    // An unknown thread or project is the handler's to report.
+  }
+  for (const key of FOLDER_PARAMS) {
+    const value = params[key]
+    if (typeof value === 'string' && isAbsolute(value)) folders.push(value)
+  }
+  return folders
+}
+
 async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: unknown): Promise<unknown> {
   // A call that names a thread (or project) of another of the user's computers goes to that computer.
   // This runs inside the profile's request barrier, so such calls drain with the profile.
@@ -1134,6 +1212,8 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       ctx.mms.threads?.lifecycleStore?.get(params.threadId)) {
     ctx.mms.threads.assertThreadAdmission(params.threadId)
   }
+  // Before any synchronous work in the folder: a pending macOS permission prompt then holds only this request.
+  await waitForRequestFolders(ctx, method, params)
   if (ctx.mms.domains?.has(method)) return ctx.mms.domains.dispatch(ctx, method, params)
   switch (method) {
     case 'threads.focus': {
