@@ -409,7 +409,17 @@ export interface AgentActor {
   hops?: number
 }
 
+/** `pr_update` is no longer written (see `isRetiredInboxRow`). */
 export type InboxKind = 'child_result' | 'restart_note' | 'reconcile_notice' | 'pr_update'
+
+/**
+ * A row of a kind no longer written: `pr_update`, which an earlier pull request watch used to wake the agent to change
+ * code and push. One an earlier version left is never delivered; it is acknowledged before the run engine's workers
+ * start, and the wake and steer paths acknowledge any they still meet.
+ */
+export function isRetiredInboxRow(row: Pick<InboxRecord, 'kind'>): boolean {
+  return row.kind === 'pr_update'
+}
 
 export type InboxStatus = 'pending' | 'delivered' | 'acknowledged'
 
@@ -451,18 +461,6 @@ export interface ChildQuestionPayload {
 
 export function isChildQuestionRow(row: Pick<InboxRecord, 'kind' | 'payload'>): boolean {
   return row.kind === 'reconcile_notice' && (row.payload as { kind?: unknown } | null)?.kind === 'child_question'
-}
-
-/**
- * Payload of a `pr_update` row: what a watched pull request changed, for a thread whose watch lets the
- * agent act. `text` is the whole notice (server-authored, with every word from the host quoted); the rest says
- * what it is about. The row's id carries the delivery id, so a second write of the same delivery is refused.
- */
-export interface PullRequestUpdatePayload {
-  text: string
-  number: number
-  headSha: string
-  changes: string[]
 }
 
 /** Payload of a `turn.start` effect that wakes a thread for its pending inbox rows (rule 4). */

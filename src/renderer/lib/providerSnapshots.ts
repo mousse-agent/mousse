@@ -416,6 +416,51 @@ export function pickerIdFor(selection: { instanceId?: string; llmProvider: strin
   return selection.llmProvider
 }
 
+/** A model the composer can start on, in the shape `threads.setModel` takes. */
+export interface PickerSelection {
+  instanceId?: string
+  llmProvider: string
+  model: string
+}
+
+/**
+ * The model a composer starts on when no usable default was chosen: the first provider in picker
+ * order that is ready (else the first offered at all), on its first listed model, which a provider
+ * lists as its default. Undefined while the picker offers nothing.
+ */
+export function fallbackModel(providers: readonly PickerProvider[]): PickerSelection | undefined {
+  const offered = providers.filter((provider) => provider.models.length > 0)
+  const provider = offered.find((entry) => entry.status?.tone === 'ready') ?? offered[0]
+  if (!provider) return undefined
+  return {
+    ...(provider.instanceId ? { instanceId: provider.instanceId } : {}),
+    llmProvider: provider.llmProvider,
+    model: provider.models[0]!.id
+  }
+}
+
+/** The selection names a model on a provider the picker offers (a default on a provider switched off or removed does not). */
+export function pickerOffers(selection: { instanceId?: string; llmProvider: string; model: string }, providers: readonly PickerProvider[]): boolean {
+  if (!selection.model) return false
+  const id = pickerIdFor(selection, providers)
+  return providers.some((provider) => provider.id === id)
+}
+
+/**
+ * The model a composer picks by itself: only on this computer, for a thread without a model of its
+ * own, once the profile default is read and the picker does not offer it. A model or default chosen
+ * by hand always wins.
+ */
+export function composerAutoModel(input: {
+  remote: boolean
+  threadModel: unknown
+  profileDefault: PickerSelection | undefined
+  providers: readonly PickerProvider[]
+}): PickerSelection | undefined {
+  if (input.remote || input.threadModel || !input.profileDefault) return undefined
+  return pickerOffers(input.profileDefault, input.providers) ? undefined : fallbackModel(input.providers)
+}
+
 /** Model ids hidden or starred per instance, from device snapshots (prefs are not per project). */
 export function modelPrefsByInstance(snapshots: readonly InstanceSnapshot[] | undefined): Map<string, { hidden: Set<string>; favorites: Set<string> }> {
   const prefs = new Map<string, { hidden: Set<string>; favorites: Set<string> }>()

@@ -272,7 +272,18 @@ export interface ResolvedPullRequestSummary {
   pullRequest: PullRequestSummary
   /** Threads that already work on this pull request (not archived). */
   threads: Array<{ id: string; name: string }>
+  /** Starting turns on `extensions.worktreeConfig` in the repository (see `WORKTREE_CONFIG_NOTICE`), so the dialog says so first. */
+  enablesWorktreeConfig: boolean
 }
+
+/**
+ * What Start from pull request tells the person when it turns on Git's per-worktree settings in their repository. A
+ * worktree of someone else's commits needs them to keep that worktree's hooks and filters off. It is written once,
+ * as part of the start, and left on.
+ */
+export const WORKTREE_CONFIG_NOTICE = "Starting also turns on extensions.worktreeConfig in this repository's Git settings, so the worktree can keep hooks and filters off. It stays on."
+export const WORKTREE_CONFIG_NEEDED = "Starting from a pull request needs extensions.worktreeConfig turned on in this repository's Git settings, so the worktree can keep hooks and filters off. It is off. Start again from a Mousse that asks first, or turn it on with `git config extensions.worktreeConfig true`."
+export const WORKTREE_CONFIG_ENABLED = "Turned on extensions.worktreeConfig in this repository's Git settings, so the worktree keeps hooks and filters off. It stays on."
 
 export interface StartPullRequestThreadInput {
   projectId: string
@@ -285,6 +296,11 @@ export interface StartPullRequestThreadInput {
   allowClosed?: boolean
   /** Start even though another thread already works on this pull request. */
   allowDuplicate?: boolean
+  /**
+   * The person was shown `WORKTREE_CONFIG_NOTICE` and started anyway, so the start may turn on `extensions.worktreeConfig`.
+   * Without it, a repository with the setting off is refused (`pull_request_worktree_config_needed`) and nothing changes.
+   */
+  allowWorktreeConfig?: boolean
 }
 
 /** What starting a thread from a pull request returns beside the thread itself. */
@@ -299,6 +315,8 @@ export interface StartPullRequestThreadResult {
   sent: boolean
   /** Why a requested send did not happen (the text is from people who are not owners, members or collaborators, or the send failed); null otherwise. */
   withheld: string | null
+  /** `WORKTREE_CONFIG_ENABLED` when this start turned on `extensions.worktreeConfig` in the repository; null when it changed no repository setting. */
+  repositoryConfigChange: string | null
 }
 
 /** Where a thread's Push goes and why, when the thread is linked to a pull request. */
@@ -310,8 +328,8 @@ export interface PullRequestPushTarget {
   reason: string | null
 }
 
-/** What a watch does when its pull request changes: nothing, tell the thread, or tell the thread and wake the agent. */
-export type PullRequestWatchMode = 'off' | 'notify' | 'act'
+/** What a watch does when its pull request changes: nothing, or tell the thread with a line in it. It never wakes the agent. */
+export type PullRequestWatchMode = 'off' | 'notify'
 
 /** One page-bounded read of line comments: `drained` says the read reached the end; otherwise it continues at `nextPage`. */
 export interface LineCommentRead {
@@ -350,8 +368,6 @@ export interface PullRequestWatchStatus {
   /** The account the host's credential belongs to; its own comments are not reported. */
   viewer: string | null
   host: string | null
-  /** `act` cannot be turned on: a subagent's pending notice would hold its parent's task open. */
-  actRefusal: string | null
 }
 
 /** A thread's link to a pull request, set when it creates one, starts from one, or watches one. */

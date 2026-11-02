@@ -55,7 +55,8 @@ import { ThreadComputerBar } from './ThreadComputerBar'
 import { EarlierMessagesBar } from './EarlierMessagesBar'
 import { forgetMessageImageRequests, hydrateMessageImages } from '../lib/messageImages'
 import { isOutcomeUncertain, settleUncertainSend } from '../lib/uncertainSend'
-import { onProviderListingsChanged, pickerIdFor, pickerProviders, projectScope, useProviderSnapshots } from '../lib/providerSnapshots'
+import { SendRetryIds } from '../lib/sendRetryIds'
+import { composerAutoModel, onProviderListingsChanged, pickerIdFor, pickerProviders, projectScope, useProviderSnapshots, type PickerSelection } from '../lib/providerSnapshots'
 import { errorText, sendErrorLine } from '../lib/errorText'
 import { PromptUndoNotice } from './PromptUndoControls'
 import { pendingChangesDetails, type PendingChangesDetails } from '../../shared/workspace'
@@ -199,6 +200,21 @@ export function OrchestratorChat() {
   const [selectedInstanceId, setSelectedInstanceId] = useState<string | undefined>(undefined)
   const selectedProviderId = pickerIdFor({ instanceId: selectedInstanceId, llmProvider: selectedLlmProvider }, providers)
   const [selectedModelId, setSelectedModelId] = useState('')
+  // The profile's default model, once settings are read; undefined until then.
+  const [profileDefault, setProfileDefault] = useState<PickerSelection | undefined>(undefined)
+  // With no thread model and no default the picker offers, the composer starts on the first ready
+  // provider's model, and a send stamps it on the thread.
+  const autoModel = useMemo(
+    () => composerAutoModel({ remote: Boolean(remoteNode), threadModel: activeThreadModelOverride, profileDefault, providers }),
+    [remoteNode, activeThreadModelOverride, profileDefault, providers]
+  )
+  // Also re-applied after a settings refresh puts the unusable default back.
+  useEffect(() => {
+    if (!autoModel) return
+    setSelectedLlmProvider(autoModel.llmProvider)
+    setSelectedInstanceId(autoModel.instanceId)
+    setSelectedModelId(autoModel.model)
+  }, [autoModel, selectedLlmProvider, selectedInstanceId, selectedModelId])
   const [enabledSkills, setEnabledSkills] = useState<SkillDescriptor[]>([])
   const [modelMenuOpen, setModelMenuOpen] = useState(false)
   // Pasted/dropped files and voice notes are kept per-thread in memory (not the
@@ -251,7 +267,7 @@ export function OrchestratorChat() {
     state.addComposerReference(expectedThread, resolved)
     setSendError(null)
   }, [])
-  const pendingSends = useRef(new Map<string, string>())
+  const sendIds = useRef(new SendRetryIds())
   const blankSendPending = useRef(false)
   useEffect(() => { setSendError(null); setSendChanges(null) }, [profileId, activeThreadId])
   const [optimisticQueueItems, setOptimisticQueueItems] = useState<QueuedMessage[]>([])
@@ -461,6 +477,13 @@ export function OrchestratorChat() {
     setCatalog(options.llmProviders)
     setDefaultPermissionMode(normalizePermissionMode(settings.permissions?.defaultMode))
     const selectedModel = activeThreadModelOverride ?? settings.provider
+    setProfileDefault((current) =>
+      current?.llmProvider === settings.provider.llmProvider &&
+      current.instanceId === settings.provider.instanceId &&
+      current.model === settings.provider.model
+        ? current
+        : { ...settings.provider }
+    )
     // The picker shows the other computer's model while a chat that runs there is open.
     if (!remoteNodeRef.current) {
       setSelectedLlmProvider(selectedModel.llmProvider)
@@ -669,9 +692,8 @@ export function OrchestratorChat() {
       const bytes = new TextEncoder().encode(JSON.stringify({ profileId, threadId: targetThreadId, content, mode, images }))
       const signature = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', bytes)), (byte) => byte.toString(16).padStart(2, '0')).join('')
       if (!stillVisible()) return
-      const requestId = pendingSends.current.get(signature) ?? crypto.randomUUID()
-      pendingSends.current.set(signature, requestId)
-      if (pendingSends.current.size > 32) pendingSends.current.delete(pendingSends.current.keys().next().value!)
+      // The service's retry key: a send that may have arrived lends its id to the same message sent again.
+      const requestId = sendIds.current.begin(signature)
       const request = {
         requestId,
         content: content || (images?.length ? '[Image attachment]' : ''),
@@ -729,11 +751,12 @@ export function OrchestratorChat() {
         }
       }
       try {
-        const result = targetThreadId
-          ? await window.mousse.orchestrator.sendToThread(targetThreadId, request)
-          : await window.mousse.orchestrator.send(request)
+        const result = await (targetThreadId
+          ? window.mousse.orchestrator.sendToThread(targetThreadId, request)
+          : window.mousse.orchestrator.send(request)
+        ).finally(() => sendIds.current.replied(requestId))
         if (result.error && result.requestAcknowledged === false) throw result.error
-        pendingSends.current.delete(signature)
+        sendIds.current.settle(signature, requestId, 'answered')
         if (!stillVisible()) return
         // Queued sends return quickly while an earlier turn remains active — do not clear loading.
         if (optimisticQueueId) {
@@ -763,12 +786,15 @@ export function OrchestratorChat() {
         if (stillVisible()) setLoading(stillActive)
         return true
       } catch (error) {
+        // A send the service refused ran nothing: the same text sent again is a new message. One with no
+        // answer (a timeout, another computer that did not confirm) keeps its id, so sending it again replays it.
+        sendIds.current.settle(signature, requestId, isOutcomeUncertain(error) ? 'unknown' : 'refused')
         if (!stillVisible()) return
         setSendError(sendErrorLine(error))
         const changes = pendingChangesDetails(error)
         setSendChanges(changes ? { line: sendErrorLine(error), message: errorText(error), details: changes } : null)
         if (isOutcomeUncertain(error) && targetThreadId) {
-          // The other computer did not confirm: the message may be there. Keep what is shown, read the thread again,
+          // No answer came (another computer did not confirm, or the reply timed out): the message may be there. Keep what is shown, read the thread again,
           // and only then say whether it arrived. Sending the same text again replays this request, so it cannot run twice.
           const thread = targetThreadId
           void settleUncertainSend({
@@ -786,6 +812,8 @@ export function OrchestratorChat() {
               }
             }
           }).then((outcome) => {
+            // It arrived: the same text sent later is a new message, not a repeat of this one.
+            sendIds.current.settle(signature, requestId, outcome === 'arrived' ? 'arrived' : 'unknown')
             if (!stillVisible()) return
             if (outcome === 'missing') {
               setSendError(`${sendErrorLine(error)} It did not arrive, so it is back in the composer.`)
@@ -938,6 +966,11 @@ export function OrchestratorChat() {
         setBlankPermissionMode(undefined)
         if (updated) useAppStore.getState().upsertThread(updated)
       }
+    } else if (autoModel && activeThreadId) {
+      // A thread without a model of its own would run on the unusable default: give it the shown one.
+      const updated = await window.mousse.threads.setModel(activeThreadId, autoModel)
+      if (!stillVisible()) return
+      if (updated) useAppStore.getState().upsertThread(updated)
     }
 
     // Clear only after we accept the send/queue path (control commands already cleared above).
@@ -985,9 +1018,13 @@ export function OrchestratorChat() {
     // own modelOverride, which is stamped at create time from this value.
     if (!activeThreadId) {
       // A chat for another computer takes its model there; this computer's default stays as it is.
-      if (!remoteDraft) void window.mousse.settings.set({
-        provider: { ...instance, model: pick.model, effort: pick.effort }
-      })
+      if (!remoteDraft) {
+        // The new default wins over the automatic model at once, not after settings reply.
+        setProfileDefault({ ...instance, model: pick.model })
+        void window.mousse.settings.set({
+          provider: { ...instance, model: pick.model, effort: pick.effort }
+        })
+      }
       return
     }
     // The empty local thread behind a remote draft is not the chat; its model is not the other computer's pick.

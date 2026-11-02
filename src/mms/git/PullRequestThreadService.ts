@@ -10,12 +10,14 @@ import {
   type RepositoryIdentity,
   type StartPullRequestThreadInput,
   type StartPullRequestThreadResult,
-  type ThreadPullRequestLink
+  type ThreadPullRequestLink,
+  WORKTREE_CONFIG_ENABLED,
+  WORKTREE_CONFIG_NEEDED
 } from '../../shared/pullRequests'
 import { buildPullRequestSeed, pullRequestSeedTrust } from '../../shared/pullRequestSeed'
 import type { Thread } from '../../shared/types'
 import type { ThreadDataStore } from '../data/ThreadDataStore'
-import { ThreadWorkspaceManager } from '../workspace/ThreadWorkspaceManager'
+import { perWorktreeConfigEnabled, ThreadWorkspaceManager } from '../workspace/ThreadWorkspaceManager'
 import type { CodeHost } from './CodeHost'
 import { PullRequestReadError } from './GitHubCodeHost'
 import { acquireRepositoryLease } from './RepositoryLease'
@@ -42,6 +44,8 @@ export interface PullRequestThreadDeps {
   prepareThread?(thread: Thread): Thread
   /** Sends the first message of a thread. */
   send(threadId: string, content: string): Promise<void>
+  /** Writes a line into a thread once per `messageId`, waking nothing: how a start says what it changed in the repository. */
+  note?(threadId: string, text: string, messageId: string): Promise<unknown>
 }
 
 /** What `resolve` tells a client about a pull request before a thread is started. */
@@ -49,6 +53,8 @@ export interface ResolvedPullRequest {
   detail: PullRequestDetail
   /** Threads that are linked to this pull request and not archived. */
   threads: Array<{ id: string; name: string }>
+  /** Starting would turn on `extensions.worktreeConfig` in the repository, which the start dialog says before it runs. */
+  enablesWorktreeConfig: boolean
 }
 
 function git(cwd: string, args: string[]): string {
@@ -140,7 +146,7 @@ export class PullRequestThreadService {
         { number: parsed.number }
       )
     }
-    return { detail, threads: this.threadsOf(detail.identity) }
+    return { detail, threads: this.threadsOf(detail.identity), enablesWorktreeConfig: !perWorktreeConfigEnabled(project.path) }
   }
 
   private threadsOf(identity: PullRequestIdentity): Array<{ id: string; name: string }> {
@@ -175,6 +181,11 @@ export class PullRequestThreadService {
     } catch {
       throw new PullRequestThreadError('pull_request_not_git', 'The project folder is not a Git repository.')
     }
+    // The repository's configuration changes only when the person agreed to it; a client that did not ask (an older one
+    // included) is refused before anything is fetched or made.
+    if (input.allowWorktreeConfig !== true && !perWorktreeConfigEnabled(topLevel)) {
+      throw new PullRequestThreadError('pull_request_worktree_config_needed', WORKTREE_CONFIG_NEEDED, { setting: 'extensions.worktreeConfig' })
+    }
     let headSha: string
     try {
       headSha = await this.deps.codeHost.fetchPullRequestHead(topLevel, detail.identity)
@@ -199,19 +210,34 @@ export class PullRequestThreadService {
     const headMoved = headSha.toLowerCase() !== detail.headSha.toLowerCase()
     const name = `PR #${detail.number}: ${detail.title}`.replace(/\s+/g, ' ').trim().slice(0, THREAD_NAME_MAX)
     let thread = this.deps.threads.createThread(name, project.id, project.path, { worktreeEnabled: true })
+    // The one change this start may make to the person's repository configuration, only when they agreed to it, made
+    // under the repository's lease once nothing can refuse, and said in the result and in the thread. Never turned off
+    // again: other worktrees may rely on it by then.
+    let repositoryConfigChange: string | null = null
     try {
       const threadDirectory = this.deps.threads.getThreadDir(thread.id)
-      await new ThreadWorkspaceManager(threadDirectory).provision(thread.id, 'main', project.path, undefined, undefined, headSha, { untrusted: true })
+      await new ThreadWorkspaceManager(threadDirectory).provision(thread.id, 'main', project.path, undefined, undefined, headSha, {
+        untrusted: true,
+        ...(input.allowWorktreeConfig === true ? { enableWorktreeConfig: () => { repositoryConfigChange = WORKTREE_CONFIG_ENABLED } } : {})
+      })
     } catch (error) {
       await this.discard(thread.id, project.path, topLevel)
-      throw new PullRequestThreadError('pull_request_workspace_failed', `Could not create the worktree for pull request #${detail.number}: ${error instanceof Error ? error.message : String(error)}`)
+      const said = repositoryConfigChange ? ` ${repositoryConfigChange}` : ''
+      throw new PullRequestThreadError('pull_request_workspace_failed', `Could not create the worktree for pull request #${detail.number}: ${error instanceof Error ? error.message : String(error)}${said}`)
     }
     try {
       thread = this.deps.threads.updateThreadMeta(thread.id, { pullRequest: linkFromDetail(detail) })
       if (this.deps.prepareThread) thread = this.deps.prepareThread(thread)
     } catch (error) {
       await this.discard(thread.id, project.path, topLevel)
-      throw new PullRequestThreadError('pull_request_workspace_failed', `Could not set up the thread for pull request #${detail.number}: ${error instanceof Error ? error.message : String(error)}`)
+      const said = repositoryConfigChange ? ` ${repositoryConfigChange}` : ''
+      throw new PullRequestThreadError('pull_request_workspace_failed', `Could not set up the thread for pull request #${detail.number}: ${error instanceof Error ? error.message : String(error)}${said}`)
+    }
+
+    if (repositoryConfigChange && this.deps.note) {
+      await this.deps.note(thread.id, repositoryConfigChange, `msg:worktree-config:${thread.id}`).catch((error: unknown) => {
+        console.warn('the repository setting notice could not be written', { threadId: thread.id, error: error instanceof Error ? error.message : String(error) })
+      })
     }
 
     const seed = buildPullRequestSeed(detail, { headSha })
@@ -221,7 +247,12 @@ export class PullRequestThreadService {
       // Text from strangers is never a turn nobody read: only owners, members and collaborators may be quoted in one.
       const trust = pullRequestSeedTrust(detail)
       if (!trust.trusted) {
-        withheld = `Not sent: the message quotes people who are not owners, members or collaborators (${trust.untrusted.slice(0, 5).join(', ')}). Read it and send it yourself.`
+        const reasons = [
+          ...(trust.untrusted.length ? [`the message quotes people who are not owners, members or collaborators (${trust.untrusted.slice(0, 5).join(', ')})`] : []),
+          // A failed read (often GitHub's rate limit) is not a verdict on the person.
+          ...(trust.unchecked.length ? [`GitHub could not be asked whether ${trust.unchecked.slice(0, 5).join(', ')} ${trust.unchecked.length === 1 ? 'is an owner, member or collaborator' : 'are owners, members or collaborators'}`] : [])
+        ]
+        withheld = `Not sent: ${reasons.join(', and ')}. Read it and send it yourself.`
       } else {
         const message = input.message?.trim()
         try {
@@ -233,7 +264,7 @@ export class PullRequestThreadService {
         }
       }
     }
-    return { thread, seed, headSha, headMoved, sent, withheld }
+    return { thread, seed, headSha, headMoved, sent, withheld, repositoryConfigChange }
   }
 
   /**
@@ -259,8 +290,9 @@ export class PullRequestThreadService {
             return false
           }
         }
-        if (existsSync(workspace.worktreePath)) attempt(['worktree', 'remove', '--force', workspace.worktreePath])
-        attempt(['worktree', 'prune'])
+        // Only this worktree's registration goes, also when its folder is already gone. No `git worktree prune`: that
+        // would drop every stale registration in the person's repository, not just the one this start made.
+        attempt(['worktree', 'remove', '--force', workspace.worktreePath])
         removed = !existsSync(workspace.worktreePath)
         if (removed) {
           attempt(['branch', '-D', workspace.branch])

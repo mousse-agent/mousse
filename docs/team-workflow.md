@@ -138,7 +138,7 @@ Run `node scripts/team-status.mjs --fetch` for a fresh Git snapshot, or omit `--
 
 ## Cleanup helper
 
-Run `node scripts/team-cleanup.mjs` from the primary checkout for a dry run, or add `--apply` to act. It prunes remote-tracking refs and treats a branch as delivered when a merged PR's head matches its tip, or when its tip is already on the default branch (but not equal to it). For delivered branches it removes the worktree and local branch, and deletes the origin branch of a merged PR with a lease on the checked tip.
+Run `node scripts/team-cleanup.mjs` from the primary checkout for a dry run, or add `--apply` to act. A dry run changes nothing: it reads origin's branches with `git ls-remote` and compares them with commits already fetched. `--apply` first fetches and prunes remote-tracking refs and stale worktree registrations. It treats a branch as delivered when a merged PR's head matches its tip, or when its tip is already on the default branch (but not equal to it). For delivered branches it removes the worktree and local branch, and deletes the origin branch of a merged PR with a lease on the checked tip.
 
 It keeps, and reports, anything with an open PR, commits not on the default branch, uncommitted or untracked files, a lock, use within the last day, the primary or current checkout, `backup/*` and `mousse/*` branches, worktrees managed by the Mousse app, and detached checkouts. `--branch <name>` limits it to one branch and skips the recent-use check; use it for the task you just merged. Without GitHub access it falls back to branches already on the default branch and leaves origin alone.
 

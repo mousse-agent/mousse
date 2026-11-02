@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import { EventEmitter } from 'node:events'
 import { onRetiredBareRoute, type ExecutionBinding } from '../../shared/harness/types'
 import { isStricter, type PermissionMode } from '../../shared/permissionMode'
@@ -62,7 +63,10 @@ export type RunCommand =
        * tracked the same way (`FOLLOW_UP_SOURCES`).
        */
       delegation?: SendDelegation
-      /** The message text; kept only as the digest of a tracked delegation. */
+      /**
+       * The message text; kept only as digests: of a tracked delegation, and on the send's receipt, so a
+       * repeated `clientRequestId` with other text is refused instead of answered with another message's run.
+       */
       prompt?: string
       /**
        * SPEC §17.3: the send denies the thread's saved approval requests with `feedback` as the
@@ -1669,7 +1673,7 @@ export class RunEngine extends EventEmitter {
     const { threadId, clientRequestId } = command
     const receipt = store.getReceipt(clientRequestId)
     if (receipt) {
-      if (receipt.threadId !== threadId || receipt.commandKind !== command.kind)
+      if (receipt.threadId !== threadId || receipt.commandKind !== command.kind || !samePrompt(command, receipt))
         return {
           status: 'rejected',
           reason: 'client_request_id_conflict',
@@ -1801,7 +1805,12 @@ export class RunEngine extends EventEmitter {
           ...(command.prompt !== undefined ? { length: command.prompt.length } : {})
         })
       const sequence = store.maxSeq(command.threadId)
-      this.putReceipt(command, 'accepted', { runId: run.runId, sequence, ...(endedPause ? { endedPause } : {}) })
+      this.putReceipt(command, 'accepted', {
+        runId: run.runId,
+        sequence,
+        ...(endedPause ? { endedPause } : {}),
+        ...(command.prompt !== undefined ? { promptDigest: promptDigest(command.prompt) } : {})
+      })
       return { status: 'accepted', runId: run.runId, sequence, replayed: false, ...(endedPause ? { endedPause } : {}) }
     })
   }
@@ -1994,6 +2003,17 @@ export class RunEngine extends EventEmitter {
 function requireStatus(run: RunRecord, allowed: RunStatus[]): void {
   if (!allowed.includes(run.status))
     fail('bad_request', `Run ${run.runId} is ${run.status}; expected ${allowed.join(' or ')}.`)
+}
+
+function promptDigest(prompt: string): string {
+  return createHash('sha256').update(prompt, 'utf8').digest('hex')
+}
+
+/** A repeated send carries the text it was first sent with. Receipts and sends without a text are not compared. */
+function samePrompt(command: RunCommand, receipt: ReceiptRecord): boolean {
+  if (command.kind !== 'send' || command.prompt === undefined) return true
+  const stored = (receipt.result as { promptDigest?: unknown } | null)?.promptDigest
+  return typeof stored !== 'string' || stored === promptDigest(command.prompt)
 }
 
 function replay(receipt: ReceiptRecord): CommandResult {

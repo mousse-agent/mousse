@@ -798,15 +798,7 @@ export class MmsProfileServices {
         const record = this.threads.lifecycleStore.get(threadId)
         return !record || record.state === 'active'
       },
-      isSubagent: (threadId) => Boolean(this.threads.getThread(threadId)?.lineage || this.runEngine.delegations.getLineage(threadId)),
       runStore: () => this.runEngine.store,
-      inbox: () => this.runEngine.inbox,
-      // A person's message is a visible user message that is not a job's prompt; wakes and notices are hidden or not user messages.
-      lastPersonMessageAt: (threadId) => {
-        const mine = this.orchestrator.getMessages(threadId).filter((message) => message.role === 'user' && !message.scheduled && !message.subagentNotice?.length)
-        const at = Date.parse(mine.at(-1)?.timestamp ?? '')
-        return Number.isNaN(at) ? null : at
-      },
       notify: (threadId, text, messageId) => this.orchestrator.noteThreadUpdate(threadId, text, { messageId }),
       onRunEnd: (listener) => {
         const handler = (event: ThreadEvent): void => {
@@ -974,12 +966,19 @@ export class MmsProfileServices {
     // A trashed thread is not listed and cannot be written to, so its watch ends now, while its folder still resolves, and a
     // restore does not bring it back with a backlog.
     this.pullRequestWatch.onEnded(taskId, 'trashed')
+    // Read while the thread is listed: its checkout's repository is in this folder.
+    const projectPath = resolveThreadProjectPath(this.projects, this.threads, taskId)
     const record = await this.lifecycle.trash({
       taskId,
       operationId: this.resolveLifecycleOperationId(taskId, 'trash', operationId),
       expectedGeneration
     })
-    if (record.state === 'trashed' && this.removesWorktreesWithDeletedThreads()) {
+    // The trash is done; removing the checkout works in the project's repository, so it waits for the folder's
+    // volume (a pending macOS permission prompt). A volume that is not answering, or shutdown, leaves the
+    // checkout to the hourly cleanup.
+    if (record.state === 'trashed' && this.removesWorktreesWithDeletedThreads() &&
+        await this.orchestrator.waitForThreadFolders(taskId, [projectPath], this.requests.signal, { whenNotAnswering: 'fail' })
+          .catch(() => 'aborted' as const) === 'ready') {
       try {
         // The same keep rules as the hourly run (unpublished commits, links, files in use); a checkout that is kept stays until purge.
         const item = await this.storageCleanup.retireDeletedWorktree(taskId)
@@ -1024,6 +1023,11 @@ export class MmsProfileServices {
 
   getProfileId(): string {
     return this.profileId
+  }
+
+  /** Aborts when the profile starts shutting down; a request waiting for a folder's volume ends then. */
+  get requestShutdownSignal(): AbortSignal {
+    return this.requests.signal
   }
 
   async runOwnedRequest<T>(method: string, work: () => T | Promise<T>): Promise<T> {
@@ -1287,6 +1291,8 @@ export class MmsProfileServices {
         console.warn('the bot startup pass failed', { error: error instanceof Error ? error.message : String(error) })
       }
     }
+    // Wake rows of a kind no longer written (an earlier pull request watch's) are settled before any worker can run one.
+    this.runEngine.inbox.withdrawRetiredRows()
     this.startRunEngineWorkers()
 
     if (this.config.getScheduledSection().enabled) {
