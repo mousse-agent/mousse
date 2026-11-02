@@ -94,4 +94,32 @@ describe('under MOUSSE_GIT_POLICY=refuse', () => {
       expect(violations()).toEqual([])
     } finally { repositoryLease.release(); releaseExecutionLeaseHandle(taskLease) }
   })
+
+  it('a thread worktree named from its first message: naming, a taken name, retirement, trash expiry and a restore need nothing they are not allowed', async () => {
+    const task = join(f.home, 'thread-data', 'task'), other = join(f.home, 'thread-data', 'other')
+    for (const dir of [task, other]) mkdirSync(dir, { recursive: true })
+    writeFileSync(join(task, 'meta.json'), JSON.stringify({ id: 'task' }))
+    refuse()
+    // Named once, under refusal: the second thread with the same first message gets the next free name.
+    const metadata = await new ThreadWorkspaceManager(task).provision('task', 'main', f.repo, undefined, undefined, undefined, { nameFrom: 'Fix the login button' })
+    const second = await new ThreadWorkspaceManager(other).provision('other', 'main', f.repo, undefined, undefined, undefined, { nameFrom: 'Fix the login button' })
+    expect([metadata.branch, second.branch]).toEqual(['mousse/fix-the-login-button', 'mousse/fix-the-login-button-2'])
+    const store = new ResourceLifecycleStore({ profileId: 'p', profileHome: f.home }); store.registerTask({ taskId: 'task', location: task })
+    registerThreadLifecycleGate(f.home, store)
+    const taskLease = await waitAcquireExecutionLease(task), repositoryLease = await acquireRepositoryLease(resolveRepositoryIdentity(f.repo))
+    try {
+      const service = new WorktreeRetirementService(store, { taskLease, repositoryLease })
+      writeFileSync(join(metadata.worktreePath, 'uncommitted.txt'), 'kept\n')
+      service.prepare({ taskId: 'task', worktreePath: metadata.worktreePath, branch: metadata.branch, sourcePath: join(task, 'workspace.json') })
+      const path = service.pathFor('task', metadata.worktreePath)
+      service.retire(path)
+      expect(service.expireTrash(path, { now: Date.now() + 2 * WORKTREE_TRASH_QUIET_MS })).toEqual({ removed: true })
+      // Its branch went with the trash; the other thread's stays.
+      expect(plain(f.repo, 'branch', '--list', 'mousse/*', '--format=%(refname:short)')).toBe('mousse/fix-the-login-button-2')
+      service.reconstruct(path)
+      expect(plain(metadata.worktreePath, 'branch', '--show-current')).toBe(metadata.branch)
+      expect(f.read(metadata.worktreePath, 'uncommitted.txt')).toBe('kept\n')
+      expect(violations()).toEqual([])
+    } finally { repositoryLease.release(); releaseExecutionLeaseHandle(taskLease) }
+  })
 })

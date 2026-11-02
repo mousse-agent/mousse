@@ -13,6 +13,7 @@ import { assertFrozenContentEntry, lifecycleGit, lifecycleRead, readDirectLifecy
 import { isOwnerLive, PROCESS_INSTANCE_ID } from '../queue/processLiveness'
 import { getExternalResourceClaims } from './LifecycleClaims'
 import { withFileLock } from '../scheduled/fileLock'
+import { isMousseOwnedRef } from '../../shared/mousseBranches'
 
 const digest = (value: unknown): string => createHash('sha256').update(JSON.stringify(value)).digest('hex')
 const within = (root: string, path: string): boolean => { const rel = relative(resolve(root), resolve(path)); return !isAbsolute(rel) && rel !== '..' && !rel.startsWith(`..${process.platform === 'win32' ? '\\' : '/'}`) }
@@ -307,7 +308,7 @@ export class ResourcePurgeService {
       if (shared(resource.identity, resource.repositoryId)) { preview.retained.push({ identity: resource.identity, reason: 'Another owner retains this resource' }); continue }
       if (resource.kind === 'git-ref') {
         try {
-          if (!/^(refs\/mousse\/|refs\/heads\/mousse\/(thread|agent|workflow)\/)/.test(resource.identity)) throw new Error('Source ref is not Mousse-owned')
+          if (!isMousseOwnedRef(resource.identity)) throw new Error('Source ref is not Mousse-owned')
           const commonDir = resource.repositoryId ? repositories.get(resource.repositoryId) : repositories.size === 1 ? [...repositories.values()][0] : undefined
           if (!commonDir) throw new Error('Repository is unavailable; ref existence cannot be established')
           const expectedValue = readDirectLifecycleRef(commonDir, resource.identity)

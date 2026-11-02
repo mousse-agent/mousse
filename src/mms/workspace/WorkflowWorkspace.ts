@@ -35,6 +35,7 @@ import { WorktreeIdentity } from '../worktree/WorktreeIdentity'
 import { ThreadWorkspaceManager } from './ThreadWorkspaceManager'
 import { WorkspaceResolver } from './WorkspaceResolver'
 import { repoProgramEnv, withoutRepoPrograms } from '../git/repoPrograms'
+import { isIdNamedMousseBranch, isMousseBranchName } from '../../shared/mousseBranches'
 
 export interface WorkflowWorkspaceOwner {
   profileId: string
@@ -275,6 +276,19 @@ export async function resolveOwnedThreadWorkspace(
   }
 }
 
+/**
+ * Whether the branch a thread's workspace records is the thread's own: `mousse/<slug>`, named once when its worktree was
+ * made, or for a thread made before that, `mousse/thread/<thread>/<conversation branch>`. Another thread's id-named branch,
+ * and a branch outside `mousse/`, are never its own. With an active conversation branch (`activated`), any of the thread's
+ * id-named branches counts, and so does the Git branch a fork made before snapshots recorded, which the checkout may still be on.
+ */
+export function isThreadOwnBranch(branch: string, threadId: string, conversationBranchId: string, activated?: { gitBranch?: string }): boolean {
+  if (activated?.gitBranch && branch === activated.gitBranch) return true
+  if (!isMousseBranchName(branch)) return false
+  if (!isIdNamedMousseBranch(branch)) return true
+  return activated ? branch.startsWith(`mousse/thread/${threadId}/`) : branch === `mousse/thread/${threadId}/${conversationBranchId}`
+}
+
 function validateThreadWorkspaceMetadata(
   manager: ThreadWorkspaceManager,
   metadata: ReturnType<ThreadWorkspaceManager['load']> & {},
@@ -293,8 +307,7 @@ function validateThreadWorkspaceMetadata(
     .find((branch) => branch.id === branchId && branch.lifecycle === 'active')
   // Activating a conversation branch no longer switches Git branches, so the checkout stays on the thread's own; forks made
   // before snapshots recorded a Git branch of their own, which the checkout may still be on.
-  const expectedBranch = activated?.gitBranch ?? `mousse/thread/${threadId}/${branchId}`
-  const ownBranch = activated ? metadata.branch === expectedBranch || metadata.branch.startsWith(`mousse/thread/${threadId}/`) : metadata.branch === expectedBranch
+  const ownBranch = isThreadOwnBranch(metadata.branch, threadId, branchId, activated)
   const expectedRef = activated?.retainedRef ?? `refs/mousse/threads/${threadId}/${branchId}`
   const ownedPath = activated
     ? pathInside(join(repository.worktreeBase, 'threads', threadId), metadata.worktreePath)

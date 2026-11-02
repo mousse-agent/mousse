@@ -5,6 +5,7 @@ import { acquireRepositoryLease } from '../git/RepositoryLease'
 import { resolveRepositoryIdentity } from '../git/RepositoryIdentity'
 import { getMousseHomeDir } from '../data/paths'
 import { repoProgramEnv, withoutRepoPrograms } from '../git/repoPrograms'
+import { isMousseBranchName } from '../../shared/mousseBranches'
 
 export interface WorkspaceGcReport {
   /** Exact revisions inspected by this report; purge rejects changed resources. */
@@ -60,7 +61,7 @@ export class WorkspaceGcService {
         // canonicalize /var to /private/var on macOS, while callers and
         // cleanup commands use the configured path.
         // Active task branches and results not reachable from the destination retain ownership.
-        const protectedTask = current.branch?.startsWith('mousse/thread/') || current.branch?.startsWith('mousse/agent/') || current.branch?.startsWith('mousse/workflow/')
+        const protectedTask = isMousseBranchName(current.branch)
         let unpublished = true
         try { git(this.repositoryPath, ['merge-base', '--is-ancestor', git(currentPath, ['rev-parse', 'HEAD']), 'HEAD']); unpublished = false } catch { /* retain uncertain results */ }
         if (owned && !protectedTask && !unpublished) staleWorktrees.push({ path: join(displayRoot, ownedRelative), branch: current.branch })

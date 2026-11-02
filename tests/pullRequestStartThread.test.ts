@@ -128,7 +128,7 @@ describe('starting a thread from a pull request', () => {
     expect(git(workspace.worktreePath, 'rev-parse', 'HEAD')).toBe(prSha)
     expect(f.read(workspace.worktreePath)).toBe('pull request value\n')
     // The thread's branch is its own; no remote or branch was added for the fork, and the primary checkout stays put.
-    expect(workspace.branch).toBe(`mousse/thread/${result.thread.id}/main`)
+    expect(workspace.branch).toBe('mousse/pr-7-fix-the-thing')
     expect(git(f.repo, 'remote')).toBe(remotesBefore)
     expect(git(f.repo, 'rev-parse', '--abbrev-ref', 'HEAD')).toBe(primaryBranch)
     expect(git(f.repo, 'rev-parse', 'HEAD')).toBe(primaryHead)
@@ -392,18 +392,22 @@ describe('starting a thread from a pull request', () => {
   })
 
   describe('when the worktree cannot be made', () => {
-    /** Makes `git worktree add` fail after provisioning began: the thread's branch name is already taken. */
-    function blockWorktree(): { threadId: () => string } {
+    /**
+     * Makes `git worktree add` fail after provisioning began: the repository has a branch named `mousse`, so Git can make
+     * no branch under `mousse/`. (A taken thread branch name no longer blocks it: the thread gets the next free name.)
+     */
+    function blockWorktree(): { threadId: () => string; unblock: () => void } {
       let id = ''
       const create = mms.threads.createThread.bind(mms.threads)
       vi.spyOn(mms.threads, 'createThread').mockImplementation((...args) => {
         const thread = create(...args)
         id = thread.id
-        git(f.repo, 'branch', `mousse/thread/${thread.id}/main`, 'HEAD')
+        git(f.repo, 'branch', 'mousse', 'HEAD')
         return thread
       })
-      return { threadId: () => id }
+      return { threadId: () => id, unblock: () => { git(f.repo, 'branch', '-D', 'mousse') } }
     }
+    const mousseRefs = () => git(f.repo, 'for-each-ref', '--format=%(refname)').split('\n').filter((ref) => ref.startsWith('refs/heads/mousse/'))
 
     it('removes the thread, its folder and what provisioning left in the repository, and says why', async () => {
       const blocked = blockWorktree()
@@ -416,7 +420,8 @@ describe('starting a thread from a pull request', () => {
       const id = blocked.threadId()
       expect(mms.threads.listAllThreads()).toHaveLength(threadsBefore)
       expect(mms.threads.listAllThreads().some((thread) => thread.id === id)).toBe(false)
-      expect(git(f.repo, 'for-each-ref', '--format=%(refname)', `refs/heads/mousse/thread/${id}`, `refs/mousse/threads/${id}`)).toBe('')
+      expect(mousseRefs()).toEqual([])
+      expect(git(f.repo, 'for-each-ref', '--format=%(refname)', `refs/mousse/threads/${id}`)).toBe('')
       expect(git(f.repo, 'worktree', 'list', '--porcelain').split('\n').filter((line) => line.startsWith('worktree '))).toHaveLength(1)
       expect(trash).not.toHaveBeenCalled()
       // Nothing was sent and nothing is left to retry against; the fetched ref went too, so no fork history stays reachable.
@@ -424,6 +429,7 @@ describe('starting a thread from a pull request', () => {
       expect(git(f.repo, 'for-each-ref', '--format=%(refname)', 'refs/mousse/pull')).toBe('')
       // A retry is not refused as a duplicate.
       vi.mocked(mms.threads.createThread).mockRestore()
+      blocked.unblock()
       await expect(start()).resolves.toMatchObject({ sent: false })
     })
 
