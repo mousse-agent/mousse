@@ -890,7 +890,7 @@ export class ClaudeSubscriptionProviderService {
   models(): LlmModelOption[] {
     const live = this.settings.models
     // Never listed: the CLI aliases. Listed but empty (every model needs a newer Mousse): older ones only.
-    if (!live || (!live.length && !this.settings.modelsRefreshedAt)) return FALLBACK_MODELS
+    if (!live || !this.listedByClaude()) return FALLBACK_MODELS
     const results = this.settings.olderModels?.results
     if (!results || !Object.keys(results).length) return live
     const listed = new Set(live.map((model) => model.id))
@@ -913,7 +913,15 @@ export class ClaudeSubscriptionProviderService {
   }
   /** When Claude Code last listed the models, kept with them across restarts. */
   modelsRefreshedAt(): string | undefined {
-    return this.settings.models?.length ? this.settings.modelsRefreshedAt : undefined
+    return this.listedByClaude() ? this.settings.modelsRefreshedAt : undefined
+  }
+  /**
+   * Claude Code has listed the models: a saved list, or an empty one saved by a refresh (every model it
+   * listed needs a newer Mousse). An empty list never saved by a refresh is not a listing.
+   */
+  private listedByClaude(): boolean {
+    const models = this.settings.models
+    return Boolean(models && (models.length || this.settings.modelsRefreshedAt))
   }
   llmProvider(): LlmProviderOption | undefined {
     if (!this.configured()) return undefined
@@ -1007,7 +1015,7 @@ export class ClaudeSubscriptionProviderService {
     const result = await this.probe(this.environment())
     if (this.stopped) return
     this.cliProbe = { at: Date.now(), result }
-    if (result.kind === 'signed_in' && !this.settings.models?.length && !this.modelDiscoveryStarted) {
+    if (result.kind === 'signed_in' && !this.listedByClaude() && !this.modelDiscoveryStarted) {
       this.modelDiscoveryStarted = true
       void this.refreshModels(this.dir).catch(
         () => {
@@ -1110,7 +1118,7 @@ export class ClaudeSubscriptionProviderService {
       } catch {
         session.abort.signal.throwIfAborted()
         if (this.stopped) throw new Error('Claude provider is stopped')
-        if (!this.settings.models?.length) this.settings.models = FALLBACK_MODELS
+        if (!this.listedByClaude()) this.settings.models = FALLBACK_MODELS
         this.save()
         interaction.notify({
           type: 'progress',
@@ -2063,7 +2071,7 @@ export class ClaudeSubscriptionProviderService {
       controller.signal.throwIfAborted()
       const selected = parseThinkingSuffixFromModelId(input.model)
       // A level the model does not offer (saved for another model) runs at the model's default.
-      const level = supportedEffortOf(input.model, this.settings.models?.length ? this.models() : [], new Set([...CLAUDE_EFFORTS, 'ultracode']))
+      const level = supportedEffortOf(input.model, this.listedByClaude() ? this.models() : [], new Set([...CLAUDE_EFFORTS, 'ultracode']))
       // Ultracode runs at the model's default effort, with Claude Code's `ultracode` setting on.
       const ultracode = level === 'ultracode'
       const effort = level && CLAUDE_EFFORTS.has(level) ? level as Options['effort'] : undefined

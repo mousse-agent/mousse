@@ -1102,6 +1102,9 @@ describe('older Claude models', () => {
     await service.olderCheck
     expect(service.models().map((model) => model.id)).not.toContain('next')
     expect(queries[1]!.setModel.mock.calls.map(([model]) => model)).not.toContain('next')
+    // An empty listing is still a fresh one, and the CLI aliases do not come back.
+    expect(service.modelsRefreshedAt()).toBeDefined()
+    expect(service.models().map((model) => model.id)).not.toContain('opus')
   })
 
   it('replaces a check still running for an earlier key with one for the new key', async () => {
