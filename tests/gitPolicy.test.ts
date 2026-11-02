@@ -7,7 +7,7 @@ import {
   assertGitAllowed, clearGitPolicyLog, decideGitCommand, GitPolicyError, gitPolicyLog, isOwnedPath, isOwnedRef,
   currentUserRequest, registerOwnedGitRoot, stripInheritedGitEnv, userAction, withGitAccess, withUserRequest, type GitCommandRequest, type GitDecision
 } from '../src/mms/git/gitPolicy'
-import { repoProgramEnv, withoutRepoPrograms } from '../src/mms/git/repoPrograms'
+import { guardedSimpleGit, repoProgramEnv, withoutDeref, withoutRepoPrograms } from '../src/mms/git/repoPrograms'
 import { tryGit } from '../src/mms/actions/git'
 
 const USER = userAction('button', 'Push')
@@ -264,6 +264,57 @@ describe('round 2: work tree, sparse checkout, protocols and the environment', (
     })
     expect(currentUserRequest()).toBeUndefined()
     await expect(later).rejects.toBeInstanceOf(GitPolicyError)
+  })
+})
+
+describe('round 3: private indexes in linked worktrees, update-ref options, simple-git arguments', () => {
+  /** A user's repository with a Mousse worktree linked from it under the Mousse home. */
+  function linked() {
+    git(outside, '-c', 'user.name=x', '-c', 'user.email=x@example.invalid', 'commit', '-q', '--allow-empty', '-m', 'base')
+    const worktree = join(owned, 'linked')
+    git(outside, 'worktree', 'add', '-q', '-b', 'mousse/thread/1/main', worktree)
+    const gitDir = git(worktree, 'rev-parse', '--absolute-git-dir')
+    mkdirSync(join(gitDir, 'mousse'), { recursive: true })
+    return { worktree, gitDir }
+  }
+
+  it('accepts Mousse\'s private indexes in the Git directory of an owned linked worktree, in both shapes', () => {
+    const { worktree, gitDir } = linked()
+    expect(gitDir).toContain(join('.git', 'worktrees'))
+    for (const index of [join(gitDir, 'mousse-pending-1.index'), join(gitDir, 'mousse', 'snapshot-index'), join(gitDir, 'mousse', 'restore-a.index'), join(gitDir, 'mousse', 'preserve-b.index')]) {
+      expect(decideGitCommand({ cwd: worktree, args: ['add', '-u'], env: { GIT_INDEX_FILE: index } }), index).toMatchObject({ access: 'owned', allowed: true })
+      expect(decideGitCommand({ cwd: worktree, args: ['read-tree', 'HEAD'], env: { GIT_INDEX_FILE: index } }), index).toMatchObject({ access: 'owned', allowed: true })
+    }
+  })
+
+  it('accepts them in the primary checkout\'s Git directory, and refuses another checkout\'s or an unknown name', () => {
+    const { gitDir } = linked()
+    const primary = join(outside, '.git')
+    expect(decideGitCommand({ cwd: outside, args: ['add', '-u'], env: { GIT_INDEX_FILE: join(primary, 'mousse', 'preserve-b.index') } })).toMatchObject({ access: 'owned', allowed: true })
+    expect(decideGitCommand({ cwd: outside, args: ['add', '-u'], env: { GIT_INDEX_FILE: join(gitDir, 'mousse-pending-1.index') } })).toMatchObject({ allowed: false })
+    expect(decideGitCommand({ cwd: outside, args: ['add', '-u'], env: { GIT_INDEX_FILE: join(primary, 'mousse', 'other.index') } })).toMatchObject({ allowed: false })
+    expect(decideGitCommand({ cwd: outside, args: ['add', '-u'], env: { GIT_INDEX_FILE: join(primary, 'index') } })).toMatchObject({ allowed: false })
+  })
+
+  it('finds the ref of update-ref past -m and its message', () => {
+    expect(withoutDeref(['update-ref', '-m', 'keep', 'refs/mousse/x', 'a'.repeat(40)])).toEqual(['update-ref', '--no-deref', '-m', 'keep', 'refs/mousse/x', 'a'.repeat(40)])
+    // A message that reads like a ref is the message, not the ref.
+    expect(withoutDeref(['update-ref', '-m', 'refs/mousse/x', 'HEAD', 'a'.repeat(40)])).toEqual(['update-ref', '-m', 'refs/mousse/x', 'HEAD', 'a'.repeat(40)])
+    expect(withoutDeref(['update-ref', '-d', '--', 'refs/mousse/x'])).toEqual(['update-ref', '--no-deref', '-d', '--', 'refs/mousse/x'])
+    expect(withoutDeref(['update-ref', '--stdin'])).toEqual(['update-ref', '--stdin'])
+  })
+
+  it('judges a simple-git method by the arguments it was given, not by its name', async () => {
+    git(outside, '-c', 'user.name=x', '-c', 'user.email=x@example.invalid', 'commit', '-q', '--allow-empty', '-m', 'base')
+    git(outside, 'branch', 'feature')
+    await guardedSimpleGit(outside).branch(['-d', 'feature'])
+    expect(gitPolicyLog().at(-1)).toMatchObject({ kind: 'violation', command: 'git branch -d feature' })
+    vi.stubEnv('MOUSSE_GIT_POLICY', 'refuse')
+    git(outside, 'branch', 'feature')
+    expect(() => guardedSimpleGit(outside).branch(['-D', 'feature'])).toThrow(GitPolicyError)
+    expect(git(outside, 'branch', '--list', 'feature')).toContain('feature')
+    // A listing is still a read.
+    await expect(guardedSimpleGit(outside).branchLocal()).resolves.toBeTruthy()
   })
 })
 

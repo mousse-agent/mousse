@@ -1,7 +1,7 @@
 import { execFile } from 'node:child_process'
 import { gitDirectoryEnv, nonInteractiveGitEnv, withGitConfigEnv } from '../../git/gitEnv'
 import { GIT_NULL_DEVICE } from '../../git/gitNullDevice'
-import { assertGitAllowed } from '../../git/gitPolicy'
+import { assertGitAllowed, type UserAction } from '../../git/gitPolicy'
 import { HOOK_EVENTS } from '../../git/repoPrograms'
 import { NetError } from '../../../shared/net'
 
@@ -34,7 +34,8 @@ function runGit(
   args: string[],
   trustRemoteConfiguration: boolean,
   signal?: AbortSignal,
-  maximumBytes = 2 * 1024 * 1024
+  maximumBytes = 2 * 1024 * 1024,
+  userRequested?: UserAction
 ): Promise<string> {
   const safety = [
     '-c',
@@ -53,7 +54,7 @@ function runGit(
   return new Promise((resolve, reject) => {
     const env = environment(cwd, trustRemoteConfiguration)
     try {
-      assertGitAllowed({ cwd, args, env })
+      assertGitAllowed({ cwd, args, env, userRequested })
     } catch (error) {
       reject(error)
       return
@@ -90,12 +91,16 @@ export function git(
   return runGit(cwd, args, false, signal, maximumBytes)
 }
 
-/** Fetch/push only against the locally bound owner's remote; trusts their credentials and transport configuration. */
+/**
+ * Fetch/push only against the locally bound owner's remote; trusts their credentials and transport configuration.
+ * `userRequested` is the dispatching device's request, which a push to that remote needs.
+ */
 export function remoteGit(
   cwd: string,
   args: string[],
   signal?: AbortSignal,
-  maximumBytes?: number
+  maximumBytes?: number,
+  userRequested?: UserAction
 ): Promise<string> {
-  return runGit(cwd, args, true, signal, maximumBytes)
+  return runGit(cwd, args, true, signal, maximumBytes, userRequested)
 }

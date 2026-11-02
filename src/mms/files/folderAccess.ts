@@ -2,6 +2,8 @@ import { execFile } from 'node:child_process'
 import { lstat, opendir, readlink, realpath, stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { isAbsolute, join, resolve, sep } from 'node:path'
+import { mousseGitEnv } from '../git/gitEnv'
+import { assertGitAllowed } from '../git/gitPolicy'
 
 /**
  * Waits, without blocking the daemon, until the folders a request or turn works in can be read.
@@ -65,13 +67,15 @@ async function readFolder(path: string): Promise<void> {
 
 function gitCommonDir(folder: string): Promise<string | null> {
   return new Promise((settle) => {
-    execFile('git', ['-c', 'core.fsmonitor=false', 'rev-parse', '--path-format=absolute', '--git-common-dir'], {
+    const args = ['rev-parse', '--path-format=absolute', '--git-common-dir']
+    assertGitAllowed({ cwd: folder, args })
+    execFile('git', ['-c', 'core.fsmonitor=false', ...args], {
       cwd: folder,
       encoding: 'utf8',
       windowsHide: true,
       // A Git that never answers (a hung drive) is ended in the end; the caller stopped waiting long before.
       timeout: 120_000,
-      env: { ...process.env, GIT_OPTIONAL_LOCKS: '0', GIT_TERMINAL_PROMPT: '0' }
+      env: mousseGitEnv({ ...process.env, GIT_OPTIONAL_LOCKS: '0', GIT_TERMINAL_PROMPT: '0' })
     }, (error, stdout) => settle(error ? null : stdout.trim() || null))
   })
 }

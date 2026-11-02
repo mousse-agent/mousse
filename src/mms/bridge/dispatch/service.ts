@@ -1,3 +1,4 @@
+import { userAction } from '../../git/gitPolicy'
 import { createHash } from 'node:crypto'
 import { realpath } from 'node:fs/promises'
 import {
@@ -334,7 +335,10 @@ export class DispatchService {
             record.binding.options.remote!,
             `${resultRef(record.id)}:refs/heads/mousse/dispatch/${record.id}`
           ],
-          controller.signal
+          controller.signal,
+          undefined,
+          // The dispatching device asked for the push, on a binding its owner allowed to push.
+          userAction('device', `Push dispatch result to ${record.binding.options.remote}`)
         )
       }
       const bytes = await createResultBundle(root, quarantine, record.id, controller.signal),

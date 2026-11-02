@@ -17,6 +17,7 @@ const APPROVED_GIT_SPAWNERS: Record<string, string> = {
   'src/mms/bridge/dispatch/git.ts': 'assertGitAllowed',
   'src/mms/files/WorkspaceGrep.ts': 'withoutRepoPrograms',
   'src/mms/files/WorkspaceIndex.ts': 'withoutRepoPrograms',
+  'src/mms/files/folderAccess.ts': 'assertGitAllowed',
   'src/mms/files/gitControl.ts': 'assertGitAllowed',
   'src/mms/git/GitService.ts': 'withoutRepoPrograms',
   'src/mms/git/PullRequestThreadService.ts': 'withoutRepoPrograms',

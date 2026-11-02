@@ -40,9 +40,23 @@ function sources(dir: string): string[] {
 
 /** Git subcommands that change something; a call whose argument list starts with one is a Git write. */
 const WRITE_SUBCOMMANDS = new Set([
-  'add', 'am', 'apply', 'branch', 'checkout', 'cherry-pick', 'clean', 'clone', 'commit', 'fetch', 'init', 'merge', 'mv', 'pull', 'push',
-  'read-tree', 'rebase', 'reset', 'restore', 'revert', 'rm', 'sparse-checkout', 'stash', 'switch', 'update-index', 'update-ref', 'worktree'
+  'add', 'am', 'apply', 'branch', 'checkout', 'checkout-index', 'cherry-pick', 'clean', 'clone', 'commit', 'config', 'fetch', 'init', 'merge',
+  'mv', 'pull', 'push', 'read-tree', 'rebase', 'remote', 'reset', 'restore', 'revert', 'rm', 'sparse-checkout', 'stash', 'switch', 'symbolic-ref',
+  'tag', 'update-index', 'update-ref', 'worktree'
 ])
+
+/**
+ * The read forms of subcommands that can also write, told apart by their literal arguments: `config --get`,
+ * `tag --list`, `remote` alone or `remote get-url`, `symbolic-ref` with one name. Anything else counts as a write.
+ */
+function readForm(subcommand: string, rest: readonly string[]): boolean {
+  const positional = rest.filter((word) => !word.startsWith('-'))
+  if (subcommand === 'config') return rest.some((word) => /^--(get|get-all|get-regexp|get-urlmatch|list|show-origin|show-scope)$|^-l$/.test(word)) || positional.length <= 1
+  if (subcommand === 'tag') return rest.some((word) => /^(-l|--list|--contains|--points-at|--merged|--no-merged)$/.test(word)) || positional.length === 0
+  if (subcommand === 'remote') return positional.length === 0 || ['get-url', 'show'].includes(positional[0]!)
+  if (subcommand === 'symbolic-ref') return !rest.some((word) => /^(-d|--delete)$/.test(word)) && positional.length <= 1
+  return false
+}
 /** Functions that run the Git command in their argument list. */
 const RUNNERS = new Set(['git', 'gitRaw', 'tryGit', 'actionGit', 'lifecycleGit', 'workspaceGit', 'runGit', 'runLive', 'withoutRepoPrograms', 'raw'])
 /** GitService and code host methods that change the repository or GitHub. */
@@ -71,10 +85,13 @@ function writesGit(call: ts.CallExpression, callee: string | null): boolean {
   if (!callee || !RUNNERS.has(callee.split('.').pop()!)) return false
   return call.arguments.some((argument) => {
     if (!ts.isArrayLiteralExpression(argument)) return false
-    const first = argument.elements.find((element) => !ts.isSpreadElement(element))
+    const elements = argument.elements.filter((element) => !ts.isSpreadElement(element))
+    const first = elements[0]
+    // Only literal words count; a word computed at run time (a key, a ref) is treated as a positional argument.
+    const rest = elements.slice(1).map((element) => (ts.isStringLiteralLike(element) ? element.text : '<value>'))
     // A literal subcommand, or either branch of `a ? 'merge' : 'revert'`.
     const names = !first ? [] : ts.isConditionalExpression(first) ? [first.whenTrue, first.whenFalse] : [first]
-    return names.some((name) => ts.isStringLiteralLike(name) && WRITE_SUBCOMMANDS.has(name.text))
+    return names.some((name) => ts.isStringLiteralLike(name) && WRITE_SUBCOMMANDS.has(name.text) && !readForm(name.text, rest))
   })
 }
 

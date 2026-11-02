@@ -438,7 +438,16 @@ function gitDirectoryArgs(cwd: string): string[] {
  */
 export function withoutDeref(args: readonly string[]): string[] {
   if (args[0] !== 'update-ref' || args.includes('--no-deref') || args.includes('--stdin')) return [...args]
-  const ref = args.slice(1).find((arg) => !arg.startsWith('-'))
+  // The first positional argument, past options: `-m <reason>` takes a value, `--` ends the options.
+  let ref: string | undefined
+  for (let index = 1; index < args.length; index++) {
+    const arg = args[index]!
+    if (arg === '--') { ref = args[index + 1]; break }
+    if (arg === '-m') { index += 1; continue }
+    if (arg.startsWith('-')) continue
+    ref = arg
+    break
+  }
   if (!ref || ref === 'HEAD') return [...args]
   return ['update-ref', '--no-deref', ...args.slice(1)]
 }
@@ -467,14 +476,22 @@ export const UNSAFE_ALLOWED = {
   allowUnsafePager: true
 } as const
 
-/** The Git command a simple-git method other than `raw` runs, for the central check. */
+/** The Git subcommand a simple-git method other than `raw` runs, for the central check. */
 const SIMPLE_GIT_COMMANDS: Record<string, readonly string[]> = {
   status: ['status'], diff: ['diff'], diffSummary: ['diff'], log: ['log'], show: ['show'], branchLocal: ['branch'], branch: ['branch'],
-  checkIsRepo: ['rev-parse'], revparse: ['rev-parse'], listRemote: ['ls-remote'], getRemotes: ['remote'], tags: ['tag'], init: ['init']
+  checkIsRepo: ['rev-parse'], revparse: ['rev-parse'], listRemote: ['ls-remote'], getRemotes: ['remote'], tags: ['tag'], init: ['init'],
+  deleteLocalBranch: ['branch', '-d'], deleteLocalBranches: ['branch', '-d'], checkoutBranch: ['checkout', '-b'], checkoutLocalBranch: ['checkout', '-b'],
+  addConfig: ['config'], addRemote: ['remote', 'add'], removeRemote: ['remote', 'remove'], addTag: ['tag'], addAnnotatedTag: ['tag', '-a']
 }
 
-function simpleGitCommand(method: string): readonly string[] {
-  return SIMPLE_GIT_COMMANDS[method] ?? [method]
+/**
+ * The command a simple-git call runs, as the check should see it: the method's subcommand followed by the
+ * string arguments it was given (`branch(['-d', name])` is `git branch -d name`, not a branch listing).
+ * An options object only ever adds reading options for the methods used here, so only strings are kept.
+ */
+function simpleGitCommand(method: string, parameters: readonly unknown[] = []): string[] {
+  const words = parameters.flat().filter((value): value is string => typeof value === 'string')
+  return [...(SIMPLE_GIT_COMMANDS[method] ?? [method]), ...words]
 }
 
 /**
@@ -487,7 +504,7 @@ export function policedSimpleGit(cwd: string, git: SimpleGit): SimpleGit {
       const value = Reflect.get(target, key, receiver) as unknown
       if (typeof key === 'symbol' || typeof value !== 'function' || key === 'env' || key === 'then') return value
       return (...parameters: unknown[]) => {
-        const args = key === 'raw' ? parameters.flat().filter((item): item is string => typeof item === 'string') : simpleGitCommand(key)
+        const args = key === 'raw' ? parameters.flat().filter((item): item is string => typeof item === 'string') : simpleGitCommand(key, parameters)
         assertGitAllowed({ cwd, args })
         return (value as (...values: unknown[]) => unknown).apply(target, parameters)
       }
@@ -515,7 +532,7 @@ export function guardedSimpleGit(cwd: string, options: Partial<Omit<SimpleGitOpt
         // Only `raw` takes free-form arguments; every other method used here only reads.
         const args = key === 'raw' ? parameters.flat().filter((value): value is string => typeof value === 'string') : []
         // Lock-free: the instance's config holds NO_INDEX_REFRESH and its environment turns optional locks off.
-        assertGitAllowed({ cwd, args: key === 'raw' ? args : simpleGitCommand(key), lockFree: true })
+        assertGitAllowed({ cwd, args: key === 'raw' ? args : simpleGitCommand(key, parameters), lockFree: true })
         // No optional locks: a status or diff read here never refreshes and rewrites the index.
         const instance = forCommand(args).env(repoProgramEnv({ ...process.env, GIT_OPTIONAL_LOCKS: '0' })) as unknown as Record<string, (...values: unknown[]) => unknown>
         return instance[key]!(...parameters)

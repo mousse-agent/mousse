@@ -34,8 +34,8 @@ const ACCESS_RANK: Record<GitAccess, number> = { none: 0, read: 1, owned: 2, use
 
 /** The user's request behind a Git change Mousse makes for them. */
 export interface UserAction {
-  /** Where they asked: a button or menu item, the CLI, or a chat message. */
-  via: 'button' | 'cli' | 'chat'
+  /** Where they asked: a button or menu item, the CLI, a chat message, or another of their computers (a bridge dispatch). */
+  via: 'button' | 'cli' | 'chat' | 'device'
   /** What they asked for: the button's label, the CLI command, or the request in their words. */
   label: string
 }
@@ -46,7 +46,7 @@ export function userAction(via: UserAction['via'], label: string): UserAction {
 
 function isUserAction(value: unknown): value is UserAction {
   const action = value as Partial<UserAction> | null | undefined
-  return Boolean(action && (action.via === 'button' || action.via === 'cli' || action.via === 'chat') && typeof action.label === 'string' && action.label.trim())
+  return Boolean(action && (action.via === 'button' || action.via === 'cli' || action.via === 'chat' || action.via === 'device') && typeof action.label === 'string' && action.label.trim())
 }
 
 export type GitPolicyMode = 'log' | 'refuse'
@@ -559,13 +559,25 @@ function ghReads(args: readonly string[]): boolean {
 // ---------------------------------------------------------------------------------------------------------
 // Deciding
 
+/** Private index files Mousse makes directly in a Git directory (the pending-changes snapshot). */
+const OWNED_INDEX_IN_GIT_DIR = /^mousse-[\w.-]+\.index$/
+/** Private index files Mousse makes in the Git directory's `mousse/` folder (turn snapshots, restore, preserve). */
+const OWNED_INDEX_IN_MOUSSE_DIR = /^(snapshot-index|(restore|preserve)-[\w.-]+\.index)$/
+
 /**
- * A private index Mousse made: under the Mousse home, or a `mousse-*.index` file directly in a repository's
- * Git directory (where the pending-changes snapshot builds its tree). A checkout's own `index` never is.
+ * A private index Mousse made: under the Mousse home, or one of its own index files in the Git directory of the
+ * checkout the command runs in, for the primary checkout and a linked worktree alike (`.git/worktrees/<name>`,
+ * which has no objects of its own). A checkout's own `index` never is.
  */
-function isOwnedIndex(file: string): boolean {
+function isOwnedIndex(file: string, cwd: string, env: NodeJS.ProcessEnv): boolean {
   if (isOwnedPath(file)) return true
-  return /^mousse-[\w.-]+\.index$/.test(basename(file)) && isGitDirectory(dirname(file))
+  const name = basename(file)
+  const folder = dirname(file)
+  const inGitDir = OWNED_INDEX_IN_GIT_DIR.test(name) ? folder : OWNED_INDEX_IN_MOUSSE_DIR.test(name) && basename(folder) === 'mousse' ? dirname(folder) : null
+  if (!inGitDir) return false
+  const gitDir = readGit(cwd, ['rev-parse', '--absolute-git-dir'], env)
+  if (!gitDir || gitDir.status !== 0) return isGitDirectory(inGitDir)
+  return canonicalGitPath(gitDir.stdout.trim()) === canonicalGitPath(inGitDir)
 }
 
 /** Variables that send Git to another repository, work tree, object store or index. */
@@ -657,7 +669,7 @@ export function decideGitCommand(request: GitCommandRequest): GitDecision {
   if (effect.worktreeConfig && !cwdOwned) problems.push('it writes the config of a worktree Mousse does not own')
   if (effect.worktree && !cwdOwned) problems.push('it changes files outside a Mousse worktree')
   const indexFile = request.env?.GIT_INDEX_FILE
-  if (effect.index && !(indexFile ? isOwnedIndex(resolve(request.cwd, indexFile)) : cwdOwned)) problems.push('it writes the index of a checkout Mousse does not own')
+  if (effect.index && !(indexFile ? isOwnedIndex(resolve(request.cwd, indexFile), request.cwd, env) : cwdOwned)) problems.push('it writes the index of a checkout Mousse does not own')
   if (effect.head && !cwdOwned) problems.push('it moves HEAD of a checkout Mousse does not own')
   if (effect.headBranch) {
     const head = cwdOwned ? finalRef(request.cwd, 'HEAD', env) : null

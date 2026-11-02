@@ -117,7 +117,7 @@ async function addUntrustedWorktree(primaryCheckoutPath: string, addArguments: s
     encoding: 'utf8',
     stdio: ['ignore', 'pipe', 'pipe']
   })
-  pinUntrustedWorktree(primaryCheckoutPath, worktreePath, safety, userRequested)
+  pinUntrustedWorktree(primaryCheckoutPath, worktreePath, safety)
 }
 
 function canonicalPath(path: string): string {
