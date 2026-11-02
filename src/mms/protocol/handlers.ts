@@ -108,8 +108,8 @@ import { inThreadSnapshotScope, snapshotsOffReason } from '../workspace/Snapshot
 import { RedoService } from '../actions/RedoService'
 import { CodeRevertService } from '../actions/CodeRevertService'
 import { ConversationBranchService } from '../actions/ConversationBranchService'
-import { discardPendingChanges, git as workspaceGit } from '../actions/git'
-import { abortPreservedNotice, takeSnapshot } from '../actions/snapshots'
+import { discardPendingChangesAsync, gitAsync as workspaceGitAsync } from '../actions/git'
+import { abortPreservedNotice, takeSnapshotAsync } from '../actions/snapshots'
 import { randomUUID } from 'node:crypto'
 import { ManagedConflictService } from '../actions/ManagedConflictService'
 import { cancelPendingIntegrations } from '../agents/ChildAgentIntegrationService'
@@ -123,7 +123,8 @@ import { grepWorkspace } from '../files/WorkspaceGrep'
 import { getWorkspaceIndexRegistry } from '../files/WorkspaceIndexRegistry'
 import { searchWorkspacePaths } from '../files/WorkspaceSearch'
 import { devGuiBridge } from '../devgui/DevGuiBridge'
-import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync } from 'node:fs'
+import { existsSync, lstatSync, mkdirSync, readFileSync } from 'node:fs'
+import { realpath as realpathNative } from 'node:fs/promises'
 import { FILE_ASSET_PIECE_BYTES, SAVE_TOO_LARGE_MESSAGE, saveExceedsRequest } from '../../shared/fileAssets'
 import { homedir } from 'node:os'
 import { isAbsolute, join, relative, resolve } from 'node:path'
@@ -850,10 +851,10 @@ async function gitMutationTarget(ctx: HandlerContext, p: Record<string, unknown>
 }
 
 /** Paths as `getStatus` names them (repository-relative), accepted only inside the project folder. */
-function gitPaths(ctx: HandlerContext, root: string, value: unknown): string[] {
+async function gitPaths(ctx: HandlerContext, root: string, value: unknown): Promise<string[]> {
   const paths = asStringArray(value, 'paths', { unique: true, maxItems: GIT_PATHS_MAX, maxItemLen: 4096 })
   if (paths.length === 0) throw new DomainRpcError('invalid_params', 'paths must name at least one file')
-  const top = workspaceGit(root, ['rev-parse', '--show-toplevel'])
+  const top = await workspaceGitAsync(root, ['rev-parse', '--show-toplevel'])
   let named: string[]
   try {
     named = repoRelativePaths(top, root, paths)
@@ -864,8 +865,9 @@ function gitPaths(ctx: HandlerContext, root: string, value: unknown): string[] {
   // follows junctions, and `discard` deletes what it names. The path is only looked at, never changed, so a `.git` name is no concern here.
   if (ctx.connection?.bridgeCaller) {
     try {
-      const realRoot = realpathSync.native(resolve(root))
-      const realTop = realpathSync.native(top)
+      // `fs/promises`' `realpath` answers like `realpathSync.native`.
+      const realRoot = await realpathNative(resolve(root))
+      const realTop = await realpathNative(top)
       for (const path of named) containedPath(ctx, root, relative(realRoot, join(realTop, path)), 'inspect')
     } catch (error) {
       throw refusedPath(error)
@@ -2881,17 +2883,17 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       if (!workspace || workspace.lifecycle !== 'ready') throw new DomainRpcError('workspace_not_ready', 'Thread workspace is not ready')
       // Everything uncommitted goes, the results of the thread's turns included. The files as they are now are recorded
       // as a snapshot first (the turns' receipts keep theirs), and a copy stays under refs/mousse/discarded/.
-      return await withGitMutationLocks(operation.threadDirectory, workspace.worktreePath, 'discard-pending-changes', () => {
+      return await withGitMutationLocks(operation.threadDirectory, workspace.worktreePath, 'discard-pending-changes', async () => {
         let before: string
         // The files are recorded first. When the record cannot be written (a pending operation), a plain snapshot stands in;
         // when even that fails, nothing is discarded. The copy is made inside `discardPendingChanges`, before any reset.
-        try { before = new ThreadActionService(operation.threadDirectory).recordOutsideChangesHeld({ threadId: workspace.threadId, conversationBranchId: workspace.conversationBranchId, workspacePath: workspace.worktreePath }).startSha }
+        try { before = (await new ThreadActionService(operation.threadDirectory).recordOutsideChangesHeld({ threadId: workspace.threadId, conversationBranchId: workspace.conversationBranchId, workspacePath: workspace.worktreePath })).startSha }
         catch {
-          try { before = takeSnapshot(workspace.worktreePath, { reason: 'before discard', threadId: workspace.threadId }).sha }
+          try { before = (await takeSnapshotAsync(workspace.worktreePath, { reason: 'before discard', threadId: workspace.threadId })).sha }
           catch (error) { throw new DomainRpcError('discard_unsafe', `Nothing was discarded: the files could not be recorded first (${(error as Error).message.split(/\r?\n/)[0]}).`) }
-          workspaceGit(workspace.worktreePath, ['update-ref', '--no-deref', `refs/mousse/discarded/snapshot-${before}`, before])
+          await workspaceGitAsync(workspace.worktreePath, ['update-ref', '--no-deref', `refs/mousse/discarded/snapshot-${before}`, before])
         }
-        const { backupRef } = discardPendingChanges(workspace.worktreePath)
+        const { backupRef } = await discardPendingChangesAsync(workspace.worktreePath)
         return { backupRef, snapshotSha: before, notice: `The files as they were are kept in Git as ${backupRef}. To bring them back, run \`git restore --source=${backupRef} --worktree -- .\` in ${workspace.worktreePath}.` }
       })
     }
@@ -3210,7 +3212,8 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const workspace = new ThreadWorkspaceManager(operation.threadDirectory).load()
       // A thread in its project's folder has nothing to publish: its work is already in the primary checkout.
       if (isProjectFolderWorkspace(workspace)) return { available: false, workspace, reason: PROJECT_FOLDER_PUBLISH_REASON }
-      return { available: Boolean(workspace?.lifecycle === 'ready'), workspace, sourceSha: workspace?.lifecycle === 'ready' ? workspace.snapshotSha ?? workspaceGit(workspace.worktreePath, ['rev-parse', 'HEAD']) : undefined, targetSha: workspaceGit(operation.projectPath, ['rev-parse', 'HEAD']), journalGeneration: operation.currentGeneration }
+      const sourceSha = workspace?.lifecycle === 'ready' ? workspace.snapshotSha ?? await workspaceGitAsync(workspace.worktreePath, ['rev-parse', 'HEAD']) : undefined
+      return { available: Boolean(workspace?.lifecycle === 'ready'), workspace, sourceSha, targetSha: await workspaceGitAsync(operation.projectPath, ['rev-parse', 'HEAD']), journalGeneration: operation.currentGeneration }
     }
     case 'publish.start': {
       const p = isObject(params) ? params : {}
@@ -3450,7 +3453,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
           const manager = new ThreadWorkspaceManager(directory)
           if (manager.verify().lifecycle !== 'ready' || manager.load()?.headSha !== metadata.headSha) throw new DomainRpcError('task_revision_changed', 'Task revision changed before push; refresh the reviewed revision')
           // A push sends commits. Files that are not committed are not in them, and they are not a reason to hold the commits back.
-          const uncommitted = workspaceGit(root, ['status', '--porcelain', '--untracked-files=all']).split(/\r?\n/).filter(Boolean).length
+          const uncommitted = (await workspaceGitAsync(root, ['status', '--porcelain', '--untracked-files=all'])).split(/\r?\n/).filter(Boolean).length
           await ctx.mms.gitService.push(root, gitUserAction(ctx, 'Push'), { expectedBranch, ...toPullRequest, ...request })
           if (uncommitted) notice = uncommittedNotPushedNotice(uncommitted)
         }, signal)
@@ -3481,13 +3484,13 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const staging = method === 'git.stage'
       const action = gitUserAction(ctx, staging ? 'Stage' : 'Unstage')
       if (all) await (staging ? ctx.mms.gitService.stageAll(target.root, action) : ctx.mms.gitService.unstageAll(target.root, action))
-      else await (staging ? ctx.mms.gitService.stage(target.root, action, gitPaths(ctx, target.root, p.paths)) : ctx.mms.gitService.unstage(target.root, action, gitPaths(ctx, target.root, p.paths)))
+      else await (staging ? ctx.mms.gitService.stage(target.root, action, await gitPaths(ctx, target.root, p.paths)) : ctx.mms.gitService.unstage(target.root, action, await gitPaths(ctx, target.root, p.paths)))
       return gitStatusResult(ctx, target.root)
     }
     case 'git.discard': {
       const p = isObject(params) ? params : {}
       const target = await gitMutationTarget(ctx, p)
-      const paths = gitPaths(ctx, target.root, p.paths)
+      const paths = await gitPaths(ctx, target.root, p.paths)
       const thread = threadWorktree(target)
       if (thread) {
         // The discard is recorded as an action of the person, so the files before it are in a snapshot.

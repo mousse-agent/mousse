@@ -45,7 +45,7 @@ it('releases only exclusive expired receipt refs and leaves current/user branche
   expect(git(workspace.worktreePath, 'rev-parse', workspace.retainedRef)).toBe(action.endSha)
   expect(f.read(f.thread, 'messages.json')).toContain('retained transcript')
   const { id: _id, workspaceId: _workspaceId, generation: _generation, retainedRefs: _refs, createdAt: _createdAt, ...input } = receipt
-  expect(new ChangeReceiptService(f.thread).record(workspace.worktreePath, input)).toEqual(receipt)
+  await expect(new ChangeReceiptService(f.thread).record(workspace.worktreePath, input)).resolves.toEqual(receipt)
   expect(git(f.repo, 'for-each-ref', '--format=%(refname)', `refs/mousse/changes/${receipt.id}`)).toBe('')
   await expect(new CodeRevertService(f.thread).revertCode(action.id, workspace.worktreePath)).rejects.toThrow('expired')
 })

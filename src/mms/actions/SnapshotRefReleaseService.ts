@@ -9,7 +9,7 @@ import type { ThreadLeaseHandle } from '../queue/ThreadExecutionLease'
 import { collectStoreGarbage, dropSnapshotStoreUser, loadSnapshotWorkspace, projectStorePath, readSnapshotWorkspaceRecord, removeThreadSnapshots, SNAPSHOT_TRASH_QUIET_MS, threadPinRef, threadStorePath, trashProjectStoreIfUnused } from '../workspace/SnapshotWorkspace'
 import { ChangeReceiptService } from './ChangeReceiptService'
 import { withGitMutationLocks } from './GitOperationCoordinator'
-import { git, tryGit } from './git'
+import { git, gitAsync, tryGit, tryGitAsync } from './git'
 import { UndoRetentionService } from './UndoRetentionService'
 import { keptFilesFromListing, PRESERVED_EXPIRY_OPERATION, PRESERVED_REF_FORMAT, PRESERVED_REFS, threadPreservedIndex, type KeptFilesRef } from './preservedFiles'
 
@@ -26,6 +26,10 @@ function refValue(top: string, name: string): string | undefined {
   return tryGit(top, ['rev-parse', '--verify', '-q', name]).stdout || undefined
 }
 
+async function refValueAsync(top: string, name: string): Promise<string | undefined> {
+  return (await tryGitAsync(top, ['rev-parse', '--verify', '-q', name])).stdout || undefined
+}
+
 /**
  * Releases the refs of receipts whose Undo has expired, in the hidden store of a folder without Git, and then
  * collects the store's garbage. `ReceiptRefReleaseService` does this for a worktree and never collects garbage, because
@@ -39,7 +43,7 @@ export async function releaseSnapshotRefs(threadDirectory: string, options: { li
   const workspace = loadSnapshotWorkspace(threadDirectory)
   if (!workspace) throw new Error('This thread has no snapshot workspace.')
   const limit = options.limit ?? 20
-  return withGitMutationLocks(threadDirectory, workspace.record.workTree, 'undo-ref-release', () => {
+  return withGitMutationLocks(threadDirectory, workspace.record.workTree, 'undo-ref-release', async () => {
     const retention = new UndoRetentionService(threadDirectory, options.now)
     if (!retention.clockAllowsRelease()) throw new Error('Clock review or recovery is required before physical receipt release.')
     const journal = new ThreadJournal(threadDirectory)
@@ -56,14 +60,16 @@ export async function releaseSnapshotRefs(threadDirectory: string, options: { li
         continue
       }
       const expectedValues = [receipt.beforeSha, receipt.afterSha]
-      const present = names.map((name, index) => ({ name, expected: expectedValues[index]!, current: refValue(top, name) })).filter((ref) => ref.current !== undefined)
+      const values: Array<{ name: string; expected: string; current: string | undefined }> = []
+      for (const [index, name] of names.entries()) values.push({ name, expected: expectedValues[index]!, current: await refValueAsync(top, name) })
+      const present = values.filter((ref) => ref.current !== undefined)
       const changed = present.find((ref) => ref.current !== ref.expected)
       if (changed) {
         result.retained.push({ receiptId: receipt.id, reason: `Receipt reference changed: ${changed.name}` })
         continue
       }
       for (const ref of present) {
-        git(top, ['update-ref', '-d', ref.name, ref.current!])
+        await gitAsync(top, ['update-ref', '-d', ref.name, ref.current!])
         result.releasedRefs.push(ref.name)
       }
     }

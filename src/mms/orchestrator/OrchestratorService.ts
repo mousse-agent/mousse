@@ -240,7 +240,7 @@ import { cancelledIntegrationsNotice, cancelPendingIntegrations } from '../agent
 import { buildSubagentResultReport, delegationResultRefPrefix, formatSubagentResultReport, readSubagentResults, recordedFilesAt, SUBAGENT_RESULTS_FILE, writeSubagentResults, type SubagentResultReport } from '../agents/subagentResultReport'
 import type { NativeContextBoundary } from '../../shared/threadActions'
 import { coverageNotice, SnapshotRefusedError, snapshotOrigin } from '../actions/snapshots'
-import { git as actionGit, requireClean as requireCleanWorkspace } from '../actions/git'
+import { git as actionGit, gitAsync as actionGitAsync, requireCleanAsync as requireCleanWorkspaceAsync } from '../actions/git'
 import {
   claimNextNormal,
   clearPendingQueue,
@@ -9281,10 +9281,15 @@ export class OrchestratorService extends EventEmitter {
           presentationMessageStart: turnPresentationStart, nativeContextBoundary: turnNativeStartBoundary
         })).startSha
       } else {
-        requireCleanWorkspace(checkpointCwd, 'Thread workspace')
-        turnStartSha = actionGit(checkpointCwd, ['rev-parse', 'HEAD'])
+        await requireCleanWorkspaceAsync(checkpointCwd, 'Thread workspace')
+        turnStartSha = await actionGitAsync(checkpointCwd, ['rev-parse', 'HEAD'])
       }
     }
+    // What `beginTurn` checks of the start, read here without blocking, where the turn already waited for its snapshot:
+    // `beginTurn` itself runs with nothing awaited before the turn is registered, and reports the result as it always has.
+    const turnStartCheck = checkpointEnabled && turnStartSha && checkpointCwd
+      ? await new ThreadActionService(this.resolveThreadDir(session.threadId)!).checkTurnStart(checkpointCwd, turnStartSha)
+      : undefined
     // Keep user commits visible in the sidebar. Internal orchestration wakes stay hidden.
     if (!reuseLastUser && displayUserMessage) {
       this.touchUserActivityAndNotify(session.threadId)
@@ -9385,7 +9390,7 @@ export class OrchestratorService extends EventEmitter {
         ...(turnStartNote ? { startNote: turnStartNote } : {}),
         presentationMessageStart: turnPresentationStart, presentationMessageEnd: session.messages.length,
         nativeContextStartBoundary: turnNativeStartBoundary, nativeContextBoundary: turnNativeStartBoundary
-      }, turnStartSha)
+      }, turnStartSha, turnStartCheck)
     }
     const turn: ActiveTurnControl = {
       abort: new AbortController(),
@@ -10935,8 +10940,8 @@ export class OrchestratorService extends EventEmitter {
     try {
       return await this.withTaskWriter(owner, async () => {
         const directory = this.resolveThreadDir(owner.threadId)!
-        const base = actionGit(agent.worktreePath, ['rev-parse', `refs/mousse/agents/${agent.id}/base`])
-        const workerHead = actionGit(agent.worktreePath, ['rev-parse', 'HEAD'])
+        const base = await actionGitAsync(agent.worktreePath, ['rev-parse', `refs/mousse/agents/${agent.id}/base`])
+        const workerHead = await actionGitAsync(agent.worktreePath, ['rev-parse', 'HEAD'])
         if (agent.readyCommit && agent.readyCommit !== workerHead) throw new Error('Worker HEAD changed after readiness validation')
         const workerAction = await new ThreadActionService(join(directory, 'agent-changes', agent.id)).checkpointExistingTurn({
           threadId: agent.id, turnId: `worker-result:${agent.id}`, conversationBranchId: 'main',

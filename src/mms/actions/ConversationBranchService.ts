@@ -11,8 +11,8 @@ import { withGitMutationLocks } from './GitOperationCoordinator'
 import type { ThreadLeaseHandle } from '../queue/ThreadExecutionLease'
 import { ThreadWorkspaceManager } from '../workspace/ThreadWorkspaceManager'
 import { ChangeReceiptService } from './ChangeReceiptService'
-import { git, refuseUnsafeChanges, treeOf } from './git'
-import { moveFiles, takeSnapshot } from './snapshots'
+import { gitAsync, refuseUnsafeChangesAsync, treeOfAsync } from './git'
+import { moveFilesAsync, takeSnapshotAsync } from './snapshots'
 
 export class ConversationBranchService {
   private readonly path: string
@@ -42,7 +42,7 @@ export class ConversationBranchService {
     return withGitMutationLocks(this.threadDirectory, workspacePath, 'conversation-activate', async () => {
       new ChangeReceiptService(this.threadDirectory).assertNoPendingOperation()
       this.actions.assertExpectedRevision(expectedJournalRevision)
-      refuseUnsafeChanges(workspacePath, 'Thread workspace', { discard: true })
+      await refuseUnsafeChangesAsync(workspacePath, 'Thread workspace', { discard: true })
       const branches = this.list(); const selected = branches.find((branch) => branch.id === branchId)
       if (!selected || selected.lifecycle === 'tombstoned') throw new Error(`Conversation branch is unavailable: ${branchId}`)
       const manager = new ThreadWorkspaceManager(this.threadDirectory)
@@ -53,21 +53,21 @@ export class ConversationBranchService {
         operationId,
         operationType: 'conversation-activate',
         state: 'running',
-        expectedPreState: { branchId, preBranch: git(workspacePath, ['branch', '--show-current']), preSha: git(workspacePath, ['rev-parse', 'HEAD']) }
+        expectedPreState: { branchId, preBranch: await gitAsync(workspacePath, ['branch', '--show-current']), preSha: await gitAsync(workspacePath, ['rev-parse', 'HEAD']) }
       })
       try {
         const threadId = metadata?.threadId
         if (leaving !== selected.id) {
           // Edits made outside Mousse since the last action are recorded for the branch being left, then it keeps the files.
-          const current = this.actions.recordOutsideChangesHeld({ threadId: threadId ?? '', conversationBranchId: leaving, workspacePath }).startSha
+          const current = (await this.actions.recordOutsideChangesHeld({ threadId: threadId ?? '', conversationBranchId: leaving, workspacePath })).startSha
           const left = branches.find((branch) => branch.id === leaving && branch.lifecycle !== 'tombstoned')
           // The thread's first branch can't be activated again; its code stays under the thread's own ref.
-          if (left) git(workspacePath, ['update-ref', '--no-deref', left.retainedRef, current])
-          const wanted = git(workspacePath, ['rev-parse', '--verify', `${selected.retainedRef}^{commit}`])
-          moveFiles(git(workspacePath, ['rev-parse', '--show-toplevel']), treeOf(workspacePath, current), treeOf(workspacePath, wanted), operationId)
+          if (left) await gitAsync(workspacePath, ['update-ref', '--no-deref', left.retainedRef, current])
+          const wanted = await gitAsync(workspacePath, ['rev-parse', '--verify', `${selected.retainedRef}^{commit}`])
+          await moveFilesAsync(await gitAsync(workspacePath, ['rev-parse', '--show-toplevel']), await treeOfAsync(workspacePath, current), await treeOfAsync(workspacePath, wanted), operationId)
         }
-        const snapshot = takeSnapshot(workspacePath, { reason: `activate conversation branch ${selected.id}`, threadId, operationId })
-        git(workspacePath, ['update-ref', '--no-deref', selected.retainedRef, snapshot.sha])
+        const snapshot = await takeSnapshotAsync(workspacePath, { reason: `activate conversation branch ${selected.id}`, threadId, operationId })
+        await gitAsync(workspacePath, ['update-ref', '--no-deref', selected.retainedRef, snapshot.sha])
         for (const branch of branches) branch.lifecycle = branch.id === branchId ? 'active' : 'inactive'
         atomicWriteJsonSync(this.path, branches)
         if (metadata) atomicWriteJsonSync(manager.workspacePath, { ...metadata, conversationBranchId: selected.id, retainedRef: selected.retainedRef, snapshotSha: snapshot.sha, headSha: snapshot.head ?? metadata.headSha, generation: (metadata.generation ?? 0) + 1 })
@@ -133,7 +133,7 @@ export class ConversationBranchService {
       const operationId = randomUUID()
       const retainedRef = `refs/mousse/conversation-branches/${id}`
       const metadata = new ThreadWorkspaceManager(this.threadDirectory).load()
-      const codeSha = codeMode === 'current' ? takeSnapshot(workspacePath, { reason: 'fork', threadId: metadata?.threadId, operationId }).sha : action.endSha
+      const codeSha = codeMode === 'current' ? (await takeSnapshotAsync(workspacePath, { reason: 'fork', threadId: metadata?.threadId, operationId })).sha : action.endSha
       this.journal.append({
         operationId,
         operationType: 'conversation-fork',
@@ -141,7 +141,7 @@ export class ConversationBranchService {
         expectedPreState: { sourceBranchId, actionId, codeMode, codeSha }
       })
       try {
-        git(workspacePath, ['update-ref', '--no-deref', retainedRef, codeSha])
+        await gitAsync(workspacePath, ['update-ref', '--no-deref', retainedRef, codeSha])
         const record: ConversationBranch = {
           id,
           name,

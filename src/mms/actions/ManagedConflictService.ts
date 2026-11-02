@@ -1,8 +1,8 @@
 import { ThreadJournal } from '../data/ThreadJournal'
 import { ThreadActionService } from './ThreadActionService'
 import { withGitMutationLocks } from './GitOperationCoordinator'
-import { git, requireClean, tryGit } from './git'
-import { leftMergeRefusal, preserveBeforeAbort } from './leftMerge'
+import { gitAsync, requireCleanAsync, tryGitAsync } from './git'
+import { leftMergeRefusalAsync, preserveBeforeAbortAsync } from './leftMerge'
 
 /** Abort only the Git sequencer belonging to the selected durable operation. */
 export class ManagedConflictService {
@@ -19,7 +19,7 @@ export class ManagedConflictService {
       // A merge an older version left is aborted only while it is that very merge (`leftMergeRefusal`, which the banner
       // shares): one started later, even of the same commit at the same HEAD, is the person's or the agent's. A record that
       // can never be aborted is cleared, so nothing offers it again.
-      const refusal = leftMerge ? leftMergeRefusal(workspacePath, record, journal.list()) : undefined
+      const refusal = leftMerge ? await leftMergeRefusalAsync(workspacePath, record, journal.list()) : undefined
       if (refusal) {
         journal.append({ operationId, operationType: record.operationType, state: 'cancelled', details: { mergeNoLongerRecorded: true } })
         throw new Error(refusal)
@@ -28,19 +28,19 @@ export class ManagedConflictService {
       if (!merge && !['undo', 'redo', 'code-revert'].includes(record.operationType)) throw new Error(`Abort is unavailable for ${record.operationType}`)
       const details = record.details as { preMergeSha?: string; prePublishSha?: string; preUndoSha?: string; startSha?: string; workerHeadSha?: string; currentCommit?: string; actionId?: string }
       const before = details.preMergeSha ?? details.prePublishSha ?? details.preUndoSha ?? details.startSha
-      if (!before || git(workspacePath, ['rev-parse', 'HEAD']) !== before) throw new Error('Conflict HEAD changed outside the selected operation.')
-      const marker = tryGit(workspacePath, ['rev-parse', '--verify', merge ? 'MERGE_HEAD' : 'REVERT_HEAD'])
+      if (!before || await gitAsync(workspacePath, ['rev-parse', 'HEAD']) !== before) throw new Error('Conflict HEAD changed outside the selected operation.')
+      const marker = await tryGitAsync(workspacePath, ['rev-parse', '--verify', merge ? 'MERGE_HEAD' : 'REVERT_HEAD'])
       if (!marker.ok) throw new Error('The matching Git sequencer is no longer active.')
       const intent = journal.list().find((entry) => entry.operationId === operationId && ['prepared', 'running'].includes(entry.state))
       const sourceSha = (intent?.expectedPreState as { sourceSha?: string } | undefined)?.sourceSha ?? (details as { sourceSha?: string }).sourceSha
       const expected = merge ? details.workerHeadSha ?? sourceSha : details.currentCommit
       if (!expected || marker.stdout !== expected) throw new Error('Git sequencer belongs to another operation.')
       // An abort rewrites conflicted files, edits in them included: they are kept first, so nothing is lost.
-      const preservedRef = preserveBeforeAbort(workspacePath, operationId)
-      const result = tryGit(workspacePath, [merge ? 'merge' : 'revert', '--abort'])
+      const preservedRef = await preserveBeforeAbortAsync(workspacePath, operationId)
+      const result = await tryGitAsync(workspacePath, [merge ? 'merge' : 'revert', '--abort'])
       if (!result.ok) throw new Error(result.stderr || 'Unable to abort the operation conflict.')
       // The merge is gone; what else the folder holds is someone's work and stays as it is.
-      if (!leftMerge) requireClean(workspacePath, 'Thread workspace after abort')
+      if (!leftMerge) await requireCleanAsync(workspacePath, 'Thread workspace after abort')
       if (['undo', 'redo'].includes(record.operationType)) {
         const actions = new ThreadActionService(this.threadDirectory)
         const all = actions.list(); const target = all.find((item) => item.id === details.actionId)

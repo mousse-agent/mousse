@@ -1,7 +1,9 @@
 import { createHash } from 'node:crypto'
-import { readFileSync, statSync } from 'node:fs'
-import { git, mousseCommitEnvNow, tryGit } from './git'
-import { worktreeTree } from './snapshots'
+import { statSync } from 'node:fs'
+import { stat } from 'node:fs/promises'
+import { gitStep, mousseCommitEnvNow, tryGitStep } from './git'
+import { worktreeTreeSteps } from './snapshots'
+import { files, runAsync, runSync, step, type Steps } from './steps'
 
 /**
  * Which `git merge` is in progress in a folder, closely enough to tell the merge an earlier version of Mousse left
@@ -18,30 +20,38 @@ export interface MergeIdentity {
   mergeMsg: string | null
 }
 
-function gitPath(folder: string, name: string): string | undefined {
-  const path = tryGit(folder, ['rev-parse', '--path-format=absolute', '--git-path', name])
+function* gitPath(folder: string, name: string): Steps<string | undefined> {
+  const path = yield* tryGitStep(folder, ['rev-parse', '--path-format=absolute', '--git-path', name])
   return path.ok && path.stdout ? path.stdout : undefined
 }
 
-function hashOf(path: string | undefined): string | null {
+function* hashOf(path: string | undefined): Steps<string | null> {
   if (!path) return null
   try {
-    return createHash('sha256').update(readFileSync(path)).digest('hex')
+    return createHash('sha256').update(yield* files.readBytes(path)).digest('hex')
   } catch {
     return null
   }
 }
 
+/** `statSync(path, { bigint: true, throwIfNoEntry: false })` as a step. */
+function bigStat(path: string): Steps<{ ino: bigint; mtimeNs: bigint; ctimeNs: bigint } | undefined> {
+  return step(() => statSync(path, { bigint: true, throwIfNoEntry: false }), () => stat(path, { bigint: true }).catch((error: NodeJS.ErrnoException) => {
+    if (error.code === 'ENOENT' || error.code === 'ENOTDIR') return undefined
+    throw error
+  }))
+}
+
 /** The merge in progress in `folder` now, or undefined when none is. */
-export function mergeIdentity(folder: string): MergeIdentity | undefined {
-  const mergeHeadPath = gitPath(folder, 'MERGE_HEAD')
+export function* mergeIdentitySteps(folder: string): Steps<MergeIdentity | undefined> {
+  const mergeHeadPath = yield* gitPath(folder, 'MERGE_HEAD')
   if (!mergeHeadPath) return undefined
-  const file = statSync(mergeHeadPath, { bigint: true, throwIfNoEntry: false })
-  const head = tryGit(folder, ['rev-parse', '--verify', '-q', 'HEAD']).stdout
+  const file = yield* bigStat(mergeHeadPath)
+  const head = (yield* tryGitStep(folder, ['rev-parse', '--verify', '-q', 'HEAD'])).stdout
   if (!file || !head) return undefined
   let mergeHead: string
   try {
-    mergeHead = readFileSync(mergeHeadPath, 'utf8').trim()
+    mergeHead = (yield* files.readText(mergeHeadPath)).trim()
   } catch {
     return undefined
   }
@@ -49,13 +59,21 @@ export function mergeIdentity(folder: string): MergeIdentity | undefined {
     head,
     mergeHead,
     mergeHeadFile: { ino: String(file.ino), mtimeNs: String(file.mtimeNs), ctimeNs: String(file.ctimeNs) },
-    mergeMsg: hashOf(gitPath(folder, 'MERGE_MSG'))
+    mergeMsg: yield* hashOf(yield* gitPath(folder, 'MERGE_MSG'))
   }
 }
 
+export function mergeIdentity(folder: string): MergeIdentity | undefined {
+  return runSync(mergeIdentitySteps(folder))
+}
+
+export function mergeIdentityAsync(folder: string): Promise<MergeIdentity | undefined> {
+  return runAsync(mergeIdentitySteps(folder))
+}
+
 /** Whether the merge in progress in `folder` is exactly the recorded one: same HEAD, same `MERGE_HEAD` file, same message. */
-export function isRecordedMerge(folder: string, recorded: unknown): boolean {
-  const now = mergeIdentity(folder)
+function* isRecordedMergeSteps(folder: string, recorded: unknown): Steps<boolean> {
+  const now = yield* mergeIdentitySteps(folder)
   const was = recorded as Partial<MergeIdentity> | undefined
   if (!now || !was?.mergeHeadFile) return false
   return now.head === was.head && now.mergeHead === was.mergeHead && now.mergeMsg === was.mergeMsg &&
@@ -63,19 +81,32 @@ export function isRecordedMerge(folder: string, recorded: unknown): boolean {
     now.mergeHeadFile.ctimeNs === was.mergeHeadFile.ctimeNs
 }
 
+export function isRecordedMerge(folder: string, recorded: unknown): boolean {
+  return runSync(isRecordedMergeSteps(folder, recorded))
+}
+
 /**
  * Keeps every file of the folder as it is now, conflicted ones with their markers and edits included, as one commit
  * under a new `refs/mousse/preserved/` ref, before an abort rewrites them. Reads the files only; HEAD, the branch,
  * the index and the files stay as they are. The caller holds the mutation locks.
  */
-export function preserveBeforeAbort(folder: string, operationId: string): string {
-  const top = git(folder, ['rev-parse', '--show-toplevel'])
-  const tree = worktreeTree(top)
-  const head = tryGit(top, ['rev-parse', '--verify', '-q', 'HEAD^{commit}']).stdout
-  const sha = git(top, ['commit-tree', tree, ...(head ? ['-p', head] : []), '-m', 'mousse snapshot: files kept before an abort', '-m', `Mousse-Operation: ${operationId}`], mousseCommitEnvNow())
+function* preserveBeforeAbortSteps(folder: string, operationId: string): Steps<string> {
+  const top = yield* gitStep(folder, ['rev-parse', '--show-toplevel'])
+  const tree = yield* worktreeTreeSteps(top)
+  const head = (yield* tryGitStep(top, ['rev-parse', '--verify', '-q', 'HEAD^{commit}'])).stdout
+  const sha = yield* gitStep(top, ['commit-tree', tree, ...(head ? ['-p', head] : []), '-m', 'mousse snapshot: files kept before an abort', '-m', `Mousse-Operation: ${operationId}`], mousseCommitEnvNow())
   const ref = `refs/mousse/preserved/${operationId}-abort-${sha.slice(0, 12)}`
-  git(top, ['update-ref', '--no-deref', ref, sha])
+  yield* gitStep(top, ['update-ref', '--no-deref', ref, sha])
   return ref
+}
+
+export function preserveBeforeAbort(folder: string, operationId: string): string {
+  return runSync(preserveBeforeAbortSteps(folder, operationId))
+}
+
+/** {@link preserveBeforeAbort} without blocking the daemon. */
+export function preserveBeforeAbortAsync(folder: string, operationId: string): Promise<string> {
+  return runAsync(preserveBeforeAbortSteps(folder, operationId))
 }
 
 interface LeftMergeRecord { operationId: string; state: string; details?: unknown; expectedPreState?: unknown }
@@ -86,13 +117,21 @@ interface LeftMergeRecord { operationId: string; state: string; details?: unknow
  * exactly the recorded one (`isRecordedMerge`), HEAD must be where it was before that merge, and `MERGE_HEAD` must
  * name what that merge brought in. `records` is the thread's journal, for the merge's intent.
  */
-export function leftMergeRefusal(folder: string, record: LeftMergeRecord, records: readonly LeftMergeRecord[]): string | undefined {
+function* leftMergeRefusalSteps(folder: string, record: LeftMergeRecord, records: readonly LeftMergeRecord[]): Steps<string | undefined> {
   const details = (record.details ?? {}) as { mergeIdentity?: unknown; preMergeSha?: string; prePublishSha?: string; workerHeadSha?: string; sourceSha?: string }
-  if (!isRecordedMerge(folder, details.mergeIdentity)) return 'The merge in progress is not the one an earlier version left, so Mousse left it alone.'
+  if (!(yield* isRecordedMergeSteps(folder, details.mergeIdentity))) return 'The merge in progress is not the one an earlier version left, so Mousse left it alone.'
   const before = details.preMergeSha ?? details.prePublishSha
-  if (!before || tryGit(folder, ['rev-parse', '--verify', '-q', 'HEAD']).stdout !== before) return 'Conflict HEAD changed outside the selected operation.'
+  if (!before || (yield* tryGitStep(folder, ['rev-parse', '--verify', '-q', 'HEAD'])).stdout !== before) return 'Conflict HEAD changed outside the selected operation.'
   const intent = records.find((entry) => entry.operationId === record.operationId && ['prepared', 'running'].includes(entry.state))
   const expected = details.workerHeadSha ?? (intent?.expectedPreState as { sourceSha?: string } | undefined)?.sourceSha ?? details.sourceSha
-  if (!expected || tryGit(folder, ['rev-parse', '--verify', '-q', 'MERGE_HEAD']).stdout !== expected) return 'Git sequencer belongs to another operation.'
+  if (!expected || (yield* tryGitStep(folder, ['rev-parse', '--verify', '-q', 'MERGE_HEAD'])).stdout !== expected) return 'Git sequencer belongs to another operation.'
   return undefined
+}
+
+export function leftMergeRefusal(folder: string, record: LeftMergeRecord, records: readonly LeftMergeRecord[]): string | undefined {
+  return runSync(leftMergeRefusalSteps(folder, record, records))
+}
+
+export function leftMergeRefusalAsync(folder: string, record: LeftMergeRecord, records: readonly LeftMergeRecord[]): Promise<string | undefined> {
+  return runAsync(leftMergeRefusalSteps(folder, record, records))
 }
