@@ -1855,10 +1855,18 @@ html.platform-darwin .titlebar-left {
   box-shadow: none;
 }
 
-.model-picker-body {
+/* The rail (favorites, then providers) runs the full height on the left; the search sits over the
+   list only. */
+.model-picker-main {
   display: flex;
   min-height: 0;
-  max-height: 320px;
+}
+
+.model-picker-center {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
 }
 
 .model-picker-rail {
@@ -1869,6 +1877,18 @@ html.platform-darwin .titlebar-left {
   border-right: 1px solid var(--ui-line);
   overflow-y: auto;
   flex-shrink: 0;
+}
+
+.model-picker-rail-tabs {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.model-picker-rail-sep {
+  height: 1px;
+  margin: 2px 4px;
+  background: var(--ui-line);
 }
 
 .model-picker-rail-item {
@@ -1894,9 +1914,6 @@ html.platform-darwin .titlebar-left {
   color: var(--text-primary);
 }
 
-.model-picker-rail-all {
-  display: inline-flex;
-}
 
 .composer-model-menu,
 .model-picker-list {
@@ -1947,13 +1964,13 @@ html.platform-darwin .titlebar-left {
   background: var(--ui-hover);
 }
 
-.model-picker-row.selected {
-  background: var(--ui-pressed);
-  box-shadow: var(--ui-specular);
-}
-
-html[data-theme='high-contrast'] .model-picker-row.selected {
-  box-shadow: inset 0 0 0 1px var(--ui-line-strong);
+/* The selected model is marked by a check on the right; hover and the keyboard highlight fill the row. */
+.model-picker-row-check {
+  display: inline-flex;
+  flex: 0 0 14px;
+  justify-content: center;
+  margin-left: 2px;
+  color: var(--text-primary);
 }
 
 .model-picker-row-main {
@@ -2095,12 +2112,13 @@ html[data-theme='high-contrast'] .model-picker-row.selected {
   margin-right: 4px;
   border-radius: var(--ui-menu-row-radius);
   color: var(--ui-faint);
-  opacity: 0.6;
+  opacity: 0;
   flex-shrink: 0;
   transition: opacity 0.12s, color 0.12s, background 0.12s;
 }
 
 .model-picker-row:is(:hover, .highlighted) .model-picker-star,
+.model-picker-star:focus-visible,
 .model-picker-star.active {
   opacity: 1;
 }

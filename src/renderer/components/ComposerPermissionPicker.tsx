@@ -85,8 +85,10 @@ export function permissionChoice(control: Omit<PermissionControl, 'onSelect'>): 
 
 /**
  * The run menu's permission section: one icon button per mode in a row, the chosen one highlighted,
- * and one fixed line under the row naming and describing the chosen mode, or the hovered or focused
- * one. A mode that cannot be picked stays in the row, dimmed, and its line says why.
+ * and one line under the row naming and describing the chosen mode, or the hovered or focused one.
+ * Every mode's line is drawn in the same place and only the active one shows, so the block keeps the
+ * size of the longest and never resizes on hover. A mode that cannot be picked stays in the row,
+ * dimmed, and its line says why.
  */
 export function PermissionModeSection({ control, choice, onPicked }: {
   control: PermissionControl
@@ -98,12 +100,13 @@ export function PermissionModeSection({ control, choice, onPicked }: {
   const { agent, limits } = control
   const { offered, selected, shown, reason, approvesItself, blocked } = choice
   const focus = preview ?? selected
-  const line = (() => {
-    if (blocked[focus]) return blocked[focus]
-    if (focus === selected && reason) return `Running as ${describePermissionMode(shown)}: ${reason}.`
+  const lineFor = (mode: PermissionMode): string => {
+    if (blocked[mode]) return blocked[mode]
+    if (mode === selected && reason) return `Running as ${describePermissionMode(shown)}: ${reason}.`
     if (approvesItself) return `${agent} approves tools itself.`
-    return modeDescription(focus, agent, limits?.sandboxOffInFull === true)
-  })()
+    return modeDescription(mode, agent, limits?.sandboxOffInFull === true)
+  }
+  const lines = [...new Set<PermissionMode>([...offered, selected])]
   return <div className="composer-mode-menu-section composer-run-menu-permissions" role="group" aria-label="Permissions">
     <div className="composer-mode-menu-heading">Permissions</div>
     <div className="composer-run-menu-permission-row" onMouseLeave={() => setPreview(null)}>
@@ -135,8 +138,10 @@ export function PermissionModeSection({ control, choice, onPicked }: {
       })}
     </div>
     <div className="composer-run-menu-permission-line" aria-live="polite">
-      <span className="composer-run-menu-permission-name">{describePermissionMode(focus)}</span>
-      <span className="composer-run-menu-permission-desc">{line}</span>
+      {lines.map((mode) => <div key={mode} className={`composer-run-menu-permission-line-item${mode === focus ? '' : ' is-hidden'}`} aria-hidden={mode === focus ? undefined : true}>
+        <span className="composer-run-menu-permission-name">{describePermissionMode(mode)}</span>
+        <span className="composer-run-menu-permission-desc">{lineFor(mode)}</span>
+      </div>)}
     </div>
   </div>
 }

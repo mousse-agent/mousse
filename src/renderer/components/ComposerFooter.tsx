@@ -4,8 +4,9 @@ import { showsContextGauge, type ProviderWithStatus } from '../lib/providerSnaps
 import { describePermissionMode, type PermissionMode } from '../../shared/permissionMode'
 import type { ContextUsageSnapshot } from '../../shared/types'
 import { listingServes } from '../../shared/providerInstances'
-import { parseThinkingSuffixFromModelId } from '../../shared/modelVariants'
-import { carryReasoningLevel, ComposerRunMenu, RunSettingsColumn, runLevelText, runSettingsRows, shownReasoningLevel, type RunSettingsTarget } from './ComposerEffortPicker'
+import { getModelSpeedOptions, parseThinkingSuffixFromModelId } from '../../shared/modelVariants'
+import { shortModelName } from '../../shared/modelNames'
+import { carryReasoningLevel, ComposerRunMenu, PermissionMenuButton, ReasoningColumn, reasoningRows, runLevelText, shownReasoningLevel, SpeedToggle, type RunSettingsTarget } from './ComposerEffortPicker'
 import { permissionChoice, type PermissionControl } from './ComposerPermissionPicker'
 import { FloatingPortal, useFloatingPosition } from '../lib/floatingLayer'
 import { getGroupedModelButtonParts, ModelFamilyMenu, type ModelPickTarget } from './ModelFamilyMenu'
@@ -156,20 +157,31 @@ export function ComposerFooter({
   }
   const runSettings = {
     pick: (target: ModelPickTarget) => resolveTarget(target).modelId,
+    // Beside the list: the highlighted model's reasoning levels, while any listed model has levels.
     render: (target: ModelPickTarget, listed: ModelPickTarget[]) => {
-      const resolved = resolveTarget(target)
-      const control = permissionFor(listingOf(target))
-      if (runSettingsRows(resolved, Boolean(control)) === 0) return null
-      // A hidden copy of the largest model's settings holds the column's size while the highlight moves.
+      // A hidden copy of the largest model's column holds its size while the highlight moves.
       let largest: { target: ModelPickTarget; resolved: RunSettingsTarget; rows: number } | undefined
       for (const entry of listed) {
         const each = resolveTarget(entry)
-        const rows = runSettingsRows(each, Boolean(permission))
+        const rows = reasoningRows(each)
         if (!largest || rows > largest.rows) largest = { target: entry, resolved: each, rows }
       }
+      if (!largest || largest.rows === 0) return null
       return <>
-        <RunSettingsColumn key={`${target.instanceId ?? target.providerId}:${target.label}`} target={resolved} label={target.label} permission={control} onSelect={onModelSelect} onClose={closePicker} />
-        {largest ? <RunSettingsColumn sizer target={largest.resolved} label={largest.target.label} permission={permissionFor(listingOf(largest.target))} onSelect={onModelSelect} onClose={closePicker} /> : null}
+        <ReasoningColumn target={resolveTarget(target)} label={shortModelName(target.label)} onSelect={onModelSelect} onClose={closePicker} />
+        <ReasoningColumn sizer target={largest.resolved} label={shortModelName(largest.target.label)} onSelect={onModelSelect} onClose={closePicker} />
+      </>
+    },
+    // Under the picker: the highlighted model's speed on the left, the thread's permission mode on the right.
+    footer: (target: ModelPickTarget | undefined) => {
+      const resolved = target ? resolveTarget(target) : undefined
+      const speeds = resolved ? getModelSpeedOptions(resolved.providerId, resolved.modelId, resolved.models) : undefined
+      if (!speeds && !permissionControl) return null
+      return <>
+        <div className="model-picker-footer-start">
+          {resolved && speeds ? <SpeedToggle key={`${resolved.instanceId ?? resolved.providerId}:${resolved.modelId}`} target={resolved} onSelect={onModelSelect} onClose={closePicker} /> : null}
+        </div>
+        {permissionControl ? <PermissionMenuButton control={permissionControl} onClose={closePicker} /> : null}
       </>
     }
   }

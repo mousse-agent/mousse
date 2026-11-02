@@ -26,41 +26,228 @@
   cursor: default;
 }
 
-/* The model picker with run settings: the list, then a column for the highlighted model on the same
-   surface, divided by a hairline. The column keeps the size of the largest model's settings (a hidden
-   copy holds it), so moving through models never resizes the picker. The list grows to the column
-   (ModelFamilyMenu sets its height), so the settings never scroll while the window has room. */
+/* The composer's model picker: rail, search and list, and a reasoning column for the highlighted
+   model on the same surface, divided by hairlines; under them a footer bar with the speed toggle and
+   the permission button. The column keeps the size of the largest model's levels (a hidden copy holds
+   it), so moving through models never resizes the picker. */
 .model-picker-panel.has-run-settings {
-  min-width: min(560px, calc(100vw - 48px));
-  max-width: min(680px, calc(100vw - 48px));
+  min-width: min(600px, calc(100vw - 48px));
+  max-width: min(720px, calc(100vw - 48px));
 }
 
-.model-picker-panel.has-run-settings .model-picker-body {
-  max-height: calc(100vh - 96px);
+/* The permission menu opens above the footer and may overlap the list. */
+.model-picker-panel.has-footer {
+  overflow: visible;
 }
 
-.model-picker-panel.has-run-settings .model-picker-list {
+.model-picker-panel.has-run-settings .model-picker-center {
   border-right: 1px solid var(--ui-line);
 }
 
 .model-picker-run {
   display: grid;
-  flex: 0 0 240px;
+  flex: 0 0 236px;
   align-self: flex-start;
-  width: 240px;
-  max-height: calc(100vh - 96px);
+  width: 236px;
+  max-height: calc(100vh - 140px);
   overflow-y: auto;
-  padding: var(--ui-menu-pad);
 }
 
 .model-picker-run > * {
   grid-area: 1 / 1;
   min-width: 0;
+  padding-bottom: var(--ui-menu-pad);
 }
 
 .model-picker-run-sizer {
   visibility: hidden;
   pointer-events: none;
+}
+
+/* "Reasoning" and, muted on the right, the model whose levels show; as tall as the search row. */
+.model-picker-run-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  height: 37px;
+  margin-bottom: var(--ui-menu-pad);
+  padding: 0 12px;
+  border-bottom: 1px solid var(--ui-line);
+  box-sizing: border-box;
+}
+
+.model-picker-run-title {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-secondary);
+}
+
+.model-picker-run-model {
+  overflow: hidden;
+  font-size: 12px;
+  color: var(--ui-faint);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.model-picker-run-empty {
+  padding: 6px 12px;
+  font-size: 12.5px;
+  color: var(--text-secondary);
+}
+
+/* A level: name, "Default" muted, and a check on the chosen one. Hover and focus fill the row. */
+.model-picker-run .composer-mode-menu-item.model-picker-level {
+  width: calc(100% - 2 * var(--ui-menu-pad));
+  margin: 0 var(--ui-menu-pad);
+  padding-left: var(--ui-menu-row-x);
+}
+
+.model-picker-level > span:first-child {
+  flex: 1;
+  min-width: 0;
+}
+
+.model-picker-level-check {
+  display: inline-flex;
+  flex: 0 0 14px;
+  justify-content: center;
+  color: var(--text-primary);
+}
+
+.model-picker-run .composer-run-menu-note {
+  padding-inline: 12px;
+}
+
+/* The footer bar: speed on the left (empty when the model has one speed), permission on the right. */
+.model-picker-footer {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: 40px;
+  padding: 6px 8px;
+  border-top: 1px solid var(--ui-line);
+}
+
+.model-picker-footer-start {
+  display: flex;
+  min-width: 0;
+}
+
+/* Speed: a small pill of segments; the chosen one a slightly lighter chip, the others muted text. */
+.model-picker-speed {
+  display: inline-flex;
+  gap: 2px;
+  padding: 2px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--text-primary) 5%, transparent);
+}
+
+.model-picker-speed-option {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 24px;
+  padding: 0 10px;
+  border-radius: 6px;
+  font-size: 12.5px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  transition: background 0.12s, color 0.12s;
+}
+
+.model-picker-speed-option:hover {
+  color: var(--text-primary);
+}
+
+.model-picker-speed-option.selected {
+  background: color-mix(in srgb, var(--text-primary) 11%, transparent);
+  box-shadow: var(--ui-specular);
+  color: var(--text-primary);
+}
+
+.model-picker-speed-option:focus-visible {
+  outline: none;
+  box-shadow: var(--ui-focus-ring);
+}
+
+.model-picker-speed-option.selected:focus-visible {
+  box-shadow: var(--ui-specular), var(--ui-focus-ring);
+}
+
+/* Permission: the thread's mode as a quiet button; its menu opens above, right-aligned. */
+.model-picker-permission-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 8px 0 10px;
+  border-radius: var(--ui-control-radius);
+  background: color-mix(in srgb, var(--text-primary) 5%, transparent);
+  font-size: 12.5px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  transition: background 0.12s, color 0.12s;
+}
+
+.model-picker-permission-btn:hover,
+.model-picker-permission-btn.open {
+  background: var(--ui-hover);
+  color: var(--text-primary);
+}
+
+.model-picker-permission-btn:focus-visible {
+  outline: none;
+  box-shadow: var(--ui-focus-ring);
+}
+
+.model-picker-permission-btn.is-limited .model-picker-permission-icon {
+  color: var(--warning);
+}
+
+.model-picker-permission-menu {
+  position: absolute;
+  right: 8px;
+  bottom: calc(100% + 6px);
+  z-index: 2;
+  width: 300px;
+  padding: 8px;
+  border: 1px solid var(--ui-line-strong);
+  border-radius: var(--ui-menu-radius);
+  background: var(--ui-raised);
+  box-shadow: var(--ui-specular), var(--ui-menu-drop);
+}
+
+.model-picker-permission-menu .composer-mode-menu-heading {
+  padding: 0 0 6px;
+}
+
+/* The modes in one container, the chosen one a lighter chip. */
+.model-picker-permission-menu .composer-run-menu-permission-row {
+  padding: 2px;
+  gap: 2px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--text-primary) 5%, transparent);
+}
+
+.model-picker-permission-menu .composer-run-menu-permission {
+  height: 28px;
+}
+
+.model-picker-permission-menu .composer-run-menu-permission-line {
+  min-height: 0;
+  padding: 8px 0 0;
+  font-size: 12px;
+}
+
+.model-picker-permission-menu .composer-run-menu-permission-name {
+  display: block;
+  margin: 0 0 2px;
+  font-size: 13.5px;
+  font-weight: 600;
 }
 
 /* The run menu (an assigned model's, and Settings'): the shared menu material with even padding; wide
@@ -86,7 +273,6 @@
 }
 
 .composer-mode-menu.composer-run-menu .composer-mode-menu-item.selected,
-.model-picker-run .composer-mode-menu-item.selected,
 .composer-run-menu-permission.selected,
 .composer-run-menu-segment.selected {
   background: color-mix(in srgb, var(--text-primary) 11%, transparent);
@@ -102,7 +288,6 @@
 }
 
 .composer-mode-menu.composer-run-menu .composer-mode-menu-item.selected:focus-visible,
-.model-picker-run .composer-mode-menu-item.selected:focus-visible,
 .composer-run-menu-permission.selected:focus-visible,
 .composer-run-menu-segment.selected:focus-visible {
   box-shadow: var(--ui-specular), var(--ui-focus-ring);
@@ -147,9 +332,10 @@
   cursor: default;
 }
 
-/* One fixed block under the row for the chosen (or hovered) mode: two lines tall, so it never jumps. */
+/* One block under the row for the chosen (or hovered) mode. Every mode's line sits in the same grid
+   cell and only the active one is visible, so the block is as tall as the longest and never jumps. */
 .composer-run-menu-permission-line {
-  display: block;
+  display: grid;
   min-height: calc(2 * 1.35 * 11.5px);
   padding: 6px var(--ui-menu-row-x) 4px;
   font-size: 11.5px;
@@ -178,4 +364,13 @@
 .composer-run-menu-segment:disabled {
   opacity: 0.55;
   cursor: default;
+}
+
+.composer-run-menu-permission-line-item {
+  grid-area: 1 / 1;
+  min-width: 0;
+}
+
+.composer-run-menu-permission-line-item.is-hidden {
+  visibility: hidden;
 }

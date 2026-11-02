@@ -9,7 +9,7 @@ import {
   type ReactNode,
   type RefObject
 } from 'react'
-import { ChevronRight, LayoutGrid, Star } from '../lib/icons'
+import { Check, ChevronRight, Star } from '../lib/icons'
 import { SettingsSearch } from './settings/SettingsSearch'
 import type { LlmProviderOption } from '../../shared/settings'
 import {
@@ -66,13 +66,15 @@ interface ModelFamilyMenuProps {
   /** Optional ref to the floating shell (outside-click handling). */
   contentRef?: RefObject<HTMLDivElement | null>
   /**
-   * Run settings beside the list (the composer's): `render` draws them for the highlighted model, or
-   * returns null when it has none (`listed` lets the column keep one size across models); `pick`
-   * turns the id the menu would select for a model into the one it selects.
+   * Run settings for the highlighted model (the composer's): `render` draws the column beside the list,
+   * or returns null when no listed model has any (`listed` lets the column keep one size across
+   * models); `footer` draws the bar under the whole picker; `pick` turns the id the menu would select
+   * for a model into the one it selects.
    */
   runSettings?: {
     pick: (target: ModelPickTarget) => string
     render: (target: ModelPickTarget, listed: ModelPickTarget[]) => ReactNode
+    footer?: (target: ModelPickTarget | undefined) => ReactNode
   }
 }
 
@@ -118,18 +120,20 @@ function getInitialVariantOptions(
     (effortCandidate && family.efforts.includes(effortCandidate) ? effortCandidate : undefined) ??
     selected?.effort
 
+  // Another model starts at its standard speed; Fast is chosen, never picked by alphabetical order.
+  const speed = family.speeds.includes('standard') ? 'standard' : family.speeds[0]
   if (!selected) {
     return {
       context: family.contexts[0],
       effort,
-      speed: family.speeds[0]
+      speed
     }
   }
 
   return {
     context: selected.context ?? family.contexts[0],
     effort,
-    speed: selected.speed ?? family.speeds[0]
+    speed: selected.speed ?? speed
   }
 }
 
@@ -468,14 +472,8 @@ function ProfileModelFamilyMenu({
   const highlightedEntry = filteredEntries[highlightIndex]
   const highlightedTarget = runSettings && highlightedEntry ? targetOf(highlightedEntry) : undefined
   const runColumn = runSettings && highlightedTarget ? runSettings.render(highlightedTarget, listedTargets) : null
-
-  // The list grows to the run settings beside it, so they never scroll while the window has room.
-  useLayoutEffect(() => {
-    const list = menuRef.current
-    if (!list) return
-    const height = runRef.current?.offsetHeight ?? 0
-    list.style.maxHeight = height > 320 ? `${height}px` : ''
-  })
+  const runFooter = runSettings?.footer ? runSettings.footer(highlightedTarget) : null
+  const footerRef = useRef<HTMLDivElement>(null)
 
   const clearHoverTimer = () => {
     if (hoverTimerRef.current !== null) {
@@ -677,6 +675,7 @@ function ProfileModelFamilyMenu({
             <ChevronRight size={12} className="model-picker-row-chevron" />
           ) : null}
           {shortcut ? <span className="model-picker-shortcut">{shortcut}</span> : null}
+          <span className="model-picker-row-check" aria-hidden="true">{selected ? <Check size={14} /> : null}</span>
         </button>
         <button
           type="button"
@@ -691,6 +690,20 @@ function ProfileModelFamilyMenu({
     )
   }
 
+  /** Shows favorites only: at the top of the rail, or beside the search when there is no rail. */
+  const favoritesToggle = (className: string) => (
+    <button
+      type="button"
+      className={`${className}${favoritesOnly ? ' selected active' : ''}`}
+      aria-pressed={favoritesOnly}
+      aria-label={favoritesOnly ? 'Show all models' : 'Show favorites only'}
+      title={favoritesOnly ? 'Show all models' : 'Show favorites only'}
+      onClick={() => setFavoritesOnly((value) => !value)}
+    >
+      <Star size={railItems.length > 1 ? 16 : 14} strokeWidth={2} fill={favoritesOnly ? 'currentColor' : 'none'} />
+    </button>
+  )
+
   const shell = (
     <div
       className={`composer-model-picker-shell model-picker-shell${
@@ -699,86 +712,68 @@ function ProfileModelFamilyMenu({
       ref={setShellNode}
       style={portaled ? floatingStyle : undefined}
     >
-      <div className={`model-picker-panel${runColumn ? ' has-run-settings' : ''}`}>
-        <div className="model-picker-search">
-          <button
-            type="button"
-            className={`model-picker-favorites-toggle${favoritesOnly ? ' active' : ''}`}
-            aria-pressed={favoritesOnly}
-            aria-label={favoritesOnly ? 'Show all models' : 'Show favorites only'}
-            title={favoritesOnly ? 'Show all models' : 'Show favorites only'}
-            onClick={() => setFavoritesOnly((value) => !value)}
-          >
-            <Star size={14} strokeWidth={2} fill={favoritesOnly ? 'currentColor' : 'none'} />
-          </button>
-          <SettingsSearch
-            className="model-picker-search-field"
-            inputRef={searchInputRef}
-            placeholder="Search models"
-            ariaLabel="Search models"
-            value={searchQuery}
-            onChange={setSearchQuery}
-            inputAria={{
-              role: 'combobox',
-              'aria-expanded': true,
-              'aria-controls': listId,
-              'aria-autocomplete': 'list',
-              'aria-activedescendant': highlightedEntry ? `${idPrefix}-model-${highlightIndex}` : undefined
-            }}
-          />
-        </div>
-
-        <div className="model-picker-body">
+      <div className={`model-picker-panel${runColumn ? ' has-run-settings' : ''}${runFooter ? ' has-footer' : ''}`}>
+        <div className="model-picker-main">
           {railItems.length > 1 ? (
-            <div
-              className="model-picker-rail"
-              role="tablist"
-              aria-label="Filter by provider"
-              data-tooltip-placement="outside-left"
-            >
-              <button
-                type="button"
-                role="tab"
-                aria-selected={railFilter === null}
-                className={`model-picker-rail-item${railFilter === null ? ' selected' : ''}`}
-                title="All models"
-                onClick={() => setRailFilter(null)}
-              >
-                <LayoutGrid size={16} className="model-picker-rail-all" aria-hidden />
-              </button>
-              {railItems.map((item) => (
-                <button
-                  key={item.key}
-                  type="button"
-                  role="tab"
-                  aria-selected={railFilter === item.key}
-                  className={`model-picker-rail-item${railFilter === item.key ? ' selected' : ''}`}
-                  title={item.label}
-                  aria-label={item.label}
-                  onClick={() => setRailFilter((current) => (current === item.key ? null : item.key))}
-                >
-                  <ProviderIcon providerId={item.iconId} size={16} />
-                  {item.badge ? <span className="model-picker-instance-badge" aria-hidden="true">{item.badge}</span> : null}
-                </button>
-              ))}
+            <div className="model-picker-rail" data-tooltip-placement="outside-left">
+              {favoritesToggle('model-picker-rail-item')}
+              <div className="model-picker-rail-sep" aria-hidden="true" />
+              <div className="model-picker-rail-tabs" role="tablist" aria-label="Filter by provider">
+                {railItems.map((item) => (
+                  <button
+                    key={item.key}
+                    type="button"
+                    role="tab"
+                    aria-selected={railFilter === item.key}
+                    className={`model-picker-rail-item${railFilter === item.key ? ' selected' : ''}`}
+                    title={item.label}
+                    aria-label={item.label}
+                    onClick={() => setRailFilter((current) => (current === item.key ? null : item.key))}
+                  >
+                    <ProviderIcon providerId={item.iconId} size={16} />
+                    {item.badge ? <span className="model-picker-instance-badge" aria-hidden="true">{item.badge}</span> : null}
+                  </button>
+                ))}
+              </div>
             </div>
           ) : null}
 
-          <div
-            ref={menuRef}
-            id={listId}
-            className="composer-model-menu model-picker-list scrollbar-ultra-thin"
-            role="listbox"
-            aria-label="Select model"
-            onScroll={handleMenuScroll}
-          >
-            {filteredEntries.length === 0 ? (
-              <div className="model-picker-empty">
-                {favoritesOnly ? 'No favorite models yet.' : 'No models match your search.'}
-              </div>
-            ) : (
-              filteredEntries.map((entry, index) => renderEntry(entry, index))
-            )}
+          <div className="model-picker-center">
+            <div className="model-picker-search">
+              {railItems.length > 1 ? null : favoritesToggle('model-picker-favorites-toggle')}
+              <SettingsSearch
+                className="model-picker-search-field"
+                inputRef={searchInputRef}
+                placeholder="Search models"
+                ariaLabel="Search models"
+                value={searchQuery}
+                onChange={setSearchQuery}
+                inputAria={{
+                  role: 'combobox',
+                  'aria-expanded': true,
+                  'aria-controls': listId,
+                  'aria-autocomplete': 'list',
+                  'aria-activedescendant': highlightedEntry ? `${idPrefix}-model-${highlightIndex}` : undefined
+                }}
+              />
+            </div>
+
+            <div
+              ref={menuRef}
+              id={listId}
+              className="composer-model-menu model-picker-list scrollbar-ultra-thin"
+              role="listbox"
+              aria-label="Select model"
+              onScroll={handleMenuScroll}
+            >
+              {filteredEntries.length === 0 ? (
+                <div className="model-picker-empty">
+                  {favoritesOnly ? 'No favorite models yet.' : 'No models match your search.'}
+                </div>
+              ) : (
+                filteredEntries.map((entry, index) => renderEntry(entry, index))
+              )}
+            </div>
           </div>
 
           {runColumn ? (
@@ -787,16 +782,38 @@ function ProfileModelFamilyMenu({
               className="model-picker-run scrollbar-ultra-thin"
               onMouseEnter={clearHoverTimer}
               onKeyDown={(event) => {
-                // Left from the levels goes back to the list (in the permission row it moves between modes).
-                if (event.key !== 'ArrowLeft' || event.defaultPrevented) return
-                event.preventDefault()
-                searchInputRef.current?.focus()
+                if (event.defaultPrevented) return
+                // Left goes back to the list; Down past the last level goes on to the footer.
+                if (event.key === 'ArrowLeft') {
+                  event.preventDefault()
+                  searchInputRef.current?.focus()
+                } else if (event.key === 'ArrowDown') {
+                  const next = footerRef.current?.querySelector<HTMLElement>('[role="radio"][tabindex="0"], button')
+                  if (next) {
+                    event.preventDefault()
+                    next.focus()
+                  }
+                }
               }}
             >
               {runColumn}
             </div>
           ) : null}
         </div>
+
+        {runFooter ? (
+          <div
+            ref={footerRef}
+            className="model-picker-footer"
+            onMouseEnter={clearHoverTimer}
+            onKeyDown={(event) => {
+              // Up from the footer goes back to the levels (inside the permission menu it moves between modes).
+              if (event.key === 'ArrowUp' && !event.defaultPrevented && !(event.target as HTMLElement).closest('[role="menu"]')) enterRunSettings(event)
+            }}
+          >
+            {runFooter}
+          </div>
+        ) : null}
       </div>
 
       {(activeFamily && activeFamily.family.contexts.length > 1) && (
