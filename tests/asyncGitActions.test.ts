@@ -140,6 +140,47 @@ describe.skipIf(process.platform === 'win32')('a thread action whose Git does no
     expect(git(worktree, 'status', '--porcelain')).toBe('')
   }, 40_000)
 
+  /**
+   * A `git` first on PATH that answers its first command `seconds` late when it runs in `folder` (or names it), other
+   * than `rev-parse`: the folder check before a request asks `rev-parse` without blocking on every version.
+   */
+  function slowFirstCommand(folder: string, seconds: number): string {
+    const real = execFileSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).trim()
+    const bin = join(f.root, 'bin')
+    mkdirSync(bin, { recursive: true })
+    const started = join(f.root, 'first-command-started')
+    const resolved = execFileSync('sh', ['-c', `cd "${folder}" && pwd -P`], { encoding: 'utf8' }).trim()
+    writeFileSync(join(bin, 'git'), [
+      '#!/bin/sh',
+      `case "$(pwd -P) $*" in *"${resolved}"*|*"${folder}"*)`,
+      `  case "$*" in *rev-parse*) ;; *) if [ ! -e "${started}" ]; then : > "${started}"; sleep ${seconds}; fi;; esac;;`,
+      'esac',
+      `exec "${real}" "$@"`,
+      ''
+    ].join('\n'))
+    chmodSync(join(bin, 'git'), 0o755)
+    process.env.PATH = `${bin}${delimiter}${previousPath}`
+    return started
+  }
+
+  it('cleanup of a trashed thread holds only that thread: other requests answer while its Git waits', async () => {
+    const { ctx, thread, worktree, project } = await threadWithTurn()
+    const other = mms.threads.createThread('Another thread', project.id)
+    const started = slowFirstCommand(worktree, 3)
+    const begun = Date.now()
+    // Trash retires the thread's checkout in the same request; its first Git command there takes 3 seconds.
+    const trashing = dispatchMethod(ctx, 'threads.trash', { threadId: thread.id })
+    await vi.waitFor(() => expect(existsSync(started)).toBe(true), { timeout: 10_000 })
+    expect(await pending(trashing)).toBe(true)
+    await expect(dispatchMethod(ctx, 'threads.get', { threadId: other.id })).resolves.toBeDefined()
+    await expect(dispatchMethod(ctx, 'git.status', { projectId: project.id })).resolves.toMatchObject({ status: { isRepo: true } })
+    await expect(dispatchMethod(ctx, 'settings.get', {})).resolves.toBeDefined()
+    expect(Date.now() - begun).toBeLessThan(2500)
+    expect(await pending(trashing)).toBe(true)
+    // Once Git answers, the trash finishes as usual.
+    await expect(trashing).resolves.toMatchObject({ ok: true })
+  }, 40_000)
+
   it('a second action on the same thread runs no Git of its own until the first has finished', async () => {
     const { ctx, thread, worktree } = await threadWithTurn()
     writeFileSync(join(worktree, 'value.txt'), 'edited by hand\n')
