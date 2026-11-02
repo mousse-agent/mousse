@@ -149,6 +149,23 @@ function transcribeSegment(model: LocalSttModel, samples: Float32Array): Promise
 }
 
 /**
+ * Transcribes one piece of 16 kHz audio (at most the model's longest segment) with a local model.
+ * Live dictation sends each piece as the user pauses (`liveTranscription.ts`).
+ */
+export async function transcribeLocalSamples(modelId: LocalSttModelId, samples: Float32Array): Promise<string> {
+  const model = findLocalSttModel(modelId)
+  if (!model) throw new Error(`Unknown local dictation model: ${modelId}`)
+  const release = hold()
+  try {
+    const text = await transcribeSegment(model, samples)
+    if (worker?.modelId === model.id) worker.ready = true
+    return text
+  } finally {
+    release()
+  }
+}
+
+/**
  * Transcribes a recording with a local model, one segment at a time. `onPartial` receives the
  * text of the segments done so far after each one. Aborting `signal` stops before the next
  * segment goes to the worker and rejects; the segment the worker is already on finishes unseen.
