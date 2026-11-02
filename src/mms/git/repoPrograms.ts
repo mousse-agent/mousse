@@ -292,13 +292,34 @@ function remember(key: string, paths: Iterable<string>, programs: RepoPrograms):
   cache.set(key, { watched: [...new Set(paths)].map((path) => [path, signature(path)] as const), programs })
 }
 
-/** `failed` is set when Git could not be run or read in full (a timeout, output past the limit). */
-function bareGit(cwd: string, args: string[]): { ok: boolean; stdout: string; failed: boolean } {
+let probeTimeoutMs = 30_000
+
+/** For tests: how long a probe may run before it counts as timed out. */
+export function setRepoProgramProbeTimeout(ms: number): void {
+  probeTimeoutMs = ms
+}
+
+/**
+ * `failed` is set when Git could not be run or read in full (a timeout, output past the limit);
+ * `timedOut` when it was still running at the time limit.
+ */
+function bareGit(cwd: string, args: string[]): { ok: boolean; stdout: string; failed: boolean; timedOut: boolean } {
   assertGitAllowed({ cwd, args })
   // A common directory Mousse names is named the same way for the probe as for the command it is for.
-  const result = spawnSync('git', ['-c', 'core.fsmonitor=false', ...args], { cwd, encoding: 'utf8', windowsHide: true, timeout: 30_000, maxBuffer: 16 * 1024 * 1024, env: repoProgramEnv({ ...process.env, GIT_OPTIONAL_LOCKS: '0', ...gitDirectoryEnv(cwd) }) })
-  return { ok: !result.error && result.status === 0, stdout: result.error ? '' : result.stdout ?? '', failed: Boolean(result.error) }
+  const result = spawnSync('git', ['-c', 'core.fsmonitor=false', ...args], { cwd, encoding: 'utf8', windowsHide: true, timeout: probeTimeoutMs, maxBuffer: 16 * 1024 * 1024, env: repoProgramEnv({ ...process.env, GIT_OPTIONAL_LOCKS: '0', ...gitDirectoryEnv(cwd) }) })
+  const timedOut = (result.error as NodeJS.ErrnoException | undefined)?.code === 'ETIMEDOUT'
+  return { ok: !result.error && result.status === 0, stdout: result.error ? '' : result.stdout ?? '', failed: Boolean(result.error), timedOut }
 }
+
+/**
+ * Folders whose probe timed out, until when the next Git call there is refused at once. The probe is
+ * synchronous, so without this each call in a folder on a volume that does not answer (one macOS is
+ * still asking about, a hung drive) would stop the whole daemon for the full timeout again.
+ */
+const timedOut = new Map<string, number>()
+const TIMED_OUT_FOR_MS = 60_000
+
+const NOT_ANSWERING = "Git did not answer in this repository's folder in time (its drive may be busy, or macOS may be asking whether Mousse may access it), so Mousse does not run Git here for now. It tries again in a minute."
 
 const UNREADABLE = "This repository's Git config could not be read in full (it may be very large or include a file that cannot be read), so Mousse does not run Git here."
 
@@ -311,11 +332,22 @@ const UNREADABLE = "This repository's Git config could not be read in full (it m
  */
 function programsFor(cwd: string): RepoPrograms {
   const key = resolve(cwd)
+  // Before the cache: checking a cached entry stats files, which could be on the volume that did not answer.
+  const until = timedOut.get(key)
+  if (until !== undefined) {
+    if (Date.now() < until) throw new RepoProgramError(NOT_ANSWERING)
+    timedOut.delete(key)
+  }
   const hit = cache.get(key)
   if (hit && hit.watched.every(([path, sig]) => signature(path) === sig)) return hit.programs
   cache.delete(key)
   probes += 1
   const where = bareGit(key, ['rev-parse', '--path-format=absolute', '--git-dir', '--git-common-dir', '--show-toplevel'])
+  if (where.timedOut) {
+    if (timedOut.size >= CACHE_LIMIT) timedOut.delete(timedOut.keys().next().value!)
+    timedOut.set(key, Date.now() + TIMED_OUT_FOR_MS)
+    throw new RepoProgramError(NOT_ANSWERING)
+  }
   if (where.failed) throw new RepoProgramError(UNREADABLE)
   // Not a repository: nothing of a repository's own can run. Remembered until a `.git` appears above it.
   if (!where.ok) {
@@ -382,6 +414,7 @@ export function trustRepositoryPrograms(path: string): RepoTrustRecord | null {
   }
   const record = writeRepoTrust(commonDir, filters)
   cache.clear()
+  timedOut.clear()
   return record
 }
 
@@ -551,4 +584,5 @@ export function guardedSimpleGit(cwd: string, options: Partial<Omit<SimpleGitOpt
 /** For tests: forget cached repositories. */
 export function clearRepoProgramCache(): void {
   cache.clear()
+  timedOut.clear()
 }
