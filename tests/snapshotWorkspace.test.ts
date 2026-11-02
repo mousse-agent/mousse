@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { withGitMutationLocks } from '../src/mms/actions/GitOperationCoordinator'
 import { expireTrashedSnapshotRefs, releaseSnapshotRefs, releaseThreadSnapshots } from '../src/mms/actions/SnapshotRefReleaseService'
 import { WORKTREE_TRASH_QUIET_MS } from '../src/mms/lifecycle/WorktreeRetirementService'
+import { expirePreservedFiles } from '../src/mms/actions/preservedFiles'
 import { ThreadActionService } from '../src/mms/actions/ThreadActionService'
 import { UndoRetentionService } from '../src/mms/actions/UndoRetentionService'
 import { UndoService } from '../src/mms/actions/UndoService'
@@ -678,6 +679,26 @@ describe('what happens to a store when its owner goes', () => {
     expect(b.store('rev-parse', b.receipt.retainedRefs[1]!)).toBe(b.action.endSha)
     expect(b.store('cat-file', '-t', b.action.endSha)).toBe('commit')
     // B's Undo still works after the collection.
+    await b.undo()
+    expect(existsSync(join(work, 'b.txt'))).toBe(false)
+  })
+
+  it('expires the files a restore kept in the store once they are older than the Undo window, and collects them', async () => {
+    const work = folder('work')
+    const a = await aged('a', work, 'project-1')
+    const b = await aged('b', work, 'project-1')
+    await new UndoRetentionService(a.directory).sweep(work)
+    const old = (t: typeof a): string => {
+      const date = `@${Math.floor((Date.now() - 31 * 24 * 60 * 60 * 1000) / 1000)} +0000`
+      return execFileSync('git', ['--git-dir', t.space.store.gitDir, 'commit-tree', t.store('rev-parse', `${t.action.endSha}^{tree}`), '-m', 'kept'], { encoding: 'utf8', env: { ...process.env, GIT_COMMITTER_DATE: date, GIT_AUTHOR_DATE: date } }).trim()
+    }
+    const mine = old(a), theirs = old(b)
+    a.store('update-ref', `refs/mousse/preserved/${a.receipt.operationId}-abc`, mine)
+    b.store('update-ref', `refs/mousse/preserved/${b.receipt.operationId}-abc`, theirs)
+    expect(await expirePreservedFiles(a.directory, work)).toEqual({ expiredRefs: [`refs/mousse/preserved/${a.receipt.operationId}-abc`] })
+    // Gone from the store after the collection; B's kept files and its Undo are untouched.
+    expect(() => a.store('cat-file', '-e', mine)).toThrow()
+    expect(b.store('for-each-ref', '--format=%(refname)', 'refs/mousse/preserved/')).toBe(`refs/mousse/preserved/${b.receipt.operationId}-abc`)
     await b.undo()
     expect(existsSync(join(work, 'b.txt'))).toBe(false)
   })

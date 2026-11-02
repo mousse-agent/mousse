@@ -1,14 +1,15 @@
 /**
- * Purging a thread that worked in its project's own folder releases its pins and its receipts' refs in that folder's
- * repository, and nothing else: no file in the folder is deleted or moved, HEAD, the index and the branches stay, files
- * a restore kept (`refs/mousse/preserved/*`) stay, and another thread's pins stay. A purge that stops partway resumes
- * and finishes the release.
+ * Purging a thread that worked in its project's own folder releases its pins, its receipts' refs and the files its
+ * restores kept (`refs/mousse/preserved/<operation>-…`) in that folder's repository, and nothing else: no file in the
+ * folder is deleted or moved, HEAD, the index and the branches stay, and another thread's pins and kept files stay. A
+ * purge that stops partway resumes and finishes the release.
  */
 import { afterEach, expect, test, vi } from 'vitest'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { ThreadActionService } from '../src/mms/actions/ThreadActionService'
+import { ThreadJournal } from '../src/mms/data/ThreadJournal'
 import { ResourceLifecycleCoordinator } from '../src/mms/lifecycle/ResourceLifecycleCoordinator'
 import { ResourceLifecycleStore } from '../src/mms/lifecycle/ResourceLifecycleStore'
 import { ResourcePurgeService } from '../src/mms/lifecycle/ResourcePurgeService'
@@ -42,6 +43,9 @@ async function fixture() {
   const head = git(repo, ['rev-parse', 'HEAD'])
   git(repo, ['update-ref', 'refs/mousse/threads/other/main', head])
   git(repo, ['update-ref', 'refs/mousse/preserved/op-1-abc', head])
+  // Files a restore of this thread kept go with the thread.
+  const operation = new ThreadJournal(location, { readOnly: true }).list()[0]!.operationId
+  git(repo, ['update-ref', `refs/mousse/preserved/${operation}-def`, head])
 
   const coordinator = new ResourceLifecycleCoordinator(store, { drain: async () => {}, settleMutationOwnership: async () => {}, projectIndex: () => {}, projectPurged: () => {} })
   return { location, repo, store, coordinator }
@@ -66,7 +70,8 @@ test('purging a project-folder thread releases its pins and receipt refs only, a
   const preview = await f.coordinator.cleanup.preview('task')
   expect(preview.blockers).toEqual([])
   const refItems = preview.items.filter((item) => item.kind === 'ref').map((item) => item.identity).sort()
-  expect(refItems).toEqual(before.filter((ref) => ref.startsWith('refs/mousse/changes/') || ref === 'refs/mousse/threads/task/main'))
+  expect(refItems).toEqual(before.filter((ref) => ref.startsWith('refs/mousse/changes/') || ref === 'refs/mousse/threads/task/main' || (ref.startsWith('refs/mousse/preserved/') && ref !== 'refs/mousse/preserved/op-1-abc')))
+  expect(refItems.filter((ref) => ref.startsWith('refs/mousse/preserved/'))).toHaveLength(1)
   // No worktree item and no path in the person's folder.
   expect(preview.items.some((item) => item.kind === 'worktree' || (item.kind === 'path' && item.identity.startsWith(f.repo)))).toBe(false)
 

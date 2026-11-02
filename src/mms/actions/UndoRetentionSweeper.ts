@@ -4,14 +4,20 @@ import { releaseExecutionLeaseHandle, tryAcquireExecutionLease } from '../queue/
 import { UndoRetentionService } from './UndoRetentionService'
 import { ReceiptRefReleaseService } from './ReceiptRefReleaseService'
 import { releaseSnapshotRefs } from './SnapshotRefReleaseService'
+import { expirePreservedFiles } from './preservedFiles'
 
-/** Small rotating idle-task batches. Shutdown cancels lease waits and awaits completion. */
+/**
+ * Small rotating idle-task batches. Shutdown cancels lease waits and awaits completion. Files a restore kept
+ * (`refs/mousse/preserved/`) expire here too, once they are older than the thread's Undo retention window; never in
+ * the first pass after `start`, which runs while the daemon starts.
+ */
 export class UndoRetentionSweeper {
   private timer?: ReturnType<typeof setInterval>
   private pending?: Promise<void>
   private readonly abort = new AbortController()
   private cursor = 0
-  readonly outcomes = new Map<string, { at: string; expired?: number; releasedRefs?: number; reason?: string }>()
+  private passes = 0
+  readonly outcomes = new Map<string, { at: string; expired?: number; releasedRefs?: number; expiredPreservedRefs?: number; reason?: string }>()
   constructor(private readonly store: ResourceLifecycleStore, private readonly options = { intervalMs: 60 * 60 * 1000, tasksPerBatch: 20 }) {}
   start(): void {
     if (this.timer || this.abort.signal.aborted) return
@@ -36,6 +42,8 @@ export class UndoRetentionSweeper {
     let tasks
     try { tasks = this.store.list().filter((task) => task.state === 'active') }
     catch { return } // Unknown ownership disables sweeping; inventory exposes its source error.
+    // The first pass belongs to starting up: kept files are not looked at until a later one.
+    const startup = this.passes++ === 0
     const batch = Math.min(tasks.length, this.options.tasksPerBatch)
     for (let i = 0; i < batch && !this.abort.signal.aborted; i++) {
       const task = tasks[this.cursor++ % tasks.length]!
@@ -46,12 +54,19 @@ export class UndoRetentionSweeper {
         const workspace = new ThreadWorkspaceManager(task.location).loadOrSnapshot()
         if (!workspace || workspace.lifecycle !== 'ready') continue
         const result = await new UndoRetentionService(task.location).sweep(workspace.worktreePath, this.abort.signal, lease)
+        // Kept files have their own outcome: a failure here never holds back the receipt release below.
+        let preserved: { expired?: number; reason?: string } = {}
+        if (!result.suspended && !startup) {
+          try { preserved = { expired: (await expirePreservedFiles(task.location, workspace.worktreePath, { signal: this.abort.signal, heldThreadLease: lease })).expiredRefs.length } }
+          catch (error) { preserved = { reason: `Kept files: ${error instanceof Error ? error.message : String(error)}` } }
+        }
         // A folder with no worktree keeps its snapshots in a store of Mousse's own, which is also tidied after the release.
         const released = result.suspended ? undefined : workspace.snapshotOnly
           ? await releaseSnapshotRefs(task.location, { signal: this.abort.signal, heldThreadLease: lease })
           : await new ReceiptRefReleaseService(this.store, task.taskId).release(workspace.worktreePath, { signal: this.abort.signal, heldThreadLease: lease })
+        const reasons = result.suspended ? ['Clock review required'] : [...(released?.retained.map((item) => item.reason) ?? []), ...(preserved.reason ? [preserved.reason] : [])]
         this.outcomes.set(task.taskId, { at: new Date().toISOString(), expired: result.expired.length, releasedRefs: released?.releasedRefs.length ?? 0,
-          ...(result.suspended ? { reason: 'Clock review required' } : released?.retained.length ? { reason: released.retained.map((item) => item.reason).join('; ') } : {}) })
+          ...(preserved.expired !== undefined ? { expiredPreservedRefs: preserved.expired } : {}), ...(reasons.length ? { reason: reasons.join('; ') } : {}) })
       } catch (error) {
         this.outcomes.set(task.taskId, { at: new Date().toISOString(), reason: error instanceof Error ? error.message : String(error) })
       } finally { if (lease) releaseExecutionLeaseHandle(lease) }

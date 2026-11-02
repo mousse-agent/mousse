@@ -43,6 +43,18 @@ test('complete purge removes exclusive checkout, refs and task data and retains 
   expect(() => f.store.registerTask({ taskId: 'task', location: f.location, creating: true })).toThrow(/tombstone/)
   expect((await f.coordinator.purge({ taskId: 'task', operationId: 'purge' })).state).toBe('purged')
 })
+test('a purge releases the files the thread’s restores kept and leaves another thread’s', async () => {
+  const f = fixture({ git: true })
+  const head = git(f.repo, ['rev-parse', 'HEAD'])
+  // `provision` is an operation in the thread's journal; `other-operation` is not.
+  git(f.repo, ['update-ref', 'refs/mousse/preserved/provision-abc', head])
+  git(f.repo, ['update-ref', 'refs/mousse/preserved/other-operation-abc', head])
+  await f.coordinator.trash({ taskId: 'task', operationId: 'trash' })
+  const preview = await f.coordinator.cleanup.preview('task'); expect(preview.blockers).toEqual([])
+  expect(preview.items.filter((item) => item.kind === 'ref' && item.identity.startsWith('refs/mousse/preserved/')).map((item) => item.identity)).toEqual(['refs/mousse/preserved/provision-abc'])
+  expect((await f.coordinator.purge({ taskId: 'task', operationId: 'purge', expectedGeneration: preview.generation, previewDigest: preview.digest })).state).toBe('purged')
+  expect(git(f.repo, ['for-each-ref', '--format=%(refname)', 'refs/mousse/', 'refs/heads/mousse/'])).toBe('refs/mousse/preserved/other-operation-abc')
+})
 test('dirty sole copy needs a human exact preview discard; automatic request preserves it', async () => {
   const f = fixture({ git: true }); writeFileSync(join(f.worktree, 'secret.txt'), 'only copy')
   await f.coordinator.trash({ taskId: 'task', operationId: 'trash' }); const preview = await f.coordinator.cleanup.preview('task')

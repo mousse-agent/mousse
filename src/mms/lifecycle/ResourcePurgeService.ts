@@ -7,7 +7,7 @@ import { atomicWriteJsonSync } from '../data/AtomicFs'
 import { acquireRepositoryLease } from '../git/RepositoryLease'
 import { resolveRepositoryIdentity } from '../git/RepositoryIdentity'
 import { buildResourceInventory } from './ResourceInventory'
-import { projectFolderPurgeRefs } from './projectFolderRefs'
+import { projectFolderPurgeRefs, threadPreservedRefNames } from './projectFolderRefs'
 import { measureTree } from './diskMeasure'
 import { assertLifecyclePath, ResourceLifecycleStore } from './ResourceLifecycleStore'
 import { assertFrozenContentEntry, lifecycleGit, lifecycleRead, readDirectLifecycleRef, walkOwnedContent, WorktreeRetirementService } from './WorktreeRetirementService'
@@ -301,9 +301,9 @@ export class ResourcePurgeService {
         preview.exclusiveBytes += manifest.content.reduce((sum, entry) => sum + entry.bytes, 0)
       } catch (error) { preview.blockers.push(`Workspace retained: ${resource.identity}: ${(error as Error).message}`) }
     }
-    // A thread that worked in its project's own folder pinned snapshots there, outside every worktree: its pins and its
-    // receipts' refs are released like a worktree thread's refs, before its record goes with the task data. Refs only:
-    // nothing in the person's folder is deleted or moved, and the files a restore kept (`refs/mousse/preserved/`) stay.
+    // A thread that worked in its project's own folder pinned snapshots there, outside every worktree: its pins, its
+    // receipts' refs and the files its restores kept (`refs/mousse/preserved/<operation>-…`) are released like a worktree
+    // thread's refs, before its record goes with the task data. Refs only: nothing in the person's folder is deleted or moved.
     const folderRefs: LifecyclePurgeItem[] = []
     for (const task of tasks) {
       if (!ownedIds.has(task.taskId)) continue
@@ -312,6 +312,22 @@ export class ResourcePurgeService {
       if (!plan) continue
       if ('unavailable' in plan) { preview.retained.push({ identity: join(task.location, 'project-folder.json'), reason: plan.unavailable }); continue }
       for (const { ref, sha } of plan.refs) folderRefs.push({ id: `project-folder-ref:${task.taskId}:${ref}`, kind: 'ref', identity: ref, ownerTaskId: task.taskId, commonDir: plan.commonDir, expectedValue: sha, status: 'pending' })
+    }
+    // A worktree thread's restores keep files in its repository's refs too; they go with the thread's other refs.
+    for (const task of tasks) {
+      if (!ownedIds.has(task.taskId)) continue
+      const repositoryIds = new Set(inventory.resources.filter((resource) => resource.kind === 'worktree' && resource.ownerTaskId === task.taskId && resource.repositoryId).map((resource) => resource.repositoryId!))
+      for (const repositoryId of repositoryIds) {
+        const commonDir = repositories.get(repositoryId)
+        if (!commonDir) continue
+        try {
+          for (const ref of threadPreservedRefNames(commonDir, task.location)) {
+            if (folderRefs.some((item) => item.identity === ref)) continue
+            const sha = readDirectLifecycleRef(commonDir, ref)
+            if (sha) folderRefs.push({ id: `preserved-ref:${task.taskId}:${ref}`, kind: 'ref', identity: ref, ownerTaskId: task.taskId, commonDir, expectedValue: sha, status: 'pending' })
+          }
+        } catch (error) { preview.blockers.push(`Files kept by restores of ${task.taskId}: ${(error as Error).message}`) }
+      }
     }
     preview.items.push(...folderRefs)
     const plannedRefs = new Set(folderRefs.map((item) => item.identity))
