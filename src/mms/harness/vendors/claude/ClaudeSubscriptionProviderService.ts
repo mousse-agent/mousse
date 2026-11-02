@@ -22,7 +22,7 @@ import { AppError } from '../../../../shared/errors'
 import type { ProviderToolEvent } from '../../../../shared/agentActivity'
 import { CLAUDE_INSTANCE_ID } from '../../../../shared/providerInstances'
 import { catalogModelsOnRoute, MODEL_CATALOG_FORMAT, type ModelCatalog, type ModelCatalogEntry, type ModelCatalogRoute } from '../../../../shared/modelCatalog'
-import { bundledModelCatalog, catalogForThisMousse } from '../../../models/modelCatalog'
+import { catalogForThisMousse, readModelCatalog } from '../../../models/modelCatalog'
 import { atomicWriteJsonSync } from '../../../data/AtomicFs'
 import type { UserQuestionService } from '../../../orchestrator/UserQuestionService'
 import { exactDirectory } from '../../../run/approvalFingerprint'
@@ -101,9 +101,10 @@ type Settings = {
   sessions?: Record<string, SavedSession>
 }
 /**
- * The older-model check's results, by `claude` route id. `key` hashes the Claude Code program file,
- * the account and the candidate route ids: a change to any of them starts the check over. A
- * candidate with no result is unknown and is checked again on the next refresh.
+ * The older-model check's results, by `claude` route id. `key` hashes the Claude Code program file
+ * and the account: a change to either starts the check over. A candidate with no result is unknown
+ * and is checked on the next refresh; a result whose model is no longer a candidate is dropped. So a
+ * catalog that adds a model checks only that one.
  */
 export type OlderModelsState = {
   key: string
@@ -210,8 +211,9 @@ type TurnContext = {
 }
 type Dependencies = {
   /**
-   * Mousse's model catalog as read, before version limits (default `bundledModelCatalog()`); this
-   * service gates it for the running Mousse. Tests use made-up models.
+   * Mousse's model catalog as read, before version limits (default `readModelCatalog()`: the bundled
+   * or the downloaded copy, whichever revision is higher); this service gates it for the running
+   * Mousse. Tests use made-up models.
    */
   modelCatalog?: () => ModelCatalog
   /** How long the older-model check may take after the live list is saved (default 20 s; tests). */
@@ -479,10 +481,14 @@ export function claudeLiveModelsForThisMousse(models: readonly ModelInfo[], read
   return models.filter((model) => !held.has(bareModelId(model.value)) && !(model.resolvedModel && held.has(bareModelId(model.resolvedModel))))
 }
 
-/** The cache key of a check: the Claude Code program file, the account and the candidate route ids. */
-export function claudeOlderCheckKey(fingerprint: string | undefined, subject: string | undefined, candidates: readonly ClaudeOlderCandidate[]): string {
-  const routes = candidates.map((entry) => entry.route.id).sort()
-  return createHash('sha256').update(JSON.stringify([fingerprint ?? '', subject ?? '', routes])).digest('hex')
+/**
+ * The cache key of the check's results: the Claude Code program file and the account. The candidates
+ * are not part of it (results are kept per route id), so `_candidates` is ignored; it stays for
+ * callers that pass them. A key saved before results were kept this way never matches, so those
+ * results are dropped and checked again.
+ */
+export function claudeOlderCheckKey(fingerprint: string | undefined, subject: string | undefined, _candidates?: readonly ClaudeOlderCandidate[]): string {
+  return createHash('sha256').update(JSON.stringify(['per-route', fingerprint ?? '', subject ?? ''])).digest('hex')
 }
 
 /** `setModel`'s words when Claude Code refuses a model for this account (`400 unknown provider for model … · model not changed`). */
@@ -904,7 +910,7 @@ export class ClaudeSubscriptionProviderService {
   /** The catalog as read, and gated for this Mousse version (`minMousse`). */
   private catalogs(): { read: ModelCatalog; gated: ModelCatalog } {
     try {
-      const read = (this.dependencies.modelCatalog ?? bundledModelCatalog)()
+      const read = (this.dependencies.modelCatalog ?? readModelCatalog)()
       return { read, gated: catalogForThisMousse(read) }
     } catch {
       const empty: ModelCatalog = { format: MODEL_CATALOG_FORMAT, revision: 0, models: [] }
@@ -1267,19 +1273,28 @@ export class ClaudeSubscriptionProviderService {
   /**
    * Starts the older-model check on the idle discovery query once the live list is saved: it owns
    * the query from then on, with its own budget, and `refreshModels` returns without waiting for it.
-   * A changed key (Claude Code updated, another account, other candidates) drops the old results at
-   * once, and a check still running for the old key is stopped and replaced by this one. Nothing
-   * starts when every candidate has a result, or when a check for the same key is running.
-   * Returns whether it took the query.
+   * A changed key (Claude Code updated, another account) drops the old results at once, and a check
+   * still running for the old key is stopped and replaced by this one. With the same key, results of
+   * models that are no longer candidates are dropped and only candidates without a result are
+   * checked. Nothing starts when every candidate has a result, or when a check for the same key is
+   * running (candidates added meanwhile wait for the next refresh). Returns whether it took the query.
    */
   private startOlderCheck(query: Query, controller: AbortController, live: ModelInfo[]): boolean {
     const candidates = claudeOlderCandidates(this.catalog(), claudeLiveModelIds(live))
-    const key = claudeOlderCheckKey(cliFingerprint(this.launchTarget()), this.accountSubject(), candidates)
-    if (this.settings.olderModels?.key !== key) {
-      this.settings.olderModels = { key, results: {} }
+    const key = claudeOlderCheckKey(cliFingerprint(this.launchTarget()), this.accountSubject())
+    let state = this.settings.olderModels
+    // Saved under another key, or not results at all: start over.
+    if (state?.key !== key || !state.results || typeof state.results !== 'object' || Array.isArray(state.results)) {
+      state = { key, results: {} }
+      this.settings.olderModels = state
       this.save()
+    } else {
+      const wanted = new Set(candidates.map((candidate) => candidate.route.id))
+      const gone = Object.keys(state.results).filter((routeId) => !wanted.has(routeId))
+      for (const routeId of gone) delete state.results[routeId]
+      if (gone.length) this.save()
     }
-    const results = this.settings.olderModels.results
+    const results = state.results
     const pending = candidates.filter((candidate) => !results[candidate.route.id])
     if (this.stopped || this.olderRun?.key === key) return false
     // A check for another key writes nothing any more: stop it (its own query closes as it ends).
@@ -1290,9 +1305,9 @@ export class ClaudeSubscriptionProviderService {
     const budget = setTimeout(() => controller.abort(), this.dependencies.olderCheckMs ?? 20_000)
     const check = claudeOlderModelCheck(query, pending, controller.signal, (routeId, outcome) => {
       // A later refresh may have changed the key; its results are not this check's to write.
-      const state = this.settings.olderModels
-      if (this.stopped || state?.key !== key) return
-      state.results[routeId] = outcome
+      const current = this.settings.olderModels
+      if (this.stopped || current?.key !== key) return
+      current.results[routeId] = outcome
       this.save()
       // A model that runs changes the listing: open windows read it again now, not at the next refresh.
       if (outcome.outcome === 'runs') this.notifyChanged()

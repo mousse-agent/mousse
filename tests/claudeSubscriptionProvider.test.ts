@@ -32,7 +32,8 @@ function fixture(
   loggedIn = true,
   usageLimitHoldMs?: number,
   models: unknown[] = [{ id: 'sonnet', label: 'Sonnet' }],
-  dependencies: Partial<NonNullable<ConstructorParameters<typeof ClaudeSubscriptionProviderService>[2]>> = {}
+  dependencies: Partial<NonNullable<ConstructorParameters<typeof ClaudeSubscriptionProviderService>[2]>> = {},
+  saved: Record<string, unknown> = {}
 ) {
   const home = mkdtempSync(join(tmpdir(), 'claude-subscription-test-'))
   homes.push(home)
@@ -46,7 +47,8 @@ function fixture(
     JSON.stringify({
       loginPolicy: 'cli',
       binaryPath: binary,
-      models
+      models,
+      ...saved
     })
   )
   const questions = new UserQuestionService()
@@ -1131,6 +1133,45 @@ describe('older Claude models', () => {
       'ember-remapped': { outcome: 'remapped', to: 'ember-live' },
       'ember-old-20290101': { outcome: 'runs' }
     })
+  })
+
+  it('checks only the model a new catalog revision adds, and drops the result of one it removes', async () => {
+    const queries = [olderQuery(standard), olderQuery(standard)]
+    let next = 0
+    let current = catalog
+    const { service, home, settings } = fixture(() => queries[next++]!.query, true, undefined, undefined, { modelCatalog: () => current })
+    await service.refreshModels(home)
+    await service.olderCheck
+    current = parseModelCatalog({
+      format: 1,
+      revision: 2,
+      models: [...catalog.models.filter((model) => model.id !== 'ember-refused'), entry('ember-added', '2030-06-01', { older: true })]
+    })
+    await service.refreshModels(home)
+    await service.olderCheck
+    // The new model, and the one still unknown; nothing with a result is asked again.
+    expect(queries[1]!.setModel.mock.calls.map(([model]) => model)).toEqual(['ember', 'ember-added', 'ember-unknown'])
+    expect(settings().olderModels.results).toEqual({
+      'ember-added': { outcome: 'runs' },
+      'ember-runs': { outcome: 'runs', defaultEffort: 'high' },
+      'ember-remapped': { outcome: 'remapped', to: 'ember-live' },
+      'ember-old-20290101': { outcome: 'runs' }
+    })
+    expect(service.models().map((model) => model.id)).toEqual(['ember', 'ember-added', 'ember-runs', 'ember-old-20290101'])
+  })
+
+  it('drops results saved in an older shape and checks every candidate again', async () => {
+    // Saved by a build whose key also hashed the candidate route ids, and a malformed one.
+    const oldKey = createHash('sha256').update(JSON.stringify(['fingerprint', 'subject', ['ember-runs']])).digest('hex')
+    for (const olderModels of [{ key: oldKey, results: { 'ember-runs': { outcome: 'refused' } } }, { key: 'x', results: null }, 'not state']) {
+      const check = olderQuery(standard)
+      const { service, home, settings } = fixture(() => check.query, true, undefined, undefined, { modelCatalog: () => catalog }, { olderModels })
+      expect(() => service.models()).not.toThrow()
+      await service.refreshModels(home)
+      await service.olderCheck
+      expect(check.setModel.mock.calls.map(([model]) => model)).toEqual(['ember', 'ember-runs', 'ember-refused', 'ember-remapped', 'ember-unknown', 'ember-old-20290101'])
+      expect(settings().olderModels.results['ember-runs']).toEqual({ outcome: 'runs', defaultEffort: 'high' })
+    }
   })
 
   it('runs an older model at a level its catalog entry lists', async () => {

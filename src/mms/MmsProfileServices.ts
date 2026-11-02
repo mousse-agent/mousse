@@ -14,6 +14,7 @@ import { AntigravityProviderService } from './harness/acp/presets/antigravity/An
 import { configInstanceStore, ProviderInstanceService } from './harness/instanceMap'
 import { createProviderAccess, type ProviderAccess } from './providers/providerAccess'
 import { createHarnessGateway, type Harness, type HarnessGateway } from './harness/gateway'
+import { onModelCatalogChange } from './models/modelCatalog'
 import { antigravityDriver } from './harness/drivers/antigravity'
 import { acpDriver } from './harness/drivers/acp'
 import { AgentInstalls } from './harness/agents/install'
@@ -165,6 +166,7 @@ export class MmsProfileServices {
   harness?: HarnessGateway
   private harnessImpl?: Harness
   private catalogUnsubscribe?: () => void
+  private modelCatalogUnsubscribe?: () => void
   readonly projects: ProjectManager
   readonly applets: AppletStore
   readonly threads: ThreadDataStore
@@ -523,6 +525,8 @@ export class MmsProfileServices {
     this.harness = this.harnessImpl
     // A background catalogue refresh reaches the pickers as a snapshots event.
     this.catalogUnsubscribe = this.providerAuth.onCatalogChanged?.(() => this.harnessImpl?.catalogChanged())
+    // A newer model catalog downloaded between releases queues a refresh of the instances that read it.
+    this.modelCatalogUnsubscribe = onModelCatalogChange(() => this.harnessImpl?.modelCatalogChanged())
     this.harnessImpl.startModelRefreshSchedule()
     this.orchestrator.setHarness(this.harnessImpl)
     // Personal bots (PR 6): their own database under `<profileHome>/bots/`, which older builds never open.
@@ -1558,6 +1562,7 @@ export class MmsProfileServices {
       () => this.net.shutdown(),
       () => this.requests.waitForIdle(),
       () => this.catalogUnsubscribe?.(),
+      () => this.modelCatalogUnsubscribe?.(),
       () => this.harnessImpl?.stop(),
       () => this.antigravity.stop(),
       () => this.claudeSubscription.stop(),

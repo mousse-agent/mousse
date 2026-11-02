@@ -24,6 +24,7 @@ import { resolveWindowsShim, type CliLaunch } from '../resolveWindowsShim'
 import { quirksFor } from '../acp/quirks'
 import { isInheritedCredential, resolveCommand, type InstanceEnv } from '../env'
 import { runHarness, type HarnessRunResult } from '../spawn'
+import { fetchWithAllowedRedirects } from '../../net/allowedRedirects'
 import { containedFile, createStaging, extractArchive } from './archive'
 import { LOCK_FILE, withLock } from './lock'
 import { changedFile, DIST_DIR, hashFile, hashTree, readReceipt, RECEIPT_FILE, type AgentReceipt } from './receipt'
@@ -32,11 +33,6 @@ import { cleanEnv, commandSegments, platformKeys, resolveDistribution, type AcpR
 export const MAX_DOWNLOAD_BYTES = 1024 ** 3
 export const DOWNLOAD_TIMEOUT_MS = 20 * 60_000
 export const NPM_TIMEOUT_MS = 20 * 60_000
-
-/** Redirects a download may follow besides its own host: release assets GitHub serves elsewhere. */
-export const REDIRECT_HOSTS: Readonly<Record<string, readonly string[]>> = {
-  'github.com': ['objects.githubusercontent.com', 'release-assets.githubusercontent.com']
-}
 
 const PROFILE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/
 const AGENT_ID = /^[a-z0-9][a-z0-9._-]{0,63}$/
@@ -170,7 +166,8 @@ export function sha512Of(integrity: unknown): string | undefined {
 
 /**
  * Downloads `url` to `target`: streamed SHA-256, a size cap and a deadline. Redirects may only
- * stay on the declared host (same scheme) or go to the fixed `REDIRECT_HOSTS` table.
+ * stay on the declared host (same scheme) or go to the fixed `REDIRECT_HOSTS` table
+ * (`fetchWithAllowedRedirects`).
  */
 export async function downloadArtifact(
   url: string,
@@ -180,21 +177,7 @@ export async function downloadArtifact(
   const fetchFile = options.fetch ?? fetch
   const timeout = AbortSignal.timeout(options.timeoutMs ?? DOWNLOAD_TIMEOUT_MS)
   const signal = options.signal ? AbortSignal.any([options.signal, timeout]) : timeout
-  const declared = new URL(url)
-  const allowed = new Set([declared.host, ...(REDIRECT_HOSTS[declared.hostname] ?? [])])
-  let current = declared
-  let response: Response | undefined
-  for (let hop = 0; ; hop += 1) {
-    response = await fetchFile(current.href, { signal, redirect: 'manual' })
-    if (response.status < 300 || response.status >= 400) break
-    const location = response.headers.get('location')
-    await response.body?.cancel().catch(() => undefined)
-    if (!location || hop >= 5) throw new Error(`The ${options.label} download redirected too often.`)
-    const next = new URL(location, current)
-    if (next.protocol !== declared.protocol || !allowed.has(next.host))
-      throw new Error(`The ${options.label} download redirected to ${next.host}, which Mousse does not download agents from.`)
-    current = next
-  }
+  const { response, url: current } = await fetchWithAllowedRedirects(url, { fetch: fetchFile, signal, label: options.label, from: 'agents' })
   if (!response.ok || !response.body) throw new Error(`The ${options.label} download failed (${response.status}).`)
   const max = options.maxBytes ?? MAX_DOWNLOAD_BYTES
   const declaredSize = Number(response.headers.get('content-length'))
