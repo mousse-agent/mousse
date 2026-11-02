@@ -30,6 +30,12 @@ export interface ResourceLifecycleHooks {
   quiesceDisk?(): Promise<() => void>
   /** Fault injection / observability after durable boundaries, never used to authorize a move. */
   onPhase?(record: TaskLifecycleRecord, phase: LifecycleOperationPhase): Promise<void> | void
+  /**
+   * Run on every pass of a permanent delete, the first and each resumed one, before anything is removed: what the
+   * deleted threads hold outside their folders (snapshot stores) is let go. It must be safe to run again; a failure
+   * stops the pass, and the purge stays started and resumes later.
+   */
+  beforePurgeRemoval?(record: TaskLifecycleRecord): Promise<void> | void
 }
 
 const running = new Set<string>()
@@ -40,7 +46,7 @@ const MOVABLE_LOCKS = ['execution.lease', 'queue.mut.lock', 'thread-data.mut.loc
 export class ResourceLifecycleCoordinator {
   readonly cleanup: ResourcePurgeService
   constructor(readonly store: ResourceLifecycleStore, private readonly hooks: ResourceLifecycleHooks) {
-    this.cleanup = new ResourcePurgeService(store, { assertIdle: (taskId) => hooks.assertCanTrash?.(store.require(taskId)), projectPurged: (record) => hooks.projectPurged?.(record), onBoundary: (record) => hooks.onPhase?.(record, 'purge-started'), configurationChanged: hooks.configurationChanged, quiesceDisk: hooks.quiesceDisk })
+    this.cleanup = new ResourcePurgeService(store, { assertIdle: (taskId) => hooks.assertCanTrash?.(store.require(taskId)), projectPurged: (record) => hooks.projectPurged?.(record), onBoundary: (record) => hooks.onPhase?.(record, 'purge-started'), beforeRemoval: (record) => hooks.beforePurgeRemoval?.(record), configurationChanged: hooks.configurationChanged, quiesceDisk: hooks.quiesceDisk })
   }
 
   trash(request: LifecycleRequest): Promise<TaskLifecycleRecord> { return this.run('trash', request) }

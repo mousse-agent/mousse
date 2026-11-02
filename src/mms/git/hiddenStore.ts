@@ -1,6 +1,6 @@
 import { AsyncLocalStorage } from 'node:async_hooks'
 import { createHash } from 'node:crypto'
-import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from 'node:fs'
 import { join, resolve, sep } from 'node:path'
 import type { RepositoryIdentity } from './RepositoryIdentity'
 
@@ -115,7 +115,27 @@ function isolatedSettings(empty: string, hooks: string): Array<[string, string]>
 
 const prepared = new Set<string>()
 
-/** The store's empty config, attributes and hooks folder, and its attributes override; written once per process. */
+/** Writes `content` to `path` only when it differs, through a temporary file and a rename, so no reader sees half of it. */
+function writeIfChanged(path: string, content: string): void {
+  try { if (readFileSync(path, 'utf8') === content) return } catch { /* not there yet */ }
+  mkdirSync(join(path, '..'), { recursive: true })
+  const temporary = `${path}.${process.pid}.${Date.now()}.tmp`
+  writeFileSync(temporary, content)
+  renameSync(temporary, path)
+}
+
+const STORE_EXCLUDE = `# Mousse: what a snapshot never holds, besides the folder's own .gitignore files.\n${BUILT_IN_EXCLUDES.join('\n')}\n`
+
+/**
+ * Brings the store's exclude list and attributes override up to date. Run under the store's mutation lock before each
+ * snapshot; a store gets both when it is made, so a read before any snapshot already has them.
+ */
+export function ensureStoreRules(store: HiddenStore): void {
+  writeIfChanged(join(store.gitDir, 'info', 'exclude'), STORE_EXCLUDE)
+  writeIfChanged(join(store.gitDir, 'info', 'attributes'), STORE_ATTRIBUTES)
+}
+
+/** The store's empty config and attributes file and its empty hooks folder; made once per process. */
 function isolationFiles(store: HiddenStore): { empty: string; hooks: string } {
   const directory = join(store.gitDir, 'mousse', 'isolation')
   const empty = join(directory, 'empty')
@@ -123,11 +143,8 @@ function isolationFiles(store: HiddenStore): { empty: string; hooks: string } {
   if (!prepared.has(store.gitDir)) {
     mkdirSync(hooks, { recursive: true })
     if (!existsSync(empty)) writeFileSync(empty, '')
-    const attributes = join(store.gitDir, 'info', 'attributes')
-    mkdirSync(join(store.gitDir, 'info'), { recursive: true })
-    let current = ''
-    try { current = readFileSync(attributes, 'utf8') } catch { /* not there yet */ }
-    if (current !== STORE_ATTRIBUTES) writeFileSync(attributes, STORE_ATTRIBUTES)
+    // An older store, read before its first snapshot here: never without its attributes override.
+    if (!existsSync(join(store.gitDir, 'info', 'attributes'))) writeIfChanged(join(store.gitDir, 'info', 'attributes'), STORE_ATTRIBUTES)
     prepared.add(store.gitDir)
   }
   return { empty, hooks }

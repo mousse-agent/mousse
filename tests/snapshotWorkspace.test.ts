@@ -4,7 +4,8 @@ import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { withGitMutationLocks } from '../src/mms/actions/GitOperationCoordinator'
-import { releaseSnapshotRefs, releaseThreadSnapshots } from '../src/mms/actions/SnapshotRefReleaseService'
+import { expireTrashedSnapshotRefs, releaseSnapshotRefs, releaseThreadSnapshots } from '../src/mms/actions/SnapshotRefReleaseService'
+import { WORKTREE_TRASH_QUIET_MS } from '../src/mms/lifecycle/WorktreeRetirementService'
 import { ThreadActionService } from '../src/mms/actions/ThreadActionService'
 import { UndoRetentionService } from '../src/mms/actions/UndoRetentionService'
 import { UndoService } from '../src/mms/actions/UndoService'
@@ -19,7 +20,7 @@ import { ThreadWorkspaceManager } from '../src/mms/workspace/ThreadWorkspaceMana
 import { WorkspaceResolver } from '../src/mms/workspace/WorkspaceResolver'
 import { activeHiddenStore } from '../src/mms/git/hiddenStore'
 import { tryGit } from '../src/mms/actions/git'
-import { ensureSnapshotWorkspace, inThreadSnapshotScope, loadSnapshotWorkspace, projectStorePath, snapshotsOffReason, threadSnapshotStore, threadStorePath } from '../src/mms/workspace/SnapshotWorkspace'
+import { expireSnapshotTrash, setSnapshotsOff, snapshotTrashRoot, SNAPSHOT_TRASH_QUIET_MS, startedInSnapshotStore, ensureSnapshotWorkspace, inThreadSnapshotScope, loadSnapshotWorkspace, projectStorePath, snapshotsOffReason, threadSnapshotStore, threadStorePath } from '../src/mms/workspace/SnapshotWorkspace'
 import { actionOptions } from './fixtures/gitFoundation'
 
 const git = (cwd: string, ...args: string[]): string => execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim()
@@ -97,6 +98,27 @@ describe('a hidden store keeps exact bytes', () => {
     await t.undo()
     expect(readFileSync(join(work, 'a.txt'), 'utf8')).toBe('original lowercase\n')
     expect(readFileSync(join(work, 'b.md'), 'utf8')).toBe('also lowercase\n')
+  })
+
+  it('runs no hook from the person’s global config in a turn, an Undo, a release or a garbage collection', async () => {
+    const hooks = folder('global-hooks')
+    const marker = join(root, 'hook-ran')
+    for (const name of ['reference-transaction', 'post-index-change', 'pre-auto-gc', 'post-checkout']) {
+      writeFileSync(join(hooks, name), `#!/bin/sh\necho ${name} >> '${marker}'\n`, { mode: 0o755 })
+    }
+    globalConfig(`[core]\n\thooksPath = ${hooks}\n[gc]\n\tauto = 1\n`)
+    const work = folder('work')
+    write(work, 'a.txt', 'a\n')
+    const t = thread('a', work, 'project-1')
+    await t.turn('turn', () => write(work, 'a.txt', 'b\n'))
+    await t.undo()
+    await releaseThreadSnapshots(t.directory)
+    expect(existsSync(marker)).toBe(false)
+    // The hooks are real: plain Git with the same global config runs them.
+    const control = folder('control')
+    execFileSync('git', ['init', '-q', control])
+    execFileSync('git', ['-C', control, '-c', 'user.name=Ada', '-c', 'user.email=ada@example.test', 'commit', '-q', '--allow-empty', '-m', 'x'])
+    expect(readFileSync(marker, 'utf8')).toContain('reference-transaction')
   })
 
   it('converts no line endings, whatever core.autocrlf or the folder’s eol attributes say', async () => {
@@ -218,6 +240,20 @@ describe('a project without Git', () => {
     expect(gitFiles()).toBe(before)
     expect(git(work, 'for-each-ref')).toBe('')
     expect(git(work, 'status', '--porcelain')).toBe('?? a.txt')
+  })
+
+  it('does not keep a thread whose turns were all refused in store mode after git init', async () => {
+    const work = folder('work')
+    for (let index = 0; index < 5; index += 1) write(work, `f${index}.txt`, 'x\n')
+    configureSnapshotLimits({ files: 4 })
+    const directory = folder('thread-refused')
+    setSnapshotsOff(directory, 'Undo is off for this folder because it is too large (more than 4 files).', { threadId: 'r', workTree: work, projectId: 'project-1' })
+    expect(startedInSnapshotStore(directory)).toBe(false)
+    // A thread that did record a snapshot there keeps the store.
+    configureSnapshotLimits()
+    const t = thread('a', work, 'project-1')
+    await t.turn('turn', () => write(work, 'g.txt', 'g\n'))
+    expect(startedInSnapshotStore(t.directory)).toBe(true)
   })
 
   it('keeps the store a thread started with after git init, while a new thread uses the repository', async () => {
@@ -515,6 +551,9 @@ describe('a project without Git', () => {
 
   it('never snapshots a home or system folder', () => {
     expect(isUnsafeSnapshotRoot('/')).toBe(true)
+    if (process.platform !== 'win32') {
+      for (const system of ['/etc', '/usr', '/usr/local/src', '/System', '/Library/Application Support']) expect(isUnsafeSnapshotRoot(system)).toBe(true)
+    }
     expect(isUnsafeSnapshotRoot(homedir())).toBe(true)
     expect(isUnsafeSnapshotRoot(join(homedir(), '..'))).toBe(true)
     expect(isUnsafeSnapshotRoot(join(root, 'project'), join(root, 'project'))).toBe(true)
@@ -589,6 +628,8 @@ describe('a thread with no project', () => {
     expect(existsSync(join(t.directory, 'snapshots.git'))).toBe(false)
     expect(await releaseThreadSnapshots(t.directory)).toEqual([])
     expect(existsSync(join(home, 'thread-snapshots', 'solo'))).toBe(false)
+    // It waits in the trash, as a retired worktree does, instead of being deleted at once.
+    expect(readdirSync(snapshotTrashRoot(home))).toEqual([expect.stringMatching(/^thread-solo-/)])
     // The scratch folder is the runtime's and stays as it is.
     expect(readFileSync(join(scratch, 'notes.md'), 'utf8')).toBe('# notes\n')
   })
@@ -658,17 +699,52 @@ describe('what happens to a store when its owner goes', () => {
     expect(existsSync(b.space.store.gitDir)).toBe(true)
   })
 
-  it('removes a project’s store with the project, and nothing else of the profile', async () => {
+  it('keeps a removed project’s store while a thread uses it, then trashes it with the files it kept, and the trash deletes it after an hour', async () => {
     const work = folder('work')
     const projects = new ProjectManager(home)
     const project = projects.openProject(work)
     const t = thread('a', work, project.id)
-    await t.turn('turn', () => write(work, 'a.txt', 'a\n'))
-    expect(existsSync(projectStorePath(project.id, home))).toBe(true)
+    const { action } = await t.turn('turn', () => write(work, 'a.txt', 'a\n'))
+    // A restore of this thread kept a file no snapshot held.
+    const operation = new ChangeReceiptService(t.directory).list().at(-1)!.operationId
+    t.store('update-ref', `refs/mousse/preserved/${operation}-abc`, action.endSha)
     projects.removeProject(project.id)
-    expect(existsSync(projectStorePath(project.id, home))).toBe(false)
+    // The thread still uses the store: it stays, and Undo still works.
+    expect(existsSync(projectStorePath(project.id, home))).toBe(true)
+    await t.undo()
+    expect(existsSync(join(work, 'a.txt'))).toBe(false)
+    // The thread is deleted for good: the store goes to the trash with what it kept, never straight to deletion.
+    await releaseThreadSnapshots(t.directory)
     expect(existsSync(join(home, 'project-data', project.id))).toBe(false)
-    expect(readFileSync(join(work, 'a.txt'), 'utf8')).toBe('a\n')
+    const [trashed] = readdirSync(snapshotTrashRoot(home))
+    expect(trashed).toMatch(new RegExp(`^project-${project.id}-`))
+    const kept = git(join(snapshotTrashRoot(home), trashed!, 'snapshots.git'), 'for-each-ref', '--format=%(refname)', 'refs/mousse/trash/')
+    expect(kept).toMatch(new RegExp(`/preserved/${operation}-abc$`))
+    expect(expireSnapshotTrash(Date.now() + 30 * 60_000, home)).toEqual([{ name: trashed, removed: false, reason: 'Waiting in the trash' }])
+    expect(expireSnapshotTrash(Date.now() + SNAPSHOT_TRASH_QUIET_MS + 60_000, home)).toMatchObject([{ name: trashed, removed: true }])
+    expect(readdirSync(snapshotTrashRoot(home))).toEqual([])
+    expect(SNAPSHOT_TRASH_QUIET_MS).toBe(WORKTREE_TRASH_QUIET_MS)
+  })
+
+  it('moves a deleted thread’s kept files to the trash in a shared store, keeps the other thread’s, and expires them after an hour', async () => {
+    const work = folder('work')
+    const a = thread('a', work, 'project-1')
+    const b = thread('b', work, 'project-1')
+    const first = await a.turn('turn-a', () => write(work, 'a.txt', 'a\n'))
+    await b.turn('turn-b', () => write(work, 'b.txt', 'b\n'))
+    const operation = new ChangeReceiptService(a.directory).list().at(-1)!.operationId
+    a.store('update-ref', `refs/mousse/preserved/${operation}-abc`, first.action.endSha)
+    const released = await releaseThreadSnapshots(a.directory)
+    expect(released).toContain(`refs/mousse/preserved/${operation}-abc`)
+    expect(a.store('for-each-ref', '--format=%(refname)', 'refs/mousse/preserved/')).toBe('')
+    expect(a.store('for-each-ref', '--format=%(refname)', 'refs/mousse/trash/')).toMatch(/\/preserved\//)
+    expect(await expireTrashedSnapshotRefs(Date.now() + 10 * 60_000, home)).toEqual([])
+    expect(await expireTrashedSnapshotRefs(Date.now() + SNAPSHOT_TRASH_QUIET_MS + 60_000, home)).toHaveLength(1)
+    expect(a.store('for-each-ref', '--format=%(refname)', 'refs/mousse/trash/')).toBe('')
+    // The other thread keeps its store and its Undo.
+    expect(existsSync(projectStorePath('project-1', home))).toBe(true)
+    await b.undo()
+    expect(existsSync(join(work, 'b.txt'))).toBe(false)
   })
 })
 

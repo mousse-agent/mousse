@@ -22,6 +22,8 @@ import { assertLifecyclePath, type ResourceLifecycleStore } from './ResourceLife
 import type { PolicySnapshot, StoragePolicyStore } from './StoragePolicyStore'
 import type { StorageSweepClock } from './sweepClock'
 import { WORKTREE_TRASH_QUIET_MS, WorktreeRetirementService } from './WorktreeRetirementService'
+import { expireSnapshotTrash } from '../workspace/SnapshotWorkspace'
+import { expireTrashedSnapshotRefs } from '../actions/SnapshotRefReleaseService'
 
 const DAY_MS = 86_400_000
 const FIRST_RUN_DELAY_MS = 5 * 60_000
@@ -479,6 +481,8 @@ export class StorageCleanupService {
     if (!allowed && !clock.suspended && !this.stopping) {
       try { items.push(...await this.worktreeTrashItems(startedMs)) }
       catch (error) { items.push({ rule: 'trash', label: 'Worktrees in the trash', bytes: 0, outcome: 'failed', reason: (error as Error).message }) }
+      try { items.push(...await this.snapshotTrashItems(startedMs)) }
+      catch (error) { items.push({ rule: 'trash', label: 'Snapshot stores in the trash', bytes: 0, outcome: 'failed', reason: (error as Error).message }) }
     }
     if (snapshot && (hasRule || trigger === 'manual')) {
       try { items.push(...await this.trashPhase(startedMs, trigger, allowed)) }
@@ -922,6 +926,22 @@ export class StorageCleanupService {
         await yieldToLoop()
       }
     }
+    return items
+  }
+
+  /**
+   * Snapshot stores of folders without Git that went to the trash (a removed project's, once no thread used it; a deleted
+   * thread's with no project), and the files deleted threads' restores kept in a shared store: deleted once they have
+   * waited as long as a retired worktree.
+   */
+  private async snapshotTrashItems(now: number): Promise<StorageCleanupItem[]> {
+    const items: StorageCleanupItem[] = []
+    for (const entry of expireSnapshotTrash(now)) {
+      if (!entry.removed && entry.reason === 'Waiting in the trash') continue
+      items.push({ rule: 'trash', label: `Snapshot store in the trash (${entry.name})`, bytes: 0, outcome: entry.removed ? 'removed' : 'kept', reason: entry.reason })
+    }
+    const refs = await expireTrashedSnapshotRefs(now)
+    if (refs.length) items.push({ rule: 'trash', label: 'Files kept by deleted threads’ restores', bytes: 0, outcome: 'removed', reason: `${refs.length} deleted from the trash after an hour` })
     return items
   }
 

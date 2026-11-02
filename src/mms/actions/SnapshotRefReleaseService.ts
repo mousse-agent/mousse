@@ -1,10 +1,13 @@
-import { existsSync, readFileSync } from 'node:fs'
+import { execFileSync } from 'node:child_process'
+import { existsSync, readdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { ThreadJournal } from '../data/ThreadJournal'
 import { acquireRepositoryLease } from '../git/RepositoryLease'
-import { hiddenStoreIdentity, inHiddenStore } from '../git/hiddenStore'
+import { getMousseHomeDir } from '../data/paths'
+import { hiddenStoreIdentity, inHiddenStore, isolatedEnv } from '../git/hiddenStore'
+import { repoProgramEnv } from '../git/repoPrograms'
 import type { ThreadLeaseHandle } from '../queue/ThreadExecutionLease'
-import { collectStoreGarbage, loadSnapshotWorkspace, readSnapshotWorkspaceRecord, removeThreadSnapshots, threadPinRef } from '../workspace/SnapshotWorkspace'
+import { collectStoreGarbage, dropSnapshotStoreUser, loadSnapshotWorkspace, readSnapshotWorkspaceRecord, removeThreadSnapshots, SNAPSHOT_TRASH_QUIET_MS, threadPinRef, trashProjectStoreIfUnused } from '../workspace/SnapshotWorkspace'
 import { ChangeReceiptService } from './ChangeReceiptService'
 import { withGitMutationLocks } from './GitOperationCoordinator'
 import { git, tryGit } from './git'
@@ -112,10 +115,60 @@ export async function releaseThreadSnapshots(threadDirectory: string, signal?: A
         git(top, ['update-ref', '-d', name, current])
         released.push(name)
       }
+      // Files a restore of this thread kept (`refs/mousse/preserved/<operation>-…`) exist nowhere else: they move to the
+      // trash namespace, which the storage cleanup empties after the trash's wait (`expireTrashedSnapshotRefs`).
+      const operations = new ChangeReceiptService(threadDirectory).list().map((receipt) => receipt.operationId)
+      const preserved = tryGit(top, ['for-each-ref', '--format=%(refname) %(objectname)', 'refs/mousse/preserved/']).stdout.split(/\r?\n/).filter(Boolean)
+      const trashed = `refs/mousse/trash/${Date.now()}`
+      for (const line of preserved) {
+        const [name, sha] = line.split(' ') as [string, string]
+        const leaf = name.slice('refs/mousse/preserved/'.length)
+        if (!operations.some((operation) => leaf.startsWith(`${operation}-`))) continue
+        git(top, ['update-ref', '--no-deref', `${trashed}/preserved/${leaf}`, sha])
+        git(top, ['update-ref', '-d', name, sha])
+        released.push(name)
+      }
       if (released.length) collectStoreGarbage(workspace.store)
+      dropSnapshotStoreUser(workspace.store.gitDir, workspace.record.threadId)
       return released
     })
   } finally {
     lease.release()
+    // The last thread of a removed project lets the store go to the trash, after the lease that lives in it is let go.
+    if (workspace.record.projectId) trashProjectStoreIfUnused(workspace.record.projectId)
   }
+}
+
+/**
+ * Empties the trash namespace of every project store: the preserved files of deleted threads, once they have waited
+ * `SNAPSHOT_TRASH_QUIET_MS`, then collects the store's garbage. Returns the refs it deleted.
+ */
+export async function expireTrashedSnapshotRefs(now = Date.now(), home = getMousseHomeDir()): Promise<string[]> {
+  const root = join(home, 'project-data')
+  let projects: string[]
+  try { projects = readdirSync(root) } catch { return [] }
+  const deleted: string[] = []
+  for (const projectId of projects) {
+    const gitDir = join(root, projectId, 'snapshots.git')
+    if (!existsSync(join(gitDir, 'HEAD'))) continue
+    const store = { workTree: gitDir, gitDir }
+    const lease = await acquireRepositoryLease(hiddenStoreIdentity(store))
+    try {
+      const run = (args: string[]): string => execFileSync('git', ['--git-dir', gitDir, ...args], { cwd: gitDir, env: isolatedEnv(store, repoProgramEnv()), encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim()
+      const refs = run(['for-each-ref', '--format=%(refname) %(objectname)', 'refs/mousse/trash/']).split(/\r?\n/).filter(Boolean)
+      let removed = 0
+      for (const line of refs) {
+        const [name, sha] = line.split(' ') as [string, string]
+        const at = Number(name.split('/')[3])
+        if (!Number.isFinite(at) || now - at < SNAPSHOT_TRASH_QUIET_MS) continue
+        run(['update-ref', '-d', name, sha])
+        deleted.push(name)
+        removed++
+      }
+      if (removed) collectStoreGarbage(store)
+    } finally {
+      lease.release()
+    }
+  }
+  return deleted
 }

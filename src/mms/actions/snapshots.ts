@@ -4,7 +4,7 @@ import { copyFileSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSy
 import { homedir } from 'node:os'
 import { join, parse, resolve, sep } from 'node:path'
 import type { GitRecord } from '../../shared/threadActions'
-import { activeHiddenStore, builtInPathspecs, outsideHiddenStore } from '../git/hiddenStore'
+import { activeHiddenStore, builtInPathspecs, ensureStoreRules, outsideHiddenStore } from '../git/hiddenStore'
 import { git, gitEnv, guarded, mergeTrees, MOUSSE_COMMIT_ENV, NOT_MOUSSE, operationInProgress, tryGit, treeOf } from './git'
 
 /**
@@ -143,15 +143,23 @@ function canonicalPath(path: string): string {
   try { return realpathSync.native(resolved) } catch { return resolved }
 }
 
+/** System folders a snapshot never holds, nor anything inside them. */
+const SYSTEM_FOLDERS = process.platform === 'win32'
+  ? [process.env.SystemRoot ?? 'C:\\Windows', process.env.ProgramFiles ?? 'C:\\Program Files', process.env['ProgramFiles(x86)'] ?? 'C:\\Program Files (x86)', process.env.ProgramData ?? 'C:\\ProgramData']
+  : ['/etc', '/usr', '/bin', '/sbin', '/System', '/Library']
+
 /**
- * A folder that must never be snapshotted: the filesystem root, the home folder, or a folder that holds it. A project
- * there would put someone's whole account in a store.
+ * A folder that must never be snapshotted: the filesystem root, the home folder or a folder that holds it, or a system
+ * folder (`/etc`, `/usr`, `/System`, `/Library`, `C:\\Windows`, `C:\\Program Files`, `C:\\ProgramData`) or a folder in one.
+ * A project there would put someone's whole account, or the system, in a store.
  */
 export function isUnsafeSnapshotRoot(path: string, home = homedir()): boolean {
   const target = canonicalPath(path)
   if (target === parse(target).root) return true
   const user = canonicalPath(home)
-  return user === target || user.startsWith(target.endsWith(sep) ? target : `${target}${sep}`)
+  if (user === target || user.startsWith(target.endsWith(sep) ? target : `${target}${sep}`)) return true
+  const fold = (value: string): string => process.platform === 'win32' ? value.toLowerCase() : value
+  return SYSTEM_FOLDERS.map(canonicalPath).some((system) => fold(target) === fold(system) || fold(target).startsWith(fold(system.endsWith(sep) ? system : `${system}${sep}`)))
 }
 
 const UNSAFE_ROOT = 'Undo is off for this folder because it is a home or system folder.'
@@ -296,6 +304,8 @@ function indexTree(top: string, index: string, head: string | undefined): { tree
   // A hidden store first leaves out what it does not keep (files over the size limit) and refuses a folder it cannot
   // snapshot at all; what it leaves out is named with the rest.
   const store = activeHiddenStore(top)
+  // Under the store's mutation lock: its exclude list and attributes are current before anything is added.
+  if (store) ensureStoreRules(store)
   const hidden = store ? hiddenStoreCoverage(top) : undefined
   const env = { GIT_INDEX_FILE: index }
   // The store's exclude list already leaves `.mousse/` out, and Git refuses an exclusion that names an ignored path.

@@ -1,10 +1,11 @@
+import { randomUUID } from 'node:crypto'
 import { execFileSync } from 'node:child_process'
-import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import type { ThreadWorkspaceMetadata } from '../../shared/workspace'
 import { atomicWriteJsonSync } from '../data/AtomicFs'
 import { getMousseHomeDir } from '../data/paths'
-import { BUILT_IN_EXCLUDES, inHiddenStore, insideFolder, isolatedEnv, registerHiddenStore, type HiddenStore } from '../git/hiddenStore'
+import { BUILT_IN_EXCLUDES, ensureStoreRules, inHiddenStore, insideFolder, isolatedEnv, registerHiddenStore, type HiddenStore } from '../git/hiddenStore'
 import { repoProgramEnv } from '../git/repoPrograms'
 import { isUnsafeSnapshotRoot, SnapshotRefusedError } from '../actions/snapshots'
 
@@ -106,8 +107,8 @@ export function prepareStore(store: HiddenStore): void {
       }
     }
   }
-  mkdirSync(join(store.gitDir, 'info'), { recursive: true })
-  writeFileSync(join(store.gitDir, 'info', 'exclude'), `# Mousse: what a snapshot never holds, besides the folder's own .gitignore files.\n${BUILT_IN_EXCLUDES.join('\n')}\n`)
+  // A new store gets its exclude list and attributes now; each snapshot keeps them current under the store's lock.
+  if (!existsSync(join(store.gitDir, 'info', 'exclude'))) ensureStoreRules(store)
 }
 
 /** The thread's record, whether or not its folder or store is still there. */
@@ -155,6 +156,8 @@ export function ensureSnapshotWorkspace(input: EnsureSnapshotWorkspaceInput): Sn
   }
   const store = registerHiddenStore({ workTree, gitDir: storePathOf(record, input.home) })
   prepareStore(store)
+  // A project's store keeps a note of each thread that uses it: it stays while any does (`retireProjectSnapshots`).
+  if (kind === 'project') noteSnapshotStoreUser(store.gitDir, input.threadId)
   if (JSON.stringify(existing) !== JSON.stringify(record)) writeRecord(input.threadDirectory, record)
   return { record, store, threadDirectory: input.threadDirectory }
 }
@@ -257,23 +260,110 @@ export function inThreadSnapshotScope<T>(threadDirectory: string, cwd: string, o
 }
 
 /**
- * Whether the thread started in a project folder's hidden store (it has a record, with or without a store yet). It keeps
- * that store for the rest of its life, even when the folder later becomes a Git repository: its turns are recorded there.
+ * Whether the thread started in a project folder's hidden store: a snapshot of it was recorded there. It keeps that
+ * store for the rest of its life, even when the folder later becomes a Git repository. A thread whose turns were all
+ * refused (a folder too large) recorded nothing there and uses the repository like a new thread.
  */
 export function startedInSnapshotStore(threadDirectory: string): boolean {
-  return readSnapshotWorkspaceRecord(threadDirectory)?.kind === 'project'
+  const record = readSnapshotWorkspaceRecord(threadDirectory)
+  return record?.kind === 'project' && Boolean(record.snapshotSha)
 }
 
-/** Removes a project's store with the project. Nothing else of the project's is touched. */
-export function removeProjectSnapshots(projectId: string, home = getMousseHomeDir()): void {
-  if (!STORAGE_IDENTITY.test(projectId)) return
-  rmSync(join(home, 'project-data', projectId), { recursive: true, force: true, maxRetries: 3, retryDelay: 100 })
+/** How long a store waits in Mousse's trash before it is deleted: the same as a retired worktree (`WORKTREE_TRASH_QUIET_MS`). */
+export const SNAPSHOT_TRASH_QUIET_MS = 60 * 60_000
+
+const usersDirectory = (gitDir: string): string => join(gitDir, 'mousse', 'threads')
+const PROJECT_REMOVED = 'project-removed'
+
+/** Notes that the thread records its turns in the store. */
+export function noteSnapshotStoreUser(gitDir: string, threadId: string): void {
+  if (!STORAGE_IDENTITY.test(threadId)) return
+  const path = join(usersDirectory(gitDir), threadId)
+  if (existsSync(path)) return
+  mkdirSync(usersDirectory(gitDir), { recursive: true })
+  writeFileSync(path, '')
 }
 
-/** Removes the store of a thread with no project when the thread is deleted for good. */
+/** Notes that the thread no longer uses the store (it was deleted for good). */
+export function dropSnapshotStoreUser(gitDir: string, threadId: string): void {
+  if (STORAGE_IDENTITY.test(threadId)) rmSync(join(usersDirectory(gitDir), threadId), { force: true })
+}
+
+function storeUsers(gitDir: string): string[] {
+  try { return readdirSync(usersDirectory(gitDir)) } catch { return [] }
+}
+
+/** Where stores wait before they are deleted. */
+export function snapshotTrashRoot(home = getMousseHomeDir()): string {
+  return join(home, 'trash', 'snapshot-stores')
+}
+
+/**
+ * Moves a store's folder (`project-data/<id>` or `thread-snapshots/<id>`) into Mousse's trash in one rename, with the
+ * time it went there. Nothing is deleted: `expireSnapshotTrash` deletes it after `SNAPSHOT_TRASH_QUIET_MS`.
+ */
+export function trashSnapshotFolder(folder: string, label: string, home = getMousseHomeDir()): string | undefined {
+  if (!existsSync(folder)) return undefined
+  const root = snapshotTrashRoot(home)
+  mkdirSync(root, { recursive: true })
+  const target = join(root, `${label}-${Date.now()}-${randomUUID().slice(0, 8)}`)
+  renameSync(folder, target)
+  writeFileSync(join(target, 'trashed.json'), JSON.stringify({ trashedAt: new Date().toISOString(), from: folder }))
+  return target
+}
+
+/**
+ * A project was removed. Its store stays while any thread still records its turns there (those threads keep their
+ * Undo, and the files kept under `refs/mousse/preserved/` stay with them); it is marked so the last thread to go moves
+ * it to the trash (`releaseThreadSnapshots`). With no thread left, it moves to the trash now.
+ */
+export function retireProjectSnapshots(projectId: string, home = getMousseHomeDir()): 'kept' | 'trashed' | 'none' {
+  if (!STORAGE_IDENTITY.test(projectId)) return 'none'
+  const folder = join(home, 'project-data', projectId)
+  const gitDir = projectStorePath(projectId, home)
+  if (!existsSync(folder)) return 'none'
+  if (storeUsers(gitDir).length) {
+    mkdirSync(join(gitDir, 'mousse'), { recursive: true })
+    writeFileSync(join(gitDir, 'mousse', PROJECT_REMOVED), new Date().toISOString())
+    return 'kept'
+  }
+  return trashSnapshotFolder(folder, `project-${projectId}`, home) ? 'trashed' : 'none'
+}
+
+/** After a thread of a removed project let go of its store: the store goes to the trash once no thread uses it. */
+export function trashProjectStoreIfUnused(projectId: string, home = getMousseHomeDir()): boolean {
+  if (!STORAGE_IDENTITY.test(projectId)) return false
+  const gitDir = projectStorePath(projectId, home)
+  if (!existsSync(join(gitDir, 'mousse', PROJECT_REMOVED)) || storeUsers(gitDir).length) return false
+  return Boolean(trashSnapshotFolder(join(home, 'project-data', projectId), `project-${projectId}`, home))
+}
+
+/** Moves the store of a thread with no project to the trash when the thread is deleted for good. */
 export function removeThreadSnapshots(threadId: string, home = getMousseHomeDir()): void {
   if (!STORAGE_IDENTITY.test(threadId)) return
-  rmSync(join(home, 'thread-snapshots', threadId), { recursive: true, force: true, maxRetries: 3, retryDelay: 100 })
+  trashSnapshotFolder(join(home, 'thread-snapshots', threadId), `thread-${threadId}`, home)
+}
+
+/** Deletes the stores that have waited in the trash for `SNAPSHOT_TRASH_QUIET_MS`. Returns what it deleted and what it kept. */
+export function expireSnapshotTrash(now = Date.now(), home = getMousseHomeDir()): Array<{ name: string; removed: boolean; reason: string }> {
+  const root = snapshotTrashRoot(home)
+  let names: string[]
+  try { names = readdirSync(root) } catch { return [] }
+  return names.map((name) => {
+    const folder = join(root, name)
+    let trashedAt = Number.NaN
+    try { trashedAt = Date.parse((JSON.parse(readFileSync(join(folder, 'trashed.json'), 'utf8')) as { trashedAt?: string }).trashedAt ?? '') } catch { /* read below */ }
+    if (Number.isNaN(trashedAt)) {
+      try { trashedAt = statSync(folder).mtimeMs } catch { return { name, removed: false, reason: 'Could not be read' } }
+    }
+    if (now - trashedAt < SNAPSHOT_TRASH_QUIET_MS) return { name, removed: false, reason: 'Waiting in the trash' }
+    try {
+      rmSync(folder, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 })
+      return { name, removed: true, reason: 'Deleted from the trash after an hour' }
+    } catch (error) {
+      return { name, removed: false, reason: (error as Error).message }
+    }
+  })
 }
 
 /** Collects the garbage in a store Mousse owns. Never run on a repository of the person's. */
