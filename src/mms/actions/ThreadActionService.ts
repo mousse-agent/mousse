@@ -64,6 +64,9 @@ export class ActionExecutionError extends Error {
 /** Written when a turn's start could not be snapshotted; the checkpoint of the action that starts there reads it. */
 const UNCAPTURED_START_FILE = 'uncaptured-start.json'
 interface UncapturedStart { startSha: string; error: string }
+/** Written when a turn's end could not be snapshotted; the next record of outside changes says it holds that turn's changes. */
+const UNRECORDED_END_FILE = 'unrecorded-end.json'
+interface UnrecordedEnd { actionId: string; turnId: string }
 
 export class ThreadActionService {
   private readonly actionsPath: string
@@ -167,6 +170,9 @@ export class ThreadActionService {
     // The latest recorded snapshot. Workspaces recorded before snapshots have none; their last checkpoint commit was HEAD.
     const known = metadata?.snapshotSha ?? latest?.endSha ?? metadata?.headSha ?? snapshot.head
     const receipts = new ChangeReceiptService(this.threadDirectory)
+    let unrecorded: UnrecordedEnd | undefined
+    try { unrecorded = JSON.parse(readFileSync(join(this.threadDirectory, UNRECORDED_END_FILE), 'utf8')) as UnrecordedEnd } catch { unrecorded = undefined }
+    rmSync(join(this.threadDirectory, UNRECORDED_END_FILE), { force: true })
     if (!known || !tryGit(options.workspacePath, ['cat-file', '-e', `${known}^{commit}`]).ok || sameTree(options.workspacePath, known, snapshot.sha)) {
       receipts.adoptSnapshot(options.workspacePath, snapshot)
       return { startSha: snapshot.sha }
@@ -179,6 +185,11 @@ export class ThreadActionService {
       nativeContextBoundary: options.nativeContextBoundary ?? latest?.nativeContextBoundary ?? { messageIndex: 0, compactionGeneration: 0, fidelity: 'legacy' },
       externalEffects: []
     }, known, 'completed')
+    if (unrecorded) {
+      // Not only the person's edits: the turn before could not record its end, so its changes are in here too.
+      const all = this.list(), recorded = all.find((item) => item.id === action.id)
+      if (recorded) { recorded.notice = `These changes include those of turn ${unrecorded.turnId}, whose end could not be recorded.`; this.replace(all); action.notice = recorded.notice }
+    }
     return { startSha: action.endSha, action }
   }
 
@@ -376,6 +387,7 @@ export class ThreadActionService {
       snapshot = { sha: action.startSha, tree: git(workspacePath, ['rev-parse', `${action.startSha}^{tree}`]), ...(head ? { head } : {}), ...(branch ? { branch } : {}),
         coverageGaps: [{ path: '.', reason: `no snapshot could be taken (${String((error as Error).message ?? error).split(/\r?\n/)[0]})` }] }
       action.reversible = false
+      if (action.actor?.kind !== 'user') atomicWriteJsonSync(join(this.threadDirectory, UNRECORDED_END_FILE), { actionId: action.id, turnId: action.turnId } satisfies UnrecordedEnd)
     }
     // The turn's start could not be captured: the placeholder start is not used. The turn is recorded from its end, so no
     // file is attributed to it and code Undo restores nothing (the conversation still rewinds), and the gap says why.

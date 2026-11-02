@@ -8,7 +8,7 @@ import { PublishService } from '../src/mms/actions/PublishService'
 import { RedoService } from '../src/mms/actions/RedoService'
 import { ThreadActionService } from '../src/mms/actions/ThreadActionService'
 import { UndoService } from '../src/mms/actions/UndoService'
-import { publishedRef, restoreChange, takeSnapshot, worktreeTree } from '../src/mms/actions/snapshots'
+import { PRESERVE_LIMITS, publishedRef, restoreChange, takeSnapshot, worktreeTree } from '../src/mms/actions/snapshots'
 import { cancelledIntegrationsNotice, cancelPendingIntegrations } from '../src/mms/agents/ChildAgentIntegrationService'
 import { ManagedConflictService } from '../src/mms/actions/ManagedConflictService'
 import { spawnSync } from 'node:child_process'
@@ -350,6 +350,26 @@ describe('Undo, Redo and revert by three-way merge', () => {
     expect(action.state).toBe('completed')
   })
 
+  it('Undo refuses, naming the folder and changing nothing, when what is in the way is too large to keep first', async () => {
+    write('cache', 'tracked file\n'); git(cwd, 'add', 'cache'); git(cwd, 'commit', '-qm', 'cache file')
+    await turn('outside', () => undefined)
+    // The turn turns the file into an ignored folder; Undo would put the file back over that folder.
+    await turn('turn', () => { git(cwd, 'rm', '-q', 'cache'); write('.gitignore', 'cache/\n'); git(cwd, 'add', '.gitignore'); git(cwd, 'commit', '-qm', 'ignore cache') }, 2)
+    mkdirSync(join(cwd, 'cache'))
+    for (const name of ['a', 'b', 'c', 'd']) write(`cache/${name}.bin`, `${name}\n`)
+    const limits = { ...PRESERVE_LIMITS }
+    PRESERVE_LIMITS.files = 2
+    try {
+      await expect(new UndoService(f.thread).undoLatest('main', cwd)).rejects.toThrow(/would write over cache.*Nothing was changed\. Move cache aside/)
+    } finally { Object.assign(PRESERVE_LIMITS, limits) }
+    for (const name of ['a', 'b', 'c', 'd']) expect(f.read(cwd, `cache/${name}.bin`)).toBe(`${name}\n`)
+    noPending()
+    // Under the limit, the same Undo keeps every file first and goes through.
+    const undone = await new UndoService(f.thread).undoLatest('main', cwd)
+    expect(undone.notice).toMatch(/kept under refs\/mousse\/preserved\/\S+: cache\/a\.bin, cache\/b\.bin, cache\/c\.bin, cache\/d\.bin/)
+    expect(f.read(cwd, 'cache')).toBe('tracked file\n')
+  })
+
   it('reverting an older turn refuses on a conflict and changes nothing', async () => {
     const first = await turn('first', () => write('value.txt', 'one\n'))
     await turn('second', () => write('value.txt', 'two\n'), 2)
@@ -490,6 +510,20 @@ describe('recovery', () => {
     expect(f.read(cwd, 'outside.txt')).toBe('written before the turn\n')
     expect(f.read(cwd, 'agent.txt')).toBe('agent\n')
     expect(existsSync(join(f.thread, 'uncaptured-start.json'))).toBe(false)
+  })
+
+  it('when a turn cannot record its end, the next record of outside changes says it holds that turn’s changes', async () => {
+    const blocker = join(git(cwd, 'rev-parse', '--absolute-git-dir'), 'mousse')
+    const { action } = await turn('unrecorded', () => {
+      write('agent.txt', 'agent\n')
+      rmSync(blocker, { recursive: true, force: true }); writeFileSync(blocker, 'in the way\n')
+    })
+    expect(action.git?.coverageGaps?.[0]?.reason).toMatch(/no snapshot could be taken/)
+    rmSync(blocker)
+    await turn('next', () => write('next.txt', 'next\n'), 2)
+    const outside = actions.list().find((item) => item.turnId.startsWith('user-changes:'))!
+    expect(outside.changedPaths.map((item) => item.path)).toEqual(['agent.txt'])
+    expect(outside.notice).toBe('These changes include those of turn unrecorded, whose end could not be recorded.')
   })
 
   it('a nested repository with a commit is recorded by its commit, and changes inside it are reported as not covered', async () => {
@@ -938,6 +972,15 @@ describe('publish', () => {
     noPending()
     expect(new ThreadWorkspaceManager(f.thread).verify().lifecycle).toBe('ready')
     expect(await new PublishService(f.thread).recoverPending(cwd, f.repo)).toEqual([{ operationId: 'interrupted', state: 'cancelled' }])
+  })
+
+  it('a pending publish whose target branch was deleted is closed, and the next publish goes on', async () => {
+    await interruptedBeforeTheMove('prepared')
+    const target = git(f.repo, 'branch', '--show-current')
+    git(f.repo, 'switch', '-q', '-c', 'next-target'); git(f.repo, 'branch', '-D', target)
+    // The next publish settles it first instead of refusing.
+    expect((await new PublishService(f.thread).publish(cwd, f.repo, 'next-target')).state).toBe('completed')
+    expect(new ThreadJournal(f.thread).latestByOperation().get('interrupted')).toMatchObject({ state: 'cancelled', details: { reason: expect.stringContaining(`target branch ${target} no longer exists`) } })
   })
 
   it('a thread an older version locked after a failed fast-forward recovers on its own and can publish again', async () => {

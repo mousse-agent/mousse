@@ -284,6 +284,8 @@ export function restoreChange(cwd: string, input: RestoreChangeInput, planned?: 
   const top = git(cwd, ['rev-parse', '--show-toplevel'])
   const merged = mergeTrees(top, input.base, input.ours, input.theirs)
   if ('conflicts' in merged) return merged
+  // Checked before the intent is recorded: a folder that cannot be kept refuses the restore with nothing pending.
+  uncapturedInTheWay(top, treeOf(top, input.ours), merged.tree)
   planned?.(merged.tree)
   const preserved = moveFiles(top, treeOf(top, input.ours), merged.tree, input.operationId)
   return { snapshot: takeSnapshot(top, input), tree: merged.tree, ...(preserved ? { preserved } : {}) }
@@ -297,14 +299,21 @@ function uncapturedInTheWay(top: string, from: string, to: string): string[] {
   const touched = git(top, ['diff-tree', '-r', '-z', '--no-renames', '--name-only', from, to]).split('\0').filter(Boolean)
   if (!touched.length) return []
   const held = new Set(git(top, ['ls-tree', '-r', '-z', '--name-only', from]).split('\0').filter(Boolean))
+  // A nested repository recorded by its commit (a gitlink) is never written into: Git only changes the link.
+  const links = new Set([from, to].flatMap((tree) => git(top, ['ls-tree', '-r', '-z', tree]).split('\0').filter((line) => line.startsWith('160000 ')).map((line) => line.slice(line.indexOf('\t') + 1))))
   const found = new Set<string>()
-  const visit = (path: string, depth = 0): void => {
-    if (depth > 64 || found.size >= 10_000) return
+  // A folder too big or too deep to list, or another repository, cannot be kept file by file: the restore is refused
+  // before anything is written, naming it, instead of going on with part of it unkept.
+  const tooMuch = (path: string): never => { throw new RestoreInTheWayError(path) }
+  const visit = (root: string, path: string, depth = 0): void => {
+    if (links.has(path)) return
+    if (depth > PRESERVE_LIMITS.depth || found.size >= PRESERVE_LIMITS.files) tooMuch(root)
     let stat
     try { stat = lstatSync(join(top, path)) } catch { return }
     if (stat.isDirectory()) {
-      if (path === '.git' || path.endsWith('/.git') || path === '.mousse') return
-      for (const name of readdirSync(join(top, path))) visit(`${path}/${name}`, depth + 1)
+      if (path === '.mousse') return
+      if (path === '.git' || path.endsWith('/.git')) tooMuch(root)
+      for (const name of readdirSync(join(top, path))) visit(root, `${path}/${name}`, depth + 1)
     } else if (!held.has(path)) found.add(path)
   }
   for (const path of touched) {
@@ -314,9 +323,20 @@ function uncapturedInTheWay(top: string, from: string, to: string): string[] {
       const above = parts.slice(0, depth).join('/')
       try { if (!lstatSync(join(top, above)).isDirectory() && !held.has(above)) found.add(above) } catch { break }
     }
-    visit(path)
+    visit(path, path)
   }
   return [...found].sort()
+}
+
+/** How much a restore keeps file by file before it refuses instead (`uncapturedInTheWay`). Lowered by tests. */
+export const PRESERVE_LIMITS = { files: 10_000, depth: 64 }
+
+/** A restore would write over a folder that is too large to keep first, or holds another repository. Nothing was changed. */
+export class RestoreInTheWayError extends Error {
+  constructor(readonly path: string) {
+    super(`The restore would write over ${path}, which holds files no snapshot has and is too large to keep first (or is another repository). Nothing was changed. Move ${path} aside, then try again.`)
+    this.name = 'RestoreInTheWayError'
+  }
 }
 
 /** Stores files as one commit under a new `refs/mousse/preserved/` ref, through a temporary index. Reads them only. */

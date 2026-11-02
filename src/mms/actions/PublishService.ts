@@ -252,8 +252,16 @@ export class PublishService {
     const mergedBefore = !expected.publishSha && Boolean(tip) && tip !== expected.prePublishSha && contains(expected.sourceSha)
     const landed = receipt?.afterSha && contains(receipt.afterSha) ? receipt.afterSha : expected.publishSha && contains(expected.publishSha) ? expected.publishSha : mergedBefore ? tip : undefined
     if (landed) return { operationId, state: 'completed', result: this.completePublish(primaryCheckout, operationId, expected.prePublishSha, expected.sourceSha, landed) }
-    // Unreadable now (a disk that is not mounted, a branch being rewritten): nothing is decided, and recovery tries again.
-    if (!tip) return { operationId, state: 'pending', reason: `${primaryCheckout} or its branch ${expected.targetBranch} could not be read` }
+    if (!tip) {
+      // The checkout reads, and the branch is gone: the publish can never land there, so it is closed and later ones go on.
+      const readable = existsSync(primaryCheckout) && tryGit(primaryCheckout, ['rev-parse', '--git-dir']).ok
+      if (readable && !tryGit(primaryCheckout, ['show-ref', '--verify', '-q', `refs/heads/${expected.targetBranch}`]).ok) {
+        this.journal.append({ operationId, operationType: 'publish', state: 'cancelled', details: { recovered: true, prePublishSha: expected.prePublishSha, targetBranch: expected.targetBranch, reason: `The publish did not land: target branch ${expected.targetBranch} no longer exists, and nothing was changed by recovery.` } })
+        return { operationId, state: 'cancelled' }
+      }
+      // Unreadable now (a disk that is not mounted): nothing is decided, and recovery tries again.
+      return { operationId, state: 'pending', reason: `${primaryCheckout} or its branch ${expected.targetBranch} could not be read` }
+    }
     // A publish made before snapshots merged in the primary; a merge it left there is reported, and stays abortable.
     const mergeInProgress = !expected.publishSha && tryGit(primaryCheckout, ['rev-parse', '--verify', '-q', 'MERGE_HEAD']).ok ? primaryCheckout : undefined
     const reason = mergeInProgress ? `a merge from an earlier version is still in progress in ${primaryCheckout}; abort it or finish it with Git`
