@@ -2068,6 +2068,30 @@ html[data-theme='high-contrast'] .model-picker-row.selected {
   content: none;
 }
 
+/* "Show more": a provider's older models, folded after its last row. */
+.model-picker-more {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 5px var(--ui-menu-row-x);
+  border-radius: var(--ui-menu-row-radius);
+  text-align: left;
+  font-size: 12px;
+  color: var(--text-secondary);
+  transition: background 0.12s;
+}
+
+.model-picker-more:hover,
+.model-picker-more:focus-visible {
+  background: var(--ui-hover);
+  color: var(--text-primary);
+}
+
+.model-picker-more-count {
+  color: var(--ui-faint);
+}
+
 /* In a multi-brand provider's list, a model with no maker line keeps the height of its neighbours. */
 .model-picker-row.bare .model-picker-row-main {
   min-height: 44px;

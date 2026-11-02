@@ -280,6 +280,11 @@ export interface LlmModelOption {
   images?: true
   /** Context window in tokens, when its catalogue says so. */
   contextWindow?: number
+  /**
+   * An older model: one the agent does not list itself, offered because Mousse's model catalog has
+   * it and a check showed it runs. The picker folds it behind "Show more".
+   */
+  older?: true
 }
 
 export interface LlmProviderOption {
