@@ -9,7 +9,7 @@ import { ThreadWorkspaceManager } from '../workspace/ThreadWorkspaceManager'
 import { ChangeReceiptService } from './ChangeReceiptService'
 import { changedPaths, commitParents, git, refuseUnsafeChanges, treeOf } from './git'
 import { UndoConflictError } from './UndoService'
-import { describeGit, pushedNotice, pushedTo, restoreChange, sameTree, snapshotOrigin, takeSnapshot, worktreeTree, type Snapshot } from './snapshots'
+import { describeGit, pushedNotice, preservedNotice, pushedTo, restoreChange, sameTree, snapshotOrigin, takeSnapshot, worktreeTree, type Snapshot } from './snapshots'
 
 /** What `prepared` records: the files before the revert and the tree they become. */
 interface RevertIntent {
@@ -62,7 +62,7 @@ export class CodeRevertService {
       })
       if ('conflicts' in restored) throw new UndoConflictError(restored.conflicts, 'The code revert')
       const pushed = pushedTo(workspacePath, target.commits)
-      return this.complete(workspacePath, operationId, { target, latest: actions.at(-1) }, ours.sha, restored.snapshot, new Date().toISOString(), pushed ? pushedNotice('Revert', pushed) : undefined)
+      return this.complete(workspacePath, operationId, { target, latest: actions.at(-1) }, ours.sha, restored.snapshot, new Date().toISOString(), [pushed ? pushedNotice('Revert', pushed) : '', restored.preserved ? preservedNotice(restored.preserved) : ''].filter(Boolean).join(' ') || undefined)
     })
   }
 

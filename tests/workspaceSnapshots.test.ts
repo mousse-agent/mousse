@@ -157,6 +157,8 @@ describe('an agent that does its own Git work', () => {
     expect(action.state).toBe('completed')
     expect(action.changedPaths.map((item) => item.path)).toEqual(['kept.txt'])
     expect(git(cwd, 'ls-tree', '--name-only', action.endSha).split('\n')).not.toContain('tool')
+    // Left out, and said so: the turn record names what the snapshot does not hold.
+    expect(action.git?.coverageGaps).toEqual([{ path: 'tool', reason: expect.stringMatching(/no commit yet.*not in the snapshot/) }])
     expect(new ThreadWorkspaceManager(f.thread).verify().lifecycle).toBe('ready')
     noPending()
 
@@ -304,6 +306,21 @@ describe('Undo, Redo and revert by three-way merge', () => {
     expect(git(cwd, 'status', '--porcelain', '--untracked-files=all')).toBe(before)
     expect(f.read(cwd)).toBe('agent edit then mine\n')
     noPending()
+  })
+
+  it('Undo keeps an ignored file it would overwrite, which no snapshot holds, under a retained ref and says so', async () => {
+    write('secret', 'tracked\n'); git(cwd, 'add', 'secret'); git(cwd, 'commit', '-qm', 'secret')
+    await turn('outside', () => undefined)
+    const { action } = await turn('turn', () => { git(cwd, 'rm', '-q', 'secret'); write('.gitignore', 'secret\n'); git(cwd, 'add', '.gitignore'); git(cwd, 'commit', '-qm', 'stop tracking the secret') }, 2)
+    // A new, ignored sole copy at the path the turn removed: no snapshot holds it.
+    write('secret', 'only copy\n')
+    expect(git(cwd, 'ls-tree', '--name-only', takeSnapshot(cwd, { reason: 'check' }).sha)).not.toMatch(/^secret$/m)
+    const undone = await new UndoService(f.thread).undoLatest('main', cwd)
+    expect(f.read(cwd, 'secret')).toBe('tracked\n')
+    expect(undone.notice).toMatch(/kept under refs\/mousse\/preserved\/\S+: secret/)
+    const ref = undone.notice!.match(/(refs\/mousse\/preserved\/\S+?):/)![1]!
+    expect(git(cwd, 'show', `${ref}:secret`)).toBe('only copy')
+    expect(action.state).toBe('completed')
   })
 
   it('reverting an older turn refuses on a conflict and changes nothing', async () => {

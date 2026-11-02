@@ -13,6 +13,8 @@ export interface GitRecord {
   branchAfter?: string
   rewroteHistory: boolean
   operationInProgress?: string
+  /** What was in the worktree at the end but not in the snapshot, and why (a nested repository with no commit). */
+  coverageGaps?: Array<{ path: string; reason: string }>
 }
 
 /** Persisted once in the operation journal; actions and workflow results reference this ID. */

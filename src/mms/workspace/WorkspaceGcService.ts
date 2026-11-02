@@ -20,10 +20,10 @@ function git(cwd: string, args: string[]): string {
   return execFileSync('git', withoutRepoPrograms(cwd, args), { cwd, env: repoProgramEnv(), encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim()
 }
 
-/** Namespaces whose refs are released only by their owner: receipts, thread and fork results, agent and workflow results, retirement pins and the last published files. */
+/** Namespaces whose refs are released only by their owner: receipts, thread and fork results, agent, delegation and workflow results, retirement pins, the last published files and files a restore kept. */
 const PROTECTED_NAMESPACES = [
   'refs/mousse/changes/', 'refs/mousse/threads/', 'refs/mousse/conversation-branches/', 'refs/mousse/agents/', 'refs/mousse/workflows/',
-  'refs/mousse/lifecycle/', 'refs/mousse/published/'
+  'refs/mousse/lifecycle/', 'refs/mousse/published/', 'refs/mousse/preserved/', 'refs/mousse/delegations/'
 ]
 
 /** Whether a ref points at a workspace snapshot (see `takeSnapshot`), which no branch contains. */

@@ -1,6 +1,6 @@
 import { execFileSync, spawnSync } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
-import { copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { copyFileSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, rmSync, writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import type { GitRecord } from '../../shared/threadActions'
 import { repoProgramEnv, withoutRepoPrograms } from '../git/repoPrograms'
@@ -21,7 +21,12 @@ export interface Snapshot {
   branch?: string
   /** A merge, rebase, revert or cherry-pick that was waiting in the worktree. */
   operationInProgress?: string
+  /** What is in the worktree but not in the snapshot, and why. Reported, never a reason to fail the snapshot. */
+  coverageGaps?: CoverageGap[]
 }
+
+export interface CoverageGap { path: string; reason: string }
+const NESTED_WITHOUT_COMMIT = 'a repository inside the worktree with no commit yet; its files are not in the snapshot'
 
 export interface SnapshotInput {
   /** Why it was taken, for the commit message: "turn end", "outside changes". One line. */
@@ -95,20 +100,21 @@ function followTrackedFiles(top: string, env: NodeJS.ProcessEnv, head: string | 
  * brings it in line with the files HEAD and the real index track (`followTrackedFiles`), so a file that is ignored but
  * was force-added and committed later is in it.
  */
-function indexTree(top: string, index: string, head: string | undefined): string {
+function indexTree(top: string, index: string, head: string | undefined): { tree: string; skipped: string[] } {
   const env = { GIT_INDEX_FILE: index }
   const add = (skipped: string[]) => git(top, ['add', '-A', '--', '.', NOT_MOUSSE, ...skipped.map((path) => `:(exclude,literal)${path}`)], env)
-  const attempt = (): string => {
+  const attempt = (): { tree: string; skipped: string[] } => {
     if (!existsSync(index)) git(top, head ? ['read-tree', head] : ['read-tree', '--empty'], env)
+    let skipped: string[] = []
     try {
       add([])
     } catch (error) {
-      const skipped = nestedRepositoriesWithoutCommit(top, env)
+      skipped = nestedRepositoriesWithoutCommit(top, env)
       if (!skipped.length) throw error
       add(skipped)
     }
     followTrackedFiles(top, env, head)
-    return git(top, ['write-tree'], env)
+    return { tree: git(top, ['write-tree'], env), skipped }
   }
   try {
     return attempt()
@@ -123,7 +129,7 @@ function indexTree(top: string, index: string, head: string | undefined): string
 /** The tree of the worktree's files right now, without writing a commit. */
 export function worktreeTree(cwd: string): string {
   const top = git(cwd, ['rev-parse', '--show-toplevel'])
-  return indexTree(top, privateFiles(top).index, headOf(top))
+  return indexTree(top, privateFiles(top).index, headOf(top)).tree
 }
 
 function readLast(path: string): LastSnapshot | undefined {
@@ -139,10 +145,11 @@ export function takeSnapshot(cwd: string, input: SnapshotInput): Snapshot {
   const top = git(cwd, ['rev-parse', '--show-toplevel'])
   const files = privateFiles(top)
   const head = headOf(top)
-  const tree = indexTree(top, files.index, head)
+  const { tree, skipped } = indexTree(top, files.index, head)
+  const coverageGaps = skipped.map((path) => ({ path, reason: NESTED_WITHOUT_COMMIT }))
   const branch = tryGit(top, ['branch', '--show-current']).stdout || undefined
   const operation = operationInProgress(top)
-  const state = { tree, ...(head ? { head } : {}), ...(branch ? { branch } : {}), ...(operation ? { operationInProgress: operation } : {}) }
+  const state = { tree, ...(head ? { head } : {}), ...(branch ? { branch } : {}), ...(operation ? { operationInProgress: operation } : {}), ...(coverageGaps.length ? { coverageGaps } : {}) }
   const previous = readLast(files.last)
   if (previous && previous.tree === tree && previous.head === head && tryGit(top, ['cat-file', '-e', `${previous.sha}^{commit}`]).ok) return { sha: previous.sha, ...state }
   const trailers = [
@@ -194,7 +201,8 @@ export function describeGit(cwd: string, startSha: string, after: Snapshot): { r
   const record: GitRecord = {
     ...(before.head ? { headBefore: before.head } : {}), ...(after.head ? { headAfter: after.head } : {}),
     ...(before.branch ? { branchBefore: before.branch } : {}), ...(after.branch ? { branchAfter: after.branch } : {}),
-    rewroteHistory, ...(after.operationInProgress ? { operationInProgress: after.operationInProgress } : {})
+    rewroteHistory, ...(after.operationInProgress ? { operationInProgress: after.operationInProgress } : {}),
+    ...(after.coverageGaps?.length ? { coverageGaps: after.coverageGaps } : {})
   }
   return { record, commits }
 }
@@ -213,7 +221,16 @@ export function pushedNotice(operation: string, remote: string): string {
   return `These commits were already pushed to ${remote}; ${operation} restores files only.`
 }
 
-export type RestoreResult = { snapshot: Snapshot; tree: string } | { conflicts: string[] }
+/** Files a restore was about to overwrite or delete that no snapshot held (ignored, for example), kept first under `ref`. */
+export interface PreservedFiles { ref: string; paths: string[] }
+
+export type RestoreResult = { snapshot: Snapshot; tree: string; preserved?: PreservedFiles } | { conflicts: string[] }
+
+/** The line a result carries when a restore kept files no snapshot held before writing over them. */
+export function preservedNotice(preserved: PreservedFiles): string {
+  const named = preserved.paths.slice(0, 10).join(', ') + (preserved.paths.length > 10 ? ` and ${preserved.paths.length - 10} more` : '')
+  return `Files no snapshot held were in the way and are kept under ${preserved.ref}: ${named}. Bring one back with git restore --source=${preserved.ref} -- <path>.`
+}
 
 export interface RestoreChangeInput extends SnapshotInput {
   /** The code the change started from; with `theirs` it is what is taken back (Undo: the turn's end). */
@@ -237,18 +254,78 @@ export function restoreChange(cwd: string, input: RestoreChangeInput, planned?: 
   const merged = mergeTrees(top, input.base, input.ours, input.theirs)
   if ('conflicts' in merged) return merged
   planned?.(merged.tree)
-  moveFiles(top, treeOf(top, input.ours), merged.tree)
-  return { snapshot: takeSnapshot(top, input), tree: merged.tree }
+  const preserved = moveFiles(top, treeOf(top, input.ours), merged.tree, input.operationId)
+  return { snapshot: takeSnapshot(top, input), tree: merged.tree, ...(preserved ? { preserved } : {}) }
+}
+
+/**
+ * Files on disk at the paths a move from `from` to `to` writes or deletes that `from` does not hold: an ignored or
+ * excluded file, or what fills a folder where `to` puts a file. These are bytes no snapshot has.
+ */
+function uncapturedInTheWay(top: string, from: string, to: string): string[] {
+  const touched = git(top, ['diff-tree', '-r', '-z', '--no-renames', '--name-only', from, to]).split('\0').filter(Boolean)
+  if (!touched.length) return []
+  const held = new Set(git(top, ['ls-tree', '-r', '-z', '--name-only', from]).split('\0').filter(Boolean))
+  const found = new Set<string>()
+  const visit = (path: string, depth = 0): void => {
+    if (depth > 64 || found.size >= 10_000) return
+    let stat
+    try { stat = lstatSync(join(top, path)) } catch { return }
+    if (stat.isDirectory()) {
+      if (path === '.git' || path.endsWith('/.git') || path === '.mousse') return
+      for (const name of readdirSync(join(top, path))) visit(`${path}/${name}`, depth + 1)
+    } else if (!held.has(path)) found.add(path)
+  }
+  for (const path of touched) {
+    const parts = path.split('/')
+    // A file where `to` needs a folder above the path.
+    for (let depth = 1; depth < parts.length; depth++) {
+      const above = parts.slice(0, depth).join('/')
+      try { if (!lstatSync(join(top, above)).isDirectory() && !held.has(above)) found.add(above) } catch { break }
+    }
+    visit(path)
+  }
+  return [...found].sort()
+}
+
+/** Stores files as one commit under a new `refs/mousse/preserved/` ref, through a temporary index. Reads them only. */
+function preserveFiles(top: string, paths: string[], directory: string, operationId?: string): PreservedFiles {
+  const temporary = join(directory, `preserve-${randomUUID()}.index`)
+  const env = { GIT_INDEX_FILE: temporary }
+  try {
+    git(top, ['read-tree', '--empty'], env)
+    const entries = paths.map((path) => {
+      const absolute = join(top, path)
+      const link = lstatSync(absolute).isSymbolicLink()
+      const sha = link
+        ? execFileSync('git', withoutRepoPrograms(top, ['hash-object', '-w', '--stdin']), { cwd: top, env: repoProgramEnv(), encoding: 'utf8', input: readlinkSync(absolute) }).trim()
+        : git(top, ['hash-object', '-w', '--no-filters', '--', path])
+      const mode = link ? '120000' : (lstatSync(absolute).mode & 0o111) ? '100755' : '100644'
+      return `${mode} ${sha}\t${path}`
+    })
+    execFileSync('git', withoutRepoPrograms(top, ['update-index', '--index-info']), { cwd: top, env: repoProgramEnv({ ...process.env, ...env }), input: entries.join('\n') + '\n' })
+    const tree = git(top, ['write-tree'], env)
+    const head = headOf(top)
+    const sha = git(top, ['commit-tree', tree, ...(head ? ['-p', head] : []), '-m', `${SUBJECT}files kept before a restore`], MOUSSE_COMMIT_ENV)
+    const ref = `refs/mousse/preserved/${operationId ?? randomUUID()}-${sha.slice(0, 12)}`
+    git(top, ['update-ref', ref, sha])
+    return { ref, paths }
+  } finally {
+    rmSync(temporary, { force: true })
+  }
 }
 
 /**
  * Rewrites the files that differ between two trees from the first (what the worktree holds, as of the last snapshot)
  * to the second, through a temporary private index. A file that changed since the snapshot makes Git refuse
- * before anything is written.
+ * before anything is written. A file in the way that `from` does not hold (ignored, excluded, or inside a folder
+ * that becomes a file) is no snapshot's, so it is kept under a `refs/mousse/preserved/` ref first and returned.
  */
-export function moveFiles(top: string, from: string, to: string): void {
-  if (from === to) return
+export function moveFiles(top: string, from: string, to: string, operationId?: string): PreservedFiles | undefined {
+  if (from === to) return undefined
   const files = privateFiles(top)
+  const inTheWay = uncapturedInTheWay(top, from, to)
+  const preserved = inTheWay.length ? preserveFiles(top, inTheWay, files.directory, operationId) : undefined
   const temporary = join(files.directory, `restore-${randomUUID()}.index`)
   const env = { GIT_INDEX_FILE: temporary }
   try {
@@ -262,4 +339,5 @@ export function moveFiles(top: string, from: string, to: string): void {
   } finally {
     rmSync(temporary, { force: true })
   }
+  return preserved
 }
