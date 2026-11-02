@@ -28,7 +28,7 @@ import { PROVIDER_STT_MAX_BYTES } from '../../shared/dictation'
 import { PROVIDER_TTS_MAX_CHARS } from '../../shared/readAloud'
 import type { ExternalEffect, ThreadAction } from '../../shared/threadActions'
 import type { ThreadWorkspaceMetadata } from '../../shared/workspace'
-import { relinked, sameLinkedPullRequest, type GitPullRequestInfo, type PullRequestDetail, type PullRequestPushTarget, type PullRequestWatchMode, type RepositoryIdentity, type ThreadPullRequestLink } from '../../shared/pullRequests'
+import { relinked, sameLinkedPullRequest, type GitPullRequestInfo, type PullRequestDetail, type PullRequestMergeMethod, type PullRequestPushTarget, type PullRequestWatchMode, type RepositoryIdentity, type ThreadPullRequestLink } from '../../shared/pullRequests'
 import { PULL_REQUEST_EXISTS, PullRequestReadError } from '../git/GitHubCodeHost'
 import { PullRequestThreadError, PullRequestThreadService } from '../git/PullRequestThreadService'
 import { PullRequestWatchError } from '../git/PullRequestWatchService'
@@ -119,7 +119,8 @@ import { devGuiBridge } from '../devgui/DevGuiBridge'
 import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync } from 'node:fs'
 import { FILE_ASSET_PIECE_BYTES, SAVE_TOO_LARGE_MESSAGE, saveExceedsRequest } from '../../shared/fileAssets'
 import { homedir } from 'node:os'
-import { join, relative, resolve } from 'node:path'
+import { isAbsolute, join, relative, resolve } from 'node:path'
+import { FolderNotAnsweringError, waitForFolderAccess } from '../files/folderAccess'
 import type { DomainConnectionContext } from './domainRegistry'
 import { DomainRpcError } from './domainRegistry'
 import { WORKFLOW_RUN_CAPABILITY } from '../../shared/workflowRunPlatform'
@@ -197,6 +198,10 @@ function questionAnswerer(ctx: HandlerContext): Answerer {
 /** Messages `thread.messages` returns when the caller names no limit, and the most it will. */
 const MESSAGES_PAGE_DEFAULT = 100
 const MESSAGES_PAGE_MAX = 500
+
+function isMergeMethod(value: unknown): value is PullRequestMergeMethod {
+  return value === 'merge' || value === 'squash' || value === 'rebase'
+}
 
 function rejectUnknownKeys(p: Record<string, unknown>, allowed: readonly string[]): void {
   for (const key of Object.keys(p)) if (!allowed.includes(key)) throw new DomainRpcError('invalid_params', `${key} is not allowed`)
@@ -722,6 +727,8 @@ function pullRequestThreadService(ctx: HandlerContext): PullRequestThreadService
       if (sentFrom) prepared = ctx.mms.threads.updateThreadMeta(thread.id, { startedFrom: { node: sentFrom.node } }, { touch: false })
       return prepared
     },
+    // A notice from Mousse itself, so the thread shows it even before its first turn.
+    note: (threadId, text, messageId) => ctx.mms.orchestrator.noteThreadUpdate(threadId, text, { messageId, kind: 'warning' }),
     send: async (threadId, content) => {
       ctx.mms.orchestrator.getOrCreateSession(threadId)
       const input = await prepareChatInput(ctx, threadId, { content }, {})
@@ -1113,6 +1120,83 @@ function scheduledJobOptionsDeps(ctx: HandlerContext): ScheduledJobOptionsDeps {
   })
 }
 
+/**
+ * Methods that read or write a project folder synchronously (Git, files, the checkout, project config). They
+ * wait for the folder's volume first; every other method (Stop, thread metadata, queues, settings) answers
+ * at once whatever a folder is waiting for.
+ */
+const FOLDER_METHOD_PREFIXES = ['git.', 'files.', 'workspace.', 'review.', 'actions.', 'pullRequests.', 'publish.', 'skills.']
+const FOLDER_METHODS = new Set([
+  'projects.open', 'projects.identity', 'projects.trustGitSettings', 'orchestrator.send', 'orchestrator.retry',
+  'thread.fork', 'thread.mergeBack', 'threads.setWorktreeEnabled', 'threads.purge', 'agents.spawn', 'tasks.create',
+  'pty.create', 'editor.folder', 'github.cloneRepository', 'github.createRepository', 'mcp.getConfigSources',
+  'mcp.listServers', 'mcp.writeCursorConfig', 'storage.cleanup.plan', 'storage.cleanup.run'
+])
+/** Methods under those prefixes that only signal work already in memory. */
+const FOLDER_FREE_METHODS = new Set(['git.cancelOperation', 'pullRequests.watchStatus'])
+
+/** Methods that start a turn: like the turn, they wait for a volume that is not answering instead of failing. */
+const WAIT_WHEN_NOT_ANSWERING = new Set(['orchestrator.send', 'orchestrator.retry'])
+
+function readsFolder(method: string): boolean {
+  if (FOLDER_FREE_METHODS.has(method)) return false
+  return FOLDER_METHODS.has(method) || FOLDER_METHOD_PREFIXES.some((prefix) => method.startsWith(prefix))
+}
+
+/**
+ * Waits for the folders a request works in. A Stop of its thread or the profile's shutdown ends the wait
+ * with an error, so neither waits on a pending macOS permission prompt.
+ */
+async function waitForRequestFolders(ctx: HandlerContext, method: string, params: unknown): Promise<void> {
+  if (!readsFolder(method)) return
+  const folders = requestFolders(ctx, params)
+  if (folders.length === 0) return
+  const threadId = isObject(params) && typeof params.threadId === 'string' ? params.threadId : undefined
+  const shutdown = ctx.mms.requestShutdownSignal
+  // A volume that stopped answering fails other requests at once, so polls do not pile up behind it.
+  const whenNotAnswering = WAIT_WHEN_NOT_ANSWERING.has(method) ? 'wait' as const : 'fail' as const
+  let waited: 'ready' | 'stopped' | 'aborted'
+  try {
+    waited = ctx.mms.orchestrator?.waitForThreadFolders
+      ? await ctx.mms.orchestrator.waitForThreadFolders(threadId, folders, shutdown, { whenNotAnswering })
+      : await waitForFolderAccess(folders, { signal: shutdown, whenNotAnswering }).then(() => 'ready' as const, (error: unknown) => {
+        if (error instanceof FolderNotAnsweringError) throw error
+        return 'aborted' as const
+      })
+  } catch (error) {
+    if (error instanceof FolderNotAnsweringError) throw new DomainRpcError('folder_not_answering', error.message, { volume: error.volume })
+    throw error
+  }
+  if (waited === 'stopped') throw new DomainRpcError('thread_stopped', 'The thread was stopped before this request started.', { threadId })
+  if (waited === 'aborted') throw Object.assign(new Error('Profile work is shutting down'), { code: 'profile_draining' })
+}
+
+/** Parameters that name a folder by its absolute path. A relative `path` is a file inside the project and is skipped. */
+const FOLDER_PARAMS = ['path', 'cwd', 'root', 'projectPath', 'workspacePath', 'folder', 'directory'] as const
+
+/** The project folders a request names: its thread's project, its project, or a folder path. */
+function requestFolders(ctx: HandlerContext, params: unknown): string[] {
+  if (!isObject(params)) return []
+  const folders: string[] = []
+  try {
+    if (typeof params.threadId === 'string') {
+      const path = resolveThreadProjectPath(ctx.mms.projects, ctx.mms.threads, params.threadId)
+      if (path) folders.push(path)
+    }
+    if (typeof params.projectId === 'string') {
+      const path = ctx.mms.projects.getProject(params.projectId)?.path
+      if (path) folders.push(path)
+    }
+  } catch {
+    // An unknown thread or project is the handler's to report.
+  }
+  for (const key of FOLDER_PARAMS) {
+    const value = params[key]
+    if (typeof value === 'string' && isAbsolute(value)) folders.push(value)
+  }
+  return folders
+}
+
 async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: unknown): Promise<unknown> {
   // A call that names a thread (or project) of another of the user's computers goes to that computer.
   // This runs inside the profile's request barrier, so such calls drain with the profile.
@@ -1128,6 +1212,8 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       ctx.mms.threads?.lifecycleStore?.get(params.threadId)) {
     ctx.mms.threads.assertThreadAdmission(params.threadId)
   }
+  // Before any synchronous work in the folder: a pending macOS permission prompt then holds only this request.
+  await waitForRequestFolders(ctx, method, params)
   if (ctx.mms.domains?.has(method)) return ctx.mms.domains.dispatch(ctx, method, params)
   switch (method) {
     case 'threads.focus': {
@@ -1557,8 +1643,9 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       if (!ctx.mms.threads.getThread(threadId)) {
         throw new DomainRpcError('thread_not_found', 'Thread not found', { threadId })
       }
-      // Idempotency key (SPEC §6). `requestId` is deliberately not reused: the GUI keeps one per
-      // content hash while a send is in flight, so it would turn a repeated message into a replay.
+      // Idempotency key (SPEC §6): a repeat with the same id and text answers with the first send's run.
+      // It is not taken from `requestId`, which names a slash workflow's receipt and is optional; the
+      // app and the CLI pass the same value in both when a repeat must not run twice.
       const clientRequestId = asOptionalClientRequestId(p.clientRequestId)
       // SPEC §12.7: `ack` returns once the send and its turn.start effect are committed.
       const awaitMode = asOptionalSendAwaitMode(p.await)
@@ -3420,16 +3507,19 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       return { pullRequest, existing: false }
     }
     case 'pullRequests.merge': {
-      // Merges a pull request of the folder's repository with the method the host's merge button offers, else squash.
+      // Merges a pull request of the folder's repository. `method` is the one a person confirmed: it is used exactly,
+      // and the host refuses it if the repository does not allow it. Without it (an older client), the method the
+      // host's merge button offers, else squash.
       const p = isObject(params) ? params : {}
-      rejectUnknownKeys(p, ['threadId', 'projectId', 'number', 'headSha'])
+      rejectUnknownKeys(p, ['threadId', 'projectId', 'number', 'headSha', 'method'])
       const number = asBoundedInt(p.number, 'number', { min: 1, max: Number.MAX_SAFE_INTEGER })
       const headSha = asOptionalString(p.headSha, 64)
       if (headSha !== undefined && !/^[0-9a-f]{7,64}$/i.test(headSha)) throw new DomainRpcError('invalid_params', 'headSha is not a commit')
+      if (p.method !== undefined && !isMergeMethod(p.method)) throw new DomainRpcError('invalid_params', 'method must be merge, squash or rebase')
       await materializeRequestedWorkspace(ctx, p)
       const root = pullRequestFolder(ctx, p)
       const codeHost = ctx.mms.gitService.codeHost
-      const method = await codeHost.defaultMergeMethod(root) ?? 'squash'
+      const method = isMergeMethod(p.method) ? p.method : await codeHost.defaultMergeMethod(root) ?? 'squash'
       try {
         const pullRequest = await codeHost.mergePullRequest(root, number, { method, ...(headSha ? { headSha } : {}) })
         return { pullRequest, method }
@@ -3453,6 +3543,14 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       rejectUnknownKeys(p, ['threadId', 'projectId'])
       await materializeRequestedWorkspace(ctx, p)
       return { baseBranches: await ctx.mms.gitService.codeHost.listBaseBranches(pullRequestFolder(ctx, p)) }
+    }
+    case 'pullRequests.mergeMethod': {
+      // The method the host's merge button offers, for the Merge confirmation to name and then pass to `pullRequests.merge`.
+      // Null when it cannot be read: nothing is guessed here.
+      const p = isObject(params) ? params : {}
+      rejectUnknownKeys(p, ['threadId', 'projectId'])
+      await materializeRequestedWorkspace(ctx, p)
+      return { method: await ctx.mms.gitService.codeHost.defaultMergeMethod(pullRequestFolder(ctx, p)) }
     }
     case 'pullRequests.link': {
       const p = isObject(params) ? params : {}
@@ -3493,12 +3591,13 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const { detail } = resolved
       return {
         pullRequest: { number: detail.number, title: detail.title, url: detail.url, state: detail.state, isDraft: detail.isDraft, author: detail.author, headRefName: detail.headRefName, isCrossRepository: detail.isCrossRepository },
-        threads: resolved.threads
+        threads: resolved.threads,
+        enablesWorktreeConfig: resolved.enablesWorktreeConfig
       }
     }
     case 'pullRequests.startThread': {
       const p = isObject(params) ? params : {}
-      rejectUnknownKeys(p, ['projectId', 'number', 'reference', 'send', 'message', 'allowClosed', 'allowDuplicate'])
+      rejectUnknownKeys(p, ['projectId', 'number', 'reference', 'send', 'message', 'allowClosed', 'allowDuplicate', 'allowWorktreeConfig'])
       const projectId = asString(p.projectId, 'projectId', 256)
       if ((p.number === undefined) === (p.reference === undefined)) throw new DomainRpcError('invalid_params', 'Give either number or reference')
       const reference = p.reference !== undefined
@@ -3514,7 +3613,8 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
           send,
           ...(message !== undefined ? { message } : {}),
           allowClosed: asOptionalBoolean(p.allowClosed, 'allowClosed') === true,
-          allowDuplicate: asOptionalBoolean(p.allowDuplicate, 'allowDuplicate') === true
+          allowDuplicate: asOptionalBoolean(p.allowDuplicate, 'allowDuplicate') === true,
+          allowWorktreeConfig: asOptionalBoolean(p.allowWorktreeConfig, 'allowWorktreeConfig') === true
         }))
         return { ...started, threads: listedThreadsFor(ctx, ctx.mms.threads.listAllThreads()) }
       } finally {
@@ -3544,12 +3644,12 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       return { thread, threads: listedThreadsFor(ctx, threads) }
     }
     case 'pullRequests.watch': {
-      // Turns a thread's watch of its pull request off, to notify (a line in the thread) or to act (also wakes the agent).
+      // Turns a thread's watch of its pull request off, or on to notify (a line in the thread). A watch never wakes the agent.
       const p = isObject(params) ? params : {}
       rejectUnknownKeys(p, ['threadId', 'watch', 'number'])
       const threadId = asString(p.threadId, 'threadId', 256)
       const mode = asString(p.watch, 'watch', 16)
-      if (mode !== 'off' && mode !== 'notify' && mode !== 'act') throw new DomainRpcError('invalid_params', 'watch must be off, notify or act')
+      if (mode !== 'off' && mode !== 'notify') throw new DomainRpcError('invalid_params', 'watch must be off or notify')
       const number = asOptionalBoundedInt(p.number, 'number', { min: 1, max: Number.MAX_SAFE_INTEGER })
       if (!ctx.mms.threads.getThread(threadId)) throw new DomainRpcError('thread_not_found', 'Thread not found', { threadId })
       ctx.mms.threads.assertThreadAdmission(threadId)

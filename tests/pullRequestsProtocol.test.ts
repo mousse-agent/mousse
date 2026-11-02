@@ -9,7 +9,7 @@ import { WorkspaceResolver } from '../src/mms/workspace/WorkspaceResolver'
 import { ThreadWorkspaceManager } from '../src/mms/workspace/ThreadWorkspaceManager'
 import type { GitPullRequestInfo, GitPullRequestLookup, Thread } from '../src/shared/types'
 import { parsePullRequestDetail, PULL_REQUEST_EXISTS, PullRequestReadError } from '../src/mms/git/GitHubCodeHost'
-import type { PullRequestDetail } from '../src/shared/pullRequests'
+import { WORKTREE_CONFIG_ENABLED, WORKTREE_CONFIG_NEEDED, type PullRequestDetail } from '../src/shared/pullRequests'
 import { git, gitFoundationFixture } from './fixtures/gitFoundation'
 
 const info = (patch: Partial<GitPullRequestInfo> = {}): GitPullRequestInfo => ({
@@ -70,7 +70,7 @@ describe('pull request methods through the daemon protocol', () => {
   const normalized = (path: unknown) => String(path).replace(/\\/g, '/').toLowerCase()
 
   it('lists the methods', () => {
-    for (const method of ['pullRequests.get', 'pullRequests.detail', 'pullRequests.draft', 'pullRequests.create', 'pullRequests.merge', 'pullRequests.close', 'pullRequests.baseBranches', 'pullRequests.link', 'pullRequests.unlink']) {
+    for (const method of ['pullRequests.get', 'pullRequests.detail', 'pullRequests.draft', 'pullRequests.create', 'pullRequests.merge', 'pullRequests.close', 'pullRequests.baseBranches', 'pullRequests.mergeMethod', 'pullRequests.link', 'pullRequests.unlink']) {
       expect(PROTOCOL_METHODS).toContain(method)
     }
   })
@@ -157,6 +157,51 @@ describe('pull request methods through the daemon protocol', () => {
       expect(merge.mock.calls[0].slice(1)).toEqual([12, { method: 'squash' }])
     })
 
+    it('tells the Merge confirmation the method the host offers, null when it cannot be read, and merges nothing', async () => {
+      const method = vi.spyOn(mms.gitService.codeHost, 'defaultMergeMethod').mockResolvedValue('rebase')
+      const merge = vi.spyOn(mms.gitService.codeHost, 'mergePullRequest').mockResolvedValue(info({ state: 'merged' }))
+      const project = mms.projects.openProject(f.repo)
+      expect(await client.request('pullRequests.mergeMethod', { projectId: project.id })).toEqual({ method: 'rebase' })
+      expect(normalized(method.mock.calls[0][0])).toBe(normalized(f.repo))
+      method.mockResolvedValue(null)
+      expect(await client.request('pullRequests.mergeMethod', { projectId: project.id })).toEqual({ method: null })
+      await expect(client.request('pullRequests.mergeMethod', { projectId: project.id, number: 12 })).rejects.toThrow(/number is not allowed/)
+      expect(merge).not.toHaveBeenCalled()
+    })
+
+    it('merges with the confirmed method exactly when the host\'s method was read and then cannot be', async () => {
+      const method = vi.spyOn(mms.gitService.codeHost, 'defaultMergeMethod').mockResolvedValueOnce('rebase').mockResolvedValue(null)
+      const merge = vi.spyOn(mms.gitService.codeHost, 'mergePullRequest').mockResolvedValue(info({ state: 'merged' }))
+      const project = mms.projects.openProject(f.repo)
+      const { method: confirmed } = await client.request('pullRequests.mergeMethod', { projectId: project.id }) as { method: string }
+      expect(await client.request('pullRequests.merge', { projectId: project.id, number: 12, method: confirmed })).toMatchObject({ method: 'rebase' })
+      // A rebase confirmed is a rebase: the unreadable second answer never turns it into a squash.
+      expect(merge.mock.calls[0].slice(1)).toEqual([12, { method: 'rebase' }])
+      expect(method).toHaveBeenCalledTimes(1)
+    })
+
+    it('says nothing it cannot back when the method cannot be read and then can, and the merge picks it', async () => {
+      vi.spyOn(mms.gitService.codeHost, 'defaultMergeMethod').mockResolvedValueOnce(null).mockResolvedValue('merge')
+      const merge = vi.spyOn(mms.gitService.codeHost, 'mergePullRequest').mockResolvedValue(info({ state: 'merged' }))
+      const project = mms.projects.openProject(f.repo)
+      // The confirmation is told the method is unknown, not "squash", so it does not promise one.
+      expect(await client.request('pullRequests.mergeMethod', { projectId: project.id })).toEqual({ method: null })
+      expect(await client.request('pullRequests.merge', { projectId: project.id, number: 12 })).toMatchObject({ method: 'merge' })
+      expect(merge.mock.calls[0].slice(1)).toEqual([12, { method: 'merge' }])
+    })
+
+    it('uses a confirmed method even when the host now offers another, and refuses one it does not know', async () => {
+      const method = vi.spyOn(mms.gitService.codeHost, 'defaultMergeMethod').mockResolvedValue('squash')
+      const merge = vi.spyOn(mms.gitService.codeHost, 'mergePullRequest').mockResolvedValue(info({ state: 'merged' }))
+      const project = mms.projects.openProject(f.repo)
+      expect(await client.request('pullRequests.merge', { projectId: project.id, number: 12, method: 'merge' })).toMatchObject({ method: 'merge' })
+      expect(merge.mock.calls[0].slice(1)).toEqual([12, { method: 'merge' }])
+      expect(method).not.toHaveBeenCalled()
+      await expect(client.request('pullRequests.merge', { projectId: project.id, number: 12, method: 'fast-forward' })).rejects.toThrow(/merge, squash or rebase/)
+      await expect(client.request('pullRequests.merge', { projectId: project.id, number: 12, method: 'SQUASH' })).rejects.toThrow(/merge, squash or rebase/)
+      expect(merge).toHaveBeenCalledTimes(1)
+    })
+
     it('closes in the project folder', async () => {
       const close = vi.spyOn(mms.gitService.codeHost, 'closePullRequest').mockResolvedValue(info({ state: 'closed' }))
       const project = mms.projects.openProject(f.repo)
@@ -179,7 +224,7 @@ describe('pull request methods through the daemon protocol', () => {
       const close = vi.spyOn(mms.gitService.codeHost, 'closePullRequest').mockResolvedValue(info())
       const project = mms.projects.openProject(f.repo)
       const thread = mms.threads.createThread('Task A', project.id)
-      await expect(client.request('pullRequests.merge', { projectId: project.id, number: 12, method: 'rebase' })).rejects.toThrow(/method is not allowed/)
+      await expect(client.request('pullRequests.merge', { projectId: project.id, number: 12, deleteBranch: true })).rejects.toThrow(/deleteBranch is not allowed/)
       await expect(client.request('pullRequests.merge', { projectId: project.id, number: 12, headSha: '--admin' })).rejects.toThrow(/not a commit/)
       await expect(client.request('pullRequests.merge', { projectId: project.id, number: 0 })).rejects.toThrow(/number/)
       await expect(client.request('pullRequests.merge', { number: 12 })).rejects.toThrow(/projectId or threadId is required/)
@@ -430,12 +475,12 @@ describe('pull request methods through the daemon protocol', () => {
       git(f.repo, 'checkout', '-q', 'feature-a')
 
       const summary = await mms.gitService.readBranchSummary(f.repo, { branch: 'feature-b', base, remote: null })
-      expect(summary.commits).toEqual([{ subject: 'Add b', body: '' }])
+      expect(summary.commits).toEqual([{ subject: 'Add b', body: '', authorEmail: 'foundation@example.test' }])
       expect(summary.stat).toContain('b.txt')
       expect(summary.stat).not.toContain('a.txt')
       expect(summary.patch).toContain('+++ b/b.txt')
       const a = await mms.gitService.readBranchSummary(f.repo, { branch: 'feature-a', base, remote: null })
-      expect(a.commits).toEqual([{ subject: 'Add a', body: 'Why a' }])
+      expect(a.commits).toEqual([{ subject: 'Add a', body: 'Why a', authorEmail: 'foundation@example.test' }])
     })
 
     it('prefers the remote-tracking base, and reads nothing for a base or branch that does not exist or looks like a flag', async () => {
@@ -673,8 +718,18 @@ describe('pull request methods through the daemon protocol', () => {
       const project = mms.projects.openProject(f.repo)
       events.length = 0
 
-      const started = await client.request<{ thread: Thread; threads: Thread[]; seed: string; headSha: string; headMoved: boolean; sent: boolean }>('pullRequests.startThread', { projectId: project.id, number: 7 })
-      expect(started).toMatchObject({ headSha: head, headMoved: false, sent: false })
+      // A request that did not agree to the repository setting (as an older client sends it) changes nothing.
+      await expect(client.request('pullRequests.startThread', { projectId: project.id, number: 7 })).rejects.toMatchObject({ code: 'pull_request_worktree_config_needed', message: WORKTREE_CONFIG_NEEDED })
+      expect(fetch).not.toHaveBeenCalled()
+      expect(() => git(f.repo, 'config', '--local', '--get', 'extensions.worktreeConfig')).toThrow()
+      expect((await client.request<{ enablesWorktreeConfig: boolean }>('pullRequests.resolve', { projectId: project.id, reference: '7' })).enablesWorktreeConfig).toBe(true)
+
+      const started = await client.request<{ thread: Thread; threads: Thread[]; seed: string; headSha: string; headMoved: boolean; sent: boolean; repositoryConfigChange: string | null }>('pullRequests.startThread', { projectId: project.id, number: 7, allowWorktreeConfig: true })
+      expect(started).toMatchObject({ headSha: head, headMoved: false, sent: false, repositoryConfigChange: WORKTREE_CONFIG_ENABLED })
+      expect(git(f.repo, 'config', '--local', '--get', 'extensions.worktreeConfig')).toBe('true')
+      // The thread says so too, for every client, with a line that wakes nothing.
+      expect(mms.orchestrator.getMessages(started.thread.id).filter((message) => message.role === 'system').map((message) => [message.kind, message.content])).toEqual([['warning', WORKTREE_CONFIG_ENABLED]])
+      expect(mms.runEngine.inbox.listForThread(started.thread.id)).toEqual([])
       expect(started.thread.pullRequest).toMatchObject({ number: 7, nameWithOwner: 'acme/app', headRefName: 'fix-thing' })
       expect(started.threads.some((thread) => thread.id === started.thread.id)).toBe(true)
       expect(normalized(fetch.mock.calls[0][0])).toBe(normalized(f.repo))
@@ -693,7 +748,7 @@ describe('pull request methods through the daemon protocol', () => {
       vi.spyOn(mms.gitService.codeHost, 'fetchPullRequestHead').mockResolvedValue(head)
       const send = vi.spyOn(mms.orchestrator, 'send').mockResolvedValue({} as never)
       const project = mms.projects.openProject(f.repo)
-      const started = await client.request<{ thread: Thread; seed: string; sent: boolean }>('pullRequests.startThread', { projectId: project.id, number: 7, send: true, message: 'Fix the review comments.' })
+      const started = await client.request<{ thread: Thread; seed: string; sent: boolean }>('pullRequests.startThread', { projectId: project.id, number: 7, send: true, message: 'Fix the review comments.', allowWorktreeConfig: true })
       expect(started.sent).toBe(true)
       expect(send).toHaveBeenCalledTimes(1)
       expect(send.mock.calls[0][0]).toBe(`${started.seed}\n\nFix the review comments.`)
@@ -706,7 +761,7 @@ describe('pull request methods through the daemon protocol', () => {
       vi.spyOn(mms.gitService.codeHost, 'fetchPullRequestHead').mockResolvedValue(head)
       const send = vi.spyOn(mms.orchestrator, 'send').mockResolvedValue({} as never)
       const project = mms.projects.openProject(f.repo)
-      const started = await client.request<{ seed: string; sent: boolean; withheld: string }>('pullRequests.startThread', { projectId: project.id, number: 7, send: true })
+      const started = await client.request<{ seed: string; sent: boolean; withheld: string }>('pullRequests.startThread', { projectId: project.id, number: 7, send: true, allowWorktreeConfig: true })
       expect(started.sent).toBe(false)
       expect(started.withheld).toMatch(/not owners, members or collaborators \(stranger\)/)
       expect(started.seed).toContain('Quoted from GitHub:')
@@ -718,7 +773,7 @@ describe('pull request methods through the daemon protocol', () => {
       vi.spyOn(mms.gitService.codeHost, 'fetchPullRequestHead').mockRejectedValue(new Error('offline'))
       const project = mms.projects.openProject(f.repo)
       events.length = 0
-      await expect(client.request('pullRequests.startThread', { projectId: project.id, number: 7 })).rejects.toMatchObject({ code: 'pull_request_fetch_failed' })
+      await expect(client.request('pullRequests.startThread', { projectId: project.id, number: 7, allowWorktreeConfig: true })).rejects.toMatchObject({ code: 'pull_request_fetch_failed' })
       await vi.waitFor(() => expect(events.some((event) => event.type === 'threads.updated')).toBe(true))
     })
 
@@ -727,7 +782,7 @@ describe('pull request methods through the daemon protocol', () => {
       vi.spyOn(mms.gitService.codeHost, 'fetchPullRequestHead').mockRejectedValue(new Error("No remote of this checkout points at github.com/acme/app, the pull request's repository."))
       const project = mms.projects.openProject(f.repo)
       const before = mms.threads.listAllThreads().length
-      await expect(client.request('pullRequests.startThread', { projectId: project.id, number: 7 })).rejects.toMatchObject({ code: 'pull_request_fetch_failed', message: /No remote of this checkout points at github\.com\/acme\/app/ })
+      await expect(client.request('pullRequests.startThread', { projectId: project.id, number: 7, allowWorktreeConfig: true })).rejects.toMatchObject({ code: 'pull_request_fetch_failed', message: /No remote of this checkout points at github\.com\/acme\/app/ })
       expect(mms.threads.listAllThreads()).toHaveLength(before)
     })
 

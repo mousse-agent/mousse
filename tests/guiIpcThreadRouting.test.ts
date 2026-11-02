@@ -242,9 +242,22 @@ describe('a call to another computer that was not confirmed', () => {
     expect(answer.requestAcknowledged).toBe(false)
     expect(answer.error).toMatchObject({ code: 'outcome_uncertain' })
     expect(answer.error?.message).toContain('may have happened')
-    expect(sent('orchestrator.send')[0].params).toMatchObject({ threadId: REMOTE, requestId: 'req-1' })
+    // The window's request id is also the service's retry key, so sending it again cannot run it twice.
+    expect(sent('orchestrator.send')[0].params).toMatchObject({ threadId: REMOTE, requestId: 'req-1', clientRequestId: 'req-1' })
     await vi.waitFor(() => expect(sent('threads.list')).toHaveLength(1))
     expect(sent('snapshot')).toEqual([{ method: 'snapshot', params: { threadId: REMOTE } }])
+  })
+
+  it('reports a send whose reply timed out as one that may have happened, so the window keeps its request id', async () => {
+    presentation.setActiveThreadId('local-thread')
+    request.mockImplementationOnce(async (method: string, params?: unknown) => {
+      calls.push({ method, params })
+      throw new Error('Request timeout: orchestrator.send')
+    })
+    const answer = (await invoke('orchestrator:sendToThread', 'local-thread', { content: 'Long task', requestId: 'req-9' })) as { requestAcknowledged?: boolean; error?: { code?: string } }
+    expect(answer.requestAcknowledged).toBe(false)
+    expect(answer.error).toMatchObject({ code: 'outcome_uncertain' })
+    expect(sent('orchestrator.send')[0].params).toMatchObject({ requestId: 'req-9', clientRequestId: 'req-9' })
   })
 
   it('leaves a thread of another computer, or of this one, that is not in view alone', async () => {

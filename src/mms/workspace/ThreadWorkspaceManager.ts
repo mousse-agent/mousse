@@ -47,17 +47,43 @@ async function untrustedSafety(repositoryRoot: string): Promise<string[]> {
   return [...safety, '-c', 'submodule.recurse=false']
 }
 
+const CORE_WORKTREE_REFUSAL = 'This repository sets core.worktree, so a worktree cannot hold its own safety configuration.'
+
+/** Whether the repository already keeps Git configuration per worktree (`extensions.worktreeConfig`). */
+export function perWorktreeConfigEnabled(checkoutPath: string): boolean {
+  return tryGit(checkoutPath, ['config', '--local', '--type=bool', '--get', 'extensions.worktreeConfig']).stdout === 'true'
+}
+
+/**
+ * Turns on `extensions.worktreeConfig` in the repository's own configuration, which a worktree of someone else's
+ * commits needs to hold its safety settings. It changes the person's repository, so it runs only as part of the
+ * action that asked for such a worktree (Start from pull request), and that action says so. It is written at most
+ * once and never turned off again. True when this call turned it on.
+ */
+export function enablePerWorktreeConfig(primaryCheckoutPath: string): boolean {
+  if (perWorktreeConfigEnabled(primaryCheckoutPath)) return false
+  if (tryGit(primaryCheckoutPath, ['config', '--get', 'core.worktree']).stdout) throw new Error(CORE_WORKTREE_REFUSAL)
+  git(primaryCheckoutPath, ['config', '--local', 'extensions.worktreeConfig', 'true'])
+  return true
+}
+
+/** Refuses unless the repository keeps configuration per worktree, so a worktree of someone else's commits can be protected. */
+function assertPerWorktreeConfig(primaryCheckoutPath: string): void {
+  if (tryGit(primaryCheckoutPath, ['config', '--get', 'core.worktree']).stdout) throw new Error(CORE_WORKTREE_REFUSAL)
+  if (!perWorktreeConfigEnabled(primaryCheckoutPath)) {
+    throw new Error("This repository's per-worktree Git settings are off (extensions.worktreeConfig), so a worktree of a pull request cannot be made safely. Start from the pull request again, or turn them on with `git config extensions.worktreeConfig true`.")
+  }
+}
+
 /**
  * Makes the overrides part of the worktree's own configuration, so every Git command run there (a checkpoint
  * commit, the side card's Commit and Push, an agent's shell) is bound by them. A relative `core.hooksPath` or
  * a `.gitattributes` filter would otherwise act on the checkout's own files. Refuses when Git cannot keep
- * configuration per worktree, rather than leaving the worktree unprotected.
+ * configuration per worktree, rather than leaving the worktree unprotected. It never changes the repository's own
+ * configuration: `enablePerWorktreeConfig` does that, once, as part of the action the person asked for.
  */
 function pinUntrustedWorktree(primaryCheckoutPath: string, worktreePath: string, safety: readonly string[]): void {
-  if (tryGit(primaryCheckoutPath, ['config', '--get', 'core.worktree']).stdout) {
-    throw new Error('This repository sets core.worktree, so a worktree cannot hold its own safety configuration.')
-  }
-  git(primaryCheckoutPath, ['config', 'extensions.worktreeConfig', 'true'])
+  assertPerWorktreeConfig(primaryCheckoutPath)
   for (let index = 0; index < safety.length; index++) {
     if (safety[index] !== '-c') continue
     const setting = safety[index + 1]
@@ -70,9 +96,16 @@ function pinUntrustedWorktree(primaryCheckoutPath: string, worktreePath: string,
   }
 }
 
-/** `git worktree add` for commits from someone else: nothing they carry runs, no LFS content is fetched, and the safety stays pinned. */
-async function addUntrustedWorktree(primaryCheckoutPath: string, addArguments: string[], worktreePath: string): Promise<void> {
+/**
+ * `git worktree add` for commits from someone else: nothing they carry runs, no LFS content is fetched, and the safety
+ * stays pinned. `enableWorktreeConfig` (see `provision`) turns the setting on once the safety checks have passed.
+ */
+async function addUntrustedWorktree(primaryCheckoutPath: string, addArguments: string[], worktreePath: string, enableWorktreeConfig?: () => void): Promise<void> {
+  // A repository whose filters cannot be switched off is refused here, before its configuration is changed.
   const safety = await untrustedSafety(primaryCheckoutPath)
+  if (enableWorktreeConfig && enablePerWorktreeConfig(primaryCheckoutPath)) enableWorktreeConfig()
+  // Refused before anything is checked out, not after: the worktree must never exist without its safety settings.
+  assertPerWorktreeConfig(primaryCheckoutPath)
   execFileSync('git', [...safety, 'worktree', 'add', ...addArguments], {
     cwd: primaryCheckoutPath,
     env: repoProgramEnv({ ...process.env, ...nonInteractiveGitEnv(), GIT_LFS_SKIP_SMUDGE: '1' }),
@@ -166,8 +199,13 @@ export class ThreadWorkspaceManager {
      * is looked up in the checkout), filter, smudge and process drivers its `.gitattributes` selects, Git LFS
      * (no smudge, so its `.lfsconfig` is never read) and the file system monitor are switched off in the
      * worktree's own configuration, and the workspace is marked so a restore does the same.
+     *
+     * `enableWorktreeConfig`: the person agreed to turn on `extensions.worktreeConfig`, which that safety needs. It is
+     * turned on here, under the repository's lease and after every check that can refuse, so a refused start leaves
+     * the setting as it was; the callback runs when this call turned it on. Without it, a repository with the
+     * setting off is refused.
      */
-    options: { untrusted?: boolean } = {}
+    options: { untrusted?: boolean; enableWorktreeConfig?: () => void } = {}
   ): Promise<ThreadWorkspaceMetadata> {
     const existing = this.load()
     if (existing?.lifecycle === 'ready') return this.verify(existing)
@@ -217,7 +255,7 @@ export class ThreadWorkspaceManager {
         lastVerifiedAt: new Date().toISOString(),
         ...(options.untrusted ? { untrusted: true as const } : {})
       } satisfies ThreadWorkspaceMetadata)
-      if (options.untrusted) await addUntrustedWorktree(repository.primaryCheckoutPath, ['-b', branch, worktreePath, head], worktreePath)
+      if (options.untrusted) await addUntrustedWorktree(repository.primaryCheckoutPath, ['-b', branch, worktreePath, head], worktreePath, options.enableWorktreeConfig)
       else git(repository.primaryCheckoutPath, ['worktree', 'add', '-b', branch, worktreePath, head])
       git(repository.primaryCheckoutPath, ['update-ref', retainedRef, head])
       const metadata: ThreadWorkspaceMetadata = {
@@ -297,6 +335,8 @@ export class ThreadWorkspaceManager {
         const manifestPath = retirement.pathFor(metadata.threadId, metadata.worktreePath)
         const manifest = retirement.load(manifestPath)
         if (manifest.branch !== metadata.branch || manifest.resultSha !== metadata.headSha || manifest.repositoryId !== metadata.repositoryId) throw new Error('Retired workspace manifest disagrees with authoritative task binding')
+        // Refused before the rebuild registers anything: a worktree made and then refused would be left empty, without its safety.
+        if (metadata.untrusted) assertPerWorktreeConfig(repository.gitTopLevel)
         // The worktree's own configuration went with the worktree: for someone else's commits it is put back before anything is checked out.
         const safety = metadata.untrusted ? await untrustedSafety(repository.gitTopLevel) : undefined
         retirement.reconstruct(manifestPath, safety ? { prepare: (path) => pinUntrustedWorktree(repository.gitTopLevel, path, safety), env: { ...nonInteractiveGitEnv(), GIT_LFS_SKIP_SMUDGE: '1' } } : undefined)

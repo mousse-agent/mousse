@@ -21,6 +21,7 @@ import {
   type PullRequestReviewVerdict,
   type RepositoryIdentity
 } from '../../shared/pullRequests'
+import { UNCHECKED_ASSOCIATION } from '../../shared/pullRequestSeed'
 import type { CodeHost } from './CodeHost'
 import {
   classifyGhFailure,
@@ -185,8 +186,12 @@ export function classifyPullRequestFailure(message: string): 'none' | 'not-githu
   return kind === 'rate-limited' || kind === 'not-found' ? 'error' : kind
 }
 
+/**
+ * What `gh pr view` reads for a pull request in full. The author's association is not among them: gh 2.98 and later
+ * refuse `authorAssociation` there ("Unknown JSON field"), so it is read from the REST API beside the view.
+ */
 const PULL_REQUEST_DETAIL_FIELDS = [
-  'number', 'title', 'url', 'state', 'isDraft', 'body', 'author', 'authorAssociation', 'baseRefName', 'headRefName', 'headRefOid',
+  'number', 'title', 'url', 'state', 'isDraft', 'body', 'author', 'baseRefName', 'headRefName', 'headRefOid',
   'headRepository', 'headRepositoryOwner', 'isCrossRepository', 'reviewDecision', 'reviews', 'comments',
   'statusCheckRollup', 'updatedAt', 'mergedAt', 'closedAt', 'mergeable', 'mergeStateStatus'
 ].join(',')
@@ -403,13 +408,15 @@ function repositoryOf(owner: unknown, repository: unknown): string | null {
 /**
  * Parses `gh pr view --json <detail fields>` and the line comment pages read newest first (each as
  * `parseLineCommentPage` reads them). `commentsTruncated` says the last page was full, so older line
- * comments exist. Null when the view is not a pull request.
+ * comments exist. `authorAssociation` is the author's association read beside the view; without it the
+ * view's own field is used (older gh), else none. Null when the view is not a pull request.
  */
 export function parsePullRequestDetail(
   identity: PullRequestIdentity,
   viewJson: string,
   commentPages: readonly string[],
-  commentsTruncated = false
+  commentsTruncated = false,
+  authorAssociation?: string
 ): PullRequestDetail | null {
   const info = parsePullRequestJson(viewJson)
   if (!info) return null
@@ -436,7 +443,7 @@ export function parsePullRequestDetail(
     identity,
     body: text(value.body),
     author: login(value.author),
-    authorAssociation: text(value.authorAssociation) || 'NONE',
+    authorAssociation: authorAssociation || text(value.authorAssociation) || 'NONE',
     headSha: text(value.headRefOid),
     headRepository: repositoryOf(value.headRepositoryOwner, value.headRepository),
     baseRepository: identity.nameWithOwner,
@@ -833,13 +840,17 @@ export class GitHubCodeHost implements CodeHost {
   }
 
   private async readDetail(cwd: string, pullRequest: PullRequestIdentity, withLines = true): Promise<PullRequestDetail> {
-    const { stdout: view } = await this.runExecutable(
-      'gh',
-      ['pr', 'view', String(pullRequest.number), '--json', PULL_REQUEST_DETAIL_FIELDS, '--jq', PULL_REQUEST_VIEW_JQ],
-      { cwd }
-    )
     const [owner, repository] = pullRequest.nameWithOwner.split('/')
-    const endpoint = `repos/${encodeURIComponent(owner)}/${encodeURIComponent(repository)}/pulls/${pullRequest.number}/comments`
+    const pull = `repos/${encodeURIComponent(owner)}/${encodeURIComponent(repository)}/pulls/${pullRequest.number}`
+    const [{ stdout: view }, association] = await Promise.all([
+      this.runExecutable(
+        'gh',
+        ['pr', 'view', String(pullRequest.number), '--json', PULL_REQUEST_DETAIL_FIELDS, '--jq', PULL_REQUEST_VIEW_JQ],
+        { cwd }
+      ),
+      this.readAuthorAssociation(cwd, pullRequest.host, pull)
+    ])
+    const endpoint = `${pull}/comments`
     const pages: string[] = []
     let lastCount = 0
     for (let page = 1; withLines && page <= LINE_COMMENT_MAX_PAGES; page++) {
@@ -859,9 +870,24 @@ export class GitHubCodeHost implements CodeHost {
       if (lastCount < LINE_COMMENT_PAGE_SIZE) break
     }
     const truncated = pages.length === LINE_COMMENT_MAX_PAGES && lastCount === LINE_COMMENT_PAGE_SIZE
-    const detail = parsePullRequestDetail(pullRequest, view, pages, truncated)
+    const detail = parsePullRequestDetail(pullRequest, view, pages, truncated, association)
     if (!detail) throw new PullRequestReadError('GitHub CLI returned an unexpected pull request response.', 'error')
     return detail
+  }
+
+  /**
+   * How the pull request's author relates to the repository (`OWNER`, `MEMBER`, `CONTRIBUTOR`…), from the REST API.
+   * A failed or unreadable answer (often GitHub's rate limit) is `UNCHECKED`: never trusted, as `NONE` is, but not
+   * reported as the person being a stranger. A pull request must still open when it cannot be read.
+   */
+  private async readAuthorAssociation(cwd: string, host: string, pull: string): Promise<string> {
+    try {
+      const { stdout } = await this.runExecutable('gh', ['api', '--hostname', host, pull, '--jq', '.author_association'], { cwd })
+      const association = stdout.trim().toUpperCase()
+      return /^[A-Z_]{1,40}$/.test(association) ? association : UNCHECKED_ASSOCIATION
+    } catch {
+      return UNCHECKED_ASSOCIATION
+    }
   }
 
   /** A failed detail read with the host's own message, plus where and as whom it failed when that explains it. */

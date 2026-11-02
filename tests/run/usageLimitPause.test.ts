@@ -39,10 +39,10 @@ const managedCodexLimit = (): AppError =>
 /** One turn of a scripted adapter: it fails with the error (built when the turn runs, so its reset is still ahead), waits on a gate, or replies. */
 type Step = { fail?: () => Error; gate?: Promise<void> }
 
-const rowId = (threadId: string): string => `inbox:pr-update:${threadId}:1:0`
+const rowId = (threadId: string): string => `inbox:notice:${threadId}:1:0`
 
-/** The notice a watched pull request writes into a thread's inbox, and a phrase that appears in it once. */
-const NOTICE = formatPullRequestNotice([{ kind: 'checks_failed', checks: [{ name: 'build', state: 'failing', url: null }] }], { number: 7, title: 'Add thing', url: 'https://github.com/acme/app/pull/7', headSha: 'abcdef0123', authorAssociation: 'OWNER' }, 'act')
+/** A notice row's text, and a phrase that appears in it once. */
+const NOTICE = formatPullRequestNotice([{ kind: 'checks_failed', checks: [{ name: 'build', state: 'failing', url: null }] }], { number: 7, title: 'Add thing', url: 'https://github.com/acme/app/pull/7', headSha: 'abcdef0123' })
 const NOTICE_MARK = 'Add thing'
 
 describe('a usage limit pauses the run', () => {
@@ -477,7 +477,7 @@ describe('a usage limit pauses the run', () => {
       const d = boot(newHome(), [pi])
       const { thread, run } = await paused(d, pi)
       const reconciler = new Reconciler({ store: d.engine.store, outbox: d.engine.outbox, tools: new ToolInvocations(d.engine.store), now: () => new Date().toISOString(), capabilitiesFor: () => PI_TEST_CAPABILITIES })
-      d.engine.inbox.append({ inboxId: `inbox:pr-update:${thread.id}:1:0`, threadId: thread.id, kind: 'pr_update', payload: { text: NOTICE, number: 7, headSha: 'abcdef0123', changes: ['checks_failed'] } })
+      d.engine.inbox.append({ inboxId: `inbox:notice:${thread.id}:1:0`, threadId: thread.id, kind: 'reconcile_notice', payload: { text: NOTICE } })
 
       expect(reconciler.runOnce().wakes.wakes).toEqual([])
       expect(d.engine.inbox.listForThread(thread.id)[0]).toMatchObject({ status: 'pending' })
@@ -503,8 +503,8 @@ describe('a usage limit pauses the run', () => {
       const first = await d.orch.send('Do the work', false, { threadId: thread.id, clientRequestId: 'first', awaitMode: 'ack' })
       await waitFor(() => pi.turns.length === 1, 'the first turn')
       // The wake was admitted while the thread was busy: its run is queued and its effect waits.
-      const rowId = `inbox:pr-update:${thread.id}:1:0`
-      d.engine.inbox.append({ inboxId: rowId, threadId: thread.id, kind: 'pr_update', payload: { text: NOTICE, number: 7, headSha: 'abcdef0123', changes: ['checks_failed'] } })
+      const rowId = `inbox:notice:${thread.id}:1:0`
+      d.engine.inbox.append({ inboxId: rowId, threadId: thread.id, kind: 'reconcile_notice', payload: { text: NOTICE } })
       const wake = await d.engine.dispatch({ kind: 'send', threadId: thread.id, clientRequestId: 'wake:1', source: 'wake' })
       if (wake.status !== 'accepted') throw new Error('send rejected')
       const effect = d.engine.outbox.enqueue({ threadId: thread.id, runId: wake.runId, kind: 'turn.start', payload: { kind: 'wake', threadId: thread.id, runId: wake.runId, inboxIds: [rowId] } })
@@ -622,7 +622,7 @@ describe('a usage limit pauses the run', () => {
     const pausedWithRow = async (home: string, pi: ScriptedAdapter, fault: (point: string) => void) => {
       const d = boot(home, [pi], { pid: 1, fault })
       const out = await paused(d, pi)
-      d.engine.inbox.append({ inboxId: rowId(out.thread.id), threadId: out.thread.id, kind: 'pr_update', payload: { text: NOTICE, number: 7, headSha: 'abcdef0123', changes: ['checks_failed'] } })
+      d.engine.inbox.append({ inboxId: rowId(out.thread.id), threadId: out.thread.id, kind: 'reconcile_notice', payload: { text: NOTICE } })
       return { d, ...out }
     }
 
@@ -702,7 +702,7 @@ describe('a usage limit pauses the run', () => {
       let acknowledge: (() => void) | undefined
       const d = boot(newHome(), [pi], { fault: (point) => { if (point === 'resume.afterRows') { const run = acknowledge; acknowledge = undefined; run?.() } } })
       const { thread, run } = await paused(d, pi)
-      d.engine.inbox.append({ inboxId: rowId(thread.id), threadId: thread.id, kind: 'pr_update', payload: { text: NOTICE, number: 7, headSha: 'abcdef0123', changes: ['checks_failed'] } })
+      d.engine.inbox.append({ inboxId: rowId(thread.id), threadId: thread.id, kind: 'reconcile_notice', payload: { text: NOTICE } })
       // `task_status` reads the row between the item's write and its claim.
       acknowledge = () => d.engine.inbox.markAcknowledged([rowId(thread.id)])
 
@@ -751,7 +751,7 @@ describe('a usage limit pauses the run', () => {
       })
       const { thread, run } = await paused(d, pi)
       target = { d, runId: run.runId }
-      d.engine.inbox.append({ inboxId: `inbox:pr-update:${thread.id}:1:0`, threadId: thread.id, kind: 'pr_update', payload: { text: NOTICE, number: 7, headSha: 'abcdef0123', changes: ['checks_failed'] } })
+      d.engine.inbox.append({ inboxId: `inbox:notice:${thread.id}:1:0`, threadId: thread.id, kind: 'reconcile_notice', payload: { text: NOTICE } })
 
       await waitFor(() => landed && queueOf(d, thread.id).length === 0 && effectsOf(d, run.runId, 'run.resume').every((effect) => effect.status === 'succeeded'), 'the item to be retired')
 
@@ -813,7 +813,7 @@ describe('a usage limit pauses the run', () => {
       // The timer's executor writes the item and then dies, for good.
       const first = boot(home, [pi], { pid: 1, fault: (point) => { if (point === 'resume.afterItem') { crashed = true; throw new Error('crash at resume.afterItem') } } })
       const { thread, run } = await paused(first, pi)
-      first.engine.inbox.append({ inboxId: rowId(thread.id), threadId: thread.id, kind: 'pr_update', payload: { text: NOTICE, number: 7, headSha: 'abcdef0123', changes: ['checks_failed'] } })
+      first.engine.inbox.append({ inboxId: rowId(thread.id), threadId: thread.id, kind: 'reconcile_notice', payload: { text: NOTICE } })
       await waitFor(() => crashed && queueOf(first, thread.id).length === 1, 'the item to be on disk')
       await first.crash()
 

@@ -286,6 +286,113 @@ describe('OrchestratorService over the Run Engine', () => {
     ).rejects.toThrow('client_request_id_conflict')
   }, 30_000)
 
+  it('answers a send whose turn failed after it started with its run, and a retry runs nothing', async () => {
+    const thread = store.createThread('failed-after-start')
+    orch.getOrCreateSession(thread.id).projectCwd = projectRepo
+    releaseFirst()
+    // The provider has answered, then the turn fails as a turn-end checkpoint does when the agent moved the
+    // workspace's branch ("recovery is required"). The agent's work is done by then.
+    const internals = orch as unknown as { setTurnPhase: (threadId: string, phase: string, ...rest: unknown[]) => void }
+    const setTurnPhase = internals.setTurnPhase.bind(orch)
+    internals.setTurnPhase = (threadId, phase, ...rest) => {
+      if (phase === 'finalizing') throw new Error('Workspace branch changed during execution; recovery is required.')
+      setTurnPhase(threadId, phase, ...rest)
+    }
+    const first = await orch.send('push and open a PR', false, { threadId: thread.id, clientRequestId: 'failed-send' })
+    expect(chatCalls).toBe(1)
+    expect(first.runId).toBeTruthy()
+    expect(first.error).toMatchObject({ code: 'orchestrator_turn_failed' })
+    expect(first.message).toMatch(/^\[orchestrator_turn_failed\] /)
+    expect(engine.getRun(first.runId!)).toMatchObject({
+      status: 'failed',
+      outcome: { error: 'Workspace branch changed during execution; recovery is required.' }
+    })
+    expect(engine.getRun(first.runId!)!.startedAt).not.toBeNull()
+
+    const again = await orch.send('push and open a PR', false, { threadId: thread.id, clientRequestId: 'failed-send' })
+    expect(again).toMatchObject({ runId: first.runId, replayed: true })
+    expect(chatCalls).toBe(1)
+    expect(engine.listRuns(thread.id)).toHaveLength(1)
+  }, 30_000)
+
+  it('fails a send whose turn could not start, and nothing of it runs later', async () => {
+    const thread = store.createThread('failed-before-start')
+    orch.getOrCreateSession(thread.id).projectCwd = projectRepo
+    releaseFirst()
+    // The message cannot be taken into the thread: the turn ends before its run starts.
+    const internals = orch as unknown as { acceptTurnUserInput: (...args: unknown[]) => void }
+    const accept = internals.acceptTurnUserInput
+    internals.acceptTurnUserInput = () => { throw new Error('transcript is not writable') }
+    await expect(
+      orch.send('never runs', false, { threadId: thread.id, clientRequestId: 'refused-send' })
+    ).rejects.toThrow('transcript is not writable')
+    const [run] = engine.listRuns(thread.id)
+    expect(run).toMatchObject({ status: 'failed', startedAt: null })
+    internals.acceptTurnUserInput = accept
+    // The worker and reconciler get their chance: the refused run never reaches the provider.
+    await new Promise((resolve) => setTimeout(resolve, 300))
+    expect(chatCalls).toBe(0)
+    expect(effectStatuses(engine, thread.id, 'turn.start', run.runId).at(-1)).toBe('succeeded')
+    // A repeat with the same id fails as the first send did, instead of answering as if it had run.
+    await expect(
+      orch.send('never runs', false, { threadId: thread.id, clientRequestId: 'refused-send' })
+    ).rejects.toMatchObject({ code: 'run_not_started', message: expect.stringContaining('transcript is not writable') })
+    expect(engine.listRuns(thread.id)).toHaveLength(1)
+    // Sent again as a new message, it runs once.
+    const next = await orch.send('never runs', false, { threadId: thread.id, clientRequestId: 'refused-send-2' })
+    expect(next.message).toBe('hello from probe')
+    expect(chatCalls).toBe(1)
+  }, 30_000)
+
+  it('answers a slash workflow that was admitted and then failed with its run, its workflow run and the error', async () => {
+    const thread = store.createThread('workflow-admitted')
+    orch.getOrCreateSession(thread.id).projectCwd = projectRepo
+    releaseFirst()
+    const workflowRun = {
+      invocationId: 'invocation-1', profileId: 'profile', threadId: thread.id, definitionId: 'definition',
+      revisionId: 'revision', runId: 'workflow-run-1', title: 'Fixture', state: 'running' as const
+    }
+    let executed = 0
+    orch.setWorkflowChatExecutor({
+      prepare: async () => { throw new Error('not used') },
+      execute: async () => { executed += 1; return workflowRun },
+      observe: async () => { throw new Error('not used') },
+      abandon: () => undefined
+    })
+    // The workflow is admitted; then its message cannot be saved in the thread.
+    const internals = orch as unknown as { acceptTurnUserInput: (...args: unknown[]) => void }
+    internals.acceptTurnUserInput = () => { throw new Error('transcript is not writable') }
+    const input = { content: '/fixture', workflowInvocationId: workflowRun.invocationId }
+    const first = await orch.send(input, false, { threadId: thread.id, clientRequestId: 'workflow-send' })
+    expect(executed).toBe(1)
+    expect(first).toMatchObject({ workflowRun, error: { code: 'orchestrator_turn_failed' } })
+    expect(engine.getRun(first.runId!)).toMatchObject({ status: 'failed' })
+    expect(engine.getRun(first.runId!)!.startedAt).not.toBeNull()
+    // The transcript has no record of the workflow run: its message was never saved.
+    expect(orch.getOrCreateSession(thread.id).messages.some((message) => message.workflowRun)).toBe(false)
+    // A repeat answers with the same run and the workflow run it admitted, so the caller can still follow it;
+    // the workflow is not admitted again and the repeat is not refused.
+    const again = await orch.send(input, false, { threadId: thread.id, clientRequestId: 'workflow-send' })
+    expect(again).toMatchObject({ runId: first.runId, replayed: true, workflowRun })
+    const once = await orch.send(input, false, { threadId: thread.id, clientRequestId: 'workflow-send' })
+    expect(once).toMatchObject({ runId: first.runId, replayed: true, workflowRun })
+    expect(executed).toBe(1)
+    expect(chatCalls).toBe(0)
+  }, 30_000)
+
+  it('refuses a repeated id that comes with other text', async () => {
+    const thread = store.createThread('id-reused')
+    orch.getOrCreateSession(thread.id).projectCwd = projectRepo
+    releaseFirst()
+    const first = await orch.send('first text', false, { threadId: thread.id, clientRequestId: 'reused-id' })
+    expect(first.message).toBe('hello from probe')
+    await expect(
+      orch.send('other text', false, { threadId: thread.id, clientRequestId: 'reused-id' })
+    ).rejects.toMatchObject({ code: 'client_request_id_conflict' })
+    expect(engine.listRuns(thread.id)).toHaveLength(1)
+    expect(chatCalls).toBe(1)
+  }, 30_000)
+
   it('gives a pre-upgrade queue item a run when it drains', async () => {
     const thread = store.createThread('legacy-queue')
     orch.getOrCreateSession(thread.id).projectCwd = projectRepo

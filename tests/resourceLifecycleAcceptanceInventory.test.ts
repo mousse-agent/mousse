@@ -102,13 +102,13 @@ describe('public inventory and request identity', () => {
         getOrCreateSession(threadId: string): { workspace: { workspacePath: string } | null; agents: { create(input: Omit<Agent, 'id' | 'createdAt' | 'updatedAt'>, id?: string): Agent } }
         withTaskWriter<T>(session: unknown, work: () => Promise<T>): Promise<T>
         snapshotOwnedParent(session: unknown, label: string): Promise<string>
-        worktrees: { createSelectiveWorktree(id: string, files: string[], repositoryPath: string, base: string): Promise<{ path: string; branch: string }> }
+        worktrees: { createWorktree(id: string, repositoryPath: string, base: string): Promise<{ path: string; branch: string }> }
       }
       const session = owner.getOrCreateSession(thread.id)
       const childIdentity = randomUUID()
       const created = await owner.withTaskWriter(session, async () => {
         const base = await owner.snapshotOwnedParent(session, 'child-base')
-        return owner.worktrees.createSelectiveWorktree(childIdentity, ['PRIMARY.txt'], session.workspace!.workspacePath, base)
+        return owner.worktrees.createWorktree(childIdentity, session.workspace!.workspacePath, base)
       })
       session.agents.create({ cliType: 'mousse', worktreePath: created.path, branch: created.branch, repositoryRoot: session.workspace!.workspacePath,
         executionMode: 'gui', status: 'running', task: 'Inspect PRIMARY.txt and retain your result.' } as Omit<Agent, 'id' | 'createdAt' | 'updatedAt'>, childIdentity)

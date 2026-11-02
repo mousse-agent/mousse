@@ -83,6 +83,8 @@ export class FakeGh {
     if (list[0] === 'api') {
       const path = list[3]
       if (path === 'user') return { stdout: `${this.viewer}\n`, stderr: '' }
+      // The pull request itself, projected to its author's association (gh 2.98 refuses that field in `pr view`).
+      if (/\/pulls\/\d+$/.test(path)) return { stdout: `${this.authorAssociation}\n`, stderr: '' }
       return { stdout: JSON.stringify(this.linePage(path)), stderr: '' }
     }
     throw ghFailure(`unexpected gh ${list.join(' ')}`)
@@ -98,7 +100,6 @@ export class FakeGh {
       isDraft: false,
       body: '',
       author: { login: 'dev' },
-      authorAssociation: this.authorAssociation,
       baseRefName: 'main',
       headRefName: 'feature',
       headRefOid: this.headSha,

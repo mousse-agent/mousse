@@ -446,6 +446,7 @@ export const PROTOCOL_METHODS = [
   'pullRequests.merge',
   'pullRequests.close',
   'pullRequests.baseBranches',
+  'pullRequests.mergeMethod',
   'pullRequests.link',
   'pullRequests.unlink',
   'pullRequests.list',
