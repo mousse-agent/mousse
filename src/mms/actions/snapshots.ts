@@ -65,7 +65,47 @@ export interface SnapshotInput {
 
 const SUBJECT = 'mousse snapshot: '
 
-interface LastSnapshot { sha: string; tree: string; head?: string }
+interface LastSnapshot { sha: string; tree: string; head?: string; uncovered?: string }
+
+/**
+ * What a snapshot did not cover, kept with it (a `Mousse-Uncovered:` line of its commit): its coverage gaps, and the
+ * ignored files and folders that were there (collapsed to their folder, at most `IGNORED_RECORDED`). A restore reads it
+ * so it never deletes or writes over what was there but not recorded. `truncated`: more were ignored than recorded.
+ */
+export interface Uncovered { gaps: CoverageGap[]; ignored: string[]; truncated: boolean }
+
+const UNCOVERED_LINE = 'Mousse-Uncovered: '
+const IGNORED_RECORDED = 2000
+
+/** The ignored files and folders in the folder now, collapsed to their folder; never `.mousse`. */
+function ignoredNow(top: string): { ignored: string[]; truncated: boolean } {
+  const listed = tryGit(top, ['ls-files', '-z', '--others', '--ignored', '--exclude-standard', '--directory'])
+  if (!listed.ok) return { ignored: [], truncated: true }
+  const all = listed.stdout.split('\0').filter((path) => path && path !== '.mousse/' && !path.startsWith('.mousse/'))
+  return { ignored: all.slice(0, IGNORED_RECORDED), truncated: all.length > IGNORED_RECORDED }
+}
+
+/** The record of what `sha` did not cover, or undefined for a snapshot taken before snapshots kept one. */
+export function snapshotUncovered(top: string, sha: string): Uncovered | undefined {
+  const commit = tryGit(top, ['cat-file', 'commit', sha])
+  if (!commit.ok) return undefined
+  const line = commit.stdout.split('\n').find((entry) => entry.startsWith(UNCOVERED_LINE))
+  if (!line) return undefined
+  try {
+    const value = JSON.parse(line.slice(UNCOVERED_LINE.length)) as { g?: CoverageGap[]; i?: string[]; t?: boolean }
+    return { gaps: Array.isArray(value.g) ? value.g : [], ignored: Array.isArray(value.i) ? value.i : [], truncated: value.t === true }
+  } catch {
+    return undefined
+  }
+}
+
+/** The reason `path` was not covered in `record`, or undefined when the record covers it. */
+function uncoveredReason(record: Uncovered, path: string): string | undefined {
+  const within = (root: string): boolean => root === '.' || path === root || path.startsWith(`${root.replace(/\/$/, '')}/`)
+  const gap = record.gaps.find((entry) => within(entry.path))
+  if (gap) return gap.reason
+  return record.ignored.some((entry) => entry.endsWith('/') ? within(entry) : entry === path) ? 'ignored' : undefined
+}
 
 /** What a hidden store refuses to snapshot, so that a folder too large to walk quickly never slows or fails a turn. */
 export interface SnapshotLimits {
@@ -329,15 +369,20 @@ export function takeSnapshot(cwd: string, input: SnapshotInput): Snapshot {
   const branch = hidden ? undefined : tryGit(top, ['branch', '--show-current']).stdout || undefined
   const operation = operationInProgress(top)
   const state = { tree, ...(head ? { head } : {}), ...(branch ? { branch } : {}), ...(operation ? { operationInProgress: operation } : {}), ...(coverageGaps.length ? { coverageGaps } : {}) }
+  const { ignored, truncated } = ignoredNow(top)
+  const uncovered = JSON.stringify({ g: coverageGaps, i: ignored, ...(truncated ? { t: true } : {}) })
   const previous = readLast(files.last)
-  if (previous && previous.tree === tree && previous.head === head && tryGit(top, ['cat-file', '-e', `${previous.sha}^{commit}`]).ok) return { sha: previous.sha, ...state }
+  // Reused only when what it left out is the same too: a restore reads that from the snapshot.
+  if (previous && previous.tree === tree && previous.head === head && previous.uncovered === uncovered && tryGit(top, ['cat-file', '-e', `${previous.sha}^{commit}`]).ok) return { sha: previous.sha, ...state }
   const trailers = [
     input.threadId ? `Mousse-Thread: ${input.threadId}` : '', input.operationId ? `Mousse-Operation: ${input.operationId}` : '',
-    head ? `Mousse-Head: ${head}` : '', branch ? `Mousse-Branch: ${branch}` : ''
+    head ? `Mousse-Head: ${head}` : '', branch ? `Mousse-Branch: ${branch}` : '',
+    // Only when something was not covered: no record and an empty one mean the same to a restore.
+    coverageGaps.length || ignored.length || truncated ? `${UNCOVERED_LINE}${uncovered}` : ''
   ].filter(Boolean).join('\n')
   const subject = `${SUBJECT}${input.reason.split(/\r?\n/)[0]!.trim()}`
   const sha = git(top, ['commit-tree', tree, ...(head ? ['-p', head] : []), '-m', subject, ...(trailers ? ['-m', trailers] : [])], MOUSSE_COMMIT_ENV)
-  writeFileSync(files.last, JSON.stringify({ sha, tree, ...(head ? { head } : {}) } satisfies LastSnapshot))
+  writeFileSync(files.last, JSON.stringify({ sha, tree, ...(head ? { head } : {}), uncovered } satisfies LastSnapshot))
   return { sha, ...state }
 }
 
@@ -403,7 +448,17 @@ export function pushedNotice(operation: string, remote: string): string {
 /** Files a restore was about to overwrite or delete that no snapshot held (ignored, for example), kept first under `ref`. */
 export interface PreservedFiles { ref: string; paths: string[] }
 
-export type RestoreResult = { snapshot: Snapshot; tree: string; preserved?: PreservedFiles } | { conflicts: string[] }
+/** A path a restore left as it is because it was not covered on one side, and why. */
+export interface LeftAsIs { path: string; reason: string }
+
+export type RestoreResult = { snapshot: Snapshot; tree: string; preserved?: PreservedFiles; leftAsIs?: LeftAsIs[] } | { conflicts: string[] }
+
+/** The line a result carries for the paths a restore left as they are. */
+export function leftAsIsNotice(left: LeftAsIs[] | undefined): string | undefined {
+  if (!left?.length) return undefined
+  const named = left.slice(0, 10).map((entry) => `${entry.path} (${entry.reason})`).join(', ')
+  return `Left as it is: ${named}${left.length > 10 ? ` and ${left.length - 10} more` : ''}.`
+}
 
 /** The line a result carries when a restore kept files no snapshot held before writing over them. */
 export function preservedNotice(preserved: PreservedFiles): string {
@@ -418,6 +473,8 @@ export interface RestoreChangeInput extends SnapshotInput {
   ours: string
   /** The code to bring in (Undo: the turn's start). */
   theirs: string
+  /** Where `theirs` is, in words for the result: "at the start of the turn". */
+  restoredTo?: string
 }
 
 /**
@@ -432,11 +489,54 @@ export function restoreChange(cwd: string, input: RestoreChangeInput, planned?: 
   const top = git(cwd, ['rev-parse', '--show-toplevel'])
   const merged = mergeTrees(top, input.base, input.ours, input.theirs)
   if ('conflicts' in merged) return merged
+  const ours = treeOf(top, input.ours)
+  const { tree, leftAsIs } = leaveUncovered(top, input, ours, merged.tree)
   // Checked before the intent is recorded: a folder that cannot be kept refuses the restore with nothing pending.
-  uncapturedInTheWay(top, treeOf(top, input.ours), merged.tree)
-  planned?.(merged.tree)
-  const preserved = moveFiles(top, treeOf(top, input.ours), merged.tree, input.operationId)
-  return { snapshot: takeSnapshot(top, input), tree: merged.tree, ...(preserved ? { preserved } : {}) }
+  uncapturedInTheWay(top, ours, tree)
+  planned?.(tree)
+  const preserved = moveFiles(top, ours, tree, input.operationId)
+  return { snapshot: takeSnapshot(top, input), tree, ...(preserved ? { preserved } : {}), ...(leftAsIs.length ? { leftAsIs } : {}) }
+}
+
+/**
+ * The merge's tree with every path the restore must not touch put back as it is now: a path not covered on the side
+ * being restored to (left out, unreadable or ignored there, so its absence there says nothing), a path that would be
+ * deleted when the record of that side is incomplete, and a file not covered now (over the size limit) that the
+ * restore would write over. Those stay on disk as they are and are named. A snapshot with no record (taken before
+ * snapshots kept one) changes nothing here.
+ */
+function leaveUncovered(top: string, input: RestoreChangeInput, ours: string, merged: string): { tree: string; leftAsIs: LeftAsIs[] } {
+  const target = snapshotUncovered(top, input.theirs)
+  const now = snapshotUncovered(top, input.ours)
+  if (!target && !now) return { tree: merged, leftAsIs: [] }
+  const where = input.restoredTo ?? 'in the version restored'
+  const changes = git(top, ['diff-tree', '-r', '-z', '--no-renames', '--name-status', ours, merged]).split('\0').filter(Boolean)
+  const leftAsIs: LeftAsIs[] = []
+  for (let index = 0; index + 1 < changes.length; index += 2) {
+    const status = changes[index]!
+    const path = changes[index + 1]!
+    const there = target ? uncoveredReason(target, path) : undefined
+    const current = now?.gaps.length ? uncoveredReason({ ...now, ignored: [] }, path) : undefined
+    if (there) leftAsIs.push({ path, reason: `not covered ${where}` })
+    else if (target?.truncated && status === 'D') leftAsIs.push({ path, reason: `not known whether it was there ${where}` })
+    else if (current && existsSync(join(top, path))) leftAsIs.push({ path, reason: `not covered now: ${current}` })
+  }
+  if (!leftAsIs.length) return { tree: merged, leftAsIs }
+  // The kept paths take their entry from `ours` (or none), through a temporary index: nothing on disk changes here.
+  const temporary = join(privateFiles(top).directory, `leave-${randomUUID()}.index`)
+  const env = { GIT_INDEX_FILE: temporary }
+  try {
+    git(top, ['read-tree', merged], env)
+    const kept = new Map(git(top, ['ls-tree', '-r', '-z', ours, '--', ...leftAsIs.map((entry) => entry.path)]).split('\0').filter(Boolean)
+      .map((line) => { const tab = line.indexOf('\t'); const [mode, , sha] = line.slice(0, tab).split(' '); return [line.slice(tab + 1), `${mode} ${sha}`] as const }))
+    const lines = leftAsIs.map((entry) => `${kept.get(entry.path) ?? `0 ${'0'.repeat(merged.length)}`}\t${entry.path}`)
+    git(top, ['update-index', '--index-info'], env, lines.join('\n') + '\n')
+    return { tree: git(top, ['write-tree'], env), leftAsIs }
+  } catch (error) {
+    throw new Error(`The restore would change ${leftAsIs[0]!.path}, which was not recorded, and cannot leave it as it is. Nothing was changed.`, { cause: error })
+  } finally {
+    rmSync(temporary, { force: true })
+  }
 }
 
 /**

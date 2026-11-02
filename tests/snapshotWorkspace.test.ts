@@ -432,6 +432,51 @@ describe('a project without Git', () => {
     expect(readFileSync(join(work, 'big.bin'), 'utf8')).toBe('y'.repeat(300))
   })
 
+  it('never deletes a file the start left out: the turn records both sides’ gaps, and Undo leaves it and says why', async () => {
+    const work = folder('work')
+    write(work, 'small.txt', 'one\n')
+    write(work, 'data.bin', 'x'.repeat(200))
+    configureSnapshotLimits({ fileBytes: 100 })
+    const t = thread('a', work, 'project-1')
+    // The agent shrinks the file below the limit: the end records it, the start never did.
+    const { action } = await t.turn('turn', () => { write(work, 'data.bin', 'small now'); write(work, 'small.txt', 'two\n') })
+    expect(action.git?.coverageGaps).toEqual([{ path: 'data.bin', reason: 'over 100 bytes, at the start of the turn' }])
+    expect(action.notCovered).toBe('Not covered: data.bin (over 100 bytes, at the start of the turn).')
+    const undone = await t.undo()
+    expect(readFileSync(join(work, 'small.txt'), 'utf8')).toBe('one\n')
+    expect(readFileSync(join(work, 'data.bin'), 'utf8')).toBe('small now')
+    expect(undone.notice).toContain('Left as it is: data.bin (not covered at the start of the turn).')
+  })
+
+  it('never deletes a file that was ignored at the start and that the turn un-ignored', async () => {
+    const work = folder('work')
+    write(work, '.gitignore', 'secret.txt\n')
+    write(work, 'secret.txt', 'keep me\n')
+    const t = thread('a', work, 'project-1')
+    const { action } = await t.turn('turn', () => { write(work, '.gitignore', ''); write(work, 'notes.txt', 'new\n') })
+    expect(t.store('ls-tree', '-r', '--name-only', action.endSha).split('\n')).toContain('secret.txt')
+    const undone = await t.undo()
+    expect(readFileSync(join(work, '.gitignore'), 'utf8')).toBe('secret.txt\n')
+    expect(existsSync(join(work, 'notes.txt'))).toBe(false)
+    expect(readFileSync(join(work, 'secret.txt'), 'utf8')).toBe('keep me\n')
+    expect(undone.notice).toContain('Left as it is: secret.txt (not covered at the start of the turn).')
+  })
+
+  it('leaves a file that grew past the limit during the turn, says so, and restores the rest', async () => {
+    const work = folder('work')
+    write(work, 'small.txt', 'one\n')
+    write(work, 'data.bin', 'x'.repeat(50))
+    configureSnapshotLimits({ fileBytes: 100 })
+    const t = thread('a', work, 'project-1')
+    const { action } = await t.turn('turn', () => { write(work, 'data.bin', 'y'.repeat(300)); write(work, 'small.txt', 'two\n') })
+    expect(action).toMatchObject({ reversible: true })
+    expect(action.notCovered).toBe('Not covered: data.bin (over 100 bytes).')
+    const undone = await t.undo()
+    expect(readFileSync(join(work, 'small.txt'), 'utf8')).toBe('one\n')
+    expect(readFileSync(join(work, 'data.bin'), 'utf8')).toBe('y'.repeat(300))
+    expect(undone.notice).toContain('Left as it is: data.bin (not covered now: over 100 bytes).')
+  })
+
   it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)('leaves an unreadable file out and names it, as in a worktree', async () => {
     const work = folder('work')
     write(work, 'a.txt', 'a\n')

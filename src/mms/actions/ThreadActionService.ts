@@ -13,7 +13,7 @@ import { ChangeReceiptService } from './ChangeReceiptService'
 import { assertHeldThreadLease, withGitMutationLocks } from './GitOperationCoordinator'
 import { IN_PROGRESS_GIT_MARKERS } from '../git/gitMarkers'
 import { changedPaths, git, tryGit } from './git'
-import { coverageNotice, describeGit, sameTree, SnapshotRefusedError, takeSnapshot, type Snapshot } from './snapshots'
+import { coverageNotice, describeGit, sameTree, SnapshotRefusedError, snapshotUncovered, takeSnapshot, type Snapshot } from './snapshots'
 import { activeHiddenStore } from '../git/hiddenStore'
 import { inThreadSnapshotScope, setSnapshotsOff } from '../workspace/SnapshotWorkspace'
 
@@ -403,6 +403,14 @@ export class ThreadActionService {
       action.startSha = snapshot.sha
       snapshot = { ...snapshot, coverageGaps: [{ path: '.', reason: `start of turn not captured: ${uncaptured.error}` }, ...(snapshot.coverageGaps ?? [])] }
       rmSync(join(this.threadDirectory, UNCAPTURED_START_FILE), { force: true })
+    }
+    // What the start did not cover is the turn's too: a file left out at the start and recorded at the end was not made
+    // by the turn. The turn's gaps are both sides', the start's named as such where the end covered them.
+    const startGaps = snapshotUncovered(workspacePath, action.startSha)?.gaps ?? []
+    if (startGaps.length) {
+      const endPaths = new Set((snapshot.coverageGaps ?? []).map((gap) => gap.path))
+      const fromStart = startGaps.filter((gap) => !endPaths.has(gap.path)).map((gap) => ({ path: gap.path, reason: `${gap.reason}, at the start of the turn` }))
+      if (fromStart.length) snapshot = { ...snapshot, coverageGaps: [...(snapshot.coverageGaps ?? []), ...fromStart] }
     }
     const { record, commits } = describeGit(workspacePath, action.startSha, snapshot)
     action.endSha = snapshot.sha
