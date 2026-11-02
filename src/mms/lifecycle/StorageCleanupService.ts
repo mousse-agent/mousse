@@ -869,12 +869,12 @@ export class StorageCleanupService {
         // A manual run evaluates every worktree before it retires the first, so the thread may have been used since.
         if (verdict.rule === 'worktree-inactive' && verdict.inactiveDays !== null && (this.now() - this.activityAt(record, bound, head)) / DAY_MS < verdict.inactiveDays) return kept('Thread was used since check')
         const retirement = new WorktreeRetirementService(this.deps.store, { taskLease, repositoryLease })
-        retirement.prepare({ taskId: record.taskId, worktreePath: workspace.worktreePath, branch: workspace.branch, sourcePath: join(record.location, 'workspace.json'), repositoryId: workspace.repositoryId, baseSha: workspace.baseSha, resultSha: head })
+        await retirement.prepare({ taskId: record.taskId, worktreePath: workspace.worktreePath, branch: workspace.branch, sourcePath: join(record.location, 'workspace.json'), repositoryId: workspace.repositoryId, baseSha: workspace.baseSha, resultSha: head })
         let inUse: string | undefined
         try { inUse = this.probeRemoval(workspace.worktreePath) } catch (error) { return failed((error as Error).message) }
         if (inUse) return kept(inUse)
         // The folder moves into the trash in one step or not at all; a folder in use stays where it is.
-        retirement.retire(retirement.pathFor(record.taskId, workspace.worktreePath))
+        await retirement.retire(retirement.pathFor(record.taskId, workspace.worktreePath))
         try { atomicWriteJsonSync(cleanupMarkerPath(this.deps.store, record.taskId), { retiredAt: new Date(this.now()).toISOString(), rule: verdict.rule } satisfies CleanupMarker) }
         catch { /* The checkout is gone and restorable; only the status note is missing. */ }
         return { ...base, bytes: measurement.bytes, files: measurement.files, ...approximate(measurement), outcome: 'removed', reason: verdict.reason }
@@ -913,8 +913,8 @@ export class StorageCleanupService {
           let lease
           try { lease = await acquireRepositoryLease(await resolveRepositoryIdentityAsync(manifest.trashPath, { requireMutationCapability: true }), { signal: AbortSignal.timeout(REPOSITORY_LEASE_WAIT_MS) }) }
           catch { items.push({ ...base, bytes: 0, outcome: 'kept', reason: 'Repository is busy' }); continue }
-          let outcome: ReturnType<WorktreeRetirementService['expireTrash']>
-          try { outcome = new WorktreeRetirementService(this.deps.store, { repositoryLease: lease }).expireTrash(path, { now, inUse: this.probeRemoval }) }
+          let outcome: Awaited<ReturnType<WorktreeRetirementService['expireTrash']>>
+          try { outcome = await new WorktreeRetirementService(this.deps.store, { repositoryLease: lease }).expireTrash(path, { now, inUse: this.probeRemoval }) }
           finally { lease.release() }
           if (!outcome || 'waiting' in outcome) continue
           items.push('removed' in outcome

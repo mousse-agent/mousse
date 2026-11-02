@@ -185,7 +185,7 @@ export class ResourcePurgeService {
         if (!existsSync(item.identity)) continue
         try {
           const lease = await acquireRepositoryLease(await resolveRepositoryIdentityAsync(item.identity, { requireMutationCapability: true }), { signal: AbortSignal.timeout(10_000) })
-          try { this.assertReservation(taskId, token, record.generation); const refusal = options.recheck?.(item.identity); if (refusal) throw new Error(refusal); new WorktreeRetirementService(this.store, { repositoryLease: lease, cleanupTaskId: taskId, cleanupToken: token, cleanupGeneration: record.generation }).retire(item.manifestPath) } finally { lease.release() }
+          try { this.assertReservation(taskId, token, record.generation); const refusal = options.recheck?.(item.identity); if (refusal) throw new Error(refusal); await new WorktreeRetirementService(this.store, { repositoryLease: lease, cleanupTaskId: taskId, cleanupToken: token, cleanupGeneration: record.generation }).retire(item.manifestPath) } finally { lease.release() }
         } catch (error) { retained.push(`Checkout retained: ${(error as Error).message}`) }
       }
       this.store.update(taskId, (current) => { if (retained.length) current.blockedReason = retained.join('; '); else delete current.blockedReason })
@@ -261,10 +261,10 @@ export class ResourcePurgeService {
           if (readOnly) {
             // No repository lease and no `prepare`, which writes a manifest and Git refs: judge the checkout by
             // what `prepare` would refuse. The item is for display only; it is never signed or acted on.
-            const discard = this.retirement.inspectForDiscard({ taskId: resource.ownerTaskId, sourcePath: source.path, worktreePath: resource.identity, branch, repositoryId: resource.repositoryId })
+            const discard = await this.retirement.inspectForDiscard({ taskId: resource.ownerTaskId, sourcePath: source.path, worktreePath: resource.identity, branch, repositoryId: resource.repositoryId })
             repositories.set(discard.repositoryId, discard.commonDir)
             let retained: string | undefined
-            try { this.retirement.inspectContent(resource.identity) } catch (error) { retained = (error as Error).message }
+            try { await this.retirement.inspectContent(resource.identity) } catch (error) { retained = (error as Error).message }
             let discardRequired = Boolean(retained) || resource.claims.some((claim) => ['pending-integration', 'conflict'].includes(claim.kind))
             for (const source of inventory.sources.filter((source) => resource.sourceIds.includes(source.id) && basename(source.path) === 'workspace.json')) {
               // The thread's branch is the agent's to move, so the commits it holds are read from HEAD, not from the record.
@@ -280,9 +280,9 @@ export class ResourcePurgeService {
           try {
             this.assertReservation(taskId, reservation, record.generation)
             const input = { taskId: resource.ownerTaskId, sourcePath: source.path, worktreePath: resource.identity, branch, repositoryId: resource.repositoryId }
-            try { manifest = new WorktreeRetirementService(this.store, { repositoryLease: lease, cleanupTaskId: taskId, cleanupToken: reservation, cleanupGeneration: record.generation }).prepare(input) }
+            try { manifest = await new WorktreeRetirementService(this.store, { repositoryLease: lease, cleanupTaskId: taskId, cleanupToken: reservation, cleanupGeneration: record.generation }).prepare(input) }
             catch (error) {
-              const discard = this.retirement.inspectForDiscard(input)
+              const discard = await this.retirement.inspectForDiscard(input)
               repositories.set(discard.repositoryId, discard.commonDir)
               // The discard path compares the checkout's own branch when it removes it.
               preview.items.push({ id: resource.id, kind: 'worktree', identity: resource.identity, ownerTaskId: resource.ownerTaskId, commonDir: discard.commonDir, expectedValue: discard.resultSha, rootIdentity: discard.rootIdentity, content: discard.content, indexDigest: discard.indexDigest, branch: current, sourcePath: source.path, discardRequired: true, discardState: 'pending', reason: (error as Error).message, status: 'pending' })
@@ -292,7 +292,7 @@ export class ResourcePurgeService {
           } finally { lease.release() }
         }
         if (!manifest) throw new Error('Absent workspace lacks a reconstruction manifest')
-        this.retirement.verifyPins(manifest)
+        await this.retirement.verifyPins(manifest)
         repositories.set(manifest.repositoryId, manifest.commonDir)
         // A worktree that held uncommitted files is kept as a snapshot; deleting the snapshot deletes that work.
         let discardRequired = resource.claims.some((claim) => ['pending-integration', 'conflict'].includes(claim.kind)) || manifest.snapshotSha !== undefined
@@ -547,7 +547,7 @@ export class ResourcePurgeService {
           return
         }
         // Purge reuses the verifier; its source is fenced by the external irreversible owner.
-        new WorktreeRetirementService(this.store, { repositoryLease: lease, cleanupTaskId: reservation.taskId, cleanupToken: reservation.token, cleanupGeneration: reservation.generation }).retire(item.manifestPath!, { purging: true })
+        await new WorktreeRetirementService(this.store, { repositoryLease: lease, cleanupTaskId: reservation.taskId, cleanupToken: reservation.token, cleanupGeneration: reservation.generation }).retire(item.manifestPath!, { purging: true })
       } else {
         const current = readDirectLifecycleRef(commonDir, item.identity)
         if (!current) return

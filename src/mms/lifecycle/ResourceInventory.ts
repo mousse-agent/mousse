@@ -115,7 +115,7 @@ export function buildResourceInventory(store: ResourceLifecycleStore, record: Ta
           if (owners.length !== 1) throw new Error('Absent checkout lacks unique reconstruction authority')
           const manifest = retirement.load(retirement.pathFor(owners[0].taskId, path))
           if (expectedBranch && manifest.branch !== expectedBranch || expectedRepository && manifest.repositoryId !== expectedRepository) throw new Error('Reconstruction owner changed')
-          retirement.verifyPins(manifest)
+          retirement.verifyPinsSync(manifest)
           verifiedWorktrees.set(key, undefined)
           for (const value of resources.values()) if (value.kind === 'worktree' && value.identity === path) value.ownership = 'verified'
           return

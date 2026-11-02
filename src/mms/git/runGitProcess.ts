@@ -1,7 +1,14 @@
 import { spawn } from 'node:child_process'
 
 /** What a Git process left: as `spawnSync` reports it. */
-export interface GitProcess { status: number | null; stdout: string; stderr: string; error?: NodeJS.ErrnoException }
+export interface GitProcess {
+  status: number | null
+  stdout: string
+  stderr: string
+  error?: NodeJS.ErrnoException
+  /** `stdout` as the bytes Git wrote, for output that is not text (`cat-file --batch`). */
+  stdoutBytes: Buffer
+}
 
 /** The output limit `spawnSync` and `execFileSync` use when none is given. */
 const DEFAULT_MAX_BUFFER = 1024 * 1024
@@ -32,7 +39,8 @@ export function runGitProcess(argv: string[], options: { cwd: string; env: NodeJ
       if (timer) clearTimeout(timer)
       // As `spawnSync`: the exit code even when the output was cut off; none for a process that was killed or never started.
       const started = !error || error.code === 'ENOBUFS' || error.code === 'ETIMEDOUT'
-      settle({ status: started ? code : null, stdout: Buffer.concat(out).toString('utf8'), stderr: Buffer.concat(err).toString('utf8'), ...(error ? { error } : {}) })
+      const bytes = Buffer.concat(out)
+      settle({ status: started ? code : null, stdout: bytes.toString('utf8'), stdoutBytes: bytes, stderr: Buffer.concat(err).toString('utf8'), ...(error ? { error } : {}) })
     })
     if (options.input !== undefined) {
       // Git may stop reading early (a refusal); what it did not read is dropped, as with `spawnSync`.

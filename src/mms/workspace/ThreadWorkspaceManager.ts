@@ -430,7 +430,7 @@ export class ThreadWorkspaceManager {
         if (metadata.untrusted) assertPerWorktreeConfig(repository.gitTopLevel)
         // The worktree's own configuration went with the worktree: for someone else's commits it is put back before anything is checked out.
         const safety = metadata.untrusted ? await untrustedSafety(repository.gitTopLevel) : undefined
-        retirement.reconstruct(manifestPath, safety ? { prepare: (path) => pinUntrustedWorktree(repository.gitTopLevel, path, safety), env: { ...nonInteractiveGitEnv(), GIT_LFS_SKIP_SMUDGE: '1' } } : undefined)
+        await retirement.reconstruct(manifestPath, safety ? { prepare: (path) => pinUntrustedWorktree(repository.gitTopLevel, path, safety), env: { ...nonInteractiveGitEnv(), GIT_LFS_SKIP_SMUDGE: '1' } } : undefined)
         const restored = this.verify(metadata)
         if (restored.lifecycle !== 'ready') throw new Error('Reconstructed task workspace failed verification')
         atomicWriteJsonSync(this.workspacePath, restored)
