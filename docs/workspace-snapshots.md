@@ -46,7 +46,7 @@ In detail:
 | Before / after of a change | `refs/mousse/changes/<receiptId>/{before,after}` (exactly this pair; inventory and release assume it) |
 | A conversation branch's code | `refs/mousse/conversation-branches/<id>` |
 | A chat agent's start and result | `refs/mousse/agents/<id>/base`, `refs/mousse/agents/<id>/result` |
-| A delegated task's start and result | `refs/mousse/delegations/<childThreadId>/<delegationId>/{base,result}` (`:` in the id becomes `-`; listed in the parent's `subagent-results.json`) |
+| A delegated task's start and result | `refs/mousse/delegations/<childThreadId>/<delegationId>/{base,result}` (`:` in the id becomes `-`; listed in the subagent thread's `subagent-results.json`) |
 | A workflow agent's spawn snapshot and its result | `refs/mousse/workflows/<profile>/<thread>/<agent>-base`, `refs/mousse/workflows/<profile>/<thread>/<agent>` (`workspace record` `retainedRef`) |
 | The thread's files as last published | `refs/mousse/published/<threadId>` (kept in the primary's repository) |
 | A retired worktree | `refs/mousse/lifecycle/<profile>/<thread>/<key>/{base,result,snapshot}` (`snapshot` only when the worktree held uncommitted files; replaced by the trash expiry's snapshot) |
