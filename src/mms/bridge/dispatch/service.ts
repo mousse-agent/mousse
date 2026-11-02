@@ -218,6 +218,9 @@ export class DispatchService {
             'fetch.fsckObjects=true',
             'fetch',
             '--no-tags',
+            '--no-prune',
+            '--no-prune-tags',
+            '--no-recurse-submodules',
             '--no-write-fetch-head',
             record.binding.options.remote,
             request.baseCommit
@@ -326,6 +329,8 @@ export class DispatchService {
           [
             'push',
             '--no-verify',
+            '--no-follow-tags',
+            '--recurse-submodules=no',
             record.binding.options.remote!,
             `${resultRef(record.id)}:refs/heads/mousse/dispatch/${record.id}`
           ],

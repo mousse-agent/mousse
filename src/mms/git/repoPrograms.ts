@@ -3,6 +3,7 @@ import { statSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import simpleGit, { type SimpleGit, type SimpleGitOptions } from 'simple-git'
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
+import { gitDirectoryEnv, withGitConfigEnv } from './gitEnv'
 import { NO_HOOKS_PATH } from './gitNullDevice'
 import { isTrustedRepoEntry, readRepoTrust, repoTrustPath, TRUSTED_FILTER_KEY, writeRepoTrust, type RepoTrustRecord } from './repoTrust'
 
@@ -95,6 +96,14 @@ const FIXED = [
   'diff.submodule=short'
 ]
 
+/**
+ * For Mousse's own commands: a read never writes the index. `git status` refreshes and writes it back
+ * unless optional locks are off (`--no-optional-locks`, added in {@link withoutRepoPrograms}), and
+ * `git diff` does whenever it finds a file whose stat data alone changed, unless this is off. A command
+ * that writes the index on purpose still does.
+ */
+export const NO_INDEX_REFRESH = ['diff.autoRefreshIndex=false'] as const
+
 const HOOKS_OFF = [`core.hooksPath=${NO_HOOKS_PATH}`, ...HOOK_EVENTS.map((event) => `hook.${event}.enabled=false`)]
 
 /** Config written by the user (or their environment) rather than by the repository. */
@@ -139,9 +148,12 @@ const LFS_EXTENSION = /^lfs\.extension\..+\.(clean|smudge)$/
  */
 export const SAFE_LOOKUP_ENV: Readonly<Record<string, string>> = { PYTHONSAFEPATH: '1', NoDefaultCurrentDirectoryInExePath: '1' }
 
-/** `env` (the process's own by default) with {@link SAFE_LOOKUP_ENV}, for a Git command Mousse runs by itself. */
+/**
+ * `env` (the process's own by default) with {@link SAFE_LOOKUP_ENV} and the settings every Git process
+ * Mousse starts carries ({@link withGitConfigEnv}), for a Git command Mousse runs by itself.
+ */
 export function repoProgramEnv(env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
-  return { ...env, ...SAFE_LOOKUP_ENV }
+  return withGitConfigEnv({ ...env, ...SAFE_LOOKUP_ENV })
 }
 
 /** Keys whose repository value cannot be overridden from the command line; such a repository is refused. */
@@ -270,7 +282,8 @@ function remember(key: string, paths: Iterable<string>, programs: RepoPrograms):
 
 /** `failed` is set when Git could not be run or read in full (a timeout, output past the limit). */
 function bareGit(cwd: string, args: string[]): { ok: boolean; stdout: string; failed: boolean } {
-  const result = spawnSync('git', ['-c', 'core.fsmonitor=false', ...args], { cwd, encoding: 'utf8', windowsHide: true, timeout: 30_000, maxBuffer: 16 * 1024 * 1024, env: { ...process.env, ...SAFE_LOOKUP_ENV, GIT_OPTIONAL_LOCKS: '0' } })
+  // A common directory Mousse names is named the same way for the probe as for the command it is for.
+  const result = spawnSync('git', ['-c', 'core.fsmonitor=false', ...args], { cwd, encoding: 'utf8', windowsHide: true, timeout: 30_000, maxBuffer: 16 * 1024 * 1024, env: repoProgramEnv({ ...process.env, GIT_OPTIONAL_LOCKS: '0', ...gitDirectoryEnv(cwd) }) })
   return { ok: !result.error && result.status === 0, stdout: result.error ? '' : result.stdout ?? '', failed: Boolean(result.error) }
 }
 
@@ -321,7 +334,7 @@ export function repoProgramSettings(cwd: string, options: RepoProgramOptions & {
   const programs = programsFor(cwd)
   const hooks = [...HOOKS_OFF, ...programs.hookNames.filter((name) => !(HOOK_EVENTS as readonly string[]).includes(name)).map((name) => `hook.${name}.enabled=false`)]
   const required = programs.emptiedFilters.map((name) => `filter.${name}.required=${options.write ? 'true' : 'false'}`)
-  return [...FIXED, ...hooks, ...programs.overrides, ...required]
+  return [...FIXED, ...NO_INDEX_REFRESH, ...hooks, ...programs.overrides, ...required]
 }
 
 /** `-c` arguments that go before the Git subcommand `args`. */
@@ -384,11 +397,25 @@ export function trustExistingProjectsOnce(profileHome: string, projectPaths: rea
  * is left alone.
  */
 export function withoutRepoPrograms(cwd: string, args: readonly string[], options?: RepoProgramOptions): string[] {
-  if (args[0] === 'config') return [...args]
-  return [...noRepoProgramArgs(cwd, args, options), ...args]
+  const named = gitDirectoryArgs(cwd)
+  if (args[0] === 'config') return [...named, ...args]
+  // Optional locks are off for Mousse's own commands, so `status` does not refresh and write the index.
+  return [...named, ...(options?.userAction ? [] : ['--no-optional-locks']), ...noRepoProgramArgs(cwd, args, options), ...args]
 }
 
-const UNSAFE_ALLOWED = {
+/**
+ * `--git-dir` for a command Mousse runs inside a Git directory it chose (a repository's shared directory, a
+ * bare clone with linked worktrees, the bridge's quarantine). `safe.bareRepository=explicit` stops Git from
+ * finding such a folder by itself, and Git before 2.45 refuses even a `.git` folder that way. Only the
+ * folder the command runs in is named, never one Git would reach by walking up.
+ */
+function gitDirectoryArgs(cwd: string): string[] {
+  const dir = gitDirectoryEnv(cwd).GIT_DIR
+  return dir ? [`--git-dir=${dir}`] : []
+}
+
+/** simple-git's checks Mousse turns off: the values it sets are its own, never a caller's (see {@link guardedSimpleGit}). */
+export const UNSAFE_ALLOWED = {
   allowUnsafeHooksPath: true,
   allowUnsafeFsMonitor: true,
   allowUnsafeFilter: true,
@@ -430,7 +457,8 @@ export function guardedSimpleGit(cwd: string, options: Partial<Omit<SimpleGitOpt
       return (...parameters: unknown[]) => {
         // Only `raw` takes free-form arguments; every other method used here only reads.
         const args = key === 'raw' ? parameters.flat().filter((value): value is string => typeof value === 'string') : []
-        const instance = forCommand(args).env(repoProgramEnv()) as unknown as Record<string, (...values: unknown[]) => unknown>
+        // No optional locks: a status or diff read here never refreshes and rewrites the index.
+        const instance = forCommand(args).env(repoProgramEnv({ ...process.env, GIT_OPTIONAL_LOCKS: '0' })) as unknown as Record<string, (...values: unknown[]) => unknown>
         return instance[key]!(...parameters)
       }
     }

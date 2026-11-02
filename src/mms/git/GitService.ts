@@ -4,7 +4,7 @@ import { existsSync } from 'node:fs'
 import { mkdtemp, rm, rmdir, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve, sep } from 'node:path'
-import type { SimpleGit, StatusResult } from 'simple-git'
+import type { SimpleGit } from 'simple-git'
 import { redactGitText } from '../../shared/gitText'
 import { holdsRepositoryMutation } from '../actions/GitOperationCoordinator'
 import type { CodeHost } from './CodeHost'
@@ -21,6 +21,7 @@ import { MOUSSE_COMMIT_EMAIL } from './mousseCommitIdentity'
 import { resolveRepositoryIdentity } from './RepositoryIdentity'
 import { acquireRepositoryLease, RepositoryLeaseAbortedError } from './RepositoryLease'
 import { guardedSimpleGit, NO_DIFF_PROGRAMS, repoProgramEnv, SAFE_LOOKUP_ENV, withoutRepoPrograms } from './repoPrograms'
+import { readWorkingTreeStatus, type StatusEntry } from './workingTreeStatus'
 import type {
   GitBranchInfo,
   GitBranchOptions,
@@ -56,6 +57,9 @@ const gitErrors = createErrorProvider({
   git_already_repo: { category: 'conflict', retryable: false, message: 'This folder is already a Git repository.' },
   git_no_remote: { category: 'invalid', retryable: false, message: 'Add a remote before pushing.' },
   git_no_upstream: { category: 'invalid', retryable: false, message: 'This branch has no upstream. Push it first to set one.' },
+  git_upstream_name_differs: { category: 'invalid', retryable: false, message: 'This branch tracks a remote branch with another name. Set push.default to "upstream" to push there, or push it from a terminal.' },
+  git_upstream_elsewhere: { category: 'invalid', retryable: false, message: 'push.default is "upstream", but this branch would be pushed to a remote other than its upstream\'s. Push it from a terminal.' },
+  git_upstream_local: { category: 'invalid', retryable: false, message: 'This branch tracks another local branch, so there is no remote branch to push to.' },
   git_amend_no_commit: { category: 'invalid', retryable: false, message: 'There is no commit to amend.' },
   git_amend_pushed: { category: 'conflict', retryable: false, message: 'The latest commit is already pushed, so it cannot be amended.' },
   git_busy: { category: 'unavailable', retryable: true, message: 'Another Git action on this folder is still running. Try again shortly.' },
@@ -97,6 +101,19 @@ const PUSH_SILENCE_MS = 2 * 60_000
 const FETCH_SILENCE_MS = 2 * 60_000
 /** Hooks may run tests without printing; this only stops one that waits on a prompt forever. */
 const COMMIT_SILENCE_MS = 10 * 60_000
+
+/**
+ * A fetch only downloads: `fetch.prune`, `remote.<name>.prune` or `fetch.pruneTags` in the user's config
+ * cannot make it delete remote-tracking branches or local tags, it does not reach into submodules, and it
+ * starts no background gc.
+ */
+const FETCH = ['fetch', '--no-auto-gc', '--progress', '--no-prune', '--no-prune-tags', '--recurse-submodules=no'] as const
+
+/**
+ * A push sends the one ref it names, and no tags through `push.followTags`. `push.recurseSubmodules` is the
+ * user's own choice and still applies (`check` refuses a push whose submodule commits are not on a remote).
+ */
+const PUSH = ['push', '--progress', '--no-follow-tags'] as const
 
 export interface PushRemoteInputs {
   pushRemote: string | null
@@ -167,11 +184,11 @@ function normalizePath(value: string): string {
   return (process.platform === 'win32' ? value.replace(/\\/g, '/') : value).replace(/^(?:\.\/)+/, '').replace(/\/+$/, '')
 }
 
-function rawEntries(status: StatusResult): RawEntry[] {
-  return status.files.map((entry) => ({
+function rawEntries(status: readonly StatusEntry[]): RawEntry[] {
+  return status.map((entry) => ({
     path: normalizePath(entry.path),
-    index: entry.index.trim(),
-    workdir: entry.working_dir.trim(),
+    index: entry.index,
+    workdir: entry.workdir,
     ...(entry.from ? { from: normalizePath(entry.from) } : {})
   }))
 }
@@ -380,7 +397,8 @@ export class GitService {
    */
   private runGit(cwd: string, args: readonly string[], options?: GitRunOptions & { userAction?: boolean }): Promise<GitRun> {
     const { userAction, ...run } = options ?? {}
-    return runGit(cwd, withoutRepoPrograms(cwd, args, { userAction }), userAction ? run : { ...run, env: { ...run.env, ...SAFE_LOOKUP_ENV } })
+    // Mousse's own commands take no optional lock, so a read never refreshes and rewrites the index.
+    return runGit(cwd, withoutRepoPrograms(cwd, args, { userAction }), userAction ? run : { ...run, env: { ...run.env, ...SAFE_LOOKUP_ENV, GIT_OPTIONAL_LOCKS: '0' } })
   }
 
   /**
@@ -489,12 +507,12 @@ export class GitService {
     }
 
     const git = this.gitFor(cwd)
-    const status = await git.status()
+    const entries = await this.statusEntries(cwd)
     const branch = await git.raw(['symbolic-ref', '--quiet', '--short', 'HEAD']).then((value) => value.trim() || null).catch(() => null)
     const hasHead = await git.raw(['rev-parse', '--verify', 'HEAD']).then(() => true).catch(() => false)
     const upstream = branch && hasHead ? await this.upstream(git) : null
     const hasRemote = await git.raw(['remote']).then((value) => Boolean(value.trim())).catch(() => false)
-    const changes = rawEntries(status).flatMap(mapStatus)
+    const changes = entries.flatMap(mapStatus)
 
     let ahead = 0
     let behind = 0
@@ -537,10 +555,9 @@ export class GitService {
       return git.diff([...NO_DIFF_PROGRAMS, '--cached', '--', filePath])
     }
 
-    const status = await git.status()
-    const normalized = filePath.replace(/\\/g, '/')
-    const entry = status.files.find((file) => file.path.replace(/\\/g, '/') === normalized)
-    if (entry?.index === '?' && entry.working_dir === '?') {
+    const normalized = normalizePath(filePath.replace(/\\/g, '/'))
+    const entry = (await this.statusEntries(cwd)).find((file) => file.path === normalized)
+    if (entry && isUntracked(entry)) {
       const nullPath = process.platform === 'win32' ? 'NUL' : '/dev/null'
       return git.diff([...NO_DIFF_PROGRAMS, '--no-index', nullPath, filePath]).catch(() => '')
     }
@@ -713,8 +730,9 @@ export class GitService {
     return resolve(await this.read(cwd, ['rev-parse', '--show-toplevel']) ?? cwd)
   }
 
+  /** The status of the whole repository, read with plumbing so that reading it never writes the index. */
   private async statusEntries(cwd: string): Promise<RawEntry[]> {
-    return rawEntries(await this.gitFor(cwd).status())
+    return rawEntries(await readWorkingTreeStatus(await this.toplevel(cwd)))
   }
 
   private async hasHead(cwd: string): Promise<boolean> {
@@ -838,8 +856,8 @@ export class GitService {
       const remotes = await this.read(cwd, ['remote'])
       if (!remotes) throw gitErrors.create('git_no_remote')
       const behindBefore = await this.behindCount(git)
-      // No pruning and no background gc: a fetch that was only asked for news must not rewrite local refs or stall on housekeeping.
-      const run = await this.runLive(cwd, ['fetch', '--no-auto-gc', '--progress'], live, { env: explicitActionGitEnv(), silenceMs: FETCH_SILENCE_MS })
+      // No pruning and no background gc, whatever the config says: a fetch that was only asked for news must not delete refs or stall on housekeeping.
+      const run = await this.runLive(cwd, [...FETCH], live, { env: explicitActionGitEnv(), silenceMs: FETCH_SILENCE_MS })
       if (!run.ok) {
         if (run.cancelled) throw cancelledError()
         if (run.stalled) throw gitErrors.create('git_silence_timeout')
@@ -876,7 +894,7 @@ export class GitService {
       // changed files with nothing to abort and, on Windows, a lock file, so it never is: not by a timer, not by Cancel.
       const target = await this.branchUpstream(cwd, branch)
       if (target) {
-        const fetched = await this.runLive(cwd, ['fetch', '--no-auto-gc', '--progress', target.remote], live, { env: explicitActionGitEnv(), silenceMs: FETCH_SILENCE_MS })
+        const fetched = await this.runLive(cwd, [...FETCH, target.remote], live, { env: explicitActionGitEnv(), silenceMs: FETCH_SILENCE_MS })
         if (!fetched.ok) {
           if (fetched.cancelled) throw cancelledError()
           if (fetched.stalled) throw gitErrors.create('git_silence_timeout')
@@ -1254,19 +1272,18 @@ ${run.output}`))
       if (toBranch.startsWith('-') || await this.read(cwd, ['check-ref-format', '--branch', toBranch]) !== toBranch) throw gitErrors.create('git_branch_invalid')
       // The thread's own branch is published under the name the pull request's head branch has there. No `-u`: the
       // branch keeps no upstream, so a push after the link is gone cannot follow it to the pull request's branch.
-      const run = await this.runLive(cwd, ['push', '--progress', toRemote, `HEAD:refs/heads/${toBranch}`], live, { env: explicitActionGitEnv(), silenceMs: PUSH_SILENCE_MS, hooks: true })
+      const run = await this.runLive(cwd, [...PUSH, toRemote, `HEAD:refs/heads/${toBranch}`], live, { env: explicitActionGitEnv(), silenceMs: PUSH_SILENCE_MS, hooks: true })
       if (run.ok) return
       if (run.cancelled) throw cancelledError()
       if (run.stalled) throw gitErrors.create('git_silence_timeout')
       throw this.pushFailure(run)
     }
-    const hasUpstream = Boolean(await this.upstream(git))
-    const remote = hasUpstream ? null : await this.publishRemote(git, branch)
-    if (!hasUpstream && !remote) throw gitErrors.create('git_no_remote')
-    // With an upstream, let Git resolve pushRemote, remote.pushDefault, refspecs and push.default.
-    // Progress output keeps a slow but healthy upload from looking silent; a push that does go
-    // silent is waiting on a prompt nobody can answer and is stopped before it holds the folder's lease.
-    const run = await this.runLive(cwd, remote ? ['push', '--progress', '-u', remote, branch] : ['push', '--progress'], live, { env: explicitActionGitEnv(), silenceMs: PUSH_SILENCE_MS, hooks: true })
+    const target = await this.pushTarget(cwd, git, branch)
+    // The destination is always named in full (`HEAD:refs/heads/<branch>`), so `push.default`, a remote's
+    // push refspecs or `--mirror` config cannot widen the push to other branches. Progress output keeps a
+    // slow but healthy upload from looking silent; a push that does go silent is waiting on a prompt nobody
+    // can answer and is stopped before it holds the folder's lease.
+    const run = await this.runLive(cwd, [...PUSH, ...(target.publish ? ['-u'] : []), target.remote, `HEAD:refs/heads/${target.branch}`], live, { env: explicitActionGitEnv(), silenceMs: PUSH_SILENCE_MS, hooks: true })
     if (run.ok) return
     if (run.cancelled) throw cancelledError()
     if (run.stalled) throw gitErrors.create('git_silence_timeout')
@@ -1282,14 +1299,43 @@ ${run.output}`))
     return failure('git_push_failed', run)
   }
 
-  private async publishRemote(git: SimpleGit, branch: string): Promise<string | null> {
+  /**
+   * Where Push sends the current branch: always one branch, named in full. The user's config still picks
+   * the destination, the way Git would for a plain `git push`:
+   * - the remote is `branch.<name>.pushRemote`, else `remote.pushDefault`, else the upstream's remote;
+   * - with `push.default=current` the branch keeps its name there; with `upstream` it goes to the upstream
+   *   branch, which must be on that remote; otherwise (`simple`, the default) it keeps its name, and an
+   *   upstream with another name on the same remote is refused, so a branch made from `origin/main` never
+   *   pushes into `main`. `matching` and `nothing` act as `simple`: Push names one branch, never all of them;
+   * - a branch without an upstream is published under its own name and tracked (`-u`).
+   */
+  private async pushTarget(cwd: string, git: SimpleGit, branch: string): Promise<{ remote: string; branch: string; publish: boolean }> {
     const config = (key: string): Promise<string | null> =>
       git.raw(['config', '--get', key]).then((value) => value.trim() || null).catch(() => null)
-    const [pushRemote, pushDefault, remotes] = await Promise.all([
+    const [pushRemote, pushDefault, mode, remotes, upstream] = await Promise.all([
       config(`branch.${branch}.pushRemote`),
       config('remote.pushDefault'),
-      git.raw(['remote']).then((value) => value.split('\n').map((line) => line.trim()).filter(Boolean)).catch(() => [])
+      config('push.default'),
+      git.raw(['remote']).then((value) => value.split('\n').map((line) => line.trim()).filter(Boolean)).catch(() => []),
+      this.branchUpstream(cwd, branch)
     ])
-    return choosePushRemote({ pushRemote, pushDefault, remotes })
+    const named = (remote: string | null): string | null => (remote && !remote.startsWith('-') ? remote : null)
+    if (upstream) {
+      const remote = named(pushRemote) ?? named(pushDefault) ?? named(upstream.remote)
+      if (!remote) throw gitErrors.create('git_no_remote')
+      const style = mode?.toLowerCase()
+      if (style === 'current') return { remote, branch, publish: false }
+      if (style === 'upstream' || style === 'tracking') {
+        if (remote !== upstream.remote) throw gitErrors.create('git_upstream_elsewhere')
+        return { remote, branch: upstream.branch, publish: false }
+      }
+      if (remote === upstream.remote && upstream.branch !== branch) throw gitErrors.create('git_upstream_name_differs')
+      return { remote, branch, publish: false }
+    }
+    // Tracking a local branch: there is nothing on a remote to push to, and publishing would replace that choice.
+    if (await this.upstream(git)) throw gitErrors.create('git_upstream_local')
+    const remote = named(choosePushRemote({ pushRemote, pushDefault, remotes }))
+    if (!remote) throw gitErrors.create('git_no_remote')
+    return { remote, branch, publish: true }
   }
 }

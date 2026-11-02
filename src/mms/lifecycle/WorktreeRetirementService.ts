@@ -14,17 +14,23 @@ import { WorktreeIdentity } from '../worktree/WorktreeIdentity'
 import { ThreadJournal } from '../data/ThreadJournal'
 import { getExternalResourceClaims } from './LifecycleClaims'
 import type { ConversationBranch, ThreadAction } from '../../shared/threadActions'
+import { gitDirectoryEnv } from '../git/gitEnv'
+import { READ_ONLY_GIT_ENV } from '../git/readOnlyGit'
 import { repoProgramEnv, withoutRepoPrograms } from '../git/repoPrograms'
 
 const hash = (value: string | Buffer): string => createHash('sha256').update(value).digest('hex')
 export function lifecycleGit(cwd: string, args: string[], input?: string, maxBuffer = 32 * 1024 * 1024, env?: NodeJS.ProcessEnv): string {
-  return execFileSync('git', withoutRepoPrograms(cwd, args), { cwd, input, env: repoProgramEnv({ ...process.env, ...env }), encoding: 'utf8', windowsHide: true, timeout: 30_000, maxBuffer, stdio: ['pipe', 'pipe', 'pipe'] }).trimEnd()
+  return execFileSync('git', withoutRepoPrograms(cwd, args), { cwd, input, env: repoProgramEnv({ ...process.env, ...gitDirectoryEnv(cwd), ...env }), encoding: 'utf8', windowsHide: true, timeout: 30_000, maxBuffer, stdio: ['pipe', 'pipe', 'pipe'] }).trimEnd()
+}
+/** A lifecycle read (a preview, the checks before a delete): it never refreshes the index and never fetches a missing object. */
+export function lifecycleRead(cwd: string, args: string[], input?: string, maxBuffer?: number): string {
+  return lifecycleGit(cwd, args, input, maxBuffer, READ_ONLY_GIT_ENV)
 }
 /** Never treat an unreadable reference as absent, and never dereference an owned symbolic ref. */
 export function readDirectLifecycleRef(cwd: string, ref: string): string | undefined {
   try { lifecycleGit(cwd, ['symbolic-ref', '-q', ref]); throw new Error(`Symbolic resource reference is not cleanup authority: ${ref}`) }
   catch (error) { if ((error as { status?: number }).status !== 1) throw error }
-  const listing = spawnSync('git', withoutRepoPrograms(cwd, ['for-each-ref', '--format=%(refname)%00%(objectname)', ref]), { cwd, env: repoProgramEnv(), encoding: 'utf8', windowsHide: true, timeout: 30_000, maxBuffer: 32 * 1024 * 1024 })
+  const listing = spawnSync('git', withoutRepoPrograms(cwd, ['for-each-ref', '--format=%(refname)%00%(objectname)', ref]), { cwd, env: repoProgramEnv({ ...process.env, ...gitDirectoryEnv(cwd), ...READ_ONLY_GIT_ENV }), encoding: 'utf8', windowsHide: true, timeout: 30_000, maxBuffer: 32 * 1024 * 1024 })
   // Git may warn about a corrupt loose ref while exiting successfully and omitting it.
   if (listing.error || listing.status !== 0 || listing.stderr.trim()) throw new Error(`Resource reference inventory is unreadable: ${ref}`)
   const rows = listing.stdout.split(/\r?\n/)
@@ -115,7 +121,7 @@ export class WorktreeRetirementService {
   inspectForDiscard(input: RetirementInput) {
     const identity = this.inspectIdentity(input.worktreePath, input.branch, input.repositoryId)
     this.verifySource({ ...input, repositoryId: identity.repositoryId })
-    return { ...identity, resultSha: lifecycleGit(input.worktreePath, ['rev-parse', 'HEAD']), indexDigest: hash(lifecycleGit(input.worktreePath, ['ls-files', '--stage', '-v', '-z'])), content: walkOwnedContent(input.worktreePath, true) }
+    return { ...identity, resultSha: lifecycleRead(input.worktreePath, ['rev-parse', 'HEAD']), indexDigest: hash(lifecycleRead(input.worktreePath, ['ls-files', '--stage', '-v', '-z'])), content: walkOwnedContent(input.worktreePath, true) }
   }
   load(path: string): WorktreeReconstructionManifest {
     assertLifecyclePath(this.store.root, path)
@@ -305,11 +311,11 @@ export class WorktreeRetirementService {
   private inspectIdentity(path: string, branch: string, expectedRepository?: string) {
     assertLifecyclePath(dirname(path), path)
     if (!isAbsolute(path) || !lstatSync(join(path, '.git')).isFile() || !/^mousse\/(thread|agent|workflow)\//.test(branch)) throw new Error('Only owned linked worktrees can retire')
-    if (!same(realpathSync(path), lifecycleGit(path, ['rev-parse', '--show-toplevel'])) || lifecycleGit(path, ['branch', '--show-current']) !== branch) throw new Error('Worktree root or branch changed')
-    const commonDir = realpathSync(resolve(path, lifecycleGit(path, ['rev-parse', '--git-common-dir'])))
+    if (!same(realpathSync(path), lifecycleRead(path, ['rev-parse', '--show-toplevel'])) || lifecycleRead(path, ['branch', '--show-current']) !== branch) throw new Error('Worktree root or branch changed')
+    const commonDir = realpathSync(resolve(path, lifecycleRead(path, ['rev-parse', '--git-common-dir'])))
     const repositoryId = hash(commonDir.toLowerCase()).slice(0, 32)
     if (expectedRepository && expectedRepository !== repositoryId) throw new Error('Worktree repository changed')
-    const gitDirectory = realpathSync(resolve(path, lifecycleGit(path, ['rev-parse', '--git-dir'])))
+    const gitDirectory = realpathSync(resolve(path, lifecycleRead(path, ['rev-parse', '--git-dir'])))
     const stat = lstatSync(path)
     const identity = { commonDir, repositoryId, gitDirectory, rootIdentity: { dev: stat.dev, ino: stat.ino, birthtimeMs: stat.birthtimeMs } }
     if (!this.registered({ ...identity, worktreePath: path } as WorktreeReconstructionManifest)) throw new Error('Worktree is not registered')
@@ -317,13 +323,13 @@ export class WorktreeRetirementService {
   }
   /** Throws unless the checkout holds only tracked, exactly reconstructible content. Reads only; writes nothing. */
   inspectContent(path: string): Pick<WorktreeReconstructionManifest, 'content' | 'auxiliary' | 'sparse'> {
-    if (lifecycleGit(path, ['status', '--porcelain=v1', '--untracked-files=all'])) throw new Error('Dirty, conflicted or untracked content requires retention')
+    if (lifecycleRead(path, ['status', '--porcelain=v1', '--untracked-files=all'])) throw new Error('Dirty, conflicted or untracked content requires retention')
     const entries = walkOwnedContent(path, true)
-    const tracked = new Map(lifecycleGit(path, ['ls-tree', '-r', '-z', 'HEAD']).split('\0').filter(Boolean).map((line) => { const tab = line.indexOf('\t'), header = line.slice(0, tab).split(' '); return [line.slice(tab + 1), { mode: header[0], sha: header[2] }] }))
+    const tracked = new Map(lifecycleRead(path, ['ls-tree', '-r', '-z', 'HEAD']).split('\0').filter(Boolean).map((line) => { const tab = line.indexOf('\t'), header = line.slice(0, tab).split(' '); return [line.slice(tab + 1), { mode: header[0], sha: header[2] }] }))
     const sparseEnabled = (() => { try { return lifecycleGit(path, ['config', '--bool', 'core.sparseCheckout']) === 'true' } catch { return false } })()
     const sparse = sparseEnabled ? { patterns: readFileSync(resolve(path, lifecycleGit(path, ['rev-parse', '--git-path', 'info/sparse-checkout'])), 'utf8'), cone: (() => { try { return lifecycleGit(path, ['config', '--bool', 'core.sparseCheckoutCone']) === 'true' } catch { return false } })() } : undefined
     const skipped = new Set<string>()
-    for (const flag of lifecycleGit(path, ['ls-files', '-v', '-z']).split('\0').filter(Boolean)) {
+    for (const flag of lifecycleRead(path, ['ls-files', '-v', '-z']).split('\0').filter(Boolean)) {
       if (/^[a-z]/.test(flag) || (flag.startsWith('S ') && (!sparse || existsSync(join(path, flag.slice(2)))))) throw new Error('Hidden index flags require explicit retention')
       if (flag.startsWith('S ')) skipped.add(flag.slice(2))
     }

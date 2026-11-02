@@ -80,7 +80,7 @@ export async function detectGitRoute(root: string): Promise<GitRoute> {
     return { ok: false, reason: 'git-too-old' }
   }
   try {
-    await execFileAsync('git', ['rev-parse', '--show-toplevel'], { cwd: root, windowsHide: true })
+    await execFileAsync('git', ['rev-parse', '--show-toplevel'], { cwd: root, env: repoProgramEnv(), windowsHide: true })
     return { ok: true, version }
   } catch {
     return { ok: false, reason: 'not-a-repo' }

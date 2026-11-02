@@ -3,6 +3,7 @@ import { existsSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { realPathOrAncestor } from './realPath'
+import { withGitConfigEnv } from '../git/gitEnv'
 
 /**
  * What a repository reads that can run programs and that lies in the working tree, as real paths:
@@ -35,7 +36,7 @@ function runGit(root: string, args: string[]): Promise<GitRun> {
         timeout: GIT_TIMEOUT_MS,
         maxBuffer: 4 * 1024 * 1024,
         windowsHide: true,
-        env: { ...process.env, GIT_TERMINAL_PROMPT: '0' }
+        env: withGitConfigEnv({ ...process.env, GIT_TERMINAL_PROMPT: '0' })
       },
       (error, stdout) => {
         if (!error) return resolveRun({ status: 0, stdout, missing: false })

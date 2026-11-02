@@ -7,6 +7,7 @@ import { join, resolve } from 'node:path'
 import { filterRefusal, repoProgramEnv, withoutRepoPrograms } from '../git/repoPrograms'
 import { IN_PROGRESS_GIT_MARKERS } from '../git/gitMarkers'
 import { MOUSSE_COMMIT_EMAIL, MOUSSE_COMMIT_NAME } from '../git/mousseCommitIdentity'
+import { readWorkingTreeStatusSync, type StatusEntry } from '../git/workingTreeStatus'
 
 /**
  * Git for Mousse's own actions (checkpoints, restore, undo, revert): no program the repository
@@ -42,8 +43,8 @@ export function tryGit(cwd: string, args: string[], env?: NodeJS.ProcessEnv): { 
 
 /** How many changed files a message names before it says "and N more". */
 const NAMED_FILES = 5
-/** Fields before the path in each `git status --porcelain=v2` entry type. */
-const FIELDS_BEFORE_PATH: Record<string, number> = { '1': 8, '2': 9, u: 10, '?': 1 }
+const CONFLICT_PAIRS = new Set(['DD', 'AU', 'UD', 'UA', 'DU', 'AA', 'UU'])
+const isConflict = (entry: StatusEntry): boolean => CONFLICT_PAIRS.has(`${entry.index || ' '}${entry.workdir || ' '}`)
 const OPERATION_OF: Record<(typeof IN_PROGRESS_GIT_MARKERS)[number], PendingChanges['operation']> = {
   MERGE_HEAD: 'merge', REVERT_HEAD: 'revert', CHERRY_PICK_HEAD: 'cherry-pick', REBASE_HEAD: 'rebase', 'rebase-merge': 'rebase', 'rebase-apply': 'rebase'
 }
@@ -75,18 +76,12 @@ export interface PendingChanges {
 /** What is pending in a checkout, read from the top of the repository. */
 export function inspectPendingChanges(cwd: string): PendingChanges {
   const top = git(cwd, ['rev-parse', '--show-toplevel'])
-  const entries = gitRaw(top, ['status', '--porcelain=v2', '-z', '--untracked-files=all']).split('\0')
+  // Plumbing, not `git status`: a check never refreshes and rewrites the index of the checkout it looks at.
   const files: string[] = []
   const unmerged: string[] = []
-  for (let index = 0; index < entries.length; index++) {
-    const entry = entries[index]
-    const fields = FIELDS_BEFORE_PATH[entry[0]]
-    if (!fields) continue
-    // The path is everything after the fixed fields, spaces included; a rename or copy is followed by its old name.
-    const path = entry.split(' ').slice(fields).join(' ')
-    if (entry[0] === '2') index++
-    if (entry[0] === 'u') unmerged.push(path)
-    else files.push(path)
+  for (const entry of readWorkingTreeStatusSync(top)) {
+    if (isConflict(entry)) unmerged.push(entry.path)
+    else files.push(entry.path)
   }
   let operation: PendingChanges['operation']
   for (const marker of IN_PROGRESS_GIT_MARKERS) {

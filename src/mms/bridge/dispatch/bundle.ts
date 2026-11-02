@@ -85,6 +85,8 @@ export async function verifyAndImportBundle(
       'transfer.fsckObjects=true',
       'fetch',
       '--no-tags',
+      '--no-prune',
+      '--no-prune-tags',
       '--no-write-fetch-head',
       bundle,
       `${inputRef(base)}:${inputRef(base)}`
@@ -115,6 +117,8 @@ export async function verifyAndImportBundle(
       'transfer.fsckObjects=true',
       'fetch',
       '--no-tags',
+      '--no-prune',
+      '--no-prune-tags',
       '--no-write-fetch-head',
       repository,
       `${inputRef(base)}:${inputRef(base)}`

@@ -1,4 +1,5 @@
 import { execFile } from 'node:child_process'
+import { withGitConfigEnv } from './gitEnv'
 import { repoProgramEnv, withoutRepoPrograms } from './repoPrograms'
 
 export interface ExecutableResult {
@@ -27,7 +28,8 @@ export const execRunner: ExecutableRunner = (executable, args, options) =>
       argv,
       {
         cwd: options?.cwd,
-        ...(executable === 'git' ? { env: repoProgramEnv({ ...process.env, ...options?.env }) } : options?.env ? { env: { ...process.env, ...options.env } } : {}),
+        // `gh` runs Git itself (remotes, `pr checkout`), so its Git gets the same settings as Mousse's own.
+        env: executable === 'git' ? repoProgramEnv({ ...process.env, ...options?.env }) : withGitConfigEnv({ ...process.env, ...options?.env }),
         windowsHide: true,
         encoding: 'utf8',
         timeout: options?.timeoutMs ?? 60_000,
