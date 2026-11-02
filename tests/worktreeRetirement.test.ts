@@ -116,6 +116,32 @@ test('trash expiry snapshots the folder, deletes it and its branch, and a restor
   expect(readFileSync(join(f.worktree, 'new.txt'), 'utf8')).toBe('new\n')
 })
 
+test('trash expiry asks whether the folder is in use before its snapshot, so a write that slips in then is in the snapshot', async () => {
+  const f = await fixture()
+  f.service.prepare(f.input)
+  const trashed = f.service.retire(f.path)
+  const later = Date.now() + 2 * WORKTREE_TRASH_QUIET_MS
+  expect(f.service.expireTrash(f.path, { now: later, inUse: (path) => { writeFileSync(join(path, 'a.txt'), 'written during the check\n'); return undefined } })).toEqual({ removed: true })
+  expect(existsSync(trashed.trashPath!)).toBe(false)
+  const retired = JSON.parse(readFileSync(f.path, 'utf8'))
+  expect(git(f.repo, ['show', `${retired.snapshotRef}:a.txt`])).toBe('written during the check')
+})
+
+test('trash expiry reads the folder again before deleting it: a change since its snapshot is captured and the delete waits', async () => {
+  const f = await fixture()
+  f.service.prepare(f.input)
+  const trashed = f.service.retire(f.path)
+  const later = Date.now() + 2 * WORKTREE_TRASH_QUIET_MS
+  const outcome = f.service.expireTrash(f.path, { now: later, afterCapture: (path) => writeFileSync(join(path, 'b.txt'), 'written after the snapshot\n') })
+  expect(outcome).toEqual({ kept: expect.stringMatching(/changed while it was being deleted.*kept as a snapshot.*next run/), waiting: true })
+  expect(readFileSync(join(trashed.trashPath!, 'b.txt'), 'utf8')).toBe('written after the snapshot\n')
+  const manifest = JSON.parse(readFileSync(f.path, 'utf8'))
+  expect(manifest.state).toBe('trashed')
+  expect(git(f.repo, ['show', `${manifest.snapshotRef}:b.txt`])).toBe('written after the snapshot')
+  // With nothing changing any more, a later run deletes it.
+  expect(f.service.expireTrash(f.path, { now: later + 2 * WORKTREE_TRASH_QUIET_MS })).toEqual({ removed: true })
+})
+
 test('a branch the agent made itself, and a worktree the agent added, are never touched', async () => {
   const f = await fixture()
   git(f.worktree, ['switch', '-q', '-c', 'agent/own-work'])

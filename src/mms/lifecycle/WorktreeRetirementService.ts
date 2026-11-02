@@ -269,9 +269,10 @@ export class WorktreeRetirementService {
    * of its files is pinned first (it replaces the pins `prepare` made), then Git removes it. What a snapshot cannot hold
    * (ignored or untracked files Git does not see, staged changes, an operation in progress) keeps it in the trash, and
    * the reason is returned. Needs the repository lease; the thread may be busy, since its own worktree is elsewhere.
-   * `inUse` is asked just before the removal (Windows: open files). Undefined means there was nothing to do.
+   * Order: `inUse` (Windows: open files), then the snapshot, then a second read of the folder; a change since the
+   * snapshot is captured again and the delete waits for the next run. Undefined means there was nothing to do.
    */
-  expireTrash(manifestPath: string, options: { now?: number; inUse?: (path: string) => string | undefined } = {}): { removed: true } | { kept: string; waiting?: true } | undefined {
+  expireTrash(manifestPath: string, options: { now?: number; inUse?: (path: string) => string | undefined; /** Test seam: runs between the snapshot and the check before the delete. */ afterCapture?: (path: string) => void } = {}): { removed: true } | { kept: string; waiting?: true } | undefined {
     const manifest = this.load(manifestPath)
     return this.store.withGate(manifest.taskId, () => {
       this.assertRepositoryLease(manifest.commonDir, manifest.repositoryId)
@@ -292,30 +293,55 @@ export class WorktreeRetirementService {
       if (now - Date.parse(manifest.trashedAt!) < WORKTREE_TRASH_QUIET_MS) return { kept: 'Waiting in the trash', waiting: true }
       if (now - newestChange(trashPath) < WORKTREE_TRASH_QUIET_MS) return { kept: 'Files in it changed within the last hour', waiting: true }
       this.verifyPins(manifest)
-      const head = lifecycleGit(trashPath, ['rev-parse', 'HEAD'])
-      const treeSha = lifecycleGit(trashPath, ['rev-parse', 'HEAD^{tree}'])
-      const snapshot = lifecycleGit(trashPath, ['status', '--porcelain=v1', '--untracked-files=all']) ? takeSnapshot(trashPath, { reason: 'trash expiry', threadId: manifest.taskId }) : undefined
-      const dirty = Boolean(snapshot && snapshot.tree !== treeSha)
-      let contents: ReturnType<WorktreeRetirementService['inspectContent']>
-      try { contents = this.inspectContent(trashPath, dirty ? snapshot!.tree : undefined) }
-      catch (error) { return { kept: `Kept in the trash at ${trashPath}: ${(error as Error).message}` } }
-      const prefix = manifest.resultRef.slice(0, -'/result'.length)
-      lifecycleGit(trashPath, ['update-ref', '--no-deref', manifest.resultRef, head, manifest.resultSha])
-      if (dirty) lifecycleGit(trashPath, ['update-ref', '--no-deref', `${prefix}/snapshot`, snapshot!.sha, readDirectLifecycleRef(trashPath, `${prefix}/snapshot`) ?? '0'.repeat(snapshot!.sha.length)])
-      const headBranch = lifecycleGit(trashPath, ['branch', '--show-current'])
-      // A clean folder drops the snapshot fields; an earlier snapshot ref stays where it is, as every pin does.
-      delete manifest.snapshotSha; delete manifest.snapshotTree; delete manifest.snapshotRef; delete manifest.headBranch; delete manifest.sparse
-      Object.assign(manifest, { resultSha: head, treeSha, ...(dirty ? { snapshotSha: snapshot!.sha, snapshotTree: snapshot!.tree, snapshotRef: `${prefix}/snapshot` } : {}), ...(headBranch ? { headBranch } : {}), ...contents })
-      atomicWriteJsonSync(manifestPath, manifest)
-      this.verifyPins(manifest)
+      // In use (Windows: open files) is asked before anything is captured, so whatever it lets through is in the snapshot.
       const busy = options.inUse?.(trashPath)
       if (busy) return { kept: busy }
+      const first = this.captureTrashed(manifestPath, manifest)
+      if ('kept' in first) return first
+      options.afterCapture?.(trashPath)
+      // Right before the delete, the folder is read again: a change since the snapshot is captured and the delete waits.
+      const again = this.trashedState(manifest)
+      if (again !== first.state) {
+        const retaken = this.captureTrashed(manifestPath, manifest)
+        return { kept: `Files in it changed while it was being deleted${'kept' in retaken ? `; ${retaken.kept}` : '; they are kept as a snapshot'}. It is looked at again on the next run.`, waiting: true }
+      }
       this.removeTrashed(manifest)
       manifest.state = 'retired'; delete manifest.trashPath; delete manifest.trashedAt
       atomicWriteJsonSync(manifestPath, manifest)
       this.releaseBranches(manifest); atomicWriteJsonSync(manifestPath, manifest)
       return { removed: true }
     })
+  }
+  /**
+   * Takes a snapshot of the folder in the trash and pins it in place of the earlier pins (`result` at its HEAD,
+   * `snapshot` when it has uncommitted files), recording both in the manifest. What a snapshot cannot hold keeps it.
+   */
+  private captureTrashed(manifestPath: string, manifest: WorktreeReconstructionManifest): { state: string } | { kept: string } {
+    const trashPath = manifest.trashPath!
+    const head = lifecycleGit(trashPath, ['rev-parse', 'HEAD'])
+    const treeSha = lifecycleGit(trashPath, ['rev-parse', 'HEAD^{tree}'])
+    const snapshot = lifecycleGit(trashPath, ['status', '--porcelain=v1', '--untracked-files=all']) ? takeSnapshot(trashPath, { reason: 'trash expiry', threadId: manifest.taskId }) : undefined
+    const dirty = Boolean(snapshot && snapshot.tree !== treeSha)
+    let contents: ReturnType<WorktreeRetirementService['inspectContent']>
+    try { contents = this.inspectContent(trashPath, dirty ? snapshot!.tree : undefined) }
+    catch (error) { return { kept: `Kept in the trash at ${trashPath}: ${(error as Error).message}` } }
+    const prefix = manifest.resultRef.slice(0, -'/result'.length)
+    lifecycleGit(trashPath, ['update-ref', '--no-deref', manifest.resultRef, head, manifest.resultSha])
+    if (dirty) lifecycleGit(trashPath, ['update-ref', '--no-deref', `${prefix}/snapshot`, snapshot!.sha, readDirectLifecycleRef(trashPath, `${prefix}/snapshot`) ?? '0'.repeat(snapshot!.sha.length)])
+    const headBranch = lifecycleGit(trashPath, ['branch', '--show-current'])
+    // A clean folder drops the snapshot fields; an earlier snapshot ref stays where it is, as every pin does.
+    delete manifest.snapshotSha; delete manifest.snapshotTree; delete manifest.snapshotRef; delete manifest.headBranch; delete manifest.sparse
+    Object.assign(manifest, { resultSha: head, treeSha, ...(dirty ? { snapshotSha: snapshot!.sha, snapshotTree: snapshot!.tree, snapshotRef: `${prefix}/snapshot` } : {}), ...(headBranch ? { headBranch } : {}), ...contents })
+    atomicWriteJsonSync(manifestPath, manifest)
+    this.verifyPins(manifest)
+    return { state: this.trashedState(manifest) }
+  }
+  /** What the folder in the trash holds now, to compare with what was captured: HEAD, the tree of its files and every entry's bytes. */
+  private trashedState(manifest: WorktreeReconstructionManifest): string {
+    const trashPath = manifest.trashPath!
+    try {
+      return JSON.stringify([lifecycleGit(trashPath, ['rev-parse', 'HEAD']), worktreeTree(trashPath), walkOwnedContent(trashPath, true)])
+    } catch (error) { return `unreadable: ${(error as Error).message}` }
   }
   /** Points Git's registration at the trash after a move that a crash interrupted. Idempotent. */
   private settleTrashRegistration(manifest: WorktreeReconstructionManifest): void {
