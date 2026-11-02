@@ -132,8 +132,8 @@ async function main() {
     await execute("[...document.querySelectorAll('[role=menuitemradio]')].find(row=>row.textContent.trim()==='Studio').focus()")
     await key('ArrowRight')
     await until("!!document.querySelector('.profile-row-menu') && document.querySelector('.profile-row-menu').contains(document.activeElement)")
-    const submenu: string[] = [await focused()]
-    for (const name of ['ArrowDown', 'ArrowDown', 'ArrowDown', 'End', 'Home']) { await key(name); submenu.push(await focused()) }
+    // Arrow keys inside the row menu are covered in tests/renderer/profileRowMenu.test.ts.
+    const submenu = await focused()
     await key('Escape')
     await until("!document.querySelector('.profile-row-menu')")
     const afterFirstEscape = { menuOpen: await menuIsOpen(), focus: await focused() }
@@ -163,15 +163,7 @@ async function main() {
     await openActions('Design')
     await clickText('.profile-row-menu [role=menuitem]', 'Rename')
     await until("!!document.querySelector('[role=dialog]')")
-    const designDialog = await dialogInfo()
-    await setInput('[aria-label="Profile name"]', '')
-    const emptyDialog = await dialogInfo()
-    await setInput('[aria-label="Profile name"]', 'x'.repeat(80))
-    const longDialog = await dialogInfo()
-    await setInput('[aria-label="Profile name"]', '   ')
-    const blankDialog = await dialogInfo()
-    await setInput('[aria-label="Profile name"]', 'Design')
-    const unchangedDialog = await dialogInfo()
+    // Name validation is covered in tests/renderer/profileEditDialog.test.ts; here only Escape closing the dialog.
     await execute("document.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}))")
     await until("!document.querySelector('[role=dialog]')")
     // Archive from inside the dialog, after the confirmation.
@@ -203,7 +195,7 @@ async function main() {
     await clickText('.profile-row-menu [role=menuitem]', 'Archive')
     await until(`footerQa.archives.includes('prf_new1') && ${footerName}==='Adithya'`)
     const archivedCurrent = { binds: await execute('footerQa.binds'), archives: await execute('footerQa.archives') }
-    evidence.actions = { studioActions, colourDialog, colourUpdates, recoloured, designDialog, emptyDialog, longDialog, blankDialog, unchangedDialog, afterDialogArchive, afterRowArchive, createDialog, created, docsActions, archivedCurrent, errors: await execute('footerQa.errors') }
+    evidence.actions = { studioActions, colourDialog, colourUpdates, recoloured, afterDialogArchive, afterRowArchive, createDialog, created, docsActions, archivedCurrent, errors: await execute('footerQa.errors') }
 
     // Signed out: the sign-in row replaces the identity, and there is no Sign out.
     await load({ scenario: 'static', account: 'out', profiles: '2' })
