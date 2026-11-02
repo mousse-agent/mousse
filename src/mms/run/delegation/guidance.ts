@@ -43,3 +43,8 @@ export function subagentGuidanceLines(parentTitle?: string): string[] {
 export function subagentPreamble(parentTitle?: string): string {
   return subagentGuidanceLines(parentTitle).join(' ')
 }
+
+/** The task in a subagent's first prompt, without the guidance `subagentPreamble` puts before it; other text as it is. */
+export function withoutSubagentPreamble(prompt: string): string {
+  return prompt.replace(/^You are a subagent[^\n]*\n\n/, '')
+}

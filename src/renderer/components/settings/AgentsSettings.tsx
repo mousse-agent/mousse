@@ -1,17 +1,17 @@
 import { findListedModel, modelLabel } from '../../../shared/modelChoice'
 import { resolveModelChoice } from '../../lib/modelChoice'
 import type { MousseSettings, MousseSettingsUpdate, SettingsOptions } from '../../../shared/settings'
-import { CONTEXT_COMPACTION_OPTIONS, normalizeContextSettings, oneShotProviderOptions, type ContextCompactionTokens } from '../../../shared/settings'
+import { CONTEXT_COMPACTION_OPTIONS, normalizeContextSettings, normalizeExperimentalSettings, oneShotProviderOptions, type ContextCompactionTokens } from '../../../shared/settings'
 import type { Project } from '../../../shared/types'
 import { AgentAccessSettings } from './AgentAccessSettings'
 import { SettingsGroup, SettingsRow, Switch } from './SettingsRow'
 import { SettingsModelPicker } from './SettingsModelPicker'
 import { Select } from '../ui/Select'
-import { Brain, Layers, RotateCcw } from '../../lib/icons'
+import { Brain, FlaskConical, Layers, RotateCcw } from '../../lib/icons'
 
 /**
  * Settings > Agents: the default model and chat title model, plus context
- * compaction, and how far agents may reach into other threads. Replaces the old Models, Context and
+ * compaction, how far agents may reach into other threads, and features still being tried out. Replaces the old Models, Context and
  * per-CLI Agents pages; their stored keys are left untouched.
  */
 export function AgentsSettings({
@@ -43,6 +43,7 @@ export function AgentsSettings({
     Boolean(findListedModel(provider.models, titleModel)))
 
   const context = normalizeContextSettings(settings.context)
+  const experimental = normalizeExperimentalSettings(settings.experimental)
 
   return (
     <section id="agents" className="settings-section">
@@ -137,6 +138,22 @@ export function AgentsSettings({
       </SettingsGroup>
 
       <AgentAccessSettings settings={settings} projects={projects} updateSettings={updateSettings} />
+
+      <SettingsGroup title="Experimental" icon={FlaskConical}>
+        <SettingsRow
+          title="Give each subagent its own worktree"
+          htmlFor="agents-subagent-worktrees"
+          description="Each subagent starts on its own branch from the main agent's current commit. Off: the main agent decides."
+          control={
+            <Switch
+              id="agents-subagent-worktrees"
+              label="Give each subagent its own worktree"
+              checked={experimental.subagentWorktrees}
+              onChange={(subagentWorktrees) => void updateSettings({ experimental: { ...experimental, subagentWorktrees } })}
+            />
+          }
+        />
+      </SettingsGroup>
     </section>
   )
 }

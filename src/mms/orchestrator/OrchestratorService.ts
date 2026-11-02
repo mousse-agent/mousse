@@ -19,6 +19,7 @@ import {
   narrowAgentAccess,
   normalizeAgentAccessSettings,
   normalizeContextSettings,
+  normalizeExperimentalSettings,
   normalizeRunSettings,
   resolveContextCompactionTokens,
   resolveModelForMode,
@@ -99,7 +100,7 @@ import { planWakeNotice, type NoticeContext } from '../run/delegation/notice'
 import { acknowledgeRows } from '../run/terminal'
 import { cancelQueuedWakes } from '../run/delegation/wake'
 import { taskCheckpoint } from '../run/delegation/checkpoint'
-import { subagentPreamble } from '../run/delegation/guidance'
+import { subagentPreamble, withoutSubagentPreamble } from '../run/delegation/guidance'
 import { isRunningSubagent, type SubagentNoticeItem } from '../../shared/subagents'
 import type { DelegationRequest, ForkPointSeed, ThreadCreation } from '../run/RunEngine'
 import type { HandoffItem } from '../run/handoff/budget'
@@ -4708,6 +4709,42 @@ export class OrchestratorService extends EventEmitter {
     return threadTurnOrigin({ ...(botRole ? { botRole } : {}), workflow: Boolean(workflowInvocationId), ...(lineage ? { lineage } : {}) })
   }
 
+  /** Whether "Give each subagent its own worktree" (Settings > Agents > Experimental) is on. */
+  private subagentWorktreesOn(): boolean {
+    try {
+      return normalizeExperimentalSettings(this.settingsStore.get().experimental).subagentWorktrees
+    } catch {
+      return false
+    }
+  }
+
+  /** The commit the parent's checkout is on now (its worktree, else its project folder); undefined without one. */
+  private parentHeadNow(parentThreadId: string): string | undefined {
+    const directory = this.resolveThreadDir(parentThreadId)
+    const parent = directory ? new ThreadWorkspaceManager(directory).load() : undefined
+    const project = this.projectManager && this.threadStore ? resolveThreadProjectPath(this.projectManager, this.threadStore, parentThreadId) : undefined
+    const cwd = parent && existsSync(parent.worktreePath) ? parent.worktreePath : this.sharedWorkspaceOf(parentThreadId)?.path ?? project
+    if (!cwd) return undefined
+    try {
+      return actionGit(cwd, ['rev-parse', '--verify', 'HEAD^{commit}'])
+    } catch {
+      return undefined
+    }
+  }
+
+  /**
+   * A child started with "Give each subagent its own worktree" on gets its worktree before its first turn, from the
+   * parent's HEAD recorded when it was started, under the Mousse home, whatever the turn's mode. Its `mousse/` branch is named
+   * from its task (`nameFrom`), as any thread's is from its first message.
+   */
+  private async seedSubagentWorkspace(threadId: string, projectPath: string, threadDir: string, signal?: AbortSignal, lease?: ThreadSession['executionLease'], nameFrom?: string): Promise<void> {
+    const startSha = this.threadStore?.getThread(threadId)?.workspaceBinding?.startSha
+    if (!startSha) return
+    const manager = new ThreadWorkspaceManager(threadDir)
+    if (manager.load()) return
+    await manager.provision(threadId, 'main', projectPath, signal, lease ?? undefined, startSha, { nameFrom })
+  }
+
   /** The parent's workspace path a `shared` child observes, or null when the parent has none. */
   private sharedWorkspaceOf(parentThreadId: string): ThreadSession['sharedWorkspace'] {
     const parent = this.getOrCreateSession(parentThreadId)
@@ -4741,10 +4778,12 @@ export class OrchestratorService extends EventEmitter {
     const effective = override ?? this.defaultAgentModel()
     const model = effective.model?.trim() && (effective.instanceId?.trim() || effective.llmProvider?.trim()) ? structuredClone(effective) : undefined
     const shared = request.workspace === 'shared' ? this.sharedWorkspaceOf(request.parentThreadId) : null
+    // With "Give each subagent its own worktree" on, the child's worktree starts at the parent's HEAD as it is now.
+    const startSha = request.workspace === 'isolated' && this.subagentWorktreesOn() ? this.parentHeadNow(request.parentThreadId) : undefined
     const child = this.threadStore.createThread(title, parentThread.projectId, undefined, {
       lineage: lineageForChild(parentThread),
       ownerThreadId: parentThread.id,
-      workspaceBinding: { policy: request.workspace === 'shared' ? 'shared' : 'isolated', ...(shared ? { sharedPath: shared.path } : {}) },
+      workspaceBinding: { policy: request.workspace === 'shared' ? 'shared' : 'isolated', ...(shared ? { sharedPath: shared.path } : {}), ...(startSha ? { startSha } : {}) },
       // A child starts at the narrowest of its lineage's ceiling, the parent's saved mode and the mode
       // the delegating run actually enforces (its binding: a provider may have lowered the saved
       // mode, and a per-turn option may have tightened it). It never starts wider than the run that
@@ -5067,9 +5106,11 @@ export class OrchestratorService extends EventEmitter {
   }
 
   /** What a thread's worktree branch is named from: its first message, else its name. */
-  private branchNameSource(threadId: string, messages?: readonly ChatMessage[]): string | undefined {
-    const first = (messages ?? this.sessions.get(threadId)?.messages ?? []).find((message) => message.role === 'user' && message.content.trim())
-    return first?.content ?? this.threadStore?.getThread(threadId)?.name
+  private branchNameSource(threadId: string, messages?: readonly ChatMessage[], pending?: string): string | undefined {
+    const first = (messages ?? this.sessions.get(threadId)?.messages ?? []).find((message) => message.role === 'user' && message.content.trim())?.content ?? pending
+    // A subagent's first message is its guidance, then its task: the branch is named from the task.
+    const text = first ? withoutSubagentPreamble(first).trim() : ''
+    return text || this.threadStore?.getThread(threadId)?.name
   }
 
   private async seedForkWorkspace(threadId: string, projectPath: string, threadDir: string, signal?: AbortSignal, lease?: ThreadSession['executionLease']): Promise<void> {
@@ -5258,6 +5299,11 @@ export class OrchestratorService extends EventEmitter {
     // stands now (its grant narrowed by the profile setting), never one the model chose.
     const accessLevel = this.effectiveAccess(callerAccess ?? 'lineage')
     const role = input.role?.trim() || undefined
+    // Experimental: every subagent gets a worktree of its own, whatever the main agent asked for. A read-only subagent's
+    // own subagents stay read-only, since authority only narrows down the tree.
+    const askedShared = input.workspace === 'shared'
+    if (askedShared && this.subagentWorktreesOn() && !this.isReadOnlyChild(parentThreadId)) input = { ...input, workspace: 'isolated' }
+    const ownWorktree = askedShared && input.workspace === 'isolated'
     if (input.workspace === 'shared' && !(role && SHARED_WORKSPACE_ROLES.has(role)))
       throw new Error('workspace "shared" is allowed only for read-only roles (role "research" or "review"); use workspace "isolated" for work that edits, builds or tests.')
     // SPEC §13.8: the child names an instance; an older `provider` name is mapped to one. An unknown
@@ -5304,7 +5350,10 @@ export class OrchestratorService extends EventEmitter {
       childRunId: accepted.childRunId,
       title: this.titleOf(accepted.childThreadId) ?? title ?? null,
       ...(accepted.replayed ? { replayed: true } : {}),
-      note: 'Started. Mousse sends you the result when it finishes; end your turn.'
+      ...(ownWorktree ? { workspace: 'isolated' as const } : {}),
+      note: ownWorktree
+        ? 'Started in a worktree of its own, not your folder: this computer gives every subagent one. Mousse sends you the result when it finishes; end your turn.'
+        : 'Started. Mousse sends you the result when it finishes; end your turn.'
     }
   }
 
@@ -9049,8 +9098,9 @@ export class OrchestratorService extends EventEmitter {
         const threadDir = this.resolveThreadDir(session.threadId)
         if (projectPath && threadDir) {
           await this.seedForkWorkspace(session.threadId, projectPath, threadDir, opts?.externalSignal, session.executionLease)
+          await this.seedSubagentWorkspace(session.threadId, projectPath, threadDir, opts?.externalSignal, session.executionLease, this.branchNameSource(session.threadId, session.messages, request.content))
           session.workspace = await new WorkspaceResolver(threadDir, session.threadId, projectPath)
-            .resolve(request.mode, 'main', opts?.externalSignal, session.executionLease ?? undefined, this.branchNameSource(session.threadId, session.messages) ?? request.content)
+            .resolve(request.mode, 'main', opts?.externalSignal, session.executionLease ?? undefined, this.branchNameSource(session.threadId, session.messages, request.content))
           session.projectCwd = session.workspace.projectPath
         } else {
           session.workspace = null
