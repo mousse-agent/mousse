@@ -180,6 +180,28 @@ interface NetConfiguration {
   addonRecords?: Record<string, { action: string; appliedAt: number; record: unknown }>
   preparedForJoin?: boolean
 }
+/** Transports that carry a session through a relay server rather than straight to the peer. */
+const RELAY_TRANSPORTS = new Set(['relay', HOSTED_RELAY_TRANSPORT])
+
+/**
+ * The open session with `node` to use. Both computers may hold one, each dialed by one side; one
+ * that does not go through a relay (a direct or tailnet link) wins, because every message through
+ * a relay pays its round trip.
+ */
+export function preferredSession<S extends Pick<SyncSession, 'state' | 'peer'>>(
+  sessions: Iterable<S>,
+  node: NodeId,
+  transportOf: (session: S) => string | undefined
+): S | undefined {
+  let relayed: S | undefined
+  for (const session of sessions) {
+    if (session.state() !== 'open' || session.peer.node !== node) continue
+    if (!RELAY_TRANSPORTS.has(transportOf(session) ?? '')) return session
+    relayed ??= session
+  }
+  return relayed
+}
+
 export interface NetRuntime {
   db: NetDatabase
   keys: FileKeyStore
@@ -2358,11 +2380,16 @@ export class NetService {
   editorTunnelConnectionClosed(connection: string): void {
     this.localTunnelStore?.closeConnection(connection)
   }
+  /** An open session with `node`, see {@link preferredSession}. */
   session(node: NodeId): SyncSession {
     this.assertEnabled()
-    for (const session of this.sessions)
-      if (session.state() === 'open' && session.peer.node === node) return session
-    throw new NetError('peer_offline')
+    const session = preferredSession(
+      this.sessions,
+      node,
+      (row) => this.sessionLinks.get(row)?.transport
+    )
+    if (!session) throw new NetError('peer_offline')
+    return session
   }
   /** True while an open session (of `node`, when given) is being served the stream. */
   streamSubscribed(stream: StreamId, node?: NodeId): boolean {

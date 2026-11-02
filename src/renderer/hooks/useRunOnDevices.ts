@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import type { NodeId } from '../../shared/net'
 import { notSharingNodes, refreshComputers, useComputers } from '../lib/computers'
 import type { Device } from '../lib/netDevices'
-import { readRemoteComposerOptions, type RemoteComposerOptions } from '../lib/remoteComputers'
+import { cachedRemoteComposerOptions, readRemoteComposerOptions, type RemoteComposerOptions } from '../lib/remoteComputers'
 import { useAppStore } from '../stores/appStore'
 
 /**
@@ -15,28 +15,54 @@ export function useRunOnDevices(): { devices: readonly Device[]; notSharing: Rea
   const threads = useAppStore((state) => state.threads)
   const projects = useAppStore((state) => state.projects)
   const notSharing = useMemo(() => notSharingNodes([...threads, ...projects]), [threads, projects])
+  // Each computer's models are read once it is connected, so picking it shows them at once.
+  useEffect(() => {
+    for (const device of devices)
+      if (device.state === 'open' && !cachedRemoteComposerOptions(device.node))
+        void readRemoteComposerOptions(device.node).catch(() => undefined)
+  }, [devices])
   return { devices, notSharing, refresh: () => void refreshComputers() }
 }
 
+/** The longest wait between attempts to read a computer's models while it does not answer. */
+const RETRY_MAX_MS = 15_000
+
 /**
- * The models another computer offers a chat that runs there (a new one, or a thread of it). Empty
- * until it answers, and when it cannot be reached.
+ * The models another computer offers a chat that runs there (a new one, or a thread of it): its
+ * last answer at once, then a fresh one. While it does not answer, it is asked again, sooner at
+ * first; until it has answered once, `loaded` is false.
  */
 export function useRemoteComposerOptions(node: NodeId | undefined): RemoteComposerOptions & { loaded: boolean } {
-  const [state, setState] = useState<{ node: NodeId | undefined; options: RemoteComposerOptions }>({ node, options: { providers: [], defaultModel: null } })
+  const [state, setState] = useState<{ node: NodeId; options: RemoteComposerOptions } | undefined>()
   useEffect(() => {
-    let cancelled = false
     if (!node) return
-    const read = () => void readRemoteComposerOptions(node).then(
-      (options) => { if (!cancelled) setState({ node, options }) },
-      () => { if (!cancelled) setState({ node, options: { providers: [], defaultModel: null } }) }
-    )
+    let cancelled = false
+    let delay = 1000
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const cached = cachedRemoteComposerOptions(node)
+    if (cached) setState({ node, options: cached })
+    const read = () => {
+      clearTimeout(timer)
+      void readRemoteComposerOptions(node).then(
+        (options) => {
+          if (cancelled) return
+          delay = 1000
+          setState({ node, options })
+        },
+        () => {
+          if (cancelled) return
+          timer = setTimeout(read, delay)
+          delay = Math.min(delay * 2, RETRY_MAX_MS)
+        }
+      )
+    }
     read()
     // What that computer lets this device do can change while the chat is open; coming back to the window asks again.
     window.addEventListener('focus', read)
-    return () => { cancelled = true; window.removeEventListener('focus', read) }
+    return () => { cancelled = true; clearTimeout(timer); window.removeEventListener('focus', read) }
   }, [node])
-  return state.node === node && node
-    ? { ...state.options, loaded: true }
+  const options = state && state.node === node ? state.options : node ? cachedRemoteComposerOptions(node) : undefined
+  return node && options
+    ? { ...options, loaded: true }
     : { providers: [], defaultModel: null, loaded: false }
 }

@@ -96,14 +96,24 @@ export function remotePermissionCeiling(lineage: PermissionMode | undefined, lim
   return { ceiling: limit, reason: `${computer} lets this device use ${describePermissionMode(limit)} at most. Raise the limit for this device on ${computer}, in Settings, Devices.` }
 }
 
+/** The last answer of each computer, so picking it again shows its models at once. */
+const composerOptionsCache = new Map<NodeId, RemoteComposerOptions>()
+
+/** What `node` last answered to `readRemoteComposerOptions`, while this window is open. */
+export function cachedRemoteComposerOptions(node: NodeId): RemoteComposerOptions | undefined {
+  return composerOptionsCache.get(node)
+}
+
 export async function readRemoteComposerOptions(node: NodeId): Promise<RemoteComposerOptions> {
   const value = await request<Partial<RemoteComposerOptions> | undefined>('bridge.hub.composerOptions', { target: node })
   const permission = value?.permission
-  return {
+  const options: RemoteComposerOptions = {
     providers: Array.isArray(value?.providers) ? value.providers : [],
     defaultModel: value?.defaultModel ?? null,
     ...(permission && isPermissionMode(permission.defaultMode)
       ? { permission: { defaultMode: permission.defaultMode, ...(isPermissionMode(permission.limit) ? { limit: permission.limit } : {}) } }
       : {})
   }
+  composerOptionsCache.set(node, options)
+  return options
 }

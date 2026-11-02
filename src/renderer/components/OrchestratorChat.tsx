@@ -507,7 +507,12 @@ export function OrchestratorChat() {
 
   // Picking a computer swaps the picker to its default model; coming back restores this computer's.
   // A thread of another computer shows the model it has there, or that computer's default.
+  // Compared by value: the computer is asked again (on focus, after a failed read), and the same
+  // default read again must not undo a model the person picked meanwhile.
   const remoteDefault = remoteOptions.defaultModel
+  const remoteDefaultKey = remoteDefault ? JSON.stringify(remoteDefault) : ''
+  const remoteDefaultRef = useRef(remoteDefault)
+  remoteDefaultRef.current = remoteDefault
   const refreshSelectionRef = useRef(refreshSelection)
   refreshSelectionRef.current = refreshSelection
   useEffect(() => {
@@ -516,11 +521,12 @@ export function OrchestratorChat() {
       return
     }
     if (!remoteOptions.loaded) return
-    const pick = remoteDraft ? remoteDefault : (activeThreadModelOverride ?? remoteDefault)
+    const fallback = remoteDefaultRef.current
+    const pick = remoteDraft ? fallback : (activeThreadModelOverride ?? fallback)
     setSelectedLlmProvider(pick?.llmProvider ?? '')
     setSelectedInstanceId(pick?.instanceId)
     setSelectedModelId(pick ? pickerModelId(pick) : '')
-  }, [remoteNode, remoteDraft, remoteOptions.loaded, remoteDefault, activeThreadModelOverride])
+  }, [remoteNode, remoteDraft, remoteOptions.loaded, remoteDefaultKey, activeThreadModelOverride])
 
   useEffect(() => {
     void refreshSelection()
@@ -952,7 +958,12 @@ export function OrchestratorChat() {
       // Blank composer keeps model in local state only. Stamp it onto the new
       // thread before the first turn so the pick survives without touching the
       // shared settings default used by other threads.
-      if (selectedProviderId && selectedModelId) {
+      // A chat on another computer starts on that computer's default model unless another was
+      // picked: each call to it is a round trip, and the first message waits for them.
+      const keepsRemoteDefault = remoteDraft && (!remoteOptions.loaded || (
+        !!remoteDefault && selectedLlmProvider === remoteDefault.llmProvider && selectedModelId === pickerModelId(remoteDefault)
+      ))
+      if (selectedProviderId && selectedModelId && !keepsRemoteDefault) {
         const updated = await window.mousse.threads.setModel(id, {
           ...selectionFor(selectedProviderId),
           ...pickedSelection(selectedModelId)
