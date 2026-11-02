@@ -130,6 +130,46 @@ function linkContent(top: string, path: string): Buffer | null {
 }
 
 /**
+ * The paths of `records` (a `--raw` diff against the working tree, paths relative to `cwd`) whose content did
+ * not change: Git compared their stat data only and reported them as modified with no object name for the
+ * working tree side. A file counts as unchanged when `hash-object` (line endings and filters applied as Git
+ * would, nothing written) gives the object the other side has; a link, when its target does. A changed mode,
+ * a deletion or a type change is never in the set.
+ */
+function* unchangedSteps(cwd: string, records: readonly RawRecord[], objectFormat: string): Generator<Step, Set<string>, string[]> {
+  const unsure = records.filter((record) => record.status === 'M' && record.srcMode === record.dstMode && isZero(record.dstSha))
+  const unchanged = new Set<string>()
+  for (const record of unsure.filter((item) => item.srcMode === LINK)) {
+    const content = linkContent(cwd, record.path)
+    if (content && blobName(objectFormat, content) === record.srcSha) unchanged.add(record.path)
+  }
+  const files = unsure.filter((item) => REGULAR.has(item.srcMode))
+  for (let start = 0; start < files.length; start += HASH_BATCH) {
+    const batch = files.slice(start, start + HASH_BATCH)
+    // A file that went away meanwhile fails the batch; its files then stay reported as changed.
+    const [output] = yield [{ args: ['hash-object', '--', ...batch.map((record) => record.path)], optional: true }]
+    const hashes = output!.split(/\r?\n/)
+    batch.forEach((record, index) => {
+      if (hashes[index]?.trim() === record.srcSha) unchanged.add(record.path)
+    })
+  }
+  return unchanged
+}
+
+/**
+ * The paths a `git diff --raw --no-abbrev -z` against the working tree (run in `cwd`, paths relative to it) reports as
+ * modified although their content is unchanged. Mousse's own diffs run without refreshing the index
+ * (`diff.autoRefreshIndex=false`), so a listing such as `--name-status` includes files whose stat data alone
+ * changed; this tells them apart without writing anything.
+ */
+export async function unchangedWorktreePaths(cwd: string, raw: string): Promise<Set<string>> {
+  const records = parseRawDiff(raw)
+  if (!records.some((record) => record.status === 'M' && isZero(record.dstSha))) return new Set()
+  const format = (await plumbing(cwd, ['rev-parse', '--show-object-format']).catch(() => '')).trim() || 'sha1'
+  return drive(cwd, unchangedSteps(cwd, records, format))
+}
+
+/**
  * The status, as a sequence of steps a sync or an async driver runs: `diff-index --cached` for the index
  * against HEAD, `diff-files` for the working tree against the index, `ls-files --unmerged` for conflicts
  * and `ls-files --others` for untracked files. None of these writes the index.
@@ -180,23 +220,7 @@ function* statusSteps(top: string): Generator<Step, StatusEntry[], string[]> {
   }
 
   const workdir = parseRawDiff(unstaged!).filter((record) => record.status !== 'U' && !stages.has(record.path))
-  // Only the stat data differs, as far as `diff-files` can tell without reading the content.
-  const unsure = workdir.filter((record) => record.status === 'M' && record.srcMode === record.dstMode && isZero(record.dstSha))
-  const unchanged = new Set<string>()
-  for (const record of unsure.filter((item) => item.srcMode === LINK)) {
-    const content = linkContent(top, record.path)
-    if (content && blobName(objectFormat, content) === record.srcSha) unchanged.add(record.path)
-  }
-  const files = unsure.filter((item) => REGULAR.has(item.srcMode))
-  for (let start = 0; start < files.length; start += HASH_BATCH) {
-    const batch = files.slice(start, start + HASH_BATCH)
-    // A file that went away meanwhile fails the batch; its files then stay reported as changed.
-    const [output] = yield [{ args: ['hash-object', '--', ...batch.map((record) => record.path)], optional: true }]
-    const hashes = output!.split(/\r?\n/)
-    batch.forEach((record, index) => {
-      if (hashes[index]?.trim() === record.srcSha) unchanged.add(record.path)
-    })
-  }
+  const unchanged = yield* unchangedSteps(top, workdir, objectFormat)
   for (const record of workdir) {
     if (unchanged.has(record.path)) continue
     entry(record.path).workdir = record.status
@@ -209,10 +233,14 @@ function* statusSteps(top: string): Generator<Step, StatusEntry[], string[]> {
 
 /** The working tree's status, read with plumbing so that reading it never writes the index ({@link statusSteps}). */
 export async function readWorkingTreeStatus(top: string): Promise<StatusEntry[]> {
-  const steps = statusSteps(top)
+  return drive(top, statusSteps(top))
+}
+
+/** Runs the reads of `steps` in `cwd`, each step's reads together. */
+async function drive<T>(cwd: string, steps: Generator<Step, T, string[]>): Promise<T> {
   let next = steps.next([])
   while (!next.done) {
-    next = steps.next(await Promise.all(next.value.map((read) => plumbing(top, read.args).catch((error: unknown) => {
+    next = steps.next(await Promise.all(next.value.map((read) => plumbing(cwd, read.args).catch((error: unknown) => {
       if (read.optional && !(error instanceof GitPolicyError)) return ''
       throw error
     }))))
