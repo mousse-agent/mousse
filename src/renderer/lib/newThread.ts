@@ -29,14 +29,18 @@ export function isNewEmptyThread(
   return !activeThreadId || Boolean(thread && !isThreadStarted(thread) && messageCount === 0)
 }
 
-/** The workspace draft for the new chat, falling back to what the thread already has. */
+/**
+ * The workspace draft for the new chat, falling back to what the thread already has. A thread that never
+ * chose (`worktreeEnabled` unset) takes `worktreeByDefault`, the "Start new chats in a worktree" setting.
+ */
 export function composerWorkspaceFor(
   draft: ComposerWorkspace | undefined,
-  thread: { projectId?: string; worktreeEnabled?: boolean; node?: string } | undefined
+  thread: { projectId?: string; worktreeEnabled?: boolean; node?: string } | undefined,
+  worktreeByDefault: boolean
 ): ComposerWorkspace {
   return draft ?? {
     projectId: thread?.projectId,
-    worktreeEnabled: Boolean(thread?.worktreeEnabled),
+    worktreeEnabled: thread?.worktreeEnabled ?? worktreeByDefault,
     // An empty thread that was created on another computer is a chat for it.
     ...(thread?.node ? { node: thread.node as NodeId } : {})
   }
@@ -48,9 +52,10 @@ export function composerWorkspaceFor(
  */
 export function localWorkspaceFor(
   draft: ComposerWorkspace | undefined,
-  thread: { projectId?: string; worktreeEnabled?: boolean; node?: string } | undefined
+  thread: { projectId?: string; worktreeEnabled?: boolean; node?: string } | undefined,
+  worktreeByDefault: boolean
 ): ComposerWorkspace {
-  const workspace = composerWorkspaceFor(draft, thread)
+  const workspace = composerWorkspaceFor(draft, thread, worktreeByDefault)
   return workspace.node ? { worktreeEnabled: false } : workspace
 }
 

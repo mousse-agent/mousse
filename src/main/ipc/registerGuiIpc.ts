@@ -1471,7 +1471,7 @@ export function registerGuiIpc(
   const createParams = (name: string | undefined, projectId: string | undefined, opts: { worktreeEnabled?: boolean; node?: string } | undefined) => ({
     name: name?.trim() || 'New Chat',
     projectId,
-    worktreeEnabled: opts?.worktreeEnabled === true,
+    ...(typeof opts?.worktreeEnabled === 'boolean' ? { worktreeEnabled: opts.worktreeEnabled } : {}),
     ...(typeof opts?.node === 'string' && opts.node ? { node: opts.node } : {})
   })
 

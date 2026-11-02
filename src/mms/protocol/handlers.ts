@@ -1415,7 +1415,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const p = isObject(params) ? params : {}
       const name = asString(p.name, 'name', 512)
       const projectId = asOptionalString(p.projectId, 256)
-      const worktreeEnabled = asOptionalBoolean(p.worktreeEnabled, 'worktreeEnabled') === true
+      const worktreeEnabled = asOptionalBoolean(p.worktreeEnabled, 'worktreeEnabled')
       const projectPath = projectId
         ? ctx.mms.projects.getProject(projectId)?.path
         : undefined

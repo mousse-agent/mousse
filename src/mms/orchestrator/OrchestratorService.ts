@@ -3496,7 +3496,8 @@ export class OrchestratorService extends EventEmitter {
       id: intent.threadId,
       // Listed from the first write, never an empty draft the app's "New chat" would take over.
       started: true,
-      worktreeEnabled: intent.worktreeEnabled,
+      // Only `new_worktree` is recorded: `project` on a Git project still edits in a worktree of its own (`runsIn`).
+      ...(intent.worktreeEnabled ? { worktreeEnabled: true } : {}),
       ...(intent.modelOverride ? { modelOverride: intent.modelOverride } : {}),
       permissionMode: intent.permissionMode,
       // Launched by the caller's thread, never owned by it: it is neither nested under it nor deleted with it.
@@ -5167,6 +5168,11 @@ export class OrchestratorService extends EventEmitter {
     return this.forkCheckpoint(sourceDir, sourceRunId) ? 'checkpoint' : 'missing'
   }
 
+  /** False once the thread chose its project's folder (worktree toggle off); unset keeps a worktree. */
+  private threadWantsWorktree(threadId: string): boolean {
+    return this.threadStore?.getThread(threadId)?.worktreeEnabled !== false
+  }
+
   /** What a thread's worktree branch is named from: its first message, else its name. */
   private branchNameSource(threadId: string, messages?: readonly ChatMessage[], pending?: string): string | undefined {
     const first = (messages ?? this.sessions.get(threadId)?.messages ?? []).find((message) => message.role === 'user' && message.content.trim())?.content ?? pending
@@ -5183,6 +5189,7 @@ export class OrchestratorService extends EventEmitter {
     let seed: Record<string, unknown>
     try {
       if (manager.load()) seed = { kind: 'existing_workspace' }
+      else if (!this.threadWantsWorktree(threadId)) seed = { kind: 'worktree_off' }
       else if (!manager.resolveRepository(projectPath).capability.gitBacked) seed = { kind: 'not_git_backed' }
       else {
         const sourceDir = this.resolveThreadDir(fork.sourceThreadId)
@@ -9188,7 +9195,7 @@ export class OrchestratorService extends EventEmitter {
         if (projectPath && threadDir) {
           await this.seedForkWorkspace(session.threadId, projectPath, threadDir, opts?.externalSignal, session.executionLease)
           await this.seedSubagentWorkspace(session.threadId, projectPath, threadDir, opts?.externalSignal, session.executionLease, this.branchNameSource(session.threadId, session.messages, request.content))
-          session.workspace = await new WorkspaceResolver(threadDir, session.threadId, projectPath)
+          session.workspace = await new WorkspaceResolver(threadDir, session.threadId, projectPath, this.threadWantsWorktree(session.threadId))
             .resolve(request.mode, 'main', opts?.externalSignal, session.executionLease ?? undefined, this.branchNameSource(session.threadId, session.messages, request.content))
           session.projectCwd = session.workspace.projectPath
         } else {
@@ -10779,7 +10786,7 @@ export class OrchestratorService extends EventEmitter {
       const project = resolveThreadProjectPath(this.projectManager, this.threadStore, session.threadId)
       if (!project) throw new Error('Isolated agents require a project')
       if (!held || !session.workspace) {
-        session.workspace = await new WorkspaceResolver(directory, session.threadId, project).resolve('agent', 'main', this.lifecycle.signal, lease, this.branchNameSource(session.threadId, session.messages))
+        session.workspace = await new WorkspaceResolver(directory, session.threadId, project, this.threadWantsWorktree(session.threadId)).resolve('agent', 'main', this.lifecycle.signal, lease, this.branchNameSource(session.threadId, session.messages))
       }
       if (!session.workspace.capability.checkpointable) throw new Error('Isolated agents require an owned Git workspace')
       session.projectCwd = session.workspace.projectPath

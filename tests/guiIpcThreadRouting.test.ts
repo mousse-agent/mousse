@@ -179,7 +179,8 @@ describe('a chat is created on another computer', () => {
     expect(sent('threads.create').map((call) => call.params)).toEqual([
       { name: 'Fix it', projectId: project, worktreeEnabled: true, node: NODE },
       { name: 'Fix it', projectId: undefined, worktreeEnabled: false },
-      { name: 'New Chat', projectId: undefined, worktreeEnabled: false }
+      // No choice made: none is sent, so the thread takes the "Start new chats in a worktree" setting.
+      { name: 'New Chat', projectId: undefined }
     ])
   })
 })

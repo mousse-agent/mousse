@@ -77,7 +77,8 @@ function DeviceMenuButton({ threadId, name, locked }: { threadId: string | null;
   const draft = useAppStore((s) => s.composerWorkspaceDrafts[s.activeThreadId ?? '__blank__'])
   const thread = useAppStore((s) => s.threads.find((entry) => entry.id === s.activeThreadId))
   const setComposerWorkspaceDraft = useAppStore((s) => s.setComposerWorkspaceDraft)
-  const workspace = composerWorkspaceFor(draft, thread)
+  const worktreeByDefault = useAppStore((s) => s.worktreeByDefault)
+  const workspace = composerWorkspaceFor(draft, thread, worktreeByDefault)
 
   const [menuOpen, setOpen] = useState(false)
   const { devices, notSharing, refresh } = useRunOnDevices()
