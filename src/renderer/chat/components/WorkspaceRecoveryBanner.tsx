@@ -26,8 +26,9 @@ const TITLES: Record<WorkspaceRecovery['kind'], string> = {
   publish: 'A Publish did not finish.'
 }
 
-/** The line under the title: the reason, or what recovery does for a Publish that only did not finish. */
+/** The line under the title: the reason, without repeating the title. */
 function detailOf(recovery: WorkspaceRecovery): string {
+  if (recovery.kind === 'merge' && recovery.folder) return `In ${recovery.folder}. Abort it, or finish it with Git.`
   if (recovery.kind === 'publish' && recovery.reason === 'A Publish did not finish.') {
     return 'Recovery checks whether it reached the branch and records what happened. Turns keep working meanwhile.'
   }

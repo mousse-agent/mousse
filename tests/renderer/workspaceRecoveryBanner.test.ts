@@ -60,7 +60,9 @@ describe('the workspace recovery banner', () => {
   it('names the folder of a merge an earlier version left and offers to abort it', () => {
     const props = view(merge)
     expect(text()).toContain('A merge from an earlier version of Mousse is still in progress.')
-    expect(text()).toContain('in /work/app. Abort it, or finish it with Git.')
+    // The title is not repeated: the line under it names the folder and what to do.
+    expect(text()).toContain('In /work/app. Abort it, or finish it with Git.')
+    expect(text().match(/still in progress/g)).toHaveLength(1)
     expect(buttons().map((entry) => entry.textContent)).toEqual(['Abort the merge'])
     click(buttons()[0])
     expect(props.onAbort).toHaveBeenCalledTimes(1)
