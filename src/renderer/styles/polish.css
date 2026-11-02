@@ -198,11 +198,6 @@ html[data-theme='high-contrast'] {
 /* ---------- Sidebar ---------- */
 .app .threads-sidebar {
   --threads-sidebar-row-height: var(--ui-row-height);
-  background-image: radial-gradient(
-    140% 38% at 0% 0%,
-    rgba(var(--accent-rgb), calc(var(--ui-aura-strength) * 0.8)) 0%,
-    transparent 70%
-  );
 }
 
 .app .threads-sidebar-toolbar {
@@ -450,6 +445,16 @@ html[data-theme='high-contrast'] {
 .app .threads-sidebar-section-settled {
   margin-top: 8px;
   border-top: 1px solid var(--ui-line);
+}
+
+/* Recently deleted sits right under Settled; keep the pair tight. */
+.app .threads-sidebar-section-settled.collapsed:has(+ .threads-sidebar-section-trash:not([hidden])) {
+  margin-bottom: 0;
+}
+
+.app .threads-sidebar-section-settled + .threads-sidebar-section-trash {
+  margin-top: 4px;
+  padding-top: 0;
 }
 
 /* ---------- Chats: roster, groups, recent ---------- */
