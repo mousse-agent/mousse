@@ -7,6 +7,7 @@ import { atomicWriteJsonSync } from '../data/AtomicFs'
 import { acquireRepositoryLease } from '../git/RepositoryLease'
 import { resolveRepositoryIdentity } from '../git/RepositoryIdentity'
 import { buildResourceInventory } from './ResourceInventory'
+import { projectFolderPurgeRefs } from './projectFolderRefs'
 import { measureTree } from './diskMeasure'
 import { assertLifecyclePath, ResourceLifecycleStore } from './ResourceLifecycleStore'
 import { assertFrozenContentEntry, lifecycleGit, lifecycleRead, readDirectLifecycleRef, walkOwnedContent, WorktreeRetirementService } from './WorktreeRetirementService'
@@ -300,6 +301,20 @@ export class ResourcePurgeService {
         preview.exclusiveBytes += manifest.content.reduce((sum, entry) => sum + entry.bytes, 0)
       } catch (error) { preview.blockers.push(`Workspace retained: ${resource.identity}: ${(error as Error).message}`) }
     }
+    // A thread that worked in its project's own folder pinned snapshots there, outside every worktree: its pins and its
+    // receipts' refs are released like a worktree thread's refs, before its record goes with the task data. Refs only:
+    // nothing in the person's folder is deleted or moved, and the files a restore kept (`refs/mousse/preserved/`) stay.
+    const folderRefs: LifecyclePurgeItem[] = []
+    for (const task of tasks) {
+      if (!ownedIds.has(task.taskId)) continue
+      let plan: ReturnType<typeof projectFolderPurgeRefs>
+      try { plan = projectFolderPurgeRefs(task) } catch (error) { preview.blockers.push(`Project folder refs of ${task.taskId}: ${(error as Error).message}`); continue }
+      if (!plan) continue
+      if ('unavailable' in plan) { preview.retained.push({ identity: join(task.location, 'project-folder.json'), reason: plan.unavailable }); continue }
+      for (const { ref, sha } of plan.refs) folderRefs.push({ id: `project-folder-ref:${task.taskId}:${ref}`, kind: 'ref', identity: ref, ownerTaskId: task.taskId, commonDir: plan.commonDir, expectedValue: sha, status: 'pending' })
+    }
+    preview.items.push(...folderRefs)
+    const plannedRefs = new Set(folderRefs.map((item) => item.identity))
     // Preparation adds explicit reconstruction pins. Refresh rather than omitting their cleanup.
     inventory = buildResourceInventory(this.store, this.store.require(taskId))
     for (const resource of inventory.resources) {
@@ -307,6 +322,8 @@ export class ResourcePurgeService {
       if (resource.kind === 'worktree' || resource.kind === 'agent-session' || resource.kind === 'artifact') continue
       if (shared(resource.identity, resource.repositoryId)) { preview.retained.push({ identity: resource.identity, reason: 'Another owner retains this resource' }); continue }
       if (resource.kind === 'git-ref') {
+        // Already planned from the project folder's own repository.
+        if (plannedRefs.has(resource.identity)) continue
         try {
           if (!isMousseOwnedRef(resource.identity)) throw new Error('Source ref is not Mousse-owned')
           const commonDir = resource.repositoryId ? repositories.get(resource.repositoryId) : repositories.size === 1 ? [...repositories.values()][0] : undefined
