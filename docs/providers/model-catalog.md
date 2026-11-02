@@ -41,18 +41,18 @@ file; every other test uses made-up models, so adding a real model never touches
 |---|---|---|
 | `id` | Required | The maker's own model id. Never renamed or reused. Saved selections and favorites store it. |
 | `name` | Required | Full name, for example "Claude Opus 5.5". |
-| `maker` | Required | Picks the logo and the brand section (`anthropic`). |
+| `maker` | Required | Picks the logo and the brand section (`anthropic`, `openai`). |
 | `released` | Required | `YYYY-MM-DD`, a real date. Sets list order (newest first). |
 | `routes` | Required, at least one | See below. |
-| `short` | Optional | The name beside a maker logo: `name` without the brand ("Opus 5.5"). Defaults to `name`. |
-| `family` | Optional | For example `opus`. Two models can share a release date, so a family tells them apart. |
-| `older` | Optional | `true` folds the model behind "Show more" on API routes. Agent routes ignore it: there, "older" means the agent does not list the model itself. |
+| `short` | Optional | The name beside a maker logo: `name` without the brand ("Opus 5.5"). Defaults to `name`. OpenAI's names carry no brand ("GPT-6.1 Sol", "o3"), so there `short` is `name`. |
+| `family` | Optional | For example `opus`. Two models can share a release date, so a family tells them apart. OpenAI families are the tier: `astra`, `sol`, `terra`, `luna`, and before those tiers `gpt` (the flagships, with o1 and o3), `mini`, `nano`, `pro`, `codex`, `codex-spark`, `realtime`, `daybreak-blue`, `daybreak-red`. |
+| `older` | Optional | `true` folds the model behind "Show more" on API routes. It marks a model a newer one of the same family replaces. Agent routes ignore it: there, "older" means the agent does not list the model itself. |
 | `efforts` | Optional | Reasoning levels, with the same values as `LlmModelOption.efforts`. Used only when the route reports none for the model; in practice, older Claude Code models. |
 
 ### Routes
 
 A route key is an existing driver or provider id: `claude` (the Claude Code driver), `anthropic`
-(the Anthropic API provider), `openai`, `codex`. The value is an object:
+(the Anthropic API provider), `openai` (the OpenAI API provider), `codex`. The value is an object:
 
 | Field | Required? | Rule |
 |---|---|---|
@@ -105,6 +105,24 @@ The bundled-file test checks: the schema, unique ids and unique ids per route, v
 route keys, `short` equal to `name` without the brand, and every `minMousse` at or below
 `package.json`'s version.
 
+## API model lists
+
+The Anthropic and OpenAI API providers list their own models: Anthropic through `models.list`, OpenAI
+through `/v1/models` plus pi-ai's bundled data. The catalog only names and orders those lists
+(`catalogApiModels`, applied in `ProviderAuthService.toLlmProviderOption`):
+
+- A listed model whose id is a route id on `anthropic` or `openai` takes that catalog model's `name`
+  and `older`. It matches by the route id, not the catalog `id`.
+- Catalog models come first, newest `released` first. Models the catalog does not know keep their
+  own name and their place, after them.
+- A listed model whose route needs a newer Mousse (`minMousse`) is left out.
+- Names only: the models turns run on are not changed (`api`, cost, context window, output limit,
+  input types, reasoning, `compat`, `baseUrl`, thinking levels). pi-ai's data and its download stay
+  as they are.
+
+The picker shows the short form of a name beside the maker logo (`shortModelName`), which matches
+`short` for every catalog model.
+
 ## Older Claude models
 
 Claude Code lists only its current models (`supportedModels()`), but often still runs older ones.
@@ -143,7 +161,7 @@ Not built yet:
   every 6 hours with a timeout and a size cap, and used only when its `revision` is higher than the
   copy in use. The bundled copy is trusted as part of the install.
 - **Signing:** a detached Ed25519 signature over the downloaded bytes, checked before use.
-- **API routes:** names and order for model API lists (`anthropic`, `openai`), and later a per-route
-  block with what each adapter needs (context and output limits, input types, reasoning, price).
+- **API routes:** a per-route block with what each adapter needs (context and output limits, input
+  types, reasoning, price), before the catalog replaces pi-ai data that turns run on.
 - **Moving a thread off a model that is no longer offered,** to the newest model of the same
   `family`, then the provider's newest model.

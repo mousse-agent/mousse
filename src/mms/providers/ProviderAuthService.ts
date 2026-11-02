@@ -2,8 +2,10 @@ import { dirname, join } from 'path'
 import type { ApiKeyCredential, Credential, MutableModels, Provider } from '@earendil-works/pi-ai'
 import { getEnvApiKey, getSupportedThinkingLevels } from '@earendil-works/pi-ai/compat'
 import { getModelEffortLevels } from '../../shared/modelEfforts'
+import { catalogApiModels, MODEL_CATALOG_FORMAT, type ModelCatalog, type ModelCatalogRouteKey } from '../../shared/modelCatalog'
+import { bundledModelCatalog, catalogForThisMousse } from '../models/modelCatalog'
 import { builtinModels, builtinProviders } from '@earendil-works/pi-ai/providers/all'
-import type { LlmProviderOption } from '../../shared/settings'
+import type { LlmModelOption, LlmProviderOption } from '../../shared/settings'
 import type {
   AmbientProviderInfo,
   ConfiguredProvider,
@@ -96,6 +98,14 @@ const GUIDED_API_KEY_PROVIDERS = new Set([
 type ProviderAuthTypeFilter = 'api_key' | 'oauth'
 
 /** How often to re-fetch dynamic provider model catalogs (Cursor, OpenAI-compatible, Radius, …). */
+/** API providers whose model lists take names, order and `older` from the model catalog, by their route. */
+const CATALOG_ROUTES: Readonly<Record<string, ModelCatalogRouteKey>> = { [CLAUDE_PROVIDER_ID]: 'anthropic', openai: 'openai' }
+
+export interface ProviderAuthServiceOptions {
+  /** Mousse's model catalog as read, before version limits (default `bundledModelCatalog()`). */
+  modelCatalog?: () => ModelCatalog
+}
+
 const DYNAMIC_MODELS_REFRESH_MS = 5 * 60_000
 /** Upper bounds so a hung endpoint cannot stall later refreshes forever. */
 const CATALOG_REFRESH_TIMEOUT_MS = 60_000
@@ -130,7 +140,10 @@ export class ProviderAuthService {
   private refreshController: AbortController | null = null
   private stopped = false
 
-  constructor(authPath = join(getMousseHomeDir(), 'auth.json')) {
+  constructor(
+    authPath = join(getMousseHomeDir(), 'auth.json'),
+    private readonly options: ProviderAuthServiceOptions = {}
+  ) {
     const home = dirname(authPath)
     this.credentials = new FileCredentialStore(authPath)
     this.modelsStore = new FileModelsStore(join(home, 'models-cache.json'))
@@ -333,12 +346,28 @@ export class ProviderAuthService {
         ...(model.contextWindow > 0 ? { contextWindow: model.contextWindow } : {})
       }
     })
-    if (models.length === 0) return null
+    const route = Object.hasOwn(CATALOG_ROUTES, id) ? CATALOG_ROUTES[id] : undefined
+    const listed = route ? this.withCatalogNames(models, route) : models
+    if (listed.length === 0) return null
     return {
       id,
       label: this.getProviderDisplayName(id),
-      models
+      models: listed
     }
+  }
+
+  /**
+   * The picker's list for an API provider, named and ordered by the model catalog
+   * (`catalogApiModels`). Only names, order and `older` change; the models turns run on do not.
+   */
+  private withCatalogNames<T extends LlmModelOption>(models: T[], route: ModelCatalogRouteKey): T[] {
+    let read: ModelCatalog
+    try {
+      read = (this.options.modelCatalog ?? bundledModelCatalog)()
+    } catch {
+      read = { format: MODEL_CATALOG_FORMAT, revision: 0, models: [] }
+    }
+    return catalogApiModels(models, read, catalogForThisMousse(read), route)
   }
 
   /** Live catalogs for every registered provider, including ones without stored credentials. */

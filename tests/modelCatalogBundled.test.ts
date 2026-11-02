@@ -14,8 +14,11 @@ const raw = JSON.parse(readFileSync(join(root, 'src/mms/models/models.json'), 'u
   models: Array<Record<string, unknown>>
 }
 const packageVersion = (JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')) as { version: string }).version
-/** The brand each maker's full names start with (#490: `short` is `name` without it). */
-const BRANDS: Record<string, string> = { anthropic: 'Claude' }
+/**
+ * The brand each maker's full names start with (#490: `short` is `name` without it). OpenAI's names
+ * carry none ("GPT-6.1 Sol", "o3"), so their short form is the full name.
+ */
+const BRANDS: Record<string, string> = { anthropic: 'Claude', openai: '' }
 const FIELDS = new Set(['id', 'name', 'short', 'maker', 'family', 'released', 'older', 'efforts', 'routes'])
 
 describe('bundled model catalog', () => {
@@ -71,7 +74,7 @@ describe('bundled model catalog', () => {
     for (const model of raw.models) {
       const brand = BRANDS[model.maker as string]
       expect(brand, `${model.id}: maker ${model.maker}`).toBeDefined()
-      expect(model.name, String(model.id)).toBe(`${brand} ${model.short}`)
+      expect(model.name, String(model.id)).toBe(brand ? `${brand} ${model.short}` : model.short)
     }
   })
 
