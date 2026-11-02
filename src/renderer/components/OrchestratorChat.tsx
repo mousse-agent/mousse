@@ -56,7 +56,7 @@ import { EarlierMessagesBar } from './EarlierMessagesBar'
 import { forgetMessageImageRequests, hydrateMessageImages } from '../lib/messageImages'
 import { isOutcomeUncertain, settleUncertainSend } from '../lib/uncertainSend'
 import { SendRetryIds } from '../lib/sendRetryIds'
-import { composerAutoModel, onProviderListingsChanged, pickerIdFor, pickerProviders, projectScope, useProviderSnapshots, type PickerSelection } from '../lib/providerSnapshots'
+import { composerAutoModel, fallbackModel, onProviderListingsChanged, pickerOffers, pickerIdFor, pickerProviders, projectScope, useProviderSnapshots, type PickerSelection } from '../lib/providerSnapshots'
 import { errorText, sendErrorLine } from '../lib/errorText'
 import { PromptUndoNotice } from './PromptUndoControls'
 import { pendingChangesDetails, type PendingChangesDetails } from '../../shared/workspace'
@@ -96,6 +96,23 @@ function releaseComposerMediaUrls(media: ComposerMediaDraft): void {
     if (file.previewUrl) URL.revokeObjectURL(file.previewUrl)
   })
   media.voice.forEach((voice) => URL.revokeObjectURL(voice.url))
+}
+
+/** One picker selection as a comparable string. */
+function selectionKey(selection: { instanceId?: string; llmProvider: string; pickerId: string }): string {
+  return `${selection.instanceId ?? ''}\u0000${selection.llmProvider}\u0000${selection.pickerId}`
+}
+
+/** The thread's model is exactly the wanted one: the same account, model and reasoning level. */
+function sameModel(
+  has: { instanceId?: string; llmProvider: string; model: string; effort?: string } | undefined,
+  wanted: { instanceId?: string; llmProvider: string; model: string; effort?: string }
+): boolean {
+  return !!has &&
+    (has.instanceId ?? '') === (wanted.instanceId ?? '') &&
+    has.llmProvider === wanted.llmProvider &&
+    has.model === wanted.model &&
+    (has.effort ?? '') === (wanted.effort ?? '')
 }
 
 export function OrchestratorChat() {
@@ -505,22 +522,43 @@ export function OrchestratorChat() {
     // snapshot fetched for another thread goes stale on switch.
   }, [activeThreadModelOverride, activeThreadId, profileReady, profileId])
 
-  // Picking a computer swaps the picker to its default model; coming back restores this computer's.
-  // A thread of another computer shows the model it has there, or that computer's default.
+  // Picking a computer swaps the picker to its default model (or its first usable one, as on this
+  // computer); coming back restores this computer's. A thread of another computer shows the model it
+  // has there. That computer is asked again (on focus, after a failed read): an answer that only
+  // changes its default keeps a model the person picked meanwhile.
   const remoteDefault = remoteOptions.defaultModel
+  const remoteDefaultKey = remoteDefault ? JSON.stringify(remoteDefault) : ''
+  const remoteDefaultRef = useRef(remoteDefault)
+  remoteDefaultRef.current = remoteDefault
+  const providersRef = useRef(providers)
+  providersRef.current = providers
+  const shownSelectionRef = useRef('')
+  shownSelectionRef.current = selectionKey({ instanceId: selectedInstanceId, llmProvider: selectedLlmProvider, pickerId: selectedModelId })
+  const remoteAppliedRef = useRef<{ context: string; shown: string } | undefined>(undefined)
   const refreshSelectionRef = useRef(refreshSelection)
   refreshSelectionRef.current = refreshSelection
   useEffect(() => {
     if (!remoteNode) {
+      remoteAppliedRef.current = undefined
       void refreshSelectionRef.current()
       return
     }
     if (!remoteOptions.loaded) return
-    const pick = remoteDraft ? remoteDefault : (activeThreadModelOverride ?? remoteDefault)
+    const own = remoteDraft ? undefined : activeThreadModelOverride
+    const remote = remoteDefaultRef.current
+    const known = remote?.llmProvider ? { ...remote, llmProvider: remote.llmProvider } : undefined
+    const pick = own ?? (known && pickerOffers(known, providersRef.current) ? known : fallbackModel(providersRef.current))
+    const context = `${remoteNode}\u0000${remoteDraft}\u0000${own ? JSON.stringify(own) : ''}`
+    const applied = remoteAppliedRef.current
+    if (applied?.context === context && applied.shown !== shownSelectionRef.current) return
     setSelectedLlmProvider(pick?.llmProvider ?? '')
     setSelectedInstanceId(pick?.instanceId)
     setSelectedModelId(pick ? pickerModelId(pick) : '')
-  }, [remoteNode, remoteDraft, remoteOptions.loaded, remoteDefault, activeThreadModelOverride])
+    remoteAppliedRef.current = {
+      context,
+      shown: pick ? selectionKey({ instanceId: pick.instanceId, llmProvider: pick.llmProvider, pickerId: pickerModelId(pick) }) : selectionKey({ llmProvider: '', pickerId: '' })
+    }
+  }, [remoteNode, remoteDraft, remoteOptions.loaded, remoteDefaultKey, activeThreadModelOverride, providers])
 
   useEffect(() => {
     void refreshSelection()
@@ -952,11 +990,14 @@ export function OrchestratorChat() {
       // Blank composer keeps model in local state only. Stamp it onto the new
       // thread before the first turn so the pick survives without touching the
       // shared settings default used by other threads.
-      if (selectedProviderId && selectedModelId) {
-        const updated = await window.mousse.threads.setModel(id, {
-          ...selectionFor(selectedProviderId),
-          ...pickedSelection(selectedModelId)
-        })
+      // Skipped when the new thread already has exactly that model (account, model and level): on
+      // another computer each call is a round trip the first message would wait for.
+      const wanted = selectedProviderId && selectedModelId
+        ? { ...selectionFor(selectedProviderId), ...pickedSelection(selectedModelId) }
+        : undefined
+      const stamped = useAppStore.getState().threads.find((entry) => entry.id === id)?.modelOverride
+      if (wanted && !sameModel(stamped, wanted)) {
+        const updated = await window.mousse.threads.setModel(id, wanted)
         if (!stillVisible()) return
         if (updated) useAppStore.getState().upsertThread(updated)
       }
