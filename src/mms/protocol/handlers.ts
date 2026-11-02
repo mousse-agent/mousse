@@ -3884,7 +3884,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         ctx.mms.threads.getThreadDir(threadId)
       }
       const lifecycle = store.require(threadId)
-      return { lifecycle, inventory: buildResourceInventory(store, lifecycle), migrationDiagnostics }
+      return { lifecycle, inventory: await buildResourceInventory(store, lifecycle), migrationDiagnostics }
     }
     case 'threads.trash': {
       const p = isObject(params) ? params : {}

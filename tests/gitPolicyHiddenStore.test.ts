@@ -13,7 +13,7 @@ import { listChangedFiles, readFileVersions } from '../src/mms/git/reviewDiff'
 import { ResourceLifecycleCoordinator } from '../src/mms/lifecycle/ResourceLifecycleCoordinator'
 import { ResourceLifecycleStore } from '../src/mms/lifecycle/ResourceLifecycleStore'
 import { registerThreadLifecycleGate } from '../src/mms/queue/ThreadLifecycleAdmission'
-import { ensureSnapshotWorkspace, expireSnapshotTrash, inThreadSnapshotScope, SNAPSHOT_TRASH_QUIET_MS, snapshotTrashRoot } from '../src/mms/workspace/SnapshotWorkspace'
+import { ensureSnapshotWorkspaceAsync, expireSnapshotTrash, inThreadSnapshotScope, SNAPSHOT_TRASH_QUIET_MS, snapshotTrashRoot } from '../src/mms/workspace/SnapshotWorkspace'
 import { actionOptions } from './fixtures/gitFoundation'
 
 /**
@@ -49,12 +49,12 @@ const violations = () => entries.filter((entry) => entry.kind === 'violation').m
 const asked = <T>(label: string, work: () => T): T => withUserRequest(userAction('button', label), work)
 
 /** A thread of `projectId` (none: a thread with no project) whose folder is `work`, with its directory in the lifecycle store. */
-function thread(work: string, projectId?: string) {
+async function thread(work: string, projectId?: string) {
   const location = join(home, 'thread-data', 'task')
   mkdirSync(location, { recursive: true })
   writeFileSync(join(location, 'meta.json'), JSON.stringify({ id: 'task' }))
   writeFileSync(join(location, 'messages.json'), '[]')
-  const space = ensureSnapshotWorkspace({ threadDirectory: location, threadId: 'task', workTree: work, ...(projectId ? { projectId } : {}) })
+  const space = (await ensureSnapshotWorkspaceAsync({ threadDirectory: location, threadId: 'task', workTree: work, ...(projectId ? { projectId } : {}) }))
   const actions = new ThreadActionService(location)
   const turn = (id: string, start: number, mutate: () => void) =>
     actions.runCheckpointedAction({ ...actionOptions(space.record.workTree, id), threadId: 'task', presentationMessageStart: start, presentationMessageEnd: start + 2 }, mutate)
@@ -82,7 +82,7 @@ async function purge(location: string): Promise<void> {
 }
 
 /** A file a turn stopped tracking (now ignored), made again as an only copy: Undo keeps it in the store before writing over it. */
-async function keptByUndo(t: ReturnType<typeof thread>): Promise<string> {
+async function keptByUndo(t: Awaited<ReturnType<typeof thread>>): Promise<string> {
   writeFileSync(join(t.work, 'secret'), 'tracked\n')
   await t.turn('add-secret', 0, () => undefined)
   await t.turn('drop-secret', 2, () => { rmSync(join(t.work, 'secret')); writeFileSync(join(t.work, '.gitignore'), 'secret\n') })
@@ -97,7 +97,7 @@ describe('a folder without Git under MOUSSE_GIT_POLICY=refuse', () => {
     const work = join(root, 'work')
     mkdirSync(work)
     writeFileSync(join(work, 'a.txt'), 'one\n')
-    const t = thread(work, 'project-1')
+    const t = (await thread(work, 'project-1'))
     const first = await t.turn('turn-1', 0, () => writeFileSync(join(work, 'a.txt'), 'two\n'))
     const second = await t.turn('turn-2', 2, () => writeFileSync(join(work, 'b.txt'), 'b\n'))
     expect(first.action.reversible && second.action.reversible).toBe(true)
@@ -132,7 +132,7 @@ describe('a folder without Git under MOUSSE_GIT_POLICY=refuse', () => {
   it('keeps a deleted thread whose store holds files an Undo kept within the Undo window until the person discards them', async () => {
     const work = join(root, 'work')
     mkdirSync(work)
-    const t = thread(work, 'project-1')
+    const t = (await thread(work, 'project-1'))
     const ref = await keptByUndo(t)
     const gitDir = t.space.store.gitDir
     const refs = (prefix: string) => execFileSync('git', ['--git-dir', gitDir, 'for-each-ref', '--format=%(refname)', prefix], { encoding: 'utf8' }).trim()
@@ -163,7 +163,7 @@ describe('a folder without Git under MOUSSE_GIT_POLICY=refuse', () => {
     vi.useFakeTimers({ toFake: ['Date'] }); vi.setSystemTime(Date.now() - 40 * 24 * 60 * 60 * 1000)
     let ref: string
     try {
-      const t = thread(work, 'project-1')
+      const t = (await thread(work, 'project-1'))
       ref = await keptByUndo(t)
     } finally { vi.useRealTimers() }
     const { store, coordinator } = await trashed(join(home, 'thread-data', 'task'))
@@ -178,7 +178,7 @@ describe('a folder without Git under MOUSSE_GIT_POLICY=refuse', () => {
   it('moves a thread with no project’s store to the trash, and the expiry deletes it, with no violation', async () => {
     const work = join(root, 'scratch')
     mkdirSync(work)
-    const t = thread(work)
+    const t = (await thread(work))
     await t.turn('turn', 0, () => writeFileSync(join(work, 'notes.md'), '# notes\n'))
     await purge(t.location)
     expect(readdirSync(snapshotTrashRoot(home))).toEqual([expect.stringMatching(/^thread-task-/)])

@@ -7,7 +7,7 @@ import { join, parse, resolve, sep } from 'node:path'
 import type { GitRecord } from '../../shared/threadActions'
 import { activeHiddenStore, builtInPathspecs, ensureStoreRules, outsideHiddenStore } from '../git/hiddenStore'
 import { gitEnv, gitStep, guarded, guardedAsync, mergeTreesSteps, MOUSSE_COMMIT_ENV, mousseCommitEnvNow, NOT_MOUSSE, operationInProgressSteps, runGitProcess, tryGit, tryGitAsync, tryGitStep, treeOfSteps } from './git'
-import { files as disk, runAsync, runSync, step, type Steps } from './steps'
+import { files as disk, runAsync, step, type Steps } from './steps'
 import { retentionWindowText } from '../../shared/undoRetention'
 
 /**
@@ -116,9 +116,6 @@ export function* snapshotUncoveredSteps(top: string, sha: string): Steps<Uncover
   }
 }
 
-export function snapshotUncovered(top: string, sha: string): Uncovered | undefined {
-  return runSync(snapshotUncoveredSteps(top, sha))
-}
 
 export function snapshotUncoveredAsync(top: string, sha: string): Promise<Uncovered | undefined> {
   return runAsync(snapshotUncoveredSteps(top, sha))
@@ -178,11 +175,8 @@ const SYSTEM_FOLDERS = process.platform === 'win32'
  * folder (`/etc`, `/usr`, `/System`, `/Library`, `C:\\Windows`, `C:\\Program Files`, `C:\\ProgramData`) or a folder in one.
  * A project there would put someone's whole account, or the system, in a store.
  */
-export function isUnsafeSnapshotRoot(path: string, home = homedir()): boolean {
-  return runSync(unsafeSnapshotRoot(path, home))
-}
 
-/** {@link isUnsafeSnapshotRoot} without blocking the daemon. */
+/** Whether `path` is a folder a snapshot must never hold (see `unsafeSnapshotRoot`). Reads without blocking. */
 export function isUnsafeSnapshotRootAsync(path: string, home = homedir()): Promise<boolean> {
   return runAsync(unsafeSnapshotRoot(path, home))
 }
@@ -421,9 +415,6 @@ export function* worktreeTreeSteps(cwd: string): Steps<string> {
   return (yield* indexTree(top, index, yield* headOf(top))).tree
 }
 
-export function worktreeTree(cwd: string): string {
-  return runSync(worktreeTreeSteps(cwd))
-}
 
 export function worktreeTreeAsync(cwd: string): Promise<string> {
   return runAsync(worktreeTreeSteps(cwd))
@@ -464,11 +455,8 @@ export function* takeSnapshotSteps(cwd: string, input: SnapshotInput): Steps<Sna
   return { sha, ...state }
 }
 
-export function takeSnapshot(cwd: string, input: SnapshotInput): Snapshot {
-  return runSync(takeSnapshotSteps(cwd, input))
-}
 
-/** {@link takeSnapshot} without blocking the daemon. */
+/** Records the worktree's files as a snapshot (see `takeSnapshotSteps`), without blocking the daemon. */
 export function takeSnapshotAsync(cwd: string, input: SnapshotInput): Promise<Snapshot> {
   return runAsync(takeSnapshotSteps(cwd, input))
 }
@@ -484,9 +472,6 @@ export function* sameTreeSteps(cwd: string, a: string, b: string): Steps<boolean
   try { return (yield* treeOfSteps(cwd, a)) === (yield* treeOfSteps(cwd, b)) } catch { return false }
 }
 
-export function sameTree(cwd: string, a: string, b: string): boolean {
-  return runSync(sameTreeSteps(cwd, a, b))
-}
 
 export function sameTreeAsync(cwd: string, a: string, b: string): Promise<boolean> {
   return runAsync(sameTreeSteps(cwd, a, b))
@@ -504,9 +489,6 @@ export function* snapshotOriginSteps(cwd: string, sha: string): Steps<{ head?: s
   return { head: trailer('Mousse-Head'), branch: trailer('Mousse-Branch') }
 }
 
-export function snapshotOrigin(cwd: string, sha: string): { head?: string; branch?: string } {
-  return runSync(snapshotOriginSteps(cwd, sha))
-}
 
 export function snapshotOriginAsync(cwd: string, sha: string): Promise<{ head?: string; branch?: string }> {
   return runAsync(snapshotOriginSteps(cwd, sha))
@@ -534,9 +516,6 @@ export function* describeGitSteps(cwd: string, startSha: string, after: Snapshot
   return { record, commits }
 }
 
-export function describeGit(cwd: string, startSha: string, after: Snapshot): { record: GitRecord; commits: string[] } {
-  return runSync(describeGitSteps(cwd, startSha, after))
-}
 
 export function describeGitAsync(cwd: string, startSha: string, after: Snapshot): Promise<{ record: GitRecord; commits: string[] }> {
   return runAsync(describeGitSteps(cwd, startSha, after))
@@ -551,9 +530,6 @@ export function* pushedToSteps(cwd: string, commits: string[]): Steps<string | u
   return refs.ok ? refs.stdout.split(/\r?\n/).find((ref) => ref && !ref.endsWith('/HEAD')) : undefined
 }
 
-export function pushedTo(cwd: string, commits: string[]): string | undefined {
-  return runSync(pushedToSteps(cwd, commits))
-}
 
 export function pushedToAsync(cwd: string, commits: string[]): Promise<string | undefined> {
   return runAsync(pushedToSteps(cwd, commits))
@@ -626,11 +602,8 @@ export function* restoreChangeSteps(cwd: string, input: RestoreChangeInput, plan
   return { snapshot, tree, ...(preserved ? { preserved } : {}), ...(leftAsIs.length ? { leftAsIs } : {}) }
 }
 
-export function restoreChange(cwd: string, input: RestoreChangeInput, planned?: (tree: string) => void): RestoreResult {
-  return runSync(restoreChangeSteps(cwd, input, planned))
-}
 
-/** {@link restoreChange} without blocking the daemon. */
+/** Brings `theirs` into the worktree (see `restoreChangeSteps`), without blocking the daemon. */
 export function restoreChangeAsync(cwd: string, input: RestoreChangeInput, planned?: (tree: string) => void): Promise<RestoreResult> {
   return runAsync(restoreChangeSteps(cwd, input, planned))
 }
@@ -782,11 +755,8 @@ export function* moveFilesSteps(top: string, from: string, to: string, operation
   return preserved
 }
 
-export function moveFiles(top: string, from: string, to: string, operationId?: string): PreservedFiles | undefined {
-  return runSync(moveFilesSteps(top, from, to, operationId))
-}
 
-/** {@link moveFiles} without blocking the daemon. */
+/** Rewrites the files that differ between two trees (see `moveFilesSteps`), without blocking the daemon. */
 export function moveFilesAsync(top: string, from: string, to: string, operationId?: string): Promise<PreservedFiles | undefined> {
   return runAsync(moveFilesSteps(top, from, to, operationId))
 }

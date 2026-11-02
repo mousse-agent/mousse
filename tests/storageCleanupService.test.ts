@@ -251,7 +251,7 @@ describe('inactive rule', () => {
     const f = fixture(); setPolicy(f, inactive())
     git(f.worktree, ['switch', '-q', '-c', 'issue-1-work'])
     // The inventory that permanent deletion and shared-ownership proofs are built on does not fail closed either.
-    expect(buildResourceInventory(f.store, f.store.require('task')).blockers).toEqual([])
+    expect((await buildResourceInventory(f.store, f.store.require('task'))).blockers).toEqual([])
     expect(item(await f.service.run('manual'))).toMatchObject({ outcome: 'removed' })
     expect(existsSync(f.worktree)).toBe(false)
     await new ThreadWorkspaceManager(f.location).restore(f.repo)

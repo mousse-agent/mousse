@@ -1,7 +1,7 @@
 /**
  * Mousse's thread actions (checkpoints, Undo, Discard, Publish) run their Git and file work without blocking the
- * daemon. The synchronous and async forms of the shared helpers give the same answers; an action whose Git does not
- * answer holds only its own thread, and a second action on that thread still waits for the first.
+ * daemon. The async helpers answer as Git does, the synchronous Git runner that remains gives the same answers; an
+ * action whose Git does not answer holds only its own thread, and a second action on that thread still waits for the first.
  */
 import { execFileSync, spawnSync } from 'node:child_process'
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
@@ -10,9 +10,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { MousseMainService } from '../src/mms/MousseMainService'
 import { dispatchMethod } from '../src/mms/protocol/handlers'
 import { ThreadWorkspaceManager } from '../src/mms/workspace/ThreadWorkspaceManager'
-import { gitAsync, gitRawStep, inspectPendingChanges, inspectPendingChangesAsync, runGitProcess, tryGit, tryGitAsync } from '../src/mms/actions/git'
-import { runAsync, runSync } from '../src/mms/actions/steps'
-import { takeSnapshot, takeSnapshotAsync, worktreeTree, worktreeTreeAsync } from '../src/mms/actions/snapshots'
+import { gitAsync, inspectPendingChangesAsync, runGitProcess, tryGit, tryGitAsync } from '../src/mms/actions/git'
+import { takeSnapshotAsync, worktreeTreeAsync } from '../src/mms/actions/snapshots'
 import { testHarness } from '../src/mms/run/testkit/harness'
 import { git, gitFoundationFixture } from './fixtures/gitFoundation'
 import { piAdapter } from './run/phase6Fixture'
@@ -36,13 +35,15 @@ afterEach(() => {
   f.dispose()
 })
 
-describe('the synchronous and async forms', () => {
-  it('give the same answers', async () => {
+describe('the async helpers', () => {
+  it('answer as Git does, and as the synchronous runner that remains', async () => {
     writeFileSync(join(f.repo, 'value.txt'), 'changed\n')
     writeFileSync(join(f.repo, 'new.txt'), 'new\n')
-    expect(await inspectPendingChangesAsync(f.repo)).toEqual(inspectPendingChanges(f.repo))
-    expect(await worktreeTreeAsync(f.repo)).toBe(worktreeTree(f.repo))
-    const snapshot = takeSnapshot(f.repo, { reason: 'test' })
+    expect(await inspectPendingChangesAsync(f.repo)).toMatchObject({ files: expect.arrayContaining(['new.txt', 'value.txt']), unmerged: [] })
+    // The worktree's files as a tree, without writing a commit: the snapshot taken next has the same tree.
+    const tree = await worktreeTreeAsync(f.repo)
+    const snapshot = await takeSnapshotAsync(f.repo, { reason: 'test' })
+    expect(snapshot.tree).toBe(tree)
     // The files did not change, so both name the snapshot just taken.
     expect(await takeSnapshotAsync(f.repo, { reason: 'test' })).toEqual(snapshot)
     expect(await tryGitAsync(f.repo, ['rev-parse', '--verify', '-q', 'nothing'])).toEqual(tryGit(f.repo, ['rev-parse', '--verify', '-q', 'nothing']))
@@ -58,8 +59,6 @@ describe('the synchronous and async forms', () => {
     const async = await tryGitAsync(f.repo, ['cat-file', '-p', blob])
     expect(sync.ok).toBe(false)
     expect(async.ok).toBe(sync.ok)
-    expect(() => runSync(gitRawStep(f.repo, ['cat-file', '-p', blob]))).toThrow()
-    await expect(runAsync(gitRawStep(f.repo, ['cat-file', '-p', blob]))).rejects.toThrow()
   })
 
   it('report output past the limit as spawnSync does', async () => {

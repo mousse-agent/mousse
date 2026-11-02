@@ -2,8 +2,8 @@ import { randomUUID } from 'node:crypto'
 import type { ChangeReceipt } from '../../shared/threadActions'
 import { ThreadJournal } from '../data/ThreadJournal'
 import { resolveRepositoryIdentityAsync } from '../git/RepositoryIdentity'
-import { buildResourceInventory } from '../lifecycle/ResourceInventory'
-import { getExternalResourceClaims } from '../lifecycle/LifecycleClaims'
+import { buildResourceInventory, buildResourceInventoryFromFacts, OwnershipFacts } from '../lifecycle/ResourceInventory'
+import { getExternalResourceClaims, getExternalResourceClaimsFromFacts } from '../lifecycle/LifecycleClaims'
 import { readDirectLifecycleRefAsync } from '../lifecycle/WorktreeRetirementService'
 import type { ResourceLifecycleStore } from '../lifecycle/ResourceLifecycleStore'
 import type { ThreadLeaseHandle } from '../queue/ThreadExecutionLease'
@@ -50,14 +50,24 @@ export class ReceiptRefReleaseService {
       const result: ReceiptRefReleaseResult = { releasedRefs: [], retained: [], reclaimedGitBytes: null }
       if (!candidates.length) return result
       // All live source records, across this profile, are re-read inside the repository lease: here, and again right
-      // before each receipt's transaction starts, with no await in between, since the reads of the refs now wait.
+      // before each receipt's transaction starts, with no await in between, since the reads of the refs now wait. The
+      // checkouts and project folders they name are read just before, without blocking (`OwnershipFacts`); a record
+      // that names one those facts do not cover fails closed.
+      let facts = new OwnershipFacts()
+      const readFacts = async (): Promise<void> => {
+        facts = new OwnershipFacts()
+        await buildResourceInventory(this.store, task, {}, facts)
+        // Only the facts are wanted here: a refusal is made again, from the records, by `ownership`.
+        await getExternalResourceClaims(this.store, new Set([task.taskId]), facts).catch(() => undefined)
+      }
       const ownership = () => {
-        const inventory = buildResourceInventory(this.store, task)
-        const external = getExternalResourceClaims(this.store, new Set([task.taskId]))
+        const inventory = buildResourceInventoryFromFacts(this.store, task, facts)
+        const external = getExternalResourceClaimsFromFacts(this.store, new Set([task.taskId]), facts)
         const blockers = inventory.blockers
         if (blockers.length) throw new OwnershipBlocked(`Receipt ref release needs unambiguous ownership: ${blockers.join('; ')}`)
         return { inventory, external }
       }
+      await readFacts()
       ownership()
       for (const candidate of candidates) {
         const receipt = candidate.receipt
@@ -81,6 +91,7 @@ export class ReceiptRefReleaseService {
           const release = `start\n${present.map((ref) => `delete ${ref.name} ${ref.sha}`).join('\n')}\nprepare\ncommit\n`
           // Checked (by the central Git check) before ownership is read, so that from there to the start of the transaction nothing waits.
           const argv = present.length ? await withoutRepoProgramsAsync(workspacePath, ['update-ref', '--no-deref', '--stdin'], { stdin: release }) : undefined
+          await readFacts()
           const { inventory, external } = ownership()
           for (const ref of intent.refs) {
             const resources = inventory.resources.filter((resource) => resource.kind === 'git-ref' && resource.identity === ref.name)

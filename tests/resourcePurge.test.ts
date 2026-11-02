@@ -9,7 +9,7 @@ import { fixtureGit as git, ownedHome } from './support/fixtureGit'
 import { resolveRepositoryIdentity } from '../src/mms/git/RepositoryIdentity'
 import { registerThreadLifecycleGate } from '../src/mms/queue/ThreadLifecycleAdmission'
 import { createHash } from 'node:crypto'
-import { preserveBeforeAbort } from '../src/mms/actions/leftMerge'
+import { preserveBeforeAbortAsync } from '../src/mms/actions/leftMerge'
 import { ThreadJournal } from '../src/mms/data/ThreadJournal'
 
 const roots: string[] = []
@@ -49,18 +49,18 @@ test('complete purge removes exclusive checkout, refs and task data and retains 
 })
 test('a purge releases the files the thread’s aborts kept, asks first while they may be the only copy, and leaves another thread’s', async () => {
   const f = fixture({ git: true })
-  const keep = (operationId: string, at: number) => {
+  const keep = async (operationId: string, at: number) => {
     vi.useFakeTimers({ toFake: ['Date'] }); vi.setSystemTime(at)
     try {
-      const ref = preserveBeforeAbort(f.worktree, operationId)
+      const ref = (await preserveBeforeAbortAsync(f.worktree, operationId))
       new ThreadJournal(f.location).append({ operationId, operationType: 'publish', state: 'cancelled', details: { conflictAborted: true, preservedRef: ref } })
       return ref
     } finally { vi.useRealTimers() }
   }
-  const old = keep('old-abort', Date.now() - 40 * 24 * 60 * 60 * 1000)
-  const young = keep('young-abort', Date.now())
+  const old = (await keep('old-abort', Date.now() - 40 * 24 * 60 * 60 * 1000))
+  const young = (await keep('young-abort', Date.now()))
   // Another thread's abort, whose id starts with this thread's: never this thread's.
-  const theirs = preserveBeforeAbort(f.worktree, 'old-abort-other')
+  const theirs = (await preserveBeforeAbortAsync(f.worktree, 'old-abort-other'))
   await f.coordinator.trash({ taskId: 'task', operationId: 'trash' })
   const preview = await f.coordinator.cleanup.preview('task'); expect(preview.blockers).toEqual([])
   const kept = preview.items.filter((item) => item.kind === 'ref' && item.identity.startsWith('refs/mousse/preserved/'))

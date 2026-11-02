@@ -21,11 +21,11 @@ function fixture() {
   registerThreadLifecycleGate(home, store)
   const location = join(home, 'thread-data', 'standalone', 'task')
   store.registerTask({ taskId: 'task', location, creating: true }); json(join(location, 'meta.json'), { id: 'task' })
-  return { home, store, location, inventory: () => buildResourceInventory(store, store.require('task')) }
+  return { home, store, location, inventory: async () => (await buildResourceInventory(store, store.require('task'))) }
 }
 
 describe('source-derived lifecycle resource inventory', () => {
-  it.each(['task', 'internal'])('accepts a registered external task %s journal but rejects its replacement with an outside link', (kind) => {
+  it.each(['task', 'internal'])('accepts a registered external task %s journal but rejects its replacement with an outside link', async (kind) => {
     const root = mkdtempSync(join(tmpdir(), 'resource-inventory-legacy-')); homes.push(root)
     const home = join(root, 'profile'), location = join(root, 'legacy-task')
     const store = new ResourceLifecycleStore({ profileId: 'legacy', profileHome: home, allowedTaskRoots: [root] })
@@ -38,17 +38,17 @@ describe('source-derived lifecycle resource inventory', () => {
       json(join(journal, '0000000000000001.json'), { schemaVersion: 1, sequence: 1, operationId: id, operationType: 'change-checkpoint', state: 'completed', createdAt: new Date().toISOString(), details: { receipt: { id, kind: 'checkpoint', beforeSha: 'a'.repeat(40), afterSha: 'b'.repeat(40), retainedRefs, createdAt: new Date().toISOString() } } })
       return retainedRefs
     }).flat()
-    const inventory = () => buildResourceInventory(store, store.require('task'))
-    expect(inventory().blockers).toEqual([])
-    for (const ref of refs) expect(inventory().resources.some((resource) => resource.identity === ref)).toBe(true)
+    const inventory = async () => (await buildResourceInventory(store, store.require('task')))
+    expect((await inventory()).blockers).toEqual([])
+    for (const ref of refs) expect((await inventory()).resources.some((resource) => resource.identity === ref)).toBe(true)
     const replaced = journals[kind === 'task' ? 0 : 1], outside = join(root, 'outside-journal')
     renameSync(replaced, outside)
     symlinkSync(outside, replaced, process.platform === 'win32' ? 'junction' : 'dir')
-    expect(inventory().blockers.some((reason) => reason.includes('journal authority') && reason.includes(replaced))).toBe(true)
-    expect(() => getExternalResourceClaims(store, new Set(['another-task']))).toThrow(/Shared ownership cannot be proven/)
+    expect((await inventory()).blockers.some((reason) => reason.includes('journal authority') && reason.includes(replaced))).toBe(true)
+    await expect(getExternalResourceClaims(store, new Set(['another-task']))).rejects.toThrow(/Shared ownership cannot be proven/)
   })
 
-  it.each(['task', 'internal'])('rejects a dangling %s receipt journal instead of omitting reference ownership', (kind) => {
+  it.each(['task', 'internal'])('rejects a dangling %s receipt journal instead of omitting reference ownership', async (kind) => {
     const { home, store, location, inventory } = fixture()
     let journal = join(location, 'journal')
     if (kind === 'internal') {
@@ -58,8 +58,8 @@ describe('source-derived lifecycle resource inventory', () => {
     mkdirSync(dirname(journal), { recursive: true })
     symlinkSync(join(home, 'missing-journal'), journal, process.platform === 'win32' ? 'junction' : 'dir')
     expect(existsSync(journal)).toBe(false)
-    expect(inventory().blockers.some((reason) => reason.includes('journal authority'))).toBe(true)
-    expect(() => getExternalResourceClaims(store, new Set(['another-task']))).toThrow(/Shared ownership cannot be proven/)
+    expect((await inventory()).blockers.some((reason) => reason.includes('journal authority'))).toBe(true)
+    await expect(getExternalResourceClaims(store, new Set(['another-task']))).rejects.toThrow(/Shared ownership cannot be proven/)
   })
 
   it.each(['agents.json', 'workspace.json', 'agent-episodes.json'])('rejects a dangling peer %s authority instead of omitting its claims', async (name) => {
@@ -73,8 +73,8 @@ describe('source-derived lifecycle resource inventory', () => {
     // Junctions do not require Windows developer-mode privileges and remain visible to lstat when dangling.
     symlinkSync(missing, join(peer, name), process.platform === 'win32' ? 'junction' : 'file')
     expect(existsSync(join(peer, name))).toBe(false)
-    expect(buildResourceInventory(store, store.require('peer')).blockers.some((reason) => reason.includes(name))).toBe(true)
-    expect(() => getExternalResourceClaims(store, new Set(['task']))).toThrow(/Shared ownership cannot be proven/)
+    expect((await buildResourceInventory(store, store.require('peer'))).blockers.some((reason) => reason.includes(name))).toBe(true)
+    await expect(getExternalResourceClaims(store, new Set(['task']))).rejects.toThrow(/Shared ownership cannot be proven/)
     const preview = await coordinator.cleanup.preview('task')
     expect(preview.blockers.some((reason) => reason.includes(name))).toBe(true)
     await expect(coordinator.purge({ taskId: 'task', operationId: 'purge', expectedGeneration: preview.generation, previewDigest: preview.digest })).rejects.toThrow()
@@ -86,7 +86,7 @@ describe('source-derived lifecycle resource inventory', () => {
     const service = new BrowserArtifactService({ profileId: '11111111-1111-4111-8111-111111111111', profileRoot: home, workerArtifactRoot: join(home, 'browser', 'worker-artifacts') })
     const artifact = await service.put({ profileId: '11111111-1111-4111-8111-111111111111', threadId: 'task', sessionId: 'session' }, { bytes: Buffer.from('image'), mediaType: 'image/png', displayName: 'image.png' }, 1024)
     json(join(home, 'browser', 'cache', 'unrelated.json'), { malformed: true })
-    const result = inventory()
+    const result = (await inventory())
     expect(result.blockers).toEqual([])
     expect(result.resources.some((item) => item.kind === 'artifact' && item.identity === artifact.id && item.claims.some((claim) => claim.kind === 'conversation-attachment'))).toBe(true)
     expect(result.resources.some((item) => item.identity === join(home, 'artifacts', artifact.id))).toBe(true)
@@ -95,7 +95,7 @@ describe('source-derived lifecycle resource inventory', () => {
     await service.dispose()
   })
 
-  it('covers invocation ownership, run containers, request links and explicitly pinned snapshots', () => {
+  it('covers invocation ownership, run containers, request links and explicitly pinned snapshots', async () => {
     const { home, store, inventory } = fixture()
     const child = join(home, 'thread-data', 'standalone', 'invocation')
     store.registerTask({ taskId: 'invocation', location: child, parentTaskId: 'task', creating: true }); json(join(child, 'meta.json'), { id: 'invocation' })
@@ -107,14 +107,14 @@ describe('source-derived lifecycle resource inventory', () => {
     const run = join(home, 'workflow-runs', runId)
     json(join(run, 'manifest.json'), { version: 1, profileId: '11111111-1111-4111-8111-111111111111', threadId: 'task', runId })
     json(join(run, 'checkpoint.json'), { artifacts: [] })
-    const result = inventory()
+    const result = (await inventory())
     expect(result.blockers).toEqual([])
     for (const expected of [child, join(run, 'staging'), join(run, 'scripts'), join(run, 'results'), join(home, 'workflow-agent-bindings', 'snapshots', `${hash}.json`), join(home, 'workflow-admissions', 'request.json')]) expect(result.resources.some((item) => item.identity === expected)).toBe(true)
     json(join(home, 'workflow-agent-bindings', 'invocations', 'call.json'), { version: 1, profileId: '11111111-1111-4111-8111-111111111111', parentThreadId: 'task', executionThreadId: 'unowned' })
-    expect(inventory().blockers).toContain('Workflow execution thread lacks durable ownership edge: unowned')
+    expect((await inventory()).blockers).toContain('Workflow execution thread lacks durable ownership edge: unowned')
   })
 
-  it('verifies actual linked Git ownership and reports foreign paths or malformed agent entries', () => {
+  it('verifies actual linked Git ownership and reports foreign paths or malformed agent entries', async () => {
     const { home, location, inventory } = fixture()
     const repo = join(home, 'repo'), tree = join(home, 'owned-tree')
     mkdirSync(repo)
@@ -124,11 +124,11 @@ describe('source-derived lifecycle resource inventory', () => {
     git('worktree', 'add', '-b', 'mousse/thread/task/main', tree)
     const repositoryId = createHash('sha256').update(realpathSync(resolve(repo, git('rev-parse', '--git-common-dir'))).toLowerCase()).digest('hex').slice(0, 32)
     json(join(location, 'workspace.json'), { schemaVersion: 1, threadId: 'task', repositoryId, worktreePath: tree, branch: 'mousse/thread/task/main' })
-    const verified = inventory()
+    const verified = (await inventory())
     expect(verified.blockers).toEqual([])
     expect(verified.resources.find((item) => item.identity === tree)?.ownership).toBe('verified')
     json(join(location, 'agents.json'), [null, { id: 'legacy', worktreePath: repo, branch: 'main' }])
-    const ambiguous = inventory()
+    const ambiguous = (await inventory())
     expect(ambiguous.blockers.some((item) => item.includes('Unknown record'))).toBe(true)
     expect(ambiguous.resources.find((item) => item.identity === repo)?.ownership).toBe('unknown')
     expect(ambiguous.blockers.some((item) => item.includes('Unverified worktree'))).toBe(true)
@@ -136,11 +136,11 @@ describe('source-derived lifecycle resource inventory', () => {
 })
 
 describe('legacy named-agent data left by older builds', () => {
-  it('still holds a recall claim for the identity and a pending-integration claim for an unintegrated isolated result', () => {
+  it('still holds a recall claim for the identity and a pending-integration claim for an unintegrated isolated result', async () => {
     const { location, inventory } = fixture()
     const worktreePath = join(tmpdir(), 'legacy-named-agent-worktree'), branch = 'mousse/agent/legacy-writer'
     seedLegacyNamedEpisode(location, { name: 'Writer', episodeId: 'legacy-writer', workspace: 'isolated', access: 'write', worktreePath, branch, baseSha: 'a'.repeat(40), resultSha: 'b'.repeat(40) })
-    const resources = inventory().resources
+    const resources = (await inventory()).resources
     const claimsOn = (identity: string) => resources.find((item) => item.identity === identity)?.claims.map((claim) => claim.kind)
     expect(claimsOn(`refs/heads/${branch}`)).toEqual(['pending-integration'])
     expect(claimsOn('refs/mousse/agents/legacy-writer/result')).toEqual(['pending-integration'])

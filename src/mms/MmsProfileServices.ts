@@ -731,7 +731,7 @@ export class MmsProfileServices {
             'Cannot trash thread: an owned workflow is still active or waiting'
           )
         }
-        const inventory = buildResourceInventory(this.threads.lifecycleStore, record)
+        const inventory = await buildResourceInventory(this.threads.lifecycleStore, record)
         if (inventory.blockers.length)
           throw new ResourceLifecycleError('ambiguous', `Resource ownership is not established: ${inventory.blockers.join('; ')}`)
         // The trash was accepted for exactly these threads (fresh operation, current generation) and

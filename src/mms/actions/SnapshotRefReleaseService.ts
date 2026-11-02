@@ -3,7 +3,7 @@ import { join } from 'node:path'
 import { ThreadJournal } from '../data/ThreadJournal'
 import { acquireRepositoryLease } from '../git/RepositoryLease'
 import { getMousseHomeDir } from '../data/paths'
-import { hiddenStoreIdentity, inHiddenStore, runStoreGit, runStoreGitAsync } from '../git/hiddenStore'
+import { hiddenStoreIdentity, inHiddenStore, runStoreGitAsync } from '../git/hiddenStore'
 import { repoProgramEnv } from '../git/repoPrograms'
 import type { ThreadLeaseHandle } from '../queue/ThreadExecutionLease'
 import { collectStoreGarbageAsync, dropSnapshotStoreUser, loadSnapshotWorkspaceAsync, projectStorePath, readSnapshotWorkspaceRecord, removeThreadSnapshots, SNAPSHOT_TRASH_QUIET_MS, threadPinRef, threadStorePath, trashProjectStoreIfUnused } from '../workspace/SnapshotWorkspace'
@@ -80,18 +80,8 @@ export async function releaseSnapshotRefs(threadDirectory: string, options: { li
 /**
  * The thread's own kept-files refs in its hidden snapshot store (a folder without Git), with the store's Git directory:
  * the same `discardReason` rule as in a repository (`keptFilesFromListing`). Undefined for a thread with no store. Reads
- * only, and needs neither the thread's folder nor a lease.
+ * only, and needs neither the thread's folder nor a lease; the store's Git runs as a child process.
  */
-export function threadStoreKeptFiles(threadDirectory: string, now = Date.now()): { gitDir: string; refs: KeptFilesRef[] } | undefined {
-  const record = readSnapshotWorkspaceRecord(threadDirectory)
-  if (!record || (record.kind === 'project' && !record.projectId)) return undefined
-  const gitDir = record.kind === 'project' ? projectStorePath(record.projectId!) : threadStorePath(record.threadId)
-  if (!existsSync(join(gitDir, 'HEAD'))) return undefined
-  const listing = runStoreGit({ workTree: gitDir, gitDir }, ['for-each-ref', `--format=${PRESERVED_REF_FORMAT}`, PRESERVED_REFS], repoProgramEnv())
-  return { gitDir, refs: keptFilesFromListing(listing, threadDirectory, now) }
-}
-
-/** {@link threadStoreKeptFiles} without blocking the daemon: the store's Git runs as a child process. */
 export async function threadStoreKeptFilesAsync(threadDirectory: string, now = Date.now()): Promise<{ gitDir: string; refs: KeptFilesRef[] } | undefined> {
   const record = readSnapshotWorkspaceRecord(threadDirectory)
   if (!record || (record.kind === 'project' && !record.projectId)) return undefined

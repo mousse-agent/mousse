@@ -12,9 +12,9 @@ import { PublishService } from '../src/mms/actions/PublishService'
 import { describeRecovery, recoveryErrorText } from '../src/mms/workspace/workspaceRecovery'
 import { ManagedConflictService } from '../src/mms/actions/ManagedConflictService'
 import { tryGit } from '../src/mms/actions/git'
-import { mergeIdentity } from '../src/mms/actions/leftMerge'
+import { mergeIdentityAsync } from '../src/mms/actions/leftMerge'
 import { onGitPolicyEntry, type GitPolicyEntry } from '../src/mms/git/gitPolicy'
-import { ensureSnapshotWorkspace } from '../src/mms/workspace/SnapshotWorkspace'
+import { ensureSnapshotWorkspaceAsync } from '../src/mms/workspace/SnapshotWorkspace'
 import { existsSync, readFileSync, realpathSync, rmSync, symlinkSync } from 'node:fs'
 import { randomUUID } from 'node:crypto'
 import { vi } from 'vitest'
@@ -85,11 +85,11 @@ async function leftIntegration(threadDirectory: string, cwd: string) {
 }
 
 /** The record recovery leaves for a Publish an older version stopped as a merge in the primary checkout. */
-function leftPublishMerge(threadDirectory: string) {
+async function leftPublishMerge(threadDirectory: string) {
   const { before, theirs } = stoppedMerge(f.repo, 'old-publish')
   const journal = new ThreadJournal(threadDirectory)
   journal.append({ operationId: 'old-publish', operationType: 'publish', state: 'prepared', expectedPreState: { prePublishSha: before, sourceSha: theirs, targetBranch: 'main' } })
-  journal.append({ operationId: 'old-publish', operationType: 'publish', state: 'cancelled', details: { recovered: true, prePublishSha: before, mergeInProgress: f.repo, mergeIdentity: mergeIdentity(f.repo), sourceSha: theirs, reason: 'The publish did not land.' } })
+  journal.append({ operationId: 'old-publish', operationType: 'publish', state: 'cancelled', details: { recovered: true, prePublishSha: before, mergeInProgress: f.repo, mergeIdentity: (await mergeIdentityAsync(f.repo)), sourceSha: theirs, reason: 'The publish did not land.' } })
   return { before }
 }
 
@@ -207,7 +207,7 @@ describe('what a thread is waiting on', () => {
     const workspace = await new ThreadWorkspaceManager(f.thread).provision('task', 'main', f.repo)
     const cwd = workspace.worktreePath
     const { theirs } = stoppedMerge(cwd, 'no-base')
-    new ThreadJournal(f.thread).append({ operationId: 'no-base', operationType: 'child-integration', state: 'cancelled', details: { mergeInProgress: cwd, mergeIdentity: mergeIdentity(cwd), workerHeadSha: theirs } })
+    new ThreadJournal(f.thread).append({ operationId: 'no-base', operationType: 'child-integration', state: 'cancelled', details: { mergeInProgress: cwd, mergeIdentity: (await mergeIdentityAsync(cwd)), workerHeadSha: theirs } })
     expect(await status()).toBeUndefined()
     await expect(new ManagedConflictService(f.thread).abort(cwd, 'no-base')).rejects.toThrow('Conflict HEAD changed outside the selected operation.')
     expect(mergeHead(cwd).ok).toBe(true)
@@ -215,7 +215,7 @@ describe('what a thread is waiting on', () => {
 
   it('reports a merge a Publish from an earlier version left in the primary checkout', async () => {
     await new ThreadWorkspaceManager(f.thread).provision('task', 'main', f.repo)
-    leftPublishMerge(f.thread)
+    await leftPublishMerge(f.thread)
     expect(await status()).toEqual(expect.objectContaining({ kind: 'merge', folder: f.repo, operationId: 'old-publish', operationType: 'publish' }))
   })
 
@@ -275,7 +275,7 @@ describe('through the daemon', () => {
   it('operations.abort aborts a merge an earlier version left, and workspace.getStatus stops reporting it', async () => {
     const d = await daemonThread()
     try {
-      const { before } = leftPublishMerge(d.directory)
+      const { before } = (await leftPublishMerge(d.directory))
       expect(await d.recovery()).toMatchObject({ kind: 'merge', folder: f.repo, operationId: 'old-publish' })
       const aborted = await d.call('operations.abort', { operationId: 'old-publish' }) as { ok: boolean; preservedRef: string }
       expect(aborted).toEqual({ ok: true, preservedRef: expect.stringMatching(/^refs\/mousse\/preserved\/old-publish-abort-/), notice: expect.stringMatching(/^Every file as it was before the abort is kept under refs\/mousse\/preserved\/old-publish-abort-\S+ for 30 days\. Bring one back before then/) })
@@ -293,7 +293,7 @@ describe('through the daemon', () => {
   it('operations.recover clears the record of a left merge that was replaced, so it is never offered again', async () => {
     const d = await daemonThread()
     try {
-      leftPublishMerge(d.directory)
+      await leftPublishMerge(d.directory)
       git(f.repo, 'merge', '--abort')
       expect(() => git(f.repo, 'merge', '-q', '--no-edit', 'old-publish')).toThrow()
       expect(await d.recovery()).toBeUndefined()
@@ -350,7 +350,7 @@ describe('through the daemon', () => {
       const started = Date.now()
       await expect(d.call('operations.recover')).rejects.toMatchObject({ code: 'thread_busy', message: 'The current turn is still running. Try again once it finishes.' })
       await expect(d.call('operations.abort', { operationId: 'any' })).rejects.toMatchObject({ code: 'operation_not_found' })
-      leftPublishMerge(d.directory)
+      await leftPublishMerge(d.directory)
       await expect(d.call('operations.abort', { operationId: 'old-publish' })).rejects.toMatchObject({ code: 'thread_busy' })
       expect(Date.now() - started).toBeLessThan(5_000)
       expect(mergeHead(f.repo).ok).toBe(true)
@@ -384,7 +384,7 @@ describe('through the daemon', () => {
       try {
         // The thread records its turns in a hidden store, since the folder has no Git of its own.
         // The thread records its turns in a hidden store, as its first turn does, and has no worktree.
-        const store = ensureSnapshotWorkspace({ threadDirectory: d.directory, threadId: d.threadId, workTree: folder, projectId: d.projectId })
+        const store = (await ensureSnapshotWorkspaceAsync({ threadDirectory: d.directory, threadId: d.threadId, workTree: folder, projectId: d.projectId }))
         await new ThreadActionService(d.directory).runCheckpointedAction({ ...actionOptions(store.record.workTree, 'turn-1'), threadId: d.threadId }, () => writeFileSync(join(folder, 'notes.txt'), 'two\n'))
         expect(new ThreadWorkspaceManager(d.directory).load()).toBeUndefined()
         expect(await new ThreadWorkspaceManager(d.directory).loadOrSnapshotAsync()).toMatchObject({ snapshotOnly: true, worktreePath: realpathSync(folder) })
@@ -468,7 +468,7 @@ describe('through the daemon', () => {
         const prePublishSha = git(f.repo, 'rev-parse', 'HEAD')
         new ThreadJournal(d.directory).append({ operationId: 'interrupted', operationType: 'publish', state: 'prepared', expectedPreState: { prePublishSha, targetBranch: git(f.repo, 'branch', '--show-current'), sourceSha: git(d.cwd, 'rev-parse', 'HEAD') } })
         await expect(d.call('operations.recover')).resolves.toEqual({ ok: true, settled: true })
-        const { before } = leftPublishMerge(d.directory)
+        const { before } = (await leftPublishMerge(d.directory))
         const aborted = await d.call('operations.abort', { operationId: 'old-publish' }) as { preservedRef: string }
         expect(mergeHead(f.repo).ok).toBe(false)
         expect(git(f.repo, 'rev-parse', 'HEAD')).toBe(before)

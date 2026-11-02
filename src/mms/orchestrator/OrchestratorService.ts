@@ -239,7 +239,7 @@ import { ThreadActionService } from '../actions/ThreadActionService'
 import { cancelledIntegrationsNotice, cancelPendingIntegrations } from '../agents/ChildAgentIntegrationService'
 import { buildSubagentResultReport, buildSubagentResultReportAsync, delegationResultRefPrefix, formatSubagentResultReport, readSubagentResults, recordedFilesAt, SUBAGENT_RESULTS_FILE, writeSubagentResults, type SubagentResultReport } from '../agents/subagentResultReport'
 import type { NativeContextBoundary } from '../../shared/threadActions'
-import { coverageNotice, SnapshotRefusedError, snapshotOrigin } from '../actions/snapshots'
+import { coverageNotice, SnapshotRefusedError, snapshotOriginAsync } from '../actions/snapshots'
 import { git as actionGit, gitAsync as actionGitAsync, requireCleanAsync as requireCleanWorkspaceAsync } from '../actions/git'
 import {
   claimNextNormal,
@@ -5214,11 +5214,11 @@ export class OrchestratorService extends EventEmitter {
         seed = checkpoint
           ? { kind: 'checkpoint', sha: checkpoint.endSha, actionId: checkpoint.id }
           : sourceWorkspace?.lifecycle === 'ready'
-            ? { kind: 'source_head', sha: actionGit(sourceWorkspace.worktreePath, ['rev-parse', 'HEAD']) }
+            ? { kind: 'source_head', sha: await actionGitAsync(sourceWorkspace.worktreePath, ['rev-parse', 'HEAD']) }
             : { kind: 'primary_head' }
         // A checkpoint is a snapshot: the fork's worktree is made at the commit the snapshot was taken on (the source's
         // HEAD then) and the snapshot's files are written over it, so no snapshot commit becomes the fork's branch.
-        const seedHead = checkpoint ? snapshotOrigin(sourceWorkspace?.worktreePath ?? projectPath, checkpoint.endSha).head : undefined
+        const seedHead = checkpoint ? (await snapshotOriginAsync(sourceWorkspace?.worktreePath ?? projectPath, checkpoint.endSha)).head : undefined
         await manager.provision(threadId, 'main', projectPath, signal, lease ?? undefined, checkpoint ? seedHead : typeof seed.sha === 'string' ? seed.sha : undefined, { ...(checkpoint ? { snapshot: checkpoint.endSha } : {}), nameFrom: this.branchNameSource(threadId) })
       }
     } catch (error) {

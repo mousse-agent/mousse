@@ -6,13 +6,14 @@ import { join } from 'node:path'
 const spawned: Array<{ args: readonly string[]; env: NodeJS.ProcessEnv | undefined }> = []
 vi.mock('node:child_process', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:child_process')>()
-  return { ...actual, spawnSync: ((command: string, args: readonly string[], options: { env?: NodeJS.ProcessEnv }) => {
+  // Git runs as a child process that does not block the daemon (`spawn`).
+  return { ...actual, spawn: ((command: string, args: readonly string[], options: { env?: NodeJS.ProcessEnv }) => {
     spawned.push({ args, env: options.env })
-    return (actual.spawnSync as (...parameters: unknown[]) => unknown)(command, args, options)
-  }) as typeof actual.spawnSync }
+    return (actual.spawn as (...parameters: unknown[]) => unknown)(command, args, options)
+  }) as typeof actual.spawn }
 })
 
-const { readOnlyGit, runReadOnlyGit } = await import('../src/mms/git/readOnlyGit')
+const { readOnlyGitAsync, runReadOnlyGitAsync } = await import('../src/mms/git/readOnlyGit')
 const { fixtureGit } = await import('./support/fixtureGit')
 
 const roots: string[] = []
@@ -24,17 +25,17 @@ function repo(): string {
 }
 
 describe('read-only Git for background checks', () => {
-  it('asks Git not to take optional locks, so a commit from another terminal is never refused by a background status', () => {
+  it('asks Git not to take optional locks, so a commit from another terminal is never refused by a background status', async () => {
     const cwd = repo()
-    expect(readOnlyGit(cwd, ['status', '--porcelain', '--untracked-files=all'])).toBe('?? a.txt')
+    expect(await readOnlyGitAsync(cwd, ['status', '--porcelain', '--untracked-files=all'])).toBe('?? a.txt')
     const status = spawned.find((entry) => entry.args.includes('status'))
     expect(status?.env?.GIT_OPTIONAL_LOCKS).toBe('0')
     expect(status?.env?.PATH ?? status?.env?.Path).toBeDefined() // the rest of the environment is kept
   })
 
-  it('returns a non-zero exit instead of throwing, and readOnlyGit throws with Git\'s message', () => {
+  it('returns a non-zero exit instead of throwing, and readOnlyGit throws with Git\'s message', async () => {
     const cwd = repo()
-    expect(runReadOnlyGit(cwd, ['rev-parse', '--verify', '--quiet', 'refs/heads/absent']).status).toBe(1)
-    expect(() => readOnlyGit(cwd, ['rev-parse', '--verify', 'refs/heads/absent'])).toThrow(/fatal|Needed a single revision/i)
+    expect((await runReadOnlyGitAsync(cwd, ['rev-parse', '--verify', '--quiet', 'refs/heads/absent'])).status).toBe(1)
+    await expect(readOnlyGitAsync(cwd, ['rev-parse', '--verify', 'refs/heads/absent'])).rejects.toThrow(/fatal|Needed a single revision/i)
   })
 })

@@ -1,6 +1,5 @@
-import { existsSync, rmdirSync } from 'node:fs'
+import { access, rmdir } from 'node:fs/promises'
 import { dirname } from 'node:path'
-import { execFileSync } from 'node:child_process'
 import {
   parsePullRequestReference,
   pullRequestIdentityKey,
@@ -22,7 +21,8 @@ import type { CodeHost } from './CodeHost'
 import { PullRequestReadError } from './GitHubCodeHost'
 import { acquireRepositoryLease } from './RepositoryLease'
 import { resolveRepositoryIdentityAsync } from './RepositoryIdentity'
-import { repoProgramEnv, withoutRepoPrograms } from './repoPrograms'
+import { repoProgramEnv, withoutRepoProgramsAsync } from './repoPrograms'
+import { gitRunError, runGitProcess } from './runGitProcess'
 import { rethrowGitPolicyError, type UserAction } from './gitPolicy'
 
 /** A refusal with a code a client can show copy for; the daemon turns it into its own error type. */
@@ -58,8 +58,12 @@ export interface ResolvedPullRequest {
   enablesWorktreeConfig: boolean
 }
 
-function git(cwd: string, args: string[]): string {
-  return execFileSync('git', withoutRepoPrograms(cwd, args), { cwd, env: repoProgramEnv(), encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim()
+/** Git in the person's repository, without blocking the daemon; the central check runs first. */
+async function git(cwd: string, args: string[]): Promise<string> {
+  const argv = await withoutRepoProgramsAsync(cwd, args)
+  const ran = await runGitProcess(argv, { cwd, env: repoProgramEnv() })
+  if (ran.error || ran.status !== 0) throw gitRunError(argv, ran)
+  return ran.stdout.trim()
 }
 
 function sameRepository(link: Pick<ThreadPullRequestLink, 'host' | 'nameWithOwner' | 'number'>, identity: PullRequestIdentity): boolean {
@@ -183,7 +187,7 @@ export class PullRequestThreadService {
     // The checkout is only fetched into, so uncommitted changes in it are no reason to refuse.
     let topLevel: string
     try {
-      topLevel = git(project.path, ['rev-parse', '--show-toplevel'])
+      topLevel = await git(project.path, ['rev-parse', '--show-toplevel'])
     } catch {
       throw new PullRequestThreadError('pull_request_not_git', 'The project folder is not a Git repository.')
     }
@@ -291,9 +295,9 @@ export class PullRequestThreadService {
       if (workspace) {
         lease = await acquireRepositoryLease(await resolveRepositoryIdentityAsync(topLevel, { requireMutationCapability: true }))
         const primary = (await manager.resolveRepositoryAsync(projectPath)).primaryCheckoutPath
-        const attempt = (args: string[]) => {
+        const attempt = async (args: string[]): Promise<boolean> => {
           try {
-            git(primary, args)
+            await git(primary, args)
             return true
           } catch (error) {
             rethrowGitPolicyError(error)
@@ -302,14 +306,14 @@ export class PullRequestThreadService {
         }
         // Only this worktree's registration goes, also when its folder is already gone. No `git worktree prune`: that
         // would drop every stale registration in the person's repository, not just the one this start made.
-        attempt(['worktree', 'remove', '--force', workspace.worktreePath])
-        removed = !existsSync(workspace.worktreePath)
+        await attempt(['worktree', 'remove', '--force', workspace.worktreePath])
+        removed = !await access(workspace.worktreePath).then(() => true, () => false)
         if (removed) {
-          attempt(['branch', '-D', workspace.branch])
-          attempt(['update-ref', '--no-deref', '-d', workspace.retainedRef])
+          await attempt(['branch', '-D', workspace.branch])
+          await attempt(['update-ref', '--no-deref', '-d', workspace.retainedRef])
           try {
             // The folder provisioning made for the worktree; only removed when it is empty.
-            rmdirSync(dirname(workspace.worktreePath))
+            await rmdir(dirname(workspace.worktreePath))
           } catch {
             // Not empty or already gone.
           }

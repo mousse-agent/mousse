@@ -1,7 +1,6 @@
 import { MOUSSE_CONTROL_FILE_PATHS } from '../worktree/controlFiles'
-import { execFileSync, spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { existsSync, lstatSync, readFileSync, readdirSync, readlinkSync, realpath as realpathCallback, realpathSync, type Stats } from 'node:fs'
+import { existsSync, lstatSync, readFileSync, realpath as realpathCallback, type Stats } from 'node:fs'
 import { access, chmod, lstat, mkdir, readdir, readFile, readlink, rm, writeFile } from 'node:fs/promises'
 import { promisify } from 'node:util'
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path'
@@ -18,9 +17,9 @@ import { WorktreeIdentity } from '../worktree/WorktreeIdentity'
 import { ThreadJournal } from '../data/ThreadJournal'
 import { getExternalResourceClaims } from './LifecycleClaims'
 import type { ConversationBranch, ThreadAction } from '../../shared/threadActions'
-import { gitDirectoryEnv, gitDirectoryEnvAsync } from '../git/gitEnv'
+import { gitDirectoryEnvAsync } from '../git/gitEnv'
 import { READ_ONLY_GIT_ENV } from '../git/readOnlyGit'
-import { repoProgramEnv, withoutRepoPrograms, withoutRepoProgramsAsync } from '../git/repoPrograms'
+import { repoProgramEnv, withoutRepoProgramsAsync } from '../git/repoPrograms'
 import { gitRunError, runGitProcess } from '../git/runGitProcess'
 import { renameFolderAsync } from './renameFolder'
 import { isIdNamedMousseBranch, isMousseBranchName } from '../../shared/mousseBranches'
@@ -28,31 +27,9 @@ import { isIdNamedMousseBranch, isMousseBranchName } from '../../shared/mousseBr
 const hash = (value: string | Buffer): string => createHash('sha256').update(value).digest('hex')
 /** A retired worktree waits in the trash until nothing in it has changed for this long; then its files are snapshotted and it is deleted. */
 export const WORKTREE_TRASH_QUIET_MS = 60 * 60_000
-export function lifecycleGit(cwd: string, args: string[], input?: string, maxBuffer = 32 * 1024 * 1024, env?: NodeJS.ProcessEnv): string {
-  return execFileSync('git', withoutRepoPrograms(cwd, args, { stdin: input, env }), { cwd, input, env: repoProgramEnv({ ...process.env, ...gitDirectoryEnv(cwd), ...env }), encoding: 'utf8', windowsHide: true, timeout: 30_000, maxBuffer, stdio: ['pipe', 'pipe', 'pipe'] }).trimEnd()
-}
-/** A lifecycle read (a preview, the checks before a delete): it never refreshes the index and never fetches a missing object. */
-export function lifecycleRead(cwd: string, args: string[], input?: string, maxBuffer?: number): string {
-  return lifecycleGit(cwd, args, input, maxBuffer, READ_ONLY_GIT_ENV)
-}
-/** Never treat an unreadable reference as absent, and never dereference an owned symbolic ref. */
-export function readDirectLifecycleRef(cwd: string, ref: string): string | undefined {
-  try { lifecycleGit(cwd, ['symbolic-ref', '-q', ref]); throw new Error(`Symbolic resource reference is not cleanup authority: ${ref}`) }
-  catch (error) { if ((error as { status?: number }).status !== 1) throw error }
-  const listing = spawnSync('git', withoutRepoPrograms(cwd, ['for-each-ref', '--format=%(refname)%00%(objectname)', ref]), { cwd, env: repoProgramEnv({ ...process.env, ...gitDirectoryEnv(cwd), ...READ_ONLY_GIT_ENV }), encoding: 'utf8', windowsHide: true, timeout: 30_000, maxBuffer: 32 * 1024 * 1024 })
-  // Git may warn about a corrupt loose ref while exiting successfully and omitting it.
-  if (listing.error || listing.status !== 0 || listing.stderr.trim()) throw new Error(`Resource reference inventory is unreadable: ${ref}`)
-  const rows = listing.stdout.split(/\r?\n/)
-  const row = rows.find((entry) => entry.split('\0')[0] === ref)
-  if (!row) return undefined
-  const sha = row?.split('\0')[1]
-  if (!sha || !/^[a-f0-9]{40,64}$/.test(sha) || /^0+$/.test(sha)) throw new Error(`Existing resource reference is malformed or unreadable: ${ref}`)
-  return sha
-}
 /**
- * {@link lifecycleGit} without blocking the daemon: it waits until the folder's volume answers, runs the same central
- * check without blocking, and the same command with the same time and output limits. It fails as `execFileSync` does:
- * the error carries Git's `status`, `stdout` and `stderr`.
+ * Git for lifecycle work, without blocking the daemon: it waits until the folder's volume answers, runs the central
+ * check, and the command with a 30-second limit. A failure carries Git's `status`, `stdout` and `stderr`.
  */
 export async function lifecycleGitAsync(cwd: string, args: string[], input?: string, maxBuffer = 32 * 1024 * 1024, env?: NodeJS.ProcessEnv): Promise<string> {
   const argv = await withoutRepoProgramsAsync(cwd, args, { stdin: input, env })
@@ -60,11 +37,11 @@ export async function lifecycleGitAsync(cwd: string, args: string[], input?: str
   if (ran.error || ran.status !== 0) throw gitRunError(argv, ran)
   return ran.stdout.trimEnd()
 }
-/** {@link lifecycleRead} without blocking the daemon. */
+/** A lifecycle read (a preview, the checks before a delete): it never refreshes the index and never fetches a missing object. */
 export function lifecycleReadAsync(cwd: string, args: string[], input?: string, maxBuffer?: number): Promise<string> {
   return lifecycleGitAsync(cwd, args, input, maxBuffer, READ_ONLY_GIT_ENV)
 }
-/** {@link readDirectLifecycleRef} without blocking the daemon: the same reads, the same refusals. */
+/** Never treat an unreadable reference as absent, and never dereference an owned symbolic ref. */
 export async function readDirectLifecycleRefAsync(cwd: string, ref: string): Promise<string | undefined> {
   try { await lifecycleGitAsync(cwd, ['symbolic-ref', '-q', ref]); throw new Error(`Symbolic resource reference is not cleanup authority: ${ref}`) }
   catch (error) { if ((error as { status?: number }).status !== 1) throw error }
@@ -80,45 +57,7 @@ export async function readDirectLifecycleRefAsync(cwd: string, ref: string): Pro
 }
 function same(a: string, b: string): boolean { return (process.platform === 'win32' ? resolve(a).toLowerCase() === resolve(b).toLowerCase() : resolve(a) === resolve(b)) }
 export interface ContentEntry { path: string; kind: 'file' | 'directory' | 'link'; digest: string; bytes: number; mode: number }
-export function assertFrozenContentEntry(root: string, entry: ContentEntry): void {
-  const path = join(root, entry.path)
-  assertLifecyclePath(dirname(root), root)
-  if (entry.path) assertLifecyclePath(root, dirname(path))
-  const stat = lstatSync(path)
-  const kind = stat.isSymbolicLink() ? 'link' : stat.isDirectory() ? 'directory' : stat.isFile() ? 'file' : 'unknown'
-  if (kind !== entry.kind || stat.mode !== entry.mode || kind !== 'directory' && stat.size !== entry.bytes || kind === 'file' && stat.nlink > 1) throw new Error('Frozen content was replaced before mutation')
-  const current = kind === 'link' ? hash(readlinkSync(path)) : kind === 'file' ? hash(readFileSync(path)) : ''
-  if (current !== entry.digest) throw new Error('Frozen content changed before mutation')
-}
-/** A bounded walk that never follows links, crosses devices or enters Git administration. */
-export function walkOwnedContent(root: string, skipRootGit = false): ContentEntry[] {
-  assertLifecyclePath(dirname(root), root)
-  const rootStat = lstatSync(root)
-  const entries: ContentEntry[] = []
-  let bytes = 0
-  const walk = (path: string, depth: number): void => {
-    if (depth > 64 || entries.length >= 100_000) throw new Error('Owned content exceeds bounded inventory limits')
-    const stat = lstatSync(path)
-    if (stat.dev !== rootStat.dev) throw new Error('Owned content crosses a filesystem boundary')
-    const rel = relative(root, path).split('\\').join('/')
-    if (stat.isSymbolicLink()) { entries.push({ path: rel, kind: 'link', digest: hash(readlinkSync(path)), bytes: stat.size, mode: stat.mode }); return }
-    if (stat.isDirectory()) {
-      entries.push({ path: rel, kind: 'directory', digest: '', bytes: 0, mode: stat.mode })
-      for (const name of readdirSync(path).sort()) {
-        if (skipRootGit && !rel && name === '.git') continue
-        if (skipRootGit && name === '.git') throw new Error('Nested repository requires explicit retention')
-        walk(join(path, name), depth + 1)
-      }
-      return
-    }
-    if (!stat.isFile() || stat.nlink > 1) throw new Error('Special or multiply linked content requires explicit retention')
-    bytes += stat.size
-    if (stat.size > 64 * 1024 * 1024 || bytes > 512 * 1024 * 1024) throw new Error('Owned content exceeds bounded byte limits')
-    entries.push({ path: rel, kind: 'file', digest: hash(readFileSync(path)), bytes: stat.size, mode: stat.mode })
-  }
-  walk(root, 0)
-  return entries
-}
+
 
 export interface WorktreeReconstructionManifest {
   schemaVersion: 1
@@ -192,7 +131,7 @@ function statOrThrow(stat: Stats | { error: unknown }): Stats {
   return stat
 }
 
-/** {@link assertFrozenContentEntry} without blocking: the same checks, read with async calls. */
+/** Refuses an entry that is no longer exactly as frozen (kind, mode, size, links, content) before it is changed. Reads without blocking. */
 export async function assertFrozenContentEntryAsync(root: string, entry: ContentEntry): Promise<void> {
   const path = join(root, entry.path)
   await assertLifecyclePathAsync(dirname(root), root)
@@ -205,8 +144,8 @@ export async function assertFrozenContentEntryAsync(root: string, entry: Content
 }
 
 /**
- * {@link walkOwnedContent} without blocking the daemon: the same entries in the same order, and the same refusals. The
- * entries of a folder are looked at in batches.
+ * A bounded walk that never follows links, crosses devices or enters Git administration. Reads without blocking the
+ * daemon; the entries of a folder are looked at in batches.
  */
 export async function walkOwnedContentAsync(root: string, skipRootGit = false): Promise<ContentEntry[]> {
   await assertLifecyclePathAsync(dirname(root), root)
@@ -429,7 +368,7 @@ export class WorktreeRetirementService {
       for (let added = true; added;) { added = false; for (const record of records) if (record.parentTaskId && excluded.has(record.parentTaskId) && record.state !== 'trashed' && !excluded.has(record.taskId)) { excluded.add(record.taskId); added = true } }
     }
     const overlaps = (left: string, right: string) => { const rel = relative(resolve(left), resolve(right)); return !isAbsolute(rel) && rel !== '..' && !rel.startsWith(`..${process.platform === 'win32' ? '\\' : '/'}`) }
-    const shared = getExternalResourceClaims(this.store, excluded).some((resource) => !(resource.peerProfileId === this.store.profileId && excluded.has(resource.ownerTaskId)) && isAbsolute(resource.identity) && (overlaps(resource.identity, manifest.worktreePath) || overlaps(manifest.worktreePath, resource.identity)))
+    const shared = (await getExternalResourceClaims(this.store, excluded)).some((resource) => !(resource.peerProfileId === this.store.profileId && excluded.has(resource.ownerTaskId)) && isAbsolute(resource.identity) && (overlaps(resource.identity, manifest.worktreePath) || overlaps(manifest.worktreePath, resource.identity)))
     if (shared) throw new Error('Another task or profile retains this checkout; retirement is blocked')
     await this.verifyPins(manifest)
     const trashPath = this.trashPathFor(manifest)
@@ -654,14 +593,6 @@ export class WorktreeRetirementService {
     for (const [ref, sha] of [[manifest.baseRef, manifest.baseSha], [manifest.resultRef, manifest.resultSha], ...(manifest.snapshotRef ? [[manifest.snapshotRef, manifest.snapshotSha!]] : [])]) if (await readDirectLifecycleRefAsync(manifest.commonDir, ref) !== sha) throw new Error('Reconstruction pin changed or is unavailable')
     if (await lifecycleGitAsync(manifest.commonDir, ['rev-parse', `${manifest.resultSha}^{tree}`]) !== manifest.treeSha) throw new Error('Retained result tree changed')
     if (manifest.snapshotSha && await lifecycleGitAsync(manifest.commonDir, ['rev-parse', `${manifest.snapshotSha}^{tree}`]) !== manifest.snapshotTree) throw new Error('Retained snapshot tree changed')
-  }
-  /** {@link verifyPins}, answered at once: for the resource inventory, which is still built synchronously. */
-  verifyPinsSync(manifest: WorktreeReconstructionManifest): void {
-    assertLifecyclePath(dirname(manifest.commonDir), manifest.commonDir)
-    if (hash(realpathSync(manifest.commonDir).toLowerCase()).slice(0, 32) !== manifest.repositoryId) throw new Error('Repository identity is unavailable or changed')
-    for (const [ref, sha] of [[manifest.baseRef, manifest.baseSha], [manifest.resultRef, manifest.resultSha], ...(manifest.snapshotRef ? [[manifest.snapshotRef, manifest.snapshotSha!]] : [])]) if (readDirectLifecycleRef(manifest.commonDir, ref) !== sha) throw new Error('Reconstruction pin changed or is unavailable')
-    if (lifecycleGit(manifest.commonDir, ['rev-parse', `${manifest.resultSha}^{tree}`]) !== manifest.treeSha) throw new Error('Retained result tree changed')
-    if (manifest.snapshotSha && lifecycleGit(manifest.commonDir, ['rev-parse', `${manifest.snapshotSha}^{tree}`]) !== manifest.snapshotTree) throw new Error('Retained snapshot tree changed')
   }
   /**
    * The commit a branch points at, never following a symbolic ref: a branch that is a symbolic ref (or unreadable) is

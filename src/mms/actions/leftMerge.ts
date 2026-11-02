@@ -3,7 +3,7 @@ import { statSync } from 'node:fs'
 import { stat } from 'node:fs/promises'
 import { gitStep, mousseCommitEnvNow, tryGitStep } from './git'
 import { worktreeTreeSteps } from './snapshots'
-import { files, runAsync, runSync, step, type Steps } from './steps'
+import { files, runAsync, step, type Steps } from './steps'
 
 /**
  * Which `git merge` is in progress in a folder, closely enough to tell the merge an earlier version of Mousse left
@@ -63,9 +63,6 @@ export function* mergeIdentitySteps(folder: string): Steps<MergeIdentity | undef
   }
 }
 
-export function mergeIdentity(folder: string): MergeIdentity | undefined {
-  return runSync(mergeIdentitySteps(folder))
-}
 
 export function mergeIdentityAsync(folder: string): Promise<MergeIdentity | undefined> {
   return runAsync(mergeIdentitySteps(folder))
@@ -81,9 +78,6 @@ function* isRecordedMergeSteps(folder: string, recorded: unknown): Steps<boolean
     now.mergeHeadFile.ctimeNs === was.mergeHeadFile.ctimeNs
 }
 
-export function isRecordedMerge(folder: string, recorded: unknown): boolean {
-  return runSync(isRecordedMergeSteps(folder, recorded))
-}
 
 /**
  * Keeps every file of the folder as it is now, conflicted ones with their markers and edits included, as one commit
@@ -100,11 +94,8 @@ function* preserveBeforeAbortSteps(folder: string, operationId: string): Steps<s
   return ref
 }
 
-export function preserveBeforeAbort(folder: string, operationId: string): string {
-  return runSync(preserveBeforeAbortSteps(folder, operationId))
-}
 
-/** {@link preserveBeforeAbort} without blocking the daemon. */
+/** Keeps every file of the folder before an abort rewrites them (see `preserveBeforeAbortSteps`), without blocking the daemon. */
 export function preserveBeforeAbortAsync(folder: string, operationId: string): Promise<string> {
   return runAsync(preserveBeforeAbortSteps(folder, operationId))
 }
@@ -128,9 +119,6 @@ function* leftMergeRefusalSteps(folder: string, record: LeftMergeRecord, records
   return undefined
 }
 
-export function leftMergeRefusal(folder: string, record: LeftMergeRecord, records: readonly LeftMergeRecord[]): string | undefined {
-  return runSync(leftMergeRefusalSteps(folder, record, records))
-}
 
 export function leftMergeRefusalAsync(folder: string, record: LeftMergeRecord, records: readonly LeftMergeRecord[]): Promise<string | undefined> {
   return runAsync(leftMergeRefusalSteps(folder, record, records))

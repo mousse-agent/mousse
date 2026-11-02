@@ -12,7 +12,7 @@ import { activeHiddenStore, checkStoreCommand, checkStoreCommandAsync, hiddenSto
 import type { GitCheckOptions, RepoProgramOptions } from '../git/repoPrograms'
 import { waitForFolderAccess } from '../files/folderAccess'
 import { runGitProcess } from '../git/runGitProcess'
-import { files, runAsync, runSync, step, type Steps } from './steps'
+import { files, runAsync, step, type Steps } from './steps'
 
 /**
  * `args` as Mousse's own commands run them: no repository program, and, for a folder whose snapshots live in a hidden
@@ -142,31 +142,6 @@ const OPERATION_OF: Record<(typeof IN_PROGRESS_GIT_MARKERS)[number], PendingChan
 const MOUSSE_DIRECTORY = '.mousse'
 export const NOT_MOUSSE = `:(exclude)${MOUSSE_DIRECTORY}`
 
-/** Git output exactly as printed (NUL-separated lists keep leading and trailing spaces), optionally fed `input`. */
-function gitRaw(cwd: string, args: string[], env?: NodeJS.ProcessEnv, input?: string): string {
-  const result = spawnSync('git', guarded(cwd, args, { env, stdin: input }), { cwd, encoding: 'utf8', input, env: gitEnv(cwd, env) })
-  if (result.error || result.status !== 0) {
-    const stderr = (result.stderr ?? '').trim()
-    throw new Error(filterRefusal(stderr) || stderr || `git ${args[0]} failed`)
-  }
-  return result.stdout
-}
-
-/** {@link gitRaw} without blocking the daemon. */
-async function gitRawAsync(cwd: string, args: string[], env?: NodeJS.ProcessEnv, input?: string): Promise<string> {
-  const result = await runGitProcess(await guardedAsync(cwd, args, { env, stdin: input }), { cwd, env: gitEnv(cwd, env), input })
-  if (result.error || result.status !== 0) {
-    const stderr = (result.stderr ?? '').trim()
-    throw new Error(filterRefusal(stderr) || stderr || `git ${args[0]} failed`)
-  }
-  return result.stdout
-}
-
-/** {@link gitRaw} as a step. */
-export function gitRawStep(cwd: string, args: string[], env?: NodeJS.ProcessEnv, input?: string): Steps<string> {
-  return step(() => gitRaw(cwd, args, env, input), () => gitRawAsync(cwd, args, env, input))
-}
-
 export interface PendingChanges {
   /** The repository's top level, which every path below is relative to. */
   top: string
@@ -195,9 +170,6 @@ export function* inspectPendingChangesSteps(cwd: string): Steps<PendingChanges> 
   return { top, files: [...unmerged, ...files], unmerged, ...(operation ? { operation } : {}) }
 }
 
-export function inspectPendingChanges(cwd: string): PendingChanges {
-  return runSync(inspectPendingChangesSteps(cwd))
-}
 
 export function inspectPendingChangesAsync(cwd: string): Promise<PendingChanges> {
   return runAsync(inspectPendingChangesSteps(cwd))
@@ -213,9 +185,6 @@ export function* operationInProgressSteps(cwd: string): Steps<PendingChanges['op
   return undefined
 }
 
-export function operationInProgress(cwd: string): PendingChanges['operation'] {
-  return runSync(operationInProgressSteps(cwd))
-}
 
 export function operationInProgressAsync(cwd: string): Promise<PendingChanges['operation']> {
   return runAsync(operationInProgressSteps(cwd))
@@ -239,13 +208,8 @@ export interface PendingChangesOptions {
 /**
  * The refusal for a checkout Mousse can't work in by itself: an unresolved conflict or a merge, revert,
  * cherry-pick or rebase in progress (`workspace_conflict`), or, for checks after Mousse's own steps, plain
- * uncommitted changes (`workspace_not_clean`). It names the folder and the first few files.
+ * uncommitted changes (`workspace_not_clean`). It names the folder and the first few files of what is pending.
  */
-export function pendingChangesError(cwd: string, label: string, options: PendingChangesOptions = {}, pending = inspectPendingChanges(cwd)): AppError {
-  return pendingChangesErrorFor(label, options, pending)
-}
-
-/** {@link pendingChangesError} for what is pending, already read. */
 export function pendingChangesErrorFor(label: string, options: PendingChangesOptions, pending: PendingChanges): AppError {
   const conflict = pending.unmerged.length > 0 || pending.operation !== undefined
   const discard = conflict && options.discard === true && pending.operation !== 'rebase'
@@ -269,9 +233,6 @@ export function* requireCleanSteps(cwd: string, label: string): Steps<void> {
   if (status) throw pendingChangesErrorFor(label, {}, yield* inspectPendingChangesSteps(cwd))
 }
 
-export function requireClean(cwd: string, label: string): void {
-  runSync(requireCleanSteps(cwd, label))
-}
 
 export function requireCleanAsync(cwd: string, label: string): Promise<void> {
   return runAsync(requireCleanSteps(cwd, label))
@@ -284,9 +245,6 @@ export function* refuseUnsafeChangesSteps(cwd: string, label: string, options: P
   return pending
 }
 
-export function refuseUnsafeChanges(cwd: string, label: string, options: PendingChangesOptions = {}): PendingChanges {
-  return runSync(refuseUnsafeChangesSteps(cwd, label, options))
-}
 
 export function refuseUnsafeChangesAsync(cwd: string, label: string, options: PendingChangesOptions = {}): Promise<PendingChanges> {
   return runAsync(refuseUnsafeChangesSteps(cwd, label, options))
@@ -306,9 +264,6 @@ export function* treeOfSteps(top: string, revision: string): Steps<string> {
   return yield* gitStep(top, ['rev-parse', `${revision}^{tree}`])
 }
 
-export function treeOf(top: string, revision: string): string {
-  return runSync(treeOfSteps(top, revision))
-}
 
 export function treeOfAsync(top: string, revision: string): Promise<string> {
   return runAsync(treeOfSteps(top, revision))
@@ -323,9 +278,6 @@ export function* mergeTreesSteps(top: string, base: string, ours: string, theirs
   return { conflicts: /^[0-9a-f]{40,64}$/.test(tree ?? '') ? files.filter(Boolean) : [] }
 }
 
-export function mergeTrees(top: string, base: string, ours: string, theirs: string): { tree: string } | { conflicts: string[] } {
-  return runSync(mergeTreesSteps(top, base, ours, theirs))
-}
 
 export function mergeTreesAsync(top: string, base: string, ours: string, theirs: string): Promise<{ tree: string } | { conflicts: string[] }> {
   return runAsync(mergeTreesSteps(top, base, ours, theirs))
@@ -349,9 +301,6 @@ export function* backupPendingChangesSteps(top: string): Steps<string> {
   }, realIndex)
 }
 
-export function backupPendingChanges(top: string): string {
-  return runSync(backupPendingChangesSteps(top))
-}
 
 /**
  * Drops pending changes, untracked files and an unfinished merge, revert or cherry-pick, after keeping a copy
@@ -369,9 +318,6 @@ export function* discardPendingChangesSteps(cwd: string): Steps<{ backupRef: str
   return { backupRef }
 }
 
-export function discardPendingChanges(cwd: string): { backupRef: string } {
-  return runSync(discardPendingChangesSteps(cwd))
-}
 
 export function discardPendingChangesAsync(cwd: string): Promise<{ backupRef: string }> {
   return runAsync(discardPendingChangesSteps(cwd))
@@ -382,9 +328,6 @@ export function* commitParentsSteps(cwd: string, sha: string): Steps<string[]> {
   return line.split(/\s+/).slice(1)
 }
 
-export function commitParents(cwd: string, sha: string): string[] {
-  return runSync(commitParentsSteps(cwd, sha))
-}
 
 export function commitParentsAsync(cwd: string, sha: string): Promise<string[]> {
   return runAsync(commitParentsSteps(cwd, sha))
@@ -402,9 +345,6 @@ export function* changedPathsSteps(cwd: string, start: string, end: string): Ste
   return changed
 }
 
-export function changedPaths(cwd: string, start: string, end: string): Array<{ path: string; beforeHash?: string; afterHash?: string }> {
-  return runSync(changedPathsSteps(cwd, start, end))
-}
 
 export function changedPathsAsync(cwd: string, start: string, end: string): Promise<Array<{ path: string; beforeHash?: string; afterHash?: string }>> {
   return runAsync(changedPathsSteps(cwd, start, end))

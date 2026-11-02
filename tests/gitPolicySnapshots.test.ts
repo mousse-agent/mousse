@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { PublishService } from '../src/mms/actions/PublishService'
 import { ThreadActionService } from '../src/mms/actions/ThreadActionService'
 import { UndoService } from '../src/mms/actions/UndoService'
-import { takeSnapshot } from '../src/mms/actions/snapshots'
+import { takeSnapshotAsync } from '../src/mms/actions/snapshots'
 import { acquireRepositoryLease } from '../src/mms/git/RepositoryLease'
 import { resolveRepositoryIdentity } from '../src/mms/git/RepositoryIdentity'
 import { onGitPolicyEntry, userAction, withUserRequest, type GitPolicyEntry } from '../src/mms/git/gitPolicy'
@@ -61,7 +61,7 @@ describe('under MOUSSE_GIT_POLICY=refuse', () => {
   it('the primary checkout: a turn snapshot needs no request, and Undo runs under the user’s', async () => {
     refuse()
     const actions = new ThreadActionService(f.thread)
-    const snapshot = takeSnapshot(f.repo, { reason: 'primary' })
+    const snapshot = (await takeSnapshotAsync(f.repo, { reason: 'primary' }))
     expect(snapshot.sha).toMatch(/^[0-9a-f]{40}$/)
     await turn(actions, f.repo, 'one', () => writeFileSync(join(f.repo, 'value.txt'), 'one\n'))
     await withUserRequest(userAction('button', 'Undo'), () => new UndoService(f.thread).undoLatest('main', f.repo))

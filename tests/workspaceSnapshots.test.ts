@@ -8,7 +8,7 @@ import { PublishService } from '../src/mms/actions/PublishService'
 import { RedoService } from '../src/mms/actions/RedoService'
 import { ThreadActionService } from '../src/mms/actions/ThreadActionService'
 import { UndoService } from '../src/mms/actions/UndoService'
-import { PRESERVE_LIMITS, publishedRef, restoreChange, takeSnapshot, worktreeTree } from '../src/mms/actions/snapshots'
+import { PRESERVE_LIMITS, publishedRef, restoreChangeAsync, takeSnapshotAsync, worktreeTreeAsync } from '../src/mms/actions/snapshots'
 import { cancelledIntegrationsNotice, cancelPendingIntegrations } from '../src/mms/agents/ChildAgentIntegrationService'
 import { ManagedConflictService } from '../src/mms/actions/ManagedConflictService'
 import { spawnSync } from 'node:child_process'
@@ -16,7 +16,7 @@ import { buildSubagentResultReport, formatSubagentResultReport } from '../src/mm
 import { ThreadJournal } from '../src/mms/data/ThreadJournal'
 import { ThreadWorkspaceManager } from '../src/mms/workspace/ThreadWorkspaceManager'
 import { WorkspaceGcService } from '../src/mms/workspace/WorkspaceGcService'
-import { discardPendingChanges } from '../src/mms/actions/git'
+import { discardPendingChangesAsync } from '../src/mms/actions/git'
 import { acquireWorkspaceMutationLease, provisionOwnedAgentWorkspace, resolveOwnedThreadWorkspace } from '../src/mms/workspace/WorkflowWorkspace'
 import type { ThreadAction } from '../src/shared/threadActions'
 import { actionOptions, git, gitFoundationFixture } from './fixtures/gitFoundation'
@@ -78,43 +78,43 @@ describe('turns are recorded as private snapshots', () => {
     expect(receipt.git).toMatchObject({ rewroteHistory: false })
   })
 
-  it('reuses the previous snapshot while the files and HEAD are unchanged', () => {
-    const first = takeSnapshot(cwd, { reason: 'first' })
-    expect(takeSnapshot(cwd, { reason: 'second' }).sha).toBe(first.sha)
+  it('reuses the previous snapshot while the files and HEAD are unchanged', async () => {
+    const first = (await takeSnapshotAsync(cwd, { reason: 'first' }))
+    expect((await takeSnapshotAsync(cwd, { reason: 'second' })).sha).toBe(first.sha)
     write('more.txt', 'x\n')
-    expect(takeSnapshot(cwd, { reason: 'third' }).sha).not.toBe(first.sha)
+    expect((await takeSnapshotAsync(cwd, { reason: 'third' })).sha).not.toBe(first.sha)
   })
 
-  it('rebuilds its private index when it is missing or corrupt', () => {
+  it('rebuilds its private index when it is missing or corrupt', async () => {
     write('a.txt', 'a\n')
-    const first = takeSnapshot(cwd, { reason: 'first' })
+    const first = (await takeSnapshotAsync(cwd, { reason: 'first' }))
     const index = join(git(cwd, 'rev-parse', '--absolute-git-dir'), 'mousse', 'snapshot-index')
     expect(existsSync(index)).toBe(true)
     writeFileSync(index, 'not an index')
     write('b.txt', 'b\n')
-    const second = takeSnapshot(cwd, { reason: 'second' })
+    const second = (await takeSnapshotAsync(cwd, { reason: 'second' }))
     expect(git(cwd, 'ls-tree', '--name-only', second.sha).split('\n')).toEqual(expect.arrayContaining(['a.txt', 'b.txt']))
     expect(second.sha).not.toBe(first.sha)
   })
 
-  it('follows the files HEAD tracks on every snapshot: an ignored file force-added and committed later is in it', () => {
+  it('follows the files HEAD tracks on every snapshot: an ignored file force-added and committed later is in it', async () => {
     write('.gitignore', '*.local\n'); git(cwd, 'add', '.gitignore'); git(cwd, 'commit', '-qm', 'ignore')
     write('settings.local', 'one\n')
     // The private index exists before the file is tracked, so seeding it from HEAD alone would never see the file.
-    const before = takeSnapshot(cwd, { reason: 'before' })
+    const before = (await takeSnapshotAsync(cwd, { reason: 'before' }))
     expect(git(cwd, 'ls-tree', '--name-only', before.sha)).not.toMatch(/settings\.local/)
     git(cwd, 'add', '-f', 'settings.local')
     const index = git(cwd, 'ls-files', '--stage')
     // Staged but not committed: the real index tracks it.
-    expect(git(cwd, 'show', `${takeSnapshot(cwd, { reason: 'staged' }).sha}:settings.local`)).toBe('one')
+    expect(git(cwd, 'show', `${(await takeSnapshotAsync(cwd, { reason: 'staged' })).sha}:settings.local`)).toBe('one')
     git(cwd, 'commit', '-qm', 'track the local settings')
     write('settings.local', 'two\n')
-    const after = takeSnapshot(cwd, { reason: 'after' })
+    const after = (await takeSnapshotAsync(cwd, { reason: 'after' }))
     expect(git(cwd, 'show', `${after.sha}:settings.local`)).toBe('two')
     expect(git(cwd, 'ls-files', '--stage')).toBe(index)
     // Untracked again by HEAD and the real index: an ignored file leaves the snapshot.
     git(cwd, 'rm', '-q', '--cached', 'settings.local'); git(cwd, 'commit', '-qm', 'untrack')
-    expect(git(cwd, 'ls-tree', '--name-only', takeSnapshot(cwd, { reason: 'untracked' }).sha)).not.toMatch(/settings\.local/)
+    expect(git(cwd, 'ls-tree', '--name-only', (await takeSnapshotAsync(cwd, { reason: 'untracked' })).sha)).not.toMatch(/settings\.local/)
     expect(f.read(cwd, 'settings.local')).toBe('two\n')
   })
 })
@@ -342,7 +342,7 @@ describe('Undo, Redo and revert by three-way merge', () => {
     const { action } = await turn('turn', () => { git(cwd, 'rm', '-q', 'secret'); write('.gitignore', 'secret\n'); git(cwd, 'add', '.gitignore'); git(cwd, 'commit', '-qm', 'stop tracking the secret') }, 2)
     // A new, ignored sole copy at the path the turn removed: no snapshot holds it.
     write('secret', 'only copy\n')
-    expect(git(cwd, 'ls-tree', '--name-only', takeSnapshot(cwd, { reason: 'check' }).sha)).not.toMatch(/^secret$/m)
+    expect(git(cwd, 'ls-tree', '--name-only', (await takeSnapshotAsync(cwd, { reason: 'check' })).sha)).not.toMatch(/^secret$/m)
     const undone = await pressed('Undo', () => new UndoService(f.thread).undoLatest('main', cwd))
     expect(f.read(cwd, 'secret')).toBe('tracked\n')
     expect(undone.notice).toMatch(/kept under refs\/mousse\/preserved\/\S+ for 30 days: secret/)
@@ -405,8 +405,8 @@ describe('Undo, Redo and revert by three-way merge', () => {
     const { action } = await turn('turn', () => write('value.txt', 'agent\n'))
     git(cwd, 'add', 'value.txt')
     const cached = git(cwd, 'diff', '--cached', '--binary')
-    const ours = takeSnapshot(cwd, { reason: 'ours' })
-    const result = restoreChange(cwd, { reason: 'undo', base: action.endSha, ours: ours.sha, theirs: action.startSha })
+    const ours = (await takeSnapshotAsync(cwd, { reason: 'ours' }))
+    const result = (await restoreChangeAsync(cwd, { reason: 'undo', base: action.endSha, ours: ours.sha, theirs: action.startSha }))
     expect('snapshot' in result).toBe(true)
     expect(f.read(cwd)).toBe('base\n')
     // The index still holds the staged agent version: the files and the index now disagree, as they would after any edit.
@@ -571,28 +571,28 @@ describe('recovery', () => {
   })
 
   /** An Undo that was interrupted after writing its intent, as `UndoService` writes it. */
-  function interruptedUndo(target: ThreadAction, applyFiles: boolean): string {
+  async function interruptedUndo(target: ThreadAction, applyFiles: boolean): Promise<string> {
     const operationId = 'interrupted-undo'
-    const ours = takeSnapshot(cwd, { reason: 'before undo', operationId })
+    const ours = (await takeSnapshotAsync(cwd, { reason: 'before undo', operationId }))
     const journal = new ThreadJournal(f.thread)
     let expectedTree = ''
-    const restored = restoreChange(cwd, { reason: 'undo', operationId, base: target.endSha, ours: ours.sha, theirs: target.startSha }, (tree) => {
+    const restored = (await restoreChangeAsync(cwd, { reason: 'undo', operationId, base: target.endSha, ours: ours.sha, theirs: target.startSha }, (tree) => {
       expectedTree = tree
       journal.append({ operationId, operationType: 'undo', state: 'prepared', expectedPreState: { preUndoSha: ours.sha, actionId: target.id },
         details: { target, contextAction: target, kind: 'undo', compensationId: 'compensation-1', restoreContext: false, ours: ours.sha, expectedTree } })
       actions.replace(actions.list().map((item) => item.id === target.id ? { ...item, state: 'undoing' as const } : item))
-    })
+    }))
     if (!applyFiles) {
       // The crash came before the files changed: put them back as they were.
       expect('snapshot' in restored).toBe(true)
-      restoreChange(cwd, { reason: 'undo the undo', base: (restored as { snapshot: { sha: string } }).snapshot.sha, ours: (restored as { snapshot: { sha: string } }).snapshot.sha, theirs: ours.sha })
+      await restoreChangeAsync(cwd, { reason: 'undo the undo', base: (restored as { snapshot: { sha: string } }).snapshot.sha, ours: (restored as { snapshot: { sha: string } }).snapshot.sha, theirs: ours.sha })
     }
     return expectedTree
   }
 
   it('an Undo that crashed after changing the files is recorded from the files, without being replayed', async () => {
     const { action } = await turn('turn', () => write('agent.txt', 'agent\n'))
-    interruptedUndo(action, true)
+    await interruptedUndo(action, true)
     expect(existsSync(join(cwd, 'agent.txt'))).toBe(false)
     await new UndoService(f.thread).recoverPending(cwd, () => undefined)
     noPending()
@@ -600,12 +600,12 @@ describe('recovery', () => {
     const compensation = actions.get('compensation-1')!
     expect(compensation).toMatchObject({ actor: { kind: 'user' }, state: 'completed', commits: [] })
     expect(compensation.changedPaths.map((item) => item.path)).toEqual(['agent.txt'])
-    expect(worktreeTree(cwd)).toBe(git(cwd, 'rev-parse', `${action.startSha}^{tree}`))
+    expect((await worktreeTreeAsync(cwd))).toBe(git(cwd, 'rev-parse', `${action.startSha}^{tree}`))
   })
 
   it('an Undo that crashed before changing the files is cancelled and the turn stays undoable', async () => {
     const { action } = await turn('turn', () => write('agent.txt', 'agent\n'))
-    interruptedUndo(action, false)
+    await interruptedUndo(action, false)
     expect(existsSync(join(cwd, 'agent.txt'))).toBe(true)
     await new UndoService(f.thread).recoverPending(cwd, () => undefined)
     noPending()
@@ -616,7 +616,7 @@ describe('recovery', () => {
 
   it('an Undo that crashed with files that match neither state stays pending for a person', async () => {
     const { action } = await turn('turn', () => write('agent.txt', 'agent\n'))
-    interruptedUndo(action, false)
+    await interruptedUndo(action, false)
     mkdirSync(join(cwd, 'surprise'), { recursive: true }); write('surprise/file.txt', 'x\n')
     await expect(new UndoService(f.thread).recoverPending(cwd, () => undefined)).rejects.toThrow(/neither the state before nor the state after/)
     expect(() => noPending()).toThrow()
@@ -734,7 +734,7 @@ describe('subagent results', () => {
 
   it('a merge an older version left unfinished is cancelled, not replayed, and the files stay as they are', async () => {
     const agent = await worker('worker', { 'worker.txt': 'worker\n' })
-    const ours = takeSnapshot(cwd, { reason: 'ours' })
+    const ours = (await takeSnapshotAsync(cwd, { reason: 'ours' }))
     const journal = new ThreadJournal(f.thread)
     for (const [operationId, state] of [['crashed', 'prepared'], ['stuck', 'recovery_required']] as const) {
       journal.append({
@@ -782,11 +782,11 @@ describe('subagent results', () => {
 })
 
 describe('discard', () => {
-  it('keeps a staged, force-added ignored file in its copy before it resets anything', () => {
+  it('keeps a staged, force-added ignored file in its copy before it resets anything', async () => {
     write('.gitignore', '*.local\n'); git(cwd, 'add', '.gitignore'); git(cwd, 'commit', '-qm', 'ignore')
     write('settings.local', 'staged only\n'); git(cwd, 'add', '-f', 'settings.local')
     write('value.txt', 'edited\n')
-    const { backupRef } = discardPendingChanges(cwd)
+    const { backupRef } = (await discardPendingChangesAsync(cwd))
     expect(git(cwd, 'show', `${backupRef}:settings.local`)).toBe('staged only')
     expect(git(cwd, 'show', `${backupRef}:value.txt`)).toBe('edited')
     expect(existsSync(join(cwd, 'settings.local'))).toBe(false)
