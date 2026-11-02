@@ -39,11 +39,12 @@ const NESTED_COMMIT_ONLY = 'nested repository; only its commit is recorded'
 /**
  * Nested repositories (and submodules) the snapshot records as a link to their commit, whose own files differ from
  * it: uncommitted or untracked changes in them are not in the snapshot. A clean one is fully covered by its commit.
+ * The check never refreshes the nested repository's index.
  */
 function nestedWithChanges(top: string, env: NodeJS.ProcessEnv, skip: CoverageGap[]): CoverageGap[] {
   const links = git(top, ['ls-files', '-s', '-z'], env).split('\0').filter((line) => line.startsWith('160000 ')).map((line) => line.slice(line.indexOf('\t') + 1))
   return links.filter((path) => !skip.some((gap) => gap.path === path) && existsSync(join(top, path, '.git')))
-    .filter((path) => { const status = tryGit(join(top, path), ['status', '--porcelain', '--untracked-files=all']); return !status.ok || status.stdout !== '' })
+    .filter((path) => { const status = tryGit(join(top, path), ['--no-optional-locks', 'status', '--porcelain', '--untracked-files=all']); return !status.ok || status.stdout !== '' })
     .map((path) => ({ path, reason: NESTED_COMMIT_ONLY }))
 }
 
