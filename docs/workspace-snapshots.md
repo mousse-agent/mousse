@@ -181,7 +181,7 @@ A project that is not a Git repository, a repository with no commit yet, and a t
 
 ### The store
 
-A repository Mousse creates (`git init --bare --template=`, then `core.bare=false`, `gc.auto=0`) and uses only as `git --git-dir=<store> --work-tree=<folder>`.
+A repository Mousse creates (`git init --bare --template=`) and uses only with `GIT_DIR=<store>` and `GIT_WORK_TREE=<folder>`. Its config is never written.
 
 | Folder | Store | Shared by |
 | --- | --- | --- |
@@ -197,6 +197,8 @@ A store records exact bytes. Every store command runs isolated from the person's
 ### How Git reaches the store
 
 A store belongs to the threads that recorded turns in it, never to the folder. `src/mms/git/hiddenStore.ts` keeps a scope (`AsyncLocalStorage`); Mousse's own Git helpers (`actions/git.ts`) and the review's `guardedSimpleGit` add `--git-dir`/`--work-tree` (or `GIT_DIR`/`GIT_WORK_TREE`) only for a command run inside the scope of a store, on a path inside its folder. The scope is opened for a thread, from its own `snapshot-workspace.json` (`threadSnapshotStore`, `inThreadSnapshotScope` in `SnapshotWorkspace.ts`): `withGitMutationLocks` opens it for every snapshot, restore, receipt and recovery, and the read paths (the review's turn and thread scopes, `commitExists` for them, the restore review's `restoreDiff`) open it for the thread they read. Nothing else is redirected, so the Git panel and everything else see the folder as it is.
+
+Every store command passes the central Git check (`gitPolicy.ts`) as it runs, through `guarded` (actions/git.ts), the review's runner, or `runStoreGit` for the store's creation, ref maintenance and garbage collection. The store is named by `GIT_DIR` and its folder by `GIT_WORK_TREE`, never by the folder's own `--git-dir`, and the check accepts that pair only for a store under the Mousse home (`isOwnedSnapshotStore`). The store's index, HEAD and refs are then Mousse's, and `gc` is allowed there and nowhere else. Writing the folder's files is the person's: Undo, Redo and revert carry their request. The store's config is never written; each command passes `gc.auto=0` and the isolation settings itself. `tests/gitPolicyHiddenStore.test.ts` runs a turn, the review, Undo, Redo, a permanent delete and the trash expiry under `MOUSSE_GIT_POLICY=refuse` with no violation.
 
 That is what lets a folder become a repository later. When someone runs `git init` in a project folder, a thread that recorded a snapshot in the store keeps it (`WorkspaceResolver` gives it no worktree, with `unavailableReason: 'snapshot-store'`); one whose turns were all refused recorded nothing there and uses the repository like a new thread, and its Undo, Redo and review keep working from the store. A new thread uses the repository like any other, and none of Mousse's commands for it, or for the Git panel, go through the store. The store's `info/exclude` leaves the new `.git/` out.
 
