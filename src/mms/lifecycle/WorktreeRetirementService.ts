@@ -1,6 +1,6 @@
 import { MOUSSE_CONTROL_FILE_PATHS } from '../worktree/controlFiles'
 import { createHash } from 'node:crypto'
-import { existsSync, lstatSync, readFileSync, realpath as realpathCallback, type Stats } from 'node:fs'
+import { existsSync, lstatSync, readdirSync, readFileSync, readlinkSync, realpath as realpathCallback, type BigIntStats, type Stats } from 'node:fs'
 import { access, chmod, lstat, mkdir, readdir, readFile, readlink, rm, writeFile } from 'node:fs/promises'
 import { promisify } from 'node:util'
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path'
@@ -29,6 +29,10 @@ const hash = (value: string | Buffer): string => createHash('sha256').update(val
 /** A retired worktree waits in the trash until nothing in it has changed for this long; then its files are snapshotted and it is deleted. */
 export const WORKTREE_TRASH_QUIET_MS = 60 * 60_000
 /** The record of a worktree in the trash changed or went (a permanent deletion) while it was being expired. */
+/** A folder in the trash as it is compared before its delete: its HEAD and every entry's bytes. */
+function trashedStateOf(head: string, content: readonly ContentEntry[]): string {
+  return JSON.stringify([head, content])
+}
 class TrashRecordChanged extends Error {
   constructor() { super('Its record changed while it was being deleted; it is looked at again on the next run') }
 }
@@ -140,16 +144,139 @@ function statOrThrow(stat: Stats | { error: unknown }): Stats {
   return stat
 }
 
-/** Refuses an entry that is no longer exactly as frozen (kind, mode, size, links, content) before it is changed. Reads without blocking. */
-export async function assertFrozenContentEntryAsync(root: string, entry: ContentEntry): Promise<void> {
+/**
+ * An entry of frozen content checked without blocking, with what the check was made from: its `lstat` before and after its
+ * bytes were read (identical), so {@link assertFrozenEntryUnchanged} can tell, synchronously and right before the entry is
+ * changed, that it is still those bytes.
+ */
+export interface FrozenEntryProof { path: string; entry: ContentEntry; signature: string; coarse: boolean }
+
+/** What an entry's `lstat` says, to tell whether it changed since: device, inode, type, mode, links, size and both times. */
+function statSignature(stat: BigIntStats): string {
+  return [stat.dev, stat.ino, stat.mode, stat.nlink, stat.size, stat.mtimeNs, stat.ctimeNs].join(':')
+}
+/**
+ * Times a write cannot be told apart by: whole milliseconds or coarser (an HFS+ or FAT volume, some network shares).
+ * There the bytes themselves are compared again instead.
+ */
+function coarseTimes(stat: BigIntStats): boolean {
+  return stat.mtimeNs % 1_000_000n === 0n && stat.ctimeNs % 1_000_000n === 0n
+}
+function kindOf(stat: { isSymbolicLink(): boolean; isDirectory(): boolean; isFile(): boolean }): ContentEntry['kind'] | 'unknown' {
+  return stat.isSymbolicLink() ? 'link' : stat.isDirectory() ? 'directory' : stat.isFile() ? 'file' : 'unknown'
+}
+
+/**
+ * Refuses an entry that is no longer exactly as frozen (kind, mode, size, links, content), reading it without blocking, and
+ * returns what the check was made from. The entry is read between two `lstat`s that must agree, so the bytes checked are
+ * the bytes the returned signature describes. The caller removes it only after {@link assertFrozenEntryUnchanged}, with
+ * nothing awaited in between.
+ */
+export async function proveFrozenContentEntryAsync(root: string, entry: ContentEntry): Promise<FrozenEntryProof> {
   const path = join(root, entry.path)
   await assertLifecyclePathAsync(dirname(root), root)
   if (entry.path) await assertLifecyclePathAsync(root, dirname(path))
-  const stat = await lstat(path)
-  const kind = stat.isSymbolicLink() ? 'link' : stat.isDirectory() ? 'directory' : stat.isFile() ? 'file' : 'unknown'
-  if (kind !== entry.kind || stat.mode !== entry.mode || kind !== 'directory' && stat.size !== entry.bytes || kind === 'file' && stat.nlink > 1) throw new Error('Frozen content was replaced before mutation')
+  const before = await lstat(path, { bigint: true })
+  const kind = kindOf(before)
+  if (kind !== entry.kind || Number(before.mode) !== entry.mode || kind !== 'directory' && Number(before.size) !== entry.bytes || kind === 'file' && before.nlink > 1n) throw new Error('Frozen content was replaced before mutation')
   const current = kind === 'link' ? hash(await readlink(path)) : kind === 'file' ? hash(await readFile(path)) : ''
   if (current !== entry.digest) throw new Error('Frozen content changed before mutation')
+  const after = await lstat(path, { bigint: true })
+  if (statSignature(after) !== statSignature(before)) throw new Error('Frozen content changed before mutation')
+  return { path, entry, signature: statSignature(before), coarse: coarseTimes(before) }
+}
+
+/**
+ * Right before a proven entry is removed, synchronously: it is still the entry {@link proveFrozenContentEntryAsync} read.
+ * Its `lstat` must be unchanged, so any write since (which moves its change time) refuses it; where the times are too
+ * coarse to show that, its bytes are read and compared again. The entry is under the Mousse home.
+ */
+export function assertFrozenEntryUnchanged(proof: FrozenEntryProof): void {
+  const stat = lstatSync(proof.path, { bigint: true })
+  if (statSignature(stat) !== proof.signature) throw new Error('Frozen content changed before mutation')
+  if (!proof.coarse || proof.entry.kind === 'directory') return
+  const current = proof.entry.kind === 'link' ? hash(readlinkSync(proof.path)) : hash(readFileSync(proof.path))
+  if (current !== proof.entry.digest) throw new Error('Frozen content changed before mutation')
+}
+
+/**
+ * Every entry of a folder as `lstat` describes it (identity, size, mode, links and both times), without its bytes: compared
+ * again synchronously right before the folder is deleted, it shows whether anything in it changed since. `coarse` is set
+ * when some entry's times cannot show a write (see {@link coarseTimes}).
+ */
+export interface FolderSignature { text: string; coarse: boolean }
+
+export async function folderSignatureAsync(root: string, skipRootGit = false): Promise<FolderSignature> {
+  const rows: string[] = []
+  let coarse = false
+  const visit = async (path: string, stat: BigIntStats, rel: string, depth: number): Promise<void> => {
+    if (depth > 64 || rows.length > 100_000) throw new Error('Owned content exceeds bounded inventory limits')
+    rows.push(`${rel}\0${statSignature(stat)}`)
+    coarse ||= coarseTimes(stat)
+    if (!stat.isDirectory()) return
+    const names = (await readdir(path)).sort().filter((name) => !(skipRootGit && !rel && name === '.git'))
+    for (let start = 0; start < names.length; start += STAT_BATCH) {
+      const batch = names.slice(start, start + STAT_BATCH)
+      const stats = await Promise.all(batch.map((name) => lstat(join(path, name), { bigint: true })))
+      for (const [index, name] of batch.entries()) await visit(join(path, name), stats[index]!, rel ? `${rel}/${name}` : name, depth + 1)
+    }
+  }
+  await visit(root, await lstat(root, { bigint: true }), '', 0)
+  return { text: rows.join('\n'), coarse }
+}
+
+/** {@link folderSignatureAsync}, read at once: for the synchronous check right before a delete. The folder is under the Mousse home. */
+export function folderSignatureSync(root: string, skipRootGit = false): FolderSignature {
+  const rows: string[] = []
+  let coarse = false
+  const visit = (path: string, stat: BigIntStats, rel: string, depth: number): void => {
+    if (depth > 64 || rows.length > 100_000) throw new Error('Owned content exceeds bounded inventory limits')
+    rows.push(`${rel}\0${statSignature(stat)}`)
+    coarse ||= coarseTimes(stat)
+    if (!stat.isDirectory()) return
+    for (const name of readdirSync(path).sort()) {
+      if (skipRootGit && !rel && name === '.git') continue
+      visit(join(path, name), lstatSync(join(path, name), { bigint: true }), rel ? `${rel}/${name}` : name, depth + 1)
+    }
+  }
+  visit(root, lstatSync(root, { bigint: true }), '', 0)
+  return { text: rows.join('\n'), coarse }
+}
+
+/**
+ * The bytes of every file and link of a folder, read at once: only for {@link FolderSignature}s whose times are too coarse
+ * to show a write, right before the folder is deleted. The same entries as {@link walkOwnedContentAsync}.
+ */
+function folderContentSync(root: string, skipRootGit = false): ContentEntry[] {
+  const entries: ContentEntry[] = []
+  const visit = (path: string, rel: string): void => {
+    const stat = lstatSync(path)
+    if (stat.isSymbolicLink()) { entries.push({ path: rel, kind: 'link', digest: hash(readlinkSync(path)), bytes: stat.size, mode: stat.mode }); return }
+    if (stat.isDirectory()) {
+      entries.push({ path: rel, kind: 'directory', digest: '', bytes: 0, mode: stat.mode })
+      for (const name of readdirSync(path).sort()) if (!(skipRootGit && !rel && name === '.git')) visit(join(path, name), rel ? `${rel}/${name}` : name)
+      return
+    }
+    entries.push({ path: rel, kind: 'file', digest: hash(readFileSync(path)), bytes: stat.size, mode: stat.mode })
+  }
+  visit(root, '')
+  return entries
+}
+
+/**
+ * Right before a folder is deleted, synchronously and with nothing awaited before the delete starts: nothing in it changed
+ * since `signature` was read. With coarse times its bytes are compared with `content` too. Throws {@link FolderChanged}.
+ */
+export function assertFolderUnchanged(root: string, signature: FolderSignature, content: readonly ContentEntry[], skipRootGit = false): void {
+  let now: FolderSignature
+  try { now = folderSignatureSync(root, skipRootGit) } catch { throw new FolderChanged() }
+  if (now.text !== signature.text) throw new FolderChanged()
+  if ((signature.coarse || now.coarse) && JSON.stringify(folderContentSync(root, skipRootGit)) !== JSON.stringify(content)) throw new FolderChanged()
+}
+
+/** A folder changed between the check that allowed its deletion and the moment the deletion would start. Nothing was deleted. */
+export class FolderChanged extends Error {
+  constructor() { super('Files in it changed right before it would have been deleted') }
 }
 
 /**
@@ -186,58 +313,6 @@ export async function walkOwnedContentAsync(root: string, skipRootGit = false): 
   return entries
 }
 
-export interface WorktreeReconstructionManifest {
-  schemaVersion: 1
-  profileId: string
-  taskId: string
-  worktreePath: string
-  branch: string
-  repositoryId: string
-  commonDir: string
-  gitDirectory: string
-  rootIdentity: { dev: number; ino: number; birthtimeMs: number }
-  sourcePath: string
-  baseSha: string
-  resultSha: string
-  treeSha: string
-  checkoutFingerprint: string
-  baseRef: string
-  resultRef: string
-  /**
-   * Set when the worktree held uncommitted files: `snapshotSha` is a snapshot of all of its files (its parent is the
-   * HEAD in `resultSha`), pinned under `snapshotRef`, and `snapshotTree` its tree. Reconstruction writes those files
-   * over a checkout of `resultSha`. Absent for a worktree whose files were its HEAD.
-   */
-  snapshotSha?: string
-  snapshotTree?: string
-  snapshotRef?: string
-  /** The branch HEAD was on when the worktree was retired; absent when it was detached. The agent may have left the thread's own branch. */
-  headBranch?: string
-  sparse?: { patterns: string; cone: boolean }
-  auxiliary: Array<{ path: string; content: string }>
-  content: ContentEntry[]
-  /**
-   * Where the folder waits in Mousse's trash (`trashPathFor`), set before it is moved there. It was moved in one step and
-   * stays registered with Git at that path. A process may still have its working directory there and write to it.
-   */
-  trashPath?: string
-  /** When the folder reached the trash; set with state `trashed`. */
-  trashedAt?: string
-  /**
-   * Earlier pins the trash expiry did not replace because the new pin does not contain them (the folder's HEAD moved
-   * away from them): each stays under its own ref, `<prefix>/kept/<sha>`, and goes only with the owner.
-   */
-  keptRefs?: string[]
-  /** Owned branches deleted once their tips were kept by the pins here, so a restore can bring them back. */
-  deletedBranches?: Array<{ name: string; sha: string }>
-  /** Branches a restore could not bring back because their commit is gone from the repository. */
-  branchesNotRestored?: Array<{ name: string; sha: string }>
-  /**
-   * `prepared`: pins written, folder in place. `trashed`: the folder is in the trash. `retired`: its files were
-   * snapshotted and it was deleted. `materialized`: the worktree is back at its own path.
-   */
-  state: 'prepared' | 'trashed' | 'retired' | 'materialized'
-}
 /** The latest change time of anything in a folder, links not followed; `Infinity` when it is too large to tell. Never blocks. */
 async function newestChange(root: string): Promise<number> {
   let newest = 0, seen = 0
@@ -469,18 +544,29 @@ export class WorktreeRetirementService {
     const first = await this.captureTrashed(manifestPath, manifest, record)
     if ('kept' in first) return first
     options.afterCapture?.(trashPath)
-    // Right before the delete, the folder is read again: a change since the snapshot is captured and the delete waits.
-    const again = await this.trashedState(manifest)
-    if (again !== first.state) {
+    const changed = async (): Promise<{ kept: string; waiting: true }> => {
       const retaken = await this.captureTrashed(manifestPath, manifest, record)
       return { kept: `Files in it changed while it was being deleted${'kept' in retaken ? `; ${retaken.kept}` : '; they are kept as a snapshot'}. It is looked at again on the next run.`, waiting: true }
     }
-    // Right before Git deletes it: the repository lease is still held, and the record is still the one this pass read.
+    // Right before the delete, the folder is read again and compared with what the snapshot holds: a change since the
+    // snapshot is captured and the delete waits. What `lstat` says of every entry is read first, so a write after this
+    // read is still seen by the check right before Git starts.
+    let signature: FolderSignature
+    try { signature = await folderSignatureAsync(trashPath, true) } catch { return await changed() }
+    if (await this.trashedState(manifest) !== first.state) return await changed()
+    // Right before Git deletes it, with nothing awaited in between: the repository lease is still held, the record is
+    // still the one this pass read, and nothing in the folder changed since it was compared with the snapshot.
     const lease = await this.readRepositoryLease()
-    await this.removeTrashed(manifest, () => this.store.withGate(manifest.taskId, () => {
-      this.assertRepositoryLease(manifest.commonDir, manifest.repositoryId, lease)
-      this.assertTrashRecord(manifestPath, record)
-    }))
+    try {
+      await this.removeTrashed(manifest, () => this.store.withGate(manifest.taskId, () => {
+        this.assertRepositoryLease(manifest.commonDir, manifest.repositoryId, lease)
+        this.assertTrashRecord(manifestPath, record)
+        assertFolderUnchanged(trashPath, signature, first.content, true)
+      }))
+    } catch (error) {
+      if (error instanceof FolderChanged) return await changed()
+      throw error
+    }
     manifest.state = 'retired'; delete manifest.trashPath; delete manifest.trashedAt
     this.saveTrashed(manifestPath, manifest, record)
     await this.releaseBranches(manifest); this.saveTrashed(manifestPath, manifest, record)
@@ -490,7 +576,7 @@ export class WorktreeRetirementService {
    * Takes a snapshot of the folder in the trash and pins it in place of the earlier pins (`result` at its HEAD,
    * `snapshot` when it has uncommitted files), recording both in the manifest. What a snapshot cannot hold keeps it.
    */
-  private async captureTrashed(manifestPath: string, manifest: WorktreeReconstructionManifest, record: { text: string }): Promise<{ state: string } | { kept: string }> {
+  private async captureTrashed(manifestPath: string, manifest: WorktreeReconstructionManifest, record: { text: string }): Promise<{ state: string; content: ContentEntry[] } | { kept: string }> {
     const trashPath = manifest.trashPath!
     const head = await lifecycleReadAsync(trashPath, ['rev-parse', 'HEAD'])
     const treeSha = await lifecycleReadAsync(trashPath, ['rev-parse', 'HEAD^{tree}'])
@@ -519,9 +605,10 @@ export class WorktreeRetirementService {
     Object.assign(manifest, { resultSha: head, treeSha, ...(dirty ? { snapshotSha: snapshot!.sha, snapshotTree: snapshot!.tree, snapshotRef: `${prefix}/snapshot` } : {}), ...(headBranch ? { headBranch } : {}), ...contents })
     this.saveTrashed(manifestPath, manifest, record)
     await this.verifyPins(manifest)
-    return { state: await this.trashedState(manifest) }
+    // What the snapshot holds, not a read of the folder now: `inspectContent` read every entry after the snapshot and proved
+    // each against it, so a write made since then (during the waits above) differs from this and is never deleted unseen.
+    return { state: trashedStateOf(head, contents.content), content: contents.content }
   }
-  /** What the folder in the trash holds now, to compare with what was captured: HEAD, the tree of its files and every entry's bytes. */
   /**
    * The record of a worktree in the trash is written only while it is still the one this pass read or last wrote, checked
    * under the task's gate in the same synchronous step: a permanent deletion may have removed it meanwhile, and it is
@@ -539,10 +626,11 @@ export class WorktreeRetirementService {
     try { current = JSON.stringify(JSON.parse(readFileSync(manifestPath, 'utf8'))) } catch { current = undefined }
     if (current !== record.text) throw new TrashRecordChanged()
   }
+  /** What the folder in the trash holds now, to compare with what was captured: HEAD and every entry's bytes. */
   private async trashedState(manifest: WorktreeReconstructionManifest): Promise<string> {
     const trashPath = manifest.trashPath!
     try {
-      return JSON.stringify([await lifecycleReadAsync(trashPath, ['rev-parse', 'HEAD']), await worktreeTreeAsync(trashPath), await walkOwnedContentAsync(trashPath, true)])
+      return trashedStateOf(await lifecycleReadAsync(trashPath, ['rev-parse', 'HEAD']), await walkOwnedContentAsync(trashPath, true))
     } catch (error) { return `unreadable: ${(error as Error).message}` }
   }
   /** Points Git's registration at the trash after a move that a crash interrupted. Idempotent. */

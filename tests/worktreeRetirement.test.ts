@@ -148,6 +148,48 @@ test('trash expiry reads the folder again before deleting it: a change since its
   expect(await f.service.expireTrash(f.path, { now: later + 2 * WORKTREE_TRASH_QUIET_MS })).toEqual({ removed: true })
 })
 
+test('trash expiry deletes only what its snapshot holds: a write while the capture checks its pins keeps the folder', async () => {
+  const f = await fixture()
+  await f.service.prepare(f.input)
+  const trashed = await f.service.retire(f.path)
+  const later = Date.now() + 2 * WORKTREE_TRASH_QUIET_MS
+  // The second check of the pins is the one at the end of the capture: after the snapshot and the proof of its contents.
+  const verifyPins = f.service.verifyPins.bind(f.service)
+  let checks = 0
+  vi.spyOn(f.service, 'verifyPins').mockImplementation(async (manifest) => {
+    checks += 1
+    if (checks === 2) writeFileSync(join(trashed.trashPath!, 'a.txt'), 'written while the pins were checked\n')
+    return verifyPins(manifest)
+  })
+  const outcome = await f.service.expireTrash(f.path, { now: later })
+  expect(checks).toBeGreaterThanOrEqual(2)
+  expect(outcome).toEqual({ kept: expect.stringMatching(/changed while it was being deleted/), waiting: true })
+  expect(readFileSync(join(trashed.trashPath!, 'a.txt'), 'utf8')).toBe('written while the pins were checked\n')
+  // The write is captured now, so nothing of it is lost when a later run deletes the folder.
+  const manifest = JSON.parse(readFileSync(f.path, 'utf8'))
+  expect(git(f.repo, ['show', `${manifest.snapshotRef}:a.txt`])).toBe('written while the pins were checked')
+})
+
+test('trash expiry checks the folder again right before Git deletes it: a write after its last read keeps the folder', async () => {
+  const f = await fixture()
+  await f.service.prepare(f.input)
+  const trashed = await f.service.retire(f.path)
+  const later = Date.now() + 2 * WORKTREE_TRASH_QUIET_MS
+  // The repository lease is read last right before the delete: after the folder was compared with the snapshot.
+  const service = f.service as unknown as { readRepositoryLease(): Promise<unknown> }
+  const readLease = service.readRepositoryLease.bind(service)
+  let reads = 0
+  vi.spyOn(service, 'readRepositoryLease').mockImplementation(async () => {
+    reads += 1
+    if (reads === 2) writeFileSync(join(trashed.trashPath!, 'b.txt'), 'written right before the delete\n')
+    return readLease()
+  })
+  const outcome = await f.service.expireTrash(f.path, { now: later })
+  expect(reads).toBe(2)
+  expect(outcome).toEqual({ kept: expect.stringMatching(/changed while it was being deleted/), waiting: true })
+  expect(readFileSync(join(trashed.trashPath!, 'b.txt'), 'utf8')).toBe('written right before the delete\n')
+})
+
 test('trash expiry never writes back a record a permanent deletion removed meanwhile, and deletes nothing then', async () => {
   const f = await fixture()
   await f.service.prepare(f.input)

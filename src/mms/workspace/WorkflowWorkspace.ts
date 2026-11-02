@@ -170,20 +170,26 @@ async function listedWorktree(gitTopLevel: string, worktreePath: string): Promis
 }
 
 /**
- * Callers join a folder's queue in the order they called. The folder's key is its real path, which is read without
- * blocking, so joining is itself queued: each caller joins only after every earlier caller has.
+ * Callers join a folder's queue in the order they called. The queue's key is the folder's real path, which is read without
+ * blocking, so joining is itself queued, per folder as the caller names it: each caller joins only after every earlier
+ * caller for that folder has, and a folder whose path is slow to read holds up only its own callers. Two spellings of one
+ * folder (a link and its target) still share the queue; only the order in which they join it is not fixed.
  */
-let joining: Promise<unknown> = Promise.resolve()
+const joining = new Map<string, Promise<unknown>>()
+
+const cancelled = (): Error => Object.assign(new Error('cancelled'), { code: 'cancelled' })
 
 export async function withSerializedWorkspace<T>(cwd: string, work: () => Promise<T>, signal?: AbortSignal): Promise<T> {
   let result: T
   let started = false
-  const joined = joining.then(async () => {
+  if (signal?.aborted) throw cancelled()
+  const named = resolve(cwd)
+  const joined = (joining.get(named) ?? Promise.resolve()).then(async () => {
     const key = await canonicalPath(cwd)
     const previous = occupancyTails.get(key) ?? Promise.resolve()
     const queued = previous.catch(() => undefined).then(async () => {
       started = true
-      if (signal?.aborted) throw Object.assign(new Error('cancelled'), { code: 'cancelled' })
+      if (signal?.aborted) throw cancelled()
       result = await work()
     })
     occupancyTails.set(key, queued)
@@ -192,16 +198,28 @@ export async function withSerializedWorkspace<T>(cwd: string, work: () => Promis
     void queued.finally(() => {
       if (occupancyTails.get(key) === queued) occupancyTails.delete(key)
     }).catch(() => undefined)
+    // A caller that stopped waiting before it joined never reads this; its refusal is not an unhandled one.
+    queued.catch(() => undefined)
     return { queued }
   })
-  joining = joined.catch(() => undefined)
-  const next = (await joined).queued
+  const tail = joined.catch(() => undefined)
+  joining.set(named, tail)
+  void tail.then(() => { if (joining.get(named) === tail) joining.delete(named) })
+  // Waiting to join ends with the caller's signal; the queued step then sees it and never runs the work.
+  const next = (signal ? await new Promise<Awaited<typeof joined>>((resolveJoin, reject) => {
+    const abort = (): void => reject(cancelled())
+    signal.addEventListener('abort', abort, { once: true })
+    joined.then(
+      (value) => { signal.removeEventListener('abort', abort); resolveJoin(value) },
+      (error: unknown) => { signal.removeEventListener('abort', abort); reject(error instanceof Error ? error : new Error(String(error))) }
+    )
+  }) : await joined).queued
   try {
     if (!signal) await next
     else await new Promise<void>((resolveWait, reject) => {
       // Once dispatch has started, cancellation belongs to the underlying
       // runner and this promise must retain ownership until raw settlement.
-      const abort = () => { if (!started) reject(Object.assign(new Error('cancelled'), { code: 'cancelled' })) }
+      const abort = () => { if (!started) reject(cancelled()) }
       if (signal.aborted) { abort(); return }
       signal.addEventListener('abort', abort, { once: true })
       void next.then(

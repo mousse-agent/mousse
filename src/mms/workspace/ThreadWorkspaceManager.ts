@@ -1,5 +1,5 @@
 import { ResourceLifecycleStore } from '../lifecycle/ResourceLifecycleStore'
-import { walkOwnedContentAsync, WorktreeRetirementService } from '../lifecycle/WorktreeRetirementService'
+import { assertFolderUnchanged, folderSignatureAsync, walkOwnedContentAsync, WorktreeRetirementService } from '../lifecycle/WorktreeRetirementService'
 import { getThreadLifecycleGate } from '../queue/ThreadLifecycleAdmission'
 import { execFileSync } from 'node:child_process'
 import { existsSync, readFileSync, realpathSync } from 'node:fs'
@@ -531,8 +531,14 @@ export class ThreadWorkspaceManager {
     catch { throw new Error('The worktree was partly removed and programs are still using files in it; close them and try again.') }
     try {
       const retained = new Map(manifest.content.map((entry) => [entry.path, entry]))
-      const verified = (await walkOwnedContentAsync(aside, true)).every((entry) => entry.kind === 'directory' || (retained.get(entry.path)?.kind === entry.kind && retained.get(entry.path)?.digest === entry.digest))
-      if (verified) await rm(aside, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 })
+      // What `lstat` says of every entry is read before the bytes are, so a write after that read is still seen right
+      // before the delete, which starts with nothing awaited after that check.
+      const signature = await folderSignatureAsync(aside, true)
+      const content = await walkOwnedContentAsync(aside, true)
+      const verified = content.every((entry) => entry.kind === 'directory' || (retained.get(entry.path)?.kind === entry.kind && retained.get(entry.path)?.digest === entry.digest))
+      if (!verified) return
+      assertFolderUnchanged(aside, signature, content, true)
+      await rm(aside, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 })
     } catch { /* The moved folder stays; the worktree is rebuilt beside it. */ }
   }
 

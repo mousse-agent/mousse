@@ -1,7 +1,7 @@
 import { createErrorProvider, normalizeAppError } from '../../shared/errors'
 import { createHash, randomUUID } from 'node:crypto'
-import { existsSync, readFileSync } from 'node:fs'
-import { access, lstat, rmdir, unlink } from 'node:fs/promises'
+import { existsSync, lstatSync, readdirSync, readFileSync, rmdirSync, unlinkSync } from 'node:fs'
+import { access, lstat } from 'node:fs/promises'
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import type { LifecyclePurgeItem, LifecyclePurgePreview, TaskLifecycleRecord, TrashRetentionPolicy } from '../../shared/resourceLifecycle'
 import { atomicWriteJsonSync } from '../data/AtomicFs'
@@ -11,7 +11,7 @@ import { buildResourceInventory, OwnershipFacts } from './ResourceInventory'
 import { projectFolderPurgeRefs, threadKeptFilesRefs } from './projectFolderRefs'
 import { measureTree } from './diskMeasure'
 import { assertLifecyclePath, assertLifecyclePathAsync, ResourceLifecycleStore } from './ResourceLifecycleStore'
-import { assertFrozenContentEntryAsync, lifecycleGitAsync, lifecycleReadAsync, readDirectLifecycleRefAsync, walkOwnedContentAsync, WorktreeRetirementService } from './WorktreeRetirementService'
+import { assertFrozenEntryUnchanged, lifecycleGitAsync, proveFrozenContentEntryAsync, lifecycleReadAsync, readDirectLifecycleRefAsync, walkOwnedContentAsync, WorktreeRetirementService } from './WorktreeRetirementService'
 import { isOwnerLive, PROCESS_INSTANCE_ID } from '../queue/processLiveness'
 import { getExternalResourceClaims, getExternalResourceClaimsFromFacts } from './LifecycleClaims'
 import { withFileLock } from '../scheduled/fileLock'
@@ -19,8 +19,6 @@ import { isMousseOwnedRef } from '../../shared/mousseBranches'
 import { isKeptFilesItem } from '../../shared/resourceLifecycle'
 import { isOwnedSnapshotStore } from '../git/gitPolicy'
 import { threadStoreKeptFilesAsync } from '../actions/SnapshotRefReleaseService'
-import { withoutRepoProgramsAsync, repoProgramEnv } from '../git/repoPrograms'
-import { gitRunError, runGitProcess } from '../git/runGitProcess'
 
 const digest = (value: unknown): string => createHash('sha256').update(JSON.stringify(value)).digest('hex')
 const within = (root: string, path: string): boolean => { const rel = relative(resolve(root), resolve(path)); return !isAbsolute(rel) && rel !== '..' && !rel.startsWith(`..${process.platform === 'win32' ? '\\' : '/'}`) }
@@ -525,7 +523,13 @@ export class ResourcePurgeService {
     }
     if (item.kind === 'path') {
       if (!await present(item.identity)) return
-      await this.removeFrozen(item.identity, item.content!, this.store.profileHome, item.rootIdentity, 'Owned resource changed during purge')
+      // Peer claims are read without blocking, then checked again from the records right before each entry is removed.
+      const claims = await this.peersCheck(ownedIds)
+      const unclaimed = (): void => {
+        assertReservation()
+        if (claims().some((peer) => peer.identity === item.identity || isAbsolute(item.identity) && isAbsolute(peer.identity) && (within(item.identity, peer.identity) || within(peer.identity, item.identity)))) throw new Error(`New shared owner retains ${item.identity}`)
+      }
+      await this.removeFrozen(item.identity, item.content!, this.store.profileHome, item.rootIdentity, 'Owned resource changed during purge', false, unclaimed)
       return
     }
     const commonDir = item.commonDir!
@@ -554,15 +558,21 @@ export class ResourcePurgeService {
           }
           const stat = await lstat(item.identity)
           if (rootIdentity(stat) !== digest(item.rootIdentity) || await lifecycleReadAsync(item.identity, ['branch', '--show-current']) !== item.branch || await lifecycleReadAsync(item.identity, ['rev-parse', 'HEAD']) !== item.expectedValue) throw new Error('Discarded checkout identity changed')
+          let emptied = false
           if (item.discardState === 'pending') {
             if (createHash('sha256').update(await lifecycleReadAsync(item.identity, ['ls-files', '--stage', '-v', '-z'])).digest('hex') !== item.indexDigest) throw new Error('Staged sole-copy content changed after the reviewed discard')
-            unclaimed()
-            await this.removeFrozen(item.identity, item.content, item.identity, undefined, 'Sole-copy content changed after the reviewed discard', true)
+            await this.removeFrozen(item.identity, item.content, item.identity, undefined, 'Sole-copy content changed after the reviewed discard', true, unclaimed)
             onDiscardCleared()
+            emptied = true
           }
-          // Clearing is durably recorded before this idempotent index/worktree reconstruction.
-          await lifecycleGitAsync(item.identity, ['restore', '--source=HEAD', '--staged', '--worktree', '--', '.'])
-          await lifecycleGitAsync(commonDir, ['worktree', 'remove', item.identity])
+          // Clearing is durably recorded before this idempotent index/worktree reconstruction. The claims are checked again
+          // right before each command starts. Right after the reviewed files went, the checkout holds only its `.git`:
+          // anything written there since was not reviewed, and the restore would write over it, so it stops the purge.
+          await lifecycleGitAsync(item.identity, ['restore', '--source=HEAD', '--staged', '--worktree', '--', '.'], undefined, undefined, undefined, () => {
+            unclaimed()
+            if (emptied && readdirSync(item.identity).some((name) => name !== '.git')) throw new Error('Sole-copy content changed after the reviewed discard')
+          })
+          await lifecycleGitAsync(commonDir, ['worktree', 'remove', item.identity], undefined, undefined, undefined, unclaimed)
           return
         }
         // Purge reuses the verifier; its source is fenced by the external irreversible owner.
@@ -574,22 +584,21 @@ export class ResourcePurgeService {
         if (!current) return
         if (current !== item.expectedValue) throw new Error('Owned ref changed after purge preview')
         const input = `start\ndelete ${item.identity} ${item.expectedValue!}\nprepare\ncommit\n`
-        // The central check runs first, so from the ownership check to the start of the transaction nothing waits.
-        const argv = await withoutRepoProgramsAsync(commonDir, ['update-ref', '--no-deref', '--stdin'], { stdin: input })
-        unclaimed()
-        const ran = await runGitProcess(argv, { cwd: commonDir, env: repoProgramEnv(), input, maxBuffer: 32 * 1024 * 1024 })
-        if (ran.error || ran.status !== 0) throw gitRunError(argv, ran)
+        // The central check runs first, then the ownership check right before the transaction starts, with nothing awaited in between.
+        await lifecycleGitAsync(commonDir, ['update-ref', '--no-deref', '--stdin'], input, undefined, undefined, unclaimed)
       }
     } finally { lease.release() }
   }
 
   /**
    * Removes the frozen `content` of `root`, deepest first, as the plan recorded it: everything still there must match the
-   * plan (a prior crash may have removed a prefix), and each entry is checked against its frozen record immediately
-   * before it is removed, so nothing is unlinked that changed since. Never follows a link or removes an unreviewed
-   * subtree. `rootIdentity`, when given, is checked before every removal too.
+   * plan (a prior crash may have removed a prefix). Each entry is read and checked against its frozen record without
+   * blocking; then, right before it is removed and with nothing awaited in between, the path, the root, `beforeEach` (the
+   * caller's claims check) and the entry itself are checked again synchronously ({@link assertFrozenEntryUnchanged}), so a
+   * write since its bytes were checked refuses it and nothing unreviewed is unlinked. Never follows a link or removes an
+   * unreviewed subtree. `rootIdentity`, when given, is checked before every removal too. The entries are under the Mousse home.
    */
-  private async removeFrozen(root: string, content: NonNullable<LifecyclePurgeItem['content']>, owner: string, frozenRoot: LifecyclePurgeItem['rootIdentity'], changed: string, skipRootGit = false): Promise<void> {
+  private async removeFrozen(root: string, content: NonNullable<LifecyclePurgeItem['content']>, owner: string, frozenRoot: LifecyclePurgeItem['rootIdentity'], changed: string, skipRootGit = false, beforeEach?: () => void): Promise<void> {
     if (frozenRoot) {
       await assertLifecyclePathAsync(owner, root)
       if (rootIdentity(await lstat(root)) !== digest(frozenRoot)) throw new Error('Owned resource root was replaced')
@@ -601,10 +610,14 @@ export class ResourcePurgeService {
       if (skipRootGit && !entry.path) continue
       const path = join(root, entry.path)
       await assertLifecyclePathAsync(owner, dirname(path))
-      if (frozenRoot && rootIdentity(await lstat(root)) !== digest(frozenRoot)) throw new Error('Owned resource root was replaced during removal')
-      await assertFrozenContentEntryAsync(root, entry)
-      if (entry.kind === 'directory') await rmdir(path)
-      else await unlink(path)
+      const proof = await proveFrozenContentEntryAsync(root, entry)
+      // From here to the removal nothing is awaited.
+      beforeEach?.()
+      assertLifecyclePath(owner, dirname(path))
+      if (frozenRoot && rootIdentity(lstatSync(root)) !== digest(frozenRoot)) throw new Error('Owned resource root was replaced during removal')
+      assertFrozenEntryUnchanged(proof)
+      if (entry.kind === 'directory') rmdirSync(path)
+      else unlinkSync(path)
     }
   }
 }
