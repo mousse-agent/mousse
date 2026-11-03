@@ -1,7 +1,7 @@
 import { MOUSSE_CONTROL_FILE_PATHS } from '../worktree/controlFiles'
 import { createHash, randomBytes } from 'node:crypto'
 import { existsSync, lstatSync, readdirSync, readFileSync, readlinkSync, realpath as realpathCallback, rmdirSync, unlinkSync, type BigIntStats, type Stats } from 'node:fs'
-import { access, chmod, lstat, mkdir, readdir, readFile, readlink, symlink, unlink, writeFile } from 'node:fs/promises'
+import { access, chmod, lstat, mkdir, readdir, readFile, readlink, rename, rmdir, symlink, unlink, writeFile } from 'node:fs/promises'
 import { promisify } from 'node:util'
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { atomicWriteJsonSync } from '../data/AtomicFs'
@@ -32,10 +32,6 @@ const hash = (value: string | Buffer): string => createHash('sha256').update(val
 /** A retired worktree waits in the trash until nothing in it has changed for this long; then its files are snapshotted and it is deleted. */
 export const WORKTREE_TRASH_QUIET_MS = 60 * 60_000
 /** The record of a worktree in the trash changed or went (a permanent deletion) while it was being expired. */
-/** A folder in the trash as it is compared before its delete: its HEAD, every entry's bytes and Git's own data of it. */
-function trashedStateOf(head: string, content: readonly ContentEntry[], admin: string): string {
-  return JSON.stringify([head, content, admin])
-}
 /** HEAD and Git's own data of a worktree, as compared before its `.git` file is deleted. */
 function adminStateOf(head: string, admin: string): string {
   return JSON.stringify([head, admin])
@@ -48,6 +44,83 @@ function sameContent(a: readonly ContentEntry[], b: readonly ContentEntry[]): bo
 /** Whether an entry is exactly the one the proof records. */
 function sameEntry(entry: ContentEntry, proof: ContentEntry | undefined): boolean {
   return Boolean(proof) && entry.kind === proof!.kind && entry.digest === proof!.digest && entry.bytes === proof!.bytes && entry.mode === proof!.mode
+}
+/** Whether an entry is still what the proof records, by its kind, size, mode and (a link) target; not by a file's bytes. */
+function sameShape(entry: ContentEntry, proof: ContentEntry | undefined): boolean {
+  return Boolean(proof) && entry.kind === proof!.kind && entry.bytes === proof!.bytes && entry.mode === proof!.mode && (entry.kind !== 'link' || entry.digest === proof!.digest)
+}
+/** How often the trash expiry refreshes the repository lease it holds; well within its stale time. */
+const LEASE_HEARTBEAT_MS = 5_000
+/** The repository lease was taken by someone else while a folder was being deleted: nothing more is removed. */
+class LeaseLost extends Error {}
+/** A folder as `lstat` identifies it. */
+function identityOf(stat: { dev: number; ino: number }): string { return `${stat.dev}:${stat.ino}` }
+/**
+ * Synchronously, right before something in `folder` (or `folder` itself) is removed: every folder from `top` down to
+ * `folder` is a real folder, no link, and the very one recorded in `folders` (by `resolve`d path). Throws {@link FolderChanged}.
+ */
+function assertFoldersUnchanged(top: string, folder: string, folders: ReadonlyMap<string, string>): void {
+  for (let at = resolve(folder); ; at = dirname(at)) {
+    let stat: Stats
+    try { stat = lstatSync(at) } catch { throw new FolderChanged() }
+    if (stat.isSymbolicLink() || !stat.isDirectory() || folders.get(at) !== identityOf(stat)) throw new FolderChanged()
+    if (same(at, top)) return
+    if (dirname(at) === at) throw new FolderChanged()
+  }
+}
+/** Why Git has the worktree whose administration folder is `adminDir` locked (empty for no reason given), or undefined. */
+function lockReasonSync(adminDir: string): string | undefined {
+  try { return readFileSync(join(adminDir, 'locked'), 'utf8').trim() } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined; return '' }
+}
+function lockedText(reason: string, path: string): string {
+  return `Git has this worktree locked${reason ? ` (${reason})` : ''}, so it stays in the trash. Run git worktree unlock "${path}" to let it be deleted.`
+}
+/** Whether the volume of `path` tells names apart only by case, as macOS and Windows volumes usually do not. */
+async function caseInsensitiveAt(path: string): Promise<boolean> {
+  for (let at = resolve(path); dirname(at) !== at; at = dirname(at)) {
+    const name = basename(at), flipped = name.toUpperCase() !== name ? name.toUpperCase() : name.toLowerCase()
+    if (flipped === name) continue
+    const [real, other] = await Promise.all([lstat(at), lstat(join(dirname(at), flipped)).catch(() => undefined)])
+    return Boolean(other && other.ino === real.ino && other.dev === real.dev)
+  }
+  return false
+}
+/** A rebuild writing entries into a new checkout: its top folder, whether the volume folds case, and the folders done. */
+interface Placing { top: string; insensitive: boolean; placed: Set<string> }
+/** Removes an entry of a checkout being rebuilt: a folder with everything in it, a link as the link. Never follows a link. */
+async function clearEntry(path: string): Promise<void> {
+  const stat = await lstat(path)
+  if (stat.isDirectory()) {
+    for (const name of await readdir(path)) await clearEntry(join(path, name))
+    await rmdir(path)
+  } else await unlink(path)
+}
+/**
+ * In a folder of a checkout being rebuilt, makes `name` ready for an entry of `kind` and returns its path. What is in the
+ * way is cleared, links never followed: another kind of entry, or, on a volume that does not tell case apart, another
+ * spelling of the name, except a folder spelled differently, which is renamed so what it holds stays. A file is written over.
+ */
+async function placeEntry(placing: Placing, parent: string, name: string, kind: ContentEntry['kind']): Promise<string> {
+  const path = join(parent, name)
+  let stat = await lstat(path).catch(() => undefined)
+  if (stat && placing.insensitive) {
+    const other = (await readdir(parent)).find((entry) => entry !== name && entry.toLowerCase() === name.toLowerCase())
+    if (other && kind === 'directory' && stat.isDirectory()) { await rename(join(parent, other), path); return path }
+    if (other) { await clearEntry(join(parent, other)); stat = undefined }
+  }
+  if (stat && !(kind === 'directory' && stat.isDirectory()) && !(kind === 'file' && stat.isFile())) { await clearEntry(path); stat = undefined }
+  if (!stat && kind === 'directory') await mkdir(path)
+  return path
+}
+/** Makes every folder of `parts` (a path below the checkout's top) a real folder spelled so; returns the last. */
+async function placeFolder(placing: Placing, parts: readonly string[]): Promise<string> {
+  let at = placing.top
+  for (const part of parts) {
+    const next = join(at, part)
+    if (!placing.placed.has(next)) { await placeEntry(placing, at, part, 'directory'); placing.placed.add(next) }
+    at = next
+  }
+  return at
 }
 /** A file another process holds open fails to delete with these codes (on Windows also EPERM and EACCES). */
 const IN_USE_CODES = new Set(process.platform === 'win32' ? ['EBUSY', 'EPERM', 'EACCES'] : ['EBUSY'])
@@ -336,7 +409,12 @@ export class FolderChanged extends Error {
  * A bounded walk that never follows links, crosses devices or enters Git administration. Reads without blocking the
  * daemon; the entries of a folder are looked at in batches.
  */
-export async function walkOwnedContentAsync(root: string, skipRootGit = false): Promise<ContentEntry[]> {
+export async function walkOwnedContentAsync(root: string, skipRootGit = false, options: {
+  /** False: files are not read, and their digest is empty; only their kind, size and mode are listed. */
+  digests?: boolean
+  /** Filled with the identity (`identityOf`) of every folder walked, by `resolve`d path. */
+  folders?: Map<string, string>
+} = {}): Promise<ContentEntry[]> {
   await assertLifecyclePathAsync(dirname(root), root)
   const rootStat = await lstat(root)
   const entries: ContentEntry[] = []
@@ -348,6 +426,7 @@ export async function walkOwnedContentAsync(root: string, skipRootGit = false): 
     if (stat.isSymbolicLink()) { entries.push({ path: rel, kind: 'link', digest: hash(await readlink(path)), bytes: stat.size, mode: stat.mode }); return }
     if (stat.isDirectory()) {
       entries.push({ path: rel, kind: 'directory', digest: '', bytes: 0, mode: stat.mode })
+      options.folders?.set(resolve(path), identityOf(stat))
       const names = (await readdir(path)).sort()
       const stats = await lstatAll(names.map((name) => join(path, name)))
       for (const [index, name] of names.entries()) {
@@ -360,7 +439,7 @@ export async function walkOwnedContentAsync(root: string, skipRootGit = false): 
     if (!stat.isFile() || stat.nlink > 1) throw new Error('Special or multiply linked content requires explicit retention')
     bytes += stat.size
     if (stat.size > 64 * 1024 * 1024 || bytes > 512 * 1024 * 1024) throw new Error('Owned content exceeds bounded byte limits')
-    entries.push({ path: rel, kind: 'file', digest: hash(await readFile(path)), bytes: stat.size, mode: stat.mode })
+    entries.push({ path: rel, kind: 'file', digest: options.digests === false ? '' : hash(await readFile(path)), bytes: stat.size, mode: stat.mode })
   }
   await walk(root, rootStat, 0)
   return entries
@@ -584,26 +663,41 @@ export class WorktreeRetirementService {
    * Order:
    * 1. `inUse` (Windows: open files), then the capture: a snapshot, a kept copy of the files it cannot hold, Git's own
    *    data of the worktree, and the proof, the digest of every entry (`content`), all recorded before anything moves.
-   * 2. The folder is read again and compared with the proof; a change since is captured again and the delete waits for
-   *    the next run. Otherwise the folder is renamed to a `.deleting-<hex>` sibling in the trash, after its `deleting`
-   *    state is recorded: a writer that opens a file by its path in the folder now fails instead of writing into it.
+   * 2. What `lstat` says of every entry (read before the capture) is compared again, with HEAD and Git's own data; a
+   *    change since is captured again and the delete waits for the next run. A worktree Git has locked stays in the
+   *    trash, and the lock is named. Otherwise the folder is renamed to a `.deleting-<hex>` sibling in the trash, after its
+   *    `deleting` state is recorded: a writer that opens a file by its path in the folder now fails instead of writing into it.
    * 3. It is compared with the proof once more and deleted entry by entry (`deleteRenamed`), its `.git` file last.
    * 4. `git worktree remove` at the old path unregisters it.
    * A write found in it while it is being deleted stops the delete: the write is added to the proof (never in place of
    * it), and what is left waits for the next run.
    *
-   * The remaining limit: a write through a handle opened before the rename (a file held open, or a process whose working
-   * directory is in the folder) into a file between its last comparison and its unlink is lost with that file.
+   * The remaining limits: a write through a handle opened before the rename (a file held open, or a process whose working
+   * directory is in the folder) into a file between its last comparison and its unlink is lost with that file; and, with
+   * no `unlinkat` in Node, a folder deliberately swapped for a link between the check of the folders above an entry and
+   * its removal (see `deleteRenamed`). An accidental redirection outside the trash is not possible.
    * Undefined means there was nothing to do.
    */
   async expireTrash(manifestPath: string, options: ExpireOptions = {}): Promise<{ removed: true } | { kept: string; waiting?: true } | undefined> {
     const manifest = this.load(manifestPath)
     const record = { text: JSON.stringify(manifest) }
+    const stopBeating = this.keepLeaseFresh()
     try { return await this.expireLoaded(manifestPath, manifest, record, options) }
     catch (error) {
       if (error instanceof TrashRecordChanged) return { kept: error.message, waiting: true }
       throw error
-    }
+    } finally { stopBeating() }
+  }
+  /**
+   * The repository lease is kept fresh while the trash expiry holds it: a delete of many files can take longer than the
+   * lease's stale time, after which another process could take it. Whether it is still held is checked before each removal.
+   */
+  private keepLeaseFresh(): () => void {
+    const lease = this.ownership?.repositoryLease
+    if (!lease) return () => undefined
+    const timer = setInterval(() => { lease.heartbeat() }, LEASE_HEARTBEAT_MS)
+    timer.unref?.()
+    return () => clearInterval(timer)
   }
   private async expireLoaded(manifestPath: string, manifest: WorktreeReconstructionManifest, record: { text: string }, options: ExpireOptions): Promise<{ removed: true } | { kept: string; waiting?: true } | undefined> {
     this.assertRepositoryLease(manifest.commonDir, manifest.repositoryId, await this.readRepositoryLease())
@@ -628,6 +722,11 @@ export class WorktreeRetirementService {
     // In use (Windows: open files) is asked before anything is captured, so whatever it lets through is in the snapshot.
     const busy = options.inUse?.(trashPath)
     if (busy) return { kept: busy }
+    // What `lstat` says of every entry is read before the capture reads any bytes: a write from then on changes it, and
+    // the check right before the delete state is recorded sees that. Each file is read once here, by the capture.
+    let signature: FolderSignature
+    try { signature = await folderSignatureAsync(trashPath, true) }
+    catch (error) { return { kept: `Kept in the trash at ${trashPath}: ${(error as Error).message}` } }
     const first = await this.captureTrashed(manifestPath, manifest, record)
     if ('kept' in first) return first
     options.afterCapture?.(trashPath)
@@ -635,21 +734,22 @@ export class WorktreeRetirementService {
       const retaken = await this.captureTrashed(manifestPath, manifest, record)
       return { kept: `Files in it changed while it was being deleted${'kept' in retaken ? `; ${retaken.kept}` : '; they are kept as a snapshot'}. It is looked at again on the next run.`, waiting: true }
     }
-    // Before the rename, the folder is read again and compared with what the capture holds: a change since is captured
-    // and the delete waits. What `lstat` says of every entry is read first, so a write after this read is still seen by
-    // the check right before the delete state is recorded.
-    let signature: FolderSignature
-    try { signature = await folderSignatureAsync(trashPath, true) } catch { return await changed() }
-    if (await this.trashedState(manifest) !== first.state) return await changed()
+    // HEAD and Git's own data are read again and compared with the capture; a change since is captured and the delete waits.
+    if (await this.adminStateAt(trashPath, manifest.commonDir) !== first.admin) return await changed()
+    const adminDir = await this.adminDirOf(trashPath, manifest.commonDir)
     const lease = await this.readRepositoryLease()
     const deletingPath = join(dirname(trashPath), `.deleting-${randomBytes(8).toString('hex')}`)
     // With nothing awaited in between: the repository lease is still held, the record is still the one this pass read,
-    // nothing in the folder changed since it was compared, and then the `deleting` state is recorded with the proof the
-    // capture wrote, before the folder moves. A crash after this finds the folder at one of its two names.
+    // Git has no lock on the worktree, nothing in the folder changed since its `lstat`s were read before the capture, and
+    // then the `deleting` state is recorded with the proof the capture wrote, before the folder moves. A crash after this
+    // finds the folder at one of its two names.
+    let locked: string | undefined
     try {
       this.store.withGate(manifest.taskId, () => {
         this.assertRepositoryLease(manifest.commonDir, manifest.repositoryId, lease)
         this.assertTrashRecord(manifestPath, record)
+        locked = lockReasonSync(adminDir)
+        if (locked !== undefined) return
         assertFolderUnchanged(trashPath, signature, first.content, true)
         manifest.state = 'deleting'
         manifest.deleting = { path: deletingPath, startedAt: new Date(now).toISOString(), adminState: first.admin }
@@ -660,6 +760,7 @@ export class WorktreeRetirementService {
       if (error instanceof FolderChanged) return await changed()
       throw error
     }
+    if (locked !== undefined) return { kept: lockedText(locked, trashPath) }
     try { await renameFolderAsync(trashPath, deletingPath) }
     catch (error) {
       // Nothing moved: the folder waits in the trash as it was (on Windows, a file or folder in it is held open).
@@ -691,59 +792,92 @@ export class WorktreeRetirementService {
     }
     const now = options.now ?? Date.now()
     if (patient && deleting.changedAt && now - Date.parse(deleting.changedAt) < WORKTREE_TRASH_QUIET_MS) return { kept: 'Files in it changed while it was being deleted; what is left is deleted once nothing has changed in it for an hour', waiting: true }
+    // A lock Git was given after the rename: nothing more is deleted, and it is named.
+    const locked = await this.lockOf(manifest.commonDir, trashPath)
+    if (locked !== undefined) return { kept: lockedText(locked, trashPath) }
     await this.verifyPins(manifest)
     const stopped = await this.deleteRenamed(manifestPath, manifest, record, options)
     if (stopped) return stopped
     return await this.unregisterDeleted(manifestPath, manifest, record)
   }
   /**
-   * Deletes the renamed folder against the proof (`content`): it is walked and every entry compared with the proof first
-   * (an entry already gone was deleted before a crash, and its bytes are in the proof). Then, deepest first, each file
-   * and link is read and proven again (`proveFrozenContentEntryAsync`) and, with nothing awaited from its last `lstat`
-   * check to the `unlink`, removed; each folder goes with a plain `rmdir`, which fails when anything new appeared in it.
+   * Deletes the renamed folder against the proof (`content`). It is walked first (an entry already gone was deleted before
+   * a crash, and its bytes are in the proof) and every entry's kind, size and mode compared with the proof, and the
+   * identity of every folder from the trash down is recorded. Then, deepest first, each file and link is read and proven
+   * again against the proof (`proveFrozenContentEntryAsync`) and, with nothing awaited from its last check to the
+   * `unlink`, removed; each folder goes with a plain `rmdir`, which fails when anything new appeared in it. Right before
+   * each removal the repository lease must still be held, and every folder from the trash down to it must be the very
+   * folder recorded, and no link: a folder swapped for a link, or moved away, stops the delete, so no removal is ever
+   * redirected outside the trash. Node has no `unlinkat`, so a deliberate swap between that check and the system call
+   * remains possible in principle; an accidental redirection does not.
    * Git's own data and HEAD are compared, and captured again on top of the earlier capture when they changed, while the
-   * `.git` file is still there; the `.git` file goes last, then the folder itself, so Mousse's Git never runs in a folder
-   * without it. Returns why it stopped, or undefined when the folder is gone.
+   * `.git` file is still there; the `.git` file goes last, then the folder itself. A folder whose `.git` file is gone
+   * already (a crash or a file in use right after it went) is no checkout any more: no Git runs in it, and the rest goes.
+   * Returns why it stopped, or undefined when the folder is gone.
    */
   private async deleteRenamed(manifestPath: string, manifest: WorktreeReconstructionManifest, record: { text: string }, options: ExpireOptions): Promise<{ kept: string; waiting?: true } | undefined> {
     const root = manifest.deleting!.path
+    const trash = join(this.store.profileHome, 'trash')
     const proof = new Map(manifest.content.map((entry) => [entry.path, entry]))
+    const folders = new Map<string, string>()
     let current: ContentEntry[]
-    try { current = await walkOwnedContentAsync(root, true) }
-    catch (error) { return { kept: `Kept in the trash at ${root}: ${(error as Error).message}` } }
-    if (current.some((entry) => !sameEntry(entry, proof.get(entry.path)))) return await this.addLateWrites(manifestPath, manifest, record, options)
+    try {
+      for (let at = dirname(root); ; at = dirname(at)) { folders.set(resolve(at), identityOf(await lstat(at))); if (same(at, trash) || dirname(at) === at) break }
+      current = await walkOwnedContentAsync(root, true, { digests: false, folders })
+    } catch (error) { return { kept: `Kept in the trash at ${root}: ${(error as Error).message}` } }
+    // The bytes are compared file by file below, right before each one goes; here, what every entry is.
+    if (current.some((entry) => !sameShape(entry, proof.get(entry.path)))) return await this.addLateWrites(manifestPath, manifest, record, options)
+    const dotGit = join(root, '.git')
+    const gitFile = await lstat(dotGit).catch(() => undefined)
+    if (gitFile && !gitFile.isFile()) return await this.addLateWrites(manifestPath, manifest, record, options)
     const lease = await this.readRepositoryLease()
     this.store.withGate(manifest.taskId, () => {
       this.assertRepositoryLease(manifest.commonDir, manifest.repositoryId, lease)
       this.assertTrashRecord(manifestPath, record)
     })
     const gone = (error: unknown): boolean => (error as NodeJS.ErrnoException).code === 'ENOENT'
+    /** Right before a removal, synchronously: the lease is still held and the folders down to `folder` are the ones recorded. */
+    const check = (held: Awaited<ReturnType<WorktreeRetirementService['readRepositoryLease']>>, folder: string): void => {
+      try { this.assertRepositoryLease(manifest.commonDir, manifest.repositoryId, held) } catch { throw new LeaseLost() }
+      assertFoldersUnchanged(trash, folder, folders)
+    }
+    const heldNow = (): Promise<Awaited<ReturnType<WorktreeRetirementService['readRepositoryLease']>>> => this.readRepositoryLease().catch(() => undefined)
     try {
       for (const entry of [...current].reverse()) {
         if (!entry.path) continue
         const path = join(root, entry.path)
         if (entry.kind === 'directory') {
           options.beforeRemove?.(path)
+          const held = await heldNow()
+          check(held, path)
           try { rmdirSync(path) } catch (error) { if (!gone(error)) throw error }
           continue
         }
         let frozen: FrozenEntryProof
-        try { frozen = await proveFrozenContentEntryAsync(root, entry) } catch (error) { if (gone(error)) continue; throw error }
-        // From here to the unlink nothing is awaited.
+        try { frozen = await proveFrozenContentEntryAsync(root, proof.get(entry.path)!) } catch (error) { if (gone(error)) continue; throw error }
         options.beforeRemove?.(path)
+        const held = await heldNow()
+        // From here to the unlink nothing is awaited.
+        check(held, dirname(path))
         try { assertFrozenEntryUnchanged(frozen); unlinkSync(path) } catch (error) { if (!gone(error)) throw error }
       }
-      if (await this.adminStateAt(root, manifest.commonDir) !== manifest.deleting!.adminState) await this.recaptureAdmin(manifestPath, manifest, record, root)
-      const dotGit = join(root, '.git')
-      if (!(await lstat(dotGit)).isFile()) throw new FolderChanged()
-      options.beforeRemove?.(dotGit)
-      unlinkSync(dotGit)
+      if (gitFile) {
+        if (await this.adminStateAt(root, manifest.commonDir) !== manifest.deleting!.adminState) await this.recaptureAdmin(manifestPath, manifest, record, root)
+        options.beforeRemove?.(dotGit)
+        const held = await heldNow()
+        check(held, root)
+        if (!lstatSync(dotGit).isFile()) throw new FolderChanged()
+        unlinkSync(dotGit)
+      }
       options.beforeRemove?.(root)
+      const held = await heldNow()
+      check(held, root)
       rmdirSync(root)
     } catch (error) {
       const code = (error as NodeJS.ErrnoException).code
+      if (error instanceof LeaseLost) return { kept: `Mousse lost hold of the repository while deleting the worktree from the trash; what is left of it waits at ${root} and is deleted on a later run` }
       if (code && IN_USE_CODES.has(code)) return { kept: `Files in this worktree are in use; what is left of it waits at ${root} and is deleted on a later run` }
-      if (error instanceof FolderChanged || code === 'ENOTEMPTY' || code === 'EEXIST' || /^Frozen content (changed|was replaced)/.test((error as Error).message)) return await this.addLateWrites(manifestPath, manifest, record, options)
+      if (error instanceof FolderChanged || code === 'ENOTEMPTY' || code === 'EEXIST' || code === 'ENOTDIR' || /^Frozen content (changed|was replaced)/.test((error as Error).message)) return await this.addLateWrites(manifestPath, manifest, record, options)
       throw error
     }
     return undefined
@@ -751,6 +885,9 @@ export class WorktreeRetirementService {
   /**
    * A write was found in the folder while it was being deleted: what differs from the proof is added to it (a kept copy of
    * the files, the new digests, and the folders), the earlier versions staying where they are, and the delete stops.
+   * The newer form of a path wins: when a path changed kind (a file became a folder, a folder a link), the proof's earlier
+   * entry for it and everything under it leave the proof, and on a volume that does not tell case apart another spelling
+   * of a path is the same path, and the newer spelling stays. Their bytes stay in the snapshot and the earlier copies.
    * Nothing is deleted here; what is left of the folder waits for the next run.
    */
   private async addLateWrites(manifestPath: string, manifest: WorktreeReconstructionManifest, record: { text: string }, options: ExpireOptions): Promise<{ kept: string; waiting?: true }> {
@@ -767,9 +904,31 @@ export class WorktreeRetirementService {
     catch (error) { return stop(`Kept in the trash at ${root}: ${(error as Error).message}`) }
     const proof = new Map(manifest.content.map((entry) => [entry.path, entry]))
     const late = current.filter((entry) => !sameEntry(entry, proof.get(entry.path)))
+    const fold = await caseInsensitiveAt(root) ? (path: string): string => path.toLowerCase() : (path: string): string => path
+    const spellings = new Map<string, string[]>()
+    for (const path of proof.keys()) spellings.set(fold(path), [...(spellings.get(fold(path)) ?? []), path])
+    const gone: string[] = []
+    // Shallowest first, so a folder's change is settled before its entries are added.
+    for (const entry of [...late].sort((a, b) => a.path.split('/').length - b.path.split('/').length)) {
+      if (!entry.path) continue
+      for (const path of spellings.get(fold(entry.path)) ?? []) {
+        const old = proof.get(path)
+        if (!old || path === entry.path && old.kind === entry.kind) continue
+        proof.delete(path)
+        // The earlier form leaves the copy's index too, so Git does not keep the old name beside the new one.
+        if (path !== entry.path) gone.push(path)
+        const inside = [...proof.keys()].filter((inner) => fold(inner).startsWith(`${fold(path)}/`))
+        if (old.kind !== entry.kind) {
+          for (const inner of inside) { proof.delete(inner); gone.push(inner) }
+        } else if (old.kind === 'directory') {
+          // The same folder spelled anew: what the proof holds under it keeps its bytes, under the new spelling.
+          for (const inner of inside) { const value = proof.get(inner)!; proof.delete(inner); gone.push(inner); const moved = `${entry.path}${inner.slice(path.length)}`; if (!proof.has(moved)) proof.set(moved, { ...value, path: moved }) }
+        }
+      }
+    }
     const files = late.filter((entry) => entry.kind !== 'directory').map((entry) => entry.path)
     if (files.length) {
-      const copy = await this.keepFiles(root, manifest, files, late)
+      const copy = await this.keepFiles(root, manifest, files, late, gone)
       if ('kept' in copy) return stop(copy.kept)
       await this.pinKept(root, manifest, copy.sha)
       manifest.keptFiles = [...(manifest.keptFiles ?? []), copy]
@@ -783,14 +942,30 @@ export class WorktreeRetirementService {
     const trashPath = manifest.trashPath!
     // Git unregisters a worktree whose folder is gone; one at that path again would be someone's new files, and is kept.
     if (await exists(trashPath)) return { kept: `Files were written at ${trashPath} after the worktree there was deleted; they are kept, and so is Git's registration of the worktree` }
-    if (await this.registeredAt(manifest.commonDir, trashPath)) await lifecycleGitAsync(manifest.commonDir, ['worktree', 'remove', trashPath])
+    if (await this.registeredAt(manifest.commonDir, trashPath)) {
+      // Git refuses to unregister a locked worktree without `--force`, which is never used: the lock is named instead.
+      const locked = await this.lockOf(manifest.commonDir, trashPath)
+      if (locked !== undefined) return { kept: lockedText(locked, trashPath) }
+      const lease = await this.readRepositoryLease()
+      try { await lifecycleGitAsync(manifest.commonDir, ['worktree', 'remove', trashPath], undefined, undefined, undefined, () => { try { this.assertRepositoryLease(manifest.commonDir, manifest.repositoryId, lease) } catch { throw new LeaseLost() } }) }
+      catch (error) { if (error instanceof LeaseLost) return { kept: 'Mousse lost hold of the repository before Git could unregister the worktree deleted from the trash; a later run does it' }; throw error }
+    }
     if (await this.registeredAt(manifest.commonDir, trashPath)) throw new Error('Git still registers the worktree deleted from the trash')
     manifest.state = 'retired'; delete manifest.trashPath; delete manifest.trashedAt; delete manifest.deleting
     this.saveTrashed(manifestPath, manifest, record)
     await this.releaseBranches(manifest); this.saveTrashed(manifestPath, manifest, record)
     return { removed: true }
   }
-  /** HEAD and Git's own data of a worktree, as one value to compare (see `trashedStateOf`). */
+  /** Why Git has the worktree registered at `path` locked (an empty reason for a lock without one), or undefined. */
+  private async lockOf(commonDir: string, path: string): Promise<string | undefined> {
+    let inBlock = false
+    for (const line of (await lifecycleReadAsync(commonDir, ['worktree', 'list', '--porcelain'])).split(/\r?\n/)) {
+      if (line.startsWith('worktree ')) inBlock = same(line.slice(9), path)
+      else if (inBlock && (line === 'locked' || line.startsWith('locked '))) return line.slice('locked'.length).trim()
+    }
+    return undefined
+  }
+  /** HEAD and Git's own data of a worktree, as one value to compare (see `adminStateOf`). */
   private async adminStateAt(folder: string, commonDir: string): Promise<string> {
     try { return adminStateOf(await lifecycleReadAsync(folder, ['rev-parse', 'HEAD']), adminDigest(await readAdminFilesAsync(await this.adminDirOf(folder, commonDir)))) }
     catch (error) { return `unreadable: ${(error as Error).message}` }
@@ -819,19 +994,15 @@ export class WorktreeRetirementService {
   }
   /**
    * Keeps `paths` of the folder at `top` in a kept copy owned by the thread's journal (`keepCopy`, the same store Discard
-   * uses, with its byte cap) and checks that the copy holds the bytes `proof` names for each: a file written between the
-   * two reads differs, and keeps the folder. Writes no pin.
+   * uses, with its byte cap) and checks that what the copy read of each is the bytes `proof` names: a file written between
+   * the two reads differs, and keeps the folder. `gone` are paths no longer there, left out of the copy. Writes no pin.
    */
-  private async keepFiles(top: string, manifest: WorktreeReconstructionManifest, paths: string[], proof: readonly ContentEntry[]): Promise<{ sha: string; paths: string[] } | { kept: string }> {
+  private async keepFiles(top: string, manifest: WorktreeReconstructionManifest, paths: string[], proof: readonly ContentEntry[], gone: readonly string[] = []): Promise<{ sha: string; paths: string[] } | { kept: string }> {
     let copy: Awaited<ReturnType<typeof keepCopy>>
-    try { copy = await keepCopy({ owner: this.store.require(manifest.taskId).location, top, operationType: 'worktree-cleanup', action: 'Deleting it from the trash', paths }) }
+    try { copy = await keepCopy({ owner: this.store.require(manifest.taskId).location, top, operationType: 'worktree-cleanup', action: 'Deleting it from the trash', paths, ...(gone.length ? { gone } : {}) }) }
     catch (error) { return { kept: `Kept in the trash at ${top}: ${(error as Error).message.split(/\r?\n/)[0]}` } }
     const expected = new Map(proof.map((entry) => [entry.path, entry]))
-    const stored = await this.keptBlobs(manifest.commonDir, copy.sha, paths)
-    for (const path of paths) {
-      const bytes = stored.get(path)?.bytes
-      if (!bytes || hash(bytes) !== expected.get(path)?.digest) return { kept: `Kept in the trash at ${top}: ${path} changed while its copy was being kept` }
-    }
+    for (const path of paths) if (copy.digests.get(path) !== expected.get(path)?.digest) return { kept: `Kept in the trash at ${top}: ${path} changed while its copy was being kept` }
     return { sha: copy.sha, paths }
   }
   /** The bytes and mode `commit` holds for each of `paths` that it has. */
@@ -861,17 +1032,19 @@ export class WorktreeRetirementService {
     }
     return out
   }
-  /** Writes the files a kept copy holds for the rebuild (`keptFiles`) into the new checkout, as the copy holds them. */
-  private async writeKeptFiles(manifest: WorktreeReconstructionManifest, layer: { sha: string; paths: string[] }): Promise<void> {
+  /**
+   * Writes the files a kept copy holds for the rebuild (`keptFiles`) into the new checkout, as the copy holds them. What is
+   * in the way of a newer form (`placeEntry`) is cleared first, links never followed.
+   */
+  private async writeKeptFiles(manifest: WorktreeReconstructionManifest, layer: { sha: string; paths: string[] }, placing: Placing): Promise<void> {
     const stored = await this.keptBlobs(manifest.commonDir, layer.sha, layer.paths)
     for (const path of layer.paths) {
       const file = stored.get(path)
       if (!file) throw new Error(`The kept copy of ${path} is missing`)
-      const target = join(manifest.worktreePath, path)
-      await assertLifecyclePathAsync(manifest.worktreePath, target)
-      await mkdir(dirname(target), { recursive: true })
-      const existing = await lstat(target).catch(() => undefined)
-      if (existing && (file.mode === '120000' || existing.isSymbolicLink())) await unlink(target)
+      const parts = path.split('/'), name = parts.pop()!
+      const parent = await placeFolder(placing, parts)
+      await assertLifecyclePathAsync(manifest.worktreePath, parent)
+      const target = await placeEntry(placing, parent, name, file.mode === '120000' ? 'link' : 'file')
       if (file.mode === '120000') await symlink(file.bytes.toString('utf8'), target)
       else await writeFile(target, file.bytes)
     }
@@ -880,7 +1053,7 @@ export class WorktreeRetirementService {
    * Takes a snapshot of the folder in the trash and pins it in place of the earlier pins (`result` at its HEAD,
    * `snapshot` when it has uncommitted files), recording both in the manifest. What a snapshot cannot hold keeps it.
    */
-  private async captureTrashed(manifestPath: string, manifest: WorktreeReconstructionManifest, record: { text: string }): Promise<{ state: string; content: ContentEntry[]; admin: string } | { kept: string }> {
+  private async captureTrashed(manifestPath: string, manifest: WorktreeReconstructionManifest, record: { text: string }): Promise<{ content: ContentEntry[]; admin: string } | { kept: string }> {
     const trashPath = manifest.trashPath!
     const head = await lifecycleReadAsync(trashPath, ['rev-parse', 'HEAD'])
     const treeSha = await lifecycleReadAsync(trashPath, ['rev-parse', 'HEAD^{tree}'])
@@ -931,7 +1104,7 @@ export class WorktreeRetirementService {
     await this.verifyPins(manifest)
     // What the snapshot holds, not a read of the folder now: `inspectContent` read every entry after the snapshot and proved
     // each against it, so a write made since then (during the waits above) differs from this and is never deleted unseen.
-    return { state: trashedStateOf(head, contents.content, admin.digest), content: contents.content, admin: adminStateOf(head, admin.digest) }
+    return { content: contents.content, admin: adminStateOf(head, admin.digest) }
   }
   /** The administration folder of a linked worktree: `<common>/worktrees/<name>`, never anything else. */
   private async adminDirOf(worktreePath: string, commonDir: string): Promise<string> {
@@ -1042,13 +1215,6 @@ export class WorktreeRetirementService {
     try { current = JSON.stringify(JSON.parse(readFileSync(manifestPath, 'utf8'))) } catch { current = undefined }
     if (current !== record.text) throw new TrashRecordChanged()
   }
-  /** What the folder in the trash holds now, to compare with what was captured: HEAD and every entry's bytes. */
-  private async trashedState(manifest: WorktreeReconstructionManifest): Promise<string> {
-    const trashPath = manifest.trashPath!
-    try {
-      return trashedStateOf(await lifecycleReadAsync(trashPath, ['rev-parse', 'HEAD']), await walkOwnedContentAsync(trashPath, true), adminDigest(await readAdminFilesAsync(await this.adminDirOf(trashPath, manifest.commonDir))))
-    } catch (error) { return `unreadable: ${(error as Error).message}` }
-  }
   /** Points Git's registration at the trash after a move that a crash interrupted. Idempotent. */
   private async settleTrashRegistration(manifest: WorktreeReconstructionManifest): Promise<void> {
     const trashPath = manifest.trashPath
@@ -1075,31 +1241,47 @@ export class WorktreeRetirementService {
   }
   /**
    * A permanent deletion the person confirmed, only: deletes a folder in the trash entry by entry, deepest first, links
-   * never followed, a worktree's `.git` file last. `beforeStart` runs right before the first removal. A file in use
+   * never followed, a worktree's `.git` file last. Every entry and every folder from the trash down is identified when
+   * the folder is walked; right before each removal, each folder down to it must be the very one walked, and no link, and
+   * the entry the very one walked, or nothing more is removed (as in `deleteRenamed`, a deliberate swap between that check
+   * and the system call remains possible in principle). `beforeStart` runs right before the first removal. A file in use
    * stops it; the next pass of the permanent deletion carries on.
    */
   private async removeConfirmed(root: string, beforeStart?: () => void): Promise<void> {
     const trash = join(this.store.profileHome, 'trash')
     await assertLifecyclePathAsync(trash, root)
-    const paths: Array<{ path: string; folder: boolean }> = []
+    const folders = new Map<string, string>()
+    for (let at = dirname(root); ; at = dirname(at)) { folders.set(resolve(at), identityOf(await lstat(at))); if (same(at, trash) || dirname(at) === at) break }
+    const paths: Array<{ path: string; folder: boolean; identity: string }> = []
     const visit = async (path: string, depth: number): Promise<void> => {
       if (depth > 64 || paths.length > 1_000_000) throw new Error('The folder in the trash is too deep or too large to delete entry by entry')
       const stat = await lstat(path)
-      if (stat.isDirectory()) for (const name of (await readdir(path)).sort()) if (!(depth === 0 && name === '.git')) await visit(join(path, name), depth + 1)
-      if (path !== root) paths.push({ path, folder: stat.isDirectory() })
+      if (stat.isDirectory()) {
+        folders.set(resolve(path), identityOf(stat))
+        for (const name of (await readdir(path)).sort()) if (!(depth === 0 && name === '.git')) await visit(join(path, name), depth + 1)
+      }
+      if (path !== root) paths.push({ path, folder: stat.isDirectory(), identity: identityOf(stat) })
     }
     await visit(root, 0)
     const dotGit = join(root, '.git')
-    if (await lstat(dotGit).then(() => true, () => false)) {
-      if ((await lstat(dotGit)).isDirectory()) throw new Error('A repository of its own is in the trash; it is kept')
-      paths.push({ path: dotGit, folder: false })
+    const gitStat = await lstat(dotGit).catch(() => undefined)
+    if (gitStat) {
+      if (gitStat.isDirectory()) throw new Error('A repository of its own is in the trash; it is kept')
+      paths.push({ path: dotGit, folder: false, identity: identityOf(gitStat) })
     }
-    paths.push({ path: root, folder: true })
+    paths.push({ path: root, folder: true, identity: folders.get(resolve(root))! })
     beforeStart?.()
-    assertLifecyclePath(trash, root)
     for (const entry of paths) {
-      try { if (entry.folder) rmdirSync(entry.path); else unlinkSync(entry.path) }
-      catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }
+      try {
+        assertFoldersUnchanged(trash, dirname(entry.path), folders)
+        const stat = lstatSync(entry.path)
+        if (identityOf(stat) !== entry.identity || stat.isDirectory() !== entry.folder || entry.folder && stat.isSymbolicLink()) throw new FolderChanged()
+        if (entry.folder) rmdirSync(entry.path); else unlinkSync(entry.path)
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue
+        if (error instanceof FolderChanged) throw new Error(`Files in ${root} changed while it was being deleted; the rest of it is kept`)
+        throw error
+      }
     }
   }
   /**
@@ -1199,10 +1381,13 @@ export class WorktreeRetirementService {
       // The uncommitted files come back as the snapshot held them, over the fresh checkout of the HEAD it was taken on;
       // then what the kept copies hold (ignored files, writes found while the folder was being deleted), in order.
       if (manifest.snapshotTree) await moveFilesAsync(manifest.worktreePath, manifest.treeSha, manifest.snapshotTree)
-      for (const layer of manifest.keptFiles ?? []) await this.writeKeptFiles(manifest, layer)
+      // A later form of a path (another kind, or another spelling on a volume that folds case) clears the earlier one.
+      const placing: Placing = { top: manifest.worktreePath, insensitive: await caseInsensitiveAt(manifest.worktreePath), placed: new Set() }
+      for (const layer of manifest.keptFiles ?? []) await this.writeKeptFiles(manifest, layer, placing)
       for (const entry of manifest.content) {
         const target = join(manifest.worktreePath, entry.path)
-        if (entry.kind === 'directory') { await assertLifecyclePathAsync(manifest.worktreePath, target); await mkdir(target, { recursive: true }) }
+        if (entry.kind === 'directory' && manifest.keptFiles?.length) { if (entry.path) await placeFolder(placing, entry.path.split('/')) }
+        else if (entry.kind === 'directory') { await assertLifecyclePathAsync(manifest.worktreePath, target); await mkdir(target, { recursive: true }) }
         if (entry.kind !== 'link') { await assertLifecyclePathAsync(manifest.worktreePath, target); await chmod(target, entry.mode & 0o777) }
       }
     }
@@ -1357,7 +1542,8 @@ export class WorktreeRetirementService {
       if (/^[a-z]/.test(flag) || (flag.startsWith('S ') && (!sparse || await exists(join(path, flag.slice(2)))))) throw new Error('Hidden index flags require explicit retention')
       if (flag.startsWith('S ')) skipped.add(flag.slice(2))
     }
-    for (const name of tracked.keys()) if (!entries.some((entry) => entry.path === name) && !skipped.has(name)) throw new Error('Missing tracked content is not explained by sparse checkout')
+    const present = new Set(entries.map((entry) => entry.path))
+    for (const name of tracked.keys()) if (!present.has(name) && !skipped.has(name)) throw new Error('Missing tracked content is not explained by sparse checkout')
     const auxiliary: Array<{ path: string; content: string }> = []
     const uncaptured: string[] = []
     const files = entries.filter((entry) => entry.kind === 'file' && tracked.has(entry.path))
