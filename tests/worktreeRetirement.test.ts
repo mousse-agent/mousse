@@ -11,6 +11,7 @@ import { WORKTREE_TRASH_QUIET_MS, WorktreeRetirementService } from '../src/mms/l
 import { fixtureGit as git, ownedHome } from './support/fixtureGit'
 import { ThreadJournal } from '../src/mms/data/ThreadJournal'
 import { ThreadWorkspaceManager } from '../src/mms/workspace/ThreadWorkspaceManager'
+import { unverifiableThread } from './support/unverifiableThread'
 
 /** Git lists worktrees with forward slashes on every platform; paths are compared in that form, and case-folded on Windows. */
 const slashes = (path: string): string => { const value = resolve(path).replaceAll('\\', '/'); return process.platform === 'win32' ? value.toLowerCase() : value }
@@ -315,6 +316,25 @@ test('a claim by another task that appears while retirement waits stops the move
   expect(readFileSync(join(f.worktree, 'a.txt'), 'utf8')).toBe('first\n')
   expect(f.service.load(f.path).trashPath).toBeUndefined()
 })
+
+test('a thread whose worktree points at a deleted and recreated repository does not stop moving a checkout of another repository to the trash', async () => {
+  const f = await fixture(); await f.service.prepare(f.input)
+  const broken = unverifiableThread(f.store, { id: 'broken', name: 'Fix prices', repo: join(f.root, 'other-repo'), how: 'recreated' })
+  await f.service.retire(f.path)
+  expect(existsSync(f.worktree)).toBe(false); expect(listed(f.repo)).not.toContain(slashes(f.worktree))
+  const restarted = new WorktreeRetirementService(new ResourceLifecycleStore({ profileId: 'test', profileHome: f.home }), f.ownership)
+  await restarted.reconstruct(f.path); expect(readFileSync(join(f.worktree, 'a.txt'), 'utf8')).toBe('first\n')
+  expect(readFileSync(join(broken.worktree, 'a.txt'), 'utf8')).toBe('first\n')
+}, 60_000)
+
+test('a broken thread in the same repository keeps the checkout where it is, and the refusal names that thread', async () => {
+  const f = await fixture(); await f.service.prepare(f.input)
+  writeFileSync(join(f.worktree, 'a.txt'), 'edited\n')
+  const broken = unverifiableThread(f.store, { id: 'broken', name: 'Fix prices', repo: f.repo, how: 'unlinked' })
+  await expect(f.service.retire(f.path)).rejects.toThrow(`Thread “Fix prices” has a worktree Mousse can’t check: ${broken.worktree}. This checkout is kept until Mousse can check that worktree again.`)
+  expect(readFileSync(join(f.worktree, 'a.txt'), 'utf8')).toBe('edited\n'); expect(listed(f.repo)).toContain(slashes(f.worktree))
+  expect(f.service.load(f.path).trashPath).toBeUndefined()
+}, 60_000)
 
 test("the caller's own check runs right before the move, and a refusal there moves nothing", async () => {
   const f = await fixture(); await f.service.prepare(f.input)

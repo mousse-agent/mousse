@@ -66,6 +66,11 @@ function keyOf(commonDir: string): string {
   return createHash('sha256').update(commonDir.toLowerCase()).digest('hex').slice(0, 32)
 }
 
+/** The repository key (`RepositoryIdentity.key`) of a common Git directory's real path (`canonicalPathAsync`). */
+export function repositoryKeyOf(canonicalCommonDir: string): string {
+  return keyOf(canonicalCommonDir)
+}
+
 // ---------------------------------------------------------------------------------------------------------
 // The metadata folder
 

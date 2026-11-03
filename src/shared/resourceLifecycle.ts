@@ -131,8 +131,20 @@ export interface LifecyclePurgePreview {
   items: LifecyclePurgeItem[]
   ownedTaskIds: string[]
   blockers: string[]
-  retained: Array<{ identity: string; reason: string }>
+  /** Kept, with why. `unverifiedOwner` is the thread whose checkout can't be verified and whose records name it. */
+  retained: Array<{ identity: string; reason: string; unverifiedOwner?: string }>
   exclusiveBytes: number
+}
+
+/**
+ * Why the thread can't be deleted yet: something of it is kept back because another thread, whose worktree can't be
+ * checked, may still use it (`retained` entries with `unverifiedOwner`). Deleting the thread then would leave what is
+ * kept with no thread to own it, and nothing in the app could delete it later; so the thread stays in the trash, owning
+ * it, until that worktree can be checked again. One line per such thread.
+ */
+export function unverifiedHolds(preview: Pick<LifecyclePurgePreview, 'retained'>): string[] {
+  return [...new Set(preview.retained.filter((item) => item.unverifiedOwner).map((item) => item.reason))]
+    .map((reason) => `${reason} What this thread may share with it stays in the trash with this thread until Mousse can check that worktree again.`)
 }
 export interface LifecyclePurgeProgress extends LifecyclePurgePreview {
   operationId: string

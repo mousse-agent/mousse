@@ -7,16 +7,17 @@ import type { LifecyclePurgeItem, LifecyclePurgePreview, TaskLifecycleRecord, Tr
 import { atomicWriteJsonSync } from '../data/AtomicFs'
 import { acquireRepositoryLease } from '../git/RepositoryLease'
 import { resolveRepositoryIdentityAsync } from '../git/RepositoryIdentity'
+import { canonicalPathAsync, gitCommonDirAsync } from './canonicalPath'
 import { buildResourceInventory, OwnershipFacts } from './ResourceInventory'
 import { projectFolderPurgeRefs, threadKeptFilesRefs } from './projectFolderRefs'
 import { measureTree } from './diskMeasure'
 import { assertLifecyclePath, assertLifecyclePathAsync, ResourceLifecycleStore } from './ResourceLifecycleStore'
 import { assertFrozenEntryUnchanged, lifecycleGitAsync, proveFrozenContentEntryAsync, lifecycleReadAsync, readDirectLifecycleRefAsync, walkOwnedContentAsync, WorktreeRetirementService } from './WorktreeRetirementService'
 import { isOwnerLive, PROCESS_INSTANCE_ID } from '../queue/processLiveness'
-import { getExternalResourceClaims, getExternalResourceClaimsFromFacts } from './LifecycleClaims'
+import { claimOverlapsPath, getExternalResourceClaims, getExternalResourceClaimsFromFacts, repositoryTargetAsync, unverifiedOwnerOver, type ClaimTarget } from './LifecycleClaims'
 import { withFileLock } from '../scheduled/fileLock'
 import { isMousseOwnedRef } from '../../shared/mousseBranches'
-import { isKeptFilesItem } from '../../shared/resourceLifecycle'
+import { isKeptFilesItem, unverifiedHolds } from '../../shared/resourceLifecycle'
 import { isOwnedSnapshotStore } from '../git/gitPolicy'
 import { threadStoreKeptFilesAsync } from '../actions/SnapshotRefReleaseService'
 
@@ -191,7 +192,9 @@ export class ResourcePurgeService {
       if (record.state !== 'trashed') return
       const preview = await this.previewOwned(taskId)
       const retained = [...preview.blockers]
-      if (!preview.blockers.length) for (const item of preview.items.filter((item) => item.kind === 'worktree')) {
+      // Checkouts another thread's unverifiable records may name are not items; the thread's other checkouts still retire.
+      const holds = new Set(unverifiedHolds(preview))
+      if (preview.blockers.every((blocker) => holds.has(blocker))) for (const item of preview.items.filter((item) => item.kind === 'worktree')) {
         if (!item.manifestPath) { retained.push(`Checkout retained: ${item.reason ?? item.identity}`); continue }
         if (!await present(item.identity)) continue
         try {
@@ -279,9 +282,38 @@ export class ResourcePurgeService {
     preview.blockers.push(...inventory.blockers)
     if (inventory.blockers.length || inventory.sources.some((source) => source.status !== 'verified')) return this.sign(preview)
     const repositories = new Map<string, string>()
-    const shared = (identity: string, repositoryId?: string): boolean => peers.some((peer) => peer.identity === identity && (!repositoryId || peer.repositoryId === repositoryId) || isAbsolute(identity) && isAbsolute(peer.identity) && (within(identity, peer.identity) || within(peer.identity, identity)))
+    // Another thread whose checkout can't be verified holds only what its records may still name: that is kept back, with why.
+    const held = new Set<string>()
+    /** The real repository of each worktree that stays, for listing the files its restores kept as kept too. */
+    const keptRepositories = new Map<string, string>()
+    /** The repository part of a target, read once per repository. */
+    const repositoryTargets = new Map<string, ReturnType<typeof repositoryTargetAsync>>()
+    const repositoryTarget = async (commonDir: string | undefined, recorded?: string): Promise<ClaimTarget> => {
+      if (!commonDir) return { repositoryIds: [recorded] }
+      if (!repositoryTargets.has(commonDir)) repositoryTargets.set(commonDir, repositoryTargetAsync(commonDir))
+      const found = await repositoryTargets.get(commonDir)!
+      return { repositoryIds: [recorded, ...found.repositoryIds], registeredWorktrees: found.registeredWorktrees }
+    }
+    /** Real paths, so an alias of a folder another record names is that folder (`claimOverlapsPath`). */
+    const canonical = async (identity: string): Promise<string | undefined> => isAbsolute(identity) ? canonicalPathAsync(identity) : undefined
+    const keptBack = (identity: string, target: ClaimTarget): boolean => {
+      const owner = unverifiedOwnerOver(peers, target)
+      if (!owner) return false
+      if (!held.has(identity)) preview.retained.push({ identity, reason: owner.reason, unverifiedOwner: owner.taskId })
+      held.add(identity)
+      return true
+    }
+    // Mousse's refs outside `refs/heads/` are named by ids, so the same name is the same ref whatever repository a record
+    // gives: one written before the repository moved names it by its old id. A branch name is shared within a repository.
+    const idNamed = (identity: string): boolean => identity.startsWith('refs/') && !identity.startsWith('refs/heads/')
+    const shared = (identity: string, repositoryId: string | undefined, real: string | undefined): boolean => peers.some((peer) => peer.identity === identity && (!repositoryId || !peer.repositoryId || peer.repositoryId === repositoryId || idNamed(identity)) || real !== undefined && claimOverlapsPath(peer, real))
     for (const resource of inventory.resources.filter((item) => item.kind === 'worktree' && ownedIds.has(item.ownerTaskId))) {
-      if (shared(resource.identity, resource.repositoryId)) { preview.retained.push({ identity: resource.identity, reason: 'Another task or profile retains this workspace' }); continue }
+      const real = await canonical(resource.identity)
+      const realCommonDir = await gitCommonDirAsync(resource.identity)
+      if (resource.repositoryId && realCommonDir) keptRepositories.set(resource.repositoryId, realCommonDir)
+      if (shared(resource.identity, resource.repositoryId, real)) { preview.retained.push({ identity: resource.identity, reason: 'Another task or profile retains this workspace' }); continue }
+      if (keptBack(resource.identity, { ...await repositoryTarget(realCommonDir, resource.repositoryId), path: real })) continue
+      keptRepositories.delete(resource.repositoryId ?? '')
       try {
         const manifestPath = this.retirement.pathFor(resource.ownerTaskId, resource.identity)
         let manifest = existsSync(manifestPath) ? this.retirement.load(manifestPath) : undefined
@@ -348,7 +380,8 @@ export class ResourcePurgeService {
       try { plan = await projectFolderPurgeRefs(task) } catch (error) { preview.blockers.push(`Project folder refs of ${task.taskId}: ${(error as Error).message}`); continue }
       if (!plan) continue
       if ('unavailable' in plan) { preview.retained.push({ identity: join(task.location, 'project-folder.json'), reason: plan.unavailable }); continue }
-      for (const { ref, sha, discardReason } of plan.refs) folderRefs.push({ id: `project-folder-ref:${task.taskId}:${ref}`, kind: 'ref', identity: ref, ownerTaskId: task.taskId, commonDir: plan.commonDir, expectedValue: sha, ...(discardReason ? { discardRequired: true, reason: discardReason } : {}), status: 'pending' })
+      const repository = await repositoryTarget(plan.commonDir)
+      for (const { ref, sha, discardReason } of plan.refs) if (!keptBack(ref, { ...repository, ref })) folderRefs.push({ id: `project-folder-ref:${task.taskId}:${ref}`, kind: 'ref', identity: ref, ownerTaskId: task.taskId, commonDir: plan.commonDir, expectedValue: sha, ...(discardReason ? { discardRequired: true, reason: discardReason } : {}), status: 'pending' })
     }
     // A worktree thread's restores keep files in its repository's refs too; they go with the thread's other refs, and
     // while they may be the only copy of a file a purge asks before dropping them (`threadKeptFilesRefs`).
@@ -356,11 +389,14 @@ export class ResourcePurgeService {
       if (!ownedIds.has(task.taskId)) continue
       const repositoryIds = new Set(inventory.resources.filter((resource) => resource.kind === 'worktree' && resource.ownerTaskId === task.taskId && resource.repositoryId).map((resource) => resource.repositoryId!))
       for (const repositoryId of repositoryIds) {
-        const commonDir = repositories.get(repositoryId)
+        // A worktree that stays (another owner keeps it) keeps the files its restores kept too; they are listed as kept.
+        const commonDir = repositories.get(repositoryId) ?? keptRepositories.get(repositoryId)
         if (!commonDir) continue
         try {
+          const repository = await repositoryTarget(commonDir, repositoryId)
           for (const { ref, sha, discardReason } of await threadKeptFilesRefs(commonDir, task.location)) {
-            if (folderRefs.some((item) => item.identity === ref) || await readDirectLifecycleRefAsync(commonDir, ref) !== sha) continue
+            if (folderRefs.some((item) => item.identity === ref) || await readDirectLifecycleRefAsync(commonDir, ref) !== sha || keptBack(ref, { ...repository, ref })) continue
+            if (!repositories.has(repositoryId)) { preview.retained.push({ identity: ref, reason: 'Kept with its worktree, which another task or profile retains' }); continue }
             folderRefs.push({ id: `preserved-ref:${task.taskId}:${ref}`, kind: 'ref', identity: ref, ownerTaskId: task.taskId, commonDir, expectedValue: sha, ...(discardReason ? { discardRequired: true, reason: discardReason } : {}), status: 'pending' })
           }
         } catch (error) { preview.blockers.push(`Files kept by restores of ${task.taskId}: ${(error as Error).message}`) }
@@ -383,7 +419,13 @@ export class ResourcePurgeService {
     for (const resource of inventory.resources) {
       if (!ownedIds.has(resource.ownerTaskId)) continue
       if (resource.kind === 'worktree' || resource.kind === 'agent-session' || resource.kind === 'artifact') continue
-      if (shared(resource.identity, resource.repositoryId)) { preview.retained.push({ identity: resource.identity, reason: 'Another owner retains this resource' }); continue }
+      const real = await canonical(resource.identity)
+      if (shared(resource.identity, resource.repositoryId, real)) { preview.retained.push({ identity: resource.identity, reason: 'Another owner retains this resource' }); continue }
+      if (held.has(resource.identity)) continue
+      const repositoryId = resource.repositoryId ?? (repositories.size === 1 ? [...repositories.keys()][0] : undefined)
+      // A ref of a worktree that stays is judged in that worktree's real repository too.
+      const commonDir = repositoryId ? repositories.get(repositoryId) ?? keptRepositories.get(repositoryId) : undefined
+      if (!plannedRefs.has(resource.identity) && keptBack(resource.identity, resource.kind === 'git-ref' ? { ...await repositoryTarget(commonDir, repositoryId), ref: resource.identity } : { path: resource.identity.includes('#') ? undefined : real })) continue
       if (resource.kind === 'git-ref') {
         // Already planned from the project folder's own repository.
         if (plannedRefs.has(resource.identity)) continue
@@ -438,8 +480,17 @@ export class ResourcePurgeService {
       .filter((item, index, all) => all.findIndex((other) => other.kind === item.kind && other.identity === item.identity) === index)
     preview.items.sort((a, b) => this.order(a, tasks) - this.order(b, tasks) || a.identity.localeCompare(b.identity))
     for (const item of preview.items) if (item.kind === 'path') preview.exclusiveBytes += item.content!.reduce((sum, entry) => sum + entry.bytes, 0)
-    preview.blockers = [...new Set(preview.blockers)]
+    // Deleting the thread while something of it is kept back would leave that with no thread to own it or delete it later:
+    // the thread stays in the trash, and the refusal names the thread and the worktree that can't be checked.
+    preview.blockers = [...new Set([...preview.blockers, ...unverifiedHolds(preview)])]
     return this.sign(preview)
+  }
+
+  /** What an unverified thread's scope is matched against for `item` (`unverifiedOwnerOver`). */
+  private async claimTarget(item: LifecyclePurgeItem): Promise<ClaimTarget> {
+    const repository = await repositoryTargetAsync(item.kind === 'ref' || item.kind === 'worktree' ? item.commonDir : undefined)
+    if (item.kind === 'ref') return { ...repository, ref: item.identity }
+    return { ...repository, ...(isAbsolute(item.identity) ? { path: await canonicalPathAsync(item.identity) } : {}) }
   }
   private sign(preview: LifecyclePurgePreview): LifecyclePurgePreview { preview.digest = digest({ ...preview, digest: '' }); return preview }
   private order(item: LifecyclePurgeItem, tasks: TaskLifecycleRecord[]): number { return item.kind === 'worktree' ? 0 : item.kind === 'ref' ? 1 : tasks.some((task) => task.location === item.identity) ? 3 : 2 }
@@ -477,8 +528,11 @@ export class ResourcePurgeService {
       for (const item of record.purge.items) {
         if (item.status !== 'pending') continue
         // Peer source records are re-read at each step. Partial failure never weakens another owner's claim.
+        const target = await this.claimTarget(item)
         const peers = await this.peers(new Set(record.purge!.ownedTaskIds))
-        if (peers.some((peer) => peer.identity === item.identity || isAbsolute(item.identity) && isAbsolute(peer.identity) && (within(item.identity, peer.identity) || within(peer.identity, item.identity)))) throw new Error(`New shared owner retains ${item.identity}`)
+        if (peers.some((peer) => peer.identity === item.identity || target.path !== undefined && claimOverlapsPath(peer, target.path))) throw new Error(`New shared owner retains ${item.identity}`)
+        const unverified = unverifiedOwnerOver(peers, target)
+        if (unverified) throw new Error(`${unverified.reason} ${item.identity} is kept.`)
         await this.remove(item, new Set(record.purge!.ownedTaskIds), () => this.store.update(input.taskId, (current) => { current.purge!.items.find((entry) => entry.id === item.id)!.discardState = 'cleared' }), () => this.assertReservation(input.taskId, reservation, record.generation), { taskId: input.taskId, token: reservation, generation: record.generation })
         record = this.store.update(input.taskId, (current) => { const progress = current.purge!.items.find((entry) => entry.id === item.id)!; progress.status = 'removed'; delete current.purge!.error; delete current.blockedReason })
         await this.hooks.onBoundary?.(record)
@@ -524,10 +578,14 @@ export class ResourcePurgeService {
     if (item.kind === 'path') {
       if (!await present(item.identity)) return
       // Peer claims are read without blocking, then checked again from the records right before each entry is removed.
+      const target = await this.claimTarget(item)
       const claims = await this.peersCheck(ownedIds)
       const unclaimed = (): void => {
         assertReservation()
-        if (claims().some((peer) => peer.identity === item.identity || isAbsolute(item.identity) && isAbsolute(peer.identity) && (within(item.identity, peer.identity) || within(peer.identity, item.identity)))) throw new Error(`New shared owner retains ${item.identity}`)
+        const current = claims()
+        if (current.some((peer) => peer.identity === item.identity || target.path !== undefined && claimOverlapsPath(peer, target.path))) throw new Error(`New shared owner retains ${item.identity}`)
+        const unverified = unverifiedOwnerOver(current, target)
+        if (unverified) throw new Error(`${unverified.reason} ${item.identity} is kept.`)
       }
       await this.removeFrozen(item.identity, item.content!, this.store.profileHome, item.rootIdentity, 'Owned resource changed during purge', false, unclaimed)
       return
@@ -544,10 +602,14 @@ export class ResourcePurgeService {
     try {
       assertReservation()
       // Re-checked right before each change below, with nothing awaited in between (`peersCheck`).
+      const target = await this.claimTarget(item)
       const claims = await this.peersCheck(ownedIds)
       const unclaimed = (): void => {
         assertReservation()
-        if (claims().some((peer) => peer.identity === item.identity)) throw new Error('A new source claim retains the resource')
+        const current = claims()
+        if (current.some((peer) => peer.identity === item.identity || target.path !== undefined && claimOverlapsPath(peer, target.path))) throw new Error('A new source claim retains the resource')
+        const unverified = unverifiedOwnerOver(current, target)
+        if (unverified) throw new Error(`${unverified.reason} ${item.identity} is kept.`)
       }
       unclaimed()
       if (item.kind === 'worktree') {

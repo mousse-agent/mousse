@@ -21,6 +21,7 @@ import { acquireExecutionLease, getExecutionLeasePath, isExecutionLeaseHeld, lea
 import { registerThreadLifecycleGate } from '../src/mms/queue/ThreadLifecycleAdmission'
 import { ThreadWorkspaceManager } from '../src/mms/workspace/ThreadWorkspaceManager'
 import { committedGitTemplate } from './support/gitBase'
+import { unverifiableThread } from './support/unverifiableThread'
 
 const DAY = 86_400_000
 const HOUR = 3_600_000
@@ -581,6 +582,32 @@ describe('deleted threads and orphans', () => {
     const preview = await f.coordinator.cleanup.preview('task')
     expect(preview.items.find((entry) => entry.kind === 'worktree')).toMatchObject({ discardRequired: true })
     expect(preview.items.filter((entry) => entry.kind === 'ref').map((entry) => entry.identity)).toContain(manifest.snapshotRef)
+  }, 60_000)
+
+  it('a thread whose worktree points at a deleted and recreated repository does not stop cleanup in another repository', async () => {
+    const f = fixture(); enableTrash(f)
+    unverifiableThread(f.store, { id: 'broken', name: 'Fix prices', repo: join(f.root, 'other-repo'), how: 'recreated' })
+    await trashed(f, 'old-thread')
+    await f.coordinator.trash({ taskId: 'task', operationId: 'trash' })
+    setPolicy(f, { worktrees: { removeWithDeletedThreads: true } })
+    const report = await f.service.run('manual')
+    expect(item(report, 'worktree-deleted')).toMatchObject({ outcome: 'removed' }); expect(existsSync(f.worktree)).toBe(false)
+    expect(report.items.find((entry) => entry.threadId === 'old-thread')).toMatchObject({ rule: 'trash', outcome: 'removed' })
+    expect(f.store.require('old-thread').state).toBe('purged')
+  }, 60_000)
+
+  it('lists an unused folder in a broken thread’s repository as possibly its own, naming the thread, and leaves both in place', async () => {
+    const f = fixture(); setPolicy(f, inactive())
+    const broken = unverifiableThread(f.store, { id: 'broken', name: 'Fix prices', repo: join(f.root, 'other-repo'), how: 'recreated' })
+    const mine = join(f.home, 'repositories', f.repositoryId, 'worktrees', 'threads', 'ghost', 'main'); mkdirSync(mine, { recursive: true }); writeFileSync(join(mine, 'file.txt'), 'who owns this')
+    const theirs = join(f.home, 'repositories', broken.repositoryId, 'worktrees', 'threads', 'ghost', 'main'); mkdirSync(theirs, { recursive: true }); writeFileSync(join(theirs, 'file.txt'), 'maybe theirs')
+    const report = await f.service.run('manual')
+    const orphans = report.items.filter((entry) => entry.rule === 'worktree-orphan')
+    expect(orphans).toHaveLength(2)
+    expect(orphans).toContainEqual(expect.objectContaining({ outcome: 'kept', reason: 'No thread uses this worktree', label: 'threads/ghost', bytes: expect.any(Number) }))
+    expect(orphans).toContainEqual(expect.objectContaining({ outcome: 'kept', reason: `Thread “Fix prices” has a worktree Mousse can’t check: ${broken.worktree}. It may still use this worktree.` }))
+    expect(readFileSync(join(mine, 'file.txt'), 'utf8')).toBe('who owns this'); expect(readFileSync(join(theirs, 'file.txt'), 'utf8')).toBe('maybe theirs')
+    expect(readFileSync(join(broken.worktree, 'a.txt'), 'utf8')).toBe('first\n')
   }, 60_000)
 
   it('reports an orphan directory as kept and leaves it in place', async () => {
