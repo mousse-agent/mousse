@@ -151,7 +151,7 @@ describe('thread fork (SPEC §16.2)', () => {
     })
     expect(d.engine.listRuns(forked.threadId)).toEqual([])
     // The fork keeps the source's selection, stored in the instance shape.
-    expect(d.orch.getThreadModelOverride(forked.threadId)).toEqual({ ...PI, instanceId: 'pi:openai' })
+    expect(d.orch.getThreadModelOverride(forked.threadId)).toEqual({ ...PI, instanceId: 'pi:openai', name: 'GPT-Replay' })
   })
 
   it('resolves portably on the first message, in the fork\'s own worktree seeded from the source checkpoint', async () => {

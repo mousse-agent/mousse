@@ -976,7 +976,7 @@ describe('GitHubCodeHost fetch failures and the fetched ref', () => {
   it('releases the fetched ref only while it still holds the commit, and never throws', async () => {
     const run = vi.fn<ExecutableRunner>(async () => ok())
     await new GitHubCodeHost(run).releasePullRequestHead('/repo', pullRequest, SHA)
-    expect(run).toHaveBeenCalledWith('git', ['update-ref', '-d', 'refs/mousse/pull/7/head', SHA], { cwd: '/repo' })
+    expect(run).toHaveBeenCalledWith('git', ['update-ref', '--no-deref', '-d', 'refs/mousse/pull/7/head', SHA], { cwd: '/repo' })
     run.mockClear()
     await new GitHubCodeHost(vi.fn<ExecutableRunner>(async () => { throw failure('cannot lock ref') })).releasePullRequestHead('/repo', pullRequest, SHA)
     await new GitHubCodeHost(run).releasePullRequestHead('/repo', pullRequest, 'not a sha')

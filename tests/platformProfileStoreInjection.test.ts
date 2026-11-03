@@ -262,6 +262,7 @@ describe('profile start order (H4)', () => {
         recoverRunEngineOnBoot: () => { engine.reconcileOnBoot(); calls.push('recover') },
         scheduleStartupQueueRecovery: () => undefined
       },
+      runEngine: engine,
       startRunEngineWorkers: () => { calls.push('workers') },
       startMcpServer: async () => undefined,
       threadRuntimes: { restoreOnStartup: () => undefined },
