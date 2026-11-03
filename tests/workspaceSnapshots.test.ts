@@ -656,8 +656,9 @@ describe('recovery', () => {
 })
 
 describe('conversation forks', () => {
-  it('pin the snapshot without a Git branch, and activating one switches the files only', async () => {
+  it('pin the snapshot without a Git branch, and activating one switches the files only, keeping edits made since', async () => {
     const { action } = await turn('turn', () => write('agent.txt', 'agent\n'))
+    await turn('second', () => write('agent.txt', 'agent, second turn\n'), 2)
     write('later.txt', 'later\n')
     const head = git(cwd, 'rev-parse', 'HEAD')
     const before = branches()
@@ -667,8 +668,9 @@ describe('conversation forks', () => {
     expect(branches()).toBe(before)
 
     await service.activate(cwd, fork.id)
-    expect(existsSync(join(cwd, 'later.txt'))).toBe(false)
+    // The fork's code comes in, and the person's edit since the last turn stays.
     expect(readFileSync(join(cwd, 'agent.txt'), 'utf8')).toBe('agent\n')
+    expect(readFileSync(join(cwd, 'later.txt'), 'utf8')).toBe('later\n')
     expect(git(cwd, 'rev-parse', 'HEAD')).toBe(head)
     expect(branches()).toBe(before)
     expect(new ThreadWorkspaceManager(f.thread).load()).toMatchObject({ conversationBranchId: fork.id, branch: 'mousse/thread-task' })

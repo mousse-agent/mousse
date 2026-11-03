@@ -146,25 +146,29 @@ describe('operations in a thread worktree with uncommitted changes', () => {
     expect(git(workspace, 'branch', '--list', '--format=%(refname:short)')).toBe(gitBranches)
     expect(git(workspace, 'rev-parse', first.retainedRef)).toBe(action.endSha)
 
-    // Leaving the thread's first branch records what changed outside Mousse as the user's, then the files become the fork's code.
+    // Leaving the thread's first branch records what changed outside Mousse as the user's. The fork has the code the
+    // person's edits were made on, so the switch brings them along and nothing on disk or in the index changes.
+    const before = pending(workspace)
     await branches.activate(workspace, first.id)
     const saved = actions.list().find((item) => item.turnId.startsWith('user-changes:'))!
     expect(git(workspace, 'show', `${saved.endSha}:value.txt`)).toBe('user edit')
     expect(git(workspace, 'show', `${saved.endSha}:notes/screen shot.png`)).toBeTruthy()
-    expect(readFileSync(join(workspace, 'value.txt'), 'utf8')).toBe('base\n')
-    expect(existsSync(join(workspace, 'notes'))).toBe(false)
+    expect(pending(workspace)).toEqual(before)
     expect(readFileSync(join(workspace, 'agent.txt'), 'utf8')).toBe('agent\n')
     // HEAD, the Git branch and the ignored file are untouched by switching.
     expect(git(workspace, 'rev-parse', 'HEAD')).toBe(head)
     expect(git(workspace, 'branch', '--show-current')).toBe(gitBranch)
     expect(readFileSync(join(workspace, 'ignored.log'), 'utf8')).toBe('keep me\n')
 
-    // Work on the first branch stays with it while the second is active, and comes back exactly.
-    writeFileSync(join(workspace, 'first-branch.txt'), 'on first\n')
+    // A turn on the first branch stays with it while the second is active, and comes back exactly.
+    await actions.runCheckpointedAction({ ...actionOptions(workspace, 'on-first'), conversationBranchId: first.id }, () => writeFileSync(join(workspace, 'first-branch.txt'), 'on first\n'))
+    const onFirst = pending(workspace)
     await branches.activate(workspace, second.id)
     expect(existsSync(join(workspace, 'first-branch.txt'))).toBe(false)
+    expect(readFileSync(join(workspace, 'value.txt'), 'utf8')).toBe('base\n')
     await branches.activate(workspace, first.id)
     expect(readFileSync(join(workspace, 'first-branch.txt'), 'utf8')).toBe('on first\n')
+    expect(pending(workspace)).toEqual(onFirst)
     expect(git(workspace, 'rev-parse', 'HEAD')).toBe(head)
     expect(keptRefs(workspace)).toEqual([])
   })

@@ -107,7 +107,7 @@ import { releaseSnapshotRefs } from '../actions/SnapshotRefReleaseService'
 import { inThreadSnapshotScopeAsync, snapshotsOffReason } from '../workspace/SnapshotWorkspace'
 import { RedoService } from '../actions/RedoService'
 import { CodeRevertService } from '../actions/CodeRevertService'
-import { ConversationBranchService } from '../actions/ConversationBranchService'
+import { ConversationBranchService, FIRST_BRANCH_ID } from '../actions/ConversationBranchService'
 import { discardPendingChangesAsync, gitAsync as workspaceGitAsync } from '../actions/git'
 import { getMousseHomeDir } from '../data/paths'
 import { keepCopy, keepExistingCommit, KeepCopyRefusedError, keptCopyNotice, keptCopyWindowMs, projectKeptFilesOwner, registerProjectKeptFilesFolder, type KeptCopy } from '../actions/keptCopies'
@@ -3164,13 +3164,17 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const workspace = new ThreadWorkspaceManager(operation.threadDirectory).load()
       if (!workspace || workspace.lifecycle !== 'ready') throw new DomainRpcError('workspace_not_ready', 'Thread workspace is not ready')
       const branches = new ConversationBranchService(operation.threadDirectory)
-      const current = branches.list().find((branch) => branch.lifecycle === 'active')
-      const target = loadConversationState(operation.threadDirectory, branchId)
-      const branch = await branches.activate(workspace.worktreePath, branchId, operation.currentGeneration, () => {
-        if (current) saveConversationState(ctx, operation.threadId, operation.threadDirectory, current.id)
+      const leaving = workspace.conversationBranchId ?? FIRST_BRANCH_ID
+      // A branch with no record, a removed one, or one whose conversation was never saved is refused before anything changes.
+      if (!branches.available(branchId, workspace) || (branchId !== leaving && !existsSync(conversationStatePath(operation.threadDirectory, branchId)))) {
+        throw new DomainRpcError('conversation_branch_unavailable', `Conversation branch ${branchId} is not available to switch to. Nothing was changed.`, { branchId })
+      }
+      // The conversation being left is saved under its own branch once the switch is known to go ahead, then the selected one's is loaded.
+      const { branch, notice } = await branches.activate(workspace.worktreePath, branchId, operation.currentGeneration, () => {
+        const target = loadConversationState(operation.threadDirectory, branchId)
         ctx.mms.orchestrator.replaceConversationState(operation.threadId, target.messages, target.nativeContext)
-      })
-      return { branch }
+      }, (left) => saveConversationState(ctx, operation.threadId, operation.threadDirectory, left))
+      return { branch, ...(notice ? { notice } : {}) }
     }
     case 'operations.get': {
       const p = isObject(params) ? params : {}
