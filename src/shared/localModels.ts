@@ -29,6 +29,18 @@ export interface LocalModelManifest {
   /** Pinned commit of `repo`, so every download gets the same verified bytes. */
   revision: string
   files: readonly LocalModelFile[]
+  /**
+   * Figures the model dialog compares. Each is optional: a missing one shows as a dash and a
+   * row nobody has drops out. Only published or measured figures go here, with their source.
+   */
+  compare?: LocalModelFigures
+}
+
+export interface LocalModelFigures {
+  /** Languages the model handles; `name` when it is one, e.g. "English". */
+  languages?: { count: number; name?: string }
+  /** Average English word error rate in percent, from a published benchmark. */
+  englishWer?: number
 }
 
 export function localModelFileUrl(model: LocalModelManifest, path: string): string {

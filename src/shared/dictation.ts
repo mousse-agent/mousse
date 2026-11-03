@@ -71,6 +71,15 @@ export interface NemoTransducerSttModel extends LocalSttModelBase {
 export type LocalSttModel = TransformersSttModel | NemoTransducerSttModel
 
 /**
+ * `compare.englishWer` is the average word error rate of the original model on the Hugging Face
+ * Open ASR Leaderboard's English short-form sets (AMI, Earnings-22, GigaSpeech, LibriSpeech clean
+ * and other, SPGISpeech, TED-LIUM, VoxPopuli), from
+ * https://github.com/huggingface/open_asr_leaderboard/blob/16743c6dabc69abcb8fd5bf529a95e3c6c16ac3c/scripts/data/en_shortform.csv
+ * Mousse runs quantized copies, which may differ slightly.
+ */
+const ENGLISH = { count: 1, name: 'English' }
+
+/**
  * Moonshine Tiny (Useful Sensors) as converted for transformers.js in
  * `onnx-community/moonshine-tiny-ONNX`. English only and the smallest model offered; same files and
  * runtime as Moonshine Base.
@@ -79,6 +88,7 @@ export const MOONSHINE_TINY: MoonshineSttModel = {
   id: 'moonshine-tiny',
   label: 'Moonshine Tiny',
   description: 'English, fastest',
+  compare: { languages: ENGLISH, englishWer: 12.65 },
   parameters: '27M',
   license: 'MIT',
   homepage: 'https://huggingface.co/moonshine-ai/moonshine-tiny',
@@ -108,6 +118,7 @@ export const MOONSHINE_BASE: MoonshineSttModel = {
   id: 'moonshine-base',
   label: 'Moonshine Base',
   description: 'English',
+  compare: { languages: ENGLISH, englishWer: 9.99 },
   parameters: '61M',
   license: 'MIT',
   homepage: 'https://huggingface.co/UsefulSensors/moonshine-base',
@@ -139,6 +150,7 @@ export const PARAKEET_TDT_110M: NemoTransducerSttModel = {
   id: 'parakeet-tdt-110m',
   label: 'Parakeet TDT 110M',
   description: 'English with punctuation',
+  compare: { languages: ENGLISH, englishWer: 7.49 },
   parameters: '110M',
   license: 'CC-BY-4.0',
   homepage: 'https://huggingface.co/nvidia/parakeet-tdt_ctc-110m',
@@ -170,6 +182,8 @@ export const WHISPER_BASE: WhisperSttModel = {
   id: 'whisper-base',
   label: 'Whisper Base',
   description: '99 languages',
+  // The leaderboard lists only the English-only whisper-base.en, not this multilingual model.
+  compare: { languages: { count: 99 } },
   parameters: '74M',
   license: 'Apache-2.0',
   homepage: 'https://huggingface.co/openai/whisper-base',
@@ -201,6 +215,7 @@ export const PARAKEET_TDT_06B_V3: NemoTransducerSttModel = {
   id: 'parakeet-tdt-0.6b-v3',
   label: 'Parakeet TDT 0.6B v3',
   description: '25 European languages',
+  compare: { languages: { count: 25 }, englishWer: 6.32 },
   parameters: '600M',
   license: 'CC-BY-4.0',
   homepage: 'https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3',
@@ -232,6 +247,9 @@ export const LOCAL_STT_MODELS: readonly LocalSttModel[] = [
   PARAKEET_TDT_110M,
   PARAKEET_TDT_06B_V3
 ]
+
+/** Suggested first in the model dialog: fast, with punctuation, and a small download. */
+export const RECOMMENDED_STT_MODEL_ID: LocalSttModelId = 'parakeet-tdt-110m'
 
 export function findLocalSttModel(modelId: string): LocalSttModel | undefined {
   return LOCAL_STT_MODELS.find((model) => model.id === modelId)

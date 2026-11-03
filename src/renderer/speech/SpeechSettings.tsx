@@ -1,7 +1,8 @@
 import { useEffect, useId } from 'react'
-import { LOCAL_STT_MODELS, sttModelsFromProviders } from '../../shared/dictation'
+import { LOCAL_STT_MODELS, RECOMMENDED_STT_MODEL_ID, sttModelsFromProviders } from '../../shared/dictation'
 import {
   LOCAL_TTS_MODELS,
+  RECOMMENDED_TTS_MODEL_ID,
   findLocalTtsModel,
   providerTtsVoices,
   ttsModelsFromProviders,
@@ -24,9 +25,13 @@ import {
 import { useReadAloudStore } from '../readAloud/readAloudStore'
 import { useProviderSpeechModels } from '../speechModels/SpeechModelPicker'
 import { SpeechModelSetting } from '../speechModels/SpeechModelSetting'
+import { dictationComparison, readAloudComparison } from '../speechModels/modelComparison'
 import { useAppStore } from '../stores/appStore'
 import { SPEECH_SPEEDS, useSpeechPreferences, voiceFor } from './speechPreferences'
 import '../styles/speech.css'
+
+const READ_ALOUD_COMPARISON = readAloudComparison(RECOMMENDED_TTS_MODEL_ID)
+const DICTATION_COMPARISON = dictationComparison(RECOMMENDED_STT_MODEL_ID)
 
 const PREVIEW_KEY = 'speech-settings-preview'
 const PREVIEW_TEXT =
@@ -112,6 +117,7 @@ function ReadAloudSpeechSettings() {
         localModels={LOCAL_TTS_MODELS}
         localSelection={readAloudLocalSelection}
         localApi={readAloudLocalApi}
+        comparison={READ_ALOUD_COMPARISON}
       />
       <SettingsRow
         title="Voice"
@@ -197,6 +203,7 @@ function DictationSpeechSettings() {
         localModels={LOCAL_STT_MODELS}
         localSelection={dictationLocalSelection}
         localApi={dictationLocalApi}
+        comparison={DICTATION_COMPARISON}
       />
       <SettingsRow
         title="Reduce background noise"

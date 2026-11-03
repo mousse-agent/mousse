@@ -70,27 +70,193 @@
   color: var(--danger);
 }
 
-/* "Get more models" dialog: one flat list in the settings row anatomy. Icons carry the actions
-   (each with a tooltip and an aria-label) and colour carries state at icon scale only: the accent
-   on what starts a download and on its progress ring, success on the installed check. */
+/* "Get more models" dialog. Two views: three picked models compared as columns, then every model
+   as a list in the settings row anatomy. Weight and brightness mark the best figure in a row; the
+   recommended column sits on one barely lifted panel (background only, no edges or bars). Colour
+   stays at small scale: the accent on the recommended tag, the in-use dot and the progress ring. */
+.modal-overlay.speech-models-dialog .modal {
+  width: 800px;
+  max-height: min(86vh, 760px);
+}
+
+.speech-models-dialog .modal-header {
+  gap: var(--space-8, 8px);
+}
+
+.speech-models-back {
+  margin-left: calc(-1 * var(--space-4, 4px));
+}
+
+.speech-compare {
+  position: relative;
+  display: grid;
+  margin-top: var(--space-8, 8px);
+  font-size: var(--settings-fs-small, 12.5px);
+  font-variant-numeric: tabular-nums;
+}
+
+.speech-compare-row {
+  display: contents;
+}
+
+.speech-compare-panel {
+  border-radius: var(--ui-card-radius);
+  background: var(--ui-hover);
+}
+
+.speech-compare-head,
+.speech-compare-cell,
+.speech-compare-label {
+  position: relative;
+  min-width: 0;
+}
+
+.speech-compare-head {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4, 4px);
+  padding: var(--space-16, 16px) var(--space-16, 16px) var(--space-24, 24px);
+}
+
+.speech-models-tag {
+  font-size: 12px;
+  color: var(--ui-faint);
+}
+
+.speech-models-tag.recommended {
+  color: var(--accent);
+}
+
+.speech-compare-name {
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--text-primary);
+}
+
+.speech-compare-desc {
+  line-height: 1.45;
+  color: var(--text-secondary);
+}
+
+.speech-compare-label,
+.speech-compare-cell {
+  display: flex;
+  align-items: center;
+  min-height: 44px;
+  border-top: 1px solid var(--ui-line);
+  color: var(--text-secondary);
+}
+
+.speech-compare-label {
+  padding-right: var(--space-16, 16px);
+}
+
+.speech-compare-cell {
+  padding: 0 var(--space-16, 16px);
+}
+
+.speech-compare-cell.best {
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.speech-compare-label[title] {
+  cursor: help;
+}
+
+/* The actions row closes the table: no line above it, room below inside the panel. */
+.speech-compare-row:last-child > * {
+  border-top-color: transparent;
+}
+
+.speech-compare-action {
+  min-height: 60px;
+  padding-bottom: var(--space-4, 4px);
+}
+
+.speech-models-dialog :is(.speech-compare, .speech-models-list) .settings-btn {
+  height: var(--settings-control-h, 28px);
+  border-radius: var(--ui-control-radius);
+  font-size: var(--settings-fs-small, 12.5px);
+}
+
+.speech-models-in-use {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-8, 8px);
+  white-space: nowrap;
+  color: var(--text-primary);
+}
+
+.speech-models-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+
+.speech-models-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-4, 4px);
+}
+
+/* Download in the list: the size is the label, so the button stays bare. */
+.speech-models-list .settings-btn.speech-models-get {
+  gap: 6px;
+  margin-right: calc(-1 * var(--space-12, 12px));
+  border-color: transparent;
+}
+
+.speech-models-more {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: calc(100% + 2 * var(--space-8, 8px));
+  margin: var(--space-12, 12px) calc(-1 * var(--space-8, 8px)) 0;
+  padding: var(--space-12, 12px) var(--space-8, 8px);
+  border-radius: var(--ui-control-radius);
+  font-size: var(--settings-fs-row, 13.5px);
+  color: var(--text-secondary);
+  transition: background-color 0.15s, color 0.15s;
+}
+
+.speech-models-more:hover {
+  background: var(--ui-hover);
+  color: var(--text-primary);
+}
+
+.speech-models-more:focus-visible {
+  outline: none;
+  box-shadow: var(--ui-focus-ring);
+}
+
+.speech-models-group + .speech-models-group {
+  margin-top: var(--space-16, 16px);
+}
+
+.speech-models-group-title {
+  margin: var(--space-4, 4px) 0 0;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--ui-faint);
+}
+
 .speech-models-list.settings-group {
   padding-top: 0;
 }
 
-.speech-models-check {
-  display: inline-flex;
-  flex-shrink: 0;
-  color: var(--success);
+.speech-models-list .settings-item-desc > span {
+  display: block;
+}
+
+.speech-models-stats {
+  color: var(--ui-faint);
 }
 
 /* Only Delete warns on hover; downloading and retrying stay neutral. */
 .settings-icon-btn.speech-models-action:hover:not(:disabled) {
   color: var(--text-primary);
-}
-
-.settings-icon-btn.speech-models-action.accent,
-.settings-icon-btn.speech-models-action.accent:hover:not(:disabled) {
-  color: var(--accent);
 }
 
 .speech-models-progress {
