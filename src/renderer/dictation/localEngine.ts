@@ -1,4 +1,5 @@
 import { findLocalSttModel, type LocalSttModel, type LocalSttModelId } from '../../shared/dictation'
+import type { DictationVocabularyTerm } from '../../shared/dictationVocabulary'
 import { serveModelFiles } from '../speechModels/pageSupport'
 import { MIN_SEGMENT_SECONDS, decodeRecording, splitIntoSegments } from './audio'
 import type { LocalSttWorkerEvent, LocalSttWorkerRequest } from './workerProtocol'
@@ -25,6 +26,13 @@ let lastRequestId = 0
 let busy = 0
 let idleTimer: ReturnType<typeof setTimeout> | null = null
 const pending = new Map<number, Pending>()
+/** The current profile's vocabulary, sent with every transcription (Settings, Speech). */
+let vocabulary: readonly DictationVocabularyTerm[] = []
+
+/** Sets the terms local transcriptions use from now on; speech preferences call this. */
+export function setLocalDictationVocabulary(terms: readonly DictationVocabularyTerm[]): void {
+  vocabulary = terms
+}
 
 function failAll(error: Error): void {
   for (const request of pending.values()) request.reject(error)
@@ -145,7 +153,7 @@ export function warmLocalEngine(modelId: LocalSttModelId): void {
 function transcribeSegment(model: LocalSttModel, samples: Float32Array): Promise<string> {
   // Copy: segments are views of one large buffer, and transferring would detach all of it.
   const copy = samples.slice()
-  return ask(model, (id) => ({ type: 'transcribe', id, samples: copy }), [copy.buffer])
+  return ask(model, (id) => ({ type: 'transcribe', id, samples: copy, vocabulary }), [copy.buffer])
 }
 
 /**
