@@ -53,10 +53,12 @@ function blobSha(value: string): string {
 /**
  * Makes the next automatic maintenance in `cwd` collect at once and in the foreground, and writes unreachable
  * objects it would delete. Git estimates loose objects from the `17/` fan-out folder, so the objects go there.
+ * `maintenance.strategy=gc` picks the gc task: newer Git defaults to geometric repacking, which packs loose
+ * objects instead of pruning them. Older Git ignores the setting and runs gc anyway.
  */
 function armHousekeeping(cwd: string, scratchDir: string): Map<string, string> {
   for (const [key, value] of [
-    ['maintenance.auto', 'true'], ['maintenance.autoDetach', 'false'], ['gc.auto', '1'], ['gc.autoDetach', 'false'],
+    ['maintenance.auto', 'true'], ['maintenance.strategy', 'gc'], ['maintenance.autoDetach', 'false'], ['gc.auto', '1'], ['gc.autoDetach', 'false'],
     ['gc.pruneExpire', 'now'], ['gc.reflogExpire', 'now'], ['gc.reflogExpireUnreachable', 'now'], ['fetch.writeCommitGraph', 'true']
   ]) git(cwd, 'config', key!, value!)
   const doomed = new Map<string, string>()

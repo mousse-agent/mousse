@@ -376,7 +376,11 @@ function* indexTree(top: string, index: string, head: string | undefined): Steps
         if (!gaps.some((gap) => gap.path === match[1])) gaps.push({ path: match[1]!, reason: UNREADABLE })
       }
       if (result.ok) break
-      const found = [...result.stderr.matchAll(/unable to index file '([^']+)'/g)].map((match) => match[1]!).filter((path) => !gaps.some((gap) => gap.path === path))
+      // Git names a nested repository with no commit as a folder (`'tool/' does not have a commit checked out`).
+      const nestedNamed = [...result.stderr.matchAll(/'([^']+?)\/?' does not have a commit checked out/g)].map((match) => match[1]!).filter((path) => !gaps.some((gap) => gap.path === path))
+      for (const path of nestedNamed) gaps.push({ path, reason: NESTED_WITHOUT_COMMIT })
+      const found = [...result.stderr.matchAll(/unable to index file '([^']+?)\/?'/g)].map((match) => match[1]!).filter((path) => !gaps.some((gap) => gap.path === path))
+      if (nestedNamed.length && !found.length) continue
       if (!found.length && !nestedChecked) {
         nestedChecked = true
         const nested = (yield* nestedRepositoriesWithoutCommit(top, env)).filter((path) => !gaps.some((gap) => gap.path === path))

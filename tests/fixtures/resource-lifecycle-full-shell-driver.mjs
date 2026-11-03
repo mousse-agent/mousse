@@ -32,6 +32,24 @@ async function check() {
     writeFileSync(join(config.evidenceDir, `${name}.png`), (await win.webContents.capturePage()).toPNG())
   }
   const proof = { actualMain: config.mainEntry }
+  const lifecycleState = () => evaluate(`window.mousse.threads.inventory()`).then((value) => value.lifecycles.find((record) => record.taskId === config.threadId)?.state)
+  // Remove from the thread's context menu in the sidebar. The daemon refuses a storage change while the app's requests are
+  // still running (Git reads on a slow machine) and the thread stays; a person presses Remove again. A trash under way
+  // leaves the thread's state, so Remove is pressed again only while it is still active. The removal is finished when the
+  // thread's checkout has moved into Mousse's trash (the "Remove worktrees of deleted threads" rule, on by default).
+  const removeFromSidebar = async (label) => {
+    let pressed = 0
+    await until(async () => {
+      const state = await lifecycleState()
+      if (state === 'active' && Date.now() - pressed > 4000 && await evaluate(`Boolean(${threadRow})`)) {
+        await evaluate(`${threadRow}.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 40, clientY: 40 }))`)
+        await click('Remove'); pressed = Date.now()
+      }
+      return state
+    }, (state) => state === 'trashed', label)
+    await until(() => evaluate(`document.querySelector('[data-testid="sidebar-trash-count"]')?.textContent`), (value) => value === '1', `${label}: recently deleted count`)
+    await until(() => existsSync(join(config.workspace, '.git')), (present) => !present, `${label}: task checkout moves to the trash`)
+  }
   await until(() => evaluate('Boolean(window.mousse && document.querySelector("#root")?.children.length)'), Boolean, 'Production preload')
   await evaluate(`window.mousse.threads.select(${JSON.stringify(config.threadId)})`)
   await until(text, value => value.includes('Task value changed to full application bytes.'), 'Expired task transcript')
@@ -51,9 +69,7 @@ async function check() {
   await click('Back')
   await click('Threads')
   await until(() => evaluate(`Boolean(${threadRow})`), Boolean, 'Sidebar thread row')
-  await evaluate(`${threadRow}.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 40, clientY: 40 }))`)
-  await click('Remove')
-  await until(() => evaluate(`document.querySelector('[data-testid="sidebar-trash-count"]')?.textContent`), (value) => value === '1', 'Recently deleted count')
+  await removeFromSidebar('Remove from the sidebar')
   await click('Expand recently deleted threads')
   await until(() => evaluate(`Boolean(${trashRow}?.querySelector('button[data-action="restore"]'))`), Boolean, 'Reversible trash state')
   proof.trashedFromSidebar = true
@@ -61,13 +77,21 @@ async function check() {
   await clickTrash('restore')
   await until(async () => evaluate(`window.mousse.threads.inventory()`), (value) => value.lifecycles.find((record) => record.taskId === config.threadId)?.state === 'active', 'Idle task restore')
   await until(() => evaluate(`!${trashRow} && Boolean(${threadRow})`), Boolean, 'Restored thread back in the sidebar')
-  if (!existsSync(config.workspace)) throw Error('Task checkout missing after restore')
+  // A restore leaves the checkout in the trash; opening the restored thread brings it back with the task's files.
+  await evaluate(`${threadRow}.click()`)
+  const checkout = join(config.workspace, 'value.txt')
+  await until(() => existsSync(join(config.workspace, '.git')) && existsSync(checkout) && readFileSync(checkout, 'utf8'), (value) => value === 'full application bytes\n', 'Task checkout back after opening the restored thread')
   proof.restoreIdle = true
-  await evaluate(`${threadRow}.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 40, clientY: 40 }))`)
-  await click('Remove')
+  await removeFromSidebar('Remove the restored thread')
   await until(() => evaluate(`Boolean(${trashRow}?.querySelector('button[data-action="delete"]'))`), Boolean, 'Trash review control')
   await clickTrash('delete')
-  await until(() => evaluate(`document.querySelector('[data-testid="storage-deletion-preview"]')?.textContent ?? ''`), (value) => value.includes('Frees'), 'Exact permanent preview')
+  // A preview asked for while the removal is still finishing with the checkout fails and the row says so; a person presses Delete again.
+  let previewPressed = Date.now()
+  await until(async () => {
+    const preview = await evaluate(`document.querySelector('[data-testid="storage-deletion-preview"]')?.textContent ?? ''`)
+    if (!preview && Date.now() - previewPressed > 3000 && await evaluate(`Boolean(${trashRow}?.querySelector('[data-testid="sidebar-trash-notice"]'))`)) { await clickTrash('delete'); previewPressed = Date.now() }
+    return preview
+  }, (value) => value.includes('Frees'), 'Exact permanent preview')
   await screenshot('03-purge-preview')
   await evaluate(`(() => { const dialog=document.querySelector('[aria-label="Permanent deletion preview"]'); const checkbox=dialog.querySelector('input[type="checkbox"]'); if(checkbox) checkbox.click() })()`)
   await click('Delete permanently')
