@@ -13,6 +13,7 @@ import type {
 import { APPROVALS_REFUSED_MESSAGE } from '../../../shared/harness/types'
 import { acpPermissionKey, actionOf } from '../../../shared/permissionKeys'
 import { permissionModeAllows, type PermissionAction, type PermissionMode } from '../../../shared/permissionMode'
+import { permissionActionForWrite } from '../../files/gitMetadataWrite'
 import type { ApprovalTag, UserQuestionService } from '../../orchestrator/UserQuestionService'
 
 /**
@@ -214,7 +215,11 @@ export async function readWorkspaceFile(scope: AcpRequestScope, request: ReadTex
   return { content: lines.slice(from, request.limit ? from + request.limit : undefined).join('\n') }
 }
 
-/** `fs/write_text_file` inside the workspace, after the user approves this edit. */
+/**
+ * `fs/write_text_file` inside the workspace, under the turn's permission mode. A write is an edit, except one into
+ * Git's own files (`permissionActionForWrite`), which counts as a command: it asks under Auto-accept edits and Auto,
+ * as the same change through the shell would, and names the file.
+ */
 export async function writeWorkspaceFile(
   questions: UserQuestionService,
   scope: AcpRequestScope,
@@ -224,14 +229,21 @@ export async function writeWorkspaceFile(
   const path = workspacePath(scope, request.path)
   if (!scope.threadId) throw new Error('ACP file write has no thread')
   if (scope.approvals === 'never') throw new Error(APPROVALS_REFUSED_MESSAGE)
-  // Edits go ahead under Auto-accept edits and Full access; a write outside a turn asks.
-  if (!permissionModeAllows(scope.permissionMode ?? 'ask', 'edit')) {
+  const mode = scope.permissionMode ?? 'ask'
+  // Full access writes anything in the workspace without asking, so there is nothing to tell apart.
+  const write = permissionModeAllows(mode, 'command') ? { action: 'edit' as const } : await permissionActionForWrite(scope.cwd, path)
+  scope.throwIfAborted()
+  // Edits go ahead under Auto-accept edits and Full access, Git's files only under Full access; a write outside a turn asks.
+  if (!permissionModeAllows(mode, write.action)) {
+    const prompt = write.action === 'command'
+      ? `Allow ${label} to change Git's own files (${write.gitFile})?`
+      : `Allow ${label} to write ${relative(scope.cwd!, path)}?`
     const answer = await questions.requestAnswers([{
-      id: 'write', prompt: `Allow ${label} to write ${relative(scope.cwd!, path)}?`,
-      options: [{ id: 'allow', label: 'Allow this edit' }, { id: 'reject', label: 'Reject' }]
+      id: 'write', prompt,
+      options: [{ id: 'allow', label: write.action === 'command' ? 'Allow this change' : 'Allow this edit' }, { id: 'reject', label: 'Reject' }]
     }], scope.threadId, {
       approval: {
-        action: 'edit',
+        action: write.action,
         permissionKey: acpPermissionKey('edit'),
         options: [{ id: 'allow', decision: 'allow', scope: 'once' }, { id: 'reject', decision: 'reject' }],
         tool: { name: 'fs/write_text_file', input: { path: request.path, content: request.content }, ...(scope.cwd ? { cwd: scope.cwd } : {}) }
