@@ -52,6 +52,15 @@ export interface DesktopUpdaterOptions {
   clearTimer?: (handle: unknown) => void
 }
 
+/**
+ * A stable build always follows stable, even when a nightly saved a nightly choice in the same
+ * user data folder. A nightly build may follow stable when that was chosen.
+ */
+function channelFor(currentVersion: string, chosen: UpdateChannel | undefined): UpdateChannel {
+  const own = channelForVersion(currentVersion)
+  return own === 'stable' ? 'stable' : (chosen ?? own)
+}
+
 function errorMessage(error: unknown): string {
   const text = error instanceof Error ? error.message : String(error)
   const firstLine = text.split('\n')[0]!.trim()
@@ -93,7 +102,7 @@ export class DesktopUpdater {
     this.state = {
       phase: options.disabledReason ? 'disabled' : 'idle',
       currentVersion: options.currentVersion,
-      channel: kept.channel ?? channelForVersion(options.currentVersion),
+      channel: channelFor(options.currentVersion, kept.channel),
       ...(options.disabledReason ? { disabledReason: options.disabledReason } : {}),
       releaseNotes: [],
       omittedReleaseCount: 0,
@@ -132,6 +141,7 @@ export class DesktopUpdater {
   setChannel(channel: UpdateChannel): Promise<UpdateState> {
     return this.enqueue(async () => {
       if (['disabled', 'downloading', 'installing'].includes(this.state.phase)) return this.state
+      if (channelFor(this.options.currentVersion, channel) !== channel) return this.state
       this.options.store.write({ ...this.options.store.read(), channel })
       this.update({ channel, phase: 'idle' }, ['availableVersion', 'downloadPercent', 'error'])
       if (this.backendPromise) this.applyChannel(await this.backendPromise)
