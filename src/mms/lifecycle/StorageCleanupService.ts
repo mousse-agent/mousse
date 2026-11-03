@@ -3,7 +3,7 @@ import { appendFileSync, existsSync, lstatSync, readFileSync, readdirSync, realp
 import { access, lstat, readdir, stat } from 'node:fs/promises'
 import { promisify } from 'node:util'
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path'
-import { keptBackForUnverifiedThread, type TaskLifecycleRecord } from '../../shared/resourceLifecycle'
+import type { TaskLifecycleRecord } from '../../shared/resourceLifecycle'
 import { REPORT_ENTRY_LIMIT, storagePolicyHasRule, STORAGE_PLAN_TTL_MS, type StorageCleanupItem, type StorageCleanupPlanItem, type StorageCleanupPlanToken, type StorageCleanupReport, type StoragePolicy } from '../../shared/storage'
 import type { Thread } from '../../shared/types'
 import type { ThreadWorkspaceMetadata } from '../../shared/workspace'
@@ -15,11 +15,12 @@ import { publishedRef } from '../actions/snapshots'
 import { readOnlyGitAsync, runReadOnlyGitAsync } from '../git/readOnlyGit'
 import { LISTING_MAX_BUFFER } from '../git/runGitProcess'
 import { acquireRepositoryLease } from '../git/RepositoryLease'
-import { resolveRepositoryIdentityAsync } from '../git/RepositoryIdentity'
+import { repositoryKeyOf, resolveRepositoryIdentityAsync } from '../git/RepositoryIdentity'
 import { isExecutionLeaseHeld, releaseExecutionLeaseHandle, STORAGE_CLEANUP_LEASE_SOURCE, tryAcquireExecutionLease } from '../queue/ThreadExecutionLease'
 import { MOUSSE_CONTROL_FILE_PATHS } from '../worktree/controlFiles'
 import { measureTree, type Measurement } from './diskMeasure'
-import { getExternalResourceClaims, unverifiedOwnerOver } from './LifecycleClaims'
+import { claimOverlapsPath, getExternalResourceClaims, unverifiedOwnerOver } from './LifecycleClaims'
+import { canonicalPathAsync, gitCommonDirAsync } from './canonicalPath'
 import type { ResourcePurgeService, TrashSweepOutcome } from './ResourcePurgeService'
 import { assertLifecyclePath, type ResourceLifecycleStore } from './ResourceLifecycleStore'
 import type { PolicySnapshot, StoragePolicyStore } from './StoragePolicyStore'
@@ -418,9 +419,8 @@ export class StorageCleanupService {
         const base = { rule: 'trash' as const, threadId: taskId, projectId, label }
         try {
           const preview = await purge.previewReadOnly(taskId)
-          const keptBack = keptBackForUnverifiedThread(preview)
-          if (preview.blockers.length || preview.items.some((item) => item.discardRequired) || keptBack) {
-            planned.push({ ...base, action: 'keep', reason: preview.blockers.join('; ') || keptBack || 'Automatic trash cleanup retains unpublished or sole-copy content; review permanent deletion to decide.', bytes: 0 })
+          if (preview.blockers.length || preview.items.some((item) => item.discardRequired)) {
+            planned.push({ ...base, action: 'keep', reason: preview.blockers.join('; ') || 'Automatic trash cleanup retains unpublished or sole-copy content; review permanent deletion to decide.', bytes: 0 })
             continue
           }
           const reclaim = await purge.reclaimEstimate(preview)
@@ -1160,7 +1160,6 @@ export class StorageCleanupService {
   /** Directories in the managed worktree folders that nothing claims. Reported with their size, never removed. */
   private async orphanItems(): Promise<StorageCleanupItem[]> {
     const claims = await getExternalResourceClaims(this.deps.store, new Set())
-    const claimed = claims.map((resource) => resource.identity).filter((identity) => isAbsolute(identity))
     const items: StorageCleanupItem[] = []
     const repositories = join(this.deps.installationHome, 'repositories')
     if (!existsSync(repositories)) return items
@@ -1174,11 +1173,18 @@ export class StorageCleanupService {
           let stat
           try { stat = lstatSync(directory) } catch { continue }
           if (!stat.isDirectory() || stat.isSymbolicLink()) continue
-          if (claimed.some((identity) => within(directory, identity) || within(identity, directory))) continue
+          // Compared by real paths, so a record that names this folder through an alias still claims it.
+          const real = await canonicalPathAsync(directory)
+          if (claims.some((claim) => claimOverlapsPath(claim, real))) continue
           const measurement = await this.measure(directory, { mode: 'reclaim', budgetMs: MEASURE_BUDGET_MS })
           if (!measurement.files) continue // An empty leftover folder holds nothing.
           // A thread whose checkout can't be verified may still use a folder of its repository: not called unused, and says why.
-          const unverified = unverifiedOwnerOver(claims, { repositoryId: repository, path: directory })
+          // The repository is the one the folder's checkouts point at now, as well as the one its place is named after.
+          let children: string[] = []
+          try { children = readdirSync(directory).slice(0, 32) } catch { /* Judged by the folder itself. */ }
+          const checkouts = [directory, ...children.map((child) => join(directory, child))]
+          const actual = (await Promise.all(checkouts.map((checkout) => gitCommonDirAsync(checkout)))).flatMap((commonDir) => commonDir ? [repositoryKeyOf(commonDir)] : [])
+          const unverified = unverifiedOwnerOver(claims, { repositoryIds: [repository, ...actual], path: real })
           items.push({ rule: 'worktree-orphan', label: `${kind}/${name}`, bytes: measurement.bytes, files: measurement.files, ...approximate(measurement), outcome: 'kept', reason: unverified ? `${unverified.reason} It may still use this worktree.` : 'No thread uses this worktree' })
         }
       }

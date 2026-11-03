@@ -66,9 +66,9 @@ function keyOf(commonDir: string): string {
   return createHash('sha256').update(commonDir.toLowerCase()).digest('hex').slice(0, 32)
 }
 
-/** The repository key (`RepositoryIdentity.key`) of a common Git directory, read without blocking. */
-export async function repositoryKeyOfCommonDir(commonDir: string): Promise<string> {
-  return keyOf(await canonicalAsync(commonDir))
+/** The repository key (`RepositoryIdentity.key`) of a common Git directory's real path (`canonicalPathAsync`). */
+export function repositoryKeyOf(canonicalCommonDir: string): string {
+  return keyOf(canonicalCommonDir)
 }
 
 // ---------------------------------------------------------------------------------------------------------

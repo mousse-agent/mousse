@@ -1,7 +1,7 @@
 import { afterEach, expect, test, vi } from 'vitest'
-import { mkdtempSync, mkdirSync, writeFileSync, existsSync, rmSync, readFileSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, writeFileSync, existsSync, rmSync, readFileSync, symlinkSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, relative } from 'node:path'
 import { ResourceLifecycleStore } from '../src/mms/lifecycle/ResourceLifecycleStore'
 import { ResourceLifecycleCoordinator } from '../src/mms/lifecycle/ResourceLifecycleCoordinator'
 import { WorktreeRetirementService } from '../src/mms/lifecycle/WorktreeRetirementService'
@@ -15,6 +15,7 @@ import { getExternalResourceClaims, unverifiedOwnerOver } from '../src/mms/lifec
 import { ProfileManager } from '../src/mms/profiles/ProfileManager'
 import { createInstallationPaths } from '../src/mms/profiles/paths'
 import { unverifiableThread } from './support/unverifiableThread'
+import { canonicalPathAsync } from '../src/mms/lifecycle/canonicalPath'
 
 const roots: string[] = []
 const owned: Array<() => void> = []
@@ -268,7 +269,8 @@ test('the release of what a deleted thread holds outside its folder runs on ever
 
 
 // ---- A thread whose worktree can't be verified holds only what its records may name (live audit N4) ----
-const BROKEN_REASON = 'Thread “Fix prices” points at a worktree whose repository is gone.'
+const brokenReason = (worktree: string) => `Thread “Fix prices” has a worktree Mousse can’t check: ${worktree}.`
+const HOLD = 'What this thread may share with it stays in the trash with this thread until Mousse can check that worktree again.'
 
 test('a thread whose worktree points at a deleted and recreated repository no longer blocks deleting a thread in another repository', async () => {
   const f = fixture({ git: true }); automatic(f)
@@ -285,45 +287,90 @@ test('a thread whose worktree points at a deleted and recreated repository no lo
   expect(f.store.require('broken').state).toBe('active'); expect(readFileSync(join(broken.worktree, 'a.txt'), 'utf8')).toBe('first\n')
 }, 60_000)
 
-test('what a broken thread in the same repository may still use is kept back with its name, and automatic cleanup waits for the person', async () => {
+test('a broken thread in the same repository keeps this thread in the trash, owning what they may share, and the refusal names that thread and its worktree', async () => {
   const f = fixture({ git: true }); automatic(f)
-  unverifiableThread(f.store, { id: 'broken', name: 'Fix prices', repo: f.repo, how: 'unlinked' })
+  const broken = unverifiableThread(f.store, { id: 'broken', name: 'Fix prices', repo: f.repo, how: 'unlinked' })
+  const reason = brokenReason(broken.worktree)
   writeFileSync(join(f.worktree, 'kept.txt'), 'kept bytes\n')
   const pins = git(f.repo, ['for-each-ref', '--format=%(refname) %(objectname)', 'refs/mousse/threads/task/', 'refs/heads/mousse/thread/task/'])
   await trashedTask(f, 'task')
   const preview = await f.coordinator.cleanup.preview('task')
-  expect(preview.blockers).toEqual([])
-  expect(preview.retained).toContainEqual({ identity: f.worktree, reason: BROKEN_REASON, unverifiedOwner: 'broken' })
-  expect(preview.retained).toContainEqual({ identity: 'refs/mousse/threads/task/main', reason: BROKEN_REASON, unverifiedOwner: 'broken' })
+  expect(preview.blockers).toEqual([`${reason} ${HOLD}`])
+  expect(preview.retained).toContainEqual({ identity: f.worktree, reason, unverifiedOwner: 'broken' })
+  expect(preview.retained).toContainEqual({ identity: 'refs/mousse/threads/task/main', reason, unverifiedOwner: 'broken' })
   expect(preview.items.filter((item) => item.kind === 'worktree' || item.kind === 'ref')).toEqual([])
-  expect(preview.items.some((item) => item.kind === 'path' && item.identity === f.store.require('task').location)).toBe(true)
-  // Deleting it unattended would leave what is kept with no thread: the sweep keeps it and says why.
-  expect((await f.coordinator.cleanup.sweep(Date.now())).find((outcome) => outcome.taskId === 'task')).toMatchObject({ outcome: 'kept', reason: expect.stringContaining(BROKEN_REASON) })
-  expect(f.store.require('task').state).toBe('trashed')
-  // The person can still delete it; what is kept back stays byte for byte.
+  // Neither the sweep nor the person deletes it: what is kept would be left with no thread to own it.
+  expect((await f.coordinator.cleanup.sweep(Date.now())).find((outcome) => outcome.taskId === 'task')).toMatchObject({ outcome: 'kept', reason: expect.stringContaining(reason) })
   const fresh = await f.coordinator.cleanup.preview('task')
-  expect((await f.coordinator.purge({ taskId: 'task', operationId: 'purge', expectedGeneration: fresh.generation, previewDigest: fresh.digest })).state).toBe('purged')
+  await expect(f.coordinator.purge({ taskId: 'task', operationId: 'purge', expectedGeneration: fresh.generation, previewDigest: fresh.digest, discard: true, human: true })).rejects.toThrow()
+  expect(f.store.require('task').state).toBe('trashed'); expect(existsSync(join(f.store.require('task').location, 'workspace.json'))).toBe(true)
   expect(readFileSync(join(f.worktree, 'kept.txt'), 'utf8')).toBe('kept bytes\n'); expect(readFileSync(join(f.worktree, 'a.txt'), 'utf8')).toBe('first\n')
   expect(git(f.repo, ['for-each-ref', '--format=%(refname) %(objectname)', 'refs/mousse/threads/task/', 'refs/heads/mousse/thread/task/'])).toBe(pins)
 }, 60_000)
 
-test('an unverified thread holds its repositories, its paths and its refs, and a thread whose records name no repository never holds every one', async () => {
+test('a broken thread that names this thread’s worktree through an alias keeps it, with its untracked output and the files its abort kept', async () => {
   const f = fixture({ git: true })
   const broken = unverifiableThread(f.store, { id: 'broken', name: 'Fix prices', repo: join(f.root, 'other-repo'), how: 'recreated' })
-  const claims = await getExternalResourceClaims(f.store, new Set(['task']))
-  const owner = claims.find((claim) => claim.unverified)!.unverified!
-  expect(owner).toMatchObject({ taskId: 'broken', reason: BROKEN_REASON, repositoryIds: [broken.repositoryId] })
+  // The broken thread's helper names this worktree through a link to the profile folder, the way /tmp names /private/tmp.
+  const alias = join(f.root, 'profile-alias'); symlinkSync(f.home, alias, process.platform === 'win32' ? 'junction' : 'dir')
+  writeFileSync(join(broken.location, 'agents.json'), JSON.stringify([{ id: 'helper', worktreePath: join(alias, relative(f.home, f.worktree)), branch: 'mousse/agent/helper', status: 'ready' }]))
+  writeFileSync(join(f.worktree, 'output.txt'), 'untracked output\n')
+  const kept = await preserveBeforeAbortAsync(f.worktree, 'abort-1')
+  new ThreadJournal(f.location).append({ operationId: 'abort-1', operationType: 'publish', state: 'cancelled', details: { conflictAborted: true, preservedRef: kept } })
+  const keptSha = git(f.repo, ['rev-parse', kept!])
+  await f.coordinator.trash({ taskId: 'task', operationId: 'trash' })
+  const preview = await f.coordinator.cleanup.preview('task')
+  expect(preview.items.filter((item) => item.kind === 'worktree' || item.identity === kept)).toEqual([])
+  expect(preview.retained.map((item) => item.identity)).toEqual(expect.arrayContaining([f.worktree, kept]))
+  // Both of its worktrees fail the check: its own, and this one named through the alias.
+  expect(preview.blockers).toEqual([`Thread “Fix prices” has worktrees Mousse can’t check: ${broken.worktree}, ${join(alias, relative(f.home, f.worktree))}. ${HOLD}`])
+  await expect(f.coordinator.purge({ taskId: 'task', operationId: 'purge', expectedGeneration: preview.generation, previewDigest: preview.digest, discard: true, human: true })).rejects.toThrow()
+  expect(readFileSync(join(f.worktree, 'output.txt'), 'utf8')).toBe('untracked output\n')
+  expect(git(f.repo, ['rev-parse', kept!])).toBe(keptSha); expect(git(f.repo, ['show', `${keptSha}:a.txt`])).toBe('first')
+  expect(f.store.require('task').state).toBe('trashed')
+}, 60_000)
+
+test('an unverified thread holds its recorded and real repositories, its real paths and its refs, and nothing else', async () => {
+  const f = fixture({ git: true })
+  const other = join(f.root, 'other-repo')
+  const broken = unverifiableThread(f.store, { id: 'broken', name: 'Fix prices', repo: other, how: 'recreated' })
+  const folderRepository = 'f'.repeat(32)
+  writeFileSync(join(broken.location, 'project-folder.json'), JSON.stringify({ schemaVersion: 1, kind: 'project-folder', threadId: 'broken', worktreePath: join(f.root, 'gone-folder'), repositoryId: folderRepository }))
+  writeFileSync(join(broken.location, 'agents.json'), JSON.stringify([{ id: 'helper', branch: 'mousse/agent/helper', status: 'completed' }]))
+  const ownerOf = async () => {
+    const claims = await getExternalResourceClaims(f.store, new Set(['task']))
+    return { claims, owner: claims.find((claim) => claim.unverified)!.unverified! }
+  }
+  const { claims, owner } = await ownerOf()
+  const over = (target: Parameters<typeof unverifiedOwnerOver>[1]) => unverifiedOwnerOver(claims, target)
+  expect(owner).toMatchObject({ taskId: 'broken', reason: brokenReason(broken.worktree), worktrees: [broken.worktree] })
+  // The project folder is gone, but its record is the only one naming that repository, so it is held: uncertain.
+  expect(owner.repositoryIds).toEqual(expect.arrayContaining([broken.repositoryId, folderRepository]))
   const repositoryA = resolveRepositoryIdentity(f.repo).key
-  expect(unverifiedOwnerOver(claims, { repositoryId: broken.repositoryId })).toBe(owner)
-  expect(unverifiedOwnerOver(claims, { path: join(broken.worktree, 'src') })).toBe(owner)
-  expect(unverifiedOwnerOver(claims, { path: broken.location })).toBe(owner)
-  expect(unverifiedOwnerOver(claims, { repositoryId: repositoryA, path: f.worktree })).toBeUndefined()
-  // A ref name counts only where no repository tells them apart.
-  expect(unverifiedOwnerOver(claims, { ref: 'refs/mousse/threads/broken/other' })).toBe(owner)
-  expect(unverifiedOwnerOver(claims, { repositoryId: repositoryA, ref: 'refs/mousse/threads/broken/other' })).toBeUndefined()
-  const withoutRepository = claims.map((claim) => claim.unverified ? { ...claim, unverified: { ...claim.unverified, repositoryIds: [] } } : claim)
-  expect(unverifiedOwnerOver(withoutRepository, { repositoryId: repositoryA, ref: 'refs/mousse/changes/11111111-1111-4111-8111-111111111111/before' })).toBeUndefined()
-  expect(unverifiedOwnerOver(withoutRepository, { repositoryId: repositoryA, ref: broken.retainedRef })).toBe(withoutRepository.find((claim) => claim.unverified)!.unverified)
+  expect(over({ repositoryIds: [broken.repositoryId] })).toBe(owner)
+  expect(over({ repositoryIds: [folderRepository] })).toBe(owner)
+  expect(over({ path: await canonicalPathAsync(join(broken.worktree, 'src')) })).toBe(owner)
+  expect(over({ path: await canonicalPathAsync(broken.location) })).toBe(owner)
+  // Its own namespaces and its id-named refs are held in any repository; a branch name only where no repository tells them apart.
+  expect(over({ repositoryIds: [], ref: 'refs/mousse/lifecycle/test/broken/abc/base' })).toBe(owner)
+  expect(over({ ref: 'refs/mousse/agents/helper' })).toBe(owner)
+  expect(over({ ref: 'refs/heads/mousse/agent/helper' })).toBe(owner)
+  expect(over({ ref: 'refs/mousse/changes/11111111-1111-4111-8111-111111111111/before' })).toBeUndefined()
+  expect(over({ path: await canonicalPathAsync(f.worktree) })).toBeUndefined()
+  // A recorded repository nothing ties to a real one any more may be any repository: then every repository is held.
+  expect(owner.uncertain).toBe(true)
+  expect(over({ repositoryIds: [repositoryA] })).toBe(owner)
+  rmSync(join(broken.location, 'project-folder.json'))
+  const settled = await ownerOf()
+  expect(settled.owner.uncertain).toBe(false)
+  expect(unverifiedOwnerOver(settled.claims, { repositoryIds: [repositoryA], path: await canonicalPathAsync(f.worktree) })).toBeUndefined()
+  expect(unverifiedOwnerOver(settled.claims, { repositoryIds: [repositoryA], ref: 'refs/heads/mousse/agent/helper' })).toBeUndefined()
+  expect(unverifiedOwnerOver(settled.claims, { repositoryIds: [repositoryA], ref: 'refs/mousse/agents/helper' })).toBe(settled.owner)
+  // The broken checkout and the repository it named both gone: nothing ties the recorded one to a real repository.
+  rmSync(broken.worktree, { recursive: true, force: true }); rmSync(other, { recursive: true, force: true })
+  const gone = await ownerOf()
+  expect(gone.owner.uncertain).toBe(true)
+  expect(unverifiedOwnerOver(gone.claims, { repositoryIds: [repositoryA] })).toBe(gone.owner)
 }, 60_000)
 
 test('profile storage the installation does not list still blocks every permanent delete, broken thread or not', async () => {

@@ -1059,11 +1059,6 @@ html[data-theme='high-contrast'] .threads-sidebar-thread.threads-sidebar-card.pr
   overflow-wrap: anywhere;
 }
 
-.trash-delete-kept {
-  color: var(--text-secondary);
-  overflow-wrap: anywhere;
-}
-
 .trash-delete-details > summary,
 .trash-delete-files > summary {
   cursor: pointer;

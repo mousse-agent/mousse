@@ -11,6 +11,7 @@ import { UndoRetentionService } from '../actions/UndoRetentionService'
 import { AgentEpisodeStore } from '../agents/AgentEpisodeStore'
 import { ThreadJournal } from '../data/ThreadJournal'
 import { PRESERVED_EXPIRY_OPERATION } from '../../shared/resourceLifecycle'
+import { canonicalPathAsync, gitCommonDirAsync } from './canonicalPath'
 
 type JsonObject = Record<string, unknown>
 const object = (value: unknown): JsonObject | undefined => value !== null && typeof value === 'object' && !Array.isArray(value) ? value as JsonObject : undefined
@@ -34,6 +35,10 @@ export class OwnershipFacts {
   /** The reason a worktree could not be verified, or undefined when it was; keyed by {@link worktreeKey}. */
   readonly worktrees = new Map<string, string | undefined>()
   readonly legacy = new Map<string, LegacyScan>()
+  /** Real paths (`canonicalPathAsync`), for comparing what two records name. */
+  readonly canonical = new Map<string, string>()
+  /** The real Git common directory a checkout points at now (`gitCommonDirAsync`), or null when it can't be told. */
+  readonly commonDirs = new Map<string, string | null>()
 }
 
 /** What scanning an old `.mousse/.data` folder inside a project found, in the order the scan met it. */
@@ -50,12 +55,18 @@ export type OwnershipNeed =
   | { kind: 'present'; path: string }
   | { kind: 'worktree'; store: ResourceLifecycleStore; path: string; branch?: string; repository?: string }
   | { kind: 'legacy'; root: string }
+  | { kind: 'canonical'; path: string }
+  | { kind: 'common-dir'; path: string }
 
 /** How the synchronous pass answers what it reads outside Mousse's records. */
 export interface OwnershipReads {
   present(path: string): boolean
   worktree(store: ResourceLifecycleStore, path: string, branch: string | undefined, repository: string | undefined): string | undefined
   legacy(root: string): LegacyScan
+  /** The real path of `path`. One the facts do not cover is never guessed: the final pass throws. */
+  canonical(path: string): string
+  /** The real Git common directory checkout `path` points at now, or undefined when it can't be told. */
+  commonDir(path: string): string | undefined
   /** Facts the pass needed and did not have: a blocker each, so ownership is never decided on a guess. */
   readonly missing: string[]
 }
@@ -86,6 +97,16 @@ export function collectingReads(facts: OwnershipFacts, needs: OwnershipNeed[]): 
       if (facts.legacy.has(root)) return facts.legacy.get(root)!
       needs.push({ kind: 'legacy', root })
       return EMPTY_LEGACY
+    },
+    canonical: (path) => {
+      if (facts.canonical.has(path)) return facts.canonical.get(path)!
+      needs.push({ kind: 'canonical', path })
+      return resolve(path)
+    },
+    commonDir: (path) => {
+      if (facts.commonDirs.has(path)) return facts.commonDirs.get(path) ?? undefined
+      needs.push({ kind: 'common-dir', path })
+      return undefined
     }
   }
 }
@@ -109,7 +130,13 @@ export function finalReads(facts: OwnershipFacts): OwnershipReads {
     legacy: (root) => {
       if (facts.legacy.has(root)) return facts.legacy.get(root)!
       return { ...EMPTY_LEGACY, error: changed(root) }
-    }
+    },
+    canonical: (path) => {
+      if (facts.canonical.has(path)) return facts.canonical.get(path)!
+      throw new Error(changed(path))
+    },
+    // Not read: the repository can't be told, which the caller treats as any repository.
+    commonDir: (path) => facts.commonDirs.get(path) ?? undefined
   }
 }
 
@@ -123,6 +150,10 @@ export async function readOwnershipFacts(needs: readonly OwnershipNeed[], facts:
     } else if (need.kind === 'worktree') {
       const key = worktreeKey(need.store, need.path, need.branch, need.repository)
       if (!facts.worktrees.has(key)) facts.worktrees.set(key, await verifyWorktreeFact(need.store, need.path, need.branch, need.repository))
+    } else if (need.kind === 'canonical') {
+      if (!facts.canonical.has(need.path)) facts.canonical.set(need.path, await canonicalPathAsync(need.path))
+    } else if (need.kind === 'common-dir') {
+      if (!facts.commonDirs.has(need.path)) facts.commonDirs.set(need.path, await gitCommonDirAsync(need.path) ?? null)
     } else if (!facts.legacy.has(need.root)) facts.legacy.set(need.root, await scanLegacyFolder(need.root))
   }
 }

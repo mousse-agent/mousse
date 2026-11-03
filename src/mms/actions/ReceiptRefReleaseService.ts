@@ -95,10 +95,11 @@ export class ReceiptRefReleaseService {
           const { inventory, external } = ownership()
           for (const ref of intent.refs) {
             const resources = inventory.resources.filter((resource) => resource.kind === 'git-ref' && resource.identity === ref.name)
-            // A ref of the same name is shared even where the claim names no repository: receipt refs are named by their receipt's id.
-            if (external.some((resource) => resource.kind === 'git-ref' && resource.identity === ref.name && (!resource.repositoryId || resource.repositoryId === identity.key))) throw new Error(`Reference is associated with another task or profile: ${ref.name}`)
-            // A thread whose checkout can't be verified holds what its records may name in this repository, never every repository.
-            const unverified = unverifiedOwnerOver(external, { repositoryId: identity.key, ref: ref.name })
+            // Receipt refs are named by their receipt's id, so a claim on the same name is on this ref whatever repository the
+            // claim records: a record written before the repository moved still names the old one.
+            if (external.some((resource) => resource.kind === 'git-ref' && resource.identity === ref.name)) throw new Error(`Reference is associated with another task or profile: ${ref.name}`)
+            // A thread whose checkout can't be verified holds what its records may name, and its repositories (recorded or real).
+            const unverified = unverifiedOwnerOver(external, { repositoryIds: [identity.key], ref: ref.name })
             if (unverified) throw new Error(`${unverified.reason} ${ref.name} is kept.`)
             if (!resources.length || resources.some((resource) => resource.ownerTaskId !== task.taskId || resource.repositoryId !== identity.key || resource.claims.length > 0 || resource.ownership === 'unknown')) throw new Error(`Reference has an active, shared or unknown claim: ${ref.name}`)
           }

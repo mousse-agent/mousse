@@ -605,7 +605,7 @@ describe('deleted threads and orphans', () => {
     const orphans = report.items.filter((entry) => entry.rule === 'worktree-orphan')
     expect(orphans).toHaveLength(2)
     expect(orphans).toContainEqual(expect.objectContaining({ outcome: 'kept', reason: 'No thread uses this worktree', label: 'threads/ghost', bytes: expect.any(Number) }))
-    expect(orphans).toContainEqual(expect.objectContaining({ outcome: 'kept', reason: 'Thread “Fix prices” points at a worktree whose repository is gone. It may still use this worktree.' }))
+    expect(orphans).toContainEqual(expect.objectContaining({ outcome: 'kept', reason: `Thread “Fix prices” has a worktree Mousse can’t check: ${broken.worktree}. It may still use this worktree.` }))
     expect(readFileSync(join(mine, 'file.txt'), 'utf8')).toBe('who owns this'); expect(readFileSync(join(theirs, 'file.txt'), 'utf8')).toBe('maybe theirs')
     expect(readFileSync(join(broken.worktree, 'a.txt'), 'utf8')).toBe('first\n')
   }, 60_000)

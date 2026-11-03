@@ -330,8 +330,8 @@ test('a thread whose worktree points at a deleted and recreated repository does 
 test('a broken thread in the same repository keeps the checkout where it is, and the refusal names that thread', async () => {
   const f = await fixture(); await f.service.prepare(f.input)
   writeFileSync(join(f.worktree, 'a.txt'), 'edited\n')
-  unverifiableThread(f.store, { id: 'broken', name: 'Fix prices', repo: f.repo, how: 'unlinked' })
-  await expect(f.service.retire(f.path)).rejects.toThrow('Thread “Fix prices” points at a worktree whose repository is gone.')
+  const broken = unverifiableThread(f.store, { id: 'broken', name: 'Fix prices', repo: f.repo, how: 'unlinked' })
+  await expect(f.service.retire(f.path)).rejects.toThrow(`Thread “Fix prices” has a worktree Mousse can’t check: ${broken.worktree}. This checkout is kept until Mousse can check that worktree again.`)
   expect(readFileSync(join(f.worktree, 'a.txt'), 'utf8')).toBe('edited\n'); expect(listed(f.repo)).toContain(slashes(f.worktree))
   expect(f.service.load(f.path).trashPath).toBeUndefined()
 }, 60_000)

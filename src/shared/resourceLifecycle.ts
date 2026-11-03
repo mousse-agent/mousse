@@ -137,13 +137,14 @@ export interface LifecyclePurgePreview {
 }
 
 /**
- * Why automatic cleanup leaves this thread in the trash: something of it is kept back because another thread, whose
- * checkout can't be verified, may still use it. Deleting it then would leave the kept part with no thread at all, so
- * only the person decides, in the Permanently delete dialog. Undefined when nothing is kept back for that reason.
+ * Why the thread can't be deleted yet: something of it is kept back because another thread, whose worktree can't be
+ * checked, may still use it (`retained` entries with `unverifiedOwner`). Deleting the thread then would leave what is
+ * kept with no thread to own it, and nothing in the app could delete it later; so the thread stays in the trash, owning
+ * it, until that worktree can be checked again. One line per such thread.
  */
-export function keptBackForUnverifiedThread(preview: Pick<LifecyclePurgePreview, 'retained'>): string | undefined {
-  const reasons = [...new Set(preview.retained.filter((item) => item.unverifiedOwner).map((item) => item.reason))]
-  return reasons.length ? `${reasons.join(' ')} Its files that may overlap are kept; review permanent deletion to decide.` : undefined
+export function unverifiedHolds(preview: Pick<LifecyclePurgePreview, 'retained'>): string[] {
+  return [...new Set(preview.retained.filter((item) => item.unverifiedOwner).map((item) => item.reason))]
+    .map((reason) => `${reason} What this thread may share with it stays in the trash with this thread until Mousse can check that worktree again.`)
 }
 export interface LifecyclePurgeProgress extends LifecyclePurgePreview {
   operationId: string

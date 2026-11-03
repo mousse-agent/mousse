@@ -8,6 +8,7 @@ import type {
   TaskLifecycleRecord,
   TrashRetentionPolicy
 } from '../../src/shared/resourceLifecycle'
+import { unverifiedHolds } from '../../src/shared/resourceLifecycle'
 import {
   RecentlyDeletedView,
   type RecentlyDeletedActions
@@ -393,23 +394,17 @@ describe('Permanent delete confirmation', () => {
     expect(confirmButton(html)).toContain('disabled')
   })
 
-  it('names the thread whose broken worktree keeps some items back, once, and still lets the rest be deleted', () => {
-    const reason = 'Thread “Fix prices” points at a worktree whose repository is gone.'
-    const html = dialog({
-      preview: preview([item('path', 'data')], {
-        retained: [
-          { identity: '/x/wt', reason, unverifiedOwner: 'b' },
-          { identity: 'refs/mousse/threads/a/main', reason, unverifiedOwner: 'b' },
-          { identity: '/x/shared', reason: 'Another task or profile retains this workspace' }
-        ]
-      })
-    })
-    expect(html).toContain(`Kept: ${reason} What it may still use stays; see Show details.`)
-    expect(html.split('data-testid="trash-delete-kept"')).toHaveLength(2)
-    expect(html.indexOf('Kept: Thread')).toBeLessThan(html.indexOf('Show details'))
+  it('names the thread and the worktree that can’t be checked, lists what stays with this thread, and refuses to go on', () => {
+    const reason = 'Thread “Fix prices” has a worktree Mousse can’t check: /x/broken/main.'
+    const retained = [
+      { identity: '/x/wt', reason, unverifiedOwner: 'b' },
+      { identity: 'refs/mousse/threads/a/main', reason, unverifiedOwner: 'b' }
+    ]
+    const html = dialog({ preview: preview([item('path', 'data')], { retained, blockers: unverifiedHolds({ retained }) }) })
+    expect(html).toContain(`Can’t delete: ${reason} What this thread may share with it stays in the trash with this thread until Mousse can check that worktree again.`)
+    expect(html.split('Can’t delete:')).toHaveLength(2)
     expect(html).toContain(`Kept · ${reason}`)
-    expect(html).not.toContain('Can’t delete')
-    expect(confirmButton(html)).not.toContain('disabled')
+    expect(confirmButton(html)).toContain('disabled')
   })
 
   it('shows a busy or failed deletion with its reason and lets the person try again', () => {

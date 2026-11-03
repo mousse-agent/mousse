@@ -15,7 +15,9 @@ import { PROCESS_INSTANCE_ID } from '../queue/processLiveness'
 import { AgentEpisodeStore } from '../agents/AgentEpisodeStore'
 import { WorktreeIdentity } from '../worktree/WorktreeIdentity'
 import { ThreadJournal } from '../data/ThreadJournal'
-import { getExternalResourceClaims, getExternalResourceClaimsFromFacts, unverifiedOwnerOver } from './LifecycleClaims'
+import { claimOverlapsPath, getExternalResourceClaims, getExternalResourceClaimsFromFacts, unverifiedOwnerOver } from './LifecycleClaims'
+import { canonicalPathAsync } from './canonicalPath'
+import { repositoryKeyOf } from '../git/RepositoryIdentity'
 import { OwnershipFacts } from './ResourceInventory'
 import type { ConversationBranch, ThreadAction } from '../../shared/threadActions'
 import { gitDirectoryEnvAsync } from '../git/gitEnv'
@@ -479,13 +481,16 @@ export class WorktreeRetirementService {
       }
       return excluded
     }
-    const overlaps = (left: string, right: string) => { const rel = relative(resolve(left), resolve(right)); return !isAbsolute(rel) && rel !== '..' && !rel.startsWith(`..${process.platform === 'win32' ? '\\' : '/'}`) }
+    // Compared by real paths and real repositories, so an alias of this checkout, or a record written before the repository
+    // moved, still names it.
+    const worktreeReal = await canonicalPathAsync(manifest.worktreePath)
+    const repositoryIds = [manifest.repositoryId, repositoryKeyOf(await canonicalPathAsync(manifest.commonDir))]
     /** Why another owner keeps this checkout: a claim on it, or a thread whose checkout can't be verified and whose records may name it. */
     const shares = (all: Awaited<ReturnType<typeof getExternalResourceClaims>>, excluded: Set<string>): string | undefined => {
       const claims = all.filter((resource) => !(resource.peerProfileId === this.store.profileId && excluded.has(resource.ownerTaskId)))
-      if (claims.some((resource) => isAbsolute(resource.identity) && (overlaps(resource.identity, manifest.worktreePath) || overlaps(manifest.worktreePath, resource.identity)))) return 'Another task or profile retains this checkout; retirement is blocked'
-      const unverified = unverifiedOwnerOver(claims, { repositoryId: manifest.repositoryId, path: manifest.worktreePath })
-      return unverified && `${unverified.reason} This checkout is kept until that is resolved.`
+      if (claims.some((resource) => claimOverlapsPath(resource, worktreeReal))) return 'Another task or profile retains this checkout; retirement is blocked'
+      const unverified = unverifiedOwnerOver(claims, { repositoryIds, path: worktreeReal })
+      return unverified && `${unverified.reason} This checkout is kept until Mousse can check that worktree again.`
     }
     const excluded = excludedNow()
     const blocked = shares(await getExternalResourceClaims(this.store, excluded), excluded)
