@@ -6,7 +6,7 @@ import type { ThreadLeaseHandle } from '../queue/ThreadExecutionLease'
 import { collectStoreGarbageAsync, threadSnapshotStoreAsync } from '../workspace/SnapshotWorkspace'
 import { PRESERVED_EXPIRY_OPERATION, PRESERVED_REFS } from '../../shared/resourceLifecycle'
 import { withGitMutationLocks } from './GitOperationCoordinator'
-import { gitAsync } from './git'
+import { gitAsync, LISTING } from './git'
 import { UndoRetentionService } from './UndoRetentionService'
 
 /**
@@ -179,7 +179,7 @@ export async function expirePreservedFiles(threadDirectory: string, workspacePat
     const retention = new UndoRetentionService(threadDirectory, options.now)
     const journal = new ThreadJournal(threadDirectory)
     const store = await threadSnapshotStoreAsync(threadDirectory, workspacePath)
-    const listing = () => gitAsync(workspacePath, ['for-each-ref', `--format=${PRESERVED_REF_FORMAT}`, PRESERVED_REFS])
+    const listing = () => gitAsync(workspacePath, ['for-each-ref', `--format=${PRESERVED_REF_FORMAT}`, PRESERVED_REFS], undefined, undefined, LISTING)
     const present = async () => new Set(parsePreservedRefs(await listing()).map((item) => item.ref))
     const finish = async (went: string[], skipped?: string): Promise<PreservedFilesExpiry> => {
       if (went.length && store) await collectStoreGarbageAsync(store)

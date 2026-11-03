@@ -211,13 +211,13 @@ export function hiddenStoreEnv(store: HiddenStore, base: NodeJS.ProcessEnv = pro
  * is the caller's environment (`repoProgramEnv()`); the isolation is applied on top. Before the store exists there is no
  * `GIT_DIR` to name: `init` names the folder it makes, under the Mousse home.
  */
-export async function runStoreGitAsync(store: HiddenStore, args: readonly string[], base: NodeJS.ProcessEnv = process.env): Promise<string> {
+export async function runStoreGitAsync(store: HiddenStore, args: readonly string[], base: NodeJS.ProcessEnv = process.env, maxBuffer?: number): Promise<string> {
   const run = ['--no-optional-locks', ...args]
   const init = args[0] === 'init'
   const cwd = init ? dirname(store.gitDir) : store.gitDir
   if (init) await assertGitAllowedAsync({ cwd, args: run, env: isolation(), lockFree: true })
   else await checkStoreCommandAsync(store, store.gitDir, run, {}, false)
-  const ran = await runGitProcess(run, { cwd, env: init ? isolatedEnv(store, base) : { ...isolatedEnv(store, base), ...location(store, false) } })
+  const ran = await runGitProcess(run, { cwd, env: init ? isolatedEnv(store, base) : { ...isolatedEnv(store, base), ...location(store, false) }, maxBuffer })
   if (ran.error || ran.status !== 0) throw gitRunError(run, ran)
   return ran.stdout.trim()
 }

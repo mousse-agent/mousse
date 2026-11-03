@@ -28,6 +28,7 @@ import {
 import { canonicalRepository, portableRepository, REPO_ID } from './repository'
 import { dispatchRequest } from './validate'
 import { commitDispatchResult, git, remoteGit } from './git'
+import { LISTING_MAX_BUFFER } from '../../git/runGitProcess'
 import type {
   DispatchArtifacts,
   DispatchRecord,
@@ -301,7 +302,7 @@ export class DispatchService {
         throw new NetError('conflict')
       this.phase(record, 'publishing')
       await git(record.worktree.path, ['add', '--all'], controller.signal)
-      if (await git(record.worktree.path, ['diff', '--cached', '--name-only'], controller.signal))
+      if (await git(record.worktree.path, ['diff', '--cached', '--name-only'], controller.signal, LISTING_MAX_BUFFER))
         await commitDispatchResult(record.worktree.path, `Dispatch ${record.id}`, controller.signal)
       const head = await git(record.worktree.path, ['rev-parse', 'HEAD'], controller.signal)
       await git(root, ['merge-base', '--is-ancestor', request.baseCommit, head], controller.signal)

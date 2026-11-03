@@ -106,6 +106,17 @@ describe('runGit', () => {
     expect(Math.max(...lines.map((line) => line.text.length))).toBeLessThanOrEqual(4096)
   }, 30_000)
 
+  it('says when stdout was longer than it keeps, and keeps all of it up to the limit', async () => {
+    const dir = folder()
+    const script = aliasArgs(dir, `process.stdout.write('a'.repeat(5000) + 'the end')`)
+    const cut = await runGit(dir, script, { stdoutBytes: 4096 })
+    expect(cut).toMatchObject({ ok: true, truncated: true })
+    expect(cut.stdout.length).toBe(4096)
+    expect(cut.stdout.endsWith('the end')).toBe(true)
+    const whole = await runGit(dir, script, { stdoutBytes: 8192 })
+    expect(whole).toMatchObject({ ok: true, truncated: false, stdout: 'a'.repeat(5000) + 'the end' })
+  })
+
   it('passes on only the head of an overlong line, so a secret across the cut never shows up as the next line', async () => {
     const dir = folder()
     const lines: GitLine[] = []

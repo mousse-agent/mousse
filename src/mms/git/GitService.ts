@@ -13,6 +13,7 @@ import { explicitActionGitEnv } from './gitEnv'
 import { IN_PROGRESS_GIT_MARKERS } from './gitMarkers'
 import { OperationStream } from './gitOperationStream'
 import { englishMessagesEnv, runGit, type GitLine, type GitRun, type GitRunOptions } from './gitProcess'
+import { LISTING_MAX_BUFFER } from './runGitProcess'
 import { HookTrace, withHookFailure, type HookTraceEvent } from './gitTrace'
 import { GitHubCodeHost } from './GitHubCodeHost'
 import { GitHubService } from './GitHubService'
@@ -410,11 +411,15 @@ export class GitService {
       guarded = await withoutRepoProgramsAsync(cwd, args, { userAction, env: run.env, signal: run.signal })
     } catch (error) {
       // Cancelled during the check before it: the answer `runGit` gives a run cancelled before it starts.
-      if (run.signal?.aborted && error === run.signal.reason) return { ok: false, code: null, stalled: false, cancelled: true, exited: true, stdout: '', output: '' }
+      if (run.signal?.aborted && error === run.signal.reason) return { ok: false, code: null, stalled: false, cancelled: true, exited: true, stdout: '', truncated: false, output: '' }
       throw error
     }
-    // Mousse's own commands take no optional lock, so a read never refreshes and rewrites the index.
-    return runGit(cwd, guarded, userAction ? run : { ...run, env: { ...run.env, ...SAFE_LOOKUP_ENV, GIT_OPTIONAL_LOCKS: '0' } })
+    // What the user pressed shows its output as messages, where the end (Git's verdict) is what counts.
+    if (userAction) return runGit(cwd, guarded, run)
+    // Mousse's own commands take no optional lock, so a read never refreshes and rewrites the index. Their stdout is
+    // read as an answer, so it is kept whole, and an answer too long to keep is a failure, never part of one.
+    const read = await runGit(cwd, guarded, { stdoutBytes: LISTING_MAX_BUFFER, ...run, env: { ...run.env, ...SAFE_LOOKUP_ENV, GIT_OPTIONAL_LOCKS: '0' } })
+    return read.truncated ? { ...read, ok: false } : read
   }
 
   /**

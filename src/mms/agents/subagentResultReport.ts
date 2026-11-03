@@ -2,7 +2,7 @@ import { existsSync, readFileSync } from 'node:fs'
 import type { SubagentResultReport } from '../../shared/subagentResult'
 import type { ThreadAction } from '../../shared/threadActions'
 import { atomicWriteJsonSync } from '../data/AtomicFs'
-import { gitStep, tryGitStep } from '../actions/git'
+import { gitStep, LISTING, tryGitStep } from '../actions/git'
 import { snapshotOriginSteps } from '../actions/snapshots'
 import { runAsync, runSync, type Steps } from '../actions/steps'
 
@@ -35,7 +35,7 @@ function* reportSteps(input: SubagentResultInput): Steps<SubagentResultReport> {
   const resultSha = yield* gitStep(cwd, ['rev-parse', '--verify', `${input.resultSha}^{commit}`])
   if (input.pins?.base) yield* gitStep(cwd, ['update-ref', '--no-deref', input.pins.base, baseSha])
   if (input.pins?.result) yield* gitStep(cwd, ['update-ref', '--no-deref', input.pins.result, resultSha])
-  const changed = baseSha === resultSha ? [] : (yield* gitStep(cwd, ['diff', '--name-only', '--no-renames', baseSha, resultSha])).split(/\r?\n/).filter(Boolean)
+  const changed = baseSha === resultSha ? [] : (yield* gitStep(cwd, ['diff', '--name-only', '--no-renames', baseSha, resultSha], undefined, undefined, LISTING)).split(/\r?\n/).filter(Boolean)
   const after = yield* snapshotOriginSteps(cwd, resultSha)
   const startHead = (yield* snapshotOriginSteps(cwd, baseSha)).head ?? baseSha
   let commits: Array<{ sha: string; subject: string }> = []
