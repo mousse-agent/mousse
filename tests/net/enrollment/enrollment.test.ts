@@ -571,12 +571,12 @@ describe('P2 protected authority delivery', () => {
   it('requires real encrypted invite storage, explicitly protects existing keys, and stays locked after restart', async () => {
     const a = await profile(true, systemClock, false),
       before = a.keys.nodeKeys()
-    expect(a.keys.encryptedAtRest()).toBe(false)
+    expect(a.keys.protectedAtRest()).toBe(false)
     expect(() => a.service.issueNodeInvite()).toThrow(
       expect.objectContaining({ code: 'keystore_locked' })
     )
     a.keys.protect('enrollment-test-master')
-    expect(a.keys.encryptedAtRest()).toBe(true)
+    expect(a.keys.protectedAtRest()).toBe(true)
     expect(a.keys.nodeKeys()).toEqual(before)
     const file = readFileSync(join(a.path, 'net', 'keys.json')).toString()
     expect(file).not.toContain('PRIVATE KEY')
@@ -624,7 +624,7 @@ describe('P2 protected authority delivery', () => {
     expect(() => faulted.protect('new-master')).toThrow(
       expect.objectContaining({ code: 'storage_full' })
     )
-    expect(faulted.encryptedAtRest()).toBe(false)
+    expect(faulted.protectedAtRest()).toBe(false)
     expect(readFileSync(join(plain.path, 'net', 'keys.json'))).toEqual(before)
     const a = await profile(true),
       b = await profile(),

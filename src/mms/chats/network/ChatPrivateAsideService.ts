@@ -121,7 +121,7 @@ export class ChatPrivateAsideService {
     spaces.client.options.identity.verifyAuthor(opening.author,bytes,sig,opening.ts,'history')
     return{descriptor,state}
   }
-  private protected():void{const {rt}=this.options;if(rt.keys.state()!=='unlocked'||!rt.keys.encryptedAtRest())throw new NetError('keystore_locked');this.selfPeer()}
+  private protected():void{const {rt}=this.options;if(rt.keys.state()!=='unlocked'||!rt.keys.protectedAtRest())throw new NetError('keystore_locked');this.selfPeer()}
   private selfPeer(){
     const {rt}=this.options,self=rt.identity.self(),root=self&&rt.identity.pinnedRootKey(self.user),signed=self&&rt.identity.roster(self.user)
     if(!self||!root||!signed||rt.identity.rosterState(self.user)!=='ok')throw new NetError('bad_delegation')

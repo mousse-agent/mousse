@@ -1244,9 +1244,9 @@ export class SpaceHostService implements StreamAuthority, SpaceJoinAdmissionPort
     )
       return fail('bad_request')
     if (
-      !('encryptedAtRest' in this.options.keys) ||
-      typeof this.options.keys.encryptedAtRest !== 'function' ||
-      this.options.keys.encryptedAtRest() !== true
+      !('protectedAtRest' in this.options.keys) ||
+      typeof this.options.keys.protectedAtRest !== 'function' ||
+      this.options.keys.protectedAtRest() !== true
     )
       return fail('keystore_locked')
     if (
@@ -1295,9 +1295,9 @@ export class SpaceHostService implements StreamAuthority, SpaceJoinAdmissionPort
   registerInvite(space: SpaceId, authorization: Signed, proofKey: Uint8Array): void {
     this.host(space, true)
     if (
-      !('encryptedAtRest' in this.options.keys) ||
-      typeof this.options.keys.encryptedAtRest !== 'function' ||
-      this.options.keys.encryptedAtRest() !== true
+      !('protectedAtRest' in this.options.keys) ||
+      typeof this.options.keys.protectedAtRest !== 'function' ||
+      this.options.keys.protectedAtRest() !== true
     )
       return fail('keystore_locked')
     if (proofKey.length !== 32) return fail('invite_invalid')

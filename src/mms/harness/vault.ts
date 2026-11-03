@@ -2,11 +2,13 @@ import { mkdirSync, readFileSync, rmSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { atomicWriteFileSync } from '../data/AtomicFs'
 import { createSecretCodec, type SecretCodec } from '../providers/secretCodec'
+import { setAsideSecretFile } from '../providers/secretFile'
 
 /**
  * Secrets of one instance (`<stateDir>/secrets.json`): string values by name, encrypted at rest
  * with the OS vault whenever Electron offers it, under the same rules as the provider credential
- * file. Only the instance's own runtime reads it; the values never reach a snapshot or a log.
+ * file (an owner-only plain file under a `plainAtRest` codec). Only the instance's own runtime reads
+ * it; the values never reach a snapshot or a log.
  */
 
 const ENVELOPE_KEY = '__mousse_encrypted_v1'
@@ -44,7 +46,12 @@ export class InstanceVault {
       } catch {
         decrypted = null
       }
-      if (decrypted === null) throw this.failure('decryption is unavailable or failed')
+      if (decrypted === null) {
+        if (!this.codec.plainAtRest) throw this.failure('decryption is unavailable or failed')
+        // Saved through the keychain, which this build never asks: start empty.
+        setAsideSecretFile(this.path)
+        return (this.cache = {})
+      }
       try {
         parsed = JSON.parse(decrypted)
       } catch {
