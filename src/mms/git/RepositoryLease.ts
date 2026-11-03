@@ -73,7 +73,13 @@ function safeReclaim(path: string, staleAfterMs: number): boolean {
     return true
   } catch { return false }
 }
-/** Update through the opened inode after verifying the token, never a replacement owner. */
+/**
+ * Update through the opened inode after verifying the token, never a replacement owner: a reclaim that unlinked the file
+ * and wrote its own leaves this write in the old inode. (A temporary file renamed over the lease would replace the new
+ * owner's file instead.) The new owner record is written over the old one before the file is cut to its length, never
+ * after emptying it, so a reader in another process never sees an empty or cut-short lease: the records only differ in
+ * `heartbeatAt`, which has a fixed width, so they have the same length.
+ */
 function writeOwnerInPlace(path: string, token: string, owner: RepositoryLeaseOwner): boolean {
   let fd: number | null = null
   try {
@@ -82,8 +88,8 @@ function writeOwnerInPlace(path: string, token: string, owner: RepositoryLeaseOw
     const length = readSync(fd, buffer, 0, buffer.length, 0)
     if (JSON.parse(buffer.subarray(0, length).toString('utf8')).token !== token) return false
     const payload = Buffer.from(JSON.stringify(owner))
-    ftruncateSync(fd, 0)
     writeSync(fd, payload, 0, payload.length, 0)
+    if (payload.length < length) ftruncateSync(fd, payload.length)
     fsyncSync(fd)
     return true
   } catch { return false } finally { if (fd !== null) try { closeSync(fd) } catch { /* ignore */ } }

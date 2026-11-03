@@ -1,5 +1,5 @@
 import { afterEach, expect, test, vi } from 'vitest'
-import { mkdtempSync, mkdirSync, writeFileSync, existsSync, rmSync, renameSync, cpSync, readFileSync, readdirSync, lstatSync, readlinkSync, symlinkSync, unlinkSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, writeFileSync, existsSync, rmSync, renameSync, cpSync, readFileSync, readdirSync, lstatSync, readlinkSync, symlinkSync, unlinkSync, chmodSync } from 'node:fs'
 import { execFileSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { randomBytes } from 'node:crypto'
@@ -880,4 +880,132 @@ test('a repository lease lost while the folder is being deleted stops the delete
   expect(await f.service.expireTrash(f.path, { now: LATER() })).toEqual({ removed: true })
   await f.service.reconstruct(f.path)
   expect(filesOf(f.worktree)).toEqual(f.before)
+})
+
+// ---- Review round 2: a rebuild never deletes what it did not write; layers of folders; permissions; the lease ----
+
+test.skipIf(process.platform === 'win32')('a rebuild never deletes bytes it did not write: files that appear in the way are kept as a copy first, and the rebuild finishes', async () => {
+  const f = await trashedFixture()
+  expect(await f.service.expireTrash(f.path, { now: LATER() })).toEqual({ removed: true })
+  const personal = 'a sole copy written while the worktree was rebuilt 3ea43028\n', cache = 'other bytes at a kept path\n'
+  // While the worktree is rebuilt, someone writes where the proof says there is a link, and over a file the proof holds.
+  const manifest = await f.service.reconstruct(f.path, { env: {}, prepare: (root) => {
+    mkdirSync(join(root, 'ignored', 'link'), { recursive: true }); writeFileSync(join(root, 'ignored', 'link', 'personal.txt'), personal)
+    writeFileSync(join(root, 'ignored', 'cache.bin'), cache)
+  } })
+  expect(manifest.state).toBe('materialized')
+  expect(filesOf(f.worktree)).toEqual(f.before)
+  // Both were kept before they were cleared, owned by the thread's journal, byte for byte.
+  const kept = new Map(manifest.keptAside!.flatMap((entry) => entry.paths.map((path) => [path, entry.ref] as const)))
+  expect([...kept.keys()].sort()).toEqual(['ignored/cache.bin', 'ignored/link/personal.txt'])
+  expect(git(f.worktree, ['cat-file', 'blob', `${kept.get('ignored/link/personal.txt')}:ignored/link/personal.txt`])).toBe(personal.trimEnd())
+  expect(git(f.worktree, ['cat-file', 'blob', `${kept.get('ignored/cache.bin')}:ignored/cache.bin`])).toBe(cache.trimEnd())
+  const owned = new ThreadJournal(join(f.home, 'thread-data', 'task')).list().filter((entry) => entry.operationType === 'worktree-cleanup' && entry.state === 'completed').map((entry) => (entry.details as { ref?: string }).ref)
+  for (const ref of kept.values()) expect(owned).toContain(ref)
+})
+
+test('a tracked file that became an empty folder while the folder was being deleted is rebuilt as that folder', async () => {
+  const f = await fixture()
+  await f.service.prepare(f.input); await f.service.retire(f.path)
+  expect(await f.service.expireTrash(f.path, { now: LATER(), afterRename: (renamed) => { unlinkSync(join(renamed, 'b.txt')); mkdirSync(join(renamed, 'b.txt')) } })).toMatchObject({ waiting: true })
+  const manifest = manifestOf(f.path), left = filesOf(manifest.deleting.path)
+  expect(left['b.txt/']).toBeDefined()
+  await f.service.reconstruct(f.path)
+  expect(filesOf(f.worktree)).toEqual(left)
+  // The folder came from a layer of folders only: nothing in it to keep a copy of.
+  expect(manifestOf(f.path).keptFiles).toEqual([{ paths: [], folders: ['b.txt'] }])
+})
+
+test.skipIf(process.platform === 'win32').each([
+  ['a file', (root: string) => writeFileSync(join(root, 'ignored'), 'became a file\n')],
+  ['a link', (root: string) => symlinkSync('sub', join(root, 'ignored'))]
+] as const)('a folder that became %s and then a folder again across runs is rebuilt in its newest form', async (_what, become) => {
+  const f = await trashedFixture()
+  expect(await f.service.expireTrash(f.path, { now: LATER(), afterRename: (renamed) => { rmSync(join(renamed, 'ignored'), { recursive: true }); become(renamed) } })).toMatchObject({ waiting: true })
+  const first = manifestOf(f.path), root = first.deleting.path
+  rmSync(join(root, 'ignored')); mkdirSync(join(root, 'ignored')); writeFileSync(join(root, 'ignored', 'new.txt'), 'a folder again\n')
+  expect(await f.service.expireTrash(f.path, { now: Date.parse(first.deleting.changedAt) + 2 * WORKTREE_TRASH_QUIET_MS })).toMatchObject({ waiting: true })
+  const left = filesOf(root)
+  await f.service.reconstruct(f.path)
+  expect(filesOf(f.worktree)).toEqual(left)
+  // A second restore of the same record is not stopped by the first: the worktree is there, as rebuilt.
+  expect(manifestOf(f.path).state).toBe('materialized')
+})
+
+/** Gives every folder under `root` its owner's write permission back, so a test's folders can be removed. */
+function writableTree(root: string): void {
+  for (const name of readdirSync(root)) {
+    const path = join(root, name), stat = lstatSync(path)
+    if (stat.isDirectory()) { chmodSync(path, 0o755); writableTree(path) }
+  }
+}
+
+test.skipIf(process.platform === 'win32' || process.getuid?.() === 0)('a folder Mousse may not delete files in keeps the worktree in the trash, whole, naming the folder; a restore brings it back byte for byte', async () => {
+  const f = await trashedFixture((trashPath) => { mkdirSync(join(trashPath, 'ignored', 'ro')); writeFileSync(join(trashPath, 'ignored', 'ro', 'mod.go'), 'package x\n'); chmodSync(join(trashPath, 'ignored', 'ro'), 0o555) })
+  try {
+    expect(await f.service.expireTrash(f.path, { now: LATER() })).toEqual({ kept: expect.stringContaining('Mousse may not delete the files in ignored/ro, so the worktree stays in the trash') })
+    expect(manifestOf(f.path).state).toBe('trashed'); expect(filesOf(f.trashPath)).toEqual(f.before); expect(deletingFolders(f.trashPath)).toEqual([])
+    await f.service.reconstruct(f.path)
+    expect(filesOf(f.worktree)).toEqual(f.before)
+  } finally { writableTree(f.root) }
+})
+
+test.skipIf(process.platform === 'win32' || process.getuid?.() === 0)('a folder made read-only after the rename stops the delete; a restore rebuilds the worktree from the proof, with that folder read-only', async () => {
+  const f = await trashedFixture()
+  let root = ''
+  try {
+    expect(await f.service.expireTrash(f.path, { now: LATER(), afterRename: (renamed) => { root = renamed; chmodSync(join(renamed, 'sub'), 0o555) } })).toMatchObject({ waiting: true })
+    // The next run gets as far as the folder, and stops there.
+    const changedAt = Date.parse(manifestOf(f.path).deleting.changedAt)
+    expect(await f.service.expireTrash(f.path, { now: changedAt + 2 * WORKTREE_TRASH_QUIET_MS })).toEqual({ kept: expect.stringContaining('Mousse may not delete files in sub'), readOnly: true })
+    expect(existsSync(join(root, 'sub', 'x.txt'))).toBe(true)
+    await f.service.reconstruct(f.path)
+    expect(filesOf(f.worktree)).toEqual({ ...f.before, 'sub/': 'folder 365' })
+    expect(existsSync(root)).toBe(false); expect(listed(f.repo)).not.toContain(slashes(f.trashPath))
+  } finally { writableTree(f.root) }
+})
+
+test('a lease read that meets the file while another process writes it is tried again instead of failing the expiry', async () => {
+  const f = await trashedFixture()
+  const leasePath = f.ownership.repositoryLease.path, held = readFileSync(leasePath, 'utf8')
+  // The file is empty for a moment, as a writer that empties it first leaves it.
+  writeFileSync(leasePath, ''); setTimeout(() => writeFileSync(leasePath, held), 10)
+  expect(await f.service.expireTrash(f.path, { now: LATER() })).toEqual({ removed: true })
+  await f.service.reconstruct(f.path)
+  expect(filesOf(f.worktree)).toEqual(f.before)
+})
+
+test('the delete a restore finishes keeps the repository lease fresh', async () => {
+  const f = await trashedFixture()
+  await expect(f.service.expireTrash(f.path, { now: LATER(), afterRename: () => { throw new Error('the process stopped') } })).rejects.toThrow()
+  const ticks: Array<() => void> = []
+  const realSetInterval = globalThis.setInterval
+  const spy = vi.spyOn(globalThis, 'setInterval').mockImplementation(((callback: () => void, ms?: number) => { if (ms === 5_000) ticks.push(callback); return realSetInterval(callback, ms) }) as typeof setInterval)
+  const heartbeat = vi.spyOn(f.ownership.repositoryLease, 'heartbeat')
+  try { await f.service.reconstruct(f.path) } finally { spy.mockRestore() }
+  expect(ticks).toHaveLength(1)
+  ticks[0]!()
+  expect(heartbeat).toHaveBeenCalled()
+  expect(filesOf(f.worktree)).toEqual(f.before)
+})
+
+test.skipIf(process.platform === 'win32')('a folder swapped for a link just before a file in it is read stops the delete as a change, and a later run settles it', async () => {
+  const f = await trashedFixture()
+  const outside = join(f.root, 'outside'); mkdirSync(outside); writeFileSync(join(outside, 'cache.bin'), 'outside\n')
+  let swapped = false
+  const outcome = await f.service.expireTrash(f.path, { now: LATER(), beforeRemove: (path) => {
+    // Right as the folder before it goes, `ignored` (read next) becomes a link to outside the trash.
+    if (swapped || !path.endsWith(`${sep}sub`)) return
+    swapped = true
+    const root = dirname(path)
+    renameSync(join(root, 'ignored'), join(f.root, 'moved-ignored')); symlinkSync(outside, join(root, 'ignored'))
+  } }).catch((error: Error) => error)
+  expect(readFileSync(join(outside, 'cache.bin'), 'utf8')).toBe('outside\n')
+  expect(outcome).toEqual({ kept: expect.stringMatching(/changed while it was being deleted/), waiting: true })
+  const manifest = manifestOf(f.path), left = filesOf(manifest.deleting.path)
+  expect(await f.service.expireTrash(f.path, { now: Date.parse(manifest.deleting.changedAt) + 2 * WORKTREE_TRASH_QUIET_MS })).toEqual({ removed: true })
+  expect(readFileSync(join(outside, 'cache.bin'), 'utf8')).toBe('outside\n')
+  await f.service.reconstruct(f.path)
+  // `sub` went before the swap and comes back from the proof; `ignored` comes back as the link it is now.
+  expect(filesOf(f.worktree)).toEqual({ ...Object.fromEntries(Object.entries(f.before).filter(([path]) => !path.startsWith('ignored/'))), ignored: left.ignored })
 })

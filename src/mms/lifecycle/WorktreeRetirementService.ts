@@ -1,9 +1,9 @@
 import { MOUSSE_CONTROL_FILE_PATHS } from '../worktree/controlFiles'
 import { createHash, randomBytes } from 'node:crypto'
-import { existsSync, lstatSync, readdirSync, readFileSync, readlinkSync, realpath as realpathCallback, rmdirSync, unlinkSync, type BigIntStats, type Stats } from 'node:fs'
+import { constants as fsConstants, existsSync, lstatSync, readdirSync, readFileSync, readlinkSync, realpath as realpathCallback, rmdirSync, unlinkSync, type BigIntStats, type Stats } from 'node:fs'
 import { access, chmod, lstat, mkdir, readdir, readFile, readlink, rename, rmdir, symlink, unlink, writeFile } from 'node:fs/promises'
 import { promisify } from 'node:util'
-import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path'
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { atomicWriteJsonSync } from '../data/AtomicFs'
 import { assertLifecyclePath, assertLifecyclePathAsync, ResourceLifecycleStore } from './ResourceLifecycleStore'
 import type { RepositoryLeaseHandle } from '../git/RepositoryLease'
@@ -75,6 +75,25 @@ function lockReasonSync(adminDir: string): string | undefined {
 function lockedText(reason: string, path: string): string {
   return `Git has this worktree locked${reason ? ` (${reason})` : ''}, so it stays in the trash. Run git worktree unlock "${path}" to let it be deleted.`
 }
+/**
+ * The first folder in `root` (relative to it, `''` for `root` itself) whose files this process may not delete, or
+ * undefined. Links are not followed. On Windows a folder's read-only flag does not stop that, so nothing is looked at.
+ */
+async function readOnlyFolderAsync(root: string): Promise<string | undefined> {
+  if (process.platform === 'win32') return undefined
+  let seen = 0
+  const visit = async (path: string, rel: string, depth: number): Promise<string | undefined> => {
+    if (++seen > 100_000 || depth > 64) return undefined
+    if (!await access(path, fsConstants.W_OK | fsConstants.X_OK).then(() => true, () => false)) return rel
+    for (const entry of await readdir(path, { withFileTypes: true })) {
+      if (!entry.isDirectory() || depth === 0 && entry.name === '.git') continue
+      const found = await visit(join(path, entry.name), rel ? `${rel}/${entry.name}` : entry.name, depth + 1)
+      if (found !== undefined) return found
+    }
+    return undefined
+  }
+  return visit(root, '', 0)
+}
 /** Whether the volume of `path` tells names apart only by case, as macOS and Windows volumes usually do not. */
 async function caseInsensitiveAt(path: string): Promise<boolean> {
   for (let at = resolve(path); dirname(at) !== at; at = dirname(at)) {
@@ -85,42 +104,99 @@ async function caseInsensitiveAt(path: string): Promise<boolean> {
   }
   return false
 }
-/** A rebuild writing entries into a new checkout: its top folder, whether the volume folds case, and the folders done. */
-interface Placing { top: string; insensitive: boolean; placed: Set<string> }
-/** Removes an entry of a checkout being rebuilt: a folder with everything in it, a link as the link. Never follows a link. */
-async function clearEntry(path: string): Promise<void> {
-  const stat = await lstat(path)
-  if (stat.isDirectory()) {
-    for (const name of await readdir(path)) await clearEntry(join(path, name))
-    await rmdir(path)
-  } else await unlink(path)
-}
 /**
- * In a folder of a checkout being rebuilt, makes `name` ready for an entry of `kind` and returns its path. What is in the
- * way is cleared, links never followed: another kind of entry, or, on a volume that does not tell case apart, another
- * spelling of the name, except a folder spelled differently, which is renamed so what it holds stays. A file is written over.
+ * A rebuild writing a worktree's files back from its proof, into the checkout `git worktree add` just made. It never
+ * removes or overwrites anything it did not write itself: before an entry in the way is cleared (another kind of entry,
+ * another spelling of its name on a volume that does not tell case apart, a file written over), every file and link in
+ * it must be exactly what the checkout and snapshot wrote (`fromCheckout`) or what this rebuild wrote (`written`).
+ * Anything else, written there by someone while the rebuild ran, is kept as a copy first (`keep`), and only then cleared;
+ * when no copy can be kept, the rebuild stops with nothing of it deleted. Links are never followed. A folder made ready
+ * is remembered (`placed`) until something at or above it is cleared or renamed.
  */
-async function placeEntry(placing: Placing, parent: string, name: string, kind: ContentEntry['kind']): Promise<string> {
-  const path = join(parent, name)
-  let stat = await lstat(path).catch(() => undefined)
-  if (stat && placing.insensitive) {
-    const other = (await readdir(parent)).find((entry) => entry !== name && entry.toLowerCase() === name.toLowerCase())
-    if (other && kind === 'directory' && stat.isDirectory()) { await rename(join(parent, other), path); return path }
-    if (other) { await clearEntry(join(parent, other)); stat = undefined }
+class Rebuild {
+  readonly placed = new Set<string>()
+  /** What this rebuild wrote, or kept a copy of, by path below the top: `<kind>:<SHA-256 of the bytes or link target>`. */
+  readonly written = new Map<string, string>()
+  constructor(
+    readonly top: string,
+    readonly insensitive: boolean,
+    private readonly fromCheckout: (rel: string, kind: 'file' | 'link', bytes: Buffer) => Promise<boolean>,
+    private readonly keep: (rels: string[]) => Promise<ReadonlyMap<string, string>>
+  ) {}
+  private rel(path: string): string { return relative(this.top, path).split(sep).join('/') }
+  /** Records a file or link this rebuild wrote, as it wrote it. */
+  record(path: string, kind: 'file' | 'link', bytes: Buffer): void { this.written.set(this.rel(path), `${kind}:${hash(bytes)}`) }
+  /** Forgets what was remembered at or below `path`: it was cleared, or moved to `to`. */
+  private forget(path: string, to?: string): void {
+    const rel = this.rel(path), under = (key: string): boolean => key === rel || key.startsWith(`${rel}/`)
+    for (const folder of [...this.placed]) if (folder === path || folder.startsWith(`${path}${sep}`)) this.placed.delete(folder)
+    for (const [key, value] of [...this.written]) if (under(key)) { this.written.delete(key); if (to) this.written.set(`${this.rel(to)}${key.slice(rel.length)}`, value) }
   }
-  if (stat && !(kind === 'directory' && stat.isDirectory()) && !(kind === 'file' && stat.isFile())) { await clearEntry(path); stat = undefined }
-  if (!stat && kind === 'directory') await mkdir(path)
-  return path
-}
-/** Makes every folder of `parts` (a path below the checkout's top) a real folder spelled so; returns the last. */
-async function placeFolder(placing: Placing, parts: readonly string[]): Promise<string> {
-  let at = placing.top
-  for (const part of parts) {
-    const next = join(at, part)
-    if (!placing.placed.has(next)) { await placeEntry(placing, at, part, 'directory'); placing.placed.add(next) }
-    at = next
+  /** Whether the file or link at `path` is exactly what this rebuild, or the checkout and snapshot, wrote there. */
+  private async mine(path: string, stat: Stats): Promise<boolean> {
+    const kind = stat.isSymbolicLink() ? 'link' : stat.isFile() ? 'file' : undefined
+    if (!kind) return false
+    const bytes = kind === 'link' ? Buffer.from(await readlink(path), 'utf8') : await readFile(path)
+    const recorded = this.written.get(this.rel(path))
+    if (recorded !== undefined) return recorded === `${kind}:${hash(bytes)}`
+    return this.fromCheckout(this.rel(path), kind, bytes)
   }
-  return at
+  /** Keeps a copy of every file and link at or below `path` the rebuild did not write, so none of them is lost. */
+  private async keepStrangers(path: string): Promise<void> {
+    for (let attempt = 0; ; attempt++) {
+      const strangers: Array<{ rel: string; kind: 'file' | 'link' }> = []
+      const visit = async (at: string): Promise<void> => {
+        const stat = await lstat(at)
+        if (stat.isDirectory()) { for (const name of await readdir(at)) await visit(join(at, name)) }
+        else if (!await this.mine(at, stat)) strangers.push({ rel: this.rel(at), kind: stat.isSymbolicLink() ? 'link' : 'file' })
+      }
+      await visit(path)
+      if (!strangers.length) return
+      if (attempt >= 2) throw new Error(`Files keep changing at ${path} while the worktree is rebuilt; nothing of them was deleted. Try again once they have stopped changing.`)
+      const digests = await this.keep(strangers.map((entry) => entry.rel))
+      for (const entry of strangers) { const digest = digests.get(entry.rel); if (digest) this.written.set(entry.rel, `${entry.kind}:${digest}`) }
+    }
+  }
+  /** Clears what is at `path`, after `keepStrangers`: a folder with everything in it, a link as the link. */
+  private async clear(path: string): Promise<void> {
+    await this.keepStrangers(path)
+    const remove = async (at: string): Promise<void> => {
+      const stat = await lstat(at)
+      if (stat.isDirectory()) { for (const name of await readdir(at)) await remove(join(at, name)); await rmdir(at) }
+      else await unlink(at)
+    }
+    await remove(path)
+    this.forget(path)
+  }
+  /**
+   * In `parent`, makes `name` ready for an entry of `kind` and returns its path: what is in the way is cleared (see the
+   * class); a folder spelled differently is renamed instead, so what it holds stays. A file is written over only when it is
+   * one the rebuild wrote, or once a copy of it is kept.
+   */
+  async place(parent: string, name: string, kind: ContentEntry['kind']): Promise<string> {
+    const path = join(parent, name)
+    let stat = await lstat(path).catch(() => undefined)
+    if (stat && this.insensitive) {
+      const other = (await readdir(parent)).find((entry) => entry !== name && entry.toLowerCase() === name.toLowerCase())
+      if (other && kind === 'directory' && stat.isDirectory()) { await rename(join(parent, other), path); this.forget(join(parent, other), path); return path }
+      if (other) { await this.clear(join(parent, other)); stat = undefined }
+    }
+    if (stat && kind === 'directory' && stat.isDirectory()) return path
+    if (stat && kind === 'file' && stat.isFile()) { await this.keepStrangers(path); return path }
+    if (stat) await this.clear(path)
+    if (kind === 'directory') await mkdir(path)
+    return path
+  }
+  /** Makes every folder of `parts` (a path below the top) a real folder spelled so; returns the last. */
+  async folder(parts: readonly string[]): Promise<string> {
+    let at = this.top
+    for (const part of parts) {
+      const next = join(at, part)
+      if (!this.placed.has(next)) { await this.place(at, part, 'directory'); this.placed.add(next) }
+      at = next
+    }
+    return at
+  }
 }
 /** A file another process holds open fails to delete with these codes (on Windows also EPERM and EACCES). */
 const IN_USE_CODES = new Set(process.platform === 'win32' ? ['EBUSY', 'EPERM', 'EACCES'] : ['EBUSY'])
@@ -133,6 +209,13 @@ interface ExpireOptions {
   afterRename?: (path: string) => void
   /** Test seam: runs right before each entry of the renamed folder is removed, after its last check. */
   beforeRemove?: (path: string) => void
+  /** Folders of what is left that a restore made writable (`makeRemnantWritable`), by path: their mode before and after. */
+  madeWritable?: ReadonlyMap<string, { from: number; to: number }>
+}
+/** An entry as it was before a restore made its folder writable, so that change is not taken for a write by someone. */
+function beforeMadeWritable(entry: ContentEntry, options: ExpireOptions): ContentEntry {
+  const mode = options.madeWritable?.get(entry.path)
+  return mode && entry.kind === 'directory' && entry.mode === mode.to ? { ...entry, mode: mode.from } : entry
 }
 class TrashRecordChanged extends Error {
   constructor() { super('Its record changed while it was being deleted; it is looked at again on the next run') }
@@ -233,9 +316,16 @@ export interface WorktreeReconstructionManifest {
    * the folder was being deleted. Each entry is one kept copy (`keptCopies.ts`, owned by the thread's journal) whose
    * commit is also pinned under `<prefix>/kept/<sha>` (in `keptRefs`), so it lasts as long as the rest of this record.
    * `paths` are the files it holds for the rebuild; a rebuild writes them over the checkout in this order, a later copy
-   * of a path over an earlier one. `content` names the bytes each path must have then.
+   * of a path over an earlier one. `folders` are folders that appeared or changed kind with them (a file that became an
+   * empty folder): the rebuild makes them, in the same order. A layer of folders only has no copy (`sha`). `content`
+   * names the bytes each path must have then.
    */
-  keptFiles?: Array<{ sha: string; paths: string[] }>
+  keptFiles?: Array<{ sha?: string; paths: string[]; folders?: string[] }>
+  /**
+   * Files that appeared in the new checkout while it was being rebuilt, in the way of what the proof holds: each was kept
+   * in a kept copy (`ref`, owned by the thread's journal) before the rebuild cleared it.
+   */
+  keptAside?: Array<{ ref: string; paths: string[] }>
   /**
    * Set with state `deleting`: the trash expiry renamed the folder to `path` (a `.deleting-<hex>` sibling in the trash)
    * and is deleting it entry by entry against `content`, the proof the capture recorded. `adminState` is the HEAD and
@@ -512,7 +602,9 @@ export class WorktreeRetirementService {
     if (value.baseRef !== `${prefix}/base` || value.resultRef !== `${prefix}/result` || ![value.worktreePath, value.commonDir, value.gitDirectory, value.sourcePath].every(isAbsolute) || ![value.baseSha, value.resultSha, value.treeSha].every((sha) => /^[a-f0-9]{40,64}$/.test(sha)) || !/^[a-f0-9]{32}$/.test(value.repositoryId) || !Array.isArray(value.content) || !Array.isArray(value.auxiliary) || !['prepared', 'trashed', 'deleting', 'retired', 'materialized'].includes(value.state)) throw new Error('Malformed workspace reconstruction manifest')
     if (value.trashPath !== undefined && !same(value.trashPath, this.trashPathFor(value)) || ['trashed', 'deleting'].includes(value.state) && (!value.trashPath || typeof value.trashedAt !== 'string')) throw new Error('Malformed workspace trash location')
     if ((value.state === 'deleting') !== (value.deleting !== undefined) || value.deleting && (typeof value.deleting.path !== 'string' || !same(dirname(value.deleting.path), dirname(value.trashPath!)) || !/^\.deleting-[a-f0-9]{16}$/.test(basename(value.deleting.path)) || typeof value.deleting.startedAt !== 'string' || typeof value.deleting.adminState !== 'string' || value.deleting.changedAt !== undefined && typeof value.deleting.changedAt !== 'string')) throw new Error('Malformed workspace delete record')
-    if (value.keptFiles !== undefined && (!Array.isArray(value.keptFiles) || !value.keptFiles.every((layer) => typeof layer?.sha === 'string' && /^[a-f0-9]{40,64}$/.test(layer.sha) && value.keptRefs?.includes(`${prefix}/kept/${layer.sha}`) && Array.isArray(layer.paths) && layer.paths.every((path) => typeof path === 'string' && path !== '' && !isAbsolute(path) && !path.split(/[\\/]/).includes('..'))))) throw new Error('Malformed workspace kept files')
+    const relativePath = (path: unknown): boolean => typeof path === 'string' && path !== '' && !isAbsolute(path) && !path.split(/[\\/]/).includes('..')
+    if (value.keptFiles !== undefined && (!Array.isArray(value.keptFiles) || !value.keptFiles.every((layer) => (layer?.sha === undefined ? Array.isArray(layer?.paths) && layer.paths.length === 0 : typeof layer.sha === 'string' && /^[a-f0-9]{40,64}$/.test(layer.sha) && value.keptRefs?.includes(`${prefix}/kept/${layer.sha}`)) && Array.isArray(layer.paths) && layer.paths.every(relativePath) && (layer.folders === undefined || Array.isArray(layer.folders) && layer.folders.every(relativePath))))) throw new Error('Malformed workspace kept files')
+    if (value.keptAside !== undefined && (!Array.isArray(value.keptAside) || !value.keptAside.every((entry) => typeof entry?.ref === 'string' && entry.ref.startsWith('refs/mousse/preserved/') && Array.isArray(entry.paths) && entry.paths.every(relativePath)))) throw new Error('Malformed workspace kept files')
     if (value.keptRefs !== undefined && (!Array.isArray(value.keptRefs) || !value.keptRefs.every((ref) => typeof ref === 'string' && ref.startsWith(`${prefix}/kept/`)))) throw new Error('Malformed workspace kept pins')
     if (value.adminRef !== undefined && (value.adminRef !== `${prefix}/admin` || ![value.adminTree, value.adminCommit].every((sha) => typeof sha === 'string' && /^[a-f0-9]{40,64}$/.test(sha)))) throw new Error('Malformed workspace Git data pin')
     if (value.deletedBranches !== undefined && (!Array.isArray(value.deletedBranches) || !value.deletedBranches.every((entry) => isMousseBranchName(entry?.name) && /^[a-f0-9]{40,64}$/.test(entry?.sha)))) throw new Error('Malformed workspace branch record')
@@ -722,6 +814,9 @@ export class WorktreeRetirementService {
     // In use (Windows: open files) is asked before anything is captured, so whatever it lets through is in the snapshot.
     const busy = options.inUse?.(trashPath)
     if (busy) return { kept: busy }
+    // A folder whose files Mousse may not delete keeps the worktree in the trash, whole, instead of a delete that stops partway.
+    const readOnly = await readOnlyFolderAsync(trashPath)
+    if (readOnly !== undefined) return { kept: `Mousse may not delete the files in ${readOnly || 'its top folder'}, so the worktree stays in the trash. Make that folder writable to let it be deleted.` }
     // What `lstat` says of every entry is read before the capture reads any bytes: a write from then on changes it, and
     // the check right before the delete state is recorded sees that. Each file is read once here, by the capture.
     let signature: FolderSignature
@@ -778,7 +873,7 @@ export class WorktreeRetirementService {
    * - it is at neither: only Git's registration of it is left, and it is unregistered.
    * `patient`: after a write was found in it, wait `WORKTREE_TRASH_QUIET_MS` from then before deleting again.
    */
-  private async continueDeleting(manifestPath: string, manifest: WorktreeReconstructionManifest, record: { text: string }, options: ExpireOptions, patient: boolean): Promise<{ removed: true } | { kept: string; waiting?: true }> {
+  private async continueDeleting(manifestPath: string, manifest: WorktreeReconstructionManifest, record: { text: string }, options: ExpireOptions, patient: boolean): Promise<{ removed: true } | { kept: string; waiting?: true; readOnly?: true }> {
     const deleting = manifest.deleting!
     const trashPath = manifest.trashPath!
     await assertLifecyclePathAsync(join(this.store.profileHome, 'trash'), deleting.path)
@@ -815,7 +910,7 @@ export class WorktreeRetirementService {
    * already (a crash or a file in use right after it went) is no checkout any more: no Git runs in it, and the rest goes.
    * Returns why it stopped, or undefined when the folder is gone.
    */
-  private async deleteRenamed(manifestPath: string, manifest: WorktreeReconstructionManifest, record: { text: string }, options: ExpireOptions): Promise<{ kept: string; waiting?: true } | undefined> {
+  private async deleteRenamed(manifestPath: string, manifest: WorktreeReconstructionManifest, record: { text: string }, options: ExpireOptions): Promise<{ kept: string; waiting?: true; readOnly?: true } | undefined> {
     const root = manifest.deleting!.path
     const trash = join(this.store.profileHome, 'trash')
     const proof = new Map(manifest.content.map((entry) => [entry.path, entry]))
@@ -823,7 +918,7 @@ export class WorktreeRetirementService {
     let current: ContentEntry[]
     try {
       for (let at = dirname(root); ; at = dirname(at)) { folders.set(resolve(at), identityOf(await lstat(at))); if (same(at, trash) || dirname(at) === at) break }
-      current = await walkOwnedContentAsync(root, true, { digests: false, folders })
+      current = (await walkOwnedContentAsync(root, true, { digests: false, folders })).map((entry) => beforeMadeWritable(entry, options))
     } catch (error) { return { kept: `Kept in the trash at ${root}: ${(error as Error).message}` } }
     // The bytes are compared file by file below, right before each one goes; here, what every entry is.
     if (current.some((entry) => !sameShape(entry, proof.get(entry.path)))) return await this.addLateWrites(manifestPath, manifest, record, options)
@@ -842,10 +937,12 @@ export class WorktreeRetirementService {
       assertFoldersUnchanged(trash, folder, folders)
     }
     const heldNow = (): Promise<Awaited<ReturnType<WorktreeRetirementService['readRepositoryLease']>>> => this.readRepositoryLease().catch(() => undefined)
+    let removing = root
     try {
       for (const entry of [...current].reverse()) {
         if (!entry.path) continue
         const path = join(root, entry.path)
+        removing = path
         if (entry.kind === 'directory') {
           options.beforeRemove?.(path)
           const held = await heldNow()
@@ -861,6 +958,7 @@ export class WorktreeRetirementService {
         check(held, dirname(path))
         try { assertFrozenEntryUnchanged(frozen); unlinkSync(path) } catch (error) { if (!gone(error)) throw error }
       }
+      removing = root
       if (gitFile) {
         if (await this.adminStateAt(root, manifest.commonDir) !== manifest.deleting!.adminState) await this.recaptureAdmin(manifestPath, manifest, record, root)
         options.beforeRemove?.(dotGit)
@@ -877,7 +975,11 @@ export class WorktreeRetirementService {
       const code = (error as NodeJS.ErrnoException).code
       if (error instanceof LeaseLost) return { kept: `Mousse lost hold of the repository while deleting the worktree from the trash; what is left of it waits at ${root} and is deleted on a later run` }
       if (code && IN_USE_CODES.has(code)) return { kept: `Files in this worktree are in use; what is left of it waits at ${root} and is deleted on a later run` }
-      if (error instanceof FolderChanged || code === 'ENOTEMPTY' || code === 'EEXIST' || code === 'ENOTDIR' || /^Frozen content (changed|was replaced)/.test((error as Error).message)) return await this.addLateWrites(manifestPath, manifest, record, options)
+      // A folder whose permissions do not let Mousse delete its files: the delete stops there, and a restore rebuilds
+      // the worktree from the proof (`reconstruct` makes the folders of what is left writable first).
+      if (code === 'EACCES' || code === 'EPERM') return { kept: `Mousse may not delete files in ${relative(root, dirname(removing)) || 'its top folder'}; what is left of the worktree waits at ${root}. Make that folder writable to let it be deleted.`, readOnly: true }
+      // A folder swapped for a link right before a file in it was read is a change of kind like any other.
+      if (error instanceof FolderChanged || code === 'ENOTEMPTY' || code === 'EEXIST' || code === 'ENOTDIR' || /^Frozen content (changed|was replaced)/.test((error as Error).message) || /^Lifecycle path is a link/.test((error as Error).message)) return await this.addLateWrites(manifestPath, manifest, record, options)
       throw error
     }
     return undefined
@@ -900,7 +1002,7 @@ export class WorktreeRetirementService {
     // Without its `.git` file the folder is no checkout any more, and Git run in it would look for one above it.
     if (!(await lstat(join(root, '.git')).catch(() => undefined))?.isFile()) return stop(`Files were written into ${root} as it was being deleted; they are kept there`)
     let current: ContentEntry[]
-    try { current = await walkOwnedContentAsync(root, true) }
+    try { current = (await walkOwnedContentAsync(root, true)).map((entry) => beforeMadeWritable(entry, options)) }
     catch (error) { return stop(`Kept in the trash at ${root}: ${(error as Error).message}`) }
     const proof = new Map(manifest.content.map((entry) => [entry.path, entry]))
     const late = current.filter((entry) => !sameEntry(entry, proof.get(entry.path)))
@@ -927,12 +1029,15 @@ export class WorktreeRetirementService {
       }
     }
     const files = late.filter((entry) => entry.kind !== 'directory').map((entry) => entry.path)
+    // Folders go in the layer too, so a rebuild makes them in order with the files: a file that became an empty folder
+    // has nothing else to say so.
+    const folders = late.filter((entry) => entry.kind === 'directory' && entry.path).map((entry) => entry.path)
     if (files.length) {
       const copy = await this.keepFiles(root, manifest, files, late, gone)
       if ('kept' in copy) return stop(copy.kept)
-      await this.pinKept(root, manifest, copy.sha)
-      manifest.keptFiles = [...(manifest.keptFiles ?? []), copy]
-    }
+      await this.pinKept(root, manifest, copy.sha!)
+      manifest.keptFiles = [...(manifest.keptFiles ?? []), { ...copy, ...(folders.length ? { folders } : {}) }]
+    } else if (folders.length) manifest.keptFiles = [...(manifest.keptFiles ?? []), { paths: [], folders }]
     for (const entry of late) proof.set(entry.path, entry)
     manifest.content = [...proof.values()]
     return stop('Files in it changed while it was being deleted; the changes are kept with its other files, and what is left is deleted on a later run')
@@ -1033,21 +1138,60 @@ export class WorktreeRetirementService {
     return out
   }
   /**
-   * Writes the files a kept copy holds for the rebuild (`keptFiles`) into the new checkout, as the copy holds them. What is
-   * in the way of a newer form (`placeEntry`) is cleared first, links never followed.
+   * Writes one layer of `keptFiles` into the new checkout: its folders, shallowest first, then the files its kept copy
+   * holds, as the copy holds them. What is in the way of a newer form is cleared by `rebuild`, which never deletes what
+   * it did not write.
    */
-  private async writeKeptFiles(manifest: WorktreeReconstructionManifest, layer: { sha: string; paths: string[] }, placing: Placing): Promise<void> {
+  private async writeKeptFiles(manifest: WorktreeReconstructionManifest, layer: { sha?: string; paths: string[]; folders?: string[] }, rebuild: Rebuild): Promise<void> {
+    for (const folder of [...layer.folders ?? []].sort((a, b) => a.split('/').length - b.split('/').length)) await rebuild.folder(folder.split('/'))
+    if (!layer.sha) return
     const stored = await this.keptBlobs(manifest.commonDir, layer.sha, layer.paths)
     for (const path of layer.paths) {
       const file = stored.get(path)
       if (!file) throw new Error(`The kept copy of ${path} is missing`)
       const parts = path.split('/'), name = parts.pop()!
-      const parent = await placeFolder(placing, parts)
+      const parent = await rebuild.folder(parts)
       await assertLifecyclePathAsync(manifest.worktreePath, parent)
-      const target = await placeEntry(placing, parent, name, file.mode === '120000' ? 'link' : 'file')
-      if (file.mode === '120000') await symlink(file.bytes.toString('utf8'), target)
+      const kind = file.mode === '120000' ? 'link' : 'file'
+      const target = await rebuild.place(parent, name, kind)
+      if (kind === 'link') await symlink(file.bytes.toString('utf8'), target)
       else await writeFile(target, file.bytes)
+      rebuild.record(target, kind, file.bytes)
     }
+  }
+  /**
+   * The rebuild of a retired worktree: what it may clear is what the checkout and snapshot wrote (each compared with the
+   * tree's bytes as checked out, or an auxiliary payload) and what it wrote itself; anything else is kept as a copy owned
+   * by the thread's journal first (`keptAside`).
+   */
+  private async rebuildOf(manifest: WorktreeReconstructionManifest): Promise<Rebuild> {
+    let tree: Map<string, { mode: string; sha: string }> | undefined
+    const auxiliary = new Map(manifest.auxiliary.map((entry) => [entry.path, Buffer.from(entry.content, 'base64')]))
+    const fromCheckout = async (rel: string, kind: 'file' | 'link', bytes: Buffer): Promise<boolean> => {
+      const payload = auxiliary.get(rel)
+      if (payload) return kind === 'file' && payload.equals(bytes)
+      tree ??= new Map((await lifecycleReadAsync(manifest.worktreePath, ['ls-tree', '-r', '-z', manifest.snapshotTree ?? manifest.treeSha], undefined, LISTING_MAX_BUFFER)).split('\0').filter(Boolean).map((line) => {
+        const tab = line.indexOf('\t'), [mode, , sha] = line.slice(0, tab).split(' ')
+        return [line.slice(tab + 1), { mode: mode!, sha: sha! }]
+      }))
+      const entry = tree.get(rel)
+      if (!entry || (entry.mode === '120000') !== (kind === 'link')) return false
+      if (kind === 'link') return (await this.catBlobs(manifest.commonDir, [entry.sha]))[0]!.equals(bytes)
+      // The bytes the checkout wrote: the blob as checked out, through the worktree's own attributes.
+      const argv = await withoutRepoProgramsAsync(manifest.worktreePath, ['cat-file', '--batch', '--filters', '-Z'])
+      const ran = await runGitProcess(argv, { cwd: manifest.worktreePath, env: repoProgramEnv(), input: `${entry.sha} ${rel}\0`, timeout: 30_000, maxBuffer: 600 * 1024 * 1024 })
+      if (ran.error || ran.status !== 0) return false
+      const headerEnd = ran.stdoutBytes.indexOf(0)
+      return headerEnd > 0 && ran.stdoutBytes.subarray(headerEnd + 1, ran.stdoutBytes.length - 1).equals(bytes)
+    }
+    const keep = async (rels: string[]): Promise<ReadonlyMap<string, string>> => {
+      let copy: Awaited<ReturnType<typeof keepCopy>>
+      try { copy = await keepCopy({ owner: this.store.require(manifest.taskId).location, top: manifest.worktreePath, operationType: 'worktree-cleanup', action: 'Rebuilding the worktree', paths: rels }) }
+      catch (error) { throw new Error(`Files appeared in the worktree while it was rebuilt, in the way of its own files, and no copy of them could be kept (${(error as Error).message.split(/\r?\n/)[0]}); nothing of them was deleted: ${rels.join(', ')}`) }
+      manifest.keptAside = [...(manifest.keptAside ?? []), { ref: copy.ref, paths: rels }]
+      return copy.digests
+    }
+    return new Rebuild(manifest.worktreePath, await caseInsensitiveAt(manifest.worktreePath), fromCheckout, keep)
   }
   /**
    * Takes a snapshot of the folder in the trash and pins it in place of the earlier pins (`result` at its HEAD,
@@ -1321,6 +1465,24 @@ export class WorktreeRetirementService {
    * `untrusted` is for a checkout of someone else's commits: `prepare` runs on the new worktree before anything is checked
    * out into it (it puts the safety configuration in place) and `env` goes to the checkout.
    */
+  /**
+   * Gives the owner write permission on every folder of what is left of a delete in the trash, links never followed, and
+   * records each folder's mode before and after in `changed`, by path below `root`.
+   */
+  private async makeRemnantWritable(root: string, changed: Map<string, { from: number; to: number }>): Promise<void> {
+    const trash = join(this.store.profileHome, 'trash')
+    const visit = async (path: string, rel: string, depth: number): Promise<void> => {
+      const stat = await lstat(path)
+      if (!stat.isDirectory() || depth > 64) return
+      await assertLifecyclePathAsync(trash, path)
+      if ((stat.mode & 0o200) === 0) {
+        await chmod(path, (stat.mode & 0o7777) | 0o700)
+        changed.set(rel, { from: changed.get(rel)?.from ?? stat.mode, to: (await lstat(path)).mode })
+      }
+      for (const name of await readdir(path)) await visit(join(path, name), rel ? `${rel}/${name}` : name, depth + 1)
+    }
+    await visit(root, '', 0)
+  }
   async reconstruct(manifestPath: string, untrusted?: { prepare(worktreePath: string): void | Promise<void>; env: NodeJS.ProcessEnv }): Promise<WorktreeReconstructionManifest> {
     const manifest = this.load(manifestPath)
     await this.checkOwnership(manifest.taskId, manifest.commonDir, manifest.repositoryId)
@@ -1331,12 +1493,19 @@ export class WorktreeRetirementService {
     // registered. Never from the half-deleted folder.
     if (manifest.state === 'deleting') {
       const record = { text: JSON.stringify(manifest) }
-      let outcome: { removed: true } | { kept: string; waiting?: true } | undefined
-      for (let attempt = 0; attempt < 3 && manifest.state === 'deleting'; attempt++) {
-        try { outcome = await this.continueDeleting(manifestPath, manifest, record, {}, false) }
-        catch (error) { if (error instanceof TrashRecordChanged) throw new Error('The worktree record changed while it was being restored; try again'); throw error }
-        if (outcome && !('removed' in outcome) && !outcome.waiting) break
-      }
+      let outcome: { removed: true } | { kept: string; waiting?: true; readOnly?: true } | undefined
+      const stopBeating = this.keepLeaseFresh()
+      const madeWritable = new Map<string, { from: number; to: number }>()
+      try {
+        for (let attempt = 0; attempt < 3 && manifest.state === 'deleting'; attempt++) {
+          try { outcome = await this.continueDeleting(manifestPath, manifest, record, { madeWritable }, false) }
+          catch (error) { if (error instanceof TrashRecordChanged) throw new Error('The worktree record changed while it was being restored; try again'); throw error }
+          // What is left is Mousse's own copy in its trash, and the proof holds its modes: its folders are made writable
+          // so the delete can finish, and the rebuild gives each folder the mode the proof records.
+          if (outcome && 'readOnly' in outcome) { await this.makeRemnantWritable(manifest.deleting!.path, madeWritable); continue }
+          if (outcome && !('removed' in outcome) && !outcome.waiting) break
+        }
+      } finally { stopBeating() }
       if (manifest.state === 'deleting') throw new Error(`The worktree is still being deleted from the trash, so it cannot be rebuilt yet: ${outcome && 'kept' in outcome ? outcome.kept : 'try again'}`)
     }
     await this.settleTrashRegistration(manifest)
@@ -1381,12 +1550,13 @@ export class WorktreeRetirementService {
       // The uncommitted files come back as the snapshot held them, over the fresh checkout of the HEAD it was taken on;
       // then what the kept copies hold (ignored files, writes found while the folder was being deleted), in order.
       if (manifest.snapshotTree) await moveFilesAsync(manifest.worktreePath, manifest.treeSha, manifest.snapshotTree)
-      // A later form of a path (another kind, or another spelling on a volume that folds case) clears the earlier one.
-      const placing: Placing = { top: manifest.worktreePath, insensitive: await caseInsensitiveAt(manifest.worktreePath), placed: new Set() }
-      for (const layer of manifest.keptFiles ?? []) await this.writeKeptFiles(manifest, layer, placing)
+      // A later form of a path (another kind, or another spelling on a volume that folds case) clears the earlier one,
+      // and only what the rebuild itself wrote is ever cleared.
+      const rebuild = manifest.keptFiles?.length ? await this.rebuildOf(manifest) : undefined
+      for (const layer of manifest.keptFiles ?? []) await this.writeKeptFiles(manifest, layer, rebuild!)
       for (const entry of manifest.content) {
         const target = join(manifest.worktreePath, entry.path)
-        if (entry.kind === 'directory' && manifest.keptFiles?.length) { if (entry.path) await placeFolder(placing, entry.path.split('/')) }
+        if (entry.kind === 'directory' && rebuild) { if (entry.path) await rebuild.folder(entry.path.split('/')) }
         else if (entry.kind === 'directory') { await assertLifecyclePathAsync(manifest.worktreePath, target); await mkdir(target, { recursive: true }) }
         if (entry.kind !== 'link') { await assertLifecyclePathAsync(manifest.worktreePath, target); await chmod(target, entry.mode & 0o777) }
       }
@@ -1408,7 +1578,7 @@ export class WorktreeRetirementService {
     for (const [ref, sha] of [[manifest.baseRef, manifest.baseSha], [manifest.resultRef, manifest.resultSha], ...(manifest.snapshotRef ? [[manifest.snapshotRef, manifest.snapshotSha!]] : []), ...(manifest.adminRef ? [[manifest.adminRef, manifest.adminCommit!]] : [])]) if (await readDirectLifecycleRefAsync(manifest.commonDir, ref) !== sha) throw new Error('Reconstruction pin changed or is unavailable')
     if (manifest.adminCommit && await lifecycleGitAsync(manifest.commonDir, ['rev-parse', `${manifest.adminCommit}^{tree}`]) !== manifest.adminTree) throw new Error('Retained Git data of the worktree changed')
     const prefix = manifest.resultRef.slice(0, -'/result'.length)
-    for (const layer of manifest.keptFiles ?? []) if (await readDirectLifecycleRefAsync(manifest.commonDir, `${prefix}/kept/${layer.sha}`) !== layer.sha) throw new Error('A pin of the kept files changed or is unavailable')
+    for (const layer of manifest.keptFiles ?? []) if (layer.sha && await readDirectLifecycleRefAsync(manifest.commonDir, `${prefix}/kept/${layer.sha}`) !== layer.sha) throw new Error('A pin of the kept files changed or is unavailable')
     if (await lifecycleGitAsync(manifest.commonDir, ['rev-parse', `${manifest.resultSha}^{tree}`]) !== manifest.treeSha) throw new Error('Retained result tree changed')
     if (manifest.snapshotSha && await lifecycleGitAsync(manifest.commonDir, ['rev-parse', `${manifest.snapshotSha}^{tree}`]) !== manifest.snapshotTree) throw new Error('Retained snapshot tree changed')
   }
@@ -1597,7 +1767,12 @@ export class WorktreeRetirementService {
   private async readRepositoryLease(): Promise<{ token?: string; processInstanceId?: string } | undefined> {
     const lease = this.ownership?.repositoryLease
     if (!lease) return undefined
-    return JSON.parse(await readFile(lease.path, 'utf8')) as { token?: string; processInstanceId?: string }
+    // A read that meets the file while another process writes it is tried once more before it counts.
+    try { return JSON.parse(await readFile(lease.path, 'utf8')) as { token?: string; processInstanceId?: string } }
+    catch {
+      await new Promise((resume) => setTimeout(resume, 50))
+      return JSON.parse(await readFile(lease.path, 'utf8')) as { token?: string; processInstanceId?: string }
+    }
   }
   private assertRepositoryLease(commonDir: string, repositoryId: string, current: { token?: string; processInstanceId?: string } | undefined): void {
     const lease = this.ownership?.repositoryLease
