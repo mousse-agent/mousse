@@ -1,3 +1,4 @@
+import type { LocalSttModelId } from '../../shared/dictation'
 import { localModelBytes, type LocalModelManifest } from '../../shared/localModels'
 
 /**
@@ -133,11 +134,18 @@ export const wrongWordsMetric: ModelMetric<LocalModelManifest> = {
   stat: (wer) => `1 in ${wordsPerError(wer)} words wrong`
 }
 
+/**
+ * Dictation columns: the recommended model, then two chosen by hand, each tagged with what sets it
+ * apart. A chosen model missing from the list leaves its column to the rules after them.
+ */
 export function dictationComparison(recommendedId: string): ModelComparison<LocalModelManifest> {
   return {
     metrics: [stopWaitMetric, wrongWordsMetric, languagesMetric],
     picks: [
       { tag: 'Recommended', choose: pickId(recommendedId) },
+      { tag: 'European languages', choose: pickId('parakeet-tdt-0.6b-v3' satisfies LocalSttModelId) },
+      // 99 languages, as many as any model in the list.
+      { tag: 'Most languages', choose: pickId('whisper-small' satisfies LocalSttModelId) },
       { tag: 'Fewest wrong words', choose: pickBest(wrongWordsMetric) },
       { tag: 'Most languages', choose: pickBest(languagesMetric) },
       { tag: 'Smallest download', choose: smallestDownload }
