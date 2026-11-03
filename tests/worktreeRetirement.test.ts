@@ -434,3 +434,78 @@ test('a thread record that names a branch outside mousse/, or another thread\'s 
   expect(existsSync(f.worktree)).toBe(true)
   expect(git(f.repo, ['branch', '--list', 'feature/theirs', '--format=%(refname:short)'])).toBe('feature/theirs')
 })
+
+test("trash expiry keeps Git's own data of the worktree, and a rebuild brings back its configuration, HEAD history and own refs", async () => {
+  const f = await threadFixture('named')
+  const original = git(f.worktree, ['rev-parse', 'HEAD'])
+  // A commit on a detached HEAD, then back: only the worktree's HEAD history names it.
+  git(f.worktree, ['checkout', '-q', '--detach']); writeFileSync(join(f.worktree, 'a.txt'), 'unique abandoned commit\n'); git(f.worktree, ['commit', '-qam', 'abandoned user commit'])
+  const abandoned = git(f.worktree, ['rev-parse', 'HEAD']); git(f.worktree, ['reset', '-q', '--hard', original])
+  // A commit only a ref of the worktree's own names.
+  const own = git(f.worktree, ['commit-tree', `${original}^{tree}`, '-p', original, '-m', 'named only by a worktree ref'])
+  git(f.worktree, ['update-ref', 'refs/worktree/mine', own])
+  git(f.repo, ['config', 'extensions.worktreeConfig', 'true']); git(f.worktree, ['config', '--worktree', 'audit.note', 'unique worktree configuration'])
+  const adminDir = git(f.worktree, ['rev-parse', '--absolute-git-dir'])
+  // A file Git may add there one day: kept as it is.
+  const future = Buffer.from([0, 1, 2, 255, 10, 13, 0x6d]); writeFileSync(join(adminDir, 'future-data'), future)
+  const configBytes = readFileSync(join(adminDir, 'config.worktree')), reflogBytes = readFileSync(join(adminDir, 'logs', 'HEAD')), refBytes = readFileSync(join(adminDir, 'refs', 'worktree', 'mine'))
+  expect(reflogBytes.toString('utf8')).toContain(abandoned)
+  await f.service.prepare(f.input)
+  const trashed = await f.service.retire(f.path)
+  // A lock someone put on the worktree in the trash is not kept. It is lifted once the capture is done, so Git deletes the folder.
+  const trashedAdmin = git(trashed.trashPath!, ['rev-parse', '--absolute-git-dir'])
+  writeFileSync(join(trashedAdmin, 'locked'), 'stale lock\n')
+  expect(await f.service.expireTrash(f.path, { now: Date.now() + 2 * WORKTREE_TRASH_QUIET_MS, afterCapture: () => rmSync(join(trashedAdmin, 'locked')) })).toEqual({ removed: true })
+  expect(existsSync(trashedAdmin)).toBe(false)
+  const retired = JSON.parse(readFileSync(f.path, 'utf8'))
+  const kept = git(f.repo, ['ls-tree', '-r', '--name-only', retired.adminTree]).split('\n')
+  expect(kept).toEqual(expect.arrayContaining(['config.worktree', 'logs/HEAD', 'refs/worktree/mine', 'future-data']))
+  expect(kept).not.toContain('locked'); expect(kept).not.toContain('gitdir')
+  // Nothing outside the pins names the two commits any more; garbage collection keeps them.
+  git(f.repo, ['reflog', 'expire', '--expire=now', '--all']); git(f.repo, ['gc', '--prune=now', '-q'])
+  for (const sha of [abandoned, own]) expect(git(f.repo, ['cat-file', '-t', sha])).toBe('commit')
+  await f.service.reconstruct(f.path)
+  const rebuiltAdmin = git(f.worktree, ['rev-parse', '--absolute-git-dir'])
+  expect(git(f.worktree, ['config', '--worktree', '--get', 'audit.note'])).toBe('unique worktree configuration')
+  expect(readFileSync(join(rebuiltAdmin, 'config.worktree'))).toEqual(configBytes)
+  // The kept history comes first, then what the rebuild recorded.
+  expect(readFileSync(join(rebuiltAdmin, 'logs', 'HEAD')).subarray(0, reflogBytes.length)).toEqual(reflogBytes)
+  expect(git(f.worktree, ['reflog', 'show', '--format=%H', 'HEAD']).split('\n')).toContain(abandoned)
+  expect(readFileSync(join(rebuiltAdmin, 'refs', 'worktree', 'mine'))).toEqual(refBytes)
+  expect(git(f.worktree, ['rev-parse', 'refs/worktree/mine'])).toBe(own)
+  expect(readFileSync(join(rebuiltAdmin, 'future-data'))).toEqual(future)
+  expect(existsSync(join(rebuiltAdmin, 'locked'))).toBe(false)
+  expect(git(f.repo, ['worktree', 'list', '--porcelain'])).not.toMatch(/^locked/m)
+  expect(git(f.worktree, ['status', '--porcelain'])).toBe('')
+})
+
+test("a rebuild puts the kept configuration in place before the untrusted checkout's safety settings, which still win", async () => {
+  const f = await fixture()
+  git(f.repo, ['config', 'extensions.worktreeConfig', 'true'])
+  git(f.worktree, ['config', '--worktree', 'audit.note', 'kept']); git(f.worktree, ['config', '--worktree', 'core.hooksPath', join(f.root, 'hooks-from-before')])
+  await f.service.prepare(f.input); await f.service.retire(f.path)
+  expect(await f.service.expireTrash(f.path, { now: Date.now() + 2 * WORKTREE_TRASH_QUIET_MS })).toEqual({ removed: true })
+  let seenAtPrepare: string | undefined
+  await f.service.reconstruct(f.path, {
+    prepare: (path) => { seenAtPrepare = git(path, ['config', '--worktree', '--get', 'audit.note']); git(path, ['config', '--worktree', 'core.hooksPath', '/dev/null']) },
+    env: {}
+  })
+  expect(seenAtPrepare).toBe('kept')
+  expect(git(f.worktree, ['config', '--worktree', '--get', 'core.hooksPath'])).toBe('/dev/null')
+})
+
+test("a change to Git's own data of the worktree after its capture is captured again before the delete", async () => {
+  const f = await fixture()
+  git(f.repo, ['config', 'extensions.worktreeConfig', 'true']); git(f.worktree, ['config', '--worktree', 'audit.note', 'first'])
+  await f.service.prepare(f.input); await f.service.retire(f.path)
+  const later = Date.now() + 2 * WORKTREE_TRASH_QUIET_MS
+  const outcome = await f.service.expireTrash(f.path, { now: later, afterCapture: (path) => git(path, ['config', '--worktree', 'audit.note', 'written after the capture']) })
+  expect(outcome).toEqual({ kept: expect.stringMatching(/changed while it was being deleted/), waiting: true })
+  expect(await f.service.expireTrash(f.path, { now: later + 2 * WORKTREE_TRASH_QUIET_MS })).toEqual({ removed: true })
+  // The later capture builds on the earlier one, so neither is dropped.
+  const retired = JSON.parse(readFileSync(f.path, 'utf8'))
+  expect(git(f.repo, ['show', `${retired.adminCommit}:config.worktree`])).toContain('written after the capture')
+  expect(git(f.repo, ['show', `${retired.adminCommit}^:config.worktree`])).toContain('note = first')
+  await f.service.reconstruct(f.path)
+  expect(git(f.worktree, ['config', '--worktree', '--get', 'audit.note'])).toBe('written after the capture')
+})

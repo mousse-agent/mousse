@@ -609,6 +609,8 @@ export function inventoryFrom(store: ResourceLifecycleStore, record: TaskLifecyc
         // The files of a worktree that held uncommitted work, kept as a snapshot until the owner is permanently deleted.
         resource('git-ref', text(value.snapshotRef), found.source.id, claim, 'Workspace owner retains its uncommitted files', task.taskId, text(value.repositoryId))
         for (const ref of Array.isArray(value.keptRefs) ? value.keptRefs : []) resource('git-ref', text(ref), found.source.id, claim, 'Workspace owner retains an earlier pin of its files', task.taskId, text(value.repositoryId))
+        // Git's own data of a deleted worktree (its configuration, HEAD history and own refs), kept for a rebuild.
+        resource('git-ref', text(value.adminRef), found.source.id, claim, "Workspace owner retains Git's own data of its worktree", task.taskId, text(value.repositoryId))
         resource('runtime', found.source.path, found.source.id, claim, 'Workspace reconstruction metadata follows its owner claims', task.taskId)
       }
     }

@@ -9,7 +9,7 @@ import { assertLifecyclePath, assertLifecyclePathAsync, ResourceLifecycleStore }
 import type { RepositoryLeaseHandle } from '../git/RepositoryLease'
 import type { ThreadLeaseHandle } from '../queue/ThreadExecutionLease'
 import { assertHeldThreadLease } from '../actions/GitOperationCoordinator'
-import { operationInProgressAsync } from '../actions/git'
+import { MOUSSE_COMMIT_ENV, operationInProgressAsync } from '../actions/git'
 import { moveFilesAsync, sameTreeAsync, takeSnapshotAsync, worktreeTreeAsync } from '../actions/snapshots'
 import { PROCESS_INSTANCE_ID } from '../queue/processLiveness'
 import { AgentEpisodeStore } from '../agents/AgentEpisodeStore'
@@ -24,14 +24,15 @@ import { repoProgramEnv, withoutRepoProgramsAsync } from '../git/repoPrograms'
 import { gitRunError, runGitProcess } from '../git/runGitProcess'
 import { renameFolderAsync } from './renameFolder'
 import { isIdNamedMousseBranch, isMousseBranchName } from '../../shared/mousseBranches'
+import { adminDigest, adminObjectIds, blobId, HEAD_REFLOG, readAdminFilesAsync, replayedAdminFile, type AdminFile } from './worktreeAdminData'
 
 const hash = (value: string | Buffer): string => createHash('sha256').update(value).digest('hex')
 /** A retired worktree waits in the trash until nothing in it has changed for this long; then its files are snapshotted and it is deleted. */
 export const WORKTREE_TRASH_QUIET_MS = 60 * 60_000
 /** The record of a worktree in the trash changed or went (a permanent deletion) while it was being expired. */
-/** A folder in the trash as it is compared before its delete: its HEAD and every entry's bytes. */
-function trashedStateOf(head: string, content: readonly ContentEntry[]): string {
-  return JSON.stringify([head, content])
+/** A folder in the trash as it is compared before its delete: its HEAD, every entry's bytes and Git's own data of it. */
+function trashedStateOf(head: string, content: readonly ContentEntry[], admin: string): string {
+  return JSON.stringify([head, content, admin])
 }
 class TrashRecordChanged extends Error {
   constructor() { super('Its record changed while it was being deleted; it is looked at again on the next run') }
@@ -118,6 +119,15 @@ export interface WorktreeReconstructionManifest {
   deletedBranches?: Array<{ name: string; sha: string }>
   /** Branches a restore could not bring back because their commit is gone from the repository. */
   branchesNotRestored?: Array<{ name: string; sha: string }>
+  /**
+   * Git's own data of the worktree, kept when the trash expiry deletes it: the files of its administration folder
+   * (`<common>/worktrees/<name>/`, see `worktreeAdminData.ts`) as the tree `adminTree` of the commit `adminCommit`,
+   * pinned under `adminRef`. A later capture that differs makes a new commit on top of the earlier one. A rebuild writes
+   * the files back before anything is checked out.
+   */
+  adminTree?: string
+  adminCommit?: string
+  adminRef?: string
   /**
    * `prepared`: pins written, folder in place. `trashed`: the folder is in the trash. `retired`: its files were
    * snapshotted and it was deleted. `materialized`: the worktree is back at its own path.
@@ -380,6 +390,7 @@ export class WorktreeRetirementService {
     if (value.baseRef !== `${prefix}/base` || value.resultRef !== `${prefix}/result` || ![value.worktreePath, value.commonDir, value.gitDirectory, value.sourcePath].every(isAbsolute) || ![value.baseSha, value.resultSha, value.treeSha].every((sha) => /^[a-f0-9]{40,64}$/.test(sha)) || !/^[a-f0-9]{32}$/.test(value.repositoryId) || !Array.isArray(value.content) || !Array.isArray(value.auxiliary) || !['prepared', 'trashed', 'retired', 'materialized'].includes(value.state)) throw new Error('Malformed workspace reconstruction manifest')
     if (value.trashPath !== undefined && !same(value.trashPath, this.trashPathFor(value)) || value.state === 'trashed' && (!value.trashPath || typeof value.trashedAt !== 'string')) throw new Error('Malformed workspace trash location')
     if (value.keptRefs !== undefined && (!Array.isArray(value.keptRefs) || !value.keptRefs.every((ref) => typeof ref === 'string' && ref.startsWith(`${prefix}/kept/`)))) throw new Error('Malformed workspace kept pins')
+    if (value.adminRef !== undefined && (value.adminRef !== `${prefix}/admin` || ![value.adminTree, value.adminCommit].every((sha) => typeof sha === 'string' && /^[a-f0-9]{40,64}$/.test(sha)))) throw new Error('Malformed workspace Git data pin')
     if (value.deletedBranches !== undefined && (!Array.isArray(value.deletedBranches) || !value.deletedBranches.every((entry) => isMousseBranchName(entry?.name) && /^[a-f0-9]{40,64}$/.test(entry?.sha)))) throw new Error('Malformed workspace branch record')
     for (const entry of value.content) if (isAbsolute(entry.path) || entry.path.split(/[\\/]/).includes('..') || !['file', 'directory', 'link'].includes(entry.kind) || !Number.isSafeInteger(entry.bytes) || entry.bytes < 0) throw new Error('Manifest content path is invalid')
     for (const entry of value.auxiliary) if (!MOUSSE_CONTROL_FILE_PATHS.includes(entry.path) || typeof entry.content !== 'string' || entry.content.length > 2 * 1024 * 1024) throw new Error('Manifest auxiliary payload is invalid')
@@ -586,28 +597,140 @@ export class WorktreeRetirementService {
     try { contents = await this.inspectContent(trashPath, dirty ? snapshot!.tree : undefined) }
     catch (error) { return { kept: `Kept in the trash at ${trashPath}: ${(error as Error).message}` } }
     const prefix = manifest.resultRef.slice(0, -'/result'.length)
+    const adminRef = `${prefix}/admin`
+    // Git's own data of the worktree is stored first, as objects only: what cannot be kept keeps the folder, with no pin moved.
+    let admin: Awaited<ReturnType<WorktreeRetirementService['storeAdmin']>>
+    try { admin = await this.storeAdmin(trashPath, manifest.commonDir, await readDirectLifecycleRefAsync(trashPath, adminRef)) }
+    catch (error) { return { kept: `Kept in the trash at ${trashPath}: Git's own data of it could not be kept (${(error as Error).message.split(/\r?\n/)[0]})` } }
+    const pinKept = async (sha: string): Promise<void> => {
+      const ref = `${prefix}/kept/${sha}`
+      if (await readDirectLifecycleRefAsync(trashPath, ref) !== sha) await lifecycleGitAsync(trashPath, ['update-ref', '--no-deref', ref, sha, '0'.repeat(sha.length)])
+      manifest.keptRefs = [...new Set([...(manifest.keptRefs ?? []), ref])]
+    }
     // A pin is never replaced by one that does not contain it: the earlier commit or snapshot stays under a ref of its own.
     const keepPin = async (old: string | undefined, next: string): Promise<void> => {
       if (!old || old === next || await gitSucceeds(trashPath, ['merge-base', '--is-ancestor', old, next])) return
-      const ref = `${prefix}/kept/${old}`
-      if (await readDirectLifecycleRefAsync(trashPath, ref) !== old) await lifecycleGitAsync(trashPath, ['update-ref', '--no-deref', ref, old, '0'.repeat(old.length)])
-      manifest.keptRefs = [...new Set([...(manifest.keptRefs ?? []), ref])]
+      await pinKept(old)
     }
     const previousSnapshot = await readDirectLifecycleRefAsync(trashPath, `${prefix}/snapshot`)
     await keepPin(manifest.resultSha, head)
     if (dirty) await keepPin(previousSnapshot, snapshot!.sha)
+    // Every commit the worktree's HEAD history and its own refs name stays: the pins above may already hold it; otherwise
+    // the newest of them that holds it gets a kept pin, so Git's garbage collection never takes a commit only they named.
+    const pinned = [manifest.baseSha, head, ...(dirty ? [snapshot!.sha] : []), ...(previousSnapshot ? [previousSnapshot] : []), ...(manifest.keptRefs ?? []).map((ref) => ref.slice(ref.lastIndexOf('/') + 1))]
+    for (const sha of await this.uncontainedTips(manifest.commonDir, admin.commits, pinned)) await pinKept(sha)
     this.saveTrashed(manifestPath, manifest, record)
     await lifecycleGitAsync(trashPath, ['update-ref', '--no-deref', manifest.resultRef, head, manifest.resultSha])
     if (dirty) await lifecycleGitAsync(trashPath, ['update-ref', '--no-deref', `${prefix}/snapshot`, snapshot!.sha, previousSnapshot ?? '0'.repeat(snapshot!.sha.length)])
+    if (admin.commit !== admin.previous) await lifecycleGitAsync(trashPath, ['update-ref', '--no-deref', adminRef, admin.commit, admin.previous ?? '0'.repeat(admin.commit.length)])
     const headBranch = await lifecycleReadAsync(trashPath, ['branch', '--show-current'])
     // A clean folder drops the snapshot fields; an earlier snapshot ref stays where it is, as every pin does.
     delete manifest.snapshotSha; delete manifest.snapshotTree; delete manifest.snapshotRef; delete manifest.headBranch; delete manifest.sparse
-    Object.assign(manifest, { resultSha: head, treeSha, ...(dirty ? { snapshotSha: snapshot!.sha, snapshotTree: snapshot!.tree, snapshotRef: `${prefix}/snapshot` } : {}), ...(headBranch ? { headBranch } : {}), ...contents })
+    Object.assign(manifest, { resultSha: head, treeSha, ...(dirty ? { snapshotSha: snapshot!.sha, snapshotTree: snapshot!.tree, snapshotRef: `${prefix}/snapshot` } : {}), ...(headBranch ? { headBranch } : {}), ...contents, adminTree: admin.tree, adminCommit: admin.commit, adminRef })
     this.saveTrashed(manifestPath, manifest, record)
     await this.verifyPins(manifest)
     // What the snapshot holds, not a read of the folder now: `inspectContent` read every entry after the snapshot and proved
     // each against it, so a write made since then (during the waits above) differs from this and is never deleted unseen.
-    return { state: trashedStateOf(head, contents.content), content: contents.content }
+    return { state: trashedStateOf(head, contents.content, admin.digest), content: contents.content }
+  }
+  /** The administration folder of a linked worktree: `<common>/worktrees/<name>`, never anything else. */
+  private async adminDirOf(worktreePath: string, commonDir: string): Promise<string> {
+    const adminDir = await realpathLikeSync(resolve(worktreePath, await lifecycleReadAsync(worktreePath, ['rev-parse', '--git-dir'])))
+    if (!same(dirname(adminDir), join(commonDir, 'worktrees'))) throw new Error('The worktree has no administration folder of its own')
+    return adminDir
+  }
+  /**
+   * Stores the files of the worktree's administration folder (see `worktreeAdminData.ts`) as a tree, each blob proven to
+   * be the bytes that were read, and a commit of it on top of `previous` (reused when its tree is the same). Returns the
+   * commits the folder's reflogs and refs name, and what the files hold, to compare before the delete. Writes no ref.
+   */
+  private async storeAdmin(trashPath: string, commonDir: string, previous: string | undefined): Promise<{ tree: string; commit: string; previous?: string; digest: string; commits: string[] }> {
+    const adminDir = await this.adminDirOf(trashPath, commonDir)
+    const files = await readAdminFilesAsync(adminDir)
+    const format = await lifecycleReadAsync(commonDir, ['rev-parse', '--show-object-format'])
+    const blobs = new Map<string, string>()
+    const regular = files.filter((file) => file.mode !== '120000')
+    if (regular.some((file) => /[\r\n]/.test(file.path))) throw new Error('A file name Git cannot be given on a line')
+    // Git reads the files again: each blob it stores must be the bytes read above, or the folder changed meanwhile.
+    const ids = regular.length ? (await lifecycleGitAsync(commonDir, ['hash-object', '-w', '--no-filters', '--stdin-paths'], regular.map((file) => join(adminDir, file.path)).join('\n') + '\n')).split('\n') : []
+    for (const [index, file] of regular.entries()) blobs.set(file.path, ids[index]!)
+    for (const file of files.filter((entry) => entry.mode === '120000')) blobs.set(file.path, await lifecycleGitAsync(commonDir, ['hash-object', '-w', '--stdin'], file.bytes.toString('utf8')))
+    for (const file of files) if (blobs.get(file.path) !== blobId(file.bytes, format)) throw new Error('Its files changed while they were read')
+    const tree = await this.writeAdminTree(commonDir, files, blobs)
+    const reuse = previous && await lifecycleReadAsync(commonDir, ['rev-parse', `${previous}^{tree}`]).catch(() => undefined) === tree
+    const commit = reuse ? previous : await lifecycleGitAsync(commonDir, ['commit-tree', tree, ...(previous ? ['-p', previous] : []), '-m', "mousse: Git's own data of a retired worktree"], undefined, undefined, MOUSSE_COMMIT_ENV)
+    // The worktree's own refs as Git lists them too, so a ref store other than plain files is covered as well.
+    const listed = (await lifecycleReadAsync(trashPath, ['for-each-ref', '--format=%(objectname)', 'refs/worktree/', 'refs/bisect/', 'refs/rewritten/'])).split('\n')
+    const named = [...new Set([...adminObjectIds(files), ...listed.filter((sha) => /^[a-f0-9]{40,64}$/.test(sha))])]
+    const types = named.length ? (await lifecycleReadAsync(commonDir, ['cat-file', '--batch-check=%(objectname) %(objecttype)'], named.join('\n') + '\n')).split('\n') : []
+    const commits = types.map((line) => line.split(' ')).filter(([sha, type]) => type === 'commit' && named.includes(sha!)).map(([sha]) => sha!)
+    return { tree, commit, ...(previous ? { previous } : {}), digest: adminDigest(files), commits }
+  }
+  /** A tree of the kept files, one `mktree` per folder. */
+  private async writeAdminTree(commonDir: string, files: readonly AdminFile[], blobs: ReadonlyMap<string, string>): Promise<string> {
+    const write = async (prefix: string): Promise<string> => {
+      const rows: string[] = []
+      const folders = new Set<string>()
+      for (const file of files) {
+        if (prefix && !file.path.startsWith(`${prefix}/`)) continue
+        const rest = prefix ? file.path.slice(prefix.length + 1) : file.path
+        const slash = rest.indexOf('/')
+        if (slash < 0) rows.push(`${file.mode} blob ${blobs.get(file.path)!}\t${rest}`)
+        else folders.add(rest.slice(0, slash))
+      }
+      for (const folder of folders) rows.push(`040000 tree ${await write(prefix ? `${prefix}/${folder}` : folder)}\t${folder}`)
+      return lifecycleGitAsync(commonDir, ['mktree', '-z'], rows.map((row) => `${row}\0`).join(''))
+    }
+    return write('')
+  }
+  /**
+   * Of `commits`, the fewest that hold every one not already held by `pinned`: the independent tips of them (none an
+   * ancestor of another), less those an existing pin contains. Pinning these keeps every commit in `commits`.
+   */
+  private async uncontainedTips(commonDir: string, commits: readonly string[], pinned: readonly string[]): Promise<string[]> {
+    const held = new Set(pinned)
+    const rest = commits.filter((sha) => !held.has(sha))
+    if (!rest.length) return []
+    const tips = rest.length === 1 ? rest : (await lifecycleReadAsync(commonDir, ['merge-base', '--independent', ...rest])).split('\n').filter(Boolean)
+    const uncontained: string[] = []
+    for (const tip of tips) {
+      let contained = false
+      for (const pin of held) if (await gitSucceeds(commonDir, ['merge-base', '--is-ancestor', tip, pin])) { contained = true; break }
+      if (!contained) uncontained.push(tip)
+    }
+    return uncontained
+  }
+  /**
+   * Writes Git's kept data of the worktree into the administration folder `git worktree add` just made, before anything
+   * is checked out: its configuration then applies to the checkout. The files `replayedAdminFile` leaves out (the folder's
+   * registration, locks, links, HEAD and the index) are never written. The kept HEAD history goes in front of what the
+   * rebuild itself recorded. Configuration Mousse puts on an untrusted checkout is applied after this, over it.
+   */
+  private async restoreAdmin(manifest: WorktreeReconstructionManifest): Promise<void> {
+    if (!manifest.adminTree) return
+    const adminDir = await this.adminDirOf(manifest.worktreePath, manifest.commonDir)
+    const entries = (await lifecycleReadAsync(manifest.commonDir, ['ls-tree', '-r', '-z', manifest.adminTree])).split('\0').filter(Boolean).map((line) => {
+      const tab = line.indexOf('\t'), [mode, type, sha] = line.slice(0, tab).split(' ')
+      return { mode: mode!, type: type!, sha: sha!, path: line.slice(tab + 1) }
+    }).filter((entry) => entry.type === 'blob' && replayedAdminFile(entry.path, entry.mode))
+    if (!entries.length) return
+    const argv = await withoutRepoProgramsAsync(manifest.commonDir, ['cat-file', '--batch'])
+    const ran = await runGitProcess(argv, { cwd: manifest.commonDir, env: repoProgramEnv({ ...process.env, ...READ_ONLY_GIT_ENV }), input: entries.map((entry) => `${entry.sha}\n`).join(''), timeout: 30_000, maxBuffer: 600 * 1024 * 1024 })
+    if (ran.error || ran.status !== 0) throw gitRunError(argv, ran)
+    let offset = 0
+    for (const entry of entries) {
+      const headerEnd = ran.stdoutBytes.indexOf(10, offset)
+      const [sha, type, size] = ran.stdoutBytes.subarray(offset, headerEnd).toString('utf8').split(' ')
+      if (headerEnd < 0 || sha !== entry.sha || type !== 'blob' || !/^\d+$/.test(size ?? '')) throw new Error('Kept Git data of the worktree is unreadable')
+      let bytes: Buffer = ran.stdoutBytes.subarray(headerEnd + 1, headerEnd + 1 + Number(size))
+      offset = headerEnd + 1 + Number(size) + 1
+      const target = join(adminDir, entry.path)
+      await assertLifecyclePathAsync(adminDir, target)
+      await mkdir(dirname(target), { recursive: true })
+      if (entry.path === HEAD_REFLOG) bytes = Buffer.concat([bytes, await readFile(target).catch(() => Buffer.alloc(0))])
+      await writeFile(target, bytes)
+      await chmod(target, entry.mode === '100755' ? 0o755 : 0o644)
+    }
   }
   /**
    * The record of a worktree in the trash is written only while it is still the one this pass read or last wrote, checked
@@ -630,7 +753,7 @@ export class WorktreeRetirementService {
   private async trashedState(manifest: WorktreeReconstructionManifest): Promise<string> {
     const trashPath = manifest.trashPath!
     try {
-      return trashedStateOf(await lifecycleReadAsync(trashPath, ['rev-parse', 'HEAD']), await walkOwnedContentAsync(trashPath, true))
+      return trashedStateOf(await lifecycleReadAsync(trashPath, ['rev-parse', 'HEAD']), await walkOwnedContentAsync(trashPath, true), adminDigest(await readAdminFilesAsync(await this.adminDirOf(trashPath, manifest.commonDir))))
     } catch (error) { return `unreadable: ${(error as Error).message}` }
   }
   /** Points Git's registration at the trash after a move that a crash interrupted. Idempotent. */
@@ -723,6 +846,8 @@ export class WorktreeRetirementService {
       let onBranch: string | undefined
       for (const name of [manifest.headBranch, manifest.branch]) if (name && await this.tip(manifest, name) === manifest.resultSha) { onBranch = name; break }
       if (!onBranch || !await this.tryAdd(manifest, [manifest.worktreePath, onBranch])) await lifecycleGitAsync(manifest.commonDir, ['worktree', 'add', '--no-checkout', '--detach', manifest.worktreePath, manifest.resultSha])
+      // Git's own data first, so its configuration is in place for the fingerprint check and the checkout.
+      await this.restoreAdmin(manifest)
       await untrusted?.prepare(manifest.worktreePath)
       if (await this.checkoutFingerprint(manifest.worktreePath) !== manifest.checkoutFingerprint) throw new Error('Checkout conversion policy changed; reconstruction requires recovery')
       if (manifest.sparse) await lifecycleGitAsync(manifest.worktreePath, ['sparse-checkout', 'set', manifest.sparse.cone ? '--cone' : '--no-cone', '--stdin'], manifest.sparse.patterns)
@@ -751,7 +876,8 @@ export class WorktreeRetirementService {
   async verifyPins(manifest: WorktreeReconstructionManifest): Promise<void> {
     await assertLifecyclePathAsync(dirname(manifest.commonDir), manifest.commonDir)
     if (hash((await realpathLikeSync(manifest.commonDir)).toLowerCase()).slice(0, 32) !== manifest.repositoryId) throw new Error('Repository identity is unavailable or changed')
-    for (const [ref, sha] of [[manifest.baseRef, manifest.baseSha], [manifest.resultRef, manifest.resultSha], ...(manifest.snapshotRef ? [[manifest.snapshotRef, manifest.snapshotSha!]] : [])]) if (await readDirectLifecycleRefAsync(manifest.commonDir, ref) !== sha) throw new Error('Reconstruction pin changed or is unavailable')
+    for (const [ref, sha] of [[manifest.baseRef, manifest.baseSha], [manifest.resultRef, manifest.resultSha], ...(manifest.snapshotRef ? [[manifest.snapshotRef, manifest.snapshotSha!]] : []), ...(manifest.adminRef ? [[manifest.adminRef, manifest.adminCommit!]] : [])]) if (await readDirectLifecycleRefAsync(manifest.commonDir, ref) !== sha) throw new Error('Reconstruction pin changed or is unavailable')
+    if (manifest.adminCommit && await lifecycleGitAsync(manifest.commonDir, ['rev-parse', `${manifest.adminCommit}^{tree}`]) !== manifest.adminTree) throw new Error('Retained Git data of the worktree changed')
     if (await lifecycleGitAsync(manifest.commonDir, ['rev-parse', `${manifest.resultSha}^{tree}`]) !== manifest.treeSha) throw new Error('Retained result tree changed')
     if (manifest.snapshotSha && await lifecycleGitAsync(manifest.commonDir, ['rev-parse', `${manifest.snapshotSha}^{tree}`]) !== manifest.snapshotTree) throw new Error('Retained snapshot tree changed')
   }
