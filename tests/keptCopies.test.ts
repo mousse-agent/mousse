@@ -569,18 +569,21 @@ describe('the copy also keeps what stands where Discard puts a file back', () =>
   })
 
   it('refuses, naming it, when a repository of its own stands where HEAD has a file, and changes nothing', async () => {
-    for (const how of ['panel', 'pending'] as const) {
+    for (const how of ['panel', 'pending', 'inside'] as const) {
       const cwd = repo()
       rmSync(join(cwd, 'base.txt')); mkdirSync(join(cwd, 'base.txt'))
-      git(join(cwd, 'base.txt'), 'init', '-q', '-b', 'main')
-      writeFileSync(join(cwd, 'base.txt', 'history.txt'), 'nested history\n')
-      git(join(cwd, 'base.txt'), 'add', '.'); git(join(cwd, 'base.txt'), '-c', 'user.name=N', '-c', 'user.email=n@example.invalid', 'commit', '-qm', 'nested')
+      // `inside`: the repository is a folder down, in a folder of ignored files standing where HEAD has base.txt.
+      const nested = how === 'inside' ? 'base.txt/vendor' : 'base.txt'
+      if (how === 'inside') { writeFileSync(join(cwd, '.git', 'info', 'exclude'), 'base.txt/\n'); writeFileSync(join(cwd, 'base.txt', 'notes.txt'), 'notes\n'); mkdirSync(join(cwd, nested)) }
+      git(join(cwd, nested), 'init', '-q', '-b', 'main')
+      writeFileSync(join(cwd, nested, 'history.txt'), 'nested history\n')
+      git(join(cwd, nested), 'add', '.'); git(join(cwd, nested), '-c', 'user.name=N', '-c', 'user.email=n@example.invalid', 'commit', '-qm', 'nested')
       const before = everything(cwd)
       const index = indexDigest(cwd)
-      const work = how === 'panel'
-        ? new GitService().discard(cwd, USER, ['base.txt'], { owner: temp('mousse-kept-owner-') })
-        : discardPending(cwd, temp('mousse-kept-owner-'))
-      await expect(work).rejects.toThrow(/base\.txt is a separate Git repository/)
+      const work = how === 'pending'
+        ? discardPending(cwd, temp('mousse-kept-owner-'))
+        : new GitService().discard(cwd, USER, ['base.txt'], { owner: temp('mousse-kept-owner-') })
+      await expect(work).rejects.toThrow(how === 'inside' ? 'base.txt/vendor is a separate Git repository inside base.txt' : 'base.txt is a separate Git repository where Git would put the file base.txt back')
       if (how === 'pending') await expect(discardPending(cwd, temp('mousse-kept-owner-'))).rejects.toBeInstanceOf(KeepCopyRefusedError)
       expect(everything(cwd)).toEqual(before)
       expect(indexDigest(cwd)).toBe(index)

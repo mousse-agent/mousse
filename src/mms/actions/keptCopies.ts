@@ -431,7 +431,8 @@ async function obstructionsOf(top: string, writes: readonly string[], target: st
   // A folder where `target` has a file or link: everything in it.
   const walk = async (folder: string, write: string): Promise<void> => {
     if (await lstat(join(top, folder, '.git')).then(() => true, () => false)) {
-      throw new KeepCopyRefusedError(`${action} could not keep a copy: ${folder} is a separate Git repository, and putting back ${write} would delete it with its history. Nothing was changed. Move ${folder} out of the way, then try again.`, [folder])
+      const where = folder === write ? `where Git would put the file ${write} back` : `inside ${write}, where Git would put a file back`
+      throw new KeepCopyRefusedError(`${action} could not keep a copy: ${folder} is a separate Git repository ${where}, deleting the repository with its history. Nothing was changed. Move ${folder} out of the way, then try again.`, [folder])
     }
     const children = await readdir(join(top, folder), { withFileTypes: true })
     await Promise.all(children.map(async (child) => {
