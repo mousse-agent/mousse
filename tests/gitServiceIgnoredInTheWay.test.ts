@@ -108,7 +108,7 @@ describe('switching branches over ignored files', () => {
     write(cwd, '.gitignore', '.env\nignored/\ncache/\n'); git(cwd, 'commit', '-qam', 'ignore cache')
     write(cwd, '.env', 'mine\n'); write(cwd, 'cache/one.bin', 'one\n'); write(cwd, 'cache/two.bin', 'two\n')
     const error = await refusal(new GitService().checkout(cwd, USER, 'feature'))
-    expect(error.message).toBe('Switching to feature would overwrite ignored files: .env, cache/. Move them aside, then try again. Nothing was changed.')
+    expect(error.message).toBe('Switching to feature would overwrite ignored files and folders: .env, cache/. Move them aside, then try again. Nothing was changed.')
     expect([read(cwd, '.env'), read(cwd, 'cache/one.bin'), read(cwd, 'cache/two.bin')]).toEqual(['mine\n', 'one\n', 'two\n'])
     expect(git(cwd, 'branch', '--show-current')).toBe('main')
   })
@@ -424,4 +424,132 @@ describe('ignored files Git lists only as part of an untracked folder', () => {
     expect(error.message).toBe('Pulling origin/main would overwrite an ignored file: notes/run.log. Move it aside, then try again. Nothing was changed.')
     expect(read(cwd, 'notes/run.log')).toBe('ignored log only here\n')
   }, 60_000)
+})
+
+const outcome = (promise: Promise<unknown>) => promise.catch((error: Error & { code?: string }) => ({ error: error.code, message: error.message }))
+const bytes = (cwd: string, path: string) => (existsSync(join(cwd, path)) ? read(cwd, path) : '<missing>')
+
+describe('replays and merges as Git really runs them', () => {
+  it('rebase replays with the merge backend even when rebase.backend is apply, so the check matches the replay', async () => {
+    const cwd = repo()
+    write(cwd, 'old/a', 'a\n'); commitAll(cwd, 'old')
+    const { push } = withRemote(cwd)
+    write(cwd, 'old/new', 'local commit\n'); commitAll(cwd, 'add new')
+    git(cwd, 'rm', '-q', 'old/new'); git(cwd, 'commit', '-qm', 'remove new')
+    push((other) => { git(other, 'mv', 'old', 'renamed'); git(other, 'commit', '-qm', 'rename') })
+    write(cwd, '.git/info/exclude', 'old/new\n'); write(cwd, 'old/new', 'mine\n')
+    git(cwd, 'config', 'rebase.backend', 'apply')
+    const before = state(cwd, ['old/new'])
+    const error = await refusal(new GitService().pull(cwd, USER, { strategy: 'rebase' }))
+    expect(error.code).toBe('git_ignored_in_the_way')
+    expect(error.message).toContain('an ignored file: old/new.')
+    expect(state(cwd, ['old/new'])).toEqual(before)
+  }, 60_000)
+
+  it('rebase counts the commits after a step that conflicts here, since a merge program can settle it in the real replay', async () => {
+    const cwd = repo()
+    write(cwd, '.gitattributes', 'base.txt merge=keep\n'); commitAll(cwd, 'attributes')
+    git(cwd, 'config', 'merge.keep.driver', 'true')
+    const { push } = withRemote(cwd)
+    write(cwd, 'base.txt', 'local\n'); git(cwd, 'commit', '-qam', 'local conflicting change')
+    write(cwd, '.env', 'committed\n'); git(cwd, 'add', '-f', '.env'); git(cwd, 'commit', '-qm', 'env')
+    git(cwd, 'rm', '-q', '.env'); git(cwd, 'commit', '-qm', 'rm env')
+    push((other) => { write(other, 'base.txt', 'upstream\n'); git(other, 'commit', '-qam', 'upstream conflicting change') })
+    write(cwd, '.env', 'mine\n')
+    const before = state(cwd, ['.env'])
+    const error = await refusal(new GitService().pull(cwd, USER, { strategy: 'rebase' }))
+    expect(error.message).toBe('Pulling origin/main would overwrite an ignored file: .env. Move it aside, then try again. Nothing was changed.')
+    expect(state(cwd, ['.env'])).toEqual(before)
+  }, 60_000)
+
+  it.each(['merge', 'rebase'] as const)('%s refuses for an ignored file partway down an ignored folder, where the upstream needs a folder', async (strategy) => {
+    const cwd = repo()
+    write(cwd, '.gitignore', '.env\nignored/\nbuild/\n'); commitAll(cwd, 'ignore build')
+    const { push } = withRemote(cwd)
+    push((other) => { write(other, 'build/output/index.js', 'tracked\n'); git(other, 'add', '-f', 'build/output/index.js'); git(other, 'commit', '-qm', 'track build output') })
+    localCommit(cwd)
+    write(cwd, 'build/output', 'my build log\n')
+    const before = state(cwd, ['build/output'])
+    const error = await refusal(new GitService().pull(cwd, USER, { strategy }))
+    expect(error.message).toBe('Pulling origin/main would overwrite an ignored file: build/output. Move it aside, then try again. Nothing was changed.')
+    expect(state(cwd, ['build/output'])).toEqual(before)
+  }, 60_000)
+
+  it.each(['merge', 'rebase'] as const)('%s refuses for an untracked file partway down an untracked folder', async (strategy) => {
+    const cwd = repo()
+    const { push } = withRemote(cwd)
+    push((other) => { write(other, 'data/raw/x.csv', 'tracked\n'); commitAll(other, 'track data') })
+    localCommit(cwd)
+    write(cwd, 'data/raw', 'my raw data\n'); write(cwd, 'data/notes.txt', 'notes\n')
+    const before = state(cwd, ['data/raw', 'data/notes.txt'])
+    const error = await refusal(new GitService().pull(cwd, USER, { strategy }))
+    expect(error.message).toBe('Pulling origin/main would overwrite an untracked file: data/raw. Move it aside, then try again. Nothing was changed.')
+    expect(state(cwd, ['data/raw', 'data/notes.txt'])).toEqual(before)
+  }, 60_000)
+
+  it('stash and switch names an ignored file inside an untracked folder the branch replaces with a file, before any stash', async () => {
+    const cwd = repo()
+    write(cwd, '.gitignore', '*.log\n'); commitAll(cwd, 'logs')
+    git(cwd, 'checkout', '-q', '-b', 'feature'); write(cwd, 'notes', 'target\n'); commitAll(cwd, 'notes is a file'); git(cwd, 'checkout', '-q', 'main')
+    write(cwd, 'notes/todo', 'todo\n'); write(cwd, 'notes/run.log', 'mine\n'); write(cwd, 'base.txt', 'edit\n')
+    const service = new GitService() as unknown as GitService & { runGit: (cwd: string, args: string[], ...rest: unknown[]) => Promise<unknown> }
+    const original = service.runGit.bind(service), commands: string[][] = []
+    service.runGit = (cwd, args, ...rest) => { commands.push(args); return original(cwd, args, ...rest) }
+    const before = state(cwd, ['notes/run.log'])
+    const error = await refusal(service.checkout(cwd, USER, 'feature', { dirty: 'stash' }))
+    expect(error.message).toBe('Switching to feature would overwrite an ignored file: notes/run.log. Move it aside, then try again. Nothing was changed.')
+    expect(commands.some((args) => args[0] === 'stash')).toBe(false)
+    expect(state(cwd, ['notes/run.log'])).toEqual(before)
+  })
+})
+
+describe('what the check lets through', () => {
+  it('a populated nested repository becoming a submodule is a safe switch', async () => {
+    const cwd = repo(), library = repo()
+    git(cwd, 'switch', '-q', '-c', 'feature'); git(cwd, '-c', 'protocol.file.allow=always', 'submodule', 'add', '-q', library, 'sub'); git(cwd, 'commit', '-qm', 'add sub')
+    git(cwd, 'submodule', 'deinit', '-q', '-f', 'sub'); git(cwd, 'switch', '-q', 'main'); rmSync(join(cwd, 'sub'), { recursive: true, force: true })
+    git(cwd, 'clone', '-q', library, 'sub'); write(cwd, 'sub/.env', 'mine\n')
+    expect(await outcome(new GitService().checkout(cwd, USER, 'feature'))).toEqual({})
+    expect(bytes(cwd, 'sub/.env')).toBe('mine\n')
+  }, 60_000)
+
+  it('an ignored folder becoming a submodule is a safe switch', async () => {
+    const cwd = repo(), library = repo()
+    write(cwd, '.gitignore', 'sub/\n'); git(cwd, 'commit', '-qam', 'ignore sub')
+    git(cwd, 'switch', '-q', '-c', 'feature'); git(cwd, '-c', 'protocol.file.allow=always', 'submodule', 'add', '-q', '--force', library, 'sub'); git(cwd, 'commit', '-qm', 'add sub')
+    git(cwd, 'submodule', 'deinit', '-q', '-f', 'sub'); git(cwd, 'switch', '-q', 'main'); write(cwd, 'sub/local', 'mine\n')
+    expect(await outcome(new GitService().checkout(cwd, USER, 'feature'))).toEqual({})
+    expect(bytes(cwd, 'sub/local')).toBe('mine\n')
+  }, 60_000)
+
+  it('a merge configured with the ours strategy writes nothing, so it is not refused', async () => {
+    const cwd = repo(), { push } = withRemote(cwd)
+    localCommit(cwd)
+    push((other) => { write(other, '.env', 'upstream\n'); git(other, 'add', '-f', '.env'); git(other, 'commit', '-qm', 'env') })
+    write(cwd, '.env', 'mine\n'); git(cwd, 'config', 'branch.main.mergeOptions', '-s ours')
+    expect(await new GitService().pull(cwd, USER, { strategy: 'merge' })).toEqual({ result: 'merged' })
+    expect(bytes(cwd, '.env')).toBe('mine\n')
+  }, 60_000)
+
+  it("an editor's backup x~ is not taken for the side name of a folder/file conflict", async () => {
+    const cwd = repo()
+    write(cwd, '.gitignore', '.env\nignored/\n*~\n'); write(cwd, 'x', 'file\n'); commitAll(cwd, 'x is a file')
+    const { push } = withRemote(cwd)
+    push((other) => { git(other, 'rm', '-q', 'x'); write(other, 'x/y', 'now a folder\n'); commitAll(other, 'x is a folder') })
+    write(cwd, 'x', 'changed here\n'); commitAll(cwd, 'x changed')
+    write(cwd, 'x~', 'editor backup\n')
+    expect(await new GitService().pull(cwd, USER, { strategy: 'merge' })).toEqual({ result: 'conflicted' })
+    expect(bytes(cwd, 'x~')).toBe('editor backup\n')
+  }, 60_000)
+
+  it('names a nested repository by its folder, and a single ignored folder as a folder', async () => {
+    const cwd = repo()
+    git(cwd, 'checkout', '-q', '-b', 'feature'); write(cwd, 'tools/run.sh', 'tracked\n'); write(cwd, 'logs', 'a file now\n'); commitAll(cwd, 'tools and logs'); git(cwd, 'checkout', '-q', 'main')
+    write(cwd, '.gitignore', '.env\nignored/\nlogs/\n'); commitAll(cwd, 'ignore logs')
+    write(cwd, 'logs/today.log', 'log\n')
+    git(dirname(cwd), 'init', '-q', join(cwd, 'tools')); write(cwd, 'tools/run.sh', 'my script\n')
+    const error = await refusal(new GitService().checkout(cwd, USER, 'feature'))
+    expect(error.message).toBe('Switching to feature would overwrite an ignored folder: logs/; the files of the nested repository tools. Move them aside, then try again. Nothing was changed.')
+    expect([read(cwd, 'tools/run.sh'), read(cwd, 'logs/today.log')]).toEqual(['my script\n', 'log\n'])
+  })
 })

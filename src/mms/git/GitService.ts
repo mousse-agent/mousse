@@ -302,24 +302,32 @@ function classified(code: GitErrorCode, run: GitRun): AppError {
   return gitErrors.create(code, redactGitText(run.output))
 }
 
-const IN_THE_WAY_WORDS: Record<InTheWayKind, { one: string; many: string; list: boolean }> = {
-  ignored: { one: 'an ignored file', many: 'ignored files', list: true },
-  untracked: { one: 'an untracked file', many: 'untracked files', list: true },
-  submodule: { one: 'the files of submodule', many: 'the files of submodules', list: false },
-  nested: { one: 'the files of the nested repository', many: 'the files of the nested repositories', list: false },
-  unreadable: { one: 'a folder Mousse cannot read', many: 'folders Mousse cannot read', list: true }
+/**
+ * How each kind is named: a file and a folder (`logs/`) are told apart, so a folder is never called a file. A submodule
+ * and a nested repository are named by their folder, whose files would be overwritten.
+ */
+const IN_THE_WAY_WORDS: Record<InTheWayKind, { file: [string, string]; folder: [string, string]; mixed: string; list: boolean }> = {
+  ignored: { file: ['an ignored file', 'ignored files'], folder: ['an ignored folder', 'ignored folders'], mixed: 'ignored files and folders', list: true },
+  untracked: { file: ['an untracked file', 'untracked files'], folder: ['an untracked folder', 'untracked folders'], mixed: 'untracked files and folders', list: true },
+  submodule: { file: ['the files of submodule', 'the files of submodules'], folder: ['the files of submodule', 'the files of submodules'], mixed: 'the files of submodules', list: false },
+  nested: { file: ['the files of the nested repository', 'the files of the nested repositories'], folder: ['the files of the nested repository', 'the files of the nested repositories'], mixed: 'the files of the nested repositories', list: false },
+  unreadable: { file: ['a folder Mousse cannot read', 'folders Mousse cannot read'], folder: ['a folder Mousse cannot read', 'folders Mousse cannot read'], mixed: 'folders Mousse cannot read', list: true }
 }
 
 /** A switch, a new branch or a pull refused before it wrote anything, naming what it would have overwritten, as spelled on disk. */
 function inTheWayError(doing: string, found: readonly InTheWay[]): AppError {
+  // A name with a line break or other control character is quoted, so the message stays one line and says exactly which file.
+  const shown = (path: string) => (/\p{Cc}/u.test(path) ? JSON.stringify(path) : path)
   const parts = (Object.keys(IN_THE_WAY_WORDS) as InTheWayKind[]).flatMap((kind) => {
-    // A name with a line break or other control character is quoted, so the message stays one line and says exactly which file.
-    const shown = (path: string) => (/\p{Cc}/u.test(path) ? JSON.stringify(path) : path)
-    const paths = found.filter((item) => item.kind === kind).map((item) => shown(IN_THE_WAY_WORDS[kind].list ? item.path : item.path.replace(/\/$/, '')))
-    if (!paths.length) return []
+    const items = found.filter((item) => item.kind === kind)
+    if (!items.length) return []
     const words = IN_THE_WAY_WORDS[kind]
+    const folders = items.filter((item) => item.path.endsWith('/')).length
+    const many = items.length > 1 ? 1 : 0
+    const label = folders === 0 ? words.file[many] : folders === items.length ? words.folder[many] : words.mixed
+    const paths = items.map((item) => shown(words.list ? item.path : item.path.replace(/\/$/, '')))
     const named = `${paths.slice(0, 5).join(', ')}${paths.length > 5 ? ` and ${paths.length - 5} more` : ''}`
-    return [`${paths.length === 1 ? words.one : words.many}${words.list ? ':' : ''} ${named}`]
+    return [`${label}${words.list ? ':' : ''} ${named}`]
   })
   const one = found.length === 1 && IN_THE_WAY_WORDS[found[0]!.kind].list
   return new AppError({
@@ -1028,13 +1036,14 @@ export class GitService {
       }
       assertNotCancelled(live)
       // A merge or rebase already waiting makes Git refuse; there is nothing to check before that.
-      if (!waiting) await this.refuseInTheWayForPull(cwd, strategy, target ? `Pulling ${target.remote}/${target.branch}` : 'Pulling')
+      if (!waiting) await this.refuseInTheWayForPull(cwd, branch, strategy, target ? `Pulling ${target.remote}/${target.branch}` : 'Pulling')
       assertNotCancelled(live)
       live.stopCancelling()
       // `--no-overwrite-ignore` makes Git itself refuse a fast-forward over an ignored file, should the check above
       // have missed one. It does not stop a real merge (Git 2.50 still writes over an ignored file then) and a rebase
-      // does not take it, so those rely on the check alone.
-      const integrate = strategy === 'ff-only' ? ['merge', '--no-overwrite-ignore', '--ff-only', '@{upstream}'] : strategy === 'merge' ? ['merge', '--no-overwrite-ignore', '--no-edit', '@{upstream}'] : ['rebase', '@{upstream}']
+      // does not take it, so those rely on the check alone. A rebase always uses the merge backend, whatever
+      // `rebase.backend` says, so it replays commits the way the check worked them out.
+      const integrate = strategy === 'ff-only' ? ['merge', '--no-overwrite-ignore', '--ff-only', '@{upstream}'] : strategy === 'merge' ? ['merge', '--no-overwrite-ignore', '--no-edit', '@{upstream}'] : ['rebase', '--merge', '@{upstream}']
       const run = await this.runLive(cwd, integrate, live, { env: explicitActionGitEnv() })
       if (!run.ok) {
         if (!waiting && await this.inProgress(cwd)) return { result: 'conflicted' }
@@ -1085,15 +1094,13 @@ export class GitService {
    * The pull's check (`refuseInTheWay`), with what each strategy writes, untracked files included: a rebase replays
    * commits under rules that change on the way, so Git's own check can miss a file that was untracked when it began.
    * - A fast-forward writes the upstream's files.
-   * - A merge writes its result (`merge-tree`), with the side names a folder/file conflict gives files.
-   * - A rebase first takes the files to the upstream, then replays each local commit in turn. Each step is worked out
-   *   as Git will do it (`merge-tree` from the commit's parent), so a change that rename detection moves is counted
-   *   where it lands, and a path a local commit adds and a later one deletes is counted too. The upstream's own
-   *   commits are never replayed, only its last state is written. A rebase of a branch that holds a merge replays the
-   *   merged commits even when the upstream is already in it.
+   * - A merge writes its result (`merge-tree`, with the `-X` options of `branch.<name>.mergeOptions`), with the side
+   *   names a folder/file conflict gives files. A merge with the `ours` strategy writes nothing.
+   * - A rebase: see `rebaseWrites`. A rebase of a branch that holds a merge replays the merged commits even when the
+   *   upstream is already in it.
    * Where Git does nothing or refuses anyway (diverged for a fast-forward, nothing to bring in) nothing is checked.
    */
-  private async refuseInTheWayForPull(cwd: string, strategy: 'ff-only' | 'merge' | 'rebase', doing: string): Promise<void> {
+  private async refuseInTheWayForPull(cwd: string, branch: string, strategy: 'ff-only' | 'merge' | 'rebase', doing: string): Promise<void> {
     const head = await this.read(cwd, ['rev-parse', '--verify', '--quiet', 'HEAD^{commit}'])
     const upstream = await this.read(cwd, ['rev-parse', '--verify', '--quiet', '@{upstream}^{commit}'])
     if (!head || !upstream || head === upstream) return
@@ -1106,13 +1113,14 @@ export class GitService {
     }
     if (strategy === 'merge') {
       if (contains) return
+      const options = await this.mergeOptions(cwd, branch)
+      // A fast-forward writes the upstream's files whatever the strategy; a real merge with `ours` keeps HEAD's.
+      const fastForward = behind && !options.noFastForward
+      if (options.strategy === 'ours' && !fastForward) return
       await this.refuseInTheWay(cwd, doing, true, async (top) => {
-        if (behind) return plannedWrites(top, head, upstream)
-        const merged = await mergeResult(top, head, upstream)
-        if (merged) return [...await plannedWrites(top, head, merged.tree), ...conflictWrites(merged.conflicts)]
-        // A Git without `merge-tree --write-tree`: every path either side changed since they parted.
-        const base = await this.read(top, ['merge-base', head, upstream])
-        return [...base ? await plannedWrites(top, base, upstream) : [], ...await plannedWrites(top, head, upstream)]
+        if (fastForward) return plannedWrites(top, head, upstream)
+        const merged = await mergeResult(top, head, upstream, { strategyOptions: options.strategyOptions })
+        return [...await plannedWrites(top, head, merged.tree), ...conflictWrites(merged.conflicts)]
       })
       return
     }
@@ -1121,7 +1129,42 @@ export class GitService {
     await this.refuseInTheWay(cwd, doing, true, (top) => this.rebaseWrites(top, head, upstream))
   }
 
-  /** Every path a rebase of `head` onto `upstream` writes, step by step (see `refuseInTheWayForPull`). */
+  /**
+   * What `git merge` takes from the branch's configuration (`branch.<name>.mergeOptions`, `merge.ff`): the strategy,
+   * its `-X` options, and whether a fast-forward is turned off.
+   */
+  private async mergeOptions(cwd: string, branch: string): Promise<{ strategy?: string; strategyOptions: string[]; noFastForward: boolean }> {
+    const words = (await this.read(cwd, ['config', '--get', `branch.${branch}.mergeOptions`]) ?? '').split(/\s+/).filter(Boolean)
+    let strategy: string | undefined
+    const strategyOptions: string[] = []
+    let noFastForward = (await this.read(cwd, ['config', '--get', 'merge.ff'])) === 'false'
+    for (let index = 0; index < words.length; index++) {
+      const word = words[index]!
+      const value = (long: string, short: string): string | undefined => {
+        if (word === long || word === short) return words[++index]
+        if (word.startsWith(`${long}=`)) return word.slice(long.length + 1)
+        if (word.startsWith(short) && word.length > short.length) return word.slice(short.length)
+        return undefined
+      }
+      const chosen = value('--strategy', '-s')
+      if (chosen !== undefined) { strategy = chosen; continue }
+      const option = value('--strategy-option', '-X')
+      if (option !== undefined) { strategyOptions.push(option); continue }
+      if (word === '--no-ff') noFastForward = true
+      else if (word === '--ff' || word === '--ff-only') noFastForward = false
+    }
+    return { ...(strategy ? { strategy } : {}), strategyOptions, noFastForward }
+  }
+
+  /**
+   * Every path a rebase of `head` onto `upstream` writes. It first takes the files to the upstream, then replays each
+   * local commit in turn with the merge backend (`--merge`, which the pull always passes). Each step is worked out as
+   * Git will do it (`merge-tree` from the commit's parent), so a change that rename detection moves is counted where it
+   * lands; each commit's own paths are counted too, whatever the step did with them. A step that conflicts here may not
+   * stop the real rebase (a merge program the repository configures can settle it), so every later commit is counted
+   * as well, worked out from the conflicted result. The upstream's own commits are never replayed, only its last state
+   * is written. When a step cannot be worked out the check fails, rather than leave its writes uncounted.
+   */
   private async rebaseWrites(top: string, head: string, upstream: string): Promise<PlannedWrite[]> {
     const writes = await plannedWrites(top, head, upstream)
     // The commits `git rebase` replays: not merges, and not those whose change the upstream already has.
@@ -1132,15 +1175,8 @@ export class GitService {
     let onto = upstream
     for (const commit of replayed) {
       const base = await this.read(top, ['rev-parse', '--verify', '--quiet', `${commit}^1^{tree}`]) ?? await emptyTree(top)
-      const step = await mergeResult(top, onto, commit, base)
-      if (!step) {
-        // A Git without `merge-tree --merge-base`: the commit's own paths, without the moves rename detection makes.
-        writes.push(...await plannedWrites(top, base, commit))
-        continue
-      }
-      writes.push(...await plannedWrites(top, onto, step.tree), ...conflictWrites(step.conflicts))
-      // The rebase stops at the first conflict; what comes after is the person's to continue or abort.
-      if (step.conflicted) break
+      const step = await mergeResult(top, onto, commit, { base })
+      writes.push(...await plannedWrites(top, base, commit), ...await plannedWrites(top, onto, step.tree), ...conflictWrites(step.conflicts))
       onto = step.tree
     }
     return writes

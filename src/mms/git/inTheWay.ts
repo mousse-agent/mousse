@@ -7,9 +7,9 @@ import { LISTING, tryGitRawAsync } from '../actions/git'
  * write over or delete that no commit holds. Git writes over and deletes ignored files without asking, and a rebase
  * replays commits under rules that can change on the way, so Mousse checks first and refuses, naming what is there.
  *
- * Only reads: the files on disk are listed by Git (`ls-files --others`), never added to the object store, and nothing
- * is snapshotted for the check. The only objects written are the trees `git merge-tree` builds to work out a merge or
- * a rebase's steps, which nothing points at.
+ * The files on disk are only listed by Git (`ls-files --others`), never added to the object store, and nothing is
+ * snapshotted for the check. The only objects written are what `git merge-tree` builds to work out a merge or a
+ * rebase's steps: its trees and the merged contents of files both sides changed, which nothing points at.
  */
 
 /** Why a file is in the way. */
@@ -27,7 +27,10 @@ export interface PlannedWrite {
   mode: string
   /** The submodule that was at this path before the step, if any. */
   wasSubmodule?: boolean
-  /** A side name Git gives a file in a folder/file conflict (`x~HEAD`): any name that starts with this is written. */
+  /**
+   * The start of a side name Git gives a file in a folder/file conflict (`x~`): the name it writes is this followed by
+   * one of the labels Mousse's merge and rebase use (`SIDE_LABEL`).
+   */
   sidePrefix?: boolean
 }
 
@@ -38,6 +41,12 @@ export class InTheWayCheckError extends Error {
     this.name = 'InTheWayCheckError'
   }
 }
+
+/**
+ * The labels Git puts after the tilde of a side name for the commands Mousse runs: `HEAD`, `@{upstream}` (a merge of the
+ * upstream), and a replayed commit's short hash with its subject (a rebase). An editor's backup `x~` is not one.
+ */
+const SIDE_LABEL = /^(?:HEAD|@\{upstream\}|[0-9a-f]{4,64}(?: \(.*\))?)$/s
 
 const GITLINK = '160000'
 const DELETED = '000000'
@@ -79,14 +88,15 @@ export interface MergeResult {
 
 /**
  * The tree `git merge` or one step of a rebase would leave, worked out without touching the files (`merge-tree`).
- * `base` is given for a rebase step (the replayed commit's parent); `ours` and `theirs` may then be trees. Null when
- * this Git cannot do it (older than 2.40 for `base`, 2.38 without).
+ * `base` is given for a rebase step (the replayed commit's parent); `ours` and `theirs` may then be trees.
+ * `strategyOptions` are the merge's `-X` options. When Git cannot work it out (older than 2.40 for `base`, 2.38
+ * without, or the read fails) what the command writes is unknown, so the check fails rather than guess.
  */
-export async function mergeResult(top: string, ours: string, theirs: string, base?: string): Promise<MergeResult | null> {
-  const run = await tryGitRawAsync(top, ['merge-tree', '--write-tree', '-z', '--name-only', '--no-messages', ...(base ? [`--merge-base=${base}`] : []), ours, theirs], undefined, LISTING)
-  if (run.status !== 0 && run.status !== 1) return null
+export async function mergeResult(top: string, ours: string, theirs: string, options: { base?: string; strategyOptions?: readonly string[] } = {}): Promise<MergeResult> {
+  const args = ['merge-tree', '--write-tree', '-z', '--name-only', '--no-messages', ...(options.strategyOptions ?? []).map((option) => `--strategy-option=${option}`), ...(options.base ? [`--merge-base=${options.base}`] : []), ours, theirs]
+  const run = await tryGitRawAsync(top, args, undefined, LISTING)
   const [tree = '', ...rest] = fields(run.stdout)
-  if (!/^[0-9a-f]{40,64}$/.test(tree)) return null
+  if ((run.status !== 0 && run.status !== 1) || !/^[0-9a-f]{40,64}$/.test(tree)) throw new InTheWayCheckError(firstLine(run.stderr) || 'git merge-tree could not work out the merge')
   const end = rest.indexOf('')
   return { tree, conflicted: run.status === 1, conflicts: [...new Set(end < 0 ? rest : rest.slice(0, end))] }
 }
@@ -165,29 +175,46 @@ export async function findInTheWay(top: string, planned: readonly PlannedWrite[]
 
   const found = new Map<string, InTheWay>()
   const add = (path: string, kind: InTheWayKind) => { if (counts(kind) && !found.has(fold(path))) found.set(fold(path), { path, kind }) }
+  const named = (item: Listed) => (item.folder ? `${item.path}/` : item.path)
   // Files inside a folder Git lists as untracked, which may hide ignored ones: Git is asked which are ignored.
   const toClassify: string[] = []
+  // Untracked folders a write replaces whole, when untracked files do not count: the ignored files in them still do.
+  const replacedUntracked = new Set<string>()
   const sidePrefixes = writes.filter((write) => write.sidePrefix).map((write) => fold(write.path))
   for (const item of listed) {
-    if (!item.folder && sidePrefixes.some((prefix) => fold(item.path).startsWith(prefix) && !fold(item.path).slice(prefix.length).includes('/'))) add(item.path, item.kind)
+    if (item.folder) continue
+    const key = fold(item.path)
+    if (sidePrefixes.some((prefix) => key.startsWith(prefix) && SIDE_LABEL.test(item.path.slice(prefix.length)))) add(item.path, item.kind)
+  }
+  const inFolder = (item: Listed) => {
+    if (item.kind === 'untracked' && item.folder && !options.untracked) replacedUntracked.add(item.path)
+    // A nested repository is named by its folder, whatever file of it a write reaches.
+    add(named(item), item.kind)
   }
   for (const write of writes) {
     if (write.sidePrefix) continue
     const key = fold(write.path)
     const parts = key.split('/')
+    // A submodule added where a folder is leaves that folder's files as they are; Git only records the link.
+    const keepsFolder = write.mode === GITLINK
     const exact = byPath.get(key)
-    if (exact) add(exact.folder ? `${exact.path}/` : exact.path, exact.kind)
-    for (const item of within.get(key) ?? []) add(item.folder ? `${item.path}/` : item.path, item.kind)
+    if (exact && !(keepsFolder && exact.folder)) inFolder(exact)
+    if (!keepsFolder) for (const item of within.get(key) ?? []) inFolder(item)
     for (let depth = 1; depth < parts.length; depth++) {
       const above = byPath.get(parts.slice(0, depth).join('/'))
       if (!above) continue
       if (!above.folder) add(above.path, above.kind)
-      // Inside a listed folder only a file that is there is written over; a new one is only added beside the others.
-      else if (above.kind === 'unreadable') add(`${above.path}/`, above.kind)
-      else if (await exists(join(top, write.path))) {
-        const path = `${above.path}${await diskSpelling(top, write.path.slice(above.path.length), above.path, ignoreCase)}`
-        if (above.kind === 'untracked') toClassify.push(path)
-        else add(path, above.kind)
+      // Inside a listed folder only what is there is written over; a new file is only added beside the others.
+      else if (above.kind === 'unreadable') add(named(above), above.kind)
+      else {
+        const there = await firstInTheWay(top, above.path, write.path.slice(above.path.length + 1), keepsFolder)
+        // A nested repository is named by its folder, whatever file of it would be overwritten.
+        if (there !== null && above.kind === 'nested') add(named(above), above.kind)
+        else if (there !== null) {
+          const path = `${above.path}/${await diskSpelling(top, there, above.path, ignoreCase)}`
+          if (above.kind === 'untracked') toClassify.push(path)
+          else add(path, above.kind)
+        }
       }
       break
     }
@@ -198,6 +225,11 @@ export async function findInTheWay(top: string, planned: readonly PlannedWrite[]
     if (!run.ok && run.status !== 1) throw new InTheWayCheckError(firstLine(run.stderr) || 'git check-ignore failed')
     const ignored = new Set(fields(run.stdout).filter(Boolean))
     for (const path of toClassify) add(path, ignored.has(path) ? 'ignored' : 'untracked')
+  }
+  for (const folder of replacedUntracked) {
+    // Listed one by one within the folder: the listing of the whole checkout leaves them out of an untracked folder.
+    const inside = await gitRead(top, ['ls-files', '-z', '--others', '--ignored', '--exclude-standard', '--', `:(literal)${folder}/`])
+    for (const path of fields(inside).filter(Boolean)) add(path, 'ignored')
   }
   for (const path of await replacedSubmodules(top, writes)) add(`${path}/`, 'submodule')
   return [...found.values()].sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0))
@@ -233,7 +265,7 @@ async function exists(path: string): Promise<boolean> {
   return lstat(path).then(() => true, (error: NodeJS.ErrnoException) => error.code !== 'ENOENT' && error.code !== 'ENOTDIR')
 }
 
-/** `rest` (beginning with a slash) as its names are spelled on disk below `folder`, on a file system that ignores case. */
+/** `rest` as its names are spelled on disk below `folder`, on a file system that ignores case. */
 async function diskSpelling(top: string, rest: string, folder: string, ignoreCase: boolean): Promise<string> {
   if (!ignoreCase) return rest
   let at = folder
@@ -244,5 +276,28 @@ async function diskSpelling(top: string, rest: string, folder: string, ignoreCas
     spelled.push(real)
     at = `${at}/${real}`
   }
-  return `/${spelled.join('/')}`
+  return spelled.join('/')
+}
+
+/**
+ * The first name on the way from `folder` down to `rest` that a write there would overwrite, or null: a file (or link)
+ * partway down, where the write needs a folder, or whatever is at `rest` itself. A folder at `rest` counts too, unless
+ * the write is a submodule, which leaves a folder's files as they are. A name that is not there ends the walk.
+ */
+async function firstInTheWay(top: string, folder: string, rest: string, keepsFolder: boolean): Promise<string | null> {
+  const names = rest.split('/')
+  for (let depth = 1; depth <= names.length; depth++) {
+    const path = names.slice(0, depth).join('/')
+    const stat = await lstat(join(top, folder, path)).catch((error: NodeJS.ErrnoException) => {
+      // A name Git cannot look at is treated as there.
+      if (error.code === 'ENOENT' || error.code === 'ENOTDIR') return null
+      return 'unknown' as const
+    })
+    if (stat === null) return null
+    if (stat === 'unknown') return path
+    const last = depth === names.length
+    if (!stat.isDirectory()) return path
+    if (last) return keepsFolder ? null : `${path}/`
+  }
+  return null
 }
