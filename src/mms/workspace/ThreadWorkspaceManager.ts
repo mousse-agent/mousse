@@ -430,7 +430,11 @@ export class ThreadWorkspaceManager {
     return Boolean(metadata && gate instanceof ResourceLifecycleStore && existsSync(new WorktreeRetirementService(gate).pathFor(metadata.threadId, metadata.worktreePath)))
   }
 
-  async restore(projectPath: string, signal?: AbortSignal, heldThreadLease?: ThreadLeaseHandle): Promise<ThreadWorkspaceMetadata> {
+  /**
+   * `onNotice` gets what the thread should be told about the restore, once it has finished: files a rebuild set aside
+   * (`keptAsideNotice`), with the command that brings each back. A failure to deliver it leaves the restore done.
+   */
+  async restore(projectPath: string, signal?: AbortSignal, heldThreadLease?: ThreadLeaseHandle, onNotice?: (notice: { id: string; text: string }) => unknown): Promise<ThreadWorkspaceMetadata> {
     // The project folder is the person's own: there is no worktree to bring back.
     const current = this.load()
     if (isProjectFolderWorkspace(current)) return this.verify(current)
@@ -469,10 +473,15 @@ export class ThreadWorkspaceManager {
         if (metadata.untrusted) await assertPerWorktreeConfig(repository.gitTopLevel)
         // The worktree's own configuration went with the worktree: for someone else's commits it is put back before anything is checked out.
         const safety = metadata.untrusted ? await untrustedSafety(repository.gitTopLevel) : undefined
-        await retirement.reconstruct(manifestPath, safety ? { prepare: (path) => pinUntrustedWorktree(repository.gitTopLevel, path, safety), env: { ...nonInteractiveGitEnv(), GIT_LFS_SKIP_SMUDGE: '1' } } : undefined)
+        const rebuilt = await retirement.reconstruct(manifestPath, safety ? { prepare: (path) => pinUntrustedWorktree(repository.gitTopLevel, path, safety), env: { ...nonInteractiveGitEnv(), GIT_LFS_SKIP_SMUDGE: '1' } } : undefined)
         const restored = await this.verify(metadata)
         if (restored.lifecycle !== 'ready') throw new Error('Reconstructed task workspace failed verification')
         atomicWriteJsonSync(this.workspacePath, restored)
+        const notice = retirement.keptAsideNotice(rebuilt)
+        if (notice) {
+          // The copies are kept and listed in the thread's journal either way; only the line in the thread is missing then.
+          try { await onNotice?.(notice) } catch (error) { console.warn('restore notice could not be delivered', { threadId: metadata.threadId, error: error instanceof Error ? error.message : String(error) }) }
+        }
         return restored
       }
       // The files come from the retained snapshot, and the worktree starts at the HEAD the snapshot was taken on: on the

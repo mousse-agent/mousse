@@ -696,7 +696,8 @@ async function ensureWorkspaceMaterialized(ctx: HandlerContext, threadId: string
   const projectPath = project ?? resolveThreadProjectPath(ctx.mms.projects, ctx.mms.threads, threadId)
   if (!projectPath) return
   const restore = (async () => {
-    await manager.restore(projectPath)
+    // Files a rebuild had to set aside are named in the thread, with the command that brings each back.
+    await manager.restore(projectPath, undefined, undefined, (notice) => ctx.mms.orchestrator.noteThreadUpdate(threadId, notice.text, { messageId: notice.id, kind: 'warning' }))
     clearCleanupMarker(ctx.mms.threads.lifecycleStore, threadId)
   })().finally(() => { restoresInFlight.delete(key) })
   restoresInFlight.set(key, restore)

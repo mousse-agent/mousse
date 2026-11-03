@@ -1,7 +1,9 @@
-import { execFileSync } from 'node:child_process'
+import { execFileSync, spawn } from 'node:child_process'
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
+import { readFile } from 'node:fs/promises'
+import { buildSync } from 'esbuild'
 import { afterEach, describe, expect, it } from 'vitest'
 import { resolveRepositoryIdentity } from '../src/mms/git/RepositoryIdentity'
 import { acquireRepositoryLease, getRepositoryLeasePath, RepositoryLeaseAbortedError } from '../src/mms/git/RepositoryLease'
@@ -46,4 +48,25 @@ describe('RepositoryLease', () => {
     writeFileSync(getRepositoryLeasePath(identity), JSON.stringify({ pid: 2147000000, processInstanceId: 'dead', token: 'dead', acquiredAt: new Date(0).toISOString(), heartbeatAt: new Date(0).toISOString() }))
     const recovered = await acquireRepositoryLease(identity); expect(existsSync(getRepositoryLeasePath(identity))).toBe(true); recovered.release()
   })
+})
+
+describe('RepositoryLease heartbeat', () => {
+  it('never leaves the lease empty or cut short for a reader in another process while it is refreshed', async () => {
+    const root = repo()
+    const work = mkdtempSync(join(tmpdir(), 'mousse-lease-child-')); dirs.push(work)
+    // The real lease code, run in a process of its own that refreshes the lease as fast as it can.
+    writeFileSync(join(work, 'child.ts'), `import { acquireRepositoryLease } from ${JSON.stringify(resolve('src/mms/git/RepositoryLease'))}\nimport { resolveRepositoryIdentity } from ${JSON.stringify(resolve('src/mms/git/RepositoryIdentity'))}\nconst lease = await acquireRepositoryLease(resolveRepositoryIdentity(process.argv[2]))\nconsole.log(lease.path)\nconst until = Date.now() + 2000\nwhile (Date.now() < until) lease.heartbeat()\nlease.release()\n`)
+    buildSync({ entryPoints: [join(work, 'child.ts')], bundle: true, platform: 'node', format: 'esm', outfile: join(work, 'child.mjs'), logLevel: 'silent', banner: { js: "import { createRequire } from 'module'; const require = createRequire(import.meta.url);" } })
+    const child = spawn(process.execPath, [join(work, 'child.mjs'), root], { stdio: ['ignore', 'pipe', 'inherit'] })
+    const path = await new Promise<string>((done) => child.stdout.once('data', (data) => done(String(data).trim())))
+    let running = true
+    child.on('exit', () => { running = false })
+    let reads = 0, unreadable = 0
+    while (running) {
+      const batch = await Promise.all(Array.from({ length: 16 }, () => readFile(path, 'utf8').then((text) => { JSON.parse(text); return 0 }).catch((error: NodeJS.ErrnoException) => error.code === 'ENOENT' ? 0 : 1)))
+      reads += batch.length; unreadable += batch.reduce((sum: number, value) => sum + value, 0)
+    }
+    expect(reads).toBeGreaterThan(1_000)
+    expect(unreadable).toBe(0)
+  }, 30_000)
 })

@@ -61,6 +61,8 @@ export interface KeptCopy {
   conflictTree?: string
   /** How long the owner keeps it: its Undo window. */
   windowMs: number
+  /** The SHA-256 of each working version kept (a link's: of its target), as read when it was kept. */
+  digests: ReadonlyMap<string, string>
 }
 
 export interface KeepCopyInput {
@@ -75,6 +77,8 @@ export interface KeepCopyInput {
   paths?: readonly string[]
   /** Without `paths`: ignored files too. */
   includeIgnored?: boolean
+  /** With `paths`: paths that are no longer there (a folder that became a file, say), left out of the copy's index. */
+  gone?: readonly string[]
 }
 
 /** A copy cannot be kept, so the action was refused before anything changed. Its message names the files. */
@@ -192,11 +196,12 @@ class PackFile {
    * Adds a large file as a blob, read and compressed in pieces, and returns its object id. A file whose size changes
    * while it is read is refused: its copy would not be the file.
    */
-  async addLargeFile(absolute: string, path: string): Promise<string> {
+  async addLargeFile(absolute: string, path: string): Promise<{ id: string; sha256: string }> {
     const file = await open(absolute, 'r')
     try {
       const size = (await file.stat()).size
       const id: Hash = createHash(this.algorithm).update(`blob ${size}\0`)
+      const sha256 = createHash('sha256')
       await this.write(objectHeader('blob', size))
       const compressor = createDeflate({ level: 1 })
       const feeding = (async () => {
@@ -208,6 +213,7 @@ class PackFile {
           read += bytesRead
           const piece = Buffer.from(chunk.subarray(0, bytesRead))
           id.update(piece)
+          sha256.update(piece)
           if (!compressor.write(piece)) await new Promise((done) => compressor.once('drain', done))
         }
         compressor.end()
@@ -218,7 +224,7 @@ class PackFile {
       for await (const out of compressor) await this.write(out as Buffer)
       await feeding
       this.count++
-      return id.digest('hex')
+      return { id: id.digest('hex'), sha256: sha256.digest('hex') }
     } finally {
       await file.close()
     }
@@ -418,6 +424,7 @@ export async function keepCopy(input: KeepCopyInput): Promise<KeptCopy> {
     pack = await PackFile.create(join(gitDir, `mousse-keep-${randomUUID()}.pack`), algorithm)
     const indexModes = fileModes ? undefined : await currentModes(top, env)
     const stored: string[] = []
+    const digests = new Map<string, string>()
     const kept = entries.filter((entry) => entry.kind === 'file' || entry.kind === 'link')
     for (let start = 0; start < kept.length; start += READ_AHEAD) {
       const batch = kept.slice(start, start + READ_AHEAD)
@@ -432,9 +439,12 @@ export async function keepCopy(input: KeepCopyInput): Promise<KeptCopy> {
         let id: string
         if (piece) {
           id = pack.objectId('blob', piece.data)
+          digests.set(entry.path, createHash('sha256').update(piece.data).digest('hex'))
           await pack.add('blob', piece.data.length, piece.compressed)
         } else {
-          id = await pack.addLargeFile(join(top, entry.path), entry.path)
+          const large = await pack.addLargeFile(join(top, entry.path), entry.path)
+          id = large.id
+          digests.set(entry.path, large.sha256)
         }
         const known = indexModes?.get(entry.path)
         const mode = entry.kind === 'link' ? '120000' : fileModes ? (entry.executable ? '100755' : '100644') : known === '100755' || known === '120000' ? known : '100644'
@@ -443,7 +453,7 @@ export async function keepCopy(input: KeepCopyInput): Promise<KeptCopy> {
     }
     // A path that is gone, or is now a folder, leaves the copy's index, as does a file in the way of a folder that now
     // holds a kept file. A folder that is a repository of its own stays as the index has it.
-    const gone = new Set(entries.filter((entry) => entry.kind === 'gone' || entry.kind === 'folder').map((entry) => entry.path))
+    const gone = new Set([...entries.filter((entry) => entry.kind === 'gone' || entry.kind === 'folder').map((entry) => entry.path), ...(input.gone ?? [])])
     for (const entry of kept) for (let slash = entry.path.indexOf('/'); slash !== -1; slash = entry.path.indexOf('/', slash + 1)) gone.add(entry.path.slice(0, slash))
     if (gone.size) await gitAsync(top, ['update-index', '-z', '--force-remove', '--stdin'], env, `${[...gone].join('\0')}\0`)
     if (stored.length) {
@@ -483,7 +493,7 @@ export async function keepCopy(input: KeepCopyInput): Promise<KeptCopy> {
     for (const object of folded) await unlink(join(objects, object.id.slice(0, 2), object.id.slice(2))).catch(() => undefined)
 
     const { operationId, ref } = await recordKept(input.owner, top, input.operationType, sha)
-    return { operationId, ref, sha, top, stagedTree, workingTree, ...(conflictTree ? { conflictTree } : {}), windowMs: keptCopyWindowMs(input.owner) }
+    return { operationId, ref, sha, top, stagedTree, workingTree, ...(conflictTree ? { conflictTree } : {}), windowMs: keptCopyWindowMs(input.owner), digests }
   } finally {
     await pack?.discard()
     await rm(working, { force: true })

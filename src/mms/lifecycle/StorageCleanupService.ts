@@ -940,8 +940,9 @@ export class StorageCleanupService {
 
   /**
    * Worktrees the rules moved into the trash. One that has waited an hour with nothing in it changing has its files
-   * snapshotted and is deleted (`WorktreeRetirementService.expireTrash`); what a snapshot cannot hold keeps it in the
-   * trash, with the reason. Only the repository lease is taken: the thread's own worktree is not the one in the trash.
+   * kept and is deleted against that proof (`WorktreeRetirementService.expireTrash`); what cannot be kept keeps it in the
+   * trash, with the reason, and one whose delete stopped carries on. Only the repository lease is taken: the thread's own
+   * worktree is not the one in the trash.
    */
   private async worktreeTrashItems(now: number): Promise<StorageCleanupItem[]> {
     const items: StorageCleanupItem[] = []
@@ -957,13 +958,16 @@ export class StorageCleanupService {
         const path = join(root, owner, name)
         let manifest: ReturnType<WorktreeRetirementService['load']>
         try { manifest = reader.load(path) } catch { continue }
-        if (!manifest.trashPath || !existsSync(manifest.trashPath)) continue
+        if (manifest.state !== 'deleting' && (!manifest.trashPath || !existsSync(manifest.trashPath))) continue
         if (manifest.state === 'trashed' && now - Date.parse(manifest.trashedAt ?? '') < WORKTREE_TRASH_QUIET_MS) continue
+        // The repository is found from the folder while it is still a checkout; once its `.git` file is gone, from the
+        // repository's own top folder.
+        const at = [manifest.deleting?.path, manifest.trashPath].find((folder) => folder && existsSync(join(folder, '.git'))) ?? dirname(manifest.commonDir)
         const { label, projectId } = this.labelFor(manifest.taskId)
         const base = { rule: 'trash' as const, threadId: manifest.taskId, projectId, label: `${label}: worktree in the trash` }
         try {
           let lease
-          try { lease = await acquireRepositoryLease(await resolveRepositoryIdentityAsync(manifest.trashPath, { requireMutationCapability: true }), { signal: AbortSignal.timeout(REPOSITORY_LEASE_WAIT_MS) }) }
+          try { lease = await acquireRepositoryLease(await resolveRepositoryIdentityAsync(at, { requireMutationCapability: true }), { signal: AbortSignal.timeout(REPOSITORY_LEASE_WAIT_MS) }) }
           catch { items.push({ ...base, bytes: 0, outcome: 'kept', reason: 'Repository is busy' }); continue }
           let outcome: Awaited<ReturnType<WorktreeRetirementService['expireTrash']>>
           try { outcome = await new WorktreeRetirementService(this.deps.store, { repositoryLease: lease }).expireTrash(path, { now, inUse: this.probeRemoval }) }

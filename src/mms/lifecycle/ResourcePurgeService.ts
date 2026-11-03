@@ -360,8 +360,8 @@ export class ResourcePurgeService {
         if (!manifest) throw new Error('Absent workspace lacks a reconstruction manifest')
         await this.retirement.verifyPins(manifest)
         repositories.set(manifest.repositoryId, manifest.commonDir)
-        // A worktree that held uncommitted files is kept as a snapshot; deleting the snapshot deletes that work.
-        let discardRequired = resource.claims.some((claim) => ['pending-integration', 'conflict'].includes(claim.kind)) || manifest.snapshotSha !== undefined
+        // A worktree that held uncommitted or ignored files is kept as a snapshot and kept copies; deleting them deletes that work.
+        let discardRequired = resource.claims.some((claim) => ['pending-integration', 'conflict'].includes(claim.kind)) || manifest.snapshotSha !== undefined || Boolean(manifest.keptFiles?.length)
         for (const source of inventory.sources.filter((source) => resource.sourceIds.includes(source.id) && basename(source.path) === 'workspace.json')) {
           const workspace = JSON.parse(readFileSync(source.path, 'utf8')) as { integrationTarget?: { baseSha?: string } }
           if (manifest.resultSha !== workspace.integrationTarget?.baseSha) discardRequired = true

@@ -1972,6 +1972,11 @@ export class OrchestratorService extends EventEmitter {
    * and leaves the line in memory, so the retry finds it, adds and announces nothing a second time, and saves again.
    * Unlike `postThreadNotice`, no inbox row is written, so nothing wakes the agent.
    */
+  /** What a restore of the thread's worktree says (files a rebuild set aside), as a line in the thread, once per notice. */
+  private restoreNotifier(threadId: string): (notice: { id: string; text: string }) => Promise<unknown> {
+    return (notice) => this.noteThreadUpdate(threadId, notice.text, { messageId: notice.id, kind: 'warning' })
+  }
+
   async noteThreadUpdate(threadId: string, text: string, opts: { messageId: string; kind?: 'warning' }): Promise<'delivered' | 'already'> {
     if (this.lifecycle.stopping) throw new Error('The daemon is stopping')
     if (this.threadStore?.lifecycleStore?.get(threadId)) this.threadStore.assertThreadAdmission(threadId)
@@ -9558,7 +9563,7 @@ export class OrchestratorService extends EventEmitter {
         if (projectPath && threadDir) {
           await this.seedForkWorkspace(session.threadId, projectPath, threadDir, opts?.externalSignal, session.executionLease)
           await this.seedSubagentWorkspace(session.threadId, projectPath, threadDir, opts?.externalSignal, session.executionLease, this.branchNameSource(session.threadId, session.messages, request.content))
-          session.workspace = await new WorkspaceResolver(threadDir, session.threadId, projectPath, this.placementOf(session.threadId))
+          session.workspace = await new WorkspaceResolver(threadDir, session.threadId, projectPath, this.placementOf(session.threadId), this.restoreNotifier(session.threadId))
             .resolve(request.mode, 'main', opts?.externalSignal, session.executionLease ?? undefined, this.branchNameSource(session.threadId, session.messages, request.content))
           session.projectCwd = session.workspace.projectPath
         } else {
@@ -11158,7 +11163,7 @@ export class OrchestratorService extends EventEmitter {
       const project = resolveThreadProjectPath(this.projectManager, this.threadStore, session.threadId)
       if (!project) throw new Error('Isolated agents require a project')
       if (!held || !session.workspace) {
-        session.workspace = await new WorkspaceResolver(directory, session.threadId, project, this.placementOf(session.threadId)).resolve('agent', 'main', this.lifecycle.signal, lease, this.branchNameSource(session.threadId, session.messages))
+        session.workspace = await new WorkspaceResolver(directory, session.threadId, project, this.placementOf(session.threadId), this.restoreNotifier(session.threadId)).resolve('agent', 'main', this.lifecycle.signal, lease, this.branchNameSource(session.threadId, session.messages))
       }
       // A thread in its project's folder has no worktree of its own, and that is fine: the main agent chose where its
       // subagents work, and their results are recorded in their own worktrees.
