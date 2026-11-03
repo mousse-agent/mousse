@@ -4,7 +4,7 @@ import { lstatSync, type Stats } from 'node:fs'
 import { lstat } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join, parse, resolve, sep } from 'node:path'
-import type { GitRecord } from '../../shared/threadActions'
+import type { GitRecord, ThreadAction } from '../../shared/threadActions'
 import { activeHiddenStore, builtInPathspecs, ensureStoreRules, outsideHiddenStore } from '../git/hiddenStore'
 import { gitEnv, gitStep, guarded, guardedAsync, mergeTreesSteps, MOUSSE_COMMIT_ENV, mousseCommitEnvNow, NOT_MOUSSE, operationInProgressSteps, runGitProcess, tryGit, tryGitAsync, tryGitStep, treeOfSteps } from './git'
 import { files as disk, runAsync, step, type Steps } from './steps'
@@ -535,9 +535,63 @@ export function pushedToAsync(cwd: string, commits: string[]): Promise<string | 
   return runAsync(pushedToSteps(cwd, commits))
 }
 
-/** The line a result carries when the turn's commits are already on a remote: only files are taken back. */
-export function pushedNotice(operation: string, remote: string): string {
-  return `These commits were already pushed to ${remote}; ${operation} restores files only.`
+/** The line a result carries when the turn's commits are already on a remote. */
+export function pushedNotice(remote: string, count: number): string {
+  return count === 1 ? `This commit was already pushed to ${remote}.` : `These commits were already pushed to ${remote}.`
+}
+
+/** What a turn did to Git that a restore of its files leaves in place: as the turn's own action recorded it. */
+export type GitLeftInPlaceSource = Pick<ThreadAction, 'commits' | 'git'>
+
+const shortSha = (sha: string): string => sha.slice(0, 7)
+
+function shasInWords(commits: string[]): string {
+  const named = commits.slice(0, 3).map(shortSha)
+  const rest = commits.length - named.length
+  if (rest > 0) return `${named.join(', ')} and ${rest} more`
+  return named.length > 1 ? `${named.slice(0, -1).join(', ')} and ${named.at(-1)}` : named[0]!
+}
+
+/**
+ * The line Undo, Redo or a revert carries when the turn it restores also did Git work, which a restore of files
+ * never takes back: the commits it made (by short SHA, on the branch they were made on), a branch switch, and
+ * rewritten history. It is built from `original`, the turn's own action, since a Redo's target is the Undo's record,
+ * whose commits are always empty. Commits are worded as history, and qualified when their branch has moved since.
+ */
+export function* gitLeftInPlaceNoticeSteps(cwd: string, operation: 'Undo' | 'Redo' | 'Revert', original: GitLeftInPlaceSource): Steps<string | undefined> {
+  const { commits, git } = original
+  const parts: string[] = []
+  const branch = git?.branchAfter
+  const last = commits.at(-1)
+  if (last) {
+    const isAncestor = function* (ref: string): Steps<boolean> {
+      return (yield* tryGitStep(cwd, ['merge-base', '--is-ancestor', last, ref])).ok
+    }
+    const subject = commits.length === 1 ? `Commit ${shasInWords(commits)} from this turn` : `Commits ${shasInWords(commits)} from this turn`
+    let where: string
+    if (branch && (yield* isAncestor(`refs/heads/${branch}`))) where = `${commits.length === 1 ? 'stays' : 'stay'} on ${branch}`
+    else if (branch) {
+      const exists = (yield* tryGitStep(cwd, ['rev-parse', '--verify', '--quiet', `refs/heads/${branch}`])).ok
+      where = `${commits.length === 1 ? 'was' : 'were'} made on ${branch}, which ${exists ? `has moved since and no longer holds ${commits.length === 1 ? 'it' : 'them'}` : 'no longer exists'}`
+    } else where = `${commits.length === 1 ? 'was' : 'were'} made on a detached HEAD`
+    // Git compares the files with HEAD: while HEAD still holds the commits, the restored files read as taking them back.
+    const shown = operation !== 'Redo' && (yield* isAncestor('HEAD'))
+      ? `, so Git now shows ${commits.length === 1 ? 'its' : 'their'} changes as ${operation === 'Undo' ? 'undone' : 'reverted'}` : ''
+    parts.push(`${subject} ${where}${shown}.`)
+  }
+  if (git && git.branchBefore !== git.branchAfter && (git.branchBefore || git.branchAfter)) {
+    const name = (value?: string) => value ?? 'a detached HEAD'
+    parts.push(`This turn switched from ${name(git.branchBefore)} to ${name(git.branchAfter)}; ${operation} leaves the checkout where it is.`)
+  }
+  if (git?.rewroteHistory) parts.push(`This turn rewrote the history of ${branch ?? 'HEAD'} (a reset or rebase); ${operation} leaves that history as it is.`)
+  if (!parts.length) return undefined
+  const pushed = yield* pushedToSteps(cwd, commits)
+  return [`${operation} restored files only.`, ...parts, ...(pushed ? [pushedNotice(pushed, commits.length)] : [])].join(' ')
+}
+
+
+export function gitLeftInPlaceNoticeAsync(cwd: string, operation: 'Undo' | 'Redo' | 'Revert', original: GitLeftInPlaceSource): Promise<string | undefined> {
+  return runAsync(gitLeftInPlaceNoticeSteps(cwd, operation, original))
 }
 
 /** Files a restore was about to overwrite or delete that no snapshot held (ignored, for example), kept first under `ref`. */

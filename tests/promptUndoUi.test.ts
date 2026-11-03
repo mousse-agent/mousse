@@ -102,8 +102,8 @@ it('uses authoritative conversation redo after Undo hides the prompt', async () 
   await vi.waitFor(() => expect(redo).toHaveBeenCalledExactlyOnceWith(threadId, 8))
 })
 
-it('shows the line an Undo returns with its result, such as commits that were already pushed, until it is dismissed', async () => {
-  const text = 'These commits were already pushed to origin/feature; Undo restores files only.'
+it('shows the line an Undo returns with its result, such as the commits it left in place, until it is dismissed', async () => {
+  const text = 'Undo restored files only. Commit 147626f from this turn stays on main, so Git now shows its changes as undone. This commit was already pushed to origin/main.'
   const undoLatest = vi.fn().mockResolvedValue({ action: { notice: text }, runId: 'run' })
   await mount(vi.fn().mockResolvedValue(history), undoLatest)
   PromptUndoButton({ messageId: target.messageId }).props.onClick()

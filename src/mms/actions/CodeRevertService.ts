@@ -9,7 +9,7 @@ import { ThreadWorkspaceManager } from '../workspace/ThreadWorkspaceManager'
 import { ChangeReceiptService } from './ChangeReceiptService'
 import { changedPathsAsync, commitParentsAsync, gitAsync, refuseUnsafeChangesAsync, treeOfAsync } from './git'
 import { UndoConflictError } from './UndoService'
-import { describeGitAsync, pushedNotice, leftAsIsNotice, preservedNotice, coverageNotice, pushedToAsync, restoreChangeAsync, sameTreeAsync, snapshotOriginAsync, takeSnapshotAsync, worktreeTreeAsync, type Snapshot } from './snapshots'
+import { describeGitAsync, gitLeftInPlaceNoticeAsync, leftAsIsNotice, preservedNotice, coverageNotice, restoreChangeAsync, sameTreeAsync, snapshotOriginAsync, takeSnapshotAsync, worktreeTreeAsync, type Snapshot } from './snapshots'
 
 /** What `prepared` records: the files before the revert and the tree they become. */
 interface RevertIntent {
@@ -18,6 +18,8 @@ interface RevertIntent {
   /** The snapshot of the files before the revert; absent in intents written before snapshots. */
   ours?: string
   expectedTree?: string
+  /** What the turn did to Git that the revert leaves in place (`gitLeftInPlaceNotice`), so a recovered revert says it too. */
+  gitNotice?: string
 }
 
 /** Revert an older action's code while preserving current conversation/model context. */
@@ -56,13 +58,13 @@ export class CodeRevertService {
       const threadId = workspace?.threadId
       // The files as they are now, including edits made since: they are part of the merge, so they stay.
       const ours = await takeSnapshotAsync(workspacePath, { reason: 'before code revert', threadId, operationId })
+      const gitNotice = await gitLeftInPlaceNoticeAsync(workspacePath, 'Revert', target)
       const restored = await restoreChangeAsync(workspacePath, { reason: `revert code action ${actionId}`, threadId, operationId, base: target.endSha, ours: ours.sha, theirs: target.startSha, restoredTo: 'at the start of the turn' }, (expectedTree) => {
-        const intent: RevertIntent = { target, latest: actions.at(-1), ours: ours.sha, expectedTree }
+        const intent: RevertIntent = { target, latest: actions.at(-1), ours: ours.sha, expectedTree, ...(gitNotice ? { gitNotice } : {}) }
         this.journal.append({ operationId, operationType: 'code-revert', state: 'prepared', expectedPreState: { startSha: ours.sha, actionId }, details: intent })
       })
       if ('conflicts' in restored) throw new UndoConflictError(restored.conflicts, 'The code revert')
-      const pushed = await pushedToAsync(workspacePath, target.commits)
-      return this.complete(workspacePath, operationId, { target, latest: actions.at(-1) }, ours.sha, restored.snapshot, new Date().toISOString(), [pushed ? pushedNotice('Revert', pushed) : '', restored.preserved ? preservedNotice(restored.preserved, new UndoRetentionService(this.threadDirectory).policy().windowMs) : '', leftAsIsNotice(restored.leftAsIs) ?? '', coverageNotice(target.git?.coverageGaps, ours.coverageGaps, restored.snapshot.coverageGaps) ?? ''].filter(Boolean).join(' ') || undefined)
+      return this.complete(workspacePath, operationId, { target, latest: actions.at(-1) }, ours.sha, restored.snapshot, new Date().toISOString(), [gitNotice ?? '', restored.preserved ? preservedNotice(restored.preserved, new UndoRetentionService(this.threadDirectory).policy().windowMs) : '', leftAsIsNotice(restored.leftAsIs) ?? '', coverageNotice(target.git?.coverageGaps, ours.coverageGaps, restored.snapshot.coverageGaps) ?? ''].filter(Boolean).join(' ') || undefined)
     })
   }
 
@@ -109,7 +111,8 @@ export class CodeRevertService {
           this.journal.append({ operationId: entry.operationId, operationType: 'code-revert', state: 'cancelled', details: { recoveredBeforeGit: true } })
           continue
         }
-        await this.complete(workspacePath, entry.operationId, details, applied.startSha, applied.end, intent!.createdAt)
+        const gitNotice = details.gitNotice ?? await gitLeftInPlaceNoticeAsync(workspacePath, 'Revert', details.target)
+        await this.complete(workspacePath, entry.operationId, details, applied.startSha, applied.end, intent!.createdAt, gitNotice)
       }
     }, undefined, heldThreadLease)
   }
