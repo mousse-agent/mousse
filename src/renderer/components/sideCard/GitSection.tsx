@@ -620,7 +620,7 @@ function CommitButton({ path, scope: gitScope, branch, fileCount, commits, pusha
     }
   }
 
-  const flowButtons = commitFlowButtons({ pushable, openPullRequest: openPullRequest !== null, amend, amendOnly: menu.nothingToCommit ? menu.shortHash : null })
+  const flowButtons = commitFlowButtons({ pushable, openPullRequest: openPullRequest !== null, amend })
   const label = (flow: CommitFlow, idle: string) => (work && work.flow === flow ? commitPhaseLabel(work.phase) : idle)
 
   return (

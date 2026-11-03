@@ -953,22 +953,14 @@ export interface CommitFlowButton {
 
 /**
  * The buttons of the commit popover, in the order shown. "Commit and push" needs somewhere to push and a branch that
- * is not behind; "Commit, push and open PR" needs `openPullRequest`, which `gitActionAvailability` decides. With
- * nothing to commit and amend turned on, the primary button names the commit it rewrites: "Amend a1b2c3d".
+ * is not behind; "Commit, push and open PR" needs `openPullRequest`, which `gitActionAvailability` decides.
  */
-export function commitFlowButtons(input: {
-  pushable: boolean
-  openPullRequest: boolean
-  amend: boolean
-  /** The short hash of the commit an amend of nothing but the message rewrites; null when files are committed too. */
-  amendOnly?: string | null
-}): CommitFlowButton[] {
+export function commitFlowButtons(input: { pushable: boolean; openPullRequest: boolean; amend: boolean }): CommitFlowButton[] {
   const labels = commitButtonLabels(input.amend)
-  const primary = input.amend && input.amendOnly ? `Amend ${input.amendOnly}` : labels.commit
   return [
     ...(input.pushable && input.openPullRequest ? [{ flow: 'push-pr' as const, label: labels.commitPushAndOpenPr, quiet: true }] : []),
     ...(input.pushable ? [{ flow: 'push' as const, label: labels.commitAndPush, quiet: true }] : []),
-    { flow: 'commit', label: primary, quiet: false }
+    { flow: 'commit', label: labels.commit, quiet: false }
   ]
 }
 

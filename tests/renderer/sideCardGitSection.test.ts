@@ -443,7 +443,7 @@ describe('the commit popover with nothing to commit', () => {
     expect(lastCommitMessage).not.toHaveBeenCalled()
   })
 
-  it('enables the primary button as "Amend <sha>" once the user turns amend on', async () => {
+  it('enables the primary button as Amend once the user turns amend on, the hint naming the commit', async () => {
     await mount(clean())
     await click(trigger())
     await click(amendSwitch())
@@ -452,7 +452,7 @@ describe('the commit popover with nothing to commit', () => {
     // The empty box starts from the last commit's message.
     expect(lastCommitMessage).toHaveBeenCalledTimes(1)
     expect(popover()?.querySelector('textarea')?.value).toBe('Fix the flaky retry test')
-    expect(primary()?.textContent).toBe('Amend a1b2c3d')
+    expect(primary()?.textContent).toBe('Amend')
     expect(primary()?.disabled).toBe(false)
     expect(primary()?.hasAttribute('title')).toBe(false)
     expect(popover()?.querySelector('.side-card-git-hint')?.textContent).toBe('Amends a1b2c3d')

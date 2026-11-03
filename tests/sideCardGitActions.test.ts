@@ -937,7 +937,7 @@ describe('amend message', () => {
 })
 
 describe('commit popover buttons', () => {
-  const buttons = (input: { pushable: boolean; openPullRequest: boolean; amend?: boolean; amendOnly?: string | null }) =>
+  const buttons = (input: { pushable: boolean; openPullRequest: boolean; amend?: boolean }) =>
     commitFlowButtons({ amend: false, ...input }).map(({ flow, label }) => `${flow}: ${label}`)
 
   it('lists the pull request button first, then push, then the plain commit last as the primary one', () => {
@@ -955,15 +955,6 @@ describe('commit popover buttons', () => {
       'push: Amend and push',
       'commit: Amend'
     ])
-  })
-
-  it('names the commit on the primary button when an amend changes only the message', () => {
-    expect(buttons({ pushable: true, openPullRequest: false, amend: true, amendOnly: 'a1b2c3d' })).toEqual([
-      'push: Amend and push',
-      'commit: Amend a1b2c3d'
-    ])
-    // Amend still off: the button keeps its plain name, and the popover holds it disabled.
-    expect(buttons({ pushable: false, openPullRequest: false, amend: false, amendOnly: 'a1b2c3d' })).toEqual(['commit: Commit'])
   })
 
   it('never shows a pull request button without somewhere to push', () => {
