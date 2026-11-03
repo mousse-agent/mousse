@@ -10,7 +10,7 @@ import { ChangeReceiptService } from './ChangeReceiptService'
 import { withGitMutationLocks } from './GitOperationCoordinator'
 import { ThreadWorkspaceManager } from '../workspace/ThreadWorkspaceManager'
 import { changedPathsAsync, commitParentsAsync, gitAsync, refuseUnsafeChangesAsync, treeOfAsync } from './git'
-import { describeGitAsync, pushedNotice, leftAsIsNotice, preservedNotice, coverageNotice, pushedToAsync, restoreChangeAsync, sameTreeAsync, snapshotOriginAsync, takeSnapshotAsync, worktreeTreeAsync, type Snapshot } from './snapshots'
+import { describeGitAsync, gitLeftInPlaceNoticeAsync, leftAsIsNotice, preservedNotice, coverageNotice, restoreChangeAsync, sameTreeAsync, snapshotOriginAsync, takeSnapshotAsync, worktreeTreeAsync, type Snapshot } from './snapshots'
 
 export type RestoreActionContext = (action: ThreadAction, kind: 'undo' | 'redo') => void | Promise<void>
 interface UndoRecovery {
@@ -35,6 +35,8 @@ interface UndoIntent {
   ours?: string
   /** The tree the restore turns the files into. */
   expectedTree?: string
+  /** What the turn did to Git that the restore leaves in place (`gitLeftInPlaceNotice`), so a recovered restore says it too. */
+  gitNotice?: string
 }
 
 /** Edits made since the action overlap with it: nothing was changed, and the files are named for the person. */
@@ -47,6 +49,20 @@ export class UndoConflictError extends AppError {
     })
     this.name = 'UndoConflictError'
   }
+}
+
+/**
+ * The turn an Undo or Redo restores: the action itself, or for an Undo's or Redo's own record, the turn the chain of
+ * them started from. Only that turn records its commits and Git work; a restore's record never has commits.
+ */
+function turnBehind(all: ThreadAction[], action: ThreadAction): ThreadAction {
+  let source = action
+  for (let step = 0; step < all.length; step++) {
+    const prior = all.find((item) => item.compensationActionId === source.id)
+    if (!prior) break
+    source = prior
+  }
+  return source
 }
 
 export class UndoService {
@@ -103,14 +119,14 @@ export class UndoService {
       // The files as they are now, including edits made since the action: they are part of the merge, so they stay.
       const threadId = new ThreadWorkspaceManager(this.threadDirectory).load()?.threadId
       const ours = await takeSnapshotAsync(workspacePath, { reason: `before ${kind}`, threadId, operationId })
+      const gitNotice = await gitLeftInPlaceNoticeAsync(workspacePath, label, turnBehind(all, target))
       const restored = await restoreChangeAsync(workspacePath, { reason: `${kind} turn ${target.turnId}`, threadId, operationId, base: target.endSha, ours: ours.sha, theirs: target.startSha, restoredTo: kind === 'redo' ? 'before the Undo' : 'at the start of the turn' }, (expectedTree) => {
-        const intent: UndoIntent = { target, contextAction, kind, compensationId, restoreContext: Boolean(restoreContext), ours: ours.sha, expectedTree }
+        const intent: UndoIntent = { target, contextAction, kind, compensationId, restoreContext: Boolean(restoreContext), ours: ours.sha, expectedTree, ...(gitNotice ? { gitNotice } : {}) }
         this.journal.append({ operationId, operationType: kind, state: 'prepared', expectedPreState: { preUndoSha: ours.sha, actionId: target.id }, details: intent })
         target.state = 'undoing'; this.actions.replace(all)
       })
       if ('conflicts' in restored) throw new UndoConflictError(restored.conflicts)
-      const pushed = await pushedToAsync(workspacePath, target.commits)
-      const compensation = await this.compensationFor(workspacePath, { target, contextAction, kind, compensationId }, ours.sha, restored.snapshot, new Date().toISOString(), [pushed ? pushedNotice(label, pushed) : '', restored.preserved ? preservedNotice(restored.preserved, new UndoRetentionService(this.threadDirectory).policy().windowMs) : '', leftAsIsNotice(restored.leftAsIs) ?? '', coverageNotice(target.git?.coverageGaps, ours.coverageGaps, restored.snapshot.coverageGaps) ?? ''].filter(Boolean).join(' ') || undefined)
+      const compensation = await this.compensationFor(workspacePath, { target, contextAction, kind, compensationId }, ours.sha, restored.snapshot, new Date().toISOString(), [gitNotice ?? '', restored.preserved ? preservedNotice(restored.preserved, new UndoRetentionService(this.threadDirectory).policy().windowMs) : '', leftAsIsNotice(restored.leftAsIs) ?? '', coverageNotice(target.git?.coverageGaps, ours.coverageGaps, restored.snapshot.coverageGaps) ?? ''].filter(Boolean).join(' ') || undefined)
       const receipt = await receipts.record(workspacePath, { operationId, kind, actor: { kind: 'user' }, actionId: compensation.id,
         beforeSha: ours.sha, afterSha: restored.snapshot.sha, introducedCommits: [],
         contributions: [], externalEffects: target.externalEffects, reversesReceiptId: target.receiptId, git: compensation.git })
@@ -170,7 +186,9 @@ export class UndoService {
             continue
           }
           const target = { ...intent.target, state: 'undone' as const, compensationActionId: intent.compensationId }
-          const compensation = await this.compensationFor(workspacePath, { target, contextAction: intent.contextAction, kind: intent.kind, compensationId: intent.compensationId }, applied.startSha, applied.end, prepared!.createdAt)
+          // An intent written before this line was recorded has it built again from the turn.
+          const gitNotice = intent.gitNotice ?? await gitLeftInPlaceNoticeAsync(workspacePath, intent.kind === 'redo' ? 'Redo' : 'Undo', turnBehind(this.actions.list(), intent.target))
+          const compensation = await this.compensationFor(workspacePath, { target, contextAction: intent.contextAction, kind: intent.kind, compensationId: intent.compensationId }, applied.startSha, applied.end, prepared!.createdAt, gitNotice)
           const receipts = new ChangeReceiptService(this.threadDirectory)
           const known = receipts.list().find((item) => item.operationId === record.operationId)
           const receipt = known ? await receipts.replay(workspacePath, known) : await receipts.record(workspacePath, { operationId: record.operationId, kind: intent.kind, actor: { kind: 'user' }, actionId: compensation.id, beforeSha: applied.startSha, afterSha: applied.end.sha, introducedCommits: compensation.commits, contributions: [], externalEffects: target.externalEffects, reversesReceiptId: target.receiptId, ...(compensation.git ? { git: compensation.git } : {}) })

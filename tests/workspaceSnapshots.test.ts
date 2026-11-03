@@ -215,11 +215,20 @@ describe('an agent that does its own Git work', () => {
     expect(actions.get(action.id)?.state).toBe('undone')
     // No commit of Mousse's anywhere: the branch history is the agent's own.
     expect(git(cwd, 'log', '--format=%s', '-5')).not.toMatch(/mousse/i)
+    // It says what it left: the commit, the branch it is on, and the switch.
+    expect(undone.notice).toBe(`Undo restored files only. Commit ${head.slice(0, 7)} from this turn stays on issue-2-task, so Git now shows its changes as undone. This turn switched from mousse/thread-task to issue-2-task; Undo leaves the checkout where it is.`)
+    const refs = branches()
 
-    await pressed('Redo', () => new RedoService(f.thread).redoLatest('main', cwd))
+    // Redo's target is the Undo's own record, with no commits; the notice still comes from the turn.
+    const redone = await pressed('Redo', () => new RedoService(f.thread).redoLatest('main', cwd))
     expect(f.read(cwd)).toBe('edited\n')
     expect(existsSync(join(cwd, 'feature.txt'))).toBe(true)
     expect(git(cwd, 'rev-parse', 'HEAD')).toBe(head)
+    expect(branches()).toBe(refs)
+    expect(redone.commits).toEqual([])
+    expect(redone.notice).toBe(`Redo restored files only. Commit ${head.slice(0, 7)} from this turn stays on issue-2-task. This turn switched from mousse/thread-task to issue-2-task; Redo leaves the checkout where it is.`)
+    // Undo of the Redo goes back through both records to the same turn.
+    expect((await pressed('Undo', () => new UndoService(f.thread).undoLatest('main', cwd))).notice).toBe(undone.notice)
   })
 
   it('can reset or rewrite history: the turn is recorded as it is and says history was rewritten', async () => {
@@ -235,7 +244,9 @@ describe('an agent that does its own Git work', () => {
     expect(action.commits).toEqual([])
     expect(action.changedPaths.map((item) => item.path).sort()).toEqual(['after-reset.txt', 'earlier.txt'])
     noPending()
-    await pressed('Undo', () => new UndoService(f.thread).undoLatest('main', cwd))
+    const undone = await pressed('Undo', () => new UndoService(f.thread).undoLatest('main', cwd))
+    expect(undone.notice).toBe('Undo restored files only. This turn rewrote the history of mousse/thread-task (a reset or rebase); Undo leaves that history as it is.')
+    expect(git(cwd, 'rev-parse', 'HEAD')).toBe(f.baseSha)
     expect(existsSync(join(cwd, 'after-reset.txt'))).toBe(false)
     expect(existsSync(join(cwd, 'earlier.txt'))).toBe(true)
   })
@@ -254,13 +265,22 @@ describe('an agent that does its own Git work', () => {
     const undone = await pressed('Undo', () => new UndoService(f.thread).undoLatest('main', cwd))
     expect(existsSync(join(cwd, 'pushed.txt'))).toBe(false)
     expect(git(cwd, 'rev-parse', 'HEAD')).toBe(head)
-    expect(undone.notice).toBe('These commits were already pushed to origin/feature; Undo restores files only.')
+    expect(undone.notice).toBe(`Undo restored files only. Commit ${head.slice(0, 7)} from this turn stays on mousse/thread-task, so Git now shows its changes as undone. This commit was already pushed to origin/feature.`)
     // The notice stays on the recorded action, where the app reads it.
     expect(actions.get(undone.id)?.notice).toBe(undone.notice)
   })
 
-  it('has no notice when its commits were not pushed', async () => {
-    await turn('turn', () => { write('local.txt', 'x\n'); git(cwd, 'add', 'local.txt'); git(cwd, 'commit', '-qm', 'local') })
+  it('names commits that were not pushed without a pushed line, and several by their short SHAs', async () => {
+    const { action } = await turn('turn', () => {
+      for (const name of ['a', 'b']) { write(`${name}.txt`, 'x\n'); git(cwd, 'add', `${name}.txt`); git(cwd, 'commit', '-qm', name) }
+    })
+    const [first, second] = action.commits.map((sha) => sha.slice(0, 7))
+    expect((await pressed('Undo', () => new UndoService(f.thread).undoLatest('main', cwd))).notice)
+      .toBe(`Undo restored files only. Commits ${first} and ${second} from this turn stay on mousse/thread-task, so Git now shows their changes as undone.`)
+  })
+
+  it('has no notice when the turn did no Git work', async () => {
+    await turn('turn', () => write('local.txt', 'x\n'))
     expect((await pressed('Undo', () => new UndoService(f.thread).undoLatest('main', cwd))).notice).toBeUndefined()
   })
 
@@ -601,6 +621,16 @@ describe('recovery', () => {
     expect(compensation).toMatchObject({ actor: { kind: 'user' }, state: 'completed', commits: [] })
     expect(compensation.changedPaths.map((item) => item.path)).toEqual(['agent.txt'])
     expect((await worktreeTreeAsync(cwd))).toBe(git(cwd, 'rev-parse', `${action.startSha}^{tree}`))
+  })
+
+  it('an Undo of a turn that committed, recovered from an intent that did not record the notice, builds it from the turn', async () => {
+    const { action } = await turn('turn', () => { write('agent.txt', 'agent\n'); git(cwd, 'add', 'agent.txt'); git(cwd, 'commit', '-qm', 'agent') })
+    const head = git(cwd, 'rev-parse', 'HEAD')
+    await interruptedUndo(action, true)
+    await new UndoService(f.thread).recoverPending(cwd, () => undefined)
+    noPending()
+    expect(actions.get('compensation-1')?.notice).toBe(`Undo restored files only. Commit ${head.slice(0, 7)} from this turn stays on mousse/thread-task, so Git now shows its changes as undone.`)
+    expect(git(cwd, 'rev-parse', 'HEAD')).toBe(head)
   })
 
   it('an Undo that crashed before changing the files is cancelled and the turn stays undoable', async () => {
