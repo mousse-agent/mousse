@@ -34,7 +34,7 @@ afterEach(() => { vi.restoreAllMocks(); folderAccess.reset(); f.dispose() })
 
 /** A sweeper over one active thread whose worktree is at `worktreePath`. */
 function sweeper(worktreePath: string, options = { intervalMs: 60 * 60 * 1000, tasksPerBatch: 20, firstPassAfterMs: 0 }) {
-  vi.spyOn(ThreadWorkspaceManager.prototype, 'loadOrSnapshot').mockReturnValue({ lifecycle: 'ready', worktreePath } as never)
+  vi.spyOn(ThreadWorkspaceManager.prototype, 'loadOrSnapshotAsync').mockResolvedValue({ lifecycle: 'ready', worktreePath } as never)
   const store = { list: () => [{ taskId: 'thread-1', state: 'active', location: f.thread }] } as unknown as ResourceLifecycleStore
   return new UndoRetentionSweeper(store, options)
 }
