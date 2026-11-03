@@ -11,6 +11,7 @@ import type { Inbox } from '../Inbox'
 import type { RunStore } from '../RunStore'
 import { stoppedByPerson, TERMINAL_RUN_STATUSES, type DelegationRecord, type RunRecord, type RunStatus } from '../types'
 import { childBusyInputs, isChildBusy, type ChildBusyInputs } from './hold'
+import type { RemoteSubagentOverlay } from './remoteSubagents'
 
 /** What the view reads besides the run store. */
 export interface SubagentViewSources {
@@ -20,6 +21,11 @@ export interface SubagentViewSources {
   /** The child's thread, or undefined when it is gone (trashed or purged): such a child is not listed. */
   thread: (threadId: string) => { name: string } | undefined
   hasPendingQuestion: (threadId: string) => boolean
+  /**
+   * A remote subagent's computer and what its open task does there (issue #469). Its runs here are
+   * stand-ins that stay `queued`, so what it does comes from there.
+   */
+  remote?: (threadId: string) => RemoteSubagentOverlay | undefined
 }
 
 /**
@@ -111,7 +117,10 @@ function summarize(
   // The same inputs the engine publishes by (`settleWaitingDelegations`), so the row and the task agree.
   const busyInputs = childBusyInputs(sources.store, childThreadId)
   const busy = isChildBusy(runs, busyInputs)
-  const activity = childActivity(runs, sources.hasPendingQuestion(childThreadId), busyInputs)
+  const remote = sources.remote?.(childThreadId)
+  const local = childActivity(runs, sources.hasPendingQuestion(childThreadId), busyInputs)
+  // A stand-in run waits `queued` here while its computer works on it.
+  const activity: SubagentActivity = remote?.activity && local === 'queued' ? remote.activity : local
   const continuingOrdinals = runs
     .filter((run) => !TERMINAL_RUN_STATUSES.has(run.status) && !NON_CONTINUATION_SOURCES.has(run.source))
     .map((run) => run.ordinal)
@@ -160,7 +169,18 @@ function summarize(
     createdAt: first.createdAt,
     updatedAt: stamps.reduce((a, b) => (a > b ? a : b)),
     waitingOn: waiting ? waitingOn(sources, childThreadId, visited) : [],
-    tasks
+    tasks,
+    ...(remote
+      ? {
+          computer: {
+            node: remote.node,
+            name: remote.computerName,
+            online: remote.online,
+            ...(remote.ref ? { ref: remote.ref } : {}),
+            ...(remote.lastError && activity !== 'idle' ? { lastError: remote.lastError } : {})
+          }
+        }
+      : {})
   }
 }
 

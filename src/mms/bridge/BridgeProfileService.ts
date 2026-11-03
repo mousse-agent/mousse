@@ -17,6 +17,7 @@ import { SpaceArchiveService } from '../spaces/archive/SpaceArchiveService'
 import { SpaceCurrentIdentity } from '../spaces/SpaceCurrentIdentity'
 import { BotProfileService, type NativeBotComposition } from '../bots/space/BotProfileService'
 import { BridgeArtifacts } from './artifacts'
+import { remoteComputersPort } from './routed/remoteComputers'
 import { BridgeHub } from './hub'
 import { validateHubParams } from './hub/validation'
 import { MmsRemoteBackend, RemoteApi, ThreadStreamAdapter } from './remote'
@@ -417,6 +418,15 @@ export class BridgeProfileService {
     })
     this.router.setLists(this.lists)
     services.remoteLists = this.lists
+    // An agent may start a subagent on another of the user's computers through the router's client (issue #469).
+    const computersPort = remoteComputersPort({
+      services,
+      client: this.router.client,
+      computers: () => (this.router.enabled() ? this.router.pairedComputers() : undefined),
+      online: (node) => this.router.isOnline(node)
+    })
+    services.orchestrator.setRemoteComputers(computersPort)
+    this.disposers.add(() => services.orchestrator.setRemoteComputers(undefined))
     // This computer's own threads go to the front of a group in front of the other computers' rows too.
     const floor = (projectId: string | undefined): number | undefined => this.lists.frontFloor(projectId)
     services.threads.remoteFloor = floor

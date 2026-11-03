@@ -90,10 +90,10 @@ describe('Settings > Agents > Agent access', () => {
     pickLevel('Manage')
     // The project list travels with the level, so a save never drops it.
     expect(updates).toHaveBeenCalledTimes(1)
-    expect(updates).toHaveBeenCalledWith({ agentAccess: { level: 'manage', projectIds: ['p2'], answerApprovals: false } })
+    expect(updates).toHaveBeenCalledWith({ agentAccess: { level: 'manage', projectIds: ['p2'], answerApprovals: false, remoteSubagents: false, computers: [] } })
     expect(trigger().textContent).toContain('Manage')
     expect(text()).toContain('full events and messages of other threads')
-    expect(savedByDaemon()).toEqual({ level: 'manage', projectIds: ['p2'], answerApprovals: false })
+    expect(savedByDaemon()).toEqual({ level: 'manage', projectIds: ['p2'], answerApprovals: false, remoteSubagents: false, computers: [] })
 
     pickLevel('Lineage only')
     expect(savedByDaemon().level).toBe('lineage')
@@ -120,7 +120,7 @@ describe('Settings > Agents > Agent access', () => {
     expect(text()).toContain('every project, including threads without a project')
 
     click(row('Beta'))
-    expect(updates).toHaveBeenLastCalledWith({ agentAccess: { level: 'manage', projectIds: ['p2'], answerApprovals: false } })
+    expect(updates).toHaveBeenLastCalledWith({ agentAccess: { level: 'manage', projectIds: ['p2'], answerApprovals: false, remoteSubagents: false, computers: [] } })
     expect(checked()).toEqual(['Beta'])
     expect(text()).toContain('only threads in the checked projects')
 
@@ -146,7 +146,7 @@ describe('Settings > Agents > Agent access', () => {
 
     // Widening to every project is its own, named choice.
     click(row('All projects'))
-    expect(updates).toHaveBeenCalledWith({ agentAccess: { level: 'manage', projectIds: [], answerApprovals: false } })
+    expect(updates).toHaveBeenCalledWith({ agentAccess: { level: 'manage', projectIds: [], answerApprovals: false, remoteSubagents: false, computers: [] } })
     expect(checked()).toEqual(['All projects'])
     // And choosing it again changes nothing.
     updates.mockClear()
@@ -194,9 +194,9 @@ describe('Settings > Agents > Agent access', () => {
       const { updates } = show({ level: 'manage', projectIds: ['p2'] })
       click(answerSwitch()!)
       expect(updates).toHaveBeenCalledTimes(1)
-      expect(updates).toHaveBeenCalledWith({ agentAccess: { level: 'manage', projectIds: ['p2'], answerApprovals: true } })
+      expect(updates).toHaveBeenCalledWith({ agentAccess: { level: 'manage', projectIds: ['p2'], answerApprovals: true, remoteSubagents: false, computers: [] } })
       expect(on()).toBe(true)
-      expect(savedByDaemon()).toEqual({ level: 'manage', projectIds: ['p2'], answerApprovals: true })
+      expect(savedByDaemon()).toEqual({ level: 'manage', projectIds: ['p2'], answerApprovals: true, remoteSubagents: false, computers: [] })
       click(answerSwitch()!)
       expect(savedByDaemon().answerApprovals).toBe(false)
     })
@@ -205,7 +205,7 @@ describe('Settings > Agents > Agent access', () => {
       show({ level: 'manage', answerApprovals: true })
       expect(on()).toBe(true)
       pickLevel('Read')
-      expect(savedByDaemon()).toEqual({ level: 'read', projectIds: [], answerApprovals: false })
+      expect(savedByDaemon()).toEqual({ level: 'read', projectIds: [], answerApprovals: false, remoteSubagents: false, computers: [] })
       pickLevel('Manage')
       expect(on()).toBe(false)
       expect(savedByDaemon().answerApprovals).toBe(false)
@@ -214,7 +214,39 @@ describe('Settings > Agents > Agent access', () => {
     it('a project pick keeps the switch as it is', () => {
       show({ level: 'manage', answerApprovals: true })
       click(row('Beta'))
-      expect(savedByDaemon()).toEqual({ level: 'manage', projectIds: ['p2'], answerApprovals: true })
+      expect(savedByDaemon()).toEqual({ level: 'manage', projectIds: ['p2'], answerApprovals: true, remoteSubagents: false, computers: [] })
+    })
+  })
+
+  describe('subagents on other devices', () => {
+    const remoteSwitch = () => host.querySelector<HTMLElement>('#agent-access-remote-subagents')
+    const on = () => remoteSwitch()!.getAttribute('aria-checked') === 'true'
+
+    it('is offered at every level, off for a profile that never touched it', () => {
+      for (const level of ['lineage', 'read', 'manage'] as const) {
+        show({ level })
+        expect(remoteSwitch(), level).not.toBeNull()
+        expect(on(), level).toBe(false)
+      }
+      expect(text()).toContain('Allow agents to create Subagents on other Devices')
+      expect(normalizeAgentAccessSettings(getDefaultSettings().agentAccess).remoteSubagents).toBe(false)
+    })
+
+    it('saves the whole setting when switched, and says to pair computers when none are connected', () => {
+      const { updates } = show({ level: 'read' })
+      click(remoteSwitch()!)
+      expect(updates).toHaveBeenCalledWith({ agentAccess: { level: 'read', projectIds: [], answerApprovals: false, remoteSubagents: true, computers: [] } })
+      expect(savedByDaemon().remoteSubagents).toBe(true)
+      expect(text()).toContain('Pair them in Settings → Devices')
+    })
+
+    it('hides the computer list while off and keeps it, so switching back on restores the same computers', () => {
+      show({ remoteSubagents: false, computers: ['node-gone'] })
+      expect(rows().some((entry) => entry.textContent === 'Removed computer')).toBe(false)
+      click(remoteSwitch()!)
+      expect(row('Removed computer').getAttribute('aria-checked')).toBe('true')
+      click(remoteSwitch()!)
+      expect(savedByDaemon()).toMatchObject({ remoteSubagents: false, computers: ['node-gone'] })
     })
   })
 

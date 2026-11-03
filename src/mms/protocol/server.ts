@@ -515,6 +515,10 @@ export class MmsProtocolServer {
         console.warn('subagents.updated could not be derived from a run event', { error: error instanceof Error ? error.message : String(error) })
       }
     })
+    // A remote subagent's row changes with its computer (offline, a question waiting there) as well as its runs.
+    onOrch('subagent-changed', (payload: { threadId: string }) => {
+      pushSubagentsUpdated(subagentAncestorsOf(services.runEngine.delegations, payload.threadId))
+    })
     for (const name of ['pending', 'cleared'] as const)
       onEmitter(services.questions, name, (payload: { threadId: string }) => {
         pushSubagentsUpdated(subagentAncestorsOf(services.runEngine.delegations, payload.threadId))

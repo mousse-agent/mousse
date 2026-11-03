@@ -30,7 +30,7 @@ export function SubagentComposerBannerView({ asking, onOpen }: SubagentComposerB
             className="composer-banner-row"
             title={`Open ${entry.title}`}
             aria-label={`${label}. Open ${entry.title}`}
-            onClick={() => onOpen(entry.childThreadId)}
+            onClick={() => onOpen(entry.openId)}
           >
             <span className="composer-banner-dot" aria-hidden="true" />
             <span className="composer-banner-text">{label}</span>

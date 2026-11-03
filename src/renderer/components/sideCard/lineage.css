@@ -80,6 +80,14 @@ button.lineage-row:focus-visible {
   line-height: 1.3;
 }
 
+/* A remote subagent's computer, under its name like the model. */
+.lineage-computer {
+  align-self: flex-start;
+  max-width: 100%;
+  margin-top: 1px;
+  font-size: 11px;
+}
+
 .lineage-status {
   flex: 0 0 auto;
   color: var(--ui-faint);
