@@ -254,7 +254,7 @@ A phone joins as a leaf node of the same user. It receives an ordinary `mj1_` no
 
 **Phone invites need a relay rendezvous.** The desktop issues phone invites only with a Mousse ID relay rendezvous (`route_unreachable` without a relay listener). The rendezvous ticket inside the invite lets the phone dial the authority through the relay as registration `rendezvous_` + base64url(SHA-256(ticket)), generation 1.
 
-**Request path (phone asks, desktop approves).** The phone posts an enrollment request to Mousse ID with its device name, a fresh X25519 `boxPublicKey` and its `transportFingerprint` (base64url SHA-256 of its P-256 SPKI DER). The authority's daemon polls the mailbox every 15 seconds while it is connected to Mousse ID. Settings show each request with its device name and match code. On Approve, the daemon:
+**Request path (phone asks, desktop approves).** The phone posts an enrollment request to Mousse ID with its device name, a fresh X25519 `boxPublicKey` and its `transportFingerprint` (base64url SHA-256 of its P-256 SPKI DER). The authority's daemon polls the mailbox every 15 seconds while it is connected to Mousse ID and approves each request itself: signing in to the same Mousse ID account is the consent. A request whose approval fails stays in Settings with its device name and match code, for the person to approve or deny. On approval, the daemon:
 
 1. issues a node invite named after the device, pinned to the requested transport fingerprint;
 2. seals the invite to `boxPublicKey` for that request ID;
@@ -269,7 +269,7 @@ Deny posts to the deny route.
 3. reads the request every 2 seconds until it is approved, opens the sealed invite, and joins with it (§8, through the invite's relay rendezvous);
 4. registers its new node with the same grant.
 
-The authority approves computer requests itself when it polls the mailbox, with no prompt and no match code: signing in to the same Mousse ID account is the consent. The invite is a computer invite (computer capabilities, kind recorded as computer) pinned to the requested transport fingerprint. Phone requests are still shown with their match code.
+The authority approves computer requests itself, like phone requests. The invite is a computer invite (computer capabilities, kind recorded as computer) pinned to the requested transport fingerprint.
 
 **Request seal.** The sender generates an ephemeral X25519 key `e`. Let `box` be the 32-byte raw `boxPublicKey`.
 

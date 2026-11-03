@@ -1,10 +1,12 @@
 import { afterEach, expect, it, vi } from 'vitest'
 import { createServer } from 'node:http'
 import { once } from 'node:events'
-import { randomBytes } from 'node:crypto'
+import { generateKeyPairSync, randomBytes } from 'node:crypto'
 import { resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { profile, cleanup } from '../chats/helpers'
+import { openRequestSeal } from '../../../src/mms/net/plus/enrollmentSeal'
+import { rawPublicKey } from '../../../src/mms/net/identity/crypto'
 
 // An OS vault stand-in, so new network keys are protected without a passphrase as on a desktop.
 vi.mock('../../../src/mms/providers/secretCodec', () => ({
@@ -151,6 +153,35 @@ it.skipIf(!process.env.MOUSSE_PLUS_ROOT)(
     expect(
       inventory.registrations.filter((row: { revokedAt: unknown }) => row.revokedAt === null).map((row: { nodeId: string }) => row.nodeId).sort()
     ).toEqual([owner.node, member.node].sort())
+  },
+  90000
+)
+
+it.skipIf(!process.env.MOUSSE_PLUS_ROOT)(
+  'a phone signed in to the same Mousse ID is added without a question or a match code',
+  async () => {
+    const fixture = await mousseId(process.env.MOUSSE_PLUS_ROOT!)
+    const desk = await profile({ initialize: false })
+    expect(await signIn(fixture, desk, 'Desk')).toMatchObject({ connected: true })
+    const owner = desk.services.net.runtime().identity.self()!
+    // The phone asks with its account session, as the phone app does after signing in.
+    const box = generateKeyPairSync('x25519').privateKey
+    const actor = { accountId: fixture.accountId, recentAuthAt: Date.now() }
+    const request = await fixture.service.createEnrollmentRequest(actor, {
+      targetNodeId: owner.node,
+      deviceName: 'Pixel',
+      kind: 'phone',
+      boxPublicKey: rawPublicKey(box),
+      transportFingerprint: randomBytes(32).toString('base64url')
+    })
+    let sealed: string | undefined
+    for (let attempt = 0; attempt < 60 && !sealed; attempt++) {
+      sealed = (await fixture.service.readEnrollmentRequest(actor, request.id)).sealedInvite
+      if (!sealed) await new Promise((done) => setTimeout(done, 500))
+    }
+    expect(openRequestSeal(sealed!, box.export({ type: 'pkcs8', format: 'der' }).subarray(-32), request.id)).toMatch(/^mj1_/)
+    // Nothing waits for the person to approve.
+    expect(desk.services.net.request('net.plus.enrollment.requests', {})).toEqual({ requests: [] })
   },
   90000
 )
