@@ -7,6 +7,7 @@ import { join, parse, resolve, sep } from 'node:path'
 import type { GitRecord, ThreadAction } from '../../shared/threadActions'
 import { activeHiddenStore, builtInPathspecs, ensureStoreRules, outsideHiddenStore } from '../git/hiddenStore'
 import { gitEnv, gitStep, guarded, guardedAsync, LISTING, mergeTreesSteps, MOUSSE_COMMIT_ENV, mousseCommitEnvNow, NOT_MOUSSE, operationInProgressSteps, runGitProcess, tryGit, tryGitAsync, tryGitStep, treeOfSteps } from './git'
+import { restoreCommandsText, restoreCommandTemplate, restoreShell, type RestoreShell } from './restoreCommands'
 import { files as disk, runAsync, step, type Steps } from './steps'
 import { retentionWindowText } from '../../shared/undoRetention'
 
@@ -624,8 +625,11 @@ export function gitLeftInPlaceNoticeAsync(cwd: string, operation: 'Undo' | 'Redo
   return runAsync(gitLeftInPlaceNoticeSteps(cwd, operation, original))
 }
 
-/** Files a restore was about to overwrite or delete that no snapshot held (ignored, for example), kept first under `ref`. */
-export interface PreservedFiles { ref: string; paths: string[] }
+/**
+ * Files a restore was about to overwrite or delete that no snapshot held (ignored, for example), kept first under `ref`
+ * as their bytes on disk. `paths` are relative to `top`, the repository's top folder.
+ */
+export interface PreservedFiles { ref: string; paths: string[]; top: string }
 
 /** A path a restore left as it is because it was not covered on one side, and why. */
 export interface LeftAsIs { path: string; reason: string }
@@ -640,17 +644,23 @@ export function leftAsIsNotice(left: LeftAsIs[] | undefined): string | undefined
 }
 
 /**
- * The line a result carries when a restore kept files no snapshot held before writing over them. They are kept for the
- * thread's Undo retention window (`windowMs`), then expire (`expirePreservedFiles`).
+ * The line a result carries when a restore kept files no snapshot held before writing over them, with a command that
+ * brings each back byte for byte (`restoreCommands.ts`). They are kept for the thread's Undo retention window
+ * (`windowMs`), then expire (`expirePreservedFiles`).
  */
-export function preservedNotice(preserved: PreservedFiles, windowMs: number): string {
+export function preservedNotice(preserved: PreservedFiles, windowMs: number, shell: RestoreShell = restoreShell()): string {
   const named = preserved.paths.slice(0, 10).join(', ') + (preserved.paths.length > 10 ? ` and ${preserved.paths.length - 10} more` : '')
-  return `Files no snapshot held were in the way and are kept under ${preserved.ref} for ${retentionWindowText(windowMs)}: ${named}. Bring one back before then with git restore --source=${preserved.ref} -- <path>.`
+  const commands = restoreCommandsText(preserved.paths.map((path) => ({ ref: preserved.ref, path })), { shell })
+  return `Files no snapshot held were in the way and are kept under ${preserved.ref} for ${retentionWindowText(windowMs)}: ${named}. Bring one back before then by running this in ${preserved.top}: ${commands}.`
 }
 
-/** The line an abort's reply carries: every file as it was before the abort is kept under `ref` for the thread's Undo window. */
-export function abortPreservedNotice(ref: string, windowMs: number): string {
-  return `Every file as it was before the abort is kept under ${ref} for ${retentionWindowText(windowMs)}. Bring one back before then with git restore --source=${ref} -- <path>.`
+/**
+ * The line an abort's reply carries: every file as it was before the abort is kept under `ref` for the thread's Undo
+ * window. The ref holds a snapshot's tree, Git's normal form of each file, so the command converts it back as a checkout
+ * would; run in `top`, the repository's top folder.
+ */
+export function abortPreservedNotice(ref: string, windowMs: number, top: string, shell: RestoreShell = restoreShell()): string {
+  return `Every file as it was before the abort is kept under ${ref} for ${retentionWindowText(windowMs)}. Bring one back before then by running this in ${top}: ${restoreCommandTemplate(ref, { normalized: true, shell })}.`
 }
 
 export interface RestoreChangeInput extends SnapshotInput {
@@ -806,7 +816,7 @@ function* preserveFiles(top: string, paths: string[], directory: string, operati
     const sha = yield* gitStep(top, ['commit-tree', tree, ...(head ? ['-p', head] : []), '-m', `${SUBJECT}files kept before a restore`], mousseCommitEnvNow())
     const ref = `refs/mousse/preserved/${operationId ?? randomUUID()}-${sha.slice(0, 12)}`
     yield* gitStep(top, ['update-ref', '--no-deref', ref, sha])
-    return { ref, paths }
+    return { ref, paths, top }
   } finally {
     yield* disk.remove(temporary)
   }

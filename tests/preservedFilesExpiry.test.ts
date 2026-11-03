@@ -78,7 +78,7 @@ async function setup(kind: 'folder' | 'worktree') {
   }
   /** What an abort keeps, recorded as `ManagedConflictService.abort` records it. */
   const keepByAbort = async (operationId: string, threadDirectory = location) => {
-    const ref = (await preserveBeforeAbortAsync(cwd, operationId))
+    const { ref } = await preserveBeforeAbortAsync(cwd, operationId)
     new ThreadJournal(threadDirectory).append({ operationId, operationType: 'publish', state: 'cancelled', details: { conflictAborted: true, preservedRef: ref } })
     return ref
   }
@@ -102,8 +102,8 @@ test('kept files expire after the Undo window counted from Mousse’s record, wh
   const restore = await f.keepByUndo('secret')
   const abort = (await f.keepByAbort('client-chosen-op'))
   // The notice says how long they are kept; the commits are dated by Mousse's clock, not the environment.
-  expect(restore.notice).toMatch(/kept under refs\/mousse\/preserved\/\S+ for 30 days: secret\. Bring one back before then/)
-  expect(abortPreservedNotice(abort, new UndoRetentionService(f.location).policy().windowMs)).toBe(`Every file as it was before the abort is kept under ${abort} for 30 days. Bring one back before then with git restore --source=${abort} -- <path>.`)
+  expect(restore.notice).toContain(`kept under ${restore.ref} for 30 days: secret. Bring one back before then by running this in ${f.git(f.cwd, 'rev-parse', '--show-toplevel')}: git cat-file blob ${restore.ref}:secret > secret.`)
+  expect(abortPreservedNotice(abort, new UndoRetentionService(f.location).policy().windowMs, f.cwd, 'posix')).toBe(`Every file as it was before the abort is kept under ${abort} for 30 days. Bring one back before then by running this in ${f.cwd}: git cat-file --filters ${abort}:<path> > <path>.`)
   for (const ref of [restore.ref, abort]) expect(Math.abs(Number(f.git(f.cwd, 'log', '-1', '--format=%ct', ref)) * 1000 - start)).toBeLessThan(60_000)
 
   expect(await expirePreservedFiles(f.location, f.cwd)).toEqual({ expiredRefs: [] })

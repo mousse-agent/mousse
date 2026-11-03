@@ -48,9 +48,8 @@ function repo(): string {
  * repository's top folder as a person would, and reads the file's bytes.
  */
 function restoreWorking(cwd: string, ref: string, path: string): Buffer {
-  const quoted = `'${path.replace(/'/g, `'\\''`)}'`
   mkdirSync(dirname(join(cwd, path)), { recursive: true })
-  execFileSync('sh', ['-c', keptCopyRestoreCommand(ref).replaceAll('<path>', quoted)], { cwd, stdio: ['ignore', 'pipe', 'pipe'] })
+  execFileSync('sh', ['-c', keptCopyRestoreCommand(ref, path, 'posix')], { cwd, stdio: ['ignore', 'pipe', 'pipe'] })
   return readFileSync(join(cwd, path))
 }
 
@@ -334,7 +333,7 @@ describe('keepCopy', () => {
     expect(git(cwd, 'show', `${kept.ref}^2:base.txt`)).toBe('staged')
     expect(git(cwd, 'show', `${kept.ref}:loose.txt`)).toBe('loose')
     expect(git(cwd, 'rev-parse', `${kept.ref}^1`)).toBe(before.head)
-    expect(keptCopyNotice(kept)).toBe(`A copy is kept for 30 days as ${kept.ref}. To bring a file back exactly as it was, run in ${cwd}: git cat-file blob ${kept.ref}:<path> > <path> (its staged version: git restore --source=${kept.ref}^2 --staged -- <path>).`)
+    expect(keptCopyNotice(kept, 'posix')).toBe(`A copy is kept for 30 days as ${kept.ref}. To bring a file back exactly as it was, run in ${cwd}: git cat-file blob ${kept.ref}:base.txt > base.txt; git cat-file blob ${kept.ref}:loose.txt > loose.txt (its staged version: git restore --source=${kept.ref}^2 --staged -- <path>).`)
   })
 
   it('keeps ignored files too when asked, for a cleanup that removes them', async () => {

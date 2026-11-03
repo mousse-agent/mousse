@@ -16,7 +16,7 @@ import { git, gitFoundationFixture } from './fixtures/gitFoundation'
 
 type Discarded = { status: GitStatusSnapshot; kept?: GitKeptCopy }
 /** Runs the restore command the result shows, for `path`, in the folder it names. */
-const restore = (top: string, ref: string, path: string) => execFileSync('sh', ['-c', keptCopyRestoreCommand(ref).replaceAll('<path>', `'${path}'`)], { cwd: top })
+const restore = (top: string, ref: string, path: string) => execFileSync('sh', ['-c', keptCopyRestoreCommand(ref, path, 'posix')], { cwd: top })
 const preserved = (cwd: string) => git(cwd, 'for-each-ref', '--format=%(refname)', 'refs/mousse/preserved/').split('\n').filter(Boolean)
 
 describe('Git panel Discard keeps a copy', () => {
@@ -58,7 +58,7 @@ describe('Git panel Discard keeps a copy', () => {
     const kept = result.kept!
     expect(preserved(f.repo)).toEqual([kept.ref])
     const top = git(f.repo, 'rev-parse', '--show-toplevel')
-    expect(kept.notice).toBe(`A copy is kept for 30 days as ${kept.ref}. To bring a file back exactly as it was, run in ${top}: git cat-file blob ${kept.ref}:<path> > <path> (its staged version: git restore --source=${kept.ref}^2 --staged -- <path>).`)
+    expect(kept.notice).toBe(`A copy is kept for 30 days as ${kept.ref}. To bring a file back exactly as it was, run in ${top}: git cat-file blob ${kept.ref}:scratch.bin > scratch.bin; git cat-file blob ${kept.ref}:value.txt > value.txt (its staged version: git restore --source=${kept.ref}^2 --staged -- <path>).`)
     // Owned by the project's data folder, where the sweep looks.
     const owner = projectKeptFilesOwner(mms.threads.lifecycleStore.profileHome, project.id)
     expect(threadPreservedIndex(owner).owns(kept.ref)).toBe(true)

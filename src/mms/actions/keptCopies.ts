@@ -11,6 +11,7 @@ import { gitRunError, type GitProcess } from '../git/runGitProcess'
 import { KEEP_COPY_OPERATIONS, PRESERVED_REFS, type KeepCopyOperation } from '../../shared/resourceLifecycle'
 import { DEFAULT_UNDO_RETENTION_POLICY, retentionWindowText } from '../../shared/undoRetention'
 import { gitAsync, gitEnv, guardedAsync, LISTING, mousseCommitEnvNow, NOT_MOUSSE, runGitProcess, tryGitAsync } from './git'
+import { restoreCommandsText, restoreCommandTemplate, restoreFileCommand, restoreShell, restoreStagedCommand, type RestoreShell } from './restoreCommands'
 import { UndoRetentionService } from './UndoRetentionService'
 
 /**
@@ -569,14 +570,19 @@ export function keptCopyWindowMs(owner: string): number {
 }
 const windows = new Map<string, { stamp: string; windowMs: number }>()
 
-/** The command that writes a kept file back exactly as it was on disk, run in the repository's top folder. */
-export function keptCopyRestoreCommand(ref: string): string {
-  return `git cat-file blob ${ref}:<path> > <path>`
+/** The command that writes a kept file back exactly as it was on disk, run in the repository's top folder (`restoreCommands.ts`). */
+export function keptCopyRestoreCommand(ref: string, path?: string, shell: RestoreShell = restoreShell()): string {
+  return path === undefined ? restoreCommandTemplate(ref, { shell }) : restoreFileCommand(ref, path, { shell })
 }
 
-/** What a result says about a copy: where it is, for how long, and how to bring a file back exactly as it was. */
-export function keptCopyNotice(kept: Pick<KeptCopy, 'ref' | 'windowMs' | 'top'>): string {
-  return `A copy is kept for ${retentionWindowText(kept.windowMs)} as ${kept.ref}. To bring a file back exactly as it was, run in ${kept.top}: ${keptCopyRestoreCommand(kept.ref)} (its staged version: git restore --source=${kept.ref}^2 --staged -- <path>).`
+/**
+ * What a result says about a copy: where it is, for how long, and how to bring a file back exactly as it was, with a
+ * command for each of the first files it holds.
+ */
+export function keptCopyNotice(kept: Pick<KeptCopy, 'ref' | 'windowMs' | 'top' | 'digests'>, shell: RestoreShell = restoreShell()): string {
+  const files = [...kept.digests.keys()].sort().map((path) => ({ ref: kept.ref, path }))
+  const commands = files.length ? restoreCommandsText(files, { shell }) : restoreCommandTemplate(kept.ref, { shell })
+  return `A copy is kept for ${retentionWindowText(kept.windowMs)} as ${kept.ref}. To bring a file back exactly as it was, run in ${kept.top}: ${commands} (its staged version: ${restoreStagedCommand(kept.ref, shell)}).`
 }
 
 // ---------------------------------------------------------------------------------------------------------
