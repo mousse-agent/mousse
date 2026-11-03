@@ -26,7 +26,8 @@ import { gitRunError, LISTING_MAX_BUFFER, runGitProcess } from '../git/runGitPro
 import { renameFolderAsync } from './renameFolder'
 import { isIdNamedMousseBranch, isMousseBranchName } from '../../shared/mousseBranches'
 import { adminDigest, adminObjectIds, blobId, HEAD_REFLOG, readAdminFilesAsync, replayedAdminFile, type AdminFile } from './worktreeAdminData'
-import { keepCopy } from '../actions/keptCopies'
+import { keepCopy, keptCopyWindowMs } from '../actions/keptCopies'
+import { retentionWindowText } from '../../shared/undoRetention'
 
 const hash = (value: string | Buffer): string => createHash('sha256').update(value).digest('hex')
 /** A retired worktree waits in the trash until nothing in it has changed for this long; then its files are snapshotted and it is deleted. */
@@ -567,6 +568,33 @@ export interface RetirementOwnership { repositoryLease: RepositoryLeaseHandle; t
  * manifest records), never across an await: the gate also admits every write to the thread. The leases the caller holds
  * keep the checkout to this work in between, and ownership is checked again, under the gate, right before each move.
  */
+/** How many set-aside files a notice names, each with its own command. */
+const NOTICE_PATHS = 5
+/** A path or `<ref>:<path>` as one word of a shell command, quoted only when it needs to be. */
+function shellWord(value: string): string {
+  return /^[\w./@:+=,-]+$/.test(value) ? value : `'${value.replaceAll("'", "'\\''")}'`
+}
+/**
+ * What a rebuild of the worktree set aside (`keptAside`), in plain words for the thread, with the exact command that
+ * brings each file back and how long it is kept; undefined when it set nothing aside. `windowMs` is the owner's Undo
+ * window (`keptCopyWindowMs`).
+ */
+export function keptAsideNotice(manifest: Pick<WorktreeReconstructionManifest, 'keptAside' | 'worktreePath'>, windowMs: number): { id: string; text: string } | undefined {
+  const files = (manifest.keptAside ?? []).flatMap((entry) => entry.paths.map((path) => ({ ref: entry.ref, path })))
+  if (!files.length) return undefined
+  const one = files.length === 1
+  const named = files.slice(0, NOTICE_PATHS)
+  // In backticks, which the thread shows as commands.
+  const commands = named.map(({ ref, path }) => `\`git cat-file blob ${shellWord(`${ref}:${path}`)} > ${shellWord(path)}\``).join('; ')
+  const more = files.length > named.length ? `, and the same way for the other ${files.length - named.length} (listed under ${[...new Set(files.slice(NOTICE_PATHS).map((file) => file.ref))].join(', ')})` : ''
+  const what = one ? `${files[0]!.path}, which was` : `${files.length} files, which were`
+  const list = one ? '' : `: ${named.map((file) => file.path).join(', ')}${files.length > named.length ? ` and ${files.length - named.length} more` : ''}`
+  return {
+    id: `worktree-set-aside-${manifest.keptAside![0]!.ref.slice(manifest.keptAside![0]!.ref.lastIndexOf('/') + 1)}`,
+    text: `While rebuilding this worktree, Mousse set aside ${what} written there during the rebuild${list}. Bring ${one ? 'it' : 'them'} back by running this in ${manifest.worktreePath}: ${commands}${more} (kept for ${retentionWindowText(windowMs)}).`
+  }
+}
+
 export class WorktreeRetirementService {
   constructor(readonly store: ResourceLifecycleStore, private readonly ownership?: RetirementOwnership) {}
   pathFor(taskId: string, worktreePath: string): string { return join(this.store.root, 'workspaces', taskId, `${hash(resolve(worktreePath))}.json`) }
@@ -1483,6 +1511,10 @@ export class WorktreeRetirementService {
     }
     await visit(root, '', 0)
   }
+  /** {@link keptAsideNotice} of a rebuilt worktree, with its owner's Undo window. */
+  keptAsideNotice(manifest: WorktreeReconstructionManifest): { id: string; text: string } | undefined {
+    return manifest.keptAside?.length ? keptAsideNotice(manifest, keptCopyWindowMs(this.store.require(manifest.taskId).location)) : undefined
+  }
   async reconstruct(manifestPath: string, untrusted?: { prepare(worktreePath: string): void | Promise<void>; env: NodeJS.ProcessEnv }): Promise<WorktreeReconstructionManifest> {
     const manifest = this.load(manifestPath)
     await this.checkOwnership(manifest.taskId, manifest.commonDir, manifest.repositoryId)
@@ -1552,6 +1584,8 @@ export class WorktreeRetirementService {
       if (manifest.snapshotTree) await moveFilesAsync(manifest.worktreePath, manifest.treeSha, manifest.snapshotTree)
       // A later form of a path (another kind, or another spelling on a volume that folds case) clears the earlier one,
       // and only what the rebuild itself wrote is ever cleared.
+      // Only what this rebuild sets aside is reported for it.
+      delete manifest.keptAside
       const rebuild = manifest.keptFiles?.length ? await this.rebuildOf(manifest) : undefined
       for (const layer of manifest.keptFiles ?? []) await this.writeKeptFiles(manifest, layer, rebuild!)
       for (const entry of manifest.content) {

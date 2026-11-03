@@ -69,7 +69,9 @@ export class WorkspaceResolver {
     private readonly threadDirectory: string,
     private readonly threadId: string,
     private readonly projectPath: string,
-    private readonly placement: ThreadPlacement
+    private readonly placement: ThreadPlacement,
+    /** Tells the thread about a restore (`ThreadWorkspaceManager.restore`'s `onNotice`): a line in it, made once per `id`. */
+    private readonly notify?: (notice: { id: string; text: string }) => unknown
   ) {}
 
   async resolve(
@@ -87,7 +89,7 @@ export class WorkspaceResolver {
       if (existing.lifecycle !== 'ready') throw workspaceErrors.create('workspace_recovery_required', undefined, { state: existing.lifecycle })
       const verified = await manager.verify(existing)
       if (verified.lifecycle === 'missing' && manager.hasReconstructionManifest(existing)) {
-        return manager.executionContext(this.projectPath, await manager.restore(this.projectPath, signal, heldThreadLease))
+        return manager.executionContext(this.projectPath, await manager.restore(this.projectPath, signal, heldThreadLease, this.notify))
       }
       if (verified.lifecycle !== 'ready') throw workspaceErrors.create('workspace_recovery_required', undefined, { state: verified.lifecycle })
       return manager.executionContext(this.projectPath, verified)

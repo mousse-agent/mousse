@@ -9,7 +9,9 @@ import { resolveRepositoryIdentity } from '../src/mms/git/RepositoryIdentity'
 import { waitAcquireExecutionLease, releaseExecutionLeaseHandle } from '../src/mms/queue/ThreadExecutionLease'
 import { registerThreadLifecycleGate } from '../src/mms/queue/ThreadLifecycleAdmission'
 import { ResourceLifecycleStore } from '../src/mms/lifecycle/ResourceLifecycleStore'
-import { WORKTREE_TRASH_QUIET_MS, WorktreeRetirementService } from '../src/mms/lifecycle/WorktreeRetirementService'
+import { keptAsideNotice, WORKTREE_TRASH_QUIET_MS, WorktreeRetirementService } from '../src/mms/lifecycle/WorktreeRetirementService'
+import { keptCopyWindowMs } from '../src/mms/actions/keptCopies'
+import { retentionWindowText } from '../src/shared/undoRetention'
 import { fixtureGit as git, ownedHome } from './support/fixtureGit'
 import { ThreadJournal } from '../src/mms/data/ThreadJournal'
 import { ThreadWorkspaceManager } from '../src/mms/workspace/ThreadWorkspaceManager'
@@ -416,7 +418,7 @@ async function threadFixture(kind: 'named' | 'id-named') {
   const taskLease = await waitAcquireExecutionLease(task), repositoryLease = await acquireRepositoryLease(resolveRepositoryIdentity(repo))
   releases.push(() => repositoryLease.release(), () => releaseExecutionLeaseHandle(taskLease))
   const service = new WorktreeRetirementService(store, { taskLease, repositoryLease })
-  return { repo, task, worktree, branch, service, input: { taskId: 'task', worktreePath: worktree, branch, sourcePath: join(task, 'workspace.json') }, path: service.pathFor('task', worktree) }
+  return { repo, task, worktree, branch, service, input: { taskId: 'task', worktreePath: worktree, branch, sourcePath: join(task, 'workspace.json') }, path: service.pathFor('task', worktree), releaseLeases: () => { repositoryLease.release(); releaseExecutionLeaseHandle(taskLease) } }
 }
 
 test.each(['named', 'id-named'] as const)('a thread worktree whose branch is %s is owned: it retires, its branch goes at trash expiry, and a restore brings both back', async (kind) => {
@@ -1009,3 +1011,67 @@ test.skipIf(process.platform === 'win32')('a folder swapped for a link just befo
   // `sub` went before the swap and comes back from the proof; `ignored` comes back as the link it is now.
   expect(filesOf(f.worktree)).toEqual({ ...Object.fromEntries(Object.entries(f.before).filter(([path]) => !path.startsWith('ignored/'))), ignored: left.ignored })
 })
+
+// ---- Review round 3: what a rebuild set aside is said in the thread, with the command that brings it back ----
+
+/** The commands a set-aside notice gives, as it gives them. */
+function noticeCommands(text: string, worktree: string): string[] {
+  const start = text.indexOf(`running this in ${worktree}: `) + `running this in ${worktree}: `.length
+  return text.slice(start, text.lastIndexOf(' (kept for ')).split('; ').map((command) => command.replace(/^`|`$/g, ''))
+}
+
+test.skipIf(process.platform === 'win32')('a rebuild that set files aside says so in plain words, and each command it gives brings a file back byte for byte', async () => {
+  const f = await trashedFixture()
+  expect(await f.service.expireTrash(f.path, { now: LATER() })).toEqual({ removed: true })
+  const personal = Buffer.from('a sole copy written while the worktree was rebuilt 3ea43028\n'), cache = Buffer.from([7, 0, 255, 13, 10, 42])
+  const manifest = await f.service.reconstruct(f.path, { env: {}, prepare: (root) => {
+    mkdirSync(join(root, 'ignored', 'link'), { recursive: true }); writeFileSync(join(root, 'ignored', 'link', 'personal.txt'), personal)
+    writeFileSync(join(root, 'ignored', 'cache.bin'), cache)
+  } })
+  const notice = f.service.keptAsideNotice(manifest)!
+  const window = retentionWindowText(keptCopyWindowMs(join(f.home, 'thread-data', 'task')))
+  expect(notice.text).toMatch(new RegExp(`^While rebuilding this worktree, Mousse set aside 2 files, which were written there during the rebuild: ignored/cache\\.bin, ignored/link/personal\\.txt\\. Bring them back by running this in .+: \`git cat-file blob refs/mousse/preserved/\\S+:ignored/cache\\.bin > ignored/cache\\.bin\`; \`git cat-file blob refs/mousse/preserved/\\S+:ignored/link/personal\\.txt > ignored/link/personal\\.txt\` \\(kept for ${window}\\)\\.$`))
+  const [cacheCommand, personalCommand] = noticeCommands(notice.text, f.worktree)
+  // The command as given, run where the notice says: the file is back exactly as it was written.
+  execFileSync('/bin/sh', ['-c', cacheCommand!], { cwd: f.worktree })
+  expect(readFileSync(join(f.worktree, 'ignored', 'cache.bin'))).toEqual(cache)
+  // Its path holds the rebuilt link now, so the person picks where it goes: the bytes the command writes are the ones set aside.
+  expect(execFileSync('/bin/sh', ['-c', personalCommand!.slice(0, personalCommand!.indexOf(' > '))], { cwd: f.worktree })).toEqual(personal)
+})
+
+test('a rebuild that set nothing aside says nothing', async () => {
+  const f = await trashedFixture()
+  expect(await f.service.expireTrash(f.path, { now: LATER() })).toEqual({ removed: true })
+  const manifest = await f.service.reconstruct(f.path)
+  expect(manifest.keptAside).toBeUndefined()
+  expect(f.service.keptAsideNotice(manifest)).toBeUndefined()
+  expect(keptAsideNotice({ worktreePath: f.worktree }, 1)).toBeUndefined()
+  expect(filesOf(f.worktree)).toEqual(f.before)
+})
+
+test.skipIf(process.platform === 'win32')('restoring a thread tells it what the rebuild set aside, once, and nothing when it set nothing aside', async () => {
+  for (const stranger of [true, false]) {
+    const f = await threadFixture('named')
+    writeFileSync(join(f.repo, '.git', 'info', 'exclude'), 'ignored/\n')
+    await f.service.prepare(f.input)
+    const trashed = await f.service.retire(f.path)
+    mkdirSync(join(trashed.trashPath!, 'ignored')); writeFileSync(join(trashed.trashPath!, 'ignored', 'cache.bin'), 'kept with the worktree\n')
+    const before = filesOf(trashed.trashPath!)
+    expect(await f.service.expireTrash(f.path, { now: LATER() })).toEqual({ removed: true })
+    f.releaseLeases()
+    const restoreAdmin = (WorktreeRetirementService.prototype as unknown as { restoreAdmin(manifest: unknown): Promise<void> }).restoreAdmin
+    // While the worktree is rebuilt, something writes over the ignored file the proof holds.
+    const spy = vi.spyOn(WorktreeRetirementService.prototype as unknown as { restoreAdmin(manifest: unknown): Promise<void> }, 'restoreAdmin').mockImplementation(async function (this: unknown, manifest: unknown) {
+      await restoreAdmin.call(this, manifest)
+      if (stranger) { mkdirSync(join(f.worktree, 'ignored'), { recursive: true }); writeFileSync(join(f.worktree, 'ignored', 'cache.bin'), 'written during the rebuild\n') }
+    })
+    const notices: Array<{ id: string; text: string }> = []
+    try { await new ThreadWorkspaceManager(f.task).restore(f.repo, undefined, undefined, (notice) => { notices.push(notice) }) } finally { spy.mockRestore() }
+    expect(filesOf(f.worktree)).toEqual(before)
+    if (!stranger) { expect(notices).toEqual([]); continue }
+    expect(notices).toHaveLength(1)
+    expect(notices[0]!.text).toContain('While rebuilding this worktree, Mousse set aside ignored/cache.bin, which was written there during the rebuild. Bring it back by running this in ')
+    execFileSync('/bin/sh', ['-c', noticeCommands(notices[0]!.text, f.worktree)[0]!], { cwd: f.worktree })
+    expect(readFileSync(join(f.worktree, 'ignored', 'cache.bin'), 'utf8')).toBe('written during the rebuild\n')
+  }
+}, 120_000)
