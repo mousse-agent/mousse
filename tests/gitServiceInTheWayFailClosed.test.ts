@@ -12,13 +12,14 @@ import { userAction } from '../src/mms/git/gitPolicy'
  * writes unchecked.
  */
 
-const faults = vi.hoisted(() => ({ command: '' }))
+type Reply = { ok: boolean; status: number | null; stdout: string; stderr: string }
+const faults = vi.hoisted(() => ({ command: '', reply: null as Reply | null }))
 vi.mock('../src/mms/actions/git', async (original) => {
   const real = await original<typeof import('../src/mms/actions/git')>()
   return {
     ...real,
     tryGitRawAsync: async (cwd: string, args: string[], ...rest: [string?, { maxBuffer?: number }?]) =>
-      args[0] === faults.command ? { ok: false, status: null, stdout: '', stderr: 'probe: listing exceeded limit' } : real.tryGitRawAsync(cwd, args, ...rest)
+      args[0] === faults.command ? faults.reply ?? { ok: false, status: null, stdout: '', stderr: 'probe: listing exceeded limit' } : real.tryGitRawAsync(cwd, args, ...rest)
   }
 })
 
@@ -55,6 +56,7 @@ const outcome = (promise: Promise<unknown>) => promise.then(() => ({}), (error: 
 
 afterEach(() => {
   faults.command = ''
+  faults.reply = null
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true })
 })
 
@@ -113,6 +115,51 @@ describe('a check that cannot be made refuses', () => {
     service.runGit = (cwd, args, ...rest) => (args[0] === 'rev-list' && args.includes('--cherry-pick') ? Promise.resolve({ ok: false, stdout: '', output: 'probe: listing exceeded limit' }) : original(cwd, args, ...rest))
     const before = state(cwd)
     expect(await outcome(service.pull(cwd, USER, { strategy: 'rebase' }))).toMatchObject({ code: 'git_in_the_way_unchecked' })
+    expect(state(cwd)).toEqual(before)
+  }, 60_000)
+})
+
+/** What a Git older than 2.38 says to `merge-tree --write-tree` (2.38 and 2.39 say the same to `--merge-base`). */
+const OLD_GIT: Reply = { ok: false, status: 129, stdout: '', stderr: "error: unknown option `write-tree'\nusage: git merge-tree <base-tree> <branch1> <branch2>\n" }
+
+describe('a Git without merge-tree --write-tree', () => {
+  it.each([['merge', 'merged'], ['rebase', 'rebased']] as const)('still pulls a clean diverged %s', async (strategy, result) => {
+    const cwd = repo()
+    const push = withRemote(cwd)
+    push((other) => { write(other, 'up.txt', 'up\n'); commitAll(other, 'up') })
+    write(cwd, 'local.txt', 'local\n'); commitAll(cwd, 'local')
+    faults.command = 'merge-tree'; faults.reply = OLD_GIT
+    expect(await outcome(new GitService().pull(cwd, USER, { strategy }))).toEqual({})
+    expect(bytes(cwd, 'up.txt')).toBe('up\n')
+    expect(git(cwd, 'log', '-1', '--format=%s', strategy === 'merge' ? 'HEAD^2' : 'HEAD^')).toBe('up')
+  }, 60_000)
+
+  it.each(['merge', 'rebase'] as const)('%s still refuses over an ignored file', async (strategy) => {
+    const cwd = repo()
+    const push = withRemote(cwd)
+    push((other) => { write(other, '.env', 'upstream\n'); git(other, 'add', '-f', '.env'); git(other, 'commit', '-qm', 'env') })
+    write(cwd, 'local.txt', 'local\n'); commitAll(cwd, 'local')
+    write(cwd, '.env', 'mine\n')
+    const before = state(cwd)
+    faults.command = 'merge-tree'; faults.reply = OLD_GIT
+    expect(await outcome(new GitService().pull(cwd, USER, { strategy }))).toMatchObject({ code: 'git_ignored_in_the_way' })
+    expect(state(cwd)).toEqual(before)
+  }, 60_000)
+
+  it('still refuses when a read the conservative count needs fails', async () => {
+    const cwd = repo()
+    const push = withRemote(cwd)
+    push((other) => { write(other, 'up.txt', 'up\n'); commitAll(other, 'up') })
+    write(cwd, 'local.txt', 'local\n'); commitAll(cwd, 'local')
+    const before = state(cwd)
+    // `merge-tree` reports an old Git, and the listing of local commits is cut off.
+    faults.command = 'merge-tree'; faults.reply = OLD_GIT
+    const { configureInTheWay } = await import('../src/mms/git/inTheWay')
+    configureInTheWay({ mergeTree: false })
+    faults.command = 'rev-list'; faults.reply = null
+    try {
+      expect(await outcome(new GitService().pull(cwd, USER, { strategy: 'rebase' }))).toMatchObject({ code: 'git_in_the_way_unchecked' })
+    } finally { configureInTheWay() }
     expect(state(cwd)).toEqual(before)
   }, 60_000)
 })

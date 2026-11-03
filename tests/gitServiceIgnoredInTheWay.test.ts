@@ -2,9 +2,10 @@ import { execFileSync } from 'node:child_process'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { GitService } from '../src/mms/git/GitService'
 import { userAction } from '../src/mms/git/gitPolicy'
+import { configureInTheWay } from '../src/mms/git/inTheWay'
 import { committedGitTemplate } from './support/gitBase'
 
 /**
@@ -552,4 +553,91 @@ describe('what the check lets through', () => {
     expect(error.message).toBe('Switching to feature would overwrite an ignored folder: logs/; the files of the nested repository tools. Move them aside, then try again. Nothing was changed.')
     expect([read(cwd, 'tools/run.sh'), read(cwd, 'logs/today.log')]).toEqual(['my script\n', 'log\n'])
   })
+})
+
+describe('on a Git without merge-tree --write-tree, merges and rebases are counted conservatively', () => {
+  beforeEach(() => configureInTheWay({ mergeTree: false }))
+  afterEach(() => configureInTheWay())
+
+  /** The upstream renames `old/` to `ignored/`; a local commit adds `old/new.txt`, which a merge or rebase moves to `ignored/new.txt`. */
+  function renamedFolder(cwd: string): string {
+    const { push } = withRemote(cwd)
+    push((other) => { write(other, 'old/a.txt', 'one\ntwo\nthree\nfour\nfive\n'); write(other, 'old/b.txt', 'six\nseven\neight\nnine\n'); commitAll(other, 'old folder') })
+    git(cwd, 'pull', '-q', '--ff-only')
+    push((other) => { git(other, 'mv', 'old', 'ignored'); git(other, 'commit', '-qm', 'rename old to ignored') })
+    write(cwd, 'old/new.txt', 'added locally\n'); commitAll(cwd, 'local file in old')
+    const mine = 'ignored bytes only here\n'
+    write(cwd, 'ignored/new.txt', mine)
+    return mine
+  }
+
+  it.each(['merge', 'rebase'] as const)('%s refuses for a local file that the upstream folder rename carries over an ignored file', async (strategy) => {
+    const cwd = repo(); renamedFolder(cwd)
+    const before = state(cwd, ['ignored/new.txt'])
+    const error = await refusal(new GitService().pull(cwd, USER, { strategy }))
+    expect(error.message).toContain('an ignored file: ignored/new.txt.')
+    expect(state(cwd, ['ignored/new.txt'])).toEqual(before)
+  }, 60_000)
+
+  it('rebase refuses when local commits add and delete a path that is ignored on disk, whatever the backend', async () => {
+    const cwd = repo()
+    write(cwd, 'old/a', 'a\n'); commitAll(cwd, 'old')
+    const { push } = withRemote(cwd)
+    write(cwd, 'old/new', 'local commit\n'); commitAll(cwd, 'add new')
+    git(cwd, 'rm', '-q', 'old/new'); git(cwd, 'commit', '-qm', 'remove new')
+    push((other) => { git(other, 'mv', 'old', 'renamed'); git(other, 'commit', '-qm', 'rename') })
+    write(cwd, '.git/info/exclude', 'old/new\n'); write(cwd, 'old/new', 'mine\n')
+    git(cwd, 'config', 'rebase.backend', 'apply')
+    const before = state(cwd, ['old/new'])
+    const error = await refusal(new GitService().pull(cwd, USER, { strategy: 'rebase' }))
+    expect(error.message).toContain('an ignored file: old/new.')
+    expect(state(cwd, ['old/new'])).toEqual(before)
+  }, 60_000)
+
+  it('rebase counts every local commit, also after one a merge program settles', async () => {
+    const cwd = repo()
+    write(cwd, '.gitattributes', 'base.txt merge=keep\n'); commitAll(cwd, 'attributes')
+    git(cwd, 'config', 'merge.keep.driver', 'true')
+    const { push } = withRemote(cwd)
+    write(cwd, 'base.txt', 'local\n'); git(cwd, 'commit', '-qam', 'local conflicting change')
+    write(cwd, '.env', 'committed\n'); git(cwd, 'add', '-f', '.env'); git(cwd, 'commit', '-qm', 'env')
+    git(cwd, 'rm', '-q', '.env'); git(cwd, 'commit', '-qm', 'rm env')
+    push((other) => { write(other, 'base.txt', 'upstream\n'); git(other, 'commit', '-qam', 'upstream conflicting change') })
+    write(cwd, '.env', 'mine\n')
+    const before = state(cwd, ['.env'])
+    const error = await refusal(new GitService().pull(cwd, USER, { strategy: 'rebase' }))
+    expect(error.message).toBe('Pulling origin/main would overwrite an ignored file: .env. Move it aside, then try again. Nothing was changed.')
+    expect(state(cwd, ['.env'])).toEqual(before)
+  }, 60_000)
+
+  it.each(['merge', 'rebase'] as const)('%s refuses for an ignored file partway down an ignored folder', async (strategy) => {
+    const cwd = repo()
+    write(cwd, '.gitignore', '.env\nignored/\nbuild/\n'); commitAll(cwd, 'ignore build')
+    const { push } = withRemote(cwd)
+    push((other) => { write(other, 'build/output/index.js', 'tracked\n'); git(other, 'add', '-f', 'build/output/index.js'); git(other, 'commit', '-qm', 'track build output') })
+    localCommit(cwd)
+    write(cwd, 'build/output', 'my build log\n')
+    const before = state(cwd, ['build/output'])
+    const error = await refusal(new GitService().pull(cwd, USER, { strategy }))
+    expect(error.message).toBe('Pulling origin/main would overwrite an ignored file: build/output. Move it aside, then try again. Nothing was changed.')
+    expect(state(cwd, ['build/output'])).toEqual(before)
+  }, 60_000)
+
+  it.each(['merge', 'rebase'] as const)('%s refuses when the upstream starts tracking an ignored file', async (strategy) => {
+    const cwd = repo(), mine = upstreamTracksEnv(cwd)
+    localCommit(cwd)
+    const error = await refusal(new GitService().pull(cwd, USER, { strategy }))
+    expect(error.code).toBe('git_ignored_in_the_way')
+    expect(read(cwd, '.env')).toBe(mine)
+  }, 60_000)
+
+  it.each([['merge', 'merged'], ['rebase', 'rebased']] as const)('a clean diverged %s still pulls, with ignored files beside it', async (strategy, result) => {
+    const cwd = repo(), { push } = withRemote(cwd)
+    write(cwd, 'src/app.ts', 'app\n'); commitAll(cwd, 'app'); git(cwd, 'push', '-q')
+    push((other) => { git(other, 'pull', '-q'); git(other, 'mv', 'src', 'lib'); write(other, 'up.txt', 'up\n'); commitAll(other, 'move src to lib') })
+    write(cwd, 'notes.txt', 'local\n'); commitAll(cwd, 'local')
+    write(cwd, '.env', 'mine\n'); write(cwd, 'ignored/cache.bin', 'cache\n')
+    await expect(new GitService().pull(cwd, USER, { strategy })).resolves.toEqual({ result })
+    expect([read(cwd, 'up.txt'), read(cwd, 'lib/app.ts'), read(cwd, 'notes.txt'), read(cwd, '.env'), read(cwd, 'ignored/cache.bin')]).toEqual(['up\n', 'app\n', 'local\n', 'mine\n', 'cache\n'])
+  }, 60_000)
 })

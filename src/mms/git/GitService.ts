@@ -8,7 +8,7 @@ import type { SimpleGit } from 'simple-git'
 import { redactGitText } from '../../shared/gitText'
 import { holdsRepositoryMutation } from '../actions/GitOperationCoordinator'
 import { keepCopy, KeepCopyRefusedError, type KeptCopy } from '../actions/keptCopies'
-import { conflictWrites, emptyTree, findInTheWay, InTheWayCheckError, mergeResult, plannedWrites, type InTheWay, type InTheWayKind, type PlannedWrite } from './inTheWay'
+import { conflictWrites, conservativeWrites, emptyTree, findInTheWay, InTheWayCheckError, mergeResult, plannedWrites, type InTheWay, type InTheWayKind, type PlannedWrite } from './inTheWay'
 import type { CodeHost } from './CodeHost'
 import { COMMIT_SUGGESTION_LIMITS, EMPTY_COMMIT_INPUT, fitPatch, parseNumstat, type CommitInput } from './commitSuggestion'
 import { explicitActionGitEnv } from './gitEnv'
@@ -1120,6 +1120,8 @@ export class GitService {
       await this.refuseInTheWay(cwd, doing, true, async (top) => {
         if (fastForward) return plannedWrites(top, head, upstream)
         const merged = await mergeResult(top, head, upstream, { strategyOptions: options.strategyOptions })
+        // A Git that cannot work the merge out: the conservative count, not a refusal of every merge.
+        if (!merged) return conservativeWrites(top, head, upstream)
         return [...await plannedWrites(top, head, merged.tree), ...conflictWrites(merged.conflicts)]
       })
       return
@@ -1163,7 +1165,8 @@ export class GitService {
    * lands; each commit's own paths are counted too, whatever the step did with them. A step that conflicts here may not
    * stop the real rebase (a merge program the repository configures can settle it), so every later commit is counted
    * as well, worked out from the conflicted result. The upstream's own commits are never replayed, only its last state
-   * is written. When a step cannot be worked out the check fails, rather than leave its writes uncounted.
+   * is written. On a Git without `merge-tree --merge-base` the writes are counted the conservative way
+   * (`conservativeWrites`); a read that fails fails the check, rather than leave writes uncounted.
    */
   private async rebaseWrites(top: string, head: string, upstream: string): Promise<PlannedWrite[]> {
     const writes = await plannedWrites(top, head, upstream)
@@ -1176,6 +1179,8 @@ export class GitService {
     for (const commit of replayed) {
       const base = await this.read(top, ['rev-parse', '--verify', '--quiet', `${commit}^1^{tree}`]) ?? await emptyTree(top)
       const step = await mergeResult(top, onto, commit, { base })
+      // A Git that cannot work the steps out: the conservative count, not a refusal of every rebase.
+      if (!step) return conservativeWrites(top, head, upstream)
       writes.push(...await plannedWrites(top, base, commit), ...await plannedWrites(top, onto, step.tree), ...conflictWrites(step.conflicts))
       onto = step.tree
     }

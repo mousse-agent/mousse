@@ -86,20 +86,89 @@ export interface MergeResult {
   conflicts: string[]
 }
 
+/** What can be changed for tests: `mergeTree: false` works out writes as on a Git without `merge-tree --write-tree`. */
+const settings = { mergeTree: true }
+
+export function configureInTheWay(next: { mergeTree?: boolean } = {}): void {
+  settings.mergeTree = next.mergeTree ?? true
+}
+
 /**
  * The tree `git merge` or one step of a rebase would leave, worked out without touching the files (`merge-tree`).
  * `base` is given for a rebase step (the replayed commit's parent); `ours` and `theirs` may then be trees.
- * `strategyOptions` are the merge's `-X` options. When Git cannot work it out (older than 2.40 for `base`, 2.38
- * without, or the read fails) what the command writes is unknown, so the check fails rather than guess.
+ * `strategyOptions` are the merge's `-X` options.
+ *
+ * Null when this Git cannot do it: `--write-tree` needs Git 2.38, `--merge-base` 2.40, and an option it does not know
+ * makes it print its usage (exit 129). The caller then counts writes the conservative way (`conservativeWrites`).
+ * Any other failure fails the check, rather than guess.
  */
-export async function mergeResult(top: string, ours: string, theirs: string, options: { base?: string; strategyOptions?: readonly string[] } = {}): Promise<MergeResult> {
+export async function mergeResult(top: string, ours: string, theirs: string, options: { base?: string; strategyOptions?: readonly string[] } = {}): Promise<MergeResult | null> {
+  if (!settings.mergeTree) return null
   const args = ['merge-tree', '--write-tree', '-z', '--name-only', '--no-messages', ...(options.strategyOptions ?? []).map((option) => `--strategy-option=${option}`), ...(options.base ? [`--merge-base=${options.base}`] : []), ours, theirs]
   const run = await tryGitRawAsync(top, args, undefined, LISTING)
+  if (run.status === 129 || /unknown (?:option|switch)|usage: git merge-tree/i.test(run.stderr)) return null
   const [tree = '', ...rest] = fields(run.stdout)
   if ((run.status !== 0 && run.status !== 1) || !/^[0-9a-f]{40,64}$/.test(tree)) throw new InTheWayCheckError(firstLine(run.stderr) || 'git merge-tree could not work out the merge')
   const end = rest.indexOf('')
   return { tree, conflicted: run.status === 1, conflicts: [...new Set(end < 0 ? rest : rest.slice(0, end))] }
 }
+
+/**
+ * Every path a merge of `upstream` into `head`, or a rebase of `head` onto it, can write, counted without
+ * `merge-tree` (a Git older than 2.38, or 2.40 for a rebase): more than the command writes, never less.
+ * - Every path `head` and `upstream` differ in.
+ * - Every path a local commit touches (`upstream..head`, merged commits included): a rebase replays them, and a
+ *   merge can move their files.
+ * - Those local paths moved as the upstream's renames since the two parted move them: a renamed file, and the
+ *   folders its rename implies, as rename detection would carry a local file into a renamed folder.
+ * - The side names a folder/file conflict can give any of them.
+ * A read that fails fails the check.
+ */
+export async function conservativeWrites(top: string, head: string, upstream: string): Promise<PlannedWrite[]> {
+  const writes = await plannedWrites(top, head, upstream)
+  const commits = (await gitRead(top, ['rev-list', '--no-merges', `${upstream}..${head}`])).split('\n').map((line) => line.trim()).filter(Boolean)
+  const local: PlannedWrite[] = []
+  for (const commit of commits) {
+    const parent = await tryGitRawAsync(top, ['rev-parse', '--verify', '--quiet', `${commit}^1^{tree}`])
+    local.push(...await plannedWrites(top, parent.ok ? parent.stdout.trim() : await emptyTree(top), commit))
+  }
+  const moved: PlannedWrite[] = []
+  const base = await tryGitRawAsync(top, ['merge-base', head, upstream])
+  // Exit 1: no common commit, so no rename to follow.
+  if (!base.ok && base.status !== 1) throw new InTheWayCheckError(firstLine(base.stderr) || 'git merge-base failed')
+  if (base.ok) {
+    const files = new Map<string, string>()
+    const folders = new Map<string, string>()
+    const parts = fields(await gitRead(top, ['diff-tree', '-r', '-z', '-M', '--name-status', base.stdout.trim(), upstream, '--']))
+    for (let index = 0; index < parts.length && parts[index];) {
+      const status = parts[index]!
+      if (/^[RC]/.test(status)) {
+        const from = parts[index + 1]!, to = parts[index + 2]!
+        if (status.startsWith('R')) {
+          files.set(from, to)
+          // `a/b/x` to `c/b/x` moves the folders `a/b` to `c/b` and `a` to `c`.
+          let oldFolder = parentOf(from), newFolder = parentOf(to)
+          while (oldFolder && newFolder && oldFolder !== newFolder) {
+            if (!folders.has(oldFolder)) folders.set(oldFolder, newFolder)
+            if (nameOf(oldFolder) !== nameOf(newFolder)) break
+            oldFolder = parentOf(oldFolder); newFolder = parentOf(newFolder)
+          }
+        }
+        index += 3
+      } else index += 2
+    }
+    for (const write of local) {
+      const renamed = files.get(write.path)
+      if (renamed) moved.push({ path: renamed, mode: '100644' })
+      for (const [from, to] of folders) if (write.path.startsWith(`${from}/`)) moved.push({ path: `${to}${write.path.slice(from.length)}`, mode: '100644' })
+    }
+  }
+  const sides = [...local, ...moved].map((write) => ({ path: `${write.path}~`, mode: '100644', sidePrefix: true }))
+  return [...writes, ...local, ...moved, ...sides]
+}
+
+const parentOf = (path: string): string => path.slice(0, Math.max(0, path.lastIndexOf('/')))
+const nameOf = (path: string): string => path.slice(path.lastIndexOf('/') + 1)
 
 /** The conflicts of a merge or rebase step as writes: the file itself, and any side name Git may give it. */
 export function conflictWrites(conflicts: readonly string[]): PlannedWrite[] {
