@@ -7,7 +7,7 @@
 import { execFileSync, spawnSync } from 'node:child_process'
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { keepCopy, keptCopyNotice } from '../src/mms/actions/keptCopies'
 import { preserveBeforeAbortAsync } from '../src/mms/actions/leftMerge'
@@ -174,7 +174,8 @@ describe('each notice\'s commands give back the exact bytes in the shells of thi
     }
     writeAll(top, files)
     const { ref, top: kept } = await preserveBeforeAbortAsync(top, 'op')
-    expect(kept).toBe(top)
+    // Git names the folder its own way (forward slashes on Windows); it is the same folder.
+    expect(resolve(kept)).toBe(resolve(top))
     expect(git(top, 'cat-file', 'blob', `${ref}:kept/crlf file.crlf`)).toBe('one\ntwo')
     expect(abortPreservedNotice(ref, 24 * 60 * 60 * 1000, top)).toBe(`Every file as it was before the abort is kept under ${ref} for 1 day. Bring one back before then by running this in ${top}: ${restoreCommandTemplate(ref, { normalized: true })}.`)
     const commands = Object.fromEntries(Object.keys(files).map((path) => [path, restoreFileCommand(ref, path, { normalized: true })]))
