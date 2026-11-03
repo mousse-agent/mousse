@@ -8,6 +8,7 @@ import type { SimpleGit } from 'simple-git'
 import { redactGitText } from '../../shared/gitText'
 import { holdsRepositoryMutation } from '../actions/GitOperationCoordinator'
 import { keepCopy, KeepCopyRefusedError, type KeptCopy } from '../actions/keptCopies'
+import { RestoreInTheWayError, uncapturedInTheWayAsync, worktreeTreeAsync } from '../actions/snapshots'
 import type { CodeHost } from './CodeHost'
 import { COMMIT_SUGGESTION_LIMITS, EMPTY_COMMIT_INPUT, fitPatch, parseNumstat, type CommitInput } from './commitSuggestion'
 import { explicitActionGitEnv } from './gitEnv'
@@ -77,6 +78,7 @@ const gitErrors = createErrorProvider({
   git_checkout_dirty: { category: 'conflict', retryable: false, message: 'Uncommitted changes would be overwritten by the switch.' },
   git_checkout_untracked_collision: { category: 'conflict', retryable: false, message: 'Untracked files in the way would be overwritten by the switch.' },
   git_checkout_failed: { category: 'invalid', retryable: false, message: 'Git could not switch branches.' },
+  git_ignored_in_the_way: { category: 'conflict', retryable: false, message: 'Ignored files would be overwritten. Move them aside, then try again. Nothing was changed.' },
   git_stash_kept: { category: 'conflict', retryable: false, message: 'Git could not put your changes back. They are kept in the stash named "mousse: switch to ...".' },
   git_index_restore_failed: { category: 'internal', retryable: false, message: 'The commit failed and Git could not put the staged files back as they were. Everything is staged; unstage what you do not want to commit.' },
   git_index_locked: { category: 'conflict', retryable: false, message: 'A stopped Git left its lock file .git/index.lock behind. Make sure no Git is running in this folder, delete that file, then check what is staged.' },
@@ -297,6 +299,18 @@ function assertNotCancelled(live: Live | undefined): void {
 /** A recognised failure: the code's fixed message, with the redacted Git output kept as the cause. */
 function classified(code: GitErrorCode, run: GitRun): AppError {
   return gitErrors.create(code, redactGitText(run.output))
+}
+
+/** A switch, a new branch or a pull refused before it wrote anything, naming the files it would have overwritten. */
+function ignoredInTheWay(doing: string, paths: readonly string[]): AppError {
+  const shown = paths.slice(0, 5).join(', ')
+  const more = paths.length > 5 ? ` and ${paths.length - 5} more` : ''
+  const files = paths.length === 1 ? `an ignored file: ${shown}` : `ignored files: ${shown}${more}`
+  return new AppError({
+    code: 'git_ignored_in_the_way',
+    message: `${doing} would overwrite ${files}. Move ${paths.length === 1 ? 'it' : 'them'} aside, then try again. Nothing was changed.`,
+    errorInfo: gitErrors.create('git_ignored_in_the_way').errorInfo
+  })
 }
 
 /**
@@ -991,8 +1005,13 @@ export class GitService {
         }
       }
       assertNotCancelled(live)
+      // A merge or rebase already waiting makes Git refuse; there is nothing to check before that.
+      if (!waiting) await this.refuseIgnoredForPull(cwd, strategy, target ? `Pulling ${target.remote}/${target.branch}` : 'Pulling')
+      assertNotCancelled(live)
       live.stopCancelling()
-      const integrate = strategy === 'ff-only' ? ['merge', '--ff-only', '@{upstream}'] : strategy === 'merge' ? ['merge', '--no-edit', '@{upstream}'] : ['rebase', '@{upstream}']
+      // `--no-overwrite-ignore` makes Git itself refuse too, should the check above have missed a file. A rebase does
+      // not take it, so a rebase relies on the check alone.
+      const integrate = strategy === 'ff-only' ? ['merge', '--no-overwrite-ignore', '--ff-only', '@{upstream}'] : strategy === 'merge' ? ['merge', '--no-overwrite-ignore', '--no-edit', '@{upstream}'] : ['rebase', '@{upstream}']
       const run = await this.runLive(cwd, integrate, live, { env: explicitActionGitEnv() })
       if (!run.ok) {
         if (!waiting && await this.inProgress(cwd)) return { result: 'conflicted' }
@@ -1015,6 +1034,49 @@ export class GitService {
       }
       return { result: 'fast-forwarded' }
     }, live.signal))
+  }
+
+  /**
+   * Refuses, before anything is written, a switch, a new branch or a pull that would write over or delete a file no
+   * snapshot has: an ignored file, or one Mousse could not record. Git writes over ignored files without asking. `to`
+   * is the commit or tree the files are taken to; `alsoWrites` names paths written on the way, such as a rebase's steps.
+   */
+  private async refuseIgnoredInTheWay(cwd: string, doing: string, to: string, alsoWrites: readonly string[] = []): Promise<void> {
+    const top = await this.toplevel(cwd)
+    let found: string[]
+    try {
+      found = await uncapturedInTheWayAsync(top, await worktreeTreeAsync(top), to, alsoWrites)
+    } catch (error) {
+      // A folder too large to check, or another repository, is named the same way.
+      if (!(error instanceof RestoreInTheWayError)) throw error
+      found = [error.path]
+    }
+    if (found.length) throw ignoredInTheWay(doing, found)
+  }
+
+  /**
+   * The pull's check (`refuseIgnoredInTheWay`), with what each strategy writes. A fast-forward writes the upstream's
+   * files; a merge writes the merge's result. A rebase first takes the files to the upstream, then replays each local
+   * commit in turn, so a local commit that added a path and a later one that deleted it both touch that path even
+   * though neither end shows it. The upstream's own commits are never replayed, only its last state is written.
+   * Where Git will refuse anyway (diverged for a fast-forward, or nothing to bring in) nothing is checked.
+   */
+  private async refuseIgnoredForPull(cwd: string, strategy: 'ff-only' | 'merge' | 'rebase', doing: string): Promise<void> {
+    const head = await this.read(cwd, ['rev-parse', '--verify', '--quiet', 'HEAD^{commit}'])
+    const upstream = await this.read(cwd, ['rev-parse', '--verify', '--quiet', '@{upstream}^{commit}'])
+    if (!head || !upstream || head === upstream) return
+    const isAncestor = async (a: string, b: string) => (await this.runGit(cwd, ['merge-base', '--is-ancestor', a, b])).ok
+    if (await isAncestor(upstream, head)) return
+    const forward = await isAncestor(head, upstream)
+    if (forward || strategy === 'rebase') {
+      if (strategy === 'ff-only' && !forward) return
+      const replayed = forward ? [] : (await this.read(cwd, ['log', '--no-merges', '--no-renames', '--format=', '--name-only', '-z', `${upstream}..${head}`]) ?? '').split('\0').map((path) => path.replace(/^\n+/, '')).filter(Boolean)
+      return this.refuseIgnoredInTheWay(cwd, doing, upstream, replayed)
+    }
+    if (strategy === 'ff-only') return
+    // The merge's result as Git will write it, conflicts included. Without one (an old Git), the backstop on the merge stands.
+    const merged = (await this.runGit(cwd, ['merge-tree', '--write-tree', '--no-messages', head, upstream])).stdout.split('\n')[0]?.trim()
+    await this.refuseIgnoredInTheWay(cwd, doing, merged && /^[0-9a-f]{40,64}$/.test(merged) ? merged : upstream)
   }
 
   /** Gives up a merge or rebase that stopped on conflicts. Only ever called by an explicit user action. */
@@ -1173,7 +1235,8 @@ export class GitService {
       if (await this.branchExists(cwd, name)) throw gitErrors.create('git_branch_exists')
       const from = options.from
       if (from !== undefined && (from.startsWith('-') || await this.read(cwd, ['rev-parse', '--verify', '--quiet', `${from}^{commit}`]) === null)) throw gitErrors.create('git_ref_not_found')
-      const args = options.checkout === false ? ['branch', name] : ['switch', '-c', name]
+      if (from !== undefined && options.checkout !== false) await this.refuseIgnoredInTheWay(cwd, `Creating ${name} from ${from}`, `${from}^{commit}`)
+      const args = options.checkout === false ? ['branch', name] : ['switch', '--no-overwrite-ignore', '-c', name]
       if (from !== undefined) args.push(from)
       const run = await this.runGit(cwd, args)
       if (!run.ok) throw this.checkoutFailure(run, 'git_branch_failed')
@@ -1221,8 +1284,9 @@ export class GitService {
 
   private async switchTo(cwd: string, branch: string, live?: Live): Promise<void> {
     if (branch.startsWith('-')) throw gitErrors.create('git_branch_invalid')
-    // Never on a timer, and no Cancel: a checkout killed halfway leaves a half-switched tree.
-    const run = await this.runLive(cwd, ['checkout', branch, '--'], live, { env: explicitActionGitEnv() })
+    // Never on a timer, and no Cancel: a checkout killed halfway leaves a half-switched tree. `--no-overwrite-ignore`
+    // backs up the check made before (`refuseIgnoredForSwitch`).
+    const run = await this.runLive(cwd, ['checkout', '--no-overwrite-ignore', branch, '--'], live, { env: explicitActionGitEnv() })
     if (!run.ok) throw this.checkoutFailure(run, 'git_checkout_failed')
   }
 
@@ -1235,8 +1299,26 @@ export class GitService {
     return this.asUser(userRequested, () => this.checkoutNow(cwd, branch, options))
   }
 
+  /**
+   * The switch's check (`refuseIgnoredInTheWay`). The branch is read as `git checkout` reads it: a local branch first,
+   * else any commit, else a remote branch of that name that the checkout would start a local branch from. A name
+   * none of those match is left to Git to refuse.
+   */
+  private async refuseIgnoredForSwitch(cwd: string, branch: string): Promise<void> {
+    if (branch.startsWith('-')) return
+    let target = await this.read(cwd, ['rev-parse', '--verify', '--quiet', `refs/heads/${branch}^{commit}`])
+      ?? await this.read(cwd, ['rev-parse', '--verify', '--quiet', `${branch}^{commit}`])
+    if (!target) {
+      const remote = (await this.read(cwd, ['for-each-ref', '--format=%(objectname)', `refs/remotes/*/${branch}`]))?.split('\n').filter(Boolean) ?? []
+      if (new Set(remote).size === 1) target = remote[0]!
+    }
+    if (target) await this.refuseIgnoredInTheWay(cwd, `Switching to ${branch}`, target)
+  }
+
   private async checkoutNow(cwd: string, branch: string, options: GitCheckoutOptions & GitOperationRequest = {}): Promise<GitCheckoutResult> {
     return this.runOperation(cwd, 'checkout', options, false, (live) => this.serialized(cwd, async () => {
+      // Before any stash, so a refusal leaves nothing to put back.
+      await this.refuseIgnoredForSwitch(cwd, branch)
       if (options.dirty !== 'stash') {
         await this.switchTo(cwd, branch, live)
         return {}
