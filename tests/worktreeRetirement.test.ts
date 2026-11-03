@@ -1,5 +1,5 @@
 import { afterEach, expect, test, vi } from 'vitest'
-import { mkdtempSync, mkdirSync, writeFileSync, existsSync, rmSync, renameSync, cpSync, readFileSync, readdirSync, lstatSync, readlinkSync, symlinkSync, unlinkSync, chmodSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, writeFileSync, existsSync, rmSync, renameSync, cpSync, readFileSync, readdirSync, lstatSync, readlinkSync, symlinkSync, unlinkSync, chmodSync, openSync, closeSync, writeSync, ftruncateSync, constants as fsConstants } from 'node:fs'
 import { execFileSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { randomBytes } from 'node:crypto'
@@ -22,6 +22,9 @@ const slashes = (path: string): string => { const value = resolve(path).replaceA
 const listed = (repo: string): string[] => git(repo, ['worktree', 'list', '--porcelain']).split(/\r?\n/).filter((line) => line.startsWith('worktree ')).map((line) => slashes(line.slice(9)))
 const roots: string[] = []
 const releases: Array<() => unknown> = []
+// Each test here runs Git dozens of times. Starting a process on the Windows runner takes several times longer, so its
+// tests take 10 to 17 seconds there against the 20-second default; they get room, and nothing here waits on a timer.
+if (process.platform === 'win32') vi.setConfig({ testTimeout: 60_000 })
 afterEach(() => { for (const release of releases.splice(0)) release(); for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }) })
 async function fixture(sparse = false, crlf = false) {
   const root = mkdtempSync(join(tmpdir(), 'mousse-retire-')); roots.push(root)
@@ -609,35 +612,73 @@ test.skipIf(process.platform === 'win32')('a writer at the boundary Git used to 
   expect(filesOf(f.worktree)).toEqual(f.before)
 })
 
-test('after the rename a write by path fails, and a write through a handle still in the folder survives: the folder is kept and the write added to the proof', async () => {
+test('a file held open in the folder: where the rename goes ahead (macOS, Linux) a write through it survives and is added to the proof; where it refuses the rename (Windows) the worktree stays in the trash, whole', async () => {
   const f = await trashedFixture()
+  let handle: number | undefined
   let pathWrite: unknown
-  const outcome = await f.service.expireTrash(f.path, {
-    now: LATER(),
-    afterRename: (renamed) => {
-      try { writeFileSync(join(f.trashPath, 'b.txt'), 'by path\n') } catch (error) { pathWrite = error }
-      // A process whose working directory is in the folder writes relative to it, so into the renamed folder.
-      writeFileSync(join(renamed, 'b.txt'), 'through a handle still open\n')
-      writeFileSync(join(renamed, 'sub', 'late.txt'), 'late\n')
+  const written = Buffer.from('through a handle still open\n')
+  try {
+    const outcome = await f.service.expireTrash(f.path, {
+      now: LATER(),
+      // Opened after the capture and kept open across the rename, as an editor or a build tool holds a file. On Windows
+      // without sharing, as such programs often do.
+      afterCapture: (path) => { handle = openSync(join(path, 'b.txt'), process.platform === 'win32' ? fsConstants.O_RDWR | fsConstants.UV_FS_O_EXLOCK : 'r+') },
+      afterRename: (renamed) => {
+        try { writeFileSync(join(f.trashPath, 'b.txt'), 'by path\n') } catch (error) { pathWrite = error }
+        // The handle still points at the file, now in the renamed folder.
+        writeSync(handle!, written, 0, written.length, 0); ftruncateSync(handle!, written.length)
+        writeFileSync(join(renamed, 'sub', 'late.txt'), 'late\n')
+      }
+    })
+    if (process.platform === 'win32') {
+      // The rename is refused while the file is open, after its few retries: nothing moved and nothing is lost.
+      expect(outcome).toEqual({ kept: expect.stringMatching(/in use/) })
+      expect(manifestOf(f.path).state).toBe('trashed'); expect(deletingFolders(f.trashPath)).toEqual([])
+      expect(filesOf(f.trashPath)).toEqual(f.before)
+      closeSync(handle!); handle = undefined
+      expect(await f.service.expireTrash(f.path, { now: LATER() })).toEqual({ removed: true })
+      await f.service.reconstruct(f.path)
+      expect(filesOf(f.worktree)).toEqual(f.before)
+      return
     }
-  })
-  expect((pathWrite as NodeJS.ErrnoException).code).toBe('ENOENT')
-  expect(existsSync(f.trashPath)).toBe(false)
-  expect(outcome).toEqual({ kept: expect.stringMatching(/changed while it was being deleted.*kept/), waiting: true })
-  const manifest = manifestOf(f.path)
-  expect(manifest.state).toBe('deleting')
-  // Nothing was deleted: the folder is all there, with the late writes.
-  const left = filesOf(manifest.deleting.path)
-  expect(left).toEqual({ ...f.before, 'b.txt': expect.stringContaining(Buffer.from('through a handle still open\n').toString('base64')), 'sub/late.txt': expect.any(String) })
-  // The proof grew: the late versions are kept, and the earlier ones stay in the snapshot.
-  expect(manifest.keptFiles).toHaveLength(2)
-  expect(manifest.keptFiles[1].paths.sort()).toEqual(['b.txt', 'sub/late.txt'])
-  expect(git(f.repo, ['show', `${manifest.keptFiles[1].sha}:b.txt`])).toBe('through a handle still open')
-  expect(listed(f.repo)).toContain(slashes(f.trashPath))
-  // A restore now rebuilds from the proof, with the late writes, and the half-deleted folder goes.
+    expect((pathWrite as NodeJS.ErrnoException).code).toBe('ENOENT')
+    expect(existsSync(f.trashPath)).toBe(false)
+    expect(outcome).toEqual({ kept: expect.stringMatching(/changed while it was being deleted.*kept/), waiting: true })
+    const manifest = manifestOf(f.path)
+    expect(manifest.state).toBe('deleting')
+    // Nothing was deleted: the folder is all there, with the late writes.
+    const left = filesOf(manifest.deleting.path)
+    expect(left).toEqual({ ...f.before, 'b.txt': expect.stringContaining(written.toString('base64')), 'sub/late.txt': expect.any(String) })
+    // The proof grew: the late versions are kept, and the earlier ones stay in the snapshot.
+    expect(manifest.keptFiles).toHaveLength(2)
+    expect(manifest.keptFiles[1].paths.sort()).toEqual(['b.txt', 'sub/late.txt'])
+    expect(git(f.repo, ['show', `${manifest.keptFiles[1].sha}:b.txt`])).toBe('through a handle still open')
+    expect(listed(f.repo)).toContain(slashes(f.trashPath))
+    closeSync(handle!); handle = undefined
+    // A restore now rebuilds from the proof, with the late writes, and the half-deleted folder goes.
+    await f.service.reconstruct(f.path)
+    expect(filesOf(f.worktree)).toEqual(left)
+    expect(existsSync(manifest.deleting.path)).toBe(false); expect(listed(f.repo)).not.toContain(slashes(f.trashPath))
+  } finally { if (handle !== undefined) closeSync(handle) }
+})
+
+test.skipIf(process.platform === 'win32' || process.getuid?.() === 0)('a rename the system refuses stops the expiry at once: the worktree stays in the trash, whole, and the next run completes', async () => {
+  const f = await trashedFixture()
+  const parent = dirname(f.trashPath)
+  const timers = (): number => process.getActiveResourcesInfo().filter((kind) => kind === 'Timeout').length
+  const timersBefore = timers(), started = Date.now()
+  try {
+    // The folder that holds it no longer lets anything be renamed in it, as a held file does on Windows.
+    const outcome = await f.service.expireTrash(f.path, { now: LATER(), afterCapture: () => chmodSync(parent, 0o555), afterRename: () => { throw new Error('the rename went ahead') } })
+    expect(outcome).toEqual({ kept: expect.stringMatching(/^Files in this worktree are in use/) })
+  } finally { chmodSync(parent, 0o755) }
+  expect(Date.now() - started).toBeLessThan(15_000)
+  expect(timers()).toBe(timersBefore)
+  expect(manifestOf(f.path).state).toBe('trashed'); expect(manifestOf(f.path).deleting).toBeUndefined()
+  expect(filesOf(f.trashPath)).toEqual(f.before); expect(deletingFolders(f.trashPath)).toEqual([])
+  expect(await f.service.expireTrash(f.path, { now: LATER() })).toEqual({ removed: true })
   await f.service.reconstruct(f.path)
-  expect(filesOf(f.worktree)).toEqual(left)
-  expect(existsSync(manifest.deleting.path)).toBe(false); expect(listed(f.repo)).not.toContain(slashes(f.trashPath))
+  expect(filesOf(f.worktree)).toEqual(f.before)
 })
 
 test('a file created in a folder as it is deleted makes rmdir stop: what is not deleted yet and the new file are kept', async () => {

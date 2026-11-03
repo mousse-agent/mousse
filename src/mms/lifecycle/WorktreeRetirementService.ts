@@ -1234,7 +1234,11 @@ export class WorktreeRetirementService {
     const trashPath = manifest.trashPath!
     const head = await lifecycleReadAsync(trashPath, ['rev-parse', 'HEAD'])
     const treeSha = await lifecycleReadAsync(trashPath, ['rev-parse', 'HEAD^{tree}'])
-    const snapshot = await lifecycleReadAsync(trashPath, ['status', '--porcelain=v1', '--untracked-files=all'], undefined, LISTING_MAX_BUFFER) ? await takeSnapshotAsync(trashPath, { reason: 'trash expiry', threadId: manifest.taskId }) : undefined
+    // A file another process holds open without sharing (Windows) cannot be read by Git: the worktree stays in the
+    // trash as in use, and a later run captures it.
+    let snapshot: Awaited<ReturnType<typeof takeSnapshotAsync>> | undefined
+    try { snapshot = await lifecycleReadAsync(trashPath, ['status', '--porcelain=v1', '--untracked-files=all'], undefined, LISTING_MAX_BUFFER) ? await takeSnapshotAsync(trashPath, { reason: 'trash expiry', threadId: manifest.taskId }) : undefined }
+    catch (error) { return { kept: `Kept in the trash at ${trashPath}: files in it could not be read, maybe because they are in use (${(error as Error).message.split(/\r?\n/)[0]})` } }
     const dirty = Boolean(snapshot && snapshot.tree !== treeSha)
     let inspected: Awaited<ReturnType<WorktreeRetirementService['inspectContent']>>
     try { inspected = await this.inspectContent(trashPath, dirty ? snapshot!.tree : undefined, { collectUncaptured: true }) }
