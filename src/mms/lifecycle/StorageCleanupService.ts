@@ -1,4 +1,5 @@
 import { knownAppError } from '../../shared/errors'
+import { chosenFolderPlace, disconnectedWorktreeFolder, driveNotConnectedText, isThreadWorktreePlace, worktreeContainers } from '../worktree/worktreeLayout'
 import { appendFileSync, existsSync, lstatSync, readFileSync, readdirSync, realpath as realpathCallback, realpathSync, renameSync, rmdirSync, statSync, unlinkSync, type Dirent } from 'node:fs'
 import { access, lstat, readdir, stat } from 'node:fs/promises'
 import { promisify } from 'node:util'
@@ -640,7 +641,11 @@ export class StorageCleanupService {
   private async evaluateDeleted(record: TaskLifecycleRecord, snapshot: PolicySnapshot, real: boolean): Promise<DeletedVerdict> {
     let workspace: ThreadWorkspaceMetadata | undefined
     try { workspace = readWorkspaceFile(record.location) } catch (error) { return { keep: (error as Error).message, remember: false } }
-    if (!workspace || !await present(workspace.worktreePath)) return { skip: true }
+    if (!workspace) return { skip: true }
+    // On a drive that is not connected: there, out of reach, and kept; never taken for already removed.
+    const offline = await disconnectedWorktreeFolder(workspace.worktreePath)
+    if (offline) return { keep: driveNotConnectedText(offline), remember: false }
+    if (!await present(workspace.worktreePath)) return { skip: true }
     const fingerprint = await this.deletedFingerprint(record, workspace, snapshot)
     const memo = this.keepMemo.get(record.taskId)
     if (fingerprint && memo?.fingerprint === fingerprint && this.now() - memo.at < KEEP_MEMO_TTL_MS) return { keep: memo.reason, remember: false }
@@ -729,7 +734,7 @@ export class StorageCleanupService {
     const kept: TaskLifecycleRecord[] = []
     for (const record of candidates) {
       let keep: boolean
-      try { const workspace = readWorkspaceFile(record.location); keep = workspace === undefined ? false : await present(workspace.worktreePath) || workspace.lifecycle !== 'ready' }
+      try { const workspace = readWorkspaceFile(record.location); keep = workspace === undefined ? false : await present(workspace.worktreePath) || workspace.lifecycle !== 'ready' || Boolean(await disconnectedWorktreeFolder(workspace.worktreePath)) }
       catch { keep = true }
       if (keep) kept.push(record)
     }
@@ -774,9 +779,13 @@ export class StorageCleanupService {
     const path = workspace.worktreePath
     const folded = (value: string): string => process.platform === 'win32' ? value.toLowerCase() : value
     if ((await lstat(path)).isSymbolicLink() || folded(await realpathLike(path)) !== folded(join(await realpathLike(dirname(path)), basename(path)))) return 'Worktree is a link'
-    if (!within(join(this.deps.installationHome, 'repositories', workspace.repositoryId, 'worktrees', 'threads', taskId), path)) return 'Outside the managed worktree folder'
-    // A link anywhere above the checkout (a repository folder that is a junction to another disk) resolves outside the installation.
-    if (!within(await realpathLike(this.deps.installationHome), await realpathLike(path))) return 'Outside the managed worktree folder'
+    // Where `worktreeLayout` makes the thread's worktrees: Mousse's own folder, or a worktree folder the person chose.
+    if (!isThreadWorktreePlace(path, { home: this.deps.installationHome, repositoryId: workspace.repositoryId, threadId: taskId })) return 'Outside the managed worktree folder'
+    // A link anywhere above the checkout (a repository folder that is a junction to another disk) resolves outside the installation,
+    // or outside its repository's folder in the chosen worktree folder.
+    const chosen = chosenFolderPlace(path)
+    const root = chosen ? join(await realpathLike(chosen.folder), basename(chosen.repositoryFolder)) : await realpathLike(this.deps.installationHome)
+    if (!within(root, await realpathLike(path))) return 'Outside the managed worktree folder'
     return undefined
   }
 
@@ -843,6 +852,8 @@ export class StorageCleanupService {
     if (!workspace) return undefined
     if (workspace.lifecycle !== 'ready') return { keep: 'Workspace is not ready' }
     const path = workspace.worktreePath
+    const offline = await disconnectedWorktreeFolder(path)
+    if (offline) return { keep: driveNotConnectedText(offline) }
     if (!await present(path)) return undefined
     const busy = this.deps.idle(record.taskId)
     if (busy) return { keep: busy }
@@ -1233,34 +1244,33 @@ export class StorageCleanupService {
   private async orphanItems(): Promise<StorageCleanupItem[]> {
     const claims = await getExternalResourceClaims(this.deps.store, new Set())
     const items: StorageCleanupItem[] = []
-    const repositories = join(this.deps.installationHome, 'repositories')
-    if (!existsSync(repositories)) return items
     // A worktree a dispatch left in place has its own row, which can remove it.
     const dispatchKept = new Set(await Promise.all(listKeptWorktrees(this.deps.store.profileHome).map((kept) => canonicalPathAsync(kept.path))))
-    for (const repository of readdirSync(repositories)) {
-      for (const kind of ['threads', 'agents']) {
-        const folder = join(repositories, repository, 'worktrees', kind)
-        if (!existsSync(folder)) continue
-        for (const name of readdirSync(folder)) {
-          if (this.stopping) return items
-          const directory = join(folder, name)
-          let stat
-          try { stat = lstatSync(directory) } catch { continue }
-          if (!stat.isDirectory() || stat.isSymbolicLink()) continue
-          // Compared by real paths, so a record that names this folder through an alias still claims it.
-          const real = await canonicalPathAsync(directory)
-          if (dispatchKept.has(real) || claims.some((claim) => claimOverlapsPath(claim, real))) continue
-          const measurement = await this.measure(directory, { mode: 'reclaim', budgetMs: MEASURE_BUDGET_MS })
-          if (!measurement.files) continue // An empty leftover folder holds nothing.
-          // A thread whose checkout can't be verified may still use a folder of its repository: not called unused, and says why.
-          // The repository is the one the folder's checkouts point at now, as well as the one its place is named after.
-          let children: string[] = []
-          try { children = readdirSync(directory).slice(0, 32) } catch { /* Judged by the folder itself. */ }
-          const checkouts = [directory, ...children.map((child) => join(directory, child))]
-          const actual = await Promise.all([...new Set((await Promise.all(checkouts.map((checkout) => gitCommonDirAsync(checkout)))).filter((commonDir): commonDir is string => Boolean(commonDir)))].map((commonDir) => repositoryTargetAsync(commonDir)))
-          const unverified = unverifiedOwnerOver(claims, { repositoryIds: [repository, ...actual.flatMap((target) => target.repositoryIds)], registeredWorktrees: actual.flatMap((target) => target.registeredWorktrees), path: real })
-          items.push({ rule: 'worktree-orphan', label: `${kind}/${name}`, bytes: measurement.bytes, files: measurement.files, ...approximate(measurement), outcome: 'kept', reason: unverified ? `${unverified.reason} It may still use this worktree.` : 'No thread uses this worktree' })
-        }
+    // Mousse's own folder and every worktree folder the person chose that is there (`worktreeLayout`). One that is not
+    // there (a drive not connected) is not looked at: what is in it is out of reach, never unused.
+    for (const { path: folder, repository, kind } of await worktreeContainers(this.deps.installationHome)) {
+      if (!existsSync(folder)) continue
+      for (const name of readdirSync(folder)) {
+        if (this.stopping) return items
+        // A repository's folder in a chosen worktree folder holds its agents' folder beside the threads' worktrees.
+        if (kind === 'folder' && name === 'agents') continue
+        const directory = join(folder, name)
+        let stat
+        try { stat = lstatSync(directory) } catch { continue }
+        if (!stat.isDirectory() || stat.isSymbolicLink()) continue
+        // Compared by real paths, so a record that names this folder through an alias still claims it.
+        const real = await canonicalPathAsync(directory)
+        if (dispatchKept.has(real) || claims.some((claim) => claimOverlapsPath(claim, real))) continue
+        const measurement = await this.measure(directory, { mode: 'reclaim', budgetMs: MEASURE_BUDGET_MS })
+        if (!measurement.files) continue // An empty leftover folder holds nothing.
+        // A thread whose checkout can't be verified may still use a folder of its repository: not called unused, and says why.
+        // The repository is the one the folder's checkouts point at now, as well as the one its place is named after.
+        let children: string[] = []
+        try { children = readdirSync(directory).slice(0, 32) } catch { /* Judged by the folder itself. */ }
+        const checkouts = [directory, ...children.map((child) => join(directory, child))]
+        const actual = await Promise.all([...new Set((await Promise.all(checkouts.map((checkout) => gitCommonDirAsync(checkout)))).filter((commonDir): commonDir is string => Boolean(commonDir)))].map((commonDir) => repositoryTargetAsync(commonDir)))
+        const unverified = unverifiedOwnerOver(claims, { repositoryIds: [repository, ...actual.flatMap((target) => target.repositoryIds)], registeredWorktrees: actual.flatMap((target) => target.registeredWorktrees), path: real })
+        items.push({ rule: 'worktree-orphan', label: `${kind === 'folder' ? basename(folder) : kind}/${name}`, bytes: measurement.bytes, files: measurement.files, ...approximate(measurement), outcome: 'kept', reason: unverified ? `${unverified.reason} It may still use this worktree.` : 'No thread uses this worktree' })
       }
     }
     return items

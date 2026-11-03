@@ -214,6 +214,24 @@ export function normalizeExperimentalSettings(raw?: Partial<ExperimentalSettings
   return { subagentWorktrees: raw?.subagentWorktrees === true }
 }
 
+/**
+ * Where new worktrees go (Settings → Storage → Worktree folder). `worktreeFolder` null is Mousse's own folder
+ * (`<Mousse home>/repositories/<repository>/worktrees`). `previousWorktreeFolders` are the folders chosen before that may
+ * still hold worktrees: their worktrees stay where they are, and stay Mousse's; one is forgotten once nothing of Mousse's
+ * is left in it. Only the daemon's own Storage action writes either (`storage.setWorktreeFolder`), after checking the folder.
+ */
+export interface StorageSettings {
+  worktreeFolder: string | null
+  previousWorktreeFolders: string[]
+}
+
+export function normalizeStorageSettings(raw?: Partial<StorageSettings> | null): StorageSettings {
+  const folder = (value: unknown): string | undefined => typeof value === 'string' && value.trim() && !value.includes('\0') ? value : undefined
+  const current = folder(raw?.worktreeFolder) ?? null
+  const previous = Array.isArray(raw?.previousWorktreeFolders) ? raw!.previousWorktreeFolders.map(folder).filter((path): path is string => Boolean(path) && path !== current) : []
+  return { worktreeFolder: current, previousWorktreeFolders: [...new Set(previous)] }
+}
+
 export interface MousseSettings {
   profile: {
     username: string
@@ -227,6 +245,7 @@ export interface MousseSettings {
   agentAccess: AgentAccessSettings
   runs: RunSettings
   experimental: ExperimentalSettings
+  storage: StorageSettings
   provider: {
     llmProvider: LlmProviderId
     /** The model as its agent lists it; the reasoning level is `effort` (absent = the model's default). */
@@ -544,6 +563,7 @@ export function getDefaultSettings(): MousseSettings {
     agentAccess: normalizeAgentAccessSettings(),
     runs: normalizeRunSettings(),
     experimental: normalizeExperimentalSettings(),
+    storage: normalizeStorageSettings(),
     provider: {
       llmProvider: '',
       model: ''

@@ -123,6 +123,8 @@ export interface StoragePolicyRowsProps {
   onResumeStorage: () => void
   /** Threads in the trash; they are reviewed from the sidebar. */
   trashCount: number
+  /** The Worktree folder row, first in the Worktrees group. */
+  worktreeFolder?: ReactNode
 }
 
 /** The Trash, Worktrees and Browser data groups. Every change saves at once. */
@@ -154,6 +156,7 @@ export function StoragePolicyRows(props: StoragePolicyRowsProps) {
     </SettingsGroup>
 
     <SettingsGroup title="Worktrees" icon={GitBranch} id="storage-worktrees" description={<span title={WORKTREE_GROUP_TOOLTIP}>{WORKTREE_GROUP_DESCRIPTION}</span>}>
+      {props.worktreeFolder}
       {props.storagePaused && <SettingsRow
         data-testid="storage-clock-paused"
         title="Time-based cleanup is paused"

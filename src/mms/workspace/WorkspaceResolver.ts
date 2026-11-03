@@ -6,6 +6,7 @@ import { inspectPendingChangesAsync } from '../actions/git'
 import { PROJECT_FOLDER_REASON, type ThreadPlacement } from './threadPlacement'
 import { ThreadWorkspaceManager } from './ThreadWorkspaceManager'
 import { startedInSnapshotStore } from './SnapshotWorkspace'
+import { assertWorktreeFolderConnected } from '../worktree/worktreeLayout'
 
 /** A thread that records its turns in its folder's hidden store, whatever the folder has become since (`unavailableReason`). */
 export const SNAPSHOT_STORE_REASON = 'snapshot-store'
@@ -87,6 +88,8 @@ export class WorkspaceResolver {
     const existing = manager.load()
     if (existing) {
       if (existing.lifecycle !== 'ready') throw workspaceErrors.create('workspace_recovery_required', undefined, { state: existing.lifecycle })
+      // On a drive that is not connected: the turn waits for it (`DriveNotConnectedError`), and nothing is marked or rebuilt.
+      await assertWorktreeFolderConnected(existing.worktreePath)
       const verified = await manager.verify(existing)
       if (verified.lifecycle === 'missing' && manager.hasReconstructionManifest(existing)) {
         return manager.executionContext(this.projectPath, await manager.restore(this.projectPath, signal, heldThreadLease, this.notify))
@@ -120,6 +123,7 @@ export class WorkspaceResolver {
     // Read before the worktree exists: what the project folder holds that the new worktree, cut from HEAD, will not.
     const startNote = await uncommittedLeftBehindNote(this.projectPath)
     await manager.provision(this.threadId, conversationBranchId, this.projectPath, signal, heldThreadLease, undefined, { nameFrom })
-    return { ...await manager.executionContext(this.projectPath), ...(startNote ? { startNote } : {}) }
+    const note = [startNote, manager.placementNote].filter(Boolean).join(' ')
+    return { ...await manager.executionContext(this.projectPath), ...(note ? { startNote: note } : {}) }
   }
 }

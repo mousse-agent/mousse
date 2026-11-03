@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto'
+import { disconnectedWorktreeFolder, driveNotConnectedText } from '../worktree/worktreeLayout'
 import { existsSync, lstatSync, readFileSync, readdirSync, realpath as realpathCallback } from 'node:fs'
 import { access, lstat, readdir, readFile } from 'node:fs/promises'
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path'
@@ -166,6 +167,10 @@ export async function readOwnershipFacts(needs: readonly OwnershipNeed[], facts:
 async function verifyWorktreeFact(store: ResourceLifecycleStore, path: string, expectedBranch: string | undefined, expectedRepository: string | undefined): Promise<string | undefined> {
   try {
     if (!isAbsolute(path)) throw new Error('Registered checkout is not absolute')
+    // In a worktree folder the person chose that is not there: the worktree is there, out of reach, and can't be checked.
+    // Never taken for absent: its thread's claim keeps its repository's resources and nothing else (`LifecycleClaims`).
+    const offline = await disconnectedWorktreeFolder(path)
+    if (offline) throw new Error(driveNotConnectedText(offline))
     if (!await access(path).then(() => true, () => false)) {
       const retirement = new WorktreeRetirementService(store)
       const owners = store.list().filter((task) => existsSync(retirement.pathFor(task.taskId, path)))

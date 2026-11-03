@@ -300,3 +300,14 @@
   padding: var(--space-8) var(--settings-surface-x);
   font-size: var(--settings-fs-small);
 }
+
+/* Worktree folder: the folder as a path the person can read and copy. */
+.storage-folder-path {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 0.95em;
+  overflow-wrap: anywhere;
+}
+
+.storage-folder-offline {
+  color: var(--warning, var(--text-primary));
+}

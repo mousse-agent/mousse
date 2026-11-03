@@ -78,7 +78,7 @@ import { stopStrategy } from '../run/CommandPolicy'
 import { agentMessageText, AppToolTurns, createAppToolRegistry, McpToolError, unattendedRefusal, type AgentApprovalResult, type AgentCreatedThread, type AgentQueueCommand, type AgentQueueResult, type AgentScheduleHost, type AgentRunCommandResult, type AgentSendResult, type AgentThreadRequest, type ApprovalRequestInfo, type AppToolHost, type AppToolTurn, type McpCaller, type QueueSnapshot, type ToolRegistry, userMcpProxy } from '../run/mcp/appTools'
 import { AGENT_THREAD_COMMAND, AGENT_THREAD_CREATED_ACTION, AGENT_THREAD_REPAIR_WINDOW_MS, agentThreadFingerprint, LAUNCHED_THREAD_ACCESS_CEILING, readAgentThreadReceipt, type AgentThreadIntent } from './agentThreadIntent'
 import { THREAD_CREATE_MAX_ACTIVE_PER_THREAD } from '../run/mcp/appTools/thread'
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { QueueCommands, type QueueIntent } from '../run/QueueCommands'
 import type { PlannedQueueCommand, QueueEffects } from '../queue/queueJournal'
 import { modeFactsFor, prepareSkills, sessionInstructions, settingsToolEnabled, turnPreamble } from '../run/mcp/appTools/assemble'
@@ -225,6 +225,7 @@ import type { ProjectManager } from '../data/ProjectManager'
 import type { ThreadDataStore } from '../data/ThreadDataStore'
 import { resolveThreadProjectPath } from '../data/resolveActiveProjectPath'
 import { waitForFolderAccess, type WaitOptions } from '../files/folderAccess'
+import { disconnectedWorktreeFolder, driveNotConnectedText, waitForWorktreeFolder } from '../worktree/worktreeLayout'
 import { resolveProjectWorkingDirectory } from '../data/projectWorkingDirectory'
 import { lineageForChild } from '../data/subagentLineage'
 import { SNAPSHOT_STORE_REASON, WorkspaceResolver, modeMutatesFiles, unprovisionedContext } from '../workspace/WorkspaceResolver'
@@ -2419,13 +2420,39 @@ export class OrchestratorService extends EventEmitter {
    */
   async waitForThreadFolders(threadId: string | undefined, folders?: Array<string | null | undefined>, signal?: AbortSignal, options: Pick<WaitOptions, 'whenNotAnswering'> = {}): Promise<'ready' | 'stopped' | 'aborted'> {
     const paths = folders ?? [threadId ? this.threadProjectPath(threadId) : undefined]
+    return await this.waitForThread(threadId, signal, (waitSignal) => waitForFolderAccess(paths, { ...options, signal: waitSignal }))
+  }
+
+  /**
+   * A thread whose worktree is in a worktree folder the person chose that is not there (its drive is not connected)
+   * waits here until the folder is back, as it waits for a folder's permission prompt: without its lease, so other
+   * threads and Storage go on; a Stop ends the wait; and nothing about the worktree is changed, marked or rebuilt, so
+   * the thread carries on as it was. It is told once per wait.
+   */
+  async waitForThreadDrive(threadId: string | undefined, signal?: AbortSignal): Promise<'ready' | 'stopped' | 'aborted'> {
+    if (!threadId || threadId === '__unbound__') return 'ready'
+    const directory = this.resolveThreadDir(threadId)
+    let worktreePath: string | undefined
+    try { worktreePath = directory ? new ThreadWorkspaceManager(directory).load()?.worktreePath : undefined } catch { return 'ready' }
+    const folder = await disconnectedWorktreeFolder(worktreePath)
+    if (!folder) return 'ready'
+    try {
+      await this.noteThreadUpdate(threadId, `${driveNotConnectedText(folder)}. This thread carries on by itself when the drive is back.`, { messageId: `drive-not-connected-${randomUUID()}`, kind: 'warning' })
+    } catch (error) {
+      console.warn('the drive notice could not be written', { threadId, error: error instanceof Error ? error.message : String(error) })
+    }
+    return await this.waitForThread(threadId, signal, (waitSignal) => waitForWorktreeFolder(folder, waitSignal))
+  }
+
+  /** Runs `wait` for the thread until it settles; a Stop of the thread ends it (`'stopped'`), and so do `signal` and shutdown (`'aborted'`). */
+  private async waitForThread(threadId: string | undefined, signal: AbortSignal | undefined, wait: (signal: AbortSignal) => Promise<void>): Promise<'ready' | 'stopped' | 'aborted'> {
     const stop = new AbortController()
     const key = threadId ?? ''
     let waits = this.folderWaits.get(key)
     if (!waits) this.folderWaits.set(key, waits = new Set())
     waits.add(stop)
     try {
-      await waitForFolderAccess(paths, { ...options, signal: AbortSignal.any([stop.signal, this.lifecycle.signal, ...(signal ? [signal] : [])]) })
+      await wait(AbortSignal.any([stop.signal, this.lifecycle.signal, ...(signal ? [signal] : [])]))
       return 'ready'
     } catch (error) {
       if (stop.signal.aborted) return 'stopped'
@@ -9455,11 +9482,12 @@ export class OrchestratorService extends EventEmitter {
     // Before recovery and provisioning read the folder synchronously: a pending macOS permission prompt
     // then holds only this turn, not the daemon. Turns from schedules, channels and restarts start here too.
     if (session.threadId !== '__unbound__') {
-      const waited = await this.waitForThreadFolders(
+      let waited = await this.waitForThreadFolders(
         session.threadId,
         [session.sharedWorkspace?.path, session.primaryCheckout?.path, this.threadProjectPath(session.threadId)],
         opts?.externalSignal
       )
+      if (waited === 'ready' && !session.sharedWorkspace && !session.primaryCheckout) waited = await this.waitForThreadDrive(session.threadId, opts?.externalSignal)
       if (waited !== 'ready') {
         const run = opts?.runId ? this.runEngine?.getRun(opts.runId) : undefined
         // Only the profile shutting down (the orchestrator's or the effect worker's stop) puts the turn back,

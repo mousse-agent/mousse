@@ -14,6 +14,7 @@ import { moveFilesAsync, sameTreeAsync, takeSnapshotAsync, worktreeTreeAsync } f
 import { PROCESS_INSTANCE_ID } from '../queue/processLiveness'
 import { AgentEpisodeStore } from '../agents/AgentEpisodeStore'
 import { WorktreeIdentity } from '../worktree/WorktreeIdentity'
+import { assertWorktreeFolderConnected, isAgentWorktreePlace, isThreadWorktreePlace, trashRootFor, trashRootOf } from '../worktree/worktreeLayout'
 import { ThreadJournal } from '../data/ThreadJournal'
 import { claimOverlapsPath, getExternalResourceClaims, getExternalResourceClaimsFromFacts, repositoryTargetAsync, unverifiedOwnerOver } from './LifecycleClaims'
 import { canonicalPathAsync } from './canonicalPath'
@@ -321,9 +322,13 @@ export function keptAsideNotice(manifest: Pick<WorktreeReconstructionManifest, '
 export class WorktreeRetirementService {
   constructor(readonly store: ResourceLifecycleStore, private readonly ownership?: RetirementOwnership) {}
   pathFor(taskId: string, worktreePath: string): string { return join(this.store.root, 'workspaces', taskId, `${hash(resolve(worktreePath))}.json`) }
-  /** The one place a retired worktree waits in Mousse's trash; next to the profile, so the move stays on one disk. */
+  /**
+   * The one place a retired worktree waits in Mousse's trash, on the worktree's own drive so the move is a rename: the
+   * profile's trash for a worktree in Mousse's own folder, `<folder>/.mousse-trash` for one in a worktree folder the
+   * person chose (`worktreeLayout`). Never a copy and a delete across drives.
+   */
   trashPathFor(manifest: Pick<WorktreeReconstructionManifest, 'taskId' | 'worktreePath'>): string {
-    return join(this.store.profileHome, 'trash', 'worktrees', hash(manifest.taskId).slice(0, 16), hash(resolve(manifest.worktreePath)).slice(0, 32))
+    return join(trashRootFor(manifest.worktreePath, this.store.profileHome), 'worktrees', hash(manifest.taskId).slice(0, 16), hash(resolve(manifest.worktreePath)).slice(0, 32))
   }
   async inspectForDiscard(input: RetirementInput) {
     const identity = await this.inspectIdentity(input.worktreePath, input.branch, input.repositoryId)
@@ -470,6 +475,7 @@ export class WorktreeRetirementService {
     await this.verifyPins(manifest)
     const trashPath = this.trashPathFor(manifest)
     if (await exists(trashPath)) throw new Error(`An earlier copy of this worktree is still in the trash at ${trashPath}; it is kept`)
+    await assertWorktreeFolderConnected(manifest.worktreePath)
     await mkdir(dirname(trashPath), { recursive: true })
     // Right before the move, with nothing awaited between these checks and its start: the checkouts other records name
     // are read again now, then the leases, the reservation, the source and every claim are checked from the records, and
@@ -632,7 +638,7 @@ export class WorktreeRetirementService {
   private async continueDeleting(manifestPath: string, manifest: WorktreeReconstructionManifest, record: { text: string }, options: ExpireOptions, patient: boolean): Promise<{ removed: true } | { kept: string; waiting?: true; readOnly?: true }> {
     const deleting = manifest.deleting!
     const trashPath = manifest.trashPath!
-    await assertLifecyclePathAsync(join(this.store.profileHome, 'trash'), deleting.path)
+    await assertLifecyclePathAsync(trashRootOf(deleting.path, this.store.profileHome), deleting.path)
     if (!await exists(deleting.path)) {
       if (await exists(trashPath)) {
         if (!(await lstat(join(trashPath, '.git')).catch(() => undefined))?.isFile()) return { kept: `Files were written at ${trashPath} after the worktree there was deleted; they are kept, and so is Git's registration of the worktree` }
@@ -662,7 +668,7 @@ export class WorktreeRetirementService {
     const root = manifest.deleting!.path
     return deleteVerifiedAsync({
       root,
-      top: join(this.store.profileHome, 'trash'),
+      top: trashRootOf(root, this.store.profileHome),
       proof: manifest.content,
       now: options.now,
       madeWritable: options.madeWritable,
@@ -970,7 +976,7 @@ export class WorktreeRetirementService {
    */
   private async removeTrashed(manifest: WorktreeReconstructionManifest, beforeStart?: () => void): Promise<void> {
     const trashPath = manifest.trashPath!
-    await assertLifecyclePathAsync(join(this.store.profileHome, 'trash'), trashPath)
+    await assertLifecyclePathAsync(trashRootOf(trashPath, this.store.profileHome), trashPath)
     // Whether the checks before Git passed: a refusal there deletes nothing, by Git or otherwise.
     let cleared = false
     try { await lifecycleGitAsync(manifest.commonDir, ['worktree', 'remove', '--force', trashPath], undefined, undefined, undefined, () => { beforeStart?.(); cleared = true }) }
@@ -991,7 +997,7 @@ export class WorktreeRetirementService {
    * stops it; the next pass of the permanent deletion carries on.
    */
   private async removeConfirmed(root: string, beforeStart?: () => void): Promise<void> {
-    const trash = join(this.store.profileHome, 'trash')
+    const trash = trashRootOf(root, this.store.profileHome)
     await assertLifecyclePathAsync(trash, root)
     const folders = new Map<string, string>()
     await recordFoldersAboveAsync(trash, root, folders)
@@ -1069,7 +1075,7 @@ export class WorktreeRetirementService {
    * records each folder's mode before and after in `changed`, by path below `root`.
    */
   private async makeRemnantWritable(root: string, changed: Map<string, { from: number; to: number }>): Promise<void> {
-    const trash = join(this.store.profileHome, 'trash')
+    const trash = trashRootOf(root, this.store.profileHome)
     const visit = async (path: string, rel: string, depth: number): Promise<void> => {
       const stat = await lstat(path)
       if (!stat.isDirectory() || depth > 64) return
@@ -1088,6 +1094,9 @@ export class WorktreeRetirementService {
   }
   async reconstruct(manifestPath: string, untrusted?: { prepare(worktreePath: string): void | Promise<void>; env: NodeJS.ProcessEnv }): Promise<WorktreeReconstructionManifest> {
     const manifest = this.load(manifestPath)
+    // A worktree folder the person chose that is not there (a drive not connected): nothing is rebuilt, since its folders
+    // would be made again on the disk the drive mounts on; it waits for the drive.
+    await assertWorktreeFolderConnected(manifest.worktreePath)
     await this.checkOwnership(manifest.taskId, manifest.commonDir, manifest.repositoryId)
     this.store.withGate(manifest.taskId, () => this.verifySource(manifest))
     await this.verifyPins(manifest)
@@ -1216,7 +1225,6 @@ export class WorktreeRetirementService {
     const value: unknown = JSON.parse(readFileSync(sourcePath, 'utf8'))
     if (!input.repositoryId || !/^[a-f0-9]{32}$/.test(input.repositoryId)) throw new Error('Workspace source requires verified repository identity')
     const installationHome = basename(dirname(this.store.profileHome)) === 'profiles' ? dirname(dirname(this.store.profileHome)) : this.store.profileHome
-    const worktreeBase = join(installationHome, 'repositories', input.repositoryId, 'worktrees')
     const owns = (row: Record<string, unknown>): boolean => row.worktreePath === input.worktreePath && row.branch === input.branch
     let owned = false
     let baseSha: string | undefined, resultSha: string | undefined
@@ -1229,7 +1237,7 @@ export class WorktreeRetirementService {
         // made, or for a thread made before that, `mousse/thread/<task>/<conversation branch>`.
         const leaf = typeof intent?.worktreePath === 'string' ? basename(intent.worktreePath) : undefined
         const branchFits = typeof intent?.branch === 'string' && (intent.branch.startsWith('mousse/thread/') ? intent.branch === `mousse/thread/${task.taskId}/${leaf}` : !isIdNamedMousseBranch(intent.branch) && isMousseBranchName(intent.branch))
-        return entry.schemaVersion === 1 && entry.operationType === 'workspace-provision' && entry.state === 'planned' && branchFits && Boolean(leaf && /^[a-z0-9][a-z0-9_-]{0,127}$/i.test(leaf)) && typeof intent!.worktreePath === 'string' && samePath(intent!.worktreePath, input.worktreePath) && samePath(input.worktreePath, join(worktreeBase, 'threads', task.taskId, leaf!))
+        return entry.schemaVersion === 1 && entry.operationType === 'workspace-provision' && entry.state === 'planned' && branchFits && Boolean(leaf && /^[a-z0-9][a-z0-9_-]{0,127}$/i.test(leaf)) && typeof intent!.worktreePath === 'string' && samePath(intent!.worktreePath, input.worktreePath) && isThreadWorktreePlace(input.worktreePath, { home: installationHome, repositoryId: input.repositoryId!, threadId: task.taskId })
       })
       let branchOwned = provisions.some((entry) => (entry.expectedPreState as { branch?: string }).branch === input.branch)
       if (!branchOwned && typeof row.conversationBranchId === 'string') {
@@ -1256,11 +1264,12 @@ export class WorktreeRetirementService {
     } else if (insideTask && dirname(sourcePath) === task.location && basename(sourcePath) === 'agent-episodes.json') {
       const state = new AgentEpisodeStore(task.location).read()
       const episode = state.episodes.find((entry) => entry.policy.workspace === 'isolated' && entry.binding.worktreePath === input.worktreePath && entry.binding.branch === input.branch && input.branch === `mousse/agent/${entry.id}`)
-      owned = Boolean(episode && samePath(input.worktreePath, WorktreeIdentity.forAgent(join(worktreeBase, 'agents'), episode.id).path))
+      // `forAgent` refuses an id that is not a complete safe identifier, so it can never name another folder.
+      owned = Boolean(episode && WorktreeIdentity.forAgent(installationHome, episode.id) && isAgentWorktreePlace(input.worktreePath, { home: installationHome, repositoryId: input.repositoryId, agentId: episode.id }))
       baseSha = episode?.binding.baseSha
       resultSha = episode?.result?.resultSha
     } else if (insideTask && dirname(sourcePath) === task.location && ['agents.json', 'mousse-agent-sessions.json'].includes(basename(sourcePath)) && Array.isArray(value)) {
-      owned = value.some((row) => row && typeof row === 'object' && owns(row) && typeof (row.agentId ?? row.id) === 'string' && input.branch === `mousse/agent/${row.agentId ?? row.id}` && samePath(input.worktreePath, WorktreeIdentity.forAgent(join(worktreeBase, 'agents'), row.agentId ?? row.id).path))
+      owned = value.some((row) => row && typeof row === 'object' && owns(row) && typeof (row.agentId ?? row.id) === 'string' && input.branch === `mousse/agent/${row.agentId ?? row.id}` && WorktreeIdentity.forAgent(installationHome, row.agentId ?? row.id) && isAgentWorktreePlace(input.worktreePath, { home: installationHome, repositoryId: input.repositoryId!, agentId: String(row.agentId ?? row.id) }))
     } else if (!insideTask && dirname(sourcePath) === join(this.store.profileHome, 'workflow-agent-bindings', 'workspaces') && value && typeof value === 'object' && !Array.isArray(value)) {
       const row = value as Record<string, unknown>
       const key = typeof row.idempotencyKey === 'string' ? row.idempotencyKey : ''

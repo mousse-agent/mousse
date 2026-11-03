@@ -8,7 +8,7 @@ import { access, mkdir, realpath, rename, rm } from 'node:fs/promises'
 import { nonInteractiveGitEnv } from '../git/gitEnv'
 import { assertGitAllowedAsync, rethrowGitPolicyError, type UserAction } from '../git/gitPolicy'
 import { safeWorktreeGit } from '../worktree/WorktreeManager'
-import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
+import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { assertHeldThreadLease } from '../actions/GitOperationCoordinator'
 import { moveFilesAsync, snapshotOriginAsync } from '../actions/snapshots'
 import { waitForFolderAccess } from '../files/folderAccess'
@@ -17,6 +17,7 @@ import { loadSnapshotWorkspaceMetadataAsync } from './SnapshotWorkspace'
 import { atomicWriteJsonSync } from '../data/AtomicFs'
 import { ThreadJournal } from '../data/ThreadJournal'
 import { getMousseHomeDir } from '../data/paths'
+import { assertWorktreeFolderConnected, chosenWorktreeFolder, defaultWorktreeBase, notConnectedPlacementNote, placeThreadWorktree } from '../worktree/worktreeLayout'
 import { acquireRepositoryLease, type RepositoryLeaseHandle } from '../git/RepositoryLease'
 import { resolveRepositoryIdentity, resolveRepositoryIdentityAsync, type RepositoryIdentity } from '../git/RepositoryIdentity'
 import {
@@ -196,7 +197,7 @@ function repositoryContext(requested: string, topLevel: string, identity: Reposi
     gitCommonDirectory: identity.commonDir,
     primaryCheckoutPath: topLevel,
     projectRelativeSubdirectory: subdirectory,
-    worktreeBase: join(getMousseHomeDir(), 'repositories', identity.key, 'worktrees'),
+    worktreeBase: defaultWorktreeBase(getMousseHomeDir(), identity.key),
     capability: capability()
   }
 }
@@ -211,6 +212,11 @@ export function isProjectFolderWorkspace(metadata: Pick<ThreadWorkspaceMetadata,
 
 export class ThreadWorkspaceManager {
   readonly journal: ThreadJournal
+  /**
+   * Set by the last {@link provision} that made a worktree: what the thread is told about where it went, when the
+   * worktree folder the person chose was not connected and it went to Mousse's own folder instead.
+   */
+  placementNote?: string
 
   constructor(readonly threadDirectory: string) {
     this.journal = new ThreadJournal(threadDirectory)
@@ -353,8 +359,18 @@ export class ThreadWorkspaceManager {
       // Named once, under the repository's lease, so two threads cannot take the same name.
       const branch = await threadBranchNameAsync(options.nameFrom, threadId, async (name) => (await tryGit(repository.primaryCheckoutPath, ['for-each-ref', '--count=1', '--format=%(refname)', `refs/heads/${name}`])).stdout !== '')
       const retainedRef = `refs/mousse/threads/${threadId}/${conversationBranchId}`
-      const worktreePath = join(repository.worktreeBase, 'threads', threadId, conversationBranchId)
-      await mkdir(join(repository.worktreeBase, 'threads', threadId), { recursive: true })
+      // In the worktree folder the person chose (Settings → Storage), or Mousse's own; see `worktreeLayout`.
+      const placement = await placeThreadWorktree({
+        home: getMousseHomeDir(),
+        folder: chosenWorktreeFolder(this.threadDirectory),
+        repositoryId: repository.repositoryId,
+        projectName: basename(repository.primaryCheckoutPath),
+        threadId,
+        conversationBranchId,
+        branch
+      })
+      const worktreePath = placement.path
+      this.placementNote = placement.notConnected ? notConnectedPlacementNote(placement.notConnected) : undefined
       const intent = this.journal.append({
         operationId,
         operationType: 'workspace-provision',
@@ -441,6 +457,9 @@ export class ThreadWorkspaceManager {
     if (isProjectFolderWorkspace(current)) return this.verify(current)
     const metadata = this.load()
     if (!metadata) throw new Error('Thread workspace metadata is missing')
+    // A worktree on a drive that is not connected is there, out of reach: it waits for the drive, and is never rebuilt
+    // in its place (which would make its folder again on the disk the drive is mounted on).
+    await assertWorktreeFolderConnected(metadata.worktreePath)
     const verified = await this.verify(metadata)
     const unfinishedProvision = [...this.journal.latestByOperation().values()].some((entry) => entry.operationType === 'workspace-provision' && !['completed', 'cancelled'].includes(entry.state))
     if (verified.lifecycle === 'ready' && metadata.lifecycle === 'ready' && !unfinishedProvision) return verified

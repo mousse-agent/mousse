@@ -1,4 +1,5 @@
 import { ResourceLifecycleError } from './lifecycle/ResourceLifecycleStore'
+import { setWorktreeFolders } from './worktree/worktreeLayout'
 import { AgentEpisodeStore } from './agents/AgentEpisodeStore'
 import { join } from 'path'
 import { homedir } from 'os'
@@ -322,6 +323,8 @@ export class MmsProfileServices {
     })
     this.events = new MmsEventBus()
     this.settings = new SettingsStore(config)
+    // Before anything reads or moves a worktree: the folders this profile chose for them are Mousse's (`worktreeLayout`).
+    setWorktreeFolders(homeDir, this.settings.get().storage)
     this.providerAuth = shared.providerAuth
     // The built-in instances' launch settings and sign-out live in their instance config (the
     // gateway's); the vendor services read them from there and save through `configure`.

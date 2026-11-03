@@ -696,7 +696,11 @@ const api = {
     cleanupPlan: (): Promise<{ plan: import('../shared/storage').StorageCleanupPlanItem[]; token: import('../shared/storage').StorageCleanupPlanToken }> => storageInvoke('storage:cleanupPlan'),
     cleanupRun: (token?: import('../shared/storage').StorageCleanupPlanToken): Promise<{ report: import('../shared/storage').StorageCleanupReport }> => storageInvoke('storage:cleanupRun', token),
     cleanupLastReport: (): Promise<{ report: import('../shared/storage').StorageCleanupReport | null }> => storageInvoke('storage:cleanupLastReport'),
-    usage: (options?: { refresh?: boolean }): Promise<import('../shared/storage').StorageUsageSnapshot> => storageInvoke('storage:usage', options)
+    usage: (options?: { refresh?: boolean }): Promise<import('../shared/storage').StorageUsageSnapshot> => storageInvoke('storage:usage', options),
+    worktreeFolder: (): Promise<{ status: import('../shared/storage').WorktreeFolderStatus }> => storageInvoke('storage:worktreeFolder'),
+    /** Opens the folder picker; null when the person cancelled it. */
+    chooseWorktreeFolder: (): Promise<{ status: import('../shared/storage').WorktreeFolderStatus } | null> => storageInvoke('storage:chooseWorktreeFolder'),
+    resetWorktreeFolder: (): Promise<{ status: import('../shared/storage').WorktreeFolderStatus }> => storageInvoke('storage:resetWorktreeFolder')
   },
   workspace: {
     getStatus: (threadId: string): Promise<unknown> => ipcRenderer.invoke('workspace:getStatus', threadId),
