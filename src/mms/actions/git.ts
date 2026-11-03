@@ -302,8 +302,8 @@ export function mergeTreesAsync(top: string, base: string, ours: string, theirs:
 
 /**
  * Drops pending changes, untracked files and an unfinished merge, revert or cherry-pick, after `keep` has kept a copy
- * of them (`keepCopy` over the whole working tree: staged, working and conflict versions). Ignored files, nested
- * repositories and `.mousse/` stay. A rebase is refused. The caller holds the mutation locks and has the user's
+ * of them (`keepCopy` over the whole working tree: staged, working and conflict versions, and what stands where a file
+ * goes back, ignored files included). Other ignored files, nested repositories and `.mousse/` stay. A rebase is refused. The caller holds the mutation locks and has the user's
  * confirmation.
  */
 export async function discardPendingChangesAsync<T>(cwd: string, keep: (top: string) => Promise<T>): Promise<T> {
