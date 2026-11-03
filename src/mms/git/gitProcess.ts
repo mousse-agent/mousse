@@ -21,7 +21,10 @@ export interface GitRun {
   cancelled: boolean
   /** The process has ended and its pipes are closed; false only when a stopped process outlasted the wait for it. */
   exited: boolean
+  /** stdout; only its last `stdoutBytes` when `truncated`. */
   stdout: string
+  /** stdout was longer than `stdoutBytes` and lost its beginning: never a complete answer, even when `ok`. */
+  truncated: boolean
   /** stdout then stderr, for messages and classification. */
   output: string
 }
@@ -40,6 +43,8 @@ export interface GitRunOptions {
   signal?: AbortSignal
   /** Called for every line either stream prints, as it arrives. */
   onLine?: (line: GitLine) => void
+  /** Bytes of stdout kept (its end, past this); 1 MiB when not given. */
+  stdoutBytes?: number
 }
 
 /**
@@ -55,11 +60,14 @@ export function englishMessagesEnv(): Record<string, string> {
 class TailBuffer {
   private chunks: Buffer[] = []
   private size = 0
+  /** Something was dropped from the start. */
+  cut = false
   constructor(private readonly limit: number) {}
 
   push(chunk: Buffer): void {
     this.chunks.push(chunk)
     this.size += chunk.length
+    if (this.size > this.limit) this.cut = true
     while (this.size > this.limit && this.chunks.length > 0) {
       const excess = this.size - this.limit
       const first = this.chunks[0]
@@ -143,7 +151,7 @@ class LineSplitter {
 export function runGit(cwd: string, args: readonly string[], options: GitRunOptions = {}): Promise<GitRun> {
   return new Promise((resolvePromise, reject) => {
     if (options.signal?.aborted) {
-      resolvePromise({ ok: false, code: null, stalled: false, cancelled: true, exited: true, stdout: '', output: '' })
+      resolvePromise({ ok: false, code: null, stalled: false, cancelled: true, exited: true, stdout: '', truncated: false, output: '' })
       return
     }
     const child = spawn('git', args, {
@@ -154,7 +162,7 @@ export function runGit(cwd: string, args: readonly string[], options: GitRunOpti
       // Leads its own process group on POSIX, so a stop reaches hooks and helpers too.
       detached: process.platform !== 'win32'
     })
-    const stdout = new TailBuffer(RETAINED_BYTES)
+    const stdout = new TailBuffer(options.stdoutBytes ?? RETAINED_BYTES)
     const stderr = new TailBuffer(RETAINED_BYTES)
     const onLine = options.onLine
     const splitters = onLine ? [new LineSplitter(onLine), new LineSplitter(onLine)] : []
@@ -199,6 +207,7 @@ export function runGit(cwd: string, args: readonly string[], options: GitRunOpti
         cancelled: cancelled && !succeeded,
         exited,
         stdout: out,
+        truncated: stdout.cut,
         output: [out, err].filter(Boolean).join('\n')
       })
     }

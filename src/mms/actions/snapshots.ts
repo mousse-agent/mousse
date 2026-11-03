@@ -6,7 +6,7 @@ import { homedir } from 'node:os'
 import { join, parse, resolve, sep } from 'node:path'
 import type { GitRecord, ThreadAction } from '../../shared/threadActions'
 import { activeHiddenStore, builtInPathspecs, ensureStoreRules, outsideHiddenStore } from '../git/hiddenStore'
-import { gitEnv, gitStep, guarded, guardedAsync, mergeTreesSteps, MOUSSE_COMMIT_ENV, mousseCommitEnvNow, NOT_MOUSSE, operationInProgressSteps, runGitProcess, tryGit, tryGitAsync, tryGitStep, treeOfSteps } from './git'
+import { gitEnv, gitStep, guarded, guardedAsync, LISTING, mergeTreesSteps, MOUSSE_COMMIT_ENV, mousseCommitEnvNow, NOT_MOUSSE, operationInProgressSteps, runGitProcess, tryGit, tryGitAsync, tryGitStep, treeOfSteps } from './git'
 import { files as disk, runAsync, step, type Steps } from './steps'
 import { retentionWindowText } from '../../shared/undoRetention'
 
@@ -56,7 +56,7 @@ const NESTED_COMMIT_ONLY = 'nested repository; only its commit is recorded'
  * The check never refreshes the nested repository's index.
  */
 function* nestedWithChanges(top: string, env: NodeJS.ProcessEnv, skip: CoverageGap[]): Steps<CoverageGap[]> {
-  const links = (yield* gitStep(top, ['ls-files', '-s', '-z'], env)).split('\0').filter((line) => line.startsWith('160000 ')).map((line) => line.slice(line.indexOf('\t') + 1))
+  const links = (yield* gitStep(top, ['ls-files', '-s', '-z'], env, undefined, LISTING)).split('\0').filter((line) => line.startsWith('160000 ')).map((line) => line.slice(line.indexOf('\t') + 1))
   const present: string[] = []
   for (const path of links) if (!skip.some((gap) => gap.path === path) && (yield* disk.exists(join(top, path, '.git')))) present.push(path)
   const changed: CoverageGap[] = []
@@ -96,7 +96,7 @@ const IGNORED_RECORDED = 2000
 
 /** The ignored files and folders in the folder now, collapsed to their folder; never `.mousse`. */
 function* ignoredNow(top: string): Steps<{ ignored: string[]; truncated: boolean }> {
-  const listed = yield* tryGitStep(top, ['ls-files', '-z', '--others', '--ignored', '--exclude-standard', '--directory'])
+  const listed = yield* tryGitStep(top, ['ls-files', '-z', '--others', '--ignored', '--exclude-standard', '--directory'], undefined, LISTING)
   if (!listed.ok) return { ignored: [], truncated: true }
   const all = listed.stdout.split('\0').filter((path) => path && path !== '.mousse/' && !path.startsWith('.mousse/'))
   return { ignored: all.slice(0, IGNORED_RECORDED), truncated: all.length > IGNORED_RECORDED }
@@ -104,7 +104,7 @@ function* ignoredNow(top: string): Steps<{ ignored: string[]; truncated: boolean
 
 /** The record of what `sha` did not cover, or undefined for a snapshot taken before snapshots kept one. */
 export function* snapshotUncoveredSteps(top: string, sha: string): Steps<Uncovered | undefined> {
-  const commit = yield* tryGitStep(top, ['cat-file', 'commit', sha])
+  const commit = yield* tryGitStep(top, ['cat-file', 'commit', sha], undefined, LISTING)
   if (!commit.ok) return undefined
   const line = commit.stdout.split('\n').find((entry) => entry.startsWith(UNCOVERED_LINE))
   if (!line) return undefined
@@ -230,7 +230,7 @@ const LEFT_OUT_BY_MOUSSE = 'dependency or build folder, never kept in snapshots'
 function* excludedFolders(top: string, gitDir: string): Steps<CoverageGap[]> {
   const exclude = join(gitDir, 'info', 'exclude')
   const listed = (yield* disk.exists(exclude))
-    ? yield* tryGitStep(top, ['ls-files', '-z', '--others', '--ignored', '--directory', `--exclude-from=${exclude}`])
+    ? yield* tryGitStep(top, ['ls-files', '-z', '--others', '--ignored', '--directory', `--exclude-from=${exclude}`], undefined, LISTING)
     : { ok: true, stdout: '' }
   return (listed.ok ? listed.stdout.split('\0').filter(Boolean) : [])
     .map((path) => path.replace(/\/$/, ''))
@@ -307,7 +307,7 @@ function* headOf(top: string): Steps<string | undefined> {
  */
 function* nestedRepositoriesWithoutCommit(top: string, env: NodeJS.ProcessEnv): Steps<string[]> {
   // Git lists a nested repository it would add as one entry ending in a slash.
-  const untracked = (yield* gitStep(top, ['ls-files', '-z', '--others', '--exclude-standard'], env)).split('\0')
+  const untracked = (yield* gitStep(top, ['ls-files', '-z', '--others', '--exclude-standard'], env, undefined, LISTING)).split('\0')
   const without: string[] = []
   for (const path of untracked.filter((entry) => entry.endsWith('/')).map((entry) => entry.slice(0, -1))) {
     if (!(yield* outsideStore(join(top, path), ['rev-parse', '--verify', '-q', 'HEAD^{commit}'])).ok) without.push(path)
@@ -331,17 +331,17 @@ function gitWithPaths(top: string, args: string[], paths: string[], env?: NodeJS
  */
 function* followTrackedFiles(top: string, env: NodeJS.ProcessEnv, head: string | undefined, skip: string[] = []): Steps<void> {
   // HEAD's paths the private index lacks (it was seeded from an older HEAD), and the real index's ignored entries.
-  const fromHead = head ? nul(yield* gitStep(top, ['diff-index', '--cached', '--no-renames', '--diff-filter=D', '--name-only', '-z', head], env)) : []
-  const fromIndex = nul(yield* gitStep(top, ['ls-files', '-z', '--cached', '--ignored', '--exclude-standard']))
+  const fromHead = head ? nul(yield* gitStep(top, ['diff-index', '--cached', '--no-renames', '--diff-filter=D', '--name-only', '-z', head], env, undefined, LISTING)) : []
+  const fromIndex = nul(yield* gitStep(top, ['ls-files', '-z', '--cached', '--ignored', '--exclude-standard'], undefined, undefined, LISTING))
   const left = (path: string) => skip.some((gap) => path === gap || path.startsWith(`${gap}/`))
   const missing: string[] = []
   for (const path of new Set([...fromHead, ...fromIndex])) if (ownPath(path) && !left(path) && (yield* disk.exists(join(top, path)))) missing.push(path)
   if (missing.length) yield* gitWithPaths(top, ['add', '-f'], missing, env)
-  const ignored = nul(yield* gitStep(top, ['ls-files', '-z', '--cached', '--ignored', '--exclude-standard'], env))
+  const ignored = nul(yield* gitStep(top, ['ls-files', '-z', '--cached', '--ignored', '--exclude-standard'], env, undefined, LISTING))
   if (!ignored.length) return
   // Rare: an ignored file stays in the private index after HEAD and the real index stopped tracking it.
-  const tracked = new Set(nul(yield* gitStep(top, ['ls-files', '-z', '--cached', '--', ...literal(ignored)])))
-  if (head) for (const path of nul(yield* gitStep(top, ['ls-tree', '-r', '-z', '--name-only', '--full-tree', head, '--', ...ignored]))) tracked.add(path)
+  const tracked = new Set(nul(yield* gitStep(top, ['ls-files', '-z', '--cached', '--', ...literal(ignored)], undefined, undefined, LISTING)))
+  if (head) for (const path of nul(yield* gitStep(top, ['ls-tree', '-r', '-z', '--name-only', '--full-tree', head, '--', ...ignored], undefined, undefined, LISTING))) tracked.add(path)
   const untracked = ignored.filter((path) => !tracked.has(path))
   if (untracked.length) yield* gitWithPaths(top, ['rm', '-q', '--cached', '--ignore-unmatch'], untracked, env)
 }
@@ -361,7 +361,7 @@ function* indexTree(top: string, index: string, head: string | undefined): Steps
   const hidden = store ? yield* hiddenStoreCoverage(top) : undefined
   const env = { GIT_INDEX_FILE: index }
   // The store's exclude list already leaves `.mousse/` out, and Git refuses an exclusion that names an ignored path.
-  const addAll = (left: CoverageGap[]) => tryGitStep(top, ['add', '-A', '--', '.', ...(hidden ? [] : [NOT_MOUSSE]), ...left.map((gap) => `:(exclude,literal)${gap.path}`)], env)
+  const addAll = (left: CoverageGap[]) => tryGitStep(top, ['add', '-A', '--', '.', ...(hidden ? [] : [NOT_MOUSSE]), ...left.map((gap) => `:(exclude,literal)${gap.path}`)], env, LISTING)
   const indexOnce = function* (): Steps<{ tree: string; gaps: CoverageGap[] }> {
     if (!(yield* disk.exists(index))) yield* gitStep(top, head ? ['read-tree', head] : ['read-tree', '--empty'], env)
     // What can be read is recorded; what cannot (an unreadable file or folder, a nested repository with no commit) is
@@ -504,7 +504,7 @@ export function* describeGitSteps(cwd: string, startSha: string, after: Snapshot
   let rewroteHistory = false
   if (before.head && after.head && before.head !== after.head) {
     if ((yield* tryGitStep(cwd, ['merge-base', '--is-ancestor', before.head, after.head])).ok) {
-      commits = (yield* gitStep(cwd, ['rev-list', '--first-parent', '--reverse', `${before.head}..${after.head}`])).split(/\r?\n/).filter(Boolean)
+      commits = (yield* gitStep(cwd, ['rev-list', '--first-parent', '--reverse', `${before.head}..${after.head}`], undefined, undefined, LISTING)).split(/\r?\n/).filter(Boolean)
     } else rewroteHistory = true
   }
   const record: GitRecord = {
@@ -526,7 +526,7 @@ export function* pushedToSteps(cwd: string, commits: string[]): Steps<string | u
   // A ref that holds a later commit holds every earlier one, so the first is enough.
   const first = commits[0]
   if (!first) return undefined
-  const refs = yield* tryGitStep(cwd, ['for-each-ref', '--contains', first, '--format=%(refname:short)', 'refs/remotes/'])
+  const refs = yield* tryGitStep(cwd, ['for-each-ref', '--contains', first, '--format=%(refname:short)', 'refs/remotes/'], undefined, LISTING)
   return refs.ok ? refs.stdout.split(/\r?\n/).find((ref) => ref && !ref.endsWith('/HEAD')) : undefined
 }
 
@@ -674,7 +674,7 @@ function* leaveUncovered(top: string, input: RestoreChangeInput, ours: string, m
   const now = yield* snapshotUncoveredSteps(top, input.ours)
   if (!target && !now) return { tree: merged, leftAsIs: [] }
   const where = input.restoredTo ?? 'in the version restored'
-  const changes = (yield* gitStep(top, ['diff-tree', '-r', '-z', '--no-renames', '--name-status', ours, merged])).split('\0').filter(Boolean)
+  const changes = (yield* gitStep(top, ['diff-tree', '-r', '-z', '--no-renames', '--name-status', ours, merged], undefined, undefined, LISTING)).split('\0').filter(Boolean)
   const leftAsIs: LeftAsIs[] = []
   for (let index = 0; index + 1 < changes.length; index += 2) {
     const status = changes[index]!
@@ -691,7 +691,7 @@ function* leaveUncovered(top: string, input: RestoreChangeInput, ours: string, m
   const env = { GIT_INDEX_FILE: temporary }
   try {
     yield* gitStep(top, ['read-tree', merged], env)
-    const kept = new Map((yield* gitStep(top, ['ls-tree', '-r', '-z', ours, '--', ...leftAsIs.map((entry) => entry.path)])).split('\0').filter(Boolean)
+    const kept = new Map((yield* gitStep(top, ['ls-tree', '-r', '-z', ours, '--', ...leftAsIs.map((entry) => entry.path)], undefined, undefined, LISTING)).split('\0').filter(Boolean)
       .map((line) => { const tab = line.indexOf('\t'); const [mode, , sha] = line.slice(0, tab).split(' '); return [line.slice(tab + 1), `${mode} ${sha}`] as const }))
     const lines = leftAsIs.map((entry) => `${kept.get(entry.path) ?? `0 ${'0'.repeat(merged.length)}`}\t${entry.path}`)
     yield* gitStep(top, ['update-index', '--index-info'], env, lines.join('\n') + '\n')
@@ -708,13 +708,13 @@ function* leaveUncovered(top: string, input: RestoreChangeInput, ours: string, m
  * excluded file, or what fills a folder where `to` puts a file. These are bytes no snapshot has.
  */
 function* uncapturedInTheWay(top: string, from: string, to: string): Steps<string[]> {
-  const touched = (yield* gitStep(top, ['diff-tree', '-r', '-z', '--no-renames', '--name-only', from, to])).split('\0').filter(Boolean)
+  const touched = (yield* gitStep(top, ['diff-tree', '-r', '-z', '--no-renames', '--name-only', from, to], undefined, undefined, LISTING)).split('\0').filter(Boolean)
   if (!touched.length) return []
-  const held = new Set((yield* gitStep(top, ['ls-tree', '-r', '-z', '--name-only', from])).split('\0').filter(Boolean))
+  const held = new Set((yield* gitStep(top, ['ls-tree', '-r', '-z', '--name-only', from], undefined, undefined, LISTING)).split('\0').filter(Boolean))
   // A nested repository recorded by its commit (a gitlink) is never written into: Git only changes the link.
   const links = new Set<string>()
   for (const tree of [from, to]) {
-    for (const line of (yield* gitStep(top, ['ls-tree', '-r', '-z', tree])).split('\0')) if (line.startsWith('160000 ')) links.add(line.slice(line.indexOf('\t') + 1))
+    for (const line of (yield* gitStep(top, ['ls-tree', '-r', '-z', tree], undefined, undefined, LISTING)).split('\0')) if (line.startsWith('160000 ')) links.add(line.slice(line.indexOf('\t') + 1))
   }
   const found = new Set<string>()
   // A folder too big or too deep to list, or another repository, cannot be kept file by file: the restore is refused
@@ -800,7 +800,7 @@ export function* moveFilesSteps(top: string, from: string, to: string, operation
     if (yield* disk.exists(files.index)) yield* disk.copyFile(files.index, temporary)
     if (!(yield* disk.exists(temporary)) || (yield* gitStep(top, ['write-tree'], env)) !== from) {
       yield* gitStep(top, ['read-tree', from], env)
-      yield* tryGitStep(top, ['update-index', '-q', '--refresh'], env)
+      yield* tryGitStep(top, ['update-index', '-q', '--refresh'], env, LISTING)
     }
     yield* gitStep(top, ['read-tree', '-m', '-u', from, to], env)
   } finally {

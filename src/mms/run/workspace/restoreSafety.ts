@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
 import { realpathSync } from 'node:fs'
 import { resolve, sep } from 'node:path'
-import { tryGit } from '../../actions/git'
+import { LISTING, tryGit } from '../../actions/git'
 import { inThreadSnapshotScope } from '../../workspace/SnapshotWorkspace'
 import { isProjectFolderWorkspace, ThreadWorkspaceManager } from '../../workspace/ThreadWorkspaceManager'
 import type { ThreadWorkspaceMetadata } from '../../../shared/workspace'
@@ -113,7 +113,7 @@ export function restoreDiffSha(diff: string): string {
 
 /** What restoring `from` → `to` would change in the worktree (`git diff from to`), bounded. */
 export function restoreDiff(threadDirectory: string, worktreePath: string, from: string, to: string): string {
-  const result = inThreadSnapshotScope(threadDirectory, worktreePath, () => tryGit(worktreePath, ['diff', '--no-color', from, to]))
+  const result = inThreadSnapshotScope(threadDirectory, worktreePath, () => tryGit(worktreePath, ['diff', '--no-color', from, to], undefined, LISTING))
   if (!result.ok) return ''
   return result.stdout.length > RESTORE_DIFF_MAX_CHARS
     ? `${result.stdout.slice(0, RESTORE_DIFF_MAX_CHARS)}\n… diff truncated`

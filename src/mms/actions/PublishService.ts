@@ -4,7 +4,7 @@ import type { ThreadLeaseHandle } from '../queue/ThreadExecutionLease'
 import { ThreadJournal } from '../data/ThreadJournal'
 import { withGitMutationLocks } from './GitOperationCoordinator'
 import { currentUserRequest, withoutUserRequest, withUserRequest, type UserAction } from '../git/gitPolicy'
-import { gitAsync, mergeTreesAsync, requireCleanAsync, treeOfAsync, tryGitAsync } from './git'
+import { gitAsync, LISTING, mergeTreesAsync, requireCleanAsync, treeOfAsync, tryGitAsync } from './git'
 import { publishedRef, sameTreeAsync, takeSnapshotAsync } from './snapshots'
 import { ChangeReceiptService } from './ChangeReceiptService'
 import { ThreadActionService } from './ThreadActionService'
@@ -68,7 +68,7 @@ export type PublishRecovery =
  * changes, or a folder above one. Reads only.
  */
 async function ignoredInTheWay(checkout: string, from: string, to: string): Promise<string[]> {
-  const written = (await gitAsync(checkout, ['diff-tree', '-r', '-z', '--no-renames', '--name-only', '--diff-filter=AMT', from, to])).split('\0').filter(Boolean)
+  const written = (await gitAsync(checkout, ['diff-tree', '-r', '-z', '--no-renames', '--name-only', '--diff-filter=AMT', from, to], undefined, undefined, LISTING)).split('\0').filter(Boolean)
   if (!written.length) return []
   const candidates = new Set<string>()
   for (const path of written) {
@@ -79,7 +79,7 @@ async function ignoredInTheWay(checkout: string, from: string, to: string): Prom
   const list = [...candidates]
   for (let start = 0; start < list.length; start += 500) {
     const chunk = list.slice(start, start + 500).map((path) => `:(literal)${path}`)
-    for (const path of (await gitAsync(checkout, ['ls-files', '-z', '--others', '--ignored', '--exclude-standard', '--', ...chunk])).split('\0').filter(Boolean)) found.add(path)
+    for (const path of (await gitAsync(checkout, ['ls-files', '-z', '--others', '--ignored', '--exclude-standard', '--', ...chunk], undefined, undefined, LISTING)).split('\0').filter(Boolean)) found.add(path)
   }
   return [...found].sort()
 }
@@ -171,7 +171,7 @@ export class PublishService {
       const moved = await asked(() => tryGitAsync(primaryCheckout, ['merge', '--ff-only', '--no-overwrite-ignore', publishSha]))
       if (!moved.ok) {
         // The branch did not move, so there is nothing to recover: the attempt is closed and the thread stays usable.
-        const left = await gitAsync(primaryCheckout, ['status', '--porcelain', '--untracked-files=all'])
+        const left = await gitAsync(primaryCheckout, ['status', '--porcelain', '--untracked-files=all'], undefined, undefined, LISTING)
         this.journal.append({ operationId, operationType: 'publish', state: 'cancelled', details: { prePublishSha, targetBranch, error: moved.stderr, ...(left ? { leftFiles: true } : {}) } })
         throw new Error(`Publish could not update ${primaryCheckout}: ${moved.stderr || 'Git refused the update'}. ${left ? 'Some of its files may have been updated; check git status there.' : 'Nothing was changed.'}`)
       }

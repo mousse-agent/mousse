@@ -14,6 +14,12 @@ export interface GitProcess {
 const DEFAULT_MAX_BUFFER = 1024 * 1024
 
 /**
+ * The output limit for a read whose output grows with the repository: its index, a tree, its refs, changed or untracked
+ * paths. A big repository lists far more than 1 MiB of them, and output past a limit fails the read; it is never cut off.
+ */
+export const LISTING_MAX_BUFFER = 256 * 1024 * 1024
+
+/**
  * Runs `git argv` without blocking and reports it as `spawnSync` would: output past `maxBuffer` (on either stream)
  * or a run past `timeout` stops Git and is an `ENOBUFS` or `ETIMEDOUT` error, with the output read so far.
  */

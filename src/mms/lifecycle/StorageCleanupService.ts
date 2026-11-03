@@ -13,6 +13,7 @@ import { isIntegratedAsync, primaryRemoteAsync, resolveDefaultBranchAsync } from
 import { operationInProgressAsync } from '../actions/git'
 import { publishedRef } from '../actions/snapshots'
 import { readOnlyGitAsync, runReadOnlyGitAsync } from '../git/readOnlyGit'
+import { LISTING_MAX_BUFFER } from '../git/runGitProcess'
 import { acquireRepositoryLease } from '../git/RepositoryLease'
 import { resolveRepositoryIdentityAsync } from '../git/RepositoryIdentity'
 import { isExecutionLeaseHeld, releaseExecutionLeaseHandle, STORAGE_CLEANUP_LEASE_SOURCE, tryAcquireExecutionLease } from '../queue/ThreadExecutionLease'
@@ -787,16 +788,16 @@ export class StorageCleanupService {
     // HEAD and the branch are the agent's to move; the commits it added are counted below.
     const head = await readOnlyGitAsync(path, ['rev-parse', 'HEAD'])
     // Uncommitted files do not keep a worktree: retiring it saves them as a snapshot first. What a snapshot cannot hold keeps it.
-    const changed = (await readOnlyGitAsync(path, ['status', '--porcelain', '--untracked-files=all'])).split(/\r?\n/).filter(Boolean).length
+    const changed = (await readOnlyGitAsync(path, ['status', '--porcelain', '--untracked-files=all'], LISTING_MAX_BUFFER)).split(/\r?\n/).filter(Boolean).length
     const operation = await operationInProgressAsync(path)
     if (operation) return { keep: `Has a ${operation} in progress` }
-    if (await readOnlyGitAsync(path, ['ls-files', '-u'])) return { keep: 'Has unresolved conflicts' }
-    const staged = (await readOnlyGitAsync(path, ['diff', '--cached', '--name-only'])).split(/\r?\n/).filter(Boolean).length
+    if (await readOnlyGitAsync(path, ['ls-files', '-u'], LISTING_MAX_BUFFER)) return { keep: 'Has unresolved conflicts' }
+    const staged = (await readOnlyGitAsync(path, ['diff', '--cached', '--name-only'], LISTING_MAX_BUFFER)).split(/\r?\n/).filter(Boolean).length
     if (staged) return { keep: `Has staged changes (${plural(staged, 'file')})` }
     if (changed && (await runReadOnlyGitAsync(path, ['config', '--bool', 'core.sparseCheckout'])).stdout.trim() === 'true') return { keep: `Has uncommitted changes in a sparse checkout (${plural(changed, 'file')})` }
     // Cheap checks first: a worktree with ignored files (node_modules, .env) is kept without walking it for another repository.
     const ignored: string[] = []
-    for (const entry of (await readOnlyGitAsync(path, ['ls-files', '--others', '--ignored', '--exclude-standard', '--directory', '-z'])).split('\0').filter(Boolean)) {
+    for (const entry of (await readOnlyGitAsync(path, ['ls-files', '--others', '--ignored', '--exclude-standard', '--directory', '-z'], LISTING_MAX_BUFFER)).split('\0').filter(Boolean)) {
       if (!await onlyControlFiles(path, entry)) ignored.push(entry)
     }
     if (ignored.length) return { keep: `Has ignored files (${ignored[0]})` }

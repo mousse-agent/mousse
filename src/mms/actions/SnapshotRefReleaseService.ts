@@ -9,7 +9,7 @@ import type { ThreadLeaseHandle } from '../queue/ThreadExecutionLease'
 import { collectStoreGarbageAsync, dropSnapshotStoreUser, loadSnapshotWorkspaceAsync, projectStorePath, readSnapshotWorkspaceRecord, removeThreadSnapshots, SNAPSHOT_TRASH_QUIET_MS, threadPinRef, threadStorePath, trashProjectStoreIfUnused } from '../workspace/SnapshotWorkspace'
 import { ChangeReceiptService } from './ChangeReceiptService'
 import { withGitMutationLocks } from './GitOperationCoordinator'
-import { gitAsync, tryGitAsync } from './git'
+import { gitAsync, LISTING, tryGitAsync } from './git'
 import { UndoRetentionService } from './UndoRetentionService'
 import { keptFilesFromListing, PRESERVED_EXPIRY_OPERATION, PRESERVED_REF_FORMAT, PRESERVED_REFS, threadPreservedIndex, type KeptFilesRef } from './preservedFiles'
 
@@ -87,7 +87,7 @@ export async function threadStoreKeptFilesAsync(threadDirectory: string, now = D
   if (!record || (record.kind === 'project' && !record.projectId)) return undefined
   const gitDir = record.kind === 'project' ? projectStorePath(record.projectId!) : threadStorePath(record.threadId)
   if (!existsSync(join(gitDir, 'HEAD'))) return undefined
-  const listing = await runStoreGitAsync({ workTree: gitDir, gitDir }, ['for-each-ref', `--format=${PRESERVED_REF_FORMAT}`, PRESERVED_REFS], repoProgramEnv())
+  const listing = await runStoreGitAsync({ workTree: gitDir, gitDir }, ['for-each-ref', `--format=${PRESERVED_REF_FORMAT}`, PRESERVED_REFS], repoProgramEnv(), LISTING.maxBuffer)
   return { gitDir, refs: keptFilesFromListing(listing, threadDirectory, now) }
 }
 
@@ -116,7 +116,7 @@ export async function releaseThreadSnapshots(threadDirectory: string, signal?: A
     return await inHiddenStore(workspace.store, async () => {
       const top = workspace.store.workTree
       const names = new Set<string>()
-      const pins = await tryGitAsync(top, ['for-each-ref', '--format=%(refname)', `refs/mousse/threads/${workspace.record.threadId}/`])
+      const pins = await tryGitAsync(top, ['for-each-ref', '--format=%(refname)', `refs/mousse/threads/${workspace.record.threadId}/`], undefined, LISTING)
       for (const name of pins.stdout.split(/\r?\n/).filter(Boolean)) names.add(name)
       names.add(threadPinRef(workspace.record.threadId))
       for (const receipt of new ChangeReceiptService(threadDirectory, { readOnly: true }).list()) for (const name of receipt.retainedRefs) names.add(name)
@@ -142,7 +142,7 @@ export async function releaseThreadSnapshots(threadDirectory: string, signal?: A
       // trash namespace, which the storage cleanup empties after the trash's wait (`expireTrashedSnapshotRefs`).
       // Only the thread's own, by the exact names their writers use (`threadPreservedIndex`), never by a prefix.
       const owned = threadPreservedIndex(threadDirectory)
-      const preserved = (await tryGitAsync(top, ['for-each-ref', '--format=%(refname) %(objectname)', PRESERVED_REFS])).stdout.split(/\r?\n/).filter(Boolean)
+      const preserved = (await tryGitAsync(top, ['for-each-ref', '--format=%(refname) %(objectname)', PRESERVED_REFS], undefined, LISTING)).stdout.split(/\r?\n/).filter(Boolean)
       const trashed = `refs/mousse/trash/${Date.now()}`
       for (const line of preserved) {
         const [name, sha] = line.split(' ') as [string, string]
@@ -178,7 +178,7 @@ export async function expireTrashedSnapshotRefs(now = Date.now(), home = getMous
     const store = { workTree: gitDir, gitDir }
     const lease = await acquireRepositoryLease(hiddenStoreIdentity(store))
     try {
-      const run = (args: string[]): Promise<string> => runStoreGitAsync(store, args, repoProgramEnv())
+      const run = (args: string[]): Promise<string> => runStoreGitAsync(store, args, repoProgramEnv(), LISTING.maxBuffer)
       const refs = (await run(['for-each-ref', '--format=%(refname) %(objectname)', 'refs/mousse/trash/'])).split(/\r?\n/).filter(Boolean)
       let removed = 0
       for (const line of refs) {

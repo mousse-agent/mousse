@@ -11,7 +11,7 @@ import { rethrowGitPolicyError } from '../git/gitPolicy'
 import { activeHiddenStore, checkStoreCommand, checkStoreCommandAsync, hiddenStoreEnv } from '../git/hiddenStore'
 import type { GitCheckOptions, RepoProgramOptions } from '../git/repoPrograms'
 import { waitForFolderAccess } from '../files/folderAccess'
-import { runGitProcess } from '../git/runGitProcess'
+import { LISTING_MAX_BUFFER, runGitProcess } from '../git/runGitProcess'
 import { files, runAsync, step, type Steps } from './steps'
 
 /**
@@ -57,18 +57,27 @@ export { runGitProcess }
 /** The output limit `spawnSync` and `execFileSync` use when none is given. */
 const DEFAULT_MAX_BUFFER = 1024 * 1024
 
+export interface GitReadOptions {
+  /** Bytes of output Git may print before the run is stopped and fails; 1 MiB when not given (or 256 MiB with input). */
+  maxBuffer?: number
+}
+
+/** For a read whose output grows with the repository (see `LISTING_MAX_BUFFER`). */
+export const LISTING: GitReadOptions = { maxBuffer: LISTING_MAX_BUFFER }
+
 /**
  * Git for Mousse's own actions (checkpoints, restore, undo, revert): no program the repository
  * configures runs. Files under a filter only the repository defines (git-crypt) are refused, with a
  * message saying why, rather than stored unfiltered. Code that can wait uses {@link gitAsync}.
  */
-export function git(cwd: string, args: string[], env?: NodeJS.ProcessEnv, input?: string): string {
+export function git(cwd: string, args: string[], env?: NodeJS.ProcessEnv, input?: string, options?: GitReadOptions): string {
   try {
     return execFileSync('git', guarded(cwd, args, { ...(env ? { env } : {}), ...(input !== undefined ? { stdin: input } : {}) }), {
       cwd,
       env: gitEnv(cwd, env),
       encoding: 'utf8',
-      ...(input !== undefined ? { input, maxBuffer: 256 * 1024 * 1024 } : {}),
+      maxBuffer: options?.maxBuffer ?? (input !== undefined ? LISTING_MAX_BUFFER : DEFAULT_MAX_BUFFER),
+      ...(input !== undefined ? { input } : {}),
       stdio: [input !== undefined ? 'pipe' : 'ignore', 'pipe', 'pipe']
     }).trim()
   } catch (error) {
@@ -79,9 +88,9 @@ export function git(cwd: string, args: string[], env?: NodeJS.ProcessEnv, input?
 }
 
 /** {@link git} without blocking the daemon: the same check, command and answer, and an error carrying Git's `stderr` and `status`. */
-export async function gitAsync(cwd: string, args: string[], env?: NodeJS.ProcessEnv, input?: string): Promise<string> {
+export async function gitAsync(cwd: string, args: string[], env?: NodeJS.ProcessEnv, input?: string, options?: GitReadOptions): Promise<string> {
   const argv = await guardedAsync(cwd, args, { ...(env ? { env } : {}), ...(input !== undefined ? { stdin: input } : {}) })
-  const ran = await runGitProcess(argv, { cwd, env: gitEnv(cwd, env), input, maxBuffer: input !== undefined ? 256 * 1024 * 1024 : DEFAULT_MAX_BUFFER })
+  const ran = await runGitProcess(argv, { cwd, env: gitEnv(cwd, env), input, maxBuffer: options?.maxBuffer ?? (input !== undefined ? LISTING_MAX_BUFFER : DEFAULT_MAX_BUFFER) })
   if (!ran.error && ran.status === 0) return ran.stdout.trim()
   const error = Object.assign(new Error(`Command failed: git ${argv.join(' ')}${ran.stderr ? `\n${ran.stderr}` : ''}`, ran.error ? { cause: ran.error } : undefined), { status: ran.status, stdout: ran.stdout, stderr: ran.stderr })
   const refusal = filterRefusal(ran.stderr)
@@ -89,7 +98,7 @@ export async function gitAsync(cwd: string, args: string[], env?: NodeJS.Process
   throw error
 }
 
-export function tryGit(cwd: string, args: string[], env?: NodeJS.ProcessEnv): { ok: boolean; stdout: string; stderr: string } {
+export function tryGit(cwd: string, args: string[], env?: NodeJS.ProcessEnv, options?: GitReadOptions): { ok: boolean; stdout: string; stderr: string } {
   let safe: string[]
   try {
     safe = guarded(cwd, args, { env })
@@ -98,7 +107,7 @@ export function tryGit(cwd: string, args: string[], env?: NodeJS.ProcessEnv): { 
     rethrowGitPolicyError(error)
     return { ok: false, stdout: '', stderr: error instanceof Error ? error.message : String(error) }
   }
-  const result = spawnSync('git', safe, { cwd, encoding: 'utf8', env: gitEnv(cwd, env) })
+  const result = spawnSync('git', safe, { cwd, encoding: 'utf8', env: gitEnv(cwd, env), maxBuffer: options?.maxBuffer ?? DEFAULT_MAX_BUFFER })
   const stderr = result.stderr.trim()
   // Output cut off at the limit is a failure, even when Git exited 0 before it was stopped (`spawnSync` reports both).
   const ok = !result.error && result.status === 0
@@ -106,7 +115,7 @@ export function tryGit(cwd: string, args: string[], env?: NodeJS.ProcessEnv): { 
 }
 
 /** {@link tryGit} without blocking the daemon. */
-export async function tryGitAsync(cwd: string, args: string[], env?: NodeJS.ProcessEnv): Promise<{ ok: boolean; stdout: string; stderr: string }> {
+export async function tryGitAsync(cwd: string, args: string[], env?: NodeJS.ProcessEnv, options?: GitReadOptions): Promise<{ ok: boolean; stdout: string; stderr: string }> {
   let safe: string[]
   try {
     safe = await guardedAsync(cwd, args, { env })
@@ -114,7 +123,7 @@ export async function tryGitAsync(cwd: string, args: string[], env?: NodeJS.Proc
     rethrowGitPolicyError(error)
     return { ok: false, stdout: '', stderr: error instanceof Error ? error.message : String(error) }
   }
-  const result = await runGitProcess(safe, { cwd, env: gitEnv(cwd, env) })
+  const result = await runGitProcess(safe, { cwd, env: gitEnv(cwd, env), maxBuffer: options?.maxBuffer ?? DEFAULT_MAX_BUFFER })
   const stderr = result.stderr.trim()
   // As in `tryGit`: output cut off at the limit is a failure.
   const ok = !result.error && result.status === 0
@@ -122,13 +131,13 @@ export async function tryGitAsync(cwd: string, args: string[], env?: NodeJS.Proc
 }
 
 /** {@link git} as a step: see `steps.ts`. */
-export function gitStep(cwd: string, args: string[], env?: NodeJS.ProcessEnv, input?: string): Steps<string> {
-  return step(() => git(cwd, args, env, input), () => gitAsync(cwd, args, env, input))
+export function gitStep(cwd: string, args: string[], env?: NodeJS.ProcessEnv, input?: string, options?: GitReadOptions): Steps<string> {
+  return step(() => git(cwd, args, env, input, options), () => gitAsync(cwd, args, env, input, options))
 }
 
 /** {@link tryGit} as a step. */
-export function tryGitStep(cwd: string, args: string[], env?: NodeJS.ProcessEnv): Steps<{ ok: boolean; stdout: string; stderr: string }> {
-  return step(() => tryGit(cwd, args, env), () => tryGitAsync(cwd, args, env))
+export function tryGitStep(cwd: string, args: string[], env?: NodeJS.ProcessEnv, options?: GitReadOptions): Steps<{ ok: boolean; stdout: string; stderr: string }> {
+  return step(() => tryGit(cwd, args, env, options), () => tryGitAsync(cwd, args, env, options))
 }
 
 /** How many changed files a message names before it says "and N more". */
@@ -229,7 +238,7 @@ export function pendingChangesErrorFor(label: string, options: PendingChangesOpt
 /** For checks after Mousse's own steps (an aborted merge, a worker's result): any change is refused. */
 export function* requireCleanSteps(cwd: string, label: string): Steps<void> {
   if (activeHiddenStore(cwd)) return
-  const status = yield* gitStep(cwd, ['status', '--porcelain=v2', '--untracked-files=all'])
+  const status = yield* gitStep(cwd, ['status', '--porcelain=v2', '--untracked-files=all'], undefined, undefined, LISTING)
   if (status) throw pendingChangesErrorFor(label, {}, yield* inspectPendingChangesSteps(cwd))
 }
 
@@ -271,7 +280,7 @@ export function treeOfAsync(top: string, revision: string): Promise<string> {
 
 /** Three-way merge of `theirs` onto `ours` from `base`, without touching the checkout. */
 export function* mergeTreesSteps(top: string, base: string, ours: string, theirs: string): Steps<{ tree: string } | { conflicts: string[] }> {
-  const result = yield* tryGitStep(top, ['merge-tree', '--write-tree', '--name-only', '--no-messages', `--merge-base=${base}`, ours, theirs])
+  const result = yield* tryGitStep(top, ['merge-tree', '--write-tree', '--name-only', '--no-messages', `--merge-base=${base}`, ours, theirs], undefined, LISTING)
   const [tree, ...files] = result.stdout.split(/\r?\n/)
   if (result.ok && tree) return { tree }
   // Exit 1 lists the conflicted files after the tree; anything else (an old Git without `--merge-base`) is a conflict too.
@@ -292,7 +301,7 @@ export function* backupPendingChangesSteps(top: string): Steps<string> {
   const realIndex = resolve(top, yield* gitStep(top, ['rev-parse', '--git-path', 'index']))
   return yield* withIndexFile(top, function* (env) {
     if (!(yield* files.exists(realIndex))) yield* gitStep(top, ['read-tree', 'HEAD'], env)
-    yield* gitStep(top, ['add', '-A', '--', '.', NOT_MOUSSE], env)
+    yield* gitStep(top, ['add', '-A', '--', '.', NOT_MOUSSE], env, undefined, LISTING)
     const tree = yield* gitStep(top, ['write-tree'], env)
     const commit = yield* gitStep(top, ['commit-tree', tree, '-p', 'HEAD', '-m', 'mousse: copy of discarded changes'], MOUSSE_COMMIT_ENV)
     const ref = `refs/mousse/discarded/${new Date().toISOString().replace(/[:.]/g, '-')}-${randomUUID().slice(0, 8)}`
@@ -335,7 +344,7 @@ export function commitParentsAsync(cwd: string, sha: string): Promise<string[]> 
 
 export function* changedPathsSteps(cwd: string, start: string, end: string): Steps<Array<{ path: string; beforeHash?: string; afterHash?: string }>> {
   if (start === end) return []
-  const paths = (yield* gitStep(cwd, ['diff', '--name-only', `${start}..${end}`])).split(/\r?\n/).filter(Boolean)
+  const paths = (yield* gitStep(cwd, ['diff', '--name-only', `${start}..${end}`], undefined, undefined, LISTING)).split(/\r?\n/).filter(Boolean)
   const blob = function* (revision: string, path: string): Steps<string | undefined> {
     const result = yield* tryGitStep(cwd, ['rev-parse', `${revision}:${path}`])
     return result.ok ? result.stdout : undefined

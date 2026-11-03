@@ -21,7 +21,7 @@ import type { ConversationBranch, ThreadAction } from '../../shared/threadAction
 import { gitDirectoryEnvAsync } from '../git/gitEnv'
 import { READ_ONLY_GIT_ENV } from '../git/readOnlyGit'
 import { repoProgramEnv, withoutRepoProgramsAsync } from '../git/repoPrograms'
-import { gitRunError, runGitProcess } from '../git/runGitProcess'
+import { gitRunError, LISTING_MAX_BUFFER, runGitProcess } from '../git/runGitProcess'
 import { renameFolderAsync } from './renameFolder'
 import { isIdNamedMousseBranch, isMousseBranchName } from '../../shared/mousseBranches'
 import { adminDigest, adminObjectIds, blobId, HEAD_REFLOG, readAdminFilesAsync, replayedAdminFile, type AdminFile } from './worktreeAdminData'
@@ -366,7 +366,7 @@ export class WorktreeRetirementService {
     const identity = await this.inspectIdentity(input.worktreePath, input.branch, input.repositoryId)
     this.verifySource({ ...input, repositoryId: identity.repositoryId })
     const resultSha = await lifecycleReadAsync(input.worktreePath, ['rev-parse', 'HEAD'])
-    const indexDigest = hash(await lifecycleReadAsync(input.worktreePath, ['ls-files', '--stage', '-v', '-z']))
+    const indexDigest = hash(await lifecycleReadAsync(input.worktreePath, ['ls-files', '--stage', '-v', '-z'], undefined, LISTING_MAX_BUFFER))
     return { ...identity, resultSha, indexDigest, content: await walkOwnedContentAsync(input.worktreePath, true) }
   }
   /**
@@ -408,7 +408,7 @@ export class WorktreeRetirementService {
     })
     const resultSha = await lifecycleReadAsync(input.worktreePath, ['rev-parse', 'HEAD'])
     // Uncommitted files are kept as a snapshot: a worktree whose status is clean has nothing to snapshot.
-    const snapshot = await lifecycleReadAsync(input.worktreePath, ['status', '--porcelain=v1', '--untracked-files=all']) ? await takeSnapshotAsync(input.worktreePath, { reason: 'retirement', threadId: input.taskId }) : undefined
+    const snapshot = await lifecycleReadAsync(input.worktreePath, ['status', '--porcelain=v1', '--untracked-files=all'], undefined, LISTING_MAX_BUFFER) ? await takeSnapshotAsync(input.worktreePath, { reason: 'retirement', threadId: input.taskId }) : undefined
     const treeSha = await lifecycleReadAsync(input.worktreePath, ['rev-parse', 'HEAD^{tree}'])
     const dirty = Boolean(snapshot && snapshot.tree !== treeSha)
     // A result the owner recorded is a commit (the HEAD) or a snapshot of the files; either way the files must still be those.
@@ -591,7 +591,7 @@ export class WorktreeRetirementService {
     const trashPath = manifest.trashPath!
     const head = await lifecycleReadAsync(trashPath, ['rev-parse', 'HEAD'])
     const treeSha = await lifecycleReadAsync(trashPath, ['rev-parse', 'HEAD^{tree}'])
-    const snapshot = await lifecycleReadAsync(trashPath, ['status', '--porcelain=v1', '--untracked-files=all']) ? await takeSnapshotAsync(trashPath, { reason: 'trash expiry', threadId: manifest.taskId }) : undefined
+    const snapshot = await lifecycleReadAsync(trashPath, ['status', '--porcelain=v1', '--untracked-files=all'], undefined, LISTING_MAX_BUFFER) ? await takeSnapshotAsync(trashPath, { reason: 'trash expiry', threadId: manifest.taskId }) : undefined
     const dirty = Boolean(snapshot && snapshot.tree !== treeSha)
     let contents: Awaited<ReturnType<WorktreeRetirementService['inspectContent']>>
     try { contents = await this.inspectContent(trashPath, dirty ? snapshot!.tree : undefined) }
@@ -991,21 +991,21 @@ export class WorktreeRetirementService {
    */
   async inspectContent(path: string, snapshotTree?: string): Promise<Pick<WorktreeReconstructionManifest, 'content' | 'auxiliary' | 'sparse'>> {
     if (!snapshotTree) {
-      if (await lifecycleReadAsync(path, ['status', '--porcelain=v1', '--untracked-files=all'])) throw new Error('Dirty, conflicted or untracked content requires retention')
+      if (await lifecycleReadAsync(path, ['status', '--porcelain=v1', '--untracked-files=all'], undefined, LISTING_MAX_BUFFER)) throw new Error('Dirty, conflicted or untracked content requires retention')
     } else {
       if (await operationInProgressAsync(path)) throw new Error('A merge, rebase or other Git operation in progress requires retention')
-      if (await lifecycleReadAsync(path, ['ls-files', '-u'])) throw new Error('Conflicted content requires retention')
-      if (await lifecycleReadAsync(path, ['diff', '--cached', '--name-only'])) throw new Error('Staged changes require retention')
+      if (await lifecycleReadAsync(path, ['ls-files', '-u'], undefined, LISTING_MAX_BUFFER)) throw new Error('Conflicted content requires retention')
+      if (await lifecycleReadAsync(path, ['diff', '--cached', '--name-only'], undefined, LISTING_MAX_BUFFER)) throw new Error('Staged changes require retention')
     }
     const entries = await walkOwnedContentAsync(path, true)
-    const tracked = new Map((await lifecycleReadAsync(path, ['ls-tree', '-r', '-z', snapshotTree ?? 'HEAD'])).split('\0').filter(Boolean).map((line) => { const tab = line.indexOf('\t'), header = line.slice(0, tab).split(' '); return [line.slice(tab + 1), { mode: header[0], sha: header[2] }] }))
+    const tracked = new Map((await lifecycleReadAsync(path, ['ls-tree', '-r', '-z', snapshotTree ?? 'HEAD'], undefined, LISTING_MAX_BUFFER)).split('\0').filter(Boolean).map((line) => { const tab = line.indexOf('\t'), header = line.slice(0, tab).split(' '); return [line.slice(tab + 1), { mode: header[0], sha: header[2] }] }))
     const configTrue = async (key: string): Promise<boolean> => { try { return await lifecycleGitAsync(path, ['config', '--bool', key]) === 'true' } catch { return false } }
     const sparseEnabled = await configTrue('core.sparseCheckout')
     const sparse = sparseEnabled ? { patterns: await readFile(resolve(path, await lifecycleGitAsync(path, ['rev-parse', '--git-path', 'info/sparse-checkout'])), 'utf8'), cone: await configTrue('core.sparseCheckoutCone') } : undefined
     // A snapshot sees a file outside the sparse patterns as deleted, so it cannot stand for the checkout.
     if (snapshotTree && sparse) throw new Error('A sparse checkout with uncommitted files requires retention')
     const skipped = new Set<string>()
-    for (const flag of (await lifecycleReadAsync(path, ['ls-files', '-v', '-z'])).split('\0').filter(Boolean)) {
+    for (const flag of (await lifecycleReadAsync(path, ['ls-files', '-v', '-z'], undefined, LISTING_MAX_BUFFER)).split('\0').filter(Boolean)) {
       if (/^[a-z]/.test(flag) || (flag.startsWith('S ') && (!sparse || await exists(join(path, flag.slice(2)))))) throw new Error('Hidden index flags require explicit retention')
       if (flag.startsWith('S ')) skipped.add(flag.slice(2))
     }

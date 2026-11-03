@@ -4,7 +4,7 @@ import { acquireRepositoryLease } from '../git/RepositoryLease'
 import { resolveRepositoryIdentityAsync } from '../git/RepositoryIdentity'
 import { getMousseHomeDir } from '../data/paths'
 import { repoProgramEnv, withoutRepoProgramsAsync } from '../git/repoPrograms'
-import { gitRunError, runGitProcess } from '../git/runGitProcess'
+import { gitRunError, LISTING_MAX_BUFFER, runGitProcess } from '../git/runGitProcess'
 import { isMousseBranchName } from '../../shared/mousseBranches'
 
 export interface WorkspaceGcReport {
@@ -18,9 +18,9 @@ export interface WorkspaceGcReport {
 }
 
 /** Git without blocking the daemon: the same check, command and answer as `execFileSync`. */
-async function git(cwd: string, args: string[]): Promise<string> {
+async function git(cwd: string, args: string[], maxBuffer?: number): Promise<string> {
   const argv = await withoutRepoProgramsAsync(cwd, args)
-  const ran = await runGitProcess(argv, { cwd, env: repoProgramEnv() })
+  const ran = await runGitProcess(argv, { cwd, env: repoProgramEnv(), maxBuffer })
   if (ran.error || ran.status !== 0) throw gitRunError(argv, ran)
   return ran.stdout.trim()
 }
@@ -84,7 +84,7 @@ export class WorkspaceGcService {
       else if (!line) await flush()
     }
     await flush()
-    const refs = (await git(this.repositoryPath, ['for-each-ref', '--format=%(refname)', 'refs/mousse'])).split(/\r?\n/).filter(Boolean)
+    const refs = (await git(this.repositoryPath, ['for-each-ref', '--format=%(refname)', 'refs/mousse'], LISTING_MAX_BUFFER)).split(/\r?\n/).filter(Boolean)
     const protectedRefs = new Set(referencedRefs)
     for (const ref of refs) {
       // Audit/undo references have no implicit expiration; explicit retirement must release them. A snapshot of a
