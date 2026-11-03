@@ -26,6 +26,7 @@ import { renameFolderAsync } from './renameFolder'
 import { isIdNamedMousseBranch, isMousseBranchName } from '../../shared/mousseBranches'
 import { adminDigest, adminObjectIds, blobId, HEAD_REFLOG, readAdminFilesAsync, replayedAdminFile, type AdminFile } from './worktreeAdminData'
 import { keepCopy, keptCopyWindowMs } from '../actions/keptCopies'
+import { restoreCommands, restoreShell, type RestoreShell } from '../actions/restoreCommands'
 import { retentionWindowText } from '../../shared/undoRetention'
 import { lifecycleGitAsync, lifecycleReadAsync, readDirectLifecycleRefAsync } from './lifecycleGit'
 import { assertFolderUnchanged, assertFoldersUnchanged, caseInsensitiveAt, deleteVerifiedAsync, FolderChanged, folderSignatureAsync, identityOf, lockedText, lstatAll, recordFoldersAboveAsync, sameEntry, samePath, statOrThrow, unregisterDeletedAsync, walkOwnedContentAsync, worktreeLockAsync, worktreeRegisteredAsync, type ContentEntry, type FolderSignature, type HeldCheck, type LateWrites } from './verifiedDelete'
@@ -295,38 +296,33 @@ export interface RetirementInput { taskId: string; worktreePath: string; branch:
 export interface RetirementOwnership { repositoryLease: RepositoryLeaseHandle; taskLease?: ThreadLeaseHandle; cleanupTaskId?: string; cleanupToken?: string; cleanupGeneration?: number }
 
 /**
+ * What a rebuild of the worktree set aside (`keptAside`), in plain words for the thread, with the exact command that
+ * brings each file back (`restoreCommands.ts`) and how long it is kept; undefined when it set nothing aside. `windowMs`
+ * is the owner's Undo window (`keptCopyWindowMs`).
+ */
+export function keptAsideNotice(manifest: Pick<WorktreeReconstructionManifest, 'keptAside' | 'worktreePath'>, windowMs: number, shell: RestoreShell = restoreShell()): { id: string; text: string } | undefined {
+  const files = (manifest.keptAside ?? []).flatMap((entry) => entry.paths.map((path) => ({ ref: entry.ref, path })))
+  if (!files.length) return undefined
+  const one = files.length === 1
+  const { commands, rest } = restoreCommands(files, { shell })
+  const named = files.slice(0, commands.length)
+  // In backticks, which the thread shows as commands.
+  const shown = commands.map((command) => `\`${command}\``).join('; ')
+  const more = rest.length ? `, and the same way for the other ${rest.length} (listed under ${[...new Set(rest.map((file) => file.ref))].join(', ')})` : ''
+  const what = one ? `${files[0]!.path}, which was` : `${files.length} files, which were`
+  const list = one ? '' : `: ${named.map((file) => file.path).join(', ')}${rest.length ? ` and ${rest.length} more` : ''}`
+  return {
+    id: `worktree-set-aside-${manifest.keptAside![0]!.ref.slice(manifest.keptAside![0]!.ref.lastIndexOf('/') + 1)}`,
+    text: `While rebuilding this worktree, Mousse set aside ${what} written there during the rebuild${list}. Bring ${one ? 'it' : 'them'} back by running this in ${manifest.worktreePath}: ${shown}${more} (kept for ${retentionWindowText(windowMs)}).`
+  }
+}
+
+/**
  * Call under task execution ownership followed by repository mutation ownership. Every method runs without blocking the
  * daemon. The task's lifecycle gate is held only for short synchronous steps (the ownership checks and the source and
  * manifest records), never across an await: the gate also admits every write to the thread. The leases the caller holds
  * keep the checkout to this work in between, and ownership is checked again, under the gate, right before each move.
  */
-/** How many set-aside files a notice names, each with its own command. */
-const NOTICE_PATHS = 5
-/** A path or `<ref>:<path>` as one word of a shell command, quoted only when it needs to be. */
-function shellWord(value: string): string {
-  return /^[\w./@:+=,-]+$/.test(value) ? value : `'${value.replaceAll("'", "'\\''")}'`
-}
-/**
- * What a rebuild of the worktree set aside (`keptAside`), in plain words for the thread, with the exact command that
- * brings each file back and how long it is kept; undefined when it set nothing aside. `windowMs` is the owner's Undo
- * window (`keptCopyWindowMs`).
- */
-export function keptAsideNotice(manifest: Pick<WorktreeReconstructionManifest, 'keptAside' | 'worktreePath'>, windowMs: number): { id: string; text: string } | undefined {
-  const files = (manifest.keptAside ?? []).flatMap((entry) => entry.paths.map((path) => ({ ref: entry.ref, path })))
-  if (!files.length) return undefined
-  const one = files.length === 1
-  const named = files.slice(0, NOTICE_PATHS)
-  // In backticks, which the thread shows as commands.
-  const commands = named.map(({ ref, path }) => `\`git cat-file blob ${shellWord(`${ref}:${path}`)} > ${shellWord(path)}\``).join('; ')
-  const more = files.length > named.length ? `, and the same way for the other ${files.length - named.length} (listed under ${[...new Set(files.slice(NOTICE_PATHS).map((file) => file.ref))].join(', ')})` : ''
-  const what = one ? `${files[0]!.path}, which was` : `${files.length} files, which were`
-  const list = one ? '' : `: ${named.map((file) => file.path).join(', ')}${files.length > named.length ? ` and ${files.length - named.length} more` : ''}`
-  return {
-    id: `worktree-set-aside-${manifest.keptAside![0]!.ref.slice(manifest.keptAside![0]!.ref.lastIndexOf('/') + 1)}`,
-    text: `While rebuilding this worktree, Mousse set aside ${what} written there during the rebuild${list}. Bring ${one ? 'it' : 'them'} back by running this in ${manifest.worktreePath}: ${commands}${more} (kept for ${retentionWindowText(windowMs)}).`
-  }
-}
-
 export class WorktreeRetirementService {
   constructor(readonly store: ResourceLifecycleStore, private readonly ownership?: RetirementOwnership) {}
   pathFor(taskId: string, worktreePath: string): string { return join(this.store.root, 'workspaces', taskId, `${hash(resolve(worktreePath))}.json`) }

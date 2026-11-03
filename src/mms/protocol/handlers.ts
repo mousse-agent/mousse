@@ -3260,7 +3260,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const workspace = new ThreadWorkspaceManager(operation.threadDirectory).load()
       if (record.operationType !== 'publish' && !workspace) throw new DomainRpcError('workspace_not_ready', 'Thread workspace is missing')
       assertNoRunningTurn(ctx, operation.threadId)
-      let aborted: { preservedRef: string }
+      let aborted: { preservedRef: string; top: string }
       try {
         aborted = await new ManagedConflictService(operation.threadDirectory).abort(record.operationType === 'publish' ? operation.projectPath : workspace!.worktreePath, operationId)
       } catch (error) {
@@ -3268,7 +3268,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         throw new DomainRpcError(isLeaseBusy(error) ? 'thread_busy' : 'abort_failed', isLeaseBusy(error) ? THREAD_BUSY_TEXT : recoveryErrorText(error))
       }
       // Every file as it was before the abort, conflicted ones with their edits, is kept under this ref for the thread's Undo window.
-      return { ok: true, preservedRef: aborted.preservedRef, notice: abortPreservedNotice(aborted.preservedRef, new UndoRetentionService(operation.threadDirectory).policy().windowMs) }
+      return { ok: true, preservedRef: aborted.preservedRef, notice: abortPreservedNotice(aborted.preservedRef, new UndoRetentionService(operation.threadDirectory).policy().windowMs, aborted.top) }
     }
     case 'publish.status': {
       const p = isObject(params) ? params : {}

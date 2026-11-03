@@ -13,6 +13,7 @@ import type { ThreadLeaseHandle } from '../queue/ThreadExecutionLease'
 import { ThreadWorkspaceManager } from '../workspace/ThreadWorkspaceManager'
 import { ChangeReceiptService } from './ChangeReceiptService'
 import { gitAsync, LISTING, mergeTreesAsync, refuseUnsafeChangesAsync, treeOfAsync, tryGitAsync } from './git'
+import { restoreCommandsText } from './restoreCommands'
 import { coverageNotice, leftAsIsNotice, moveOutcome, moveProgressAsync, preservedNotice, restoreChangeAsync, snapshotOfTreeAsync, takeSnapshotAsync, type Snapshot } from './snapshots'
 import { retentionWindowText } from '../../shared/undoRetention'
 
@@ -281,7 +282,7 @@ export class ConversationBranchService {
 
   /**
    * The line a switch carries for the person's files it takes out of the folder: where their version stays, and a
-   * command that brings back exactly the file as it was before the switch. The branch's ref holds it when the file
+   * command for each file that brings it back as it was before the switch (`restoreCommands.ts`). The branch's ref holds it when the file
    * there is the same; otherwise the outside-changes record of the switch, or a kept copy of the files before it, does
    * (for the Undo retention window).
    */
@@ -298,7 +299,10 @@ export class ConversationBranchService {
       kept = ` (kept for ${retentionWindowText(new UndoRetentionService(this.threadDirectory).policy().windowMs)})`
     }
     const one = paths.length === 1
-    return `${pathsInWords(paths)} ${one ? 'is now as it was' : 'are now as they were'} on ${input.target}. Your ${one ? 'version stays' : 'versions stay'} on ${input.leftName}: switch back to it, or bring ${one ? 'it' : 'one'} back with git restore --source=${source} -- <path>${kept}.`
+    // The ref holds a snapshot, Git's normal form of each file, which the command converts back as a checkout would.
+    const top = await gitAsync(workspacePath, ['rev-parse', '--show-toplevel'])
+    const commands = restoreCommandsText(paths.map((path) => ({ ref: source, path })), { normalized: true })
+    return `${pathsInWords(paths)} ${one ? 'is now as it was' : 'are now as they were'} on ${input.target}. Your ${one ? 'version stays' : 'versions stay'} on ${input.leftName}: switch back to it, or bring ${one ? 'it' : 'them'} back by running this in ${top}: ${commands}${kept}.`
   }
 
   private async readable(workspacePath: string, sha: string): Promise<boolean> {

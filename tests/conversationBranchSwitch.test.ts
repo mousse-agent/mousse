@@ -37,6 +37,15 @@ const read = (path: string) => readFileSync(join(cwd, path), 'utf8')
 const turn = (id: string, mutate: () => void, start = 0, conversationBranchId = 'main') =>
   actions.runCheckpointedAction({ ...actionOptions(cwd, id), conversationBranchId, presentationMessageStart: start, presentationMessageEnd: start + 2 }, mutate)
 /** HEAD, the branch it is on, every branch and the real index, byte for byte. */
+/** The line a switch gives for a file it takes out of the folder, with the command that brings it back. */
+const leftBehind = (file: string, target: string, left: string, ref: string) =>
+  `${file} is now as it was on ${target}. Your version stays on ${left}: switch back to it, or bring it back by running this in ${git(cwd, 'rev-parse', '--show-toplevel')}: git cat-file --filters ${ref}:${file} > ${file}`
+/** Runs the command a switch's line gives for a file, in a shell, in the folder it names. */
+const runShown = (notice: string | undefined) => {
+  const match = /running this in (.+?): (git cat-file \S+ \S+ > \S+?)(?:\.$| \(kept for |; )/.exec(notice ?? '')
+  if (!match) throw new Error(`No command in: ${notice}`)
+  execFileSync('sh', ['-c', match[2]!], { cwd: match[1]! })
+}
 const gitState = () => ({
   head: git(cwd, 'rev-parse', 'HEAD'),
   branch: git(cwd, 'symbolic-ref', '-q', 'HEAD'),
@@ -271,7 +280,7 @@ describe('a file saved while the switch writes', { timeout: 60_000 }, () => {
     await turn('third', () => write('x.txt', 'x\n'), 4)
     const { notice } = await pressed('Switch conversation branch', () => service.activate(cwd, older.id))
     expect(read('agent.txt')).toBe('first\n')
-    expect(notice).toBe('agent.txt is now as it was on Older. Your version stays on Main: switch back to it, or bring it back with git restore --source=refs/mousse/threads/task/main -- <path>.')
+    expect(notice).toBe(`${leftBehind('agent.txt', 'Older', 'Main', 'refs/mousse/threads/task/main')}.`)
   })
 })
 
@@ -349,8 +358,8 @@ describe('edits brought along across several switches', { timeout: 60_000 }, () 
     const older = await service.fork(cwd, 'main', action.id, 'Older')
     const { notice } = await sw(older.id)
     expect(read('value.txt')).toBe('base\n')
-    expect(notice).toBe('value.txt is now as it was on Older. Your version stays on Main: switch back to it, or bring it back with git restore --source=refs/mousse/threads/task/main -- <path>.')
-    git(cwd, 'restore', '--source=refs/mousse/threads/task/main', '--', 'value.txt')
+    expect(notice).toBe(`${leftBehind('value.txt', 'Older', 'Main', 'refs/mousse/threads/task/main')}.`)
+    runShown(notice)
     expect(read('value.txt')).toBe('the person\'s edit\n')
   })
 
@@ -362,7 +371,7 @@ describe('edits brought along across several switches', { timeout: 60_000 }, () 
     const { notice } = await sw(b.id)
     expect(existsSync(join(cwd, 'NOTES.txt'))).toBe(false)
     expect(existsSync(join(cwd, 'a-only.txt'))).toBe(false)
-    expect(notice).toBe(`NOTES.txt is now as it was on B. Your version stays on A: switch back to it, or bring it back with git restore --source=${a.retainedRef} -- <path>.`)
+    expect(notice).toBe(`${leftBehind('NOTES.txt', 'B', 'A', a.retainedRef)}.`)
     await sw(a.id)
     expect(read('NOTES.txt')).toBe('unique personal WIP\n')
     expect(read('a-only.txt')).toBe('A work\n')
@@ -488,8 +497,8 @@ describe('what a switch keeps, and what it says', { timeout: 60_000 }, () => {
     await turn('on-a', () => write('NOTES.txt', 'person line\nagent line\n'), 2, a.id)
     const { notice } = await sw(b.id)
     expect(existsSync(join(cwd, 'NOTES.txt'))).toBe(false)
-    expect(notice).toBe(`NOTES.txt is now as it was on B. Your version stays on A: switch back to it, or bring it back with git restore --source=${a.retainedRef} -- <path>.`)
-    git(cwd, 'restore', `--source=${a.retainedRef}`, '--', 'NOTES.txt')
+    expect(notice).toBe(`${leftBehind('NOTES.txt', 'B', 'A', a.retainedRef)}.`)
+    runShown(notice)
     expect(read('NOTES.txt')).toBe('person line\nagent line\n')
   })
 
@@ -505,10 +514,9 @@ describe('what a switch keeps, and what it says', { timeout: 60_000 }, () => {
     const { notice } = await sw(a.id)
     // The newer line came along; the recorded one is A's now.
     expect(read('value.txt')).toBe('alpha\nunchanged one\nunchanged two\nunchanged three\nPERSON LATEST\n')
-    const source = /git restore --source=(\S+) -- <path>/.exec(notice ?? '')?.[1]
-    expect(source).toMatch(/^refs\/mousse\//)
-    expect(notice).toMatch(/\(kept for .+\)\.$/)
-    git(cwd, 'restore', `--source=${source}`, '--', 'value.txt')
+    expect(notice).toMatch(/: git cat-file --filters refs\/mousse\/\S+:value\.txt > value\.txt \(kept for .+\)\.$/)
+    write('value.txt', 'overwritten\n')
+    runShown(notice)
     expect(readFileSync(join(cwd, 'value.txt'))).toEqual(Buffer.from(before))
   })
 })
