@@ -18,9 +18,10 @@ import { BROWSER_VIEWER_CAPABILITY } from '../../shared/browser/host'
 import { BROWSER_SETUP_CAPABILITY } from '../../shared/browser/setup'
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync } from 'fs'
 import { homedir } from 'os'
-import { basename, join } from 'path'
+import { join } from 'path'
 import { fileURLToPath } from 'url'
 import { resolveDaemonHostInvocation } from '../../cli/daemonHost'
+import { daemonCommand } from './daemonCommand'
 import {
   canonicalizeHome,
   pollUntilRuntimeReady,
@@ -620,17 +621,13 @@ export class GuiMmsController extends EventEmitter {
     const host = resolveDaemonHostInvocation(
       scriptPath ?? (typeof import.meta.url === 'string' ? fileURLToPath(import.meta.url) : undefined)
     )
-    // A packaged GUI must re-enter its own dual-mode executable. PATH launchers
-    // and the copied console host are intended for user shells; resolving either
-    // here can delay or prevent the daemon and leave a Start Menu launch headless.
-    const isPackagedGuiHost = Boolean(
-      process.versions.electron && /^mousse(?:\.exe)?$/i.test(basename(process.execPath))
-    )
-    const command = isPackagedGuiHost ? process.execPath : host.command
-    const argsPrefix = isPackagedGuiHost ? ['--cli'] : host.argsPrefix
-    const env = isPackagedGuiHost
-      ? { ...process.env, MOUSSE_CLI: '1' }
-      : host.env
+    const { command, argsPrefix, env } = daemonCommand({
+      execPath: process.execPath,
+      platform: process.platform,
+      electron: Boolean(process.versions.electron),
+      env: process.env,
+      host
+    })
     mkdirSync(this.homeDir, { recursive: true })
     const logPath = join(this.homeDir, 'mms-startup.log')
     const logFd = openSync(logPath, 'a')
