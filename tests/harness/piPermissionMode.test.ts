@@ -1,3 +1,7 @@
+import { execFileSync } from 'node:child_process'
+import { mkdtempSync, realpathSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { PI_RPC_CAPS } from '../../src/mms/harness/drivers/pi'
 import { PiRpcEngine, type PiRpcEngineOptions } from '../../src/mms/harness/pi/engine'
@@ -9,9 +13,9 @@ import type { PermissionMode } from '../../src/shared/permissionMode'
  * mode does not allow without asking, and denies when the turn cannot ask.
  */
 const engine = new PiRpcEngine({ instanceId: 'pi:x', provider: 'x', label: 'X', capabilities: PI_RPC_CAPS, catalog: () => ({ revision: 1, provider: { id: 'x', builtin: false, models: [] as never } }) } as unknown as PiRpcEngineOptions)
-type Gate = (turn: unknown, toolName: string, input: Record<string, unknown>) => Promise<{ allow: false; reason: string } | null>
-const askPermission = (turn: unknown, toolName: string, input: Record<string, unknown>) =>
-  (engine as unknown as { askPermission: Gate }).askPermission(turn, toolName, input)
+type Gate = (turn: unknown, toolName: string, input: Record<string, unknown>, cwd?: string) => Promise<{ allow: false; reason: string } | null>
+const askPermission = (turn: unknown, toolName: string, input: Record<string, unknown>, cwd?: string) =>
+  (engine as unknown as { askPermission: Gate }).askPermission(turn, toolName, input, cwd)
 
 function turnIn(permissionMode: PermissionMode, permission: PermissionPrompter | undefined) {
   const asked: Array<{ title: string; approval: unknown }> = []
@@ -62,5 +66,24 @@ describe('Pi RPC engine permission mode', () => {
     const refusing = turnIn('accept_edits', { approvals: 'never', choose: async () => 'allow' })
     expect(await askPermission(refusing.turn, 'bash', { command: 'make' })).toMatchObject({ allow: false })
     expect(refusing.asked).toEqual([])
+  })
+
+  it("asks before a write into Git's own files under Auto-accept edits, naming the file, as for a command", async () => {
+    const cwd = realpathSync(mkdtempSync(join(tmpdir(), 'pi-git-write-')))
+    try {
+      execFileSync('git', ['init', '-q', '-b', 'main'], { cwd, stdio: 'ignore' })
+      for (const toolName of ['write', 'edit']) {
+        const { turn, asked } = turnIn('accept_edits', answer('reject'))
+        expect(await askPermission(turn, toolName, { path: '@.git/config', content: '[core]\n' }, cwd)).toMatchObject({ allow: false, reason: expect.stringContaining("change Git's own files") })
+        expect(asked).toEqual([{ title: "Allow Pi to change Git's own files (.git/config)?", approval: { action: 'command', permissionKey: 'pi:edit', tool: { name: toolName, input: { path: '@.git/config', content: '[core]\n' }, cwd } } }])
+      }
+      const ordinary = turnIn('accept_edits', answer('reject'))
+      expect(await askPermission(ordinary.turn, 'write', { path: '.gitignore', content: 'x\n' }, cwd)).toBeNull()
+      const full = turnIn('full', answer('reject'))
+      expect(await askPermission(full.turn, 'write', { path: '.git/config', content: '' }, cwd)).toBeNull()
+      expect(ordinary.asked.concat(full.asked)).toEqual([])
+    } finally {
+      rmSync(cwd, { recursive: true, force: true })
+    }
   })
 })

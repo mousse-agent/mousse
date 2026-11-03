@@ -11,11 +11,14 @@ import { assertGitAllowed } from '../git/gitPolicy'
  * - `hookFolders`: every folder `core.hooksPath` names;
  * - `configFiles`: every file Git reads as configuration besides the repository's own (`include.path`
  *   and `includeIf.*.path` targets, whether they apply now or could later), because a `core.hooksPath` or
- *   `core.fsmonitor` in one of them runs a program on the owner's next `git status` or commit.
+ *   `core.fsmonitor` in one of them runs a program on the owner's next `git status` or commit;
+ * - `gitFolders`: the repository's Git folder and, for a linked worktree, the common folder it shares,
+ *   whatever they are called (a `.git` file can point anywhere).
  */
 export interface GitControl {
   hookFolders: string[]
   configFiles: string[]
+  gitFolders: string[]
 }
 
 const GIT_TIMEOUT_MS = 5_000
@@ -80,7 +83,7 @@ function originFiles(output: string, root: string): string[] {
 /** Reads what the repository around `root` takes from the working tree. Throws when it cannot be read. */
 export async function loadGitControl(root: string): Promise<GitControl> {
   const hooks = await runGit(root, ['config', '--type=path', '--get-all', 'core.hooksPath'])
-  if (hooks.missing) return { hookFolders: [], configFiles: [] }
+  if (hooks.missing) return { hookFolders: [], configFiles: [], gitFolders: [] }
   if (hooks.status !== 0 && hooks.status !== 1) throw new Error('hooks setting unreadable')
   const files = new Set<string>()
   // Every file that is read for this repository right now, includes followed.
@@ -112,7 +115,10 @@ export async function loadGitControl(root: string): Promise<GitControl> {
       folders.push(resolve(top, value))
     }
   }
-  return { hookFolders: folders.map(placeOf), configFiles: [...files].map(placeOf) }
+  // Outside a repository there is none (128).
+  const dirs = await runGit(root, ['rev-parse', '--absolute-git-dir', '--git-common-dir'])
+  const gitFolders = dirs.status === 0 ? [...new Set(dirs.stdout.split(/\r?\n/).filter(Boolean).map((dir) => resolve(root, dir)))] : []
+  return { hookFolders: folders.map(placeOf), configFiles: [...files].map(placeOf), gitFolders: gitFolders.map(placeOf) }
 }
 
 /** The repository roots whose settings decide what a change at `real` can do: `root` and every nested repository between it and the file. */
