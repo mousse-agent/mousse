@@ -14,7 +14,8 @@ export function Modal({
   children,
   footer,
   className,
-  closeDisabled = false
+  closeDisabled = false,
+  headerStart
 }: {
   open: boolean
   title: string
@@ -26,6 +27,8 @@ export function Modal({
   className?: string
   /** The dialog cannot be dismissed right now (work is in progress): the close button says so. */
   closeDisabled?: boolean
+  /** Before the title, e.g. a back button for a dialog with a second view. */
+  headerStart?: ReactNode
 }) {
   const titleId = useId()
   const panelRef = useRef<HTMLDivElement>(null)
@@ -42,6 +45,7 @@ export function Modal({
     >
       <div ref={panelRef} tabIndex={-1} className={`modal${hideTitle ? ' untitled' : ''}`} onClick={(e) => e.stopPropagation()}>
         <header className="modal-header">
+          {headerStart}
           {!hideTitle && <h3 id={titleId}>{title}</h3>}
           <ModalClose onClose={onClose} disabled={closeDisabled} />
         </header>
