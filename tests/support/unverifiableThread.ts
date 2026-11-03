@@ -13,10 +13,11 @@ function initRepository(repo: string): void {
 /**
  * Registers thread `id` in `store` with a worktree in `repo` that can no longer be verified, as seen live:
  * - `recreated`: the repository was deleted and made again at the same path, so Git no longer knows the worktree;
- * - `unlinked`: the worktree's `.git` file is gone, so it is no longer a linked worktree of the repository.
+ * - `unlinked`: the worktree's `.git` file is gone, so it is no longer a linked worktree of the repository;
+ * - `intact`: nothing is broken yet, for a test that breaks it its own way (moving the repository, say).
  * `repo` is created when it does not exist. The thread's records are intact; only its checkout fails verification.
  */
-export function unverifiableThread(store: ResourceLifecycleStore, options: { id: string; name: string; repo: string; how: 'recreated' | 'unlinked' }) {
+export function unverifiableThread(store: ResourceLifecycleStore, options: { id: string; name: string; repo: string; how: 'recreated' | 'unlinked' | 'intact' }) {
   const { id, name, repo, how } = options
   if (!existsSync(repo)) initRepository(repo)
   const repositoryId = resolveRepositoryIdentity(repo).key
@@ -33,6 +34,6 @@ export function unverifiableThread(store: ResourceLifecycleStore, options: { id:
   writeFileSync(join(location, 'workspace.json'), JSON.stringify({ schemaVersion: 1, threadId: id, worktreePath: worktree, branch, repositoryId, retainedRef, baseSha: sha, headSha: sha, integrationTarget: { baseSha: sha, checkoutPath: repo }, lifecycle: 'ready' }))
   store.registerTask({ taskId: id, location })
   if (how === 'recreated') { rmSync(repo, { recursive: true, force: true }); initRepository(repo) }
-  else rmSync(join(worktree, '.git'))
+  else if (how === 'unlinked') rmSync(join(worktree, '.git'))
   return { location, worktree, repositoryId, branch, retainedRef }
 }

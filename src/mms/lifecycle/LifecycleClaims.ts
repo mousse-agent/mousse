@@ -6,7 +6,7 @@ import { ProfileManager } from '../profiles/ProfileManager'
 import { createInstallationPaths } from '../profiles/paths'
 import { collectingReads, finalReads, inventoryFrom, OWNER_SCAN_LIMIT, OwnershipFacts, readOwnershipFacts, type OwnershipNeed, type OwnershipReads } from './ResourceInventory'
 import { assertLifecyclePath, ResourceLifecycleStore } from './ResourceLifecycleStore'
-import { pathsOverlap } from './canonicalPath'
+import { canonicalPathAsync, comparablePath, pathsOverlap, registeredWorktreesAsync } from './canonicalPath'
 import { repositoryKeyOf } from '../git/RepositoryIdentity'
 
 /**
@@ -24,9 +24,15 @@ export interface UnverifiedOwner {
   reason: string
   /** The checkouts that failed verification. */
   worktrees: string[]
+  /** Real paths of every checkout its records name, to find the repository that still registers one. */
+  checkouts: string[]
   /** Recorded repository ids, and the keys of the real common directories its checkouts and project folder point at. */
   repositoryIds: string[]
-  /** A recorded repository that no checkout or folder ties to a real one any more: it may be any repository. */
+  /**
+   * A recorded repository that no checkout or folder ties to a real one any more (moved or deleted outright), so where its
+   * refs are now is unknown. Not every repository is held for it: its id-named refs and namespaces are held by name in any
+   * repository already, and its branches, whose names carry no id, are then held by name in any repository too.
+   */
   uncertain: boolean
   /** Real paths (`canonicalPathAsync`): the thread's data folders and every checkout or container its records name. */
   paths: string[]
@@ -41,7 +47,23 @@ type ExternalClaims = ExternalClaim[]
  * What a caller is about to remove or release: the repositories it is in (each key it is known by), its real path
  * (`canonicalPathAsync`), or its ref.
  */
-export interface ClaimTarget { repositoryIds?: Array<string | undefined>; path?: string; ref?: string }
+export interface ClaimTarget {
+  repositoryIds?: Array<string | undefined>
+  path?: string
+  ref?: string
+  /** Real paths of the worktrees the target's repository registers (`registeredWorktreesAsync`). */
+  registeredWorktrees?: string[]
+}
+
+/**
+ * The repository part of a {@link ClaimTarget} in the repository at `commonDir`: the ids it is recorded by, the key of
+ * its real common directory, and the worktrees it registers. Reads without blocking.
+ */
+export async function repositoryTargetAsync(commonDir: string | undefined, ...recorded: Array<string | undefined>): Promise<Required<Pick<ClaimTarget, 'repositoryIds' | 'registeredWorktrees'>>> {
+  if (!commonDir) return { repositoryIds: recorded, registeredWorktrees: [] }
+  const real = await canonicalPathAsync(commonDir)
+  return { repositoryIds: [...recorded, repositoryKeyOf(real)], registeredWorktrees: await registeredWorktreesAsync(real) }
+}
 
 /** Whether `claim` names `canonicalPath`, something inside it, or something around it, compared by real paths. */
 export function claimOverlapsPath(claim: ExternalClaim, canonicalPath: string): boolean {
@@ -50,23 +72,25 @@ export function claimOverlapsPath(claim: ExternalClaim, canonicalPath: string): 
 
 /**
  * The unverified thread whose scope covers `target`, if any:
- * - a repository it may use: one of its recorded or real ones, or any one while it is `uncertain`;
+ * - a repository it may use: one of its recorded or real ones, or one that still registers one of its checkouts;
  * - a real path inside or around one it names;
  * - a ref it names, or one in its own namespaces. Mousse's refs outside `refs/heads/` are named by ids, so the same name
- *   is the same ref in any repository. A branch name is held only where no repository tells them apart, so the same
- *   branch name in another repository is not, and an owner without a repository never holds every repository.
+ *   is the same ref in any repository. A branch name is held only where no repository tells them apart, or while the
+ *   owner is `uncertain` (its repository may now be any one), so the same branch name in another repository is not
+ *   otherwise. No owner holds every repository: one broken thread never stops cleanup in unrelated repositories.
  */
 export function unverifiedOwnerOver(claims: readonly ExternalClaim[], target: ClaimTarget): UnverifiedOwner | undefined {
   const repositories = (target.repositoryIds ?? []).filter((id): id is string => Boolean(id))
   for (const claim of claims) {
     const owner = claim.unverified
     if (!owner) continue
-    if (repositories.length && (owner.uncertain || repositories.some((id) => owner.repositoryIds.includes(id)))) return owner
+    if (repositories.some((id) => owner.repositoryIds.includes(id))) return owner
+    if (target.registeredWorktrees?.some((registered) => owner.checkouts.some((checkout) => comparablePath(checkout) === comparablePath(registered)))) return owner
     if (target.path && owner.paths.some((path) => pathsOverlap(path, target.path!))) return owner
     if (target.ref) {
       const ref = target.ref
       const ownNamespace = owner.refPrefixes.some((prefix) => ref.startsWith(prefix))
-      if (ownNamespace || owner.refs.includes(ref) && (!ref.startsWith('refs/heads/') || !repositories.length || !owner.repositoryIds.length)) return owner
+      if (ownNamespace || owner.refs.includes(ref) && (!ref.startsWith('refs/heads/') || owner.uncertain || !repositories.length || !owner.repositoryIds.length)) return owner
     }
   }
   return undefined
@@ -113,7 +137,7 @@ function unverifiedClaim(store: ResourceLifecycleStore, current: ResourceLifecyc
   const resolved = anchors.map((anchor) => ({ ...anchor, commonDir: isAbsolute(anchor.path) ? reads.commonDir(anchor.path) : undefined }))
   const real = new Set(resolved.flatMap((anchor) => anchor.commonDir ? [repositoryKeyOf(anchor.commonDir)] : []))
   // A recorded repository nothing ties to a real one any more (the checkout and the project are gone or unreadable): it
-  // may have moved anywhere, so every repository is held.
+  // may have moved anywhere, so its branch names are held in any repository (`unverifiedOwnerOver`).
   const uncertain = resolved.some((anchor) => anchor.repositoryId && !anchor.commonDir && !real.has(anchor.repositoryId))
   const refs = [...new Set(inventory.resources.filter((resource) => resource.kind === 'git-ref').map((resource) => resource.identity))]
   const refPrefixes = [...owners].flatMap((id) => [`refs/mousse/threads/${id}/`, `refs/mousse/delegations/${id}/`, `refs/mousse/published/${id}`, `refs/mousse/workflows/${store.profileId}/${id}/`, `refs/mousse/lifecycle/${store.profileId}/${id}/`, `refs/heads/mousse/thread/${id}/`])
@@ -127,7 +151,7 @@ function unverifiedClaim(store: ResourceLifecycleStore, current: ResourceLifecyc
     id: createHash('sha256').update(`unverified\0${store.profileId}\0${record.taskId}`).digest('hex'),
     kind: 'unknown', identity: `unverified-thread:${store.profileId}/${record.taskId}`, ownerTaskId: record.taskId,
     materialization: 'unknown', ownership: 'unknown', sourceIds: [], claims: [], peerProfileId: store.profileId,
-    unverified: { profileId: store.profileId, taskId: record.taskId, reason, worktrees, repositoryIds: [...new Set([...recorded, ...real])], uncertain, paths: [...paths].map((path) => reads.canonical(path)), refs, refPrefixes }
+    unverified: { profileId: store.profileId, taskId: record.taskId, reason, worktrees, checkouts: [...new Set(anchors.filter((anchor) => isAbsolute(anchor.path)).map((anchor) => reads.canonical(anchor.path)))], repositoryIds: [...new Set([...recorded, ...real])], uncertain, paths: [...paths].map((path) => reads.canonical(path)), refs, refPrefixes }
   }
 }
 

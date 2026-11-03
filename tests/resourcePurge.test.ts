@@ -1,5 +1,5 @@
 import { afterEach, expect, test, vi } from 'vitest'
-import { mkdtempSync, mkdirSync, writeFileSync, existsSync, rmSync, readFileSync, symlinkSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, writeFileSync, existsSync, rmSync, readFileSync, renameSync, symlinkSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, relative } from 'node:path'
 import { ResourceLifecycleStore } from '../src/mms/lifecycle/ResourceLifecycleStore'
@@ -357,9 +357,13 @@ test('an unverified thread holds its recorded and real repositories, its real pa
   expect(over({ ref: 'refs/heads/mousse/agent/helper' })).toBe(owner)
   expect(over({ ref: 'refs/mousse/changes/11111111-1111-4111-8111-111111111111/before' })).toBeUndefined()
   expect(over({ path: await canonicalPathAsync(f.worktree) })).toBeUndefined()
-  // A recorded repository nothing ties to a real one any more may be any repository: then every repository is held.
+  // A recorded repository nothing ties to a real one any more may be any repository. Every repository is not held for it;
+  // its branch names are, in any repository, besides its id-named refs and namespaces.
   expect(owner.uncertain).toBe(true)
-  expect(over({ repositoryIds: [repositoryA] })).toBe(owner)
+  expect(over({ repositoryIds: [repositoryA] })).toBeUndefined()
+  expect(over({ repositoryIds: [repositoryA], path: await canonicalPathAsync(f.worktree), ref: 'refs/heads/mousse/thread/task/main' })).toBeUndefined()
+  expect(over({ repositoryIds: [repositoryA], ref: 'refs/heads/mousse/agent/helper' })).toBe(owner)
+  expect(over({ repositoryIds: [repositoryA], ref: 'refs/mousse/threads/broken/main' })).toBe(owner)
   rmSync(join(broken.location, 'project-folder.json'))
   const settled = await ownerOf()
   expect(settled.owner.uncertain).toBe(false)
@@ -370,7 +374,64 @@ test('an unverified thread holds its recorded and real repositories, its real pa
   rmSync(broken.worktree, { recursive: true, force: true }); rmSync(other, { recursive: true, force: true })
   const gone = await ownerOf()
   expect(gone.owner.uncertain).toBe(true)
-  expect(unverifiedOwnerOver(gone.claims, { repositoryIds: [repositoryA] })).toBe(gone.owner)
+  expect(unverifiedOwnerOver(gone.claims, { repositoryIds: [repositoryA] })).toBeUndefined()
+  expect(unverifiedOwnerOver(gone.claims, { repositoryIds: [repositoryA], ref: 'refs/heads/mousse/agent/helper' })).toBe(gone.owner)
+}, 60_000)
+
+test('a broken thread whose project folder and worktree were deleted outright no longer blocks deleting a thread in an unrelated repository', async () => {
+  const f = fixture({ git: true }); automatic(f)
+  const other = join(f.root, 'other-repo')
+  const broken = unverifiableThread(f.store, { id: 'broken', name: 'Fix prices', repo: other, how: 'recreated' })
+  rmSync(broken.worktree, { recursive: true, force: true }); rmSync(other, { recursive: true, force: true })
+  expect((await getExternalResourceClaims(f.store, new Set(['task']))).find((claim) => claim.unverified)?.unverified?.uncertain).toBe(true)
+  await trashedTask(f, 'task')
+  const preview = await f.coordinator.cleanup.preview('task')
+  expect(preview.blockers).toEqual([]); expect(preview.retained).toEqual([])
+  expect(preview.items.map((item) => item.kind)).toEqual(expect.arrayContaining(['worktree', 'ref', 'path']))
+  expect((await f.coordinator.cleanup.sweep(Date.now())).find((outcome) => outcome.taskId === 'task')).toMatchObject({ outcome: 'purged' })
+  expect(f.store.require('task').state).toBe('purged'); expect(existsSync(f.worktree)).toBe(false)
+  expect(git(f.repo, ['for-each-ref', '--format=%(refname)', 'refs/mousse/', 'refs/heads/mousse/'])).toBe('')
+}, 60_000)
+
+test('a broken thread whose repository moved without its worktrees repaired keeps its thread pins and receipt refs there through a peer’s purge', async () => {
+  const f = fixture({ git: true })
+  // The broken thread was made while the repository was at an old place; the repository then moved to where this
+  // thread's records point, and the broken thread's worktree was never repaired, so it still points at the old place.
+  const old = join(f.root, 'old-place')
+  renameSync(f.repo, old)
+  const broken = unverifiableThread(f.store, { id: 'broken', name: 'Fix prices', repo: old, how: 'intact' })
+  // An Undo receipt of the broken thread, which this thread's journal holds too (as a fork's copy does), and a saved
+  // conversation branch of this thread that keeps the broken thread's pin.
+  const sha = git(old, ['rev-parse', 'HEAD']), receiptId = '22222222-2222-4222-8222-222222222222', at = new Date().toISOString()
+  const receiptRefs = [`refs/mousse/changes/${receiptId}/before`, `refs/mousse/changes/${receiptId}/after`]
+  for (const ref of receiptRefs) git(old, ['update-ref', ref, sha])
+  const entry = (sequence: number) => JSON.stringify({ schemaVersion: 1, sequence, operationId: 'shared-turn', operationType: 'change-checkpoint', state: 'completed', createdAt: at, details: { receipt: { id: receiptId, kind: 'checkpoint', beforeSha: sha, afterSha: sha, retainedRefs: receiptRefs, createdAt: at } } })
+  mkdirSync(join(broken.location, 'journal')); writeFileSync(join(broken.location, 'journal', '0000000000000001.json'), entry(1))
+  writeFileSync(join(f.location, 'journal', '0000000000000003.json'), entry(3))
+  writeFileSync(join(f.location, 'conversation-branches.json'), JSON.stringify([{ id: 'saved', retainedRef: broken.retainedRef }]))
+  renameSync(old, f.repo)
+  expect(readFileSync(join(broken.worktree, '.git'), 'utf8')).toContain(old)
+  const theirs = () => git(f.repo, ['for-each-ref', '--format=%(refname) %(objectname)', 'refs/mousse/threads/broken/', 'refs/heads/mousse/thread/broken/', 'refs/mousse/changes/'])
+  const ours = () => git(f.repo, ['for-each-ref', '--format=%(refname) %(objectname)', 'refs/mousse/threads/task/', 'refs/heads/mousse/thread/task/'])
+  const before = theirs(), oursBefore = ours()
+  expect(before.split('\n')).toHaveLength(4)
+  await f.coordinator.trash({ taskId: 'task', operationId: 'trash' })
+  // The moved repository still registers the broken thread's worktree (the next `git worktree repair` there, which a
+  // trash move runs, links it back), so it shares this repository: the delete is refused up front and nothing changes.
+  const refused = await f.coordinator.cleanup.preview('task')
+  expect(refused.blockers).toEqual([`${brokenReason(broken.worktree)} ${HOLD}`])
+  await expect(f.coordinator.purge({ taskId: 'task', operationId: 'refused', expectedGeneration: refused.generation, previewDigest: refused.digest, discard: true, human: true })).rejects.toThrow()
+  expect(f.store.require('task').state).toBe('trashed'); expect(existsSync(f.worktree)).toBe(true)
+  expect(theirs()).toBe(before); expect(ours()).toBe(oursBefore)
+  // The person deletes the broken worktree's folder and Git forgets it: nothing ties that thread to a repository now.
+  // Its pins and receipt refs are still held by their names, so the purge goes on and leaves them.
+  rmSync(broken.worktree, { recursive: true, force: true }); git(f.repo, ['worktree', 'prune'])
+  const preview = await f.coordinator.cleanup.preview('task')
+  expect(preview.blockers).toEqual([])
+  expect(preview.items.filter((item) => [broken.retainedRef, ...receiptRefs].includes(item.identity))).toEqual([])
+  expect((await f.coordinator.purge({ taskId: 'task', operationId: 'purge', expectedGeneration: preview.generation, previewDigest: preview.digest, discard: true, human: true })).state).toBe('purged')
+  expect(theirs()).toBe(before)
+  expect(existsSync(f.worktree)).toBe(false); expect(ours()).toBe('')
 }, 60_000)
 
 test('profile storage the installation does not list still blocks every permanent delete, broken thread or not', async () => {

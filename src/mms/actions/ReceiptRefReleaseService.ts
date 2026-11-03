@@ -3,7 +3,7 @@ import type { ChangeReceipt } from '../../shared/threadActions'
 import { ThreadJournal } from '../data/ThreadJournal'
 import { resolveRepositoryIdentityAsync } from '../git/RepositoryIdentity'
 import { buildResourceInventory, buildResourceInventoryFromFacts, OwnershipFacts } from '../lifecycle/ResourceInventory'
-import { getExternalResourceClaims, getExternalResourceClaimsFromFacts, unverifiedOwnerOver } from '../lifecycle/LifecycleClaims'
+import { getExternalResourceClaims, getExternalResourceClaimsFromFacts, repositoryTargetAsync, unverifiedOwnerOver } from '../lifecycle/LifecycleClaims'
 import { readDirectLifecycleRefAsync } from '../lifecycle/WorktreeRetirementService'
 import type { ResourceLifecycleStore } from '../lifecycle/ResourceLifecycleStore'
 import type { ThreadLeaseHandle } from '../queue/ThreadExecutionLease'
@@ -69,6 +69,8 @@ export class ReceiptRefReleaseService {
       }
       await readFacts()
       ownership()
+      // This repository as an unverified thread's scope is matched against it: its keys and the worktrees it registers.
+      const repository = await repositoryTargetAsync(identity.commonDir, identity.key)
       for (const candidate of candidates) {
         const receipt = candidate.receipt
         if (!receipt) throw new Error('Release journal references a missing immutable receipt.')
@@ -99,7 +101,7 @@ export class ReceiptRefReleaseService {
             // claim records: a record written before the repository moved still names the old one.
             if (external.some((resource) => resource.kind === 'git-ref' && resource.identity === ref.name)) throw new Error(`Reference is associated with another task or profile: ${ref.name}`)
             // A thread whose checkout can't be verified holds what its records may name, and its repositories (recorded or real).
-            const unverified = unverifiedOwnerOver(external, { repositoryIds: [identity.key], ref: ref.name })
+            const unverified = unverifiedOwnerOver(external, { ...repository, ref: ref.name })
             if (unverified) throw new Error(`${unverified.reason} ${ref.name} is kept.`)
             if (!resources.length || resources.some((resource) => resource.ownerTaskId !== task.taskId || resource.repositoryId !== identity.key || resource.claims.length > 0 || resource.ownership === 'unknown')) throw new Error(`Reference has an active, shared or unknown claim: ${ref.name}`)
           }

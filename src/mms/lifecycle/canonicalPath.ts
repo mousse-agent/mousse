@@ -1,5 +1,5 @@
 import { realpath as realpathCallback } from 'node:fs'
-import { lstat, readFile } from 'node:fs/promises'
+import { access, lstat, readdir, readFile } from 'node:fs/promises'
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { promisify } from 'node:util'
 
@@ -40,8 +40,9 @@ export function pathsOverlap(left: string, right: string): boolean {
 /**
  * The real path of the Git common directory a checkout points at now, from its own `.git` alone: a folder is a primary
  * checkout's; a file names the worktree's Git folder, whose `commondir` (or, when that folder is gone, its place under
- * `<common>/worktrees/`) gives the repository it belongs to, even one that was moved or deleted. Git is not run, so
- * nothing walks up into a parent repository. Undefined when the checkout has no `.git` or it can't be read.
+ * `<common>/worktrees/`) gives the repository it belongs to. Git is not run, so nothing walks up into a parent
+ * repository. Undefined when the checkout has no `.git`, it can't be read, or the repository it names is not there (it
+ * was moved or deleted, so the link ties it to no real repository).
  */
 export async function gitCommonDirAsync(checkout: string): Promise<string | undefined> {
   try {
@@ -56,6 +57,26 @@ export async function gitCommonDirAsync(checkout: string): Promise<string | unde
     try { common = resolve(gitDir, (await readFile(join(gitDir, 'commondir'), 'utf8')).trim()) }
     // No `commondir`: a linked worktree whose Git folder is gone, or a checkout whose Git folder is kept elsewhere.
     catch { common = basename(dirname(gitDir)) === 'worktrees' ? dirname(dirname(gitDir)) : gitDir }
+    if (!await access(common).then(() => true, () => false)) return undefined
     return await canonicalPathAsync(common)
   } catch { return undefined }
+}
+
+/**
+ * The real paths of the worktrees a repository registers (`<common>/worktrees/<name>/gitdir`), there or not. A worktree whose
+ * own `.git` link is stale (the repository moved and it was not repaired) is still registered here, and the next
+ * `git worktree repair` in this repository links it back, so it belongs to this repository. Reads without blocking.
+ */
+export async function registeredWorktreesAsync(commonDir: string): Promise<string[]> {
+  const root = join(commonDir, 'worktrees')
+  let names: string[]
+  try { names = await readdir(root) } catch { return [] }
+  const paths: string[] = []
+  for (const name of names.slice(0, 4096)) {
+    try {
+      const gitFile = (await readFile(join(root, name, 'gitdir'), 'utf8')).trim()
+      if (gitFile) paths.push(await canonicalPathAsync(dirname(resolve(root, name, gitFile))))
+    } catch { /* Not a worktree registration. */ }
+  }
+  return paths
 }

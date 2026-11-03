@@ -15,11 +15,11 @@ import { publishedRef } from '../actions/snapshots'
 import { readOnlyGitAsync, runReadOnlyGitAsync } from '../git/readOnlyGit'
 import { LISTING_MAX_BUFFER } from '../git/runGitProcess'
 import { acquireRepositoryLease } from '../git/RepositoryLease'
-import { repositoryKeyOf, resolveRepositoryIdentityAsync } from '../git/RepositoryIdentity'
+import { resolveRepositoryIdentityAsync } from '../git/RepositoryIdentity'
 import { isExecutionLeaseHeld, releaseExecutionLeaseHandle, STORAGE_CLEANUP_LEASE_SOURCE, tryAcquireExecutionLease } from '../queue/ThreadExecutionLease'
 import { MOUSSE_CONTROL_FILE_PATHS } from '../worktree/controlFiles'
 import { measureTree, type Measurement } from './diskMeasure'
-import { claimOverlapsPath, getExternalResourceClaims, unverifiedOwnerOver } from './LifecycleClaims'
+import { claimOverlapsPath, getExternalResourceClaims, repositoryTargetAsync, unverifiedOwnerOver } from './LifecycleClaims'
 import { canonicalPathAsync, gitCommonDirAsync } from './canonicalPath'
 import type { ResourcePurgeService, TrashSweepOutcome } from './ResourcePurgeService'
 import { assertLifecyclePath, type ResourceLifecycleStore } from './ResourceLifecycleStore'
@@ -1183,8 +1183,8 @@ export class StorageCleanupService {
           let children: string[] = []
           try { children = readdirSync(directory).slice(0, 32) } catch { /* Judged by the folder itself. */ }
           const checkouts = [directory, ...children.map((child) => join(directory, child))]
-          const actual = (await Promise.all(checkouts.map((checkout) => gitCommonDirAsync(checkout)))).flatMap((commonDir) => commonDir ? [repositoryKeyOf(commonDir)] : [])
-          const unverified = unverifiedOwnerOver(claims, { repositoryIds: [repository, ...actual], path: real })
+          const actual = await Promise.all([...new Set((await Promise.all(checkouts.map((checkout) => gitCommonDirAsync(checkout)))).filter((commonDir): commonDir is string => Boolean(commonDir)))].map((commonDir) => repositoryTargetAsync(commonDir)))
+          const unverified = unverifiedOwnerOver(claims, { repositoryIds: [repository, ...actual.flatMap((target) => target.repositoryIds)], registeredWorktrees: actual.flatMap((target) => target.registeredWorktrees), path: real })
           items.push({ rule: 'worktree-orphan', label: `${kind}/${name}`, bytes: measurement.bytes, files: measurement.files, ...approximate(measurement), outcome: 'kept', reason: unverified ? `${unverified.reason} It may still use this worktree.` : 'No thread uses this worktree' })
         }
       }

@@ -6,7 +6,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:pat
 import type { LifecyclePurgeItem, LifecyclePurgePreview, TaskLifecycleRecord, TrashRetentionPolicy } from '../../shared/resourceLifecycle'
 import { atomicWriteJsonSync } from '../data/AtomicFs'
 import { acquireRepositoryLease } from '../git/RepositoryLease'
-import { repositoryKeyOf, resolveRepositoryIdentityAsync } from '../git/RepositoryIdentity'
+import { resolveRepositoryIdentityAsync } from '../git/RepositoryIdentity'
 import { canonicalPathAsync, gitCommonDirAsync } from './canonicalPath'
 import { buildResourceInventory, OwnershipFacts } from './ResourceInventory'
 import { projectFolderPurgeRefs, threadKeptFilesRefs } from './projectFolderRefs'
@@ -14,7 +14,7 @@ import { measureTree } from './diskMeasure'
 import { assertLifecyclePath, assertLifecyclePathAsync, ResourceLifecycleStore } from './ResourceLifecycleStore'
 import { assertFrozenEntryUnchanged, lifecycleGitAsync, proveFrozenContentEntryAsync, lifecycleReadAsync, readDirectLifecycleRefAsync, walkOwnedContentAsync, WorktreeRetirementService } from './WorktreeRetirementService'
 import { isOwnerLive, PROCESS_INSTANCE_ID } from '../queue/processLiveness'
-import { claimOverlapsPath, getExternalResourceClaims, getExternalResourceClaimsFromFacts, unverifiedOwnerOver, type ClaimTarget } from './LifecycleClaims'
+import { claimOverlapsPath, getExternalResourceClaims, getExternalResourceClaimsFromFacts, repositoryTargetAsync, unverifiedOwnerOver, type ClaimTarget } from './LifecycleClaims'
 import { withFileLock } from '../scheduled/fileLock'
 import { isMousseOwnedRef } from '../../shared/mousseBranches'
 import { isKeptFilesItem, unverifiedHolds } from '../../shared/resourceLifecycle'
@@ -286,6 +286,14 @@ export class ResourcePurgeService {
     const held = new Set<string>()
     /** The real repository of each worktree that stays, for listing the files its restores kept as kept too. */
     const keptRepositories = new Map<string, string>()
+    /** The repository part of a target, read once per repository. */
+    const repositoryTargets = new Map<string, ReturnType<typeof repositoryTargetAsync>>()
+    const repositoryTarget = async (commonDir: string | undefined, recorded?: string): Promise<ClaimTarget> => {
+      if (!commonDir) return { repositoryIds: [recorded] }
+      if (!repositoryTargets.has(commonDir)) repositoryTargets.set(commonDir, repositoryTargetAsync(commonDir))
+      const found = await repositoryTargets.get(commonDir)!
+      return { repositoryIds: [recorded, ...found.repositoryIds], registeredWorktrees: found.registeredWorktrees }
+    }
     /** Real paths, so an alias of a folder another record names is that folder (`claimOverlapsPath`). */
     const canonical = async (identity: string): Promise<string | undefined> => isAbsolute(identity) ? canonicalPathAsync(identity) : undefined
     const keptBack = (identity: string, target: ClaimTarget): boolean => {
@@ -304,7 +312,7 @@ export class ResourcePurgeService {
       const realCommonDir = await gitCommonDirAsync(resource.identity)
       if (resource.repositoryId && realCommonDir) keptRepositories.set(resource.repositoryId, realCommonDir)
       if (shared(resource.identity, resource.repositoryId, real)) { preview.retained.push({ identity: resource.identity, reason: 'Another task or profile retains this workspace' }); continue }
-      if (keptBack(resource.identity, { repositoryIds: [resource.repositoryId, ...realCommonDir ? [repositoryKeyOf(realCommonDir)] : []], path: real })) continue
+      if (keptBack(resource.identity, { ...await repositoryTarget(realCommonDir, resource.repositoryId), path: real })) continue
       keptRepositories.delete(resource.repositoryId ?? '')
       try {
         const manifestPath = this.retirement.pathFor(resource.ownerTaskId, resource.identity)
@@ -372,8 +380,8 @@ export class ResourcePurgeService {
       try { plan = await projectFolderPurgeRefs(task) } catch (error) { preview.blockers.push(`Project folder refs of ${task.taskId}: ${(error as Error).message}`); continue }
       if (!plan) continue
       if ('unavailable' in plan) { preview.retained.push({ identity: join(task.location, 'project-folder.json'), reason: plan.unavailable }); continue }
-      const repositoryId = repositoryKeyOf(await canonicalPathAsync(plan.commonDir))
-      for (const { ref, sha, discardReason } of plan.refs) if (!keptBack(ref, { repositoryIds: [repositoryId], ref })) folderRefs.push({ id: `project-folder-ref:${task.taskId}:${ref}`, kind: 'ref', identity: ref, ownerTaskId: task.taskId, commonDir: plan.commonDir, expectedValue: sha, ...(discardReason ? { discardRequired: true, reason: discardReason } : {}), status: 'pending' })
+      const repository = await repositoryTarget(plan.commonDir)
+      for (const { ref, sha, discardReason } of plan.refs) if (!keptBack(ref, { ...repository, ref })) folderRefs.push({ id: `project-folder-ref:${task.taskId}:${ref}`, kind: 'ref', identity: ref, ownerTaskId: task.taskId, commonDir: plan.commonDir, expectedValue: sha, ...(discardReason ? { discardRequired: true, reason: discardReason } : {}), status: 'pending' })
     }
     // A worktree thread's restores keep files in its repository's refs too; they go with the thread's other refs, and
     // while they may be the only copy of a file a purge asks before dropping them (`threadKeptFilesRefs`).
@@ -385,8 +393,9 @@ export class ResourcePurgeService {
         const commonDir = repositories.get(repositoryId) ?? keptRepositories.get(repositoryId)
         if (!commonDir) continue
         try {
+          const repository = await repositoryTarget(commonDir, repositoryId)
           for (const { ref, sha, discardReason } of await threadKeptFilesRefs(commonDir, task.location)) {
-            if (folderRefs.some((item) => item.identity === ref) || await readDirectLifecycleRefAsync(commonDir, ref) !== sha || keptBack(ref, { repositoryIds: [repositoryId, repositoryKeyOf(await canonicalPathAsync(commonDir))], ref })) continue
+            if (folderRefs.some((item) => item.identity === ref) || await readDirectLifecycleRefAsync(commonDir, ref) !== sha || keptBack(ref, { ...repository, ref })) continue
             if (!repositories.has(repositoryId)) { preview.retained.push({ identity: ref, reason: 'Kept with its worktree, which another task or profile retains' }); continue }
             folderRefs.push({ id: `preserved-ref:${task.taskId}:${ref}`, kind: 'ref', identity: ref, ownerTaskId: task.taskId, commonDir, expectedValue: sha, ...(discardReason ? { discardRequired: true, reason: discardReason } : {}), status: 'pending' })
           }
@@ -414,9 +423,9 @@ export class ResourcePurgeService {
       if (shared(resource.identity, resource.repositoryId, real)) { preview.retained.push({ identity: resource.identity, reason: 'Another owner retains this resource' }); continue }
       if (held.has(resource.identity)) continue
       const repositoryId = resource.repositoryId ?? (repositories.size === 1 ? [...repositories.keys()][0] : undefined)
-      const commonDir = repositoryId ? repositories.get(repositoryId) : undefined
-      const repositoryIds = [repositoryId, ...commonDir ? [repositoryKeyOf(await canonicalPathAsync(commonDir))] : []]
-      if (!plannedRefs.has(resource.identity) && keptBack(resource.identity, resource.kind === 'git-ref' ? { repositoryIds, ref: resource.identity } : { path: resource.identity.includes('#') ? undefined : real })) continue
+      // A ref of a worktree that stays is judged in that worktree's real repository too.
+      const commonDir = repositoryId ? repositories.get(repositoryId) ?? keptRepositories.get(repositoryId) : undefined
+      if (!plannedRefs.has(resource.identity) && keptBack(resource.identity, resource.kind === 'git-ref' ? { ...await repositoryTarget(commonDir, repositoryId), ref: resource.identity } : { path: resource.identity.includes('#') ? undefined : real })) continue
       if (resource.kind === 'git-ref') {
         // Already planned from the project folder's own repository.
         if (plannedRefs.has(resource.identity)) continue
@@ -479,9 +488,9 @@ export class ResourcePurgeService {
 
   /** What an unverified thread's scope is matched against for `item` (`unverifiedOwnerOver`). */
   private async claimTarget(item: LifecyclePurgeItem): Promise<ClaimTarget> {
-    const repositoryIds = item.commonDir && (item.kind === 'ref' || item.kind === 'worktree') ? [repositoryKeyOf(await canonicalPathAsync(item.commonDir))] : []
-    if (item.kind === 'ref') return { repositoryIds, ref: item.identity }
-    return { repositoryIds, ...(isAbsolute(item.identity) ? { path: await canonicalPathAsync(item.identity) } : {}) }
+    const repository = await repositoryTargetAsync(item.kind === 'ref' || item.kind === 'worktree' ? item.commonDir : undefined)
+    if (item.kind === 'ref') return { ...repository, ref: item.identity }
+    return { ...repository, ...(isAbsolute(item.identity) ? { path: await canonicalPathAsync(item.identity) } : {}) }
   }
   private sign(preview: LifecyclePurgePreview): LifecyclePurgePreview { preview.digest = digest({ ...preview, digest: '' }); return preview }
   private order(item: LifecyclePurgeItem, tasks: TaskLifecycleRecord[]): number { return item.kind === 'worktree' ? 0 : item.kind === 'ref' ? 1 : tasks.some((task) => task.location === item.identity) ? 3 : 2 }
