@@ -1504,7 +1504,9 @@ export class NetService {
         this.config.enabled &&
         this.featureEnabled('netBridge') &&
         this.state?.keys.state() === 'unlocked' &&
-        this.transport?.hasPlusRelayListener() === true &&
+        // The Mousse ID relay is on, not "listening on it right now": a listener waiting to listen
+        // again (a quota refusal, a relay restart) must not close every phone's direct path.
+        this.transport?.hasPlusRelay() === true &&
         this.hosted.directPath?.().webrtc !== false
       )
     } catch {
