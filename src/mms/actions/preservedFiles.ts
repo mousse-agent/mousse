@@ -5,7 +5,7 @@ import { withGitAccess } from '../git/gitPolicy'
 import type { ThreadLeaseHandle } from '../queue/ThreadExecutionLease'
 import { collectStoreGarbageAsync, threadSnapshotStoreAsync } from '../workspace/SnapshotWorkspace'
 import { KEEP_COPY_OPERATIONS, PRESERVED_EXPIRY_OPERATION, PRESERVED_REFS } from '../../shared/resourceLifecycle'
-import { settleInterruptedKeeps } from './keptCopies'
+import { settleInterruptedKeeps, uncountedSince } from './keptCopies'
 import { withGitMutationLocks } from './GitOperationCoordinator'
 import { gitAsync, LISTING } from './git'
 import { UndoRetentionService } from './UndoRetentionService'
@@ -191,11 +191,14 @@ export async function expirePreservedFiles(threadDirectory: string, workspacePat
     // An interrupted expiry or keep is settled first, whatever else holds this one back: settling only records what is
     // gone, or what was kept.
     const settled = await settleInterrupted(journal, present)
-    await settleInterruptedKeeps(threadDirectory)
+    // Only this repository's keeps: a keep of the same owner in another repository may still be running.
+    const top = store ? undefined : (await gitAsync(workspacePath, ['rev-parse', '--show-toplevel']).catch(() => undefined))
+    if (top) await settleInterruptedKeeps(threadDirectory, top)
     if (!retention.clockAllowsRelease()) return finish(settled, 'The Undo retention clock needs review before kept files expire.')
     if (retention.unfinishedOperation()) return finish(settled, 'An unfinished operation protects kept files.')
     const now = (options.now ?? Date.now)()
-    const due = threadPreservedRefs(await listing(), threadDirectory).filter((item) => item.keptAt !== undefined && retention.retainedUntil(item.keptAt) <= now)
+    // Time a project's clock did not count (it resumed after a jump with no person to review it) keeps copies longer.
+    const due = threadPreservedRefs(await listing(), threadDirectory).filter((item) => item.keptAt !== undefined && retention.retainedUntil(item.keptAt) + uncountedSince(threadDirectory, item.keptAt) <= now)
     if (!due.length) return finish(settled)
     const operationId = randomUUID()
     const refs = due.map((item) => ({ name: item.ref, sha: item.sha, keptAt: new Date(item.keptAt!).toISOString() }))

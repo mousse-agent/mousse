@@ -7,7 +7,7 @@ import { dirname, join, resolve, sep } from 'node:path'
 import type { SimpleGit } from 'simple-git'
 import { redactGitText } from '../../shared/gitText'
 import { holdsRepositoryMutation } from '../actions/GitOperationCoordinator'
-import { keepCopy, KeepCopyTooLargeError, type KeptCopy } from '../actions/keptCopies'
+import { keepCopy, KeepCopyRefusedError, type KeptCopy } from '../actions/keptCopies'
 import type { CodeHost } from './CodeHost'
 import { COMMIT_SUGGESTION_LIMITS, EMPTY_COMMIT_INPUT, fitPatch, parseNumstat, type CommitInput } from './commitSuggestion'
 import { explicitActionGitEnv } from './gitEnv'
@@ -91,6 +91,7 @@ const gitErrors = createErrorProvider({
   git_branch_failed: { category: 'invalid', retryable: false, message: 'Git could not change the branch.' },
   git_path_outside: { category: 'invalid', retryable: false, message: 'That path is outside the project folder.' },
   keep_copy_too_large: { category: 'invalid', retryable: false, message: 'These changes are too large to keep a copy of, so nothing was discarded.' },
+  keep_copy_refused: { category: 'invalid', retryable: false, message: 'A copy of these changes could not be kept, so nothing was discarded.' },
   git_failed: { category: 'invalid', retryable: false, message: 'Git could not complete that action.' }
 })
 
@@ -894,16 +895,17 @@ export class GitService {
       try {
         kept = await keepCopy({ owner: keep.owner, top, operationType: 'git-discard', action: 'Discard', paths: [...new Set([...restore, ...remove, ...untracked])] })
       } catch (error) {
-        // The refusal names the largest paths, so the person knows what to move aside first.
-        if (error instanceof KeepCopyTooLargeError) {
-          const fixed = gitErrors.create('keep_copy_too_large')
-          throw new AppError({ code: fixed.code, message: error.message, errorInfo: fixed.errorInfo, details: { bytes: error.bytes, largest: error.largest } }, error)
+        // The refusal names the files (the largest ones, for a copy too large), so the person knows what to move aside.
+        if (error instanceof KeepCopyRefusedError) {
+          const fixed = gitErrors.create(error.code === 'keep_copy_too_large' ? 'keep_copy_too_large' : 'keep_copy_refused')
+          throw new AppError({ code: fixed.code, message: error.message, errorInfo: fixed.errorInfo, details: { paths: error.paths } }, error)
         }
         throw error
       }
+      // Untracked files go first: a tracked file that a folder of untracked files replaced can then come back in its place.
+      await this.removeUntracked(top, untracked)
       await this.withPathspecFile(top, ['restore', '--source=HEAD', '--staged', '--worktree'], [...restore])
       await this.withPathspecFile(top, ['rm', '-f', '-r', '--ignore-unmatch', '-q'], [...remove])
-      await this.removeUntracked(top, untracked)
       return kept
     })
   }

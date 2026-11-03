@@ -1,10 +1,11 @@
 import { execFileSync } from 'node:child_process'
 import { createHash, randomBytes } from 'node:crypto'
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { KEEP_COPY_LIMITS, keepCopy, keptCopyNotice, projectKeptFilesOwner, registerProjectKeptFilesFolder, settleInterruptedKeeps } from '../src/mms/actions/keptCopies'
+import { KEEP_COPY_LIMITS, keepCopy, keptCopyNotice, keptCopyRestoreCommand, projectKeptFilesOwner, projectKeptFilesOwners, registerProjectKeptFilesFolder, settleInterruptedKeeps } from '../src/mms/actions/keptCopies'
+import { retireProjectSnapshots } from '../src/mms/workspace/SnapshotWorkspace'
 import { expirePreservedFiles, threadPreservedIndex } from '../src/mms/actions/preservedFiles'
 import { UndoRetentionService } from '../src/mms/actions/UndoRetentionService'
 import { UndoRetentionSweeper } from '../src/mms/actions/UndoRetentionSweeper'
@@ -42,9 +43,14 @@ function repo(): string {
   return cwd
 }
 
-/** Brings the working version of `path` back from the copy and reads it. */
+/**
+ * Brings the working version of `path` back from the copy with the command the result shows, run by a shell in the
+ * repository's top folder as a person would, and reads the file's bytes.
+ */
 function restoreWorking(cwd: string, ref: string, path: string): Buffer {
-  git(cwd, 'restore', `--source=${ref}`, '--', path)
+  const quoted = `'${path.replace(/'/g, `'\\''`)}'`
+  mkdirSync(dirname(join(cwd, path)), { recursive: true })
+  execFileSync('sh', ['-c', keptCopyRestoreCommand(ref).replaceAll('<path>', quoted)], { cwd, stdio: ['ignore', 'pipe', 'pipe'] })
   return readFileSync(join(cwd, path))
 }
 
@@ -101,20 +107,24 @@ describe('Discard keeps a copy first', () => {
     expect(statSync(join(cwd, 'tool.sh')).mode & 0o111).not.toBe(0)
   })
 
-  it('keeps an edit Git can tell only by its content: same size, and the time its index entry records', async () => {
+  it('keeps an edit Git can tell only by its content in a whole-tree copy: same size, and the time its index entry records', async () => {
     const cwd = repo()
     // Without the change time, an edit within the second its entry was written looks the same to Git by size and time.
     git(cwd, 'config', 'core.trustctime', 'false')
+    // A file written an hour ago, so its entry is not racy when it is committed and Git records its real size.
+    const hourAgo = new Date(Date.now() - 60 * 60 * 1000)
+    writeFileSync(join(cwd, 'base.txt'), 'kept\n'); utimesSync(join(cwd, 'base.txt'), hourAgo, hourAgo)
+    git(cwd, 'commit', '-qam', 'kept')
     const recorded = statSync(join(cwd, 'base.txt'))
-    writeFileSync(join(cwd, 'base.txt'), 'BASE\n')
-    // The file and the index both carry the entry's time, so only a racy-clean check reads the file again.
+    writeFileSync(join(cwd, 'base.txt'), 'KEPT\n')
+    // The file and the index both carry the entry's time, so only a racy-clean check reads the file again. The copy of the
+    // index is written afresh, so it has a new time unless the keep gives it the real index's.
     utimesSync(join(cwd, 'base.txt'), recorded.atime, recorded.mtime)
     utimesSync(join(cwd, '.git', 'index'), recorded.atime, recorded.mtime)
     // Read without writing the index: a write would mark the entry changed and hide what is tested here.
     expect(git(cwd, '--no-optional-locks', 'status', '--porcelain')).toBe('M base.txt')
-    const kept = (await new GitService().discard(cwd, USER, ['base.txt'], { owner: temp('mousse-kept-owner-') }))!
-    expect(readFileSync(join(cwd, 'base.txt'), 'utf8')).toBe('base\n')
-    expect(restoreWorking(cwd, kept.ref, 'base.txt').toString()).toBe('BASE\n')
+    const kept = await keepCopy({ owner: temp('mousse-kept-owner-'), top: cwd, operationType: 'git-discard', action: 'Discard' })
+    expect(restoreWorking(cwd, kept.ref, 'base.txt').toString()).toBe('KEPT\n')
   })
 
   it('brings back a staged-only addition from its staged version', async () => {
@@ -207,6 +217,110 @@ describe('Discard keeps a copy first', () => {
   })
 })
 
+describe('the copy holds each file’s bytes as they were on disk', () => {
+  /** Commits `files` (with `.gitattributes` among them, say) on top of the fixture's base. */
+  function commit(cwd: string, files: Record<string, string>): void {
+    for (const [path, text] of Object.entries(files)) writeFileSync(join(cwd, path), text)
+    git(cwd, 'add', '.'); git(cwd, 'commit', '-qm', 'setup')
+  }
+  async function discardAndRestore(cwd: string, path: string, bytes: Buffer): Promise<void> {
+    const kept = (await new GitService().discard(cwd, USER, [path], { owner: temp('mousse-kept-owner-') }))!
+    expect(existsSync(join(cwd, path)) && readFileSync(join(cwd, path)).equals(bytes)).toBe(false)
+    expect(restoreWorking(cwd, kept.ref, path).equals(bytes)).toBe(true)
+  }
+
+  it('keeps CRLF line endings that core.autocrlf=input would turn into LF', async () => {
+    const cwd = repo()
+    git(cwd, 'config', 'core.autocrlf', 'input')
+    const bytes = Buffer.from('one\r\ntwo\r\nthree\r\n')
+    writeFileSync(join(cwd, 'base.txt'), bytes)
+    await discardAndRestore(cwd, 'base.txt', bytes)
+  })
+
+  it('keeps CRLF line endings that text=auto would turn into LF', async () => {
+    const cwd = repo()
+    commit(cwd, { '.gitattributes': '* text=auto\n' })
+    const bytes = Buffer.from('untracked\r\nwindows file\r\n')
+    writeFileSync(join(cwd, 'win.txt'), bytes)
+    await discardAndRestore(cwd, 'win.txt', bytes)
+  })
+
+  it('keeps what a clean filter would change', async () => {
+    const cwd = repo()
+    const config = join(temp('mousse-kept-config-'), 'gitconfig')
+    writeFileSync(config, '[filter "mask"]\n\tclean = sed s/SECRET/xxxxxx/\n\tsmudge = cat\n')
+    vi.stubEnv('GIT_CONFIG_GLOBAL', config)
+    commit(cwd, { '.gitattributes': '*.cfg filter=mask\n', 'app.cfg': 'token=none\n' })
+    const bytes = Buffer.from('token=SECRET\n')
+    writeFileSync(join(cwd, 'app.cfg'), bytes)
+    await discardAndRestore(cwd, 'app.cfg', bytes)
+  })
+
+  it('keeps an $Id$ line that ident would collapse', async () => {
+    const cwd = repo()
+    commit(cwd, { '.gitattributes': '*.c ident\n', 'main.c': '/* $Id$ */\n' })
+    const bytes = Buffer.from('/* $Id: written by hand $ */\nint kept;\n')
+    writeFileSync(join(cwd, 'main.c'), bytes)
+    await discardAndRestore(cwd, 'main.c', bytes)
+  })
+
+  it('keeps a symbolic link as its link', async () => {
+    const cwd = repo()
+    symlinkSync('base.txt', join(cwd, 'link'))
+    const kept = (await new GitService().discard(cwd, USER, ['link'], { owner: temp('mousse-kept-owner-') }))!
+    expect(existsSync(join(cwd, 'link'))).toBe(false)
+    expect(git(cwd, 'ls-tree', kept.ref, '--', 'link')).toMatch(/^120000 blob /)
+    expect(gitBytes(cwd, 'cat-file', 'blob', `${kept.ref}:link`).toString()).toBe('base.txt')
+  })
+})
+
+describe('the copy’s objects', () => {
+  const objectCounts = (cwd: string) => Object.fromEntries(git(cwd, 'count-objects', '-v').split('\n').map((line) => line.split(': ')).map(([key, value]) => [key, Number(value)]))
+
+  it('go into the repository as one pack, with no loose object, however many files there are', async () => {
+    const cwd = repo()
+    const paths: string[] = []
+    for (let folder = 0; folder < 20; folder++) {
+      mkdirSync(join(cwd, 'build', `d${folder}`), { recursive: true })
+      for (let file = 0; file < 100; file++) {
+        const path = `build/d${folder}/f${file}.js`
+        writeFileSync(join(cwd, path), `// ${folder}/${file}\n${'x'.repeat(file)}`)
+        paths.push(path)
+      }
+    }
+    const before = objectCounts(cwd)
+    const kept = (await new GitService().discard(cwd, USER, paths, { owner: temp('mousse-kept-owner-') }))!
+    const after = objectCounts(cwd)
+    expect(after.count).toBe(before.count)
+    expect(after.packs).toBe(before.packs + 1)
+    // Every object the copy names is there.
+    expect(() => git(cwd, 'rev-list', '--objects', '--missing=error', kept.ref)).not.toThrow()
+    expect(restoreWorking(cwd, kept.ref, 'build/d7/f42.js').toString()).toBe(`// 7/42\n${'x'.repeat(42)}`)
+  })
+
+  it('count staged versions toward the cap too', async () => {
+    const cwd = repo()
+    const owner = temp('mousse-kept-owner-')
+    KEEP_COPY_LIMITS.bytes = 1000
+    writeFileSync(join(cwd, 'staged.bin'), randomBytes(4000)); git(cwd, 'add', 'staged.bin')
+    // Nothing is left on disk: the staged version is all the copy would hold.
+    rmSync(join(cwd, 'staged.bin'))
+    const refusal = await new GitService().discard(cwd, USER, ['staged.bin'], { owner }).catch((error: unknown) => error)
+    expect(refusal).toMatchObject({ code: 'keep_copy_too_large', message: expect.stringContaining('staged.bin (3.9 KB)') })
+    expect(git(cwd, 'diff', '--cached', '--name-only')).toBe('staged.bin')
+    expect(preservedRefs(cwd)).toEqual([])
+  })
+
+  it('a tracked file replaced by a folder: the folder’s files are kept, and the file comes back', async () => {
+    const cwd = repo()
+    writeFileSync(join(cwd, 'lib'), 'a file\n'); git(cwd, 'add', 'lib'); git(cwd, 'commit', '-qm', 'lib')
+    rmSync(join(cwd, 'lib')); mkdirSync(join(cwd, 'lib')); writeFileSync(join(cwd, 'lib', 'inner.txt'), 'in the folder\n')
+    const kept = (await new GitService().discard(cwd, USER, ['lib', 'lib/inner.txt'], { owner: temp('mousse-kept-owner-') }))!
+    expect(readFileSync(join(cwd, 'lib'), 'utf8')).toBe('a file\n')
+    expect(gitBytes(cwd, 'cat-file', 'blob', `${kept.ref}:lib/inner.txt`).toString()).toBe('in the folder\n')
+  })
+})
+
 describe('keepCopy', () => {
   it('never changes the real index, HEAD or branches while it keeps a copy', async () => {
     const cwd = repo()
@@ -220,7 +334,7 @@ describe('keepCopy', () => {
     expect(git(cwd, 'show', `${kept.ref}^2:base.txt`)).toBe('staged')
     expect(git(cwd, 'show', `${kept.ref}:loose.txt`)).toBe('loose')
     expect(git(cwd, 'rev-parse', `${kept.ref}^1`)).toBe(before.head)
-    expect(keptCopyNotice(kept)).toBe(`A copy is kept for 30 days as ${kept.ref}. To bring a file back: git restore --source=${kept.ref} -- <path> (its staged version: --source=${kept.ref}^2 --staged).`)
+    expect(keptCopyNotice(kept)).toBe(`A copy is kept for 30 days as ${kept.ref}. To bring a file back exactly as it was, run in ${cwd}: git cat-file blob ${kept.ref}:<path> > <path> (its staged version: git restore --source=${kept.ref}^2 --staged -- <path>).`)
   })
 
   it('keeps ignored files too when asked, for a cleanup that removes them', async () => {
@@ -244,17 +358,44 @@ describe('keepCopy', () => {
     git(cwd, 'update-ref', written, commit)
     // An unsettled keep pauses nothing: it removed nothing yet.
     expect(new UndoRetentionService(owner).unfinishedOperation()).toBe(false)
-    expect(await settleInterruptedKeeps(owner)).toEqual([written])
+    expect(await settleInterruptedKeeps(owner, cwd)).toEqual([written])
     const latest = new ThreadJournal(owner).latestByOperation()
     expect(latest.get(operationOf(written))).toMatchObject({ state: 'completed', details: { phase: 'outcome', ref: written, interrupted: true } })
     expect(latest.get(operationOf(missing))).toMatchObject({ state: 'failed', details: { phase: 'outcome', interrupted: true } })
     expect(preservedRefs(cwd)).toEqual([written])
     // Settled once: a second call records nothing more.
     const count = new ThreadJournal(owner).list().length
-    expect(await settleInterruptedKeeps(owner)).toEqual([])
+    expect(await settleInterruptedKeeps(owner, cwd)).toEqual([])
     expect(new ThreadJournal(owner).list()).toHaveLength(count)
     // Both stay the owner's, so the one that exists expires with the others.
     expect(threadPreservedIndex(owner).owns(written)).toBe(true)
+  })
+})
+
+describe('owners', () => {
+  it('settles only the keeps of the repository whose locks the caller holds', async () => {
+    const first = repo()
+    const second = repo()
+    const owner = temp('mousse-kept-owner-')
+    const operationId = '33333333-3333-4333-8333-333333333333'
+    const sha = git(first, 'rev-parse', 'HEAD')
+    const ref = `refs/mousse/preserved/${operationId}-${sha.slice(0, 12)}`
+    new ThreadJournal(owner).append({ operationId, operationType: 'git-discard', state: 'prepared', details: { phase: 'intent', ref, sha, top: first } })
+    // A keep in the first repository may still be running while the second one's is settled.
+    expect(await settleInterruptedKeeps(owner, second)).toEqual([])
+    expect(new ThreadJournal(owner).latestByOperation().get(operationId)?.state).toBe('prepared')
+    expect(await settleInterruptedKeeps(owner, first)).toEqual([])
+    expect(new ThreadJournal(owner).latestByOperation().get(operationId)?.state).toBe('failed')
+  })
+
+  it('a project’s owner is outside its data folder, so removing the project leaves its copies to expire', () => {
+    const home = temp('mousse-kept-home-')
+    const owner = projectKeptFilesOwner(home, 'project-2')
+    registerProjectKeptFilesFolder(owner, 'project-2', repo())
+    mkdirSync(join(home, 'project-data', 'project-2'), { recursive: true })
+    expect(retireProjectSnapshots('project-2', home)).toBe('trashed')
+    expect(existsSync(join(home, 'project-data', 'project-2'))).toBe(false)
+    expect(projectKeptFilesOwners(home).map((item) => item.owner)).toEqual([owner])
   })
 })
 
@@ -307,6 +448,37 @@ describe('kept copies expire', () => {
     await sweeper.tick()
     expect(preservedRefs(cwd)).toEqual([])
     expect(sweeper.outcomes.get(`project:project-1:${cwd}`)).toMatchObject({ expiredPreservedRefs: 1 })
+    await sweeper.stop()
+  })
+
+  it('a project’s clock that jumped resumes by itself, and the jump is not counted: the copy is kept that much longer', async () => {
+    const cwd = repo()
+    const home = temp('mousse-kept-home-')
+    const start = Date.parse('2026-11-03T12:00:00Z')
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(start)
+    const owner = projectKeptFilesOwner(home, 'project-3')
+    registerProjectKeptFilesFolder(owner, 'project-3', cwd)
+    writeFileSync(join(cwd, 'draft.txt'), 'draft\n')
+    const kept = (await new GitService().discard(cwd, USER, ['draft.txt'], { owner }))!
+    const sweeper = new UndoRetentionSweeper({ list: () => [], profileHome: home } as unknown as ResourceLifecycleStore)
+    await sweeper.tick()
+    // Ten days with no sweep: more than the clock trusts in one step, as after a week with the computer off.
+    vi.setSystemTime(start + 10 * DAY)
+    await sweeper.tick()
+    expect(sweeper.outcomes.get(`project:project-3:${cwd}`)?.reason).toBeUndefined()
+    expect(new UndoRetentionService(owner, Date.now, true).suspendedSince()).toBeUndefined()
+    for (let day = 16; day < 40; day += 6) {
+      vi.setSystemTime(start + day * DAY)
+      await sweeper.tick()
+    }
+    // Thirty days after the copy, plus the ten the clock did not count.
+    vi.setSystemTime(start + 40 * DAY - 60 * 60 * 1000)
+    await sweeper.tick()
+    expect(preservedRefs(cwd)).toEqual([kept.ref])
+    vi.setSystemTime(start + 40 * DAY + 60 * 60 * 1000)
+    await sweeper.tick()
+    expect(preservedRefs(cwd)).toEqual([])
     await sweeper.stop()
   })
 })

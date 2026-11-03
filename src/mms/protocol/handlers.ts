@@ -110,7 +110,7 @@ import { CodeRevertService } from '../actions/CodeRevertService'
 import { ConversationBranchService } from '../actions/ConversationBranchService'
 import { discardPendingChangesAsync, gitAsync as workspaceGitAsync } from '../actions/git'
 import { getMousseHomeDir } from '../data/paths'
-import { keepCopy, KeepCopyTooLargeError, keptCopyNotice, keptCopyWindowMs, projectKeptFilesOwner, registerProjectKeptFilesFolder, type KeptCopy } from '../actions/keptCopies'
+import { keepCopy, keepExistingCommit, KeepCopyRefusedError, keptCopyNotice, keptCopyWindowMs, projectKeptFilesOwner, registerProjectKeptFilesFolder, type KeptCopy } from '../actions/keptCopies'
 import { abortPreservedNotice, takeSnapshotAsync } from '../actions/snapshots'
 import { randomUUID } from 'node:crypto'
 import { ManagedConflictService } from '../actions/ManagedConflictService'
@@ -2935,17 +2935,19 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       // as a snapshot first (the turns' receipts keep theirs), and a copy stays for the thread's Undo window.
       return await withGitMutationLocks(operation.threadDirectory, workspace.worktreePath, 'discard-pending-changes', async () => {
         let before: string
-        // The files are recorded first. When the record cannot be written (a pending operation), a plain snapshot stands in;
-        // when even that fails, nothing is discarded. The copy is made inside `discardPendingChanges`, before any reset.
+        // The files are recorded first. When the record cannot be written (a pending operation), a plain snapshot stands in,
+        // kept as one of the thread's copies so it expires with them; when either fails, nothing is discarded. The copy of
+        // what is dropped is made inside `discardPendingChanges`, before any reset.
         try { before = (await new ThreadActionService(operation.threadDirectory).recordOutsideChangesHeld({ threadId: workspace.threadId, conversationBranchId: workspace.conversationBranchId, workspacePath: workspace.worktreePath })).startSha }
         catch {
           try { before = (await takeSnapshotAsync(workspace.worktreePath, { reason: 'before discard', threadId: workspace.threadId })).sha }
           catch (error) { throw new DomainRpcError('discard_unsafe', `Nothing was discarded: the files could not be recorded first (${(error as Error).message.split(/\r?\n/)[0]}).`) }
-          await workspaceGitAsync(workspace.worktreePath, ['update-ref', '--no-deref', `refs/mousse/discarded/snapshot-${before}`, before])
+          try { await keepExistingCommit({ owner: operation.threadDirectory, top: workspace.worktreePath, operationType: 'git-discard', sha: before }) }
+          catch (error) { throw new DomainRpcError('discard_unsafe', `Nothing was discarded: the files could not be kept first (${(error as Error).message.split(/\r?\n/)[0]}).`) }
         }
         const kept = await discardPendingChangesAsync(workspace.worktreePath, (top) => keepCopy({ owner: operation.threadDirectory, top, operationType: 'git-discard', action: 'Discard' }))
-          .catch((error: unknown) => { throw error instanceof KeepCopyTooLargeError ? new DomainRpcError('keep_copy_too_large', error.message, { bytes: error.bytes, largest: error.largest }) : error })
-        return { backupRef: kept.ref, snapshotSha: before, notice: `${keptCopyNotice(kept)} Run it in ${workspace.worktreePath}.` }
+          .catch((error: unknown) => { throw error instanceof KeepCopyRefusedError ? new DomainRpcError(error.code, error.message, { paths: error.paths }) : error })
+        return { backupRef: kept.ref, snapshotSha: before, notice: keptCopyNotice(kept) }
       })
     }
     case 'actions.list': {

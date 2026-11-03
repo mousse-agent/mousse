@@ -5,7 +5,8 @@ import { UndoRetentionService } from './UndoRetentionService'
 import { ReceiptRefReleaseService } from './ReceiptRefReleaseService'
 import { releaseSnapshotRefs } from './SnapshotRefReleaseService'
 import { expirePreservedFiles } from './preservedFiles'
-import { projectKeptFilesOwners } from './keptCopies'
+import { projectKeptFilesOwners, resumeProjectClockHeld } from './keptCopies'
+import { withGitMutationLocks } from './GitOperationCoordinator'
 import { existsSync } from 'node:fs'
 
 /**
@@ -83,7 +84,8 @@ export class UndoRetentionSweeper {
 
   /**
    * The copies each project keeps for the person's own checkout, in every folder they were kept in. As for a thread,
-   * the start-up pass only moves the owner's retention clock (starting it the first time); nothing expires in it.
+   * the start-up pass only moves the owner's retention clock (starting it the first time); nothing expires in it. A
+   * clock that jumped resumes without a person (`resumeProjectClockHeld`), with the jump not counted.
    */
   private async sweepProjectOwners(startup: boolean): Promise<void> {
     for (const { projectId, owner, folders } of projectKeptFilesOwners(this.store.profileHome)) {
@@ -96,7 +98,12 @@ export class UndoRetentionSweeper {
         try {
           lease = tryAcquireExecutionLease(owner, { source: 'undo-retention-sweep' })
           if (!lease) continue
-          const clock = await new UndoRetentionService(owner).sweep(folder, this.abort.signal, lease)
+          let clock = await new UndoRetentionService(owner).sweep(folder, this.abort.signal, lease)
+          // No person reviews a project's clock: it resumes at once, and the time it jumped is not counted.
+          if (clock.suspended) {
+            await withGitMutationLocks(owner, folder, 'kept-copies-clock', () => resumeProjectClockHeld(owner), this.abort.signal, lease)
+            clock = await new UndoRetentionService(owner).sweep(folder, this.abort.signal, lease)
+          }
           if (clock.suspended) { this.outcomes.set(key, { at: new Date().toISOString(), reason: 'Clock review required' }); continue }
           if (startup) continue
           const expiry = await expirePreservedFiles(owner, folder, { signal: this.abort.signal, heldThreadLease: lease })

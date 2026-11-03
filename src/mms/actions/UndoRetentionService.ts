@@ -133,6 +133,21 @@ export class UndoRetentionService {
   isReceiptExpired(receiptId: string): boolean { return this.state().expired.has(receiptId) }
   expiredReceiptIds(): ReadonlySet<string> { return this.state().expired }
   policy(): UndoRetentionPolicy { return { ...this.state().policy } }
+  /** The last time the clock trusted, when it is suspended (it moved forward by more than `maxForwardStepMs`). */
+  suspendedSince(): number | undefined {
+    const state = this.state()
+    return state.suspended ? state.highWater : undefined
+  }
+
+  /**
+   * Resumes a suspended clock at now without a person's review. Only for an owner no person reviews (a project's kept
+   * copies, `keptCopies.ts`), whose caller first records the time from {@link suspendedSince} to now as not counted, so
+   * nothing it keeps expires sooner because of the jump. A thread's clock resumes only through `configure`.
+   */
+  resumeUncountedHeld(): void {
+    if (!this.state().suspended) return
+    this.append({ kind: 'clock', at: this.now(), suspended: false })
+  }
   clockAllowsRelease(): boolean {
     const state = this.state(), now = this.now()
     return !state.suspended && now >= state.highWater && now <= state.highWater + state.policy.maxForwardStepMs

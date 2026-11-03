@@ -1,10 +1,12 @@
+import { execFileSync } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
 import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { projectKeptFilesOwner } from '../src/mms/actions/keptCopies'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { keptCopyRestoreCommand, projectKeptFilesOwner } from '../src/mms/actions/keptCopies'
 import { threadPreservedIndex } from '../src/mms/actions/preservedFiles'
 import { ThreadActionService } from '../src/mms/actions/ThreadActionService'
+import { WorkspaceResolver } from '../src/mms/workspace/WorkspaceResolver'
 import { ThreadJournal } from '../src/mms/data/ThreadJournal'
 import { MousseMainService } from '../src/mms/MousseMainService'
 import { LocalMmsClient } from '../src/mms/protocol/client'
@@ -13,6 +15,8 @@ import type { GitKeptCopy, GitStatusSnapshot } from '../src/shared/types'
 import { git, gitFoundationFixture } from './fixtures/gitFoundation'
 
 type Discarded = { status: GitStatusSnapshot; kept?: GitKeptCopy }
+/** Runs the restore command the result shows, for `path`, in the folder it names. */
+const restore = (top: string, ref: string, path: string) => execFileSync('sh', ['-c', keptCopyRestoreCommand(ref).replaceAll('<path>', `'${path}'`)], { cwd: top })
 const preserved = (cwd: string) => git(cwd, 'for-each-ref', '--format=%(refname)', 'refs/mousse/preserved/').split('\n').filter(Boolean)
 
 describe('Git panel Discard keeps a copy', () => {
@@ -53,13 +57,14 @@ describe('Git panel Discard keeps a copy', () => {
     expect(existsSync(join(f.repo, 'scratch.bin'))).toBe(false)
     const kept = result.kept!
     expect(preserved(f.repo)).toEqual([kept.ref])
-    expect(kept.notice).toBe(`A copy is kept for 30 days as ${kept.ref}. To bring a file back: git restore --source=${kept.ref} -- <path> (its staged version: --source=${kept.ref}^2 --staged).`)
+    const top = git(f.repo, 'rev-parse', '--show-toplevel')
+    expect(kept.notice).toBe(`A copy is kept for 30 days as ${kept.ref}. To bring a file back exactly as it was, run in ${top}: git cat-file blob ${kept.ref}:<path> > <path> (its staged version: git restore --source=${kept.ref}^2 --staged -- <path>).`)
     // Owned by the project's data folder, where the sweep looks.
     const owner = projectKeptFilesOwner(mms.threads.lifecycleStore.profileHome, project.id)
     expect(threadPreservedIndex(owner).owns(kept.ref)).toBe(true)
     expect(JSON.parse(readFileSync(join(owner, 'owner.json'), 'utf8'))).toMatchObject({ projectId: project.id, folders: [git(f.repo, 'rev-parse', '--show-toplevel')] })
 
-    git(f.repo, 'restore', `--source=${kept.ref}`, '--', 'scratch.bin', 'value.txt')
+    for (const path of ['scratch.bin', 'value.txt']) restore(f.repo, kept.ref, path)
     expect(readFileSync(join(f.repo, 'scratch.bin')).equals(binary)).toBe(true)
     expect(readFileSync(join(f.repo, 'value.txt'), 'utf8')).toBe('working\n')
     git(f.repo, 'restore', `--source=${kept.ref}^2`, '--staged', '--', 'value.txt')
@@ -82,7 +87,29 @@ describe('Git panel Discard keeps a copy', () => {
     expect(action).toMatchObject({ actor: { kind: 'user' }, externalEffects: [expect.objectContaining({ description: 'Discarded 1 file' })] })
     // The snapshot before the action has the file too.
     expect(git(f.repo, 'show', `${action.startSha}:draft.txt`)).toBe('the thread’s draft')
-    git(f.repo, 'restore', `--source=${kept.ref}`, '--', 'draft.txt')
+    restore(f.repo, kept.ref, 'draft.txt')
     expect(readFileSync(join(f.repo, 'draft.txt'), 'utf8')).toBe('the thread’s draft\n')
+  })
+
+  it('the pending-changes Discard keeps the snapshot that stands in for the record as one of the thread’s copies, never an ownerless ref', async () => {
+    const project = mms.projects.openProject(f.repo)
+    const thread = mms.threads.createThread('Worktree thread', project.id)
+    const directory = mms.threads.getThreadDir(thread.id)
+    const worktree = (await new WorkspaceResolver(directory, thread.id, f.repo).resolve('agent')).workspacePath!
+    writeFileSync(join(worktree, 'left.txt'), 'left over\n')
+    // The record of the files cannot be written (an operation of the thread is pending, say): a plain snapshot stands in.
+    vi.spyOn(ThreadActionService.prototype, 'recordOutsideChangesHeld').mockRejectedValueOnce(new Error('an operation is pending'))
+    const result = await client.request<{ backupRef: string; snapshotSha: string; notice: string }>('workspace.discardPendingChanges', { threadId: thread.id, confirmed: true })
+    vi.restoreAllMocks()
+    expect(git(worktree, 'for-each-ref', '--format=%(refname)', 'refs/mousse/discarded/')).toBe('')
+    const kept = preserved(worktree)
+    expect(kept).toHaveLength(2)
+    const index = threadPreservedIndex(directory)
+    for (const ref of kept) expect(index.owns(ref)).toBe(true)
+    const snapshotRef = kept.find((ref) => git(worktree, 'rev-parse', ref) === result.snapshotSha)!
+    expect(git(worktree, 'show', `${snapshotRef}:left.txt`)).toBe('left over')
+    expect(existsSync(join(worktree, 'left.txt'))).toBe(false)
+    restore(worktree, result.backupRef, 'left.txt')
+    expect(readFileSync(join(worktree, 'left.txt'), 'utf8')).toBe('left over\n')
   })
 })
