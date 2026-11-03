@@ -1,6 +1,6 @@
 import { afterEach, expect, test, vi } from 'vitest'
 import { execFileSync } from 'node:child_process'
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { ResourceLifecycleStore } from '../src/mms/lifecycle/ResourceLifecycleStore'
@@ -10,18 +10,22 @@ import { fixtureGit as git, ownedHome } from './support/fixtureGit'
 import { resolveRepositoryIdentity } from '../src/mms/git/RepositoryIdentity'
 import { registerThreadLifecycleGate } from '../src/mms/queue/ThreadLifecycleAdmission'
 
-/** Runs right after the purge unlinks a path, as a write that lands between two of its system calls would. */
-const late = vi.hoisted(() => ({ afterUnlink: undefined as undefined | ((path: string) => void) }))
+/** Run right after the purge unlinks a path or removes a folder, as a change that lands between two of its system calls would. */
+const late = vi.hoisted(() => ({ afterUnlink: undefined as undefined | ((path: string) => void), afterRmdir: undefined as undefined | ((path: string) => void) }))
 vi.mock('node:fs', async (importOriginal) => {
   const fs = await importOriginal<typeof import('node:fs')>()
-  return { ...fs, unlinkSync: ((path) => { fs.unlinkSync(path); late.afterUnlink?.(String(path)) }) as typeof fs.unlinkSync }
+  return {
+    ...fs,
+    unlinkSync: ((path) => { fs.unlinkSync(path); late.afterUnlink?.(String(path)) }) as typeof fs.unlinkSync,
+    rmdirSync: ((path, options) => { fs.rmdirSync(path, options); late.afterRmdir?.(String(path)) }) as typeof fs.rmdirSync
+  }
 })
 
 const roots: string[] = []
 const undo: Array<() => void> = []
 const realPath = process.env.PATH
 afterEach(() => {
-  vi.restoreAllMocks(); late.afterUnlink = undefined; process.env.PATH = realPath
+  vi.restoreAllMocks(); late.afterUnlink = undefined; late.afterRmdir = undefined; process.env.PATH = realPath
   for (const step of undo.splice(0)) step()
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true })
 })
@@ -67,11 +71,15 @@ function stopAfter(when: (record: TaskLifecycleRecord) => boolean): void {
 }
 const cleared = (record: TaskLifecycleRecord) => Boolean(record.purge?.items.some((item) => item.discardState === 'cleared'))
 
-/** Every Git command from here on, with the folder it ran in. */
-function recordGit(root: string): () => string[] {
-  const bin = join(root, 'bin'), log = join(root, 'git.log'); mkdirSync(bin)
+/**
+ * Every Git command from here on, with the folder it ran in. With `dropLinkAfter`, the first command run in that folder
+ * whose arguments hold `dropLinkAfter.args` deletes the folder's `.git` once it has finished, as something else could.
+ */
+function recordGit(root: string, dropLinkAfter?: { folder: string; args: string }): () => string[] {
+  const bin = join(root, 'bin'), log = join(root, 'git.log'), flag = join(root, 'dropped'); mkdirSync(bin)
   const real = execFileSync('/bin/sh', ['-c', 'command -v git'], { encoding: 'utf8' }).trim()
-  writeFileSync(join(bin, 'git'), `#!/bin/sh\nprintf '%s\\t%s\\n' "$PWD" "$*" >> '${log}'\nexec '${real}' "$@"\n`); chmodSync(join(bin, 'git'), 0o755)
+  const drop = dropLinkAfter ? `if [ "$PWD" = '${dropLinkAfter.folder}' ] && [ ! -e '${flag}' ]; then case "$*" in *'${dropLinkAfter.args}'*) '${real}' "$@"; rc=$?; : > '${flag}'; rm -f '${dropLinkAfter.folder}/.git'; exit $rc ;; esac; fi\n` : ''
+  writeFileSync(join(bin, 'git'), `#!/bin/sh\nprintf '%s\\t%s\\n' "$PWD" "$*" >> '${log}'\n${drop}exec '${real}' "$@"\n`); chmodSync(join(bin, 'git'), 0o755)
   process.env.PATH = `${bin}:${realPath}`
   return () => existsSync(log) ? readFileSync(log, 'utf8').trim().split('\n') : []
 }
@@ -179,4 +187,100 @@ test('a worktree Git has locked stops the delete before anything is removed, and
   git(f.repo, ['worktree', 'unlock', f.worktree])
   expect((await f.coordinator().recover('task')).state).toBe('purged')
   expect(registered(f.repo, f.worktree)).toBe(false)
+})
+
+test('a folder swapped for a link while it is deleted gets no .git: the link target is left alone and the swap is named', async () => {
+  const f = await trashedWithStagedWork()
+  const elsewhere = join(f.root, 'personal-folder'), moved = join(f.root, 'moved'); mkdirSync(elsewhere)
+  writeFileSync(join(elsewhere, 'personal.txt'), 'not in the purge\n')
+  late.afterUnlink = (path) => { if (path === join(f.worktree, '.git')) { late.afterUnlink = undefined; renameSync(f.worktree, moved); symlinkSync(elsewhere, f.worktree) } }
+  await expect(f.first.purge(await f.preview())).rejects.toMatchObject({ code: 'resource_purge_kept', message: `Permanent delete stopped: the worktree at ${f.worktree} was moved or replaced while it was being deleted, so its link to its repository (.git) was not put back. Its files were kept.` })
+  expect(existsSync(join(elsewhere, '.git'))).toBe(false)
+  expect(readFileSync(join(elsewhere, 'personal.txt'), 'utf8')).toBe('not in the purge\n')
+})
+
+test('recovery checks the lock before removing an empty folder left without .git', async () => {
+  const f = await trashedWithStagedWork()
+  stopAfter(cleared)
+  await expect(f.first.purge(await f.preview())).rejects.toThrow()
+  vi.restoreAllMocks()
+  const dot = join(f.worktree, '.git'), admin = readFileSync(dot, 'utf8').trim().slice('gitdir: '.length)
+  unlinkSync(dot); writeFileSync(join(admin, 'locked'), 'keep the folder')
+  const commands = recordGit(f.root)
+  await expect(f.coordinator().recover('task')).rejects.toMatchObject({ code: 'resource_purge_kept', message: expect.stringContaining('Git has this worktree locked (keep the folder)') })
+  expect(existsSync(f.worktree)).toBe(true)
+  expect(registered(f.repo, f.worktree)).toBe(true)
+  expect(commands().filter((line) => line.startsWith(`${f.worktree}\t`))).toEqual([])
+})
+
+test('a lock taken while the reviewed files are removed stops every later removal', async () => {
+  const f = await trashedWithStagedWork()
+  const admin = readFileSync(join(f.worktree, '.git'), 'utf8').trim().slice('gitdir: '.length)
+  let first = ''
+  late.afterUnlink = (path) => { if (path.startsWith(`${f.worktree}/`) && !path.endsWith('/.git')) { first = path; late.afterUnlink = undefined; writeFileSync(join(admin, 'locked'), 'keep this checkout') } }
+  await expect(f.first.purge(await f.preview())).rejects.toMatchObject({ code: 'resource_purge_kept', message: expect.stringContaining('Git has this worktree locked (keep this checkout)') })
+  expect(first).not.toBe('')
+  expect(existsSync(join(f.worktree, '.git'))).toBe(true)
+  const left = ['base.txt', 'draft.txt'].filter((name) => existsSync(join(f.worktree, name)))
+  expect(left).toHaveLength(1)
+  expect(readFileSync(join(f.worktree, left[0]), 'utf8')).toBe(left[0] === 'base.txt' ? 'staged reviewed bytes\n' : 'reviewed draft\n')
+  git(f.repo, ['worktree', 'unlock', f.worktree])
+  expect((await f.coordinator().recover('task')).state).toBe('purged')
+  expect(registered(f.repo, f.worktree)).toBe(false)
+})
+
+test('a lock taken right after .git is removed puts .git back and keeps the folder', async () => {
+  const f = await trashedWithStagedWork()
+  const link = readFileSync(join(f.worktree, '.git'), 'utf8'), admin = link.trim().slice('gitdir: '.length)
+  late.afterUnlink = (path) => { if (path === join(f.worktree, '.git')) { late.afterUnlink = undefined; writeFileSync(join(admin, 'locked'), '') } }
+  await expect(f.first.purge(await f.preview())).rejects.toMatchObject({ code: 'resource_purge_kept', message: `Permanent delete stopped: Git has this worktree locked, so it stays in the trash. Run git worktree unlock "${f.worktree}" to let it be deleted.` })
+  expect(readFileSync(join(f.worktree, '.git'), 'utf8')).toBe(link)
+  expect(git(f.worktree, ['rev-parse', '--abbrev-ref', 'HEAD'])).toBe('mousse/thread/task/main')
+})
+
+test('a folder made again before Git unregisters the old one is named on every run, and goes once it is empty', async () => {
+  const f = await trashedWithStagedWork()
+  const value = Buffer.from('made after the checkout went\n')
+  late.afterRmdir = (path) => { if (path === f.worktree) { late.afterRmdir = undefined; mkdirSync(f.worktree); writeFileSync(join(f.worktree, 'new.txt'), value) } }
+  const message = `Permanent delete stopped: files were written at ${f.worktree} after its worktree was deleted. They were kept.`
+  await expect(f.first.purge(await f.preview())).rejects.toMatchObject({ message })
+  await expect(f.coordinator().recover('task')).rejects.toMatchObject({ code: 'resource_purge_kept', message })
+  expect(readFileSync(join(f.worktree, 'new.txt')).equals(value)).toBe(true)
+  unlinkSync(join(f.worktree, 'new.txt'))
+  expect((await f.coordinator().recover('task')).state).toBe('purged')
+  expect(existsSync(f.worktree)).toBe(false)
+  expect(registered(f.repo, f.worktree)).toBe(false)
+})
+
+test('.git deleted by something else before the files are cleared is named as such', async () => {
+  const f = await trashedWithStagedWork()
+  stopAfter((record) => record.state === 'purge-started')
+  await expect(f.first.purge(await f.preview())).rejects.toThrow()
+  vi.restoreAllMocks()
+  unlinkSync(join(f.worktree, '.git'))
+  await expect(f.coordinator().recover('task')).rejects.toMatchObject({ message: `Permanent delete stopped: the worktree at ${f.worktree} lost its link to its repository (.git) before its files were cleared. It was kept.` })
+  expect(readFileSync(join(f.worktree, 'draft.txt'), 'utf8')).toBe('reviewed draft\n')
+})
+
+test('a change to the worktree folder itself names the folder', async () => {
+  const f = await trashedWithStagedWork()
+  stopAfter((record) => record.state === 'purge-started')
+  await expect(f.first.purge(await f.preview())).rejects.toThrow()
+  vi.restoreAllMocks()
+  chmodSync(f.worktree, statSync(f.worktree).mode & 0o777 ^ 0o070)
+  await expect(f.coordinator().recover('task')).rejects.toMatchObject({ message: `Permanent delete stopped: the worktree folder ${f.worktree} changed after the delete began. It was kept.` })
+  expect(readFileSync(join(f.worktree, 'draft.txt'), 'utf8')).toBe('reviewed draft\n')
+})
+
+test('the checks before the delete never run Git in the folder once its .git is gone', async () => {
+  const f = await trashedWithStagedWork()
+  stopAfter((record) => record.state === 'purge-started')
+  await expect(f.first.purge(await f.preview())).rejects.toThrow()
+  vi.restoreAllMocks()
+  const commands = recordGit(f.root, { folder: f.worktree, args: 'branch --show-current' })
+  await expect(f.coordinator().recover('task')).rejects.toMatchObject({ code: 'resource_purge_kept' })
+  const here = commands().filter((line) => line.startsWith(`${f.worktree}\t`))
+  expect(here).toHaveLength(1)
+  expect(here[0]).toContain('branch --show-current')
+  expect(readFileSync(join(f.worktree, 'draft.txt'), 'utf8')).toBe('reviewed draft\n')
 })
