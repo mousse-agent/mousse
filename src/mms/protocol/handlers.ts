@@ -3165,14 +3165,19 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       if (!workspace || workspace.lifecycle !== 'ready') throw new DomainRpcError('workspace_not_ready', 'Thread workspace is not ready')
       const branches = new ConversationBranchService(operation.threadDirectory)
       const leaving = workspace.conversationBranchId ?? FIRST_BRANCH_ID
-      // A branch with no record, a removed one, or one whose conversation was never saved is refused before anything changes.
-      if (!branches.available(branchId, workspace) || (branchId !== leaving && !existsSync(conversationStatePath(operation.threadDirectory, branchId)))) {
-        throw new DomainRpcError('conversation_branch_unavailable', `Conversation branch ${branchId} is not available to switch to. Nothing was changed.`, { branchId })
+      // A branch with no record, a removed one, or one whose conversation was never saved or can't be read is refused
+      // before anything changes. The branch being left has its conversation saved by the switch itself.
+      const unavailable = (message = `Conversation branch ${branchId} is not available to switch to. Nothing was changed.`) => new DomainRpcError('conversation_branch_unavailable', message, { branchId })
+      if (!branches.available(branchId, workspace)) throw unavailable()
+      let target: ConversationStateSnapshot | undefined
+      if (branchId !== leaving) {
+        if (!existsSync(conversationStatePath(operation.threadDirectory, branchId))) throw unavailable()
+        try { target = loadConversationState(operation.threadDirectory, branchId) } catch { throw unavailable(`The saved conversation of branch ${branchId} can't be read. Nothing was changed.`) }
       }
-      // The conversation being left is saved under its own branch once the switch is known to go ahead, then the selected one's is loaded.
+      // The conversation being left is saved under its own branch once the switch is known to go ahead, then the selected one's is put in place.
       const { branch, notice } = await branches.activate(workspace.worktreePath, branchId, operation.currentGeneration, () => {
-        const target = loadConversationState(operation.threadDirectory, branchId)
-        ctx.mms.orchestrator.replaceConversationState(operation.threadId, target.messages, target.nativeContext)
+        const state = target ?? loadConversationState(operation.threadDirectory, branchId)
+        ctx.mms.orchestrator.replaceConversationState(operation.threadId, state.messages, state.nativeContext)
       }, (left) => saveConversationState(ctx, operation.threadId, operation.threadDirectory, left))
       return { branch, ...(notice ? { notice } : {}) }
     }

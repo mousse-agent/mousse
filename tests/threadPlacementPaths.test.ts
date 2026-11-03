@@ -12,6 +12,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { AssistantMessage } from '../src/shared/transcript'
 import type { Thread } from '../src/shared/types'
 import { MousseMainService } from '../src/mms/MousseMainService'
+import { ChangeReceiptService } from '../src/mms/actions/ChangeReceiptService'
 import { ThreadActionService } from '../src/mms/actions/ThreadActionService'
 import type { ProviderAdapter, TurnInput, TurnResult, TurnSink } from '../src/mms/harness/adapter'
 import { onGitPolicyEntry, type GitPolicyEntry } from '../src/mms/git/gitPolicy'
@@ -279,6 +280,13 @@ describe('where a thread works', () => {
 
       // A branch that does not exist is a clear refusal, not an internal error.
       await expect(dispatchMethod(ctx(), 'actions.activateBranch', { threadId: off.id, conversationBranchId: 'no-such-branch' })).rejects.toMatchObject({ code: 'conversation_branch_unavailable' })
+      // A saved conversation that can't be read refuses the switch before anything changes, with nothing left pending.
+      writeFileSync(join(main.threads.getThreadDir(off.id), 'conversation-contexts', `${encodeURIComponent(older.id)}.json`), '{"schemaVersion":1}')
+      writeFileSync(join(repo, 'agent.txt'), 'second turn\n')
+      await expect(dispatchMethod(ctx(), 'actions.activateBranch', { threadId: off.id, conversationBranchId: older.id })).rejects.toMatchObject({ code: 'conversation_branch_unavailable' })
+      expect(read('agent.txt')).toBe('second turn\n')
+      expect(workspaceOf(off.id)?.conversationBranchId).toBe('main')
+      expect(() => new ChangeReceiptService(main.threads.getThreadDir(off.id)).assertNoPendingOperation()).not.toThrow()
     })).toEqual([])
     expect(gitState()).toEqual(before)
     noWorktree(off.id)

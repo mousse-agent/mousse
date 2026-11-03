@@ -10,7 +10,7 @@ import { ChangeReceiptService } from './ChangeReceiptService'
 import { withGitMutationLocks } from './GitOperationCoordinator'
 import { ThreadWorkspaceManager } from '../workspace/ThreadWorkspaceManager'
 import { changedPathsAsync, commitParentsAsync, gitAsync, refuseUnsafeChangesAsync, treeOfAsync } from './git'
-import { describeGitAsync, gitLeftInPlaceNoticeAsync, leftAsIsNotice, preservedNotice, coverageNotice, restoreChangeAsync, sameTreeAsync, snapshotOriginAsync, takeSnapshotAsync, worktreeTreeAsync, type Snapshot } from './snapshots'
+import { describeGitAsync, gitLeftInPlaceNoticeAsync, leftAsIsNotice, preservedNotice, coverageNotice, moveOutcome, moveProgressAsync, restoreChangeAsync, sameTreeAsync, snapshotOriginAsync, takeSnapshotAsync, type Snapshot } from './snapshots'
 
 export type RestoreActionContext = (action: ThreadAction, kind: 'undo' | 'redo') => void | Promise<void>
 interface UndoRecovery {
@@ -208,16 +208,17 @@ export class UndoService {
   }
 
   /**
-   * Whether an interrupted restore landed, read from the files: the receipt when it was recorded; otherwise the files
-   * match the planned result (landed) or still match the snapshot before it (did not). Anything else is not Mousse's
-   * to guess at, so recovery stays pending for a person to look at.
+   * Whether an interrupted restore landed, read from the files: the receipt when it was recorded; otherwise every path
+   * the restore writes is as planned (landed) or none is (did not). Some written and some not is not Mousse's to guess
+   * at, so recovery stays pending for a person to look at.
    */
   private async provenApplied(workspacePath: string, operationId: string, intent: UndoIntent): Promise<{ startSha: string; end: Snapshot } | undefined> {
     const known = new ChangeReceiptService(this.threadDirectory).list().find((item) => item.operationId === operationId)
     if (known) return { startSha: known.beforeSha, end: { sha: known.afterSha, tree: await treeOfAsync(workspacePath, known.afterSha), ...await snapshotOriginAsync(workspacePath, known.afterSha) } }
-    const current = await worktreeTreeAsync(workspacePath)
-    if (current === intent.expectedTree) return { startSha: intent.ours!, end: await takeSnapshotAsync(workspacePath, { reason: `${intent.kind} turn ${intent.target.turnId}`, operationId }) }
-    if (current === await treeOfAsync(workspacePath, intent.ours!)) return undefined
+    // Only the paths the restore writes are read, straight from disk: an ignored file it wrote counts, and an unrelated new file does not.
+    const outcome = moveOutcome(await moveProgressAsync(workspacePath, await treeOfAsync(workspacePath, intent.ours!), intent.expectedTree!))
+    if (outcome === 'applied') return { startSha: intent.ours!, end: await takeSnapshotAsync(workspacePath, { reason: `${intent.kind} turn ${intent.target.turnId}`, operationId }) }
+    if (outcome === 'not-applied') return undefined
     throw new Error('Undo recovery found files that match neither the state before nor the state after the restore; resolve the differences by hand.')
   }
 

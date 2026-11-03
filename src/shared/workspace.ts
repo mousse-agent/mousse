@@ -68,6 +68,13 @@ export interface ThreadWorkspaceMetadata {
   headSha: string
   /** The latest recorded snapshot of the worktree's files; absent until the first one. */
   snapshotSha?: string
+  /**
+   * Set when the active conversation branch was switched to: `own` is the branch's own code, and `snapshotSha` the
+   * files it arrived with, which also hold the edits brought along from the branch left. While nothing has been
+   * recorded since (`snapshotSha` above still holds the same files), leaving the branch counts only `own` as its code,
+   * so those edits come along again instead of staying behind. `at` is when it was switched to.
+   */
+  switchedIn?: { branchId: ConversationBranchId; snapshotSha: string; own: string; at: string }
   lifecycle: WorkspaceLifecycle
   lastVerifiedAt: string
   workspaceId?: string

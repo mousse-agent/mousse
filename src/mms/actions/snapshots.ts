@@ -818,3 +818,71 @@ export function* moveFilesSteps(top: string, from: string, to: string, operation
 export function moveFilesAsync(top: string, from: string, to: string, operationId?: string): Promise<PreservedFiles | undefined> {
   return runAsync(moveFilesSteps(top, from, to, operationId))
 }
+
+/**
+ * How far a move of the files from one tree to another got, read path by path from the disk (bytes and mode), for the
+ * paths the two trees hold differently: still as in `from` (`unmoved`), as in `to` (`moved`), or neither (`other`,
+ * changed by someone since). Ignored files count, since the disk is read directly; files the move never touches do
+ * not. A nested repository recorded by its commit is left out.
+ */
+export interface MoveProgress { moved: string[]; unmoved: string[]; other: string[] }
+
+/** Whether a move that stopped landed: every path moved (`applied`), none did (`not-applied`), or some only (`partial`). */
+export function moveOutcome(progress: MoveProgress): 'applied' | 'not-applied' | 'partial' {
+  if (!progress.unmoved.length) return progress.moved.length || !progress.other.length ? 'applied' : 'not-applied'
+  return progress.moved.length ? 'partial' : 'not-applied'
+}
+
+export function* moveProgressSteps(cwd: string, from: string, to: string): Steps<MoveProgress> {
+  const top = yield* gitStep(cwd, ['rev-parse', '--show-toplevel'])
+  const progress: MoveProgress = { moved: [], unmoved: [], other: [] }
+  const paths = (yield* gitStep(top, ['diff-tree', '-r', '-z', '--no-renames', '--name-only', from, to], undefined, undefined, LISTING)).split('\0').filter(Boolean)
+  if (!paths.length) return progress
+  const wanted = new Set(paths)
+  const entries = function* (tree: string): Steps<Map<string, { mode: string; sha: string }>> {
+    const map = new Map<string, { mode: string; sha: string }>()
+    for (const line of (yield* gitStep(top, ['ls-tree', '-r', '-z', '--full-tree', tree], undefined, undefined, LISTING)).split('\0')) {
+      const tab = line.indexOf('\t')
+      if (tab < 0 || !wanted.has(line.slice(tab + 1))) continue
+      const [mode, , sha] = line.slice(0, tab).split(' ')
+      map.set(line.slice(tab + 1), { mode: mode!, sha: sha! })
+    }
+    return map
+  }
+  const before = yield* entries(from)
+  const after = yield* entries(to)
+  // What is on disk at each path: a file's blob as `git add` would store it (filters applied), a link's target, or nothing.
+  const found = new Map<string, { mode: string; sha: string }>()
+  const files: string[] = []
+  for (const path of paths) {
+    if (before.get(path)?.mode === '160000' || after.get(path)?.mode === '160000') continue
+    let stat: Stats
+    try { stat = yield* disk.lstat(join(top, path)) } catch { continue }
+    if (stat.isSymbolicLink()) found.set(path, { mode: '120000', sha: yield* gitStep(top, ['hash-object', '--stdin'], undefined, yield* disk.readlink(join(top, path))) })
+    else if (stat.isFile()) {
+      found.set(path, { mode: stat.mode & 0o111 ? '100755' : '100644', sha: '' })
+      if (path.includes('\n')) found.get(path)!.sha = yield* gitStep(top, ['hash-object', '--', path])
+      else files.push(path)
+    }
+  }
+  if (files.length) {
+    const shas = (yield* gitStep(top, ['hash-object', '--stdin-paths'], undefined, files.join('\n') + '\n')).split(/\r?\n/)
+    files.forEach((path, index) => { found.get(path)!.sha = shas[index] ?? '' })
+  }
+  // Windows keeps no executable bit on disk, so only the bytes are compared there.
+  const same = (a?: { mode: string; sha: string }, b?: { mode: string; sha: string }): boolean =>
+    !a || !b ? a === b : a.sha === b.sha && (process.platform === 'win32' || a.mode === b.mode)
+  for (const path of paths) {
+    if (before.get(path)?.mode === '160000' || after.get(path)?.mode === '160000') continue
+    const now = found.get(path)
+    if (same(now, before.get(path))) progress.unmoved.push(path)
+    else if (same(now, after.get(path))) progress.moved.push(path)
+    else progress.other.push(path)
+  }
+  return progress
+}
+
+/** How far a move got (see `moveProgressSteps`), without blocking the daemon. */
+export function moveProgressAsync(cwd: string, from: string, to: string): Promise<MoveProgress> {
+  return runAsync(moveProgressSteps(cwd, from, to))
+}
