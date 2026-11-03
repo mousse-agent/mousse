@@ -46,7 +46,7 @@ async function fixture() {
   git(repo, ['update-ref', 'refs/mousse/threads/other/main', head])
   git(repo, ['update-ref', 'refs/mousse/preserved/op-1-abc', head])
   // Files an abort of this thread kept go with the thread, but only with the person's say while they may be the only copy.
-  const kept = (await preserveBeforeAbortAsync(repo, 'abort-op'))
+  const kept = (await preserveBeforeAbortAsync(repo, 'abort-op')).ref
   new ThreadJournal(location).append({ operationId: 'abort-op', operationType: 'publish', state: 'cancelled', details: { conflictAborted: true, preservedRef: kept } })
 
   const coordinator = new ResourceLifecycleCoordinator(store, { drain: async () => {}, settleMutationOwnership: async () => {}, projectIndex: () => {}, projectPurged: () => {} })
