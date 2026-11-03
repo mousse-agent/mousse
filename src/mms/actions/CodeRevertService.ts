@@ -9,7 +9,7 @@ import { ThreadWorkspaceManager } from '../workspace/ThreadWorkspaceManager'
 import { ChangeReceiptService } from './ChangeReceiptService'
 import { changedPathsAsync, commitParentsAsync, gitAsync, refuseUnsafeChangesAsync, treeOfAsync } from './git'
 import { UndoConflictError } from './UndoService'
-import { describeGitAsync, gitLeftInPlaceNoticeAsync, leftAsIsNotice, preservedNotice, coverageNotice, restoreChangeAsync, sameTreeAsync, moveOutcome, moveProgressAsync, snapshotOriginAsync, takeSnapshotAsync, type Snapshot } from './snapshots'
+import { describeGitAsync, gitLeftInPlaceNoticeAsync, leftAsIsNotice, preservedNotice, coverageNotice, restoreChangeAsync, sameTreeAsync, moveOutcome, moveProgressAsync, snapshotOfTreeAsync, snapshotOriginAsync, takeSnapshotAsync, type Snapshot } from './snapshots'
 
 /** What `prepared` records: the files before the revert and the tree they become. */
 interface RevertIntent {
@@ -126,7 +126,8 @@ export class CodeRevertService {
     if (prior) return { startSha: prior.beforeSha, end: { sha: prior.afterSha, tree: await treeOfAsync(workspacePath, prior.afterSha), ...await snapshotOriginAsync(workspacePath, prior.afterSha) } }
     // Only the paths the revert writes are read, straight from disk: an ignored file it wrote counts, and an unrelated new file does not.
     const outcome = moveOutcome(await moveProgressAsync(workspacePath, await treeOfAsync(workspacePath, details.ours!), details.expectedTree!))
-    if (outcome === 'applied') return { startSha: details.ours!, end: await takeSnapshotAsync(workspacePath, { reason: `revert code action ${details.target.id}`, operationId }) }
+    // The end is the planned result, not the files now: an edit made since stays an edit made since.
+    if (outcome === 'applied') return { startSha: details.ours!, end: await snapshotOfTreeAsync(workspacePath, details.expectedTree!, { reason: `revert code action ${details.target.id}`, operationId }) }
     if (outcome === 'not-applied') return undefined
     throw new Error('Code revert recovery found files that match neither the state before nor the state after the revert; resolve the differences by hand.')
   }

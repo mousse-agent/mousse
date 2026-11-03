@@ -13,7 +13,8 @@ import type { ThreadLeaseHandle } from '../queue/ThreadExecutionLease'
 import { ThreadWorkspaceManager } from '../workspace/ThreadWorkspaceManager'
 import { ChangeReceiptService } from './ChangeReceiptService'
 import { gitAsync, LISTING, mergeTreesAsync, refuseUnsafeChangesAsync, treeOfAsync, tryGitAsync } from './git'
-import { coverageNotice, leftAsIsNotice, moveOutcome, moveProgressAsync, preservedNotice, restoreChangeAsync, sameTreeAsync, takeSnapshotAsync, type Snapshot } from './snapshots'
+import { coverageNotice, leftAsIsNotice, moveOutcome, moveProgressAsync, preservedNotice, restoreChangeAsync, snapshotOfTreeAsync, takeSnapshotAsync, type Snapshot } from './snapshots'
+import { retentionWindowText } from '../../shared/undoRetention'
 
 /** The thread's first conversation branch: the one every thread starts on. */
 export const FIRST_BRANCH_ID = 'main'
@@ -47,7 +48,7 @@ export class ConversationSwitchInterruptedError extends AppError {
   constructor(readonly files: string[], target: string) {
     super({
       code: 'restore_conflict',
-      message: `${files.join(', ')} changed while switching to ${target}. Nothing was changed. Try the switch again.`,
+      message: `${files.length ? files.join(', ') : 'A file'} changed while switching to ${target}. Nothing was changed. Try the switch again.`,
       details: { files }, errorInfo: { category: 'conflict', retryable: true }
     })
     this.name = 'ConversationSwitchInterruptedError'
@@ -64,6 +65,8 @@ interface SwitchIntent {
   expectedTree: string
   /** The selected branch's own code (its ref when the switch began). */
   own: string
+  /** The code of the branch being left: what it keeps when the switch does not happen. */
+  base?: string
   restoreContext: boolean
 }
 
@@ -169,6 +172,8 @@ export class ConversationBranchService {
         expectedPreState: { branchId, leaving, preBranch: await gitAsync(workspacePath, ['branch', '--show-current']), preSha: (await tryGitAsync(workspacePath, ['rev-parse', '--verify', '-q', 'HEAD^{commit}'])).stdout }
       })
       let intent: SwitchIntent | undefined
+      // Once the outside changes are recorded: what the branch being left keeps when the switch does not happen.
+      let staying: { base: string; current: string } | undefined
       try {
         if (leaving === selected.id) {
           // Already active: the files and the record stay as they are.
@@ -189,32 +194,40 @@ export class ConversationBranchService {
         await saveContext?.(leaving)
         // Edits made outside Mousse since the last record are recorded for the branch being left: its receipt pins the
         // files as they are now. The branch's ref keeps its own code, so edits brought along stay out of it.
-        const current = (await this.actions.recordOutsideChangesHeld({ threadId: threadId ?? '', conversationBranchId: leaving, workspacePath })).startSha
+        const outside = await this.actions.recordOutsideChangesHeld({ threadId: threadId ?? '', conversationBranchId: leaving, workspacePath })
+        const current = outside.startSha
+        staying = { base, current }
         if (left) await gitAsync(workspacePath, ['update-ref', '--no-deref', left.retainedRef, base])
         if (added) atomicWriteJsonSync(this.path, branches)
         const restored = await restoreChangeAsync(workspacePath, { reason: `switch to conversation branch ${selected.id}`, threadId, operationId, base, ours: current, theirs, restoredTo: `on ${selected.name}` }, (expectedTree) => {
-          intent = { branchId: selected.id, leaving, ours: current, expectedTree, own: theirs, restoreContext: Boolean(restoreContext) }
+          intent = { branchId: selected.id, leaving, ours: current, expectedTree, own: theirs, base, restoreContext: Boolean(restoreContext) }
           this.journal.append({ operationId, operationType: 'conversation-activate', state: 'prepared', expectedPreState: { branchId, leaving, ours: current }, details: intent })
         })
         if ('conflicts' in restored) throw new ConversationSwitchConflictError(restored.conflicts, selected.name, leftName)
         const leftBehind = await this.leftBehind(workspacePath, metadata, leaving, current, restored.tree)
         const notice = [
-          leftBehind.length && left ? `${pathsInWords(leftBehind)} ${leftBehind.length === 1 ? 'is now as it was' : 'are now as they were'} on ${selected.name}. Your ${leftBehind.length === 1 ? 'version stays' : 'versions stay'} on ${leftName}: switch back to it, or bring ${leftBehind.length === 1 ? 'it' : 'one'} back with git restore --source=${left.retainedRef} -- <path>.` : '',
+          leftBehind.length && left ? await this.leftBehindNotice(workspacePath, { paths: leftBehind, target: selected.name, leftName, leftRef: left.retainedRef, base, current, receiptId: outside.action?.receiptId, operationId }) : '',
           restored.preserved ? preservedNotice(restored.preserved, new UndoRetentionService(this.threadDirectory).policy().windowMs) : '',
           leftAsIsNotice(restored.leftAsIs) ?? '', coverageNotice(ours.coverageGaps, restored.snapshot.coverageGaps) ?? ''
         ].filter(Boolean).join(' ') || undefined
-        this.settle(branches, selected.id, restored.snapshot, { branchId: selected.id, snapshotSha: restored.snapshot.sha, own: theirs, at: new Date().toISOString() })
+        await this.settle(workspacePath, branches, selected, restored.snapshot, { branchId: selected.id, snapshotSha: restored.snapshot.sha, own: theirs, at: new Date().toISOString() })
         return this.complete(operationId, selected, restoreContext, restored.snapshot.sha, notice)
       } catch (error) {
         const state = this.journal.latestByOperation().get(operationId)?.state
         if (state === 'context_pending') throw error
         if (state === 'prepared' && intent) {
-          // Stopped after the intent: when none of the files it writes changed (Git refuses when one was saved meanwhile),
-          // the switch is settled as not done and the files named; otherwise recovery tells from the files.
-          const progress = await moveProgressAsync(workspacePath, await treeOfAsync(workspacePath, intent.ours), intent.expectedTree).catch(() => undefined)
-          if (!progress || moveOutcome(progress) !== 'not-applied') throw error
-          this.journal.append({ operationId, operationType: 'conversation-activate', state: 'cancelled', details: { branchId, files: progress.other, error: error instanceof Error ? error.message : String(error) } })
-          if (progress.other.length) throw new ConversationSwitchInterruptedError(progress.other, selected.name)
+          // Stopped after the intent. Git refuses the whole write when a file it writes was saved meanwhile ("not
+          // uptodate"), before writing anything; otherwise, when none of the files it writes changed, nothing was
+          // written either. Then the switch is settled as not done and the files named; else recovery tells from the files.
+          const message = error instanceof Error ? error.message : String(error)
+          const named = [...message.matchAll(/Entry '([^']+)' not uptodate/g)].map((match) => match[1]!)
+          const refused = /not uptodate/.test(message)
+          const progress = refused ? undefined : await moveProgressAsync(workspacePath, await treeOfAsync(workspacePath, intent.ours), intent.expectedTree).catch(() => undefined)
+          if (!refused && (!progress || moveOutcome(progress) !== 'not-applied')) throw error
+          const files = progress?.other.length ? progress.other : named
+          this.journal.append({ operationId, operationType: 'conversation-activate', state: 'cancelled', details: { branchId, files, error: message } })
+          this.stayOn(leaving, intent.base ?? intent.ours, intent.ours)
+          if (refused || files.length) throw new ConversationSwitchInterruptedError(files, selected.name)
           throw error
         }
         this.journal.append({
@@ -223,6 +236,7 @@ export class ConversationBranchService {
           state: 'failed',
           details: { branchId, error: error instanceof Error ? error.message : String(error) }
         })
+        if (staying) this.stayOn(leaving, staying.base, staying.current)
         throw error
       }
     })
@@ -238,13 +252,53 @@ export class ConversationBranchService {
 
   /**
    * The code of the branch being left, without edits made since its last record: its own code from when it was
-   * switched to, while nothing has been recorded since (the latest snapshot still holds the files it arrived with);
-   * otherwise its last record (`lastRecorded`).
+   * switched to, while no action has been recorded on it since (a turn, an Undo, a Redo, a revert or an
+   * outside-changes record); otherwise its last record (`lastRecorded`). Files that match what it arrived with say
+   * nothing: a turn may have recorded the edits brought along and then put the same bytes back.
    */
   private async leavingCode(workspacePath: string, metadata: ThreadWorkspaceMetadata | undefined, leaving: ConversationBranchId): Promise<string | undefined> {
     const arrived = metadata?.switchedIn
-    if (arrived?.branchId === leaving && metadata?.snapshotSha && await this.readable(workspacePath, arrived.own) && await sameTreeAsync(workspacePath, metadata.snapshotSha, arrived.snapshotSha)) return arrived.own
+    if (arrived?.branchId === leaving && await this.readable(workspacePath, arrived.own) && !this.recordedSince(leaving, arrived.at)) return arrived.own
     return this.lastRecorded(workspacePath, metadata, leaving)
+  }
+
+  /** Whether an action was recorded on the branch after `at`. */
+  private recordedSince(branchId: ConversationBranchId, at: string): boolean {
+    return this.actions.list().some((action) => action.conversationBranchId === branchId && action.createdAt > at)
+  }
+
+  /**
+   * A switch that did not happen: the branch being left stays active, with `base` as its own code and the files now
+   * (`current`) as what it holds besides, so the outside-changes record the switch made does not count as a record of
+   * the person's edits and a retry brings them along again.
+   */
+  private stayOn(leaving: ConversationBranchId, base: string, current: string): void {
+    const manager = new ThreadWorkspaceManager(this.threadDirectory)
+    const metadata = manager.load()
+    if (!metadata || (metadata.conversationBranchId ?? FIRST_BRANCH_ID) !== leaving) return
+    atomicWriteJsonSync(manager.workspacePath, { ...metadata, switchedIn: { branchId: leaving, own: base, snapshotSha: current, at: new Date().toISOString() } })
+  }
+
+  /**
+   * The line a switch carries for the person's files it takes out of the folder: where their version stays, and a
+   * command that brings back exactly the file as it was before the switch. The branch's ref holds it when the file
+   * there is the same; otherwise the outside-changes record of the switch, or a kept copy of the files before it, does
+   * (for the Undo retention window).
+   */
+  private async leftBehindNotice(workspacePath: string, input: { paths: string[]; target: string; leftName: string; leftRef: string; base: string; current: string; receiptId?: string; operationId: string }): Promise<string> {
+    const { paths } = input
+    const literal = paths.map((path) => `:(literal)${path}`)
+    const exact = !(await gitAsync(workspacePath, ['diff-tree', '-r', '--name-only', input.base, input.current, '--', ...literal], undefined, undefined, LISTING)).trim()
+    let source = input.leftRef
+    let kept = ''
+    if (!exact) {
+      const receipt = input.receiptId ? new ChangeReceiptService(this.threadDirectory).list().find((item) => item.id === input.receiptId) : undefined
+      source = receipt?.retainedRefs[1] ?? `refs/mousse/preserved/${input.operationId}-${input.current.slice(0, 12)}`
+      if (!receipt) await gitAsync(workspacePath, ['update-ref', '--no-deref', source, input.current])
+      kept = ` (kept for ${retentionWindowText(new UndoRetentionService(this.threadDirectory).policy().windowMs)})`
+    }
+    const one = paths.length === 1
+    return `${pathsInWords(paths)} ${one ? 'is now as it was' : 'are now as they were'} on ${input.target}. Your ${one ? 'version stays' : 'versions stay'} on ${input.leftName}: switch back to it, or bring ${one ? 'it' : 'one'} back with git restore --source=${source} -- <path>${kept}.`
   }
 
   private async readable(workspacePath: string, sha: string): Promise<boolean> {
@@ -252,29 +306,22 @@ export class ConversationBranchService {
   }
 
   /**
-   * The files that were the person's on the branch being left and that the switch changes: what an outside-changes
-   * record touched last, or what came along when the branch was switched to and no turn has touched since. Such a file
+   * The files that were the person's on the branch being left and that the switch changes: any an outside-changes
+   * record on it touched, or that came along when it was switched to, even when a turn edited them since. Such a file
    * leaves the folder only because a record made it the branch's own (a turn or the outside-changes record before it).
    */
   private async leftBehind(workspacePath: string, metadata: ThreadWorkspaceMetadata | undefined, leaving: ConversationBranchId, from: string, to: string): Promise<string[]> {
     const changed = (await gitAsync(workspacePath, ['diff-tree', '-r', '-z', '--no-renames', '--name-only', from, to], undefined, undefined, LISTING)).split('\0').filter(Boolean)
     if (!changed.length) return []
-    const personal = new Map<string, boolean>()
+    const personal = new Set<string>()
     const arrived = metadata?.switchedIn?.branchId === leaving ? metadata.switchedIn : undefined
-    let broughtIn = !arrived
-    const bringIn = async (switchedIn: SwitchedIn) => {
-      broughtIn = true
-      if (!await this.readable(workspacePath, switchedIn.own) || !await this.readable(workspacePath, switchedIn.snapshotSha)) return
-      for (const path of (await gitAsync(workspacePath, ['diff-tree', '-r', '-z', '--no-renames', '--name-only', switchedIn.own, switchedIn.snapshotSha], undefined, undefined, LISTING)).split('\0').filter(Boolean)) personal.set(path, true)
+    if (arrived && await this.readable(workspacePath, arrived.own) && await this.readable(workspacePath, arrived.snapshotSha)) {
+      for (const path of (await gitAsync(workspacePath, ['diff-tree', '-r', '-z', '--no-renames', '--name-only', arrived.own, arrived.snapshotSha], undefined, undefined, LISTING)).split('\0').filter(Boolean)) personal.add(path)
     }
     for (const action of this.actions.list()) {
-      if (action.conversationBranchId !== leaving || action.state === 'running' || action.state === 'undone') continue
-      if (!broughtIn && action.createdAt > arrived!.at) await bringIn(arrived!)
-      const byPerson = action.turnId.startsWith(USER_CHANGES_TURN_PREFIX)
-      for (const change of action.changedPaths) personal.set(change.path, byPerson)
+      if (action.conversationBranchId === leaving && action.turnId.startsWith(USER_CHANGES_TURN_PREFIX)) for (const change of action.changedPaths) personal.add(change.path)
     }
-    if (!broughtIn) await bringIn(arrived!)
-    return changed.filter((path) => personal.get(path))
+    return changed.filter((path) => personal.has(path))
   }
 
   /**
@@ -290,12 +337,13 @@ export class ConversationBranchService {
   }
 
   /**
-   * Records `branchId` as the active branch, whose files are `snapshot`. The branch's ref keeps its own code; the
-   * workspace's latest snapshot is the files as they are, and `switchedIn` tells the two apart until the next record.
+   * Records `selected` as the active branch, whose files are `snapshot`. Its ref points at the files it arrived with,
+   * as an active branch's ref always points at its latest snapshot (a rebuild of a missing worktree reads it);
+   * `switchedIn` keeps its own code apart until the next record, and leaving puts the ref back on that code.
    */
-  private settle(branches: ConversationBranch[], branchId: ConversationBranchId, snapshot: Snapshot, switchedIn: SwitchedIn): void {
-    const selected = branches.find((branch) => branch.id === branchId)!
-    for (const branch of branches) if (branch.lifecycle !== 'tombstoned') branch.lifecycle = branch.id === branchId ? 'active' : 'inactive'
+  private async settle(workspacePath: string, branches: ConversationBranch[], selected: ConversationBranch, snapshot: Snapshot, switchedIn: SwitchedIn): Promise<void> {
+    for (const branch of branches) if (branch.lifecycle !== 'tombstoned') branch.lifecycle = branch.id === selected.id ? 'active' : 'inactive'
+    await gitAsync(workspacePath, ['update-ref', '--no-deref', selected.retainedRef, snapshot.sha])
     atomicWriteJsonSync(this.path, branches)
     const manager = new ThreadWorkspaceManager(this.threadDirectory)
     const metadata = manager.load()
@@ -321,10 +369,12 @@ export class ConversationBranchService {
           if (outcome === 'partial') throw new Error('Switching conversation branches stopped partway, and the files match neither the state before nor the state after the switch; resolve the differences by hand.')
           if (outcome === 'not-applied') {
             this.journal.append({ operationId: entry.operationId, operationType: 'conversation-activate', state: 'cancelled', details: { branchId: intent.branchId, recoveredBeforeFiles: true } })
+            this.stayOn(intent.leaving, intent.base ?? intent.ours, intent.ours)
             continue
           }
-          const snapshot = await takeSnapshotAsync(workspacePath, { reason: `switch to conversation branch ${branch.id}`, threadId: new ThreadWorkspaceManager(this.threadDirectory).load()?.threadId, operationId: entry.operationId })
-          this.settle(branches, branch.id, snapshot, { branchId: branch.id, snapshotSha: snapshot.sha, own: intent.own, at: entry.createdAt })
+          // The files are recorded as the switch planned them; anything that appeared since is an edit made since.
+          const snapshot = await snapshotOfTreeAsync(workspacePath, intent.expectedTree, { reason: `switch to conversation branch ${branch.id}`, threadId: new ThreadWorkspaceManager(this.threadDirectory).load()?.threadId, operationId: entry.operationId })
+          await this.settle(workspacePath, branches, branch, snapshot, { branchId: branch.id, snapshotSha: snapshot.sha, own: intent.own, at: new Date().toISOString() })
           this.journal.append({ operationId: entry.operationId, operationType: 'conversation-activate', state: 'context_pending', details: { branchId: branch.id, snapshotSha: snapshot.sha, restoreContext: intent.restoreContext, recovered: true } })
           if (intent.restoreContext) await restoreContext(branch)
           this.journal.append({ operationId: entry.operationId, operationType: 'conversation-activate', state: 'completed', details: { branchId: branch.id, recovered: true } })

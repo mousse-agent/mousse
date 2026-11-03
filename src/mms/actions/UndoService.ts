@@ -10,7 +10,7 @@ import { ChangeReceiptService } from './ChangeReceiptService'
 import { withGitMutationLocks } from './GitOperationCoordinator'
 import { ThreadWorkspaceManager } from '../workspace/ThreadWorkspaceManager'
 import { changedPathsAsync, commitParentsAsync, gitAsync, refuseUnsafeChangesAsync, treeOfAsync } from './git'
-import { describeGitAsync, gitLeftInPlaceNoticeAsync, leftAsIsNotice, preservedNotice, coverageNotice, moveOutcome, moveProgressAsync, restoreChangeAsync, sameTreeAsync, snapshotOriginAsync, takeSnapshotAsync, type Snapshot } from './snapshots'
+import { describeGitAsync, gitLeftInPlaceNoticeAsync, leftAsIsNotice, preservedNotice, coverageNotice, moveOutcome, moveProgressAsync, snapshotOfTreeAsync, restoreChangeAsync, sameTreeAsync, snapshotOriginAsync, takeSnapshotAsync, type Snapshot } from './snapshots'
 
 export type RestoreActionContext = (action: ThreadAction, kind: 'undo' | 'redo') => void | Promise<void>
 interface UndoRecovery {
@@ -217,7 +217,8 @@ export class UndoService {
     if (known) return { startSha: known.beforeSha, end: { sha: known.afterSha, tree: await treeOfAsync(workspacePath, known.afterSha), ...await snapshotOriginAsync(workspacePath, known.afterSha) } }
     // Only the paths the restore writes are read, straight from disk: an ignored file it wrote counts, and an unrelated new file does not.
     const outcome = moveOutcome(await moveProgressAsync(workspacePath, await treeOfAsync(workspacePath, intent.ours!), intent.expectedTree!))
-    if (outcome === 'applied') return { startSha: intent.ours!, end: await takeSnapshotAsync(workspacePath, { reason: `${intent.kind} turn ${intent.target.turnId}`, operationId }) }
+    // The end is the planned result, not the files now: an edit made since stays an edit made since.
+    if (outcome === 'applied') return { startSha: intent.ours!, end: await snapshotOfTreeAsync(workspacePath, intent.expectedTree!, { reason: `${intent.kind} turn ${intent.target.turnId}`, operationId }) }
     if (outcome === 'not-applied') return undefined
     throw new Error('Undo recovery found files that match neither the state before nor the state after the restore; resolve the differences by hand.')
   }

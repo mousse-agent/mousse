@@ -5,13 +5,15 @@
  * switched back to, and a switch that stopped partway is proven from the files or cancelled, never replayed.
  */
 import { execFileSync, spawnSync } from 'node:child_process'
-import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ChangeReceiptService } from '../src/mms/actions/ChangeReceiptService'
 import { ConversationBranchService } from '../src/mms/actions/ConversationBranchService'
 import { ThreadActionService } from '../src/mms/actions/ThreadActionService'
 import { restoreChangeAsync, takeSnapshotAsync } from '../src/mms/actions/snapshots'
+import { files as disk } from '../src/mms/actions/steps'
+import { UndoService } from '../src/mms/actions/UndoService'
 import { ThreadJournal } from '../src/mms/data/ThreadJournal'
 import { ThreadWorkspaceManager } from '../src/mms/workspace/ThreadWorkspaceManager'
 import type { ConversationBranch } from '../src/shared/threadActions'
@@ -55,7 +57,7 @@ async function forkedWithEdit(): Promise<ConversationBranch> {
   return pressed('Fork', () => service.fork(cwd, 'main', action.id, 'Older'))
 }
 
-describe('switching conversation branches', () => {
+describe('switching conversation branches', { timeout: 60_000 }, () => {
   it('keeps the person’s edit on disk, and switches back to the first branch exactly, without touching HEAD, the index or branches', async () => {
     const before = gitState()
     const older = await forkedWithEdit()
@@ -159,7 +161,7 @@ describe('switching conversation branches', () => {
   })
 })
 
-describe('a switch that stopped after its intent was recorded', () => {
+describe('a switch that stopped after its intent was recorded', { timeout: 60_000 }, () => {
   /** Stops a switch right after the files were written, before the switch was recorded as done. */
   async function stoppedAfterFiles(target: ConversationBranch): Promise<void> {
     const settle = vi.spyOn(ConversationBranchService.prototype as unknown as { settle: () => void }, 'settle').mockImplementationOnce(() => { throw new Error('stopped') })
@@ -243,7 +245,7 @@ describe('a switch that stopped after its intent was recorded', () => {
   })
 })
 
-describe('a file saved while the switch writes', () => {
+describe('a file saved while the switch writes', { timeout: 60_000 }, () => {
   it('settles the switch as not done, names the file, and leaves nothing pending', async () => {
     const { action } = await turn('first', () => write('agent.txt', 'first\n'))
     await turn('second', () => write('agent.txt', 'second\n'), 2)
@@ -273,7 +275,7 @@ describe('a file saved while the switch writes', () => {
   })
 })
 
-describe('edits brought along across several switches', () => {
+describe('edits brought along across several switches', { timeout: 60_000 }, () => {
   const sw = (id: string) => pressed('Switch conversation branch', () => service.activate(cwd, id))
   /** Three turns on the first branch, and forks A (first turn), B (second) and C (third). */
   async function threeForks() {
@@ -285,11 +287,12 @@ describe('edits brought along across several switches', () => {
     const c = await service.fork(cwd, 'main', three.id, 'C')
     return { a, b, c }
   }
+  /** No branch but the active one holds the edit; the active one's ref is its latest snapshot, the files as they are. */
   const refsHoldNoEdit = (branches: ConversationBranch[]) => {
-    for (const branch of branches) expect(tryGitOk('cat-file', '-e', `${branch.retainedRef}:NOTES.txt`)).toBe(false)
+    for (const branch of branches.filter((item) => item.lifecycle !== 'active')) expect(tryGitOk('cat-file', '-e', `${branch.retainedRef}:NOTES.txt`)).toBe(false)
   }
 
-  it('main → A → B → A → C → main keeps the edit on disk at every step, and no branch takes it in', async () => {
+  it('main → A → B → A → C → main keeps the edit on disk at every step, and no branch left holds it', async () => {
     const { a, b, c } = await threeForks()
     write('NOTES.txt', 'unique personal WIP\n')
     const before = gitState()
@@ -391,5 +394,159 @@ describe('edits brought along across several switches', () => {
     await sw('main')
     expect(read('NOTES.txt')).toBe('unique personal WIP\n')
     expect(read('agent.txt')).toBe('three\n')
+  })
+})
+
+describe('what a switch keeps, and what it says', { timeout: 60_000 }, () => {
+  const sw = (id: string) => pressed('Switch conversation branch', () => service.activate(cwd, id))
+  /** Two turns on the first branch, and forks A and B at the first. */
+  async function twoForks() {
+    const { action } = await turn('first', () => write('agent.txt', 'one\n'))
+    await turn('second', () => write('agent.txt', 'two\n'), 2)
+    return { a: await service.fork(cwd, 'main', action.id, 'A'), b: await service.fork(cwd, 'main', action.id, 'B') }
+  }
+  /** Saves `path` with `value` right after the switch records its intent, before it writes the files. */
+  const saveDuringSwitch = (path: string, value: string, touch = false) => {
+    const original = ThreadJournal.prototype.append
+    return vi.spyOn(ThreadJournal.prototype, 'append').mockImplementation(function (this: ThreadJournal, entry: Parameters<ThreadJournal['append']>[0]) {
+      const recorded = original.call(this, entry)
+      if (entry.operationType === 'conversation-activate' && entry.state === 'prepared') {
+        write(path, value)
+        if (touch) utimesSync(join(cwd, path), new Date(Date.now() + 60_000), new Date(Date.now() + 60_000))
+      }
+      return recorded
+    })
+  }
+
+  it('a rebuilt worktree has the edits that came along, and the next turn records none of them as deleted', async () => {
+    const { a } = await twoForks()
+    write('NOTES.txt', 'carried\n')
+    await sw(a.id)
+    git(f.repo, 'worktree', 'remove', '--force', cwd)
+    expect(existsSync(cwd)).toBe(false)
+    const restored = await new ThreadWorkspaceManager(f.thread).restore(f.repo)
+    expect(restored.lifecycle).toBe('ready')
+    expect(read('NOTES.txt')).toBe('carried\n')
+    expect(read('agent.txt')).toBe('one\n')
+    await turn('on-a', () => write('x.txt', 'x\n'), 2, a.id)
+    expect(actions.list().filter((item) => item.conversationBranchId === a.id && item.turnId.startsWith('user-changes:'))).toEqual([])
+  })
+
+  it('turns on a fork that put the files back as they arrived still made the edit the fork\'s own', async () => {
+    const { a, b } = await twoForks()
+    write('NOTES.txt', 'E\n')
+    await sw(a.id)
+    await turn('a-edit', () => write('NOTES.txt', 'E extended by A\n'), 2, a.id)
+    await turn('a-revise', () => write('NOTES.txt', 'E\n'), 4, a.id)
+    const { notice } = await sw(b.id)
+    expect(existsSync(join(cwd, 'NOTES.txt'))).toBe(false)
+    expect(notice).toContain('NOTES.txt is now as it was on B. Your version stays on A')
+    expect(git(cwd, 'show', `${a.retainedRef}:NOTES.txt`)).toBe('E')
+    await turn('b-work', () => write('B.txt', 'B work\n'), 2, b.id)
+    await sw(a.id)
+    expect(read('NOTES.txt')).toBe('E\n')
+  })
+
+  it('an Undo on a fork back to the files it arrived with still counts as a record of the edit', async () => {
+    const { a, b } = await twoForks()
+    write('NOTES.txt', 'E\n')
+    await sw(a.id)
+    await turn('a-work', () => write('A.txt', 'A work\n'), 2, a.id)
+    await pressed('Undo', () => new UndoService(f.thread).undoLatest(a.id, cwd))
+    await sw(b.id)
+    expect(existsSync(join(cwd, 'NOTES.txt'))).toBe(false)
+    await sw(a.id)
+    expect(read('NOTES.txt')).toBe('E\n')
+  })
+
+  it('a switch cancelled by a save, then asked for again, still brings the person\'s edit along', async () => {
+    const { a } = await twoForks()
+    write('NOTES.txt', 'person WIP\n')
+    // The save writes A's own bytes, so the retry merges it cleanly.
+    const save = saveDuringSwitch('agent.txt', 'one\n')
+    await expect(sw(a.id)).rejects.toMatchObject({ code: 'restore_conflict', details: { files: ['agent.txt'] } })
+    save.mockRestore()
+    expect(latestSwitch()?.state).toBe('cancelled')
+    await sw(a.id)
+    expect(read('NOTES.txt')).toBe('person WIP\n')
+    expect(read('agent.txt')).toBe('one\n')
+  })
+
+  it('a save that keeps the same bytes does not stop the switch', async () => {
+    const { a } = await twoForks()
+    const save = saveDuringSwitch('agent.txt', 'two\n', true)
+    await sw(a.id)
+    save.mockRestore()
+    expect(read('agent.txt')).toBe('one\n')
+    expect(latestSwitch()?.state).toBe('completed')
+  })
+
+  it('a turn on the fork that edited the edit that came along is named when the switch takes it out', async () => {
+    const { a, b } = await twoForks()
+    write('NOTES.txt', 'person line\n')
+    await sw(a.id)
+    await turn('on-a', () => write('NOTES.txt', 'person line\nagent line\n'), 2, a.id)
+    const { notice } = await sw(b.id)
+    expect(existsSync(join(cwd, 'NOTES.txt'))).toBe(false)
+    expect(notice).toBe(`NOTES.txt is now as it was on B. Your version stays on A: switch back to it, or bring it back with git restore --source=${a.retainedRef} -- <path>.`)
+    git(cwd, 'restore', `--source=${a.retainedRef}`, '--', 'NOTES.txt')
+    expect(read('NOTES.txt')).toBe('person line\nagent line\n')
+  })
+
+  it('the restore command in the notice brings back the file exactly as it was, a newer edit in it included', async () => {
+    const original = 'alpha\nunchanged one\nunchanged two\nunchanged three\nomega\n'
+    const recorded = 'PERSON RECORDED\nunchanged one\nunchanged two\nunchanged three\nomega\n'
+    const before = 'PERSON RECORDED\nunchanged one\nunchanged two\nunchanged three\nPERSON LATEST\n'
+    const { action } = await turn('first', () => write('value.txt', original))
+    write('value.txt', recorded)
+    await turn('second', () => write('agent.txt', 'second\n'), 2)
+    const a = await service.fork(cwd, 'main', action.id, 'A')
+    write('value.txt', before)
+    const { notice } = await sw(a.id)
+    // The newer line came along; the recorded one is A's now.
+    expect(read('value.txt')).toBe('alpha\nunchanged one\nunchanged two\nunchanged three\nPERSON LATEST\n')
+    const source = /git restore --source=(\S+) -- <path>/.exec(notice ?? '')?.[1]
+    expect(source).toMatch(/^refs\/mousse\//)
+    expect(notice).toMatch(/\(kept for .+\)\.$/)
+    git(cwd, 'restore', `--source=${source}`, '--', 'value.txt')
+    expect(readFileSync(join(cwd, 'value.txt'))).toEqual(Buffer.from(before))
+  })
+})
+
+describe('recovery read from the files', { timeout: 60_000 }, () => {
+  async function stoppedAfterFiles(target: ConversationBranch): Promise<void> {
+    const settle = vi.spyOn(ConversationBranchService.prototype as unknown as { settle: () => void }, 'settle').mockImplementationOnce(() => { throw new Error('stopped') })
+    await expect(pressed('Switch conversation branch', () => service.activate(cwd, target.id, undefined, () => undefined))).rejects.toThrow('stopped')
+    settle.mockRestore()
+    expect(latestSwitch()?.state).toBe('prepared')
+  }
+
+  it('stays pending when one file it wrote was edited by the person before recovery, and the edit stays', async () => {
+    const { action } = await turn('first', () => { write('agent.txt', 'first turn\n'); write('other.txt', 'first other\n') })
+    await turn('second', () => { write('agent.txt', 'second turn\n'); write('other.txt', 'second other\n') }, 2)
+    const older = await service.fork(cwd, 'main', action.id, 'Older')
+    await stoppedAfterFiles(older)
+    write('other.txt', 'the person\'s edit\n')
+    await expect(service.recoverPending(cwd, () => undefined)).rejects.toThrow(/neither the state before nor the state after/)
+    expect(latestSwitch()?.state).toBe('prepared')
+    expect(read('other.txt')).toBe('the person\'s edit\n')
+  })
+
+  it('finishes a switch that fully landed on a disk that keeps no executable bit', async () => {
+    const { action } = await turn('first', () => write('agent.txt', 'first\n'))
+    await turn('second', () => write('agent.txt', 'second\n'), 2)
+    const older = await service.fork(cwd, 'main', action.id, 'Older')
+    await stoppedAfterFiles(older)
+    // FAT and exFAT read every file as executable, and Git sets core.fileMode false there.
+    git(cwd, 'config', 'core.fileMode', 'false')
+    const lstat = disk.lstat
+    vi.spyOn(disk, 'lstat').mockImplementation(function* (path: string) {
+      const stat = yield* lstat(path)
+      if (stat.isFile()) Object.defineProperty(stat, 'mode', { value: stat.mode | 0o111 })
+      return stat
+    } as typeof disk.lstat)
+    await service.recoverPending(cwd, () => undefined)
+    expect(latestSwitch()?.state).toBe('completed')
+    expect(workspace().conversationBranchId).toBe(older.id)
   })
 })

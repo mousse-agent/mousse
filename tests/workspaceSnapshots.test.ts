@@ -655,6 +655,27 @@ describe('recovery', () => {
     expect(readFileSync(join(cwd, 'second.txt'), 'utf8')).toBe('second\n')
   })
 
+  it('an Undo that crashed, with one restored file edited by the person before recovery, stays pending and keeps the edit', async () => {
+    const { action } = await turn('turn', () => { write('agent.txt', 'agent\n'); write('second.txt', 'second\n') })
+    await interruptedUndo(action, true)
+    write('agent.txt', 'the person\'s file\n')
+    await expect(new UndoService(f.thread).recoverPending(cwd, () => undefined)).rejects.toThrow(/neither the state before nor the state after/)
+    expect(() => noPending()).toThrow()
+    expect(readFileSync(join(cwd, 'agent.txt'), 'utf8')).toBe('the person\'s file\n')
+  })
+
+  it('an Undo recovered after a file appeared records its planned end, so a Redo keeps that file', async () => {
+    const { action } = await turn('turn', () => write('agent.txt', 'agent\n'))
+    await interruptedUndo(action, true)
+    write('made-meanwhile.txt', 'the person\'s new file\n')
+    await new UndoService(f.thread).recoverPending(cwd, () => undefined)
+    noPending()
+    expect(git(cwd, 'ls-tree', '--name-only', actions.get('compensation-1')!.endSha)).not.toContain('made-meanwhile.txt')
+    await pressed('Redo', () => new RedoService(f.thread).redoLatest('main', cwd))
+    expect(readFileSync(join(cwd, 'agent.txt'), 'utf8')).toBe('agent\n')
+    expect(readFileSync(join(cwd, 'made-meanwhile.txt'), 'utf8')).toBe('the person\'s new file\n')
+  })
+
   it('an Undo that crashed is still told apart when an unrelated file appeared meanwhile, which stays', async () => {
     const { action } = await turn('turn', () => write('agent.txt', 'agent\n'))
     await interruptedUndo(action, false)
