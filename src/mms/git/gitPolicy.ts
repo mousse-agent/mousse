@@ -291,6 +291,9 @@ const ALLOWED_SETTINGS: ReadonlyArray<readonly [RegExp, (value: string) => boole
   [/^core\.attributesfile$/, (value) => NULL_DEVICES.has(value)],
   [/^core\.untrackedcache$/, (value) => value === 'false'],
   [/^gc\.auto$/, (value) => value === '0'],
+  // Mousse's own commands never start Git's automatic housekeeping (`MOUSSE_GIT_CONFIG`).
+  [/^maintenance\.auto$/, (value) => value === 'false'],
+  [/^fetch\.writecommitgraph$/, (value) => value === 'false'],
   [/^core\.hookspath$/, (value) => NULL_DEVICES.has(value)],
   [/^core\.excludesfile$/, (value) => NULL_DEVICES.has(value)],
   [/^hook\..+\.enabled$/, (value) => value === 'false'],

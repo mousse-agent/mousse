@@ -35,8 +35,19 @@ export function explicitActionGitEnv(): Record<string, string> {
  * They are passed in the environment (`GIT_CONFIG_COUNT`), which reaches every Git that process starts
  * (hooks, `gh`, credential helpers) and counts as command-line config, the only kind besides the user's
  * own that Git reads this setting from.
+ *
+ * The other three keep Git's own housekeeping out of Mousse's commands. After a commit, merge or fetch,
+ * Git starts `git maintenance run --auto` (or `gc --auto` in older versions), which can repack and prune
+ * objects nothing points at, such as a dropped stash or a reset commit the person still wants. A fetch
+ * also rewrites the commit-graph when `fetch.writeCommitGraph` is on. Mousse never asks for either, so
+ * neither runs; the person's own Git keeps running them as configured.
  */
-export const MOUSSE_GIT_CONFIG: ReadonlyArray<readonly [string, string]> = [['safe.bareRepository', 'explicit']]
+export const MOUSSE_GIT_CONFIG: ReadonlyArray<readonly [string, string]> = [
+  ['safe.bareRepository', 'explicit'],
+  ['maintenance.auto', 'false'],
+  ['gc.auto', '0'],
+  ['fetch.writeCommitGraph', 'false']
+]
 
 /**
  * `env` with `entries` added as `GIT_CONFIG_KEY_<n>`/`GIT_CONFIG_VALUE_<n>` after any the environment
