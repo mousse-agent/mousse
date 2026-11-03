@@ -71,7 +71,7 @@ async function thread(name: string, work: string, projectId?: string) {
 
 /** What an abort keeps in the thread's store, recorded as `ManagedConflictService.abort` records it. */
 async function keepByAbort(t: Awaited<ReturnType<typeof thread>>, operationId: string): Promise<string> {
-  const ref = await inThreadSnapshotScope(t.directory, t.work, () => preserveBeforeAbortAsync(t.work, operationId))
+  const { ref } = await inThreadSnapshotScope(t.directory, t.work, () => preserveBeforeAbortAsync(t.work, operationId))
   new ThreadJournal(t.directory).append({ operationId, operationType: 'publish', state: 'cancelled', details: { conflictAborted: true, preservedRef: ref } })
   return ref
 }
