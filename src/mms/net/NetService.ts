@@ -3332,8 +3332,9 @@ export class NetService {
         this.presences().clearLegacy(peer.node)
         return
       }
-      // A phone is a browser client with no daemon behind it.
-      if (link.transport === PHONE_WEBRTC_TRANSPORT) return
+      // A phone is a browser client with no daemon behind it, on any carrier: it answers no
+      // requests, and ends a session that sends it one. Only a computer sends a routes record.
+      if (link.transport === PHONE_WEBRTC_TRANSPORT || !this.publishesRoutes(peer.node)) return
       void this.track(this.readPeerInfo(session, peer.node))
     } catch {
       // Presence never affects a session.
