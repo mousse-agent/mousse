@@ -393,6 +393,25 @@ describe('Permanent delete confirmation', () => {
     expect(confirmButton(html)).toContain('disabled')
   })
 
+  it('names the thread whose broken worktree keeps some items back, once, and still lets the rest be deleted', () => {
+    const reason = 'Thread “Fix prices” points at a worktree whose repository is gone.'
+    const html = dialog({
+      preview: preview([item('path', 'data')], {
+        retained: [
+          { identity: '/x/wt', reason, unverifiedOwner: 'b' },
+          { identity: 'refs/mousse/threads/a/main', reason, unverifiedOwner: 'b' },
+          { identity: '/x/shared', reason: 'Another task or profile retains this workspace' }
+        ]
+      })
+    })
+    expect(html).toContain(`Kept: ${reason} What it may still use stays; see Show details.`)
+    expect(html.split('data-testid="trash-delete-kept"')).toHaveLength(2)
+    expect(html.indexOf('Kept: Thread')).toBeLessThan(html.indexOf('Show details'))
+    expect(html).toContain(`Kept · ${reason}`)
+    expect(html).not.toContain('Can’t delete')
+    expect(confirmButton(html)).not.toContain('disabled')
+  })
+
   it('shows a busy or failed deletion with its reason and lets the person try again', () => {
     const html = dialog({
       error:

@@ -131,8 +131,19 @@ export interface LifecyclePurgePreview {
   items: LifecyclePurgeItem[]
   ownedTaskIds: string[]
   blockers: string[]
-  retained: Array<{ identity: string; reason: string }>
+  /** Kept, with why. `unverifiedOwner` is the thread whose checkout can't be verified and whose records name it. */
+  retained: Array<{ identity: string; reason: string; unverifiedOwner?: string }>
   exclusiveBytes: number
+}
+
+/**
+ * Why automatic cleanup leaves this thread in the trash: something of it is kept back because another thread, whose
+ * checkout can't be verified, may still use it. Deleting it then would leave the kept part with no thread at all, so
+ * only the person decides, in the Permanently delete dialog. Undefined when nothing is kept back for that reason.
+ */
+export function keptBackForUnverifiedThread(preview: Pick<LifecyclePurgePreview, 'retained'>): string | undefined {
+  const reasons = [...new Set(preview.retained.filter((item) => item.unverifiedOwner).map((item) => item.reason))]
+  return reasons.length ? `${reasons.join(' ')} Its files that may overlap are kept; review permanent deletion to decide.` : undefined
 }
 export interface LifecyclePurgeProgress extends LifecyclePurgePreview {
   operationId: string

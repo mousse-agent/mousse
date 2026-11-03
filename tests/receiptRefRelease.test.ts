@@ -14,6 +14,7 @@ import { ProfileManager } from '../src/mms/profiles/ProfileManager'
 import { createInstallationPaths } from '../src/mms/profiles/paths'
 import { actionOptions, git, gitFoundationFixture } from './fixtures/gitFoundation'
 import { seedLegacyNamedEpisode } from './fixtures/legacy-named-agent'
+import { unverifiableThread } from './support/unverifiableThread'
 
 let f: ReturnType<typeof gitFoundationFixture>
 beforeEach(() => { f = gitFoundationFixture() })
@@ -147,3 +148,35 @@ it.each(['not a valid Git object identity\n', '0'.repeat(40) + '\n'])('keeps ref
   expect(operations[0].state).toBe('prepared')
   expect(git(f.repo, 'rev-parse', 'HEAD')).toBe(f.baseSha)
 }, 30_000)
+
+const BROKEN_REASON = 'Thread “Fix prices” points at a worktree whose repository is gone.'
+
+it('a thread whose worktree points at a deleted and recreated repository no longer stops releasing Undo history in another repository', async () => {
+  const { store, workspace, receipt, release } = await fixture()
+  unverifiableThread(store, { id: 'broken', name: 'Fix prices', repo: join(f.root, 'other-repo'), how: 'recreated' })
+  const result = await release.release(workspace.worktreePath)
+  expect(result.retained).toEqual([])
+  expect(result.releasedRefs).toEqual(receipt.retainedRefs)
+}, 60_000)
+
+it('a broken thread in the same repository keeps the Undo history there and names the thread', async () => {
+  const { store, workspace, receipt, release } = await fixture()
+  unverifiableThread(store, { id: 'broken', name: 'Fix prices', repo: f.repo, how: 'unlinked' })
+  const result = await release.release(workspace.worktreePath)
+  expect(result.releasedRefs).toEqual([])
+  expect(result.retained).toEqual([{ receiptId: receipt.id, reason: expect.stringContaining(BROKEN_REASON) }])
+  expect(git(f.repo, 'rev-parse', receipt.retainedRefs[0]!)).toBe(receipt.beforeSha)
+  expect(git(f.repo, 'rev-parse', receipt.retainedRefs[1]!)).toBe(receipt.afterSha)
+}, 60_000)
+
+it('a broken thread in another profile holds the same repository too, and says it is in another profile', async () => {
+  const { workspace, receipt, release } = await fixture()
+  const manager = ProfileManager.open(createInstallationPaths(f.home))
+  const profile = manager.initializeFresh({ displayName: 'Peer', slug: 'peer' })
+  const peer = new ResourceLifecycleStore({ profileId: profile.id, profileHome: manager.getPaths(profile.id).root })
+  unverifiableThread(peer, { id: 'broken', name: 'Fix prices', repo: f.repo, how: 'unlinked' })
+  const result = await release.release(workspace.worktreePath)
+  expect(result.releasedRefs).toEqual([])
+  expect(result.retained[0]?.reason).toContain('Thread “Fix prices” in another profile points at a worktree whose repository is gone.')
+  expect(git(f.repo, 'rev-parse', receipt.retainedRefs[0]!)).toBe(receipt.beforeSha)
+}, 60_000)

@@ -1,12 +1,87 @@
+import { createHash } from 'node:crypto'
 import { existsSync, lstatSync, readFileSync, readdirSync } from 'node:fs'
-import { basename, dirname, join, resolve } from 'node:path'
-import type { LifecycleResource } from '../../shared/resourceLifecycle'
+import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path'
+import type { LifecycleResource, ResourceInventorySnapshot, TaskLifecycleRecord } from '../../shared/resourceLifecycle'
 import { ProfileManager } from '../profiles/ProfileManager'
 import { createInstallationPaths } from '../profiles/paths'
 import { collectingReads, finalReads, inventoryFrom, OWNER_SCAN_LIMIT, OwnershipFacts, readOwnershipFacts, type OwnershipNeed, type OwnershipReads } from './ResourceInventory'
 import { assertLifecyclePath, ResourceLifecycleStore } from './ResourceLifecycleStore'
 
-type ExternalClaims = Array<LifecycleResource & { peerProfileId: string }>
+/**
+ * Another thread whose checkout can't be verified (its repository is gone, or was replaced at the same path). Its records
+ * were read in full, so what it may still own is known: the repositories its records name, the paths they name and the
+ * refs they name, plus the ref namespaces that carry its id. A resource inside that scope is kept back, with `reason`;
+ * anything outside it is not this thread's, so it no longer stops cleanup elsewhere. A thread whose records themselves
+ * can't be read has no known scope, and that still blocks everything.
+ */
+export interface UnverifiedOwner {
+  profileId: string
+  taskId: string
+  /** "Thread “Fix prices” points at a worktree whose repository is gone." */
+  reason: string
+  repositoryIds: string[]
+  /** Absolute paths: the thread's data folders and every checkout or container its records name. */
+  paths: string[]
+  refs: string[]
+  refPrefixes: string[]
+}
+export type ExternalClaim = LifecycleResource & { peerProfileId: string; unverified?: UnverifiedOwner }
+type ExternalClaims = ExternalClaim[]
+
+/** What a caller is about to remove or release: its repository (when known), its path, or its ref. */
+export interface ClaimTarget { repositoryId?: string; path?: string; ref?: string }
+
+const overlaps = (left: string, right: string): boolean => {
+  const inside = (root: string, path: string) => { const rel = relative(resolve(root), resolve(path)); return !isAbsolute(rel) && rel !== '..' && !rel.startsWith(`..${process.platform === 'win32' ? '\\' : '/'}`) }
+  return inside(left, right) || inside(right, left)
+}
+
+/**
+ * The unverified thread whose scope covers `target`, if any: the same repository, a path inside or around one it names, or
+ * a ref it names. A ref name alone counts only where a repository can't tell them apart (either side has none), so the
+ * same branch name in another repository is not held, and an owner without a repository never matches every one.
+ */
+export function unverifiedOwnerOver(claims: readonly ExternalClaim[], target: ClaimTarget): UnverifiedOwner | undefined {
+  for (const claim of claims) {
+    const owner = claim.unverified
+    if (!owner) continue
+    if (target.repositoryId && owner.repositoryIds.includes(target.repositoryId)) return owner
+    if (target.path && isAbsolute(target.path) && owner.paths.some((path) => overlaps(path, target.path!))) return owner
+    if (target.ref && (!target.repositoryId || !owner.repositoryIds.length) && (owner.refs.includes(target.ref) || owner.refPrefixes.some((prefix) => target.ref!.startsWith(prefix)))) return owner
+  }
+  return undefined
+}
+
+/** A worktree that can't be verified is the only blocker that leaves the records' scope known (`verifyWorktreeFact`). */
+const UNVERIFIED_WORKTREE = 'Unverified worktree '
+
+function threadName(location: string, taskId: string): string {
+  try {
+    const name = (JSON.parse(readFileSync(join(location, 'meta.json'), 'utf8')) as { name?: unknown }).name
+    if (typeof name === 'string' && name.trim()) return name.trim()
+  } catch { /* The id names it instead. */ }
+  return taskId
+}
+
+function unverifiedClaim(store: ResourceLifecycleStore, current: ResourceLifecycleStore, record: TaskLifecycleRecord, inventory: ResourceInventorySnapshot): ExternalClaim {
+  const owners = new Set([record.taskId, ...inventory.resources.map((resource) => resource.ownerTaskId)])
+  const paths = new Set([record.location, ...record.locations])
+  for (const resource of inventory.resources) if (isAbsolute(resource.identity) && !resource.identity.includes('#') && resource.kind !== 'git-ref' && resource.kind !== 'artifact') paths.add(resource.identity)
+  const repositoryIds = [...new Set(inventory.resources.map((resource) => resource.repositoryId).filter((id): id is string => Boolean(id)))]
+  const refs = [...new Set(inventory.resources.filter((resource) => resource.kind === 'git-ref').map((resource) => resource.identity))]
+  const refPrefixes = [...owners].flatMap((id) => [`refs/mousse/threads/${id}/`, `refs/mousse/delegations/${id}/`, `refs/mousse/published/${id}`, `refs/mousse/workflows/${store.profileId}/${id}/`, `refs/heads/mousse/thread/${id}/`])
+  // The thread named is the one whose worktree failed, which may be a thread this one owns.
+  const broken = store.get(inventory.resources.find((resource) => resource.kind === 'worktree' && resource.ownership === 'unknown')?.ownerTaskId ?? record.taskId) ?? record
+  const name = threadName(broken.location, broken.taskId)
+  const where = resolve(store.profileHome) === resolve(current.profileHome) ? '' : ' in another profile'
+  const reason = `Thread “${name}”${where} points at a worktree whose repository is gone.`
+  return {
+    id: createHash('sha256').update(`unverified\0${store.profileId}\0${record.taskId}`).digest('hex'),
+    kind: 'unknown', identity: `unverified-thread:${store.profileId}/${record.taskId}`, ownerTaskId: record.taskId,
+    materialization: 'unknown', ownership: 'unknown', sourceIds: [], claims: [], peerProfileId: store.profileId,
+    unverified: { profileId: store.profileId, taskId: record.taskId, reason, repositoryIds, paths: [...paths], refs, refPrefixes }
+  }
+}
 
 /**
  * Installation-wide source view shared by purge and receipt release; malformed peers fail closed. Checkouts and old
@@ -110,8 +185,11 @@ function claimsFrom(current: ResourceLifecycleStore, ownedIds: Set<string>, read
     }
     return records.filter((record) => record.state !== 'purged' && !(resolve(store.profileHome) === resolve(current.profileHome) && ownedIds.has(record.taskId))).flatMap((record) => {
       const inventory = inventoryFrom(store, record, {}, reads)
-      if (inventory.blockers.length) throw new Error(`Shared ownership cannot be proven for profile ${store.profileId}, task ${record.taskId}: ${inventory.blockers.join('; ')}`)
-      return inventory.resources.map((resource) => ({ ...resource, peerProfileId: store.profileId }))
+      const claims: ExternalClaims = inventory.resources.map((resource) => ({ ...resource, peerProfileId: store.profileId }))
+      if (!inventory.blockers.length) return claims
+      // Records read in full, with only a checkout that can't be verified: what the thread may own is known, so only that is held.
+      if (inventory.blockers.every((blocker) => blocker.startsWith(UNVERIFIED_WORKTREE))) return [...claims, unverifiedClaim(store, current, record, inventory)]
+      throw new Error(`Shared ownership cannot be proven for profile ${store.profileId}, task ${record.taskId}: ${inventory.blockers.join('; ')}`)
     })
   })
 }

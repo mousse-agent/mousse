@@ -11,6 +11,10 @@ import { registerThreadLifecycleGate } from '../src/mms/queue/ThreadLifecycleAdm
 import { createHash } from 'node:crypto'
 import { preserveBeforeAbortAsync } from '../src/mms/actions/leftMerge'
 import { ThreadJournal } from '../src/mms/data/ThreadJournal'
+import { getExternalResourceClaims, unverifiedOwnerOver } from '../src/mms/lifecycle/LifecycleClaims'
+import { ProfileManager } from '../src/mms/profiles/ProfileManager'
+import { createInstallationPaths } from '../src/mms/profiles/paths'
+import { unverifiableThread } from './support/unverifiableThread'
 
 const roots: string[] = []
 const owned: Array<() => void> = []
@@ -262,3 +266,84 @@ test('the release of what a deleted thread holds outside its folder runs on ever
   expect(passes).toBe(2)
 })
 
+
+// ---- A thread whose worktree can't be verified holds only what its records may name (live audit N4) ----
+const BROKEN_REASON = 'Thread “Fix prices” points at a worktree whose repository is gone.'
+
+test('a thread whose worktree points at a deleted and recreated repository no longer blocks deleting a thread in another repository', async () => {
+  const f = fixture({ git: true }); automatic(f)
+  const broken = unverifiableThread(f.store, { id: 'broken', name: 'Fix prices', repo: join(f.root, 'other-repo'), how: 'recreated' })
+  await trashedTask(f, 'task')
+  const preview = await f.coordinator.cleanup.preview('task')
+  expect(preview.blockers).toEqual([]); expect(preview.retained).toEqual([])
+  expect(preview.items.map((item) => item.kind)).toEqual(expect.arrayContaining(['worktree', 'ref', 'path']))
+  // The hourly sweep purges it too.
+  expect((await f.coordinator.cleanup.sweep(Date.now())).find((outcome) => outcome.taskId === 'task')).toMatchObject({ outcome: 'purged' })
+  expect(f.store.require('task').state).toBe('purged'); expect(existsSync(f.worktree)).toBe(false)
+  expect(git(f.repo, ['for-each-ref', '--format=%(refname)', 'refs/mousse/', 'refs/heads/mousse/'])).toBe('')
+  // The broken thread is untouched.
+  expect(f.store.require('broken').state).toBe('active'); expect(readFileSync(join(broken.worktree, 'a.txt'), 'utf8')).toBe('first\n')
+}, 60_000)
+
+test('what a broken thread in the same repository may still use is kept back with its name, and automatic cleanup waits for the person', async () => {
+  const f = fixture({ git: true }); automatic(f)
+  unverifiableThread(f.store, { id: 'broken', name: 'Fix prices', repo: f.repo, how: 'unlinked' })
+  writeFileSync(join(f.worktree, 'kept.txt'), 'kept bytes\n')
+  const pins = git(f.repo, ['for-each-ref', '--format=%(refname) %(objectname)', 'refs/mousse/threads/task/', 'refs/heads/mousse/thread/task/'])
+  await trashedTask(f, 'task')
+  const preview = await f.coordinator.cleanup.preview('task')
+  expect(preview.blockers).toEqual([])
+  expect(preview.retained).toContainEqual({ identity: f.worktree, reason: BROKEN_REASON, unverifiedOwner: 'broken' })
+  expect(preview.retained).toContainEqual({ identity: 'refs/mousse/threads/task/main', reason: BROKEN_REASON, unverifiedOwner: 'broken' })
+  expect(preview.items.filter((item) => item.kind === 'worktree' || item.kind === 'ref')).toEqual([])
+  expect(preview.items.some((item) => item.kind === 'path' && item.identity === f.store.require('task').location)).toBe(true)
+  // Deleting it unattended would leave what is kept with no thread: the sweep keeps it and says why.
+  expect((await f.coordinator.cleanup.sweep(Date.now())).find((outcome) => outcome.taskId === 'task')).toMatchObject({ outcome: 'kept', reason: expect.stringContaining(BROKEN_REASON) })
+  expect(f.store.require('task').state).toBe('trashed')
+  // The person can still delete it; what is kept back stays byte for byte.
+  const fresh = await f.coordinator.cleanup.preview('task')
+  expect((await f.coordinator.purge({ taskId: 'task', operationId: 'purge', expectedGeneration: fresh.generation, previewDigest: fresh.digest })).state).toBe('purged')
+  expect(readFileSync(join(f.worktree, 'kept.txt'), 'utf8')).toBe('kept bytes\n'); expect(readFileSync(join(f.worktree, 'a.txt'), 'utf8')).toBe('first\n')
+  expect(git(f.repo, ['for-each-ref', '--format=%(refname) %(objectname)', 'refs/mousse/threads/task/', 'refs/heads/mousse/thread/task/'])).toBe(pins)
+}, 60_000)
+
+test('an unverified thread holds its repositories, its paths and its refs, and a thread whose records name no repository never holds every one', async () => {
+  const f = fixture({ git: true })
+  const broken = unverifiableThread(f.store, { id: 'broken', name: 'Fix prices', repo: join(f.root, 'other-repo'), how: 'recreated' })
+  const claims = await getExternalResourceClaims(f.store, new Set(['task']))
+  const owner = claims.find((claim) => claim.unverified)!.unverified!
+  expect(owner).toMatchObject({ taskId: 'broken', reason: BROKEN_REASON, repositoryIds: [broken.repositoryId] })
+  const repositoryA = resolveRepositoryIdentity(f.repo).key
+  expect(unverifiedOwnerOver(claims, { repositoryId: broken.repositoryId })).toBe(owner)
+  expect(unverifiedOwnerOver(claims, { path: join(broken.worktree, 'src') })).toBe(owner)
+  expect(unverifiedOwnerOver(claims, { path: broken.location })).toBe(owner)
+  expect(unverifiedOwnerOver(claims, { repositoryId: repositoryA, path: f.worktree })).toBeUndefined()
+  // A ref name counts only where no repository tells them apart.
+  expect(unverifiedOwnerOver(claims, { ref: 'refs/mousse/threads/broken/other' })).toBe(owner)
+  expect(unverifiedOwnerOver(claims, { repositoryId: repositoryA, ref: 'refs/mousse/threads/broken/other' })).toBeUndefined()
+  const withoutRepository = claims.map((claim) => claim.unverified ? { ...claim, unverified: { ...claim.unverified, repositoryIds: [] } } : claim)
+  expect(unverifiedOwnerOver(withoutRepository, { repositoryId: repositoryA, ref: 'refs/mousse/changes/11111111-1111-4111-8111-111111111111/before' })).toBeUndefined()
+  expect(unverifiedOwnerOver(withoutRepository, { repositoryId: repositoryA, ref: broken.retainedRef })).toBe(withoutRepository.find((claim) => claim.unverified)!.unverified)
+}, 60_000)
+
+test('profile storage the installation does not list still blocks every permanent delete, broken thread or not', async () => {
+  const f = fixture({ git: true })
+  unverifiableThread(f.store, { id: 'broken', name: 'Fix prices', repo: join(f.root, 'other-repo'), how: 'recreated' })
+  ProfileManager.open(createInstallationPaths(f.home)).initializeFresh({ displayName: 'Peer', slug: 'peer' })
+  mkdirSync(join(f.home, 'profiles', 'stray'), { recursive: true })
+  await f.coordinator.trash({ taskId: 'task', operationId: 'trash' })
+  const preview = await f.coordinator.cleanup.preview('task')
+  expect(preview.blockers).toEqual([expect.stringContaining('Unregistered profile storage')]); expect(preview.items).toEqual([])
+  await expect(f.coordinator.purge({ taskId: 'task', operationId: 'purge', expectedGeneration: preview.generation, previewDigest: preview.digest })).rejects.toThrow()
+  expect(f.store.require('task').state).toBe('trashed')
+  expect(readFileSync(join(f.worktree, 'a.txt'), 'utf8')).toBe('first\n')
+}, 60_000)
+
+test('records that can no longer be read still block every permanent delete: their scope is unknown', async () => {
+  const f = fixture({ git: true })
+  const broken = unverifiableThread(f.store, { id: 'broken', name: 'Fix prices', repo: join(f.root, 'other-repo'), how: 'recreated' })
+  writeFileSync(join(broken.location, 'workspace.json'), '{ not json')
+  await f.coordinator.trash({ taskId: 'task', operationId: 'trash' })
+  const preview = await f.coordinator.cleanup.preview('task')
+  expect(preview.blockers).toEqual([expect.stringContaining('Shared ownership cannot be proven')]); expect(preview.items).toEqual([])
+}, 60_000)

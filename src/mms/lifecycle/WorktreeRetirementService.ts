@@ -15,7 +15,7 @@ import { PROCESS_INSTANCE_ID } from '../queue/processLiveness'
 import { AgentEpisodeStore } from '../agents/AgentEpisodeStore'
 import { WorktreeIdentity } from '../worktree/WorktreeIdentity'
 import { ThreadJournal } from '../data/ThreadJournal'
-import { getExternalResourceClaims, getExternalResourceClaimsFromFacts } from './LifecycleClaims'
+import { getExternalResourceClaims, getExternalResourceClaimsFromFacts, unverifiedOwnerOver } from './LifecycleClaims'
 import { OwnershipFacts } from './ResourceInventory'
 import type { ConversationBranch, ThreadAction } from '../../shared/threadActions'
 import { gitDirectoryEnvAsync } from '../git/gitEnv'
@@ -480,10 +480,16 @@ export class WorktreeRetirementService {
       return excluded
     }
     const overlaps = (left: string, right: string) => { const rel = relative(resolve(left), resolve(right)); return !isAbsolute(rel) && rel !== '..' && !rel.startsWith(`..${process.platform === 'win32' ? '\\' : '/'}`) }
-    const shares = (claims: Awaited<ReturnType<typeof getExternalResourceClaims>>, excluded: Set<string>): boolean => claims.some((resource) => !(resource.peerProfileId === this.store.profileId && excluded.has(resource.ownerTaskId)) && isAbsolute(resource.identity) && (overlaps(resource.identity, manifest.worktreePath) || overlaps(manifest.worktreePath, resource.identity)))
-    const blocked = 'Another task or profile retains this checkout; retirement is blocked'
+    /** Why another owner keeps this checkout: a claim on it, or a thread whose checkout can't be verified and whose records may name it. */
+    const shares = (all: Awaited<ReturnType<typeof getExternalResourceClaims>>, excluded: Set<string>): string | undefined => {
+      const claims = all.filter((resource) => !(resource.peerProfileId === this.store.profileId && excluded.has(resource.ownerTaskId)))
+      if (claims.some((resource) => isAbsolute(resource.identity) && (overlaps(resource.identity, manifest.worktreePath) || overlaps(manifest.worktreePath, resource.identity)))) return 'Another task or profile retains this checkout; retirement is blocked'
+      const unverified = unverifiedOwnerOver(claims, { repositoryId: manifest.repositoryId, path: manifest.worktreePath })
+      return unverified && `${unverified.reason} This checkout is kept until that is resolved.`
+    }
     const excluded = excludedNow()
-    if (shares(await getExternalResourceClaims(this.store, excluded), excluded)) throw new Error(blocked)
+    const blocked = shares(await getExternalResourceClaims(this.store, excluded), excluded)
+    if (blocked) throw new Error(blocked)
     await this.verifyPins(manifest)
     const trashPath = this.trashPathFor(manifest)
     if (await exists(trashPath)) throw new Error(`An earlier copy of this worktree is still in the trash at ${trashPath}; it is kept`)
@@ -499,7 +505,8 @@ export class WorktreeRetirementService {
       this.assertOwnership(manifest.taskId, manifest.commonDir, manifest.repositoryId, lease)
       this.verifySource(manifest, options.purging)
       const current = excludedNow()
-      if (shares(getExternalResourceClaimsFromFacts(this.store, current, facts), current)) throw new Error(blocked)
+      const late = shares(getExternalResourceClaimsFromFacts(this.store, current, facts), current)
+      if (late) throw new Error(late)
     })
     options.beforeMove?.()
     // The destination is fixed by the manifest, so a crash after the move finds the folder there.

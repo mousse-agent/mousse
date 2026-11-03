@@ -162,6 +162,8 @@ export interface DeletionSummary {
   /** Names the work that would be lost; present exactly when `needsDiscard`. */
   discardWarning?: string
   blockers: string[]
+  /** Why some items stay: another thread whose checkout can't be verified may still use them. One line per thread. */
+  keptBack: string[]
 }
 
 /** The one-glance reading of a purge preview, so the dialog can lead with what is lost. */
@@ -193,7 +195,8 @@ export function summarizeDeletion(preview: LifecyclePurgePreview, name: string, 
     keptFiles,
     needsDiscard,
     ...(needsDiscard ? { discardWarning: `Unpublished work will be lost: ${lostWork.join('; ')}.` } : {}),
-    blockers: preview.blockers
+    blockers: preview.blockers,
+    keptBack: [...new Set(preview.retained.filter((item) => item.unverifiedOwner).map((item) => item.reason))]
   }
 }
 

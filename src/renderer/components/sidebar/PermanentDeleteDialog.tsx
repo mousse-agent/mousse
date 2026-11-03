@@ -47,6 +47,7 @@ export function PermanentDeleteDialog({ confirmation, onDiscardChange, onConfirm
         <p className="trash-delete-headline">{summary.headline}</p>
         <p className="trash-delete-frees">{summary.frees}</p>
         {summary.blockers.map((reason) => <p key={reason} className="trash-delete-error" role="alert">Can’t delete: {reason}</p>)}
+        {summary.keptBack.map((reason) => <p key={reason} className="trash-delete-kept" data-testid="trash-delete-kept">Kept: {reason} What it may still use stays; see Show details.</p>)}
         {summary.discardWarning && <div className="trash-delete-warning">
           <p>{summary.discardWarning}</p>
           <label className="trash-delete-discard">

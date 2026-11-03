@@ -3,7 +3,7 @@ import type { ChangeReceipt } from '../../shared/threadActions'
 import { ThreadJournal } from '../data/ThreadJournal'
 import { resolveRepositoryIdentityAsync } from '../git/RepositoryIdentity'
 import { buildResourceInventory, buildResourceInventoryFromFacts, OwnershipFacts } from '../lifecycle/ResourceInventory'
-import { getExternalResourceClaims, getExternalResourceClaimsFromFacts } from '../lifecycle/LifecycleClaims'
+import { getExternalResourceClaims, getExternalResourceClaimsFromFacts, unverifiedOwnerOver } from '../lifecycle/LifecycleClaims'
 import { readDirectLifecycleRefAsync } from '../lifecycle/WorktreeRetirementService'
 import type { ResourceLifecycleStore } from '../lifecycle/ResourceLifecycleStore'
 import type { ThreadLeaseHandle } from '../queue/ThreadExecutionLease'
@@ -95,7 +95,11 @@ export class ReceiptRefReleaseService {
           const { inventory, external } = ownership()
           for (const ref of intent.refs) {
             const resources = inventory.resources.filter((resource) => resource.kind === 'git-ref' && resource.identity === ref.name)
+            // A ref of the same name is shared even where the claim names no repository: receipt refs are named by their receipt's id.
             if (external.some((resource) => resource.kind === 'git-ref' && resource.identity === ref.name && (!resource.repositoryId || resource.repositoryId === identity.key))) throw new Error(`Reference is associated with another task or profile: ${ref.name}`)
+            // A thread whose checkout can't be verified holds what its records may name in this repository, never every repository.
+            const unverified = unverifiedOwnerOver(external, { repositoryId: identity.key, ref: ref.name })
+            if (unverified) throw new Error(`${unverified.reason} ${ref.name} is kept.`)
             if (!resources.length || resources.some((resource) => resource.ownerTaskId !== task.taskId || resource.repositoryId !== identity.key || resource.claims.length > 0 || resource.ownership === 'unknown')) throw new Error(`Reference has an active, shared or unknown claim: ${ref.name}`)
           }
           if (!candidate.intent) journal.append({ operationId: candidate.operationId, operationType: 'undo-ref-release', state: 'prepared', details: intent })
