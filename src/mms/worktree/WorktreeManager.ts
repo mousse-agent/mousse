@@ -70,8 +70,10 @@ export class WorktreeManager {
     // the user's original path and would return paths that cannot be matched by
     // callers. RepositoryContext still owns the canonical Git command context.
     this.repository = await RepositoryContext.open(this.repoRoot)
+    // `.mousse-worktrees` is only read: older versions made agent worktrees there, and the orphan scan
+    // still reports what it finds. Nothing is created in the person's repository, and a folder that is
+    // already there is left as it is.
     this.worktreesBase = join(this.repoRoot, '.mousse-worktrees')
-    await mkdir(this.worktreesBase, { recursive: true })
   }
 
   private async getRepository(): Promise<RepositoryContext> {

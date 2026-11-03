@@ -111,7 +111,7 @@ const ISOLATED_SETTINGS: ReadonlyArray<readonly [string, string]> = [
   ['core.fsmonitor', 'false'], ['core.untrackedCache', 'false'],
   ['core.symlinks', process.platform === 'win32' ? 'false' : 'true'],
   // Mousse collects a store's garbage itself, after it releases refs; nothing it runs may start a collection.
-  ['gc.auto', '0'],
+  ['gc.auto', '0'], ['maintenance.auto', 'false'],
   ['diff.autoRefreshIndex', 'false']
 ]
 

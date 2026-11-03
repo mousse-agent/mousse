@@ -3,9 +3,9 @@ import { lutimesSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
-import { gitDirectoryEnv, isGitDirectory, withGitConfigEnv } from '../src/mms/git/gitEnv'
+import { gitDirectoryEnv, isGitDirectory, MOUSSE_GIT_CONFIG, withGitConfigEnv } from '../src/mms/git/gitEnv'
 import { GitService } from '../src/mms/git/GitService'
-import { userAction } from '../src/mms/git/gitPolicy'
+import { decideGitCommand, userAction } from '../src/mms/git/gitPolicy'
 import { readOnlyGitAsync, runReadOnlyGitAsync } from '../src/mms/git/readOnlyGit'
 import { conflictPair, readWorkingTreeStatus, readWorkingTreeStatusSync } from '../src/mms/git/workingTreeStatus'
 import { git as actionGit, inspectPendingChangesAsync } from '../src/mms/actions/git'
@@ -274,12 +274,25 @@ describe('Status reads use plumbing and never write the index', () => {
 describe('Every Git run carries safe.bareRepository=explicit', () => {
   it('appends after the entries the environment already has, once', () => {
     const env = withGitConfigEnv({ GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'user.name', GIT_CONFIG_VALUE_0: 'Someone' })
-    expect(env).toMatchObject({ GIT_CONFIG_COUNT: '2', GIT_CONFIG_KEY_0: 'user.name', GIT_CONFIG_VALUE_0: 'Someone', GIT_CONFIG_KEY_1: 'safe.bareRepository', GIT_CONFIG_VALUE_1: 'explicit' })
+    expect(env).toMatchObject({ GIT_CONFIG_COUNT: '5', GIT_CONFIG_KEY_0: 'user.name', GIT_CONFIG_VALUE_0: 'Someone', GIT_CONFIG_KEY_1: 'safe.bareRepository', GIT_CONFIG_VALUE_1: 'explicit' })
     expect(withGitConfigEnv(env)).toEqual(env)
     // A later entry of the user's own would win, so ours goes after it.
-    const overridden = withGitConfigEnv({ ...env, GIT_CONFIG_COUNT: '3', GIT_CONFIG_KEY_2: 'safe.bareRepository', GIT_CONFIG_VALUE_2: 'all' })
-    expect(overridden).toMatchObject({ GIT_CONFIG_COUNT: '4', GIT_CONFIG_KEY_3: 'safe.bareRepository', GIT_CONFIG_VALUE_3: 'explicit' })
-    expect(withGitConfigEnv({ GIT_CONFIG_COUNT: 'x', GIT_CONFIG_KEY_0: 'a.b' })).toEqual({ GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'safe.bareRepository', GIT_CONFIG_VALUE_0: 'explicit' })
+    const overridden = withGitConfigEnv({ ...env, GIT_CONFIG_COUNT: '6', GIT_CONFIG_KEY_5: 'safe.bareRepository', GIT_CONFIG_VALUE_5: 'all' })
+    expect(overridden).toMatchObject({ GIT_CONFIG_COUNT: '7', GIT_CONFIG_KEY_6: 'safe.bareRepository', GIT_CONFIG_VALUE_6: 'explicit' })
+    expect(withGitConfigEnv({ GIT_CONFIG_COUNT: 'x', GIT_CONFIG_KEY_0: 'a.b' })).toMatchObject({ GIT_CONFIG_COUNT: '4', GIT_CONFIG_KEY_0: 'safe.bareRepository', GIT_CONFIG_VALUE_0: 'explicit' })
+    expect(withGitConfigEnv({ GIT_CONFIG_COUNT: 'x', GIT_CONFIG_KEY_0: 'a.b' }).GIT_CONFIG_KEY_4).toBeUndefined()
+  })
+
+  it('turns off Git\'s automatic housekeeping, and the central check accepts the whole set', () => {
+    const env = withGitConfigEnv({})
+    const pairs = Array.from({ length: Number(env.GIT_CONFIG_COUNT) }, (_, index) => [env[`GIT_CONFIG_KEY_${index}`], env[`GIT_CONFIG_VALUE_${index}`]])
+    expect(pairs).toEqual([['safe.bareRepository', 'explicit'], ['maintenance.auto', 'false'], ['gc.auto', '0'], ['fetch.writeCommitGraph', 'false']])
+    expect(MOUSSE_GIT_CONFIG).toEqual(pairs)
+    // Set by a caller in its own environment, each is one the check lets through.
+    expect(decideGitCommand({ cwd: tmpdir(), args: ['log'], env: { ...process.env, ...env } })).toMatchObject({ allowed: true })
+    for (const [key, value] of [['maintenance.auto', 'true'], ['fetch.writeCommitGraph', 'true'], ['gc.auto', '1']]) {
+      expect(decideGitCommand({ cwd: tmpdir(), args: ['-c', `${key}=${value}`, 'log'] })).toMatchObject({ allowed: false })
+    }
   })
 
   it('never finds a bare repository left inside a project', async () => {
