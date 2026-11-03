@@ -130,6 +130,23 @@ export async function tryGitAsync(cwd: string, args: string[], env?: NodeJS.Proc
   return { ok, stdout: result.stdout.trim(), stderr: (!ok && filterRefusal(stderr)) || stderr }
 }
 
+/**
+ * {@link tryGitAsync} with Git's output exactly as written, not trimmed, and the exit status, for `-z` listings whose
+ * names may begin or end with blanks. `input` goes to Git's standard input. Output cut off at the limit is a failure.
+ */
+export async function tryGitRawAsync(cwd: string, args: string[], input?: string): Promise<{ ok: boolean; status: number | null; stdout: string; stderr: string }> {
+  let safe: string[]
+  try {
+    safe = await guardedAsync(cwd, args, input !== undefined ? { stdin: input } : undefined)
+  } catch (error) {
+    rethrowGitPolicyError(error)
+    return { ok: false, status: null, stdout: '', stderr: error instanceof Error ? error.message : String(error) }
+  }
+  const result = await runGitProcess(safe, { cwd, env: gitEnv(cwd), ...(input !== undefined ? { input } : {}) })
+  const ok = !result.error && result.status === 0
+  return { ok, status: result.error ? null : result.status, stdout: result.stdout, stderr: (!ok && filterRefusal(result.stderr.trim())) || result.stderr }
+}
+
 /** {@link git} as a step: see `steps.ts`. */
 export function gitStep(cwd: string, args: string[], env?: NodeJS.ProcessEnv, input?: string, options?: GitReadOptions): Steps<string> {
   return step(() => git(cwd, args, env, input, options), () => gitAsync(cwd, args, env, input, options))
