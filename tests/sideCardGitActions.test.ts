@@ -20,7 +20,6 @@ import {
   commitScope,
   emptyCommitForm,
   existingPullRequestNotice,
-  forceAmend,
   openPullRequestFailedMessage,
   gitActionAvailability,
   gitCollapsedLabel,
@@ -34,8 +33,7 @@ import {
   pullRequestRow,
   pullRequestScope,
   pushButtonModel,
-  pushFailedMessage,
-  releaseForcedAmend
+  pushFailedMessage
 } from '../src/renderer/components/sideCard/gitSectionLogic'
 import { EMPTY_GIT_ENTRY, type GitStatusView } from '../src/renderer/stores/gitStatusStore'
 import { useAppStore } from '../src/renderer/stores/appStore'
@@ -495,10 +493,10 @@ describe('commit menu state', () => {
   })
 
   it('enables the trigger for changes or an amendable commit', () => {
-    expect(commitMenuState([commit()], 2, false)).toMatchObject({ triggerEnabled: true, forced: false })
+    expect(commitMenuState([commit()], 2, false)).toMatchObject({ triggerEnabled: true, nothingToCommit: false })
     expect(commitMenuState([commit({ onRemote: true })], 2, false).triggerEnabled).toBe(true)
     expect(commitMenuState([], 1, false).triggerEnabled).toBe(true)
-    expect(commitMenuState([commit()], 0, false)).toMatchObject({ triggerEnabled: true, forced: true })
+    expect(commitMenuState([commit()], 0, false)).toMatchObject({ triggerEnabled: true, nothingToCommit: true })
   })
 
   it('disables the trigger when there is nothing to commit or amend', () => {
@@ -512,8 +510,21 @@ describe('commit menu state', () => {
     expect(commitMenuState([commit()], 2, true)).toMatchObject({ amend: true, amendDisabled: false })
   })
 
-  it('forces amend on without changes', () => {
-    expect(commitMenuState([commit()], 0, false)).toMatchObject({ amend: true, amendDisabled: true, amendTitle: 'No changes to commit' })
+  it('never turns amend on by itself: without changes it stays off and can be switched on', () => {
+    expect(commitMenuState([commit()], 0, false)).toMatchObject({
+      amend: false,
+      amendDisabled: false,
+      amendTitle: null,
+      submitReason: 'No changes to commit. Turn on Amend last commit to change a1b2c3d'
+    })
+    expect(commitMenuState([commit()], 0, true)).toMatchObject({ amend: true, amendDisabled: false, submitReason: null })
+  })
+
+  it('has no commit to offer without changes when amend is not possible', () => {
+    for (const state of [commitMenuState([commit({ onRemote: true })], 0, true), commitMenuState([], 0, true), commitMenuState([commit()], 0, true, true)]) {
+      expect(state).toMatchObject({ triggerEnabled: false, amend: false, amendDisabled: true })
+      expect(state.submitReason).not.toBeNull()
+    }
   })
 
   it('disables amend with the reason when it is not possible', () => {
@@ -526,16 +537,17 @@ describe('commit menu state', () => {
     expect(commitMenuState([], 2, true)).toMatchObject({ amend: false, amendDisabled: true, amendTitle: 'No commits yet' })
   })
 
-  it('reports amend as forced only when it is the one possible commit', () => {
-    expect(commitMenuState([commit()], 0, false).forced).toBe(true)
-    expect(commitMenuState([commit()], 1, false).forced).toBe(false)
-    expect(commitMenuState([commit({ onRemote: true })], 0, false).forced).toBe(false)
+  it('lets a commit through with changes, amend or not', () => {
+    expect(commitMenuState([commit()], 1, false).submitReason).toBeNull()
+    expect(commitMenuState([commit()], 1, true).submitReason).toBeNull()
+    expect(commitMenuState([], 1, false).submitReason).toBeNull()
   })
 
-  it('keeps amend on once it was set, so files appearing later do not drop it', () => {
-    // The popover stores the choice while amend is forced; with changes it stays checked and can be turned off.
-    expect(commitMenuState([commit()], 2, true)).toMatchObject({ amend: true, forced: false, amendDisabled: false })
+  it('keeps the amend choice as files come and go: only the user sets it', () => {
+    expect(commitMenuState([commit()], 2, true)).toMatchObject({ amend: true, amendDisabled: false })
+    expect(commitMenuState([commit()], 0, true).amend).toBe(true)
     expect(commitMenuState([commit()], 2, false).amend).toBe(false)
+    expect(commitMenuState([commit()], 0, false).amend).toBe(false)
   })
 
   it('names the commit it would amend', () => {
@@ -546,6 +558,7 @@ describe('commit menu state', () => {
   it('words the footer hint and buttons for a plain commit and for an amend', () => {
     expect(commitHint(false, 'a1b2c3d', 1)).toBe('Stages 1 file')
     expect(commitHint(false, 'a1b2c3d', 3)).toBe('Stages 3 files')
+    expect(commitHint(false, 'a1b2c3d', 0)).toBe('No changes to commit')
     expect(commitHint(true, 'a1b2c3d', 0)).toBe('Amends a1b2c3d')
     expect(commitHint(true, 'a1b2c3d', 2)).toBe('Amends a1b2c3d · stages 2 files')
     expect(commitButtonLabels(false)).toEqual({ commit: 'Commit', commitAndPush: 'Commit and push', commitPushAndOpenPr: 'Commit, push and open PR' })
@@ -595,8 +608,8 @@ describe('commit button label', () => {
     })
   })
 
-  it('never offers an amend under the Commit label: with no changes the button says Amend, or stays disabled', () => {
-    expect(trigger([])).toEqual({ label: 'Amend', title: 'No changes to commit. Amend a1b2c3d to change its message' })
+  it('says Commit with no changes, offering an amend the user turns on, or stays disabled', () => {
+    expect(trigger([])).toEqual({ label: 'Commit', title: 'No changes to commit. You can amend a1b2c3d to change its message' })
     expect(trigger([], { commits: [commit({ onRemote: true })] })).toEqual({ label: 'Commit', title: 'No changes to commit' })
     expect(trigger([], { commits: [] })).toEqual({ label: 'Commit', title: 'No changes to commit' })
     expect(trigger([], { scope: { workspaceThreadId: 't1' } })).toEqual({ label: 'Commit', title: 'No changes to commit' })
@@ -794,7 +807,7 @@ describe('commit form scope', () => {
   })
 
   it('keeps typed text across a new HEAD on the same branch, but not the amend choice', () => {
-    const moved = commitFormFor({ ...typed(), amendChecked: true, amendForced: true }, commitScope('a', [other]))
+    const moved = commitFormFor({ ...typed(), amendChecked: true }, commitScope('a', [other]))
     expect(moved).toEqual({ ...emptyCommitForm(commitScope('a', [other])), draft: { message: 'Only for a', prefilled: null } })
   })
 
@@ -814,16 +827,11 @@ describe('commit form scope', () => {
     expect(stored).toEqual(emptyCommitForm(scopeA))
   })
 
-  it('turns a forced amend back off on close, and keeps one the user chose', () => {
-    const forced = forceAmend(emptyCommitForm(scopeA))
-    expect(forced).toMatchObject({ amendChecked: true, amendForced: true })
-    expect(releaseForcedAmend(forced)).toMatchObject({ amendChecked: false, amendForced: false })
-
+  it('starts with amend off, and only the user turns it on or off', () => {
+    expect(emptyCommitForm(scopeA).amendChecked).toBe(false)
     const chosen = chooseAmend(emptyCommitForm(scopeA), true)
-    expect(releaseForcedAmend(chosen)).toBe(chosen)
-    // Amend the user already switched on is not taken over by the forced state.
-    expect(forceAmend(chosen)).toBe(chosen)
-    expect(chooseAmend(forced, true).amendForced).toBe(false)
+    expect(chosen.amendChecked).toBe(true)
+    expect(chooseAmend(chosen, false).amendChecked).toBe(false)
   })
 })
 
@@ -1101,9 +1109,9 @@ describe('git section actions markup', () => {
   it('keeps the commit trigger enabled when only an amend is possible', () => {
     const html = render(view({ commits: [commit()] }))
     expect(html).toMatch(/<button[^>]*class="side-card-git-commit-button"(?![^>]*disabled)/)
-    // Labelled Amend, never Commit: amending is not a silent default.
-    expect(html).toContain('title="No changes to commit. Amend a1b2c3d to change its message"')
-    expect(html).toMatch(/class="side-card-git-commit-button"[\s\S]*?<span>Amend<\/span><\/button>/)
+    // Labelled Commit: the popover offers the amend, and the user turns it on.
+    expect(html).toContain('title="No changes to commit. You can amend a1b2c3d to change its message"')
+    expect(html).toMatch(/class="side-card-git-commit-button"[\s\S]*?<span>Commit<\/span><\/button>/)
   })
 
   it('names what the Commit button commits on the button itself', () => {
