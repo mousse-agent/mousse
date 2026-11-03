@@ -82,7 +82,6 @@ import {
   dirtySwitchChoices,
   emptyCommitForm,
   existingPullRequestNotice,
-  forceAmend,
   GIT_BUSY_REASON,
   GIT_CHECKING_LABEL,
   gitActionAvailability,
@@ -103,7 +102,6 @@ import {
   pullRequestScope,
   pushButtonModel,
   pushFailedMessage,
-  releaseForcedAmend,
   THREAD_BRANCH_SWITCH_REASON,
   untrackedFileCount,
   type CommitAvailability,
@@ -532,7 +530,8 @@ function CommitButton({ path, scope: gitScope, branch, fileCount, commits, pusha
   const { amend } = menu
   const trimmed = draft.message.trim()
   const blocked = lock.reason !== null
-  const canSubmit = Boolean(trimmed) && !work && !blocked && commitAvailability.blockedReason === null
+  // With nothing to commit, the buttons wait for the user to turn amend on; nothing turns it on for them.
+  const canSubmit = Boolean(trimmed) && !work && !blocked && commitAvailability.blockedReason === null && menu.submitReason === null
   // Amend with an empty message starts from the last commit's message, once: clearing it by hand sticks.
   const needsPrefill = amend && open && !work && !trimmed && draft.prefilled === null
   // The suggestion being written, if any. Typing, committing or another branch ends interest in it, so the
@@ -550,16 +549,6 @@ function CommitButton({ path, scope: gitScope, branch, fileCount, commits, pusha
   useEffect(() => {
     if (!menu.triggerEnabled) setOpen(false)
   }, [menu.triggerEnabled])
-
-  // Amend is the only possible commit: keep it on, so files changing under the open popover do not drop it.
-  useEffect(() => {
-    if (open && menu.forced) updateForm(forceAmend)
-  }, [open, menu.forced, updateForm])
-
-  // A forced amend is not the user's choice, so it does not outlive the popover.
-  useEffect(() => {
-    if (!open) updateForm(releaseForcedAmend)
-  }, [open, updateForm])
 
   // The prefill is the message of the HEAD it was read for; a different HEAD cancels the read.
   useEffect(() => {
@@ -631,7 +620,7 @@ function CommitButton({ path, scope: gitScope, branch, fileCount, commits, pusha
     }
   }
 
-  const flowButtons = commitFlowButtons({ pushable, openPullRequest: openPullRequest !== null, amend })
+  const flowButtons = commitFlowButtons({ pushable, openPullRequest: openPullRequest !== null, amend, amendOnly: menu.nothingToCommit ? menu.shortHash : null })
   const label = (flow: CommitFlow, idle: string) => (work && work.flow === flow ? commitPhaseLabel(work.phase) : idle)
 
   return (
@@ -722,6 +711,7 @@ function CommitButton({ path, scope: gitScope, branch, fileCount, commits, pusha
                 type="button"
                 className={quiet ? 'side-card-git-submit side-card-git-submit-quiet' : 'side-card-git-submit'}
                 data-flow={flow}
+                title={menu.submitReason ?? undefined}
                 disabled={!canSubmit}
                 onClick={() => void submit(flow)}
               >

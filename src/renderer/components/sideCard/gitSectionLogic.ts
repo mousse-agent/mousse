@@ -805,13 +805,15 @@ export interface CommitMenuState {
   canAmend: boolean
   /** The Commit button opens the menu when there is something to commit or amend. */
   triggerEnabled: boolean
-  /** Without file changes the only possible commit is an amend, so amend is on and cannot be turned off. */
-  forced: boolean
-  /** Whether the commit amends: asked for, or the only possible commit. */
+  /** No file changes: the only possible commit is an amend, and only once the user turns it on. */
+  nothingToCommit: boolean
+  /** Whether the commit amends. Only the user's own choice turns it on. */
   amend: boolean
   amendDisabled: boolean
   /** Why the checkbox is disabled; null when it can be toggled. */
   amendTitle: string | null
+  /** Why the commit buttons stay disabled whatever the message says; null when a commit is possible. */
+  submitReason: string | null
   shortHash: string | null
 }
 
@@ -822,19 +824,18 @@ export interface CommitMenuState {
 export function commitMenuState(commits: readonly GitCommit[], fileCount: number, amendChecked: boolean, inThread = false): CommitMenuState {
   const canAmend = !inThread && canAmendCommit(commits)
   const hasChanges = fileCount > 0
-  const forced = canAmend && !hasChanges
-  const amendTitle = !canAmend
-    ? inThread ? THREAD_WORKTREE_REASON : commits.length === 0 ? 'No commits yet' : 'The last commit is already pushed'
-    : forced ? 'No changes to commit' : null
-  const triggerEnabled = hasChanges || canAmend
+  const amendTitle = canAmend ? null : inThread ? THREAD_WORKTREE_REASON : commits.length === 0 ? 'No commits yet' : 'The last commit is already pushed'
+  const amend = canAmend && amendChecked
+  const shortHash = commits[0]?.shortHash ?? null
   return {
     canAmend,
-    triggerEnabled,
-    forced,
-    amend: canAmend && (amendChecked || forced),
+    triggerEnabled: hasChanges || canAmend,
+    nothingToCommit: !hasChanges,
+    amend,
     amendDisabled: amendTitle !== null,
     amendTitle,
-    shortHash: commits[0]?.shortHash ?? null
+    submitReason: hasChanges || amend ? null : `No changes to commit. Turn on Amend last commit to change ${shortHash ?? 'it'}`,
+    shortHash
   }
 }
 
@@ -846,13 +847,13 @@ export interface CommitTrigger {
 
 /**
  * Names on the Commit button exactly what it commits: "Commit all (N)" when every change goes in (untracked files
- * included), "Commit staged (M of N)" when only the staged files do. With no changes the only commit is an amend, so
- * the button says Amend; with nothing to amend either it stays Commit, disabled.
+ * included), "Commit staged (M of N)" when only the staged files do. With no changes it still says Commit: the popover
+ * offers an amend, which stays off until the user turns it on. With nothing to amend either, the button is disabled.
  */
-export function commitTrigger(menu: Pick<CommitMenuState, 'triggerEnabled' | 'forced' | 'shortHash'>, commit: CommitAvailability): CommitTrigger {
+export function commitTrigger(menu: Pick<CommitMenuState, 'triggerEnabled' | 'nothingToCommit' | 'shortHash'>, commit: CommitAvailability): CommitTrigger {
   if (!menu.triggerEnabled) return { label: 'Commit', title: 'No changes to commit' }
-  if (menu.forced) {
-    return { label: 'Amend', title: `No changes to commit. Amend ${menu.shortHash ?? 'the last commit'} to change its message` }
+  if (menu.nothingToCommit) {
+    return { label: 'Commit', title: `No changes to commit. You can amend ${menu.shortHash ?? 'the last commit'} to change its message` }
   }
   const total = commit.changedCount
   const untracked = commit.untrackedCount > 0 ? `, including ${plural(commit.untrackedCount, 'untracked file')}` : ''
@@ -922,6 +923,7 @@ export function commitHint(amend: boolean, shortHash: string | null, fileCount: 
   if (commit?.blockedReason) return commit.blockedReason
   const files = plural(fileCount, 'file')
   if (!amend) {
+    if (fileCount === 0) return 'No changes to commit'
     if (commit?.mode === 'thread') return "Commits all changes on this thread's branch"
     if (commit?.mode === 'finish-merge') return 'Finishes the merge'
     if (commit?.mode === 'staged') return `Commits ${plural(commit.stagedCount, 'staged file')}`
@@ -951,14 +953,22 @@ export interface CommitFlowButton {
 
 /**
  * The buttons of the commit popover, in the order shown. "Commit and push" needs somewhere to push and a branch that
- * is not behind; "Commit, push and open PR" needs `openPullRequest`, which `gitActionAvailability` decides.
+ * is not behind; "Commit, push and open PR" needs `openPullRequest`, which `gitActionAvailability` decides. With
+ * nothing to commit and amend turned on, the primary button names the commit it rewrites: "Amend a1b2c3d".
  */
-export function commitFlowButtons(input: { pushable: boolean; openPullRequest: boolean; amend: boolean }): CommitFlowButton[] {
+export function commitFlowButtons(input: {
+  pushable: boolean
+  openPullRequest: boolean
+  amend: boolean
+  /** The short hash of the commit an amend of nothing but the message rewrites; null when files are committed too. */
+  amendOnly?: string | null
+}): CommitFlowButton[] {
   const labels = commitButtonLabels(input.amend)
+  const primary = input.amend && input.amendOnly ? `Amend ${input.amendOnly}` : labels.commit
   return [
     ...(input.pushable && input.openPullRequest ? [{ flow: 'push-pr' as const, label: labels.commitPushAndOpenPr, quiet: true }] : []),
     ...(input.pushable ? [{ flow: 'push' as const, label: labels.commitAndPush, quiet: true }] : []),
-    { flow: 'commit', label: labels.commit, quiet: false }
+    { flow: 'commit', label: primary, quiet: false }
   ]
 }
 
@@ -999,13 +1009,12 @@ export function commitScope(branch: string | null, commits: readonly GitCommit[]
 /** The commit popover's inputs, tagged with the branch and HEAD they were entered for. */
 export interface CommitForm extends CommitScope {
   draft: CommitDraft
+  /** Only ever set by the user's own choice. */
   amendChecked: boolean
-  /** Amend was switched on because it was the only possible commit, not by the user. */
-  amendForced: boolean
 }
 
 export function emptyCommitForm(scope: CommitScope): CommitForm {
-  return { ...scope, draft: EMPTY_COMMIT_DRAFT, amendChecked: false, amendForced: false }
+  return { ...scope, draft: EMPTY_COMMIT_DRAFT, amendChecked: false }
 }
 
 /**
@@ -1019,19 +1028,9 @@ export function commitFormFor(form: CommitForm, scope: CommitScope): CommitForm 
   return { ...emptyCommitForm(scope), draft: clearAmendPrefill(form.draft) }
 }
 
-/** The popover closed: an amend that was only forced goes back off, one the user chose stays. */
-export function releaseForcedAmend(form: CommitForm): CommitForm {
-  return form.amendForced ? { ...form, amendChecked: false, amendForced: false } : form
-}
-
-/** Amend is the only possible commit, so switch it on, remembering the user did not choose it. */
-export function forceAmend(form: CommitForm): CommitForm {
-  return form.amendChecked ? form : { ...form, amendChecked: true, amendForced: true }
-}
-
 /** The user's own amend choice. */
 export function chooseAmend(form: CommitForm, checked: boolean): CommitForm {
-  return { ...form, amendChecked: checked, amendForced: false }
+  return { ...form, amendChecked: checked }
 }
 
 /** Why mutating Git controls are disabled while one action runs. */
