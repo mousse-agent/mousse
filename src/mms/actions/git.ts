@@ -259,16 +259,6 @@ export function refuseUnsafeChangesAsync(cwd: string, label: string, options: Pe
   return runAsync(refuseUnsafeChangesSteps(cwd, label, options))
 }
 
-function* withIndexFile<T>(top: string, run: (env: NodeJS.ProcessEnv) => Steps<T>, copyFrom?: string): Steps<T> {
-  const file = join(yield* gitStep(top, ['rev-parse', '--absolute-git-dir']), `mousse-pending-${randomUUID()}.index`)
-  try {
-    if (copyFrom && (yield* files.exists(copyFrom))) yield* files.copyFile(copyFrom, file)
-    return yield* run({ GIT_INDEX_FILE: file })
-  } finally {
-    yield* files.remove(file)
-  }
-}
-
 export function* treeOfSteps(top: string, revision: string): Steps<string> {
   return yield* gitStep(top, ['rev-parse', `${revision}^{tree}`])
 }
@@ -293,43 +283,20 @@ export function mergeTreesAsync(top: string, base: string, ours: string, theirs:
 }
 
 /**
- * Keeps a copy of every pending change as a commit on top of HEAD under `refs/mousse/discarded/<id>`, without touching
- * the index or the files. It starts from a copy of the real index, so what is staged is in it, a force-added ignored
- * file included, and then adds the files as they are (tracked and untracked, not ignored). Throws when it cannot.
+ * Drops pending changes, untracked files and an unfinished merge, revert or cherry-pick, after `keep` has kept a copy
+ * of them (`keepCopy` over the whole working tree: staged, working and conflict versions). Ignored files, nested
+ * repositories and `.mousse/` stay. A rebase is refused. The caller holds the mutation locks and has the user's
+ * confirmation.
  */
-export function* backupPendingChangesSteps(top: string): Steps<string> {
-  const realIndex = resolve(top, yield* gitStep(top, ['rev-parse', '--git-path', 'index']))
-  return yield* withIndexFile(top, function* (env) {
-    if (!(yield* files.exists(realIndex))) yield* gitStep(top, ['read-tree', 'HEAD'], env)
-    yield* gitStep(top, ['add', '-A', '--', '.', NOT_MOUSSE], env, undefined, LISTING)
-    const tree = yield* gitStep(top, ['write-tree'], env)
-    const commit = yield* gitStep(top, ['commit-tree', tree, '-p', 'HEAD', '-m', 'mousse: copy of discarded changes'], MOUSSE_COMMIT_ENV)
-    const ref = `refs/mousse/discarded/${new Date().toISOString().replace(/[:.]/g, '-')}-${randomUUID().slice(0, 8)}`
-    yield* gitStep(top, ['update-ref', '--no-deref', ref, commit])
-    return ref
-  }, realIndex)
-}
-
-
-/**
- * Drops pending changes, untracked files and an unfinished merge, revert or cherry-pick, after keeping a copy
- * (see `backupPendingChanges`). Ignored files, nested repositories and `.mousse/` stay. A rebase is refused.
- * The caller holds the mutation locks and has the user's confirmation.
- */
-export function* discardPendingChangesSteps(cwd: string): Steps<{ backupRef: string }> {
-  const pending = yield* inspectPendingChangesSteps(cwd)
+export async function discardPendingChangesAsync<T>(cwd: string, keep: (top: string) => Promise<T>): Promise<T> {
+  const pending = await runAsync(inspectPendingChangesSteps(cwd))
   if (pending.operation === 'rebase') throw pendingChangesErrorFor('Workspace', {}, pending)
-  const backupRef = yield* backupPendingChangesSteps(pending.top)
-  yield* gitStep(pending.top, ['reset', '--hard', '-q', 'HEAD'])
-  yield* gitStep(pending.top, ['clean', '-f', '-d', '-q', '--', '.', NOT_MOUSSE])
-  const left = yield* inspectPendingChangesSteps(pending.top)
+  const kept = await keep(pending.top)
+  await gitAsync(pending.top, ['reset', '--hard', '-q', 'HEAD'])
+  await gitAsync(pending.top, ['clean', '-f', '-d', '-q', '--', '.', NOT_MOUSSE])
+  const left = await runAsync(inspectPendingChangesSteps(pending.top))
   if (ownPaths(left.files).length || left.operation) throw pendingChangesErrorFor('Workspace', {}, left)
-  return { backupRef }
-}
-
-
-export function discardPendingChangesAsync(cwd: string): Promise<{ backupRef: string }> {
-  return runAsync(discardPendingChangesSteps(cwd))
+  return kept
 }
 
 export function* commitParentsSteps(cwd: string, sha: string): Steps<string[]> {

@@ -4,16 +4,19 @@ import { waitForFolderAccess } from '../files/folderAccess'
 import { withGitAccess } from '../git/gitPolicy'
 import type { ThreadLeaseHandle } from '../queue/ThreadExecutionLease'
 import { collectStoreGarbageAsync, threadSnapshotStoreAsync } from '../workspace/SnapshotWorkspace'
-import { PRESERVED_EXPIRY_OPERATION, PRESERVED_REFS } from '../../shared/resourceLifecycle'
+import { KEEP_COPY_OPERATIONS, PRESERVED_EXPIRY_OPERATION, PRESERVED_REFS } from '../../shared/resourceLifecycle'
+import { settleInterruptedKeeps, uncountedSince } from './keptCopies'
 import { withGitMutationLocks } from './GitOperationCoordinator'
 import { gitAsync, LISTING } from './git'
 import { UndoRetentionService } from './UndoRetentionService'
 
 /**
- * Files a restore found in its way, or an abort was about to rewrite, are kept as one commit under a
- * `refs/mousse/preserved/` ref. Two writers name them:
+ * Files a restore found in its way, or an abort was about to rewrite, or an action was about to remove, are kept as one
+ * commit under a `refs/mousse/preserved/` ref. These writers name them:
  * - `moveFiles` (Undo, Redo, revert, switching conversation branches): `<operation>-<12 hex>`, where the operation is a
  *   UUID Mousse made and recorded in the thread's journal under one of {@link RESTORE_OPERATION_TYPES}.
+ * - `keepCopy` (Discard, worktree cleanup): the same shape, recorded under `git-discard` or `worktree-cleanup` in its
+ *   owner's journal: a thread's, or the project's data folder for the person's own checkout (`projectKeptFilesOwner`).
  * - `preserveBeforeAbort`: `<operation>-abort-<12 hex>`, and the abort records that exact name as `preservedRef`.
  * A thread owns a ref only by one of these two exact shapes, so an operation id that is a prefix of another thread's
  * (a client may choose a Publish's id) never claims it.
@@ -26,8 +29,8 @@ export { PRESERVED_REFS }
  */
 export { PRESERVED_EXPIRY_OPERATION }
 
-/** Operation types whose restores write `<operation>-<12 hex>` refs. */
-const RESTORE_OPERATION_TYPES = new Set(['undo', 'redo', 'change-undo', 'change-redo', 'code-revert', 'conversation-activate'])
+/** Operation types whose restores, or keeps of a copy, write `<operation>-<12 hex>` refs. */
+const RESTORE_OPERATION_TYPES = new Set<string>(['undo', 'redo', 'change-undo', 'change-redo', 'code-revert', 'conversation-activate', ...KEEP_COPY_OPERATIONS])
 const UUID = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
 const OPERATION_ID = new RegExp(`^${UUID}$`)
 const RESTORE_REF = new RegExp(`^refs/mousse/preserved/(${UUID})-[0-9a-f]{12}$`)
@@ -122,7 +125,7 @@ export function keptFilesFromListing(listing: string, threadDirectory: string, n
     const until = item.keptAt === undefined ? undefined : retention.retainedUntil(item.keptAt)
     if (until !== undefined && until <= now) return { ref: item.ref, sha: item.sha }
     const kept = until === undefined ? 'kept with no recorded time' : `kept until ${new Date(until).toISOString().slice(0, 10)}`
-    return { ref: item.ref, sha: item.sha, discardReason: `Files set aside before a restore or an abort wrote over them, ${kept}; they may be the only copy` }
+    return { ref: item.ref, sha: item.sha, discardReason: `Files set aside before a restore, an abort or a Discard wrote over or removed them, ${kept}; they may be the only copy` }
   })
 }
 
@@ -185,12 +188,17 @@ export async function expirePreservedFiles(threadDirectory: string, workspacePat
       if (went.length && store) await collectStoreGarbageAsync(store)
       return { expiredRefs: went, ...(skipped ? { skipped } : {}) }
     }
-    // An interrupted expiry is settled first, whatever else holds this one back: settling only records what is gone.
+    // An interrupted expiry or keep is settled first, whatever else holds this one back: settling only records what is
+    // gone, or what was kept.
     const settled = await settleInterrupted(journal, present)
+    // Only this repository's keeps: a keep of the same owner in another repository may still be running.
+    const top = store ? undefined : (await gitAsync(workspacePath, ['rev-parse', '--show-toplevel']).catch(() => undefined))
+    if (top) await settleInterruptedKeeps(threadDirectory, top)
     if (!retention.clockAllowsRelease()) return finish(settled, 'The Undo retention clock needs review before kept files expire.')
-    if (retention.unfinishedOperation(PRESERVED_EXPIRY_OPERATION)) return finish(settled, 'An unfinished operation protects kept files.')
+    if (retention.unfinishedOperation()) return finish(settled, 'An unfinished operation protects kept files.')
     const now = (options.now ?? Date.now)()
-    const due = threadPreservedRefs(await listing(), threadDirectory).filter((item) => item.keptAt !== undefined && retention.retainedUntil(item.keptAt) <= now)
+    // Time a project's clock did not count (it resumed after a jump with no person to review it) keeps copies longer.
+    const due = threadPreservedRefs(await listing(), threadDirectory).filter((item) => item.keptAt !== undefined && retention.retainedUntil(item.keptAt) + uncountedSince(threadDirectory, item.keptAt) <= now)
     if (!due.length) return finish(settled)
     const operationId = randomUUID()
     const refs = due.map((item) => ({ name: item.ref, sha: item.sha, keptAt: new Date(item.keptAt!).toISOString() }))

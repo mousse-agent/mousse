@@ -136,7 +136,7 @@ describe.skipIf(process.platform === 'win32')('a thread action whose Git does no
     expect(Date.now() - begun).toBeLessThan(2500)
     expect(await pending(discarding)).toBe(true)
     // Once Git answers, the action finishes as usual.
-    await expect(discarding).resolves.toMatchObject({ backupRef: expect.stringMatching(/^refs\/mousse\/discarded\//) })
+    await expect(discarding).resolves.toMatchObject({ backupRef: expect.stringMatching(/^refs\/mousse\/preserved\//) })
     expect(git(worktree, 'status', '--porcelain')).toBe('')
   }, 40_000)
 

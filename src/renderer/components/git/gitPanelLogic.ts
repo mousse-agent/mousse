@@ -8,6 +8,7 @@ import type {
   GitStatusSnapshot
 } from '../../../shared/types'
 import { THREAD_WORKTREE_REASON } from '../sideCard/gitSectionLogic'
+import { retentionWindowText } from '../../../shared/undoRetention'
 
 /** Pure state and wording for the Git panel's file rows and its sync bar. */
 
@@ -248,14 +249,15 @@ const DISCARD_LIST_LIMIT = 10
 
 /**
  * The confirmation shown before changes are thrown away. It names the files, says which
- * untracked ones will be deleted, and that this cannot be undone.
+ * untracked ones will be deleted, and for how long a copy is kept (`keptForMs`, the owner's
+ * Undo window as the daemon reports it with the folder's status).
  */
-export function discardPrompt(files: readonly GitFileChange[]): string {
+export function discardPrompt(files: readonly GitFileChange[], keptForMs?: number): string {
   const byPath = new Map<string, boolean>()
   for (const file of files) byPath.set(file.path, (byPath.get(file.path) ?? false) || file.status === 'untracked')
   const entries = [...byPath]
   if (entries.length === 0) return ''
-  const closing = ['', 'This cannot be undone.']
+  const closing = ['', keptForMs ? `A copy is kept for ${retentionWindowText(keptForMs)}.` : 'A copy is kept in Git.']
   if (entries.length === 1) {
     const [path, untracked] = entries[0]
     return untracked

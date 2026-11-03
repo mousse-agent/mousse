@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process'
+import { createReadStream } from 'node:fs'
 
 /** What a Git process left: as `spawnSync` reports it. */
 export interface GitProcess {
@@ -22,11 +23,12 @@ export const LISTING_MAX_BUFFER = 256 * 1024 * 1024
 /**
  * Runs `git argv` without blocking and reports it as `spawnSync` would: output past `maxBuffer` (on either stream)
  * or a run past `timeout` stops Git and is an `ENOBUFS` or `ETIMEDOUT` error, with the output read so far.
+ * `inputFile` streams a file to Git's input instead of `input` (a pack for `index-pack --stdin`), however large.
  */
-export function runGitProcess(argv: string[], options: { cwd: string; env: NodeJS.ProcessEnv; input?: string; maxBuffer?: number; timeout?: number }): Promise<GitProcess> {
+export function runGitProcess(argv: string[], options: { cwd: string; env: NodeJS.ProcessEnv; input?: string; inputFile?: string; maxBuffer?: number; timeout?: number }): Promise<GitProcess> {
   const limit = options.maxBuffer ?? DEFAULT_MAX_BUFFER
   return new Promise((settle) => {
-    const child = spawn('git', argv, { cwd: options.cwd, env: options.env, windowsHide: true, stdio: [options.input !== undefined ? 'pipe' : 'ignore', 'pipe', 'pipe'] })
+    const child = spawn('git', argv, { cwd: options.cwd, env: options.env, windowsHide: true, stdio: [options.input !== undefined || options.inputFile !== undefined ? 'pipe' : 'ignore', 'pipe', 'pipe'] })
     const out: Buffer[] = []
     const err: Buffer[] = []
     let outSize = 0
@@ -52,6 +54,11 @@ export function runGitProcess(argv: string[], options: { cwd: string; env: NodeJ
       // Git may stop reading early (a refusal); what it did not read is dropped, as with `spawnSync`.
       child.stdin!.on('error', () => undefined)
       child.stdin!.end(options.input)
+    } else if (options.inputFile !== undefined) {
+      child.stdin!.on('error', () => undefined)
+      const file = createReadStream(options.inputFile)
+      file.on('error', (readError) => { error ??= readError; child.stdin!.destroy(); child.kill() })
+      file.pipe(child.stdin!)
     }
   })
 }

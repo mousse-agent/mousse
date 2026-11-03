@@ -17,6 +17,7 @@ import { ThreadJournal } from '../src/mms/data/ThreadJournal'
 import { ThreadWorkspaceManager } from '../src/mms/workspace/ThreadWorkspaceManager'
 import { WorkspaceGcService } from '../src/mms/workspace/WorkspaceGcService'
 import { discardPendingChangesAsync } from '../src/mms/actions/git'
+import { keepCopy } from '../src/mms/actions/keptCopies'
 import { acquireWorkspaceMutationLease, provisionOwnedAgentWorkspace, resolveOwnedThreadWorkspace } from '../src/mms/workspace/WorkflowWorkspace'
 import type { ThreadAction } from '../src/shared/threadActions'
 import { actionOptions, git, gitFoundationFixture } from './fixtures/gitFoundation'
@@ -816,7 +817,9 @@ describe('discard', () => {
     write('.gitignore', '*.local\n'); git(cwd, 'add', '.gitignore'); git(cwd, 'commit', '-qm', 'ignore')
     write('settings.local', 'staged only\n'); git(cwd, 'add', '-f', 'settings.local')
     write('value.txt', 'edited\n')
-    const { backupRef } = (await discardPendingChangesAsync(cwd))
+    const { ref: backupRef } = await discardPendingChangesAsync(cwd, (top) => keepCopy({ owner: f.thread, top, operationType: 'git-discard', action: 'Discard' }))
+    // A staged-only file is kept with its staged version too.
+    expect(git(cwd, 'show', `${backupRef}^2:settings.local`)).toBe('staged only')
     expect(git(cwd, 'show', `${backupRef}:settings.local`)).toBe('staged only')
     expect(git(cwd, 'show', `${backupRef}:value.txt`)).toBe('edited')
     expect(existsSync(join(cwd, 'settings.local'))).toBe(false)

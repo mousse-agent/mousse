@@ -13,7 +13,7 @@ import { withGitMutationLocks } from './GitOperationCoordinator'
 import { UndoRetentionService } from './UndoRetentionService'
 import { repoProgramEnv, withoutRepoProgramsAsync } from '../git/repoPrograms'
 import { gitRunError, runGitProcess } from '../git/runGitProcess'
-import { PRESERVED_EXPIRY_OPERATION } from '../../shared/resourceLifecycle'
+import { settlesItself } from '../../shared/resourceLifecycle'
 
 /** The ownership inventory showed a blocker: the whole release stops, as when it shows one before the first receipt. */
 class OwnershipBlocked extends Error {}
@@ -42,7 +42,7 @@ export class ReceiptRefReleaseService {
       const expired = retention.expiredReceiptIds()
       const receipts = new ChangeReceiptService(task.location).list()
       const latest = [...journal.latestByOperation().values()]
-      if (latest.some((entry) => entry.operationType !== 'undo-ref-release' && entry.operationType !== PRESERVED_EXPIRY_OPERATION && ['planned', 'running', 'prepared', 'git_applied', 'context_pending', 'recovery_required'].includes(entry.state))) throw new Error('Active or recovery operations protect receipt refs.')
+      if (latest.some((entry) => entry.operationType !== 'undo-ref-release' && !settlesItself(entry.operationType) && ['planned', 'running', 'prepared', 'git_applied', 'context_pending', 'recovery_required'].includes(entry.state))) throw new Error('Active or recovery operations protect receipt refs.')
       const pending = latest.filter((entry) => entry.operationType === 'undo-ref-release' && entry.state === 'prepared')
       const complete = new Set(latest.filter((entry) => entry.operationType === 'undo-ref-release' && entry.state === 'completed').map((entry) => (entry.details as ReleaseIntent).receiptId))
       const candidates = [...pending.map((entry) => ({ receipt: receipts.find((receipt) => receipt.id === (entry.details as ReleaseIntent).receiptId), operationId: entry.operationId, intent: entry.details as ReleaseIntent })),

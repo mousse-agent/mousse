@@ -222,13 +222,16 @@ describe('file rows', () => {
 })
 
 describe('discard confirmation wording', () => {
-  it('names one tracked file and warns that it cannot be undone', () => {
-    expect(discardPrompt([change('src/a.ts')])).toBe('Discard changes to src/a.ts?\n\nThis cannot be undone.')
+  it('names one tracked file and says how long a copy is kept, from the window the daemon reports', () => {
+    expect(discardPrompt([change('src/a.ts')], 30 * 24 * 60 * 60 * 1000)).toBe('Discard changes to src/a.ts?\n\nA copy is kept for 30 days.')
+    expect(discardPrompt([change('src/a.ts')], 12 * 60 * 60 * 1000)).toBe('Discard changes to src/a.ts?\n\nA copy is kept for 12 hours.')
+    // A status without the window still says a copy is kept, never a made-up length.
+    expect(discardPrompt([change('src/a.ts')])).toBe('Discard changes to src/a.ts?\n\nA copy is kept in Git.')
   })
 
   it('says an untracked file will be deleted', () => {
     expect(discardPrompt([change('new.ts', { status: 'untracked' })])).toBe(
-      'Delete new.ts?\n\nIt is not tracked by Git, so it will be deleted.\n\nThis cannot be undone.'
+      'Delete new.ts?\n\nIt is not tracked by Git, so it will be deleted.\n\nA copy is kept in Git.'
     )
   })
 
@@ -237,11 +240,11 @@ describe('discard confirmation wording', () => {
     expect(prompt).toContain('Discard changes to 2 files?')
     expect(prompt).toContain('  a.ts\n')
     expect(prompt).toContain('  new.ts (untracked, will be deleted)')
-    expect(prompt.endsWith('This cannot be undone.')).toBe(true)
+    expect(prompt.endsWith('A copy is kept in Git.')).toBe(true)
   })
 
   it('counts a file staged and edited again once, and shortens a long list', () => {
-    expect(discardPrompt([change('mm.ts', { staged: true }), change('mm.ts')])).toBe('Discard changes to mm.ts?\n\nThis cannot be undone.')
+    expect(discardPrompt([change('mm.ts', { staged: true }), change('mm.ts')])).toBe('Discard changes to mm.ts?\n\nA copy is kept in Git.')
     const many = Array.from({ length: 14 }, (_, index) => change(`f${index}.ts`))
     const prompt = discardPrompt(many)
     expect(prompt).toContain('Discard changes to 14 files?')
