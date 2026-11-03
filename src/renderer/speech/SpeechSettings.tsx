@@ -26,6 +26,7 @@ import { useProviderSpeechModels } from '../speechModels/SpeechModelPicker'
 import { SpeechModelSetting } from '../speechModels/SpeechModelSetting'
 import { useAppStore } from '../stores/appStore'
 import { SPEECH_SPEEDS, useSpeechPreferences, voiceFor } from './speechPreferences'
+import { VocabularySetting } from './VocabularySetting'
 import '../styles/speech.css'
 
 const PREVIEW_KEY = 'speech-settings-preview'
@@ -177,6 +178,8 @@ function DictationSpeechSettings() {
   const reduceNoise = useSpeechPreferences((state) => state.preferences.reduceNoise)
   const syncPreferences = useSpeechPreferences((state) => state.syncProfile)
   const setReduceNoise = useSpeechPreferences((state) => state.setReduceNoise)
+  const vocabulary = useSpeechPreferences((state) => state.preferences.vocabulary)
+  const setVocabulary = useSpeechPreferences((state) => state.setVocabulary)
   const providerModels = useProviderSpeechModels(sttModelsFromProviders)
 
   useEffect(() => {
@@ -204,6 +207,7 @@ function DictationSpeechSettings() {
         htmlFor={noiseSwitchId}
         control={<Switch id={noiseSwitchId} checked={reduceNoise} onChange={setReduceNoise} />}
       />
+      <VocabularySetting vocabulary={vocabulary} selection={selection} onChange={setVocabulary} />
     </SettingsGroup>
   )
 }

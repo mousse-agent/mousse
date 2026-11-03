@@ -1,4 +1,5 @@
 import type { LocalSttModel } from '../../shared/dictation'
+import type { DictationVocabularyTerm } from '../../shared/dictationVocabulary'
 import { speechModelThreads } from '../speechModels/threads'
 import { setupLocalModelWorker } from '../speechModels/workerSupport'
 import { resolveWorkerModel } from './workerModel'
@@ -8,7 +9,8 @@ import type { LocalSttWorkerEvent, LocalSttWorkerRequest } from './workerProtoco
 export interface SttEngine {
   /** Loads the model, and may run it once so the first real transcription starts quickly. */
   warm: () => Promise<void>
-  transcribe: (samples: Float32Array) => Promise<string>
+  /** `vocabulary` is the user's terms; models that cannot use it ignore it. */
+  transcribe: (samples: Float32Array, vocabulary: readonly DictationVocabularyTerm[]) => Promise<string>
 }
 
 /**
@@ -63,7 +65,7 @@ export function serveSttWorker<Runtime extends LocalSttModel['runtime']>(
         })
       )
     }
-    else if (message.type === 'transcribe') queue = queue.then(() => run(message.id, (ready) => ready.transcribe(message.samples)))
+    else if (message.type === 'transcribe') queue = queue.then(() => run(message.id, (ready) => ready.transcribe(message.samples, message.vocabulary ?? [])))
     else handleFileResponse?.(message)
   })
 }

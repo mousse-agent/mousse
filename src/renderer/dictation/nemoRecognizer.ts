@@ -1,7 +1,9 @@
 import { ParakeetFeatureExtractor } from '@huggingface/transformers'
 import type * as OrtWeb from 'onnxruntime-web'
 import type { NemoTransducerSttModel } from '../../shared/dictation'
+import { MAX_RESCORED_TERMS, type DictationVocabularyTerm } from '../../shared/dictationVocabulary'
 import { detokenize, greedyTdtSearch, parseTokens } from './tdtSearch'
+import { DEFAULT_BOOST, decodedWords, findCandidates, tdtSequenceScore, tokenizeTerm, type VocabularyCandidate } from './vocabularyRescoring'
 
 /**
  * Parakeet TDT runs as three ONNX models: the FastConformer encoder turns log-mel features into
@@ -25,6 +27,9 @@ export interface NemoRecognizer {
   decoder: OrtWeb.InferenceSession
   joiner: OrtWeb.InferenceSession
   vocabulary: string[]
+  /** Piece text to id, and the longest piece, for writing vocabulary terms as pieces. */
+  pieces: Map<string, number>
+  longestPiece: number
 }
 
 export async function loadNemoRecognizer(
@@ -41,6 +46,8 @@ export async function loadNemoRecognizer(
     readFile(model.tokens)
   ])
   const vocabulary = parseTokens(new TextDecoder().decode(tokens))
+  const pieces = new Map(vocabulary.map((piece, id) => [piece, id] as const))
+  const longestPiece = vocabulary.reduce((longest, piece) => Math.max(longest, piece.length), 0)
   // NeMo's preprocessing for these models: 25 ms Hann windows every 10 ms, 0.97 pre-emphasis.
   const features = new ParakeetFeatureExtractor({
     feature_size: model.featureSize,
@@ -50,7 +57,7 @@ export async function loadNemoRecognizer(
     win_length: 400,
     preemphasis: 0.97
   })
-  return { model, ort, features, encoder, decoder, joiner, vocabulary }
+  return { model, ort, features, encoder, decoder, joiner, vocabulary, pieces, longestPiece }
 }
 
 /**
@@ -75,7 +82,11 @@ interface Prediction {
   cell: OrtWeb.Tensor
 }
 
-export async function recognizeNemo(recognizer: NemoRecognizer, samples: Float32Array): Promise<string> {
+export async function recognizeNemo(
+  recognizer: NemoRecognizer,
+  samples: Float32Array,
+  terms: readonly DictationVocabularyTerm[] = []
+): Promise<string> {
   const { model, ort, features, encoder, decoder, joiner, vocabulary } = recognizer
   const { input_features: input } = await features(samples)
   const [, frames, bins] = input.dims as number[]
@@ -105,6 +116,7 @@ export async function recognizeNemo(recognizer: NemoRecognizer, samples: Float32
   const zeros = (): OrtWeb.Tensor => new ort.Tensor('float32', new Float32Array(model.predictorLayers * model.predictorSize), stateShape)
 
   const blank = vocabulary.length - 1
+  const emitted: Array<{ frame: number; before: Prediction }> = []
   const tokens = await greedyTdtSearch<Prediction>({
     frames: Math.min(length, steps),
     blank,
@@ -118,7 +130,89 @@ export async function recognizeNemo(recognizer: NemoRecognizer, samples: Float32
         [joiner.inputNames[1]]: prediction.out
       })
       return joined[joiner.outputNames[0]].data as Float32Array
-    }
+    },
+    onEmit: ({ frame: at, before }) => emitted.push({ frame: at, before })
   })
-  return detokenize(vocabulary, tokens)
+  if (terms.length === 0) return detokenize(vocabulary, tokens)
+  const words = decodedWords(vocabulary, tokens)
+  const candidates = findCandidates(words, terms.slice(0, MAX_RESCORED_TERMS))
+  if (candidates.length === 0) return detokenize(vocabulary, tokens)
+
+  /** Log probability of writing `pieces` over frames `[from, to)`, continuing from `before`. */
+  const score = async (pieces: number[], before: Prediction, from: number, to: number): Promise<number> => {
+    const span = to - from
+    const encoderSlice = new Float32Array(dim * span)
+    for (let row = 0; row < dim; row += 1) encoderSlice.set(frameData.subarray(row * steps + from, row * steps + to), row * span)
+    const predicted = await decoder.run({
+      [targetsName]: new ort.Tensor('int32', Int32Array.from(pieces), [1, pieces.length]),
+      [targetLengthName]: new ort.Tensor('int32', Int32Array.from([pieces.length]), [1]),
+      [hiddenName]: before.hidden,
+      [cellName]: before.cell
+    })
+    // The joiner scores every frame against the prediction after each prefix of `pieces` at once.
+    const after = predicted[predictionName].data as Float32Array
+    const first = before.out.data as Float32Array
+    const size = first.length
+    const width = pieces.length + 1
+    const predictions = new Float32Array(size * width)
+    for (let row = 0; row < size; row += 1) {
+      predictions[row * width] = first[row]
+      predictions.set(after.subarray(row * pieces.length, (row + 1) * pieces.length), row * width + 1)
+    }
+    const joined = await joiner.run({
+      [joiner.inputNames[0]]: new ort.Tensor('float32', encoderSlice, [1, dim, span]),
+      [joiner.inputNames[1]]: new ort.Tensor('float32', predictions, [1, size, width])
+    })
+    const grid = joined[joiner.outputNames[0]].data as Float32Array
+    const classes = grid.length / (span * width)
+    return tdtSequenceScore(span, pieces, blank, (at, u) => grid.subarray((at * width + u) * classes, (at * width + u + 1) * classes))
+  }
+
+  const usable = Math.min(length, steps)
+  const heardScores = new Map<string, number>()
+  const choices: Array<{ candidate: VocabularyCandidate; margin: number; written: number[] }> = []
+  for (const candidate of candidates) {
+    const first = words[candidate.startWord]
+    const last = words[candidate.endWord - 1]
+    const from = emitted[first.start].frame
+    const to = candidate.endWord < words.length ? emitted[words[candidate.endWord].start].frame : usable
+    const termPieces = tokenizeTerm(candidate.term.term, recognizer.pieces, recognizer.longestPiece)
+    if (to <= from || !termPieces) continue
+    const written = [...termPieces, ...tokens.slice(last.end - last.punctuation, last.end)]
+    if (candidate.spellingOnly) {
+      choices.push({ candidate, margin: Number.POSITIVE_INFINITY, written })
+      continue
+    }
+    const key = `${candidate.startWord}:${candidate.endWord}`
+    let heard = heardScores.get(key)
+    if (heard === undefined) {
+      heard = await score(tokens.slice(first.start, last.end), emitted[first.start].before, from, to)
+      heardScores.set(key, heard)
+    }
+    const margin = (await score(written, emitted[first.start].before, from, to)) + DEFAULT_BOOST * termPieces.length - heard
+    if (margin >= 0) choices.push({ candidate, margin, written })
+  }
+  if (choices.length === 0) return detokenize(vocabulary, tokens)
+
+  // The clearest wins first; a span that overlaps one already taken stays as heard.
+  choices.sort((a, b) => b.margin - a.margin)
+  const taken = new Array<boolean>(words.length).fill(false)
+  const replacements = new Map<number, { endWord: number; written: number[] }>()
+  for (const { candidate, written } of choices) {
+    if (taken.slice(candidate.startWord, candidate.endWord).some(Boolean)) continue
+    taken.fill(true, candidate.startWord, candidate.endWord)
+    replacements.set(candidate.startWord, { endWord: candidate.endWord, written })
+  }
+  const rewritten: number[] = []
+  for (let index = 0; index < words.length; ) {
+    const replacement = replacements.get(index)
+    if (replacement) {
+      rewritten.push(...replacement.written)
+      index = replacement.endWord
+    } else {
+      rewritten.push(...tokens.slice(words[index].start, words[index].end))
+      index += 1
+    }
+  }
+  return detokenize(vocabulary, rewritten)
 }

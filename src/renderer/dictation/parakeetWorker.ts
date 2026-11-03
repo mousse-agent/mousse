@@ -37,6 +37,6 @@ serveSttWorker(['nemo-transducer'], (model) => {
       const recognizer = await load()
       await recognizeNemo(recognizer, warmUpAudio(model.sampleRate))
     },
-    transcribe: async (samples) => recognizeNemo(await load(), samples)
+    transcribe: async (samples, vocabulary) => recognizeNemo(await load(), samples, vocabulary)
   }
 })

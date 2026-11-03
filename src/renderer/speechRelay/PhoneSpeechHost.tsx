@@ -39,7 +39,11 @@ const windowDeps: PhoneSpeechDeps = {
       : window.mousse.readAloud.cancelLocalModelDownload(modelId as LocalTtsModelId),
   onLocalStatus: (kind, listener) =>
     kind === 'dictation' ? window.mousse.dictation.onLocalModelStatus(listener) : window.mousse.readAloud.onLocalModelStatus(listener),
-  transcribe: transcribeRecording,
+  transcribe: (...args) => {
+    // Loads this profile's preferences, so a phone's dictation uses the vocabulary too.
+    currentSpeechPreferences()
+    return transcribeRecording(...args)
+  },
   synthesizeLocal: synthesizeWithLocalModel,
   synthesizeProvider: (request) => window.mousse.readAloud.synthesizeWithProvider(request)
 }

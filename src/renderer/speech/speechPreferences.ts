@@ -1,5 +1,7 @@
 import { create } from 'zustand'
+import { normalizeVocabulary, type DictationVocabularyTerm } from '../../shared/dictationVocabulary'
 import { findLocalTtsModel, resolveProviderTtsVoice, type ReadAloudSelection } from '../../shared/readAloud'
+import { setLocalDictationVocabulary } from '../dictation/localEngine'
 import { profilePreferenceKey } from '../lib/profilePreferences'
 import { useAppStore } from '../stores/appStore'
 
@@ -11,11 +13,13 @@ export interface SpeechPreferences {
   voices: Record<string, string>
   /** Dictation runs the microphone through noise suppression before the model hears it. */
   reduceNoise: boolean
+  /** Names local dictation should write when it hears them. */
+  vocabulary: DictationVocabularyTerm[]
 }
 
 export const SPEECH_SPEEDS = [0.75, 1, 1.25, 1.5, 1.75, 2] as const
 
-export const DEFAULT_SPEECH_PREFERENCES: SpeechPreferences = { speed: 1, voices: {}, reduceNoise: true }
+export const DEFAULT_SPEECH_PREFERENCES: SpeechPreferences = { speed: 1, voices: {}, reduceNoise: true, vocabulary: [] }
 
 const PREFERENCE_NAME = 'speech'
 
@@ -30,7 +34,7 @@ export function parseSpeechPreferences(value: unknown): SpeechPreferences {
     }
   }
   const reduceNoise = typeof record.reduceNoise === 'boolean' ? record.reduceNoise : DEFAULT_SPEECH_PREFERENCES.reduceNoise
-  return { speed, voices, reduceNoise }
+  return { speed, voices, reduceNoise, vocabulary: normalizeVocabulary(record.vocabulary) }
 }
 
 export function readAloudVoiceKey(selection: ReadAloudSelection): string {
@@ -70,6 +74,7 @@ interface SpeechPreferencesState {
   setSpeed: (speed: number) => void
   setVoice: (selection: ReadAloudSelection, voice: string) => void
   setReduceNoise: (reduceNoise: boolean) => void
+  setVocabulary: (vocabulary: readonly DictationVocabularyTerm[]) => void
 }
 
 export const useSpeechPreferences = create<SpeechPreferencesState>((set, get) => {
@@ -79,6 +84,7 @@ export const useSpeechPreferences = create<SpeechPreferencesState>((set, get) =>
     const preferences = { ...get().preferences, ...change }
     save(profileId, preferences)
     set({ preferences })
+    setLocalDictationVocabulary(preferences.vocabulary)
   }
 
   return {
@@ -86,11 +92,14 @@ export const useSpeechPreferences = create<SpeechPreferencesState>((set, get) =>
     preferences: { ...DEFAULT_SPEECH_PREFERENCES },
     syncProfile: (profileId) => {
       if (get().profileId === profileId) return
-      set({ profileId, preferences: load(profileId) })
+      const preferences = load(profileId)
+      set({ profileId, preferences })
+      setLocalDictationVocabulary(preferences.vocabulary)
     },
     setSpeed: (speed) => update({ speed }),
     setVoice: (selection, voice) => update({ voices: { ...get().preferences.voices, [readAloudVoiceKey(selection)]: voice } }),
-    setReduceNoise: (reduceNoise) => update({ reduceNoise })
+    setReduceNoise: (reduceNoise) => update({ reduceNoise }),
+    setVocabulary: (vocabulary) => update({ vocabulary: normalizeVocabulary(vocabulary) })
   }
 })
 
