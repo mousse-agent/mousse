@@ -349,3 +349,26 @@ it('reads what a peer reports and ignores anything malformed', () => {
   expect(parsePeerInfo({ version: 'x'.repeat(200) })).toBeUndefined()
   expect(parsePeerInfo({ version: '0.1.3 <script>' })).toBeUndefined()
 })
+
+it('never asks a phone for its version, on any carrier, since a phone ends a session that sends it a request', async () => {
+  const { a } = await pair()
+  const internals = a.net as unknown as {
+    observePeer(session: object): void
+    sessionLinks: WeakMap<object, { direction: 'in' | 'out'; transport?: string }>
+  }
+  const user = a.net.runtime().identity.self()!.user
+  const session = (node: string) => {
+    const value = { peer: { node, user }, rpc: vi.fn(async () => ({})), onClosed: () => () => undefined }
+    internals.sessionLinks.set(value, { direction: 'in', transport: 'plus-relay' })
+    return value
+  }
+  // A phone over the Mousse ID relay sends no routes record.
+  const phone = session('nod_phone')
+  internals.observePeer(phone)
+  expect(phone.rpc).not.toHaveBeenCalled()
+  // A computer always does, and is asked.
+  a.net.runtime().db.database.prepare('INSERT INTO net_peer_routes VALUES(?,?)').run('nod_computer', '{}')
+  const computer = session('nod_computer')
+  internals.observePeer(computer)
+  await vi.waitFor(() => expect(computer.rpc).toHaveBeenCalledWith('net.info', {}, expect.anything()))
+}, 30000)
