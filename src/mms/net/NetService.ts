@@ -1219,7 +1219,7 @@ export class NetService {
       createIdentity: async (name) => {
         await this.init({ name })
         const rt = this.runtime()
-        if (!rt.keys.encryptedAtRest()) rt.keys.protect()
+        if (!rt.keys.protectedAtRest()) rt.keys.protect()
         this.emit()
       },
       prepareJoin: async () => {
@@ -1229,7 +1229,7 @@ export class NetService {
         this.config.preparedForJoin = true
         this.saveConfig()
         if (rt.keys.state() !== 'unlocked') throw new NetError('keystore_locked')
-        if (!rt.keys.encryptedAtRest()) rt.keys.protect()
+        if (!rt.keys.protectedAtRest()) rt.keys.protect()
         return { transportFingerprint: fingerprint(decodeBase64(rt.keys.nodeKeys().transport)) }
       },
       joinWithInvite: async (invite, name) => {
