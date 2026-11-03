@@ -10914,7 +10914,9 @@ export class OrchestratorService extends EventEmitter {
 
   /**
    * Explicit cleanup of validated agent worktrees only. Ghost directories are never deleted.
-   * Cancelled/failed/ready worktrees are kept unless their agent ids are listed.
+   * Cancelled/failed/ready worktrees are kept unless their agent ids are listed. A worktree's ignored
+   * files are kept first, as a copy the agent's thread owns; with no thread, or when they cannot be
+   * kept, the worktree stays.
    */
   async cleanupAgentWorktrees(
     agentIds: string[],
@@ -10927,12 +10929,14 @@ export class OrchestratorService extends EventEmitter {
       .map((agent) => ({ path: agent.worktreePath, branch: agent.branch, id: agent.id }))
 
     for (const target of targets) {
+      const threadId = this.agentOwner(target.id)?.threadId
+      const owner = threadId ? this.resolveThreadDir(threadId) : null
       const result = await this.worktrees.cleanupValidatedAgentWorktree(
         { path: target.path, branch: target.branch },
-        options
+        { ...options, ...(owner ? { keepIgnored: { owner } } : {}) }
       )
       if (result.success) {
-        logs.push(`[worktree] Removed validated worktree for ${target.id.slice(0, 8)}`)
+        logs.push(`[worktree] Removed validated worktree for ${target.id.slice(0, 8)}${result.copy ? `; its ${result.copy.files} ignored files are kept as ${result.copy.ref}` : ''}`)
       } else {
         logs.push(`[worktree] Cleanup refused/failed for ${target.id.slice(0, 8)}: ${result.error}`)
       }

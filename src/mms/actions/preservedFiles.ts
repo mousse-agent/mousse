@@ -16,7 +16,8 @@ import { UndoRetentionService } from './UndoRetentionService'
  * - `moveFiles` (Undo, Redo, revert, switching conversation branches): `<operation>-<12 hex>`, where the operation is a
  *   UUID Mousse made and recorded in the thread's journal under one of {@link RESTORE_OPERATION_TYPES}.
  * - `keepCopy` (Discard, worktree cleanup): the same shape, recorded under `git-discard` or `worktree-cleanup` in its
- *   owner's journal: a thread's, or the project's data folder for the person's own checkout (`projectKeptFilesOwner`).
+ *   owner's journal: a thread's, the project's for the person's own checkout (`projectKeptFilesOwner`), or a dispatch's for
+ *   its worktree (`dispatchKeptFilesOwner`).
  * - `preserveBeforeAbort`: `<operation>-abort-<12 hex>`, and the abort records that exact name as `preservedRef`.
  * A thread owns a ref only by one of these two exact shapes, so an operation id that is a prefix of another thread's
  * (a client may choose a Publish's id) never claims it.

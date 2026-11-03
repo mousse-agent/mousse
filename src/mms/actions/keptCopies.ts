@@ -16,9 +16,10 @@ import { UndoRetentionService } from './UndoRetentionService'
 /**
  * A copy of what an action is about to remove, kept before it removes anything, under the same
  * `refs/mousse/preserved/<operation>-<12 hex>` refs a restore keeps files under (`preservedFiles.ts`). The operation is
- * recorded in its owner's journal (a thread's, or the project's own for the person's checkout, `projectKeptFilesOwner`),
- * so the copy is that owner's: the hourly Undo retention sweep deletes it after the owner's Undo window, and a purge of a
- * thread lists it. Discard keeps one; worktree cleanup reuses it.
+ * recorded in its owner's journal (a thread's; the project's own for the person's checkout, `projectKeptFilesOwner`; or a
+ * dispatch's own for its worktree, `dispatchKeptFilesOwner`), so the copy is that owner's: the hourly Undo retention
+ * sweep deletes it after the owner's Undo window, and a purge of a thread lists it. Discard keeps one; worktree cleanup
+ * keeps one of a worktree's ignored files before it removes the worktree.
  *
  * The copy is one commit laid out the way `git stash` lays one out:
  * - its tree is the working versions, each file's exact bytes on disk: no line-ending conversion, filter or `ident` is
@@ -617,10 +618,61 @@ export function projectKeptFilesOwners(home: string): Array<{ projectId: string;
   try { projects = readdirSync(join(home, OWNERS_FOLDER)) } catch { return [] }
   const owners: Array<{ projectId: string; owner: string; folders: string[] }> = []
   for (const projectId of projects) {
-    if (!PROJECT_IDENTITY.test(projectId)) continue
+    if (!PROJECT_IDENTITY.test(projectId) || projectId === DISPATCH_OWNERS) continue
     const owner = projectKeptFilesOwner(home, projectId)
     const record = readOwnerRecord(join(owner, OWNER_RECORD))
     if (record) owners.push({ projectId, owner, folders: record.folders })
+  }
+  return owners
+}
+
+// ---------------------------------------------------------------------------------------------------------
+// A dispatch's worktree: copies owned by the dispatch, in the profile
+
+/** The folder, inside {@link OWNERS_FOLDER}, of every dispatch's owner. No project is named this. */
+const DISPATCH_OWNERS = 'dispatches'
+const DISPATCH_IDENTITY = /^dsp_[0-9a-z]{26}$/
+
+interface DispatchOwnerRecord { schemaVersion: 1; dispatchId: string; folders: string[] }
+
+/**
+ * The folder whose journal owns the copy a dispatch keeps of its worktree's ignored files before the worktree is
+ * removed. The dispatch's record is in the network database, which a journal cannot live in, so its owner is a folder
+ * of its own in the profile, beside the projects' owners; the copies expire after its Undo window like theirs.
+ */
+export function dispatchKeptFilesOwner(home: string, dispatchId: string): string {
+  if (!DISPATCH_IDENTITY.test(dispatchId)) throw new Error('A dispatch id names the folder that keeps its copies.')
+  return join(home, OWNERS_FOLDER, DISPATCH_OWNERS, dispatchId)
+}
+
+/** Notes that the dispatch's copies are kept in the repository of `top` (its main folder), so the hourly sweep finds them. */
+export function registerDispatchKeptFilesFolder(owner: string, dispatchId: string, top: string): void {
+  const path = join(owner, OWNER_RECORD)
+  const record = readDispatchOwnerRecord(path) ?? { schemaVersion: 1, dispatchId, folders: [] }
+  const folder = resolve(top)
+  if (!record.folders.includes(folder)) atomicWriteJsonSync(path, { ...record, folders: [...record.folders, folder] } satisfies DispatchOwnerRecord)
+}
+
+function readDispatchOwnerRecord(path: string): DispatchOwnerRecord | undefined {
+  try {
+    const record = JSON.parse(readFileSync(path, 'utf8')) as Partial<DispatchOwnerRecord>
+    return record.schemaVersion === 1 && typeof record.dispatchId === 'string' && Array.isArray(record.folders) && record.folders.every((item) => typeof item === 'string')
+      ? record as DispatchOwnerRecord : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/** Every dispatch's owner of copies, with the folders they are in. */
+export function dispatchKeptFilesOwners(home: string): Array<{ dispatchId: string; owner: string; folders: string[] }> {
+  let dispatches: string[]
+  try { dispatches = readdirSync(join(home, OWNERS_FOLDER, DISPATCH_OWNERS)) } catch { return [] }
+  const owners: Array<{ dispatchId: string; owner: string; folders: string[] }> = []
+  for (const dispatchId of dispatches) {
+    if (!DISPATCH_IDENTITY.test(dispatchId)) continue
+    const owner = dispatchKeptFilesOwner(home, dispatchId)
+    const record = readDispatchOwnerRecord(join(owner, OWNER_RECORD))
+    if (record?.dispatchId === dispatchId) owners.push({ dispatchId, owner, folders: record.folders })
   }
   return owners
 }

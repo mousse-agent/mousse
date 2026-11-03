@@ -66,6 +66,7 @@ export const CLEANUP_COPY = {
   idle: 'Runs the rules above now. You see what would be removed, and confirm, before anything is deleted.',
   noRule: 'Turn on a cleanup rule to use this.',
   trashWarning: 'Threads removed from the trash cannot be restored.',
+  dispatchWarning: 'A dispatch worktree is deleted for good, with its ignored files.',
   worktreeNote: 'A removed worktree is restored the next time you use its thread.',
   onlyListed: 'Only the items listed here are removed. Anything else that becomes eligible waits for the next run.',
   expired: 'This check is out of date. Check again to see what would be removed now.'
@@ -77,6 +78,7 @@ export const STORAGE_RULE_LABELS: Record<StorageCleanupRule, string> = {
   'worktree-inactive': 'Inactive worktree',
   'worktree-merged': 'Merged worktree',
   'worktree-orphan': 'Unused worktree',
+  'dispatch-worktree': 'Dispatch worktree',
   'browser-capture': 'Browser capture',
   trash: 'Trash'
 }

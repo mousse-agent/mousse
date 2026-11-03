@@ -476,6 +476,7 @@ export class BridgeProfileService {
       db: rt.db,
       identity: rt.identity,
       installationHome: services.getHomeDir(),
+      profileHome: services.getProfileHomeDir(),
       profileId: services.profileId,
       threads: services.threads,
       runtime: {

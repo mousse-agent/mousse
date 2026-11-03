@@ -8,6 +8,8 @@ export interface PlanSummary {
   lowerBound: boolean
   /** Some removal empties the trash, which cannot be undone. */
   emptiesTrash: boolean
+  /** Some removal deletes a worktree a dispatch left in place, with its ignored files; it does not come back. */
+  deletesDispatchWorktree: boolean
   line: string
 }
 
@@ -21,13 +23,14 @@ export function summarizePlan(plan: readonly StorageCleanupPlanItem[]): PlanSumm
   const lowerBound = approximate && removals.filter((item) => item.bytesApproximate).every((item) => item.bytesLowerBound)
   const keep = plan.length - removals.length
   const emptiesTrash = removals.some((item) => item.rule === 'trash')
+  const deletesDispatchWorktree = removals.some((item) => item.rule === 'dispatch-worktree')
   let line: string
   if (removals.length === 0) line = 'Nothing would be removed.'
   else {
     const size = bytes === 0 ? '' : lowerBound ? `, freeing at least ${formatBytes(bytes)}` : approximate ? `, freeing about ${formatBytes(bytes)}` : `, freeing ${formatBytes(bytes)}`
     line = `Would remove ${plural(removals.length, 'item')}${size}.`
   }
-  return { remove: removals.length, keep, bytes, approximate, lowerBound, emptiesTrash, line }
+  return { remove: removals.length, keep, bytes, approximate, lowerBound, emptiesTrash, deletesDispatchWorktree, line }
 }
 
 const OUTCOME_ORDER: Record<StorageCleanupItem['outcome'], number> = { failed: 0, removed: 1, kept: 2 }

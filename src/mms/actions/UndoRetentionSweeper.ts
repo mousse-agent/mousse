@@ -5,15 +5,16 @@ import { UndoRetentionService } from './UndoRetentionService'
 import { ReceiptRefReleaseService } from './ReceiptRefReleaseService'
 import { releaseSnapshotRefs } from './SnapshotRefReleaseService'
 import { expirePreservedFiles } from './preservedFiles'
-import { projectKeptFilesOwners, resumeProjectClockHeld } from './keptCopies'
+import { dispatchKeptFilesOwners, projectKeptFilesOwners, resumeProjectClockHeld } from './keptCopies'
 import { withGitMutationLocks } from './GitOperationCoordinator'
 import { existsSync } from 'node:fs'
 
 /**
  * Small rotating idle-task batches. Shutdown cancels lease waits and awaits completion. Files a restore or a Discard
  * kept (`refs/mousse/preserved/`) expire here too, once they are older than their owner's Undo retention window; never
- * in the first pass after `start`, which runs while the daemon starts. The owners are the active threads, and each
- * project's data folder, which owns the copies a Discard kept in the person's own checkout (`projectKeptFilesOwner`).
+ * in the first pass after `start`, which runs while the daemon starts. The owners are the active threads, each
+ * project's owner, which owns the copies a Discard kept in the person's own checkout (`projectKeptFilesOwner`), and
+ * each dispatch's owner, which owns the copy of its worktree's ignored files (`dispatchKeptFilesOwner`).
  */
 export class UndoRetentionSweeper {
   private timer?: ReturnType<typeof setInterval>
@@ -79,27 +80,32 @@ export class UndoRetentionSweeper {
           reason: [error instanceof Error ? error.message : String(error), ...(preserved.reason ? [preserved.reason] : [])].join('; ') })
       } finally { if (lease) releaseExecutionLeaseHandle(lease) }
     }
-    await this.sweepProjectOwners(startup)
+    await this.sweepKeptCopyOwners(startup)
   }
 
   /**
-   * The copies each project keeps for the person's own checkout, in every folder they were kept in. As for a thread,
-   * the start-up pass only moves the owner's retention clock (starting it the first time); nothing expires in it. A
-   * clock that jumped resumes without a person (`resumeProjectClockHeld`), with the jump not counted.
+   * The copies each project keeps for the person's own checkout, and each dispatch for its worktree's ignored files, in
+   * every folder they were kept in. As for a thread, the start-up pass only moves the owner's retention clock (starting
+   * it the first time); nothing expires in it. A clock that jumped resumes without a person (`resumeProjectClockHeld`),
+   * with the jump not counted.
    */
-  private async sweepProjectOwners(startup: boolean): Promise<void> {
-    for (const { projectId, owner, folders } of projectKeptFilesOwners(this.store.profileHome)) {
+  private async sweepKeptCopyOwners(startup: boolean): Promise<void> {
+    const owners = [
+      ...projectKeptFilesOwners(this.store.profileHome).map(({ projectId, owner, folders }) => ({ name: `project:${projectId}`, owner, folders })),
+      ...dispatchKeptFilesOwners(this.store.profileHome).map(({ dispatchId, owner, folders }) => ({ name: `dispatch:${dispatchId}`, owner, folders }))
+    ]
+    for (const { name, owner, folders } of owners) {
       for (const folder of folders) {
         if (this.abort.signal.aborted) return
         // A folder that is gone, or on a drive that is not connected, keeps its copies until it is back.
         if (!existsSync(folder)) continue
-        const key = `project:${projectId}:${folder}`
+        const key = `${name}:${folder}`
         let lease
         try {
           lease = tryAcquireExecutionLease(owner, { source: 'undo-retention-sweep' })
           if (!lease) continue
           let clock = await new UndoRetentionService(owner).sweep(folder, this.abort.signal, lease)
-          // No person reviews a project's clock: it resumes at once, and the time it jumped is not counted.
+          // No person reviews a project's or a dispatch's clock: it resumes at once, and the time it jumped is not counted.
           if (clock.suspended) {
             await withGitMutationLocks(owner, folder, 'kept-copies-clock', () => resumeProjectClockHeld(owner), this.abort.signal, lease)
             clock = await new UndoRetentionService(owner).sweep(folder, this.abort.signal, lease)

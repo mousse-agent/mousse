@@ -28,6 +28,8 @@ import type { StorageSweepClock } from './sweepClock'
 import { WORKTREE_TRASH_QUIET_MS, WorktreeRetirementService } from './WorktreeRetirementService'
 import { expireSnapshotTrash } from '../workspace/SnapshotWorkspace'
 import { expireTrashedSnapshotRefs } from '../actions/SnapshotRefReleaseService'
+import { WorktreeManager } from '../worktree/WorktreeManager'
+import { forgetKeptWorktree, listKeptWorktrees, type KeptWorktree } from './keptWorktrees'
 
 const DAY_MS = 86_400_000
 const FIRST_RUN_DELAY_MS = 5 * 60_000
@@ -158,6 +160,7 @@ export type PlannedCleanup = StorageCleanupPlanItem
 const worktreeKey = (taskId: string): string => `worktree:${taskId}`
 const trashKey = (taskId: string): string => `trash:${taskId}`
 const captureKey = (sessionId: string): string => `capture:${sessionId}`
+const dispatchWorktreeKey = (dispatchId: string): string => `dispatch-worktree:${dispatchId}`
 const approximate = (measurement: Pick<Measurement, 'estimated' | 'partial'>) => ({
   ...(measurement.estimated || measurement.partial ? { bytesApproximate: true as const } : {}),
   ...(measurement.partial && !measurement.estimated ? { bytesLowerBound: true as const } : {})
@@ -364,6 +367,8 @@ export class StorageCleanupService {
     }
     if (!clock.suspended) planned.push(...await this.planCaptures(snapshot, now))
     planned.push(...await this.planTrash(now))
+    try { planned.push(...await this.planDispatchWorktrees()) }
+    catch (error) { planned.push({ rule: 'dispatch-worktree', label: 'Dispatch worktrees', action: 'keep', reason: (error as Error).message, bytes: 0 }) }
     try {
       for (const orphan of await this.orphanItems()) planned.push({ rule: orphan.rule, label: orphan.label, action: 'keep', reason: orphan.reason, bytes: orphan.bytes, ...(orphan.bytesApproximate ? { bytesApproximate: true as const } : {}), ...(orphan.bytesLowerBound ? { bytesLowerBound: true as const } : {}) })
     } catch { /* Ownership could not be proven; a run reports nothing here either. */ }
@@ -486,6 +491,8 @@ export class StorageCleanupService {
     if (snapshot && (hasRule || trigger === 'manual')) {
       try { items.push(...await this.worktreePhase(snapshot, !clock.suspended, startedMs, trigger, allowed)) }
       catch (error) { items.push({ rule: 'worktree-inactive', label: 'Worktrees', bytes: 0, outcome: 'failed', reason: (error as Error).message }) }
+      try { items.push(...await this.dispatchWorktreeItems(allowed)) }
+      catch (error) { items.push({ rule: 'dispatch-worktree', label: 'Dispatch worktrees', bytes: 0, outcome: 'failed', reason: (error as Error).message }) }
     }
     // Worktrees already in the trash are settled whatever rules are on now; a confirmed plan touches only what it named.
     if (!allowed && !clock.suspended && !this.stopping) {
@@ -1155,6 +1162,61 @@ export class StorageCleanupService {
     return items
   }
 
+  // ---- Worktrees finished dispatches left in place ----
+
+  private dispatchWorktreeBase(kept: KeptWorktree): Pick<StorageCleanupItem, 'rule' | 'key' | 'label' | 'threadId' | 'projectId'> {
+    const thread = kept.threadId ? this.deps.threads.getThread(kept.threadId) : undefined
+    return {
+      rule: 'dispatch-worktree', key: dispatchWorktreeKey(kept.dispatchId),
+      label: kept.dispatchId,
+      ...(thread ? { threadId: thread.id } : {}), ...(thread?.projectId ? { projectId: thread.projectId } : {})
+    }
+  }
+
+  private dispatchWorktreeReason(kept: KeptWorktree): string {
+    return `Left in place when its dispatch finished, with ${plural(kept.ignoredFiles, 'ignored file')} Mousse could not keep a copy of. Removing it deletes them.`
+  }
+
+  /**
+   * Each worktree a finished dispatch left in place (`keptWorktrees`) is offered for removal: nothing else ever removes
+   * it, since no thread's resources name it. It goes only when the person confirms a plan that lists it.
+   */
+  private async planDispatchWorktrees(): Promise<PlannedCleanup[]> {
+    const planned: PlannedCleanup[] = []
+    for (const kept of listKeptWorktrees(this.deps.store.profileHome)) {
+      if (this.stopping) break
+      if (!existsSync(kept.path)) continue
+      const measurement = await this.measure(kept.path, { mode: 'reclaim', budgetMs: MEASURE_BUDGET_MS })
+      const { rule, key, label, threadId, projectId } = this.dispatchWorktreeBase(kept)
+      planned.push({ rule, key, label, ...(threadId ? { threadId } : {}), ...(projectId ? { projectId } : {}), action: 'remove', reason: this.dispatchWorktreeReason(kept), bytes: measurement.bytes, ...approximate(measurement) })
+    }
+    return planned
+  }
+
+  /**
+   * In a run: a worktree a finished dispatch left in place is removed, with its ignored files, only when the confirmed
+   * plan named it (`allowed`); otherwise it is reported as kept. Git still refuses one with untracked or changed files.
+   * A record whose folder is gone is forgotten.
+   */
+  private async dispatchWorktreeItems(allowed?: ReadonlySet<string>): Promise<StorageCleanupItem[]> {
+    const items: StorageCleanupItem[] = []
+    for (const kept of listKeptWorktrees(this.deps.store.profileHome)) {
+      if (this.stopping) break
+      if (!existsSync(kept.path)) { forgetKeptWorktree(this.deps.store.profileHome, kept.dispatchId); continue }
+      const base = this.dispatchWorktreeBase(kept)
+      const measurement = await this.measure(kept.path, { mode: 'reclaim', budgetMs: MEASURE_BUDGET_MS })
+      const sized = { bytes: measurement.bytes, files: measurement.files, ...approximate(measurement) }
+      if (!allowed?.has(base.key!)) { items.push({ ...base, ...sized, outcome: 'kept', reason: `${this.dispatchWorktreeReason(kept)} Clean up now lists it.` }); continue }
+      const result = await new WorktreeManager(kept.repositoryRoot, this.deps.installationHome).cleanupValidatedAgentWorktree(
+        { path: kept.path, branch: kept.branch, repositoryRoot: kept.repositoryRoot }, { safeCheckout: true, keepIgnored: 'delete-confirmed' })
+      if (result.success) {
+        forgetKeptWorktree(this.deps.store.profileHome, kept.dispatchId)
+        items.push({ ...base, ...sized, outcome: 'removed', reason: `Removed with its ${plural(kept.ignoredFiles, 'ignored file')}, as confirmed` })
+      } else items.push({ ...base, bytes: 0, outcome: 'failed', reason: result.error ?? 'The worktree could not be removed' })
+    }
+    return items
+  }
+
   // ---- Orphans ----
 
   /** Directories in the managed worktree folders that nothing claims. Reported with their size, never removed. */
@@ -1163,6 +1225,8 @@ export class StorageCleanupService {
     const items: StorageCleanupItem[] = []
     const repositories = join(this.deps.installationHome, 'repositories')
     if (!existsSync(repositories)) return items
+    // A worktree a dispatch left in place has its own row, which can remove it.
+    const dispatchKept = new Set(await Promise.all(listKeptWorktrees(this.deps.store.profileHome).map((kept) => canonicalPathAsync(kept.path))))
     for (const repository of readdirSync(repositories)) {
       for (const kind of ['threads', 'agents']) {
         const folder = join(repositories, repository, 'worktrees', kind)
@@ -1175,7 +1239,7 @@ export class StorageCleanupService {
           if (!stat.isDirectory() || stat.isSymbolicLink()) continue
           // Compared by real paths, so a record that names this folder through an alias still claims it.
           const real = await canonicalPathAsync(directory)
-          if (claims.some((claim) => claimOverlapsPath(claim, real))) continue
+          if (dispatchKept.has(real) || claims.some((claim) => claimOverlapsPath(claim, real))) continue
           const measurement = await this.measure(directory, { mode: 'reclaim', budgetMs: MEASURE_BUDGET_MS })
           if (!measurement.files) continue // An empty leftover folder holds nothing.
           // A thread whose checkout can't be verified may still use a folder of its repository: not called unused, and says why.
