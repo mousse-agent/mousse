@@ -80,6 +80,8 @@ it('compares three models: the recommended one, the fewest wrong words and the m
   const cells = [...host.querySelectorAll('[role="cell"]')].map((item) => item.textContent)
   expect(cells).toContain('1 in 16')
   expect(cells).toContain('—')
+  // Measured waits: Parakeet 110M 127 ms, v3 216 ms, Whisper Base about 3 s.
+  expect(cells.slice(0, 3)).toEqual(['No wait', 'Under 1 s', '3 s'])
   expect(host.querySelector('.speech-compare-cell.best')?.textContent).toBeTruthy()
 })
 
@@ -89,7 +91,7 @@ it('opens every model from "more models" and goes back', async () => {
   expect(host.querySelector('h3')?.textContent).toBe('All dictation models')
   const titles = [...host.querySelectorAll('.settings-item-title')].map((item) => item.textContent)
   expect(titles).toEqual(['Moonshine Tiny', 'Moonshine Base', 'Parakeet TDT 110M', 'Whisper Base', 'Parakeet TDT 0.6B v3'])
-  expect(host.textContent).toContain('1 in 8 words wrong · 32 MB')
+  expect(host.textContent).toContain('No wait · 1 in 8 words wrong · 32 MB')
   await click('Back')
   expect(columnNames()).toHaveLength(3)
 })

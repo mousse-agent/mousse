@@ -76,6 +76,12 @@ export type LocalSttModel = TransformersSttModel | NemoTransducerSttModel
  * and other, SPGISpeech, TED-LIUM, VoxPopuli), from
  * https://github.com/huggingface/open_asr_leaderboard/blob/16743c6dabc69abcb8fd5bf529a95e3c6c16ac3c/scripts/data/en_shortform.csv
  * Mousse runs quantized copies, which may differ slightly.
+ *
+ * `compare.stopWaitMs` is measured: local models transcribe while you speak, so stopping waits for
+ * the audio after the last pause. Recorded speech (13 s and 54 s clips) was played through a fake
+ * microphone into the composer's dictation hook in Electron, three runs each with the model loaded,
+ * on a 24-thread desktop CPU. The figure is the median of the slower clip. Whisper pads every piece
+ * to 30 s, so even a short last piece takes seconds.
  */
 const ENGLISH = { count: 1, name: 'English' }
 
@@ -88,7 +94,7 @@ export const MOONSHINE_TINY: MoonshineSttModel = {
   id: 'moonshine-tiny',
   label: 'Moonshine Tiny',
   description: 'English, fastest',
-  compare: { languages: ENGLISH, englishWer: 12.65 },
+  compare: { languages: ENGLISH, englishWer: 12.65, stopWaitMs: 104 },
   parameters: '27M',
   license: 'MIT',
   homepage: 'https://huggingface.co/moonshine-ai/moonshine-tiny',
@@ -118,7 +124,7 @@ export const MOONSHINE_BASE: MoonshineSttModel = {
   id: 'moonshine-base',
   label: 'Moonshine Base',
   description: 'English',
-  compare: { languages: ENGLISH, englishWer: 9.99 },
+  compare: { languages: ENGLISH, englishWer: 9.99, stopWaitMs: 45 },
   parameters: '61M',
   license: 'MIT',
   homepage: 'https://huggingface.co/UsefulSensors/moonshine-base',
@@ -150,7 +156,7 @@ export const PARAKEET_TDT_110M: NemoTransducerSttModel = {
   id: 'parakeet-tdt-110m',
   label: 'Parakeet TDT 110M',
   description: 'English with punctuation',
-  compare: { languages: ENGLISH, englishWer: 7.49 },
+  compare: { languages: ENGLISH, englishWer: 7.49, stopWaitMs: 127 },
   parameters: '110M',
   license: 'CC-BY-4.0',
   homepage: 'https://huggingface.co/nvidia/parakeet-tdt_ctc-110m',
@@ -183,7 +189,7 @@ export const WHISPER_BASE: WhisperSttModel = {
   label: 'Whisper Base',
   description: '99 languages',
   // The leaderboard lists only the English-only whisper-base.en, not this multilingual model.
-  compare: { languages: { count: 99 } },
+  compare: { languages: { count: 99 }, stopWaitMs: 2980 },
   parameters: '74M',
   license: 'Apache-2.0',
   homepage: 'https://huggingface.co/openai/whisper-base',
@@ -215,7 +221,7 @@ export const PARAKEET_TDT_06B_V3: NemoTransducerSttModel = {
   id: 'parakeet-tdt-0.6b-v3',
   label: 'Parakeet TDT 0.6B v3',
   description: '25 European languages',
-  compare: { languages: { count: 25 }, englishWer: 6.32 },
+  compare: { languages: { count: 25 }, englishWer: 6.32, stopWaitMs: 216 },
   parameters: '600M',
   license: 'CC-BY-4.0',
   homepage: 'https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3',

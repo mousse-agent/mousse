@@ -1,6 +1,6 @@
 import { expect, it } from 'vitest'
 import type { LocalModelManifest } from '../src/shared/localModels'
-import { isBestValue, pickBest, pickId, pickModels, wordsPerError } from '../src/renderer/speechModels/modelComparison'
+import { isBestValue, pickBest, pickId, pickModels, stopWaitMetric, stopWaitSeconds, wordsPerError } from '../src/renderer/speechModels/modelComparison'
 
 const model = (id: string, englishWer?: number, languages?: number): LocalModelManifest => ({
   id,
@@ -54,4 +54,11 @@ it('marks the best value only when two or more figures differ', () => {
 it('reads a word error rate as "1 in N" words', () => {
   expect(wordsPerError(6.32)).toBe(16)
   expect(wordsPerError(12.65)).toBe(8)
+})
+
+it('rounds a measured wait to what the comparison shows', () => {
+  expect([45, 149, 150, 999, 1000, 2980].map(stopWaitSeconds)).toEqual([0, 0, 0.5, 0.5, 1, 3])
+  expect([0, 0.5, 3].map((seconds) => stopWaitMetric.cell(seconds, model('a')))).toEqual(['No wait', 'Under 1 s', '3 s'])
+  expect(stopWaitMetric.stat(3, model('a'))).toBe('3 s wait')
+  expect(stopWaitMetric.value(model('a'))).toBeUndefined()
 })

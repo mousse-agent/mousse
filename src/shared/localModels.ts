@@ -41,6 +41,8 @@ export interface LocalModelFigures {
   languages?: { count: number; name?: string }
   /** Average English word error rate in percent, from a published benchmark. */
   englishWer?: number
+  /** Dictation: measured time from the stop click to the text, in milliseconds. */
+  stopWaitMs?: number
 }
 
 export function localModelFileUrl(model: LocalModelManifest, path: string): string {

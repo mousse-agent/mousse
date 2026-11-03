@@ -95,19 +95,30 @@ export const smallestDownload = pickBest({ value: localModelBytes, best: 'low' }
 // ---------------------------------------------------------------------------------------------
 
 /**
- * Every local dictation model transcribes while you speak (`useDictation.ts` starts
- * `liveTranscription.ts` for any local model): the audio is cut at pauses and each piece is
- * transcribed as it ends, so stopping only waits for the words after the last pause. The wait is
- * a property of how Mousse runs local models, so it is the same for each of them.
+ * Shown wait in seconds for a measured `stopWaitMs`: 0 is "No wait", 0.5 "Under 1 s", otherwise
+ * whole seconds. Rounded to what is shown, so two models that read the same compare as equal.
+ * The figures come from a fast desktop CPU, so "No wait" stops at 150 ms: a computer a third as
+ * fast still writes the text well within half a second.
+ */
+export function stopWaitSeconds(ms: number): number {
+  if (ms < 150) return 0
+  if (ms < 1000) return 0.5
+  return Math.round(ms / 1000)
+}
+
+const stopWaitText = (seconds: number): string => (seconds === 0 ? 'No wait' : seconds < 1 ? 'Under 1 s' : `${seconds} s`)
+
+/**
+ * Local dictation models transcribe while you speak (`liveTranscription.ts`), so stopping waits for
+ * the words after the last pause; how long that takes is measured per model (`compare.stopWaitMs`).
  */
 export const stopWaitMetric: ModelMetric<LocalModelManifest> = {
   label: 'Wait when you stop',
-  hint: 'Text is written while you speak, so only the words after your last pause are left',
-  value: () => 0,
+  hint: 'Text is written while you speak; this is the time left for the words after your last pause',
+  value: (model) => (model.compare?.stopWaitMs === undefined ? undefined : stopWaitSeconds(model.compare.stopWaitMs)),
   best: 'low',
-  cell: () => 'Last phrase only',
-  // The same for every model, so list rows leave it out.
-  stat: () => ''
+  cell: stopWaitText,
+  stat: (seconds) => (seconds === 0 ? 'No wait' : `${stopWaitText(seconds)} wait`)
 }
 
 /** "1 in N" words wrong, N = 100 / word error rate. */
