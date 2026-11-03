@@ -1,7 +1,8 @@
 import { afterEach, expect, test, vi } from 'vitest'
-import { mkdtempSync, mkdirSync, writeFileSync, existsSync, rmSync, renameSync, cpSync, readFileSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, writeFileSync, existsSync, rmSync, renameSync, cpSync, readFileSync, readdirSync, lstatSync, readlinkSync, symlinkSync } from 'node:fs'
+import { execFileSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
-import { join, resolve } from 'node:path'
+import { dirname, join, resolve, sep } from 'node:path'
 import { acquireRepositoryLease } from '../src/mms/git/RepositoryLease'
 import { resolveRepositoryIdentity } from '../src/mms/git/RepositoryIdentity'
 import { waitAcquireExecutionLease, releaseExecutionLeaseHandle } from '../src/mms/queue/ThreadExecutionLease'
@@ -528,4 +529,190 @@ test("a change to Git's own data of the worktree after its capture is captured a
   expect(git(f.repo, ['show', `${retired.adminCommit}^:config.worktree`])).toContain('note = first')
   await f.service.reconstruct(f.path)
   expect(git(f.worktree, ['config', '--worktree', '--get', 'audit.note'])).toBe('written after the capture')
+})
+
+// ---- Verified delete: the folder is renamed, compared with its proof, and deleted entry by entry ----
+
+/** Every entry of a folder but its own `.git` file: each file's mode and exact bytes, each link's target, each folder's mode. */
+function filesOf(root: string): Record<string, string> {
+  const out: Record<string, string> = {}
+  const walk = (dir: string, rel: string): void => {
+    for (const name of readdirSync(dir).sort()) {
+      if (!rel && name === '.git') continue
+      const path = join(dir, name), at = rel ? `${rel}/${name}` : name, stat = lstatSync(path)
+      if (stat.isDirectory()) { out[`${at}/`] = `folder ${stat.mode & 0o777}`; walk(path, at) }
+      else if (stat.isSymbolicLink()) out[at] = `link ${readlinkSync(path)}`
+      else out[at] = `file ${stat.mode & 0o777} ${readFileSync(path).toString('base64')}`
+    }
+  }
+  walk(root, '')
+  return out
+}
+const LATER = (): number => Date.now() + 2 * WORKTREE_TRASH_QUIET_MS
+const deletingFolders = (trashPath: string): string[] => readdirSync(dirname(trashPath)).filter((name) => name.startsWith('.deleting-'))
+
+/** A worktree in the trash with a changed tracked file, an untracked one in a folder, an ignored binary file and a link. */
+async function trashedFixture() {
+  const f = await fixture()
+  writeFileSync(join(f.repo, '.git', 'info', 'exclude'), 'ignored/\n')
+  await f.service.prepare(f.input)
+  const trashed = await f.service.retire(f.path)
+  const trashPath = trashed.trashPath!
+  writeFileSync(join(trashPath, 'a.txt'), 'edited in the trash\n')
+  mkdirSync(join(trashPath, 'sub')); writeFileSync(join(trashPath, 'sub', 'x.txt'), 'x\n'); writeFileSync(join(trashPath, 'sub', 'y.txt'), 'y\n')
+  mkdirSync(join(trashPath, 'ignored')); writeFileSync(join(trashPath, 'ignored', 'cache.bin'), Buffer.from([0, 1, 2, 254, 255, 13, 10]))
+  if (process.platform !== 'win32') symlinkSync('a.txt', join(trashPath, 'ignored', 'link'))
+  const adminDir = git(trashPath, ['rev-parse', '--absolute-git-dir'])
+  return { ...f, trashed, trashPath, adminDir, before: filesOf(trashPath) }
+}
+const manifestOf = (path: string) => JSON.parse(readFileSync(path, 'utf8'))
+
+test('an unchanged folder is kept, removed entry by entry and unregistered; a restore rebuilds it byte for byte, ignored files included', async () => {
+  const f = await trashedFixture()
+  expect(await f.service.expireTrash(f.path, { now: LATER() })).toEqual({ removed: true })
+  expect(existsSync(f.trashPath)).toBe(false); expect(deletingFolders(f.trashPath)).toEqual([])
+  expect(listed(f.repo)).not.toContain(slashes(f.trashPath)); expect(existsSync(f.adminDir)).toBe(false)
+  const retired = manifestOf(f.path)
+  expect(retired.state).toBe('retired'); expect(retired.deleting).toBeUndefined()
+  // The ignored files are in a kept copy owned by the thread's journal, and pinned for as long as the record lasts.
+  expect(retired.keptFiles).toEqual([{ sha: expect.any(String), paths: expect.arrayContaining(['ignored/cache.bin']) }])
+  expect(retired.keptRefs).toContain(`${retired.resultRef.slice(0, -'/result'.length)}/kept/${retired.keptFiles[0].sha}`)
+  const preserved = git(f.repo, ['for-each-ref', '--format=%(objectname)', 'refs/mousse/preserved/'])
+  expect(preserved).toBe(retired.keptFiles[0].sha)
+  expect(new ThreadJournal(join(f.home, 'thread-data', 'task')).list().some((entry) => entry.operationType === 'worktree-cleanup' && entry.state === 'completed')).toBe(true)
+  git(f.repo, ['gc', '--prune=now', '-q'])
+  await f.service.reconstruct(f.path)
+  expect(filesOf(f.worktree)).toEqual(f.before)
+  expect(git(f.worktree, ['branch', '--show-current'])).toBe(f.branch)
+})
+
+test.skipIf(process.platform === 'win32')('a writer at the boundary Git used to delete at fails to write instead of losing its bytes (the earlier expiry race, inverted)', async () => {
+  const f = await trashedFixture()
+  const bin = join(f.root, 'race-bin'); mkdirSync(bin)
+  const realGit = execFileSync('which', ['git'], { encoding: 'utf8' }).trim()
+  const value = 'late bytes after final validation 63fa0ee1\n'
+  // A still-live writer that writes by path into the folder as Git is asked to remove the worktree.
+  writeFileSync(join(bin, 'git'), `#!/bin/sh\ncase " $* " in\n  *" worktree remove "*) if printf '%s' '${value}' > '${f.trashPath}/a.txt' 2>/dev/null; then echo wrote; else echo failed; fi > '${f.root}/race-fired' ;;\nesac\nexec '${realGit}' "$@"\n`, { mode: 0o755 })
+  const previousPath = process.env.PATH
+  process.env.PATH = `${bin}:${previousPath}`
+  let outcome
+  try { outcome = await f.service.expireTrash(f.path, { now: LATER() }) } finally { process.env.PATH = previousPath }
+  expect(outcome).toEqual({ removed: true })
+  // The folder was gone by then: the write failed, so no bytes were taken in and then lost.
+  expect(readFileSync(join(f.root, 'race-fired'), 'utf8').trim()).toBe('failed')
+  expect(existsSync(f.trashPath)).toBe(false)
+  await f.service.reconstruct(f.path)
+  expect(filesOf(f.worktree)).toEqual(f.before)
+})
+
+test('after the rename a write by path fails, and a write through a handle still in the folder survives: the folder is kept and the write added to the proof', async () => {
+  const f = await trashedFixture()
+  let pathWrite: unknown
+  const outcome = await f.service.expireTrash(f.path, {
+    now: LATER(),
+    afterRename: (renamed) => {
+      try { writeFileSync(join(f.trashPath, 'b.txt'), 'by path\n') } catch (error) { pathWrite = error }
+      // A process whose working directory is in the folder writes relative to it, so into the renamed folder.
+      writeFileSync(join(renamed, 'b.txt'), 'through a handle still open\n')
+      writeFileSync(join(renamed, 'sub', 'late.txt'), 'late\n')
+    }
+  })
+  expect((pathWrite as NodeJS.ErrnoException).code).toBe('ENOENT')
+  expect(existsSync(f.trashPath)).toBe(false)
+  expect(outcome).toEqual({ kept: expect.stringMatching(/changed while it was being deleted.*kept/), waiting: true })
+  const manifest = manifestOf(f.path)
+  expect(manifest.state).toBe('deleting')
+  // Nothing was deleted: the folder is all there, with the late writes.
+  const left = filesOf(manifest.deleting.path)
+  expect(left).toEqual({ ...f.before, 'b.txt': expect.stringContaining(Buffer.from('through a handle still open\n').toString('base64')), 'sub/late.txt': expect.any(String) })
+  // The proof grew: the late versions are kept, and the earlier ones stay in the snapshot.
+  expect(manifest.keptFiles).toHaveLength(2)
+  expect(manifest.keptFiles[1].paths.sort()).toEqual(['b.txt', 'sub/late.txt'])
+  expect(git(f.repo, ['show', `${manifest.keptFiles[1].sha}:b.txt`])).toBe('through a handle still open')
+  expect(listed(f.repo)).toContain(slashes(f.trashPath))
+  // A restore now rebuilds from the proof, with the late writes, and the half-deleted folder goes.
+  await f.service.reconstruct(f.path)
+  expect(filesOf(f.worktree)).toEqual(left)
+  expect(existsSync(manifest.deleting.path)).toBe(false); expect(listed(f.repo)).not.toContain(slashes(f.trashPath))
+})
+
+test('a file created in a folder as it is deleted makes rmdir stop: what is not deleted yet and the new file are kept', async () => {
+  const f = await trashedFixture()
+  const outcome = await f.service.expireTrash(f.path, {
+    now: LATER(),
+    beforeRemove: (path) => { if (path.endsWith(`${sep}sub`)) writeFileSync(join(path, 'new.txt'), 'created mid-delete\n') }
+  })
+  expect(outcome).toEqual({ kept: expect.stringMatching(/changed while it was being deleted/), waiting: true })
+  const manifest = manifestOf(f.path)
+  const left = filesOf(manifest.deleting.path)
+  // sub/x.txt and sub/y.txt came first and are gone; sub itself stopped the delete, with its new file in it.
+  expect(left['sub/new.txt']).toContain(Buffer.from('created mid-delete\n').toString('base64'))
+  expect(left['sub/x.txt']).toBeUndefined(); expect(left['a.txt']).toBe(f.before['a.txt']); expect(left['ignored/cache.bin']).toBe(f.before['ignored/cache.bin'])
+  expect(manifest.keptFiles.at(-1).paths).toEqual(['sub/new.txt'])
+  // It waits an hour from the write; then what is left is deleted.
+  expect(await f.service.expireTrash(f.path, { now: LATER() })).toMatchObject({ waiting: true })
+  expect(await f.service.expireTrash(f.path, { now: Date.parse(manifest.deleting.changedAt) + 2 * WORKTREE_TRASH_QUIET_MS })).toEqual({ removed: true })
+  expect(existsSync(manifest.deleting.path)).toBe(false); expect(listed(f.repo)).not.toContain(slashes(f.trashPath))
+  await f.service.reconstruct(f.path)
+  expect(filesOf(f.worktree)).toEqual({ ...f.before, 'sub/new.txt': left['sub/new.txt'] })
+})
+
+test.each(['after the rename', 'mid-delete'] as const)('a crash %s settles on restart, and a restore rebuilds byte for byte from the proof', async (when) => {
+  const f = await trashedFixture()
+  let removed = 0
+  await expect(f.service.expireTrash(f.path, {
+    now: LATER(),
+    ...(when === 'after the rename'
+      ? { afterRename: () => { throw new Error('the process stopped') } }
+      : { beforeRemove: () => { if (++removed === 3) throw new Error('the process stopped') } })
+  })).rejects.toThrow('the process stopped')
+  const manifest = manifestOf(f.path)
+  expect(manifest.state).toBe('deleting'); expect(existsSync(manifest.deleting.path)).toBe(true)
+  expect(existsSync(f.trashPath)).toBe(false)
+  const restarted = new WorktreeRetirementService(new ResourceLifecycleStore({ profileId: 'test', profileHome: f.home }), f.ownership)
+  if (when === 'after the rename') expect(await restarted.expireTrash(f.path, { now: LATER() })).toEqual({ removed: true })
+  // Mid-delete, the restore itself finishes the delete against the proof, then rebuilds.
+  await restarted.reconstruct(f.path)
+  expect(filesOf(f.worktree)).toEqual(f.before)
+  expect(existsSync(manifest.deleting.path)).toBe(false); expect(deletingFolders(f.trashPath)).toEqual([])
+  expect(listed(f.repo)).not.toContain(slashes(f.trashPath))
+  expect(manifestOf(f.path).state).toBe('materialized')
+})
+
+test('a delete that stopped before the rename goes back to the trash as it was', async () => {
+  const f = await trashedFixture()
+  const manifest = manifestOf(f.path)
+  // The state was recorded and the process stopped before the folder moved.
+  writeFileSync(f.path, JSON.stringify({ ...manifest, state: 'deleting', deleting: { path: join(dirname(f.trashPath), '.deleting-0123456789abcdef'), startedAt: new Date().toISOString(), adminState: 'x' } }))
+  expect(await f.service.expireTrash(f.path, { now: LATER() })).toEqual({ kept: 'Waiting in the trash', waiting: true })
+  expect(manifestOf(f.path)).toMatchObject({ state: 'trashed' }); expect(filesOf(f.trashPath)).toEqual(f.before)
+  expect(await f.service.expireTrash(f.path, { now: LATER() })).toEqual({ removed: true })
+  await f.service.reconstruct(f.path)
+  expect(filesOf(f.worktree)).toEqual(f.before)
+})
+
+test('a file in use (Windows) stops the delete where it is; a later run carries on, and a restore rebuilds byte for byte', async () => {
+  const f = await trashedFixture()
+  // Windows refuses to delete a file another process holds open; the in-use check before the capture let it through.
+  const busy = Object.assign(new Error('EBUSY: resource busy or locked, unlink'), { code: 'EBUSY' })
+  const outcome = await f.service.expireTrash(f.path, { now: LATER(), beforeRemove: (path) => { if (path.endsWith(`${sep}b.txt`)) throw busy } })
+  expect(outcome).toEqual({ kept: expect.stringMatching(/in use; what is left of it waits at .*\.deleting-/) })
+  const manifest = manifestOf(f.path)
+  expect(manifest.state).toBe('deleting'); expect(manifest.deleting.changedAt).toBeUndefined()
+  const left = filesOf(manifest.deleting.path)
+  expect(left['b.txt']).toBe(f.before['b.txt']); expect(left['a.txt']).toBe(f.before['a.txt']); expect(left['sub/x.txt']).toBeUndefined()
+  expect(await f.service.expireTrash(f.path, { now: LATER() })).toEqual({ removed: true })
+  expect(existsSync(manifest.deleting.path)).toBe(false); expect(listed(f.repo)).not.toContain(slashes(f.trashPath))
+  await f.service.reconstruct(f.path)
+  expect(filesOf(f.worktree)).toEqual(f.before)
+})
+
+test('a permanent deletion takes what is left of a stopped delete, and its registration', async () => {
+  const f = await trashedFixture()
+  await expect(f.service.expireTrash(f.path, { now: LATER(), afterRename: () => { throw new Error('the process stopped') } })).rejects.toThrow()
+  const manifest = manifestOf(f.path)
+  // Kept until then: the bytes are all in the proof, and a restore would still bring them back.
+  expect(filesOf(manifest.deleting.path)).toEqual(f.before)
+  await f.service.retire(f.path, { purging: true })
+  expect(existsSync(manifest.deleting.path)).toBe(false); expect(listed(f.repo)).not.toContain(slashes(f.trashPath))
 })
