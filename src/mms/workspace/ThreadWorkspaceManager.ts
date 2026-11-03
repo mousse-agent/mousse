@@ -4,7 +4,7 @@ import { assertFolderUnchanged, folderSignatureAsync, walkOwnedContentAsync } fr
 import { getThreadLifecycleGate } from '../queue/ThreadLifecycleAdmission'
 import { execFileSync } from 'node:child_process'
 import { existsSync, readFileSync, realpathSync } from 'node:fs'
-import { access, mkdir, realpath, rename, rm } from 'node:fs/promises'
+import { access, mkdir, readdir, realpath, rename, rm } from 'node:fs/promises'
 import { nonInteractiveGitEnv } from '../git/gitEnv'
 import { assertGitAllowedAsync, rethrowGitPolicyError, type UserAction } from '../git/gitPolicy'
 import { safeWorktreeGit } from '../worktree/WorktreeManager'
@@ -17,7 +17,7 @@ import { loadSnapshotWorkspaceMetadataAsync } from './SnapshotWorkspace'
 import { atomicWriteJsonSync } from '../data/AtomicFs'
 import { ThreadJournal } from '../data/ThreadJournal'
 import { getMousseHomeDir } from '../data/paths'
-import { assertWorktreeFolderConnected, chosenWorktreeFolder, defaultWorktreeBase, notConnectedPlacementNote, placeThreadWorktree } from '../worktree/worktreeLayout'
+import { assertWorktreeFolderConnected, chosenFolderHolding, chosenWorktreeFolder, defaultWorktreeBase, notConnectedPlacementNote, placeThreadWorktree, worktreeRegistrationProblem, worktreeRegistrationProblemSync } from '../worktree/worktreeLayout'
 import { acquireRepositoryLease, type RepositoryLeaseHandle } from '../git/RepositoryLease'
 import { resolveRepositoryIdentity, resolveRepositoryIdentityAsync, type RepositoryIdentity } from '../git/RepositoryIdentity'
 import {
@@ -367,7 +367,9 @@ export class ThreadWorkspaceManager {
         projectName: basename(repository.primaryCheckoutPath),
         threadId,
         conversationBranchId,
-        branch
+        branch,
+        // A name Git or a reconstruction manifest still names is never given to another worktree.
+        taken: (path) => this.pathNamed(repository.primaryCheckoutPath, path)
       })
       const worktreePath = placement.path
       this.placementNote = placement.notConnected ? notConnectedPlacementNote(placement.notConnected) : undefined
@@ -440,6 +442,20 @@ export class ThreadWorkspaceManager {
       repositoryLease?.release()
       if (threadLease && !heldThreadLease) releaseExecutionLeaseHandle(threadLease)
     }
+  }
+
+  /** Whether Git registers a worktree at `path`, or any thread's reconstruction manifest names it. */
+  private async pathNamed(checkoutPath: string, path: string): Promise<boolean> {
+    const listed = (await tryGit(checkoutPath, ['worktree', 'list', '--porcelain'])).stdout.split(/\r?\n/)
+    const fold = (value: string): string => process.platform === 'win32' || process.platform === 'darwin' ? resolve(value).toLowerCase() : resolve(value)
+    if (listed.some((line) => line.startsWith('worktree ') && fold(line.slice('worktree '.length)) === fold(path))) return true
+    const gate = getThreadLifecycleGate(this.threadDirectory)
+    if (!(gate instanceof ResourceLifecycleStore)) return false
+    const retirement = new WorktreeRetirementService(gate)
+    let tasks: string[] = []
+    try { tasks = await readdir(join(gate.root, 'workspaces')) } catch { return false }
+    for (const task of tasks) if (await access(retirement.pathFor(task, path)).then(() => true, () => false)) return true
+    return false
   }
 
   hasReconstructionManifest(metadata = this.load()): boolean {
@@ -594,6 +610,9 @@ export class ThreadWorkspaceManager {
   verifySync(metadata = this.load()): ThreadWorkspaceMetadata {
     if (!metadata) throw new Error('Thread workspace metadata is missing')
     if (!existsSync(metadata.worktreePath)) return { ...metadata, lifecycle: 'missing' as const, lastVerifiedAt: new Date().toISOString() }
+    if (!isProjectFolderWorkspace(metadata) && chosenFolderHolding(metadata.worktreePath) && worktreeRegistrationProblemSync(metadata.worktreePath, metadata.repositoryId)) {
+      return { ...metadata, lifecycle: 'recovery_required' as const, lastVerifiedAt: new Date().toISOString() }
+    }
     try {
       gitSync(metadata.worktreePath, ['rev-parse', '--show-toplevel'])
       if (this.hasPendingOperation()) throw new Error('A Mousse operation is waiting for recovery.')
@@ -611,6 +630,11 @@ export class ThreadWorkspaceManager {
     if (!await pathExists(metadata.worktreePath)) {
       const missing = { ...metadata, lifecycle: 'missing' as const, lastVerifiedAt: new Date().toISOString() }
       return missing
+    }
+    // In a worktree folder the person chose, before any Git runs there: the folder must be this repository's registered
+    // worktree, or it is someone else's (another drive at the same path, a folder put there by hand).
+    if (!isProjectFolderWorkspace(metadata) && chosenFolderHolding(metadata.worktreePath) && await worktreeRegistrationProblem(metadata.worktreePath, metadata.repositoryId)) {
+      return { ...metadata, lifecycle: 'recovery_required' as const, lastVerifiedAt: new Date().toISOString() }
     }
     try {
       // The branch and HEAD are the agent's to move: ready means the checkout is there and no Mousse operation waits.

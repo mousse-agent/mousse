@@ -20,6 +20,7 @@ export function StorageSettings() {
   const [storagePaused, setStoragePaused] = useState(false)
   const [reviewRecommended, setReviewRecommended] = useState(false)
   const [worktreeFolder, setWorktreeFolder] = useState<WorktreeFolderStatus>()
+  const [folderRefusal, setFolderRefusal] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const [usageKey, setUsageKey] = useState(0)
@@ -100,11 +101,20 @@ export function StorageSettings() {
   })
 
   // The folder picker opens in the app; the daemon checks the folder and says why when it refuses one.
+  // A folder the daemon refuses is named in the row, with why (a drive that can't store file permissions, say).
   const chooseWorktreeFolder = () => void run(async () => {
-    const chosen = await window.mousse.storage.chooseWorktreeFolder()
-    if (chosen && mounted.current) setWorktreeFolder(chosen.status)
+    setFolderRefusal('')
+    try {
+      const chosen = await window.mousse.storage.chooseWorktreeFolder()
+      if (chosen && mounted.current) setWorktreeFolder(chosen.status)
+    } catch (cause) {
+      const shape = cause as Partial<AppErrorShape> | null
+      if (shape?.code !== 'invalid_worktree_folder' || typeof shape.message !== 'string') throw cause
+      if (mounted.current) setFolderRefusal(shape.message)
+    }
   })
   const resetWorktreeFolder = () => void run(async () => {
+    setFolderRefusal('')
     const { status } = await window.mousse.storage.resetWorktreeFolder()
     if (mounted.current) setWorktreeFolder(status)
   })
@@ -126,7 +136,7 @@ export function StorageSettings() {
       onPolicy={savePolicy}
       onResumeTrash={() => { if (trash) saveTrash(trash) }}
       onResumeStorage={() => { if (policy) savePolicy(policy) }}
-      worktreeFolder={<WorktreeFolderRow status={worktreeFolder} busy={busy} onChoose={chooseWorktreeFolder} onReset={resetWorktreeFolder} />}
+      worktreeFolder={<WorktreeFolderRow status={worktreeFolder} busy={busy} refusal={folderRefusal} onChoose={chooseWorktreeFolder} onReset={resetWorktreeFolder} />}
     />
     {error && <p className="storage-error" role="alert">{error}</p>}
 

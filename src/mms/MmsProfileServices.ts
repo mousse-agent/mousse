@@ -1,5 +1,5 @@
 import { ResourceLifecycleError } from './lifecycle/ResourceLifecycleStore'
-import { setWorktreeFolders } from './worktree/worktreeLayout'
+import { forgetWorktreeFolders, refreshWorktreeFolders, setWorktreeFolders } from './worktree/worktreeLayout'
 import { AgentEpisodeStore } from './agents/AgentEpisodeStore'
 import { join } from 'path'
 import { homedir } from 'os'
@@ -1138,6 +1138,8 @@ export class MmsProfileServices {
   }
 
   async initialize(): Promise<void> {
+    // The chosen worktree folders that are connected, with what Mousse made in them, before anything recovers or runs Git there.
+    await refreshWorktreeFolders()
     await this.lifecycle.recoverAll()
     for (const thread of this.threads.listAllThreads()) {
       const episodes = new AgentEpisodeStore(this.threads.getThreadDir(thread.id))
@@ -1595,6 +1597,8 @@ export class MmsProfileServices {
     } catch (error) {
       console.warn('run engine database close failed', error)
     }
+    // What this profile chose for worktrees is no longer Mousse's to act on through it.
+    forgetWorktreeFolders(this.homeDir)
     this.started = false
     this.stopped = true
   }

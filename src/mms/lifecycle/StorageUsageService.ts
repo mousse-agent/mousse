@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { chosenFolderPlace, folderPresent, knownWorktreeFolders, worktreeContainers, WORKTREE_TRASH_FOLDER } from '../worktree/worktreeLayout'
+import { chosenFolderPlace, folderConnected, knownWorktreeFolders, worktreeContainers, WORKTREE_TRASH_FOLDER } from '../worktree/worktreeLayout'
 import { lstat, readFile, readdir, realpath } from 'node:fs/promises'
 import { existsSync, readFileSync } from 'node:fs'
 import { basename, isAbsolute, join, relative, sep } from 'node:path'
@@ -487,7 +487,7 @@ export class StorageUsageService {
     }
     // The worktree folders the person chose that are there: their worktrees count where they are (`worktreeLayout`).
     for (const lex of knownWorktreeFolders()) {
-      if (!await folderPresent(lex)) continue
+      if (!await folderConnected(lex)) continue
       try { bases.push({ lex, real: await realpath(lex) }) } catch { /* Gone since: nothing is inside it. */ }
     }
     return { bases, linkFree: new Map() }

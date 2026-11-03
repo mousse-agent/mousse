@@ -1,6 +1,7 @@
 import { repositoryIdentitiesFor } from '../bridge/remote/repositoryIdentity'
-import { assertWorktreeFolderConnected, WorktreeFolderRefused } from '../worktree/worktreeLayout'
-import { chooseWorktreeFolder, worktreeFolderStatus } from '../worktree/worktreeFolderSetting'
+import { assertWorktreeFolderConnected, chosenFolderHolding, WorktreeFolderRefused } from '../worktree/worktreeLayout'
+import { listKeptWorktrees } from '../lifecycle/keptWorktrees'
+import { chooseWorktreeFolder, recordedWorktreePaths, worktreeFolderStatus } from '../worktree/worktreeFolderSetting'
 import { userAction, withGitAccess, withUserRequest, type UserAction } from '../git/gitPolicy'
 import { gitAccessOf, USER_REQUEST_LABELS } from './gitAccess'
 import type { StorageCleanupPlanToken } from '../../shared/storage'
@@ -531,9 +532,14 @@ async function localFilesRoot(ctx: HandlerContext, params: Record<string, unknow
   if (threadId && threadProject) {
     const manager = new ThreadWorkspaceManager(ctx.mms.threads.getThreadDir(threadId))
     const stored = manager.load()
+    // A worktree in a worktree folder the person chose is never stood in for by the project folder: while its drive is
+    // not connected the panel says so, and a save can never land in the person's own checkout instead.
+    const chosen = stored && !isProjectFolderWorkspace(stored) && chosenFolderHolding(stored.worktreePath)
+    if (chosen) await assertWorktreeFolderConnected(stored!.worktreePath)
     const verified = stored ? await manager.verify(stored) : undefined
     // A ready workspace's folder, as `executionContext` names it; without a record there is none to use.
     if (verified?.lifecycle === 'ready') return manager.workingFolder(threadProject, verified)
+    if (chosen) throw new DomainRpcError('workspace_not_ready', `Task workspace is ${verified?.lifecycle ?? 'missing'}; recovery is required.`)
   }
   if (projectId) return ctx.mms.projects.getProject(projectId)!.path
   return threadProject ?? homedir()
@@ -4027,7 +4033,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const p = isObject(params) ? params : {}
       if (p.folder !== null && typeof p.folder !== 'string') throw new DomainRpcError('bad_request', 'folder must be a path or null')
       try {
-        return { status: await chooseWorktreeFolder(ctx.mms.settings, ctx.mms.getProfileHomeDir(), ctx.mms.getHomeDir(), p.folder) }
+        return { status: await chooseWorktreeFolder(ctx.mms.settings, ctx.mms.getProfileHomeDir(), ctx.mms.getHomeDir(), p.folder, () => recordedWorktreePaths(ctx.mms.threads.lifecycleStore, () => listKeptWorktrees(ctx.mms.getProfileHomeDir()))) }
       } catch (error) {
         if (error instanceof WorktreeFolderRefused) throw new DomainRpcError('invalid_worktree_folder', error.message)
         throw error

@@ -14,7 +14,7 @@ import { moveFilesAsync, sameTreeAsync, takeSnapshotAsync, worktreeTreeAsync } f
 import { PROCESS_INSTANCE_ID } from '../queue/processLiveness'
 import { AgentEpisodeStore } from '../agents/AgentEpisodeStore'
 import { WorktreeIdentity } from '../worktree/WorktreeIdentity'
-import { assertWorktreeFolderConnected, isAgentWorktreePlace, isThreadWorktreePlace, trashRootFor, trashRootOf } from '../worktree/worktreeLayout'
+import { assertWorktreeFolderConnected, defaultWorkflowAgentWorktreeBase, disconnectedWorktreeFolder, driveNotConnectedText, isAgentWorktreePlace, isThreadWorktreePlace, isWorkflowAgentWorktreePlace, trashRootFor, trashRootOf } from '../worktree/worktreeLayout'
 import { ThreadJournal } from '../data/ThreadJournal'
 import { claimOverlapsPath, getExternalResourceClaims, getExternalResourceClaimsFromFacts, repositoryTargetAsync, unverifiedOwnerOver } from './LifecycleClaims'
 import { canonicalPathAsync } from './canonicalPath'
@@ -396,13 +396,29 @@ export class WorktreeRetirementService {
     const checkoutFingerprint = await this.checkoutFingerprint(input.worktreePath)
     const manifest: WorktreeReconstructionManifest = { schemaVersion: 1, profileId: this.store.profileId, ...input, ...identity, baseSha, resultSha, treeSha, checkoutFingerprint, baseRef: `${prefix}/base`, resultRef: `${prefix}/result`, ...(dirty ? { snapshotSha: snapshot!.sha, snapshotTree: snapshot!.tree, snapshotRef: `${prefix}/snapshot` } : {}), ...(headBranch ? { headBranch } : {}), ...contents, state: 'prepared' }
     const manifestPath = this.pathFor(input.taskId, input.worktreePath)
+    // A pin is never moved off a commit nothing else reaches (an earlier snapshot of files that were never committed):
+    // that commit is kept under the record's own `kept/` pins first, with the ones an earlier record kept.
+    const pins: Array<[string, string]> = [[manifest.baseRef, baseSha], [manifest.resultRef, resultSha], ...(manifest.snapshotRef ? [[manifest.snapshotRef, manifest.snapshotSha!] as [string, string]] : [])]
+    const earlier = existsSync(manifestPath) ? (() => { try { return this.load(manifestPath).keptRefs ?? [] } catch { return [] } })() : []
+    const keep: Array<[string, string]> = []
+    for (const ref of [`${prefix}/base`, `${prefix}/result`, `${prefix}/snapshot`]) {
+      const old = await readDirectLifecycleRefAsync(input.worktreePath, ref)
+      const next = pins.find(([name]) => name === ref)?.[1]
+      if (!old || old === next || await this.reachedElsewhere(input.worktreePath, old, ref, next)) continue
+      keep.push([`${prefix}/kept/${old}`, old])
+    }
+    const keptRefs = [...new Set([...earlier, ...keep.map(([ref]) => ref)])]
+    if (keptRefs.length) manifest.keptRefs = keptRefs
     // Intent precedes pins. Recovery can distinguish an incomplete preparation from retirement.
     const leaseNow = await this.readRepositoryLease()
     this.store.withGate(input.taskId, () => {
       this.assertOwnership(input.taskId, identity.commonDir, identity.repositoryId, leaseNow)
       if (!existsSync(manifestPath) || JSON.stringify(JSON.parse(readFileSync(manifestPath, 'utf8'))) !== JSON.stringify(manifest)) atomicWriteJsonSync(manifestPath, manifest)
     })
-    for (const [ref, sha] of [[manifest.baseRef, baseSha], [manifest.resultRef, resultSha], ...(manifest.snapshotRef ? [[manifest.snapshotRef, manifest.snapshotSha!]] : [])]) {
+    for (const [ref, sha] of keep) {
+      if (await readDirectLifecycleRefAsync(input.worktreePath, ref) !== sha) await lifecycleGitAsync(input.worktreePath, ['update-ref', '--no-deref', ref, sha, '0'.repeat(sha.length)])
+    }
+    for (const [ref, sha] of pins) {
       const old = await readDirectLifecycleRefAsync(input.worktreePath, ref) ?? '0'.repeat(sha.length)
       await lifecycleGitAsync(input.worktreePath, ['update-ref', '--no-deref', ref, sha, old])
     }
@@ -425,6 +441,8 @@ export class WorktreeRetirementService {
     beforeMove?: () => void
   } = {}): Promise<WorktreeReconstructionManifest> {
     const manifest = this.load(manifestPath)
+    // On a drive that is not connected nothing moves and nothing is taken for gone; it waits for the drive.
+    await assertWorktreeFolderConnected(manifest.worktreePath, manifest.trashPath, manifest.deleting?.path)
     await this.checkOwnership(manifest.taskId, manifest.commonDir, manifest.repositoryId)
     await this.verifyPins(manifest)
     const save = (): void => { if (!options.purging) atomicWriteJsonSync(manifestPath, manifest) }
@@ -549,6 +567,10 @@ export class WorktreeRetirementService {
     return () => clearInterval(timer)
   }
   private async expireLoaded(manifestPath: string, manifest: WorktreeReconstructionManifest, record: { text: string }, options: ExpireOptions): Promise<{ removed: true } | { kept: string; waiting?: true } | undefined> {
+    // On a drive that is not connected nothing is settled: a folder that is away is not deleted, its delete is not
+    // finished and its registration is left as it is. The record waits as it is, and the expiry carries on once it is back.
+    const offline = await disconnectedWorktreeFolder(manifest.worktreePath, manifest.trashPath, manifest.deleting?.path)
+    if (offline) return { kept: driveNotConnectedText(offline), waiting: true }
     this.assertRepositoryLease(manifest.commonDir, manifest.repositoryId, await this.readRepositoryLease())
     // A move a crash interrupted before it was recorded: the folder is in the trash and starts waiting now.
     if (manifest.state === 'prepared' && manifest.trashPath && await exists(manifest.trashPath) && !await exists(manifest.worktreePath)) {
@@ -1096,7 +1118,7 @@ export class WorktreeRetirementService {
     const manifest = this.load(manifestPath)
     // A worktree folder the person chose that is not there (a drive not connected): nothing is rebuilt, since its folders
     // would be made again on the disk the drive mounts on; it waits for the drive.
-    await assertWorktreeFolderConnected(manifest.worktreePath)
+    await assertWorktreeFolderConnected(manifest.worktreePath, manifest.trashPath, manifest.deleting?.path)
     await this.checkOwnership(manifest.taskId, manifest.commonDir, manifest.repositoryId)
     this.store.withGate(manifest.taskId, () => this.verifySource(manifest))
     await this.verifyPins(manifest)
@@ -1136,55 +1158,84 @@ export class WorktreeRetirementService {
       Object.assign(manifest, identity, { state: 'materialized' }); atomicWriteJsonSync(manifestPath, manifest)
       return manifest
     }
-    if (!await exists(manifest.worktreePath)) {
-      await assertLifecyclePathAsync(dirname(manifest.worktreePath), manifest.worktreePath)
-      if (await this.registered(manifest)) throw new Error('Absent worktree has a stale registration')
-      await mkdir(dirname(manifest.worktreePath), { recursive: true })
-      // Ownership is checked again right before the worktree is made.
-      await this.checkOwnership(manifest.taskId, manifest.commonDir, manifest.repositoryId)
-      await this.restoreBranches(manifest)
-      // On the branch it was on when the tip is still the HEAD it had; otherwise at that HEAD, detached. The branches stay the agent's to move.
-      let onBranch: string | undefined
-      for (const name of [manifest.headBranch, manifest.branch]) if (name && await this.tip(manifest, name) === manifest.resultSha) { onBranch = name; break }
-      if (!onBranch || !await this.tryAdd(manifest, [manifest.worktreePath, onBranch])) await lifecycleGitAsync(manifest.commonDir, ['worktree', 'add', '--no-checkout', '--detach', manifest.worktreePath, manifest.resultSha])
-      // Git's own data first, so its configuration is in place for the fingerprint check and the checkout.
-      await this.restoreAdmin(manifest)
-      await untrusted?.prepare(manifest.worktreePath)
-      if (await this.checkoutFingerprint(manifest.worktreePath) !== manifest.checkoutFingerprint) throw new Error('Checkout conversion policy changed; reconstruction requires recovery')
-      if (manifest.sparse) await lifecycleGitAsync(manifest.worktreePath, ['sparse-checkout', 'set', manifest.sparse.cone ? '--cone' : '--no-cone', '--stdin'], manifest.sparse.patterns)
-      await lifecycleGitAsync(manifest.worktreePath, ['checkout', 'HEAD'], undefined, undefined, untrusted?.env)
-      for (const auxiliary of manifest.auxiliary) {
-        const target = join(manifest.worktreePath, auxiliary.path)
-        await assertLifecyclePathAsync(manifest.worktreePath, target); await mkdir(dirname(target), { recursive: true })
-        await writeFile(target, Buffer.from(auxiliary.content, 'base64'))
+    // Set when this call made the worktree: a rebuild that fails after that sets aside what it made (`setAsideHalfBuilt`),
+    // so the next use never finds a folder at the worktree's path and takes it for the worktree.
+    let built = false
+    let identity: Awaited<ReturnType<WorktreeRetirementService['inspectIdentity']>>
+    try {
+      if (!await exists(manifest.worktreePath)) {
+        await assertLifecyclePathAsync(dirname(manifest.worktreePath), manifest.worktreePath)
+        if (await this.registered(manifest)) throw new Error('Absent worktree has a stale registration')
+        await mkdir(dirname(manifest.worktreePath), { recursive: true })
+        // Ownership is checked again right before the worktree is made.
+        await this.checkOwnership(manifest.taskId, manifest.commonDir, manifest.repositoryId)
+        await this.restoreBranches(manifest)
+        // On the branch it was on when the tip is still the HEAD it had; otherwise at that HEAD, detached. The branches stay the agent's to move.
+        let onBranch: string | undefined
+        for (const name of [manifest.headBranch, manifest.branch]) if (name && await this.tip(manifest, name) === manifest.resultSha) { onBranch = name; break }
+        if (!onBranch || !await this.tryAdd(manifest, [manifest.worktreePath, onBranch])) await lifecycleGitAsync(manifest.commonDir, ['worktree', 'add', '--no-checkout', '--detach', manifest.worktreePath, manifest.resultSha])
+        built = true
+        // Git's own data first, so its configuration is in place for the fingerprint check and the checkout.
+        await this.restoreAdmin(manifest)
+        await untrusted?.prepare(manifest.worktreePath)
+        if (await this.checkoutFingerprint(manifest.worktreePath) !== manifest.checkoutFingerprint) throw new Error('Checkout conversion policy changed; reconstruction requires recovery')
+        if (manifest.sparse) await lifecycleGitAsync(manifest.worktreePath, ['sparse-checkout', 'set', manifest.sparse.cone ? '--cone' : '--no-cone', '--stdin'], manifest.sparse.patterns)
+        await lifecycleGitAsync(manifest.worktreePath, ['checkout', 'HEAD'], undefined, undefined, untrusted?.env)
+        for (const auxiliary of manifest.auxiliary) {
+          const target = join(manifest.worktreePath, auxiliary.path)
+          await assertLifecyclePathAsync(manifest.worktreePath, target); await mkdir(dirname(target), { recursive: true })
+          await writeFile(target, Buffer.from(auxiliary.content, 'base64'))
+        }
+        if (manifest.auxiliary.some((entry) => entry.path === '.mousse/materialized-inputs.exclude')) await lifecycleGitAsync(manifest.worktreePath, ['config', '--worktree', 'core.excludesFile', join(manifest.worktreePath, '.mousse', 'materialized-inputs.exclude')])
+        // The uncommitted files come back as the snapshot held them, over the fresh checkout of the HEAD it was taken on;
+        // then what the kept copies hold (ignored files, writes found while the folder was being deleted), in order.
+        if (manifest.snapshotTree) await moveFilesAsync(manifest.worktreePath, manifest.treeSha, manifest.snapshotTree)
+        // A later form of a path (another kind, or another spelling on a volume that folds case) clears the earlier one,
+        // and only what the rebuild itself wrote is ever cleared.
+        // Only what this rebuild sets aside is reported for it.
+        delete manifest.keptAside
+        const rebuild = manifest.keptFiles?.length ? await this.rebuildOf(manifest) : undefined
+        for (const layer of manifest.keptFiles ?? []) await this.writeKeptFiles(manifest, layer, rebuild!)
+        for (const entry of manifest.content) {
+          const target = join(manifest.worktreePath, entry.path)
+          if (entry.kind === 'directory' && rebuild) { if (entry.path) await rebuild.folder(entry.path.split('/')) }
+          else if (entry.kind === 'directory') { await assertLifecyclePathAsync(manifest.worktreePath, target); await mkdir(target, { recursive: true }) }
+          if (entry.kind !== 'link') { await assertLifecyclePathAsync(manifest.worktreePath, target); await chmod(target, entry.mode & 0o777) }
+        }
       }
-      if (manifest.auxiliary.some((entry) => entry.path === '.mousse/materialized-inputs.exclude')) await lifecycleGitAsync(manifest.worktreePath, ['config', '--worktree', 'core.excludesFile', join(manifest.worktreePath, '.mousse', 'materialized-inputs.exclude')])
-      // The uncommitted files come back as the snapshot held them, over the fresh checkout of the HEAD it was taken on;
-      // then what the kept copies hold (ignored files, writes found while the folder was being deleted), in order.
-      if (manifest.snapshotTree) await moveFilesAsync(manifest.worktreePath, manifest.treeSha, manifest.snapshotTree)
-      // A later form of a path (another kind, or another spelling on a volume that folds case) clears the earlier one,
-      // and only what the rebuild itself wrote is ever cleared.
-      // Only what this rebuild sets aside is reported for it.
-      delete manifest.keptAside
-      const rebuild = manifest.keptFiles?.length ? await this.rebuildOf(manifest) : undefined
-      for (const layer of manifest.keptFiles ?? []) await this.writeKeptFiles(manifest, layer, rebuild!)
-      for (const entry of manifest.content) {
-        const target = join(manifest.worktreePath, entry.path)
-        if (entry.kind === 'directory' && rebuild) { if (entry.path) await rebuild.folder(entry.path.split('/')) }
-        else if (entry.kind === 'directory') { await assertLifecyclePathAsync(manifest.worktreePath, target); await mkdir(target, { recursive: true }) }
-        if (entry.kind !== 'link') { await assertLifecyclePathAsync(manifest.worktreePath, target); await chmod(target, entry.mode & 0o777) }
-      }
+      identity = await this.inspectIdentity(manifest.worktreePath, manifest.branch, manifest.repositoryId)
+      // With kept copies, the files a snapshot holds are no longer all of them: every entry is compared with the proof.
+      const matches = manifest.keptFiles?.length
+        ? sameContent(await walkOwnedContentAsync(manifest.worktreePath, true), manifest.content)
+        : !(manifest.snapshotTree && await worktreeTreeAsync(manifest.worktreePath) !== manifest.snapshotTree) && JSON.stringify((await this.inspectContent(manifest.worktreePath, manifest.snapshotTree)).content) === JSON.stringify(manifest.content)
+      if (await lifecycleGitAsync(manifest.worktreePath, ['rev-parse', 'HEAD^{tree}']) !== manifest.treeSha || !matches) throw new Error('Reconstructed workspace does not match retained content')
+    } catch (error) {
+      if (built) await this.setAsideHalfBuilt(manifest)
+      throw error
     }
-    const identity = await this.inspectIdentity(manifest.worktreePath, manifest.branch, manifest.repositoryId)
-    // With kept copies, the files a snapshot holds are no longer all of them: every entry is compared with the proof.
-    const matches = manifest.keptFiles?.length
-      ? sameContent(await walkOwnedContentAsync(manifest.worktreePath, true), manifest.content)
-      : !(manifest.snapshotTree && await worktreeTreeAsync(manifest.worktreePath) !== manifest.snapshotTree) && JSON.stringify((await this.inspectContent(manifest.worktreePath, manifest.snapshotTree)).content) === JSON.stringify(manifest.content)
-    if (await lifecycleGitAsync(manifest.worktreePath, ['rev-parse', 'HEAD^{tree}']) !== manifest.treeSha || !matches) throw new Error('Reconstructed workspace does not match retained content')
     await this.verifyPins(manifest)
     delete manifest.trashPath; delete manifest.trashedAt
     Object.assign(manifest, identity, { state: 'materialized' }); atomicWriteJsonSync(manifestPath, manifest)
     return manifest
+  }
+  /** Whether `commit` is reached by a ref other than `ref`, or by `next`, which is about to take its place. */
+  private async reachedElsewhere(cwd: string, commit: string, ref: string, next: string | undefined): Promise<boolean> {
+    if (next && await gitSucceeds(cwd, ['merge-base', '--is-ancestor', commit, next])) return true
+    const containing = (await lifecycleReadAsync(cwd, ['for-each-ref', '--format=%(refname)', '--contains', commit], undefined, LISTING_MAX_BUFFER)).split(/\r?\n/).filter(Boolean)
+    return containing.some((name) => name !== ref)
+  }
+  /**
+   * A rebuild that failed after it made the worktree: the folder is renamed aside, next to it (`<path>.partial-<hex>`, on
+   * the same drive), so nothing in it is lost, and Git's registration of the worktree's path, which no folder is at any
+   * more, is removed. The record stays as it was; the next use rebuilds again from the same pins.
+   */
+  private async setAsideHalfBuilt(manifest: WorktreeReconstructionManifest): Promise<void> {
+    try {
+      if (await exists(manifest.worktreePath)) await renameFolderAsync(manifest.worktreePath, `${manifest.worktreePath}.partial-${randomBytes(8).toString('hex')}`)
+      if (await this.registered(manifest)) await lifecycleGitAsync(manifest.commonDir, ['worktree', 'remove', manifest.worktreePath])
+    } catch (error) {
+      console.warn('a half-built worktree could not be set aside', { worktreePath: manifest.worktreePath, error: error instanceof Error ? error.message : String(error) })
+    }
   }
   async verifyPins(manifest: WorktreeReconstructionManifest): Promise<void> {
     await assertLifecyclePathAsync(dirname(manifest.commonDir), manifest.commonDir)
@@ -1274,8 +1325,9 @@ export class WorktreeRetirementService {
       const row = value as Record<string, unknown>
       const key = typeof row.idempotencyKey === 'string' ? row.idempotencyKey : ''
       const agentId = `wf-${hash(`${this.store.profileId}:${task.taskId}:${key}`).slice(0, 40)}`
-      const expectedPath = WorktreeIdentity.forAgent(join(installationHome, 'wf', input.repositoryId.slice(0, 16), hash(`${this.store.profileId}:${task.taskId}`).slice(0, 24)), agentId).path
-      owned = row.version === 1 && row.kind === 'git-worktree' && row.profileId === this.store.profileId && row.threadId === task.taskId && Boolean(key) && basename(sourcePath) === `${/^[a-f0-9]{64}$/i.test(key) ? key.toLowerCase() : hash(key)}.json` && row.retainedRef === `refs/mousse/workflows/${this.store.profileId}/${task.taskId}/${agentId}` && input.branch === `mousse/agent/${agentId}` && samePath(input.worktreePath, expectedPath) && owns(row)
+      const ownerDigest = hash(`${this.store.profileId}:${task.taskId}`).slice(0, 24)
+      const expectedPath = WorktreeIdentity.forAgent(defaultWorkflowAgentWorktreeBase(installationHome, input.repositoryId, ownerDigest), agentId).path
+      owned = row.version === 1 && row.kind === 'git-worktree' && row.profileId === this.store.profileId && row.threadId === task.taskId && Boolean(key) && basename(sourcePath) === `${/^[a-f0-9]{64}$/i.test(key) ? key.toLowerCase() : hash(key)}.json` && row.retainedRef === `refs/mousse/workflows/${this.store.profileId}/${task.taskId}/${agentId}` && input.branch === `mousse/agent/${agentId}` && (samePath(input.worktreePath, expectedPath) || isWorkflowAgentWorktreePlace(input.worktreePath, { home: installationHome, repositoryId: input.repositoryId, ownerDigest, agentId })) && owns(row)
       baseSha = typeof row.baseSha === 'string' ? row.baseSha : undefined
       resultSha = typeof row.resultSha === 'string' ? row.resultSha : undefined
     }

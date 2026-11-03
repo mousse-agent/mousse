@@ -56,7 +56,9 @@ it('edits policies, shows usage across machines, and cleans up only after the pl
     expect(report.worktreeFolder.initial).toContain("New worktrees go in Mousse's own folder, /Users/you/.mousse/repositories.")
     expect(report.worktreeFolder.chosen).toContain('New worktrees go in /Volumes/T7/Mousse worktrees, one folder per project.')
     expect(report.worktreeFolder.reset).toContain('Worktrees made earlier stay where they are: /Volumes/T7/Mousse worktrees.')
-    expect(report.worktreeFolder.calls).toEqual([1, 1])
+    expect(report.worktreeFolder.refused).toEqual({ text: "This drive (exFAT) can't store file permissions, which Git worktrees need. Pick a folder on an APFS, HFS+, NTFS or ext4 drive.", pageError: '', unchanged: true })
+    expect(report.worktreeFolder.refusalCleared).toBe(true)
+    expect(report.worktreeFolder.calls).toEqual([2, 1])
 
     // Policy editing: each setting is sent, saved and read back; a bad number is never sent.
     const policy = report.policy

@@ -98,16 +98,11 @@ export class GitPolicyError extends Error {
 // ---------------------------------------------------------------------------------------------------------
 // Owned places
 
-/** Owned roots besides the Mousse home, each with the names of its children that are owned (all of them when unset). */
-const extraOwnedRoots = new Map<string, RegExp | undefined>()
+const extraOwnedRoots = new Set<string>()
 
-/**
- * Treats `path` as owned, like the Mousse home. Returns the undo. With `onlyChildren`, only what is inside a child of
- * `path` whose name matches is owned: a worktree folder the person chose (`worktreeLayout`) holds Mousse's own folders,
- * and may hold folders of the person's own beside them, which stay theirs.
- */
-export function registerOwnedGitRoot(path: string, options: { onlyChildren?: RegExp } = {}): () => void {
-  extraOwnedRoots.set(resolve(path), options.onlyChildren)
+/** For tests and embedders: treat `path` as owned, like the Mousse home. Returns the undo. */
+export function registerOwnedGitRoot(path: string): () => void {
+  extraOwnedRoots.add(resolve(path))
   return () => { extraOwnedRoots.delete(resolve(path)) }
 }
 
@@ -226,24 +221,15 @@ function contains(root: string, path: string): boolean {
   return b === a || b.startsWith(a.endsWith(sep) ? a : a + sep)
 }
 
-function ownedRoots(): Array<{ root: string; onlyChildren?: RegExp }> {
-  return [{ root: getMousseHomeDir() }, ...[...extraOwnedRoots].map(([root, onlyChildren]) => ({ root, onlyChildren }))]
-    .map((entry) => ({ ...entry, root: canonicalGitPath(entry.root) }))
-}
-
-/** Whether `real` is inside `root`, and, with `onlyChildren`, inside a child of it whose name matches. */
-function ownedBelow(root: string, onlyChildren: RegExp | undefined, real: string): boolean {
-  if (!contains(root, real)) return false
-  if (!onlyChildren) return true
-  const child = real.slice(root.length).replace(/^[\\/]+/, '').split(/[\\/]/)[0]
-  return Boolean(child) && onlyChildren.test(child!)
+function ownedRoots(): string[] {
+  return [getMousseHomeDir(), ...extraOwnedRoots].map(canonicalGitPath)
 }
 
 /** Whether `path` is inside the Mousse home (or another owned root), compared as real long paths. */
 export function isOwnedPath(path: string): boolean {
   if (!path || !isAbsolute(path)) return false
   const real = canonicalGitPath(path)
-  return ownedRoots().some(({ root, onlyChildren }) => ownedBelow(root, onlyChildren, real))
+  return ownedRoots().some((root) => contains(root, real))
 }
 
 /** `refs/mousse/*` and `mousse/*` branches, also on a remote. */

@@ -214,22 +214,42 @@ export function normalizeExperimentalSettings(raw?: Partial<ExperimentalSettings
   return { subagentWorktrees: raw?.subagentWorktrees === true }
 }
 
+/** A worktree folder the person chose, and the id written in its marker (`.mousse-worktrees.json`) when it was chosen. */
+export interface WorktreeFolderEntry {
+  path: string
+  id: string
+}
+
 /**
  * Where new worktrees go (Settings → Storage → Worktree folder). `worktreeFolder` null is Mousse's own folder
  * (`<Mousse home>/repositories/<repository>/worktrees`). `previousWorktreeFolders` are the folders chosen before that may
  * still hold worktrees: their worktrees stay where they are, and stay Mousse's; one is forgotten once nothing of Mousse's
- * is left in it. Only the daemon's own Storage action writes either (`storage.setWorktreeFolder`), after checking the folder.
+ * is in it and no record names a path in it. Only the daemon's own Storage action writes either
+ * (`storage.setWorktreeFolder`), after checking the folder.
  */
 export interface StorageSettings {
-  worktreeFolder: string | null
-  previousWorktreeFolders: string[]
+  worktreeFolder: WorktreeFolderEntry | null
+  previousWorktreeFolders: WorktreeFolderEntry[]
+}
+
+/** A stored folder entry: a full path and a 32-character id; anything else is dropped. */
+function worktreeFolderEntry(value: unknown): WorktreeFolderEntry | undefined {
+  const entry = value as Partial<WorktreeFolderEntry> | null | undefined
+  if (!entry || typeof entry !== 'object' || typeof entry.path !== 'string' || typeof entry.id !== 'string') return undefined
+  const path = entry.path
+  const absolute = path.startsWith('/') || /^[A-Za-z]:[\\/]/.test(path) || path.startsWith('\\\\')
+  if (!absolute || path.includes('\0') || !/^[a-f0-9]{32}$/.test(entry.id)) return undefined
+  return { path, id: entry.id }
 }
 
 export function normalizeStorageSettings(raw?: Partial<StorageSettings> | null): StorageSettings {
-  const folder = (value: unknown): string | undefined => typeof value === 'string' && value.trim() && !value.includes('\0') ? value : undefined
-  const current = folder(raw?.worktreeFolder) ?? null
-  const previous = Array.isArray(raw?.previousWorktreeFolders) ? raw!.previousWorktreeFolders.map(folder).filter((path): path is string => Boolean(path) && path !== current) : []
-  return { worktreeFolder: current, previousWorktreeFolders: [...new Set(previous)] }
+  const current = worktreeFolderEntry(raw?.worktreeFolder) ?? null
+  const previous: WorktreeFolderEntry[] = []
+  for (const value of Array.isArray(raw?.previousWorktreeFolders) ? raw!.previousWorktreeFolders : []) {
+    const entry = worktreeFolderEntry(value)
+    if (entry && !(current && current.path === entry.path) && !previous.some((other) => other.path === entry.path)) previous.push(entry)
+  }
+  return { worktreeFolder: current, previousWorktreeFolders: previous }
 }
 
 export interface MousseSettings {
