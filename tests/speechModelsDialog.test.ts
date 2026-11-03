@@ -68,39 +68,48 @@ const click = async (name: string): Promise<void> => {
   await act(async () => button(name).click())
 }
 
-it('compares three models: the recommended one, the fewest wrong words and the most languages', () => {
+it('compares three models: the recommended one, European languages and the most languages', () => {
   renderDictation({})
-  expect(columnNames()).toEqual(['Parakeet TDT 110M', 'Parakeet TDT 0.6B v3', 'Whisper Base'])
+  expect(columnNames()).toEqual(['Parakeet Unified English', 'Parakeet TDT 0.6B v3', 'Whisper Small'])
   const tags = [...host.querySelectorAll('.speech-compare-head .speech-models-tag')].map((item) => item.textContent)
-  expect(tags).toEqual(['Recommended', 'Fewest wrong words', 'Most languages'])
+  expect(tags).toEqual(['Recommended', 'European languages', 'Most languages'])
   const rows = [...host.querySelectorAll('[role="rowheader"]')].map((item) => item.textContent)
   expect(rows).toContain('Wrong words')
   expect(rows).toContain('Languages')
-  // 6.32% is about 1 in 16 words; Whisper Base has no published figure.
+  // Waits of 136 ms, 216 ms and about 5 s; word error rates of 5.91% and 6.32%, none for Whisper Small.
   const cells = [...host.querySelectorAll('[role="cell"]')].map((item) => item.textContent)
-  expect(cells).toContain('1 in 16')
-  expect(cells).toContain('—')
-  // Measured waits: Parakeet 110M 127 ms, v3 216 ms, Whisper Base about 3 s.
-  expect(cells.slice(0, 3)).toEqual(['No wait', 'Under 1 s', '3 s'])
+  expect(cells.slice(0, 6)).toEqual(['No wait', 'Under 1 s', '5 s', '1 in 17', '1 in 16', '—'])
   expect(host.querySelector('.speech-compare-cell.best')?.textContent).toBeTruthy()
 })
 
 it('opens every model from "more models" and goes back', async () => {
   renderDictation({})
-  await click('2 more models')
+  await click('5 more models')
   expect(host.querySelector('h3')?.textContent).toBe('All dictation models')
   const titles = [...host.querySelectorAll('.settings-item-title')].map((item) => item.textContent)
-  expect(titles).toEqual(['Moonshine Tiny', 'Moonshine Base', 'Parakeet TDT 110M', 'Whisper Base', 'Parakeet TDT 0.6B v3'])
+  expect(titles).toEqual([
+    'Moonshine Tiny',
+    'Moonshine Base',
+    'Parakeet TDT 110M',
+    'Parakeet Unified English',
+    'Parakeet TDT 0.6B v2',
+    'Whisper Base',
+    'Parakeet TDT 0.6B v3',
+    'Whisper Small'
+  ])
   expect(host.textContent).toContain('No wait · 1 in 8 words wrong · 32 MB')
   await click('Back')
   expect(columnNames()).toHaveLength(3)
 })
 
 it('marks the model in use and uses a downloaded one', async () => {
-  renderDictation({ 'parakeet-tdt-110m': { status: 'downloaded' }, 'whisper-base': { status: 'downloaded' } }, 'parakeet-tdt-110m')
+  renderDictation(
+    { 'parakeet-unified-en-0.6b': { status: 'downloaded' }, 'whisper-small': { status: 'downloaded' } },
+    'parakeet-unified-en-0.6b'
+  )
   expect(host.querySelector('.speech-models-in-use')?.textContent).toBe('In use')
-  await click('Use Whisper Base')
-  expect(onUse).toHaveBeenCalledWith(expect.objectContaining({ id: 'whisper-base' }))
+  await click('Use Whisper Small')
+  expect(onUse).toHaveBeenCalledWith(expect.objectContaining({ id: 'whisper-small' }))
 })
 
 it('downloads from the comparison and deletes from the list', async () => {
@@ -109,21 +118,21 @@ it('downloads from the comparison and deletes from the list', async () => {
   expect(api.download).toHaveBeenCalledWith('parakeet-tdt-0.6b-v3')
   expect(onStatus).toHaveBeenCalledWith({ modelId: 'parakeet-tdt-0.6b-v3', state: { status: 'downloaded' } })
 
-  await click('2 more models')
+  await click('5 more models')
   await click('Delete Moonshine Tiny')
   expect(api.remove).toHaveBeenCalledWith('moonshine-tiny')
 })
 
 it('shows download progress with cancel, and a retry after a failure', async () => {
   renderDictation({
-    'parakeet-tdt-110m': { status: 'downloading', receivedBytes: 50, totalBytes: 100 },
-    'whisper-base': { status: 'error', message: 'Network error' }
+    'parakeet-unified-en-0.6b': { status: 'downloading', receivedBytes: 50, totalBytes: 100 },
+    'whisper-small': { status: 'error', message: 'Network error' }
   })
   expect(host.querySelector('[role="progressbar"]')?.getAttribute('aria-valuenow')).toBe('50')
-  await click('Cancel downloading Parakeet TDT 110M')
-  expect(api.cancelDownload).toHaveBeenCalledWith('parakeet-tdt-110m')
-  await click('Retry downloading Whisper Base')
-  expect(api.download).toHaveBeenCalledWith('whisper-base')
+  await click('Cancel downloading Parakeet Unified English')
+  expect(api.cancelDownload).toHaveBeenCalledWith('parakeet-unified-en-0.6b')
+  await click('Retry downloading Whisper Small')
+  expect(api.download).toHaveBeenCalledWith('whisper-small')
 })
 
 it('compares read aloud models by languages and voices', () => {
