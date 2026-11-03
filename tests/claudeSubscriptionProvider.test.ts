@@ -11,6 +11,10 @@ import { EffectOutbox } from '../src/mms/run/EffectOutbox'
 import { RunEngine } from '../src/mms/run/RunEngine'
 import { RunStore } from '../src/mms/run/RunStore'
 import { readUsageLimit } from '../src/mms/orchestrator/providerErrors'
+import { parseModelCatalog, type ModelCatalog } from '../src/shared/modelCatalog'
+
+/** No catalog models: a test that checks older models passes its own made-up catalog. */
+const NO_CATALOG: ModelCatalog = { format: 1, revision: 0, models: [] }
 
 const homes: string[] = []
 beforeEach(() => {
@@ -27,7 +31,8 @@ function fixture(
   query: (input: { options: Options; prompt: unknown }) => Query,
   loggedIn = true,
   usageLimitHoldMs?: number,
-  models: unknown[] = [{ id: 'sonnet', label: 'Sonnet' }]
+  models: unknown[] = [{ id: 'sonnet', label: 'Sonnet' }],
+  dependencies: Partial<NonNullable<ConstructorParameters<typeof ClaudeSubscriptionProviderService>[2]>> = {}
 ) {
   const home = mkdtempSync(join(tmpdir(), 'claude-subscription-test-'))
   homes.push(home)
@@ -47,9 +52,10 @@ function fixture(
   const questions = new UserQuestionService()
   const runAuth = vi.fn(async () => JSON.stringify({ loggedIn, authMethod: loggedIn ? 'claude.ai' : 'none' }))
   let launch: { binaryPath?: string; args?: string[]; env?: Record<string, string> } = { binaryPath: binary }
-  const service = new ClaudeSubscriptionProviderService(home, questions, { query, runAuth, live: false, usageLimitHoldMs, launchConfig: () => launch })
+  const service = new ClaudeSubscriptionProviderService(home, questions, { query, runAuth, live: false, usageLimitHoldMs, launchConfig: () => launch, modelCatalog: () => NO_CATALOG, ...dependencies })
   return {
     home,
+    binary,
     service,
     questions,
     runAuth,
@@ -916,6 +922,230 @@ describe('Claude reasoning levels', () => {
     expect(captured[0]).toMatchObject({ model: 'haiku' })
     expect(captured[0].effort).toBeUndefined()
     expect(captured[0].settings?.ultracode).toBeUndefined()
+  })
+})
+
+describe('older Claude models', () => {
+  // Made-up models: one listed live (behind an alias, with a `[…]` variant suffix) and five older ones.
+  const entry = (id: string, released: string, extra: Record<string, unknown> = {}) => ({
+    id, name: `Claude Ember ${id}`, short: `Ember ${id}`, maker: 'anthropic', family: 'ember', released, routes: { claude: { id } }, ...extra
+  })
+  const catalog = parseModelCatalog({
+    format: 1,
+    revision: 1,
+    models: [
+      entry('ember-live', '2031-01-01'),
+      entry('ember-old', '2029-01-01', { older: true, routes: { claude: { id: 'ember-old-20290101' } } }),
+      entry('ember-refused', '2030-03-01', { older: true }),
+      entry('ember-runs', '2030-04-01', { older: true, efforts: ['low', 'high', 'ultra'] }),
+      entry('ember-remapped', '2030-02-01', { older: true }),
+      entry('ember-unknown', '2030-01-01', { older: true }),
+      entry('ember-api', '2030-05-01', { older: true, routes: { anthropic: { id: 'ember-api' } } })
+    ]
+  })
+  const live = { value: 'ember', resolvedModel: 'ember-live[1m]', displayName: 'Ember', description: 'Ember 9 · test model' }
+  type Behaviour = { refuse?: true; fail?: true; applied?: string | null; effort?: string; hang?: true }
+  /** An idle query whose `setModel` and `get_settings` act per model as `behaviour` says. */
+  function olderQuery(behaviour: Record<string, Behaviour>, listed: unknown[] = [live]) {
+    let current = 'ember'
+    const setModel = vi.fn(async (model: string) => {
+      if (behaviour[model]?.refuse) throw new Error(`API error: 400 unknown provider for model ${model} · model not changed`)
+      if (behaviour[model]?.fail) throw new Error('API error: 529 overloaded')
+      current = model
+    })
+    const getSettings = vi.fn(async () => {
+      const acting = behaviour[current]
+      if (acting?.hang) return new Promise(() => {})
+      const model = acting?.applied === undefined ? current : acting.applied
+      return { applied: { ...(model === null ? {} : { model }), ...(acting?.effort ? { effort: acting.effort } : {}) } }
+    })
+    const query = Object.assign(fakeQuery(), { supportedModels: vi.fn(async () => listed), setModel, getSettings }) as unknown as Query
+    return { query, setModel, close: (query as unknown as { close: ReturnType<typeof vi.fn> }).close }
+  }
+  const standard: Record<string, Behaviour> = {
+    'ember-runs': { effort: 'high' },
+    'ember-refused': { refuse: true },
+    'ember-remapped': { applied: 'ember-live' },
+    'ember-unknown': { applied: null }
+  }
+
+  it('offers the models that run after the live ones, newest first, and drops refused and remapped ones', async () => {
+    const first = olderQuery(standard)
+    const { service, home, settings } = fixture(() => first.query, true, undefined, undefined, { modelCatalog: () => catalog })
+    await service.refreshModels(home)
+    await service.olderCheck
+    // The live alias first (its extras), then the candidates newest first; nothing listed live and no other route.
+    expect(first.setModel.mock.calls.map(([model]) => model)).toEqual(['ember', 'ember-runs', 'ember-refused', 'ember-remapped', 'ember-unknown', 'ember-old-20290101'])
+    expect(service.llmProvider()?.models).toEqual([
+      { id: 'ember', label: 'Ember 9', efforts: undefined },
+      { id: 'ember-runs', label: 'Ember ember-runs', efforts: ['low', 'high'], thinkingOff: false, defaultEffort: 'high', older: true },
+      { id: 'ember-old-20290101', label: 'Ember ember-old', older: true }
+    ])
+    expect(settings().olderModels.results).toEqual({
+      'ember-runs': { outcome: 'runs', defaultEffort: 'high' },
+      'ember-refused': { outcome: 'refused' },
+      'ember-remapped': { outcome: 'remapped', to: 'ember-live' },
+      'ember-old-20290101': { outcome: 'runs' }
+    })
+    expect(first.close).toHaveBeenCalledOnce()
+  })
+
+  it('checks again only the models left unknown, until Claude Code or the account changes', async () => {
+    const queries = [olderQuery({ ...standard, 'ember-old-20290101': { fail: true } }), olderQuery(standard), olderQuery(standard), olderQuery(standard)]
+    let next = 0
+    const { service, home, binary } = fixture(() => queries[next++]!.query, true, undefined, undefined, { modelCatalog: () => catalog })
+    await service.refreshModels(home)
+    await service.olderCheck
+    // An overloaded API is no answer: the model is not offered, and asked again next time.
+    expect(service.models().map((model) => model.id)).toEqual(['ember', 'ember-runs'])
+    await service.refreshModels(home)
+    await service.olderCheck
+    expect(queries[1]!.setModel.mock.calls.map(([model]) => model)).toEqual(['ember', 'ember-unknown', 'ember-old-20290101'])
+    expect(service.models().map((model) => model.id)).toEqual(['ember', 'ember-runs', 'ember-old-20290101'])
+    // An updated Claude Code (another program file) checks every candidate again.
+    writeFileSync(binary, 'fixture, updated')
+    await service.refreshModels(home)
+    await service.olderCheck
+    expect(queries[2]!.setModel.mock.calls.map(([model]) => model)).toEqual(['ember', 'ember-runs', 'ember-refused', 'ember-remapped', 'ember-unknown', 'ember-old-20290101'])
+    // So does another account.
+    vi.stubEnv('ANTHROPIC_API_KEY', 'sk-ant-another-account')
+    await service.refreshModels(home)
+    await service.olderCheck
+    expect(queries[3]!.setModel.mock.calls).toHaveLength(6)
+  })
+
+  it('saves the live list first, does not hold the refresh, and keeps what it found within its budget', async () => {
+    const check = olderQuery({ ...standard, 'ember-remapped': { hang: true } })
+    const { service, home, settings } = fixture(() => check.query, true, undefined, undefined, { modelCatalog: () => catalog, olderCheckMs: 50 })
+    await service.refreshModels(home)
+    expect(settings().models.map((model: { id: string }) => model.id)).toEqual(['ember'])
+    expect(service.olderCheck).toBeDefined()
+    await service.olderCheck
+    expect(check.close).toHaveBeenCalledOnce()
+    expect(settings().olderModels.results).toEqual({ 'ember-runs': { outcome: 'runs', defaultEffort: 'high' }, 'ember-refused': { outcome: 'refused' } })
+    expect(service.models().map((model) => model.id)).toEqual(['ember', 'ember-runs'])
+  })
+
+  it('offers nothing older when Claude Code reports no applied model', async () => {
+    const check = olderQuery(Object.fromEntries(['ember-runs', 'ember-refused', 'ember-remapped', 'ember-unknown', 'ember-old-20290101'].map((id) => [id, { applied: null }])))
+    const { service, home, settings } = fixture(() => check.query, true, undefined, undefined, { modelCatalog: () => catalog })
+    await service.refreshModels(home)
+    await service.olderCheck
+    expect(service.models().map((model) => model.id)).toEqual(['ember'])
+    expect(settings().olderModels.results).toEqual({})
+  })
+
+  it('tells listeners each time it finds a model that runs, after the refresh returned', async () => {
+    const check = olderQuery(standard)
+    const { service, home } = fixture(() => check.query, true, undefined, undefined, { modelCatalog: () => catalog })
+    const changed = vi.fn(() => service.models().map((model) => model.id))
+    service.hooks.changed = changed
+    await service.refreshModels(home)
+    expect(changed).not.toHaveBeenCalled()
+    await service.olderCheck
+    // One call per model that runs, each seeing it listed; refused, remapped and unknown ones change nothing.
+    expect(changed.mock.results.map((call) => call.value)).toEqual([
+      ['ember', 'ember-runs'],
+      ['ember', 'ember-runs', 'ember-old-20290101']
+    ])
+  })
+
+  it('does not offer a model Claude Code lists when its catalog route needs a newer Mousse', async () => {
+    vi.stubEnv('MOUSSE_VERSION', '1.2.0')
+    const limited = parseModelCatalog({
+      format: 1,
+      revision: 2,
+      models: [
+        ...catalog.models,
+        entry('ember-next', '2031-02-01', { routes: { claude: { id: 'ember-next', minMousse: '1.3.0' } } }),
+        entry('ember-soon', '2031-03-01', { routes: { claude: { id: 'ember-soon', minMousse: '2.0' } } }),
+        entry('ember-now', '2031-04-01', { routes: { claude: { id: 'ember-now', minMousse: '1.2.0' } } })
+      ]
+    })
+    const listed = [
+      live,
+      // By its alias's resolved model, by its own id with a variant suffix, and one this version handles.
+      { value: 'next', resolvedModel: 'ember-next', displayName: 'Next', description: 'Ember 10 · test model' },
+      { value: 'ember-soon[1m]', displayName: 'Soon', description: 'Ember 11 · test model' },
+      { value: 'ember-now', displayName: 'Now', description: 'Ember 12 · test model' },
+      // No catalog entry: Claude Code's own word stands.
+      { value: 'custom', displayName: 'Custom', description: 'model' }
+    ]
+    const check = olderQuery(standard, listed)
+    const { service, home } = fixture(() => check.query, true, undefined, undefined, { modelCatalog: () => limited })
+    await service.refreshModels(home)
+    await service.olderCheck
+    expect(service.models().map((model) => model.id)).toEqual(['ember', 'ember-now', 'custom', 'ember-runs', 'ember-old-20290101'])
+    // Neither is switched to, for its levels or as an older model.
+    expect(check.setModel.mock.calls.map(([model]) => model)).not.toContain('next')
+    expect(check.setModel.mock.calls.map(([model]) => model)).not.toContain('ember-next')
+    expect(check.setModel.mock.calls.map(([model]) => model)).not.toContain('ember-soon[1m]')
+  })
+
+  it('drops a saved listing when every model Claude Code lists now needs a newer Mousse', async () => {
+    const limited = parseModelCatalog({
+      format: 1,
+      revision: 2,
+      models: [...catalog.models, entry('ember-next', '2031-02-01', { routes: { claude: { id: 'ember-next', minMousse: '1.3.0' } } })]
+    })
+    const listed = [{ value: 'next', resolvedModel: 'ember-next', displayName: 'Next', description: 'Ember 10 · test model' }]
+    const queries = [olderQuery(standard, listed), olderQuery(standard, listed)]
+    let index = 0
+    const { service, home } = fixture(() => queries[index++]!.query, true, undefined, undefined, { modelCatalog: () => limited })
+    vi.stubEnv('MOUSSE_VERSION', '1.3.0')
+    await service.refreshModels(home)
+    await service.olderCheck
+    expect(service.models().map((model) => model.id)).toContain('next')
+    // The same listing on a Mousse below the route's limit: the saved listing goes, not just the new one.
+    vi.stubEnv('MOUSSE_VERSION', '1.2.0')
+    await service.refreshModels(home)
+    await service.olderCheck
+    expect(service.models().map((model) => model.id)).not.toContain('next')
+    expect(queries[1]!.setModel.mock.calls.map(([model]) => model)).not.toContain('next')
+    // An empty listing is still a fresh one, and the CLI aliases do not come back.
+    expect(service.modelsRefreshedAt()).toBeDefined()
+    expect(service.models().map((model) => model.id)).not.toContain('opus')
+  })
+
+  it('replaces a check still running for an earlier key with one for the new key', async () => {
+    const held = olderQuery({ ...standard, 'ember-refused': { hang: true } })
+    const next = olderQuery(standard)
+    const queries = [held, next]
+    let index = 0
+    const { service, home, settings } = fixture(() => queries[index++]!.query, true, undefined, undefined, { modelCatalog: () => catalog })
+    await service.refreshModels(home)
+    await vi.waitFor(() => expect(held.setModel.mock.calls.map(([model]) => model)).toContain('ember-refused'))
+    const first = service.olderCheck
+    // Another account while the first check waits on Claude Code.
+    vi.stubEnv('ANTHROPIC_API_KEY', 'sk-ant-another-account')
+    await service.refreshModels(home)
+    await first
+    expect(held.close).toHaveBeenCalledOnce()
+    await service.olderCheck
+    expect(next.setModel.mock.calls.map(([model]) => model)).toEqual(['ember', 'ember-runs', 'ember-refused', 'ember-remapped', 'ember-unknown', 'ember-old-20290101'])
+    expect(next.close).toHaveBeenCalledOnce()
+    expect(service.olderCheck).toBeUndefined()
+    expect(settings().olderModels.results).toEqual({
+      'ember-runs': { outcome: 'runs', defaultEffort: 'high' },
+      'ember-refused': { outcome: 'refused' },
+      'ember-remapped': { outcome: 'remapped', to: 'ember-live' },
+      'ember-old-20290101': { outcome: 'runs' }
+    })
+  })
+
+  it('runs an older model at a level its catalog entry lists', async () => {
+    const captured: Options[] = []
+    const check = olderQuery(standard)
+    let first = true
+    const { service, home } = fixture(({ options }) => {
+      if (first) { first = false; return check.query }
+      captured.push(options)
+      return fakeQuery([result])
+    }, true, undefined, undefined, { modelCatalog: () => catalog })
+    await service.refreshModels(home)
+    await service.olderCheck
+    await service.chat({ ...chatInput(home), model: 'ember-runs:low' })
+    expect(captured[0]).toMatchObject({ model: 'ember-runs', effort: 'low' })
   })
 })
 

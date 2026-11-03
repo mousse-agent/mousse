@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { ChangeReceipt, ThreadAction } from '../../shared/threadActions'
+import { settlesItself } from '../../shared/resourceLifecycle'
 import { DEFAULT_UNDO_RETENTION_POLICY, type UndoRetentionEligibility, type UndoRetentionPolicy } from '../../shared/undoRetention'
 import { ThreadJournal } from '../data/ThreadJournal'
 import { withGitMutationLocks } from './GitOperationCoordinator'
@@ -82,9 +83,25 @@ export class UndoRetentionService {
       return receipt ? [receipt] : []
     })
   }
-  private pending(): boolean {
-    return [...this.journal.latestByOperation().values()].some((entry) => ['planned', 'running', 'prepared', 'git_applied', 'context_pending', 'recovery_required'].includes(entry.state))
+  private pending(): boolean { return this.unfinishedOperation() }
+
+  /**
+   * Whether an operation of the thread has not finished: a journal operation in a non-terminal state, or an action still
+   * running, checkpointing or undoing. An expiry of kept files and a keep of a copy settle themselves and hold no Undo
+   * material (`settlesItself`), so neither counts.
+   */
+  unfinishedOperation(): boolean {
+    return [...this.journal.latestByOperation().values()].some((entry) => !settlesItself(entry.operationType) && ['planned', 'running', 'prepared', 'git_applied', 'context_pending', 'recovery_required'].includes(entry.state))
       || this.actions().some((action) => ['planned', 'running', 'checkpointing', 'undoing', 'undo_conflict'].includes(action.state))
+  }
+
+  /**
+   * Until when material the thread kept at `at` (milliseconds) is retained: the Undo window after it, and never before
+   * the grace that follows this thread's adoption of retention, the same rule as an action's Undo deadline.
+   */
+  retainedUntil(at: number): number {
+    const state = this.state()
+    return Math.max(at + state.policy.windowMs, state.adoptedAt === undefined ? 0 : state.adoptedAt + state.policy.migrationGraceMs)
   }
   private key(action: ThreadAction): string { return action.receiptId ?? `action:${action.id}` }
   private deadline(action: ThreadAction, state: State): number {
@@ -116,6 +133,21 @@ export class UndoRetentionService {
   isReceiptExpired(receiptId: string): boolean { return this.state().expired.has(receiptId) }
   expiredReceiptIds(): ReadonlySet<string> { return this.state().expired }
   policy(): UndoRetentionPolicy { return { ...this.state().policy } }
+  /** The last time the clock trusted, when it is suspended (it moved forward by more than `maxForwardStepMs`). */
+  suspendedSince(): number | undefined {
+    const state = this.state()
+    return state.suspended ? state.highWater : undefined
+  }
+
+  /**
+   * Resumes a suspended clock at now without a person's review. Only for an owner no person reviews (a project's kept
+   * copies, `keptCopies.ts`), whose caller first records the time from {@link suspendedSince} to now as not counted, so
+   * nothing it keeps expires sooner because of the jump. A thread's clock resumes only through `configure`.
+   */
+  resumeUncountedHeld(): void {
+    if (!this.state().suspended) return
+    this.append({ kind: 'clock', at: this.now(), suspended: false })
+  }
   clockAllowsRelease(): boolean {
     const state = this.state(), now = this.now()
     return !state.suspended && now >= state.highWater && now <= state.highWater + state.policy.maxForwardStepMs

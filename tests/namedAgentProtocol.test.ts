@@ -165,7 +165,7 @@ it('provisions first-use task editor writes and commits only in the owned checko
   expect(f.read(f.repo)).toBe('base\n')
   writeFileSync(join(metadata.worktreePath, 'value.txt'), 'manual owned change\n')
   await client.request('git.commit', { threadId: thread.id, message: 'Reviewed manual owned change' })
-  expect(new ThreadWorkspaceManager(mms.threads.getThreadDir(thread.id)).verify().lifecycle).toBe('ready')
+  expect((await new ThreadWorkspaceManager(mms.threads.getThreadDir(thread.id)).verify()).lifecycle).toBe('ready')
   await expect(client.request('git.checkout', { threadId: thread.id, branch: 'master' })).rejects.toThrow('authoritative')
   expect(f.read(f.repo)).toBe('base\n')
 }, 30_000)

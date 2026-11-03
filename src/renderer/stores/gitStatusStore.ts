@@ -204,10 +204,13 @@ export async function unstageGitPaths(key: string, paths: readonly string[] | 'a
   }
 }
 
-/** Throw away the changes to these paths; untracked files are deleted. The caller confirms first. */
-export async function discardGitPaths(key: string, paths: readonly string[], scope: GitScope): Promise<void> {
+/**
+ * Throw away the changes to these paths; untracked files are deleted. The caller confirms first.
+ * Returns what the daemon says about the copy it kept first.
+ */
+export async function discardGitPaths(key: string, paths: readonly string[], scope: GitScope): Promise<string | undefined> {
   try {
-    await window.mousse.git.discard(scope, [...paths])
+    return (await window.mousse.git.discard(scope, [...paths])).kept?.notice
   } finally {
     await refreshAfterMutation(key, scope)
   }

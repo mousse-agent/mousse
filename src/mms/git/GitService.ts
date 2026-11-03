@@ -1,27 +1,31 @@
 import { AppError, createErrorProvider } from '../../shared/errors'
 import { spawn } from 'node:child_process'
 import { existsSync } from 'node:fs'
-import { mkdtemp, rm, rmdir, stat, writeFile } from 'node:fs/promises'
+import { access, mkdtemp, rm, rmdir, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve, sep } from 'node:path'
 import type { SimpleGit } from 'simple-git'
 import { redactGitText } from '../../shared/gitText'
 import { holdsRepositoryMutation } from '../actions/GitOperationCoordinator'
+import { keepCopy, KeepCopyRefusedError, type KeptCopy } from '../actions/keptCopies'
+import { conflictWrites, conservativeWrites, emptyTree, findInTheWay, InTheWayCheckError, mergeResult, plannedWrites, type InTheWay, type InTheWayKind, type PlannedWrite } from './inTheWay'
 import type { CodeHost } from './CodeHost'
 import { COMMIT_SUGGESTION_LIMITS, EMPTY_COMMIT_INPUT, fitPatch, parseNumstat, type CommitInput } from './commitSuggestion'
 import { explicitActionGitEnv } from './gitEnv'
 import { IN_PROGRESS_GIT_MARKERS } from './gitMarkers'
 import { OperationStream } from './gitOperationStream'
 import { englishMessagesEnv, runGit, type GitLine, type GitRun, type GitRunOptions } from './gitProcess'
+import { LISTING_MAX_BUFFER } from './runGitProcess'
 import { HookTrace, withHookFailure, type HookTraceEvent } from './gitTrace'
 import { GitHubCodeHost } from './GitHubCodeHost'
 import { GitHubService } from './GitHubService'
 import { PULL_REQUEST_DRAFT_COMMITS, PULL_REQUEST_DRAFT_LIMITS, userCommits, type DraftCommit } from './pullRequestDraft'
 import { MOUSSE_COMMIT_EMAIL } from './mousseCommitIdentity'
-import { resolveRepositoryIdentity } from './RepositoryIdentity'
+import { resolveRepositoryIdentityAsync } from './RepositoryIdentity'
 import { acquireRepositoryLease, RepositoryLeaseAbortedError } from './RepositoryLease'
-import { guardedSimpleGit, NO_DIFF_PROGRAMS, repoProgramEnv, SAFE_LOOKUP_ENV, withoutRepoPrograms } from './repoPrograms'
+import { checkRepoPrograms, guardedSimpleGit, NO_DIFF_PROGRAMS, repoProgramEnv, SAFE_LOOKUP_ENV, withoutRepoProgramsAsync } from './repoPrograms'
 import { readWorkingTreeStatus, type StatusEntry } from './workingTreeStatus'
+import { waitForFolderAccess } from '../files/folderAccess'
 import { GitPolicyError, withUserRequest, type UserAction } from './gitPolicy'
 import type {
   GitBranchInfo,
@@ -74,6 +78,8 @@ const gitErrors = createErrorProvider({
   git_checkout_dirty: { category: 'conflict', retryable: false, message: 'Uncommitted changes would be overwritten by the switch.' },
   git_checkout_untracked_collision: { category: 'conflict', retryable: false, message: 'Untracked files in the way would be overwritten by the switch.' },
   git_checkout_failed: { category: 'invalid', retryable: false, message: 'Git could not switch branches.' },
+  git_ignored_in_the_way: { category: 'conflict', retryable: false, message: 'Files no commit holds would be overwritten. Move them aside, then try again. Nothing was changed.' },
+  git_in_the_way_unchecked: { category: 'unavailable', retryable: true, message: 'Mousse could not check which files would be overwritten, so nothing was changed.' },
   git_stash_kept: { category: 'conflict', retryable: false, message: 'Git could not put your changes back. They are kept in the stash named "mousse: switch to ...".' },
   git_index_restore_failed: { category: 'internal', retryable: false, message: 'The commit failed and Git could not put the staged files back as they were. Everything is staged; unstage what you do not want to commit.' },
   git_index_locked: { category: 'conflict', retryable: false, message: 'A stopped Git left its lock file .git/index.lock behind. Make sure no Git is running in this folder, delete that file, then check what is staged.' },
@@ -87,6 +93,8 @@ const gitErrors = createErrorProvider({
   git_branch_current: { category: 'invalid', retryable: false, message: 'Switch to another branch before deleting this one.' },
   git_branch_failed: { category: 'invalid', retryable: false, message: 'Git could not change the branch.' },
   git_path_outside: { category: 'invalid', retryable: false, message: 'That path is outside the project folder.' },
+  keep_copy_too_large: { category: 'invalid', retryable: false, message: 'These changes are too large to keep a copy of, so nothing was discarded.' },
+  keep_copy_refused: { category: 'invalid', retryable: false, message: 'A copy of these changes could not be kept, so nothing was discarded.' },
   git_failed: { category: 'invalid', retryable: false, message: 'Git could not complete that action.' }
 })
 
@@ -295,6 +303,47 @@ function classified(code: GitErrorCode, run: GitRun): AppError {
 }
 
 /**
+ * How each kind is named: a file and a folder (`logs/`) are told apart, so a folder is never called a file. A submodule
+ * and a nested repository are named by their folder, whose files would be overwritten.
+ */
+const IN_THE_WAY_WORDS: Record<InTheWayKind, { file: [string, string]; folder: [string, string]; mixed: string; list: boolean }> = {
+  ignored: { file: ['an ignored file', 'ignored files'], folder: ['an ignored folder', 'ignored folders'], mixed: 'ignored files and folders', list: true },
+  untracked: { file: ['an untracked file', 'untracked files'], folder: ['an untracked folder', 'untracked folders'], mixed: 'untracked files and folders', list: true },
+  submodule: { file: ['the files of submodule', 'the files of submodules'], folder: ['the files of submodule', 'the files of submodules'], mixed: 'the files of submodules', list: false },
+  nested: { file: ['the files of the nested repository', 'the files of the nested repositories'], folder: ['the files of the nested repository', 'the files of the nested repositories'], mixed: 'the files of the nested repositories', list: false },
+  unreadable: { file: ['a folder Mousse cannot read', 'folders Mousse cannot read'], folder: ['a folder Mousse cannot read', 'folders Mousse cannot read'], mixed: 'folders Mousse cannot read', list: true }
+}
+
+/** A switch, a new branch or a pull refused before it wrote anything, naming what it would have overwritten, as spelled on disk. */
+function inTheWayError(doing: string, found: readonly InTheWay[]): AppError {
+  // A name with a line break or other control character is quoted, so the message stays one line and says exactly which file.
+  const shown = (path: string) => (/\p{Cc}/u.test(path) ? JSON.stringify(path) : path)
+  const parts = (Object.keys(IN_THE_WAY_WORDS) as InTheWayKind[]).flatMap((kind) => {
+    const items = found.filter((item) => item.kind === kind)
+    if (!items.length) return []
+    const words = IN_THE_WAY_WORDS[kind]
+    const folders = items.filter((item) => item.path.endsWith('/')).length
+    const many = items.length > 1 ? 1 : 0
+    const label = folders === 0 ? words.file[many] : folders === items.length ? words.folder[many] : words.mixed
+    const paths = items.map((item) => shown(words.list ? item.path : item.path.replace(/\/$/, '')))
+    const named = `${paths.slice(0, 5).join(', ')}${paths.length > 5 ? ` and ${paths.length - 5} more` : ''}`
+    return [`${label}${words.list ? ':' : ''} ${named}`]
+  })
+  const one = found.length === 1 && IN_THE_WAY_WORDS[found[0]!.kind].list
+  return new AppError({
+    code: 'git_ignored_in_the_way',
+    message: `${doing} would overwrite ${parts.join('; ')}. Move ${one ? 'it' : 'them'} aside, then try again. Nothing was changed.`,
+    errorInfo: gitErrors.create('git_ignored_in_the_way').errorInfo
+  })
+}
+
+/** The check before a write could not be made: said plainly, with Git's own words kept as the cause. */
+function inTheWayUnchecked(doing: string, cause: unknown): AppError {
+  const fixed = gitErrors.create('git_in_the_way_unchecked', cause)
+  return new AppError({ code: 'git_in_the_way_unchecked', message: `Mousse could not check which files ${doing.charAt(0).toLowerCase()}${doing.slice(1)} would overwrite, so nothing was changed. Try again.`, errorInfo: fixed.errorInfo }, cause)
+}
+
+/**
  * An unrecognised failure: the message is Git's own redacted output, or the code's
  * fixed text when Git printed nothing.
  */
@@ -326,16 +375,20 @@ const SUMMARY_KILL_SETTLE_MS = 5_000
 /** Commits whose authors are read when drafting a pull request; Mousse's own are left out of these. */
 const DRAFT_COMMITS_SCANNED = 2000
 
-function readBoundedGit(cwd: string, args: readonly string[], maxBytes: number): Promise<string> {
-  return new Promise((resolvePromise, reject) => {
-    let guarded: string[]
-    try {
-      guarded = withoutRepoPrograms(cwd, args)
-    } catch (error) {
-      if (error instanceof GitPolicyError) reject(error)
-      else resolvePromise('')
-      return
-    }
+/** Whether `path` is there, as `existsSync` answers, without blocking. */
+function pathExists(path: string): Promise<boolean> {
+  return access(path).then(() => true, () => false)
+}
+
+async function readBoundedGit(cwd: string, args: readonly string[], maxBytes: number): Promise<string> {
+  let guarded: string[]
+  try {
+    guarded = await withoutRepoProgramsAsync(cwd, args)
+  } catch (error) {
+    if (error instanceof GitPolicyError) throw error
+    return ''
+  }
+  return new Promise((resolvePromise) => {
     const child = spawn('git', guarded, {
       cwd,
       env: repoProgramEnv({ ...process.env, ...englishMessagesEnv(), GIT_OPTIONAL_LOCKS: '0' }),
@@ -397,12 +450,23 @@ export class GitService {
    * switch, push): the repository's hooks and programs run, as from a terminal. Every other command
    * here (status polling, diffs, the reads behind them) runs none of them.
    */
-  private runGit(cwd: string, args: readonly string[], options?: GitRunOptions & { userAction?: boolean }): Promise<GitRun> {
+  private async runGit(cwd: string, args: readonly string[], options?: GitRunOptions & { userAction?: boolean }): Promise<GitRun> {
     const { userAction, ...run } = options ?? {}
-    // Every change here is one the user asked for: the mutation that runs it passed their request in.
-    const guarded = withoutRepoPrograms(cwd, args, { userAction, env: run.env })
-    // Mousse's own commands take no optional lock, so a read never refreshes and rewrites the index.
-    return runGit(cwd, guarded, userAction ? run : { ...run, env: { ...run.env, ...SAFE_LOOKUP_ENV, GIT_OPTIONAL_LOCKS: '0' } })
+    let guarded: string[]
+    try {
+      // Every change here is one the user asked for: the mutation that runs it passed their request in.
+      guarded = await withoutRepoProgramsAsync(cwd, args, { userAction, env: run.env, signal: run.signal })
+    } catch (error) {
+      // Cancelled during the check before it: the answer `runGit` gives a run cancelled before it starts.
+      if (run.signal?.aborted && error === run.signal.reason) return { ok: false, code: null, stalled: false, cancelled: true, exited: true, stdout: '', truncated: false, output: '' }
+      throw error
+    }
+    // What the user pressed shows its output as messages, where the end (Git's verdict) is what counts.
+    if (userAction) return runGit(cwd, guarded, run)
+    // Mousse's own commands take no optional lock, so a read never refreshes and rewrites the index. Their stdout is
+    // read as an answer, so it is kept whole, and an answer too long to keep is a failure, never part of one.
+    const read = await runGit(cwd, guarded, { stdoutBytes: LISTING_MAX_BUFFER, ...run, env: { ...run.env, ...SAFE_LOOKUP_ENV, GIT_OPTIONAL_LOCKS: '0' } })
+    return read.truncated ? { ...read, ok: false } : read
   }
 
   /**
@@ -509,13 +573,18 @@ export class GitService {
   }
 
   async isRepo(cwd: string): Promise<boolean> {
-    return existsSync(cwd) && this.gitFor(cwd).checkIsRepo().catch(() => false)
+    // The folder answers before anything looks at it.
+    await waitForFolderAccess([resolve(cwd)])
+    if (!await pathExists(cwd)) return false
+    // A repository whose programs Mousse cannot turn off is refused here, with its reason, before the reads below turn failures into defaults.
+    await checkRepoPrograms(cwd)
+    return this.gitFor(cwd).checkIsRepo().catch(() => false)
   }
 
   async getStatus(cwd: string): Promise<GitStatusSnapshot> {
     const isRepo = await this.isRepo(cwd)
     if (!isRepo) {
-      return { isRepo: false, branch: null, upstream: null, tracking: 'none', ahead: 0, behind: 0, changes: [], ...(existsSync(cwd) ? {} : { missing: true }) }
+      return { isRepo: false, branch: null, upstream: null, tracking: 'none', ahead: 0, behind: 0, changes: [], ...(await pathExists(cwd) ? {} : { missing: true }) }
     }
 
     const git = this.gitFor(cwd)
@@ -696,9 +765,10 @@ export class GitService {
   }
 
   private async withLease<T>(cwd: string, operation: () => Promise<T>, signal?: AbortSignal): Promise<T> {
-    let identity: ReturnType<typeof resolveRepositoryIdentity> | null = null
+    let identity: Awaited<ReturnType<typeof resolveRepositoryIdentityAsync>> | null = null
     try {
-      identity = existsSync(cwd) ? resolveRepositoryIdentity(cwd) : null
+      await waitForFolderAccess([resolve(cwd)])
+      identity = await pathExists(cwd) ? await resolveRepositoryIdentityAsync(cwd) : null
     } catch {
       identity = null
     }
@@ -834,16 +904,20 @@ export class GitService {
   /**
    * Throws the changes of these paths away: tracked files go back to HEAD (index and
    * working tree), files HEAD does not have are removed, untracked files are deleted.
-   * This cannot be undone, so the caller confirms first.
+   * A copy of their staged, working and conflict versions is kept first, owned by
+   * `keep.owner`'s journal (`keepCopy`), and returned; nothing is removed unless it was kept.
+   * A copy too large to keep refuses the discard with `keep_copy_too_large`, changing nothing.
+   * The caller confirms first.
    */
-  discard(cwd: string, userRequested: UserAction, paths: readonly string[]): Promise<void> {
-    return this.asUser(userRequested, () => this.discardNow(cwd, paths))
+  discard(cwd: string, userRequested: UserAction, paths: readonly string[], keep: { owner: string }): Promise<KeptCopy | undefined> {
+    return this.asUser(userRequested, () => this.discardNow(cwd, paths, keep))
   }
 
-  private async discardNow(cwd: string, paths: readonly string[]): Promise<void> {
-    await this.serialized(cwd, async () => {
+  private async discardNow(cwd: string, paths: readonly string[], keep: { owner: string }): Promise<KeptCopy | undefined> {
+    return await this.serialized(cwd, async () => {
       const top = await this.toplevel(cwd)
       const selected = selectEntries(await this.statusEntries(top), paths)
+      if (!selected.length) return undefined
       const unborn = !await this.hasHead(top)
       const restore = new Set<string>()
       const remove = new Set<string>()
@@ -860,9 +934,23 @@ export class GitService {
         else restore.add(entry.path)
         if (!unborn && entry.index === 'R' && entry.from) restore.add(entry.from)
       }
+      // Every path the discard writes or removes, as it is now, before any of it changes.
+      let kept: KeptCopy
+      try {
+        kept = await keepCopy({ owner: keep.owner, top, operationType: 'git-discard', action: 'Discard', paths: [...new Set([...restore, ...remove, ...untracked])] })
+      } catch (error) {
+        // The refusal names the files (the largest ones, for a copy too large), so the person knows what to move aside.
+        if (error instanceof KeepCopyRefusedError) {
+          const fixed = gitErrors.create(error.code === 'keep_copy_too_large' ? 'keep_copy_too_large' : 'keep_copy_refused')
+          throw new AppError({ code: fixed.code, message: error.message, errorInfo: fixed.errorInfo, details: { paths: error.paths } }, error)
+        }
+        throw error
+      }
+      // Untracked files go first: a tracked file that a folder of untracked files replaced can then come back in its place.
+      await this.removeUntracked(top, untracked)
       await this.withPathspecFile(top, ['restore', '--source=HEAD', '--staged', '--worktree'], [...restore])
       await this.withPathspecFile(top, ['rm', '-f', '-r', '--ignore-unmatch', '-q'], [...remove])
-      await this.removeUntracked(top, untracked)
+      return kept
     })
   }
 
@@ -947,8 +1035,15 @@ export class GitService {
         }
       }
       assertNotCancelled(live)
+      // A merge or rebase already waiting makes Git refuse; there is nothing to check before that.
+      if (!waiting) await this.refuseInTheWayForPull(cwd, branch, strategy, target ? `Pulling ${target.remote}/${target.branch}` : 'Pulling')
+      assertNotCancelled(live)
       live.stopCancelling()
-      const integrate = strategy === 'ff-only' ? ['merge', '--ff-only', '@{upstream}'] : strategy === 'merge' ? ['merge', '--no-edit', '@{upstream}'] : ['rebase', '@{upstream}']
+      // `--no-overwrite-ignore` makes Git itself refuse a fast-forward over an ignored file, should the check above
+      // have missed one. It does not stop a real merge (Git 2.50 still writes over an ignored file then) and a rebase
+      // does not take it, so those rely on the check alone. A rebase always uses the merge backend, whatever
+      // `rebase.backend` says, so it replays commits the way the check worked them out.
+      const integrate = strategy === 'ff-only' ? ['merge', '--no-overwrite-ignore', '--ff-only', '@{upstream}'] : strategy === 'merge' ? ['merge', '--no-overwrite-ignore', '--no-edit', '@{upstream}'] : ['rebase', '--merge', '@{upstream}']
       const run = await this.runLive(cwd, integrate, live, { env: explicitActionGitEnv() })
       if (!run.ok) {
         if (!waiting && await this.inProgress(cwd)) return { result: 'conflicted' }
@@ -971,6 +1066,125 @@ export class GitService {
       }
       return { result: 'fast-forwarded' }
     }, live.signal))
+  }
+
+  /**
+   * Refuses, before anything is written, a switch, a new branch or a pull that would write over or delete a file no
+   * commit holds (`findInTheWay`). `plan` lists the paths the command writes, from the top of the checkout; `untracked`
+   * counts untracked files too, where Git would not refuse them itself. A check that cannot be made refuses as well.
+   */
+  private async refuseInTheWay(cwd: string, doing: string, untracked: boolean, plan: (top: string) => Promise<PlannedWrite[]>): Promise<void> {
+    let found: InTheWay[]
+    try {
+      const top = await this.toplevel(cwd)
+      found = await findInTheWay(top, await plan(top), { untracked })
+    } catch (error) {
+      if (error instanceof AppError || error instanceof GitPolicyError || !(error instanceof InTheWayCheckError || error instanceof Error)) throw error
+      throw inTheWayUnchecked(doing, error)
+    }
+    if (found.length) throw inTheWayError(doing, found)
+  }
+
+  /** HEAD's commit, or the empty tree in a repository with no commit yet. */
+  private async headOrEmpty(top: string): Promise<string> {
+    return await this.read(top, ['rev-parse', '--verify', '--quiet', 'HEAD^{commit}']) ?? emptyTree(top)
+  }
+
+  /**
+   * The pull's check (`refuseInTheWay`), with what each strategy writes, untracked files included: a rebase replays
+   * commits under rules that change on the way, so Git's own check can miss a file that was untracked when it began.
+   * - A fast-forward writes the upstream's files.
+   * - A merge writes its result (`merge-tree`, with the `-X` options of `branch.<name>.mergeOptions`), with the side
+   *   names a folder/file conflict gives files. A merge with the `ours` strategy writes nothing.
+   * - A rebase: see `rebaseWrites`. A rebase of a branch that holds a merge replays the merged commits even when the
+   *   upstream is already in it.
+   * Where Git does nothing or refuses anyway (diverged for a fast-forward, nothing to bring in) nothing is checked.
+   */
+  private async refuseInTheWayForPull(cwd: string, branch: string, strategy: 'ff-only' | 'merge' | 'rebase', doing: string): Promise<void> {
+    const head = await this.read(cwd, ['rev-parse', '--verify', '--quiet', 'HEAD^{commit}'])
+    const upstream = await this.read(cwd, ['rev-parse', '--verify', '--quiet', '@{upstream}^{commit}'])
+    if (!head || !upstream || head === upstream) return
+    const isAncestor = async (a: string, b: string) => (await this.runGit(cwd, ['merge-base', '--is-ancestor', a, b])).ok
+    const behind = await isAncestor(head, upstream)
+    const contains = !behind && await isAncestor(upstream, head)
+    if (strategy === 'ff-only') {
+      if (behind) await this.refuseInTheWay(cwd, doing, true, (top) => plannedWrites(top, head, upstream))
+      return
+    }
+    if (strategy === 'merge') {
+      if (contains) return
+      const options = await this.mergeOptions(cwd, branch)
+      // A fast-forward writes the upstream's files whatever the strategy; a real merge with `ours` keeps HEAD's.
+      const fastForward = behind && !options.noFastForward
+      if (options.strategy === 'ours' && !fastForward) return
+      await this.refuseInTheWay(cwd, doing, true, async (top) => {
+        if (fastForward) return plannedWrites(top, head, upstream)
+        const merged = await mergeResult(top, head, upstream, { strategyOptions: options.strategyOptions })
+        // A Git that cannot work the merge out: the conservative count, not a refusal of every merge.
+        if (!merged) return conservativeWrites(top, head, upstream)
+        return [...await plannedWrites(top, head, merged.tree), ...conflictWrites(merged.conflicts)]
+      })
+      return
+    }
+    // A count that cannot be read is taken as a merge, so the rebase is checked rather than let through.
+    if (contains && Number(await this.read(cwd, ['rev-list', '--min-parents=2', '--count', `${upstream}..${head}`]) ?? 1) === 0) return
+    await this.refuseInTheWay(cwd, doing, true, (top) => this.rebaseWrites(top, head, upstream))
+  }
+
+  /**
+   * What `git merge` takes from the branch's configuration (`branch.<name>.mergeOptions`, `merge.ff`): the strategy,
+   * its `-X` options, and whether a fast-forward is turned off.
+   */
+  private async mergeOptions(cwd: string, branch: string): Promise<{ strategy?: string; strategyOptions: string[]; noFastForward: boolean }> {
+    const words = (await this.read(cwd, ['config', '--get', `branch.${branch}.mergeOptions`]) ?? '').split(/\s+/).filter(Boolean)
+    let strategy: string | undefined
+    const strategyOptions: string[] = []
+    let noFastForward = (await this.read(cwd, ['config', '--get', 'merge.ff'])) === 'false'
+    for (let index = 0; index < words.length; index++) {
+      const word = words[index]!
+      const value = (long: string, short: string): string | undefined => {
+        if (word === long || word === short) return words[++index]
+        if (word.startsWith(`${long}=`)) return word.slice(long.length + 1)
+        if (word.startsWith(short) && word.length > short.length) return word.slice(short.length)
+        return undefined
+      }
+      const chosen = value('--strategy', '-s')
+      if (chosen !== undefined) { strategy = chosen; continue }
+      const option = value('--strategy-option', '-X')
+      if (option !== undefined) { strategyOptions.push(option); continue }
+      if (word === '--no-ff') noFastForward = true
+      else if (word === '--ff' || word === '--ff-only') noFastForward = false
+    }
+    return { ...(strategy ? { strategy } : {}), strategyOptions, noFastForward }
+  }
+
+  /**
+   * Every path a rebase of `head` onto `upstream` writes. It first takes the files to the upstream, then replays each
+   * local commit in turn with the merge backend (`--merge`, which the pull always passes). Each step is worked out as
+   * Git will do it (`merge-tree` from the commit's parent), so a change that rename detection moves is counted where it
+   * lands; each commit's own paths are counted too, whatever the step did with them. A step that conflicts here may not
+   * stop the real rebase (a merge program the repository configures can settle it), so every later commit is counted
+   * as well, worked out from the conflicted result. The upstream's own commits are never replayed, only its last state
+   * is written. On a Git without `merge-tree --merge-base` the writes are counted the conservative way
+   * (`conservativeWrites`); a read that fails fails the check, rather than leave writes uncounted.
+   */
+  private async rebaseWrites(top: string, head: string, upstream: string): Promise<PlannedWrite[]> {
+    const writes = await plannedWrites(top, head, upstream)
+    // The commits `git rebase` replays: not merges, and not those whose change the upstream already has.
+    const listed = await this.runGit(top, ['rev-list', '--reverse', '--topo-order', '--no-merges', '--cherry-pick', '--right-only', `${upstream}...${head}`])
+    // Without the list, the replayed commits would go unchecked.
+    if (!listed.ok) throw new InTheWayCheckError(listed.output.trim().split('\n')[0] || 'git rev-list failed')
+    const replayed = listed.stdout.split('\n').map((line) => line.trim()).filter(Boolean)
+    let onto = upstream
+    for (const commit of replayed) {
+      const base = await this.read(top, ['rev-parse', '--verify', '--quiet', `${commit}^1^{tree}`]) ?? await emptyTree(top)
+      const step = await mergeResult(top, onto, commit, { base })
+      // A Git that cannot work the steps out: the conservative count, not a refusal of every rebase.
+      if (!step) return conservativeWrites(top, head, upstream)
+      writes.push(...await plannedWrites(top, base, commit), ...await plannedWrites(top, onto, step.tree), ...conflictWrites(step.conflicts))
+      onto = step.tree
+    }
+    return writes
   }
 
   /** Gives up a merge or rebase that stopped on conflicts. Only ever called by an explicit user action. */
@@ -1129,7 +1343,10 @@ export class GitService {
       if (await this.branchExists(cwd, name)) throw gitErrors.create('git_branch_exists')
       const from = options.from
       if (from !== undefined && (from.startsWith('-') || await this.read(cwd, ['rev-parse', '--verify', '--quiet', `${from}^{commit}`]) === null)) throw gitErrors.create('git_ref_not_found')
-      const args = options.checkout === false ? ['branch', name] : ['switch', '-c', name]
+      if (from !== undefined && options.checkout !== false) {
+        await this.refuseInTheWay(cwd, `Creating ${name} from ${from}`, false, async (top) => plannedWrites(top, await this.headOrEmpty(top), `${from}^{commit}`))
+      }
+      const args = options.checkout === false ? ['branch', name] : ['switch', '--no-overwrite-ignore', '-c', name]
       if (from !== undefined) args.push(from)
       const run = await this.runGit(cwd, args)
       if (!run.ok) throw this.checkoutFailure(run, 'git_branch_failed')
@@ -1177,8 +1394,9 @@ export class GitService {
 
   private async switchTo(cwd: string, branch: string, live?: Live): Promise<void> {
     if (branch.startsWith('-')) throw gitErrors.create('git_branch_invalid')
-    // Never on a timer, and no Cancel: a checkout killed halfway leaves a half-switched tree.
-    const run = await this.runLive(cwd, ['checkout', branch, '--'], live, { env: explicitActionGitEnv() })
+    // Never on a timer, and no Cancel: a checkout killed halfway leaves a half-switched tree. `--no-overwrite-ignore`
+    // backs up the check made before (`refuseInTheWayForSwitch`).
+    const run = await this.runLive(cwd, ['checkout', '--no-overwrite-ignore', branch, '--'], live, { env: explicitActionGitEnv() })
     if (!run.ok) throw this.checkoutFailure(run, 'git_checkout_failed')
   }
 
@@ -1191,8 +1409,37 @@ export class GitService {
     return this.asUser(userRequested, () => this.checkoutNow(cwd, branch, options))
   }
 
+  /**
+   * The switch's check (`refuseInTheWay`). Untracked files are left to Git, which refuses to write over them, and to
+   * stash and switch, which stashes them first.
+   */
+  private async refuseInTheWayForSwitch(cwd: string, branch: string): Promise<void> {
+    if (branch.startsWith('-')) return
+    const target = await this.switchTarget(cwd, branch)
+    if (target) await this.refuseInTheWay(cwd, `Switching to ${branch}`, false, async (top) => plannedWrites(top, await this.headOrEmpty(top), target))
+  }
+
+  /**
+   * The commit `git checkout <branch>` goes to, read as Git reads it: a local branch first, else any commit, else the
+   * remote branch of that name it would start a local branch from (the only remote that has one, or
+   * `checkout.defaultRemote`). Null for a name none of those match, which Git refuses.
+   */
+  private async switchTarget(cwd: string, branch: string): Promise<string | null> {
+    const commit = (ref: string) => this.read(cwd, ['rev-parse', '--verify', '--quiet', `${ref}^{commit}`])
+    const direct = await commit(`refs/heads/${branch}`) ?? await commit(branch)
+    if (direct) return direct
+    const listed = (await this.read(cwd, ['for-each-ref', '--format=%(refname)%00%(objectname)', 'refs/remotes/']))?.split('\n') ?? []
+    const remotes = new Set((await this.read(cwd, ['remote']))?.split('\n').filter(Boolean) ?? [])
+    const matches = listed.map((line) => line.split('\0')).filter(([ref = '']) => [...remotes].some((remote) => ref === `refs/remotes/${remote}/${branch}`))
+    if (matches.length === 1) return matches[0]![1] ?? null
+    const preferred = await this.read(cwd, ['config', '--get', 'checkout.defaultRemote'])
+    return preferred ? commit(`refs/remotes/${preferred}/${branch}`) : null
+  }
+
   private async checkoutNow(cwd: string, branch: string, options: GitCheckoutOptions & GitOperationRequest = {}): Promise<GitCheckoutResult> {
     return this.runOperation(cwd, 'checkout', options, false, (live) => this.serialized(cwd, async () => {
+      // Before any stash, so a refusal leaves nothing to put back.
+      await this.refuseInTheWayForSwitch(cwd, branch)
       if (options.dirty !== 'stash') {
         await this.switchTo(cwd, branch, live)
         return {}

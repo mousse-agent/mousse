@@ -1,4 +1,5 @@
 import { existsSync, statSync } from 'node:fs'
+import { access, stat } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import { GIT_NULL_DEVICE } from './gitNullDevice'
 
@@ -34,8 +35,19 @@ export function explicitActionGitEnv(): Record<string, string> {
  * They are passed in the environment (`GIT_CONFIG_COUNT`), which reaches every Git that process starts
  * (hooks, `gh`, credential helpers) and counts as command-line config, the only kind besides the user's
  * own that Git reads this setting from.
+ *
+ * The other three keep Git's own housekeeping out of Mousse's commands. After a commit, merge or fetch,
+ * Git starts `git maintenance run --auto` (or `gc --auto` in older versions), which can repack and prune
+ * objects nothing points at, such as a dropped stash or a reset commit the person still wants. A fetch
+ * also rewrites the commit-graph when `fetch.writeCommitGraph` is on. Mousse never asks for either, so
+ * neither runs; the person's own Git keeps running them as configured.
  */
-export const MOUSSE_GIT_CONFIG: ReadonlyArray<readonly [string, string]> = [['safe.bareRepository', 'explicit']]
+export const MOUSSE_GIT_CONFIG: ReadonlyArray<readonly [string, string]> = [
+  ['safe.bareRepository', 'explicit'],
+  ['maintenance.auto', 'false'],
+  ['gc.auto', '0'],
+  ['fetch.writeCommitGraph', 'false']
+]
 
 /**
  * `env` with `entries` added as `GIT_CONFIG_KEY_<n>`/`GIT_CONFIG_VALUE_<n>` after any the environment
@@ -84,6 +96,23 @@ export function isGitDirectory(path: string): boolean {
   } catch {
     return false
   }
+}
+
+/** {@link isGitDirectory} without blocking: the same checks, read with async calls. */
+export async function isGitDirectoryAsync(path: string): Promise<boolean> {
+  try {
+    // `existsSync`: anything there that can be reached, whatever it is.
+    if (await access(join(path, '.git')).then(() => true, () => false)) return false
+    const [head, objects, refs] = await Promise.all([stat(join(path, 'HEAD')), stat(join(path, 'objects')), stat(join(path, 'refs'))])
+    return head.isFile() && objects.isDirectory() && refs.isDirectory()
+  } catch {
+    return false
+  }
+}
+
+/** {@link gitDirectoryEnv} without blocking. */
+export async function gitDirectoryEnvAsync(cwd: string): Promise<Record<string, string>> {
+  return await isGitDirectoryAsync(cwd) ? { GIT_DIR: resolve(cwd) } : {}
 }
 
 /**

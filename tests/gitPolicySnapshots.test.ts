@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { PublishService } from '../src/mms/actions/PublishService'
 import { ThreadActionService } from '../src/mms/actions/ThreadActionService'
 import { UndoService } from '../src/mms/actions/UndoService'
-import { takeSnapshot } from '../src/mms/actions/snapshots'
+import { takeSnapshotAsync } from '../src/mms/actions/snapshots'
 import { acquireRepositoryLease } from '../src/mms/git/RepositoryLease'
 import { resolveRepositoryIdentity } from '../src/mms/git/RepositoryIdentity'
 import { onGitPolicyEntry, userAction, withUserRequest, type GitPolicyEntry } from '../src/mms/git/gitPolicy'
@@ -61,7 +61,7 @@ describe('under MOUSSE_GIT_POLICY=refuse', () => {
   it('the primary checkout: a turn snapshot needs no request, and Undo runs under the user’s', async () => {
     refuse()
     const actions = new ThreadActionService(f.thread)
-    const snapshot = takeSnapshot(f.repo, { reason: 'primary' })
+    const snapshot = (await takeSnapshotAsync(f.repo, { reason: 'primary' }))
     expect(snapshot.sha).toMatch(/^[0-9a-f]{40}$/)
     await turn(actions, f.repo, 'one', () => writeFileSync(join(f.repo, 'value.txt'), 'one\n'))
     await withUserRequest(userAction('button', 'Undo'), () => new UndoService(f.thread).undoLatest('main', f.repo))
@@ -84,12 +84,12 @@ describe('under MOUSSE_GIT_POLICY=refuse', () => {
       refuse()
       const service = new WorktreeRetirementService(store, { taskLease, repositoryLease })
       writeFileSync(join(worktree, 'uncommitted.txt'), 'kept\n')
-      service.prepare({ taskId: 'task', worktreePath: worktree, branch, sourcePath })
+      await service.prepare({ taskId: 'task', worktreePath: worktree, branch, sourcePath })
       const path = service.pathFor('task', worktree)
-      const trashed = service.retire(path)
+      const trashed = await service.retire(path)
       expect(existsSync(trashed.trashPath!)).toBe(true)
-      expect(service.expireTrash(path, { now: Date.now() + 2 * WORKTREE_TRASH_QUIET_MS })).toEqual({ removed: true })
-      service.reconstruct(path)
+      expect(await service.expireTrash(path, { now: Date.now() + 2 * WORKTREE_TRASH_QUIET_MS })).toEqual({ removed: true })
+      await service.reconstruct(path)
       expect(f.read(worktree, 'uncommitted.txt')).toBe('kept\n')
       expect(violations()).toEqual([])
     } finally { repositoryLease.release(); releaseExecutionLeaseHandle(taskLease) }
@@ -110,13 +110,13 @@ describe('under MOUSSE_GIT_POLICY=refuse', () => {
     try {
       const service = new WorktreeRetirementService(store, { taskLease, repositoryLease })
       writeFileSync(join(metadata.worktreePath, 'uncommitted.txt'), 'kept\n')
-      service.prepare({ taskId: 'task', worktreePath: metadata.worktreePath, branch: metadata.branch, sourcePath: join(task, 'workspace.json') })
+      await service.prepare({ taskId: 'task', worktreePath: metadata.worktreePath, branch: metadata.branch, sourcePath: join(task, 'workspace.json') })
       const path = service.pathFor('task', metadata.worktreePath)
-      service.retire(path)
-      expect(service.expireTrash(path, { now: Date.now() + 2 * WORKTREE_TRASH_QUIET_MS })).toEqual({ removed: true })
+      await service.retire(path)
+      expect(await service.expireTrash(path, { now: Date.now() + 2 * WORKTREE_TRASH_QUIET_MS })).toEqual({ removed: true })
       // Its branch went with the trash; the other thread's stays.
       expect(plain(f.repo, 'branch', '--list', 'mousse/*', '--format=%(refname:short)')).toBe('mousse/fix-the-login-button-2')
-      service.reconstruct(path)
+      await service.reconstruct(path)
       expect(plain(metadata.worktreePath, 'branch', '--show-current')).toBe(metadata.branch)
       expect(f.read(metadata.worktreePath, 'uncommitted.txt')).toBe('kept\n')
       expect(violations()).toEqual([])

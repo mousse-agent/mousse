@@ -29,6 +29,8 @@ export interface LocalModelWorkerOptions {
   files: readonly LocalModelFile[]
   /** Sends a message to the page. */
   post: (message: ModelFileRequest) => void
+  /** ONNX Runtime threads; one unless the worker asks for more (see `speechModelThreads`). */
+  threads?: number
 }
 
 export interface LocalModelWorkerSupport {
@@ -39,7 +41,7 @@ export interface LocalModelWorkerSupport {
 const escapeRegExp = (value: string): string => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 
 /** Configures the ONNX runtime and redirects the model's file downloads to the page. Call once per worker. */
-export function setupLocalModelWorker({ repo, files, post }: LocalModelWorkerOptions): LocalModelWorkerSupport {
+export function setupLocalModelWorker({ repo, files, post, threads = 1 }: LocalModelWorkerOptions): LocalModelWorkerSupport {
   const filePaths = new Set(files.map((file) => file.path))
   const modelUrl = new RegExp(`^https://huggingface\\.co/${escapeRegExp(repo)}/resolve/[^/]+/([^?#]+)`)
   const pendingFiles = new Map<number, { resolve: (bytes: ArrayBuffer) => void; reject: (error: Error) => void }>()
@@ -70,7 +72,7 @@ export function setupLocalModelWorker({ repo, files, post }: LocalModelWorkerOpt
   env.useBrowserCache = false
   const wasm = env.backends.onnx.wasm
   if (wasm) {
-    wasm.numThreads = 1
+    wasm.numThreads = threads
     wasm.proxy = false
     // The CPU build is bundled with the app; nothing is fetched from a CDN.
     wasm.wasmPaths = { mjs: ortMjsUrl, wasm: ortWasmUrl }

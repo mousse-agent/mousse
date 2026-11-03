@@ -731,7 +731,7 @@ export class MmsProfileServices {
             'Cannot trash thread: an owned workflow is still active or waiting'
           )
         }
-        const inventory = buildResourceInventory(this.threads.lifecycleStore, record)
+        const inventory = await buildResourceInventory(this.threads.lifecycleStore, record)
         if (inventory.blockers.length)
           throw new ResourceLifecycleError('ambiguous', `Resource ownership is not established: ${inventory.blockers.join('; ')}`)
         // The trash was accepted for exactly these threads (fresh operation, current generation) and
@@ -784,7 +784,7 @@ export class MmsProfileServices {
         // tries again instead of leaving the refs or the store behind for good.
         const failures: string[] = []
         for (const task of this.lifecycleOwnedTasks(record.taskId)) {
-          try { await releaseThreadSnapshots(task.location) } catch (error) { failures.push(`${task.taskId}: ${error instanceof Error ? error.message : String(error)}`) }
+          try { await releaseThreadSnapshots(task.location, undefined, { discardAuthorized: Boolean(record.purge?.discardAuthorized) }) } catch (error) { failures.push(`${task.taskId}: ${error instanceof Error ? error.message : String(error)}`) }
         }
         if (failures.length) throw new Error(`The snapshots of a deleted thread could not be released yet; the delete will try again. ${failures.join('; ')}`)
       },

@@ -1,12 +1,12 @@
 import tseslint from 'typescript-eslint'
 import reactHooks from 'eslint-plugin-react-hooks'
 
-// Lint baseline: every rule is a warning so the existing code base passes while
-// new hazards (floating promises, hook misuse, swallowed errors) stay visible.
+// The code base is clean of these, so they fail lint. Mark a deliberately
+// unawaited promise with `void`; explain a deliberately empty block in a comment.
 const rules = {
-  '@typescript-eslint/no-floating-promises': 'warn',
-  '@typescript-eslint/no-misused-promises': 'warn',
-  'no-empty': ['warn', { allowEmptyCatch: false }]
+  '@typescript-eslint/no-floating-promises': 'error',
+  '@typescript-eslint/no-misused-promises': 'error',
+  'no-empty': ['error', { allowEmptyCatch: false }]
 }
 
 const tsFiles = (patterns) => patterns.map((pattern) => `${pattern}/**/*.{ts,tsx}`)
@@ -48,7 +48,7 @@ export default tseslint.config(
     plugins: { '@typescript-eslint': tseslint.plugin, 'react-hooks': reactHooks },
     rules: {
       ...rules,
-      'react-hooks/rules-of-hooks': 'warn',
+      'react-hooks/rules-of-hooks': 'error',
       'react-hooks/exhaustive-deps': 'warn'
     }
   }

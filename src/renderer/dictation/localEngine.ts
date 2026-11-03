@@ -1,4 +1,5 @@
 import { findLocalSttModel, type LocalSttModel, type LocalSttModelId } from '../../shared/dictation'
+import type { DictationVocabularyTerm } from '../../shared/dictationVocabulary'
 import { serveModelFiles } from '../speechModels/pageSupport'
 import { MIN_SEGMENT_SECONDS, decodeRecording, splitIntoSegments } from './audio'
 import type { LocalSttWorkerEvent, LocalSttWorkerRequest } from './workerProtocol'
@@ -10,16 +11,28 @@ interface Pending {
 
 /**
  * The loaded model holds WebAssembly memory that is only returned when the worker ends, so the
- * worker is shut down when dictation has been idle for a while. Loading it again takes about a second.
+ * worker is shut down when dictation has been idle for a while. Loading it again takes a second or
+ * more (several for the larger models), so the wait covers a run of dictations, as for read aloud.
  */
-const IDLE_DISPOSE_MS = 30_000
+export const IDLE_DISPOSE_MS = 5 * 60_000
+
+/** How far the model of the current worker has got. */
+export type LocalEngineState = 'cold' | 'loading' | 'ready'
 
 /** One worker at a time, for the model that was used last. */
-let worker: { modelId: LocalSttModelId; worker: Worker } | null = null
+let worker: { modelId: LocalSttModelId; worker: Worker; warming: Promise<void> | null; ready: boolean } | null = null
 let lastRequestId = 0
-let activeTranscriptions = 0
+/** Warm-ups and transcriptions in flight; the worker is never disposed under them. */
+let busy = 0
 let idleTimer: ReturnType<typeof setTimeout> | null = null
 const pending = new Map<number, Pending>()
+/** The current profile's vocabulary, sent with every transcription (Settings, Speech). */
+let vocabulary: readonly DictationVocabularyTerm[] = []
+
+/** Sets the terms local transcriptions use from now on; speech preferences call this. */
+export function setLocalDictationVocabulary(terms: readonly DictationVocabularyTerm[]): void {
+  vocabulary = terms
+}
 
 function failAll(error: Error): void {
   for (const request of pending.values()) request.reject(error)
@@ -37,8 +50,8 @@ function createWorker(model: LocalSttModel): Worker {
   }
 }
 
-function ensureWorker(model: LocalSttModel): Worker {
-  if (worker?.modelId === model.id) return worker.worker
+function ensureWorker(model: LocalSttModel): NonNullable<typeof worker> {
+  if (worker?.modelId === model.id) return worker
   disposeLocalEngine()
   const created = createWorker(model)
   const init: LocalSttWorkerRequest = { type: 'init', modelId: model.id }
@@ -58,8 +71,8 @@ function ensureWorker(model: LocalSttModel): Worker {
     created.terminate()
     failAll(new Error(event.message || 'The local speech engine stopped unexpectedly'))
   })
-  worker = { modelId: model.id, worker: created }
-  return created
+  worker = { modelId: model.id, worker: created, warming: null, ready: false }
+  return worker
 }
 
 function cancelIdleDispose(): void {
@@ -71,8 +84,18 @@ function scheduleIdleDispose(): void {
   cancelIdleDispose()
   idleTimer = setTimeout(() => {
     idleTimer = null
-    if (activeTranscriptions === 0) disposeLocalEngine()
+    if (busy === 0) disposeLocalEngine()
   }, IDLE_DISPOSE_MS)
+}
+
+/** Marks the start of work that must keep the worker alive; the returned function marks its end. */
+function hold(): () => void {
+  cancelIdleDispose()
+  busy++
+  return () => {
+    busy--
+    if (busy === 0) scheduleIdleDispose()
+  }
 }
 
 /** Drops the loaded model, e.g. after its files were deleted or when it has been idle. */
@@ -83,17 +106,71 @@ export function disposeLocalEngine(): void {
   failAll(new Error('The local speech engine was stopped'))
 }
 
-function transcribeSegment(model: LocalSttModel, samples: Float32Array): Promise<string> {
+/** Sends one request to the worker of `model`, starting it if needed, and waits for the answer. */
+function ask(model: LocalSttModel, message: (id: number) => LocalSttWorkerRequest, transfer: Transferable[] = []): Promise<string> {
   return new Promise((resolve, reject) => {
     // Before the request is registered: switching models stops the old worker and fails its requests.
     const target = ensureWorker(model)
     const id = ++lastRequestId
     pending.set(id, { resolve, reject })
-    // Copy: segments are views of one large buffer, and transferring would detach all of it.
-    const copy = samples.slice()
-    const request: LocalSttWorkerRequest = { type: 'transcribe', id, samples: copy }
-    target.postMessage(request, [copy.buffer])
+    target.worker.postMessage(message(id), transfer)
   })
+}
+
+/** Whether the worker for `modelId` has its model loaded, is loading it, or has none. */
+export function localEngineState(modelId: LocalSttModelId): LocalEngineState {
+  if (worker?.modelId !== modelId) return 'cold'
+  return worker.ready ? 'ready' : worker.warming ? 'loading' : 'cold'
+}
+
+/**
+ * Starts the worker for `modelId` and loads its model, so a recording that starts now does not wait
+ * for loading when it stops. Does nothing more when that model is loaded or loading. A failure is
+ * left for the transcription that follows to report.
+ */
+export function warmLocalEngine(modelId: LocalSttModelId): void {
+  const model = findLocalSttModel(modelId)
+  if (!model) return
+  const release = hold()
+  const current = ensureWorker(model)
+  if (current.warming || current.ready) {
+    release()
+    return
+  }
+  const started = performance.now()
+  current.warming = ask(model, (id) => ({ type: 'warm', id }))
+    .then(() => {
+      current.ready = true
+      console.info(`[dictation] ${model.label} ready in ${Math.round(performance.now() - started)} ms`)
+    })
+    .catch(() => {
+      // Let the next recording try again; the transcription reports the error.
+      current.warming = null
+    })
+    .finally(release)
+}
+
+function transcribeSegment(model: LocalSttModel, samples: Float32Array): Promise<string> {
+  // Copy: segments are views of one large buffer, and transferring would detach all of it.
+  const copy = samples.slice()
+  return ask(model, (id) => ({ type: 'transcribe', id, samples: copy, vocabulary }), [copy.buffer])
+}
+
+/**
+ * Transcribes one piece of 16 kHz audio (at most the model's longest segment) with a local model.
+ * Live dictation sends each piece as the user pauses (`liveTranscription.ts`).
+ */
+export async function transcribeLocalSamples(modelId: LocalSttModelId, samples: Float32Array): Promise<string> {
+  const model = findLocalSttModel(modelId)
+  if (!model) throw new Error(`Unknown local dictation model: ${modelId}`)
+  const release = hold()
+  try {
+    const text = await transcribeSegment(model, samples)
+    if (worker?.modelId === model.id) worker.ready = true
+    return text
+  } finally {
+    release()
+  }
 }
 
 /**
@@ -109,16 +186,20 @@ export async function transcribeWithLocalModel(
 ): Promise<string> {
   const model = findLocalSttModel(modelId)
   if (!model) throw new Error(`Unknown local dictation model: ${modelId}`)
-  cancelIdleDispose()
-  activeTranscriptions++
+  const release = hold()
   try {
     signal?.throwIfAborted()
+    const state = localEngineState(model.id)
+    const started = performance.now()
     const samples = await decodeRecording(recording, model.sampleRate)
+    const decoded = performance.now()
     const minSamples = Math.ceil(MIN_SEGMENT_SECONDS * model.sampleRate)
     const parts: string[] = []
+    let segments = 0
     for (const segment of splitIntoSegments(samples, model.sampleRate, model.maxSegmentSeconds)) {
       signal?.throwIfAborted()
       if (segment.length < minSamples) continue
+      segments++
       const text = await transcribeSegment(model, segment)
       if (text) {
         parts.push(text)
@@ -126,9 +207,14 @@ export async function transcribeWithLocalModel(
       }
     }
     signal?.throwIfAborted()
+    if (worker?.modelId === model.id) worker.ready = true
+    const seconds = (samples.length / model.sampleRate).toFixed(1)
+    console.info(
+      `[dictation] ${model.label}: ${seconds} s of audio, decoded in ${Math.round(decoded - started)} ms, ` +
+        `${segments} segment(s) in ${Math.round(performance.now() - decoded)} ms, model was ${state}`
+    )
     return parts.join(' ')
   } finally {
-    activeTranscriptions--
-    if (activeTranscriptions === 0) scheduleIdleDispose()
+    release()
   }
 }

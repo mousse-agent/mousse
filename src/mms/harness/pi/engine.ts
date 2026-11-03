@@ -1,12 +1,15 @@
 import { execFile } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
 import { closeSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, rmSync } from 'node:fs'
+import { homedir } from 'node:os'
 import { join, resolve as resolvePath } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
 import { isRetryableAssistantError } from '@earendil-works/pi-ai'
 import { AppError } from '../../../shared/errors'
 import { piPermissionKey, piToolAction } from '../../../shared/permissionKeys'
 import { permissionModeAllows } from '../../../shared/permissionMode'
+import { permissionActionForWrite } from '../../files/gitMetadataWrite'
 import { harnessAppError } from '../../../shared/harness/types'
 import { parseThinkingSuffixFromModelId } from '../../../shared/modelVariants'
 import { atomicWriteFileSync, atomicWriteJsonSync } from '../../data/AtomicFs'
@@ -474,6 +477,27 @@ interface StartingTurn {
   thread?: PiThreadProcess
   turn?: PiTurn
   cancelled: boolean
+}
+
+const UNICODE_SPACES = /[\u00A0\u2000-\u200A\u202F\u205F\u3000]/g
+
+/**
+ * The path a Pi file tool writes, spelled as Pi resolves it (`resolveToCwd` in pi-coding-agent): odd spaces read as
+ * spaces, a leading `@` is dropped, and `~` is the home folder. Relative paths stay relative to the thread's folder.
+ */
+function piToolPath(path: string): string {
+  let normalized = path.replace(UNICODE_SPACES, ' ')
+  if (normalized.startsWith('@')) normalized = normalized.slice(1)
+  if (normalized === '~') return homedir()
+  if (normalized.startsWith('~/') || (process.platform === 'win32' && normalized.startsWith('~\\'))) return join(homedir(), normalized.slice(2))
+  if (/^file:\/\//.test(normalized)) {
+    try {
+      return fileURLToPath(normalized)
+    } catch {
+      return normalized
+    }
+  }
+  return normalized
 }
 
 export class PiRpcEngine implements ProviderAdapter {
@@ -1173,28 +1197,36 @@ export class PiRpcEngine implements ProviderAdapter {
 
   /**
    * Asks the user before a built-in tool the turn's permission mode does not allow without asking
-   * (`bash` under Ask and Auto-accept edits, `edit` and `write` under Ask). Null when the call may go
-   * on. A turn with no way to ask, or whose approvals are refused, denies: nothing runs unapproved.
+   * (`bash` under Ask and Auto-accept edits, `edit` and `write` under Ask). An edit or write into Git's
+   * own files counts as a command (`permissionActionForWrite`) and names the file. Null when the call may
+   * go on. A turn with no way to ask, or whose approvals are refused, denies: nothing runs unapproved.
    */
   private async askPermission(turn: PiTurn, toolName: string, input: Record<string, unknown>, cwd: string): Promise<PiGateResponse | null> {
-    const action = piToolAction(toolName)
-    if (!action || permissionModeAllows(turn.input.permissionMode, action)) return null
+    const kind = piToolAction(toolName)
+    // Full access runs commands and edits alike without asking.
+    if (!kind || permissionModeAllows(turn.input.permissionMode, 'command')) return null
+    const target = typeof input.path === 'string' ? input.path : undefined
+    const write = kind === 'edit' && target !== undefined ? await permissionActionForWrite(cwd, piToolPath(target)) : undefined
+    const action = write?.action ?? kind
+    if (permissionModeAllows(turn.input.permissionMode, action)) return null
     const prompter = turn.host.bridge?.permission
     const denied = (reason: string): PiGateResponse => ({ allow: false, reason })
     if (!prompter || prompter.approvals === 'never') return denied(`${GATE_REFUSALS.denied}: ${toolName} needs the user's approval and this turn cannot ask`)
-    const detail = typeof input.command === 'string' ? input.command : typeof input.path === 'string' ? input.path : JSON.stringify(input)
+    const detail = typeof input.command === 'string' ? input.command : target ?? JSON.stringify(input)
+    const what = write?.action === 'command' ? "change Git's own files" : kind === 'command' ? 'run this command' : 'edit this file'
     try {
       const chosen = await prompter.choose({
         threadId: turn.input.threadId,
-        title: `Allow Pi to ${action === 'command' ? 'run this command' : 'edit this file'}?\n${detail.slice(0, 4000)}`,
+        title: write?.action === 'command' ? `Allow Pi to ${what} (${write.gitFile})?` : `Allow Pi to ${what}?\n${detail.slice(0, 4000)}`,
         options: [
           { optionId: 'allow', kind: 'allow_once', label: 'Allow once', scope: 'once' },
           { optionId: 'reject', kind: 'reject_once', label: 'Reject', scope: 'once' }
         ],
-        approval: { action, permissionKey: piPermissionKey(action), tool: { name: toolName, input, cwd } }
+        // The key stays the tool's class (an edit); the action is what the mode and who may answer go by.
+        approval: { action, permissionKey: piPermissionKey(kind), tool: { name: toolName, input, cwd } }
       })
       if (chosen === 'allow' && !turn.input.signal.aborted) return null
-      return denied(`The user rejected the request to ${action === 'command' ? 'run this command' : 'edit this file'}. Do not retry it unless they ask.`)
+      return denied(`The user rejected the request to ${what}. Do not retry it unless they ask.`)
     } catch {
       return denied(`${GATE_REFUSALS.denied}: the user did not approve ${toolName}`)
     }

@@ -223,7 +223,7 @@ import { waitForFolderAccess, type WaitOptions } from '../files/folderAccess'
 import { resolveProjectWorkingDirectory } from '../data/projectWorkingDirectory'
 import { lineageForChild } from '../data/subagentLineage'
 import { SNAPSHOT_STORE_REASON, WorkspaceResolver, modeMutatesFiles, unprovisionedContext } from '../workspace/WorkspaceResolver'
-import { ensureSnapshotWorkspace, setSnapshotsOff } from '../workspace/SnapshotWorkspace'
+import { ensureSnapshotWorkspaceAsync, loadSnapshotWorkspaceMetadataAsync, setSnapshotsOff } from '../workspace/SnapshotWorkspace'
 import { threadPlacement, type ThreadPlacement } from '../workspace/threadPlacement'
 import { ThreadWorkspaceManager } from '../workspace/ThreadWorkspaceManager'
 import { findWorktreeOwner } from '../scheduled/validateJobOptions'
@@ -237,10 +237,10 @@ import type { MousseFeatureFlags } from '../../shared/featureFlags'
 import { DEFAULT_FEATURE_FLAGS } from '../../shared/featureFlags'
 import { ThreadActionService } from '../actions/ThreadActionService'
 import { cancelledIntegrationsNotice, cancelPendingIntegrations } from '../agents/ChildAgentIntegrationService'
-import { buildSubagentResultReport, delegationResultRefPrefix, formatSubagentResultReport, readSubagentResults, recordedFilesAt, SUBAGENT_RESULTS_FILE, writeSubagentResults, type SubagentResultReport } from '../agents/subagentResultReport'
+import { buildSubagentResultReport, buildSubagentResultReportAsync, delegationResultRefPrefix, formatSubagentResultReport, readSubagentResults, recordedFilesAt, SUBAGENT_RESULTS_FILE, writeSubagentResults, type SubagentResultReport } from '../agents/subagentResultReport'
 import type { NativeContextBoundary } from '../../shared/threadActions'
-import { coverageNotice, SnapshotRefusedError, snapshotOrigin } from '../actions/snapshots'
-import { git as actionGit, requireClean as requireCleanWorkspace } from '../actions/git'
+import { coverageNotice, SnapshotRefusedError, snapshotOriginAsync } from '../actions/snapshots'
+import { git as actionGit, gitAsync as actionGitAsync, requireCleanAsync as requireCleanWorkspaceAsync } from '../actions/git'
 import {
   claimNextNormal,
   clearPendingQueue,
@@ -1503,15 +1503,15 @@ export class OrchestratorService extends EventEmitter {
       ...(patch?.activeMessageId !== undefined ? { activeMessageId: patch.activeMessageId } : existing?.activeMessageId ? { activeMessageId: existing.activeMessageId } : {}),
       ...(patch?.error ? { error: patch.error } : existing?.error && phase === 'failed' ? { error: existing.error } : {}),
     } as TurnState
-    if (patch?.turnId !== undefined && patch.turnId !== existing?.turnId) (state as any).startedAt = now
-    if (phase !== 'streaming' && phase !== 'tool_running') delete (state as any).activeMessageId
-    if (phase === 'idle') { state.turnId = null; delete (state as any).startedAt }
-    if (phase !== 'failed') { delete (state as any).error; delete state.errorDescriptor }
+    if (patch?.turnId !== undefined && patch.turnId !== existing?.turnId) state.startedAt = now
+    if (phase !== 'streaming' && phase !== 'tool_running') delete state.activeMessageId
+    if (phase === 'idle') { state.turnId = null; delete state.startedAt }
+    if (phase !== 'failed') { delete state.error; delete state.errorDescriptor }
     // The pause is only part of the paused state; any other phase drops it.
     if (phase === 'paused' && patch?.pause) state.pause = patch.pause
     else delete state.pause
-    if ((phase === 'queued' || phase === 'thinking') && !existing?.startedAt) (state as any).startedAt = now
-    if (phase !== 'idle' && !(state as any).startedAt) (state as any).startedAt = existing?.startedAt ?? now
+    if ((phase === 'queued' || phase === 'thinking') && !existing?.startedAt) state.startedAt = now
+    if (phase !== 'idle' && !state.startedAt) state.startedAt = existing?.startedAt ?? now
     this.turnStates.set(threadId, state)
     if (HEARTBEAT_TURN_PHASES.has(phase)) this.heartbeatRun(state.turnId)
     else if (existing?.turnId) this.runHeartbeats.delete(existing.turnId)
@@ -3382,6 +3382,9 @@ export class OrchestratorService extends EventEmitter {
     // A bot's thread acts for a person outside Mousse and starts no threads.
     if (this.botThreads?.roleOf(options.actor.threadId)) throw new McpToolError('mousse_scope_denied', 'A thread that belongs to a bot cannot create threads.')
     const key = options.clientRequestId
+    // Whether the project is a Git repository, read ahead without blocking, so the receipt is looked up, planned and
+    // recorded below with nothing awaited in between. Only for a request not seen before.
+    const gitBacked = engine.store.getReceipt(key) ? false : await this.projectGitBacked(input.projectId)
     const stored = engine.store.getReceipt(key)
     let intent: AgentThreadIntent
     if (stored) {
@@ -3390,7 +3393,7 @@ export class OrchestratorService extends EventEmitter {
       intent = earlier.intent
     } else {
       // Everything that can refuse does so here, before anything is recorded or made.
-      intent = this.planAgentThread(input, options)
+      intent = this.planAgentThread(input, options, gitBacked)
       engine.store.putReceipt({
         clientRequestId: key,
         threadId: options.actor.threadId,
@@ -3408,17 +3411,23 @@ export class OrchestratorService extends EventEmitter {
   }
 
   /** The launch an agent asked for, checked against the project, the profile and the caller's own limits. Throws what it refuses. */
-  private planAgentThread(input: AgentThreadRequest, options: { actor: AgentActor; accessLevel: AgentAccessLevel }): AgentThreadIntent {
+  /** Whether a project's folder is a Git repository a worktree can be made in; false for an unknown project or one Git cannot read. */
+  private async projectGitBacked(projectId: string): Promise<boolean> {
+    const project = this.projectManager?.getProject(projectId)
+    if (!project) return false
+    try {
+      return (await new ThreadWorkspaceManager('').resolveRepositoryAsync(project.path)).capability.gitBacked
+    } catch {
+      return false
+    }
+  }
+
+  /** `gitBacked`: {@link projectGitBacked} of the project, read by the caller before the receipt lookup. */
+  private planAgentThread(input: AgentThreadRequest, options: { actor: AgentActor; accessLevel: AgentAccessLevel }, gitBacked: boolean): AgentThreadIntent {
     const engine = this.requireRunEngine()
     const project = this.projectManager?.getProject(input.projectId)
     if (!project) throw new Error(`Project ${input.projectId} was not found.`)
     // A worktree needs Git: on any other project a "new worktree" thread would write in the project folder, beside others.
-    let gitBacked = false
-    try {
-      gitBacked = new ThreadWorkspaceManager('').resolveRepository(project.path).capability.gitBacked
-    } catch {
-      gitBacked = false
-    }
     if (input.workspace === 'new_worktree' && !gitBacked)
       throw new Error('workspace "new_worktree" needs a Git project: this project is not backed by a Git repository, so a thread there would work in the project folder. Use workspace "project". No thread was created.')
     // However many runs this thread has made, only so many of its launched threads may be working at once.
@@ -5191,7 +5200,7 @@ export class OrchestratorService extends EventEmitter {
     try {
       if (manager.load()) seed = { kind: 'existing_workspace' }
       else if (this.placementOf(threadId) === 'project-folder') seed = { kind: 'project_folder' }
-      else if (!manager.resolveRepository(projectPath).capability.gitBacked) seed = { kind: 'not_git_backed' }
+      else if (!(await manager.resolveRepositoryAsync(projectPath)).capability.gitBacked) seed = { kind: 'not_git_backed' }
       else {
         const sourceDir = this.resolveThreadDir(fork.sourceThreadId)
         const sourceRunId = String(fork.payload.sourceRunId ?? '')
@@ -5205,11 +5214,11 @@ export class OrchestratorService extends EventEmitter {
         seed = checkpoint
           ? { kind: 'checkpoint', sha: checkpoint.endSha, actionId: checkpoint.id }
           : sourceWorkspace?.lifecycle === 'ready'
-            ? { kind: 'source_head', sha: actionGit(sourceWorkspace.worktreePath, ['rev-parse', 'HEAD']) }
+            ? { kind: 'source_head', sha: await actionGitAsync(sourceWorkspace.worktreePath, ['rev-parse', 'HEAD']) }
             : { kind: 'primary_head' }
         // A checkpoint is a snapshot: the fork's worktree is made at the commit the snapshot was taken on (the source's
         // HEAD then) and the snapshot's files are written over it, so no snapshot commit becomes the fork's branch.
-        const seedHead = checkpoint ? snapshotOrigin(sourceWorkspace?.worktreePath ?? projectPath, checkpoint.endSha).head : undefined
+        const seedHead = checkpoint ? (await snapshotOriginAsync(sourceWorkspace?.worktreePath ?? projectPath, checkpoint.endSha)).head : undefined
         await manager.provision(threadId, 'main', projectPath, signal, lease ?? undefined, checkpoint ? seedHead : typeof seed.sha === 'string' ? seed.sha : undefined, { ...(checkpoint ? { snapshot: checkpoint.endSha } : {}), nameFrom: this.branchNameSource(threadId) })
       }
     } catch (error) {
@@ -9115,7 +9124,8 @@ export class OrchestratorService extends EventEmitter {
     // operations below under that lease, before workspace verification/dispatch.
     const recoveryDirectory = session.threadId !== '__unbound__' ? this.resolveThreadDir(session.threadId) : undefined
     const recoveryManager = recoveryDirectory ? new ThreadWorkspaceManager(recoveryDirectory) : undefined
-    const recoveryWorkspace = recoveryManager?.loadOrSnapshot()
+    // A thread recording into a hidden store is looked up without blocking; only then does this wait before the lease.
+    const recoveryWorkspace = recoveryManager ? recoveryManager.load() ?? await loadSnapshotWorkspaceMetadataAsync(recoveryDirectory!) : undefined
     // Acquire cross-process execution lease before mutating thread state.
     let lease: ThreadLeaseHandle | null = session.executionLease
     if (session.threadId !== '__unbound__') {
@@ -9142,7 +9152,7 @@ export class OrchestratorService extends EventEmitter {
     if (recoveryDirectory && recoveryWorkspace && session.executionLease) {
       const heldLease = session.executionLease
       // A merge of a subagent's result an older version left unfinished is cancelled, never run again; the thread hears of it.
-      const cancelledIntegrations = cancelledIntegrationsNotice(cancelPendingIntegrations(recoveryDirectory, recoveryWorkspace.worktreePath))
+      const cancelledIntegrations = cancelledIntegrationsNotice(await cancelPendingIntegrations(recoveryDirectory, recoveryWorkspace.worktreePath))
       if (cancelledIntegrations) this.sessionAls.run(session, () => this.addSystemMessage(cancelledIntegrations))
       const primary = this.projectManager && this.threadStore
         ? resolveThreadProjectPath(this.projectManager, this.threadStore, session.threadId) : undefined
@@ -9180,7 +9190,7 @@ export class OrchestratorService extends EventEmitter {
       let gitBacked = false
       try {
         const threadDir = this.resolveThreadDir(session.threadId)
-        gitBacked = Boolean(threadDir && new ThreadWorkspaceManager(threadDir).resolveRepository(session.primaryCheckout.path).capability.gitBacked)
+        gitBacked = Boolean(threadDir && (await new ThreadWorkspaceManager(threadDir).resolveRepositoryAsync(session.primaryCheckout.path)).capability.gitBacked)
       } catch {
         // Not a repository the checkout code understands: the context says so.
       }
@@ -9258,7 +9268,7 @@ export class OrchestratorService extends EventEmitter {
         // A folder with no worktree: a folder Mousse cannot snapshot (too large, a home folder) never fails the turn;
         // it runs with its conversation recorded alone, and Undo says why the files are not.
         try {
-          const prepared = ensureSnapshotWorkspace({ threadDirectory: snapshotFolder.directory, threadId: snapshotFolder.threadId, workTree: snapshotFolder.workTree, projectId: snapshotFolder.projectId })
+          const prepared = await ensureSnapshotWorkspaceAsync({ threadDirectory: snapshotFolder.directory, threadId: snapshotFolder.threadId, workTree: snapshotFolder.workTree, projectId: snapshotFolder.projectId })
           checkpointCwd = prepared.record.workTree
           turnStartSha = (await new ThreadActionService(snapshotFolder.directory).recordOutsideChanges({
             threadId: session.threadId, conversationBranchId, workspacePath: checkpointCwd,
@@ -9281,10 +9291,15 @@ export class OrchestratorService extends EventEmitter {
           presentationMessageStart: turnPresentationStart, nativeContextBoundary: turnNativeStartBoundary
         })).startSha
       } else {
-        requireCleanWorkspace(checkpointCwd, 'Thread workspace')
-        turnStartSha = actionGit(checkpointCwd, ['rev-parse', 'HEAD'])
+        await requireCleanWorkspaceAsync(checkpointCwd, 'Thread workspace')
+        turnStartSha = await actionGitAsync(checkpointCwd, ['rev-parse', 'HEAD'])
       }
     }
+    // What `beginTurn` checks of the start, read here without blocking, where the turn already waited for its snapshot:
+    // `beginTurn` itself runs with nothing awaited before the turn is registered, and reports the result as it always has.
+    const turnStartCheck = checkpointEnabled && turnStartSha && checkpointCwd
+      ? await new ThreadActionService(this.resolveThreadDir(session.threadId)!).checkTurnStart(checkpointCwd, turnStartSha)
+      : undefined
     // Keep user commits visible in the sidebar. Internal orchestration wakes stay hidden.
     if (!reuseLastUser && displayUserMessage) {
       this.touchUserActivityAndNotify(session.threadId)
@@ -9385,7 +9400,7 @@ export class OrchestratorService extends EventEmitter {
         ...(turnStartNote ? { startNote: turnStartNote } : {}),
         presentationMessageStart: turnPresentationStart, presentationMessageEnd: session.messages.length,
         nativeContextStartBoundary: turnNativeStartBoundary, nativeContextBoundary: turnNativeStartBoundary
-      }, turnStartSha)
+      }, turnStartSha, turnStartCheck)
     }
     const turn: ActiveTurnControl = {
       abort: new AbortController(),
@@ -10899,7 +10914,9 @@ export class OrchestratorService extends EventEmitter {
 
   /**
    * Explicit cleanup of validated agent worktrees only. Ghost directories are never deleted.
-   * Cancelled/failed/ready worktrees are kept unless their agent ids are listed.
+   * Cancelled/failed/ready worktrees are kept unless their agent ids are listed. A worktree's ignored
+   * files are kept first, as a copy the agent's thread owns; with no thread, or when they cannot be
+   * kept, the worktree stays.
    */
   async cleanupAgentWorktrees(
     agentIds: string[],
@@ -10912,12 +10929,14 @@ export class OrchestratorService extends EventEmitter {
       .map((agent) => ({ path: agent.worktreePath, branch: agent.branch, id: agent.id }))
 
     for (const target of targets) {
+      const threadId = this.agentOwner(target.id)?.threadId
+      const owner = threadId ? this.resolveThreadDir(threadId) : null
       const result = await this.worktrees.cleanupValidatedAgentWorktree(
         { path: target.path, branch: target.branch },
-        options
+        { ...options, ...(owner ? { keepIgnored: { owner } } : {}) }
       )
       if (result.success) {
-        logs.push(`[worktree] Removed validated worktree for ${target.id.slice(0, 8)}`)
+        logs.push(`[worktree] Removed validated worktree for ${target.id.slice(0, 8)}${result.copy ? `; its ${result.copy.files} ignored files are kept as ${result.copy.ref}` : ''}`)
       } else {
         logs.push(`[worktree] Cleanup refused/failed for ${target.id.slice(0, 8)}: ${result.error}`)
       }
@@ -10935,8 +10954,8 @@ export class OrchestratorService extends EventEmitter {
     try {
       return await this.withTaskWriter(owner, async () => {
         const directory = this.resolveThreadDir(owner.threadId)!
-        const base = actionGit(agent.worktreePath, ['rev-parse', `refs/mousse/agents/${agent.id}/base`])
-        const workerHead = actionGit(agent.worktreePath, ['rev-parse', 'HEAD'])
+        const base = await actionGitAsync(agent.worktreePath, ['rev-parse', `refs/mousse/agents/${agent.id}/base`])
+        const workerHead = await actionGitAsync(agent.worktreePath, ['rev-parse', 'HEAD'])
         if (agent.readyCommit && agent.readyCommit !== workerHead) throw new Error('Worker HEAD changed after readiness validation')
         const workerAction = await new ThreadActionService(join(directory, 'agent-changes', agent.id)).checkpointExistingTurn({
           threadId: agent.id, turnId: `worker-result:${agent.id}`, conversationBranchId: 'main',
@@ -10945,7 +10964,7 @@ export class OrchestratorService extends EventEmitter {
           presentationMessageStart: 0, presentationMessageEnd: 0,
           nativeContextBoundary: { messageIndex: 0, compactionGeneration: 0, fidelity: 'exact' }
         }, base, 'completed')
-        const report = buildSubagentResultReport({
+        const report = await buildSubagentResultReportAsync({
           cwd: agent.worktreePath, workedIn: agent.worktreePath, shared: false, baseSha: base, resultSha: workerAction.endSha,
           pins: { result: `refs/mousse/agents/${agent.id}/result` }
         })

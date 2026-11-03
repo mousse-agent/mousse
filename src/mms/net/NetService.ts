@@ -72,7 +72,7 @@ import { SqliteNodePolicy } from './store/nodePolicy'
 import { SqliteBridgeAudit } from './store/audit'
 import { SqliteRemoteLists } from './store/remoteLists'
 import { FileBlobStore } from './store/blobs'
-import { FileKeyStore, NetIdentityService } from './identity'
+import { FileKeyStore, NetIdentityService, setAsideKeychainNetwork } from './identity'
 import { ProfileTransports } from './transports/manager'
 import { DirectTransport } from './transports/direct'
 import { inboundPrincipal } from './transports/admission'
@@ -128,6 +128,8 @@ import type { RelayIdentity } from './relay/protocol'
 import { inviteRequiresProtection } from './enrollment/service'
 import { RouteManagerImpl } from './link/routeManager'
 import { openSecureChannel } from './link/secureChannel'
+import { fingerprint } from './link/selfSignedCert'
+import { decodeBase64 } from './identity/crypto'
 import { NetSyncSession, type SyncSessionOptions } from './sync/session'
 import { NodeStreamAuthority } from './sync/nodeAuthority'
 import { SyncSupervisor } from './sync/supervisor'
@@ -178,6 +180,28 @@ interface NetConfiguration {
   addonRecords?: Record<string, { action: string; appliedAt: number; record: unknown }>
   preparedForJoin?: boolean
 }
+/** Transports that carry a session through a relay server rather than straight to the peer. */
+const RELAY_TRANSPORTS = new Set(['relay', HOSTED_RELAY_TRANSPORT])
+
+/**
+ * The open session with `node` to use. Both computers may hold one, each dialed by one side; one
+ * that does not go through a relay (a direct or tailnet link) wins, because every message through
+ * a relay pays its round trip.
+ */
+export function preferredSession<S extends Pick<SyncSession, 'state' | 'peer'>>(
+  sessions: Iterable<S>,
+  node: NodeId,
+  transportOf: (session: S) => string | undefined
+): S | undefined {
+  let relayed: S | undefined
+  for (const session of sessions) {
+    if (session.state() !== 'open' || session.peer.node !== node) continue
+    if (!RELAY_TRANSPORTS.has(transportOf(session) ?? '')) return session
+    relayed ??= session
+  }
+  return relayed
+}
+
 export interface NetRuntime {
   db: NetDatabase
   keys: FileKeyStore
@@ -351,6 +375,7 @@ export class NetService {
   runtime(): NetRuntime {
     if (this.stopped) throw new NetError('cancelled')
     if (this.state) return this.state
+    setAsideKeychainNetwork(this.options.profileDir)
     const db = new NetDatabase({ profileDir: this.options.profileDir, clock: this.clock })
     try {
       db.transaction(() =>
@@ -555,7 +580,7 @@ export class NetService {
         },
         handle: async () => {
           return {
-            protected: keys.encryptedAtRest(),
+            protected: keys.protectedAtRest(),
             unlocked: keys.state() === 'unlocked',
             node: identity.self()?.node
           }
@@ -707,7 +732,7 @@ export class NetService {
       void this.tunnels.sweepStrays()
       return this.state
     } catch (error) {
-      this.domain?.close?.()
+      void this.domain?.close?.()
       this.domain = undefined
       this.state = undefined
       db.close()
@@ -766,6 +791,14 @@ export class NetService {
     if (method === 'net.transport.list' && (this.disabled || !this.config.enabled))
       return this.transportList()
     if (this.disabled) throw new NetError('disabled')
+    // Signing in to Mousse ID on a computer with no network identity joins the account's network.
+    if (
+      this.hosted &&
+      ['net.plus.discover', 'net.plus.login.begin', 'net.plus.login.finish'].includes(method) &&
+      ((method === 'net.plus.login.finish' && this.hosted.handlesJoin(String(params.id))) ||
+        !this.hasIdentity())
+    )
+      return this.track(this.hosted.joinSignIn(method, params))
     if (!['net.init', 'bridge.join'].includes(method)) this.assertEnabled()
     if (method.startsWith('bridge.') && method !== 'bridge.join') this.assertFeature('netBridge')
     if (method === 'net.doctor') return this.doctor()
@@ -1182,8 +1215,33 @@ export class NetService {
       directPathChanged: () => this.syncPhoneWebRtc(),
       relayIdentity: () => this.relayIdentity(),
       issueRendezvousInvite: (input) => this.issueRendezvousInvite(input),
-      revokeUnsentInvite: (invite, error) => this.revokeUnsentInvite(invite, error)
+      revokeUnsentInvite: (invite, error) => this.revokeUnsentInvite(invite, error),
+      createIdentity: async (name) => {
+        await this.init({ name })
+        const rt = this.runtime()
+        if (!rt.keys.encryptedAtRest()) rt.keys.protect()
+        this.emit()
+      },
+      prepareJoin: async () => {
+        const rt = this.runtime()
+        if (rt.identity.self()) throw new NetError('conflict', 'This profile already has an identity.')
+        if (rt.keys.state() === 'missing') await rt.keys.initialize({ asAuthority: false })
+        this.config.preparedForJoin = true
+        this.saveConfig()
+        if (rt.keys.state() !== 'unlocked') throw new NetError('keystore_locked')
+        if (!rt.keys.encryptedAtRest()) rt.keys.protect()
+        return { transportFingerprint: fingerprint(decodeBase64(rt.keys.nodeKeys().transport)) }
+      },
+      joinWithInvite: async (invite, name) => {
+        await this.join(invite, name)
+      }
     }
+  }
+  /** A network identity exists for this profile; never creates the network database. */
+  private hasIdentity(): boolean {
+    return (
+      existsSync(join(this.options.profileDir, 'net', 'net.db')) && !!this.runtime().identity.self()
+    )
   }
   /** Invites that a phone redeems over a relay rendezvous; the only route a phone can dial. */
   private async issueRendezvousInvite(
@@ -1447,7 +1505,9 @@ export class NetService {
         this.config.enabled &&
         this.featureEnabled('netBridge') &&
         this.state?.keys.state() === 'unlocked' &&
-        this.transport?.hasPlusRelayListener() === true &&
+        // The Mousse ID relay is on, not "listening on it right now": a listener waiting to listen
+        // again (a quota refusal, a relay restart) must not close every phone's direct path.
+        this.transport?.hasPlusRelay() === true &&
         this.hosted.directPath?.().webrtc !== false
       )
     } catch {
@@ -2323,11 +2383,16 @@ export class NetService {
   editorTunnelConnectionClosed(connection: string): void {
     this.localTunnelStore?.closeConnection(connection)
   }
+  /** An open session with `node`, see {@link preferredSession}. */
   session(node: NodeId): SyncSession {
     this.assertEnabled()
-    for (const session of this.sessions)
-      if (session.state() === 'open' && session.peer.node === node) return session
-    throw new NetError('peer_offline')
+    const session = preferredSession(
+      this.sessions,
+      node,
+      (row) => this.sessionLinks.get(row)?.transport
+    )
+    if (!session) throw new NetError('peer_offline')
+    return session
   }
   /** True while an open session (of `node`, when given) is being served the stream. */
   streamSubscribed(stream: StreamId, node?: NodeId): boolean {
@@ -2534,7 +2599,7 @@ export class NetService {
         rt.keys.protect(passphrase)
       }
     }
-    if (needsProtection && !rt.keys.encryptedAtRest()) throw new NetError('keystore_locked')
+    if (needsProtection && !rt.keys.protectedAtRest()) throw new NetError('keystore_locked')
     const prepared = await rt.enrollment.prepareNodeJoin(invite, name)
     if (prepared.state !== 'enrolled') {
       const transport = new ProfileTransports({
@@ -2751,7 +2816,7 @@ export class NetService {
         editorServer: this.editorServerView(),
         ...(this.disabled ? { restartRequired: true } : {}),
         keystore: rt.keys.state(),
-        protected: rt.keys.encryptedAtRest(),
+        protected: rt.keys.protectedAtRest(),
         ...(rt.keys.vaultUnavailable?.() ? { vaultUnavailable: true } : {}),
         ...(self ? { self, rosterState: rt.identity.rosterState(self.user) } : {}),
         routes: this.transport?.routes() ?? [],
@@ -3268,8 +3333,9 @@ export class NetService {
         this.presences().clearLegacy(peer.node)
         return
       }
-      // A phone is a browser client with no daemon behind it.
-      if (link.transport === PHONE_WEBRTC_TRANSPORT) return
+      // A phone is a browser client with no daemon behind it, on any carrier: it answers no
+      // requests, and ends a session that sends it one. Only a computer sends a routes record.
+      if (link.transport === PHONE_WEBRTC_TRANSPORT || !this.publishesRoutes(peer.node)) return
       void this.track(this.readPeerInfo(session, peer.node))
     } catch {
       // Presence never affects a session.

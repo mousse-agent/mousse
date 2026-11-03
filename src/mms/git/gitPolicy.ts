@@ -1,9 +1,10 @@
 import { AsyncLocalStorage } from 'node:async_hooks'
-import { spawnSync } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import { realpathSync } from 'node:fs'
+import { realpath } from 'node:fs/promises'
 import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path'
 import { getMousseHomeDir } from '../data/paths'
-import { gitDirectoryEnv, isGitDirectory, stripInheritedGitEnv, withGitConfigEnv } from './gitEnv'
+import { isGitDirectory, isGitDirectoryAsync, stripInheritedGitEnv, withGitConfigEnv } from './gitEnv'
 import { GIT_NULL_DEVICE, NO_HOOKS_PATH } from './gitNullDevice'
 
 /**
@@ -24,7 +25,8 @@ import { GIT_NULL_DEVICE, NO_HOOKS_PATH } from './gitNullDevice'
  * only turns things off) are refused whatever they do, and so are `gc`, `prune`, `worktree prune` and
  * `reflog expire`, which can delete what nothing else keeps.
  *
- * For this release a refusal is only logged. `MOUSSE_GIT_POLICY=refuse` turns refusal on; `log` is the default.
+ * A command the rule does not allow is refused with a {@link GitPolicyError} and logged. `MOUSSE_GIT_POLICY=log`
+ * goes back to only logging it, for diagnosing a caller that is refused by mistake.
  */
 
 /** What a protocol method, or a command, needs from Git. Ordered from least to most. */
@@ -51,9 +53,9 @@ function isUserAction(value: unknown): value is UserAction {
 
 export type GitPolicyMode = 'log' | 'refuse'
 
-/** `refuse` only when `MOUSSE_GIT_POLICY=refuse`; anything else logs. */
+/** `log` only when `MOUSSE_GIT_POLICY=log`; anything else refuses. */
 export function gitPolicyMode(): GitPolicyMode {
-  return process.env.MOUSSE_GIT_POLICY?.trim().toLowerCase() === 'refuse' ? 'refuse' : 'log'
+  return process.env.MOUSSE_GIT_POLICY?.trim().toLowerCase() === 'log' ? 'log' : 'refuse'
 }
 
 export interface GitCommandRequest {
@@ -104,6 +106,100 @@ export function registerOwnedGitRoot(path: string): () => void {
   return () => { extraOwnedRoots.delete(resolve(path)) }
 }
 
+// ---------------------------------------------------------------------------------------------------------
+// What the check reads
+
+/** What `git` printed, or null when it could not be run. */
+type GitRead = { status: number | null; stdout: string } | null
+
+/**
+ * Everything the check reads from the disk or from Git. {@link decideGitCommand} reads through the current
+ * reader: {@link SYNC_READS} reads at once; {@link decideGitCommandAsync} runs the same decision against a
+ * reader that only answers what was read beforehand without blocking, so both decide the same way.
+ */
+interface CheckReads {
+  /** `realpathSync.native`, or null when it fails. */
+  realpath(path: string): string | null
+  isGitDirectory(path: string): boolean
+  /** Git run in `cwd`, `gitDir` named as `GIT_DIR` when set. */
+  git(cwd: string, args: readonly string[], gitDir: string | undefined): GitRead
+}
+
+function readGitEnv(gitDir: string | undefined): NodeJS.ProcessEnv {
+  return withGitConfigEnv({ ...stripInheritedGitEnv(process.env), ...(gitDir ? { GIT_DIR: gitDir } : {}), GIT_OPTIONAL_LOCKS: '0' })
+}
+
+const READ_GIT_TIMEOUT_MS = 10_000
+
+const SYNC_READS: CheckReads = {
+  realpath(path) {
+    try { return realpathSync.native(path) } catch { return null }
+  },
+  isGitDirectory,
+  git(cwd, args, gitDir) {
+    const result = spawnSync('git', ['-c', 'core.fsmonitor=false', ...args], { cwd, encoding: 'utf8', windowsHide: true, timeout: READ_GIT_TIMEOUT_MS, env: readGitEnv(gitDir) })
+    return result.error ? null : { status: result.status, stdout: result.stdout }
+  }
+}
+
+/** {@link SYNC_READS}'s `git` without blocking: the same command, time limit and answer. */
+function readGitAsync(cwd: string, args: readonly string[], gitDir: string | undefined, signal?: AbortSignal): Promise<GitRead> {
+  return new Promise((settle) => {
+    const child = spawn('git', ['-c', 'core.fsmonitor=false', ...args], { cwd, windowsHide: true, env: readGitEnv(gitDir), stdio: ['ignore', 'pipe', 'ignore'], signal })
+    const chunks: Buffer[] = []
+    let failed = false
+    const timer = setTimeout(() => { failed = true; child.kill() }, READ_GIT_TIMEOUT_MS)
+    child.stdout.on('data', (chunk: Buffer) => chunks.push(chunk))
+    child.on('error', () => { failed = true })
+    child.on('close', (code) => {
+      clearTimeout(timer)
+      settle(failed ? null : { status: code, stdout: Buffer.concat(chunks).toString('utf8') })
+    })
+  })
+}
+
+let reads: CheckReads = SYNC_READS
+
+/** Thrown by the async check's reader for an answer it does not have yet; never escapes {@link decideGitCommandAsync}. */
+class NotReadYet {
+  constructor(readonly key: string, readonly read: () => Promise<unknown>) {}
+}
+
+/**
+ * `work`, or a rejection with `signal`'s reason as soon as it aborts. A file call already started cannot be
+ * stopped: it finishes in the background and its answer is dropped.
+ */
+export function untilAborted<T>(work: Promise<T>, signal: AbortSignal | undefined): Promise<T> {
+  if (!signal) return work
+  if (signal.aborted) {
+    work.catch(() => undefined)
+    return Promise.reject(signal.reason)
+  }
+  return new Promise<T>((settle, reject) => {
+    const onAbort = (): void => reject(signal.reason)
+    signal.addEventListener('abort', onAbort, { once: true })
+    work.then(settle, reject).finally(() => signal.removeEventListener('abort', onAbort))
+  })
+}
+
+/** A reader that answers from `answers`, and asks for anything else to be read first. */
+function replayReads(answers: Map<string, unknown>, signal: AbortSignal | undefined): CheckReads {
+  const answer = <T>(key: string, read: () => Promise<T>): T => {
+    if (answers.has(key)) return answers.get(key) as T
+    throw new NotReadYet(key, read)
+  }
+  return {
+    realpath: (path) => answer(`realpath\0${path}`, () => untilAborted(realpath(path).catch(() => null), signal)),
+    isGitDirectory: (path) => answer(`gitdir\0${path}`, () => untilAborted(isGitDirectoryAsync(path), signal)),
+    git: (cwd, args, gitDir) => answer(`git\0${cwd}\0${gitDir ?? ''}\0${args.join('\0')}`, () => readGitAsync(cwd, args, gitDir, signal))
+  }
+}
+
+/** `GIT_DIR` for a command Mousse runs inside a Git directory it named itself (see `gitDirectoryEnv`). */
+function ownGitDirectory(cwd: string): string | undefined {
+  return reads.isGitDirectory(cwd) ? resolve(cwd) : undefined
+}
+
 /**
  * The real path of `path`, or of its nearest existing ancestor with the rest appended. `realpathSync.native`
  * expands Windows 8.3 short names (`RUNNER~1`), which plain `realpathSync` keeps, so both sides of a
@@ -113,13 +209,10 @@ export function canonicalGitPath(path: string): string {
   const absolute = resolve(path)
   const missing: string[] = []
   for (let current = absolute; ; current = dirname(current)) {
-    try {
-      const real = realpathSync.native(current)
-      return missing.length ? join(real, ...missing.reverse()) : real
-    } catch {
-      if (dirname(current) === current) return absolute
-      missing.push(current.slice(dirname(current).length).replace(/^[\\/]+/, ''))
-    }
+    const real = reads.realpath(current)
+    if (real !== null) return missing.length ? join(real, ...missing.reverse()) : real
+    if (dirname(current) === current) return absolute
+    missing.push(current.slice(dirname(current).length).replace(/^[\\/]+/, ''))
   }
 }
 
@@ -149,15 +242,8 @@ export function isOwnedRef(ref: string): boolean {
  * A read the check itself runs (a symbolic ref's target, a config value), with nothing it inherited that
  * could send it elsewhere. Null when Git could not be run.
  */
-function readGit(cwd: string, args: readonly string[], env?: NodeJS.ProcessEnv): { status: number | null; stdout: string } | null {
-  const result = spawnSync('git', ['-c', 'core.fsmonitor=false', ...args], {
-    cwd,
-    encoding: 'utf8',
-    windowsHide: true,
-    timeout: 10_000,
-    env: withGitConfigEnv({ ...stripInheritedGitEnv(process.env), ...gitDirectoryEnv(cwd), ...(env?.GIT_DIR ? { GIT_DIR: env.GIT_DIR } : {}), GIT_OPTIONAL_LOCKS: '0' })
-  })
-  return result.error ? null : { status: result.status, stdout: result.stdout }
+function readGit(cwd: string, args: readonly string[], env?: NodeJS.ProcessEnv): GitRead {
+  return reads.git(cwd, args, env?.GIT_DIR ? env.GIT_DIR : ownGitDirectory(cwd))
 }
 
 /** Whether `extensions.worktreeConfig` is already on, so per-worktree settings stay out of the shared config. */
@@ -205,6 +291,9 @@ const ALLOWED_SETTINGS: ReadonlyArray<readonly [RegExp, (value: string) => boole
   [/^core\.attributesfile$/, (value) => NULL_DEVICES.has(value)],
   [/^core\.untrackedcache$/, (value) => value === 'false'],
   [/^gc\.auto$/, (value) => value === '0'],
+  // Mousse's own commands never start Git's automatic housekeeping (`MOUSSE_GIT_CONFIG`).
+  [/^maintenance\.auto$/, (value) => value === 'false'],
+  [/^fetch\.writecommitgraph$/, (value) => value === 'false'],
   [/^core\.hookspath$/, (value) => NULL_DEVICES.has(value)],
   [/^core\.excludesfile$/, (value) => NULL_DEVICES.has(value)],
   [/^hook\..+\.enabled$/, (value) => value === 'false'],
@@ -580,7 +669,7 @@ function isOwnedIndex(file: string, cwd: string, env: NodeJS.ProcessEnv): boolea
   const inGitDir = OWNED_INDEX_IN_GIT_DIR.test(name) ? folder : OWNED_INDEX_IN_MOUSSE_DIR.test(name) && basename(folder) === 'mousse' ? dirname(folder) : null
   if (!inGitDir) return false
   const gitDir = readGit(cwd, ['rev-parse', '--absolute-git-dir'], env)
-  if (!gitDir || gitDir.status !== 0) return isGitDirectory(inGitDir)
+  if (!gitDir || gitDir.status !== 0) return reads.isGitDirectory(inGitDir)
   return canonicalGitPath(gitDir.stdout.trim()) === canonicalGitPath(inGitDir)
 }
 
@@ -620,7 +709,7 @@ function environmentProblem(cwd: string, env: NodeJS.ProcessEnv): { refuse?: str
   if (parameters) for (const match of parameters.matchAll(/'([^']*)'(?:=\s*'([^']*)')?/g)) settings.push(match[2] === undefined ? match[1]! : `${match[1]}=${match[2]}`)
   const bad = settings.find((pair) => !allowedSetting(pair))
   if (bad !== undefined) return { refuse: `it sets "${bad.split('=')[0]}" in the environment, which could change what the command does` }
-  const ownGitDir = gitDirectoryEnv(cwd).GIT_DIR
+  const ownGitDir = ownGitDirectory(cwd)
   // A snapshot store as `GIT_DIR`, with the folder the command runs in (or the store itself) as its work tree.
   const named = own('GIT_DIR')
   const store = named !== undefined && isOwnedSnapshotStore(resolve(cwd, named)) ? resolve(cwd, named) : undefined
@@ -802,21 +891,93 @@ function record(entry: GitPolicyEntry): void {
   const count = (seen.get(key) ?? 0) + 1
   seen.set(key, count)
   if (count === 1 || count % 100 === 0) {
-    console.warn(entry.kind === 'violation' ? 'git policy: Mousse ran a Git command the rule does not allow' : 'git policy: a protocol method ran Git it did not declare', {
+    const message = entry.kind === 'undeclared'
+      ? 'git policy: a protocol method ran Git it did not declare'
+      : gitPolicyMode() === 'refuse' ? 'git policy: Mousse refused a Git command the rule does not allow' : 'git policy: Mousse ran a Git command the rule does not allow'
+    console.warn(message, {
       command: entry.command, cwd: entry.cwd, reason: entry.decision.reason, method: entry.method, mode: gitPolicyMode(), times: count
     })
   }
 }
 
 /**
- * Checks a Git or `gh` command Mousse is about to run. A violation is logged; with `MOUSSE_GIT_POLICY=refuse`
- * it throws a {@link GitPolicyError} instead. A command that needs more than the protocol method it runs
+ * Checks a Git or `gh` command Mousse is about to run. A violation is logged and throws a {@link GitPolicyError};
+ * with `MOUSSE_GIT_POLICY=log` it is only logged. A command that needs more than the protocol method it runs
  * under declared is logged too, never refused.
  */
 export function assertGitAllowed(request: GitCommandRequest): GitDecision {
   const userRequested = request.userRequested ?? currentUserRequest()
   if (userRequested && !request.userRequested) request = { ...request, userRequested }
-  const decision = decideGitCommand(request)
+  return enforce(request, decideGitCommand(request))
+}
+
+/**
+ * {@link assertGitAllowed} without blocking the daemon: what the check reads (real paths, whether a folder is a
+ * Git directory, where a symbolic ref points) is read with async calls and child processes, then the same
+ * decision is made. It refuses by rejecting.
+ */
+export async function assertGitAllowedAsync(request: GitCommandRequest, signal?: AbortSignal): Promise<GitDecision> {
+  const userRequested = request.userRequested ?? currentUserRequest()
+  if (userRequested && !request.userRequested) request = { ...request, userRequested }
+  return enforce(request, await decideGitCommandAsync(request, signal))
+}
+
+/** Reads the check may need before it has decided; past this, something is wrong with the check itself. */
+const MAX_CHECK_READS = 256
+
+/** Times the async check may find an answer changed on its final read before it refuses for now. */
+const CHECK_PASSES = 3
+
+/**
+ * {@link decideGitCommand} without blocking. The decision runs against a reader that answers only what has
+ * been read already; each time it needs something else, that is read without blocking and the decision runs
+ * again from the start. Once it has every answer, all of them are read again in one final pass, and the
+ * decision stands only when none changed: it is then the decision one synchronous check makes on the same
+ * answers. When one did change (a ref retargeted meanwhile), the decision runs again on the new answers; after
+ * {@link CHECK_PASSES} such passes the command is refused for now.
+ */
+export async function decideGitCommandAsync(request: GitCommandRequest, signal?: AbortSignal): Promise<GitDecision> {
+  const answers = new Map<string, unknown>()
+  const readers = new Map<string, () => Promise<unknown>>()
+  const replay = replayReads(answers, signal)
+  for (let pass = 0; pass < CHECK_PASSES; pass++) {
+    const decision = await decideOnAnswers(request, replay, answers, readers, signal)
+    const keys = [...answers.keys()]
+    const again = await Promise.all(keys.map((key) => readers.get(key)!()))
+    signal?.throwIfAborted()
+    let changed = false
+    keys.forEach((key, index) => {
+      if (JSON.stringify(answers.get(key)) === JSON.stringify(again[index])) return
+      changed = true
+      answers.set(key, again[index])
+    })
+    if (!changed) return decision
+  }
+  return { access: 'userRequested', allowed: false, reason: 'what the check reads kept changing while it ran' }
+}
+
+/** Runs the decision on `answers`, reading each answer it is missing first. */
+async function decideOnAnswers(request: GitCommandRequest, replay: CheckReads, answers: Map<string, unknown>, readers: Map<string, () => Promise<unknown>>, signal: AbortSignal | undefined): Promise<GitDecision> {
+  for (let round = 0; round <= MAX_CHECK_READS; round++) {
+    signal?.throwIfAborted()
+    const previous = reads
+    reads = replay
+    let missing: NotReadYet
+    try {
+      return decideGitCommand(request)
+    } catch (error) {
+      if (!(error instanceof NotReadYet)) throw error
+      missing = error
+    } finally {
+      reads = previous
+    }
+    readers.set(missing.key, missing.read)
+    answers.set(missing.key, await missing.read())
+  }
+  throw new Error(`The Git check needed more than ${MAX_CHECK_READS} reads for "${describe(request)}".`)
+}
+
+function enforce(request: GitCommandRequest, decision: GitDecision): GitDecision {
   const current = scope.getStore()
   if (!decision.allowed) {
     record({ command: describe(request), cwd: request.cwd, decision, method: current?.method, kind: 'violation' })

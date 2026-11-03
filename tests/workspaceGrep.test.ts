@@ -5,7 +5,7 @@ import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { PassThrough } from 'node:stream'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { grepWorkspace, type GrepWorkspaceOptions } from '../src/mms/files/WorkspaceGrep'
 import { buildWorkspaceIndex, type GitRoute, type WorkspaceIndexSnapshot } from '../src/mms/files/WorkspaceIndex'
 import {
@@ -366,7 +366,8 @@ describe('grepWorkspace: git arguments and output handling', () => {
     const hung = fakeGit(() => undefined)
     const controller = new AbortController()
     const running = search(root, 'needle', { signal: controller.signal, timeoutMs: 10_000, deps: { spawn: hung.spawn, detectGit: gitRoute() } })
-    await sleep(20)
+    // Git starts once the check before it has finished, which runs without blocking.
+    await vi.waitFor(() => expect(hung.children).toHaveLength(1))
     controller.abort()
     await expect(running).rejects.toMatchObject({ name: 'AbortError' })
     expect(hung.children[0].killed).toBe(true)

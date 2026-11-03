@@ -555,6 +555,17 @@ describe('git section formatting', () => {
     expect(commitMenuState(commits, 0, false, true)).toMatchObject({ triggerEnabled: false, amend: false })
   })
 
+  it('never turns amend on by itself with nothing to commit', () => {
+    // A clean repository whose last commit only this computer has: Commit opens with amend off.
+    expect(commitMenuState([commit()], 0, false)).toMatchObject({ triggerEnabled: true, nothingToCommit: true, amend: false, amendDisabled: false })
+    // Pushed HEAD, unborn repository, thread worktree: nothing to commit and nothing to amend.
+    expect(commitMenuState([commit({ pushed: true, onRemote: true })], 0, false)).toMatchObject({ triggerEnabled: false, amend: false })
+    expect(commitMenuState([], 0, false)).toMatchObject({ triggerEnabled: false, amend: false, amendTitle: 'No commits yet' })
+    expect(commitMenuState([commit()], 0, false, true)).toMatchObject({ triggerEnabled: false, amend: false })
+    // Files coming or going never flip the choice: it is whatever the user set.
+    for (const files of [0, 1, 3, 0]) expect(commitMenuState([commit()], files, false).amend).toBe(false)
+  })
+
   it('reduces a git failure to one readable line', () => {
     const raw = new Error(
       "Error invoking remote method 'git:checkout': Error: error: Your local changes to the following files would be overwritten by checkout:\n\tsrc/a.ts\nPlease commit your changes"

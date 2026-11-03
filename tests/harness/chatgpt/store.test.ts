@@ -114,6 +114,20 @@ describe('ChatGPT store', () => {
     expect(new ChatGptStore(path, vault).read()).toEqual({ ...SAMPLE(), revision: 1, incarnation: expect.stringMatching(/^[0-9a-f-]{36}$/) })
   })
 
+  it('reads a store saved through the keychain as empty under a build that never asks it, keeping the old payload aside', () => {
+    const { profileHome } = homes()
+    const path = chatgptStorePath(profileHome, 'codex:managed')
+    new ChatGptStore(path, fakeVault()).write(SAMPLE())
+    const before = row(path)!
+    const store = new ChatGptStore(path, { ...plainCodec, plainAtRest: true })
+    expect(store.read()).toMatchObject({ active: null, sessions: [], revision: 1 })
+    expect(readFileSync(`${path}.keychain-1`, 'utf8')).toBe(before.payload)
+    const data = store.read()
+    store.write({ ...data, active: 'oaiapp_b' })
+    expect(row(path)).toMatchObject({ revision: 2, encrypted: 0 })
+    expect(store.read().active).toBe('oaiapp_b')
+  })
+
   it('refuses to save when the required vault is unavailable, and saves nothing', () => {
     const { profileHome } = homes()
     const path = chatgptStorePath(profileHome, 'codex:managed')

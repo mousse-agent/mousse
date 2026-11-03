@@ -35,7 +35,8 @@ function runGit(
   trustRemoteConfiguration: boolean,
   signal?: AbortSignal,
   maximumBytes = 2 * 1024 * 1024,
-  userRequested?: UserAction
+  userRequested?: UserAction,
+  identity?: NodeJS.ProcessEnv
 ): Promise<string> {
   const safety = [
     '-c',
@@ -52,7 +53,7 @@ function runGit(
     'credential.interactive=false'
   ]
   return new Promise((resolve, reject) => {
-    const env = environment(cwd, trustRemoteConfiguration)
+    const env = { ...environment(cwd, trustRemoteConfiguration), ...identity }
     try {
       assertGitAllowed({ cwd, args, env, userRequested })
     } catch (error) {
@@ -89,6 +90,22 @@ export function git(
   maximumBytes?: number
 ): Promise<string> {
   return runGit(cwd, args, false, signal, maximumBytes)
+}
+
+/** The author and committer of a dispatch's result commit. */
+const DISPATCH_IDENTITY = {
+  GIT_AUTHOR_NAME: 'Mousse Dispatch',
+  GIT_AUTHOR_EMAIL: 'dispatch@localhost',
+  GIT_COMMITTER_NAME: 'Mousse Dispatch',
+  GIT_COMMITTER_EMAIL: 'dispatch@localhost'
+}
+
+/**
+ * Commits what is staged in a dispatch's worktree as Mousse Dispatch, unsigned. The identity travels in the
+ * environment and signing is turned off by a flag, since the central Git check refuses `-c user.*` settings.
+ */
+export function commitDispatchResult(cwd: string, message: string, signal?: AbortSignal): Promise<string> {
+  return runGit(cwd, ['commit', '--no-gpg-sign', '-m', message], false, signal, undefined, undefined, DISPATCH_IDENTITY)
 }
 
 /**

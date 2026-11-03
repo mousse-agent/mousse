@@ -1,11 +1,13 @@
-import { useEffect, useId, useRef, useState, type ReactNode } from 'react'
-import type { LocalModelManifest, LocalModelState, LocalModelStatus } from '../../shared/localModels'
+import { useEffect, useId, useRef, useState, type CSSProperties, type ReactNode } from 'react'
+import { localModelBytes, type LocalModelManifest, type LocalModelState, type LocalModelStatus } from '../../shared/localModels'
 import { Modal } from '../components/ui/Modal'
-import { Check, Download, RotateCcw, Trash2, X } from '../lib/icons'
+import { ChevronLeft, ChevronRight, Download, RotateCcw, Trash2, X } from '../lib/icons'
 import { SettingsGroup, SettingsRow } from '../components/settings/SettingsRow'
 import { Select } from '../components/ui/Select'
+import { isBestValue, pickModels, type ModelComparison, type ModelMetric, type ModelPick } from './modelComparison'
 import {
   downloadPercent,
+  formatModelSize,
   useLocalModelActions,
   useLocalModelStates,
   type LocalModelApi,
@@ -15,7 +17,7 @@ import {
 
 /**
  * Settings, Speech: one model row (a select of the models ready to use, plus "Get more models")
- * and the dialog that downloads and deletes the models that run on this computer.
+ * and the dialog that compares, downloads, deletes and picks the models that run on this computer.
  */
 export interface SpeechModelSettingProps<S extends SpeechSelection, M extends LocalModelManifest> {
   title: string
@@ -29,6 +31,8 @@ export interface SpeechModelSettingProps<S extends SpeechSelection, M extends Lo
   localModels: readonly M[]
   localSelection: (model: M) => S
   localApi: LocalModelApi
+  /** The figures the dialog compares and how it picks its columns. */
+  comparison: ModelComparison<M>
 }
 
 const optionKey = (selection: SpeechSelection): string =>
@@ -44,7 +48,8 @@ export function SpeechModelSetting<S extends SpeechSelection, M extends LocalMod
   providerSelection,
   localModels,
   localSelection,
-  localApi
+  localApi,
+  comparison
 }: SpeechModelSettingProps<S, M>) {
   const selectId = useId()
   const [states, applyStatus] = useLocalModelStates(localApi)
@@ -119,9 +124,12 @@ export function SpeechModelSetting<S extends SpeechSelection, M extends LocalMod
         <SpeechModelsDialog
           title={dialogTitle}
           localModels={localModels}
+          comparison={comparison}
           states={states}
           api={localApi}
           onStatus={onStatus}
+          inUseId={value?.source === 'local' ? value.modelId : null}
+          onUse={(model) => onSelect(localSelection(model))}
           onClose={() => setDialogOpen(false)}
         />
       )}
@@ -129,65 +137,268 @@ export function SpeechModelSetting<S extends SpeechSelection, M extends LocalMod
   )
 }
 
-function SpeechModelsDialog<M extends LocalModelManifest>({
-  title,
-  localModels,
-  states,
-  api,
-  onStatus,
-  onClose
-}: {
-  title: string
-  localModels: readonly M[]
+interface DialogModelProps<M extends LocalModelManifest> {
   states: Record<string, LocalModelState | undefined>
   api: LocalModelApi
   onStatus: (status: LocalModelStatus) => void
+  /** The local model the feature uses now, if any. */
+  inUseId: string | null
+  onUse: (model: M) => void
+}
+
+export function SpeechModelsDialog<M extends LocalModelManifest>({
+  title,
+  localModels,
+  comparison,
+  onClose,
+  ...modelProps
+}: DialogModelProps<M> & {
+  title: string
+  localModels: readonly M[]
+  comparison: ModelComparison<M>
   onClose: () => void
 }) {
-  // One list in catalogue order, so a row never jumps when its download finishes; the row's icon
-  // and check carry its state.
+  const [view, setView] = useState<'compare' | 'all'>('compare')
+  const picks = pickModels(localModels, comparison.picks)
+  const tags = new Map(picks.map((pick) => [pick.model.id, pick.tag]))
+  const remaining = localModels.length - picks.length
+
+  // Focus follows the switch: Back on the list, the row that opened it on the way back.
+  const backRef = useRef<HTMLButtonElement>(null)
+  const moreRef = useRef<HTMLButtonElement>(null)
+  const switched = useRef(false)
+  useEffect(() => {
+    if (!switched.current) return
+    ;(view === 'all' ? backRef : moreRef).current?.focus()
+  }, [view])
+  const show = (next: 'compare' | 'all'): void => {
+    switched.current = true
+    setView(next)
+  }
+
   return (
-    <Modal open title={title} onClose={onClose}>
-      <SettingsGroup className="speech-models-list">
-        {localModels.map((model) => (
-          <DialogModelRow key={model.id} model={model} state={states[model.id] ?? { status: 'not-downloaded' }} api={api} onStatus={onStatus} />
-        ))}
-      </SettingsGroup>
+    <Modal
+      open
+      title={view === 'compare' ? title : `All ${title.toLowerCase()}`}
+      className="speech-models-dialog"
+      onClose={onClose}
+      headerStart={
+        view === 'all' ? (
+          <button ref={backRef} type="button" className="settings-icon-btn speech-models-back" title="Back" aria-label="Back" onClick={() => show('compare')}>
+            <ChevronLeft size={16} />
+          </button>
+        ) : undefined
+      }
+    >
+      {view === 'compare' ? (
+        <>
+          <ModelComparisonTable picks={picks} metrics={comparison.metrics} {...modelProps} />
+          <button ref={moreRef} type="button" className="speech-models-more" onClick={() => show('all')}>
+            <span>{remaining > 0 ? `${remaining} more ${remaining === 1 ? 'model' : 'models'}` : 'All models'}</span>
+            <ChevronRight size={16} />
+          </button>
+        </>
+      ) : (
+        <AllModels models={localModels} tags={tags} metrics={comparison.metrics} {...modelProps} />
+      )}
     </Modal>
   )
 }
 
+// ---------------------------------------------------------------------------------------------
+// Comparison
+// ---------------------------------------------------------------------------------------------
+
+const stateOf = (states: DialogModelProps<LocalModelManifest>['states'], id: string): LocalModelState => states[id] ?? { status: 'not-downloaded' }
+
+function ModelComparisonTable<M extends LocalModelManifest>({
+  picks,
+  metrics,
+  ...modelProps
+}: DialogModelProps<M> & { picks: ReadonlyArray<ModelPick<M>>; metrics: ReadonlyArray<ModelMetric<M>> }) {
+  const { states } = modelProps
+  // A row none of the columns has a figure for says nothing.
+  const rows = metrics.filter((metric) => picks.some((pick) => metric.value(pick.model) !== undefined))
+  const at = (column: number, row: number): CSSProperties => ({ gridColumn: column + 1, gridRow: row + 1 })
+  const downloadRow = rows.length + 1
+  const actionRow = rows.length + 2
+  const recommended = picks.findIndex((pick) => pick.tag === 'Recommended')
+
+  return (
+    <div className="speech-compare" role="table" aria-label="Model comparison" style={{ gridTemplateColumns: `minmax(132px, auto) repeat(${picks.length}, minmax(0, 1fr))` }}>
+      {recommended >= 0 && <div className="speech-compare-panel" aria-hidden="true" style={{ gridColumn: recommended + 2, gridRow: `1 / ${actionRow + 2}` }} />}
+      <div role="row" className="speech-compare-row">
+        <span role="columnheader" style={at(0, 0)} />
+        {picks.map((pick, index) => (
+          <div key={pick.model.id} role="columnheader" className="speech-compare-head" style={at(index + 1, 0)}>
+            <span className={`speech-models-tag${index === recommended ? ' recommended' : ''}`}>{pick.tag}</span>
+            <span className="speech-compare-name">{pick.model.label}</span>
+            <span className="speech-compare-desc">{pick.model.description}</span>
+          </div>
+        ))}
+      </div>
+      {rows.map((metric, row) => {
+        const values = picks.map((pick) => metric.value(pick.model))
+        return (
+          <div key={metric.label} role="row" className="speech-compare-row">
+            <span role="rowheader" className="speech-compare-label" title={metric.hint} style={at(0, row + 1)}>
+              {metric.label}
+            </span>
+            {picks.map((pick, index) => {
+              const value = values[index]
+              const best = isBestValue(value, values, metric.best)
+              return (
+                <span key={pick.model.id} role="cell" className={`speech-compare-cell${best ? ' best' : ''}`} style={at(index + 1, row + 1)}>
+                  {value === undefined ? '—' : metric.cell(value, pick.model)}
+                </span>
+              )
+            })}
+          </div>
+        )
+      })}
+      <div role="row" className="speech-compare-row">
+        <span role="rowheader" className="speech-compare-label" style={at(0, downloadRow)}>
+          Download
+        </span>
+        {picks.map((pick, index) => (
+          <span key={pick.model.id} role="cell" className="speech-compare-cell" style={at(index + 1, downloadRow)}>
+            <DownloadCell model={pick.model} state={stateOf(states, pick.model.id)} />
+          </span>
+        ))}
+      </div>
+      <div role="row" className="speech-compare-row">
+        <span role="rowheader" style={at(0, actionRow)} />
+        {picks.map((pick, index) => (
+          <span key={pick.model.id} role="cell" className="speech-compare-cell speech-compare-action" style={at(index + 1, actionRow)}>
+            <ModelActions model={pick.model} variant="compare" {...modelProps} />
+          </span>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+function DownloadCell({ model, state }: { model: LocalModelManifest; state: LocalModelState }) {
+  switch (state.status) {
+    case 'downloaded':
+      return <>Downloaded</>
+    case 'downloading':
+      return <>{downloadPercent(state)}%</>
+    case 'error':
+      return (
+        <span className="speech-models-error" role="alert" title={state.message}>
+          Download failed
+        </span>
+      )
+    default:
+      return <>{formatModelSize(localModelBytes(model))}</>
+  }
+}
+
+// ---------------------------------------------------------------------------------------------
+// All models
+// ---------------------------------------------------------------------------------------------
+
+/** English-only models first, then the rest, each group in catalogue order. */
+function languageGroups<M extends LocalModelManifest>(models: readonly M[]): Array<{ title: string; models: M[] }> {
+  const english = models.filter((model) => model.compare?.languages?.count === 1 && model.compare.languages.name === 'English')
+  const other = models.filter((model) => !english.includes(model))
+  return [
+    { title: 'English', models: english },
+    { title: 'Other languages', models: other }
+  ].filter((group) => group.models.length > 0)
+}
+
+function AllModels<M extends LocalModelManifest>({
+  models,
+  tags,
+  metrics,
+  ...modelProps
+}: DialogModelProps<M> & { models: readonly M[]; tags: ReadonlyMap<string, string>; metrics: ReadonlyArray<ModelMetric<M>> }) {
+  return (
+    <div className="speech-models-all">
+      {languageGroups(models).map((group) => (
+        <section key={group.title} className="speech-models-group" aria-label={group.title}>
+          <h4 className="speech-models-group-title">{group.title}</h4>
+          <SettingsGroup className="speech-models-list">
+            {group.models.map((model) => (
+              <ModelListRow key={model.id} model={model} tag={tags.get(model.id)} metrics={metrics} {...modelProps} />
+            ))}
+          </SettingsGroup>
+        </section>
+      ))}
+    </div>
+  )
+}
+
+function ModelListRow<M extends LocalModelManifest>({
+  model,
+  tag,
+  metrics,
+  ...modelProps
+}: DialogModelProps<M> & { model: M; tag: string | undefined; metrics: ReadonlyArray<ModelMetric<M>> }) {
+  const state = stateOf(modelProps.states, model.id)
+  const size = formatModelSize(localModelBytes(model))
+  let stats: ReactNode
+  if (state.status === 'downloading') stats = `Downloading · ${downloadPercent(state)}% of ${size}`
+  else if (state.status === 'error') {
+    stats = (
+      <span className="speech-models-error" role="alert">
+        {state.message}
+      </span>
+    )
+  } else {
+    const parts = metrics.flatMap((metric) => {
+      const value = metric.value(model)
+      const text = value === undefined ? '' : metric.stat(value, model)
+      // Never repeat what the description line already says ("99 languages").
+      return text && !model.description.toLowerCase().includes(text.toLowerCase()) ? [text] : []
+    })
+    stats = [...parts, size].join(' · ')
+  }
+  return (
+    <SettingsRow
+      title={model.label}
+      titleAction={tag ? <span className={`speech-models-tag${tag === 'Recommended' ? ' recommended' : ''}`}>{tag}</span> : undefined}
+      description={
+        <>
+          <span className="speech-models-desc">{model.description}</span>
+          <span className="speech-models-stats">{stats}</span>
+        </>
+      }
+      control={<ModelActions model={model} variant="list" {...modelProps} />}
+    />
+  )
+}
+
+// ---------------------------------------------------------------------------------------------
+// Actions
+// ---------------------------------------------------------------------------------------------
+
 const RING_R = 12
 const RING_C = 2 * Math.PI * RING_R
 
-function DialogModelRow({
+/**
+ * What can be done with one model: In use, Use (and Delete in the list), Download, the progress
+ * ring with Cancel while it downloads, and Retry after a failure.
+ */
+function ModelActions<M extends LocalModelManifest>({
   model,
-  state,
+  variant,
+  states,
   api,
-  onStatus
-}: {
-  model: LocalModelManifest
-  state: LocalModelState
-  api: LocalModelApi
-  onStatus: (status: LocalModelStatus) => void
-}) {
+  onStatus,
+  inUseId,
+  onUse
+}: DialogModelProps<M> & { model: M; variant: 'compare' | 'list' }) {
   const { download, cancel, remove, deleting, size } = useLocalModelActions(model, api, onStatus)
+  const state = stateOf(states, model.id)
 
-  let description: ReactNode = `${size} · ${model.description}`
-  let control: ReactNode
   if (state.status === 'downloading') {
     const percent = downloadPercent(state)
-    description = `Downloading · ${percent}% of ${size}`
-    control = (
+    return (
       <span className="speech-models-progress">
-        <svg
-          viewBox="0 0 28 28"
-          role="progressbar"
-          aria-label={`Downloading ${model.label}`}
-          aria-valuemin={0}
-          aria-valuemax={100}
-          aria-valuenow={percent}
-        >
+        <svg viewBox="0 0 28 28" role="progressbar" aria-label={`Downloading ${model.label}`} aria-valuemin={0} aria-valuemax={100} aria-valuenow={percent}>
           <circle className="speech-models-progress-track" cx="14" cy="14" r={RING_R} />
           <circle
             className="speech-models-progress-fill"
@@ -203,43 +414,48 @@ function DialogModelRow({
         </button>
       </span>
     )
-  } else if (state.status === 'downloaded') {
-    control = (
-      <button type="button" className="settings-icon-btn" title="Delete" aria-label={`Delete ${model.label}`} disabled={deleting} onClick={remove}>
-        <Trash2 size={15} />
-      </button>
-    )
-  } else if (state.status === 'error') {
-    description = (
-      <span className="speech-models-error" role="alert">
-        {state.message}
+  }
+  if (state.status === 'downloaded') {
+    if (model.id === inUseId) {
+      return (
+        <span className="speech-models-in-use">
+          <span className="speech-models-dot" aria-hidden="true" />
+          In use
+        </span>
+      )
+    }
+    return (
+      <span className="speech-models-actions">
+        {variant === 'list' && (
+          <button type="button" className="settings-icon-btn" title="Delete" aria-label={`Delete ${model.label}`} disabled={deleting} onClick={remove}>
+            <Trash2 size={15} />
+          </button>
+        )}
+        <button type="button" className="settings-btn" aria-label={`Use ${model.label}`} disabled={deleting} onClick={() => onUse(model)}>
+          Use
+        </button>
       </span>
     )
-    control = (
+  }
+  if (state.status === 'error') {
+    return variant === 'compare' ? (
+      <button type="button" className="settings-btn" aria-label={`Retry downloading ${model.label}`} onClick={download}>
+        Try again
+      </button>
+    ) : (
       <button type="button" className="settings-icon-btn speech-models-action" title="Try again" aria-label={`Retry downloading ${model.label}`} onClick={download}>
         <RotateCcw size={15} />
       </button>
     )
-  } else {
-    control = (
-      <button type="button" className="settings-icon-btn speech-models-action accent" title="Download" aria-label={`Download ${model.label}`} onClick={download}>
-        <Download size={16} />
-      </button>
-    )
   }
-
-  return (
-    <SettingsRow
-      title={model.label}
-      titleAction={
-        state.status === 'downloaded' ? (
-          <span className="speech-models-check" role="img" title="On this computer" aria-label="On this computer">
-            <Check size={14} strokeWidth={2.2} />
-          </span>
-        ) : undefined
-      }
-      description={description}
-      control={control}
-    />
+  return variant === 'compare' ? (
+    <button type="button" className="settings-btn" aria-label={`Download ${model.label}`} onClick={download}>
+      Download {size}
+    </button>
+  ) : (
+    <button type="button" className="settings-btn speech-models-get" title="Download" aria-label={`Download ${model.label}`} onClick={download}>
+      <Download size={14} />
+      {size}
+    </button>
   )
 }

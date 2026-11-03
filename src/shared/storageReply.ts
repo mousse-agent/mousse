@@ -26,7 +26,7 @@ export class StorageReplyError extends Error {
 
 const MAX_ROWS = 20_000
 const MAX_TEXT = 2_000
-const RULES: readonly StorageCleanupRule[] = ['worktree-deleted', 'worktree-inactive', 'worktree-merged', 'worktree-orphan', 'browser-capture', 'trash']
+const RULES: readonly StorageCleanupRule[] = ['worktree-deleted', 'worktree-inactive', 'worktree-merged', 'worktree-orphan', 'dispatch-worktree', 'browser-capture', 'trash']
 const OUTCOMES: readonly StorageCleanupItem['outcome'][] = ['removed', 'kept', 'failed']
 
 const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value)

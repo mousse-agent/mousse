@@ -1393,6 +1393,8 @@ export interface GitStatusSnapshot {
   hasRemote?: boolean
   /** The folder itself does not exist, for example a removed worktree. */
   missing?: boolean
+  /** How long a Discard here keeps a copy of what it removes: its owner's Undo window. Set by the daemon. */
+  discardKeptForMs?: number
 }
 
 export interface GitCommit {
@@ -1468,6 +1470,14 @@ export interface GitScope {
   projectId: string | null
   /** Set only when the folder is the thread's own ready worktree. */
   workspaceThreadId: string | null
+}
+
+/** The copy a Discard kept before it removed anything (`git.discard`'s `kept`). */
+export interface GitKeptCopy {
+  ref: string
+  windowMs: number
+  /** Where it is, for how long, and the command that brings a file back. */
+  notice: string
 }
 
 /** What a daemon Git mutation answers: the folder's fresh status, plus the action's own result. */

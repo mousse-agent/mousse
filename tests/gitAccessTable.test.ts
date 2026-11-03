@@ -58,7 +58,11 @@ function readForm(subcommand: string, rest: readonly string[]): boolean {
   return false
 }
 /** Functions that run the Git command in their argument list. */
-const RUNNERS = new Set(['git', 'gitRaw', 'tryGit', 'actionGit', 'lifecycleGit', 'workspaceGit', 'runGit', 'runLive', 'withoutRepoPrograms', 'raw'])
+const RUNNERS = new Set([
+  'git', 'gitRaw', 'tryGit', 'actionGit', 'lifecycleGit', 'workspaceGit', 'runGit', 'runLive', 'withoutRepoPrograms', 'raw',
+  // The same runners without blocking, and as steps (`actions/steps.ts`).
+  'gitAsync', 'gitRawAsync', 'tryGitAsync', 'actionGitAsync', 'workspaceGitAsync', 'withoutRepoProgramsAsync', 'gitStep', 'gitRawStep', 'tryGitStep'
+])
 /** GitService and code host methods that change the repository or GitHub. */
 const SERVICE_WRITES = /^(GitService\.(stage|stageAll|unstage|unstageAll|discard|fetch|pull|abortInProgress|init|createBranch|renameBranch|deleteBranch|checkout|commit|push)|CodeHost\.(createPullRequest|mergePullRequest|closePullRequest|fetchPullRequestHead|releasePullRequestHead)|GitHubService\.(createRepository|cloneRepository))$/
 
@@ -232,7 +236,7 @@ describe('GIT_ACCESS', () => {
       .map((method) => `${method}: ${[...handlers.get(method)!].filter((callee) => reached.has(callee) || SERVICE_WRITES.test(callee)).join(', ')}`)
     expect(wrong).toEqual([])
     // The analysis itself finds the paths it must: Revert, Publish, Abort, Discard, Start from a pull request.
-    for (const key of ['CodeRevertService.revertCode', 'PublishService.publish', 'ManagedConflictService.abort', 'PullRequestThreadService.startThread', 'discardPendingChanges']) expect(reached.has(key), key).toBe(true)
+    for (const key of ['CodeRevertService.revertCode', 'PublishService.publish', 'ManagedConflictService.abort', 'PullRequestThreadService.startThread', 'discardPendingChangesAsync']) expect(reached.has(key), key).toBe(true)
     // Undo and Redo only rewind the conversation on this branch; they are declared for the file restore that follows.
     expect(reached.has('ConversationActionService.apply')).toBe(false)
   })

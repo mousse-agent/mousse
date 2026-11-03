@@ -1010,7 +1010,7 @@ describe('merging and closing a pull request', () => {
     useGitPullRequestStore.setState({ entries: { [pullRequestKey('/repo/a', 'feature')]: { lookup: lookup(7), fetchedAt: 1 } } })
     const result = await mergePullRequest({ path: '/repo/a', branch: 'feature', number: 7, threadId: 't1', projectId: 'p1' }, 'abc1234')
     expect(result.method).toBe('squash')
-    expect(merge).toHaveBeenCalledWith({ threadId: 't1' }, 7, 'abc1234')
+    expect(merge).toHaveBeenCalledWith({ threadId: 't1' }, 7, 'abc1234', undefined)
     expect(entry('/repo/a', 'feature').lookup).toMatchObject({ state: 'found', pullRequest: { number: 7, state: 'merged' } })
     expect(git.pullRequest).toHaveBeenCalledWith({ threadId: 't1' }, 'feature', true)
     expect(git.detail).toHaveBeenCalledWith({ threadId: 't1' }, 7, true)

@@ -12,10 +12,10 @@ import { ThreadWorkspaceManager } from '../workspace/ThreadWorkspaceManager'
 import { ChangeReceiptService } from './ChangeReceiptService'
 import { assertHeldThreadLease, withGitMutationLocks } from './GitOperationCoordinator'
 import { IN_PROGRESS_GIT_MARKERS } from '../git/gitMarkers'
-import { changedPaths, git, tryGit } from './git'
-import { coverageNotice, describeGit, sameTree, SnapshotRefusedError, snapshotUncovered, takeSnapshot, type Snapshot } from './snapshots'
+import { changedPathsAsync, git, gitAsync, tryGitAsync } from './git'
+import { coverageNotice, describeGitAsync, sameTreeAsync, SnapshotRefusedError, snapshotUncoveredAsync, takeSnapshotAsync, type Snapshot } from './snapshots'
 import { activeHiddenStore } from '../git/hiddenStore'
-import { inThreadSnapshotScope, setSnapshotsOff } from '../workspace/SnapshotWorkspace'
+import { inThreadSnapshotScope, inThreadSnapshotScopeAsync, setSnapshotsOff } from '../workspace/SnapshotWorkspace'
 
 export interface RunThreadActionOptions {
   threadId: string
@@ -64,6 +64,12 @@ export class ActionExecutionError extends Error {
     this.name = 'ActionExecutionError'
   }
 }
+
+/**
+ * What {@link ThreadActionService.checkTurnStart} found: `error` is what checking that `startSha` is a commit threw,
+ * kept so that `beginTurn` throws it where it always did.
+ */
+export interface TurnStartCheck { workspacePath: string; startSha: string; error?: unknown }
 
 /** Written when a turn's start could not be snapshotted; the checkpoint of the action that starts there reads it. */
 const UNCAPTURED_START_FILE = 'uncaptured-start.json'
@@ -123,8 +129,25 @@ export class ThreadActionService {
     }
   }
 
-  /** Durable intent is established before model execution, under its task lease. `startSha` is the snapshot the turn starts from. */
-  beginTurn(options: RunThreadActionOptions, startSha: string): ThreadAction {
+  /**
+   * Checks without blocking the daemon what `beginTurn` checks of a turn's start: that `startSha` is a commit in the
+   * thread's folder. A caller that must not wait inside `beginTurn` (the turn is not registered yet) checks first,
+   * where it already waits, and passes the result in.
+   */
+  async checkTurnStart(workspacePath: string, startSha: string): Promise<TurnStartCheck> {
+    try {
+      await inThreadSnapshotScopeAsync(this.threadDirectory, workspacePath, () => gitAsync(workspacePath, ['rev-parse', '--verify', `${startSha}^{commit}`]))
+      return { workspacePath, startSha }
+    } catch (error) {
+      return { workspacePath, startSha, error }
+    }
+  }
+
+  /**
+   * Durable intent is established before model execution, under its task lease. `startSha` is the snapshot the turn
+   * starts from. With `checked` (from {@link checkTurnStart}, for this folder and start), no Git runs here.
+   */
+  beginTurn(options: RunThreadActionOptions, startSha: string, checked?: TurnStartCheck): ThreadAction {
     if (options.heldThreadLease) assertHeldThreadLease(this.threadDirectory, options.heldThreadLease)
     const existing = this.list().find((item) => item.turnId === options.turnId)
     if (existing) {
@@ -134,7 +157,11 @@ export class ThreadActionService {
     }
     new ChangeReceiptService(this.threadDirectory).assertNoPendingOperation()
     this.assertExpectedRevision(options.expectedJournalRevision)
-    inThreadSnapshotScope(this.threadDirectory, options.workspacePath, () => git(options.workspacePath, ['rev-parse', '--verify', `${startSha}^{commit}`]))
+    if (checked && checked.startSha === startSha && checked.workspacePath === options.workspacePath) {
+      if ('error' in checked) throw checked.error
+    } else {
+      inThreadSnapshotScope(this.threadDirectory, options.workspacePath, () => git(options.workspacePath, ['rev-parse', '--verify', `${startSha}^{commit}`]))
+    }
     const actions = this.list()
     const action = this.newAction(options, startSha, actions)
     this.journal.append({ operationId: action.id, operationType: 'action-checkpoint', state: 'running', expectedPreState: { startSha, actionId: action.id }, details: { action } })
@@ -157,16 +184,16 @@ export class ThreadActionService {
   }
 
   /** `recordOutsideChanges` for a caller that already holds the mutation locks. */
-  recordOutsideChangesHeld(options: OutsideChangesOptions): { startSha: string; action?: ThreadAction } {
-    const metadata = new ThreadWorkspaceManager(this.threadDirectory).loadOrSnapshot()
+  async recordOutsideChangesHeld(options: OutsideChangesOptions): Promise<{ startSha: string; action?: ThreadAction }> {
+    const metadata = await new ThreadWorkspaceManager(this.threadDirectory).loadOrSnapshotAsync()
     const latest = this.latest(options.conversationBranchId)
     let snapshot: Snapshot
     try {
-      snapshot = takeSnapshot(options.workspacePath, { reason: 'before the next action', threadId: options.threadId })
+      snapshot = await takeSnapshotAsync(options.workspacePath, { reason: 'before the next action', threadId: options.threadId })
     } catch (error) {
       // No snapshot now never stops the turn. The last recorded one stands in only as a placeholder: it is marked as not
       // this turn's start, so the checkpoint records the turn from its end (nothing attributed, no files for Undo to restore).
-      const fallback = metadata?.snapshotSha ?? latest?.endSha ?? metadata?.headSha ?? (tryGit(options.workspacePath, ['rev-parse', '--verify', '-q', 'HEAD^{commit}']).stdout || undefined)
+      const fallback = metadata?.snapshotSha ?? latest?.endSha ?? metadata?.headSha ?? ((await tryGitAsync(options.workspacePath, ['rev-parse', '--verify', '-q', 'HEAD^{commit}'])).stdout || undefined)
       if (!fallback) throw error
       atomicWriteJsonSync(join(this.threadDirectory, UNCAPTURED_START_FILE), { startSha: fallback, error: String((error as Error).message ?? error).split(/\r?\n/)[0] } satisfies UncapturedStart)
       return { startSha: fallback }
@@ -178,12 +205,12 @@ export class ThreadActionService {
     let unrecorded: UnrecordedEnd | undefined
     try { unrecorded = JSON.parse(readFileSync(join(this.threadDirectory, UNRECORDED_END_FILE), 'utf8')) as UnrecordedEnd } catch { unrecorded = undefined }
     rmSync(join(this.threadDirectory, UNRECORDED_END_FILE), { force: true })
-    if (!known || !tryGit(options.workspacePath, ['cat-file', '-e', `${known}^{commit}`]).ok || sameTree(options.workspacePath, known, snapshot.sha)) {
-      receipts.adoptSnapshot(options.workspacePath, snapshot)
+    if (!known || !(await tryGitAsync(options.workspacePath, ['cat-file', '-e', `${known}^{commit}`])).ok || await sameTreeAsync(options.workspacePath, known, snapshot.sha)) {
+      await receipts.adoptSnapshot(options.workspacePath, snapshot)
       return { startSha: snapshot.sha }
     }
     const at = options.presentationMessageStart ?? latest?.presentationMessageEnd ?? 0
-    const action = this.checkpointTurnHeld({
+    const action = await this.checkpointTurnHeld({
       threadId: options.threadId, turnId: `${USER_CHANGES_TURN_PREFIX}${randomUUID()}`, actor: { kind: 'user' },
       conversationBranchId: options.conversationBranchId, workspacePath: options.workspacePath,
       presentationMessageStart: at, presentationMessageEnd: at,
@@ -208,7 +235,7 @@ export class ThreadActionService {
   }
 
   /** `checkpointExistingTurn` for a caller that already holds the mutation locks. */
-  private checkpointTurnHeld(options: RunThreadActionOptions, startSha: string, state: 'completed' | 'stopped' | 'failed'): ThreadAction {
+  private async checkpointTurnHeld(options: RunThreadActionOptions, startSha: string, state: 'completed' | 'stopped' | 'failed'): Promise<ThreadAction> {
     const actions = this.list()
     const completed = actions.find((item) => item.turnId === options.turnId && item.state !== 'running')
     if (completed) {
@@ -233,7 +260,7 @@ export class ThreadActionService {
     action.externalEffects = options.externalEffects ?? action.externalEffects
     if (options.startNote) action.startNote = options.startNote
     try {
-      this.checkpoint(options.workspacePath, action, state)
+      await this.checkpoint(options.workspacePath, action, state)
       // Admission order differs from completion order when a turn snapshots before child spawn.
       actions.splice(actions.indexOf(action), 1); actions.push(action)
       this.replace(actions)
@@ -259,7 +286,7 @@ export class ThreadActionService {
         if (metadata && metadata.lifecycle !== 'ready') throw new Error('Workspace requires recovery before this action.')
         this.assertExpectedRevision(options.expectedJournalRevision)
         // Other changes made outside Mousse are recorded as their own action first, so this action covers only its own change.
-        const startSha = options.allowDirtyInput ? this.startFromFiles(options) : this.recordOutsideChangesHeld(options).startSha
+        const startSha = options.allowDirtyInput ? await this.startFromFiles(options) : (await this.recordOutsideChangesHeld(options)).startSha
         const actions = this.list()
         if (actions.some((item) => item.turnId === options.turnId)) throw new Error('This turn already has a durable intent; execution must not be replayed.')
         const action = this.newAction(options, startSha, actions)
@@ -279,7 +306,7 @@ export class ThreadActionService {
           // Whatever the failure left behind is recorded as it is; a snapshot commits nothing, so no hook is bypassed.
           let checkpointComplete = false
           try {
-            this.checkpoint(options.workspacePath, action, 'failed')
+            await this.checkpoint(options.workspacePath, action, 'failed')
             checkpointComplete = true
           } catch (checkpointError) {
             action.state = 'failed'
@@ -304,7 +331,7 @@ export class ThreadActionService {
           }
           throw new ActionExecutionError(action, error)
         }
-        this.checkpoint(options.workspacePath, action, 'completed')
+        await this.checkpoint(options.workspacePath, action, 'completed')
         this.replace(actions)
         this.appendCheckpointCompleted(action, 'completed')
         return { result, action }
@@ -319,11 +346,11 @@ export class ThreadActionService {
     try { return JSON.parse(readFileSync(join(this.threadDirectory, UNCAPTURED_START_FILE), 'utf8')) as UncapturedStart } catch { return undefined }
   }
 
-  private startFromFiles(options: RunThreadActionOptions): string {
+  private async startFromFiles(options: RunThreadActionOptions): Promise<string> {
     let snapshot: Snapshot
-    try { snapshot = takeSnapshot(options.workspacePath, { reason: 'before the action', threadId: options.threadId }) }
-    catch { return this.recordOutsideChangesHeld(options).startSha }
-    new ChangeReceiptService(this.threadDirectory).adoptSnapshot(options.workspacePath, snapshot)
+    try { snapshot = await takeSnapshotAsync(options.workspacePath, { reason: 'before the action', threadId: options.threadId }) }
+    catch { return (await this.recordOutsideChangesHeld(options)).startSha }
+    await new ChangeReceiptService(this.threadDirectory).adoptSnapshot(options.workspacePath, snapshot)
     return snapshot.sha
   }
 
@@ -343,9 +370,9 @@ export class ThreadActionService {
         const state = details.find((item) => item?.actionState)?.actionState ?? 'stopped'
         if (receipt) {
           // The snapshot was already taken and recorded; only the action's own record is finished. Files are not touched.
-          receipts.replay(workspacePath, receipt)
+          await receipts.replay(workspacePath, receipt)
           action.receiptId = receipt.id; action.endSha = receipt.afterSha; action.commits = receipt.introducedCommits
-          action.changedPaths = changedPaths(workspacePath, action.startSha, action.endSha)
+          action.changedPaths = await changedPathsAsync(workspacePath, action.startSha, action.endSha)
           action.externalEffects = receipt.externalEffects
           if (receipt.git) action.git = receipt.git
           action.state = state; action.completedAt = receipt.createdAt
@@ -353,7 +380,7 @@ export class ThreadActionService {
           // Nothing landed that a retake would not capture, whatever stopped the first attempt (this includes
           // threads that an earlier version locked when the agent had switched branches or rewritten history).
           try {
-            this.checkpoint(workspacePath, action, state)
+            await this.checkpoint(workspacePath, action, state)
           } catch (error) {
             // The retake failed as well: the operation stays waiting, with what stopped it this time.
             this.journal.append({ operationId: entry.operationId, operationType: entry.operationType, state: 'recovery_required', details: { actionId: action.id, actionState: state, startSha: action.startSha, error: String(error) } })
@@ -372,28 +399,28 @@ export class ThreadActionService {
    * Records the worktree's files as the action's end snapshot and the action's change as a receipt. The branch the
    * thread is on, HEAD and the index are whatever the agent left them; they are described, never checked.
    */
-  private checkpoint(
+  private async checkpoint(
     workspacePath: string,
     action: ThreadAction,
     state: 'completed' | 'stopped' | 'failed'
-  ): void {
-    workspacePath = git(workspacePath, ['rev-parse', '--show-toplevel'])
+  ): Promise<void> {
+    workspacePath = await gitAsync(workspacePath, ['rev-parse', '--show-toplevel'])
     action.state = 'checkpointing'
     this.journal.append({ operationId: action.id, operationType: 'action-checkpoint', state: 'prepared', expectedPreState: { startSha: action.startSha }, details: { action, actionState: state } })
-    const threadId = new ThreadWorkspaceManager(this.threadDirectory).loadOrSnapshot()?.threadId
+    const threadId = (await new ThreadWorkspaceManager(this.threadDirectory).loadOrSnapshotAsync())?.threadId
     const reason = action.turnId.startsWith(USER_CHANGES_TURN_PREFIX) ? 'outside changes' : `end of turn ${action.turnId}`
     let snapshot: Snapshot
     try {
-      snapshot = takeSnapshot(workspacePath, { reason, threadId, operationId: action.id })
+      snapshot = await takeSnapshotAsync(workspacePath, { reason, threadId, operationId: action.id })
     } catch (error) {
       // A snapshot that cannot be taken never locks the thread: the action ends where it started, says nothing of its
       // files was covered and why, and cannot be undone (there is nothing recorded to restore). A hidden store has no
       // HEAD or branch of the folder's to report.
       const hidden = activeHiddenStore(workspacePath) !== undefined
-      const head = hidden ? undefined : tryGit(workspacePath, ['rev-parse', '--verify', '-q', 'HEAD^{commit}']).stdout || undefined
-      const branch = hidden ? undefined : tryGit(workspacePath, ['branch', '--show-current']).stdout || undefined
+      const head = hidden ? undefined : (await tryGitAsync(workspacePath, ['rev-parse', '--verify', '-q', 'HEAD^{commit}'])).stdout || undefined
+      const branch = hidden ? undefined : (await tryGitAsync(workspacePath, ['branch', '--show-current'])).stdout || undefined
       const why = error instanceof SnapshotRefusedError ? error.gapReason : `no snapshot could be taken (${String((error as Error).message ?? error).split(/\r?\n/)[0]})`
-      snapshot = { sha: action.startSha, tree: git(workspacePath, ['rev-parse', `${action.startSha}^{tree}`]), ...(head ? { head } : {}), ...(branch ? { branch } : {}),
+      snapshot = { sha: action.startSha, tree: await gitAsync(workspacePath, ['rev-parse', `${action.startSha}^{tree}`]), ...(head ? { head } : {}), ...(branch ? { branch } : {}),
         coverageGaps: [{ path: '.', reason: why }] }
       action.reversible = false
       if (action.actor?.kind !== 'user') atomicWriteJsonSync(join(this.threadDirectory, UNRECORDED_END_FILE), { actionId: action.id, turnId: action.turnId } satisfies UnrecordedEnd)
@@ -410,19 +437,19 @@ export class ThreadActionService {
     }
     // What the start did not cover is the turn's too: a file left out at the start and recorded at the end was not made
     // by the turn. The turn's gaps are both sides', the start's named as such where the end covered them.
-    const startGaps = snapshotUncovered(workspacePath, action.startSha)?.gaps ?? []
+    const startGaps = (await snapshotUncoveredAsync(workspacePath, action.startSha))?.gaps ?? []
     if (startGaps.length) {
       const endPaths = new Set((snapshot.coverageGaps ?? []).map((gap) => gap.path))
       const fromStart = startGaps.filter((gap) => !endPaths.has(gap.path)).map((gap) => ({ path: gap.path, reason: `${gap.reason}, at the start of the turn` }))
       if (fromStart.length) snapshot = { ...snapshot, coverageGaps: [...(snapshot.coverageGaps ?? []), ...fromStart] }
     }
-    const { record, commits } = describeGit(workspacePath, action.startSha, snapshot)
+    const { record, commits } = await describeGitAsync(workspacePath, action.startSha, snapshot)
     action.endSha = snapshot.sha
     action.commits = commits
     action.git = record
     const notCovered = coverageNotice(snapshot.coverageGaps)
     if (notCovered) action.notCovered = notCovered
-    action.changedPaths = changedPaths(workspacePath, action.startSha, snapshot.sha)
+    action.changedPaths = await changedPathsAsync(workspacePath, action.startSha, snapshot.sha)
     action.state = state
     action.completedAt = new Date().toISOString()
     const receipts = new ChangeReceiptService(this.threadDirectory)
@@ -430,7 +457,7 @@ export class ThreadActionService {
     // so the window is the action's own: nothing else writes to this thread while its turn holds the lease.
     const integrations = receipts.list().filter((item) => item.operationId !== action.id && item.createdAt >= action.createdAt && (item.kind === 'integration' || item.kind === 'checkpoint') && item.afterSha !== item.beforeSha)
     action.externalEffects = [...new Map([...action.externalEffects, ...integrations.flatMap((item) => item.externalEffects)].map((effect) => [JSON.stringify(effect), effect])).values()]
-    const receipt = receipts.record(workspacePath, {
+    const receipt = await receipts.record(workspacePath, {
       operationId: action.id, kind: 'checkpoint', actor: action.actor ?? { kind: 'main' },
       actionId: action.id, turnId: action.turnId, runId: action.runId,
       beforeSha: action.startSha, afterSha: action.endSha, introducedCommits: action.commits,

@@ -3,7 +3,8 @@
  * The side card's Git section, mounted: the branch name always opens something (the branch list, or why the
  * branch stays fixed), the section collapses from its heading and keeps that choice across threads, and the
  * thread's pull requests list the newest first with the rest behind "Show N more", and an open one merges or closes
- * after a confirmation.
+ * after a confirmation. With nothing to commit, the commit popover opens with amend off and nothing turns it on but
+ * the user.
  */
 import { act, createElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
@@ -13,7 +14,7 @@ import { pullRequestList, pullRequestRow, type PullRequestFoundRow } from '../..
 import { useAppStore } from '../../src/renderer/stores/appStore'
 import { EMPTY_GIT_ENTRY, type GitStatusView } from '../../src/renderer/stores/gitStatusStore'
 import type { GitPullRequestInfo, PullRequestDetail } from '../../src/shared/pullRequests'
-import type { GitStatusSnapshot } from '../../src/shared/types'
+import type { GitCommit, GitStatusSnapshot } from '../../src/shared/types'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 // jsdom lays nothing out; the branch list scrolls its active option into view.
@@ -366,5 +367,141 @@ describe('merging and closing from a pull request row', () => {
     expect(useAppStore.getState().mainView).toBe('git')
     await click(host.querySelector('.side-card-git-pr'))
     expect(useAppStore.getState().mainView).toBe('pullRequest')
+  })
+})
+
+describe('the commit popover with nothing to commit', () => {
+  let host: HTMLDivElement
+  let root: Root
+  let lastCommitMessage: ReturnType<typeof vi.fn>
+  const head = (patch: Partial<GitCommit> = {}): GitCommit => ({
+    hash: 'a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2',
+    shortHash: 'a1b2c3d',
+    message: 'Fix the flaky retry test',
+    author: 'Ada',
+    date: '2026-10-24T10:00:00Z',
+    pushed: false,
+    onRemote: false,
+    ...patch
+  })
+  const clean = (patch: Partial<GitStatusView> = {}) => view({ commits: [head()], ...patch })
+  const withFile = (patch: Partial<GitStatusView> = {}) =>
+    clean({ status: status({ changes: [{ path: 'a.ts', status: 'modified', staged: false }] }), ...patch })
+
+  const mount = async (git: GitStatusView, props: Partial<Parameters<typeof GitSectionView>[0]> = {}) => {
+    await act(async () => {
+      root.render(createElement(GitSectionView, { threadId: 't1', projectId: 'p1', path: '/repo/a', git, collapsedLabel: null, ...props }))
+    })
+  }
+  const click = async (element: Element | null | undefined) => {
+    if (!element) throw new Error('element not found')
+    await act(async () => { (element as HTMLElement).click() })
+  }
+  const trigger = () => host.querySelector<HTMLButtonElement>('.side-card-git-commit-button')
+  const popover = () => document.body.querySelector('.side-card-git-commit-popover')
+  const amendSwitch = () => popover()?.querySelector<HTMLButtonElement>('[role="switch"]') ?? null
+  const primary = () => popover()?.querySelector<HTMLButtonElement>('.side-card-git-submit[data-flow="commit"]') ?? null
+  const submits = () => [...(popover()?.querySelectorAll<HTMLButtonElement>('.side-card-git-submit[data-flow]') ?? [])]
+  const type = async (text: string) => {
+    const box = popover()?.querySelector('textarea')
+    if (!box) throw new Error('no message box')
+    const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set
+    await act(async () => {
+      setter?.call(box, text)
+      box.dispatchEvent(new Event('input', { bubbles: true }))
+    })
+  }
+
+  beforeEach(() => {
+    useAppStore.setState({ sideCardCollapsed: {} })
+    lastCommitMessage = vi.fn(async () => 'Fix the flaky retry test')
+    vi.stubGlobal('mousse', { git: { lastCommitMessage } })
+    host = document.createElement('div')
+    document.body.appendChild(host)
+    root = createRoot(host)
+  })
+  afterEach(async () => {
+    await act(async () => root.unmount())
+    host.remove()
+    document.body.innerHTML = ''
+    vi.unstubAllGlobals()
+  })
+
+  it('says Commit and opens with amend off, its buttons waiting for the user to turn it on', async () => {
+    await mount(clean())
+    expect(trigger()?.textContent).toBe('Commit')
+    expect(trigger()?.disabled).toBe(false)
+    await click(trigger())
+    expect(popover()?.getAttribute('aria-label')).toBe('Commit changes')
+    expect(amendSwitch()?.getAttribute('aria-checked')).toBe('false')
+    expect(amendSwitch()?.disabled).toBe(false)
+    await type('Reworded message')
+    expect(primary()?.textContent).toBe('Commit')
+    expect(submits().every((button) => button.disabled)).toBe(true)
+    expect(primary()?.title).toBe('No changes to commit. Turn on Amend last commit to change a1b2c3d')
+    expect(popover()?.querySelector('.side-card-git-hint')?.textContent).toBe('No changes to commit')
+    expect(lastCommitMessage).not.toHaveBeenCalled()
+  })
+
+  it('enables the primary button as Amend once the user turns amend on, the hint naming the commit', async () => {
+    await mount(clean())
+    await click(trigger())
+    await click(amendSwitch())
+    expect(amendSwitch()?.getAttribute('aria-checked')).toBe('true')
+    expect(popover()?.getAttribute('aria-label')).toBe('Amend commit')
+    // The empty box starts from the last commit's message.
+    expect(lastCommitMessage).toHaveBeenCalledTimes(1)
+    expect(popover()?.querySelector('textarea')?.value).toBe('Fix the flaky retry test')
+    expect(primary()?.textContent).toBe('Amend')
+    expect(primary()?.disabled).toBe(false)
+    expect(primary()?.hasAttribute('title')).toBe(false)
+    expect(popover()?.querySelector('.side-card-git-hint')?.textContent).toBe('Amends a1b2c3d')
+  })
+
+  it('keeps amend off when files appear and go again while the popover is open', async () => {
+    await mount(clean())
+    await click(trigger())
+    await mount(withFile())
+    expect(amendSwitch()?.getAttribute('aria-checked')).toBe('false')
+    expect(primary()?.textContent).toBe('Commit')
+    await mount(clean())
+    expect(popover()).not.toBeNull()
+    expect(amendSwitch()?.getAttribute('aria-checked')).toBe('false')
+    await type('Something')
+    expect(primary()?.disabled).toBe(true)
+  })
+
+  it('keeps amend off when the last commit is committed away under the open popover', async () => {
+    await mount(withFile())
+    await click(trigger())
+    expect(amendSwitch()?.getAttribute('aria-checked')).toBe('false')
+    // Committed elsewhere: no changes left and a new HEAD.
+    await mount(clean({ commits: [head({ hash: 'f'.repeat(40), shortHash: 'fffffff' }), head()] }))
+    expect(popover()).not.toBeNull()
+    expect(amendSwitch()?.getAttribute('aria-checked')).toBe('false')
+    await type('Something')
+    expect(primary()?.disabled).toBe(true)
+    expect(primary()?.title).toContain('fffffff')
+  })
+
+  it('drops an amend the user turned on when HEAD moves under the open popover', async () => {
+    await mount(clean())
+    await click(trigger())
+    await click(amendSwitch())
+    await mount(clean({ commits: [head({ hash: 'f'.repeat(40), shortHash: 'fffffff' }), head()] }))
+    expect(amendSwitch()?.getAttribute('aria-checked')).toBe('false')
+    expect(primary()?.disabled).toBe(true)
+  })
+
+  it('keeps the trigger disabled when the last commit is pushed, the repository has no commits, or it is a thread worktree', async () => {
+    await mount(clean({ commits: [head({ pushed: true, onRemote: true })] }))
+    expect(trigger()?.textContent).toBe('Commit')
+    expect(trigger()?.disabled).toBe(true)
+    await mount(view({ status: status({ tracking: 'unborn', upstream: null }), commits: [] }))
+    expect(trigger()?.textContent).toBe('Commit')
+    expect(trigger()?.disabled).toBe(true)
+    await mount(clean({ status: status({ branch: 'mousse/thread/t1' }), branches: { current: 'mousse/thread/t1', branches: ['mousse/thread/t1'] } }), { workspaceThreadId: 't1', path: '/wt/t1' })
+    expect(trigger()?.textContent).toBe('Commit')
+    expect(trigger()?.disabled).toBe(true)
   })
 })

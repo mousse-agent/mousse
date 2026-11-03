@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { englishMessagesEnv } from './gitProcess'
 import { GitPolicyError } from './gitPolicy'
 import { READ_ONLY_GIT_ENV } from './readOnlyGit'
-import { repoProgramEnv, withoutRepoPrograms } from './repoPrograms'
+import { repoProgramEnv, withoutRepoPrograms, withoutRepoProgramsAsync } from './repoPrograms'
 
 /**
  * One path's state as `git status --porcelain` would print it: a code for the index side and one for the
@@ -33,15 +33,9 @@ function plumbingEnv(): NodeJS.ProcessEnv {
  * A plumbing read from the top of the repository: no program the repository configures runs, no optional
  * lock is taken (so the index is never refreshed and written back), and a partial clone fetches nothing.
  */
-function plumbing(top: string, args: readonly string[]): Promise<string> {
+async function plumbing(top: string, args: readonly string[]): Promise<string> {
+  const argv = await withoutRepoProgramsAsync(top, args)
   return new Promise((resolvePromise, reject) => {
-    let argv: string[]
-    try {
-      argv = withoutRepoPrograms(top, args)
-    } catch (error) {
-      reject(error)
-      return
-    }
     execFile('git', argv, { cwd: top, env: plumbingEnv(), encoding: 'utf8', windowsHide: true, timeout: 60_000, maxBuffer: MAX_OUTPUT }, (error, stdout, stderr) => {
       if (error) reject(Object.assign(new Error(stderr.trim() || error.message), { cause: error }))
       else resolvePromise(stdout)

@@ -286,6 +286,19 @@ describe('DesktopUpdater', () => {
     updater.dispose()
   })
 
+  it('a stable build follows stable even when a nightly saved the nightly channel, and refuses to switch', async () => {
+    const store = memoryStore({ channel: 'nightly' })
+    const { backend, updater } = setup({ version: '0.1.2', store })
+    expect(updater.getState().channel).toBe('stable')
+    backend.next = { isUpdateAvailable: false, updateInfo: { version: '0.1.2' } }
+    await updater.check()
+    expect(backend).toMatchObject({ channel: 'latest', allowPrerelease: false, allowDowngrade: false, fullChangelog: false })
+    await updater.setChannel('nightly')
+    expect(updater.getState().channel).toBe('stable')
+    expect(backend).toMatchObject({ channel: 'latest', allowPrerelease: false })
+    updater.dispose()
+  })
+
   it('does nothing when disabled', async () => {
     const { backend, updater } = setup({ disabledReason: 'Updates on macOS need a signed build.' })
     updater.start()

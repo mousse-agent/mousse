@@ -269,7 +269,7 @@ function ProfileSettingsPage({ profileId }: { profileId: string }) {
       <button
         type="button"
         className="overlay-titlebar-back"
-        onClick={closeSettings}
+        onClick={() => void closeSettings()}
         aria-label="Back"
       >
         <ArrowLeft size={14} strokeWidth={2} />

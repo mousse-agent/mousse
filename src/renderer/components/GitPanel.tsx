@@ -99,6 +99,8 @@ export function GitPanel() {
   selectedRef.current = selected
   const [activity, setActivity] = useState<SyncActivity>(IDLE_SYNC_ACTIVITY)
   const [rowError, setRowError] = useState('')
+  // What the last discard kept, and how to bring a file back.
+  const [rowNotice, setRowNotice] = useState('')
   // One Git action at a time: the ref answers a second click before the state has rendered.
   const [busy, setBusy] = useState(false)
   const busyRef = useRef(false)
@@ -126,6 +128,7 @@ export function GitPanel() {
     setGithubNotice('')
     setActivity(IDLE_SYNC_ACTIVITY)
     setRowError('')
+    setRowNotice('')
   }, [folderId])
 
   // A file that is no longer listed (staged, discarded or committed elsewhere) has no diff to show.
@@ -156,20 +159,22 @@ export function GitPanel() {
   const runFileRequest = useCallback((request: RowRequest) => {
     if (!folderId) return
     setRowError('')
+    setRowNotice('')
     // The open file as it was when the button was pressed: the refresh after the action drops a row that moved, so it is read first.
     const before = selectedRef.current
     void withBusy(async () => {
-      const outcome = await runRowAction(folderId, scope, request)
+      const outcome = await runRowAction(folderId, scope, request, { discardKeptForMs: status?.discardKeptForMs })
       if (outcome.kind === 'failed') {
         setRowError(outcome.message)
       } else if (outcome.kind === 'done') {
+        if (outcome.notice) setRowNotice(outcome.notice)
         const paths = request.files === 'all' ? 'all' : request.files.map((file) => file.path)
         const followed = selectionAfterAction(before, request.action, paths)
         // Another row opened meanwhile stays open.
         setSelected((current) => (current === null || current === before ? followed : current))
       }
     })
-  }, [folderId, scope, withBusy])
+  }, [folderId, scope, status?.discardKeptForMs, withBusy])
 
   const onRowAction = useCallback((action: RowAction, file: GitFileChange) => {
     runFileRequest({ action, files: [file] })
@@ -384,6 +389,7 @@ export function GitPanel() {
         )}
         <GitOperationStatus path={folderId} />
         {rowError && <div className="git-changes-error" role="alert">{rowError}</div>}
+        {rowNotice && <div className="git-changes-notice" role="status">{rowNotice}</div>}
 
         <div className="git-changes">{renderSidebarBody()}</div>
       </ResizablePanelSidebar>

@@ -5,7 +5,7 @@ import { setImmediate as yieldToEventLoop } from 'node:timers/promises'
 import { promisify } from 'node:util'
 import { lowerPath } from '../../shared/fuzzyPath'
 import { SKIP_DIR_NAMES } from './pathGuard'
-import { repoProgramEnv, withoutRepoPrograms } from '../git/repoPrograms'
+import { repoProgramEnv, withoutRepoProgramsAsync } from '../git/repoPrograms'
 import { assertGitAllowed, GitPolicyError, rethrowGitPolicyError } from '../git/gitPolicy'
 
 export type WorkspaceIndexFallbackReason = 'not-a-repo' | 'git-missing' | 'git-too-old'
@@ -218,15 +218,15 @@ function hasSkippedSegment(segments: string[]): boolean {
  * Returns `false` when git failed before listing anything usable.
  */
 async function listWithGit(root: string, collector: IndexCollector, signal: AbortSignal | undefined): Promise<boolean> {
+  let args: string[]
+  try {
+    args = await withoutRepoProgramsAsync(root, ['ls-files', '-z', '--cached', '--others', '--exclude-standard', '--'], { signal })
+  } catch (error) {
+    if (signal?.aborted) throw abortError()
+    if (error instanceof GitPolicyError) throw error
+    return false
+  }
   return new Promise<boolean>((resolvePromise, reject) => {
-    let args: string[]
-    try {
-      args = withoutRepoPrograms(root, ['ls-files', '-z', '--cached', '--others', '--exclude-standard', '--'])
-    } catch (error) {
-      if (error instanceof GitPolicyError) return reject(error)
-      resolvePromise(false)
-      return
-    }
     const child = spawn('git', args, {
       cwd: root,
       env: repoProgramEnv(),

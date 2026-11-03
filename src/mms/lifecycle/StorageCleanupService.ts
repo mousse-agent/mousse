@@ -1,5 +1,7 @@
 import { knownAppError } from '../../shared/errors'
-import { appendFileSync, existsSync, lstatSync, readFileSync, readdirSync, realpathSync, renameSync, rmdirSync, statSync, unlinkSync, type Dirent } from 'node:fs'
+import { appendFileSync, existsSync, lstatSync, readFileSync, readdirSync, realpath as realpathCallback, realpathSync, renameSync, rmdirSync, statSync, unlinkSync, type Dirent } from 'node:fs'
+import { access, lstat, readdir, stat } from 'node:fs/promises'
+import { promisify } from 'node:util'
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import type { TaskLifecycleRecord } from '../../shared/resourceLifecycle'
 import { REPORT_ENTRY_LIMIT, storagePolicyHasRule, STORAGE_PLAN_TTL_MS, type StorageCleanupItem, type StorageCleanupPlanItem, type StorageCleanupPlanToken, type StorageCleanupReport, type StoragePolicy } from '../../shared/storage'
@@ -7,16 +9,18 @@ import type { Thread } from '../../shared/types'
 import type { ThreadWorkspaceMetadata } from '../../shared/workspace'
 import { atomicWriteFileSync, atomicWriteJsonSync } from '../data/AtomicFs'
 import { ThreadJournal } from '../data/ThreadJournal'
-import { isIntegrated, primaryRemote, resolveDefaultBranch } from '../git/defaultBranch'
-import { operationInProgress } from '../actions/git'
+import { isIntegratedAsync, primaryRemoteAsync, resolveDefaultBranchAsync } from '../git/defaultBranch'
+import { operationInProgressAsync } from '../actions/git'
 import { publishedRef } from '../actions/snapshots'
-import { readOnlyGit, runReadOnlyGit } from '../git/readOnlyGit'
+import { readOnlyGitAsync, runReadOnlyGitAsync } from '../git/readOnlyGit'
+import { LISTING_MAX_BUFFER } from '../git/runGitProcess'
 import { acquireRepositoryLease } from '../git/RepositoryLease'
-import { resolveRepositoryIdentity } from '../git/RepositoryIdentity'
+import { resolveRepositoryIdentityAsync } from '../git/RepositoryIdentity'
 import { isExecutionLeaseHeld, releaseExecutionLeaseHandle, STORAGE_CLEANUP_LEASE_SOURCE, tryAcquireExecutionLease } from '../queue/ThreadExecutionLease'
 import { MOUSSE_CONTROL_FILE_PATHS } from '../worktree/controlFiles'
 import { measureTree, type Measurement } from './diskMeasure'
-import { getExternalResourceClaims } from './LifecycleClaims'
+import { claimOverlapsPath, getExternalResourceClaims, repositoryTargetAsync, unverifiedOwnerOver } from './LifecycleClaims'
+import { canonicalPathAsync, gitCommonDirAsync } from './canonicalPath'
 import type { ResourcePurgeService, TrashSweepOutcome } from './ResourcePurgeService'
 import { assertLifecyclePath, type ResourceLifecycleStore } from './ResourceLifecycleStore'
 import type { PolicySnapshot, StoragePolicyStore } from './StoragePolicyStore'
@@ -24,6 +28,8 @@ import type { StorageSweepClock } from './sweepClock'
 import { WORKTREE_TRASH_QUIET_MS, WorktreeRetirementService } from './WorktreeRetirementService'
 import { expireSnapshotTrash } from '../workspace/SnapshotWorkspace'
 import { expireTrashedSnapshotRefs } from '../actions/SnapshotRefReleaseService'
+import { WorktreeManager } from '../worktree/WorktreeManager'
+import { forgetKeptWorktree, listKeptWorktrees, type KeptWorktree } from './keptWorktrees'
 
 const DAY_MS = 86_400_000
 const FIRST_RUN_DELAY_MS = 5 * 60_000
@@ -44,6 +50,10 @@ const BUSY_REASON = /^Cannot trash thread:|Cleanup owns this task|is still activ
 /** Keep reasons that can differ on the next look, so they are not remembered. */
 const TRANSIENT_REASON = /Settings changed|Commit changed|in use|busy|owns this task|still active|lease/i
 const IN_USE_REASON = 'Files in this worktree are in use'
+/** `realpathSync` without blocking (the same answers, unlike `fs/promises`' native one). */
+const realpathLike = promisify(realpathCallback)
+/** Whether `path` is there, as `existsSync` answers; read without blocking. */
+const present = (path: string): Promise<boolean> => access(path).then(() => true, () => false)
 /**
  * A screenshot capture: `art_<uuid>.png` (the worker and the attached browser) or `art_<uuid>` (the default
  * artifact port). Downloads share the `art_` prefix but never this shape: the worker adds `.download`, and an
@@ -64,7 +74,9 @@ interface CaptureChain { root: string; rootReal: string; profileDir: string; pro
  * On Windows a directory cannot be renamed while a process has its working directory inside it or holds
  * a file in it open without delete sharing, which is also what makes `git worktree remove` stop partway.
  * Renaming the checkout away and straight back therefore tells, before anything is deleted, whether the
- * removal can finish. Elsewhere an open file does not block removal, so nothing is probed.
+ * removal can finish. Elsewhere an open file does not block removal, so nothing is probed. It stays synchronous: the
+ * folder is away only within this one call, so nothing else ever finds the checkout missing (Windows only, and only
+ * a rename within Mousse's own folder).
  */
 function probeRemovable(path: string): string | undefined {
   if (process.platform !== 'win32') return undefined
@@ -148,6 +160,7 @@ export type PlannedCleanup = StorageCleanupPlanItem
 const worktreeKey = (taskId: string): string => `worktree:${taskId}`
 const trashKey = (taskId: string): string => `trash:${taskId}`
 const captureKey = (sessionId: string): string => `capture:${sessionId}`
+const dispatchWorktreeKey = (dispatchId: string): string => `dispatch-worktree:${dispatchId}`
 const approximate = (measurement: Pick<Measurement, 'estimated' | 'partial'>) => ({
   ...(measurement.estimated || measurement.partial ? { bytesApproximate: true as const } : {}),
   ...(measurement.partial && !measurement.estimated ? { bytesLowerBound: true as const } : {})
@@ -184,7 +197,7 @@ export async function findNestedRepository(root: string): Promise<{ nested?: str
     const { path, depth } = stack.pop()!
     if (depth > 64) return { truncated: true }
     let entries: Dirent[]
-    try { entries = readdirSync(path, { withFileTypes: true }) } catch { return { truncated: true } }
+    try { entries = await readdir(path, { withFileTypes: true }) } catch { return { truncated: true } }
     sinceYield += entries.length
     if (sinceYield >= WALK_YIELD_ENTRIES) { sinceYield = 0; await yieldToLoop() }
     for (const entry of entries) {
@@ -197,13 +210,13 @@ export async function findNestedRepository(root: string): Promise<{ nested?: str
 }
 
 /** Ignored entries that are only Mousse control files do not keep a worktree (the verifier retains them). */
-function onlyControlFiles(worktree: string, entry: string): boolean {
+async function onlyControlFiles(worktree: string, entry: string): Promise<boolean> {
   const path = entry.replace(/\/$/, '')
   if (MOUSSE_CONTROL_FILE_PATHS.includes(path)) return true
   if (!entry.endsWith('/')) return false
   const directory = join(worktree, path)
   try {
-    const names = readdirSync(directory, { recursive: true, withFileTypes: true }).filter((child) => !child.isDirectory())
+    const names = (await readdir(directory, { recursive: true, withFileTypes: true })).filter((child) => !child.isDirectory())
     return names.length > 0 && names.every((child) => MOUSSE_CONTROL_FILE_PATHS.includes(`${path}/${relative(directory, join(child.parentPath, child.name)).split('\\').join('/')}`))
   } catch { return false }
 }
@@ -354,6 +367,8 @@ export class StorageCleanupService {
     }
     if (!clock.suspended) planned.push(...await this.planCaptures(snapshot, now))
     planned.push(...await this.planTrash(now))
+    try { planned.push(...await this.planDispatchWorktrees()) }
+    catch (error) { planned.push({ rule: 'dispatch-worktree', label: 'Dispatch worktrees', action: 'keep', reason: (error as Error).message, bytes: 0 }) }
     try {
       for (const orphan of await this.orphanItems()) planned.push({ rule: orphan.rule, label: orphan.label, action: 'keep', reason: orphan.reason, bytes: orphan.bytes, ...(orphan.bytesApproximate ? { bytesApproximate: true as const } : {}), ...(orphan.bytesLowerBound ? { bytesLowerBound: true as const } : {}) })
     } catch { /* Ownership could not be proven; a run reports nothing here either. */ }
@@ -476,6 +491,8 @@ export class StorageCleanupService {
     if (snapshot && (hasRule || trigger === 'manual')) {
       try { items.push(...await this.worktreePhase(snapshot, !clock.suspended, startedMs, trigger, allowed)) }
       catch (error) { items.push({ rule: 'worktree-inactive', label: 'Worktrees', bytes: 0, outcome: 'failed', reason: (error as Error).message }) }
+      try { items.push(...await this.dispatchWorktreeItems(allowed)) }
+      catch (error) { items.push({ rule: 'dispatch-worktree', label: 'Dispatch worktrees', bytes: 0, outcome: 'failed', reason: (error as Error).message }) }
     }
     // Worktrees already in the trash are settled whatever rules are on now; a confirmed plan touches only what it named.
     if (!allowed && !clock.suspended && !this.stopping) {
@@ -605,9 +622,9 @@ export class StorageCleanupService {
     } finally { resume?.() }
   }
 
-  private deletedFingerprint(record: TaskLifecycleRecord, workspace: ThreadWorkspaceMetadata, snapshot: PolicySnapshot): string | undefined {
+  private async deletedFingerprint(record: TaskLifecycleRecord, workspace: ThreadWorkspaceMetadata, snapshot: PolicySnapshot): Promise<string | undefined> {
     try {
-      return [snapshot.digest, readOnlyGit(workspace.worktreePath, ['rev-parse', 'HEAD']), statSync(workspace.worktreePath).mtimeMs, statSync(join(record.location, 'workspace.json')).mtimeMs].join('|')
+      return [snapshot.digest, await readOnlyGitAsync(workspace.worktreePath, ['rev-parse', 'HEAD']), (await stat(workspace.worktreePath)).mtimeMs, statSync(join(record.location, 'workspace.json')).mtimeMs].join('|')
     } catch { return undefined }
   }
 
@@ -622,8 +639,8 @@ export class StorageCleanupService {
   private async evaluateDeleted(record: TaskLifecycleRecord, snapshot: PolicySnapshot, real: boolean): Promise<DeletedVerdict> {
     let workspace: ThreadWorkspaceMetadata | undefined
     try { workspace = readWorkspaceFile(record.location) } catch (error) { return { keep: (error as Error).message, remember: false } }
-    if (!workspace || !existsSync(workspace.worktreePath)) return { skip: true }
-    const fingerprint = this.deletedFingerprint(record, workspace, snapshot)
+    if (!workspace || !await present(workspace.worktreePath)) return { skip: true }
+    const fingerprint = await this.deletedFingerprint(record, workspace, snapshot)
     const memo = this.keepMemo.get(record.taskId)
     if (fingerprint && memo?.fingerprint === fingerprint && this.now() - memo.at < KEEP_MEMO_TTL_MS) return { keep: memo.reason, remember: false }
     // A thread in the trash is no longer in the live index, so the lookup can fail with "not found": nothing is running for it.
@@ -657,30 +674,41 @@ export class StorageCleanupService {
     const { workspace, head, measurement } = verdict
     const path = workspace.worktreePath
     // Runs under the cleanup reservation and the repository lease, right before the checkout is removed.
-    const recheck = (candidate: string): string | undefined => {
+    // The purge checks its reservation again after this, right before the checkout moves.
+    const recheck = async (candidate: string): Promise<string | undefined> => {
       try {
         if (!samePath(candidate, path)) return 'Other worktrees of a deleted thread are removed when it is permanently deleted'
         if (this.deps.policy.digest() !== snapshot.digest) return 'Settings changed since check'
-        const placement = this.placementProblem(workspace, record.taskId)
+        const placement = await this.placementProblem(workspace, record.taskId)
         if (placement) return placement
-        if (readOnlyGit(path, ['rev-parse', 'HEAD']) !== head) return 'Commit changed since check'
+        if (await readOnlyGitAsync(path, ['rev-parse', 'HEAD']) !== head) return 'Commit changed since check'
+        // Again, with nothing awaited after it: the reads above wait.
+        if (this.deps.policy.digest() !== snapshot.digest) return 'Settings changed since check'
         return this.probeRemoval(path)
       } catch (error) { return (error as Error).message }
     }
-    try { await this.deps.purge.retireTrashed(record.taskId, { recheck }) }
+    // The checks that can change without the reads above, once more right before the move, with nothing awaited between
+    // them and its start (retirement prepares first): the settings, and on Windows whether a file in it is open.
+    const beforeMove = (): string | undefined => {
+      try {
+        if (this.deps.policy.digest() !== snapshot.digest) return 'Settings changed since check'
+        return this.probeRemoval(path)
+      } catch (error) { return (error as Error).message }
+    }
+    try { await this.deps.purge.retireTrashed(record.taskId, { recheck, beforeMove }) }
     catch (error) {
       const reason = (error as Error).message
       return BUSY_REASON.test(reason) ? kept(reason) : { ...base, bytes: 0, outcome: 'failed', reason }
     }
-    if (!existsSync(path)) {
+    if (!await present(path)) {
       this.keepMemo.delete(record.taskId)
       return { ...base, bytes: measurement.bytes, files: measurement.files, ...approximate(measurement), outcome: 'removed', reason: 'Thread was deleted' }
     }
-    if (!existsSync(join(path, '.git'))) {
+    if (!await present(join(path, '.git'))) {
       return { ...base, bytes: 0, outcome: 'failed', reason: this.deps.store.get(record.taskId)?.blockedReason ?? 'Worktree was partly removed because files in it were in use; it is rebuilt the next time the thread is used' }
     }
     const reason = this.deps.store.get(record.taskId)?.blockedReason ?? 'Worktree was kept'
-    const fingerprint = this.deletedFingerprint(record, workspace, snapshot)
+    const fingerprint = await this.deletedFingerprint(record, workspace, snapshot)
     if (fingerprint && !TRANSIENT_REASON.test(reason)) this.keepMemo.set(record.taskId, { fingerprint, reason, at: this.now() })
     return kept(reason)
   }
@@ -697,10 +725,14 @@ export class StorageCleanupService {
     // Only live root threads. A trashed record belongs to the deleted-threads rule alone, and a
     // subagent's worktree goes with its thread.
     let candidates = this.deps.store.list().filter((record) => record.state === 'active' && !record.parentTaskId && (!allowed || allowed.has(worktreeKey(record.taskId)))).sort((a, b) => a.taskId.localeCompare(b.taskId))
-    candidates = candidates.filter((record) => {
-      try { const workspace = readWorkspaceFile(record.location); return workspace === undefined ? false : existsSync(workspace.worktreePath) || workspace.lifecycle !== 'ready' }
-      catch { return true }
-    })
+    const kept: TaskLifecycleRecord[] = []
+    for (const record of candidates) {
+      let keep: boolean
+      try { const workspace = readWorkspaceFile(record.location); keep = workspace === undefined ? false : await present(workspace.worktreePath) || workspace.lifecycle !== 'ready' }
+      catch { keep = true }
+      if (keep) kept.push(record)
+    }
+    candidates = kept
     if (batched && candidates.length > SCHEDULED_BATCH) {
       const after = this.cursor ? candidates.findIndex((record) => record.taskId.localeCompare(this.cursor!) > 0) : 0
       const start = after < 0 ? 0 : after
@@ -721,14 +753,14 @@ export class StorageCleanupService {
     return evaluations
   }
 
-  private activityAt(record: TaskLifecycleRecord, workspace: ThreadWorkspaceMetadata, head: string): number {
+  private async activityAt(record: TaskLifecycleRecord, workspace: ThreadWorkspaceMetadata, head: string): Promise<number> {
     const times: number[] = [Date.parse(this.deps.threads.getThread(record.taskId)?.createdAt ?? record.createdAt)]
     for (const name of ['messages.json', 'workspace.json']) {
       try { times.push(statSync(join(record.location, name)).mtimeMs) } catch { /* No such file: it contributes nothing. */ }
     }
     const journal = new ThreadJournal(record.location, { readOnly: true }).list()
     if (journal.length) times.push(Date.parse(journal[journal.length - 1]!.createdAt))
-    times.push(Number(readOnlyGit(workspace.worktreePath, ['log', '-1', '--format=%ct', head])) * 1000)
+    times.push(Number(await readOnlyGitAsync(workspace.worktreePath, ['log', '-1', '--format=%ct', head])) * 1000)
     return Math.max(...times.filter(Number.isFinite))
   }
 
@@ -737,13 +769,13 @@ export class StorageCleanupService {
    * directory (not a symlink or junction), inside the thread's managed folder by name, and still
    * inside the installation once every link above it is resolved. Evaluated again under the leases.
    */
-  private placementProblem(workspace: ThreadWorkspaceMetadata, taskId: string): string | undefined {
+  private async placementProblem(workspace: ThreadWorkspaceMetadata, taskId: string): Promise<string | undefined> {
     const path = workspace.worktreePath
     const folded = (value: string): string => process.platform === 'win32' ? value.toLowerCase() : value
-    if (lstatSync(path).isSymbolicLink() || folded(realpathSync(path)) !== folded(join(realpathSync(dirname(path)), basename(path)))) return 'Worktree is a link'
+    if ((await lstat(path)).isSymbolicLink() || folded(await realpathLike(path)) !== folded(join(await realpathLike(dirname(path)), basename(path)))) return 'Worktree is a link'
     if (!within(join(this.deps.installationHome, 'repositories', workspace.repositoryId, 'worktrees', 'threads', taskId), path)) return 'Outside the managed worktree folder'
     // A link anywhere above the checkout (a repository folder that is a junction to another disk) resolves outside the installation.
-    if (!within(realpathSync(this.deps.installationHome), realpathSync(path))) return 'Outside the managed worktree folder'
+    if (!within(await realpathLike(this.deps.installationHome), await realpathLike(path))) return 'Outside the managed worktree folder'
     return undefined
   }
 
@@ -756,23 +788,26 @@ export class StorageCleanupService {
    */
   private async inspectCheckout(record: TaskLifecycleRecord, workspace: ThreadWorkspaceMetadata): Promise<{ keep: string } | CheckoutFacts> {
     const path = workspace.worktreePath
-    if (!existsSync(join(path, '.git'))) return { keep: 'Worktree is partly removed; it is rebuilt the next time the thread is used' }
-    const placement = this.placementProblem(workspace, record.taskId)
+    if (!await present(join(path, '.git'))) return { keep: 'Worktree is partly removed; it is rebuilt the next time the thread is used' }
+    const placement = await this.placementProblem(workspace, record.taskId)
     if (placement) return { keep: placement }
     const unfinished = [...new ThreadJournal(record.location, { readOnly: true }).latestByOperation().values()].find((entry) => !TERMINAL_OPERATION_STATES.has(entry.state))
     if (unfinished) return { keep: 'Workspace has an unfinished operation' }
     // HEAD and the branch are the agent's to move; the commits it added are counted below.
-    const head = readOnlyGit(path, ['rev-parse', 'HEAD'])
+    const head = await readOnlyGitAsync(path, ['rev-parse', 'HEAD'])
     // Uncommitted files do not keep a worktree: retiring it saves them as a snapshot first. What a snapshot cannot hold keeps it.
-    const changed = readOnlyGit(path, ['status', '--porcelain', '--untracked-files=all']).split(/\r?\n/).filter(Boolean).length
-    const operation = operationInProgress(path)
+    const changed = (await readOnlyGitAsync(path, ['status', '--porcelain', '--untracked-files=all'], LISTING_MAX_BUFFER)).split(/\r?\n/).filter(Boolean).length
+    const operation = await operationInProgressAsync(path)
     if (operation) return { keep: `Has a ${operation} in progress` }
-    if (readOnlyGit(path, ['ls-files', '-u'])) return { keep: 'Has unresolved conflicts' }
-    const staged = readOnlyGit(path, ['diff', '--cached', '--name-only']).split(/\r?\n/).filter(Boolean).length
+    if (await readOnlyGitAsync(path, ['ls-files', '-u'], LISTING_MAX_BUFFER)) return { keep: 'Has unresolved conflicts' }
+    const staged = (await readOnlyGitAsync(path, ['diff', '--cached', '--name-only'], LISTING_MAX_BUFFER)).split(/\r?\n/).filter(Boolean).length
     if (staged) return { keep: `Has staged changes (${plural(staged, 'file')})` }
-    if (changed && runReadOnlyGit(path, ['config', '--bool', 'core.sparseCheckout']).stdout.trim() === 'true') return { keep: `Has uncommitted changes in a sparse checkout (${plural(changed, 'file')})` }
+    if (changed && (await runReadOnlyGitAsync(path, ['config', '--bool', 'core.sparseCheckout'])).stdout.trim() === 'true') return { keep: `Has uncommitted changes in a sparse checkout (${plural(changed, 'file')})` }
     // Cheap checks first: a worktree with ignored files (node_modules, .env) is kept without walking it for another repository.
-    const ignored = readOnlyGit(path, ['ls-files', '--others', '--ignored', '--exclude-standard', '--directory', '-z']).split('\0').filter(Boolean).filter((entry) => !onlyControlFiles(path, entry))
+    const ignored: string[] = []
+    for (const entry of (await readOnlyGitAsync(path, ['ls-files', '--others', '--ignored', '--exclude-standard', '--directory', '-z'], LISTING_MAX_BUFFER)).split('\0').filter(Boolean)) {
+      if (!await onlyControlFiles(path, entry)) ignored.push(entry)
+    }
     if (ignored.length) return { keep: `Has ignored files (${ignored[0]})` }
     await yieldToLoop()
     const nested = await findNestedRepository(path)
@@ -780,24 +815,24 @@ export class StorageCleanupService {
     if (nested.truncated) return { keep: 'Worktree is too large to check for another repository' }
     const target = workspace.integrationTarget
     if (!target || !/^[a-f0-9]{40,64}$/.test(target.baseSha)) return { keep: 'Integration target is unknown' }
-    const beyondBase = Number(readOnlyGit(path, ['rev-list', '--count', `${target.baseSha}..HEAD`]))
+    const beyondBase = Number(await readOnlyGitAsync(path, ['rev-list', '--count', `${target.baseSha}..HEAD`]))
     if (!Number.isSafeInteger(beyondBase)) return { keep: 'Commits beyond the base could not be counted' }
     let integrated = false
     if (beyondBase > 0) {
-      const defaults = resolveDefaultBranch(target.checkoutPath, this.deps.codeHost)
-      if (!defaults) return { keep: `Default branch is unavailable; run \`git remote set-head ${primaryRemote(target.checkoutPath) ?? '<remote>'} --auto\`` }
+      const defaults = await resolveDefaultBranchAsync(target.checkoutPath, this.deps.codeHost)
+      if (!defaults) return { keep: `Default branch is unavailable; run \`git remote set-head ${await primaryRemoteAsync(target.checkoutPath) ?? '<remote>'} --auto\`` }
       // Ancestry covers a branch that was merged as it is. A publish puts the files into one new commit, so it is also
       // integrated when the files it last published are the ones in HEAD.
-      integrated = isIntegrated(path, head, defaults.refs) || (changed === 0 && this.publishedAsHead(target.checkoutPath, record.taskId, path))
+      integrated = await isIntegratedAsync(path, head, defaults.refs) || (changed === 0 && await this.publishedAsHead(target.checkoutPath, record.taskId, path))
       if (!integrated) return { keep: `Has ${plural(beyondBase, 'unpublished commit')}` }
     }
     return { head, beyondBase, integrated, uncommitted: changed }
   }
 
   /** Whether the thread's last publish put exactly the files HEAD has into the primary checkout. Reads only. */
-  private publishedAsHead(primaryCheckout: string, taskId: string, worktree: string): boolean {
-    const published = runReadOnlyGit(primaryCheckout, ['rev-parse', '--verify', '-q', `${publishedRef(taskId)}^{tree}`])
-    return published.status === 0 && published.stdout.trim() === readOnlyGit(worktree, ['rev-parse', 'HEAD^{tree}'])
+  private async publishedAsHead(primaryCheckout: string, taskId: string, worktree: string): Promise<boolean> {
+    const published = await runReadOnlyGitAsync(primaryCheckout, ['rev-parse', '--verify', '-q', `${publishedRef(taskId)}^{tree}`])
+    return published.status === 0 && published.stdout.trim() === await readOnlyGitAsync(worktree, ['rev-parse', 'HEAD^{tree}'])
   }
 
   /** The fixed order of keep reasons; the first match wins. Undefined means skip silently. */
@@ -807,7 +842,7 @@ export class StorageCleanupService {
     if (!workspace) return undefined
     if (workspace.lifecycle !== 'ready') return { keep: 'Workspace is not ready' }
     const path = workspace.worktreePath
-    if (!existsSync(path)) return undefined
+    if (!await present(path)) return undefined
     const busy = this.deps.idle(record.taskId)
     if (busy) return { keep: busy }
     if (isExecutionLeaseHeld(record.location)) return { keep: 'Thread is in use' }
@@ -818,7 +853,7 @@ export class StorageCleanupService {
     let reason = ''
     const reasons: string[] = []
     if (inactiveOn) {
-      const ageDays = Math.max(0, (now - this.activityAt(record, workspace, head)) / DAY_MS)
+      const ageDays = Math.max(0, (now - await this.activityAt(record, workspace, head)) / DAY_MS)
       if (ageDays >= policy.worktrees.inactiveDays!) { rule = 'worktree-inactive'; reason = `Inactive for ${Math.floor(ageDays)} days` }
       else reasons.push(`Inactive for ${Math.floor(ageDays)} of ${policy.worktrees.inactiveDays} days`)
     }
@@ -828,7 +863,7 @@ export class StorageCleanupService {
       // A merged thread the person keeps coming back to would be retired, restored by the next status
       // refresh and retired again every hour. A worktree used in the last day (a message, an operation,
       // a commit or a restore) is left alone.
-      else if (now - this.activityAt(record, workspace, head) < DAY_MS) reasons.push('Used within the last day')
+      else if (now - await this.activityAt(record, workspace, head) < DAY_MS) reasons.push('Used within the last day')
       else { rule = 'worktree-merged'; reason = 'Work is merged into the default branch' }
     }
     if (!rule) return { keep: reasons.join('; ') }
@@ -853,7 +888,7 @@ export class StorageCleanupService {
     const taskLease = tryAcquireExecutionLease(record.location, { source: STORAGE_CLEANUP_LEASE_SOURCE })
     if (!taskLease) return kept('Thread is in use')
     try {
-      const identity = resolveRepositoryIdentity(workspace.worktreePath, { requireMutationCapability: true })
+      const identity = await resolveRepositoryIdentityAsync(workspace.worktreePath, { requireMutationCapability: true })
       let repositoryLease
       try { repositoryLease = await acquireRepositoryLease(identity, { signal: AbortSignal.timeout(REPOSITORY_LEASE_WAIT_MS) }) }
       catch { return kept('Repository is busy') }
@@ -863,18 +898,35 @@ export class StorageCleanupService {
         if (busy) return kept('Thread became busy')
         const bound = readWorkspaceFile(record.location)
         if (!bound || bound.worktreePath !== workspace.worktreePath || bound.branch !== workspace.branch || bound.headSha !== workspace.headSha || bound.lifecycle !== workspace.lifecycle) return kept('Workspace changed since check')
-        const placement = this.placementProblem(workspace, record.taskId)
+        const placement = await this.placementProblem(workspace, record.taskId)
         if (placement) return kept(placement)
-        if (readOnlyGit(workspace.worktreePath, ['rev-parse', 'HEAD']) !== head) return kept('Commit changed since check')
+        if (await readOnlyGitAsync(workspace.worktreePath, ['rev-parse', 'HEAD']) !== head) return kept('Commit changed since check')
         // A manual run evaluates every worktree before it retires the first, so the thread may have been used since.
-        if (verdict.rule === 'worktree-inactive' && verdict.inactiveDays !== null && (this.now() - this.activityAt(record, bound, head)) / DAY_MS < verdict.inactiveDays) return kept('Thread was used since check')
+        if (verdict.rule === 'worktree-inactive' && verdict.inactiveDays !== null && (this.now() - await this.activityAt(record, bound, head)) / DAY_MS < verdict.inactiveDays) return kept('Thread was used since check')
+        // The reads above wait: the policy is checked again. The thread cannot start work meanwhile, since cleanup holds its lease.
+        if (this.deps.policy.digest() !== verdict.policyDigest) return kept('Settings changed since check')
         const retirement = new WorktreeRetirementService(this.deps.store, { taskLease, repositoryLease })
-        retirement.prepare({ taskId: record.taskId, worktreePath: workspace.worktreePath, branch: workspace.branch, sourcePath: join(record.location, 'workspace.json'), repositoryId: workspace.repositoryId, baseSha: workspace.baseSha, resultSha: head })
+        await retirement.prepare({ taskId: record.taskId, worktreePath: workspace.worktreePath, branch: workspace.branch, sourcePath: join(record.location, 'workspace.json'), repositoryId: workspace.repositoryId, baseSha: workspace.baseSha, resultSha: head })
         let inUse: string | undefined
         try { inUse = this.probeRemoval(workspace.worktreePath) } catch (error) { return failed((error as Error).message) }
         if (inUse) return kept(inUse)
+        // Preparing and retiring wait, so the checks above that can change without those reads run once more right before
+        // the move, with nothing awaited between them and its start: the outcome they give is the one they gave before.
+        let stopped: StorageCleanupItem | undefined
+        const stop = (item: StorageCleanupItem): never => { stopped = item; throw new Error(item.reason ?? 'Kept') }
+        const beforeMove = (): void => {
+          if (this.deps.policy.digest() !== verdict.policyDigest) stop(kept('Settings changed since check'))
+          const busyNow = this.deps.idle(record.taskId)
+          if (busyNow) stop(kept('Thread became busy'))
+          const boundNow = readWorkspaceFile(record.location)
+          if (!boundNow || boundNow.worktreePath !== workspace.worktreePath || boundNow.branch !== workspace.branch || boundNow.headSha !== workspace.headSha || boundNow.lifecycle !== workspace.lifecycle) stop(kept('Workspace changed since check'))
+          let inUseNow: string | undefined
+          try { inUseNow = this.probeRemoval(workspace.worktreePath) } catch (error) { stop(failed((error as Error).message)) }
+          if (inUseNow) stop(kept(inUseNow))
+        }
         // The folder moves into the trash in one step or not at all; a folder in use stays where it is.
-        retirement.retire(retirement.pathFor(record.taskId, workspace.worktreePath))
+        try { await retirement.retire(retirement.pathFor(record.taskId, workspace.worktreePath), { beforeMove }) }
+        catch (error) { if (stopped) return stopped; throw error }
         try { atomicWriteJsonSync(cleanupMarkerPath(this.deps.store, record.taskId), { retiredAt: new Date(this.now()).toISOString(), rule: verdict.rule } satisfies CleanupMarker) }
         catch { /* The checkout is gone and restorable; only the status note is missing. */ }
         return { ...base, bytes: measurement.bytes, files: measurement.files, ...approximate(measurement), outcome: 'removed', reason: verdict.reason }
@@ -911,10 +963,10 @@ export class StorageCleanupService {
         const base = { rule: 'trash' as const, threadId: manifest.taskId, projectId, label: `${label}: worktree in the trash` }
         try {
           let lease
-          try { lease = await acquireRepositoryLease(resolveRepositoryIdentity(manifest.trashPath, { requireMutationCapability: true }), { signal: AbortSignal.timeout(REPOSITORY_LEASE_WAIT_MS) }) }
+          try { lease = await acquireRepositoryLease(await resolveRepositoryIdentityAsync(manifest.trashPath, { requireMutationCapability: true }), { signal: AbortSignal.timeout(REPOSITORY_LEASE_WAIT_MS) }) }
           catch { items.push({ ...base, bytes: 0, outcome: 'kept', reason: 'Repository is busy' }); continue }
-          let outcome: ReturnType<WorktreeRetirementService['expireTrash']>
-          try { outcome = new WorktreeRetirementService(this.deps.store, { repositoryLease: lease }).expireTrash(path, { now, inUse: this.probeRemoval }) }
+          let outcome: Awaited<ReturnType<WorktreeRetirementService['expireTrash']>>
+          try { outcome = await new WorktreeRetirementService(this.deps.store, { repositoryLease: lease }).expireTrash(path, { now, inUse: this.probeRemoval }) }
           finally { lease.release() }
           if (!outcome || 'waiting' in outcome) continue
           items.push('removed' in outcome
@@ -1110,14 +1162,71 @@ export class StorageCleanupService {
     return items
   }
 
+  // ---- Worktrees finished dispatches left in place ----
+
+  private dispatchWorktreeBase(kept: KeptWorktree): Pick<StorageCleanupItem, 'rule' | 'key' | 'label' | 'threadId' | 'projectId'> {
+    const thread = kept.threadId ? this.deps.threads.getThread(kept.threadId) : undefined
+    return {
+      rule: 'dispatch-worktree', key: dispatchWorktreeKey(kept.dispatchId),
+      label: kept.dispatchId,
+      ...(thread ? { threadId: thread.id } : {}), ...(thread?.projectId ? { projectId: thread.projectId } : {})
+    }
+  }
+
+  private dispatchWorktreeReason(kept: KeptWorktree): string {
+    return `Left in place when its dispatch finished, with ${plural(kept.ignoredFiles, 'ignored file')} Mousse could not keep a copy of. Removing it deletes them.`
+  }
+
+  /**
+   * Each worktree a finished dispatch left in place (`keptWorktrees`) is offered for removal: nothing else ever removes
+   * it, since no thread's resources name it. It goes only when the person confirms a plan that lists it.
+   */
+  private async planDispatchWorktrees(): Promise<PlannedCleanup[]> {
+    const planned: PlannedCleanup[] = []
+    for (const kept of listKeptWorktrees(this.deps.store.profileHome)) {
+      if (this.stopping) break
+      if (!existsSync(kept.path)) continue
+      const measurement = await this.measure(kept.path, { mode: 'reclaim', budgetMs: MEASURE_BUDGET_MS })
+      const { rule, key, label, threadId, projectId } = this.dispatchWorktreeBase(kept)
+      planned.push({ rule, key, label, ...(threadId ? { threadId } : {}), ...(projectId ? { projectId } : {}), action: 'remove', reason: this.dispatchWorktreeReason(kept), bytes: measurement.bytes, ...approximate(measurement) })
+    }
+    return planned
+  }
+
+  /**
+   * In a run: a worktree a finished dispatch left in place is removed, with its ignored files, only when the confirmed
+   * plan named it (`allowed`); otherwise it is reported as kept. Git still refuses one with untracked or changed files.
+   * A record whose folder is gone is forgotten.
+   */
+  private async dispatchWorktreeItems(allowed?: ReadonlySet<string>): Promise<StorageCleanupItem[]> {
+    const items: StorageCleanupItem[] = []
+    for (const kept of listKeptWorktrees(this.deps.store.profileHome)) {
+      if (this.stopping) break
+      if (!existsSync(kept.path)) { forgetKeptWorktree(this.deps.store.profileHome, kept.dispatchId); continue }
+      const base = this.dispatchWorktreeBase(kept)
+      const measurement = await this.measure(kept.path, { mode: 'reclaim', budgetMs: MEASURE_BUDGET_MS })
+      const sized = { bytes: measurement.bytes, files: measurement.files, ...approximate(measurement) }
+      if (!allowed?.has(base.key!)) { items.push({ ...base, ...sized, outcome: 'kept', reason: `${this.dispatchWorktreeReason(kept)} Clean up now lists it.` }); continue }
+      const result = await new WorktreeManager(kept.repositoryRoot, this.deps.installationHome).cleanupValidatedAgentWorktree(
+        { path: kept.path, branch: kept.branch, repositoryRoot: kept.repositoryRoot }, { safeCheckout: true, keepIgnored: 'delete-confirmed' })
+      if (result.success) {
+        forgetKeptWorktree(this.deps.store.profileHome, kept.dispatchId)
+        items.push({ ...base, ...sized, outcome: 'removed', reason: `Removed with its ${plural(kept.ignoredFiles, 'ignored file')}, as confirmed` })
+      } else items.push({ ...base, bytes: 0, outcome: 'failed', reason: result.error ?? 'The worktree could not be removed' })
+    }
+    return items
+  }
+
   // ---- Orphans ----
 
   /** Directories in the managed worktree folders that nothing claims. Reported with their size, never removed. */
   private async orphanItems(): Promise<StorageCleanupItem[]> {
-    const claimed = getExternalResourceClaims(this.deps.store, new Set()).map((resource) => resource.identity).filter((identity) => isAbsolute(identity))
+    const claims = await getExternalResourceClaims(this.deps.store, new Set())
     const items: StorageCleanupItem[] = []
     const repositories = join(this.deps.installationHome, 'repositories')
     if (!existsSync(repositories)) return items
+    // A worktree a dispatch left in place has its own row, which can remove it.
+    const dispatchKept = new Set(await Promise.all(listKeptWorktrees(this.deps.store.profileHome).map((kept) => canonicalPathAsync(kept.path))))
     for (const repository of readdirSync(repositories)) {
       for (const kind of ['threads', 'agents']) {
         const folder = join(repositories, repository, 'worktrees', kind)
@@ -1128,10 +1237,19 @@ export class StorageCleanupService {
           let stat
           try { stat = lstatSync(directory) } catch { continue }
           if (!stat.isDirectory() || stat.isSymbolicLink()) continue
-          if (claimed.some((identity) => within(directory, identity) || within(identity, directory))) continue
+          // Compared by real paths, so a record that names this folder through an alias still claims it.
+          const real = await canonicalPathAsync(directory)
+          if (dispatchKept.has(real) || claims.some((claim) => claimOverlapsPath(claim, real))) continue
           const measurement = await this.measure(directory, { mode: 'reclaim', budgetMs: MEASURE_BUDGET_MS })
           if (!measurement.files) continue // An empty leftover folder holds nothing.
-          items.push({ rule: 'worktree-orphan', label: `${kind}/${name}`, bytes: measurement.bytes, files: measurement.files, ...approximate(measurement), outcome: 'kept', reason: 'No thread uses this worktree' })
+          // A thread whose checkout can't be verified may still use a folder of its repository: not called unused, and says why.
+          // The repository is the one the folder's checkouts point at now, as well as the one its place is named after.
+          let children: string[] = []
+          try { children = readdirSync(directory).slice(0, 32) } catch { /* Judged by the folder itself. */ }
+          const checkouts = [directory, ...children.map((child) => join(directory, child))]
+          const actual = await Promise.all([...new Set((await Promise.all(checkouts.map((checkout) => gitCommonDirAsync(checkout)))).filter((commonDir): commonDir is string => Boolean(commonDir)))].map((commonDir) => repositoryTargetAsync(commonDir)))
+          const unverified = unverifiedOwnerOver(claims, { repositoryIds: [repository, ...actual.flatMap((target) => target.repositoryIds)], registeredWorktrees: actual.flatMap((target) => target.registeredWorktrees), path: real })
+          items.push({ rule: 'worktree-orphan', label: `${kind}/${name}`, bytes: measurement.bytes, files: measurement.files, ...approximate(measurement), outcome: 'kept', reason: unverified ? `${unverified.reason} It may still use this worktree.` : 'No thread uses this worktree' })
         }
       }
     }

@@ -74,13 +74,29 @@ export function threadBranchSlug(text: string): string {
  * the repository (a branch of that name, or branches under it); a taken or reserved name gets `-2`, `-3`, … appended.
  */
 export function threadBranchName(text: string | undefined, threadId: string, taken: (name: string) => boolean): string {
+  const { base, names } = threadBranchCandidates(text, threadId)
+  for (const name of names) if (!taken(name)) return name
+  throw new Error(`No free branch name for ${MOUSSE_BRANCH_PREFIX}${base}`)
+}
+
+/** {@link threadBranchName} with a `taken` that answers later, as a Git read without blocking does. The same names, in the same order. */
+export async function threadBranchNameAsync(text: string | undefined, threadId: string, taken: (name: string) => Promise<boolean>): Promise<string> {
+  const { base, names } = threadBranchCandidates(text, threadId)
+  for (const name of names) if (!await taken(name)) return name
+  throw new Error(`No free branch name for ${MOUSSE_BRANCH_PREFIX}${base}`)
+}
+
+/** The names `threadBranchName` tries, in order: the slug, then `-2`, `-3`, … , skipping reserved and invalid ones. */
+function threadBranchCandidates(text: string | undefined, threadId: string): { base: string; names: Generator<string> } {
   const fallback = `thread-${threadId.replace(/[^A-Za-z0-9]/g, '').slice(0, 8).toLowerCase() || 'new'}`
   const base = threadBranchSlug(text ?? '') || fallback
-  for (let suffix = 1; suffix < 1000; suffix++) {
-    const slug = suffix === 1 ? base : `${base}-${suffix}`
-    const name = `${MOUSSE_BRANCH_PREFIX}${slug}`
-    if (RESERVED_SLUGS.has(slug) || !validBranchName(name) || taken(name)) continue
-    return name
+  function* names(): Generator<string> {
+    for (let suffix = 1; suffix < 1000; suffix++) {
+      const slug = suffix === 1 ? base : `${base}-${suffix}`
+      const name = `${MOUSSE_BRANCH_PREFIX}${slug}`
+      if (RESERVED_SLUGS.has(slug) || !validBranchName(name)) continue
+      yield name
+    }
   }
-  throw new Error(`No free branch name for ${MOUSSE_BRANCH_PREFIX}${base}`)
+  return { base, names: names() }
 }

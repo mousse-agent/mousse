@@ -23,6 +23,9 @@ export type LocalSttModelId =
   | 'whisper-base'
   | 'parakeet-tdt-110m'
   | 'parakeet-tdt-0.6b-v3'
+  | 'parakeet-unified-en-0.6b'
+  | 'parakeet-tdt-0.6b-v2'
+  | 'whisper-small'
 
 interface LocalSttModelBase extends LocalModelManifest {
   id: LocalSttModelId
@@ -52,7 +55,10 @@ export interface WhisperSttModel extends TransformersSttModelBase {
 
 export type TransformersSttModel = MoonshineSttModel | WhisperSttModel
 
-/** A NeMo transducer exported by sherpa-onnx, decoded with TDT greedy search. */
+/**
+ * A NeMo transducer exported by sherpa-onnx, decoded with TDT greedy search. A plain RNN-T joiner
+ * scores no durations, which the same search reads as standard RNN-T greedy decoding.
+ */
 export interface NemoTransducerSttModel extends LocalSttModelBase {
   runtime: 'nemo-transducer'
   /** Mel bins the encoder takes. */
@@ -71,6 +77,23 @@ export interface NemoTransducerSttModel extends LocalSttModelBase {
 export type LocalSttModel = TransformersSttModel | NemoTransducerSttModel
 
 /**
+ * `compare.englishWer` is the average word error rate of the original model on the Hugging Face
+ * Open ASR Leaderboard's English short-form sets (AMI, Earnings-22, GigaSpeech, LibriSpeech clean
+ * and other, SPGISpeech, TED-LIUM, VoxPopuli), from
+ * https://github.com/huggingface/open_asr_leaderboard/blob/16743c6dabc69abcb8fd5bf529a95e3c6c16ac3c/scripts/data/en_shortform.csv
+ * Mousse runs quantized copies, which may differ slightly. A model missing from that file takes
+ * the figure its model card reports for the same eight sets, as noted on the model.
+ *
+ * `compare.stopWaitMs` is measured: local models transcribe while you speak, so stopping waits for
+ * the audio after the last pause. Recorded speech (13 s and 54 s clips) was played through a fake
+ * microphone into the composer's dictation hook in Electron, three runs each with the model loaded,
+ * on a 24-thread desktop CPU. The figure is the median of the slower clip. Whisper pads every piece
+ * to 30 s, so even a short last piece takes seconds. A model measured only once is given a
+ * conservative estimate from its size instead, as noted on the model.
+ */
+const ENGLISH = { count: 1, name: 'English' }
+
+/**
  * Moonshine Tiny (Useful Sensors) as converted for transformers.js in
  * `onnx-community/moonshine-tiny-ONNX`. English only and the smallest model offered; same files and
  * runtime as Moonshine Base.
@@ -79,6 +102,7 @@ export const MOONSHINE_TINY: MoonshineSttModel = {
   id: 'moonshine-tiny',
   label: 'Moonshine Tiny',
   description: 'English, fastest',
+  compare: { languages: ENGLISH, englishWer: 12.65, stopWaitMs: 104 },
   parameters: '27M',
   license: 'MIT',
   homepage: 'https://huggingface.co/moonshine-ai/moonshine-tiny',
@@ -108,6 +132,7 @@ export const MOONSHINE_BASE: MoonshineSttModel = {
   id: 'moonshine-base',
   label: 'Moonshine Base',
   description: 'English',
+  compare: { languages: ENGLISH, englishWer: 9.99, stopWaitMs: 45 },
   parameters: '61M',
   license: 'MIT',
   homepage: 'https://huggingface.co/UsefulSensors/moonshine-base',
@@ -139,6 +164,7 @@ export const PARAKEET_TDT_110M: NemoTransducerSttModel = {
   id: 'parakeet-tdt-110m',
   label: 'Parakeet TDT 110M',
   description: 'English with punctuation',
+  compare: { languages: ENGLISH, englishWer: 7.49, stopWaitMs: 127 },
   parameters: '110M',
   license: 'CC-BY-4.0',
   homepage: 'https://huggingface.co/nvidia/parakeet-tdt_ctc-110m',
@@ -170,6 +196,8 @@ export const WHISPER_BASE: WhisperSttModel = {
   id: 'whisper-base',
   label: 'Whisper Base',
   description: '99 languages',
+  // The leaderboard lists only the English-only whisper-base.en, not this multilingual model.
+  compare: { languages: { count: 99 }, stopWaitMs: 2980 },
   parameters: '74M',
   license: 'Apache-2.0',
   homepage: 'https://huggingface.co/openai/whisper-base',
@@ -201,6 +229,7 @@ export const PARAKEET_TDT_06B_V3: NemoTransducerSttModel = {
   id: 'parakeet-tdt-0.6b-v3',
   label: 'Parakeet TDT 0.6B v3',
   description: '25 European languages',
+  compare: { languages: { count: 25 }, englishWer: 6.32, stopWaitMs: 216 },
   parameters: '600M',
   license: 'CC-BY-4.0',
   homepage: 'https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3',
@@ -224,14 +253,120 @@ export const PARAKEET_TDT_06B_V3: NemoTransducerSttModel = {
   ]
 }
 
+/**
+ * NVIDIA Parakeet Unified English 0.6B (FastConformer RNN-T, trained for both streaming and offline
+ * use) in sherpa-onnx's int8 offline export, published by the sherpa-onnx maintainer. Mousse runs it
+ * offline on each piece of live dictation. English with punctuation and capitals.
+ */
+export const PARAKEET_UNIFIED_EN: NemoTransducerSttModel = {
+  id: 'parakeet-unified-en-0.6b',
+  label: 'Parakeet Unified English',
+  description: 'English, fewest wrong words',
+  // Not on the leaderboard: mean of the model card's offline WERs on the leaderboard's eight English
+  // sets (AMI 10.14, Earnings-22 11.16, GigaSpeech 10.05, LibriSpeech 1.63 and 3.11, SPGISpeech
+  // 2.04, TED-LIUM 3.39, VoxPopuli 5.77),
+  // https://huggingface.co/nvidia/parakeet-unified-en-0.6b/blob/fe53cd885760c96b6a5f51a0bfd362cb4584a98b/README.md
+  compare: { languages: ENGLISH, englishWer: 5.91, stopWaitMs: 136 },
+  parameters: '600M',
+  license: 'NVIDIA Open Model License',
+  homepage: 'https://huggingface.co/nvidia/parakeet-unified-en-0.6b',
+  repo: 'csukuangfj2/sherpa-onnx-nemo-parakeet-unified-en-0.6b-int8-non-streaming',
+  revision: '8c3a10fb13408c7a7054f6898958bf1c64a8d6c7',
+  runtime: 'nemo-transducer',
+  sampleRate: 16000,
+  maxSegmentSeconds: 30,
+  featureSize: 128,
+  encoder: 'encoder.int8.onnx',
+  decoder: 'decoder.int8.onnx',
+  joiner: 'joiner.int8.onnx',
+  predictorSize: 640,
+  predictorLayers: 2,
+  tokens: 'tokens.txt',
+  files: [
+    { path: 'tokens.txt', size: 8952, sha256: 'dc0b4584ab2e4ddbf888425c076c61b736e7356a015250db7d307e6f1a8188ff' },
+    { path: 'decoder.int8.onnx', size: 7257753, sha256: 'a5e223392c90e75f8144cdb5eb95af7625db389e39edef2bd1a9c872b3298fe6' },
+    { path: 'joiner.int8.onnx', size: 1735860, sha256: '869f43f7d24595c55581ad3bf249a935fb8a71389fbdaa7504b9f46f93140f8a' },
+    { path: 'encoder.int8.onnx', size: 654040552, sha256: '6716910b7a0833997fec7a410494c995d70124001a0e9b66d6370d6aced577e0' }
+  ]
+}
+
+/**
+ * NVIDIA Parakeet TDT 0.6B v2 in sherpa-onnx's int8 export, published by the sherpa-onnx maintainer.
+ * English with punctuation and capitals; the same shape as v3 with a 1024-piece vocabulary.
+ */
+export const PARAKEET_TDT_06B_V2: NemoTransducerSttModel = {
+  id: 'parakeet-tdt-0.6b-v2',
+  label: 'Parakeet TDT 0.6B v2',
+  description: 'English with punctuation',
+  // Wait: one run on an 8 s clip took 12 ms; estimated as v3's 216 ms, the same size of encoder.
+  compare: { languages: ENGLISH, englishWer: 6.05, stopWaitMs: 216 },
+  parameters: '600M',
+  license: 'CC-BY-4.0',
+  homepage: 'https://huggingface.co/nvidia/parakeet-tdt-0.6b-v2',
+  repo: 'csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8',
+  revision: '1ab9323565ddb038682214b292f588070a538ce2',
+  runtime: 'nemo-transducer',
+  sampleRate: 16000,
+  maxSegmentSeconds: 30,
+  featureSize: 128,
+  encoder: 'encoder.int8.onnx',
+  decoder: 'decoder.int8.onnx',
+  joiner: 'joiner.int8.onnx',
+  predictorSize: 640,
+  predictorLayers: 2,
+  tokens: 'tokens.txt',
+  files: [
+    { path: 'tokens.txt', size: 9384, sha256: 'ec182b70dd42113aff6c5372c75cac58c952443eb22322f57bbd7f53977d497d' },
+    { path: 'decoder.int8.onnx', size: 7257753, sha256: 'b6bb64963457237b900e496ee9994b59294526439fbcc1fecf705b31a15c6b4e' },
+    { path: 'joiner.int8.onnx', size: 1739080, sha256: '7946164367946e7f9f29a122407c3252b680dbae9a51343eb2488d057c3c43d2' },
+    { path: 'encoder.int8.onnx', size: 652184296, sha256: 'a32b12d17bbbc309d0686fbbcc2987b5e9b8333a7da83fa6b089f0a2acd651ab' }
+  ]
+}
+
+
+/** OpenAI Whisper Small as converted for transformers.js; multilingual like Whisper Base. */
+export const WHISPER_SMALL: WhisperSttModel = {
+  id: 'whisper-small',
+  label: 'Whisper Small',
+  description: '99 languages',
+  // The leaderboard lists only the English-only whisper-small.en. Wait: one run on an 8 s clip took
+  // 3.5 s; estimated at 5 s, as Whisper Base waited longer on the longer clip.
+  compare: { languages: { count: 99 }, stopWaitMs: 5000 },
+  parameters: '242M',
+  license: 'Apache-2.0',
+  homepage: 'https://huggingface.co/openai/whisper-small',
+  repo: 'onnx-community/whisper-small',
+  revision: '36050c46d777d46dc4b5f43f6d90574fc38f8732',
+  runtime: 'whisper',
+  dtype: { encoder_model: 'q8', decoder_model_merged: 'q8' },
+  sampleRate: 16000,
+  maxSegmentSeconds: 30,
+  files: [
+    { path: 'config.json', size: 2227, sha256: '457854d452f17661e197d74aee12b8e74fb75ba30ebfaa7426d0d61ea1e08a18' },
+    { path: 'generation_config.json', size: 3893, sha256: 'f538b28220c6a6d6f1af1458d4141cacb4ef4963df3de98a19490440c412ddf0' },
+    { path: 'preprocessor_config.json', size: 339, sha256: 'a6a76d28c93edb273669eb9e0b0636a2bddbb1272c3261e47b7ca6dfdbac1b8d' },
+    { path: 'tokenizer.json', size: 2480466, sha256: '27fc476bfe7f17299480be2273fc0608e4d5a99aba2ab5dec5374b4482d1a566' },
+    { path: 'tokenizer_config.json', size: 282683, sha256: '2a4c4281cf9f51ac6ccc406fdc711a087afe6530f671fa7b80953edc498275ce' },
+    { path: 'onnx/encoder_model_quantized.onnx', size: 92326160, sha256: 'a43a83f3c5361cd591cfa7c36f14b43cf7cb22f47a415cc14a8d557be800fa92' },
+    { path: 'onnx/decoder_model_merged_quantized.onnx', size: 156750845, sha256: 'ec07c3cbb64172c39791e26ee870a65ac22b458c36722bfe2776b3dbf741e0c9' }
+  ]
+}
+
+
 /** Listed in this order in the model picker. */
 export const LOCAL_STT_MODELS: readonly LocalSttModel[] = [
   MOONSHINE_TINY,
   MOONSHINE_BASE,
   WHISPER_BASE,
   PARAKEET_TDT_110M,
-  PARAKEET_TDT_06B_V3
+  PARAKEET_TDT_06B_V3,
+  PARAKEET_UNIFIED_EN,
+  PARAKEET_TDT_06B_V2,
+  WHISPER_SMALL
 ]
+
+/** Suggested first in the model dialog: the fewest wrong words in English, with punctuation. */
+export const RECOMMENDED_STT_MODEL_ID: LocalSttModelId = 'parakeet-unified-en-0.6b'
 
 export function findLocalSttModel(modelId: string): LocalSttModel | undefined {
   return LOCAL_STT_MODELS.find((model) => model.id === modelId)

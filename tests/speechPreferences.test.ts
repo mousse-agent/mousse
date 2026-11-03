@@ -16,7 +16,8 @@ describe('parseSpeechPreferences', () => {
     expect(parseSpeechPreferences({ speed: 9, voices: { a: 3, b: 'x' }, reduceNoise: 'no' })).toEqual({
       speed: 1,
       voices: { b: 'x' },
-      reduceNoise: true
+      reduceNoise: true,
+      vocabulary: []
     })
   })
 
@@ -24,8 +25,17 @@ describe('parseSpeechPreferences', () => {
     expect(parseSpeechPreferences({ speed: 1.5, voices: { 'local:kokoro-82m': 'bm_george' }, reduceNoise: false })).toEqual({
       speed: 1.5,
       voices: { 'local:kokoro-82m': 'bm_george' },
-      reduceNoise: false
+      reduceNoise: false,
+      vocabulary: []
     })
+  })
+
+  it('keeps the vocabulary, cleaned up', () => {
+    const parsed = parseSpeechPreferences({ vocabulary: ['OpenCode', { term: ' Mousse ', soundsLike: ['moose', 'Moose', 'Mousse'] }, { term: 'opencode', soundsLike: ['open code'] }, 7, { term: '' }] })
+    expect(parsed.vocabulary).toEqual([
+      { term: 'OpenCode', soundsLike: ['open code'] },
+      { term: 'Mousse', soundsLike: ['moose'] }
+    ])
   })
 })
 

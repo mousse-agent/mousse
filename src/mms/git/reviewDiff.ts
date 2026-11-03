@@ -3,7 +3,7 @@ import { createReadStream } from 'node:fs'
 import { lstat, open, readlink, realpath } from 'node:fs/promises'
 import { dirname, isAbsolute, join, relative } from 'node:path'
 import { leavesFolder } from '../files/pathGuard'
-import { guardedSimpleGit, NO_DIFF_PROGRAMS } from './repoPrograms'
+import { checkRepoPrograms, guardedSimpleGit, NO_DIFF_PROGRAMS } from './repoPrograms'
 import {
   EMPTY_TREE_SHA,
   REVIEW_MAX_COUNTED_UNTRACKED,
@@ -17,7 +17,7 @@ import {
   type ReviewRange,
   type ReviewSide
 } from '../../shared/review'
-import { gitEnv, guarded, tryGit } from '../actions/git'
+import { gitEnv, guarded, tryGit, tryGitAsync } from '../actions/git'
 import { unchangedWorktreePaths } from './workingTreeStatus'
 
 /** Git's own heuristic: a NUL byte in the first 8 KB means the file is binary. */
@@ -124,6 +124,8 @@ function hashEmptyTree(cwd: string): Promise<string> {
 
 /** The empty tree of this repository. `/dev/null` cannot stand in for it through `execFile` on Windows. */
 export async function emptyTreeSha(cwd: string): Promise<string> {
+  // A refused repository says why, rather than falling back below.
+  await checkRepoPrograms(cwd)
   const format = await guardedSimpleGit(cwd).raw(['rev-parse', '--show-object-format']).then((value) => value.trim()).catch(() => 'sha1')
   return format === 'sha256' ? hashEmptyTree(cwd) : EMPTY_TREE_SHA
 }
@@ -133,14 +135,21 @@ export function commitExists(cwd: string, sha: string): boolean {
   return tryGit(cwd, ['cat-file', '-e', `${sha}^{commit}`]).ok
 }
 
+/** {@link commitExists} without blocking the daemon. */
+export async function commitExistsAsync(cwd: string, sha: string): Promise<boolean> {
+  return (await tryGitAsync(cwd, ['cat-file', '-e', `${sha}^{commit}`])).ok
+}
+
 /** The range for the working tree: HEAD to index when staged, index to working tree otherwise. */
 export async function worktreeRange(cwd: string, staged: boolean): Promise<ReviewRange> {
+  await checkRepoPrograms(cwd)
   const head = await guardedSimpleGit(cwd).raw(['rev-parse', '--verify', 'HEAD']).then((value) => value.trim()).catch(() => '')
   const headSide: ReviewSide | null = head ? { kind: 'commit', sha: head } : null
   return staged ? { from: headSide, to: { kind: 'index' } } : { from: { kind: 'index' }, to: { kind: 'worktree' } }
 }
 
 export async function isGitRepository(cwd: string): Promise<boolean> {
+  await checkRepoPrograms(cwd)
   return guardedSimpleGit(cwd).checkIsRepo().catch(() => false)
 }
 

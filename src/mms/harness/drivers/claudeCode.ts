@@ -376,6 +376,8 @@ export function claudeCodeDriver(options: ClaudeCodeDriverOptions = {}): Harness
         entry.users += 1
         service = entry.service
       }
+      // Older models the service finds after a refresh returned reach clients through the newest runtime.
+      service.hooks.changed = () => context.changed()
       let stopped = false
 
       /** The sign-in terminal that is running, so removing the instance can end it. */

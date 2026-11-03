@@ -83,6 +83,18 @@ export interface DispatchRecord {
   result?: Signed
   error?: string
   cleanupError?: 'worktree_cleanup_failed' | 'quarantine_cleanup_failed'
+  /**
+   * A worktree cleanup under way, recorded before the worktree's ignored files are kept and again before the removal.
+   * One a start-up finds was stopped by the process ending: it is settled from what is there, never repeated.
+   */
+  worktreeCleanup?: { phase: 'keeping' | 'removing'; owner: string; files: number; ref?: string; sha?: string }
+  /** The copy of the worktree's ignored files, kept before the worktree was removed. */
+  worktreeCopy?: { ref: string; sha: string; files: number }
+  /**
+   * The worktree was not removed and stays where it was: its ignored files could not be kept first, or its cleanup
+   * stopped part way. `reason` starts "Kept, N ignored files". Storage lists it, where it can be deleted.
+   */
+  worktreeKept?: { ignoredFiles: number; reason: string }
   createdAt: number
   updatedAt: number
 }

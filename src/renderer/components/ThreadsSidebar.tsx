@@ -511,7 +511,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
         : event.key === 'ArrowRight'
           ? SIDEBAR_VIEWS[(index + 1) % SIDEBAR_VIEWS.length]
           : SIDEBAR_VIEWS[(index + SIDEBAR_VIEWS.length - 1) % SIDEBAR_VIEWS.length]
-    setSidebarView(nextView)
+    void setSidebarView(nextView)
     const buttons = event.currentTarget.querySelectorAll<HTMLButtonElement>('[role="tab"]')
     buttons[SIDEBAR_VIEWS.indexOf(nextView)]?.focus()
   }
@@ -603,34 +603,26 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
 
   const handlePin = async () => {
-
     if (!contextMenu) return
-
     const { target } = contextMenu
-
     closeContextMenu()
-
-
-
-    if (target.type === 'thread') {
-
-      await window.mousse.threads.pin(target.id, !target.pinned)
-
-    } else {
-
-      await window.mousse.projects.pin(target.id, !target.pinned)
-
+    try {
+      if (target.type === 'thread') await window.mousse.threads.pin(target.id, !target.pinned)
+      else await window.mousse.projects.pin(target.id, !target.pinned)
+    } catch (error) {
+      console.error(`Pinning the ${target.type} failed`, error)
     }
-
   }
-
-
 
   const handleSettle = async () => {
     if (!contextMenu || contextMenu.target.type !== 'thread') return
     const { target } = contextMenu
     closeContextMenu()
-    await window.mousse.threads.settle(target.id, !target.settled)
+    try {
+      await window.mousse.threads.settle(target.id, !target.settled)
+    } catch (error) {
+      console.error('Archiving the thread failed', error)
+    }
   }
 
   const handleRegenerateTitle = async () => {
@@ -921,7 +913,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
         onClick={() => {
 
-          if (!isRenaming && !isSettled && !suppressClick.current) selectThread(thread.id)
+          if (!isRenaming && !isSettled && !suppressClick.current) void selectThread(thread.id)
 
         }}
 
@@ -959,7 +951,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
             isRenaming={isRenaming}
             renamingName={renaming?.name ?? ''}
             isGeneratingTitle={isGeneratingTitle}
-            onRename={submitRename}
+            onRename={(name) => void submitRename(name)}
             onCancelRename={() => setRenaming(null)}
           />
         ) : (
@@ -976,7 +968,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
             initialName={renaming.name}
 
-            onSubmit={submitRename}
+            onSubmit={(name) => void submitRename(name)}
 
             onCancel={() => setRenaming(null)}
 
@@ -1022,7 +1014,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
             title={thread.pinnedAt ? 'Unpin' : 'Pin'}
             onClick={(event) => {
               event.stopPropagation()
-              void window.mousse.threads.pin(thread.id, !thread.pinnedAt)
+              void window.mousse.threads.pin(thread.id, !thread.pinnedAt).catch((error) => console.error('Pinning the thread failed', error))
             }}
           >
             <Pin size={13} strokeWidth={2} aria-hidden="true" />
@@ -1034,7 +1026,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
             title={isSettled ? 'Unarchive' : 'Archive'}
             onClick={(event) => {
               event.stopPropagation()
-              void window.mousse.threads.settle(thread.id, !isSettled)
+              void window.mousse.threads.settle(thread.id, !isSettled).catch((error) => console.error('Archiving the thread failed', error))
             }}
           >
             <Archive size={13} strokeWidth={2} aria-hidden="true" />
@@ -1082,7 +1074,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
             title={label}
             aria-label={label}
             className={`threads-sidebar-tab${sidebarView === view ? ' active' : ''}`}
-            onClick={() => setSidebarView(view)}
+            onClick={() => void setSidebarView(view)}
           >
             <Icon size={16} strokeWidth={1.8} aria-hidden="true" />
             {sidebarView === view && <span>{label}</span>}
@@ -1209,7 +1201,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
                           initialName={renaming.name}
 
-                          onSubmit={submitRename}
+                          onSubmit={(name) => void submitRename(name)}
 
                           onCancel={() => setRenaming(null)}
 
@@ -1430,16 +1422,16 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
           onClose={closeContextMenu}
 
-          onPin={handlePin}
+          onPin={() => void handlePin()}
 
-          onSettle={handleSettle}
+          onSettle={() => void handleSettle()}
 
-          onRegenerateTitle={handleRegenerateTitle}
+          onRegenerateTitle={() => void handleRegenerateTitle()}
 
           onRename={handleRename}
 
-          onRemove={handleRemove}
-          onTrustGitSettings={handleTrustGitSettings}
+          onRemove={() => void handleRemove()}
+          onTrustGitSettings={() => void handleTrustGitSettings()}
 
         />
 

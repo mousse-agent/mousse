@@ -1,13 +1,17 @@
 import { createHash } from 'node:crypto'
-import { existsSync, lstatSync, readFileSync, readdirSync, realpathSync } from 'node:fs'
+import { existsSync, lstatSync, readFileSync, readdirSync, realpath as realpathCallback } from 'node:fs'
+import { access, lstat, readdir, readFile } from 'node:fs/promises'
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path'
+import { promisify } from 'node:util'
 import type { LifecycleResource, ResourceInventorySnapshot, ResourceSource, RetentionClaimKind, TaskLifecycleRecord } from '../../shared/resourceLifecycle'
 import { assertLifecyclePath, ResourceLifecycleStore, validateResourceInventory } from './ResourceLifecycleStore'
 import { canonicalJson, sha256Hex } from '../../shared/agents/hashes'
-import { lifecycleRead, WorktreeRetirementService } from './WorktreeRetirementService'
+import { lifecycleReadAsync, WorktreeRetirementService } from './WorktreeRetirementService'
 import { UndoRetentionService } from '../actions/UndoRetentionService'
 import { AgentEpisodeStore } from '../agents/AgentEpisodeStore'
 import { ThreadJournal } from '../data/ThreadJournal'
+import { settlesItself } from '../../shared/resourceLifecycle'
+import { canonicalPathAsync, gitCommonDirAsync } from './canonicalPath'
 
 type JsonObject = Record<string, unknown>
 const object = (value: unknown): JsonObject | undefined => value !== null && typeof value === 'object' && !Array.isArray(value) ? value as JsonObject : undefined
@@ -21,11 +25,239 @@ export interface ResourceInventoryOptions {
 }
 
 /**
+ * What ownership reads outside Mousse's own records: whether a checkout is there, whether it is the registered worktree
+ * its record says it is (with Git, and the reconstruction pins of one that is absent), and what an old data folder
+ * inside a project folder holds. These are read without blocking ({@link readOwnershipFacts}); the records themselves,
+ * which are Mousse's own files, are then read synchronously and answered from these facts.
+ */
+export class OwnershipFacts {
+  readonly present = new Map<string, boolean>()
+  /** The reason a worktree could not be verified, or undefined when it was; keyed by {@link worktreeKey}. */
+  readonly worktrees = new Map<string, string | undefined>()
+  readonly legacy = new Map<string, LegacyScan>()
+  /** Real paths (`canonicalPathAsync`), for comparing what two records name. */
+  readonly canonical = new Map<string, string>()
+  /** The real Git common directory a checkout points at now (`gitCommonDirAsync`), or null when it can't be told. */
+  readonly commonDirs = new Map<string, string | null>()
+}
+
+/** What scanning an old `.mousse/.data` folder inside a project found, in the order the scan met it. */
+export interface LegacyScan {
+  /** Paths the scan visited, for the shared bound on ownership discovery. */
+  visited: number
+  /** Each task metadata file found, with the id it names (absent when unreadable or nameless). */
+  metas: Array<{ path: string; id?: string }>
+  /** What stopped the scan (a link, a folder too deep), after the metas found before it. */
+  error?: string
+}
+
+export type OwnershipNeed =
+  | { kind: 'present'; path: string }
+  | { kind: 'worktree'; store: ResourceLifecycleStore; path: string; branch?: string; repository?: string }
+  | { kind: 'legacy'; root: string }
+  | { kind: 'canonical'; path: string }
+  | { kind: 'common-dir'; path: string }
+
+/** How the synchronous pass answers what it reads outside Mousse's records. */
+export interface OwnershipReads {
+  present(path: string): boolean
+  worktree(store: ResourceLifecycleStore, path: string, branch: string | undefined, repository: string | undefined): string | undefined
+  legacy(root: string): LegacyScan
+  /** The real path of `path`. One the facts do not cover is never guessed: the final pass throws. */
+  canonical(path: string): string
+  /** The real Git common directory checkout `path` points at now, or undefined when it can't be told. */
+  commonDir(path: string): string | undefined
+  /** Facts the pass needed and did not have: a blocker each, so ownership is never decided on a guess. */
+  readonly missing: string[]
+}
+
+/** An absent checkout is verified against its own profile's reconstruction manifests, so the profile is part of the key. */
+export function worktreeKey(store: Pick<ResourceLifecycleStore, 'root'>, path: string, branch: string | undefined, repository: string | undefined): string {
+  return `${store.root}\0${path}\0${branch}\0${repository}`
+}
+
+const EMPTY_LEGACY: LegacyScan = { visited: 0, metas: [] }
+
+/** Answers from `facts`, noting what is missing in `needs`; for a first pass whose result is thrown away. */
+export function collectingReads(facts: OwnershipFacts, needs: OwnershipNeed[]): OwnershipReads {
+  return {
+    missing: [],
+    present: (path) => {
+      if (facts.present.has(path)) return facts.present.get(path)!
+      needs.push({ kind: 'present', path })
+      return true
+    },
+    worktree: (store, path, branch, repository) => {
+      const key = worktreeKey(store, path, branch, repository)
+      if (facts.worktrees.has(key)) return facts.worktrees.get(key)
+      needs.push({ kind: 'worktree', store, path, branch, repository })
+      return undefined
+    },
+    legacy: (root) => {
+      if (facts.legacy.has(root)) return facts.legacy.get(root)!
+      needs.push({ kind: 'legacy', root })
+      return EMPTY_LEGACY
+    },
+    canonical: (path) => {
+      if (facts.canonical.has(path)) return facts.canonical.get(path)!
+      needs.push({ kind: 'canonical', path })
+      return resolve(path)
+    },
+    commonDir: (path) => {
+      if (facts.commonDirs.has(path)) return facts.commonDirs.get(path) ?? undefined
+      needs.push({ kind: 'common-dir', path })
+      return undefined
+    }
+  }
+}
+
+/** Answers from `facts` only. A fact that is missing (the records changed since the facts were read) fails closed. */
+export function finalReads(facts: OwnershipFacts): OwnershipReads {
+  const missing: string[] = []
+  const changed = (what: string) => `Ownership of ${what} changed while it was being read; try again`
+  return {
+    missing,
+    present: (path) => {
+      if (facts.present.has(path)) return facts.present.get(path)!
+      missing.push(changed(path))
+      return true
+    },
+    worktree: (store, path, branch, repository) => {
+      const key = worktreeKey(store, path, branch, repository)
+      if (facts.worktrees.has(key)) return facts.worktrees.get(key)
+      return `Unverified worktree ${path}: ${changed('it')}`
+    },
+    legacy: (root) => {
+      if (facts.legacy.has(root)) return facts.legacy.get(root)!
+      return { ...EMPTY_LEGACY, error: changed(root) }
+    },
+    canonical: (path) => {
+      if (facts.canonical.has(path)) return facts.canonical.get(path)!
+      throw new Error(changed(path))
+    },
+    // Not read: the repository can't be told, which the caller treats as any repository.
+    commonDir: (path) => facts.commonDirs.get(path) ?? undefined
+  }
+}
+
+const realpathLikeSync = promisify(realpathCallback)
+
+/** Reads the facts in `needs` into `facts`, without blocking. */
+export async function readOwnershipFacts(needs: readonly OwnershipNeed[], facts: OwnershipFacts): Promise<void> {
+  for (const need of needs) {
+    if (need.kind === 'present') {
+      if (!facts.present.has(need.path)) facts.present.set(need.path, await access(need.path).then(() => true, () => false))
+    } else if (need.kind === 'worktree') {
+      const key = worktreeKey(need.store, need.path, need.branch, need.repository)
+      if (!facts.worktrees.has(key)) facts.worktrees.set(key, await verifyWorktreeFact(need.store, need.path, need.branch, need.repository))
+    } else if (need.kind === 'canonical') {
+      if (!facts.canonical.has(need.path)) facts.canonical.set(need.path, await canonicalPathAsync(need.path))
+    } else if (need.kind === 'common-dir') {
+      if (!facts.commonDirs.has(need.path)) facts.commonDirs.set(need.path, await gitCommonDirAsync(need.path) ?? null)
+    } else if (!facts.legacy.has(need.root)) facts.legacy.set(need.root, await scanLegacyFolder(need.root))
+  }
+}
+
+/**
+ * Whether `path` is the registered worktree its record says, as the inventory has always checked it: a present one is a
+ * regular linked worktree whose repository, top level and registration match; an absent one has exactly one owner's
+ * reconstruction manifest whose pins still hold. The reason it is not, or undefined.
+ */
+async function verifyWorktreeFact(store: ResourceLifecycleStore, path: string, expectedBranch: string | undefined, expectedRepository: string | undefined): Promise<string | undefined> {
+  try {
+    if (!isAbsolute(path)) throw new Error('Registered checkout is not absolute')
+    if (!await access(path).then(() => true, () => false)) {
+      const retirement = new WorktreeRetirementService(store)
+      const owners = store.list().filter((task) => existsSync(retirement.pathFor(task.taskId, path)))
+      if (owners.length !== 1) throw new Error('Absent checkout lacks unique reconstruction authority')
+      const manifest = retirement.load(retirement.pathFor(owners[0].taskId, path))
+      if (expectedBranch && manifest.branch !== expectedBranch || expectedRepository && manifest.repositoryId !== expectedRepository) throw new Error('Reconstruction owner changed')
+      await retirement.verifyPins(manifest)
+      return undefined
+    }
+    if ((await lstat(path)).isSymbolicLink() || !(await lstat(join(path, '.git'))).isFile()) throw new Error('Not a regular linked Git worktree')
+    const git = async (...args: string[]) => (await lifecycleReadAsync(path, args)).trim()
+    const common = await realpathLikeSync(resolve(path, await git('rev-parse', '--git-common-dir')))
+    const repositoryId = digest(common.toLowerCase()).slice(0, 32)
+    if (expectedRepository && repositoryId !== expectedRepository) throw new Error('Repository common-directory identity changed')
+    // The branch is the owner's record, not proof: the agent is free to switch to another, so the checkout is known by its path, registration and repository.
+    const top = await realpathLikeSync(await git('rev-parse', '--show-toplevel'))
+    if (top.toLowerCase() !== (await realpathLikeSync(path)).toLowerCase()) throw new Error('Source path is not the registered worktree root')
+    const listed = (await git('worktree', 'list', '--porcelain')).split(/\r?\n/).some((line) => line.startsWith('worktree ') && resolve(line.slice(9)).toLowerCase() === resolve(path).toLowerCase())
+    if (!listed) throw new Error('Git does not register the worktree')
+    return undefined
+  } catch (error) {
+    return `Unverified worktree ${path}: ${(error as Error).message}`
+  }
+}
+
+/** Bound on what ownership discovery visits, across every folder it scans for one profile. */
+export const OWNER_SCAN_LIMIT = 100_000
+
+/**
+ * Scans an old data folder inside a project folder the way ownership discovery scans the profile's own folders: every
+ * task metadata file it holds, down to four levels, refusing a link anywhere on the way. Reads without blocking.
+ */
+async function scanLegacyFolder(root: string): Promise<LegacyScan> {
+  const scan: LegacyScan = { visited: 0, metas: [] }
+  const exists = (path: string) => access(path).then(() => true, () => false)
+  const isLink = async (path: string) => { try { return (await lstat(path)).isSymbolicLink() } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false; throw error } }
+  const visit = async (path: string, depth: number): Promise<void> => {
+    if (!await exists(path)) return
+    // As `assertLifecyclePath`: no link from `path` up to the root, the root included.
+    for (let current = path; ; current = dirname(current)) {
+      if (await isLink(current)) throw new Error('Lifecycle path is a link')
+      if (relative(root, current) === '' || dirname(current) === current) break
+    }
+    if (++scan.visited > OWNER_SCAN_LIMIT || depth > 4) throw new Error('Unregistered storage layout exceeds bounded ownership discovery.')
+    if (!(await lstat(path)).isDirectory()) return
+    const meta = join(path, 'meta.json')
+    if (await exists(meta)) {
+      if (await isLink(meta)) throw new Error('Lifecycle path is a link')
+      let id: string | undefined
+      try { id = (JSON.parse(await readFile(meta, 'utf8')) as { id?: string }).id } catch (error) { throw new Error(`Unreadable task metadata ${meta}: ${(error as Error).message}`) }
+      scan.metas.push({ path, ...(id ? { id } : {}) })
+      return
+    }
+    for (const name of await readdir(path)) {
+      // Completed migration backups are deliberately historical, never new live owners.
+      if (name === '.migration-trash') continue
+      const child = join(path, name)
+      const info = await lstat(child)
+      if (info.isDirectory() || info.isSymbolicLink()) await visit(child, depth + 1)
+    }
+  }
+  try { await visit(root, 0) } catch (error) { scan.error = (error as Error).message }
+  return scan
+}
+
+/**
  * Read-only source projection. This deliberately does not call a directory name ownership proof,
  * infer that clean Git status makes a tree disposable, or release any retention claim.
- * Historical generation snapshots are not scanned as live claim authorities.
+ * Historical generation snapshots are not scanned as live claim authorities. Checkouts are read without blocking the
+ * daemon (see {@link OwnershipFacts}); `facts` may be shared with other passes, which then read each checkout once.
  */
-export function buildResourceInventory(store: ResourceLifecycleStore, record: TaskLifecycleRecord, options: ResourceInventoryOptions = {}): ResourceInventorySnapshot {
+export async function buildResourceInventory(store: ResourceLifecycleStore, record: TaskLifecycleRecord, options: ResourceInventoryOptions = {}, facts = new OwnershipFacts()): Promise<ResourceInventorySnapshot> {
+  for (let round = 0; ; round++) {
+    const needs: OwnershipNeed[] = []
+    const inventory = inventoryFrom(store, record, options, collectingReads(facts, needs))
+    if (!needs.length) return inventory
+    // Records that keep naming new checkouts: decide on what is known, and fail closed on the rest.
+    if (round >= 8) return inventoryFrom(store, record, options, finalReads(facts))
+    await readOwnershipFacts(needs, facts)
+  }
+}
+
+/**
+ * {@link buildResourceInventory} from facts already read, synchronously: the records are read now, with nothing awaited,
+ * and a checkout the facts do not cover is a blocker. For a caller that must act on the answer before anything else runs.
+ */
+export function buildResourceInventoryFromFacts(store: ResourceLifecycleStore, record: TaskLifecycleRecord, facts: OwnershipFacts, options: ResourceInventoryOptions = {}): ResourceInventorySnapshot {
+  return inventoryFrom(store, record, options, finalReads(facts))
+}
+
+/** The synchronous pass over the records, answering checkouts from `reads`. */
+export function inventoryFrom(store: ResourceLifecycleStore, record: TaskLifecycleRecord, options: ResourceInventoryOptions, reads: OwnershipReads): ResourceInventorySnapshot {
   const result: ResourceInventorySnapshot = { schemaVersion: 1, profileId: store.profileId, taskId: record.taskId, generation: record.generation, observedAt: new Date().toISOString(), sources: [], resources: [], blockers: [] }
   const resources = new Map<string, LifecycleResource>()
   const verifiedWorktrees = new Map<string, string | undefined>()
@@ -65,7 +297,9 @@ export function buildResourceInventory(store: ResourceLifecycleStore, record: Ta
     const id = digest(`${kind}\0${repositoryId ?? ''}\0${identity}`)
     let value = resources.get(id)
     if (!value) {
-      value = { id, kind, identity, ownerTaskId, ...(repositoryId ? { repositoryId } : {}), ownership: 'source-associated', materialization: ['task-data', 'worktree', 'workflow-record', 'invocation-thread', 'runtime'].includes(kind) ? (existsSync(identity) ? 'present' : 'absent') : 'unknown', sourceIds: [], claims: [] }
+      // A checkout is read without blocking (`reads`); everything else named here is Mousse's own.
+      const present = (): boolean => kind === 'worktree' ? reads.present(identity) : existsSync(identity)
+      value = { id, kind, identity, ownerTaskId, ...(repositoryId ? { repositoryId } : {}), ownership: 'source-associated', materialization: ['task-data', 'worktree', 'workflow-record', 'invocation-thread', 'runtime'].includes(kind) ? (present() ? 'present' : 'absent') : 'unknown', sourceIds: [], claims: [] }
       resources.set(id, value)
     }
     if (!value.sourceIds.includes(sourceId)) value.sourceIds.push(sourceId)
@@ -103,35 +337,9 @@ export function buildResourceInventory(store: ResourceLifecycleStore, record: Ta
   }
   const verifyWorktree = (path: string | undefined, expectedBranch: string | undefined, expectedRepository: string | undefined): void => {
     if (!path) return
-    const key = `${path}\0${expectedBranch}\0${expectedRepository}`
-    if (!verifiedWorktrees.has(key)) {
-      let failure: string | undefined
-      try {
-        if (!isAbsolute(path)) throw new Error('Registered checkout is not absolute')
-        if (!existsSync(path)) {
-          const retirement = new WorktreeRetirementService(store)
-          const owners = store.list().filter((task) => existsSync(retirement.pathFor(task.taskId, path)))
-          if (owners.length !== 1) throw new Error('Absent checkout lacks unique reconstruction authority')
-          const manifest = retirement.load(retirement.pathFor(owners[0].taskId, path))
-          if (expectedBranch && manifest.branch !== expectedBranch || expectedRepository && manifest.repositoryId !== expectedRepository) throw new Error('Reconstruction owner changed')
-          retirement.verifyPins(manifest)
-          verifiedWorktrees.set(key, undefined)
-          for (const value of resources.values()) if (value.kind === 'worktree' && value.identity === path) value.ownership = 'verified'
-          return
-        }
-        if (lstatSync(path).isSymbolicLink() || !lstatSync(join(path, '.git')).isFile()) throw new Error('Not a regular linked Git worktree')
-        const git = (...args: string[]) => lifecycleRead(path, args).trim()
-        const common = realpathSync(resolve(path, git('rev-parse', '--git-common-dir')))
-        const repositoryId = digest(common.toLowerCase()).slice(0, 32)
-        if (expectedRepository && repositoryId !== expectedRepository) throw new Error('Repository common-directory identity changed')
-        // The branch is the owner's record, not proof: the agent is free to switch to another, so the checkout is known by its path, registration and repository.
-        const top = realpathSync(git('rev-parse', '--show-toplevel'))
-        if (top.toLowerCase() !== realpathSync(path).toLowerCase()) throw new Error('Source path is not the registered worktree root')
-        const listed = git('worktree', 'list', '--porcelain').split(/\r?\n/).some((line) => line.startsWith('worktree ') && resolve(line.slice(9)).toLowerCase() === resolve(path).toLowerCase())
-        if (!listed) throw new Error('Git does not register the worktree')
-      } catch (error) { failure = `Unverified worktree ${path}: ${(error as Error).message}` }
-      verifiedWorktrees.set(key, failure)
-    }
+    const key = worktreeKey(store, path, expectedBranch, expectedRepository)
+    // Read beforehand without blocking (`verifyWorktreeFact`).
+    if (!verifiedWorktrees.has(key)) verifiedWorktrees.set(key, reads.worktree(store, path, expectedBranch, expectedRepository))
     const failure = verifiedWorktrees.get(key)
     for (const value of resources.values()) if (value.kind === 'worktree' && value.identity === path) value.ownership = failure ? 'unknown' : 'verified'
     if (failure) result.blockers.push(failure)
@@ -276,7 +484,9 @@ export function buildResourceInventory(store: ResourceLifecycleStore, record: Ta
         }
       } catch (error) { result.blockers.push(`Journal inventory failed: ${(error as Error).message}`) }
     }
-    for (const entry of latest.values()) if (['planned', 'running', 'prepared', 'git_applied', 'context_pending', 'recovery_required'].includes(String(entry.data.state))) resource('task-data', task.location, entry.source.id, 'recovery', `Unsettled operation ${entry.data.operationId}`, task.taskId)
+    // An unsettled expiry of kept files only records which refs went, and an unsettled keep removed nothing yet; the purge
+    // lists the refs themselves.
+    for (const entry of latest.values()) if (!settlesItself(String(entry.data.operationType)) && ['planned', 'running', 'prepared', 'git_applied', 'context_pending', 'recovery_required'].includes(String(entry.data.state))) resource('task-data', task.location, entry.source.id, 'recovery', `Unsettled operation ${entry.data.operationId}`, task.taskId)
     // Attachments are retained associations. No blob is unlinked in this phase.
     const messages = source(join(task.location, 'messages.json'))
     if (messages) {
@@ -431,12 +641,14 @@ export function buildResourceInventory(store: ResourceLifecycleStore, record: Ta
         // The files of a worktree that held uncommitted work, kept as a snapshot until the owner is permanently deleted.
         resource('git-ref', text(value.snapshotRef), found.source.id, claim, 'Workspace owner retains its uncommitted files', task.taskId, text(value.repositoryId))
         for (const ref of Array.isArray(value.keptRefs) ? value.keptRefs : []) resource('git-ref', text(ref), found.source.id, claim, 'Workspace owner retains an earlier pin of its files', task.taskId, text(value.repositoryId))
+        // Git's own data of a deleted worktree (its configuration, HEAD history and own refs), kept for a rebuild.
+        resource('git-ref', text(value.adminRef), found.source.id, claim, "Workspace owner retains Git's own data of its worktree", task.taskId, text(value.repositoryId))
         resource('runtime', found.source.path, found.source.id, claim, 'Workspace reconstruction metadata follows its owner claims', task.taskId)
       }
     }
   }
   result.resources = [...resources.values()]
-  result.blockers = [...new Set(result.blockers)]
+  result.blockers = [...new Set([...result.blockers, ...reads.missing])]
   validateResourceInventory(result)
   return result
 }

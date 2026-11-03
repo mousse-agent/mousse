@@ -8,6 +8,7 @@ import type {
   TaskLifecycleRecord,
   TrashRetentionPolicy
 } from '../../src/shared/resourceLifecycle'
+import { unverifiedHolds } from '../../src/shared/resourceLifecycle'
 import {
   RecentlyDeletedView,
   type RecentlyDeletedActions
@@ -390,6 +391,19 @@ describe('Permanent delete confirmation', () => {
     })
     expect(html).toContain('Can’t delete: Workspace retained: /x/wt: a terminal is still open')
     expect(html).toMatch(/role="alert"[^>]*>Can’t delete/)
+    expect(confirmButton(html)).toContain('disabled')
+  })
+
+  it('names the thread and the worktree that can’t be checked, lists what stays with this thread, and refuses to go on', () => {
+    const reason = 'Thread “Fix prices” has a worktree Mousse can’t check: /x/broken/main.'
+    const retained = [
+      { identity: '/x/wt', reason, unverifiedOwner: 'b' },
+      { identity: 'refs/mousse/threads/a/main', reason, unverifiedOwner: 'b' }
+    ]
+    const html = dialog({ preview: preview([item('path', 'data')], { retained, blockers: unverifiedHolds({ retained }) }) })
+    expect(html).toContain(`Can’t delete: ${reason} What this thread may share with it stays in the trash with this thread until Mousse can check that worktree again.`)
+    expect(html.split('Can’t delete:')).toHaveLength(2)
+    expect(html).toContain(`Kept · ${reason}`)
     expect(confirmButton(html)).toContain('disabled')
   })
 

@@ -283,7 +283,7 @@ function fixture(outputs: Array<string | AssistantMessage> = ['done'], override?
       f.service.send({ chatId: group.id, text })
       await f.service.waitForIdle()
       expect(f.service.get(group.id).run?.state).toBe(kind === 'failed' ? 'failed' : 'completed')
-      expect(new ThreadWorkspaceManager(f.threads.getThreadDir(group.threadId)).verify().lifecycle).toBe('ready')
+      expect((await new ThreadWorkspaceManager(f.threads.getThreadDir(group.threadId)).verify()).lifecycle).toBe('ready')
     }
     const binding = f.service.resourceBinding(group.id)
     // Each run is a private snapshot; the agent's uncommitted edit stays uncommitted in the worktree.
@@ -298,7 +298,7 @@ function fixture(outputs: Array<string | AssistantMessage> = ['done'], override?
       const before = await resources.fileRead(context, 'tracked.txt')
       expect(await resources.fileWrite(context, before.path, 'Human edit after agent', before.revision)).toMatchObject({ status: 'saved' })
       expect(readFileSync(join(repo, 'tracked.txt'), 'utf8')).toBe('Original')
-      expect(new ThreadWorkspaceManager(f.threads.getThreadDir(group.threadId)).verify().lifecycle).toBe('ready')
+      expect((await new ThreadWorkspaceManager(f.threads.getThreadDir(group.threadId)).verify()).lifecycle).toBe('ready')
     } finally { await resources.dispose() }
   }, 20_000)
   it('binds shared resources to the project subdirectory inside a managed monorepo worktree', async () => {
@@ -314,7 +314,7 @@ function fixture(outputs: Array<string | AssistantMessage> = ['done'], override?
     f.service.send({ chatId: group.id, text: 'Inspect the package' }); await f.service.waitForIdle()
     expect(f.service.get(group.id).run?.state).toBe('completed')
     const binding = f.service.resourceBinding(group.id)
-    expect(binding.workspaceRoot).toBe(join(new ThreadWorkspaceManager(f.threads.getThreadDir(group.threadId)).verify().worktreePath, 'package'))
+    expect(binding.workspaceRoot).toBe(join((await new ThreadWorkspaceManager(f.threads.getThreadDir(group.threadId)).verify()).worktreePath, 'package'))
     f.options.services.platform = { browser: { listPublicSessions: () => [] } }
     const resources = createMmsChatResourceService(f.options.services, id => f.service.resourceBinding(id))
     try {

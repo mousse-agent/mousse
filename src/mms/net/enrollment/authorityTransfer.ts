@@ -66,7 +66,7 @@ export class AuthorityTransferDelivery {
         'forbidden',
         'Protected delivery requires an independent committed operation.'
       )
-    if (!this.options.keys.encryptedAtRest() || this.options.keys.state() !== 'unlocked')
+    if (!this.options.keys.protectedAtRest() || this.options.keys.state() !== 'unlocked')
       throw new NetError(
         'keystore_locked',
         'Protect and unlock this profile before authority transfer.'

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest'
-import { readRemoteComposerOptions, remotePermissionCeiling, remotePermissionView } from '../../src/renderer/lib/remoteComputers'
+import { cachedRemoteComposerOptions, readRemoteComposerOptions, remotePermissionCeiling, remotePermissionView } from '../../src/renderer/lib/remoteComputers'
 
 describe('the permission mode a thread of another computer runs in', () => {
   it('is the thread\'s own mode, or that computer\'s default, never this computer\'s', () => {
@@ -53,5 +53,14 @@ describe('reading another computer\'s composer options', () => {
     expect((await readRemoteComposerOptions('nod_a' as never)).permission).toBeUndefined()
     answer({ providers: [], defaultModel: null, permission: { defaultMode: 'ask', limit: 'root' } })
     expect((await readRemoteComposerOptions('nod_a' as never)).permission).toEqual({ defaultMode: 'ask' })
+  })
+
+  it('remembers each computer\'s last answer, and keeps it when a later read fails', async () => {
+    answer({ providers: [{ id: 'claude' }], defaultModel: { llmProvider: 'claude', model: 'opus' } })
+    await readRemoteComposerOptions('nod_cached' as never)
+    ;(globalThis as { window?: unknown }).window = { mousse: { platformRequest: { request: async () => { throw { code: 'peer_offline' } } } } }
+    await expect(readRemoteComposerOptions('nod_cached' as never)).rejects.toMatchObject({ code: 'peer_offline' })
+    expect(cachedRemoteComposerOptions('nod_cached' as never)?.defaultModel).toEqual({ llmProvider: 'claude', model: 'opus' })
+    expect(cachedRemoteComposerOptions('nod_never' as never)).toBeUndefined()
   })
 })

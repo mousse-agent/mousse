@@ -55,7 +55,7 @@ function MousseIdAccount() {
     ? [plus.email ?? `Account ${plus.accountId ?? ''}`, plus.plan, host].filter(Boolean).join(' · ')
     : !loaded ? 'Checking Mousse ID…'
       : plus?.configured ? 'Disconnected. Sign in again to reconnect.'
-        : 'Optional. Sign in to reach this computer from your phone.'
+        : 'Optional. Sign in to reach this computer from your phone and from your other computers signed in to it.'
   const setupStep = !plus?.connected && !pending && loaded && mousseIdPreparation(net) === 'manual' ? mousseIdSetupStep(net) : ''
 
   return (

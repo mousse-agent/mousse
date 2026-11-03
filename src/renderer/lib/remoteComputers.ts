@@ -3,6 +3,7 @@ import { describePermissionMode, isPermissionMode, isStricter, narrowPermissionM
 import type { NodeId } from '../../shared/net'
 import type { LlmProviderOption } from '../../shared/settings'
 import type { Project } from '../../shared/types'
+import { useAppStore } from '../stores/appStore'
 import { localProjectIdOf, workspaceOnOtherComputer, workspaceOnThisComputer, type ComposerWorkspace } from './newThread'
 
 const request = <T>(method: Parameters<typeof window.mousse.platformRequest.request>[0], params: unknown) =>
@@ -96,14 +97,34 @@ export function remotePermissionCeiling(lineage: PermissionMode | undefined, lim
   return { ceiling: limit, reason: `${computer} lets this device use ${describePermissionMode(limit)} at most. Raise the limit for this device on ${computer}, in Settings, Devices.` }
 }
 
-export async function readRemoteComposerOptions(node: NodeId): Promise<RemoteComposerOptions> {
-  const value = await request<Partial<RemoteComposerOptions> | undefined>('bridge.hub.composerOptions', { target: node })
-  const permission = value?.permission
-  return {
-    providers: Array.isArray(value?.providers) ? value.providers : [],
-    defaultModel: value?.defaultModel ?? null,
-    ...(permission && isPermissionMode(permission.defaultMode)
-      ? { permission: { defaultMode: permission.defaultMode, ...(isPermissionMode(permission.limit) ? { limit: permission.limit } : {}) } }
-      : {})
-  }
+/** The last answer of each computer, per profile, so picking it again shows its models at once. */
+const composerOptionsCache = new Map<string, RemoteComposerOptions>()
+/** The read in flight per computer and profile: a second caller shares it instead of racing it. */
+const composerOptionsReads = new Map<string, Promise<RemoteComposerOptions>>()
+const composerOptionsKey = (node: NodeId) => `${useAppStore.getState().profileId}\u0000${node}`
+
+/** What `node` last answered to `readRemoteComposerOptions` for this profile, while this window is open. */
+export function cachedRemoteComposerOptions(node: NodeId): RemoteComposerOptions | undefined {
+  return composerOptionsCache.get(composerOptionsKey(node))
+}
+
+export function readRemoteComposerOptions(node: NodeId): Promise<RemoteComposerOptions> {
+  const key = composerOptionsKey(node)
+  const pending = composerOptionsReads.get(key)
+  if (pending) return pending
+  const read = (async () => {
+    const value = await request<Partial<RemoteComposerOptions> | undefined>('bridge.hub.composerOptions', { target: node })
+    const permission = value?.permission
+    const options: RemoteComposerOptions = {
+      providers: Array.isArray(value?.providers) ? value.providers : [],
+      defaultModel: value?.defaultModel ?? null,
+      ...(permission && isPermissionMode(permission.defaultMode)
+        ? { permission: { defaultMode: permission.defaultMode, ...(isPermissionMode(permission.limit) ? { limit: permission.limit } : {}) } }
+        : {})
+    }
+    composerOptionsCache.set(key, options)
+    return options
+  })().finally(() => composerOptionsReads.delete(key))
+  composerOptionsReads.set(key, read)
+  return read
 }

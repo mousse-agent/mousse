@@ -207,7 +207,7 @@ export function modelsWithPrefs(listed: readonly LlmModelOption[], prefs: ModelP
   for (const model of listed) {
     if (seen.has(model.id)) continue
     seen.add(model.id)
-    entries.push({ id: model.id, label: canonicalModelName(model.label, model.id), source: 'catalog', capabilities: listedCapabilities(model), hidden: hidden.has(model.id), favorite: favorites.has(model.id) })
+    entries.push({ id: model.id, label: canonicalModelName(model.label, model.id), source: 'catalog', capabilities: listedCapabilities(model), hidden: hidden.has(model.id), favorite: favorites.has(model.id), ...(model.older ? { older: true as const } : {}) })
   }
   for (const model of prefs.custom) {
     if (seen.has(model.id)) continue

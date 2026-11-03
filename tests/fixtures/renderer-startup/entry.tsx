@@ -9,7 +9,7 @@ import '../../../src/renderer/styles/scheduled-panel.css'
 const calls: Array<{ method: string; params?: unknown; input?: unknown }> = []
 const errors: string[] = []
 const profile = { id: 'prf_startup-bound', displayName: 'Startup profile', isDefault: true, revision: 1 }
-const appearance = { ...getDefaultSettings().appearance, theme: 'dark-modern' as const, acrylic: false }
+const appearance = { ...getDefaultSettings().appearance, theme: 'github-dark' as const, acrylic: false }
 let finishList!: (value: unknown) => void, finishStatus!: (value: unknown) => void
 let failList!: (reason: Error) => void, failStatus!: (reason: Error) => void
 let list: Promise<unknown>, status: Promise<unknown>
@@ -80,7 +80,7 @@ function api(path: string[] = []): unknown {
   },
   profile: () => useAppStore.getState().profileId,
   workspaceReady: () => useAppStore.getState().workspaceReady,
-  acrylic: (theme: 'blacksphere-plus' | 'dark-modern' | 'light', intensity: number) => {
+  acrylic: (theme: 'blacksphere-plus' | 'github-dark' | 'light', intensity: number) => {
     applyAppearance({ ...appearance, theme, acrylic: true, acrylicIntensity: intensity })
   },
   overlay: (page: 'settings' | 'scheduled', open: boolean) => {

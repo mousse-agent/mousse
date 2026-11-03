@@ -17,6 +17,8 @@ export interface TdtSearch<Prediction> {
   joint: (frame: number, prediction: Prediction) => Promise<ArrayLike<number>>
   /** Tokens allowed on one frame before the search is pushed to the next one. */
   maxSymbolsPerFrame: number
+  /** Called for each emitted token with its frame and the prediction it was emitted from. */
+  onEmit?: (step: { token: number; frame: number; before: Prediction }) => void
 }
 
 function argmax(values: ArrayLike<number>, from: number, to: number): number {
@@ -36,6 +38,7 @@ export async function greedyTdtSearch<Prediction>(search: TdtSearch<Prediction>)
     const token = argmax(logits, 0, blank + 1)
     let skip = argmax(logits, blank + 1, logits.length) - blank - 1
     if (token !== blank) {
+      search.onEmit?.({ token, frame, before: prediction })
       tokens.push(token)
       prediction = await search.predict(token, prediction)
       emitted += 1

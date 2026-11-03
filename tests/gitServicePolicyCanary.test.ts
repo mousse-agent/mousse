@@ -81,7 +81,7 @@ describe('GitService under the central Git check', () => {
     await service.fetch(cwd, USER)
     await service.pull(cwd, USER)
     writeFileSync(join(cwd, 'a.txt'), 'discard me\n')
-    await service.discard(cwd, USER, ['a.txt'])
+    await service.discard(cwd, USER, ['a.txt'], { owner: join(root, 'kept-files') })
     mkdirSync(join(root, 'fresh'))
     await service.init(join(root, 'fresh'), USER)
     expect(gitPolicyLog()).toEqual([])

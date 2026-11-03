@@ -174,7 +174,7 @@ export function isWaitingPermissionRequest(message: UIMessage | undefined): bool
 }
 
 /**
- * The request in one short line: what it would do ("Run", "Edit", "Use") and to what (the command,
+ * The request in one short line: what it would do ("Run", "Edit", "Change", "Use") and to what (the command,
  * the file), read from the saved prompt. The prompt's first line asks the question; what follows is
  * the command, a path or the tool's input.
  */
@@ -186,6 +186,9 @@ export function permissionSummary(
   const questionAt = Math.max(0, lines.findIndex((line) => line.endsWith("?")));
   const question = lines[questionAt] ?? "";
   const rest = lines.slice(questionAt + 1);
+  // A file write into Git's own files asks as a command does: "Allow Pi to change Git's own files (.git/config)?".
+  const gitFiles = question.match(/^Allow .+? to change Git's own files \((.+)\)\?$/i);
+  if (gitFiles) return { verb: "Change", target: gitFiles[1]! };
   const verbOf = (kind: PermissionRequestData["action"]) =>
     kind === "command" ? "Run" : kind === "edit" ? "Edit" : "Use";
   // What the question names: "Allow Codex to edit a.ts, b.ts?", "Allow Pi to run this command?", "Allow Claude Code to run a command (Bash)?".

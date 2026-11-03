@@ -7,10 +7,11 @@ import { ThreadActionService } from '../src/mms/actions/ThreadActionService'
 import { CodeRevertService } from '../src/mms/actions/CodeRevertService'
 import { PublishService } from '../src/mms/actions/PublishService'
 import { ChangeReceiptService } from '../src/mms/actions/ChangeReceiptService'
-import { worktreeTree } from '../src/mms/actions/snapshots'
+import { worktreeTreeAsync } from '../src/mms/actions/snapshots'
 import { ThreadJournal } from '../src/mms/data/ThreadJournal'
 import { UndoService } from '../src/mms/actions/UndoService'
 import { CRASH_CHILD_REQUIRE, actionOptions, git, gitFoundationFixture } from './fixtures/gitFoundation'
+import { pressed } from './support/userRequest'
 
 let f: ReturnType<typeof gitFoundationFixture>
 beforeEach(() => { f = gitFoundationFixture() })
@@ -50,7 +51,7 @@ it.each(['checkpoint', 'revert', 'publish'].flatMap((kind) => ['before', 'after'
     expect(git(f.repo, 'status', '--porcelain')).toBe(kind === 'checkpoint' ? 'M value.txt' : '')
     expect(new ChangeReceiptService(f.thread).list().filter((receipt) => receipt.kind === kind)).toHaveLength(1)
     expect([...new ThreadJournal(f.thread).latestByOperation().values()].filter((entry) => ['prepared', 'git_applied', 'running', 'context_pending', 'recovery_required'].includes(entry.state))).toEqual([])
-    if (kind === 'checkpoint') expect(git(f.repo, 'rev-parse', `${new ThreadActionService(f.thread).latest('main')!.endSha}^{tree}`)).toBe(worktreeTree(f.repo))
+    if (kind === 'checkpoint') expect(git(f.repo, 'rev-parse', `${new ThreadActionService(f.thread).latest('main')!.endSha}^{tree}`)).toBe((await worktreeTreeAsync(f.repo)))
     expect(f.read(f.repo)).toBe(kind === 'checkpoint' ? 'checkpoint result\n' : kind === 'revert' ? 'base\n' : 'child result\n')
     const journalSize = new ThreadJournal(f.thread).list().length
     await recover!()
@@ -73,11 +74,11 @@ it('recovers an interrupted nested snapshot before its parent and keeps whole-pa
   expect(git(f.repo, 'rev-parse', 'HEAD')).toBe(appliedHead)
   expect(actions.list()).toHaveLength(2)
   expect(actions.latest('main')).toMatchObject({ turnId: 'parent-turn', state: 'stopped' })
-  expect(git(f.repo, 'rev-parse', `${actions.latest('main')!.endSha}^{tree}`)).toBe(worktreeTree(f.repo))
+  expect(git(f.repo, 'rev-parse', `${actions.latest('main')!.endSha}^{tree}`)).toBe((await worktreeTreeAsync(f.repo)))
   expect(actions.list()[0].turnId).toBe('nested-snapshot')
   const parentReceipt = new ChangeReceiptService(f.thread).list().find((receipt) => receipt.id === actions.latest('main')!.receiptId)!
   expect(parentReceipt.contributions.some((item) => item.receiptId === actions.list()[0].receiptId)).toBe(true)
-  await new UndoService(f.thread).undoLatest('main', f.repo)
+  await pressed('Undo', () => new UndoService(f.thread).undoLatest('main', f.repo))
   expect(f.read(f.repo)).toBe('base\n')
   expect(git(f.repo, 'status', '--porcelain')).toBe('')
   expect(git(f.repo, 'rev-parse', 'HEAD')).toBe(appliedHead)

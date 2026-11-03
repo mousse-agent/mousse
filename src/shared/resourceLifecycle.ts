@@ -93,6 +93,29 @@ export interface TaskLifecycleRecord {
   cleanupOwner?: { pid: number; processInstanceId: string; token: string }
 }
 
+/** Where Mousse keeps files a restore or an abort set aside before writing over them. */
+export const PRESERVED_REFS = 'refs/mousse/preserved/'
+
+/** The thread journal's operation type for an expiry of those files (`expirePreservedFiles`). */
+export const PRESERVED_EXPIRY_OPERATION = 'preserved-files-expired'
+
+/** Journal operation types of a copy kept before an action removed files (`keepCopy`): Discard, and worktree cleanup. */
+export const KEEP_COPY_OPERATIONS = ['git-discard', 'worktree-cleanup'] as const
+export type KeepCopyOperation = (typeof KEEP_COPY_OPERATIONS)[number]
+
+/**
+ * Operations that settle themselves and change no file before they are settled: an expiry of kept files only records
+ * which refs went, and a keep removes nothing before its copy is recorded. One left unfinished pauses nothing.
+ */
+export function settlesItself(operationType: string): boolean {
+  return operationType === PRESERVED_EXPIRY_OPERATION || (KEEP_COPY_OPERATIONS as readonly string[]).includes(operationType)
+}
+
+/** Whether a purge item is files a restore or an abort kept (a `refs/mousse/preserved/` ref), which may be the only copy of a file. */
+export function isKeptFilesItem(item: Pick<LifecyclePurgeItem, 'kind' | 'identity'>): boolean {
+  return item.kind === 'ref' && item.identity.startsWith(PRESERVED_REFS)
+}
+
 export interface LifecyclePurgeItem {
   id: string
   kind: 'worktree' | 'ref' | 'path' | 'scheduled-row'
@@ -120,8 +143,20 @@ export interface LifecyclePurgePreview {
   items: LifecyclePurgeItem[]
   ownedTaskIds: string[]
   blockers: string[]
-  retained: Array<{ identity: string; reason: string }>
+  /** Kept, with why. `unverifiedOwner` is the thread whose checkout can't be verified and whose records name it. */
+  retained: Array<{ identity: string; reason: string; unverifiedOwner?: string }>
   exclusiveBytes: number
+}
+
+/**
+ * Why the thread can't be deleted yet: something of it is kept back because another thread, whose worktree can't be
+ * checked, may still use it (`retained` entries with `unverifiedOwner`). Deleting the thread then would leave what is
+ * kept with no thread to own it, and nothing in the app could delete it later; so the thread stays in the trash, owning
+ * it, until that worktree can be checked again. One line per such thread.
+ */
+export function unverifiedHolds(preview: Pick<LifecyclePurgePreview, 'retained'>): string[] {
+  return [...new Set(preview.retained.filter((item) => item.unverifiedOwner).map((item) => item.reason))]
+    .map((reason) => `${reason} What this thread may share with it stays in the trash with this thread until Mousse can check that worktree again.`)
 }
 export interface LifecyclePurgeProgress extends LifecyclePurgePreview {
   operationId: string

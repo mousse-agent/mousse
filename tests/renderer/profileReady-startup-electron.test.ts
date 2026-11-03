@@ -43,7 +43,7 @@ it('paints the real shell and retryable skeleton before trusted binding, then pr
     expect(await exited, output).toBe(0)
     const report = JSON.parse(readFileSync(join(directory, 'evidence.json'), 'utf8'))
     expect(report.rendererErrors).toEqual([])
-    expect(report.before).toMatchObject({ ready: false, profile: 'default', scheduled: false, main: false, skeleton: true, titlebar: true, theme: 'dark-modern', surface: '#1f1f1f', acrylic: 'false' })
+    expect(report.before).toMatchObject({ ready: false, profile: 'default', scheduled: false, main: false, skeleton: true, titlebar: true, theme: 'github-dark', surface: '#0d1117', acrylic: 'false' })
     expect(report.failed).toMatchObject({ ready: false, main: false, skeleton: true })
     expect(report.failed.error).toContain('Controlled workspace service unavailable')
     expect(report.before.calls.some((row: any) => row.method.startsWith('settings.') || row.method === 'platformRequest.request')).toBe(false)

@@ -1,5 +1,5 @@
 import { errorDiagnostic, knownAppError, normalizeAppError, parseErrorInfo, type AppErrorShape } from '../../shared/errors'
-import type { LifecycleState, LifecyclePurgePreview, TaskLifecycleRecord, TrashRetentionPolicy } from '../../shared/resourceLifecycle'
+import { isKeptFilesItem, type LifecycleState, type LifecyclePurgePreview, type TaskLifecycleRecord, type TrashRetentionPolicy } from '../../shared/resourceLifecycle'
 import { formatBytes } from '../../shared/storage'
 import type { ThreadSearchSkipped } from '../../shared/types'
 
@@ -156,6 +156,8 @@ export interface DeletionSummary {
   unpublishedWorktrees: number
   /** Files outside Git that exist nowhere else. */
   soleCopyPaths: number
+  /** Sets of files set aside before a restore or an abort that may be the only copy (still within their Undo window). */
+  keptFiles: number
   needsDiscard: boolean
   /** Names the work that would be lost; present exactly when `needsDiscard`. */
   discardWarning?: string
@@ -168,23 +170,27 @@ export function summarizeDeletion(preview: LifecyclePurgePreview, name: string, 
   const lost = joinWords([
     'transcript',
     ...(kinds.has('worktree') ? ['worktree'] : []),
-    ...(kinds.has('ref') ? ['branch'] : []),
+    ...(preview.items.some((item) => item.kind === 'ref' && !isKeptFilesItem(item)) ? ['branch'] : []),
+    ...(preview.items.some(isKeptFilesItem) ? ['kept files'] : []),
     ...(kinds.has('scheduled-row') ? ['scheduled tasks'] : [])
   ])
   const unpublishedWorktrees = preview.items.filter((item) => item.kind === 'worktree' && item.discardRequired).length
   const soleCopyPaths = preview.items.filter((item) => item.kind === 'path' && item.discardRequired).length
-  const needsDiscard = unpublishedWorktrees > 0 || soleCopyPaths > 0
+  const keptFiles = preview.items.filter((item) => isKeptFilesItem(item) && item.discardRequired).length
+  const needsDiscard = unpublishedWorktrees > 0 || soleCopyPaths > 0 || keptFiles > 0
   const approximate = Boolean(reclaim && (reclaim.estimated || reclaim.partial))
   const bytes = reclaim?.bytes ?? preview.exclusiveBytes
   const lostWork: string[] = []
   if (unpublishedWorktrees) lostWork.push(`${unpublishedWorktrees} ${unpublishedWorktrees === 1 ? 'worktree has' : 'worktrees have'} unpublished work`)
   if (soleCopyPaths) lostWork.push(`${soleCopyPaths} ${soleCopyPaths === 1 ? 'folder holds' : 'folders hold'} files that exist nowhere else`)
+  if (keptFiles) lostWork.push(`${keptFiles} ${keptFiles === 1 ? 'set' : 'sets'} of files set aside before a restore or an abort may be the only copy`)
   return {
     lost,
     headline: `Permanently deletes the ${lost} of “${name}”. This can’t be undone.`,
     frees: `Frees ${approximate ? 'about ' : ''}${formatBytes(bytes)}.`,
     unpublishedWorktrees,
     soleCopyPaths,
+    keptFiles,
     needsDiscard,
     ...(needsDiscard ? { discardWarning: `Unpublished work will be lost: ${lostWork.join('; ')}.` } : {}),
     blockers: preview.blockers

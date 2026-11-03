@@ -107,9 +107,8 @@ function resolveEditDiffThemeIsDark(): boolean {
     }
     return true;
   }
-  // Every other mousse theme id (dark, dark-modern, one-dark, monokai,
-  // solarized-dark, github-dark, high-contrast, blacksphere-plus, …) is
-  // dark-only.
+  // Every other mousse theme id (dark, solarized-dark, github-dark,
+  // high-contrast, blacksphere-plus, …) is dark-only.
   if (dataTheme) return true;
   if (root.classList.contains("dark")) return true;
   try {

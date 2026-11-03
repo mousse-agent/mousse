@@ -244,7 +244,7 @@ Inbound carriers share one profile-owned admission allocator. A lease is reserve
 
 WireError is `{code,message,retryable,cause?}` with a cause array outermost first of `{message,code?}`. Code and retryability MUST follow `NET_ERRORS`; receivers derive retryability from their own registry rather than trusting a peer flag. Diagnostic messages/causes MUST redact secrets and sealed/private/message content. Errors do not prove replay safety. A response error preserves causes while stable code drives the UI.
 
-The exhaustive stable codes are: unsupported_version, incompatible_peer, upgrade_required, downgrade_unsupported, bad_request, too_large, bad_signature, bad_delegation, peer_key_mismatch, revoked, not_enrolled, not_member, forbidden, invite_invalid, roster_conflict, conflict, stream_unknown, snapshot_required, meta_stale, space_frozen, rate_limited, quota_exceeded, storage_full, storage_corrupt, keystore_locked, keystore_missing, clock_skew, route_unreachable, peer_offline, deadline_exceeded, cancelled, budget_exhausted, profile_unsupported, repo_not_bound, outcome_uncertain, internal. The exact categories/default messages/retryability are in `errors.ts`.
+The exhaustive stable codes are: unsupported_version, incompatible_peer, upgrade_required, downgrade_unsupported, bad_request, too_large, bad_signature, bad_delegation, peer_key_mismatch, revoked, not_enrolled, not_member, forbidden, invite_invalid, roster_conflict, conflict, stream_unknown, snapshot_required, meta_stale, space_frozen, rate_limited, quota_exceeded, storage_full, storage_corrupt, keystore_locked, keystore_missing, clock_skew, route_unreachable, peer_offline, authority_offline, deadline_exceeded, cancelled, budget_exhausted, profile_unsupported, repo_not_bound, outcome_uncertain, internal. The exact categories/default messages/retryability are in `errors.ts`.
 
 Schema/codec fixtures and focused tests establish encoding and rejection behavior only. They do not establish a working distributed session or a security-qualified runtime; P0 independent review and P1 integration gates remain required.
 
@@ -254,13 +254,22 @@ A phone joins as a leaf node of the same user. It receives an ordinary `mj1_` no
 
 **Phone invites need a relay rendezvous.** The desktop issues phone invites only with a Mousse ID relay rendezvous (`route_unreachable` without a relay listener). The rendezvous ticket inside the invite lets the phone dial the authority through the relay as registration `rendezvous_` + base64url(SHA-256(ticket)), generation 1.
 
-**Request path (phone asks, desktop approves).** The phone posts an enrollment request to Mousse ID with its device name, a fresh X25519 `boxPublicKey` and its `transportFingerprint` (base64url SHA-256 of its P-256 SPKI DER). The authority's daemon polls the mailbox every 15 seconds while it is connected to Mousse ID. Settings show each request with its device name and match code. On Approve, the daemon:
+**Request path (phone asks, desktop approves).** The phone posts an enrollment request to Mousse ID with its device name, a fresh X25519 `boxPublicKey` and its `transportFingerprint` (base64url SHA-256 of its P-256 SPKI DER). The authority's daemon polls the mailbox every 15 seconds while it is connected to Mousse ID and approves each request itself: signing in to the same Mousse ID account is the consent. A request whose approval fails stays in Settings with its device name and match code, for the person to approve or deny. On approval, the daemon:
 
 1. issues a node invite named after the device, pinned to the requested transport fingerprint;
 2. seals the invite to `boxPublicKey` for that request ID;
 3. posts it to the request's approve route. If posting fails, the unsent invite is revoked.
 
 Deny posts to the deny route.
+
+**Computers on the same account.** A computer with no network identity signs in to Mousse ID without one: its sign-in carries a throwaway signing key instead of a user, root and node, and the account grant it gets may read the account's inventory, post a computer enrollment request, read its own requests and then bind or register (Mousse ID contract, join sign-in). The computer then:
+
+1. picks the authority of the account's network with the most devices (the oldest on a tie) from the inventory. With no network on the account it creates its own identity, binds its root and registers, as a first computer does. When that authority is not online it stops with `authority_offline`;
+2. creates its node keys, protects them, and posts a `kind: 'computer'` request to that authority with a fresh `boxPublicKey` and its transport fingerprint;
+3. reads the request every 2 seconds until it is approved, opens the sealed invite, and joins with it (§8, through the invite's relay rendezvous);
+4. registers its new node with the same grant.
+
+The authority approves computer requests itself, like phone requests. The invite is a computer invite (computer capabilities, kind recorded as computer) pinned to the requested transport fingerprint.
 
 **Request seal.** The sender generates an ephemeral X25519 key `e`. Let `box` be the 32-byte raw `boxPublicKey`.
 
@@ -293,7 +302,7 @@ Default phone capabilities are read, chat and write.
 
 A phone that reached a computer through Mousse ID may switch to a WebRTC peer-to-peer path when the networks allow it: the same Wi-Fi, a tailnet, IPv6 between both ends, or IPv4 through STUN hole punching. When no direct path works, the phone stays on the Mousse ID relay. There is no TURN. Nothing in either app shows or controls it. The computer never keeps a listening TCP port for it; its UDP sockets live only as long as one accepted offer (`src/mms/net/transports/phoneWebRtc.ts`).
 
-**When it is offered.** Only while the computer is signed in to Mousse ID with its hosted relay listener up, Net is on with Bridge enabled, the key store is unlocked, and the Mousse ID configuration document (`GET /v1/net/config`) does not set `directWebrtc: false`. That field is the kill switch. The document's `stun: string[]` (at most 4 `stun:host[:port]` URLs; `stuns:` entries are ignored) becomes the ICE servers, and an empty list means host candidates only. The computer reads the document when it signs in, when it starts, and at most every 10 minutes while it renews the relay lease. It keeps the last value while Mousse ID is unreachable.
+**When it is offered.** Only while the computer is signed in to Mousse ID (a live registration; a relay listener waiting to listen again does not end direct paths), Net is on with Bridge enabled, the key store is unlocked, and the Mousse ID configuration document (`GET /v1/net/config`) does not set `directWebrtc: false`. That field is the kill switch. The document's `stun: string[]` (at most 4 `stun:host[:port]` URLs; `stuns:` entries are ignored) becomes the ICE servers, and an empty list means host candidates only. The computer reads the document when it signs in, when it starts, and at most every 10 minutes while it renews the relay lease. It keeps the last value while Mousse ID is unreachable.
 
 **Discovery.** `net.direct.endpoints` takes `{}` (capability `read`, not mutating, never stored). Over a session that arrived on the `plus-relay` or `phone-webrtc` carrier, and while the path is offered, it returns `{endpoints: [], webrtc: {v: 1}}`. Otherwise it returns `{endpoints: []}`. An older computer omits `webrtc`, and the phone then never tries.
 

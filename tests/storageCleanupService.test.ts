@@ -15,17 +15,20 @@ import { ResourceLifecycleStore } from '../src/mms/lifecycle/ResourceLifecycleSt
 import { cleanupMarkerPath, findNestedRepository, readCleanupMarker, StorageCleanupService } from '../src/mms/lifecycle/StorageCleanupService'
 import { StoragePolicyStore } from '../src/mms/lifecycle/StoragePolicyStore'
 import { StorageSweepClock } from '../src/mms/lifecycle/sweepClock'
-import { lifecycleGit as git, WorktreeRetirementService } from '../src/mms/lifecycle/WorktreeRetirementService'
+import { WorktreeRetirementService } from '../src/mms/lifecycle/WorktreeRetirementService'
+import { fixtureGit as git, ownedHome } from './support/fixtureGit'
 import { acquireExecutionLease, getExecutionLeasePath, isExecutionLeaseHeld, leaseBusyMessage, readLeaseOwner, releaseExecutionLeaseHandle, tryAcquireExecutionLease, waitAcquireExecutionLease } from '../src/mms/queue/ThreadExecutionLease'
 import { registerThreadLifecycleGate } from '../src/mms/queue/ThreadLifecycleAdmission'
 import { ThreadWorkspaceManager } from '../src/mms/workspace/ThreadWorkspaceManager'
 import { committedGitTemplate } from './support/gitBase'
+import { unverifiableThread } from './support/unverifiableThread'
 
 const DAY = 86_400_000
 const HOUR = 3_600_000
 const OLD = new Date(Date.now() - 90 * DAY)
 const roots: string[] = []
-afterEach(() => { vi.restoreAllMocks(); for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }) })
+const owned: Array<() => void> = []
+afterEach(() => { vi.restoreAllMocks(); for (const undo of owned.splice(0)) undo(); for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }) })
 
 // A base commit made 90 days ago, so the commit time of HEAD does not count as recent activity.
 const copyBase = committedGitTemplate((repo) => {
@@ -51,7 +54,7 @@ interface FixtureOptions {
 
 function fixture(options: FixtureOptions = {}) {
   const root = mkdtempSync(join(tmpdir(), 'mousse-storage-')); roots.push(root)
-  const home = join(root, 'profile'), location = join(home, 'thread-data', 'task'); mkdirSync(location, { recursive: true })
+  const home = join(root, 'profile'), location = join(home, 'thread-data', 'task'); mkdirSync(location, { recursive: true }); owned.push(ownedHome(home))
   writeFileSync(join(location, 'meta.json'), JSON.stringify({ id: 'task' })); writeFileSync(join(location, 'messages.json'), '[]')
   const store = new ResourceLifecycleStore({ profileId: 'test', profileHome: home }); store.registerTask({ taskId: 'task', location })
   registerThreadLifecycleGate(home, store)
@@ -249,7 +252,7 @@ describe('inactive rule', () => {
     const f = fixture(); setPolicy(f, inactive())
     git(f.worktree, ['switch', '-q', '-c', 'issue-1-work'])
     // The inventory that permanent deletion and shared-ownership proofs are built on does not fail closed either.
-    expect(buildResourceInventory(f.store, f.store.require('task')).blockers).toEqual([])
+    expect((await buildResourceInventory(f.store, f.store.require('task'))).blockers).toEqual([])
     expect(item(await f.service.run('manual'))).toMatchObject({ outcome: 'removed' })
     expect(existsSync(f.worktree)).toBe(false)
     await new ThreadWorkspaceManager(f.location).restore(f.repo)
@@ -447,8 +450,8 @@ describe('leases and re-checks', () => {
     } })
     location = f.location; setPolicy(f, inactive())
     expect(item(await f.service.run('manual'))).toMatchObject({ outcome: 'removed' })
-    // First call: the scan phase, no lease held. Second call: the re-check, where cleanup holds the thread.
-    expect(seen[0]).toBe(true); expect(seen).toHaveLength(2)
+    // First call: the scan phase, no lease held. Then the re-check, and the check right before the move: cleanup holds the thread.
+    expect(seen).toEqual([true, false, false])
   }, 60_000)
 
   it('holds the thread while it waits for the repository: a terminal is refused with the cleanup message and a turn waits for it', async () => {
@@ -497,6 +500,23 @@ describe('leases and re-checks', () => {
       setPolicy(f, inactive(60))
     } finally { repository.release() }
     expect(item(await run)).toMatchObject({ outcome: 'kept', reason: 'Settings changed since check' })
+    expect(existsSync(f.worktree)).toBe(true)
+  }, 60_000)
+
+  it('re-checks the policy right before the move: a settings change while the checkout is prepared keeps it', async () => {
+    const f = fixture(); setPolicy(f, inactive())
+    const prepare = WorktreeRetirementService.prototype.prepare
+    let prepared = 0
+    const spy = vi.spyOn(WorktreeRetirementService.prototype, 'prepare').mockImplementation(async function (this: WorktreeRetirementService, input) {
+      const manifest = await prepare.call(this, input)
+      prepared += 1
+      setPolicy(f, inactive(60))
+      return manifest
+    })
+    let report: StorageCleanupReport
+    try { report = await f.service.run('manual') } finally { spy.mockRestore() }
+    expect(prepared).toBe(1)
+    expect(item(report)).toMatchObject({ outcome: 'kept', reason: 'Settings changed since check' })
     expect(existsSync(f.worktree)).toBe(true)
   }, 60_000)
 
@@ -562,6 +582,32 @@ describe('deleted threads and orphans', () => {
     const preview = await f.coordinator.cleanup.preview('task')
     expect(preview.items.find((entry) => entry.kind === 'worktree')).toMatchObject({ discardRequired: true })
     expect(preview.items.filter((entry) => entry.kind === 'ref').map((entry) => entry.identity)).toContain(manifest.snapshotRef)
+  }, 60_000)
+
+  it('a thread whose worktree points at a deleted and recreated repository does not stop cleanup in another repository', async () => {
+    const f = fixture(); enableTrash(f)
+    unverifiableThread(f.store, { id: 'broken', name: 'Fix prices', repo: join(f.root, 'other-repo'), how: 'recreated' })
+    await trashed(f, 'old-thread')
+    await f.coordinator.trash({ taskId: 'task', operationId: 'trash' })
+    setPolicy(f, { worktrees: { removeWithDeletedThreads: true } })
+    const report = await f.service.run('manual')
+    expect(item(report, 'worktree-deleted')).toMatchObject({ outcome: 'removed' }); expect(existsSync(f.worktree)).toBe(false)
+    expect(report.items.find((entry) => entry.threadId === 'old-thread')).toMatchObject({ rule: 'trash', outcome: 'removed' })
+    expect(f.store.require('old-thread').state).toBe('purged')
+  }, 60_000)
+
+  it('lists an unused folder in a broken thread’s repository as possibly its own, naming the thread, and leaves both in place', async () => {
+    const f = fixture(); setPolicy(f, inactive())
+    const broken = unverifiableThread(f.store, { id: 'broken', name: 'Fix prices', repo: join(f.root, 'other-repo'), how: 'recreated' })
+    const mine = join(f.home, 'repositories', f.repositoryId, 'worktrees', 'threads', 'ghost', 'main'); mkdirSync(mine, { recursive: true }); writeFileSync(join(mine, 'file.txt'), 'who owns this')
+    const theirs = join(f.home, 'repositories', broken.repositoryId, 'worktrees', 'threads', 'ghost', 'main'); mkdirSync(theirs, { recursive: true }); writeFileSync(join(theirs, 'file.txt'), 'maybe theirs')
+    const report = await f.service.run('manual')
+    const orphans = report.items.filter((entry) => entry.rule === 'worktree-orphan')
+    expect(orphans).toHaveLength(2)
+    expect(orphans).toContainEqual(expect.objectContaining({ outcome: 'kept', reason: 'No thread uses this worktree', label: 'threads/ghost', bytes: expect.any(Number) }))
+    expect(orphans).toContainEqual(expect.objectContaining({ outcome: 'kept', reason: `Thread “Fix prices” has a worktree Mousse can’t check: ${broken.worktree}. It may still use this worktree.` }))
+    expect(readFileSync(join(mine, 'file.txt'), 'utf8')).toBe('who owns this'); expect(readFileSync(join(theirs, 'file.txt'), 'utf8')).toBe('maybe theirs')
+    expect(readFileSync(join(broken.worktree, 'a.txt'), 'utf8')).toBe('first\n')
   }, 60_000)
 
   it('reports an orphan directory as kept and leaves it in place', async () => {
@@ -1093,7 +1139,7 @@ function captureFixture(options: CaptureOptions = {}) {
     mkdirSync(join(root, 'real')); symlinkSync(join(root, 'real'), join(root, 'linked'), junctionType)
     base = join(root, 'linked')
   }
-  const home = join(base, 'profile'); mkdirSync(home, { recursive: true })
+  const home = join(base, 'profile'); mkdirSync(home, { recursive: true }); owned.push(ownedHome(home))
   const store = new ResourceLifecycleStore({ profileId: 'test', profileHome: home })
   registerThreadLifecycleGate(home, store)
   const coordinator = new ResourceLifecycleCoordinator(store, { drain: async () => {}, settleMutationOwnership: async () => {}, projectIndex: () => {}, projectPurged: () => {} })

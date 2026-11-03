@@ -7,6 +7,24 @@ import { ThreadSearchDialog } from './ThreadSearchDialog'
 import { DownloadsIndicator } from './downloads/DownloadsIndicator'
 import '../styles/navigation-rail.css'
 
+export type RailPage = 'home' | 'automations' | 'usage' | 'settings'
+
+/** One rail page at most is current; an open page or search means Home is not. */
+export function activeRailPage(state: {
+  scheduledOpen: boolean
+  usageOpen: boolean
+  settingsOpen: boolean
+  threadSearchOpen: boolean
+  mainAreaOpen: boolean
+  sidebarMode: 'projects' | 'chats'
+}): RailPage | null {
+  if (state.settingsOpen) return 'settings'
+  if (state.usageOpen) return 'usage'
+  if (state.scheduledOpen) return 'automations'
+  if (state.threadSearchOpen || state.mainAreaOpen || state.sidebarMode !== 'projects') return null
+  return 'home'
+}
+
 interface NavigationRailProps {
   onMouseEnter?: () => void
   onMouseLeave?: () => void
@@ -28,21 +46,22 @@ export function NavigationRail({ onMouseEnter, onMouseLeave }: NavigationRailPro
 
   const leaveRailPage = () => {
     setScheduledOpen(false)
+    useAppStore.getState().setUsageOpen(false)
+    setSettingsOpen(false)
   }
   const navigateRail = async (action: () => void) => {
     if (!await confirmNavigation()) return
-    leaveRailPage()
     action()
   }
 
   const showHome = async () => {
-    if ((scheduledOpen || sidebarMode !== 'projects') && !await confirmNavigation()) return
+    if ((scheduledOpen || usageOpen || settingsOpen || sidebarMode !== 'projects') && !await confirmNavigation()) return
     leaveRailPage()
     useAppStore.getState().setSidebarMode('projects')
     setThreadsSidebarOpen(true)
     setMainAreaOpen(false)
   }
-  const overlayOpen = scheduledOpen || searchOpen
+  const activePage = activeRailPage({ scheduledOpen, usageOpen, settingsOpen, threadSearchOpen: searchOpen, mainAreaOpen, sidebarMode })
   const reviewPending = useStorageReviewPending()
   useEffect(() => { void refreshStorageReview() }, [])
   const shortcut = (label: string, Icon: LucideIcon, active: boolean, onClick: () => void, disabled = false) => (
@@ -58,11 +77,11 @@ export function NavigationRail({ onMouseEnter, onMouseLeave }: NavigationRailPro
   return (
     <>
       <nav className="navigation-rail" aria-label="Mousse navigation" onMouseEnter={onMouseEnter} onMouseLeave={onMouseLeave}>
-        {shortcut('Home', House, !overlayOpen && !mainAreaOpen && sidebarMode === 'projects', () => void showHome())}
-        {shortcut('Automations', Workflow, scheduledOpen, () => void navigateRail(() => setScheduledOpen(true)))}
+        {shortcut('Home', House, activePage === 'home', () => void showHome())}
+        {shortcut('Automations', Workflow, activePage === 'automations', () => void navigateRail(() => setScheduledOpen(true)))}
         <div className="navigation-rail-separator" role="separator" />
-        {shortcut('Subscription usage', Gauge, usageOpen, () => void navigateRail(() => useAppStore.getState().setUsageOpen(true)))}
-        {shortcut('Settings', Settings, settingsOpen, () => void navigateRail(() => setSettingsOpen(true)))}
+        {shortcut('Subscription usage', Gauge, activePage === 'usage', () => void navigateRail(() => useAppStore.getState().setUsageOpen(true)))}
+        {shortcut('Settings', Settings, activePage === 'settings', () => void navigateRail(() => setSettingsOpen(true)))}
         <DownloadsIndicator variant="rail" />
       </nav>
       <ThreadSearchDialog open={searchOpen} onClose={() => setSearchOpen(false)} onSelect={(threadId) => {

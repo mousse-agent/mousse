@@ -3,13 +3,13 @@ import { lutimesSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
-import { gitDirectoryEnv, isGitDirectory, withGitConfigEnv } from '../src/mms/git/gitEnv'
+import { gitDirectoryEnv, isGitDirectory, MOUSSE_GIT_CONFIG, withGitConfigEnv } from '../src/mms/git/gitEnv'
 import { GitService } from '../src/mms/git/GitService'
-import { userAction } from '../src/mms/git/gitPolicy'
-import { readOnlyGit, runReadOnlyGit } from '../src/mms/git/readOnlyGit'
+import { decideGitCommand, userAction } from '../src/mms/git/gitPolicy'
+import { readOnlyGitAsync, runReadOnlyGitAsync } from '../src/mms/git/readOnlyGit'
 import { conflictPair, readWorkingTreeStatus, readWorkingTreeStatusSync } from '../src/mms/git/workingTreeStatus'
-import { git as actionGit, inspectPendingChanges } from '../src/mms/actions/git'
-import { lifecycleGit, lifecycleRead, readDirectLifecycleRef } from '../src/mms/lifecycle/WorktreeRetirementService'
+import { git as actionGit, inspectPendingChangesAsync } from '../src/mms/actions/git'
+import { lifecycleGitAsync, lifecycleReadAsync, readDirectLifecycleRefAsync } from '../src/mms/lifecycle/WorktreeRetirementService'
 
 /** The user's request a test passes to a GitService change. */
 const USER = userAction('button', 'Test action')
@@ -245,12 +245,12 @@ describe('Status reads use plumbing and never write the index', () => {
     expect(await readWorkingTreeStatus(cwd)).toEqual([{ path: 'link', index: '', workdir: 'M' }])
   })
 
-  it('inspectPendingChanges reads with plumbing and leaves the index alone', () => {
+  it('inspectPendingChanges reads with plumbing and leaves the index alone', async () => {
     const cwd = busy()
     const index = join(cwd, '.git', 'index')
     const before = readFileSync(index)
     const mtime = statSync(index).mtimeMs
-    const pending = inspectPendingChanges(cwd)
+    const pending = (await inspectPendingChangesAsync(cwd))
     expect(readFileSync(index).equals(before)).toBe(true)
     expect(statSync(index).mtimeMs).toBe(mtime)
     expect(pending.unmerged).toEqual(['conflict.txt'])
@@ -262,11 +262,11 @@ describe('Status reads use plumbing and never write the index', () => {
     expect(pending.files[0]).toBe('conflict.txt')
   })
 
-  it('lifecycle reads before a delete take no optional lock', () => {
+  it('lifecycle reads before a delete take no optional lock', async () => {
     const cwd = busy()
     const index = join(cwd, '.git', 'index')
     const before = readFileSync(index)
-    expect(lifecycleRead(cwd, ['status', '--porcelain=v1', '--untracked-files=all'])).not.toBe('')
+    expect((await lifecycleReadAsync(cwd, ['status', '--porcelain=v1', '--untracked-files=all']))).not.toBe('')
     expect(readFileSync(index).equals(before)).toBe(true)
   })
 })
@@ -274,27 +274,40 @@ describe('Status reads use plumbing and never write the index', () => {
 describe('Every Git run carries safe.bareRepository=explicit', () => {
   it('appends after the entries the environment already has, once', () => {
     const env = withGitConfigEnv({ GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'user.name', GIT_CONFIG_VALUE_0: 'Someone' })
-    expect(env).toMatchObject({ GIT_CONFIG_COUNT: '2', GIT_CONFIG_KEY_0: 'user.name', GIT_CONFIG_VALUE_0: 'Someone', GIT_CONFIG_KEY_1: 'safe.bareRepository', GIT_CONFIG_VALUE_1: 'explicit' })
+    expect(env).toMatchObject({ GIT_CONFIG_COUNT: '5', GIT_CONFIG_KEY_0: 'user.name', GIT_CONFIG_VALUE_0: 'Someone', GIT_CONFIG_KEY_1: 'safe.bareRepository', GIT_CONFIG_VALUE_1: 'explicit' })
     expect(withGitConfigEnv(env)).toEqual(env)
     // A later entry of the user's own would win, so ours goes after it.
-    const overridden = withGitConfigEnv({ ...env, GIT_CONFIG_COUNT: '3', GIT_CONFIG_KEY_2: 'safe.bareRepository', GIT_CONFIG_VALUE_2: 'all' })
-    expect(overridden).toMatchObject({ GIT_CONFIG_COUNT: '4', GIT_CONFIG_KEY_3: 'safe.bareRepository', GIT_CONFIG_VALUE_3: 'explicit' })
-    expect(withGitConfigEnv({ GIT_CONFIG_COUNT: 'x', GIT_CONFIG_KEY_0: 'a.b' })).toEqual({ GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'safe.bareRepository', GIT_CONFIG_VALUE_0: 'explicit' })
+    const overridden = withGitConfigEnv({ ...env, GIT_CONFIG_COUNT: '6', GIT_CONFIG_KEY_5: 'safe.bareRepository', GIT_CONFIG_VALUE_5: 'all' })
+    expect(overridden).toMatchObject({ GIT_CONFIG_COUNT: '7', GIT_CONFIG_KEY_6: 'safe.bareRepository', GIT_CONFIG_VALUE_6: 'explicit' })
+    expect(withGitConfigEnv({ GIT_CONFIG_COUNT: 'x', GIT_CONFIG_KEY_0: 'a.b' })).toMatchObject({ GIT_CONFIG_COUNT: '4', GIT_CONFIG_KEY_0: 'safe.bareRepository', GIT_CONFIG_VALUE_0: 'explicit' })
+    expect(withGitConfigEnv({ GIT_CONFIG_COUNT: 'x', GIT_CONFIG_KEY_0: 'a.b' }).GIT_CONFIG_KEY_4).toBeUndefined()
   })
 
-  it('never finds a bare repository left inside a project', () => {
+  it('turns off Git\'s automatic housekeeping, and the central check accepts the whole set', () => {
+    const env = withGitConfigEnv({})
+    const pairs = Array.from({ length: Number(env.GIT_CONFIG_COUNT) }, (_, index) => [env[`GIT_CONFIG_KEY_${index}`], env[`GIT_CONFIG_VALUE_${index}`]])
+    expect(pairs).toEqual([['safe.bareRepository', 'explicit'], ['maintenance.auto', 'false'], ['gc.auto', '0'], ['fetch.writeCommitGraph', 'false']])
+    expect(MOUSSE_GIT_CONFIG).toEqual(pairs)
+    // Set by a caller in its own environment, each is one the check lets through.
+    expect(decideGitCommand({ cwd: tmpdir(), args: ['log'], env: { ...process.env, ...env } })).toMatchObject({ allowed: true })
+    for (const [key, value] of [['maintenance.auto', 'true'], ['fetch.writeCommitGraph', 'true'], ['gc.auto', '1']]) {
+      expect(decideGitCommand({ cwd: tmpdir(), args: ['-c', `${key}=${value}`, 'log'] })).toMatchObject({ allowed: false })
+    }
+  })
+
+  it('never finds a bare repository left inside a project', async () => {
     const root = scratch('mousse-embedded-bare-')
     const embedded = join(root, 'project', 'vendor.git')
     git(root, 'init', '-q', '--bare', embedded)
     mkdirSync(join(embedded, 'objects', 'deep'), { recursive: true })
     // Plain Git finds it from below; Mousse's Git does not.
     expect(git(join(embedded, 'objects', 'deep'), 'rev-parse', '--is-bare-repository')).toBe('true')
-    const run = runReadOnlyGit(join(embedded, 'objects', 'deep'), ['rev-parse', '--is-bare-repository'])
+    const run = (await runReadOnlyGitAsync(join(embedded, 'objects', 'deep'), ['rev-parse', '--is-bare-repository']))
     expect(run.status).not.toBe(0)
     expect(run.stderr).toMatch(/safe\.bareRepository/)
   })
 
-  it('still runs in a common directory Mousse names, for a worktree of a bare repository', () => {
+  it('still runs in a common directory Mousse names, for a worktree of a bare repository', async () => {
     const root = realpathSync(scratch('mousse-bare-worktree-'))
     const bare = join(root, 'repo.git')
     git(root, 'init', '-q', '--bare', '-b', 'main', bare)
@@ -305,11 +318,11 @@ describe('Every Git run carries safe.bareRepository=explicit', () => {
     expect(isGitDirectory(bare)).toBe(true)
     expect(isGitDirectory(join(root, 'main'))).toBe(false)
     expect(gitDirectoryEnv(bare)).toEqual({ GIT_DIR: bare })
-    expect(lifecycleGit(bare, ['worktree', 'list', '--porcelain'])).toContain(`worktree ${join(root, 'main')}`)
-    expect(readOnlyGit(join(root, 'main'), ['rev-parse', '--abbrev-ref', 'HEAD'])).toBe('main')
+    expect((await lifecycleGitAsync(bare, ['worktree', 'list', '--porcelain']))).toContain(`worktree ${join(root, 'main')}`)
+    expect((await readOnlyGitAsync(join(root, 'main'), ['rev-parse', '--abbrev-ref', 'HEAD']))).toBe('main')
   })
 
-  it('reads lifecycle refs and runs Mousse\'s own commands in a bare clone with linked worktrees, and in a .git folder', () => {
+  it('reads lifecycle refs and runs Mousse\'s own commands in a bare clone with linked worktrees, and in a .git folder', async () => {
     const root = realpathSync(scratch('mousse-bare-layout-'))
     const bare = join(root, 'repo.git')
     git(root, 'init', '-q', '--bare', '-b', 'main', bare)
@@ -320,15 +333,15 @@ describe('Every Git run carries safe.bareRepository=explicit', () => {
     const head = git(bare, 'rev-parse', 'main')
     git(bare, 'update-ref', 'refs/mousse/lifecycle/x', head)
     // Restore checks and purge read refs in the shared directory.
-    expect(readDirectLifecycleRef(bare, 'refs/mousse/lifecycle/x')).toBe(head)
-    expect(readDirectLifecycleRef(bare, 'refs/mousse/lifecycle/missing')).toBeUndefined()
-    expect(lifecycleRead(bare, ['worktree', 'list', '--porcelain'])).toContain(`worktree ${join(root, 'main')}`)
+    expect((await readDirectLifecycleRefAsync(bare, 'refs/mousse/lifecycle/x'))).toBe(head)
+    expect((await readDirectLifecycleRefAsync(bare, 'refs/mousse/lifecycle/missing'))).toBeUndefined()
+    expect((await lifecycleReadAsync(bare, ['worktree', 'list', '--porcelain']))).toContain(`worktree ${join(root, 'main')}`)
     expect(actionGit(bare, ['rev-parse', '--verify', 'refs/mousse/lifecycle/x'])).toBe(head)
-    expect(readOnlyGit(bare, ['rev-parse', 'main'])).toBe(head)
+    expect((await readOnlyGitAsync(bare, ['rev-parse', 'main']))).toBe(head)
     // The same in a repository's own .git folder.
     const dotGit = join(seed, '.git')
     git(seed, 'update-ref', 'refs/mousse/lifecycle/y', head)
-    expect(readDirectLifecycleRef(dotGit, 'refs/mousse/lifecycle/y')).toBe(head)
-    expect(lifecycleRead(dotGit, ['worktree', 'list', '--porcelain'])).toContain(`worktree ${seed}`)
+    expect((await readDirectLifecycleRefAsync(dotGit, 'refs/mousse/lifecycle/y'))).toBe(head)
+    expect((await lifecycleReadAsync(dotGit, ['worktree', 'list', '--porcelain']))).toContain(`worktree ${seed}`)
   })
 })

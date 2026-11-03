@@ -43,7 +43,7 @@ export class SpaceArchiveRecovery {
   }): Promise<PreparedSpaceRecovery> {
     const rt = this.profile.options.runtime,
       self = rt.identity.self(),
-      keys = rt.keys as typeof rt.keys & { encryptedAtRest?(): boolean },
+      keys = rt.keys as typeof rt.keys & { protectedAtRest?(): boolean },
       root = self && rt.identity.pinnedRootKey(self.user)
     if (input.signal.aborted) throw new NetError('cancelled')
     if (
@@ -51,7 +51,7 @@ export class SpaceArchiveRecovery {
       !self?.isAuthority ||
       !root ||
       keys.state() !== 'unlocked' ||
-      keys.encryptedAtRest?.() !== true ||
+      keys.protectedAtRest?.() !== true ||
       keys.rootKey() !== root ||
       this.archive.manifest.space !== input.space ||
       this.archive.manifest.owner.user !== self.user ||

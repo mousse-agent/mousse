@@ -2,7 +2,7 @@ import { createErrorProvider } from '../../shared/errors'
 import type { ThreadLeaseHandle } from '../queue/ThreadExecutionLease'
 import type { ChatMode } from '../../shared/types'
 import type { WorkspaceExecutionContext } from '../../shared/workspace'
-import { inspectPendingChanges } from '../actions/git'
+import { inspectPendingChangesAsync } from '../actions/git'
 import { PROJECT_FOLDER_REASON, type ThreadPlacement } from './threadPlacement'
 import { ThreadWorkspaceManager } from './ThreadWorkspaceManager'
 import { startedInSnapshotStore } from './SnapshotWorkspace'
@@ -49,10 +49,10 @@ const START_NOTE_PATHS = 5
  * uncommitted changes, which the worktree therefore does not have. They are not copied over and nothing waits on
  * them; the turn record says so. Undefined when the folder is clean or cannot be read.
  */
-export function uncommittedLeftBehindNote(projectPath: string): string | undefined {
+export async function uncommittedLeftBehindNote(projectPath: string): Promise<string | undefined> {
   let paths: string[]
   try {
-    paths = inspectPendingChanges(projectPath).files.filter((path) => path !== '.mousse' && !path.startsWith('.mousse/'))
+    paths = (await inspectPendingChangesAsync(projectPath)).files.filter((path) => path !== '.mousse' && !path.startsWith('.mousse/'))
   } catch {
     return undefined
   }
@@ -85,7 +85,7 @@ export class WorkspaceResolver {
     const existing = manager.load()
     if (existing) {
       if (existing.lifecycle !== 'ready') throw workspaceErrors.create('workspace_recovery_required', undefined, { state: existing.lifecycle })
-      const verified = manager.verify(existing)
+      const verified = await manager.verify(existing)
       if (verified.lifecycle === 'missing' && manager.hasReconstructionManifest(existing)) {
         return manager.executionContext(this.projectPath, await manager.restore(this.projectPath, signal, heldThreadLease))
       }
@@ -93,10 +93,10 @@ export class WorkspaceResolver {
       return manager.executionContext(this.projectPath, verified)
     }
     if (!mutating) {
-      const repository = manager.resolveRepository(this.projectPath)
+      const repository = await manager.resolveRepositoryAsync(this.projectPath)
       return unprovisionedContext(this.threadId, this.projectPath, repository.capability.gitBacked, 'Read-only turn uses the primary checkout')
     }
-    const repository = manager.resolveRepository(this.projectPath)
+    const repository = await manager.resolveRepositoryAsync(this.projectPath)
     // A thread that started in the folder's hidden store keeps it, even after someone made the folder a Git repository:
     // its turns are recorded there. Only new threads use the repository.
     if (startedInSnapshotStore(this.threadDirectory)) {
@@ -105,7 +105,7 @@ export class WorkspaceResolver {
     }
     if (this.placement === 'project-folder' && repository.capability.gitBacked) {
       // The project folder itself, with a record of its own so the turn is snapshotted and can be undone. No worktree.
-      const folder = manager.ensureProjectFolder(this.threadId, conversationBranchId, this.projectPath)
+      const folder = await manager.ensureProjectFolder(this.threadId, conversationBranchId, this.projectPath)
       if (folder) return manager.executionContext(this.projectPath, folder)
       // Never a worktree for this thread, whatever happened above.
       return unprovisionedContext(this.threadId, this.projectPath, true, PROJECT_FOLDER_REASON)
@@ -116,8 +116,8 @@ export class WorkspaceResolver {
       return { threadId: this.threadId, workspacePath: this.projectPath, projectPath: this.projectPath, primaryPath: this.projectPath, lifecycle: 'unprovisioned', capability: repository.capability }
     }
     // Read before the worktree exists: what the project folder holds that the new worktree, cut from HEAD, will not.
-    const startNote = uncommittedLeftBehindNote(this.projectPath)
+    const startNote = await uncommittedLeftBehindNote(this.projectPath)
     await manager.provision(this.threadId, conversationBranchId, this.projectPath, signal, heldThreadLease, undefined, { nameFrom })
-    return { ...manager.executionContext(this.projectPath), ...(startNote ? { startNote } : {}) }
+    return { ...await manager.executionContext(this.projectPath), ...(startNote ? { startNote } : {}) }
   }
 }

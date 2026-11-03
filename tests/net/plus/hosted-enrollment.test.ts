@@ -106,7 +106,7 @@ it.skipIf(!process.env.MOUSSE_PLUS_ROOT)(
     expect(member.isAuthority).toBe(false)
     expect(member.node).not.toBe(owner.node)
     expect(joiner.services.net.runtime().keys.rootKey()).toBeUndefined()
-    expect(joiner.services.net.runtime().keys.encryptedAtRest()).toBe(true)
+    expect(joiner.services.net.runtime().keys.protectedAtRest()).toBe(true)
     expect(host.services.net.runtime().identity.roster()).toBeDefined()
     const inventory = await hosted.inventory({ accountId, recentAuthAt: Date.now() })
     expect(inventory.registrations).toHaveLength(1)

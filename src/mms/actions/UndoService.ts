@@ -9,8 +9,8 @@ import { UndoRetentionService } from './UndoRetentionService'
 import { ChangeReceiptService } from './ChangeReceiptService'
 import { withGitMutationLocks } from './GitOperationCoordinator'
 import { ThreadWorkspaceManager } from '../workspace/ThreadWorkspaceManager'
-import { changedPaths, commitParents, git, refuseUnsafeChanges, treeOf } from './git'
-import { describeGit, pushedNotice, leftAsIsNotice, preservedNotice, coverageNotice, pushedTo, restoreChange, sameTree, snapshotOrigin, takeSnapshot, worktreeTree, type Snapshot } from './snapshots'
+import { changedPathsAsync, commitParentsAsync, gitAsync, refuseUnsafeChangesAsync, treeOfAsync } from './git'
+import { describeGitAsync, gitLeftInPlaceNoticeAsync, leftAsIsNotice, preservedNotice, coverageNotice, moveOutcome, moveProgressAsync, snapshotOfTreeAsync, restoreChangeAsync, sameTreeAsync, snapshotOriginAsync, takeSnapshotAsync, type Snapshot } from './snapshots'
 
 export type RestoreActionContext = (action: ThreadAction, kind: 'undo' | 'redo') => void | Promise<void>
 interface UndoRecovery {
@@ -35,6 +35,8 @@ interface UndoIntent {
   ours?: string
   /** The tree the restore turns the files into. */
   expectedTree?: string
+  /** What the turn did to Git that the restore leaves in place (`gitLeftInPlaceNotice`), so a recovered restore says it too. */
+  gitNotice?: string
 }
 
 /** Edits made since the action overlap with it: nothing was changed, and the files are named for the person. */
@@ -47,6 +49,20 @@ export class UndoConflictError extends AppError {
     })
     this.name = 'UndoConflictError'
   }
+}
+
+/**
+ * The turn an Undo or Redo restores: the action itself, or for an Undo's or Redo's own record, the turn the chain of
+ * them started from. Only that turn records its commits and Git work; a restore's record never has commits.
+ */
+function turnBehind(all: ThreadAction[], action: ThreadAction): ThreadAction {
+  let source = action
+  for (let step = 0; step < all.length; step++) {
+    const prior = all.find((item) => item.compensationActionId === source.id)
+    if (!prior) break
+    source = prior
+  }
+  return source
 }
 
 export class UndoService {
@@ -78,7 +94,7 @@ export class UndoService {
       receipts.assertNoPendingOperation()
       this.actions.assertExpectedRevision(expectedJournalRevision)
       // A merge or rebase waiting in the worktree is not Mousse's to disturb.
-      refuseUnsafeChanges(workspacePath, 'Thread workspace', { discard: true })
+      await refuseUnsafeChangesAsync(workspacePath, 'Thread workspace', { discard: true })
       const all = this.actions.list()
       const target = all.filter((action) => action.conversationBranchId === branchId).at(-1)
       if (!target || !['completed', 'failed', 'stopped'].includes(target.state)) throw new Error('Only the latest completed action is eligible for conversation undo.')
@@ -92,23 +108,26 @@ export class UndoService {
       const contextAction = kind === 'redo' ? original! : target
       const sourceReceipt = receipts.list().find((item) => item.id === target.receiptId)
       if (sourceReceipt && receipts.isPublished(sourceReceipt)) throw knownAppError({ code: 'published_changes', message: 'Published changes require a new code revert, not local undo.' }, { category: 'conflict', retryable: false })
-      const later = receipts.list().filter((item) => sourceReceipt && item.generation > sourceReceipt.generation && !sameTree(workspacePath, item.beforeSha, item.afterSha))
-      if (later.length) throw new Error('A newer workspace change depends on this action; undo the latest change first.')
+      let later = false
+      for (const item of receipts.list()) {
+        if (sourceReceipt && item.generation > sourceReceipt.generation && !await sameTreeAsync(workspacePath, item.beforeSha, item.afterSha)) { later = true; break }
+      }
+      if (later) throw new Error('A newer workspace change depends on this action; undo the latest change first.')
       const operationId = randomUUID()
       const compensationId = randomUUID()
       const label = kind === 'redo' ? 'Redo' : 'Undo'
       // The files as they are now, including edits made since the action: they are part of the merge, so they stay.
       const threadId = new ThreadWorkspaceManager(this.threadDirectory).load()?.threadId
-      const ours = takeSnapshot(workspacePath, { reason: `before ${kind}`, threadId, operationId })
-      const restored = restoreChange(workspacePath, { reason: `${kind} turn ${target.turnId}`, threadId, operationId, base: target.endSha, ours: ours.sha, theirs: target.startSha, restoredTo: kind === 'redo' ? 'before the Undo' : 'at the start of the turn' }, (expectedTree) => {
-        const intent: UndoIntent = { target, contextAction, kind, compensationId, restoreContext: Boolean(restoreContext), ours: ours.sha, expectedTree }
+      const ours = await takeSnapshotAsync(workspacePath, { reason: `before ${kind}`, threadId, operationId })
+      const gitNotice = await gitLeftInPlaceNoticeAsync(workspacePath, label, turnBehind(all, target))
+      const restored = await restoreChangeAsync(workspacePath, { reason: `${kind} turn ${target.turnId}`, threadId, operationId, base: target.endSha, ours: ours.sha, theirs: target.startSha, restoredTo: kind === 'redo' ? 'before the Undo' : 'at the start of the turn' }, (expectedTree) => {
+        const intent: UndoIntent = { target, contextAction, kind, compensationId, restoreContext: Boolean(restoreContext), ours: ours.sha, expectedTree, ...(gitNotice ? { gitNotice } : {}) }
         this.journal.append({ operationId, operationType: kind, state: 'prepared', expectedPreState: { preUndoSha: ours.sha, actionId: target.id }, details: intent })
         target.state = 'undoing'; this.actions.replace(all)
       })
       if ('conflicts' in restored) throw new UndoConflictError(restored.conflicts)
-      const pushed = pushedTo(workspacePath, target.commits)
-      const compensation = this.compensationFor(workspacePath, { target, contextAction, kind, compensationId }, ours.sha, restored.snapshot, new Date().toISOString(), [pushed ? pushedNotice(label, pushed) : '', restored.preserved ? preservedNotice(restored.preserved) : '', leftAsIsNotice(restored.leftAsIs) ?? '', coverageNotice(target.git?.coverageGaps, ours.coverageGaps, restored.snapshot.coverageGaps) ?? ''].filter(Boolean).join(' ') || undefined)
-      const receipt = receipts.record(workspacePath, { operationId, kind, actor: { kind: 'user' }, actionId: compensation.id,
+      const compensation = await this.compensationFor(workspacePath, { target, contextAction, kind, compensationId }, ours.sha, restored.snapshot, new Date().toISOString(), [gitNotice ?? '', restored.preserved ? preservedNotice(restored.preserved, new UndoRetentionService(this.threadDirectory).policy().windowMs) : '', leftAsIsNotice(restored.leftAsIs) ?? '', coverageNotice(target.git?.coverageGaps, ours.coverageGaps, restored.snapshot.coverageGaps) ?? ''].filter(Boolean).join(' ') || undefined)
+      const receipt = await receipts.record(workspacePath, { operationId, kind, actor: { kind: 'user' }, actionId: compensation.id,
         beforeSha: ours.sha, afterSha: restored.snapshot.sha, introducedCommits: [],
         contributions: [], externalEffects: target.externalEffects, reversesReceiptId: target.receiptId, git: compensation.git })
       compensation.receiptId = receipt.id
@@ -122,7 +141,7 @@ export class UndoService {
   }
 
   /** The action that records a restore: from the files before it to the files after it. */
-  private compensationFor(workspacePath: string, intent: Pick<UndoIntent, 'target' | 'contextAction' | 'kind' | 'compensationId'>, startSha: string, end: Snapshot, createdAt: string, notice?: string): ThreadAction {
+  private async compensationFor(workspacePath: string, intent: Pick<UndoIntent, 'target' | 'contextAction' | 'kind' | 'compensationId'>, startSha: string, end: Snapshot, createdAt: string, notice?: string): Promise<ThreadAction> {
     const { target, contextAction, kind } = intent
     return {
       id: intent.compensationId, turnId: kind === 'redo' ? contextAction.turnId : intent.compensationId, conversationBranchId: target.conversationBranchId, actor: { kind: 'user' },
@@ -132,8 +151,8 @@ export class UndoService {
       nativeContextStartBoundary: contextAction.nativeContextStartBoundary ? target.nativeContextBoundary : undefined,
       nativeContextBoundary: kind === 'undo' ? target.nativeContextStartBoundary ?? target.nativeContextBoundary : contextAction.nativeContextBoundary,
       startSha, endSha: end.sha, commits: [], childIntegrations: [],
-      changedPaths: changedPaths(workspacePath, startSha, end.sha), externalEffects: target.externalEffects,
-      git: describeGit(workspacePath, startSha, end).record, ...(notice ? { notice } : {}),
+      changedPaths: await changedPathsAsync(workspacePath, startSha, end.sha), externalEffects: target.externalEffects,
+      git: (await describeGitAsync(workspacePath, startSha, end)).record, ...(notice ? { notice } : {}),
       reversible: true, state: 'completed', createdAt, completedAt: new Date().toISOString()
     }
   }
@@ -159,7 +178,7 @@ export class UndoService {
         if (!intent?.target) throw new Error('Undo recovery intent is missing.')
         let recovery = record.details as UndoRecovery
         if (!recovery.compensation) {
-          const applied = intent.ours ? this.provenApplied(workspacePath, record.operationId, intent) : this.legacyApplied(workspacePath, record.operationId, intent)
+          const applied = intent.ours ? await this.provenApplied(workspacePath, record.operationId, intent) : await this.legacyApplied(workspacePath, record.operationId, intent)
           if (!applied) {
             const all = this.actions.list(); const target = all.find((item) => item.id === intent.target.id)
             if (target) { target.state = intent.target.state; this.actions.replace(all) }
@@ -167,10 +186,12 @@ export class UndoService {
             continue
           }
           const target = { ...intent.target, state: 'undone' as const, compensationActionId: intent.compensationId }
-          const compensation = this.compensationFor(workspacePath, { target, contextAction: intent.contextAction, kind: intent.kind, compensationId: intent.compensationId }, applied.startSha, applied.end, prepared!.createdAt)
+          // An intent written before this line was recorded has it built again from the turn.
+          const gitNotice = intent.gitNotice ?? await gitLeftInPlaceNoticeAsync(workspacePath, intent.kind === 'redo' ? 'Redo' : 'Undo', turnBehind(this.actions.list(), intent.target))
+          const compensation = await this.compensationFor(workspacePath, { target, contextAction: intent.contextAction, kind: intent.kind, compensationId: intent.compensationId }, applied.startSha, applied.end, prepared!.createdAt, gitNotice)
           const receipts = new ChangeReceiptService(this.threadDirectory)
           const known = receipts.list().find((item) => item.operationId === record.operationId)
-          const receipt = known ? receipts.replay(workspacePath, known) : receipts.record(workspacePath, { operationId: record.operationId, kind: intent.kind, actor: { kind: 'user' }, actionId: compensation.id, beforeSha: applied.startSha, afterSha: applied.end.sha, introducedCommits: compensation.commits, contributions: [], externalEffects: target.externalEffects, reversesReceiptId: target.receiptId, ...(compensation.git ? { git: compensation.git } : {}) })
+          const receipt = known ? await receipts.replay(workspacePath, known) : await receipts.record(workspacePath, { operationId: record.operationId, kind: intent.kind, actor: { kind: 'user' }, actionId: compensation.id, beforeSha: applied.startSha, afterSha: applied.end.sha, introducedCommits: compensation.commits, contributions: [], externalEffects: target.externalEffects, reversesReceiptId: target.receiptId, ...(compensation.git ? { git: compensation.git } : {}) })
           compensation.receiptId = receipt.id
           recovery = { actionId: target.id, preUndoSha: applied.startSha, endSha: applied.end.sha, target, compensation, contextAction: intent.contextAction, kind: intent.kind, restoreContext: intent.restoreContext }
           this.journal.append({ operationId: record.operationId, operationType: intent.kind, state: 'git_applied', details: recovery })
@@ -187,29 +208,31 @@ export class UndoService {
   }
 
   /**
-   * Whether an interrupted restore landed, read from the files: the receipt when it was recorded; otherwise the files
-   * match the planned result (landed) or still match the snapshot before it (did not). Anything else is not Mousse's
-   * to guess at, so recovery stays pending for a person to look at.
+   * Whether an interrupted restore landed, read from the files: the receipt when it was recorded; otherwise every path
+   * the restore writes is as planned (landed) or none is (did not). Some written and some not is not Mousse's to guess
+   * at, so recovery stays pending for a person to look at.
    */
-  private provenApplied(workspacePath: string, operationId: string, intent: UndoIntent): { startSha: string; end: Snapshot } | undefined {
+  private async provenApplied(workspacePath: string, operationId: string, intent: UndoIntent): Promise<{ startSha: string; end: Snapshot } | undefined> {
     const known = new ChangeReceiptService(this.threadDirectory).list().find((item) => item.operationId === operationId)
-    if (known) return { startSha: known.beforeSha, end: { sha: known.afterSha, tree: treeOf(workspacePath, known.afterSha), ...snapshotOrigin(workspacePath, known.afterSha) } }
-    const current = worktreeTree(workspacePath)
-    if (current === intent.expectedTree) return { startSha: intent.ours!, end: takeSnapshot(workspacePath, { reason: `${intent.kind} turn ${intent.target.turnId}`, operationId }) }
-    if (current === treeOf(workspacePath, intent.ours!)) return undefined
+    if (known) return { startSha: known.beforeSha, end: { sha: known.afterSha, tree: await treeOfAsync(workspacePath, known.afterSha), ...await snapshotOriginAsync(workspacePath, known.afterSha) } }
+    // Only the paths the restore writes are read, straight from disk: an ignored file it wrote counts, and an unrelated new file does not.
+    const outcome = moveOutcome(await moveProgressAsync(workspacePath, await treeOfAsync(workspacePath, intent.ours!), intent.expectedTree!))
+    // The end is the planned result, not the files now: an edit made since stays an edit made since.
+    if (outcome === 'applied') return { startSha: intent.ours!, end: await snapshotOfTreeAsync(workspacePath, intent.expectedTree!, { reason: `${intent.kind} turn ${intent.target.turnId}`, operationId }) }
+    if (outcome === 'not-applied') return undefined
     throw new Error('Undo recovery found files that match neither the state before nor the state after the restore; resolve the differences by hand.')
   }
 
   /** The proof for an intent written before snapshots: the restore was a commit on the branch. */
-  private legacyApplied(workspacePath: string, operationId: string, intent: UndoIntent): { startSha: string; end: Snapshot } | undefined {
-    const head = git(workspacePath, ['rev-parse', 'HEAD'])
+  private async legacyApplied(workspacePath: string, operationId: string, intent: UndoIntent): Promise<{ startSha: string; end: Snapshot } | undefined> {
+    const head = await gitAsync(workspacePath, ['rev-parse', 'HEAD'])
     const preUndoSha = intent.target.endSha
     const known = new ChangeReceiptService(this.threadDirectory).list().find((item) => item.operationId === operationId)
-    const landed = head !== preUndoSha && commitParents(workspacePath, head)[0] === preUndoSha && git(workspacePath, ['log', '-1', '--format=%B']).includes(operationId)
+    const landed = head !== preUndoSha && (await commitParentsAsync(workspacePath, head))[0] === preUndoSha && (await gitAsync(workspacePath, ['log', '-1', '--format=%B'])).includes(operationId)
     if (!known && !landed && intent.target.startSha !== intent.target.endSha) {
       if (head !== preUndoSha) throw new Error('Undo recovery HEAD changed outside the recorded operation.')
       return undefined
     }
-    return { startSha: preUndoSha, end: { sha: head, tree: treeOf(workspacePath, head), head } }
+    return { startSha: preUndoSha, end: { sha: head, tree: await treeOfAsync(workspacePath, head), head } }
   }
 }

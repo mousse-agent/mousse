@@ -23,12 +23,6 @@ function themePreviewClass(themeId: ThemeId): string {
       return 'preview-system'
     case 'blacksphere-plus':
       return 'preview-blacksphere-plus'
-    case 'dark-modern':
-      return 'preview-dark-modern'
-    case 'one-dark':
-      return 'preview-one-dark'
-    case 'monokai':
-      return 'preview-monokai'
     case 'solarized-dark':
       return 'preview-solarized-dark'
     case 'github-dark':

@@ -22,8 +22,13 @@ serveSttWorker(['moonshine'], (model) => {
     return recognizer
   }
 
-  return async (samples) => {
-    const output = await (await load())(samples)
-    return Array.isArray(output) ? output.map((part) => part.text).join(' ') : output.text
+  return {
+    warm: async () => {
+      await load()
+    },
+    transcribe: async (samples) => {
+      const output = await (await load())(samples)
+      return Array.isArray(output) ? output.map((part) => part.text).join(' ') : output.text
+    }
   }
 })

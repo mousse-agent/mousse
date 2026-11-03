@@ -37,6 +37,7 @@ import type {
   GitFetchResult,
   GitOperationEvent,
   GitMutationResult,
+  GitKeptCopy,
   GitPullOptions,
   GitPullRequestLookup,
   GitPullResult,
@@ -494,7 +495,7 @@ const api = {
       storageInvoke('git:stage', scope, input),
     unstage: (scope: GitScope, input: { paths: string[] } | { all: true }): Promise<GitMutationResult> =>
       storageInvoke('git:unstage', scope, input),
-    discard: (scope: GitScope, paths: string[]): Promise<GitMutationResult> =>
+    discard: (scope: GitScope, paths: string[]): Promise<GitMutationResult<{ kept?: GitKeptCopy }>> =>
       storageInvoke('git:discard', scope, paths),
     fetch: (scope: GitScope, options?: GitFetchOptions): Promise<GitMutationResult<GitFetchResult>> =>
       storageInvoke('git:fetch', scope, options),

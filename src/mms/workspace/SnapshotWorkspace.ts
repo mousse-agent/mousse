@@ -1,13 +1,14 @@
 import { randomUUID } from 'node:crypto'
-import { execFileSync } from 'node:child_process'
 import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import type { ThreadWorkspaceMetadata } from '../../shared/workspace'
 import { atomicWriteJsonSync } from '../data/AtomicFs'
 import { getMousseHomeDir } from '../data/paths'
-import { BUILT_IN_EXCLUDES, ensureStoreRules, inHiddenStore, insideFolder, registerHiddenStore, runStoreGit, type HiddenStore } from '../git/hiddenStore'
+import { access, realpath, stat } from 'node:fs/promises'
+import { BUILT_IN_EXCLUDES, ensureStoreRules, inHiddenStore, insideFolder, registerHiddenStore, runStoreGitAsync, type HiddenStore } from '../git/hiddenStore'
 import { repoProgramEnv } from '../git/repoPrograms'
-import { isUnsafeSnapshotRoot, SnapshotRefusedError } from '../actions/snapshots'
+import { isUnsafeSnapshotRootAsync, SnapshotRefusedError } from '../actions/snapshots'
+import { waitForFolderAccess } from '../files/folderAccess'
 
 /**
  * Snapshot workspaces (docs/workspace-snapshots.md, "Folders without Git"): a thread whose folder has no Git Mousse may
@@ -74,24 +75,24 @@ function storePathOf(record: SnapshotWorkspaceRecord, home = getMousseHomeDir())
 
 /**
  * Makes the store if it is missing and writes its settings and exclude list; the same call keeps an older store current.
- * Two threads of one project may start their first turns together, so a creation that meets the other's lock is tried again.
+ * Two threads of one project may start their first turns together, so a creation that meets the other's lock is tried
+ * again after a short wait. The store lives in the Mousse home; only its Git (`init`) runs, as a child process. No
+ * template: the person's init.templateDir would put its hooks and files into Mousse's store. The store's config is never
+ * written: each command names the folder as `GIT_WORK_TREE` and turns automatic collection off itself.
  */
-export function prepareStore(store: HiddenStore): void {
+export async function prepareStoreAsync(store: HiddenStore): Promise<void> {
   if (!existsSync(join(store.gitDir, 'HEAD'))) {
     for (let attempt = 0; ; attempt++) {
       try {
         mkdirSync(store.gitDir, { recursive: true })
-        // No template: the person's init.templateDir would put its hooks and files into Mousse's store. The store's config
-        // is never written: each command names the folder as `GIT_WORK_TREE` and turns automatic collection off itself.
-        runStoreGit(store, ['init', '--bare', '--quiet', '--template=', store.gitDir], repoProgramEnv())
+        await runStoreGitAsync(store, ['init', '--bare', '--quiet', '--template=', store.gitDir], repoProgramEnv())
         break
       } catch (error) {
         if (attempt >= 4) throw error
-        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50 * (attempt + 1))
+        await new Promise((settle) => setTimeout(settle, 50 * (attempt + 1)))
       }
     }
   }
-  // A new store gets its exclude list and attributes now; each snapshot keeps them current under the store's lock.
   if (!existsSync(join(store.gitDir, 'info', 'exclude'))) ensureStoreRules(store)
 }
 
@@ -123,15 +124,18 @@ export interface EnsureSnapshotWorkspaceInput {
 /**
  * The thread's snapshot workspace for `workTree`, made if it is not there yet. Refuses a folder that must never be
  * snapshotted (a home or system folder) and one that is not a folder. The store is registered so that operations on
- * the folder find it.
+ * the folder find it. The folder (the person's) is resolved and checked without blocking, once its volume answers; the
+ * store and the record are in the Mousse home. A thread keeps its history when the folder it works in changes (another
+ * provider's scratch folder): the pin and the receipts stay. A project's store keeps a note of each thread that uses it:
+ * it stays while any does (`retireProjectSnapshots`).
  */
-export function ensureSnapshotWorkspace(input: EnsureSnapshotWorkspaceInput): SnapshotWorkspace {
-  const workTree = realpathSync.native(resolve(input.workTree))
-  if (!statSync(workTree).isDirectory()) throw new SnapshotRefusedError('Undo is off for this folder because it is not a folder.')
-  if (isUnsafeSnapshotRoot(workTree)) throw new SnapshotRefusedError('Undo is off for this folder because it is a home or system folder.')
+export async function ensureSnapshotWorkspaceAsync(input: EnsureSnapshotWorkspaceInput): Promise<SnapshotWorkspace> {
+  await waitForFolderAccess([resolve(input.workTree)])
+  const workTree = await realpath(resolve(input.workTree))
+  if (!(await stat(workTree)).isDirectory()) throw new SnapshotRefusedError('Undo is off for this folder because it is not a folder.')
+  if (await isUnsafeSnapshotRootAsync(workTree)) throw new SnapshotRefusedError('Undo is off for this folder because it is a home or system folder.')
   const kind = input.projectId ? 'project' : 'standalone'
   const existing = readSnapshotWorkspaceRecord(input.threadDirectory)
-  // A thread keeps its history when the folder it works in changes (another provider's scratch folder): the pin and the receipts stay.
   const record: SnapshotWorkspaceRecord = {
     schemaVersion: 1, kind, threadId: input.threadId, workTree,
     ...(input.projectId ? { projectId: input.projectId } : {}),
@@ -139,8 +143,7 @@ export function ensureSnapshotWorkspace(input: EnsureSnapshotWorkspaceInput): Sn
     ...(existing?.off ? { off: existing.off } : {})
   }
   const store = registerHiddenStore({ workTree, gitDir: storePathOf(record, input.home) })
-  prepareStore(store)
-  // A project's store keeps a note of each thread that uses it: it stays while any does (`retireProjectSnapshots`).
+  await prepareStoreAsync(store)
   if (kind === 'project') noteSnapshotStoreUser(store.gitDir, input.threadId)
   if (JSON.stringify(existing) !== JSON.stringify(record)) writeRecord(input.threadDirectory, record)
   return { record, store, threadDirectory: input.threadDirectory }
@@ -154,6 +157,22 @@ export function loadSnapshotWorkspace(threadDirectory: string, home?: string): S
   try { gitDir = storePathOf(record, home) } catch { return undefined }
   if (!existsSync(join(gitDir, 'HEAD'))) return undefined
   const workTree = realpathSync.native(record.workTree)
+  return { record, store: registerHiddenStore({ workTree, gitDir }), threadDirectory }
+}
+
+/**
+ * {@link loadSnapshotWorkspace} without blocking the daemon: the folder (the person's) is looked at with async calls
+ * once its volume answers. The record and the store are in the Mousse home.
+ */
+export async function loadSnapshotWorkspaceAsync(threadDirectory: string, home?: string): Promise<SnapshotWorkspace | undefined> {
+  const record = readSnapshotWorkspaceRecord(threadDirectory)
+  if (!record) return undefined
+  await waitForFolderAccess([resolve(record.workTree)])
+  if (!await access(record.workTree).then(() => true, () => false)) return undefined
+  let gitDir: string
+  try { gitDir = storePathOf(record, home) } catch { return undefined }
+  if (!existsSync(join(gitDir, 'HEAD'))) return undefined
+  const workTree = await realpath(record.workTree)
   return { record, store: registerHiddenStore({ workTree, gitDir }), threadDirectory }
 }
 
@@ -218,12 +237,6 @@ export function snapshotWorkspaceMetadata(workspace: SnapshotWorkspace): ThreadW
   }
 }
 
-/** `snapshotWorkspaceMetadata` of the thread's workspace, with its store registered. */
-export function loadSnapshotWorkspaceMetadata(threadDirectory: string): ThreadWorkspaceMetadata | undefined {
-  const workspace = loadSnapshotWorkspace(threadDirectory)
-  return workspace ? snapshotWorkspaceMetadata(workspace) : undefined
-}
-
 /**
  * The hidden store the thread records its turns in, when `cwd` is in its folder. Read from the thread's own record, never
  * from the folder: a person who runs `git init` in the folder later gets their repository, and this thread keeps its store.
@@ -235,6 +248,29 @@ export function threadSnapshotStore(threadDirectory: string, cwd: string): Hidde
   let real = path
   try { real = realpathSync.native(path) } catch { /* a path that is gone is compared as given */ }
   return insideFolder(store.workTree, path) || insideFolder(store.workTree, real) ? store : undefined
+}
+
+/** {@link threadSnapshotStore} without blocking the daemon: the folder's real path is read with an async call. */
+export async function threadSnapshotStoreAsync(threadDirectory: string, cwd: string): Promise<HiddenStore | undefined> {
+  const store = (await loadSnapshotWorkspaceAsync(threadDirectory))?.store
+  if (!store) return undefined
+  const path = resolve(cwd)
+  let real = path
+  // `fs/promises`' `realpath` answers like `realpathSync.native`.
+  try { real = await realpath(path) } catch { /* a path that is gone is compared as given */ }
+  return insideFolder(store.workTree, path) || insideFolder(store.workTree, real) ? store : undefined
+}
+
+/** {@link inThreadSnapshotScope} without blocking the daemon: the store is found with async calls, then `operation` runs in its scope. */
+export async function inThreadSnapshotScopeAsync<T>(threadDirectory: string, cwd: string, operation: () => Promise<T>): Promise<T> {
+  const store = await threadSnapshotStoreAsync(threadDirectory, cwd)
+  return store ? inHiddenStore(store, operation) : operation()
+}
+
+/** `snapshotWorkspaceMetadata` of the thread's workspace, with its store registered. */
+export async function loadSnapshotWorkspaceMetadataAsync(threadDirectory: string): Promise<ThreadWorkspaceMetadata | undefined> {
+  const workspace = await loadSnapshotWorkspaceAsync(threadDirectory)
+  return workspace ? snapshotWorkspaceMetadata(workspace) : undefined
 }
 
 /** Runs `operation` with Mousse's Git commands in `cwd` going through the thread's store, when it has one for that folder. */
@@ -350,7 +386,10 @@ export function expireSnapshotTrash(now = Date.now(), home = getMousseHomeDir())
   })
 }
 
+/** The one garbage collection Mousse runs: in a snapshot store it owns, after it released the refs. */
+const STORE_GC = ['gc', '--prune=now', '--quiet']
+
 /** Collects the garbage in a store Mousse owns. Never run on a repository of the person's. */
-export function collectStoreGarbage(store: HiddenStore): void {
-  runStoreGit(store, ['gc', '--prune=now', '--quiet'], repoProgramEnv())
+export async function collectStoreGarbageAsync(store: HiddenStore): Promise<void> {
+  await runStoreGitAsync(store, STORE_GC, repoProgramEnv())
 }
