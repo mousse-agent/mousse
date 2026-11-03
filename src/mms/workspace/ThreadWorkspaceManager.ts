@@ -1,5 +1,6 @@
 import { ResourceLifecycleStore } from '../lifecycle/ResourceLifecycleStore'
-import { assertFolderUnchanged, folderSignatureAsync, walkOwnedContentAsync, WorktreeRetirementService } from '../lifecycle/WorktreeRetirementService'
+import { WorktreeRetirementService } from '../lifecycle/WorktreeRetirementService'
+import { assertFolderUnchanged, folderSignatureAsync, walkOwnedContentAsync } from '../lifecycle/verifiedDelete'
 import { getThreadLifecycleGate } from '../queue/ThreadLifecycleAdmission'
 import { execFileSync } from 'node:child_process'
 import { existsSync, readFileSync, realpathSync } from 'node:fs'
