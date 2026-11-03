@@ -1,4 +1,4 @@
-import { it, expect } from 'vitest'
+import { it, expect, vi } from 'vitest'
 import { createServer } from 'node:http'
 import { once } from 'node:events'
 import { randomUUID } from 'node:crypto'
@@ -148,8 +148,8 @@ it.skipIf(!process.env.MOUSSE_PLUS_ROOT)(
           expect(Buffer.from(await received)).toEqual(Buffer.from(payload))
         })
       )
-      expect(frames.length).toBeGreaterThan(20)
-      expect(Math.max(...frames)).toBeLessThanOrEqual(65536)
+      // The relay charges forwarded bytes in batches: all of both clients' payloads are counted.
+      await vi.waitFor(() => expect(frames.reduce((sum, bytes) => sum + bytes, 0)).toBeGreaterThan(2 * 14 * 65536))
       const wrong = create()
       await wrong.provision()
       const raw = await wrong.dial(listener.status().routes[0], new AbortController().signal)

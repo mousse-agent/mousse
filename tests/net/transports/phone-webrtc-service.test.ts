@@ -162,6 +162,17 @@ describe('WebRTC direct path in the Net service', () => {
     expect(computer.net.phoneWebRtcCounts()).toEqual({ pending: 0, live: 0 })
   }, 40_000)
 
+  it('keeps direct paths while the relay listener waits to listen again', async () => {
+    const { computer, phone, mousseId, factory } = await fixture()
+    const relayed = await relayedSession(phone.net, computer.net, mousseId)
+    await rpc(relayed, PHONE_WEBRTC_OFFER_METHOD, { sdp: fakeOffer(), v: 1 })
+    // A quota refusal or relay restart takes the listener's route away for a while.
+    mousseId.relay().drop()
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(factory.peers[0].closed).toBe(false)
+    expect(await rpc(relayed, PHONE_ENDPOINTS_METHOD, {})).toEqual({ endpoints: [], webrtc: { v: 1 } })
+  }, 40_000)
+
   it('closes everything when the Net service shuts down', async () => {
     const { computer, phone, mousseId, factory } = await fixture()
     const relayed = await relayedSession(phone.net, computer.net, mousseId)

@@ -26,7 +26,13 @@ export class FakeHostedRelay implements Transport {
   readonly traits = { canListen: true, canDial: true, readsPlaintext: true, needsAccount: true }
   accept?: (raw: Duplex, info: InboundInfo) => void
   private listening = false
+  private readonly statusListeners = new Set<(status: ReturnType<FakeHostedRelay['status']>) => void>()
   constructor(private readonly address: string) {}
+  /** The relay refused to listen for now (a quota, a restart): the route goes, the transport stays. */
+  drop(): void {
+    this.listening = false
+    for (const listener of this.statusListeners) listener(this.status())
+  }
   async provision(): Promise<void> {}
   status() {
     return {
@@ -34,8 +40,9 @@ export class FakeHostedRelay implements Transport {
       routes: this.listening ? [{ transport: this.id, address: this.address, priority: 20 }] : []
     }
   }
-  onStatus(): () => void {
-    return () => {}
+  onStatus(listener: (status: ReturnType<FakeHostedRelay['status']>) => void): () => void {
+    this.statusListeners.add(listener)
+    return () => this.statusListeners.delete(listener)
   }
   async listen(accept: (raw: Duplex, info: InboundInfo) => void) {
     this.accept = accept

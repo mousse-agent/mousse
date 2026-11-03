@@ -377,6 +377,13 @@ export class ProfileTransports {
       this.changed()
     }
   }
+  /**
+   * The Mousse ID relay is turned on and running, whether or not its listener has a route right
+   * now: it may be waiting to listen again after a refusal or a relay restart.
+   */
+  hasPlusRelay(): boolean {
+    return this.registry.transports().some((transport) => transport.id === 'plus-relay')
+  }
   hasPlusRelayListener(): boolean {
     return this.registry
       .transports()

@@ -3,7 +3,7 @@ import { Duplex } from 'node:stream'
 import WebSocket, { createWebSocketStream } from 'ws'
 import { parseBoundedJsonDocument } from './codec.js'
 import { decodeBase64, isNodeId, ticketHash } from './crypto.js'
-import { isRelayErrorCode, NetRelayError } from './errors.js'
+import { isRelayErrorCode, NetRelayError, type RelayErrorCode } from './errors.js'
 import { AUTH_MAX_BYTES, canonicalAudience, FRAME_MAX_BYTES, hostedRelayProofBytes } from './protocol.js'
 import type { HostedRelayAuth, HostedRelayRegistration, HostedRelayRendezvous, RelayIdentity, RelayRole } from './types.js'
 /**
@@ -21,7 +21,12 @@ export interface HostedRelayTransportOptions {
   priority?: number
 }
 export interface HostedRelayRoute { transport: string; address: string; priority: number }
-export interface HostedRelayStatus { state: 'disabled' | 'ready' | 'degraded'; routes: HostedRelayRoute[] }
+export interface HostedRelayStatus {
+  state: 'disabled' | 'ready' | 'degraded'
+  routes: HostedRelayRoute[]
+  /** Why the listener is not listening, while it waits to try again. */
+  lastError?: { code: RelayErrorCode; message: string }
+}
 /** Derived from native RelayTransport rawStream, preserving ordered 64 KiB segmentation. */
 function rawStream(ws: WebSocket): Duplex {
   ws.on('message', (_bytes, binary) => { if (!binary) ws.terminate() })
@@ -72,13 +77,14 @@ export class HostedRelayTransport {
   async provision(): Promise<void> { if (this.stopped) throw new NetRelayError('cancelled'); this.changed('ready') }
   status(): HostedRelayStatus { return structuredClone(this.statusValue) }
   onStatus(listener: (status: HostedRelayStatus) => void): () => void { this.statusListeners.add(listener); return () => { this.statusListeners.delete(listener) } }
-  private changed(state: HostedRelayStatus['state']): void {
+  private changed(state: HostedRelayStatus['state'], error?: unknown): void {
     const routes:HostedRelayRoute[]=[]
     if(state==='ready'&&this.listening&&!this.options.enrollment){
       const url = new URL(this.audience); url.searchParams.set('node', this.options.identity().node)
       routes.push({transport:this.id,address:url.toString(),priority:this.options.priority??20})
     }
-    this.statusValue = { state, routes }
+    const code = state === 'degraded' && error instanceof NetRelayError ? error.code : undefined
+    this.statusValue = { state, routes, ...(code ? { lastError: { code, message: `The relay refused to listen (${code}).` } } : {}) }
     for (const listener of this.statusListeners) listener(this.status())
   }
   private open(role: RelayRole, target: `nod_${string}`, signal?: AbortSignal, rendezvous?: HostedRelayAuth['rendezvous']): Promise<{ ws: WebSocket; paired: Promise<Duplex | undefined> }> {
@@ -156,14 +162,18 @@ export class HostedRelayTransport {
         this.armed = false
         // Nobody dialed before the relay's waiting deadline: listen again at once, keeping the route.
         if (error instanceof NetRelayError && error.code === 'deadline_exceeded') void this.arm().catch(() => {})
-        else this.rearm()
+        else this.rearm(error)
       })
-    } catch (error) { this.armed = false; this.rearm(); throw error }
+    } catch (error) { this.armed = false; this.rearm(error); throw error }
   }
-  private rearm(): void {
+  /** Listens again after a backoff; until then the transport offers no route and says why. */
+  private rearm(error?: unknown): void {
     if (!this.listening || this.stopped || this.retry) return
-    this.changed('degraded')
-    this.retry = setTimeout(() => { this.retry = undefined; void this.arm().catch(() => {}) }, Math.min(60_000, 1000 * 2 ** Math.min(6, this.failures++)))
+    this.changed('degraded', error)
+    // A quota refusal does not clear in seconds; trying again at once would only use more of it.
+    const backoff = Math.min(60_000, 1000 * 2 ** Math.min(6, this.failures++))
+    const delay = error instanceof NetRelayError && error.code === 'quota_exceeded' ? 60_000 : backoff
+    this.retry = setTimeout(() => { this.retry = undefined; void this.arm().catch(() => {}) }, delay)
   }
   async dial(route: HostedRelayRoute, signal: AbortSignal): Promise<Duplex> {
     if (route.transport !== this.id || this.statusValue.state === 'disabled') throw new NetRelayError('route_unreachable')
