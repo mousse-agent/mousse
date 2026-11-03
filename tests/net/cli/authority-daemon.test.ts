@@ -137,6 +137,13 @@ it.skipIf(process.platform === 'win32')(
       )
       await stop(caller)
       expect(visible).toBe('')
+      // The target can report `activated` a moment before the requester's daemon marks its records completed.
+      await until(
+        () => mutations(),
+        (rows) => rows.length === 2 && rows.every((row) => row.state === 'completed'),
+        20_000,
+        'The authority transfer records did not complete'
+      )
       const ids = delivery(),
         records = mutations()
       expect(ids).toHaveLength(1)
