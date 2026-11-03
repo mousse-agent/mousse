@@ -97,8 +97,9 @@ export class HostedNetController implements HostedNet {
   private enrollmentList: PlusEnrollmentRequest[] = []
   private enrollmentPoll?: ReturnType<typeof setTimeout>
   private enrollmentAbortBound = false
-  /** Computer requests already approved (or tried) once; a failed one is not retried every poll. */
-  private computerRequestsTried = new Set<string>()
+  /** Requests approved (or tried) once on their own; a failed one is not retried every poll. */
+  private requestsTried = new Set<string>()
+  private requestsApproved = new Set<string>()
   private direct: DirectPathConfig = DEFAULT_DIRECT_PATH
   private directReadAt?: number
   private joinClient?: MousseIdJoin
@@ -587,26 +588,28 @@ export class HostedNetController implements HostedNet {
     if (changed) this.host.emit()
   }
 
-  /** With `approveComputers` (the poll, outside the serial queue) computer requests are approved. */
-  private async refreshEnrollmentRequests(approveComputers = false): Promise<PlusEnrollmentRequest[]> {
+  /** With `approveDevices` (the poll, outside the serial queue) requests are approved. */
+  private async refreshEnrollmentRequests(approveDevices = false): Promise<PlusEnrollmentRequest[]> {
     if (!this.enrollmentEligible()) {
       this.setEnrollmentRequests([])
       return []
     }
     const requests = await this.service().enrollmentRequests()
-    // A computer asks only after signing in to this same account, which is the consent: it is
-    // added without a question. Phones are still shown with their match code.
+    // A device asks only after signing in to this same Mousse ID account, which is the consent: a
+    // computer or a phone is added without a question. A request whose approval failed stays listed,
+    // so the person can approve or deny it by hand.
     for (const request of requests)
-      if (approveComputers && request.kind === 'computer' && !this.computerRequestsTried.has(request.id)) {
-        this.computerRequestsTried.add(request.id)
+      if (approveDevices && !this.requestsTried.has(request.id)) {
+        this.requestsTried.add(request.id)
         await this.host
           .serial(() => this.approveRequest(request))
+          .then(() => this.requestsApproved.add(request.id))
           .catch((error) => {
             this.host.fail(error)
             this.host.emit()
           })
       }
-    this.setEnrollmentRequests(requests.filter((row) => row.kind !== 'computer'))
+    this.setEnrollmentRequests(requests.filter((row) => !this.requestsApproved.has(row.id)))
     return this.enrollmentList
   }
 
