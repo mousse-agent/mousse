@@ -225,6 +225,30 @@ it('derives the same portable identity for clones and normalized transport/user 
   expect((await portableRepository(clone)).repoId).toBe(f.request.repoId)
 })
 
+it('keeps its identity with Mousse-owned root commits under refs/mousse, and dispatch still runs', async () => {
+  const f = await fixture()
+  // Mousse keeps Git's data of a removed worktree as a commit that is often a root commit, under refs/mousse/. 300 of
+  // them pass the 256-root limit; none may change the identity.
+  const stream = Array.from({ length: 300 }, (_, index) =>
+    `commit refs/mousse/preserved/root-${index}\ncommitter Mousse <mousse@localhost> ${index} +0000\ndata ${String(index).length}\n${index}\n`).join('')
+  execFileSync('git', ['fast-import', '--quiet'], { cwd: f.repo, input: stream })
+  expect((await git(f.repo, ['rev-list', '--max-parents=0', '--all'])).split('\n')).toHaveLength(301)
+  expect((await portableRepository(f.repo)).repoId).toBe(f.request.repoId)
+  await f.service.bindRepository(f.request.repoId, f.repo)
+  await f.service.run(f.request, f.context, f.execution)
+  const record = f.service.query(f.execution, f.context)!
+  f.commit()
+  await f.service.drainCleanup()
+  expect(f.service.query(f.execution, f.context)).toMatchObject({ state: 'completed', phase: 'complete' })
+  await expect(stat(record.worktree!.path)).rejects.toMatchObject({ code: 'ENOENT' })
+  // The cleanup kept Git's data of the dispatch's worktree as a copy the dispatch owns; the identity is still the same.
+  const owner = dispatchKeptFilesOwner(f.profile, record.id)
+  const kept = (await git(f.repo, ['for-each-ref', '--format=%(refname)', 'refs/mousse/preserved/'])).split('\n').filter((ref) => threadPreservedIndex(owner).owns(ref))
+  expect(kept).toHaveLength(1)
+  expect(await git(f.repo, ['cat-file', '-t', `${kept[0]}:HEAD`])).toBe('blob')
+  expect((await portableRepository(f.repo)).repoId).toBe(f.request.repoId)
+})
+
 it('requires explicit binding and exact profile before worktree/model effects', async () => {
   const f = await fixture()
   await expect(f.service.run(f.request, f.context, f.execution)).rejects.toMatchObject({

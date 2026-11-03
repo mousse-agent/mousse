@@ -7,7 +7,8 @@ import { RepositoryContext } from './RepositoryContext'
 import { WorktreeIdentity } from './WorktreeIdentity'
 import { resolveRepositoryIdentityAsync } from '../git/RepositoryIdentity'
 import { getMousseHomeDir } from '../data/paths'
-import { keepCopy, KeepCopyRefusedError, KeepCopyTooLargeError, type KeptCopy } from '../actions/keptCopies'
+import { keepCopy, keepExistingCommit, KeepCopyRefusedError, KeepCopyTooLargeError, type KeptCopy } from '../actions/keptCopies'
+import { storeAdminBeforeRemoval } from '../lifecycle/worktreeAdminData'
 import { withGitMutationLocks } from '../actions/GitOperationCoordinator'
 import { withGitAccess } from '../git/gitPolicy'
 
@@ -22,15 +23,27 @@ export interface WorktreeInfo {
   baseSha?: string
 }
 
-/** Who keeps the copy of a worktree's ignored files that cleanup makes before it removes the worktree. */
+/**
+ * Who keeps the copies cleanup makes before it removes a worktree: one of its ignored files, and one of Git's own data
+ * of it (its settings, HEAD history and own refs, with the commits only they name).
+ */
 export interface KeepIgnoredFiles {
-  /** The journal folder that owns the copy: the dispatch's (`dispatchKeptFilesOwner`), or the agent's thread's. */
+  /**
+   * The journal folder that owns the copies: the dispatch's (`dispatchKeptFilesOwner`), the agent's thread's, or, for an
+   * agent with no thread, its project's (`projectKeptFilesOwner`).
+   */
   owner: string
   /**
-   * Told before anything is kept, then once the copy is complete and before the removal starts, so the caller can
-   * record each step durably first. Whatever was recorded last tells a later start what happened; nothing is replayed.
+   * A person confirmed deleting the worktree with its ignored files, after Storage named them: they are not copied.
+   * Git's own data of the worktree is still kept.
    */
-  record?: (step: { phase: 'keeping'; files: number } | { phase: 'removing'; ref: string; sha: string; files: number }) => void
+  deleteIgnored?: boolean
+  /**
+   * Told before anything is kept, then once the copies are complete and before the removal starts, so the caller can
+   * record each step durably first. Whatever was recorded last tells a later start what happened; nothing is replayed.
+   * `ref` and `sha` name the copy of the ignored files, when there are any; `admin` the copy of Git's own data.
+   */
+  record?: (step: { phase: 'keeping'; files: number } | { phase: 'removing'; ref?: string; sha?: string; files: number; admin: { ref: string; sha: string } }) => void
 }
 
 export interface WorktreeCleanupResult {
@@ -40,6 +53,8 @@ export interface WorktreeCleanupResult {
   kept?: { ignoredFiles: number; reason: string; code: 'keep_copy_too_large' | 'keep_copy_refused' | 'nested_repository' | 'no_owner' }
   /** The copy of the ignored files kept before the worktree was removed. */
   copy?: { ref: string; sha: string; files: number; windowMs: number }
+  /** The copy of Git's own data of the worktree kept before it was removed, which also holds the commits only that data named. */
+  admin?: { ref: string; sha: string; windowMs: number }
 }
 
 export interface GhostWorktreeEntry {
@@ -273,15 +288,17 @@ export class WorktreeManager {
 
   /**
    * Explicit cleanup only: Git refuses dirty worktrees and does not alter other metadata. `git worktree remove` deletes
-   * ignored files (build outputs, logs) with the folder, so they are kept first, as a copy owned by
-   * `keepIgnored.owner` (`keepCopy`), and the worktree is removed only once that copy is complete. A worktree whose
-   * ignored files cannot be kept (over the copy limit, changing while they are read, a repository inside, or no owner
+   * ignored files (build outputs, logs) with the folder, and Git's own data of the worktree (its settings, HEAD history
+   * and own refs) with its administration folder. Both are kept first, as copies owned by `keepIgnored.owner`: the
+   * ignored files with `keepCopy`, Git's data as a commit whose parents are the commits only it names
+   * (`storeAdminBeforeRemoval`, `keepExistingCommit`). The worktree is removed only once both are complete. A worktree
+   * whose files cannot be kept (over the copy limit, changing while they are read, a repository inside, or no owner
    * was given) is not removed: the result says `kept`, with how many ignored files it holds, and nothing in it changes.
-   * `delete-confirmed` is a person's own delete from Storage: the ignored files go with the worktree.
+   * `keepIgnored.deleteIgnored` is a person's own delete from Storage: the ignored files go with the worktree.
    */
   async cleanupValidatedAgentWorktree(
     worktreeInfo: WorktreeInfo,
-    options: { deleteBranch?: boolean; safeCheckout?: boolean; keepIgnored?: KeepIgnoredFiles | 'delete-confirmed' } = {}
+    options: { deleteBranch?: boolean; safeCheckout?: boolean; keepIgnored?: KeepIgnoredFiles } = {}
   ): Promise<WorktreeCleanupResult> {
     try {
       const repository = await this.repositoryFor(worktreeInfo)
@@ -295,7 +312,7 @@ export class WorktreeManager {
       if (!valid) {
         return { success: false, error: `Refusing to remove path that is not a validated agent worktree: ${worktreeInfo.path}` }
       }
-      let copy: WorktreeCleanupResult['copy']
+      let kept: Pick<WorktreeCleanupResult, 'copy' | 'admin'> = {}
       if (await exists(worktreeInfo.path)) {
         const { git: cleanupGit, safety } = options.safeCheckout
           ? await safeWorktreeGit(repository.root)
@@ -306,20 +323,17 @@ export class WorktreeManager {
           ? await safeWorktreeGit(worktreeInfo.path)
           : { git: guardedSimpleGit(worktreeInfo.path), safety: [] }
         const ignored = await ignoredFilesOf((args) => inWorktree.raw([...worktreeSafety, ...args]))
-        if (ignored === 'dirty' || options.keepIgnored === 'delete-confirmed') {
-          // Git refuses a worktree with untracked or changed files, and changes nothing: no copy is needed for that. A
-          // person who confirmed deleting this worktree, after Storage named its ignored files, deletes them with it.
+        if (ignored === 'dirty') {
+          // Git refuses a worktree with untracked or changed files, and changes nothing: no copy is needed for that.
           await remove()
-        } else if (ignored.files.length || ignored.repositories.length) {
-          const kept = await keepIgnoredThenRemove(worktreeInfo.path, ignored, options.keepIgnored, remove)
-          if ('kept' in kept) return { success: false, error: kept.kept.reason, kept: kept.kept }
-          copy = kept.copy
         } else {
-          await remove()
+          const outcome = await keepThenRemove(worktreeInfo.path, worktreeInfo.branch, ignored, options.keepIgnored, remove)
+          if ('kept' in outcome) return { success: false, error: outcome.kept.reason, kept: outcome.kept }
+          kept = outcome
         }
       }
       if (options.deleteBranch === true) await repository.git.branch(['-d', worktreeInfo.branch])
-      return { success: true, ...(copy ? { copy } : {}) }
+      return { success: true, ...kept }
     } catch (err) {
       return { success: false, error: err instanceof Error ? err.message : String(err) }
     }
@@ -331,7 +345,7 @@ export class WorktreeManager {
    */
   async cleanupValidatedAgentWorktrees(
     worktrees: WorktreeInfo[],
-    options: { deleteBranch?: boolean } = {}
+    options: { deleteBranch?: boolean; keepIgnored?: KeepIgnoredFiles } = {}
   ): Promise<Array<{ path: string; success: boolean; error?: string }>> {
     const results: Array<{ path: string; success: boolean; error?: string }> = []
     for (const info of worktrees) {
@@ -381,35 +395,52 @@ async function ignoredFilesOf(git: (args: string[]) => Promise<string>): Promise
 }
 
 /**
- * Keeps the worktree's ignored files as one copy (`keepCopy`, operation `worktree-cleanup`), owned by `keep.owner`, then
- * removes the worktree, both under the owner's and the repository's locks, so the copy's expiry never runs in between.
- * A copy that cannot be kept leaves the worktree as it is.
+ * Keeps what removing the worktree would lose, then removes it, all under the owner's and the repository's locks, so
+ * the copies' expiry never runs in between: Git's own data of the worktree first, as objects only, then its ignored
+ * files as one copy (`keepCopy`, operation `worktree-cleanup`), then Git's data as a copy of the same owner
+ * (`keepExistingCommit`). Anything that cannot be kept leaves the worktree as it is.
  */
-async function keepIgnoredThenRemove(
+async function keepThenRemove(
   worktreePath: string,
+  branch: string,
   ignored: { files: string[]; repositories: string[] },
   keep: KeepIgnoredFiles | undefined,
   remove: () => Promise<unknown>
-): Promise<{ copy: NonNullable<WorktreeCleanupResult['copy']> } | { kept: NonNullable<WorktreeCleanupResult['kept']> }> {
-  const ignoredFiles = ignored.files.length
-  const holds = plural(ignoredFiles, 'ignored file')
-  if (ignored.repositories.length) {
-    return { kept: { ignoredFiles, code: 'nested_repository', reason: `Kept, ${holds}: ${ignored.repositories.slice(0, 3).join(', ')} is a repository of its own, which a copy cannot hold.` } }
+): Promise<Pick<WorktreeCleanupResult, 'copy' | 'admin'> | { kept: NonNullable<WorktreeCleanupResult['kept']> }> {
+  const ignoredFiles = keep?.deleteIgnored ? 0 : ignored.files.length
+  const holds = ignoredFiles ? `Kept, ${plural(ignoredFiles, 'ignored file')}` : 'Kept'
+  if (!keep?.deleteIgnored && ignored.repositories.length) {
+    return { kept: { ignoredFiles, code: 'nested_repository', reason: `${holds}: ${ignored.repositories.slice(0, 3).join(', ')} is a repository of its own, which a copy cannot hold.` } }
   }
-  if (!keep) return { kept: { ignoredFiles, code: 'no_owner', reason: `Kept, ${holds}: nothing owns a copy of them.` } }
+  if (!keep) {
+    return { kept: { ignoredFiles, code: 'no_owner', reason: ignoredFiles ? `${holds}: nothing owns a copy of them.` : `${holds}: nothing owns a copy of Git's own data of it (its settings and HEAD history).` } }
+  }
   return withGitAccess('worktree.cleanup', 'owned', () => withGitMutationLocks(keep.owner, worktreePath, 'worktree-cleanup', async () => {
     keep.record?.({ phase: 'keeping', files: ignoredFiles })
-    let kept: KeptCopy
+    let admin: Awaited<ReturnType<typeof storeAdminBeforeRemoval>>
     try {
-      kept = await keepCopy({ owner: keep.owner, top: worktreePath, operationType: 'worktree-cleanup', action: 'Worktree cleanup', paths: ignored.files })
+      // The worktree's branch counts as going too: what only it holds is kept with Git's data, whatever happens to it later.
+      admin = await storeAdminBeforeRemoval(worktreePath, [`refs/heads/${branch}`])
     } catch (error) {
-      if (!(error instanceof KeepCopyRefusedError)) throw error
-      const code = error instanceof KeepCopyTooLargeError ? 'keep_copy_too_large' as const : 'keep_copy_refused' as const
-      return { kept: { ignoredFiles, code, reason: `Kept, ${holds}: ${error.message.replace(/ Nothing was changed\..*$/s, '')}` } }
+      return { kept: { ignoredFiles, code: 'keep_copy_refused' as const, reason: `${holds}: Git's own data of it (its settings and HEAD history) could not be kept (${(error as Error).message.split(/\r?\n/)[0]}).` } }
     }
-    keep.record?.({ phase: 'removing', ref: kept.ref, sha: kept.sha, files: ignoredFiles })
+    let copy: KeptCopy | undefined
+    if (ignoredFiles) {
+      try {
+        copy = await keepCopy({ owner: keep.owner, top: worktreePath, operationType: 'worktree-cleanup', action: 'Worktree cleanup', paths: ignored.files })
+      } catch (error) {
+        if (!(error instanceof KeepCopyRefusedError)) throw error
+        const code = error instanceof KeepCopyTooLargeError ? 'keep_copy_too_large' as const : 'keep_copy_refused' as const
+        return { kept: { ignoredFiles, code, reason: `${holds}: ${error.message.replace(/ Nothing was changed\..*$/s, '')}` } }
+      }
+    }
+    const adminKept = await keepExistingCommit({ owner: keep.owner, top: worktreePath, operationType: 'worktree-cleanup', sha: admin.commit })
+    keep.record?.({ phase: 'removing', ...(copy ? { ref: copy.ref, sha: copy.sha } : {}), files: ignoredFiles, admin: { ref: adminKept.ref, sha: admin.commit } })
     await remove()
-    return { copy: { ref: kept.ref, sha: kept.sha, files: ignoredFiles, windowMs: kept.windowMs } }
+    return {
+      ...(copy ? { copy: { ref: copy.ref, sha: copy.sha, files: ignoredFiles, windowMs: copy.windowMs } } : {}),
+      admin: { ref: adminKept.ref, sha: admin.commit, windowMs: adminKept.windowMs }
+    }
   }))
 }
 

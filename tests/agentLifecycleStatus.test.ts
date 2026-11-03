@@ -269,7 +269,7 @@ describe('orphan worktree detection', () => {
     const ghost = join(root, '.mousse-worktrees', 'random-folder')
     mkdirSync(ghost, { recursive: true })
 
-    const results = await manager.cleanupValidatedAgentWorktrees([wt])
+    const results = await manager.cleanupValidatedAgentWorktrees([wt], { keepIgnored: { owner: mkdtempSync(join(tmpdir(), 'mousse-cleanup-owner-')) } })
     expect(results[0]?.success).toBe(true)
     expect(existsSync(wt.path)).toBe(false)
     expect(existsSync(ghost)).toBe(true)

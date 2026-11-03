@@ -26,6 +26,7 @@ import { withGitMutationLocks } from '../../actions/GitOperationCoordinator'
 import { gitAsync } from '../../actions/git'
 import { withGitAccess } from '../../git/gitPolicy'
 import { recordKeptWorktree } from '../../lifecycle/keptWorktrees'
+import { isCleanupAdminCapture } from '../../lifecycle/worktreeAdminData'
 import { canonicalJson } from '../../net/sync/codec'
 import {
   createResultBundle,
@@ -460,8 +461,8 @@ export class DispatchService {
     this.save(record)
   }
   /**
-   * Removes the dispatch's worktree, after keeping its ignored files (build outputs, logs) as a copy the dispatch owns,
-   * which expires after its Undo window. Each step is recorded first (`worktreeCleanup`). A worktree whose ignored files
+   * Removes the dispatch's worktree, after keeping its ignored files (build outputs, logs) and Git's own data of it (its
+   * settings and HEAD history) as copies the dispatch owns, which expire after its Undo window. Each step is recorded first (`worktreeCleanup`). A worktree whose ignored files
    * cannot be kept stays where it is: the record says "Kept, N ignored files", and Storage lists it for deletion.
    */
   private async cleanupWorktree(record: DispatchRecord, worktree: NonNullable<DispatchRecord['worktree']>): Promise<void> {
@@ -503,8 +504,12 @@ export class DispatchService {
     if (!kept && present) {
       kept = await withGitAccess('dispatch.recover', 'owned', () =>
         withGitMutationLocks(step.owner, worktree.path, 'worktree-cleanup-settle', async () => {
-          const [ref] = await settleInterruptedKeeps(step.owner, worktree.path)
-          return ref ? { ref, sha: await gitAsync(worktree.path, ['rev-parse', '--verify', `${ref}^{commit}`]) } : undefined
+          // The copy of Git's own data of the worktree is the owner's too, and is not the copy of its ignored files.
+          for (const ref of await settleInterruptedKeeps(step.owner, worktree.path)) {
+            if (!(await isCleanupAdminCapture(worktree.path, ref)))
+              return { ref, sha: await gitAsync(worktree.path, ['rev-parse', '--verify', `${ref}^{commit}`]) }
+          }
+          return undefined
         })
       ).catch(() => undefined)
     }
@@ -513,7 +518,9 @@ export class DispatchService {
     if (present)
       this.keepWorktree(record, worktree, {
         ignoredFiles: step.files,
-        reason: `Kept, ${step.files} ignored ${step.files === 1 ? 'file' : 'files'}: its cleanup stopped part way${kept ? ', after they were kept' : ''}, and is not repeated.`
+        reason: step.files
+          ? `Kept, ${step.files} ignored ${step.files === 1 ? 'file' : 'files'}: its cleanup stopped part way${kept ? ', after they were kept' : ''}, and is not repeated.`
+          : 'Kept: its cleanup stopped part way, and is not repeated.'
       })
   }
 
