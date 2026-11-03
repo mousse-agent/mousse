@@ -21,7 +21,7 @@ import {
 import { PROJECT_SHELL_AGENT_ID } from '../../../../src/shared/types'
 import { newId } from '../../../../src/shared/net'
 import { cleanup, resources } from '../hub/fixture'
-import { burst, fakeShells, type Spawned } from './terminalFixture'
+import { burst, fakeShells, terminalTurnsRecorded, type Spawned } from './terminalFixture'
 import { readStream, repo, routedOwner, testClock } from './routedFixture'
 
 afterEach(async () => {
@@ -595,6 +595,8 @@ describe('a terminal’s output on its own stream', () => {
     const exited = new Promise<void>((resolve) => o.f.mms.ptyManager.once('exit', () => resolve()))
     const { t } = folderThread(o)
     const created = await create(o, t.id)
+    // The process ends itself; its turn is recorded in the thread's folder before the folder is removed.
+    resources.push(() => terminalTurnsRecorded(o.f.mms.ptyManager))
     expect(created.ok).toBe(true)
     const ptyId = (created as { result: { ptyId: string } }).result.ptyId
     // The stream is attached before the process is told to print.

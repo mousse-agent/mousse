@@ -42,6 +42,13 @@ export interface Spawned {
   pty: FakePty
 }
 
+/** Waits until every terminal that has ended has recorded its thread's turn, which it does in the thread's folder. */
+export async function terminalTurnsRecorded(manager: unknown): Promise<void> {
+  const owned = (manager as { ownedTaskTerminals: Map<string, { drain: Promise<void> }> })
+    .ownedTaskTerminals
+  await Promise.all([...owned.values()].map((owner) => owner.drain))
+}
+
 /** Makes a computer's terminals fake ones. Nothing here reads or prints the process environment. */
 export function fakeShells(
   manager: unknown,
@@ -50,6 +57,13 @@ export function fakeShells(
   onSpawn?: (shell: Spawned) => void
 ): Spawned[] {
   const spawned: Spawned[] = []
+  // A shell that is still running would hold the owner's shutdown. Its end records the thread's turn
+  // in the thread's folder, so every shell ends, and that record is written, before any folder made
+  // ahead of a shell is removed: cleanups run newest first, and this one is added as each shell starts.
+  const endAll = async () => {
+    for (const shell of spawned) shell.pty.exit(0)
+    await terminalTurnsRecorded(manager)
+  }
   ;(manager as { spawnPty: unknown }).spawnPty = (
     shell: string,
     args: string[],
@@ -58,13 +72,10 @@ export function fakeShells(
     const pty = new FakePty()
     const entry = { shell, args, options, pty }
     spawned.push(entry)
+    cleanups.push(endAll)
     onSpawn?.(entry)
     return pty
   }
-  // A shell that is still running would hold the owner's shutdown.
-  cleanups.push(() => {
-    for (const shell of spawned) shell.pty.exit(0)
-  })
   return spawned
 }
 
