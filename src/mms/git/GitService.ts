@@ -7,6 +7,7 @@ import { dirname, join, resolve, sep } from 'node:path'
 import type { SimpleGit } from 'simple-git'
 import { redactGitText } from '../../shared/gitText'
 import { holdsRepositoryMutation } from '../actions/GitOperationCoordinator'
+import { keepCopy, KeepCopyTooLargeError, type KeptCopy } from '../actions/keptCopies'
 import type { CodeHost } from './CodeHost'
 import { COMMIT_SUGGESTION_LIMITS, EMPTY_COMMIT_INPUT, fitPatch, parseNumstat, type CommitInput } from './commitSuggestion'
 import { explicitActionGitEnv } from './gitEnv'
@@ -89,6 +90,7 @@ const gitErrors = createErrorProvider({
   git_branch_current: { category: 'invalid', retryable: false, message: 'Switch to another branch before deleting this one.' },
   git_branch_failed: { category: 'invalid', retryable: false, message: 'Git could not change the branch.' },
   git_path_outside: { category: 'invalid', retryable: false, message: 'That path is outside the project folder.' },
+  keep_copy_too_large: { category: 'invalid', retryable: false, message: 'These changes are too large to keep a copy of, so nothing was discarded.' },
   git_failed: { category: 'invalid', retryable: false, message: 'Git could not complete that action.' }
 })
 
@@ -857,16 +859,20 @@ export class GitService {
   /**
    * Throws the changes of these paths away: tracked files go back to HEAD (index and
    * working tree), files HEAD does not have are removed, untracked files are deleted.
-   * This cannot be undone, so the caller confirms first.
+   * A copy of their staged, working and conflict versions is kept first, owned by
+   * `keep.owner`'s journal (`keepCopy`), and returned; nothing is removed unless it was kept.
+   * A copy too large to keep refuses the discard with `keep_copy_too_large`, changing nothing.
+   * The caller confirms first.
    */
-  discard(cwd: string, userRequested: UserAction, paths: readonly string[]): Promise<void> {
-    return this.asUser(userRequested, () => this.discardNow(cwd, paths))
+  discard(cwd: string, userRequested: UserAction, paths: readonly string[], keep: { owner: string }): Promise<KeptCopy | undefined> {
+    return this.asUser(userRequested, () => this.discardNow(cwd, paths, keep))
   }
 
-  private async discardNow(cwd: string, paths: readonly string[]): Promise<void> {
-    await this.serialized(cwd, async () => {
+  private async discardNow(cwd: string, paths: readonly string[], keep: { owner: string }): Promise<KeptCopy | undefined> {
+    return await this.serialized(cwd, async () => {
       const top = await this.toplevel(cwd)
       const selected = selectEntries(await this.statusEntries(top), paths)
+      if (!selected.length) return undefined
       const unborn = !await this.hasHead(top)
       const restore = new Set<string>()
       const remove = new Set<string>()
@@ -883,9 +889,22 @@ export class GitService {
         else restore.add(entry.path)
         if (!unborn && entry.index === 'R' && entry.from) restore.add(entry.from)
       }
+      // Every path the discard writes or removes, as it is now, before any of it changes.
+      let kept: KeptCopy
+      try {
+        kept = await keepCopy({ owner: keep.owner, top, operationType: 'git-discard', action: 'Discard', paths: [...new Set([...restore, ...remove, ...untracked])] })
+      } catch (error) {
+        // The refusal names the largest paths, so the person knows what to move aside first.
+        if (error instanceof KeepCopyTooLargeError) {
+          const fixed = gitErrors.create('keep_copy_too_large')
+          throw new AppError({ code: fixed.code, message: error.message, errorInfo: fixed.errorInfo, details: { bytes: error.bytes, largest: error.largest } }, error)
+        }
+        throw error
+      }
       await this.withPathspecFile(top, ['restore', '--source=HEAD', '--staged', '--worktree'], [...restore])
       await this.withPathspecFile(top, ['rm', '-f', '-r', '--ignore-unmatch', '-q'], [...remove])
       await this.removeUntracked(top, untracked)
+      return kept
     })
   }
 

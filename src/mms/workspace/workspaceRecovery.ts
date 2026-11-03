@@ -4,7 +4,7 @@ import { leftMergeRefusalAsync } from '../actions/leftMerge'
 import { waitForFolderAccess } from '../files/folderAccess'
 import type { ThreadWorkspaceMetadata, WorkspaceRecovery } from '../../shared/workspace'
 import { ThreadWorkspaceManager } from './ThreadWorkspaceManager'
-import { PRESERVED_EXPIRY_OPERATION } from '../../shared/resourceLifecycle'
+import { settlesItself } from '../../shared/resourceLifecycle'
 
 /** Journal states of an operation that has not finished (`ThreadWorkspaceManager.hasPendingOperation`). */
 const PENDING_STATES = ['prepared', 'git_applied', 'context_pending', 'recovery_required']
@@ -76,8 +76,9 @@ export async function describeRecovery(threadDirectory: string, verified: Thread
   }
 
   // Turns, Undo and Publish are refused until this is recovered.
-  // An unsettled expiry of kept files touches no file; the next retention sweep settles it, so it pauses nothing.
-  const waiting = latest.find((entry) => PENDING_STATES.includes(entry.state) && !PUBLISH_TYPES.includes(entry.operationType) && entry.operationType !== PRESERVED_EXPIRY_OPERATION)
+  // An unsettled expiry of kept files, or keep of a copy, touches no file; the next retention sweep settles it, so it
+  // pauses nothing.
+  const waiting = latest.find((entry) => PENDING_STATES.includes(entry.state) && !PUBLISH_TYPES.includes(entry.operationType) && !settlesItself(entry.operationType))
   if (waiting) return { kind: 'paused', reason: errorOf(waiting) ?? `The ${waiting.operationType} operation did not finish.`, ...operationOf(waiting) }
   // A folder with no Git of its own (`snapshotOnly`) has no worktree for Git to read: only a waiting operation pauses it.
   if (!verified.snapshotOnly && verified.lifecycle === 'recovery_required') return { kind: 'paused', reason: 'Git cannot read the worktree.' }

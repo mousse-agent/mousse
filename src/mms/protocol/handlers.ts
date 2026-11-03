@@ -109,6 +109,8 @@ import { RedoService } from '../actions/RedoService'
 import { CodeRevertService } from '../actions/CodeRevertService'
 import { ConversationBranchService } from '../actions/ConversationBranchService'
 import { discardPendingChangesAsync, gitAsync as workspaceGitAsync } from '../actions/git'
+import { getMousseHomeDir } from '../data/paths'
+import { keepCopy, KeepCopyTooLargeError, keptCopyNotice, keptCopyWindowMs, projectKeptFilesOwner, registerProjectKeptFilesFolder, type KeptCopy } from '../actions/keptCopies'
 import { abortPreservedNotice, takeSnapshotAsync } from '../actions/snapshots'
 import { randomUUID } from 'node:crypto'
 import { ManagedConflictService } from '../actions/ManagedConflictService'
@@ -968,6 +970,51 @@ async function followedGitAction<T>(
 
 function threadWorktree(target: GitMutationTarget): Required<GitMutationTarget> | null {
   return target.directory && target.workspace ? { root: target.root, directory: target.directory, workspace: target.workspace } : null
+}
+
+/**
+ * The thread whose recorded action a person's Git change in `target` runs as: its own worktree, or its project's folder
+ * when it works there (its `project-folder.json` record). Null without a thread, or for one with no ready record.
+ */
+function recordedThreadTarget(ctx: HandlerContext, p: Record<string, unknown>, target: GitMutationTarget): Required<GitMutationTarget> | null {
+  const worktree = threadWorktree(target)
+  if (worktree) return worktree
+  const threadId = asOptionalString(p.threadId, 256)
+  if (!threadId) return null
+  const directory = ctx.mms.threads.getThreadDir(threadId)
+  const workspace = new ThreadWorkspaceManager(directory).load()
+  return workspace && isProjectFolderWorkspace(workspace) && workspace.lifecycle === 'ready' ? { root: target.root, directory, workspace } : null
+}
+
+/** The profile folder project data is kept in. */
+function profileHome(ctx: HandlerContext): string {
+  return ctx.mms.threads.lifecycleStore?.profileHome ?? getMousseHomeDir()
+}
+
+/** The project a request names, directly or through its thread. */
+function requestProjectId(ctx: HandlerContext, p: Record<string, unknown>): string | undefined {
+  const threadId = asOptionalString(p.threadId, 256)
+  return asOptionalString(p.projectId, 256) ?? (threadId ? ctx.mms.threads.getThread(threadId)?.projectId ?? undefined : undefined)
+}
+
+/** The project's owner of copies a Discard keeps in the person's own checkout at `root`, noted so the sweep finds them. */
+function projectKeptFilesOwnerFor(ctx: HandlerContext, p: Record<string, unknown>, root: string): string {
+  const projectId = requestProjectId(ctx, p)
+  if (!projectId) throw new DomainRpcError('project_not_found', 'A Discard outside a thread needs its project, which keeps the copy.')
+  const owner = projectKeptFilesOwner(profileHome(ctx), projectId)
+  registerProjectKeptFilesFolder(owner, projectId, root)
+  return owner
+}
+
+/** Whose Undo window a Discard requested with these parameters keeps its copy for; only reads. */
+function discardOwnerFor(ctx: HandlerContext, p: Record<string, unknown>): string | undefined {
+  const threadId = asOptionalString(p.threadId, 256)
+  if (threadId) {
+    const directory = ctx.mms.threads.getThreadDir(threadId)
+    if (new ThreadWorkspaceManager(directory).load()) return directory
+  }
+  const projectId = requestProjectId(ctx, p)
+  try { return projectId ? projectKeptFilesOwner(profileHome(ctx), projectId) : undefined } catch { return undefined }
 }
 
 async function gitStatusResult(ctx: HandlerContext, root: string, extra: Record<string, unknown> = {}): Promise<{ status: GitStatusSnapshot }> {
@@ -2873,7 +2920,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     }
     case 'workspace.discardPendingChanges': {
       // The Discard button of a `workspace_conflict` error in a thread worktree. Only ever run on a person's click
-      // after a confirmation; it keeps a copy of what it drops under refs/mousse/discarded/.
+      // after a confirmation; it keeps a copy of what it drops under refs/mousse/preserved/, owned by the thread.
       const p = isObject(params) ? params : {}
       rejectUnknownKeys(p, ['threadId', 'confirmed'])
       if (p.confirmed !== true) throw new DomainRpcError('confirmation_required', 'Discarding changes needs the user’s confirmation.')
@@ -2885,7 +2932,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       if (isProjectFolderWorkspace(workspace)) throw new DomainRpcError('thread_in_project_folder', 'This chat works in the project folder, whose uncommitted changes are yours; Mousse does not discard them.')
       if (!workspace || workspace.lifecycle !== 'ready') throw new DomainRpcError('workspace_not_ready', 'Thread workspace is not ready')
       // Everything uncommitted goes, the results of the thread's turns included. The files as they are now are recorded
-      // as a snapshot first (the turns' receipts keep theirs), and a copy stays under refs/mousse/discarded/.
+      // as a snapshot first (the turns' receipts keep theirs), and a copy stays for the thread's Undo window.
       return await withGitMutationLocks(operation.threadDirectory, workspace.worktreePath, 'discard-pending-changes', async () => {
         let before: string
         // The files are recorded first. When the record cannot be written (a pending operation), a plain snapshot stands in;
@@ -2896,8 +2943,9 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
           catch (error) { throw new DomainRpcError('discard_unsafe', `Nothing was discarded: the files could not be recorded first (${(error as Error).message.split(/\r?\n/)[0]}).`) }
           await workspaceGitAsync(workspace.worktreePath, ['update-ref', '--no-deref', `refs/mousse/discarded/snapshot-${before}`, before])
         }
-        const { backupRef } = await discardPendingChangesAsync(workspace.worktreePath)
-        return { backupRef, snapshotSha: before, notice: `The files as they were are kept in Git as ${backupRef}. To bring them back, run \`git restore --source=${backupRef} --worktree -- .\` in ${workspace.worktreePath}.` }
+        const kept = await discardPendingChangesAsync(workspace.worktreePath, (top) => keepCopy({ owner: operation.threadDirectory, top, operationType: 'git-discard', action: 'Discard' }))
+          .catch((error: unknown) => { throw error instanceof KeepCopyTooLargeError ? new DomainRpcError('keep_copy_too_large', error.message, { bytes: error.bytes, largest: error.largest }) : error })
+        return { backupRef: kept.ref, snapshotSha: before, notice: `${keptCopyNotice(kept)} Run it in ${workspace.worktreePath}.` }
       })
     }
     case 'actions.list': {
@@ -3389,7 +3437,11 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     case 'git.status': {
       const p = isObject(params) ? params : {}
       await materializeRequestedWorkspace(ctx, p)
-      return { status: await ctx.mms.gitService.getStatus(projectRootContext(ctx, p)) }
+      const root = projectRootContext(ctx, p)
+      const status = await ctx.mms.gitService.getStatus(root)
+      // How long a Discard here keeps its copy, for the confirmation to say: the owner's Undo window.
+      const owner = discardOwnerFor(ctx, p)
+      return { status: owner ? { ...status, discardKeptForMs: keptCopyWindowMs(owner) } : status }
     }
     case 'git.diff': {
       const p = isObject(params) ? params : {}
@@ -3496,13 +3548,18 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const p = isObject(params) ? params : {}
       const target = await gitMutationTarget(ctx, p)
       const paths = await gitPaths(ctx, target.root, p.paths)
-      const thread = threadWorktree(target)
+      // A thread's discard, in its worktree or its project's folder, is recorded as an action of the person, so the files
+      // before it are in a snapshot, and the thread owns the copy. The person's own checkout, with no thread, keeps the
+      // copy for the project.
+      const thread = recordedThreadTarget(ctx, p, target)
+      const owner = thread?.directory ?? projectKeptFilesOwnerFor(ctx, p, target.root)
+      const discard = () => ctx.mms.gitService.discard(target.root, gitUserAction(ctx, 'Discard changes'), paths, { owner })
+      let kept: KeptCopy | undefined
       if (thread) {
-        // The discard is recorded as an action of the person, so the files before it are in a snapshot.
         const effects: ExternalEffect[] = [{ kind: 'unknown', description: `Discarded ${paths.length} ${paths.length === 1 ? 'file' : 'files'}`, reversible: false }]
-        await runUserThreadGitAction(ctx, thread, { externalEffects: effects }, () => ctx.mms.gitService.discard(target.root, gitUserAction(ctx, 'Discard changes'), paths))
-      } else await ctx.mms.gitService.discard(target.root, gitUserAction(ctx, 'Discard changes'), paths)
-      return gitStatusResult(ctx, target.root)
+        kept = await runUserThreadGitAction(ctx, thread, { externalEffects: effects }, discard)
+      } else kept = await discard()
+      return gitStatusResult(ctx, target.root, kept ? { kept: { ref: kept.ref, windowMs: kept.windowMs, notice: keptCopyNotice(kept) } } : {})
     }
     case 'git.fetch': {
       const p = isObject(params) ? params : {}

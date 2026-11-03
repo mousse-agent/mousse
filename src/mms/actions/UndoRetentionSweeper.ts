@@ -5,11 +5,14 @@ import { UndoRetentionService } from './UndoRetentionService'
 import { ReceiptRefReleaseService } from './ReceiptRefReleaseService'
 import { releaseSnapshotRefs } from './SnapshotRefReleaseService'
 import { expirePreservedFiles } from './preservedFiles'
+import { projectKeptFilesOwners } from './keptCopies'
+import { existsSync } from 'node:fs'
 
 /**
- * Small rotating idle-task batches. Shutdown cancels lease waits and awaits completion. Files a restore kept
- * (`refs/mousse/preserved/`) expire here too, once they are older than the thread's Undo retention window; never in
- * the first pass after `start`, which runs while the daemon starts.
+ * Small rotating idle-task batches. Shutdown cancels lease waits and awaits completion. Files a restore or a Discard
+ * kept (`refs/mousse/preserved/`) expire here too, once they are older than their owner's Undo retention window; never
+ * in the first pass after `start`, which runs while the daemon starts. The owners are the active threads, and each
+ * project's data folder, which owns the copies a Discard kept in the person's own checkout (`projectKeptFilesOwner`).
  */
 export class UndoRetentionSweeper {
   private timer?: ReturnType<typeof setInterval>
@@ -74,6 +77,34 @@ export class UndoRetentionSweeper {
         this.outcomes.set(task.taskId, { at: new Date().toISOString(), ...(preserved.expired !== undefined ? { expiredPreservedRefs: preserved.expired } : {}),
           reason: [error instanceof Error ? error.message : String(error), ...(preserved.reason ? [preserved.reason] : [])].join('; ') })
       } finally { if (lease) releaseExecutionLeaseHandle(lease) }
+    }
+    await this.sweepProjectOwners(startup)
+  }
+
+  /**
+   * The copies each project keeps for the person's own checkout, in every folder they were kept in. As for a thread,
+   * the start-up pass only moves the owner's retention clock (starting it the first time); nothing expires in it.
+   */
+  private async sweepProjectOwners(startup: boolean): Promise<void> {
+    for (const { projectId, owner, folders } of projectKeptFilesOwners(this.store.profileHome)) {
+      for (const folder of folders) {
+        if (this.abort.signal.aborted) return
+        // A folder that is gone, or on a drive that is not connected, keeps its copies until it is back.
+        if (!existsSync(folder)) continue
+        const key = `project:${projectId}:${folder}`
+        let lease
+        try {
+          lease = tryAcquireExecutionLease(owner, { source: 'undo-retention-sweep' })
+          if (!lease) continue
+          const clock = await new UndoRetentionService(owner).sweep(folder, this.abort.signal, lease)
+          if (clock.suspended) { this.outcomes.set(key, { at: new Date().toISOString(), reason: 'Clock review required' }); continue }
+          if (startup) continue
+          const expiry = await expirePreservedFiles(owner, folder, { signal: this.abort.signal, heldThreadLease: lease })
+          this.outcomes.set(key, { at: new Date().toISOString(), expiredPreservedRefs: expiry.expiredRefs.length, ...(expiry.skipped ? { reason: `Kept files: ${expiry.skipped}` } : {}) })
+        } catch (error) {
+          this.outcomes.set(key, { at: new Date().toISOString(), reason: `Kept files: ${error instanceof Error ? error.message : String(error)}` })
+        } finally { if (lease) releaseExecutionLeaseHandle(lease) }
+      }
     }
   }
 }

@@ -11,7 +11,8 @@ import { ChangeReceiptService } from './ChangeReceiptService'
 import { withGitMutationLocks } from './GitOperationCoordinator'
 import { gitAsync, LISTING, tryGitAsync } from './git'
 import { UndoRetentionService } from './UndoRetentionService'
-import { keptFilesFromListing, PRESERVED_EXPIRY_OPERATION, PRESERVED_REF_FORMAT, PRESERVED_REFS, threadPreservedIndex, type KeptFilesRef } from './preservedFiles'
+import { settlesItself } from '../../shared/resourceLifecycle'
+import { keptFilesFromListing, PRESERVED_REF_FORMAT, PRESERVED_REFS, threadPreservedIndex, type KeptFilesRef } from './preservedFiles'
 
 export interface SnapshotReleaseResult {
   releasedRefs: string[]
@@ -44,7 +45,7 @@ export async function releaseSnapshotRefs(threadDirectory: string, options: { li
     if (!retention.clockAllowsRelease()) throw new Error('Clock review or recovery is required before physical receipt release.')
     const journal = new ThreadJournal(threadDirectory)
     // An unsettled expiry of kept files touches no receipt ref: it never holds this release back.
-    if ([...journal.latestByOperation().values()].some((entry) => ACTIVE.includes(entry.state) && entry.operationType !== PRESERVED_EXPIRY_OPERATION)) throw new Error('Active or recovery operations protect receipt refs.')
+    if ([...journal.latestByOperation().values()].some((entry) => ACTIVE.includes(entry.state) && !settlesItself(entry.operationType))) throw new Error('Active or recovery operations protect receipt refs.')
     const expired = retention.expiredReceiptIds()
     const result: SnapshotReleaseResult = { releasedRefs: [], retained: [], collected: false }
     const top = workspace.store.workTree

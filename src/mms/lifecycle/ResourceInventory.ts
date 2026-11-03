@@ -10,7 +10,7 @@ import { lifecycleReadAsync, WorktreeRetirementService } from './WorktreeRetirem
 import { UndoRetentionService } from '../actions/UndoRetentionService'
 import { AgentEpisodeStore } from '../agents/AgentEpisodeStore'
 import { ThreadJournal } from '../data/ThreadJournal'
-import { PRESERVED_EXPIRY_OPERATION } from '../../shared/resourceLifecycle'
+import { settlesItself } from '../../shared/resourceLifecycle'
 import { canonicalPathAsync, gitCommonDirAsync } from './canonicalPath'
 
 type JsonObject = Record<string, unknown>
@@ -484,8 +484,9 @@ export function inventoryFrom(store: ResourceLifecycleStore, record: TaskLifecyc
         }
       } catch (error) { result.blockers.push(`Journal inventory failed: ${(error as Error).message}`) }
     }
-    // An unsettled expiry of kept files only records which refs went; the purge lists the refs themselves.
-    for (const entry of latest.values()) if (entry.data.operationType !== PRESERVED_EXPIRY_OPERATION && ['planned', 'running', 'prepared', 'git_applied', 'context_pending', 'recovery_required'].includes(String(entry.data.state))) resource('task-data', task.location, entry.source.id, 'recovery', `Unsettled operation ${entry.data.operationId}`, task.taskId)
+    // An unsettled expiry of kept files only records which refs went, and an unsettled keep removed nothing yet; the purge
+    // lists the refs themselves.
+    for (const entry of latest.values()) if (!settlesItself(String(entry.data.operationType)) && ['planned', 'running', 'prepared', 'git_applied', 'context_pending', 'recovery_required'].includes(String(entry.data.state))) resource('task-data', task.location, entry.source.id, 'recovery', `Unsettled operation ${entry.data.operationId}`, task.taskId)
     // Attachments are retained associations. No blob is unlinked in this phase.
     const messages = source(join(task.location, 'messages.json'))
     if (messages) {

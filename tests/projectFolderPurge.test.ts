@@ -74,7 +74,7 @@ test('purging a project-folder thread releases its pins and receipt refs only, a
   const refItems = preview.items.filter((item) => item.kind === 'ref').map((item) => item.identity).sort()
   expect(refItems).toEqual(before.filter((ref) => ref.startsWith('refs/mousse/changes/') || ref === 'refs/mousse/threads/task/main' || (ref.startsWith('refs/mousse/preserved/') && ref !== 'refs/mousse/preserved/op-1-abc')))
   expect(refItems.filter((ref) => ref.startsWith('refs/mousse/preserved/'))).toEqual([f.kept])
-  expect(preview.items.find((item) => item.identity === f.kept)).toMatchObject({ discardRequired: true, reason: expect.stringMatching(/^Files set aside before a restore or an abort wrote over them, kept until \d{4}-\d{2}-\d{2}; they may be the only copy$/) })
+  expect(preview.items.find((item) => item.identity === f.kept)).toMatchObject({ discardRequired: true, reason: expect.stringMatching(/^Files set aside before a restore, an abort or a Discard wrote over or removed them, kept until \d{4}-\d{2}-\d{2}; they may be the only copy$/) })
   // Without the person's discard the purge refuses and the kept files stay.
   await expect(f.coordinator.purge({ taskId: 'task', operationId: 'purge', expectedGeneration: preview.generation, previewDigest: preview.digest })).rejects.toMatchObject({ code: 'resource_purge_discard_required' })
   expect(refsIn(f.repo)).toContain(f.kept)

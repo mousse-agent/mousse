@@ -139,7 +139,7 @@ describe('a folder without Git under MOUSSE_GIT_POLICY=refuse', () => {
     const { store, coordinator } = await trashed(t.location)
     // The preview lists them as kept files that may be the only copy.
     const preview = await coordinator.cleanup.preview('task')
-    expect(preview.items.filter((item) => item.identity.startsWith('refs/mousse/preserved/'))).toEqual([expect.objectContaining({ kind: 'ref', identity: ref, discardRequired: true, reason: expect.stringMatching(/^Files set aside before a restore or an abort wrote over them, kept until \d{4}-\d{2}-\d{2}; they may be the only copy$/) })])
+    expect(preview.items.filter((item) => item.identity.startsWith('refs/mousse/preserved/'))).toEqual([expect.objectContaining({ kind: 'ref', identity: ref, discardRequired: true, reason: expect.stringMatching(/^Files set aside before a restore, an abort or a Discard wrote over or removed them, kept until \d{4}-\d{2}-\d{2}; they may be the only copy$/) })])
     // Automatic cleanup keeps the thread, and a purge without the person's discard refuses: nothing moves to the trash.
     coordinator.cleanup.configure({ schemaVersion: 1, graceDays: 1, automaticPurge: true }, true)
     store.update('task', (record) => { record.trashedAt = new Date(Date.now() - 5 * 24 * 60 * 60 * 1000).toISOString() })

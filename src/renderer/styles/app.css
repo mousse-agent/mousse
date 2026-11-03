@@ -4379,11 +4379,19 @@ div.files-asset-preview { display: grid; place-items: center; overflow: auto; pa
   color: var(--danger);
 }
 
-.git-changes-error {
+.git-changes-error,
+.git-changes-notice {
   flex-shrink: 0;
   padding: 6px 12px;
   font-size: 11px;
   line-height: 1.4;
+}
+
+/* What a discard kept: the ref and the restore command, which are copied by hand. */
+.git-changes-notice {
+  color: var(--text-secondary);
+  overflow-wrap: anywhere;
+  user-select: text;
 }
 
 /* The Git action in flight or just ended: what it is doing, Cancel, and its output. */

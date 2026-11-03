@@ -5,6 +5,7 @@ import { MousseMainService } from '../src/mms/MousseMainService'
 import { MmsProtocolServer } from '../src/mms/protocol/server'
 import { LocalMmsClient } from '../src/mms/protocol/client'
 import { ThreadActionService } from '../src/mms/actions/ThreadActionService'
+import { threadPreservedIndex } from '../src/mms/actions/preservedFiles'
 import { ThreadWorkspaceManager } from '../src/mms/workspace/ThreadWorkspaceManager'
 import { git, gitFoundationFixture } from './fixtures/gitFoundation'
 import { testHarness } from '../src/mms/run/testkit/harness'
@@ -109,7 +110,11 @@ describe('sending in a dirty thread workspace', () => {
     await expect(client.request('workspace.discardPendingChanges', { threadId: thread.id })).rejects.toMatchObject({ code: 'confirmation_required' })
     expect(git(worktree, 'rev-parse', '--verify', '-q', 'MERGE_HEAD')).not.toBe('')
     const discarded = await client.request<{ backupRef: string; snapshotSha?: string; notice: string }>('workspace.discardPendingChanges', { threadId: thread.id, confirmed: true })
-    expect(discarded.backupRef).toMatch(/^refs\/mousse\/discarded\//)
+    expect(discarded.backupRef).toMatch(/^refs\/mousse\/preserved\//)
+    // The thread owns it, so it expires with the thread's Undo window.
+    expect(threadPreservedIndex(directory).owns(discarded.backupRef)).toBe(true)
+    // The merge's conflict is kept with its stages.
+    expect(git(worktree, 'ls-tree', '-r', '--name-only', `${discarded.backupRef}^3`).split('\n')).toEqual(expect.arrayContaining(['stage-1/value.txt', 'stage-2/value.txt', 'stage-3/value.txt']))
     // The second turn's uncommitted result goes with the conflict, so it is kept where a person can find it, and the result says where.
     expect(git(worktree, 'show', `${discarded.backupRef}:result.txt`)).toBe('second turn result')
     expect(discarded.notice).toContain(discarded.backupRef)

@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { ChangeReceipt, ThreadAction } from '../../shared/threadActions'
-import { PRESERVED_EXPIRY_OPERATION } from '../../shared/resourceLifecycle'
+import { settlesItself } from '../../shared/resourceLifecycle'
 import { DEFAULT_UNDO_RETENTION_POLICY, type UndoRetentionEligibility, type UndoRetentionPolicy } from '../../shared/undoRetention'
 import { ThreadJournal } from '../data/ThreadJournal'
 import { withGitMutationLocks } from './GitOperationCoordinator'
@@ -83,16 +83,15 @@ export class UndoRetentionService {
       return receipt ? [receipt] : []
     })
   }
-  // An expiry of kept files settles itself and holds no Undo material, so it never holds back Undo's own retention.
-  private pending(): boolean { return this.unfinishedOperation(PRESERVED_EXPIRY_OPERATION) }
+  private pending(): boolean { return this.unfinishedOperation() }
 
   /**
    * Whether an operation of the thread has not finished: a journal operation in a non-terminal state, or an action still
-   * running, checkpointing or undoing. `exceptType` leaves out one journal operation type (its own, for a caller that
-   * settles it itself).
+   * running, checkpointing or undoing. An expiry of kept files and a keep of a copy settle themselves and hold no Undo
+   * material (`settlesItself`), so neither counts.
    */
-  unfinishedOperation(exceptType?: string): boolean {
-    return [...this.journal.latestByOperation().values()].some((entry) => entry.operationType !== exceptType && ['planned', 'running', 'prepared', 'git_applied', 'context_pending', 'recovery_required'].includes(entry.state))
+  unfinishedOperation(): boolean {
+    return [...this.journal.latestByOperation().values()].some((entry) => !settlesItself(entry.operationType) && ['planned', 'running', 'prepared', 'git_applied', 'context_pending', 'recovery_required'].includes(entry.state))
       || this.actions().some((action) => ['planned', 'running', 'checkpointing', 'undoing', 'undo_conflict'].includes(action.state))
   }
 

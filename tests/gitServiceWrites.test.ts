@@ -29,6 +29,8 @@ function repo() {
   return cwd
 }
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }) })
+/** A journal folder that owns the copy a discard keeps. */
+const keep = () => { const owner = mkdtempSync(join(tmpdir(), 'mousse-keep-owner-')); roots.push(owner); return { owner } }
 
 // Not trimmed: the first status code of a line can be a space.
 const porcelain = (cwd: string) => execFileSync('git', ['status', '--porcelain=v1', '-uall'], { cwd, encoding: 'utf8' }).split('\n').filter(Boolean).sort()
@@ -174,7 +176,7 @@ describe('GitService stage, unstage and discard', () => {
     write(cwd, 'a.txt')
     await service.stage(cwd, USER, ['a.txt', 'vanished.txt'])
     await service.unstage(cwd, USER, ['vanished.txt'])
-    await service.discard(cwd, USER, ['vanished.txt'])
+    await service.discard(cwd, USER, ['vanished.txt'], keep())
     expect(porcelain(cwd)).toEqual(['A  a.txt'])
   })
 
@@ -203,7 +205,7 @@ describe('GitService stage, unstage and discard', () => {
     expect(git(cwd, 'diff', '--cached', '--name-only').split('\n')).toHaveLength(800)
     await service.unstage(cwd, USER, [...tracked, ...untracked])
     expect(git(cwd, 'diff', '--cached', '--name-only')).toBe('')
-    await service.discard(cwd, USER, [...tracked, ...untracked])
+    await service.discard(cwd, USER, [...tracked, ...untracked], keep())
     expect(porcelain(cwd)).toEqual([])
     expect(readFileSync(join(cwd, tracked[7]), 'utf8')).toBe(`${tracked[7]}\n`)
     expect(existsSync(join(cwd, 'loose'))).toBe(false)
@@ -224,7 +226,7 @@ describe('GitService stage, unstage and discard', () => {
     write(cwd, 'base.txt', 'edited\n'); write(cwd, 'keep.txt', 'staged\n'); git(cwd, 'add', 'keep.txt'); write(cwd, 'keep.txt', 'staged and edited\n')
     write(cwd, 'added.txt'); git(cwd, 'add', 'added.txt'); write(cwd, 'added.txt', 'edited after add\n')
     write(cwd, 'loose.txt'); write(cwd, 'untracked-dir/deep/x.txt'); write(cwd, 'untouched.txt')
-    await service.discard(cwd, USER, ['base.txt', 'keep.txt', 'added.txt', 'loose.txt', 'untracked-dir'])
+    await service.discard(cwd, USER, ['base.txt', 'keep.txt', 'added.txt', 'loose.txt', 'untracked-dir'], keep())
     expect(porcelain(cwd)).toEqual(['?? untouched.txt'])
     expect(readFileSync(join(cwd, 'base.txt'), 'utf8')).toBe('base\n')
     expect(readFileSync(join(cwd, 'keep.txt'), 'utf8')).toBe('keep.txt\n')
@@ -236,7 +238,7 @@ describe('GitService stage, unstage and discard', () => {
     write(cwd, 'gone.txt'); write(cwd, 'staged-gone.txt'); write(cwd, 'old.txt', renameSource)
     git(cwd, 'add', '-A'); git(cwd, 'commit', '-m', 'files')
     rmSync(join(cwd, 'gone.txt')); git(cwd, 'rm', 'staged-gone.txt'); git(cwd, 'mv', 'old.txt', 'new.txt')
-    await service.discard(cwd, USER, ['gone.txt', 'staged-gone.txt', 'new.txt'])
+    await service.discard(cwd, USER, ['gone.txt', 'staged-gone.txt', 'new.txt'], keep())
     expect(porcelain(cwd)).toEqual([])
     expect(existsSync(join(cwd, 'old.txt'))).toBe(true)
     expect(existsSync(join(cwd, 'new.txt'))).toBe(false)
@@ -245,7 +247,7 @@ describe('GitService stage, unstage and discard', () => {
   it('discards an intent-to-add file', async () => {
     const cwd = repo()
     write(cwd, 'ita.txt'); git(cwd, 'add', '-N', 'ita.txt')
-    await new GitService().discard(cwd, USER, ['ita.txt'])
+    await new GitService().discard(cwd, USER, ['ita.txt'], keep())
     expect(porcelain(cwd)).toEqual([])
     expect(existsSync(join(cwd, 'ita.txt'))).toBe(false)
   })
@@ -255,7 +257,7 @@ describe('GitService stage, unstage and discard', () => {
     git(cwd, 'checkout', '-b', 'other'); write(cwd, 'base.txt', 'other\n'); git(cwd, 'commit', '-am', 'other')
     git(cwd, 'checkout', 'main'); write(cwd, 'base.txt', 'main\n'); git(cwd, 'commit', '-am', 'main')
     expect(() => git(cwd, 'merge', 'other')).toThrow()
-    await new GitService().discard(cwd, USER, ['base.txt'])
+    await new GitService().discard(cwd, USER, ['base.txt'], keep())
     expect(readFileSync(join(cwd, 'base.txt'), 'utf8')).toBe('main\n')
     expect(porcelain(cwd)).toEqual([])
   })
@@ -271,7 +273,7 @@ describe('GitService stage, unstage and discard', () => {
     expect(porcelain(cwd)).toEqual(['?? a.txt', 'A  b.txt'])
     await service.stageAll(cwd, USER); await service.unstageAll(cwd, USER)
     expect(porcelain(cwd)).toEqual(['?? a.txt', '?? b.txt'])
-    await service.stage(cwd, USER, ['a.txt']); await service.discard(cwd, USER, ['a.txt', 'b.txt'])
+    await service.stage(cwd, USER, ['a.txt']); await service.discard(cwd, USER, ['a.txt', 'b.txt'], keep())
     expect(porcelain(cwd)).toEqual([])
   })
 
@@ -279,7 +281,7 @@ describe('GitService stage, unstage and discard', () => {
     const root = mkdtempSync(join(tmpdir(), 'mousse-git-outside-')); roots.push(root)
     const cwd = join(root, 'work'); mkdirSync(cwd); git(cwd, 'init', '-b', 'main')
     writeFileSync(join(root, 'precious.txt'), 'keep me\n'); write(cwd, 'inside.txt')
-    await new GitService().discard(cwd, USER, ['../precious.txt', 'inside.txt'])
+    await new GitService().discard(cwd, USER, ['../precious.txt', 'inside.txt'], keep())
     expect(existsSync(join(root, 'precious.txt'))).toBe(true)
     expect(existsSync(join(cwd, 'inside.txt'))).toBe(false)
   })
@@ -524,7 +526,7 @@ describe('GitService in a project folder inside the repository', () => {
   it('discards the file the path names, not a same-named file under the project folder', async () => {
     const { top, cwd } = nested()
     write(top, 'pkg/README.md', 'precious edit\n'); write(top, 'README.md', 'untracked root file\n'); write(top, 'other/keep.txt', 'edited\n')
-    await new GitService().discard(cwd, USER, ['README.md', 'other/keep.txt'])
+    await new GitService().discard(cwd, USER, ['README.md', 'other/keep.txt'], keep())
     expect(existsSync(join(top, 'README.md'))).toBe(false)
     expect(readFileSync(join(top, 'pkg/README.md'), 'utf8')).toBe('precious edit\n')
     expect(readFileSync(join(top, 'other/keep.txt'), 'utf8')).toBe('other/keep.txt\n')
@@ -547,10 +549,10 @@ describe('GitService discard of a nested repository', () => {
     git(inner, 'init', '-b', 'main'); git(inner, 'config', 'user.name', 'x'); git(inner, 'config', 'user.email', 'x@example.invalid'); git(inner, 'config', 'commit.gpgsign', 'false')
     write(inner, 'inner.txt'); git(inner, 'add', '-A'); git(inner, 'commit', '-m', 'inner history')
     write(cwd, 'vendor/loose.txt')
-    await new GitService().discard(cwd, USER, ['vendor'])
+    await new GitService().discard(cwd, USER, ['vendor'], keep())
     expect(existsSync(join(cwd, 'vendor/loose.txt'))).toBe(false)
     expect(git(inner, 'log', '-1', '--format=%s')).toBe('inner history')
-    await new GitService().discard(cwd, USER, ['vendor/lib'])
+    await new GitService().discard(cwd, USER, ['vendor/lib'], keep())
     expect(existsSync(join(inner, '.git'))).toBe(true)
   })
 })

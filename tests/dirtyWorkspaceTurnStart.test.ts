@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { ThreadActionService } from '../src/mms/actions/ThreadActionService'
 import { UndoService } from '../src/mms/actions/UndoService'
 import { discardPendingChangesAsync, requireCleanAsync } from '../src/mms/actions/git'
+import { keepCopy } from '../src/mms/actions/keptCopies'
 import { pendingChangesDetails } from '../src/shared/workspace'
 import { pressed } from './support/userRequest'
 
@@ -135,8 +136,11 @@ describe('a turn that starts in a workspace changed outside Mousse', () => {
     expect(git(repo, 'diff', '--name-only', '--diff-filter=U')).toBe('value.txt')
 
     // Discard stays what it was for a conflict the user wants gone: it keeps a copy of everything it drops.
-    const { backupRef } = await pressed('Discard changes', () => discardPendingChangesAsync(repo))
-    expect(backupRef).toMatch(/^refs\/mousse\/discarded\//)
+    const owner = mkdtempSync(join(tmpdir(), 'mousse-discard-owner-'))
+    const { ref: backupRef } = await pressed('Discard changes', () => discardPendingChangesAsync(repo, (top) => keepCopy({ owner, top, operationType: 'git-discard', action: 'Discard' })))
+    expect(backupRef).toMatch(/^refs\/mousse\/preserved\//)
+    expect(git(repo, 'show', `${backupRef}:untracked.txt`)).toBe('mine')
+    rmSync(owner, { recursive: true, force: true })
     expect(tryGit(repo, 'rev-parse', '--verify', '-q', 'MERGE_HEAD')).toBe(false)
   })
 })
@@ -171,7 +175,7 @@ describe('refusals about pending changes', () => {
     const refusal = await pressed('Undo', () => new UndoService(thread).undoLatest('main', repo)).catch((error: unknown) => error)
     expect(refusal).toMatchObject({ code: 'workspace_conflict', details: { operation: 'rebase', discard: false } })
     expect((refusal as Error).message).toMatch(/has a rebase in progress with conflicts in value\.txt\. Finish or abort it in a terminal, then try again\.$/)
-    await expect(discardPendingChangesAsync(repo)).rejects.toThrow(/rebase in progress/)
+    await expect(discardPendingChangesAsync(repo, () => { throw new Error('nothing is kept for a rebase') })).rejects.toThrow(/rebase in progress/)
     tryGit(repo, 'rebase', '--abort')
   })
 })

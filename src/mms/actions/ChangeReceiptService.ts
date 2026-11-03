@@ -8,7 +8,7 @@ import { coverageNotice } from './snapshots'
 import { gitAsync } from './git'
 import type { Snapshot } from './snapshots'
 import { UndoRetentionService } from './UndoRetentionService'
-import { PRESERVED_EXPIRY_OPERATION } from '../../shared/resourceLifecycle'
+import { settlesItself } from '../../shared/resourceLifecycle'
 
 function canonical(value: unknown): string {
   const normalize = (input: unknown): unknown => Array.isArray(input) ? input.map(normalize) : input && typeof input === 'object' ? Object.fromEntries(Object.entries(input).filter(([, value]) => value !== undefined).sort(([a], [b]) => a.localeCompare(b)).map(([key, value]) => [key, normalize(value)])) : input
@@ -104,7 +104,7 @@ export class ChangeReceiptService {
   assertNoPendingOperation(): void {
     // A publish waiting to be settled concerns the primary checkout only; it never holds up the thread's own work.
     const pending = [...this.journal.latestByOperation().values()].find((entry) =>
-      ['prepared', 'git_applied', 'context_pending', 'recovery_required'].includes(entry.state) && !isPublish(entry.operationType) && entry.operationType !== PRESERVED_EXPIRY_OPERATION)
+      ['prepared', 'git_applied', 'context_pending', 'recovery_required'].includes(entry.state) && !isPublish(entry.operationType) && !settlesItself(entry.operationType))
     if (pending) throw new Error(`Workspace recovery required for operation ${pending.operationId} (${pending.operationType}).`)
   }
 }

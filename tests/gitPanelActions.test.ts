@@ -85,17 +85,24 @@ describe('row actions', () => {
     expect(git.stage).toHaveBeenCalledWith(project, { paths: ['mm.ts'] })
   })
 
-  it('asks before discarding, naming what is lost, and discards only after a yes', async () => {
+  it('asks before discarding, naming what is lost and how long its copy is kept, and discards only after a yes', async () => {
     const confirm = vi.fn(() => true)
     const { git } = install({}, confirm)
     const files = [file('a.ts'), file('new.ts', { status: 'untracked' })]
-    expect(await runRowAction(PATH, project, { action: 'discard', files })).toEqual({ kind: 'done' })
+    expect(await runRowAction(PATH, project, { action: 'discard', files }, { discardKeptForMs: 30 * 24 * 60 * 60 * 1000 })).toEqual({ kind: 'done' })
     expect(confirm).toHaveBeenCalledTimes(1)
     const prompt = String(confirm.mock.calls[0]?.[0])
     expect(prompt).toContain('a.ts')
     expect(prompt).toContain('new.ts (untracked, will be deleted)')
-    expect(prompt).toContain('This cannot be undone.')
+    expect(prompt).toContain('A copy is kept for 30 days.')
     expect(git.discard).toHaveBeenCalledWith(project, ['a.ts', 'new.ts'])
+  })
+
+  it('returns what the daemon says about the copy it kept, for the panel to show', async () => {
+    const { git } = install({}, vi.fn(() => true))
+    const notice = 'A copy is kept under refs/mousse/preserved/x-0123456789ab for 30 days.'
+    git.discard.mockResolvedValueOnce({ status: repoStatus(), kept: { ref: 'refs/mousse/preserved/x-0123456789ab', windowMs: 1, notice } })
+    expect(await runRowAction(PATH, project, { action: 'discard', files: [file('a.ts')] })).toEqual({ kind: 'done', notice })
   })
 
   it('does nothing when the discard is declined: no daemon call, no refresh', async () => {
@@ -111,7 +118,7 @@ describe('row actions', () => {
     const { git, confirm } = install()
     const ask = vi.fn(() => false)
     await runRowAction(PATH, project, { action: 'discard', files: [file('a.ts')] }, { confirm: ask })
-    expect(ask).toHaveBeenCalledWith('Discard changes to a.ts?\n\nThis cannot be undone.')
+    expect(ask).toHaveBeenCalledWith('Discard changes to a.ts?\n\nA copy is kept in Git.')
     expect(confirm).not.toHaveBeenCalled()
     expect(git.discard).not.toHaveBeenCalled()
   })
