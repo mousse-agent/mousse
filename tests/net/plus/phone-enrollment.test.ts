@@ -7,11 +7,7 @@ import { pathToFileURL } from 'node:url'
 import { profile, cleanup } from '../chats/helpers'
 import { HostedProfileService } from '../../../src/mms/net/plus/HostedProfileService'
 import type { PlusConfiguration } from '../../../src/mms/net/plus/contracts'
-import {
-  enrollmentMatchCode,
-  openOfferSeal,
-  openRequestSeal
-} from '../../../src/mms/net/plus/enrollmentSeal'
+import { openOfferSeal, openRequestSeal } from '../../../src/mms/net/plus/enrollmentSeal'
 import { canonicalJson } from '../../../src/mms/net/sync/codec'
 import { fingerprint } from '../../../src/mms/net/link/selfSignedCert'
 
