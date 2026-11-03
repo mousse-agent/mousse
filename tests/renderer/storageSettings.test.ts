@@ -104,7 +104,7 @@ describe('plain-words copy', () => {
     for (const id of ['deletedThreads', 'inactive', 'merged'] as const) expect(STORAGE_RULE_COPY[id].never, id).toBeUndefined()
     expect(WORKTREE_GROUP_TOOLTIP).toContain('Uncommitted')
     expect(WORKTREE_GROUP_TOOLTIP).toContain('untracked')
-    expect(WORKTREE_GROUP_TOOLTIP).toContain('ignored')
+    expect(WORKTREE_GROUP_TOOLTIP).toContain('Ignored files')
     expect(WORKTREE_GROUP_TOOLTIP).toContain('node_modules')
     expect(WORKTREE_GROUP_TOOLTIP).toContain('commits that are not in the default branch')
     expect(WORKTREE_GROUP_TOOLTIP).toContain('running or waiting')
@@ -126,7 +126,7 @@ describe('plain-words copy', () => {
     expect(html).not.toContain('storage-keep-when')
     expect(text(html)).not.toContain('Keep a worktree when it has any local files')
     expect(text(html)).toContain(WORKTREE_GROUP_DESCRIPTION)
-    expect(html).toContain('title="Uncommitted, untracked and ignored files')
+    expect(html).toContain('title="Ignored files')
   })
 
   it('keeps the plain sentences free of jargon a person would not use', () => {

@@ -1,5 +1,6 @@
 import type { ReviewRange, ReviewScope, ReviewSide } from '../../shared/review'
-import { commitExists } from '../git/reviewDiff'
+import { commitExistsAsync } from '../git/reviewDiff'
+import { inThreadSnapshotScopeAsync } from '../workspace/SnapshotWorkspace'
 import { ThreadWorkspaceManager } from '../workspace/ThreadWorkspaceManager'
 import { ThreadActionService } from './ThreadActionService'
 
@@ -17,18 +18,26 @@ const NO_LONGER_AVAILABLE = 'Changes no longer available: the turn was undone or
 const commit = (sha: string): ReviewSide => ({ kind: 'commit', sha })
 
 /**
- * Maps a turn or thread scope to a Git range in the thread's worktree. Returns null when the thread
- * has no ready workspace of its own: only provisioned workspaces are checkpointed, so a thread
- * without one has no turns to review. The working-tree scope does not go through here.
+ * Maps a turn or thread scope to a Git range in the thread's worktree, or, for a folder without Git, in its hidden
+ * snapshot store. Returns null when the thread has no ready workspace of its own: only provisioned workspaces and
+ * snapshot workspaces are checkpointed, so a thread without one has no turns to review. The working-tree scope does not
+ * go through here.
  */
-export function resolveReviewScope(threadDirectory: string, scope: ReviewScope): ResolvedReviewScope | null {
-  const workspace = new ThreadWorkspaceManager(threadDirectory).load()
+export async function resolveReviewScope(threadDirectory: string, scope: ReviewScope): Promise<ResolvedReviewScope | null> {
+  const workspace = await new ThreadWorkspaceManager(threadDirectory).loadOrSnapshotAsync()
   if (!workspace || workspace.lifecycle !== 'ready') return null
   const cwd = workspace.worktreePath
+  // Read without blocking the daemon, through the thread's hidden store when it has one.
+  const exists = (sha: string): Promise<boolean> => inThreadSnapshotScopeAsync(threadDirectory, cwd, () => commitExistsAsync(cwd, sha))
 
   if (scope.kind === 'thread') {
-    const range: ReviewRange = { from: commit(workspace.baseSha), to: { kind: 'worktree' } }
-    return commitExists(cwd, workspace.baseSha) ? { cwd, range } : { cwd, range, unavailable: NO_LONGER_AVAILABLE }
+    // A folder with no worktree has no base commit: the thread starts where its first recorded action did.
+    const base = workspace.snapshotOnly
+      ? new ThreadActionService(threadDirectory).list().find((item) => item.scope !== 'conversation' && item.startSha)?.startSha
+      : workspace.baseSha
+    if (!base) return null
+    const range: ReviewRange = { from: commit(base), to: { kind: 'worktree' } }
+    return await exists(base) ? { cwd, range } : { cwd, range, unavailable: NO_LONGER_AVAILABLE }
   }
   if (scope.kind !== 'turn') return null
 
@@ -40,6 +49,6 @@ export function resolveReviewScope(threadDirectory: string, scope: ReviewScope):
   const unfinished = action.state === 'planned' || action.state === 'running' || action.state === 'checkpointing'
   const to: ReviewSide = unfinished ? { kind: 'worktree' } : commit(action.endSha)
   const range: ReviewRange = { from: commit(action.startSha), to }
-  const missing = !commitExists(cwd, action.startSha) || (to.kind === 'commit' && !commitExists(cwd, to.sha))
+  const missing = !await exists(action.startSha) || (to.kind === 'commit' && !await exists(to.sha))
   return missing ? { cwd, range, unavailable: NO_LONGER_AVAILABLE } : { cwd, range }
 }

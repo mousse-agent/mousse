@@ -267,6 +267,8 @@ export function claudeCodeDriver(options: ClaudeCodeDriverOptions = {}): Harness
     // Mousse's own PreToolUse hook stamps each Mousse call with the turn's token (`updatedInput`).
     mcpTurnBinding: 'per_call',
     userMcp: 'native',
+    // Claude Code asks through `canUseTool` (the relay prefix is never auto-allowed).
+    relay: { approvals: 'runtime' },
     // Claude Code passes MCP image content to the model, and every Claude model reads images.
     mcpImageResults: true,
     mirrorsVendorFile: true,
@@ -374,6 +376,8 @@ export function claudeCodeDriver(options: ClaudeCodeDriverOptions = {}): Harness
         entry.users += 1
         service = entry.service
       }
+      // Older models the service finds after a refresh returned reach clients through the newest runtime.
+      service.hooks.changed = () => context.changed()
       let stopped = false
 
       /** The sign-in terminal that is running, so removing the instance can end it. */

@@ -71,10 +71,16 @@ export interface TlsCredentials {
 export interface KeyStore {
   state(): KeystoreState
   unlock(passphrase: string): Promise<void>
-  /** Create node keys (and, when `asAuthority`, the user root key). Fails if keys exist. */
+  /**
+   * Create node keys (and, when `asAuthority`, the user root key). Fails if keys exist. A
+   * `passphrase` protects them instead of the OS vault.
+   */
   initialize(options: {
     asAuthority: boolean
+    passphrase?: string
   }): Promise<{ node: NodePublicKeys; rootKey?: Base64Url }>
+  /** True once the OS vault refused to protect keys in this process; a passphrase is the only way left. */
+  vaultUnavailable?(): boolean
   nodeKeys(): NodePublicKeys
   /** Present only on the authority node. */
   rootKey(): Base64Url | undefined

@@ -3,23 +3,65 @@ import {
   LOCAL_STT_MODELS,
   MOONSHINE_BASE,
   MOONSHINE_TINY,
+  PARAKEET_TDT_06B_V2,
   PARAKEET_TDT_06B_V3,
   PARAKEET_TDT_110M,
+  PARAKEET_UNIFIED_EN,
+  RECOMMENDED_STT_MODEL_ID,
   WHISPER_BASE,
+  WHISPER_SMALL,
   findLocalSttModel,
   type LocalSttModelId
 } from '../src/shared/dictation'
 import { localModelBytes, localModelFileUrl } from '../src/shared/localModels'
 import { resolveWorkerModel } from '../src/renderer/dictation/workerModel'
+import { dictationComparison, pickModels } from '../src/renderer/speechModels/modelComparison'
 
-const ALL_IDS: LocalSttModelId[] = ['moonshine-tiny', 'moonshine-base', 'whisper-base', 'parakeet-tdt-110m', 'parakeet-tdt-0.6b-v3']
+const ALL_IDS: LocalSttModelId[] = [
+  'moonshine-tiny',
+  'moonshine-base',
+  'whisper-base',
+  'parakeet-tdt-110m',
+  'parakeet-tdt-0.6b-v3',
+  'parakeet-unified-en-0.6b',
+  'parakeet-tdt-0.6b-v2',
+  'whisper-small'
+]
 
 describe('local dictation model list', () => {
   it('offers every model once, each findable by id', () => {
     expect(LOCAL_STT_MODELS.map((model) => model.id)).toEqual(ALL_IDS)
     for (const model of LOCAL_STT_MODELS) expect(findLocalSttModel(model.id)).toBe(model)
-    expect(findLocalSttModel('whisper-large-v3-turbo')).toBeUndefined()
-    expect(findLocalSttModel('whisper-small')).toBeUndefined()
+    expect(new Set(LOCAL_STT_MODELS.map((model) => model.label)).size).toBe(LOCAL_STT_MODELS.length)
+    expect(findLocalSttModel('cohere-transcribe')).toBeUndefined()
+  })
+
+  it('compares Parakeet Unified English, Parakeet 0.6B v3 and Whisper Small first', () => {
+    const picks = pickModels(LOCAL_STT_MODELS, dictationComparison(RECOMMENDED_STT_MODEL_ID).picks)
+    expect(picks.map((pick) => [pick.tag, pick.model.id])).toEqual([
+      ['Recommended', 'parakeet-unified-en-0.6b'],
+      ['European languages', 'parakeet-tdt-0.6b-v3'],
+      ['Most languages', 'whisper-small']
+    ])
+    // Each tag is true of the whole list: the fewest wrong words, the most languages.
+    const wer = (model: (typeof LOCAL_STT_MODELS)[number]): number => model.compare?.englishWer ?? Infinity
+    expect(Math.min(...LOCAL_STT_MODELS.map(wer))).toBe(wer(PARAKEET_UNIFIED_EN))
+    const languages = (model: (typeof LOCAL_STT_MODELS)[number]): number => model.compare?.languages?.count ?? 0
+    expect(Math.max(...LOCAL_STT_MODELS.map(languages))).toBe(languages(WHISPER_SMALL))
+  })
+
+  it('falls back to the figure rules when a chosen model is missing', () => {
+    const without = LOCAL_STT_MODELS.filter((model) => model.id !== 'parakeet-tdt-0.6b-v3' && model.id !== 'whisper-small')
+    const picks = pickModels(without, dictationComparison(RECOMMENDED_STT_MODEL_ID).picks)
+    expect(picks.map((pick) => [pick.tag, pick.model.id])).toEqual([
+      ['Recommended', 'parakeet-unified-en-0.6b'],
+      ['Fewest wrong words', 'parakeet-tdt-0.6b-v2'],
+      ['Most languages', 'whisper-base']
+    ])
+  })
+
+  it('gives every dictation model a measured wait after you stop', () => {
+    for (const model of LOCAL_STT_MODELS) expect(model.compare?.stopWaitMs, model.id).toBeGreaterThan(0)
   })
 
   it.each(LOCAL_STT_MODELS.map((model) => [model.id, model] as const))('%s has a pinned revision and verifiable files', (_id, model) => {
@@ -36,7 +78,8 @@ describe('local dictation model list', () => {
   })
 
   it('lists the files transformers.js reads for each Moonshine and Whisper model', () => {
-    for (const model of [MOONSHINE_TINY, MOONSHINE_BASE, WHISPER_BASE]) {
+    for (const model of LOCAL_STT_MODELS) {
+      if (model.runtime === 'nemo-transducer') continue
       const paths = model.files.map((file) => file.path)
       for (const path of ['config.json', 'generation_config.json', 'preprocessor_config.json', 'tokenizer.json', 'tokenizer_config.json']) {
         expect(paths, `${model.id} ${path}`).toContain(path)
@@ -60,14 +103,18 @@ describe('local dictation model list', () => {
     expect(WHISPER_BASE.sampleRate).toBe(16000)
   })
 
-  it('gives Parakeet 0.6B v3 its own shape: 128 mel bins and a two-layer prediction network', () => {
-    expect(PARAKEET_TDT_06B_V3).toMatchObject({ runtime: 'nemo-transducer', featureSize: 128, predictorSize: 640, predictorLayers: 2 })
+  it('gives the 0.6B Parakeet models 128 mel bins and a two-layer prediction network', () => {
+    for (const model of [PARAKEET_TDT_06B_V3, PARAKEET_TDT_06B_V2, PARAKEET_UNIFIED_EN]) {
+      expect(model).toMatchObject({ runtime: 'nemo-transducer', featureSize: 128, predictorSize: 640, predictorLayers: 2 })
+    }
     expect(PARAKEET_TDT_110M).toMatchObject({ featureSize: 80, predictorSize: 640, predictorLayers: 1 })
-    const paths = PARAKEET_TDT_06B_V3.files.map((file) => file.path)
-    for (const path of [PARAKEET_TDT_06B_V3.encoder, PARAKEET_TDT_06B_V3.decoder, PARAKEET_TDT_06B_V3.joiner, PARAKEET_TDT_06B_V3.tokens]) {
-      expect(paths).toContain(path)
+    for (const model of LOCAL_STT_MODELS) {
+      if (model.runtime !== 'nemo-transducer') continue
+      const paths = model.files.map((file) => file.path)
+      for (const path of [model.encoder, model.decoder, model.joiner, model.tokens]) expect(paths, model.id).toContain(path)
     }
   })
+
 })
 
 describe('resolveWorkerModel', () => {

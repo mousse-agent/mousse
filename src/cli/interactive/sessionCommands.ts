@@ -3,6 +3,7 @@
  * Mirrors Telegram/Discord slash semantics for /threads, /models, /model, /steer, /stop.
  */
 
+import { findListedModel, modelChoiceOf, modelLabel } from '../../shared/modelChoice'
 import { formatThreadList, resolveThreadSelection } from '../../shared/threadSelection'
 import { listingKey, listingServes, selectionFromListing } from '../../shared/providerInstances'
 import type { LlmProviderOption } from '../../shared/settings'
@@ -17,7 +18,11 @@ export interface SessionModel {
   /** The provider instance (two Claude instances share `llmProvider`); absent on older selections. */
   instanceId?: string
   llmProvider: string
+  /** The model as its agent lists it; the reasoning level is `effort`. */
   model: string
+  effort?: string
+  /** The model's name, as the daemon stored it with the selection. */
+  name?: string
 }
 
 export interface InteractiveSessionState {
@@ -225,7 +230,7 @@ function handleModelCommand(raw: string, ctx: InteractiveCommandContext): string
 function formatModelList(ctx: InteractiveCommandContext): string {
   const current = ctx.state.modelOverride ?? ctx.getGlobalModel()
   const lines: string[] = [
-    `Current model: ${current.llmProvider ? `${current.llmProvider}/${current.model}` : current.model || '(not set)'}`,
+    `Current model: ${current.model ? currentModelLine(current, ctx.listModels()) : '(not set)'}`,
     ctx.state.modelOverride ? '(session/thread override active)' : '(from global settings)',
     '',
     'Available models:'
@@ -251,7 +256,7 @@ function formatModelList(ctx: InteractiveCommandContext): string {
     for (const model of provider.models) {
       if (shown >= maxModels) break outer
       const marker =
-        model.id === current.model && listingServes(provider, current) ? ' *' : ''
+        listingServes(provider, current) && findListedModel(provider.models, current.model)?.id === model.id ? ' *' : ''
       // A model more than one instance lists is picked by its qualified name.
       const qualified = (listedBy.get(model.id) ?? 0) > 1 ? `  (/model ${qualifiedName(provider, model.id)})` : ''
       lines.push(`  ${model.id}${marker}${qualified}`)
@@ -263,6 +268,14 @@ function formatModelList(ctx: InteractiveCommandContext): string {
   lines.push('')
   lines.push('Usage: /models <name> [--session|--thread|--global]; /models <instance>/<name> picks one instance')
   return lines.join('\n')
+}
+
+/** The current model by name, then the id `/models` takes: "Claude Opus 5.5 · High (claude/opus)". */
+function currentModelLine(current: SessionModel, providers: LlmProviderOption[]): string {
+  const listing = providers.find((provider) => listingServes(provider, current))
+  const listed = listing && findListedModel(listing.models, current.model)
+  const name = modelLabel(modelChoiceOf({ ...current, provider: current.llmProvider }, listed?.label))
+  return `${name} (${listing ? listingKey(listing) : current.instanceId ?? current.llmProvider}/${current.model})`
 }
 
 /** `<instance>/<model>`: how a model of one instance is named when another lists it too. */

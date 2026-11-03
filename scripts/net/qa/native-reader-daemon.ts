@@ -426,7 +426,7 @@ const snapshot = () => {
       projectId,
       callCount,
       self: rt.identity.self(),
-      protected: rt.keys.encryptedAtRest(),
+      protected: rt.keys.protectedAtRest(),
       permissions,
       subscriptions: [...subscribed],
       subscriptionErrors,

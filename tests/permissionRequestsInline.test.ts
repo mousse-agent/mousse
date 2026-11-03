@@ -79,6 +79,11 @@ describe('the one-line summary', () => {
     expect(permissionSummary('Allow Codex to edit src/a.ts, src/b.ts?', 'edit')).toEqual({ verb: 'Edit', target: 'src/a.ts, src/b.ts' })
     expect(permissionSummary('Allow Pi to edit this file?\nnotes.md', 'tool')).toEqual({ verb: 'Edit', target: 'notes.md' })
   })
+
+  it("reads a write into Git's own files, which asks as a command", () => {
+    expect(permissionSummary("Allow Antigravity to change Git's own files (.git/HEAD)?", 'command')).toEqual({ verb: 'Change', target: '.git/HEAD' })
+    expect(permissionSummary("Allow Pi to change Git's own files (.git/HEAD, written as head-link)?", 'tool')).toEqual({ verb: 'Change', target: '.git/HEAD, written as head-link' })
+  })
 })
 
 describe('placing requests in the transcript', () => {

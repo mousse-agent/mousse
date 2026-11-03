@@ -14,6 +14,7 @@ describe('Linux acrylic background synchronization', () => {
   it('keeps native corners clear in acrylic and solid mode without Windows material calls', () => {
     Object.defineProperty(process, 'platform', { value: 'linux', configurable: true })
     const settings = getDefaultSettings()
+    settings.appearance.acrylic = true
     const store = { get: () => settings } as SettingsStore
     const setBackgroundColor = vi.fn()
     const setBackgroundMaterial = vi.fn()

@@ -20,7 +20,8 @@ export function WindowCaptionButtons() {
 
   useEffect(() => {
     if (isMac) return
-    void window.mousse.window.isMaximized().then(setIsMaximized)
+    // On failure the button keeps showing Maximize until the next maximize event.
+    void window.mousse.window.isMaximized().then(setIsMaximized, () => {})
     return window.mousse.window.onMaximizedChange(setIsMaximized)
   }, [isMac])
 

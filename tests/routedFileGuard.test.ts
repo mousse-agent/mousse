@@ -256,7 +256,7 @@ describe('what Git reads from the folder that can run programs', () => {
   it('finds every core.hooksPath, from the top of the working tree when relative, and every included file', async () => {
     const { root, base } = repository()
     mkdirSync(join(root, 'sub'))
-    expect(await loadGitControl(root)).toEqual({ hookFolders: [], configFiles: expect.any(Array) })
+    expect(await loadGitControl(root)).toEqual({ hookFolders: [], configFiles: expect.any(Array), gitFolders: expect.any(Array) })
     config(root, 'core.hooksPath', '.githooks')
     expect((await loadGitControl(root)).hookFolders).toEqual([join(root, '.githooks')])
     // From a folder below the top it is still taken from the top.
@@ -337,14 +337,14 @@ describe('what Git reads from the folder that can run programs', () => {
     expect(() => broken.resolve(root, 'a.txt', 'write')).toThrow(refusal('path_protected'))
     expect(broken.resolve(root, 'a.txt', 'read').relative).toBe('a.txt')
     // Nobody looked: the same refusal.
-    expect(() => new RoutedGuard({ git: new GitControlCache(async () => ({ hookFolders: [], configFiles: [] })) }).resolve(root, 'a.txt', 'write')).toThrow(
+    expect(() => new RoutedGuard({ git: new GitControlCache(async () => ({ hookFolders: [], configFiles: [], gitFolders: [] })) }).resolve(root, 'a.txt', 'write')).toThrow(
       refusal('path_protected')
     )
 
     const counted = new GitControlCache(
       async () => {
         loads += 1
-        return { hookFolders: [], configFiles: [] }
+        return { hookFolders: [], configFiles: [], gitFolders: [] }
       },
       10_000,
       () => clock

@@ -3,14 +3,26 @@ import { ThreadWorkspaceManager } from '../workspace/ThreadWorkspaceManager'
 import { releaseExecutionLeaseHandle, tryAcquireExecutionLease } from '../queue/ThreadExecutionLease'
 import { UndoRetentionService } from './UndoRetentionService'
 import { ReceiptRefReleaseService } from './ReceiptRefReleaseService'
+import { releaseSnapshotRefs } from './SnapshotRefReleaseService'
+import { expirePreservedFiles } from './preservedFiles'
+import { dispatchKeptFilesOwners, projectKeptFilesOwners, resumeProjectClockHeld } from './keptCopies'
+import { withGitMutationLocks } from './GitOperationCoordinator'
+import { existsSync } from 'node:fs'
 
-/** Small rotating idle-task batches. Shutdown cancels lease waits and awaits completion. */
+/**
+ * Small rotating idle-task batches. Shutdown cancels lease waits and awaits completion. Files a restore or a Discard
+ * kept (`refs/mousse/preserved/`) expire here too, once they are older than their owner's Undo retention window; never
+ * in the first pass after `start`, which runs while the daemon starts. The owners are the active threads, each
+ * project's owner, which owns the copies a Discard kept in the person's own checkout (`projectKeptFilesOwner`), and
+ * each dispatch's owner, which owns the copy of its worktree's ignored files (`dispatchKeptFilesOwner`).
+ */
 export class UndoRetentionSweeper {
   private timer?: ReturnType<typeof setInterval>
   private pending?: Promise<void>
   private readonly abort = new AbortController()
   private cursor = 0
-  readonly outcomes = new Map<string, { at: string; expired?: number; releasedRefs?: number; reason?: string }>()
+  private passes = 0
+  readonly outcomes = new Map<string, { at: string; expired?: number; releasedRefs?: number; expiredPreservedRefs?: number; reason?: string }>()
   constructor(private readonly store: ResourceLifecycleStore, private readonly options = { intervalMs: 60 * 60 * 1000, tasksPerBatch: 20 }) {}
   start(): void {
     if (this.timer || this.abort.signal.aborted) return
@@ -35,22 +47,77 @@ export class UndoRetentionSweeper {
     let tasks
     try { tasks = this.store.list().filter((task) => task.state === 'active') }
     catch { return } // Unknown ownership disables sweeping; inventory exposes its source error.
+    // The first pass belongs to starting up: kept files are not looked at until a later one.
+    const startup = this.passes++ === 0
     const batch = Math.min(tasks.length, this.options.tasksPerBatch)
     for (let i = 0; i < batch && !this.abort.signal.aborted; i++) {
       const task = tasks[this.cursor++ % tasks.length]!
       let lease
+      // Kept files have their own outcome: a failure there never holds back the receipt release, nor is hidden by one.
+      let preserved: { expired?: number; reason?: string } = {}
       try {
         lease = tryAcquireExecutionLease(task.location, { source: 'undo-retention-sweep' })
         if (!lease) continue
-        const workspace = new ThreadWorkspaceManager(task.location).load()
+        const workspace = await new ThreadWorkspaceManager(task.location).loadOrSnapshotAsync()
         if (!workspace || workspace.lifecycle !== 'ready') continue
         const result = await new UndoRetentionService(task.location).sweep(workspace.worktreePath, this.abort.signal, lease)
-        const released = result.suspended ? undefined : await new ReceiptRefReleaseService(this.store, task.taskId).release(workspace.worktreePath, { signal: this.abort.signal, heldThreadLease: lease })
+        if (!result.suspended && !startup) {
+          try {
+            const expiry = await expirePreservedFiles(task.location, workspace.worktreePath, { signal: this.abort.signal, heldThreadLease: lease })
+            preserved = { expired: expiry.expiredRefs.length, ...(expiry.skipped ? { reason: `Kept files: ${expiry.skipped}` } : {}) }
+          }
+          catch (error) { preserved = { reason: `Kept files: ${error instanceof Error ? error.message : String(error)}` } }
+        }
+        // A folder with no worktree keeps its snapshots in a store of Mousse's own, which is also tidied after the release.
+        const released = result.suspended ? undefined : workspace.snapshotOnly
+          ? await releaseSnapshotRefs(task.location, { signal: this.abort.signal, heldThreadLease: lease })
+          : await new ReceiptRefReleaseService(this.store, task.taskId).release(workspace.worktreePath, { signal: this.abort.signal, heldThreadLease: lease })
+        const reasons = result.suspended ? ['Clock review required'] : [...(released?.retained.map((item) => item.reason) ?? []), ...(preserved.reason ? [preserved.reason] : [])]
         this.outcomes.set(task.taskId, { at: new Date().toISOString(), expired: result.expired.length, releasedRefs: released?.releasedRefs.length ?? 0,
-          ...(result.suspended ? { reason: 'Clock review required' } : released?.retained.length ? { reason: released.retained.map((item) => item.reason).join('; ') } : {}) })
+          ...(preserved.expired !== undefined ? { expiredPreservedRefs: preserved.expired } : {}), ...(reasons.length ? { reason: reasons.join('; ') } : {}) })
       } catch (error) {
-        this.outcomes.set(task.taskId, { at: new Date().toISOString(), reason: error instanceof Error ? error.message : String(error) })
+        this.outcomes.set(task.taskId, { at: new Date().toISOString(), ...(preserved.expired !== undefined ? { expiredPreservedRefs: preserved.expired } : {}),
+          reason: [error instanceof Error ? error.message : String(error), ...(preserved.reason ? [preserved.reason] : [])].join('; ') })
       } finally { if (lease) releaseExecutionLeaseHandle(lease) }
+    }
+    await this.sweepKeptCopyOwners(startup)
+  }
+
+  /**
+   * The copies each project keeps for the person's own checkout, and each dispatch for its worktree's ignored files, in
+   * every folder they were kept in. As for a thread, the start-up pass only moves the owner's retention clock (starting
+   * it the first time); nothing expires in it. A clock that jumped resumes without a person (`resumeProjectClockHeld`),
+   * with the jump not counted.
+   */
+  private async sweepKeptCopyOwners(startup: boolean): Promise<void> {
+    const owners = [
+      ...projectKeptFilesOwners(this.store.profileHome).map(({ projectId, owner, folders }) => ({ name: `project:${projectId}`, owner, folders })),
+      ...dispatchKeptFilesOwners(this.store.profileHome).map(({ dispatchId, owner, folders }) => ({ name: `dispatch:${dispatchId}`, owner, folders }))
+    ]
+    for (const { name, owner, folders } of owners) {
+      for (const folder of folders) {
+        if (this.abort.signal.aborted) return
+        // A folder that is gone, or on a drive that is not connected, keeps its copies until it is back.
+        if (!existsSync(folder)) continue
+        const key = `${name}:${folder}`
+        let lease
+        try {
+          lease = tryAcquireExecutionLease(owner, { source: 'undo-retention-sweep' })
+          if (!lease) continue
+          let clock = await new UndoRetentionService(owner).sweep(folder, this.abort.signal, lease)
+          // No person reviews a project's or a dispatch's clock: it resumes at once, and the time it jumped is not counted.
+          if (clock.suspended) {
+            await withGitMutationLocks(owner, folder, 'kept-copies-clock', () => resumeProjectClockHeld(owner), this.abort.signal, lease)
+            clock = await new UndoRetentionService(owner).sweep(folder, this.abort.signal, lease)
+          }
+          if (clock.suspended) { this.outcomes.set(key, { at: new Date().toISOString(), reason: 'Clock review required' }); continue }
+          if (startup) continue
+          const expiry = await expirePreservedFiles(owner, folder, { signal: this.abort.signal, heldThreadLease: lease })
+          this.outcomes.set(key, { at: new Date().toISOString(), expiredPreservedRefs: expiry.expiredRefs.length, ...(expiry.skipped ? { reason: `Kept files: ${expiry.skipped}` } : {}) })
+        } catch (error) {
+          this.outcomes.set(key, { at: new Date().toISOString(), reason: `Kept files: ${error instanceof Error ? error.message : String(error)}` })
+        } finally { if (lease) releaseExecutionLeaseHandle(lease) }
+      }
     }
   }
 }

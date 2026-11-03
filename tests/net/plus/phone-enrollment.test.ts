@@ -7,11 +7,7 @@ import { pathToFileURL } from 'node:url'
 import { profile, cleanup } from '../chats/helpers'
 import { HostedProfileService } from '../../../src/mms/net/plus/HostedProfileService'
 import type { PlusConfiguration } from '../../../src/mms/net/plus/contracts'
-import {
-  enrollmentMatchCode,
-  openOfferSeal,
-  openRequestSeal
-} from '../../../src/mms/net/plus/enrollmentSeal'
+import { openOfferSeal, openRequestSeal } from '../../../src/mms/net/plus/enrollmentSeal'
 import { canonicalJson } from '../../../src/mms/net/sync/codec'
 import { fingerprint } from '../../../src/mms/net/link/selfSignedCert'
 
@@ -383,17 +379,11 @@ it.skipIf(!process.env.MOUSSE_PLUS_ROOT)(
       createdAt: Date.now(),
       expiresAt: Date.now() + 600000
     })
-    let listed: any
-    for (let i = 0; i < 50; i++) {
-      listed = host.services.net.request('net.plus.enrollment.requests', {})
-      if (listed.requests.length) break
+    // The phone signed in to the same Mousse ID: the authority approves it on its own, with no
+    // request left for the person to answer.
+    for (let i = 0; i < 100 && !requests.get('req-phone').sealedInvite; i++)
       await new Promise((done) => setTimeout(done, 100))
-    }
-    expect(listed.requests).toHaveLength(1)
-    expect(listed.requests[0].matchCode).toBe(
-      enrollmentMatchCode(box.publicKey, transportFingerprint)
-    )
-    await host.services.net.request('net.plus.enrollment.approve', { id: 'req-phone' })
+    expect(host.services.net.request('net.plus.enrollment.requests', {})).toEqual({ requests: [] })
     const invite = openRequestSeal(requests.get('req-phone').sealedInvite, box.privateKey, 'req-phone')
     await phone.services.net.request('bridge.join', {
       invite,

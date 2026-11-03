@@ -826,14 +826,24 @@ describe('remote composer methods on a real profile', () => {
     const before = mms.settings.get().provider
     const result = await call(api, 'threads.setModel', {
       threadId: thread.id,
-      model: { instanceId: 'pi:anthropic', model: 'claude-opus-4-8:high' }
+      model: { instanceId: 'pi:anthropic', model: 'claude-opus-4-8', effort: 'high' }
     })
     expect(result).toMatchObject({
       ok: true,
-      modelOverride: { instanceId: 'pi:anthropic', model: 'claude-opus-4-8:high' }
+      modelOverride: { instanceId: 'pi:anthropic', model: 'claude-opus-4-8', effort: 'high' }
     })
     expect(mms.threads.getThread(thread.id)?.modelOverride).toMatchObject({
-      model: 'claude-opus-4-8:high'
+      model: 'claude-opus-4-8',
+      effort: 'high'
+    })
+    // An older device packs the level into the model; it is stored apart all the same.
+    await call(api, 'threads.setModel', {
+      threadId: thread.id,
+      model: { instanceId: 'pi:anthropic', model: 'claude-opus-4-8:low' }
+    })
+    expect(mms.threads.getThread(thread.id)?.modelOverride).toMatchObject({
+      model: 'claude-opus-4-8',
+      effort: 'low'
     })
     expect(mms.settings.get().provider).toEqual(before)
     expect(

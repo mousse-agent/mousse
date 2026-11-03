@@ -267,7 +267,8 @@ describe('delegated child policy', () => {
     )
     const modeOf = (threadId: string) => d.store.getThread(threadId)?.permissionMode
     const turnsOf = (threadId: string) => claude.turns.filter((turn) => turn.input.threadId === threadId)
-    const done = (run: { childRunId: string }) => waitFor(() => d.engine.getRun(run.childRunId)?.status === 'completed', 'a child run')
+    // The turn is over once its checkpoint is recorded, which is after its run completes: a send before that queues.
+    const done = (run: { childRunId: string; childThreadId: string }) => waitFor(() => d.engine.getRun(run.childRunId)?.status === 'completed' && !d.orch.isConversationHistoryBusy(run.childThreadId), 'a child run')
 
     d.orch.setThreadPermissionMode(thread.id, 'accept_edits')
     expect(d.engine.store.listEvents(thread.id).filter((event) => event.type === 'thread.permission_mode')).toHaveLength(1)
@@ -470,7 +471,7 @@ describe('delegated child policy', () => {
         nested.shared = await delegate(delegation, { workspace: 'shared', role: 'review', instanceId: 'claude' }, 'nest-shared')
         nested.isolated = await delegate(delegation, { workspace: 'isolated', role: 'implement', instanceId: 'claude' }, 'nest-isolated')
         nested.named = await delegation.named.create({ name: 'writer', task: 'edit it', access: 'write' }, { toolCallId: 'nest-named' }) as Record<string, unknown>
-        nested.integrate = await delegation.integrateDelegation({ delegationId: 'delegation:any' }, { toolCallId: 'nest-integrate' }).catch((error: { code?: string }) => ({ code: error.code }))
+        nested.result = await delegation.reportResult({ delegationId: 'delegation:any' }) as Record<string, unknown>
         return 'Nested.'
       }
     )
@@ -481,12 +482,13 @@ describe('delegated child policy', () => {
     expect(d.engine.delegations.get(nested.shared.delegationId as string)).toMatchObject({ parentThreadId: child!.childThreadId, workspace: 'shared' })
     for (const key of ['isolated', 'named'])
       expect(nested[key], key).toMatchObject({ started: false, code: 'read_only_caller_requires_shared', message: expect.stringContaining('"shared"') })
-    expect(nested.integrate).toEqual({ code: 'mousse_read_only' })
+    // Asking for a result changes no workspace, so a read-only child may: an unknown task is a refusal value, not an error.
+    expect(nested.result).not.toMatchObject({ code: 'mousse_read_only' })
     // Only the read-only grandchild exists.
     expect(d.engine.delegations.listForParentThread(child!.childThreadId)).toHaveLength(1)
   }, 30_000)
 
-  it("a read-only child's Mousse tools cannot write threads, start work or integrate; read tools still work", async () => {
+  it("a read-only child's Mousse tools cannot write threads or start work; read tools still work", async () => {
     const started: Record<string, { childThreadId: string; childRunId: string }> = {}
     const results: Record<string, Record<string, unknown>> = { shared: {}, isolated: {} }
     let registryReady: ((registry: ToolRegistry) => void) | undefined
@@ -508,7 +510,6 @@ describe('delegated child policy', () => {
         ['thread_fork', {}],
         ['thread_merge_back', {}],
         ['delegate_task', { prompt: 'x', title: 'Writer', workspace: 'isolated', role: 'implement', instanceId: 'claude' }],
-        ['integrate_delegation', { delegationId: 'delegation:any' }],
         ['create_task', { title: 't' }]
       ] as const) {
         results[name][tool] = await tools.call(tool, { ...args }, { credential, toolCallId: `${name}-${tool}`, signal: new AbortController().signal })
@@ -537,7 +538,6 @@ describe('delegated child policy', () => {
       // The call reaches delegate_task, which refuses a non-read-only child as a value; a read-only one starts.
       delegate_task: 'read_only_caller_requires_shared',
       delegate_shared: 'started',
-      integrate_delegation: 'mousse_read_only',
       create_task: 'mousse_read_only'
     })
     // The same calls are not refused by the policy for an isolated child.

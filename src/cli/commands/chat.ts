@@ -149,6 +149,8 @@ export async function runChat(args: ParsedArgs): Promise<void> {
       threadId: tid,
       content: message,
       requestId,
+      // `--request-id` names the send: running the command again with it answers with the same run.
+      clientRequestId: requestId,
       source: 'cli'
     })
   } catch (error) {

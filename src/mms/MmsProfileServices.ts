@@ -103,6 +103,7 @@ import { existsSync } from 'node:fs'
 import { settleThreadMutationOwnership } from './queue/ThreadExecutionLease'
 import type { TaskLifecycleRecord } from '../shared/resourceLifecycle'
 import { UndoRetentionSweeper } from './actions/UndoRetentionSweeper'
+import { releaseThreadSnapshots } from './actions/SnapshotRefReleaseService'
 import { PullRequestWatchService } from './git/PullRequestWatchService'
 import { resolveThreadProjectPath } from './data/resolveActiveProjectPath'
 import { SpeechRelay } from './speech/SpeechRelay'
@@ -443,7 +444,8 @@ export class MmsProfileServices {
     this.mcpCredentials = new McpCredentials(this.runEngine.store)
     this.mcpServer = new MousseMcpServer({
       credentials: this.mcpCredentials,
-      registry: this.orchestrator.mcpToolRegistry()
+      registry: this.orchestrator.mcpToolRegistry(),
+      relay: this.orchestrator.relayHandler()
     })
     this.orchestrator.setAppletStore(this.applets)
     // Registry agents install once per installation; each profile records which versions it uses.
@@ -502,6 +504,10 @@ export class MmsProfileServices {
       prefs: {
         read: () => config.getProvidersSection().modelPrefs,
         write: (modelPrefs) => config.updateProvidersSection({ modelPrefs })
+      },
+      names: {
+        read: () => config.getProvidersSection().modelNames,
+        write: (modelNames) => config.updateProvidersSection({ modelNames })
       },
       cwd: () => this.worktrees.getRepoRoot(),
       piDisplayName: (providerId) => this.providerAuth.getProviderDisplayName(providerId),
@@ -725,7 +731,7 @@ export class MmsProfileServices {
             'Cannot trash thread: an owned workflow is still active or waiting'
           )
         }
-        const inventory = buildResourceInventory(this.threads.lifecycleStore, record)
+        const inventory = await buildResourceInventory(this.threads.lifecycleStore, record)
         if (inventory.blockers.length)
           throw new ResourceLifecycleError('ambiguous', `Resource ownership is not established: ${inventory.blockers.join('; ')}`)
         // The trash was accepted for exactly these threads (fresh operation, current generation) and
@@ -772,6 +778,16 @@ export class MmsProfileServices {
         }
       },
       quiesceDisk: () => this.storageUsage.pause(),
+      beforePurgeRemoval: async (record) => {
+        // What a deleted thread holds in a snapshot store goes on every pass, while the receipts that name it still exist.
+        // Releasing again is harmless; a failure (a file another process holds) stops the pass, so the purge resumes and
+        // tries again instead of leaving the refs or the store behind for good.
+        const failures: string[] = []
+        for (const task of this.lifecycleOwnedTasks(record.taskId)) {
+          try { await releaseThreadSnapshots(task.location, undefined, { discardAuthorized: Boolean(record.purge?.discardAuthorized) }) } catch (error) { failures.push(`${task.taskId}: ${error instanceof Error ? error.message : String(error)}`) }
+        }
+        if (failures.length) throw new Error(`The snapshots of a deleted thread could not be released yet; the delete will try again. ${failures.join('; ')}`)
+      },
       projectPurged: (record) => {
         // A permanent delete freed space.
         this.storageUsage.rescanSoon()
@@ -794,15 +810,7 @@ export class MmsProfileServices {
         const record = this.threads.lifecycleStore.get(threadId)
         return !record || record.state === 'active'
       },
-      isSubagent: (threadId) => Boolean(this.threads.getThread(threadId)?.lineage || this.runEngine.delegations.getLineage(threadId)),
       runStore: () => this.runEngine.store,
-      inbox: () => this.runEngine.inbox,
-      // A person's message is a visible user message that is not a job's prompt; wakes and notices are hidden or not user messages.
-      lastPersonMessageAt: (threadId) => {
-        const mine = this.orchestrator.getMessages(threadId).filter((message) => message.role === 'user' && !message.scheduled && !message.subagentNotice?.length)
-        const at = Date.parse(mine.at(-1)?.timestamp ?? '')
-        return Number.isNaN(at) ? null : at
-      },
       notify: (threadId, text, messageId) => this.orchestrator.noteThreadUpdate(threadId, text, { messageId }),
       onRunEnd: (listener) => {
         const handler = (event: ThreadEvent): void => {
@@ -970,12 +978,19 @@ export class MmsProfileServices {
     // A trashed thread is not listed and cannot be written to, so its watch ends now, while its folder still resolves, and a
     // restore does not bring it back with a backlog.
     this.pullRequestWatch.onEnded(taskId, 'trashed')
+    // Read while the thread is listed: its checkout's repository is in this folder.
+    const projectPath = resolveThreadProjectPath(this.projects, this.threads, taskId)
     const record = await this.lifecycle.trash({
       taskId,
       operationId: this.resolveLifecycleOperationId(taskId, 'trash', operationId),
       expectedGeneration
     })
-    if (record.state === 'trashed' && this.removesWorktreesWithDeletedThreads()) {
+    // The trash is done; removing the checkout works in the project's repository, so it waits for the folder's
+    // volume (a pending macOS permission prompt). A volume that is not answering, or shutdown, leaves the
+    // checkout to the hourly cleanup.
+    if (record.state === 'trashed' && this.removesWorktreesWithDeletedThreads() &&
+        await this.orchestrator.waitForThreadFolders(taskId, [projectPath], this.requests.signal, { whenNotAnswering: 'fail' })
+          .catch(() => 'aborted' as const) === 'ready') {
       try {
         // The same keep rules as the hourly run (unpublished commits, links, files in use); a checkout that is kept stays until purge.
         const item = await this.storageCleanup.retireDeletedWorktree(taskId)
@@ -1020,6 +1035,11 @@ export class MmsProfileServices {
 
   getProfileId(): string {
     return this.profileId
+  }
+
+  /** Aborts when the profile starts shutting down; a request waiting for a folder's volume ends then. */
+  get requestShutdownSignal(): AbortSignal {
+    return this.requests.signal
   }
 
   async runOwnedRequest<T>(method: string, work: () => T | Promise<T>): Promise<T> {
@@ -1283,6 +1303,8 @@ export class MmsProfileServices {
         console.warn('the bot startup pass failed', { error: error instanceof Error ? error.message : String(error) })
       }
     }
+    // Wake rows of a kind no longer written (an earlier pull request watch's) are settled before any worker can run one.
+    this.runEngine.inbox.withdrawRetiredRows()
     this.startRunEngineWorkers()
 
     if (this.config.getScheduledSection().enabled) {

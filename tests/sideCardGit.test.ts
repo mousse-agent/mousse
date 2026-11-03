@@ -549,10 +549,21 @@ describe('git section formatting', () => {
   it('disables amend with its reason in a thread worktree', () => {
     const commits = [commit()]
     expect(commitMenuState(commits, 2, false).amendDisabled).toBe(false)
-    const checkpointed = commitMenuState(commits, 2, true, true)
-    expect(checkpointed).toMatchObject({ canAmend: false, amend: false, amendDisabled: true, amendTitle: "This thread's branch is checkpointed" })
+    const inThread = commitMenuState(commits, 2, true, true)
+    expect(inThread).toMatchObject({ canAmend: false, amend: false, amendDisabled: true, amendTitle: "Not available in this thread's worktree" })
     // No changes and nothing else to commit: the trigger stays off instead of forcing an amend.
     expect(commitMenuState(commits, 0, false, true)).toMatchObject({ triggerEnabled: false, amend: false })
+  })
+
+  it('never turns amend on by itself with nothing to commit', () => {
+    // A clean repository whose last commit only this computer has: Commit opens with amend off.
+    expect(commitMenuState([commit()], 0, false)).toMatchObject({ triggerEnabled: true, nothingToCommit: true, amend: false, amendDisabled: false })
+    // Pushed HEAD, unborn repository, thread worktree: nothing to commit and nothing to amend.
+    expect(commitMenuState([commit({ pushed: true, onRemote: true })], 0, false)).toMatchObject({ triggerEnabled: false, amend: false })
+    expect(commitMenuState([], 0, false)).toMatchObject({ triggerEnabled: false, amend: false, amendTitle: 'No commits yet' })
+    expect(commitMenuState([commit()], 0, false, true)).toMatchObject({ triggerEnabled: false, amend: false })
+    // Files coming or going never flip the choice: it is whatever the user set.
+    for (const files of [0, 1, 3, 0]) expect(commitMenuState([commit()], files, false).amend).toBe(false)
   })
 
   it('reduces a git failure to one readable line', () => {
@@ -936,7 +947,8 @@ describe('Merge and Close on a pull request row', () => {
   it('shows Merge as the primary action and Close beside it, and no watch control', () => {
     const html = sectionWith({})
     expect(html).toMatch(/class="side-card-git-pr-merge"[^>]*data-ready="true"/)
-    expect(html).toContain('aria-label="Close pull request #7"')
+    // Close carries its name, so it is not taken for a second Merge.
+    expect(html).toMatch(/aria-label="Close pull request #7 without merging"[^>]*>[\s\S]*?<span>Close<\/span><\/button>/)
     expect(html).not.toContain('Watch')
     expect(html).not.toContain('Let the agent act')
   })

@@ -33,10 +33,10 @@ const linkOf = (patch: Partial<ThreadPullRequestLink> = {}): ThreadPullRequestLi
 
 describe('a re-link keeps the watch of the same pull request only', () => {
   it('keeps it for the same pull request, drops it for another, and never invents one', () => {
-    expect(relinked(linkOf({ watch: 'act' }), linkOf({ linkedAt: '2026-10-27T00:00:00Z' }))).toMatchObject({ number: 7, watch: 'act', linkedAt: '2026-10-27T00:00:00Z' })
-    expect(relinked(linkOf({ watch: 'act' }), linkOf({ number: 8 })).watch).toBeUndefined()
-    expect(relinked(linkOf({ watch: 'act' }), linkOf({ nameWithOwner: 'other/app' })).watch).toBeUndefined()
-    expect(relinked(linkOf({ watch: 'act' }), linkOf({ host: 'GITHUB.COM', nameWithOwner: 'Acme/App' })).watch).toBe('act')
+    expect(relinked(linkOf({ watch: 'notify' }), linkOf({ linkedAt: '2026-10-27T00:00:00Z' }))).toMatchObject({ number: 7, watch: 'notify', linkedAt: '2026-10-27T00:00:00Z' })
+    expect(relinked(linkOf({ watch: 'notify' }), linkOf({ number: 8 })).watch).toBeUndefined()
+    expect(relinked(linkOf({ watch: 'notify' }), linkOf({ nameWithOwner: 'other/app' })).watch).toBeUndefined()
+    expect(relinked(linkOf({ watch: 'notify' }), linkOf({ host: 'GITHUB.COM', nameWithOwner: 'Acme/App' })).watch).toBe('notify')
     expect(relinked(undefined, linkOf()).watch).toBeUndefined()
     expect(relinked(linkOf({ watch: 'notify' }), linkOf({ watch: 'off' })).watch).toBe('off')
   })
@@ -89,7 +89,7 @@ describe('the watch through the daemon protocol', () => {
 
   it('refuses bad parameters, an unlinked thread and an unknown thread', async () => {
     const thread = newThread()
-    await expect(client.request('pullRequests.watch', { threadId: thread.id, watch: 'always' })).rejects.toThrow(/off, notify or act/)
+    await expect(client.request('pullRequests.watch', { threadId: thread.id, watch: 'always' })).rejects.toThrow(/off or notify/)
     await expect(client.request('pullRequests.watch', { threadId: thread.id, watch: 'notify', cwd: '/x' })).rejects.toThrow(/cwd is not allowed/)
     await expect(client.request('pullRequests.watch', { threadId: thread.id })).rejects.toThrow(/watch/)
     await expect(client.request('pullRequests.watch', { threadId: 'missing', watch: 'notify' })).rejects.toThrow(/not found/i)
@@ -112,21 +112,20 @@ describe('the watch through the daemon protocol', () => {
     expect(mms.threads.getThread(thread.id)?.pullRequest?.watch).toBe('off')
   })
 
-  it('refuses act on a subagent thread but lets it be notified', async () => {
+  it('only notifies: a watch that would wake the agent is refused, and the status has no such mode', async () => {
     const thread = newThread()
     mms.threads.updateThreadMeta(thread.id, { pullRequest: linkOf() })
-    mms.runEngine.delegations.createLineage({ threadId: thread.id, parentThreadId: 'parent', parentRunId: 'run-1', relationship: 'subagent' })
-    await expect(client.request('pullRequests.watch', { threadId: thread.id, watch: 'act' })).rejects.toThrow(/subagent thread can only be notified/)
+    await expect(client.request('pullRequests.watch', { threadId: thread.id, watch: 'act' })).rejects.toThrow(/off or notify/)
     const ok = await client.request<{ status: PullRequestWatchStatus }>('pullRequests.watch', { threadId: thread.id, watch: 'notify' })
-    expect(ok.status.actRefusal).toMatch(/subagent/)
     expect(ok.status.mode).toBe('notify')
+    expect(ok.status).not.toHaveProperty('actRefusal')
   })
 
   it('keeps the watch when the same pull request is linked again, and drops it for another one', async () => {
     const thread = newThread()
-    await client.request('pullRequests.watch', { threadId: thread.id, watch: 'act', number: 7 })
+    await client.request('pullRequests.watch', { threadId: thread.id, watch: 'notify', number: 7 })
     await client.request('pullRequests.link', { threadId: thread.id, number: 7 })
-    expect(mms.threads.getThread(thread.id)?.pullRequest).toMatchObject({ number: 7, watch: 'act' })
+    expect(mms.threads.getThread(thread.id)?.pullRequest).toMatchObject({ number: 7, watch: 'notify' })
     vi.spyOn(mms.gitService.codeHost, 'getPullRequestDetail').mockResolvedValue(detailOf({ number: 8, identity: { host: 'github.com', nameWithOwner: 'acme/app', number: 8 } }))
     await client.request('pullRequests.link', { threadId: thread.id, number: 8 })
     expect(mms.threads.getThread(thread.id)?.pullRequest).toMatchObject({ number: 8 })
@@ -146,7 +145,7 @@ describe('the watch through the daemon protocol', () => {
 
   it('ends the watch as soon as the thread is stopped, through the one Stop path', async () => {
     const thread = newThread()
-    await client.request('pullRequests.watch', { threadId: thread.id, watch: 'act', number: 7 })
+    await client.request('pullRequests.watch', { threadId: thread.id, watch: 'notify', number: 7 })
     await mms.orchestrator.stopThread(thread.id, 'user')
     expect(mms.pullRequestWatch.status(thread.id)).toMatchObject({ state: 'ended', ended: { reason: 'stopped' } })
     expect(mms.threads.getThread(thread.id)?.pullRequest?.watch).toBe('off')
@@ -163,7 +162,7 @@ describe('the watch through the daemon protocol', () => {
 
   it('ends the watch of a thread that is moved to the trash, and a restore does not bring it back or report a backlog', async () => {
     const thread = newThread()
-    await client.request('pullRequests.watch', { threadId: thread.id, watch: 'act', number: 7 })
+    await client.request('pullRequests.watch', { threadId: thread.id, watch: 'notify', number: 7 })
     await mms.trashThread(thread.id)
     // Posted while the thread was in the trash.
     const lineReads = vi.mocked(mms.gitService.codeHost.listLineCommentsSince)
@@ -227,4 +226,30 @@ describe('the watch through the daemon protocol', () => {
       expect(mms.threads.loadThreadData(thread.id).messages.filter((message) => message.content === text)).toHaveLength(2)
     })
   })
+})
+
+describe('wake rows an earlier pull request watch left', () => {
+  it('are withdrawn at startup before any run engine worker starts, for a thread with no link too', async () => {
+    const f = gitFoundationFixture()
+    const mms = await MousseMainService.create({ homeDir: f.home, headless: true, ownerKind: 'test' })
+    try {
+      const project = mms.projects.openProject(f.repo)
+      const thread = mms.threads.createThread('No link any more', project.id)
+      const row = mms.runEngine.inbox.append({ inboxId: `inbox:pr-update:${thread.id}:1:0`, threadId: thread.id, kind: 'pr_update', payload: { text: 'Address what needs code changes and push when done.' } })
+      const services = mms as unknown as { startRunEngineWorkers(): void }
+      const startWorkers = services.startRunEngineWorkers.bind(mms)
+      let statusWhenWorkersStarted: string | undefined
+      vi.spyOn(services, 'startRunEngineWorkers').mockImplementation(() => {
+        statusWhenWorkersStarted = mms.runEngine.inbox.get(row.inboxId)?.status
+        startWorkers()
+      })
+      await mms.start()
+      expect(statusWhenWorkersStarted).toBe('acknowledged')
+      expect(mms.runEngine.store.listNonTerminalRuns().filter((run) => run.threadId === thread.id)).toEqual([])
+    } finally {
+      vi.restoreAllMocks()
+      await mms.stop()
+      f.dispose()
+    }
+  }, 30_000)
 })

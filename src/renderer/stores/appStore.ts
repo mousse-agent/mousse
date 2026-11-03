@@ -89,8 +89,11 @@ export function sameThreadSnapshot(a: Thread[], b: Thread[]): boolean {
       left.node !== right.node ||
       left.offline !== right.offline ||
       left.notShared !== right.notShared ||
+      left.modelOverride?.instanceId !== right.modelOverride?.instanceId ||
       left.modelOverride?.llmProvider !== right.modelOverride?.llmProvider ||
-      left.modelOverride?.model !== right.modelOverride?.model
+      left.modelOverride?.model !== right.modelOverride?.model ||
+      left.modelOverride?.effort !== right.modelOverride?.effort ||
+      left.modelOverride?.name !== right.modelOverride?.name
     ) {
       return false
     }
@@ -184,6 +187,9 @@ interface AppState {
   browserElementAttachmentsByThread: Record<string, BrowserElementAttachment[]>
   /** Workspace choices for each new-chat draft, isolated by profile. */
   composerWorkspaceDrafts: Record<string, ComposerWorkspace>
+  /** The profile's "Start new chats in a worktree" setting: the worktree choice of a draft that has not made one. */
+  worktreeByDefault: boolean
+  setWorktreeByDefault: (worktreeByDefault: boolean) => void
   setComposerWorkspaceDraft: (threadId: string | null, workspace?: ComposerWorkspace) => void
   /**
    * New threads or blank drafts whose workspace a send is preparing, keyed by
@@ -453,6 +459,8 @@ export const useAppStore = create<AppState>()(persist((set) => ({
   threadsSidebarView: 'projects',
   setThreadsSidebarView: (threadsSidebarView) => set({ threadsSidebarView }),
   composerWorkspaceDrafts: {},
+  worktreeByDefault: true,
+  setWorktreeByDefault: (worktreeByDefault) => set({ worktreeByDefault }),
   workspacePending: {},
   setWorkspacePending: (profileId, threadId, pending) => set((state) => {
     const key = workspacePendingKey(profileId, threadId)
@@ -515,8 +523,8 @@ export const useAppStore = create<AppState>()(persist((set) => ({
   setTasks: (tasks) => set({ tasks }),
   setSidebarWidth: (sidebarWidth) => set({ sidebarWidth }),
   setThreadsSidebarWidth: (threadsSidebarWidth) => set({ threadsSidebarWidth }),
-  setSettingsOpen: (settingsOpen) => set(settingsOpen ? { settingsOpen, scheduledOpen: false } : { settingsOpen }),
-  setScheduledOpen: (scheduledOpen) => set(scheduledOpen ? { scheduledOpen, settingsOpen: false } : { scheduledOpen }),
+  setSettingsOpen: (settingsOpen) => set(settingsOpen ? { settingsOpen, scheduledOpen: false, usageOpen: false } : { settingsOpen }),
+  setScheduledOpen: (scheduledOpen) => set(scheduledOpen ? { scheduledOpen, settingsOpen: false, usageOpen: false } : { scheduledOpen }),
   setLoading: (loading) => set({ loading }),
   setAppInfo: (appInfo) => set({ appInfo }),
   setThreadsSidebarOpen: (threadsSidebarOpen) => set({ threadsSidebarOpen }),

@@ -11,6 +11,8 @@ import type { McpTurnBinding } from '../mcp/appTools/registry'
 
 /** The turn binding each real driver declares (`harness/drivers/*`), for test drivers of the same kind. */
 const TURN_BINDINGS: Partial<Record<ProviderAdapter['driver'], McpTurnBinding>> = { claude: 'per_call', codex: 'drained_turn', antigravity: 'drained_turn', acp: 'drained_turn', pi: 'per_call' }
+/** Who asks before a relayed tool runs, as each real driver declares (`HarnessDriver.relay`); pi has no relay. */
+const RELAY_APPROVALS: Partial<Record<ProviderAdapter['driver'], 'runtime' | 'mousse'>> = { claude: 'runtime', codex: 'mousse', cursor: 'mousse', acp: 'runtime', antigravity: 'runtime', grok: 'runtime' }
 // As the real Claude Code and Codex drivers declare.
 const MCP_IMAGE_RESULTS: Partial<Record<ProviderAdapter['driver'], boolean>> = { claude: true, codex: true }
 
@@ -32,6 +34,7 @@ export function adapterDriver(adapter: ProviderAdapter, extra: Partial<HarnessCa
     customModels: true,
     mcpTurnBinding: mcpTurnBinding ?? TURN_BINDINGS[adapter.driver],
     mcpImageResults: MCP_IMAGE_RESULTS[adapter.driver] ?? false,
+    ...(RELAY_APPROVALS[adapter.driver] ? { relay: { approvals: RELAY_APPROVALS[adapter.driver]! } } : {}),
     // As the real pi driver declares: its models name chats.
     oneShot: adapter.driver === 'pi',
     decodeConfig: (raw) => decodeInstanceConfig(raw, { privateHome: false }),

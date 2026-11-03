@@ -70,6 +70,8 @@ export interface ChatComposerProps {
   enabledSkills: SkillDescriptor[]
   providers: ProviderWithStatus[]
   selectedProviderId: string
+  /** The selection's instance, when it names one. */
+  selectedInstanceId?: string
   selectedModelId: string
   modelMenuOpen: boolean
   onModelMenuOpenChange: (open: boolean) => void
@@ -152,6 +154,7 @@ export function ChatComposer({
   enabledSkills,
   providers,
   selectedProviderId,
+  selectedInstanceId,
   selectedModelId,
   modelMenuOpen,
   onModelMenuOpenChange,
@@ -838,6 +841,7 @@ export function ChatComposer({
       <ComposerFooter
         providers={providers}
         selectedProviderId={selectedProviderId}
+        selectedInstanceId={selectedInstanceId}
         selectedModelId={selectedModelId}
         modelMenuOpen={modelMenuOpen}
         onModelMenuOpenChange={onModelMenuOpenChange}

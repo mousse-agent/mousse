@@ -192,6 +192,8 @@ export function signInErrorMessage(cause: unknown, origin: string, net?: NetStat
       return `Mousse ID at ${host} didn’t accept the sign-in. Try again later.`
     case 'keystore_locked':
       return mousseIdSetupStep(net)
+    case 'authority_offline':
+      return 'Your other computer signed in to this Mousse ID adds this one to your devices. Open Mousse on it, then sign in again.'
     case 'expired':
       return 'The sign-in code expired. Sign in again.'
     default:

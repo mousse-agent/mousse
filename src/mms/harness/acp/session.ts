@@ -12,6 +12,7 @@ import { initializeAgent, sessionCapability, type AcpAgentInfo } from './capabil
 import { closeAcpConnection, type AcpClientHandlers, type AcpConnection, type AcpConnectionFactory, type AcpPurpose } from './connection'
 import { LoadGate } from './loadGate'
 import { sessionMcpServers } from './mcp'
+import type { McpAttachment } from '../../run/mcp/MousseMcpServer'
 import { AGENT_DEFAULT_MODEL, agentModels, agentModes, modelOptions, planModeId, type ModelControl } from './models'
 import {
   answerPermission,
@@ -58,6 +59,8 @@ export interface AcpProcess extends AcpConnection {
   prompting?: Promise<void>
   /** Bearer token of the Mousse MCP server the session was opened with (null: none). */
   mcpToken?: string | null
+  /** The MCP relay the session was opened with, `url|revision` (null: none). */
+  relayKey?: string | null
   /** Provider instance whose turn opened the session. */
   instanceId?: string
   /** Hash of the session instructions the session was given (`orchestrationInstructions`). */
@@ -189,7 +192,7 @@ export interface AcpChatInput {
   history?: string
   images?: ChatImageAttachment[]
   signal?: AbortSignal
-  mcp?: { url: string; token: string } | null
+  mcp?: McpAttachment | null
   /** Session instructions: in the session's first prompt, and again on a resumed session they changed for. */
   orchestrationInstructions?: string
   onText: (text: string) => void
@@ -592,7 +595,7 @@ export class AcpSessions {
   /**
    * `mcp` attaches the Mousse MCP server to the ACP session (SPEC §15.2) and `orchestrationInstructions`
    * goes into the session's first prompt. The token is stable per thread, so a live session is reused
-   * across turns; only a changed token (after a revocation) closes it and resumes with the new one.
+   * across turns; only a changed token (after a revocation) or MCP relay closes it and resumes with the new one.
    */
   async chat(input: AcpChatInput): Promise<string> {
     const { label, store, questions, quirks } = this.options
@@ -604,7 +607,9 @@ export class AcpSessions {
     let saved = stored && (stored.instanceId ?? this.options.defaultInstanceId) === instanceId ? stored : undefined
     let active = this.sessions.get(input.threadId)
     const mcpToken = input.mcp?.token ?? null
-    if (active && (active.connection.signal.aborted || active.generation !== this.options.launchGeneration() || active.cwd !== input.cwd || saved?.historyKey !== historyKey || (active.mcpToken ?? null) !== mcpToken || (active.instanceId ?? this.options.defaultInstanceId) !== instanceId)) {
+    // A new relay catalogue reopens the session too: an agent reads its tool lists when the session opens.
+    const relayKey = input.mcp?.relay ? `${input.mcp.relay.url}|${input.mcp.relay.revision}` : null
+    if (active && (active.connection.signal.aborted || active.generation !== this.options.launchGeneration() || active.cwd !== input.cwd || saved?.historyKey !== historyKey || (active.mcpToken ?? null) !== mcpToken || (active.relayKey ?? null) !== relayKey || (active.instanceId ?? this.options.defaultInstanceId) !== instanceId)) {
       this.close(active)
       this.sessions.delete(input.threadId)
       active = undefined
@@ -700,6 +705,7 @@ export class AcpSessions {
           input.signal?.throwIfAborted()
           const mcpServers = sessionMcpServers(input.mcp, { http: current.mcpHttp === true && quirks.mcp !== 'stdio' })
           current.mcpToken = mcpToken
+          current.relayKey = relayKey
           session = undefined
           if (saved?.cwd === input.cwd && saved.historyKey === historyKey) {
             const reopenedId = saved.sessionId

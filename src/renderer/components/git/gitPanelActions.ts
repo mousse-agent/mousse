@@ -7,7 +7,7 @@ import {
   stageGitPaths,
   unstageGitPaths
 } from '../../stores/gitStatusStore'
-import { THREAD_CHECKPOINTED_REASON, gitErrorMessage, isGitCancelled } from '../sideCard/gitSectionLogic'
+import { THREAD_WORKTREE_REASON, gitErrorMessage, isGitCancelled } from '../sideCard/gitSectionLogic'
 import {
   discardPrompt,
   fetchResultNotice,
@@ -21,19 +21,22 @@ export type RowRequest =
   | { action: 'stage' | 'unstage'; files: readonly GitFileChange[] | 'all' }
   | { action: 'discard'; files: readonly GitFileChange[] }
 
-export type RowOutcome = { kind: 'done' } | { kind: 'cancelled' } | { kind: 'failed'; message: string }
+export type RowOutcome = { kind: 'done'; notice?: string } | { kind: 'cancelled' } | { kind: 'failed'; message: string }
 
 export interface RowActionDeps {
   /** Asks the user; false cancels. Defaults to the window's confirm dialog. */
   confirm?: (message: string) => boolean
+  /** How long a discard keeps its copy, as the folder's status says (`discardKeptForMs`). */
+  discardKeptForMs?: number
 }
 
 const paths = (files: readonly GitFileChange[]): string[] => [...new Set(files.map((file) => file.path))]
 
 /**
  * Stage, unstage or discard files. A discard asks first and does nothing when declined, since it
- * destroys changes and deletes untracked files. Stage and unstage are refused in a thread's own
- * worktree, where the next checkpoint would commit everything anyway.
+ * throws changes away and deletes untracked files; its result names the copy the daemon kept and
+ * how to bring a file back. Stage and unstage are refused in a thread's own worktree, where a
+ * commit takes every change anyway.
  */
 export async function runRowAction(
   path: string,
@@ -42,14 +45,15 @@ export async function runRowAction(
   deps: RowActionDeps = {}
 ): Promise<RowOutcome> {
   if (request.action !== 'discard' && scope.workspaceThreadId !== null) {
-    return { kind: 'failed', message: THREAD_CHECKPOINTED_REASON }
+    return { kind: 'failed', message: THREAD_WORKTREE_REASON }
   }
   if (request.files !== 'all' && request.files.length === 0) return { kind: 'done' }
   try {
     if (request.action === 'discard') {
       const confirm = deps.confirm ?? ((message: string) => window.confirm(message))
-      if (!confirm(discardPrompt(request.files))) return { kind: 'cancelled' }
-      await discardGitPaths(path, paths(request.files), scope)
+      if (!confirm(discardPrompt(request.files, deps.discardKeptForMs))) return { kind: 'cancelled' }
+      const notice = await discardGitPaths(path, paths(request.files), scope)
+      return notice ? { kind: 'done', notice } : { kind: 'done' }
     } else {
       const target = request.files === 'all' ? 'all' : paths(request.files)
       if (request.action === 'stage') await stageGitPaths(path, target, scope)

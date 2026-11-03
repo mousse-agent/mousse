@@ -37,7 +37,7 @@ export function createMmsChatResourceService(services: MmsProfileServices, resol
     if (fresh.profileId !== profileId || fresh.threadId !== binding.threadId || fresh.workspaceRoot !== binding.workspaceRoot || !fresh.participants.some((participant) => participant.id === binding.participant.id)) throw new ChatResourceError('resource_binding_changed', 'Group resource membership or workspace changed')
     const manager = new ThreadWorkspaceManager(services.threads.getThreadDir(binding.threadId))
     const metadata = manager.load()
-    if (metadata && (metadata.lifecycle !== 'ready' || await realpath(manager.executionContext('', metadata).projectPath) !== binding.workspaceRoot)) throw new ChatResourceError('resource_owner_mismatch', 'Group workspace differs from the owned task workspace')
+    if (metadata && (metadata.lifecycle !== 'ready' || await realpath(manager.workingFolder('', metadata)) !== binding.workspaceRoot)) throw new ChatResourceError('resource_owner_mismatch', 'Group workspace differs from the owned task workspace')
   }
   const browserContext = (binding: TrustedChatResourceBinding, sessionId?: string): BrowserToolContext => {
     const scope = sessionId ? services.platform.browser.sessions.trustedSessionScope({ profileId, threadId: binding.threadId, sessionId }) : undefined
@@ -130,9 +130,11 @@ export function createMmsChatResourceService(services: MmsProfileServices, resol
               presentationMessageStart: latest?.presentationMessageEnd ?? 0, presentationMessageEnd: latest?.presentationMessageEnd ?? 0,
               nativeContextBoundary: latest?.nativeContextBoundary ?? { messageIndex: 0, compactionGeneration: 0, fidelity: 'legacy' },
               externalEffects: [{ kind: 'unknown', reversible: false, description: 'Shared terminal commands may affect external services or ignored files.' }] }
-            // The user's pending edits are saved as their own checkpoint first; the terminal's action covers only what it changes.
-            startSha = (await actions.saveUserChanges(actionOptions)).startSha
-            actions.beginTurn(actionOptions, startSha)
+            // Edits made outside the terminal are recorded as their own action first; the terminal's action covers only what it changes.
+            startSha = (await actions.recordOutsideChanges(actionOptions)).startSha
+            // What `beginTurn` checks of the start, read right after the snapshot without blocking; `beginTurn` then runs no Git.
+            const startCheck = await actions.checkTurnStart(actionOptions.workspacePath, startSha)
+            actions.beginTurn(actionOptions, startSha, startCheck)
           }
           const id = services.ptyManager.create(`chat:${binding.groupId}`, binding.workspaceRoot, undefined, {
             threadId: binding.threadId,

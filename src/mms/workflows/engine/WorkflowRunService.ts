@@ -1667,7 +1667,8 @@ export class WorkflowRunService implements WorkflowRuntimePort {
         const next = queue.shift()!
         const work = runBranch(next).then(() => {
           const idx = active.indexOf(work)
-          if (idx >= 0) active.splice(idx, 1)
+          // The removed promise has already settled.
+          if (idx >= 0) void active.splice(idx, 1)
         })
         active.push(work)
       }

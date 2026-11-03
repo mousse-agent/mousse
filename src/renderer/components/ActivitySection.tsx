@@ -8,18 +8,27 @@ import { Activity } from '../lib/icons'
 export function ActivitySection() {
   const [stats, setStats] = useState<LineEditStatsSnapshot | null>(null)
   const [usage, setUsage] = useState<UsageStatsSnapshot | null>(null)
+  const [loadFailed, setLoadFailed] = useState(false)
 
   useEffect(() => {
-    void window.mousse.lineEdits.getStats().then(setStats)
-    return window.mousse.lineEdits.onUpdated(setStats)
+    void window.mousse.lineEdits.getStats().then(setStats, (error) => {
+      console.error('Loading activity failed', error)
+      setLoadFailed(true)
+    })
+    return window.mousse.lineEdits.onUpdated((next) => {
+      setLoadFailed(false)
+      setStats(next)
+    })
   }, [])
 
-  useEffect(() => { void window.mousse.usageStats.getStats().then(setUsage) }, [])
+  useEffect(() => {
+    void window.mousse.usageStats.getStats().then(setUsage, (error) => console.error('Loading token usage failed', error))
+  }, [])
 
   if (!stats) {
     return (
       <SettingsGroup title="Activity" icon={Activity}>
-        <p className="settings-muted activity-loading">Loading activity…</p>
+        <p className="settings-muted activity-loading">{loadFailed ? 'Couldn’t load activity.' : 'Loading activity…'}</p>
       </SettingsGroup>
     )
   }

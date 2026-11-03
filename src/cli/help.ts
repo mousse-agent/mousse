@@ -36,6 +36,7 @@ Usage:
   mousse-cli revert-code --session <id> --action <id>
   mousse-cli fork --session <id> --action <id>
   mousse-cli operation abort <id> --session <id>
+  mousse-cli operation recover --session <id>
 
 Global options:
   -p, --print                 Print response and exit (non-interactive / automation)
@@ -76,7 +77,7 @@ One-shot (-p / piped / non-TTY):
   /stop                       Abort if a turn is in-flight in this process
   /steer <prompt>             Steers only when a turn is active (no silent fallback)
   /<workflow> [arguments]     Run via the same resolver used by the app
-  --request-id <uuid>         Reuse with identical slash input after a lost reply
+  --request-id <uuid>         Reuse after a lost reply: the same send is answered, never run twice
   --no-wait                  Return after workflow admission (otherwise wait)
 
 Quote a complete slash invocation so the shell passes its named arguments as text.
@@ -187,6 +188,7 @@ export const THREAD_ACTION_HELP = `Usage:
   mousse-cli revert-code --session <thread> --action <action>
   mousse-cli fork --session <thread> --action <action> [--name <name>]
   mousse-cli operation abort <operation> --session <thread>
+  mousse-cli operation recover --session <thread>
 `
 
 export const CONFIG_HELP = `Usage:

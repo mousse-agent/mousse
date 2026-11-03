@@ -16,7 +16,7 @@ import { nativeSdkVersion, type NativeBotDefinition } from '../../../src/mms/bot
 import { newId } from '../../../src/shared/net'
 import { ScriptedBotRuntime } from '../bots/scriptedRuntime'
 import { portableRepository } from '../../../src/mms/bridge/dispatch'
-import { git } from '../../../src/mms/bridge/dispatch/git'
+import { fixtureGitAsync as git, ownedHome } from '../../support/fixtureGit'
 import type { ChatTaskSelectionInput } from '../../../src/shared/chatsNetwork'
 import { installExactDefinitionRuntime } from '../../fixtures/agent-platform/exactDefinitionRuntime'
 
@@ -24,6 +24,8 @@ export const cleanup: Array<() => void | Promise<void>> = []
 export async function profile(input: { home?: string; profileId?: string; initialize?: boolean; protect?: boolean; paused?: boolean; native?: boolean } = {}) {
   const home = input.home ?? realpathSync(mkdtempSync(join(tmpdir(), 'net-chats-'))), profileId = input.profileId ?? randomUUID()
   if (!input.home) cleanup.push(() => rmSync(home, { recursive: true, force: true }))
+  // The profile's home is Mousse's, as the real one under the Mousse home is.
+  cleanup.push(ownedHome(home))
   const auth = new ProviderAuthService(join(home, 'provider-auth.json'))
   cleanup.push(() => auth.stop())
   const domains = new DomainHandlerRegistry(), contexts: Context[] = []
@@ -67,7 +69,7 @@ export async function profile(input: { home?: string; profileId?: string; initia
     const rt = services.net.runtime()
     if (rt.identity.self() && rt.keys.state() === 'locked') await services.net.request('net.unlock', { passphrase: 'chats-candidate-fixture-protection' })
     else await services.net.request('net.init', { listen: true })
-    if (input.protect !== false && !rt.keys.encryptedAtRest()) await services.net.request('net.protect', { passphrase: 'chats-candidate-fixture-protection' })
+    if (input.protect !== false && !rt.keys.protectedAtRest()) await services.net.request('net.protect', { passphrase: 'chats-candidate-fixture-protection' })
   }
   const createGroup = async () => {
     const registry = services.platform.agentDefinitions

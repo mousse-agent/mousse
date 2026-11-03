@@ -383,18 +383,33 @@ export class HostedProfileService {
       grant.expiresAt <= this.now()
     )
       throw new NetError('forbidden')
-    const selected = { ...transaction.configuration, accountId: grant.accountId }
-    if (transaction.bindRoot) await this.bind(selected, grant.accessToken)
+    return this.useGrant(
+      { ...transaction.configuration, accountId: grant.accountId },
+      grant.accessToken,
+      transaction.bindRoot,
+      {
+        email: displayText(grant.email, 320),
+        // No paid plans yet: a plan name is kept only when the service says monetization is on.
+        plan: grant.monetization === true ? displayText(grant.plan, 64) : undefined
+      }
+    )
+  }
+  /** Binds (as the root authority) or selects the account, then registers this computer. */
+  async useGrant(
+    selected: PlusConfiguration,
+    accessToken: string,
+    bindRoot: boolean,
+    account: { email?: string; plan?: string } = {}
+  ): Promise<PlusStatus> {
+    if (bindRoot) await this.bind(selected, accessToken)
     else this.configure(selected)
-    const email = displayText(grant.email, 320),
-      // No paid plans yet: a plan name is kept only when the service says monetization is on.
-      plan = grant.monetization === true ? displayText(grant.plan, 64) : undefined,
+    const { email, plan } = account,
       stored = this.read()
     if (stored && (email || plan)) {
       stored.account = { ...(email ? { email } : {}), ...(plan ? { plan } : {}) }
       this.save(stored)
     }
-    return this.connect(grant.accessToken)
+    return this.connect(accessToken)
   }
   /** Drops the pending sign-in so a cancelled attempt does not block a new one. */
   cancelLogin(): void {
@@ -402,7 +417,7 @@ export class HostedProfileService {
   }
   private guard(): void {
     if (this.options.signal.aborted) throw new NetError('cancelled')
-    if (this.options.keys.state() !== 'unlocked' || !this.options.keys.encryptedAtRest())
+    if (this.options.keys.state() !== 'unlocked' || !this.options.keys.protectedAtRest())
       throw new NetError('keystore_locked')
   }
   private read(): Stored | undefined {

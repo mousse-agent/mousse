@@ -1,3 +1,4 @@
+import type { UserAction } from './gitPolicy'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -21,6 +22,7 @@ import {
   type PullRequestReviewVerdict,
   type RepositoryIdentity
 } from '../../shared/pullRequests'
+import { UNCHECKED_ASSOCIATION } from '../../shared/pullRequestSeed'
 import type { CodeHost } from './CodeHost'
 import {
   classifyGhFailure,
@@ -185,8 +187,12 @@ export function classifyPullRequestFailure(message: string): 'none' | 'not-githu
   return kind === 'rate-limited' || kind === 'not-found' ? 'error' : kind
 }
 
+/**
+ * What `gh pr view` reads for a pull request in full. The author's association is not among them: gh 2.98 and later
+ * refuse `authorAssociation` there ("Unknown JSON field"), so it is read from the REST API beside the view.
+ */
 const PULL_REQUEST_DETAIL_FIELDS = [
-  'number', 'title', 'url', 'state', 'isDraft', 'body', 'author', 'authorAssociation', 'baseRefName', 'headRefName', 'headRefOid',
+  'number', 'title', 'url', 'state', 'isDraft', 'body', 'author', 'baseRefName', 'headRefName', 'headRefOid',
   'headRepository', 'headRepositoryOwner', 'isCrossRepository', 'reviewDecision', 'reviews', 'comments',
   'statusCheckRollup', 'updatedAt', 'mergedAt', 'closedAt', 'mergeable', 'mergeStateStatus'
 ].join(',')
@@ -403,13 +409,15 @@ function repositoryOf(owner: unknown, repository: unknown): string | null {
 /**
  * Parses `gh pr view --json <detail fields>` and the line comment pages read newest first (each as
  * `parseLineCommentPage` reads them). `commentsTruncated` says the last page was full, so older line
- * comments exist. Null when the view is not a pull request.
+ * comments exist. `authorAssociation` is the author's association read beside the view; without it the
+ * view's own field is used (older gh), else none. Null when the view is not a pull request.
  */
 export function parsePullRequestDetail(
   identity: PullRequestIdentity,
   viewJson: string,
   commentPages: readonly string[],
-  commentsTruncated = false
+  commentsTruncated = false,
+  authorAssociation?: string
 ): PullRequestDetail | null {
   const info = parsePullRequestJson(viewJson)
   if (!info) return null
@@ -436,7 +444,7 @@ export function parsePullRequestDetail(
     identity,
     body: text(value.body),
     author: login(value.author),
-    authorAssociation: text(value.authorAssociation) || 'NONE',
+    authorAssociation: authorAssociation || text(value.authorAssociation) || 'NONE',
     headSha: text(value.headRefOid),
     headRepository: repositoryOf(value.headRepositoryOwner, value.headRepository),
     baseRepository: identity.nameWithOwner,
@@ -833,13 +841,17 @@ export class GitHubCodeHost implements CodeHost {
   }
 
   private async readDetail(cwd: string, pullRequest: PullRequestIdentity, withLines = true): Promise<PullRequestDetail> {
-    const { stdout: view } = await this.runExecutable(
-      'gh',
-      ['pr', 'view', String(pullRequest.number), '--json', PULL_REQUEST_DETAIL_FIELDS, '--jq', PULL_REQUEST_VIEW_JQ],
-      { cwd }
-    )
     const [owner, repository] = pullRequest.nameWithOwner.split('/')
-    const endpoint = `repos/${encodeURIComponent(owner)}/${encodeURIComponent(repository)}/pulls/${pullRequest.number}/comments`
+    const pull = `repos/${encodeURIComponent(owner)}/${encodeURIComponent(repository)}/pulls/${pullRequest.number}`
+    const [{ stdout: view }, association] = await Promise.all([
+      this.runExecutable(
+        'gh',
+        ['pr', 'view', String(pullRequest.number), '--json', PULL_REQUEST_DETAIL_FIELDS, '--jq', PULL_REQUEST_VIEW_JQ],
+        { cwd }
+      ),
+      this.readAuthorAssociation(cwd, pullRequest.host, pull)
+    ])
+    const endpoint = `${pull}/comments`
     const pages: string[] = []
     let lastCount = 0
     for (let page = 1; withLines && page <= LINE_COMMENT_MAX_PAGES; page++) {
@@ -859,9 +871,24 @@ export class GitHubCodeHost implements CodeHost {
       if (lastCount < LINE_COMMENT_PAGE_SIZE) break
     }
     const truncated = pages.length === LINE_COMMENT_MAX_PAGES && lastCount === LINE_COMMENT_PAGE_SIZE
-    const detail = parsePullRequestDetail(pullRequest, view, pages, truncated)
+    const detail = parsePullRequestDetail(pullRequest, view, pages, truncated, association)
     if (!detail) throw new PullRequestReadError('GitHub CLI returned an unexpected pull request response.', 'error')
     return detail
+  }
+
+  /**
+   * How the pull request's author relates to the repository (`OWNER`, `MEMBER`, `CONTRIBUTOR`…), from the REST API.
+   * A failed or unreadable answer (often GitHub's rate limit) is `UNCHECKED`: never trusted, as `NONE` is, but not
+   * reported as the person being a stranger. A pull request must still open when it cannot be read.
+   */
+  private async readAuthorAssociation(cwd: string, host: string, pull: string): Promise<string> {
+    try {
+      const { stdout } = await this.runExecutable('gh', ['api', '--hostname', host, pull, '--jq', '.author_association'], { cwd })
+      const association = stdout.trim().toUpperCase()
+      return /^[A-Z_]{1,40}$/.test(association) ? association : UNCHECKED_ASSOCIATION
+    } catch {
+      return UNCHECKED_ASSOCIATION
+    }
   }
 
   /** A failed detail read with the host's own message, plus where and as whom it failed when that explains it. */
@@ -888,7 +915,7 @@ export class GitHubCodeHost implements CodeHost {
     return new PullRequestReadError(message, kind === 'none' ? 'error' : kind)
   }
 
-  async createPullRequest(cwd: string, input: CreatePullRequestInput): Promise<GitPullRequestInfo> {
+  async createPullRequest(cwd: string, input: CreatePullRequestInput, userRequested: UserAction): Promise<GitPullRequestInfo> {
     const title = input.title.trim()
     if (title.length < 1 || title.length > 256) throw new Error('The title must be 1–256 characters.')
     const base = input.base.trim()
@@ -908,7 +935,7 @@ export class GitHubCodeHost implements CodeHost {
       const args = ['pr', 'create', `--title=${title}`, `--body-file=${bodyFile}`, `--base=${base}`, `--head=${head}`]
       if (input.draft) args.push('--draft')
       try {
-        ({ stdout, stderr } = await this.runExecutable('gh', args, { cwd }))
+        ({ stdout, stderr } = await this.runExecutable('gh', args, { cwd, userRequested }))
       } catch (error) {
         if (isMissingExecutable(error)) throw new Error('GitHub CLI (gh) was not found. Install it and try again.')
         const message = processMessage(error)
@@ -960,7 +987,7 @@ export class GitHubCodeHost implements CodeHost {
     }
   }
 
-  async mergePullRequest(cwd: string, number: number, options: { method: PullRequestMergeMethod; headSha?: string }): Promise<GitPullRequestInfo> {
+  async mergePullRequest(cwd: string, number: number, options: { method: PullRequestMergeMethod; headSha?: string }, userRequested: UserAction): Promise<GitPullRequestInfo> {
     const flag = { merge: '--merge', squash: '--squash', rebase: '--rebase' }[options.method]
     // The branch is kept: a thread's worktree may still be on it.
     const args = ['pr', 'merge', String(this.requireNumber(number)), flag]
@@ -968,11 +995,11 @@ export class GitHubCodeHost implements CodeHost {
       if (!/^[0-9a-f]{7,64}$/i.test(options.headSha)) throw new Error('Unsupported commit.')
       args.push(`--match-head-commit=${options.headSha}`)
     }
-    return this.changePullRequest(cwd, number, args)
+    return this.changePullRequest(cwd, number, args, userRequested)
   }
 
-  async closePullRequest(cwd: string, number: number): Promise<GitPullRequestInfo> {
-    return this.changePullRequest(cwd, number, ['pr', 'close', String(this.requireNumber(number))])
+  async closePullRequest(cwd: string, number: number, userRequested: UserAction): Promise<GitPullRequestInfo> {
+    return this.changePullRequest(cwd, number, ['pr', 'close', String(this.requireNumber(number))], userRequested)
   }
 
   private requireNumber(number: number): number {
@@ -981,10 +1008,10 @@ export class GitHubCodeHost implements CodeHost {
   }
 
   /** Runs a merge or close and reads the pull request back; every read of the repository is forgotten, whatever the outcome. */
-  private async changePullRequest(cwd: string, number: number, args: string[]): Promise<GitPullRequestInfo> {
+  private async changePullRequest(cwd: string, number: number, args: string[], userRequested: UserAction): Promise<GitPullRequestInfo> {
     const identity = await this.repositoryIdentity(cwd).catch(() => null)
     try {
-      await this.runExecutable('gh', args, { cwd })
+      await this.runExecutable('gh', args, { cwd, userRequested })
     } catch (error) {
       if (isMissingExecutable(error)) throw new Error('GitHub CLI (gh) was not found. Install it and try again.')
       throw new Error(ghFailureText(error))
@@ -1154,7 +1181,7 @@ export class GitHubCodeHost implements CodeHost {
       // not followed, a credential prompt cannot wait for a person, and a large pull request gets five minutes.
       await this.runExecutable(
         'git',
-        ['-c', 'transfer.fsckObjects=true', 'fetch', '--no-tags', '--no-recurse-submodules', '--no-write-fetch-head', '--', remote, `+${source}:${destination}`],
+        ['-c', 'transfer.fsckObjects=true', 'fetch', '--no-tags', '--no-prune', '--no-prune-tags', '--no-recurse-submodules', '--no-write-fetch-head', '--', remote, `+${source}:${destination}`],
         { cwd, env: { GIT_TERMINAL_PROMPT: '0' }, timeoutMs: FETCH_TIMEOUT_MS }
       )
     } catch (error) {
@@ -1169,7 +1196,7 @@ export class GitHubCodeHost implements CodeHost {
   async releasePullRequestHead(cwd: string, pullRequest: PullRequestIdentity, sha: string): Promise<void> {
     if (!Number.isSafeInteger(pullRequest.number) || pullRequest.number < 1 || !/^[0-9a-f]{40,64}$/.test(sha)) return
     // Only when the ref still holds this commit: a start that fetched a newer head meanwhile keeps its own.
-    await this.runExecutable('git', ['update-ref', '-d', `refs/mousse/pull/${pullRequest.number}/head`, sha], { cwd }).catch(() => undefined)
+    await this.runExecutable('git', ['update-ref', '--no-deref', '-d', `refs/mousse/pull/${pullRequest.number}/head`, sha], { cwd }).catch(() => undefined)
   }
 
   /**

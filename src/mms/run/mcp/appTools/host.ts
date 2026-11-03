@@ -226,6 +226,8 @@ export interface AppToolHost extends DelegationToolsHost {
   toolLedger?(runId: string): ToolLedger | undefined
   /** The thread is a read-only (`shared`) delegated child; it may call only `reads` and `readOnlySafe` tools. */
   readOnlyThread?(threadId: string): boolean
+  /** The thread's project directory, which scopes the MCP relay's servers; absent: global servers only. */
+  projectPathFor?(threadId: string): string | undefined
   /** The ceiling the thread's delegations gave it (the listing ignores the turn's mode). */
   threadCeiling?(threadId: string): ModeCeiling
   /** The thread's role when it is a personal bot's thread (PR 6 §5). */

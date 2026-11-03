@@ -96,7 +96,7 @@ async function main() {
       const stored = readFileSync(join(profile, 'net', 'keys.json'), 'utf8'),
         reopened = new FileKeyStore(profile, { codec })
       output.vaultRoundtrip =
-        keys.encryptedAtRest() &&
+        keys.protectedAtRest() &&
         JSON.parse(stored).mode === 'vault' &&
         reopened.state() === 'unlocked' &&
         !stored.includes('PRIVATE KEY') &&

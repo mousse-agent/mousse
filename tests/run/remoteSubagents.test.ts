@@ -249,7 +249,7 @@ describe('remote subagents (issue #469)', () => {
     steps['busy'] = async (tools) => { out.busy = await tools.continueSubagent({ subagent: 'Mac tester', prompt: 'And iOS?' }, { toolCallId: 'c0' }) as Json }
     steps['more'] = async (tools) => {
       out.more = await tools.continueSubagent({ subagent: 'Mac tester', prompt: 'And iOS?' }, { toolCallId: 'c1' }) as Json
-      out.merge = await tools.integrateDelegation({ subagent: 'Mac tester' }, { toolCallId: 'i1' }) as Json
+      out.merge = await tools.reportResult({ subagent: 'Mac tester' }) as Json
     }
     await say('go')
     await say('busy')
@@ -263,7 +263,7 @@ describe('remote subagents (issue #469)', () => {
     expect(sends).toHaveLength(2)
     expect(sends[1].params).toMatchObject({ threadId: 'far-thread-1', content: 'And iOS?' })
     expect(mac.methods().filter((method) => method === 'threads.create')).toHaveLength(1)
-    expect(out.merge).toMatchObject({ code: 'remote_integration_unsupported' })
+    expect(out.merge).toMatchObject({ merged: false, note: expect.stringContaining('another computer') })
     expect(d.engine.remoteSubagents.get(out.more.delegationId)).toMatchObject({ remoteThreadId: 'far-thread-1', remoteRunId: 'far-run-2', state: 'running' })
   })
 

@@ -1,12 +1,14 @@
 import { AppError } from '../../shared/errors'
 import { AsyncLocalStorage } from 'node:async_hooks'
 import { closeSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from 'node:fs'
+import { lstat } from 'node:fs/promises'
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { createHash, randomUUID } from 'node:crypto'
 import { atomicWriteJsonSync } from '../data/AtomicFs'
 import { isOwnerLive, PROCESS_INSTANCE_ID } from '../queue/processLiveness'
 import { canonicalizeAbsolutePath } from '../profiles/pathSafety'
 import { RESOURCE_LIFECYCLE_VERSION, RETENTION_CLAIM_KINDS, type LifecycleAdmission, type ResourceInventorySnapshot, type TaskLifecycleRecord } from '../../shared/resourceLifecycle'
+import { isMousseOwnedRef } from '../../shared/mousseBranches'
 
 export class ResourceLifecycleError extends AppError {
   constructor(code: 'busy' | 'stale' | 'unavailable' | 'ambiguous' | 'unsupported', message: string, cause?: unknown) {
@@ -43,6 +45,21 @@ export function assertLifecyclePath(root: string, path: string): void {
     catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }
     // Each component is checked with lstat; canonicalizing both paths here
     // repeats whole filesystem walks and cannot add authority after links are rejected.
+    if (relative(resolvedRoot, current) === '') break
+    const parent = dirname(current)
+    if (parent === current) throw new ResourceLifecycleError('ambiguous', 'Lifecycle root is not an ancestor')
+    current = parent
+  }
+}
+
+/** {@link assertLifecyclePath} without blocking: the same checks, each component read with an async `lstat`. */
+export async function assertLifecyclePathAsync(root: string, path: string): Promise<void> {
+  if (!isAbsolute(path) || path.includes('\0') || !contains(root, path)) throw new ResourceLifecycleError('ambiguous', 'Lifecycle path escapes its owned root')
+  const resolvedRoot = resolve(root)
+  let current = resolve(path)
+  while (true) {
+    try { if ((await lstat(current)).isSymbolicLink()) throw new ResourceLifecycleError('ambiguous', 'Lifecycle path is a link') }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }
     if (relative(resolvedRoot, current) === '') break
     const parent = dirname(current)
     if (parent === current) throw new ResourceLifecycleError('ambiguous', 'Lifecycle root is not an ancestor')
@@ -419,7 +436,7 @@ export class ResourceLifecycleStore {
       for (const item of purge.items) {
         if (!item.id || ids.has(item.id) || !purge.ownedTaskIds.includes(item.ownerTaskId) || !['worktree', 'ref', 'path', 'scheduled-row'].includes(item.kind) || !['pending', 'removed', 'retained'].includes(item.status) || item.discardRequired && !purge.discardAuthorized) throw new ResourceLifecycleError('ambiguous', 'Invalid purge resource progress')
         ids.add(item.id)
-        if (item.kind === 'ref' && (!/^(refs\/mousse\/|refs\/heads\/mousse\/(thread|agent|workflow)\/)/.test(item.identity) || !/^[a-f0-9]{40,64}$/.test(item.expectedValue ?? '') || !isAbsolute(item.commonDir ?? ''))) throw new ResourceLifecycleError('ambiguous', 'Invalid purge reference intent')
+        if (item.kind === 'ref' && (!isMousseOwnedRef(item.identity) || !/^[a-f0-9]{40,64}$/.test(item.expectedValue ?? '') || !isAbsolute(item.commonDir ?? ''))) throw new ResourceLifecycleError('ambiguous', 'Invalid purge reference intent')
         if (item.kind === 'path') {
           assertLifecyclePath(this.profileHome, item.identity)
           if (!item.content || !item.rootIdentity) throw new ResourceLifecycleError('ambiguous', 'Purge path lacks its frozen content proof')

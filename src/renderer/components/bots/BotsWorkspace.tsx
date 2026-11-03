@@ -13,6 +13,8 @@ import {
 import type { BotEscalationAnswer, BotEscalationSummary } from '../../../shared/bots/personal/escalation'
 import { NEUTRAL_TOOLS, type NeutralTool } from '../../../shared/harness/tools'
 import type { LlmProviderOption } from '../../../shared/settings'
+import { modelLabel } from '../../../shared/modelChoice'
+import { resolveModelChoice } from '../../lib/modelChoice'
 import { openThread } from '../../lib/openThread'
 import { errorText, type BotDefinitionEntryView, type PersonalBotsClient } from '../../services/personalBotsClient'
 import './bots.css'
@@ -359,7 +361,7 @@ export function ApprovalDialog({ name, approval, busy, onApprove, onClose }: {
       {approval.added.length > 0 ? <ul>{approval.added.map((line) => <li key={line.text}>{line.text}</li>)}</ul> : <p className="bots__muted">Nothing new to approve.</p>}
       <h3>Where it runs</h3>
       <ul>{approval.threads.map((thread) => <li key={thread.key}>
-        {thread.instanceId} · {thread.model}: {thread.ok ? 'can hold these permissions' : thread.reason ?? 'cannot hold these permissions'}
+        {thread.instanceId} · {modelLabel(resolveModelChoice({ instanceId: thread.instanceId, provider: thread.instanceId, model: thread.model }))}: {thread.ok ? 'can hold these permissions' : thread.reason ?? 'cannot hold these permissions'}
       </li>)}</ul>
       {!allPass && <p className="bots__error">Every thread's runtime must be able to hold these permissions before you can approve.</p>}
       <div className="bots__actions">
@@ -437,7 +439,7 @@ function BotEditor({ definition, isNew, providers, skills, busy, error, onCancel
       </label>
       <label>Model
         <select value={draft.main.selection.model} onChange={(event) => setDraft({ ...draft, main: { ...draft.main, selection: { ...draft.main.selection, model: event.target.value } } })}>
-          {!provider?.models.some((model) => model.id === draft.main.selection.model) && <option value={draft.main.selection.model}>{draft.main.selection.model || 'Choose a model'}</option>}
+          {!provider?.models.some((model) => model.id === draft.main.selection.model) && <option value={draft.main.selection.model}>{draft.main.selection.model ? modelLabel(resolveModelChoice({ instanceId: draft.main.selection.instanceId, provider: draft.main.selection.instanceId, model: draft.main.selection.model })) : 'Choose a model'}</option>}
           {provider?.models.map((model) => <option key={model.id} value={model.id}>{model.label}</option>)}
         </select>
       </label>

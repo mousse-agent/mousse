@@ -1,9 +1,10 @@
 import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { expect, it, vi } from 'vitest'
-import { LOCAL_STT_MODELS } from '../src/shared/dictation'
+import { LOCAL_STT_MODELS, RECOMMENDED_STT_MODEL_ID } from '../src/shared/dictation'
 import type { LocalModelApi, SpeechSelection } from '../src/renderer/speechModels/SpeechModelPicker'
 import { SpeechModelSetting } from '../src/renderer/speechModels/SpeechModelSetting'
+import { dictationComparison } from '../src/renderer/speechModels/modelComparison'
 
 // The themed select renders options only while open; the stub lists them as markup.
 vi.mock('../src/renderer/components/ui/Select', () => import('./support/selectStub'))
@@ -28,7 +29,8 @@ const render = (value: SpeechSelection | null, providerModels: Parameters<typeof
       providerSelection: (model) => ({ source: 'provider', providerId: model.providerId, modelId: model.modelId, label: model.label }),
       localModels: LOCAL_STT_MODELS,
       localSelection: (model) => ({ source: 'local', modelId: model.id, label: model.label }),
-      localApi: api
+      localApi: api,
+      comparison: dictationComparison(RECOMMENDED_STT_MODEL_ID)
     })
   )
 

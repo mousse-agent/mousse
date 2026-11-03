@@ -65,6 +65,33 @@ describe('greedyTdtSearch', () => {
     expect(tokens).toEqual([])
     expect(calls).toBe(3)
   })
+
+  it('decodes an RNN-T joiner, which scores no durations: stay on a frame until blank', async () => {
+    // Token scores only (ids 0..3, 3 is blank), as Parakeet Unified's joiner returns.
+    const token = (id: number): number[] => [0, 1, 2, 3].map((index) => (index === id ? 1 : 0))
+    const script = new Map<string, number[]>([
+      ['0:start', token(0)],
+      ['0:0', token(1)],
+      ['0:1', token(BLANK)],
+      ['1:1', token(BLANK)],
+      ['2:1', token(2)],
+      ['2:2', token(BLANK)]
+    ])
+    const joints: string[] = []
+    const tokens = await greedyTdtSearch<string>({
+      frames: 3,
+      blank: BLANK,
+      maxSymbolsPerFrame: 10,
+      start: async () => 'start',
+      predict: async (id) => String(id),
+      joint: async (frame, prediction) => {
+        joints.push(`${frame}:${prediction}`)
+        return script.get(`${frame}:${prediction}`)!
+      }
+    })
+    expect(tokens).toEqual([0, 1, 2])
+    expect(joints).toEqual(['0:start', '0:0', '0:1', '1:1', '2:1', '2:2'])
+  })
 })
 
 describe('Parakeet tokens', () => {

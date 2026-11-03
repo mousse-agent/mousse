@@ -190,9 +190,9 @@ describe('the folder an editor opens for a thread', () => {
       expect(JSON.stringify(refused)).not.toContain(worktreePath)
     }
     // Asking never brings the checkout back.
-    expect(manager.verify().lifecycle).toBe('missing')
+    expect((await manager.verify()).lifecycle).toBe('missing')
 
-    // Its HEAD moved outside a recorded operation: the worktree needs recovery.
+    // Its HEAD moved (an agent committed in it): the worktree is still the thread's folder, as HEAD and the branch are the agent's to move.
     const moved = o.thread('Moved', project.id, primary)
     const movedMeta = await new ThreadWorkspaceManager(o.f.mms.threads.getThreadDir(moved.id)).provision(
       moved.id,
@@ -203,15 +203,10 @@ describe('the folder an editor opens for a thread', () => {
       cwd: movedMeta.worktreePath,
       stdio: 'pipe'
     })
-    const needsRecovery = await o.call('editor.folder', { threadId: moved.id })
-    expect(needsRecovery).toMatchObject({
-      ok: false,
-      error: {
-        code: 'workspace_not_ready',
-        details: { threadId: moved.id, state: 'recovery_required' }
-      }
+    expect(await o.ok('editor.folder', { threadId: moved.id })).toMatchObject({
+      path: movedMeta.worktreePath,
+      kind: 'worktree'
     })
-    expect(JSON.stringify(needsRecovery)).not.toContain(movedMeta.worktreePath)
   }, 180_000)
 
   it('is refused for a thread that is not there, has no folder, or whose folder is gone', async () => {
@@ -358,13 +353,13 @@ describe('the folder on the owner', () => {
     return path
   }
 
-  it('is refused, without naming it, when the owner’s system cannot write it as an address', () => {
+  it('is refused, without naming it, when the owner’s system cannot write it as an address', async () => {
     const projectPath = directory()
     // A system whose paths are written the other way: no path of this one is a path of that one.
     const platform = windows ? 'linux' : 'win32'
     let thrown: unknown
     try {
-      resolveEditorFolder({ threadId: 't1', threadDirectory: directory(), projectPath, platform })
+      await resolveEditorFolder({ threadId: 't1', threadDirectory: directory(), projectPath, platform })
     } catch (error) {
       thrown = error
     }
@@ -372,24 +367,24 @@ describe('the folder on the owner', () => {
     expect(String((thrown as Error).message)).not.toContain(projectPath)
   })
 
-  it('names the owner’s system and login, and leaves out a login that is not safe in an SSH config', () => {
+  it('names the owner’s system and login, and leaves out a login that is not safe in an SSH config', async () => {
     const projectPath = directory()
     const ask = (user: string) =>
       resolveEditorFolder({ threadId: 't1', threadDirectory: directory(), projectPath, user })
-    expect(ask('ana')).toMatchObject({
+    expect(await ask('ana')).toMatchObject({
       path: projectPath,
       kind: 'project',
       platform: process.platform,
       user: 'ana'
     })
-    for (const user of ['Ana Maria', 'a"b', 'a#b', 'a\nb', '']) expect(ask(user), user).not.toHaveProperty('user')
+    for (const user of ['Ana Maria', 'a"b', 'a#b', 'a\nb', '']) expect(await ask(user), user).not.toHaveProperty('user')
   })
 
-  it('opens a project reached through a link under the link’s name, and checks where the link leads', () => {
+  it('opens a project reached through a link under the link’s name, and checks where the link leads', async () => {
     const real = directory()
     const link = join(directory(), 'linked project')
     symlinkSync(real, link, windows ? 'junction' : 'dir')
-    const found = resolveEditorFolder({
+    const found = await resolveEditorFolder({
       threadId: 't1',
       threadDirectory: directory(),
       projectPath: link
@@ -406,7 +401,7 @@ describe('the folder on the owner', () => {
     symlinkSync(join(home, '.aws'), toAws, windows ? 'junction' : 'dir')
     let thrown: unknown
     try {
-      resolveEditorFolder({ threadId: 't1', threadDirectory: directory(), projectPath: toAws, sensitive })
+      await resolveEditorFolder({ threadId: 't1', threadDirectory: directory(), projectPath: toAws, sensitive })
     } catch (error) {
       thrown = error
     }
@@ -416,10 +411,10 @@ describe('the folder on the owner', () => {
     for (const spelled of [toAws, home]) expect(String((thrown as Error).message)).not.toContain(spelled)
   })
 
-  it('carries a folder name with `#`, `%`, a space and non-ASCII letters as it is spelled', () => {
+  it('carries a folder name with `#`, `%`, a space and non-ASCII letters as it is spelled', async () => {
     const name = join(directory(), 'a#b 100% café 日本')
     mkdirSync(name)
-    const found = resolveEditorFolder({
+    const found = await resolveEditorFolder({
       threadId: 't1',
       threadDirectory: directory(),
       projectPath: name

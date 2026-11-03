@@ -234,7 +234,7 @@
 
 /* Edit diff follows the app theme tokens (not hardcoded black) so text stays
    readable in every theme. `html[data-theme]` covers all mousse theme ids
-   (dark-modern, blacksphere-plus, …), not just `.dark` / `[data-theme="dark"]`.
+   (github-dark, blacksphere-plus, …), not just `.dark` / `[data-theme="dark"]`.
    Values are theme vars, so they resolve correctly in light mode too. */
 .dark .an-edit-tool-card,
 [data-theme="dark"] .an-edit-tool-card,

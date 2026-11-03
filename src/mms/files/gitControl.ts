@@ -3,17 +3,22 @@ import { existsSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { realPathOrAncestor } from './realPath'
+import { mousseGitEnv } from '../git/gitEnv'
+import { assertGitAllowed } from '../git/gitPolicy'
 
 /**
  * What a repository reads that can run programs and that lies in the working tree, as real paths:
  * - `hookFolders`: every folder `core.hooksPath` names;
  * - `configFiles`: every file Git reads as configuration besides the repository's own (`include.path`
  *   and `includeIf.*.path` targets, whether they apply now or could later), because a `core.hooksPath` or
- *   `core.fsmonitor` in one of them runs a program on the owner's next `git status` or commit.
+ *   `core.fsmonitor` in one of them runs a program on the owner's next `git status` or commit;
+ * - `gitFolders`: the repository's Git folder and, for a linked worktree, the common folder it shares,
+ *   whatever they are called (a `.git` file can point anywhere).
  */
 export interface GitControl {
   hookFolders: string[]
   configFiles: string[]
+  gitFolders: string[]
 }
 
 const GIT_TIMEOUT_MS = 5_000
@@ -27,15 +32,19 @@ interface GitRun {
 /** Runs Git without blocking the daemon. A non-zero exit is a result (`status`); a failure to run is thrown. */
 function runGit(root: string, args: string[]): Promise<GitRun> {
   return new Promise((resolveRun, reject) => {
+    // Run in the folder rather than with `-C`, which the central check refuses; a missing folder is Git's "not a repository".
+    if (!existsSync(root)) return resolveRun({ status: 128, stdout: '', missing: false })
+    assertGitAllowed({ cwd: root, args })
     execFile(
       'git',
-      ['-C', root, ...args],
+      args,
       {
+        cwd: root,
         encoding: 'utf8',
         timeout: GIT_TIMEOUT_MS,
         maxBuffer: 4 * 1024 * 1024,
         windowsHide: true,
-        env: { ...process.env, GIT_TERMINAL_PROMPT: '0' }
+        env: mousseGitEnv({ ...process.env, GIT_TERMINAL_PROMPT: '0' })
       },
       (error, stdout) => {
         if (!error) return resolveRun({ status: 0, stdout, missing: false })
@@ -74,7 +83,7 @@ function originFiles(output: string, root: string): string[] {
 /** Reads what the repository around `root` takes from the working tree. Throws when it cannot be read. */
 export async function loadGitControl(root: string): Promise<GitControl> {
   const hooks = await runGit(root, ['config', '--type=path', '--get-all', 'core.hooksPath'])
-  if (hooks.missing) return { hookFolders: [], configFiles: [] }
+  if (hooks.missing) return { hookFolders: [], configFiles: [], gitFolders: [] }
   if (hooks.status !== 0 && hooks.status !== 1) throw new Error('hooks setting unreadable')
   const files = new Set<string>()
   // Every file that is read for this repository right now, includes followed.
@@ -106,7 +115,10 @@ export async function loadGitControl(root: string): Promise<GitControl> {
       folders.push(resolve(top, value))
     }
   }
-  return { hookFolders: folders.map(placeOf), configFiles: [...files].map(placeOf) }
+  // Outside a repository there is none (128).
+  const dirs = await runGit(root, ['rev-parse', '--absolute-git-dir', '--git-common-dir'])
+  const gitFolders = dirs.status === 0 ? [...new Set(dirs.stdout.split(/\r?\n/).filter(Boolean).map((dir) => resolve(root, dir)))] : []
+  return { hookFolders: folders.map(placeOf), configFiles: [...files].map(placeOf), gitFolders: gitFolders.map(placeOf) }
 }
 
 /** The repository roots whose settings decide what a change at `real` can do: `root` and every nested repository between it and the file. */

@@ -33,7 +33,7 @@ it('reads saved appearance from the active default profile without rewriting eit
   writeFileSync(join(directory, 'installation.json'), JSON.stringify(manifest))
   const profileRoot = join(directory, 'profiles', profileId)
   mkdirSync(profileRoot, { recursive: true })
-  const saved = { theme: 'dark-modern', accentColor: '#3b82f6', acrylic: false, acrylicIntensity: 73 }
+  const saved = { theme: 'github-dark', accentColor: '#3b82f6', acrylic: false, acrylicIntensity: 73 }
   const config = JSON.stringify({ settings: { appearance: saved }, providers: { keep: 'unchanged' } })
   writeFileSync(join(profileRoot, 'mousse.conf'), config)
   const shared = JSON.stringify({ settings: { appearance: fallback } })
@@ -44,7 +44,7 @@ it('reads saved appearance from the active default profile without rewriting eit
 })
 
 it('uses legacy appearance when no profile manifest exists', () => {
-  const appearance = { ...fallback, theme: 'one-dark' as const }
+  const appearance = { ...fallback, theme: 'solarized-dark' as const }
   expect(readStartupAppearance(home(), appearance)).toEqual(appearance)
 })
 
@@ -63,13 +63,13 @@ it('keeps a damaged manifest untouched and still opens with a fallback theme', (
 
 it('uses the same fixed surface as the renderer instead of tinting a fixed theme with its accent', () => {
   expect(appearanceSurfaceBase(fallback)).toBe('#000000')
-  expect(appearanceSurfaceBase({ ...fallback, theme: 'dark-modern' })).toBe('#1f1f1f')
+  expect(appearanceSurfaceBase({ ...fallback, theme: 'github-dark' })).toBe('#0d1117')
   expect(appearanceSurfaceBase({ ...fallback, theme: 'system' }, false))
     .toBe(appearanceSurfaceBase({ ...fallback, theme: 'light' }))
 })
 
 it('passes only appearance to preload and ignores absent or damaged launch arguments', () => {
-  const saved = { ...fallback, theme: 'monokai' as const, acrylicIntensity: 80 }
+  const saved = { ...fallback, theme: 'solarized-dark' as const, acrylicIntensity: 80 }
   expect(readStartupAppearanceArgument(['--other', startupAppearanceArgument(saved)])).toEqual(saved)
   expect(readStartupAppearanceArgument([])).toBeNull()
   expect(readStartupAppearanceArgument(['--mousse-startup-appearance=%broken'])).toBeNull()

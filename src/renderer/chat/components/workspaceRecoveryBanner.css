@@ -1,0 +1,124 @@
+/* A thread whose worktree needs recovery: why it is paused and the button that fixes it. Sits where "Run paused" does. */
+.chat-workspace-recovery {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px 16px;
+  width: min(100%, var(--an-max-width, 680px));
+  box-sizing: border-box;
+  margin: 8px auto;
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--warning) 32%, var(--border));
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--warning) 7%, transparent);
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.chat-workspace-recovery-text {
+  display: flex;
+  flex: 1 1 260px;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.chat-workspace-recovery-head {
+  display: inline-flex;
+  align-items: flex-start;
+  gap: 6px;
+  color: var(--text-primary);
+}
+
+.chat-workspace-recovery-head svg {
+  flex-shrink: 0;
+  margin-top: 3px;
+  color: var(--warning);
+}
+
+.chat-workspace-recovery-title {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.chat-workspace-recovery-detail {
+  overflow-wrap: anywhere;
+}
+
+.chat-workspace-recovery code {
+  font-family: var(--font-mono, monospace);
+  font-size: 11.5px;
+}
+
+.chat-workspace-recovery-actions {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.chat-workspace-recovery-btn {
+  min-height: 26px;
+  padding: 3px 11px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text-primary);
+  font: inherit;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.chat-workspace-recovery-btn:hover {
+  background: var(--ui-hover);
+}
+
+.chat-workspace-recovery-btn:active {
+  background: var(--ui-pressed);
+}
+
+.chat-workspace-recovery-btn:focus-visible {
+  outline: none;
+  box-shadow: var(--ui-focus-ring);
+}
+
+.chat-workspace-recovery-btn-primary {
+  border-color: transparent;
+  background: var(--gradient-accent);
+  color: white;
+}
+
+.chat-workspace-recovery-btn-primary:hover {
+  background: var(--gradient-accent);
+  filter: brightness(1.08);
+}
+
+.chat-workspace-recovery-btn[aria-disabled="true"] {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.chat-workspace-recovery-error {
+  flex-basis: 100%;
+  margin: 0;
+  color: var(--danger);
+}
+
+/* "Still waiting: …" and "Waiting for the current turn to finish.": facts, not failures. */
+.chat-workspace-recovery-note {
+  flex-basis: 100%;
+  margin: 0;
+  color: var(--text-secondary);
+}
+
+/* A kind this build does not know: said, with no button and no warning colour. */
+.chat-workspace-recovery[data-kind="notice"] {
+  border-color: var(--border);
+  background: color-mix(in srgb, var(--text-secondary) 5%, transparent);
+}
+
+.chat-workspace-recovery[data-kind="notice"] .chat-workspace-recovery-head svg {
+  color: var(--text-secondary);
+}

@@ -114,11 +114,11 @@ describe('delegation policy fixes', () => {
     expect(readOnly(adapter.turns.at(-1))).toEqual({ cwd: projectDir, write: false, read: true })
   })
 
-  it('an integration run whose start throws ends failed and leaves an integration_failed notice', async () => {
+  it('an integration run an older version queued merges nothing: it ends cancelled with an integration_failed notice, even while another run holds the thread', async () => {
     const { d } = setup()
     const parent = d.store.createThread('Parent')
     d.orch.setThreadModelOverride(parent.id, PI)
-    // Another run holds the thread, so the integration run cannot start.
+    // Another run holds the thread; the integration run never starts a turn, so that does not matter.
     const holder = await d.engine.dispatch({ kind: 'send', threadId: parent.id, clientRequestId: 'holder', source: 'gui' })
     if (holder.status !== 'accepted') throw new Error('send rejected')
     d.engine.markStarting(holder.runId)
@@ -133,7 +133,7 @@ describe('delegation policy fixes', () => {
     })
     await waitFor(() => d.engine.outbox.get(effect.effectId)!.status !== 'pending' && d.engine.outbox.get(effect.effectId)!.status !== 'running', 'the integration effect')
     expect(d.engine.outbox.get(effect.effectId)!.status).toBe('succeeded')
-    expect(d.engine.getRun(integration.runId)).toMatchObject({ status: 'failed', outcome: { error: expect.stringContaining('already has active run') } })
+    expect(d.engine.getRun(integration.runId)).toMatchObject({ status: 'cancelled', outcome: { error: 'Mousse no longer merges subagent results.' } })
     const notices = d.engine.inbox.listPending(parent.id)
     expect(notices).toHaveLength(1)
     expect(notices[0]).toMatchObject({
@@ -141,7 +141,7 @@ describe('delegation policy fixes', () => {
       runId: integration.runId,
       payload: { type: 'integration_failed', delegationId: 'delegation:missing' }
     })
-    expect(String((notices[0].payload as { text: string }).text)).toContain('failed')
+    expect(String((notices[0].payload as { text: string }).text)).toMatch(/was not run: Mousse no longer merges subagent results\. Nothing in your files changed/)
   })
 
   it('a delegation whose commit fails leaves no orphan thread; the retry creates exactly one', async () => {

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -52,6 +52,35 @@ test('dry run reports a merged branch and its clean worktree without changing an
   assert.equal(result.worktrees[0].path.endsWith('done-tree'), true);
   assert.ok(existsSync(tree));
   assert.ok(git(repo, 'rev-parse', '--verify', 'done'));
+});
+
+test('dry run fetches, prunes and writes nothing: stale remote refs, worktree registrations and indexes stay', (t) => {
+  const { root, repo, git, commitOn, mergeToTrunk, run } = fixture(t);
+  // A merged branch's clean worktree whose file was touched: git status would refresh and rewrite its index.
+  commitOn('done', 'done.txt');
+  mergeToTrunk('done');
+  const doneTree = join(root, 'done-tree');
+  git(repo, 'worktree', 'add', doneTree, 'done');
+  const later = new Date(Date.now() + 60_000);
+  utimesSync(join(doneTree, 'done.txt'), later, later);
+  const index = join(git(doneTree, 'rev-parse', '--absolute-git-dir'), 'index');
+  const indexBefore = { bytes: readFileSync(index), mtimeMs: statSync(index).mtimeMs };
+  commitOn('gone', 'gone.txt');
+  git(repo, 'push', 'origin', 'gone');
+  git(repo, 'push', 'origin', '--delete', 'gone');
+  git(repo, 'update-ref', 'refs/remotes/origin/gone', git(repo, 'rev-parse', 'gone'));
+  const missing = join(root, 'missing-tree');
+  git(repo, 'worktree', 'add', missing, 'gone');
+  rmSync(missing, { recursive: true, force: true });
+  const refsBefore = git(repo, 'for-each-ref');
+  const result = run();
+  assert.equal(result.mode, 'dry-run');
+  assert.equal(git(repo, 'for-each-ref'), refsBefore);
+  assert.ok(git(repo, 'worktree', 'list', '--porcelain').includes('missing-tree'));
+  assert.ok(!existsSync(join(repo, '.git', 'FETCH_HEAD')));
+  assert.deepEqual(result.branches.map((b) => b.name), ['done']);
+  assert.deepEqual(readFileSync(index), indexBefore.bytes);
+  assert.equal(statSync(index).mtimeMs, indexBefore.mtimeMs);
 });
 
 test('apply removes a merged branch and its worktree, keeping one with uncommitted changes', (t) => {

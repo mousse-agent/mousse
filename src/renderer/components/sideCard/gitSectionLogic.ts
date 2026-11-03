@@ -648,7 +648,7 @@ export function canPush(status: GitStatusSnapshot | null): boolean {
 }
 
 /** Shown where a thread's own worktree rules out an action, for example amend. */
-export const THREAD_CHECKPOINTED_REASON = "This thread's branch is checkpointed"
+export const THREAD_WORKTREE_REASON = "Not available in this thread's worktree"
 
 const plural = (count: number, noun: string) => `${count} ${noun}${count === 1 ? '' : 's'}`
 
@@ -665,6 +665,10 @@ export interface GitChangeCounts {
   unstagedCount: number
   conflictedCount: number
   changedCount: number
+  /** New files Git does not track yet; once staged they count as staged. */
+  untrackedCount: number
+  /** Files with changes on both sides: staged, then edited again. Counted in `stagedCount` and in `unstagedCount`. */
+  partlyStagedCount: number
 }
 
 export function gitChangeCounts(status: GitStatusSnapshot | null): GitChangeCounts {
@@ -672,14 +676,23 @@ export function gitChangeCounts(status: GitStatusSnapshot | null): GitChangeCoun
   const unstaged = new Set<string>()
   const conflicted = new Set<string>()
   const changed = new Set<string>()
+  const untracked = new Set<string>()
   for (const change of status?.changes ?? []) {
     if (change.status === 'ignored') continue
     changed.add(change.path)
     if (change.status === 'conflicted') conflicted.add(change.path)
     else if (change.staged) staged.add(change.path)
     else unstaged.add(change.path)
+    if (change.status === 'untracked') untracked.add(change.path)
   }
-  return { stagedCount: staged.size, unstagedCount: unstaged.size, conflictedCount: conflicted.size, changedCount: changed.size }
+  return {
+    stagedCount: staged.size,
+    unstagedCount: unstaged.size,
+    conflictedCount: conflicted.size,
+    changedCount: changed.size,
+    untrackedCount: untracked.size,
+    partlyStagedCount: [...staged].filter((path) => unstaged.has(path)).length
+  }
 }
 
 /** What a commit would include, which decides the hint under the message. */
@@ -733,7 +746,7 @@ export function gitActionAvailability(
 
   const offerCommitAndPush = canPush(status) && !behind
   const lookupNone = pullRequest?.state === 'none' && pullRequest.isDefaultBranch === false
-  const amendReason = inThread ? THREAD_CHECKPOINTED_REASON : commitCount === 0 ? 'No commits yet' : null
+  const amendReason = inThread ? THREAD_WORKTREE_REASON : commitCount === 0 ? 'No commits yet' : null
 
   let mode: CommitMode = 'all'
   if (conflictedReason) mode = 'conflicted'
@@ -792,39 +805,113 @@ export interface CommitMenuState {
   canAmend: boolean
   /** The Commit button opens the menu when there is something to commit or amend. */
   triggerEnabled: boolean
-  triggerTitle: string
-  /** Without file changes the only possible commit is an amend, so amend is on and cannot be turned off. */
-  forced: boolean
-  /** Whether the commit amends: asked for, or the only possible commit. */
+  /** No file changes: the only possible commit is an amend, and only once the user turns it on. */
+  nothingToCommit: boolean
+  /** Whether the commit amends. Only the user's own choice turns it on. */
   amend: boolean
   amendDisabled: boolean
   /** Why the checkbox is disabled; null when it can be toggled. */
   amendTitle: string | null
+  /** Why the commit buttons stay disabled whatever the message says; null when a commit is possible. */
+  submitReason: string | null
   shortHash: string | null
 }
 
 /**
- * `checkpointed` is a thread's own worktree: its history is recorded commit by commit, so the daemon
+ * `inThread` is a thread's own worktree: a commit there takes every change, so the daemon
  * refuses an amend there and the switch says why instead of failing later.
  */
-export function commitMenuState(commits: readonly GitCommit[], fileCount: number, amendChecked: boolean, checkpointed = false): CommitMenuState {
-  const canAmend = !checkpointed && canAmendCommit(commits)
+export function commitMenuState(commits: readonly GitCommit[], fileCount: number, amendChecked: boolean, inThread = false): CommitMenuState {
+  const canAmend = !inThread && canAmendCommit(commits)
   const hasChanges = fileCount > 0
-  const forced = canAmend && !hasChanges
-  const amendTitle = !canAmend
-    ? checkpointed ? THREAD_CHECKPOINTED_REASON : commits.length === 0 ? 'No commits yet' : 'The last commit is already pushed'
-    : forced ? 'No changes to commit' : null
-  const triggerEnabled = hasChanges || canAmend
+  const amendTitle = canAmend ? null : inThread ? THREAD_WORKTREE_REASON : commits.length === 0 ? 'No commits yet' : 'The last commit is already pushed'
+  const amend = canAmend && amendChecked
+  const shortHash = commits[0]?.shortHash ?? null
   return {
     canAmend,
-    triggerEnabled,
-    triggerTitle: !triggerEnabled ? 'No changes to commit' : hasChanges ? 'Commit all changes' : 'Amend the last commit',
-    forced,
-    amend: canAmend && (amendChecked || forced),
+    triggerEnabled: hasChanges || canAmend,
+    nothingToCommit: !hasChanges,
+    amend,
     amendDisabled: amendTitle !== null,
     amendTitle,
-    shortHash: commits[0]?.shortHash ?? null
+    submitReason: hasChanges || amend ? null : `No changes to commit. Turn on Amend last commit to change ${shortHash ?? 'it'}`,
+    shortHash
   }
+}
+
+/** The Commit button's own words: what a commit would take, counted, and its tooltip saying it in full. */
+export interface CommitTrigger {
+  label: string
+  title: string
+}
+
+/**
+ * Names on the Commit button exactly what it commits: "Commit all (N)" when every change goes in (untracked files
+ * included), "Commit staged (M of N)" when only the staged files do. With no changes it still says Commit: the popover
+ * offers an amend, which stays off until the user turns it on. With nothing to amend either, the button is disabled.
+ */
+export function commitTrigger(menu: Pick<CommitMenuState, 'triggerEnabled' | 'nothingToCommit' | 'shortHash'>, commit: CommitAvailability): CommitTrigger {
+  if (!menu.triggerEnabled) return { label: 'Commit', title: 'No changes to commit' }
+  if (menu.nothingToCommit) {
+    return { label: 'Commit', title: `No changes to commit. You can amend ${menu.shortHash ?? 'the last commit'} to change its message` }
+  }
+  const total = commit.changedCount
+  const untracked = commit.untrackedCount > 0 ? `, including ${plural(commit.untrackedCount, 'untracked file')}` : ''
+  switch (commit.mode) {
+    case 'conflicted':
+      return { label: 'Commit', title: commit.blockedReason ?? 'Resolve the conflicted files first' }
+    case 'finish-merge':
+      // With nothing staged the commit stages everything first (`add -A`), as a plain commit does.
+      if (commit.stagedCount > 0) return { label: `Commit merge (${commit.stagedCount} of ${total} staged)`, title: `Finish the merge with only the ${plural(commit.stagedCount, 'staged file')}${unstagedStaysOut(commit)}` }
+      if (total > 0) return { label: `Commit merge (all ${total})`, title: `Finish the merge, staging and committing all ${plural(total, 'changed file')}${untracked}` }
+      return { label: 'Commit merge', title: 'Finish the merge' }
+    case 'staged':
+      return { label: `Commit staged (${commit.stagedCount} of ${total})`, title: `Commit only the ${plural(commit.stagedCount, 'staged file')}${unstagedStaysOut(commit)}` }
+    case 'thread':
+      return { label: `Commit all (${total})`, title: `Commit all ${plural(total, 'changed file')} on this thread's branch${untracked}` }
+    default:
+      return { label: `Commit all (${total})`, title: `Stage and commit all ${plural(total, 'changed file')}${untracked}` }
+  }
+}
+
+/**
+ * What a staged-only commit leaves out, counted from the unstaged side: a file staged and then edited again goes in
+ * with its staged part only, so its unstaged part is named as staying out. Nothing when everything is staged.
+ */
+function unstagedStaysOut(commit: Pick<CommitAvailability, 'unstagedCount' | 'partlyStagedCount'>): string {
+  const { unstagedCount: unstaged, partlyStagedCount: partly } = commit
+  if (unstaged === 0) return ''
+  if (partly === unstaged) return `; the unstaged part of ${partly === 1 ? 'the partly staged file' : `the ${partly} partly staged files`} stays out`
+  const including = partly > 0 ? `, including the unstaged part of ${plural(partly, 'partly staged file')}` : ''
+  return `; unstaged changes in ${plural(unstaged, 'file')} stay out${including}`
+}
+
+/** A merge method in GitHub's own words, for the button that confirms it. */
+const MERGE_METHOD_ACTIONS: Record<PullRequestMergeMethod, string> = {
+  merge: 'Create a merge commit',
+  squash: 'Squash and merge',
+  rebase: 'Rebase and merge'
+}
+
+/**
+ * The Merge confirmation, naming the method the merge will use: the merge is sent with that method and uses exactly
+ * it. `method` is undefined while it is read and null when it could not be (or the computer is too old to say); the
+ * merge then goes without one, and the computer that merges uses the repository's default, else squash.
+ */
+export function mergeConfirmation(number: string, base: string, method: PullRequestMergeMethod | null | undefined): { text: string; action: string } {
+  const into = base ? ` into ${base}` : ''
+  if (method === undefined) return { text: `Merge ${number}${into}?`, action: 'Merge' }
+  if (method === null) {
+    return { text: `Merge ${number}${into}? The merge method couldn't be read, so the repository's default is used, else squash.`, action: 'Merge' }
+  }
+  const on = base ? ` on ${base}` : ''
+  const onto = base ? ` onto ${base}` : ''
+  const text = {
+    merge: `Merge ${number}${into} with a merge commit?`,
+    squash: `Squash ${number} into one commit${on}?`,
+    rebase: `Rebase the commits of ${number}${onto}?`
+  }[method]
+  return { text, action: MERGE_METHOD_ACTIONS[method] }
 }
 
 /**
@@ -836,6 +923,7 @@ export function commitHint(amend: boolean, shortHash: string | null, fileCount: 
   if (commit?.blockedReason) return commit.blockedReason
   const files = plural(fileCount, 'file')
   if (!amend) {
+    if (fileCount === 0) return 'No changes to commit'
     if (commit?.mode === 'thread') return "Commits all changes on this thread's branch"
     if (commit?.mode === 'finish-merge') return 'Finishes the merge'
     if (commit?.mode === 'staged') return `Commits ${plural(commit.stagedCount, 'staged file')}`
@@ -913,13 +1001,12 @@ export function commitScope(branch: string | null, commits: readonly GitCommit[]
 /** The commit popover's inputs, tagged with the branch and HEAD they were entered for. */
 export interface CommitForm extends CommitScope {
   draft: CommitDraft
+  /** Only ever set by the user's own choice. */
   amendChecked: boolean
-  /** Amend was switched on because it was the only possible commit, not by the user. */
-  amendForced: boolean
 }
 
 export function emptyCommitForm(scope: CommitScope): CommitForm {
-  return { ...scope, draft: EMPTY_COMMIT_DRAFT, amendChecked: false, amendForced: false }
+  return { ...scope, draft: EMPTY_COMMIT_DRAFT, amendChecked: false }
 }
 
 /**
@@ -933,19 +1020,9 @@ export function commitFormFor(form: CommitForm, scope: CommitScope): CommitForm 
   return { ...emptyCommitForm(scope), draft: clearAmendPrefill(form.draft) }
 }
 
-/** The popover closed: an amend that was only forced goes back off, one the user chose stays. */
-export function releaseForcedAmend(form: CommitForm): CommitForm {
-  return form.amendForced ? { ...form, amendChecked: false, amendForced: false } : form
-}
-
-/** Amend is the only possible commit, so switch it on, remembering the user did not choose it. */
-export function forceAmend(form: CommitForm): CommitForm {
-  return form.amendChecked ? form : { ...form, amendChecked: true, amendForced: true }
-}
-
 /** The user's own amend choice. */
 export function chooseAmend(form: CommitForm, checked: boolean): CommitForm {
-  return { ...form, amendChecked: checked, amendForced: false }
+  return { ...form, amendChecked: checked }
 }
 
 /** Why mutating Git controls are disabled while one action runs. */

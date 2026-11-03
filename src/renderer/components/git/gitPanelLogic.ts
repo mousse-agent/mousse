@@ -7,7 +7,8 @@ import type {
   GitScope,
   GitStatusSnapshot
 } from '../../../shared/types'
-import { THREAD_CHECKPOINTED_REASON } from '../sideCard/gitSectionLogic'
+import { THREAD_WORKTREE_REASON } from '../sideCard/gitSectionLogic'
+import { retentionWindowText } from '../../../shared/undoRetention'
 
 /** Pure state and wording for the Git panel's file rows and its sync bar. */
 
@@ -104,7 +105,7 @@ export function syncControls(status: GitStatusSnapshot | null, scope: Pick<GitSc
   }
   const fetch: SyncControl = status.hasRemote === false ? { enabled: false, reason: 'No remote configured' } : { enabled: true, reason: null }
   let pullReason: string | null = null
-  if (scope.workspaceThreadId !== null) pullReason = THREAD_CHECKPOINTED_REASON
+  if (scope.workspaceThreadId !== null) pullReason = THREAD_WORKTREE_REASON
   else if (state.kind === 'conflicted') pullReason = 'Resolve the conflicted files first'
   else if (state.kind === 'in-progress') pullReason = `Finish or abort the ${state.what ?? 'merge'} first`
   else if (state.noUpstream === 'detached') pullReason = 'Detached HEAD has no upstream'
@@ -177,7 +178,7 @@ export type RowAction = 'stage' | 'unstage' | 'discard'
 
 /**
  * The buttons a file row shows. Stage and unstage are absent in a thread's own worktree, where
- * the next checkpoint commits everything anyway; discard is available everywhere.
+ * a commit there takes every change anyway; discard is available everywhere.
  */
 export function rowActions(file: GitFileChange, scope: Pick<GitScope, 'workspaceThreadId'>): RowAction[] {
   if (file.status === 'ignored') return []
@@ -248,14 +249,15 @@ const DISCARD_LIST_LIMIT = 10
 
 /**
  * The confirmation shown before changes are thrown away. It names the files, says which
- * untracked ones will be deleted, and that this cannot be undone.
+ * untracked ones will be deleted, and for how long a copy is kept (`keptForMs`, the owner's
+ * Undo window as the daemon reports it with the folder's status).
  */
-export function discardPrompt(files: readonly GitFileChange[]): string {
+export function discardPrompt(files: readonly GitFileChange[], keptForMs?: number): string {
   const byPath = new Map<string, boolean>()
   for (const file of files) byPath.set(file.path, (byPath.get(file.path) ?? false) || file.status === 'untracked')
   const entries = [...byPath]
   if (entries.length === 0) return ''
-  const closing = ['', 'This cannot be undone.']
+  const closing = ['', keptForMs ? `A copy is kept for ${retentionWindowText(keptForMs)}.` : 'A copy is kept in Git.']
   if (entries.length === 1) {
     const [path, untracked] = entries[0]
     return untracked

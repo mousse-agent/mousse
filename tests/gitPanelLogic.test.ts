@@ -120,7 +120,7 @@ describe('pull choices and controls', () => {
     expect(reason({ changes: [change('a.ts', { status: 'conflicted' })] })).toBe('Resolve the conflicted files first')
     expect(reason({ inProgress: 'rebase' })).toBe('Finish or abort the rebase first')
     expect(reason({ inProgress: 'cherry-pick' })).toBe('Finish or abort the cherry-pick first')
-    expect(reason({ behind: 1 }, thread)).toBe("This thread's branch is checkpointed")
+    expect(reason({ behind: 1 }, thread)).toBe("Not available in this thread's worktree")
   })
 
   it('still fetches in a thread worktree, but not without a remote', () => {
@@ -177,7 +177,7 @@ describe('file rows', () => {
     expect(rowActions(change('i.log', { status: 'ignored' }), project)).toEqual([])
   })
 
-  it("keeps only discard in a thread's own worktree, where the next checkpoint commits everything", () => {
+  it("keeps only discard in a thread's own worktree, where a commit takes every change", () => {
     expect(rowActions(change('a.ts'), thread)).toEqual(['discard'])
     expect(rowActions(change('a.ts', { staged: true }), thread)).toEqual(['discard'])
     expect(sectionAction('staged', project)).toBe('unstage-all')
@@ -222,13 +222,16 @@ describe('file rows', () => {
 })
 
 describe('discard confirmation wording', () => {
-  it('names one tracked file and warns that it cannot be undone', () => {
-    expect(discardPrompt([change('src/a.ts')])).toBe('Discard changes to src/a.ts?\n\nThis cannot be undone.')
+  it('names one tracked file and says how long a copy is kept, from the window the daemon reports', () => {
+    expect(discardPrompt([change('src/a.ts')], 30 * 24 * 60 * 60 * 1000)).toBe('Discard changes to src/a.ts?\n\nA copy is kept for 30 days.')
+    expect(discardPrompt([change('src/a.ts')], 12 * 60 * 60 * 1000)).toBe('Discard changes to src/a.ts?\n\nA copy is kept for 12 hours.')
+    // A status without the window still says a copy is kept, never a made-up length.
+    expect(discardPrompt([change('src/a.ts')])).toBe('Discard changes to src/a.ts?\n\nA copy is kept in Git.')
   })
 
   it('says an untracked file will be deleted', () => {
     expect(discardPrompt([change('new.ts', { status: 'untracked' })])).toBe(
-      'Delete new.ts?\n\nIt is not tracked by Git, so it will be deleted.\n\nThis cannot be undone.'
+      'Delete new.ts?\n\nIt is not tracked by Git, so it will be deleted.\n\nA copy is kept in Git.'
     )
   })
 
@@ -237,11 +240,11 @@ describe('discard confirmation wording', () => {
     expect(prompt).toContain('Discard changes to 2 files?')
     expect(prompt).toContain('  a.ts\n')
     expect(prompt).toContain('  new.ts (untracked, will be deleted)')
-    expect(prompt.endsWith('This cannot be undone.')).toBe(true)
+    expect(prompt.endsWith('A copy is kept in Git.')).toBe(true)
   })
 
   it('counts a file staged and edited again once, and shortens a long list', () => {
-    expect(discardPrompt([change('mm.ts', { staged: true }), change('mm.ts')])).toBe('Discard changes to mm.ts?\n\nThis cannot be undone.')
+    expect(discardPrompt([change('mm.ts', { staged: true }), change('mm.ts')])).toBe('Discard changes to mm.ts?\n\nA copy is kept in Git.')
     const many = Array.from({ length: 14 }, (_, index) => change(`f${index}.ts`))
     const prompt = discardPrompt(many)
     expect(prompt).toContain('Discard changes to 14 files?')
@@ -378,7 +381,7 @@ describe('sync bar markup', () => {
     expect(busy).toMatch(/title="Another Git action is running"[^>]*disabled=""[^>]*>(<svg.*?<\/svg>)?Fetch/)
     expect(busy).toMatch(/title="Another Git action is running"[^>]*disabled=""[^>]*>(<svg.*?<\/svg>)?Pull/)
     const inThread = render({ behind: 1 }, IDLE_SYNC_ACTIVITY, thread)
-    expect(inThread).toMatch(/title="This thread&#x27;s branch is checkpointed"[^>]*disabled=""[^>]*>(<svg.*?<\/svg>)?Pull/)
+    expect(inThread).toMatch(/title="Not available in this thread&#x27;s worktree"[^>]*disabled=""[^>]*>(<svg.*?<\/svg>)?Pull/)
     expect(inThread).toMatch(/<button(?![^>]*disabled)[^>]*>(<svg.*?<\/svg>)?Fetch/)
   })
 

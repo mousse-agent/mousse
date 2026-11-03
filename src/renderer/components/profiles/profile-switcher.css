@@ -6,8 +6,9 @@
   display: block;
   flex: 0 0 auto;
   min-width: 0;
-  height: var(--titlebar-height);
-  margin: var(--ui-gutter, 8px);
+  height: auto;
+  /* Flush with the window's bottom edge; only the top corners are rounded. */
+  margin: var(--ui-gutter, 8px) var(--ui-gutter, 8px) 0;
   padding: 0;
   -webkit-app-region: no-drag;
 }
@@ -20,7 +21,8 @@
   min-height: 44px;
   padding: 7px var(--ui-row-x);
   border: 1px solid var(--ui-line);
-  border-radius: 10px;
+  border-bottom: 0;
+  border-radius: 10px 10px 0 0;
   background: color-mix(in srgb, var(--text-primary) 3%, transparent);
   box-shadow: var(--ui-specular);
   color: var(--text-primary);

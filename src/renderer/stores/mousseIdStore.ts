@@ -147,7 +147,10 @@ export const useMousseIdStore = create<MousseIdState>((set, get) => ({
     set({ busy: true, error: '' })
     const deviceName = (await window.mousse.app?.getInfo().catch(() => undefined))?.deviceName?.trim() || 'My device'
     let net = get().net
-    if (mousseIdPreparation(net) === 'automatic') {
+    // A computer with no network identity yet signs in first: it then joins the account's other
+    // computers, or creates the network when it is the account's first computer.
+    const joining = !net?.self
+    if (!joining && mousseIdPreparation(net) === 'automatic') {
       try {
         net = await prepareNetworking(net, deviceName)
       } catch (cause) {
@@ -157,7 +160,7 @@ export const useMousseIdStore = create<MousseIdState>((set, get) => ({
           busy: false,
           error: conflict ? ''
             : errorCode(cause) === 'keystore_locked'
-              ? 'This computer has no system keychain to protect network keys. Set a passphrase under Devices, then sign in.'
+              ? 'Mousse can’t use this computer’s keychain to protect network keys. Set a passphrase under Devices, then sign in.'
               : `Couldn’t turn on networking: ${message(cause)}`
         })
         await get().refresh()
@@ -177,9 +180,15 @@ export const useMousseIdStore = create<MousseIdState>((set, get) => ({
         }
         const pending = await request<PendingSignIn>('net.plus.login.begin', begin).catch(async (cause: unknown) => {
           // An earlier sign-in that was never finished blocks a new one; replace it.
-          if (errorCode(cause) !== 'conflict') throw cause
-          await request('net.plus.login.cancel')
-          return request<PendingSignIn>('net.plus.login.begin', begin)
+          if (errorCode(cause) === 'conflict') {
+            await request('net.plus.login.cancel')
+            return request<PendingSignIn>('net.plus.login.begin', begin)
+          }
+          // A Mousse ID without the join sign-in: create this computer's own network first.
+          if (!joining || errorCode(cause) !== 'forbidden') throw cause
+          net = await prepareNetworking(net, deviceName)
+          if (get().profileId === profileId) set({ net })
+          return request<PendingSignIn>('net.plus.login.begin', { ...begin, bindRoot: !!net.self?.isAuthority })
         })
         if (controller.signal.aborted) throw new PlusSignInError('cancelled', 'Sign-in cancelled.')
         // The approval page sends the browser back here; polling still covers browsers that can't.

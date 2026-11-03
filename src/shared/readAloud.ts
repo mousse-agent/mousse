@@ -121,6 +121,7 @@ export const KOKORO_82M: KokoroTtsModel = {
   id: 'kokoro-82m',
   label: 'Kokoro 82M',
   description: 'English voices',
+  compare: { languages: { count: 1, name: 'English' } },
   parameters: '82M',
   license: 'Apache-2.0',
   homepage: 'https://huggingface.co/hexgrad/Kokoro-82M',
@@ -193,6 +194,7 @@ const kittenModel = (
   id,
   label,
   description: 'English voices',
+  compare: { languages: { count: 1, name: 'English' } },
   parameters,
   license: 'Apache-2.0',
   homepage: `https://huggingface.co/${repo}`,
@@ -250,6 +252,7 @@ export const SUPERTONIC_3: SupertonicTtsModel = {
   id: 'supertonic-3',
   label: 'Supertonic 3',
   description: '31 languages',
+  compare: { languages: { count: 31 } },
   parameters: '99M',
   license: 'OpenRAIL-M',
   homepage: 'https://huggingface.co/Supertone/supertonic-3',
@@ -401,6 +404,7 @@ const pocketModel = (pack: PocketPackage): PocketTtsModel => {
     id: `pocket-tts-${pack.language}`,
     label: `Pocket TTS ${pack.name}`,
     description: `${pack.name} voices`,
+    compare: { languages: { count: 1, name: pack.name } },
     parameters: '100M',
     license: 'CC-BY-4.0',
     homepage: 'https://huggingface.co/kyutai/pocket-tts',
@@ -434,6 +438,9 @@ export const POCKET_TTS_MODELS: readonly PocketTtsModel[] = POCKET_PACKAGES.map(
 export const LOCAL_TTS_MODELS: readonly LocalTtsModel[] = [
   KOKORO_82M, KITTEN_TTS_MINI, KITTEN_TTS_MICRO, KITTEN_TTS_NANO, SUPERTONIC_3, ...POCKET_TTS_MODELS
 ]
+
+/** Suggested first in the model dialog. */
+export const RECOMMENDED_TTS_MODEL_ID: LocalTtsModelId = 'kokoro-82m'
 
 export function findLocalTtsModel(modelId: string): LocalTtsModel | undefined {
   return LOCAL_TTS_MODELS.find((model) => model.id === modelId)

@@ -1,3 +1,4 @@
+import type { UserAction } from './gitPolicy'
 import { lstat, readdir } from 'node:fs/promises'
 import { dirname, isAbsolute, parse, resolve } from 'node:path'
 import type {
@@ -64,7 +65,8 @@ export class GitHubService {
 
   async createRepository(
     projectPath: string,
-    input: Omit<GitHubCreateRepositoryInput, 'projectId'>
+    input: Omit<GitHubCreateRepositoryInput, 'projectId'>,
+    userRequested: UserAction
   ): Promise<GitHubCreateRepositoryResult> {
     const name = validateRepositoryName(input.name)
     if (input.visibility !== 'private' && input.visibility !== 'public') {
@@ -72,7 +74,7 @@ export class GitHubService {
     }
     return this.runExclusive(async () => {
       await this.requireReady()
-      await this.runExecutable('git', ['init'], { cwd: projectPath }).catch((error) => {
+      await this.runExecutable('git', ['init'], { cwd: projectPath, userRequested }).catch((error) => {
         throw new Error(`Could not initialize the local Git repository: ${processMessage(error)}`)
       })
       const args = [
@@ -81,7 +83,7 @@ export class GitHubService {
         '--remote=origin'
       ] as const
       try {
-        const result = await this.runExecutable('gh', args, { cwd: projectPath })
+        const result = await this.runExecutable('gh', args, { cwd: projectPath, userRequested })
         const repositoryUrl = result.stdout.split(/\r?\n/).map((line) => line.trim()).find((line) => /^https?:\/\//.test(line))
         return repositoryUrl ? { repositoryUrl } : {}
       } catch (error) {
@@ -90,7 +92,7 @@ export class GitHubService {
     })
   }
 
-  async cloneRepository(input: GitHubCloneRepositoryInput): Promise<string> {
+  async cloneRepository(input: GitHubCloneRepositoryInput, userRequested: UserAction): Promise<string> {
     const repository = validateRepository(input.repository)
     const destination = resolve(input.destination.trim())
     if (!input.destination.trim() || !isAbsolute(input.destination) || destination === parse(destination).root) {
@@ -101,7 +103,7 @@ export class GitHubService {
       await this.requireReady()
       await this.assertSafeDestination(destination)
       try {
-        await this.runExecutable('gh', ['repo', 'clone', repository, destination])
+        await this.runExecutable('gh', ['repo', 'clone', repository, destination], { userRequested })
       } catch (error) {
         throw new Error(`GitHub clone failed: ${processMessage(error)}`)
       }

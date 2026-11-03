@@ -1,5 +1,6 @@
 import type { AgentCapabilityKind, AgentModelCapabilityProfile, AgentModelLookup, AgentModelRef } from '../../shared/agents/types'
-import { findModelFamily, parseThinkingSuffixFromModelId } from '../../shared/modelVariants'
+import { findModelFamily } from '../../shared/modelVariants'
+import { findListedModel } from '../../shared/modelChoice'
 import type { HarnessGateway } from '../harness/gateway'
 
 /** Context window from which a model counts as `long_context`. */
@@ -28,7 +29,7 @@ export class SharedAgentModelLookup implements AgentModelLookup {
     let resolved: ReturnType<HarnessGateway['resolveStored']>
     try {
       resolved = harness.resolveStored(
-        { instanceId: ref.instanceId, llmProvider: ref.providerId, model: ref.modelId },
+        { instanceId: ref.instanceId, llmProvider: ref.providerId, model: ref.modelId, ...(ref.effort ? { effort: ref.effort } : {}) },
         { purpose: 'definition' }
       )
     } catch (error) {
@@ -41,10 +42,10 @@ export class SharedAgentModelLookup implements AgentModelLookup {
     }
     // An entry that moved runs the agent's own model for the ref: the ref the run sends names that
     // model on the instance it moved to, so the run never sends the old id there.
-    const resolvedRef: AgentModelRef = {
-      ...ref, instanceId: resolved.instanceId, providerId: resolved.llmProvider,
-      ...(resolved.movedFrom ? { modelId: parseThinkingSuffixFromModelId(resolved.model).baseId } : {})
-    }
+    const { effort: _effort, ...rest } = ref
+    const resolvedRef: AgentModelRef = resolved.movedFrom
+      ? { ...rest, instanceId: resolved.instanceId, providerId: resolved.llmProvider, modelId: resolved.model, ...(resolved.effort ? { effort: resolved.effort } : {}) }
+      : { ...ref, instanceId: resolved.instanceId, providerId: resolved.llmProvider }
     const listed = harness.catalog.models(resolved.instanceId, { kind: 'device' })
     // An instance that lists nothing is signed out (or not set up yet): say so, not "not in the catalog".
     if (!listed.length) {
@@ -55,9 +56,7 @@ export class SharedAgentModelLookup implements AgentModelLookup {
       }
     }
     const models = listed.filter((entry) => !entry.hidden)
-    const wanted = resolved.model || ref.modelId
-    const baseId = parseThinkingSuffixFromModelId(wanted).baseId
-    const model = models.find((entry) => entry.id === wanted) ?? models.find((entry) => entry.id === baseId)
+    const model = findListedModel(models, resolved.model || ref.modelId)
     if (!model) return null
     const options = models.map((entry) => ({ id: entry.id, label: entry.label, efforts: entry.capabilities.efforts }))
     const family = findModelFamily(resolved.llmProvider, options, model.id)

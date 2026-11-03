@@ -616,6 +616,14 @@ export interface ThreadMessagesSnapshot {
   replace?: boolean
 }
 
+/** A model as a message records it: the provider, the model as listed, its level and its name. */
+export interface MessageModelSelection {
+  provider: string
+  model: string
+  effort?: string
+  name?: string
+}
+
 export interface ChatMessage {
   /** Durable completed-response applets; generated code never executes in the shell. */
   presentationParts?: import('./applets').AppletPresentationPart[]
@@ -692,10 +700,11 @@ export interface ChatMessage {
     /** Presentation-only model transition; never injected into provider context. */
     | 'context_handoff'
   /** Selection actually admitted for this user turn, independent of composer edits. */
-  modelSelection?: { provider: string; model: string }
+  /** The model the message's turn ran (older messages carry the level packed into `model`). */
+  modelSelection?: MessageModelSelection
   contextHandoff?: {
-    from: { provider: string; model: string }
-    to: { provider: string; model: string }
+    from: MessageModelSelection
+    to: MessageModelSelection
     /** Run Engine handoff artifact (SPEC §16.1) the turn delivered; absent for a display-only switch. */
     handoffId?: string
     strategy?: 'native_resume' | 'delta' | 'full_summary' | 'fork_delta_summary' | 'legacy_import'
@@ -972,6 +981,11 @@ export interface SubagentWorkspaceBinding {
   policy: 'shared' | 'isolated' | 'primary'
   /** The parent's workspace path a `shared` child observes read-only. */
   sharedPath?: string
+  /**
+   * An `isolated` child started with "Give each subagent its own worktree" on: the parent's HEAD when it was started. Its
+   * worktree is made from this commit before its first turn, whatever that turn's mode.
+   */
+  startSha?: string
 }
 
 /**
@@ -1049,10 +1063,11 @@ export interface Thread {
   /** How much the agent may do without asking; absent means the profile default. */
   permissionMode?: PermissionMode
   /**
-   * Opt-in isolated git worktree for this thread. OFF by default (undefined/false
-   * means run on the primary checkout). Toggleable from the new-chat input bar
-   * before the first message; locked once a workspace is provisioned or the
-   * thread has started.
+   * Whether this thread works in its own git worktree. `false` runs it on the project's
+   * folder. Unset means no choice was recorded: the composer shows the "Start new chats in a
+   * worktree" setting, and a thread from before the toggle was honoured gets a worktree.
+   * Toggleable from the new-chat input bar before the first message; locked once a
+   * workspace is provisioned or the thread has started.
    */
   worktreeEnabled?: boolean
   /** The pull request this thread created, started from, or watches; set by the daemon, never inferred from a branch name. */
@@ -1393,6 +1408,8 @@ export interface GitStatusSnapshot {
   hasRemote?: boolean
   /** The folder itself does not exist, for example a removed worktree. */
   missing?: boolean
+  /** How long a Discard here keeps a copy of what it removes: its owner's Undo window. Set by the daemon. */
+  discardKeptForMs?: number
 }
 
 export interface GitCommit {
@@ -1468,6 +1485,14 @@ export interface GitScope {
   projectId: string | null
   /** Set only when the folder is the thread's own ready worktree. */
   workspaceThreadId: string | null
+}
+
+/** The copy a Discard kept before it removed anything (`git.discard`'s `kept`). */
+export interface GitKeptCopy {
+  ref: string
+  windowMs: number
+  /** Where it is, for how long, and the command that brings a file back. */
+  notice: string
 }
 
 /** What a daemon Git mutation answers: the folder's fresh status, plus the action's own result. */

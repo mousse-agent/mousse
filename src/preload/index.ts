@@ -37,6 +37,7 @@ import type {
   GitFetchResult,
   GitOperationEvent,
   GitMutationResult,
+  GitKeptCopy,
   GitPullOptions,
   GitPullRequestLookup,
   GitPullResult,
@@ -78,6 +79,7 @@ import type {
   PullRequestDraft,
   PullRequestFormInput,
   PullRequestListItem,
+  PullRequestMergeMethod,
   PullRequestPushTarget,
   PullRequestRef,
   PullRequestScope,
@@ -493,7 +495,7 @@ const api = {
       storageInvoke('git:stage', scope, input),
     unstage: (scope: GitScope, input: { paths: string[] } | { all: true }): Promise<GitMutationResult> =>
       storageInvoke('git:unstage', scope, input),
-    discard: (scope: GitScope, paths: string[]): Promise<GitMutationResult> =>
+    discard: (scope: GitScope, paths: string[]): Promise<GitMutationResult<{ kept?: GitKeptCopy }>> =>
       storageInvoke('git:discard', scope, paths),
     fetch: (scope: GitScope, options?: GitFetchOptions): Promise<GitMutationResult<GitFetchResult>> =>
       storageInvoke('git:fetch', scope, options),
@@ -531,9 +533,15 @@ const api = {
       ipcRenderer.invoke('pullRequests:draft', scope, base),
     create: (scope: PullRequestScope, input: PullRequestFormInput): Promise<CreatePullRequestResult> =>
       ipcRenderer.invoke('pullRequests:create', scope, input),
-    /** Merges the pull request with the repository's usual method; `headSha` refuses when its head moved since. */
-    merge: (ref: PullRequestRef, number: number, headSha?: string): Promise<PullRequestActionResult> =>
-      ipcRenderer.invoke('pullRequests:merge', ref, number, headSha),
+    /** The method the host's merge button offers in this folder's repository; null when it cannot be read. */
+    mergeMethod: (ref: PullRequestRef): Promise<PullRequestMergeMethod | null> =>
+      ipcRenderer.invoke('pullRequests:mergeMethod', ref),
+    /**
+     * Merges the pull request with `method`, the one the person confirmed, exactly; without it, the repository's usual
+     * method, else squash. `headSha` refuses when its head moved since.
+     */
+    merge: (ref: PullRequestRef, number: number, headSha?: string, method?: PullRequestMergeMethod): Promise<PullRequestActionResult> =>
+      ipcRenderer.invoke('pullRequests:merge', ref, number, headSha, method),
     /** Closes the pull request without merging it; its branch stays. */
     close: (ref: PullRequestRef, number: number): Promise<PullRequestActionResult> =>
       ipcRenderer.invoke('pullRequests:close', ref, number),
@@ -694,8 +702,8 @@ const api = {
     getStatus: (threadId: string): Promise<unknown> => ipcRenderer.invoke('workspace:getStatus', threadId),
     restore: (threadId: string, expectedJournalGeneration?: number): Promise<unknown> =>
       ipcRenderer.invoke('workspace:restore', threadId, expectedJournalGeneration),
-    /** Discard on a conflict in the thread worktree, after the person confirmed. Keeps a copy under `backupRef`. */
-    discardPendingChanges: (threadId: string): Promise<{ backupRef: string }> =>
+    /** Discard on a conflict in the thread worktree, after the person confirmed. Keeps a copy under `backupRef`, and `notice` says how to bring the files back. */
+    discardPendingChanges: (threadId: string): Promise<{ backupRef: string; notice: string }> =>
       ipcRenderer.invoke('workspace:discardPendingChanges', threadId)
   },
   actions: {
@@ -719,7 +727,10 @@ const api = {
     start: (params: Record<string, unknown>): Promise<unknown> => ipcRenderer.invoke('publish:start', params)
   },
   operations: {
-    abort: (params: Record<string, unknown>): Promise<unknown> => ipcRenderer.invoke('operations:abort', params)
+    abort: (params: Record<string, unknown>): Promise<unknown> => ipcRenderer.invoke('operations:abort', params),
+    /** Finishes or settles what a thread's worktree or its Publish is waiting on. Never moves the branch or HEAD. */
+    recover: (threadId: string): Promise<import('../shared/workspace').WorkspaceRecoverResult> =>
+      ipcRenderer.invoke('operations:recover', threadId)
   },
   projects: {
     list: (): Promise<Project[]> => ipcRenderer.invoke('projects:list'),
@@ -772,7 +783,7 @@ const api = {
       ipcRenderer.invoke('threads:regenerateTitle', threadId),
     setModel: (
       threadId: string,
-      model?: { instanceId?: string; llmProvider: string; model: string }
+      model?: { instanceId?: string; llmProvider: string; model: string; effort?: string }
     ): Promise<Thread> => ipcRenderer.invoke('threads:setModel', threadId, model),
     pin: (threadId: string, pinned: boolean): Promise<Thread> =>
       ipcRenderer.invoke('threads:pin', threadId, pinned),

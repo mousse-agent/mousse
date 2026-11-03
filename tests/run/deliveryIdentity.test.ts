@@ -28,7 +28,7 @@ describe('delivering a subagent result to its parent (issue #142)', () => {
     const wakeRunId = reconciler.runOnce().wakes.wakes[0]
     await waitFor(() => d.engine.getRun(wakeRunId)?.status === 'completed', 'the wake run')
     const wake = adapter.turns.find((turn) => turn.threadId === parent.id && turn.prompt.startsWith('Subagent'))!
-    expect(wake.prompt).toBe(`Subagent "API reviewer" (thread ${out.first.childThreadId}) finished task ${out.first.delegationId}.\nAll modules look fine.\nFull result above.`)
+    expect(wake.prompt).toBe(`Subagent "API reviewer" (thread ${out.first.childThreadId}) finished task ${out.first.delegationId}.\nAll modules look fine.\nFull result above.\nIt worked in your own folder, shared with you; Mousse merged nothing.`)
     expect(d.engine.inbox.get(row.inboxId)!.status).toBe('acknowledged')
     expect(d.engine.delegations.get(out.first.delegationId)!.status).toBe('acknowledged')
     // The wake message tells the app what it reports, so the app never parses the text.
@@ -77,7 +77,7 @@ describe('delivering a subagent result to its parent (issue #142)', () => {
       // The run is terminal in this fixture, so make the engine report it live for this call.
       vi.spyOn(w.d.engine, 'getRun').mockReturnValue({ ...run, status: 'running' })
       ;(w.d.orch as any).executeTurnSteerEffect(effect)
-      expect(steered).toHaveBeenCalledWith(w.parent.id, `Subagent "API reviewer" (thread ${w.out.first.childThreadId}) finished task ${w.out.first.delegationId}.\nAll modules look fine.\nFull result above.`, [expect.objectContaining({ title: 'API reviewer', fullyShown: true })], { inboxIds: [w.row.inboxId], effectId: effect.effectId }, undefined, undefined, undefined, undefined)
+      expect(steered).toHaveBeenCalledWith(w.parent.id, `Subagent "API reviewer" (thread ${w.out.first.childThreadId}) finished task ${w.out.first.delegationId}.\nAll modules look fine.\nFull result above.\nIt worked in your own folder, shared with you; Mousse merged nothing.`, [expect.objectContaining({ title: 'API reviewer', fullyShown: true })], { inboxIds: [w.row.inboxId], effectId: effect.effectId }, undefined, undefined, undefined, undefined)
       // What the notice showed is recorded when it is built.
       expect(w.d.engine.inbox.get(w.row.inboxId)!.payload).toMatchObject({ noticeShown: true })
     })

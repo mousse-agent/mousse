@@ -47,15 +47,34 @@ export interface RepositoryContextData {
 
 export interface ThreadWorkspaceMetadata {
   schemaVersion: 1
+  /**
+   * `project-folder`: the thread works in its project's own folder (its worktree is off). `worktreePath` is then the
+   * repository's top folder, `branch` is empty (Mousse made none), and nothing that retires, trashes or deletes
+   * worktrees ever acts on it: it is the person's folder. Turns are still snapshotted and undone as in a worktree.
+   * Absent: the thread's own worktree.
+   */
+  kind?: 'project-folder'
   threadId: string
   repositoryId: RepositoryId
   conversationBranchId: ConversationBranchId
+  /** The branch Mousse created for the thread. The agent may switch away from it; nothing here follows it. */
   branch: string
+  /** Points at the latest snapshot (see `snapshotSha`); at the base commit before the first one. */
   retainedRef: string
   worktreePath: string
   projectRelativeSubdirectory: string
   baseSha: string
+  /** The last HEAD Mousse observed in the worktree. Informational: HEAD is the agent's to move. */
   headSha: string
+  /** The latest recorded snapshot of the worktree's files; absent until the first one. */
+  snapshotSha?: string
+  /**
+   * Set when the active conversation branch was switched to: `own` is the branch's own code, and `snapshotSha` the
+   * files it arrived with, which also hold the edits brought along from the branch left. While nothing has been
+   * recorded since (`snapshotSha` above still holds the same files), leaving the branch counts only `own` as its code,
+   * so those edits come along again instead of staying behind. `at` is when it was switched to.
+   */
+  switchedIn?: { branchId: ConversationBranchId; snapshotSha: string; own: string; at: string }
   lifecycle: WorkspaceLifecycle
   lastVerifiedAt: string
   workspaceId?: string
@@ -68,6 +87,11 @@ export interface ThreadWorkspaceMetadata {
    * anything the commits carry.
    */
   untrusted?: true
+  /**
+   * Not a worktree: the folder is the person's, and its snapshots live in a hidden store (a project without Git, a
+   * thread with no project). Only the Undo, review and retention code sees this; it is never written to `workspace.json`.
+   */
+  snapshotOnly?: true
 }
 
 export interface WorkspaceExecutionContext {
@@ -83,6 +107,43 @@ export interface WorkspaceExecutionContext {
   baseSha?: string
   headSha?: string
   provenance?: WorkspaceProvenance
+  /** `project-folder`: the thread works in its project's own folder; there is nothing to publish. */
+  placement?: 'project-folder'
+  /**
+   * Set only on the context of the turn that made the thread's worktree, when the project folder then held
+   * uncommitted changes the worktree (cut from HEAD) does not have. The turn's record keeps it as `startNote`.
+   */
+  startNote?: string
+}
+
+/**
+ * What a thread is waiting on; `workspace.getStatus` returns it until it is settled.
+ * - `paused`: an operation other than Publish did not finish, or Git cannot read the worktree. Every turn, Undo and
+ *   Publish are refused until `operations.recover` settles it.
+ * - `merge`: a merge an earlier version of Mousse started is still in progress in `folder`. Nothing is refused;
+ *   `operations.abort` with `operationId` aborts it.
+ * - `publish`: a Publish did not finish. Nothing is refused; `operations.recover` finds out whether it landed.
+ */
+export interface WorkspaceRecovery {
+  kind: 'paused' | 'merge' | 'publish'
+  /** One plain sentence. */
+  reason: string
+  /** The operation it concerns, when there is one. */
+  operationId?: string
+  operationType?: string
+  /** The folder the merge is in, for `merge`: the worktree or the primary checkout. */
+  folder?: string
+}
+
+/** The result of `operations.recover`: whether nothing waits any more, and otherwise what still does. */
+export interface WorkspaceRecoverResult {
+  ok: true
+  /** True when nothing waits after recovery. */
+  settled: boolean
+  /** What still waits, as `workspace.getStatus` reports it, when not settled. */
+  recovery?: WorkspaceRecovery
+  /** Why it still waits, in plain words, to follow "Still waiting:". */
+  stillWaiting?: string
 }
 
 export const PENDING_CHANGES_ERROR_CODES = ['workspace_not_clean', 'workspace_conflict'] as const

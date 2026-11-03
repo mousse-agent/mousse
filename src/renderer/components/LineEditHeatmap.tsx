@@ -12,6 +12,8 @@ import {
 import { Segmented, SettingsGroup, type SegmentedOption } from './settings/SettingsRow'
 import { Activity, Coins } from '../lib/icons'
 import { Select } from './ui/Select'
+import { modelLabel } from '../../shared/modelChoice'
+import { resolveModelChoice } from '../lib/modelChoice'
 import '../styles/profile-heatmap.css'
 
 function formatTotal(value: number): string {
@@ -237,7 +239,7 @@ export function LineEditHeatmap({ stats, usage }: LineEditHeatmapProps) {
               ariaLabel="Model filter"
               value={model}
               onChange={setModel}
-              options={[{ value: 'all', label: 'All models' }, ...(usage?.models ?? []).map((item) => ({ value: item, label: item }))]}
+              options={[{ value: 'all', label: 'All models' }, ...(usage?.models ?? []).map((item) => ({ value: item, label: modelLabel(resolveModelChoice({ provider: '', model: item })) }))]}
             />
           </span>
         }

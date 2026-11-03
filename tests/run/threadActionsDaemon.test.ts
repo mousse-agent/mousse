@@ -813,7 +813,8 @@ describe('thread_send, thread_wait, thread_interrupt and thread_steer end to end
       // The thread itself is untouched, and a turn of its own still runs as it was set.
       expect(w.d.store.getThread(w.other.id)?.permissionMode).toBe('full')
       await w.d.orch.send('by hand', false, { threadId: w.other.id, clientRequestId: 'hand' })
-      expect(w.turnsOf(w.other.id).at(-1)?.permissionMode).toBe('full')
+      await waitFor(() => w.turnsOf(w.other.id).length === 3, 'the turn sent by hand', 30_000)
+      expect(w.turnsOf(w.other.id).at(-1)).toMatchObject({ prompt: 'by hand', permissionMode: 'full' })
     })
 
     it('a person\'s Continue after an agent-narrowed run, and a provider continuation of it, keep the narrowed mode', async () => {

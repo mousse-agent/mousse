@@ -1,4 +1,5 @@
 import type { ModelOverride } from '../../shared/providerInstances'
+import { upgradeSelection } from '../../shared/modelSelection'
 import type { PermissionMode } from '../../shared/permissionMode'
 import { createErrorProvider } from '../../shared/errors'
 import { isAgentAccessLevel, narrowAgentAccess, type AgentAccessLevel } from '../../shared/settings'
@@ -181,6 +182,12 @@ export interface ThreadSearchOptions {
   maxMessageThreads?: number
 }
 
+/** A thread's `meta.json`, with a reasoning level packed into its model (written before #490) moved into its own field. */
+function readThreadMeta<T extends { modelOverride?: ModelOverride }>(path: string): T {
+  const meta = JSON.parse(readFileSync(path, 'utf-8')) as T
+  return meta?.modelOverride ? { ...meta, modelOverride: upgradeSelection(meta.modelOverride) } : meta
+}
+
 export class ThreadDataStore extends EventEmitter {
   /**
    * The order of the first row of the user's other computers in a group (a project, or none), when there are
@@ -326,7 +333,8 @@ export class ThreadDataStore extends EventEmitter {
       order: this.nextThreadOrder(projectId, projectPath)
     }
     if (opts?.started === true) meta.startedAt = now
-    if (opts?.worktreeEnabled === true) meta.worktreeEnabled = true
+    // `false` is kept: a thread that chose its project's folder never gets a worktree (`WorkspaceResolver`).
+    if (typeof opts?.worktreeEnabled === 'boolean') meta.worktreeEnabled = opts.worktreeEnabled
     if (opts?.lineage) meta.lineage = structuredClone(opts.lineage)
     if (opts?.createdByThreadId) meta.createdByThreadId = opts.createdByThreadId
     if (isAgentAccessLevel(opts?.accessCeiling)) meta.accessCeiling = opts.accessCeiling
@@ -459,7 +467,7 @@ export class ThreadDataStore extends EventEmitter {
     this.ensureThreadDir(threadDir)
     return withThreadLifecyclePath(threadDir, 'write', () => withFileLock(join(threadDir, '.execution-init.lock'), () => {
       const metaPath = join(threadDir, 'meta.json')
-      const meta = existsSync(metaPath) ? JSON.parse(readFileSync(metaPath, 'utf8')) as ThreadMeta : initial
+      const meta = existsSync(metaPath) ? readThreadMeta<ThreadMeta>(metaPath) : initial
       if (meta.id !== id || meta.projectId !== projectId || meta.settledAt) throw new Error('Execution thread identity or state changed')
       // A previous process may have died between these writes. Preserve every
       // file already present, including messages produced after admission.
@@ -570,7 +578,7 @@ export class ThreadDataStore extends EventEmitter {
       if (existsSync(targetMetaPath) || (this.storageLayout.allowLegacyProjectData && existsSync(legacyMetaPath))) {
         const threadDir = this.storageMigration.migrateRepository(project.path, project.id, id)
         if (!this.lifecycleStore.get(id)) this.lifecycleStore.registerTask({ taskId: id, location: threadDir })
-        return JSON.parse(readFileSync(join(threadDir, 'meta.json'), 'utf-8')) as Thread
+        return readThreadMeta<Thread>(join(threadDir, 'meta.json'))
       }
     }
     return undefined
@@ -643,10 +651,9 @@ export class ThreadDataStore extends EventEmitter {
     }
     const updated: Thread = {
       ...thread,
+      worktreeEnabled: enabled,
       updatedAt: new Date().toISOString()
     }
-    if (enabled) updated.worktreeEnabled = true
-    else delete updated.worktreeEnabled
 
     const threadDir = this.getThreadDir(id)
     this.writeJsonAtomic(join(threadDir, 'meta.json'), updated)
@@ -761,7 +768,7 @@ export class ThreadDataStore extends EventEmitter {
   projectLifecycleIndex(record: TaskLifecycleRecord): void {
     this.removeFromStandaloneIndex(record.taskId)
     if (record.location === record.originalLocation) {
-      const meta = JSON.parse(readFileSync(join(record.location, 'meta.json'), 'utf8')) as ThreadMeta
+      const meta = readThreadMeta<ThreadMeta>(join(record.location, 'meta.json'))
       if (meta.id !== record.taskId) throw new Error('Lifecycle thread identity mismatch')
       if (!meta.projectId) this.addToStandaloneIndex(meta)
     } else if (this.getActiveThreadId() === record.taskId) {
@@ -1076,7 +1083,7 @@ export class ThreadDataStore extends EventEmitter {
       const metaPath = join(threadDir, 'meta.json')
       if (existsSync(metaPath)) {
         try {
-          const meta = JSON.parse(readFileSync(metaPath, 'utf-8')) as ThreadMeta
+          const meta = readThreadMeta<ThreadMeta>(metaPath)
           meta.updatedAt = new Date().toISOString()
           if (!meta.startedAt && data.messages.length > 0) {
             meta.startedAt = meta.updatedAt
@@ -1396,7 +1403,7 @@ export class ThreadDataStore extends EventEmitter {
       const metaPath = join(dataDir, entry.name, 'meta.json')
       if (!existsSync(metaPath)) continue
       try {
-        const thread = JSON.parse(readFileSync(metaPath, 'utf-8')) as Thread
+        const thread = readThreadMeta<Thread>(metaPath)
         if (!this.isLifecycleVisible(thread.id)) continue
         if (!this.lifecycleStore.get(thread.id)) this.lifecycleStore.registerTask({ taskId: thread.id, location: join(dataDir, entry.name) })
         this.ensureStartedAt(thread, projectPath)

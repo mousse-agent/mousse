@@ -1,6 +1,7 @@
 import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, statSync } from 'node:fs'
+import { existsSync, lstatSync, readFileSync, statSync } from 'node:fs'
+import { access, mkdir, realpath } from 'node:fs/promises'
 import { isAbsolute, join, relative, resolve } from 'node:path'
 import type { ExecutionContext, ExecutionWorkspaceRevision } from '../../shared/execution/types'
 import { ThreadActionService } from '../actions/ThreadActionService'
@@ -8,7 +9,10 @@ import { ChangeReceiptService } from '../actions/ChangeReceiptService'
 import { CodeRevertService } from '../actions/CodeRevertService'
 import { PublishService } from '../actions/PublishService'
 import { ConversationBranchService } from '../actions/ConversationBranchService'
-import { ChildAgentIntegrationService } from '../agents/ChildAgentIntegrationService'
+import { moveFilesAsync, sameTreeAsync, takeSnapshotAsync } from '../actions/snapshots'
+import { gitAsync } from '../actions/git'
+import { cancelPendingIntegrations, cancelledIntegrationsNotice } from '../agents/ChildAgentIntegrationService'
+import { buildSubagentResultReportAsync } from '../agents/subagentResultReport'
 import { withGitMutationLocks } from '../actions/GitOperationCoordinator'
 import {
   isWorkflowWorkingDirectory,
@@ -20,7 +24,7 @@ import type { ProjectManager } from '../data/ProjectManager'
 import type { ThreadDataStore } from '../data/ThreadDataStore'
 import { getMousseHomeDir } from '../data/paths'
 import { acquireRepositoryLease, type RepositoryLeaseHandle } from '../git/RepositoryLease'
-import { resolveRepositoryIdentity } from '../git/RepositoryIdentity'
+import { resolveRepositoryIdentityAsync } from '../git/RepositoryIdentity'
 import { DomainRpcError } from '../protocol/domainRegistry'
 import { assertOwnedPath } from '../profiles/pathSafety'
 import {
@@ -32,12 +36,17 @@ import {
 import { WorktreeIdentity } from '../worktree/WorktreeIdentity'
 import { ThreadWorkspaceManager } from './ThreadWorkspaceManager'
 import { WorkspaceResolver } from './WorkspaceResolver'
-import { repoProgramEnv, withoutRepoPrograms } from '../git/repoPrograms'
+import { PROJECT_FOLDER_WORKFLOW_REASON, threadPlacement } from './threadPlacement'
+import { repoProgramEnv, withoutRepoPrograms, withoutRepoProgramsAsync } from '../git/repoPrograms'
+import { gitRunError, runGitProcess } from '../git/runGitProcess'
+import { isIdNamedMousseBranch, isMousseBranchName } from '../../shared/mousseBranches'
 
 export interface WorkflowWorkspaceOwner {
   profileId: string
   threads: Pick<ThreadDataStore, 'getThread' | 'getThreadDir'>
   projects: Pick<ProjectManager, 'getProject'>
+  /** Writes a line in a thread; used to tell it about work an older version left unfinished. */
+  orchestrator?: { noteThreadNotice(threadId: string, text: string): void }
 }
 
 export interface OwnedThreadWorkspace {
@@ -61,6 +70,8 @@ export interface OwnedAgentWorkspace {
   recordPath: string
   parent?: OwnedThreadWorkspace
   baseSha?: string
+  /** The thread's files the worker started from (uncommitted work included): the base of the merge back. */
+  baseSnapshot?: string
   retainedRef?: string
 }
 
@@ -77,6 +88,9 @@ interface AgentWorkspaceRecord {
   branch?: string
   retainedRef?: string
   baseSha?: string
+  /** A snapshot of the thread's files at spawn; the worktree was made at `baseSha` and these files written over it. */
+  baseSnapshot?: string
+  /** The worker's result: a snapshot of its files, or `baseSnapshot` when it changed nothing. */
   resultSha?: string
   receiptId?: string
   lifecycle: 'ready'
@@ -84,29 +98,41 @@ interface AgentWorkspaceRecord {
 
 const occupancyTails = new Map<string, Promise<unknown>>()
 
-function git(cwd: string, args: string[]): string {
+/** Only for {@link isWorkflowRevisionCurrent}, which the workflow engine asks synchronously. */
+function gitSync(cwd: string, args: string[]): string {
   return execFileSync('git', withoutRepoPrograms(cwd, args), { cwd, env: repoProgramEnv(), encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim()
 }
 
-function canonicalPath(path: string): string {
+/** Git without blocking the daemon: the same check, command and answer as `execFileSync`. */
+async function git(cwd: string, args: string[]): Promise<string> {
+  const argv = await withoutRepoProgramsAsync(cwd, args)
+  const ran = await runGitProcess(argv, { cwd, env: repoProgramEnv() })
+  if (ran.error || ran.status !== 0) throw gitRunError(argv, ran)
+  return ran.stdout.trim()
+}
+
+/** The real path, read without blocking; `fs/promises`' `realpath` answers like `realpathSync.native`. */
+async function canonicalPath(path: string): Promise<string> {
   const resolved = resolve(path)
   try {
-    return realpathSync.native(resolved)
+    return await realpath(resolved)
   } catch {
     return resolved
   }
 }
 
-function pathsEqual(left: string, right: string): boolean {
-  const a = canonicalPath(left)
-  const b = canonicalPath(right)
+async function pathsEqual(left: string, right: string): Promise<boolean> {
+  const a = await canonicalPath(left)
+  const b = await canonicalPath(right)
   return process.platform === 'win32' ? a.toLowerCase() === b.toLowerCase() : a === b
 }
 
-function pathInside(root: string, candidate: string): boolean {
-  const rel = relative(canonicalPath(root), canonicalPath(candidate))
+async function pathInside(root: string, candidate: string): Promise<boolean> {
+  const rel = relative(await canonicalPath(root), await canonicalPath(candidate))
   return rel === '' || (!isAbsolute(rel) && rel !== '..' && !rel.startsWith(`..${process.platform === 'win32' ? '\\' : '/'}`))
 }
+
+const exists = (path: string): Promise<boolean> => access(path).then(() => true, () => false)
 
 function digestIdentity(value: string): string {
   return createHash('sha256').update(value).digest('hex')
@@ -134,37 +160,66 @@ function liveBinding(
   return { thread, project }
 }
 
-function listedWorktree(gitTopLevel: string, worktreePath: string): boolean {
-  const listed = git(gitTopLevel, ['worktree', 'list', '--porcelain'])
-  const wanted = canonicalPath(worktreePath)
-  return listed.split(/\r?\n/).some((line) => {
-    if (!line.startsWith('worktree ')) return false
-    return pathsEqual(line.slice(9), wanted)
-  })
+async function listedWorktree(gitTopLevel: string, worktreePath: string): Promise<boolean> {
+  const listed = await git(gitTopLevel, ['worktree', 'list', '--porcelain'])
+  const wanted = await canonicalPath(worktreePath)
+  for (const line of listed.split(/\r?\n/)) {
+    if (line.startsWith('worktree ') && await pathsEqual(line.slice(9), wanted)) return true
+  }
+  return false
 }
 
+/**
+ * Callers join a folder's queue in the order they called. The queue's key is the folder's real path, which is read without
+ * blocking, so joining is itself queued, per folder as the caller names it: each caller joins only after every earlier
+ * caller for that folder has, and a folder whose path is slow to read holds up only its own callers. Two spellings of one
+ * folder (a link and its target) still share the queue; only the order in which they join it is not fixed.
+ */
+const joining = new Map<string, Promise<unknown>>()
+
+const cancelled = (): Error => Object.assign(new Error('cancelled'), { code: 'cancelled' })
+
 export async function withSerializedWorkspace<T>(cwd: string, work: () => Promise<T>, signal?: AbortSignal): Promise<T> {
-  const key = canonicalPath(cwd)
-  const previous = occupancyTails.get(key) ?? Promise.resolve()
   let result: T
   let started = false
-  const next = previous.catch(() => undefined).then(async () => {
-    started = true
-    if (signal?.aborted) throw Object.assign(new Error('cancelled'), { code: 'cancelled' })
-    result = await work()
+  if (signal?.aborted) throw cancelled()
+  const named = resolve(cwd)
+  const joined = (joining.get(named) ?? Promise.resolve()).then(async () => {
+    const key = await canonicalPath(cwd)
+    const previous = occupancyTails.get(key) ?? Promise.resolve()
+    const queued = previous.catch(() => undefined).then(async () => {
+      started = true
+      if (signal?.aborted) throw cancelled()
+      result = await work()
+    })
+    occupancyTails.set(key, queued)
+    // Keep queue cleanup owned by the queued operation even when its caller is
+    // released immediately by cancellation while another operation still holds cwd.
+    void queued.finally(() => {
+      if (occupancyTails.get(key) === queued) occupancyTails.delete(key)
+    }).catch(() => undefined)
+    // A caller that stopped waiting before it joined never reads this; its refusal is not an unhandled one.
+    queued.catch(() => undefined)
+    return { queued }
   })
-  occupancyTails.set(key, next)
-  // Keep queue cleanup owned by the queued operation even when its caller is
-  // released immediately by cancellation while another operation still holds cwd.
-  void next.finally(() => {
-    if (occupancyTails.get(key) === next) occupancyTails.delete(key)
-  }).catch(() => undefined)
+  const tail = joined.catch(() => undefined)
+  joining.set(named, tail)
+  void tail.then(() => { if (joining.get(named) === tail) joining.delete(named) })
+  // Waiting to join ends with the caller's signal; the queued step then sees it and never runs the work.
+  const next = (signal ? await new Promise<Awaited<typeof joined>>((resolveJoin, reject) => {
+    const abort = (): void => reject(cancelled())
+    signal.addEventListener('abort', abort, { once: true })
+    joined.then(
+      (value) => { signal.removeEventListener('abort', abort); resolveJoin(value) },
+      (error: unknown) => { signal.removeEventListener('abort', abort); reject(error instanceof Error ? error : new Error(String(error))) }
+    )
+  }) : await joined).queued
   try {
     if (!signal) await next
     else await new Promise<void>((resolveWait, reject) => {
       // Once dispatch has started, cancellation belongs to the underlying
       // runner and this promise must retain ownership until raw settlement.
-      const abort = () => { if (!started) reject(Object.assign(new Error('cancelled'), { code: 'cancelled' })) }
+      const abort = () => { if (!started) reject(cancelled()) }
       if (signal.aborted) { abort(); return }
       signal.addEventListener('abort', abort, { once: true })
       void next.then(
@@ -182,12 +237,16 @@ export async function resolveOwnedThreadWorkspace(
   signal?: AbortSignal
 ): Promise<OwnedThreadWorkspace> {
   if (signal?.aborted) throw new DomainRpcError('cancelled', 'Workflow workspace resolution cancelled')
-  const { project } = liveBinding(owner, context)
+  const { project, thread } = liveBinding(owner, context)
   if (!project) throw new DomainRpcError('project_required', 'Thread workspace requires a project')
-  const projectPath = canonicalPath(project.path)
+  // Workflows write through the thread's own worktree (its leases, receipts and step worktrees). A thread in its
+  // project's folder never gets one, so a workflow there is refused before anything is made.
+  const placement = threadPlacement(thread)
+  if (placement === 'project-folder') throw new DomainRpcError('thread_in_project_folder', PROJECT_FOLDER_WORKFLOW_REASON)
+  const projectPath = await canonicalPath(project.path)
   const threadDirectory = owner.threads.getThreadDir(context.threadId)
   const manager = new ThreadWorkspaceManager(threadDirectory)
-  const repository = manager.resolveRepository(projectPath)
+  const repository = await manager.resolveRepositoryAsync(projectPath)
   if (!repository.capability.gitBacked) {
     throw new DomainRpcError(
       'executor_unavailable',
@@ -196,21 +255,24 @@ export async function resolveOwnedThreadWorkspace(
   }
   let existing = manager.load()
   if (existing) {
-    validateThreadWorkspaceMetadata(manager, existing, repository, context.threadId)
+    await validateThreadWorkspaceMetadata(manager, existing, repository, context.threadId)
+    // `recovery_required` is admitted too: a thread an older version left waiting recovers on its own instead of staying locked.
     const pending = [...manager.journal.latestByOperation().values()].some((entry) =>
       ['action-checkpoint', 'change-checkpoint', 'child-integration', 'change-integration', 'publish', 'change-publish', 'code-revert', 'change-revert'].includes(entry.operationType)
-      && ['running', 'prepared', 'git_applied'].includes(entry.state))
+      && ['running', 'prepared', 'git_applied', 'recovery_required'].includes(entry.state))
     if (pending) {
       const lease = await waitAcquireExecutionLease(threadDirectory, { source: 'workflow-workspace-recovery', signal, maxAttempts: 36_000 })
       try {
-        await new ChildAgentIntegrationService(threadDirectory).recoverPending(existing.worktreePath, lease)
+        // A merge of a subagent's result an older version left unfinished is recorded as cancelled, never run again.
+        const notice = cancelledIntegrationsNotice(await cancelPendingIntegrations(threadDirectory, existing.worktreePath))
+        if (notice) owner.orchestrator?.noteThreadNotice(context.threadId, notice)
         await new PublishService(threadDirectory).recoverPending(existing.worktreePath, repository.primaryCheckoutPath, lease)
         await new ThreadActionService(threadDirectory).recoverPending(existing.worktreePath, lease)
         await new CodeRevertService(threadDirectory).recoverPending(existing.worktreePath, lease)
         existing = manager.load()!
       } finally { releaseExecutionLeaseHandle(lease) }
     }
-    const verified = manager.verify(existing)
+    const verified = await manager.verify(existing)
     if (verified.lifecycle !== 'ready') {
       throw new DomainRpcError('thread_unavailable', `Thread workspace is stale (${verified.lifecycle})`)
     }
@@ -218,11 +280,11 @@ export async function resolveOwnedThreadWorkspace(
       throw new DomainRpcError('thread_unavailable', 'Thread workspace is bound to a different repository')
     }
     liveBinding(owner, context)
-    const execution = manager.executionContext(projectPath)
-    if (!execution.workspacePath || pathsEqual(execution.workspacePath, repository.primaryCheckoutPath)) {
+    const execution = await manager.executionContext(projectPath)
+    if (!execution.workspacePath || await pathsEqual(execution.workspacePath, repository.primaryCheckoutPath)) {
       throw new DomainRpcError('thread_unavailable', 'Thread workspace must not be the primary checkout')
     }
-    const cwd = validateThreadWorkspacePaths(execution.workspacePath, execution.projectPath, repository)
+    const cwd = await validateThreadWorkspacePaths(execution.workspacePath, execution.projectPath, repository)
     return {
       cwd,
       workspacePath: execution.workspacePath,
@@ -234,7 +296,7 @@ export async function resolveOwnedThreadWorkspace(
       branch: execution.branch
     }
   }
-  const execution = await new WorkspaceResolver(threadDirectory, context.threadId, projectPath).resolve('agent', 'main', signal)
+  const execution = await new WorkspaceResolver(threadDirectory, context.threadId, projectPath, placement).resolve('agent', 'main', signal)
   liveBinding(owner, context)
   if (execution.lifecycle !== 'ready' || !execution.capability.gitBacked) {
     throw new DomainRpcError(
@@ -242,15 +304,15 @@ export async function resolveOwnedThreadWorkspace(
       execution.capability.unavailableReason ?? 'Thread workspace is unavailable'
     )
   }
-  if (!execution.workspacePath || pathsEqual(execution.workspacePath, execution.primaryPath)) {
+  if (!execution.workspacePath || await pathsEqual(execution.workspacePath, execution.primaryPath)) {
     throw new DomainRpcError('thread_unavailable', 'Thread workspace must not be the primary checkout')
   }
   const metadata = manager.load()
   if (!metadata || metadata.lifecycle !== 'ready') {
     throw new DomainRpcError('thread_unavailable', 'Thread workspace provisioning did not become ready')
   }
-  validateThreadWorkspaceMetadata(manager, metadata, repository, context.threadId)
-  const cwd = validateThreadWorkspacePaths(execution.workspacePath, execution.projectPath, repository)
+  await validateThreadWorkspaceMetadata(manager, metadata, repository, context.threadId)
+  const cwd = await validateThreadWorkspacePaths(execution.workspacePath, execution.projectPath, repository)
   return {
     cwd,
     workspacePath: execution.workspacePath,
@@ -263,12 +325,25 @@ export async function resolveOwnedThreadWorkspace(
   }
 }
 
-function validateThreadWorkspaceMetadata(
+/**
+ * Whether the branch a thread's workspace records is the thread's own: `mousse/<slug>`, named once when its worktree was
+ * made, or for a thread made before that, `mousse/thread/<thread>/<conversation branch>`. Another thread's id-named branch,
+ * and a branch outside `mousse/`, are never its own. With an active conversation branch (`activated`), any of the thread's
+ * id-named branches counts, and so does the Git branch a fork made before snapshots recorded, which the checkout may still be on.
+ */
+export function isThreadOwnBranch(branch: string, threadId: string, conversationBranchId: string, activated?: { gitBranch?: string }): boolean {
+  if (activated?.gitBranch && branch === activated.gitBranch) return true
+  if (!isMousseBranchName(branch)) return false
+  if (!isIdNamedMousseBranch(branch)) return true
+  return activated ? branch.startsWith(`mousse/thread/${threadId}/`) : branch === `mousse/thread/${threadId}/${conversationBranchId}`
+}
+
+async function validateThreadWorkspaceMetadata(
   manager: ThreadWorkspaceManager,
   metadata: ReturnType<ThreadWorkspaceManager['load']> & {},
   repository: ReturnType<ThreadWorkspaceManager['resolveRepository']>,
   threadId: string
-): void {
+): Promise<void> {
   if (lstatSync(manager.workspacePath).isSymbolicLink() || statSync(manager.workspacePath).size > 64 * 1024) {
     throw new DomainRpcError('thread_unavailable', 'Thread workspace metadata is not a bounded regular file')
   }
@@ -279,40 +354,42 @@ function validateThreadWorkspaceMetadata(
   const expectedPath = join(repository.worktreeBase, 'threads', threadId, branchId)
   const activated = new ConversationBranchService(manager.threadDirectory).list()
     .find((branch) => branch.id === branchId && branch.lifecycle === 'active')
-  const expectedBranch = activated?.gitBranch ?? `mousse/thread/${threadId}/${branchId}`
+  // Activating a conversation branch no longer switches Git branches, so the checkout stays on the thread's own; forks made
+  // before snapshots recorded a Git branch of their own, which the checkout may still be on.
+  const ownBranch = isThreadOwnBranch(metadata.branch, threadId, branchId, activated)
   const expectedRef = activated?.retainedRef ?? `refs/mousse/threads/${threadId}/${branchId}`
   const ownedPath = activated
-    ? pathInside(join(repository.worktreeBase, 'threads', threadId), metadata.worktreePath)
-    : pathsEqual(metadata.worktreePath, expectedPath)
+    ? await pathInside(join(repository.worktreeBase, 'threads', threadId), metadata.worktreePath)
+    : await pathsEqual(metadata.worktreePath, expectedPath)
   if (
     metadata.threadId !== threadId ||
     metadata.repositoryId !== repository.repositoryId ||
     metadata.projectRelativeSubdirectory !== repository.projectRelativeSubdirectory ||
     !ownedPath ||
-    metadata.branch !== expectedBranch ||
+    !ownBranch ||
     metadata.retainedRef !== expectedRef
   ) {
     throw new DomainRpcError('thread_unavailable', 'Thread workspace metadata does not match the live project binding')
   }
-  if (!pathInside(repository.worktreeBase, metadata.worktreePath)) {
+  if (!await pathInside(repository.worktreeBase, metadata.worktreePath)) {
     throw new DomainRpcError('thread_unavailable', 'Thread workspace path is outside the repository workspace root')
   }
 }
 
-function validateThreadWorkspacePaths(
+async function validateThreadWorkspacePaths(
   worktreePath: string,
   projectCwd: string,
   repository: ReturnType<ThreadWorkspaceManager['resolveRepository']>
-): string {
-  if (!listedWorktree(repository.gitTopLevel, worktreePath)) {
+): Promise<string> {
+  if (!await listedWorktree(repository.gitTopLevel, worktreePath)) {
     throw new DomainRpcError('thread_unavailable', 'Thread workspace is not registered with the live repository')
   }
-  if (resolveRepositoryIdentity(worktreePath).key !== repository.repositoryId) {
+  if ((await resolveRepositoryIdentityAsync(worktreePath)).key !== repository.repositoryId) {
     throw new DomainRpcError('thread_unavailable', 'Thread workspace belongs to another repository')
   }
-  const worktree = canonicalPath(worktreePath)
-  const cwd = canonicalPath(projectCwd)
-  if (!pathInside(worktree, cwd) || pathsEqual(worktree, repository.primaryCheckoutPath)) {
+  const worktree = await canonicalPath(worktreePath)
+  const cwd = await canonicalPath(projectCwd)
+  if (!await pathInside(worktree, cwd) || await pathsEqual(worktree, repository.primaryCheckoutPath)) {
     throw new DomainRpcError('thread_unavailable', 'Thread workspace project path escapes its registered worktree')
   }
   return cwd
@@ -329,14 +406,14 @@ export async function resolveScriptWorkingDirectory(input: {
   if (input.signal.aborted) throw new DomainRpcError('cancelled', 'Workflow script cancelled')
   liveBinding(input.owner, input.context)
   if (input.workingDirectory === 'run-staging') {
-    mkdirSync(input.stagingDir, { recursive: true })
-    return { cwd: canonicalPath(input.stagingDir) }
+    await mkdir(input.stagingDir, { recursive: true })
+    return { cwd: await canonicalPath(input.stagingDir) }
   }
   if (input.workingDirectory === 'profile-sandbox') {
     if (!input.sandboxRoot?.trim()) {
       throw new DomainRpcError('executor_unavailable', 'profile-sandbox is unavailable: no supported isolation backend')
     }
-    return { cwd: canonicalPath(input.sandboxRoot) }
+    return { cwd: await canonicalPath(input.sandboxRoot) }
   }
   const thread = await resolveOwnedThreadWorkspace(input.owner, input.context, input.signal)
   liveBinding(input.owner, input.context)
@@ -346,34 +423,33 @@ export async function resolveScriptWorkingDirectory(input: {
   }
 }
 
-/** Recheck after waiting for the writer, before any intentional dirty snapshot. */
-function verifyWorkspaceWriterAdmission(
+/** Recheck after waiting for the writer, before any intentional dirty snapshot. The caller holds the thread's writer lease. */
+async function verifyWorkspaceWriterAdmission(
   owner: WorkflowWorkspaceOwner,
   context: Pick<ExecutionContext, 'profileId' | 'threadId' | 'projectId'>,
   workspace: OwnedThreadWorkspace
-): void {
+): Promise<void> {
   const { project } = liveBinding(owner, context)
   const manager = new ThreadWorkspaceManager(workspace.threadDirectory)
   const metadata = manager.load()
   if (metadata) {
     if (!project) throw new DomainRpcError('thread_unavailable', 'Workspace project ownership changed')
-    const repository = manager.resolveRepository(canonicalPath(project.path))
-    validateThreadWorkspaceMetadata(manager, metadata, repository, context.threadId)
-    if (metadata.lifecycle !== 'ready' || manager.verify(metadata).lifecycle !== 'ready') {
-      throw new DomainRpcError('thread_unavailable', 'Workspace HEAD or branch changed while waiting; recovery is required')
+    const repository = await manager.resolveRepositoryAsync(await canonicalPath(project.path))
+    await validateThreadWorkspaceMetadata(manager, metadata, repository, context.threadId)
+    if (metadata.lifecycle !== 'ready' || (await manager.verify(metadata)).lifecycle !== 'ready') {
+      throw new DomainRpcError('thread_unavailable', 'Workspace needs recovery before it can be written')
     }
-    if (!pathsEqual(metadata.worktreePath, workspace.workspacePath) || metadata.branch !== workspace.branch) {
+    // Bound by where the worktree is and which repository it belongs to. The branch is the agent's to switch or detach.
+    if (!await pathsEqual(metadata.worktreePath, workspace.workspacePath) || (await resolveRepositoryIdentityAsync(workspace.workspacePath)).key !== metadata.repositoryId) {
       throw new DomainRpcError('thread_unavailable', 'Workspace binding changed while waiting; resolve its current revision again')
     }
-    validateThreadWorkspacePaths(workspace.workspacePath, workspace.cwd, repository)
+    await validateThreadWorkspacePaths(workspace.workspacePath, workspace.cwd, repository)
   } else {
     // Isolated children have a separate journal but no task-binding metadata.
-    // Their immutable spawn revision is the admission authority instead.
-    if (pathsEqual(workspace.threadDirectory, owner.threads.getThreadDir(context.threadId)) ||
-        !workspace.expectedHeadSha || !workspace.branch ||
-        git(workspace.workspacePath, ['rev-parse', 'HEAD']) !== workspace.expectedHeadSha ||
-        git(workspace.workspacePath, ['branch', '--show-current']) !== workspace.branch ||
-        resolveRepositoryIdentity(workspace.workspacePath).key !== workspace.repositoryId) {
+    // Their repository identity is the admission authority instead; HEAD and branch are the agent's to move.
+    if (await pathsEqual(workspace.threadDirectory, owner.threads.getThreadDir(context.threadId)) ||
+        !workspace.expectedHeadSha ||
+        (await resolveRepositoryIdentityAsync(workspace.workspacePath)).key !== workspace.repositoryId) {
       throw new DomainRpcError('thread_unavailable', 'Workspace admission revision changed; recovery is required')
     }
   }
@@ -391,28 +467,25 @@ export async function acquireWorkspaceMutationLease(
     threadLease = await waitAcquireExecutionLease(workspace.threadDirectory, {
       source: 'workflow-script-workspace', signal, maxAttempts: 36_000
     })
-    verifyWorkspaceWriterAdmission(owner, context, workspace)
+    await verifyWorkspaceWriterAdmission(owner, context, workspace)
     // The thread lease covers the writer lifetime. Repository leases are taken
     // only by checkpoint/integration operations, never across model or process work.
-    let startSha = git(workspace.workspacePath, ['rev-parse', 'HEAD'])
-    if (git(workspace.workspacePath, ['status', '--porcelain', '--untracked-files=all'])) {
-      const before = await new ThreadActionService(workspace.threadDirectory).checkpointExistingTurn({
-        threadId: context.threadId, turnId: `workflow-input:${crypto.randomUUID()}`,
-        conversationBranchId: new ThreadWorkspaceManager(workspace.threadDirectory).load()?.conversationBranchId ?? 'main', workspacePath: workspace.workspacePath,
-        presentationMessageStart: 0, presentationMessageEnd: 0,
-        nativeContextBoundary: { messageIndex: 0, compactionGeneration: 0, fidelity: 'exact' },
-        actor: { kind: 'workflow', id: context.runId }, runId: context.runId, heldThreadLease: threadLease
-      }, startSha, 'completed')
-      startSha = before.endSha
-    }
-    const turnId = `${context.turnId ?? context.runId ?? 'workflow'}:${crypto.randomUUID()}`
     const conversationBranchId = new ThreadWorkspaceManager(workspace.threadDirectory).load()?.conversationBranchId ?? 'main'
-    new ThreadActionService(workspace.threadDirectory).beginTurn({
+    // Files changed outside Mousse since the last action are recorded first; the workflow starts from the snapshot.
+    const startSha = (await new ThreadActionService(workspace.threadDirectory).recordOutsideChanges({
+      threadId: context.threadId, conversationBranchId, workspacePath: workspace.workspacePath, heldThreadLease: threadLease,
+      presentationMessageStart: 0, nativeContextBoundary: { messageIndex: 0, compactionGeneration: 0, fidelity: 'exact' }
+    })).startSha
+    const turnId = `${context.turnId ?? context.runId ?? 'workflow'}:${crypto.randomUUID()}`
+    const actions = new ThreadActionService(workspace.threadDirectory)
+    // Checked without blocking, right after the snapshot it checks; `beginTurn` then runs no Git.
+    const startCheck = await actions.checkTurnStart(workspace.workspacePath, startSha)
+    actions.beginTurn({
       threadId: context.threadId, turnId, conversationBranchId, workspacePath: workspace.workspacePath,
       presentationMessageStart: 0, presentationMessageEnd: 0,
       nativeContextBoundary: { messageIndex: 0, compactionGeneration: 0, fidelity: 'exact' },
       actor: { kind: 'workflow', id: context.runId }, runId: context.runId, heldThreadLease: threadLease
-    }, startSha)
+    }, startSha, startCheck)
     let revision: ExecutionWorkspaceRevision | undefined
     let healthy = true
     let released = false
@@ -452,8 +525,12 @@ export async function acquireWorkspaceMutationLease(
   }
 }
 
-/** Complete isolated output through the same attributed integration as chat. */
-export async function integrateOwnedAgentWorkspace(input: {
+/**
+ * Pins a finished workflow agent's result and reports it; nothing is merged into the parent thread. The result is a
+ * snapshot of the worker's files, kept under its workflow ref, and its base (the thread's files at spawn) beside it
+ * (`workflowBaseRef`). The parent agent brings the result in with Git if it wants it.
+ */
+export async function reportOwnedAgentWorkspace(input: {
   owner: WorkflowWorkspaceOwner
   context: ExecutionContext
   workspace: OwnedAgentWorkspace
@@ -466,34 +543,29 @@ export async function integrateOwnedAgentWorkspace(input: {
   const record = readAgentRecord(workspace.recordPath, context, input.idempotencyKey)
   if (!record) throw new DomainRpcError('unknown_effect', 'Workflow child result has no durable workspace record')
   const resultSha = input.revision.writeSha
-  await withGitMutationLocks(`${workspace.recordPath}.changes`, workspace.worktreePath, 'workflow-result-pin', () => {
-    if (git(workspace.worktreePath, ['rev-parse', 'HEAD']) !== resultSha) throw new Error('Worker result revision changed')
-    if (workspace.retainedRef) git(workspace.worktreePath, ['update-ref', workspace.retainedRef, resultSha])
-    writeAgentRecord(workspace.recordPath, { ...record, resultSha, receiptId: input.revision.receiptId })
-  }, input.signal)
-  const parent = workspace.parent
-  const lease = await waitAcquireExecutionLease(parent.threadDirectory, { source: 'workflow-integration', signal: input.signal })
-  try {
-    verifyWorkspaceWriterAdmission(input.owner, context, parent)
-    const metadata = new ThreadWorkspaceManager(parent.threadDirectory).load()
-    const expected = git(parent.workspacePath, ['rev-parse', 'HEAD'])
-    if (resultSha === workspace.baseSha) return { workspaceId: metadata?.workspaceId ?? context.threadId,
-      readSha: workspace.baseSha, writeSha: expected, generation: metadata?.generation }
-    const integration = await new ChildAgentIntegrationService(parent.threadDirectory).integrate({
-      agentId: agentWorktreeId(context.profileId, context.threadId, input.idempotencyKey),
-      operationId: `workflow-integration:${input.idempotencyKey}`,
-      workerWorktree: workspace.worktreePath, workerBranch: workspace.branch,
-      spawnBaseSha: workspace.baseSha, expectedWorkerHead: resultSha,
-      threadWorkspace: parent.workspacePath, expectedDestinationHead: expected,
-      externalEffects: new ChangeReceiptService(`${workspace.recordPath}.changes`).list()
-        .find((receipt) => receipt.id === input.revision.receiptId)?.externalEffects ?? [],
-      actor: { kind: 'workflow', id: context.runId }, runId: context.runId,
-      turnId: context.turnId, heldThreadLease: lease, signal: input.signal
+  const spawnBase = record.baseSnapshot ?? workspace.baseSha
+  // A worker that changed nothing has no result: its files are the ones it started from.
+  const unchanged = await sameTreeAsync(workspace.worktreePath, resultSha, spawnBase)
+  const report = await withGitMutationLocks(`${workspace.recordPath}.changes`, workspace.worktreePath, 'workflow-result-pin', async () => {
+    // The result is a snapshot of the worker's files, which stays valid whatever the worker did to its own HEAD since.
+    await gitAsync(workspace.worktreePath, ['cat-file', '-e', `${resultSha}^{commit}`])
+    const frozen = await buildSubagentResultReportAsync({
+      cwd: workspace.worktreePath, workedIn: workspace.worktreePath, shared: false,
+      baseSha: spawnBase, resultSha: unchanged ? spawnBase : resultSha,
+      pins: workspace.retainedRef ? { base: workflowBaseRef(workspace.retainedRef), result: workspace.retainedRef } : undefined
     })
-    return { workspaceId: metadata?.workspaceId ?? context.threadId, readSha: workspace.baseSha,
-      writeSha: integration.integrationSha, receiptId: integration.receiptId,
-      generation: new ThreadWorkspaceManager(parent.threadDirectory).load()?.generation }
-  } finally { releaseExecutionLeaseHandle(lease) }
+    writeAgentRecord(workspace.recordPath, { ...record, resultSha: frozen.resultSha, receiptId: input.revision.receiptId })
+    return frozen
+  }, input.signal)
+  // The parent's files are not touched: the revision names them as they are, and carries the report.
+  const metadata = new ThreadWorkspaceManager(workspace.parent.threadDirectory).load()
+  return { workspaceId: metadata?.workspaceId ?? context.threadId, readSha: workspace.baseSha,
+    writeSha: metadata?.snapshotSha ?? await gitAsync(workspace.parent.workspacePath, ['rev-parse', 'HEAD']), generation: metadata?.generation, result: report }
+}
+
+/** Where a workflow agent's base is kept, beside its result ref (a ref cannot also be a folder of other refs). */
+export function workflowBaseRef(retainedRef: string): string {
+  return `${retainedRef}-base`
 }
 
 export function isWorkflowRevisionCurrent(
@@ -527,10 +599,12 @@ export function isWorkflowRevisionCurrent(
         if (contribution.resultSha === revision.readSha || contribution.resultSha === revision.writeSha) return true
       }
     }
+    // Snapshots have no ancestry, but receipts are linear: an observation made at or after the undone change saw it.
+    if (undone.git) return observedGeneration !== undefined && undone.generation <= observedGeneration
     // A later verification can observe a descendant of the reversed change.
     if (undone.beforeSha !== undone.afterSha) {
       try {
-        git(metadata.worktreePath, ['merge-base', '--is-ancestor', undone.afterSha, revision.readSha])
+        gitSync(metadata.worktreePath, ['merge-base', '--is-ancestor', undone.afterSha, revision.readSha])
         return true
       } catch { /* not a dependent revision */ }
     }
@@ -555,16 +629,16 @@ export async function provisionOwnedAgentWorkspace(input: {
   const recordPath = join(input.registrationRoot, `${digest}.json`)
   assertOwnedPath(input.registrationRoot, recordPath)
   const existing = readAgentRecord(recordPath, input.context, input.idempotencyKey)
-  const repository = project ? resolveRepositoryIdentity(project.path) : undefined
+  const repository = project ? await resolveRepositoryIdentityAsync(project.path) : undefined
   if (!project || (repository && !repository.capability.allowed && repository.capability.reason === 'not-a-repository')) {
     const scratch = join(input.scratchRoot, digest)
     assertOwnedPath(input.scratchRoot, scratch)
-    mkdirSync(scratch, { recursive: true })
-    const cwd = canonicalPath(scratch)
-    if (!pathInside(input.scratchRoot, cwd)) {
+    await mkdir(scratch, { recursive: true })
+    const cwd = await canonicalPath(scratch)
+    if (!await pathInside(input.scratchRoot, cwd)) {
       throw new DomainRpcError('executor_unavailable', 'Workflow agent scratch path escapes its owned root')
     }
-    if (existing && (existing.kind !== 'scratch' || !pathsEqual(existing.worktreePath, scratch) || !pathsEqual(existing.projectCwd, cwd))) {
+    if (existing && (existing.kind !== 'scratch' || !await pathsEqual(existing.worktreePath, scratch) || !await pathsEqual(existing.projectCwd, cwd))) {
       throw new DomainRpcError('profile_mismatch', 'Workflow agent scratch record does not match its owned path')
     }
     atomicWriteJsonSync(recordPath, {
@@ -586,8 +660,8 @@ export async function provisionOwnedAgentWorkspace(input: {
       branch: thread.branch, recordPath, parent: thread }
   }
   if (existing?.kind === 'git-worktree') {
-    const reused = reuseAgentWorktree(existing, thread, input.owner, input.context, input.idempotencyKey)
-    if (reused) return { ...reused, recordPath, parent: thread, baseSha: existing.baseSha, retainedRef: existing.retainedRef }
+    const reused = await reuseAgentWorktree(existing, thread, input.owner, input.context, input.idempotencyKey)
+    if (reused) return { ...reused, recordPath, parent: thread, baseSha: existing.baseSha, baseSnapshot: existing.baseSnapshot, retainedRef: existing.retainedRef }
   } else if (existing) {
     throw new DomainRpcError('profile_mismatch', 'Workflow agent workspace kind changed for this invocation')
   }
@@ -625,33 +699,33 @@ function readAgentRecord(
   return record
 }
 
-function reuseAgentWorktree(
+async function reuseAgentWorktree(
   record: AgentWorkspaceRecord,
   thread: OwnedThreadWorkspace,
   owner: WorkflowWorkspaceOwner,
   context: Pick<ExecutionContext, 'profileId' | 'threadId' | 'projectId'>,
   idempotencyKey: string
-): Omit<OwnedAgentWorkspace, 'recordPath'> | undefined {
+): Promise<Omit<OwnedAgentWorkspace, 'recordPath'> | undefined> {
   liveBinding(owner, context)
   const agentId = agentWorktreeId(context.profileId, context.threadId, idempotencyKey)
   const ownerDigest = digestIdentity(`${context.profileId}:${context.threadId}`).slice(0, 24)
   const worktreesBase = join(getMousseHomeDir(), 'wf', thread.repositoryId.slice(0, 16), ownerDigest)
   const identity = WorktreeIdentity.forAgent(worktreesBase, agentId)
   const expectedRef = `refs/mousse/workflows/${context.profileId}/${context.threadId}/${agentId}`
-  const expectedCwd = projectCwd(identity.path, thread.projectRelativeSubdirectory)
+  const expectedCwd = await projectCwd(identity.path, thread.projectRelativeSubdirectory)
   if (
     record.repositoryId !== thread.repositoryId ||
     record.branch !== identity.branch ||
     record.retainedRef !== expectedRef ||
-    !pathsEqual(record.worktreePath, identity.path) ||
-    !pathsEqual(record.projectCwd, expectedCwd)
+    !await pathsEqual(record.worktreePath, identity.path) ||
+    !await pathsEqual(record.projectCwd, expectedCwd)
   ) {
     throw new DomainRpcError('thread_unavailable', 'Workflow agent workspace is bound to a different repository')
   }
-  if (!existsSync(record.worktreePath) || !listedWorktree(thread.gitTopLevel, record.worktreePath)) return undefined
-  const branch = git(record.worktreePath, ['branch', '--show-current'])
-  if (branch !== identity.branch || resolveRepositoryIdentity(record.worktreePath).key !== thread.repositoryId) {
-    throw new DomainRpcError('thread_unavailable', 'Workflow agent worktree branch changed')
+  if (!await exists(record.worktreePath) || !await listedWorktree(thread.gitTopLevel, record.worktreePath)) return undefined
+  // Bound by its path, its top level and its repository; the agent may have switched or detached its branch.
+  if (!await pathsEqual(await canonicalPath(await git(record.worktreePath, ['rev-parse', '--show-toplevel'])), await canonicalPath(record.worktreePath)) || (await resolveRepositoryIdentityAsync(record.worktreePath)).key !== thread.repositoryId) {
+    throw new DomainRpcError('thread_unavailable', 'Workflow agent worktree changed')
   }
   return {
     cwd: record.projectCwd,
@@ -683,42 +757,36 @@ async function createAgentWorktree(input: {
       source: 'workflow-agent-worktree',
       signal: input.signal
     })
-    verifyWorkspaceWriterAdmission(input.owner, input.context, input.thread)
-    if (git(input.thread.workspacePath, ['status', '--porcelain', '--untracked-files=all'])) {
-      const head = git(input.thread.workspacePath, ['rev-parse', 'HEAD'])
-      await new ThreadActionService(input.thread.threadDirectory).checkpointExistingTurn({
-        threadId: input.context.threadId, turnId: `workflow-base:${input.idempotencyKey}`,
-        conversationBranchId: new ThreadWorkspaceManager(input.thread.threadDirectory).load()?.conversationBranchId ?? 'main', workspacePath: input.thread.workspacePath,
-        presentationMessageStart: 0, presentationMessageEnd: 0,
-        nativeContextBoundary: { messageIndex: 0, compactionGeneration: 0, fidelity: 'exact' },
-        actor: { kind: 'workflow', id: input.idempotencyKey }, heldThreadLease: threadLease
-      }, head, 'completed')
-    }
-    const baseSha = git(input.thread.workspacePath, ['rev-parse', 'HEAD'])
-    const repoIdentity = resolveRepositoryIdentity(input.thread.gitTopLevel, { requireMutationCapability: true })
+    await verifyWorkspaceWriterAdmission(input.owner, input.context, input.thread)
+    const baseSha = await git(input.thread.workspacePath, ['rev-parse', 'HEAD'])
+    const repoIdentity = await resolveRepositoryIdentityAsync(input.thread.gitTopLevel, { requireMutationCapability: true })
     repositoryLease = await acquireRepositoryLease(repoIdentity, { signal: input.signal })
     liveBinding(input.owner, input.context)
-    mkdirSync(worktreesBase, { recursive: true })
-    if (existsSync(identity.path) && listedWorktree(input.thread.gitTopLevel, identity.path)) {
+    // The worker starts from the thread's files as they are, uncommitted work included, on top of the same commit.
+    // That snapshot is also the base its result is merged back from.
+    const threadFiles = await takeSnapshotAsync(input.thread.workspacePath, { reason: `workflow agent ${input.idempotencyKey}` })
+    await mkdir(worktreesBase, { recursive: true })
+    if (await exists(identity.path) && await listedWorktree(input.thread.gitTopLevel, identity.path)) {
       throw new DomainRpcError('unknown_effect', 'Unrecorded workflow worktree exists; preserve it for recovery')
     }
     let branchExists = false
     try {
-      git(input.thread.gitTopLevel, ['show-ref', '--verify', `refs/heads/${identity.branch}`])
+      await git(input.thread.gitTopLevel, ['show-ref', '--verify', `refs/heads/${identity.branch}`])
       branchExists = true
     } catch {
       branchExists = false
     }
-    if (existsSync(identity.path)) {
+    if (await exists(identity.path)) {
       throw new DomainRpcError('executor_unavailable', `Refusing to reuse unmanaged agent worktree path: ${identity.path}`)
     }
     if (branchExists) {
       throw new DomainRpcError('unknown_effect', 'Workflow agent branch exists without its owned record')
     } else {
-      git(input.thread.workspacePath, ['worktree', 'add', '-b', identity.branch, identity.path, baseSha])
+      await git(input.thread.workspacePath, ['worktree', 'add', '-b', identity.branch, identity.path, baseSha])
+      await moveFilesAsync(identity.path, await git(identity.path, ['rev-parse', 'HEAD^{tree}']), threadFiles.tree)
     }
-    git(input.thread.gitTopLevel, ['update-ref', retainedRef, git(identity.path, ['rev-parse', 'HEAD'])])
-    const cwd = projectCwd(identity.path, input.thread.projectRelativeSubdirectory)
+    await git(input.thread.gitTopLevel, ['update-ref', '--no-deref', retainedRef, threadFiles.sha])
+    const cwd = await projectCwd(identity.path, input.thread.projectRelativeSubdirectory)
     writeAgentRecord(input.recordPath, {
       version: 1,
       kind: 'git-worktree',
@@ -732,20 +800,21 @@ async function createAgentWorktree(input: {
       branch: identity.branch,
       retainedRef,
       baseSha,
+      baseSnapshot: threadFiles.sha,
       lifecycle: 'ready'
     })
     return { cwd, worktreePath: identity.path, kind: 'git-worktree', branch: identity.branch, recordPath: input.recordPath,
-      parent: input.thread, baseSha, retainedRef }
+      parent: input.thread, baseSha, baseSnapshot: threadFiles.sha, retainedRef }
   } finally {
     repositoryLease?.release()
     if (threadLease) releaseExecutionLeaseHandle(threadLease)
   }
 }
 
-function projectCwd(worktreePath: string, subdirectory: string): string {
-  const worktree = canonicalPath(worktreePath)
-  const cwd = canonicalPath(!subdirectory || subdirectory === '.' ? worktree : join(worktree, subdirectory))
-  if (!pathInside(worktree, cwd)) {
+async function projectCwd(worktreePath: string, subdirectory: string): Promise<string> {
+  const worktree = await canonicalPath(worktreePath)
+  const cwd = await canonicalPath(!subdirectory || subdirectory === '.' ? worktree : join(worktree, subdirectory))
+  if (!await pathInside(worktree, cwd)) {
     throw new DomainRpcError('executor_unavailable', 'Workflow agent project path is outside its worktree')
   }
   return cwd

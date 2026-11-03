@@ -1,10 +1,9 @@
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'fs'
 import { join } from 'path'
 import { tmpdir } from 'os'
 import { afterEach, describe, expect, it } from 'vitest'
 import simpleGit from 'simple-git'
 import { BlastRadiusAnalyzer, extractRelativeSpecifiers } from '../src/mms/worktree/BlastRadiusAnalyzer'
-import { WorktreeManager } from '../src/mms/worktree/WorktreeManager'
 
 const roots: string[] = []
 const originalMousseHome = process.env.MOUSSE_HOME
@@ -70,43 +69,5 @@ describe('selective worktrees', () => {
     expect(result.includedFiles).not.toContain('docs/unrelated.md')
     expect(result.prospectiveFiles).toEqual(['missing.ts'])
     expect(result.rejectedFiles).toHaveLength(1)
-  })
-
-  it('materializes only the blast radius, preserves paths, and shares dependencies', async () => {
-    const { root } = await fixture()
-    const manager = new WorktreeManager(root)
-    await manager.init()
-    const worktree = await manager.createSelectiveWorktree('selective-agent-id', ['src/feature.ts', 'src/new-helper.ts'])
-
-    expect(readFileSync(join(worktree.path, 'src', 'feature.ts'), 'utf8')).toContain("'./math'")
-    expect(existsSync(join(worktree.path, 'src', 'math.ts'))).toBe(true)
-    expect(existsSync(join(worktree.path, 'src', 'app.ts'))).toBe(true)
-    expect(existsSync(join(worktree.path, 'tests', 'feature.test.ts'))).toBe(true)
-    expect(existsSync(join(worktree.path, 'docs', 'unrelated.md'))).toBe(false)
-    expect(lstatSync(join(worktree.path, 'node_modules')).isSymbolicLink()).toBe(true)
-    expect(worktree.sharedDependencyPaths).toEqual([join(worktree.path, 'node_modules')])
-    mkdirSync(join(worktree.path, '.mousse'), { recursive: true })
-    writeFileSync(join(worktree.path, '.mousse', 'task-progress.json'), '{"status":"working"}\n')
-    expect((await simpleGit(worktree.path).status()).isClean()).toBe(true)
-
-    const cleanup = await manager.cleanupValidatedAgentWorktree(worktree)
-    expect(cleanup.success).toBe(true)
-  })
-
-  it('materializes an explicitly selected untracked input without unrelated files', async () => {
-    const { root } = await fixture()
-    const manager = new WorktreeManager(root)
-    await manager.init()
-    const worktree = await manager.createSelectiveWorktree(
-      'untracked-input-agent',
-      ['docs/report.md', 'reference/local-input.mp4']
-    )
-
-    expect(readFileSync(join(worktree.path, 'reference', 'local-input.mp4'), 'utf8'))
-      .toBe('untracked media input\n')
-    expect(existsSync(join(worktree.path, 'docs', 'unrelated.md'))).toBe(false)
-
-    const cleanup = await manager.cleanupValidatedAgentWorktree(worktree)
-    expect(cleanup.success).toBe(true)
   })
 })

@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, statSync } from 'fs'
+import { readFile, stat } from 'fs/promises'
 import { dirname, extname, join, normalize, posix, relative, resolve, sep } from 'path'
 import type { SimpleGit } from 'simple-git'
 
@@ -80,6 +80,23 @@ function closure(seeds: Iterable<string>, edges: Map<string, Set<string>>): Set<
  * Builds a conservative source dependency graph from tracked files. Both dependencies
  * and dependents are included transitively so edits retain their compilation and test blast radius.
  */
+/** Source files read together. */
+const READ_BATCH = 256
+
+/** A tracked source file's text, or undefined when it is not there, is over 2 MiB, or cannot be read. */
+async function sourceText(absolute: string): Promise<string | undefined> {
+  try {
+    if ((await stat(absolute)).size > 2 * 1024 * 1024) return undefined
+    return await readFile(absolute, 'utf8')
+  } catch {
+    return undefined
+  }
+}
+
+async function isDirectory(path: string): Promise<boolean> {
+  return stat(path).then((found) => found.isDirectory(), () => false)
+}
+
 export class BlastRadiusAnalyzer {
   constructor(private readonly root: string, private readonly git: SimpleGit) {}
 
@@ -95,7 +112,7 @@ export class BlastRadiusAnalyzer {
         rejectedFiles.push({ path: requested, reason: 'Path must identify a file inside the repository.' })
       } else if (/[*?\[\]{}]/.test(normalized)) {
         rejectedFiles.push({ path: requested, reason: 'Globs are not allowed; declare exact file paths.' })
-      } else if (existsSync(join(this.root, ...normalized.split('/'))) && statSync(join(this.root, ...normalized.split('/'))).isDirectory()) {
+      } else if (await isDirectory(join(this.root, ...normalized.split('/')))) {
         rejectedFiles.push({ path: requested, reason: 'Directories are not allowed; declare exact file paths.' })
       } else if (!declaredFiles.includes(normalized)) {
         declaredFiles.push(normalized)
@@ -105,12 +122,19 @@ export class BlastRadiusAnalyzer {
 
     const forward = new Map<string, Set<string>>()
     const reverse = new Map<string, Set<string>>()
-    for (const file of tracked) {
-      if (!SOURCE_EXTENSIONS.includes(extname(file).toLowerCase())) continue
-      const absolute = join(this.root, ...file.split('/'))
+    const sources = [...tracked].filter((file) => SOURCE_EXTENSIONS.includes(extname(file).toLowerCase()))
+    // Read a batch at a time without blocking the daemon, then taken in the tracked files' order.
+    const contents = new Map<string, string | undefined>()
+    for (let start = 0; start < sources.length; start += READ_BATCH) {
+      const batch = sources.slice(start, start + READ_BATCH)
+      const read = await Promise.all(batch.map((file) => sourceText(join(this.root, ...file.split('/')))))
+      batch.forEach((file, index) => contents.set(file, read[index]))
+    }
+    for (const file of sources) {
       try {
-        if (!existsSync(absolute) || statSync(absolute).size > 2 * 1024 * 1024) continue
-        const imports = extractRelativeSpecifiers(readFileSync(absolute, 'utf8'))
+        const text = contents.get(file)
+        if (text === undefined) continue
+        const imports = extractRelativeSpecifiers(text)
         for (const specifier of imports) {
           const target = candidatePaths(file, specifier).find((candidate) => tracked.has(candidate))
           if (!target) continue

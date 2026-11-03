@@ -88,9 +88,11 @@ it('loads and shows only the real main window while MMS readiness remains withhe
   await vi.waitFor(() => expect(startup.controller.start).toHaveBeenCalledTimes(1))
   expect(window.options).toMatchObject({ width: 1400, height: 900, title: 'Mousse', show: false })
   expect(readStartupAppearanceArgument(window.options.webPreferences.additionalArguments)).toMatchObject({ theme: 'blacksphere-plus' })
+  // The local speech models' threads need it; only this window gets it, never its webviews.
+  expect(window.options.webPreferences.enableBlinkFeatures).toBe('SharedArrayBuffer')
   if (process.platform === 'win32') {
-    expect(window.options).toMatchObject({ backgroundMaterial: 'acrylic' })
-    expect(window.options.backgroundColor).toMatch(/^#00[0-9a-f]{6}$/)
+    expect(window.options).toMatchObject({ backgroundMaterial: 'none' })
+    expect(window.options.backgroundColor).toMatch(/^#[0-9a-f]{6}$/)
   }
   expect(window.show).toHaveBeenCalled()
   expect(window.loadFile.mock.calls.length + window.loadURL.mock.calls.length).toBe(1)

@@ -1,18 +1,22 @@
-import { execFileSync } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import type { ChangeReceipt } from '../../shared/threadActions'
 import { ThreadJournal } from '../data/ThreadJournal'
-import { resolveRepositoryIdentity } from '../git/RepositoryIdentity'
-import { buildResourceInventory } from '../lifecycle/ResourceInventory'
-import { getExternalResourceClaims } from '../lifecycle/LifecycleClaims'
-import { readDirectLifecycleRef } from '../lifecycle/WorktreeRetirementService'
+import { resolveRepositoryIdentityAsync } from '../git/RepositoryIdentity'
+import { buildResourceInventory, buildResourceInventoryFromFacts, OwnershipFacts } from '../lifecycle/ResourceInventory'
+import { getExternalResourceClaims, getExternalResourceClaimsFromFacts, repositoryTargetAsync, unverifiedOwnerOver } from '../lifecycle/LifecycleClaims'
+import { readDirectLifecycleRefAsync } from '../lifecycle/WorktreeRetirementService'
 import type { ResourceLifecycleStore } from '../lifecycle/ResourceLifecycleStore'
 import type { ThreadLeaseHandle } from '../queue/ThreadExecutionLease'
 import { ThreadWorkspaceManager } from '../workspace/ThreadWorkspaceManager'
 import { ChangeReceiptService } from './ChangeReceiptService'
 import { withGitMutationLocks } from './GitOperationCoordinator'
 import { UndoRetentionService } from './UndoRetentionService'
-import { repoProgramEnv, withoutRepoPrograms } from '../git/repoPrograms'
+import { repoProgramEnv, withoutRepoProgramsAsync } from '../git/repoPrograms'
+import { gitRunError, runGitProcess } from '../git/runGitProcess'
+import { settlesItself } from '../../shared/resourceLifecycle'
+
+/** The ownership inventory showed a blocker: the whole release stops, as when it shows one before the first receipt. */
+class OwnershipBlocked extends Error {}
 
 interface ReleaseIntent { version: 1; receiptId: string; repositoryId: string; refs: Array<{ name: string; sha: string }> }
 export interface ReceiptRefReleaseResult { releasedRefs: string[]; retained: Array<{ receiptId: string; reason: string }>; reclaimedGitBytes: null }
@@ -27,9 +31,9 @@ export class ReceiptRefReleaseService {
     const admission = this.store.captureAdmission(task.taskId, task.location)
     const limit = options.limit ?? 20
     if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw new Error('Invalid receipt release batch size.')
-    return withGitMutationLocks(task.location, workspacePath, 'undo-ref-release', () => {
+    return withGitMutationLocks(task.location, workspacePath, 'undo-ref-release', async () => {
       this.store.assertAdmission(admission)
-      const identity = resolveRepositoryIdentity(workspacePath, { requireMutationCapability: true })
+      const identity = await resolveRepositoryIdentityAsync(workspacePath, { requireMutationCapability: true })
       const workspace = new ThreadWorkspaceManager(task.location).load()
       if (!workspace || workspace.repositoryId !== identity.key || workspace.lifecycle !== 'ready') throw new Error('Receipt release repository does not match the authoritative task workspace.')
       const journal = new ThreadJournal(task.location)
@@ -38,19 +42,35 @@ export class ReceiptRefReleaseService {
       const expired = retention.expiredReceiptIds()
       const receipts = new ChangeReceiptService(task.location).list()
       const latest = [...journal.latestByOperation().values()]
-      if (latest.some((entry) => entry.operationType !== 'undo-ref-release' && ['planned', 'running', 'prepared', 'git_applied', 'context_pending', 'recovery_required'].includes(entry.state))) throw new Error('Active or recovery operations protect receipt refs.')
+      if (latest.some((entry) => entry.operationType !== 'undo-ref-release' && !settlesItself(entry.operationType) && ['planned', 'running', 'prepared', 'git_applied', 'context_pending', 'recovery_required'].includes(entry.state))) throw new Error('Active or recovery operations protect receipt refs.')
       const pending = latest.filter((entry) => entry.operationType === 'undo-ref-release' && entry.state === 'prepared')
       const complete = new Set(latest.filter((entry) => entry.operationType === 'undo-ref-release' && entry.state === 'completed').map((entry) => (entry.details as ReleaseIntent).receiptId))
       const candidates = [...pending.map((entry) => ({ receipt: receipts.find((receipt) => receipt.id === (entry.details as ReleaseIntent).receiptId), operationId: entry.operationId, intent: entry.details as ReleaseIntent })),
         ...receipts.filter((receipt) => expired.has(receipt.id) && !complete.has(receipt.id) && !pending.some((entry) => (entry.details as ReleaseIntent).receiptId === receipt.id)).map((receipt) => ({ receipt, operationId: randomUUID(), intent: undefined as ReleaseIntent | undefined }))].slice(0, limit)
       const result: ReceiptRefReleaseResult = { releasedRefs: [], retained: [], reclaimedGitBytes: null }
       if (!candidates.length) return result
-      // All live source records, across this profile, are re-read inside the repository lease.
-      // No await occurs between this inventory and the CAS transaction below.
-      const inventory = buildResourceInventory(this.store, task)
-      const external = getExternalResourceClaims(this.store, new Set([task.taskId]))
-      const blockers = inventory.blockers
-      if (blockers.length) throw new Error(`Receipt ref release needs unambiguous ownership: ${blockers.join('; ')}`)
+      // All live source records, across this profile, are re-read inside the repository lease: here, and again right
+      // before each receipt's transaction starts, with no await in between, since the reads of the refs now wait. The
+      // checkouts and project folders they name are read just before, without blocking (`OwnershipFacts`); a record
+      // that names one those facts do not cover fails closed.
+      let facts = new OwnershipFacts()
+      const readFacts = async (): Promise<void> => {
+        facts = new OwnershipFacts()
+        await buildResourceInventory(this.store, task, {}, facts)
+        // Only the facts are wanted here: a refusal is made again, from the records, by `ownership`.
+        await getExternalResourceClaims(this.store, new Set([task.taskId]), facts).catch(() => undefined)
+      }
+      const ownership = () => {
+        const inventory = buildResourceInventoryFromFacts(this.store, task, facts)
+        const external = getExternalResourceClaimsFromFacts(this.store, new Set([task.taskId]), facts)
+        const blockers = inventory.blockers
+        if (blockers.length) throw new OwnershipBlocked(`Receipt ref release needs unambiguous ownership: ${blockers.join('; ')}`)
+        return { inventory, external }
+      }
+      await readFacts()
+      ownership()
+      // This repository as an unverified thread's scope is matched against it: its keys and the worktrees it registers.
+      const repository = await repositoryTargetAsync(identity.commonDir, identity.key)
       for (const candidate of candidates) {
         const receipt = candidate.receipt
         if (!receipt) throw new Error('Release journal references a missing immutable receipt.')
@@ -58,32 +78,45 @@ export class ReceiptRefReleaseService {
           if (!expired.has(receipt.id)) throw new Error('Receipt Undo claim is still retained.')
           const intent = this.intent(receipt, identity.key)
           if (candidate.intent && JSON.stringify(candidate.intent) !== JSON.stringify(intent)) throw new Error('Release intent does not match immutable receipt ownership.')
+          const present: Array<{ name: string; sha: string }> = []
           for (const ref of intent.refs) {
-            const resources = inventory.resources.filter((resource) => resource.kind === 'git-ref' && resource.identity === ref.name)
-            if (external.some((resource) => resource.kind === 'git-ref' && resource.identity === ref.name && (!resource.repositoryId || resource.repositoryId === identity.key))) throw new Error(`Reference is associated with another task or profile: ${ref.name}`)
-            if (!resources.length || resources.some((resource) => resource.ownerTaskId !== task.taskId || resource.repositoryId !== identity.key || resource.claims.length > 0 || resource.ownership === 'unknown')) throw new Error(`Reference has an active, shared or unknown claim: ${ref.name}`)
-          }
-          const present = intent.refs.filter((ref) => {
             // A successful exact ref enumeration proves absence. Git errors and
             // symbolic references cannot be interpreted as an interrupted delete.
-            const current = readDirectLifecycleRef(workspacePath, ref.name)
+            const current = await readDirectLifecycleRefAsync(workspacePath, ref.name)
             if (current === undefined) {
               if (!candidate.intent) throw new Error(`Receipt reference is unexpectedly absent: ${ref.name}`)
-              return false // interrupted transaction may already have removed it
+              continue // interrupted transaction may already have removed it
             }
             if (current !== ref.sha) throw new Error(`Receipt reference changed: ${ref.name}`)
-            return true
-          })
+            present.push(ref)
+          }
+          const release = `start\n${present.map((ref) => `delete ${ref.name} ${ref.sha}`).join('\n')}\nprepare\ncommit\n`
+          // Checked (by the central Git check) before ownership is read, so that from there to the start of the transaction nothing waits.
+          const argv = present.length ? await withoutRepoProgramsAsync(workspacePath, ['update-ref', '--no-deref', '--stdin'], { stdin: release }) : undefined
+          await readFacts()
+          const { inventory, external } = ownership()
+          for (const ref of intent.refs) {
+            const resources = inventory.resources.filter((resource) => resource.kind === 'git-ref' && resource.identity === ref.name)
+            // Receipt refs are named by their receipt's id, so a claim on the same name is on this ref whatever repository the
+            // claim records: a record written before the repository moved still names the old one.
+            if (external.some((resource) => resource.kind === 'git-ref' && resource.identity === ref.name)) throw new Error(`Reference is associated with another task or profile: ${ref.name}`)
+            // A thread whose checkout can't be verified holds what its records may name, and its repositories (recorded or real).
+            const unverified = unverifiedOwnerOver(external, { ...repository, ref: ref.name })
+            if (unverified) throw new Error(`${unverified.reason} ${ref.name} is kept.`)
+            if (!resources.length || resources.some((resource) => resource.ownerTaskId !== task.taskId || resource.repositoryId !== identity.key || resource.claims.length > 0 || resource.ownership === 'unknown')) throw new Error(`Reference has an active, shared or unknown claim: ${ref.name}`)
+          }
           if (!candidate.intent) journal.append({ operationId: candidate.operationId, operationType: 'undo-ref-release', state: 'prepared', details: intent })
           options.afterPrepared?.()
-          if (present.length) execFileSync('git', withoutRepoPrograms(workspacePath, ['update-ref', '--no-deref', '--stdin']), {
-            cwd: workspacePath, env: repoProgramEnv(), input: `start\n${present.map((ref) => `delete ${ref.name} ${ref.sha}`).join('\n')}\nprepare\ncommit\n`, encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true
-          })
+          if (argv) {
+            const ran = await runGitProcess(argv, { cwd: workspacePath, env: repoProgramEnv(), input: release })
+            if (ran.error || ran.status !== 0) throw gitRunError(argv, ran)
+          }
           options.afterGit?.()
-          if (intent.refs.some((ref) => readDirectLifecycleRef(workspacePath, ref.name) !== undefined)) throw new Error('Receipt reference survived the release transaction.')
+          for (const ref of intent.refs) if (await readDirectLifecycleRefAsync(workspacePath, ref.name) !== undefined) throw new Error('Receipt reference survived the release transaction.')
           journal.append({ operationId: candidate.operationId, operationType: 'undo-ref-release', state: 'completed', details: intent })
           result.releasedRefs.push(...intent.refs.map((ref) => ref.name))
         } catch (error) {
+          if (error instanceof OwnershipBlocked) throw error
           result.retained.push({ receiptId: receipt.id, reason: error instanceof Error ? error.message : String(error) })
           // A pending operation remains visible and blocks other mutations until this service retries.
           if (journal.latestByOperation().get(candidate.operationId)?.state === 'prepared') break
