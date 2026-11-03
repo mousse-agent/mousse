@@ -70,9 +70,13 @@ export async function portableRepositoryAt(
     for (const value of (await git(root, ['remote', 'get-url', '--all', name], signal)).split('\n'))
       remotes.push(normalizeRemote(value))
   }
+  // Mousse's own refs are left out: the commits it keeps there (Git's data of a removed worktree, say) can be root
+  // commits, and each would otherwise change the repository's identity, then pass the 256-root limit.
   const roots = [
     ...new Set(
-      (await git(root, ['rev-list', '--max-parents=0', '--all'], signal)).split('\n').filter(Boolean)
+      (await git(root, ['rev-list', '--max-parents=0', '--exclude=refs/mousse/*', '--all'], signal))
+        .split('\n')
+        .filter(Boolean)
     )
   ].sort()
   if (!roots.length || roots.length > 256 || roots.some((value) => !COMMIT.test(value)))

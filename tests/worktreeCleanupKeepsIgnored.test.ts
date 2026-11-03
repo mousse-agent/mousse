@@ -5,7 +5,9 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { KEEP_COPY_LIMITS, keptCopyRestoreCommand } from '../src/mms/actions/keptCopies'
-import { threadPreservedIndex } from '../src/mms/actions/preservedFiles'
+import { expirePreservedFiles, threadPreservedIndex } from '../src/mms/actions/preservedFiles'
+import { UndoRetentionService } from '../src/mms/actions/UndoRetentionService'
+import { DEFAULT_UNDO_RETENTION_POLICY } from '../src/shared/undoRetention'
 import { WorktreeManager } from '../src/mms/worktree/WorktreeManager'
 import { ownedHome } from './support/fixtureGit'
 
@@ -19,6 +21,9 @@ afterEach(() => {
 
 const git = (cwd: string, ...args: string[]): string => execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim()
 const preservedRefs = (cwd: string): string[] => git(cwd, 'for-each-ref', '--format=%(refname)', 'refs/mousse/preserved/').split('\n').filter(Boolean)
+/** The bytes a kept file gives back: `git cat-file blob <ref>:<path>`, the restore command, read as bytes. */
+const keptBytes = (cwd: string, ref: string, path: string): Buffer => execFileSync('git', ['cat-file', 'blob', `${ref}:${path}`], { cwd, stdio: ['ignore', 'pipe', 'pipe'] })
+const exists = (cwd: string, sha: string): boolean => { try { git(cwd, 'cat-file', '-e', sha); return true } catch { return false } }
 
 /** A repository and an installation home of Mousse's, as the audit reproduction set them up. */
 function setup() {
@@ -63,21 +68,23 @@ describe('agent worktree cleanup keeps ignored files first', () => {
     const { cwd, owner, manager } = setup()
     const info = await manager.createWorktree('audit-agent-456', cwd)
     mkdirSync(join(info.path, 'ignored')); writeFileSync(join(info.path, 'ignored', 'out.bin'), randomBytes(64))
-    const steps: Array<{ phase: string; present: boolean; ref?: string }> = []
-    const result = await manager.cleanupValidatedAgentWorktree(info, { safeCheckout: true, keepIgnored: { owner, record: (step) => steps.push({ phase: step.phase, present: existsSync(info.path), ...('ref' in step ? { ref: step.ref } : {}) }) } })
-    expect(steps).toEqual([{ phase: 'keeping', present: true }, { phase: 'removing', present: true, ref: result.copy!.ref }])
-    expect(preservedRefs(cwd)).toEqual([result.copy!.ref])
+    const steps: Array<{ phase: string; present: boolean; ref?: string; admin?: string }> = []
+    const result = await manager.cleanupValidatedAgentWorktree(info, { safeCheckout: true, keepIgnored: { owner, record: (step) => steps.push({ phase: step.phase, present: existsSync(info.path), ...('ref' in step ? { ref: step.ref } : {}), ...('admin' in step ? { admin: step.admin.ref } : {}) }) } })
+    expect(steps).toEqual([{ phase: 'keeping', present: true }, { phase: 'removing', present: true, ref: result.copy!.ref, admin: result.admin!.ref }])
+    expect(preservedRefs(cwd).sort()).toEqual([result.copy!.ref, result.admin!.ref].sort())
   })
 
-  it('removes a worktree with no ignored files as before, keeping nothing', async () => {
+  it('removes a worktree with no ignored files after keeping only Git\'s own data of it', async () => {
     const { cwd, owner, manager } = setup()
     const info = await manager.createWorktree('audit-agent-789', cwd)
     const steps: string[] = []
     const result = await manager.cleanupValidatedAgentWorktree(info, { safeCheckout: true, keepIgnored: { owner, record: (step) => steps.push(step.phase) } })
-    expect(result).toEqual({ success: true })
+    expect(result).toEqual({ success: true, admin: { ref: expect.any(String), sha: expect.any(String), windowMs: DEFAULT_UNDO_RETENTION_POLICY.windowMs } })
     expect(existsSync(info.path)).toBe(false)
-    expect(steps).toEqual([])
-    expect(preservedRefs(cwd)).toEqual([])
+    expect(steps).toEqual(['keeping', 'removing'])
+    expect(preservedRefs(cwd)).toEqual([result.admin!.ref])
+    // Every commit the worktree named is held by a branch, so the kept commit is a root commit with no parents.
+    expect(git(cwd, 'rev-list', '--parents', '-n1', result.admin!.ref)).toBe(result.admin!.sha)
   })
 
   it('over the copy limit, keeps the worktree and every ignored file, and says how many there are', async () => {
@@ -95,6 +102,16 @@ describe('agent worktree cleanup keeps ignored files first', () => {
     }
     expect(readFileSync(join(info.path, 'ignored', 'big.bin')).equals(big)).toBe(true)
     expect(readFileSync(join(info.path, 'ignored', 'small.txt'), 'utf8')).toBe('small\n')
+    expect(git(cwd, 'worktree', 'list', '--porcelain')).toContain(info.path)
+    expect(preservedRefs(cwd)).toEqual([])
+  })
+
+  it('with nothing to own a copy, keeps a worktree that has no ignored files, for Git\'s own data of it', async () => {
+    const { cwd, manager } = setup()
+    const info = await manager.createWorktree('audit-agent-none-clean', cwd)
+    const result = await manager.cleanupValidatedAgentWorktree(info, { safeCheckout: true })
+    expect(result).toMatchObject({ success: false, kept: { ignoredFiles: 0, code: 'no_owner', reason: expect.stringMatching(/^Kept: nothing owns a copy of Git's own data/) } })
+    expect(existsSync(info.path)).toBe(true)
     expect(git(cwd, 'worktree', 'list', '--porcelain')).toContain(info.path)
     expect(preservedRefs(cwd)).toEqual([])
   })
@@ -119,5 +136,82 @@ describe('agent worktree cleanup keeps ignored files first', () => {
     expect(readFileSync(join(info.path, 'draft.txt'), 'utf8')).toBe('untracked\n')
     expect(readFileSync(join(info.path, 'ignored', 'out.txt'), 'utf8')).toBe('ignored\n')
     expect(preservedRefs(cwd)).toEqual([])
+  })
+})
+
+describe("agent worktree cleanup keeps Git's own data of the worktree", () => {
+  /** Moves the owner's retention clock to `at` in steps the clock check accepts. */
+  async function advance(owner: string, top: string, from: number, at: number): Promise<void> {
+    for (let now = from; now < at; now = Math.min(at, now + 6 * 24 * 60 * 60 * 1000)) await new UndoRetentionService(owner, () => now).sweep(top)
+    await new UndoRetentionService(owner, () => at).sweep(top)
+  }
+
+  it('keeps per-worktree settings, HEAD history and the commit only that history named, until the copy expires (the audit reproduction N4, inverted)', async () => {
+    const { cwd, owner, manager } = setup()
+    const start = Date.now()
+    await new UndoRetentionService(owner, () => start).sweep(cwd)
+    const info = await manager.createWorktree('audit-cleanup-admin', cwd, git(cwd, 'rev-parse', 'HEAD'))
+    git(cwd, 'config', 'extensions.worktreeConfig', 'true')
+    git(info.path, 'config', '--worktree', 'audit.note', 'sole admin setting 3c91dd')
+    const admin = git(info.path, 'rev-parse', '--absolute-git-dir'), config = readFileSync(join(admin, 'config.worktree'))
+    // A commit made on a detached HEAD and then left: only the worktree's HEAD history names it.
+    const original = git(info.path, 'rev-parse', 'HEAD'); git(info.path, 'checkout', '-q', '--detach')
+    writeFileSync(join(info.path, 'base.txt'), 'abandoned user commit contents\n'); git(info.path, 'commit', '-qam', 'abandoned')
+    const abandoned = git(info.path, 'rev-parse', 'HEAD'); git(info.path, 'reset', '-q', '--hard', original)
+    const reflog = readFileSync(join(admin, 'logs', 'HEAD'))
+    expect(reflog.toString()).toContain(abandoned)
+
+    const result = await manager.cleanupValidatedAgentWorktree(info, { safeCheckout: true, keepIgnored: { owner } })
+
+    expect(result.success).toBe(true); expect(existsSync(admin)).toBe(false); expect(existsSync(info.path)).toBe(false)
+    const ref = result.admin!.ref
+    expect(threadPreservedIndex(owner).owns(ref)).toBe(true)
+    expect(keptBytes(cwd, ref, 'config.worktree').equals(config)).toBe(true)
+    expect(keptBytes(cwd, ref, 'logs/HEAD').equals(reflog)).toBe(true)
+    expect(git(cwd, 'rev-parse', `${ref}^@`).split('\n')).toEqual([abandoned])
+
+    // Inside the window nothing expires, and Git's garbage collection keeps the abandoned commit.
+    const inside = start + DEFAULT_UNDO_RETENTION_POLICY.windowMs - 60 * 60 * 1000
+    await advance(owner, cwd, start, inside)
+    expect((await expirePreservedFiles(owner, cwd, { now: () => inside })).expiredRefs).toEqual([])
+    git(cwd, 'reflog', 'expire', '--expire=now', '--all'); git(cwd, 'gc', '-q', '--prune=now')
+    expect(git(cwd, 'cat-file', '-t', abandoned)).toBe('commit')
+    expect(keptBytes(cwd, ref, 'logs/HEAD').equals(reflog)).toBe(true)
+
+    // After it, the copy goes, and the pin with it.
+    const after = start + DEFAULT_UNDO_RETENTION_POLICY.windowMs + 60 * 60 * 1000
+    await advance(owner, cwd, inside, after)
+    expect((await expirePreservedFiles(owner, cwd, { now: () => after })).expiredRefs).toEqual([ref])
+    expect(preservedRefs(cwd)).toEqual([])
+    git(cwd, 'reflog', 'expire', '--expire=now', '--all'); git(cwd, 'gc', '-q', '--prune=now')
+    expect(exists(cwd, abandoned)).toBe(false)
+  })
+
+  it('keeps the commit a worktree\'s branch alone held, since the branch may go after it', async () => {
+    const { cwd, owner, manager } = setup()
+    const info = await manager.createWorktree('audit-cleanup-branch', cwd)
+    writeFileSync(join(info.path, 'base.txt'), 'agent work\n'); git(info.path, 'commit', '-qam', 'agent work')
+    const work = git(info.path, 'rev-parse', 'HEAD')
+    const result = await manager.cleanupValidatedAgentWorktree(info, { safeCheckout: true, keepIgnored: { owner }, deleteBranch: false })
+    expect(result.success).toBe(true)
+    expect(git(cwd, 'rev-parse', `${result.admin!.ref}^@`).split('\n')).toEqual([work])
+    git(cwd, 'branch', '-D', info.branch); git(cwd, 'reflog', 'expire', '--expire=now', '--all'); git(cwd, 'gc', '-q', '--prune=now')
+    expect(git(cwd, 'cat-file', '-t', work)).toBe('commit')
+  })
+
+  it('a confirmed delete from Storage removes the ignored files with the worktree and still keeps Git\'s own data of it', async () => {
+    const { cwd, owner, manager } = setup()
+    const info = await manager.createWorktree('audit-cleanup-confirmed', cwd)
+    git(cwd, 'config', 'extensions.worktreeConfig', 'true')
+    git(info.path, 'config', '--worktree', 'audit.note', 'confirmed delete setting')
+    const config = readFileSync(join(git(info.path, 'rev-parse', '--absolute-git-dir'), 'config.worktree'))
+    mkdirSync(join(info.path, 'ignored')); writeFileSync(join(info.path, 'ignored', 'out.bin'), randomBytes(64))
+    const steps: string[] = []
+    const result = await manager.cleanupValidatedAgentWorktree(info, { safeCheckout: true, keepIgnored: { owner, deleteIgnored: true, record: (step) => steps.push(`${step.phase}:${step.files}`) } })
+    expect(result.success).toBe(true); expect(result.copy).toBeUndefined()
+    expect(existsSync(info.path)).toBe(false)
+    expect(steps).toEqual(['keeping:0', 'removing:0'])
+    expect(preservedRefs(cwd)).toEqual([result.admin!.ref])
+    expect(keptBytes(cwd, result.admin!.ref, 'config.worktree').equals(config)).toBe(true)
   })
 })

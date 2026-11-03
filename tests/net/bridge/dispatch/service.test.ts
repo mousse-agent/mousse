@@ -33,6 +33,7 @@ import { dispatchKeptFilesOwner, KEEP_COPY_LIMITS, keptCopyRestoreCommand } from
 import { threadPreservedIndex } from '../../../../src/mms/actions/preservedFiles'
 import { UndoRetentionSweeper } from '../../../../src/mms/actions/UndoRetentionSweeper'
 import { listKeptWorktrees } from '../../../../src/mms/lifecycle/keptWorktrees'
+import { isCleanupAdminCapture } from '../../../../src/mms/lifecycle/worktreeAdminData'
 import { ResourceLifecycleCoordinator } from '../../../../src/mms/lifecycle/ResourceLifecycleCoordinator'
 import type { ResourceLifecycleStore } from '../../../../src/mms/lifecycle/ResourceLifecycleStore'
 import { StorageCleanupService } from '../../../../src/mms/lifecycle/StorageCleanupService'
@@ -223,6 +224,30 @@ it('derives the same portable identity for clones and normalized transport/user 
   expect(() => normalizeRemote('https://example.com/team/repo.git?token=secret')).toThrow()
   await writeFile(join(clone, 'dirty.txt'), 'caller dirty')
   expect((await portableRepository(clone)).repoId).toBe(f.request.repoId)
+})
+
+it('keeps its identity with Mousse-owned root commits under refs/mousse, and dispatch still runs', async () => {
+  const f = await fixture()
+  // Mousse keeps Git's data of a removed worktree as a commit that is often a root commit, under refs/mousse/. 300 of
+  // them pass the 256-root limit; none may change the identity.
+  const stream = Array.from({ length: 300 }, (_, index) =>
+    `commit refs/mousse/preserved/root-${index}\ncommitter Mousse <mousse@localhost> ${index} +0000\ndata ${String(index).length}\n${index}\n`).join('')
+  execFileSync('git', ['fast-import', '--quiet'], { cwd: f.repo, input: stream })
+  expect((await git(f.repo, ['rev-list', '--max-parents=0', '--all'])).split('\n')).toHaveLength(301)
+  expect((await portableRepository(f.repo)).repoId).toBe(f.request.repoId)
+  await f.service.bindRepository(f.request.repoId, f.repo)
+  await f.service.run(f.request, f.context, f.execution)
+  const record = f.service.query(f.execution, f.context)!
+  f.commit()
+  await f.service.drainCleanup()
+  expect(f.service.query(f.execution, f.context)).toMatchObject({ state: 'completed', phase: 'complete' })
+  await expect(stat(record.worktree!.path)).rejects.toMatchObject({ code: 'ENOENT' })
+  // The cleanup kept Git's data of the dispatch's worktree as a copy the dispatch owns; the identity is still the same.
+  const owner = dispatchKeptFilesOwner(f.profile, record.id)
+  const kept = (await git(f.repo, ['for-each-ref', '--format=%(refname)', 'refs/mousse/preserved/'])).split('\n').filter((ref) => threadPreservedIndex(owner).owns(ref))
+  expect(kept).toHaveLength(1)
+  expect(await git(f.repo, ['cat-file', '-t', `${kept[0]}:HEAD`])).toBe('blob')
+  expect((await portableRepository(f.repo)).repoId).toBe(f.request.repoId)
 })
 
 it('requires explicit binding and exact profile before worktree/model effects', async () => {
@@ -876,6 +901,12 @@ describe('worktree cleanup keeps the ignored files a dispatch made', () => {
     return readFileSync(join(repo, path))
   }
   const preservedRefs = async (repo: string) => (await git(repo, ['for-each-ref', '--format=%(refname)', 'refs/mousse/preserved/'])).split('\n').filter(Boolean)
+  /** The copies of Git's own data of a removed worktree, which cleanup keeps beside the copy of its ignored files. */
+  const adminRefs = async (repo: string) => {
+    const refs: string[] = []
+    for (const ref of await preservedRefs(repo)) if (await isCleanupAdminCapture(repo, ref)) refs.push(ref)
+    return refs
+  }
   /** A completed dispatch whose agent left `files` in its worktree. */
   async function completedDispatch(files: Record<string, Buffer>) {
     const f = await fixture(async (request) => {
@@ -911,7 +942,11 @@ describe('worktree cleanup keeps the ignored files a dispatch made', () => {
     await expect(stat(worktree)).rejects.toMatchObject({ code: 'ENOENT' })
     // The dispatch owns the copy, so its Undo window decides when it goes.
     expect(threadPreservedIndex(dispatchKeptFilesOwner(f.profile, record.id)).owns(record.worktreeCopy!.ref)).toBe(true)
-    expect(await preservedRefs(f.repo)).toEqual([record.worktreeCopy!.ref])
+    // Beside it, the dispatch keeps Git's own data of the worktree, until the same window ends.
+    const admin = await adminRefs(f.repo)
+    expect(admin).toHaveLength(1)
+    expect(threadPreservedIndex(dispatchKeptFilesOwner(f.profile, record.id)).owns(admin[0]!)).toBe(true)
+    expect((await preservedRefs(f.repo)).sort()).toEqual([record.worktreeCopy!.ref, admin[0]!].sort())
     for (const [path, bytes] of Object.entries(files)) expect(restore(f.repo, record.worktreeCopy!.ref, path).equals(bytes)).toBe(true)
   })
 
@@ -961,7 +996,7 @@ describe('worktree cleanup keeps the ignored files a dispatch made', () => {
     expect(existsSync(record.worktree!.path)).toBe(true)
   })
 
-  it('with no ignored files, removes the worktree as before and keeps nothing', async () => {
+  it('with no ignored files, removes the worktree after keeping only Git\'s own data of it', async () => {
     const f = await completedDispatch({})
     const worktree = f.service.query(f.execution, f.context)!.worktree!.path
     f.commit()
@@ -971,8 +1006,10 @@ describe('worktree cleanup keeps the ignored files a dispatch made', () => {
     expect(record.worktreeCopy).toBeUndefined()
     expect(record.worktreeKept).toBeUndefined()
     await expect(stat(worktree)).rejects.toMatchObject({ code: 'ENOENT' })
-    expect(await preservedRefs(f.repo)).toEqual([])
-    expect(existsSync(dispatchKeptFilesOwner(f.profile, record.id))).toBe(false)
+    const admin = await adminRefs(f.repo)
+    expect(admin).toHaveLength(1)
+    expect(await preservedRefs(f.repo)).toEqual(admin)
+    expect(threadPreservedIndex(dispatchKeptFilesOwner(f.profile, record.id)).owns(admin[0]!)).toBe(true)
   })
 
   it('a start after the process ended before cleanup began keeps the ignored files, then removes the worktree', async () => {
@@ -1122,12 +1159,15 @@ describe('worktree cleanup keeps the ignored files a dispatch made', () => {
       }
       vi.setSystemTime(start + 30 * DAY - 60 * 60 * 1000)
       await sweeper.tick()
-      expect(await preservedRefs(f.repo)).toEqual([record.worktreeCopy!.ref])
+      const admin = await adminRefs(f.repo)
+      expect(admin).toHaveLength(1)
+      expect((await preservedRefs(f.repo)).sort()).toEqual([record.worktreeCopy!.ref, admin[0]!].sort())
       expect(sweeper.outcomes.get(`dispatch:${record.id}:${f.repo}`)).toMatchObject({ expiredPreservedRefs: 0 })
       vi.setSystemTime(start + 30 * DAY + 60 * 60 * 1000)
       await sweeper.tick()
+      // Both copies go together: the ignored files, and Git's own data of the worktree with the commits only it named.
       expect(await preservedRefs(f.repo)).toEqual([])
-      expect(sweeper.outcomes.get(`dispatch:${record.id}:${f.repo}`)).toMatchObject({ expiredPreservedRefs: 1 })
+      expect(sweeper.outcomes.get(`dispatch:${record.id}:${f.repo}`)).toMatchObject({ expiredPreservedRefs: 2 })
       await sweeper.stop()
     } finally {
       vi.useRealTimers()

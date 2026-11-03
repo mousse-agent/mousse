@@ -30,6 +30,7 @@ import { expireSnapshotTrash } from '../workspace/SnapshotWorkspace'
 import { expireTrashedSnapshotRefs } from '../actions/SnapshotRefReleaseService'
 import { WorktreeManager } from '../worktree/WorktreeManager'
 import { forgetKeptWorktree, listKeptWorktrees, type KeptWorktree } from './keptWorktrees'
+import { dispatchKeptFilesOwner, registerDispatchKeptFilesFolder } from '../actions/keptCopies'
 
 const DAY_MS = 86_400_000
 const FIRST_RUN_DELAY_MS = 5 * 60_000
@@ -1199,7 +1200,8 @@ export class StorageCleanupService {
 
   /**
    * In a run: a worktree a finished dispatch left in place is removed, with its ignored files, only when the confirmed
-   * plan named it (`allowed`); otherwise it is reported as kept. Git still refuses one with untracked or changed files.
+   * plan named it (`allowed`); otherwise it is reported as kept. Git's own data of it is kept first, as a copy the
+   * dispatch owns. Git still refuses one with untracked or changed files.
    * A record whose folder is gone is forgotten.
    */
   private async dispatchWorktreeItems(allowed?: ReadonlySet<string>): Promise<StorageCleanupItem[]> {
@@ -1211,8 +1213,12 @@ export class StorageCleanupService {
       const measurement = await this.measure(kept.path, { mode: 'reclaim', budgetMs: MEASURE_BUDGET_MS })
       const sized = { bytes: measurement.bytes, files: measurement.files, ...approximate(measurement) }
       if (!allowed?.has(base.key!)) { items.push({ ...base, ...sized, outcome: 'kept', reason: `${this.dispatchWorktreeReason(kept)} Clean up now lists it.` }); continue }
+      // The ignored files go, as confirmed; Git's own data of the worktree is kept, as a copy the dispatch owns.
+      let owner: string | undefined
+      try { owner = dispatchKeptFilesOwner(this.deps.store.profileHome, kept.dispatchId) } catch { owner = undefined }
       const result = await new WorktreeManager(kept.repositoryRoot, this.deps.installationHome).cleanupValidatedAgentWorktree(
-        { path: kept.path, branch: kept.branch, repositoryRoot: kept.repositoryRoot }, { safeCheckout: true, keepIgnored: 'delete-confirmed' })
+        { path: kept.path, branch: kept.branch, repositoryRoot: kept.repositoryRoot },
+        { safeCheckout: true, ...(owner ? { keepIgnored: { owner, deleteIgnored: true, record: (step) => { if (step.phase === 'keeping') registerDispatchKeptFilesFolder(owner, kept.dispatchId, kept.repositoryRoot) } } } : {}) })
       if (result.success) {
         forgetKeptWorktree(this.deps.store.profileHome, kept.dispatchId)
         items.push({ ...base, ...sized, outcome: 'removed', reason: `Removed with its ${plural(kept.ignoredFiles, 'ignored file')}, as confirmed` })

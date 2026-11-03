@@ -12,6 +12,8 @@ import { createAgentToolAccess } from '../agents/WorkspaceAccessPolicy'
 import type { AgentWorkspacePolicy } from '../../shared/agentEpisodes'
 import { AsyncLocalStorage } from 'async_hooks'
 import { join, resolve } from 'node:path'
+import { projectKeptFilesOwner, registerProjectKeptFilesFolder } from '../actions/keptCopies'
+import { getMousseHomeDir } from '../data/paths'
 import { tmpdir } from 'node:os'
 import { readFileSync } from 'node:fs'
 import {
@@ -11272,8 +11274,9 @@ export class OrchestratorService extends EventEmitter {
   /**
    * Explicit cleanup of validated agent worktrees only. Ghost directories are never deleted.
    * Cancelled/failed/ready worktrees are kept unless their agent ids are listed. A worktree's ignored
-   * files are kept first, as a copy the agent's thread owns; with no thread, or when they cannot be
-   * kept, the worktree stays.
+   * files and Git's own data of it are kept first, as copies the agent's thread owns, or its project
+   * when it has no thread (`agentCleanupOwner`); with neither, or when they cannot be kept, the
+   * worktree stays.
    */
   async cleanupAgentWorktrees(
     agentIds: string[],
@@ -11283,22 +11286,41 @@ export class OrchestratorService extends EventEmitter {
     const targets = agentIds
       .map((id) => this.agents.get(id))
       .filter((agent): agent is Agent => Boolean(agent))
-      .map((agent) => ({ path: agent.worktreePath, branch: agent.branch, id: agent.id }))
+      .map((agent) => ({ path: agent.worktreePath, branch: agent.branch, id: agent.id, repositoryRoot: agent.repositoryRoot }))
 
     for (const target of targets) {
-      const threadId = this.agentOwner(target.id)?.threadId
-      const owner = threadId ? this.resolveThreadDir(threadId) : null
+      const owner = this.agentCleanupOwner(target.id, target.repositoryRoot ?? this.worktrees.getRepoRoot())
       const result = await this.worktrees.cleanupValidatedAgentWorktree(
         { path: target.path, branch: target.branch },
         { ...options, ...(owner ? { keepIgnored: { owner } } : {}) }
       )
       if (result.success) {
-        logs.push(`[worktree] Removed validated worktree for ${target.id.slice(0, 8)}${result.copy ? `; its ${result.copy.files} ignored files are kept as ${result.copy.ref}` : ''}`)
+        logs.push(`[worktree] Removed validated worktree for ${target.id.slice(0, 8)}${result.copy ? `; its ${result.copy.files} ignored files are kept as ${result.copy.ref}` : ''}${result.admin ? `; Git's own data of it is kept as ${result.admin.ref}` : ''}`)
       } else {
         logs.push(`[worktree] Cleanup refused/failed for ${target.id.slice(0, 8)}: ${result.error}`)
       }
     }
     return logs
+  }
+
+  /**
+   * Who owns the copies an agent's worktree cleanup keeps: the agent's thread, or, for an agent with no thread, the
+   * project whose folder is the repository's (`projectKeptFilesOwner`), noted so the hourly sweep finds and expires them.
+   */
+  private agentCleanupOwner(agentId: string, repositoryRoot: string): string | undefined {
+    const threadId = this.agentOwner(agentId)?.threadId
+    const directory = threadId ? this.resolveThreadDir(threadId) : null
+    if (directory) return directory
+    const root = resolve(repositoryRoot)
+    const project = this.projectManager?.listProjects().find((item) => resolve(item.path) === root)
+    if (!project) return undefined
+    try {
+      const owner = projectKeptFilesOwner(this.threadStore?.lifecycleStore?.profileHome ?? getMousseHomeDir(), project.id)
+      registerProjectKeptFilesFolder(owner, project.id, root)
+      return owner
+    } catch {
+      return undefined
+    }
   }
 
   /**

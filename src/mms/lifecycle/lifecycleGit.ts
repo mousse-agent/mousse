@@ -35,3 +35,8 @@ export async function readDirectLifecycleRefAsync(cwd: string, ref: string): Pro
   if (!sha || !/^[a-f0-9]{40,64}$/.test(sha) || /^0+$/.test(sha)) throw new Error(`Existing resource reference is malformed or unreadable: ${ref}`)
   return sha
 }
+/** Whether Git exits 0 for a question it answers by its status alone (`merge-base --is-ancestor`, `cat-file -e`). */
+export async function gitSucceeds(cwd: string, args: string[]): Promise<boolean> {
+  const argv = await withoutRepoProgramsAsync(cwd, args)
+  return (await runGitProcess(argv, { cwd, env: repoProgramEnv() })).status === 0
+}
