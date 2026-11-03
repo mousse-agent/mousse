@@ -52,6 +52,7 @@ export type StorageCleanupRule =
   | 'worktree-inactive'
   | 'worktree-merged'
   | 'worktree-orphan'
+  | 'dispatch-worktree'
   | 'browser-capture'
   | 'trash'
 

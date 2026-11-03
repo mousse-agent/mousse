@@ -1,5 +1,6 @@
 import { userAction } from '../../git/gitPolicy'
 import { createHash } from 'node:crypto'
+import { existsSync } from 'node:fs'
 import { realpath } from 'node:fs/promises'
 import {
   NetError,
@@ -16,6 +17,15 @@ import { json } from '../../net/store/database'
 import type { NetIdentityService } from '../../net/identity/NetIdentityService'
 import type { ThreadDataStore } from '../../data/ThreadDataStore'
 import { WorktreeManager } from '../../worktree/WorktreeManager'
+import {
+  dispatchKeptFilesOwner,
+  registerDispatchKeptFilesFolder,
+  settleInterruptedKeeps
+} from '../../actions/keptCopies'
+import { withGitMutationLocks } from '../../actions/GitOperationCoordinator'
+import { gitAsync } from '../../actions/git'
+import { withGitAccess } from '../../git/gitPolicy'
+import { recordKeptWorktree } from '../../lifecycle/keptWorktrees'
 import { canonicalJson } from '../../net/sync/codec'
 import {
   createResultBundle,
@@ -41,6 +51,11 @@ export interface DispatchServiceOptions {
   db: NetDatabase
   identity: NetIdentityService
   installationHome: string
+  /**
+   * The profile's home: the owner of a dispatch's copy of its worktree's ignored files is a folder there
+   * (`dispatchKeptFilesOwner`), and a worktree left in place is listed there for Storage (`recordKeptWorktree`).
+   */
+  profileHome: string
   profileId: string
   threads: Pick<ThreadDataStore, 'ensureExecutionThread'>
   runtime: DispatchRuntime
@@ -434,13 +449,8 @@ export class DispatchService {
     record.phase = 'cleanup'
     delete record.cleanupError
     this.save(record)
-    if (record.worktree) {
-      const cleanup = await new WorktreeManager(
-        record.binding.path,
-        this.options.installationHome
-      ).cleanupValidatedAgentWorktree(record.worktree, { safeCheckout: true })
-      if (!cleanup.success) record.cleanupError = 'worktree_cleanup_failed'
-    }
+    if (record.worktree && record.worktreeCleanup) await this.settleWorktreeCleanup(record)
+    else if (record.worktree && !record.worktreeKept) await this.cleanupWorktree(record, record.worktree)
     try {
       await removeQuarantine(await this.quarantineRoot(), record.id)
     } catch {
@@ -449,6 +459,82 @@ export class DispatchService {
     if (!record.cleanupError) record.phase = 'complete'
     this.save(record)
   }
+  /**
+   * Removes the dispatch's worktree, after keeping its ignored files (build outputs, logs) as a copy the dispatch owns,
+   * which expires after its Undo window. Each step is recorded first (`worktreeCleanup`). A worktree whose ignored files
+   * cannot be kept stays where it is: the record says "Kept, N ignored files", and Storage lists it for deletion.
+   */
+  private async cleanupWorktree(record: DispatchRecord, worktree: NonNullable<DispatchRecord['worktree']>): Promise<void> {
+    const owner = dispatchKeptFilesOwner(this.options.profileHome, record.id)
+    const cleanup = await new WorktreeManager(
+      record.binding.path,
+      this.options.installationHome
+    ).cleanupValidatedAgentWorktree(worktree, {
+      safeCheckout: true,
+      keepIgnored: {
+        owner,
+        record: (step) => {
+          // The copy's ref is in the repository, which the sweep reaches through its main folder once the worktree is gone.
+          if (step.phase === 'keeping')
+            registerDispatchKeptFilesFolder(owner, record.id, worktree.repositoryRoot ?? record.binding.path)
+          record.worktreeCleanup = { ...step, owner }
+          this.save(record)
+        }
+      }
+    })
+    const reached = record.worktreeCleanup
+    delete record.worktreeCleanup
+    // A copy that was complete when the removal then failed is still the dispatch's; a later start tries the removal anew.
+    const copy = cleanup.copy ?? (reached?.phase === 'removing' && reached.ref && reached.sha ? { ref: reached.ref, sha: reached.sha, files: reached.files } : undefined)
+    if (copy) record.worktreeCopy = { ref: copy.ref, sha: copy.sha, files: copy.files }
+    if (cleanup.kept) this.keepWorktree(record, worktree, cleanup.kept)
+    else if (!cleanup.success) record.cleanupError = 'worktree_cleanup_failed'
+  }
+
+  /**
+   * A cleanup the process ended in the middle of: what it kept is recorded from what the repository holds, and the
+   * worktree, if it is still there, stays. The removal is never started again here.
+   */
+  private async settleWorktreeCleanup(record: DispatchRecord): Promise<void> {
+    const worktree = record.worktree!,
+      step = record.worktreeCleanup!
+    const present = existsSync(worktree.path)
+    let kept = step.phase === 'removing' && step.ref && step.sha ? { ref: step.ref, sha: step.sha } : undefined
+    if (!kept && present) {
+      kept = await withGitAccess('dispatch.recover', 'owned', () =>
+        withGitMutationLocks(step.owner, worktree.path, 'worktree-cleanup-settle', async () => {
+          const [ref] = await settleInterruptedKeeps(step.owner, worktree.path)
+          return ref ? { ref, sha: await gitAsync(worktree.path, ['rev-parse', '--verify', `${ref}^{commit}`]) } : undefined
+        })
+      ).catch(() => undefined)
+    }
+    delete record.worktreeCleanup
+    if (kept) record.worktreeCopy = { ref: kept.ref, sha: kept.sha, files: step.files }
+    if (present)
+      this.keepWorktree(record, worktree, {
+        ignoredFiles: step.files,
+        reason: `Kept, ${step.files} ignored ${step.files === 1 ? 'file' : 'files'}: its cleanup stopped part way${kept ? ', after they were kept' : ''}, and is not repeated.`
+      })
+  }
+
+  private keepWorktree(
+    record: DispatchRecord,
+    worktree: NonNullable<DispatchRecord['worktree']>,
+    kept: { ignoredFiles: number; reason: string }
+  ): void {
+    record.worktreeKept = { ignoredFiles: kept.ignoredFiles, reason: kept.reason }
+    recordKeptWorktree(this.options.profileHome, {
+      dispatchId: record.id,
+      ...(record.threadId ? { threadId: record.threadId } : {}),
+      path: worktree.path,
+      branch: worktree.branch,
+      repositoryRoot: worktree.repositoryRoot ?? record.binding.path,
+      ignoredFiles: kept.ignoredFiles,
+      reason: kept.reason,
+      keptAt: new Date(this.options.db.clock.now()).toISOString()
+    })
+  }
+
   private async quarantineRoot(): Promise<string> {
     return (this.quarantine ??= await privateDirectory(this.options.db.directory, 'dispatch'))
   }

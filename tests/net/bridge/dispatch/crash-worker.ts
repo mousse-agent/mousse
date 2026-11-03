@@ -1,5 +1,7 @@
-import { writeFile } from 'node:fs/promises'
-import { join } from 'node:path'
+import { createHash } from 'node:crypto'
+import { writeFileSync } from 'node:fs'
+import { mkdir, writeFile } from 'node:fs/promises'
+import { dirname, join } from 'node:path'
 import { NetDatabase } from '../../../../src/mms/net/store/database'
 import { FileKeyStore } from '../../../../src/mms/net/identity/FileKeyStore'
 import { NetIdentityService } from '../../../../src/mms/net/identity/NetIdentityService'
@@ -8,7 +10,7 @@ import { ThreadDataStore } from '../../../../src/mms/data/ThreadDataStore'
 import { DispatchService } from '../../../../src/mms/bridge/dispatch/service'
 import { registerOwnedGitRoot } from '../../../../src/mms/git/gitPolicy'
 import type { ResolvedAgentDefinition } from '../../../../src/shared/agents/types'
-import type { Roster, NodeDelegation } from '../../../../src/shared/net'
+import { newId, type Roster, type NodeDelegation } from '../../../../src/shared/net'
 
 async function main() {
   const input = JSON.parse(process.argv[2]),
@@ -25,6 +27,20 @@ async function main() {
   })
   const roster = identity.verifySigned<Roster>(identity.roster()!, keys.rootKey()!),
     delegation = identity.verifySigned<NodeDelegation>(roster.nodes[0], keys.rootKey()!)
+  // `cleanup-keeping` and `cleanup-removing`: the dispatch completes, and the process stops for good right after its
+  // cleanup recorded that step, so the test can end it there.
+  const cleanupStep = typeof input.phase === 'string' && input.phase.startsWith('cleanup-') ? input.phase.slice('cleanup-'.length) : undefined
+  if (cleanupStep) {
+    const prototype = DispatchService.prototype as unknown as { save(record: { worktreeCleanup?: { phase: string } }, insert?: boolean): void }
+    const save = prototype.save
+    prototype.save = function (record, insert) {
+      save.call(this, record, insert)
+      if (record.worktreeCleanup?.phase === cleanupStep) {
+        writeFileSync(input.marker, 'paused')
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0)
+      }
+    }
+  }
   const threads = new ThreadDataStore(new ProjectManager(input.profile), input.profile, {
     profileId: 'test',
     allowLegacyProjectData: false
@@ -33,6 +49,7 @@ async function main() {
     db,
     identity,
     installationHome: input.home,
+    profileHome: input.profile,
     profileId: 'test',
     threads,
     runtime: {
@@ -49,6 +66,24 @@ async function main() {
         } as ResolvedAgentDefinition
       },
       run: async (request) => {
+        if (cleanupStep) {
+          for (const [path, bytes] of Object.entries(input.outputs as Record<string, string>)) {
+            await mkdir(dirname(join(request.worktreePath, path)), { recursive: true })
+            await writeFile(join(request.worktreePath, path), Buffer.from(bytes, 'base64'))
+          }
+          return {
+            runId: request.executionId,
+            profileId: 'test',
+            threadId: request.threadId,
+            definitionId: 'agent_dispatch',
+            definitionRevision: 'revision-1',
+            runtimeKind: 'mousse',
+            status: 'completed',
+            text: 'done',
+            history: [],
+            usage: { elapsedMs: 1 }
+          }
+        }
         await writeFile(
           join(request.worktreePath, 'crash-effect.txt'),
           'committed model effect before SIGKILL'
@@ -61,11 +96,16 @@ async function main() {
       readInput: async () => {
         throw new Error('not reached')
       },
-      prepareResult: async () => {
-        throw new Error('not reached')
+      prepareResult: async (bytes) => {
+        if (!cleanupStep) throw new Error('not reached')
+        return {
+          ref: { stream: newId('stream'), event: newId('event'), blob: `blb_${createHash('sha256').update(bytes).digest('hex')}` },
+          commit: () => undefined
+        }
       }
     }
   })
+  const terminal: Array<() => void> = []
   await service.run(
     input.request,
     {
@@ -74,10 +114,13 @@ async function main() {
       deadlineAt: db.clock.now() + 60_000,
       signal: new AbortController().signal,
       progress: () => undefined,
-      onTerminalCommit: () => undefined
+      onTerminalCommit: (work) => terminal.push(work)
     },
     input.execution
   )
+  // The terminal transaction, as the RPC layer commits it; the cleanup starts after it.
+  db.transaction(() => terminal.forEach((work) => work()))
+  await service.drainCleanup()
 }
 void main().catch(() => {
   process.send?.({ failed: true })

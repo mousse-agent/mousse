@@ -35,7 +35,7 @@ export function CleanupPlanView({ plan }: { plan: readonly StorageCleanupPlanIte
   const kept = plan.filter((item) => item.action === 'keep')
   return <div className="storage-plan" data-testid="storage-cleanup-plan">
     <p className="storage-plan-summary" data-testid="storage-plan-summary">{summary.line}{summary.keep > 0 ? ` ${summary.keep} will be kept.` : ''}</p>
-    {summary.remove > 0 && <p className="settings-muted">{CLEANUP_COPY.worktreeNote}{summary.emptiesTrash ? ` ${CLEANUP_COPY.trashWarning}` : ''} {CLEANUP_COPY.onlyListed}</p>}
+    {summary.remove > 0 && <p className="settings-muted">{CLEANUP_COPY.worktreeNote}{summary.emptiesTrash ? ` ${CLEANUP_COPY.trashWarning}` : ''}{summary.deletesDispatchWorktree ? ` ${CLEANUP_COPY.dispatchWarning}` : ''} {CLEANUP_COPY.onlyListed}</p>}
     {removals.length > 0 && <ul className="storage-result-list" aria-label="Would be removed" data-testid="storage-plan-removals">
       {removals.map((item, index) => <li key={`r${index}`}>
         <span className="storage-result-main">{ruleLabel(item.rule, item.action)}: {item.label}</span>
