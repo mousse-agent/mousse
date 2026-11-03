@@ -645,19 +645,64 @@ describe('recovery', () => {
     expect(existsSync(join(cwd, 'agent.txt'))).toBe(false)
   })
 
-  it('an Undo that crashed with files that match neither state stays pending for a person', async () => {
+  it('an Undo that crashed with only some of its files written stays pending for a person', async () => {
+    const { action } = await turn('turn', () => { write('agent.txt', 'agent\n'); write('second.txt', 'second\n') })
+    await interruptedUndo(action, true)
+    // As if the stop had come halfway: one file was taken back, the other was not.
+    write('second.txt', 'second\n')
+    await expect(new UndoService(f.thread).recoverPending(cwd, () => undefined)).rejects.toThrow(/neither the state before nor the state after/)
+    expect(() => noPending()).toThrow()
+    expect(readFileSync(join(cwd, 'second.txt'), 'utf8')).toBe('second\n')
+  })
+
+  it('an Undo that crashed, with one restored file edited by the person before recovery, stays pending and keeps the edit', async () => {
+    const { action } = await turn('turn', () => { write('agent.txt', 'agent\n'); write('second.txt', 'second\n') })
+    await interruptedUndo(action, true)
+    write('agent.txt', 'the person\'s file\n')
+    await expect(new UndoService(f.thread).recoverPending(cwd, () => undefined)).rejects.toThrow(/neither the state before nor the state after/)
+    expect(() => noPending()).toThrow()
+    expect(readFileSync(join(cwd, 'agent.txt'), 'utf8')).toBe('the person\'s file\n')
+  })
+
+  it('an Undo recovered after a file appeared records its planned end, so a Redo keeps that file', async () => {
+    const { action } = await turn('turn', () => write('agent.txt', 'agent\n'))
+    await interruptedUndo(action, true)
+    write('made-meanwhile.txt', 'the person\'s new file\n')
+    await new UndoService(f.thread).recoverPending(cwd, () => undefined)
+    noPending()
+    expect(git(cwd, 'ls-tree', '--name-only', actions.get('compensation-1')!.endSha)).not.toContain('made-meanwhile.txt')
+    await pressed('Redo', () => new RedoService(f.thread).redoLatest('main', cwd))
+    expect(readFileSync(join(cwd, 'agent.txt'), 'utf8')).toBe('agent\n')
+    expect(readFileSync(join(cwd, 'made-meanwhile.txt'), 'utf8')).toBe('the person\'s new file\n')
+  })
+
+  it('an Undo that crashed is still told apart when an unrelated file appeared meanwhile, which stays', async () => {
     const { action } = await turn('turn', () => write('agent.txt', 'agent\n'))
     await interruptedUndo(action, false)
     mkdirSync(join(cwd, 'surprise'), { recursive: true }); write('surprise/file.txt', 'x\n')
-    await expect(new UndoService(f.thread).recoverPending(cwd, () => undefined)).rejects.toThrow(/neither the state before nor the state after/)
-    expect(() => noPending()).toThrow()
+    await new UndoService(f.thread).recoverPending(cwd, () => undefined)
+    noPending()
+    expect(actions.get(action.id)?.state).toBe('completed')
     expect(readFileSync(join(cwd, 'surprise', 'file.txt'), 'utf8')).toBe('x\n')
+  })
+
+  it('an Undo that crashed after bringing back a file that is ignored now is recorded as done', async () => {
+    write('out.log', 'kept by the turn\n')
+    const { action } = await turn('turn', () => rmSync(join(cwd, 'out.log')))
+    const exclude = git(cwd, 'rev-parse', '--path-format=absolute', '--git-path', 'info/exclude')
+    mkdirSync(join(exclude, '..'), { recursive: true }); writeFileSync(exclude, 'out.log\n', { flag: 'a' })
+    await interruptedUndo(action, true)
+    expect(readFileSync(join(cwd, 'out.log'), 'utf8')).toBe('kept by the turn\n')
+    await new UndoService(f.thread).recoverPending(cwd, () => undefined)
+    noPending()
+    expect(actions.get(action.id)?.state).toBe('undone')
   })
 })
 
 describe('conversation forks', () => {
-  it('pin the snapshot without a Git branch, and activating one switches the files only', async () => {
+  it('pin the snapshot without a Git branch, and activating one switches the files only, keeping edits made since', async () => {
     const { action } = await turn('turn', () => write('agent.txt', 'agent\n'))
+    await turn('second', () => write('agent.txt', 'agent, second turn\n'), 2)
     write('later.txt', 'later\n')
     const head = git(cwd, 'rev-parse', 'HEAD')
     const before = branches()
@@ -667,8 +712,9 @@ describe('conversation forks', () => {
     expect(branches()).toBe(before)
 
     await service.activate(cwd, fork.id)
-    expect(existsSync(join(cwd, 'later.txt'))).toBe(false)
+    // The fork's code comes in, and the person's edit since the last turn stays.
     expect(readFileSync(join(cwd, 'agent.txt'), 'utf8')).toBe('agent\n')
+    expect(readFileSync(join(cwd, 'later.txt'), 'utf8')).toBe('later\n')
     expect(git(cwd, 'rev-parse', 'HEAD')).toBe(head)
     expect(branches()).toBe(before)
     expect(new ThreadWorkspaceManager(f.thread).load()).toMatchObject({ conversationBranchId: fork.id, branch: 'mousse/thread-task' })

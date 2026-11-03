@@ -12,6 +12,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { AssistantMessage } from '../src/shared/transcript'
 import type { Thread } from '../src/shared/types'
 import { MousseMainService } from '../src/mms/MousseMainService'
+import { ChangeReceiptService } from '../src/mms/actions/ChangeReceiptService'
 import { ThreadActionService } from '../src/mms/actions/ThreadActionService'
 import type { ProviderAdapter, TurnInput, TurnResult, TurnSink } from '../src/mms/harness/adapter'
 import { onGitPolicyEntry, type GitPolicyEntry } from '../src/mms/git/gitPolicy'
@@ -233,26 +234,59 @@ describe('where a thread works', () => {
     return entries.filter((entry) => entry.kind === 'violation').map((entry) => `${entry.command} (${entry.decision.reason})`)
   }
 
-  it('switches conversation branches in the project folder as the person asked, with refusal on', async () => {
+  it('switching conversation branches in the project folder keeps the person\'s own edits, and switches back to the first branch', async () => {
     const off = thread(false)
     const before = gitState()
+    const messages = () => structuredClone(main.orchestrator.getMessagesForPersistence(off.id))
+    const read = (path: string) => readFileSync(join(repo, path), 'utf8')
     expect(await violationsDuring(async () => {
-      onTurn = (cwd) => writeFileSync(join(cwd, 'notes.txt'), 'first turn\n')
+      onTurn = (cwd) => writeFileSync(join(cwd, 'agent.txt'), 'first turn\n')
       await main.orchestrator.send({ content: 'first', mode: 'agent' }, false, { threadId: off.id })
-      onTurn = (cwd) => writeFileSync(join(cwd, 'notes.txt'), 'second turn\n')
+      onTurn = (cwd) => writeFileSync(join(cwd, 'agent.txt'), 'second turn\n')
       await main.orchestrator.send({ content: 'second', mode: 'agent' }, false, { threadId: off.id })
       onTurn = undefined
       const first = new ThreadActionService(main.threads.getThreadDir(off.id)).list().find((action) => !action.turnId.startsWith('user-changes:'))!
-      const fork = async (name: string, codeMode: 'historical' | 'current') =>
-        (await dispatchMethod(ctx(), 'actions.fork', { threadId: off.id, actionId: first.id, name, codeMode }) as { branch: { id: string } }).branch
-      const older = await fork('Older', 'historical')
-      writeFileSync(join(repo, 'notes.txt'), 'edited after the fork\n')
-      const edited = await fork('Edited', 'current')
-      // Each switch writes the branch's files over the person's folder, as they asked through the protocol.
+      // The person's own work in progress, made outside any turn.
+      writeFileSync(join(repo, 'NOTES.txt'), 'WIP2 edit before fork\n')
+      const older = (await dispatchMethod(ctx(), 'actions.fork', { threadId: off.id, actionId: first.id, name: 'Older', codeMode: 'historical' }) as { branch: { id: string } }).branch
+      const onMain = messages()
+
+      // The older branch's code comes in, and the person's edit stays in their folder.
       await dispatchMethod(ctx(), 'actions.activateBranch', { threadId: off.id, conversationBranchId: older.id })
-      expect(readFileSync(join(repo, 'notes.txt'), 'utf8')).toBe('first turn\n')
-      await dispatchMethod(ctx(), 'actions.activateBranch', { threadId: off.id, conversationBranchId: edited.id })
-      expect(readFileSync(join(repo, 'notes.txt'), 'utf8')).toBe('edited after the fork\n')
+      expect(read('agent.txt')).toBe('first turn\n')
+      expect(read('NOTES.txt')).toBe('WIP2 edit before fork\n')
+      expect(messages().length).toBeLessThan(onMain.length)
+
+      // The thread's first branch can be switched back to, with its conversation and its files.
+      await dispatchMethod(ctx(), 'actions.activateBranch', { threadId: off.id, conversationBranchId: 'main' })
+      expect(read('agent.txt')).toBe('second turn\n')
+      expect(read('NOTES.txt')).toBe('WIP2 edit before fork\n')
+      expect(messages()).toEqual(onMain)
+      expect(workspaceOf(off.id)?.conversationBranchId).toBe('main')
+
+      // An edit that overlaps with the other branch's code refuses the switch, names the file, and changes nothing.
+      writeFileSync(join(repo, 'agent.txt'), 'edited by the person\n')
+      const refs = git('for-each-ref', '--format=%(refname) %(objectname)')
+      const status = git('status', '--porcelain', '--untracked-files=all')
+      await expect(dispatchMethod(ctx(), 'actions.activateBranch', { threadId: off.id, conversationBranchId: older.id })).rejects.toMatchObject({
+        code: 'restore_conflict', message: 'Switching to Older would overwrite your edits in: agent.txt. They stay on Main. Nothing was changed.'
+      })
+      expect(git('for-each-ref', '--format=%(refname) %(objectname)')).toBe(refs)
+      expect(git('status', '--porcelain', '--untracked-files=all')).toBe(status)
+      expect(read('agent.txt')).toBe('edited by the person\n')
+      expect(read('NOTES.txt')).toBe('WIP2 edit before fork\n')
+      expect(messages()).toEqual(onMain)
+      expect(workspaceOf(off.id)?.conversationBranchId).toBe('main')
+
+      // A branch that does not exist is a clear refusal, not an internal error.
+      await expect(dispatchMethod(ctx(), 'actions.activateBranch', { threadId: off.id, conversationBranchId: 'no-such-branch' })).rejects.toMatchObject({ code: 'conversation_branch_unavailable' })
+      // A saved conversation that can't be read refuses the switch before anything changes, with nothing left pending.
+      writeFileSync(join(main.threads.getThreadDir(off.id), 'conversation-contexts', `${encodeURIComponent(older.id)}.json`), '{"schemaVersion":1}')
+      writeFileSync(join(repo, 'agent.txt'), 'second turn\n')
+      await expect(dispatchMethod(ctx(), 'actions.activateBranch', { threadId: off.id, conversationBranchId: older.id })).rejects.toMatchObject({ code: 'conversation_branch_unavailable' })
+      expect(read('agent.txt')).toBe('second turn\n')
+      expect(workspaceOf(off.id)?.conversationBranchId).toBe('main')
+      expect(() => new ChangeReceiptService(main.threads.getThreadDir(off.id)).assertNoPendingOperation()).not.toThrow()
     })).toEqual([])
     expect(gitState()).toEqual(before)
     noWorktree(off.id)

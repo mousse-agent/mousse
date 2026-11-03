@@ -465,6 +465,32 @@ export function takeSnapshotAsync(cwd: string, input: SnapshotInput): Promise<Sn
   return runAsync(takeSnapshotSteps(cwd, input))
 }
 
+/**
+ * Records `tree` as a snapshot commit of the worktree, on its HEAD, without reading the files: the result an
+ * interrupted restore planned, once every file it writes is proven to be as planned. Files that appeared since are
+ * then edits made after it, not part of it.
+ */
+export function* snapshotOfTreeSteps(cwd: string, tree: string, input: SnapshotInput): Steps<Snapshot> {
+  const top = yield* gitStep(cwd, ['rev-parse', '--show-toplevel'])
+  const head = yield* headOf(top)
+  const branch = activeHiddenStore(top) ? undefined : (yield* tryGitStep(top, ['branch', '--show-current'])).stdout || undefined
+  const operation = yield* operationInProgressSteps(top)
+  const { ignored, truncated } = yield* ignoredNow(top)
+  const trailers = [
+    input.threadId ? `Mousse-Thread: ${input.threadId}` : '', input.operationId ? `Mousse-Operation: ${input.operationId}` : '',
+    head ? `Mousse-Head: ${head}` : '', branch ? `Mousse-Branch: ${branch}` : '',
+    ignored.length || truncated ? `${UNCOVERED_LINE}${JSON.stringify({ g: [], i: ignored, ...(truncated ? { t: true } : {}) })}` : ''
+  ].filter(Boolean).join('\n')
+  const subject = `${SUBJECT}${input.reason.split(/\r?\n/)[0]!.trim()}`
+  const sha = yield* gitStep(top, ['commit-tree', tree, ...(head ? ['-p', head] : []), '-m', subject, ...(trailers ? ['-m', trailers] : [])], MOUSSE_COMMIT_ENV)
+  return { sha, tree, ...(head ? { head } : {}), ...(branch ? { branch } : {}), ...(operation ? { operationInProgress: operation } : {}) }
+}
+
+/** Records `tree` as a snapshot (see `snapshotOfTreeSteps`), without blocking the daemon. */
+export function snapshotOfTreeAsync(cwd: string, tree: string, input: SnapshotInput): Promise<Snapshot> {
+  return runAsync(snapshotOfTreeSteps(cwd, tree, input))
+}
+
 /** The ref that remembers the thread's files as last published into the primary checkout: the next publish brings in only what came after. */
 export function publishedRef(threadId: string): string {
   return `refs/mousse/published/${threadId}`
@@ -802,10 +828,10 @@ export function* moveFilesSteps(top: string, from: string, to: string, operation
   try {
     // The persistent index was refreshed by the snapshot, so its stat data lets Git see that the files still match.
     if (yield* disk.exists(files.index)) yield* disk.copyFile(files.index, temporary)
-    if (!(yield* disk.exists(temporary)) || (yield* gitStep(top, ['write-tree'], env)) !== from) {
-      yield* gitStep(top, ['read-tree', from], env)
-      yield* tryGitStep(top, ['update-index', '-q', '--refresh'], env, LISTING)
-    }
+    if (!(yield* disk.exists(temporary)) || (yield* gitStep(top, ['write-tree'], env)) !== from) yield* gitStep(top, ['read-tree', from], env)
+    // A file saved since with the same bytes (format on save, `touch`) only has new stat data: refreshed, it reads as
+    // unchanged, so Git refuses only a file whose bytes changed.
+    yield* tryGitStep(top, ['update-index', '-q', '--refresh'], env, LISTING)
     yield* gitStep(top, ['read-tree', '-m', '-u', from, to], env)
   } finally {
     yield* disk.remove(temporary)
@@ -817,4 +843,78 @@ export function* moveFilesSteps(top: string, from: string, to: string, operation
 /** Rewrites the files that differ between two trees (see `moveFilesSteps`), without blocking the daemon. */
 export function moveFilesAsync(top: string, from: string, to: string, operationId?: string): Promise<PreservedFiles | undefined> {
   return runAsync(moveFilesSteps(top, from, to, operationId))
+}
+
+/**
+ * How far a move of the files from one tree to another got, read path by path from the disk (bytes and mode), for the
+ * paths the two trees hold differently: still as in `from` (`unmoved`), as in `to` (`moved`), or neither (`other`,
+ * changed by someone since). Ignored files count, since the disk is read directly; files the move never touches do
+ * not. A nested repository recorded by its commit is left out.
+ */
+export interface MoveProgress { moved: string[]; unmoved: string[]; other: string[] }
+
+/**
+ * Whether a move that stopped landed: every path exactly as planned (`applied`), none of them (`not-applied`), or some
+ * only, or some moved and others changed since (`partial`), which is for a person: recording those as moved would make
+ * an edit made since part of the result, and a later Redo or switch would write over it.
+ */
+export function moveOutcome(progress: MoveProgress): 'applied' | 'not-applied' | 'partial' {
+  if (!progress.moved.length) return progress.unmoved.length || progress.other.length ? 'not-applied' : 'applied'
+  return progress.unmoved.length || progress.other.length ? 'partial' : 'applied'
+}
+
+export function* moveProgressSteps(cwd: string, from: string, to: string): Steps<MoveProgress> {
+  const top = yield* gitStep(cwd, ['rev-parse', '--show-toplevel'])
+  const progress: MoveProgress = { moved: [], unmoved: [], other: [] }
+  const paths = (yield* gitStep(top, ['diff-tree', '-r', '-z', '--no-renames', '--name-only', from, to], undefined, undefined, LISTING)).split('\0').filter(Boolean)
+  if (!paths.length) return progress
+  const wanted = new Set(paths)
+  const entries = function* (tree: string): Steps<Map<string, { mode: string; sha: string }>> {
+    const map = new Map<string, { mode: string; sha: string }>()
+    for (const line of (yield* gitStep(top, ['ls-tree', '-r', '-z', '--full-tree', tree], undefined, undefined, LISTING)).split('\0')) {
+      const tab = line.indexOf('\t')
+      if (tab < 0 || !wanted.has(line.slice(tab + 1))) continue
+      const [mode, , sha] = line.slice(0, tab).split(' ')
+      map.set(line.slice(tab + 1), { mode: mode!, sha: sha! })
+    }
+    return map
+  }
+  const before = yield* entries(from)
+  const after = yield* entries(to)
+  // What is on disk at each path: a file's blob as `git add` would store it (filters applied), a link's target, or nothing.
+  const found = new Map<string, { mode: string; sha: string }>()
+  const files: string[] = []
+  for (const path of paths) {
+    if (before.get(path)?.mode === '160000' || after.get(path)?.mode === '160000') continue
+    let stat: Stats
+    try { stat = yield* disk.lstat(join(top, path)) } catch { continue }
+    if (stat.isSymbolicLink()) found.set(path, { mode: '120000', sha: yield* gitStep(top, ['hash-object', '--stdin'], undefined, yield* disk.readlink(join(top, path))) })
+    else if (stat.isFile()) {
+      found.set(path, { mode: stat.mode & 0o111 ? '100755' : '100644', sha: '' })
+      if (path.includes('\n')) found.get(path)!.sha = yield* gitStep(top, ['hash-object', '--', path])
+      else files.push(path)
+    }
+  }
+  if (files.length) {
+    const shas = (yield* gitStep(top, ['hash-object', '--stdin-paths'], undefined, files.join('\n') + '\n')).split(/\r?\n/)
+    files.forEach((path, index) => { found.get(path)!.sha = shas[index] ?? '' })
+  }
+  // A disk that keeps no executable bit (Windows, FAT, exFAT, some network drives: Git sets `core.fileMode` false there)
+  // reads every file as executable or none, so only the bytes are compared there.
+  const fileMode = process.platform !== 'win32' && (yield* tryGitStep(top, ['config', '--bool', 'core.fileMode'])).stdout.trim() !== 'false'
+  const same = (a?: { mode: string; sha: string }, b?: { mode: string; sha: string }): boolean =>
+    !a || !b ? a === b : a.sha === b.sha && (!fileMode || a.mode === b.mode)
+  for (const path of paths) {
+    if (before.get(path)?.mode === '160000' || after.get(path)?.mode === '160000') continue
+    const now = found.get(path)
+    if (same(now, before.get(path))) progress.unmoved.push(path)
+    else if (same(now, after.get(path))) progress.moved.push(path)
+    else progress.other.push(path)
+  }
+  return progress
+}
+
+/** How far a move got (see `moveProgressSteps`), without blocking the daemon. */
+export function moveProgressAsync(cwd: string, from: string, to: string): Promise<MoveProgress> {
+  return runAsync(moveProgressSteps(cwd, from, to))
 }
