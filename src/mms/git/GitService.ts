@@ -1116,7 +1116,8 @@ export class GitService {
       })
       return
     }
-    if (contains && Number(await this.read(cwd, ['rev-list', '--min-parents=2', '--count', `${upstream}..${head}`]) ?? 0) === 0) return
+    // A count that cannot be read is taken as a merge, so the rebase is checked rather than let through.
+    if (contains && Number(await this.read(cwd, ['rev-list', '--min-parents=2', '--count', `${upstream}..${head}`]) ?? 1) === 0) return
     await this.refuseInTheWay(cwd, doing, true, (top) => this.rebaseWrites(top, head, upstream))
   }
 
@@ -1124,7 +1125,10 @@ export class GitService {
   private async rebaseWrites(top: string, head: string, upstream: string): Promise<PlannedWrite[]> {
     const writes = await plannedWrites(top, head, upstream)
     // The commits `git rebase` replays: not merges, and not those whose change the upstream already has.
-    const replayed = (await this.read(top, ['rev-list', '--reverse', '--topo-order', '--no-merges', '--cherry-pick', '--right-only', `${upstream}...${head}`]) ?? '').split('\n').filter(Boolean)
+    const listed = await this.runGit(top, ['rev-list', '--reverse', '--topo-order', '--no-merges', '--cherry-pick', '--right-only', `${upstream}...${head}`])
+    // Without the list, the replayed commits would go unchecked.
+    if (!listed.ok) throw new InTheWayCheckError(listed.output.trim().split('\n')[0] || 'git rev-list failed')
+    const replayed = listed.stdout.split('\n').map((line) => line.trim()).filter(Boolean)
     let onto = upstream
     for (const commit of replayed) {
       const base = await this.read(top, ['rev-parse', '--verify', '--quiet', `${commit}^1^{tree}`]) ?? await emptyTree(top)

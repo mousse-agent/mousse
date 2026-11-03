@@ -132,9 +132,10 @@ export async function tryGitAsync(cwd: string, args: string[], env?: NodeJS.Proc
 
 /**
  * {@link tryGitAsync} with Git's output exactly as written, not trimmed, and the exit status, for `-z` listings whose
- * names may begin or end with blanks. `input` goes to Git's standard input. Output cut off at the limit is a failure.
+ * names may begin or end with blanks. `input` goes to Git's standard input. Output cut off at the limit is a failure;
+ * a listing passes {@link LISTING}.
  */
-export async function tryGitRawAsync(cwd: string, args: string[], input?: string): Promise<{ ok: boolean; status: number | null; stdout: string; stderr: string }> {
+export async function tryGitRawAsync(cwd: string, args: string[], input?: string, options?: GitReadOptions): Promise<{ ok: boolean; status: number | null; stdout: string; stderr: string }> {
   let safe: string[]
   try {
     safe = await guardedAsync(cwd, args, input !== undefined ? { stdin: input } : undefined)
@@ -142,7 +143,7 @@ export async function tryGitRawAsync(cwd: string, args: string[], input?: string
     rethrowGitPolicyError(error)
     return { ok: false, status: null, stdout: '', stderr: error instanceof Error ? error.message : String(error) }
   }
-  const result = await runGitProcess(safe, { cwd, env: gitEnv(cwd), ...(input !== undefined ? { input } : {}) })
+  const result = await runGitProcess(safe, { cwd, env: gitEnv(cwd), ...(input !== undefined ? { input } : {}), maxBuffer: options?.maxBuffer ?? DEFAULT_MAX_BUFFER })
   const ok = !result.error && result.status === 0
   return { ok, status: result.error ? null : result.status, stdout: result.stdout, stderr: (!ok && filterRefusal(result.stderr.trim())) || result.stderr }
 }

@@ -1,6 +1,6 @@
 import { lstat, readdir } from 'node:fs/promises'
 import { join } from 'node:path'
-import { tryGitRawAsync } from '../actions/git'
+import { LISTING, tryGitRawAsync } from '../actions/git'
 
 /**
  * What a Git command that writes the person's files (a branch switch, a new branch started from a ref, a pull) would
@@ -43,8 +43,9 @@ const GITLINK = '160000'
 const DELETED = '000000'
 const fields = (text: string): string[] => text.split('\0')
 
+/** A read whose output grows with the repository: it may print up to the listing limit, and fails past it. */
 async function gitRead(top: string, args: string[], input?: string): Promise<string> {
-  const run = await tryGitRawAsync(top, args, input)
+  const run = await tryGitRawAsync(top, args, input, LISTING)
   if (!run.ok) throw new InTheWayCheckError(firstLine(run.stderr) || `git ${args[0]} failed`)
   return run.stdout
 }
@@ -82,7 +83,7 @@ export interface MergeResult {
  * this Git cannot do it (older than 2.40 for `base`, 2.38 without).
  */
 export async function mergeResult(top: string, ours: string, theirs: string, base?: string): Promise<MergeResult | null> {
-  const run = await tryGitRawAsync(top, ['merge-tree', '--write-tree', '-z', '--name-only', '--no-messages', ...(base ? [`--merge-base=${base}`] : []), ours, theirs])
+  const run = await tryGitRawAsync(top, ['merge-tree', '--write-tree', '-z', '--name-only', '--no-messages', ...(base ? [`--merge-base=${base}`] : []), ours, theirs], undefined, LISTING)
   if (run.status !== 0 && run.status !== 1) return null
   const [tree = '', ...rest] = fields(run.stdout)
   if (!/^[0-9a-f]{40,64}$/.test(tree)) return null
@@ -124,7 +125,7 @@ export async function findInTheWay(top: string, planned: readonly PlannedWrite[]
   const fold = ignoreCase ? (path: string) => path.toLowerCase() : (path: string) => path
 
   const listing = async (ignored: boolean) => {
-    const run = await tryGitRawAsync(top, ['ls-files', '-z', '--others', '--exclude-standard', '--directory', '--no-empty-directory', ...(ignored ? ['--ignored'] : [])])
+    const run = await tryGitRawAsync(top, ['ls-files', '-z', '--others', '--exclude-standard', '--directory', '--no-empty-directory', ...(ignored ? ['--ignored'] : [])], undefined, LISTING)
     if (!run.ok) throw new InTheWayCheckError(firstLine(run.stderr) || 'git ls-files failed')
     return run
   }
@@ -192,7 +193,7 @@ export async function findInTheWay(top: string, planned: readonly PlannedWrite[]
     }
   }
   if (toClassify.length) {
-    const run = await tryGitRawAsync(top, ['check-ignore', '-z', '--stdin'], toClassify.map((path) => `${path}\0`).join(''))
+    const run = await tryGitRawAsync(top, ['check-ignore', '-z', '--stdin'], toClassify.map((path) => `${path}\0`).join(''), LISTING)
     // Exit 1: none of them is ignored.
     if (!run.ok && run.status !== 1) throw new InTheWayCheckError(firstLine(run.stderr) || 'git check-ignore failed')
     const ignored = new Set(fields(run.stdout).filter(Boolean))
@@ -205,7 +206,7 @@ export async function findInTheWay(top: string, planned: readonly PlannedWrite[]
 /** Only the writes a sparse checkout makes in the folder; on a Git without `check-rules`, all of them. */
 async function insideSparsePatterns(top: string, writes: readonly PlannedWrite[]): Promise<readonly PlannedWrite[]> {
   const paths = [...new Set(writes.map((write) => write.path))]
-  const run = await tryGitRawAsync(top, ['sparse-checkout', 'check-rules', '-z'], paths.map((path) => `${path}\0`).join(''))
+  const run = await tryGitRawAsync(top, ['sparse-checkout', 'check-rules', '-z'], paths.map((path) => `${path}\0`).join(''), LISTING)
   if (!run.ok) return writes
   const inside = new Set(fields(run.stdout).filter(Boolean))
   return writes.filter((write) => inside.has(write.path))
