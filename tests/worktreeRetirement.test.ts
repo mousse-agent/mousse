@@ -476,10 +476,10 @@ test("trash expiry keeps Git's own data of the worktree, and a rebuild brings ba
   expect(reflogBytes.toString('utf8')).toContain(abandoned)
   await f.service.prepare(f.input)
   const trashed = await f.service.retire(f.path)
-  // A lock someone put on the worktree in the trash is not kept. It is lifted once the capture is done, so Git deletes the folder.
+  // A lock someone puts on the worktree in the trash as its capture starts is not kept. It is lifted once the capture is
+  // done, so the folder is deleted. (A lock there before the run keeps the worktree in the trash without a capture.)
   const trashedAdmin = git(trashed.trashPath!, ['rev-parse', '--absolute-git-dir'])
-  writeFileSync(join(trashedAdmin, 'locked'), 'stale lock\n')
-  expect(await f.service.expireTrash(f.path, { now: Date.now() + 2 * WORKTREE_TRASH_QUIET_MS, afterCapture: () => rmSync(join(trashedAdmin, 'locked')) })).toEqual({ removed: true })
+  expect(await f.service.expireTrash(f.path, { now: Date.now() + 2 * WORKTREE_TRASH_QUIET_MS, inUse: () => { writeFileSync(join(trashedAdmin, 'locked'), 'stale lock\n'); return undefined }, afterCapture: () => rmSync(join(trashedAdmin, 'locked')) })).toEqual({ removed: true })
   expect(existsSync(trashedAdmin)).toBe(false)
   const retired = JSON.parse(readFileSync(f.path, 'utf8'))
   const kept = git(f.repo, ['ls-tree', '-r', '--name-only', retired.adminTree]).split('\n')
@@ -785,12 +785,19 @@ test.skipIf(process.platform === 'win32')('a permanent deletion never follows a 
 test('a worktree Git has locked stays in the trash as it is, and the lock is named; once unlocked it is deleted and comes back byte for byte', async () => {
   const f = await trashedFixture()
   git(f.repo, ['worktree', 'lock', '--reason', 'an agent is using it', f.trashPath])
+  const record = readFileSync(f.path, 'utf8')
+  const timers = (): number => process.getActiveResourcesInfo().filter((kind) => kind === 'Timeout').length
+  const timersBefore = timers()
   const outcome = await f.service.expireTrash(f.path, { now: LATER() })
   expect(outcome).toEqual({ kept: expect.stringContaining('Git has this worktree locked (an agent is using it), so it stays in the trash') })
   expect(manifestOf(f.path)).toMatchObject({ state: 'trashed' }); expect(filesOf(f.trashPath)).toEqual(f.before)
   expect(deletingFolders(f.trashPath)).toEqual([])
-  // Every later run says the same, and a restore moves the folder back as it is.
+  // Every later run says the same. Nothing is captured while it is locked: no kept copy, no new pins, the record as it was.
   expect(await f.service.expireTrash(f.path, { now: LATER() })).toEqual(outcome)
+  expect(git(f.repo, ['for-each-ref', '--format=%(refname)', 'refs/mousse/preserved/'])).toBe('')
+  expect(readFileSync(f.path, 'utf8')).toBe(record)
+  // The lease refresh the expiry starts is stopped when it returns.
+  expect(timers()).toBe(timersBefore)
   git(f.repo, ['worktree', 'unlock', f.trashPath])
   expect(await f.service.expireTrash(f.path, { now: LATER() })).toEqual({ removed: true })
   await f.service.reconstruct(f.path)

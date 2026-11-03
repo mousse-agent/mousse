@@ -839,6 +839,11 @@ export class WorktreeRetirementService {
     if (now - Date.parse(manifest.trashedAt!) < WORKTREE_TRASH_QUIET_MS) return { kept: 'Waiting in the trash', waiting: true }
     if (now - await newestChange(trashPath) < WORKTREE_TRASH_QUIET_MS) return { kept: 'Files in it changed within the last hour', waiting: true }
     await this.verifyPins(manifest)
+    // A worktree Git has locked stays in the trash before anything is captured: every run would otherwise capture it
+    // again, and keep another copy of its ignored files, only to stop at the check before the rename. That check stays,
+    // for a lock given while the capture runs.
+    const lockedNow = await this.lockOf(manifest.commonDir, trashPath)
+    if (lockedNow !== undefined) return { kept: lockedText(lockedNow, trashPath) }
     // In use (Windows: open files) is asked before anything is captured, so whatever it lets through is in the snapshot.
     const busy = options.inUse?.(trashPath)
     if (busy) return { kept: busy }
