@@ -11,7 +11,8 @@ export function discardPrompt(details: PendingChangesDetails): string {
 
 /**
  * A conflict Mousse can't work around in the thread worktree, with Discard: it drops the changes after asking
- * (a copy is kept), then retries what was refused (`onResolved`).
+ * (a copy is kept), then retries what was refused (`onResolved`). Files that changed after Discard was pressed are
+ * left as they are; the notice then names them instead, and Discard stays offered.
  */
 export function PendingChangesNotice({ threadId, message, details, onResolved, className }: {
   threadId: string
@@ -22,13 +23,16 @@ export function PendingChangesNotice({ threadId, message, details, onResolved, c
 }) {
   const [working, setWorking] = useState(false)
   const [failure, setFailure] = useState<string | null>(null)
+  const [left, setLeft] = useState<string | null>(null)
   const discard = async () => {
     if (working || !window.confirm(discardPrompt(details))) return
     setWorking(true)
     setFailure(null)
+    setLeft(null)
     try {
-      await window.mousse.workspace.discardPendingChanges(threadId)
-      onResolved()
+      const result = await window.mousse.workspace.discardPendingChanges(threadId)
+      if (result?.left) setLeft(result.left)
+      else onResolved()
     } catch (cause) {
       setFailure(ipcErrorLine(cause) || String(cause))
     } finally {
@@ -37,7 +41,7 @@ export function PendingChangesNotice({ threadId, message, details, onResolved, c
   }
   return (
     <div className={className} role="alert">
-      <span>{failure ?? message}</span>
+      <span>{failure ?? left ?? message}</span>
       {details.discard && <button type="button" disabled={working} onClick={() => void discard()}>Discard</button>}
     </div>
   )

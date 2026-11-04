@@ -1493,6 +1493,8 @@ export interface GitKeptCopy {
   windowMs: number
   /** Where it is, for how long, and the command that brings a file back. */
   notice: string
+  /** Paths that changed after the person pressed Discard, so they were left as they are: the line that names them. */
+  left?: string
 }
 
 /** What a daemon Git mutation answers: the folder's fresh status, plus the action's own result. */

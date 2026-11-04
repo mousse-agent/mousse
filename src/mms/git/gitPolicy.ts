@@ -290,6 +290,8 @@ const ALLOWED_SETTINGS: ReadonlyArray<readonly [RegExp, (value: string) => boole
   // A snapshot store's isolation (`hiddenStore.ts`): no attributes file, no untracked cache, no automatic collection.
   [/^core\.attributesfile$/, (value) => NULL_DEVICES.has(value)],
   [/^core\.untrackedcache$/, (value) => value === 'false'],
+  // A private index Mousse writes is never split, so it leaves no shared index file behind (`provenDiscard.ts`).
+  [/^core\.splitindex$/, (value) => value === 'false'],
   [/^gc\.auto$/, (value) => value === '0'],
   // Mousse's own commands never start Git's automatic housekeeping (`MOUSSE_GIT_CONFIG`).
   [/^maintenance\.auto$/, (value) => value === 'false'],

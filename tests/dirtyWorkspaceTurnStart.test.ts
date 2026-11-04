@@ -137,7 +137,7 @@ describe('a turn that starts in a workspace changed outside Mousse', () => {
 
     // Discard stays what it was for a conflict the user wants gone: it keeps a copy of everything it drops.
     const owner = mkdtempSync(join(tmpdir(), 'mousse-discard-owner-'))
-    const { ref: backupRef } = await pressed('Discard changes', () => discardPendingChangesAsync(repo, (top) => keepCopy({ owner, top, operationType: 'git-discard', action: 'Discard' })))
+    const { ref: backupRef } = await pressed('Discard changes', () => discardPendingChangesAsync(repo, (top, scope) => keepCopy({ owner, top, operationType: 'git-discard', action: 'Discard', ...scope })))
     expect(backupRef).toMatch(/^refs\/mousse\/preserved\//)
     expect(git(repo, 'show', `${backupRef}:untracked.txt`)).toBe('mine')
     rmSync(owner, { recursive: true, force: true })

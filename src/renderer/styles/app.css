@@ -4380,11 +4380,18 @@ div.files-asset-preview { display: grid; place-items: center; overflow: auto; pa
 }
 
 .git-changes-error,
+.git-changes-left,
 .git-changes-notice {
   flex-shrink: 0;
   padding: 6px 12px;
   font-size: 11px;
   line-height: 1.4;
+}
+
+/* Paths a discard left as they are, named above what it kept. */
+.git-changes-left {
+  color: var(--text-primary);
+  overflow-wrap: anywhere;
 }
 
 /* What a discard kept: the ref and the restore command, which are copied by hand. */

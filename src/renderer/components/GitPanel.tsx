@@ -101,6 +101,8 @@ export function GitPanel() {
   const [rowError, setRowError] = useState('')
   // What the last discard kept, and how to bring a file back.
   const [rowNotice, setRowNotice] = useState('')
+  // Paths the last discard left as they are, because they changed after Discard was pressed.
+  const [rowLeft, setRowLeft] = useState('')
   // One Git action at a time: the ref answers a second click before the state has rendered.
   const [busy, setBusy] = useState(false)
   const busyRef = useRef(false)
@@ -129,6 +131,7 @@ export function GitPanel() {
     setActivity(IDLE_SYNC_ACTIVITY)
     setRowError('')
     setRowNotice('')
+    setRowLeft('')
   }, [folderId])
 
   // A file that is no longer listed (staged, discarded or committed elsewhere) has no diff to show.
@@ -160,6 +163,7 @@ export function GitPanel() {
     if (!folderId) return
     setRowError('')
     setRowNotice('')
+    setRowLeft('')
     // The open file as it was when the button was pressed: the refresh after the action drops a row that moved, so it is read first.
     const before = selectedRef.current
     void withBusy(async () => {
@@ -168,6 +172,7 @@ export function GitPanel() {
         setRowError(outcome.message)
       } else if (outcome.kind === 'done') {
         if (outcome.notice) setRowNotice(outcome.notice)
+        if (outcome.left) setRowLeft(outcome.left)
         const paths = request.files === 'all' ? 'all' : request.files.map((file) => file.path)
         const followed = selectionAfterAction(before, request.action, paths)
         // Another row opened meanwhile stays open.
@@ -389,6 +394,7 @@ export function GitPanel() {
         )}
         <GitOperationStatus path={folderId} />
         {rowError && <div className="git-changes-error" role="alert">{rowError}</div>}
+        {rowLeft && <div className="git-changes-left" role="status">{rowLeft}</div>}
         {rowNotice && <div className="git-changes-notice" role="status">{rowNotice}</div>}
 
         <div className="git-changes">{renderSidebarBody()}</div>

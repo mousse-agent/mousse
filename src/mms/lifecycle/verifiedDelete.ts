@@ -117,15 +117,16 @@ function kindOf(stat: { isSymbolicLink(): boolean; isDirectory(): boolean; isFil
  * Refuses an entry that is no longer exactly as frozen (kind, mode, size, links, content), reading it without blocking, and
  * returns what the check was made from. The entry is read between two `lstat`s that must agree, so the bytes checked are
  * the bytes the returned signature describes. The caller removes it only after {@link assertFrozenEntryUnchanged}, with
- * nothing awaited in between.
+ * nothing awaited in between. A file with other hard links is refused, as one entry of a folder removed whole, unless
+ * `otherLinks` allows it: removing one of its names loses no bytes, and a write through any name still changes its `lstat`.
  */
-export async function proveFrozenContentEntryAsync(root: string, entry: ContentEntry): Promise<FrozenEntryProof> {
+export async function proveFrozenContentEntryAsync(root: string, entry: ContentEntry, options: { otherLinks?: boolean } = {}): Promise<FrozenEntryProof> {
   const path = join(root, entry.path)
   await assertLifecyclePathAsync(dirname(root), root)
   if (entry.path) await assertLifecyclePathAsync(root, dirname(path))
   const before = await lstat(path, { bigint: true })
   const kind = kindOf(before)
-  if (kind !== entry.kind || Number(before.mode) !== entry.mode || kind !== 'directory' && Number(before.size) !== entry.bytes || kind === 'file' && before.nlink > 1n) throw new Error('Frozen content was replaced before mutation')
+  if (kind !== entry.kind || Number(before.mode) !== entry.mode || kind !== 'directory' && Number(before.size) !== entry.bytes || kind === 'file' && before.nlink > 1n && !options.otherLinks) throw new Error('Frozen content was replaced before mutation')
   const current = kind === 'link' ? hash(await readlink(path)) : kind === 'file' ? hash(await readFile(path)) : ''
   if (current !== entry.digest) throw new Error('Frozen content changed before mutation')
   const after = await lstat(path, { bigint: true })

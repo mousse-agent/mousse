@@ -21,7 +21,8 @@ export type RowRequest =
   | { action: 'stage' | 'unstage'; files: readonly GitFileChange[] | 'all' }
   | { action: 'discard'; files: readonly GitFileChange[] }
 
-export type RowOutcome = { kind: 'done'; notice?: string } | { kind: 'cancelled' } | { kind: 'failed'; message: string }
+/** `left` names paths a discard left as they are, because they changed after the person pressed Discard. */
+export type RowOutcome = { kind: 'done'; notice?: string; left?: string } | { kind: 'cancelled' } | { kind: 'failed'; message: string }
 
 export interface RowActionDeps {
   /** Asks the user; false cancels. Defaults to the window's confirm dialog. */
@@ -52,8 +53,8 @@ export async function runRowAction(
     if (request.action === 'discard') {
       const confirm = deps.confirm ?? ((message: string) => window.confirm(message))
       if (!confirm(discardPrompt(request.files, deps.discardKeptForMs))) return { kind: 'cancelled' }
-      const notice = await discardGitPaths(path, paths(request.files), scope)
-      return notice ? { kind: 'done', notice } : { kind: 'done' }
+      const kept = await discardGitPaths(path, paths(request.files), scope)
+      return { kind: 'done', ...(kept?.notice ? { notice: kept.notice } : {}), ...(kept?.left ? { left: kept.left } : {}) }
     } else {
       const target = request.files === 'all' ? 'all' : paths(request.files)
       if (request.action === 'stage') await stageGitPaths(path, target, scope)

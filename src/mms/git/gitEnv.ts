@@ -145,3 +145,13 @@ export function stripInheritedGitEnv(env: NodeJS.ProcessEnv, inherited: NodeJS.P
   }
   return next
 }
+
+/**
+ * The environment entries for a Git command on one of Mousse's private index files: `GIT_INDEX_FILE`, and
+ * `core.splitIndex` off (after any `GIT_CONFIG_*` entries the process already has), so Git never writes a shared index
+ * file for it, which would stay behind in the Git folder once the private index is deleted.
+ */
+export function privateIndexEnv(indexFile: string, extra: Record<string, string> = {}): Record<string, string> {
+  const config = Object.entries(withGitConfigEnv(process.env, [['core.splitIndex', 'false']])).filter((entry): entry is [string, string] => /^GIT_CONFIG_(COUNT|KEY_\d+|VALUE_\d+)$/.test(entry[0]) && entry[1] !== undefined)
+  return { ...Object.fromEntries(config), ...extra, GIT_INDEX_FILE: indexFile }
+}

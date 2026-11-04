@@ -13,6 +13,7 @@ import type { GitCheckOptions, RepoProgramOptions } from '../git/repoPrograms'
 import { waitForFolderAccess } from '../files/folderAccess'
 import { LISTING_MAX_BUFFER, runGitProcess } from '../git/runGitProcess'
 import { files, runAsync, step, type Steps } from './steps'
+import { discardProvenAsync, stagedEntryDigests, stagedModes, stagedSince, waitForIndexAsync, type DiscardGit, type LeftAsItIs } from './provenDiscard'
 
 /**
  * `args` as Mousse's own commands run them: no repository program, and, for a folder whose snapshots live in a hidden
@@ -300,21 +301,113 @@ export function mergeTreesAsync(top: string, base: string, ours: string, theirs:
   return runAsync(mergeTreesSteps(top, base, ours, theirs))
 }
 
+/** What {@link discardPendingChangesAsync} asks its `keep` to keep a copy of: `keepCopy`'s `paths` and `writes`. */
+export interface DiscardScope {
+  /** Every path the discard removes or writes HEAD's version back at. */
+  paths: string[]
+  /** The paths HEAD's version is written back at; what stands in their way is kept too. */
+  writes: string[]
+}
+
+/** The NUL-separated fields of a Git listing, exactly as named (a leading space is part of a path). */
+async function listZAsync(top: string, args: string[]): Promise<string[]> {
+  const ran = await tryGitRawAsync(top, args, undefined, LISTING)
+  if (!ran.ok) throw new Error(`Command failed: git ${args.join(' ')}\n${ran.stderr.trim()}`)
+  return ran.stdout.split('\0').filter(Boolean)
+}
+
+/** The mode HEAD has at each of `paths` it has, asked a few thousand characters of literal paths at a time. */
+async function headModesAsync(top: string, paths: readonly string[]): Promise<Map<string, string>> {
+  const modes = new Map<string, string>()
+  for (let start = 0; start < paths.length;) {
+    const batch: string[] = []
+    for (let length = 0; start < paths.length && (!batch.length || length + paths[start]!.length < 16_000); start++) {
+      batch.push(`:(literal)${paths[start]!}`)
+      length += paths[start]!.length + 11
+    }
+    for (const line of await listZAsync(top, ['ls-tree', '-z', 'HEAD', '--', ...batch])) modes.set(line.slice(line.indexOf('\t') + 1), line.slice(0, line.indexOf(' ')))
+  }
+  return modes
+}
+
 /**
  * Drops pending changes, untracked files and an unfinished merge, revert or cherry-pick, after `keep` has kept a copy
- * of them (`keepCopy` over the whole working tree: staged, working and conflict versions, and what stands where a file
- * goes back, ignored files included). Other ignored files, nested repositories and `.mousse/` stay. A rebase is refused. The caller holds the mutation locks and has the user's
- * confirmation.
+ * of them (`keepCopy` over `scope`: staged, working and conflict versions, and what stands where a file goes back,
+ * ignored files included). Other ignored files, nested repositories and `.mousse/` stay. A rebase is refused. The
+ * caller holds the mutation locks and has the user's confirmation.
+ *
+ * Mousse removes only what the copy proves it holds, and Git only creates (`discardProvenAsync`). A path where
+ * something changed after the copy was read, that was staged anew, or that was saved again after it was emptied, is not
+ * discarded, keeps its staged version (conflict stages included) and is named in `left`; then the unfinished operation
+ * stays too. Only once every path was written back does the whole index go back to HEAD (`git reset`, which leaves the
+ * files alone), ending the operation. Another Git command holding the index refuses it first (`IndexLockedError`).
+ * `beforeUnlink` is a test seam: it runs right before each removed entry's last check.
  */
-export async function discardPendingChangesAsync<T>(cwd: string, keep: (top: string) => Promise<T>): Promise<T> {
+export async function discardPendingChangesAsync<T extends { digests: ReadonlyMap<string, string> }>(
+  cwd: string,
+  keep: (top: string, scope: DiscardScope) => Promise<T>,
+  options: { beforeUnlink?: (path: string) => void } = {}
+): Promise<T & { left: LeftAsItIs[] }> {
   const pending = await runAsync(inspectPendingChangesSteps(cwd))
   if (pending.operation === 'rebase') throw pendingChangesErrorFor('Workspace', {}, pending)
-  const kept = await keep(pending.top)
-  await gitAsync(pending.top, ['reset', '--hard', '-q', 'HEAD'])
-  await gitAsync(pending.top, ['clean', '-f', '-d', '-q', '--', '.', NOT_MOUSSE])
-  const left = await runAsync(inspectPendingChangesSteps(pending.top))
-  if (ownPaths(left.files).length || left.operation) throw pendingChangesErrorFor('Workspace', {}, left)
-  return kept
+  const top = pending.top
+  const head = (await tryGitAsync(top, ['rev-parse', '--verify', '-q', 'HEAD^{commit}'])).stdout || undefined
+  const [indexBefore, others, staged, working, unmerged, flagged] = await Promise.all([
+    listZAsync(top, ['ls-files', '-s', '-z']),
+    listZAsync(top, ['ls-files', '-z', '--others', '--exclude-standard', '--', '.', NOT_MOUSSE]),
+    head ? listZAsync(top, ['diff-index', '-z', '--cached', '--name-only', '--no-renames', head, '--', '.', NOT_MOUSSE]) : Promise.resolve([]),
+    head ? listZAsync(top, ['diff-index', '-z', '--name-only', '--no-renames', head, '--', '.', NOT_MOUSSE]) : Promise.resolve([]),
+    listZAsync(top, ['ls-files', '-z', '--unmerged', '--', '.', NOT_MOUSSE]),
+    listZAsync(top, ['ls-files', '-z', '-v', '--', '.', NOT_MOUSSE])
+  ])
+  // A repository of its own inside is listed as `name/`; like `git clean -d`, it stays.
+  const untracked = others.filter((path) => !path.endsWith('/'))
+  // Without a commit every staged path goes; otherwise what differs from HEAD, conflicts, and the paths Git is told to
+  // assume unchanged (their edits are overwritten too, though Git does not list them).
+  const tracked = [...new Set(head
+    ? [...staged, ...working, ...unmerged.map((line) => line.slice(line.indexOf('\t') + 1)), ...flagged.filter((line) => /^[a-z] /.test(line)).map((line) => line.slice(2))]
+    : stagedModes(indexBefore).keys())].filter((path) => path !== '.mousse' && !path.startsWith('.mousse/'))
+  const headModes = head ? await headModesAsync(top, tracked) : new Map<string, string>()
+  const indexModes = stagedModes(indexBefore)
+  // A submodule changes in the index only: its folder is never walked, removed or written. One staged where HEAD has a
+  // file is in the way of that file, and the copy refuses it.
+  const submodule = (path: string): boolean => headModes.has(path) ? headModes.get(path) === '160000' : indexModes.get(path) === '160000'
+  const restore = tracked.filter((path) => headModes.has(path) && !submodule(path))
+  const remove = [...tracked.filter((path) => !headModes.has(path) && !submodule(path)), ...untracked]
+  const run: DiscardGit = async (args, options = {}) => {
+    const argv = await guardedAsync(top, args, { ...(options.env ? { env: options.env } : {}), ...(options.input !== undefined ? { stdin: options.input } : {}) })
+    const ran = await runGitProcess(argv, { cwd: top, env: gitEnv(top, options.env), ...(options.input !== undefined ? { input: options.input } : {}), maxBuffer: LISTING_MAX_BUFFER })
+    return { status: ran.error ? null : ran.status, stdout: ran.stdout, stderr: (filterRefusal(ran.stderr.trim()) || ran.stderr) }
+  }
+  // Another Git command holding the index refuses the discard before anything is kept or removed.
+  await waitForIndexAsync(top, run)
+  const kept = await keep(top, { paths: [...tracked, ...untracked], writes: restore })
+  const { left, endedOperation, stagedElsewhere, indexWritten } = await discardProvenAsync({
+    top,
+    ...(head ? { head } : {}),
+    restore,
+    remove: tracked.filter((path) => !headModes.has(path) && !submodule(path)),
+    untracked,
+    indexOnly: tracked.filter(submodule),
+    stagedBefore: stagedEntryDigests(indexBefore),
+    digests: kept.digests,
+    discardGit: run,
+    // Folders `git clean -d` would remove once empty: untracked ones, listed as `name/`.
+    wholeTree: { untrackedFolders: (await listZAsync(top, ['ls-files', '-z', '--others', '--directory', '--exclude-standard', '--', '.', NOT_MOUSSE])).filter((path) => path.endsWith('/')) },
+    ...(options.beforeUnlink ? { beforeUnlink: options.beforeUnlink } : {})
+  })
+  if (endedOperation) {
+    // The whole index went back to HEAD with the rest, which ended the merge, revert or cherry-pick. What is still
+    // pending is refused, except an entry someone staged after the index was written: that is their newer work.
+    const after = await runAsync(inspectPendingChangesSteps(top))
+    const now = stagedEntryDigests(await listZAsync(top, ['ls-files', '-s', '-z']))
+    const stagedSinceWrite = new Set(indexWritten ? stagedSince(indexWritten, now, [...new Set([...indexWritten.keys(), ...now.keys()])]) : [])
+    if (ownPaths(after.files).some((path) => !stagedSinceWrite.has(path)) || after.operation) throw pendingChangesErrorFor('Workspace', {}, after)
+  } else if (!left.length && pending.operation) {
+    // Everything was discarded, but something else was staged meanwhile: the index stays, and so does the operation.
+    for (const path of stagedElsewhere) left.push({ path, reason: 'operation', changed: path })
+  }
+  return { ...kept, left }
 }
 
 export function* commitParentsSteps(cwd: string, sha: string): Steps<string[]> {
