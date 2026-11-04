@@ -14,7 +14,7 @@ import { ThreadWorkspaceManager } from '../workspace/ThreadWorkspaceManager'
 import { ChangeReceiptService } from './ChangeReceiptService'
 import { gitAsync, LISTING, mergeTreesAsync, refuseUnsafeChangesAsync, treeOfAsync, tryGitAsync } from './git'
 import { restoreCommandsText, restoreKindOf } from './restoreCommands'
-import { coverageNotice, leftAsIsNotice, moveOutcome, moveProgressAsync, preservedNotice, restoreChangeAsync, snapshotOfTreeAsync, takeSnapshotAsync, type Snapshot } from './snapshots'
+import { coverageNotice, exactBytesNotice, leftAsIsNotice, moveOutcome, moveProgressAsync, preservedNotice, restoreChangeAsync, snapshotOfTreeAsync, takeSnapshotAsync, type Snapshot } from './snapshots'
 import { retentionWindowText } from '../../shared/undoRetention'
 
 /** The thread's first conversation branch: the one every thread starts on. */
@@ -200,7 +200,7 @@ export class ConversationBranchService {
         staying = { base, current }
         if (left) await gitAsync(workspacePath, ['update-ref', '--no-deref', left.retainedRef, base])
         if (added) atomicWriteJsonSync(this.path, branches)
-        const restored = await restoreChangeAsync(workspacePath, { reason: `switch to conversation branch ${selected.id}`, threadId, operationId, base, ours: current, theirs, restoredTo: `on ${selected.name}` }, (expectedTree) => {
+        const restored = await restoreChangeAsync(workspacePath, { reason: `switch to conversation branch ${selected.id}`, threadId, operationId, base, ours: current, theirs, restoredTo: `on ${selected.name}`, keep: { owner: this.threadDirectory, action: 'Switching conversation branches' } }, (expectedTree) => {
           intent = { branchId: selected.id, leaving, ours: current, expectedTree, own: theirs, base, restoreContext: Boolean(restoreContext) }
           this.journal.append({ operationId, operationType: 'conversation-activate', state: 'prepared', expectedPreState: { branchId, leaving, ours: current }, details: intent })
         })
@@ -209,6 +209,7 @@ export class ConversationBranchService {
         const notice = [
           leftBehind.length && left ? await this.leftBehindNotice(workspacePath, { paths: leftBehind, target: selected.name, leftName, leftRef: left.retainedRef, base, current, receiptId: outside.action?.receiptId, operationId }) : '',
           restored.preserved ? preservedNotice(restored.preserved, new UndoRetentionService(this.threadDirectory).policy().windowMs) : '',
+          restored.exact ? exactBytesNotice(restored.exact) : '',
           leftAsIsNotice(restored.leftAsIs) ?? '', coverageNotice(ours.coverageGaps, restored.snapshot.coverageGaps) ?? ''
         ].filter(Boolean).join(' ') || undefined
         await this.settle(workspacePath, branches, selected, restored.snapshot, { branchId: selected.id, snapshotSha: restored.snapshot.sha, own: theirs, at: new Date().toISOString() })

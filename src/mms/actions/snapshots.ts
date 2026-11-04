@@ -1,13 +1,17 @@
 import { spawnSync } from 'node:child_process'
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { lstatSync, type Stats } from 'node:fs'
-import { lstat } from 'node:fs/promises'
+import { lstat, rm } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join, parse, resolve, sep } from 'node:path'
 import type { GitRecord, ThreadAction } from '../../shared/threadActions'
 import { activeHiddenStore, builtInPathspecs, ensureStoreRules, outsideHiddenStore } from '../git/hiddenStore'
-import { gitEnv, gitStep, guarded, guardedAsync, LISTING, mergeTreesSteps, MOUSSE_COMMIT_ENV, mousseCommitEnvNow, NOT_MOUSSE, operationInProgressSteps, runGitProcess, tryGit, tryGitAsync, tryGitStep, treeOfSteps } from './git'
-import { restoreCommandsText, restoreKindOf, restoreShell, type RestoreKind, type RestoreShell } from './restoreCommands'
+import { gitAsync, gitEnv, gitStep, ownGitRunner, guarded, guardedAsync, LISTING, mergeTreesSteps, MOUSSE_COMMIT_ENV, mousseCommitEnvNow, NOT_MOUSSE, operationInProgressSteps, runGitProcess, tryGit, tryGitAsync, tryGitStep, treeOfSteps } from './git'
+import type { FrozenEntryProof } from '../lifecycle/verifiedDelete'
+import { readConvertedAsync } from './heldBytes'
+import { createOnlyAsync, removeProvenAsync } from './provenDiscard'
+import { keepCopy } from './keptCopies'
+import { restoreCommandsText, restoreFileCommand, restoreKindOf, restoreShell, type RestoreKind, type RestoreShell } from './restoreCommands'
 import { files as disk, runAsync, step, type Steps } from './steps'
 import { retentionWindowText } from '../../shared/undoRetention'
 
@@ -640,7 +644,18 @@ export interface PreservedFiles {
 /** A path a restore left as it is because it was not covered on one side, and why. */
 export interface LeftAsIs { path: string; reason: string }
 
-export type RestoreResult = { snapshot: Snapshot; tree: string; preserved?: PreservedFiles; leftAsIs?: LeftAsIs[] } | { conflicts: string[] }
+/**
+ * Files a restore wrote over or removed whose bytes on disk Git would not write back (line endings, an encoding or a
+ * filter it converts), kept exactly as they were first: each under the ref of the copy that holds it (one, unless a file
+ * changed while the restore ran and was kept again). `windowMs`: how long their owner keeps them; absent when the
+ * restore named no owner and they were kept under the restore's own ref.
+ */
+export interface ExactBytesKept { files: Array<{ path: string; ref: string; kind?: RestoreKind }>; top: string; windowMs?: number }
+
+/** Whose copy a restore keeps of bytes no snapshot holds: the action's owner (a thread's folder), and the action as a refusal names it ("Undo"). */
+export interface RestoreKeep { owner: string; action: string }
+
+export type RestoreResult = { snapshot: Snapshot; tree: string; preserved?: PreservedFiles; exact?: ExactBytesKept; leftAsIs?: LeftAsIs[] } | { conflicts: string[] }
 
 /** The line a result carries for the paths a restore left as they are. */
 export function leftAsIsNotice(left: LeftAsIs[] | undefined): string | undefined {
@@ -660,6 +675,25 @@ export function preservedNotice(preserved: PreservedFiles, windowMs: number, she
   return `Files no snapshot held were in the way and are kept under ${preserved.ref} for ${retentionWindowText(windowMs)}: ${named}. Bring one back before then by running this in ${preserved.top}: ${commands}.`
 }
 
+/**
+ * The line a result carries when a restore kept files exactly as they were on disk before writing them in Git's form.
+ * Kept short: until snapshots record exact bytes, every Undo in a repository whose files Git converts can carry it.
+ */
+export function exactBytesNotice(kept: ExactBytesKept, shell: RestoreShell = restoreShell()): string {
+  const paths = kept.files.map((file) => file.path)
+  const one = paths.length === 1
+  const named = paths.slice(0, 3).join(', ') + (paths.length > 3 ? ` and ${paths.length - 3} more` : '')
+  const first = kept.files[0]!
+  const others = [...new Set(kept.files.map((file) => file.ref))].filter((ref) => ref !== first.ref)
+  const rest = one ? '' : `, and the same way for the others${others.length ? ` (some under ${others.join(', ')})` : ''}`
+  return `Kept ${named} exactly as ${one ? 'it was' : 'they were'} on disk${kept.windowMs === undefined ? '' : ` for ${retentionWindowText(kept.windowMs)}`}; Git writes ${one ? 'it' : 'them'} with other line endings or encoding. Bring ${one ? 'it' : 'one'} back by running this in ${kept.top}: ${restoreFileCommand(first.ref, first.path, { shell, ...(first.kind ? { kind: first.kind } : {}) })}${rest}.`
+}
+
+/** The lines a move's result carries for what it kept exactly and what it left as it is; undefined when neither. */
+export function movedFilesNotice(moved: Pick<MovedFiles, 'exact' | 'leftAsIs'>): string | undefined {
+  return [moved.exact ? exactBytesNotice(moved.exact) : '', leftAsIsNotice(moved.leftAsIs) ?? ''].filter(Boolean).join(' ') || undefined
+}
+
 export interface RestoreChangeInput extends SnapshotInput {
   /** The code the change started from; with `theirs` it is what is taken back (Undo: the turn's end). */
   base: string
@@ -669,6 +703,8 @@ export interface RestoreChangeInput extends SnapshotInput {
   theirs: string
   /** Where `theirs` is, in words for the result: "at the start of the turn". */
   restoredTo?: string
+  /** Who keeps bytes on disk that Git would write back in another form (see `moveFilesSteps`). */
+  keep?: RestoreKeep
 }
 
 /**
@@ -688,9 +724,10 @@ export function* restoreChangeSteps(cwd: string, input: RestoreChangeInput, plan
   // Checked before the intent is recorded: a folder that cannot be kept refuses the restore with nothing pending.
   yield* uncapturedInTheWay(top, ours, tree)
   planned?.(tree)
-  const preserved = yield* moveFilesSteps(top, ours, tree, input.operationId)
+  const moved = yield* moveFilesSteps(top, ours, tree, input.operationId, input.keep)
   const snapshot = yield* takeSnapshotSteps(top, input)
-  return { snapshot, tree, ...(preserved ? { preserved } : {}), ...(leftAsIs.length ? { leftAsIs } : {}) }
+  const left = [...leftAsIs, ...(moved.leftAsIs ?? [])]
+  return { snapshot, tree, ...(moved.preserved ? { preserved: moved.preserved } : {}), ...(moved.exact ? { exact: moved.exact } : {}), ...(left.length ? { leftAsIs: left } : {}) }
 }
 
 
@@ -744,8 +781,8 @@ function* leaveUncovered(top: string, input: RestoreChangeInput, ours: string, m
  * Files on disk at the paths a move from `from` to `to` writes or deletes that `from` does not hold: an ignored or
  * excluded file, or what fills a folder where `to` puts a file. These are bytes no snapshot has.
  */
-function* uncapturedInTheWay(top: string, from: string, to: string): Steps<string[]> {
-  const touched = (yield* gitStep(top, ['diff-tree', '-r', '-z', '--no-renames', '--name-only', from, to], undefined, undefined, LISTING)).split('\0').filter(Boolean)
+function* uncapturedInTheWay(top: string, from: string, to: string, listed?: string[]): Steps<string[]> {
+  const touched = listed ?? (yield* gitStep(top, ['diff-tree', '-r', '-z', '--no-renames', '--name-only', from, to], undefined, undefined, LISTING)).split('\0').filter(Boolean)
   if (!touched.length) return []
   const held = new Set((yield* gitStep(top, ['ls-tree', '-r', '-z', '--name-only', from], undefined, undefined, LISTING)).split('\0').filter(Boolean))
   // A nested repository recorded by its commit (a gitlink) is never written into: Git only changes the link.
@@ -821,19 +858,51 @@ function* preserveFiles(top: string, paths: string[], directory: string, operati
   }
 }
 
+/** What a move of the files did besides the move: what it kept first, and paths it left as they are. */
+export interface MovedFiles { preserved?: PreservedFiles; exact?: ExactBytesKept; leftAsIs?: LeftAsIs[] }
+
+/** The SHA-256 of a file (or a link's target) as the kept ref `ref` holds it, read as Git wrote it, never converted. */
+async function keptDigest(top: string, ref: string, path: string): Promise<string> {
+  const argv = await guardedAsync(top, ['cat-file', 'blob', `${ref}:${path}`])
+  const ran = await runGitProcess(argv, { cwd: top, env: gitEnv(top), maxBuffer: LISTING.maxBuffer })
+  if (ran.error || ran.status !== 0) throw new Error(`Command failed: git cat-file blob ${ref}:${path}\n${ran.stderr}`)
+  return createHash('sha256').update(ran.stdoutBytes).digest('hex')
+}
+
+/** One path the move writes or deletes: its mode and blob in `from` and in `to` (mode `000000` where a tree has none). */
+interface Change { fromMode: string; fromBlob: string; toMode: string; toBlob: string }
+
 /**
  * Rewrites the files that differ between two trees from the first (what the worktree holds, as of the last snapshot)
  * to the second, through a temporary private index. A file that changed since the snapshot makes Git refuse
  * before anything is written. A file in the way that `from` does not hold (ignored, excluded, or inside a folder
  * that becomes a file) is no snapshot's, so it is kept under a `refs/mousse/preserved/` ref first and returned.
+ *
+ * Files Git converts when it writes them (CRLF and LF under `core.autocrlf`, an `eol`, `text`, encoding or filter
+ * attribute) are written by `writeConvertedAsync` instead: Git's checks cannot tell their raw forms apart, so Mousse
+ * removes each one only once it is proven held or kept, and Git then only creates. Files Git does not convert stay with
+ * `read-tree -m -u`, whose refresh is enough there: their stored form is their raw bytes, so after the refresh any write
+ * that changes them changes their size or times (Git refuses), or lands in the second of the refresh, when Git compares
+ * the raw bytes again and refuses. What that leaves is a write landing while Git itself writes, after it checked.
  */
-export function* moveFilesSteps(top: string, from: string, to: string, operationId?: string): Steps<PreservedFiles | undefined> {
-  if (from === to) return undefined
+export function* moveFilesSteps(top: string, from: string, to: string, operationId?: string, keep?: RestoreKeep): Steps<MovedFiles> {
+  if (from === to) return {}
   const files = yield* privateFiles(top)
-  const inTheWay = yield* uncapturedInTheWay(top, from, to)
+  // Every path the move writes or deletes: `:<mode> <mode> <blob> <blob> <status>`, then the path.
+  const raw = (yield* gitStep(top, ['diff-tree', '-r', '-z', '--no-renames', '--raw', from, to], undefined, undefined, LISTING)).split('\0')
+  const changes = new Map<string, Change>()
+  for (let index = 0; index + 1 < raw.length; index += 2) {
+    const [fromMode, toMode, fromBlob, toBlob] = raw[index]!.slice(1).split(' ') as [string, string, string, string]
+    changes.set(raw[index + 1]!, { fromMode, fromBlob, toMode, toBlob })
+  }
+  const touched = [...changes.keys()]
+  const heldAsFiles = touched.filter((path) => /^100(?:644|755)$/.test(changes.get(path)!.fromMode))
+  const inTheWay = yield* uncapturedInTheWay(top, from, to, touched)
   const preserved = inTheWay.length ? yield* preserveFiles(top, inTheWay, files.directory, operationId) : undefined
+  const converted = yield* convertedPaths(top, touched, heldAsFiles)
   const temporary = join(files.directory, `restore-${randomUUID()}.index`)
   const env = { GIT_INDEX_FILE: temporary }
+  let written: { exact?: ExactBytesKept; leftAsIs: LeftAsIs[] } = { leftAsIs: [] }
   try {
     // The persistent index was refreshed by the snapshot, so its stat data lets Git see that the files still match.
     if (yield* disk.exists(files.index)) yield* disk.copyFile(files.index, temporary)
@@ -841,26 +910,208 @@ export function* moveFilesSteps(top: string, from: string, to: string, operation
     // A file saved since with the same bytes (format on save, `touch`) only has new stat data: refreshed, it reads as
     // unchanged, so Git refuses only a file whose bytes changed.
     yield* tryGitStep(top, ['update-index', '-q', '--refresh'], env, LISTING)
-    yield* gitStep(top, ['read-tree', '-m', '-u', from, to], env)
+    if (!converted.length) yield* gitStep(top, ['read-tree', '-m', '-u', from, to], env)
+    else written = yield* asyncOnly(() => writeConvertedAsync({ top, from, to, env, changes, converted, keep, operationId, directory: files.directory, ...(preserved ? { preserved } : {}) }))
   } finally {
     yield* disk.remove(temporary)
   }
-  return preserved
+  return { ...(preserved ? { preserved } : {}), ...(written.exact ? { exact: written.exact } : {}), ...(written.leftAsIs.length ? { leftAsIs: written.leftAsIs } : {}) }
 }
 
 
 /** Rewrites the files that differ between two trees (see `moveFilesSteps`), without blocking the daemon. */
-export function moveFilesAsync(top: string, from: string, to: string, operationId?: string): Promise<PreservedFiles | undefined> {
-  return runAsync(moveFilesSteps(top, from, to, operationId))
+export function moveFilesAsync(top: string, from: string, to: string, operationId?: string, keep?: RestoreKeep): Promise<MovedFiles> {
+  return runAsync(moveFilesSteps(top, from, to, operationId, keep))
 }
+
+/** The attributes under which Git writes a file with bytes other than its blob's; `crlf` is `text`'s old name. */
+const CONVERTING_ATTRIBUTES = ['text', 'crlf', 'eol', 'filter', 'ident', 'working-tree-encoding'] as const
+
+/**
+ * The paths among `files` that Git converts when it writes them: every one when `core.autocrlf` is on (`true` or
+ * `input`, as Git reads it in the end) or the move changes a `.gitattributes`, otherwise those `check-attr` finds a
+ * converting attribute on. `core.eol` alone converts nothing: it applies to files with a `text` attribute, which
+ * `check-attr` finds. In a repository that converts nothing this is two quick reads, and no file is opened.
+ */
+function* convertedPaths(top: string, touched: string[], files: string[]): Steps<string[]> {
+  if (!files.length) return []
+  const autocrlf = yield* tryGitStep(top, ['config', '--get', 'core.autocrlf'])
+  // A bare `autocrlf` key reads as true.
+  if (autocrlf.ok && !/^(false|no|off|0)$/i.test(autocrlf.stdout.trim())) return files
+  if (touched.some((path) => path === '.gitattributes' || path.endsWith('/.gitattributes'))) return files
+  // For each path, in order, one `path NUL attribute NUL value NUL` per attribute asked.
+  const fields = (yield* gitStep(top, ['check-attr', '-z', '--stdin', ...CONVERTING_ATTRIBUTES], undefined, files.join('\0') + '\0', LISTING)).split('\0')
+  return files.filter((_, index) => CONVERTING_ATTRIBUTES.some((__, attribute) => {
+    const value = fields[(index * CONVERTING_ATTRIBUTES.length + attribute) * 3 + 2]
+    return value !== undefined && value !== 'unspecified' && value !== 'unset'
+  }))
+}
+
+/** A step that runs only without blocking the daemon, as every restore does. */
+function asyncOnly<T>(run: () => Promise<T>): Steps<T> {
+  return step(() => { throw new Error('This part of a restore runs only without blocking the daemon.') }, run)
+}
+
+/** How many times a restore reads and keeps files that keep changing while it does, before it stops. */
+const KEEP_ROUNDS = 3
+const CHANGED_WHILE_WRITING = 'changed while the restore was writing it'
+
+interface ConvertedWrite {
+  top: string; from: string; to: string
+  /** The temporary index, holding `from` and just refreshed. */
+  env: NodeJS.ProcessEnv
+  changes: ReadonlyMap<string, Change>
+  /** Paths `from` holds as files that Git converts, which the move writes or deletes. */
+  converted: readonly string[]
+  keep?: RestoreKeep
+  operationId?: string
+  directory: string
+  /** What this restore kept first of the files in its way (`preserveFiles`). */
+  preserved?: PreservedFiles
+}
+
+const namedPaths = (paths: readonly string[]): string => paths.slice(0, 5).join(', ') + (paths.length > 5 ? ` and ${paths.length - 5} more` : '')
+
+/**
+ * The move, for a repository where Git converts some of the paths it writes. Mousse removes only bytes it has proven are
+ * held, and Git only creates, with the same steps a Discard takes (`provenDiscard.ts`):
+ * 1. Nothing is written yet. A converted file whose normal form changed since the snapshot refuses the restore, as Git
+ *    would. Each converted file on disk is read once and compared with Git's form of it (`heldBytes.ts`); one that
+ *    differs is kept by `keep`'s owner (`keepCopy`), and the copy must hold the bytes that were read. A file that changes
+ *    meanwhile is read again, up to `KEEP_ROUNDS` times; then the restore is refused, naming it, with nothing written.
+ * 2. Git moves every other path (`read-tree -m -u` to a target that leaves the converted paths, and target paths in
+ *    their way, as they are), refusing a changed file as before.
+ * 3. Mousse removes each converted file, and a folder that becomes a file with the files this restore kept from it, each
+ *    entry proven right before its unlink (`removeProvenAsync`). One that changed since is read and kept again (still
+ *    bounded); one that keeps changing is left as it is and named. Folders the result still has stay.
+ * 4. Git writes the new versions only where nothing is (`createOnlyAsync`, `checkout-index` without `--force`). Every
+ *    path it did not write is left as it is and named, with why.
+ * A crash between 3 and 4 leaves paths both trees have empty, which recovery reads as a partial restore for a person.
+ */
+async function writeConvertedAsync(write: ConvertedWrite): Promise<{ exact?: ExactBytesKept; leftAsIs: LeftAsIs[] }> {
+  const { top, from, to, env, changes, converted } = write
+  const action = write.keep?.action ?? 'The restore'
+  const blobs = new Map(converted.map((path) => [path, changes.get(path)!.fromBlob]))
+  // As Git refuses a file whose normal form changed since the snapshot: the merge was worked out from that snapshot.
+  const listed = new Set(nul(await gitAsync(top, ['diff-files', '--name-only', '-z'], env, undefined, LISTING)))
+  const stale: string[] = []
+  for (const path of converted) if (listed.has(path) && await lstat(join(top, path)).then(() => true, () => false)) stale.push(path)
+  if (stale.length) throw new Error(`${action} stopped because ${namedPaths(stale)} changed after the files were read. Nothing was changed; try again.`)
+
+  const keptAt = new Map<string, string>()
+  let windowMs: number | undefined
+  /** Reads `paths`, keeps what is not held, and returns the proofs whose bytes are held or kept, and the paths that changed. */
+  const readAndKeep = async (paths: readonly string[]): Promise<{ proofs: FrozenEntryProof[]; changed: string[] }> => {
+    const { read, changed } = await readConvertedAsync(top, blobs, paths)
+    const unheld = read.filter((entry) => !entry.held)
+    let copy: { ref: string; digests?: ReadonlyMap<string, string> } | undefined
+    if (unheld.length && write.keep) {
+      const kept = await keepCopy({ owner: write.keep.owner, top, operationType: 'restore-keep', action: write.keep.action, paths: unheld.map((entry) => entry.path) })
+      copy = { ref: kept.ref, digests: kept.digests }
+      windowMs = kept.windowMs
+    } else if (unheld.length) {
+      copy = await runAsync(preserveFiles(top, unheld.map((entry) => entry.path), write.directory, write.operationId))
+    }
+    const proofs: FrozenEntryProof[] = []
+    for (const entry of read) {
+      // The copy reads each file again: it must hold the very bytes compared, or the file changed in between.
+      if (!entry.held && copy?.digests && copy.digests.get(entry.path) !== entry.proof.entry.digest) { changed.push(entry.path); continue }
+      if (!entry.held) keptAt.set(entry.path, copy!.ref)
+      proofs.push(entry.proof)
+    }
+    return { proofs, changed }
+  }
+
+  // 1. Read, compare and keep, with nothing written yet.
+  const proven = new Map<string, FrozenEntryProof>()
+  for (let round = 1, pending: readonly string[] = converted; ; round++) {
+    const { proofs, changed } = await readAndKeep(pending)
+    for (const proof of proofs) proven.set(proof.entry.path, proof)
+    if (!changed.length) break
+    if (round >= KEEP_ROUNDS) {
+      const one = changed.length === 1
+      throw new Error(`${action} stopped because ${namedPaths(changed)} kept changing while ${one ? 'its' : 'their'} copy was being kept. Nothing was changed; try again once ${one ? 'it has' : 'they have'} stopped changing.`)
+    }
+    pending = changed
+  }
+
+  // 2. Git moves everything else. The converted paths keep `from`'s entry in its target, and target paths in their way
+  // are left for step 4: inside one, a file where one has a folder, or (on a disk that folds case) another spelling of
+  // one, which Git would write over it.
+  const ignoreCase = (await tryGitAsync(top, ['config', '--bool', 'core.ignorecase'])).stdout === 'true'
+  const fold = (path: string): string => (ignoreCase ? path.toLowerCase() : path)
+  const ancestors = (path: string): string[] => path.split('/').slice(0, -1).map((_, depth, parts) => parts.slice(0, depth + 1).join('/'))
+  const exactly = new Set(converted)
+  const mine = new Set(converted.map(fold))
+  const aboveMine = new Set(converted.flatMap(ancestors).map(fold))
+  const inTheirWay = [...changes.entries()].filter(([path, change]) => change.toMode !== '000000' && !exactly.has(path)
+    && (mine.has(fold(path)) || aboveMine.has(fold(path)) || ancestors(path).some((above) => mine.has(fold(above))))).map(([path]) => path)
+  // Folders the result still has: one emptied on the way is never removed, so it keeps its identity.
+  const kept = new Set([...changes.entries()].filter(([, change]) => change.toMode !== '000000').flatMap(([path]) => ancestors(path)).map(fold))
+  const target = join(write.directory, `restore-target-${randomUUID()}.index`)
+  try {
+    await gitAsync(top, ['read-tree', to], { GIT_INDEX_FILE: target })
+    const lines = [
+      ...inTheirWay.map((path) => `0 ${'0'.repeat(from.length)}\t${path}`),
+      ...converted.map((path) => { const change = changes.get(path)!; return `${change.fromMode} ${change.fromBlob}\t${path}` })
+    ]
+    await gitAsync(top, ['update-index', '-z', '--index-info'], { GIT_INDEX_FILE: target }, lines.join('\0') + '\0')
+    const around = await gitAsync(top, ['write-tree'], { GIT_INDEX_FILE: target })
+    await gitAsync(top, ['read-tree', '-m', '-u', from, around], env)
+  } finally {
+    await rm(target, { force: true })
+  }
+
+  // 3. Mousse removes what it has proven (`removeProvenAsync`), each entry right after its last check. A target file
+  // whose place holds a folder goes with that folder, whose other files must be the ones this restore kept first.
+  const digests = new Map([...proven.values()].map((proof) => [proof.entry.path, proof.entry.digest]))
+  const folderTargets = inTheirWay.filter((path) => aboveMine.has(fold(path)))
+  if (write.preserved) for (const path of write.preserved.paths.filter((path) => folderTargets.some((folder) => path.startsWith(`${folder}/`)))) digests.set(path, await keptDigest(top, write.preserved.ref, path))
+  const run = ownGitRunner(top)
+  const skipped = new Map<string, string>()
+  let pending = converted.slice()
+  let targets = folderTargets
+  for (let round = 1; ; round++) {
+    const restore = [...pending.filter((path) => changes.get(path)!.toMode !== '000000'), ...targets]
+    const remove = pending.filter((path) => changes.get(path)!.toMode === '000000')
+    const { left } = await removeProvenAsync({ top, restore, remove, digests, keepFolder: (rel) => kept.has(fold(rel)) })
+    const changed = [...new Set(left.map((entry) => entry.path))]
+    // A folder whose other files changed since they were kept stays as it is.
+    for (const path of changed.filter((path) => !exactly.has(path))) skipped.set(path, CHANGED_WHILE_WRITING)
+    pending = changed.filter((path) => exactly.has(path))
+    targets = []
+    if (!pending.length) break
+    if (round >= KEEP_ROUNDS) { for (const path of pending) skipped.set(path, CHANGED_WHILE_WRITING); break }
+    // Files Git has already written are not taken back: one that cannot be kept now is left as it is.
+    const again = await readAndKeep(pending).catch(() => undefined)
+    if (!again) { for (const path of pending) skipped.set(path, CHANGED_WHILE_WRITING); break }
+    for (const proof of again.proofs) digests.set(proof.entry.path, proof.entry.digest)
+  }
+
+  // 4. Git writes the new versions only where nothing is (`createOnlyAsync`), and every path it did not write is named.
+  // Skipped paths, and every folder above one: a path is blocked when it is one, lies under one, or holds one.
+  const skippedAbove = new Set([...skipped.keys()].flatMap(ancestors))
+  const blocked = (path: string): boolean => skipped.has(path) || skippedAbove.has(path) || ancestors(path).some((above) => skipped.has(above))
+  const toCreate = [...converted.filter((path) => changes.get(path)!.toMode !== '000000'), ...inTheirWay].filter((path) => !blocked(path))
+  const { notWritten } = await createOnlyAsync(top, run, toCreate, to)
+  for (const [path, why] of notWritten) skipped.set(path, why.reason === 'failed' ? `Git could not write it${why.detail ? `: ${why.detail}` : ''}` : CHANGED_WHILE_WRITING)
+  const leftAsIs = [...skipped].sort(([a], [b]) => a.localeCompare(b)).map(([path, reason]) => ({ path, reason }))
+  const files = [...keptAt].map(([path, ref]) => {
+    const kind = restoreKindOf(changes.get(path)?.fromMode)
+    return { path, ref, ...(kind !== 'file' ? { kind } : {}) }
+  }).sort((a, b) => a.path.localeCompare(b.path))
+  return { ...(files.length ? { exact: { files, top, ...(windowMs !== undefined ? { windowMs } : {}) } } : {}), leftAsIs }
+}
+
 
 /**
  * How far a move of the files from one tree to another got, read path by path from the disk (bytes and mode), for the
  * paths the two trees hold differently: still as in `from` (`unmoved`), as in `to` (`moved`), or neither (`other`,
  * changed by someone since). Ignored files count, since the disk is read directly; files the move never touches do
- * not. A nested repository recorded by its commit is left out.
+ * not. A nested repository recorded by its commit is left out. `emptied`: paths in `other` that both trees hold and the
+ * disk does not, as a restore leaves a file it removed before Git wrote its new version (`writeConvertedAsync`).
  */
-export interface MoveProgress { moved: string[]; unmoved: string[]; other: string[] }
+export interface MoveProgress { moved: string[]; unmoved: string[]; other: string[]; emptied?: string[] }
 
 /**
  * Whether a move that stopped landed: every path exactly as planned (`applied`), none of them (`not-applied`), or some
@@ -868,13 +1119,15 @@ export interface MoveProgress { moved: string[]; unmoved: string[]; other: strin
  * an edit made since part of the result, and a later Redo or switch would write over it.
  */
 export function moveOutcome(progress: MoveProgress): 'applied' | 'not-applied' | 'partial' {
+  // A path both sides hold, now empty: the restore had started to write. It is never taken as not done.
+  if (progress.emptied?.length) return 'partial'
   if (!progress.moved.length) return progress.unmoved.length || progress.other.length ? 'not-applied' : 'applied'
   return progress.unmoved.length || progress.other.length ? 'partial' : 'applied'
 }
 
 export function* moveProgressSteps(cwd: string, from: string, to: string): Steps<MoveProgress> {
   const top = yield* gitStep(cwd, ['rev-parse', '--show-toplevel'])
-  const progress: MoveProgress = { moved: [], unmoved: [], other: [] }
+  const progress: MoveProgress = { moved: [], unmoved: [], other: [], emptied: [] }
   const paths = (yield* gitStep(top, ['diff-tree', '-r', '-z', '--no-renames', '--name-only', from, to], undefined, undefined, LISTING)).split('\0').filter(Boolean)
   if (!paths.length) return progress
   const wanted = new Set(paths)
@@ -918,7 +1171,10 @@ export function* moveProgressSteps(cwd: string, from: string, to: string): Steps
     const now = found.get(path)
     if (same(now, before.get(path))) progress.unmoved.push(path)
     else if (same(now, after.get(path))) progress.moved.push(path)
-    else progress.other.push(path)
+    else {
+      progress.other.push(path)
+      if (!now && before.has(path) && after.has(path)) progress.emptied!.push(path)
+    }
   }
   return progress
 }

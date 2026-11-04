@@ -139,7 +139,7 @@ describe.skipIf(WINDOWS)('what a POSIX command changes, and only that', () => {
     const to = execFileSync('git', ['write-tree'], { cwd: top, env, encoding: 'utf8' }).trim()
     rmSync(index)
     mkdirSync(join(top, 'kept')); symlinkSync('../base.txt', join(top, 'kept', 'link')); writeFileSync(join(top, 'kept', 'run.sh'), '#!/bin/sh\n', { mode: 0o755 })
-    const preserved = (await pressed('Undo', () => moveFilesAsync(top, from.sha, to)))!
+    const preserved = (await pressed('Undo', () => moveFilesAsync(top, from.sha, to))).preserved!
     expect(preserved.kinds).toEqual({ 'kept/link': 'link', 'kept/run.sh': 'executable' })
     const notice = preservedNotice(preserved, 24 * 60 * 60 * 1000, 'posix')
     for (const [path, kind] of Object.entries(preserved.kinds!)) {
@@ -239,7 +239,7 @@ describe('each notice\'s commands give back the exact bytes in the shells of thi
     const to = execFileSync('git', ['write-tree'], { cwd: top, env, encoding: 'utf8' }).trim()
     rmSync(index)
     writeAll(top, CONTENTS)
-    const preserved = (await pressed('Undo', () => moveFilesAsync(top, from.sha, to)))!
+    const preserved = (await pressed('Undo', () => moveFilesAsync(top, from.sha, to))).preserved!
     expect(preserved.top).toBe(top)
     expect(readFileSync(join(top, 'kept/crlf file.txt'), 'utf8')).toBe('from the snapshot\n')
     const notice = preservedNotice(preserved, 24 * 60 * 60 * 1000)
