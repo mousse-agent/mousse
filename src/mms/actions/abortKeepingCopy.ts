@@ -4,7 +4,7 @@ import { access, copyFile, lstat, readFile, rm, stat, utimes } from 'node:fs/pro
 import { join, resolve } from 'node:path'
 import { privateIndexEnv } from '../git/gitEnv'
 import { assertFrozenEntryUnchanged, proveFrozenContentEntryAsync, type FrozenEntryProof } from '../lifecycle/verifiedDelete'
-import { gitAsync, NOT_MOUSSE, tryGitAsync } from './git'
+import { gitAsync, listZSync, MOUSSE_DIRECTORY, NOT_MOUSSE, tryGitAsync } from './git'
 import { keepCopy, KeepCopyRefusedError, keptPathsText, listZ, listZOver, modesIn, pendingWrites, writeBackKeptFiles, type KeptCopy } from './keptCopies'
 import { removeProvenAsync } from './provenDiscard'
 
@@ -29,7 +29,9 @@ import { removeProvenAsync } from './provenDiscard'
  *    copy puts back what was removed, and the copy is kept again, up to {@link ABORT_KEEP_ROUNDS} times; then the abort
  *    refuses, naming it.
  * 5. Right before Git starts, synchronously and with nothing awaited until it is started, every path Git writes must
- *    still be empty and every file left in place unchanged; otherwise the same: put back, keep again.
+ *    still be empty and every file left in place unchanged, and Git is asked again which paths it writes now (the index
+ *    against the target, and for a rebase every changed file): a path the copy does not cover, staged or saved since,
+ *    is the same: put back, keep again.
  * 6. Git's abort then writes the target's versions into empty paths. When it fails, every removed file is put back where
  *    nothing stands, so the folder is as it was; where Git wrote first, the error names the copy and the commands that
  *    bring those files back.
@@ -122,6 +124,13 @@ export async function abortTarget(top: string, kind: AbortKind): Promise<string 
   return await exists(await gitPath(top, kind === 'revert' ? 'REVERT_HEAD' : 'CHERRY_PICK_HEAD')) ? commitOf(top, 'HEAD') : undefined
 }
 
+/** Whether Git's abort goes back to the target at all: a run of picks after which HEAD moved is only ended ("Not rewinding"). */
+async function rewinds(top: string, kind: AbortKind): Promise<boolean> {
+  if (kind !== 'cherry-pick' && kind !== 'revert') return true
+  const safety = await gitFile(top, 'sequencer/abort-safety')
+  return !(safety && await exists(await gitPath(top, 'sequencer/head')) && safety !== await commitOf(top, 'HEAD'))
+}
+
 /**
  * Every path Git's abort writes `target`'s version at, or removes. `.mousse/` is left out, as everywhere a copy is kept.
  * - A rebase's abort is `reset --hard <target>`: every path whose staged or working version differs from the target,
@@ -133,10 +142,7 @@ export async function abortTarget(top: string, kind: AbortKind): Promise<string 
  * - A run of picks after which HEAD moved (a commit made at the stop) is not rewound at all: Git only ends it.
  */
 export async function abortWrites(top: string, kind: AbortKind, target: string): Promise<string[]> {
-  if (kind === 'cherry-pick' || kind === 'revert') {
-    const safety = await gitFile(top, 'sequencer/abort-safety')
-    if (safety && await exists(await gitPath(top, 'sequencer/head')) && safety !== await commitOf(top, 'HEAD')) return []
-  }
+  if (!await rewinds(top, kind)) return []
   const unmerged = (await listZ(top, ['ls-files', '-z', '--unmerged', '--', '.', NOT_MOUSSE])).map((line) => line.slice(line.indexOf('\t') + 1))
   if (kind === 'rebase') {
     const moved = await listZ(top, ['diff-tree', '-r', '-z', '--name-only', '--no-renames', 'HEAD', target, '--', '.', NOT_MOUSSE])
@@ -165,31 +171,40 @@ export async function autostashWrites(top: string, kind: AbortKind): Promise<str
   const lists = await Promise.all([
     changed(base, stash),
     index ? changed(base, index) : [],
-    untracked ? listZ(top, ['ls-tree', '-r', '-z', '--name-only', untracked, '--', '.', NOT_MOUSSE]) : []
+    // `ls-tree` takes no pathspec magic, so `.mousse/` is left out here.
+    untracked ? listZ(top, ['ls-tree', '-r', '-z', '--name-only', untracked]).then((paths) => paths.filter((path) => path !== MOUSSE_DIRECTORY && !path.startsWith(`${MOUSSE_DIRECTORY}/`))) : []
   ])
   return [...new Set(lists.flat())]
 }
 
-/** The index's entries at `paths`: their modes, and which are conflicted. */
-async function indexAt(top: string, paths: readonly string[]): Promise<{ modes: Map<string, string>; unmerged: Set<string> }> {
+/**
+ * The index's entries at `paths`: their modes, which are conflicted, and which carry a flag that tells Git not to look
+ * at the file (`assume-unchanged`, `skip-worktree`).
+ */
+async function indexAt(top: string, paths: readonly string[]): Promise<{ modes: Map<string, string>; unmerged: Set<string>; flagged: Set<string> }> {
   const modes = new Map<string, string>()
   const unmerged = new Set<string>()
-  for (const line of paths.length ? await listZOver(top, ['ls-files', '-z', '-s'], paths) : []) {
+  const flagged = new Set<string>()
+  if (!paths.length) return { modes, unmerged, flagged }
+  for (const line of await listZOver(top, ['ls-files', '-z', '-s'], paths)) {
     const tab = line.indexOf('\t')
     const [mode, , stage] = line.slice(0, tab).split(' ') as [string, string, string]
     const path = line.slice(tab + 1)
     modes.set(path, mode)
     if (stage !== '0') unmerged.add(path)
   }
-  return { modes, unmerged }
+  // `ls-files -v`: a lowercase tag is assume-unchanged, `S` (or `s`) skip-worktree.
+  for (const line of await listZOver(top, ['ls-files', '-z', '-v'], paths)) if (/^[a-zS] /.test(line)) flagged.add(line.slice(2))
+  return { modes, unmerged, flagged }
 }
 
 /**
  * Of `paths` (stage-0 entries), those whose file on disk differs from its index entry, as Git's `reset --merge` finds
  * them "not uptodate": read from a private copy of the index refreshed first, so a file touched but not changed is not
- * counted. A file that is gone is not counted either; Git writes it back.
+ * counted. A file that is gone is not counted either; Git writes it back. An entry Git is told not to look at
+ * (`flagged`) is compared all the same, as Git's abort does.
  */
-async function unstagedChanges(top: string, paths: readonly string[]): Promise<string[]> {
+async function unstagedChanges(top: string, paths: readonly string[], flagged: ReadonlySet<string>): Promise<string[]> {
   if (!paths.length) return []
   const gitDir = await gitAsync(top, ['rev-parse', '--absolute-git-dir'])
   const real = resolve(top, await gitAsync(top, ['rev-parse', '--git-path', 'index']))
@@ -200,6 +215,10 @@ async function unstagedChanges(top: string, paths: readonly string[]): Promise<s
     const times = await stat(real)
     await utimes(copy, times.atime, times.mtime)
     const env = privateIndexEnv(copy)
+    // Git's abort looks at a file it rewrites whatever flag its entry carries, so this copy of the index drops them.
+    const cleared = paths.filter((path) => flagged.has(path))
+    // One flag per run: given both, `update-index --stdin` clears neither.
+    for (const flag of ['--no-assume-unchanged', '--no-skip-worktree']) if (cleared.length) await gitAsync(top, ['update-index', '-z', flag, '--stdin'], env, `${cleared.join('\0')}\0`)
     // Exit status 1 only says some entries changed or are conflicted; the listing below says which.
     await tryGitAsync(top, ['update-index', '-q', '--unmerged', '--refresh'], env)
     const listed = await listZOver(top, ['diff-files', '-z', '--name-only'], paths, env)
@@ -218,15 +237,19 @@ function named(paths: readonly string[]): string {
 /**
  * Why plain Git's abort of `kind` would refuse and change nothing, with the files, or undefined when it would go ahead.
  * Mousse removes the files Git writes over before Git runs, so without this check Git's own refusals would never happen:
- * - `reset --merge` (all but a rebase) refuses a path it rewrites whose file has changes not staged ("not uptodate");
+ * - `reset --merge` (all but a rebase) refuses a path it rewrites whose file has changes not staged ("not uptodate"), and
+ *   so does a rebase's `reset --hard` where the entry is flagged assume-unchanged or skip-worktree;
  * - every abort refuses to write over a file that is not tracked and not ignored, or a folder holding one, where the
  *   target has a file and the index has none, and a file or link of that kind standing where the target has a folder.
  */
 export async function refusalOf(top: string, kind: AbortKind, target: string, writes: readonly string[]): Promise<{ message: string; paths: string[] } | undefined> {
   if (!writes.length) return undefined
   const index = await indexAt(top, writes)
-  if (kind !== 'rebase') {
-    const dirty = await unstagedChanges(top, writes.filter((path) => index.modes.has(path) && !index.unmerged.has(path) && index.modes.get(path) !== '160000'))
+  // `reset --merge` checks every stage-0 path it rewrites; `reset --hard` (a rebase) only a flagged entry it changes.
+  const changes = kind === 'rebase' && index.flagged.size ? new Set(await listZ(top, ['diff-index', '-z', '--cached', '--name-only', '--no-renames', target, '--', '.', NOT_MOUSSE])) : undefined
+  const checked = writes.filter((path) => index.modes.has(path) && !index.unmerged.has(path) && index.modes.get(path) !== '160000' && (!changes || (index.flagged.has(path) && changes.has(path))) && (kind !== 'rebase' || index.flagged.has(path)))
+  {
+    const dirty = await unstagedChanges(top, checked, index.flagged)
     if (dirty.length) {
       const one = dirty.length === 1
       return { paths: dirty, message: `Abort was stopped: ${named(dirty)} ${one ? 'has' : 'have'} changes that are not staged, and Git's abort refuses to write over them ("not uptodate"). Nothing was changed. Stage those changes or move them aside, then try again.` }
@@ -285,7 +308,10 @@ export async function abortKeepingCopy(input: AbortKeepingCopyInput): Promise<Ke
 
     // A submodule is changed in the index only: its folder is never walked or removed.
     const [targetModes, index] = await Promise.all([modesIn(top, target, writes), indexAt(top, writes)])
-    const tree = writes.filter((path) => targetModes.get(path) !== '160000' && index.modes.get(path) !== '160000')
+    // An entry flagged assume-unchanged or skip-worktree is left to Git, which may leave its file as it is; it is proven
+    // unchanged instead.
+    const tree = writes.filter((path) => targetModes.get(path) !== '160000' && index.modes.get(path) !== '160000' && !index.flagged.has(path))
+    const flaggedInPlace = writes.filter((path) => index.flagged.has(path) && index.modes.get(path) !== '160000')
     // At the autostash's own paths its apply writes over an ignored file; anything else there it leaves.
     const ignored = new Set(stashed.length ? await listZOver(top, ['ls-files', '-z', '--others', '--ignored', '--exclude-standard'], stashed) : [])
     const restore = tree.filter((path) => targetModes.has(path))
@@ -294,16 +320,16 @@ export async function abortKeepingCopy(input: AbortKeepingCopyInput): Promise<Ke
     const removed = cleared.removed
     const again = async (paths: readonly string[]): Promise<void> => {
       // What was removed is put back as it was kept; the copy is kept again with the change.
-      await writeBackKeptFiles(top, kept.sha, removed)
+      await writeBackKeptFiles(top, kept.sha, removed, kept.permissions)
       changed = [...paths]
     }
     if (cleared.left.length) { await again(cleared.left.map((entry) => entry.changed ?? entry.path)); continue }
 
-    // What stays where it is, at the autostash's other paths, is proven against the copy now and checked again right
-    // before Git starts; an empty path there must stay empty.
+    // What stays where it is (at the autostash's other paths, and flagged entries) is proven against the copy now and
+    // checked again right before Git starts; an empty path there must stay empty.
     const stays: Array<{ path: string; proof?: FrozenEntryProof }> = []
     let appeared: string | undefined
-    for (const path of stashed.filter((item) => !ignored.has(item))) {
+    for (const path of [...stashed.filter((item) => !ignored.has(item)), ...flaggedInPlace]) {
       const info = await lstat(absolute(top, path)).catch((error: unknown) => { if (gone(error)) return undefined; throw error })
       if (!info) { stays.push({ path }); continue }
       if (!info.isFile() && !info.isSymbolicLink()) continue
@@ -316,8 +342,19 @@ export async function abortKeepingCopy(input: AbortKeepingCopyInput): Promise<Ke
     if (appeared) { await again([appeared]); continue }
 
     const empty = [...restore.map((path) => ({ path, write: true })), ...remove.map((path) => ({ path, write: false }))]
+    const listed = new Set([...writes, ...stashed])
+    const rewound = await rewinds(top, input.kind)
     const beforeStart = (): void => {
       for (const { path, write } of empty) if (standsAt(top, path, write)) throw new ChangedBeforeGit(path)
+      // What Git writes now, read again: a path staged since the copy, or (a rebase's `reset --hard` writes every changed
+      // file) a file changed since, that the copy does not cover, is kept again first.
+      const quiet = { GIT_OPTIONAL_LOCKS: '0' }
+      const now = !rewound ? [] : [
+        ...listZSync(top, ['diff-index', '-z', '--cached', '--name-only', '--no-renames', target, '--', '.', NOT_MOUSSE], quiet),
+        ...(input.kind === 'rebase' ? listZSync(top, ['diff-files', '-z', '--name-only', '--', '.', NOT_MOUSSE], quiet) : [])
+      ]
+      const grown = now.find((path) => !listed.has(path))
+      if (grown !== undefined) throw new ChangedBeforeGit(grown)
       for (const { path, proof } of stays) {
         if (!proof) { if (standsAt(top, path, true)) throw new ChangedBeforeGit(path); continue }
         try { assertFrozenEntryUnchanged(proof) } catch { throw new ChangedBeforeGit(path) }
@@ -329,7 +366,7 @@ export async function abortKeepingCopy(input: AbortKeepingCopyInput): Promise<Ke
       if (error instanceof ChangedBeforeGit) { await again([error.path]); continue }
       // Git failed: every removed file goes back where nothing stands. Where Git had written first, the error says where
       // the copy is.
-      const left = await writeBackKeptFiles(top, kept.sha, removed)
+      const left = await writeBackKeptFiles(top, kept.sha, removed, kept.permissions)
       if (left.length) throw new AbortStoppedPartWayError(error, kept, left)
       throw error
     }

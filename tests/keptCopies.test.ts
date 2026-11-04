@@ -336,7 +336,7 @@ describe('keepCopy', () => {
     expect(git(cwd, 'show', `${kept.ref}^2:base.txt`)).toBe('staged')
     expect(git(cwd, 'show', `${kept.ref}:loose.txt`)).toBe('loose')
     expect(git(cwd, 'rev-parse', `${kept.ref}^1`)).toBe(before.head)
-    expect(keptCopyNotice(kept, 'posix')).toBe(`A copy is kept for 30 days as ${kept.ref}. To bring a file back exactly as it was, run in ${cwd}: rm -f ./base.txt && git cat-file blob ${kept.ref}:base.txt > ./base.txt; rm -f ./loose.txt && git cat-file blob ${kept.ref}:loose.txt > ./loose.txt (the staged version of base.txt: git restore --source=${kept.ref}^2 --staged -- <path>).`)
+    expect(keptCopyNotice(kept, 'posix')).toBe(`A copy is kept for 30 days as ${kept.ref}. To bring a file back exactly as it was, run in ${cwd}: ${keptCopyRestoreCommand(kept.ref, 'base.txt', 'posix')}; ${keptCopyRestoreCommand(kept.ref, 'loose.txt', 'posix')} (the staged version of base.txt: git restore --source=${kept.ref}^2 --staged -- <path>).`)
   })
 
   it('keeps ignored files too when asked, for a cleanup that removes them', async () => {

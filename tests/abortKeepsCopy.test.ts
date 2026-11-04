@@ -86,7 +86,7 @@ describe('Git panel Abort keeps what it writes over', () => {
       // Its notice, and the command in it, bring the resolution back exactly.
       const notice = abortKeptNotice('merge', kept, 'posix')
       // No command that restores a staged version from ^2, which has none for a conflicted file: its stages are named.
-      expect(notice).toBe(`Merge aborted. Your edits are kept for 30 days as ${kept.ref}. To bring a file back exactly as it was, run in ${kept.top}: rm -f ./base.txt && git cat-file blob ${kept.ref}:base.txt > ./base.txt (base.txt had a conflict: its versions are kept as ${kept.ref}^3:stage-1/<path>, stage-2/<path> and stage-3/<path>).`)
+      expect(notice).toBe(`Merge aborted. Your edits are kept for 30 days as ${kept.ref}. To bring a file back exactly as it was, run in ${kept.top}: ${keptCopyRestoreCommand(kept.ref, 'base.txt', 'posix')} (base.txt had a conflict: its versions are kept as ${kept.ref}^3:stage-1/<path>, stage-2/<path> and stage-3/<path>).`)
       restore(kept, 'base.txt')
       expect(readFileSync(join(cwd, 'base.txt')).equals(Buffer.from(value))).toBe(true)
     })
@@ -386,6 +386,91 @@ describe('Abort keeps what the autostash and late saves write over, and refuses 
   })
 })
 
+describe('Abort keeps what Git would write that was clean when the copy was kept', () => {
+  /** A rebase of feature onto main that stops on base.txt, with `other` tracked and clean. */
+  const stoppedRebase = (cwd: string): void => {
+    writeFileSync(join(cwd, 'other'), 'original other\n'); git(cwd, 'add', '.'); git(cwd, 'commit', '-qm', 'other')
+    git(cwd, 'checkout', '-q', '-b', 'feature'); writeFileSync(join(cwd, 'base.txt'), 'feature\n'); git(cwd, 'commit', '-qam', 'feature')
+    git(cwd, 'checkout', '-q', 'main'); writeFileSync(join(cwd, 'base.txt'), 'main\n'); git(cwd, 'commit', '-qam', 'main')
+    git(cwd, 'checkout', '-q', 'feature'); expect(() => git(cwd, 'rebase', 'main')).toThrow()
+  }
+  for (const staged of [false, true]) {
+    it(`a clean tracked file saved${staged ? ' and staged' : ''} after the copy, which a rebase's abort writes over, is kept first`, async () => {
+      const cwd = repo({ 'core.autocrlf': 'input' }), keeper = owner()
+      stoppedRebase(cwd)
+      const late = 'saved after the copy, raw CRLF 0b7e\r\n'
+      const shim = onFirstKeep(`printf '%s' '${late}' > '${cwd}/other'${staged ? ` && git -C '${cwd}' add other` : ''}`)
+      await withPath(shim.bin, () => new GitService().abortInProgress(cwd, USER, 'rebase', { owner: keeper }))
+      expect(existsSync(shim.fired)).toBe(true)
+      // Git's abort put orig-head's version back, as plain Git does; the save is in a copy, byte for byte.
+      expect(readFileSync(join(cwd, 'other'), 'utf8')).toBe('original other\n')
+      expect(keptVersions(cwd, 'other')).toContain(late)
+    })
+  }
+
+  it('a file staged after the copy, which a merge abort writes over, is kept first', async () => {
+    const cwd = repo({ 'core.autocrlf': 'input' }), keeper = owner()
+    writeFileSync(join(cwd, 'other'), 'original other\n'); git(cwd, 'add', '.'); git(cwd, 'commit', '-qm', 'other')
+    conflictedMerge(cwd)
+    const late = 'staged after the copy, raw CRLF 77aa\r\n'
+    const shim = onFirstKeep(`printf '%s' '${late}' > '${cwd}/other' && git -C '${cwd}' add other`)
+    await withPath(shim.bin, () => new GitService().abortInProgress(cwd, USER, 'merge', { owner: keeper }))
+    expect(existsSync(shim.fired)).toBe(true)
+    expect(readFileSync(join(cwd, 'other'), 'utf8')).toBe('original other\n')
+    expect(keptVersions(cwd, 'other')).toContain(late)
+  })
+
+  for (const kind of ['merge', 'rebase'] as const) {
+    it(`${kind}: an autostash that holds ignored files (stash -a) is read, and what it writes over is kept`, async () => {
+      const cwd = repo(), keeper = owner()
+      writeFileSync(join(cwd, '.gitignore'), 'draft\n'); git(cwd, 'add', '.'); git(cwd, 'commit', '-qm', 'ignore')
+      writeFileSync(join(cwd, 'draft'), 'stashed ignored bytes\n'); git(cwd, 'stash', 'push', '-q', '-a', '-m', 'ignored')
+      const stash = git(cwd, 'rev-parse', 'stash')
+      git(cwd, 'checkout', '-q', '-b', 'feature'); writeFileSync(join(cwd, 'base.txt'), 'feature\n'); git(cwd, 'commit', '-qam', 'feature')
+      git(cwd, 'checkout', '-q', 'main'); writeFileSync(join(cwd, 'base.txt'), 'main\n'); git(cwd, 'commit', '-qam', 'main')
+      if (kind === 'rebase') git(cwd, 'checkout', '-q', 'feature')
+      expect(() => git(cwd, kind, kind === 'rebase' ? 'main' : 'feature')).toThrow()
+      writeFileSync(join(cwd, '.git', kind === 'merge' ? 'MERGE_AUTOSTASH' : 'rebase-merge/autostash'), `${stash}\n`)
+      const value = 'during-stop ignored bytes 4d21\r\n'
+      writeFileSync(join(cwd, 'draft'), value)
+      const kept = (await new GitService().abortInProgress(cwd, USER, kind, { owner: keeper }))!
+      expect(readFileSync(join(cwd, 'draft'), 'utf8')).toBe('stashed ignored bytes\n')
+      expect(bytes(cwd, 'cat-file', 'blob', `${kept.ref}:draft`).equals(Buffer.from(value))).toBe(true)
+    })
+  }
+
+  for (const kind of ['merge', 'rebase'] as const) {
+    for (const flag of ['--assume-unchanged', '--skip-worktree']) {
+      it(`${kind}: a staged file flagged ${flag} and edited again refuses as plain Git does`, async () => {
+        const cwd = repo(), keeper = owner()
+        writeFileSync(join(cwd, 'a.txt'), 'a\n'); git(cwd, 'add', '.'); git(cwd, 'commit', '-qm', 'a')
+        git(cwd, 'checkout', '-q', '-b', 'feature'); writeFileSync(join(cwd, 'base.txt'), 'feature\n'); git(cwd, 'commit', '-qam', 'feature')
+        git(cwd, 'checkout', '-q', 'main'); writeFileSync(join(cwd, 'base.txt'), 'main\n'); git(cwd, 'commit', '-qam', 'main')
+        if (kind === 'rebase') git(cwd, 'checkout', '-q', 'feature')
+        expect(() => git(cwd, kind, kind === 'rebase' ? 'main' : 'feature')).toThrow()
+        writeFileSync(join(cwd, 'a.txt'), 'staged\n'); git(cwd, 'add', 'a.txt'); git(cwd, 'update-index', flag, 'a.txt')
+        writeFileSync(join(cwd, 'a.txt'), 'staged, then edited again 9c3e\n')
+        await expect(new GitService().abortInProgress(cwd, USER, kind, { owner: keeper })).rejects.toMatchObject({ code: 'keep_copy_refused', message: expect.stringContaining('a.txt has changes that are not staged') })
+        expect(readFileSync(join(cwd, 'a.txt'), 'utf8')).toBe('staged, then edited again 9c3e\n')
+      })
+    }
+  }
+
+  it('a file Git’s failed abort leaves out comes back with the permission bits it had', async () => {
+    const cwd = repo(), keeper = owner()
+    conflictedMerge(cwd)
+    writeFileSync(join(cwd, 'base.txt'), 'private resolution\n'); chmodSync(join(cwd, 'base.txt'), 0o600)
+    const lock = join(cwd, '.git', 'index.lock')
+    await expect(pressed('Abort', () => abortKeepingCopy({ top: cwd, owner: keeper, kind: 'merge', action: 'Abort', abort: async (beforeStart) => {
+      beforeStart()
+      writeFileSync(lock, '')
+      try { git(cwd, 'merge', '--abort') } finally { rmSync(lock, { force: true }) }
+    } }))).rejects.toThrow()
+    expect(readFileSync(join(cwd, 'base.txt'), 'utf8')).toBe('private resolution\n')
+    expect(statSync(join(cwd, 'base.txt')).mode & 0o777).toBe(0o600)
+  })
+})
+
 describe('the commands the Abort notice shows', () => {
   it('replace a link standing at the path instead of writing through it, and bring a kept link back as a link', async () => {
     const cwd = repo(), keeper = owner()
@@ -475,7 +560,7 @@ describe('Git panel Abort through the daemon', () => {
     expect(readFileSync(join(f.repo, 'value.txt'), 'utf8')).toBe('ours\n')
     const kept = result.kept!
     const top = git(f.repo, 'rev-parse', '--show-toplevel')
-    expect(kept.notice).toBe(`Merge aborted. Your edits are kept for 30 days as ${kept.ref}. To bring a file back exactly as it was, run in ${top}: rm -f ./value.txt && git cat-file blob ${kept.ref}:value.txt > ./value.txt (value.txt had a conflict: its versions are kept as ${kept.ref}^3:stage-1/<path>, stage-2/<path> and stage-3/<path>).`)
+    expect(kept.notice).toBe(`Merge aborted. Your edits are kept for 30 days as ${kept.ref}. To bring a file back exactly as it was, run in ${top}: ${keptCopyRestoreCommand(kept.ref, 'value.txt', 'posix')} (value.txt had a conflict: its versions are kept as ${kept.ref}^3:stage-1/<path>, stage-2/<path> and stage-3/<path>).`)
     expect(threadPreservedIndex(projectKeptFilesOwner(mms.threads.lifecycleStore.profileHome, project.id)).owns(kept.ref)).toBe(true)
     restore({ ref: kept.ref, top }, 'value.txt')
     expect(readFileSync(join(f.repo, 'value.txt'), 'utf8')).toBe('resolved by hand\n')

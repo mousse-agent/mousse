@@ -101,6 +101,16 @@ export async function gitAsync(cwd: string, args: string[], env?: NodeJS.Process
   throw error
 }
 
+/**
+ * The NUL-separated fields of a `-z` listing, exactly as Git wrote them, run synchronously: for a check that must happen
+ * with nothing awaited before what it guards (Abort's last check right before Git starts). Throws when Git fails.
+ */
+export function listZSync(cwd: string, args: string[], env?: NodeJS.ProcessEnv): string[] {
+  const result = spawnSync('git', guarded(cwd, args, { ...(env ? { env } : {}) }), { cwd, encoding: 'utf8', env: gitEnv(cwd, env), maxBuffer: LISTING_MAX_BUFFER })
+  if (result.error || result.status !== 0) throw new Error(`Command failed: git ${args.join(' ')}${result.stderr ? `\n${result.stderr.trim()}` : ''}`)
+  return result.stdout.split('\0').filter(Boolean)
+}
+
 export function tryGit(cwd: string, args: string[], env?: NodeJS.ProcessEnv, options?: GitReadOptions): { ok: boolean; stdout: string; stderr: string } {
   let safe: string[]
   try {
@@ -169,7 +179,7 @@ const OPERATION_OF: Record<(typeof IN_PROGRESS_GIT_MARKERS)[number], PendingChan
   MERGE_HEAD: 'merge', REVERT_HEAD: 'revert', CHERRY_PICK_HEAD: 'cherry-pick', REBASE_HEAD: 'rebase', 'rebase-merge': 'rebase', 'rebase-apply': 'rebase'
 }
 /** Mousse's own files in a checkout; never part of the user's pending changes. */
-const MOUSSE_DIRECTORY = '.mousse'
+export const MOUSSE_DIRECTORY = '.mousse'
 export const NOT_MOUSSE = `:(exclude)${MOUSSE_DIRECTORY}`
 
 export interface PendingChanges {

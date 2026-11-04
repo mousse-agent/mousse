@@ -1,6 +1,6 @@
 import { createHash, randomUUID, type Hash } from 'node:crypto'
 import { constants, existsSync, readdirSync, readFileSync, realpathSync, statSync } from 'node:fs'
-import { lstat, mkdir, open, readdir, readFile, readlink, rm, stat, symlink, unlink, utimes, writeFile, type FileHandle } from 'node:fs/promises'
+import { chmod, lstat, mkdir, open, readdir, readFile, readlink, rm, stat, symlink, unlink, utimes, writeFile, type FileHandle } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
 import { promisify } from 'node:util'
 import { createDeflate, deflate as deflateCallback } from 'node:zlib'
@@ -71,6 +71,8 @@ export interface KeptCopy {
   conflicted: ReadonlySet<string>
   /** Kept paths whose staged version differs from HEAD, which `^2` holds. */
   staged: ReadonlySet<string>
+  /** Each kept file's permission bits as they were (`0600`, say), which the tree's mode does not carry. */
+  permissions: ReadonlyMap<string, number>
 }
 
 export interface KeepCopyInput {
@@ -342,7 +344,7 @@ export async function keepExistingCommit(input: { owner: string; top: string; op
 // ---------------------------------------------------------------------------------------------------------
 // Keeping a copy
 
-interface Entry { path: string; kind: 'file' | 'link' | 'gone' | 'folder' | 'repository' | 'other'; bytes: number; executable?: boolean; dev?: number; ino?: number }
+interface Entry { path: string; kind: 'file' | 'link' | 'gone' | 'folder' | 'repository' | 'other'; bytes: number; executable?: boolean; dev?: number; ino?: number; /** A file's permission bits. */ permissions?: number }
 
 /** What `lstat` finds at each folder above a path, asked once per folder. */
 type Parents = Map<string, Promise<Entry>>
@@ -371,7 +373,7 @@ async function lstatEntry(top: string, path: string): Promise<Entry> {
   if (!info) return { path, kind: 'gone', bytes: 0 }
   const id = { dev: info.dev, ino: info.ino }
   if (info.isSymbolicLink()) return { path, kind: 'link', bytes: info.size, ...id }
-  if (info.isFile()) return { path, kind: 'file', bytes: info.size, executable: (info.mode & 0o111) !== 0, ...id }
+  if (info.isFile()) return { path, kind: 'file', bytes: info.size, executable: (info.mode & 0o111) !== 0, permissions: info.mode & 0o7777, ...id }
   if (info.isDirectory()) return { path, kind: await lstat(join(top, path, '.git')).then(() => true, () => false) ? 'repository' : 'folder', bytes: 0, ...id }
   return { path, kind: 'other', bytes: 0, ...id }
 }
@@ -824,7 +826,8 @@ export async function keepCopy(input: KeepCopyInput): Promise<KeptCopy> {
     const kinds = new Map(stored.map((line) => [line.slice(line.indexOf('\t') + 1), restoreKindOf(line.slice(0, line.indexOf(' ')))]))
     return {
       operationId, ref, sha, top, stagedTree, workingTree, ...(conflictTree ? { conflictTree } : {}), windowMs: keptCopyWindowMs(input.owner), digests,
-      kinds, conflicted: new Set(conflicts.map((entry) => entry.path)), staged: new Set(stagedIds.map((item) => item.path))
+      kinds, conflicted: new Set(conflicts.map((entry) => entry.path)), staged: new Set(stagedIds.map((item) => item.path)),
+      permissions: new Map(kept.flatMap((entry) => entry.permissions === undefined ? [] : [[entry.path, entry.permissions] as const]))
     }
   } finally {
     await pack?.discard()
@@ -837,9 +840,10 @@ export async function keepCopy(input: KeepCopyInput): Promise<KeptCopy> {
  * Writes the working versions the copy `sha` holds at `paths` back into the folder, each only where nothing stands now:
  * a file is created, never written over, and a folder above it is made only where none is, never through a link. Used
  * when an action removed kept files and then could not finish, so the folder is as it was. Returns the paths left as
- * they are, because something now stands there; their bytes stay in the copy.
+ * they are, because something now stands there; their bytes stay in the copy. A file gets back the permission bits it had
+ * (`permissions`, from the copy), else those its mode in the copy says.
  */
-export async function writeBackKeptFiles(top: string, sha: string, paths: readonly string[]): Promise<string[]> {
+export async function writeBackKeptFiles(top: string, sha: string, paths: readonly string[], permissions: ReadonlyMap<string, number> = new Map()): Promise<string[]> {
   if (!paths.length) return []
   const rows = (await listZOver(top, ['ls-tree', '-z', '-r', sha], paths)).map((line) => {
     const tab = line.indexOf('\t')
@@ -864,7 +868,12 @@ export async function writeBackKeptFiles(top: string, sha: string, paths: readon
         else if (!info.isDirectory() || info.isSymbolicLink()) throw Object.assign(new Error('in the way'), { code: 'EEXIST' })
       }
       if (row.mode === '120000') await symlink(data.toString(), absolute)
-      else await writeFile(absolute, data, { flag: 'wx', mode: row.mode === '100755' ? 0o755 : 0o644 })
+      else {
+        const mode = permissions.get(row.path) ?? (row.mode === '100755' ? 0o755 : 0o644)
+        await writeFile(absolute, data, { flag: 'wx', mode })
+        // The process's umask narrows what `writeFile` makes; the file gets exactly the bits it had.
+        await chmod(absolute, mode)
+      }
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
       left.push(row.path)

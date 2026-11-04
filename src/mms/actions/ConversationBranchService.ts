@@ -13,7 +13,7 @@ import type { ThreadLeaseHandle } from '../queue/ThreadExecutionLease'
 import { ThreadWorkspaceManager } from '../workspace/ThreadWorkspaceManager'
 import { ChangeReceiptService } from './ChangeReceiptService'
 import { gitAsync, LISTING, mergeTreesAsync, refuseUnsafeChangesAsync, treeOfAsync, tryGitAsync } from './git'
-import { restoreCommandsText } from './restoreCommands'
+import { restoreCommandsText, restoreKindOf } from './restoreCommands'
 import { coverageNotice, leftAsIsNotice, moveOutcome, moveProgressAsync, preservedNotice, restoreChangeAsync, snapshotOfTreeAsync, takeSnapshotAsync, type Snapshot } from './snapshots'
 import { retentionWindowText } from '../../shared/undoRetention'
 
@@ -301,7 +301,9 @@ export class ConversationBranchService {
     const one = paths.length === 1
     // The ref holds a snapshot, Git's normal form of each file, which the command converts back as a checkout would.
     const top = await gitAsync(workspacePath, ['rev-parse', '--show-toplevel'])
-    const commands = restoreCommandsText(paths.map((path) => ({ ref: source, path })), { normalized: true })
+    // Each file comes back as what the ref has: a link as a link, an executable file with its mode.
+    const modes = new Map((await gitAsync(workspacePath, ['ls-tree', '-z', source, '--', ...literal], undefined, undefined, LISTING)).split('\0').filter(Boolean).map((line) => [line.slice(line.indexOf('\t') + 1), line.slice(0, line.indexOf(' '))]))
+    const commands = restoreCommandsText(paths.map((path) => ({ ref: source, path, kind: restoreKindOf(modes.get(path)) })), { normalized: true })
     return `${pathsInWords(paths)} ${one ? 'is now as it was' : 'are now as they were'} on ${input.target}. Your ${one ? 'version stays' : 'versions stay'} on ${input.leftName}: switch back to it, or bring ${one ? 'it' : 'them'} back by running this in ${top}: ${commands}${kept}.`
   }
 

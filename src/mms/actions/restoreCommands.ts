@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto'
+
 /**
  * The commands a notice shows to bring a kept or preserved file back, run in the repository's top folder.
  *
@@ -7,16 +9,20 @@
  * - `git cat-file --filters <ref>:<path>` for a ref that holds Git's normal form of the file (a snapshot), which Git
  *   converts back as a checkout would.
  *
- * Whatever stands at the path is replaced, never written through: a link there (to another file, or out of the
- * repository) would otherwise take the bytes.
- * - POSIX shells: `rm -f ./<path> && git cat-file blob <ref>:<path> > ./<path>`. `rm` removes a link itself, never what
- *   it points to, and refuses a folder, which stops the command. A kept link comes back as a link
- *   (`ln -s "$(git cat-file blob …)" ./<path>`), an executable file with `chmod +x`.
- * - Windows: the bytes go to `<path>.mousse-restore`, which `move /y` then renames over the path. A rename replaces a
- *   link itself; `del` would empty the folder a folder link points to. Windows PowerShell 5.1's `>` re-encodes a native
- *   command's output as UTF-16, so the line is cmd's: `cmd --% /c …`, which works typed into cmd and into PowerShell
- *   (PowerShell passes everything after `--%` to cmd as it is, and cmd reads only its `/c`). A kept link is not made
- *   again there (that needs rights a person may not have): the command prints where it pointed.
+ * POSIX shells: one subshell, so nothing of it stays in the person's shell, that stops at the first step that fails.
+ * 1. No folder above the path is a link (`[ ! -L ./a ]` for each): a command never writes outside the folders it names.
+ * 2. The bytes go to `<path>.mousse-<8 hex>` first, under `set -C`, which refuses a name already taken. A copy that is
+ *    gone, or a folder that cannot be written, stops the command with nothing at the path changed.
+ * 3. `rm -f` then removes what stands at the path, a link itself and never what it points to (a folder refuses, which
+ *    stops the command), and `mv` puts the bytes there. A kept link comes back as a link with its exact target
+ *    (`ln -s --`, the target read with a sentinel so trailing newlines survive), an executable file with `chmod +x`.
+ *
+ * Windows: `cmd --% /c git cat-file blob <ref>:<path> > <path>`, one command typed the same into cmd and into
+ * PowerShell: PowerShell passes everything after `--%` to cmd as it is, and cmd reads only its `/c`. Windows PowerShell
+ * 5.1's own `>` would re-encode the bytes as UTF-16, and it refuses `&&` even after `--%`, so no step can be chained to
+ * it. That line writes through a file link standing at the path or a link above it (Windows makes links only with
+ * Developer Mode or as an administrator, and Git for Windows checks links out as plain files unless told to), and a copy
+ * that is gone leaves the file empty. A kept link is not made again there: its command prints where it pointed.
  * Paths are quoted for each shell: single quotes for POSIX shells; double quotes, with `%` left outside them, for cmd.
  */
 
@@ -59,6 +65,13 @@ function windowsWord(value: string): string {
   return /^[\w./:@+-]+$/.test(value) ? value : `"${value.replaceAll('%', '"%"')}"`
 }
 
+/** The folders above `path`, outermost first: `a`, `a/b` for `a/b/c`. */
+function parentsOf(path: string): string[] {
+  const parents: string[] = []
+  for (let slash = path.indexOf('/'); slash !== -1; slash = path.indexOf('/', slash + 1)) parents.push(path.slice(0, slash))
+  return parents
+}
+
 function command(ref: string, path: string, options: RestoreCommandOptions, placeholder: boolean): string {
   const shell = options.shell ?? restoreShell()
   const kind = options.normalized ? '--filters' : 'blob'
@@ -66,16 +79,17 @@ function command(ref: string, path: string, options: RestoreCommandOptions, plac
     const word = placeholder ? (value: string) => value : windowsWord
     const source = `git cat-file ${kind} ${word(`${ref}:${path}`)}`
     if (options.kind === 'link') return `${source} (${path} was a link; this prints where it pointed)`
-    // cmd's own commands read `/` as the start of a switch, so the rename names the path with backslashes.
-    const temporary = `${path}.mousse-restore`
-    const local = (value: string): string => word(placeholder ? value : value.replaceAll('/', '\\'))
-    return `cmd --% /c ${source} > ${word(temporary)} && move /y ${local(temporary)} ${local(path)} >nul`
+    return `cmd --% /c ${source} > ${word(path)}`
   }
-  const word = placeholder ? (value: string) => `./${value}` : (value: string) => `./${posixWord(value)}`
-  const source = `git cat-file ${kind} ${placeholder ? `${ref}:${path}` : posixWord(`${ref}:${path}`)}`
-  const target = word(path)
-  if (options.kind === 'link') return `rm -f ${target} && ln -s "$(${source})" ${target}`
-  return `rm -f ${target} && ${source} > ${target}${options.kind === 'executable' ? ` && chmod +x ${target}` : ''}`
+  const word = placeholder ? (value: string) => value : posixWord
+  const at = (rel: string): string => `./${word(rel)}`
+  const source = `git cat-file ${kind} ${word(`${ref}:${path}`)}`
+  const checks = placeholder ? [] : parentsOf(path).map((parent) => `[ ! -L ${at(parent)} ]`)
+  if (options.kind === 'link') {
+    return `(${[...checks, `t="$(${source} && printf x)"`, `rm -f ${at(path)}`, `ln -s -- "\${t%x}" ${at(path)}`].join(' && ')})`
+  }
+  const temporary = `${path}.mousse-${placeholder ? 'restore' : createHash('sha256').update(`${ref}:${path}`).digest('hex').slice(0, 8)}`
+  return `(${[...checks, 'set -C', `${source} > ${at(temporary)}`, ...(options.kind === 'executable' ? [`chmod +x ${at(temporary)}`] : []), `rm -f ${at(path)}`, `mv ${at(temporary)} ${at(path)}`].join(' && ')})`
 }
 
 /** The command that brings back one file kept under `ref`, run in the repository's top folder. */

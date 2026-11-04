@@ -5,7 +5,8 @@
  * (and zsh and bash where present); on Windows it is cmd, Windows PowerShell 5.1 and PowerShell 7 where present.
  */
 import { execFileSync, spawnSync } from 'node:child_process'
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { createHash } from 'node:crypto'
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -103,20 +104,98 @@ function expectRestored(top: string, commands: Record<string, string>, expected:
 }
 
 describe('the command shown', () => {
-  it('replaces what stands at the path, through cmd on Windows and straight into it elsewhere, quoting what needs it', () => {
+  it('replaces what stands at the path through a temporary file on POSIX shells, and is one cmd line on Windows, quoting what needs it', () => {
     const ref = 'refs/mousse/preserved/op-0123456789ab'
-    expect(restoreFileCommand(ref, 'src/a.txt', { shell: 'posix' })).toBe(`rm -f ./src/a.txt && git cat-file blob ${ref}:src/a.txt > ./src/a.txt`)
-    expect(restoreFileCommand(ref, 'src/a.txt', { shell: 'windows' })).toBe(`cmd --% /c git cat-file blob ${ref}:src/a.txt > src/a.txt.mousse-restore && move /y "src\\a.txt.mousse-restore" "src\\a.txt" >nul`)
-    expect(restoreFileCommand(ref, "it's 100%.txt", { shell: 'posix' })).toBe(`rm -f ./'it'\\''s 100%.txt' && git cat-file blob '${ref}:it'\\''s 100%.txt' > ./'it'\\''s 100%.txt'`)
-    expect(restoreFileCommand(ref, 'a b %PATH%.txt', { shell: 'windows' })).toBe(`cmd --% /c git cat-file blob "${ref}:a b "%"PATH"%".txt" > "a b "%"PATH"%".txt.mousse-restore" && move /y "a b "%"PATH"%".txt.mousse-restore" "a b "%"PATH"%".txt" >nul`)
-    expect(restoreFileCommand(ref, 'a.txt', { shell: 'posix', normalized: true })).toBe(`rm -f ./a.txt && git cat-file --filters ${ref}:a.txt > ./a.txt`)
-    expect(restoreFileCommand(ref, 'bin/run', { shell: 'posix', kind: 'executable' })).toBe(`rm -f ./bin/run && git cat-file blob ${ref}:bin/run > ./bin/run && chmod +x ./bin/run`)
-    expect(restoreFileCommand(ref, 'link', { shell: 'posix', kind: 'link' })).toBe(`rm -f ./link && ln -s "$(git cat-file blob ${ref}:link)" ./link`)
+    const tag = (path: string): string => createHash('sha256').update(`${ref}:${path}`).digest('hex').slice(0, 8)
+    expect(restoreFileCommand(ref, 'src/a.txt', { shell: 'posix' })).toBe(`([ ! -L ./src ] && set -C && git cat-file blob ${ref}:src/a.txt > ./src/a.txt.mousse-${tag('src/a.txt')} && rm -f ./src/a.txt && mv ./src/a.txt.mousse-${tag('src/a.txt')} ./src/a.txt)`)
+    expect(restoreFileCommand(ref, 'src/a.txt', { shell: 'windows' })).toBe(`cmd --% /c git cat-file blob ${ref}:src/a.txt > src/a.txt`)
+    expect(restoreFileCommand(ref, "it's 100%.txt", { shell: 'posix' })).toBe(`(set -C && git cat-file blob '${ref}:it'\\''s 100%.txt' > ./'it'\\''s 100%.txt.mousse-${tag("it's 100%.txt")}' && rm -f ./'it'\\''s 100%.txt' && mv ./'it'\\''s 100%.txt.mousse-${tag("it's 100%.txt")}' ./'it'\\''s 100%.txt')`)
+    expect(restoreFileCommand(ref, 'a b %PATH%.txt', { shell: 'windows' })).toBe(`cmd --% /c git cat-file blob "${ref}:a b "%"PATH"%".txt" > "a b "%"PATH"%".txt"`)
+    expect(restoreFileCommand(ref, 'a.txt', { shell: 'posix', normalized: true })).toBe(`(set -C && git cat-file --filters ${ref}:a.txt > ./a.txt.mousse-${tag('a.txt')} && rm -f ./a.txt && mv ./a.txt.mousse-${tag('a.txt')} ./a.txt)`)
+    expect(restoreFileCommand(ref, 'bin/run', { shell: 'posix', kind: 'executable' })).toBe(`([ ! -L ./bin ] && set -C && git cat-file blob ${ref}:bin/run > ./bin/run.mousse-${tag('bin/run')} && chmod +x ./bin/run.mousse-${tag('bin/run')} && rm -f ./bin/run && mv ./bin/run.mousse-${tag('bin/run')} ./bin/run)`)
+    expect(restoreFileCommand(ref, 'a/b/link', { shell: 'posix', kind: 'link' })).toBe(`([ ! -L ./a ] && [ ! -L ./a/b ] && t="$(git cat-file blob ${ref}:a/b/link && printf x)" && rm -f ./a/b/link && ln -s -- "\${t%x}" ./a/b/link)`)
     expect(restoreFileCommand(ref, 'link', { shell: 'windows', kind: 'link' })).toBe(`git cat-file blob ${ref}:link (link was a link; this prints where it pointed)`)
-    expect(restoreCommandTemplate(ref, { shell: 'windows' })).toBe(`cmd --% /c git cat-file blob ${ref}:<path> > <path>.mousse-restore && move /y <path>.mousse-restore <path> >nul`)
-    expect(restoreCommandTemplate(ref, { shell: 'posix' })).toBe(`rm -f ./<path> && git cat-file blob ${ref}:<path> > ./<path>`)
+    expect(restoreCommandTemplate(ref, { shell: 'windows' })).toBe(`cmd --% /c git cat-file blob ${ref}:<path> > <path>`)
+    expect(restoreCommandTemplate(ref, { shell: 'posix' })).toBe(`(set -C && git cat-file blob ${ref}:<path> > ./<path>.mousse-restore && rm -f ./<path> && mv ./<path>.mousse-restore ./<path>)`)
     expect(restoreStagedCommand(ref, 'windows')).toBe(`git restore "--source=${ref}^2" --staged -- <path>`)
     expect(restoreStagedCommand(ref, 'posix')).toBe(`git restore --source=${ref}^2 --staged -- <path>`)
+    // The Windows line has no step chained to it (Windows PowerShell 5.1 refuses `&&` even after `--%`) and writes no
+    // other name than the path itself.
+    for (const path of ['src/a.txt', 'a b %PATH%.txt']) expect(restoreFileCommand(ref, path, { shell: 'windows' })).not.toMatch(/&&|mousse-restore|move /)
+  })
+})
+
+describe.skipIf(WINDOWS)('what a POSIX command changes, and only that', () => {
+  const run = (command: string, cwd: string) => spawnSync('sh', ['-c', command], { cwd, encoding: 'utf8' })
+  it('an Undo\'s kept link and executable file come back as they were', async () => {
+    const top = repo()
+    writeFileSync(join(top, '.gitignore'), 'kept/\n'); git(top, 'add', '.gitignore'); git(top, 'commit', '-qm', 'ignore kept')
+    const from = await takeSnapshotAsync(top, { reason: 'test' })
+    const index = join(top, '.git', 'restore-target.index')
+    const env = { ...process.env, GIT_INDEX_FILE: index }
+    execFileSync('git', ['read-tree', from.tree], { cwd: top, env })
+    const blob = execFileSync('git', ['hash-object', '-w', '--stdin'], { cwd: top, input: 'from the snapshot\n', encoding: 'utf8' }).trim()
+    execFileSync('git', ['update-index', '--add', '--index-info'], { cwd: top, env, input: `100644 ${blob}\tkept/link\n100644 ${blob}\tkept/run.sh\n` })
+    const to = execFileSync('git', ['write-tree'], { cwd: top, env, encoding: 'utf8' }).trim()
+    rmSync(index)
+    mkdirSync(join(top, 'kept')); symlinkSync('../base.txt', join(top, 'kept', 'link')); writeFileSync(join(top, 'kept', 'run.sh'), '#!/bin/sh\n', { mode: 0o755 })
+    const preserved = (await pressed('Undo', () => moveFilesAsync(top, from.sha, to)))!
+    expect(preserved.kinds).toEqual({ 'kept/link': 'link', 'kept/run.sh': 'executable' })
+    const notice = preservedNotice(preserved, 24 * 60 * 60 * 1000, 'posix')
+    for (const [path, kind] of Object.entries(preserved.kinds!)) {
+      const command = restoreFileCommand(preserved.ref, path, { shell: 'posix', kind })
+      expect(notice).toContain(command)
+      expect(run(command, top).status).toBe(0)
+    }
+    expect(readlinkSync(join(top, 'kept', 'link'))).toBe('../base.txt')
+    expect(statSync(join(top, 'kept', 'run.sh')).mode & 0o111).not.toBe(0)
+  })
+
+  it('refuses a folder above the path that is a link, leaving what it points to as it is', async () => {
+    const top = repo()
+    writeAll(top, { 'dir/file': Buffer.from('kept inside\n') })
+    const kept = await keepCopy({ owner: owner(), top, operationType: 'git-abort', action: 'Abort', paths: ['dir/file'] })
+    rmSync(join(top, 'dir'), { recursive: true })
+    const outside = owner()
+    writeFileSync(join(outside, 'file'), 'unique outside bytes never kept\n')
+    symlinkSync(outside, join(top, 'dir'))
+    expect(run(restoreFileCommand(kept.ref, 'dir/file', { shell: 'posix' }), top).status).not.toBe(0)
+    expect(readFileSync(join(outside, 'file'), 'utf8')).toBe('unique outside bytes never kept\n')
+    expect(readdirSync(outside)).toEqual(['file'])
+  })
+
+  for (const target of ['target\n', '-leading', 'with space and "quote"']) {
+    it(`brings a kept link back with its exact target ${JSON.stringify(target)}`, async () => {
+      const top = repo()
+      symlinkSync(target, join(top, 'link'))
+      const kept = await keepCopy({ owner: owner(), top, operationType: 'git-abort', action: 'Abort', paths: ['link'] })
+      expect(kept.kinds.get('link')).toBe('link')
+      rmSync(join(top, 'link')); writeFileSync(join(top, 'link'), 'a file now\n')
+      expect(run(restoreFileCommand(kept.ref, 'link', { shell: 'posix', kind: 'link' }), top).status).toBe(0)
+      expect(readlinkSync(join(top, 'link'))).toBe(target)
+    })
+  }
+
+  it('changes nothing at the path when the copy is gone', async () => {
+    const top = repo()
+    writeFileSync(join(top, 'a.txt'), 'the file as it is now\n')
+    for (const kind of [undefined, 'link'] as const) {
+      expect(run(restoreFileCommand('refs/mousse/preserved/gone-000000000000', 'a.txt', { shell: 'posix', ...(kind ? { kind } : {}) }), top).status).not.toBe(0)
+      expect(readFileSync(join(top, 'a.txt'), 'utf8')).toBe('the file as it is now\n')
+    }
+  })
+
+  it('never takes a name another file has: the temporary name already taken stops it', async () => {
+    const top = repo()
+    writeFileSync(join(top, 'a.txt'), 'kept\n')
+    const kept = await keepCopy({ owner: owner(), top, operationType: 'git-abort', action: 'Abort', paths: ['a.txt'] })
+    const command = restoreFileCommand(kept.ref, 'a.txt', { shell: 'posix' })
+    const temporary = /> \.\/(a\.txt\.mousse-[0-9a-f]{8})/.exec(command)![1]!
+    writeFileSync(join(top, temporary), 'someone else\'s file\n')
+    writeFileSync(join(top, 'a.txt'), 'now\n')
+    expect(run(command, top).status).not.toBe(0)
+    expect(readFileSync(join(top, temporary), 'utf8')).toBe('someone else\'s file\n')
+    expect(readFileSync(join(top, 'a.txt'), 'utf8')).toBe('now\n')
   })
 })
 
