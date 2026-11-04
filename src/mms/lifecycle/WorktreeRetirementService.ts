@@ -50,7 +50,7 @@ function sameContent(a: readonly ContentEntry[], b: readonly ContentEntry[]): bo
 /** How often the trash expiry refreshes the repository lease it holds; well within its stale time. */
 const LEASE_HEARTBEAT_MS = 5_000
 /** Why Git has the worktree whose administration folder is `adminDir` locked (empty for no reason given), or undefined. */
-function lockReasonSync(adminDir: string): string | undefined {
+export function lockReasonSync(adminDir: string): string | undefined {
   try { return readFileSync(join(adminDir, 'locked'), 'utf8').trim() } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined; return '' }
 }
 /**

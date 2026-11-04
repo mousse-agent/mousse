@@ -1,19 +1,21 @@
-import { createErrorProvider, normalizeAppError } from '../../shared/errors'
+import { createErrorProvider, knownAppError, normalizeAppError } from '../../shared/errors'
 import { createHash, randomUUID } from 'node:crypto'
-import { existsSync, lstatSync, readdirSync, readFileSync, rmdirSync, unlinkSync } from 'node:fs'
-import { access, lstat } from 'node:fs/promises'
+import { closeSync, existsSync, fchmodSync, lstatSync, openSync, readdirSync, readFileSync, realpathSync, rmdirSync, unlinkSync, writeFileSync, type Stats } from 'node:fs'
+import { access, lstat, readdir, readFile } from 'node:fs/promises'
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import type { LifecyclePurgeItem, LifecyclePurgePreview, TaskLifecycleRecord, TrashRetentionPolicy } from '../../shared/resourceLifecycle'
 import { atomicWriteJsonSync } from '../data/AtomicFs'
 import { acquireRepositoryLease } from '../git/RepositoryLease'
 import { resolveRepositoryIdentityAsync } from '../git/RepositoryIdentity'
-import { canonicalPathAsync, gitCommonDirAsync } from './canonicalPath'
+import { canonicalPathAsync, comparablePath, gitCommonDirAsync } from './canonicalPath'
 import { buildResourceInventory, OwnershipFacts } from './ResourceInventory'
 import { projectFolderPurgeRefs, threadKeptFilesRefs } from './projectFolderRefs'
 import { measureTree } from './diskMeasure'
 import { assertLifecyclePath, assertLifecyclePathAsync, ResourceLifecycleStore } from './ResourceLifecycleStore'
-import { lifecycleGitAsync, lifecycleReadAsync, readDirectLifecycleRefAsync, WorktreeRetirementService } from './WorktreeRetirementService'
-import { assertFrozenEntryUnchanged, proveFrozenContentEntryAsync, walkOwnedContentAsync } from './verifiedDelete'
+import { lockReasonSync, WorktreeRetirementService } from './WorktreeRetirementService'
+import { lifecycleGitAsync, lifecycleReadAsync, readDirectLifecycleRefAsync } from './lifecycleGit'
+import { READ_ONLY_GIT_ENV } from '../git/readOnlyGit'
+import { assertFrozenEntryUnchanged, lockedText, proveFrozenContentEntryAsync, walkOwnedContentAsync } from './verifiedDelete'
 import { isOwnerLive, PROCESS_INSTANCE_ID } from '../queue/processLiveness'
 import { claimOverlapsPath, getExternalResourceClaims, getExternalResourceClaimsFromFacts, repositoryTargetAsync, unverifiedOwnerOver, type ClaimTarget } from './LifecycleClaims'
 import { withFileLock } from '../scheduled/fileLock'
@@ -28,6 +30,18 @@ const active = new Set<string>()
 /** Whether `path` is there, as `existsSync` answers; a checkout is read without blocking the daemon. */
 const present = (path: string): Promise<boolean> => access(path).then(() => true, () => false)
 const rootIdentity = (stat: { dev: number; ino: number; birthtimeMs: number }) => digest({ dev: stat.dev, ino: stat.ino, birthtimeMs: stat.birthtimeMs })
+/**
+ * Whether `stat` is the folder `recorded` identifies: the same device and inode, and the same creation time where the
+ * file system keeps one. Where it doesn't, Node gives 0 or the change time, which the folder's own removals move, so it is
+ * not compared; the caller compares the real path as well.
+ */
+function sameFolder(stat: Stats, recorded: { dev: number; ino: number; birthtimeMs: number } | undefined): boolean {
+  if (!recorded || !stat.isDirectory() || stat.dev !== recorded.dev || stat.ino !== recorded.ino) return false
+  return !hasBirthtime(stat) || stat.birthtimeMs === recorded.birthtimeMs
+}
+const hasBirthtime = (stat: Stats): boolean => stat.birthtimeMs !== 0 && stat.birthtimeMs !== stat.ctimeMs
+/** The real path of an existing `path`, as two of them are compared; always read the same way. */
+const realOf = (path: string): string => comparablePath(realpathSync(path))
 /** Time one reclaim estimate may spend measuring files. */
 const RECLAIM_BUDGET_MS = 20_000
 
@@ -54,6 +68,71 @@ const purgeErrors = createErrorProvider({
   resource_policy_invalid: { category: 'invalid', retryable: false, message: 'Invalid trash retention policy. Grace days must be an integer from 1 to 3650.' },
   resource_purge_io_error: { category: 'conflict', retryable: false, message: 'Purge could not remove a locked or permission-protected resource. Close applications using it and retry the pending purge.' }
 })
+
+/** A permanent delete that stopped to keep something; Trash shows the reason, which names what was kept. */
+function purgeStopped(reason: string): Error {
+  return knownAppError({ code: 'resource_purge_kept', message: `Permanent delete stopped: ${reason}` }, { category: 'conflict', retryable: false })
+}
+/** "base.txt was saved in this worktree after it began. It was kept.", naming at most three files. */
+function savedText(paths: readonly string[]): string {
+  const more = paths.length - 3
+  const names = more > 0 ? `${paths.slice(0, 3).join(', ')} and ${more} more ${more === 1 ? 'file' : 'files'}`
+    : paths.length > 1 ? `${paths.slice(0, -1).join(', ')} and ${paths.at(-1)}` : paths[0] ?? 'A file'
+  return `${names} ${paths.length > 1 ? 'were' : 'was'} saved in this worktree after it began. It was kept.`
+}
+/** What `folder` holds besides its own `.git`, relative to it, sorted; an empty folder ends in `/`. Links are not followed. */
+async function filesIn(folder: string, limit = 1000): Promise<string[]> {
+  const found: string[] = []
+  const visit = async (rel: string): Promise<void> => {
+    const names = (await readdir(rel ? join(folder, rel) : folder).catch(() => [] as string[])).sort().filter((name) => rel || name !== '.git')
+    if (rel && !names.length) found.push(`${rel}/`)
+    for (const name of names) {
+      if (found.length >= limit) return
+      const path = rel ? `${rel}/${name}` : name
+      if ((await lstat(join(folder, path)).catch(() => undefined))?.isDirectory()) await visit(path)
+      else found.push(path)
+    }
+  }
+  await visit('')
+  return found
+}
+/**
+ * A read-only Git command in the checkout `folder`, which never reaches the repository of a folder above it: `linked`
+ * says its `.git` is still there (by default, that it is there at all), and is checked before anything else runs for the
+ * command and again right before Git starts; Git may not look past `folder` either (`GIT_CEILING_DIRECTORIES`).
+ */
+async function readInCheckout(folder: string, args: string[], linked?: () => void): Promise<string> {
+  const check = linked ?? ((): void => {
+    try { lstatSync(join(folder, '.git')) } catch { throw new Error(`${folder} has no link to its repository (.git)`) }
+  })
+  check()
+  const ceiling = await canonicalPathAsync(dirname(folder))
+  return lifecycleGitAsync(folder, args, undefined, undefined, { ...READ_ONLY_GIT_ENV, GIT_CEILING_DIRECTORIES: ceiling }, check)
+}
+const fileIdentity = (stat: Stats): string => digest({ dev: stat.dev, ino: stat.ino, size: stat.size, mtimeMs: stat.mtimeMs })
+interface WorktreeRegistration {
+  /** `<common>/worktrees/<name>`: the registration's own folder, whose name is unique in the repository. */
+  adminDir: string
+  /** The worktree's path as Git recorded it. */
+  path: string
+}
+/**
+ * Git's registration of the worktree at `worktree`, found by its administration folder (`<common>/worktrees/<name>/gitdir`)
+ * rather than by asking Git about the path, so it is found with the folder, or even its parent, gone. Read without Git.
+ */
+async function registrationOf(commonDir: string, worktree: string): Promise<WorktreeRegistration | undefined> {
+  const root = join(commonDir, 'worktrees')
+  const names = await readdir(root).catch(() => [] as string[])
+  const wanted = comparablePath(await canonicalPathAsync(worktree))
+  for (const name of names.sort()) {
+    const recorded = (await readFile(join(root, name, 'gitdir'), 'utf8').catch(() => '')).trim()
+    if (!recorded) continue
+    // Git writes `<worktree>/.git`, absolute unless `worktree.useRelativePaths` is set.
+    const path = (isAbsolute(recorded) ? recorded : resolve(root, name, recorded)).replace(/[\\/]\.git$/, '')
+    if (comparablePath(await canonicalPathAsync(path)) === wanted) return { adminDir: join(root, name), path }
+  }
+  return undefined
+}
 
 /** External purge ledger survives deletion of every task-owned source. No Git object pruning. */
 export interface RetireTrashedOptions {
@@ -322,7 +401,7 @@ export class ResourcePurgeService {
           const sources = inventory.sources.filter((source) => resource.sourceIds.includes(source.id))
           const source = sources.find((source) => basename(source.path) === 'agent-episodes.json') ?? sources.find((source) => ['workspace.json', 'agents.json', 'mousse-agent-sessions.json'].includes(basename(source.path))) ?? sources.find((source) => source.path.includes('workflow'))
           if (!source) throw new Error('Workspace has no supported owner source')
-          const current = await lifecycleReadAsync(resource.identity, ['branch', '--show-current'])
+          const current = await readInCheckout(resource.identity, ['branch', '--show-current'])
           // The owner's record names the branch; the checkout may be on another one the agent switched to.
           const branch = this.retirement.ownedBranch(source.path, resource.identity) ?? current
           if (readOnly) {
@@ -615,27 +694,7 @@ export class ResourcePurgeService {
       unclaimed()
       if (item.kind === 'worktree') {
         if (item.content && item.discardState) {
-          if (!await present(item.identity)) {
-            if ((await lifecycleReadAsync(commonDir, ['worktree', 'list', '--porcelain'])).includes(`worktree ${item.identity.replaceAll('\\', '/')}`)) throw new Error('Missing discarded worktree is still registered')
-            return
-          }
-          const stat = await lstat(item.identity)
-          if (rootIdentity(stat) !== digest(item.rootIdentity) || await lifecycleReadAsync(item.identity, ['branch', '--show-current']) !== item.branch || await lifecycleReadAsync(item.identity, ['rev-parse', 'HEAD']) !== item.expectedValue) throw new Error('Discarded checkout identity changed')
-          let emptied = false
-          if (item.discardState === 'pending') {
-            if (createHash('sha256').update(await lifecycleReadAsync(item.identity, ['ls-files', '--stage', '-v', '-z'])).digest('hex') !== item.indexDigest) throw new Error('Staged sole-copy content changed after the reviewed discard')
-            await this.removeFrozen(item.identity, item.content, item.identity, undefined, 'Sole-copy content changed after the reviewed discard', true, unclaimed)
-            onDiscardCleared()
-            emptied = true
-          }
-          // Clearing is durably recorded before this idempotent index/worktree reconstruction. The claims are checked again
-          // right before each command starts. Right after the reviewed files went, the checkout holds only its `.git`:
-          // anything written there since was not reviewed, and the restore would write over it, so it stops the purge.
-          await lifecycleGitAsync(item.identity, ['restore', '--source=HEAD', '--staged', '--worktree', '--', '.'], undefined, undefined, undefined, () => {
-            unclaimed()
-            if (emptied && readdirSync(item.identity).some((name) => name !== '.git')) throw new Error('Sole-copy content changed after the reviewed discard')
-          })
-          await lifecycleGitAsync(commonDir, ['worktree', 'remove', item.identity], undefined, undefined, undefined, unclaimed)
+          await this.removeDiscarded(item, commonDir, unclaimed, onDiscardCleared)
           return
         }
         // Purge reuses the verifier; its source is fenced by the external irreversible owner.
@@ -654,6 +713,157 @@ export class ResourcePurgeService {
   }
 
   /**
+   * Permanently deletes a checkout whose files the person reviewed and agreed to discard. Mousse never writes inside it:
+   * it removes the reviewed files (`pending`), then, with the checkout holding only its `.git`, removes that and the
+   * folder, and has Git unregister the folder that is gone. Recovery (`cleared`: the reviewed files went before a stop)
+   * continues from what is on disk, never by replaying a step, so anything written in the checkout since stops the purge
+   * and the reason names it. Git is run in the folder only while its `.git` leads to this repository's registration of it;
+   * without one Git would find the repository of a folder above.
+   */
+  private async removeDiscarded(item: LifecyclePurgeItem, commonDir: string, unclaimed: () => void, onDiscardCleared: () => unknown): Promise<void> {
+    const folder = item.identity
+    const changed = (): Error => purgeStopped(`the worktree at ${folder} changed (its folder, branch or commit) since the delete was reviewed. It was kept.`)
+    const lostLink = (): Error => purgeStopped(`the worktree at ${folder} lost its link to its repository (.git) before its files were cleared. It was kept.`)
+    const writtenSince = (): Error => purgeStopped(`files were written at ${folder} after its worktree was deleted. They were kept.`)
+    // The real path the reviewed folder had; compared too, so a file system without creation times still tells folders apart.
+    const realRecorded = comparablePath(await canonicalPathAsync(folder))
+    const sameRoot = (stat: Stats): boolean => {
+      if (!sameFolder(stat, item.rootIdentity)) return false
+      try { return realOf(folder) === realRecorded } catch { return false }
+    }
+    /** What a folder that could not be removed holds; nothing visible (a delete Windows has not finished) is said as such. */
+    const kept = (files: string[]): Error => files.length ? purgeStopped(savedText(files)) : purgeStopped(`the worktree folder ${folder} could not be removed yet. It will be tried again.`)
+    /** Synchronously, right before each removal: Git has no lock on the worktree (it never removes a locked one). */
+    const unlocked = (registration: WorktreeRegistration | undefined): void => {
+      const locked = registration && lockReasonSync(registration.adminDir)
+      if (locked !== undefined) throw purgeStopped(lockedText(locked, folder))
+    }
+    const stat = await lstat(folder).catch((error: NodeJS.ErrnoException) => { if (error.code === 'ENOENT') return undefined; throw error })
+    if (!stat) {
+      // The folder is gone, so only Git's registration of it is left.
+      const registration = await registrationOf(commonDir, folder)
+      if (!registration) return
+      // Its reviewed files were never cleared: something else moved or deleted the worktree, and Git's record of it stays.
+      if (item.discardState === 'pending') throw purgeStopped(`the worktree at ${folder} was moved or deleted by something else, and Git still lists it. It was kept in Git's list of worktrees.`)
+      return await this.unregisterDiscarded(registration, folder, commonDir, unclaimed)
+    }
+    const dotGit = join(folder, '.git')
+    if (!sameRoot(stat)) {
+      // Once the reviewed files are gone, a real folder at the path without `.git` is one someone made after the checkout
+      // was removed (a stop came before Git unregistered it): its files are theirs and are kept; empty, it goes.
+      if (item.discardState !== 'cleared' || !stat.isDirectory() || await lstat(dotGit).then(() => true, () => false)) throw changed()
+      const registration = await registrationOf(commonDir, folder)
+      unlocked(registration)
+      if ((await filesIn(folder)).length) throw writtenSince()
+      unclaimed()
+      unlocked(registration)
+      const now = lstatSync(folder)
+      if (now.isSymbolicLink() || !now.isDirectory() || fileIdentity(now) !== fileIdentity(stat)) throw writtenSince()
+      try { rmdirSync(folder) } catch (error) {
+        if (['ENOTEMPTY', 'EEXIST'].includes((error as NodeJS.ErrnoException).code ?? '')) throw writtenSince()
+        throw error
+      }
+      if (registration) await this.unregisterDiscarded(registration, folder, commonDir, unclaimed)
+      return
+    }
+    const linkInfo = await lstat(dotGit).catch((error: NodeJS.ErrnoException) => { if (error.code === 'ENOENT') return undefined; throw error })
+    if (!linkInfo) {
+      // Before the files were cleared, a missing `.git` is someone else's doing.
+      if (item.discardState === 'pending') throw lostLink()
+      // A purge stopped right after removing `.git` leaves the folder empty; anything in it now was written since.
+      const files = await filesIn(folder)
+      if (files.length) throw purgeStopped(savedText(files))
+      const registration = await registrationOf(commonDir, folder)
+      unlocked(registration)
+      unclaimed()
+      unlocked(registration)
+      if (!sameRoot(lstatSync(folder))) throw changed()
+      try { rmdirSync(folder) } catch (error) {
+        if (!['ENOTEMPTY', 'EEXIST'].includes((error as NodeJS.ErrnoException).code ?? '')) throw error
+        throw kept(await filesIn(folder))
+      }
+      if (registration) await this.unregisterDiscarded(registration, folder, commonDir, unclaimed)
+      return
+    }
+    if (!linkInfo.isFile() || linkInfo.size > 4096) throw changed()
+    const link = await readFile(dotGit, 'utf8')
+    const linkIdentity = fileIdentity(linkInfo)
+    const linkMode = linkInfo.mode & 0o7777
+    const gitDir = /^gitdir:[ \t]*(.+?)[ \t]*$/m.exec(link)?.[1]
+    const registration = await registrationOf(commonDir, folder)
+    if (!gitDir || !registration || comparablePath(await canonicalPathAsync(resolve(folder, gitDir))) !== comparablePath(await canonicalPathAsync(registration.adminDir))) throw changed()
+    const realFolder = realOf(folder)
+    /** Synchronously: `.git` is still the very file read above. */
+    const linked = (): void => {
+      let now: Stats
+      try { now = lstatSync(dotGit) } catch { throw item.discardState === 'pending' ? lostLink() : changed() }
+      if (fileIdentity(now) !== linkIdentity || readFileSync(dotGit, 'utf8') !== link) throw changed()
+    }
+    // Git refuses to unregister a locked worktree without `--force`, which is never used: the lock is named before anything
+    // goes, and checked again right before each removal.
+    unlocked(registration)
+    // Git runs here only while `.git` is the file read above, and never looks past this folder.
+    if (await readInCheckout(folder, ['branch', '--show-current'], linked) !== item.branch || await readInCheckout(folder, ['rev-parse', 'HEAD'], linked) !== item.expectedValue) throw changed()
+    if (item.discardState === 'pending') {
+      if (createHash('sha256').update(await readInCheckout(folder, ['ls-files', '--stage', '-v', '-z'], linked)).digest('hex') !== item.indexDigest) throw purgeStopped('files were staged in this worktree after it began. It was kept.')
+      const named = (paths: string[]): Error => {
+        // Only the folder itself changed (its permissions): it is named.
+        const files = paths.filter(Boolean)
+        return files.length ? purgeStopped(savedText(files)) : purgeStopped(`the worktree folder ${folder} changed after the delete began. It was kept.`)
+      }
+      await this.removeFrozen(folder, item.content!, folder, undefined, named, true, () => { unclaimed(); unlocked(registration) })
+      onDiscardCleared()
+    }
+    // Right after the reviewed files went, the checkout holds only its `.git`: anything else was written since, and is kept.
+    const files = await filesIn(folder)
+    if (files.length) throw purgeStopped(savedText(files))
+    // From here to the removals nothing is awaited.
+    unclaimed()
+    unlocked(registration)
+    if (!sameRoot(lstatSync(folder))) throw changed()
+    linked()
+    let landed = readdirSync(folder).some((name) => name !== '.git')
+    if (!landed) {
+      unlinkSync(dotGit)
+      try {
+        unlocked(registration)
+        rmdirSync(folder)
+      } catch (error) {
+        // A lock, a write landed between the check and the removal, or a file in use: `.git` goes back, so the folder kept
+        // is still a working worktree; but only into that very folder. One swapped in for it (or a link to another
+        // folder) gets nothing, and is named. A `.git` someone wrote there meanwhile is theirs, and stays.
+        let same = false
+        try { const now = lstatSync(folder); same = !now.isSymbolicLink() && sameRoot(now) && realOf(folder) === realFolder } catch { /* gone */ }
+        if (!same) throw purgeStopped(`the worktree at ${folder} was moved or replaced while it was being deleted, so its link to its repository (.git) was not put back. Its files were kept.`)
+        // With its own permissions, whatever the umask.
+        try {
+          const fd = openSync(dotGit, 'wx', linkMode)
+          try { fchmodSync(fd, linkMode); writeFileSync(fd, link) } finally { closeSync(fd) }
+        } catch { /* kept as it is */ }
+        if (!['ENOTEMPTY', 'EEXIST'].includes((error as NodeJS.ErrnoException).code ?? '')) throw error
+        landed = true
+      }
+    }
+    if (landed) throw kept(await filesIn(folder))
+    await this.unregisterDiscarded(registration, folder, commonDir, unclaimed)
+  }
+  /** Git unregisters the deleted checkout. A folder at that path again would be someone's new files: it is kept, and so is the registration. */
+  private async unregisterDiscarded(registration: WorktreeRegistration, folder: string, commonDir: string, unclaimed: () => void): Promise<void> {
+    const lockedNow = (): void => {
+      const locked = lockReasonSync(registration.adminDir)
+      if (locked !== undefined) throw purgeStopped(lockedText(locked, folder))
+    }
+    lockedNow()
+    // The path as Git recorded it: Git matches it whatever is on disk, so this works with the folder's parent gone too.
+    await lifecycleGitAsync(commonDir, ['worktree', 'remove', registration.path], undefined, undefined, undefined, () => {
+      unclaimed()
+      lockedNow()
+      if (existsSync(folder)) throw purgeStopped(`files were written at ${folder} after its worktree was deleted. They were kept.`)
+    })
+    if (await registrationOf(commonDir, folder)) throw new Error('Git still lists the deleted worktree')
+  }
+
+  /**
    * Removes the frozen `content` of `root`, deepest first, as the plan recorded it: everything still there must match the
    * plan (a prior crash may have removed a prefix). Each entry is read and checked against its frozen record without
    * blocking; then, right before it is removed and with nothing awaited in between, the path, the root, `beforeEach` (the
@@ -661,14 +871,20 @@ export class ResourcePurgeService {
    * write since its bytes were checked refuses it and nothing unreviewed is unlinked. Never follows a link or removes an
    * unreviewed subtree. `rootIdentity`, when given, is checked before every removal too. The entries are under the Mousse home.
    */
-  private async removeFrozen(root: string, content: NonNullable<LifecyclePurgeItem['content']>, owner: string, frozenRoot: LifecyclePurgeItem['rootIdentity'], changed: string, skipRootGit = false, beforeEach?: () => void): Promise<void> {
+  private async removeFrozen(root: string, content: NonNullable<LifecyclePurgeItem['content']>, owner: string, frozenRoot: LifecyclePurgeItem['rootIdentity'], changed: string | ((paths: string[]) => Error), skipRootGit = false, beforeEach?: () => void): Promise<void> {
     if (frozenRoot) {
       await assertLifecyclePathAsync(owner, root)
       if (rootIdentity(await lstat(root)) !== digest(frozenRoot)) throw new Error('Owned resource root was replaced')
     }
     const current = await walkOwnedContentAsync(root, skipRootGit)
     const expected = new Map(content.map((entry) => [entry.path, digest(entry)]))
-    for (const entry of current) if (expected.get(entry.path) !== digest(entry)) throw new Error(changed)
+    const differ = current.filter((entry) => expected.get(entry.path) !== digest(entry))
+    if (differ.length) {
+      if (typeof changed === 'string') throw new Error(changed)
+      // A changed or new file is named; its folders change with it, and are named only when nothing else is.
+      const files = differ.filter((entry) => entry.kind !== 'directory')
+      throw changed((files.length ? files : differ).map((entry) => entry.path))
+    }
     for (const entry of [...current].reverse()) {
       if (skipRootGit && !entry.path) continue
       const path = join(root, entry.path)

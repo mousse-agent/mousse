@@ -63,6 +63,11 @@ export interface RepoProgramOptions {
    * would from a terminal. Only the fixed settings (no fsmonitor, no `ext::`, no submodules) apply.
    */
   userAction?: boolean
+  /**
+   * A folder Git may not look past to find the repository (`GIT_CEILING_DIRECTORIES`), set by a command that must
+   * never reach the repository of a folder above `cwd`; the repository's programs are read under the same limit.
+   */
+  ceiling?: string
 }
 
 /** What the central Git check ({@link assertGitAllowed}) needs besides the command itself. */
@@ -323,9 +328,9 @@ function bareGit(cwd: string, args: string[]): BareResult {
  * limits, and the same answer. Git running past a limit is stopped, as `spawnSync` stops it. `signal` stops
  * Git and rejects with its reason.
  */
-async function bareGitAsync(cwd: string, args: string[], signal?: AbortSignal): Promise<BareResult> {
+async function bareGitAsync(cwd: string, args: string[], signal?: AbortSignal, ceiling?: string): Promise<BareResult> {
   await assertGitAllowedAsync({ cwd, args }, signal)
-  const env = repoProgramEnv({ ...process.env, GIT_OPTIONAL_LOCKS: '0', ...await untilAborted(gitDirectoryEnvAsync(cwd), signal) })
+  const env = repoProgramEnv({ ...process.env, GIT_OPTIONAL_LOCKS: '0', ...await untilAborted(gitDirectoryEnvAsync(cwd), signal), ...(ceiling ? { GIT_CEILING_DIRECTORIES: ceiling } : {}) })
   signal?.throwIfAborted()
   return new Promise((settle, reject) => {
     const child = spawn('git', PROBE_ARGS(args), { cwd, windowsHide: true, env, stdio: ['ignore', 'pipe', 'ignore'], signal })
@@ -378,7 +383,7 @@ const CHANGING = "This repository's Git config kept changing while Mousse read i
  * order, so they reach the same answer.
  */
 type Step =
-  | { kind: 'git'; cwd: string; args: string[] }
+  | { kind: 'git'; cwd: string; args: string[]; ceiling?: string }
   | { kind: 'signature'; path: string }
   | { kind: 'trustPath'; commonDir: string }
   | { kind: 'trustRecord'; path: string }
@@ -404,8 +409,10 @@ const READ_ATTEMPTS = 3
  * the top of the worktree (a new or rewritten one would make Git find another repository). A
  * repository that includes other files from its own config is read every time.
  */
-function* readPrograms(key: string): Reading<RepoPrograms> {
-  const hit = cache.get(key)
+function* readPrograms(key: string, ceiling?: string): Reading<RepoPrograms> {
+  // Read under a ceiling, a folder may be no repository where it otherwise finds one above: that answer is its own.
+  const cached = ceiling ? `${key}\0${ceiling}` : key
+  const hit = cache.get(cached)
   if (hit) {
     let same = true
     // One at a time, stopping at the first change.
@@ -414,9 +421,9 @@ function* readPrograms(key: string): Reading<RepoPrograms> {
     }
     if (same) return hit.programs
   }
-  cache.delete(key)
+  cache.delete(cached)
   for (let attempt = 0; attempt < READ_ATTEMPTS; attempt++) {
-    const programs = yield* readProgramsOnce(key)
+    const programs = yield* readProgramsOnce(key, cached, ceiling)
     if (programs) return programs
   }
   throw new RepoProgramError(CHANGING)
@@ -428,18 +435,18 @@ function* readPrograms(key: string): Reading<RepoPrograms> {
  * not change in between is used and cached: a `git init` while Git looks for the repository, or a config
  * written while Git lists it, is never cached as the old answer with the new files' state.
  */
-function* readProgramsOnce(key: string): Reading<RepoPrograms | null> {
+function* readProgramsOnce(key: string, cached = key, ceiling?: string): Reading<RepoPrograms | null> {
   probes += 1
   // Every `.git` from the folder up: one made or changed while Git looks would make it find another repository.
   const above = [...new Set([key, ...dotGitsUpFrom(key)])]
   const aboveBefore = yield* signaturesOf(above)
-  const where = (yield { kind: 'git', cwd: key, args: ['rev-parse', '--path-format=absolute', '--git-dir', '--git-common-dir', '--show-toplevel'] }) as BareResult
+  const where = (yield { kind: 'git', cwd: key, args: ['rev-parse', '--path-format=absolute', '--git-dir', '--git-common-dir', '--show-toplevel'], ceiling }) as BareResult
   if (where.failed) throw new RepoProgramError(UNREADABLE)
   // Not a repository: nothing of a repository's own can run. Remembered until a `.git` appears above it.
   if (!where.ok) {
     const aboveAfter = yield* signaturesOf(above)
     if (!sameSignatures(aboveBefore, aboveAfter)) return null
-    remember(key, above, aboveAfter, NONE)
+    remember(cached, above, aboveAfter, NONE)
     return NONE
   }
   const [gitDir, commonDir, top] = where.stdout.split(/\r?\n/).map((line) => line.trim())
@@ -448,7 +455,7 @@ function* readProgramsOnce(key: string): Reading<RepoPrograms | null> {
   const own = gitDir && commonDir && trustPath ? [join(gitDir, 'config'), join(gitDir, 'config.worktree'), join(gitDir, 'commondir'), join(commonDir, 'config'), trustPath] : []
   const ownBefore = yield* signaturesOf(own)
   // Without the listing, nothing can be overridden: refuse rather than run the repository's programs.
-  const listing = (yield { kind: 'git', cwd: key, args: ['config', '--null', '--show-scope', '--show-origin', '--list'] }) as BareResult
+  const listing = (yield { kind: 'git', cwd: key, args: ['config', '--null', '--show-scope', '--show-origin', '--list'], ceiling }) as BareResult
   if (!listing.ok) throw new RepoProgramError(UNREADABLE)
   const entries = parseConfig(listing.stdout)
   const record = trustPath ? (yield { kind: 'trustRecord', path: trustPath }) as RepoTrustRecord | null : null
@@ -465,7 +472,7 @@ function* readProgramsOnce(key: string): Reading<RepoPrograms | null> {
     const watched = [...paths]
     const signatures: string[] = []
     for (const path of watched) signatures.push(known.get(path) ?? (yield { kind: 'signature', path }) as string)
-    remember(key, watched, signatures, programs)
+    remember(cached, watched, signatures, programs)
   }
   return programs
 }
@@ -489,15 +496,15 @@ function programsFor(cwd: string): RepoPrograms {
  * blocking, and files are read with async calls. It first waits until the folder's volume answers
  * ({@link waitForFolderAccess}). `signal` ends the wait, and stops Git, with its reason.
  */
-async function programsForAsync(cwd: string, signal?: AbortSignal): Promise<RepoPrograms> {
+async function programsForAsync(cwd: string, signal?: AbortSignal, ceiling?: string): Promise<RepoPrograms> {
   const key = resolve(cwd)
   await waitForFolderAccess([key], { signal })
-  const reading = readPrograms(key)
+  const reading = readPrograms(key, ceiling)
   for (let step = reading.next(); ; ) {
     if (step.done) return step.value
     const need = step.value
     // A file read that does not answer (a held `stat`) does not hold a cancelled caller: it finishes in the background.
-    const answer = need.kind === 'git' ? await bareGitAsync(need.cwd, need.args, signal)
+    const answer = need.kind === 'git' ? await bareGitAsync(need.cwd, need.args, signal, need.ceiling)
       : need.kind === 'signature' ? await untilAborted(signatureAsync(need.path), signal)
         : need.kind === 'trustPath' ? await untilAborted(repoTrustPathAsync(need.commonDir), signal)
           : await untilAborted(readRepoTrustAtAsync(need.path), signal)
@@ -530,7 +537,7 @@ export async function repoProgramSettingsAsync(cwd: string, options: RepoProgram
     await waitForFolderAccess([resolve(cwd)], { signal: options.signal })
     return [...FIXED]
   }
-  return settingsFrom(await programsForAsync(cwd, options.signal), options.write)
+  return settingsFrom(await programsForAsync(cwd, options.signal, options.ceiling), options.write)
 }
 
 /**
@@ -635,7 +642,9 @@ export async function withoutRepoProgramsAsync(cwd: string, args: readonly strin
   const dir = (await untilAborted(gitDirectoryEnvAsync(cwd), options?.signal)).GIT_DIR
   const named = dir ? [`--git-dir=${dir}`] : []
   if (run[0] === 'config') return [...named, ...run]
-  return [...named, ...(own ? ['--no-optional-locks'] : []), ...await noRepoProgramArgsAsync(cwd, run, options), ...run]
+  // A command kept from looking above a folder has the repository's programs read under the same limit.
+  const ceiling = options?.ceiling ?? options?.env?.GIT_CEILING_DIRECTORIES
+  return [...named, ...(own ? ['--no-optional-locks'] : []), ...await noRepoProgramArgsAsync(cwd, run, { ...options, ...(ceiling ? { ceiling } : {}) }), ...run]
 }
 
 /**
