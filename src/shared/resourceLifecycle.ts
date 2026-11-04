@@ -101,9 +101,10 @@ export const PRESERVED_EXPIRY_OPERATION = 'preserved-files-expired'
 
 /**
  * Journal operation types of a copy kept before an action removed files (`keepCopy`): Discard, worktree cleanup, Abort,
- * and a restore that would write over bytes Git converts (`restore-keep`: line endings, an encoding or a filter).
+ * a restore that would write over bytes Git converts (`restore-keep`: line endings, an encoding or a filter), and a
+ * Publish that would write over such bytes in the person's checkout (`publish-keep`).
  */
-export const KEEP_COPY_OPERATIONS = ['git-discard', 'worktree-cleanup', 'git-abort', 'restore-keep'] as const
+export const KEEP_COPY_OPERATIONS = ['git-discard', 'worktree-cleanup', 'git-abort', 'restore-keep', 'publish-keep'] as const
 export type KeepCopyOperation = (typeof KEEP_COPY_OPERATIONS)[number]
 
 /**

@@ -15,8 +15,9 @@ import { UndoRetentionService } from './UndoRetentionService'
  * commit under a `refs/mousse/preserved/` ref. These writers name them:
  * - `moveFiles` (Undo, Redo, revert, switching conversation branches): `<operation>-<12 hex>`, where the operation is a
  *   UUID Mousse made and recorded in the thread's journal under one of {@link RESTORE_OPERATION_TYPES}.
- * - `keepCopy` (Discard, worktree cleanup, Abort, and a restore's exact bytes that Git would convert): the same shape,
- *   recorded under `git-discard`, `worktree-cleanup`, `git-abort` or `restore-keep` in its owner's journal: a thread's,
+ * - `keepCopy` (Discard, worktree cleanup, Abort, and a restore's or a Publish's exact bytes that Git would convert): the
+ *   same shape, recorded under `git-discard`, `worktree-cleanup`, `git-abort`, `restore-keep` or `publish-keep` in its
+ *   owner's journal: a thread's,
  *   the project's for the person's own checkout (`projectKeptFilesOwner`), or a dispatch's for its worktree
  *   (`dispatchKeptFilesOwner`).
  * - An abort of an older version: `<operation>-abort-<12 hex>`, and the abort recorded that exact name as `preservedRef`.
