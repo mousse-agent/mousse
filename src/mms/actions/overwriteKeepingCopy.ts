@@ -1,9 +1,10 @@
 import { lstatSync } from 'node:fs'
 import { lstat } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
-import { assertFrozenEntryUnchanged, proveFrozenContentEntryAsync, type FrozenEntryProof } from '../lifecycle/verifiedDelete'
-import { readConvertedAsync } from './heldBytes'
-import { keepCopy, KeepCopyRefusedError, listZOver, modesIn, writeBackKeptFiles, type KeepCopyOperation, type KeptCopy } from './keptCopies'
+import { assertFrozenEntryUnchanged, proveFrozenContentEntryAsync, readFrozenEntryAsync, type FrozenEntryProof } from '../lifecycle/verifiedDelete'
+import { listZSync } from './git'
+import { gitsFormsAsync, readConvertedAsync } from './heldBytes'
+import { keepCopy, KeepCopyRefusedError, listZ, listZOver, modesIn, writeBackKeptFiles, type KeepCopyOperation, type KeptCopy } from './keptCopies'
 import { removeProvenAsync } from './provenDiscard'
 
 /**
@@ -14,14 +15,20 @@ import { removeProvenAsync } from './provenDiscard'
  *    autostash, paths kept alongside that Git's run may write over only where an ignored file stands (`alongside`).
  * 2. Those paths are kept as one copy of the owner's (`keepCopy`): staged and working versions, conflict stages, and
  *    whatever stands where Git writes, ignored files included. With `held: 'left'` (Publish), a file whose bytes on disk
- *    are exactly Git's form of its index entry is not kept: the commit Git moves from already holds it. It stays where it
- *    is, proven, and Git writes over it, as it would anyway.
+ *    are exactly Git's form of its index entry, or a link whose target is its blob, is not kept: the commit Git moves
+ *    from already holds it. It stays where it is, proven, and Git writes over it, as it would anyway; unless another path
+ *    Git writes is below or above it (a file that becomes a folder, a folder that becomes a file), when it is kept and
+ *    removed like the rest. With `untracked`, a kept path the index has no entry for (a file that is not tracked, or
+ *    ignored, where Git writes) refuses instead, with nothing removed.
+ *    The index entries at those paths are read before the copy and again after it: any change (a flag set, a version
+ *    staged) since the first read starts the round again, so nothing is removed on what the index said before the copy.
  * 3. Mousse removes what stands at each kept path Git writes, as far as the copy proves it holds it (`removeProvenAsync`).
  *    At `alongside` paths only ignored files go; the rest stays, proven against the copy. Anything that changed or
  *    appeared since puts back what was removed, and the copy is kept again, up to {@link OVERWRITE_KEEP_ROUNDS} times;
  *    then the action refuses, naming it.
  * 4. Right before Git starts, synchronously, every emptied path must still be empty, every file left in place unchanged,
- *    and nothing new may be among what Git writes (`grown`): anything else puts back, keeps again.
+ *    the index entries at the paths Git writes as they were read, and nothing new may be among what Git writes (`grown`):
+ *    anything else puts back, keeps again.
  * 5. Git then only creates files where nothing stands. When it fails, every removed file is put back where nothing
  *    stands; where Git wrote first, the error names the copy and the commands that bring those files back.
  *
@@ -45,6 +52,8 @@ export interface OverwriteRound {
   alongside?: readonly string[]
   /** Synchronously, right before Git starts: a path Git would write now that this round does not list, else undefined. */
   grown?: (listed: ReadonlySet<string>) => string | undefined
+  /** The index at `writes` ({@link indexAt}), when the caller has just read it; read here otherwise. */
+  index?: IndexAt
 }
 
 export interface OverwriteKeepingCopyInput {
@@ -59,8 +68,10 @@ export interface OverwriteKeepingCopyInput {
   round: () => Promise<OverwriteRound | undefined>
   /** `kept` (the default): every path Git writes is kept. `left`: a file whose bytes are Git's form of its index entry is left out of the copy, proven, and left in place. */
   held?: 'kept' | 'left'
-  /** Runs once a round's copy is kept, before anything is removed, with the kept paths that are about to be emptied. */
-  holding?: (kept: KeptCopy, emptied: readonly string[]) => void | Promise<void>
+  /** Runs once a round's copy is kept, before anything is removed, with the kept paths about to be emptied and the paths proven held. */
+  holding?: (kept: KeptCopy, emptied: readonly string[], held: ReadonlySet<string>) => void | Promise<void>
+  /** With it, a kept path the index has no entry for (not tracked, or ignored) refuses with this error before anything is removed. */
+  untracked?: (paths: readonly string[]) => Error
   /**
    * Runs Git, throwing when it fails. `beforeStart` must run synchronously right before Git starts (`runGitProcess`'s
    * option of that name); what it throws is to be thrown as it is, with Git not started.
@@ -70,7 +81,10 @@ export interface OverwriteKeepingCopyInput {
   stoppedPartWay: (gitError: unknown, kept: KeptCopy, paths: readonly string[]) => Error
 }
 
-/** What was written over: the copy, when one was kept, and the files left out of it because their commit holds them. */
+/**
+ * What was written over: the copy, when one was kept, and the paths proven held (Git's form of their index entry), whether
+ * left in place or kept because another path Git writes is below or above them.
+ */
 export interface Overwritten { kept?: KeptCopy; held: string[] }
 
 /** Something stood at a path Git writes, or a file left in place changed, right before Git was to start. */
@@ -86,27 +100,79 @@ export function namedFew(paths: readonly string[]): string {
   return paths.slice(0, 5).join(', ') + (paths.length > 5 ? ` and ${paths.length - 5} more` : '')
 }
 
-/**
- * The index's entries at `paths`: their modes and blobs, which are conflicted, and which carry a flag that tells Git not
- * to look at the file (`assume-unchanged`, `skip-worktree`).
- */
-export async function indexAt(top: string, paths: readonly string[]): Promise<{ modes: Map<string, string>; blobs: Map<string, string>; unmerged: Set<string>; flagged: Set<string> }> {
-  const modes = new Map<string, string>()
-  const blobs = new Map<string, string>()
-  const unmerged = new Set<string>()
-  const flagged = new Set<string>()
-  if (!paths.length) return { modes, blobs, unmerged, flagged }
-  for (const line of await listZOver(top, ['ls-files', '-z', '-s'], paths)) {
-    const tab = line.indexOf('\t')
-    const [mode, blob, stage] = line.slice(0, tab).split(' ') as [string, string, string]
-    const path = line.slice(tab + 1)
-    modes.set(path, mode)
-    if (stage === '0') blobs.set(path, blob)
-    else unmerged.add(path)
+/** The index's entries at some paths: modes and blobs, conflicted and flagged paths, and each path's whole entry text. */
+export interface IndexAt {
+  modes: Map<string, string>
+  blobs: Map<string, string>
+  unmerged: Set<string>
+  /** Paths flagged `assume-unchanged` or `skip-worktree`: Git does not look at their files. */
+  flagged: Set<string>
+  /** `tag mode blob stage` for each path (each stage, for a conflicted one): what the final check compares. */
+  entries: Map<string, string>
+}
+
+/** Over this many paths, the whole index is read once and filtered, rather than asked for path by path. */
+const WHOLE_INDEX = 200
+const INDEX_LISTING = ['ls-files', '-z', '-s', '-v']
+
+/** Whether a path is one of `paths` or below one of them, as a pathspec matches. */
+function within(paths: readonly string[]): (path: string) => boolean {
+  const set = new Set(paths)
+  return (path) => {
+    if (set.has(path)) return true
+    for (let slash = path.indexOf('/'); slash !== -1; slash = path.indexOf('/', slash + 1)) if (set.has(path.slice(0, slash))) return true
+    return false
   }
-  // `ls-files -v`: a lowercase tag is assume-unchanged, `S` (or `s`) skip-worktree.
-  for (const line of await listZOver(top, ['ls-files', '-z', '-v'], paths)) if (/^[a-zS] /.test(line)) flagged.add(line.slice(2))
-  return { modes, blobs, unmerged, flagged }
+}
+
+/** `ls-files -s -v` lines (`tag mode blob stage<TAB>path`), filtered. A lowercase tag is assume-unchanged, `S` skip-worktree. */
+function parseIndex(lines: readonly string[], keep: (path: string) => boolean): IndexAt {
+  const found: IndexAt = { modes: new Map(), blobs: new Map(), unmerged: new Set(), flagged: new Set(), entries: new Map() }
+  for (const line of lines) {
+    const tab = line.indexOf('\t')
+    const path = line.slice(tab + 1)
+    if (!keep(path)) continue
+    const [tag, mode, blob, stage] = line.slice(0, tab).split(' ') as [string, string, string, string]
+    found.modes.set(path, mode)
+    if (stage === '0') found.blobs.set(path, blob)
+    else found.unmerged.add(path)
+    if (/^[a-zS]$/.test(tag)) found.flagged.add(path)
+    const entry = `${tag} ${mode} ${blob} ${stage}`
+    found.entries.set(path, found.entries.has(path) ? `${found.entries.get(path)},${entry}` : entry)
+  }
+  return found
+}
+
+/**
+ * The index's entries at `paths` and below them: their modes and blobs, which are conflicted, and which carry a flag
+ * that tells Git not to look at the file (`assume-unchanged`, `skip-worktree`). One listing; for many paths, of the whole index.
+ */
+export async function indexAt(top: string, paths: readonly string[]): Promise<IndexAt> {
+  if (!paths.length) return parseIndex([], () => false)
+  const lines = paths.length > WHOLE_INDEX ? await listZ(top, INDEX_LISTING) : await listZOver(top, INDEX_LISTING, paths)
+  return parseIndex(lines, within(paths))
+}
+
+/** {@link indexAt}'s entry texts, read synchronously and without taking Git's optional locks: for the check right before Git starts. */
+function indexEntriesSync(top: string, paths: readonly string[]): Map<string, string> {
+  if (!paths.length) return new Map()
+  const quiet = { GIT_OPTIONAL_LOCKS: '0' }
+  const lines = paths.length > WHOLE_INDEX ? listZSync(top, INDEX_LISTING, quiet) : listZSync(top, [...INDEX_LISTING, '--', ...paths.map((path) => `:(literal)${path}`)], quiet)
+  return parseIndex(lines, within(paths)).entries
+}
+
+/** The first path whose index entry differs between two readings, or undefined. */
+function changedEntry(before: ReadonlyMap<string, string>, now: ReadonlyMap<string, string>): string | undefined {
+  for (const [path, entry] of before) if (now.get(path) !== entry) return path
+  for (const path of now.keys()) if (!before.has(path)) return path
+  return undefined
+}
+
+/** Ancestors of a slash-separated path, nearest last: `a/b/c` → `a`, `a/b`. */
+function ancestorsOf(path: string): string[] {
+  const found: string[] = []
+  for (let slash = path.indexOf('/'); slash !== -1; slash = path.indexOf('/', slash + 1)) found.push(path.slice(0, slash))
+  return found
 }
 
 /**
@@ -159,15 +225,30 @@ export async function overwriteKeepingCopy(input: OverwriteKeepingCopyInput): Pr
     const { target, writes } = plan
     const writeSet = new Set(writes)
     const stashed = (plan.alongside ?? []).filter((path) => !writeSet.has(path))
-    const index = await indexAt(top, writes)
+    const before = plan.index ?? await indexAt(top, writes)
 
-    // A file whose bytes are Git's form of its index entry is held by the commit Git moves from: proven, and left.
-    const held: Array<{ path: string; proof: FrozenEntryProof }> = []
+    // A file whose bytes are Git's form of its index entry, or a link whose target is its blob, is held by the commit Git
+    // moves from: proven, and left in place, unless another path Git writes is below or above it.
+    const heldAll = new Map<string, FrozenEntryProof>()
     if (input.held === 'left') {
-      const candidates = writes.filter((path) => ['100644', '100755'].includes(index.modes.get(path) ?? '') && index.blobs.has(path) && !index.flagged.has(path))
-      const { read } = candidates.length ? await readConvertedAsync(top, index.blobs, candidates) : { read: [] }
-      for (const entry of read) if (entry.held) held.push({ path: entry.path, proof: entry.proof })
+      const unflagged = (path: string): boolean => before.blobs.has(path) && !before.flagged.has(path)
+      const files = writes.filter((path) => ['100644', '100755'].includes(before.modes.get(path) ?? '') && unflagged(path))
+      const links = writes.filter((path) => before.modes.get(path) === '120000' && unflagged(path))
+      const [{ read }, targets] = await Promise.all([
+        files.length ? readConvertedAsync(top, before.blobs, files) : { read: [] },
+        links.length ? gitsFormsAsync(top, links.map((path) => ({ path, blob: before.blobs.get(path)! })), { raw: true }) : new Map<string, { bytes: number; digest: string }>()
+      ])
+      for (const entry of read) if (entry.held) heldAll.set(entry.path, entry.proof)
+      for (const path of links) {
+        const proof = await readFrozenEntryAsync(top, path).catch(() => undefined)
+        if (proof?.entry.kind === 'link' && proof.entry.digest === targets.get(path)?.digest) heldAll.set(path, proof)
+      }
     }
+    // Paths with another path Git writes below them (a file that becomes a folder), or above them (a folder that becomes
+    // a file): removing the one removes the other, so neither is left in place.
+    const above = new Set(writes.flatMap(ancestorsOf))
+    const overlaps = (path: string): boolean => above.has(path) || ancestorsOf(path).some((folder) => writeSet.has(folder))
+    const held = [...heldAll].filter(([path]) => !overlaps(path)).map(([path, proof]) => ({ path, proof }))
     const heldSet = new Set(held.map((entry) => entry.path))
     // Where nothing stands (a file Git adds), there is nothing to keep; the path must only stay empty until Git runs.
     const empties = input.held === 'left' ? writes.filter((path) => !heldSet.has(path) && !standsAt(top, path, true)) : []
@@ -176,6 +257,15 @@ export async function overwriteKeepingCopy(input: OverwriteKeepingCopyInput): Pr
     const kept = input.held !== 'left' || keptWrites.length || stashed.length
       ? await keepCopy({ owner: input.owner, top, operationType: input.operationType, action: input.action, paths: [...keptWrites, ...stashed], writes: [...keptWrites, ...stashed], target })
       : undefined
+    // Read again after the copy: what is removed is decided on the index as it is now, and a change since the first
+    // reading (a flag set, a version staged) starts the round again before anything is removed.
+    const index = await indexAt(top, writes)
+    const restaged = changedEntry(before.entries, index.entries)
+    if (restaged !== undefined) { changed = [restaged]; continue }
+    if (kept && input.untracked) {
+      const foreign = [...kept.digests.keys()].filter((path) => !index.modes.has(path)).sort()
+      if (foreign.length) throw input.untracked(foreign)
+    }
 
     // A submodule is changed in the index only: its folder is never walked or removed.
     const targetModes = await modesIn(top, target, keptWrites)
@@ -187,7 +277,7 @@ export async function overwriteKeepingCopy(input: OverwriteKeepingCopyInput): Pr
     const ignored = new Set(stashed.length ? await listZOver(top, ['ls-files', '-z', '--others', '--ignored', '--exclude-standard'], stashed) : [])
     const restore = tree.filter((path) => targetModes.has(path))
     const remove = [...tree.filter((path) => !targetModes.has(path)), ...stashed.filter((path) => ignored.has(path))]
-    if (kept) await input.holding?.(kept, [...restore, ...remove])
+    if (kept) await input.holding?.(kept, [...restore, ...remove], new Set(heldAll.keys()))
     const cleared = kept ? await removeProvenAsync({ top, restore, remove, digests: kept.digests }) : { left: [], removed: [] as string[] }
     const removed = cleared.removed
     const again = async (paths: readonly string[]): Promise<void> => {
@@ -220,6 +310,9 @@ export async function overwriteKeepingCopy(input: OverwriteKeepingCopyInput): Pr
       for (const { path, write } of empty) if (standsAt(top, path, write)) throw new ChangedBeforeGit(path)
       const grown = plan.grown?.(listed)
       if (grown !== undefined) throw new ChangedBeforeGit(grown)
+      // A version staged or a flag set since the index was read: Git might leave an emptied path empty, or a file in place.
+      const restagedNow = changedEntry(index.entries, indexEntriesSync(top, writes))
+      if (restagedNow !== undefined) throw new ChangedBeforeGit(restagedNow)
       for (const { path, proof } of stays) {
         if (!proof) { if (standsAt(top, path, true)) throw new ChangedBeforeGit(path); continue }
         try { assertFrozenEntryUnchanged(proof) } catch { throw new ChangedBeforeGit(path) }
@@ -235,7 +328,7 @@ export async function overwriteKeepingCopy(input: OverwriteKeepingCopyInput): Pr
       if (left.length) throw input.stoppedPartWay(error, kept!, left)
       throw error
     }
-    return { ...(kept ? { kept } : {}), held: [...heldSet] }
+    return { ...(kept ? { kept } : {}), held: [...heldAll.keys()] }
   }
   throw new KeepCopyRefusedError(`${input.action} was stopped: ${namedFew(changed)} kept changing while ${changed.length === 1 ? 'its' : 'their'} copy was being kept. Nothing was changed; try again once ${changed.length === 1 ? 'it has' : 'they have'} stopped changing.`, changed)
 }

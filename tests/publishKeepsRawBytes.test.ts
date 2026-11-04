@@ -4,12 +4,13 @@
  * bytes: a ref existing proves nothing.
  */
 import { execFileSync, spawnSync } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { build } from 'esbuild'
 import { afterAll, describe, expect, it } from 'vitest'
 import { keptCopyRestoreCommand } from '../src/mms/actions/keptCopies'
+import type { RestoreKind } from '../src/mms/actions/restoreCommands'
 import { threadPreservedIndex } from '../src/mms/actions/preservedFiles'
 import { PublishService, type PublishResult } from '../src/mms/actions/PublishService'
 import { ThreadJournal } from '../src/mms/data/ThreadJournal'
@@ -34,7 +35,7 @@ const latest = (owner: string, id: string) => new ThreadJournal(owner).latestByO
  * The person's checkout (`main`, with base.txt and other.txt) and a thread's worktree beside it on its own branch, which
  * Publish brings into `main`. `config` is set in the checkout before anything is written.
  */
-function fixture(config: Record<string, string> = { 'core.autocrlf': 'input' }) {
+function fixture(config: Record<string, string> = { 'core.autocrlf': 'input' }, setup?: (cwd: string) => void) {
   const n = ++count
   const cwd = join(root, `primary-${n}`), owner = join(root, `owner-${n}`), workspace = join(root, `worktree-${n}`)
   mkdirSync(cwd); mkdirSync(owner)
@@ -43,6 +44,7 @@ function fixture(config: Record<string, string> = { 'core.autocrlf': 'input' }) 
   writeFileSync(join(cwd, 'base.txt'), 'base\n')
   writeFileSync(join(cwd, 'other.txt'), 'other\n')
   writeFileSync(join(cwd, 'gone.txt'), 'gone\n')
+  setup?.(cwd)
   git(cwd, 'add', '.'); git(cwd, 'commit', '-qm', 'base')
   git(cwd, 'worktree', 'add', '-q', '-b', 'mousse/source', workspace)
   return { cwd, owner, workspace, pre: git(cwd, 'rev-parse', 'HEAD') }
@@ -71,10 +73,29 @@ async function withPath<T>(bin: string, run: () => Promise<T>): Promise<T> {
   try { process.env.PATH = `${bin}:${previous}`; return await run() } finally { process.env.PATH = previous }
 }
 /** Runs the command `notice` shows for `path`, in the folder the copy names. */
-function restoreFromNotice(notice: string, ref: string, top: string, path: string): void {
-  const command = keptCopyRestoreCommand(ref, path, 'posix')
+function restoreFromNotice(notice: string, ref: string, top: string, path: string, kind?: RestoreKind, shell = 'sh'): void {
+  const command = keptCopyRestoreCommand(ref, path, 'posix', kind)
   expect(notice).toContain(command)
-  execFileSync('sh', ['-c', command], { cwd: top })
+  execFileSync(shell, ['-c', command], { cwd: top })
+}
+
+/** Runs a publish in a child process that is killed (SIGKILL) when Git is asked for `when`, a `case` pattern. */
+async function publishCrashingAt(f: { owner: string; workspace: string; cwd: string }, when: string, operationId: string): Promise<void> {
+  const bin = launcher(when, 'kill -9 $PPID; exit 1')
+  const configPath = join(root, `crash-${count}.json`)
+  writeFileSync(configPath, JSON.stringify({ kind: 'publish', phase: 'git', thread: f.owner, repo: f.cwd, source: f.workspace, target: 'main', options: { operationId } }))
+  const runner = join(root, `publish-crash-${count}.mjs`)
+  await build({ entryPoints: ['tests/fixtures/git-foundation-operation-crash.ts'], outfile: runner, bundle: true, platform: 'node', format: 'esm', logLevel: 'silent', banner: { js: CRASH_CHILD_REQUIRE } })
+  const home = join(root, `home-${count}`)
+  mkdirSync(home)
+  const child = spawnSync(process.execPath, [runner, configPath], { env: { ...process.env, MOUSSE_HOME: home, PATH: `${bin}:${process.env.PATH}` }, encoding: 'utf8', timeout: 30_000 })
+  expect(child.signal, child.stderr).toBe('SIGKILL')
+}
+
+/** The copy a publish recorded holding before it emptied any path. */
+function holdingOf(owner: string): { ref: string; files: string[]; kinds: Record<string, string> } {
+  const entry = [...new ThreadJournal(owner).list()].reverse().find((item) => (item.details as { holding?: unknown } | undefined)?.holding)!
+  return (entry.details as { holding: { ref: string; files: string[]; kinds: Record<string, string> } }).holding
 }
 
 describe('Publish keeps raw bytes Git converts in the person checkout', () => {
@@ -271,4 +292,147 @@ describe('Publish keeps raw bytes Git converts in the person checkout', () => {
     expect(preserved(f.cwd)).toEqual([])
     expect(readdirSync(join(f.cwd, '.git')).filter((name) => name.startsWith('mousse-keep-'))).toEqual([])
   })
+})
+
+describe('Publish over files Git converts: shapes, the index and recovery', () => {
+  for (const [name, setup, change, check] of [
+    ['a file that becomes a folder', (cwd: string) => writeFileSync(join(cwd, 'f2d'), 'file\n'), (w: string) => { rmSync(join(w, 'f2d')); mkdirSync(join(w, 'f2d')); writeFileSync(join(w, 'f2d', 'x'), 'x\n') }, (cwd: string) => expect(readFileSync(join(cwd, 'f2d', 'x'), 'utf8')).toBe('x\n')],
+    ['a folder that becomes a file', (cwd: string) => { mkdirSync(join(cwd, 'd2f')); writeFileSync(join(cwd, 'd2f', 'y'), 'y\n') }, (w: string) => { rmSync(join(w, 'd2f'), { recursive: true }); writeFileSync(join(w, 'd2f'), 'now a file\n') }, (cwd: string) => expect(readFileSync(join(cwd, 'd2f'), 'utf8')).toBe('now a file\n')],
+    ['a link that becomes a folder', (cwd: string) => symlinkSync('base.txt', join(cwd, 'lk')), (w: string) => { rmSync(join(w, 'lk')); mkdirSync(join(w, 'lk')); writeFileSync(join(w, 'lk', 'x'), 'x\n') }, (cwd: string) => expect(readFileSync(join(cwd, 'lk', 'x'), 'utf8')).toBe('x\n')],
+    ['a folder that becomes a link', (cwd: string) => { mkdirSync(join(cwd, 'dl')); writeFileSync(join(cwd, 'dl', 'y'), 'y\n') }, (w: string) => { rmSync(join(w, 'dl'), { recursive: true }); symlinkSync('base.txt', join(w, 'dl')) }, (cwd: string) => expect(readlinkSync(join(cwd, 'dl'))).toBe('base.txt')]
+  ] as const) {
+    it(`${name}, with files already in Git's form, publishes; the old version stays in its commit and in the copy`, async () => {
+      const f = fixture({ 'core.autocrlf': 'input' }, setup)
+      change(f.workspace)
+      const result = await publish(f, `publish-shape-${count}`)
+      expect(result.state).toBe('completed')
+      check(f.cwd)
+      expect(git(f.cwd, 'status', '--porcelain')).toBe('')
+      expect(git(f.cwd, 'rev-parse', 'HEAD')).toBe(result.publishSha)
+      // Nothing was in other than Git's form, so nothing is named.
+      expect(result.kept).toBeUndefined()
+      expect(result.notice).toBeUndefined()
+      // What was written over is still exactly in the commit the publish moved from, and in the copy kept to remove it.
+      const [ref] = preserved(f.cwd)
+      for (const path of git(f.cwd, 'ls-tree', '-r', '--name-only', f.pre).split('\n').filter((item) => /^(f2d|d2f|lk|dl)/.test(item))) {
+        expect(blob(f.cwd, ref!, path).equals(blob(f.cwd, f.pre, path))).toBe(true)
+      }
+    })
+  }
+
+  it('a link whose target is its blob is held: a retargeted link is published with nothing kept or named', async () => {
+    const f = fixture({ 'core.autocrlf': 'input' }, (cwd) => symlinkSync('base.txt', join(cwd, 'lk')))
+    rmSync(join(f.workspace, 'lk')); symlinkSync('other.txt', join(f.workspace, 'lk'))
+    const result = await publish(f, 'publish-link')
+    expect(result.state).toBe('completed')
+    expect(readlinkSync(join(f.cwd, 'lk'))).toBe('other.txt')
+    expect(result.kept).toBeUndefined()
+    expect(result.notice).toBeUndefined()
+    expect(preserved(f.cwd)).toEqual([])
+  })
+
+  for (const [boundary, when] of [['after the copy is kept', `*" update-ref --no-deref refs/mousse/preserved/"*`], ['as the fast-forward starts', `*" merge --ff-only "*`]] as const) {
+    it(`the published version staged ${boundary} still leaves the file on disk, and the copy restores the old bytes`, async () => {
+      const f = fixture()
+      const original = cleanRaw(f.cwd, 'base.txt', 'base\r\n')
+      writeFileSync(join(f.workspace, 'base.txt'), 'published\n')
+      const published = execFileSync('git', ['hash-object', '--stdin'], { cwd: f.cwd, input: 'published\n', encoding: 'utf8' }).trim()
+      const fired = join(root, `fired-${++count}`)
+      // Restoring that revision into the index only, as `git restore --staged --source` would.
+      const bin = launcher(when, `if [ ! -e '${fired}' ]; then '${realGit}' -C '${f.cwd}' update-index --cacheinfo 100644,${published},base.txt; : > '${fired}'; fi`)
+
+      const result = await withPath(bin, () => publish(f, `publish-staged-${count}`))
+      expect(existsSync(fired)).toBe(true)
+      expect(result.state).toBe('completed')
+      expect(readFileSync(join(f.cwd, 'base.txt')).equals(Buffer.from('published\n'))).toBe(true)
+      expect(result.notWritten).toBeUndefined()
+      expect(git(f.cwd, 'status', '--porcelain')).toBe('')
+      restoreFromNotice(result.notice!, result.kept!.ref, f.cwd, 'base.txt')
+      expect(readFileSync(join(f.cwd, 'base.txt')).equals(original)).toBe(true)
+    })
+  }
+
+  it('a checkout switched to another branch at the same commit after the copy refuses; files and both branches stay', async () => {
+    const f = fixture()
+    const original = cleanRaw(f.cwd, 'base.txt', 'base\r\n')
+    git(f.cwd, 'branch', 'other')
+    writeFileSync(join(f.workspace, 'base.txt'), 'published\n')
+    const bin = launcher(`*" update-ref --no-deref refs/mousse/preserved/"*`, `'${realGit}' -C '${f.cwd}' symbolic-ref HEAD refs/heads/other`)
+
+    await expect(withPath(bin, () => publish(f, 'publish-switched'))).rejects.toThrow(/left it/)
+    expect(readFileSync(join(f.cwd, 'base.txt')).equals(original)).toBe(true)
+    expect(git(f.cwd, 'rev-parse', 'refs/heads/main')).toBe(f.pre)
+    expect(git(f.cwd, 'rev-parse', 'refs/heads/other')).toBe(f.pre)
+    expect(latest(f.owner, 'publish-switched')?.state).toBe('cancelled')
+  })
+
+  it('an ignored file that appears where the publish adds one, after the ignored-file check, refuses with nothing changed', async () => {
+    const f = fixture()
+    const base = cleanRaw(f.cwd, 'base.txt', 'base\r\n')
+    // Ignored in the person's checkout only (the rule ignores itself, so the checkout stays clean).
+    writeFileSync(join(f.cwd, '.gitignore'), 'new.txt\n.gitignore\n')
+    writeFileSync(join(f.workspace, 'new.txt'), 'from the thread\n')
+    writeFileSync(join(f.workspace, 'base.txt'), 'published\n')
+    const mine = Buffer.from('build output\r\n')
+    const bin = launcher(`*" commit-tree "*"Changes from a Mousse thread"*`, `printf 'build output\\r\\n' > '${f.cwd}/new.txt'`)
+
+    await expect(withPath(bin, () => publish(f, 'publish-ignored'))).rejects.toMatchObject({ code: 'keep_copy_refused', message: expect.stringMatching(/^Publish was stopped: new\.txt is not tracked .* Nothing was changed\./) })
+    expect(readFileSync(join(f.cwd, 'new.txt')).equals(mine)).toBe(true)
+    expect(readFileSync(join(f.cwd, 'base.txt')).equals(base)).toBe(true)
+    expect(git(f.cwd, 'rev-parse', 'HEAD')).toBe(f.pre)
+    expect(latest(f.owner, 'publish-ignored')?.state).toBe('cancelled')
+  })
+
+  /** An executable CRLF script the publish changes, and a link that becomes a folder (kept, as it overlaps). */
+  function kindsFixture() {
+    const f = fixture({ 'core.autocrlf': 'input' }, (cwd) => {
+      writeFileSync(join(cwd, 'run.sh'), 'echo run\n'); chmodSync(join(cwd, 'run.sh'), 0o755)
+      symlinkSync('base.txt', join(cwd, 'lk'))
+    })
+    const script = cleanRaw(f.cwd, 'run.sh', 'echo run\r\n')
+    writeFileSync(join(f.workspace, 'run.sh'), 'echo published\n')
+    rmSync(join(f.workspace, 'lk')); mkdirSync(join(f.workspace, 'lk')); writeFileSync(join(f.workspace, 'lk', 'x'), 'x\n')
+    return { ...f, script }
+  }
+  const checkKinds = (cwd: string, script: Buffer): void => {
+    expect(readFileSync(join(cwd, 'run.sh')).equals(script)).toBe(true)
+    expect(statSync(join(cwd, 'run.sh')).mode & 0o777).toBe(0o755)
+  }
+
+  it('recovery names files it cannot put back with commands that make a link a link and keep 755, in sh, bash and zsh', async () => {
+    const f = kindsFixture()
+    await publishCrashingAt(f, `*" merge --ff-only "*`, 'publish-kinds')
+    expect(lstatSync(join(f.cwd, 'run.sh'), { throwIfNoEntry: false })).toBeUndefined()
+    expect(lstatSync(join(f.cwd, 'lk'), { throwIfNoEntry: false })).toBeUndefined()
+    expect(holdingOf(f.owner)).toMatchObject({ files: ['run.sh'], kinds: { 'run.sh': 'executable', lk: 'link' } })
+    // Something new is saved at both paths before recovery.
+    writeFileSync(join(f.cwd, 'run.sh'), 'new\n'); writeFileSync(join(f.cwd, 'lk'), 'new\n')
+
+    const settled = await new PublishService(f.owner).recoverPending(f.workspace, f.cwd)
+    expect(settled).toEqual([{ operationId: 'publish-kinds', state: 'cancelled', notRestored: ['lk', 'run.sh'] }])
+    const reason = (latest(f.owner, 'publish-kinds')!.details as { reason: string }).reason
+    const { ref } = holdingOf(f.owner)
+    for (const shell of ['sh', 'bash', 'zsh']) {
+      rmSync(join(f.cwd, 'run.sh')); rmSync(join(f.cwd, 'lk'))
+      restoreFromNotice(reason, ref, f.cwd, 'run.sh', 'executable', shell)
+      restoreFromNotice(reason, ref, f.cwd, 'lk', 'link', shell)
+      checkKinds(f.cwd, f.script)
+      expect(lstatSync(join(f.cwd, 'lk')).isSymbolicLink()).toBe(true)
+      expect(readlinkSync(join(f.cwd, 'lk'))).toBe('base.txt')
+    }
+  }, 60_000)
+
+  it('a publish that landed before its record: the recovered notice restores an executable as one, in sh, bash and zsh', async () => {
+    const f = kindsFixture()
+    await publishCrashingAt(f, `*" update-ref --no-deref refs/mousse/changes/"*`, 'publish-landed')
+    expect(readFileSync(join(f.cwd, 'run.sh'), 'utf8')).toBe('echo published\n')
+
+    const [settled] = await new PublishService(f.owner).recoverPending(f.workspace, f.cwd)
+    expect(settled).toMatchObject({ state: 'completed', result: { kept: { files: ['run.sh'] } } })
+    const result = (settled as { result: PublishResult }).result
+    for (const shell of ['sh', 'bash', 'zsh']) {
+      restoreFromNotice(result.notice!, result.kept!.ref, f.cwd, 'run.sh', 'executable', shell)
+      checkKinds(f.cwd, f.script)
+    }
+  }, 60_000)
 })

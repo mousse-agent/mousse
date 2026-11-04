@@ -5,9 +5,11 @@ import type { ThreadLeaseHandle } from '../queue/ThreadExecutionLease'
 import { ThreadJournal } from '../data/ThreadJournal'
 import { withGitMutationLocks } from './GitOperationCoordinator'
 import { currentUserRequest, withoutUserRequest, withUserRequest, type UserAction } from '../git/gitPolicy'
-import { git, gitAsync, LISTING, mergeTreesAsync, requireCleanAsync, treeOfAsync, tryGitAsync } from './git'
+import { git, gitAsync, LISTING, mergeTreesAsync, ownGitRunner, requireCleanAsync, treeOfAsync, tryGitAsync } from './git'
 import { convertedPathsAsync, publishedRef, sameTreeAsync, takeSnapshotAsync } from './snapshots'
-import { KeepCopyRefusedError, keptPathsText, listZOver, writeBackKeptFiles, type KeptCopy } from './keptCopies'
+import { KeepCopyRefusedError, keptPathsText, listZOver, modesIn, writeBackKeptFiles, type KeptCopy } from './keptCopies'
+import { createOnlyAsync } from './provenDiscard'
+import type { RestoreKind } from './restoreCommands'
 import { indexAt, namedFew, overwriteKeepingCopy, untrackedInTheWay } from './overwriteKeepingCopy'
 import { ChangeReceiptService } from './ChangeReceiptService'
 import { ThreadActionService } from './ThreadActionService'
@@ -49,19 +51,30 @@ export interface PublishResult {
    * or a filter's form), which the publish wrote over: kept as one copy of the thread's, for its Undo window.
    */
   kept?: PublishKept
-  /** What the result says about `kept`: which files, for how long, and the command that brings each back. */
+  /**
+   * Files the publish should have written that are missing from the primary checkout afterwards, because Git skipped them
+   * (a version staged meanwhile) and Mousse could not create them either. The notice names them.
+   */
+  notWritten?: string[]
+  /** What the result says about `kept` and `notWritten`: which files, for how long, and the command that brings each back. */
   notice?: string
 }
 
 export interface PublishKept { ref: string; files: string[]; windowMs: number }
 
+/** A publish's copy as its notices need it: where it is, the files it names, and what each kept path is. */
+interface PublishCopy extends PublishKept {
+  /** The repository's top folder, which the copy's paths are relative to. */
+  top: string
+  /** What each kept path was (a file, an executable file or a link), so its restore command makes it again. */
+  kinds: Record<string, RestoreKind>
+}
+
 /**
  * What a publish that writes over converted bytes records before it empties any path: its copy, and the kept paths it is
  * about to empty, so recovery after a stop before Git's fast-forward puts them back.
  */
-interface PublishHolding extends PublishKept {
-  /** The repository's top folder, which the copy's paths are relative to. */
-  top: string
+interface PublishHolding extends PublishCopy {
   emptied: string[]
   /** Each kept file's permission bits, as the copy recorded them. */
   permissions: Record<string, number>
@@ -209,8 +222,9 @@ export class PublishService {
       const paths = writeSet.map((item) => item.path)
       const converted = await convertedPathsAsync(top, paths)
       if (converted.length) {
-        const kept = await this.fastForwardKeepingCopy({ top, primaryCheckout, threadWorkspace, operationId, intent, paths, asked })
-        return this.completePublish(primaryCheckout, operationId, prePublishSha, source, publishSha, kept)
+        const written = writeSet.filter((item) => !item.status.startsWith('D')).map((item) => item.path)
+        const done = await this.fastForwardKeepingCopy({ top, primaryCheckout, threadWorkspace, operationId, intent, paths, written, asked })
+        return this.completePublish(primaryCheckout, operationId, prePublishSha, source, publishSha, done.copy, done.notWritten)
       }
       // The branch, the index and the files move together or not at all; a fast-forward refuses before touching anything
       // it cannot update, and never writes over an ignored file.
@@ -250,32 +264,43 @@ export class PublishService {
    * fast-forward does. Before any path is emptied the copy is recorded (`holding`), so recovery can put the files back.
    * When Git fails, every removed file is put back and the publish is cancelled. Returns what was kept, if anything.
    */
-  private async fastForwardKeepingCopy(input: { top: string; primaryCheckout: string; threadWorkspace: string; operationId: string; intent: PublishIntent; paths: string[]; asked: <T>(work: () => T) => T }): Promise<KeptCopy | undefined> {
+  private async fastForwardKeepingCopy(input: { top: string; primaryCheckout: string; threadWorkspace: string; operationId: string; intent: PublishIntent; paths: string[]; written: string[]; asked: <T>(work: () => T) => T }): Promise<{ copy?: PublishCopy; notWritten: string[] }> {
     const { top, primaryCheckout, operationId, intent, paths } = input
     const cancel = (details: Record<string, unknown>): void => { this.journal.append({ operationId, operationType: 'publish', state: 'cancelled', details: { prePublishSha: intent.prePublishSha, targetBranch: intent.targetBranch, ...details } }) }
+    const notTracked = (untracked: readonly string[]): KeepCopyRefusedError => {
+      const one = untracked.length === 1
+      return new KeepCopyRefusedError(`Publish was stopped: ${namedFew(untracked)} ${one ? 'is' : 'are'} not tracked and ${one ? 'stands' : 'stand'} where the publish puts a file in ${primaryCheckout}, and Git's fast-forward refuses to write over ${one ? 'it' : 'them'}. Nothing was changed. Move ${one ? 'it' : 'them'} aside, then publish again.`, untracked)
+    }
+    const copyOf = (kept: KeptCopy, held: ReadonlySet<string>): PublishCopy => ({
+      ref: kept.ref, windowMs: kept.windowMs, top,
+      // Named are the files whose bytes were not Git's form; one kept only because another path Git writes is below or above it is not.
+      files: [...kept.digests.keys()].filter((path) => !held.has(path)).sort(),
+      kinds: Object.fromEntries(kept.kinds)
+    })
+    let done: Awaited<ReturnType<typeof overwriteKeepingCopy>>
     try {
-      const done = await overwriteKeepingCopy({
+      done = await overwriteKeepingCopy({
         owner: this.threadDirectory, top, operationType: 'publish-keep', action: 'Publish', held: 'left',
         round: async () => {
-          const untracked = await untrackedInTheWay(top, intent.publishSha, paths, (await indexAt(top, paths)).modes)
-          if (untracked.length) {
-            const one = untracked.length === 1
-            throw new KeepCopyRefusedError(`Publish was stopped: ${namedFew(untracked)} ${one ? 'is' : 'are'} not tracked and ${one ? 'stands' : 'stand'} where the publish puts a file in ${primaryCheckout}, and Git's fast-forward refuses to write over ${one ? 'it' : 'them'}. Nothing was changed. Move ${one ? 'it' : 'them'} aside, then publish again.`, untracked)
-          }
-          return { target: intent.publishSha, writes: paths }
+          const index = await indexAt(top, paths)
+          const untracked = await untrackedInTheWay(top, intent.publishSha, paths, index.modes)
+          if (untracked.length) throw notTracked(untracked)
+          return { target: intent.publishSha, writes: paths, index }
         },
-        holding: (kept, emptied) => {
-          const files = [...kept.digests.keys()].sort()
+        // An untracked or ignored file that appeared where Git writes after the checks above refuses, as Git would.
+        untracked: notTracked,
+        holding: (kept, emptied, held) => {
           const permissions = Object.fromEntries([...kept.permissions].filter(([path]) => emptied.some((item) => path === item || path.startsWith(`${item}/`))))
-          const holding: PublishHolding = { ref: kept.ref, files, windowMs: kept.windowMs, top, emptied: [...emptied], permissions }
+          const holding: PublishHolding = { ...copyOf(kept, held), emptied: [...emptied], permissions }
           this.journal.append({ operationId, operationType: 'publish', state: 'prepared', expectedPreState: intent, details: { threadWorkspace: input.threadWorkspace, primaryCheckout, holding } })
         },
         // `--no-autostash`: with `merge.autostash` set, Git would stash the emptied paths and apply them again as conflicts.
         run: async (beforeStart) => {
           const moved = await input.asked(() => tryGitAsync(primaryCheckout, ['merge', '--ff-only', '--no-overwrite-ignore', '--no-autostash', intent.publishSha], undefined, {
             beforeStart: () => {
-              // The fast-forward writes what changed from HEAD: only from the commit the copy was worked out from.
-              if (git(primaryCheckout, ['rev-parse', 'HEAD']) !== intent.prePublishSha) throw new FastForwardFailed(`${intent.targetBranch} moved while the publish was being prepared`)
+              // The fast-forward writes what changed from HEAD, on the branch HEAD names: only from the commit and the
+              // branch the copy was worked out for.
+              if (git(primaryCheckout, ['rev-parse', 'HEAD', '--symbolic-full-name', 'HEAD']) !== `${intent.prePublishSha}\nrefs/heads/${intent.targetBranch}`) throw new FastForwardFailed(`${intent.targetBranch} moved, or the checkout left it, while the publish was being prepared`)
               beforeStart()
             }
           }))
@@ -283,7 +308,6 @@ export class PublishService {
         },
         stoppedPartWay: (error, kept, left) => Object.assign(new Error(`Publish could not update ${primaryCheckout}: ${error instanceof Error ? error.message : String(error)}. Git stopped part way, after it wrote over ${left.length === 1 ? left[0] : `${left.length} files`}. ${keptPathsText(kept, left)}`, { cause: error }), { partWay: true })
       })
-      return done?.kept && done.kept.digests.size ? done.kept : undefined
     } catch (error) {
       if (error instanceof KeepCopyRefusedError) { cancel({ error: error.message }); throw error }
       if ((error as { partWay?: boolean }).partWay) { cancel({ error: (error as Error).message, leftFiles: true }); throw error }
@@ -293,9 +317,21 @@ export class PublishService {
       cancel({ error: error.stderr, ...(left ? { leftFiles: true } : {}) })
       throw new Error(`Publish could not update ${primaryCheckout}: ${error.stderr || 'Git refused the update'}. ${left ? 'Some of its files may have been updated; check git status there.' : 'Nothing was changed.'}`, { cause: error })
     }
+    const copy = done?.kept ? copyOf(done.kept, new Set(done.held)) : undefined
+    // Git leaves a path as it is when the index already has the new version there (staged meanwhile): a file Mousse
+    // removed would stay missing. Every path the publish writes must be there; a missing one is created from the publish
+    // commit, only where nothing stands, with Git's conversions.
+    const present = await Promise.all(input.written.map((path) => lstat(join(top, ...path.split('/'))).then(() => true, () => false)))
+    const missing = input.written.filter((_, at) => !present[at])
+    if (!missing.length) return { ...(copy ? { copy } : {}), notWritten: [] }
+    const modes = await modesIn(top, intent.publishSha, missing)
+    const create = missing.filter((path) => modes.has(path) && modes.get(path) !== '160000')
+    const made = await input.asked(() => createOnlyAsync(top, ownGitRunner(top), create, intent.publishSha))
+    const notWritten = [...made.notWritten].filter(([, why]) => why.reason === 'failed').map(([path]) => path).sort()
+    return { ...(copy ? { copy } : {}), notWritten }
   }
 
-  private async completePublish(primaryCheckout: string, operationId: string, prePublishSha: string, sourceSha: string, publishSha: string, kept?: KeptCopy | PublishHolding): Promise<PublishResult> {
+  private async completePublish(primaryCheckout: string, operationId: string, prePublishSha: string, sourceSha: string, publishSha: string, kept?: PublishCopy, notWritten: readonly string[] = []): Promise<PublishResult> {
     const receipts = new ChangeReceiptService(this.threadDirectory)
     const metadata = new ThreadWorkspaceManager(this.threadDirectory).load()
     // The next publish brings in only what the thread changed after these files.
@@ -306,7 +342,7 @@ export class PublishService {
       contributions: [{ baseSha: prePublishSha, resultSha: sourceSha }], externalEffects: [],
       publishedReceiptIds: this.includedReceipts()
     })
-    const result: PublishResult = { operationId, state: 'completed', prePublishSha, publishSha, sourceSha, receiptId: receipt.id, ...(kept ? keptResult(kept) : {}) }
+    const result: PublishResult = { operationId, state: 'completed', prePublishSha, publishSha, sourceSha, receiptId: receipt.id, ...keptResult(kept, notWritten, publishSha, primaryCheckout) }
     this.journal.append({ operationId, operationType: 'publish', state: 'completed', details: result })
     return result
   }
@@ -379,7 +415,7 @@ export class PublishService {
     // A publish interrupted before snapshots was a merge commit that has the reviewed commit as a parent.
     const mergedBefore = !expected.publishSha && Boolean(tip) && tip !== expected.prePublishSha && await contains(expected.sourceSha)
     const landed = receipt?.afterSha && await contains(receipt.afterSha) ? receipt.afterSha : expected.publishSha && await contains(expected.publishSha) ? expected.publishSha : mergedBefore ? tip : undefined
-    if (landed) return { operationId, state: 'completed', result: await this.completePublish(primaryCheckout, operationId, expected.prePublishSha, expected.sourceSha, landed, holding?.files.length ? holding : undefined) }
+    if (landed) return { operationId, state: 'completed', result: await this.completePublish(primaryCheckout, operationId, expected.prePublishSha, expected.sourceSha, landed, holding) }
     if (!tip) {
       // The checkout reads, and the branch is gone: the publish can never land there, so it is closed and later ones go on.
       const readable = await exists(primaryCheckout) && (await tryGitAsync(primaryCheckout, ['rev-parse', '--git-dir'])).ok
@@ -403,19 +439,31 @@ export class PublishService {
   }
 }
 
-/** What a copy is, for a notice: its paths are the files it holds. */
-function noticeCopy(kept: PublishKept & { top: string }): Parameters<typeof keptPathsText>[0] {
-  return { ref: kept.ref, windowMs: kept.windowMs, top: kept.top, digests: new Map(kept.files.map((path) => [path, ''])) }
+/** What a copy is, for a notice: its paths are the files it names, each restored as the kind it was. */
+function noticeCopy(kept: PublishCopy): Parameters<typeof keptPathsText>[0] {
+  const kinds = new Map(Object.entries(kept.kinds ?? {}))
+  return { ref: kept.ref, windowMs: kept.windowMs, top: kept.top, kinds, digests: new Map(kept.files.map((path) => [path, ''])) }
 }
 
-/** The result's `kept` and `notice` for a copy a publish kept: what it wrote over, and how to bring each file back. */
-function keptResult(kept: KeptCopy | PublishHolding): Pick<PublishResult, 'kept' | 'notice'> {
-  const files = 'files' in kept ? kept.files : [...kept.digests.keys()].sort()
-  const notice = 'files' in kept ? noticeCopy(kept) : kept
-  const one = files.length === 1
+/**
+ * The result's `kept`, `notWritten` and `notice`: the files the publish wrote over whose bytes were not Git's form, and
+ * the files it could not write, with how to bring each back.
+ */
+function keptResult(kept: PublishCopy | undefined, notWritten: readonly string[], publishSha: string, checkout: string): Pick<PublishResult, 'kept' | 'notWritten' | 'notice'> {
+  const sentences: string[] = []
+  const files = kept?.files ?? []
+  if (files.length) {
+    sentences.push(`Publish wrote over ${namedFew(files)}, whose bytes on disk were not exactly what Git holds for ${files.length === 1 ? 'it' : 'them'} (line endings, an encoding or a filter's form). ${keptPathsText(noticeCopy(kept!), files)}`)
+  }
+  if (notWritten.length) {
+    const one = notWritten.length === 1
+    const inCopy = notWritten.filter((path) => kept?.kinds[path] !== undefined)
+    sentences.push(`${namedFew(notWritten)} could not be written by the publish, so ${one ? 'it is' : 'they are'} missing from ${checkout}; the published version is in commit ${publishSha}.${inCopy.length ? ` ${keptPathsText({ ...noticeCopy(kept!), digests: new Map(inCopy.map((path) => [path, ''])) }, inCopy)}` : ''}`)
+  }
   return {
-    kept: { ref: kept.ref, files, windowMs: kept.windowMs },
-    notice: `Publish wrote over ${namedFew(files)}, whose bytes on disk were not exactly what Git holds for ${one ? 'it' : 'them'} (line endings, an encoding or a filter's form). ${keptPathsText(notice, files)}`
+    ...(files.length ? { kept: { ref: kept!.ref, files, windowMs: kept!.windowMs } } : {}),
+    ...(notWritten.length ? { notWritten: [...notWritten] } : {}),
+    ...(sentences.length ? { notice: sentences.join(' ') } : {})
   }
 }
 
@@ -426,7 +474,7 @@ function keptResult(kept: KeptCopy | PublishHolding): Pick<PublishResult, 'kept'
  */
 async function putBackHeld(holding: PublishHolding): Promise<string[]> {
   const sha = (await tryGitAsync(holding.top, ['rev-parse', '--verify', '-q', `${holding.ref}^{commit}`])).stdout
-  if (!sha) return holding.files.filter((path) => holding.emptied.some((item) => path === item || path.startsWith(`${item}/`)))
+  if (!sha) return Object.keys(holding.kinds ?? {}).filter((path) => holding.emptied.some((item) => path === item || path.startsWith(`${item}/`))).sort()
   const rows = holding.emptied.length ? (await listZOver(holding.top, ['ls-tree', '-r', '-z', sha], holding.emptied)).map((line) => {
     const tab = line.indexOf('\t')
     const [mode, , id] = line.slice(0, tab).split(' ') as [string, string, string]

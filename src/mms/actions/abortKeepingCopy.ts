@@ -4,7 +4,7 @@ import { join, resolve } from 'node:path'
 import { privateIndexEnv } from '../git/gitEnv'
 import { gitAsync, listZSync, MOUSSE_DIRECTORY, NOT_MOUSSE, tryGitAsync } from './git'
 import { KeepCopyRefusedError, keptPathsText, listZ, listZOver, pendingWrites, type KeptCopy } from './keptCopies'
-import { indexAt, namedFew, OVERWRITE_KEEP_ROUNDS, overwriteKeepingCopy, untrackedInTheWay } from './overwriteKeepingCopy'
+import { indexAt, type IndexAt, namedFew, OVERWRITE_KEEP_ROUNDS, overwriteKeepingCopy, untrackedInTheWay } from './overwriteKeepingCopy'
 
 /**
  * Abort that never loses an edit: the merge, rebase, cherry-pick or revert Git stopped in is given up only after the
@@ -209,9 +209,9 @@ async function unstagedChanges(top: string, paths: readonly string[], flagged: R
  * - every abort refuses to write over a file that is not tracked and not ignored, or a folder holding one, where the
  *   target has a file and the index has none, and a file or link of that kind standing where the target has a folder.
  */
-export async function refusalOf(top: string, kind: AbortKind, target: string, writes: readonly string[]): Promise<{ message: string; paths: string[] } | undefined> {
+export async function refusalOf(top: string, kind: AbortKind, target: string, writes: readonly string[], read?: IndexAt): Promise<{ message: string; paths: string[] } | undefined> {
   if (!writes.length) return undefined
-  const index = await indexAt(top, writes)
+  const index = read ?? await indexAt(top, writes)
   // `reset --merge` checks every stage-0 path it rewrites; `reset --hard` (a rebase) only a flagged entry it changes.
   const changes = kind === 'rebase' && index.flagged.size ? new Set(await listZ(top, ['diff-index', '-z', '--cached', '--name-only', '--no-renames', target, '--', '.', NOT_MOUSSE])) : undefined
   const checked = writes.filter((path) => index.modes.has(path) && !index.unmerged.has(path) && index.modes.get(path) !== '160000' && (!changes || (index.flagged.has(path) && changes.has(path))) && (kind !== 'rebase' || index.flagged.has(path)))
@@ -243,11 +243,12 @@ export async function abortKeepingCopy(input: AbortKeepingCopyInput): Promise<Ke
       // Nothing in progress: Git's abort says so.
       if (!target) return undefined
       const writes = await abortWrites(top, input.kind, target)
-      const refusal = await refusalOf(top, input.kind, target, writes)
+      const index = await indexAt(top, writes)
+      const refusal = await refusalOf(top, input.kind, target, writes, index)
       if (refusal) throw new KeepCopyRefusedError(refusal.message, refusal.paths)
       const rewound = await rewinds(top, input.kind)
       return {
-        target, writes, alongside: await autostashWrites(top, input.kind),
+        target, writes, index, alongside: await autostashWrites(top, input.kind),
         // What Git writes now, read again: a path staged since the copy, or (a rebase's `reset --hard` writes every changed
         // file) a file changed since, that the copy does not cover, is kept again first.
         grown: (listed) => {
