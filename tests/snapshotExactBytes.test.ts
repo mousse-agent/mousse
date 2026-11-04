@@ -3,9 +3,10 @@
  * records an exact tree, so Undo, Redo, a revert, a conversation switch and a rebuild give back the bytes that were on
  * disk, whatever line endings, encoding or attributes Git applies. Every check reads the restored file and compares bytes.
  */
-import { execFileSync } from 'node:child_process'
+import { execFileSync, spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { build } from 'esbuild'
 import { join, resolve } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { ConversationBranchService } from '../src/mms/actions/ConversationBranchService'
@@ -17,7 +18,7 @@ import { ThreadJournal } from '../src/mms/data/ThreadJournal'
 import { listChangedFiles } from '../src/mms/git/reviewDiff'
 import { trustRepositoryPrograms } from '../src/mms/git/repoPrograms'
 import { ThreadWorkspaceManager } from '../src/mms/workspace/ThreadWorkspaceManager'
-import { actionOptions, git, gitFoundationFixture } from './fixtures/gitFoundation'
+import { actionOptions, CRASH_CHILD_REQUIRE, git, gitFoundationFixture } from './fixtures/gitFoundation'
 import { pressed } from './support/userRequest'
 
 let f: ReturnType<typeof gitFoundationFixture>
@@ -327,5 +328,83 @@ describe('snapshots record exact bytes', { timeout: 60_000 }, () => {
     expect(git(cwd, 'rev-parse', 'HEAD^{tree}')).toBe(expected)
     expect(git(cwd, 'rev-list', '--parents', '-n', '1', 'HEAD').split(' ').slice(1)).toEqual([f.baseSha])
     expect(rawBlob('HEAD').toString()).toBe('published\nlines\n')
+  })
+
+  it('an ignored .gitattributes counts: its eol makes the snapshot record exact bytes, and Undo gives the CRLF file back', async () => {
+    writeFileSync(join(cwd, '.git', 'info', 'exclude'), '.gitattributes\n')
+    writeFileSync(join(cwd, '.gitattributes'), 'value.txt text eol=lf\n')
+    const original = Buffer.from('original\r\n')
+    writeFileSync(join(cwd, 'value.txt'), original)
+    const action = await turn('agent\n')
+    await undo()
+    expect(bytes().equals(original)).toBe(true)
+    expect(rawBlob((await exactTreeOfAsync(cwd, action.startSha))!).equals(original)).toBe(true)
+  })
+
+  it('a filter set only by an ignored .gitattributes is left out of the exact tree, so Undo writes the file through its filter', async () => {
+    writeFileSync(join(cwd, '.git', 'info', 'exclude'), '.gitattributes\n')
+    writeFileSync(join(cwd, '.gitattributes'), 'value.txt filter=fake\n')
+    git(cwd, 'config', 'filter.fake.clean', 'sed -e s/^/P:/'); git(cwd, 'config', 'filter.fake.smudge', 'sed -e s/^P://'); trustRepositoryPrograms(cwd)
+    writeFileSync(join(cwd, 'value.txt'), 'media original\n')
+    const action = await turn('media agent\n')
+    expect(git(cwd, 'ls-tree', '--name-only', (await exactTreeOfAsync(cwd, action.startSha))!, '--', 'value.txt')).toBe('')
+    await undo()
+    expect(bytes().toString()).toBe('media original\n')
+  })
+
+  it('the size limit is on the bytes on disk, not the smaller form Git stores (UTF-16)', async () => {
+    commitAttributes('value.txt text working-tree-encoding=UTF-16')
+    EXACT_LIMITS.fileBytes = 24
+    const value = gitsForm('some unicode é text\n')
+    // Git stores 21 bytes of UTF-8; the file on disk is over the limit.
+    expect(value.length).toBeGreaterThan(24)
+    writeFileSync(join(cwd, 'value.txt'), value)
+    const snapshot = await takeSnapshotAsync(cwd, { reason: 'size' })
+    expect(snapshot.coverageGaps).toContainEqual({ path: 'value.txt', reason: "over 24 bytes, so only Git's form of it is kept" })
+    expect(git(cwd, 'ls-tree', '--name-only', snapshot.exactTree!, '--', 'value.txt')).toBe('')
+  })
+
+  it('a worktree started from a snapshot reads the snapshot\'s attributes: an LF file under a committed eol=crlf stays LF', async () => {
+    commitAttributes('*.bat text eol=crlf')
+    writeFileSync(join(cwd, 'run.bat'), 'echo a\r\n'); git(cwd, 'add', 'run.bat'); git(cwd, 'commit', '-qm', 'script')
+    // The agent writes LF; Git stores LF either way, so the snapshot's exact tree is its tree.
+    writeFileSync(join(cwd, 'run.bat'), 'echo b\n')
+    const snapshot = await takeSnapshotAsync(cwd, { reason: 'probe' })
+    expect(snapshot.exactTree).toBe(snapshot.tree)
+    const started = f.child('started', git(cwd, 'rev-parse', 'HEAD'))
+    await pressed('Start', () => moveFilesToSnapshotAsync(started, git(started, 'rev-parse', 'HEAD^{tree}'), snapshot.sha))
+    expect(bytes('run.bat', started).toString()).toBe('echo b\n')
+  })
+
+  it('the first exact build puts its new blobs in one pack on Git 2.37 and later', async () => {
+    git(cwd, 'config', 'core.autocrlf', 'true')
+    for (let index = 0; index < 40; index++) writeFileSync(join(cwd, `file-${index}.txt`), `line ${index}\r\n`)
+    const packs = () => readdirSync(join(cwd, '.git', 'objects', 'pack')).filter((name) => name.endsWith('.pack')).length
+    const before = packs()
+    const snapshot = await takeSnapshotAsync(cwd, { reason: 'first' })
+    expect(packs()).toBe(before + 1)
+    expect(rawBlob(snapshot.exactTree!, 'file-7.txt').toString()).toBe('line 7\r\n')
+  })
+
+  it('on Git older than 2.37 the first exact build writes loose objects, never one pack per file', async () => {
+    git(cwd, 'config', 'core.autocrlf', 'true')
+    for (let index = 0; index < 40; index++) writeFileSync(join(cwd, `file-${index}.txt`), `line ${index}\r\n`)
+    const packs = () => readdirSync(join(cwd, '.git', 'objects', 'pack')).filter((name) => name.endsWith('.pack')).length
+    const before = packs()
+    // A Git that says it is 2.36, in a process of its own so the version is read afresh; every command is logged.
+    const bin = join(f.root, 'old-git'), log = join(f.root, 'old-git.log'), out = join(f.root, 'old-git.json')
+    mkdirSync(bin)
+    const real = execFileSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).trim()
+    writeFileSync(join(bin, 'git'), `#!/bin/sh\nprintf '%s\\n' "$*" >> '${log}'\ncase " $* " in\n  *" version ") echo "git version 2.36.6"; exit 0 ;;\nesac\nexec '${real}' "$@"\n`, { mode: 0o755 })
+    const entry = join(f.root, 'old-git.ts'), bundle = join(f.root, 'old-git.mjs'), project = process.cwd()
+    writeFileSync(entry, `import { writeFileSync } from 'node:fs'; import { takeSnapshotAsync } from '${project}/src/mms/actions/snapshots'; const snapshot = await takeSnapshotAsync(${JSON.stringify(cwd)}, { reason: 'old git' }); writeFileSync(${JSON.stringify(out)}, JSON.stringify(snapshot));`)
+    await build({ entryPoints: [entry], outfile: bundle, bundle: true, platform: 'node', format: 'esm', logLevel: 'silent', banner: { js: CRASH_CHILD_REQUIRE } })
+    const child = spawnSync(process.execPath, [bundle], { env: { ...process.env, MOUSSE_HOME: f.home, PATH: `${bin}:${previousPath}` }, encoding: 'utf8', timeout: 60_000 })
+    expect(child.status, child.stderr).toBe(0)
+    const snapshot = JSON.parse(readFileSync(out, 'utf8')) as { exactTree: string }
+    expect(readFileSync(log, 'utf8')).toContain('update-index -z --add --remove --stdin')
+    expect(readFileSync(log, 'utf8')).not.toContain('bigFileThreshold')
+    expect(packs()).toBe(before)
+    expect(rawBlob(snapshot.exactTree, 'file-7.txt').toString()).toBe('line 7\r\n')
   })
 })

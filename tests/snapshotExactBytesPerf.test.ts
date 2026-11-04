@@ -7,7 +7,10 @@ import { mkdirSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { recordExactTrees, takeSnapshotAsync } from '../src/mms/actions/snapshots'
-import { git, gitFoundationFixture } from './fixtures/gitFoundation'
+import { ThreadActionService } from '../src/mms/actions/ThreadActionService'
+import { UndoService } from '../src/mms/actions/UndoService'
+import { actionOptions, git, gitFoundationFixture } from './fixtures/gitFoundation'
+import { pressed } from './support/userRequest'
 
 const FILES = 20_000
 const path = (index: number) => `packages/module-${String(index % 200).padStart(3, '0')}/src/file-${String(index).padStart(5, '0')}.ts`
@@ -50,7 +53,12 @@ describe.skipIf(!process.env.MOUSSE_SNAPSHOT_PERF)('snapshot time, 20,000 files'
             warm.push(await timed(() => takeSnapshotAsync(worktree, { reason: `warm ${round}` })))
           }
           warm.sort((a, b) => a - b)
-          results.push(`autocrlf=${autocrlf} exact=${exact ? 'on ' : 'off'}: first snapshot ${cold} ms, next (one file changed, median of 3) ${warm[1]} ms`)
+          // A turn that changes one file, then its Undo: two snapshots and the restore.
+          const thread = join(f.root, `thread-${autocrlf}-${exact}`)
+          mkdirSync(thread)
+          await new ThreadActionService(thread).runCheckpointedAction(actionOptions(worktree), () => writeFileSync(join(worktree, path(11)), 'the turn\n'))
+          const undo = await timed(() => pressed('Undo', () => new UndoService(thread).undoLatest('main', worktree)))
+          results.push(`autocrlf=${autocrlf} exact=${exact ? 'on ' : 'off'}: first snapshot ${cold} ms, next (one file changed, median of 3) ${warm[1]} ms, Undo of one file ${undo} ms`)
           expect(cold).toBeGreaterThan(0)
         } finally {
           recordExactTrees(true)
