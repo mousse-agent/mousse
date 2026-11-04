@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import { lstatSync, readdirSync, readFileSync, readlinkSync, rmdirSync, unlinkSync, type BigIntStats, type Stats } from 'node:fs'
-import { access, lstat, readdir, readFile, readlink } from 'node:fs/promises'
+import { access, lstat, open, readdir, readFile, readlink } from 'node:fs/promises'
 import { basename, dirname, join, relative, resolve } from 'node:path'
 import { assertLifecyclePathAsync } from './ResourceLifecycleStore'
 import { lifecycleGitAsync, lifecycleReadAsync } from './lifecycleGit'
@@ -113,6 +113,46 @@ function kindOf(stat: { isSymbolicLink(): boolean; isDirectory(): boolean; isFil
   return stat.isSymbolicLink() ? 'link' : stat.isDirectory() ? 'directory' : stat.isFile() ? 'file' : 'unknown'
 }
 
+/** A file's SHA-256, read in pieces so a large file is never held in memory whole. */
+export async function fileDigestAsync(path: string): Promise<string> {
+  const digest = createHash('sha256')
+  const file = await open(path, 'r')
+  try {
+    const chunk = Buffer.alloc(1024 * 1024)
+    for (let position = 0; ;) {
+      const { bytesRead } = await file.read(chunk, 0, chunk.length, position)
+      if (bytesRead === 0) break
+      digest.update(chunk.subarray(0, bytesRead))
+      position += bytesRead
+    }
+  } finally {
+    await file.close()
+  }
+  return digest.digest('hex')
+}
+
+/**
+ * Reads an entry between two `lstat`s that must agree, so the digest is of the bytes the returned signature describes.
+ * `expected`, when given, is what the entry must still be (kind, mode, size, content); a file with other hard links is
+ * refused then, as one frozen entry of a folder that is removed whole.
+ */
+async function frozenEntryAsync(root: string, rel: string, expected?: ContentEntry, checked?: Set<string>, otherLinks = false): Promise<FrozenEntryProof> {
+  const path = join(root, rel)
+  // Each folder is checked for links once per caller's batch (`checked`); the unlink checks them all again, synchronously.
+  if (!checked?.has(root)) { await assertLifecyclePathAsync(dirname(root), root); checked?.add(root) }
+  if (rel && !checked?.has(dirname(path))) { await assertLifecyclePathAsync(root, dirname(path)); checked?.add(dirname(path)) }
+  const before = await lstat(path, { bigint: true })
+  const kind = kindOf(before)
+  if (kind === 'unknown') throw new Error('Frozen content was replaced before mutation')
+  if (expected && (kind !== expected.kind || Number(before.mode) !== expected.mode || kind !== 'directory' && Number(before.size) !== expected.bytes || kind === 'file' && before.nlink > 1n && !otherLinks)) throw new Error('Frozen content was replaced before mutation')
+  const current = kind === 'link' ? hash(await readlink(path)) : kind === 'file' ? await fileDigestAsync(path) : ''
+  if (expected && current !== expected.digest) throw new Error('Frozen content changed before mutation')
+  const after = await lstat(path, { bigint: true })
+  if (statSignature(after) !== statSignature(before)) throw new Error('Frozen content changed before mutation')
+  const entry = expected ?? { path: rel, kind, digest: current, bytes: kind === 'directory' ? 0 : Number(before.size), mode: Number(before.mode) }
+  return { path, entry, signature: statSignature(before), coarse: coarseTimes(before) }
+}
+
 /**
  * Refuses an entry that is no longer exactly as frozen (kind, mode, size, links, content), reading it without blocking, and
  * returns what the check was made from. The entry is read between two `lstat`s that must agree, so the bytes checked are
@@ -120,18 +160,17 @@ function kindOf(stat: { isSymbolicLink(): boolean; isDirectory(): boolean; isFil
  * nothing awaited in between. A file with other hard links is refused, as one entry of a folder removed whole, unless
  * `otherLinks` allows it: removing one of its names loses no bytes, and a write through any name still changes its `lstat`.
  */
-export async function proveFrozenContentEntryAsync(root: string, entry: ContentEntry, options: { otherLinks?: boolean } = {}): Promise<FrozenEntryProof> {
-  const path = join(root, entry.path)
-  await assertLifecyclePathAsync(dirname(root), root)
-  if (entry.path) await assertLifecyclePathAsync(root, dirname(path))
-  const before = await lstat(path, { bigint: true })
-  const kind = kindOf(before)
-  if (kind !== entry.kind || Number(before.mode) !== entry.mode || kind !== 'directory' && Number(before.size) !== entry.bytes || kind === 'file' && before.nlink > 1n && !options.otherLinks) throw new Error('Frozen content was replaced before mutation')
-  const current = kind === 'link' ? hash(await readlink(path)) : kind === 'file' ? hash(await readFile(path)) : ''
-  if (current !== entry.digest) throw new Error('Frozen content changed before mutation')
-  const after = await lstat(path, { bigint: true })
-  if (statSignature(after) !== statSignature(before)) throw new Error('Frozen content changed before mutation')
-  return { path, entry, signature: statSignature(before), coarse: coarseTimes(before) }
+export function proveFrozenContentEntryAsync(root: string, entry: ContentEntry, options: { otherLinks?: boolean } = {}): Promise<FrozenEntryProof> {
+  return frozenEntryAsync(root, entry.path, entry, undefined, options.otherLinks)
+}
+
+/**
+ * The entry at `rel` as it is now, read the same way: its digest, size and mode go into the proof, for a caller that
+ * decides from them whether its bytes are held elsewhere before it removes the entry. Removing one name of a hard-linked
+ * file loses no bytes, so other links are allowed; any write since still changes the signature.
+ */
+export function readFrozenEntryAsync(root: string, rel: string, checkedFolders?: Set<string>): Promise<FrozenEntryProof> {
+  return frozenEntryAsync(root, rel, undefined, checkedFolders)
 }
 
 /**

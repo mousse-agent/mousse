@@ -1204,12 +1204,15 @@ export class WorktreeRetirementService {
       if (manifest.auxiliary.some((entry) => entry.path === '.mousse/materialized-inputs.exclude')) await lifecycleGitAsync(manifest.worktreePath, ['config', '--worktree', 'core.excludesFile', join(manifest.worktreePath, '.mousse', 'materialized-inputs.exclude')])
       // The uncommitted files come back as the snapshot held them, over the fresh checkout of the HEAD it was taken on;
       // then what the kept copies hold (ignored files, writes found while the folder was being deleted), in order.
-      if (manifest.snapshotTree) await moveFilesAsync(manifest.worktreePath, manifest.treeSha, manifest.snapshotTree)
+      const moved = manifest.snapshotTree ? await moveFilesAsync(manifest.worktreePath, manifest.treeSha, manifest.snapshotTree, undefined, { owner: this.store.require(manifest.taskId).location, action: 'Rebuilding the worktree' }) : {}
       // A later form of a path (another kind, or another spelling on a volume that folds case) clears the earlier one,
       // and only what the rebuild itself wrote is ever cleared.
-      // Only what this rebuild sets aside is reported for it.
-      // What clearing an earlier half-built folder kept is reported with it.
-      if (halfBuiltKept.length) manifest.keptAside = halfBuiltKept; else delete manifest.keptAside
+      // Only what this rebuild sets aside is reported for it: what clearing an earlier half-built folder kept, and what the
+      // move kept exactly (a fresh checkout holds Git's form of every file, so that was written there during the rebuild).
+      const exact = new Map<string, string[]>()
+      for (const file of moved.exact?.files ?? []) exact.set(file.ref, [...exact.get(file.ref) ?? [], file.path])
+      const setAside = [...halfBuiltKept, ...[...exact].map(([ref, paths]) => ({ ref, paths }))]
+      if (setAside.length) manifest.keptAside = setAside; else delete manifest.keptAside
       const rebuild = manifest.keptFiles?.length ? await this.rebuildOf(manifest) : undefined
       for (const layer of manifest.keptFiles ?? []) await this.writeKeptFiles(manifest, layer, rebuild!)
       for (const entry of manifest.content) {

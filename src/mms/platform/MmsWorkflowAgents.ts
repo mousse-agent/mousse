@@ -892,7 +892,7 @@ export class MmsWorkflowAgents {
     const registrationRoot = join(this.root, 'workspaces')
     mkdirSync(registrationRoot, { recursive: true })
     const owned = await provisionOwnedAgentWorkspace({
-      owner: { profileId: this.services.profileId, threads: this.services.threads, projects: this.services.projects },
+      owner: { profileId: this.services.profileId, threads: this.services.threads, projects: this.services.projects, orchestrator: this.services.orchestrator },
       context,
       idempotencyKey,
       registrationRoot,

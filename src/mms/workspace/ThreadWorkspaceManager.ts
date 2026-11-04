@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto'
 import { ResourceLifecycleStore } from '../lifecycle/ResourceLifecycleStore'
 import { WorktreeRetirementService } from '../lifecycle/WorktreeRetirementService'
 import { assertFolderUnchanged, folderSignatureAsync, walkOwnedContentAsync } from '../lifecycle/verifiedDelete'
@@ -10,7 +11,7 @@ import { assertGitAllowedAsync, rethrowGitPolicyError, type UserAction } from '.
 import { safeWorktreeGit } from '../worktree/WorktreeManager'
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { assertHeldThreadLease } from '../actions/GitOperationCoordinator'
-import { moveFilesAsync, snapshotOriginAsync } from '../actions/snapshots'
+import { movedFilesNotice, moveFilesAsync, snapshotOriginAsync } from '../actions/snapshots'
 import { waitForFolderAccess } from '../files/folderAccess'
 import { gitRunError, runGitProcess } from '../git/runGitProcess'
 import { loadSnapshotWorkspaceMetadataAsync } from './SnapshotWorkspace'
@@ -330,12 +331,13 @@ export class ThreadWorkspaceManager {
      *
      * `snapshot`: a workspace snapshot (a fork's source checkpoint) whose files are written into the new worktree
      * after it is made at `startSha`, which is the commit the snapshot was taken on; the snapshot becomes the
-     * thread's latest one, so the first turn starts from it instead of recording it as outside changes.
+     * thread's latest one, so the first turn starts from it instead of recording it as outside changes. `onNotice` gets
+     * what that write kept or left as it is, as a line for the thread.
      *
      * `nameFrom`: the thread's first message. The worktree's branch is named from it once, here, as `mousse/<slug>`
      * (see `threadBranchName`), and never renamed; the name is checked against the repository under its lease.
      */
-    options: { untrusted?: boolean; enableWorktreeConfig?: () => void; userRequested?: UserAction; snapshot?: string; nameFrom?: string } = {}
+    options: { untrusted?: boolean; enableWorktreeConfig?: () => void; userRequested?: UserAction; snapshot?: string; nameFrom?: string; onNotice?: (notice: { id: string; text: string }) => unknown } = {}
   ): Promise<ThreadWorkspaceMetadata> {
     const existing = this.load()
     if (existing?.lifecycle === 'ready') return this.verify(existing)
@@ -400,7 +402,15 @@ export class ThreadWorkspaceManager {
       } satisfies ThreadWorkspaceMetadata)
       if (options.untrusted) await addUntrustedWorktree(repository.primaryCheckoutPath, ['-b', branch, worktreePath, head], worktreePath, options.enableWorktreeConfig, options.userRequested)
       else await git(repository.primaryCheckoutPath, ['worktree', 'add', '-b', branch, worktreePath, head])
-      if (options.snapshot) await moveFilesAsync(worktreePath, await git(worktreePath, ['rev-parse', 'HEAD^{tree}']), await git(worktreePath, ['rev-parse', `${options.snapshot}^{tree}`]))
+      if (options.snapshot) {
+        // A fresh checkout holds Git's form of every file, so nothing is kept here unless something wrote into it meanwhile.
+        const moved = await moveFilesAsync(worktreePath, await git(worktreePath, ['rev-parse', 'HEAD^{tree}']), await git(worktreePath, ['rev-parse', `${options.snapshot}^{tree}`]), undefined, { owner: this.threadDirectory, action: 'Starting the worktree' })
+        const notice = movedFilesNotice(moved)
+        if (notice) {
+          try { await options.onNotice?.({ id: `worktree-start-${randomUUID()}`, text: notice }) } catch (error) { console.warn('worktree start notice could not be delivered', { threadId, error: error instanceof Error ? error.message : String(error) }) }
+          if (!options.onNotice) console.warn('worktree start kept files', { threadId, notice })
+        }
+      }
       await git(repository.primaryCheckoutPath, ['update-ref', '--no-deref', retainedRef, options.snapshot ?? head])
       const metadata: ThreadWorkspaceMetadata = {
         schemaVersion: 1,
@@ -536,7 +546,11 @@ export class ThreadWorkspaceManager {
       // A branch that another worktree has checked out cannot be added again; the commit can.
       if (branch) { try { await add([metadata.worktreePath, branch]) } catch { await add(['--detach', metadata.worktreePath, head]) } }
       else await add(['--detach', metadata.worktreePath, head])
-      await moveFilesAsync(metadata.worktreePath, await git(metadata.worktreePath, ['rev-parse', 'HEAD^{tree}']), await git(metadata.worktreePath, ['rev-parse', `${retained}^{tree}`]))
+      const moved = await moveFilesAsync(metadata.worktreePath, await git(metadata.worktreePath, ['rev-parse', 'HEAD^{tree}']), await git(metadata.worktreePath, ['rev-parse', `${retained}^{tree}`]), undefined, { owner: this.threadDirectory, action: 'Restoring the worktree' })
+      const movedNotice = movedFilesNotice(moved)
+      if (movedNotice) {
+        try { await onNotice?.({ id: `worktree-restore-${randomUUID()}`, text: movedNotice }) } catch (error) { console.warn('restore notice could not be delivered', { threadId: metadata.threadId, error: error instanceof Error ? error.message : String(error) }) }
+      }
       const restored = await this.verify(metadata)
       atomicWriteJsonSync(this.workspacePath, restored)
       this.finishProvisionRecovery(restored)

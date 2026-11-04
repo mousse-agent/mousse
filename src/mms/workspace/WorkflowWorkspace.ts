@@ -9,7 +9,7 @@ import { ChangeReceiptService } from '../actions/ChangeReceiptService'
 import { CodeRevertService } from '../actions/CodeRevertService'
 import { PublishService } from '../actions/PublishService'
 import { ConversationBranchService } from '../actions/ConversationBranchService'
-import { moveFilesAsync, sameTreeAsync, takeSnapshotAsync } from '../actions/snapshots'
+import { movedFilesNotice, moveFilesAsync, sameTreeAsync, takeSnapshotAsync } from '../actions/snapshots'
 import { gitAsync } from '../actions/git'
 import { cancelPendingIntegrations, cancelledIntegrationsNotice } from '../agents/ChildAgentIntegrationService'
 import { buildSubagentResultReportAsync } from '../agents/subagentResultReport'
@@ -789,7 +789,13 @@ async function createAgentWorktree(input: {
       throw new DomainRpcError('unknown_effect', 'Workflow agent branch exists without its owned record')
     } else {
       await git(input.thread.workspacePath, ['worktree', 'add', '-b', identity.branch, identity.path, baseSha])
-      await moveFilesAsync(identity.path, await git(identity.path, ['rev-parse', 'HEAD^{tree}']), threadFiles.tree)
+      // A fresh checkout holds Git's form of every file, so nothing is kept here unless something wrote into it meanwhile.
+      const moved = await moveFilesAsync(identity.path, await git(identity.path, ['rev-parse', 'HEAD^{tree}']), threadFiles.tree, undefined, { owner: input.thread.threadDirectory, action: 'Starting the agent worktree' })
+      const notice = movedFilesNotice(moved)
+      if (notice) {
+        if (input.owner.orchestrator) input.owner.orchestrator.noteThreadNotice(input.context.threadId, notice)
+        else console.warn('agent worktree start kept files', { path: identity.path, notice })
+      }
     }
     await git(input.thread.gitTopLevel, ['update-ref', '--no-deref', retainedRef, threadFiles.sha])
     const cwd = await projectCwd(identity.path, input.thread.projectRelativeSubdirectory)

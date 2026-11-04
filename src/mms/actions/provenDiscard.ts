@@ -199,6 +199,8 @@ export async function removeProvenAsync(input: {
   remove: readonly string[]
   digests: ReadonlyMap<string, string>
   beforeUnlink?: (path: string) => void
+  /** A folder (relative to `top`) that stays even when a removed path leaves it empty: the result still has it. */
+  keepFolder?: (rel: string) => boolean
 }): Promise<{ cleared: string[]; left: LeftAsItIs[]; removed: string[] }> {
   const top = resolve(input.top)
   const writes = new Set(input.restore)
@@ -263,18 +265,25 @@ export async function removeProvenAsync(input: {
     else left.push({ path, reason: 'changed', changed: victim.changed })
   }
   // Like `git clean -d` and `git rm`: a folder a removed path leaves empty goes too.
-  await removeEmptiedFolders(top, cleared.filter((path) => !writes.has(path)))
+  await removeEmptiedFolders(top, cleared.filter((path) => !writes.has(path)), input.keepFolder)
   return { cleared, left, removed: [...victims.values()].flatMap((victim) => victim?.removed ?? []) }
 }
 
-/** Removes the folders above `paths` that are now empty, deepest first; a folder with anything in it stays. */
-async function removeEmptiedFolders(top: string, paths: readonly string[]): Promise<void> {
+/**
+ * Removes the folders above `paths` that are now empty, deepest first; a folder with anything in it stays, and so does
+ * one `keep` names (a folder the result still has: removing it would give it a new identity under any program in it).
+ */
+async function removeEmptiedFolders(top: string, paths: readonly string[], keep?: (rel: string) => boolean): Promise<void> {
   const root = resolve(top)
   const folders = new Set<string>()
   for (const path of paths) {
-    for (let folder = dirname(absolute(root, path)); folder !== root && folder.startsWith(`${root}${sep}`) && !folders.has(folder); folder = dirname(folder)) folders.add(folder)
+    for (let at = path.lastIndexOf('/'); at > 0; at = path.lastIndexOf('/', at - 1)) {
+      const rel = path.slice(0, at)
+      if (folders.has(rel)) break
+      folders.add(rel)
+    }
   }
-  for (const folder of [...folders].sort((a, b) => b.split(sep).length - a.split(sep).length)) await rmdir(folder).catch(() => undefined)
+  for (const rel of [...folders].filter((rel) => !keep?.(rel)).sort((a, b) => b.split('/').length - a.split('/').length)) await rmdir(absolute(root, rel)).catch(() => undefined)
 }
 
 /**
@@ -304,14 +313,19 @@ function under(path: string, folders: ReadonlySet<string>): boolean {
 
 const exists = (top: string, path: string): Promise<boolean> => lstat(absolute(top, path)).then(() => true, () => false)
 
-/** Whether something stands at `path`, or a file or link stands where a folder above it goes. */
-async function standsInTheWay(top: string, path: string): Promise<boolean> {
+/** Whether a file or link stands where a folder above `path` goes (a link to a folder included: Git never writes through one). */
+async function inTheWayAbove(top: string, path: string): Promise<boolean> {
   for (let slash = path.indexOf('/'); slash !== -1; slash = path.indexOf('/', slash + 1)) {
     const stat = await lstat(absolute(top, path.slice(0, slash))).catch(() => undefined)
     if (!stat) return false
     if (!stat.isDirectory()) return true
   }
-  return exists(top, path)
+  return false
+}
+
+/** Whether something stands at `path`, or a file or link stands where a folder above it goes. */
+async function standsInTheWay(top: string, path: string): Promise<boolean> {
+  return await inTheWayAbove(top, path) || exists(top, path)
 }
 
 /** The NUL-separated fields of a listing, exactly as Git wrote them; a failed run throws with Git's message. */
@@ -345,14 +359,19 @@ async function sameEntryBytes(a: string, b: string): Promise<boolean> {
   return x.equals(y)
 }
 
+/** Has Git write HEAD's version of `paths` only where nothing is (see {@link createOnlyAsync}). */
+function writeFromHeadAsync(top: string, discardGit: DiscardGit, paths: readonly string[]): Promise<{ notWritten: Map<string, { reason: 'recreated' | 'failed'; detail?: string }>; entries: Map<string, string> }> {
+  return createOnlyAsync(top, discardGit, paths, 'HEAD')
+}
+
 /**
- * Has Git write HEAD's version of `paths` only where nothing is, from a private index that holds just those entries:
+ * Has Git write `tree`'s version of `paths` only where nothing is, from a private index that holds just those entries:
  * `checkout-index` without `--force` leaves an existing file or folder as it is, and never waits for the real index's
  * lock. A run Git stopped (a folder it could not make) is finished one path at a time, for the paths still empty. Which
  * paths Git wrote is read from the private index afterwards (`diff-files`), never from its messages. Returns the paths
  * it did not write and why.
  */
-async function writeFromHeadAsync(top: string, discardGit: DiscardGit, paths: readonly string[]): Promise<{ notWritten: Map<string, { reason: 'recreated' | 'failed'; detail?: string }>; entries: Map<string, string> }> {
+export async function createOnlyAsync(top: string, discardGit: DiscardGit, paths: readonly string[], tree: string): Promise<{ notWritten: Map<string, { reason: 'recreated' | 'failed'; detail?: string }>; entries: Map<string, string> }> {
   const notWritten = new Map<string, { reason: 'recreated' | 'failed'; detail?: string }>()
   const byPath = new Map<string, string>()
   if (!paths.length) return { notWritten, entries: byPath }
@@ -364,7 +383,7 @@ async function writeFromHeadAsync(top: string, discardGit: DiscardGit, paths: re
     batch.forEach((path, index) => { if (blocked[index]) notWritten.set(path, { reason: 'recreated' }); else asked.push(path) })
   }
   if (!asked.length) return { notWritten, entries: byPath }
-  const heads = await headEntries(discardGit, 'HEAD', asked)
+  const heads = await headEntries(discardGit, tree, asked)
   for (const [path, line] of heads) byPath.set(path, line)
   const gitDir = resolve(top, firstLine((await discardGit(['rev-parse', '--absolute-git-dir'])).stdout))
   const index = join(gitDir, `mousse-discard-${randomUUID()}.index`)
@@ -392,7 +411,9 @@ async function writeFromHeadAsync(top: string, discardGit: DiscardGit, paths: re
     const listed = (await listZ(discardGit, ['diff-files', '-z', '--name-only'], env, undefined, true)).filter((path) => wanted.has(path))
     const there: string[] = []
     for (const path of listed) {
-      if (await exists(top, path)) there.push(path)
+      // A link or file that appeared above it after the check: Git did not write through it, whatever is found there.
+      if (await inTheWayAbove(top, path)) notWritten.set(path, { reason: 'recreated' })
+      else if (await exists(top, path)) there.push(path)
       // Something saved in the way of its folder after the path was emptied, or Git could not write it.
       else if (await standsInTheWay(top, path)) notWritten.set(path, { reason: 'recreated' })
       else notWritten.set(path, { reason: 'failed', detail: errors.get(path) ?? firstLine(ran.stderr) })

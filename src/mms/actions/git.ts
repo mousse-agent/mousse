@@ -171,6 +171,18 @@ export function tryGitStep(cwd: string, args: string[], env?: NodeJS.ProcessEnv,
   return step(() => tryGit(cwd, args, env, options), () => tryGitAsync(cwd, args, env, options))
 }
 
+/**
+ * Mousse's own Git in `top` as the proven write steps run it (`provenDiscard.ts`): the central check, no repository
+ * programs, the exit status, the output exactly as written, and Git's messages.
+ */
+export function ownGitRunner(top: string): DiscardGit {
+  return async (args, options = {}) => {
+    const argv = await guardedAsync(top, args, { ...(options.env ? { env: options.env } : {}), ...(options.input !== undefined ? { stdin: options.input } : {}) })
+    const ran = await runGitProcess(argv, { cwd: top, env: gitEnv(top, options.env), ...(options.input !== undefined ? { input: options.input } : {}), maxBuffer: LISTING_MAX_BUFFER })
+    return { status: ran.error ? null : ran.status, stdout: ran.stdout, stderr: (filterRefusal(ran.stderr.trim()) || ran.stderr) }
+  }
+}
+
 /** How many changed files a message names before it says "and N more". */
 const NAMED_FILES = 5
 const CONFLICT_PAIRS = new Set(['DD', 'AU', 'UD', 'UA', 'DU', 'AA', 'UU'])
@@ -386,11 +398,7 @@ export async function discardPendingChangesAsync<T extends { digests: ReadonlyMa
   const submodule = (path: string): boolean => headModes.has(path) ? headModes.get(path) === '160000' : indexModes.get(path) === '160000'
   const restore = tracked.filter((path) => headModes.has(path) && !submodule(path))
   const remove = [...tracked.filter((path) => !headModes.has(path) && !submodule(path)), ...untracked]
-  const run: DiscardGit = async (args, options = {}) => {
-    const argv = await guardedAsync(top, args, { ...(options.env ? { env: options.env } : {}), ...(options.input !== undefined ? { stdin: options.input } : {}) })
-    const ran = await runGitProcess(argv, { cwd: top, env: gitEnv(top, options.env), ...(options.input !== undefined ? { input: options.input } : {}), maxBuffer: LISTING_MAX_BUFFER })
-    return { status: ran.error ? null : ran.status, stdout: ran.stdout, stderr: (filterRefusal(ran.stderr.trim()) || ran.stderr) }
-  }
+  const run = ownGitRunner(top)
   // Another Git command holding the index refuses the discard before anything is kept or removed.
   await waitForIndexAsync(top, run)
   const kept = await keep(top, { paths: [...tracked, ...untracked], writes: restore })
