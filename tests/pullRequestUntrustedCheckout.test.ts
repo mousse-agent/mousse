@@ -13,6 +13,8 @@ import { ThreadWorkspaceManager } from '../src/mms/workspace/ThreadWorkspaceMana
 import type { PullRequestDetail } from '../src/shared/pullRequests'
 import { git, gitFoundationFixture } from './fixtures/gitFoundation'
 import { clearGitPolicyLog, gitPolicyLog, userAction } from '../src/mms/git/gitPolicy'
+import { installGitRemoveGuard } from './fixtures/gitRemoveGuard'
+import { threadPreservedIndex } from '../src/mms/actions/preservedFiles'
 
 /** A config value, or '' when it is not set. */
 const configOf = (cwd: string, key: string): string => { try { return git(cwd, 'config', '--get', key) } catch { return '' } }
@@ -299,6 +301,78 @@ describe('a pull request that tries to run code', () => {
     await settle()
     expect(requests).toEqual([])
   }, 120_000)
+
+  it('a start that fails after its worktree was made deletes it against a proof, runs no driver, and keeps nothing', async () => {
+    // A checkout Git converts (CRLF line endings) beside files under the pull request's filter drivers.
+    authorGit('rm', '-q', '--cached', '.gitattributes')
+    writeFileSync(join(author, '.gitattributes'), '*.dat filter=evil\n*.bin filter=lfsx\n*.prc filter=proc\n*.txt text eol=crlf\n')
+    authorGit('add', '-A')
+    authorGit('commit', '-qm', 'crlf text')
+    authorGit('push', '-q', '--force', 'origin', 'HEAD:refs/pull/7/head')
+    prSha = authorGit('rev-parse', 'HEAD')
+    const guard = installGitRemoveGuard()
+    const trash = vi.fn(async () => ({}))
+    let checkout: Buffer | undefined
+    let worktreePath = ''
+    try {
+      const failing = new PullRequestThreadService({
+        codeHost: host, projects: mms.projects, threads: mms.threads, trashThread: trash, send: async () => {},
+        prepareThread: (thread) => {
+          worktreePath = workspaceOf(thread.id).worktreePath
+          checkout = readFileSync(join(worktreePath, 'value.txt'))
+          throw new Error('model store unavailable')
+        }
+      })
+      const threadsBefore = mms.threads.listAllThreads().length
+      await expect(failing.startThread({ projectId, reference: '7', allowWorktreeConfig: true }, START)).rejects.toMatchObject({ code: 'pull_request_workspace_failed' })
+      expect(checkout).toEqual(Buffer.from('pull request value\r\n'))
+      // No driver ran, for the checkout or for its cleanup.
+      expect(marked()).toEqual([])
+      await settle()
+      expect(requests).toEqual([])
+      // Its files were all held by the pull request's commit, so nothing is kept: no copy, no branch, no ref of Mousse's.
+      expect(existsSync(worktreePath)).toBe(false)
+      expect(mms.threads.listAllThreads()).toHaveLength(threadsBefore)
+      expect(trash).not.toHaveBeenCalled()
+      expect(git(f.repo, 'worktree', 'list', '--porcelain').split('\n').filter((line) => line.startsWith('worktree '))).toHaveLength(1)
+      expect(git(f.repo, 'for-each-ref', '--format=%(refname)', 'refs/heads/mousse', 'refs/mousse')).toBe('')
+      // Git only unregistered a folder that was already gone.
+      guard.assertNoRemoveOfExisting()
+      expect(guard.removes().flatMap((call) => call.args)).not.toContain('--force')
+      expect(guard.removes().map((call) => call.path)).toContain(worktreePath)
+    } finally { guard.restore() }
+  }, 90_000)
+
+  it('a failed start whose worktree holds a file no commit has keeps a copy, owned by the thread, and trashes the thread', async () => {
+    const guard = installGitRemoveGuard()
+    const trash = vi.fn(async () => ({}))
+    const unique = Buffer.from('written into the new worktree\r\n')
+    let threadId = ''
+    try {
+      const failing = new PullRequestThreadService({
+        codeHost: host, projects: mms.projects, threads: mms.threads, trashThread: trash, send: async () => {},
+        prepareThread: (thread) => {
+          threadId = thread.id
+          // Ignored, so it is no uncommitted change: cleanup goes ahead, and keeps a copy of it.
+          writeFileSync(join(workspaceOf(thread.id).worktreePath, 'untracked-notes.txt'), unique)
+          throw new Error('model store unavailable')
+        }
+      })
+      git(f.repo, 'config', 'core.excludesFile', join(f.root, 'excludes'))
+      writeFileSync(join(f.root, 'excludes'), 'untracked-notes.txt\n')
+      await expect(failing.startThread({ projectId, reference: '7', allowWorktreeConfig: true }, START)).rejects.toMatchObject({ code: 'pull_request_workspace_failed' })
+      expect(marked()).toEqual([])
+      expect(trash).toHaveBeenCalledWith(threadId)
+      const kept = git(f.repo, 'for-each-ref', '--format=%(refname)', 'refs/mousse/preserved/').split('\n').filter(Boolean)
+      const copy = kept.find((ref) => { try { git(f.repo, 'cat-file', '-e', `${ref}:untracked-notes.txt`); return true } catch { return false } })!
+      const restored = join(f.root, 'restored-notes.txt')
+      writeFileSync(restored, execFileSync('git', ['cat-file', 'blob', `${copy}:untracked-notes.txt`], { cwd: f.repo }))
+      expect(readFileSync(restored)).toEqual(unique)
+      // Its owner is the thread, which the trash keeps for its window.
+      expect(threadPreservedIndex(mms.threads.getThreadDir(threadId)).owns(copy)).toBe(true)
+      guard.assertNoRemoveOfExisting()
+    } finally { guard.restore() }
+  }, 90_000)
 
   it('refuses, and leaves nothing, when a filter driver is configured for the repository itself', async () => {
     git(f.repo, 'config', 'filter.evil.smudge', 'sh tools/smudge.sh')

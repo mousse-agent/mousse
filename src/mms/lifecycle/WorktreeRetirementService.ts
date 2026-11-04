@@ -25,12 +25,15 @@ import { repoProgramEnv, withoutRepoProgramsAsync } from '../git/repoPrograms'
 import { gitRunError, LISTING_MAX_BUFFER, runGitProcess } from '../git/runGitProcess'
 import { renameFolderAsync } from './renameFolder'
 import { isIdNamedMousseBranch, isMousseBranchName } from '../../shared/mousseBranches'
-import { adminDigest, HEAD_REFLOG, readAdminFilesAsync, replayedAdminFile, storeAdmin, uncontainedTips, type StoredAdmin } from './worktreeAdminData'
-import { keepCopy, keptCopyWindowMs } from '../actions/keptCopies'
+import { adminDigest, adminObjectIds, blobId, HEAD_REFLOG, readAdminFilesAsync, replayedAdminFile, storeAdmin, storeAdminBeforeRemoval, uncontainedTips, type StoredAdmin } from './worktreeAdminData'
+import { keepCopy, keepExistingCommit, keptCopyWindowMs } from '../actions/keptCopies'
+import { threadPreservedIndex } from '../actions/preservedFiles'
+import { CLEANUP_ROUNDS } from '../worktree/verifiedCleanup'
+import { withDrivers } from '../git/gitEnv'
 import { restoreCommands, restoreShell, type RestoreKind, type RestoreShell } from '../actions/restoreCommands'
 import { retentionWindowText } from '../../shared/undoRetention'
 import { gitSucceeds, lifecycleGitAsync, lifecycleReadAsync, readDirectLifecycleRefAsync } from './lifecycleGit'
-import { assertFolderUnchanged, assertFoldersUnchanged, caseInsensitiveAt, deleteVerifiedAsync, FolderChanged, folderSignatureAsync, identityOf, lockedText, lstatAll, recordFoldersAboveAsync, sameEntry, samePath, statOrThrow, unregisterDeletedAsync, walkOwnedContentAsync, worktreeLockAsync, worktreeRegisteredAsync, type ContentEntry, type FolderSignature, type HeldCheck, type LateWrites } from './verifiedDelete'
+import { assertFolderUnchanged, assertFoldersUnchanged, caseInsensitiveAt, deleteVerifiedAsync, FolderChanged, folderSignatureAsync, identityOf, lockedText, lstatAll, recordFoldersAboveAsync, sameEntry, samePath, statOrThrow, unregisterDeletedAsync, walkOwnedContentAsync, worktreeLockAsync, worktreeRegisteredAsync, type ContentEntry, type DeletePlace, type FolderSignature, type HeldCheck, type LateWrites } from './verifiedDelete'
 
 /** The lifecycle Git helpers, also reachable from here for existing callers. */
 export { lifecycleGitAsync, lifecycleReadAsync, readDirectLifecycleRefAsync } from './lifecycleGit'
@@ -179,6 +182,59 @@ interface ExpireOptions {
   /** Folders of what is left that a restore made writable (`makeRemnantWritable`), by path: their mode before and after. */
   madeWritable?: ReadonlyMap<string, { from: number; to: number }>
 }
+/** Test seams of a rebuild clearing what an earlier rebuild left (`clearHalfBuilt`). */
+export interface RebuildSeams {
+  /** Runs right after `rebuilding.clearing` is recorded, before the folder is renamed. */
+  afterRecord?: (deletingPath: string) => void
+  /** Runs right after the folder was renamed to its `.deleting-` name. */
+  afterRename?: (deletingPath: string) => void
+  /** Runs right before each entry of the renamed folder is removed, after its last check. */
+  beforeRemove?: (path: string) => void
+}
+/** A kept copy a rebuild set aside, as `keptAside` lists it. */
+type SetAside = { ref: string; paths: string[]; kinds?: Record<string, RestoreKind> }
+/**
+ * A rebuild clearing what an earlier rebuild left at the worktree's path (`rebuilding.clearing`), recorded before the
+ * folder moves. The folder is renamed to `deletingPath` and deleted against `proof`, as the trash expiry deletes.
+ */
+export interface HalfBuiltClearing {
+  /** Where the folder is renamed to: `.deleting-<16 hex digits>` beside the worktree's own path. */
+  deletingPath: string
+  /** The folder's device and inode, which a rename keeps: what the folder at `deletingPath` must still be. */
+  identity: string
+  /** Its `.git` file as it was: written back when a write lands after it went, so Git can keep a copy of that write. */
+  gitFile: string
+  /** HEAD and Git's own data of it as captured, to tell whether they changed before `.git` goes. */
+  adminState: string
+  startedAt: string
+  /**
+   * Every entry of the folder, `.git` left out, as captured: each file and link is either exactly what `content` names
+   * (the pins hold it) or has the digest its kept copy read. Late writes join it.
+   */
+  proof: ContentEntry[]
+  /**
+   * The kept copies, owned by the thread's journal: of the files no pin holds (`paths`), with each version the index
+   * stages, and of Git's own data of the folder (`admin`), when it holds what the pins do not.
+   */
+  copies: Array<SetAside & { sha: string; admin?: true }>
+  /** When a write was last found in it while it was being deleted. */
+  changedAt?: string
+}
+/**
+ * A folder renamed to its `.deleting-` name and deleted against its proof (`deleteRenamed`): the trash expiry's, whose
+ * record is `deleting` and proof `content`, or a rebuild's clear of an earlier rebuild's folder (`clearing`, which is
+ * both its record and its proof).
+ */
+interface RenamedFolder {
+  root: string
+  /** The folder no removal may leave. */
+  top: string
+  proof: readonly ContentEntry[]
+  /** HEAD and Git's own data as captured, and when a write was last found in the folder. */
+  record: { adminState: string; changedAt?: string }
+  place: DeletePlace
+  clearing?: HalfBuiltClearing
+}
 class TrashRecordChanged extends Error {
   constructor() { super('Its record changed while it was being deleted; it is looked at again on the next run') }
 }
@@ -256,9 +312,10 @@ export interface WorktreeReconstructionManifest {
   /**
    * Set right before a rebuild makes the worktree, and cleared only once it is complete and checked. While it is set,
    * what is at the worktree's path is never taken for the worktree: the next use keeps whatever in it differs from the
-   * proof (`clearHalfBuilt`), removes it, and rebuilds.
+   * proof, deletes it against a proof (`clearHalfBuilt`, recorded in `clearing` while it runs), and rebuilds.
+   * `setAside`: the copies clearing kept, reported with what the rebuild that finishes sets aside (`keptAside`).
    */
-  rebuilding?: { startedAt: string }
+  rebuilding?: { startedAt: string; clearing?: HalfBuiltClearing; setAside?: SetAside[] }
   /**
    * Set with state `deleting`: the trash expiry renamed the folder to `path` (a `.deleting-<hex>` sibling in the trash)
    * and is deleting it entry by entry against `content`, the proof the capture recorded. `adminState` is the HEAD and
@@ -277,6 +334,12 @@ export interface WorktreeReconstructionManifest {
 const realpathLikeSync = promisify(realpathCallback)
 /** `existsSync`, without blocking. */
 const exists = (path: string): Promise<boolean> => access(path).then(() => true, () => false)
+/** Whether anything is at `path`, a link not followed. */
+const present = (path: string): Promise<boolean> => lstat(path).then(() => true, () => false)
+/** A rebuild refused because clearing what an earlier rebuild left stopped: why, with the folder named. */
+function rebuildWaits(why: string): Error {
+  return new Error(`The rebuild waits: ${why.replace(/[.]$/, '')}.`)
+}
 /** The latest change time of anything in a folder, links not followed; `Infinity` when it is too large to tell. Never blocks. */
 async function newestChange(root: string): Promise<number> {
   let newest = 0, seen = 0
@@ -375,6 +438,13 @@ export class WorktreeRetirementService {
     if (value.keptFiles !== undefined && (!Array.isArray(value.keptFiles) || !value.keptFiles.every((layer) => (layer?.sha === undefined ? Array.isArray(layer?.paths) && layer.paths.length === 0 : typeof layer.sha === 'string' && /^[a-f0-9]{40,64}$/.test(layer.sha) && value.keptRefs?.includes(`${prefix}/kept/${layer.sha}`)) && Array.isArray(layer.paths) && layer.paths.every(relativePath) && (layer.folders === undefined || Array.isArray(layer.folders) && layer.folders.every(relativePath))))) throw new Error('Malformed workspace kept files')
     if (value.keptAside !== undefined && (!Array.isArray(value.keptAside) || !value.keptAside.every((entry) => typeof entry?.ref === 'string' && entry.ref.startsWith('refs/mousse/preserved/') && Array.isArray(entry.paths) && entry.paths.every(relativePath)))) throw new Error('Malformed workspace kept files')
     if (value.rebuilding !== undefined && (typeof value.rebuilding !== 'object' || typeof value.rebuilding?.startedAt !== 'string')) throw new Error('Malformed workspace rebuild record')
+    const keptEntry = (entry: SetAside | undefined): boolean => typeof entry?.ref === 'string' && entry.ref.startsWith('refs/mousse/preserved/') && Array.isArray(entry.paths) && entry.paths.every(relativePath)
+    const setAside = value.rebuilding?.setAside, clearing = value.rebuilding?.clearing
+    if (setAside !== undefined && (!Array.isArray(setAside) || !setAside.every(keptEntry))) throw new Error('Malformed workspace rebuild record')
+    if (clearing !== undefined && (typeof clearing !== 'object' || typeof clearing.deletingPath !== 'string' || !samePath(dirname(clearing.deletingPath), dirname(value.worktreePath)) || !/^\.deleting-[a-f0-9]{16}$/.test(basename(clearing.deletingPath))
+      || typeof clearing.identity !== 'string' || typeof clearing.gitFile !== 'string' || !clearing.gitFile.startsWith('gitdir:') || typeof clearing.adminState !== 'string' || typeof clearing.startedAt !== 'string'
+      || !Array.isArray(clearing.proof) || !clearing.proof.every((entry) => typeof entry?.path === 'string' && (entry.path === '' || relativePath(entry.path)) && ['file', 'directory', 'link'].includes(entry.kind))
+      || !Array.isArray(clearing.copies) || !clearing.copies.every((copy) => keptEntry(copy) && /^[a-f0-9]{40,64}$/.test(copy.sha)) || clearing.changedAt !== undefined && typeof clearing.changedAt !== 'string')) throw new Error('Malformed workspace rebuild record')
     if (value.keptRefs !== undefined && (!Array.isArray(value.keptRefs) || !value.keptRefs.every((ref) => typeof ref === 'string' && ref.startsWith(`${prefix}/kept/`)))) throw new Error('Malformed workspace kept pins')
     if (value.adminRef !== undefined && (value.adminRef !== `${prefix}/admin` || ![value.adminTree, value.adminCommit].every((sha) => typeof sha === 'string' && /^[a-f0-9]{40,64}$/.test(sha)))) throw new Error('Malformed workspace Git data pin')
     if (value.deletedBranches !== undefined && (!Array.isArray(value.deletedBranches) || !value.deletedBranches.every((entry) => isMousseBranchName(entry?.name) && /^[a-f0-9]{40,64}$/.test(entry?.sha)))) throw new Error('Malformed workspace branch record')
@@ -684,7 +754,7 @@ export class WorktreeRetirementService {
         manifest.state = 'trashed'; delete manifest.deleting; this.saveTrashed(manifestPath, manifest, record)
         return { kept: 'Waiting in the trash', waiting: true }
       }
-      return await this.unregisterDeleted(manifestPath, manifest, record)
+      return await this.unregisterTrashed(manifestPath, manifest, record)
     }
     const now = options.now ?? Date.now()
     if (patient && deleting.changedAt && now - Date.parse(deleting.changedAt) < WORKTREE_TRASH_QUIET_MS) return { kept: 'Files in it changed while it was being deleted; what is left is deleted once nothing has changed in it for an hour', waiting: true }
@@ -692,23 +762,29 @@ export class WorktreeRetirementService {
     const locked = await worktreeLockAsync(manifest.commonDir, trashPath)
     if (locked !== undefined) return { kept: lockedText(locked, trashPath) }
     await this.verifyPins(manifest)
-    const stopped = await this.deleteRenamed(manifestPath, manifest, record, options)
+    const stopped = await this.deleteRenamed(manifestPath, manifest, record, this.trashFolder(manifest), options)
     if (stopped) return stopped
-    return await this.unregisterDeleted(manifestPath, manifest, record)
+    return await this.unregisterTrashed(manifestPath, manifest, record)
+  }
+  /** The trash expiry's renamed folder: deleted against `content`, recorded in `deleting`, from the trash down. */
+  private trashFolder(manifest: WorktreeReconstructionManifest): RenamedFolder {
+    const root = manifest.deleting!.path
+    return { root, top: trashRootOf(root, this.store.profileHome), proof: manifest.content, record: manifest.deleting!, place: 'trash' }
   }
   /**
-   * Deletes the renamed folder against the proof (`content`), as `deleteVerifiedAsync` describes, from the trash down.
+   * Deletes a renamed folder against its proof, as `deleteVerifiedAsync` describes, never leaving `folder.top`: the trash
+   * expiry's (`content`, recorded in `deleting`) or a rebuild's clear of what an earlier rebuild left (`rebuilding.clearing`).
    * Before each removal the repository lease must still be held, and before the first the record must still be the one
-   * this pass read. A write found meanwhile is kept with the worktree's other files (`keepLateWrites`) and the delete
-   * stops; Git's own data is captured again when it changed (`recaptureAdmin`).
+   * this pass read. A write found meanwhile is kept (`keepLateWrites`) and the delete stops; Git's own data is captured
+   * again when it changed.
    * Returns why it stopped, or undefined when the folder is gone.
    */
-  private deleteRenamed(manifestPath: string, manifest: WorktreeReconstructionManifest, record: { text: string }, options: ExpireOptions): Promise<{ kept: string; waiting?: true; readOnly?: true } | undefined> {
-    const root = manifest.deleting!.path
+  private deleteRenamed(manifestPath: string, manifest: WorktreeReconstructionManifest, record: { text: string }, folder: RenamedFolder, options: Pick<ExpireOptions, 'now' | 'madeWritable' | 'beforeRemove'>): Promise<{ kept: string; waiting?: true; readOnly?: true } | undefined> {
     return deleteVerifiedAsync({
-      root,
-      top: trashRootOf(root, this.store.profileHome),
-      proof: manifest.content,
+      root: folder.root,
+      top: folder.top,
+      proof: folder.proof,
+      place: folder.place,
       now: options.now,
       madeWritable: options.madeWritable,
       beforeRemove: options.beforeRemove,
@@ -721,44 +797,58 @@ export class WorktreeRetirementService {
           })
         },
         held: this.heldCheck(manifest),
-        recaptureAdmin: async (folder) => {
-          if (await this.adminStateAt(folder, manifest.commonDir) !== manifest.deleting!.adminState) await this.recaptureAdmin(manifestPath, manifest, record, folder)
+        recaptureAdmin: async (at) => {
+          if (await this.adminStateAt(at, manifest.commonDir) === folder.record.adminState) return
+          if (folder.clearing) await this.recaptureHalfBuiltAdmin(manifestPath, manifest, record, folder.clearing, at)
+          else await this.recaptureAdmin(manifestPath, manifest, record, at)
         },
-        keepLate: (late) => this.keepLateWrites(manifest, late),
+        keepLate: (late) => this.keepLateWrites(manifest, late, folder.clearing),
         save: ({ changedAt, content }) => {
-          if (content) manifest.content = content
-          manifest.deleting!.changedAt = changedAt; this.saveTrashed(manifestPath, manifest, record)
+          if (content && folder.clearing) folder.clearing.proof = content
+          else if (content) manifest.content = content
+          folder.record.changedAt = changedAt; this.saveTrashed(manifestPath, manifest, record)
         }
       }
     })
   }
   /**
-   * Writes found in the folder while it was being deleted: the files are kept in a kept copy, checked against what was
-   * found and pinned under `<prefix>/kept/<sha>`, and listed in `keptFiles` with the folders that appeared with them,
-   * so a rebuild writes them over the earlier versions. Recorded by the caller's next save.
+   * Writes found in a folder while it was being deleted, kept in a kept copy checked against what was found. For the
+   * trash expiry (no `clearing`) the copy is pinned under `<prefix>/kept/<sha>` and listed in `keptFiles` with the folders
+   * that appeared with it, so a rebuild writes them over the earlier versions. For a rebuild's clear it joins the clear's
+   * copies, which the thread is told about (`keptAside`): nothing of a half-built folder is rebuilt. Recorded by the
+   * caller's next save.
    */
-  private async keepLateWrites(manifest: WorktreeReconstructionManifest, late: LateWrites): Promise<{ kept: string } | undefined> {
+  private async keepLateWrites(manifest: WorktreeReconstructionManifest, late: LateWrites, clearing?: HalfBuiltClearing): Promise<{ kept: string } | undefined> {
     const { root, files, folders } = late
+    if (clearing) {
+      if (!files.length) return undefined
+      const copy = await this.keepFiles(root, manifest, files, late.entries, late.gone, clearing)
+      if ('kept' in copy) return copy
+      clearing.copies.push({ ref: copy.ref, sha: copy.sha, paths: files, ...copy.kinds })
+      return undefined
+    }
     if (files.length) {
       const copy = await this.keepFiles(root, manifest, files, late.entries, late.gone)
       if ('kept' in copy) return copy
-      await this.pinKept(root, manifest, copy.sha!)
-      manifest.keptFiles = [...(manifest.keptFiles ?? []), { ...copy, ...(folders.length ? { folders } : {}) }]
+      await this.pinKept(root, manifest, copy.sha)
+      manifest.keptFiles = [...(manifest.keptFiles ?? []), { sha: copy.sha, paths: copy.paths, ...(folders.length ? { folders } : {}) }]
     } else if (folders.length) manifest.keptFiles = [...(manifest.keptFiles ?? []), { paths: [], folders }]
     return undefined
   }
-  /** The folder is gone: Git's registration of it at its trash path goes, with Git's own data of it, which is kept. */
-  private unregisterDeleted(manifestPath: string, manifest: WorktreeReconstructionManifest, record: { text: string }): Promise<{ removed: true } | { kept: string }> {
-    return unregisterDeletedAsync({
-      commonDir: manifest.commonDir,
-      path: manifest.trashPath!,
-      held: this.heldCheck(manifest),
-      unregistered: async () => {
-        manifest.state = 'retired'; delete manifest.trashPath; delete manifest.trashedAt; delete manifest.deleting
-        this.saveTrashed(manifestPath, manifest, record)
-        await this.releaseBranches(manifest); this.saveTrashed(manifestPath, manifest, record)
-      }
+  /** The folder at the trash path is gone: Git's registration of it there goes, with Git's own data of it, which is kept. */
+  private unregisterTrashed(manifestPath: string, manifest: WorktreeReconstructionManifest, record: { text: string }): Promise<{ removed: true } | { kept: string }> {
+    return this.unregisterDeleted(manifest, manifest.trashPath!, 'trash', async () => {
+      manifest.state = 'retired'; delete manifest.trashPath; delete manifest.trashedAt; delete manifest.deleting
+      this.saveTrashed(manifestPath, manifest, record)
+      await this.releaseBranches(manifest); this.saveTrashed(manifestPath, manifest, record)
     })
+  }
+  /**
+   * The folder registered at `path` is gone: Git's registration of it goes (`unregisterDeletedAsync`, under the
+   * repository lease), and `unregistered` records that. A folder at `path` again stops it, and is kept.
+   */
+  private unregisterDeleted(manifest: WorktreeReconstructionManifest, path: string, place: DeletePlace, unregistered: () => Promise<void>): Promise<{ removed: true } | { kept: string }> {
+    return unregisterDeletedAsync({ commonDir: manifest.commonDir, path, place, held: this.heldCheck(manifest), unregistered })
   }
   /** The repository lease, read without blocking, and a synchronous check that it is still the one held (see `HeldCheck`). */
   private heldCheck(manifest: WorktreeReconstructionManifest): HeldCheck {
@@ -799,13 +889,14 @@ export class WorktreeRetirementService {
    * uses, with its byte cap) and checks that what the copy read of each is the bytes `proof` names: a file written between
    * the two reads differs, and keeps the folder. `gone` are paths no longer there, left out of the copy. Writes no pin.
    */
-  private async keepFiles(top: string, manifest: WorktreeReconstructionManifest, paths: string[], proof: readonly ContentEntry[], gone: readonly string[] = []): Promise<{ sha: string; paths: string[] } | { kept: string }> {
+  private async keepFiles(top: string, manifest: WorktreeReconstructionManifest, paths: string[], proof: readonly ContentEntry[], gone: readonly string[] = [], clearing?: HalfBuiltClearing): Promise<{ ref: string; sha: string; paths: string[]; kinds: { kinds?: Record<string, RestoreKind> } } | { kept: string }> {
+    const where = clearing ? `What an earlier rebuild left is kept at ${top}` : `Kept in the trash at ${top}`
     let copy: Awaited<ReturnType<typeof keepCopy>>
-    try { copy = await keepCopy({ owner: this.store.require(manifest.taskId).location, top, operationType: 'worktree-cleanup', action: 'Deleting it from the trash', paths, ...(gone.length ? { gone } : {}) }) }
-    catch (error) { return { kept: `Kept in the trash at ${top}: ${(error as Error).message.split(/\r?\n/)[0]}` } }
+    try { copy = await keepCopy({ owner: this.store.require(manifest.taskId).location, top, operationType: 'worktree-cleanup', action: clearing ? 'Rebuilding the worktree' : 'Deleting it from the trash', paths, ...(gone.length ? { gone } : {}) }) }
+    catch (error) { return { kept: `${where}: ${(error as Error).message.split(/\r?\n/)[0]}` } }
     const expected = new Map(proof.map((entry) => [entry.path, entry]))
-    for (const path of paths) if (copy.digests.get(path) !== expected.get(path)?.digest) return { kept: `Kept in the trash at ${top}: ${path} changed while its copy was being kept` }
-    return { sha: copy.sha, paths }
+    for (const path of paths) if (copy.digests.get(path) !== expected.get(path)?.digest) return { kept: `${where}: ${path} changed while its copy was being kept` }
+    return { ref: copy.ref, sha: copy.sha, paths, kinds: keptKinds(copy, paths) }
   }
   /** The bytes and mode `commit` holds for each of `paths` that it has. */
   private async keptBlobs(commonDir: string, commit: string, paths: readonly string[]): Promise<Map<string, { mode: string; bytes: Buffer }>> {
@@ -914,7 +1005,7 @@ export class WorktreeRetirementService {
     if (inspected.uncaptured.length) {
       const copy = await this.keepFiles(trashPath, manifest, inspected.uncaptured, inspected.content)
       if ('kept' in copy) return copy
-      kept = copy
+      kept = { sha: copy.sha, paths: copy.paths }
     }
     const prefix = manifest.resultRef.slice(0, -'/result'.length)
     const adminRef = `${prefix}/admin`
@@ -1131,11 +1222,11 @@ export class WorktreeRetirementService {
   keptAsideNotice(manifest: WorktreeReconstructionManifest): { id: string; text: string } | undefined {
     return manifest.keptAside?.length ? keptAsideNotice(manifest, keptCopyWindowMs(this.store.require(manifest.taskId).location)) : undefined
   }
-  async reconstruct(manifestPath: string, untrusted?: { prepare(worktreePath: string): void | Promise<void>; env: NodeJS.ProcessEnv }): Promise<WorktreeReconstructionManifest> {
+  async reconstruct(manifestPath: string, untrusted?: { prepare(worktreePath: string): void | Promise<void>; env: NodeJS.ProcessEnv }, seams: RebuildSeams = {}): Promise<WorktreeReconstructionManifest> {
     const manifest = this.load(manifestPath)
     // A worktree folder the person chose that is not there (a drive not connected): nothing is rebuilt, since its folders
     // would be made again on the disk the drive mounts on; it waits for the drive.
-    await assertWorktreeFolderConnected(manifest.worktreePath, manifest.trashPath, manifest.deleting?.path)
+    await assertWorktreeFolderConnected(manifest.worktreePath, manifest.trashPath, manifest.deleting?.path, manifest.rebuilding?.clearing?.deletingPath)
     await this.checkOwnership(manifest.taskId, manifest.commonDir, manifest.repositoryId)
     this.store.withGate(manifest.taskId, () => this.verifySource(manifest))
     await this.verifyPins(manifest)
@@ -1176,14 +1267,20 @@ export class WorktreeRetirementService {
       return manifest
     }
     // What an earlier rebuild left (it failed, or the process stopped partway) is never taken for the worktree: whatever in
-    // it differs from the proof is kept first, then it is removed, and the worktree is rebuilt from the pins.
-    const halfBuiltKept = manifest.rebuilding ? await this.clearHalfBuilt(manifestPath, manifest) : []
+    // it differs from the proof is kept first, then it is deleted against a proof, and the worktree is rebuilt from the pins.
+    if (manifest.rebuilding) {
+      const stopBeating = this.keepLeaseFresh()
+      try { await this.clearHalfBuilt(manifestPath, manifest, Boolean(untrusted), seams) }
+      catch (error) { if (error instanceof TrashRecordChanged) throw new Error('The worktree record changed while it was being restored; try again'); throw error }
+      finally { stopBeating() }
+    }
+    const halfBuiltKept = manifest.rebuilding?.setAside ?? []
     if (!await exists(manifest.worktreePath)) {
       await assertLifecyclePathAsync(dirname(manifest.worktreePath), manifest.worktreePath)
       if (await this.registered(manifest)) throw new Error('Absent worktree has a stale registration')
       await mkdir(dirname(manifest.worktreePath), { recursive: true })
       // Recorded before the worktree is made: until the rebuild is complete and checked, a folder there is not the worktree.
-      manifest.rebuilding = { startedAt: new Date().toISOString() }; atomicWriteJsonSync(manifestPath, manifest)
+      manifest.rebuilding = { startedAt: new Date().toISOString(), ...(halfBuiltKept.length ? { setAside: halfBuiltKept } : {}) }; atomicWriteJsonSync(manifestPath, manifest)
       // Ownership is checked again right before the worktree is made.
       await this.checkOwnership(manifest.taskId, manifest.commonDir, manifest.repositoryId)
       await this.restoreBranches(manifest)
@@ -1252,34 +1349,187 @@ export class WorktreeRetirementService {
   }
   /**
    * What an earlier rebuild left at the worktree's path (`rebuilding`): a folder it made and did not finish, maybe written
-   * to since. It must still be this repository's worktree, or it is kept as it is and the rebuild refused. Every version in
-   * it that is not one the rebuild writes from the pins is kept first, in a kept copy owned by the thread's journal
-   * (`keptAside`, named in the thread with the command that brings it back): each version the index stages and each file
-   * whose bytes differ from the proof. Then Git removes the worktree, its registration with it. Everything else in it was
-   * written from the pins, which keep it. A registration left without a folder is removed.
+   * to since. It must still be this repository's worktree, or it is kept as it is and the rebuild refused. It is deleted
+   * as the trash expiry deletes, never by Git, so nothing written there is lost however late it lands:
+   * 1. Capture (`captureHalfBuilt`): every entry of the folder is read, and what the rebuild does not write from the pins
+   *    is kept first in a kept copy owned by the thread's journal: each file or link whose kind or bytes differ from the
+   *    proof (`content`) or that it does not have, and each version the index stages that is neither HEAD's nor the
+   *    proof's. Git's own data of the folder is kept too when it holds what the pins do not.
+   * 2. Record: `rebuilding.clearing` names the `.deleting-<hex>` name and the proof: each entry either what `content`
+   *    names or the bytes its copy read. Recorded before anything moves.
+   * 3. The folder is renamed to that name beside it: a writer that opens a file by its old path now fails.
+   * 4. It is compared with the proof and deleted entry by entry, `.git` last (`deleteRenamed`). A write found meanwhile is
+   *    kept as another copy and the delete goes on, at most {@link CLEANUP_ROUNDS} rounds.
+   * 5. Git's registration of the worktree goes (`unregisterDeleted`); a folder at the worktree's path again stops that.
+   * When it stops, the rebuild refuses ("The rebuild waits: ...", naming the folder), and the next rebuild carries on from
+   * `rebuilding.clearing`. The copies are reported with what the rebuild sets aside (`rebuilding.setAside`, `keptAside`).
+   * No `--force` is ever used, and the caller's leases already keep the checkout to this work: no other lock is taken.
+   * For an earlier rebuild of someone else's commits (`untrusted`) every Git command runs with every filter driver off.
    */
-  private async clearHalfBuilt(manifestPath: string, manifest: WorktreeReconstructionManifest): Promise<NonNullable<WorktreeReconstructionManifest['keptAside']>> {
+  private async clearHalfBuilt(manifestPath: string, manifest: WorktreeReconstructionManifest, untrusted: boolean, seams: RebuildSeams): Promise<void> {
     const path = manifest.worktreePath
-    const kept: NonNullable<WorktreeReconstructionManifest['keptAside']> = []
-    if (await exists(path)) {
+    const clearing = manifest.rebuilding?.clearing
+    const at = clearing && await present(join(clearing.deletingPath, '.git')) ? clearing.deletingPath : await present(join(path, '.git')) ? path : manifest.commonDir
+    await withDrivers(!untrusted, at, () => this.clearHalfBuiltWith(manifestPath, manifest, seams))
+  }
+  private async clearHalfBuiltWith(manifestPath: string, manifest: WorktreeReconstructionManifest, seams: RebuildSeams): Promise<void> {
+    const path = manifest.worktreePath
+    const rebuilding = manifest.rebuilding!
+    const record = { text: JSON.stringify(manifest) }
+    /** The clear's copies of files join what the rebuild sets aside; the clear's record goes. */
+    const settle = (): void => {
+      const kept = (rebuilding.clearing?.copies ?? []).filter((copy) => !copy.admin && copy.paths.length).map(({ ref, paths, kinds }) => ({ ref, paths, ...(kinds ? { kinds } : {}) }))
+      if (kept.length) rebuilding.setAside = [...(rebuilding.setAside ?? []), ...kept]
+      delete rebuilding.clearing
+    }
+    let clearing = rebuilding.clearing
+    // Recorded but never renamed (the process stopped in between), or a folder at the worktree's path again: it is looked
+    // at afresh, as a folder an earlier rebuild left.
+    if (clearing && !await present(clearing.deletingPath) && await present(path)) { settle(); this.saveTrashed(manifestPath, manifest, record); clearing = undefined }
+    if (!clearing) {
+      if (!await present(path)) {
+        // Only Git's registration may be left.
+        if (!await this.registered(manifest)) return
+        const outcome = await this.unregisterDeleted(manifest, path, 'rebuild', async () => undefined)
+        if ('kept' in outcome) throw rebuildWaits(outcome.kept)
+        return
+      }
       const problem = await this.halfBuiltProblem(manifest)
       if (problem) throw new Error(`What an earlier rebuild left at ${path} is not this repository's worktree (${problem}); it is kept as it is`)
-      const changed = await this.halfBuiltChanges(manifest)
+      const locked = await worktreeLockAsync(manifest.commonDir, path)
+      if (locked !== undefined) throw rebuildWaits(lockedText(locked, path, 'rebuild'))
+      const captured = await this.captureHalfBuilt(manifest)
+      const lease = await this.readRepositoryLease()
+      // Recorded, with the ownership checked in the same step, before the folder moves: a process that stops from here on
+      // leaves it at one of its two names.
+      this.store.withGate(manifest.taskId, () => {
+        this.assertOwnership(manifest.taskId, manifest.commonDir, manifest.repositoryId, lease)
+        this.assertTrashRecord(manifestPath, record)
+        rebuilding.clearing = captured
+        atomicWriteJsonSync(manifestPath, manifest)
+        record.text = JSON.stringify(manifest)
+      })
+      clearing = captured
+      seams.afterRecord?.(clearing.deletingPath)
+      await assertLifecyclePathAsync(dirname(path), clearing.deletingPath)
+      try { await renameFolderAsync(path, clearing.deletingPath) }
+      catch (error) {
+        // Nothing moved; the copies stay listed with what the rebuild sets aside.
+        settle(); this.saveTrashed(manifestPath, manifest, record)
+        throw rebuildWaits(`files in ${path} are in use (${(error as Error).message.split(/\r?\n/)[0]}), so what an earlier rebuild left there stays where it is`)
+      }
+      seams.afterRename?.(clearing.deletingPath)
+    }
+    const current = clearing
+    const deletingPath = current.deletingPath
+    if (await present(deletingPath)) {
+      await assertLifecyclePathAsync(dirname(path), deletingPath)
+      if (!await this.sameClearingFolder(current)) throw rebuildWaits(`${deletingPath} is no longer the folder an earlier rebuild left; nothing in it was touched`)
+      const lost = await this.lostClearingCopy(manifest, current)
+      if (lost) throw rebuildWaits(`${lost}, so nothing more of what an earlier rebuild left at ${deletingPath} is deleted`)
+      let stopped: Awaited<ReturnType<WorktreeRetirementService['deleteRenamed']>>
+      for (let round = 1; round <= CLEANUP_ROUNDS; round++) {
+        // A write that landed after `.git` went is kept through it, once it is back.
+        await this.restoreClearingGitFile(current)
+        const copies = current.copies.length, proof = current.proof
+        stopped = await this.deleteRenamed(manifestPath, manifest, record, { root: deletingPath, top: dirname(deletingPath), proof, record: current, place: 'rebuild', clearing: current }, { beforeRemove: seams.beforeRemove })
+        if (!stopped) break
+        if (stopped.readOnly) throw rebuildWaits(stopped.kept)
+        // Without a new proof the delete stopped for a reason of its own (a copy refused, a folder swapped), unless it was
+        // a write after `.git` went: that one is kept in the next round.
+        if (current.proof === proof && (current.copies.length !== copies || (await lstat(join(deletingPath, '.git')).catch(() => undefined))?.isFile())) throw rebuildWaits(stopped.kept)
+      }
+      if (stopped) throw rebuildWaits(`files in what an earlier rebuild left kept changing while it was being cleared, ${CLEANUP_ROUNDS} times; every version written there is kept, and what is left of it is at ${deletingPath}`)
+    }
+    const outcome = await this.unregisterDeleted(manifest, path, 'rebuild', async () => { settle(); this.saveTrashed(manifestPath, manifest, record) })
+    if ('kept' in outcome) throw rebuildWaits(outcome.kept)
+  }
+  /**
+   * Reads the half-built folder and keeps what the rebuild does not write from the pins (see `clearHalfBuilt`). A file
+   * that changes while its copy is kept is read again, at most {@link CLEANUP_ROUNDS} times; every copy made stays.
+   */
+  private async captureHalfBuilt(manifest: WorktreeReconstructionManifest): Promise<HalfBuiltClearing> {
+    const path = manifest.worktreePath
+    const owner = this.store.require(manifest.taskId).location
+    const gitFile = await readFile(join(path, '.git'), 'utf8')
+    const copies: HalfBuiltClearing['copies'] = []
+    let changing: string[] = []
+    for (let attempt = 1; attempt <= CLEANUP_ROUNDS; attempt++) {
+      // Read before the files, so a change while they are read is captured again before `.git` goes.
+      const adminState = await this.adminStateAt(path, manifest.commonDir)
+      const { changed, entries } = await this.halfBuiltChanges(manifest)
       if (changed.length) {
         let copy: Awaited<ReturnType<typeof keepCopy>>
-        try { copy = await keepCopy({ owner: this.store.require(manifest.taskId).location, top: path, operationType: 'worktree-cleanup', action: 'Rebuilding the worktree', paths: changed }) }
-        catch (error) { throw new Error(`Files were written into the worktree while an earlier rebuild made it, and no copy of them could be kept (${(error as Error).message.split(/\r?\n/)[0]}); nothing was deleted: ${changed.join(', ')}`) }
-        kept.push({ ref: copy.ref, paths: changed, ...keptKinds(copy, changed) })
-        manifest.keptAside = [...(manifest.keptAside ?? []), ...kept]
-        atomicWriteJsonSync(manifestPath, manifest)
+        try { copy = await keepCopy({ owner, top: path, operationType: 'worktree-cleanup', action: 'Rebuilding the worktree', paths: changed }) }
+        catch (error) { throw rebuildWaits(`files were written into ${path} while an earlier rebuild made it, and no copy of them could be kept (${(error as Error).message.split(/\r?\n/)[0]}); nothing was deleted: ${changed.join(', ')}`) }
+        copies.push({ ref: copy.ref, sha: copy.sha, paths: changed, ...keptKinds(copy, changed) })
+        // What the copy read of each file is what the proof says of it, or it changed in between: read again.
+        changing = entries.filter((entry) => entry.kind !== 'directory' && changed.includes(entry.path) && copy.digests.get(entry.path) !== entry.digest).map((entry) => entry.path)
+        if (changing.length) continue
       }
-      await this.checkOwnership(manifest.taskId, manifest.commonDir, manifest.repositoryId)
-      await lifecycleGitAsync(manifest.commonDir, ['worktree', 'remove', '--force', path])
-      if (await exists(path)) throw new Error(`Git did not remove what an earlier rebuild left at ${path}`)
-    } else if (await this.registered(manifest)) {
-      await lifecycleGitAsync(manifest.commonDir, ['worktree', 'remove', path])
+      if (await this.halfBuiltAdminUnheld(path, manifest)) {
+        const admin = await storeAdminBeforeRemoval(path, [])
+        const kept = await keepExistingCommit({ owner, top: path, operationType: 'worktree-cleanup', sha: admin.commit })
+        copies.push({ ref: kept.ref, sha: admin.commit, paths: [], admin: true })
+      }
+      const stat = await lstat(path, { bigint: true })
+      return { deletingPath: join(dirname(path), `.deleting-${randomBytes(8).toString('hex')}`), identity: `${stat.dev}:${stat.ino}`, gitFile, adminState, startedAt: new Date().toISOString(), proof: entries, copies }
     }
-    return kept
+    throw rebuildWaits(`${changing.slice(0, 3).join(', ')} kept changing while a copy of what an earlier rebuild left at ${path} was kept; nothing was deleted`)
+  }
+  /**
+   * Whether Git's own data of the half-built folder holds what the pins do not: a file of it (its settings, its own refs)
+   * that is not the one the rebuild wrote back from `adminTree`, or a commit its HEAD or history names that no pin holds.
+   * HEAD, the index, `commondir` and the HEAD history itself are what Git writes for any new worktree; the versions the
+   * index stages are kept with the files. Anything that cannot be read counts as held by nothing.
+   */
+  private async halfBuiltAdminUnheld(folder: string, manifest: WorktreeReconstructionManifest): Promise<boolean> {
+    try {
+      const files = await readAdminFilesAsync(await this.adminDirOf(folder, manifest.commonDir))
+      const format = await lifecycleReadAsync(manifest.commonDir, ['rev-parse', '--show-object-format'])
+      const kept = new Map<string, string>()
+      if (manifest.adminTree) {
+        for (const line of (await lifecycleReadAsync(manifest.commonDir, ['ls-tree', '-r', '-z', manifest.adminTree], undefined, LISTING_MAX_BUFFER)).split('\0').filter(Boolean)) {
+          const tab = line.indexOf('\t')
+          kept.set(line.slice(tab + 1), line.slice(0, tab).split(' ')[2]!)
+        }
+      }
+      if (files.some((file) => !['HEAD', 'commondir', 'index', HEAD_REFLOG].includes(file.path) && !/^sharedindex\./.test(file.path) && kept.get(file.path) !== blobId(file.bytes, format))) return true
+      const head = await lifecycleReadAsync(folder, ['rev-parse', '--verify', '-q', 'HEAD^{commit}']).catch(() => '')
+      const pinned = [manifest.baseSha, manifest.resultSha, ...(manifest.snapshotSha ? [manifest.snapshotSha] : []), ...(manifest.keptRefs ?? []).map((ref) => ref.slice(ref.lastIndexOf('/') + 1))]
+      return (await uncontainedTips(manifest.commonDir, [...new Set([...adminObjectIds(files), ...(head ? [head] : [])])], pinned)).length > 0
+    } catch { return true }
+  }
+  /** Git's own data of the half-built folder changed while it was being deleted: kept again, as one more of the clear's copies. */
+  private async recaptureHalfBuiltAdmin(manifestPath: string, manifest: WorktreeReconstructionManifest, record: { text: string }, clearing: HalfBuiltClearing, folder: string): Promise<void> {
+    const state = await this.adminStateAt(folder, manifest.commonDir)
+    const admin = await storeAdminBeforeRemoval(folder, [])
+    const kept = await keepExistingCommit({ owner: this.store.require(manifest.taskId).location, top: folder, operationType: 'worktree-cleanup', sha: admin.commit })
+    clearing.copies.push({ ref: kept.ref, sha: admin.commit, paths: [], admin: true })
+    clearing.adminState = state
+    this.saveTrashed(manifestPath, manifest, record)
+  }
+  /** Whether the folder at `deletingPath` is still the one the clear renamed: a real folder, with the device and inode it had. */
+  private async sameClearingFolder(clearing: HalfBuiltClearing): Promise<boolean> {
+    try {
+      const stat = await lstat(clearing.deletingPath, { bigint: true })
+      return stat.isDirectory() && !stat.isSymbolicLink() && `${stat.dev}:${stat.ino}` === clearing.identity
+    } catch { return false }
+  }
+  /** Writes the folder's `.git` file back into what is left of it, when it is gone, never over anything there. */
+  private async restoreClearingGitFile(clearing: HalfBuiltClearing): Promise<void> {
+    if (!await this.sameClearingFolder(clearing)) return
+    try { await writeFile(join(clearing.deletingPath, '.git'), clearing.gitFile, { flag: 'wx' }) }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error }
+  }
+  /** Why a copy the clear recorded no longer holds what its proof says, or undefined: each is still the thread's, at its commit. */
+  private async lostClearingCopy(manifest: WorktreeReconstructionManifest, clearing: HalfBuiltClearing): Promise<string | undefined> {
+    const index = threadPreservedIndex(this.store.require(manifest.taskId).location)
+    for (const copy of clearing.copies) {
+      const sha = await lifecycleReadAsync(manifest.commonDir, ['rev-parse', '--verify', '-q', `${copy.ref}^{commit}`]).catch(() => '')
+      if (sha !== copy.sha || !index.owns(copy.ref)) return `its copy ${copy.ref} is no longer the thread's`
+    }
+    return undefined
   }
   /** Why the folder at the worktree's path is not this repository's registered worktree, or undefined: its `.git` leads to an administration folder of the repository, which leads back. */
   private async halfBuiltProblem(manifest: WorktreeReconstructionManifest): Promise<string | undefined> {
@@ -1297,10 +1547,10 @@ export class WorktreeRetirementService {
   }
   /**
    * The paths of a half-built worktree that hold a version the rebuild does not write from the pins: a version the index
-   * stages that is neither HEAD's nor the proof's, and a file or link whose kind or bytes differ from the proof's, or that
-   * the proof does not have. Read only.
+   * stages that is neither HEAD's nor the proof's, and a file or link whose kind, bytes or executable bit differ from the
+   * proof's, or that the proof does not have. With every entry of the folder as read (`.git` left out). Read only.
    */
-  private async halfBuiltChanges(manifest: WorktreeReconstructionManifest): Promise<string[]> {
+  private async halfBuiltChanges(manifest: WorktreeReconstructionManifest): Promise<{ changed: string[]; entries: ContentEntry[] }> {
     const tree = async (sha: string): Promise<Map<string, string>> => new Map((await lifecycleReadAsync(manifest.worktreePath, ['ls-tree', '-r', '-z', sha], undefined, LISTING_MAX_BUFFER)).split('\0').filter(Boolean).map((line) => {
       const tab = line.indexOf('\t')
       return [line.slice(tab + 1), line.slice(0, tab).split(' ')[2]!] as [string, string]
@@ -1313,12 +1563,13 @@ export class WorktreeRetirementService {
       if (sha !== head.get(rel) && sha !== files.get(rel)) changed.add(rel)
     }
     const proof = new Map(manifest.content.map((entry) => [entry.path, entry]))
-    for (const entry of await walkOwnedContentAsync(manifest.worktreePath, true)) {
+    const entries = await walkOwnedContentAsync(manifest.worktreePath, true)
+    for (const entry of entries) {
       if (entry.kind === 'directory' || !entry.path) continue
       const expected = proof.get(entry.path)
-      if (!expected || expected.kind !== entry.kind || expected.digest !== entry.digest) changed.add(entry.path)
+      if (!expected || expected.kind !== entry.kind || expected.digest !== entry.digest || entry.kind === 'file' && (expected.mode & 0o111) !== (entry.mode & 0o111)) changed.add(entry.path)
     }
-    return [...changed].sort()
+    return { changed: [...changed].sort(), entries }
   }
   /** Whether the record of `taskId`'s worktree at `worktreePath` has a rebuild that did not finish (`rebuilding`). */
   rebuildUnfinished(taskId: string, worktreePath: string): boolean {

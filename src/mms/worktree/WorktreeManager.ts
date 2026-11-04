@@ -448,7 +448,7 @@ function namedFiles(paths: string[]): string {
  * every path `git status --porcelain --ignore-submodules=none` lists, untracked ones included, which is what Git's own
  * removal checks. A repository of its own inside an ignored folder is listed apart: a copy cannot hold it.
  */
-async function ignoredFilesOf(git: (args: string[]) => Promise<string>): Promise<{ dirty: string[] } | { files: string[]; repositories: string[] }> {
+export async function ignoredFilesOf(git: (args: string[]) => Promise<string>): Promise<{ dirty: string[] } | { files: string[]; repositories: string[] }> {
   const status = (await git(['status', '--porcelain', '-z', '--ignore-submodules=none'])).split('\0')
   const dirty: string[] = []
   for (let index = 0; index < status.length; index += 1) {
