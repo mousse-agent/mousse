@@ -1,8 +1,8 @@
 import { execFileSync } from 'node:child_process'
 import { createServer, type Server } from 'node:http'
 import type { AddressInfo } from 'node:net'
-import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { basename, dirname, join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { git as actionGit } from '../src/mms/actions/git'
 import { MousseMainService } from '../src/mms/MousseMainService'
@@ -15,6 +15,7 @@ import { git, gitFoundationFixture } from './fixtures/gitFoundation'
 import { clearGitPolicyLog, gitPolicyLog, userAction } from '../src/mms/git/gitPolicy'
 import { installGitRemoveGuard } from './fixtures/gitRemoveGuard'
 import { threadPreservedIndex } from '../src/mms/actions/preservedFiles'
+import { listCleanupRecords } from '../src/mms/worktree/verifiedCleanup'
 
 /** A config value, or '' when it is not set. */
 const configOf = (cwd: string, key: string): string => { try { return git(cwd, 'config', '--get', key) } catch { return '' } }
@@ -373,6 +374,96 @@ describe('a pull request that tries to run code', () => {
       guard.assertNoRemoveOfExisting()
     } finally { guard.restore() }
   }, 90_000)
+
+  /** A service whose start fails right after its worktree was made, once `inWorktree` ran there. */
+  const failingAfter = (trash: () => Promise<unknown>, inWorktree: (worktreePath: string, threadId: string) => void) => new PullRequestThreadService({
+    codeHost: host, projects: mms.projects, threads: mms.threads, trashThread: trash, send: async () => {},
+    prepareThread: (thread) => { inWorktree(workspaceOf(thread.id).worktreePath, thread.id); throw new Error('model store unavailable') }
+  })
+  const collectGarbage = () => { git(f.repo, 'reflog', 'expire', '--expire=now', '--all'); git(f.repo, 'gc', '-q', '--prune=now') }
+
+  it('a commit made in a failed start\'s worktree keeps the thread, its branch and the commit', async () => {
+    const trash = vi.fn(async () => ({}))
+    const unique = Buffer.from('person commit during setup 42d912\r\n')
+    let made = '', threadId = ''
+    const guard = installGitRemoveGuard()
+    try {
+      await expect(failingAfter(trash, (worktreePath, id) => {
+        threadId = id
+        writeFileSync(join(worktreePath, 'person.txt'), unique)
+        git(worktreePath, 'add', 'person.txt')
+        git(worktreePath, '-c', 'user.name=Person', '-c', 'user.email=person@example.test', 'commit', '-q', '--no-verify', '-m', 'committed before setup failed')
+        made = git(worktreePath, 'rev-parse', 'HEAD')
+      }).startThread({ projectId, reference: '7', allowWorktreeConfig: true }, START)).rejects.toMatchObject({ code: 'pull_request_workspace_failed' })
+      expect(made).not.toBe(prSha)
+      expect(trash).toHaveBeenCalledWith(threadId)
+      collectGarbage()
+      const restored = join(f.root, 'restored-person.txt')
+      writeFileSync(restored, execFileSync('git', ['cat-file', 'blob', `${made}:person.txt`], { cwd: f.repo }))
+      expect(readFileSync(restored)).toEqual(unique)
+      expect(git(f.repo, 'rev-parse', `refs/heads/${workspaceOf(threadId).branch}`)).toBe(made)
+      expect(marked()).toEqual([])
+      guard.assertNoRemoveOfExisting()
+    } finally { guard.restore() }
+  }, 90_000)
+
+  it('a setting added to a failed start\'s worktree keeps the copy of Git\'s own data of it, and the thread', async () => {
+    const trash = vi.fn(async () => ({}))
+    let unique = Buffer.alloc(0), threadId = ''
+    const guard = installGitRemoveGuard()
+    try {
+      await expect(failingAfter(trash, (worktreePath, id) => {
+        threadId = id
+        const admin = git(worktreePath, 'rev-parse', '--absolute-git-dir')
+        unique = Buffer.concat([readFileSync(join(admin, 'config.worktree')), Buffer.from('[remote "personal"]\r\n\turl = ssh://person.example/needed-config-44feca\r\n')])
+        writeFileSync(join(admin, 'config.worktree'), unique)
+      }).startThread({ projectId, reference: '7', allowWorktreeConfig: true }, START)).rejects.toMatchObject({ code: 'pull_request_workspace_failed' })
+      expect(trash).toHaveBeenCalledWith(threadId)
+      collectGarbage()
+      const kept = git(f.repo, 'for-each-ref', '--format=%(refname)', 'refs/mousse/preserved/').split('\n').filter(Boolean)
+      const copy = kept.find((ref) => { try { git(f.repo, 'cat-file', '-e', `${ref}:config.worktree`); return true } catch { return false } })!
+      expect(threadPreservedIndex(mms.threads.getThreadDir(threadId)).owns(copy)).toBe(true)
+      const restored = join(f.root, 'restored-config.worktree')
+      writeFileSync(restored, execFileSync('git', ['cat-file', 'blob', `${copy}:config.worktree`], { cwd: f.repo }))
+      expect(readFileSync(restored)).toEqual(unique)
+      guard.assertNoRemoveOfExisting()
+    } finally { guard.restore() }
+  }, 90_000)
+
+  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)('a failed start whose cleanup stopped is finished by Storage, against its record', async () => {
+    const trash = vi.fn(async () => ({}))
+    let settings = Buffer.alloc(0), worktreePath = ''
+    const guard = installGitRemoveGuard()
+    try {
+      // A folder Mousse may not delete files in stops the cleanup part way.
+      await expect(failingAfter(trash, (path) => {
+        worktreePath = path
+        settings = readFileSync(join(git(path, 'rev-parse', '--absolute-git-dir'), 'config.worktree'))
+        chmodSync(join(path, 'tools'), 0o555)
+      }).startThread({ projectId, reference: '7', allowWorktreeConfig: true }, START)).rejects.toMatchObject({ code: 'pull_request_workspace_failed' })
+      expect(trash).toHaveBeenCalled()
+      const [record] = await listCleanupRecords(f.home)
+      expect(record?.stopped).toBeDefined()
+      expect(existsSync(worktreePath)).toBe(false)
+      chmodSync(join(record!.deletingPath, 'tools'), 0o755)
+      // Once nothing has changed in it for an hour, Storage finishes it.
+      const items = await (mms.storageCleanup as unknown as { stoppedCleanupItems(now: number): Promise<Array<{ label: string; outcome: string; reason: string }>> }).stoppedCleanupItems(Date.now() + 2 * 60 * 60_000)
+      expect(items).toMatchObject([{ label: `threads/${basename(worktreePath)}`, outcome: 'removed' }])
+      expect(existsSync(record!.deletingPath)).toBe(false)
+      expect(await listCleanupRecords(f.home)).toEqual([])
+      expect(git(f.repo, 'worktree', 'list', '--porcelain')).not.toContain(worktreePath)
+      // Git's own data of it is in the copy the thread owns, byte for byte.
+      collectGarbage()
+      const restored = join(f.root, 'restored-settings')
+      writeFileSync(restored, execFileSync('git', ['cat-file', 'blob', `${record!.admin[0]!.ref}:config.worktree`], { cwd: f.repo }))
+      expect(readFileSync(restored)).toEqual(settings)
+      expect(marked()).toEqual([])
+      guard.assertNoRemoveOfExisting()
+    } finally {
+      guard.restore()
+      for (const name of existsSync(dirname(worktreePath)) ? readdirSync(dirname(worktreePath)) : []) { try { chmodSync(join(dirname(worktreePath), name, 'tools'), 0o755) } catch { /* gone */ } }
+    }
+  }, 120_000)
 
   it('refuses, and leaves nothing, when a filter driver is configured for the repository itself', async () => {
     git(f.repo, 'config', 'filter.evil.smudge', 'sh tools/smudge.sh')

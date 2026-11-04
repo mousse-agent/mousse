@@ -13,6 +13,11 @@ import { ThreadWorkspaceManager } from '../src/mms/workspace/ThreadWorkspaceMana
 import { WorkspaceResolver } from '../src/mms/workspace/WorkspaceResolver'
 import { fixtureGit as git, ownedHome } from './support/fixtureGit'
 import { installGitRemoveGuard, type GitRemoveGuard } from './fixtures/gitRemoveGuard'
+import { ResourceLifecycleCoordinator } from '../src/mms/lifecycle/ResourceLifecycleCoordinator'
+import { StorageCleanupService } from '../src/mms/lifecycle/StorageCleanupService'
+import { StoragePolicyStore } from '../src/mms/lifecycle/StoragePolicyStore'
+import { StorageSweepClock } from '../src/mms/lifecycle/sweepClock'
+import { checkWorktreeFolder, forgetWorktreeFolders, placeAgentWorktreeBase, refreshWorktreeFolders, setWorktreeFolders } from '../src/mms/worktree/worktreeLayout'
 
 /**
  * A rebuild of a retired worktree that fails, or is cut off by the process stopping, after it made the worktree. Nothing
@@ -249,6 +254,77 @@ describe('clearing what an earlier rebuild left', () => {
     expect(readFileSync(join(f.worktree, 'a.txt'), 'utf8')).toBe('edited before retirement\n')
     expect(existsSync(deleting)).toBe(false)
     assertGitRemovedNothing(installed)
+  })
+
+  test('a version staged after the clear was recorded, with the working file put back, is kept and comes back byte for byte after Git collects its garbage', async () => {
+    const f = await halfBuilt()
+    const installed = guard()
+    const staged = Buffer.from('late staged only 6d9a1\r\n')
+    let stagedBlob = ''
+    const rebuilt = await f.service.reconstruct(f.path, undefined, { afterRecord: () => {
+      writeFileSync(join(f.worktree, 'a.txt'), staged)
+      git(f.worktree, ['add', 'a.txt'])
+      stagedBlob = git(f.worktree, ['rev-parse', ':a.txt'])
+      // The working file goes back to the bytes the capture read: only the index holds the new version.
+      writeFileSync(join(f.worktree, 'a.txt'), 'edit copied before retry\n')
+    } })
+    git(f.repo, ['reflog', 'expire', '--expire=now', '--all'])
+    git(f.repo, ['gc', '--prune=now', '-q'])
+    expect(execFileSync('git', ['cat-file', 'blob', stagedBlob], { cwd: f.repo })).toEqual(staged)
+    // It is one of the versions the thread is told about, and its command's source gives the bytes back.
+    expect(keptVersions(f.repo, rebuilt, 'a.txt')).toContain(staged.toString('binary'))
+    const copy = rebuilt.keptAside!.find((entry) => entry.paths.includes('a.txt') && keptBytes(f.repo, entry.ref, 'a.txt').equals(staged))!
+    const restored = join(f.root, 'restored-staged.txt')
+    writeFileSync(restored, keptBytes(f.repo, copy.ref, 'a.txt'))
+    expect(readFileSync(restored)).toEqual(staged)
+    expect(readFileSync(join(f.worktree, 'a.txt'), 'utf8')).toBe('edited before retirement\n')
+    assertGitRemovedNothing(installed)
+  })
+
+  test('Storage never calls what is left of a stopped clear an unused worktree', async () => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), 'mousse-rebuild-storage-'))); roots.push(root)
+    const repo = join(root, 'shop'); mkdirSync(repo)
+    git(repo, ['init', '-q', '-b', 'main']); git(repo, ['config', 'user.email', 'test@example.com']); git(repo, ['config', 'user.name', 'Test'])
+    writeFileSync(join(repo, 'a.txt'), 'first\n'); git(repo, ['add', '.']); git(repo, ['commit', '-qm', 'base'])
+    const home = join(root, 'home'); mkdirSync(home); releases.push(ownedHome(home)); process.env.MOUSSE_HOME = home
+    // An agent's worktree in a worktree folder the person chose, beside its repository's other folders.
+    const drive = realpathSync(mkdtempSync(join(tmpdir(), 'mousse-rebuild-drive-'))); roots.push(drive)
+    const entry = await checkWorktreeFolder(join(drive, 'Worktrees'), home)
+    setWorktreeFolders(home, { worktreeFolder: entry, previousWorktreeFolders: [] }); releases.push(() => forgetWorktreeFolders(home))
+    await refreshWorktreeFolders()
+    const task = join(home, 'thread-data', 'task'); mkdirSync(task, { recursive: true }); writeFileSync(join(task, 'meta.json'), JSON.stringify({ id: 'task' }))
+    const store = new ResourceLifecycleStore({ profileId: 'test', profileHome: home }); store.registerTask({ taskId: 'task', location: task })
+    registerThreadLifecycleGate(home, store)
+    const base = await placeAgentWorktreeBase({ home, folder: entry.path, repositoryId: resolveRepositoryIdentity(repo).key, projectName: 'shop' })
+    const worktree = join(base, 'worker'), branch = 'mousse/agent/worker'
+    git(repo, ['worktree', 'add', '-q', '-b', branch, worktree])
+    const sourcePath = join(task, 'agents.json'); writeFileSync(sourcePath, JSON.stringify([{ id: 'worker', worktreePath: worktree, branch }]))
+    const taskLease = await waitAcquireExecutionLease(task), repositoryLease = await acquireRepositoryLease(resolveRepositoryIdentity(repo))
+    releases.push(() => repositoryLease.release(), () => releaseExecutionLeaseHandle(taskLease))
+    const service = new WorktreeRetirementService(store, { taskLease, repositoryLease })
+    const path = service.pathFor('task', worktree)
+    writeFileSync(join(worktree, 'a.txt'), 'edited\n')
+    await service.prepare({ taskId: 'task', worktreePath: worktree, branch, sourcePath })
+    await service.retire(path)
+    expect(await service.expireTrash(path, { now: Date.now() + 2 * WORKTREE_TRASH_QUIET_MS })).toEqual({ removed: true })
+    await expect(service.reconstruct(path, { prepare: () => { throw new Error('crash during rebuild') }, env: {} })).rejects.toThrow('crash during rebuild')
+    const edit = Buffer.from('edit in the half-built folder\r\n')
+    writeFileSync(join(worktree, 'a.txt'), edit)
+    let deleting = ''
+    await expect(service.reconstruct(path, undefined, { beforeRemove: (at) => { if (basename(at) === 'a.txt') { deleting = dirname(at); throw new Error('the process stopped') } } })).rejects.toThrow('the process stopped')
+    expect(readFileSync(join(deleting, 'a.txt'))).toEqual(edit)
+    const clock = new StorageSweepClock(store.root, Date.now); clock.start()
+    const storage = new StorageCleanupService({
+      store, threads: { getThread: () => ({ id: 'task', name: 'Task', projectId: 'p' }) as never },
+      purge: new ResourceLifecycleCoordinator(store, { drain: async () => {}, settleMutationOwnership: async () => {}, projectIndex: () => {}, projectPurged: () => {} }).cleanup,
+      policy: new StoragePolicyStore(store, clock), clock, idle: () => undefined, installationHome: home, now: Date.now
+    })
+    const orphans = await (storage as unknown as { orphanItems(): Promise<Array<{ label: string }>> }).orphanItems()
+    expect(orphans.map((item) => item.label).filter((label) => label.includes('.deleting-'))).toEqual([])
+    // The folder and the copy of the edit are both still there; the copy gives the bytes back.
+    expect(readFileSync(join(deleting, 'a.txt'))).toEqual(edit)
+    const copies = service.load(path).rebuilding!.clearing!.copies.filter((copy) => copy.paths.includes('a.txt'))
+    expect(copies.map((copy) => keptBytes(repo, copy.ref, 'a.txt'))).toContainEqual(edit)
   })
 
   test('a folder made at the worktree\'s path while the clear runs stops the unregister, and is kept as it is', async () => {

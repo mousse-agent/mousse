@@ -1,6 +1,6 @@
 import { MOUSSE_CONTROL_FILE_PATHS } from '../worktree/controlFiles'
 import { createHash, randomBytes } from 'node:crypto'
-import { constants as fsConstants, existsSync, lstatSync, readFileSync, realpath as realpathCallback, rmdirSync, unlinkSync, type Stats } from 'node:fs'
+import { constants as fsConstants, existsSync, lstatSync, readdirSync, readFileSync, realpath as realpathCallback, rmdirSync, unlinkSync, type Stats } from 'node:fs'
 import { access, chmod, lstat, mkdir, readdir, readFile, readlink, rename, rmdir, symlink, unlink, writeFile } from 'node:fs/promises'
 import { promisify } from 'node:util'
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
@@ -9,7 +9,7 @@ import { assertLifecyclePath, assertLifecyclePathAsync, ResourceLifecycleStore }
 import type { RepositoryLeaseHandle } from '../git/RepositoryLease'
 import type { ThreadLeaseHandle } from '../queue/ThreadExecutionLease'
 import { assertHeldThreadLease } from '../actions/GitOperationCoordinator'
-import { MOUSSE_COMMIT_ENV, operationInProgressAsync } from '../actions/git'
+import { MOUSSE_COMMIT_ENV, mousseCommitEnvNow, operationInProgressAsync } from '../actions/git'
 import { exactTreeOfAsync, moveFilesToSnapshotAsync, sameTreeAsync, takeSnapshotAsync, worktreeTreeAsync, worktreeTreesAsync } from '../actions/snapshots'
 import { PROCESS_INSTANCE_ID } from '../queue/processLiveness'
 import { AgentEpisodeStore } from '../agents/AgentEpisodeStore'
@@ -798,7 +798,7 @@ export class WorktreeRetirementService {
         },
         held: this.heldCheck(manifest),
         recaptureAdmin: async (at) => {
-          if (await this.adminStateAt(at, manifest.commonDir) === folder.record.adminState) return
+          if (await (folder.clearing ? this.halfBuiltStateAt(at, manifest.commonDir) : this.adminStateAt(at, manifest.commonDir)) === folder.record.adminState) return
           if (folder.clearing) await this.recaptureHalfBuiltAdmin(manifestPath, manifest, record, folder.clearing, at)
           else await this.recaptureAdmin(manifestPath, manifest, record, at)
         },
@@ -1456,7 +1456,7 @@ export class WorktreeRetirementService {
     let changing: string[] = []
     for (let attempt = 1; attempt <= CLEANUP_ROUNDS; attempt++) {
       // Read before the files, so a change while they are read is captured again before `.git` goes.
-      const adminState = await this.adminStateAt(path, manifest.commonDir)
+      const adminState = await this.halfBuiltStateAt(path, manifest.commonDir)
       const { changed, entries } = await this.halfBuiltChanges(manifest)
       if (changed.length) {
         let copy: Awaited<ReturnType<typeof keepCopy>>
@@ -1500,14 +1500,61 @@ export class WorktreeRetirementService {
       return (await uncontainedTips(manifest.commonDir, [...new Set([...adminObjectIds(files), ...(head ? [head] : [])])], pinned)).length > 0
     } catch { return true }
   }
-  /** Git's own data of the half-built folder changed while it was being deleted: kept again, as one more of the clear's copies. */
+  /**
+   * HEAD, Git's own data and what the index stages of the half-built folder at `folder`, as one value to compare
+   * (`HalfBuiltClearing.adminState`): Git's own data leaves the index out, so a version staged after the capture, with the
+   * working file put back as it was, would otherwise go unseen.
+   */
+  private async halfBuiltStateAt(folder: string, commonDir: string): Promise<string> {
+    const staged = await lifecycleReadAsync(folder, ['ls-files', '-s', '-z'], undefined, LISTING_MAX_BUFFER).then(hash, (error: Error) => `unreadable: ${error.message}`)
+    return JSON.stringify([await this.adminStateAt(folder, commonDir), staged])
+  }
+  /**
+   * HEAD, Git's own data or what the index stages changed while the half-built folder was being deleted, right before its
+   * `.git` goes. Each change is kept as one more of the clear's copies, owned by the thread: Git's own data again, and the
+   * versions the index stages that neither HEAD nor the proof has, as a commit of the index's tree (`git write-tree`
+   * reads the index and writes only objects), listed with what the rebuild sets aside so the thread can bring them back.
+   */
   private async recaptureHalfBuiltAdmin(manifestPath: string, manifest: WorktreeReconstructionManifest, record: { text: string }, clearing: HalfBuiltClearing, folder: string): Promise<void> {
-    const state = await this.adminStateAt(folder, manifest.commonDir)
-    const admin = await storeAdminBeforeRemoval(folder, [])
-    const kept = await keepExistingCommit({ owner: this.store.require(manifest.taskId).location, top: folder, operationType: 'worktree-cleanup', sha: admin.commit })
-    clearing.copies.push({ ref: kept.ref, sha: admin.commit, paths: [], admin: true })
+    const owner = this.store.require(manifest.taskId).location
+    const state = await this.halfBuiltStateAt(folder, manifest.commonDir)
+    // A value that is not the pair counts as changed in both.
+    const parts = (value: string): [string?, string?] => { try { const read: unknown = JSON.parse(value); return Array.isArray(read) && read.length === 2 ? read as [string, string] : [] } catch { return [] } }
+    const [adminBefore, stagedBefore] = parts(clearing.adminState)
+    const [adminNow, stagedNow] = parts(state)
+    if (stagedBefore === undefined || stagedNow !== stagedBefore) {
+      const paths = await this.newlyStaged(folder, manifest)
+      if (paths.length) {
+        let tree: string
+        try { tree = await lifecycleGitAsync(folder, ['write-tree']) }
+        catch (error) { throw rebuildWaits(`${paths.slice(0, 3).join(', ')} ${paths.length === 1 ? 'was' : 'were'} staged in ${folder} while it was being cleared, and no copy of what is staged could be kept (${(error as Error).message.split(/\r?\n/)[0]}); what is left of it stays there`) }
+        const sha = await lifecycleGitAsync(folder, ['commit-tree', tree, '-m', 'mousse: versions staged while an earlier rebuild was cleared'], undefined, undefined, mousseCommitEnvNow())
+        const kept = await keepExistingCommit({ owner, top: folder, operationType: 'worktree-cleanup', sha })
+        clearing.copies.push({ ref: kept.ref, sha, paths })
+      }
+    }
+    if (adminBefore === undefined || adminNow !== adminBefore) {
+      const admin = await storeAdminBeforeRemoval(folder, [])
+      const kept = await keepExistingCommit({ owner, top: folder, operationType: 'worktree-cleanup', sha: admin.commit })
+      clearing.copies.push({ ref: kept.ref, sha: admin.commit, paths: [], admin: true })
+    }
     clearing.adminState = state
     this.saveTrashed(manifestPath, manifest, record)
+  }
+  /** The paths whose version the index of the half-built folder stages that neither HEAD's tree nor the proof's has. */
+  private async newlyStaged(folder: string, manifest: WorktreeReconstructionManifest): Promise<string[]> {
+    const tree = async (sha: string): Promise<Map<string, string>> => new Map((await lifecycleReadAsync(manifest.commonDir, ['ls-tree', '-r', '-z', sha], undefined, LISTING_MAX_BUFFER)).split('\0').filter(Boolean).map((line) => {
+      const tab = line.indexOf('\t')
+      return [line.slice(tab + 1), line.slice(0, tab).split(' ')[2]!] as [string, string]
+    }))
+    const head = await tree(manifest.treeSha)
+    const files = manifest.snapshotTree ? await tree(manifest.snapshotTree) : head
+    const paths = new Set<string>()
+    for (const line of (await lifecycleReadAsync(folder, ['ls-files', '-s', '-z'], undefined, LISTING_MAX_BUFFER)).split('\0').filter(Boolean)) {
+      const tab = line.indexOf('\t'), sha = line.slice(0, tab).split(' ')[1]!, rel = line.slice(tab + 1)
+      if (sha !== head.get(rel) && sha !== files.get(rel)) paths.add(rel)
+    }
+    return [...paths].sort()
   }
   /** Whether the folder at `deletingPath` is still the one the clear renamed: a real folder, with the device and inode it had. */
   private async sameClearingFolder(clearing: HalfBuiltClearing): Promise<boolean> {
@@ -1570,6 +1617,25 @@ export class WorktreeRetirementService {
       if (!expected || expected.kind !== entry.kind || expected.digest !== entry.digest || entry.kind === 'file' && (expected.mode & 0o111) !== (entry.mode & 0o111)) changed.add(entry.path)
     }
     return { changed: [...changed].sort(), entries }
+  }
+  /**
+   * The `.deleting-` folders of every rebuild whose clear of an earlier rebuild's folder has not finished
+   * (`rebuilding.clearing`): each is what is left of a worktree, which the next rebuild finishes, never an unused folder.
+   */
+  clearingFolders(): string[] {
+    const folders: string[] = []
+    const workspaces = join(this.store.root, 'workspaces')
+    let tasks: string[]
+    try { tasks = readdirSync(workspaces) } catch { return [] }
+    for (const task of tasks) {
+      let names: string[]
+      try { names = readdirSync(join(workspaces, task)) } catch { continue }
+      for (const name of names) {
+        if (!name.endsWith('.json')) continue
+        try { const deleting = this.load(join(workspaces, task, name)).rebuilding?.clearing?.deletingPath; if (deleting) folders.push(deleting) } catch { /* Not a record this profile reads. */ }
+      }
+    }
+    return folders
   }
   /** Whether the record of `taskId`'s worktree at `worktreePath` has a rebuild that did not finish (`rebuilding`). */
   rebuildUnfinished(taskId: string, worktreePath: string): boolean {

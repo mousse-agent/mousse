@@ -30,7 +30,7 @@ import { WORKTREE_TRASH_QUIET_MS, WorktreeRetirementService } from './WorktreeRe
 import { expireSnapshotTrash } from '../workspace/SnapshotWorkspace'
 import { expireTrashedSnapshotRefs } from '../actions/SnapshotRefReleaseService'
 import { WorktreeManager } from '../worktree/WorktreeManager'
-import { CLEANUP_QUIET_MS, cleanupRecordFor, DELETING_NAME, listCleanupRecords, onlyInFolderAsync } from '../worktree/verifiedCleanup'
+import { CLEANUP_QUIET_MS, cleanupRecordFor, DELETING_NAME, listCleanupRecords, onlyInFolderAsync, resumeCleanupAsync, type CleanupRecord } from '../worktree/verifiedCleanup'
 import { forgetKeptWorktree, listKeptWorktrees, type KeptWorktree } from './keptWorktrees'
 import { dispatchKeptFilesOwner, registerDispatchKeptFilesFolder } from '../actions/keptCopies'
 
@@ -1260,12 +1260,16 @@ export class StorageCleanupService {
    * against that proof: shown to name that folder and to list only held bytes, then compared, deleted entry by entry,
    * and unregistered. One that stopped (files in it kept changing, say) is tried again once nothing has changed in it for
    * an hour, whether a dispatch or an agent made it. One another run has right now is left to it and not reported.
+   * A thread's worktree whose cleanup stopped (a pull request thread whose start failed) is finished the same way, against
+   * its record alone (`resumeCleanupAsync`): it is no agent's worktree, so it is never checked as one.
    */
   private async stoppedCleanupItems(now: number): Promise<StorageCleanupItem[]> {
     const items: StorageCleanupItem[] = []
+    const threads = this.deps.store.list().map((task) => task.location)
     for (const record of await listCleanupRecords(this.deps.installationHome)) {
       if (this.stopping) return items
-      const base = { rule: 'worktree-orphan' as const, label: `agents/${basename(record.worktreePath)}` }
+      const thread = !record.branch.startsWith('mousse/agent/') && threads.some((location) => samePath(location, record.owner))
+      const base = { rule: 'worktree-orphan' as const, label: `${thread ? 'threads' : 'agents'}/${basename(record.worktreePath)}` }
       const since = record.stopped ? Date.parse(record.changedAt ?? record.stopped.at) : Number.NaN
       const stoppedAt = record.stopped ? Date.parse(record.stopped.at) : Number.NaN
       if (record.stopped && now - Math.max(since, stoppedAt) < CLEANUP_QUIET_MS) {
@@ -1273,7 +1277,7 @@ export class StorageCleanupService {
         continue
       }
       const measurement = existsSync(record.deletingPath) ? await this.measure(record.deletingPath, { mode: 'reclaim', budgetMs: MEASURE_BUDGET_MS }) : undefined
-      const result = await new WorktreeManager(record.repositoryRoot, this.deps.installationHome).cleanupValidatedAgentWorktree(
+      const result = thread ? await this.resumeThreadCleanup(record) : await new WorktreeManager(record.repositoryRoot, this.deps.installationHome).cleanupValidatedAgentWorktree(
         { path: record.deletingPath, branch: record.branch, repositoryRoot: record.repositoryRoot }, { safeCheckout: true })
       if (result.kept?.code === 'cleanup_running') continue
       items.push(result.success
@@ -1284,6 +1288,18 @@ export class StorageCleanupService {
     return items
   }
 
+  /**
+   * Finishes the stopped cleanup of a thread's worktree against its record, owned by that thread, as
+   * `cleanupValidatedAgentWorktree` reports it. A folder that went back to its own path is no cleanup's any more.
+   */
+  private async resumeThreadCleanup(record: CleanupRecord): Promise<{ success: boolean; error?: string; kept?: { code: string } }> {
+    const resumed = await resumeCleanupAsync({ home: this.deps.installationHome, id: record.id, owner: record.owner })
+    if (resumed === 'gone') return { success: false, kept: { code: 'cleanup_running' } }
+    if (resumed === 'restart') return { success: false, error: `It went back to ${record.worktreePath} before its cleanup began, and stays there.` }
+    if ('kept' in resumed) return { success: false, error: resumed.kept.reason, kept: resumed.kept }
+    return { success: true }
+  }
+
   // ---- Orphans ----
 
   /** Directories in the managed worktree folders that nothing claims. Reported with their size, never removed. */
@@ -1292,6 +1308,8 @@ export class StorageCleanupService {
     const items: StorageCleanupItem[] = []
     // A worktree a dispatch left in place has its own row, which can remove it.
     const dispatchKept = new Set(await Promise.all(listKeptWorktrees(this.deps.store.profileHome).map((kept) => canonicalPathAsync(kept.path))))
+    // What is left of a rebuild's clear of an earlier rebuild's folder: the next rebuild finishes it, never unused.
+    const clearing = new Set(await Promise.all(new WorktreeRetirementService(this.deps.store).clearingFolders().map((path) => canonicalPathAsync(path))))
     // Mousse's own folder and every worktree folder the person chose that is there (`worktreeLayout`). One that is not
     // there (a drive not connected) is not looked at: what is in it is out of reach, never unused.
     for (const { path: folder, repository, kind } of await worktreeContainers(this.deps.installationHome)) {
@@ -1308,7 +1326,7 @@ export class StorageCleanupService {
         if (!stat.isDirectory() || stat.isSymbolicLink()) continue
         // Compared by real paths, so a record that names this folder through an alias still claims it.
         const real = await canonicalPathAsync(directory)
-        if (dispatchKept.has(real) || claims.some((claim) => claimOverlapsPath(claim, real))) continue
+        if (dispatchKept.has(real) || clearing.has(real) || claims.some((claim) => claimOverlapsPath(claim, real))) continue
         const measurement = await this.measure(directory, { mode: 'reclaim', budgetMs: MEASURE_BUDGET_MS })
         if (!measurement.files) continue // An empty leftover folder holds nothing.
         // A thread whose checkout can't be verified may still use a folder of its repository: not called unused, and says why.
