@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { errorDiagnostic, knownAppError, normalizeAppError, parseErrorInfo, type AppErrorShape } from '../../shared/errors'
 import type { TaskLifecycleRecord, TrashRetentionPolicy } from '../../shared/resourceLifecycle'
-import { storagePolicyHasRule, type StoragePolicy } from '../../shared/storage'
+import { storagePolicyHasRule, type StoragePolicy, type WorktreeFolderStatus } from '../../shared/storage'
 import { parseStoragePolicy, parseStoragePolicyReply } from '../../shared/storageReply'
 import { trashCount } from '../lib/trashInventory'
 import { setStorageReviewPending } from '../lib/storageReview'
@@ -9,6 +9,7 @@ import { RecommendedRulesNotice, recommendedPolicy } from './storage/Recommended
 import { StorageCleanupSection } from './storage/StorageCleanupSection'
 import { StoragePolicyRows } from './storage/StoragePolicyRows'
 import { StorageUsageSection } from './storage/StorageUsageSection'
+import { WorktreeFolderRow } from './storage/WorktreeFolderRow'
 import '../styles/storage.css'
 
 export function StorageSettings() {
@@ -18,6 +19,8 @@ export function StorageSettings() {
   const [policy, setPolicy] = useState<StoragePolicy>()
   const [storagePaused, setStoragePaused] = useState(false)
   const [reviewRecommended, setReviewRecommended] = useState(false)
+  const [worktreeFolder, setWorktreeFolder] = useState<WorktreeFolderStatus>()
+  const [folderRefusal, setFolderRefusal] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const [usageKey, setUsageKey] = useState(0)
@@ -26,7 +29,9 @@ export function StorageSettings() {
   const inFlight = useRef<Promise<void> | null>(null)
   const reload = useCallback((): Promise<void> => {
     if (inFlight.current) return inFlight.current
-    const request = Promise.all([window.mousse.threads.inventory(), window.mousse.storage.policy()]).then(([inventory, stored]) => {
+    // An older service without the worktree folder: the row stays as it is.
+    const folder = Promise.resolve().then(() => window.mousse.storage.worktreeFolder()).then(({ status }) => { if (mounted.current) setWorktreeFolder(status) }, () => undefined)
+    const request = Promise.all([window.mousse.threads.inventory(), window.mousse.storage.policy(), folder]).then(([inventory, stored]) => {
       // A reply that does not look like a policy is refused before it reaches a control.
       const reply = parseStoragePolicyReply(stored)
       if (!mounted.current) return
@@ -95,6 +100,25 @@ export function StorageSettings() {
     if (mounted.current) setPolicy(parseStoragePolicy(saved.policy))
   })
 
+  // The folder picker opens in the app; the daemon checks the folder and says why when it refuses one.
+  // A folder the daemon refuses is named in the row, with why (a drive that can't store file permissions, say).
+  const chooseWorktreeFolder = () => void run(async () => {
+    setFolderRefusal('')
+    try {
+      const chosen = await window.mousse.storage.chooseWorktreeFolder()
+      if (chosen && mounted.current) setWorktreeFolder(chosen.status)
+    } catch (cause) {
+      const shape = cause as Partial<AppErrorShape> | null
+      if (shape?.code !== 'invalid_worktree_folder' || typeof shape.message !== 'string') throw cause
+      if (mounted.current) setFolderRefusal(shape.message)
+    }
+  })
+  const resetWorktreeFolder = () => void run(async () => {
+    setFolderRefusal('')
+    const { status } = await window.mousse.storage.resetWorktreeFolder()
+    if (mounted.current) setWorktreeFolder(status)
+  })
+
   // Dismissing leaves every rule as it is; turning the recommended rules on is an ordinary save.
   const dismissReview = () => void run(async () => { await window.mousse.storage.reviewDismiss() })
   const hasRule = Boolean(policy && trash && storagePolicyHasRule(policy, trash))
@@ -112,6 +136,7 @@ export function StorageSettings() {
       onPolicy={savePolicy}
       onResumeTrash={() => { if (trash) saveTrash(trash) }}
       onResumeStorage={() => { if (policy) savePolicy(policy) }}
+      worktreeFolder={<WorktreeFolderRow status={worktreeFolder} busy={busy} refusal={folderRefusal} onChoose={chooseWorktreeFolder} onReset={resetWorktreeFolder} />}
     />
     {error && <p className="storage-error" role="alert">{error}</p>}
 

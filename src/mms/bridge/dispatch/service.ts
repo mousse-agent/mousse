@@ -40,6 +40,7 @@ import { canonicalRepository, portableRepository, REPO_ID } from './repository'
 import { dispatchRequest } from './validate'
 import { commitDispatchResult, git, remoteGit } from './git'
 import { LISTING_MAX_BUFFER } from '../../git/runGitProcess'
+import { chosenWorktreeFolder } from '../../worktree/worktreeLayout'
 import type {
   DispatchArtifacts,
   DispatchRecord,
@@ -275,7 +276,7 @@ export class DispatchService {
           record.worktree = info
           this.save(record)
         },
-        { safeCheckout: true }
+        { safeCheckout: true, worktreeFolder: chosenWorktreeFolder(this.options.profileHome) }
       )
       const thread = this.options.threads.ensureExecutionThread(
         `bridge.dispatch:${execution}`,

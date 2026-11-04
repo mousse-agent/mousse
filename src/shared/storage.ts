@@ -252,3 +252,15 @@ export function summarizeCleanupReport(report: StorageCleanupReport): string {
   if (report.bytesApproximate) return `${counts} About ${size} recovered.`
   return `${counts} ${size} recovered.`
 }
+
+/**
+ * Settings → Storage → Worktree folder: where new worktrees go. `folder` null is Mousse's own folder (`defaultFolder`).
+ * `previous` are folders chosen before that still hold worktrees, which stay where they are. `connected` is false when
+ * the folder is not there, which is how a drive that is not connected looks.
+ */
+export interface WorktreeFolderStatus {
+  folder: string | null
+  defaultFolder: string
+  connected: boolean
+  previous: Array<{ folder: string; connected: boolean }>
+}

@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto'
+import { chosenFolderPlace, folderConnected, knownWorktreeFolders, worktreeContainers, WORKTREE_TRASH_FOLDER } from '../worktree/worktreeLayout'
 import { lstat, readFile, readdir, realpath } from 'node:fs/promises'
 import { existsSync, readFileSync } from 'node:fs'
 import { basename, isAbsolute, join, relative, sep } from 'node:path'
@@ -484,6 +485,11 @@ export class StorageUsageService {
     for (const lex of [this.deps.installationHome, this.deps.store.profileHome]) {
       try { bases.push({ lex, real: await realpath(lex) }) } catch { /* Absent: nothing is inside it. */ }
     }
+    // The worktree folders the person chose that are there: their worktrees count where they are (`worktreeLayout`).
+    for (const lex of knownWorktreeFolders()) {
+      if (!await folderConnected(lex)) continue
+      try { bases.push({ lex, real: await realpath(lex) }) } catch { /* Gone since: nothing is inside it. */ }
+    }
     return { bases, linkFree: new Map() }
   }
 
@@ -670,6 +676,9 @@ export class StorageUsageService {
       yield step()
     }
     await push('worktrees', join(installationHome, 'wf'))
+    // And Mousse's folders in each worktree folder the person chose that is there: each repository's, and the trash.
+    for (const container of await worktreeContainers(installationHome)) if (container.chosen && container.kind === 'folder') await push('worktrees', container.path)
+    for (const folder of knownWorktreeFolders()) await push('other', join(folder, WORKTREE_TRASH_FOLDER))
     // The rest, so the total matches the disk: this profile's folder, then the installation's own files
     // (other profiles are left out; they are not this profile's data).
     await push('other', profileHome)
@@ -804,6 +813,8 @@ function isWorktreePlace(path: string, installationHomes: readonly string[], pro
     }
     return undefined
   }
+  // A worktree folder the person chose: a folder in one of its repository folders (`worktreeLayout`).
+  if ((chosenFolderPlace(path)?.rest.length ?? 0) >= 1) return true
   const installation = below(installationHomes)
   if (installation) {
     if (installation[0] === 'repositories' && installation[2] === 'worktrees' && (installation[3] === 'threads' || installation[3] === 'agents') && installation.length >= 5) return true

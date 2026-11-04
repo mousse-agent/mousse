@@ -2,7 +2,7 @@ import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { existsSync, lstatSync, readFileSync, statSync } from 'node:fs'
 import { access, mkdir, realpath } from 'node:fs/promises'
-import { isAbsolute, join, relative, resolve } from 'node:path'
+import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import type { ExecutionContext, ExecutionWorkspaceRevision } from '../../shared/execution/types'
 import { ThreadActionService } from '../actions/ThreadActionService'
 import { ChangeReceiptService } from '../actions/ChangeReceiptService'
@@ -23,6 +23,7 @@ import { atomicWriteJsonSync } from '../data/AtomicFs'
 import type { ProjectManager } from '../data/ProjectManager'
 import type { ThreadDataStore } from '../data/ThreadDataStore'
 import { getMousseHomeDir } from '../data/paths'
+import { assertWorktreeFolderConnected, chosenFolderPlace, chosenWorktreeFolder, defaultThreadWorktreePath, defaultWorkflowAgentWorktreeBase, isThreadWorktreePlace, isWorkflowAgentWorktreePlace, placeWorkflowAgentWorktreeBase } from '../worktree/worktreeLayout'
 import { acquireRepositoryLease, type RepositoryLeaseHandle } from '../git/RepositoryLease'
 import { resolveRepositoryIdentityAsync } from '../git/RepositoryIdentity'
 import { DomainRpcError } from '../protocol/domainRegistry'
@@ -351,16 +352,18 @@ async function validateThreadWorkspaceMetadata(
   if (typeof branchId !== 'string' || !/^[a-z0-9][a-z0-9_-]{0,127}$/i.test(branchId)) {
     throw new DomainRpcError('thread_unavailable', 'Thread workspace branch identity is invalid')
   }
-  const expectedPath = join(repository.worktreeBase, 'threads', threadId, branchId)
+  const expectedPath = defaultThreadWorktreePath(getMousseHomeDir(), repository.repositoryId, threadId, branchId)
   const activated = new ConversationBranchService(manager.threadDirectory).list()
     .find((branch) => branch.id === branchId && branch.lifecycle === 'active')
   // Activating a conversation branch no longer switches Git branches, so the checkout stays on the thread's own; forks made
   // before snapshots recorded a Git branch of their own, which the checkout may still be on.
   const ownBranch = isThreadOwnBranch(metadata.branch, threadId, branchId, activated)
   const expectedRef = activated?.retainedRef ?? `refs/mousse/threads/${threadId}/${branchId}`
-  const ownedPath = activated
-    ? await pathInside(join(repository.worktreeBase, 'threads', threadId), metadata.worktreePath)
-    : await pathsEqual(metadata.worktreePath, expectedPath)
+  // A worktree made in a worktree folder the person chose is named after the thread's branch there (`worktreeLayout`).
+  const inChosenFolder = Boolean(chosenFolderPlace(metadata.worktreePath)) && isThreadWorktreePlace(metadata.worktreePath, { home: getMousseHomeDir(), repositoryId: repository.repositoryId, threadId })
+  const ownedPath = inChosenFolder || (activated
+    ? await pathInside(dirname(expectedPath), metadata.worktreePath)
+    : await pathsEqual(metadata.worktreePath, expectedPath))
   if (
     metadata.threadId !== threadId ||
     metadata.repositoryId !== repository.repositoryId ||
@@ -371,7 +374,7 @@ async function validateThreadWorkspaceMetadata(
   ) {
     throw new DomainRpcError('thread_unavailable', 'Thread workspace metadata does not match the live project binding')
   }
-  if (!await pathInside(repository.worktreeBase, metadata.worktreePath)) {
+  if (!inChosenFolder && !await pathInside(repository.worktreeBase, metadata.worktreePath)) {
     throw new DomainRpcError('thread_unavailable', 'Thread workspace path is outside the repository workspace root')
   }
 }
@@ -709,15 +712,17 @@ async function reuseAgentWorktree(
   liveBinding(owner, context)
   const agentId = agentWorktreeId(context.profileId, context.threadId, idempotencyKey)
   const ownerDigest = digestIdentity(`${context.profileId}:${context.threadId}`).slice(0, 24)
-  const worktreesBase = join(getMousseHomeDir(), 'wf', thread.repositoryId.slice(0, 16), ownerDigest)
-  const identity = WorktreeIdentity.forAgent(worktreesBase, agentId)
+  const identity = WorktreeIdentity.forAgent(defaultWorkflowAgentWorktreeBase(getMousseHomeDir(), thread.repositoryId, ownerDigest), agentId)
   const expectedRef = `refs/mousse/workflows/${context.profileId}/${context.threadId}/${agentId}`
-  const expectedCwd = await projectCwd(identity.path, thread.projectRelativeSubdirectory)
+  // Mousse's own `wf` folder, or the repository's agents folder in a worktree folder the person chose (`worktreeLayout`).
+  await assertWorktreeFolderConnected(record.worktreePath)
+  const placed = isWorkflowAgentWorktreePlace(record.worktreePath, { home: getMousseHomeDir(), repositoryId: thread.repositoryId, ownerDigest, agentId })
+  const expectedCwd = await projectCwd(placed ? record.worktreePath : identity.path, thread.projectRelativeSubdirectory)
   if (
     record.repositoryId !== thread.repositoryId ||
     record.branch !== identity.branch ||
     record.retainedRef !== expectedRef ||
-    !await pathsEqual(record.worktreePath, identity.path) ||
+    !placed ||
     !await pathsEqual(record.projectCwd, expectedCwd)
   ) {
     throw new DomainRpcError('thread_unavailable', 'Workflow agent workspace is bound to a different repository')
@@ -747,7 +752,8 @@ async function createAgentWorktree(input: {
   // Keep the registered worktree path short enough for Windows while retaining
   // stable ownership identity in the profile/thread keyed directory and record.
   const ownerDigest = digestIdentity(`${input.context.profileId}:${input.context.threadId}`).slice(0, 24)
-  const worktreesBase = join(getMousseHomeDir(), 'wf', input.thread.repositoryId.slice(0, 16), ownerDigest)
+  // In the worktree folder the person chose when it is connected, Mousse's own `wf` folder otherwise (`worktreeLayout`).
+  const worktreesBase = await placeWorkflowAgentWorktreeBase({ home: getMousseHomeDir(), folder: chosenWorktreeFolder(input.thread.threadDirectory), repositoryId: input.thread.repositoryId, projectName: basename(input.thread.gitTopLevel), ownerDigest })
   const identity = WorktreeIdentity.forAgent(worktreesBase, agentId)
   const retainedRef = `refs/mousse/workflows/${input.context.profileId}/${input.context.threadId}/${agentId}`
   let threadLease: ThreadLeaseHandle | undefined

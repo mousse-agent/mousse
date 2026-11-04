@@ -1283,6 +1283,20 @@ export function registerGuiIpc(
   // A run may purge large trees; it must not hit the 60 s default.
   registerStorageHandler('storage:cleanupRun', async (_e, token?: unknown) => guiMms.request('storage.cleanup.run', token === undefined ? {} : { token }, 15 * 60_000))
   registerStorageHandler('storage:cleanupLastReport', async () => guiMms.request('storage.cleanup.lastReport', {}))
+  // Settings → Storage → Worktree folder. The folder is picked here, with the system's folder picker, and checked by the daemon.
+  registerStorageHandler('storage:worktreeFolder', async () => guiMms.request('storage.worktreeFolder', {}))
+  registerStorageHandler('storage:chooseWorktreeFolder', async () => {
+    const win = getWindow()
+    const options: Electron.OpenDialogOptions = {
+      title: 'Choose a folder for new worktrees',
+      buttonLabel: 'Use this folder',
+      properties: ['openDirectory', 'createDirectory']
+    }
+    const result = win ? await dialog.showOpenDialog(win, options) : await dialog.showOpenDialog(options)
+    if (result.canceled || result.filePaths.length === 0) return null
+    return guiMms.request('storage.setWorktreeFolder', { folder: result.filePaths[0] })
+  })
+  registerStorageHandler('storage:resetWorktreeFolder', async () => guiMms.request('storage.setWorktreeFolder', { folder: null }))
   // The first call on a profile measures it, which can take most of the scan budget.
   registerStorageHandler('storage:usage', async (_e, options?: { refresh?: boolean }) =>
     guiMms.request('storage.usage', options?.refresh === true ? { refresh: true } : {}, 120_000)

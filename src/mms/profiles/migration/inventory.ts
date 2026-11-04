@@ -1,5 +1,6 @@
 import { existsSync, lstatSync, readdirSync, readFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
+import { defaultWorktreeBase } from '../../worktree/worktreeLayout'
 import { MigrationAmbiguityError } from '../../../shared/profiles/errors'
 import type { MigrationInventoryEntry, TreeDigest } from '../../../shared/profiles/types'
 import type { InstallationPaths } from '../paths'
@@ -112,7 +113,7 @@ export function inventoryLegacyHome(installation: InstallationPaths): LegacyHome
   const repositoryWorktreeBases: string[] = []
   if (existsSync(installation.repositoriesDir)) {
     for (const repo of listChildNames(installation.repositoriesDir)) {
-      const worktrees = join(installation.repositoriesDir, repo, 'worktrees')
+      const worktrees = defaultWorktreeBase(dirname(installation.repositoriesDir), repo)
       if (existsSync(worktrees)) repositoryWorktreeBases.push(worktrees)
     }
   }

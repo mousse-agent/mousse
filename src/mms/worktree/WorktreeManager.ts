@@ -1,4 +1,4 @@
-import { access, mkdir, readdir, stat } from 'fs/promises'
+import { access, readdir, stat } from 'fs/promises'
 import { GIT_NULL_DEVICE } from '../git/gitNullDevice'
 import { basename, join, relative, resolve, sep } from 'path'
 import simpleGit, { SimpleGit } from 'simple-git'
@@ -11,6 +11,7 @@ import { keepCopy, keepExistingCommit, KeepCopyRefusedError, KeepCopyTooLargeErr
 import { storeAdminBeforeRemoval } from '../lifecycle/worktreeAdminData'
 import { withGitMutationLocks } from '../actions/GitOperationCoordinator'
 import { withGitAccess } from '../git/gitPolicy'
+import { agentWorktreeBases, chosenFolderPlace, isAgentWorktreePlace, placeAgentWorktreeBase } from './worktreeLayout'
 
 
 /** `existsSync` without blocking the daemon. */
@@ -145,12 +146,12 @@ export class WorktreeManager {
     repositoryPath = this.repoRoot,
     baseSha?: string,
     beforeCreate?: (info: WorktreeInfo) => void,
-    options?: { safeCheckout?: boolean }
+    /** `worktreeFolder`: the worktree folder the person chose (Settings → Storage); unset for Mousse's own. */
+    options?: { safeCheckout?: boolean; worktreeFolder?: string }
   ): Promise<WorktreeInfo> {
     const repository = await RepositoryContext.open(repositoryPath)
     const repositoryId = (await resolveRepositoryIdentityAsync(repository.root, { requireMutationCapability: true })).key
-    const worktreesBase = join(this.installationHome, 'repositories', repositoryId, 'worktrees', 'agents')
-    await mkdir(worktreesBase, { recursive: true })
+    const worktreesBase = await placeAgentWorktreeBase({ home: this.installationHome, folder: options?.worktreeFolder, repositoryId, projectName: basename(repository.root) })
     const identity = WorktreeIdentity.forAgent(worktreesBase, agentId)
     if (await exists(identity.path)) {
       throw new Error(`Refusing to reuse existing agent worktree path: ${identity.path}`)
@@ -187,7 +188,8 @@ export class WorktreeManager {
   }
 
   /**
-   * True when path is a directory under `.mousse-worktrees` with an agent-* name.
+   * True when path is an agent's worktree where Mousse makes them (`worktreeLayout`: its own folder, or a worktree folder
+   * the person chose), or a directory under the old `.mousse-worktrees` with an agent-* name.
    * Prevents cleanup from touching unrelated project data.
    */
   isValidatedAgentWorktreePath(worktreePath: string): boolean {
@@ -198,10 +200,12 @@ export class WorktreeManager {
     if (
       externalParts.length === 4 &&
       /^[a-f0-9]{32}$/i.test(externalParts[0]) &&
-      externalParts[1] === 'worktrees' &&
-      externalParts[2] === 'agents' &&
-      /^[a-z0-9][a-z0-9_-]{2,127}$/i.test(externalParts[3])
+      /^[a-z0-9][a-z0-9_-]{2,127}$/i.test(externalParts[3]) &&
+      isAgentWorktreePlace(resolved, { home: this.installationHome, repositoryId: externalParts[0], agentId: externalParts[3] })
     ) return true
+    // `<folder>/<project>-<short key>/agents/<agent>` in a worktree folder the person chose.
+    const chosen = chosenFolderPlace(resolved)
+    if (chosen && chosen.rest.length === 2 && chosen.rest[0] === 'agents' && /^[a-z0-9][a-z0-9_-]{2,127}$/i.test(chosen.rest[1]!)) return true
     const base = resolve(this.worktreesBase)
     if (resolved === base) return false
     const rel = relative(base, resolved)
@@ -304,10 +308,12 @@ export class WorktreeManager {
       const repository = await this.repositoryFor(worktreeInfo)
       const agentId = worktreeInfo.branch.match(/^mousse\/agent\/(.+)$/)?.[1]
       const repositoryId = (await resolveRepositoryIdentityAsync(repository.root, { requireMutationCapability: true })).key
-      const expectedBase = join(this.installationHome, 'repositories', repositoryId, 'worktrees', 'agents')
-      const identity = agentId ? WorktreeIdentity.forAgent(expectedBase, agentId) : undefined
-      const valid = identity
-        ? WorktreeIdentity.isPathFor(identity, expectedBase) && resolve(worktreeInfo.path) === resolve(identity.path)
+      // In Mousse's own agents folder, or the repository's in a worktree folder the person chose (`worktreeLayout`).
+      const valid = agentId
+        ? (await agentWorktreeBases(this.installationHome, repositoryId)).some((base) => {
+          const identity = WorktreeIdentity.forAgent(base, agentId)
+          return WorktreeIdentity.isPathFor(identity, base) && resolve(worktreeInfo.path) === resolve(identity.path) && isAgentWorktreePlace(identity.path, { home: this.installationHome, repositoryId, agentId })
+        })
         : this.isValidatedAgentWorktreePath(worktreeInfo.path)
       if (!valid) {
         return { success: false, error: `Refusing to remove path that is not a validated agent worktree: ${worktreeInfo.path}` }

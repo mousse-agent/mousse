@@ -400,6 +400,8 @@ export const PROTOCOL_METHODS = [
   'storage.policy',
   'storage.configure',
   'storage.reviewDismiss',
+  'storage.worktreeFolder',
+  'storage.setWorktreeFolder',
   'storage.cleanup.run',
   'storage.cleanup.plan',
   'storage.cleanup.lastReport',

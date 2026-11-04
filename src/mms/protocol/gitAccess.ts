@@ -186,6 +186,8 @@ export const GIT_ACCESS = {
   'storage.policy': 'owned',
   'storage.configure': 'none',
   'storage.reviewDismiss': 'none',
+  'storage.worktreeFolder': 'none',
+  'storage.setWorktreeFolder': 'none',
   'storage.cleanup.run': 'owned',
   'storage.cleanup.plan': 'read',
   'storage.cleanup.lastReport': 'none',

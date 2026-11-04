@@ -4,11 +4,11 @@ import { assertFolderUnchanged, folderSignatureAsync, walkOwnedContentAsync } fr
 import { getThreadLifecycleGate } from '../queue/ThreadLifecycleAdmission'
 import { execFileSync } from 'node:child_process'
 import { existsSync, readFileSync, realpathSync } from 'node:fs'
-import { access, mkdir, realpath, rename, rm } from 'node:fs/promises'
+import { access, mkdir, readdir, realpath, rename, rm } from 'node:fs/promises'
 import { nonInteractiveGitEnv } from '../git/gitEnv'
 import { assertGitAllowedAsync, rethrowGitPolicyError, type UserAction } from '../git/gitPolicy'
 import { safeWorktreeGit } from '../worktree/WorktreeManager'
-import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
+import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { assertHeldThreadLease } from '../actions/GitOperationCoordinator'
 import { moveFilesAsync, snapshotOriginAsync } from '../actions/snapshots'
 import { waitForFolderAccess } from '../files/folderAccess'
@@ -17,6 +17,7 @@ import { loadSnapshotWorkspaceMetadataAsync } from './SnapshotWorkspace'
 import { atomicWriteJsonSync } from '../data/AtomicFs'
 import { ThreadJournal } from '../data/ThreadJournal'
 import { getMousseHomeDir } from '../data/paths'
+import { assertWorktreeFolderConnected, chosenFolderHolding, chosenWorktreeFolder, defaultWorktreeBase, notConnectedPlacementNote, placeThreadWorktree, worktreeRegistrationOf, worktreeRegistrationOfSync } from '../worktree/worktreeLayout'
 import { acquireRepositoryLease, type RepositoryLeaseHandle } from '../git/RepositoryLease'
 import { resolveRepositoryIdentity, resolveRepositoryIdentityAsync, type RepositoryIdentity } from '../git/RepositoryIdentity'
 import {
@@ -196,7 +197,7 @@ function repositoryContext(requested: string, topLevel: string, identity: Reposi
     gitCommonDirectory: identity.commonDir,
     primaryCheckoutPath: topLevel,
     projectRelativeSubdirectory: subdirectory,
-    worktreeBase: join(getMousseHomeDir(), 'repositories', identity.key, 'worktrees'),
+    worktreeBase: defaultWorktreeBase(getMousseHomeDir(), identity.key),
     capability: capability()
   }
 }
@@ -211,6 +212,11 @@ export function isProjectFolderWorkspace(metadata: Pick<ThreadWorkspaceMetadata,
 
 export class ThreadWorkspaceManager {
   readonly journal: ThreadJournal
+  /**
+   * Set by the last {@link provision} that made a worktree: what the thread is told about where it went, when the
+   * worktree folder the person chose was not connected and it went to Mousse's own folder instead.
+   */
+  placementNote?: string
 
   constructor(readonly threadDirectory: string) {
     this.journal = new ThreadJournal(threadDirectory)
@@ -353,8 +359,20 @@ export class ThreadWorkspaceManager {
       // Named once, under the repository's lease, so two threads cannot take the same name.
       const branch = await threadBranchNameAsync(options.nameFrom, threadId, async (name) => (await tryGit(repository.primaryCheckoutPath, ['for-each-ref', '--count=1', '--format=%(refname)', `refs/heads/${name}`])).stdout !== '')
       const retainedRef = `refs/mousse/threads/${threadId}/${conversationBranchId}`
-      const worktreePath = join(repository.worktreeBase, 'threads', threadId, conversationBranchId)
-      await mkdir(join(repository.worktreeBase, 'threads', threadId), { recursive: true })
+      // In the worktree folder the person chose (Settings → Storage), or Mousse's own; see `worktreeLayout`.
+      const placement = await placeThreadWorktree({
+        home: getMousseHomeDir(),
+        folder: chosenWorktreeFolder(this.threadDirectory),
+        repositoryId: repository.repositoryId,
+        projectName: basename(repository.primaryCheckoutPath),
+        threadId,
+        conversationBranchId,
+        branch,
+        // A name Git or a reconstruction manifest still names is never given to another worktree.
+        taken: (path) => this.pathNamed(repository.primaryCheckoutPath, path)
+      })
+      const worktreePath = placement.path
+      this.placementNote = placement.notConnected ? notConnectedPlacementNote(placement.notConnected) : undefined
       const intent = this.journal.append({
         operationId,
         operationType: 'workspace-provision',
@@ -426,6 +444,20 @@ export class ThreadWorkspaceManager {
     }
   }
 
+  /** Whether Git registers a worktree at `path`, or any thread's reconstruction manifest names it. */
+  private async pathNamed(checkoutPath: string, path: string): Promise<boolean> {
+    const listed = (await tryGit(checkoutPath, ['worktree', 'list', '--porcelain'])).stdout.split(/\r?\n/)
+    const fold = (value: string): string => process.platform === 'win32' || process.platform === 'darwin' ? resolve(value).toLowerCase() : resolve(value)
+    if (listed.some((line) => line.startsWith('worktree ') && fold(line.slice('worktree '.length)) === fold(path))) return true
+    const gate = getThreadLifecycleGate(this.threadDirectory)
+    if (!(gate instanceof ResourceLifecycleStore)) return false
+    const retirement = new WorktreeRetirementService(gate)
+    let tasks: string[] = []
+    try { tasks = await readdir(join(gate.root, 'workspaces')) } catch { return false }
+    for (const task of tasks) if (await access(retirement.pathFor(task, path)).then(() => true, () => false)) return true
+    return false
+  }
+
   hasReconstructionManifest(metadata = this.load()): boolean {
     const gate = getThreadLifecycleGate(this.threadDirectory)
     return Boolean(metadata && gate instanceof ResourceLifecycleStore && existsSync(new WorktreeRetirementService(gate).pathFor(metadata.threadId, metadata.worktreePath)))
@@ -441,6 +473,9 @@ export class ThreadWorkspaceManager {
     if (isProjectFolderWorkspace(current)) return this.verify(current)
     const metadata = this.load()
     if (!metadata) throw new Error('Thread workspace metadata is missing')
+    // A worktree on a drive that is not connected is there, out of reach: it waits for the drive, and is never rebuilt
+    // in its place (which would make its folder again on the disk the drive is mounted on).
+    await assertWorktreeFolderConnected(metadata.worktreePath)
     const verified = await this.verify(metadata)
     const unfinishedProvision = [...this.journal.latestByOperation().values()].some((entry) => entry.operationType === 'workspace-provision' && !['completed', 'cancelled'].includes(entry.state))
     if (verified.lifecycle === 'ready' && metadata.lifecycle === 'ready' && !unfinishedProvision) return verified
@@ -574,7 +609,11 @@ export class ThreadWorkspaceManager {
    */
   verifySync(metadata = this.load()): ThreadWorkspaceMetadata {
     if (!metadata) throw new Error('Thread workspace metadata is missing')
+    if (this.rebuildUnfinished(metadata)) return { ...metadata, lifecycle: 'missing' as const, lastVerifiedAt: new Date().toISOString() }
     if (!existsSync(metadata.worktreePath)) return { ...metadata, lifecycle: 'missing' as const, lastVerifiedAt: new Date().toISOString() }
+    if (!isProjectFolderWorkspace(metadata) && chosenFolderHolding(metadata.worktreePath) && 'problem' in worktreeRegistrationOfSync(metadata.worktreePath)) {
+      return { ...metadata, lifecycle: 'recovery_required' as const, lastVerifiedAt: new Date().toISOString() }
+    }
     try {
       gitSync(metadata.worktreePath, ['rev-parse', '--show-toplevel'])
       if (this.hasPendingOperation()) throw new Error('A Mousse operation is waiting for recovery.')
@@ -587,11 +626,51 @@ export class ThreadWorkspaceManager {
   }
 
   /** Reads the worktree with Git and async calls, never blocking the daemon. */
+  /**
+   * The repository moved (and `git worktree repair` brought its worktrees along): the round trip of the worktree's `.git`
+   * proved which repository registers it, and that repository holds the thread's own retained ref, so it is the same one
+   * under a new key. The record takes the new key; anything else about it stays. An unrelated repository never holds
+   * the thread's ref, and the record is then left as it is, and the worktree refused.
+   */
+  private async rebind(metadata: ThreadWorkspaceMetadata, repositoryId: string): Promise<ThreadWorkspaceMetadata> {
+    if (!metadata.retainedRef || !(await tryGit(metadata.worktreePath, ['rev-parse', '--verify', '-q', `${metadata.retainedRef}^{commit}`])).ok) {
+      return { ...metadata, lifecycle: 'recovery_required' as const }
+    }
+    const rebound = { ...metadata, repositoryId }
+    // Written only over the record it was read from, so a write that came in meanwhile is never undone.
+    try {
+      const stored = JSON.parse(readFileSync(this.workspacePath, 'utf8')) as ThreadWorkspaceMetadata
+      if (stored.repositoryId === metadata.repositoryId && stored.worktreePath === metadata.worktreePath) atomicWriteJsonSync(this.workspacePath, { ...stored, repositoryId })
+    } catch (error) {
+      console.warn('the moved repository could not be recorded', { threadId: metadata.threadId, error: error instanceof Error ? error.message : String(error) })
+    }
+    return rebound
+  }
+
+  /** Whether the worktree's record has a rebuild that did not finish: the folder at its path is then not the worktree. */
+  rebuildUnfinished(metadata: ThreadWorkspaceMetadata): boolean {
+    const gate = getThreadLifecycleGate(this.threadDirectory)
+    return !isProjectFolderWorkspace(metadata) && gate instanceof ResourceLifecycleStore && new WorktreeRetirementService(gate).rebuildUnfinished(metadata.threadId, metadata.worktreePath)
+  }
+
   async verify(metadata = this.load()): Promise<ThreadWorkspaceMetadata> {
     if (!metadata) throw new Error('Thread workspace metadata is missing')
+    // An unfinished rebuild is never the worktree, whatever is at its path: the next restore finishes it (`clearHalfBuilt`).
+    if (this.rebuildUnfinished(metadata)) return { ...metadata, lifecycle: 'missing' as const, lastVerifiedAt: new Date().toISOString() }
     if (!await pathExists(metadata.worktreePath)) {
       const missing = { ...metadata, lifecycle: 'missing' as const, lastVerifiedAt: new Date().toISOString() }
       return missing
+    }
+    // In a worktree folder the person chose, before any Git runs there: the folder must be this repository's registered
+    // worktree, or it is someone else's (another drive at the same path, a folder put there by hand).
+    if (!isProjectFolderWorkspace(metadata) && chosenFolderHolding(metadata.worktreePath)) {
+      const registration = await worktreeRegistrationOf(metadata.worktreePath)
+      if ('problem' in registration) return { ...metadata, lifecycle: 'recovery_required' as const, lastVerifiedAt: new Date().toISOString() }
+      if (registration.repositoryId !== metadata.repositoryId) {
+        const rebound = await this.rebind(metadata, registration.repositoryId)
+        if (rebound.lifecycle === 'recovery_required') return { ...rebound, lastVerifiedAt: new Date().toISOString() }
+        metadata = rebound
+      }
     }
     try {
       // The branch and HEAD are the agent's to move: ready means the checkout is there and no Mousse operation waits.

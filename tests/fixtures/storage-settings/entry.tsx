@@ -32,8 +32,15 @@ const daemon = {
   report: null as unknown,
   runMode: 'ok' as 'ok' | 'fail' | 'timeout',
   /** How long the dry run's token stays valid. */
-  planTtl: 600_000
+  planTtl: 600_000,
+  /** Settings → Storage → Worktree folder, as the daemon reports it. */
+  worktreeFolder: { folder: null as string | null, defaultFolder: '/Users/you/.mousse/repositories', connected: true, previous: [] as Array<{ folder: string; connected: boolean }> },
+  /** The next pick is a folder on a drive the daemon refuses. */
+  refusePick: false
 }
+const REFUSAL = "This drive (exFAT) can't store file permissions, which Git worktrees need. Pick a folder on an APFS, HFS+, NTFS or ext4 drive."
+/** The folder the scripted folder picker answers with. */
+const PICKED_FOLDER = '/Volumes/T7/Mousse worktrees'
 
 const names = { projects: { p1: 'Mousse', p2: 'Website' }, threads: { t1: 'Fix storage', t2: 'Add search', t3: 'Landing page', t4: 'Gone thread' } }
 const localUsage = (fresh: boolean) => daemon.usageMode === 'malformed'
@@ -97,6 +104,18 @@ Object.assign(window, {
       reviewDismiss: record('storage.reviewDismiss', () => { daemon.reviewRecommended = false; return { reviewRecommended: false } }),
       usage: record('storage.usage', (options?: { refresh?: boolean }) => localUsage(options?.refresh === true)),
       cleanupLastReport: async () => ({ report: daemon.report }),
+      worktreeFolder: async () => ({ status: structuredClone(daemon.worktreeFolder) }),
+      chooseWorktreeFolder: record('storage.chooseWorktreeFolder', () => {
+        if (daemon.refusePick) { daemon.refusePick = false; throw { code: 'invalid_worktree_folder', message: REFUSAL, errorInfo: { category: 'internal', retryable: false } } }
+        const before = daemon.worktreeFolder.folder
+        daemon.worktreeFolder = { ...daemon.worktreeFolder, folder: PICKED_FOLDER, connected: true, previous: before ? [{ folder: before, connected: true }] : [] }
+        return { status: structuredClone(daemon.worktreeFolder) }
+      }),
+      resetWorktreeFolder: record('storage.resetWorktreeFolder', () => {
+        const before = daemon.worktreeFolder.folder
+        daemon.worktreeFolder = { ...daemon.worktreeFolder, folder: null, connected: true, previous: before ? [{ folder: before, connected: true }] : [] }
+        return { status: structuredClone(daemon.worktreeFolder) }
+      }),
       cleanupPlan: record('storage.cleanupPlan', () => ({ plan, token: { issuedAt: Date.now(), expiresAt: Date.now() + daemon.planTtl, policyDigest: 'digest', keys: ['worktree:t2', 'worktree:old'] } })),
       cleanupRun: record('storage.cleanupRun', (_token?: unknown) => {
         if (daemon.runMode === 'fail') throw Object.assign(new Error('The cleanup service stopped'), { code: 'internal' })
@@ -222,6 +241,24 @@ async function run() {
     measuredAt: text(tid('storage-measured-at')),
     projectRows: rowsOf(), projectArcs: arcsOf().length
   }
+
+  // The worktree folder: the picker's folder is saved by the daemon and read back; Use default goes back, and the
+  // worktrees made in the chosen folder are said to stay there.
+  const folder: Record<string, unknown> = { initial: text(tid('storage-worktree-folder')), reset: Boolean($(tid('storage-worktree-folder-reset'))) }
+  // A folder the daemon refuses is named in the row, and nothing changes.
+  daemon.refusePick = true
+  $<HTMLButtonElement>(tid('storage-worktree-folder-choose'))!.click()
+  await until(() => $(tid('storage-worktree-folder-refused')), 'folder refused')
+  folder.refused = { text: text(tid('storage-worktree-folder-refused')), pageError: text('.storage-settings > .storage-error'), unchanged: !$(tid('storage-worktree-folder-reset')) }
+  $<HTMLButtonElement>(tid('storage-worktree-folder-choose'))!.click()
+  await until(() => text(tid('storage-worktree-folder')).includes(PICKED_FOLDER), 'folder chosen')
+  folder.chosen = text(tid('storage-worktree-folder'))
+  folder.refusalCleared = !$(tid('storage-worktree-folder-refused'))
+  $<HTMLButtonElement>(tid('storage-worktree-folder-reset'))!.click()
+  await until(() => !$(tid('storage-worktree-folder-reset')), 'folder reset')
+  folder.reset = text(tid('storage-worktree-folder'))
+  folder.calls = [callsOf('storage.chooseWorktreeFolder').length, callsOf('storage.resetWorktreeFolder').length]
+  evidence.worktreeFolder = folder
 
   // Policy editing: each setting is sent, saved by the daemon and read back.
   const policy: Record<string, unknown> = {}

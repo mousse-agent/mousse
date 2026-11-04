@@ -1,4 +1,7 @@
 import { repositoryIdentitiesFor } from '../bridge/remote/repositoryIdentity'
+import { assertWorktreeFolderConnected, chosenFolderHolding, WorktreeFolderRefused } from '../worktree/worktreeLayout'
+import { listKeptWorktrees } from '../lifecycle/keptWorktrees'
+import { chooseWorktreeFolder, recordedWorktreePaths, worktreeFolderStatus } from '../worktree/worktreeFolderSetting'
 import { userAction, withGitAccess, withUserRequest, type UserAction } from '../git/gitPolicy'
 import { gitAccessOf, USER_REQUEST_LABELS } from './gitAccess'
 import type { StorageCleanupPlanToken } from '../../shared/storage'
@@ -529,9 +532,14 @@ async function localFilesRoot(ctx: HandlerContext, params: Record<string, unknow
   if (threadId && threadProject) {
     const manager = new ThreadWorkspaceManager(ctx.mms.threads.getThreadDir(threadId))
     const stored = manager.load()
+    // A worktree in a worktree folder the person chose is never stood in for by the project folder: while its drive is
+    // not connected the panel says so, and a save can never land in the person's own checkout instead.
+    const chosen = stored && !isProjectFolderWorkspace(stored) && chosenFolderHolding(stored.worktreePath)
+    if (chosen) await assertWorktreeFolderConnected(stored!.worktreePath)
     const verified = stored ? await manager.verify(stored) : undefined
     // A ready workspace's folder, as `executionContext` names it; without a record there is none to use.
     if (verified?.lifecycle === 'ready') return manager.workingFolder(threadProject, verified)
+    if (chosen) throw new DomainRpcError('workspace_not_ready', `Task workspace is ${verified?.lifecycle ?? 'missing'}; recovery is required.`)
   }
   if (projectId) return ctx.mms.projects.getProject(projectId)!.path
   return threadProject ?? homedir()
@@ -688,7 +696,8 @@ async function ensureWorkspaceMaterialized(ctx: HandlerContext, threadId: string
   const manager = new ThreadWorkspaceManager(ctx.mms.threads.getThreadDir(threadId))
   const workspace = manager.load()
   // A folder without its `.git` file is what a retirement that failed partway leaves; `restore` sets it aside and rebuilds.
-  if (!workspace || existsSync(join(workspace.worktreePath, '.git')) || !manager.hasReconstructionManifest()) return
+  // An unfinished rebuild is finished here too, whatever it left at the worktree's path.
+  if (!workspace || existsSync(join(workspace.worktreePath, '.git')) && !manager.rebuildUnfinished(workspace) || !manager.hasReconstructionManifest()) return
   // One restore per thread: calls that arrive together (a focus refresh asks for status, files and the pull request at once) share it.
   const key = ctx.mms.threads.getThreadDir(threadId)
   const running = restoresInFlight.get(key)
@@ -811,6 +820,8 @@ async function ensureOwnedTaskWorkspace(ctx: HandlerContext, params: Record<stri
   }
   const manager = new ThreadWorkspaceManager(ctx.mms.threads.getThreadDir(threadId))
   if (!manager.load()) await manager.provision(threadId, 'main', project, undefined, undefined, undefined, { nameFrom: branchNameSource(ctx, threadId) })
+  // On a drive that is not connected: says so, and the worktree is left as it is (`worktreeLayout`).
+  await assertWorktreeFolderConnected(manager.load()?.worktreePath)
   await ensureWorkspaceMaterialized(ctx, threadId, project)
   if ((await manager.verify()).lifecycle !== 'ready') throw new DomainRpcError('workspace_recovery_required', 'Task workspace requires recovery before mutation')
 }
@@ -2223,6 +2234,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       // A thread in its project's folder has no worktree: its terminal starts in the project folder.
       if (!metadata && task?.projectId && (routed || p.cwd === undefined)) cwd = resolveThreadProjectPath(ctx.mms.projects, ctx.mms.threads, threadId) ?? cwd
       if (metadata) {
+        await assertWorktreeFolderConnected(metadata.worktreePath)
         if ((await manager!.verify(metadata)).lifecycle !== 'ready') throw new DomainRpcError('workspace_recovery_required', 'Task workspace requires recovery before opening a terminal')
         const projectPath = resolveThreadProjectPath(ctx.mms.projects, ctx.mms.threads, threadId)
         if (routed || p.cwd === undefined || projectPath && cwd === projectPath) cwd = manager!.workingFolder(projectPath ?? metadata.worktreePath, metadata)
@@ -4013,6 +4025,20 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         browser: { captureDays: days(browser.captureDays, 'captureDays') }
       }, ctx.connection?.clientType === 'gui')
       return { policy }
+    }
+    // Settings → Storage → Worktree folder: where new worktrees go. Existing worktrees stay where they are.
+    case 'storage.worktreeFolder':
+      return { status: await worktreeFolderStatus(ctx.mms.settings, ctx.mms.getHomeDir()) }
+    case 'storage.setWorktreeFolder': {
+      if (ctx.connection?.clientType !== 'gui') throw new DomainRpcError('forbidden', 'Only the Storage settings can choose the worktree folder')
+      const p = isObject(params) ? params : {}
+      if (p.folder !== null && typeof p.folder !== 'string') throw new DomainRpcError('bad_request', 'folder must be a path or null')
+      try {
+        return { status: await chooseWorktreeFolder(ctx.mms.settings, ctx.mms.getProfileHomeDir(), ctx.mms.getHomeDir(), p.folder, () => recordedWorktreePaths(ctx.mms.threads.lifecycleStore, () => listKeptWorktrees(ctx.mms.getProfileHomeDir()))) }
+      } catch (error) {
+        if (error instanceof WorktreeFolderRefused) throw new DomainRpcError('invalid_worktree_folder', error.message)
+        throw error
+      }
     }
     // Any local client may run it: it only applies rules a person already configured.
     // With a `token` from the dry run it removes only what that plan named, and only if it is still eligible.

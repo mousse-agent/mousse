@@ -1,4 +1,5 @@
 import { createErrorProvider, knownAppError, normalizeAppError } from '../../shared/errors'
+import { disconnectedWorktreeFolder, driveNotConnectedText } from '../worktree/worktreeLayout'
 import { createHash, randomUUID } from 'node:crypto'
 import { closeSync, existsSync, fchmodSync, lstatSync, openSync, readdirSync, readFileSync, realpathSync, rmdirSync, unlinkSync, writeFileSync, type Stats } from 'node:fs'
 import { access, lstat, readdir, readFile } from 'node:fs/promises'
@@ -388,6 +389,9 @@ export class ResourcePurgeService {
     const idNamed = (identity: string): boolean => identity.startsWith('refs/') && !identity.startsWith('refs/heads/')
     const shared = (identity: string, repositoryId: string | undefined, real: string | undefined): boolean => peers.some((peer) => peer.identity === identity && (!repositoryId || !peer.repositoryId || peer.repositoryId === repositoryId || idNamed(identity)) || real !== undefined && claimOverlapsPath(peer, real))
     for (const resource of inventory.resources.filter((item) => item.kind === 'worktree' && ownedIds.has(item.ownerTaskId))) {
+      // On a drive that is not connected: there, out of reach, and kept; never taken for already deleted.
+      const offline = await disconnectedWorktreeFolder(resource.identity)
+      if (offline) { preview.retained.push({ identity: resource.identity, reason: driveNotConnectedText(offline) }); continue }
       const real = await canonical(resource.identity)
       const realCommonDir = await gitCommonDirAsync(resource.identity)
       if (resource.repositoryId && realCommonDir) keptRepositories.set(resource.repositoryId, realCommonDir)
