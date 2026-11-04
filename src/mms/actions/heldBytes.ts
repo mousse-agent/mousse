@@ -81,6 +81,9 @@ async function streamGitAsync(top: string, args: string[], input: string, onData
  * with a random marker and names the blob and path. A path is answered only when everything checks: the marker appears
  * exactly once per record and nowhere else, and the record's header names its blob and path. Anything else leaves the
  * path out, so its file counts as not held and is kept: never the other way round.
+ *
+ * `raw`: the blob's own bytes instead, with no conversion and no filter driver run, for a file whose driver must not
+ * run: bytes equal to them are held by the blob as they are.
  */
 export async function gitsFormsAsync(top: string, entries: ReadonlyArray<{ path: string; blob: string }>, options: { raw?: boolean } = {}): Promise<Map<string, { bytes: number; digest: string }>> {
   const forms = new Map<string, { bytes: number; digest: string }>()

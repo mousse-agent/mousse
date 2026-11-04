@@ -11323,7 +11323,7 @@ export class OrchestratorService extends EventEmitter {
         { ...options, ...(owner ? { keepIgnored: { owner } } : {}) }
       )
       if (result.success) {
-        logs.push(`[worktree] Removed validated worktree for ${target.id.slice(0, 8)}${result.copy ? `; its ${result.copy.files} ignored files are kept as ${result.copy.ref}` : ''}${result.admin ? `; Git's own data of it is kept as ${result.admin.ref}` : ''}`)
+        logs.push(`[worktree] Removed validated worktree for ${target.id.slice(0, 8)}${result.copy ? `; ${result.copy.files} of its files Git cannot write back are kept as ${result.copy.ref}` : ''}${result.late?.length ? `; files written while it was being deleted are kept as ${result.late.map((copy) => copy.ref).join(', ')}` : ''}${result.admin ? `; Git's own data of it is kept as ${result.admin.ref}` : ''}`)
       } else {
         logs.push(`[worktree] Cleanup refused/failed for ${target.id.slice(0, 8)}: ${result.error}`)
       }

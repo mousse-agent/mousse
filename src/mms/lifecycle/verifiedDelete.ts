@@ -266,22 +266,36 @@ export class FolderChanged extends Error {
   constructor() { super('Files in it changed right before it would have been deleted') }
 }
 
+/** How far {@link walkOwnedContentAsync} goes before it refuses: entries, one file's bytes, and all bytes. */
+const WALK_LIMITS = { entries: 100_000, fileBytes: 64 * 1024 * 1024, bytes: 512 * 1024 * 1024 }
+
+/** What a caller may change in {@link walkOwnedContentAsync}: its limits, and whether a file with other hard links is allowed. */
+export interface WalkOptions {
+  limits?: Partial<typeof WALK_LIMITS>
+  /**
+   * A file with other hard links (a package manager's store, say) is listed like any other, for a caller whose copy holds
+   * its bytes: removing one of its names loses none, and a write through any name still changes its `lstat`.
+   */
+  otherLinks?: boolean
+}
+
 /**
  * A bounded walk that never follows links, crosses devices or enters Git administration. Reads without blocking the
  * daemon; the entries of a folder are looked at in batches.
  */
-export async function walkOwnedContentAsync(root: string, skipRootGit = false, options: {
+export async function walkOwnedContentAsync(root: string, skipRootGit = false, options: WalkOptions & {
   /** False: files are not read, and their digest is empty; only their kind, size and mode are listed. */
   digests?: boolean
   /** Filled with the identity (`identityOf`) of every folder walked, by `resolve`d path. */
   folders?: Map<string, string>
 } = {}): Promise<ContentEntry[]> {
+  const limits = { ...WALK_LIMITS, ...options.limits }
   await assertLifecyclePathAsync(dirname(root), root)
   const rootStat = await lstat(root)
   const entries: ContentEntry[] = []
   let bytes = 0
   const walk = async (path: string, stat: Stats, depth: number): Promise<void> => {
-    if (depth > 64 || entries.length >= 100_000) throw new Error('Owned content exceeds bounded inventory limits')
+    if (depth > 64 || entries.length >= limits.entries) throw new Error('Owned content exceeds bounded inventory limits')
     if (stat.dev !== rootStat.dev) throw new Error('Owned content crosses a filesystem boundary')
     const rel = relative(root, path).split('\\').join('/')
     if (stat.isSymbolicLink()) { entries.push({ path: rel, kind: 'link', digest: hash(await readlink(path)), bytes: stat.size, mode: stat.mode }); return }
@@ -297,9 +311,9 @@ export async function walkOwnedContentAsync(root: string, skipRootGit = false, o
       }
       return
     }
-    if (!stat.isFile() || stat.nlink > 1) throw new Error('Special or multiply linked content requires explicit retention')
+    if (!stat.isFile() || stat.nlink > 1 && !options.otherLinks) throw new Error('Special or multiply linked content requires explicit retention')
     bytes += stat.size
-    if (stat.size > 64 * 1024 * 1024 || bytes > 512 * 1024 * 1024) throw new Error('Owned content exceeds bounded byte limits')
+    if (stat.size > limits.fileBytes || bytes > limits.bytes) throw new Error('Owned content exceeds bounded byte limits')
     entries.push({ path: rel, kind: 'file', digest: options.digests === false ? '' : hash(await readFile(path)), bytes: stat.size, mode: stat.mode })
   }
   await walk(root, rootStat, 0)
@@ -319,9 +333,23 @@ export async function worktreeLockAsync(commonDir: string, path: string): Promis
 export async function worktreeRegisteredAsync(commonDir: string, path: string): Promise<boolean> {
   return (await lifecycleReadAsync(commonDir, ['worktree', 'list', '--porcelain'])).split(/\r?\n/).some((line) => line.startsWith('worktree ') && samePath(line.slice(9), path))
 }
+/**
+ * Who is deleting a folder, for what the person reads when it stops: the trash expiry (a worktree waiting in the trash)
+ * or an agent's or dispatch's worktree cleanup.
+ */
+export type DeletePlace = 'trash' | 'cleanup'
+
 /** The reason a worktree Git has locked is not deleted, with the command that lets it be. */
-export function lockedText(reason: string, path: string): string {
-  return `Git has this worktree locked${reason ? ` (${reason})` : ''}, so it stays in the trash. Run git worktree unlock "${path}" to let it be deleted.`
+export function lockedText(reason: string, path: string, place: DeletePlace = 'trash'): string {
+  return `Git has this worktree locked${reason ? ` (${reason})` : ''}, so ${place === 'cleanup' ? 'cleanup leaves it where it is' : 'it stays in the trash'}. Run git worktree unlock "${path}" to let it be deleted.`
+}
+/** Where a stopped delete leaves the rest: `Kept in the trash at <root>`, or what cleanup says. */
+function keptAt(root: string, place: DeletePlace): string {
+  return place === 'cleanup' ? `Cleanup stopped and kept the worktree at ${root}` : `Kept in the trash at ${root}`
+}
+/** The worktree being deleted, as a stop message names it. */
+function deletedFrom(place: DeletePlace): string {
+  return place === 'cleanup' ? 'the worktree cleanup removed' : 'the worktree deleted from the trash'
 }
 
 /** The caller's hold of the repository was lost while a folder was being deleted: nothing more is removed. */
@@ -388,6 +416,10 @@ export interface VerifiedDelete {
   madeWritable?: ReadonlyMap<string, { from: number; to: number }>
   /** Test seam: runs right before each entry is removed, after its last check. */
   beforeRemove?: (path: string) => void
+  /** Who deletes it, for the stop messages; the trash expiry by default. */
+  place?: DeletePlace
+  /** How the folder is walked and its files proven ({@link WalkOptions}); the same for every walk of one delete. */
+  walk?: WalkOptions
 }
 
 /** An entry as it was before a restore made its folder writable, so that change is not taken for a write by someone. */
@@ -414,13 +446,14 @@ function beforeMadeWritable(entry: ContentEntry, madeWritable: VerifiedDelete['m
  */
 export async function deleteVerifiedAsync(input: VerifiedDelete): Promise<{ kept: string; waiting?: true; readOnly?: true } | undefined> {
   const { root, top, steps } = input
+  const place = input.place ?? 'trash'
   const proof = new Map(input.proof.map((entry) => [entry.path, entry]))
   const folders = new Map<string, string>()
   let current: ContentEntry[]
   try {
     await recordFoldersAboveAsync(top, root, folders)
-    current = (await walkOwnedContentAsync(root, true, { digests: false, folders })).map((entry) => beforeMadeWritable(entry, input.madeWritable))
-  } catch (error) { return { kept: `Kept in the trash at ${root}: ${(error as Error).message}` } }
+    current = (await walkOwnedContentAsync(root, true, { ...input.walk, digests: false, folders })).map((entry) => beforeMadeWritable(entry, input.madeWritable))
+  } catch (error) { return { kept: `${keptAt(root, place)}: ${(error as Error).message}` } }
   // The bytes are compared file by file below, right before each one goes; here, what every entry is.
   if (current.some((entry) => !sameShape(entry, proof.get(entry.path)))) return await keepLateWritesAsync(input)
   const dotGit = join(root, '.git')
@@ -449,7 +482,7 @@ export async function deleteVerifiedAsync(input: VerifiedDelete): Promise<{ kept
         continue
       }
       let frozen: FrozenEntryProof
-      try { frozen = await proveFrozenContentEntryAsync(root, proof.get(entry.path)!) } catch (error) { if (gone(error)) continue; throw error }
+      try { frozen = await proveFrozenContentEntryAsync(root, proof.get(entry.path)!, { otherLinks: input.walk?.otherLinks }) } catch (error) { if (gone(error)) continue; throw error }
       input.beforeRemove?.(path)
       const held = await heldNow()
       // From here to the unlink nothing is awaited.
@@ -471,8 +504,8 @@ export async function deleteVerifiedAsync(input: VerifiedDelete): Promise<{ kept
     rmdirSync(root)
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code
-    if (error instanceof LeaseLost) return { kept: `Mousse lost hold of the repository while deleting the worktree from the trash; what is left of it waits at ${root} and is deleted on a later run` }
-    if (code && IN_USE_CODES.has(code)) return { kept: `Files in this worktree are in use; what is left of it waits at ${root} and is deleted on a later run` }
+    if (error instanceof LeaseLost) return { kept: place === 'cleanup' ? `Mousse lost hold of the repository during cleanup; what is left of the worktree waits at ${root}, and a later cleanup finishes it` : `Mousse lost hold of the repository while deleting the worktree from the trash; what is left of it waits at ${root} and is deleted on a later run` }
+    if (code && IN_USE_CODES.has(code)) return { kept: `Files in this worktree are in use; what is left of it waits at ${root} and ${place === 'cleanup' ? 'a later cleanup finishes it' : 'is deleted on a later run'}` }
     // A folder whose permissions do not let Mousse delete its files: the delete stops there, and a restore rebuilds
     // the worktree from the proof (`reconstruct` makes the folders of what is left writable first).
     if (code === 'EACCES' || code === 'EPERM') return { kept: `Mousse may not delete files in ${relative(root, dirname(removing)) || 'its top folder'}; what is left of the worktree waits at ${root}. Make that folder writable to let it be deleted.`, readOnly: true }
@@ -493,6 +526,7 @@ export async function deleteVerifiedAsync(input: VerifiedDelete): Promise<{ kept
  */
 async function keepLateWritesAsync(input: VerifiedDelete): Promise<{ kept: string; waiting?: true }> {
   const { root, steps } = input
+  const place = input.place ?? 'trash'
   const changedAt = new Date(input.now ?? Date.now()).toISOString()
   const stop = async (kept: string, content?: ContentEntry[]): Promise<{ kept: string; waiting: true }> => {
     await steps.save({ changedAt, ...(content ? { content } : {}) })
@@ -501,8 +535,8 @@ async function keepLateWritesAsync(input: VerifiedDelete): Promise<{ kept: strin
   // Without its `.git` file the folder is no checkout any more, and Git run in it would look for one above it.
   if (!(await lstat(join(root, '.git')).catch(() => undefined))?.isFile()) return stop(`Files were written into ${root} as it was being deleted; they are kept there`)
   let current: ContentEntry[]
-  try { current = (await walkOwnedContentAsync(root, true)).map((entry) => beforeMadeWritable(entry, input.madeWritable)) }
-  catch (error) { return stop(`Kept in the trash at ${root}: ${(error as Error).message}`) }
+  try { current = (await walkOwnedContentAsync(root, true, input.walk)).map((entry) => beforeMadeWritable(entry, input.madeWritable)) }
+  catch (error) { return stop(`${keptAt(root, place)}: ${(error as Error).message}`) }
   const proof = new Map(input.proof.map((entry) => [entry.path, entry]))
   const late = current.filter((entry) => !sameEntry(entry, proof.get(entry.path)))
   const fold = await caseInsensitiveAt(root) ? (path: string): string => path.toLowerCase() : (path: string): string => path
@@ -534,7 +568,7 @@ async function keepLateWritesAsync(input: VerifiedDelete): Promise<{ kept: strin
   const refused = await steps.keepLate({ root, files, folders, entries: late, gone })
   if (refused) return stop(refused.kept)
   for (const entry of late) proof.set(entry.path, entry)
-  return stop('Files in it changed while it was being deleted; the changes are kept with its other files, and what is left is deleted on a later run', [...proof.values()])
+  return stop(place === 'cleanup' ? 'Files in it changed while cleanup was deleting it; the changes are kept as a copy with its other files' : 'Files in it changed while it was being deleted; the changes are kept with its other files, and what is left is deleted on a later run', [...proof.values()])
 }
 
 /**
@@ -543,17 +577,18 @@ async function keepLateWritesAsync(input: VerifiedDelete): Promise<{ kept: strin
  * which is never used); the lock is named instead. `held` is checked right before Git starts. `unregistered` records it
  * once Git no longer lists the worktree.
  */
-export async function unregisterDeletedAsync(input: { commonDir: string; path: string; held: HeldCheck; unregistered: () => Promise<void> }): Promise<{ removed: true } | { kept: string }> {
+export async function unregisterDeletedAsync(input: { commonDir: string; path: string; held: HeldCheck; unregistered: () => Promise<void>; place?: DeletePlace }): Promise<{ removed: true } | { kept: string }> {
   const { commonDir, path } = input
+  const place = input.place ?? 'trash'
   if (await exists(path)) return { kept: `Files were written at ${path} after the worktree there was deleted; they are kept, and so is Git's registration of the worktree` }
   if (await worktreeRegisteredAsync(commonDir, path)) {
     const locked = await worktreeLockAsync(commonDir, path)
-    if (locked !== undefined) return { kept: lockedText(locked, path) }
+    if (locked !== undefined) return { kept: lockedText(locked, path, place) }
     const assertHeld = await input.held()
     try { await lifecycleGitAsync(commonDir, ['worktree', 'remove', path], undefined, undefined, undefined, () => { try { assertHeld() } catch { throw new LeaseLost() } }) }
-    catch (error) { if (error instanceof LeaseLost) return { kept: 'Mousse lost hold of the repository before Git could unregister the worktree deleted from the trash; a later run does it' }; throw error }
+    catch (error) { if (error instanceof LeaseLost) return { kept: `Mousse lost hold of the repository before Git could unregister ${deletedFrom(place)}; a later run does it` }; throw error }
   }
-  if (await worktreeRegisteredAsync(commonDir, path)) throw new Error('Git still registers the worktree deleted from the trash')
+  if (await worktreeRegisteredAsync(commonDir, path)) throw new Error(`Git still registers ${deletedFrom(place)}`)
   await input.unregistered()
   return { removed: true }
 }

@@ -64,13 +64,15 @@ describe('agent worktree cleanup keeps ignored files first', () => {
     for (const [path, bytes] of Object.entries(outputs)) expect(restore(cwd, result.copy!.ref, path).equals(bytes)).toBe(true)
   })
 
-  it('tells each step to the caller before it happens: the keep, then the removal with the finished copy', async () => {
+  it('tells each step to the caller before it happens: the keep, then the delete with the finished copy and where the folder goes', async () => {
     const { cwd, owner, manager } = setup()
     const info = await manager.createWorktree('audit-agent-456', cwd)
     mkdirSync(join(info.path, 'ignored')); writeFileSync(join(info.path, 'ignored', 'out.bin'), randomBytes(64))
-    const steps: Array<{ phase: string; present: boolean; ref?: string; admin?: string }> = []
-    const result = await manager.cleanupValidatedAgentWorktree(info, { safeCheckout: true, keepIgnored: { owner, record: (step) => steps.push({ phase: step.phase, present: existsSync(info.path), ...('ref' in step ? { ref: step.ref } : {}), ...('admin' in step ? { admin: step.admin.ref } : {}) }) } })
-    expect(steps).toEqual([{ phase: 'keeping', present: true }, { phase: 'removing', present: true, ref: result.copy!.ref, admin: result.admin!.ref }])
+    const steps: Array<{ phase: string; present: boolean; ref?: string; admin?: string; path?: string }> = []
+    const result = await manager.cleanupValidatedAgentWorktree(info, { safeCheckout: true, keepIgnored: { owner, record: (step) => steps.push({ phase: step.phase, present: existsSync(info.path), ...('ref' in step ? { ref: step.ref } : {}), ...('admin' in step ? { admin: step.admin.ref, path: step.path } : {}) }) } })
+    expect(steps).toEqual([{ phase: 'keeping', present: true }, { phase: 'deleting', present: true, ref: result.copy!.ref, admin: result.admin!.ref, path: expect.stringMatching(/\/\.deleting-[a-f0-9]{16}$/) }])
+    expect(dirname(steps[1]!.path!)).toBe(dirname(info.path))
+    expect(existsSync(steps[1]!.path!)).toBe(false)
     expect(preservedRefs(cwd).sort()).toEqual([result.copy!.ref, result.admin!.ref].sort())
   })
 
@@ -81,7 +83,7 @@ describe('agent worktree cleanup keeps ignored files first', () => {
     const result = await manager.cleanupValidatedAgentWorktree(info, { safeCheckout: true, keepIgnored: { owner, record: (step) => steps.push(step.phase) } })
     expect(result).toEqual({ success: true, admin: { ref: expect.any(String), sha: expect.any(String), windowMs: DEFAULT_UNDO_RETENTION_POLICY.windowMs } })
     expect(existsSync(info.path)).toBe(false)
-    expect(steps).toEqual(['keeping', 'removing'])
+    expect(steps).toEqual(['keeping', 'deleting'])
     expect(preservedRefs(cwd)).toEqual([result.admin!.ref])
     // Every commit the worktree named is held by a branch, so the kept commit is a root commit with no parents.
     expect(git(cwd, 'rev-list', '--parents', '-n1', result.admin!.ref)).toBe(result.admin!.sha)
@@ -210,7 +212,7 @@ describe("agent worktree cleanup keeps Git's own data of the worktree", () => {
     const result = await manager.cleanupValidatedAgentWorktree(info, { safeCheckout: true, keepIgnored: { owner, deleteIgnored: true, record: (step) => steps.push(`${step.phase}:${step.files}`) } })
     expect(result.success).toBe(true); expect(result.copy).toBeUndefined()
     expect(existsSync(info.path)).toBe(false)
-    expect(steps).toEqual(['keeping:0', 'removing:0'])
+    expect(steps).toEqual(['keeping:0', 'deleting:0'])
     expect(preservedRefs(cwd)).toEqual([result.admin!.ref])
     expect(keptBytes(cwd, result.admin!.ref, 'config.worktree').equals(config)).toBe(true)
   })

@@ -462,9 +462,12 @@ export class DispatchService {
     this.save(record)
   }
   /**
-   * Removes the dispatch's worktree, after keeping its ignored files (build outputs, logs) and Git's own data of it (its
-   * settings and HEAD history) as copies the dispatch owns, which expire after its Undo window. Each step is recorded first (`worktreeCleanup`). A worktree whose ignored files
-   * cannot be kept stays where it is: the record says "Kept, N ignored files", and Storage lists it for deletion.
+   * Removes the dispatch's worktree, after keeping its ignored files (build outputs, logs), any other bytes Git cannot
+   * write back, and Git's own data of it (its settings and HEAD history) as copies the dispatch owns, which expire after
+   * its Undo window; the folder is then deleted against a recorded proof (`verifiedCleanup.ts`). Each step is recorded
+   * first (`worktreeCleanup`). A worktree whose ignored files cannot be kept stays where it is, as does what is left of
+   * one whose cleanup stopped: the record says "Kept, N ignored files" and why, and Storage lists it for deletion.
+   * A cleanup a process left part way is finished here too, against its proof.
    */
   private async cleanupWorktree(record: DispatchRecord, worktree: NonNullable<DispatchRecord['worktree']>): Promise<void> {
     const owner = dispatchKeptFilesOwner(this.options.profileHome, record.id)
@@ -486,20 +489,27 @@ export class DispatchService {
     })
     const reached = record.worktreeCleanup
     delete record.worktreeCleanup
-    // A copy that was complete when the removal then failed is still the dispatch's; a later start tries the removal anew.
-    const copy = cleanup.copy ?? (reached?.phase === 'removing' && reached.ref && reached.sha ? { ref: reached.ref, sha: reached.sha, files: reached.files } : undefined)
+    // A copy that was complete when the delete then failed is still the dispatch's; a later start tries the cleanup anew.
+    const copy = cleanup.copy ?? (reached?.phase === 'deleting' && reached.ref && reached.sha ? { ref: reached.ref, sha: reached.sha, files: reached.files } : undefined)
     if (copy) record.worktreeCopy = { ref: copy.ref, sha: copy.sha, files: copy.files }
-    if (cleanup.kept) this.keepWorktree(record, worktree, cleanup.kept)
+    // What is left of a cleanup that stopped part way is at its `.deleting-` name; Storage lists it there.
+    if (cleanup.kept) this.keepWorktree(record, cleanup.kept.path ? { ...worktree, path: cleanup.kept.path } : worktree, cleanup.kept)
     else if (!cleanup.success) record.cleanupError = 'worktree_cleanup_failed'
   }
 
   /**
-   * A cleanup the process ended in the middle of: what it kept is recorded from what the repository holds, and the
-   * worktree, if it is still there, stays. The removal is never started again here.
+   * A cleanup the process ended in the middle of. One that reached `deleting` recorded its proof: it is finished against
+   * it (`cleanupWorktree` finds the record beside the worktree). Before that, what it kept is recorded from what the
+   * repository holds, and the worktree, if it is still there, stays; the cleanup is never started again here.
    */
   private async settleWorktreeCleanup(record: DispatchRecord): Promise<void> {
     const worktree = record.worktree!,
       step = record.worktreeCleanup!
+    if (step.phase === 'deleting') {
+      delete record.worktreeCleanup
+      await this.cleanupWorktree(record, worktree)
+      return
+    }
     const present = existsSync(worktree.path)
     let kept = step.phase === 'removing' && step.ref && step.sha ? { ref: step.ref, sha: step.sha } : undefined
     if (!kept && present) {

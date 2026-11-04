@@ -1474,6 +1474,15 @@ function* convertedPaths(top: string, touched: string[], files: string[]): Steps
   return files.filter((path) => converting.has(path))
 }
 
+/**
+ * The paths among `files` that Git converts when it writes them (see `convertedPaths`), without blocking the daemon: for
+ * a caller that removes files it takes as held by their blob, such as worktree cleanup. Only those need their raw bytes
+ * compared with Git's form of the blob (`heldBytes.ts`); every other file's raw bytes are its blob's.
+ */
+export function convertedPathsAsync(top: string, files: string[]): Promise<string[]> {
+  return runAsync(convertedPaths(top, [], files))
+}
+
 /** A step that runs only without blocking the daemon, as every restore does. */
 function asyncOnly<T>(run: () => Promise<T>): Steps<T> {
   return step(() => { throw new Error('This part of a restore runs only without blocking the daemon.') }, run)

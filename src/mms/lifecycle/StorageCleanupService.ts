@@ -30,6 +30,7 @@ import { WORKTREE_TRASH_QUIET_MS, WorktreeRetirementService } from './WorktreeRe
 import { expireSnapshotTrash } from '../workspace/SnapshotWorkspace'
 import { expireTrashedSnapshotRefs } from '../actions/SnapshotRefReleaseService'
 import { WorktreeManager } from '../worktree/WorktreeManager'
+import { cleanupRecordPath, DELETING_NAME, listCleanupRecords } from '../worktree/verifiedCleanup'
 import { forgetKeptWorktree, listKeptWorktrees, type KeptWorktree } from './keptWorktrees'
 import { dispatchKeptFilesOwner, registerDispatchKeptFilesFolder } from '../actions/keptCopies'
 
@@ -502,6 +503,8 @@ export class StorageCleanupService {
       catch (error) { items.push({ rule: 'trash', label: 'Worktrees in the trash', bytes: 0, outcome: 'failed', reason: (error as Error).message }) }
       try { items.push(...await this.snapshotTrashItems(startedMs)) }
       catch (error) { items.push({ rule: 'trash', label: 'Snapshot stores in the trash', bytes: 0, outcome: 'failed', reason: (error as Error).message }) }
+      try { items.push(...await this.stoppedCleanupItems(startedMs)) }
+      catch (error) { items.push({ rule: 'worktree-orphan', label: 'Agent worktree cleanups', bytes: 0, outcome: 'failed', reason: (error as Error).message }) }
     }
     if (snapshot && (hasRule || trigger === 'manual')) {
       try { items.push(...await this.trashPhase(startedMs, trigger, allowed)) }
@@ -1190,6 +1193,7 @@ export class StorageCleanupService {
   }
 
   private dispatchWorktreeReason(kept: KeptWorktree): string {
+    if (DELETING_NAME.test(basename(kept.path))) return 'What is left after its cleanup stopped part way; every file it held is kept as a copy. Removing it finishes the cleanup.'
     return `Left in place when its dispatch finished, with ${plural(kept.ignoredFiles, 'ignored file')} Mousse could not keep a copy of. Removing it deletes them.`
   }
 
@@ -1232,8 +1236,43 @@ export class StorageCleanupService {
         { safeCheckout: true, ...(owner ? { keepIgnored: { owner, deleteIgnored: true, record: (step) => { if (step.phase === 'keeping') registerDispatchKeptFilesFolder(owner, kept.dispatchId, kept.repositoryRoot) } } } : {}) })
       if (result.success) {
         forgetKeptWorktree(this.deps.store.profileHome, kept.dispatchId)
-        items.push({ ...base, ...sized, outcome: 'removed', reason: `Removed with its ${plural(kept.ignoredFiles, 'ignored file')}, as confirmed` })
+        items.push({ ...base, ...sized, outcome: 'removed', reason: DELETING_NAME.test(basename(kept.path)) ? 'Cleanup finished, as confirmed; every file it held is kept as a copy' : `Removed with its ${plural(kept.ignoredFiles, 'ignored file')}, as confirmed` })
       } else items.push({ ...base, bytes: 0, outcome: 'failed', reason: result.error ?? 'The worktree could not be removed' })
+    }
+    return items
+  }
+
+  // ---- Agent worktree cleanups a process left part way ----
+
+  /**
+   * An agent's or dispatch's worktree cleanup that a process left part way, or that stopped, leaves its folder renamed
+   * to `.deleting-<hex>` with the proof it recorded beside it (`verifiedCleanup.ts`). Each is finished here against
+   * that proof: it is compared, deleted entry by entry, and unregistered. One that stopped because files in it kept
+   * changing is tried again once nothing has changed in it for an hour. One a dispatch left for the person to confirm
+   * (`keptWorktrees`) has its own row.
+   */
+  private async stoppedCleanupItems(now: number): Promise<StorageCleanupItem[]> {
+    const items: StorageCleanupItem[] = []
+    const confirmed = listKeptWorktrees(this.deps.store.profileHome).map((kept) => resolve(kept.path))
+    for (const container of await worktreeContainers(this.deps.installationHome)) {
+      if (container.kind !== 'agents') continue
+      for (const { record } of await listCleanupRecords(container.path)) {
+        if (this.stopping) return items
+        if (confirmed.some((path) => path === resolve(record.deletingPath) || path === resolve(record.worktreePath))) continue
+        const base = { rule: 'worktree-orphan' as const, label: `agents/${basename(record.worktreePath)}` }
+        const since = record.stopped ? Date.parse(record.changedAt ?? record.stopped.at) : Number.NaN
+        if (record.stopped && now - since < WORKTREE_TRASH_QUIET_MS) {
+          items.push({ ...base, bytes: 0, outcome: 'kept', reason: `${record.stopped.reason} Cleanup tries again once nothing has changed in it for an hour.` })
+          continue
+        }
+        const measurement = existsSync(record.deletingPath) ? await this.measure(record.deletingPath, { mode: 'reclaim', budgetMs: MEASURE_BUDGET_MS }) : undefined
+        const result = await new WorktreeManager(record.repositoryRoot, this.deps.installationHome).cleanupValidatedAgentWorktree(
+          { path: record.deletingPath, branch: record.branch, repositoryRoot: record.repositoryRoot }, { safeCheckout: true })
+        items.push(result.success
+          ? { ...base, bytes: measurement?.bytes ?? 0, ...(measurement ? { files: measurement.files, ...approximate(measurement) } : {}), outcome: 'removed', reason: 'Finished a cleanup that stopped part way; every file it held is kept as a copy' }
+          : { ...base, bytes: 0, outcome: 'kept', reason: result.error ?? 'Its cleanup could not be finished' })
+        await yieldToLoop()
+      }
     }
     return items
   }
@@ -1255,6 +1294,8 @@ export class StorageCleanupService {
         // A repository's folder in a chosen worktree folder holds its agents' folder beside the threads' worktrees.
         if (kind === 'folder' && name === 'agents') continue
         const directory = join(folder, name)
+        // What is left of a cleanup under way, with its proof beside it: finished by `stoppedCleanupItems`, never unused.
+        if (DELETING_NAME.test(name) && existsSync(cleanupRecordPath(directory))) continue
         let stat
         try { stat = lstatSync(directory) } catch { continue }
         if (!stat.isDirectory() || stat.isSymbolicLink()) continue

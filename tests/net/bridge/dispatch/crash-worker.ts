@@ -27,7 +27,7 @@ async function main() {
   })
   const roster = identity.verifySigned<Roster>(identity.roster()!, keys.rootKey()!),
     delegation = identity.verifySigned<NodeDelegation>(roster.nodes[0], keys.rootKey()!)
-  // `cleanup-keeping` and `cleanup-removing`: the dispatch completes, and the process stops for good right after its
+  // `cleanup-keeping` and `cleanup-deleting`: the dispatch completes, and the process stops for good right after its
   // cleanup recorded that step, so the test can end it there.
   const cleanupStep = typeof input.phase === 'string' && input.phase.startsWith('cleanup-') ? input.phase.slice('cleanup-'.length) : undefined
   if (cleanupStep) {
