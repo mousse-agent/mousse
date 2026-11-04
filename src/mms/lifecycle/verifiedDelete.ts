@@ -436,22 +436,27 @@ export async function worktreeRegisteredAsync(commonDir: string, path: string): 
   return (await lifecycleReadAsync(commonDir, ['worktree', 'list', '--porcelain'])).split(/\r?\n/).some((line) => line.startsWith('worktree ') && samePath(line.slice(9), path))
 }
 /**
- * Who is deleting a folder, for what the person reads when it stops: the trash expiry (a worktree waiting in the trash)
- * or an agent's or dispatch's worktree cleanup.
+ * Who is deleting a folder, for what the person reads when it stops: the trash expiry (a worktree waiting in the trash),
+ * an agent's or dispatch's worktree cleanup, or a rebuild clearing what an earlier rebuild left at the worktree's path.
  */
-export type DeletePlace = 'trash' | 'cleanup'
+export type DeletePlace = 'trash' | 'cleanup' | 'rebuild'
 
 /** The reason a worktree Git has locked is not deleted, with the command that lets it be. */
 export function lockedText(reason: string, path: string, place: DeletePlace = 'trash'): string {
-  return `Git has this worktree locked${reason ? ` (${reason})` : ''}, so ${place === 'cleanup' ? 'cleanup leaves it where it is' : 'it stays in the trash'}. Run git worktree unlock "${path}" to let it be deleted.`
+  const stays = place === 'cleanup' ? 'cleanup leaves it where it is' : place === 'rebuild' ? 'the rebuild leaves it where it is' : 'it stays in the trash'
+  return `Git has this worktree locked${reason ? ` (${reason})` : ''}, so ${stays}. Run git worktree unlock "${path}" to let it be deleted.`
 }
-/** Where a stopped delete leaves the rest: `Kept in the trash at <root>`, or what cleanup says. */
+/** Where a stopped delete leaves the rest: `Kept in the trash at <root>`, or what cleanup or a rebuild says. */
 function keptAt(root: string, place: DeletePlace): string {
-  return place === 'cleanup' ? `Cleanup stopped and kept the worktree at ${root}` : `Kept in the trash at ${root}`
+  return place === 'cleanup' ? `Cleanup stopped and kept the worktree at ${root}` : place === 'rebuild' ? `What an earlier rebuild left is kept at ${root}` : `Kept in the trash at ${root}`
 }
 /** The worktree being deleted, as a stop message names it. */
 function deletedFrom(place: DeletePlace): string {
-  return place === 'cleanup' ? 'the worktree cleanup removed' : 'the worktree deleted from the trash'
+  return place === 'cleanup' ? 'the worktree cleanup removed' : place === 'rebuild' ? 'the folder an earlier rebuild left' : 'the worktree deleted from the trash'
+}
+/** Who finishes what is left of a delete that stopped. */
+function finishedBy(place: DeletePlace): string {
+  return place === 'cleanup' ? 'a later cleanup finishes it' : place === 'rebuild' ? 'the next rebuild finishes it' : 'is deleted on a later run'
 }
 
 /** Entries removed between two turns of the event loop, so a large delete never holds up the daemon for long. */
@@ -649,8 +654,8 @@ export async function deleteVerifiedAsync(input: VerifiedDelete): Promise<{ kept
     rmdirSync(root)
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code
-    if (error instanceof LeaseLost) return { kept: place === 'cleanup' ? `Mousse lost hold of the repository during cleanup; what is left of the worktree waits at ${root}, and a later cleanup finishes it` : `Mousse lost hold of the repository while deleting the worktree from the trash; what is left of it waits at ${root} and is deleted on a later run` }
-    if (code && IN_USE_CODES.has(code)) return { kept: `Files in this worktree are in use; what is left of it waits at ${root} and ${place === 'cleanup' ? 'a later cleanup finishes it' : 'is deleted on a later run'}` }
+    if (error instanceof LeaseLost) return { kept: place === 'cleanup' ? `Mousse lost hold of the repository during cleanup; what is left of the worktree waits at ${root}, and a later cleanup finishes it` : place === 'rebuild' ? `Mousse lost hold of the repository while clearing what an earlier rebuild left; what is left of it waits at ${root}, and the next rebuild finishes it` : `Mousse lost hold of the repository while deleting the worktree from the trash; what is left of it waits at ${root} and is deleted on a later run` }
+    if (code && IN_USE_CODES.has(code)) return { kept: `Files in this worktree are in use; what is left of it waits at ${root} and ${finishedBy(place)}` }
     // A folder whose permissions do not let Mousse delete its files: the delete stops there, and a restore rebuilds
     // the worktree from the proof (`reconstruct` makes the folders of what is left writable first).
     if (code === 'EACCES' || code === 'EPERM') return { kept: `Mousse may not delete files in ${relative(root, dirname(removing)) || 'its top folder'}; what is left of the worktree waits at ${root}. Make that folder writable to let it be deleted.`, readOnly: true }
@@ -716,7 +721,7 @@ async function keepLateWritesAsync(input: VerifiedDelete): Promise<{ kept: strin
   const refused = await steps.keepLate({ root, files, folders, entries: late, gone })
   if (refused) return stop(refused.kept)
   for (const entry of late) proof.set(entry.path, entry)
-  return stop(place === 'cleanup' ? 'Files in it changed while cleanup was deleting it; the changes are kept as a copy with its other files' : 'Files in it changed while it was being deleted; the changes are kept with its other files, and what is left is deleted on a later run', [...proof.values()])
+  return stop(place === 'cleanup' ? 'Files in it changed while cleanup was deleting it; the changes are kept as a copy with its other files' : place === 'rebuild' ? 'Files in it changed while it was being cleared; the changes are kept as a copy owned by the thread' : 'Files in it changed while it was being deleted; the changes are kept with its other files, and what is left is deleted on a later run', [...proof.values()])
 }
 
 /**

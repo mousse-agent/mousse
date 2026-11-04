@@ -2,7 +2,7 @@ import { execFileSync } from 'node:child_process'
 import { createServer, type Server } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { basename, dirname, join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { git as actionGit } from '../src/mms/actions/git'
 import { MousseMainService } from '../src/mms/MousseMainService'
@@ -13,6 +13,11 @@ import { ThreadWorkspaceManager } from '../src/mms/workspace/ThreadWorkspaceMana
 import type { PullRequestDetail } from '../src/shared/pullRequests'
 import { git, gitFoundationFixture } from './fixtures/gitFoundation'
 import { clearGitPolicyLog, gitPolicyLog, userAction } from '../src/mms/git/gitPolicy'
+import { installGitRemoveGuard } from './fixtures/gitRemoveGuard'
+import { threadPreservedIndex } from '../src/mms/actions/preservedFiles'
+import { listCleanupRecords } from '../src/mms/worktree/verifiedCleanup'
+import { projectKeptFilesOwner } from '../src/mms/actions/keptCopies'
+import { randomUUID } from 'node:crypto'
 
 /** A config value, or '' when it is not set. */
 const configOf = (cwd: string, key: string): string => { try { return git(cwd, 'config', '--get', key) } catch { return '' } }
@@ -299,6 +304,233 @@ describe('a pull request that tries to run code', () => {
     await settle()
     expect(requests).toEqual([])
   }, 120_000)
+
+  it('a start that fails after its worktree was made deletes it against a proof, runs no driver, and keeps nothing', async () => {
+    // A checkout Git converts (CRLF line endings) beside files under the pull request's filter drivers.
+    authorGit('rm', '-q', '--cached', '.gitattributes')
+    writeFileSync(join(author, '.gitattributes'), '*.dat filter=evil\n*.bin filter=lfsx\n*.prc filter=proc\n*.txt text eol=crlf\n')
+    authorGit('add', '-A')
+    authorGit('commit', '-qm', 'crlf text')
+    authorGit('push', '-q', '--force', 'origin', 'HEAD:refs/pull/7/head')
+    prSha = authorGit('rev-parse', 'HEAD')
+    const guard = installGitRemoveGuard()
+    const trash = vi.fn((threadId: string) => mms.trashThread(threadId))
+    let checkout: Buffer | undefined
+    let worktreePath = ''
+    try {
+      const failing = new PullRequestThreadService({
+        codeHost: host, projects: mms.projects, threads: mms.threads, trashThread: trash, send: async () => {},
+        prepareThread: (thread) => {
+          worktreePath = workspaceOf(thread.id).worktreePath
+          checkout = readFileSync(join(worktreePath, 'value.txt'))
+          throw new Error('model store unavailable')
+        }
+      })
+      const threadsBefore = mms.threads.listAllThreads().length
+      await expect(failing.startThread({ projectId, reference: '7', allowWorktreeConfig: true }, START)).rejects.toMatchObject({ code: 'pull_request_workspace_failed' })
+      expect(checkout).toEqual(Buffer.from('pull request value\r\n'))
+      // No driver ran, for the checkout or for its cleanup.
+      expect(marked()).toEqual([])
+      await settle()
+      expect(requests).toEqual([])
+      // Its files were all held by the pull request's commit, so nothing is kept: no copy, no branch, no ref of Mousse's.
+      expect(existsSync(worktreePath)).toBe(false)
+      expect(mms.threads.listAllThreads()).toHaveLength(threadsBefore)
+      expect(trash).not.toHaveBeenCalled()
+      expect(git(f.repo, 'worktree', 'list', '--porcelain').split('\n').filter((line) => line.startsWith('worktree '))).toHaveLength(1)
+      expect(git(f.repo, 'for-each-ref', '--format=%(refname)', 'refs/heads/mousse', 'refs/mousse')).toBe('')
+      // Git only unregistered a folder that was already gone.
+      guard.assertNoRemoveOfExisting()
+      expect(guard.removes().flatMap((call) => call.args)).not.toContain('--force')
+      expect(guard.removes().map((call) => call.path)).toContain(worktreePath)
+    } finally { guard.restore() }
+  }, 90_000)
+
+  /** The real trash, watched: what a failed start sends there is checked end to end, never stubbed. */
+  const realTrash = () => vi.fn((threadId: string) => mms.trashThread(threadId))
+  /** A service whose start fails right after its worktree was made, once `inWorktree` ran there. */
+  const failingAfter = (trash: (threadId: string) => Promise<unknown>, inWorktree: (worktreePath: string, threadId: string) => void, extra: Partial<ConstructorParameters<typeof PullRequestThreadService>[0]> = {}) => new PullRequestThreadService({
+    codeHost: host, projects: mms.projects, threads: mms.threads, trashThread: trash, send: async () => {},
+    prepareThread: (thread) => { inWorktree(workspaceOf(thread.id).worktreePath, thread.id); throw new Error('model store unavailable') },
+    ...extra
+  })
+  const collectGarbage = () => { git(f.repo, 'reflog', 'expire', '--expire=now', '--all'); git(f.repo, 'gc', '-q', '--prune=now') }
+  const stateOf = (threadId: string) => mms.threads.lifecycleStore.get(threadId)?.state
+  const restoredBytes = (path: string) => { const restored = join(f.root, `restored-${Date.now()}-${basename(path)}`); writeFileSync(restored, readFileSync(path)); return readFileSync(restored) }
+  /**
+   * A thread a failed start sent to the trash, with what it kept: it is trashed, and its worktree comes back with it
+   * (`kept` byte-compares what must be there); then it is trashed again and deleted permanently, and the same pull request
+   * starts again.
+   */
+  async function trashedKeeping(threadId: string, kept: (worktreePath: string) => void): Promise<void> {
+    expect(stateOf(threadId)).toBe('trashed')
+    expect((await mms.restoreThread(threadId)).state).toBe('active')
+    const manager = new ThreadWorkspaceManager(mms.threads.getThreadDir(threadId))
+    const ready = (await manager.verify()).lifecycle === 'ready' ? manager.load()! : await manager.restore(f.repo)
+    expect(ready.lifecycle).toBe('ready')
+    kept(ready.worktreePath)
+    expect((await mms.trashThread(threadId)).state).toBe('trashed')
+    const preview = await mms.lifecycle.cleanup.preview(threadId)
+    expect((await mms.lifecycle.purge({ taskId: threadId, operationId: randomUUID(), expectedGeneration: preview.generation, previewDigest: preview.digest, discard: true, human: true })).state).toBe('purged')
+    expect(marked()).toEqual([])
+    await expect(service.startThread({ projectId, reference: '7', allowWorktreeConfig: true }, START)).resolves.toMatchObject({ sent: false })
+  }
+
+  it('a commit made in a failed start\'s worktree leaves the worktree as it is, and the real trash takes the thread', async () => {
+    const trash = realTrash()
+    const unique = Buffer.from('person commit during setup 42d912\r\n')
+    let made = '', threadId = '', worktreePath = ''
+    const guard = installGitRemoveGuard()
+    try {
+      await expect(failingAfter(trash, (path, id) => {
+        threadId = id; worktreePath = path
+        writeFileSync(join(path, 'person.txt'), unique)
+        git(path, 'add', 'person.txt')
+        git(path, '-c', 'user.name=Person', '-c', 'user.email=person@example.test', 'commit', '-q', '--no-verify', '-m', 'committed before setup failed')
+        made = git(path, 'rev-parse', 'HEAD')
+      }).startThread({ projectId, reference: '7', allowWorktreeConfig: true }, START)).rejects.toMatchObject({ code: 'pull_request_workspace_failed' })
+      expect(trash).toHaveBeenCalledWith(threadId)
+      expect(await listCleanupRecords(f.home)).toEqual([])
+      collectGarbage()
+      expect(execFileSync('git', ['cat-file', 'blob', `${made}:person.txt`], { cwd: f.repo })).toEqual(unique)
+      await trashedKeeping(threadId, (path) => {
+        expect(git(path, 'rev-parse', 'HEAD')).toBe(made)
+        expect(restoredBytes(join(path, 'person.txt'))).toEqual(unique)
+      })
+      expect(worktreePath).not.toBe('')
+      guard.assertNoRemoveOfExisting()
+    } finally { guard.restore() }
+  }, 180_000)
+
+  it('a setting added to a failed start\'s worktree leaves the worktree as it is, and the real trash takes the thread', async () => {
+    const trash = realTrash()
+    let unique = Buffer.alloc(0), threadId = ''
+    const guard = installGitRemoveGuard()
+    try {
+      await expect(failingAfter(trash, (path, id) => {
+        threadId = id
+        const admin = git(path, 'rev-parse', '--absolute-git-dir')
+        unique = Buffer.concat([readFileSync(join(admin, 'config.worktree')), Buffer.from('[remote "personal"]\r\n\turl = ssh://person.example/needed-config-44feca\r\n')])
+        writeFileSync(join(admin, 'config.worktree'), unique)
+      }).startThread({ projectId, reference: '7', allowWorktreeConfig: true }, START)).rejects.toMatchObject({ code: 'pull_request_workspace_failed' })
+      expect(trash).toHaveBeenCalledWith(threadId)
+      // The worktree comes back with the thread, with the setting in its own Git data, byte for byte.
+      await trashedKeeping(threadId, (path) => expect(restoredBytes(join(git(path, 'rev-parse', '--absolute-git-dir'), 'config.worktree'))).toEqual(unique))
+      guard.assertNoRemoveOfExisting()
+    } finally { guard.restore() }
+  }, 180_000)
+
+  it('an ignored file written into a failed start\'s worktree leaves the worktree as it is, and the real trash takes the thread', async () => {
+    const trash = realTrash()
+    const unique = Buffer.from('written into the new worktree\r\n')
+    let threadId = ''
+    git(f.repo, 'config', 'core.excludesFile', join(f.root, 'excludes'))
+    writeFileSync(join(f.root, 'excludes'), 'untracked-notes.txt\n')
+    const guard = installGitRemoveGuard()
+    try {
+      await expect(failingAfter(trash, (path, id) => { threadId = id; writeFileSync(join(path, 'untracked-notes.txt'), unique) })
+        .startThread({ projectId, reference: '7', allowWorktreeConfig: true }, START)).rejects.toMatchObject({ code: 'pull_request_workspace_failed' })
+      expect(trash).toHaveBeenCalledWith(threadId)
+      await trashedKeeping(threadId, (path) => expect(restoredBytes(join(path, 'untracked-notes.txt'))).toEqual(unique))
+      guard.assertNoRemoveOfExisting()
+    } finally { guard.restore() }
+  }, 180_000)
+
+  it('provisioning that fails after its worktree exists, holding only what it wrote, is removed and its thread discarded', async () => {
+    // A ref at refs/mousse/threads makes the thread's retained ref impossible to write, after the worktree is made.
+    git(f.repo, 'update-ref', 'refs/mousse/threads', git(f.repo, 'rev-parse', 'HEAD'))
+    const trash = realTrash()
+    const threadsBefore = mms.threads.listAllThreads().length
+    const guard = installGitRemoveGuard()
+    try {
+      await expect(new PullRequestThreadService({ codeHost: host, projects: mms.projects, threads: mms.threads, trashThread: trash, send: async () => {} })
+        .startThread({ projectId, reference: '7', allowWorktreeConfig: true }, START)).rejects.toMatchObject({ code: 'pull_request_workspace_failed', message: expect.stringMatching(/^Could not create the worktree/) })
+      expect(trash).not.toHaveBeenCalled()
+      expect(mms.threads.listAllThreads()).toHaveLength(threadsBefore)
+      expect(git(f.repo, 'worktree', 'list', '--porcelain').split('\n').filter((line) => line.startsWith('worktree '))).toHaveLength(1)
+      expect(git(f.repo, 'for-each-ref', '--format=%(refname)', 'refs/heads/mousse', 'refs/mousse/preserved')).toBe('')
+      guard.assertNoRemoveOfExisting()
+      expect(guard.removes().flatMap((call) => call.args)).not.toContain('--force')
+    } finally { guard.restore() }
+    git(f.repo, 'update-ref', '-d', 'refs/mousse/threads')
+    const started = await service.startThread({ projectId, reference: '7', allowWorktreeConfig: true }, START)
+    expect(restoredBytes(join(workspaceOf(started.thread.id).worktreePath, 'value.txt'))).toEqual(execFileSync('git', ['cat-file', 'blob', `${prSha}:value.txt`], { cwd: f.repo }))
+  }, 180_000)
+
+  it('a setting written while a failed start\'s worktree is being deleted is kept as a copy its project owns', async () => {
+    const trash = realTrash()
+    const late = Buffer.from('[remote "late"]\r\n\turl = ssh://person.example/written-during-delete-71c2\r\n')
+    let threadId = '', admin = '', wrote = false
+    const guard = installGitRemoveGuard()
+    try {
+      await expect(failingAfter(trash, (path, id) => { threadId = id; admin = git(path, 'rev-parse', '--absolute-git-dir') }, {
+        cleanupBeforeRemove: (path) => {
+          if (wrote || !/^\.deleting-/.test(basename(dirname(path)))) return
+          wrote = true
+          writeFileSync(join(admin, 'config.worktree'), Buffer.concat([readFileSync(join(admin, 'config.worktree')), late]))
+        }
+      }).startThread({ projectId, reference: '7', allowWorktreeConfig: true }, START)).rejects.toMatchObject({ code: 'pull_request_workspace_failed' })
+      expect(wrote).toBe(true)
+      // Nothing of the person's was in it when the start decided, so the thread is discarded; the copy outlives it.
+      expect(trash).not.toHaveBeenCalled()
+      expect(mms.threads.listAllThreads().some((thread) => thread.id === threadId)).toBe(false)
+      collectGarbage()
+      const owner = projectKeptFilesOwner(mms.threads.lifecycleStore.profileHome, projectId)
+      const kept = git(f.repo, 'for-each-ref', '--format=%(refname)', 'refs/mousse/preserved/').split('\n').filter(Boolean)
+      const copy = kept.find((ref) => { try { return execFileSync('git', ['cat-file', 'blob', `${ref}:config.worktree`], { cwd: f.repo, stdio: ['ignore', 'pipe', 'ignore'] }).includes(late) } catch { return false } })!
+      expect(copy).toBeDefined()
+      expect(kept.every((ref) => threadPreservedIndex(owner).owns(ref))).toBe(true)
+      const restored = join(f.root, 'restored-late-config')
+      writeFileSync(restored, execFileSync('git', ['cat-file', 'blob', `${copy}:config.worktree`], { cwd: f.repo }))
+      expect(readFileSync(restored).subarray(-late.length)).toEqual(late)
+      guard.assertNoRemoveOfExisting()
+    } finally { guard.restore() }
+  }, 180_000)
+
+  it('a failed start whose cleanup stops part way is discarded, and Storage finishes the cleanup its project owns', async () => {
+    const trash = realTrash()
+    const versions: Buffer[] = []
+    let threadId = '', worktreePath = ''
+    const guard = installGitRemoveGuard()
+    try {
+      // A file written into the folder each time its `.git` is about to go: the cleanup keeps it and stops after 3 rounds.
+      await expect(failingAfter(trash, (path, id) => { threadId = id; worktreePath = path }, {
+        cleanupBeforeRemove: (path) => {
+          if (basename(path) !== '.git' || !/^\.deleting-/.test(basename(dirname(path)))) return
+          const bytes = Buffer.from(`late write ${versions.length + 1}\r\n`)
+          versions.push(bytes)
+          writeFileSync(join(dirname(path), `late-${versions.length}.txt`), bytes)
+        }
+      }).startThread({ projectId, reference: '7', allowWorktreeConfig: true }, START)).rejects.toMatchObject({ code: 'pull_request_workspace_failed' })
+      expect(trash).not.toHaveBeenCalled()
+      expect(mms.threads.listAllThreads().some((thread) => thread.id === threadId)).toBe(false)
+      const [record] = await listCleanupRecords(f.home)
+      expect(record?.stopped).toBeDefined()
+      expect(record!.owner).toBe(projectKeptFilesOwner(mms.threads.lifecycleStore.profileHome, projectId))
+      expect(versions.length).toBeGreaterThanOrEqual(2)
+      // Once nothing has changed in it for an hour, Storage finishes it.
+      const items = await (mms.storageCleanup as unknown as { stoppedCleanupItems(now: number): Promise<Array<{ label: string; outcome: string }>> }).stoppedCleanupItems(Date.now() + 2 * 60 * 60_000)
+      expect(items).toMatchObject([{ label: `threads/${basename(worktreePath)}`, outcome: 'removed' }])
+      expect(existsSync(record!.deletingPath)).toBe(false)
+      expect(await listCleanupRecords(f.home)).toEqual([])
+      expect(git(f.repo, 'worktree', 'list', '--porcelain')).not.toContain(worktreePath)
+      collectGarbage()
+      // Every version written meanwhile is in a copy the project owns, byte for byte: one the stopped cleanup kept, or
+      // the one Storage kept before it finished.
+      const owned = git(f.repo, 'for-each-ref', '--format=%(refname)', 'refs/mousse/preserved/').split('\n').filter(Boolean)
+      expect(owned.every((ref) => threadPreservedIndex(record!.owner).owns(ref))).toBe(true)
+      versions.forEach((bytes, at) => {
+        const name = `late-${at + 1}.txt`
+        const copy = owned.find((ref) => { try { git(f.repo, 'cat-file', '-e', `${ref}:${name}`); return true } catch { return false } })!
+        expect(copy).toBeDefined()
+        const restored = join(f.root, `restored-${name}`)
+        writeFileSync(restored, execFileSync('git', ['cat-file', 'blob', `${copy}:${name}`], { cwd: f.repo }))
+        expect(readFileSync(restored)).toEqual(bytes)
+      })
+      expect(marked()).toEqual([])
+      guard.assertNoRemoveOfExisting()
+    } finally { guard.restore() }
+  }, 180_000)
 
   it('refuses, and leaves nothing, when a filter driver is configured for the repository itself', async () => {
     git(f.repo, 'config', 'filter.evil.smudge', 'sh tools/smudge.sh')

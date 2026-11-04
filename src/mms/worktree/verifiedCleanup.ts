@@ -210,7 +210,7 @@ async function adminStateAt(folder: string): Promise<string> {
 }
 
 type Kept = NonNullable<WorktreeCleanupResult['kept']>
-type Removed = Pick<WorktreeCleanupResult, 'copy' | 'admin' | 'late'>
+type Removed = Pick<WorktreeCleanupResult, 'copy' | 'admin' | 'late' | 'adminLater'>
 
 export interface CleanupInput {
   /** Mousse's installation home, where the record is kept. */
@@ -707,6 +707,8 @@ async function unregister(home: string, record: CleanupRecord, stop: (why: strin
   return {
     ...(record.copy ? { copy: { ...record.copy, windowMs } } : {}),
     admin: { ...record.admin[0]!, windowMs },
-    ...(record.late.length ? { late: record.late.map((copy) => ({ ...copy, windowMs })) } : {})
+    ...(record.late.length ? { late: record.late.map((copy) => ({ ...copy, windowMs })) } : {}),
+    // Every copy is reported, so a caller that hands on or lets go of what cleanup kept sees each one.
+    ...(record.admin.length > 1 ? { adminLater: record.admin.slice(1).map((copy) => ({ ...copy, windowMs })) } : {})
   }
 }
