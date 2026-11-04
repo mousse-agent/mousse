@@ -113,6 +113,11 @@ export async function driversOffAsync(folder: string): Promise<Array<[string, st
   // Imported here: the lifecycle Git runner reads this module.
   const { lifecycleReadAsync } = await import('../lifecycle/lifecycleGit')
   const listing = await lifecycleReadAsync(folder, ['config', '--null', '--list'], undefined, LISTING_MAX_BUFFER).catch(() => '')
+  return driversOffOf(listing)
+}
+
+/** {@link driversOffAsync} for a config already read: `git config --null --list`'s output. */
+export function driversOffOf(listing: string): Array<[string, string]> {
   const names = new Set<string>()
   for (const item of listing.split('\0')) {
     const match = /^filter\.(.+)\.(?:smudge|clean|process|required)$/i.exec(item.split('\n')[0]!)

@@ -52,47 +52,84 @@ export async function readConvertedAsync(top: string, blobs: ReadonlyMap<string,
   return { read: proofs.map((proof) => ({ path: proof.entry.path, proof, held: held(proof) })), changed }
 }
 
-/** Runs one of Mousse's own Git commands with `input`, giving its output to `onData` as it comes. Rejects on failure. */
-async function streamGitAsync(top: string, args: string[], input: string, onData: (chunk: Buffer) => void): Promise<void> {
-  const argv = await guardedAsync(top, args, { stdin: input })
-  await new Promise<void>((settle, fail) => {
-    const child = spawn('git', argv, { cwd: top, env: gitEnv(top), windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] })
+/** How a streamed Git command ended: it finished, or `deadline` passed and it was stopped. */
+interface Streamed { stopped: boolean; stderr: string }
+
+/**
+ * Runs one of Mousse's own Git commands with `input`, giving its output to `onData` as it comes. Rejects on failure. At
+ * `deadline` (a time in ms), the command is stopped and the run ends as `stopped`, with the output it gave so far. Such
+ * a command runs in a process group of its own, and the whole group is stopped: a filter program Git started never
+ * outlives the run.
+ */
+async function streamGitAsync(top: string, args: string[], input: string, onData: (chunk: Buffer) => void, env?: NodeJS.ProcessEnv, deadline?: number): Promise<Streamed> {
+  const argv = await guardedAsync(top, args, { stdin: input, ...(env ? { env } : {}) })
+  const group = deadline !== undefined && process.platform !== 'win32'
+  return await new Promise<Streamed>((settle, fail) => {
+    const child = spawn('git', argv, { cwd: top, env: gitEnv(top, env), windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'], ...(group ? { detached: true } : {}) })
     const errors: Buffer[] = []
     let failed: Error | undefined
-    child.stdout.on('data', (chunk: Buffer) => { try { onData(chunk) } catch (error) { failed ??= error as Error; child.kill() } })
+    let stopped = false
+    const stopAll = (): void => {
+      if (child.pid === undefined) return
+      // Git first, so it never reports the filters it started as failed; then everything else in its group.
+      if (group) { child.kill('SIGKILL'); try { process.kill(-child.pid, 'SIGKILL') } catch { /* already gone */ } }
+      else if (process.platform === 'win32') spawn('taskkill', ['/pid', String(child.pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' }).on('error', () => child.kill('SIGKILL'))
+      else child.kill('SIGKILL')
+    }
+    const timer = deadline === undefined ? undefined : setTimeout(() => { stopped = true; stopAll() }, Math.max(0, deadline - Date.now()))
+    child.stdout.on('data', (chunk: Buffer) => { if (stopped) return; try { onData(chunk) } catch (error) { failed ??= error as Error; child.kill() } })
     child.stderr.on('data', (chunk: Buffer) => { if (errors.length < 64) errors.push(chunk) })
-    child.on('error', fail)
+    child.on('error', (error) => { if (timer) clearTimeout(timer); fail(error) })
+    // Stopped: the group is gone, so its output closes at once. A program that left the group is not waited for long.
+    child.on('exit', () => { if (stopped) setTimeout(() => settle({ stopped, stderr: Buffer.concat(errors).toString('utf8').trim() }), 250).unref() })
     child.on('close', (code) => {
+      if (timer) clearTimeout(timer)
+      const stderr = Buffer.concat(errors).toString('utf8').trim()
       if (failed) fail(failed)
-      else if (code === 0) settle()
-      else fail(new Error(`Command failed: git ${argv.join(' ')}\n${Buffer.concat(errors).toString('utf8').trim()}`))
+      else if (stopped) settle({ stopped, stderr })
+      else if (code === 0) settle({ stopped, stderr })
+      else fail(new Error(`Command failed: git ${argv.join(' ')}\n${stderr}`))
     })
     child.stdin.on('error', () => undefined)
     child.stdin.end(input)
   })
 }
 
+/** What Git writes at a path: its size and SHA-256, and its bytes themselves when there are at most `keepBytes` of them. */
+export interface GitsForm { bytes: number; digest: string; head?: Buffer }
+
+/** Git's messages when a filter's program fails, which it reports and goes on from unless the filter is required. */
+const FILTER_FAILED = /(external filter|smudge filter|clean filter)\b.*\bfailed|cannot fork to run external filter/i
+
 /**
  * The size and SHA-256 of what Git writes at each path from its blob there (`cat-file --batch --filters`, read as it
  * streams, never held whole), by path. A file is held when its bytes on disk have that size and SHA-256. With `raw`,
- * the blob's own bytes, never converted (`--filters` left off).
+ * the blob's own bytes, never converted (`--filters` left off). `env` goes to Git (`GIT_ATTR_SOURCE`, for the attributes
+ * of another tree). With `strict`, a run where Git reports a failed filter program fails, though Git went on with the
+ * blob as stored. With `deadline`, Git is stopped then, and only the paths it finished are answered. `keepBytes` keeps
+ * the bytes of each form at most that long (`head`).
  *
  * Git's header gives the blob's size, not the converted size, so each record starts with a header of ours that begins
  * with a random marker and names the blob and path. A path is answered only when everything checks: the marker appears
  * exactly once per record and nowhere else, and the record's header names its blob and path. Anything else leaves the
  * path out, so its file counts as not held and is kept: never the other way round.
  */
-export async function gitsFormsAsync(top: string, entries: ReadonlyArray<{ path: string; blob: string }>, options: { raw?: boolean } = {}): Promise<Map<string, { bytes: number; digest: string }>> {
-  const forms = new Map<string, { bytes: number; digest: string }>()
+export async function gitsFormsAsync(top: string, entries: ReadonlyArray<{ path: string; blob: string }>, options: { raw?: boolean; env?: NodeJS.ProcessEnv; strict?: boolean; deadline?: number; keepBytes?: number } = {}): Promise<Map<string, GitsForm>> {
+  const forms = new Map<string, GitsForm>()
   // Git reads one `<blob> <path>` per line and drops whitespace before the path: those few are kept without asking.
   const asked = entries.filter((entry) => !/[\n\r]/.test(entry.path) && !/^[ \t]/.test(entry.path))
   if (!asked.length) return forms
+  const keepBytes = options.keepBytes ?? 0
   const marker = `mousse-${randomUUID()}`
   const separator = Buffer.from(`\n${marker} `)
   const input = asked.map((entry) => `${entry.blob} ${entry.path}`).join('\n') + '\n'
-  const records: Array<{ header: Buffer[]; headerBytes: number; headerDone: boolean; hash: Hash; length: number; last?: number }> = []
+  const records: Array<{ header: Buffer[]; headerBytes: number; headerDone: boolean; hash: Hash; length: number; last?: number; head: Buffer[]; headBytes: number }> = []
   let leading = 0
   let pending = Buffer.from('\n') // The stream as if it began with a line break, so every record starts with `separator`.
+  const feed = (record: (typeof records)[number], bytes: Buffer): void => {
+    record.hash.update(bytes); record.length += bytes.length
+    if (record.headBytes <= keepBytes) { record.head.push(Buffer.from(bytes.subarray(0, keepBytes + 1 - record.headBytes))); record.headBytes += Math.min(bytes.length, keepBytes + 1 - record.headBytes) }
+  }
   const add = (bytes: Buffer): void => {
     if (!bytes.length) return
     const record = records.at(-1)
@@ -110,13 +147,13 @@ export async function gitsFormsAsync(top: string, entries: ReadonlyArray<{ path:
     // The last byte is held back: at the end of the output it is the record's closing line break, not its bytes.
     const body = bytes.subarray(at)
     if (!body.length) return
-    if (record.last !== undefined) { record.hash.update(Buffer.of(record.last)); record.length++ }
-    record.hash.update(body.subarray(0, -1)); record.length += body.length - 1
+    if (record.last !== undefined) feed(record, Buffer.of(record.last))
+    feed(record, body.subarray(0, -1))
     record.last = body[body.length - 1]
   }
   const close = (): void => {
     const record = records.at(-1)
-    if (record?.last !== undefined) { record.hash.update(Buffer.of(record.last)); record.length++; record.last = undefined }
+    if (record?.last !== undefined) { feed(record, Buffer.of(record.last)); record.last = undefined }
   }
   const scan = (final: boolean): void => {
     for (;;) {
@@ -124,24 +161,32 @@ export async function gitsFormsAsync(top: string, entries: ReadonlyArray<{ path:
       if (found < 0) break
       add(pending.subarray(0, found))
       close()
-      records.push({ header: [], headerBytes: 0, headerDone: false, hash: createHash('sha256'), length: 0 })
+      records.push({ header: [], headerBytes: 0, headerDone: false, hash: createHash('sha256'), length: 0, head: [], headBytes: 0 })
       pending = pending.subarray(found + separator.length)
     }
     const keep = final ? 0 : Math.min(pending.length, separator.length - 1)
     add(pending.subarray(0, pending.length - keep))
     pending = Buffer.from(pending.subarray(pending.length - keep))
   }
-  await streamGitAsync(top, ['cat-file', `--batch=${marker} %(objectname) %(rest)`, ...(options.raw ? [] : ['--filters'])], input, (chunk) => {
+  const ran = await streamGitAsync(top, ['cat-file', `--batch=${marker} %(objectname) %(rest)`, ...(options.raw ? [] : ['--filters'])], input, (chunk) => {
     pending = Buffer.concat([pending, chunk])
     scan(false)
-  })
-  scan(true)
-  const end = records.at(-1)
-  if (leading || records.length !== asked.length || end?.last !== 0x0a) return forms
-  for (const [index, entry] of asked.entries()) {
+  }, options.env, options.deadline)
+  // A stopped run's finished records are whole: with every driver required, a failure among them would have ended Git.
+  if (options.strict && !ran.stopped && FILTER_FAILED.test(ran.stderr)) throw new Error(`A filter failed: ${ran.stderr.split(/\r?\n/)[0]}`)
+  // Stopped: each record a later one follows is whole; the last may not be.
+  const finished = ran.stopped ? Math.max(0, records.length - 1) : records.length
+  if (!ran.stopped) {
+    scan(true)
+    const end = records.at(-1)
+    if (leading || records.length !== asked.length || end?.last !== 0x0a) return forms
+  } else if (leading || records.length > asked.length) return forms
+  for (const [index, entry] of asked.slice(0, ran.stopped ? finished : asked.length).entries()) {
     const record = records[index]!
     const header = Buffer.concat(record.header).toString('utf8')
-    if (record.headerDone && record.headerBytes <= 16_384 && header === `${entry.blob} ${entry.path}`) forms.set(entry.path, { bytes: record.length, digest: record.hash.digest('hex') })
+    if (!record.headerDone || record.headerBytes > 16_384 || header !== `${entry.blob} ${entry.path}`) continue
+    const head = record.length <= keepBytes ? Buffer.concat(record.head).subarray(0, record.length) : undefined
+    forms.set(entry.path, { bytes: record.length, digest: record.hash.digest('hex'), ...(head ? { head } : {}) })
   }
   return forms
 }

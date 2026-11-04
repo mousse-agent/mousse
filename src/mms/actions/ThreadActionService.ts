@@ -13,7 +13,7 @@ import { ChangeReceiptService } from './ChangeReceiptService'
 import { assertHeldThreadLease, withGitMutationLocks } from './GitOperationCoordinator'
 import { IN_PROGRESS_GIT_MARKERS } from '../git/gitMarkers'
 import { changedPathsAsync, git, gitAsync, tryGitAsync } from './git'
-import { coverageNotice, describeGitAsync, sameTreeAsync, SnapshotRefusedError, snapshotUncoveredAsync, takeSnapshotAsync, type Snapshot } from './snapshots'
+import { coverageNotice, describeGitAsync, namedGapsAsync, sameTreeAsync, SnapshotRefusedError, snapshotUncoveredAsync, takeSnapshotAsync, type Snapshot } from './snapshots'
 import { activeHiddenStore } from '../git/hiddenStore'
 import { inThreadSnapshotScope, inThreadSnapshotScopeAsync, setSnapshotsOff } from '../workspace/SnapshotWorkspace'
 
@@ -444,6 +444,12 @@ export class ThreadActionService {
       const endPaths = new Set((snapshot.coverageGaps ?? []).map((gap) => gap.path))
       const fromStart = startGaps.filter((gap) => !endPaths.has(gap.path)).map((gap) => ({ path: gap.path, reason: `${gap.reason}, at the start of the turn` }))
       if (fromStart.length) snapshot = { ...snapshot, coverageGaps: [...(snapshot.coverageGaps ?? []), ...fromStart] }
+    }
+    if (snapshot.coverageGaps?.length) {
+      // A filtered file not checked yet is named only when the turn changed it (`namedGapsAsync`).
+      const { coverageGaps: _all, ...rest } = snapshot
+      const named = await namedGapsAsync(workspacePath, action.startSha, snapshot.sha, _all)
+      snapshot = named.length ? { ...rest, coverageGaps: named } : rest
     }
     const { record, commits } = await describeGitAsync(workspacePath, action.startSha, snapshot)
     action.endSha = snapshot.sha

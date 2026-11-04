@@ -1,12 +1,14 @@
 /**
  * What recording exact bytes costs a snapshot of 20,000 files, with and without conversions (`core.autocrlf=true`, as
  * Git for Windows sets it), against snapshots without exact trees. Prints the times; run it on purpose with
- * `MOUSSE_SNAPSHOT_PERF=1 npx vitest run tests/snapshotExactBytesPerf.test.ts`.
+ * `MOUSSE_SNAPSHOT_PERF=1 npx vitest run tests/snapshotExactBytesPerf.test.ts`. A last case puts 2,000 of the files under a
+ * filter, half of which loses bytes, and times the snapshots that check them.
  */
-import { mkdirSync, writeFileSync } from 'node:fs'
+import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { recordExactTrees, takeSnapshotAsync } from '../src/mms/actions/snapshots'
+import { trustRepositoryPrograms } from '../src/mms/git/repoPrograms'
 import { ThreadActionService } from '../src/mms/actions/ThreadActionService'
 import { UndoService } from '../src/mms/actions/UndoService'
 import { actionOptions, git, gitFoundationFixture } from './fixtures/gitFoundation'
@@ -66,4 +68,38 @@ describe.skipIf(!process.env.MOUSSE_SNAPSHOT_PERF)('snapshot time, 20,000 files'
       }, 600_000)
     }
   }
+
+  it('autocrlf=input, 2,000 files under a filter, 1,000 of them losing bytes', async () => {
+    git(f.repo, 'config', 'core.autocrlf', 'input')
+    git(f.repo, 'config', 'filter.strip.clean', "sed 's/ *$//'"); git(f.repo, 'config', 'filter.strip.smudge', 'cat')
+    const worktree = join(f.root, 'wt-filtered')
+    git(f.repo, 'worktree', 'add', '-q', '--detach', worktree, 'HEAD')
+    trustRepositoryPrograms(worktree)
+    // module-000 to module-019: 2,000 files, every other one with trailing spaces the clean filter drops.
+    writeFileSync(join(worktree, '.gitattributes'), 'packages/module-0[01][0-9]/** filter=strip\n')
+    for (let index = 0; index < FILES; index++) if (index % 200 < 20 && index % 2) appendFileSync(join(worktree, path(index)), '// spaces   \n')
+    const checking: number[] = []
+    for (let round = 0; round < 6; round++) {
+      let named = 0
+      checking.push(await timed(async () => { named = (await takeSnapshotAsync(worktree, { reason: `check ${round}` })).coverageGaps?.length ?? 0 }))
+      if (!named) break
+    }
+    const warm: number[] = []
+    for (let round = 0; round < 3; round++) {
+      writeFileSync(join(worktree, path(round * 7 + 200)), `changed ${round}\n`)
+      warm.push(await timed(() => takeSnapshotAsync(worktree, { reason: `warm ${round}` })))
+    }
+    warm.sort((a, b) => a - b)
+    const unchanged = await timed(() => takeSnapshotAsync(worktree, { reason: 'unchanged' }))
+    // A turn that changes one lossy filtered file, then its Undo, which must give its trailing spaces back.
+    const target = path(201)
+    const original = readFileSync(join(worktree, target))
+    const thread = join(f.root, 'thread-filtered')
+    mkdirSync(thread)
+    await new ThreadActionService(thread).runCheckpointedAction(actionOptions(worktree), () => writeFileSync(join(worktree, target), 'the turn\n'))
+    const undo = await timed(() => pressed('Undo', () => new UndoService(thread).undoLatest('main', worktree)))
+    expect(readFileSync(join(worktree, target)).equals(original)).toBe(true)
+    results.push(`autocrlf=input, 2,000 filtered: snapshots until all are checked ${checking.join(', ')} ms, next (one file changed, median of 3) ${warm[1]} ms, unchanged ${unchanged} ms, Undo of one filtered file ${undo} ms`)
+    expect(checking.length).toBeLessThan(6)
+  }, 600_000)
 })

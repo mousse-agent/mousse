@@ -9,6 +9,9 @@ import { activeHiddenStore, builtInPathspecs, ensureStoreRules, outsideHiddenSto
 import { gitAsync, gitEnv, gitStep, ownGitRunner, guarded, guardedAsync, LISTING, mergeTreesSteps, MOUSSE_COMMIT_ENV, mousseCommitEnvNow, NOT_MOUSSE, operationInProgressSteps, runGitProcess, tryGit, tryGitAsync, tryGitStep, treeOfAsync, treeOfSteps } from './git'
 import type { FrozenEntryProof } from '../lifecycle/verifiedDelete'
 import { readConvertedAsync } from './heldBytes'
+import { ROUND_TRIP_BUDGET, roundTripsAsync, storeCheckedAsync, sweepCopiesAsync, type RoundTrip, type RoundTripAsk, type Stored } from './filterRoundTrip'
+import { driversOffAsync, driversOffOf, withScopedGitConfig } from '../git/gitEnv'
+import { repoProgramSettings, repoProgramSettingsAsync } from '../git/repoPrograms'
 import { createOnlyAsync, removeProvenAsync } from './provenDiscard'
 import { keepCopy } from './keptCopies'
 import { restoreCommandsText, restoreFileCommand, restoreKindOf, restoreShell, type RestoreKind, type RestoreShell } from './restoreCommands'
@@ -57,6 +60,30 @@ export function coverageNotice(...lists: Array<CoverageGap[] | undefined>): stri
   if (!gaps.length) return undefined
   const named = gaps.slice(0, 10).map((gap) => `${gap.path} (${gap.reason})`).join(', ')
   return `Not covered: ${named}${gaps.length > 10 ? ` and ${gaps.length - 10} more` : ''}.`
+}
+
+/** A filtered file's gap that a later snapshot closes by itself: not checked yet, or not stored yet (`filterVerdicts`). */
+const deferredGap = (gap: CoverageGap): boolean => gap.reason.startsWith('not checked yet') || gap.reason.startsWith('not stored yet')
+
+/**
+ * `lists` merged, as an action that took the files from snapshot `from` to `to` names them: a filtered file not checked
+ * or stored yet is named only when the action changed it (Git's form or its exact bytes). One it left alone is never
+ * written, so naming it says nothing about the action; a repository with thousands of filtered files would otherwise
+ * list them all on its first turns.
+ */
+export async function namedGapsAsync(cwd: string, from: string, to: string, ...lists: Array<CoverageGap[] | undefined>): Promise<CoverageGap[]> {
+  const gaps = lists.flatMap((list) => list ?? [])
+  if (!gaps.some(deferredGap)) return gaps
+  const changed = new Set<string>()
+  const pairs: Array<[string | undefined, string | undefined]> = [[from, to], [await exactTreeOfAsync(cwd, from), await exactTreeOfAsync(cwd, to)]]
+  for (const [a, b] of pairs) {
+    if (!a || !b || a === b) continue
+    const listed = await tryGitAsync(cwd, ['diff-tree', '-r', '-z', '--no-renames', '--name-only', a, b], undefined, LISTING)
+    // When the difference cannot be read, every gap is named.
+    if (!listed.ok) return gaps
+    for (const path of nul(listed.stdout)) changed.add(path)
+  }
+  return gaps.filter((gap) => !deferredGap(gap) || changed.has(gap.path))
 }
 const NESTED_WITHOUT_COMMIT = 'nested repository with no commits'
 const UNREADABLE = 'unreadable'
@@ -321,6 +348,12 @@ interface PrivateFiles {
   index: string
   /** The persistent private index of its exact tree, updated with conversions off (`exactTreeSteps`). */
   exactIndex: string
+  /** The persistent private index of the files under a filter, holding their raw blob ids only (`filterVerdicts`). */
+  filteredIndex: string
+  /** What `filterVerdicts` found for each of those files, by path. */
+  verdicts: string
+  /** The files a check was stopped on, which the next one asks last. */
+  stalled: string
   last: string
   /** The repository's `info/attributes` (absent for a hidden store, whose own does not convert). */
   infoAttributes?: string
@@ -332,17 +365,21 @@ function* privateFiles(top: string): Steps<PrivateFiles> {
     // The store has no worktree index of anyone's, so its own is the persistent one: `git diff` against the folder reads it.
     const directory = join(store.gitDir, 'mousse')
     yield* disk.mkdir(directory)
-    return { directory, index: join(store.gitDir, 'index'), exactIndex: join(directory, EXACT_INDEX), last: join(directory, 'snapshot-last.json') }
+    return { directory, index: join(store.gitDir, 'index'), exactIndex: join(directory, EXACT_INDEX), filteredIndex: join(directory, FILTERED_INDEX), verdicts: join(directory, FILTER_VERDICTS), stalled: join(directory, FILTER_STALLED), last: join(directory, 'snapshot-last.json') }
   }
   // `--git-path` keeps names Git doesn't know in the worktree's own Git directory, so each linked worktree has its own.
   const [mousse, info] = (yield* gitStep(top, ['rev-parse', '--git-path', 'mousse', '--git-path', 'info/attributes'])).split(/\r?\n/)
   const directory = resolve(top, mousse!)
   yield* disk.mkdir(directory)
-  return { directory, index: join(directory, 'snapshot-index'), exactIndex: join(directory, EXACT_INDEX), last: join(directory, 'snapshot-last.json'), infoAttributes: resolve(top, info!) }
+  return { directory, index: join(directory, 'snapshot-index'), exactIndex: join(directory, EXACT_INDEX), filteredIndex: join(directory, FILTERED_INDEX), verdicts: join(directory, FILTER_VERDICTS), stalled: join(directory, FILTER_STALLED), last: join(directory, 'snapshot-last.json'), infoAttributes: resolve(top, info!) }
 }
 
 /** The file name of the exact tree's persistent private index, next to the snapshot's own (`gitPolicy.ts` knows it). */
 const EXACT_INDEX = 'snapshot-exact-index'
+/** The file name of the filtered files' private index of raw blob ids (`gitPolicy.ts` knows it too). */
+const FILTERED_INDEX = 'snapshot-filtered-index'
+const FILTER_VERDICTS = 'snapshot-filter-verdicts.json'
+const FILTER_STALLED = 'snapshot-filter-stalled'
 
 function* headOf(top: string): Steps<string | undefined> {
   // A hidden store has no HEAD, whatever the folder's own repository says.
@@ -476,11 +513,14 @@ function* indexTree(top: string, index: string, head: string | undefined): Steps
  * normal tree. A snapshot without the mark (taken before) has no exact tree, and is read as before.
  *
  * The exact tree has a path wherever the snapshot's tree has one, except:
- * - a path under a `filter` attribute (Git LFS, git-crypt): its normal form already round-trips, and its raw bytes
- *   would put LFS media or decrypted text into `.git/objects`;
+ * - a path under a `filter` attribute whose Git form gives its bytes back (Git LFS, git-crypt): its raw bytes would put
+ *   LFS media or decrypted text into `.git/objects`. Each filtered file is checked (`filterVerdicts`); one whose filter
+ *   loses bytes (`nbstripout`, a smudge that adds some) is in the exact tree with its bytes on disk, as a kept copy
+ *   already holds them. One not checked yet (a snapshot checks a bounded number) or whose smudge fails is named as a gap;
  * - a file over `EXACT_LIMITS.fileBytes`, and a file Git converts even with conversions off (`.git/info/attributes`
  *   outranks the attribute source, and Git before 2.40 has none): only Git's form of those is kept, named as a gap.
- * A restore writes those paths in Git's form from the snapshot's tree, as it did before exact trees.
+ * A restore writes those paths in Git's form from the snapshot's tree, as it did before exact trees. No filter driver
+ * runs while the exact bytes are hashed: every one is emptied.
  *
  * Where Git converts none of the snapshot's paths (no `core.autocrlf` or `core.eol`, and `check-attr` finds no converting
  * attribute on any of them, from any `.gitattributes`, tracked or not, or any other attributes file) the two trees are
@@ -519,10 +559,18 @@ function* emptyTreeSteps(top: string): Steps<string> {
 }
 const emptyTrees = new Map<string, string>()
 
-/** Mousse's own Git in `top` with every conversion off, as the proven write steps run it. */
+/**
+ * Mousse's own Git in `top` with every conversion off, as the proven write steps run it, and every filter driver emptied
+ * (`driversOffAsync`): exact bytes are written as they are, even under a filter `.git/info/attributes` sets, which the
+ * attribute source does not turn off.
+ */
 function exactRunner(top: string, emptyTree: string): DiscardGit {
   const run = ownGitRunner(top)
-  return (args, options = {}) => run([...EXACT_SETTINGS, ...args], { ...options, env: { ...exactEnv(emptyTree) as Record<string, string>, ...options.env } })
+  let off: Promise<Array<[string, string]>> | undefined
+  return async (args, options = {}) => {
+    off ??= driversOffAsync(top)
+    return withScopedGitConfig(await off, () => run([...EXACT_SETTINGS, ...args], { ...options, env: { ...exactEnv(emptyTree) as Record<string, string>, ...options.env } }))
+  }
 }
 
 let gitVersion: [number, number] | undefined
@@ -612,6 +660,9 @@ const EXACT_TOO_LARGE = (): string => `over ${sizeText(EXACT_LIMITS.fileBytes)},
 const EXACT_FAILED = (error: string): string => `exact bytes could not be recorded (${error}), so only Git's form of files it converts is kept`
 const CONVERTED_BY_INFO = '.git/info/attributes converts it, so only Git\'s form of it is kept'
 const CONVERTED_BY_OLD_GIT = 'Git older than 2.40 converts it, so only Git\'s form of it is kept'
+/** A filtered file whose Git form is not compared with its bytes yet (`filterVerdicts`); only the turn's own are named. */
+export const NOT_CHECKED = 'not checked yet, so only Git\'s form of it is kept'
+const STORED_LATER = (): string => `not stored yet, as a snapshot stores at most ${sizeText(ROUND_TRIP_BUDGET.storeBytes)} of filtered files; only Git's form of it is kept`
 
 /** One entry of `ls-tree -r -l`: its path, mode, blob and the blob's size. */
 interface SizedEntry { path: string; mode: string; sha: string; size: number }
@@ -635,13 +686,13 @@ function* exactTreeSteps(top: string, files: PrivateFiles, normal: string, head:
   if (!conversion.converts) return { tree: normal, gaps: [] }
   const earlier = { head, previous: yield* readLast(files.last), directory: files.directory }
   try {
-    return yield* exactIndexTree(top, files.exactIndex, entries, conversion, earlier)
+    return yield* exactIndexTree(top, files, entries, conversion, earlier)
   } catch {
     // The caller holds the mutation locks, so a lock file left by a crash is nobody's.
     yield* disk.remove(files.exactIndex)
     yield* disk.remove(`${files.exactIndex}.lock`)
     try {
-      const made = yield* exactIndexTree(top, files.exactIndex, entries, conversion, earlier)
+      const made = yield* exactIndexTree(top, files, entries, conversion, earlier)
       exactFailureLogged.delete(top)
       return made
     } catch (error) {
@@ -682,22 +733,24 @@ interface Earlier { head: string | undefined; previous: LastSnapshot | undefined
  * before: HEAD's or the previous snapshot's attributes give them a `filter` (`GIT_ATTR_SOURCE` from Git 2.40; before,
  * `check-attr --cached` over a private index of that tree), or the previous snapshot left them out of its exact tree
  * and Git's form of them has not changed since. A filter line the agent dropped (`git lfs untrack`) then never puts the
- * decrypted file or LFS media into `.git/objects`: while the file is unchanged, Git's own index still holds its filtered
- * blob and never reads it again; once it changes, Git's form holds the new bytes anyway.
+ * decrypted file or LFS media into `.git/objects` unchecked: while the file is unchanged, Git's own index still holds its
+ * filtered blob and never reads it again; once it changes, Git's form holds the new bytes anyway. Each is checked as a
+ * filtered file is (`filterVerdicts`), under the attributes of the tree that gave it the filter, its value here; none
+ * where only the previous exact tree shows it, or Git is older than 2.40.
  */
-function* filteredBefore(top: string, paths: readonly string[], now: ReadonlyMap<string, string>, earlier: Earlier): Steps<Set<string>> {
-  const left = new Set<string>()
+function* filteredBefore(top: string, paths: readonly string[], now: ReadonlyMap<string, string>, earlier: Earlier): Steps<Map<string, string | undefined>> {
+  const left = new Map<string, string | undefined>()
   if (!paths.length) return left
   const modern = yield* readsAttrSource(top)
   for (const source of new Set([earlier.head, earlier.previous?.tree].filter((tree): tree is string => Boolean(tree)))) {
     if (modern) {
-      for (const [path, attribute] of yield* convertingAttributes(top, paths, { GIT_ATTR_SOURCE: source })) if (attribute === 'filter') left.add(path)
+      for (const [path, attribute] of yield* convertingAttributes(top, paths, { GIT_ATTR_SOURCE: source })) if (attribute === 'filter' && !left.has(path)) left.set(path, source)
       continue
     }
     const temporary = join(earlier.directory, `restore-attributes-${randomUUID()}.index`)
     try {
       yield* gitStep(top, ['read-tree', source], { GIT_INDEX_FILE: temporary })
-      for (const [path, attribute] of yield* convertingAttributes(top, paths, { GIT_INDEX_FILE: temporary }, [], true)) if (attribute === 'filter') left.add(path)
+      for (const [path, attribute] of yield* convertingAttributes(top, paths, { GIT_INDEX_FILE: temporary }, [], true)) if (attribute === 'filter') left.set(path, undefined)
     } finally {
       yield* disk.remove(temporary)
     }
@@ -706,57 +759,257 @@ function* filteredBefore(top: string, paths: readonly string[], now: ReadonlyMap
   if (previous?.exact && previous.exact !== previous.tree) {
     const before = yield* entriesAt(top, previous.tree, paths)
     const exact = yield* entriesAt(top, previous.exact, paths)
-    for (const path of paths) if (before.has(path) && !exact.has(path) && before.get(path) === now.get(path)) left.add(path)
+    for (const path of paths) if (!left.has(path) && before.has(path) && !exact.has(path) && before.get(path) === now.get(path)) left.set(path, undefined)
   }
   return left
 }
 
-function* exactIndexTree(top: string, index: string, entries: readonly SizedEntry[], conversion: Conversion, earlier: Earlier): Steps<{ tree: string; gaps: CoverageGap[] }> {
+function* exactIndexTree(top: string, files: PrivateFiles, entries: readonly SizedEntry[], conversion: Conversion, earlier: Earlier): Steps<{ tree: string; gaps: CoverageGap[] }> {
+  const index = files.exactIndex
   const empty = yield* emptyTreeSteps(top)
   const env = exactEnv(empty, index)
+  // No filter driver runs while bytes are hashed, not even one `.git/info/attributes` names: every one is emptied.
+  const config = yield* gitStep(top, ['config', '--null', '--list'], undefined, undefined, LISTING)
+  const off = driversOffOf(config)
+  const quiet = <T>(steps: Steps<T>): Steps<T> => withConfigSteps(off, steps)
   const links = entries.filter((entry) => entry.mode === '160000')
-  const files = entries.filter((entry) => isFile(entry.mode))
+  const fileEntries = entries.filter((entry) => isFile(entry.mode))
   const gaps: CoverageGap[] = []
-  // A path under a filter keeps Git's form, unnamed: that form round-trips, and its raw bytes are LFS media or plaintext.
+  // A path under a filter is checked first (`filterVerdicts`), never added as it is.
   const left = new Set(conversion.filtered)
   // The limit is on the bytes on disk, which a conversion can make many times the stored size (`ident` expands each
   // `$Id$` twelvefold): every file is measured.
-  const measured = files.filter((entry) => !left.has(entry.path))
+  const measured = fileEntries.filter((entry) => !left.has(entry.path))
   const sizes = yield* fileSizes(measured.map((entry) => join(top, entry.path)))
   for (const [at, entry] of measured.entries()) {
     if ((sizes[at] ?? entry.size) > EXACT_LIMITS.fileBytes) { left.add(entry.path); gaps.push({ path: entry.path, reason: EXACT_TOO_LARGE() }) }
   }
   const modern = yield* readsAttrSource(top)
-  const rest = files.map((entry) => entry.path).filter((path) => !left.has(path))
-  if (rest.length && (conversion.infoAttributes || !modern)) {
-    for (const path of new Set((yield* convertingAttributes(top, rest, exactEnv(empty), EXACT_SETTINGS)).map(([path]) => path))) {
-      left.add(path); gaps.push({ path, reason: modern ? CONVERTED_BY_INFO : CONVERTED_BY_OLD_GIT })
-    }
+  const rest = fileEntries.map((entry) => entry.path).filter((path) => !left.has(path))
+  // Paths Git converts even with conversions off: only Git's form of them can be written back. A filter alone does not
+  // count: its driver is emptied wherever exact bytes are hashed or written back (`exactRunner`), so a lossy file under
+  // a filter `.git/info/attributes` sets (where `nbstripout --install` puts it) is stored and comes back as it was.
+  const anyway = new Set<string>()
+  const asked = [...rest, ...conversion.filtered]
+  if (asked.length && (conversion.infoAttributes || !modern)) {
+    for (const [path, attribute] of yield* convertingAttributes(top, asked, exactEnv(empty), EXACT_SETTINGS)) if (attribute !== 'filter' || !conversion.filtered.has(path)) anyway.add(path)
+    for (const path of rest) if (anyway.has(path)) { left.add(path); gaps.push({ path, reason: modern ? CONVERTED_BY_INFO : CONVERTED_BY_OLD_GIT }) }
   }
   // What the exact index has: `mode sha stage\tpath`.
-  const present = new Map((yield* disk.exists(index)) ? nul(yield* gitStep(top, ['ls-files', '-s', '-z'], { GIT_INDEX_FILE: index }, undefined, LISTING)).map((line) => [line.slice(line.indexOf('\t') + 1), line.slice(0, line.indexOf(' '))] as const) : [])
+  const present = new Map((yield* disk.exists(index)) ? nul(yield* gitStep(top, ['ls-files', '-s', '-z'], { GIT_INDEX_FILE: index }, undefined, LISTING)).map((line) => {
+    const [mode, sha] = line.slice(0, line.indexOf('\t')).split(' ') as [string, string]
+    return [line.slice(line.indexOf('\t') + 1), { mode, sha }] as const
+  }) : [])
   const normal = new Map(entries.map((entry) => [entry.path, `${entry.mode} ${entry.sha}`]))
-  // A path new to the exact index stays out while a filter applied to it before (see `filteredBefore`).
-  for (const path of yield* filteredBefore(top, files.map((entry) => entry.path).filter((path) => !left.has(path) && !present.has(path)), normal, earlier)) left.add(path)
+  // A path new to the exact index is checked as a filtered one while a filter applied to it before (see `filteredBefore`).
+  const before = yield* filteredBefore(top, fileEntries.map((entry) => entry.path).filter((path) => !left.has(path) && !present.has(path)), normal, earlier)
+  for (const path of before.keys()) left.add(path)
+  // Each filtered file stays in Git's form when that gives its bytes back, and is recorded exactly when it does not.
+  const byPath = new Map(fileEntries.map((entry) => [entry.path, entry]))
+  // One `.git/info/attributes` (or Git before 2.40) also converts otherwise (`text`, `eol`) cannot be written back as its
+  // bytes, nor its raw id read without that conversion: it is named as such, and never read for a check.
+  for (const path of conversion.filtered) if (anyway.has(path)) gaps.push({ path, reason: modern ? CONVERTED_BY_INFO : CONVERTED_BY_OLD_GIT })
+  const checked = [...conversion.filtered, ...before.keys()].filter((path) => !anyway.has(path)).map((path) => byPath.get(path)).filter((entry): entry is SizedEntry => Boolean(entry))
+  const verdicts = yield* filterVerdicts(top, files, checked, before, config, off, empty, present)
+  // A lossy file is in the exact tree only as the bytes it was compared as, stored from that very read (`filterVerdicts`).
+  const stored: SizedEntry[] = []
+  for (const [path, found] of verdicts) {
+    if (found.verdict === 'same') continue
+    if (found.verdict === 'lossy' && found.stored === true) stored.push({ ...byPath.get(path)!, sha: found.raw })
+    else if (found.verdict === 'lossy' && found.stored === 'size') gaps.push({ path, reason: EXACT_TOO_LARGE() })
+    else if (found.verdict === 'lossy' && found.stored === 'budget') gaps.push({ path, reason: STORED_LATER() })
+    else gaps.push({ path, reason: NOT_CHECKED })
+  }
   const wanted = entries.filter((entry) => entry.mode !== '160000' && !left.has(entry.path)).map((entry) => entry.path)
-  const keep = new Set([...wanted, ...links.map((entry) => entry.path)])
+  const keep = new Set([...wanted, ...stored.map((entry) => entry.path), ...links.map((entry) => entry.path)])
   // Entries the snapshot's tree no longer has (or keeps only in Git's form) go first, so a path that became a folder can be added.
   const stale = [...present.keys()].filter((path) => !keep.has(path))
-  if (stale.length) yield* gitStep(top, [...EXACT_SETTINGS, 'update-index', '-z', '--force-remove', '--stdin'], env, stale.join('\0') + '\0')
+  if (stale.length) yield* quiet(gitStep(top, [...EXACT_SETTINGS, 'update-index', '-z', '--force-remove', '--stdin'], env, stale.join('\0') + '\0'))
   // A file new to the exact index, or whose mode Git's form changed, starts from Git's form's entry: `update-index --add`
   // then reads its bytes (the entry has no stat data) but keeps that mode where `core.fileMode` is false, so an
-  // executable script stays executable. Nested repositories are recorded by their commit, as Git's form has them.
-  const seeded = files.filter((entry) => !left.has(entry.path) && present.get(entry.path) !== entry.mode).map((entry) => `${entry.mode} ${entry.sha}\t${entry.path}`)
-  const seed = [...seeded, ...links.map((entry) => `160000 ${entry.sha}\t${entry.path}`)]
-  if (seed.length) yield* gitStep(top, [...EXACT_SETTINGS, 'update-index', '-z', '--index-info'], env, seed.join('\0') + '\0')
+  // executable script stays executable. Nested repositories are recorded by their commit, as Git's form has them. A
+  // lossy file's entry is its stored bytes, and is never read again here.
+  const seeded = fileEntries.filter((entry) => !left.has(entry.path) && present.get(entry.path)?.mode !== entry.mode).map((entry) => `${entry.mode} ${entry.sha}\t${entry.path}`)
+  const raw = stored.filter((entry) => present.get(entry.path)?.sha !== entry.sha || present.get(entry.path)?.mode !== entry.mode).map((entry) => `${entry.mode} ${entry.sha}\t${entry.path}`)
+  const seed = [...seeded, ...raw, ...links.map((entry) => `160000 ${entry.sha}\t${entry.path}`)]
+  if (seed.length) yield* quiet(gitStep(top, [...EXACT_SETTINGS, 'update-index', '-z', '--index-info'], env, seed.join('\0') + '\0'))
   // A file whose stat data matches its entry is not read again: the stat cache keeps the next snapshot fast. The first
   // build reads every file, and in a repository that converts most of their exact bytes are new blobs: from Git 2.37
   // those go into one pack (Git's bulk check-in, for files over `core.bigFileThreshold` that need no conversion) instead
   // of one loose file each, which on a slow disk takes seconds for 20,000 files. Older Gits write them loose, as later
   // snapshots write their few new blobs.
   const bulk = !present.size && (yield* bulkCheckinBatches(top)) ? ['-c', 'core.bigFileThreshold=1'] : []
-  if (wanted.length) yield* gitStep(top, [...EXACT_SETTINGS, ...bulk, 'update-index', '-z', '--add', '--remove', '--stdin'], env, wanted.join('\0') + '\0')
-  return { tree: yield* gitStep(top, [...EXACT_SETTINGS, 'write-tree'], env), gaps }
+  if (wanted.length) yield* quiet(gitStep(top, [...EXACT_SETTINGS, ...bulk, 'update-index', '-z', '--add', '--remove', '--stdin'], env, wanted.join('\0') + '\0'))
+  return { tree: yield* quiet(gitStep(top, [...EXACT_SETTINGS, 'write-tree'], env)), gaps }
+}
+
+/** What `filterVerdicts` found for one file: its raw blob id and size, and for a lossy one whether its bytes are stored. */
+interface FilterVerdict { verdict: RoundTrip['verdict'] | 'unchecked'; raw: string; size: number; stored?: Stored }
+
+/** A file a check was stopped on: how many snapshots it waits once stopped again (`w`), and how many it still skips (`s`). */
+interface StalledFile { p: string; w: number; s: number }
+
+/**
+ * A check `filterVerdicts` keeps for a file, reused while every input of Git's form is as it was: its raw blob id `r`,
+ * stored blob `n`, conversion attributes `a` and the drivers and settings that apply `d`. `v` is the verdict, `s` the size.
+ */
+interface VerdictRecord { r: string; n: string; a: string; d: string; v: 'same' | 'lossy'; s: number }
+
+/** The attributes that decide how Git writes a file; `crlf` is `text`'s old name. */
+const CONVERSION_ATTRIBUTES = ['text', 'crlf', 'eol', 'filter', 'ident', 'working-tree-encoding']
+
+/**
+ * `filter.<name>.required=true` for each driver that may run: its smudge or process is set, as Git reads the config and
+ * the settings Mousse's own commands put back or empty (`programs`, in order, last wins). A failing one then stops Git.
+ */
+function requiredDrivers(config: string, programs: readonly string[]): Array<[string, string]> {
+  const drivers = new Map<string, { smudge?: string; process?: string }>()
+  const set = (key: string, value: string): void => {
+    const match = /^filter\.(.+)\.(smudge|process)$/i.exec(key)
+    if (!match) return
+    const driver = drivers.get(match[1]!) ?? {}
+    driver[match[2]!.toLowerCase() as 'smudge' | 'process'] = value
+    drivers.set(match[1]!, driver)
+  }
+  for (const item of config.split('\0')) { const at = item.indexOf('\n'); if (at > 0) set(item.slice(0, at), item.slice(at + 1)) }
+  for (const setting of programs) { const at = setting.indexOf('='); if (at > 0) set(setting.slice(0, at), setting.slice(at + 1)) }
+  return [...drivers].filter(([, driver]) => driver.smudge || driver.process).map(([name]): [string, string] => [`filter.${name}.required`, 'true'])
+}
+
+/**
+ * Whether Git's form of each file in `checked` (under a filter now, or in `before`: see `filteredBefore`) gives its bytes
+ * on disk back (`filterRoundTrip.ts`), and for a lossy one, whether its bytes are stored: from the very read compared,
+ * or, for one found lossy before, from a read whose blob id is the one checked. `present`
+ * is what the exact index holds: a lossy file it already has as those bytes is stored.
+ *
+ * The raw blob id of each comes from a third private index, updated with every conversion off and every filter driver
+ * emptied (`--info-only`): no driver runs and no object is written, and its stat cache reads a file again only once it
+ * changed. A check is kept in `.git/mousse/` and reused only while the raw id, the stored blob, the file's conversion
+ * attributes and the drivers and settings that apply are all the same; a driver script changed behind the same command is
+ * not seen. A file in `before` is checked under the attributes of the tree that gave it its filter. Where none can be read
+ * (only the previous exact tree shows its filter, or Git is older than 2.40), it is not checked, and no check is reused.
+ */
+function* filterVerdicts(top: string, files: PrivateFiles, checked: readonly SizedEntry[], before: ReadonlyMap<string, string | undefined>, config: string, off: ReadonlyArray<readonly [string, string]>, empty: string, present: ReadonlyMap<string, { mode: string; sha: string }>): Steps<Map<string, FilterVerdict>> {
+  const found = new Map<string, FilterVerdict>()
+  if (!checked.length) {
+    yield* disk.remove(files.filteredIndex)
+    yield* disk.remove(files.verdicts)
+    yield* disk.remove(files.stalled)
+    yield* step(() => undefined, () => sweepCopiesAsync(files.directory, Date.now()))
+    return found
+  }
+  const env = exactEnv(empty, files.filteredIndex)
+  const paths = checked.map((entry) => entry.path)
+  const refreshFilteredIndex = function* (): Steps<Map<string, string>> {
+    const wanted = new Set(paths)
+    const stale = (yield* disk.exists(files.filteredIndex)) ? nul(yield* gitStep(top, ['ls-files', '-z'], { GIT_INDEX_FILE: files.filteredIndex }, undefined, LISTING)).filter((path) => !wanted.has(path)) : []
+    if (stale.length) yield* withConfigSteps(off, gitStep(top, [...EXACT_SETTINGS, 'update-index', '-z', '--force-remove', '--stdin'], env, stale.join('\0') + '\0'))
+    yield* withConfigSteps(off, gitStep(top, [...EXACT_SETTINGS, 'update-index', '-z', '--add', '--remove', '--info-only', '--stdin'], env, paths.join('\0') + '\0'))
+    return new Map(nul(yield* gitStep(top, ['ls-files', '-s', '-z'], { GIT_INDEX_FILE: files.filteredIndex }, undefined, LISTING)).map((line) => [line.slice(line.indexOf('\t') + 1), line.split(' ')[1]!] as const))
+  }
+  let raws: Map<string, string>
+  try {
+    raws = yield* refreshFilteredIndex()
+  } catch {
+    // The caller holds the mutation locks: a lock file left by a crash is nobody's, and the index is only a cache.
+    yield* disk.remove(files.filteredIndex)
+    yield* disk.remove(`${files.filteredIndex}.lock`)
+    raws = yield* refreshFilteredIndex()
+  }
+  // What decides Git's form besides the blob: the drivers and settings that apply (the repository's, those Mousse's own
+  // commands put back or empty, and a caller's scope), and each file's attributes.
+  const settings = config.split('\0').filter((item) => /^(filter\.[^\n]*|core\.(autocrlf|eol))(\n|$)/i.test(item))
+  const programs = (yield* step(() => repoProgramSettings(top), () => repoProgramSettingsAsync(top))).filter((value) => /^filter\./i.test(value))
+  const drivers = createHash('sha256').update(JSON.stringify([settings, programs])).digest('hex')
+  const modern = yield* readsAttrSource(top)
+  const unread = (path: string): boolean => before.has(path) && (!before.get(path) || !modern)
+  const attributes = new Map<string, string[]>()
+  const sources = new Map<string | undefined, string[]>()
+  for (const path of paths) if (!unread(path)) sources.set(before.get(path), [...sources.get(before.get(path)) ?? [], path])
+  for (const [source, group] of sources) {
+    const fields = (yield* gitStep(top, ['check-attr', '-z', '--stdin', ...CONVERSION_ATTRIBUTES], source ? { GIT_ATTR_SOURCE: source } : undefined, group.join('\0') + '\0', LISTING)).split('\0')
+    for (let at = 0; at + 2 < fields.length; at += 3) attributes.set(fields[at]!, [...attributes.get(fields[at]!) ?? [], `${fields[at + 1]}=${fields[at + 2]}`])
+  }
+  let recorded: Record<string, VerdictRecord> = {}
+  try { recorded = JSON.parse(yield* disk.readText(files.verdicts)) as Record<string, VerdictRecord> } catch { recorded = {} }
+  if (!recorded || typeof recorded !== 'object' || Array.isArray(recorded)) recorded = {}
+  const attributesOf = (path: string): string => (attributes.get(path) ?? []).join(';')
+  const asks: RoundTripAsk[] = []
+  const lossyBefore: Array<{ path: string; raw: string }> = []
+  for (const entry of checked) {
+    const raw = raws.get(entry.path)
+    const was = Object.hasOwn(recorded, entry.path) ? recorded[entry.path] : undefined
+    if (!raw || unread(entry.path)) found.set(entry.path, { verdict: 'unchecked', raw: raw ?? '', size: 0 })
+    else if (was && was.r === raw && was.n === entry.sha && was.a === attributesOf(entry.path) && was.d === drivers) {
+      // Found lossy before: its bytes are stored once the exact index holds them, or are stored again now.
+      const held = was.v === 'lossy' && present.get(entry.path)?.sha === raw
+      found.set(entry.path, { verdict: was.v, raw, size: was.s, ...(held ? { stored: true as const } : {}) })
+      if (was.v === 'lossy' && !held) lossyBefore.push({ path: entry.path, raw })
+    } else asks.push({ path: entry.path, raw, normal: entry.sha, ...(before.get(entry.path) ? { source: before.get(entry.path)! } : {}) })
+  }
+  // Files a check was stopped on before (a smudge or a read that took the whole budget) are asked last, so they never
+  // keep the others from being checked; one stopped again waits 1, 3, 7 ... up to 64 snapshots before it is asked again.
+  let stalled: StalledFile[] = []
+  try { stalled = (JSON.parse(yield* disk.readText(files.stalled)) as StalledFile[]).filter((entry) => typeof entry?.p === 'string' && Number.isInteger(entry.w) && Number.isInteger(entry.s)) } catch { stalled = [] }
+  const last = new Map(stalled.map((entry) => [entry.p, entry]))
+  const ordered = [...asks.filter((ask) => !last.has(ask.path)), ...stalled.filter((entry) => entry.s <= 0).map((entry) => asks.find((ask) => ask.path === entry.p)).filter((ask): ask is RoundTripAsk => Boolean(ask))]
+  // Git's form is streamed without blocking; a synchronous run leaves the files to a later snapshot. The checks and
+  // stores share one budget of time and of stored bytes. Copies a stopped snapshot left are removed first: this one
+  // holds the worktree's mutation locks, so none made before now is in use.
+  const required = requiredDrivers(config, programs)
+  const none: { answers: Map<string, RoundTrip>; again: Map<string, Stored>; stalledNow?: string } = { answers: new Map(), again: new Map() }
+  const { answers, again, stalledNow } = yield* step(() => none, async () => {
+    await sweepCopiesAsync(files.directory, Date.now())
+    if (!ordered.length && !lossyBefore.length) return none
+    const options = { directory: files.directory, limit: EXACT_LIMITS.fileBytes, driversOff: off, required, storeBudget: { left: ROUND_TRIP_BUDGET.storeBytes }, deadline: Date.now() + ROUND_TRIP_BUDGET.ms }
+    const again = await storeCheckedAsync(top, lossyBefore, options)
+    const checks = await roundTripsAsync(top, ordered, options)
+    return { again, answers: checks.answers, ...(checks.stalled ? { stalledNow: checks.stalled } : {}) }
+  })
+  const asked = new Set(asks.map((ask) => ask.path))
+  const stillStalled: StalledFile[] = []
+  for (const entry of stalled) {
+    if (entry.p === stalledNow || !asked.has(entry.p) || answers.has(entry.p)) continue
+    stillStalled.push({ ...entry, s: entry.s - 1 })
+  }
+  if (stalledNow) { const wait = Math.min((last.get(stalledNow)?.w ?? 0) * 2 + 1, 64); stillStalled.push({ p: stalledNow, w: wait, s: last.has(stalledNow) ? wait : 0 }) }
+  const kept = stillStalled.slice(-64)
+  if (JSON.stringify(kept) !== JSON.stringify(stalled)) yield* (kept.length ? disk.writeText(files.stalled, JSON.stringify(kept)) : disk.remove(files.stalled))
+  for (const item of lossyBefore) {
+    const stored = again.get(item.path)
+    if (stored) found.set(item.path, { ...found.get(item.path)!, stored })
+    else found.set(item.path, { verdict: 'unchecked', raw: item.raw, size: 0 })
+  }
+  const next: Record<string, VerdictRecord> = {}
+  for (const entry of checked) {
+    const answer = answers.get(entry.path)
+    const raw = raws.get(entry.path)!
+    if (answer) {
+      found.set(entry.path, { verdict: answer.verdict, raw, size: answer.size, ...(answer.stored ? { stored: answer.stored } : {}) })
+      next[entry.path] = { r: raw, n: entry.sha, a: attributesOf(entry.path), d: drivers, v: answer.verdict, s: answer.size }
+    } else if (!found.has(entry.path)) found.set(entry.path, { verdict: 'unchecked', raw, size: 0 })
+    if (!next[entry.path] && Object.hasOwn(recorded, entry.path)) next[entry.path] = recorded[entry.path]!
+  }
+  if (JSON.stringify(next) !== JSON.stringify(recorded)) yield* disk.writeText(files.verdicts, JSON.stringify(next))
+  return found
+}
+
+/** `inner`, with `entries` added to the settings of every Git command it runs (`withScopedGitConfig`). */
+function* withConfigSteps<T>(entries: ReadonlyArray<readonly [string, string]>, inner: Steps<T>): Steps<T> {
+  if (!entries.length) return yield* inner
+  let next = inner.next()
+  while (!next.done) {
+    const asked = next.value
+    let answer: unknown
+    try {
+      answer = yield { sync: () => withScopedGitConfig(entries, () => asked.sync()), async: () => withScopedGitConfig(entries, () => asked.async()) }
+    } catch (error) {
+      next = inner.throw(error)
+      continue
+    }
+    next = inner.next(answer)
+  }
+  return next.value
 }
 
 /** Records `tree` (and `exactTree`, see the exact-bytes note) as a snapshot commit on `head`. */
