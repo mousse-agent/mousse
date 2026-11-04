@@ -7,7 +7,7 @@ import { withGitMutationLocks } from '../src/mms/actions/GitOperationCoordinator
 import { expireTrashedSnapshotRefs, releaseSnapshotRefs, releaseThreadSnapshots } from '../src/mms/actions/SnapshotRefReleaseService'
 import { WORKTREE_TRASH_QUIET_MS } from '../src/mms/lifecycle/WorktreeRetirementService'
 import { expirePreservedFiles } from '../src/mms/actions/preservedFiles'
-import { preserveBeforeAbortAsync } from '../src/mms/actions/leftMerge'
+import { legacyAbortRefAsync } from './support/legacyAbortRef'
 import { ThreadJournal } from '../src/mms/data/ThreadJournal'
 import { ThreadActionService } from '../src/mms/actions/ThreadActionService'
 import { UndoRetentionService } from '../src/mms/actions/UndoRetentionService'
@@ -69,9 +69,9 @@ async function thread(name: string, work: string, projectId?: string) {
   return { directory, space, actions, turn, undo, store, work: space.record.workTree }
 }
 
-/** What an abort keeps in the thread's store, recorded as `ManagedConflictService.abort` records it. */
+/** What an abort of an older version kept in the thread's store, recorded as it recorded it. */
 async function keepByAbort(t: Awaited<ReturnType<typeof thread>>, operationId: string): Promise<string> {
-  const { ref } = await inThreadSnapshotScope(t.directory, t.work, () => preserveBeforeAbortAsync(t.work, operationId))
+  const { ref } = await inThreadSnapshotScope(t.directory, t.work, () => legacyAbortRefAsync(t.work, operationId))
   new ThreadJournal(t.directory).append({ operationId, operationType: 'publish', state: 'cancelled', details: { conflictAborted: true, preservedRef: ref } })
   return ref
 }

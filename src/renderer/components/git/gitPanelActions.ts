@@ -92,8 +92,9 @@ export async function runSync(
       const { result } = await pullGit(path, scope, { strategy: request.strategy })
       onActivity({ phase: 'done', action: 'pull', message: pullResultNotice(result) })
     } else {
-      await abortGitInProgress(path, request.kind, scope)
-      onActivity({ phase: 'done', action: 'abort', message: `${request.kind === 'merge' ? 'Merge' : 'Rebase'} aborted` })
+      // The daemon's line says it is done, how long the edits it wrote over are kept, and how to bring one back.
+      const notice = await abortGitInProgress(path, request.kind, scope)
+      onActivity({ phase: 'done', action: 'abort', message: notice ?? `${request.kind === 'merge' ? 'Merge' : 'Rebase'} aborted` })
     }
   } catch (error) {
     // Cancel is an outcome the user chose, not a failure; a stopped pull can leave a merge, which the sync bar then offers to abort.

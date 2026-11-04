@@ -135,7 +135,7 @@ describe('GitService status', () => {
     git(cwd, 'checkout', 'main'); write(cwd, 'base.txt', 'main\n'); git(cwd, 'commit', '-am', 'main')
     git(cwd, 'checkout', 'topic'); expect(() => git(cwd, 'rebase', 'main')).toThrow()
     expect((await new GitService().getStatus(cwd)).inProgress).toBe('rebase')
-    await new GitService().abortInProgress(cwd, USER, 'rebase')
+    await new GitService().abortInProgress(cwd, USER, 'rebase', keep())
     expect((await new GitService().getStatus(cwd)).inProgress).toBeNull()
   })
 
@@ -1047,7 +1047,7 @@ describe('GitService live output and cancel', () => {
     const service = new GitService()
     await expect(service.pull(cwd, USER, { strategy: 'merge' })).resolves.toEqual({ result: 'conflicted' })
     expect((await service.getStatus(cwd)).inProgress).toBe('merge')
-    await service.abortInProgress(cwd, USER, 'merge')
+    await service.abortInProgress(cwd, USER, 'merge', keep())
     expect((await service.getStatus(cwd)).inProgress).toBeNull()
   }, 60_000)
 

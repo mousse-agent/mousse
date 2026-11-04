@@ -10,9 +10,9 @@ import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { keepCopy, keptCopyNotice } from '../src/mms/actions/keptCopies'
-import { preserveBeforeAbortAsync } from '../src/mms/actions/leftMerge'
+import { legacyAbortRefAsync } from './support/legacyAbortRef'
 import { restoreCommandTemplate, restoreFileCommand, restoreStagedCommand } from '../src/mms/actions/restoreCommands'
-import { abortPreservedNotice, moveFilesAsync, preservedNotice, takeSnapshotAsync } from '../src/mms/actions/snapshots'
+import { moveFilesAsync, preservedNotice, takeSnapshotAsync } from '../src/mms/actions/snapshots'
 import { keptAsideNotice } from '../src/mms/lifecycle/WorktreeRetirementService'
 import { pressed } from './support/userRequest'
 
@@ -162,7 +162,7 @@ describe('each notice\'s commands give back the exact bytes in the shells of thi
     expectRestored(top, commands, CONTENTS)
   })
 
-  it('an abort\'s copy, which holds snapshots\' normal form: converted back as a checkout would', async () => {
+  it('an older version\'s abort copy, which holds snapshots\' normal form: converted back as a checkout would', async () => {
     const top = repo()
     // Files whose conversion round-trips: CRLF under eol=crlf, UTF-16 with a byte order mark under its encoding, and
     // files without attributes, kept as they are.
@@ -173,11 +173,10 @@ describe('each notice\'s commands give back the exact bytes in the shells of thi
       ...Object.fromEntries(AWKWARD.map((path, index) => [path, Buffer.from(`awkward ${index}\n`)]))
     }
     writeAll(top, files)
-    const { ref, top: kept } = await preserveBeforeAbortAsync(top, 'op')
+    const { ref, top: kept } = await legacyAbortRefAsync(top, 'op')
     // Git names the folder its own way (forward slashes on Windows); it is the same folder.
     expect(resolve(kept)).toBe(resolve(top))
     expect(git(top, 'cat-file', 'blob', `${ref}:kept/crlf file.crlf`)).toBe('one\ntwo')
-    expect(abortPreservedNotice(ref, 24 * 60 * 60 * 1000, top)).toBe(`Every file as it was before the abort is kept under ${ref} for 1 day. Bring one back before then by running this in ${top}: ${restoreCommandTemplate(ref, { normalized: true })}.`)
     const commands = Object.fromEntries(Object.keys(files).map((path) => [path, restoreFileCommand(ref, path, { normalized: true })]))
     expectRestored(top, commands, files)
   })

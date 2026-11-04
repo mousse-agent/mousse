@@ -1,7 +1,7 @@
 import { createHash, randomUUID, type Hash } from 'node:crypto'
 import { constants, existsSync, readdirSync, readFileSync, realpathSync, statSync } from 'node:fs'
-import { lstat, open, readdir, readFile, readlink, rm, stat, unlink, utimes, writeFile, type FileHandle } from 'node:fs/promises'
-import { join, resolve } from 'node:path'
+import { lstat, mkdir, open, readdir, readFile, readlink, rm, stat, symlink, unlink, utimes, writeFile, type FileHandle } from 'node:fs/promises'
+import { dirname, join, resolve } from 'node:path'
 import { promisify } from 'node:util'
 import { createDeflate, deflate as deflateCallback } from 'node:zlib'
 import { atomicWriteJsonSync } from '../data/AtomicFs'
@@ -132,7 +132,7 @@ async function gitBytes(top: string, args: string[], options: { env?: NodeJS.Pro
 }
 
 /** The NUL-separated fields Git printed with `-z`, exactly as named (a leading space is part of a path). */
-async function listZ(top: string, args: string[], env?: NodeJS.ProcessEnv): Promise<string[]> {
+export async function listZ(top: string, args: string[], env?: NodeJS.ProcessEnv): Promise<string[]> {
   return (await gitBytes(top, args, { ...(env ? { env } : {}), listing: true })).stdout.split('\0').filter(Boolean)
 }
 
@@ -823,6 +823,46 @@ export async function keepCopy(input: KeepCopyInput): Promise<KeptCopy> {
   }
 }
 
+/**
+ * Writes the working versions the copy `sha` holds at `paths` back into the folder, each only where nothing stands now:
+ * a file is created, never written over, and a folder above it is made only where none is, never through a link. Used
+ * when an action removed kept files and then could not finish, so the folder is as it was. Returns the paths left as
+ * they are, because something now stands there; their bytes stay in the copy.
+ */
+export async function writeBackKeptFiles(top: string, sha: string, paths: readonly string[]): Promise<string[]> {
+  if (!paths.length) return []
+  const rows = (await listZOver(top, ['ls-tree', '-z', '-r', sha], paths)).map((line) => {
+    const tab = line.indexOf('\t')
+    const [mode, , id] = line.slice(0, tab).split(' ') as [string, string, string]
+    return { mode, id, path: line.slice(tab + 1) }
+  }).filter((row) => row.mode !== '160000')
+  const out = rows.length ? (await gitBytes(top, ['cat-file', '--batch'], { input: `${rows.map((row) => row.id).join('\n')}\n`, listing: true })).stdoutBytes : Buffer.alloc(0)
+  const left: string[] = paths.filter((path) => !rows.some((row) => row.path === path))
+  let position = 0
+  for (const row of rows) {
+    const end = out.indexOf(0x0a, position)
+    const size = Number(out.subarray(position, end).toString('latin1').split(' ')[2])
+    const data = out.subarray(end + 1, end + 1 + size)
+    position = end + 1 + size + 1
+    const absolute = join(top, row.path)
+    try {
+      // Every folder above is a real folder, or is made; a link or a file there leaves the path as it is.
+      for (let slash = row.path.indexOf('/'); slash !== -1; slash = row.path.indexOf('/', slash + 1)) {
+        const folder = join(top, row.path.slice(0, slash))
+        const info = await lstat(folder).catch(() => undefined)
+        if (!info) await mkdir(folder)
+        else if (!info.isDirectory() || info.isSymbolicLink()) throw Object.assign(new Error('in the way'), { code: 'EEXIST' })
+      }
+      if (row.mode === '120000') await symlink(data.toString(), absolute)
+      else await writeFile(absolute, data, { flag: 'wx', mode: row.mode === '100755' ? 0o755 : 0o644 })
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
+      left.push(row.path)
+    }
+  }
+  return left
+}
+
 /** `diff-index -z --raw` fields: each change is a `:modes ids status` field, then its path. Deletions store nothing. */
 function stagedChanges(fields: readonly string[]): Array<{ path: string; sha: string }> {
   const changes: Array<{ path: string; sha: string }> = []
@@ -904,6 +944,20 @@ export function keptCopyNotice(kept: Pick<KeptCopy, 'ref' | 'windowMs' | 'top' |
   const files = [...kept.digests.keys()].sort().map((path) => ({ ref: kept.ref, path }))
   const commands = files.length ? restoreCommandsText(files, { shell }) : restoreCommandTemplate(kept.ref, { shell })
   return `A copy is kept for ${retentionWindowText(kept.windowMs)} as ${kept.ref}. To bring a file back exactly as it was, run in ${kept.top}: ${commands} (its staged version: ${restoreStagedCommand(kept.ref, shell)}).`
+}
+
+const ABORTED: Record<string, string> = { merge: 'Merge', rebase: 'Rebase', 'cherry-pick': 'Cherry-pick', revert: 'Revert' }
+
+/**
+ * What an Abort's result says: that it is done, how long the edits it wrote over are kept, and how to bring a file back
+ * exactly as it was. Without files, the copy only keeps where the abort stopped (a rebase's new commits, say).
+ */
+export function abortKeptNotice(kind: string, kept: Pick<KeptCopy, 'ref' | 'windowMs' | 'top' | 'digests'>, shell: RestoreShell = restoreShell()): string {
+  const done = `${ABORTED[kind] ?? 'Operation'} aborted.`
+  const window = retentionWindowText(kept.windowMs)
+  if (!kept.digests.size) return `${done} Where it stopped is kept for ${window} as ${kept.ref}.`
+  const commands = restoreCommandsText([...kept.digests.keys()].sort().map((path) => ({ ref: kept.ref, path })), { shell })
+  return `${done} Your edits are kept for ${window} as ${kept.ref}. To bring a file back exactly as it was, run in ${kept.top}: ${commands} (its staged version: ${restoreStagedCommand(kept.ref, shell)}).`
 }
 
 // ---------------------------------------------------------------------------------------------------------

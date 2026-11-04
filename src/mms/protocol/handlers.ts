@@ -114,8 +114,8 @@ import { ConversationBranchService, FIRST_BRANCH_ID } from '../actions/Conversat
 import { discardPendingChangesAsync, gitAsync as workspaceGitAsync } from '../actions/git'
 import { IndexLockedError, leftAsItIsText } from '../actions/provenDiscard'
 import { getMousseHomeDir } from '../data/paths'
-import { keepCopy, keepExistingCommit, KeepCopyRefusedError, keptCopyNotice, keptCopyWindowMs, projectKeptFilesOwner, registerProjectKeptFilesFolder, type KeptCopy } from '../actions/keptCopies'
-import { abortPreservedNotice, takeSnapshotAsync } from '../actions/snapshots'
+import { abortKeptNotice, keepCopy, keepExistingCommit, KeepCopyRefusedError, keptCopyNotice, keptCopyWindowMs, projectKeptFilesOwner, registerProjectKeptFilesFolder, type KeptCopy } from '../actions/keptCopies'
+import { takeSnapshotAsync } from '../actions/snapshots'
 import { randomUUID } from 'node:crypto'
 import { ManagedConflictService } from '../actions/ManagedConflictService'
 import { cancelPendingIntegrations } from '../agents/ChildAgentIntegrationService'
@@ -3277,15 +3277,15 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const workspace = new ThreadWorkspaceManager(operation.threadDirectory).load()
       if (record.operationType !== 'publish' && !workspace) throw new DomainRpcError('workspace_not_ready', 'Thread workspace is missing')
       assertNoRunningTurn(ctx, operation.threadId)
-      let aborted: { preservedRef: string; top: string }
+      let aborted: Awaited<ReturnType<ManagedConflictService['abort']>>
       try {
         aborted = await new ManagedConflictService(operation.threadDirectory).abort(record.operationType === 'publish' ? operation.projectPath : workspace!.worktreePath, operationId)
       } catch (error) {
         // Why the merge could not be aborted is for the person to read in the banner or the CLI.
         throw new DomainRpcError(isLeaseBusy(error) ? 'thread_busy' : 'abort_failed', isLeaseBusy(error) ? THREAD_BUSY_TEXT : recoveryErrorText(error))
       }
-      // Every file as it was before the abort, conflicted ones with their edits, is kept under this ref for the thread's Undo window.
-      return { ok: true, preservedRef: aborted.preservedRef, notice: abortPreservedNotice(aborted.preservedRef, new UndoRetentionService(operation.threadDirectory).policy().windowMs, aborted.top) }
+      // What the abort wrote over, conflicted files with their edits, is kept under this ref for the thread's Undo window.
+      return { ok: true, preservedRef: aborted.preservedRef, notice: abortKeptNotice(aborted.kind, aborted.kept) }
     }
     case 'publish.status': {
       const p = isObject(params) ? params : {}
@@ -3610,9 +3610,16 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const target = await gitMutationTarget(ctx, p)
       const kind = asString(p.kind, 'kind', 16)
       if (kind !== 'merge' && kind !== 'rebase') throw new DomainRpcError('invalid_params', 'kind must be merge or rebase')
-      // A thread worktree allows it: it gives up a merge or rebase a terminal started, back to the recorded head.
-      await underThreadLocks(target, 'user-git-abort', () => ctx.mms.gitService.abortInProgress(target.root, gitUserAction(ctx, `Abort the ${kind}`), kind))
-      return gitStatusResult(ctx, target.root)
+      // A thread worktree allows it: it gives up a merge or rebase a terminal started, back to the recorded head. Owned as
+      // a Discard's copy is: a thread's abort is a recorded action of the person, so the files before and after it are in
+      // snapshots and the thread owns the copy; the person's own checkout keeps the copy for the project.
+      const thread = recordedThreadTarget(ctx, p, target)
+      const owner = thread?.directory ?? projectKeptFilesOwnerFor(ctx, p, target.root)
+      const abortKeeping = () => ctx.mms.gitService.abortInProgress(target.root, gitUserAction(ctx, `Abort the ${kind}`), kind, { owner })
+      const kept = thread
+        ? await runUserThreadGitAction(ctx, thread, { externalEffects: [{ kind: 'unknown', description: `Aborted the ${kind}`, reversible: false }] }, abortKeeping)
+        : await abortKeeping()
+      return gitStatusResult(ctx, target.root, kept ? { kept: { ref: kept.ref, windowMs: kept.windowMs, notice: abortKeptNotice(kind, kept) } } : {})
     }
     case 'git.createBranch': {
       const p = isObject(params) ? params : {}

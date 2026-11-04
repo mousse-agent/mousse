@@ -7,7 +7,7 @@ import { join, parse, resolve, sep } from 'node:path'
 import type { GitRecord, ThreadAction } from '../../shared/threadActions'
 import { activeHiddenStore, builtInPathspecs, ensureStoreRules, outsideHiddenStore } from '../git/hiddenStore'
 import { gitEnv, gitStep, guarded, guardedAsync, LISTING, mergeTreesSteps, MOUSSE_COMMIT_ENV, mousseCommitEnvNow, NOT_MOUSSE, operationInProgressSteps, runGitProcess, tryGit, tryGitAsync, tryGitStep, treeOfSteps } from './git'
-import { restoreCommandsText, restoreCommandTemplate, restoreShell, type RestoreShell } from './restoreCommands'
+import { restoreCommandsText, restoreShell, type RestoreShell } from './restoreCommands'
 import { files as disk, runAsync, step, type Steps } from './steps'
 import { retentionWindowText } from '../../shared/undoRetention'
 
@@ -652,15 +652,6 @@ export function preservedNotice(preserved: PreservedFiles, windowMs: number, she
   const named = preserved.paths.slice(0, 10).join(', ') + (preserved.paths.length > 10 ? ` and ${preserved.paths.length - 10} more` : '')
   const commands = restoreCommandsText(preserved.paths.map((path) => ({ ref: preserved.ref, path })), { shell })
   return `Files no snapshot held were in the way and are kept under ${preserved.ref} for ${retentionWindowText(windowMs)}: ${named}. Bring one back before then by running this in ${preserved.top}: ${commands}.`
-}
-
-/**
- * The line an abort's reply carries: every file as it was before the abort is kept under `ref` for the thread's Undo
- * window. The ref holds a snapshot's tree, Git's normal form of each file, so the command converts it back as a checkout
- * would; run in `top`, the repository's top folder.
- */
-export function abortPreservedNotice(ref: string, windowMs: number, top: string, shell: RestoreShell = restoreShell()): string {
-  return `Every file as it was before the abort is kept under ${ref} for ${retentionWindowText(windowMs)}. Bring one back before then by running this in ${top}: ${restoreCommandTemplate(ref, { normalized: true, shell })}.`
 }
 
 export interface RestoreChangeInput extends SnapshotInput {

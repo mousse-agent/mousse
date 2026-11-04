@@ -1,8 +1,7 @@
 import { createHash } from 'node:crypto'
 import { statSync } from 'node:fs'
 import { stat } from 'node:fs/promises'
-import { gitStep, mousseCommitEnvNow, tryGitStep } from './git'
-import { worktreeTreeSteps } from './snapshots'
+import { tryGitStep } from './git'
 import { files, runAsync, step, type Steps } from './steps'
 
 /**
@@ -78,30 +77,6 @@ function* isRecordedMergeSteps(folder: string, recorded: unknown): Steps<boolean
     now.mergeHeadFile.ctimeNs === was.mergeHeadFile.ctimeNs
 }
 
-
-/**
- * Keeps every file of the folder as it is now, conflicted ones with their markers and edits included, as one commit
- * under a new `refs/mousse/preserved/` ref, before an abort rewrites them. Reads the files only; HEAD, the branch,
- * the index and the files stay as they are. The caller holds the mutation locks.
- */
-function* preserveBeforeAbortSteps(folder: string, operationId: string): Steps<{ ref: string; top: string }> {
-  const top = yield* gitStep(folder, ['rev-parse', '--show-toplevel'])
-  const tree = yield* worktreeTreeSteps(top)
-  const head = (yield* tryGitStep(top, ['rev-parse', '--verify', '-q', 'HEAD^{commit}'])).stdout
-  const sha = yield* gitStep(top, ['commit-tree', tree, ...(head ? ['-p', head] : []), '-m', 'mousse snapshot: files kept before an abort', '-m', `Mousse-Operation: ${operationId}`], mousseCommitEnvNow())
-  const ref = `refs/mousse/preserved/${operationId}-abort-${sha.slice(0, 12)}`
-  yield* gitStep(top, ['update-ref', '--no-deref', ref, sha])
-  return { ref, top }
-}
-
-
-/**
- * Keeps every file of the folder before an abort rewrites them (see `preserveBeforeAbortSteps`), without blocking the
- * daemon. Returns the ref and the repository's top folder, which its paths are relative to.
- */
-export function preserveBeforeAbortAsync(folder: string, operationId: string): Promise<{ ref: string; top: string }> {
-  return runAsync(preserveBeforeAbortSteps(folder, operationId))
-}
 
 interface LeftMergeRecord { operationId: string; state: string; details?: unknown; expectedPreState?: unknown }
 
