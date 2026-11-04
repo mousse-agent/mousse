@@ -983,7 +983,7 @@ export class GitService {
           indexOnly: [...restore, ...remove].filter(submodule),
           stagedBefore: stagedEntryDigests(indexBefore),
           digests: kept.digests,
-          run,
+          discardGit: run,
           ...(this.options.beforeDiscardUnlink ? { beforeUnlink: this.options.beforeDiscardUnlink } : {})
         })
         return { ...kept, left }

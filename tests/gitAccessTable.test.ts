@@ -61,7 +61,9 @@ function readForm(subcommand: string, rest: readonly string[]): boolean {
 const RUNNERS = new Set([
   'git', 'gitRaw', 'tryGit', 'actionGit', 'lifecycleGit', 'workspaceGit', 'runGit', 'runLive', 'withoutRepoPrograms', 'raw',
   // The same runners without blocking, and as steps (`actions/steps.ts`).
-  'gitAsync', 'gitRawAsync', 'tryGitAsync', 'actionGitAsync', 'workspaceGitAsync', 'withoutRepoProgramsAsync', 'gitStep', 'gitRawStep', 'tryGitStep'
+  'gitAsync', 'gitRawAsync', 'tryGitAsync', 'actionGitAsync', 'workspaceGitAsync', 'withoutRepoProgramsAsync', 'gitStep', 'gitRawStep', 'tryGitStep',
+  // The runner a Discard is given (`provenDiscard.ts`), and its form that throws on failure.
+  'discardGit', 'discardGitOrThrow'
 ])
 /** GitService and code host methods that change the repository or GitHub. */
 const SERVICE_WRITES = /^(GitService\.(stage|stageAll|unstage|unstageAll|discard|fetch|pull|abortInProgress|init|createBranch|renameBranch|deleteBranch|checkout|commit|push)|CodeHost\.(createPullRequest|mergePullRequest|closePullRequest|fetchPullRequestHead|releasePullRequestHead)|GitHubService\.(createRepository|cloneRepository))$/

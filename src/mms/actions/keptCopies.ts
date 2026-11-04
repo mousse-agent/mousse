@@ -6,6 +6,7 @@ import { promisify } from 'node:util'
 import { createDeflate, deflate as deflateCallback } from 'node:zlib'
 import { atomicWriteJsonSync } from '../data/AtomicFs'
 import { ThreadJournal, type ThreadJournalRecord } from '../data/ThreadJournal'
+import { privateIndexEnv } from '../git/gitEnv'
 import { filterRefusal } from '../git/repoPrograms'
 import { gitRunError, type GitProcess } from '../git/runGitProcess'
 import { KEEP_COPY_OPERATIONS, PRESERVED_REFS, type KeepCopyOperation } from '../../shared/resourceLifecycle'
@@ -665,7 +666,7 @@ export async function keepCopy(input: KeepCopyInput): Promise<KeptCopy> {
   // Private index files in the Git folder, named as Mousse's own (`gitPolicy`'s owned index rule).
   const working = join(gitDir, `mousse-keep-${randomUUID()}.index`)
   const stages = join(gitDir, `mousse-keep-${randomUUID()}.index`)
-  const env = { GIT_INDEX_FILE: working }
+  const env = privateIndexEnv(working)
   let pack: PackFile | undefined
   try {
     if (existsSync(realIndex)) {
@@ -791,7 +792,7 @@ export async function keepCopy(input: KeepCopyInput): Promise<KeptCopy> {
 
     let conflictTree: string | undefined
     if (conflicts.length) {
-      const stageEnv = { GIT_INDEX_FILE: stages }
+      const stageEnv = privateIndexEnv(stages)
       await gitAsync(top, ['read-tree', '--empty'], stageEnv)
       await gitAsync(top, ['update-index', '-z', '--index-info'], stageEnv, conflicts.map((entry) => `${entry.mode} ${entry.sha}\tstage-${entry.stage}/${entry.path}`).join('\0') + '\0')
       conflictTree = await gitAsync(top, ['write-tree'], stageEnv)

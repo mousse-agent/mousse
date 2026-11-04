@@ -13,7 +13,7 @@ import type { GitCheckOptions, RepoProgramOptions } from '../git/repoPrograms'
 import { waitForFolderAccess } from '../files/folderAccess'
 import { LISTING_MAX_BUFFER, runGitProcess } from '../git/runGitProcess'
 import { files, runAsync, step, type Steps } from './steps'
-import { discardProvenAsync, stagedEntryDigests, stagedModes, waitForIndexAsync, type DiscardGit, type LeftAsItIs } from './provenDiscard'
+import { discardProvenAsync, stagedEntryDigests, stagedModes, stagedSince, waitForIndexAsync, type DiscardGit, type LeftAsItIs } from './provenDiscard'
 
 /**
  * `args` as Mousse's own commands run them: no repository program, and, for a folder whose snapshots live in a hidden
@@ -382,7 +382,7 @@ export async function discardPendingChangesAsync<T extends { digests: ReadonlyMa
   // Another Git command holding the index refuses the discard before anything is kept or removed.
   await waitForIndexAsync(top, run)
   const kept = await keep(top, { paths: [...tracked, ...untracked], writes: restore })
-  const { left, wholeTreeReset, stagedElsewhere } = await discardProvenAsync({
+  const { left, endedOperation, stagedElsewhere, indexWritten } = await discardProvenAsync({
     top,
     ...(head ? { head } : {}),
     restore,
@@ -391,26 +391,18 @@ export async function discardPendingChangesAsync<T extends { digests: ReadonlyMa
     indexOnly: tracked.filter(submodule),
     stagedBefore: stagedEntryDigests(indexBefore),
     digests: kept.digests,
-    run,
+    discardGit: run,
     // Folders `git clean -d` would remove once empty: untracked ones, listed as `name/`.
     wholeTree: { untrackedFolders: (await listZAsync(top, ['ls-files', '-z', '--others', '--directory', '--exclude-standard', '--', '.', NOT_MOUSSE])).filter((path) => path.endsWith('/')) },
     ...(options.beforeUnlink ? { beforeUnlink: options.beforeUnlink } : {})
   })
-  if (wholeTreeReset) {
-    // Everything was written back and nothing was left: the whole index goes back to HEAD, which also ends the merge,
-    // revert or cherry-pick. The files are not touched. Another Git command holding the index is waited for a moment.
-    for (let attempt = 0; ; attempt++) {
-      try {
-        if (head) await gitAsync(top, ['reset', '-q'])
-        else await gitAsync(top, ['read-tree', '--empty'])
-        break
-      } catch (error) {
-        if (attempt >= 20 || !/index\.lock/.test(String((error as { stderr?: unknown }).stderr ?? (error as Error).message))) throw error
-        await new Promise((settle) => setTimeout(settle, 100))
-      }
-    }
+  if (endedOperation) {
+    // The whole index went back to HEAD with the rest, which ended the merge, revert or cherry-pick. What is still
+    // pending is refused, except an entry someone staged after the index was written: that is their newer work.
     const after = await runAsync(inspectPendingChangesSteps(top))
-    if (ownPaths(after.files).length || after.operation) throw pendingChangesErrorFor('Workspace', {}, after)
+    const now = stagedEntryDigests(await listZAsync(top, ['ls-files', '-s', '-z']))
+    const stagedSinceWrite = new Set(indexWritten ? stagedSince(indexWritten, now, [...new Set([...indexWritten.keys(), ...now.keys()])]) : [])
+    if (ownPaths(after.files).some((path) => !stagedSinceWrite.has(path)) || after.operation) throw pendingChangesErrorFor('Workspace', {}, after)
   } else if (!left.length && pending.operation) {
     // Everything was discarded, but something else was staged meanwhile: the index stays, and so does the operation.
     for (const path of stagedElsewhere) left.push({ path, reason: 'operation', changed: path })

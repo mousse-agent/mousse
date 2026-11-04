@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process'
-import { chmodSync, existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -108,7 +108,7 @@ describe('Git panel Discard removes only proven bytes', () => {
     expect(existsSync(join(cwd, 'loose.txt'))).toBe(false)
     expect(keptBytes(cwd, kept!.ref, 'loose.txt').toString()).toBe('untracked\n')
     // What was removed before the folder changed is named as removed, not as left.
-    expect(kept!.left).toEqual([{ path: 'base.txt', reason: 'partly', changed: 'base.txt/late.bin', removed: ['base.txt/private.bin'] }])
+    expect(kept!.left).toEqual([{ path: 'base.txt', reason: 'partly', changed: 'base.txt/late.bin', removed: ['base.txt/private.bin'], place: 'base.txt' }])
     expect(leftAsItIsText(kept!.left)).toBe('base.txt/late.bin changed while Discard was removing base.txt, so the rest of base.txt was left as it is; base.txt/private.bin was removed before that and is in the copy.')
   })
 
@@ -429,6 +429,156 @@ describe('review round 1', () => {
     expect(existsSync(join(cwd, '.git', 'MERGE_HEAD'))).toBe(true)
     expect(git(cwd, 'show', ':.mousse/x.txt')).toBe('staged meanwhile')
     expect(kept.left.map((item) => [item.path, item.reason])).toEqual([['.mousse/x.txt', 'operation']])
+  })
+})
+
+/**
+ * A `git` first on PATH that, right after Discard's first `ls-files -s` once Git has written files back, stages unique
+ * bytes for base.txt as someone else would (then puts HEAD's bytes back in the file). When Discard holds the index lock
+ * at that moment, that Git waits for it, as a person's Git would retry, in the background. `done` appears once staged.
+ */
+function stagerAfterCheck(cwd: string, staged: string, head: string): { restore: () => void; done: string } {
+  const marks = scratch('mousse-proven-marks-'), done = join(marks, 'done')
+  const real = execFileSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).trim()
+  const stage = `printf '%s' '${staged}' > '${cwd}/base.txt' && env -u GIT_INDEX_FILE '${real}' -C '${cwd}' add base.txt && printf '%s' '${head}' > '${cwd}/base.txt' && : > '${done}'`
+  const bin = scratch('mousse-proven-bin-')
+  writeFileSync(join(bin, 'git'), `#!/bin/sh
+case " $* " in *" checkout-index -u "*) : > '${marks}/written' ;; esac
+case " $* " in
+  *" ls-files -s "*)
+    if [ -f '${marks}/written' ] && [ ! -f '${marks}/fired' ]; then
+      : > '${marks}/fired'
+      "${real}" "$@"; status=$?
+      if ! ( ${stage} ) >/dev/null 2>&1; then
+        ( for i in $(seq 1 200); do ( ${stage} ) >/dev/null 2>&1 && break; sleep 0.05; done ) </dev/null >/dev/null 2>&1 &
+      fi
+      exit $status
+    fi ;;
+esac
+exec "${real}" "$@"
+`, { mode: 0o755 })
+  const previous = process.env.PATH
+  process.env.PATH = `${bin}:${previous}`
+  return { restore: () => { process.env.PATH = previous }, done }
+}
+const waitFor = async (path: string): Promise<void> => { for (let i = 0; i < 200 && !existsSync(path); i++) await new Promise((settle) => setTimeout(settle, 50)) }
+
+describe('review round 2', () => {
+  for (const how of ['panel', 'pending'] as const) {
+    it(`${how}: bytes someone stages while Discard writes the index are never erased`, async () => {
+      const cwd = repo()
+      writeFileSync(join(cwd, 'base.txt'), 'before discard\n')
+      const staged = 'unique staged bytes 5d1e\n'
+      const { restore, done } = stagerAfterCheck(cwd, staged, 'base\n')
+      try {
+        if (how === 'panel') await new GitService().discard(cwd, USER, ['base.txt'], owner())
+        else await pressed('Discard changes', () => discardPendingChangesAsync(cwd, keepPending(scratch('mousse-proven-owner-'))))
+        await waitFor(done)
+      } finally { restore() }
+      expect(existsSync(done)).toBe(true)
+      expect(git(cwd, 'show', ':base.txt')).toBe(staged.trim())
+    }, 30_000)
+  }
+
+  it('pending: a resolution staged before the index is written keeps it and the merge', async () => {
+    const cwd = repo()
+    conflictOnBase(cwd)
+    const resolution = 'resolution staged meanwhile\n'
+    const restore = gitShim('checkout-index', `case " $* " in *" -u "*) printf '%s' '${resolution}' > '${cwd}/base.txt'; env -u GIT_INDEX_FILE git -C '${cwd}' add base.txt; printf 'main\\n' > '${cwd}/base.txt' ;; esac`)
+    let kept
+    try { kept = await pressed('Discard changes', () => discardPendingChangesAsync(cwd, keepPending(scratch('mousse-proven-owner-')))) } finally { restore() }
+    expect(git(cwd, 'show', ':base.txt')).toBe(resolution.trim())
+    expect(existsSync(join(cwd, '.git', 'MERGE_HEAD'))).toBe(true)
+    expect(kept.left.map((item) => [item.path, item.reason])).toEqual([['base.txt', 'restaged']])
+  })
+
+  it('pending: a lock held when the index is written returns the copy, keeps the merge, and names the paths', async () => {
+    const cwd = repo()
+    conflictOnBase(cwd)
+    const conflicted = readFileSync(join(cwd, 'base.txt'))
+    const stages = git(cwd, 'ls-files', '-s', '--', 'base.txt')
+    const restore = gitShim('checkout-index', `case " $* " in *" -u "*) : > '${cwd}/.git/index.lock' ;; esac`)
+    let kept
+    try { kept = await pressed('Discard changes', () => discardPendingChangesAsync(cwd, keepPending(scratch('mousse-proven-owner-')))) } finally { restore(); rmSync(join(cwd, '.git', 'index.lock'), { force: true }) }
+    expect(readFileSync(join(cwd, 'base.txt'), 'utf8')).toBe('main\n')
+    expect(existsSync(join(cwd, '.git', 'MERGE_HEAD'))).toBe(true)
+    expect(git(cwd, 'ls-files', '-s', '--', 'base.txt')).toBe(stages)
+    expect(keptBytes(cwd, kept.ref, 'base.txt')).toEqual(conflicted)
+    expect(kept.left.map((item) => [item.path, item.reason])).toEqual([['base.txt', 'locked']])
+  }, 30_000)
+
+  it('panel: under a filter only the repository configures, the staged change goes back to HEAD with no line', async () => {
+    const cwd = repo()
+    git(cwd, 'config', 'filter.test.clean', 'tr a-z A-Z'); git(cwd, 'config', 'filter.test.smudge', 'tr A-Z a-z')
+    writeFileSync(join(cwd, '.gitattributes'), 'base.txt filter=test\n'); writeFileSync(join(cwd, 'base.txt'), 'abcdef\n')
+    git(cwd, 'add', '.'); git(cwd, 'commit', '-q', '-m', 'filtered')
+    writeFileSync(join(cwd, 'base.txt'), 'staged edit\n'); git(cwd, 'add', 'base.txt')
+    const kept = await new GitService().discard(cwd, USER, ['base.txt'], owner())
+    expect(kept!.left).toEqual([])
+    expect(readFileSync(join(cwd, 'base.txt'), 'utf8')).toBe('abcdef\n')
+    expect(git(cwd, 'show', ':base.txt')).toBe('ABCDEF')
+    expect(git(cwd, 'status', '--porcelain')).toBe('')
+  })
+
+  it('panel: many filtered files are checked with one write, not two per file', async () => {
+    const cwd = repo()
+    writeFileSync(join(cwd, '.gitattributes'), '*.f filter=cat\n')
+    const files = Array.from({ length: 20 }, (_, index) => `n${index}.f`)
+    for (const path of files) writeFileSync(join(cwd, path), `${path}\n`)
+    git(cwd, 'config', 'filter.cat.clean', 'cat'); git(cwd, 'config', 'filter.cat.smudge', 'cat')
+    git(cwd, 'add', '.'); git(cwd, 'commit', '-q', '-m', 'filtered')
+    for (const path of files) writeFileSync(join(cwd, path), 'edited\n')
+    const calls = join(scratch('mousse-proven-calls-'), 'calls')
+    const restore = gitShim('checkout-index', `case " $* " in *" --prefix="*) echo x >> '${calls}' ;; esac`)
+    let kept
+    try { kept = await new GitService().discard(cwd, USER, files, owner()) } finally { restore() }
+    expect(kept!.left).toEqual([])
+    expect(readFileSync(calls, 'utf8').split('\n').filter(Boolean)).toHaveLength(1)
+    for (const path of files) expect(readFileSync(join(cwd, path), 'utf8')).toBe(`${path}\n`)
+  })
+
+  it('pending: an assume-unchanged file keeps its flag', async () => {
+    const cwd = repo()
+    git(cwd, 'update-index', '--assume-unchanged', 'other.txt')
+    writeFileSync(join(cwd, 'other.txt'), 'edited\n'); writeFileSync(join(cwd, 'base.txt'), 'edited\n')
+    const kept = await pressed('Discard changes', () => discardPendingChangesAsync(cwd, keepPending(scratch('mousse-proven-owner-'))))
+    expect(kept.left).toEqual([])
+    expect(readFileSync(join(cwd, 'other.txt'), 'utf8')).toBe('other\n')
+    expect(git(cwd, 'ls-files', '-v', '--', 'other.txt')).toBe('h other.txt')
+  })
+
+  it('a committed CRLF blob that its text attribute would convert is written back with no line', async () => {
+    const cwd = repo()
+    writeFileSync(join(cwd, 'crlf.txt'), 'one\r\ntwo\r\n'); git(cwd, 'add', 'crlf.txt'); git(cwd, 'commit', '-q', '-m', 'crlf blob')
+    writeFileSync(join(cwd, '.gitattributes'), '*.txt text\n'); git(cwd, 'add', '.gitattributes'); git(cwd, 'commit', '-q', '-m', 'text')
+    writeFileSync(join(cwd, 'crlf.txt'), 'edited\n')
+    const kept = await new GitService().discard(cwd, USER, ['crlf.txt'], owner())
+    expect(kept!.left).toEqual([])
+    expect(readFileSync(join(cwd, 'crlf.txt'), 'utf8')).toBe('one\r\ntwo\r\n')
+  })
+
+  it('with a split index, no shared index file is left behind', async () => {
+    const cwd = repo()
+    git(cwd, 'config', 'core.splitIndex', 'true'); git(cwd, 'update-index', '--split-index')
+    const shared = () => readdirSync(join(cwd, '.git')).filter((name) => name.startsWith('sharedindex.')).sort()
+    const before = shared()
+    writeFileSync(join(cwd, 'base.txt'), 'edited\n'); writeFileSync(join(cwd, 'loose.txt'), 'untracked\n')
+    const kept = await new GitService().discard(cwd, USER, ['base.txt', 'loose.txt'], owner())
+    expect(kept!.left).toEqual([])
+    expect(shared().filter((name) => !before.includes(name))).toEqual([])
+    expect(git(cwd, 'status', '--porcelain')).toBe('')
+  })
+
+  it('one sentence for a folder in the way, however many of its rows were selected', async () => {
+    const cwd = repo()
+    rmSync(join(cwd, 'base.txt')); mkdirSync(join(cwd, 'base.txt'))
+    for (const name of ['a.txt', 'b.txt', 'c.txt']) writeFileSync(join(cwd, 'base.txt', name), `${name}\n`)
+    const service = new GitService({ beforeDiscardUnlink: (path) => { if (path.endsWith('a.txt')) writeFileSync(join(cwd, 'base.txt', 'late.bin'), 'late\n') } })
+    const kept = await service.discard(cwd, USER, ['base.txt', 'base.txt/a.txt', 'base.txt/b.txt', 'base.txt/c.txt'], owner())
+    expect(readFileSync(join(cwd, 'base.txt', 'late.bin'), 'utf8')).toBe('late\n')
+    const text = leftAsItIsText(kept!.left)!
+    expect(text.match(/changed while Discard was removing/g)).toHaveLength(1)
+    expect(text).toMatch(/^base\.txt\/late\.bin changed while Discard was removing base\.txt, so the rest of base\.txt was left as it is; /)
   })
 })
 

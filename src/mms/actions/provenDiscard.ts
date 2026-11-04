@@ -1,8 +1,9 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { lstatSync, readdirSync, readFileSync, rmdirSync, unlinkSync, type Stats } from 'node:fs'
-import { lstat, readdir, rm, rmdir } from 'node:fs/promises'
+import { copyFile, lstat, open, readdir, readFile, readlink, rename, rm, rmdir, stat, type FileHandle } from 'node:fs/promises'
 import { dirname, join, resolve, sep } from 'node:path'
 import { setImmediate as nextTurn, setTimeout as sleep } from 'node:timers/promises'
+import { privateIndexEnv } from '../git/gitEnv'
 import { assertFoldersUnchanged, assertFrozenEntryUnchanged, identityOf, proveFrozenContentEntryAsync, recordFoldersAboveAsync, type FrozenEntryProof } from '../lifecycle/verifiedDelete'
 
 /**
@@ -48,6 +49,8 @@ export interface LeftAsItIs {
   changed: string
   /** With `partly`: the entries removed (kept in the copy) before the change was found. */
   removed?: string[]
+  /** With `partly`: what was being removed, the path itself or what stood in its way. Paths sharing it share a sentence. */
+  place?: string
   /** With `failed` and `unwritable`: Git's message. */
   detail?: string
 }
@@ -255,7 +258,7 @@ export async function removeProvenAsync(input: {
     const place = victimFor.get(path)
     const victim = place === undefined ? undefined : victims.get(place)
     if (victim?.changed === undefined) cleared.push(path)
-    else if (victim.removed.length) left.push({ path, reason: 'partly', changed: victim.changed, removed: [...victim.removed] })
+    else if (victim.removed.length) left.push({ path, reason: 'partly', changed: victim.changed, removed: [...victim.removed], place: victim.rel })
     else left.push({ path, reason: 'changed', changed: victim.changed })
   }
   // Like `git clean -d` and `git rm`: a folder a removed path leaves empty goes too.
@@ -311,8 +314,8 @@ async function standsInTheWay(top: string, path: string): Promise<boolean> {
 }
 
 /** The NUL-separated fields of a listing, exactly as Git wrote them; a failed run throws with Git's message. */
-async function listZ(run: DiscardGit, args: string[], env?: Record<string, string>, input?: string): Promise<string[]> {
-  const ran = await run(args, { ...(env ? { env } : {}), ...(input !== undefined ? { input } : {}) })
+async function listZ(discardGit: DiscardGit, args: string[], env?: Record<string, string>, input?: string, write = false): Promise<string[]> {
+  const ran = await discardGit(args, { ...(env ? { env } : {}), ...(input !== undefined ? { input } : {}), ...(write ? { write } : {}) })
   if (ran.status !== 0) throw new Error(`Command failed: git ${args.join(' ')}\n${ran.stderr.trim()}`)
   return ran.stdout.split('\0').filter(Boolean)
 }
@@ -331,6 +334,16 @@ function* literalBatches(paths: readonly string[]): Generator<string[]> {
 
 const firstLine = (text: string): string => text.split('\n').map((line) => line.trim()).find(Boolean) ?? ''
 
+/** Whether two entries on disk are the same: both files with the same bytes, or both links to the same target. */
+async function sameEntryBytes(a: string, b: string): Promise<boolean> {
+  const [one, two] = await Promise.all([lstat(a).catch(() => undefined), lstat(b).catch(() => undefined)])
+  if (!one || !two) return false
+  if (one.isSymbolicLink() && two.isSymbolicLink()) return (await readlink(a)) === (await readlink(b))
+  if (!one.isFile() || !two.isFile() || one.size !== two.size) return false
+  const [x, y] = await Promise.all([readFile(a), readFile(b)])
+  return x.equals(y)
+}
+
 /**
  * Has Git write HEAD's version of `paths` only where nothing is, from a private index that holds just those entries:
  * `checkout-index` without `--force` leaves an existing file or folder as it is, and never waits for the real index's
@@ -338,7 +351,7 @@ const firstLine = (text: string): string => text.split('\n').map((line) => line.
  * paths Git wrote is read from the private index afterwards (`diff-files`), never from its messages. Returns the paths
  * it did not write and why.
  */
-async function writeFromHeadAsync(top: string, run: DiscardGit, paths: readonly string[]): Promise<{ notWritten: Map<string, { reason: 'recreated' | 'failed'; detail?: string }>; entries: Map<string, string> }> {
+async function writeFromHeadAsync(top: string, discardGit: DiscardGit, paths: readonly string[]): Promise<{ notWritten: Map<string, { reason: 'recreated' | 'failed'; detail?: string }>; entries: Map<string, string> }> {
   const notWritten = new Map<string, { reason: 'recreated' | 'failed'; detail?: string }>()
   const byPath = new Map<string, string>()
   if (!paths.length) return { notWritten, entries: byPath }
@@ -350,36 +363,48 @@ async function writeFromHeadAsync(top: string, run: DiscardGit, paths: readonly 
     batch.forEach((path, index) => { if (blocked[index]) notWritten.set(path, { reason: 'recreated' }); else asked.push(path) })
   }
   if (!asked.length) return { notWritten, entries: byPath }
-  const heads = await headEntries(run, 'HEAD', asked)
+  const heads = await headEntries(discardGit, 'HEAD', asked)
   for (const [path, line] of heads) byPath.set(path, line)
-  const gitDir = resolve(top, firstLine((await run(['rev-parse', '--absolute-git-dir'])).stdout))
+  const gitDir = resolve(top, firstLine((await discardGit(['rev-parse', '--absolute-git-dir'])).stdout))
   const index = join(gitDir, `mousse-discard-${randomUUID()}.index`)
-  const env = { GIT_INDEX_FILE: index }
+  const env = privateIndexEnv(index)
+  const scratch = `${index}.check`
   try {
     const info = [...heads.values()]
-    const made = await run(['update-index', '-z', '--index-info'], { env, input: `${info.join('\0')}\0`, write: true })
+    const made = await discardGit(['update-index', '-z', '--index-info'], { env, input: `${info.join('\0')}\0`, write: true })
     if (made.status !== 0) throw new Error(`Command failed: git update-index\n${made.stderr.trim()}`)
-    const ask = (batch: readonly string[]) => run(['checkout-index', '-u', '-z', '--stdin'], { env, input: `${batch.join('\0')}\0`, write: true })
-    const ran = await ask(asked)
+    const writeHeadBatch = (batch: readonly string[]) => discardGit(['checkout-index', '-u', '-z', '--stdin'], { env, input: `${batch.join('\0')}\0`, write: true })
+    const ran = await writeHeadBatch(asked)
     const errors = new Map<string, string>()
     if (ran.status !== 0 && ran.status !== 1) {
       for (const path of asked) {
         if (await exists(top, path)) continue
-        const one = await ask([path])
+        const one = await writeHeadBatch([path])
         if (one.status !== 0) errors.set(path, firstLine(one.stderr))
       }
+      // A run Git stopped wrote some files without recording them: refreshed, those it wrote are not listed below.
+      await discardGit(['update-index', '-q', '--refresh'], { env, write: true })
     }
-    // The private index has only these entries. Refreshed from the files (a run Git stopped wrote some without saying
-    // so), the ones that are not HEAD's version, or are missing, are listed: those Git did not write.
-    await run(['update-index', '-q', '--refresh'], { env, write: true })
+    // The private index has only these entries: the ones whose file is missing or not as Git recorded writing it are
+    // listed, with the same conversions as the write.
     const wanted = new Set(asked)
-    for (const path of await listZ(run, ['diff-files', '-z', '--name-only'], env)) {
-      if (!wanted.has(path)) continue
-      // Something saved there, or in the way of its folder, after the path was emptied.
-      if (await standsInTheWay(top, path)) notWritten.set(path, { reason: 'recreated' })
+    const listed = (await listZ(discardGit, ['diff-files', '-z', '--name-only'], env, undefined, true)).filter((path) => wanted.has(path))
+    const there: string[] = []
+    for (const path of listed) {
+      if (await exists(top, path)) there.push(path)
+      // Something saved in the way of its folder after the path was emptied, or Git could not write it.
+      else if (await standsInTheWay(top, path)) notWritten.set(path, { reason: 'recreated' })
       else notWritten.set(path, { reason: 'failed', detail: errors.get(path) ?? firstLine(ran.stderr) })
     }
+    // A listed file may still be exactly what Git writes (a blob that does not survive its own line-ending conversion,
+    // say): it is written again into a scratch folder and compared byte for byte. Only one that differs was saved by
+    // someone else after the path was emptied.
+    if (there.length) {
+      await discardGit(['checkout-index', '-f', `--prefix=${scratch}/`, '-z', '--stdin'], { env, input: `${there.join('\0')}\0`, write: true })
+      for (const path of there) if (!await sameEntryBytes(absolute(top, path), absolute(scratch, path))) notWritten.set(path, { reason: 'recreated' })
+    }
   } finally {
+    await rm(scratch, { recursive: true, force: true })
     await rm(index, { force: true })
     await rm(`${index}.lock`, { force: true })
   }
@@ -387,36 +412,115 @@ async function writeFromHeadAsync(top: string, run: DiscardGit, paths: readonly 
 }
 
 /** The real index's lock file. */
-async function indexLockOf(top: string, run: DiscardGit): Promise<string> {
-  return resolve(top, firstLine((await run(['rev-parse', '--git-path', 'index.lock'])).stdout))
+async function indexLockOf(top: string, discardGit: DiscardGit): Promise<string> {
+  return resolve(top, firstLine((await discardGit(['rev-parse', '--git-path', 'index.lock'])).stdout))
 }
 
 /**
  * Waits briefly for another Git command to release the index; one that keeps it locked (a running command, or the lock
  * of one that stopped) refuses with {@link IndexLockedError}. Run before anything is removed.
  */
-export async function waitForIndexAsync(top: string, run: DiscardGit): Promise<void> {
-  const lock = await indexLockOf(top, run)
+export async function waitForIndexAsync(top: string, discardGit: DiscardGit): Promise<void> {
+  const lock = await indexLockOf(top, discardGit)
   for (const until = Date.now() + LOCK_WAIT_MS; await lstat(lock).then(() => true, () => false);) {
     if (Date.now() >= until) throw new IndexLockedError(lock)
     await sleep(LOCK_POLL_MS)
   }
 }
 
-/** Runs a command that writes the index, again while another Git command holds its lock, for a little while. */
-async function withIndexAsync(run: DiscardGit, args: string[], options: { input?: string; env?: Record<string, string> } = {}): Promise<{ ok: boolean; locked: boolean; stderr: string }> {
-  for (const until = Date.now() + LOCK_WAIT_MS; ;) {
-    const ran = await run(args, { ...options, write: true })
-    if (ran.status === 0) return { ok: true, locked: false, stderr: '' }
-    const locked = /index\.lock/.test(ran.stderr)
-    if (!locked || Date.now() >= until) return { ok: false, locked, stderr: ran.stderr }
-    await sleep(LOCK_POLL_MS)
-  }
+/** The index's entries as one digest each, by path, read without writing it. */
+async function stagedNow(discardGit: DiscardGit): Promise<Map<string, string>> {
+  return stagedEntryDigests(await listZ(discardGit, ['ls-files', '-s', '-z']))
 }
 
-/** The index's entries as one digest each, by path, read without writing it. */
-async function stagedNow(run: DiscardGit): Promise<Map<string, string>> {
-  return stagedEntryDigests(await listZ(run, ['ls-files', '-s', '-z']))
+/** A command on a private index that must succeed. */
+async function discardGitOrThrow(discardGit: DiscardGit, args: string[], env: Record<string, string>, input?: string): Promise<void> {
+  const ran = await discardGit(args, { env, write: true, ...(input !== undefined ? { input } : {}) })
+  if (ran.status !== 0) throw new Error(`Command failed: git ${args.join(' ')}\n${ran.stderr.trim()}`)
+}
+
+/** What the transaction on the real index changes ({@link commitIndexAsync}). */
+interface IndexPlan {
+  /** HEAD's entries to put in, as `update-index --index-info` takes them, by path. */
+  put: ReadonlyMap<string, string>
+  /** Paths whose entries go. */
+  drop: readonly string[]
+  /** Paths outside the sparse checkout, marked skip-worktree as `reset --hard` leaves them. */
+  sparse: readonly string[]
+  /** End the merge, revert or cherry-pick: the whole index goes back to HEAD, if nothing else in it changed. */
+  wholeTree: boolean
+}
+
+/**
+ * Changes the real index as one compare-and-swap, the way Git itself writes it: Mousse creates `index.lock` (waiting
+ * briefly for another Git command to finish), copies the index into a private file, compares each entry it would
+ * change with what was read before anything was removed (`before`), applies only the unchanged ones there, and then
+ * writes the result into the lock and renames it over the index. While the lock is held no Git command can stage
+ * anything, so nothing staged between the comparison and the write can be lost. An entry staged anew is left as it is
+ * (`restaged`). The whole-tree reset that ends an operation runs on the copy only when no entry anywhere changed
+ * (`elsewhere` names those that did). Assume-unchanged and skip-worktree flags stay. Returns `locked` with nothing
+ * changed when the lock stays taken.
+ */
+async function commitIndexAsync(top: string, discardGit: DiscardGit, head: string | undefined, before: ReadonlyMap<string, string>, plan: IndexPlan): Promise<{ restaged: string[]; elsewhere: string[]; ended: boolean; written?: Map<string, string>; locked?: string }> {
+  const indexPath = resolve(top, firstLine((await discardGit(['rev-parse', '--git-path', 'index'])).stdout))
+  const lockPath = `${indexPath}.lock`
+  let handle: FileHandle | undefined
+  for (const until = Date.now() + LOCK_WAIT_MS; !handle;) {
+    try {
+      handle = await open(lockPath, 'wx')
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
+      if (Date.now() >= until) return { restaged: [], elsewhere: [], ended: false, locked: lockPath }
+      await sleep(LOCK_POLL_MS)
+    }
+  }
+  const gitDir = resolve(top, firstLine((await discardGit(['rev-parse', '--absolute-git-dir'])).stdout))
+  const copy = join(gitDir, `mousse-discard-${randomUUID()}.index`)
+  const env = privateIndexEnv(copy)
+  let committed = false
+  try {
+    const original = await stat(indexPath).catch(() => undefined)
+    if (original) await copyFile(indexPath, copy)
+    const now = stagedEntryDigests(await listZ(discardGit, ['ls-files', '-s', '-z'], env))
+    const paths = [...plan.put.keys(), ...plan.drop]
+    const restaged = new Set(stagedSince(before, now, paths))
+    const changing = new Set(paths.filter((path) => !restaged.has(path)))
+    // `ls-files -v`: a lowercase tag is assume-unchanged, `S` (or `s`) skip-worktree.
+    const tags = new Map((await listZ(discardGit, ['ls-files', '-v', '-z'], env)).map((line) => [line.slice(2), line[0]!]))
+    const drop = plan.drop.filter((path) => changing.has(path))
+    const put = [...plan.put].filter(([path]) => changing.has(path)).map(([, line]) => line)
+    if (drop.length) await discardGitOrThrow(discardGit, ['update-index', '-z', '--force-remove', '--stdin'], env, `${drop.join('\0')}\0`)
+    // An entry put in afresh has no stat data, so Git reads the file before calling it unchanged: a converted file
+    // (CRLF, say) of another size is not taken for a change. Stage 0 replaces conflict stages.
+    if (put.length) await discardGitOrThrow(discardGit, ['update-index', '-z', '--index-info'], env, `${put.join('\0')}\0`)
+    const elsewhere = plan.wholeTree ? stagedSince(before, now, [...new Set([...before.keys(), ...now.keys()])]).filter((path) => !plan.put.has(path) && !plan.drop.includes(path)) : []
+    const ended = plan.wholeTree && !restaged.size && !elsewhere.length
+    // The whole index back to HEAD, which also ends the merge, revert or cherry-pick (`reset` does that itself).
+    if (ended && head) await discardGitOrThrow(discardGit, ['reset', '-q'], env)
+    else if (ended) await discardGitOrThrow(discardGit, ['read-tree', '--empty'], env)
+    else await discardGit(['update-index', '-q', '--refresh'], { env, write: true })
+    const assumed = [...changing].filter((path) => plan.put.has(path) && /^[a-z]$/.test(tags.get(path) ?? '') && tags.get(path) !== 's')
+    const skipWorktree = [...new Set([...plan.sparse.filter((path) => changing.has(path)), ...[...changing].filter((path) => plan.put.has(path) && /^[sS]$/.test(tags.get(path) ?? ''))])]
+    if (assumed.length) await discardGitOrThrow(discardGit, ['update-index', '-z', '--assume-unchanged', '--stdin'], env, `${assumed.join('\0')}\0`)
+    if (skipWorktree.length) await discardGitOrThrow(discardGit, ['update-index', '-z', '--skip-worktree', '--stdin'], env, `${skipWorktree.join('\0')}\0`)
+    // What the index holds once written, to tell later changes by someone else from what this discard left.
+    const written = stagedEntryDigests(await listZ(discardGit, ['ls-files', '-s', '-z'], env))
+    const bytes = await readFile(copy).catch(() => undefined)
+    if (bytes) {
+      await handle.writeFile(bytes)
+      await handle.sync()
+      await handle.close()
+      handle = undefined
+      await rename(lockPath, indexPath)
+      committed = true
+    }
+    return { restaged: [...restaged], elsewhere, ended, written }
+  } finally {
+    if (handle) await handle.close()
+    if (!committed) await rm(lockPath, { force: true })
+    await rm(copy, { force: true })
+    await rm(`${copy}.lock`, { force: true })
+  }
 }
 
 export interface ProvenDiscardInput {
@@ -435,7 +539,7 @@ export interface ProvenDiscardInput {
   stagedBefore: ReadonlyMap<string, string>
   /** What the copy holds: `KeptCopy.digests`. */
   digests: ReadonlyMap<string, string>
-  run: DiscardGit
+  discardGit: DiscardGit
   /** The pending-changes Discard: HEAD's versions are written only inside the sparse checkout, as Git would, and empty untracked folders go too. */
   wholeTree?: { untrackedFolders: readonly string[] }
   beforeUnlink?: (path: string) => void
@@ -448,15 +552,16 @@ export interface ProvenDiscardInput {
  * nothing removed when Git's index stays locked. A failure once files were removed is returned as `failed` for the paths
  * not finished, so the caller still shows the copy.
  */
-export async function discardProvenAsync(input: ProvenDiscardInput): Promise<{ left: LeftAsItIs[]; wholeTreeReset: boolean; stagedElsewhere: string[] }> {
-  const { top, run } = input
-  await waitForIndexAsync(top, run)
+export async function discardProvenAsync(input: ProvenDiscardInput): Promise<{ left: LeftAsItIs[]; endedOperation: boolean; stagedElsewhere: string[]; indexWritten?: Map<string, string> }> {
+  const { top, discardGit } = input
+  await waitForIndexAsync(top, discardGit)
   const discarded = [...new Set([...input.restore, ...input.remove, ...input.untracked, ...input.indexOnly])]
   // A path staged anew since the copy is someone's newer work: nothing of it is touched.
-  const restagedEarly = new Set(stagedSince(input.stagedBefore, await stagedNow(run), discarded))
+  const restagedEarly = new Set(stagedSince(input.stagedBefore, await stagedNow(discardGit), discarded))
   const left: LeftAsItIs[] = [...restagedEarly].map((path) => ({ path, reason: 'changed', changed: path }))
   // A file under a filter Git cannot run here could not be written back: it is left whole.
-  const unwritable = await unwritableAsync(top, run, input.head, input.restore.filter((path) => !restagedEarly.has(path)))
+  const attributesDiscarded = discarded.some((path) => path === '.gitattributes' || path.endsWith('/.gitattributes'))
+  const unwritable = await unwritableAsync(top, discardGit, input.head, input.restore.filter((path) => !restagedEarly.has(path)), attributesDiscarded)
   for (const [path, detail] of unwritable) left.push({ path, reason: 'unwritable', changed: path, detail })
   const keep = (path: string): boolean => !restagedEarly.has(path) && !unwritable.has(path)
   const emptied = await removeProvenAsync({
@@ -474,83 +579,84 @@ export async function discardProvenAsync(input: ProvenDiscardInput): Promise<{ l
     if (input.wholeTree) await removeEmptyFoldersUnder(top, input.wholeTree.untrackedFolders)
     // HEAD's versions, only into empty paths, and (for the pending-changes Discard) only inside the sparse checkout.
     let write = input.restore.filter((path) => cleared.has(path))
-    const outside = input.wholeTree ? await outsideSparseCheckout(run, write) : new Set<string>()
+    const outside = input.wholeTree ? await outsideSparseCheckout(discardGit, write) : new Set<string>()
     write = write.filter((path) => !outside.has(path))
-    const { notWritten, entries } = await writeFromHeadAsync(top, run, write)
+    const { notWritten, entries } = await writeFromHeadAsync(top, discardGit, write)
     for (const [path, why] of notWritten) {
       left.push({ path, reason: why.reason, changed: path, ...(why.detail ? { detail: why.detail } : {}) })
       settled.add(path)
     }
-    // The index entries of what was emptied and written go back to HEAD, unless someone staged them meanwhile.
+    // One transaction on the real index, under its lock, which Mousse takes itself: each entry changes only if it is still
+    // what was read before anything was removed. One staged anew meanwhile keeps its staged version and is named, and
+    // the whole index (ending a merge, revert or cherry-pick) goes back to HEAD only if nothing in it changed.
     const done = [...cleared, ...input.indexOnly.filter(keep)].filter((path) => !settled.has(path) && !input.untracked.includes(path))
-    const restaged = new Set(stagedSince(input.stagedBefore, await stagedNow(run), done))
-    for (const path of restaged) { left.push({ path, reason: 'restaged', changed: path }); settled.add(path) }
-    const reset = done.filter((path) => !restaged.has(path))
-    if (reset.length) {
-      const list = `${reset.join('\0')}\0`
-      const ran = input.head
-        ? await withIndexAsync(run, ['reset', '-q', input.head, '--pathspec-from-file=-', '--pathspec-file-nul'], { input: list, env: { GIT_LITERAL_PATHSPECS: '1' } })
-        : await withIndexAsync(run, ['rm', '--cached', '-r', '-f', '-q', '--ignore-unmatch', '--pathspec-from-file=-', '--pathspec-file-nul'], { input: list, env: { GIT_LITERAL_PATHSPECS: '1' } })
-      if (!ran.ok) {
-        for (const path of reset) left.push(ran.locked ? { path, reason: 'locked', changed: path } : { path, reason: 'failed', changed: path, detail: firstLine(ran.stderr) })
-        return { left, wholeTreeReset: false, stagedElsewhere: [] }
-      }
-      // An entry that already was HEAD's keeps the stat data of the file before, and Git would take a converted file
-      // (CRLF, say) of another size for a change without reading it. The written ones are put in afresh, then refreshed
-      // from the files Git wrote, as `reset --hard` leaves them.
-      const written = reset.map((path) => entries.get(path)).filter((line): line is string => line !== undefined)
-      if (written.length) {
-        await withIndexAsync(run, ['update-index', '-z', '--index-info'], { input: `${written.join('\0')}\0` })
-        await run(['update-index', '-q', '--refresh'], { write: true })
-      }
-      // Outside the sparse checkout an entry is marked as not on disk, as `reset --hard` leaves it.
-      const sparse = reset.filter((path) => outside.has(path))
-      if (sparse.length) await withIndexAsync(run, ['update-index', '-z', '--skip-worktree', '--stdin'], { input: `${sparse.join('\0')}\0` })
+    const put = new Map<string, string>()
+    const drop: string[] = []
+    const indexOnlyHead = input.head ? await headEntries(discardGit, input.head, input.indexOnly.filter((path) => done.includes(path))) : new Map<string, string>()
+    for (const path of done) {
+      const line = entries.get(path) ?? indexOnlyHead.get(path)
+      if (line !== undefined) put.set(path, line)
+      // Outside the sparse checkout, a path HEAD has and that was not written still gets HEAD's entry, marked skip-worktree.
+      else if (outside.has(path)) put.set(path, '')
+      else drop.push(path)
     }
-    if (left.length || !input.wholeTree) return { left, wholeTreeReset: false, stagedElsewhere: [] }
-    // The whole index goes back to HEAD only if nothing else in it was staged meanwhile either.
-    const now = await stagedNow(run)
-    const resetPaths = new Set(reset)
-    const elsewhere = stagedSince(input.stagedBefore, now, [...new Set([...input.stagedBefore.keys(), ...now.keys()])]).filter((path) => !resetPaths.has(path))
-    return { left, wholeTreeReset: !elsewhere.length, stagedElsewhere: elsewhere }
+    if (outside.size && input.head) {
+      for (const [path, line] of await headEntries(discardGit, input.head, [...put].filter(([, line]) => line === '').map(([path]) => path))) put.set(path, line)
+    }
+    for (const [path, line] of [...put]) if (!line) { put.delete(path); drop.push(path) }
+    const committed = await commitIndexAsync(top, discardGit, input.head, input.stagedBefore, { put, drop, sparse: [...outside].filter((path) => put.has(path)), wholeTree: input.wholeTree !== undefined && !left.length })
+    if (committed.locked) {
+      for (const path of done) left.push({ path, reason: 'locked', changed: path })
+      return { left, endedOperation: false, stagedElsewhere: [] }
+    }
+    for (const path of committed.restaged) left.push({ path, reason: 'restaged', changed: path })
+    return { left, endedOperation: committed.ended, stagedElsewhere: committed.elsewhere, ...(committed.written ? { indexWritten: committed.written } : {}) }
   } catch (error) {
     // Files were removed: the copy is still the answer, with what was not finished and why.
     const detail = firstLine((error as Error).message)
     for (const path of discarded) if (!settled.has(path) && !left.some((item) => item.path === path)) left.push({ path, reason: 'failed', changed: path, detail })
-    return { left, wholeTreeReset: false, stagedElsewhere: [] }
+    return { left, endedOperation: false, stagedElsewhere: [] }
   }
 }
 
 /**
  * Of `paths`, those under a `filter` attribute whose HEAD version Git cannot write as this caller runs it (a filter only
  * the repository configures, which Mousse's own commands do not run), with Git's message. Asked before anything is
- * removed, so such a path is never emptied. The check is the write itself, into a scratch folder in the Git folder:
- * the same `checkout-index`, from a private index of HEAD's entries, with the attributes as they are now and as HEAD has
- * them (a discarded `.gitattributes` goes back to HEAD's too).
+ * removed, so such a path is never emptied. The check is the write itself, into a scratch folder in the Git folder: the
+ * same `checkout-index`, from a private index of HEAD's entries, once for all the paths (one at a time only when that
+ * fails). When a `.gitattributes` is among the discarded paths it goes back to HEAD's too, so then the attributes as
+ * HEAD has them are tried as well (`attributesDiscarded`).
  */
-async function unwritableAsync(top: string, run: DiscardGit, head: string | undefined, paths: readonly string[]): Promise<Map<string, string>> {
+async function unwritableAsync(top: string, discardGit: DiscardGit, head: string | undefined, paths: readonly string[], attributesDiscarded: boolean): Promise<Map<string, string>> {
   const unwritable = new Map<string, string>()
   if (!head || !paths.length) return unwritable
+  const sources: Array<Record<string, string>> = attributesDiscarded ? [{}, { GIT_ATTR_SOURCE: head }] : [{}]
   const filtered = new Set<string>()
-  for (const env of [undefined, { GIT_ATTR_SOURCE: head }]) {
-    const attrs = await run(['check-attr', '-z', '--stdin', 'filter'], { input: `${paths.join('\0')}\0`, ...(env ? { env } : {}) })
+  for (const source of sources) {
+    const attrs = await discardGit(['check-attr', '-z', '--stdin', 'filter'], { input: `${paths.join('\0')}\0`, env: source })
     if (attrs.status !== 0) continue
     const fields = attrs.stdout.split('\0')
     for (let at = 0; at + 2 < fields.length; at += 3) if (fields[at + 2] !== 'unspecified' && fields[at + 2] !== 'unset') filtered.add(fields[at]!)
   }
   if (!filtered.size) return unwritable
-  const entries = await headEntries(run, head, [...filtered])
-  const gitDir = resolve(top, firstLine((await run(['rev-parse', '--absolute-git-dir'])).stdout))
+  const entries = await headEntries(discardGit, head, [...filtered])
+  const gitDir = resolve(top, firstLine((await discardGit(['rev-parse', '--absolute-git-dir'])).stdout))
   const scratch = join(gitDir, `mousse-discard-check-${randomUUID()}`)
   const index = `${scratch}.index`
   try {
-    const made = await run(['update-index', '-z', '--index-info'], { env: { GIT_INDEX_FILE: index }, input: `${[...entries.values()].join('\0')}\0`, write: true })
+    const made = await discardGit(['update-index', '-z', '--index-info'], { env: privateIndexEnv(index), input: `${[...entries.values()].join('\0')}\0`, write: true })
     if (made.status !== 0) return unwritable
-    for (const path of entries.keys()) {
-      const envs: Array<Record<string, string>> = [{ GIT_INDEX_FILE: index }, { GIT_INDEX_FILE: index, GIT_ATTR_SOURCE: head }]
-      for (const env of envs) {
-        const wrote = await run(['checkout-index', '-f', `--prefix=${scratch}/`, '--', path], { env, write: true })
-        if (wrote.status !== 0) { unwritable.set(path, firstLine(wrote.stderr) || 'its filter did not run'); break }
+    const asked = [...entries.keys()]
+    for (const source of sources) {
+      const env = privateIndexEnv(index, source)
+      const all = await discardGit(['checkout-index', '-f', `--prefix=${scratch}/`, '-z', '--stdin'], { env, input: `${asked.join('\0')}\0`, write: true })
+      await rm(scratch, { recursive: true, force: true })
+      if (all.status === 0) continue
+      for (const path of asked) {
+        if (unwritable.has(path)) continue
+        const one = await discardGit(['checkout-index', '-f', `--prefix=${scratch}/`, '-z', '--stdin'], { env, input: `${path}\0`, write: true })
+        await rm(scratch, { recursive: true, force: true })
+        if (one.status !== 0) unwritable.set(path, firstLine(one.stderr) || 'its filter did not discardGit')
       }
     }
   } finally {
@@ -562,10 +668,10 @@ async function unwritableAsync(top: string, run: DiscardGit, head: string | unde
 }
 
 /** HEAD's entry for each of `paths` it has, as `update-index --index-info` takes it (`<mode> <object>\t<path>`), by path. */
-async function headEntries(run: DiscardGit, head: string, paths: readonly string[]): Promise<Map<string, string>> {
+async function headEntries(discardGit: DiscardGit, head: string, paths: readonly string[]): Promise<Map<string, string>> {
   const byPath = new Map<string, string>()
   for (const batch of literalBatches(paths)) {
-    for (const line of await listZ(run, ['ls-tree', '-z', head, '--', ...batch])) {
+    for (const line of await listZ(discardGit, ['ls-tree', '-z', head, '--', ...batch])) {
       const tab = line.indexOf('\t')
       const [mode, , object] = line.slice(0, tab).split(' ')
       byPath.set(line.slice(tab + 1), `${mode} ${object}${line.slice(tab)}`)
@@ -575,9 +681,9 @@ async function headEntries(run: DiscardGit, head: string, paths: readonly string
 }
 
 /** Of `paths`, those outside the sparse checkout, when there is one (`sparse-checkout check-rules`, Git 2.42 and later). */
-async function outsideSparseCheckout(run: DiscardGit, paths: readonly string[]): Promise<Set<string>> {
-  if (!paths.length || firstLine((await run(['config', '--type=bool', 'core.sparseCheckout'])).stdout) !== 'true') return new Set()
-  const ran = await run(['sparse-checkout', 'check-rules', '-z'], { input: `${paths.join('\0')}\0` })
+async function outsideSparseCheckout(discardGit: DiscardGit, paths: readonly string[]): Promise<Set<string>> {
+  if (!paths.length || firstLine((await discardGit(['config', '--type=bool', 'core.sparseCheckout'])).stdout) !== 'true') return new Set()
+  const ran = await discardGit(['sparse-checkout', 'check-rules', '-z'], { input: `${paths.join('\0')}\0` })
   if (ran.status !== 0) return new Set()
   const inside = new Set(ran.stdout.split('\0').filter(Boolean))
   return new Set(paths.filter((path) => !inside.has(path)))
@@ -627,10 +733,13 @@ export function leftAsItIsText(left: readonly LeftAsItIs[]): string | undefined 
   const sentences: string[] = []
   const changed = by('changed')
   if (changed.length) sentences.push(`${listed(paths(changed))} changed after you pressed Discard, so ${one(changed) ? 'it was left as it is' : 'they were left as they are'}.`)
-  for (const item of by('partly')) {
+  // One sentence per place, however many discarded paths lie in it.
+  const places = new Map<string, LeftAsItIs>()
+  for (const item of by('partly')) if (!places.has(item.place ?? item.path)) places.set(item.place ?? item.path, item)
+  for (const [place, item] of places) {
     const removed = item.removed ?? []
     const what = removed.length === 1 ? `${removed[0]} was removed before that and is` : `${removed.length} files in it were removed before that and are`
-    sentences.push(`${item.changed} changed while Discard was removing ${item.path}, so the rest of ${item.path} was left as it is; ${what} in the copy.`)
+    sentences.push(`${item.changed} changed while Discard was removing ${place}, so the rest of ${place} was left as it is; ${what} in the copy.`)
   }
   const recreated = by('recreated')
   if (recreated.length) sentences.push(`${listed(paths(recreated))} ${one(recreated) ? 'was' : 'were'} saved again after Discard removed ${one(recreated) ? 'it' : 'them'}, so the new ${one(recreated) ? 'version was' : 'versions were'} left as ${one(recreated) ? 'it is' : 'they are'}.`)
