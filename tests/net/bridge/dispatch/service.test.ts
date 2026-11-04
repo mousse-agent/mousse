@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createHash, randomBytes } from 'node:crypto'
 import { execFileSync } from 'node:child_process'
 import { existsSync, mkdirSync, readFileSync } from 'node:fs'
-import { mkdtemp, mkdir, writeFile, readFile, realpath, rm, stat } from 'node:fs/promises'
+import { mkdtemp, mkdir, writeFile, readFile, readdir, realpath, rm, stat } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { devNull, tmpdir } from 'node:os'
 import { fork } from 'node:child_process'
@@ -41,6 +41,7 @@ import { StoragePolicyStore } from '../../../../src/mms/lifecycle/StoragePolicyS
 import { StorageSweepClock } from '../../../../src/mms/lifecycle/sweepClock'
 import { STORAGE_POLICY_DEFAULTS } from '../../../../src/shared/storage'
 import type { DispatchRecord } from '../../../../src/mms/bridge/dispatch/types'
+import { WorktreeManager } from '../../../../src/mms/worktree/WorktreeManager'
 
 const roots: string[] = [],
   databases: NetDatabase[] = [],
@@ -973,6 +974,53 @@ describe('worktree cleanup keeps the ignored files a dispatch made', () => {
     expect(f.effects()).toBe(0)
   })
 
+  it('a dispatch with no thread whose cleanup a process left part way is finished by Storage against its proof, and every byte is kept', async () => {
+    const files = outputs()
+    const f = await fixture()
+    await ignoreOutputs(f.repo)
+    await f.service.bindRepository(f.request.repoId, f.repo)
+    f.threads.ensureExecutionThread = () => {
+      const worktree = f.service.query(f.execution, f.context)!.worktree!.path
+      for (const [path, bytes] of Object.entries(files)) {
+        mkdirSync(dirname(join(worktree, path)), { recursive: true })
+        execFileSync('sh', ['-c', 'cat > "$1"', 'sh', join(worktree, path)], { input: bytes })
+      }
+      throw new Error('Execution project is unavailable')
+    }
+    // The delete stops after its first removal, as when the process ends there.
+    const cleanupWorktree = WorktreeManager.prototype.cleanupValidatedAgentWorktree
+    let removals = 0
+    vi.spyOn(WorktreeManager.prototype, 'cleanupValidatedAgentWorktree').mockImplementationOnce(function (this: WorktreeManager, info, options) {
+      return cleanupWorktree.call(this, info, { ...options, beforeRemove: () => { if (++removals === 2) throw new Error('The process ended') } })
+    })
+    await expect(f.service.run(f.request, f.context, f.execution)).rejects.toBeInstanceOf(NetError)
+    const record = f.service.query(f.execution, f.context)!
+    expect(record.threadId).toBeUndefined()
+    expect(record).toMatchObject({ state: 'failed', phase: 'cleanup', cleanupError: 'worktree_cleanup_failed', worktreeCopy: { files: 2 } })
+    const worktree = record.worktree!.path
+    const left = (await readdir(dirname(worktree))).filter((name) => /^\.deleting-[a-f0-9]{16}$/.test(name)).map((name) => join(dirname(worktree), name))
+    expect(left).toHaveLength(1)
+    expect(existsSync(worktree)).toBe(false)
+    // A save into what is left before Storage runs.
+    const saved = Buffer.from('saved into what was left 31be\n')
+    await mkdir(join(left[0]!, 'build'), { recursive: true }); await writeFile(join(left[0]!, 'build', 'after.bin'), saved)
+
+    const report = await storage(f).run('schedule')
+    expect(report.items).toContainEqual(expect.objectContaining({ rule: 'worktree-orphan', outcome: 'removed', reason: expect.stringMatching(/^Finished a cleanup that stopped part way/) }))
+    expect(existsSync(left[0]!)).toBe(false)
+    expect(existsSync(`${left[0]!}.json`)).toBe(false)
+    expect(await git(f.repo, ['worktree', 'list', '--porcelain'])).not.toContain(worktree)
+    for (const [path, bytes] of Object.entries(files)) expect(restore(f.repo, record.worktreeCopy!.ref, path).equals(bytes)).toBe(true)
+    const owner = threadPreservedIndex(dispatchKeptFilesOwner(f.profile, record.id))
+    const late = (await preservedRefs(f.repo)).filter((ref) => owner.owns(ref) && ref !== record.worktreeCopy!.ref && !execFileSync('git', ['cat-file', 'commit', ref], { cwd: f.repo, encoding: 'utf8' }).includes("Git's own data"))
+    expect(late.some((ref) => { try { return restore(f.repo, ref, 'build/after.bin').equals(saved) } catch { return false } })).toBe(true)
+
+    // The dispatch's next start finds nothing left to do.
+    await f.service.recover()
+    expect(f.service.query(f.execution, f.context)).toMatchObject({ phase: 'complete' })
+    expect(f.service.query(f.execution, f.context)!.cleanupError).toBeUndefined()
+  })
+
   it('over the copy limit, the worktree stays with every ignored file, and the record says how many it kept', async () => {
     const files = outputs()
     const f = await completedDispatch(files)
@@ -1028,8 +1076,8 @@ describe('worktree cleanup keeps the ignored files a dispatch made', () => {
     for (const [path, bytes] of Object.entries(files)) expect(restore(f.repo, record.worktreeCopy!.ref, path).equals(bytes)).toBe(true)
   })
 
-  it.each(['keeping', 'removing'] as const)(
-    'a start after the process was killed while cleanup was %s settles the record from what is there and never removes the worktree',
+  it.each(['keeping', 'deleting'] as const)(
+    'a start after the process was killed while cleanup was %s settles it from what is there and its record, keeping every byte',
     async (step) => {
       const files = outputs()
       const f = await fixture()
@@ -1077,17 +1125,26 @@ describe('worktree cleanup keeps the ignored files a dispatch made', () => {
 
       await f.service.recover()
       const after: DispatchRecord = f.service.query(f.execution, f.context)!
-      expect(after).toMatchObject({ state: 'completed', phase: 'complete', worktreeKept: { ignoredFiles: 2, reason: expect.stringMatching(/^Kept, 2 ignored files: its cleanup stopped part way/) } })
       expect(after.worktreeCleanup).toBeUndefined()
-      expect(existsSync(worktree)).toBe(true)
-      for (const [path, bytes] of Object.entries(files)) expect(readFileSync(join(worktree, path)).equals(bytes)).toBe(true)
-      if (step === 'removing') {
-        expect(after.worktreeCopy).toMatchObject({ files: 2, ref: before.worktreeCleanup!.ref })
+      if (step === 'deleting') {
+        // The proof was recorded before the folder would move: the start check finishes the cleanup, as a verified delete.
+        expect(before.worktreeCleanup!.path).toMatch(/\/\.deleting-[a-f0-9]{16}$/)
+        expect(after).toMatchObject({ state: 'completed', phase: 'complete', worktreeCopy: { files: 2 } })
+        expect(after.worktreeKept).toBeUndefined()
+        expect(existsSync(worktree)).toBe(false)
+        expect(existsSync(before.worktreeCleanup!.path!)).toBe(false)
+        expect(await git(f.repo, ['worktree', 'list', '--porcelain'])).not.toContain(worktree)
         for (const [path, bytes] of Object.entries(files)) expect(restore(f.repo, after.worktreeCopy!.ref, path).equals(bytes)).toBe(true)
-      } else expect(after.worktreeCopy).toBeUndefined()
-      expect(listKeptWorktrees(f.profile)).toEqual([expect.objectContaining({ dispatchId: after.id, path: worktree })])
-      await f.service.recover()
-      expect(existsSync(worktree)).toBe(true)
+        expect(listKeptWorktrees(f.profile)).toEqual([])
+      } else {
+        expect(after).toMatchObject({ state: 'completed', phase: 'complete', worktreeKept: { ignoredFiles: 2, reason: expect.stringMatching(/^Kept, 2 ignored files: its cleanup stopped part way/) } })
+        expect(existsSync(worktree)).toBe(true)
+        for (const [path, bytes] of Object.entries(files)) expect(readFileSync(join(worktree, path)).equals(bytes)).toBe(true)
+        expect(after.worktreeCopy).toBeUndefined()
+        expect(listKeptWorktrees(f.profile)).toEqual([expect.objectContaining({ dispatchId: after.id, path: worktree })])
+        await f.service.recover()
+        expect(existsSync(worktree)).toBe(true)
+      }
       expect(f.effects()).toBe(0)
     },
     60_000

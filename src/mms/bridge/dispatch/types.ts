@@ -85,10 +85,12 @@ export interface DispatchRecord {
   cleanupError?: 'worktree_cleanup_failed' | 'quarantine_cleanup_failed'
   /**
    * A worktree cleanup under way, recorded before the worktree's ignored files and Git's own data of it are kept, and
-   * again before the removal (`ref` and `sha` name the copy of the ignored files, `admin` the copy of Git's data).
-   * One a start-up finds was stopped by the process ending: it is settled from what is there, never repeated.
+   * again once they are kept and the proof is recorded, before the folder is renamed to `path` and deleted against the
+   * proof (`ref` and `sha` name the copy of the files Git cannot write back, `admin` the copy of Git's data).
+   * One a start-up finds in `deleting` is finished against the recorded proof. One in `keeping` (or `removing`, from
+   * before cleanup deleted against a proof) is settled from what is there, never repeated.
    */
-  worktreeCleanup?: { phase: 'keeping' | 'removing'; owner: string; files: number; ref?: string; sha?: string; admin?: { ref: string; sha: string } }
+  worktreeCleanup?: { phase: 'keeping' | 'removing' | 'deleting'; owner: string; files: number; ref?: string; sha?: string; admin?: { ref: string; sha: string }; path?: string }
   /** The copy of the worktree's ignored files, kept before the worktree was removed. */
   worktreeCopy?: { ref: string; sha: string; files: number }
   /**

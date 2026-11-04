@@ -546,8 +546,14 @@ test('agent worktrees of a dispatch go to the chosen folder and are cleaned up t
   const info = await manager.createWorktree('dispatch-one', f.repo, undefined, undefined, { worktreeFolder: f.folder })
   expect(info.path).toBe(join(f.repositoryFolder, 'agents', 'dispatch-one'))
   expect(manager.isValidatedAgentWorktreePath(info.path)).toBe(true)
-  expect(await manager.cleanupValidatedAgentWorktree(info, { keepIgnored: { owner: f.thread('dispatch-owner'), deleteIgnored: true } })).toMatchObject({ success: true })
+  // Cleanup renames the folder beside itself, in the chosen folder and so on its drive, before it deletes it.
+  const renamed: string[] = []
+  expect(await manager.cleanupValidatedAgentWorktree(info, { keepIgnored: { owner: f.thread('dispatch-owner'), deleteIgnored: true, record: (step) => { if (step.phase === 'deleting') renamed.push(step.path) } } })).toMatchObject({ success: true })
+  expect(renamed).toEqual([expect.stringMatching(/\/\.deleting-[a-f0-9]{16}$/)])
+  expect(dirname(renamed[0]!)).toBe(join(f.repositoryFolder, 'agents'))
+  expect(manager.isValidatedAgentWorktreePath(renamed[0]!)).toBe(true)
   expect(existsSync(info.path)).toBe(false)
+  expect(existsSync(renamed[0]!)).toBe(false)
 })
 
 test("a workflow's isolated agents get their worktrees in the chosen folder", async () => {
