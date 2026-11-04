@@ -1,5 +1,5 @@
 import { readdir, readFile } from 'node:fs/promises'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 import type { WorktreeFolderEntry } from '../../shared/settings'
 import type { WorktreeFolderStatus } from '../../shared/storage'
 import type { SettingsStore } from '../settings/SettingsStore'
@@ -22,8 +22,10 @@ export async function worktreeFolderStatus(settings: SettingsStore, home: string
  * while it is not connected, holds anything of Mousse's, or any record names a path in it (`namedPaths`).
  */
 export async function chooseWorktreeFolder(settings: SettingsStore, profileHome: string, home: string, folder: string | null, namedPaths: () => Promise<string[]>): Promise<WorktreeFolderStatus> {
-  const next = folder === null ? null : await checkWorktreeFolder(folder, home)
   const { worktreeFolder, previousWorktreeFolders } = settings.get().storage
+  // A folder chosen before keeps the id it was chosen with.
+  const stored = folder === null ? [] : [worktreeFolder, ...previousWorktreeFolders].filter((entry): entry is WorktreeFolderEntry => Boolean(entry) && resolve(entry!.path) === resolve(folder)).map((entry) => entry.id)
+  const next = folder === null ? null : await checkWorktreeFolder(folder, home, stored)
   const candidates: WorktreeFolderEntry[] = []
   for (const entry of [worktreeFolder, ...previousWorktreeFolders]) if (entry && entry.path !== next?.path && !candidates.some((other) => other.path === entry.path)) candidates.push(entry)
   const named = await namedPaths()

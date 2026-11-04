@@ -17,7 +17,7 @@ import { loadSnapshotWorkspaceMetadataAsync } from './SnapshotWorkspace'
 import { atomicWriteJsonSync } from '../data/AtomicFs'
 import { ThreadJournal } from '../data/ThreadJournal'
 import { getMousseHomeDir } from '../data/paths'
-import { assertWorktreeFolderConnected, chosenFolderHolding, chosenWorktreeFolder, defaultWorktreeBase, notConnectedPlacementNote, placeThreadWorktree, worktreeRegistrationProblem, worktreeRegistrationProblemSync } from '../worktree/worktreeLayout'
+import { assertWorktreeFolderConnected, chosenFolderHolding, chosenWorktreeFolder, defaultWorktreeBase, notConnectedPlacementNote, placeThreadWorktree, worktreeRegistrationOf, worktreeRegistrationOfSync } from '../worktree/worktreeLayout'
 import { acquireRepositoryLease, type RepositoryLeaseHandle } from '../git/RepositoryLease'
 import { resolveRepositoryIdentity, resolveRepositoryIdentityAsync, type RepositoryIdentity } from '../git/RepositoryIdentity'
 import {
@@ -609,8 +609,9 @@ export class ThreadWorkspaceManager {
    */
   verifySync(metadata = this.load()): ThreadWorkspaceMetadata {
     if (!metadata) throw new Error('Thread workspace metadata is missing')
+    if (this.rebuildUnfinished(metadata)) return { ...metadata, lifecycle: 'missing' as const, lastVerifiedAt: new Date().toISOString() }
     if (!existsSync(metadata.worktreePath)) return { ...metadata, lifecycle: 'missing' as const, lastVerifiedAt: new Date().toISOString() }
-    if (!isProjectFolderWorkspace(metadata) && chosenFolderHolding(metadata.worktreePath) && worktreeRegistrationProblemSync(metadata.worktreePath, metadata.repositoryId)) {
+    if (!isProjectFolderWorkspace(metadata) && chosenFolderHolding(metadata.worktreePath) && 'problem' in worktreeRegistrationOfSync(metadata.worktreePath)) {
       return { ...metadata, lifecycle: 'recovery_required' as const, lastVerifiedAt: new Date().toISOString() }
     }
     try {
@@ -625,16 +626,51 @@ export class ThreadWorkspaceManager {
   }
 
   /** Reads the worktree with Git and async calls, never blocking the daemon. */
+  /**
+   * The repository moved (and `git worktree repair` brought its worktrees along): the round trip of the worktree's `.git`
+   * proved which repository registers it, and that repository holds the thread's own retained ref, so it is the same one
+   * under a new key. The record takes the new key; anything else about it stays. An unrelated repository never holds
+   * the thread's ref, and the record is then left as it is, and the worktree refused.
+   */
+  private async rebind(metadata: ThreadWorkspaceMetadata, repositoryId: string): Promise<ThreadWorkspaceMetadata> {
+    if (!metadata.retainedRef || !(await tryGit(metadata.worktreePath, ['rev-parse', '--verify', '-q', `${metadata.retainedRef}^{commit}`])).ok) {
+      return { ...metadata, lifecycle: 'recovery_required' as const }
+    }
+    const rebound = { ...metadata, repositoryId }
+    // Written only over the record it was read from, so a write that came in meanwhile is never undone.
+    try {
+      const stored = JSON.parse(readFileSync(this.workspacePath, 'utf8')) as ThreadWorkspaceMetadata
+      if (stored.repositoryId === metadata.repositoryId && stored.worktreePath === metadata.worktreePath) atomicWriteJsonSync(this.workspacePath, { ...stored, repositoryId })
+    } catch (error) {
+      console.warn('the moved repository could not be recorded', { threadId: metadata.threadId, error: error instanceof Error ? error.message : String(error) })
+    }
+    return rebound
+  }
+
+  /** Whether the worktree's record has a rebuild that did not finish: the folder at its path is then not the worktree. */
+  rebuildUnfinished(metadata: ThreadWorkspaceMetadata): boolean {
+    const gate = getThreadLifecycleGate(this.threadDirectory)
+    return !isProjectFolderWorkspace(metadata) && gate instanceof ResourceLifecycleStore && new WorktreeRetirementService(gate).rebuildUnfinished(metadata.threadId, metadata.worktreePath)
+  }
+
   async verify(metadata = this.load()): Promise<ThreadWorkspaceMetadata> {
     if (!metadata) throw new Error('Thread workspace metadata is missing')
+    // An unfinished rebuild is never the worktree, whatever is at its path: the next restore finishes it (`clearHalfBuilt`).
+    if (this.rebuildUnfinished(metadata)) return { ...metadata, lifecycle: 'missing' as const, lastVerifiedAt: new Date().toISOString() }
     if (!await pathExists(metadata.worktreePath)) {
       const missing = { ...metadata, lifecycle: 'missing' as const, lastVerifiedAt: new Date().toISOString() }
       return missing
     }
     // In a worktree folder the person chose, before any Git runs there: the folder must be this repository's registered
     // worktree, or it is someone else's (another drive at the same path, a folder put there by hand).
-    if (!isProjectFolderWorkspace(metadata) && chosenFolderHolding(metadata.worktreePath) && await worktreeRegistrationProblem(metadata.worktreePath, metadata.repositoryId)) {
-      return { ...metadata, lifecycle: 'recovery_required' as const, lastVerifiedAt: new Date().toISOString() }
+    if (!isProjectFolderWorkspace(metadata) && chosenFolderHolding(metadata.worktreePath)) {
+      const registration = await worktreeRegistrationOf(metadata.worktreePath)
+      if ('problem' in registration) return { ...metadata, lifecycle: 'recovery_required' as const, lastVerifiedAt: new Date().toISOString() }
+      if (registration.repositoryId !== metadata.repositoryId) {
+        const rebound = await this.rebind(metadata, registration.repositoryId)
+        if (rebound.lifecycle === 'recovery_required') return { ...rebound, lastVerifiedAt: new Date().toISOString() }
+        metadata = rebound
+      }
     }
     try {
       // The branch and HEAD are the agent's to move: ready means the checkout is there and no Mousse operation waits.

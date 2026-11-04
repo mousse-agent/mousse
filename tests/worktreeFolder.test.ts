@@ -257,6 +257,48 @@ test("the Git check treats Mousse's folders in the chosen folder as owned, refus
   expect(() => assertGitAllowed({ cwd: worktreePath, args: ['add', '-A'] })).toThrow(GitPolicyError)
 })
 
+test('a chosen folder whose marker went missing is still the one chosen: its repository folders say so, and choosing it again keeps its id', async () => {
+  const f = await fixture()
+  await f.choose(f.entry)
+  const manager = new ThreadWorkspaceManager(f.thread('thread-one'))
+  const made = await manager.provision('thread-one', 'main', f.repo, undefined, undefined, undefined, { nameFrom: 'Marker' })
+  rmSync(join(f.folder, WORKTREE_FOLDER_MARKER))
+  // The drive is plugged in: it reads as connected, and the marker is written again with the same id.
+  expect(await folderConnected(f.folder)).toBe(true)
+  expect(JSON.parse(readFileSync(join(f.folder, WORKTREE_FOLDER_MARKER), 'utf8')).id).toBe(f.entry.id)
+  expect((await manager.verify()).lifecycle).toBe('ready')
+  expect(decideGitCommand({ cwd: made.worktreePath, args: ['add', '-A'] }).allowed).toBe(true)
+  // Chosen again with the marker gone: the same id, from its repository folders or the stored entry.
+  rmSync(join(f.folder, WORKTREE_FOLDER_MARKER))
+  expect((await checkWorktreeFolder(f.folder, f.home, [f.entry.id])).id).toBe(f.entry.id)
+  rmSync(join(f.folder, WORKTREE_FOLDER_MARKER))
+  expect((await checkWorktreeFolder(f.folder, f.home)).id).toBe(f.entry.id)
+  await f.choose(f.entry)
+  expect(decideGitCommand({ cwd: made.worktreePath, args: ['add', '-A'] }).allowed).toBe(true)
+  expect((await new ThreadWorkspaceManager(f.thread('thread-two')).provision('thread-two', 'main', f.repo, undefined, undefined, undefined, { nameFrom: 'Second' })).worktreePath.startsWith(f.repositoryFolder + '/')).toBe(true)
+})
+
+test('a worktree in a chosen folder stays the thread\'s after its repository is moved and repaired, and the record takes the new key', async () => {
+  const f = await fixture()
+  await f.choose(f.entry)
+  const manager = new ThreadWorkspaceManager(f.thread('moved-task'))
+  const made = await manager.provision('moved-task', 'main', f.repo, undefined, undefined, undefined, { nameFrom: 'Moved' })
+  const moved = join(f.root, 'moved-shop'); renameSync(f.repo, moved); git(moved, ['worktree', 'repair', made.worktreePath])
+  const verified = await manager.verify()
+  expect(verified.lifecycle).toBe('ready')
+  const key = resolveRepositoryIdentity(moved).key
+  expect(key).not.toBe(f.key)
+  expect(verified.repositoryId).toBe(key)
+  expect(manager.load()!.repositoryId).toBe(key)
+  // A repository that merely registers a worktree at the same path, without the thread's own ref, is not taken for it.
+  const other = join(f.root, 'other'); mkdirSync(other); git(other, ['init', '-q']); git(other, ['config', 'user.email', 'test@example.com']); git(other, ['config', 'user.name', 'Test'])
+  writeFileSync(join(other, 'x.txt'), 'x\n'); git(other, ['add', '.']); git(other, ['commit', '-qm', 'x'])
+  git(moved, ['worktree', 'remove', '--force', made.worktreePath])
+  git(other, ['worktree', 'add', '-q', made.worktreePath])
+  expect((await manager.verify()).lifecycle).toBe('recovery_required')
+  expect(manager.load()!.repositoryId).toBe(key)
+})
+
 test('checking a chosen folder: a full path outside the Mousse home, outside any checkout, without a repository of its own at its top, writable, marked', async () => {
   const f = await fixture()
   await expect(checkWorktreeFolder('relative/path', f.home)).rejects.toThrow(WorktreeFolderRefused)
@@ -383,21 +425,18 @@ test('a delete interrupted after its rename settles nothing while the drive is a
 
 // ---- A rebuild that fails, and a pin that would lose a commit ----
 
-test('a rebuild that fails after making the worktree sets it aside and unregisters it, so the next use rebuilds instead of taking it as ready', async () => {
+test('a rebuild in a chosen folder that fails after making the worktree is finished by the next use, with nothing left beside it', async () => {
   const f = await agentInChosenFolder()
   writeFileSync(join(f.worktree, 'a.txt'), 'edited\n')
   await f.service.prepare(f.input)
   await f.service.retire(f.path)
   expect(await f.service.expireTrash(f.path, { now: Date.now() + 2 * WORKTREE_TRASH_QUIET_MS })).toEqual({ removed: true })
-  // A failure between making the worktree and writing its files back.
   await expect(f.service.reconstruct(f.path, { prepare: () => { throw new Error('simulated failure') }, env: {} })).rejects.toThrow('simulated failure')
-  expect(existsSync(f.worktree)).toBe(false)
-  expect(git(f.repo, ['worktree', 'list', '--porcelain'])).not.toContain(f.worktree)
-  expect(f.service.load(f.path).state).toBe('retired')
-  // Set aside next to it, never deleted.
-  expect(readdirSync(dirname(f.worktree)).some((name) => name.startsWith('worker.partial-'))).toBe(true)
+  expect(f.service.load(f.path).rebuilding).toBeDefined()
   await f.service.reconstruct(f.path)
   expect(readFileSync(join(f.worktree, 'a.txt'), 'utf8')).toBe('edited\n')
+  expect(f.service.load(f.path).rebuilding).toBeUndefined()
+  expect(readdirSync(dirname(f.worktree)).filter((name) => name.includes('.partial-'))).toEqual([])
 })
 
 test('a second retirement never moves a pin off a commit nothing else reaches', async () => {

@@ -696,7 +696,8 @@ async function ensureWorkspaceMaterialized(ctx: HandlerContext, threadId: string
   const manager = new ThreadWorkspaceManager(ctx.mms.threads.getThreadDir(threadId))
   const workspace = manager.load()
   // A folder without its `.git` file is what a retirement that failed partway leaves; `restore` sets it aside and rebuilds.
-  if (!workspace || existsSync(join(workspace.worktreePath, '.git')) || !manager.hasReconstructionManifest()) return
+  // An unfinished rebuild is finished here too, whatever it left at the worktree's path.
+  if (!workspace || existsSync(join(workspace.worktreePath, '.git')) && !manager.rebuildUnfinished(workspace) || !manager.hasReconstructionManifest()) return
   // One restore per thread: calls that arrive together (a focus refresh asks for status, files and the pull request at once) share it.
   const key = ctx.mms.threads.getThreadDir(threadId)
   const running = restoresInFlight.get(key)

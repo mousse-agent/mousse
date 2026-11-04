@@ -154,6 +154,27 @@ async function markerIdOf(folder: string): Promise<string | undefined> {
   } catch { return undefined }
 }
 
+/** The folder ids the repository markers directly in `folder` name. */
+async function repositoryMarkerIds(folder: string): Promise<Set<string>> {
+  const ids = new Set<string>()
+  let names: string[] = []
+  try { names = await readdir(folder) } catch { return ids }
+  for (const name of names) {
+    try {
+      const value = JSON.parse(await readFile(join(folder, name, REPOSITORY_FOLDER_MARKER), 'utf8')) as { schemaVersion?: unknown; folderId?: unknown; repositoryId?: unknown }
+      if (value.schemaVersion === 1 && typeof value.folderId === 'string' && MARKER_ID.test(value.folderId) && typeof value.repositoryId === 'string' && REPOSITORY_ID.test(value.repositoryId)) ids.add(value.folderId)
+    } catch { /* Not a repository folder of Mousse's. */ }
+  }
+  return ids
+}
+
+/** Writes a chosen folder's marker with `id`, whole and then named, so a marker is never half there. */
+async function writeFolderMarker(folder: string, id: string): Promise<void> {
+  const temporary = join(folder, `${WORKTREE_FOLDER_MARKER}.${randomBytes(4).toString('hex')}.tmp`)
+  await writeFile(temporary, `${JSON.stringify({ schemaVersion: 1, id, chosenAt: new Date().toISOString() })}\n`, { flag: 'wx' })
+  await rename(temporary, join(folder, WORKTREE_FOLDER_MARKER))
+}
+
 /** A repository folder's marker, when it names `folderId`. */
 async function repositoryMarkerOf(path: string, folderId: string): Promise<string | undefined> {
   try {
@@ -177,7 +198,13 @@ export async function folderConnected(folder: string): Promise<boolean> {
   let connected = false
   try {
     await waitForFolderAccess([folder], { whenNotAnswering: 'fail' })
-    const id = (await stat(folder)).isDirectory() ? await markerIdOf(folder) : undefined
+    let id = (await stat(folder)).isDirectory() ? await markerIdOf(folder) : undefined
+    // A folder whose marker went missing (deleted by hand, say) is still the one chosen when Mousse's repository folders
+    // in it carry an id it was chosen with: the marker is written again from them. Another marker is never replaced.
+    if (id === undefined && !await lstat(join(folder, WORKTREE_FOLDER_MARKER)).catch(() => undefined)) {
+      const found = [...await repositoryMarkerIds(folder)].find((candidate) => ids.has(candidate))
+      if (found) { await writeFolderMarker(folder, found); id = found }
+    }
     connected = id !== undefined && ids.has(id)
     if (connected) await registerContents(resolve(folder), id!)
   } catch { connected = false }
@@ -427,47 +454,49 @@ export function isReservedInRepositoryFolder(name: string): boolean {
 // ---------------------------------------------------------------------------------------------------------
 // A worktree's own registration
 
+/** What {@link worktreeRegistrationOf} found: the repository (by key) that registers the worktree, or why none does. */
+export type WorktreeRegistration = { repositoryId: string; commonDir: string } | { problem: string }
+
 /**
- * Why the checkout at `path` is not the registered worktree of the repository `repositoryId`, or undefined when it is:
- * its `.git` must be a file that leads to an administration folder of that repository (`<common>/worktrees/<name>`), whose
- * `gitdir` leads back to this `.git`. Read from the files alone; no Git runs in a folder that might be someone else's.
+ * The repository that registers the checkout at `path` as one of its linked worktrees, proven by the round trip alone:
+ * its `.git` must be a file that leads to an administration folder `<common>/worktrees/<name>`, whose `gitdir` leads back
+ * to this `.git`. Its key is that of the common folder now, so a repository moved since (and repaired with
+ * `git worktree repair`) is still found. Read from the files alone; no Git runs in a folder that might be someone else's.
  */
-export async function worktreeRegistrationProblem(path: string, repositoryId: string): Promise<string | undefined> {
+export async function worktreeRegistrationOf(path: string): Promise<WorktreeRegistration> {
   try {
     const dotGit = join(path, '.git')
-    if (!(await lstat(dotGit)).isFile()) return `${path} is not a linked worktree`
+    if (!(await lstat(dotGit)).isFile()) return { problem: `${path} is not a linked worktree` }
     const pointer = /^gitdir:\s*(.+?)\s*$/m.exec(await readFile(dotGit, 'utf8'))?.[1]
-    if (!pointer) return `${path} is not a linked worktree`
+    if (!pointer) return { problem: `${path} is not a linked worktree` }
     const admin = await realpath(resolve(path, pointer))
-    if (basename(dirname(admin)) !== 'worktrees') return `${path} is not a linked worktree of a repository`
-    const back = (await readFile(join(admin, 'gitdir'), 'utf8')).trim()
-    if (!same(await realpath(resolve(admin, back)).catch(() => resolve(admin, back)), await realpath(dotGit))) return `The repository's record of ${path} names another folder`
+    if (basename(dirname(admin)) !== 'worktrees') return { problem: `${path} is not a linked worktree of a repository` }
+    const back = resolve(admin, (await readFile(join(admin, 'gitdir'), 'utf8')).trim())
+    if (!same(await realpath(back).catch(() => back), await realpath(dotGit))) return { problem: `The repository's record of ${path} names another folder` }
     const common = await realpath(resolve(admin, (await readFile(join(admin, 'commondir'), 'utf8').catch(() => '../..')).trim()))
-    if (!same(dirname(admin), join(common, 'worktrees'))) return `${path} is not a linked worktree of a repository`
-    if (repositoryKeyOf(common) !== repositoryId) return `${path} is a worktree of another repository`
-    return undefined
+    if (!same(dirname(admin), join(common, 'worktrees'))) return { problem: `${path} is not a linked worktree of a repository` }
+    return { repositoryId: repositoryKeyOf(common), commonDir: common }
   } catch (error) {
-    return `${path} is not a worktree Mousse can check (${(error as NodeJS.ErrnoException).code ?? (error as Error).message})`
+    return { problem: `${path} is not a worktree Mousse can check (${(error as NodeJS.ErrnoException).code ?? (error as Error).message})` }
   }
 }
 
-/** {@link worktreeRegistrationProblem}, blocking: only for the one caller that cannot wait (`verifySync`). */
-export function worktreeRegistrationProblemSync(path: string, repositoryId: string): string | undefined {
+/** {@link worktreeRegistrationOf}, blocking: only for the one caller that cannot wait (`verifySync`). */
+export function worktreeRegistrationOfSync(path: string): WorktreeRegistration {
   try {
     const dotGit = join(path, '.git')
-    if (!lstatSync(dotGit).isFile()) return `${path} is not a linked worktree`
+    if (!lstatSync(dotGit).isFile()) return { problem: `${path} is not a linked worktree` }
     const pointer = /^gitdir:\s*(.+?)\s*$/m.exec(readFileSync(dotGit, 'utf8'))?.[1]
-    if (!pointer) return `${path} is not a linked worktree`
+    if (!pointer) return { problem: `${path} is not a linked worktree` }
     const admin = realpathSync(resolve(path, pointer))
-    if (basename(dirname(admin)) !== 'worktrees') return `${path} is not a linked worktree of a repository`
+    if (basename(dirname(admin)) !== 'worktrees') return { problem: `${path} is not a linked worktree of a repository` }
     const back = resolve(admin, readFileSync(join(admin, 'gitdir'), 'utf8').trim())
-    if (!same(existsSync(back) ? realpathSync(back) : back, realpathSync(dotGit))) return `The repository's record of ${path} names another folder`
+    if (!same(existsSync(back) ? realpathSync(back) : back, realpathSync(dotGit))) return { problem: `The repository's record of ${path} names another folder` }
     const common = realpathSync(resolve(admin, existsSync(join(admin, 'commondir')) ? readFileSync(join(admin, 'commondir'), 'utf8').trim() : '../..'))
-    if (!same(dirname(admin), join(common, 'worktrees'))) return `${path} is not a linked worktree of a repository`
-    if (repositoryKeyOf(common) !== repositoryId) return `${path} is a worktree of another repository`
-    return undefined
+    if (!same(dirname(admin), join(common, 'worktrees'))) return { problem: `${path} is not a linked worktree of a repository` }
+    return { repositoryId: repositoryKeyOf(common), commonDir: common }
   } catch (error) {
-    return `${path} is not a worktree Mousse can check (${(error as NodeJS.ErrnoException).code ?? (error as Error).message})`
+    return { problem: `${path} is not a worktree Mousse can check (${(error as NodeJS.ErrnoException).code ?? (error as Error).message})` }
   }
 }
 
@@ -594,7 +623,7 @@ export function noFileModesText(fileSystem: string | undefined): string {
  * marker. Every access waits for the folder's volume first, so a permission prompt for an external drive holds only
  * this request.
  */
-export async function checkWorktreeFolder(folder: string, home: string): Promise<WorktreeFolderEntry> {
+export async function checkWorktreeFolder(folder: string, home: string, storedIds: readonly string[] = []): Promise<WorktreeFolderEntry> {
   if (typeof folder !== 'string' || !folder.trim() || folder.includes('\0') || !isAbsolute(folder)) throw new WorktreeFolderRefused('Choose a folder by its full path.')
   const requested = resolve(folder)
   await waitForFolderAccess([requested, dirname(requested)])
@@ -618,7 +647,19 @@ export async function checkWorktreeFolder(folder: string, home: string): Promise
   if (await lstat(join(real, '.git')).catch(() => undefined)) throw new WorktreeFolderRefused(`This folder is a Git repository. Choose a folder outside any repository.`)
   const existing = await stat(real).catch(() => undefined)
   if (existing && !existing.isDirectory()) throw new WorktreeFolderRefused('This is a file, not a folder.')
-  const previousId = existing ? await markerIdOf(real) : undefined
+  // The folder's id: its marker's; without one, the id its repository folders carry (one it was chosen with here first),
+  // so choosing it again never puts a new identity under worktrees that are already there.
+  let previousId = existing ? await markerIdOf(real) : undefined
+  let rewriteMarker = false
+  if (existing && previousId === undefined && !await lstat(join(real, WORKTREE_FOLDER_MARKER)).catch(() => undefined)) {
+    const carried = [...await repositoryMarkerIds(real)]
+    const stored = carried.find((id) => storedIds.includes(id))
+    if (stored) previousId = stored
+    else if (carried.length === 1) previousId = carried[0]
+    else if (carried.length > 1) throw new WorktreeFolderRefused('This folder holds worktrees of more than one chosen worktree folder. Choose one of those folders instead.')
+    else if (storedIds.length === 1) previousId = storedIds[0]
+    rewriteMarker = previousId !== undefined
+  }
   if (existing) {
     for (const name of (await readdir(real)).sort()) {
       // Mousse's own folders, as their markers say; any other folder that holds a repository is the person's.
@@ -642,12 +683,7 @@ export async function checkWorktreeFolder(folder: string, home: string): Promise
   }
   const checked = await realpath(real)
   const id = previousId ?? randomBytes(16).toString('hex')
-  if (!previousId) {
-    // Written whole and then named, so a marker is never half there.
-    const temporary = join(checked, `${WORKTREE_FOLDER_MARKER}.${randomBytes(4).toString('hex')}.tmp`)
-    await writeFile(temporary, `${JSON.stringify({ schemaVersion: 1, id, chosenAt: new Date().toISOString() })}\n`, { flag: 'wx' })
-    await rename(temporary, join(checked, WORKTREE_FOLDER_MARKER))
-  }
+  if (!previousId || rewriteMarker) await writeFolderMarker(checked, id)
   return { path: checked, id }
 }
 
