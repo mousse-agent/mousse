@@ -53,10 +53,10 @@ export async function readConvertedAsync(top: string, blobs: ReadonlyMap<string,
 }
 
 /** Runs one of Mousse's own Git commands with `input`, giving its output to `onData` as it comes. Rejects on failure. */
-async function streamGitAsync(top: string, args: string[], input: string, onData: (chunk: Buffer) => void): Promise<void> {
-  const argv = await guardedAsync(top, args, { stdin: input })
+async function streamGitAsync(top: string, args: string[], input: string, onData: (chunk: Buffer) => void, env?: NodeJS.ProcessEnv): Promise<void> {
+  const argv = await guardedAsync(top, args, { stdin: input, ...(env ? { env } : {}) })
   await new Promise<void>((settle, fail) => {
-    const child = spawn('git', argv, { cwd: top, env: gitEnv(top), windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] })
+    const child = spawn('git', argv, { cwd: top, env: gitEnv(top, env), windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] })
     const errors: Buffer[] = []
     let failed: Error | undefined
     child.stdout.on('data', (chunk: Buffer) => { try { onData(chunk) } catch (error) { failed ??= error as Error; child.kill() } })
@@ -75,14 +75,15 @@ async function streamGitAsync(top: string, args: string[], input: string, onData
 /**
  * The size and SHA-256 of what Git writes at each path from its blob there (`cat-file --batch --filters`, read as it
  * streams, never held whole), by path. A file is held when its bytes on disk have that size and SHA-256. With `raw`,
- * the blob's own bytes, never converted (`--filters` left off).
+ * the blob's own bytes, never converted (`--filters` left off). `env` goes to Git (`GIT_ATTR_SOURCE`, for the attributes
+ * of another tree).
  *
  * Git's header gives the blob's size, not the converted size, so each record starts with a header of ours that begins
  * with a random marker and names the blob and path. A path is answered only when everything checks: the marker appears
  * exactly once per record and nowhere else, and the record's header names its blob and path. Anything else leaves the
  * path out, so its file counts as not held and is kept: never the other way round.
  */
-export async function gitsFormsAsync(top: string, entries: ReadonlyArray<{ path: string; blob: string }>, options: { raw?: boolean } = {}): Promise<Map<string, { bytes: number; digest: string }>> {
+export async function gitsFormsAsync(top: string, entries: ReadonlyArray<{ path: string; blob: string }>, options: { raw?: boolean; env?: NodeJS.ProcessEnv } = {}): Promise<Map<string, { bytes: number; digest: string }>> {
   const forms = new Map<string, { bytes: number; digest: string }>()
   // Git reads one `<blob> <path>` per line and drops whitespace before the path: those few are kept without asking.
   const asked = entries.filter((entry) => !/[\n\r]/.test(entry.path) && !/^[ \t]/.test(entry.path))
@@ -134,7 +135,7 @@ export async function gitsFormsAsync(top: string, entries: ReadonlyArray<{ path:
   await streamGitAsync(top, ['cat-file', `--batch=${marker} %(objectname) %(rest)`, ...(options.raw ? [] : ['--filters'])], input, (chunk) => {
     pending = Buffer.concat([pending, chunk])
     scan(false)
-  })
+  }, options.env)
   scan(true)
   const end = records.at(-1)
   if (leading || records.length !== asked.length || end?.last !== 0x0a) return forms

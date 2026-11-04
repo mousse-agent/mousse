@@ -673,8 +673,8 @@ function ghReads(args: readonly string[]): boolean {
 
 /** Private index files Mousse makes directly in a Git directory (the pending-changes snapshot). */
 const OWNED_INDEX_IN_GIT_DIR = /^mousse-[\w.-]+\.index$/
-/** Private index files Mousse makes in the Git directory's `mousse/` folder (turn snapshots and their exact bytes, restore, preserve). */
-const OWNED_INDEX_IN_MOUSSE_DIR = /^(snapshot-index|snapshot-exact-index|(restore|preserve)-[\w.-]+\.index)$/
+/** Private index files Mousse makes in the Git directory's `mousse/` folder (turn snapshots, their exact bytes and filtered files, restore, preserve). */
+const OWNED_INDEX_IN_MOUSSE_DIR = /^(snapshot-index|snapshot-exact-index|snapshot-filtered-index|(restore|preserve)-[\w.-]+\.index)$/
 
 /**
  * A private index Mousse made: under the Mousse home, or one of its own index files in the Git directory of the
