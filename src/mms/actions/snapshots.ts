@@ -9,7 +9,7 @@ import { activeHiddenStore, builtInPathspecs, ensureStoreRules, outsideHiddenSto
 import { gitAsync, gitEnv, gitStep, ownGitRunner, guarded, guardedAsync, LISTING, mergeTreesSteps, MOUSSE_COMMIT_ENV, mousseCommitEnvNow, NOT_MOUSSE, operationInProgressSteps, runGitProcess, tryGit, tryGitAsync, tryGitStep, treeOfAsync, treeOfSteps } from './git'
 import type { FrozenEntryProof } from '../lifecycle/verifiedDelete'
 import { readConvertedAsync } from './heldBytes'
-import { ROUND_TRIP_BUDGET, roundTripsAsync, storeCheckedAsync, type RoundTrip, type RoundTripAsk, type Stored } from './filterRoundTrip'
+import { ROUND_TRIP_BUDGET, roundTripsAsync, storeCheckedAsync, sweepCopiesAsync, type RoundTrip, type RoundTripAsk, type Stored } from './filterRoundTrip'
 import { driversOffAsync, driversOffOf, withScopedGitConfig } from '../git/gitEnv'
 import { repoProgramSettings, repoProgramSettingsAsync } from '../git/repoPrograms'
 import { createOnlyAsync, removeProvenAsync } from './provenDiscard'
@@ -352,6 +352,8 @@ interface PrivateFiles {
   filteredIndex: string
   /** What `filterVerdicts` found for each of those files, by path. */
   verdicts: string
+  /** The files a check was stopped on, which the next one asks last. */
+  stalled: string
   last: string
   /** The repository's `info/attributes` (absent for a hidden store, whose own does not convert). */
   infoAttributes?: string
@@ -363,13 +365,13 @@ function* privateFiles(top: string): Steps<PrivateFiles> {
     // The store has no worktree index of anyone's, so its own is the persistent one: `git diff` against the folder reads it.
     const directory = join(store.gitDir, 'mousse')
     yield* disk.mkdir(directory)
-    return { directory, index: join(store.gitDir, 'index'), exactIndex: join(directory, EXACT_INDEX), filteredIndex: join(directory, FILTERED_INDEX), verdicts: join(directory, FILTER_VERDICTS), last: join(directory, 'snapshot-last.json') }
+    return { directory, index: join(store.gitDir, 'index'), exactIndex: join(directory, EXACT_INDEX), filteredIndex: join(directory, FILTERED_INDEX), verdicts: join(directory, FILTER_VERDICTS), stalled: join(directory, FILTER_STALLED), last: join(directory, 'snapshot-last.json') }
   }
   // `--git-path` keeps names Git doesn't know in the worktree's own Git directory, so each linked worktree has its own.
   const [mousse, info] = (yield* gitStep(top, ['rev-parse', '--git-path', 'mousse', '--git-path', 'info/attributes'])).split(/\r?\n/)
   const directory = resolve(top, mousse!)
   yield* disk.mkdir(directory)
-  return { directory, index: join(directory, 'snapshot-index'), exactIndex: join(directory, EXACT_INDEX), filteredIndex: join(directory, FILTERED_INDEX), verdicts: join(directory, FILTER_VERDICTS), last: join(directory, 'snapshot-last.json'), infoAttributes: resolve(top, info!) }
+  return { directory, index: join(directory, 'snapshot-index'), exactIndex: join(directory, EXACT_INDEX), filteredIndex: join(directory, FILTERED_INDEX), verdicts: join(directory, FILTER_VERDICTS), stalled: join(directory, FILTER_STALLED), last: join(directory, 'snapshot-last.json'), infoAttributes: resolve(top, info!) }
 }
 
 /** The file name of the exact tree's persistent private index, next to the snapshot's own (`gitPolicy.ts` knows it). */
@@ -377,6 +379,7 @@ const EXACT_INDEX = 'snapshot-exact-index'
 /** The file name of the filtered files' private index of raw blob ids (`gitPolicy.ts` knows it too). */
 const FILTERED_INDEX = 'snapshot-filtered-index'
 const FILTER_VERDICTS = 'snapshot-filter-verdicts.json'
+const FILTER_STALLED = 'snapshot-filter-stalled'
 
 function* headOf(top: string): Steps<string | undefined> {
   // A hidden store has no HEAD, whatever the folder's own repository says.
@@ -659,7 +662,7 @@ const CONVERTED_BY_INFO = '.git/info/attributes converts it, so only Git\'s form
 const CONVERTED_BY_OLD_GIT = 'Git older than 2.40 converts it, so only Git\'s form of it is kept'
 /** A filtered file whose Git form is not compared with its bytes yet (`filterVerdicts`); only the turn's own are named. */
 export const NOT_CHECKED = 'not checked yet, so only Git\'s form of it is kept'
-const STORED_LATER = (): string => `not stored yet (a snapshot stores at most ${sizeText(ROUND_TRIP_BUDGET.storeBytes)} of filtered files), so only Git's form of it is kept`
+const STORED_LATER = (): string => `not stored yet, as a snapshot stores at most ${sizeText(ROUND_TRIP_BUDGET.storeBytes)} of filtered files; only Git's form of it is kept`
 
 /** One entry of `ls-tree -r -l`: its path, mode, blob and the blob's size. */
 interface SizedEntry { path: string; mode: string; sha: string; size: number }
@@ -803,14 +806,16 @@ function* exactIndexTree(top: string, files: PrivateFiles, entries: readonly Siz
   for (const path of before.keys()) left.add(path)
   // Each filtered file stays in Git's form when that gives its bytes back, and is recorded exactly when it does not.
   const byPath = new Map(fileEntries.map((entry) => [entry.path, entry]))
-  const checked = [...conversion.filtered, ...before.keys()].map((path) => byPath.get(path)).filter((entry): entry is SizedEntry => Boolean(entry))
-  const verdicts = yield* filterVerdicts(top, files, checked, before, config, off, empty, anyway, present)
+  // One `.git/info/attributes` (or Git before 2.40) also converts otherwise (`text`, `eol`) cannot be written back as its
+  // bytes, nor its raw id read without that conversion: it is named as such, and never read for a check.
+  for (const path of conversion.filtered) if (anyway.has(path)) gaps.push({ path, reason: modern ? CONVERTED_BY_INFO : CONVERTED_BY_OLD_GIT })
+  const checked = [...conversion.filtered, ...before.keys()].filter((path) => !anyway.has(path)).map((path) => byPath.get(path)).filter((entry): entry is SizedEntry => Boolean(entry))
+  const verdicts = yield* filterVerdicts(top, files, checked, before, config, off, empty, present)
   // A lossy file is in the exact tree only as the bytes it was compared as, stored from that very read (`filterVerdicts`).
   const stored: SizedEntry[] = []
   for (const [path, found] of verdicts) {
     if (found.verdict === 'same') continue
-    if (found.verdict === 'lossy' && anyway.has(path)) gaps.push({ path, reason: modern ? CONVERTED_BY_INFO : CONVERTED_BY_OLD_GIT })
-    else if (found.verdict === 'lossy' && found.stored === true) stored.push({ ...byPath.get(path)!, sha: found.raw })
+    if (found.verdict === 'lossy' && found.stored === true) stored.push({ ...byPath.get(path)!, sha: found.raw })
     else if (found.verdict === 'lossy' && found.stored === 'size') gaps.push({ path, reason: EXACT_TOO_LARGE() })
     else if (found.verdict === 'lossy' && found.stored === 'budget') gaps.push({ path, reason: STORED_LATER() })
     else gaps.push({ path, reason: NOT_CHECKED })
@@ -840,6 +845,9 @@ function* exactIndexTree(top: string, files: PrivateFiles, entries: readonly Siz
 
 /** What `filterVerdicts` found for one file: its raw blob id and size, and for a lossy one whether its bytes are stored. */
 interface FilterVerdict { verdict: RoundTrip['verdict'] | 'unchecked'; raw: string; size: number; stored?: Stored }
+
+/** A file a check was stopped on: how many snapshots it waits once stopped again (`w`), and how many it still skips (`s`). */
+interface StalledFile { p: string; w: number; s: number }
 
 /**
  * A check `filterVerdicts` keeps for a file, reused while every input of Git's form is as it was: its raw blob id `r`,
@@ -871,7 +879,7 @@ function requiredDrivers(config: string, programs: readonly string[]): Array<[st
 /**
  * Whether Git's form of each file in `checked` (under a filter now, or in `before`: see `filteredBefore`) gives its bytes
  * on disk back (`filterRoundTrip.ts`), and for a lossy one, whether its bytes are stored: from the very read compared,
- * or, for one found lossy before, from a read whose blob id is the one checked. One in `noStore` never is. `present`
+ * or, for one found lossy before, from a read whose blob id is the one checked. `present`
  * is what the exact index holds: a lossy file it already has as those bytes is stored.
  *
  * The raw blob id of each comes from a third private index, updated with every conversion off and every filter driver
@@ -881,11 +889,13 @@ function requiredDrivers(config: string, programs: readonly string[]): Array<[st
  * not seen. A file in `before` is checked under the attributes of the tree that gave it its filter. Where none can be read
  * (only the previous exact tree shows its filter, or Git is older than 2.40), it is not checked, and no check is reused.
  */
-function* filterVerdicts(top: string, files: PrivateFiles, checked: readonly SizedEntry[], before: ReadonlyMap<string, string | undefined>, config: string, off: ReadonlyArray<readonly [string, string]>, empty: string, noStore: ReadonlySet<string>, present: ReadonlyMap<string, { mode: string; sha: string }>): Steps<Map<string, FilterVerdict>> {
+function* filterVerdicts(top: string, files: PrivateFiles, checked: readonly SizedEntry[], before: ReadonlyMap<string, string | undefined>, config: string, off: ReadonlyArray<readonly [string, string]>, empty: string, present: ReadonlyMap<string, { mode: string; sha: string }>): Steps<Map<string, FilterVerdict>> {
   const found = new Map<string, FilterVerdict>()
   if (!checked.length) {
     yield* disk.remove(files.filteredIndex)
     yield* disk.remove(files.verdicts)
+    yield* disk.remove(files.stalled)
+    yield* step(() => undefined, () => sweepCopiesAsync(files.directory, Date.now()))
     return found
   }
   const env = exactEnv(empty, files.filteredIndex)
@@ -934,15 +944,37 @@ function* filterVerdicts(top: string, files: PrivateFiles, checked: readonly Siz
       // Found lossy before: its bytes are stored once the exact index holds them, or are stored again now.
       const held = was.v === 'lossy' && present.get(entry.path)?.sha === raw
       found.set(entry.path, { verdict: was.v, raw, size: was.s, ...(held ? { stored: true as const } : {}) })
-      if (was.v === 'lossy' && !held && !noStore.has(entry.path)) lossyBefore.push({ path: entry.path, raw })
-    } else asks.push({ path: entry.path, raw, normal: entry.sha, ...(before.get(entry.path) ? { source: before.get(entry.path)! } : {}), ...(noStore.has(entry.path) ? { store: false } : {}) })
+      if (was.v === 'lossy' && !held) lossyBefore.push({ path: entry.path, raw })
+    } else asks.push({ path: entry.path, raw, normal: entry.sha, ...(before.get(entry.path) ? { source: before.get(entry.path)! } : {}) })
   }
-  // Git's form is streamed without blocking; a synchronous run leaves the files to a later snapshot.
-  const options = { directory: files.directory, limit: EXACT_LIMITS.fileBytes, driversOff: off, required: requiredDrivers(config, programs), storeBudget: { left: ROUND_TRIP_BUDGET.storeBytes } }
-  const none = { answers: new Map<string, RoundTrip>(), again: new Map<string, Stored>() }
-  const { answers, again } = asks.length || lossyBefore.length
-    ? yield* step(() => none, async () => ({ again: await storeCheckedAsync(top, lossyBefore, options), answers: await roundTripsAsync(top, asks, options) }))
-    : none
+  // Files a check was stopped on before (a smudge or a read that took the whole budget) are asked last, so they never
+  // keep the others from being checked; one stopped again waits 1, 3, 7 ... up to 64 snapshots before it is asked again.
+  let stalled: StalledFile[] = []
+  try { stalled = (JSON.parse(yield* disk.readText(files.stalled)) as StalledFile[]).filter((entry) => typeof entry?.p === 'string' && Number.isInteger(entry.w) && Number.isInteger(entry.s)) } catch { stalled = [] }
+  const last = new Map(stalled.map((entry) => [entry.p, entry]))
+  const ordered = [...asks.filter((ask) => !last.has(ask.path)), ...stalled.filter((entry) => entry.s <= 0).map((entry) => asks.find((ask) => ask.path === entry.p)).filter((ask): ask is RoundTripAsk => Boolean(ask))]
+  // Git's form is streamed without blocking; a synchronous run leaves the files to a later snapshot. The checks and
+  // stores share one budget of time and of stored bytes. Copies a stopped snapshot left are removed first: this one
+  // holds the worktree's mutation locks, so none made before now is in use.
+  const required = requiredDrivers(config, programs)
+  const none: { answers: Map<string, RoundTrip>; again: Map<string, Stored>; stalledNow?: string } = { answers: new Map(), again: new Map() }
+  const { answers, again, stalledNow } = yield* step(() => none, async () => {
+    await sweepCopiesAsync(files.directory, Date.now())
+    if (!ordered.length && !lossyBefore.length) return none
+    const options = { directory: files.directory, limit: EXACT_LIMITS.fileBytes, driversOff: off, required, storeBudget: { left: ROUND_TRIP_BUDGET.storeBytes }, deadline: Date.now() + ROUND_TRIP_BUDGET.ms }
+    const again = await storeCheckedAsync(top, lossyBefore, options)
+    const checks = await roundTripsAsync(top, ordered, options)
+    return { again, answers: checks.answers, ...(checks.stalled ? { stalledNow: checks.stalled } : {}) }
+  })
+  const asked = new Set(asks.map((ask) => ask.path))
+  const stillStalled: StalledFile[] = []
+  for (const entry of stalled) {
+    if (entry.p === stalledNow || !asked.has(entry.p) || answers.has(entry.p)) continue
+    stillStalled.push({ ...entry, s: entry.s - 1 })
+  }
+  if (stalledNow) { const wait = Math.min((last.get(stalledNow)?.w ?? 0) * 2 + 1, 64); stillStalled.push({ p: stalledNow, w: wait, s: last.has(stalledNow) ? wait : 0 }) }
+  const kept = stillStalled.slice(-64)
+  if (JSON.stringify(kept) !== JSON.stringify(stalled)) yield* (kept.length ? disk.writeText(files.stalled, JSON.stringify(kept)) : disk.remove(files.stalled))
   for (const item of lossyBefore) {
     const stored = again.get(item.path)
     if (stored) found.set(item.path, { ...found.get(item.path)!, stored })

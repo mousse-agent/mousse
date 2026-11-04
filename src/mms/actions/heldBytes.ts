@@ -57,21 +57,31 @@ interface Streamed { stopped: boolean; stderr: string }
 
 /**
  * Runs one of Mousse's own Git commands with `input`, giving its output to `onData` as it comes. Rejects on failure. At
- * `deadline` (a time in ms), the command is stopped and the run ends as `stopped`, with the output it gave so far.
+ * `deadline` (a time in ms), the command is stopped and the run ends as `stopped`, with the output it gave so far. Such
+ * a command runs in a process group of its own, and the whole group is stopped: a filter program Git started never
+ * outlives the run.
  */
 async function streamGitAsync(top: string, args: string[], input: string, onData: (chunk: Buffer) => void, env?: NodeJS.ProcessEnv, deadline?: number): Promise<Streamed> {
   const argv = await guardedAsync(top, args, { stdin: input, ...(env ? { env } : {}) })
+  const group = deadline !== undefined && process.platform !== 'win32'
   return await new Promise<Streamed>((settle, fail) => {
-    const child = spawn('git', argv, { cwd: top, env: gitEnv(top, env), windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] })
+    const child = spawn('git', argv, { cwd: top, env: gitEnv(top, env), windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'], ...(group ? { detached: true } : {}) })
     const errors: Buffer[] = []
     let failed: Error | undefined
     let stopped = false
-    const timer = deadline === undefined ? undefined : setTimeout(() => { stopped = true; child.kill('SIGKILL') }, Math.max(0, deadline - Date.now()))
+    const stopAll = (): void => {
+      if (child.pid === undefined) return
+      // Git first, so it never reports the filters it started as failed; then everything else in its group.
+      if (group) { child.kill('SIGKILL'); try { process.kill(-child.pid, 'SIGKILL') } catch { /* already gone */ } }
+      else if (process.platform === 'win32') spawn('taskkill', ['/pid', String(child.pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' }).on('error', () => child.kill('SIGKILL'))
+      else child.kill('SIGKILL')
+    }
+    const timer = deadline === undefined ? undefined : setTimeout(() => { stopped = true; stopAll() }, Math.max(0, deadline - Date.now()))
     child.stdout.on('data', (chunk: Buffer) => { if (stopped) return; try { onData(chunk) } catch (error) { failed ??= error as Error; child.kill() } })
     child.stderr.on('data', (chunk: Buffer) => { if (errors.length < 64) errors.push(chunk) })
     child.on('error', (error) => { if (timer) clearTimeout(timer); fail(error) })
-    // Stopped: a filter program Git started may still hold its error output open; its answer is not waited for.
-    child.on('exit', () => { if (stopped) settle({ stopped, stderr: Buffer.concat(errors).toString('utf8').trim() }) })
+    // Stopped: the group is gone, so its output closes at once. A program that left the group is not waited for long.
+    child.on('exit', () => { if (stopped) setTimeout(() => settle({ stopped, stderr: Buffer.concat(errors).toString('utf8').trim() }), 250).unref() })
     child.on('close', (code) => {
       if (timer) clearTimeout(timer)
       const stderr = Buffer.concat(errors).toString('utf8').trim()
@@ -162,7 +172,8 @@ export async function gitsFormsAsync(top: string, entries: ReadonlyArray<{ path:
     pending = Buffer.concat([pending, chunk])
     scan(false)
   }, options.env, options.deadline)
-  if (options.strict && FILTER_FAILED.test(ran.stderr)) throw new Error(`A filter failed: ${ran.stderr.split(/\r?\n/)[0]}`)
+  // A stopped run's finished records are whole: with every driver required, a failure among them would have ended Git.
+  if (options.strict && !ran.stopped && FILTER_FAILED.test(ran.stderr)) throw new Error(`A filter failed: ${ran.stderr.split(/\r?\n/)[0]}`)
   // Stopped: each record a later one follows is whole; the last may not be.
   const finished = ran.stopped ? Math.max(0, records.length - 1) : records.length
   if (!ran.stopped) {

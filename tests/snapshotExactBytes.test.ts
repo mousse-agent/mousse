@@ -878,7 +878,7 @@ describe('filtered files: Git\'s form is checked, and a filter that loses bytes 
     for (const name of names) writeFileSync(join(cwd, name), `${name} ${'x'.repeat(16)}   \n`)
     const first = await takeSnapshotAsync(cwd, { reason: 'first' })
     expect(first.coverageGaps?.map((gap) => gap.path)).toEqual(['b.txt', 'value.txt'])
-    expect(first.coverageGaps?.[0]?.reason).toBe("not stored yet (a snapshot stores at most 40 bytes of filtered files), so only Git's form of it is kept")
+    expect(first.coverageGaps?.[0]?.reason).toBe("not stored yet, as a snapshot stores at most 40 bytes of filtered files; only Git's form of it is kept")
     expect((await takeSnapshotAsync(cwd, { reason: 'second' })).coverageGaps?.map((gap) => gap.path)).toEqual(['value.txt'])
     expect((await takeSnapshotAsync(cwd, { reason: 'third' })).coverageGaps).toBeUndefined()
     await turn(() => { for (const name of names) writeFileSync(join(cwd, name), 'agent\n') })
@@ -908,5 +908,116 @@ describe('filtered files: Git\'s form is checked, and a filter that loses bytes 
     expect(undone.notice ?? '').not.toMatch(/\b[ab]\.txt\b/)
     // a.txt and b.txt were never touched; c.txt comes back in Git's form, as named.
     expect([bytes('a.txt').toString(), bytes('b.txt').toString(), bytes('c.txt').toString()]).toEqual(['a.txt   \n', 'b.txt   \n', 'c.txt\n'])
+  })
+
+  it('a smudge stopped at the deadline is stopped with Git: it never runs on after the snapshot', async () => {
+    const started = join(f.root, 'smudge-started'), finished = join(f.root, 'smudge-finished')
+    filter('slow', "sed 's/ *$//'", `sh -c 'echo $$ > "${started}"; sleep 3; echo finished > "${finished}"; cat'`)
+    writeFileSync(join(cwd, 'value.txt'), 'slow original  \n')
+    const snapshot = await takeSnapshotAsync(cwd, { reason: 'probe' })
+    expect(snapshot.coverageGaps).toEqual([{ path: 'value.txt', reason: NOT_CHECKED }])
+    const pid = Number(readFileSync(started, 'utf8'))
+    expect(() => process.kill(pid, 0)).toThrow()
+    execFileSync('sleep', ['3.2'])
+    expect(existsSync(finished)).toBe(false)
+    expect(bytes().toString()).toBe('slow original  \n')
+  })
+
+  it('copies a killed snapshot left are removed by the next one; nothing else in .git/mousse is', async () => {
+    filter('strip', "sed 's/ *$//'", 'cat')
+    const original = Buffer.from('crash temp raw original   \n')
+    writeFileSync(join(cwd, 'value.txt'), original)
+    const folder = join(cwd, '.git', 'mousse')
+    mkdirSync(folder, { recursive: true })
+    // A process that is gone, and this process before this snapshot: both left a copy of the bytes they were storing.
+    const gone = spawnSync('sh', ['-c', 'echo $$']).stdout.toString().trim()
+    for (const name of [`filtered-${gone}-abc123`, `filtered-${process.pid}-def456`]) { mkdirSync(join(folder, name)); writeFileSync(join(folder, name, '0'), original) }
+    writeFileSync(join(folder, 'filtered-notes'), 'not a copy\n')
+    const action = await turn('agent\n')
+    expect(readdirSync(folder).filter((name) => name.startsWith('filtered-')).sort()).toEqual(['filtered-notes'])
+    expect(readFileSync(join(folder, 'filtered-notes'), 'utf8')).toBe('not a copy\n')
+    expect(action.notCovered).toBeUndefined()
+    await undo()
+    expect(bytes().equals(original)).toBe(true)
+  })
+
+  it('a file whose check cannot finish in the budget is asked last, so the files after it are checked and come back exactly', async () => {
+    filter('strip', "sed 's/ *$//'", `sh -c 'case "$1" in a-slow.dat) sleep 3 ;; esac; cat' -- %f`, '*.dat')
+    writeFileSync(join(cwd, 'a-slow.dat'), 'slow file\n')
+    const names = Array.from({ length: 20 }, (_, at) => `b${String(at).padStart(2, '0')}.dat`)
+    for (const name of names) writeFileSync(join(cwd, name), `${name}   \n`)
+    const gaps: string[][] = []
+    const times: number[] = []
+    for (let round = 0; round < 3; round++) {
+      const started = Date.now()
+      gaps.push(((await takeSnapshotAsync(cwd, { reason: `round ${round}` })).coverageGaps ?? []).map((gap) => gap.path))
+      times.push(Date.now() - started)
+    }
+    expect(gaps.at(-1)).toEqual(['a-slow.dat'])
+    // Stopped twice, the slow file waits a few snapshots: the third takes none of the budget for it.
+    expect(times[2]).toBeLessThan(1500)
+    await turn(() => { for (const name of names) writeFileSync(join(cwd, name), 'agent\n') })
+    await undo()
+    for (const name of names) expect(bytes(name).toString()).toBe(`${name}   \n`)
+  })
+
+  it('files under a filter are never all held in memory at once: at most a bounded amount of their bytes is', async () => {
+    filter('plain', 'cat', 'cat', '*.bin -text')
+    for (let at = 0; at < 24; at++) writeFileSync(join(cwd, `m${String(at).padStart(2, '0')}.bin`), Buffer.alloc(20 * 1024 * 1024, at))
+    const base = process.memoryUsage().arrayBuffers
+    let peak = base
+    const timer = setInterval(() => { peak = Math.max(peak, process.memoryUsage().arrayBuffers) }, 5)
+    const snapshot = await takeSnapshotAsync(cwd, { reason: 'memory' })
+    clearInterval(timer)
+    expect(snapshot.coverageGaps).toBeUndefined()
+    expect((peak - base) / 1024 / 1024).toBeLessThan(200)
+  })
+
+  it('stores and checks share one time budget per snapshot', async () => {
+    git(cwd, 'config', 'filter.strip.clean', "sed 's/ *$//'"); git(cwd, 'config', 'filter.strip.smudge', 'cat')
+    git(cwd, 'config', 'filter.slow.clean', "sed 's/ *$//'"); git(cwd, 'config', 'filter.slow.smudge', `sh -c 'sleep 0.25; cat'`)
+    commitAttributes('value.txt filter=strip\n*.dat filter=slow')
+    trustRepositoryPrograms(cwd)
+    writeFileSync(join(cwd, 'value.txt'), 'stored next time   \n')
+    for (let at = 0; at < 20; at++) writeFileSync(join(cwd, `s${at}.dat`), `slow ${at}   \n`)
+    // Every file is found lossy, and none stored: the snapshots may store nothing.
+    ROUND_TRIP_BUDGET.storeBytes = 0
+    for (let round = 0; round < 8; round++) if (((await takeSnapshotAsync(cwd, { reason: `check ${round}` })).coverageGaps ?? []).every((gap) => gap.reason.startsWith('not stored yet'))) break
+    ROUND_TRIP_BUDGET.storeBytes = 200 * 1024 ** 2
+    // The slow files change, so they are checked again; value.txt is stored from its earlier verdict, slowly.
+    for (let at = 0; at < 20; at++) writeFileSync(join(cwd, `s${at}.dat`), `slow again ${at}   \n`)
+    // Storing takes the whole budget, so the checks get none of their own: about 2 s more than the snapshot's own work.
+    gitLauncher('*" hash-object -w --no-filters --stdin-paths "*', 'sleep 2')
+    const started = Date.now()
+    const snapshot = await takeSnapshotAsync(cwd, { reason: 'store and check' })
+    const took = Date.now() - started
+    process.env.PATH = previousPath
+    expect(rawBlob(snapshot.exactTree!).toString()).toBe('stored next time   \n')
+    expect(took).toBeLessThan(5200)
+  })
+
+  it('a filtered file .git/info/attributes also converts (text) is named as such and never read for a check', async () => {
+    filter('counted', "sed 's/ *$//'", `'${logging('smudge.sh', 'cat')}' smudge`, 'other.txt')
+    writeFileSync(resolve(cwd, git(cwd, 'rev-parse', '--git-path', 'info/attributes')), 'value.txt filter=counted text eol=crlf\n')
+    writeFileSync(join(cwd, 'value.txt'), 'converted   \r\n')
+    for (const reason of ['first', 'second']) {
+      const snapshot = await takeSnapshotAsync(cwd, { reason })
+      expect(snapshot.coverageGaps).toEqual([{ path: 'value.txt', reason: ".git/info/attributes converts it, so only Git's form of it is kept" }])
+    }
+    expect(smudges()).toBe(0)
+    expect(bytes().toString()).toBe('converted   \r\n')
+  })
+
+  it('a repository whose path holds a double quote still stores lossy files', async () => {
+    const quoted = join(f.root, 'quo"ted')
+    execFileSync('cp', ['-R', cwd, quoted])
+    cwd = quoted
+    filter('strip', "sed 's/ *$//'", 'cat')
+    const original = Buffer.from('spaces in a quoted repository   \n')
+    writeFileSync(join(cwd, 'value.txt'), original)
+    const action = await turn('agent\n')
+    expect(action.notCovered).toBeUndefined()
+    await undo()
+    expect(bytes().equals(original)).toBe(true)
   })
 })
