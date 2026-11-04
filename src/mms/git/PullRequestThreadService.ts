@@ -30,10 +30,13 @@ import { verifiedCleanupAsync } from '../worktree/verifiedCleanup'
 import { withDrivers } from './gitEnv'
 import { ignoredFilesOf } from '../worktree/WorktreeManager'
 import { blobId, linkedAdminDir, readAdminFilesAsync } from '../lifecycle/worktreeAdminData'
+import { readOnlyFolderAsync } from '../lifecycle/WorktreeRetirementService'
+import { projectKeptFilesOwner, registerProjectKeptFilesFolder } from '../actions/keptCopies'
 
 /**
  * What a start made: the pull request's head it fetched, and Git's own data of the worktree (each file's blob id, by
- * path) as provisioning left it, read once it returned. Absent when provisioning did not finish.
+ * path) as provisioning left it, read the moment the worktree was made and filled (`onWorktreeMade`). Absent when
+ * provisioning stopped before that.
  */
 interface StartMade { headSha: string; admin?: { format: string; files: Map<string, string> } }
 
@@ -60,7 +63,9 @@ const THREAD_NAME_MAX = 120
 export interface PullRequestThreadDeps {
   codeHost: CodeHost
   projects: { getProject(projectId: string): { id: string; path: string } | undefined }
-  threads: Pick<ThreadDataStore, 'createThread' | 'updateThreadMeta' | 'listAllThreads' | 'getThreadDir' | 'discardUnusedThread'>
+  threads: Pick<ThreadDataStore, 'createThread' | 'updateThreadMeta' | 'listAllThreads' | 'getThreadDir' | 'discardUnusedThread' | 'lifecycleStore'>
+  /** Test seam: runs right before each entry of a failed start's worktree is removed, after its last check. */
+  cleanupBeforeRemove?: (path: string) => void
   /** Moves a thread to the trash through the lifecycle coordinator; used when a failed start cannot simply discard it. */
   trashThread(threadId: string): Promise<unknown>
   /** Finishes a new thread the way every new thread is finished (its model selection). */
@@ -258,16 +263,16 @@ export class PullRequestThreadService {
     const made: StartMade = { headSha }
     try {
       const threadDirectory = this.deps.threads.getThreadDir(thread.id)
-      const workspace = await new ThreadWorkspaceManager(threadDirectory).provision(thread.id, 'main', project.path, undefined, undefined, headSha, {
+      await new ThreadWorkspaceManager(threadDirectory).provision(thread.id, 'main', project.path, undefined, undefined, headSha, {
         untrusted: true,
         userRequested,
         nameFrom: name,
+        // What Mousse itself wrote there, read as soon as it is made: a failed start lets go of only these bytes.
+        onWorktreeMade: async (worktreePath) => { made.admin = await adminFilesOf(worktreePath).catch(() => undefined) },
         ...(input.allowWorktreeConfig === true ? { enableWorktreeConfig: () => { repositoryConfigChange = WORKTREE_CONFIG_ENABLED } } : {})
       })
-      // What Mousse itself wrote there, read before anything else can: a failed start lets go of only these bytes.
-      made.admin = await adminFilesOf(workspace.worktreePath).catch(() => undefined)
     } catch (error) {
-      await this.discard(thread.id, project.path, topLevel, made)
+      await this.discard(thread.id, project, topLevel, made)
       const said = repositoryConfigChange ? ` ${repositoryConfigChange}` : ''
       throw new PullRequestThreadError('pull_request_workspace_failed', `Could not create the worktree for pull request #${detail.number}: ${error instanceof Error ? error.message : String(error)}${said}`)
     }
@@ -275,7 +280,7 @@ export class PullRequestThreadService {
       thread = this.deps.threads.updateThreadMeta(thread.id, { pullRequest: linkFromDetail(detail) })
       if (this.deps.prepareThread) thread = this.deps.prepareThread(thread)
     } catch (error) {
-      await this.discard(thread.id, project.path, topLevel, made)
+      await this.discard(thread.id, project, topLevel, made)
       const said = repositoryConfigChange ? ` ${repositoryConfigChange}` : ''
       throw new PullRequestThreadError('pull_request_workspace_failed', `Could not set up the thread for pull request #${detail.number}: ${error instanceof Error ? error.message : String(error)}${said}`)
     }
@@ -314,15 +319,16 @@ export class PullRequestThreadService {
   }
 
   /**
-   * Removes a thread whose start failed: whatever the failed provisioning left in the repository (a worktree, its
-   * branch, its retained ref), then the thread. A thread nothing has used is discarded, so a failed start leaves nothing
-   * behind. The worktree's folder is never removed by Git: it is deleted against a proof (`verifiedCleanupAsync`, which
-   * takes the thread's and the repository's locks itself), with no filter driver run for someone else's commits, and Git
-   * only unregisters a folder that is already gone. Anything unexpected (uncommitted changes, a file in use, a copy kept
-   * of files no commit holds, a commit made there, Git's own data of it not exactly what the start wrote) leaves nothing
-   * half-removed: the thread goes to the trash, with its branch, its retained ref and every copy it owns.
+   * Removes a thread whose start failed, with whatever the failed provisioning left in the repository (a worktree, its
+   * branch, its retained ref), only when all of it is provably what the start itself wrote ({@link startOnly}): then the
+   * worktree is deleted against a proof (`verifiedCleanupAsync`, which takes its owner's and the repository's locks
+   * itself; Git only unregisters a folder that is already gone, and no filter driver runs for someone else's commits),
+   * and the thread, which nothing has used, is discarded. Anything else (a commit made there, a setting added, a file
+   * written or staged, a folder Mousse may not delete in) leaves the worktree where it is, untouched, and the thread goes
+   * to the trash, which keeps the checkout it can account for. A cleanup kept copies of anything are its project's
+   * (`projectKeptFilesOwner`), which outlives the thread, and Storage finishes one that stopped part way.
    */
-  private async discard(threadId: string, projectPath: string, topLevel: string, made: StartMade): Promise<void> {
+  private async discard(threadId: string, project: { id: string; path: string }, topLevel: string, made: StartMade): Promise<void> {
     let removed = true
     let lease: Awaited<ReturnType<typeof acquireRepositoryLease>> | undefined
     try {
@@ -330,7 +336,7 @@ export class PullRequestThreadService {
       const manager = new ThreadWorkspaceManager(threadDirectory)
       const workspace = manager.load()
       if (workspace) {
-        const primary = (await manager.resolveRepositoryAsync(projectPath)).primaryCheckoutPath
+        const primary = (await manager.resolveRepositoryAsync(project.path)).primaryCheckoutPath
         const attempt = async (args: string[]): Promise<boolean> => {
           try {
             await git(primary, args)
@@ -340,23 +346,23 @@ export class PullRequestThreadService {
             return false
           }
         }
-        const cleaned = await this.deleteWorktree(threadDirectory, primary, workspace, made)
-        lease = await acquireRepositoryLease(await resolveRepositoryIdentityAsync(topLevel, { requireMutationCapability: true }))
-        // Only this worktree's registration goes, once its folder is gone. No `git worktree prune`: that would drop every
-        // stale registration in the person's repository, not just the one this start made.
-        const commonDir = resolve(primary, await git(primary, ['rev-parse', '--git-common-dir']))
-        if (cleaned && !await present(workspace.worktreePath) && await worktreeRegisteredAsync(commonDir, workspace.worktreePath)) {
-          const outcome = await unregisterDeletedAsync({ commonDir, path: workspace.worktreePath, place: 'cleanup', held: async () => () => undefined, unregistered: async () => undefined })
-          if ('kept' in outcome) throw new Error(outcome.kept)
-        }
-        removed = cleaned && !await present(workspace.worktreePath)
-        if (removed && typeof cleaned === 'object') {
+        const cleaned = await this.deleteWorktree(primary, project, workspace, made)
+        if (cleaned === 'kept') removed = false
+        // Renamed and part deleted: Git's registration and the branch checked out there stay with the record, which
+        // Storage finishes; only the thread goes.
+        else if (cleaned !== 'stopped') {
+          lease = await acquireRepositoryLease(await resolveRepositoryIdentityAsync(topLevel, { requireMutationCapability: true }))
+          // Only this worktree's registration goes, once its folder is gone. No `git worktree prune`: that would drop every
+          // stale registration in the person's repository, not just the one this start made.
+          const commonDir = resolve(primary, await git(primary, ['rev-parse', '--git-common-dir']))
+          if (!await present(workspace.worktreePath) && await worktreeRegisteredAsync(commonDir, workspace.worktreePath)) {
+            const outcome = await unregisterDeletedAsync({ commonDir, path: workspace.worktreePath, place: 'cleanup', held: async () => () => undefined, unregistered: async () => undefined })
+            if ('kept' in outcome) throw new Error(outcome.kept)
+          }
           // The copy of Git's own data of the worktree holds only what this start wrote there, byte for byte (its settings,
           // HEAD and history at the fetched head, and an index of that head's tree): it goes with the thread, as the branch
-          // and the fetched commits do.
-          await attempt(['update-ref', '--no-deref', '-d', cleaned.admin.ref, cleaned.admin.sha])
-        }
-        if (removed) {
+          // and the fetched commits do. Any other copy stays its project's.
+          if (typeof cleaned === 'object') await attempt(['update-ref', '--no-deref', '-d', cleaned.release.ref, cleaned.release.sha])
           await attempt(['branch', '-D', workspace.branch])
           await attempt(['update-ref', '--no-deref', '-d', workspace.retainedRef])
           try {
@@ -387,34 +393,57 @@ export class PullRequestThreadService {
   }
 
   /**
-   * Deletes the worktree a failed start made, against a proof, with the thread as the owner of what is kept: `true` when
-   * there was no folder; the copy of Git's own data of it when it was deleted, nothing else was kept, and that copy holds
-   * only what the start itself wrote ({@link releasable}); and `false` otherwise: it stays, or the thread owns bytes no
-   * commit of the start holds and is not discarded. Its files are held by the checkout's blobs, compared in Git's form
-   * where Git converts them (line endings, say). Someone else's commits run no filter driver for any of it.
+   * What happens to the worktree a failed start made:
+   * - `kept`: it holds something the start did not write, or cannot be deleted whole; it is left exactly as it is.
+   * - `gone`: there is none any more, or it was deleted; what the cleanup kept stays the project's.
+   * - `stopped`: its delete stopped part way after it was renamed; the project owns the record, and Storage finishes it.
+   * - `release`: it was deleted, and the one copy the cleanup kept (Git's own data of it) holds only what the start wrote.
    */
-  private async deleteWorktree(threadDirectory: string, primary: string, workspace: { worktreePath: string; branch: string; untrusted?: true }, made: StartMade): Promise<boolean | { admin: { ref: string; sha: string } }> {
-    if (!await present(workspace.worktreePath)) return true
+  private async deleteWorktree(primary: string, project: { id: string }, workspace: { worktreePath: string; branch: string; untrusted?: true }, made: StartMade): Promise<'kept' | 'gone' | 'stopped' | { release: { ref: string; sha: string } }> {
+    if (!await present(workspace.worktreePath)) return 'gone'
     const filters = workspace.untrusted !== true
     // Read in the worktree with the repository's programs off and, for someone else's commits, every filter driver off
-    // too (its own settings already turn them off), so none runs for the check.
+    // too (its own settings already turn them off), so none runs for any of it.
     const inWorktreeGit = (args: string[]) => gitListing(workspace.worktreePath, args)
-    const ignored = await withDrivers(filters, workspace.worktreePath, () => ignoredFilesOf(inWorktreeGit))
-    if ('dirty' in ignored || ignored.repositories.length) return false
-    // Read before the cleanup: the index it is about to keep, shown to hold the fetched head's tree and nothing else.
-    const index = await withDrivers(filters, workspace.worktreePath, () => this.startIndex(workspace.worktreePath, made.headSha)).catch(() => undefined)
+    const proven = await withDrivers(filters, workspace.worktreePath, () => this.startOnly(primary, workspace, made, inWorktreeGit)).catch(() => undefined)
+    if (!proven) return 'kept'
+    const owner = projectKeptFilesOwner(this.deps.threads.lifecycleStore.profileHome, project.id)
     const outcome = await verifiedCleanupAsync({
       home: getMousseHomeDir(), worktreePath: workspace.worktreePath, branch: workspace.branch, repositoryRoot: primary,
-      keep: { owner: threadDirectory }, git: inWorktreeGit, ignored: ignored.files, filters
+      keep: { owner, record: (step) => { if (step.phase === 'keeping') registerProjectKeptFilesFolder(owner, project.id, primary) } },
+      git: inWorktreeGit, ignored: [], filters, ...(this.deps.cleanupBeforeRemove ? { beforeRemove: this.deps.cleanupBeforeRemove } : {})
     })
     if ('kept' in outcome) {
       console.warn('a failed pull request thread start kept its worktree', { path: workspace.worktreePath, reason: outcome.kept.reason })
-      return false
+      // Never moved: it stays, and the thread with it. Renamed: what is left is the project's to finish.
+      return await present(workspace.worktreePath) ? 'kept' : 'stopped'
     }
-    if (outcome.copy || outcome.late?.length || !outcome.admin) return false
-    return await this.releasable(primary, workspace.branch, made, index, outcome.admin) ? { admin: { ref: outcome.admin.ref, sha: outcome.admin.sha } } : false
+    // Something was written while it was being deleted: every copy stays its project's.
+    if (outcome.copy || outcome.late?.length || outcome.adminLater?.length || !outcome.admin) return 'gone'
+    return await this.releasable(primary, workspace.branch, made, proven.index, outcome.admin) ? { release: { ref: outcome.admin.ref, sha: outcome.admin.sha } } : 'gone'
   }
 
+  /**
+   * Whether the worktree holds only what the start wrote, read without changing anything: HEAD and the thread's branch
+   * at the head the start fetched; nothing changed, staged, untracked or ignored; Git's own data of it byte for byte what
+   * provisioning left (`made.admin`), the index excepted, which must hold exactly the fetched head's tree
+   * ({@link startIndex}); and every folder in it one Mousse may delete files in, so its delete cannot stop part way.
+   * Returns the index's blob id when it does.
+   */
+  private async startOnly(primary: string, workspace: { worktreePath: string; branch: string }, made: StartMade, inWorktreeGit: (args: string[]) => Promise<string>): Promise<{ index: string } | undefined> {
+    if (!made.admin) return undefined
+    const tip = await git(primary, ['rev-parse', '--verify', '-q', `refs/heads/${workspace.branch}^{commit}`]).catch(() => '')
+    const head = await git(workspace.worktreePath, ['rev-parse', '--verify', '-q', 'HEAD^{commit}']).catch(() => '')
+    if (tip !== made.headSha || head !== made.headSha) return undefined
+    const files = await ignoredFilesOf(inWorktreeGit)
+    if ('dirty' in files || files.files.length || files.repositories.length) return undefined
+    const now = await adminFilesOf(workspace.worktreePath)
+    const wrote = [...made.admin.files].filter(([path]) => path !== 'index')
+    if (now.files.size !== made.admin.files.size || wrote.some(([path, blob]) => now.files.get(path) !== blob)) return undefined
+    if (await readOnlyFolderAsync(workspace.worktreePath) !== undefined) return undefined
+    const index = await this.startIndex(workspace.worktreePath, made.headSha)
+    return index ? { index } : undefined
+  }
   /**
    * The blob id of the worktree's index, when it holds exactly the tree of `headSha`, stage 0, and was not written while
    * it was read (the same bytes before and after its listing); undefined otherwise.

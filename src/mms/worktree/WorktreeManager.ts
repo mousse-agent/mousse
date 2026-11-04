@@ -65,6 +65,11 @@ export interface WorktreeCleanupResult {
   late?: Array<{ ref: string; sha: string; files: number; windowMs: number }>
   /** The copy of Git's own data of the worktree kept before it was removed, which also holds the commits only that data named. */
   admin?: { ref: string; sha: string; windowMs: number }
+  /**
+   * Git's own data of the worktree captured again right before its `.git` went, because it changed while the worktree
+   * was being deleted (a setting written, a commit made through a shell still in it): one copy per change, the same owner.
+   */
+  adminLater?: Array<{ ref: string; sha: string; windowMs: number }>
 }
 
 export interface GhostWorktreeEntry {
@@ -367,7 +372,7 @@ export class WorktreeManager {
           return { success: true, ...resumed }
         }
       }
-      let kept: Pick<WorktreeCleanupResult, 'copy' | 'admin' | 'late'> = {}
+      let kept: Pick<WorktreeCleanupResult, 'copy' | 'admin' | 'late' | 'adminLater'> = {}
       if (await exists(worktreePath)) {
         // Read in the worktree with hooks, the file system monitor and every filter driver off, so none runs for the check.
         const { git: inWorktree, safety: worktreeSafety } = options.safeCheckout
@@ -478,7 +483,7 @@ async function keepThenDelete(input: {
   keep: KeepIgnoredFiles | undefined
   git: (args: string[]) => Promise<string>
   beforeRemove?: (path: string) => void
-}): Promise<Pick<WorktreeCleanupResult, 'copy' | 'admin' | 'late'> | { kept: NonNullable<WorktreeCleanupResult['kept']> }> {
+}): Promise<Pick<WorktreeCleanupResult, 'copy' | 'admin' | 'late' | 'adminLater'> | { kept: NonNullable<WorktreeCleanupResult['kept']> }> {
   const { ignored, keep } = input
   const ignoredFiles = keep?.deleteIgnored ? 0 : ignored.files.length
   const holds = ignoredFiles ? `Kept, ${plural(ignoredFiles, 'ignored file')}` : 'Kept'

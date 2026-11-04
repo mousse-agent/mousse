@@ -61,7 +61,7 @@ export function lockReasonSync(adminDir: string): string | undefined {
  * The first folder in `root` (relative to it, `''` for `root` itself) whose files this process may not delete, or
  * undefined. Links are not followed. On Windows a folder's read-only flag does not stop that, so nothing is looked at.
  */
-async function readOnlyFolderAsync(root: string): Promise<string | undefined> {
+export async function readOnlyFolderAsync(root: string): Promise<string | undefined> {
   if (process.platform === 'win32') return undefined
   let seen = 0
   const visit = async (path: string, rel: string, depth: number): Promise<string | undefined> => {

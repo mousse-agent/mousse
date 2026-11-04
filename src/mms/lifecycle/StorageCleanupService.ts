@@ -32,7 +32,7 @@ import { expireTrashedSnapshotRefs } from '../actions/SnapshotRefReleaseService'
 import { WorktreeManager } from '../worktree/WorktreeManager'
 import { CLEANUP_QUIET_MS, cleanupRecordFor, DELETING_NAME, listCleanupRecords, onlyInFolderAsync, resumeCleanupAsync, type CleanupRecord } from '../worktree/verifiedCleanup'
 import { forgetKeptWorktree, listKeptWorktrees, type KeptWorktree } from './keptWorktrees'
-import { dispatchKeptFilesOwner, registerDispatchKeptFilesFolder } from '../actions/keptCopies'
+import { dispatchKeptFilesOwner, projectKeptFilesOwners, registerDispatchKeptFilesFolder } from '../actions/keptCopies'
 
 const DAY_MS = 86_400_000
 const FIRST_RUN_DELAY_MS = 5 * 60_000
@@ -1260,15 +1260,20 @@ export class StorageCleanupService {
    * against that proof: shown to name that folder and to list only held bytes, then compared, deleted entry by entry,
    * and unregistered. One that stopped (files in it kept changing, say) is tried again once nothing has changed in it for
    * an hour, whether a dispatch or an agent made it. One another run has right now is left to it and not reported.
-   * A thread's worktree whose cleanup stopped (a pull request thread whose start failed) is finished the same way, against
-   * its record alone (`resumeCleanupAsync`): it is no agent's worktree, so it is never checked as one.
+   * A thread's worktree whose cleanup stopped (a pull request thread whose start failed, its copies owned by the
+   * thread's project or the thread) is finished the same way, against its record alone (`resumeCleanupAsync`): it is no
+   * agent's worktree, so it is never checked as one. Another profile's is left to that profile and not reported.
    */
   private async stoppedCleanupItems(now: number): Promise<StorageCleanupItem[]> {
     const items: StorageCleanupItem[] = []
-    const threads = this.deps.store.list().map((task) => task.location)
+    const owners = [...this.deps.store.list().map((task) => task.location), ...projectKeptFilesOwners(this.deps.store.profileHome).map((project) => project.owner)]
+    const within = (path: string, folder: string): boolean => { const rel = relative(resolve(folder), resolve(path)); return rel === '' || !rel.startsWith('..') && !isAbsolute(rel) }
+    const otherProfile = (path: string): boolean => within(path, join(this.deps.installationHome, 'profiles')) && !within(path, this.deps.store.profileHome)
     for (const record of await listCleanupRecords(this.deps.installationHome)) {
       if (this.stopping) return items
-      const thread = !record.branch.startsWith('mousse/agent/') && threads.some((location) => samePath(location, record.owner))
+      const agent = record.branch.startsWith('mousse/agent/')
+      if (!agent && otherProfile(record.owner)) continue
+      const thread = !agent && owners.some((owner) => samePath(owner, record.owner))
       const base = { rule: 'worktree-orphan' as const, label: `${thread ? 'threads' : 'agents'}/${basename(record.worktreePath)}` }
       const since = record.stopped ? Date.parse(record.changedAt ?? record.stopped.at) : Number.NaN
       const stoppedAt = record.stopped ? Date.parse(record.stopped.at) : Number.NaN

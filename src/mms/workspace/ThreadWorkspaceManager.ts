@@ -336,8 +336,11 @@ export class ThreadWorkspaceManager {
      *
      * `nameFrom`: the thread's first message. The worktree's branch is named from it once, here, as `mousse/<slug>`
      * (see `threadBranchName`), and never renamed; the name is checked against the repository under its lease.
+     *
+     * `onWorktreeMade`: runs once the worktree is made and its files written, still under the repository's lease and
+     * before anything else can fail: what Mousse wrote there, as a caller that may have to remove it again reads it.
      */
-    options: { untrusted?: boolean; enableWorktreeConfig?: () => void; userRequested?: UserAction; snapshot?: string; nameFrom?: string; onNotice?: (notice: { id: string; text: string }) => unknown } = {}
+    options: { untrusted?: boolean; enableWorktreeConfig?: () => void; userRequested?: UserAction; snapshot?: string; nameFrom?: string; onNotice?: (notice: { id: string; text: string }) => unknown; onWorktreeMade?: (worktreePath: string) => void | Promise<void> } = {}
   ): Promise<ThreadWorkspaceMetadata> {
     const existing = this.load()
     if (existing?.lifecycle === 'ready') return this.verify(existing)
@@ -411,6 +414,7 @@ export class ThreadWorkspaceManager {
           if (!options.onNotice) console.warn('worktree start kept files', { threadId, notice })
         }
       }
+      await options.onWorktreeMade?.(worktreePath)
       await git(repository.primaryCheckoutPath, ['update-ref', '--no-deref', retainedRef, options.snapshot ?? head])
       const metadata: ThreadWorkspaceMetadata = {
         schemaVersion: 1,
