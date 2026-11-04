@@ -664,6 +664,53 @@ describe('the copy also keeps what stands where Discard puts a file back', () =>
     expect(restoreWorking(cwd, kept.ref, 'base.txt').equals(value)).toBe(true)
   })
 
+  it('keeps an ignored file the index no longer has where pending-changes Discard writes HEAD\'s version back', async () => {
+    const cwd = repo()
+    writeFileSync(join(cwd, 'config.local'), 'shared default\n'); git(cwd, 'add', 'config.local'); git(cwd, 'commit', '-qm', 'config')
+    // The usual way to stop tracking a settings file: untrack it, ignore it, then edit it.
+    git(cwd, 'rm', '-q', '--cached', 'config.local')
+    writeFileSync(join(cwd, '.git', 'info', 'exclude'), 'config.local\n')
+    const edit = Buffer.concat([Buffer.from('my local secrets\n'), randomBytes(8)])
+    writeFileSync(join(cwd, 'config.local'), edit)
+    const kept = await discardPending(cwd, temp('mousse-kept-owner-'))
+    expect(readFileSync(join(cwd, 'config.local'), 'utf8')).toBe('shared default\n')
+    expect(restoreWorking(cwd, kept.ref, 'config.local').equals(edit)).toBe(true)
+  })
+
+  it('refuses a repository of its own staged as a submodule where HEAD has a folder: Git would write over its files', async () => {
+    const cwd = repo()
+    mkdirSync(join(cwd, 'lib')); writeFileSync(join(cwd, 'lib', 'x.txt'), 'outer x\n'); git(cwd, 'add', 'lib'); git(cwd, 'commit', '-qm', 'lib')
+    git(cwd, 'rm', '-rq', '--cached', 'lib'); rmSync(join(cwd, 'lib'), { recursive: true }); mkdirSync(join(cwd, 'lib'))
+    const nested = join(cwd, 'lib')
+    git(nested, 'init', '-q', '-b', 'main')
+    writeFileSync(join(nested, 'x.txt'), 'nested committed\n'); git(nested, 'add', '.'); git(nested, '-c', 'user.name=N', '-c', 'user.email=n@example.invalid', 'commit', '-qm', 'n')
+    writeFileSync(join(nested, 'x.txt'), 'nested dirty x 5150\n')
+    git(cwd, 'add', 'lib')
+    expect(git(cwd, 'ls-files', '-s', 'lib')).toMatch(/^160000 /)
+    const before = everything(cwd)
+    const index = indexDigest(cwd)
+    await expect(discardPending(cwd, temp('mousse-kept-owner-'))).rejects.toThrow('Discard was stopped: lib is a separate Git repository where Git would put the folder lib back')
+    expect(everything(cwd)).toEqual(before)
+    expect(indexDigest(cwd)).toBe(index)
+    expect(preservedRefs(cwd)).toEqual([])
+  })
+
+  it('a file that goes while its copy is being kept refuses in plain words, naming it', async () => {
+    const cwd = repo()
+    writeFileSync(join(cwd, 'notes.txt'), 'notes\n')
+    symlinkSync('target', join(cwd, 'link'))
+    // Removed after they were looked at and before they are read: the staged file's size is asked first.
+    writeFileSync(join(cwd, 'staged.txt'), 'staged\n'); git(cwd, 'add', 'staged.txt')
+    const real = execFileSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).trim()
+    const bin = temp('mousse-kept-bin-')
+    writeFileSync(join(bin, 'git'), `#!/bin/sh\ncase " $* " in\n *" cat-file --batch-check"*) rm -f '${join(cwd, 'notes.txt')}' '${join(cwd, 'link')}' ;;\nesac\nexec '${real}' "$@"\n`)
+    chmodSync(join(bin, 'git'), 0o755)
+    vi.stubEnv('PATH', `${bin}:${process.env.PATH}`)
+    const error = await keepCopy({ owner: temp('mousse-kept-owner-'), top: cwd, operationType: 'git-discard', action: 'Discard' }).catch((caught: unknown) => caught)
+    expect(error).toBeInstanceOf(KeepCopyRefusedError)
+    expect((error as Error).message).toMatch(/^(link|notes\.txt) changed while its copy was being kept\. Nothing was changed/)
+  })
+
   it('leaves an untracked repository of its own alone, as before', async () => {
     const cwd = repo()
     mkdirSync(join(cwd, 'other')); git(join(cwd, 'other'), 'init', '-q', '-b', 'main')

@@ -419,6 +419,9 @@ function count(budget: Budget, entry: Entry): void {
 const changedWhileKept = (path: string): KeepCopyRefusedError =>
   new KeepCopyRefusedError(`${path} changed while its copy was being kept. Nothing was changed; try again once it has stopped changing.`, [path])
 
+/** An error that means the path went, or stopped being what it was, while it was looked at. */
+const vanished = (error: unknown): boolean => ['ENOENT', 'ENOTDIR', 'EINVAL', 'ELOOP'].includes((error as NodeJS.ErrnoException)?.code ?? '')
+
 /** `info` is the entry first seen: the same device and inode. */
 const sameEntry = (entry: Entry, info: { dev: number; ino: number }): boolean => entry.ino === undefined || (info.ino === entry.ino && info.dev === entry.dev)
 
@@ -427,8 +430,8 @@ const sameEntry = (entry: Entry, info: { dev: number; ino: number }): boolean =>
  * first seen there, so a folder above it that became a link meanwhile is caught too.
  */
 async function openKept(top: string, entry: Entry): Promise<FileHandle> {
-  const file = await open(join(top, entry.path), constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0)).catch((error: NodeJS.ErrnoException) => {
-    throw error.code === 'ELOOP' ? changedWhileKept(entry.path) : error
+  const file = await open(join(top, entry.path), constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0)).catch((error: unknown) => {
+    throw vanished(error) ? changedWhileKept(entry.path) : error
   })
   const info = await file.stat().catch(async (error: unknown) => { await file.close(); throw error })
   if (!info.isFile() || !sameEntry(entry, info)) {
@@ -441,11 +444,15 @@ async function openKept(top: string, entry: Entry): Promise<FileHandle> {
 /** A kept link's target, read only while the link is the one first seen there. */
 async function readKeptLink(top: string, entry: Entry): Promise<Buffer> {
   const absolute = join(top, entry.path)
-  const before = await lstat(absolute)
-  const data = await readlink(absolute, { encoding: 'buffer' })
-  const after = await lstat(absolute)
-  if (![before, after].every((info) => info.isSymbolicLink() && sameEntry(entry, info))) throw changedWhileKept(entry.path)
-  return data
+  try {
+    const before = await lstat(absolute)
+    const data = await readlink(absolute, { encoding: 'buffer' })
+    const after = await lstat(absolute)
+    if ([before, after].every((info) => info.isSymbolicLink() && sameEntry(entry, info))) return data
+  } catch (error) {
+    if (!vanished(error)) throw error
+  }
+  throw changedWhileKept(entry.path)
 }
 
 function tooLarge(budget: Budget, atLeast: boolean): KeepCopyTooLargeError {
@@ -501,7 +508,7 @@ async function lookAt(top: string, path: string, walk: boolean, write: string, b
       const where = folder === write ? `where Git would put the file ${write} back` : `inside ${write}, where Git would put a file back`
       throw new KeepCopyRefusedError(`${budget.action} was stopped: ${folder} is a separate Git repository ${where}, and Git would delete it with its history. Nothing was changed. Move ${folder} out of the way, then try again.`, [folder])
     }
-    const names = await readdir(join(top, folder))
+    const names = await readdir(join(top, folder)).catch((error: unknown) => { throw vanished(error) ? new FolderChanged() : error })
     for (let start = 0; start < names.length; start += LOOK_AHEAD) {
       const found = await Promise.all(names.slice(start, start + LOOK_AHEAD).map((name) => lstatEntry(top, `${folder}/${name}`)))
       for (const entry of found) {
@@ -524,17 +531,23 @@ async function lookAt(top: string, path: string, walk: boolean, write: string, b
  *   followed;
  * - a folder standing where `target` has a file or link, walked by `lstat` ({@link lookAt}) with every file and link
  *   in it, ignored ones included, never through a link.
+ * - a file or link at a written path itself, which Git writes over: one no listing names, ignored and no longer in
+ *   the index, included.
  *
  * A path where `target` has a submodule is left alone: Git records the submodule's commit there and never removes its
  * folder. A folder where `target` has nothing is left too, as Git leaves it. A repository of its own in a folder Git
  * would remove is refused, naming it, because Git would delete its history with it; so is one the index records as a
- * submodule where `target` has a file. A folder that keeps changing while it is walked is refused after
+ * submodule where `target` has a file, and one it records as a submodule where `target` has a folder, whose files Git
+ * would write over. A folder that keeps changing while it is walked is refused after
  * {@link WALK_ATTEMPTS} walks. `target` is asked only about the paths something stands in the way of, and about each
  * blocking file or link once, however many paths lie below it. The walked bytes count toward `budget`.
  */
 async function obstructionsOf(top: string, writes: readonly string[], target: string, budget: Budget, parents: Parents): Promise<{ entries: Entry[]; parents: Set<string> }> {
   const blocked = new Set<string>()
   const folders: string[] = []
+  const entries = new Map<string, Entry>()
+  // Separate repositories that written paths lie inside, with one such path each.
+  const containing = new Map<string, string>()
   const unique = [...new Set(writes.map((path) => path.replace(/\/+$/, '')).filter(Boolean))]
   for (let start = 0; start < unique.length; start += LOOK_AHEAD) {
     await Promise.all(unique.slice(start, start + LOOK_AHEAD).map(async (path) => {
@@ -543,11 +556,33 @@ async function obstructionsOf(top: string, writes: readonly string[], target: st
         if (parent.kind === 'file' || parent.kind === 'link') blocked.add(parent.path)
         return
       }
+      for (let slash = path.indexOf('/'); slash !== -1; slash = path.indexOf('/', slash + 1)) {
+        if ((await parents.get(path.slice(0, slash)))?.kind === 'repository') {
+          if (!containing.has(path.slice(0, slash))) containing.set(path.slice(0, slash), path)
+          break
+        }
+      }
       const entry = await lstatEntry(top, path)
       if (entry.kind === 'folder' || entry.kind === 'repository') folders.push(path)
+      // A file or link where the action writes is overwritten, so it is kept, though no listing names it: one Git
+      // ignores and the index no longer has (`git rm --cached`, then ignored), say.
+      else if (entry.kind === 'file' || entry.kind === 'link') {
+        entries.set(path, entry)
+        count(budget, entry)
+      }
     }))
   }
-  if (!blocked.size && !folders.length) return { entries: [], parents: new Set() }
+  if (containing.size) {
+    // A repository the index stages as a submodule where `target` has a folder: Git writes `target`'s files over its own.
+    const staged = new Map<string, string>()
+    for (const line of await listZOver(top, ['ls-files', '-z', '-s'], [...containing.keys()])) staged.set(line.slice(line.indexOf('\t') + 1), line.slice(0, line.indexOf(' ')))
+    const inTarget = await modesIn(top, target, [...containing.keys()])
+    for (const [folder, write] of containing) {
+      if (staged.get(folder) !== '160000' || inTarget.get(folder) !== '040000') continue
+      throw new KeepCopyRefusedError(`${budget.action} was stopped: ${folder} is a separate Git repository where Git would put the folder ${folder} back, and Git would write over its files, ${write} among them. Nothing was changed. Move ${folder} out of the way, then try again.`, [folder])
+    }
+  }
+  if (!blocked.size && !folders.length) return { entries: [...entries.values()], parents: new Set() }
 
   // A file or link is in the way where `target` has a folder; a folder, where it has a file or link. A submodule's
   // folder in `target` is Git's to leave alone.
@@ -556,7 +591,6 @@ async function obstructionsOf(top: string, writes: readonly string[], target: st
     ...[...blocked].filter((path) => modes.get(path) === '040000').map((path) => ({ path, walk: false, parent: true })),
     ...folders.filter((path) => ['100644', '100755', '120000'].includes(modes.get(path) ?? '')).map((path) => ({ path, walk: true, parent: false }))
   ]
-  const entries = new Map<string, Entry>()
   const kept = new Set<string>()
   for (const look of looks) {
     let found: Entry[] | undefined
