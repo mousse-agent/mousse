@@ -1,6 +1,6 @@
 import { createErrorProvider, knownAppError, normalizeAppError } from '../../shared/errors'
 import { createHash, randomUUID } from 'node:crypto'
-import { existsSync, lstatSync, readdirSync, readFileSync, realpathSync, rmdirSync, unlinkSync, writeFileSync, type Stats } from 'node:fs'
+import { closeSync, existsSync, fchmodSync, lstatSync, openSync, readdirSync, readFileSync, realpathSync, rmdirSync, unlinkSync, writeFileSync, type Stats } from 'node:fs'
 import { access, lstat, readdir, readFile } from 'node:fs/promises'
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import type { LifecyclePurgeItem, LifecyclePurgePreview, TaskLifecycleRecord, TrashRetentionPolicy } from '../../shared/resourceLifecycle'
@@ -30,6 +30,18 @@ const active = new Set<string>()
 /** Whether `path` is there, as `existsSync` answers; a checkout is read without blocking the daemon. */
 const present = (path: string): Promise<boolean> => access(path).then(() => true, () => false)
 const rootIdentity = (stat: { dev: number; ino: number; birthtimeMs: number }) => digest({ dev: stat.dev, ino: stat.ino, birthtimeMs: stat.birthtimeMs })
+/**
+ * Whether `stat` is the folder `recorded` identifies: the same device and inode, and the same creation time where the
+ * file system keeps one. Where it doesn't, Node gives 0 or the change time, which the folder's own removals move, so it is
+ * not compared; the caller compares the real path as well.
+ */
+function sameFolder(stat: Stats, recorded: { dev: number; ino: number; birthtimeMs: number } | undefined): boolean {
+  if (!recorded || !stat.isDirectory() || stat.dev !== recorded.dev || stat.ino !== recorded.ino) return false
+  return !hasBirthtime(stat) || stat.birthtimeMs === recorded.birthtimeMs
+}
+const hasBirthtime = (stat: Stats): boolean => stat.birthtimeMs !== 0 && stat.birthtimeMs !== stat.ctimeMs
+/** The real path of an existing `path`, as two of them are compared; always read the same way. */
+const realOf = (path: string): string => comparablePath(realpathSync(path))
 /** Time one reclaim estimate may spend measuring files. */
 const RECLAIM_BUDGET_MS = 20_000
 
@@ -713,7 +725,14 @@ export class ResourcePurgeService {
     const changed = (): Error => purgeStopped(`the worktree at ${folder} changed (its folder, branch or commit) since the delete was reviewed. It was kept.`)
     const lostLink = (): Error => purgeStopped(`the worktree at ${folder} lost its link to its repository (.git) before its files were cleared. It was kept.`)
     const writtenSince = (): Error => purgeStopped(`files were written at ${folder} after its worktree was deleted. They were kept.`)
-    const sameRoot = (stat: Stats): boolean => stat.isDirectory() && rootIdentity(stat) === digest(item.rootIdentity)
+    // The real path the reviewed folder had; compared too, so a file system without creation times still tells folders apart.
+    const realRecorded = comparablePath(await canonicalPathAsync(folder))
+    const sameRoot = (stat: Stats): boolean => {
+      if (!sameFolder(stat, item.rootIdentity)) return false
+      try { return realOf(folder) === realRecorded } catch { return false }
+    }
+    /** What a folder that could not be removed holds; nothing visible (a delete Windows has not finished) is said as such. */
+    const kept = (files: string[]): Error => files.length ? purgeStopped(savedText(files)) : purgeStopped(`the worktree folder ${folder} could not be removed yet. It will be tried again.`)
     /** Synchronously, right before each removal: Git has no lock on the worktree (it never removes a locked one). */
     const unlocked = (registration: WorktreeRegistration | undefined): void => {
       const locked = registration && lockReasonSync(registration.adminDir)
@@ -761,7 +780,7 @@ export class ResourcePurgeService {
       if (!sameRoot(lstatSync(folder))) throw changed()
       try { rmdirSync(folder) } catch (error) {
         if (!['ENOTEMPTY', 'EEXIST'].includes((error as NodeJS.ErrnoException).code ?? '')) throw error
-        throw purgeStopped(savedText(await filesIn(folder)))
+        throw kept(await filesIn(folder))
       }
       if (registration) await this.unregisterDiscarded(registration, folder, commonDir, unclaimed)
       return
@@ -769,10 +788,11 @@ export class ResourcePurgeService {
     if (!linkInfo.isFile() || linkInfo.size > 4096) throw changed()
     const link = await readFile(dotGit, 'utf8')
     const linkIdentity = fileIdentity(linkInfo)
+    const linkMode = linkInfo.mode & 0o7777
     const gitDir = /^gitdir:[ \t]*(.+?)[ \t]*$/m.exec(link)?.[1]
     const registration = await registrationOf(commonDir, folder)
     if (!gitDir || !registration || comparablePath(await canonicalPathAsync(resolve(folder, gitDir))) !== comparablePath(await canonicalPathAsync(registration.adminDir))) throw changed()
-    const realFolder = await canonicalPathAsync(folder)
+    const realFolder = realOf(folder)
     /** Synchronously: `.git` is still the very file read above. */
     const linked = (): void => {
       let now: Stats
@@ -813,14 +833,18 @@ export class ResourcePurgeService {
         // is still a working worktree; but only into that very folder. One swapped in for it (or a link to another
         // folder) gets nothing, and is named. A `.git` someone wrote there meanwhile is theirs, and stays.
         let same = false
-        try { const now = lstatSync(folder); same = !now.isSymbolicLink() && sameRoot(now) && comparablePath(realpathSync.native(folder)) === comparablePath(realFolder) } catch { /* gone */ }
+        try { const now = lstatSync(folder); same = !now.isSymbolicLink() && sameRoot(now) && realOf(folder) === realFolder } catch { /* gone */ }
         if (!same) throw purgeStopped(`the worktree at ${folder} was moved or replaced while it was being deleted, so its link to its repository (.git) was not put back. Its files were kept.`)
-        try { writeFileSync(dotGit, link, { flag: 'wx' }) } catch { /* kept as it is */ }
+        // With its own permissions, whatever the umask.
+        try {
+          const fd = openSync(dotGit, 'wx', linkMode)
+          try { fchmodSync(fd, linkMode); writeFileSync(fd, link) } finally { closeSync(fd) }
+        } catch { /* kept as it is */ }
         if (!['ENOTEMPTY', 'EEXIST'].includes((error as NodeJS.ErrnoException).code ?? '')) throw error
         landed = true
       }
     }
-    if (landed) throw purgeStopped(savedText(await filesIn(folder)))
+    if (landed) throw kept(await filesIn(folder))
     await this.unregisterDiscarded(registration, folder, commonDir, unclaimed)
   }
   /** Git unregisters the deleted checkout. A folder at that path again would be someone's new files: it is kept, and so is the registration. */

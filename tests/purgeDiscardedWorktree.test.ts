@@ -10,22 +10,50 @@ import { fixtureGit as git, ownedHome } from './support/fixtureGit'
 import { resolveRepositoryIdentity } from '../src/mms/git/RepositoryIdentity'
 import { registerThreadLifecycleGate } from '../src/mms/queue/ThreadLifecycleAdmission'
 
-/** Run right after the purge unlinks a path or removes a folder, as a change that lands between two of its system calls would. */
-const late = vi.hoisted(() => ({ afterUnlink: undefined as undefined | ((path: string) => void), afterRmdir: undefined as undefined | ((path: string) => void) }))
+/**
+ * Changes that land between two of the purge's system calls, and file-system behaviour this Mac doesn't have:
+ * - `afterUnlink`, `afterRmdir`, `afterReadLink`: run right after a path is unlinked, a folder removed, or a `.git` read;
+ * - `rmdirFails`: `rmdir` of that folder fails with ENOTEMPTY and removes nothing (Windows, with a delete still pending);
+ * - `noBirthtime`: that folder's creation time is what Node gives where the file system keeps none (its change time, or 0);
+ * - `nativeRealpath`: how `realpathSync.native` spells a path (as Windows does for a subst or mapped drive).
+ */
+const late = vi.hoisted(() => ({
+  afterUnlink: undefined as undefined | ((path: string) => void),
+  afterRmdir: undefined as undefined | ((path: string) => void),
+  afterReadLink: undefined as undefined | ((path: string) => void),
+  rmdirFails: undefined as undefined | string,
+  noBirthtime: undefined as undefined | { folder: string; as: 'ctime' | 'zero' },
+  nativeRealpath: undefined as undefined | ((path: string) => string)
+}))
+const withoutBirthtime = <T extends { birthtimeMs: number; ctimeMs: number; isDirectory(): boolean }>(path: unknown, stat: T): T => {
+  if (late.noBirthtime && String(path) === late.noBirthtime.folder && stat.isDirectory()) stat.birthtimeMs = late.noBirthtime.as === 'zero' ? 0 : stat.ctimeMs
+  return stat
+}
 vi.mock('node:fs', async (importOriginal) => {
   const fs = await importOriginal<typeof import('node:fs')>()
+  const native = ((path, options) => { const real = fs.realpathSync.native(path, options); return late.nativeRealpath ? late.nativeRealpath(String(real)) : real }) as typeof fs.realpathSync.native
   return {
     ...fs,
     unlinkSync: ((path) => { fs.unlinkSync(path); late.afterUnlink?.(String(path)) }) as typeof fs.unlinkSync,
-    rmdirSync: ((path, options) => { fs.rmdirSync(path, options); late.afterRmdir?.(String(path)) }) as typeof fs.rmdirSync
+    rmdirSync: ((path, options) => {
+      if (String(path) === late.rmdirFails) throw Object.assign(new Error(`ENOTEMPTY: directory not empty, rmdir '${String(path)}'`), { code: 'ENOTEMPTY' })
+      fs.rmdirSync(path, options); late.afterRmdir?.(String(path))
+    }) as typeof fs.rmdirSync,
+    lstatSync: ((path, options) => withoutBirthtime(path, fs.lstatSync(path, options) as import('node:fs').Stats)) as typeof fs.lstatSync,
+    readFileSync: ((path, options) => { const read = fs.readFileSync(path, options); if (String(path).endsWith('/.git')) late.afterReadLink?.(String(path)); return read }) as typeof fs.readFileSync,
+    realpathSync: Object.assign(((path, options) => fs.realpathSync(path, options)) as typeof fs.realpathSync, { native })
   }
+})
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const fs = await importOriginal<typeof import('node:fs/promises')>()
+  return { ...fs, lstat: (async (path, options) => withoutBirthtime(path, await fs.lstat(path, options))) as typeof fs.lstat }
 })
 
 const roots: string[] = []
 const undo: Array<() => void> = []
 const realPath = process.env.PATH
 afterEach(() => {
-  vi.restoreAllMocks(); late.afterUnlink = undefined; late.afterRmdir = undefined; process.env.PATH = realPath
+  vi.restoreAllMocks(); Object.assign(late, { afterUnlink: undefined, afterRmdir: undefined, afterReadLink: undefined, rmdirFails: undefined, noBirthtime: undefined, nativeRealpath: undefined }); process.env.PATH = realPath
   for (const step of undo.splice(0)) step()
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true })
 })
@@ -79,7 +107,7 @@ function recordGit(root: string, dropLinkAfter?: { folder: string; args: string 
   const bin = join(root, 'bin'), log = join(root, 'git.log'), flag = join(root, 'dropped'); mkdirSync(bin)
   const real = execFileSync('/bin/sh', ['-c', 'command -v git'], { encoding: 'utf8' }).trim()
   const drop = dropLinkAfter ? `if [ "$PWD" = '${dropLinkAfter.folder}' ] && [ ! -e '${flag}' ]; then case "$*" in *'${dropLinkAfter.args}'*) '${real}' "$@"; rc=$?; : > '${flag}'; rm -f '${dropLinkAfter.folder}/.git'; exit $rc ;; esac; fi\n` : ''
-  writeFileSync(join(bin, 'git'), `#!/bin/sh\nprintf '%s\\t%s\\n' "$PWD" "$*" >> '${log}'\n${drop}exec '${real}' "$@"\n`); chmodSync(join(bin, 'git'), 0o755)
+  writeFileSync(join(bin, 'git'), `#!/bin/sh\nprintf '%s\\t%s\\tceiling=%s\\n' "$PWD" "$*" "$GIT_CEILING_DIRECTORIES" >> '${log}'\n${drop}exec '${real}' "$@"\n`); chmodSync(join(bin, 'git'), 0o755)
   process.env.PATH = `${bin}:${realPath}`
   return () => existsSync(log) ? readFileSync(log, 'utf8').trim().split('\n') : []
 }
@@ -283,4 +311,70 @@ test('the checks before the delete never run Git in the folder once its .git is 
   expect(here).toHaveLength(1)
   expect(here[0]).toContain('branch --show-current')
   expect(readFileSync(join(f.worktree, 'draft.txt'), 'utf8')).toBe('reviewed draft\n')
+})
+
+for (const as of ['ctime', 'zero'] as const) test(`an ordinary delete finishes where the file system keeps no creation time (Node gives ${as === 'ctime' ? 'the change time' : '0'})`, async () => {
+  const f = await trashedWithStagedWork()
+  late.noBirthtime = { folder: f.worktree, as }
+  const input = await f.preview()
+  expect((await f.first.purge(input)).state).toBe('purged')
+  expect(existsSync(f.worktree)).toBe(false)
+  expect(registered(f.repo, f.worktree)).toBe(false)
+})
+
+test('.git written back keeps its permissions', async () => {
+  const f = await trashedWithStagedWork()
+  const dot = join(f.worktree, '.git'), link = readFileSync(dot)
+  chmodSync(dot, 0o600)
+  late.afterUnlink = (path) => { if (path === dot) { late.afterUnlink = undefined; writeFileSync(join(f.worktree, 'late.txt'), 'late\n') } }
+  await expect(f.first.purge(await f.preview())).rejects.toMatchObject({ message: 'Permanent delete stopped: late.txt was saved in this worktree after it began. It was kept.' })
+  expect(readFileSync(dot).equals(link)).toBe(true)
+  expect(statSync(dot).mode & 0o777).toBe(0o600)
+})
+
+test('.git goes back where the system spells the folder’s real path differently (a subst or mapped drive)', async () => {
+  const f = await trashedWithStagedWork()
+  late.nativeRealpath = (path) => path.startsWith(f.worktree) ? `/Volumes/Mapped${path}` : path
+  late.afterUnlink = (path) => { if (path === join(f.worktree, '.git')) { late.afterUnlink = undefined; writeFileSync(join(f.worktree, 'late.txt'), 'late\n') } }
+  await expect(f.first.purge(await f.preview())).rejects.toMatchObject({ message: 'Permanent delete stopped: late.txt was saved in this worktree after it began. It was kept.' })
+  expect(git(f.worktree, ['rev-parse', '--abbrev-ref', 'HEAD'])).toBe('mousse/thread/task/main')
+})
+
+test('when .git goes right before Git starts, the repository-programs probe can’t look past the folder either', async () => {
+  const f = await trashedWithStagedWork()
+  stopAfter((record) => record.state === 'purge-started')
+  await expect(f.first.purge(await f.preview())).rejects.toThrow()
+  vi.restoreAllMocks()
+  const commands = recordGit(f.root)
+  // The first check of `.git` passes; then `.git` goes, before the probe and the command.
+  late.afterReadLink = (path) => { if (path === join(f.worktree, '.git')) { late.afterReadLink = undefined; unlinkSync(path) } }
+  await expect(f.coordinator().recover('task')).rejects.toMatchObject({ message: `Permanent delete stopped: the worktree at ${f.worktree} lost its link to its repository (.git) before its files were cleared. It was kept.` })
+  const here = commands().filter((line) => line.startsWith(`${f.worktree}\t`))
+  expect(here.length).toBeGreaterThan(0)
+  expect(here.filter((line) => line.endsWith('\tceiling='))).toEqual([])
+  expect(here.filter((line) => line.includes('config --null'))).toEqual([])
+})
+
+test('a folder rmdir can’t remove yet, with nothing visible in it, is said as such and tried again', async () => {
+  const f = await trashedWithStagedWork()
+  late.rmdirFails = f.worktree
+  await expect(f.first.purge(await f.preview())).rejects.toMatchObject({ message: `Permanent delete stopped: the worktree folder ${f.worktree} could not be removed yet. It will be tried again.` })
+  expect(git(f.worktree, ['rev-parse', '--abbrev-ref', 'HEAD'])).toBe('mousse/thread/task/main')
+  late.rmdirFails = undefined
+  expect((await f.coordinator().recover('task')).state).toBe('purged')
+  expect(registered(f.repo, f.worktree)).toBe(false)
+})
+
+test('a lock taken as the empty folder goes is named on that run and the next, and the delete finishes after unlock', async () => {
+  const f = await trashedWithStagedWork()
+  const admin = readFileSync(join(f.worktree, '.git'), 'utf8').trim().slice('gitdir: '.length)
+  late.afterRmdir = (path) => { if (path === f.worktree) { late.afterRmdir = undefined; writeFileSync(join(admin, 'locked'), 'on a USB disk') } }
+  const message = `Permanent delete stopped: Git has this worktree locked (on a USB disk), so it stays in the trash. Run git worktree unlock "${f.worktree}" to let it be deleted.`
+  await expect(f.first.purge(await f.preview())).rejects.toMatchObject({ message })
+  await expect(f.coordinator().recover('task')).rejects.toMatchObject({ message })
+  expect(f.store.require('task').purge?.error).toBe(message)
+  expect(registered(f.repo, f.worktree)).toBe(true)
+  git(f.repo, ['worktree', 'unlock', f.worktree])
+  expect((await f.coordinator().recover('task')).state).toBe('purged')
+  expect(registered(f.repo, f.worktree)).toBe(false)
 })
