@@ -8,7 +8,7 @@ import type { SimpleGit } from 'simple-git'
 import { redactGitText } from '../../shared/gitText'
 import { holdsRepositoryMutation } from '../actions/GitOperationCoordinator'
 import { keepCopy, KeepCopyRefusedError, modesIn, type KeptCopy } from '../actions/keptCopies'
-import { createOnlyAsync, removeProvenAsync, stagedEntryDigests, stagedModes, stagedSince, type LeftAsItIs } from '../actions/provenDiscard'
+import { discardProvenAsync, IndexLockedError, stagedEntryDigests, stagedModes, waitForIndexAsync, type DiscardGit, type LeftAsItIs } from '../actions/provenDiscard'
 import { conflictWrites, conservativeWrites, emptyTree, findInTheWay, InTheWayCheckError, mergeResult, plannedWrites, type InTheWay, type InTheWayKind, type PlannedWrite } from './inTheWay'
 import type { CodeHost } from './CodeHost'
 import { COMMIT_SUGGESTION_LIMITS, EMPTY_COMMIT_INPUT, fitPatch, parseNumstat, type CommitInput } from './commitSuggestion'
@@ -935,7 +935,8 @@ export class GitService {
       const untracked: string[] = []
       for (const entry of selected) {
         if (isUntracked(entry)) {
-          untracked.push(entry.path)
+          // A repository of its own is left alone, as `git clean -d` leaves it: its history is never removed.
+          if (!existsSync(join(top, entry.path, '.git'))) untracked.push(entry.path)
           continue
         }
         const pair = `${entry.index || ' '}${entry.workdir || ' '}`
@@ -945,15 +946,20 @@ export class GitService {
         else restore.add(entry.path)
         if (!unborn && entry.index === 'R' && entry.from) restore.add(entry.from)
       }
-      const tracked = [...new Set([...restore, ...remove])]
-      // What the index holds for them now, to tell afterwards whether someone staged something meanwhile.
+      if (!restore.size && !remove.size && !untracked.length) return undefined
+      const run: DiscardGit = async (args, options = {}) => {
+        const ran = await this.runGit(top, args, { ...(options.write ? { userAction: true } : {}), ...(options.env ? { env: options.env } : {}), ...(options.input !== undefined ? { input: options.input } : {}) })
+        return { status: ran.code, stdout: ran.stdout, stderr: ran.output }
+      }
+      // What the index holds now, to tell later whether someone staged something meanwhile.
       const indexBefore = await this.indexEntries(top)
-      const stagedBefore = stagedEntryDigests(indexBefore)
       // A submodule is changed in the index only: its folder is never walked, removed or written. One staged where HEAD
       // has a file is in the way of that file, and the copy refuses it.
       const headModes = unborn ? new Map<string, string>() : await modesIn(top, 'HEAD', [...restore])
       const indexModes = stagedModes(indexBefore)
       const submodule = (path: string): boolean => headModes.has(path) ? headModes.get(path) === '160000' : indexModes.get(path) === '160000'
+      // Another Git command holding the index refuses the discard before anything is kept or removed.
+      try { await waitForIndexAsync(top, run) } catch (error) { throw this.indexLocked(error) }
       // Every path the discard writes or removes, as it is now, before any of it changes.
       let kept: KeptCopy
       try {
@@ -967,31 +973,31 @@ export class GitService {
         }
         throw error
       }
-      // Untracked files and files in the way go first, each only as far as the copy holds it, deepest first.
-      const emptied = await removeProvenAsync({
-        top,
-        restore: [...restore].filter((path) => !submodule(path)),
-        remove: [...remove, ...untracked].filter((path) => !submodule(path)),
-        digests: kept.digests,
-        ...(this.options.beforeDiscardUnlink ? { beforeUnlink: this.options.beforeDiscardUnlink } : {})
-      })
-      const left = [...emptied.left]
-      const skipped = new Set(left.map((item) => item.path))
-      // Only the index entries of emptied paths go back to HEAD, and only those nobody staged anew meanwhile: a path
-      // left as it is keeps its staged version.
-      const restaged = new Set(stagedSince(stagedBefore, stagedEntryDigests(await this.indexEntries(top)), tracked.filter((path) => !skipped.has(path))))
-      for (const path of restaged) left.push({ path, changed: path })
-      const reset = tracked.filter((path) => !skipped.has(path) && !restaged.has(path))
-      await this.withPathspecFile(top, unborn ? ['rm', '--cached', '-r', '-f', '--ignore-unmatch', '-q'] : ['reset', '-q', 'HEAD'], reset)
-      // Then Git writes HEAD's versions, only into paths that are empty.
-      const write = [...restore].filter((path) => !skipped.has(path) && !restaged.has(path) && !submodule(path))
-      const notWritten = await createOnlyAsync(top, write, async (args, input) => {
-        const run = await this.runGit(top, args, { userAction: true, ...(input !== undefined ? { input } : {}) })
-        return { status: run.code, stderr: run.output }
-      }, new Set(left.map((item) => item.changed)))
-      for (const path of notWritten) left.push({ path, changed: path })
-      return { ...kept, left }
+      try {
+        const { left } = await discardProvenAsync({
+          top,
+          ...(unborn ? {} : { head: 'HEAD' }),
+          restore: [...restore].filter((path) => !submodule(path)),
+          remove: [...remove].filter((path) => !submodule(path)),
+          untracked,
+          indexOnly: [...restore, ...remove].filter(submodule),
+          stagedBefore: stagedEntryDigests(indexBefore),
+          digests: kept.digests,
+          run,
+          ...(this.options.beforeDiscardUnlink ? { beforeUnlink: this.options.beforeDiscardUnlink } : {})
+        })
+        return { ...kept, left }
+      } catch (error) {
+        throw error instanceof IndexLockedError ? this.indexLocked(error) : error
+      }
     })
+  }
+
+  /** The refusal when another Git command keeps the index locked: nothing was discarded. */
+  private indexLocked(error: unknown): unknown {
+    if (!(error instanceof IndexLockedError)) return error
+    const fixed = gitErrors.create('git_index_locked')
+    return new AppError({ code: fixed.code, message: error.message, errorInfo: fixed.errorInfo, details: { path: error.lock } }, error)
   }
 
   /** The index's entries (`ls-files -s -z`), read without writing the index. */

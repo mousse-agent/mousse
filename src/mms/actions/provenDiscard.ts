@@ -1,32 +1,75 @@
-import { createHash } from 'node:crypto'
-import { rmdirSync, unlinkSync, type Stats } from 'node:fs'
-import { lstat, readdir, rmdir } from 'node:fs/promises'
+import { createHash, randomUUID } from 'node:crypto'
+import { lstatSync, readdirSync, readFileSync, rmdirSync, unlinkSync, type Stats } from 'node:fs'
+import { lstat, readdir, rm, rmdir } from 'node:fs/promises'
 import { dirname, join, resolve, sep } from 'node:path'
-import { setImmediate as nextTurn } from 'node:timers/promises'
+import { setImmediate as nextTurn, setTimeout as sleep } from 'node:timers/promises'
 import { assertFoldersUnchanged, assertFrozenEntryUnchanged, identityOf, proveFrozenContentEntryAsync, recordFoldersAboveAsync, type FrozenEntryProof } from '../lifecycle/verifiedDelete'
 
 /**
- * How a Discard removes files: Mousse removes only bytes the kept copy proves it holds, and Git only creates.
- *
- * After `keepCopy`, every entry the discard would remove (the file at a path, a folder standing where HEAD has a file
- * with everything in it, a file or link standing where HEAD needs a folder) is read again and compared with the digest
- * the copy recorded for it ({@link removeProvenAsync}). Each is then removed deepest first, with nothing awaited between
- * its last synchronous check (the folders above it are the ones first seen, and no link; its `lstat` is unchanged) and
- * the `unlink`. An entry that changed after the copy, or appeared since, is left, and so is everything under it and the
- * path that needed it gone. Git then writes HEAD's version only where nothing is ({@link createOnlyAsync}:
- * `checkout-index` without `--force`), so a file saved at an emptied path meanwhile stays as it is too.
+ * How a Discard removes files: Mousse removes only bytes the kept copy proves it holds, and Git only creates
+ * ({@link discardProvenAsync}). In order, after `keepCopy`:
+ * 1. Git's index must not be locked, and no discarded path may have been staged anew since the copy: such a path is
+ *    left whole.
+ * 2. Every entry the discard removes (the file at a path, a folder standing where HEAD has a file with everything in
+ *    it, a file or link standing where HEAD needs a folder) is read again and compared with the digest the copy
+ *    recorded for it, then removed deepest first, with nothing awaited between its last synchronous check and the
+ *    `unlink` ({@link removeProvenAsync}). An entry that changed, or appeared since, is left with everything under it.
+ * 3. Git writes HEAD's versions only where nothing is, from a private index ({@link writeFromHeadAsync}:
+ *    `checkout-index` without `--force`), so a file saved at an emptied path meanwhile stays as it is.
+ * 4. Only then do the index entries of the paths that were emptied and written go back to HEAD, unless they were staged
+ *    anew meanwhile: a path left anywhere on the way keeps its staged version, conflict stages included.
  */
 
-/** A discarded path left as it is: something at it changed after the person pressed Discard. */
+/** Why a discarded path was not discarded, or not wholly. */
+export type LeftReason =
+  /** Something at it changed after the copy was read, or it was staged anew: nothing of it was removed. */
+  | 'changed'
+  /** Something in the folder at it changed while it was removed: what went before is in the copy, the rest stayed. */
+  | 'partly'
+  /** Saved again after it was emptied: Git did not write over it. */
+  | 'recreated'
+  /** Staged anew after its file was removed: its staged version stayed. */
+  | 'restaged'
+  /** Git's index stayed locked: its staged version stayed. */
+  | 'locked'
+  /** Git could not write HEAD's version back: the path is empty, its earlier version in the copy. */
+  | 'failed'
+  /** Git cannot write HEAD's version here (a filter it may not run): nothing of it was removed. */
+  | 'unwritable'
+  /** Not a discarded path: staged while Discard ran, so the unfinished merge, revert or cherry-pick was not ended. */
+  | 'operation'
+
+/** A discarded path that was not discarded, or not wholly, and why. */
 export interface LeftAsItIs {
   /** The path the discard was for. */
   path: string
+  reason: LeftReason
   /** What changed: the path itself, a file inside the folder in its place, or a file in the way above it. */
   changed: string
+  /** With `partly`: the entries removed (kept in the copy) before the change was found. */
+  removed?: string[]
+  /** With `failed` and `unwritable`: Git's message. */
+  detail?: string
 }
 
-/** How a caller runs one of its Git commands with standard input: its exit status and Git's messages. */
-export type DiscardGit = (args: string[], input?: string) => Promise<{ status: number | null; stderr: string }>
+/**
+ * How a caller runs one of its Git commands in the repository: its exit status, its output exactly as written, and
+ * Git's messages. `write` marks a command run as the person's Discard: one that changes the index or files, or one that
+ * must apply the same filters as those writes.
+ */
+export type DiscardGit = (args: string[], options?: { input?: string; env?: Record<string, string>; write?: boolean }) => Promise<{ status: number | null; stdout: string; stderr: string }>
+
+/** Git's index stayed locked: nothing was discarded. */
+export class IndexLockedError extends Error {
+  constructor(readonly lock: string) {
+    super(`Git's index is locked (${lock}): another Git command is running, or one stopped without removing its lock. Nothing was discarded. Try again once it has finished; if no Git is running, delete ${lock}.`)
+    this.name = 'IndexLockedError'
+  }
+}
+
+/** How long a Discard waits for another Git command to release the index, and how often it looks. */
+const LOCK_WAIT_MS = 2_000
+const LOCK_POLL_MS = 100
 
 /** Paths whose entries are walked and proven together. */
 const BATCH = 64
@@ -44,8 +87,10 @@ interface Victim {
   entries: Planned[]
   /** The identity of every folder from the repository's top down to and inside the victim. */
   folders: Map<string, string>
-  /** The first entry found changed; then nothing of the victim is removed. */
+  /** The first entry found changed; then nothing more of the victim is removed. */
   changed?: string
+  /** Files and links removed before `changed` was found. */
+  removed: string[]
 }
 
 class Changed extends Error {
@@ -74,7 +119,7 @@ async function victimOf(top: string, path: string, write: boolean): Promise<stri
 
 /** Walks `rel` by `lstat` (never through a link) and proves each file and link against `digests`. */
 async function proveVictim(top: string, rel: string, digests: ReadonlyMap<string, string>): Promise<Victim | undefined> {
-  const victim: Victim = { rel, entries: [], folders: new Map() }
+  const victim: Victim = { rel, entries: [], folders: new Map(), removed: [] }
   try {
     await recordFoldersAboveAsync(top, absolute(top, rel), victim.folders)
   } catch {
@@ -120,10 +165,29 @@ async function proveVictim(top: string, rel: string, digests: ReadonlyMap<string
 }
 
 /**
+ * Right before a proven file goes, synchronously: it is still what was proven ({@link assertFrozenEntryUnchanged}). A
+ * file whose other names this Discard removed has one link fewer per removed name and a new change time, so for it the
+ * rest of its `lstat` (device, inode, mode, size, modification time) must match, and its bytes are read and compared
+ * again.
+ */
+function assertStillProven(proof: FrozenEntryProof, unlinked: ReadonlyMap<string, number>): void {
+  try {
+    assertFrozenEntryUnchanged(proof)
+  } catch (error) {
+    const [dev, ino, mode, nlink, size, mtime] = proof.signature.split(':')
+    const fewer = unlinked.get(`${dev}:${ino}`)
+    if (!fewer || proof.entry.kind !== 'file') throw error
+    const now = lstatSync(proof.path, { bigint: true })
+    if (`${now.dev}` !== dev || `${now.ino}` !== ino || `${now.mode}` !== mode || `${now.size}` !== size || `${now.mtimeNs}` !== mtime || now.nlink !== BigInt(nlink!) - BigInt(fewer)) throw error
+    if (createHash('sha256').update(readFileSync(proof.path)).digest('hex') !== proof.entry.digest) throw error
+  }
+}
+
+/**
  * Removes what stands at each discarded path, as far as the kept copy holds it (`digests`, the SHA-256 of each working
  * version as `keepCopy` read it). `restore` are paths HEAD's version goes back at: a file or link above one, in the way
- * of its folder, goes too. `remove` are paths nothing goes back at. `cleared` are the paths emptied; `left` the ones left
- * as they are, naming what changed. `beforeUnlink` is a test seam: it runs right before each entry's last check.
+ * of its folder, goes too. `remove` are paths nothing goes back at. `cleared` are the paths emptied; `left` the ones not
+ * discarded, naming what changed. `beforeUnlink` is a test seam: it runs right before each entry's last check.
  */
 export async function removeProvenAsync(input: {
   top: string
@@ -154,7 +218,8 @@ export async function removeProvenAsync(input: {
   }
 
   // Deepest first within each place; between the last check of an entry and its removal nothing is awaited.
-  let removed = 0
+  const unlinked = new Map<string, number>()
+  let count = 0
   for (const victim of victims.values()) {
     if (!victim || victim.changed) continue
     for (const entry of [...victim.entries].reverse()) {
@@ -166,15 +231,21 @@ export async function removeProvenAsync(input: {
           rmdirSync(path)
         } else {
           assertFoldersUnchanged(top, dirname(path), victim.folders)
-          assertFrozenEntryUnchanged(entry.proof)
+          assertStillProven(entry.proof, unlinked)
           unlinkSync(path)
+          const [dev, ino] = entry.proof.signature.split(':')
+          unlinked.set(`${dev}:${ino}`, (unlinked.get(`${dev}:${ino}`) ?? 0) + 1)
+          victim.removed.push(entry.rel)
         }
       } catch {
-        // Changed since it was proven, or something new in a folder: it stays, with what is left above it.
-        victim.changed = entry.rel
+        // Changed since it was proven, or something new in a folder (named, when it can be read): it stays, with what is
+        // left above it.
+        let found: string | undefined
+        if (entry.kind === 'directory') { try { found = readdirSync(path).sort()[0] } catch { found = undefined } }
+        victim.changed = found === undefined ? entry.rel : `${entry.rel}/${found}`
         break
       }
-      if (++removed % UNLINK_BATCH === 0) await nextTurn()
+      if (++count % UNLINK_BATCH === 0) await nextTurn()
     }
   }
 
@@ -182,9 +253,10 @@ export async function removeProvenAsync(input: {
   const left: LeftAsItIs[] = []
   for (const path of paths) {
     const place = victimFor.get(path)
-    const changed = place === undefined ? undefined : victims.get(place)?.changed
-    if (changed === undefined) cleared.push(path)
-    else left.push({ path, changed })
+    const victim = place === undefined ? undefined : victims.get(place)
+    if (victim?.changed === undefined) cleared.push(path)
+    else if (victim.removed.length) left.push({ path, reason: 'partly', changed: victim.changed, removed: [...victim.removed] })
+    else left.push({ path, reason: 'changed', changed: victim.changed })
   }
   // Like `git clean -d` and `git rm`: a folder a removed path leaves empty goes too.
   await removeEmptiedFolders(top, cleared.filter((path) => !writes.has(path)))
@@ -201,45 +273,29 @@ async function removeEmptiedFolders(top: string, paths: readonly string[]): Prom
   for (const folder of [...folders].sort((a, b) => b.split(sep).length - a.split(sep).length)) await rmdir(folder).catch(() => undefined)
 }
 
+/**
+ * Removes every empty folder in `folders` (untracked folders, relative to `top`) and the folders themselves when that
+ * leaves them empty, as `git clean -d` does. Only `rmdir`: a folder with anything in it, an ignored file say, stays.
+ * Links are never followed, and a folder holding a repository of its own is never entered.
+ */
+async function removeEmptyFoldersUnder(top: string, folders: readonly string[]): Promise<void> {
+  const found: string[] = []
+  const walk = async (path: string, depth: number): Promise<void> => {
+    const stat = await lstat(path).catch(() => undefined)
+    if (!stat?.isDirectory() || depth > MAX_DEPTH) return
+    const names = await readdir(path).catch(() => [] as string[])
+    if (names.includes('.git')) return
+    found.push(path)
+    for (const name of names) await walk(join(path, name), depth + 1)
+  }
+  for (const folder of folders) await walk(absolute(top, folder.replace(/\/+$/, '')), 0)
+  for (const folder of found.sort((a, b) => b.split(sep).length - a.split(sep).length)) await rmdir(folder).catch(() => undefined)
+}
+
 /** Whether `path` lies inside one of `folders` (paths relative to the top, with `/`). */
 function under(path: string, folders: ReadonlySet<string>): boolean {
   for (let slash = path.indexOf('/'); slash !== -1; slash = path.indexOf('/', slash + 1)) if (folders.has(path.slice(0, slash))) return true
   return false
-}
-
-/**
- * Has Git write the index's version of `paths` only where nothing is: `checkout-index` without `--force` leaves an
- * existing file or folder as it is (exit 1). Paths below one of `skipped` are not asked for: a file there stays in the
- * way. A path in the way of another's folder stops a run of many, so then each path is asked for alone. Returns the
- * paths Git did not write.
- */
-export async function createOnlyAsync(top: string, paths: readonly string[], run: DiscardGit, skipped: ReadonlySet<string> = new Set()): Promise<string[]> {
-  const notWritten = new Set(paths.filter((path) => under(path, skipped)))
-  // Something already there, or a file or link in the way of its folder: saved after the path was emptied, it stays.
-  for (let start = 0; start < paths.length; start += BATCH) {
-    const batch = paths.slice(start, start + BATCH)
-    const blocked = await Promise.all(batch.map((path) => notWritten.has(path) || standsInTheWay(top, path)))
-    batch.forEach((path, index) => { if (blocked[index]) notWritten.add(path) })
-  }
-  const asked = paths.filter((path) => !notWritten.has(path))
-  if (!asked.length) return paths.filter((path) => notWritten.has(path))
-  const existed = new Set<string>()
-  const ask = async (batch: readonly string[]): Promise<number | null> => {
-    const ran = await run(['checkout-index', '-u', '-z', '--stdin'], `${batch.join('\0')}\0`)
-    // `<path> already exists, no checkout`, for each path Git left alone.
-    for (const line of ran.stderr.split('\n')) {
-      const match = /^(?:git checkout-index: )?(.*) already exists(?:, no checkout)?$/.exec(line.trim())
-      if (match) existed.add(match[1]!)
-    }
-    return ran.status
-  }
-  const status = await ask(asked)
-  // A run that stopped (a folder Git could not make) is finished one path at a time, for the paths still empty.
-  if (status !== 0 && status !== 1) {
-    for (const path of asked) if (!await exists(top, path)) await ask([path])
-  }
-  for (const path of asked) if (existed.has(path) || !await exists(top, path)) notWritten.add(path)
-  return paths.filter((path) => notWritten.has(path))
 }
 
 const exists = (top: string, path: string): Promise<boolean> => lstat(absolute(top, path)).then(() => true, () => false)
@@ -252,6 +308,279 @@ async function standsInTheWay(top: string, path: string): Promise<boolean> {
     if (!stat.isDirectory()) return true
   }
   return exists(top, path)
+}
+
+/** The NUL-separated fields of a listing, exactly as Git wrote them; a failed run throws with Git's message. */
+async function listZ(run: DiscardGit, args: string[], env?: Record<string, string>, input?: string): Promise<string[]> {
+  const ran = await run(args, { ...(env ? { env } : {}), ...(input !== undefined ? { input } : {}) })
+  if (ran.status !== 0) throw new Error(`Command failed: git ${args.join(' ')}\n${ran.stderr.trim()}`)
+  return ran.stdout.split('\0').filter(Boolean)
+}
+
+/** `paths` as literal pathspecs, a few thousand characters at a time. */
+function* literalBatches(paths: readonly string[]): Generator<string[]> {
+  for (let start = 0; start < paths.length;) {
+    const batch: string[] = []
+    for (let length = 0; start < paths.length && (!batch.length || length + paths[start]!.length < 16_000); start++) {
+      batch.push(`:(literal)${paths[start]!}`)
+      length += paths[start]!.length + 11
+    }
+    yield batch
+  }
+}
+
+const firstLine = (text: string): string => text.split('\n').map((line) => line.trim()).find(Boolean) ?? ''
+
+/**
+ * Has Git write HEAD's version of `paths` only where nothing is, from a private index that holds just those entries:
+ * `checkout-index` without `--force` leaves an existing file or folder as it is, and never waits for the real index's
+ * lock. A run Git stopped (a folder it could not make) is finished one path at a time, for the paths still empty. Which
+ * paths Git wrote is read from the private index afterwards (`diff-files`), never from its messages. Returns the paths
+ * it did not write and why.
+ */
+async function writeFromHeadAsync(top: string, run: DiscardGit, paths: readonly string[]): Promise<{ notWritten: Map<string, { reason: 'recreated' | 'failed'; detail?: string }>; entries: Map<string, string> }> {
+  const notWritten = new Map<string, { reason: 'recreated' | 'failed'; detail?: string }>()
+  const byPath = new Map<string, string>()
+  if (!paths.length) return { notWritten, entries: byPath }
+  // Something already there, or a file or link in the way of its folder: saved after the path was emptied, it stays.
+  const asked: string[] = []
+  for (let start = 0; start < paths.length; start += BATCH) {
+    const batch = paths.slice(start, start + BATCH)
+    const blocked = await Promise.all(batch.map((path) => standsInTheWay(top, path)))
+    batch.forEach((path, index) => { if (blocked[index]) notWritten.set(path, { reason: 'recreated' }); else asked.push(path) })
+  }
+  if (!asked.length) return { notWritten, entries: byPath }
+  const heads = await headEntries(run, 'HEAD', asked)
+  for (const [path, line] of heads) byPath.set(path, line)
+  const gitDir = resolve(top, firstLine((await run(['rev-parse', '--absolute-git-dir'])).stdout))
+  const index = join(gitDir, `mousse-discard-${randomUUID()}.index`)
+  const env = { GIT_INDEX_FILE: index }
+  try {
+    const info = [...heads.values()]
+    const made = await run(['update-index', '-z', '--index-info'], { env, input: `${info.join('\0')}\0`, write: true })
+    if (made.status !== 0) throw new Error(`Command failed: git update-index\n${made.stderr.trim()}`)
+    const ask = (batch: readonly string[]) => run(['checkout-index', '-u', '-z', '--stdin'], { env, input: `${batch.join('\0')}\0`, write: true })
+    const ran = await ask(asked)
+    const errors = new Map<string, string>()
+    if (ran.status !== 0 && ran.status !== 1) {
+      for (const path of asked) {
+        if (await exists(top, path)) continue
+        const one = await ask([path])
+        if (one.status !== 0) errors.set(path, firstLine(one.stderr))
+      }
+    }
+    // The private index has only these entries. Refreshed from the files (a run Git stopped wrote some without saying
+    // so), the ones that are not HEAD's version, or are missing, are listed: those Git did not write.
+    await run(['update-index', '-q', '--refresh'], { env, write: true })
+    const wanted = new Set(asked)
+    for (const path of await listZ(run, ['diff-files', '-z', '--name-only'], env)) {
+      if (!wanted.has(path)) continue
+      // Something saved there, or in the way of its folder, after the path was emptied.
+      if (await standsInTheWay(top, path)) notWritten.set(path, { reason: 'recreated' })
+      else notWritten.set(path, { reason: 'failed', detail: errors.get(path) ?? firstLine(ran.stderr) })
+    }
+  } finally {
+    await rm(index, { force: true })
+    await rm(`${index}.lock`, { force: true })
+  }
+  return { notWritten, entries: byPath }
+}
+
+/** The real index's lock file. */
+async function indexLockOf(top: string, run: DiscardGit): Promise<string> {
+  return resolve(top, firstLine((await run(['rev-parse', '--git-path', 'index.lock'])).stdout))
+}
+
+/**
+ * Waits briefly for another Git command to release the index; one that keeps it locked (a running command, or the lock
+ * of one that stopped) refuses with {@link IndexLockedError}. Run before anything is removed.
+ */
+export async function waitForIndexAsync(top: string, run: DiscardGit): Promise<void> {
+  const lock = await indexLockOf(top, run)
+  for (const until = Date.now() + LOCK_WAIT_MS; await lstat(lock).then(() => true, () => false);) {
+    if (Date.now() >= until) throw new IndexLockedError(lock)
+    await sleep(LOCK_POLL_MS)
+  }
+}
+
+/** Runs a command that writes the index, again while another Git command holds its lock, for a little while. */
+async function withIndexAsync(run: DiscardGit, args: string[], options: { input?: string; env?: Record<string, string> } = {}): Promise<{ ok: boolean; locked: boolean; stderr: string }> {
+  for (const until = Date.now() + LOCK_WAIT_MS; ;) {
+    const ran = await run(args, { ...options, write: true })
+    if (ran.status === 0) return { ok: true, locked: false, stderr: '' }
+    const locked = /index\.lock/.test(ran.stderr)
+    if (!locked || Date.now() >= until) return { ok: false, locked, stderr: ran.stderr }
+    await sleep(LOCK_POLL_MS)
+  }
+}
+
+/** The index's entries as one digest each, by path, read without writing it. */
+async function stagedNow(run: DiscardGit): Promise<Map<string, string>> {
+  return stagedEntryDigests(await listZ(run, ['ls-files', '-s', '-z']))
+}
+
+export interface ProvenDiscardInput {
+  top: string
+  /** HEAD's commit; undefined before the first commit. */
+  head?: string
+  /** Tracked paths HEAD has a file or link at: emptied, then HEAD's version is written back. */
+  restore: readonly string[]
+  /** Tracked paths HEAD does not have: emptied, and their index entries go. */
+  remove: readonly string[]
+  /** Untracked paths: emptied. */
+  untracked: readonly string[]
+  /** Paths changed in the index only (submodules): their entries go back to HEAD. */
+  indexOnly: readonly string[]
+  /** {@link stagedEntryDigests} of the index, read before the copy was kept. */
+  stagedBefore: ReadonlyMap<string, string>
+  /** What the copy holds: `KeptCopy.digests`. */
+  digests: ReadonlyMap<string, string>
+  run: DiscardGit
+  /** The pending-changes Discard: HEAD's versions are written only inside the sparse checkout, as Git would, and empty untracked folders go too. */
+  wholeTree?: { untrackedFolders: readonly string[] }
+  beforeUnlink?: (path: string) => void
+}
+
+/**
+ * Discards the paths after their copy was kept: see the top of this file. Returns the paths not discarded, or not
+ * wholly, and why, and whether the whole index may go back to HEAD now (`wholeTreeReset`: everything was discarded and
+ * nobody staged anything meanwhile), which ends a merge, revert or cherry-pick. Throws {@link IndexLockedError} with
+ * nothing removed when Git's index stays locked. A failure once files were removed is returned as `failed` for the paths
+ * not finished, so the caller still shows the copy.
+ */
+export async function discardProvenAsync(input: ProvenDiscardInput): Promise<{ left: LeftAsItIs[]; wholeTreeReset: boolean; stagedElsewhere: string[] }> {
+  const { top, run } = input
+  await waitForIndexAsync(top, run)
+  const discarded = [...new Set([...input.restore, ...input.remove, ...input.untracked, ...input.indexOnly])]
+  // A path staged anew since the copy is someone's newer work: nothing of it is touched.
+  const restagedEarly = new Set(stagedSince(input.stagedBefore, await stagedNow(run), discarded))
+  const left: LeftAsItIs[] = [...restagedEarly].map((path) => ({ path, reason: 'changed', changed: path }))
+  // A file under a filter Git cannot run here could not be written back: it is left whole.
+  const unwritable = await unwritableAsync(top, run, input.head, input.restore.filter((path) => !restagedEarly.has(path)))
+  for (const [path, detail] of unwritable) left.push({ path, reason: 'unwritable', changed: path, detail })
+  const keep = (path: string): boolean => !restagedEarly.has(path) && !unwritable.has(path)
+  const emptied = await removeProvenAsync({
+    top,
+    restore: input.restore.filter(keep),
+    remove: [...input.remove, ...input.untracked].filter(keep),
+    digests: input.digests,
+    ...(input.beforeUnlink ? { beforeUnlink: input.beforeUnlink } : {})
+  })
+  left.push(...emptied.left)
+  const cleared = new Set(emptied.cleared)
+  // Settled: left with a reason, or finished with nothing more to do (an untracked path emptied).
+  const settled = new Set<string>([...left.map((item) => item.path), ...emptied.cleared.filter((path) => input.untracked.includes(path))])
+  try {
+    if (input.wholeTree) await removeEmptyFoldersUnder(top, input.wholeTree.untrackedFolders)
+    // HEAD's versions, only into empty paths, and (for the pending-changes Discard) only inside the sparse checkout.
+    let write = input.restore.filter((path) => cleared.has(path))
+    const outside = input.wholeTree ? await outsideSparseCheckout(run, write) : new Set<string>()
+    write = write.filter((path) => !outside.has(path))
+    const { notWritten, entries } = await writeFromHeadAsync(top, run, write)
+    for (const [path, why] of notWritten) {
+      left.push({ path, reason: why.reason, changed: path, ...(why.detail ? { detail: why.detail } : {}) })
+      settled.add(path)
+    }
+    // The index entries of what was emptied and written go back to HEAD, unless someone staged them meanwhile.
+    const done = [...cleared, ...input.indexOnly.filter(keep)].filter((path) => !settled.has(path) && !input.untracked.includes(path))
+    const restaged = new Set(stagedSince(input.stagedBefore, await stagedNow(run), done))
+    for (const path of restaged) { left.push({ path, reason: 'restaged', changed: path }); settled.add(path) }
+    const reset = done.filter((path) => !restaged.has(path))
+    if (reset.length) {
+      const list = `${reset.join('\0')}\0`
+      const ran = input.head
+        ? await withIndexAsync(run, ['reset', '-q', input.head, '--pathspec-from-file=-', '--pathspec-file-nul'], { input: list, env: { GIT_LITERAL_PATHSPECS: '1' } })
+        : await withIndexAsync(run, ['rm', '--cached', '-r', '-f', '-q', '--ignore-unmatch', '--pathspec-from-file=-', '--pathspec-file-nul'], { input: list, env: { GIT_LITERAL_PATHSPECS: '1' } })
+      if (!ran.ok) {
+        for (const path of reset) left.push(ran.locked ? { path, reason: 'locked', changed: path } : { path, reason: 'failed', changed: path, detail: firstLine(ran.stderr) })
+        return { left, wholeTreeReset: false, stagedElsewhere: [] }
+      }
+      // An entry that already was HEAD's keeps the stat data of the file before, and Git would take a converted file
+      // (CRLF, say) of another size for a change without reading it. The written ones are put in afresh, then refreshed
+      // from the files Git wrote, as `reset --hard` leaves them.
+      const written = reset.map((path) => entries.get(path)).filter((line): line is string => line !== undefined)
+      if (written.length) {
+        await withIndexAsync(run, ['update-index', '-z', '--index-info'], { input: `${written.join('\0')}\0` })
+        await run(['update-index', '-q', '--refresh'], { write: true })
+      }
+      // Outside the sparse checkout an entry is marked as not on disk, as `reset --hard` leaves it.
+      const sparse = reset.filter((path) => outside.has(path))
+      if (sparse.length) await withIndexAsync(run, ['update-index', '-z', '--skip-worktree', '--stdin'], { input: `${sparse.join('\0')}\0` })
+    }
+    if (left.length || !input.wholeTree) return { left, wholeTreeReset: false, stagedElsewhere: [] }
+    // The whole index goes back to HEAD only if nothing else in it was staged meanwhile either.
+    const now = await stagedNow(run)
+    const resetPaths = new Set(reset)
+    const elsewhere = stagedSince(input.stagedBefore, now, [...new Set([...input.stagedBefore.keys(), ...now.keys()])]).filter((path) => !resetPaths.has(path))
+    return { left, wholeTreeReset: !elsewhere.length, stagedElsewhere: elsewhere }
+  } catch (error) {
+    // Files were removed: the copy is still the answer, with what was not finished and why.
+    const detail = firstLine((error as Error).message)
+    for (const path of discarded) if (!settled.has(path) && !left.some((item) => item.path === path)) left.push({ path, reason: 'failed', changed: path, detail })
+    return { left, wholeTreeReset: false, stagedElsewhere: [] }
+  }
+}
+
+/**
+ * Of `paths`, those under a `filter` attribute whose HEAD version Git cannot write as this caller runs it (a filter only
+ * the repository configures, which Mousse's own commands do not run), with Git's message. Asked before anything is
+ * removed, so such a path is never emptied. The check is the write itself, into a scratch folder in the Git folder:
+ * the same `checkout-index`, from a private index of HEAD's entries, with the attributes as they are now and as HEAD has
+ * them (a discarded `.gitattributes` goes back to HEAD's too).
+ */
+async function unwritableAsync(top: string, run: DiscardGit, head: string | undefined, paths: readonly string[]): Promise<Map<string, string>> {
+  const unwritable = new Map<string, string>()
+  if (!head || !paths.length) return unwritable
+  const filtered = new Set<string>()
+  for (const env of [undefined, { GIT_ATTR_SOURCE: head }]) {
+    const attrs = await run(['check-attr', '-z', '--stdin', 'filter'], { input: `${paths.join('\0')}\0`, ...(env ? { env } : {}) })
+    if (attrs.status !== 0) continue
+    const fields = attrs.stdout.split('\0')
+    for (let at = 0; at + 2 < fields.length; at += 3) if (fields[at + 2] !== 'unspecified' && fields[at + 2] !== 'unset') filtered.add(fields[at]!)
+  }
+  if (!filtered.size) return unwritable
+  const entries = await headEntries(run, head, [...filtered])
+  const gitDir = resolve(top, firstLine((await run(['rev-parse', '--absolute-git-dir'])).stdout))
+  const scratch = join(gitDir, `mousse-discard-check-${randomUUID()}`)
+  const index = `${scratch}.index`
+  try {
+    const made = await run(['update-index', '-z', '--index-info'], { env: { GIT_INDEX_FILE: index }, input: `${[...entries.values()].join('\0')}\0`, write: true })
+    if (made.status !== 0) return unwritable
+    for (const path of entries.keys()) {
+      const envs: Array<Record<string, string>> = [{ GIT_INDEX_FILE: index }, { GIT_INDEX_FILE: index, GIT_ATTR_SOURCE: head }]
+      for (const env of envs) {
+        const wrote = await run(['checkout-index', '-f', `--prefix=${scratch}/`, '--', path], { env, write: true })
+        if (wrote.status !== 0) { unwritable.set(path, firstLine(wrote.stderr) || 'its filter did not run'); break }
+      }
+    }
+  } finally {
+    await rm(scratch, { recursive: true, force: true })
+    await rm(index, { force: true })
+    await rm(`${index}.lock`, { force: true })
+  }
+  return unwritable
+}
+
+/** HEAD's entry for each of `paths` it has, as `update-index --index-info` takes it (`<mode> <object>\t<path>`), by path. */
+async function headEntries(run: DiscardGit, head: string, paths: readonly string[]): Promise<Map<string, string>> {
+  const byPath = new Map<string, string>()
+  for (const batch of literalBatches(paths)) {
+    for (const line of await listZ(run, ['ls-tree', '-z', head, '--', ...batch])) {
+      const tab = line.indexOf('\t')
+      const [mode, , object] = line.slice(0, tab).split(' ')
+      byPath.set(line.slice(tab + 1), `${mode} ${object}${line.slice(tab)}`)
+    }
+  }
+  return byPath
+}
+
+/** Of `paths`, those outside the sparse checkout, when there is one (`sparse-checkout check-rules`, Git 2.42 and later). */
+async function outsideSparseCheckout(run: DiscardGit, paths: readonly string[]): Promise<Set<string>> {
+  if (!paths.length || firstLine((await run(['config', '--type=bool', 'core.sparseCheckout'])).stdout) !== 'true') return new Set()
+  const ran = await run(['sparse-checkout', 'check-rules', '-z'], { input: `${paths.join('\0')}\0` })
+  if (ran.status !== 0) return new Set()
+  const inside = new Set(ran.stdout.split('\0').filter(Boolean))
+  return new Set(paths.filter((path) => !inside.has(path)))
 }
 
 /**
@@ -278,19 +607,42 @@ export function stagedSince(before: ReadonlyMap<string, string>, now: ReadonlyMa
   return paths.filter((path) => before.get(path) !== now.get(path))
 }
 
-/** How many paths a "left as it is" line names before it says "and N more". */
+/** How many paths a sentence names before it says "and N more". */
 const NAMED = 3
 
+function listed(paths: readonly string[]): string {
+  const named = paths.slice(0, NAMED)
+  if (paths.length > NAMED) return `${named.join(', ')} and ${paths.length - NAMED} more`
+  return named.length > 1 ? `${named.slice(0, -1).join(', ')} and ${named.at(-1)}` : named[0]!
+}
+
 /**
- * The line a result shows for paths a discard left as they are, or undefined when there are none:
- * "base.txt changed after you pressed Discard, so it was left as it is."
+ * The lines a result shows for paths a discard did not discard, or not wholly, or undefined when there are none. One
+ * sentence per reason, for example: "base.txt changed after you pressed Discard, so it was left as it is."
  */
 export function leftAsItIsText(left: readonly LeftAsItIs[]): string | undefined {
-  const paths = [...new Set(left.map((item) => item.path))]
-  if (!paths.length) return undefined
-  const named = paths.slice(0, NAMED)
-  const list = paths.length > NAMED ? `${named.join(', ')} and ${paths.length - NAMED} more` : named.length > 1 ? `${named.slice(0, -1).join(', ')} and ${named.at(-1)}` : named[0]!
-  return paths.length === 1
-    ? `${list} changed after you pressed Discard, so it was left as it is.`
-    : `${list} changed after you pressed Discard, so they were left as they are.`
+  const by = (reason: LeftReason): LeftAsItIs[] => left.filter((item) => item.reason === reason)
+  const paths = (items: readonly LeftAsItIs[]): string[] => [...new Set(items.map((item) => item.path))]
+  const one = (items: readonly LeftAsItIs[]): boolean => paths(items).length === 1
+  const sentences: string[] = []
+  const changed = by('changed')
+  if (changed.length) sentences.push(`${listed(paths(changed))} changed after you pressed Discard, so ${one(changed) ? 'it was left as it is' : 'they were left as they are'}.`)
+  for (const item of by('partly')) {
+    const removed = item.removed ?? []
+    const what = removed.length === 1 ? `${removed[0]} was removed before that and is` : `${removed.length} files in it were removed before that and are`
+    sentences.push(`${item.changed} changed while Discard was removing ${item.path}, so the rest of ${item.path} was left as it is; ${what} in the copy.`)
+  }
+  const recreated = by('recreated')
+  if (recreated.length) sentences.push(`${listed(paths(recreated))} ${one(recreated) ? 'was' : 'were'} saved again after Discard removed ${one(recreated) ? 'it' : 'them'}, so the new ${one(recreated) ? 'version was' : 'versions were'} left as ${one(recreated) ? 'it is' : 'they are'}.`)
+  const restaged = by('restaged')
+  if (restaged.length) sentences.push(`${listed(paths(restaged))} ${one(restaged) ? 'was' : 'were'} staged again while Discard ran, so the staged ${one(restaged) ? 'version was' : 'versions were'} kept; the earlier ${one(restaged) ? 'file is' : 'files are'} in the copy.`)
+  const locked = by('locked')
+  if (locked.length) sentences.push(`Git's index stayed locked by another Git command, so the staged ${one(locked) ? 'version' : 'versions'} of ${listed(paths(locked))} ${one(locked) ? 'was' : 'were'} left as ${one(locked) ? 'it was' : 'they were'}; the files went back to HEAD's versions.`)
+  const failed = by('failed')
+  if (failed.length) sentences.push(`Git could not put back ${listed(paths(failed))}${failed[0]!.detail ? ` (${failed[0]!.detail})` : ''}; the earlier ${one(failed) ? 'version is' : 'versions are'} in the copy.`)
+  const operation = by('operation')
+  if (operation.length) sentences.push(`${listed(paths(operation))} ${one(operation) ? 'was' : 'were'} staged while Discard ran, so the unfinished merge, revert or cherry-pick was not ended.`)
+  const unwritable = by('unwritable')
+  if (unwritable.length) sentences.push(`Git cannot write ${listed(paths(unwritable))} back here${unwritable[0]!.detail ? ` (${unwritable[0]!.detail})` : ''}, so ${one(unwritable) ? 'it was left as it is' : 'they were left as they are'}.`)
+  return sentences.length ? sentences.join(' ') : undefined
 }

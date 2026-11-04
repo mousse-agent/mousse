@@ -112,7 +112,7 @@ import { RedoService } from '../actions/RedoService'
 import { CodeRevertService } from '../actions/CodeRevertService'
 import { ConversationBranchService, FIRST_BRANCH_ID } from '../actions/ConversationBranchService'
 import { discardPendingChangesAsync, gitAsync as workspaceGitAsync } from '../actions/git'
-import { leftAsItIsText } from '../actions/provenDiscard'
+import { IndexLockedError, leftAsItIsText } from '../actions/provenDiscard'
 import { getMousseHomeDir } from '../data/paths'
 import { keepCopy, keepExistingCommit, KeepCopyRefusedError, keptCopyNotice, keptCopyWindowMs, projectKeptFilesOwner, registerProjectKeptFilesFolder, type KeptCopy } from '../actions/keptCopies'
 import { abortPreservedNotice, takeSnapshotAsync } from '../actions/snapshots'
@@ -2960,7 +2960,10 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
           catch (error) { throw new DomainRpcError('discard_unsafe', `Nothing was discarded: the files could not be kept first (${(error as Error).message.split(/\r?\n/)[0]}).`) }
         }
         const kept = await discardPendingChangesAsync(workspace.worktreePath, (top, scope) => keepCopy({ owner: operation.threadDirectory, top, operationType: 'git-discard', action: 'Discard', ...scope }))
-          .catch((error: unknown) => { throw error instanceof KeepCopyRefusedError ? new DomainRpcError(error.code, error.message, { paths: error.paths }) : error })
+          .catch((error: unknown) => {
+            if (error instanceof IndexLockedError) throw new DomainRpcError('git_index_locked', error.message, { path: error.lock })
+            throw error instanceof KeepCopyRefusedError ? new DomainRpcError(error.code, error.message, { paths: error.paths }) : error
+          })
         const left = leftAsItIsText(kept.left)
         return { backupRef: kept.ref, snapshotSha: before, notice: keptCopyNotice(kept), ...(left ? { left } : {}) }
       })

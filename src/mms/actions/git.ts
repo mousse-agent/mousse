@@ -13,7 +13,7 @@ import type { GitCheckOptions, RepoProgramOptions } from '../git/repoPrograms'
 import { waitForFolderAccess } from '../files/folderAccess'
 import { LISTING_MAX_BUFFER, runGitProcess } from '../git/runGitProcess'
 import { files, runAsync, step, type Steps } from './steps'
-import { createOnlyAsync, removeProvenAsync, stagedEntryDigests, stagedModes, stagedSince, type LeftAsItIs } from './provenDiscard'
+import { discardProvenAsync, stagedEntryDigests, stagedModes, waitForIndexAsync, type DiscardGit, type LeftAsItIs } from './provenDiscard'
 
 /**
  * `args` as Mousse's own commands run them: no repository program, and, for a folder whose snapshots live in a hidden
@@ -336,10 +336,11 @@ async function headModesAsync(top: string, paths: readonly string[]): Promise<Ma
  * ignored files included). Other ignored files, nested repositories and `.mousse/` stay. A rebase is refused. The
  * caller holds the mutation locks and has the user's confirmation.
  *
- * Mousse removes only what the copy proves it holds, and Git only creates (`provenDiscard`). A path where something
- * changed after the copy was read, or was saved again after it was emptied, is left as it is, with its staged version,
- * and named in `left`; then the unfinished operation stays too, so its conflict is not lost. Otherwise the whole index
- * goes back to HEAD at the end (`git reset`, which leaves the files alone), ending the operation.
+ * Mousse removes only what the copy proves it holds, and Git only creates (`discardProvenAsync`). A path where
+ * something changed after the copy was read, that was staged anew, or that was saved again after it was emptied, is not
+ * discarded, keeps its staged version (conflict stages included) and is named in `left`; then the unfinished operation
+ * stays too. Only once every path was written back does the whole index go back to HEAD (`git reset`, which leaves the
+ * files alone), ending the operation. Another Git command holding the index refuses it first (`IndexLockedError`).
  * `beforeUnlink` is a test seam: it runs right before each removed entry's last check.
  */
 export async function discardPendingChangesAsync<T extends { digests: ReadonlyMap<string, string> }>(
@@ -373,37 +374,46 @@ export async function discardPendingChangesAsync<T extends { digests: ReadonlyMa
   const submodule = (path: string): boolean => headModes.has(path) ? headModes.get(path) === '160000' : indexModes.get(path) === '160000'
   const restore = tracked.filter((path) => headModes.has(path) && !submodule(path))
   const remove = [...tracked.filter((path) => !headModes.has(path) && !submodule(path)), ...untracked]
-  const kept = await keep(top, { paths: [...tracked, ...untracked], writes: restore })
-
-  const emptied = await removeProvenAsync({ top, restore, remove, digests: kept.digests, ...(options.beforeUnlink ? { beforeUnlink: options.beforeUnlink } : {}) })
-  const left = [...emptied.left]
-  const skipped = new Set(left.map((item) => item.path))
-  // An entry someone staged meanwhile, anywhere in the index, is not reset.
-  const before = stagedEntryDigests(indexBefore)
-  const now = stagedEntryDigests(await listZAsync(top, ['ls-files', '-s', '-z']))
-  const restaged = new Set(stagedSince(before, now, [...new Set([...before.keys(), ...now.keys()])]))
-  for (const path of tracked) if (restaged.has(path) && !skipped.has(path)) left.push({ path, changed: path })
-  if (!left.length && !restaged.size) {
-    // The whole index goes back to HEAD, which also ends the merge, revert or cherry-pick; the files are not touched.
-    if (head) await gitAsync(top, ['reset', '-q'])
-    else await gitAsync(top, ['read-tree', '--empty'])
-  } else {
-    // Only the emptied paths' entries; one left as it is keeps its staged version (and its conflict, with the operation).
-    const reset = tracked.filter((path) => !skipped.has(path) && !restaged.has(path))
-    const list = `${reset.join('\0')}\0`
-    if (reset.length && head) await gitAsync(top, ['reset', '-q', head, '--pathspec-from-file=-', '--pathspec-file-nul'], { GIT_LITERAL_PATHSPECS: '1' }, list)
-    else if (reset.length) await gitAsync(top, ['rm', '--cached', '-r', '-f', '-q', '--ignore-unmatch', '--pathspec-from-file=-', '--pathspec-file-nul'], { GIT_LITERAL_PATHSPECS: '1' }, list)
+  const run: DiscardGit = async (args, options = {}) => {
+    const argv = await guardedAsync(top, args, { ...(options.env ? { env: options.env } : {}), ...(options.input !== undefined ? { stdin: options.input } : {}) })
+    const ran = await runGitProcess(argv, { cwd: top, env: gitEnv(top, options.env), ...(options.input !== undefined ? { input: options.input } : {}), maxBuffer: LISTING_MAX_BUFFER })
+    return { status: ran.error ? null : ran.status, stdout: ran.stdout, stderr: (filterRefusal(ran.stderr.trim()) || ran.stderr) }
   }
-  // Git writes HEAD's versions only where nothing is.
-  const write = restore.filter((path) => !skipped.has(path) && !restaged.has(path))
-  const notWritten = await createOnlyAsync(top, write, async (args, input) => {
-    const ran = await tryGitRawAsync(top, args, input)
-    return { status: ran.status, stderr: ran.stderr }
-  }, new Set(left.map((item) => item.changed)))
-  for (const path of notWritten) left.push({ path, changed: path })
-  if (!left.length) {
+  // Another Git command holding the index refuses the discard before anything is kept or removed.
+  await waitForIndexAsync(top, run)
+  const kept = await keep(top, { paths: [...tracked, ...untracked], writes: restore })
+  const { left, wholeTreeReset, stagedElsewhere } = await discardProvenAsync({
+    top,
+    ...(head ? { head } : {}),
+    restore,
+    remove: tracked.filter((path) => !headModes.has(path) && !submodule(path)),
+    untracked,
+    indexOnly: tracked.filter(submodule),
+    stagedBefore: stagedEntryDigests(indexBefore),
+    digests: kept.digests,
+    run,
+    // Folders `git clean -d` would remove once empty: untracked ones, listed as `name/`.
+    wholeTree: { untrackedFolders: (await listZAsync(top, ['ls-files', '-z', '--others', '--directory', '--exclude-standard', '--', '.', NOT_MOUSSE])).filter((path) => path.endsWith('/')) },
+    ...(options.beforeUnlink ? { beforeUnlink: options.beforeUnlink } : {})
+  })
+  if (wholeTreeReset) {
+    // Everything was written back and nothing was left: the whole index goes back to HEAD, which also ends the merge,
+    // revert or cherry-pick. The files are not touched. Another Git command holding the index is waited for a moment.
+    for (let attempt = 0; ; attempt++) {
+      try {
+        if (head) await gitAsync(top, ['reset', '-q'])
+        else await gitAsync(top, ['read-tree', '--empty'])
+        break
+      } catch (error) {
+        if (attempt >= 20 || !/index\.lock/.test(String((error as { stderr?: unknown }).stderr ?? (error as Error).message))) throw error
+        await new Promise((settle) => setTimeout(settle, 100))
+      }
+    }
     const after = await runAsync(inspectPendingChangesSteps(top))
     if (ownPaths(after.files).length || after.operation) throw pendingChangesErrorFor('Workspace', {}, after)
+  } else if (!left.length && pending.operation) {
+    // Everything was discarded, but something else was staged meanwhile: the index stays, and so does the operation.
+    for (const path of stagedElsewhere) left.push({ path, reason: 'operation', changed: path })
   }
   return { ...kept, left }
 }
